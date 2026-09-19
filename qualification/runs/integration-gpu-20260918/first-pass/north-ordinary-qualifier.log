@@ -1,0 +1,25 @@
+unit_tests: PASS
+hermes_client: PASS
+logprobs: PASS
+sampling_controls: PASS
+cold_text: PASS
+warm_prefix: PASS
+stream: PASS
+tools: PASS
+tool_roundtrip: PASS
+reasoning: PASS
+stop: PASS
+seed_repeat: PASS
+batch: PASS
+mixed_warm: PASS
+shared_cohort_priming: FAIL
+Evidence: ~/Desktop/mlx2/qualification/runs/integration-gpu-20260918/north-ordinary-qualification.json
+Traceback (most recent call last):
+  File "~/Desktop/mlx2/scripts/qualify_serving.py", line 1076, in <module>
+    main()
+  File "~/Desktop/mlx2/scripts/qualify_serving.py", line 927, in main
+    check("shared_cohort_priming", content(primed).startswith("LONG_READY")
+  File "~/Desktop/mlx2/scripts/qualify_serving.py", line 624, in check
+    assert condition, name
+           ^^^^^^^^^
+AssertionError: shared_cohort_priming

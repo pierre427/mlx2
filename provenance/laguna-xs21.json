@@ -1,0 +1,26 @@
+{
+  "component": "Laguna XS 2.1 model and Poolside tool parser",
+  "source_repository": "local read-only mlx-lm-unified checkout",
+  "source_revision": "d9425efdf6afbee6364ab5661eccc9dd44254ffa",
+  "source_paths": [
+    "mlx_lm/models/laguna.py",
+    "mlx_lm/tool_parsers/laguna.py"
+  ],
+  "license": "MIT",
+  "notice": "provenance/laguna-xs21.NOTICE",
+  "modifications": [
+    "moved model-specific tensor math behind the mlx2 adapter boundary",
+    "added strict Laguna XS 2.1 topology and local-shard inspection",
+    "bound full and sliding attention state to APCv2 layered caches",
+    "kept ordinary decode as the reference route",
+    "adapted Poolside tool parsing to mlx2 incremental output events",
+    "left external DFlash unselected pending exact qualification",
+    "added original mlx2 Metal kernels for the exact Laguna q8 top-8 down-reduction and sigmoid correction-bias router geometries",
+    "kept both kernels behind fail-closed candidate gates with engagement counters until exact qualification"
+  ],
+  "validation": [
+    "tests/test_laguna_xs21_port.py",
+    "tests/test_laguna_fused_moe.py",
+    "exact local AtomicChat/Laguna-XS-2.1-MLX-8bit metadata inspection"
+  ]
+}

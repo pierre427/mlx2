@@ -1,0 +1,9 @@
+Traceback (most recent call last):
+  File "~/Desktop/mlx2/scripts/qualify_serving.py", line 818, in <module>
+    main()
+  File "~/Desktop/mlx2/scripts/qualify_serving.py", line 611, in main
+    check(
+  File "~/Desktop/mlx2/scripts/qualify_serving.py", line 453, in check
+    assert condition, name
+           ^^^^^^^^^
+AssertionError: reasoning

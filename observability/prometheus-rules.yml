@@ -1,0 +1,55 @@
+groups:
+  - name: mlx2
+    rules:
+      - alert: Mlx2TelemetryUnavailable
+        expr: mlx2_telemetry_source_available == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: mlx2 telemetry snapshot is unavailable
+      - alert: Mlx2NotReady
+        expr: mlx2_ready == 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: mlx2 has not published a ready serving snapshot
+      - alert: Mlx2QueueBacklog
+        expr: mlx2_num_requests_waiting > 0
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: mlx2 requests have remained queued
+      - alert: Mlx2RequestFailures
+        expr: increase(mlx2_requests_total{outcome="failed"}[5m]) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: mlx2 reported terminal request failures
+      - alert: Mlx2CapabilityFailedClosed
+        expr: increase(mlx2_fail_closed_total[5m]) > 0
+        labels:
+          severity: critical
+        annotations:
+          summary: mlx2 rejected work to preserve a capability invariant
+      - alert: Mlx2PrefixCacheRestoreFailures
+        expr: increase(mlx2_prefix_cache_disk_events_total{operation="restore_failures"}[10m]) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: APCv2 disk-tier restores are failing
+      - alert: Mlx2LowMemoryHeadroom
+        expr: mlx2_memory_headroom_bytes < 1073741824
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: mlx2 execution headroom is below 1 GiB
+      - alert: Mlx2AdvancedFallbacks
+        expr: increase(mlx2_fused_gdn_events_total{event=~"fallbacks|verify_fallbacks|replay_fallbacks|catchup_fallbacks"}[10m]) > 0 or increase(mlx2_moe_fallbacks_total[10m]) > 0 or increase(mlx2_ple_compile_events_total{event="fallbacks"}[10m]) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: an advanced mlx2 execution path reported a fallback

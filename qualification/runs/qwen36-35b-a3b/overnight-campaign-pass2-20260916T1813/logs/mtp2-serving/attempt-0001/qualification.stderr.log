@@ -1,0 +1,9 @@
+Traceback (most recent call last):
+  File "~/Desktop/mlx2/scripts/qualify_serving.py", line 818, in <module>
+    main()
+  File "~/Desktop/mlx2/scripts/qualify_serving.py", line 794, in main
+    check("feature_" + feature, observed[feature] > 0, execution)
+  File "~/Desktop/mlx2/scripts/qualify_serving.py", line 453, in check
+    assert condition, name
+           ^^^^^^^^^
+AssertionError: feature_segmented_rollback

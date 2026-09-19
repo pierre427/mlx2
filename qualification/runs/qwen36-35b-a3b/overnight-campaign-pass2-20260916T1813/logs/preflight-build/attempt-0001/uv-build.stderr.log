@@ -1,0 +1,549 @@
+Building source distribution...
+running egg_info
+writing src/mlx2.egg-info/PKG-INFO
+writing dependency_links to src/mlx2.egg-info/dependency_links.txt
+writing entry points to src/mlx2.egg-info/entry_points.txt
+writing requirements to src/mlx2.egg-info/requires.txt
+writing top-level names to src/mlx2.egg-info/top_level.txt
+reading manifest file 'src/mlx2.egg-info/SOURCES.txt'
+adding license file 'LICENSE'
+adding license file 'provenance/muse-dflash2.NOTICE'
+adding license file 'provenance/muse-glimmer.NOTICE'
+adding license file 'provenance/north-mini-code.NOTICE'
+adding license file 'provenance/qwen36-35b.NOTICE'
+adding license file 'provenance/qwen38-27b.NOTICE'
+adding license file 'provenance/LICENSE.unified-MIT'
+writing manifest file 'src/mlx2.egg-info/SOURCES.txt'
+running sdist
+running egg_info
+writing src/mlx2.egg-info/PKG-INFO
+writing dependency_links to src/mlx2.egg-info/dependency_links.txt
+writing entry points to src/mlx2.egg-info/entry_points.txt
+writing requirements to src/mlx2.egg-info/requires.txt
+writing top-level names to src/mlx2.egg-info/top_level.txt
+reading manifest file 'src/mlx2.egg-info/SOURCES.txt'
+adding license file 'LICENSE'
+adding license file 'provenance/muse-dflash2.NOTICE'
+adding license file 'provenance/muse-glimmer.NOTICE'
+adding license file 'provenance/north-mini-code.NOTICE'
+adding license file 'provenance/qwen36-35b.NOTICE'
+adding license file 'provenance/qwen38-27b.NOTICE'
+adding license file 'provenance/LICENSE.unified-MIT'
+writing manifest file 'src/mlx2.egg-info/SOURCES.txt'
+running check
+creating mlx2-0.1.0
+creating mlx2-0.1.0/provenance
+creating mlx2-0.1.0/src/mlx2
+creating mlx2-0.1.0/src/mlx2.egg-info
+creating mlx2-0.1.0/src/mlx2/adapters
+creating mlx2-0.1.0/src/mlx2/runtime
+creating mlx2-0.1.0/src/mlx2/runtime/drafters
+creating mlx2-0.1.0/src/mlx2/runtime/models
+creating mlx2-0.1.0/src/mlx2/runtime/tool_parsers
+creating mlx2-0.1.0/tests
+copying files to mlx2-0.1.0...
+copying LICENSE -> mlx2-0.1.0
+copying README.md -> mlx2-0.1.0
+copying pyproject.toml -> mlx2-0.1.0
+copying provenance/LICENSE.unified-MIT -> mlx2-0.1.0/provenance
+copying provenance/muse-dflash2.NOTICE -> mlx2-0.1.0/provenance
+copying provenance/muse-glimmer.NOTICE -> mlx2-0.1.0/provenance
+copying provenance/north-mini-code.NOTICE -> mlx2-0.1.0/provenance
+copying provenance/qwen36-35b.NOTICE -> mlx2-0.1.0/provenance
+copying provenance/qwen38-27b.NOTICE -> mlx2-0.1.0/provenance
+copying src/mlx2/__init__.py -> mlx2-0.1.0/src/mlx2
+copying src/mlx2/batch_metrics.py -> mlx2-0.1.0/src/mlx2
+copying src/mlx2/cache.py -> mlx2-0.1.0/src/mlx2
+copying src/mlx2/context_compaction.py -> mlx2-0.1.0/src/mlx2
+copying src/mlx2/contracts.py -> mlx2-0.1.0/src/mlx2
+copying src/mlx2/logprobs.py -> mlx2-0.1.0/src/mlx2
+copying src/mlx2/memory.py -> mlx2-0.1.0/src/mlx2
+copying src/mlx2/output.py -> mlx2-0.1.0/src/mlx2
+copying src/mlx2/qualification.py -> mlx2-0.1.0/src/mlx2
+copying src/mlx2/routing.py -> mlx2-0.1.0/src/mlx2
+copying src/mlx2/server.py -> mlx2-0.1.0/src/mlx2
+copying src/mlx2/serving.py -> mlx2-0.1.0/src/mlx2
+copying src/mlx2/state.py -> mlx2-0.1.0/src/mlx2
+copying src/mlx2/structured_output.py -> mlx2-0.1.0/src/mlx2
+copying src/mlx2/telemetry.py -> mlx2-0.1.0/src/mlx2
+copying src/mlx2.egg-info/PKG-INFO -> mlx2-0.1.0/src/mlx2.egg-info
+copying src/mlx2.egg-info/SOURCES.txt -> mlx2-0.1.0/src/mlx2.egg-info
+copying src/mlx2.egg-info/dependency_links.txt -> mlx2-0.1.0/src/mlx2.egg-info
+copying src/mlx2.egg-info/entry_points.txt -> mlx2-0.1.0/src/mlx2.egg-info
+copying src/mlx2.egg-info/requires.txt -> mlx2-0.1.0/src/mlx2.egg-info
+copying src/mlx2.egg-info/top_level.txt -> mlx2-0.1.0/src/mlx2.egg-info
+copying src/mlx2/adapters/__init__.py -> mlx2-0.1.0/src/mlx2/adapters
+copying src/mlx2/adapters/base.py -> mlx2-0.1.0/src/mlx2/adapters
+copying src/mlx2/adapters/dflash2.py -> mlx2-0.1.0/src/mlx2/adapters
+copying src/mlx2/adapters/flash_next.py -> mlx2-0.1.0/src/mlx2/adapters
+copying src/mlx2/adapters/flash_next_memory.py -> mlx2-0.1.0/src/mlx2/adapters
+copying src/mlx2/adapters/flash_next_policy.py -> mlx2-0.1.0/src/mlx2/adapters
+copying src/mlx2/adapters/muse_glimmer.py -> mlx2-0.1.0/src/mlx2/adapters
+copying src/mlx2/adapters/muse_glimmer_config.py -> mlx2-0.1.0/src/mlx2/adapters
+copying src/mlx2/adapters/muse_glimmer_output.py -> mlx2-0.1.0/src/mlx2/adapters
+copying src/mlx2/adapters/north_memory.py -> mlx2-0.1.0/src/mlx2/adapters
+copying src/mlx2/adapters/north_mini_code.py -> mlx2-0.1.0/src/mlx2/adapters
+copying src/mlx2/adapters/north_output.py -> mlx2-0.1.0/src/mlx2/adapters
+copying src/mlx2/adapters/qwen.py -> mlx2-0.1.0/src/mlx2/adapters
+copying src/mlx2/adapters/qwen36_35b.py -> mlx2-0.1.0/src/mlx2/adapters
+copying src/mlx2/adapters/qwen38_27b.py -> mlx2-0.1.0/src/mlx2/adapters
+copying src/mlx2/adapters/qwen38_memory.py -> mlx2-0.1.0/src/mlx2/adapters
+copying src/mlx2/adapters/registry.py -> mlx2-0.1.0/src/mlx2/adapters
+copying src/mlx2/runtime/__init__.py -> mlx2-0.1.0/src/mlx2/runtime
+copying src/mlx2/runtime/apc_v2.py -> mlx2-0.1.0/src/mlx2/runtime
+copying src/mlx2/runtime/batch_admission.py -> mlx2-0.1.0/src/mlx2/runtime
+copying src/mlx2/runtime/cache_branch_transaction.py -> mlx2-0.1.0/src/mlx2/runtime
+copying src/mlx2/runtime/cache_capsule.py -> mlx2-0.1.0/src/mlx2/runtime
+copying src/mlx2/runtime/cache_planes.py -> mlx2-0.1.0/src/mlx2/runtime
+copying src/mlx2/runtime/cow_cache.py -> mlx2-0.1.0/src/mlx2/runtime
+copying src/mlx2/runtime/external_speculative.py -> mlx2-0.1.0/src/mlx2/runtime
+copying src/mlx2/runtime/generate.py -> mlx2-0.1.0/src/mlx2/runtime
+copying src/mlx2/runtime/hybrid_speculative.py -> mlx2-0.1.0/src/mlx2/runtime
+copying src/mlx2/runtime/memory_policy.py -> mlx2-0.1.0/src/mlx2/runtime
+copying src/mlx2/runtime/os_memory.py -> mlx2-0.1.0/src/mlx2/runtime
+copying src/mlx2/runtime/prompt_lookup.py -> mlx2-0.1.0/src/mlx2/runtime
+copying src/mlx2/runtime/qsa_shared_suffix.py -> mlx2-0.1.0/src/mlx2/runtime
+copying src/mlx2/runtime/qsa_topology_receipt.py -> mlx2-0.1.0/src/mlx2/runtime
+copying src/mlx2/runtime/round_levers.py -> mlx2-0.1.0/src/mlx2/runtime
+copying src/mlx2/runtime/sample_utils.py -> mlx2-0.1.0/src/mlx2/runtime
+copying src/mlx2/runtime/segmented_batch_cache.py -> mlx2-0.1.0/src/mlx2/runtime
+copying src/mlx2/runtime/segmented_physical_promotion.py -> mlx2-0.1.0/src/mlx2/runtime
+copying src/mlx2/runtime/segmented_plain_kv.py -> mlx2-0.1.0/src/mlx2/runtime
+copying src/mlx2/runtime/segmented_rotating_kv.py -> mlx2-0.1.0/src/mlx2/runtime
+copying src/mlx2/runtime/segmented_self_mtp.py -> mlx2-0.1.0/src/mlx2/runtime
+copying src/mlx2/runtime/speculative_sampling.py -> mlx2-0.1.0/src/mlx2/runtime
+copying src/mlx2/runtime/tokenizer_utils.py -> mlx2-0.1.0/src/mlx2/runtime
+copying src/mlx2/runtime/ubc_evict.py -> mlx2-0.1.0/src/mlx2/runtime
+copying src/mlx2/runtime/verify_sync.py -> mlx2-0.1.0/src/mlx2/runtime
+copying src/mlx2/runtime/drafters/__init__.py -> mlx2-0.1.0/src/mlx2/runtime/drafters
+copying src/mlx2/runtime/drafters/base_config.py -> mlx2-0.1.0/src/mlx2/runtime/drafters
+copying src/mlx2/runtime/drafters/dflash2.py -> mlx2-0.1.0/src/mlx2/runtime/drafters
+copying src/mlx2/runtime/drafters/dflash2_config.py -> mlx2-0.1.0/src/mlx2/runtime/drafters
+copying src/mlx2/runtime/drafters/dflash_base.py -> mlx2-0.1.0/src/mlx2/runtime/drafters
+copying src/mlx2/runtime/models/__init__.py -> mlx2-0.1.0/src/mlx2/runtime/models
+copying src/mlx2/runtime/models/activations.py -> mlx2-0.1.0/src/mlx2/runtime/models
+copying src/mlx2/runtime/models/base.py -> mlx2-0.1.0/src/mlx2/runtime/models
+copying src/mlx2/runtime/models/cache.py -> mlx2-0.1.0/src/mlx2/runtime/models
+copying src/mlx2/runtime/models/cohere2_moe.py -> mlx2-0.1.0/src/mlx2/runtime/models
+copying src/mlx2/runtime/models/gated_delta.py -> mlx2-0.1.0/src/mlx2/runtime/models
+copying src/mlx2/runtime/models/muse_glimmer.py -> mlx2-0.1.0/src/mlx2/runtime/models
+copying src/mlx2/runtime/models/pipeline.py -> mlx2-0.1.0/src/mlx2/runtime/models
+copying src/mlx2/runtime/models/precise_ops.py -> mlx2-0.1.0/src/mlx2/runtime/models
+copying src/mlx2/runtime/models/qwen36_35b.py -> mlx2-0.1.0/src/mlx2/runtime/models
+copying src/mlx2/runtime/models/qwen38_27b.py -> mlx2-0.1.0/src/mlx2/runtime/models
+copying src/mlx2/runtime/models/qwen3_5.py -> mlx2-0.1.0/src/mlx2/runtime/models
+copying src/mlx2/runtime/models/qwen3_next.py -> mlx2-0.1.0/src/mlx2/runtime/models
+copying src/mlx2/runtime/models/qwen4_exp.py -> mlx2-0.1.0/src/mlx2/runtime/models
+copying src/mlx2/runtime/models/qwen4_fused_gdn.py -> mlx2-0.1.0/src/mlx2/runtime/models
+copying src/mlx2/runtime/models/qwen4_fused_gdn_verify.py -> mlx2-0.1.0/src/mlx2/runtime/models
+copying src/mlx2/runtime/models/qwen4_fused_moe.py -> mlx2-0.1.0/src/mlx2/runtime/models
+copying src/mlx2/runtime/models/qwen4_gdn_outproj.py -> mlx2-0.1.0/src/mlx2/runtime/models
+copying src/mlx2/runtime/models/qwen4_moe_router.py -> mlx2-0.1.0/src/mlx2/runtime/models
+copying src/mlx2/runtime/models/qwen4_ple_nvme.py -> mlx2-0.1.0/src/mlx2/runtime/models
+copying src/mlx2/runtime/models/qwen4_qsa_indexed.py -> mlx2-0.1.0/src/mlx2/runtime/models
+copying src/mlx2/runtime/models/qwen4_qsa_indexed_merge.py -> mlx2-0.1.0/src/mlx2/runtime/models
+copying src/mlx2/runtime/models/qwen4_qsa_nax.py -> mlx2-0.1.0/src/mlx2/runtime/models
+copying src/mlx2/runtime/models/qwen4_qsa_stage1.py -> mlx2-0.1.0/src/mlx2/runtime/models
+copying src/mlx2/runtime/models/rope_utils.py -> mlx2-0.1.0/src/mlx2/runtime/models
+copying src/mlx2/runtime/models/switch_layers.py -> mlx2-0.1.0/src/mlx2/runtime/models
+copying src/mlx2/runtime/tool_parsers/__init__.py -> mlx2-0.1.0/src/mlx2/runtime/tool_parsers
+copying src/mlx2/runtime/tool_parsers/_schema.py -> mlx2-0.1.0/src/mlx2/runtime/tool_parsers
+copying src/mlx2/runtime/tool_parsers/qwen3_coder.py -> mlx2-0.1.0/src/mlx2/runtime/tool_parsers
+copying tests/test_activate_qualification_arm.py -> mlx2-0.1.0/tests
+copying tests/test_adapter_registry.py -> mlx2-0.1.0/tests
+copying tests/test_admission_progress.py -> mlx2-0.1.0/tests
+copying tests/test_apcv2_lifecycle.py -> mlx2-0.1.0/tests
+copying tests/test_batch_metrics.py -> mlx2-0.1.0/tests
+copying tests/test_batched_mtp.py -> mlx2-0.1.0/tests
+copying tests/test_boundary_qualification.py -> mlx2-0.1.0/tests
+copying tests/test_context_compaction.py -> mlx2-0.1.0/tests
+copying tests/test_core.py -> mlx2-0.1.0/tests
+copying tests/test_execution_policy.py -> mlx2-0.1.0/tests
+copying tests/test_external_dflash2_cpu.py -> mlx2-0.1.0/tests
+copying tests/test_flash_next_memory.py -> mlx2-0.1.0/tests
+copying tests/test_known_tail_ple_prefetch.py -> mlx2-0.1.0/tests
+copying tests/test_logprobs_cpu.py -> mlx2-0.1.0/tests
+copying tests/test_muse_glimmer_port.py -> mlx2-0.1.0/tests
+copying tests/test_north_mini_code_port.py -> mlx2-0.1.0/tests
+copying tests/test_ordinary_boundary.py -> mlx2-0.1.0/tests
+copying tests/test_output.py -> mlx2-0.1.0/tests
+copying tests/test_parallel_sampling.py -> mlx2-0.1.0/tests
+copying tests/test_promotion_pressure.py -> mlx2-0.1.0/tests
+copying tests/test_prompt_lookup_core.py -> mlx2-0.1.0/tests
+copying tests/test_qsa_optional_epilogues_metal.py -> mlx2-0.1.0/tests
+copying tests/test_qsa_shared_suffix.py -> mlx2-0.1.0/tests
+copying tests/test_qualification.py -> mlx2-0.1.0/tests
+copying tests/test_qualification_matrix.py -> mlx2-0.1.0/tests
+copying tests/test_qualify_serving_receipts.py -> mlx2-0.1.0/tests
+copying tests/test_qwen36_35b_port.py -> mlx2-0.1.0/tests
+copying tests/test_qwen36_http_qualification.py -> mlx2-0.1.0/tests
+copying tests/test_qwen36_overnight.py -> mlx2-0.1.0/tests
+copying tests/test_qwen38_27b_native_cpu.py -> mlx2-0.1.0/tests
+copying tests/test_qwen38_27b_port.py -> mlx2-0.1.0/tests
+copying tests/test_qwen38_memory.py -> mlx2-0.1.0/tests
+copying tests/test_qwen4_qsa_indexed.py -> mlx2-0.1.0/tests
+copying tests/test_qwen4_qsa_indexed_merge.py -> mlx2-0.1.0/tests
+copying tests/test_sampling_controls.py -> mlx2-0.1.0/tests
+copying tests/test_segmented_mtp.py -> mlx2-0.1.0/tests
+copying tests/test_segmented_physical_promotion.py -> mlx2-0.1.0/tests
+copying tests/test_segmented_plain_kv_cpu.py -> mlx2-0.1.0/tests
+copying tests/test_segmented_rotating_kv_cpu.py -> mlx2-0.1.0/tests
+copying tests/test_serving_batch_features.py -> mlx2-0.1.0/tests
+copying tests/test_serving_contract.py -> mlx2-0.1.0/tests
+copying tests/test_serving_deferred_admission.py -> mlx2-0.1.0/tests
+copying tests/test_serving_retention.py -> mlx2-0.1.0/tests
+copying tests/test_structured_output.py -> mlx2-0.1.0/tests
+copying tests/test_warm_admission.py -> mlx2-0.1.0/tests
+Writing mlx2-0.1.0/setup.cfg
+Creating tar archive
+removing 'mlx2-0.1.0' (and everything under it)
+Building wheel from source distribution...
+running egg_info
+writing src/mlx2.egg-info/PKG-INFO
+writing dependency_links to src/mlx2.egg-info/dependency_links.txt
+writing entry points to src/mlx2.egg-info/entry_points.txt
+writing requirements to src/mlx2.egg-info/requires.txt
+writing top-level names to src/mlx2.egg-info/top_level.txt
+reading manifest file 'src/mlx2.egg-info/SOURCES.txt'
+adding license file 'LICENSE'
+adding license file 'provenance/muse-dflash2.NOTICE'
+adding license file 'provenance/muse-glimmer.NOTICE'
+adding license file 'provenance/north-mini-code.NOTICE'
+adding license file 'provenance/qwen36-35b.NOTICE'
+adding license file 'provenance/qwen38-27b.NOTICE'
+adding license file 'provenance/LICENSE.unified-MIT'
+writing manifest file 'src/mlx2.egg-info/SOURCES.txt'
+running bdist_wheel
+running build
+running build_py
+creating build/lib/mlx2
+copying src/mlx2/structured_output.py -> build/lib/mlx2
+copying src/mlx2/server.py -> build/lib/mlx2
+copying src/mlx2/logprobs.py -> build/lib/mlx2
+copying src/mlx2/memory.py -> build/lib/mlx2
+copying src/mlx2/serving.py -> build/lib/mlx2
+copying src/mlx2/cache.py -> build/lib/mlx2
+copying src/mlx2/__init__.py -> build/lib/mlx2
+copying src/mlx2/telemetry.py -> build/lib/mlx2
+copying src/mlx2/routing.py -> build/lib/mlx2
+copying src/mlx2/qualification.py -> build/lib/mlx2
+copying src/mlx2/contracts.py -> build/lib/mlx2
+copying src/mlx2/batch_metrics.py -> build/lib/mlx2
+copying src/mlx2/output.py -> build/lib/mlx2
+copying src/mlx2/state.py -> build/lib/mlx2
+copying src/mlx2/context_compaction.py -> build/lib/mlx2
+creating build/lib/mlx2/runtime
+copying src/mlx2/runtime/prompt_lookup.py -> build/lib/mlx2/runtime
+copying src/mlx2/runtime/cow_cache.py -> build/lib/mlx2/runtime
+copying src/mlx2/runtime/speculative_sampling.py -> build/lib/mlx2/runtime
+copying src/mlx2/runtime/qsa_topology_receipt.py -> build/lib/mlx2/runtime
+copying src/mlx2/runtime/generate.py -> build/lib/mlx2/runtime
+copying src/mlx2/runtime/tokenizer_utils.py -> build/lib/mlx2/runtime
+copying src/mlx2/runtime/qsa_shared_suffix.py -> build/lib/mlx2/runtime
+copying src/mlx2/runtime/memory_policy.py -> build/lib/mlx2/runtime
+copying src/mlx2/runtime/cache_branch_transaction.py -> build/lib/mlx2/runtime
+copying src/mlx2/runtime/__init__.py -> build/lib/mlx2/runtime
+copying src/mlx2/runtime/external_speculative.py -> build/lib/mlx2/runtime
+copying src/mlx2/runtime/ubc_evict.py -> build/lib/mlx2/runtime
+copying src/mlx2/runtime/segmented_physical_promotion.py -> build/lib/mlx2/runtime
+copying src/mlx2/runtime/segmented_self_mtp.py -> build/lib/mlx2/runtime
+copying src/mlx2/runtime/sample_utils.py -> build/lib/mlx2/runtime
+copying src/mlx2/runtime/round_levers.py -> build/lib/mlx2/runtime
+copying src/mlx2/runtime/segmented_batch_cache.py -> build/lib/mlx2/runtime
+copying src/mlx2/runtime/batch_admission.py -> build/lib/mlx2/runtime
+copying src/mlx2/runtime/os_memory.py -> build/lib/mlx2/runtime
+copying src/mlx2/runtime/apc_v2.py -> build/lib/mlx2/runtime
+copying src/mlx2/runtime/cache_planes.py -> build/lib/mlx2/runtime
+copying src/mlx2/runtime/segmented_rotating_kv.py -> build/lib/mlx2/runtime
+copying src/mlx2/runtime/hybrid_speculative.py -> build/lib/mlx2/runtime
+copying src/mlx2/runtime/verify_sync.py -> build/lib/mlx2/runtime
+copying src/mlx2/runtime/cache_capsule.py -> build/lib/mlx2/runtime
+copying src/mlx2/runtime/segmented_plain_kv.py -> build/lib/mlx2/runtime
+creating build/lib/mlx2/adapters
+copying src/mlx2/adapters/muse_glimmer.py -> build/lib/mlx2/adapters
+copying src/mlx2/adapters/flash_next.py -> build/lib/mlx2/adapters
+copying src/mlx2/adapters/north_output.py -> build/lib/mlx2/adapters
+copying src/mlx2/adapters/registry.py -> build/lib/mlx2/adapters
+copying src/mlx2/adapters/qwen38_27b.py -> build/lib/mlx2/adapters
+copying src/mlx2/adapters/dflash2.py -> build/lib/mlx2/adapters
+copying src/mlx2/adapters/qwen36_35b.py -> build/lib/mlx2/adapters
+copying src/mlx2/adapters/__init__.py -> build/lib/mlx2/adapters
+copying src/mlx2/adapters/muse_glimmer_config.py -> build/lib/mlx2/adapters
+copying src/mlx2/adapters/flash_next_memory.py -> build/lib/mlx2/adapters
+copying src/mlx2/adapters/qwen38_memory.py -> build/lib/mlx2/adapters
+copying src/mlx2/adapters/qwen.py -> build/lib/mlx2/adapters
+copying src/mlx2/adapters/muse_glimmer_output.py -> build/lib/mlx2/adapters
+copying src/mlx2/adapters/north_mini_code.py -> build/lib/mlx2/adapters
+copying src/mlx2/adapters/flash_next_policy.py -> build/lib/mlx2/adapters
+copying src/mlx2/adapters/base.py -> build/lib/mlx2/adapters
+copying src/mlx2/adapters/north_memory.py -> build/lib/mlx2/adapters
+creating build/lib/mlx2/runtime/tool_parsers
+copying src/mlx2/runtime/tool_parsers/_schema.py -> build/lib/mlx2/runtime/tool_parsers
+copying src/mlx2/runtime/tool_parsers/qwen3_coder.py -> build/lib/mlx2/runtime/tool_parsers
+copying src/mlx2/runtime/tool_parsers/__init__.py -> build/lib/mlx2/runtime/tool_parsers
+creating build/lib/mlx2/runtime/models
+copying src/mlx2/runtime/models/rope_utils.py -> build/lib/mlx2/runtime/models
+copying src/mlx2/runtime/models/precise_ops.py -> build/lib/mlx2/runtime/models
+copying src/mlx2/runtime/models/muse_glimmer.py -> build/lib/mlx2/runtime/models
+copying src/mlx2/runtime/models/qwen4_gdn_outproj.py -> build/lib/mlx2/runtime/models
+copying src/mlx2/runtime/models/qwen4_qsa_stage1.py -> build/lib/mlx2/runtime/models
+copying src/mlx2/runtime/models/qwen38_27b.py -> build/lib/mlx2/runtime/models
+copying src/mlx2/runtime/models/activations.py -> build/lib/mlx2/runtime/models
+copying src/mlx2/runtime/models/qwen4_fused_gdn.py -> build/lib/mlx2/runtime/models
+copying src/mlx2/runtime/models/qwen4_moe_router.py -> build/lib/mlx2/runtime/models
+copying src/mlx2/runtime/models/qwen36_35b.py -> build/lib/mlx2/runtime/models
+copying src/mlx2/runtime/models/cache.py -> build/lib/mlx2/runtime/models
+copying src/mlx2/runtime/models/__init__.py -> build/lib/mlx2/runtime/models
+copying src/mlx2/runtime/models/qwen4_ple_nvme.py -> build/lib/mlx2/runtime/models
+copying src/mlx2/runtime/models/qwen3_5.py -> build/lib/mlx2/runtime/models
+copying src/mlx2/runtime/models/qwen4_exp.py -> build/lib/mlx2/runtime/models
+copying src/mlx2/runtime/models/pipeline.py -> build/lib/mlx2/runtime/models
+copying src/mlx2/runtime/models/qwen4_fused_moe.py -> build/lib/mlx2/runtime/models
+copying src/mlx2/runtime/models/cohere2_moe.py -> build/lib/mlx2/runtime/models
+copying src/mlx2/runtime/models/qwen4_fused_gdn_verify.py -> build/lib/mlx2/runtime/models
+copying src/mlx2/runtime/models/qwen4_qsa_indexed_merge.py -> build/lib/mlx2/runtime/models
+copying src/mlx2/runtime/models/qwen3_next.py -> build/lib/mlx2/runtime/models
+copying src/mlx2/runtime/models/qwen4_qsa_indexed.py -> build/lib/mlx2/runtime/models
+copying src/mlx2/runtime/models/gated_delta.py -> build/lib/mlx2/runtime/models
+copying src/mlx2/runtime/models/base.py -> build/lib/mlx2/runtime/models
+copying src/mlx2/runtime/models/switch_layers.py -> build/lib/mlx2/runtime/models
+copying src/mlx2/runtime/models/qwen4_qsa_nax.py -> build/lib/mlx2/runtime/models
+creating build/lib/mlx2/runtime/drafters
+copying src/mlx2/runtime/drafters/dflash_base.py -> build/lib/mlx2/runtime/drafters
+copying src/mlx2/runtime/drafters/base_config.py -> build/lib/mlx2/runtime/drafters
+copying src/mlx2/runtime/drafters/dflash2.py -> build/lib/mlx2/runtime/drafters
+copying src/mlx2/runtime/drafters/__init__.py -> build/lib/mlx2/runtime/drafters
+copying src/mlx2/runtime/drafters/dflash2_config.py -> build/lib/mlx2/runtime/drafters
+running egg_info
+writing src/mlx2.egg-info/PKG-INFO
+writing dependency_links to src/mlx2.egg-info/dependency_links.txt
+writing entry points to src/mlx2.egg-info/entry_points.txt
+writing requirements to src/mlx2.egg-info/requires.txt
+writing top-level names to src/mlx2.egg-info/top_level.txt
+reading manifest file 'src/mlx2.egg-info/SOURCES.txt'
+adding license file 'LICENSE'
+adding license file 'provenance/muse-dflash2.NOTICE'
+adding license file 'provenance/muse-glimmer.NOTICE'
+adding license file 'provenance/north-mini-code.NOTICE'
+adding license file 'provenance/qwen36-35b.NOTICE'
+adding license file 'provenance/qwen38-27b.NOTICE'
+adding license file 'provenance/LICENSE.unified-MIT'
+writing manifest file 'src/mlx2.egg-info/SOURCES.txt'
+warning: build_py: byte-compiling is disabled, skipping.
+
+installing to build/bdist.macosx-11.0-arm64/wheel
+running install
+running install_lib
+creating build/bdist.macosx-11.0-arm64/wheel
+creating build/bdist.macosx-11.0-arm64/wheel/mlx2
+copying build/lib/mlx2/structured_output.py -> build/bdist.macosx-11.0-arm64/wheel/./mlx2
+copying build/lib/mlx2/server.py -> build/bdist.macosx-11.0-arm64/wheel/./mlx2
+copying build/lib/mlx2/logprobs.py -> build/bdist.macosx-11.0-arm64/wheel/./mlx2
+copying build/lib/mlx2/memory.py -> build/bdist.macosx-11.0-arm64/wheel/./mlx2
+copying build/lib/mlx2/serving.py -> build/bdist.macosx-11.0-arm64/wheel/./mlx2
+creating build/bdist.macosx-11.0-arm64/wheel/mlx2/runtime
+creating build/bdist.macosx-11.0-arm64/wheel/mlx2/runtime/tool_parsers
+copying build/lib/mlx2/runtime/tool_parsers/_schema.py -> build/bdist.macosx-11.0-arm64/wheel/./mlx2/runtime/tool_parsers
+copying build/lib/mlx2/runtime/tool_parsers/qwen3_coder.py -> build/bdist.macosx-11.0-arm64/wheel/./mlx2/runtime/tool_parsers
+copying build/lib/mlx2/runtime/tool_parsers/__init__.py -> build/bdist.macosx-11.0-arm64/wheel/./mlx2/runtime/tool_parsers
+copying build/lib/mlx2/runtime/prompt_lookup.py -> build/bdist.macosx-11.0-arm64/wheel/./mlx2/runtime
+copying build/lib/mlx2/runtime/cow_cache.py -> build/bdist.macosx-11.0-arm64/wheel/./mlx2/runtime
+copying build/lib/mlx2/runtime/speculative_sampling.py -> build/bdist.macosx-11.0-arm64/wheel/./mlx2/runtime
+copying build/lib/mlx2/runtime/qsa_topology_receipt.py -> build/bdist.macosx-11.0-arm64/wheel/./mlx2/runtime
+copying build/lib/mlx2/runtime/generate.py -> build/bdist.macosx-11.0-arm64/wheel/./mlx2/runtime
+copying build/lib/mlx2/runtime/tokenizer_utils.py -> build/bdist.macosx-11.0-arm64/wheel/./mlx2/runtime
+copying build/lib/mlx2/runtime/qsa_shared_suffix.py -> build/bdist.macosx-11.0-arm64/wheel/./mlx2/runtime
+copying build/lib/mlx2/runtime/memory_policy.py -> build/bdist.macosx-11.0-arm64/wheel/./mlx2/runtime
+copying build/lib/mlx2/runtime/cache_branch_transaction.py -> build/bdist.macosx-11.0-arm64/wheel/./mlx2/runtime
+copying build/lib/mlx2/runtime/__init__.py -> build/bdist.macosx-11.0-arm64/wheel/./mlx2/runtime
+creating build/bdist.macosx-11.0-arm64/wheel/mlx2/runtime/models
+copying build/lib/mlx2/runtime/models/rope_utils.py -> build/bdist.macosx-11.0-arm64/wheel/./mlx2/runtime/models
+copying build/lib/mlx2/runtime/models/precise_ops.py -> build/bdist.macosx-11.0-arm64/wheel/./mlx2/runtime/models
+copying build/lib/mlx2/runtime/models/muse_glimmer.py -> build/bdist.macosx-11.0-arm64/wheel/./mlx2/runtime/models
+copying build/lib/mlx2/runtime/models/qwen4_gdn_outproj.py -> build/bdist.macosx-11.0-arm64/wheel/./mlx2/runtime/models
+copying build/lib/mlx2/runtime/models/qwen4_qsa_stage1.py -> build/bdist.macosx-11.0-arm64/wheel/./mlx2/runtime/models
+copying build/lib/mlx2/runtime/models/qwen38_27b.py -> build/bdist.macosx-11.0-arm64/wheel/./mlx2/runtime/models
+copying build/lib/mlx2/runtime/models/activations.py -> build/bdist.macosx-11.0-arm64/wheel/./mlx2/runtime/models
+copying build/lib/mlx2/runtime/models/qwen4_fused_gdn.py -> build/bdist.macosx-11.0-arm64/wheel/./mlx2/runtime/models
+copying build/lib/mlx2/runtime/models/qwen4_moe_router.py -> build/bdist.macosx-11.0-arm64/wheel/./mlx2/runtime/models
+copying build/lib/mlx2/runtime/models/qwen36_35b.py -> build/bdist.macosx-11.0-arm64/wheel/./mlx2/runtime/models
+copying build/lib/mlx2/runtime/models/cache.py -> build/bdist.macosx-11.0-arm64/wheel/./mlx2/runtime/models
+copying build/lib/mlx2/runtime/models/__init__.py -> build/bdist.macosx-11.0-arm64/wheel/./mlx2/runtime/models
+copying build/lib/mlx2/runtime/models/qwen4_ple_nvme.py -> build/bdist.macosx-11.0-arm64/wheel/./mlx2/runtime/models
+copying build/lib/mlx2/runtime/models/qwen3_5.py -> build/bdist.macosx-11.0-arm64/wheel/./mlx2/runtime/models
+copying build/lib/mlx2/runtime/models/qwen4_exp.py -> build/bdist.macosx-11.0-arm64/wheel/./mlx2/runtime/models
+copying build/lib/mlx2/runtime/models/pipeline.py -> build/bdist.macosx-11.0-arm64/wheel/./mlx2/runtime/models
+copying build/lib/mlx2/runtime/models/qwen4_fused_moe.py -> build/bdist.macosx-11.0-arm64/wheel/./mlx2/runtime/models
+copying build/lib/mlx2/runtime/models/cohere2_moe.py -> build/bdist.macosx-11.0-arm64/wheel/./mlx2/runtime/models
+copying build/lib/mlx2/runtime/models/qwen4_fused_gdn_verify.py -> build/bdist.macosx-11.0-arm64/wheel/./mlx2/runtime/models
+copying build/lib/mlx2/runtime/models/qwen4_qsa_indexed_merge.py -> build/bdist.macosx-11.0-arm64/wheel/./mlx2/runtime/models
+copying build/lib/mlx2/runtime/models/qwen3_next.py -> build/bdist.macosx-11.0-arm64/wheel/./mlx2/runtime/models
+copying build/lib/mlx2/runtime/models/qwen4_qsa_indexed.py -> build/bdist.macosx-11.0-arm64/wheel/./mlx2/runtime/models
+copying build/lib/mlx2/runtime/models/gated_delta.py -> build/bdist.macosx-11.0-arm64/wheel/./mlx2/runtime/models
+copying build/lib/mlx2/runtime/models/base.py -> build/bdist.macosx-11.0-arm64/wheel/./mlx2/runtime/models
+copying build/lib/mlx2/runtime/models/switch_layers.py -> build/bdist.macosx-11.0-arm64/wheel/./mlx2/runtime/models
+copying build/lib/mlx2/runtime/models/qwen4_qsa_nax.py -> build/bdist.macosx-11.0-arm64/wheel/./mlx2/runtime/models
+copying build/lib/mlx2/runtime/external_speculative.py -> build/bdist.macosx-11.0-arm64/wheel/./mlx2/runtime
+copying build/lib/mlx2/runtime/ubc_evict.py -> build/bdist.macosx-11.0-arm64/wheel/./mlx2/runtime
+copying build/lib/mlx2/runtime/segmented_physical_promotion.py -> build/bdist.macosx-11.0-arm64/wheel/./mlx2/runtime
+copying build/lib/mlx2/runtime/segmented_self_mtp.py -> build/bdist.macosx-11.0-arm64/wheel/./mlx2/runtime
+copying build/lib/mlx2/runtime/sample_utils.py -> build/bdist.macosx-11.0-arm64/wheel/./mlx2/runtime
+copying build/lib/mlx2/runtime/round_levers.py -> build/bdist.macosx-11.0-arm64/wheel/./mlx2/runtime
+copying build/lib/mlx2/runtime/segmented_batch_cache.py -> build/bdist.macosx-11.0-arm64/wheel/./mlx2/runtime
+copying build/lib/mlx2/runtime/batch_admission.py -> build/bdist.macosx-11.0-arm64/wheel/./mlx2/runtime
+copying build/lib/mlx2/runtime/os_memory.py -> build/bdist.macosx-11.0-arm64/wheel/./mlx2/runtime
+copying build/lib/mlx2/runtime/apc_v2.py -> build/bdist.macosx-11.0-arm64/wheel/./mlx2/runtime
+creating build/bdist.macosx-11.0-arm64/wheel/mlx2/runtime/drafters
+copying build/lib/mlx2/runtime/drafters/dflash_base.py -> build/bdist.macosx-11.0-arm64/wheel/./mlx2/runtime/drafters
+copying build/lib/mlx2/runtime/drafters/base_config.py -> build/bdist.macosx-11.0-arm64/wheel/./mlx2/runtime/drafters
+copying build/lib/mlx2/runtime/drafters/dflash2.py -> build/bdist.macosx-11.0-arm64/wheel/./mlx2/runtime/drafters
+copying build/lib/mlx2/runtime/drafters/__init__.py -> build/bdist.macosx-11.0-arm64/wheel/./mlx2/runtime/drafters
+copying build/lib/mlx2/runtime/drafters/dflash2_config.py -> build/bdist.macosx-11.0-arm64/wheel/./mlx2/runtime/drafters
+copying build/lib/mlx2/runtime/cache_planes.py -> build/bdist.macosx-11.0-arm64/wheel/./mlx2/runtime
+copying build/lib/mlx2/runtime/segmented_rotating_kv.py -> build/bdist.macosx-11.0-arm64/wheel/./mlx2/runtime
+copying build/lib/mlx2/runtime/hybrid_speculative.py -> build/bdist.macosx-11.0-arm64/wheel/./mlx2/runtime
+copying build/lib/mlx2/runtime/verify_sync.py -> build/bdist.macosx-11.0-arm64/wheel/./mlx2/runtime
+copying build/lib/mlx2/runtime/cache_capsule.py -> build/bdist.macosx-11.0-arm64/wheel/./mlx2/runtime
+copying build/lib/mlx2/runtime/segmented_plain_kv.py -> build/bdist.macosx-11.0-arm64/wheel/./mlx2/runtime
+copying build/lib/mlx2/cache.py -> build/bdist.macosx-11.0-arm64/wheel/./mlx2
+copying build/lib/mlx2/__init__.py -> build/bdist.macosx-11.0-arm64/wheel/./mlx2
+copying build/lib/mlx2/telemetry.py -> build/bdist.macosx-11.0-arm64/wheel/./mlx2
+creating build/bdist.macosx-11.0-arm64/wheel/mlx2/adapters
+copying build/lib/mlx2/adapters/muse_glimmer.py -> build/bdist.macosx-11.0-arm64/wheel/./mlx2/adapters
+copying build/lib/mlx2/adapters/flash_next.py -> build/bdist.macosx-11.0-arm64/wheel/./mlx2/adapters
+copying build/lib/mlx2/adapters/north_output.py -> build/bdist.macosx-11.0-arm64/wheel/./mlx2/adapters
+copying build/lib/mlx2/adapters/registry.py -> build/bdist.macosx-11.0-arm64/wheel/./mlx2/adapters
+copying build/lib/mlx2/adapters/qwen38_27b.py -> build/bdist.macosx-11.0-arm64/wheel/./mlx2/adapters
+copying build/lib/mlx2/adapters/dflash2.py -> build/bdist.macosx-11.0-arm64/wheel/./mlx2/adapters
+copying build/lib/mlx2/adapters/qwen36_35b.py -> build/bdist.macosx-11.0-arm64/wheel/./mlx2/adapters
+copying build/lib/mlx2/adapters/__init__.py -> build/bdist.macosx-11.0-arm64/wheel/./mlx2/adapters
+copying build/lib/mlx2/adapters/muse_glimmer_config.py -> build/bdist.macosx-11.0-arm64/wheel/./mlx2/adapters
+copying build/lib/mlx2/adapters/flash_next_memory.py -> build/bdist.macosx-11.0-arm64/wheel/./mlx2/adapters
+copying build/lib/mlx2/adapters/qwen38_memory.py -> build/bdist.macosx-11.0-arm64/wheel/./mlx2/adapters
+copying build/lib/mlx2/adapters/qwen.py -> build/bdist.macosx-11.0-arm64/wheel/./mlx2/adapters
+copying build/lib/mlx2/adapters/muse_glimmer_output.py -> build/bdist.macosx-11.0-arm64/wheel/./mlx2/adapters
+copying build/lib/mlx2/adapters/north_mini_code.py -> build/bdist.macosx-11.0-arm64/wheel/./mlx2/adapters
+copying build/lib/mlx2/adapters/flash_next_policy.py -> build/bdist.macosx-11.0-arm64/wheel/./mlx2/adapters
+copying build/lib/mlx2/adapters/base.py -> build/bdist.macosx-11.0-arm64/wheel/./mlx2/adapters
+copying build/lib/mlx2/adapters/north_memory.py -> build/bdist.macosx-11.0-arm64/wheel/./mlx2/adapters
+copying build/lib/mlx2/routing.py -> build/bdist.macosx-11.0-arm64/wheel/./mlx2
+copying build/lib/mlx2/qualification.py -> build/bdist.macosx-11.0-arm64/wheel/./mlx2
+copying build/lib/mlx2/contracts.py -> build/bdist.macosx-11.0-arm64/wheel/./mlx2
+copying build/lib/mlx2/batch_metrics.py -> build/bdist.macosx-11.0-arm64/wheel/./mlx2
+copying build/lib/mlx2/output.py -> build/bdist.macosx-11.0-arm64/wheel/./mlx2
+copying build/lib/mlx2/state.py -> build/bdist.macosx-11.0-arm64/wheel/./mlx2
+copying build/lib/mlx2/context_compaction.py -> build/bdist.macosx-11.0-arm64/wheel/./mlx2
+warning: install_lib: byte-compiling is disabled, skipping.
+
+running install_egg_info
+Copying src/mlx2.egg-info to build/bdist.macosx-11.0-arm64/wheel/./mlx2-0.1.0-py3.12.egg-info
+running install_scripts
+creating build/bdist.macosx-11.0-arm64/wheel/mlx2-0.1.0.dist-info/WHEEL
+creating '~/Desktop/mlx2/dist/.tmp-xkjb8610/mlx2-0.1.0-py3-none-any.whl' and adding 'build/bdist.macosx-11.0-arm64/wheel' to it
+adding 'mlx2/__init__.py'
+adding 'mlx2/batch_metrics.py'
+adding 'mlx2/cache.py'
+adding 'mlx2/context_compaction.py'
+adding 'mlx2/contracts.py'
+adding 'mlx2/logprobs.py'
+adding 'mlx2/memory.py'
+adding 'mlx2/output.py'
+adding 'mlx2/qualification.py'
+adding 'mlx2/routing.py'
+adding 'mlx2/server.py'
+adding 'mlx2/serving.py'
+adding 'mlx2/state.py'
+adding 'mlx2/structured_output.py'
+adding 'mlx2/telemetry.py'
+adding 'mlx2/adapters/__init__.py'
+adding 'mlx2/adapters/base.py'
+adding 'mlx2/adapters/dflash2.py'
+adding 'mlx2/adapters/flash_next.py'
+adding 'mlx2/adapters/flash_next_memory.py'
+adding 'mlx2/adapters/flash_next_policy.py'
+adding 'mlx2/adapters/muse_glimmer.py'
+adding 'mlx2/adapters/muse_glimmer_config.py'
+adding 'mlx2/adapters/muse_glimmer_output.py'
+adding 'mlx2/adapters/north_memory.py'
+adding 'mlx2/adapters/north_mini_code.py'
+adding 'mlx2/adapters/north_output.py'
+adding 'mlx2/adapters/qwen.py'
+adding 'mlx2/adapters/qwen36_35b.py'
+adding 'mlx2/adapters/qwen38_27b.py'
+adding 'mlx2/adapters/qwen38_memory.py'
+adding 'mlx2/adapters/registry.py'
+adding 'mlx2/runtime/__init__.py'
+adding 'mlx2/runtime/apc_v2.py'
+adding 'mlx2/runtime/batch_admission.py'
+adding 'mlx2/runtime/cache_branch_transaction.py'
+adding 'mlx2/runtime/cache_capsule.py'
+adding 'mlx2/runtime/cache_planes.py'
+adding 'mlx2/runtime/cow_cache.py'
+adding 'mlx2/runtime/external_speculative.py'
+adding 'mlx2/runtime/generate.py'
+adding 'mlx2/runtime/hybrid_speculative.py'
+adding 'mlx2/runtime/memory_policy.py'
+adding 'mlx2/runtime/os_memory.py'
+adding 'mlx2/runtime/prompt_lookup.py'
+adding 'mlx2/runtime/qsa_shared_suffix.py'
+adding 'mlx2/runtime/qsa_topology_receipt.py'
+adding 'mlx2/runtime/round_levers.py'
+adding 'mlx2/runtime/sample_utils.py'
+adding 'mlx2/runtime/segmented_batch_cache.py'
+adding 'mlx2/runtime/segmented_physical_promotion.py'
+adding 'mlx2/runtime/segmented_plain_kv.py'
+adding 'mlx2/runtime/segmented_rotating_kv.py'
+adding 'mlx2/runtime/segmented_self_mtp.py'
+adding 'mlx2/runtime/speculative_sampling.py'
+adding 'mlx2/runtime/tokenizer_utils.py'
+adding 'mlx2/runtime/ubc_evict.py'
+adding 'mlx2/runtime/verify_sync.py'
+adding 'mlx2/runtime/drafters/__init__.py'
+adding 'mlx2/runtime/drafters/base_config.py'
+adding 'mlx2/runtime/drafters/dflash2.py'
+adding 'mlx2/runtime/drafters/dflash2_config.py'
+adding 'mlx2/runtime/drafters/dflash_base.py'
+adding 'mlx2/runtime/models/__init__.py'
+adding 'mlx2/runtime/models/activations.py'
+adding 'mlx2/runtime/models/base.py'
+adding 'mlx2/runtime/models/cache.py'
+adding 'mlx2/runtime/models/cohere2_moe.py'
+adding 'mlx2/runtime/models/gated_delta.py'
+adding 'mlx2/runtime/models/muse_glimmer.py'
+adding 'mlx2/runtime/models/pipeline.py'
+adding 'mlx2/runtime/models/precise_ops.py'
+adding 'mlx2/runtime/models/qwen36_35b.py'
+adding 'mlx2/runtime/models/qwen38_27b.py'
+adding 'mlx2/runtime/models/qwen3_5.py'
+adding 'mlx2/runtime/models/qwen3_next.py'
+adding 'mlx2/runtime/models/qwen4_exp.py'
+adding 'mlx2/runtime/models/qwen4_fused_gdn.py'
+adding 'mlx2/runtime/models/qwen4_fused_gdn_verify.py'
+adding 'mlx2/runtime/models/qwen4_fused_moe.py'
+adding 'mlx2/runtime/models/qwen4_gdn_outproj.py'
+adding 'mlx2/runtime/models/qwen4_moe_router.py'
+adding 'mlx2/runtime/models/qwen4_ple_nvme.py'
+adding 'mlx2/runtime/models/qwen4_qsa_indexed.py'
+adding 'mlx2/runtime/models/qwen4_qsa_indexed_merge.py'
+adding 'mlx2/runtime/models/qwen4_qsa_nax.py'
+adding 'mlx2/runtime/models/qwen4_qsa_stage1.py'
+adding 'mlx2/runtime/models/rope_utils.py'
+adding 'mlx2/runtime/models/switch_layers.py'
+adding 'mlx2/runtime/tool_parsers/__init__.py'
+adding 'mlx2/runtime/tool_parsers/_schema.py'
+adding 'mlx2/runtime/tool_parsers/qwen3_coder.py'
+adding 'mlx2-0.1.0.dist-info/licenses/LICENSE'
+adding 'mlx2-0.1.0.dist-info/licenses/provenance/LICENSE.unified-MIT'
+adding 'mlx2-0.1.0.dist-info/licenses/provenance/muse-dflash2.NOTICE'
+adding 'mlx2-0.1.0.dist-info/licenses/provenance/muse-glimmer.NOTICE'
+adding 'mlx2-0.1.0.dist-info/licenses/provenance/north-mini-code.NOTICE'
+adding 'mlx2-0.1.0.dist-info/licenses/provenance/qwen36-35b.NOTICE'
+adding 'mlx2-0.1.0.dist-info/licenses/provenance/qwen38-27b.NOTICE'
+adding 'mlx2-0.1.0.dist-info/METADATA'
+adding 'mlx2-0.1.0.dist-info/WHEEL'
+adding 'mlx2-0.1.0.dist-info/entry_points.txt'
+adding 'mlx2-0.1.0.dist-info/top_level.txt'
+adding 'mlx2-0.1.0.dist-info/RECORD'
+removing build/bdist.macosx-11.0-arm64/wheel
+Successfully built dist/mlx2-0.1.0.tar.gz
+Successfully built dist/mlx2-0.1.0-py3-none-any.whl

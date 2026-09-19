@@ -1,0 +1,7 @@
+PASS short_prompt_is_an_exact_lane_and_is_published {"prompt_tokens": 1411, "start_tokens": 2500, "reason": "below_start_tokens", "warm_cached": 1410, "texts": ["line 70: account 410 moved", "line 70: account 410 moved"], "error": null}
+PASS long_prompt_quantizes_a_warm_exact_prefix {"prompt_tokens": 5314, "cached_tokens": 1423, "text": "5521.", "status": "applied", "requantized_prefix_hits": 1, "error": null}
+PASS exact_entry_is_untouched_by_the_quantized_branch {"text": "line 70: account 410 moved", "cached_tokens": 1410}
+PASS long_prompt_repeat_is_stable_and_never_cached_as_exact {"text": "5521.", "cached_tokens": 1423}
+PASS counters {"lease_readings": [1, 0], "skipped": 4, "applied": 2, "requantized_prefix_hits": 2}
+PASS server_alive_final {"inflight": 0, "error": null}
+SUMMARY 6/6

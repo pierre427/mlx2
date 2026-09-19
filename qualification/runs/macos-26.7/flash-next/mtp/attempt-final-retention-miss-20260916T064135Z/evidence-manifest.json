@@ -1,0 +1,35 @@
+{
+  "arm": "mtp",
+  "cache_directory": "~/Desktop/mlx2/qualification/runs/macos-26.7/flash-next/mtp/cache-59431579",
+  "canonical_published": false,
+  "captured_at": "2026-09-16T06:41:35.714481+00:00",
+  "cold": {
+    "cached_tokens": 0,
+    "elapsed_seconds": 224.2241427500012,
+    "prompt_tokens": 261923,
+    "ttft_seconds": 220.90007612500267
+  },
+  "failure_gate": "context",
+  "files": {
+    "qualify-59431579.log": "d2008fd9c4da1e9613c6362b46fd3a694d6fce361aa52c83f9c49cee3215875b",
+    "route-qualification-59431579.json": "2b2c446cd3e63dd5944b637e81f09caf7bedc9d1b5401ecbbb94babbaf48f494",
+    "server-59431579.log": "10357b0f4ddc49f6830c174876730d400f88e334df26dc7b798aaa8d08579488",
+    "status-initial-59431579.json": "93e6cf30fd9f80f5610ca69157078815538d682463edde0620e28f767b14f972"
+  },
+  "ordinary_started": false,
+  "runbook_sha256": "1234bb375048d54c4bf4fb615a688ff62c845ee4e9d936eaa433568874076d4d",
+  "runtime_source_sha256": "5943157909e46fe3f04a30f832343a6c3f3bfe7737b53c2e2f8136af2f3ebdf3",
+  "schema": "mlx2.flash-next-failed-qualification-evidence.v1",
+  "teardown": {
+    "port_8285_listener": false,
+    "server_pid": 11989,
+    "server_pid_alive": false,
+    "swap_used": "0.00M"
+  },
+  "warm": {
+    "cached_tokens": 0,
+    "elapsed_seconds": 227.2082029580015,
+    "prompt_tokens": 261923,
+    "ttft_seconds": 224.66043037500276
+  }
+}

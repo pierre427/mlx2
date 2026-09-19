@@ -1,0 +1,4524 @@
+{
+  "schema": "mlx2.serving-qualification.v1",
+  "timestamp": 1789773727.8251011,
+  "runtime": {
+    "source_sha256": "88028b6b2557dceb4c55f2569b59c2ad301819c5f471ad1db50e2bf59e299e81",
+    "mlx_native_sha256": "30335939714520c3306cfa58597100aae08bbeabdc60a4bc8c35c32c607450a8",
+    "python": "3.12.13",
+    "macos": "26.7",
+    "mlx": "0.32.2.dev20260915+2a817ad94",
+    "transformers": "5.17.0",
+    "dependencies": {
+      "numpy": "2.5.1",
+      "tokenizers": "0.23.2",
+      "jinja2": "3.1.6",
+      "psutil": "7.2.2",
+      "regex": "2026.9.10",
+      "safetensors": "0.8.0"
+    }
+  },
+  "qualification_harness": {
+    "schema": "mlx2.qualification-harness.v1",
+    "name": "scripts/qualify_serving.py",
+    "sha256": "ccc23aec41418b10992ef098502ea4f2f01e79841d8d4dd5a641d285f6af9005"
+  },
+  "artifact": "70ae09c8721dfb83d42d5d89b47383790aaf326f81da64400161fd2eddd0498c",
+  "settings": {
+    "max_context": 32768,
+    "max_lanes": 4,
+    "max_inflight": 8,
+    "prefill_step": 2048,
+    "cache_bytes": 8589934592,
+    "disk_cache": true,
+    "host_prompt_cache_entries": 128,
+    "host_prompt_cache_tokens": 1048576,
+    "coalesce_window_ms": 5.0,
+    "batch_cohort_timeout_ms": 1000.0,
+    "mtp": false,
+    "tenant_scoped_cache": false,
+    "environment": {
+      "HF_HUB_OFFLINE": "1",
+      "TRANSFORMERS_OFFLINE": "1",
+      "MLX_ENABLE_TF32": "0",
+      "MLX_LM_COMPILED_DECODE": "0",
+      "MLX_LM_SEGMENTED_SELF_MTP": "1",
+      "MLX_LM_TRUE_BATCHED_SEGMENTED_MTP": "1",
+      "MLX_LM_SHARED_QSA_SUFFIX": "0",
+      "MLX_LM_MTP_BOUNDARY_COW": "1"
+    },
+    "adaptive_mtp_depth": {
+      "enabled": false,
+      "ewma_alpha": 0.25,
+      "shrink_gate": 0.35,
+      "grow_gate": 0.8,
+      "loss_rounds": 3,
+      "gain_rounds": 3,
+      "park_rounds": 4
+    },
+    "spomin_live_surgery": {
+      "enabled": false,
+      "capacity_tokens": 0,
+      "segment_tokens": 1024,
+      "strategy": "oldest_contiguous",
+      "protect_prefix_segments": 1
+    },
+    "cache_capsules": {
+      "enabled": false,
+      "backend": "gpu",
+      "fallback": "gpu",
+      "deadline_ms": 50.0,
+      "verify_raw_bits": false
+    },
+    "persistent_block_bytes": 0,
+    "approximate_kv": {
+      "enabled": false,
+      "operation": null,
+      "start_tokens": 0,
+      "evidence": [],
+      "descriptor": null
+    },
+    "execution_policy": {
+      "persistent": true,
+      "num_draft": 1,
+      "rate_gate": false,
+      "prefill_step_size": 2048,
+      "segment_aware_live_tip": true,
+      "segment_aware_cohort_size": 4
+    },
+    "prompt_lookup": {},
+    "decode_time_fairness": {
+      "enabled": true,
+      "fair_share": 0.5,
+      "stall_target_ms": 500.0
+    },
+    "speculation": "ordinary",
+    "cache_budget": {
+      "schema": "xing4-0-mla-cache-geometry-v1",
+      "attention_layers": 40,
+      "mtp_layers": 0,
+      "latent_dim": 512,
+      "rope_dim": 64,
+      "item_bytes": 4,
+      "allocation_step": 256,
+      "transcript_bytes_per_token": 16,
+      "transient_gib_per_lane": 3.1,
+      "bound": "fp32-mla-latent-plus-rope-key",
+      "workspace": "3.1-GiB-per-lane conservative static assumption; live qualification pending"
+    }
+  },
+  "coverage": {
+    "response_format_json_object": false,
+    "strict_json_schema": true,
+    "explicit_grammar": false,
+    "physical_n2": false,
+    "overload_429_retry_after": false,
+    "latency_ttft_itl_percentiles": false,
+    "tenant_jain_fairness": false,
+    "progress_events": false
+  },
+  "checks": {
+    "unit_tests": {
+      "passed": true,
+      "evidence": {
+        "path": "/private/tmp/mlx2-xing/qualification/runs/xing4-0-gpu-20260918/preflight.json",
+        "sha256": "be5b581984598bd02b9fbeeaf1a5909554e431118af18a0e7e75ac30ee1d8eab",
+        "identity": {
+          "git": {
+            "revision": "2478776d7054159361ac1337e19485c7aab31973"
+          },
+          "runtime": {
+            "source_sha256": "88028b6b2557dceb4c55f2569b59c2ad301819c5f471ad1db50e2bf59e299e81",
+            "mlx_native_sha256": "30335939714520c3306cfa58597100aae08bbeabdc60a4bc8c35c32c607450a8",
+            "python": "3.12.13",
+            "macos": "26.7",
+            "mlx": "0.32.2.dev20260915+2a817ad94",
+            "transformers": "5.17.0",
+            "dependencies": {
+              "numpy": "2.5.1",
+              "tokenizers": "0.23.2",
+              "jinja2": "3.1.6",
+              "psutil": "7.2.2",
+              "regex": "2026.9.10",
+              "safetensors": "0.8.0"
+            }
+          },
+          "qualification_harness": {
+            "schema": "mlx2.qualification-harness.v1",
+            "name": "scripts/qualify_serving.py",
+            "sha256": "ccc23aec41418b10992ef098502ea4f2f01e79841d8d4dd5a641d285f6af9005"
+          },
+          "test_source_sha256": "7a0362891506415d0ffc078b0588ee5910c7ae4eeeea0bea875419a78dece016"
+        },
+        "passed": true
+      }
+    },
+    "hermes_client": {
+      "passed": true,
+      "evidence": {
+        "id": "chatcmpl-a9089bedca5c4b1794b56f269aa48721",
+        "object": "chat.completion",
+        "created": 1789773727,
+        "model": "Xing4.0-29B-A4B-mlx-6bit",
+        "choices": [
+          {
+            "index": 0,
+            "finish_reason": "stop",
+            "message": {
+              "role": "assistant",
+              "content": "HERMES_READY"
+            }
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 11,
+          "completion_tokens": 5,
+          "total_tokens": 16,
+          "prompt_tokens_details": {
+            "cached_tokens": 2
+          }
+        },
+        "mlx2": {
+          "request_id": "chatcmpl-a9089bedca5c4b1794b56f269aa48721",
+          "cache": "apcv2",
+          "cached_tokens": 2,
+          "parallel_prefill": null,
+          "profile": "xing4-0-apcv2-ordinary",
+          "qualification": "candidate",
+          "route_receipt": "candidate_validation",
+          "request_controls": {
+            "logprobs": false,
+            "top_logprobs": 0,
+            "logprob_semantics": null,
+            "thinking": false,
+            "sampling": {
+              "temperature": 0,
+              "repetition_penalty": 1.0,
+              "presence_penalty": 0.0,
+              "frequency_penalty": 0.0
+            },
+            "effective_sampling": {
+              "temperature": 0,
+              "top_p": 0.95,
+              "top_k": 0,
+              "min_p": 0.0,
+              "repetition_penalty": 1.0,
+              "presence_penalty": 0.0,
+              "frequency_penalty": 0.0
+            },
+            "sampling_defaults": {
+              "schema": "mlx2.sampling-defaults.v1",
+              "explicit": [
+                "temperature",
+                "repetition_penalty",
+                "presence_penalty",
+                "frequency_penalty"
+              ],
+              "applied": {
+                "top_p": 0.95
+              },
+              "sources": {
+                "top_p": "generation_config.json"
+              },
+              "profile": "general",
+              "profile_reason": "general",
+              "model": "XingChen-AGI/Xing4.0-29B-A4B",
+              "fallback": {
+                "top_k": 0,
+                "min_p": 0.0
+              },
+              "fallback_kind": "neutral"
+            },
+            "min_tokens": 0,
+            "batch_cohort": null,
+            "reasoning_effort": "none",
+            "effort_semantics": "thinking_toggle",
+            "context_limit": 32768,
+            "structured_output": null
+          },
+          "ordinary_compute_width": 1,
+          "mtp": null,
+          "speculation": null,
+          "spomin_live_surgery": null,
+          "approximate_kv": null,
+          "cache_capsule": null,
+          "prompt_tokens": 11,
+          "completion_tokens": 5,
+          "ttft_seconds": 0.09282779198838398,
+          "elapsed_seconds": 0.17196845900616609
+        }
+      }
+    },
+    "logprobs": {
+      "passed": true,
+      "evidence": {
+        "reference": {
+          "id": "chatcmpl-938d38fca841435a9fb47b838adad3d5",
+          "object": "chat.completion",
+          "created": 1789773728,
+          "model": "Xing4.0-29B-A4B-mlx-6bit",
+          "choices": [
+            {
+              "index": 0,
+              "finish_reason": "length",
+              "message": {
+                "role": "assistant",
+                "content": "Here's a short sentence about comp"
+              }
+            }
+          ],
+          "usage": {
+            "prompt_tokens": 12,
+            "completion_tokens": 8,
+            "total_tokens": 20,
+            "prompt_tokens_details": {
+              "cached_tokens": 4
+            }
+          },
+          "mlx2": {
+            "request_id": "chatcmpl-938d38fca841435a9fb47b838adad3d5",
+            "cache": "apcv2",
+            "cached_tokens": 4,
+            "parallel_prefill": null,
+            "profile": "xing4-0-apcv2-ordinary",
+            "qualification": "candidate",
+            "route_receipt": "candidate_validation",
+            "request_controls": {
+              "logprobs": false,
+              "top_logprobs": 0,
+              "logprob_semantics": null,
+              "thinking": false,
+              "sampling": {
+                "temperature": 0,
+                "repetition_penalty": 1.0,
+                "presence_penalty": 0.0,
+                "frequency_penalty": 0.0
+              },
+              "effective_sampling": {
+                "temperature": 0,
+                "top_p": 0.95,
+                "top_k": 0,
+                "min_p": 0.0,
+                "repetition_penalty": 1.0,
+                "presence_penalty": 0.0,
+                "frequency_penalty": 0.0
+              },
+              "sampling_defaults": {
+                "schema": "mlx2.sampling-defaults.v1",
+                "explicit": [
+                  "temperature",
+                  "repetition_penalty",
+                  "presence_penalty",
+                  "frequency_penalty"
+                ],
+                "applied": {
+                  "top_p": 0.95
+                },
+                "sources": {
+                  "top_p": "generation_config.json"
+                },
+                "profile": "general",
+                "profile_reason": "general",
+                "model": "XingChen-AGI/Xing4.0-29B-A4B",
+                "fallback": {
+                  "top_k": 0,
+                  "min_p": 0.0
+                },
+                "fallback_kind": "neutral"
+              },
+              "min_tokens": 0,
+              "batch_cohort": null,
+              "reasoning_effort": null,
+              "effort_semantics": "thinking_toggle",
+              "context_limit": 32768,
+              "structured_output": null
+            },
+            "ordinary_compute_width": 1,
+            "mtp": null,
+            "speculation": null,
+            "spomin_live_surgery": null,
+            "approximate_kv": null,
+            "cache_capsule": null,
+            "prompt_tokens": 12,
+            "completion_tokens": 8,
+            "ttft_seconds": 0.09602091601118445,
+            "elapsed_seconds": 0.22664274999988265
+          }
+        },
+        "response": {
+          "id": "chatcmpl-8b382c056b244a479f8c6cd5f34a70ed",
+          "object": "chat.completion",
+          "created": 1789773728,
+          "model": "Xing4.0-29B-A4B-mlx-6bit",
+          "choices": [
+            {
+              "index": 0,
+              "finish_reason": "length",
+              "logprobs": {
+                "content": [
+                  {
+                    "id": 3761,
+                    "token": "\u2581Here",
+                    "logprob": -0.375,
+                    "top_logprobs": [
+                      {
+                        "id": 3761,
+                        "token": "\u2581Here",
+                        "logprob": -0.375
+                      },
+                      {
+                        "id": 465,
+                        "token": "\u2581A",
+                        "logprob": -1.5
+                      },
+                      {
+                        "id": 2938,
+                        "token": "\u2581**",
+                        "logprob": -3.75
+                      }
+                    ]
+                  },
+                  {
+                    "id": 124416,
+                    "token": "'",
+                    "logprob": -0.25,
+                    "top_logprobs": [
+                      {
+                        "id": 124416,
+                        "token": "'",
+                        "logprob": -0.25
+                      },
+                      {
+                        "id": 468,
+                        "token": "\u2581is",
+                        "logprob": -2.0
+                      },
+                      {
+                        "id": 547,
+                        "token": "\u2581are",
+                        "logprob": -2.625
+                      }
+                    ]
+                  },
+                  {
+                    "id": 124368,
+                    "token": "s",
+                    "logprob": 0.0,
+                    "top_logprobs": [
+                      {
+                        "id": 124368,
+                        "token": "s",
+                        "logprob": 0.0
+                      },
+                      {
+                        "id": 124364,
+                        "token": "a",
+                        "logprob": -13.3125
+                      },
+                      {
+                        "id": 124400,
+                        "token": "S",
+                        "logprob": -15.0625
+                      }
+                    ]
+                  },
+                  {
+                    "id": 399,
+                    "token": "\u2581a",
+                    "logprob": 0.0,
+                    "top_logprobs": [
+                      {
+                        "id": 399,
+                        "token": "\u2581a",
+                        "logprob": 0.0
+                      },
+                      {
+                        "id": 427,
+                        "token": "\u2581an",
+                        "logprob": -7.0
+                      },
+                      {
+                        "id": 407,
+                        "token": "\u2581the",
+                        "logprob": -8.25
+                      }
+                    ]
+                  },
+                  {
+                    "id": 2691,
+                    "token": "\u2581short",
+                    "logprob": 0.0,
+                    "top_logprobs": [
+                      {
+                        "id": 2691,
+                        "token": "\u2581short",
+                        "logprob": 0.0
+                      },
+                      {
+                        "id": 15088,
+                        "token": "\u2581sentence",
+                        "logprob": -4.625
+                      },
+                      {
+                        "id": 3759,
+                        "token": "\u2581simple",
+                        "logprob": -5.75
+                      }
+                    ]
+                  },
+                  {
+                    "id": 15088,
+                    "token": "\u2581sentence",
+                    "logprob": 0.0,
+                    "top_logprobs": [
+                      {
+                        "id": 15088,
+                        "token": "\u2581sentence",
+                        "logprob": 0.0
+                      },
+                      {
+                        "id": 124380,
+                        "token": ",",
+                        "logprob": -9.375
+                      },
+                      {
+                        "id": 118404,
+                        "token": "sentence",
+                        "logprob": -10.25
+                      }
+                    ]
+                  },
+                  {
+                    "id": 841,
+                    "token": "\u2581about",
+                    "logprob": 0.0,
+                    "top_logprobs": [
+                      {
+                        "id": 841,
+                        "token": "\u2581about",
+                        "logprob": 0.0
+                      },
+                      {
+                        "id": 124406,
+                        "token": ":",
+                        "logprob": -4.875
+                      },
+                      {
+                        "id": 482,
+                        "token": "\u2581on",
+                        "logprob": -8.875
+                      }
+                    ]
+                  },
+                  {
+                    "id": 705,
+                    "token": "\u2581comp",
+                    "logprob": 0.0,
+                    "top_logprobs": [
+                      {
+                        "id": 705,
+                        "token": "\u2581comp",
+                        "logprob": 0.0
+                      },
+                      {
+                        "id": 2938,
+                        "token": "\u2581**",
+                        "logprob": -9.5
+                      },
+                      {
+                        "id": 399,
+                        "token": "\u2581a",
+                        "logprob": -10.75
+                      }
+                    ]
+                  }
+                ]
+              },
+              "message": {
+                "role": "assistant",
+                "content": "Here's a short sentence about comp"
+              }
+            }
+          ],
+          "usage": {
+            "prompt_tokens": 12,
+            "completion_tokens": 8,
+            "total_tokens": 20,
+            "prompt_tokens_details": {
+              "cached_tokens": 11
+            }
+          },
+          "mlx2": {
+            "request_id": "chatcmpl-8b382c056b244a479f8c6cd5f34a70ed",
+            "cache": "apcv2",
+            "cached_tokens": 11,
+            "parallel_prefill": null,
+            "profile": "xing4-0-apcv2-ordinary",
+            "qualification": "candidate",
+            "route_receipt": "candidate_validation",
+            "request_controls": {
+              "logprobs": true,
+              "top_logprobs": 3,
+              "logprob_semantics": "execution_target: ordinary=post_processor_pre_sampler; mtp=transformed_target_verifier",
+              "thinking": false,
+              "sampling": {
+                "temperature": 0,
+                "repetition_penalty": 1.0,
+                "presence_penalty": 0.0,
+                "frequency_penalty": 0.0
+              },
+              "effective_sampling": {
+                "temperature": 0,
+                "top_p": 0.95,
+                "top_k": 0,
+                "min_p": 0.0,
+                "repetition_penalty": 1.0,
+                "presence_penalty": 0.0,
+                "frequency_penalty": 0.0
+              },
+              "sampling_defaults": {
+                "schema": "mlx2.sampling-defaults.v1",
+                "explicit": [
+                  "temperature",
+                  "repetition_penalty",
+                  "presence_penalty",
+                  "frequency_penalty"
+                ],
+                "applied": {
+                  "top_p": 0.95
+                },
+                "sources": {
+                  "top_p": "generation_config.json"
+                },
+                "profile": "general",
+                "profile_reason": "general",
+                "model": "XingChen-AGI/Xing4.0-29B-A4B",
+                "fallback": {
+                  "top_k": 0,
+                  "min_p": 0.0
+                },
+                "fallback_kind": "neutral"
+              },
+              "min_tokens": 0,
+              "batch_cohort": null,
+              "reasoning_effort": null,
+              "effort_semantics": "thinking_toggle",
+              "context_limit": 32768,
+              "structured_output": null
+            },
+            "ordinary_compute_width": 1,
+            "mtp": null,
+            "speculation": null,
+            "spomin_live_surgery": null,
+            "approximate_kv": null,
+            "cache_capsule": null,
+            "prompt_tokens": 12,
+            "completion_tokens": 8,
+            "ttft_seconds": 0.058442666981136426,
+            "elapsed_seconds": 0.19377174999681301
+          }
+        },
+        "stream_entries": [
+          {
+            "id": 3761,
+            "token": "\u2581Here",
+            "logprob": -0.375,
+            "top_logprobs": [
+              {
+                "id": 3761,
+                "token": "\u2581Here",
+                "logprob": -0.375
+              },
+              {
+                "id": 465,
+                "token": "\u2581A",
+                "logprob": -1.5
+              },
+              {
+                "id": 2938,
+                "token": "\u2581**",
+                "logprob": -3.75
+              }
+            ]
+          },
+          {
+            "id": 124416,
+            "token": "'",
+            "logprob": -0.25,
+            "top_logprobs": [
+              {
+                "id": 124416,
+                "token": "'",
+                "logprob": -0.25
+              },
+              {
+                "id": 468,
+                "token": "\u2581is",
+                "logprob": -2.0
+              },
+              {
+                "id": 547,
+                "token": "\u2581are",
+                "logprob": -2.625
+              }
+            ]
+          },
+          {
+            "id": 124368,
+            "token": "s",
+            "logprob": 0.0,
+            "top_logprobs": [
+              {
+                "id": 124368,
+                "token": "s",
+                "logprob": 0.0
+              },
+              {
+                "id": 124364,
+                "token": "a",
+                "logprob": -13.3125
+              },
+              {
+                "id": 124400,
+                "token": "S",
+                "logprob": -15.0625
+              }
+            ]
+          },
+          {
+            "id": 399,
+            "token": "\u2581a",
+            "logprob": 0.0,
+            "top_logprobs": [
+              {
+                "id": 399,
+                "token": "\u2581a",
+                "logprob": 0.0
+              },
+              {
+                "id": 427,
+                "token": "\u2581an",
+                "logprob": -7.0
+              },
+              {
+                "id": 407,
+                "token": "\u2581the",
+                "logprob": -8.25
+              }
+            ]
+          },
+          {
+            "id": 2691,
+            "token": "\u2581short",
+            "logprob": 0.0,
+            "top_logprobs": [
+              {
+                "id": 2691,
+                "token": "\u2581short",
+                "logprob": 0.0
+              },
+              {
+                "id": 15088,
+                "token": "\u2581sentence",
+                "logprob": -4.625
+              },
+              {
+                "id": 3759,
+                "token": "\u2581simple",
+                "logprob": -5.75
+              }
+            ]
+          },
+          {
+            "id": 15088,
+            "token": "\u2581sentence",
+            "logprob": 0.0,
+            "top_logprobs": [
+              {
+                "id": 15088,
+                "token": "\u2581sentence",
+                "logprob": 0.0
+              },
+              {
+                "id": 124380,
+                "token": ",",
+                "logprob": -9.375
+              },
+              {
+                "id": 118404,
+                "token": "sentence",
+                "logprob": -10.25
+              }
+            ]
+          },
+          {
+            "id": 841,
+            "token": "\u2581about",
+            "logprob": 0.0,
+            "top_logprobs": [
+              {
+                "id": 841,
+                "token": "\u2581about",
+                "logprob": 0.0
+              },
+              {
+                "id": 124406,
+                "token": ":",
+                "logprob": -4.875
+              },
+              {
+                "id": 482,
+                "token": "\u2581on",
+                "logprob": -8.875
+              }
+            ]
+          },
+          {
+            "id": 705,
+            "token": "\u2581comp",
+            "logprob": 0.0,
+            "top_logprobs": [
+              {
+                "id": 705,
+                "token": "\u2581comp",
+                "logprob": 0.0
+              },
+              {
+                "id": 2938,
+                "token": "\u2581**",
+                "logprob": -9.5
+              },
+              {
+                "id": 399,
+                "token": "\u2581a",
+                "logprob": -10.75
+              }
+            ]
+          }
+        ],
+        "stream_usage": {
+          "prompt_tokens": 12,
+          "completion_tokens": 8,
+          "total_tokens": 20,
+          "prompt_tokens_details": {
+            "cached_tokens": 11
+          }
+        }
+      }
+    },
+    "sampling_controls": {
+      "passed": true,
+      "evidence": [
+        {
+          "request_id": "chatcmpl-5ebbccbcc7e947cb9df6c75c82a4d6ff",
+          "cache": "apcv2",
+          "cached_tokens": 2,
+          "parallel_prefill": null,
+          "profile": "xing4-0-apcv2-ordinary",
+          "qualification": "candidate",
+          "route_receipt": "candidate_validation",
+          "request_controls": {
+            "logprobs": false,
+            "top_logprobs": 0,
+            "logprob_semantics": null,
+            "thinking": false,
+            "sampling": {
+              "temperature": 0.7,
+              "top_p": 0.9,
+              "top_k": 24,
+              "min_p": 0.05,
+              "repetition_penalty": 1.05,
+              "presence_penalty": 0.1,
+              "frequency_penalty": 0.1,
+              "seed": 237
+            },
+            "effective_sampling": {
+              "temperature": 0.7,
+              "top_p": 0.9,
+              "top_k": 24,
+              "min_p": 0.05,
+              "repetition_penalty": 1.05,
+              "presence_penalty": 0.1,
+              "frequency_penalty": 0.1
+            },
+            "sampling_defaults": {
+              "schema": "mlx2.sampling-defaults.v1",
+              "explicit": [
+                "temperature",
+                "top_p",
+                "top_k",
+                "min_p",
+                "repetition_penalty",
+                "presence_penalty",
+                "frequency_penalty"
+              ],
+              "applied": {},
+              "sources": {},
+              "profile": "general",
+              "profile_reason": "general",
+              "model": "XingChen-AGI/Xing4.0-29B-A4B",
+              "fallback": {},
+              "fallback_kind": "neutral"
+            },
+            "min_tokens": 0,
+            "batch_cohort": null,
+            "reasoning_effort": null,
+            "effort_semantics": "thinking_toggle",
+            "context_limit": 32768,
+            "structured_output": null
+          },
+          "ordinary_compute_width": 1,
+          "mtp": null,
+          "speculation": null,
+          "spomin_live_surgery": null,
+          "approximate_kv": null,
+          "cache_capsule": null,
+          "prompt_tokens": 8,
+          "completion_tokens": 27,
+          "ttft_seconds": 0.09307383399573155,
+          "elapsed_seconds": 0.5428288749826606
+        },
+        {
+          "request_id": "chatcmpl-b00f4696efe443a58557ed25142c9d89",
+          "cache": "apcv2",
+          "cached_tokens": 7,
+          "parallel_prefill": null,
+          "profile": "xing4-0-apcv2-ordinary",
+          "qualification": "candidate",
+          "route_receipt": "candidate_validation",
+          "request_controls": {
+            "logprobs": false,
+            "top_logprobs": 0,
+            "logprob_semantics": null,
+            "thinking": false,
+            "sampling": {
+              "temperature": 0.7,
+              "top_p": 0.9,
+              "top_k": 24,
+              "min_p": 0.05,
+              "repetition_penalty": 1.05,
+              "presence_penalty": 0.1,
+              "frequency_penalty": 0.1,
+              "seed": 237
+            },
+            "effective_sampling": {
+              "temperature": 0.7,
+              "top_p": 0.9,
+              "top_k": 24,
+              "min_p": 0.05,
+              "repetition_penalty": 1.05,
+              "presence_penalty": 0.1,
+              "frequency_penalty": 0.1
+            },
+            "sampling_defaults": {
+              "schema": "mlx2.sampling-defaults.v1",
+              "explicit": [
+                "temperature",
+                "top_p",
+                "top_k",
+                "min_p",
+                "repetition_penalty",
+                "presence_penalty",
+                "frequency_penalty"
+              ],
+              "applied": {},
+              "sources": {},
+              "profile": "general",
+              "profile_reason": "general",
+              "model": "XingChen-AGI/Xing4.0-29B-A4B",
+              "fallback": {},
+              "fallback_kind": "neutral"
+            },
+            "min_tokens": 0,
+            "batch_cohort": null,
+            "reasoning_effort": null,
+            "effort_semantics": "thinking_toggle",
+            "context_limit": 32768,
+            "structured_output": null
+          },
+          "ordinary_compute_width": 1,
+          "mtp": null,
+          "speculation": null,
+          "spomin_live_surgery": null,
+          "approximate_kv": null,
+          "cache_capsule": null,
+          "prompt_tokens": 8,
+          "completion_tokens": 27,
+          "ttft_seconds": 0.056349749997025356,
+          "elapsed_seconds": 0.5063863749965094
+        }
+      ]
+    },
+    "sampling_defaults": {
+      "passed": true,
+      "evidence": {
+        "declared": {
+          "schema": "mlx2.sampling-defaults.v1",
+          "model": "XingChen-AGI/Xing4.0-29B-A4B",
+          "general": "general",
+          "thinking": null,
+          "non_thinking": null,
+          "profiles": {
+            "general": {
+              "values": {
+                "temperature": 1.0,
+                "top_p": 0.95,
+                "repetition_penalty": 1.05
+              },
+              "sources": {
+                "temperature": "generation_config.json",
+                "top_p": "generation_config.json",
+                "repetition_penalty": "generation_config.json"
+              },
+              "note": "also the model card's complex reasoning / general profile"
+            },
+            "coding": {
+              "values": {
+                "temperature": 0.8,
+                "top_p": 0.95,
+                "repetition_penalty": 1.05
+              },
+              "sources": {
+                "temperature": "model card (XingChen-AGI/Xing4.0-29B-A4B, Recommended Settings): coding / agent tasks",
+                "top_p": "model card (XingChen-AGI/Xing4.0-29B-A4B, Recommended Settings): coding / agent tasks",
+                "repetition_penalty": "model card (XingChen-AGI/Xing4.0-29B-A4B, Recommended Settings): coding / agent tasks"
+              }
+            },
+            "agent": {
+              "values": {
+                "temperature": 0.8,
+                "top_p": 0.95,
+                "repetition_penalty": 1.05
+              },
+              "sources": {
+                "temperature": "model card (XingChen-AGI/Xing4.0-29B-A4B, Recommended Settings): coding / agent tasks",
+                "top_p": "model card (XingChen-AGI/Xing4.0-29B-A4B, Recommended Settings): coding / agent tasks",
+                "repetition_penalty": "model card (XingChen-AGI/Xing4.0-29B-A4B, Recommended Settings): coding / agent tasks"
+              }
+            }
+          },
+          "artifact": {
+            "generation_config": {
+              "do_sample": true,
+              "temperature": 1.0,
+              "top_p": 0.95,
+              "repetition_penalty": 1.05
+            },
+            "mismatches": {}
+          }
+        },
+        "a": {
+          "request_id": "chatcmpl-0c9eab45351c47e48c98d65f4bd82f55",
+          "cache": "apcv2",
+          "cached_tokens": 7,
+          "parallel_prefill": null,
+          "profile": "xing4-0-apcv2-ordinary",
+          "qualification": "candidate",
+          "route_receipt": "candidate_validation",
+          "request_controls": {
+            "logprobs": false,
+            "top_logprobs": 0,
+            "logprob_semantics": null,
+            "thinking": false,
+            "sampling": {
+              "seed": 311
+            },
+            "effective_sampling": {
+              "temperature": 1.0,
+              "top_p": 0.95,
+              "top_k": 0,
+              "min_p": 0.0,
+              "repetition_penalty": 1.05,
+              "presence_penalty": 0.0,
+              "frequency_penalty": 0.0
+            },
+            "sampling_defaults": {
+              "schema": "mlx2.sampling-defaults.v1",
+              "explicit": [],
+              "applied": {
+                "temperature": 1.0,
+                "top_p": 0.95,
+                "repetition_penalty": 1.05
+              },
+              "sources": {
+                "temperature": "generation_config.json",
+                "top_p": "generation_config.json",
+                "repetition_penalty": "generation_config.json"
+              },
+              "profile": "general",
+              "profile_reason": "general",
+              "model": "XingChen-AGI/Xing4.0-29B-A4B",
+              "fallback": {
+                "top_k": 0,
+                "min_p": 0.0,
+                "presence_penalty": 0.0,
+                "frequency_penalty": 0.0
+              },
+              "fallback_kind": "neutral"
+            },
+            "min_tokens": 0,
+            "batch_cohort": null,
+            "reasoning_effort": null,
+            "effort_semantics": "thinking_toggle",
+            "context_limit": 32768,
+            "structured_output": null
+          },
+          "ordinary_compute_width": 1,
+          "mtp": null,
+          "speculation": null,
+          "spomin_live_surgery": null,
+          "approximate_kv": null,
+          "cache_capsule": null,
+          "prompt_tokens": 8,
+          "completion_tokens": 27,
+          "ttft_seconds": 0.05772262500249781,
+          "elapsed_seconds": 0.5061307919968385
+        },
+        "b": {
+          "request_id": "chatcmpl-5a08c7170e51429facd6bee7692df93c",
+          "cache": "apcv2",
+          "cached_tokens": 7,
+          "parallel_prefill": null,
+          "profile": "xing4-0-apcv2-ordinary",
+          "qualification": "candidate",
+          "route_receipt": "candidate_validation",
+          "request_controls": {
+            "logprobs": false,
+            "top_logprobs": 0,
+            "logprob_semantics": null,
+            "thinking": false,
+            "sampling": {
+              "seed": 311
+            },
+            "effective_sampling": {
+              "temperature": 1.0,
+              "top_p": 0.95,
+              "top_k": 0,
+              "min_p": 0.0,
+              "repetition_penalty": 1.05,
+              "presence_penalty": 0.0,
+              "frequency_penalty": 0.0
+            },
+            "sampling_defaults": {
+              "schema": "mlx2.sampling-defaults.v1",
+              "explicit": [],
+              "applied": {
+                "temperature": 1.0,
+                "top_p": 0.95,
+                "repetition_penalty": 1.05
+              },
+              "sources": {
+                "temperature": "generation_config.json",
+                "top_p": "generation_config.json",
+                "repetition_penalty": "generation_config.json"
+              },
+              "profile": "general",
+              "profile_reason": "general",
+              "model": "XingChen-AGI/Xing4.0-29B-A4B",
+              "fallback": {
+                "top_k": 0,
+                "min_p": 0.0,
+                "presence_penalty": 0.0,
+                "frequency_penalty": 0.0
+              },
+              "fallback_kind": "neutral"
+            },
+            "min_tokens": 0,
+            "batch_cohort": null,
+            "reasoning_effort": null,
+            "effort_semantics": "thinking_toggle",
+            "context_limit": 32768,
+            "structured_output": null
+          },
+          "ordinary_compute_width": 1,
+          "mtp": null,
+          "speculation": null,
+          "spomin_live_surgery": null,
+          "approximate_kv": null,
+          "cache_capsule": null,
+          "prompt_tokens": 8,
+          "completion_tokens": 27,
+          "ttft_seconds": 0.05788375000702217,
+          "elapsed_seconds": 0.5344106669945177
+        }
+      }
+    },
+    "cold_text": {
+      "passed": true,
+      "evidence": {
+        "request_id": "chatcmpl-2f9b713396dd4fe38fa4f0329440e054",
+        "cache": "apcv2",
+        "cached_tokens": 5,
+        "parallel_prefill": null,
+        "profile": "xing4-0-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": false,
+          "top_logprobs": 0,
+          "logprob_semantics": null,
+          "thinking": false,
+          "sampling": {
+            "temperature": 0,
+            "repetition_penalty": 1.0,
+            "presence_penalty": 0.0,
+            "frequency_penalty": 0.0
+          },
+          "effective_sampling": {
+            "temperature": 0,
+            "top_p": 0.95,
+            "top_k": 0,
+            "min_p": 0.0,
+            "repetition_penalty": 1.0,
+            "presence_penalty": 0.0,
+            "frequency_penalty": 0.0
+          },
+          "sampling_defaults": {
+            "schema": "mlx2.sampling-defaults.v1",
+            "explicit": [
+              "temperature",
+              "repetition_penalty",
+              "presence_penalty",
+              "frequency_penalty"
+            ],
+            "applied": {
+              "top_p": 0.95
+            },
+            "sources": {
+              "top_p": "generation_config.json"
+            },
+            "profile": "general",
+            "profile_reason": "general",
+            "model": "XingChen-AGI/Xing4.0-29B-A4B",
+            "fallback": {
+              "top_k": 0,
+              "min_p": 0.0
+            },
+            "fallback_kind": "neutral"
+          },
+          "min_tokens": 0,
+          "batch_cohort": null,
+          "reasoning_effort": null,
+          "effort_semantics": "thinking_toggle",
+          "context_limit": 32768,
+          "structured_output": null
+        },
+        "ordinary_compute_width": 1,
+        "mtp": null,
+        "speculation": null,
+        "spomin_live_surgery": null,
+        "approximate_kv": null,
+        "cache_capsule": null,
+        "prompt_tokens": 12,
+        "completion_tokens": 6,
+        "ttft_seconds": 0.08308720801142044,
+        "elapsed_seconds": 0.1776380419905763
+      }
+    },
+    "warm_prefix": {
+      "passed": true,
+      "evidence": {
+        "request_id": "chatcmpl-a1c2bd4cd34d41babbc4f7411d5fae01",
+        "cache": "apcv2",
+        "cached_tokens": 11,
+        "parallel_prefill": null,
+        "profile": "xing4-0-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": false,
+          "top_logprobs": 0,
+          "logprob_semantics": null,
+          "thinking": false,
+          "sampling": {
+            "temperature": 0,
+            "repetition_penalty": 1.0,
+            "presence_penalty": 0.0,
+            "frequency_penalty": 0.0
+          },
+          "effective_sampling": {
+            "temperature": 0,
+            "top_p": 0.95,
+            "top_k": 0,
+            "min_p": 0.0,
+            "repetition_penalty": 1.0,
+            "presence_penalty": 0.0,
+            "frequency_penalty": 0.0
+          },
+          "sampling_defaults": {
+            "schema": "mlx2.sampling-defaults.v1",
+            "explicit": [
+              "temperature",
+              "repetition_penalty",
+              "presence_penalty",
+              "frequency_penalty"
+            ],
+            "applied": {
+              "top_p": 0.95
+            },
+            "sources": {
+              "top_p": "generation_config.json"
+            },
+            "profile": "general",
+            "profile_reason": "general",
+            "model": "XingChen-AGI/Xing4.0-29B-A4B",
+            "fallback": {
+              "top_k": 0,
+              "min_p": 0.0
+            },
+            "fallback_kind": "neutral"
+          },
+          "min_tokens": 0,
+          "batch_cohort": null,
+          "reasoning_effort": null,
+          "effort_semantics": "thinking_toggle",
+          "context_limit": 32768,
+          "structured_output": null
+        },
+        "ordinary_compute_width": 1,
+        "mtp": null,
+        "speculation": null,
+        "spomin_live_surgery": null,
+        "approximate_kv": null,
+        "cache_capsule": null,
+        "prompt_tokens": 12,
+        "completion_tokens": 6,
+        "ttft_seconds": 0.056475916993804276,
+        "elapsed_seconds": 0.1496237090032082
+      }
+    },
+    "structured_output": {
+      "passed": true,
+      "evidence": {
+        "engine": "automaton",
+        "response": {
+          "id": "chatcmpl-7131bd73c40941089b65e31014f145f3",
+          "object": "chat.completion",
+          "created": 1789773731,
+          "model": "Xing4.0-29B-A4B-mlx-6bit",
+          "choices": [
+            {
+              "index": 0,
+              "finish_reason": "stop",
+              "message": {
+                "role": "assistant",
+                "content": "{\"answer\": \"yes\"}"
+              }
+            }
+          ],
+          "usage": {
+            "prompt_tokens": 13,
+            "completion_tokens": 7,
+            "total_tokens": 20,
+            "prompt_tokens_details": {
+              "cached_tokens": 2
+            }
+          },
+          "mlx2": {
+            "request_id": "chatcmpl-7131bd73c40941089b65e31014f145f3",
+            "cache": "apcv2",
+            "cached_tokens": 2,
+            "parallel_prefill": null,
+            "profile": "xing4-0-apcv2-ordinary",
+            "qualification": "candidate",
+            "route_receipt": "candidate_validation",
+            "request_controls": {
+              "logprobs": false,
+              "top_logprobs": 0,
+              "logprob_semantics": null,
+              "thinking": false,
+              "sampling": {
+                "temperature": 0,
+                "repetition_penalty": 1.0,
+                "presence_penalty": 0.0,
+                "frequency_penalty": 0.0
+              },
+              "effective_sampling": {
+                "temperature": 0,
+                "top_p": 0.95,
+                "top_k": 0,
+                "min_p": 0.0,
+                "repetition_penalty": 1.0,
+                "presence_penalty": 0.0,
+                "frequency_penalty": 0.0
+              },
+              "sampling_defaults": {
+                "schema": "mlx2.sampling-defaults.v1",
+                "explicit": [
+                  "temperature",
+                  "repetition_penalty",
+                  "presence_penalty",
+                  "frequency_penalty"
+                ],
+                "applied": {
+                  "top_p": 0.95
+                },
+                "sources": {
+                  "top_p": "generation_config.json"
+                },
+                "profile": "general",
+                "profile_reason": "general",
+                "model": "XingChen-AGI/Xing4.0-29B-A4B",
+                "fallback": {
+                  "top_k": 0,
+                  "min_p": 0.0
+                },
+                "fallback_kind": "neutral"
+              },
+              "min_tokens": 0,
+              "batch_cohort": null,
+              "reasoning_effort": null,
+              "effort_semantics": "thinking_toggle",
+              "context_limit": 32768,
+              "structured_output": {
+                "kind": "json_schema",
+                "enforced": true,
+                "engine": "automaton",
+                "tail_mass_bound": 0.0,
+                "parallel_scans": 0,
+                "deferred": false,
+                "deferred_tokens": 0
+              }
+            },
+            "ordinary_compute_width": 1,
+            "mtp": null,
+            "speculation": null,
+            "spomin_live_surgery": null,
+            "approximate_kv": null,
+            "cache_capsule": null,
+            "prompt_tokens": 13,
+            "completion_tokens": 7,
+            "ttft_seconds": 0.6586753340088762,
+            "elapsed_seconds": 0.7724738749966491
+          }
+        }
+      }
+    },
+    "structured_output_sampled": {
+      "passed": true,
+      "evidence": {
+        "engine": "automaton",
+        "response": {
+          "id": "chatcmpl-5e7a4461146e48fb8f64069ae364f76c",
+          "object": "chat.completion",
+          "created": 1789773731,
+          "model": "Xing4.0-29B-A4B-mlx-6bit",
+          "choices": [
+            {
+              "index": 0,
+              "finish_reason": "stop",
+              "message": {
+                "role": "assistant",
+                "content": "{\"answer\": \"yes\"}"
+              }
+            }
+          ],
+          "usage": {
+            "prompt_tokens": 13,
+            "completion_tokens": 7,
+            "total_tokens": 20,
+            "prompt_tokens_details": {
+              "cached_tokens": 12
+            }
+          },
+          "mlx2": {
+            "request_id": "chatcmpl-5e7a4461146e48fb8f64069ae364f76c",
+            "cache": "apcv2",
+            "cached_tokens": 12,
+            "parallel_prefill": null,
+            "profile": "xing4-0-apcv2-ordinary",
+            "qualification": "candidate",
+            "route_receipt": "candidate_validation",
+            "request_controls": {
+              "logprobs": false,
+              "top_logprobs": 0,
+              "logprob_semantics": null,
+              "thinking": false,
+              "sampling": {
+                "temperature": 0.7,
+                "repetition_penalty": 1.0,
+                "presence_penalty": 0.0,
+                "frequency_penalty": 0.0,
+                "seed": 7
+              },
+              "effective_sampling": {
+                "temperature": 0.7,
+                "top_p": 0.95,
+                "top_k": 0,
+                "min_p": 0.0,
+                "repetition_penalty": 1.0,
+                "presence_penalty": 0.0,
+                "frequency_penalty": 0.0
+              },
+              "sampling_defaults": {
+                "schema": "mlx2.sampling-defaults.v1",
+                "explicit": [
+                  "temperature",
+                  "repetition_penalty",
+                  "presence_penalty",
+                  "frequency_penalty"
+                ],
+                "applied": {
+                  "top_p": 0.95
+                },
+                "sources": {
+                  "top_p": "generation_config.json"
+                },
+                "profile": "general",
+                "profile_reason": "general",
+                "model": "XingChen-AGI/Xing4.0-29B-A4B",
+                "fallback": {
+                  "top_k": 0,
+                  "min_p": 0.0
+                },
+                "fallback_kind": "neutral"
+              },
+              "min_tokens": 0,
+              "batch_cohort": null,
+              "reasoning_effort": null,
+              "effort_semantics": "thinking_toggle",
+              "context_limit": 32768,
+              "structured_output": {
+                "kind": "json_schema",
+                "enforced": true,
+                "engine": "automaton",
+                "tail_mass_bound": 0.0,
+                "parallel_scans": 0,
+                "deferred": false,
+                "deferred_tokens": 0
+              }
+            },
+            "ordinary_compute_width": 1,
+            "mtp": null,
+            "speculation": null,
+            "spomin_live_surgery": null,
+            "approximate_kv": null,
+            "cache_capsule": null,
+            "prompt_tokens": 13,
+            "completion_tokens": 7,
+            "ttft_seconds": 0.05922954098787159,
+            "elapsed_seconds": 0.1735707499901764
+          }
+        }
+      }
+    },
+    "structured_output_thinking": {
+      "passed": true,
+      "evidence": {
+        "outcome": "deferred",
+        "engine": "automaton",
+        "deferred_tokens": 97,
+        "adapter_declares_marker": true,
+        "attempts": [
+          {
+            "id": "chatcmpl-5a6e326588de484cbfe400443a13d92d",
+            "object": "chat.completion",
+            "created": 1789773732,
+            "model": "Xing4.0-29B-A4B-mlx-6bit",
+            "choices": [
+              {
+                "index": 0,
+                "finish_reason": "stop",
+                "message": {
+                  "role": "assistant",
+                  "content": "{\"answer\": 221}",
+                  "reasoning_content": "We need answer user. Need calculate 13*17. 13*17 = 221. Return JSON object with key answer set to integer. Need maybe just JSON. Need no reasoning? User says \"You are an AI assistant accessed via an API. You must output only the final answer, with no additional text.\" But system says think silently then output. We need final JSON. Ensure valid JSON. {\"answer\":221}."
+                }
+              }
+            ],
+            "usage": {
+              "prompt_tokens": 56,
+              "completion_tokens": 106,
+              "total_tokens": 162,
+              "prompt_tokens_details": {
+                "cached_tokens": 1
+              }
+            },
+            "mlx2": {
+              "request_id": "chatcmpl-5a6e326588de484cbfe400443a13d92d",
+              "cache": "apcv2",
+              "cached_tokens": 1,
+              "parallel_prefill": null,
+              "profile": "xing4-0-apcv2-ordinary",
+              "qualification": "candidate",
+              "route_receipt": "candidate_validation",
+              "request_controls": {
+                "logprobs": false,
+                "top_logprobs": 0,
+                "logprob_semantics": null,
+                "thinking": true,
+                "sampling": {
+                  "temperature": 0,
+                  "repetition_penalty": 1.0,
+                  "presence_penalty": 0.0,
+                  "frequency_penalty": 0.0
+                },
+                "effective_sampling": {
+                  "temperature": 0,
+                  "top_p": 0.95,
+                  "top_k": 0,
+                  "min_p": 0.0,
+                  "repetition_penalty": 1.0,
+                  "presence_penalty": 0.0,
+                  "frequency_penalty": 0.0
+                },
+                "sampling_defaults": {
+                  "schema": "mlx2.sampling-defaults.v1",
+                  "explicit": [
+                    "temperature",
+                    "repetition_penalty",
+                    "presence_penalty",
+                    "frequency_penalty"
+                  ],
+                  "applied": {
+                    "top_p": 0.95
+                  },
+                  "sources": {
+                    "top_p": "generation_config.json"
+                  },
+                  "profile": "general",
+                  "profile_reason": "general",
+                  "model": "XingChen-AGI/Xing4.0-29B-A4B",
+                  "fallback": {
+                    "top_k": 0,
+                    "min_p": 0.0
+                  },
+                  "fallback_kind": "neutral"
+                },
+                "min_tokens": 0,
+                "batch_cohort": null,
+                "reasoning_effort": null,
+                "effort_semantics": "thinking_toggle",
+                "context_limit": 32768,
+                "structured_output": {
+                  "kind": "json_object",
+                  "enforced": true,
+                  "engine": "automaton",
+                  "tail_mass_bound": 0.0,
+                  "parallel_scans": 0,
+                  "deferred": true,
+                  "deferred_tokens": 97
+                }
+              },
+              "ordinary_compute_width": 1,
+              "mtp": null,
+              "speculation": null,
+              "spomin_live_surgery": null,
+              "approximate_kv": null,
+              "cache_capsule": null,
+              "prompt_tokens": 56,
+              "completion_tokens": 106,
+              "ttft_seconds": 0.22893112499150448,
+              "elapsed_seconds": 2.033973084005993
+            }
+          }
+        ]
+      }
+    },
+    "stream": {
+      "passed": true,
+      "evidence": [
+        {
+          "id": "chatcmpl-a7c0b05b0d5f46bc8911e32b2db503df",
+          "object": "chat.completion.chunk",
+          "created": 1789773734,
+          "model": "Xing4.0-29B-A4B-mlx-6bit",
+          "choices": [
+            {
+              "index": 0,
+              "finish_reason": null,
+              "delta": {
+                "content": "ML"
+              }
+            }
+          ]
+        },
+        {
+          "id": "chatcmpl-a7c0b05b0d5f46bc8911e32b2db503df",
+          "object": "chat.completion.chunk",
+          "created": 1789773734,
+          "model": "Xing4.0-29B-A4B-mlx-6bit",
+          "choices": [
+            {
+              "index": 0,
+              "finish_reason": null,
+              "delta": {
+                "content": "X"
+              }
+            }
+          ]
+        },
+        {
+          "id": "chatcmpl-a7c0b05b0d5f46bc8911e32b2db503df",
+          "object": "chat.completion.chunk",
+          "created": 1789773734,
+          "model": "Xing4.0-29B-A4B-mlx-6bit",
+          "choices": [
+            {
+              "index": 0,
+              "finish_reason": null,
+              "delta": {
+                "content": "2"
+              }
+            }
+          ]
+        },
+        {
+          "id": "chatcmpl-a7c0b05b0d5f46bc8911e32b2db503df",
+          "object": "chat.completion.chunk",
+          "created": 1789773734,
+          "model": "Xing4.0-29B-A4B-mlx-6bit",
+          "choices": [
+            {
+              "index": 0,
+              "finish_reason": null,
+              "delta": {
+                "content": "_"
+              }
+            }
+          ]
+        },
+        {
+          "id": "chatcmpl-a7c0b05b0d5f46bc8911e32b2db503df",
+          "object": "chat.completion.chunk",
+          "created": 1789773734,
+          "model": "Xing4.0-29B-A4B-mlx-6bit",
+          "choices": [
+            {
+              "index": 0,
+              "finish_reason": null,
+              "delta": {
+                "content": "READY"
+              }
+            }
+          ]
+        },
+        {
+          "id": "chatcmpl-a7c0b05b0d5f46bc8911e32b2db503df",
+          "object": "chat.completion.chunk",
+          "created": 1789773734,
+          "model": "Xing4.0-29B-A4B-mlx-6bit",
+          "choices": [
+            {
+              "index": 0,
+              "finish_reason": "stop",
+              "delta": {}
+            }
+          ],
+          "usage": {
+            "prompt_tokens": 12,
+            "completion_tokens": 6,
+            "total_tokens": 18,
+            "prompt_tokens_details": {
+              "cached_tokens": 11
+            }
+          },
+          "mlx2": {
+            "request_id": "chatcmpl-a7c0b05b0d5f46bc8911e32b2db503df",
+            "cache": "apcv2",
+            "cached_tokens": 11,
+            "parallel_prefill": null,
+            "profile": "xing4-0-apcv2-ordinary",
+            "qualification": "candidate",
+            "route_receipt": "candidate_validation",
+            "request_controls": {
+              "logprobs": false,
+              "top_logprobs": 0,
+              "logprob_semantics": null,
+              "thinking": false,
+              "sampling": {
+                "temperature": 0,
+                "repetition_penalty": 1.0,
+                "presence_penalty": 0.0,
+                "frequency_penalty": 0.0
+              },
+              "effective_sampling": {
+                "temperature": 0,
+                "top_p": 0.95,
+                "top_k": 0,
+                "min_p": 0.0,
+                "repetition_penalty": 1.0,
+                "presence_penalty": 0.0,
+                "frequency_penalty": 0.0
+              },
+              "sampling_defaults": {
+                "schema": "mlx2.sampling-defaults.v1",
+                "explicit": [
+                  "temperature",
+                  "repetition_penalty",
+                  "presence_penalty",
+                  "frequency_penalty"
+                ],
+                "applied": {
+                  "top_p": 0.95
+                },
+                "sources": {
+                  "top_p": "generation_config.json"
+                },
+                "profile": "general",
+                "profile_reason": "general",
+                "model": "XingChen-AGI/Xing4.0-29B-A4B",
+                "fallback": {
+                  "top_k": 0,
+                  "min_p": 0.0
+                },
+                "fallback_kind": "neutral"
+              },
+              "min_tokens": 0,
+              "batch_cohort": null,
+              "reasoning_effort": null,
+              "effort_semantics": "thinking_toggle",
+              "context_limit": 32768,
+              "structured_output": null
+            },
+            "ordinary_compute_width": 1,
+            "mtp": null,
+            "speculation": null,
+            "spomin_live_surgery": null,
+            "approximate_kv": null,
+            "cache_capsule": null,
+            "prompt_tokens": 12,
+            "completion_tokens": 6,
+            "ttft_seconds": 0.05878779201884754,
+            "elapsed_seconds": 0.15423675000783987
+          }
+        }
+      ]
+    }
+  },
+  "responses": {
+    "sampling_controls": [
+      {
+        "id": "chatcmpl-5ebbccbcc7e947cb9df6c75c82a4d6ff",
+        "object": "chat.completion",
+        "created": 1789773728,
+        "model": "Xing4.0-29B-A4B-mlx-6bit",
+        "choices": [
+          {
+            "index": 0,
+            "finish_reason": "stop",
+            "message": {
+              "role": "assistant",
+              "content": "Here are three fruits:\n\n1. **Apple**\n2. **Banana**\n3. **Orange**"
+            }
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 8,
+          "completion_tokens": 27,
+          "total_tokens": 35,
+          "prompt_tokens_details": {
+            "cached_tokens": 2
+          }
+        },
+        "mlx2": {
+          "request_id": "chatcmpl-5ebbccbcc7e947cb9df6c75c82a4d6ff",
+          "cache": "apcv2",
+          "cached_tokens": 2,
+          "parallel_prefill": null,
+          "profile": "xing4-0-apcv2-ordinary",
+          "qualification": "candidate",
+          "route_receipt": "candidate_validation",
+          "request_controls": {
+            "logprobs": false,
+            "top_logprobs": 0,
+            "logprob_semantics": null,
+            "thinking": false,
+            "sampling": {
+              "temperature": 0.7,
+              "top_p": 0.9,
+              "top_k": 24,
+              "min_p": 0.05,
+              "repetition_penalty": 1.05,
+              "presence_penalty": 0.1,
+              "frequency_penalty": 0.1,
+              "seed": 237
+            },
+            "effective_sampling": {
+              "temperature": 0.7,
+              "top_p": 0.9,
+              "top_k": 24,
+              "min_p": 0.05,
+              "repetition_penalty": 1.05,
+              "presence_penalty": 0.1,
+              "frequency_penalty": 0.1
+            },
+            "sampling_defaults": {
+              "schema": "mlx2.sampling-defaults.v1",
+              "explicit": [
+                "temperature",
+                "top_p",
+                "top_k",
+                "min_p",
+                "repetition_penalty",
+                "presence_penalty",
+                "frequency_penalty"
+              ],
+              "applied": {},
+              "sources": {},
+              "profile": "general",
+              "profile_reason": "general",
+              "model": "XingChen-AGI/Xing4.0-29B-A4B",
+              "fallback": {},
+              "fallback_kind": "neutral"
+            },
+            "min_tokens": 0,
+            "batch_cohort": null,
+            "reasoning_effort": null,
+            "effort_semantics": "thinking_toggle",
+            "context_limit": 32768,
+            "structured_output": null
+          },
+          "ordinary_compute_width": 1,
+          "mtp": null,
+          "speculation": null,
+          "spomin_live_surgery": null,
+          "approximate_kv": null,
+          "cache_capsule": null,
+          "prompt_tokens": 8,
+          "completion_tokens": 27,
+          "ttft_seconds": 0.09307383399573155,
+          "elapsed_seconds": 0.5428288749826606
+        }
+      },
+      {
+        "id": "chatcmpl-b00f4696efe443a58557ed25142c9d89",
+        "object": "chat.completion",
+        "created": 1789773729,
+        "model": "Xing4.0-29B-A4B-mlx-6bit",
+        "choices": [
+          {
+            "index": 0,
+            "finish_reason": "stop",
+            "message": {
+              "role": "assistant",
+              "content": "Here are three fruits:\n\n1. **Apple**\n2. **Banana**\n3. **Orange**"
+            }
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 8,
+          "completion_tokens": 27,
+          "total_tokens": 35,
+          "prompt_tokens_details": {
+            "cached_tokens": 7
+          }
+        },
+        "mlx2": {
+          "request_id": "chatcmpl-b00f4696efe443a58557ed25142c9d89",
+          "cache": "apcv2",
+          "cached_tokens": 7,
+          "parallel_prefill": null,
+          "profile": "xing4-0-apcv2-ordinary",
+          "qualification": "candidate",
+          "route_receipt": "candidate_validation",
+          "request_controls": {
+            "logprobs": false,
+            "top_logprobs": 0,
+            "logprob_semantics": null,
+            "thinking": false,
+            "sampling": {
+              "temperature": 0.7,
+              "top_p": 0.9,
+              "top_k": 24,
+              "min_p": 0.05,
+              "repetition_penalty": 1.05,
+              "presence_penalty": 0.1,
+              "frequency_penalty": 0.1,
+              "seed": 237
+            },
+            "effective_sampling": {
+              "temperature": 0.7,
+              "top_p": 0.9,
+              "top_k": 24,
+              "min_p": 0.05,
+              "repetition_penalty": 1.05,
+              "presence_penalty": 0.1,
+              "frequency_penalty": 0.1
+            },
+            "sampling_defaults": {
+              "schema": "mlx2.sampling-defaults.v1",
+              "explicit": [
+                "temperature",
+                "top_p",
+                "top_k",
+                "min_p",
+                "repetition_penalty",
+                "presence_penalty",
+                "frequency_penalty"
+              ],
+              "applied": {},
+              "sources": {},
+              "profile": "general",
+              "profile_reason": "general",
+              "model": "XingChen-AGI/Xing4.0-29B-A4B",
+              "fallback": {},
+              "fallback_kind": "neutral"
+            },
+            "min_tokens": 0,
+            "batch_cohort": null,
+            "reasoning_effort": null,
+            "effort_semantics": "thinking_toggle",
+            "context_limit": 32768,
+            "structured_output": null
+          },
+          "ordinary_compute_width": 1,
+          "mtp": null,
+          "speculation": null,
+          "spomin_live_surgery": null,
+          "approximate_kv": null,
+          "cache_capsule": null,
+          "prompt_tokens": 8,
+          "completion_tokens": 27,
+          "ttft_seconds": 0.056349749997025356,
+          "elapsed_seconds": 0.5063863749965094
+        }
+      }
+    ],
+    "cold": {
+      "id": "chatcmpl-2f9b713396dd4fe38fa4f0329440e054",
+      "object": "chat.completion",
+      "created": 1789773730,
+      "model": "Xing4.0-29B-A4B-mlx-6bit",
+      "choices": [
+        {
+          "index": 0,
+          "finish_reason": "stop",
+          "message": {
+            "role": "assistant",
+            "content": "MLX2_READY"
+          }
+        }
+      ],
+      "usage": {
+        "prompt_tokens": 12,
+        "completion_tokens": 6,
+        "total_tokens": 18,
+        "prompt_tokens_details": {
+          "cached_tokens": 5
+        }
+      },
+      "mlx2": {
+        "request_id": "chatcmpl-2f9b713396dd4fe38fa4f0329440e054",
+        "cache": "apcv2",
+        "cached_tokens": 5,
+        "parallel_prefill": null,
+        "profile": "xing4-0-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": false,
+          "top_logprobs": 0,
+          "logprob_semantics": null,
+          "thinking": false,
+          "sampling": {
+            "temperature": 0,
+            "repetition_penalty": 1.0,
+            "presence_penalty": 0.0,
+            "frequency_penalty": 0.0
+          },
+          "effective_sampling": {
+            "temperature": 0,
+            "top_p": 0.95,
+            "top_k": 0,
+            "min_p": 0.0,
+            "repetition_penalty": 1.0,
+            "presence_penalty": 0.0,
+            "frequency_penalty": 0.0
+          },
+          "sampling_defaults": {
+            "schema": "mlx2.sampling-defaults.v1",
+            "explicit": [
+              "temperature",
+              "repetition_penalty",
+              "presence_penalty",
+              "frequency_penalty"
+            ],
+            "applied": {
+              "top_p": 0.95
+            },
+            "sources": {
+              "top_p": "generation_config.json"
+            },
+            "profile": "general",
+            "profile_reason": "general",
+            "model": "XingChen-AGI/Xing4.0-29B-A4B",
+            "fallback": {
+              "top_k": 0,
+              "min_p": 0.0
+            },
+            "fallback_kind": "neutral"
+          },
+          "min_tokens": 0,
+          "batch_cohort": null,
+          "reasoning_effort": null,
+          "effort_semantics": "thinking_toggle",
+          "context_limit": 32768,
+          "structured_output": null
+        },
+        "ordinary_compute_width": 1,
+        "mtp": null,
+        "speculation": null,
+        "spomin_live_surgery": null,
+        "approximate_kv": null,
+        "cache_capsule": null,
+        "prompt_tokens": 12,
+        "completion_tokens": 6,
+        "ttft_seconds": 0.08308720801142044,
+        "elapsed_seconds": 0.1776380419905763
+      }
+    },
+    "warm": {
+      "id": "chatcmpl-a1c2bd4cd34d41babbc4f7411d5fae01",
+      "object": "chat.completion",
+      "created": 1789773731,
+      "model": "Xing4.0-29B-A4B-mlx-6bit",
+      "choices": [
+        {
+          "index": 0,
+          "finish_reason": "stop",
+          "message": {
+            "role": "assistant",
+            "content": "MLX2_READY"
+          }
+        }
+      ],
+      "usage": {
+        "prompt_tokens": 12,
+        "completion_tokens": 6,
+        "total_tokens": 18,
+        "prompt_tokens_details": {
+          "cached_tokens": 11
+        }
+      },
+      "mlx2": {
+        "request_id": "chatcmpl-a1c2bd4cd34d41babbc4f7411d5fae01",
+        "cache": "apcv2",
+        "cached_tokens": 11,
+        "parallel_prefill": null,
+        "profile": "xing4-0-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": false,
+          "top_logprobs": 0,
+          "logprob_semantics": null,
+          "thinking": false,
+          "sampling": {
+            "temperature": 0,
+            "repetition_penalty": 1.0,
+            "presence_penalty": 0.0,
+            "frequency_penalty": 0.0
+          },
+          "effective_sampling": {
+            "temperature": 0,
+            "top_p": 0.95,
+            "top_k": 0,
+            "min_p": 0.0,
+            "repetition_penalty": 1.0,
+            "presence_penalty": 0.0,
+            "frequency_penalty": 0.0
+          },
+          "sampling_defaults": {
+            "schema": "mlx2.sampling-defaults.v1",
+            "explicit": [
+              "temperature",
+              "repetition_penalty",
+              "presence_penalty",
+              "frequency_penalty"
+            ],
+            "applied": {
+              "top_p": 0.95
+            },
+            "sources": {
+              "top_p": "generation_config.json"
+            },
+            "profile": "general",
+            "profile_reason": "general",
+            "model": "XingChen-AGI/Xing4.0-29B-A4B",
+            "fallback": {
+              "top_k": 0,
+              "min_p": 0.0
+            },
+            "fallback_kind": "neutral"
+          },
+          "min_tokens": 0,
+          "batch_cohort": null,
+          "reasoning_effort": null,
+          "effort_semantics": "thinking_toggle",
+          "context_limit": 32768,
+          "structured_output": null
+        },
+        "ordinary_compute_width": 1,
+        "mtp": null,
+        "speculation": null,
+        "spomin_live_surgery": null,
+        "approximate_kv": null,
+        "cache_capsule": null,
+        "prompt_tokens": 12,
+        "completion_tokens": 6,
+        "ttft_seconds": 0.056475916993804276,
+        "elapsed_seconds": 0.1496237090032082
+      }
+    }
+  },
+  "passed": false,
+  "coverage_scope": {
+    "core_serving": "inline",
+    "long_context": {
+      "mode": "inline",
+      "checks": [
+        "context",
+        "shared_cohort_priming",
+        "shared_warm_requests",
+        "context_bound"
+      ]
+    }
+  },
+  "preflight_receipt": {
+    "path": "/private/tmp/mlx2-xing/qualification/runs/xing4-0-gpu-20260918/preflight.json",
+    "sha256": "be5b581984598bd02b9fbeeaf1a5909554e431118af18a0e7e75ac30ee1d8eab",
+    "identity": {
+      "git": {
+        "revision": "2478776d7054159361ac1337e19485c7aab31973"
+      },
+      "runtime": {
+        "source_sha256": "88028b6b2557dceb4c55f2569b59c2ad301819c5f471ad1db50e2bf59e299e81",
+        "mlx_native_sha256": "30335939714520c3306cfa58597100aae08bbeabdc60a4bc8c35c32c607450a8",
+        "python": "3.12.13",
+        "macos": "26.7",
+        "mlx": "0.32.2.dev20260915+2a817ad94",
+        "transformers": "5.17.0",
+        "dependencies": {
+          "numpy": "2.5.1",
+          "tokenizers": "0.23.2",
+          "jinja2": "3.1.6",
+          "psutil": "7.2.2",
+          "regex": "2026.9.10",
+          "safetensors": "0.8.0"
+        }
+      },
+      "qualification_harness": {
+        "schema": "mlx2.qualification-harness.v1",
+        "name": "scripts/qualify_serving.py",
+        "sha256": "ccc23aec41418b10992ef098502ea4f2f01e79841d8d4dd5a641d285f6af9005"
+      },
+      "test_source_sha256": "7a0362891506415d0ffc078b0588ee5910c7ae4eeeea0bea875419a78dece016"
+    },
+    "passed": true
+  },
+  "failure_status": {
+    "state": "ready",
+    "model": "Xing4.0-29B-A4B-mlx-6bit",
+    "runtime": {
+      "source_sha256": "88028b6b2557dceb4c55f2569b59c2ad301819c5f471ad1db50e2bf59e299e81",
+      "mlx_native_sha256": "30335939714520c3306cfa58597100aae08bbeabdc60a4bc8c35c32c607450a8",
+      "python": "3.12.13",
+      "macos": "26.7",
+      "mlx": "0.32.2.dev20260915+2a817ad94",
+      "transformers": "5.17.0",
+      "dependencies": {
+        "numpy": "2.5.1",
+        "tokenizers": "0.23.2",
+        "jinja2": "3.1.6",
+        "psutil": "7.2.2",
+        "regex": "2026.9.10",
+        "safetensors": "0.8.0"
+      }
+    },
+    "artifact": "70ae09c8721dfb83d42d5d89b47383790aaf326f81da64400161fd2eddd0498c",
+    "profile": "xing4-0-apcv2-ordinary",
+    "settings": {
+      "max_context": 32768,
+      "max_lanes": 4,
+      "max_inflight": 8,
+      "prefill_step": 2048,
+      "cache_bytes": 8589934592,
+      "disk_cache": true,
+      "host_prompt_cache_entries": 128,
+      "host_prompt_cache_tokens": 1048576,
+      "coalesce_window_ms": 5.0,
+      "batch_cohort_timeout_ms": 1000.0,
+      "mtp": false,
+      "tenant_scoped_cache": false,
+      "environment": {
+        "HF_HUB_OFFLINE": "1",
+        "TRANSFORMERS_OFFLINE": "1",
+        "MLX_ENABLE_TF32": "0",
+        "MLX_LM_COMPILED_DECODE": "0",
+        "MLX_LM_SEGMENTED_SELF_MTP": "1",
+        "MLX_LM_TRUE_BATCHED_SEGMENTED_MTP": "1",
+        "MLX_LM_SHARED_QSA_SUFFIX": "0",
+        "MLX_LM_MTP_BOUNDARY_COW": "1"
+      },
+      "adaptive_mtp_depth": {
+        "enabled": false,
+        "ewma_alpha": 0.25,
+        "shrink_gate": 0.35,
+        "grow_gate": 0.8,
+        "loss_rounds": 3,
+        "gain_rounds": 3,
+        "park_rounds": 4
+      },
+      "spomin_live_surgery": {
+        "enabled": false,
+        "capacity_tokens": 0,
+        "segment_tokens": 1024,
+        "strategy": "oldest_contiguous",
+        "protect_prefix_segments": 1
+      },
+      "cache_capsules": {
+        "enabled": false,
+        "backend": "gpu",
+        "fallback": "gpu",
+        "deadline_ms": 50.0,
+        "verify_raw_bits": false
+      },
+      "persistent_block_bytes": 0,
+      "approximate_kv": {
+        "enabled": false,
+        "operation": null,
+        "start_tokens": 0,
+        "evidence": [],
+        "descriptor": null
+      },
+      "execution_policy": {
+        "persistent": true,
+        "num_draft": 1,
+        "rate_gate": false,
+        "prefill_step_size": 2048,
+        "segment_aware_live_tip": true,
+        "segment_aware_cohort_size": 4
+      },
+      "prompt_lookup": {},
+      "decode_time_fairness": {
+        "enabled": true,
+        "fair_share": 0.5,
+        "stall_target_ms": 500.0
+      },
+      "speculation": "ordinary",
+      "cache_budget": {
+        "schema": "xing4-0-mla-cache-geometry-v1",
+        "attention_layers": 40,
+        "mtp_layers": 0,
+        "latent_dim": 512,
+        "rope_dim": 64,
+        "item_bytes": 4,
+        "allocation_step": 256,
+        "transcript_bytes_per_token": 16,
+        "transient_gib_per_lane": 3.1,
+        "bound": "fp32-mla-latent-plus-rope-key",
+        "workspace": "3.1-GiB-per-lane conservative static assumption; live qualification pending"
+      }
+    },
+    "route_receipt": "candidate_validation",
+    "capabilities": [
+      "apc_v2",
+      "continuous_batch",
+      "grammar",
+      "layered_cache",
+      "prefix_reuse",
+      "reasoning",
+      "streaming",
+      "text",
+      "tools"
+    ],
+    "implemented_capabilities": [
+      "apc_v2",
+      "continuous_batch",
+      "grammar",
+      "layered_cache",
+      "mtp",
+      "prefix_reuse",
+      "prompt_lookup",
+      "reasoning",
+      "segmented_mtp",
+      "streaming",
+      "text",
+      "tools"
+    ],
+    "selected_capabilities": [
+      "apc_v2",
+      "continuous_batch",
+      "grammar",
+      "layered_cache",
+      "prefix_reuse",
+      "reasoning",
+      "streaming",
+      "text",
+      "tools"
+    ],
+    "qualified_capabilities": [],
+    "qualification": "candidate",
+    "max_context": 32768,
+    "max_lanes": 4,
+    "structured_output": {
+      "engines": [
+        "automaton",
+        "scanner"
+      ],
+      "thinking_deferral": true
+    },
+    "http": {
+      "max_request_bytes": 2097152
+    },
+    "sampling_defaults": {
+      "schema": "mlx2.sampling-defaults.v1",
+      "model": "XingChen-AGI/Xing4.0-29B-A4B",
+      "general": "general",
+      "thinking": null,
+      "non_thinking": null,
+      "profiles": {
+        "general": {
+          "values": {
+            "temperature": 1.0,
+            "top_p": 0.95,
+            "repetition_penalty": 1.05
+          },
+          "sources": {
+            "temperature": "generation_config.json",
+            "top_p": "generation_config.json",
+            "repetition_penalty": "generation_config.json"
+          },
+          "note": "also the model card's complex reasoning / general profile"
+        },
+        "coding": {
+          "values": {
+            "temperature": 0.8,
+            "top_p": 0.95,
+            "repetition_penalty": 1.05
+          },
+          "sources": {
+            "temperature": "model card (XingChen-AGI/Xing4.0-29B-A4B, Recommended Settings): coding / agent tasks",
+            "top_p": "model card (XingChen-AGI/Xing4.0-29B-A4B, Recommended Settings): coding / agent tasks",
+            "repetition_penalty": "model card (XingChen-AGI/Xing4.0-29B-A4B, Recommended Settings): coding / agent tasks"
+          }
+        },
+        "agent": {
+          "values": {
+            "temperature": 0.8,
+            "top_p": 0.95,
+            "repetition_penalty": 1.05
+          },
+          "sources": {
+            "temperature": "model card (XingChen-AGI/Xing4.0-29B-A4B, Recommended Settings): coding / agent tasks",
+            "top_p": "model card (XingChen-AGI/Xing4.0-29B-A4B, Recommended Settings): coding / agent tasks",
+            "repetition_penalty": "model card (XingChen-AGI/Xing4.0-29B-A4B, Recommended Settings): coding / agent tasks"
+          }
+        }
+      },
+      "artifact": {
+        "generation_config": {
+          "do_sample": true,
+          "temperature": 1.0,
+          "top_p": 0.95,
+          "repetition_penalty": 1.05
+        },
+        "mismatches": {}
+      }
+    },
+    "apcv2": {
+      "lookups": 24,
+      "hits": 23,
+      "misses": 1,
+      "queried_tokens": 20177,
+      "cached_tokens": 9987,
+      "stores": 47,
+      "clears": 0,
+      "lifetime": {
+        "lookups": 24,
+        "hits": 23,
+        "misses": 1,
+        "queried_tokens": 20177,
+        "cached_tokens": 9987,
+        "stores": 47
+      },
+      "cow_enabled": true,
+      "cow": {
+        "sources": 47,
+        "source_bytes": 1963745280,
+        "freeze_failures": 0,
+        "branches": 23,
+        "branch_failures": 0,
+        "stale_rejections": 0,
+        "invalidations": 31,
+        "active_leases": 1,
+        "peak_leases": 4,
+        "descriptor_aliases": 5600,
+        "descriptor_bytes": 2549560320,
+        "avoided_copy_bytes": 585815040,
+        "materializations": 0,
+        "materialized_bytes": 0,
+        "fallback_deepcopies": 0,
+        "fallback_bytes": 0,
+        "freeze_ns": 43973379,
+        "branch_ns": 5824997,
+        "fallback_ns": 0,
+        "releases": 22,
+        "planes": {
+          "attention_kv": {
+            "descriptor_aliases": 5600,
+            "descriptor_bytes": 2549560320,
+            "materializations": 0,
+            "materialized_bytes": 0
+          }
+        },
+        "materialized_bytes_are_estimated": true,
+        "array_readbacks": 0
+      },
+      "max_tokens": 32768,
+      "resident_max_bytes": 8589934592,
+      "max_entry_tokens": 9827,
+      "overlength_rejections": 0,
+      "idle_disk": {
+        "enabled": true,
+        "block_bytes": 0,
+        "idle_seconds": 180.0,
+        "resident_bytes": 1034956800,
+        "disk_bytes": 0,
+        "disk_max_bytes": 68719476736,
+        "disk_entries": 0,
+        "idle_spills": 0,
+        "pressure_spills": 0,
+        "restores": 0,
+        "restore_failures": 0,
+        "restore_budget_deferrals": 0,
+        "spill_failures": 0,
+        "disk_evictions": 0,
+        "bytes_written": 0,
+        "bytes_read": 0
+      },
+      "cache_capsules": {
+        "reservations": 0,
+        "reservation_rejections": 0,
+        "reserved_bytes_peak": 0,
+        "reserved_bytes": 0
+      },
+      "version": 2,
+      "layout_name": "xing4-0-mla-latent-layer-segments-v1",
+      "layer_segments": {
+        "schema": "apcv2.layer-segments.v1",
+        "entries": 16,
+        "disk_entries": 0,
+        "layers": 640,
+        "plane_layers": 640,
+        "segments": 920,
+        "logical_bytes": 1034956800,
+        "by_plane": {
+          "attention_kv": {
+            "layers": 640,
+            "segments": 920,
+            "logical_bytes": 1034956800,
+            "invalid": 0
+          }
+        }
+      }
+    },
+    "cache_capsules": null,
+    "approximate_kv": {
+      "enabled": false,
+      "state": "implemented",
+      "fidelity": "exact",
+      "applied": 0,
+      "declined": 0,
+      "requantized_prefix_hits": 0,
+      "apcv2_store_skipped_approximate": 0
+    },
+    "scheduler": {
+      "prefill_rounds": 18,
+      "prefill_only_rounds": 17,
+      "decode_priority_release_rounds": 0,
+      "decode_priority_deferred_rounds": 0,
+      "adaptive_prefill_release_rounds": 1,
+      "adaptive_prefill_slack_deferred_rounds": 0,
+      "adaptive_prefill_deadline_forced_rounds": 0,
+      "adaptive_prefill_apc_priority_admissions": 0,
+      "adaptive_prefill_chunk_histogram": {
+        "6": 1
+      },
+      "decode_fairness_prefill_chunks": 1,
+      "decode_fairness_debt_deferrals": 0,
+      "decode_fairness_debt_repayments": 1,
+      "decode_fairness_cap_clamps": 0
+    },
+    "segmented_self_mtp": {
+      "requests": 0,
+      "physical_join_flag_reconciled": 0,
+      "width_lock_plain_fallbacks": 0,
+      "engaged": 0,
+      "declined": 0,
+      "failures": 0,
+      "fallback_physical_b2": 0,
+      "physical_b2_formations": 0,
+      "b1_target_forwards": 0,
+      "b1_draft_forwards": 0,
+      "batched_target_forwards": 0,
+      "batched_draft_forwards": 0,
+      "true_batched_requests": 0,
+      "true_batched_engaged": 0,
+      "true_batched_declined": 0,
+      "live_width_change_deferrals": 0,
+      "layer_local_materializations": 0,
+      "recurrent_state_materializations": 0,
+      "recurrent_state_materialized_bytes": 0,
+      "row_state_splits": 0,
+      "segmented_attention_calls": 0,
+      "private_delta_requests": 0,
+      "private_delta_declines": 0,
+      "private_delta_preflight_declines": 0,
+      "private_delta_late_gather_fallbacks": 0,
+      "private_delta_attention_calls": 0,
+      "private_delta_rows": 0,
+      "private_delta_base_tokens_cumulative": 0,
+      "private_delta_base_tokens_last": 0,
+      "private_delta_base_tokens_min": 0,
+      "private_delta_base_tokens_max": 0,
+      "private_delta_duplicate_base_storage_bytes_not_formed_cumulative": 0,
+      "shared_qsa_rows": 0,
+      "shared_qsa_base_bytes": 0,
+      "shared_qsa_private_bytes": 0,
+      "shared_qsa_materializations": 0,
+      "shared_qsa_materialized_bytes": 0,
+      "shared_qsa_batched_selections": 0,
+      "shared_qsa_policy_checks": 0,
+      "shared_qsa_policy_admitted": 0,
+      "shared_qsa_policy_declined": 0,
+      "shared_qsa_policy_context_tokens_cumulative": 0,
+      "shared_qsa_policy_remaining_tokens_cumulative": 0,
+      "shared_qsa_policy_cutoff_tokens_cumulative": 0,
+      "exact_set_fold_requests": 0,
+      "exact_set_fold_declines": 0,
+      "exact_set_fold_preflight_declines": 0,
+      "exact_set_fold_private_fallbacks": 0,
+      "exact_set_fold_attention_calls": 0,
+      "exact_set_fold_rows": 0,
+      "exact_set_fold_device_proofs": 0,
+      "independent_lineages_consumed": 0,
+      "full_prefix_materializations": 0,
+      "full_prefix_materialized_bytes": 0,
+      "transaction_branches": 0,
+      "transaction_promotions": 0,
+      "transaction_rejections": 0,
+      "transaction_canonicalizations": 0,
+      "committed_cycles": 0,
+      "recovery_checkpoint_captures": 0,
+      "recovery_checkpoint_restores": 0,
+      "recovery_checkpoint_failures": 0,
+      "accepted_zero": 0,
+      "accepted_partial": 0,
+      "accepted_all": 0,
+      "async_qsa_promotion_requests": 0,
+      "async_qsa_promotion_queued": 0,
+      "async_qsa_promotion_engaged": 0,
+      "async_qsa_promotion_declined": 0,
+      "async_qsa_promotion_declined_shared_suffix": 0,
+      "async_qsa_promotion_declined_memory": 0,
+      "async_qsa_admission_settled": 0,
+      "async_qsa_promotion_failures": 0,
+      "async_qsa_promotion_reserved_bytes": 0,
+      "async_qsa_promotion_patched_bytes": 0,
+      "async_qsa_promotion_wait_ns": 0,
+      "async_qsa_prequeue_requests": 0,
+      "async_qsa_prequeue_queued": 0,
+      "async_qsa_prequeue_bound": 0,
+      "async_qsa_prequeue_declined": 0,
+      "async_qsa_shared_prefix_fused_layers": 0,
+      "async_qsa_budget_checks": 0,
+      "async_qsa_budget_retained_segmented": 0,
+      "async_qsa_budget_promotions": 0,
+      "async_qsa_budget_remaining_tokens_cumulative": 0,
+      "async_qsa_budget_cutoff_tokens_cumulative": 0,
+      "device_synchronizations": 0,
+      "proposal_ns": 0,
+      "commit_ns": 0,
+      "private_delta_width_1_requests": 0,
+      "private_delta_width_1_engaged": 0,
+      "private_delta_width_1_declined": 0,
+      "private_delta_width_2_requests": 0,
+      "private_delta_width_2_engaged": 0,
+      "private_delta_width_2_declined": 0,
+      "private_delta_width_3_requests": 0,
+      "private_delta_width_3_engaged": 0,
+      "private_delta_width_3_declined": 0,
+      "private_delta_width_4_requests": 0,
+      "private_delta_width_4_engaged": 0,
+      "private_delta_width_4_declined": 0,
+      "private_delta_width_5_requests": 0,
+      "private_delta_width_5_engaged": 0,
+      "private_delta_width_5_declined": 0,
+      "private_delta_width_6_requests": 0,
+      "private_delta_width_6_engaged": 0,
+      "private_delta_width_6_declined": 0,
+      "private_delta_width_7_requests": 0,
+      "private_delta_width_7_engaged": 0,
+      "private_delta_width_7_declined": 0,
+      "private_delta_width_8_requests": 0,
+      "private_delta_width_8_engaged": 0,
+      "private_delta_width_8_declined": 0,
+      "private_delta_width_9_requests": 0,
+      "private_delta_width_9_engaged": 0,
+      "private_delta_width_9_declined": 0,
+      "private_delta_width_other_requests": 0,
+      "private_delta_width_other_engaged": 0,
+      "private_delta_width_other_declined": 0,
+      "private_delta_decline_reasons": {},
+      "exact_set_fold_decline_reasons": {},
+      "environment_enabled": true,
+      "true_batched_environment_enabled": true,
+      "qsa_private_delta_environment_enabled": true,
+      "qsa_exact_set_fold_environment_enabled": true,
+      "shared_qsa_suffix_mode": "off",
+      "shared_qsa_suffix_environment_enabled": false,
+      "async_qsa_promotion_environment_enabled": false,
+      "timing_enabled": false,
+      "counter_scope": "segmented_mechanism_only",
+      "array_readbacks": 0
+    },
+    "spomin_live_surgery": {
+      "enabled": false
+    },
+    "metal_active_bytes": 26102929094,
+    "metal_peak_bytes": 28149969508,
+    "process_physical_footprint_bytes": 26995887064,
+    "execution": {
+      "architecture": "mla-noaux-moe-mhc4",
+      "cache_layout": "xing4-0-mla-latent-layer-segments-v1",
+      "mtp_head_present": true,
+      "num_draft": 1,
+      "tokenizer": {
+        "route": "fast-tokenizer-json",
+        "trust_remote_code": false,
+        "parity_counts": {
+          "extra_strings": 0,
+          "structured_strings": 974,
+          "fuzz_strings": 20000,
+          "chat_renders": 609,
+          "encode_total": 21583,
+          "random_id_sequences": 5000,
+          "decode_checks": 53166
+        },
+        "tokenizer_json_sha256": "8c7fa652d78bef428783b8c820b4bdacb80ef22cc029f5a5c326e1ad60678f1b"
+      },
+      "mhc": {
+        "compiled_calls": 0,
+        "eager_calls": 0,
+        "fallbacks": 0,
+        "last_fallback": null,
+        "kernel_calls": 1392,
+        "kernel_fallbacks": 0,
+        "last_kernel_fallback": null
+      },
+      "segmented_mtp": {
+        "requests": 0,
+        "physical_join_flag_reconciled": 0,
+        "width_lock_plain_fallbacks": 0,
+        "engaged": 0,
+        "declined": 0,
+        "failures": 0,
+        "fallback_physical_b2": 0,
+        "physical_b2_formations": 0,
+        "b1_target_forwards": 0,
+        "b1_draft_forwards": 0,
+        "batched_target_forwards": 0,
+        "batched_draft_forwards": 0,
+        "true_batched_requests": 0,
+        "true_batched_engaged": 0,
+        "true_batched_declined": 0,
+        "live_width_change_deferrals": 0,
+        "layer_local_materializations": 0,
+        "recurrent_state_materializations": 0,
+        "recurrent_state_materialized_bytes": 0,
+        "row_state_splits": 0,
+        "segmented_attention_calls": 0,
+        "private_delta_requests": 0,
+        "private_delta_declines": 0,
+        "private_delta_preflight_declines": 0,
+        "private_delta_late_gather_fallbacks": 0,
+        "private_delta_attention_calls": 0,
+        "private_delta_rows": 0,
+        "private_delta_base_tokens_cumulative": 0,
+        "private_delta_base_tokens_last": 0,
+        "private_delta_base_tokens_min": 0,
+        "private_delta_base_tokens_max": 0,
+        "private_delta_duplicate_base_storage_bytes_not_formed_cumulative": 0,
+        "shared_qsa_rows": 0,
+        "shared_qsa_base_bytes": 0,
+        "shared_qsa_private_bytes": 0,
+        "shared_qsa_materializations": 0,
+        "shared_qsa_materialized_bytes": 0,
+        "shared_qsa_batched_selections": 0,
+        "shared_qsa_policy_checks": 0,
+        "shared_qsa_policy_admitted": 0,
+        "shared_qsa_policy_declined": 0,
+        "shared_qsa_policy_context_tokens_cumulative": 0,
+        "shared_qsa_policy_remaining_tokens_cumulative": 0,
+        "shared_qsa_policy_cutoff_tokens_cumulative": 0,
+        "exact_set_fold_requests": 0,
+        "exact_set_fold_declines": 0,
+        "exact_set_fold_preflight_declines": 0,
+        "exact_set_fold_private_fallbacks": 0,
+        "exact_set_fold_attention_calls": 0,
+        "exact_set_fold_rows": 0,
+        "exact_set_fold_device_proofs": 0,
+        "independent_lineages_consumed": 0,
+        "full_prefix_materializations": 0,
+        "full_prefix_materialized_bytes": 0,
+        "transaction_branches": 0,
+        "transaction_promotions": 0,
+        "transaction_rejections": 0,
+        "transaction_canonicalizations": 0,
+        "committed_cycles": 0,
+        "recovery_checkpoint_captures": 0,
+        "recovery_checkpoint_restores": 0,
+        "recovery_checkpoint_failures": 0,
+        "accepted_zero": 0,
+        "accepted_partial": 0,
+        "accepted_all": 0,
+        "async_qsa_promotion_requests": 0,
+        "async_qsa_promotion_queued": 0,
+        "async_qsa_promotion_engaged": 0,
+        "async_qsa_promotion_declined": 0,
+        "async_qsa_promotion_declined_shared_suffix": 0,
+        "async_qsa_promotion_declined_memory": 0,
+        "async_qsa_admission_settled": 0,
+        "async_qsa_promotion_failures": 0,
+        "async_qsa_promotion_reserved_bytes": 0,
+        "async_qsa_promotion_patched_bytes": 0,
+        "async_qsa_promotion_wait_ns": 0,
+        "async_qsa_prequeue_requests": 0,
+        "async_qsa_prequeue_queued": 0,
+        "async_qsa_prequeue_bound": 0,
+        "async_qsa_prequeue_declined": 0,
+        "async_qsa_shared_prefix_fused_layers": 0,
+        "async_qsa_budget_checks": 0,
+        "async_qsa_budget_retained_segmented": 0,
+        "async_qsa_budget_promotions": 0,
+        "async_qsa_budget_remaining_tokens_cumulative": 0,
+        "async_qsa_budget_cutoff_tokens_cumulative": 0,
+        "device_synchronizations": 0,
+        "proposal_ns": 0,
+        "commit_ns": 0,
+        "private_delta_width_1_requests": 0,
+        "private_delta_width_1_engaged": 0,
+        "private_delta_width_1_declined": 0,
+        "private_delta_width_2_requests": 0,
+        "private_delta_width_2_engaged": 0,
+        "private_delta_width_2_declined": 0,
+        "private_delta_width_3_requests": 0,
+        "private_delta_width_3_engaged": 0,
+        "private_delta_width_3_declined": 0,
+        "private_delta_width_4_requests": 0,
+        "private_delta_width_4_engaged": 0,
+        "private_delta_width_4_declined": 0,
+        "private_delta_width_5_requests": 0,
+        "private_delta_width_5_engaged": 0,
+        "private_delta_width_5_declined": 0,
+        "private_delta_width_6_requests": 0,
+        "private_delta_width_6_engaged": 0,
+        "private_delta_width_6_declined": 0,
+        "private_delta_width_7_requests": 0,
+        "private_delta_width_7_engaged": 0,
+        "private_delta_width_7_declined": 0,
+        "private_delta_width_8_requests": 0,
+        "private_delta_width_8_engaged": 0,
+        "private_delta_width_8_declined": 0,
+        "private_delta_width_9_requests": 0,
+        "private_delta_width_9_engaged": 0,
+        "private_delta_width_9_declined": 0,
+        "private_delta_width_other_requests": 0,
+        "private_delta_width_other_engaged": 0,
+        "private_delta_width_other_declined": 0,
+        "private_delta_decline_reasons": {},
+        "exact_set_fold_decline_reasons": {},
+        "environment_enabled": true,
+        "true_batched_environment_enabled": true,
+        "qsa_private_delta_environment_enabled": true,
+        "qsa_exact_set_fold_environment_enabled": true,
+        "shared_qsa_suffix_mode": "off",
+        "shared_qsa_suffix_environment_enabled": false,
+        "async_qsa_promotion_environment_enabled": false,
+        "timing_enabled": false,
+        "counter_scope": "segmented_mechanism_only",
+        "array_readbacks": 0
+      }
+    },
+    "admission": {},
+    "memory_waiting": 0,
+    "headroom_bytes": 91048214528,
+    "healthy": true,
+    "error": null,
+    "inflight": 0,
+    "queue_depth": 0,
+    "counts": {
+      "admitted": 24,
+      "cycles": 1398,
+      "multi_request_cycles": 388,
+      "finish_stop": 13,
+      "completion_tokens": 2485,
+      "prompt_tokens": 19978,
+      "cached_prompt_tokens": 9986,
+      "peak_observed_width": 4,
+      "completed": 23,
+      "finish_length": 10,
+      "structured_engine_automaton": 3,
+      "structured_output_completed": 3,
+      "structured_deferred": 1
+    },
+    "int8_prefill": {
+      "schema": "mlx2.int8-prefill.v1",
+      "enabled": false,
+      "scope": "mlp",
+      "row_threshold": 512,
+      "cache": "auto",
+      "ttl_s": 120.0,
+      "active": false,
+      "fidelity": "exact",
+      "modules": 0,
+      "counts": {}
+    },
+    "recent_receipts": [
+      {
+        "request_id": "chatcmpl-bc268c8e440646cda1ae4692dc878ee9",
+        "cache": "apcv2",
+        "cached_tokens": 0,
+        "parallel_prefill": null,
+        "profile": "xing4-0-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": false,
+          "top_logprobs": 0,
+          "logprob_semantics": null,
+          "thinking": false,
+          "sampling": {
+            "temperature": 0,
+            "repetition_penalty": 1.0,
+            "presence_penalty": 0.0,
+            "frequency_penalty": 0.0
+          },
+          "effective_sampling": {
+            "temperature": 0,
+            "top_p": 0.95,
+            "top_k": 0,
+            "min_p": 0.0,
+            "repetition_penalty": 1.0,
+            "presence_penalty": 0.0,
+            "frequency_penalty": 0.0
+          },
+          "sampling_defaults": {
+            "schema": "mlx2.sampling-defaults.v1",
+            "explicit": [
+              "temperature",
+              "repetition_penalty",
+              "presence_penalty",
+              "frequency_penalty"
+            ],
+            "applied": {
+              "top_p": 0.95
+            },
+            "sources": {
+              "top_p": "generation_config.json"
+            },
+            "profile": "general",
+            "profile_reason": "general",
+            "model": "XingChen-AGI/Xing4.0-29B-A4B",
+            "fallback": {
+              "top_k": 0,
+              "min_p": 0.0
+            },
+            "fallback_kind": "neutral"
+          },
+          "min_tokens": 0,
+          "batch_cohort": null,
+          "reasoning_effort": "none",
+          "effort_semantics": "thinking_toggle",
+          "context_limit": 32768,
+          "structured_output": null
+        },
+        "ordinary_compute_width": 1,
+        "mtp": null,
+        "speculation": null,
+        "spomin_live_surgery": null,
+        "approximate_kv": null,
+        "cache_capsule": null,
+        "prompt_tokens": 7,
+        "completion_tokens": 10,
+        "ttft_seconds": 0.13436774999718182,
+        "elapsed_seconds": 0.2923010000085924
+      },
+      {
+        "request_id": "chatcmpl-c6f7102944f446e6ac548954b7060911",
+        "cache": "apcv2",
+        "cached_tokens": 2,
+        "parallel_prefill": null,
+        "profile": "xing4-0-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": false,
+          "top_logprobs": 0,
+          "logprob_semantics": null,
+          "thinking": false,
+          "sampling": {
+            "temperature": 0,
+            "repetition_penalty": 1.0,
+            "presence_penalty": 0.0,
+            "frequency_penalty": 0.0
+          },
+          "effective_sampling": {
+            "temperature": 0,
+            "top_p": 0.95,
+            "top_k": 0,
+            "min_p": 0.0,
+            "repetition_penalty": 1.0,
+            "presence_penalty": 0.0,
+            "frequency_penalty": 0.0
+          },
+          "sampling_defaults": {
+            "schema": "mlx2.sampling-defaults.v1",
+            "explicit": [
+              "temperature",
+              "repetition_penalty",
+              "presence_penalty",
+              "frequency_penalty"
+            ],
+            "applied": {
+              "top_p": 0.95
+            },
+            "sources": {
+              "top_p": "generation_config.json"
+            },
+            "profile": "general",
+            "profile_reason": "general",
+            "model": "XingChen-AGI/Xing4.0-29B-A4B",
+            "fallback": {
+              "top_k": 0,
+              "min_p": 0.0
+            },
+            "fallback_kind": "neutral"
+          },
+          "min_tokens": 0,
+          "batch_cohort": null,
+          "reasoning_effort": "none",
+          "effort_semantics": "thinking_toggle",
+          "context_limit": 32768,
+          "structured_output": null
+        },
+        "ordinary_compute_width": 1,
+        "mtp": null,
+        "speculation": null,
+        "spomin_live_surgery": null,
+        "approximate_kv": null,
+        "cache_capsule": null,
+        "prompt_tokens": 9819,
+        "completion_tokens": 8,
+        "ttft_seconds": 4.573806833010167,
+        "elapsed_seconds": 4.726196291012457
+      },
+      {
+        "request_id": "chatcmpl-da0bf81e94064324b2bc6c36f57bf042",
+        "cache": "apcv2",
+        "cached_tokens": 9815,
+        "parallel_prefill": null,
+        "profile": "xing4-0-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": false,
+          "top_logprobs": 0,
+          "logprob_semantics": null,
+          "thinking": false,
+          "sampling": {
+            "temperature": 0,
+            "repetition_penalty": 1.0,
+            "presence_penalty": 0.0,
+            "frequency_penalty": 0.0
+          },
+          "effective_sampling": {
+            "temperature": 0,
+            "top_p": 0.95,
+            "top_k": 0,
+            "min_p": 0.0,
+            "repetition_penalty": 1.0,
+            "presence_penalty": 0.0,
+            "frequency_penalty": 0.0
+          },
+          "sampling_defaults": {
+            "schema": "mlx2.sampling-defaults.v1",
+            "explicit": [
+              "temperature",
+              "repetition_penalty",
+              "presence_penalty",
+              "frequency_penalty"
+            ],
+            "applied": {
+              "top_p": 0.95
+            },
+            "sources": {
+              "top_p": "generation_config.json"
+            },
+            "profile": "general",
+            "profile_reason": "general",
+            "model": "XingChen-AGI/Xing4.0-29B-A4B",
+            "fallback": {
+              "top_k": 0,
+              "min_p": 0.0
+            },
+            "fallback_kind": "neutral"
+          },
+          "min_tokens": 0,
+          "batch_cohort": null,
+          "reasoning_effort": "none",
+          "effort_semantics": "thinking_toggle",
+          "context_limit": 32768,
+          "structured_output": null
+        },
+        "ordinary_compute_width": 1,
+        "mtp": null,
+        "speculation": null,
+        "spomin_live_surgery": null,
+        "approximate_kv": null,
+        "cache_capsule": null,
+        "prompt_tokens": 9819,
+        "completion_tokens": 8,
+        "ttft_seconds": 0.11676095798611641,
+        "elapsed_seconds": 0.26524320800672285
+      },
+      {
+        "request_id": "chatcmpl-f52a9ec9e2c84768891c4cba4e06ef74",
+        "cache": "apcv2",
+        "cached_tokens": 2,
+        "parallel_prefill": null,
+        "profile": "xing4-0-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": false,
+          "top_logprobs": 0,
+          "logprob_semantics": null,
+          "thinking": false,
+          "sampling": {
+            "temperature": 0,
+            "repetition_penalty": 1.0,
+            "presence_penalty": 0.0,
+            "frequency_penalty": 0.0
+          },
+          "effective_sampling": {
+            "temperature": 0,
+            "top_p": 0.95,
+            "top_k": 0,
+            "min_p": 0.0,
+            "repetition_penalty": 1.0,
+            "presence_penalty": 0.0,
+            "frequency_penalty": 0.0
+          },
+          "sampling_defaults": {
+            "schema": "mlx2.sampling-defaults.v1",
+            "explicit": [
+              "temperature",
+              "repetition_penalty",
+              "presence_penalty",
+              "frequency_penalty"
+            ],
+            "applied": {
+              "top_p": 0.95
+            },
+            "sources": {
+              "top_p": "generation_config.json"
+            },
+            "profile": "general",
+            "profile_reason": "general",
+            "model": "XingChen-AGI/Xing4.0-29B-A4B",
+            "fallback": {
+              "top_k": 0,
+              "min_p": 0.0
+            },
+            "fallback_kind": "neutral"
+          },
+          "min_tokens": 0,
+          "batch_cohort": null,
+          "reasoning_effort": "none",
+          "effort_semantics": "thinking_toggle",
+          "context_limit": 32768,
+          "structured_output": null
+        },
+        "ordinary_compute_width": 1,
+        "mtp": null,
+        "speculation": null,
+        "spomin_live_surgery": null,
+        "approximate_kv": null,
+        "cache_capsule": null,
+        "prompt_tokens": 20,
+        "completion_tokens": 512,
+        "ttft_seconds": 0.10950350001803599,
+        "elapsed_seconds": 8.701974541007075
+      },
+      {
+        "request_id": "chatcmpl-7f34c2e3df0d4731b47699b42430296c",
+        "cache": "apcv2",
+        "cached_tokens": 18,
+        "parallel_prefill": null,
+        "profile": "xing4-0-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": false,
+          "top_logprobs": 0,
+          "logprob_semantics": null,
+          "thinking": false,
+          "sampling": {
+            "temperature": 0,
+            "repetition_penalty": 1.0,
+            "presence_penalty": 0.0,
+            "frequency_penalty": 0.0
+          },
+          "effective_sampling": {
+            "temperature": 0,
+            "top_p": 0.95,
+            "top_k": 0,
+            "min_p": 0.0,
+            "repetition_penalty": 1.0,
+            "presence_penalty": 0.0,
+            "frequency_penalty": 0.0
+          },
+          "sampling_defaults": {
+            "schema": "mlx2.sampling-defaults.v1",
+            "explicit": [
+              "temperature",
+              "repetition_penalty",
+              "presence_penalty",
+              "frequency_penalty"
+            ],
+            "applied": {
+              "top_p": 0.95
+            },
+            "sources": {
+              "top_p": "generation_config.json"
+            },
+            "profile": "general",
+            "profile_reason": "general",
+            "model": "XingChen-AGI/Xing4.0-29B-A4B",
+            "fallback": {
+              "top_k": 0,
+              "min_p": 0.0
+            },
+            "fallback_kind": "neutral"
+          },
+          "min_tokens": 0,
+          "batch_cohort": null,
+          "reasoning_effort": "none",
+          "effort_semantics": "thinking_toggle",
+          "context_limit": 32768,
+          "structured_output": null
+        },
+        "ordinary_compute_width": 4,
+        "mtp": null,
+        "speculation": null,
+        "spomin_live_surgery": null,
+        "approximate_kv": null,
+        "cache_capsule": null,
+        "prompt_tokens": 25,
+        "completion_tokens": 384,
+        "ttft_seconds": 0.16270362501381896,
+        "elapsed_seconds": 9.915463375014951
+      },
+      {
+        "request_id": "chatcmpl-d34685eaa97546b2b2d125d29fdd674f",
+        "cache": "apcv2",
+        "cached_tokens": 18,
+        "parallel_prefill": null,
+        "profile": "xing4-0-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": false,
+          "top_logprobs": 0,
+          "logprob_semantics": null,
+          "thinking": false,
+          "sampling": {
+            "temperature": 0,
+            "repetition_penalty": 1.0,
+            "presence_penalty": 0.0,
+            "frequency_penalty": 0.0
+          },
+          "effective_sampling": {
+            "temperature": 0,
+            "top_p": 0.95,
+            "top_k": 0,
+            "min_p": 0.0,
+            "repetition_penalty": 1.0,
+            "presence_penalty": 0.0,
+            "frequency_penalty": 0.0
+          },
+          "sampling_defaults": {
+            "schema": "mlx2.sampling-defaults.v1",
+            "explicit": [
+              "temperature",
+              "repetition_penalty",
+              "presence_penalty",
+              "frequency_penalty"
+            ],
+            "applied": {
+              "top_p": 0.95
+            },
+            "sources": {
+              "top_p": "generation_config.json"
+            },
+            "profile": "general",
+            "profile_reason": "general",
+            "model": "XingChen-AGI/Xing4.0-29B-A4B",
+            "fallback": {
+              "top_k": 0,
+              "min_p": 0.0
+            },
+            "fallback_kind": "neutral"
+          },
+          "min_tokens": 0,
+          "batch_cohort": null,
+          "reasoning_effort": "none",
+          "effort_semantics": "thinking_toggle",
+          "context_limit": 32768,
+          "structured_output": null
+        },
+        "ordinary_compute_width": 4,
+        "mtp": null,
+        "speculation": null,
+        "spomin_live_surgery": null,
+        "approximate_kv": null,
+        "cache_capsule": null,
+        "prompt_tokens": 25,
+        "completion_tokens": 384,
+        "ttft_seconds": 0.1615354160021525,
+        "elapsed_seconds": 9.916876708011841
+      },
+      {
+        "request_id": "chatcmpl-9c6b906fa9be462b8cdb31ebfa85c031",
+        "cache": "apcv2",
+        "cached_tokens": 18,
+        "parallel_prefill": null,
+        "profile": "xing4-0-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": false,
+          "top_logprobs": 0,
+          "logprob_semantics": null,
+          "thinking": false,
+          "sampling": {
+            "temperature": 0,
+            "repetition_penalty": 1.0,
+            "presence_penalty": 0.0,
+            "frequency_penalty": 0.0
+          },
+          "effective_sampling": {
+            "temperature": 0,
+            "top_p": 0.95,
+            "top_k": 0,
+            "min_p": 0.0,
+            "repetition_penalty": 1.0,
+            "presence_penalty": 0.0,
+            "frequency_penalty": 0.0
+          },
+          "sampling_defaults": {
+            "schema": "mlx2.sampling-defaults.v1",
+            "explicit": [
+              "temperature",
+              "repetition_penalty",
+              "presence_penalty",
+              "frequency_penalty"
+            ],
+            "applied": {
+              "top_p": 0.95
+            },
+            "sources": {
+              "top_p": "generation_config.json"
+            },
+            "profile": "general",
+            "profile_reason": "general",
+            "model": "XingChen-AGI/Xing4.0-29B-A4B",
+            "fallback": {
+              "top_k": 0,
+              "min_p": 0.0
+            },
+            "fallback_kind": "neutral"
+          },
+          "min_tokens": 0,
+          "batch_cohort": null,
+          "reasoning_effort": "none",
+          "effort_semantics": "thinking_toggle",
+          "context_limit": 32768,
+          "structured_output": null
+        },
+        "ordinary_compute_width": 4,
+        "mtp": null,
+        "speculation": null,
+        "spomin_live_surgery": null,
+        "approximate_kv": null,
+        "cache_capsule": null,
+        "prompt_tokens": 25,
+        "completion_tokens": 384,
+        "ttft_seconds": 0.24370366599760018,
+        "elapsed_seconds": 9.978132082993397
+      },
+      {
+        "request_id": "chatcmpl-5bdbac77d93e4400901c5e118d46b198",
+        "cache": "apcv2",
+        "cached_tokens": 18,
+        "parallel_prefill": null,
+        "profile": "xing4-0-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": false,
+          "top_logprobs": 0,
+          "logprob_semantics": null,
+          "thinking": false,
+          "sampling": {
+            "temperature": 0,
+            "repetition_penalty": 1.0,
+            "presence_penalty": 0.0,
+            "frequency_penalty": 0.0
+          },
+          "effective_sampling": {
+            "temperature": 0,
+            "top_p": 0.95,
+            "top_k": 0,
+            "min_p": 0.0,
+            "repetition_penalty": 1.0,
+            "presence_penalty": 0.0,
+            "frequency_penalty": 0.0
+          },
+          "sampling_defaults": {
+            "schema": "mlx2.sampling-defaults.v1",
+            "explicit": [
+              "temperature",
+              "repetition_penalty",
+              "presence_penalty",
+              "frequency_penalty"
+            ],
+            "applied": {
+              "top_p": 0.95
+            },
+            "sources": {
+              "top_p": "generation_config.json"
+            },
+            "profile": "general",
+            "profile_reason": "general",
+            "model": "XingChen-AGI/Xing4.0-29B-A4B",
+            "fallback": {
+              "top_k": 0,
+              "min_p": 0.0
+            },
+            "fallback_kind": "neutral"
+          },
+          "min_tokens": 0,
+          "batch_cohort": null,
+          "reasoning_effort": "none",
+          "effort_semantics": "thinking_toggle",
+          "context_limit": 32768,
+          "structured_output": null
+        },
+        "ordinary_compute_width": 4,
+        "mtp": null,
+        "speculation": null,
+        "spomin_live_surgery": null,
+        "approximate_kv": null,
+        "cache_capsule": null,
+        "prompt_tokens": 25,
+        "completion_tokens": 384,
+        "ttft_seconds": 0.24257612499059178,
+        "elapsed_seconds": 9.979596541001229
+      },
+      {
+        "request_id": "chatcmpl-975374b9e1014968be226b7d225468b3",
+        "cache": "apcv2",
+        "cached_tokens": 2,
+        "parallel_prefill": null,
+        "profile": "xing4-0-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": false,
+          "top_logprobs": 0,
+          "logprob_semantics": null,
+          "thinking": true,
+          "sampling": {
+            "temperature": 0,
+            "repetition_penalty": 1.0,
+            "presence_penalty": 0.0,
+            "frequency_penalty": 0.0
+          },
+          "effective_sampling": {
+            "temperature": 0,
+            "top_p": 0.95,
+            "top_k": 0,
+            "min_p": 0.0,
+            "repetition_penalty": 1.0,
+            "presence_penalty": 0.0,
+            "frequency_penalty": 0.0
+          },
+          "sampling_defaults": {
+            "schema": "mlx2.sampling-defaults.v1",
+            "explicit": [
+              "temperature",
+              "repetition_penalty",
+              "presence_penalty",
+              "frequency_penalty"
+            ],
+            "applied": {
+              "top_p": 0.95
+            },
+            "sources": {
+              "top_p": "generation_config.json"
+            },
+            "profile": "general",
+            "profile_reason": "general",
+            "model": "XingChen-AGI/Xing4.0-29B-A4B",
+            "fallback": {
+              "top_k": 0,
+              "min_p": 0.0
+            },
+            "fallback_kind": "neutral"
+          },
+          "min_tokens": 0,
+          "batch_cohort": null,
+          "reasoning_effort": "high",
+          "effort_semantics": "thinking_toggle",
+          "context_limit": 32768,
+          "structured_output": null
+        },
+        "ordinary_compute_width": 1,
+        "mtp": null,
+        "speculation": null,
+        "spomin_live_surgery": null,
+        "approximate_kv": null,
+        "cache_capsule": null,
+        "prompt_tokens": 16,
+        "completion_tokens": 136,
+        "ttft_seconds": 0.10414504099753685,
+        "elapsed_seconds": 2.3677580000075977
+      },
+      {
+        "request_id": "chatcmpl-a9089bedca5c4b1794b56f269aa48721",
+        "cache": "apcv2",
+        "cached_tokens": 2,
+        "parallel_prefill": null,
+        "profile": "xing4-0-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": false,
+          "top_logprobs": 0,
+          "logprob_semantics": null,
+          "thinking": false,
+          "sampling": {
+            "temperature": 0,
+            "repetition_penalty": 1.0,
+            "presence_penalty": 0.0,
+            "frequency_penalty": 0.0
+          },
+          "effective_sampling": {
+            "temperature": 0,
+            "top_p": 0.95,
+            "top_k": 0,
+            "min_p": 0.0,
+            "repetition_penalty": 1.0,
+            "presence_penalty": 0.0,
+            "frequency_penalty": 0.0
+          },
+          "sampling_defaults": {
+            "schema": "mlx2.sampling-defaults.v1",
+            "explicit": [
+              "temperature",
+              "repetition_penalty",
+              "presence_penalty",
+              "frequency_penalty"
+            ],
+            "applied": {
+              "top_p": 0.95
+            },
+            "sources": {
+              "top_p": "generation_config.json"
+            },
+            "profile": "general",
+            "profile_reason": "general",
+            "model": "XingChen-AGI/Xing4.0-29B-A4B",
+            "fallback": {
+              "top_k": 0,
+              "min_p": 0.0
+            },
+            "fallback_kind": "neutral"
+          },
+          "min_tokens": 0,
+          "batch_cohort": null,
+          "reasoning_effort": "none",
+          "effort_semantics": "thinking_toggle",
+          "context_limit": 32768,
+          "structured_output": null
+        },
+        "ordinary_compute_width": 1,
+        "mtp": null,
+        "speculation": null,
+        "spomin_live_surgery": null,
+        "approximate_kv": null,
+        "cache_capsule": null,
+        "prompt_tokens": 11,
+        "completion_tokens": 5,
+        "ttft_seconds": 0.09282779198838398,
+        "elapsed_seconds": 0.17196845900616609
+      },
+      {
+        "request_id": "chatcmpl-938d38fca841435a9fb47b838adad3d5",
+        "cache": "apcv2",
+        "cached_tokens": 4,
+        "parallel_prefill": null,
+        "profile": "xing4-0-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": false,
+          "top_logprobs": 0,
+          "logprob_semantics": null,
+          "thinking": false,
+          "sampling": {
+            "temperature": 0,
+            "repetition_penalty": 1.0,
+            "presence_penalty": 0.0,
+            "frequency_penalty": 0.0
+          },
+          "effective_sampling": {
+            "temperature": 0,
+            "top_p": 0.95,
+            "top_k": 0,
+            "min_p": 0.0,
+            "repetition_penalty": 1.0,
+            "presence_penalty": 0.0,
+            "frequency_penalty": 0.0
+          },
+          "sampling_defaults": {
+            "schema": "mlx2.sampling-defaults.v1",
+            "explicit": [
+              "temperature",
+              "repetition_penalty",
+              "presence_penalty",
+              "frequency_penalty"
+            ],
+            "applied": {
+              "top_p": 0.95
+            },
+            "sources": {
+              "top_p": "generation_config.json"
+            },
+            "profile": "general",
+            "profile_reason": "general",
+            "model": "XingChen-AGI/Xing4.0-29B-A4B",
+            "fallback": {
+              "top_k": 0,
+              "min_p": 0.0
+            },
+            "fallback_kind": "neutral"
+          },
+          "min_tokens": 0,
+          "batch_cohort": null,
+          "reasoning_effort": null,
+          "effort_semantics": "thinking_toggle",
+          "context_limit": 32768,
+          "structured_output": null
+        },
+        "ordinary_compute_width": 1,
+        "mtp": null,
+        "speculation": null,
+        "spomin_live_surgery": null,
+        "approximate_kv": null,
+        "cache_capsule": null,
+        "prompt_tokens": 12,
+        "completion_tokens": 8,
+        "ttft_seconds": 0.09602091601118445,
+        "elapsed_seconds": 0.22664274999988265
+      },
+      {
+        "request_id": "chatcmpl-8b382c056b244a479f8c6cd5f34a70ed",
+        "cache": "apcv2",
+        "cached_tokens": 11,
+        "parallel_prefill": null,
+        "profile": "xing4-0-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": true,
+          "top_logprobs": 3,
+          "logprob_semantics": "execution_target: ordinary=post_processor_pre_sampler; mtp=transformed_target_verifier",
+          "thinking": false,
+          "sampling": {
+            "temperature": 0,
+            "repetition_penalty": 1.0,
+            "presence_penalty": 0.0,
+            "frequency_penalty": 0.0
+          },
+          "effective_sampling": {
+            "temperature": 0,
+            "top_p": 0.95,
+            "top_k": 0,
+            "min_p": 0.0,
+            "repetition_penalty": 1.0,
+            "presence_penalty": 0.0,
+            "frequency_penalty": 0.0
+          },
+          "sampling_defaults": {
+            "schema": "mlx2.sampling-defaults.v1",
+            "explicit": [
+              "temperature",
+              "repetition_penalty",
+              "presence_penalty",
+              "frequency_penalty"
+            ],
+            "applied": {
+              "top_p": 0.95
+            },
+            "sources": {
+              "top_p": "generation_config.json"
+            },
+            "profile": "general",
+            "profile_reason": "general",
+            "model": "XingChen-AGI/Xing4.0-29B-A4B",
+            "fallback": {
+              "top_k": 0,
+              "min_p": 0.0
+            },
+            "fallback_kind": "neutral"
+          },
+          "min_tokens": 0,
+          "batch_cohort": null,
+          "reasoning_effort": null,
+          "effort_semantics": "thinking_toggle",
+          "context_limit": 32768,
+          "structured_output": null
+        },
+        "ordinary_compute_width": 1,
+        "mtp": null,
+        "speculation": null,
+        "spomin_live_surgery": null,
+        "approximate_kv": null,
+        "cache_capsule": null,
+        "prompt_tokens": 12,
+        "completion_tokens": 8,
+        "ttft_seconds": 0.058442666981136426,
+        "elapsed_seconds": 0.19377174999681301
+      },
+      {
+        "request_id": "chatcmpl-26be903874b4424cb6daf423e60355c7",
+        "cache": "apcv2",
+        "cached_tokens": 11,
+        "parallel_prefill": null,
+        "profile": "xing4-0-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": true,
+          "top_logprobs": 3,
+          "logprob_semantics": "execution_target: ordinary=post_processor_pre_sampler; mtp=transformed_target_verifier",
+          "thinking": false,
+          "sampling": {
+            "temperature": 0,
+            "repetition_penalty": 1.0,
+            "presence_penalty": 0.0,
+            "frequency_penalty": 0.0
+          },
+          "effective_sampling": {
+            "temperature": 0,
+            "top_p": 0.95,
+            "top_k": 0,
+            "min_p": 0.0,
+            "repetition_penalty": 1.0,
+            "presence_penalty": 0.0,
+            "frequency_penalty": 0.0
+          },
+          "sampling_defaults": {
+            "schema": "mlx2.sampling-defaults.v1",
+            "explicit": [
+              "temperature",
+              "repetition_penalty",
+              "presence_penalty",
+              "frequency_penalty"
+            ],
+            "applied": {
+              "top_p": 0.95
+            },
+            "sources": {
+              "top_p": "generation_config.json"
+            },
+            "profile": "general",
+            "profile_reason": "general",
+            "model": "XingChen-AGI/Xing4.0-29B-A4B",
+            "fallback": {
+              "top_k": 0,
+              "min_p": 0.0
+            },
+            "fallback_kind": "neutral"
+          },
+          "min_tokens": 0,
+          "batch_cohort": null,
+          "reasoning_effort": null,
+          "effort_semantics": "thinking_toggle",
+          "context_limit": 32768,
+          "structured_output": null
+        },
+        "ordinary_compute_width": 1,
+        "mtp": null,
+        "speculation": null,
+        "spomin_live_surgery": null,
+        "approximate_kv": null,
+        "cache_capsule": null,
+        "prompt_tokens": 12,
+        "completion_tokens": 8,
+        "ttft_seconds": 0.056693916994845495,
+        "elapsed_seconds": 0.1867953749897424
+      },
+      {
+        "request_id": "chatcmpl-5ebbccbcc7e947cb9df6c75c82a4d6ff",
+        "cache": "apcv2",
+        "cached_tokens": 2,
+        "parallel_prefill": null,
+        "profile": "xing4-0-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": false,
+          "top_logprobs": 0,
+          "logprob_semantics": null,
+          "thinking": false,
+          "sampling": {
+            "temperature": 0.7,
+            "top_p": 0.9,
+            "top_k": 24,
+            "min_p": 0.05,
+            "repetition_penalty": 1.05,
+            "presence_penalty": 0.1,
+            "frequency_penalty": 0.1,
+            "seed": 237
+          },
+          "effective_sampling": {
+            "temperature": 0.7,
+            "top_p": 0.9,
+            "top_k": 24,
+            "min_p": 0.05,
+            "repetition_penalty": 1.05,
+            "presence_penalty": 0.1,
+            "frequency_penalty": 0.1
+          },
+          "sampling_defaults": {
+            "schema": "mlx2.sampling-defaults.v1",
+            "explicit": [
+              "temperature",
+              "top_p",
+              "top_k",
+              "min_p",
+              "repetition_penalty",
+              "presence_penalty",
+              "frequency_penalty"
+            ],
+            "applied": {},
+            "sources": {},
+            "profile": "general",
+            "profile_reason": "general",
+            "model": "XingChen-AGI/Xing4.0-29B-A4B",
+            "fallback": {},
+            "fallback_kind": "neutral"
+          },
+          "min_tokens": 0,
+          "batch_cohort": null,
+          "reasoning_effort": null,
+          "effort_semantics": "thinking_toggle",
+          "context_limit": 32768,
+          "structured_output": null
+        },
+        "ordinary_compute_width": 1,
+        "mtp": null,
+        "speculation": null,
+        "spomin_live_surgery": null,
+        "approximate_kv": null,
+        "cache_capsule": null,
+        "prompt_tokens": 8,
+        "completion_tokens": 27,
+        "ttft_seconds": 0.09307383399573155,
+        "elapsed_seconds": 0.5428288749826606
+      },
+      {
+        "request_id": "chatcmpl-b00f4696efe443a58557ed25142c9d89",
+        "cache": "apcv2",
+        "cached_tokens": 7,
+        "parallel_prefill": null,
+        "profile": "xing4-0-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": false,
+          "top_logprobs": 0,
+          "logprob_semantics": null,
+          "thinking": false,
+          "sampling": {
+            "temperature": 0.7,
+            "top_p": 0.9,
+            "top_k": 24,
+            "min_p": 0.05,
+            "repetition_penalty": 1.05,
+            "presence_penalty": 0.1,
+            "frequency_penalty": 0.1,
+            "seed": 237
+          },
+          "effective_sampling": {
+            "temperature": 0.7,
+            "top_p": 0.9,
+            "top_k": 24,
+            "min_p": 0.05,
+            "repetition_penalty": 1.05,
+            "presence_penalty": 0.1,
+            "frequency_penalty": 0.1
+          },
+          "sampling_defaults": {
+            "schema": "mlx2.sampling-defaults.v1",
+            "explicit": [
+              "temperature",
+              "top_p",
+              "top_k",
+              "min_p",
+              "repetition_penalty",
+              "presence_penalty",
+              "frequency_penalty"
+            ],
+            "applied": {},
+            "sources": {},
+            "profile": "general",
+            "profile_reason": "general",
+            "model": "XingChen-AGI/Xing4.0-29B-A4B",
+            "fallback": {},
+            "fallback_kind": "neutral"
+          },
+          "min_tokens": 0,
+          "batch_cohort": null,
+          "reasoning_effort": null,
+          "effort_semantics": "thinking_toggle",
+          "context_limit": 32768,
+          "structured_output": null
+        },
+        "ordinary_compute_width": 1,
+        "mtp": null,
+        "speculation": null,
+        "spomin_live_surgery": null,
+        "approximate_kv": null,
+        "cache_capsule": null,
+        "prompt_tokens": 8,
+        "completion_tokens": 27,
+        "ttft_seconds": 0.056349749997025356,
+        "elapsed_seconds": 0.5063863749965094
+      },
+      {
+        "request_id": "chatcmpl-0c9eab45351c47e48c98d65f4bd82f55",
+        "cache": "apcv2",
+        "cached_tokens": 7,
+        "parallel_prefill": null,
+        "profile": "xing4-0-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": false,
+          "top_logprobs": 0,
+          "logprob_semantics": null,
+          "thinking": false,
+          "sampling": {
+            "seed": 311
+          },
+          "effective_sampling": {
+            "temperature": 1.0,
+            "top_p": 0.95,
+            "top_k": 0,
+            "min_p": 0.0,
+            "repetition_penalty": 1.05,
+            "presence_penalty": 0.0,
+            "frequency_penalty": 0.0
+          },
+          "sampling_defaults": {
+            "schema": "mlx2.sampling-defaults.v1",
+            "explicit": [],
+            "applied": {
+              "temperature": 1.0,
+              "top_p": 0.95,
+              "repetition_penalty": 1.05
+            },
+            "sources": {
+              "temperature": "generation_config.json",
+              "top_p": "generation_config.json",
+              "repetition_penalty": "generation_config.json"
+            },
+            "profile": "general",
+            "profile_reason": "general",
+            "model": "XingChen-AGI/Xing4.0-29B-A4B",
+            "fallback": {
+              "top_k": 0,
+              "min_p": 0.0,
+              "presence_penalty": 0.0,
+              "frequency_penalty": 0.0
+            },
+            "fallback_kind": "neutral"
+          },
+          "min_tokens": 0,
+          "batch_cohort": null,
+          "reasoning_effort": null,
+          "effort_semantics": "thinking_toggle",
+          "context_limit": 32768,
+          "structured_output": null
+        },
+        "ordinary_compute_width": 1,
+        "mtp": null,
+        "speculation": null,
+        "spomin_live_surgery": null,
+        "approximate_kv": null,
+        "cache_capsule": null,
+        "prompt_tokens": 8,
+        "completion_tokens": 27,
+        "ttft_seconds": 0.05772262500249781,
+        "elapsed_seconds": 0.5061307919968385
+      },
+      {
+        "request_id": "chatcmpl-5a08c7170e51429facd6bee7692df93c",
+        "cache": "apcv2",
+        "cached_tokens": 7,
+        "parallel_prefill": null,
+        "profile": "xing4-0-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": false,
+          "top_logprobs": 0,
+          "logprob_semantics": null,
+          "thinking": false,
+          "sampling": {
+            "seed": 311
+          },
+          "effective_sampling": {
+            "temperature": 1.0,
+            "top_p": 0.95,
+            "top_k": 0,
+            "min_p": 0.0,
+            "repetition_penalty": 1.05,
+            "presence_penalty": 0.0,
+            "frequency_penalty": 0.0
+          },
+          "sampling_defaults": {
+            "schema": "mlx2.sampling-defaults.v1",
+            "explicit": [],
+            "applied": {
+              "temperature": 1.0,
+              "top_p": 0.95,
+              "repetition_penalty": 1.05
+            },
+            "sources": {
+              "temperature": "generation_config.json",
+              "top_p": "generation_config.json",
+              "repetition_penalty": "generation_config.json"
+            },
+            "profile": "general",
+            "profile_reason": "general",
+            "model": "XingChen-AGI/Xing4.0-29B-A4B",
+            "fallback": {
+              "top_k": 0,
+              "min_p": 0.0,
+              "presence_penalty": 0.0,
+              "frequency_penalty": 0.0
+            },
+            "fallback_kind": "neutral"
+          },
+          "min_tokens": 0,
+          "batch_cohort": null,
+          "reasoning_effort": null,
+          "effort_semantics": "thinking_toggle",
+          "context_limit": 32768,
+          "structured_output": null
+        },
+        "ordinary_compute_width": 1,
+        "mtp": null,
+        "speculation": null,
+        "spomin_live_surgery": null,
+        "approximate_kv": null,
+        "cache_capsule": null,
+        "prompt_tokens": 8,
+        "completion_tokens": 27,
+        "ttft_seconds": 0.05788375000702217,
+        "elapsed_seconds": 0.5344106669945177
+      },
+      {
+        "request_id": "chatcmpl-2f9b713396dd4fe38fa4f0329440e054",
+        "cache": "apcv2",
+        "cached_tokens": 5,
+        "parallel_prefill": null,
+        "profile": "xing4-0-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": false,
+          "top_logprobs": 0,
+          "logprob_semantics": null,
+          "thinking": false,
+          "sampling": {
+            "temperature": 0,
+            "repetition_penalty": 1.0,
+            "presence_penalty": 0.0,
+            "frequency_penalty": 0.0
+          },
+          "effective_sampling": {
+            "temperature": 0,
+            "top_p": 0.95,
+            "top_k": 0,
+            "min_p": 0.0,
+            "repetition_penalty": 1.0,
+            "presence_penalty": 0.0,
+            "frequency_penalty": 0.0
+          },
+          "sampling_defaults": {
+            "schema": "mlx2.sampling-defaults.v1",
+            "explicit": [
+              "temperature",
+              "repetition_penalty",
+              "presence_penalty",
+              "frequency_penalty"
+            ],
+            "applied": {
+              "top_p": 0.95
+            },
+            "sources": {
+              "top_p": "generation_config.json"
+            },
+            "profile": "general",
+            "profile_reason": "general",
+            "model": "XingChen-AGI/Xing4.0-29B-A4B",
+            "fallback": {
+              "top_k": 0,
+              "min_p": 0.0
+            },
+            "fallback_kind": "neutral"
+          },
+          "min_tokens": 0,
+          "batch_cohort": null,
+          "reasoning_effort": null,
+          "effort_semantics": "thinking_toggle",
+          "context_limit": 32768,
+          "structured_output": null
+        },
+        "ordinary_compute_width": 1,
+        "mtp": null,
+        "speculation": null,
+        "spomin_live_surgery": null,
+        "approximate_kv": null,
+        "cache_capsule": null,
+        "prompt_tokens": 12,
+        "completion_tokens": 6,
+        "ttft_seconds": 0.08308720801142044,
+        "elapsed_seconds": 0.1776380419905763
+      },
+      {
+        "request_id": "chatcmpl-a1c2bd4cd34d41babbc4f7411d5fae01",
+        "cache": "apcv2",
+        "cached_tokens": 11,
+        "parallel_prefill": null,
+        "profile": "xing4-0-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": false,
+          "top_logprobs": 0,
+          "logprob_semantics": null,
+          "thinking": false,
+          "sampling": {
+            "temperature": 0,
+            "repetition_penalty": 1.0,
+            "presence_penalty": 0.0,
+            "frequency_penalty": 0.0
+          },
+          "effective_sampling": {
+            "temperature": 0,
+            "top_p": 0.95,
+            "top_k": 0,
+            "min_p": 0.0,
+            "repetition_penalty": 1.0,
+            "presence_penalty": 0.0,
+            "frequency_penalty": 0.0
+          },
+          "sampling_defaults": {
+            "schema": "mlx2.sampling-defaults.v1",
+            "explicit": [
+              "temperature",
+              "repetition_penalty",
+              "presence_penalty",
+              "frequency_penalty"
+            ],
+            "applied": {
+              "top_p": 0.95
+            },
+            "sources": {
+              "top_p": "generation_config.json"
+            },
+            "profile": "general",
+            "profile_reason": "general",
+            "model": "XingChen-AGI/Xing4.0-29B-A4B",
+            "fallback": {
+              "top_k": 0,
+              "min_p": 0.0
+            },
+            "fallback_kind": "neutral"
+          },
+          "min_tokens": 0,
+          "batch_cohort": null,
+          "reasoning_effort": null,
+          "effort_semantics": "thinking_toggle",
+          "context_limit": 32768,
+          "structured_output": null
+        },
+        "ordinary_compute_width": 1,
+        "mtp": null,
+        "speculation": null,
+        "spomin_live_surgery": null,
+        "approximate_kv": null,
+        "cache_capsule": null,
+        "prompt_tokens": 12,
+        "completion_tokens": 6,
+        "ttft_seconds": 0.056475916993804276,
+        "elapsed_seconds": 0.1496237090032082
+      },
+      {
+        "request_id": "chatcmpl-7131bd73c40941089b65e31014f145f3",
+        "cache": "apcv2",
+        "cached_tokens": 2,
+        "parallel_prefill": null,
+        "profile": "xing4-0-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": false,
+          "top_logprobs": 0,
+          "logprob_semantics": null,
+          "thinking": false,
+          "sampling": {
+            "temperature": 0,
+            "repetition_penalty": 1.0,
+            "presence_penalty": 0.0,
+            "frequency_penalty": 0.0
+          },
+          "effective_sampling": {
+            "temperature": 0,
+            "top_p": 0.95,
+            "top_k": 0,
+            "min_p": 0.0,
+            "repetition_penalty": 1.0,
+            "presence_penalty": 0.0,
+            "frequency_penalty": 0.0
+          },
+          "sampling_defaults": {
+            "schema": "mlx2.sampling-defaults.v1",
+            "explicit": [
+              "temperature",
+              "repetition_penalty",
+              "presence_penalty",
+              "frequency_penalty"
+            ],
+            "applied": {
+              "top_p": 0.95
+            },
+            "sources": {
+              "top_p": "generation_config.json"
+            },
+            "profile": "general",
+            "profile_reason": "general",
+            "model": "XingChen-AGI/Xing4.0-29B-A4B",
+            "fallback": {
+              "top_k": 0,
+              "min_p": 0.0
+            },
+            "fallback_kind": "neutral"
+          },
+          "min_tokens": 0,
+          "batch_cohort": null,
+          "reasoning_effort": null,
+          "effort_semantics": "thinking_toggle",
+          "context_limit": 32768,
+          "structured_output": {
+            "kind": "json_schema",
+            "enforced": true,
+            "engine": "automaton",
+            "tail_mass_bound": 0.0,
+            "parallel_scans": 0,
+            "deferred": false,
+            "deferred_tokens": 0
+          }
+        },
+        "ordinary_compute_width": 1,
+        "mtp": null,
+        "speculation": null,
+        "spomin_live_surgery": null,
+        "approximate_kv": null,
+        "cache_capsule": null,
+        "prompt_tokens": 13,
+        "completion_tokens": 7,
+        "ttft_seconds": 0.6586753340088762,
+        "elapsed_seconds": 0.7724738749966491
+      },
+      {
+        "request_id": "chatcmpl-5e7a4461146e48fb8f64069ae364f76c",
+        "cache": "apcv2",
+        "cached_tokens": 12,
+        "parallel_prefill": null,
+        "profile": "xing4-0-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": false,
+          "top_logprobs": 0,
+          "logprob_semantics": null,
+          "thinking": false,
+          "sampling": {
+            "temperature": 0.7,
+            "repetition_penalty": 1.0,
+            "presence_penalty": 0.0,
+            "frequency_penalty": 0.0,
+            "seed": 7
+          },
+          "effective_sampling": {
+            "temperature": 0.7,
+            "top_p": 0.95,
+            "top_k": 0,
+            "min_p": 0.0,
+            "repetition_penalty": 1.0,
+            "presence_penalty": 0.0,
+            "frequency_penalty": 0.0
+          },
+          "sampling_defaults": {
+            "schema": "mlx2.sampling-defaults.v1",
+            "explicit": [
+              "temperature",
+              "repetition_penalty",
+              "presence_penalty",
+              "frequency_penalty"
+            ],
+            "applied": {
+              "top_p": 0.95
+            },
+            "sources": {
+              "top_p": "generation_config.json"
+            },
+            "profile": "general",
+            "profile_reason": "general",
+            "model": "XingChen-AGI/Xing4.0-29B-A4B",
+            "fallback": {
+              "top_k": 0,
+              "min_p": 0.0
+            },
+            "fallback_kind": "neutral"
+          },
+          "min_tokens": 0,
+          "batch_cohort": null,
+          "reasoning_effort": null,
+          "effort_semantics": "thinking_toggle",
+          "context_limit": 32768,
+          "structured_output": {
+            "kind": "json_schema",
+            "enforced": true,
+            "engine": "automaton",
+            "tail_mass_bound": 0.0,
+            "parallel_scans": 0,
+            "deferred": false,
+            "deferred_tokens": 0
+          }
+        },
+        "ordinary_compute_width": 1,
+        "mtp": null,
+        "speculation": null,
+        "spomin_live_surgery": null,
+        "approximate_kv": null,
+        "cache_capsule": null,
+        "prompt_tokens": 13,
+        "completion_tokens": 7,
+        "ttft_seconds": 0.05922954098787159,
+        "elapsed_seconds": 0.1735707499901764
+      },
+      {
+        "request_id": "chatcmpl-5a6e326588de484cbfe400443a13d92d",
+        "cache": "apcv2",
+        "cached_tokens": 1,
+        "parallel_prefill": null,
+        "profile": "xing4-0-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": false,
+          "top_logprobs": 0,
+          "logprob_semantics": null,
+          "thinking": true,
+          "sampling": {
+            "temperature": 0,
+            "repetition_penalty": 1.0,
+            "presence_penalty": 0.0,
+            "frequency_penalty": 0.0
+          },
+          "effective_sampling": {
+            "temperature": 0,
+            "top_p": 0.95,
+            "top_k": 0,
+            "min_p": 0.0,
+            "repetition_penalty": 1.0,
+            "presence_penalty": 0.0,
+            "frequency_penalty": 0.0
+          },
+          "sampling_defaults": {
+            "schema": "mlx2.sampling-defaults.v1",
+            "explicit": [
+              "temperature",
+              "repetition_penalty",
+              "presence_penalty",
+              "frequency_penalty"
+            ],
+            "applied": {
+              "top_p": 0.95
+            },
+            "sources": {
+              "top_p": "generation_config.json"
+            },
+            "profile": "general",
+            "profile_reason": "general",
+            "model": "XingChen-AGI/Xing4.0-29B-A4B",
+            "fallback": {
+              "top_k": 0,
+              "min_p": 0.0
+            },
+            "fallback_kind": "neutral"
+          },
+          "min_tokens": 0,
+          "batch_cohort": null,
+          "reasoning_effort": null,
+          "effort_semantics": "thinking_toggle",
+          "context_limit": 32768,
+          "structured_output": {
+            "kind": "json_object",
+            "enforced": true,
+            "engine": "automaton",
+            "tail_mass_bound": 0.0,
+            "parallel_scans": 0,
+            "deferred": true,
+            "deferred_tokens": 97
+          }
+        },
+        "ordinary_compute_width": 1,
+        "mtp": null,
+        "speculation": null,
+        "spomin_live_surgery": null,
+        "approximate_kv": null,
+        "cache_capsule": null,
+        "prompt_tokens": 56,
+        "completion_tokens": 106,
+        "ttft_seconds": 0.22893112499150448,
+        "elapsed_seconds": 2.033973084005993
+      },
+      {
+        "request_id": "chatcmpl-a7c0b05b0d5f46bc8911e32b2db503df",
+        "cache": "apcv2",
+        "cached_tokens": 11,
+        "parallel_prefill": null,
+        "profile": "xing4-0-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": false,
+          "top_logprobs": 0,
+          "logprob_semantics": null,
+          "thinking": false,
+          "sampling": {
+            "temperature": 0,
+            "repetition_penalty": 1.0,
+            "presence_penalty": 0.0,
+            "frequency_penalty": 0.0
+          },
+          "effective_sampling": {
+            "temperature": 0,
+            "top_p": 0.95,
+            "top_k": 0,
+            "min_p": 0.0,
+            "repetition_penalty": 1.0,
+            "presence_penalty": 0.0,
+            "frequency_penalty": 0.0
+          },
+          "sampling_defaults": {
+            "schema": "mlx2.sampling-defaults.v1",
+            "explicit": [
+              "temperature",
+              "repetition_penalty",
+              "presence_penalty",
+              "frequency_penalty"
+            ],
+            "applied": {
+              "top_p": 0.95
+            },
+            "sources": {
+              "top_p": "generation_config.json"
+            },
+            "profile": "general",
+            "profile_reason": "general",
+            "model": "XingChen-AGI/Xing4.0-29B-A4B",
+            "fallback": {
+              "top_k": 0,
+              "min_p": 0.0
+            },
+            "fallback_kind": "neutral"
+          },
+          "min_tokens": 0,
+          "batch_cohort": null,
+          "reasoning_effort": null,
+          "effort_semantics": "thinking_toggle",
+          "context_limit": 32768,
+          "structured_output": null
+        },
+        "ordinary_compute_width": 1,
+        "mtp": null,
+        "speculation": null,
+        "spomin_live_surgery": null,
+        "approximate_kv": null,
+        "cache_capsule": null,
+        "prompt_tokens": 12,
+        "completion_tokens": 6,
+        "ttft_seconds": 0.05878779201884754,
+        "elapsed_seconds": 0.15423675000783987
+      }
+    ],
+    "host_prompt_cache": {
+      "schema": "mlx2.host-prompt-cache.v1",
+      "entries": 16,
+      "tokens": 20092,
+      "max_entries": 128,
+      "max_tokens": 1048576,
+      "misses": 16,
+      "stores": 16,
+      "hits": 8
+    },
+    "api_resources": {
+      "responses": {
+        "entries": 0,
+        "bytes": 0,
+        "max_entries": 128,
+        "max_bytes": 33554432,
+        "counts": {}
+      },
+      "files": {
+        "files": 0,
+        "bytes": 0,
+        "max_files": 128,
+        "max_file_bytes": 33554432,
+        "max_bytes": 134217728,
+        "counts": {}
+      },
+      "batches": {
+        "batches": 0,
+        "max_batches": 32,
+        "max_lines": 1000,
+        "states": {},
+        "requests_completed": 0,
+        "requests_failed": 0
+      }
+    }
+  }
+}

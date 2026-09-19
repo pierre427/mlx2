@@ -1,0 +1,7 @@
+{
+  "draft_model": "~/mlx-models/Muse-Glimmer-30B-DFlash2",
+  "num_draft": 4,
+  "constrained_tool_grammar": true,
+  "tolerant_tool_markers": true,
+  "fly_verification": {"enabled": true, "entropy_threshold": 2.0, "window": 2, "min_prob": 0.01}
+}

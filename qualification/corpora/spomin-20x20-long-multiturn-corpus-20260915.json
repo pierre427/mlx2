@@ -1,0 +1,6394 @@
+{
+  "cases": [
+    {
+      "case_id": "software_architecture.01",
+      "domain": "software_architecture",
+      "expected_concepts": [
+        [
+          "idempot"
+        ],
+        [
+          "retry"
+        ],
+        [
+          "duplicate",
+          "double"
+        ],
+        [
+          "same",
+          "once",
+          "at-most"
+        ]
+      ],
+      "origin": "10x10 frozen source",
+      "question": "Why do idempotency keys matter for payment retry APIs?"
+    },
+    {
+      "case_id": "software_architecture.02",
+      "domain": "software_architecture",
+      "expected_concepts": [
+        [
+          "partition"
+        ],
+        [
+          "consistency",
+          "consistent"
+        ],
+        [
+          "availability",
+          "available"
+        ]
+      ],
+      "origin": "10x10 frozen source",
+      "question": "Explain the practical CAP tradeoff during a network partition."
+    },
+    {
+      "case_id": "software_architecture.03",
+      "domain": "software_architecture",
+      "expected_concepts": [
+        [
+          "slow",
+          "limit",
+          "throttle",
+          "signal"
+        ],
+        [
+          "producer",
+          "upstream"
+        ],
+        [
+          "overload",
+          "capacity"
+        ]
+      ],
+      "origin": "10x10 frozen source",
+      "question": "What is backpressure in a queue-based service?"
+    },
+    {
+      "case_id": "software_architecture.04",
+      "domain": "software_architecture",
+      "expected_concepts": [
+        "An append-only sequence retains ordered history that supports tracing and replay."
+      ],
+      "origin": "10x10 frozen source",
+      "question": "Why are append-only event logs useful for auditability?",
+      "review_note": "Do not require a claim of cryptographic tamper-proofing; append-only policy alone is not immutable storage against privileged modification."
+    },
+    {
+      "case_id": "software_architecture.05",
+      "domain": "software_architecture",
+      "expected_concepts": [
+        [
+          "cascad",
+          "amplif",
+          "overload"
+        ],
+        [
+          "fail",
+          "timeout",
+          "unhealthy"
+        ]
+      ],
+      "origin": "10x10 frozen source",
+      "question": "Name the failure mode circuit breakers are meant to reduce."
+    },
+    {
+      "case_id": "software_architecture.06",
+      "domain": "software_architecture",
+      "expected_concepts": [
+        "Return the recorded result without executing a second payment."
+      ],
+      "origin": "10x10 frozen source",
+      "question": "A payment API atomically records the committed payment result with an idempotency key. Before that record expires, a client retries the identical payload with that key after a timeout. What should the API do?",
+      "review_note": "State record retention and identical-payload assumptions; avoid implying every API remembers every key forever."
+    },
+    {
+      "case_id": "software_architecture.07",
+      "domain": "software_architecture",
+      "expected_concepts": [
+        "Retries amplify load; bounded backoff and jitter reduce synchronized demand."
+      ],
+      "origin": "10x10 frozen source",
+      "question": "Why does adding retries without backoff sometimes worsen an outage?"
+    },
+    {
+      "case_id": "software_architecture.08",
+      "domain": "software_architecture",
+      "expected_concepts": [
+        "Synchronous callers wait; queues decouple completion and require delivery/retry handling."
+      ],
+      "origin": "10x10 frozen source",
+      "question": "What is the practical difference between a synchronous call and an asynchronous queue?"
+    },
+    {
+      "case_id": "software_architecture.09",
+      "domain": "software_architecture",
+      "expected_concepts": [
+        "Avoid serving stale values after authoritative state changes."
+      ],
+      "origin": "10x10 frozen source",
+      "question": "Why should a cache entry have a version or invalidation policy?"
+    },
+    {
+      "case_id": "software_architecture.10",
+      "domain": "software_architecture",
+      "expected_concepts": [
+        "Bound memory and latency and apply backpressure under overload."
+      ],
+      "origin": "10x10 frozen source",
+      "question": "Give one reason a service should have a bounded queue."
+    },
+    {
+      "case_id": "software_architecture.11",
+      "domain": "software_architecture",
+      "expected_concepts": [
+        [
+          "idempot"
+        ],
+        [
+          "retry"
+        ],
+        [
+          "duplicate",
+          "double"
+        ],
+        [
+          "same",
+          "once",
+          "at-most"
+        ]
+      ],
+      "origin": "controlled variant of software_architecture.01",
+      "question": "For an operational design note, explain this mechanism and one consequence: Why do idempotency keys matter for payment retry APIs?"
+    },
+    {
+      "case_id": "software_architecture.12",
+      "domain": "software_architecture",
+      "expected_concepts": [
+        [
+          "partition"
+        ],
+        [
+          "consistency",
+          "consistent"
+        ],
+        [
+          "availability",
+          "available"
+        ]
+      ],
+      "origin": "controlled variant of software_architecture.02",
+      "question": "For an operational design note, explain this mechanism and one consequence: Explain the practical CAP tradeoff during a network partition."
+    },
+    {
+      "case_id": "software_architecture.13",
+      "domain": "software_architecture",
+      "expected_concepts": [
+        [
+          "slow",
+          "limit",
+          "throttle",
+          "signal"
+        ],
+        [
+          "producer",
+          "upstream"
+        ],
+        [
+          "overload",
+          "capacity"
+        ]
+      ],
+      "origin": "controlled variant of software_architecture.03",
+      "question": "For an operational design note, explain this mechanism and one consequence: What is backpressure in a queue-based service?"
+    },
+    {
+      "case_id": "software_architecture.14",
+      "domain": "software_architecture",
+      "expected_concepts": [
+        "An append-only sequence retains ordered history that supports tracing and replay."
+      ],
+      "origin": "controlled variant of software_architecture.04",
+      "question": "For an operational design note, explain this mechanism and one consequence: Why are append-only event logs useful for auditability?",
+      "review_note": "Do not require a claim of cryptographic tamper-proofing; append-only policy alone is not immutable storage against privileged modification."
+    },
+    {
+      "case_id": "software_architecture.15",
+      "domain": "software_architecture",
+      "expected_concepts": [
+        [
+          "cascad",
+          "amplif",
+          "overload"
+        ],
+        [
+          "fail",
+          "timeout",
+          "unhealthy"
+        ]
+      ],
+      "origin": "controlled variant of software_architecture.05",
+      "question": "For an operational design note, explain this mechanism and one consequence: Name the failure mode circuit breakers are meant to reduce."
+    },
+    {
+      "case_id": "software_architecture.16",
+      "domain": "software_architecture",
+      "expected_concepts": [
+        "Return the recorded result without executing a second payment."
+      ],
+      "origin": "controlled variant of software_architecture.06",
+      "question": "For an operational design note, explain this mechanism and one consequence: A payment API atomically records the committed payment result with an idempotency key. Before that record expires, a client retries the identical payload with that key after a timeout. What should the API do?",
+      "review_note": "State record retention and identical-payload assumptions; avoid implying every API remembers every key forever."
+    },
+    {
+      "case_id": "software_architecture.17",
+      "domain": "software_architecture",
+      "expected_concepts": [
+        "Retries amplify load; bounded backoff and jitter reduce synchronized demand."
+      ],
+      "origin": "controlled variant of software_architecture.07",
+      "question": "For an operational design note, explain this mechanism and one consequence: Why does adding retries without backoff sometimes worsen an outage?"
+    },
+    {
+      "case_id": "software_architecture.18",
+      "domain": "software_architecture",
+      "expected_concepts": [
+        "Synchronous callers wait; queues decouple completion and require delivery/retry handling."
+      ],
+      "origin": "controlled variant of software_architecture.08",
+      "question": "For an operational design note, explain this mechanism and one consequence: What is the practical difference between a synchronous call and an asynchronous queue?"
+    },
+    {
+      "case_id": "software_architecture.19",
+      "domain": "software_architecture",
+      "expected_concepts": [
+        "Avoid serving stale values after authoritative state changes."
+      ],
+      "origin": "controlled variant of software_architecture.09",
+      "question": "For an operational design note, explain this mechanism and one consequence: Why should a cache entry have a version or invalidation policy?"
+    },
+    {
+      "case_id": "software_architecture.20",
+      "domain": "software_architecture",
+      "expected_concepts": [
+        "Bound memory and latency and apply backpressure under overload."
+      ],
+      "origin": "controlled variant of software_architecture.10",
+      "question": "For an operational design note, explain this mechanism and one consequence: Give one reason a service should have a bounded queue."
+    },
+    {
+      "case_id": "databases.01",
+      "domain": "databases",
+      "expected_concepts": [
+        "It controls interference and visibility between concurrent transactions; weaker levels permit anomalies that serializable isolation prevents."
+      ],
+      "origin": "10x10 frozen source",
+      "question": "What does transaction isolation control, and why does the chosen isolation level matter?",
+      "review_note": "Do not require all ACID implementations or isolation levels to be serializable."
+    },
+    {
+      "case_id": "databases.02",
+      "domain": "databases",
+      "expected_concepts": [
+        [
+          "index"
+        ],
+        [
+          "fewer",
+          "less"
+        ],
+        [
+          "rows",
+          "pages"
+        ]
+      ],
+      "origin": "10x10 frozen source",
+      "question": "Why can a selective index be faster than scanning a table?"
+    },
+    {
+      "case_id": "databases.03",
+      "domain": "databases",
+      "expected_concepts": [
+        "Each transaction reads a consistent snapshot, generally from its start, plus its own writes; concurrent conflicting writes are checked."
+      ],
+      "origin": "10x10 frozen source",
+      "question": "Explain snapshot isolation in one sentence.",
+      "review_note": "Snapshot isolation need not be serializable; do not penalize a valid write-skew caveat or require every detail in one sentence."
+    },
+    {
+      "case_id": "databases.04",
+      "domain": "databases",
+      "expected_concepts": [
+        [
+          "referential"
+        ],
+        [
+          "orphan",
+          "missing",
+          "invalid"
+        ]
+      ],
+      "origin": "10x10 frozen source",
+      "question": "What problem does a foreign key constraint prevent?"
+    },
+    {
+      "case_id": "databases.05",
+      "domain": "databases",
+      "expected_concepts": [
+        [
+          "parameter",
+          "prepared"
+        ],
+        [
+          "code",
+          "data"
+        ],
+        [
+          "injection"
+        ]
+      ],
+      "origin": "10x10 frozen source",
+      "question": "Why are prepared statements useful for SQL injection defense?"
+    },
+    {
+      "case_id": "databases.06",
+      "domain": "databases",
+      "expected_concepts": [
+        "Write skew; serializable isolation or appropriate locking/constraint."
+      ],
+      "origin": "10x10 frozen source",
+      "question": "Two transactions each see the other doctor on call and both go off call under snapshot isolation. Name the anomaly and one prevention."
+    },
+    {
+      "case_id": "databases.07",
+      "domain": "databases",
+      "expected_concepts": [
+        "Each insert must maintain index structures and may add I/O."
+      ],
+      "origin": "10x10 frozen source",
+      "question": "Why can adding an index slow inserts?"
+    },
+    {
+      "case_id": "databases.08",
+      "domain": "databases",
+      "expected_concepts": [
+        "Recover committed updates via durable log records; atomic recovery."
+      ],
+      "origin": "10x10 frozen source",
+      "question": "What does a write-ahead log make possible after a crash?"
+    },
+    {
+      "case_id": "databases.09",
+      "domain": "databases",
+      "expected_concepts": [
+        "COUNT(*) counts rows; column count excludes null values."
+      ],
+      "origin": "10x10 frozen source",
+      "question": "What does SELECT COUNT(*) count compared with COUNT(nullable_column)?"
+    },
+    {
+      "case_id": "databases.10",
+      "domain": "databases",
+      "expected_concepts": [
+        "A key consisting of two or more columns identifying a row together."
+      ],
+      "origin": "10x10 frozen source",
+      "question": "What is a composite database key?"
+    },
+    {
+      "case_id": "databases.11",
+      "domain": "databases",
+      "expected_concepts": [
+        "It controls interference and visibility between concurrent transactions; weaker levels permit anomalies that serializable isolation prevents."
+      ],
+      "origin": "controlled variant of databases.01",
+      "question": "For an operational design note, explain this mechanism and one consequence: What does transaction isolation control, and why does the chosen isolation level matter?",
+      "review_note": "Do not require all ACID implementations or isolation levels to be serializable."
+    },
+    {
+      "case_id": "databases.12",
+      "domain": "databases",
+      "expected_concepts": [
+        [
+          "index"
+        ],
+        [
+          "fewer",
+          "less"
+        ],
+        [
+          "rows",
+          "pages"
+        ]
+      ],
+      "origin": "controlled variant of databases.02",
+      "question": "For an operational design note, explain this mechanism and one consequence: Why can a selective index be faster than scanning a table?"
+    },
+    {
+      "case_id": "databases.13",
+      "domain": "databases",
+      "expected_concepts": [
+        "Each transaction reads a consistent snapshot, generally from its start, plus its own writes; concurrent conflicting writes are checked."
+      ],
+      "origin": "controlled variant of databases.03",
+      "question": "For an operational design note, explain this mechanism and one consequence: Explain snapshot isolation in one sentence.",
+      "review_note": "Snapshot isolation need not be serializable; do not penalize a valid write-skew caveat or require every detail in one sentence."
+    },
+    {
+      "case_id": "databases.14",
+      "domain": "databases",
+      "expected_concepts": [
+        [
+          "referential"
+        ],
+        [
+          "orphan",
+          "missing",
+          "invalid"
+        ]
+      ],
+      "origin": "controlled variant of databases.04",
+      "question": "For an operational design note, explain this mechanism and one consequence: What problem does a foreign key constraint prevent?"
+    },
+    {
+      "case_id": "databases.15",
+      "domain": "databases",
+      "expected_concepts": [
+        [
+          "parameter",
+          "prepared"
+        ],
+        [
+          "code",
+          "data"
+        ],
+        [
+          "injection"
+        ]
+      ],
+      "origin": "controlled variant of databases.05",
+      "question": "For an operational design note, explain this mechanism and one consequence: Why are prepared statements useful for SQL injection defense?"
+    },
+    {
+      "case_id": "databases.16",
+      "domain": "databases",
+      "expected_concepts": [
+        "Write skew; serializable isolation or appropriate locking/constraint."
+      ],
+      "origin": "controlled variant of databases.06",
+      "question": "For an operational design note, explain this mechanism and one consequence: Two transactions each see the other doctor on call and both go off call under snapshot isolation. Name the anomaly and one prevention."
+    },
+    {
+      "case_id": "databases.17",
+      "domain": "databases",
+      "expected_concepts": [
+        "Each insert must maintain index structures and may add I/O."
+      ],
+      "origin": "controlled variant of databases.07",
+      "question": "For an operational design note, explain this mechanism and one consequence: Why can adding an index slow inserts?"
+    },
+    {
+      "case_id": "databases.18",
+      "domain": "databases",
+      "expected_concepts": [
+        "Recover committed updates via durable log records; atomic recovery."
+      ],
+      "origin": "controlled variant of databases.08",
+      "question": "For an operational design note, explain this mechanism and one consequence: What does a write-ahead log make possible after a crash?"
+    },
+    {
+      "case_id": "databases.19",
+      "domain": "databases",
+      "expected_concepts": [
+        "COUNT(*) counts rows; column count excludes null values."
+      ],
+      "origin": "controlled variant of databases.09",
+      "question": "For an operational design note, explain this mechanism and one consequence: What does SELECT COUNT(*) count compared with COUNT(nullable_column)?"
+    },
+    {
+      "case_id": "databases.20",
+      "domain": "databases",
+      "expected_concepts": [
+        "A key consisting of two or more columns identifying a row together."
+      ],
+      "origin": "controlled variant of databases.10",
+      "question": "For an operational design note, explain this mechanism and one consequence: What is a composite database key?"
+    },
+    {
+      "case_id": "security.01",
+      "domain": "security",
+      "expected_concepts": [
+        [
+          "salt"
+        ],
+        [
+          "unique",
+          "per-user",
+          "per password"
+        ],
+        [
+          "pepper"
+        ],
+        [
+          "secret",
+          "server"
+        ]
+      ],
+      "origin": "10x10 frozen source",
+      "question": "Contrast a password salt with a pepper."
+    },
+    {
+      "case_id": "security.02",
+      "domain": "security",
+      "expected_concepts": [
+        [
+          "cross-site",
+          "csrf"
+        ],
+        [
+          "request"
+        ],
+        [
+          "authenticated",
+          "browser",
+          "session"
+        ]
+      ],
+      "origin": "10x10 frozen source",
+      "question": "What does CSRF protection defend against?"
+    },
+    {
+      "case_id": "security.03",
+      "domain": "security",
+      "expected_concepts": [
+        [
+          "encode",
+          "escaping"
+        ],
+        [
+          "context"
+        ],
+        [
+          "validation",
+          "reject"
+        ]
+      ],
+      "origin": "10x10 frozen source",
+      "question": "Why is output encoding different from input validation?"
+    },
+    {
+      "case_id": "security.04",
+      "domain": "security",
+      "expected_concepts": [
+        [
+          "minimum",
+          "only"
+        ],
+        [
+          "permissions",
+          "privileges"
+        ],
+        [
+          "needed",
+          "required"
+        ]
+      ],
+      "origin": "10x10 frozen source",
+      "question": "What does least privilege mean for a service account?"
+    },
+    {
+      "case_id": "security.05",
+      "domain": "security",
+      "expected_concepts": [
+        [
+          "leak",
+          "expos"
+        ],
+        [
+          "logs"
+        ],
+        [
+          "credential",
+          "secret",
+          "token"
+        ]
+      ],
+      "origin": "10x10 frozen source",
+      "question": "Why should secrets not be logged even in debug mode?"
+    },
+    {
+      "case_id": "security.06",
+      "domain": "security",
+      "expected_concepts": [
+        "Fast hashing allows many guesses; password KDFs add cost and salts."
+      ],
+      "origin": "10x10 frozen source",
+      "question": "Why does hashing a password with plain SHA-256 provide weaker resistance to offline guessing than a password KDF?"
+    },
+    {
+      "case_id": "security.07",
+      "domain": "security",
+      "expected_concepts": [
+        "No; transport encryption does not separate SQL code from user data."
+      ],
+      "origin": "10x10 frozen source",
+      "question": "Does HTTPS alone prevent a server-side SQL injection bug? Explain."
+    },
+    {
+      "case_id": "security.08",
+      "domain": "security",
+      "expected_concepts": [
+        "Authentication alone does not establish permission for a particular object."
+      ],
+      "origin": "10x10 frozen source",
+      "question": "Why should authorization be checked on each requested object?"
+    },
+    {
+      "case_id": "security.09",
+      "domain": "security",
+      "expected_concepts": [
+        "JavaScript access to the cookie; not all XSS effects or CSRF."
+      ],
+      "origin": "10x10 frozen source",
+      "question": "A web app sets an HttpOnly cookie. Which client-side access does this restrict?"
+    },
+    {
+      "case_id": "security.10",
+      "domain": "security",
+      "expected_concepts": [
+        "Copies and history can remain; the credential stays valid until revoked."
+      ],
+      "origin": "10x10 frozen source",
+      "question": "Why is revoking an exposed token necessary even after removing it from the latest code revision?"
+    },
+    {
+      "case_id": "security.11",
+      "domain": "security",
+      "expected_concepts": [
+        [
+          "salt"
+        ],
+        [
+          "unique",
+          "per-user",
+          "per password"
+        ],
+        [
+          "pepper"
+        ],
+        [
+          "secret",
+          "server"
+        ]
+      ],
+      "origin": "controlled variant of security.01",
+      "question": "For an operational design note, explain this mechanism and one consequence: Contrast a password salt with a pepper."
+    },
+    {
+      "case_id": "security.12",
+      "domain": "security",
+      "expected_concepts": [
+        [
+          "cross-site",
+          "csrf"
+        ],
+        [
+          "request"
+        ],
+        [
+          "authenticated",
+          "browser",
+          "session"
+        ]
+      ],
+      "origin": "controlled variant of security.02",
+      "question": "For an operational design note, explain this mechanism and one consequence: What does CSRF protection defend against?"
+    },
+    {
+      "case_id": "security.13",
+      "domain": "security",
+      "expected_concepts": [
+        [
+          "encode",
+          "escaping"
+        ],
+        [
+          "context"
+        ],
+        [
+          "validation",
+          "reject"
+        ]
+      ],
+      "origin": "controlled variant of security.03",
+      "question": "For an operational design note, explain this mechanism and one consequence: Why is output encoding different from input validation?"
+    },
+    {
+      "case_id": "security.14",
+      "domain": "security",
+      "expected_concepts": [
+        [
+          "minimum",
+          "only"
+        ],
+        [
+          "permissions",
+          "privileges"
+        ],
+        [
+          "needed",
+          "required"
+        ]
+      ],
+      "origin": "controlled variant of security.04",
+      "question": "For an operational design note, explain this mechanism and one consequence: What does least privilege mean for a service account?"
+    },
+    {
+      "case_id": "security.15",
+      "domain": "security",
+      "expected_concepts": [
+        [
+          "leak",
+          "expos"
+        ],
+        [
+          "logs"
+        ],
+        [
+          "credential",
+          "secret",
+          "token"
+        ]
+      ],
+      "origin": "controlled variant of security.05",
+      "question": "For an operational design note, explain this mechanism and one consequence: Why should secrets not be logged even in debug mode?"
+    },
+    {
+      "case_id": "security.16",
+      "domain": "security",
+      "expected_concepts": [
+        "Fast hashing allows many guesses; password KDFs add cost and salts."
+      ],
+      "origin": "controlled variant of security.06",
+      "question": "For an operational design note, explain this mechanism and one consequence: Why does hashing a password with plain SHA-256 provide weaker resistance to offline guessing than a password KDF?"
+    },
+    {
+      "case_id": "security.17",
+      "domain": "security",
+      "expected_concepts": [
+        "No; transport encryption does not separate SQL code from user data."
+      ],
+      "origin": "controlled variant of security.07",
+      "question": "For an operational design note, explain this mechanism and one consequence: Does HTTPS alone prevent a server-side SQL injection bug? Explain."
+    },
+    {
+      "case_id": "security.18",
+      "domain": "security",
+      "expected_concepts": [
+        "Authentication alone does not establish permission for a particular object."
+      ],
+      "origin": "controlled variant of security.08",
+      "question": "For an operational design note, explain this mechanism and one consequence: Why should authorization be checked on each requested object?"
+    },
+    {
+      "case_id": "security.19",
+      "domain": "security",
+      "expected_concepts": [
+        "JavaScript access to the cookie; not all XSS effects or CSRF."
+      ],
+      "origin": "controlled variant of security.09",
+      "question": "For an operational design note, explain this mechanism and one consequence: A web app sets an HttpOnly cookie. Which client-side access does this restrict?"
+    },
+    {
+      "case_id": "security.20",
+      "domain": "security",
+      "expected_concepts": [
+        "Copies and history can remain; the credential stays valid until revoked."
+      ],
+      "origin": "controlled variant of security.10",
+      "question": "For an operational design note, explain this mechanism and one consequence: Why is revoking an exposed token necessary even after removing it from the latest code revision?"
+    },
+    {
+      "case_id": "networking.01",
+      "domain": "networking",
+      "expected_concepts": [
+        [
+          "syn"
+        ],
+        [
+          "ack"
+        ],
+        [
+          "establish",
+          "synchron"
+        ],
+        [
+          "connection"
+        ]
+      ],
+      "origin": "10x10 frozen source",
+      "question": "What is the purpose of TCP's three-way handshake?"
+    },
+    {
+      "case_id": "networking.02",
+      "domain": "networking",
+      "expected_concepts": [
+        "Separate QUIC streams can deliver independently when data is lost on another stream; missing bytes still block ordered delivery within their own stream."
+      ],
+      "origin": "10x10 frozen source",
+      "question": "How does QUIC avoid the cross-stream head-of-line blocking caused by one lost TCP segment?",
+      "review_note": "Do not reward the overclaim that QUIC eliminates every form of head-of-line blocking."
+    },
+    {
+      "case_id": "networking.03",
+      "domain": "networking",
+      "expected_concepts": [
+        [
+          "cache"
+        ],
+        [
+          "time",
+          "duration"
+        ],
+        [
+          "record",
+          "answer"
+        ]
+      ],
+      "origin": "10x10 frozen source",
+      "question": "What does DNS TTL control?"
+    },
+    {
+      "case_id": "networking.04",
+      "domain": "networking",
+      "expected_concepts": [
+        [
+          "unhealthy",
+          "failed"
+        ],
+        [
+          "route",
+          "traffic"
+        ],
+        [
+          "backend",
+          "instance"
+        ]
+      ],
+      "origin": "10x10 frozen source",
+      "question": "Why do load balancers need health checks?"
+    },
+    {
+      "case_id": "networking.05",
+      "domain": "networking",
+      "expected_concepts": [
+        [
+          "maximum",
+          "largest"
+        ],
+        [
+          "packet",
+          "frame"
+        ],
+        [
+          "fragment",
+          "path"
+        ]
+      ],
+      "origin": "10x10 frozen source",
+      "question": "What is MTU and why can it matter?"
+    },
+    {
+      "case_id": "networking.06",
+      "domain": "networking",
+      "expected_concepts": [
+        "Latency is delay; bandwidth is transfer capacity per unit time."
+      ],
+      "origin": "10x10 frozen source",
+      "question": "What distinguishes latency from bandwidth?"
+    },
+    {
+      "case_id": "networking.07",
+      "domain": "networking",
+      "expected_concepts": [
+        "TTL permits cached use until expiry; updates are not instant global invalidation."
+      ],
+      "origin": "10x10 frozen source",
+      "question": "A DNS record changes while a resolver still has an unexpired cached answer. Why can clients see the old address?"
+    },
+    {
+      "case_id": "networking.08",
+      "domain": "networking",
+      "expected_concepts": [
+        "Forward destinations not matched by a more specific route."
+      ],
+      "origin": "10x10 frozen source",
+      "question": "What is the function of a default route?"
+    },
+    {
+      "case_id": "networking.09",
+      "domain": "networking",
+      "expected_concepts": [
+        "It lacks transport retransmission and ordered delivery guarantees; applications may add them."
+      ],
+      "origin": "10x10 frozen source",
+      "question": "Why does UDP not itself guarantee delivery or ordering?"
+    },
+    {
+      "case_id": "networking.10",
+      "domain": "networking",
+      "expected_concepts": [
+        "Reduces synchronized reconnect storms and overload."
+      ],
+      "origin": "10x10 frozen source",
+      "question": "What problem does exponential backoff with jitter address for reconnecting clients?"
+    },
+    {
+      "case_id": "networking.11",
+      "domain": "networking",
+      "expected_concepts": [
+        [
+          "syn"
+        ],
+        [
+          "ack"
+        ],
+        [
+          "establish",
+          "synchron"
+        ],
+        [
+          "connection"
+        ]
+      ],
+      "origin": "controlled variant of networking.01",
+      "question": "For an operational design note, explain this mechanism and one consequence: What is the purpose of TCP's three-way handshake?"
+    },
+    {
+      "case_id": "networking.12",
+      "domain": "networking",
+      "expected_concepts": [
+        "Separate QUIC streams can deliver independently when data is lost on another stream; missing bytes still block ordered delivery within their own stream."
+      ],
+      "origin": "controlled variant of networking.02",
+      "question": "For an operational design note, explain this mechanism and one consequence: How does QUIC avoid the cross-stream head-of-line blocking caused by one lost TCP segment?",
+      "review_note": "Do not reward the overclaim that QUIC eliminates every form of head-of-line blocking."
+    },
+    {
+      "case_id": "networking.13",
+      "domain": "networking",
+      "expected_concepts": [
+        [
+          "cache"
+        ],
+        [
+          "time",
+          "duration"
+        ],
+        [
+          "record",
+          "answer"
+        ]
+      ],
+      "origin": "controlled variant of networking.03",
+      "question": "For an operational design note, explain this mechanism and one consequence: What does DNS TTL control?"
+    },
+    {
+      "case_id": "networking.14",
+      "domain": "networking",
+      "expected_concepts": [
+        [
+          "unhealthy",
+          "failed"
+        ],
+        [
+          "route",
+          "traffic"
+        ],
+        [
+          "backend",
+          "instance"
+        ]
+      ],
+      "origin": "controlled variant of networking.04",
+      "question": "For an operational design note, explain this mechanism and one consequence: Why do load balancers need health checks?"
+    },
+    {
+      "case_id": "networking.15",
+      "domain": "networking",
+      "expected_concepts": [
+        [
+          "maximum",
+          "largest"
+        ],
+        [
+          "packet",
+          "frame"
+        ],
+        [
+          "fragment",
+          "path"
+        ]
+      ],
+      "origin": "controlled variant of networking.05",
+      "question": "For an operational design note, explain this mechanism and one consequence: What is MTU and why can it matter?"
+    },
+    {
+      "case_id": "networking.16",
+      "domain": "networking",
+      "expected_concepts": [
+        "Latency is delay; bandwidth is transfer capacity per unit time."
+      ],
+      "origin": "controlled variant of networking.06",
+      "question": "For an operational design note, explain this mechanism and one consequence: What distinguishes latency from bandwidth?"
+    },
+    {
+      "case_id": "networking.17",
+      "domain": "networking",
+      "expected_concepts": [
+        "TTL permits cached use until expiry; updates are not instant global invalidation."
+      ],
+      "origin": "controlled variant of networking.07",
+      "question": "For an operational design note, explain this mechanism and one consequence: A DNS record changes while a resolver still has an unexpired cached answer. Why can clients see the old address?"
+    },
+    {
+      "case_id": "networking.18",
+      "domain": "networking",
+      "expected_concepts": [
+        "Forward destinations not matched by a more specific route."
+      ],
+      "origin": "controlled variant of networking.08",
+      "question": "For an operational design note, explain this mechanism and one consequence: What is the function of a default route?"
+    },
+    {
+      "case_id": "networking.19",
+      "domain": "networking",
+      "expected_concepts": [
+        "It lacks transport retransmission and ordered delivery guarantees; applications may add them."
+      ],
+      "origin": "controlled variant of networking.09",
+      "question": "For an operational design note, explain this mechanism and one consequence: Why does UDP not itself guarantee delivery or ordering?"
+    },
+    {
+      "case_id": "networking.20",
+      "domain": "networking",
+      "expected_concepts": [
+        "Reduces synchronized reconnect storms and overload."
+      ],
+      "origin": "controlled variant of networking.10",
+      "question": "For an operational design note, explain this mechanism and one consequence: What problem does exponential backoff with jitter address for reconnecting clients?"
+    },
+    {
+      "case_id": "ml_ai.01",
+      "domain": "ml_ai",
+      "expected_concepts": [
+        [
+          "train"
+        ],
+        [
+          "memor",
+          "fit"
+        ],
+        [
+          "general",
+          "test",
+          "new"
+        ]
+      ],
+      "origin": "10x10 frozen source",
+      "question": "Explain overfitting in model training."
+    },
+    {
+      "case_id": "ml_ai.02",
+      "domain": "ml_ai",
+      "expected_concepts": [
+        [
+          "probab",
+          "confidence"
+        ],
+        [
+          "accuracy",
+          "correct"
+        ],
+        [
+          "match",
+          "reliab"
+        ]
+      ],
+      "origin": "10x10 frozen source",
+      "question": "How is calibration different from accuracy?"
+    },
+    {
+      "case_id": "ml_ai.03",
+      "domain": "ml_ai",
+      "expected_concepts": [
+        [
+          "tune",
+          "select"
+        ],
+        [
+          "held",
+          "unseen"
+        ],
+        [
+          "train"
+        ]
+      ],
+      "origin": "10x10 frozen source",
+      "question": "What is the role of a validation set?"
+    },
+    {
+      "case_id": "ml_ai.04",
+      "domain": "ml_ai",
+      "expected_concepts": [
+        [
+          "retriev"
+        ],
+        [
+          "misread",
+          "ignore",
+          "unsupported"
+        ],
+        [
+          "generate",
+          "synthes"
+        ]
+      ],
+      "origin": "10x10 frozen source",
+      "question": "Why can retrieval-augmented generation still hallucinate?"
+    },
+    {
+      "case_id": "ml_ai.05",
+      "domain": "ml_ai",
+      "expected_concepts": [
+        [
+          "query"
+        ],
+        [
+          "document",
+          "passage"
+        ],
+        [
+          "joint",
+          "together"
+        ],
+        [
+          "rerank",
+          "score"
+        ]
+      ],
+      "origin": "10x10 frozen source",
+      "question": "What does a cross-encoder reranker add after vector search?"
+    },
+    {
+      "case_id": "ml_ai.06",
+      "domain": "ml_ai",
+      "expected_concepts": [
+        "Avoid selection leakage and optimistic estimates of generalization."
+      ],
+      "origin": "10x10 frozen source",
+      "question": "Why must the final test set stay out of hyperparameter selection?"
+    },
+    {
+      "case_id": "ml_ai.07",
+      "domain": "ml_ai",
+      "expected_concepts": [
+        "It misses all rare positives; class metrics expose the failure."
+      ],
+      "origin": "10x10 frozen source",
+      "question": "A classifier always predicts the majority class in a 99:1 dataset. Why can 99% accuracy be misleading?"
+    },
+    {
+      "case_id": "ml_ai.08",
+      "domain": "ml_ai",
+      "expected_concepts": [
+        "Information unavailable at prediction time or from held-out data affects training/evaluation."
+      ],
+      "origin": "10x10 frozen source",
+      "question": "What is data leakage in model evaluation?"
+    },
+    {
+      "case_id": "ml_ai.09",
+      "domain": "ml_ai",
+      "expected_concepts": [
+        "Similarity is not entailment; relevant text may not establish the claim."
+      ],
+      "origin": "10x10 frozen source",
+      "question": "Why does a high retrieval similarity score not prove an answer is supported?"
+    },
+    {
+      "case_id": "ml_ai.10",
+      "domain": "ml_ai",
+      "expected_concepts": [
+        "A maximum-probability token, subject to tie handling; greedy decoding."
+      ],
+      "origin": "10x10 frozen source",
+      "question": "What does temperature zero usually select from a language model distribution?"
+    },
+    {
+      "case_id": "ml_ai.11",
+      "domain": "ml_ai",
+      "expected_concepts": [
+        [
+          "train"
+        ],
+        [
+          "memor",
+          "fit"
+        ],
+        [
+          "general",
+          "test",
+          "new"
+        ]
+      ],
+      "origin": "controlled variant of ml_ai.01",
+      "question": "For an operational design note, explain this mechanism and one consequence: Explain overfitting in model training."
+    },
+    {
+      "case_id": "ml_ai.12",
+      "domain": "ml_ai",
+      "expected_concepts": [
+        [
+          "probab",
+          "confidence"
+        ],
+        [
+          "accuracy",
+          "correct"
+        ],
+        [
+          "match",
+          "reliab"
+        ]
+      ],
+      "origin": "controlled variant of ml_ai.02",
+      "question": "For an operational design note, explain this mechanism and one consequence: How is calibration different from accuracy?"
+    },
+    {
+      "case_id": "ml_ai.13",
+      "domain": "ml_ai",
+      "expected_concepts": [
+        [
+          "tune",
+          "select"
+        ],
+        [
+          "held",
+          "unseen"
+        ],
+        [
+          "train"
+        ]
+      ],
+      "origin": "controlled variant of ml_ai.03",
+      "question": "For an operational design note, explain this mechanism and one consequence: What is the role of a validation set?"
+    },
+    {
+      "case_id": "ml_ai.14",
+      "domain": "ml_ai",
+      "expected_concepts": [
+        [
+          "retriev"
+        ],
+        [
+          "misread",
+          "ignore",
+          "unsupported"
+        ],
+        [
+          "generate",
+          "synthes"
+        ]
+      ],
+      "origin": "controlled variant of ml_ai.04",
+      "question": "For an operational design note, explain this mechanism and one consequence: Why can retrieval-augmented generation still hallucinate?"
+    },
+    {
+      "case_id": "ml_ai.15",
+      "domain": "ml_ai",
+      "expected_concepts": [
+        [
+          "query"
+        ],
+        [
+          "document",
+          "passage"
+        ],
+        [
+          "joint",
+          "together"
+        ],
+        [
+          "rerank",
+          "score"
+        ]
+      ],
+      "origin": "controlled variant of ml_ai.05",
+      "question": "For an operational design note, explain this mechanism and one consequence: What does a cross-encoder reranker add after vector search?"
+    },
+    {
+      "case_id": "ml_ai.16",
+      "domain": "ml_ai",
+      "expected_concepts": [
+        "Avoid selection leakage and optimistic estimates of generalization."
+      ],
+      "origin": "controlled variant of ml_ai.06",
+      "question": "For an operational design note, explain this mechanism and one consequence: Why must the final test set stay out of hyperparameter selection?"
+    },
+    {
+      "case_id": "ml_ai.17",
+      "domain": "ml_ai",
+      "expected_concepts": [
+        "It misses all rare positives; class metrics expose the failure."
+      ],
+      "origin": "controlled variant of ml_ai.07",
+      "question": "For an operational design note, explain this mechanism and one consequence: A classifier always predicts the majority class in a 99:1 dataset. Why can 99% accuracy be misleading?"
+    },
+    {
+      "case_id": "ml_ai.18",
+      "domain": "ml_ai",
+      "expected_concepts": [
+        "Information unavailable at prediction time or from held-out data affects training/evaluation."
+      ],
+      "origin": "controlled variant of ml_ai.08",
+      "question": "For an operational design note, explain this mechanism and one consequence: What is data leakage in model evaluation?"
+    },
+    {
+      "case_id": "ml_ai.19",
+      "domain": "ml_ai",
+      "expected_concepts": [
+        "Similarity is not entailment; relevant text may not establish the claim."
+      ],
+      "origin": "controlled variant of ml_ai.09",
+      "question": "For an operational design note, explain this mechanism and one consequence: Why does a high retrieval similarity score not prove an answer is supported?"
+    },
+    {
+      "case_id": "ml_ai.20",
+      "domain": "ml_ai",
+      "expected_concepts": [
+        "A maximum-probability token, subject to tie handling; greedy decoding."
+      ],
+      "origin": "controlled variant of ml_ai.10",
+      "question": "For an operational design note, explain this mechanism and one consequence: What does temperature zero usually select from a language model distribution?"
+    },
+    {
+      "case_id": "statistics.01",
+      "domain": "statistics",
+      "expected_concepts": [
+        [
+          "null"
+        ],
+        [
+          "observ",
+          "extreme"
+        ],
+        [
+          "probab"
+        ]
+      ],
+      "origin": "10x10 frozen source",
+      "question": "What does a p-value measure?"
+    },
+    {
+      "case_id": "statistics.02",
+      "domain": "statistics",
+      "expected_concepts": [
+        "The repeated-sampling procedure covers the fixed parameter in 95% of comparable repetitions under its assumptions."
+      ],
+      "origin": "10x10 frozen source",
+      "question": "In frequentist inference, why is a 95% confidence interval not generally a 95% probability statement about the fixed parameter after the data are observed?",
+      "review_note": "Explicit frequentist scope; Bayesian credible intervals are different and a correct caveat is acceptable."
+    },
+    {
+      "case_id": "statistics.03",
+      "domain": "statistics",
+      "expected_concepts": [
+        [
+          "aggregate"
+        ],
+        [
+          "group",
+          "subgroup"
+        ],
+        [
+          "reverse",
+          "different"
+        ]
+      ],
+      "origin": "10x10 frozen source",
+      "question": "Explain Simpson's paradox."
+    },
+    {
+      "case_id": "statistics.04",
+      "domain": "statistics",
+      "expected_concepts": [
+        "They directly show the tradeoff between finding positives and false discoveries; many negatives can make a small false-positive rate look reassuring."
+      ],
+      "origin": "10x10 frozen source",
+      "question": "Why can precision-recall curves be more informative than ROC curves when positive examples are rare?",
+      "review_note": "This is a conditional comparison, not a universal claim that ROC curves are wrong."
+    },
+    {
+      "case_id": "statistics.05",
+      "domain": "statistics",
+      "expected_concepts": [
+        "An exposure-outcome association is distorted by a common cause or other confounding structure; association alone is insufficient to identify a causal effect."
+      ],
+      "origin": "10x10 frozen source",
+      "question": "What is confounding in an observational study?",
+      "review_note": "Do not treat every third variable associated with exposure and outcome as a confounder; mediators/colliders require different handling."
+    },
+    {
+      "case_id": "statistics.06",
+      "domain": "statistics",
+      "expected_concepts": [
+        "No; confounding, reverse causality, or coincidence may explain correlation."
+      ],
+      "origin": "10x10 frozen source",
+      "question": "If two variables are correlated, does that establish causation? Why?"
+    },
+    {
+      "case_id": "statistics.07",
+      "domain": "statistics",
+      "expected_concepts": [
+        "Population is the full target set; sample is the observed subset."
+      ],
+      "origin": "10x10 frozen source",
+      "question": "What is the difference between a population and a sample?"
+    },
+    {
+      "case_id": "statistics.08",
+      "domain": "statistics",
+      "expected_concepts": [
+        "Median depends on order/central rank rather than the magnitude of all values."
+      ],
+      "origin": "10x10 frozen source",
+      "question": "Why is the median less affected by an extreme outlier than the mean?"
+    },
+    {
+      "case_id": "statistics.09",
+      "domain": "statistics",
+      "expected_concepts": [
+        "Reduces standard error, often proportional to inverse square root of sample size."
+      ],
+      "origin": "10x10 frozen source",
+      "question": "What does increasing sample size usually do to sampling uncertainty under comparable conditions?"
+    },
+    {
+      "case_id": "statistics.10",
+      "domain": "statistics",
+      "expected_concepts": [
+        "No; evidence may be insufficient, including low statistical power."
+      ],
+      "origin": "10x10 frozen source",
+      "question": "Does failing to reject a null hypothesis prove it is true?"
+    },
+    {
+      "case_id": "statistics.11",
+      "domain": "statistics",
+      "expected_concepts": [
+        [
+          "null"
+        ],
+        [
+          "observ",
+          "extreme"
+        ],
+        [
+          "probab"
+        ]
+      ],
+      "origin": "controlled variant of statistics.01",
+      "question": "For an operational design note, explain this mechanism and one consequence: What does a p-value measure?"
+    },
+    {
+      "case_id": "statistics.12",
+      "domain": "statistics",
+      "expected_concepts": [
+        "The repeated-sampling procedure covers the fixed parameter in 95% of comparable repetitions under its assumptions."
+      ],
+      "origin": "controlled variant of statistics.02",
+      "question": "For an operational design note, explain this mechanism and one consequence: In frequentist inference, why is a 95% confidence interval not generally a 95% probability statement about the fixed parameter after the data are observed?",
+      "review_note": "Explicit frequentist scope; Bayesian credible intervals are different and a correct caveat is acceptable."
+    },
+    {
+      "case_id": "statistics.13",
+      "domain": "statistics",
+      "expected_concepts": [
+        [
+          "aggregate"
+        ],
+        [
+          "group",
+          "subgroup"
+        ],
+        [
+          "reverse",
+          "different"
+        ]
+      ],
+      "origin": "controlled variant of statistics.03",
+      "question": "For an operational design note, explain this mechanism and one consequence: Explain Simpson's paradox."
+    },
+    {
+      "case_id": "statistics.14",
+      "domain": "statistics",
+      "expected_concepts": [
+        "They directly show the tradeoff between finding positives and false discoveries; many negatives can make a small false-positive rate look reassuring."
+      ],
+      "origin": "controlled variant of statistics.04",
+      "question": "For an operational design note, explain this mechanism and one consequence: Why can precision-recall curves be more informative than ROC curves when positive examples are rare?",
+      "review_note": "This is a conditional comparison, not a universal claim that ROC curves are wrong."
+    },
+    {
+      "case_id": "statistics.15",
+      "domain": "statistics",
+      "expected_concepts": [
+        "An exposure-outcome association is distorted by a common cause or other confounding structure; association alone is insufficient to identify a causal effect."
+      ],
+      "origin": "controlled variant of statistics.05",
+      "question": "For an operational design note, explain this mechanism and one consequence: What is confounding in an observational study?",
+      "review_note": "Do not treat every third variable associated with exposure and outcome as a confounder; mediators/colliders require different handling."
+    },
+    {
+      "case_id": "statistics.16",
+      "domain": "statistics",
+      "expected_concepts": [
+        "No; confounding, reverse causality, or coincidence may explain correlation."
+      ],
+      "origin": "controlled variant of statistics.06",
+      "question": "For an operational design note, explain this mechanism and one consequence: If two variables are correlated, does that establish causation? Why?"
+    },
+    {
+      "case_id": "statistics.17",
+      "domain": "statistics",
+      "expected_concepts": [
+        "Population is the full target set; sample is the observed subset."
+      ],
+      "origin": "controlled variant of statistics.07",
+      "question": "For an operational design note, explain this mechanism and one consequence: What is the difference between a population and a sample?"
+    },
+    {
+      "case_id": "statistics.18",
+      "domain": "statistics",
+      "expected_concepts": [
+        "Median depends on order/central rank rather than the magnitude of all values."
+      ],
+      "origin": "controlled variant of statistics.08",
+      "question": "For an operational design note, explain this mechanism and one consequence: Why is the median less affected by an extreme outlier than the mean?"
+    },
+    {
+      "case_id": "statistics.19",
+      "domain": "statistics",
+      "expected_concepts": [
+        "Reduces standard error, often proportional to inverse square root of sample size."
+      ],
+      "origin": "controlled variant of statistics.09",
+      "question": "For an operational design note, explain this mechanism and one consequence: What does increasing sample size usually do to sampling uncertainty under comparable conditions?"
+    },
+    {
+      "case_id": "statistics.20",
+      "domain": "statistics",
+      "expected_concepts": [
+        "No; evidence may be insufficient, including low statistical power."
+      ],
+      "origin": "controlled variant of statistics.10",
+      "question": "For an operational design note, explain this mechanism and one consequence: Does failing to reject a null hypothesis prove it is true?"
+    },
+    {
+      "case_id": "biology_medicine.01",
+      "domain": "biology_medicine",
+      "expected_concepts": [
+        "DNA is transcribed into RNA; messenger RNA is translated into protein."
+      ],
+      "origin": "10x10 frozen source",
+      "question": "What is the usual flow of sequence information from a protein-coding gene to its protein product?",
+      "review_note": "Avoid an overly broad central-dogma question whose accurate answer may discuss reverse transcription and limits of protein-to-sequence transfer."
+    },
+    {
+      "case_id": "biology_medicine.02",
+      "domain": "biology_medicine",
+      "expected_concepts": [
+        [
+          "dna"
+        ],
+        [
+          "amplif",
+          "copy"
+        ]
+      ],
+      "origin": "10x10 frozen source",
+      "question": "What does PCR amplify?"
+    },
+    {
+      "case_id": "biology_medicine.03",
+      "domain": "biology_medicine",
+      "expected_concepts": [
+        [
+          "sensitivity"
+        ],
+        [
+          "true positive",
+          "positive"
+        ],
+        [
+          "specificity"
+        ],
+        [
+          "true negative",
+          "negative"
+        ]
+      ],
+      "origin": "10x10 frozen source",
+      "question": "Differentiate sensitivity and specificity."
+    },
+    {
+      "case_id": "biology_medicine.04",
+      "domain": "biology_medicine",
+      "expected_concepts": [
+        "Random assignment reduces systematic confounding and balances baseline characteristics in expectation, including unmeasured factors."
+      ],
+      "origin": "10x10 frozen source",
+      "question": "Why randomize subjects in a clinical trial?",
+      "review_note": "Randomization does not guarantee exact balance in a particular small trial."
+    },
+    {
+      "case_id": "biology_medicine.05",
+      "domain": "biology_medicine",
+      "expected_concepts": [
+        [
+          "antibiotic"
+        ],
+        [
+          "survive",
+          "resistant"
+        ],
+        [
+          "select"
+        ]
+      ],
+      "origin": "10x10 frozen source",
+      "question": "What is antibiotic resistance selection pressure?"
+    },
+    {
+      "case_id": "biology_medicine.06",
+      "domain": "biology_medicine",
+      "expected_concepts": [
+        "Translate messenger RNA into polypeptides/proteins."
+      ],
+      "origin": "10x10 frozen source",
+      "question": "What is the principal role of ribosomes?"
+    },
+    {
+      "case_id": "biology_medicine.07",
+      "domain": "biology_medicine",
+      "expected_concepts": [
+        "Complementary A-T and G-C pairing guides template replication."
+      ],
+      "origin": "10x10 frozen source",
+      "question": "How do DNA base-pair rules support copying genetic information?"
+    },
+    {
+      "case_id": "biology_medicine.08",
+      "domain": "biology_medicine",
+      "expected_concepts": [
+        "Detect contamination or nonspecific signals when target template should be absent."
+      ],
+      "origin": "10x10 frozen source",
+      "question": "Why do negative controls matter in a PCR experiment?"
+    },
+    {
+      "case_id": "biology_medicine.09",
+      "domain": "biology_medicine",
+      "expected_concepts": [
+        "False positive reports condition when absent; false negative misses it when present."
+      ],
+      "origin": "10x10 frozen source",
+      "question": "How is a false positive different from a false negative in a diagnostic test?"
+    },
+    {
+      "case_id": "biology_medicine.10",
+      "domain": "biology_medicine",
+      "expected_concepts": [
+        "Genotype is genetic constitution; phenotype is observable traits shaped by genes/environment."
+      ],
+      "origin": "10x10 frozen source",
+      "question": "What is the difference between a genotype and a phenotype?"
+    },
+    {
+      "case_id": "biology_medicine.11",
+      "domain": "biology_medicine",
+      "expected_concepts": [
+        "DNA is transcribed into RNA; messenger RNA is translated into protein."
+      ],
+      "origin": "controlled variant of biology_medicine.01",
+      "question": "For an operational design note, explain this mechanism and one consequence: What is the usual flow of sequence information from a protein-coding gene to its protein product?",
+      "review_note": "Avoid an overly broad central-dogma question whose accurate answer may discuss reverse transcription and limits of protein-to-sequence transfer."
+    },
+    {
+      "case_id": "biology_medicine.12",
+      "domain": "biology_medicine",
+      "expected_concepts": [
+        [
+          "dna"
+        ],
+        [
+          "amplif",
+          "copy"
+        ]
+      ],
+      "origin": "controlled variant of biology_medicine.02",
+      "question": "For an operational design note, explain this mechanism and one consequence: What does PCR amplify?"
+    },
+    {
+      "case_id": "biology_medicine.13",
+      "domain": "biology_medicine",
+      "expected_concepts": [
+        [
+          "sensitivity"
+        ],
+        [
+          "true positive",
+          "positive"
+        ],
+        [
+          "specificity"
+        ],
+        [
+          "true negative",
+          "negative"
+        ]
+      ],
+      "origin": "controlled variant of biology_medicine.03",
+      "question": "For an operational design note, explain this mechanism and one consequence: Differentiate sensitivity and specificity."
+    },
+    {
+      "case_id": "biology_medicine.14",
+      "domain": "biology_medicine",
+      "expected_concepts": [
+        "Random assignment reduces systematic confounding and balances baseline characteristics in expectation, including unmeasured factors."
+      ],
+      "origin": "controlled variant of biology_medicine.04",
+      "question": "For an operational design note, explain this mechanism and one consequence: Why randomize subjects in a clinical trial?",
+      "review_note": "Randomization does not guarantee exact balance in a particular small trial."
+    },
+    {
+      "case_id": "biology_medicine.15",
+      "domain": "biology_medicine",
+      "expected_concepts": [
+        [
+          "antibiotic"
+        ],
+        [
+          "survive",
+          "resistant"
+        ],
+        [
+          "select"
+        ]
+      ],
+      "origin": "controlled variant of biology_medicine.05",
+      "question": "For an operational design note, explain this mechanism and one consequence: What is antibiotic resistance selection pressure?"
+    },
+    {
+      "case_id": "biology_medicine.16",
+      "domain": "biology_medicine",
+      "expected_concepts": [
+        "Translate messenger RNA into polypeptides/proteins."
+      ],
+      "origin": "controlled variant of biology_medicine.06",
+      "question": "For an operational design note, explain this mechanism and one consequence: What is the principal role of ribosomes?"
+    },
+    {
+      "case_id": "biology_medicine.17",
+      "domain": "biology_medicine",
+      "expected_concepts": [
+        "Complementary A-T and G-C pairing guides template replication."
+      ],
+      "origin": "controlled variant of biology_medicine.07",
+      "question": "For an operational design note, explain this mechanism and one consequence: How do DNA base-pair rules support copying genetic information?"
+    },
+    {
+      "case_id": "biology_medicine.18",
+      "domain": "biology_medicine",
+      "expected_concepts": [
+        "Detect contamination or nonspecific signals when target template should be absent."
+      ],
+      "origin": "controlled variant of biology_medicine.08",
+      "question": "For an operational design note, explain this mechanism and one consequence: Why do negative controls matter in a PCR experiment?"
+    },
+    {
+      "case_id": "biology_medicine.19",
+      "domain": "biology_medicine",
+      "expected_concepts": [
+        "False positive reports condition when absent; false negative misses it when present."
+      ],
+      "origin": "controlled variant of biology_medicine.09",
+      "question": "For an operational design note, explain this mechanism and one consequence: How is a false positive different from a false negative in a diagnostic test?"
+    },
+    {
+      "case_id": "biology_medicine.20",
+      "domain": "biology_medicine",
+      "expected_concepts": [
+        "Genotype is genetic constitution; phenotype is observable traits shaped by genes/environment."
+      ],
+      "origin": "controlled variant of biology_medicine.10",
+      "question": "For an operational design note, explain this mechanism and one consequence: What is the difference between a genotype and a phenotype?"
+    },
+    {
+      "case_id": "physics_engineering.01",
+      "domain": "physics_engineering",
+      "expected_concepts": [
+        "Total energy remains constant while it may change form."
+      ],
+      "origin": "10x10 frozen source",
+      "question": "What does conservation of energy imply for an isolated system that exchanges neither matter nor energy with its surroundings?",
+      "review_note": "Correct closed-versus-isolated ambiguity: a closed system may exchange heat or work."
+    },
+    {
+      "case_id": "physics_engineering.02",
+      "domain": "physics_engineering",
+      "expected_concepts": [
+        [
+          "moves",
+          "transfers"
+        ],
+        [
+          "heat"
+        ],
+        [
+          "work",
+          "electric"
+        ]
+      ],
+      "origin": "10x10 frozen source",
+      "question": "Why can a heat pump have COP greater than 1?"
+    },
+    {
+      "case_id": "physics_engineering.03",
+      "domain": "physics_engineering",
+      "expected_concepts": [
+        "Sample faster than twice the highest signal frequency B; practical systems also use an anti-alias filter and margin."
+      ],
+      "origin": "10x10 frozen source",
+      "question": "For ideal uniform sampling of a baseband signal with no frequencies above B, what sampling-rate condition avoids aliasing?",
+      "review_note": "Accept conventional at-least-twice wording with a boundary caveat; exact Nyquist-boundary sinusoids can be ambiguous. Do not require practical filter details."
+    },
+    {
+      "case_id": "physics_engineering.04",
+      "domain": "physics_engineering",
+      "expected_concepts": [
+        [
+          "steady-state"
+        ],
+        [
+          "error"
+        ],
+        [
+          "accumulat",
+          "integrat"
+        ]
+      ],
+      "origin": "10x10 frozen source",
+      "question": "What does the integral term in a PID controller address?"
+    },
+    {
+      "case_id": "physics_engineering.05",
+      "domain": "physics_engineering",
+      "expected_concepts": [
+        [
+          "margin"
+        ],
+        [
+          "stress",
+          "heat",
+          "load"
+        ],
+        [
+          "reliab",
+          "safe"
+        ]
+      ],
+      "origin": "10x10 frozen source",
+      "question": "Why do engineers derate components?"
+    },
+    {
+      "case_id": "physics_engineering.06",
+      "domain": "physics_engineering",
+      "expected_concepts": [
+        "20 volts and 40 watts."
+      ],
+      "origin": "10x10 frozen source",
+      "question": "A resistor has 10 ohms resistance and carries 2 amperes. What voltage and power follow from Ohm's law?"
+    },
+    {
+      "case_id": "physics_engineering.07",
+      "domain": "physics_engineering",
+      "expected_concepts": [
+        "Increased thermal motion generally increases mean interatomic spacing."
+      ],
+      "origin": "10x10 frozen source",
+      "question": "Why can a metal part expand when heated?"
+    },
+    {
+      "case_id": "physics_engineering.08",
+      "domain": "physics_engineering",
+      "expected_concepts": [
+        "Power is energy transferred per unit time."
+      ],
+      "origin": "10x10 frozen source",
+      "question": "What is the distinction between power and energy?"
+    },
+    {
+      "case_id": "physics_engineering.09",
+      "domain": "physics_engineering",
+      "expected_concepts": [
+        "Periodic forcing efficiently transfers energy; damping limits amplitude."
+      ],
+      "origin": "10x10 frozen source",
+      "question": "Why can resonance produce large oscillations near a natural frequency?"
+    },
+    {
+      "case_id": "physics_engineering.10",
+      "domain": "physics_engineering",
+      "expected_concepts": [
+        "Acts to reduce the difference between output and setpoint; stability depends on loop design."
+      ],
+      "origin": "10x10 frozen source",
+      "question": "What does negative feedback do in a control loop?"
+    },
+    {
+      "case_id": "physics_engineering.11",
+      "domain": "physics_engineering",
+      "expected_concepts": [
+        "Total energy remains constant while it may change form."
+      ],
+      "origin": "controlled variant of physics_engineering.01",
+      "question": "For an operational design note, explain this mechanism and one consequence: What does conservation of energy imply for an isolated system that exchanges neither matter nor energy with its surroundings?",
+      "review_note": "Correct closed-versus-isolated ambiguity: a closed system may exchange heat or work."
+    },
+    {
+      "case_id": "physics_engineering.12",
+      "domain": "physics_engineering",
+      "expected_concepts": [
+        [
+          "moves",
+          "transfers"
+        ],
+        [
+          "heat"
+        ],
+        [
+          "work",
+          "electric"
+        ]
+      ],
+      "origin": "controlled variant of physics_engineering.02",
+      "question": "For an operational design note, explain this mechanism and one consequence: Why can a heat pump have COP greater than 1?"
+    },
+    {
+      "case_id": "physics_engineering.13",
+      "domain": "physics_engineering",
+      "expected_concepts": [
+        "Sample faster than twice the highest signal frequency B; practical systems also use an anti-alias filter and margin."
+      ],
+      "origin": "controlled variant of physics_engineering.03",
+      "question": "For an operational design note, explain this mechanism and one consequence: For ideal uniform sampling of a baseband signal with no frequencies above B, what sampling-rate condition avoids aliasing?",
+      "review_note": "Accept conventional at-least-twice wording with a boundary caveat; exact Nyquist-boundary sinusoids can be ambiguous. Do not require practical filter details."
+    },
+    {
+      "case_id": "physics_engineering.14",
+      "domain": "physics_engineering",
+      "expected_concepts": [
+        [
+          "steady-state"
+        ],
+        [
+          "error"
+        ],
+        [
+          "accumulat",
+          "integrat"
+        ]
+      ],
+      "origin": "controlled variant of physics_engineering.04",
+      "question": "For an operational design note, explain this mechanism and one consequence: What does the integral term in a PID controller address?"
+    },
+    {
+      "case_id": "physics_engineering.15",
+      "domain": "physics_engineering",
+      "expected_concepts": [
+        [
+          "margin"
+        ],
+        [
+          "stress",
+          "heat",
+          "load"
+        ],
+        [
+          "reliab",
+          "safe"
+        ]
+      ],
+      "origin": "controlled variant of physics_engineering.05",
+      "question": "For an operational design note, explain this mechanism and one consequence: Why do engineers derate components?"
+    },
+    {
+      "case_id": "physics_engineering.16",
+      "domain": "physics_engineering",
+      "expected_concepts": [
+        "20 volts and 40 watts."
+      ],
+      "origin": "controlled variant of physics_engineering.06",
+      "question": "For an operational design note, explain this mechanism and one consequence: A resistor has 10 ohms resistance and carries 2 amperes. What voltage and power follow from Ohm's law?"
+    },
+    {
+      "case_id": "physics_engineering.17",
+      "domain": "physics_engineering",
+      "expected_concepts": [
+        "Increased thermal motion generally increases mean interatomic spacing."
+      ],
+      "origin": "controlled variant of physics_engineering.07",
+      "question": "For an operational design note, explain this mechanism and one consequence: Why can a metal part expand when heated?"
+    },
+    {
+      "case_id": "physics_engineering.18",
+      "domain": "physics_engineering",
+      "expected_concepts": [
+        "Power is energy transferred per unit time."
+      ],
+      "origin": "controlled variant of physics_engineering.08",
+      "question": "For an operational design note, explain this mechanism and one consequence: What is the distinction between power and energy?"
+    },
+    {
+      "case_id": "physics_engineering.19",
+      "domain": "physics_engineering",
+      "expected_concepts": [
+        "Periodic forcing efficiently transfers energy; damping limits amplitude."
+      ],
+      "origin": "controlled variant of physics_engineering.09",
+      "question": "For an operational design note, explain this mechanism and one consequence: Why can resonance produce large oscillations near a natural frequency?"
+    },
+    {
+      "case_id": "physics_engineering.20",
+      "domain": "physics_engineering",
+      "expected_concepts": [
+        "Acts to reduce the difference between output and setpoint; stability depends on loop design."
+      ],
+      "origin": "controlled variant of physics_engineering.10",
+      "question": "For an operational design note, explain this mechanism and one consequence: What does negative feedback do in a control loop?"
+    },
+    {
+      "case_id": "finance_economics.01",
+      "domain": "finance_economics",
+      "expected_concepts": [
+        [
+          "present"
+        ],
+        [
+          "cash flow"
+        ],
+        [
+          "cost",
+          "investment"
+        ]
+      ],
+      "origin": "10x10 frozen source",
+      "question": "What does net present value compare?"
+    },
+    {
+      "case_id": "finance_economics.02",
+      "domain": "finance_economics",
+      "expected_concepts": [
+        "The percentage price sensitivity to a small yield change, with price moving oppositely to yield."
+      ],
+      "origin": "10x10 frozen source",
+      "question": "For a plain fixed-rate bond, what does modified duration approximate for a small change in yield?",
+      "review_note": "Distinguish modified duration from Macaulay duration; no investment recommendation is requested."
+    },
+    {
+      "case_id": "finance_economics.03",
+      "domain": "finance_economics",
+      "expected_concepts": [
+        [
+          "next best",
+          "alternative"
+        ],
+        [
+          "foregone",
+          "given up"
+        ]
+      ],
+      "origin": "10x10 frozen source",
+      "question": "What is opportunity cost?"
+    },
+    {
+      "case_id": "finance_economics.04",
+      "domain": "finance_economics",
+      "expected_concepts": [
+        [
+          "high-risk",
+          "riskier"
+        ],
+        [
+          "information"
+        ],
+        [
+          "premium",
+          "market"
+        ]
+      ],
+      "origin": "10x10 frozen source",
+      "question": "Why can adverse selection damage an insurance market?"
+    },
+    {
+      "case_id": "finance_economics.05",
+      "domain": "finance_economics",
+      "expected_concepts": [
+        [
+          "underlying"
+        ],
+        [
+          "price"
+        ],
+        [
+          "change",
+          "sensitivity"
+        ]
+      ],
+      "origin": "10x10 frozen source",
+      "question": "What does an option delta roughly measure?"
+    },
+    {
+      "case_id": "finance_economics.06",
+      "domain": "finance_economics",
+      "expected_concepts": [
+        "121 units."
+      ],
+      "origin": "10x10 frozen source",
+      "question": "Ignoring fees, what is the value after two years of 100 units compounding annually at 10 percent?"
+    },
+    {
+      "case_id": "finance_economics.07",
+      "domain": "finance_economics",
+      "expected_concepts": [
+        "Imperfectly correlated exposures offset idiosyncratic risk, while common shocks remain."
+      ],
+      "origin": "10x10 frozen source",
+      "question": "Why does diversification reduce some risks without eliminating all market risk?"
+    },
+    {
+      "case_id": "finance_economics.08",
+      "domain": "finance_economics",
+      "expected_concepts": [
+        "Rising prices reduce purchasing power."
+      ],
+      "origin": "10x10 frozen source",
+      "question": "How does inflation affect the purchasing power of a fixed nominal amount?"
+    },
+    {
+      "case_id": "finance_economics.09",
+      "domain": "finance_economics",
+      "expected_concepts": [
+        "Stock is equity ownership; bond is a debt claim with contractual payments."
+      ],
+      "origin": "10x10 frozen source",
+      "question": "What is the distinction between a stock and a bond?"
+    },
+    {
+      "case_id": "finance_economics.10",
+      "domain": "finance_economics",
+      "expected_concepts": [
+        "Already incurred and unrecoverable; do not vary with the future choice."
+      ],
+      "origin": "10x10 frozen source",
+      "question": "Why are sunk costs generally excluded from a forward-looking choice between alternatives?"
+    },
+    {
+      "case_id": "finance_economics.11",
+      "domain": "finance_economics",
+      "expected_concepts": [
+        [
+          "present"
+        ],
+        [
+          "cash flow"
+        ],
+        [
+          "cost",
+          "investment"
+        ]
+      ],
+      "origin": "controlled variant of finance_economics.01",
+      "question": "For an operational design note, explain this mechanism and one consequence: What does net present value compare?"
+    },
+    {
+      "case_id": "finance_economics.12",
+      "domain": "finance_economics",
+      "expected_concepts": [
+        "The percentage price sensitivity to a small yield change, with price moving oppositely to yield."
+      ],
+      "origin": "controlled variant of finance_economics.02",
+      "question": "For an operational design note, explain this mechanism and one consequence: For a plain fixed-rate bond, what does modified duration approximate for a small change in yield?",
+      "review_note": "Distinguish modified duration from Macaulay duration; no investment recommendation is requested."
+    },
+    {
+      "case_id": "finance_economics.13",
+      "domain": "finance_economics",
+      "expected_concepts": [
+        [
+          "next best",
+          "alternative"
+        ],
+        [
+          "foregone",
+          "given up"
+        ]
+      ],
+      "origin": "controlled variant of finance_economics.03",
+      "question": "For an operational design note, explain this mechanism and one consequence: What is opportunity cost?"
+    },
+    {
+      "case_id": "finance_economics.14",
+      "domain": "finance_economics",
+      "expected_concepts": [
+        [
+          "high-risk",
+          "riskier"
+        ],
+        [
+          "information"
+        ],
+        [
+          "premium",
+          "market"
+        ]
+      ],
+      "origin": "controlled variant of finance_economics.04",
+      "question": "For an operational design note, explain this mechanism and one consequence: Why can adverse selection damage an insurance market?"
+    },
+    {
+      "case_id": "finance_economics.15",
+      "domain": "finance_economics",
+      "expected_concepts": [
+        [
+          "underlying"
+        ],
+        [
+          "price"
+        ],
+        [
+          "change",
+          "sensitivity"
+        ]
+      ],
+      "origin": "controlled variant of finance_economics.05",
+      "question": "For an operational design note, explain this mechanism and one consequence: What does an option delta roughly measure?"
+    },
+    {
+      "case_id": "finance_economics.16",
+      "domain": "finance_economics",
+      "expected_concepts": [
+        "121 units."
+      ],
+      "origin": "controlled variant of finance_economics.06",
+      "question": "For an operational design note, explain this mechanism and one consequence: Ignoring fees, what is the value after two years of 100 units compounding annually at 10 percent?"
+    },
+    {
+      "case_id": "finance_economics.17",
+      "domain": "finance_economics",
+      "expected_concepts": [
+        "Imperfectly correlated exposures offset idiosyncratic risk, while common shocks remain."
+      ],
+      "origin": "controlled variant of finance_economics.07",
+      "question": "For an operational design note, explain this mechanism and one consequence: Why does diversification reduce some risks without eliminating all market risk?"
+    },
+    {
+      "case_id": "finance_economics.18",
+      "domain": "finance_economics",
+      "expected_concepts": [
+        "Rising prices reduce purchasing power."
+      ],
+      "origin": "controlled variant of finance_economics.08",
+      "question": "For an operational design note, explain this mechanism and one consequence: How does inflation affect the purchasing power of a fixed nominal amount?"
+    },
+    {
+      "case_id": "finance_economics.19",
+      "domain": "finance_economics",
+      "expected_concepts": [
+        "Stock is equity ownership; bond is a debt claim with contractual payments."
+      ],
+      "origin": "controlled variant of finance_economics.09",
+      "question": "For an operational design note, explain this mechanism and one consequence: What is the distinction between a stock and a bond?"
+    },
+    {
+      "case_id": "finance_economics.20",
+      "domain": "finance_economics",
+      "expected_concepts": [
+        "Already incurred and unrecoverable; do not vary with the future choice."
+      ],
+      "origin": "controlled variant of finance_economics.10",
+      "question": "For an operational design note, explain this mechanism and one consequence: Why are sunk costs generally excluded from a forward-looking choice between alternatives?"
+    },
+    {
+      "case_id": "law_policy.01",
+      "domain": "law_policy",
+      "expected_concepts": [
+        "Offer proposes a bargain; acceptance manifests assent; consideration is a bargained-for exchange."
+      ],
+      "origin": "10x10 frozen source",
+      "question": "Under ordinary U.S. common-law contract principles, what roles do offer, acceptance and consideration play in forming a bargain?",
+      "review_note": "Not a universal exhaustive contract-validity checklist; capacity, legality, form requirements and exceptions may also matter."
+    },
+    {
+      "case_id": "law_policy.02",
+      "domain": "law_policy",
+      "expected_concepts": [
+        "Preponderance means more likely than not; criminal guilt requires the substantially higher beyond-reasonable-doubt standard."
+      ],
+      "origin": "10x10 frozen source",
+      "question": "In general U.S. legal education, contrast the preponderance standard commonly used in civil cases with proof beyond a reasonable doubt in criminal cases.",
+      "review_note": "Some civil issues require clear and convincing evidence; do not penalize this accurate qualification or demand a numerical percentage for reasonable doubt."
+    },
+    {
+      "case_id": "law_policy.03",
+      "domain": "law_policy",
+      "expected_concepts": [
+        "Duty of care, breach, causal connection and legally recognized harm or damages."
+      ],
+      "origin": "10x10 frozen source",
+      "question": "In general U.S. tort law, what are the usual elements of a negligence claim seeking damages?",
+      "review_note": "General educational formulation; exact doctrine varies by jurisdiction and claim."
+    },
+    {
+      "case_id": "law_policy.04",
+      "domain": "law_policy",
+      "expected_concepts": [
+        "Give interested people an opportunity to submit information and arguments that the agency considers in deciding and explaining its rule."
+      ],
+      "origin": "10x10 frozen source",
+      "question": "For U.S. federal rules subject to notice-and-comment under the Administrative Procedure Act, why invite comments before adopting a final rule?",
+      "review_note": "Do not imply all agency actions require this process, or that public comments are a binding vote."
+    },
+    {
+      "case_id": "law_policy.05",
+      "domain": "law_policy",
+      "expected_concepts": [
+        "Purpose and character of the use; nature of the copyrighted work; amount and substantiality used; effect on the potential market or value."
+      ],
+      "origin": "10x10 frozen source",
+      "question": "Under U.S. copyright law, name the four fair-use factors in 17 U.S.C. 107 at a high level.",
+      "review_note": "These are weighed contextually; there is no automatic safe percentage or categorical exemption for all educational use."
+    },
+    {
+      "case_id": "law_policy.06",
+      "domain": "law_policy",
+      "expected_concepts": [
+        "Statute is enacted law; company policy is an internal organizational rule."
+      ],
+      "origin": "10x10 frozen source",
+      "question": "As a general concept, how does a statute differ from an internal company policy?"
+    },
+    {
+      "case_id": "law_policy.07",
+      "domain": "law_policy",
+      "expected_concepts": [
+        "Rules and interpretations vary across jurisdictions and change over time."
+      ],
+      "origin": "10x10 frozen source",
+      "question": "Why does a legal answer often need a jurisdiction and date?"
+    },
+    {
+      "case_id": "law_policy.08",
+      "domain": "law_policy",
+      "expected_concepts": [
+        "Identify the triggering event/date, when and how notice was sent or received, and the applicable deadline/counting and service rules."
+      ],
+      "origin": "10x10 frozen source",
+      "question": "A hypothetical rule requires written notice within 30 days. What timing and notice facts or definitions would you need before deciding compliance?",
+      "review_note": "Remove contradictory request for exactly two facts; no unstated calendar-day or receipt-versus-dispatch assumption."
+    },
+    {
+      "case_id": "law_policy.09",
+      "domain": "law_policy",
+      "expected_concepts": [
+        "Obligation is legally enforceable; recommendation is voluntary absent incorporation."
+      ],
+      "origin": "10x10 frozen source",
+      "question": "How does a binding legal obligation differ from a voluntary best practice?"
+    },
+    {
+      "case_id": "law_policy.10",
+      "domain": "law_policy",
+      "expected_concepts": [
+        "Separate actual agreement text from inferences or disputed meaning."
+      ],
+      "origin": "10x10 frozen source",
+      "question": "Why should a summary of a contract distinguish quoted terms from interpretation?"
+    },
+    {
+      "case_id": "law_policy.11",
+      "domain": "law_policy",
+      "expected_concepts": [
+        "Offer proposes a bargain; acceptance manifests assent; consideration is a bargained-for exchange."
+      ],
+      "origin": "controlled variant of law_policy.01",
+      "question": "For an operational design note, explain this mechanism and one consequence: Under ordinary U.S. common-law contract principles, what roles do offer, acceptance and consideration play in forming a bargain?",
+      "review_note": "Not a universal exhaustive contract-validity checklist; capacity, legality, form requirements and exceptions may also matter."
+    },
+    {
+      "case_id": "law_policy.12",
+      "domain": "law_policy",
+      "expected_concepts": [
+        "Preponderance means more likely than not; criminal guilt requires the substantially higher beyond-reasonable-doubt standard."
+      ],
+      "origin": "controlled variant of law_policy.02",
+      "question": "For an operational design note, explain this mechanism and one consequence: In general U.S. legal education, contrast the preponderance standard commonly used in civil cases with proof beyond a reasonable doubt in criminal cases.",
+      "review_note": "Some civil issues require clear and convincing evidence; do not penalize this accurate qualification or demand a numerical percentage for reasonable doubt."
+    },
+    {
+      "case_id": "law_policy.13",
+      "domain": "law_policy",
+      "expected_concepts": [
+        "Duty of care, breach, causal connection and legally recognized harm or damages."
+      ],
+      "origin": "controlled variant of law_policy.03",
+      "question": "For an operational design note, explain this mechanism and one consequence: In general U.S. tort law, what are the usual elements of a negligence claim seeking damages?",
+      "review_note": "General educational formulation; exact doctrine varies by jurisdiction and claim."
+    },
+    {
+      "case_id": "law_policy.14",
+      "domain": "law_policy",
+      "expected_concepts": [
+        "Give interested people an opportunity to submit information and arguments that the agency considers in deciding and explaining its rule."
+      ],
+      "origin": "controlled variant of law_policy.04",
+      "question": "For an operational design note, explain this mechanism and one consequence: For U.S. federal rules subject to notice-and-comment under the Administrative Procedure Act, why invite comments before adopting a final rule?",
+      "review_note": "Do not imply all agency actions require this process, or that public comments are a binding vote."
+    },
+    {
+      "case_id": "law_policy.15",
+      "domain": "law_policy",
+      "expected_concepts": [
+        "Purpose and character of the use; nature of the copyrighted work; amount and substantiality used; effect on the potential market or value."
+      ],
+      "origin": "controlled variant of law_policy.05",
+      "question": "For an operational design note, explain this mechanism and one consequence: Under U.S. copyright law, name the four fair-use factors in 17 U.S.C. 107 at a high level.",
+      "review_note": "These are weighed contextually; there is no automatic safe percentage or categorical exemption for all educational use."
+    },
+    {
+      "case_id": "law_policy.16",
+      "domain": "law_policy",
+      "expected_concepts": [
+        "Statute is enacted law; company policy is an internal organizational rule."
+      ],
+      "origin": "controlled variant of law_policy.06",
+      "question": "For an operational design note, explain this mechanism and one consequence: As a general concept, how does a statute differ from an internal company policy?"
+    },
+    {
+      "case_id": "law_policy.17",
+      "domain": "law_policy",
+      "expected_concepts": [
+        "Rules and interpretations vary across jurisdictions and change over time."
+      ],
+      "origin": "controlled variant of law_policy.07",
+      "question": "For an operational design note, explain this mechanism and one consequence: Why does a legal answer often need a jurisdiction and date?"
+    },
+    {
+      "case_id": "law_policy.18",
+      "domain": "law_policy",
+      "expected_concepts": [
+        "Identify the triggering event/date, when and how notice was sent or received, and the applicable deadline/counting and service rules."
+      ],
+      "origin": "controlled variant of law_policy.08",
+      "question": "For an operational design note, explain this mechanism and one consequence: A hypothetical rule requires written notice within 30 days. What timing and notice facts or definitions would you need before deciding compliance?",
+      "review_note": "Remove contradictory request for exactly two facts; no unstated calendar-day or receipt-versus-dispatch assumption."
+    },
+    {
+      "case_id": "law_policy.19",
+      "domain": "law_policy",
+      "expected_concepts": [
+        "Obligation is legally enforceable; recommendation is voluntary absent incorporation."
+      ],
+      "origin": "controlled variant of law_policy.09",
+      "question": "For an operational design note, explain this mechanism and one consequence: How does a binding legal obligation differ from a voluntary best practice?"
+    },
+    {
+      "case_id": "law_policy.20",
+      "domain": "law_policy",
+      "expected_concepts": [
+        "Separate actual agreement text from inferences or disputed meaning."
+      ],
+      "origin": "controlled variant of law_policy.10",
+      "question": "For an operational design note, explain this mechanism and one consequence: Why should a summary of a contract distinguish quoted terms from interpretation?"
+    },
+    {
+      "case_id": "distributed_systems.01",
+      "domain": "distributed_systems",
+      "expected_concepts": [
+        [
+          "agree",
+          "agreement"
+        ],
+        [
+          "node",
+          "replica"
+        ],
+        [
+          "failure",
+          "fault"
+        ]
+      ],
+      "origin": "new-domain template variant 1/4",
+      "question": "Answer the core technical question directly: What does consensus provide in a distributed system?"
+    },
+    {
+      "case_id": "distributed_systems.02",
+      "domain": "distributed_systems",
+      "expected_concepts": [
+        [
+          "clock"
+        ],
+        [
+          "drift",
+          "skew"
+        ],
+        [
+          "partial",
+          "causal",
+          "uncertain"
+        ]
+      ],
+      "origin": "new-domain template variant 1/4",
+      "question": "Answer the core technical question directly: Why are distributed clocks insufficient for a perfect global event order?"
+    },
+    {
+      "case_id": "distributed_systems.03",
+      "domain": "distributed_systems",
+      "expected_concepts": [
+        [
+          "partition"
+        ],
+        [
+          "multiple",
+          "two"
+        ],
+        [
+          "leader",
+          "primary"
+        ],
+        [
+          "conflict",
+          "diverg"
+        ]
+      ],
+      "origin": "new-domain template variant 1/4",
+      "question": "Answer the core technical question directly: What is split brain and why is it dangerous?"
+    },
+    {
+      "case_id": "distributed_systems.04",
+      "domain": "distributed_systems",
+      "expected_concepts": [
+        [
+          "duplicate"
+        ],
+        [
+          "redeliver",
+          "retry"
+        ],
+        [
+          "idempot"
+        ]
+      ],
+      "origin": "new-domain template variant 1/4",
+      "question": "Answer the core technical question directly: Why must consumers of an at-least-once message stream be idempotent?"
+    },
+    {
+      "case_id": "distributed_systems.05",
+      "domain": "distributed_systems",
+      "expected_concepts": [
+        [
+          "replica"
+        ],
+        [
+          "consistency"
+        ],
+        [
+          "availability",
+          "latency"
+        ]
+      ],
+      "origin": "new-domain template variant 1/4",
+      "question": "Answer the core technical question directly: What does a quorum read or write trade off?"
+    },
+    {
+      "case_id": "distributed_systems.06",
+      "domain": "distributed_systems",
+      "expected_concepts": [
+        [
+          "agree",
+          "agreement"
+        ],
+        [
+          "node",
+          "replica"
+        ],
+        [
+          "failure",
+          "fault"
+        ]
+      ],
+      "origin": "new-domain template variant 2/4",
+      "question": "During a production review, the team asks: What does consensus provide in a distributed system?"
+    },
+    {
+      "case_id": "distributed_systems.07",
+      "domain": "distributed_systems",
+      "expected_concepts": [
+        [
+          "clock"
+        ],
+        [
+          "drift",
+          "skew"
+        ],
+        [
+          "partial",
+          "causal",
+          "uncertain"
+        ]
+      ],
+      "origin": "new-domain template variant 2/4",
+      "question": "During a production review, the team asks: Why are distributed clocks insufficient for a perfect global event order?"
+    },
+    {
+      "case_id": "distributed_systems.08",
+      "domain": "distributed_systems",
+      "expected_concepts": [
+        [
+          "partition"
+        ],
+        [
+          "multiple",
+          "two"
+        ],
+        [
+          "leader",
+          "primary"
+        ],
+        [
+          "conflict",
+          "diverg"
+        ]
+      ],
+      "origin": "new-domain template variant 2/4",
+      "question": "During a production review, the team asks: What is split brain and why is it dangerous?"
+    },
+    {
+      "case_id": "distributed_systems.09",
+      "domain": "distributed_systems",
+      "expected_concepts": [
+        [
+          "duplicate"
+        ],
+        [
+          "redeliver",
+          "retry"
+        ],
+        [
+          "idempot"
+        ]
+      ],
+      "origin": "new-domain template variant 2/4",
+      "question": "During a production review, the team asks: Why must consumers of an at-least-once message stream be idempotent?"
+    },
+    {
+      "case_id": "distributed_systems.10",
+      "domain": "distributed_systems",
+      "expected_concepts": [
+        [
+          "replica"
+        ],
+        [
+          "consistency"
+        ],
+        [
+          "availability",
+          "latency"
+        ]
+      ],
+      "origin": "new-domain template variant 2/4",
+      "question": "During a production review, the team asks: What does a quorum read or write trade off?"
+    },
+    {
+      "case_id": "distributed_systems.11",
+      "domain": "distributed_systems",
+      "expected_concepts": [
+        [
+          "agree",
+          "agreement"
+        ],
+        [
+          "node",
+          "replica"
+        ],
+        [
+          "failure",
+          "fault"
+        ]
+      ],
+      "origin": "new-domain template variant 3/4",
+      "question": "A new engineer needs a concise explanation. What does consensus provide in a distributed system?"
+    },
+    {
+      "case_id": "distributed_systems.12",
+      "domain": "distributed_systems",
+      "expected_concepts": [
+        [
+          "clock"
+        ],
+        [
+          "drift",
+          "skew"
+        ],
+        [
+          "partial",
+          "causal",
+          "uncertain"
+        ]
+      ],
+      "origin": "new-domain template variant 3/4",
+      "question": "A new engineer needs a concise explanation. Why are distributed clocks insufficient for a perfect global event order?"
+    },
+    {
+      "case_id": "distributed_systems.13",
+      "domain": "distributed_systems",
+      "expected_concepts": [
+        [
+          "partition"
+        ],
+        [
+          "multiple",
+          "two"
+        ],
+        [
+          "leader",
+          "primary"
+        ],
+        [
+          "conflict",
+          "diverg"
+        ]
+      ],
+      "origin": "new-domain template variant 3/4",
+      "question": "A new engineer needs a concise explanation. What is split brain and why is it dangerous?"
+    },
+    {
+      "case_id": "distributed_systems.14",
+      "domain": "distributed_systems",
+      "expected_concepts": [
+        [
+          "duplicate"
+        ],
+        [
+          "redeliver",
+          "retry"
+        ],
+        [
+          "idempot"
+        ]
+      ],
+      "origin": "new-domain template variant 3/4",
+      "question": "A new engineer needs a concise explanation. Why must consumers of an at-least-once message stream be idempotent?"
+    },
+    {
+      "case_id": "distributed_systems.15",
+      "domain": "distributed_systems",
+      "expected_concepts": [
+        [
+          "replica"
+        ],
+        [
+          "consistency"
+        ],
+        [
+          "availability",
+          "latency"
+        ]
+      ],
+      "origin": "new-domain template variant 3/4",
+      "question": "A new engineer needs a concise explanation. What does a quorum read or write trade off?"
+    },
+    {
+      "case_id": "distributed_systems.16",
+      "domain": "distributed_systems",
+      "expected_concepts": [
+        [
+          "agree",
+          "agreement"
+        ],
+        [
+          "node",
+          "replica"
+        ],
+        [
+          "failure",
+          "fault"
+        ]
+      ],
+      "origin": "new-domain template variant 4/4",
+      "question": "For an operational design note, explain this mechanism and one consequence: What does consensus provide in a distributed system?"
+    },
+    {
+      "case_id": "distributed_systems.17",
+      "domain": "distributed_systems",
+      "expected_concepts": [
+        [
+          "clock"
+        ],
+        [
+          "drift",
+          "skew"
+        ],
+        [
+          "partial",
+          "causal",
+          "uncertain"
+        ]
+      ],
+      "origin": "new-domain template variant 4/4",
+      "question": "For an operational design note, explain this mechanism and one consequence: Why are distributed clocks insufficient for a perfect global event order?"
+    },
+    {
+      "case_id": "distributed_systems.18",
+      "domain": "distributed_systems",
+      "expected_concepts": [
+        [
+          "partition"
+        ],
+        [
+          "multiple",
+          "two"
+        ],
+        [
+          "leader",
+          "primary"
+        ],
+        [
+          "conflict",
+          "diverg"
+        ]
+      ],
+      "origin": "new-domain template variant 4/4",
+      "question": "For an operational design note, explain this mechanism and one consequence: What is split brain and why is it dangerous?"
+    },
+    {
+      "case_id": "distributed_systems.19",
+      "domain": "distributed_systems",
+      "expected_concepts": [
+        [
+          "duplicate"
+        ],
+        [
+          "redeliver",
+          "retry"
+        ],
+        [
+          "idempot"
+        ]
+      ],
+      "origin": "new-domain template variant 4/4",
+      "question": "For an operational design note, explain this mechanism and one consequence: Why must consumers of an at-least-once message stream be idempotent?"
+    },
+    {
+      "case_id": "distributed_systems.20",
+      "domain": "distributed_systems",
+      "expected_concepts": [
+        [
+          "replica"
+        ],
+        [
+          "consistency"
+        ],
+        [
+          "availability",
+          "latency"
+        ]
+      ],
+      "origin": "new-domain template variant 4/4",
+      "question": "For an operational design note, explain this mechanism and one consequence: What does a quorum read or write trade off?"
+    },
+    {
+      "case_id": "compilers_languages.01",
+      "domain": "compilers_languages",
+      "expected_concepts": [
+        [
+          "token"
+        ],
+        [
+          "grammar",
+          "syntax"
+        ],
+        [
+          "character",
+          "text"
+        ]
+      ],
+      "origin": "new-domain template variant 1/4",
+      "question": "Answer the core technical question directly: What is the difference between lexical analysis and parsing?"
+    },
+    {
+      "case_id": "compilers_languages.02",
+      "domain": "compilers_languages",
+      "expected_concepts": [
+        [
+          "compile"
+        ],
+        [
+          "type"
+        ],
+        [
+          "runtime",
+          "logic",
+          "dynamic"
+        ]
+      ],
+      "origin": "new-domain template variant 1/4",
+      "question": "Answer the core technical question directly: Why does static type checking catch only some program errors?"
+    },
+    {
+      "case_id": "compilers_languages.03",
+      "domain": "compilers_languages",
+      "expected_concepts": [
+        [
+          "intermediate"
+        ],
+        [
+          "program",
+          "code"
+        ],
+        [
+          "optimiz",
+          "target"
+        ]
+      ],
+      "origin": "new-domain template variant 1/4",
+      "question": "Answer the core technical question directly: What is an intermediate representation in a compiler?"
+    },
+    {
+      "case_id": "compilers_languages.04",
+      "domain": "compilers_languages",
+      "expected_concepts": [
+        [
+          "variable",
+          "value"
+        ],
+        [
+          "register"
+        ],
+        [
+          "spill",
+          "memory"
+        ]
+      ],
+      "origin": "new-domain template variant 1/4",
+      "question": "Answer the core technical question directly: What does register allocation decide?"
+    },
+    {
+      "case_id": "compilers_languages.05",
+      "domain": "compilers_languages",
+      "expected_concepts": [
+        [
+          "undefined"
+        ],
+        [
+          "assume"
+        ],
+        [
+          "optimization",
+          "compiler"
+        ]
+      ],
+      "origin": "new-domain template variant 1/4",
+      "question": "Answer the core technical question directly: Why can undefined behavior enable aggressive optimization?"
+    },
+    {
+      "case_id": "compilers_languages.06",
+      "domain": "compilers_languages",
+      "expected_concepts": [
+        [
+          "token"
+        ],
+        [
+          "grammar",
+          "syntax"
+        ],
+        [
+          "character",
+          "text"
+        ]
+      ],
+      "origin": "new-domain template variant 2/4",
+      "question": "During a production review, the team asks: What is the difference between lexical analysis and parsing?"
+    },
+    {
+      "case_id": "compilers_languages.07",
+      "domain": "compilers_languages",
+      "expected_concepts": [
+        [
+          "compile"
+        ],
+        [
+          "type"
+        ],
+        [
+          "runtime",
+          "logic",
+          "dynamic"
+        ]
+      ],
+      "origin": "new-domain template variant 2/4",
+      "question": "During a production review, the team asks: Why does static type checking catch only some program errors?"
+    },
+    {
+      "case_id": "compilers_languages.08",
+      "domain": "compilers_languages",
+      "expected_concepts": [
+        [
+          "intermediate"
+        ],
+        [
+          "program",
+          "code"
+        ],
+        [
+          "optimiz",
+          "target"
+        ]
+      ],
+      "origin": "new-domain template variant 2/4",
+      "question": "During a production review, the team asks: What is an intermediate representation in a compiler?"
+    },
+    {
+      "case_id": "compilers_languages.09",
+      "domain": "compilers_languages",
+      "expected_concepts": [
+        [
+          "variable",
+          "value"
+        ],
+        [
+          "register"
+        ],
+        [
+          "spill",
+          "memory"
+        ]
+      ],
+      "origin": "new-domain template variant 2/4",
+      "question": "During a production review, the team asks: What does register allocation decide?"
+    },
+    {
+      "case_id": "compilers_languages.10",
+      "domain": "compilers_languages",
+      "expected_concepts": [
+        [
+          "undefined"
+        ],
+        [
+          "assume"
+        ],
+        [
+          "optimization",
+          "compiler"
+        ]
+      ],
+      "origin": "new-domain template variant 2/4",
+      "question": "During a production review, the team asks: Why can undefined behavior enable aggressive optimization?"
+    },
+    {
+      "case_id": "compilers_languages.11",
+      "domain": "compilers_languages",
+      "expected_concepts": [
+        [
+          "token"
+        ],
+        [
+          "grammar",
+          "syntax"
+        ],
+        [
+          "character",
+          "text"
+        ]
+      ],
+      "origin": "new-domain template variant 3/4",
+      "question": "A new engineer needs a concise explanation. What is the difference between lexical analysis and parsing?"
+    },
+    {
+      "case_id": "compilers_languages.12",
+      "domain": "compilers_languages",
+      "expected_concepts": [
+        [
+          "compile"
+        ],
+        [
+          "type"
+        ],
+        [
+          "runtime",
+          "logic",
+          "dynamic"
+        ]
+      ],
+      "origin": "new-domain template variant 3/4",
+      "question": "A new engineer needs a concise explanation. Why does static type checking catch only some program errors?"
+    },
+    {
+      "case_id": "compilers_languages.13",
+      "domain": "compilers_languages",
+      "expected_concepts": [
+        [
+          "intermediate"
+        ],
+        [
+          "program",
+          "code"
+        ],
+        [
+          "optimiz",
+          "target"
+        ]
+      ],
+      "origin": "new-domain template variant 3/4",
+      "question": "A new engineer needs a concise explanation. What is an intermediate representation in a compiler?"
+    },
+    {
+      "case_id": "compilers_languages.14",
+      "domain": "compilers_languages",
+      "expected_concepts": [
+        [
+          "variable",
+          "value"
+        ],
+        [
+          "register"
+        ],
+        [
+          "spill",
+          "memory"
+        ]
+      ],
+      "origin": "new-domain template variant 3/4",
+      "question": "A new engineer needs a concise explanation. What does register allocation decide?"
+    },
+    {
+      "case_id": "compilers_languages.15",
+      "domain": "compilers_languages",
+      "expected_concepts": [
+        [
+          "undefined"
+        ],
+        [
+          "assume"
+        ],
+        [
+          "optimization",
+          "compiler"
+        ]
+      ],
+      "origin": "new-domain template variant 3/4",
+      "question": "A new engineer needs a concise explanation. Why can undefined behavior enable aggressive optimization?"
+    },
+    {
+      "case_id": "compilers_languages.16",
+      "domain": "compilers_languages",
+      "expected_concepts": [
+        [
+          "token"
+        ],
+        [
+          "grammar",
+          "syntax"
+        ],
+        [
+          "character",
+          "text"
+        ]
+      ],
+      "origin": "new-domain template variant 4/4",
+      "question": "For an operational design note, explain this mechanism and one consequence: What is the difference between lexical analysis and parsing?"
+    },
+    {
+      "case_id": "compilers_languages.17",
+      "domain": "compilers_languages",
+      "expected_concepts": [
+        [
+          "compile"
+        ],
+        [
+          "type"
+        ],
+        [
+          "runtime",
+          "logic",
+          "dynamic"
+        ]
+      ],
+      "origin": "new-domain template variant 4/4",
+      "question": "For an operational design note, explain this mechanism and one consequence: Why does static type checking catch only some program errors?"
+    },
+    {
+      "case_id": "compilers_languages.18",
+      "domain": "compilers_languages",
+      "expected_concepts": [
+        [
+          "intermediate"
+        ],
+        [
+          "program",
+          "code"
+        ],
+        [
+          "optimiz",
+          "target"
+        ]
+      ],
+      "origin": "new-domain template variant 4/4",
+      "question": "For an operational design note, explain this mechanism and one consequence: What is an intermediate representation in a compiler?"
+    },
+    {
+      "case_id": "compilers_languages.19",
+      "domain": "compilers_languages",
+      "expected_concepts": [
+        [
+          "variable",
+          "value"
+        ],
+        [
+          "register"
+        ],
+        [
+          "spill",
+          "memory"
+        ]
+      ],
+      "origin": "new-domain template variant 4/4",
+      "question": "For an operational design note, explain this mechanism and one consequence: What does register allocation decide?"
+    },
+    {
+      "case_id": "compilers_languages.20",
+      "domain": "compilers_languages",
+      "expected_concepts": [
+        [
+          "undefined"
+        ],
+        [
+          "assume"
+        ],
+        [
+          "optimization",
+          "compiler"
+        ]
+      ],
+      "origin": "new-domain template variant 4/4",
+      "question": "For an operational design note, explain this mechanism and one consequence: Why can undefined behavior enable aggressive optimization?"
+    },
+    {
+      "case_id": "operating_systems.01",
+      "domain": "operating_systems",
+      "expected_concepts": [
+        [
+          "process"
+        ],
+        [
+          "thread"
+        ],
+        [
+          "address",
+          "memory"
+        ],
+        [
+          "share"
+        ]
+      ],
+      "origin": "new-domain template variant 1/4",
+      "question": "Answer the core technical question directly: What is the difference between a process and a thread?"
+    },
+    {
+      "case_id": "operating_systems.02",
+      "domain": "operating_systems",
+      "expected_concepts": [
+        [
+          "virtual"
+        ],
+        [
+          "physical"
+        ],
+        [
+          "mapping"
+        ],
+        [
+          "page"
+        ]
+      ],
+      "origin": "new-domain template variant 1/4",
+      "question": "Answer the core technical question directly: Why does virtual memory use page tables?"
+    },
+    {
+      "case_id": "operating_systems.03",
+      "domain": "operating_systems",
+      "expected_concepts": [
+        [
+          "state"
+        ],
+        [
+          "thread",
+          "process"
+        ],
+        [
+          "scheduler",
+          "CPU"
+        ]
+      ],
+      "origin": "new-domain template variant 1/4",
+      "question": "Answer the core technical question directly: What is a context switch?"
+    },
+    {
+      "case_id": "operating_systems.04",
+      "domain": "operating_systems",
+      "expected_concepts": [
+        [
+          "page"
+        ],
+        [
+          "memory"
+        ],
+        [
+          "disk",
+          "storage"
+        ],
+        [
+          "work",
+          "progress"
+        ]
+      ],
+      "origin": "new-domain template variant 1/4",
+      "question": "Answer the core technical question directly: Why can excessive paging cause thrashing?"
+    },
+    {
+      "case_id": "operating_systems.05",
+      "domain": "operating_systems",
+      "expected_concepts": [
+        [
+          "mutual",
+          "one"
+        ],
+        [
+          "critical",
+          "shared"
+        ],
+        [
+          "race"
+        ]
+      ],
+      "origin": "new-domain template variant 1/4",
+      "question": "Answer the core technical question directly: What problem does a mutex solve?"
+    },
+    {
+      "case_id": "operating_systems.06",
+      "domain": "operating_systems",
+      "expected_concepts": [
+        [
+          "process"
+        ],
+        [
+          "thread"
+        ],
+        [
+          "address",
+          "memory"
+        ],
+        [
+          "share"
+        ]
+      ],
+      "origin": "new-domain template variant 2/4",
+      "question": "During a production review, the team asks: What is the difference between a process and a thread?"
+    },
+    {
+      "case_id": "operating_systems.07",
+      "domain": "operating_systems",
+      "expected_concepts": [
+        [
+          "virtual"
+        ],
+        [
+          "physical"
+        ],
+        [
+          "mapping"
+        ],
+        [
+          "page"
+        ]
+      ],
+      "origin": "new-domain template variant 2/4",
+      "question": "During a production review, the team asks: Why does virtual memory use page tables?"
+    },
+    {
+      "case_id": "operating_systems.08",
+      "domain": "operating_systems",
+      "expected_concepts": [
+        [
+          "state"
+        ],
+        [
+          "thread",
+          "process"
+        ],
+        [
+          "scheduler",
+          "CPU"
+        ]
+      ],
+      "origin": "new-domain template variant 2/4",
+      "question": "During a production review, the team asks: What is a context switch?"
+    },
+    {
+      "case_id": "operating_systems.09",
+      "domain": "operating_systems",
+      "expected_concepts": [
+        [
+          "page"
+        ],
+        [
+          "memory"
+        ],
+        [
+          "disk",
+          "storage"
+        ],
+        [
+          "work",
+          "progress"
+        ]
+      ],
+      "origin": "new-domain template variant 2/4",
+      "question": "During a production review, the team asks: Why can excessive paging cause thrashing?"
+    },
+    {
+      "case_id": "operating_systems.10",
+      "domain": "operating_systems",
+      "expected_concepts": [
+        [
+          "mutual",
+          "one"
+        ],
+        [
+          "critical",
+          "shared"
+        ],
+        [
+          "race"
+        ]
+      ],
+      "origin": "new-domain template variant 2/4",
+      "question": "During a production review, the team asks: What problem does a mutex solve?"
+    },
+    {
+      "case_id": "operating_systems.11",
+      "domain": "operating_systems",
+      "expected_concepts": [
+        [
+          "process"
+        ],
+        [
+          "thread"
+        ],
+        [
+          "address",
+          "memory"
+        ],
+        [
+          "share"
+        ]
+      ],
+      "origin": "new-domain template variant 3/4",
+      "question": "A new engineer needs a concise explanation. What is the difference between a process and a thread?"
+    },
+    {
+      "case_id": "operating_systems.12",
+      "domain": "operating_systems",
+      "expected_concepts": [
+        [
+          "virtual"
+        ],
+        [
+          "physical"
+        ],
+        [
+          "mapping"
+        ],
+        [
+          "page"
+        ]
+      ],
+      "origin": "new-domain template variant 3/4",
+      "question": "A new engineer needs a concise explanation. Why does virtual memory use page tables?"
+    },
+    {
+      "case_id": "operating_systems.13",
+      "domain": "operating_systems",
+      "expected_concepts": [
+        [
+          "state"
+        ],
+        [
+          "thread",
+          "process"
+        ],
+        [
+          "scheduler",
+          "CPU"
+        ]
+      ],
+      "origin": "new-domain template variant 3/4",
+      "question": "A new engineer needs a concise explanation. What is a context switch?"
+    },
+    {
+      "case_id": "operating_systems.14",
+      "domain": "operating_systems",
+      "expected_concepts": [
+        [
+          "page"
+        ],
+        [
+          "memory"
+        ],
+        [
+          "disk",
+          "storage"
+        ],
+        [
+          "work",
+          "progress"
+        ]
+      ],
+      "origin": "new-domain template variant 3/4",
+      "question": "A new engineer needs a concise explanation. Why can excessive paging cause thrashing?"
+    },
+    {
+      "case_id": "operating_systems.15",
+      "domain": "operating_systems",
+      "expected_concepts": [
+        [
+          "mutual",
+          "one"
+        ],
+        [
+          "critical",
+          "shared"
+        ],
+        [
+          "race"
+        ]
+      ],
+      "origin": "new-domain template variant 3/4",
+      "question": "A new engineer needs a concise explanation. What problem does a mutex solve?"
+    },
+    {
+      "case_id": "operating_systems.16",
+      "domain": "operating_systems",
+      "expected_concepts": [
+        [
+          "process"
+        ],
+        [
+          "thread"
+        ],
+        [
+          "address",
+          "memory"
+        ],
+        [
+          "share"
+        ]
+      ],
+      "origin": "new-domain template variant 4/4",
+      "question": "For an operational design note, explain this mechanism and one consequence: What is the difference between a process and a thread?"
+    },
+    {
+      "case_id": "operating_systems.17",
+      "domain": "operating_systems",
+      "expected_concepts": [
+        [
+          "virtual"
+        ],
+        [
+          "physical"
+        ],
+        [
+          "mapping"
+        ],
+        [
+          "page"
+        ]
+      ],
+      "origin": "new-domain template variant 4/4",
+      "question": "For an operational design note, explain this mechanism and one consequence: Why does virtual memory use page tables?"
+    },
+    {
+      "case_id": "operating_systems.18",
+      "domain": "operating_systems",
+      "expected_concepts": [
+        [
+          "state"
+        ],
+        [
+          "thread",
+          "process"
+        ],
+        [
+          "scheduler",
+          "CPU"
+        ]
+      ],
+      "origin": "new-domain template variant 4/4",
+      "question": "For an operational design note, explain this mechanism and one consequence: What is a context switch?"
+    },
+    {
+      "case_id": "operating_systems.19",
+      "domain": "operating_systems",
+      "expected_concepts": [
+        [
+          "page"
+        ],
+        [
+          "memory"
+        ],
+        [
+          "disk",
+          "storage"
+        ],
+        [
+          "work",
+          "progress"
+        ]
+      ],
+      "origin": "new-domain template variant 4/4",
+      "question": "For an operational design note, explain this mechanism and one consequence: Why can excessive paging cause thrashing?"
+    },
+    {
+      "case_id": "operating_systems.20",
+      "domain": "operating_systems",
+      "expected_concepts": [
+        [
+          "mutual",
+          "one"
+        ],
+        [
+          "critical",
+          "shared"
+        ],
+        [
+          "race"
+        ]
+      ],
+      "origin": "new-domain template variant 4/4",
+      "question": "For an operational design note, explain this mechanism and one consequence: What problem does a mutex solve?"
+    },
+    {
+      "case_id": "mathematics.01",
+      "domain": "mathematics",
+      "expected_concepts": [
+        [
+          "limit"
+        ],
+        [
+          "function",
+          "value"
+        ],
+        [
+          "point"
+        ]
+      ],
+      "origin": "new-domain template variant 1/4",
+      "question": "Answer the core technical question directly: What does it mean for a function to be continuous at a point?"
+    },
+    {
+      "case_id": "mathematics.02",
+      "domain": "mathematics",
+      "expected_concepts": [
+        [
+          "assume",
+          "negation"
+        ],
+        [
+          "contradiction"
+        ],
+        [
+          "claim",
+          "true"
+        ]
+      ],
+      "origin": "new-domain template variant 1/4",
+      "question": "Answer the core technical question directly: Why does a proof by contradiction establish its claim?"
+    },
+    {
+      "case_id": "mathematics.03",
+      "domain": "mathematics",
+      "expected_concepts": [
+        [
+          "direction"
+        ],
+        [
+          "linear",
+          "transformation"
+        ],
+        [
+          "scale",
+          "eigenvalue"
+        ]
+      ],
+      "origin": "new-domain template variant 1/4",
+      "question": "Answer the core technical question directly: What is the geometric meaning of an eigenvector?"
+    },
+    {
+      "case_id": "mathematics.04",
+      "domain": "mathematics",
+      "expected_concepts": [
+        [
+          "necessary",
+          "required"
+        ],
+        [
+          "sufficient",
+          "guarantee"
+        ]
+      ],
+      "origin": "new-domain template variant 1/4",
+      "question": "Answer the core technical question directly: What distinguishes a necessary condition from a sufficient condition?"
+    },
+    {
+      "case_id": "mathematics.05",
+      "domain": "mathematics",
+      "expected_concepts": [
+        [
+          "inverse"
+        ],
+        [
+          "zero"
+        ],
+        [
+          "contradiction",
+          "no unique"
+        ]
+      ],
+      "origin": "new-domain template variant 1/4",
+      "question": "Answer the core technical question directly: Why is division by zero undefined in ordinary arithmetic?"
+    },
+    {
+      "case_id": "mathematics.06",
+      "domain": "mathematics",
+      "expected_concepts": [
+        [
+          "limit"
+        ],
+        [
+          "function",
+          "value"
+        ],
+        [
+          "point"
+        ]
+      ],
+      "origin": "new-domain template variant 2/4",
+      "question": "During a production review, the team asks: What does it mean for a function to be continuous at a point?"
+    },
+    {
+      "case_id": "mathematics.07",
+      "domain": "mathematics",
+      "expected_concepts": [
+        [
+          "assume",
+          "negation"
+        ],
+        [
+          "contradiction"
+        ],
+        [
+          "claim",
+          "true"
+        ]
+      ],
+      "origin": "new-domain template variant 2/4",
+      "question": "During a production review, the team asks: Why does a proof by contradiction establish its claim?"
+    },
+    {
+      "case_id": "mathematics.08",
+      "domain": "mathematics",
+      "expected_concepts": [
+        [
+          "direction"
+        ],
+        [
+          "linear",
+          "transformation"
+        ],
+        [
+          "scale",
+          "eigenvalue"
+        ]
+      ],
+      "origin": "new-domain template variant 2/4",
+      "question": "During a production review, the team asks: What is the geometric meaning of an eigenvector?"
+    },
+    {
+      "case_id": "mathematics.09",
+      "domain": "mathematics",
+      "expected_concepts": [
+        [
+          "necessary",
+          "required"
+        ],
+        [
+          "sufficient",
+          "guarantee"
+        ]
+      ],
+      "origin": "new-domain template variant 2/4",
+      "question": "During a production review, the team asks: What distinguishes a necessary condition from a sufficient condition?"
+    },
+    {
+      "case_id": "mathematics.10",
+      "domain": "mathematics",
+      "expected_concepts": [
+        [
+          "inverse"
+        ],
+        [
+          "zero"
+        ],
+        [
+          "contradiction",
+          "no unique"
+        ]
+      ],
+      "origin": "new-domain template variant 2/4",
+      "question": "During a production review, the team asks: Why is division by zero undefined in ordinary arithmetic?"
+    },
+    {
+      "case_id": "mathematics.11",
+      "domain": "mathematics",
+      "expected_concepts": [
+        [
+          "limit"
+        ],
+        [
+          "function",
+          "value"
+        ],
+        [
+          "point"
+        ]
+      ],
+      "origin": "new-domain template variant 3/4",
+      "question": "A new engineer needs a concise explanation. What does it mean for a function to be continuous at a point?"
+    },
+    {
+      "case_id": "mathematics.12",
+      "domain": "mathematics",
+      "expected_concepts": [
+        [
+          "assume",
+          "negation"
+        ],
+        [
+          "contradiction"
+        ],
+        [
+          "claim",
+          "true"
+        ]
+      ],
+      "origin": "new-domain template variant 3/4",
+      "question": "A new engineer needs a concise explanation. Why does a proof by contradiction establish its claim?"
+    },
+    {
+      "case_id": "mathematics.13",
+      "domain": "mathematics",
+      "expected_concepts": [
+        [
+          "direction"
+        ],
+        [
+          "linear",
+          "transformation"
+        ],
+        [
+          "scale",
+          "eigenvalue"
+        ]
+      ],
+      "origin": "new-domain template variant 3/4",
+      "question": "A new engineer needs a concise explanation. What is the geometric meaning of an eigenvector?"
+    },
+    {
+      "case_id": "mathematics.14",
+      "domain": "mathematics",
+      "expected_concepts": [
+        [
+          "necessary",
+          "required"
+        ],
+        [
+          "sufficient",
+          "guarantee"
+        ]
+      ],
+      "origin": "new-domain template variant 3/4",
+      "question": "A new engineer needs a concise explanation. What distinguishes a necessary condition from a sufficient condition?"
+    },
+    {
+      "case_id": "mathematics.15",
+      "domain": "mathematics",
+      "expected_concepts": [
+        [
+          "inverse"
+        ],
+        [
+          "zero"
+        ],
+        [
+          "contradiction",
+          "no unique"
+        ]
+      ],
+      "origin": "new-domain template variant 3/4",
+      "question": "A new engineer needs a concise explanation. Why is division by zero undefined in ordinary arithmetic?"
+    },
+    {
+      "case_id": "mathematics.16",
+      "domain": "mathematics",
+      "expected_concepts": [
+        [
+          "limit"
+        ],
+        [
+          "function",
+          "value"
+        ],
+        [
+          "point"
+        ]
+      ],
+      "origin": "new-domain template variant 4/4",
+      "question": "For an operational design note, explain this mechanism and one consequence: What does it mean for a function to be continuous at a point?"
+    },
+    {
+      "case_id": "mathematics.17",
+      "domain": "mathematics",
+      "expected_concepts": [
+        [
+          "assume",
+          "negation"
+        ],
+        [
+          "contradiction"
+        ],
+        [
+          "claim",
+          "true"
+        ]
+      ],
+      "origin": "new-domain template variant 4/4",
+      "question": "For an operational design note, explain this mechanism and one consequence: Why does a proof by contradiction establish its claim?"
+    },
+    {
+      "case_id": "mathematics.18",
+      "domain": "mathematics",
+      "expected_concepts": [
+        [
+          "direction"
+        ],
+        [
+          "linear",
+          "transformation"
+        ],
+        [
+          "scale",
+          "eigenvalue"
+        ]
+      ],
+      "origin": "new-domain template variant 4/4",
+      "question": "For an operational design note, explain this mechanism and one consequence: What is the geometric meaning of an eigenvector?"
+    },
+    {
+      "case_id": "mathematics.19",
+      "domain": "mathematics",
+      "expected_concepts": [
+        [
+          "necessary",
+          "required"
+        ],
+        [
+          "sufficient",
+          "guarantee"
+        ]
+      ],
+      "origin": "new-domain template variant 4/4",
+      "question": "For an operational design note, explain this mechanism and one consequence: What distinguishes a necessary condition from a sufficient condition?"
+    },
+    {
+      "case_id": "mathematics.20",
+      "domain": "mathematics",
+      "expected_concepts": [
+        [
+          "inverse"
+        ],
+        [
+          "zero"
+        ],
+        [
+          "contradiction",
+          "no unique"
+        ]
+      ],
+      "origin": "new-domain template variant 4/4",
+      "question": "For an operational design note, explain this mechanism and one consequence: Why is division by zero undefined in ordinary arithmetic?"
+    },
+    {
+      "case_id": "chemistry_materials.01",
+      "domain": "chemistry_materials",
+      "expected_concepts": [
+        [
+          "activation"
+        ],
+        [
+          "rate"
+        ],
+        [
+          "not consumed",
+          "regener"
+        ]
+      ],
+      "origin": "new-domain template variant 1/4",
+      "question": "Answer the core technical question directly: What does a catalyst change in a chemical reaction?"
+    },
+    {
+      "case_id": "chemistry_materials.02",
+      "domain": "chemistry_materials",
+      "expected_concepts": [
+        [
+          "collision"
+        ],
+        [
+          "energy"
+        ],
+        [
+          "activation"
+        ]
+      ],
+      "origin": "new-domain template variant 1/4",
+      "question": "Answer the core technical question directly: Why does increasing temperature often speed a reaction?"
+    },
+    {
+      "case_id": "chemistry_materials.03",
+      "domain": "chemistry_materials",
+      "expected_concepts": [
+        [
+          "electron"
+        ],
+        [
+          "transfer",
+          "ionic"
+        ],
+        [
+          "share",
+          "covalent"
+        ]
+      ],
+      "origin": "new-domain template variant 1/4",
+      "question": "Answer the core technical question directly: What is the difference between ionic and covalent bonding?"
+    },
+    {
+      "case_id": "chemistry_materials.04",
+      "domain": "chemistry_materials",
+      "expected_concepts": [
+        [
+          "electrochemical"
+        ],
+        [
+          "ion"
+        ],
+        [
+          "electron",
+          "current"
+        ]
+      ],
+      "origin": "new-domain template variant 1/4",
+      "question": "Answer the core technical question directly: Why can corrosion accelerate in an electrolyte?"
+    },
+    {
+      "case_id": "chemistry_materials.05",
+      "domain": "chemistry_materials",
+      "expected_concepts": [
+        [
+          "phase"
+        ],
+        [
+          "temperature"
+        ],
+        [
+          "pressure",
+          "composition"
+        ]
+      ],
+      "origin": "new-domain template variant 1/4",
+      "question": "Answer the core technical question directly: What does a phase diagram show?"
+    },
+    {
+      "case_id": "chemistry_materials.06",
+      "domain": "chemistry_materials",
+      "expected_concepts": [
+        [
+          "activation"
+        ],
+        [
+          "rate"
+        ],
+        [
+          "not consumed",
+          "regener"
+        ]
+      ],
+      "origin": "new-domain template variant 2/4",
+      "question": "During a production review, the team asks: What does a catalyst change in a chemical reaction?"
+    },
+    {
+      "case_id": "chemistry_materials.07",
+      "domain": "chemistry_materials",
+      "expected_concepts": [
+        [
+          "collision"
+        ],
+        [
+          "energy"
+        ],
+        [
+          "activation"
+        ]
+      ],
+      "origin": "new-domain template variant 2/4",
+      "question": "During a production review, the team asks: Why does increasing temperature often speed a reaction?"
+    },
+    {
+      "case_id": "chemistry_materials.08",
+      "domain": "chemistry_materials",
+      "expected_concepts": [
+        [
+          "electron"
+        ],
+        [
+          "transfer",
+          "ionic"
+        ],
+        [
+          "share",
+          "covalent"
+        ]
+      ],
+      "origin": "new-domain template variant 2/4",
+      "question": "During a production review, the team asks: What is the difference between ionic and covalent bonding?"
+    },
+    {
+      "case_id": "chemistry_materials.09",
+      "domain": "chemistry_materials",
+      "expected_concepts": [
+        [
+          "electrochemical"
+        ],
+        [
+          "ion"
+        ],
+        [
+          "electron",
+          "current"
+        ]
+      ],
+      "origin": "new-domain template variant 2/4",
+      "question": "During a production review, the team asks: Why can corrosion accelerate in an electrolyte?"
+    },
+    {
+      "case_id": "chemistry_materials.10",
+      "domain": "chemistry_materials",
+      "expected_concepts": [
+        [
+          "phase"
+        ],
+        [
+          "temperature"
+        ],
+        [
+          "pressure",
+          "composition"
+        ]
+      ],
+      "origin": "new-domain template variant 2/4",
+      "question": "During a production review, the team asks: What does a phase diagram show?"
+    },
+    {
+      "case_id": "chemistry_materials.11",
+      "domain": "chemistry_materials",
+      "expected_concepts": [
+        [
+          "activation"
+        ],
+        [
+          "rate"
+        ],
+        [
+          "not consumed",
+          "regener"
+        ]
+      ],
+      "origin": "new-domain template variant 3/4",
+      "question": "A new engineer needs a concise explanation. What does a catalyst change in a chemical reaction?"
+    },
+    {
+      "case_id": "chemistry_materials.12",
+      "domain": "chemistry_materials",
+      "expected_concepts": [
+        [
+          "collision"
+        ],
+        [
+          "energy"
+        ],
+        [
+          "activation"
+        ]
+      ],
+      "origin": "new-domain template variant 3/4",
+      "question": "A new engineer needs a concise explanation. Why does increasing temperature often speed a reaction?"
+    },
+    {
+      "case_id": "chemistry_materials.13",
+      "domain": "chemistry_materials",
+      "expected_concepts": [
+        [
+          "electron"
+        ],
+        [
+          "transfer",
+          "ionic"
+        ],
+        [
+          "share",
+          "covalent"
+        ]
+      ],
+      "origin": "new-domain template variant 3/4",
+      "question": "A new engineer needs a concise explanation. What is the difference between ionic and covalent bonding?"
+    },
+    {
+      "case_id": "chemistry_materials.14",
+      "domain": "chemistry_materials",
+      "expected_concepts": [
+        [
+          "electrochemical"
+        ],
+        [
+          "ion"
+        ],
+        [
+          "electron",
+          "current"
+        ]
+      ],
+      "origin": "new-domain template variant 3/4",
+      "question": "A new engineer needs a concise explanation. Why can corrosion accelerate in an electrolyte?"
+    },
+    {
+      "case_id": "chemistry_materials.15",
+      "domain": "chemistry_materials",
+      "expected_concepts": [
+        [
+          "phase"
+        ],
+        [
+          "temperature"
+        ],
+        [
+          "pressure",
+          "composition"
+        ]
+      ],
+      "origin": "new-domain template variant 3/4",
+      "question": "A new engineer needs a concise explanation. What does a phase diagram show?"
+    },
+    {
+      "case_id": "chemistry_materials.16",
+      "domain": "chemistry_materials",
+      "expected_concepts": [
+        [
+          "activation"
+        ],
+        [
+          "rate"
+        ],
+        [
+          "not consumed",
+          "regener"
+        ]
+      ],
+      "origin": "new-domain template variant 4/4",
+      "question": "For an operational design note, explain this mechanism and one consequence: What does a catalyst change in a chemical reaction?"
+    },
+    {
+      "case_id": "chemistry_materials.17",
+      "domain": "chemistry_materials",
+      "expected_concepts": [
+        [
+          "collision"
+        ],
+        [
+          "energy"
+        ],
+        [
+          "activation"
+        ]
+      ],
+      "origin": "new-domain template variant 4/4",
+      "question": "For an operational design note, explain this mechanism and one consequence: Why does increasing temperature often speed a reaction?"
+    },
+    {
+      "case_id": "chemistry_materials.18",
+      "domain": "chemistry_materials",
+      "expected_concepts": [
+        [
+          "electron"
+        ],
+        [
+          "transfer",
+          "ionic"
+        ],
+        [
+          "share",
+          "covalent"
+        ]
+      ],
+      "origin": "new-domain template variant 4/4",
+      "question": "For an operational design note, explain this mechanism and one consequence: What is the difference between ionic and covalent bonding?"
+    },
+    {
+      "case_id": "chemistry_materials.19",
+      "domain": "chemistry_materials",
+      "expected_concepts": [
+        [
+          "electrochemical"
+        ],
+        [
+          "ion"
+        ],
+        [
+          "electron",
+          "current"
+        ]
+      ],
+      "origin": "new-domain template variant 4/4",
+      "question": "For an operational design note, explain this mechanism and one consequence: Why can corrosion accelerate in an electrolyte?"
+    },
+    {
+      "case_id": "chemistry_materials.20",
+      "domain": "chemistry_materials",
+      "expected_concepts": [
+        [
+          "phase"
+        ],
+        [
+          "temperature"
+        ],
+        [
+          "pressure",
+          "composition"
+        ]
+      ],
+      "origin": "new-domain template variant 4/4",
+      "question": "For an operational design note, explain this mechanism and one consequence: What does a phase diagram show?"
+    },
+    {
+      "case_id": "electronics_control.01",
+      "domain": "electronics_control",
+      "expected_concepts": [
+        [
+          "charge"
+        ],
+        [
+          "electric",
+          "field"
+        ],
+        [
+          "energy"
+        ]
+      ],
+      "origin": "new-domain template variant 1/4",
+      "question": "Answer the core technical question directly: What does a capacitor store?"
+    },
+    {
+      "case_id": "electronics_control.02",
+      "domain": "electronics_control",
+      "expected_concepts": [
+        [
+          "gain"
+        ],
+        [
+          "stability",
+          "linear"
+        ],
+        [
+          "distortion",
+          "variation"
+        ]
+      ],
+      "origin": "new-domain template variant 1/4",
+      "question": "Answer the core technical question directly: Why is negative feedback used in an amplifier?"
+    },
+    {
+      "case_id": "electronics_control.03",
+      "domain": "electronics_control",
+      "expected_concepts": [
+        [
+          "duty",
+          "width"
+        ],
+        [
+          "pulse"
+        ],
+        [
+          "average",
+          "power"
+        ]
+      ],
+      "origin": "new-domain template variant 1/4",
+      "question": "Answer the core technical question directly: What is pulse-width modulation?"
+    },
+    {
+      "case_id": "electronics_control.04",
+      "domain": "electronics_control",
+      "expected_concepts": [
+        [
+          "sampling"
+        ],
+        [
+          "alias"
+        ],
+        [
+          "frequency",
+          "bandwidth"
+        ]
+      ],
+      "origin": "new-domain template variant 1/4",
+      "question": "Answer the core technical question directly: Why must an ADC sampling rate and input bandwidth be coordinated?"
+    },
+    {
+      "case_id": "electronics_control.05",
+      "domain": "electronics_control",
+      "expected_concepts": [
+        [
+          "integral"
+        ],
+        [
+          "saturat"
+        ],
+        [
+          "accumul"
+        ],
+        [
+          "overshoot",
+          "recovery"
+        ]
+      ],
+      "origin": "new-domain template variant 1/4",
+      "question": "Answer the core technical question directly: What does integral windup mean in a controller?"
+    },
+    {
+      "case_id": "electronics_control.06",
+      "domain": "electronics_control",
+      "expected_concepts": [
+        [
+          "charge"
+        ],
+        [
+          "electric",
+          "field"
+        ],
+        [
+          "energy"
+        ]
+      ],
+      "origin": "new-domain template variant 2/4",
+      "question": "During a production review, the team asks: What does a capacitor store?"
+    },
+    {
+      "case_id": "electronics_control.07",
+      "domain": "electronics_control",
+      "expected_concepts": [
+        [
+          "gain"
+        ],
+        [
+          "stability",
+          "linear"
+        ],
+        [
+          "distortion",
+          "variation"
+        ]
+      ],
+      "origin": "new-domain template variant 2/4",
+      "question": "During a production review, the team asks: Why is negative feedback used in an amplifier?"
+    },
+    {
+      "case_id": "electronics_control.08",
+      "domain": "electronics_control",
+      "expected_concepts": [
+        [
+          "duty",
+          "width"
+        ],
+        [
+          "pulse"
+        ],
+        [
+          "average",
+          "power"
+        ]
+      ],
+      "origin": "new-domain template variant 2/4",
+      "question": "During a production review, the team asks: What is pulse-width modulation?"
+    },
+    {
+      "case_id": "electronics_control.09",
+      "domain": "electronics_control",
+      "expected_concepts": [
+        [
+          "sampling"
+        ],
+        [
+          "alias"
+        ],
+        [
+          "frequency",
+          "bandwidth"
+        ]
+      ],
+      "origin": "new-domain template variant 2/4",
+      "question": "During a production review, the team asks: Why must an ADC sampling rate and input bandwidth be coordinated?"
+    },
+    {
+      "case_id": "electronics_control.10",
+      "domain": "electronics_control",
+      "expected_concepts": [
+        [
+          "integral"
+        ],
+        [
+          "saturat"
+        ],
+        [
+          "accumul"
+        ],
+        [
+          "overshoot",
+          "recovery"
+        ]
+      ],
+      "origin": "new-domain template variant 2/4",
+      "question": "During a production review, the team asks: What does integral windup mean in a controller?"
+    },
+    {
+      "case_id": "electronics_control.11",
+      "domain": "electronics_control",
+      "expected_concepts": [
+        [
+          "charge"
+        ],
+        [
+          "electric",
+          "field"
+        ],
+        [
+          "energy"
+        ]
+      ],
+      "origin": "new-domain template variant 3/4",
+      "question": "A new engineer needs a concise explanation. What does a capacitor store?"
+    },
+    {
+      "case_id": "electronics_control.12",
+      "domain": "electronics_control",
+      "expected_concepts": [
+        [
+          "gain"
+        ],
+        [
+          "stability",
+          "linear"
+        ],
+        [
+          "distortion",
+          "variation"
+        ]
+      ],
+      "origin": "new-domain template variant 3/4",
+      "question": "A new engineer needs a concise explanation. Why is negative feedback used in an amplifier?"
+    },
+    {
+      "case_id": "electronics_control.13",
+      "domain": "electronics_control",
+      "expected_concepts": [
+        [
+          "duty",
+          "width"
+        ],
+        [
+          "pulse"
+        ],
+        [
+          "average",
+          "power"
+        ]
+      ],
+      "origin": "new-domain template variant 3/4",
+      "question": "A new engineer needs a concise explanation. What is pulse-width modulation?"
+    },
+    {
+      "case_id": "electronics_control.14",
+      "domain": "electronics_control",
+      "expected_concepts": [
+        [
+          "sampling"
+        ],
+        [
+          "alias"
+        ],
+        [
+          "frequency",
+          "bandwidth"
+        ]
+      ],
+      "origin": "new-domain template variant 3/4",
+      "question": "A new engineer needs a concise explanation. Why must an ADC sampling rate and input bandwidth be coordinated?"
+    },
+    {
+      "case_id": "electronics_control.15",
+      "domain": "electronics_control",
+      "expected_concepts": [
+        [
+          "integral"
+        ],
+        [
+          "saturat"
+        ],
+        [
+          "accumul"
+        ],
+        [
+          "overshoot",
+          "recovery"
+        ]
+      ],
+      "origin": "new-domain template variant 3/4",
+      "question": "A new engineer needs a concise explanation. What does integral windup mean in a controller?"
+    },
+    {
+      "case_id": "electronics_control.16",
+      "domain": "electronics_control",
+      "expected_concepts": [
+        [
+          "charge"
+        ],
+        [
+          "electric",
+          "field"
+        ],
+        [
+          "energy"
+        ]
+      ],
+      "origin": "new-domain template variant 4/4",
+      "question": "For an operational design note, explain this mechanism and one consequence: What does a capacitor store?"
+    },
+    {
+      "case_id": "electronics_control.17",
+      "domain": "electronics_control",
+      "expected_concepts": [
+        [
+          "gain"
+        ],
+        [
+          "stability",
+          "linear"
+        ],
+        [
+          "distortion",
+          "variation"
+        ]
+      ],
+      "origin": "new-domain template variant 4/4",
+      "question": "For an operational design note, explain this mechanism and one consequence: Why is negative feedback used in an amplifier?"
+    },
+    {
+      "case_id": "electronics_control.18",
+      "domain": "electronics_control",
+      "expected_concepts": [
+        [
+          "duty",
+          "width"
+        ],
+        [
+          "pulse"
+        ],
+        [
+          "average",
+          "power"
+        ]
+      ],
+      "origin": "new-domain template variant 4/4",
+      "question": "For an operational design note, explain this mechanism and one consequence: What is pulse-width modulation?"
+    },
+    {
+      "case_id": "electronics_control.19",
+      "domain": "electronics_control",
+      "expected_concepts": [
+        [
+          "sampling"
+        ],
+        [
+          "alias"
+        ],
+        [
+          "frequency",
+          "bandwidth"
+        ]
+      ],
+      "origin": "new-domain template variant 4/4",
+      "question": "For an operational design note, explain this mechanism and one consequence: Why must an ADC sampling rate and input bandwidth be coordinated?"
+    },
+    {
+      "case_id": "electronics_control.20",
+      "domain": "electronics_control",
+      "expected_concepts": [
+        [
+          "integral"
+        ],
+        [
+          "saturat"
+        ],
+        [
+          "accumul"
+        ],
+        [
+          "overshoot",
+          "recovery"
+        ]
+      ],
+      "origin": "new-domain template variant 4/4",
+      "question": "For an operational design note, explain this mechanism and one consequence: What does integral windup mean in a controller?"
+    },
+    {
+      "case_id": "climate_energy.01",
+      "domain": "climate_energy",
+      "expected_concepts": [
+        [
+          "infrared",
+          "heat"
+        ],
+        [
+          "absorb",
+          "emit"
+        ],
+        [
+          "greenhouse"
+        ]
+      ],
+      "origin": "new-domain template variant 1/4",
+      "question": "Answer the core technical question directly: Why does atmospheric carbon dioxide warm the climate system?"
+    },
+    {
+      "case_id": "climate_energy.02",
+      "domain": "climate_energy",
+      "expected_concepts": [
+        [
+          "actual",
+          "generated"
+        ],
+        [
+          "maximum",
+          "rated"
+        ],
+        [
+          "time",
+          "period"
+        ]
+      ],
+      "origin": "new-domain template variant 1/4",
+      "question": "Answer the core technical question directly: What is capacity factor for a power plant?"
+    },
+    {
+      "case_id": "climate_energy.03",
+      "domain": "climate_energy",
+      "expected_concepts": [
+        [
+          "supply",
+          "generation"
+        ],
+        [
+          "demand",
+          "load"
+        ],
+        [
+          "frequency"
+        ]
+      ],
+      "origin": "new-domain template variant 1/4",
+      "question": "Answer the core technical question directly: Why does an electrical grid need frequency balancing?"
+    },
+    {
+      "case_id": "climate_energy.04",
+      "domain": "climate_energy",
+      "expected_concepts": [
+        [
+          "energy"
+        ],
+        [
+          "power"
+        ],
+        [
+          "time",
+          "rate"
+        ]
+      ],
+      "origin": "new-domain template variant 1/4",
+      "question": "Answer the core technical question directly: What is the difference between energy and power in grid planning?"
+    },
+    {
+      "case_id": "climate_energy.05",
+      "domain": "climate_energy",
+      "expected_concepts": [
+        [
+          "store"
+        ],
+        [
+          "surplus",
+          "excess"
+        ],
+        [
+          "later",
+          "deficit",
+          "demand"
+        ]
+      ],
+      "origin": "new-domain template variant 1/4",
+      "question": "Answer the core technical question directly: Why can storage help integrate variable renewable generation?"
+    },
+    {
+      "case_id": "climate_energy.06",
+      "domain": "climate_energy",
+      "expected_concepts": [
+        [
+          "infrared",
+          "heat"
+        ],
+        [
+          "absorb",
+          "emit"
+        ],
+        [
+          "greenhouse"
+        ]
+      ],
+      "origin": "new-domain template variant 2/4",
+      "question": "During a production review, the team asks: Why does atmospheric carbon dioxide warm the climate system?"
+    },
+    {
+      "case_id": "climate_energy.07",
+      "domain": "climate_energy",
+      "expected_concepts": [
+        [
+          "actual",
+          "generated"
+        ],
+        [
+          "maximum",
+          "rated"
+        ],
+        [
+          "time",
+          "period"
+        ]
+      ],
+      "origin": "new-domain template variant 2/4",
+      "question": "During a production review, the team asks: What is capacity factor for a power plant?"
+    },
+    {
+      "case_id": "climate_energy.08",
+      "domain": "climate_energy",
+      "expected_concepts": [
+        [
+          "supply",
+          "generation"
+        ],
+        [
+          "demand",
+          "load"
+        ],
+        [
+          "frequency"
+        ]
+      ],
+      "origin": "new-domain template variant 2/4",
+      "question": "During a production review, the team asks: Why does an electrical grid need frequency balancing?"
+    },
+    {
+      "case_id": "climate_energy.09",
+      "domain": "climate_energy",
+      "expected_concepts": [
+        [
+          "energy"
+        ],
+        [
+          "power"
+        ],
+        [
+          "time",
+          "rate"
+        ]
+      ],
+      "origin": "new-domain template variant 2/4",
+      "question": "During a production review, the team asks: What is the difference between energy and power in grid planning?"
+    },
+    {
+      "case_id": "climate_energy.10",
+      "domain": "climate_energy",
+      "expected_concepts": [
+        [
+          "store"
+        ],
+        [
+          "surplus",
+          "excess"
+        ],
+        [
+          "later",
+          "deficit",
+          "demand"
+        ]
+      ],
+      "origin": "new-domain template variant 2/4",
+      "question": "During a production review, the team asks: Why can storage help integrate variable renewable generation?"
+    },
+    {
+      "case_id": "climate_energy.11",
+      "domain": "climate_energy",
+      "expected_concepts": [
+        [
+          "infrared",
+          "heat"
+        ],
+        [
+          "absorb",
+          "emit"
+        ],
+        [
+          "greenhouse"
+        ]
+      ],
+      "origin": "new-domain template variant 3/4",
+      "question": "A new engineer needs a concise explanation. Why does atmospheric carbon dioxide warm the climate system?"
+    },
+    {
+      "case_id": "climate_energy.12",
+      "domain": "climate_energy",
+      "expected_concepts": [
+        [
+          "actual",
+          "generated"
+        ],
+        [
+          "maximum",
+          "rated"
+        ],
+        [
+          "time",
+          "period"
+        ]
+      ],
+      "origin": "new-domain template variant 3/4",
+      "question": "A new engineer needs a concise explanation. What is capacity factor for a power plant?"
+    },
+    {
+      "case_id": "climate_energy.13",
+      "domain": "climate_energy",
+      "expected_concepts": [
+        [
+          "supply",
+          "generation"
+        ],
+        [
+          "demand",
+          "load"
+        ],
+        [
+          "frequency"
+        ]
+      ],
+      "origin": "new-domain template variant 3/4",
+      "question": "A new engineer needs a concise explanation. Why does an electrical grid need frequency balancing?"
+    },
+    {
+      "case_id": "climate_energy.14",
+      "domain": "climate_energy",
+      "expected_concepts": [
+        [
+          "energy"
+        ],
+        [
+          "power"
+        ],
+        [
+          "time",
+          "rate"
+        ]
+      ],
+      "origin": "new-domain template variant 3/4",
+      "question": "A new engineer needs a concise explanation. What is the difference between energy and power in grid planning?"
+    },
+    {
+      "case_id": "climate_energy.15",
+      "domain": "climate_energy",
+      "expected_concepts": [
+        [
+          "store"
+        ],
+        [
+          "surplus",
+          "excess"
+        ],
+        [
+          "later",
+          "deficit",
+          "demand"
+        ]
+      ],
+      "origin": "new-domain template variant 3/4",
+      "question": "A new engineer needs a concise explanation. Why can storage help integrate variable renewable generation?"
+    },
+    {
+      "case_id": "climate_energy.16",
+      "domain": "climate_energy",
+      "expected_concepts": [
+        [
+          "infrared",
+          "heat"
+        ],
+        [
+          "absorb",
+          "emit"
+        ],
+        [
+          "greenhouse"
+        ]
+      ],
+      "origin": "new-domain template variant 4/4",
+      "question": "For an operational design note, explain this mechanism and one consequence: Why does atmospheric carbon dioxide warm the climate system?"
+    },
+    {
+      "case_id": "climate_energy.17",
+      "domain": "climate_energy",
+      "expected_concepts": [
+        [
+          "actual",
+          "generated"
+        ],
+        [
+          "maximum",
+          "rated"
+        ],
+        [
+          "time",
+          "period"
+        ]
+      ],
+      "origin": "new-domain template variant 4/4",
+      "question": "For an operational design note, explain this mechanism and one consequence: What is capacity factor for a power plant?"
+    },
+    {
+      "case_id": "climate_energy.18",
+      "domain": "climate_energy",
+      "expected_concepts": [
+        [
+          "supply",
+          "generation"
+        ],
+        [
+          "demand",
+          "load"
+        ],
+        [
+          "frequency"
+        ]
+      ],
+      "origin": "new-domain template variant 4/4",
+      "question": "For an operational design note, explain this mechanism and one consequence: Why does an electrical grid need frequency balancing?"
+    },
+    {
+      "case_id": "climate_energy.19",
+      "domain": "climate_energy",
+      "expected_concepts": [
+        [
+          "energy"
+        ],
+        [
+          "power"
+        ],
+        [
+          "time",
+          "rate"
+        ]
+      ],
+      "origin": "new-domain template variant 4/4",
+      "question": "For an operational design note, explain this mechanism and one consequence: What is the difference between energy and power in grid planning?"
+    },
+    {
+      "case_id": "climate_energy.20",
+      "domain": "climate_energy",
+      "expected_concepts": [
+        [
+          "store"
+        ],
+        [
+          "surplus",
+          "excess"
+        ],
+        [
+          "later",
+          "deficit",
+          "demand"
+        ]
+      ],
+      "origin": "new-domain template variant 4/4",
+      "question": "For an operational design note, explain this mechanism and one consequence: Why can storage help integrate variable renewable generation?"
+    },
+    {
+      "case_id": "product_reliability.01",
+      "domain": "product_reliability",
+      "expected_concepts": [
+        [
+          "average",
+          "mean"
+        ],
+        [
+          "time"
+        ],
+        [
+          "failure"
+        ]
+      ],
+      "origin": "new-domain template variant 1/4",
+      "question": "Answer the core technical question directly: What does mean time between failures measure?"
+    },
+    {
+      "case_id": "product_reliability.02",
+      "domain": "product_reliability",
+      "expected_concepts": [
+        [
+          "small",
+          "subset"
+        ],
+        [
+          "traffic",
+          "users"
+        ],
+        [
+          "detect",
+          "risk",
+          "rollback"
+        ]
+      ],
+      "origin": "new-domain template variant 1/4",
+      "question": "Answer the core technical question directly: Why is a canary deployment useful?"
+    },
+    {
+      "case_id": "product_reliability.03",
+      "domain": "product_reliability",
+      "expected_concepts": [
+        [
+          "failure",
+          "hazard"
+        ],
+        [
+          "cause"
+        ],
+        [
+          "logic",
+          "combine"
+        ]
+      ],
+      "origin": "new-domain template variant 1/4",
+      "question": "Answer the core technical question directly: What is a fault tree used for?"
+    },
+    {
+      "case_id": "product_reliability.04",
+      "domain": "product_reliability",
+      "expected_concepts": [
+        [
+          "failure"
+        ],
+        [
+          "load",
+          "stress"
+        ],
+        [
+          "production",
+          "real"
+        ]
+      ],
+      "origin": "new-domain template variant 1/4",
+      "question": "Answer the core technical question directly: Why should reliability tests include realistic load profiles?"
+    },
+    {
+      "case_id": "product_reliability.05",
+      "domain": "product_reliability",
+      "expected_concepts": [
+        [
+          "indicator",
+          "measure"
+        ],
+        [
+          "objective",
+          "target"
+        ],
+        [
+          "service"
+        ]
+      ],
+      "origin": "new-domain template variant 1/4",
+      "question": "Answer the core technical question directly: What distinguishes a service-level indicator from an objective?"
+    },
+    {
+      "case_id": "product_reliability.06",
+      "domain": "product_reliability",
+      "expected_concepts": [
+        [
+          "average",
+          "mean"
+        ],
+        [
+          "time"
+        ],
+        [
+          "failure"
+        ]
+      ],
+      "origin": "new-domain template variant 2/4",
+      "question": "During a production review, the team asks: What does mean time between failures measure?"
+    },
+    {
+      "case_id": "product_reliability.07",
+      "domain": "product_reliability",
+      "expected_concepts": [
+        [
+          "small",
+          "subset"
+        ],
+        [
+          "traffic",
+          "users"
+        ],
+        [
+          "detect",
+          "risk",
+          "rollback"
+        ]
+      ],
+      "origin": "new-domain template variant 2/4",
+      "question": "During a production review, the team asks: Why is a canary deployment useful?"
+    },
+    {
+      "case_id": "product_reliability.08",
+      "domain": "product_reliability",
+      "expected_concepts": [
+        [
+          "failure",
+          "hazard"
+        ],
+        [
+          "cause"
+        ],
+        [
+          "logic",
+          "combine"
+        ]
+      ],
+      "origin": "new-domain template variant 2/4",
+      "question": "During a production review, the team asks: What is a fault tree used for?"
+    },
+    {
+      "case_id": "product_reliability.09",
+      "domain": "product_reliability",
+      "expected_concepts": [
+        [
+          "failure"
+        ],
+        [
+          "load",
+          "stress"
+        ],
+        [
+          "production",
+          "real"
+        ]
+      ],
+      "origin": "new-domain template variant 2/4",
+      "question": "During a production review, the team asks: Why should reliability tests include realistic load profiles?"
+    },
+    {
+      "case_id": "product_reliability.10",
+      "domain": "product_reliability",
+      "expected_concepts": [
+        [
+          "indicator",
+          "measure"
+        ],
+        [
+          "objective",
+          "target"
+        ],
+        [
+          "service"
+        ]
+      ],
+      "origin": "new-domain template variant 2/4",
+      "question": "During a production review, the team asks: What distinguishes a service-level indicator from an objective?"
+    },
+    {
+      "case_id": "product_reliability.11",
+      "domain": "product_reliability",
+      "expected_concepts": [
+        [
+          "average",
+          "mean"
+        ],
+        [
+          "time"
+        ],
+        [
+          "failure"
+        ]
+      ],
+      "origin": "new-domain template variant 3/4",
+      "question": "A new engineer needs a concise explanation. What does mean time between failures measure?"
+    },
+    {
+      "case_id": "product_reliability.12",
+      "domain": "product_reliability",
+      "expected_concepts": [
+        [
+          "small",
+          "subset"
+        ],
+        [
+          "traffic",
+          "users"
+        ],
+        [
+          "detect",
+          "risk",
+          "rollback"
+        ]
+      ],
+      "origin": "new-domain template variant 3/4",
+      "question": "A new engineer needs a concise explanation. Why is a canary deployment useful?"
+    },
+    {
+      "case_id": "product_reliability.13",
+      "domain": "product_reliability",
+      "expected_concepts": [
+        [
+          "failure",
+          "hazard"
+        ],
+        [
+          "cause"
+        ],
+        [
+          "logic",
+          "combine"
+        ]
+      ],
+      "origin": "new-domain template variant 3/4",
+      "question": "A new engineer needs a concise explanation. What is a fault tree used for?"
+    },
+    {
+      "case_id": "product_reliability.14",
+      "domain": "product_reliability",
+      "expected_concepts": [
+        [
+          "failure"
+        ],
+        [
+          "load",
+          "stress"
+        ],
+        [
+          "production",
+          "real"
+        ]
+      ],
+      "origin": "new-domain template variant 3/4",
+      "question": "A new engineer needs a concise explanation. Why should reliability tests include realistic load profiles?"
+    },
+    {
+      "case_id": "product_reliability.15",
+      "domain": "product_reliability",
+      "expected_concepts": [
+        [
+          "indicator",
+          "measure"
+        ],
+        [
+          "objective",
+          "target"
+        ],
+        [
+          "service"
+        ]
+      ],
+      "origin": "new-domain template variant 3/4",
+      "question": "A new engineer needs a concise explanation. What distinguishes a service-level indicator from an objective?"
+    },
+    {
+      "case_id": "product_reliability.16",
+      "domain": "product_reliability",
+      "expected_concepts": [
+        [
+          "average",
+          "mean"
+        ],
+        [
+          "time"
+        ],
+        [
+          "failure"
+        ]
+      ],
+      "origin": "new-domain template variant 4/4",
+      "question": "For an operational design note, explain this mechanism and one consequence: What does mean time between failures measure?"
+    },
+    {
+      "case_id": "product_reliability.17",
+      "domain": "product_reliability",
+      "expected_concepts": [
+        [
+          "small",
+          "subset"
+        ],
+        [
+          "traffic",
+          "users"
+        ],
+        [
+          "detect",
+          "risk",
+          "rollback"
+        ]
+      ],
+      "origin": "new-domain template variant 4/4",
+      "question": "For an operational design note, explain this mechanism and one consequence: Why is a canary deployment useful?"
+    },
+    {
+      "case_id": "product_reliability.18",
+      "domain": "product_reliability",
+      "expected_concepts": [
+        [
+          "failure",
+          "hazard"
+        ],
+        [
+          "cause"
+        ],
+        [
+          "logic",
+          "combine"
+        ]
+      ],
+      "origin": "new-domain template variant 4/4",
+      "question": "For an operational design note, explain this mechanism and one consequence: What is a fault tree used for?"
+    },
+    {
+      "case_id": "product_reliability.19",
+      "domain": "product_reliability",
+      "expected_concepts": [
+        [
+          "failure"
+        ],
+        [
+          "load",
+          "stress"
+        ],
+        [
+          "production",
+          "real"
+        ]
+      ],
+      "origin": "new-domain template variant 4/4",
+      "question": "For an operational design note, explain this mechanism and one consequence: Why should reliability tests include realistic load profiles?"
+    },
+    {
+      "case_id": "product_reliability.20",
+      "domain": "product_reliability",
+      "expected_concepts": [
+        [
+          "indicator",
+          "measure"
+        ],
+        [
+          "objective",
+          "target"
+        ],
+        [
+          "service"
+        ]
+      ],
+      "origin": "new-domain template variant 4/4",
+      "question": "For an operational design note, explain this mechanism and one consequence: What distinguishes a service-level indicator from an objective?"
+    },
+    {
+      "case_id": "data_engineering.01",
+      "domain": "data_engineering",
+      "expected_concepts": [
+        [
+          "source",
+          "origin"
+        ],
+        [
+          "transform"
+        ],
+        [
+          "trace",
+          "audit"
+        ]
+      ],
+      "origin": "new-domain template variant 1/4",
+      "question": "Answer the core technical question directly: What is the purpose of a data lineage record?"
+    },
+    {
+      "case_id": "data_engineering.02",
+      "domain": "data_engineering",
+      "expected_concepts": [
+        [
+          "event time"
+        ],
+        [
+          "window"
+        ],
+        [
+          "late"
+        ],
+        [
+          "update",
+          "watermark"
+        ]
+      ],
+      "origin": "new-domain template variant 1/4",
+      "question": "Answer the core technical question directly: Why can late-arriving events complicate stream windows?"
+    },
+    {
+      "case_id": "data_engineering.03",
+      "domain": "data_engineering",
+      "expected_concepts": [
+        [
+          "schema"
+        ],
+        [
+          "change"
+        ],
+        [
+          "compatib",
+          "version"
+        ]
+      ],
+      "origin": "new-domain template variant 1/4",
+      "question": "Answer the core technical question directly: What is schema evolution?"
+    },
+    {
+      "case_id": "data_engineering.04",
+      "domain": "data_engineering",
+      "expected_concepts": [
+        [
+          "scan",
+          "prune"
+        ],
+        [
+          "partition"
+        ],
+        [
+          "data",
+          "I/O"
+        ]
+      ],
+      "origin": "new-domain template variant 1/4",
+      "question": "Answer the core technical question directly: Why partition a large analytical table?"
+    },
+    {
+      "case_id": "data_engineering.05",
+      "domain": "data_engineering",
+      "expected_concepts": [
+        [
+          "state"
+        ],
+        [
+          "atomic",
+          "transaction"
+        ],
+        [
+          "retry",
+          "duplicate"
+        ],
+        [
+          "sink",
+          "effect"
+        ]
+      ],
+      "origin": "new-domain template variant 1/4",
+      "question": "Answer the core technical question directly: What does exactly-once processing require beyond marketing terminology?"
+    },
+    {
+      "case_id": "data_engineering.06",
+      "domain": "data_engineering",
+      "expected_concepts": [
+        [
+          "source",
+          "origin"
+        ],
+        [
+          "transform"
+        ],
+        [
+          "trace",
+          "audit"
+        ]
+      ],
+      "origin": "new-domain template variant 2/4",
+      "question": "During a production review, the team asks: What is the purpose of a data lineage record?"
+    },
+    {
+      "case_id": "data_engineering.07",
+      "domain": "data_engineering",
+      "expected_concepts": [
+        [
+          "event time"
+        ],
+        [
+          "window"
+        ],
+        [
+          "late"
+        ],
+        [
+          "update",
+          "watermark"
+        ]
+      ],
+      "origin": "new-domain template variant 2/4",
+      "question": "During a production review, the team asks: Why can late-arriving events complicate stream windows?"
+    },
+    {
+      "case_id": "data_engineering.08",
+      "domain": "data_engineering",
+      "expected_concepts": [
+        [
+          "schema"
+        ],
+        [
+          "change"
+        ],
+        [
+          "compatib",
+          "version"
+        ]
+      ],
+      "origin": "new-domain template variant 2/4",
+      "question": "During a production review, the team asks: What is schema evolution?"
+    },
+    {
+      "case_id": "data_engineering.09",
+      "domain": "data_engineering",
+      "expected_concepts": [
+        [
+          "scan",
+          "prune"
+        ],
+        [
+          "partition"
+        ],
+        [
+          "data",
+          "I/O"
+        ]
+      ],
+      "origin": "new-domain template variant 2/4",
+      "question": "During a production review, the team asks: Why partition a large analytical table?"
+    },
+    {
+      "case_id": "data_engineering.10",
+      "domain": "data_engineering",
+      "expected_concepts": [
+        [
+          "state"
+        ],
+        [
+          "atomic",
+          "transaction"
+        ],
+        [
+          "retry",
+          "duplicate"
+        ],
+        [
+          "sink",
+          "effect"
+        ]
+      ],
+      "origin": "new-domain template variant 2/4",
+      "question": "During a production review, the team asks: What does exactly-once processing require beyond marketing terminology?"
+    },
+    {
+      "case_id": "data_engineering.11",
+      "domain": "data_engineering",
+      "expected_concepts": [
+        [
+          "source",
+          "origin"
+        ],
+        [
+          "transform"
+        ],
+        [
+          "trace",
+          "audit"
+        ]
+      ],
+      "origin": "new-domain template variant 3/4",
+      "question": "A new engineer needs a concise explanation. What is the purpose of a data lineage record?"
+    },
+    {
+      "case_id": "data_engineering.12",
+      "domain": "data_engineering",
+      "expected_concepts": [
+        [
+          "event time"
+        ],
+        [
+          "window"
+        ],
+        [
+          "late"
+        ],
+        [
+          "update",
+          "watermark"
+        ]
+      ],
+      "origin": "new-domain template variant 3/4",
+      "question": "A new engineer needs a concise explanation. Why can late-arriving events complicate stream windows?"
+    },
+    {
+      "case_id": "data_engineering.13",
+      "domain": "data_engineering",
+      "expected_concepts": [
+        [
+          "schema"
+        ],
+        [
+          "change"
+        ],
+        [
+          "compatib",
+          "version"
+        ]
+      ],
+      "origin": "new-domain template variant 3/4",
+      "question": "A new engineer needs a concise explanation. What is schema evolution?"
+    },
+    {
+      "case_id": "data_engineering.14",
+      "domain": "data_engineering",
+      "expected_concepts": [
+        [
+          "scan",
+          "prune"
+        ],
+        [
+          "partition"
+        ],
+        [
+          "data",
+          "I/O"
+        ]
+      ],
+      "origin": "new-domain template variant 3/4",
+      "question": "A new engineer needs a concise explanation. Why partition a large analytical table?"
+    },
+    {
+      "case_id": "data_engineering.15",
+      "domain": "data_engineering",
+      "expected_concepts": [
+        [
+          "state"
+        ],
+        [
+          "atomic",
+          "transaction"
+        ],
+        [
+          "retry",
+          "duplicate"
+        ],
+        [
+          "sink",
+          "effect"
+        ]
+      ],
+      "origin": "new-domain template variant 3/4",
+      "question": "A new engineer needs a concise explanation. What does exactly-once processing require beyond marketing terminology?"
+    },
+    {
+      "case_id": "data_engineering.16",
+      "domain": "data_engineering",
+      "expected_concepts": [
+        [
+          "source",
+          "origin"
+        ],
+        [
+          "transform"
+        ],
+        [
+          "trace",
+          "audit"
+        ]
+      ],
+      "origin": "new-domain template variant 4/4",
+      "question": "For an operational design note, explain this mechanism and one consequence: What is the purpose of a data lineage record?"
+    },
+    {
+      "case_id": "data_engineering.17",
+      "domain": "data_engineering",
+      "expected_concepts": [
+        [
+          "event time"
+        ],
+        [
+          "window"
+        ],
+        [
+          "late"
+        ],
+        [
+          "update",
+          "watermark"
+        ]
+      ],
+      "origin": "new-domain template variant 4/4",
+      "question": "For an operational design note, explain this mechanism and one consequence: Why can late-arriving events complicate stream windows?"
+    },
+    {
+      "case_id": "data_engineering.18",
+      "domain": "data_engineering",
+      "expected_concepts": [
+        [
+          "schema"
+        ],
+        [
+          "change"
+        ],
+        [
+          "compatib",
+          "version"
+        ]
+      ],
+      "origin": "new-domain template variant 4/4",
+      "question": "For an operational design note, explain this mechanism and one consequence: What is schema evolution?"
+    },
+    {
+      "case_id": "data_engineering.19",
+      "domain": "data_engineering",
+      "expected_concepts": [
+        [
+          "scan",
+          "prune"
+        ],
+        [
+          "partition"
+        ],
+        [
+          "data",
+          "I/O"
+        ]
+      ],
+      "origin": "new-domain template variant 4/4",
+      "question": "For an operational design note, explain this mechanism and one consequence: Why partition a large analytical table?"
+    },
+    {
+      "case_id": "data_engineering.20",
+      "domain": "data_engineering",
+      "expected_concepts": [
+        [
+          "state"
+        ],
+        [
+          "atomic",
+          "transaction"
+        ],
+        [
+          "retry",
+          "duplicate"
+        ],
+        [
+          "sink",
+          "effect"
+        ]
+      ],
+      "origin": "new-domain template variant 4/4",
+      "question": "For an operational design note, explain this mechanism and one consequence: What does exactly-once processing require beyond marketing terminology?"
+    },
+    {
+      "case_id": "cryptography_privacy.01",
+      "domain": "cryptography_privacy",
+      "expected_concepts": [
+        [
+          "confidential"
+        ],
+        [
+          "integrity"
+        ],
+        [
+          "authentic"
+        ]
+      ],
+      "origin": "new-domain template variant 1/4",
+      "question": "Answer the core technical question directly: What security property does authenticated encryption add to encryption?"
+    },
+    {
+      "case_id": "cryptography_privacy.02",
+      "domain": "cryptography_privacy",
+      "expected_concepts": [
+        [
+          "nonce"
+        ],
+        [
+          "reuse"
+        ],
+        [
+          "confidential",
+          "integrity"
+        ],
+        [
+          "key"
+        ]
+      ],
+      "origin": "new-domain template variant 1/4",
+      "question": "Answer the core technical question directly: Why must a nonce not be reused with many AEAD constructions?"
+    },
+    {
+      "case_id": "cryptography_privacy.03",
+      "domain": "cryptography_privacy",
+      "expected_concepts": [
+        [
+          "past",
+          "prior"
+        ],
+        [
+          "session"
+        ],
+        [
+          "long-term",
+          "key"
+        ]
+      ],
+      "origin": "new-domain template variant 1/4",
+      "question": "Answer the core technical question directly: What does forward secrecy protect after a long-term key compromise?"
+    },
+    {
+      "case_id": "cryptography_privacy.04",
+      "domain": "cryptography_privacy",
+      "expected_concepts": [
+        [
+          "individual",
+          "record"
+        ],
+        [
+          "influence",
+          "effect"
+        ],
+        [
+          "output",
+          "distribution"
+        ]
+      ],
+      "origin": "new-domain template variant 1/4",
+      "question": "Answer the core technical question directly: What is differential privacy intended to bound?"
+    },
+    {
+      "case_id": "cryptography_privacy.05",
+      "domain": "cryptography_privacy",
+      "expected_concepts": [
+        [
+          "compromis"
+        ],
+        [
+          "valid",
+          "accept"
+        ],
+        [
+          "revoke"
+        ],
+        [
+          "rotation"
+        ]
+      ],
+      "origin": "new-domain template variant 1/4",
+      "question": "Answer the core technical question directly: Why is key rotation not a substitute for revoking a known-compromised key?"
+    },
+    {
+      "case_id": "cryptography_privacy.06",
+      "domain": "cryptography_privacy",
+      "expected_concepts": [
+        [
+          "confidential"
+        ],
+        [
+          "integrity"
+        ],
+        [
+          "authentic"
+        ]
+      ],
+      "origin": "new-domain template variant 2/4",
+      "question": "During a production review, the team asks: What security property does authenticated encryption add to encryption?"
+    },
+    {
+      "case_id": "cryptography_privacy.07",
+      "domain": "cryptography_privacy",
+      "expected_concepts": [
+        [
+          "nonce"
+        ],
+        [
+          "reuse"
+        ],
+        [
+          "confidential",
+          "integrity"
+        ],
+        [
+          "key"
+        ]
+      ],
+      "origin": "new-domain template variant 2/4",
+      "question": "During a production review, the team asks: Why must a nonce not be reused with many AEAD constructions?"
+    },
+    {
+      "case_id": "cryptography_privacy.08",
+      "domain": "cryptography_privacy",
+      "expected_concepts": [
+        [
+          "past",
+          "prior"
+        ],
+        [
+          "session"
+        ],
+        [
+          "long-term",
+          "key"
+        ]
+      ],
+      "origin": "new-domain template variant 2/4",
+      "question": "During a production review, the team asks: What does forward secrecy protect after a long-term key compromise?"
+    },
+    {
+      "case_id": "cryptography_privacy.09",
+      "domain": "cryptography_privacy",
+      "expected_concepts": [
+        [
+          "individual",
+          "record"
+        ],
+        [
+          "influence",
+          "effect"
+        ],
+        [
+          "output",
+          "distribution"
+        ]
+      ],
+      "origin": "new-domain template variant 2/4",
+      "question": "During a production review, the team asks: What is differential privacy intended to bound?"
+    },
+    {
+      "case_id": "cryptography_privacy.10",
+      "domain": "cryptography_privacy",
+      "expected_concepts": [
+        [
+          "compromis"
+        ],
+        [
+          "valid",
+          "accept"
+        ],
+        [
+          "revoke"
+        ],
+        [
+          "rotation"
+        ]
+      ],
+      "origin": "new-domain template variant 2/4",
+      "question": "During a production review, the team asks: Why is key rotation not a substitute for revoking a known-compromised key?"
+    },
+    {
+      "case_id": "cryptography_privacy.11",
+      "domain": "cryptography_privacy",
+      "expected_concepts": [
+        [
+          "confidential"
+        ],
+        [
+          "integrity"
+        ],
+        [
+          "authentic"
+        ]
+      ],
+      "origin": "new-domain template variant 3/4",
+      "question": "A new engineer needs a concise explanation. What security property does authenticated encryption add to encryption?"
+    },
+    {
+      "case_id": "cryptography_privacy.12",
+      "domain": "cryptography_privacy",
+      "expected_concepts": [
+        [
+          "nonce"
+        ],
+        [
+          "reuse"
+        ],
+        [
+          "confidential",
+          "integrity"
+        ],
+        [
+          "key"
+        ]
+      ],
+      "origin": "new-domain template variant 3/4",
+      "question": "A new engineer needs a concise explanation. Why must a nonce not be reused with many AEAD constructions?"
+    },
+    {
+      "case_id": "cryptography_privacy.13",
+      "domain": "cryptography_privacy",
+      "expected_concepts": [
+        [
+          "past",
+          "prior"
+        ],
+        [
+          "session"
+        ],
+        [
+          "long-term",
+          "key"
+        ]
+      ],
+      "origin": "new-domain template variant 3/4",
+      "question": "A new engineer needs a concise explanation. What does forward secrecy protect after a long-term key compromise?"
+    },
+    {
+      "case_id": "cryptography_privacy.14",
+      "domain": "cryptography_privacy",
+      "expected_concepts": [
+        [
+          "individual",
+          "record"
+        ],
+        [
+          "influence",
+          "effect"
+        ],
+        [
+          "output",
+          "distribution"
+        ]
+      ],
+      "origin": "new-domain template variant 3/4",
+      "question": "A new engineer needs a concise explanation. What is differential privacy intended to bound?"
+    },
+    {
+      "case_id": "cryptography_privacy.15",
+      "domain": "cryptography_privacy",
+      "expected_concepts": [
+        [
+          "compromis"
+        ],
+        [
+          "valid",
+          "accept"
+        ],
+        [
+          "revoke"
+        ],
+        [
+          "rotation"
+        ]
+      ],
+      "origin": "new-domain template variant 3/4",
+      "question": "A new engineer needs a concise explanation. Why is key rotation not a substitute for revoking a known-compromised key?"
+    },
+    {
+      "case_id": "cryptography_privacy.16",
+      "domain": "cryptography_privacy",
+      "expected_concepts": [
+        [
+          "confidential"
+        ],
+        [
+          "integrity"
+        ],
+        [
+          "authentic"
+        ]
+      ],
+      "origin": "new-domain template variant 4/4",
+      "question": "For an operational design note, explain this mechanism and one consequence: What security property does authenticated encryption add to encryption?"
+    },
+    {
+      "case_id": "cryptography_privacy.17",
+      "domain": "cryptography_privacy",
+      "expected_concepts": [
+        [
+          "nonce"
+        ],
+        [
+          "reuse"
+        ],
+        [
+          "confidential",
+          "integrity"
+        ],
+        [
+          "key"
+        ]
+      ],
+      "origin": "new-domain template variant 4/4",
+      "question": "For an operational design note, explain this mechanism and one consequence: Why must a nonce not be reused with many AEAD constructions?"
+    },
+    {
+      "case_id": "cryptography_privacy.18",
+      "domain": "cryptography_privacy",
+      "expected_concepts": [
+        [
+          "past",
+          "prior"
+        ],
+        [
+          "session"
+        ],
+        [
+          "long-term",
+          "key"
+        ]
+      ],
+      "origin": "new-domain template variant 4/4",
+      "question": "For an operational design note, explain this mechanism and one consequence: What does forward secrecy protect after a long-term key compromise?"
+    },
+    {
+      "case_id": "cryptography_privacy.19",
+      "domain": "cryptography_privacy",
+      "expected_concepts": [
+        [
+          "individual",
+          "record"
+        ],
+        [
+          "influence",
+          "effect"
+        ],
+        [
+          "output",
+          "distribution"
+        ]
+      ],
+      "origin": "new-domain template variant 4/4",
+      "question": "For an operational design note, explain this mechanism and one consequence: What is differential privacy intended to bound?"
+    },
+    {
+      "case_id": "cryptography_privacy.20",
+      "domain": "cryptography_privacy",
+      "expected_concepts": [
+        [
+          "compromis"
+        ],
+        [
+          "valid",
+          "accept"
+        ],
+        [
+          "revoke"
+        ],
+        [
+          "rotation"
+        ]
+      ],
+      "origin": "new-domain template variant 4/4",
+      "question": "For an operational design note, explain this mechanism and one consequence: Why is key rotation not a substitute for revoking a known-compromised key?"
+    }
+  ],
+  "domain_order": [
+    "software_architecture",
+    "databases",
+    "security",
+    "networking",
+    "ml_ai",
+    "statistics",
+    "biology_medicine",
+    "physics_engineering",
+    "finance_economics",
+    "law_policy",
+    "distributed_systems",
+    "compilers_languages",
+    "operating_systems",
+    "mathematics",
+    "chemistry_materials",
+    "electronics_control",
+    "climate_energy",
+    "product_reliability",
+    "data_engineering",
+    "cryptography_privacy"
+  ],
+  "generation": {
+    "existing_domains": "10 source questions plus one controlled operational variant each",
+    "new_domains": "5 questions times 4 controlled framing variants",
+    "note": "Answer diversity is secondary; cache retention is measured by independent hidden needles.",
+    "source": "results/qwen4-publication-20260912/domain-10x10.json"
+  },
+  "schema": "mlx-uag.spomin-20x20-corpus.v1",
+  "system": "Answer the question accurately and concisely in at most four sentences. State material uncertainty. Do not produce hidden reasoning."
+}

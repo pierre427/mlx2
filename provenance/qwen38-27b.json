@@ -1,0 +1,68 @@
+{
+  "source_repository": "~/Desktop/mlx-uag/mlx-lm-unified",
+  "source_revision": "1e2bc604f71d070bee970c3e7db8b60f7855599b",
+  "license": "MIT",
+  "license_source": "LICENSE",
+  "notice": "provenance/qwen38-27b.NOTICE",
+  "source_files": {
+    "mlx_lm/models/qwen3_5.py": {
+      "sha256": "d2efbf2cf88a4ceb82050d8022c034d5a4bb2a96dc2b6d15401eb9815b1f9f2b"
+    },
+    "mlx_lm/models/qwen3_next.py": {
+      "sha256": "87b65ee661c478e06d398195646f621608e37a917bb67037ee3627be322f7646"
+    }
+  },
+  "destination": "src/mlx2/runtime/models/qwen38_27b.py",
+  "mined_symbols": {
+    "mlx_lm/models/qwen3_5.py": [
+      "DecoderLayer",
+      "Qwen3_5TextModel",
+      "MTPModule",
+      "TextModel",
+      "ModelArgs",
+      "Model"
+    ],
+    "mlx_lm/models/qwen3_next.py": [
+      "Qwen3NextAttention"
+    ]
+  },
+  "reused_mlx2_mechanisms": [
+    "runtime.models.qwen3_5.TextModelArgs",
+    "runtime.models.qwen3_5.GatedDeltaNet",
+    "runtime.models.qwen3_next.Qwen3NextMLP",
+    "runtime.models.cache.ArraysCache",
+    "runtime.models.cache.KVCache",
+    "runtime.models.pipeline.PipelineMixin",
+    "runtime.apc_v2.APCv2",
+    "runtime.cow_cache",
+    "runtime.segmented_self_mtp"
+  ],
+  "modifications": [
+    "Moved only model-specific class dependency closure into isolated dense module",
+    "Removed multi-device tensor sharding entry point",
+    "Reject MoE instead of importing unrelated sparse model class",
+    "Removed inherited qwen3_5_moe compiled-decode qualification token",
+    "Explicit None MTP for headless artifacts",
+    "Declare revision-bound hybrid layer-segment APCv2 layout",
+    "Shared Qwen chat/output parsing via adapter; new strict metadata inspection and actual-MTP capability detection",
+    "Added original generic plain-KV segmented compute adapter implementing existing cache interface with independent B1 history and per-row attention reduction; GPU unqualified"
+    ,"Added original configuration-derived dense hybrid cache bound: fp32 target/MTP KV capacity, doubled GDN rollback state, observed warm-copy growth, and dense forward workspace"
+  ],
+  "original_files": [
+    "src/mlx2/adapters/qwen38_27b.py",
+    "src/mlx2/adapters/qwen38_memory.py",
+    "tests/test_qwen38_27b_port.py",
+    "tests/test_qwen38_27b_native_cpu.py",
+    "tests/test_qwen38_memory.py",
+    "docs/ports/QWEN38-27B.md",
+    "src/mlx2/runtime/segmented_plain_kv.py",
+    "tests/test_segmented_plain_kv_cpu.py"
+  ],
+  "validation": {
+    "stage": "CPU suite plus bounded ordinary pre-fix GPU diagnostic; no route qualified",
+    "command": "PYTHONPATH=src .venv/bin/python -m pytest -q",
+    "result": "Full CPU suite passes, including dense cache geometry, 262K admission, warm-copy/growth, reserve, exact two-neighbor APCv2 disk-restore regression, malformed COW topology lease release, segmented plain-KV oracles, and tiny native trunk/MTP split replay. The first ordinary GPU diagnostic failed closed at 262K under the replaced generic envelope. A frozen-source rerun then admitted and completed cold 262K with swap zero, but its immediate warm replay exposed the now CPU-fixed generic APCv2 candidate re-spill race. The fixed source awaits isolated ordinary and MTP GPU reruns.",
+    "local_artifact_inventory": "provenance/qwen38-27b-artifacts.json",
+    "qualification": "No routes qualified or deployed"
+  }
+}

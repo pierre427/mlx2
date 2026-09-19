@@ -1,0 +1,7 @@
+{
+  "active": true,
+  "started_at": 1789599283.381191,
+  "reason": "pass3 HTTP companion remediation after thermal safety stop",
+  "source_campaign": "overnight-campaign",
+  "planned_action": "archive pass3 and launch pass4 after HTTP fix and nominal cooldown"
+}

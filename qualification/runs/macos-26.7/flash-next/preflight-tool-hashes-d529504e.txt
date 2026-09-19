@@ -1,0 +1,4 @@
+8d32f490519f91e0e4b96f0e6b60d05b088aba41930b1b5df24eb0292fcfa8c1  scripts/qualify_serving.py
+b4cae832cfe3e783e2596458a3cdc31eac8884252da72a3504bc8c68392f8ff6  qualification/four-model-experiments.json
+900c06e74b4624e15f4a7d8dee7c26ffe35aca3f3428010960c612d7cc68a48f  qualification/policies/flash-next-mtp2.json
+e12ea8a08d8ccba2d3084b09f8a1a2a2d8eae2feb10b2464f6a713b51f76ceba  /private/tmp/mlx2-flash-next-d529504e-20260916/qualify-serving-thermal-barrier.py

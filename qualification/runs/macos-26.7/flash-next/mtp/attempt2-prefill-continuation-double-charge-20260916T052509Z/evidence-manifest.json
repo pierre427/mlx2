@@ -1,0 +1,42 @@
+[
+  {
+    "bytes": 1424,
+    "path": "failure-analysis.json",
+    "sha256": "ec1278b342b2f8942368f3cf41ed47a8623efa1c8c5f7b29d5822aa72e966101"
+  },
+  {
+    "bytes": 12781,
+    "path": "monitor-ad7fdc5c.log",
+    "sha256": "98bd733d0637f672b3262640ae059703ebf7c61b56cc635ec7931ecee499cd47"
+  },
+  {
+    "bytes": 2079,
+    "path": "qualify-ad7fdc5c.log",
+    "sha256": "0b8826086d1cb623bcfc2aeca555768a6c64d4217170a11083a91d772e3beea1"
+  },
+  {
+    "bytes": 186135,
+    "path": "route-qualification-ad7fdc5c.json",
+    "sha256": "eb535df6e3d05b637c743aea324ba1c9a19b6eef1e655c7c7d12e1a13a2d50c1"
+  },
+  {
+    "bytes": 3607,
+    "path": "runbook-ad7fdc5c.log",
+    "sha256": "62053d6e8b9b4d3865d1e62738d5af35dd81e2317da47f1d68e16e46c189d2ca"
+  },
+  {
+    "bytes": 9993,
+    "path": "server-ad7fdc5c.log",
+    "sha256": "734f0ca72881c1e121cda7d4ecf4415808d496e2ff150ce89c7a04796adb0f27"
+  },
+  {
+    "bytes": 5,
+    "path": "server-ad7fdc5c.pid",
+    "sha256": "b1afe9a80fc9ffcc9e0259a3220d1ddfceb77538cae8549ecb352753cf4baaed"
+  },
+  {
+    "bytes": 11733,
+    "path": "status-initial-ad7fdc5c.json",
+    "sha256": "3501bdb562ce73916117be3b97c1d509b810de76bc26f108f8788e6b2d258cd7"
+  }
+]

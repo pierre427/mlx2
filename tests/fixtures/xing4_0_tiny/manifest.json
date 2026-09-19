@@ -1,0 +1,14 @@
+{
+  "attn_implementation": "eager",
+  "dtype": "float32",
+  "generator": "scripts/xing4_0_reference_fixture.py",
+  "mtp_reference": "DeepSeek-V3 MTP (vLLM deepseek_mtp / SGLang NextN) from HF blocks",
+  "mtp_seed_hidden": "trunk last_hidden_state: stream mean then model.norm",
+  "reference_sources": {
+    "configuration_xing4_0.py": "8012e9b83bad20b95f7815ddd458c7e721509285fd76b7fef38dd4adaef618c7",
+    "modeling_xing4_0.py": "51341dbd177ebd0181d338924356f2de72848c409580c0e3080d87ee70935cef"
+  },
+  "seed": 20260918,
+  "torch": "2.12.1",
+  "transformers": "5.12.1"
+}

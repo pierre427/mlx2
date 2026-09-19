@@ -1,0 +1,41 @@
+round 00   15.4s   775 tok    50.3 tok/s errors=0
+round 01   14.5s   908 tok    62.7 tok/s errors=0
+round 02   13.9s   879 tok    63.0 tok/s errors=0
+round 03   14.3s   959 tok    67.0 tok/s errors=0
+round 04   14.3s   869 tok    60.7 tok/s errors=0
+round 05   14.5s   876 tok    60.5 tok/s errors=0
+round 06   14.3s   862 tok    60.4 tok/s errors=0
+round 07   14.7s   886 tok    60.4 tok/s errors=0
+round 08   14.5s   886 tok    61.2 tok/s errors=0
+round 09   14.5s   952 tok    65.5 tok/s errors=0
+round 10   14.2s   839 tok    59.0 tok/s errors=0
+round 11   14.5s   901 tok    62.2 tok/s errors=0
+round 12   15.0s   895 tok    59.7 tok/s errors=1
+round 13   13.9s   854 tok    61.6 tok/s errors=0
+round 14   14.7s   964 tok    65.7 tok/s errors=0
+round 15   14.7s   906 tok    61.8 tok/s errors=0
+round 16   14.5s   871 tok    60.3 tok/s errors=0
+round 17   14.5s   926 tok    64.1 tok/s errors=0
+round 18   13.5s   852 tok    63.0 tok/s errors=0
+round 19   13.9s   898 tok    64.6 tok/s errors=0
+SUMMARY requests=400 correct=399 hard_failures=2 issues={'http_429': 1} healthy=True
+  arithmetic           20/20 
+  arithmetic_mul       20/20 
+  capital              20/20 
+  capital_sentence     20/20 
+  sequence             20/20 
+  translate            20/20 
+  code                 20/20 
+  list                 20/20 
+  json_object          20/20 
+  json_schema          20/20 
+  stop_string          20/20 
+  stream               20/20 
+  tool_call            20/20 
+  system_multi_turn    20/20 
+  needle               20/20 
+  sampled_prose        20/20 
+  sampled_topk         20/20 
+  logprobs             20/20 
+  two_samples          19/20 {'http_429': 1}
+  explain              20/20 

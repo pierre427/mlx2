@@ -1,0 +1,60 @@
+[transformers] PyTorch was not found. Models won't be available and only tokenizers, configuration and file/data utilities can be used.
+2026-09-16 00:37:19,413 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 00:37:20,451 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 00:37:20,498 INFO ubc_evict: evicted 5090.2 MB from UBC for ~/mlx-models/Muse-Glimmer-30B-mlx-4bit/model-00001-of-00004.safetensors
+2026-09-16 00:37:20,518 INFO ubc_evict: evicted 5117.7 MB from UBC for ~/mlx-models/Muse-Glimmer-30B-mlx-4bit/model-00002-of-00004.safetensors
+2026-09-16 00:37:20,538 INFO ubc_evict: evicted 5111.0 MB from UBC for ~/mlx-models/Muse-Glimmer-30B-mlx-4bit/model-00003-of-00004.safetensors
+2026-09-16 00:37:20,547 INFO ubc_evict: evicted 5040.1 MB from UBC for ~/mlx-models/Muse-Glimmer-30B-mlx-4bit/model-00004-of-00004.safetensors
+2026-09-16 00:37:20,547 INFO ubc_evict: pass complete total_mb=20359.0 elapsed_s=0.07
+[transformers] You are using a model of type `muse_glimmer` to instantiate a model of type ``. This may be expected if you are loading a checkpoint that shares a subset of the architecture (e.g., loading a `sam2_video` checkpoint into `Sam2Model`), but is otherwise not supported and can yield errors. Please verify that the checkpoint is compatible with the model you are instantiating.
+2026-09-16 00:37:21,484 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 00:37:22,517 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 00:37:22,534 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 00:37:22,600 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 00:37:22,665 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 00:37:32,644 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 00:37:32,987 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 00:37:33,200 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 00:37:33,277 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 00:37:33,808 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 00:37:34,096 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 00:37:34,324 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 00:37:34,402 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 00:37:34,480 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 00:37:36,315 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 00:37:37,121 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 00:37:38,917 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 00:37:38,995 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 00:37:40,893 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 00:37:42,626 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 00:37:56,926 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 00:37:56,983 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 00:37:57,040 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 00:37:57,042 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 00:37:58,988 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 00:38:01,101 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 00:38:04,702 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 00:38:04,702 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 00:40:53,762 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 00:41:33,946 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 00:42:25,204 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 00:42:31,321 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 00:42:42,705 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 00:42:42,735 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+[transformers] Token indices sequence length is longer than the specified maximum sequence length for this model (131132 > 131072). Running this sequence through the model will result in indexing errors
+2026-09-16 00:42:42,854 INFO "POST /v1/chat/completions HTTP/1.1" 400 -
+2026-09-16 00:42:42,855 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 00:42:43,186 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 00:42:43,189 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 00:42:43,400 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 00:42:43,608 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 00:42:43,872 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 00:42:43,873 INFO "GET /health HTTP/1.1" 200 -
+2026-09-16 00:42:43,874 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 00:42:43,930 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 00:42:43,990 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 00:42:44,047 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 00:42:44,107 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 00:42:44,168 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 00:42:44,230 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 00:42:44,291 INFO "GET /v1/status HTTP/1.1" 200 -

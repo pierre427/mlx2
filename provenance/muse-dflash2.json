@@ -1,0 +1,33 @@
+{
+  "source_repository": "~/Desktop/mlx-uag/worktrees/agnes-vlm-support",
+  "source_revision": "8a5e704e0fe43cd8654c144c4ecbd4c8aececeb5",
+  "license": "MIT",
+  "source_paths": [
+    "mlx_vlm/speculative/drafters/dflash2/dflash2.py",
+    "mlx_vlm/speculative/drafters/dflash2/config.py",
+    "mlx_vlm/speculative/drafters/qwen3_dflash/dflash.py",
+    "mlx_vlm/speculative/drafters/qwen3_dflash/config.py",
+    "mlx_vlm/models/muse_glimmer/language.py"
+  ],
+  "modifications": [
+    "Self-contained mlx2 tensor dependency closure",
+    "Actual selector proposal distribution exported for rejection sampling",
+    "Target post-layer taps and body-only prefill",
+    "Original architecture-neutral executor and APCv2 pairing, no legacy serving",
+    "Removed unimplemented tree API from selected linear route",
+    "Grouped equal-context draft projections with per-row SDPA",
+    "Serializable empty draft planes preserve first real KV dtype",
+    "Architecture-neutral external sidecar kind and distinct external route capability",
+    "Metadata-only safetensors header reconciliation rejects missing, extra, mis-shaped, wrong-dtype, overlapping or mis-indexed draft tensors before payload allocation",
+    "Request-level DFlash receipts preserve cumulative engagement when the final budget-limited round uses the ordinary target"
+  ],
+  "validation": "103 targeted CPU tests passed on macOS 26.7 (tiny FP32/BF16 target+draft, q-distribution oracle, exact rollback, APCv2 disk/RNG, cancellation, atomic failures, CLI/qualification including fail-closed fallback evidence, actual serving reserve callback, fair partial-fit progress, real APC pressure lease protection, request-level cumulative route receipt, real 5.54 GB artifact header schema and duplicate-key/wrong-shape/wrong-dtype/overlap/index/missing/extra rejection); no actual artifact payload/model load and no GPU execution; unqualified",
+  "local_integration_dependency": {
+    "repository": "mlx2",
+    "path": "src/mlx2/runtime/apc_v2.py",
+    "symbol": "APCv2.evict_oldest_unleased",
+    "source": "root concurrent working tree 2026-09-15T22:49Z",
+    "snippet_sha256": "7cba1a9f7d2ad98ba09d3be473ee851e6eda13ab31228f1cca75db1ed6e93713",
+    "note": "Existing root-authored generic helper copied into isolated snapshot only so actual lease-protection can be tested. Retain main implementation during merge."
+  }
+}

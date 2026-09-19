@@ -1,0 +1,10 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.venv/
+build/
+dist/
+
+# Runtime APC snapshots are multi-gigabyte cache payloads, not durable evidence.
+qualification/runs/**/*.safetensors

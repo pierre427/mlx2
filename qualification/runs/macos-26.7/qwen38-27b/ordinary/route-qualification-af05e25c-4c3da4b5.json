@@ -1,0 +1,3620 @@
+{
+  "schema": "mlx2.serving-qualification.v1",
+  "timestamp": 1789523278.663459,
+  "runtime": {
+    "source_sha256": "af05e25c7d7b311070aedcbf50b3fbd93277240143a791d9d6079d5fdfb1e5fc",
+    "mlx_native_sha256": "30335939714520c3306cfa58597100aae08bbeabdc60a4bc8c35c32c607450a8",
+    "python": "3.12.13",
+    "macos": "26.7",
+    "mlx": "0.32.2.dev20260915+2a817ad94",
+    "transformers": "5.12.1",
+    "dependencies": {
+      "numpy": "2.5.1",
+      "tokenizers": "0.22.2",
+      "jinja2": "3.1.6",
+      "psutil": "7.2.2",
+      "regex": "2026.9.10",
+      "safetensors": "0.8.0"
+    }
+  },
+  "qualification_harness": {
+    "schema": "mlx2.qualification-harness.v1",
+    "name": "scripts/qualify_serving.py",
+    "sha256": "4c3da4b55f9b2b22aad4ee6616226275b084a3a3f1a28227a4e05c298cc39cbd"
+  },
+  "artifact": "fb827b658dc3d26ac569efacefd0466dbf41cc1a5cb5e3a40fc1c6175298810f",
+  "settings": {
+    "max_context": 262144,
+    "max_lanes": 20,
+    "max_inflight": 24,
+    "prefill_step": 2048,
+    "cache_bytes": 17179869184,
+    "disk_cache": true,
+    "mtp": false,
+    "environment": {
+      "HF_HUB_OFFLINE": "1",
+      "TRANSFORMERS_OFFLINE": "1",
+      "MLX_ENABLE_TF32": "0",
+      "MLX_GDN_PACKED": "1",
+      "MLX_GDN_CORE": "0",
+      "MLX_LM_COMPILED_DECODE": "0",
+      "MLX_LM_SEGMENTED_SELF_MTP": "1",
+      "MLX_LM_TRUE_BATCHED_SEGMENTED_MTP": "1",
+      "MLX_LM_SHARED_QSA_SUFFIX": "0"
+    },
+    "execution_policy": {
+      "persistent": true,
+      "num_draft": 2,
+      "rate_gate": false,
+      "prefill_step_size": 2048,
+      "segment_aware_live_tip": true,
+      "segment_aware_cohort_size": 20
+    },
+    "speculation": "ordinary",
+    "cache_budget": {
+      "schema": "qwen38-cache-geometry-v1",
+      "attention_layers": 16,
+      "recurrent_layers": 48,
+      "mtp_layers": 0,
+      "kv_heads": 4,
+      "head_dim": 256,
+      "recurrent_heads": 48,
+      "recurrent_key_heads": 16,
+      "recurrent_key_dim": 128,
+      "recurrent_value_dim": 128,
+      "conv_kernel": 4,
+      "item_bytes": 4,
+      "allocation_step": 256,
+      "transcript_bytes_per_token": 16,
+      "transient_gib_per_lane": 3.1,
+      "fixed_bytes": 314048512,
+      "bound": "fp32-capacity-plus-recurrent-rollback",
+      "warm_copy": "observed-complete-cache-plus-projected-growth",
+      "workspace": "dense-forward-transient-separate-from-cache"
+    }
+  },
+  "checks": {
+    "unit_tests": {
+      "passed": true,
+      "evidence": "............................................................... [ 12%]\n........................................................................ [ 27%]\n........................................................................ [ 41%]\n......ssssssss.......................................................... [ 55%]\n..................................ss..ss...... [ 65%]\n..ss..............s.s........................... [ 74%]\n........................................................................ [ 89%]\n.......................................................                  [100%]\n484 passed, 16 skipped, 59 subtests passed in 9.46s\n"
+    },
+    "hermes_client": {
+      "passed": true,
+      "evidence": {
+        "id": "chatcmpl-a2519de956f044eb8a0b3b2035d1af19",
+        "object": "chat.completion",
+        "created": 1789523288,
+        "model": "Qwen3.8-27B-oQ4e-mtp",
+        "choices": [
+          {
+            "index": 0,
+            "finish_reason": "stop",
+            "message": {
+              "role": "assistant",
+              "content": "HERMES_READY"
+            }
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 18,
+          "completion_tokens": 4,
+          "total_tokens": 22,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          }
+        },
+        "mlx2": {
+          "request_id": "chatcmpl-a2519de956f044eb8a0b3b2035d1af19",
+          "cache": "apcv2",
+          "cached_tokens": 0,
+          "profile": "qwen38-27b-apcv2-ordinary",
+          "qualification": "candidate",
+          "route_receipt": "candidate_validation",
+          "request_controls": {
+            "logprobs": false,
+            "top_logprobs": 0,
+            "logprob_semantics": null,
+            "thinking": false,
+            "sampling": {
+              "temperature": 0
+            },
+            "reasoning_effort": "none",
+            "effort_semantics": "thinking_toggle",
+            "context_limit": 262144
+          },
+          "ordinary_compute_width": 1,
+          "mtp": null,
+          "speculation": null,
+          "prompt_tokens": 18,
+          "completion_tokens": 4,
+          "ttft_seconds": 0.34817470900088665,
+          "elapsed_seconds": 0.45233870900119655
+        }
+      }
+    },
+    "logprobs": {
+      "passed": true,
+      "evidence": {
+        "reference": {
+          "id": "chatcmpl-b419043290a54b54a7317bc4268566cb",
+          "object": "chat.completion",
+          "created": 1789523288,
+          "model": "Qwen3.8-27B-oQ4e-mtp",
+          "choices": [
+            {
+              "index": 0,
+              "finish_reason": "length",
+              "message": {
+                "role": "assistant",
+                "content": "Compilers translate high-level programming code into"
+              }
+            }
+          ],
+          "usage": {
+            "prompt_tokens": 19,
+            "completion_tokens": 8,
+            "total_tokens": 27,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            }
+          },
+          "mlx2": {
+            "request_id": "chatcmpl-b419043290a54b54a7317bc4268566cb",
+            "cache": "apcv2",
+            "cached_tokens": 0,
+            "profile": "qwen38-27b-apcv2-ordinary",
+            "qualification": "candidate",
+            "route_receipt": "candidate_validation",
+            "request_controls": {
+              "logprobs": false,
+              "top_logprobs": 0,
+              "logprob_semantics": null,
+              "thinking": false,
+              "sampling": {
+                "temperature": 0
+              },
+              "reasoning_effort": null,
+              "effort_semantics": "thinking_toggle",
+              "context_limit": 262144
+            },
+            "ordinary_compute_width": 1,
+            "mtp": null,
+            "speculation": null,
+            "prompt_tokens": 19,
+            "completion_tokens": 8,
+            "ttft_seconds": 0.16692695900019316,
+            "elapsed_seconds": 0.4025729170007253
+          }
+        },
+        "response": {
+          "id": "chatcmpl-1c2bb658de074f649e85b64a722596ad",
+          "object": "chat.completion",
+          "created": 1789523289,
+          "model": "Qwen3.8-27B-oQ4e-mtp",
+          "choices": [
+            {
+              "index": 0,
+              "finish_reason": "length",
+              "logprobs": {
+                "content": [
+                  {
+                    "id": 13160,
+                    "token": "Comp",
+                    "logprob": -0.125,
+                    "top_logprobs": [
+                      {
+                        "id": 13160,
+                        "token": "Comp",
+                        "logprob": -0.125
+                      },
+                      {
+                        "id": 32,
+                        "token": "A",
+                        "logprob": -2.75
+                      },
+                      {
+                        "id": 37132,
+                        "token": "Compiler",
+                        "logprob": -8.25
+                      }
+                    ]
+                  },
+                  {
+                    "id": 26284,
+                    "token": "ilers",
+                    "logprob": 0.0,
+                    "top_logprobs": [
+                      {
+                        "id": 26284,
+                        "token": "ilers",
+                        "logprob": 0.0
+                      },
+                      {
+                        "id": 3533,
+                        "token": "iles",
+                        "logprob": -11.25
+                      },
+                      {
+                        "id": 7728,
+                        "token": "iling",
+                        "logprob": -12.5
+                      }
+                    ]
+                  },
+                  {
+                    "id": 14260,
+                    "token": "\u0120translate",
+                    "logprob": 0.0,
+                    "top_logprobs": [
+                      {
+                        "id": 14260,
+                        "token": "\u0120translate",
+                        "logprob": 0.0
+                      },
+                      {
+                        "id": 513,
+                        "token": "\u0120are",
+                        "logprob": -4.0
+                      },
+                      {
+                        "id": 1121,
+                        "token": "\u0120act",
+                        "logprob": -4.25
+                      }
+                    ]
+                  },
+                  {
+                    "id": 1496,
+                    "token": "\u0120high",
+                    "logprob": -0.375,
+                    "top_logprobs": [
+                      {
+                        "id": 1496,
+                        "token": "\u0120high",
+                        "logprob": -0.375
+                      },
+                      {
+                        "id": 3611,
+                        "token": "\u0120human",
+                        "logprob": -1.375
+                      },
+                      {
+                        "id": 2450,
+                        "token": "\u0120source",
+                        "logprob": -5.625
+                      }
+                    ]
+                  },
+                  {
+                    "id": 11258,
+                    "token": "-level",
+                    "logprob": 0.0,
+                    "top_logprobs": [
+                      {
+                        "id": 11258,
+                        "token": "-level",
+                        "logprob": 0.0
+                      },
+                      {
+                        "id": 29768,
+                        "token": "-source",
+                        "logprob": -9.5
+                      },
+                      {
+                        "id": 15019,
+                        "token": "\u0120programming",
+                        "logprob": -10.75
+                      }
+                    ]
+                  },
+                  {
+                    "id": 15019,
+                    "token": "\u0120programming",
+                    "logprob": -0.125,
+                    "top_logprobs": [
+                      {
+                        "id": 15019,
+                        "token": "\u0120programming",
+                        "logprob": -0.125
+                      },
+                      {
+                        "id": 2450,
+                        "token": "\u0120source",
+                        "logprob": -1.875
+                      },
+                      {
+                        "id": 3611,
+                        "token": "\u0120human",
+                        "logprob": -4.875
+                      }
+                    ]
+                  },
+                  {
+                    "id": 1970,
+                    "token": "\u0120code",
+                    "logprob": -0.25,
+                    "top_logprobs": [
+                      {
+                        "id": 1970,
+                        "token": "\u0120code",
+                        "logprob": -0.25
+                      },
+                      {
+                        "id": 15005,
+                        "token": "\u0120languages",
+                        "logprob": -1.5
+                      },
+                      {
+                        "id": 3992,
+                        "token": "\u0120language",
+                        "logprob": -3.625
+                      }
+                    ]
+                  },
+                  {
+                    "id": 1083,
+                    "token": "\u0120into",
+                    "logprob": 0.0,
+                    "top_logprobs": [
+                      {
+                        "id": 1083,
+                        "token": "\u0120into",
+                        "logprob": 0.0
+                      },
+                      {
+                        "id": 421,
+                        "token": "\u0120that",
+                        "logprob": -9.875
+                      },
+                      {
+                        "id": 5774,
+                        "token": "\u0120directly",
+                        "logprob": -11.125
+                      }
+                    ]
+                  }
+                ]
+              },
+              "message": {
+                "role": "assistant",
+                "content": "Compilers translate high-level programming code into"
+              }
+            }
+          ],
+          "usage": {
+            "prompt_tokens": 19,
+            "completion_tokens": 8,
+            "total_tokens": 27,
+            "prompt_tokens_details": {
+              "cached_tokens": 18
+            }
+          },
+          "mlx2": {
+            "request_id": "chatcmpl-1c2bb658de074f649e85b64a722596ad",
+            "cache": "apcv2",
+            "cached_tokens": 18,
+            "profile": "qwen38-27b-apcv2-ordinary",
+            "qualification": "candidate",
+            "route_receipt": "candidate_validation",
+            "request_controls": {
+              "logprobs": true,
+              "top_logprobs": 3,
+              "logprob_semantics": "execution_target: ordinary=post_processor_pre_sampler; mtp=transformed_target_verifier",
+              "thinking": false,
+              "sampling": {
+                "temperature": 0
+              },
+              "reasoning_effort": null,
+              "effort_semantics": "thinking_toggle",
+              "context_limit": 262144
+            },
+            "ordinary_compute_width": 1,
+            "mtp": null,
+            "speculation": null,
+            "prompt_tokens": 19,
+            "completion_tokens": 8,
+            "ttft_seconds": 0.08816141699935542,
+            "elapsed_seconds": 0.32368783299898496
+          }
+        },
+        "stream_entries": [
+          {
+            "id": 13160,
+            "token": "Comp",
+            "logprob": -0.125,
+            "top_logprobs": [
+              {
+                "id": 13160,
+                "token": "Comp",
+                "logprob": -0.125
+              },
+              {
+                "id": 32,
+                "token": "A",
+                "logprob": -2.75
+              },
+              {
+                "id": 37132,
+                "token": "Compiler",
+                "logprob": -8.25
+              }
+            ]
+          },
+          {
+            "id": 26284,
+            "token": "ilers",
+            "logprob": 0.0,
+            "top_logprobs": [
+              {
+                "id": 26284,
+                "token": "ilers",
+                "logprob": 0.0
+              },
+              {
+                "id": 3533,
+                "token": "iles",
+                "logprob": -11.25
+              },
+              {
+                "id": 7728,
+                "token": "iling",
+                "logprob": -12.5
+              }
+            ]
+          },
+          {
+            "id": 14260,
+            "token": "\u0120translate",
+            "logprob": 0.0,
+            "top_logprobs": [
+              {
+                "id": 14260,
+                "token": "\u0120translate",
+                "logprob": 0.0
+              },
+              {
+                "id": 513,
+                "token": "\u0120are",
+                "logprob": -4.0
+              },
+              {
+                "id": 1121,
+                "token": "\u0120act",
+                "logprob": -4.25
+              }
+            ]
+          },
+          {
+            "id": 1496,
+            "token": "\u0120high",
+            "logprob": -0.375,
+            "top_logprobs": [
+              {
+                "id": 1496,
+                "token": "\u0120high",
+                "logprob": -0.375
+              },
+              {
+                "id": 3611,
+                "token": "\u0120human",
+                "logprob": -1.375
+              },
+              {
+                "id": 2450,
+                "token": "\u0120source",
+                "logprob": -5.625
+              }
+            ]
+          },
+          {
+            "id": 11258,
+            "token": "-level",
+            "logprob": 0.0,
+            "top_logprobs": [
+              {
+                "id": 11258,
+                "token": "-level",
+                "logprob": 0.0
+              },
+              {
+                "id": 29768,
+                "token": "-source",
+                "logprob": -9.5
+              },
+              {
+                "id": 15019,
+                "token": "\u0120programming",
+                "logprob": -10.75
+              }
+            ]
+          },
+          {
+            "id": 15019,
+            "token": "\u0120programming",
+            "logprob": -0.125,
+            "top_logprobs": [
+              {
+                "id": 15019,
+                "token": "\u0120programming",
+                "logprob": -0.125
+              },
+              {
+                "id": 2450,
+                "token": "\u0120source",
+                "logprob": -1.875
+              },
+              {
+                "id": 3611,
+                "token": "\u0120human",
+                "logprob": -4.875
+              }
+            ]
+          },
+          {
+            "id": 1970,
+            "token": "\u0120code",
+            "logprob": -0.25,
+            "top_logprobs": [
+              {
+                "id": 1970,
+                "token": "\u0120code",
+                "logprob": -0.25
+              },
+              {
+                "id": 15005,
+                "token": "\u0120languages",
+                "logprob": -1.5
+              },
+              {
+                "id": 3992,
+                "token": "\u0120language",
+                "logprob": -3.625
+              }
+            ]
+          },
+          {
+            "id": 1083,
+            "token": "\u0120into",
+            "logprob": 0.0,
+            "top_logprobs": [
+              {
+                "id": 1083,
+                "token": "\u0120into",
+                "logprob": 0.0
+              },
+              {
+                "id": 421,
+                "token": "\u0120that",
+                "logprob": -9.875
+              },
+              {
+                "id": 5774,
+                "token": "\u0120directly",
+                "logprob": -11.125
+              }
+            ]
+          }
+        ],
+        "stream_usage": {
+          "prompt_tokens": 19,
+          "completion_tokens": 8,
+          "total_tokens": 27,
+          "prompt_tokens_details": {
+            "cached_tokens": 18
+          }
+        }
+      }
+    },
+    "sampling_controls": {
+      "passed": true,
+      "evidence": [
+        {
+          "request_id": "chatcmpl-3b0c18bd36cf46798015206f81ba1b3c",
+          "cache": "apcv2",
+          "cached_tokens": 0,
+          "profile": "qwen38-27b-apcv2-ordinary",
+          "qualification": "candidate",
+          "route_receipt": "candidate_validation",
+          "request_controls": {
+            "logprobs": false,
+            "top_logprobs": 0,
+            "logprob_semantics": null,
+            "thinking": false,
+            "sampling": {
+              "temperature": 0.7,
+              "top_p": 0.9,
+              "top_k": 24,
+              "min_p": 0.05,
+              "repetition_penalty": 1.05,
+              "presence_penalty": 0.1,
+              "frequency_penalty": 0.1,
+              "seed": 237
+            },
+            "reasoning_effort": null,
+            "effort_semantics": "thinking_toggle",
+            "context_limit": 262144
+          },
+          "ordinary_compute_width": 1,
+          "mtp": null,
+          "speculation": null,
+          "prompt_tokens": 16,
+          "completion_tokens": 18,
+          "ttft_seconds": 0.18404758299948298,
+          "elapsed_seconds": 0.7461858749993553
+        },
+        {
+          "request_id": "chatcmpl-d729117cc09f4f64a488b9a770e24f33",
+          "cache": "apcv2",
+          "cached_tokens": 15,
+          "profile": "qwen38-27b-apcv2-ordinary",
+          "qualification": "candidate",
+          "route_receipt": "candidate_validation",
+          "request_controls": {
+            "logprobs": false,
+            "top_logprobs": 0,
+            "logprob_semantics": null,
+            "thinking": false,
+            "sampling": {
+              "temperature": 0.7,
+              "top_p": 0.9,
+              "top_k": 24,
+              "min_p": 0.05,
+              "repetition_penalty": 1.05,
+              "presence_penalty": 0.1,
+              "frequency_penalty": 0.1,
+              "seed": 237
+            },
+            "reasoning_effort": null,
+            "effort_semantics": "thinking_toggle",
+            "context_limit": 262144
+          },
+          "ordinary_compute_width": 1,
+          "mtp": null,
+          "speculation": null,
+          "prompt_tokens": 16,
+          "completion_tokens": 18,
+          "ttft_seconds": 0.09002920799866843,
+          "elapsed_seconds": 0.6517633329985983
+        }
+      ]
+    },
+    "cold_text": {
+      "passed": true,
+      "evidence": {
+        "request_id": "chatcmpl-89533b3be0bc4ce5b2cc288555f14f9f",
+        "cache": "apcv2",
+        "cached_tokens": 0,
+        "profile": "qwen38-27b-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": false,
+          "top_logprobs": 0,
+          "logprob_semantics": null,
+          "thinking": false,
+          "sampling": {
+            "temperature": 0
+          },
+          "reasoning_effort": null,
+          "effort_semantics": "thinking_toggle",
+          "context_limit": 262144
+        },
+        "ordinary_compute_width": 1,
+        "mtp": null,
+        "speculation": null,
+        "prompt_tokens": 19,
+        "completion_tokens": 5,
+        "ttft_seconds": 0.1620000409984641,
+        "elapsed_seconds": 0.300485124998886
+      }
+    },
+    "warm_prefix": {
+      "passed": true,
+      "evidence": {
+        "request_id": "chatcmpl-102b376d48ba4010ba52fc79a7514e25",
+        "cache": "apcv2",
+        "cached_tokens": 18,
+        "profile": "qwen38-27b-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": false,
+          "top_logprobs": 0,
+          "logprob_semantics": null,
+          "thinking": false,
+          "sampling": {
+            "temperature": 0
+          },
+          "reasoning_effort": null,
+          "effort_semantics": "thinking_toggle",
+          "context_limit": 262144
+        },
+        "ordinary_compute_width": 1,
+        "mtp": null,
+        "speculation": null,
+        "prompt_tokens": 19,
+        "completion_tokens": 5,
+        "ttft_seconds": 0.09020358300040243,
+        "elapsed_seconds": 0.24289104099989345
+      }
+    },
+    "stream": {
+      "passed": true,
+      "evidence": [
+        {
+          "id": "chatcmpl-2b46a7ffa6ba4e94800144dcf8b5bef4",
+          "object": "chat.completion.chunk",
+          "created": 1789523291,
+          "model": "Qwen3.8-27B-oQ4e-mtp",
+          "choices": [
+            {
+              "index": 0,
+              "finish_reason": null,
+              "delta": {
+                "content": "ML"
+              }
+            }
+          ]
+        },
+        {
+          "id": "chatcmpl-2b46a7ffa6ba4e94800144dcf8b5bef4",
+          "object": "chat.completion.chunk",
+          "created": 1789523291,
+          "model": "Qwen3.8-27B-oQ4e-mtp",
+          "choices": [
+            {
+              "index": 0,
+              "finish_reason": null,
+              "delta": {
+                "content": "X"
+              }
+            }
+          ]
+        },
+        {
+          "id": "chatcmpl-2b46a7ffa6ba4e94800144dcf8b5bef4",
+          "object": "chat.completion.chunk",
+          "created": 1789523291,
+          "model": "Qwen3.8-27B-oQ4e-mtp",
+          "choices": [
+            {
+              "index": 0,
+              "finish_reason": null,
+              "delta": {
+                "content": "2"
+              }
+            }
+          ]
+        },
+        {
+          "id": "chatcmpl-2b46a7ffa6ba4e94800144dcf8b5bef4",
+          "object": "chat.completion.chunk",
+          "created": 1789523291,
+          "model": "Qwen3.8-27B-oQ4e-mtp",
+          "choices": [
+            {
+              "index": 0,
+              "finish_reason": null,
+              "delta": {
+                "content": "_READY"
+              }
+            }
+          ]
+        },
+        {
+          "id": "chatcmpl-2b46a7ffa6ba4e94800144dcf8b5bef4",
+          "object": "chat.completion.chunk",
+          "created": 1789523291,
+          "model": "Qwen3.8-27B-oQ4e-mtp",
+          "choices": [
+            {
+              "index": 0,
+              "finish_reason": "stop",
+              "delta": {}
+            }
+          ],
+          "usage": {
+            "prompt_tokens": 19,
+            "completion_tokens": 5,
+            "total_tokens": 24,
+            "prompt_tokens_details": {
+              "cached_tokens": 18
+            }
+          },
+          "mlx2": {
+            "request_id": "chatcmpl-2b46a7ffa6ba4e94800144dcf8b5bef4",
+            "cache": "apcv2",
+            "cached_tokens": 18,
+            "profile": "qwen38-27b-apcv2-ordinary",
+            "qualification": "candidate",
+            "route_receipt": "candidate_validation",
+            "request_controls": {
+              "logprobs": false,
+              "top_logprobs": 0,
+              "logprob_semantics": null,
+              "thinking": false,
+              "sampling": {
+                "temperature": 0
+              },
+              "reasoning_effort": null,
+              "effort_semantics": "thinking_toggle",
+              "context_limit": 262144
+            },
+            "ordinary_compute_width": 1,
+            "mtp": null,
+            "speculation": null,
+            "prompt_tokens": 19,
+            "completion_tokens": 5,
+            "ttft_seconds": 0.088823833000788,
+            "elapsed_seconds": 0.22754650000024412
+          }
+        }
+      ]
+    },
+    "tools": {
+      "passed": true,
+      "evidence": {
+        "id": "chatcmpl-4221860018814260b75355aa25773325",
+        "object": "chat.completion",
+        "created": 1789523291,
+        "model": "Qwen3.8-27B-oQ4e-mtp",
+        "choices": [
+          {
+            "index": 0,
+            "finish_reason": "tool_calls",
+            "message": {
+              "role": "assistant",
+              "content": "",
+              "tool_calls": [
+                {
+                  "id": "call_139705901c0441b094a2b060",
+                  "type": "function",
+                  "function": {
+                    "name": "weather",
+                    "arguments": "{\"city\": \"Toronto\"}"
+                  }
+                }
+              ]
+            }
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 279,
+          "completion_tokens": 26,
+          "total_tokens": 305,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          }
+        },
+        "mlx2": {
+          "request_id": "chatcmpl-4221860018814260b75355aa25773325",
+          "cache": "apcv2",
+          "cached_tokens": 0,
+          "profile": "qwen38-27b-apcv2-ordinary",
+          "qualification": "candidate",
+          "route_receipt": "candidate_validation",
+          "request_controls": {
+            "logprobs": false,
+            "top_logprobs": 0,
+            "logprob_semantics": null,
+            "thinking": false,
+            "sampling": {
+              "temperature": 0
+            },
+            "reasoning_effort": null,
+            "effort_semantics": "thinking_toggle",
+            "context_limit": 262144
+          },
+          "ordinary_compute_width": 1,
+          "mtp": null,
+          "speculation": null,
+          "prompt_tokens": 279,
+          "completion_tokens": 26,
+          "ttft_seconds": 0.43516162500054634,
+          "elapsed_seconds": 1.2473405420005292
+        }
+      }
+    },
+    "tool_roundtrip": {
+      "passed": true,
+      "evidence": {
+        "id": "chatcmpl-ec17f7aed5354857980a500b863f3e8c",
+        "object": "chat.completion",
+        "created": 1789523293,
+        "model": "Qwen3.8-27B-oQ4e-mtp",
+        "choices": [
+          {
+            "index": 0,
+            "finish_reason": "stop",
+            "message": {
+              "role": "assistant",
+              "content": "Here's the current weather in Toronto:\n\n- **Temperature:** 21\u00b0C\n- **Condition:** Sunny \u2600\ufe0f\n\nEnjoy the nice weather!"
+            }
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 337,
+          "completion_tokens": 33,
+          "total_tokens": 370,
+          "prompt_tokens_details": {
+            "cached_tokens": 305
+          }
+        },
+        "mlx2": {
+          "request_id": "chatcmpl-ec17f7aed5354857980a500b863f3e8c",
+          "cache": "apcv2",
+          "cached_tokens": 305,
+          "profile": "qwen38-27b-apcv2-ordinary",
+          "qualification": "candidate",
+          "route_receipt": "candidate_validation",
+          "request_controls": {
+            "logprobs": false,
+            "top_logprobs": 0,
+            "logprob_semantics": null,
+            "thinking": false,
+            "sampling": {
+              "temperature": 0
+            },
+            "reasoning_effort": null,
+            "effort_semantics": "thinking_toggle",
+            "context_limit": 262144
+          },
+          "ordinary_compute_width": 1,
+          "mtp": null,
+          "speculation": null,
+          "prompt_tokens": 337,
+          "completion_tokens": 33,
+          "ttft_seconds": 0.1953010830002313,
+          "elapsed_seconds": 1.230259207999552
+        }
+      }
+    },
+    "reasoning": {
+      "passed": true,
+      "evidence": {
+        "id": "chatcmpl-7d19c7e5eabf419caa0c980379396af3",
+        "object": "chat.completion",
+        "created": 1789523294,
+        "model": "Qwen3.8-27B-oQ4e-mtp",
+        "choices": [
+          {
+            "index": 0,
+            "finish_reason": "stop",
+            "message": {
+              "role": "assistant",
+              "content": "\n\n221",
+              "reasoning_content": "We need answer simple multiplication. Need final concise. 13*17=221.\n"
+            }
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 62,
+          "completion_tokens": 28,
+          "total_tokens": 90,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          }
+        },
+        "mlx2": {
+          "request_id": "chatcmpl-7d19c7e5eabf419caa0c980379396af3",
+          "cache": "apcv2",
+          "cached_tokens": 0,
+          "profile": "qwen38-27b-apcv2-ordinary",
+          "qualification": "candidate",
+          "route_receipt": "candidate_validation",
+          "request_controls": {
+            "logprobs": false,
+            "top_logprobs": 0,
+            "logprob_semantics": null,
+            "thinking": true,
+            "sampling": {
+              "temperature": 0
+            },
+            "reasoning_effort": null,
+            "effort_semantics": "thinking_toggle",
+            "context_limit": 262144
+          },
+          "ordinary_compute_width": 1,
+          "mtp": null,
+          "speculation": null,
+          "prompt_tokens": 62,
+          "completion_tokens": 28,
+          "ttft_seconds": 0.1855302500007383,
+          "elapsed_seconds": 1.0605084580001858
+        }
+      }
+    },
+    "stop": {
+      "passed": true,
+      "evidence": {
+        "id": "chatcmpl-dd538ef5dcb84ac0aa644542b908d3d1",
+        "object": "chat.completion",
+        "created": 1789523295,
+        "model": "Qwen3.8-27B-oQ4e-mtp",
+        "choices": [
+          {
+            "index": 0,
+            "finish_reason": "stop",
+            "message": {
+              "role": "assistant",
+              "content": "MLX2"
+            }
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 19,
+          "completion_tokens": 4,
+          "total_tokens": 23,
+          "prompt_tokens_details": {
+            "cached_tokens": 18
+          }
+        },
+        "mlx2": {
+          "request_id": "chatcmpl-dd538ef5dcb84ac0aa644542b908d3d1",
+          "cache": "apcv2",
+          "cached_tokens": 18,
+          "profile": "qwen38-27b-apcv2-ordinary",
+          "qualification": "candidate",
+          "route_receipt": "candidate_validation",
+          "request_controls": {
+            "logprobs": false,
+            "top_logprobs": 0,
+            "logprob_semantics": null,
+            "thinking": false,
+            "sampling": {
+              "temperature": 0
+            },
+            "reasoning_effort": null,
+            "effort_semantics": "thinking_toggle",
+            "context_limit": 262144
+          },
+          "ordinary_compute_width": 1,
+          "mtp": null,
+          "speculation": null,
+          "prompt_tokens": 19,
+          "completion_tokens": 4,
+          "ttft_seconds": 0.09008662500127684,
+          "elapsed_seconds": 0.1860660000002099
+        }
+      }
+    },
+    "seed_repeat": {
+      "passed": true,
+      "evidence": {
+        "first": {
+          "id": "chatcmpl-f68af41e2e734c668c527561d65b2877",
+          "object": "chat.completion",
+          "created": 1789523295,
+          "model": "Qwen3.8-27B-oQ4e-mtp",
+          "choices": [
+            {
+              "index": 0,
+              "finish_reason": "length",
+              "message": {
+                "role": "assistant",
+                "content": "Here are three short facts about stars:\n\n1. **Stars are massive balls of plasma** powered by nuclear fusion, where hydrogen atoms combine to form helium, releasing enormous amounts of energy in the process.\n2. **Stars vary greatly in size and temperature**, ranging from small, cool red dwarfs to massive,"
+              }
+            }
+          ],
+          "usage": {
+            "prompt_tokens": 19,
+            "completion_tokens": 64,
+            "total_tokens": 83,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            }
+          },
+          "mlx2": {
+            "request_id": "chatcmpl-f68af41e2e734c668c527561d65b2877",
+            "cache": "apcv2",
+            "cached_tokens": 0,
+            "profile": "qwen38-27b-apcv2-ordinary",
+            "qualification": "candidate",
+            "route_receipt": "candidate_validation",
+            "request_controls": {
+              "logprobs": false,
+              "top_logprobs": 0,
+              "logprob_semantics": null,
+              "thinking": false,
+              "sampling": {
+                "temperature": 0.7,
+                "seed": 123
+              },
+              "reasoning_effort": null,
+              "effort_semantics": "thinking_toggle",
+              "context_limit": 262144
+            },
+            "ordinary_compute_width": 1,
+            "mtp": null,
+            "speculation": null,
+            "prompt_tokens": 19,
+            "completion_tokens": 64,
+            "ttft_seconds": 0.16578083399872412,
+            "elapsed_seconds": 2.225135999999111
+          }
+        },
+        "second": {
+          "id": "chatcmpl-03ab3271943b4a8b8fcc9436c2e92e59",
+          "object": "chat.completion",
+          "created": 1789523297,
+          "model": "Qwen3.8-27B-oQ4e-mtp",
+          "choices": [
+            {
+              "index": 0,
+              "finish_reason": "length",
+              "message": {
+                "role": "assistant",
+                "content": "Here are three short facts about stars:\n\n1. **Stars are massive balls of plasma** powered by nuclear fusion, where hydrogen atoms combine to form helium, releasing enormous amounts of energy in the process.\n2. **Stars vary greatly in size and temperature**, ranging from small, cool red dwarfs to massive,"
+              }
+            }
+          ],
+          "usage": {
+            "prompt_tokens": 19,
+            "completion_tokens": 64,
+            "total_tokens": 83,
+            "prompt_tokens_details": {
+              "cached_tokens": 18
+            }
+          },
+          "mlx2": {
+            "request_id": "chatcmpl-03ab3271943b4a8b8fcc9436c2e92e59",
+            "cache": "apcv2",
+            "cached_tokens": 18,
+            "profile": "qwen38-27b-apcv2-ordinary",
+            "qualification": "candidate",
+            "route_receipt": "candidate_validation",
+            "request_controls": {
+              "logprobs": false,
+              "top_logprobs": 0,
+              "logprob_semantics": null,
+              "thinking": false,
+              "sampling": {
+                "temperature": 0.7,
+                "seed": 123
+              },
+              "reasoning_effort": null,
+              "effort_semantics": "thinking_toggle",
+              "context_limit": 262144
+            },
+            "ordinary_compute_width": 1,
+            "mtp": null,
+            "speculation": null,
+            "prompt_tokens": 19,
+            "completion_tokens": 64,
+            "ttft_seconds": 0.09078574999875855,
+            "elapsed_seconds": 2.151570999998512
+          }
+        }
+      }
+    },
+    "batch": {
+      "passed": true,
+      "evidence": {
+        "observed_widths": [
+          4
+        ],
+        "wall_seconds": 6.982338625000921,
+        "aggregate_tokens_per_second": 91.65983410034279,
+        "request_receipts": [
+          {
+            "request_id": "chatcmpl-ea736aa00d0f4049a58055a8813f0896",
+            "cache": "apcv2",
+            "cached_tokens": 0,
+            "profile": "qwen38-27b-apcv2-ordinary",
+            "qualification": "candidate",
+            "route_receipt": "candidate_validation",
+            "request_controls": {
+              "logprobs": false,
+              "top_logprobs": 0,
+              "logprob_semantics": null,
+              "thinking": false,
+              "sampling": {
+                "temperature": 0
+              },
+              "reasoning_effort": null,
+              "effort_semantics": "thinking_toggle",
+              "context_limit": 262144
+            },
+            "ordinary_compute_width": 4,
+            "mtp": null,
+            "speculation": null,
+            "prompt_tokens": 21,
+            "completion_tokens": 160,
+            "ttft_seconds": 0.30164666599921475,
+            "elapsed_seconds": 6.888900040999943
+          },
+          {
+            "request_id": "chatcmpl-bd97b266898846e89271da86a5b62682",
+            "cache": "apcv2",
+            "cached_tokens": 0,
+            "profile": "qwen38-27b-apcv2-ordinary",
+            "qualification": "candidate",
+            "route_receipt": "candidate_validation",
+            "request_controls": {
+              "logprobs": false,
+              "top_logprobs": 0,
+              "logprob_semantics": null,
+              "thinking": false,
+              "sampling": {
+                "temperature": 0
+              },
+              "reasoning_effort": null,
+              "effort_semantics": "thinking_toggle",
+              "context_limit": 262144
+            },
+            "ordinary_compute_width": 4,
+            "mtp": null,
+            "speculation": null,
+            "prompt_tokens": 21,
+            "completion_tokens": 160,
+            "ttft_seconds": 0.30113566600084596,
+            "elapsed_seconds": 6.8915940830011095
+          },
+          {
+            "request_id": "chatcmpl-a27685a621dd4bcb965023200102c5f7",
+            "cache": "apcv2",
+            "cached_tokens": 0,
+            "profile": "qwen38-27b-apcv2-ordinary",
+            "qualification": "candidate",
+            "route_receipt": "candidate_validation",
+            "request_controls": {
+              "logprobs": false,
+              "top_logprobs": 0,
+              "logprob_semantics": null,
+              "thinking": false,
+              "sampling": {
+                "temperature": 0
+              },
+              "reasoning_effort": null,
+              "effort_semantics": "thinking_toggle",
+              "context_limit": 262144
+            },
+            "ordinary_compute_width": 4,
+            "mtp": null,
+            "speculation": null,
+            "prompt_tokens": 21,
+            "completion_tokens": 160,
+            "ttft_seconds": 0.42813495900009,
+            "elapsed_seconds": 6.978915792000407
+          },
+          {
+            "request_id": "chatcmpl-5d1ff0d7d87a487e961decb41715a1b7",
+            "cache": "apcv2",
+            "cached_tokens": 0,
+            "profile": "qwen38-27b-apcv2-ordinary",
+            "qualification": "candidate",
+            "route_receipt": "candidate_validation",
+            "request_controls": {
+              "logprobs": false,
+              "top_logprobs": 0,
+              "logprob_semantics": null,
+              "thinking": false,
+              "sampling": {
+                "temperature": 0
+              },
+              "reasoning_effort": null,
+              "effort_semantics": "thinking_toggle",
+              "context_limit": 262144
+            },
+            "ordinary_compute_width": 4,
+            "mtp": null,
+            "speculation": null,
+            "prompt_tokens": 21,
+            "completion_tokens": 160,
+            "ttft_seconds": 0.42852241699984006,
+            "elapsed_seconds": 6.975998959000208
+          }
+        ]
+      }
+    },
+    "mixed_warm": {
+      "passed": true,
+      "evidence": [
+        {
+          "request_id": "chatcmpl-648bfea3efac4492b01e3d3459f8894d",
+          "cache": "apcv2",
+          "cached_tokens": 22,
+          "profile": "qwen38-27b-apcv2-ordinary",
+          "qualification": "candidate",
+          "route_receipt": "candidate_validation",
+          "request_controls": {
+            "logprobs": false,
+            "top_logprobs": 0,
+            "logprob_semantics": null,
+            "thinking": false,
+            "sampling": {
+              "temperature": 0
+            },
+            "reasoning_effort": null,
+            "effort_semantics": "thinking_toggle",
+            "context_limit": 262144
+          },
+          "ordinary_compute_width": 2,
+          "mtp": null,
+          "speculation": null,
+          "prompt_tokens": 23,
+          "completion_tokens": 64,
+          "ttft_seconds": 0.10218999999960943,
+          "elapsed_seconds": 2.2155411250005272
+        },
+        {
+          "request_id": "chatcmpl-1811997c98784e6f98ad42859dded666",
+          "cache": "apcv2",
+          "cached_tokens": 23,
+          "profile": "qwen38-27b-apcv2-ordinary",
+          "qualification": "candidate",
+          "route_receipt": "candidate_validation",
+          "request_controls": {
+            "logprobs": false,
+            "top_logprobs": 0,
+            "logprob_semantics": null,
+            "thinking": false,
+            "sampling": {
+              "temperature": 0
+            },
+            "reasoning_effort": null,
+            "effort_semantics": "thinking_toggle",
+            "context_limit": 262144
+          },
+          "ordinary_compute_width": 2,
+          "mtp": null,
+          "speculation": null,
+          "prompt_tokens": 24,
+          "completion_tokens": 64,
+          "ttft_seconds": 0.1004773339991516,
+          "elapsed_seconds": 2.2172383749984874
+        }
+      ]
+    },
+    "context": {
+      "passed": true,
+      "evidence": {
+        "cold": {
+          "id": "chatcmpl-1a2fef063ccf4c8083b9c648ac2c4de7",
+          "object": "chat.completion",
+          "created": 1789523313,
+          "model": "Qwen3.8-27B-oQ4e-mtp",
+          "choices": [
+            {
+              "index": 0,
+              "finish_reason": "length",
+              "message": {
+                "role": "assistant",
+                "content": "LONG_READY\n\n1. **Introduction to Compiler Optimization**\n   Compiler optimization is the process of modifying the source code or intermediate representation (IR) of a program to improve its performance, reduce resource consumption, or enhance other metrics such as power efficiency or cache locality, without changing the observable behavior of the program. This is"
+              }
+            }
+          ],
+          "usage": {
+            "prompt_tokens": 262051,
+            "completion_tokens": 64,
+            "total_tokens": 262115,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            }
+          },
+          "mlx2": {
+            "request_id": "chatcmpl-1a2fef063ccf4c8083b9c648ac2c4de7",
+            "cache": "apcv2",
+            "cached_tokens": 0,
+            "profile": "qwen38-27b-apcv2-ordinary",
+            "qualification": "candidate",
+            "route_receipt": "candidate_validation",
+            "request_controls": {
+              "logprobs": false,
+              "top_logprobs": 0,
+              "logprob_semantics": null,
+              "thinking": false,
+              "sampling": {
+                "temperature": 0
+              },
+              "reasoning_effort": null,
+              "effort_semantics": "thinking_toggle",
+              "context_limit": 262144
+            },
+            "ordinary_compute_width": 1,
+            "mtp": null,
+            "speculation": null,
+            "prompt_tokens": 262051,
+            "completion_tokens": 64,
+            "ttft_seconds": 954.9046062079997,
+            "elapsed_seconds": 961.7665928750012
+          }
+        },
+        "warm": {
+          "id": "chatcmpl-553f8101297c4ccdae4add537aee8e4a",
+          "object": "chat.completion",
+          "created": 1789524275,
+          "model": "Qwen3.8-27B-oQ4e-mtp",
+          "choices": [
+            {
+              "index": 0,
+              "finish_reason": "length",
+              "message": {
+                "role": "assistant",
+                "content": "LONG_READY\n\n1. **Introduction to Compiler Optimization**\n   Compiler optimization is the process of modifying the source code or intermediate representation (IR) of a program to improve its performance, reduce resource consumption, or enhance other metrics such as power efficiency or cache locality, without changing the observable behavior of the program. This is"
+              }
+            }
+          ],
+          "usage": {
+            "prompt_tokens": 262051,
+            "completion_tokens": 64,
+            "total_tokens": 262115,
+            "prompt_tokens_details": {
+              "cached_tokens": 262050
+            }
+          },
+          "mlx2": {
+            "request_id": "chatcmpl-553f8101297c4ccdae4add537aee8e4a",
+            "cache": "apcv2",
+            "cached_tokens": 262050,
+            "profile": "qwen38-27b-apcv2-ordinary",
+            "qualification": "candidate",
+            "route_receipt": "candidate_validation",
+            "request_controls": {
+              "logprobs": false,
+              "top_logprobs": 0,
+              "logprob_semantics": null,
+              "thinking": false,
+              "sampling": {
+                "temperature": 0
+              },
+              "reasoning_effort": null,
+              "effort_semantics": "thinking_toggle",
+              "context_limit": 262144
+            },
+            "ordinary_compute_width": 1,
+            "mtp": null,
+            "speculation": null,
+            "prompt_tokens": 262051,
+            "completion_tokens": 64,
+            "ttft_seconds": 8.254543749999357,
+            "elapsed_seconds": 16.345414833000177
+          }
+        }
+      }
+    },
+    "shared_cohort_priming": {
+      "passed": true,
+      "evidence": {
+        "id": "chatcmpl-66f9289037a84c67ac9bb7e2c9a23ff8",
+        "object": "chat.completion",
+        "created": 1789524291,
+        "model": "Qwen3.8-27B-oQ4e-mtp",
+        "choices": [
+          {
+            "index": 0,
+            "finish_reason": "length",
+            "message": {
+              "role": "assistant",
+              "content": "LONG_READY\n\n1. **Introduction to Compiler Optimization**\n   Compiler optimization is the process of modifying the source code or intermediate representation (IR) of a program to improve its performance, reduce resource consumption, or enhance other metrics such as power efficiency or code size, without changing the observable behavior of the program. The primary"
+            }
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 130979,
+          "completion_tokens": 64,
+          "total_tokens": 131043,
+          "prompt_tokens_details": {
+            "cached_tokens": 65536
+          }
+        },
+        "mlx2": {
+          "request_id": "chatcmpl-66f9289037a84c67ac9bb7e2c9a23ff8",
+          "cache": "apcv2",
+          "cached_tokens": 65536,
+          "profile": "qwen38-27b-apcv2-ordinary",
+          "qualification": "candidate",
+          "route_receipt": "candidate_validation",
+          "request_controls": {
+            "logprobs": false,
+            "top_logprobs": 0,
+            "logprob_semantics": null,
+            "thinking": false,
+            "sampling": {
+              "temperature": 0
+            },
+            "reasoning_effort": null,
+            "effort_semantics": "thinking_toggle",
+            "context_limit": 262144
+          },
+          "ordinary_compute_width": 1,
+          "mtp": null,
+          "speculation": null,
+          "prompt_tokens": 130979,
+          "completion_tokens": 64,
+          "ttft_seconds": 198.75584537500072,
+          "elapsed_seconds": 203.68243741600054
+        }
+      }
+    },
+    "shared_warm_requests": {
+      "passed": true,
+      "evidence": [
+        {
+          "request_id": "chatcmpl-0657e895e70b4aa684a24643086449f2",
+          "cache": "apcv2",
+          "cached_tokens": 130978,
+          "profile": "qwen38-27b-apcv2-ordinary",
+          "qualification": "candidate",
+          "route_receipt": "candidate_validation",
+          "request_controls": {
+            "logprobs": false,
+            "top_logprobs": 0,
+            "logprob_semantics": null,
+            "thinking": false,
+            "sampling": {
+              "temperature": 0
+            },
+            "reasoning_effort": null,
+            "effort_semantics": "thinking_toggle",
+            "context_limit": 262144
+          },
+          "ordinary_compute_width": 2,
+          "mtp": null,
+          "speculation": null,
+          "prompt_tokens": 130979,
+          "completion_tokens": 64,
+          "ttft_seconds": 3.92824895800004,
+          "elapsed_seconds": 9.937647249998918
+        },
+        {
+          "request_id": "chatcmpl-64ee021b291b47178b5705dc95065a98",
+          "cache": "apcv2",
+          "cached_tokens": 130978,
+          "profile": "qwen38-27b-apcv2-ordinary",
+          "qualification": "candidate",
+          "route_receipt": "candidate_validation",
+          "request_controls": {
+            "logprobs": false,
+            "top_logprobs": 0,
+            "logprob_semantics": null,
+            "thinking": false,
+            "sampling": {
+              "temperature": 0
+            },
+            "reasoning_effort": null,
+            "effort_semantics": "thinking_toggle",
+            "context_limit": 262144
+          },
+          "ordinary_compute_width": 2,
+          "mtp": null,
+          "speculation": null,
+          "prompt_tokens": 130979,
+          "completion_tokens": 64,
+          "ttft_seconds": 2.0858823340004164,
+          "elapsed_seconds": 8.14574116699987
+        }
+      ]
+    },
+    "context_bound": {
+      "passed": true,
+      "evidence": "prompt plus output beyond limit rejected with400"
+    },
+    "cancel": {
+      "passed": true,
+      "evidence": {
+        "admitted": 29,
+        "cycles": 1108,
+        "multi_request_cycles": 294,
+        "completed": 28,
+        "cancelled": 1
+      }
+    },
+    "recovery": {
+      "passed": true,
+      "evidence": {
+        "id": "chatcmpl-7e6744d8cf524f45b86576ef64a3ed2f",
+        "object": "chat.completion",
+        "created": 1789524506,
+        "model": "Qwen3.8-27B-oQ4e-mtp",
+        "choices": [
+          {
+            "index": 0,
+            "finish_reason": "stop",
+            "message": {
+              "role": "assistant",
+              "content": "MLX2_READY"
+            }
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 19,
+          "completion_tokens": 5,
+          "total_tokens": 24,
+          "prompt_tokens_details": {
+            "cached_tokens": 18
+          }
+        },
+        "mlx2": {
+          "request_id": "chatcmpl-7e6744d8cf524f45b86576ef64a3ed2f",
+          "cache": "apcv2",
+          "cached_tokens": 18,
+          "profile": "qwen38-27b-apcv2-ordinary",
+          "qualification": "candidate",
+          "route_receipt": "candidate_validation",
+          "request_controls": {
+            "logprobs": false,
+            "top_logprobs": 0,
+            "logprob_semantics": null,
+            "thinking": false,
+            "sampling": {
+              "temperature": 0
+            },
+            "reasoning_effort": null,
+            "effort_semantics": "thinking_toggle",
+            "context_limit": 262144
+          },
+          "ordinary_compute_width": 1,
+          "mtp": null,
+          "speculation": null,
+          "prompt_tokens": 19,
+          "completion_tokens": 5,
+          "ttft_seconds": 0.1433939590006048,
+          "elapsed_seconds": 0.3403939590007212
+        }
+      }
+    },
+    "quiescence": {
+      "passed": true,
+      "evidence": {
+        "passed": true,
+        "timed_out": false,
+        "timeout_seconds": 5.0,
+        "poll_interval_seconds": 0.05,
+        "attempts": 17,
+        "elapsed_seconds": 0.9865688340014458,
+        "samples": [
+          {
+            "elapsed_seconds": 0.0009078750008484349,
+            "inflight": 0,
+            "queue_depth": 0,
+            "active_cow_leases": 1
+          },
+          {
+            "elapsed_seconds": 0.05292179200114333,
+            "inflight": 0,
+            "queue_depth": 0,
+            "active_cow_leases": 1
+          },
+          {
+            "elapsed_seconds": 0.1142031670005963,
+            "inflight": 0,
+            "queue_depth": 0,
+            "active_cow_leases": 1
+          },
+          {
+            "elapsed_seconds": 0.16816645900144067,
+            "inflight": 0,
+            "queue_depth": 0,
+            "active_cow_leases": 1
+          },
+          {
+            "elapsed_seconds": 0.24341904200082354,
+            "inflight": 0,
+            "queue_depth": 0,
+            "active_cow_leases": 1
+          },
+          {
+            "elapsed_seconds": 0.3039749170002324,
+            "inflight": 0,
+            "queue_depth": 0,
+            "active_cow_leases": 1
+          },
+          {
+            "elapsed_seconds": 0.36654858400106605,
+            "inflight": 0,
+            "queue_depth": 0,
+            "active_cow_leases": 1
+          },
+          {
+            "elapsed_seconds": 0.42233137500079465,
+            "inflight": 0,
+            "queue_depth": 0,
+            "active_cow_leases": 1
+          },
+          {
+            "elapsed_seconds": 0.4776272090002749,
+            "inflight": 0,
+            "queue_depth": 0,
+            "active_cow_leases": 1
+          },
+          {
+            "elapsed_seconds": 0.5393560419997812,
+            "inflight": 0,
+            "queue_depth": 0,
+            "active_cow_leases": 1
+          },
+          {
+            "elapsed_seconds": 0.5980802920003043,
+            "inflight": 0,
+            "queue_depth": 0,
+            "active_cow_leases": 1
+          },
+          {
+            "elapsed_seconds": 0.6525853750008537,
+            "inflight": 0,
+            "queue_depth": 0,
+            "active_cow_leases": 1
+          },
+          {
+            "elapsed_seconds": 0.7141627500004688,
+            "inflight": 0,
+            "queue_depth": 0,
+            "active_cow_leases": 1
+          },
+          {
+            "elapsed_seconds": 0.7727974589997757,
+            "inflight": 0,
+            "queue_depth": 0,
+            "active_cow_leases": 1
+          },
+          {
+            "elapsed_seconds": 0.8357257500010746,
+            "inflight": 0,
+            "queue_depth": 0,
+            "active_cow_leases": 1
+          },
+          {
+            "elapsed_seconds": 0.8988070840005093,
+            "inflight": 0,
+            "queue_depth": 0,
+            "active_cow_leases": 1
+          },
+          {
+            "elapsed_seconds": 0.9865688340014458,
+            "inflight": 0,
+            "queue_depth": 0,
+            "active_cow_leases": 0
+          }
+        ]
+      }
+    },
+    "apcv2_reuse": {
+      "passed": true,
+      "evidence": {
+        "apcv2.hits": {
+          "before": 0,
+          "after": 15,
+          "delta": 15
+        }
+      }
+    },
+    "apcv2_stores": {
+      "passed": true,
+      "evidence": {
+        "apcv2.stores": {
+          "before": 0,
+          "after": 58,
+          "delta": 58
+        }
+      }
+    },
+    "cache_leases": {
+      "passed": true,
+      "evidence": {
+        "lookups": 30,
+        "hits": 15,
+        "misses": 15,
+        "cached_tokens": 590033,
+        "stores": 58,
+        "clears": 0,
+        "lifetime": {
+          "lookups": 30,
+          "hits": 15,
+          "misses": 15,
+          "cached_tokens": 590033,
+          "stores": 58
+        },
+        "cow_enabled": true,
+        "cow": {
+          "sources": 65,
+          "source_bytes": 216386895872,
+          "freeze_failures": 0,
+          "branches": 15,
+          "branch_failures": 0,
+          "stale_rejections": 0,
+          "invalidations": 60,
+          "active_leases": 0,
+          "peak_leases": 2,
+          "descriptor_aliases": 23584,
+          "descriptor_bytes": 274399690752,
+          "avoided_copy_bytes": 58012794880,
+          "materializations": 0,
+          "materialized_bytes": 0,
+          "fallback_deepcopies": 0,
+          "fallback_bytes": 0,
+          "freeze_ns": 342469544,
+          "branch_ns": 19594085,
+          "fallback_ns": 0,
+          "releases": 15,
+          "planes": {
+            "gdn_recurrent": {
+              "descriptor_aliases": 21024,
+              "descriptor_bytes": 33713750016,
+              "materializations": 0,
+              "materialized_bytes": 0
+            },
+            "attention_kv": {
+              "descriptor_aliases": 2560,
+              "descriptor_bytes": 240685940736,
+              "materializations": 0,
+              "materialized_bytes": 0
+            }
+          },
+          "materialized_bytes_are_estimated": true,
+          "array_readbacks": 0
+        },
+        "max_tokens": 262144,
+        "max_entry_tokens": 262115,
+        "overlength_rejections": 0,
+        "idle_disk": {
+          "enabled": true,
+          "idle_seconds": 180.0,
+          "resident_bytes": 10594549760,
+          "disk_bytes": 48056113039,
+          "disk_max_bytes": 68719476736,
+          "disk_entries": 12,
+          "idle_spills": 0,
+          "pressure_spills": 25,
+          "restores": 7,
+          "restore_failures": 0,
+          "spill_failures": 0,
+          "disk_evictions": 0,
+          "bytes_written": 104903745551,
+          "bytes_read": 73164260435
+        },
+        "version": 2,
+        "layout_name": "qwen38-27b-hybrid-layer-segments-v1",
+        "layer_segments": {
+          "schema": "apcv2.layer-segments.v1",
+          "entries": 5,
+          "disk_entries": 11,
+          "layers": 320,
+          "plane_layers": 320,
+          "segments": 336,
+          "logical_bytes": 10594549760,
+          "by_plane": {
+            "gdn_recurrent": {
+              "layers": 240,
+              "segments": 240,
+              "logical_bytes": 2001272832,
+              "invalid": 0
+            },
+            "attention_kv": {
+              "layers": 80,
+              "segments": 96,
+              "logical_bytes": 8593276928,
+              "invalid": 0
+            }
+          }
+        }
+      }
+    },
+    "runtime_stable": {
+      "passed": true,
+      "evidence": {
+        "source_sha256": "af05e25c7d7b311070aedcbf50b3fbd93277240143a791d9d6079d5fdfb1e5fc",
+        "mlx_native_sha256": "30335939714520c3306cfa58597100aae08bbeabdc60a4bc8c35c32c607450a8",
+        "python": "3.12.13",
+        "macos": "26.7",
+        "mlx": "0.32.2.dev20260915+2a817ad94",
+        "transformers": "5.12.1",
+        "dependencies": {
+          "numpy": "2.5.1",
+          "tokenizers": "0.22.2",
+          "jinja2": "3.1.6",
+          "psutil": "7.2.2",
+          "regex": "2026.9.10",
+          "safetensors": "0.8.0"
+        }
+      }
+    }
+  },
+  "responses": {
+    "sampling_controls": [
+      {
+        "id": "chatcmpl-3b0c18bd36cf46798015206f81ba1b3c",
+        "object": "chat.completion",
+        "created": 1789523289,
+        "model": "Qwen3.8-27B-oQ4e-mtp",
+        "choices": [
+          {
+            "index": 0,
+            "finish_reason": "stop",
+            "message": {
+              "role": "assistant",
+              "content": "Here are three fruits:\n\n1. Apple\n2. Banana\n3. Orange"
+            }
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 16,
+          "completion_tokens": 18,
+          "total_tokens": 34,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          }
+        },
+        "mlx2": {
+          "request_id": "chatcmpl-3b0c18bd36cf46798015206f81ba1b3c",
+          "cache": "apcv2",
+          "cached_tokens": 0,
+          "profile": "qwen38-27b-apcv2-ordinary",
+          "qualification": "candidate",
+          "route_receipt": "candidate_validation",
+          "request_controls": {
+            "logprobs": false,
+            "top_logprobs": 0,
+            "logprob_semantics": null,
+            "thinking": false,
+            "sampling": {
+              "temperature": 0.7,
+              "top_p": 0.9,
+              "top_k": 24,
+              "min_p": 0.05,
+              "repetition_penalty": 1.05,
+              "presence_penalty": 0.1,
+              "frequency_penalty": 0.1,
+              "seed": 237
+            },
+            "reasoning_effort": null,
+            "effort_semantics": "thinking_toggle",
+            "context_limit": 262144
+          },
+          "ordinary_compute_width": 1,
+          "mtp": null,
+          "speculation": null,
+          "prompt_tokens": 16,
+          "completion_tokens": 18,
+          "ttft_seconds": 0.18404758299948298,
+          "elapsed_seconds": 0.7461858749993553
+        }
+      },
+      {
+        "id": "chatcmpl-d729117cc09f4f64a488b9a770e24f33",
+        "object": "chat.completion",
+        "created": 1789523290,
+        "model": "Qwen3.8-27B-oQ4e-mtp",
+        "choices": [
+          {
+            "index": 0,
+            "finish_reason": "stop",
+            "message": {
+              "role": "assistant",
+              "content": "Here are three fruits:\n\n1. Apple\n2. Banana\n3. Orange"
+            }
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 16,
+          "completion_tokens": 18,
+          "total_tokens": 34,
+          "prompt_tokens_details": {
+            "cached_tokens": 15
+          }
+        },
+        "mlx2": {
+          "request_id": "chatcmpl-d729117cc09f4f64a488b9a770e24f33",
+          "cache": "apcv2",
+          "cached_tokens": 15,
+          "profile": "qwen38-27b-apcv2-ordinary",
+          "qualification": "candidate",
+          "route_receipt": "candidate_validation",
+          "request_controls": {
+            "logprobs": false,
+            "top_logprobs": 0,
+            "logprob_semantics": null,
+            "thinking": false,
+            "sampling": {
+              "temperature": 0.7,
+              "top_p": 0.9,
+              "top_k": 24,
+              "min_p": 0.05,
+              "repetition_penalty": 1.05,
+              "presence_penalty": 0.1,
+              "frequency_penalty": 0.1,
+              "seed": 237
+            },
+            "reasoning_effort": null,
+            "effort_semantics": "thinking_toggle",
+            "context_limit": 262144
+          },
+          "ordinary_compute_width": 1,
+          "mtp": null,
+          "speculation": null,
+          "prompt_tokens": 16,
+          "completion_tokens": 18,
+          "ttft_seconds": 0.09002920799866843,
+          "elapsed_seconds": 0.6517633329985983
+        }
+      }
+    ],
+    "cold": {
+      "id": "chatcmpl-89533b3be0bc4ce5b2cc288555f14f9f",
+      "object": "chat.completion",
+      "created": 1789523291,
+      "model": "Qwen3.8-27B-oQ4e-mtp",
+      "choices": [
+        {
+          "index": 0,
+          "finish_reason": "stop",
+          "message": {
+            "role": "assistant",
+            "content": "MLX2_READY"
+          }
+        }
+      ],
+      "usage": {
+        "prompt_tokens": 19,
+        "completion_tokens": 5,
+        "total_tokens": 24,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        }
+      },
+      "mlx2": {
+        "request_id": "chatcmpl-89533b3be0bc4ce5b2cc288555f14f9f",
+        "cache": "apcv2",
+        "cached_tokens": 0,
+        "profile": "qwen38-27b-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": false,
+          "top_logprobs": 0,
+          "logprob_semantics": null,
+          "thinking": false,
+          "sampling": {
+            "temperature": 0
+          },
+          "reasoning_effort": null,
+          "effort_semantics": "thinking_toggle",
+          "context_limit": 262144
+        },
+        "ordinary_compute_width": 1,
+        "mtp": null,
+        "speculation": null,
+        "prompt_tokens": 19,
+        "completion_tokens": 5,
+        "ttft_seconds": 0.1620000409984641,
+        "elapsed_seconds": 0.300485124998886
+      }
+    },
+    "warm": {
+      "id": "chatcmpl-102b376d48ba4010ba52fc79a7514e25",
+      "object": "chat.completion",
+      "created": 1789523291,
+      "model": "Qwen3.8-27B-oQ4e-mtp",
+      "choices": [
+        {
+          "index": 0,
+          "finish_reason": "stop",
+          "message": {
+            "role": "assistant",
+            "content": "MLX2_READY"
+          }
+        }
+      ],
+      "usage": {
+        "prompt_tokens": 19,
+        "completion_tokens": 5,
+        "total_tokens": 24,
+        "prompt_tokens_details": {
+          "cached_tokens": 18
+        }
+      },
+      "mlx2": {
+        "request_id": "chatcmpl-102b376d48ba4010ba52fc79a7514e25",
+        "cache": "apcv2",
+        "cached_tokens": 18,
+        "profile": "qwen38-27b-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": false,
+          "top_logprobs": 0,
+          "logprob_semantics": null,
+          "thinking": false,
+          "sampling": {
+            "temperature": 0
+          },
+          "reasoning_effort": null,
+          "effort_semantics": "thinking_toggle",
+          "context_limit": 262144
+        },
+        "ordinary_compute_width": 1,
+        "mtp": null,
+        "speculation": null,
+        "prompt_tokens": 19,
+        "completion_tokens": 5,
+        "ttft_seconds": 0.09020358300040243,
+        "elapsed_seconds": 0.24289104099989345
+      }
+    },
+    "batch": [
+      {
+        "id": "chatcmpl-ea736aa00d0f4049a58055a8813f0896",
+        "object": "chat.completion",
+        "created": 1789523300,
+        "model": "Qwen3.8-27B-oQ4e-mtp",
+        "choices": [
+          {
+            "index": 0,
+            "finish_reason": "length",
+            "message": {
+              "role": "assistant",
+              "content": "A compiler is a specialized software program that translates source code written in a high-level programming language (like C++, Java, or Rust) into machine code (binary instructions) that a computer\u2019s CPU can execute directly.\n\nThe process is complex and involves several distinct stages. Below is a detailed breakdown of how a compiler works, from input to output.\n\n---\n\n### **High-Level Overview**\nThe general pipeline of a compiler is:\n1. **Source Code** \u2192 **Preprocessing**\n2. **Preprocessed Code** \u2192 **Lexical Analysis (Tokenization)**\n3. **Tokens** \u2192 **Syntax Analysis (Parsing)**\n4. **Parse Tree** \u2192 **Semantic Analysis**\n5. **Annotated AST** \u2192 **Intermediate Representation (IR)**\n6."
+            }
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 21,
+          "completion_tokens": 160,
+          "total_tokens": 181,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          }
+        },
+        "mlx2": {
+          "request_id": "chatcmpl-ea736aa00d0f4049a58055a8813f0896",
+          "cache": "apcv2",
+          "cached_tokens": 0,
+          "profile": "qwen38-27b-apcv2-ordinary",
+          "qualification": "candidate",
+          "route_receipt": "candidate_validation",
+          "request_controls": {
+            "logprobs": false,
+            "top_logprobs": 0,
+            "logprob_semantics": null,
+            "thinking": false,
+            "sampling": {
+              "temperature": 0
+            },
+            "reasoning_effort": null,
+            "effort_semantics": "thinking_toggle",
+            "context_limit": 262144
+          },
+          "ordinary_compute_width": 4,
+          "mtp": null,
+          "speculation": null,
+          "prompt_tokens": 21,
+          "completion_tokens": 160,
+          "ttft_seconds": 0.30164666599921475,
+          "elapsed_seconds": 6.888900040999943
+        }
+      },
+      {
+        "id": "chatcmpl-bd97b266898846e89271da86a5b62682",
+        "object": "chat.completion",
+        "created": 1789523300,
+        "model": "Qwen3.8-27B-oQ4e-mtp",
+        "choices": [
+          {
+            "index": 0,
+            "finish_reason": "length",
+            "message": {
+              "role": "assistant",
+              "content": "A compiler is a specialized software program that translates source code written in a high-level programming language (like C++, Java, or Rust) into machine code (binary instructions) that a computer\u2019s CPU can execute directly.\n\nThe process is complex and involves several distinct stages. Below is a detailed breakdown of how a compiler works, from input to output.\n\n---\n\n### **High-Level Overview**\nThe general pipeline of a compiler is:\n1. **Source Code** \u2192 **Preprocessing**\n2. **Preprocessed Code** \u2192 **Lexical Analysis (Tokenization)**\n3. **Tokens** \u2192 **Syntax Analysis (Parsing)**\n4. **Parse Tree** \u2192 **Semantic Analysis**\n5. **Annotated AST** \u2192 **Intermediate Representation (IR)**\n6."
+            }
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 21,
+          "completion_tokens": 160,
+          "total_tokens": 181,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          }
+        },
+        "mlx2": {
+          "request_id": "chatcmpl-bd97b266898846e89271da86a5b62682",
+          "cache": "apcv2",
+          "cached_tokens": 0,
+          "profile": "qwen38-27b-apcv2-ordinary",
+          "qualification": "candidate",
+          "route_receipt": "candidate_validation",
+          "request_controls": {
+            "logprobs": false,
+            "top_logprobs": 0,
+            "logprob_semantics": null,
+            "thinking": false,
+            "sampling": {
+              "temperature": 0
+            },
+            "reasoning_effort": null,
+            "effort_semantics": "thinking_toggle",
+            "context_limit": 262144
+          },
+          "ordinary_compute_width": 4,
+          "mtp": null,
+          "speculation": null,
+          "prompt_tokens": 21,
+          "completion_tokens": 160,
+          "ttft_seconds": 0.30113566600084596,
+          "elapsed_seconds": 6.8915940830011095
+        }
+      },
+      {
+        "id": "chatcmpl-a27685a621dd4bcb965023200102c5f7",
+        "object": "chat.completion",
+        "created": 1789523300,
+        "model": "Qwen3.8-27B-oQ4e-mtp",
+        "choices": [
+          {
+            "index": 0,
+            "finish_reason": "length",
+            "message": {
+              "role": "assistant",
+              "content": "A compiler is a specialized software program that translates source code written in a high-level programming language (like C++, Java, or Rust) into machine code (binary instructions) that a computer\u2019s CPU can execute directly.\n\nThe process is complex and involves several distinct stages. Below is a detailed breakdown of how a compiler works, from input to output.\n\n---\n\n### **High-Level Overview**\nThe general pipeline of a compiler is:\n1. **Source Code** \u2192 **Preprocessing**\n2. **Preprocessed Code** \u2192 **Lexical Analysis (Tokenization)**\n3. **Tokens** \u2192 **Syntax Analysis (Parsing)**\n4. **Parse Tree** \u2192 **Semantic Analysis**\n5. **Annotated AST** \u2192 **Intermediate Representation (IR)**\n6."
+            }
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 21,
+          "completion_tokens": 160,
+          "total_tokens": 181,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          }
+        },
+        "mlx2": {
+          "request_id": "chatcmpl-a27685a621dd4bcb965023200102c5f7",
+          "cache": "apcv2",
+          "cached_tokens": 0,
+          "profile": "qwen38-27b-apcv2-ordinary",
+          "qualification": "candidate",
+          "route_receipt": "candidate_validation",
+          "request_controls": {
+            "logprobs": false,
+            "top_logprobs": 0,
+            "logprob_semantics": null,
+            "thinking": false,
+            "sampling": {
+              "temperature": 0
+            },
+            "reasoning_effort": null,
+            "effort_semantics": "thinking_toggle",
+            "context_limit": 262144
+          },
+          "ordinary_compute_width": 4,
+          "mtp": null,
+          "speculation": null,
+          "prompt_tokens": 21,
+          "completion_tokens": 160,
+          "ttft_seconds": 0.42813495900009,
+          "elapsed_seconds": 6.978915792000407
+        }
+      },
+      {
+        "id": "chatcmpl-5d1ff0d7d87a487e961decb41715a1b7",
+        "object": "chat.completion",
+        "created": 1789523300,
+        "model": "Qwen3.8-27B-oQ4e-mtp",
+        "choices": [
+          {
+            "index": 0,
+            "finish_reason": "length",
+            "message": {
+              "role": "assistant",
+              "content": "A compiler is a specialized software program that translates source code written in a high-level programming language (like C++, Java, or Rust) into machine code (binary instructions) that a computer\u2019s CPU can execute directly.\n\nThe process is complex and involves several distinct stages. Below is a detailed breakdown of how a compiler works, from input to output.\n\n---\n\n### **High-Level Overview**\nThe general pipeline of a compiler is:\n1. **Source Code** \u2192 **Preprocessing**\n2. **Preprocessed Code** \u2192 **Lexical Analysis (Tokenization)**\n3. **Tokens** \u2192 **Syntax Analysis (Parsing)**\n4. **Parse Tree** \u2192 **Semantic Analysis**\n5. **Annotated AST** \u2192 **Intermediate Representation (IR)**\n6."
+            }
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 21,
+          "completion_tokens": 160,
+          "total_tokens": 181,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          }
+        },
+        "mlx2": {
+          "request_id": "chatcmpl-5d1ff0d7d87a487e961decb41715a1b7",
+          "cache": "apcv2",
+          "cached_tokens": 0,
+          "profile": "qwen38-27b-apcv2-ordinary",
+          "qualification": "candidate",
+          "route_receipt": "candidate_validation",
+          "request_controls": {
+            "logprobs": false,
+            "top_logprobs": 0,
+            "logprob_semantics": null,
+            "thinking": false,
+            "sampling": {
+              "temperature": 0
+            },
+            "reasoning_effort": null,
+            "effort_semantics": "thinking_toggle",
+            "context_limit": 262144
+          },
+          "ordinary_compute_width": 4,
+          "mtp": null,
+          "speculation": null,
+          "prompt_tokens": 21,
+          "completion_tokens": 160,
+          "ttft_seconds": 0.42852241699984006,
+          "elapsed_seconds": 6.975998959000208
+        }
+      }
+    ]
+  },
+  "passed": true,
+  "shared_cohort_domain": {
+    "context_limit": 131072,
+    "requested_width": 2,
+    "completion_budget": 64,
+    "primed_separately": true
+  },
+  "quiescence": {
+    "passed": true,
+    "timed_out": false,
+    "timeout_seconds": 5.0,
+    "poll_interval_seconds": 0.05,
+    "attempts": 17,
+    "elapsed_seconds": 0.9865688340014458,
+    "samples": [
+      {
+        "elapsed_seconds": 0.0009078750008484349,
+        "inflight": 0,
+        "queue_depth": 0,
+        "active_cow_leases": 1
+      },
+      {
+        "elapsed_seconds": 0.05292179200114333,
+        "inflight": 0,
+        "queue_depth": 0,
+        "active_cow_leases": 1
+      },
+      {
+        "elapsed_seconds": 0.1142031670005963,
+        "inflight": 0,
+        "queue_depth": 0,
+        "active_cow_leases": 1
+      },
+      {
+        "elapsed_seconds": 0.16816645900144067,
+        "inflight": 0,
+        "queue_depth": 0,
+        "active_cow_leases": 1
+      },
+      {
+        "elapsed_seconds": 0.24341904200082354,
+        "inflight": 0,
+        "queue_depth": 0,
+        "active_cow_leases": 1
+      },
+      {
+        "elapsed_seconds": 0.3039749170002324,
+        "inflight": 0,
+        "queue_depth": 0,
+        "active_cow_leases": 1
+      },
+      {
+        "elapsed_seconds": 0.36654858400106605,
+        "inflight": 0,
+        "queue_depth": 0,
+        "active_cow_leases": 1
+      },
+      {
+        "elapsed_seconds": 0.42233137500079465,
+        "inflight": 0,
+        "queue_depth": 0,
+        "active_cow_leases": 1
+      },
+      {
+        "elapsed_seconds": 0.4776272090002749,
+        "inflight": 0,
+        "queue_depth": 0,
+        "active_cow_leases": 1
+      },
+      {
+        "elapsed_seconds": 0.5393560419997812,
+        "inflight": 0,
+        "queue_depth": 0,
+        "active_cow_leases": 1
+      },
+      {
+        "elapsed_seconds": 0.5980802920003043,
+        "inflight": 0,
+        "queue_depth": 0,
+        "active_cow_leases": 1
+      },
+      {
+        "elapsed_seconds": 0.6525853750008537,
+        "inflight": 0,
+        "queue_depth": 0,
+        "active_cow_leases": 1
+      },
+      {
+        "elapsed_seconds": 0.7141627500004688,
+        "inflight": 0,
+        "queue_depth": 0,
+        "active_cow_leases": 1
+      },
+      {
+        "elapsed_seconds": 0.7727974589997757,
+        "inflight": 0,
+        "queue_depth": 0,
+        "active_cow_leases": 1
+      },
+      {
+        "elapsed_seconds": 0.8357257500010746,
+        "inflight": 0,
+        "queue_depth": 0,
+        "active_cow_leases": 1
+      },
+      {
+        "elapsed_seconds": 0.8988070840005093,
+        "inflight": 0,
+        "queue_depth": 0,
+        "active_cow_leases": 1
+      },
+      {
+        "elapsed_seconds": 0.9865688340014458,
+        "inflight": 0,
+        "queue_depth": 0,
+        "active_cow_leases": 0
+      }
+    ]
+  },
+  "final_status": {
+    "state": "ready",
+    "model": "Qwen3.8-27B-oQ4e-mtp",
+    "runtime": {
+      "source_sha256": "af05e25c7d7b311070aedcbf50b3fbd93277240143a791d9d6079d5fdfb1e5fc",
+      "mlx_native_sha256": "30335939714520c3306cfa58597100aae08bbeabdc60a4bc8c35c32c607450a8",
+      "python": "3.12.13",
+      "macos": "26.7",
+      "mlx": "0.32.2.dev20260915+2a817ad94",
+      "transformers": "5.12.1",
+      "dependencies": {
+        "numpy": "2.5.1",
+        "tokenizers": "0.22.2",
+        "jinja2": "3.1.6",
+        "psutil": "7.2.2",
+        "regex": "2026.9.10",
+        "safetensors": "0.8.0"
+      }
+    },
+    "artifact": "fb827b658dc3d26ac569efacefd0466dbf41cc1a5cb5e3a40fc1c6175298810f",
+    "profile": "qwen38-27b-apcv2-ordinary",
+    "settings": {
+      "max_context": 262144,
+      "max_lanes": 20,
+      "max_inflight": 24,
+      "prefill_step": 2048,
+      "cache_bytes": 17179869184,
+      "disk_cache": true,
+      "mtp": false,
+      "environment": {
+        "HF_HUB_OFFLINE": "1",
+        "TRANSFORMERS_OFFLINE": "1",
+        "MLX_ENABLE_TF32": "0",
+        "MLX_GDN_PACKED": "1",
+        "MLX_GDN_CORE": "0",
+        "MLX_LM_COMPILED_DECODE": "0",
+        "MLX_LM_SEGMENTED_SELF_MTP": "1",
+        "MLX_LM_TRUE_BATCHED_SEGMENTED_MTP": "1",
+        "MLX_LM_SHARED_QSA_SUFFIX": "0"
+      },
+      "execution_policy": {
+        "persistent": true,
+        "num_draft": 2,
+        "rate_gate": false,
+        "prefill_step_size": 2048,
+        "segment_aware_live_tip": true,
+        "segment_aware_cohort_size": 20
+      },
+      "speculation": "ordinary",
+      "cache_budget": {
+        "schema": "qwen38-cache-geometry-v1",
+        "attention_layers": 16,
+        "recurrent_layers": 48,
+        "mtp_layers": 0,
+        "kv_heads": 4,
+        "head_dim": 256,
+        "recurrent_heads": 48,
+        "recurrent_key_heads": 16,
+        "recurrent_key_dim": 128,
+        "recurrent_value_dim": 128,
+        "conv_kernel": 4,
+        "item_bytes": 4,
+        "allocation_step": 256,
+        "transcript_bytes_per_token": 16,
+        "transient_gib_per_lane": 3.1,
+        "fixed_bytes": 314048512,
+        "bound": "fp32-capacity-plus-recurrent-rollback",
+        "warm_copy": "observed-complete-cache-plus-projected-growth",
+        "workspace": "dense-forward-transient-separate-from-cache"
+      }
+    },
+    "route_receipt": "candidate_validation",
+    "qualification": "candidate",
+    "max_context": 262144,
+    "max_lanes": 20,
+    "apcv2": {
+      "lookups": 30,
+      "hits": 15,
+      "misses": 15,
+      "cached_tokens": 590033,
+      "stores": 58,
+      "clears": 0,
+      "lifetime": {
+        "lookups": 30,
+        "hits": 15,
+        "misses": 15,
+        "cached_tokens": 590033,
+        "stores": 58
+      },
+      "cow_enabled": true,
+      "cow": {
+        "sources": 65,
+        "source_bytes": 216386895872,
+        "freeze_failures": 0,
+        "branches": 15,
+        "branch_failures": 0,
+        "stale_rejections": 0,
+        "invalidations": 60,
+        "active_leases": 0,
+        "peak_leases": 2,
+        "descriptor_aliases": 23584,
+        "descriptor_bytes": 274399690752,
+        "avoided_copy_bytes": 58012794880,
+        "materializations": 0,
+        "materialized_bytes": 0,
+        "fallback_deepcopies": 0,
+        "fallback_bytes": 0,
+        "freeze_ns": 342469544,
+        "branch_ns": 19594085,
+        "fallback_ns": 0,
+        "releases": 15,
+        "planes": {
+          "gdn_recurrent": {
+            "descriptor_aliases": 21024,
+            "descriptor_bytes": 33713750016,
+            "materializations": 0,
+            "materialized_bytes": 0
+          },
+          "attention_kv": {
+            "descriptor_aliases": 2560,
+            "descriptor_bytes": 240685940736,
+            "materializations": 0,
+            "materialized_bytes": 0
+          }
+        },
+        "materialized_bytes_are_estimated": true,
+        "array_readbacks": 0
+      },
+      "max_tokens": 262144,
+      "max_entry_tokens": 262115,
+      "overlength_rejections": 0,
+      "idle_disk": {
+        "enabled": true,
+        "idle_seconds": 180.0,
+        "resident_bytes": 10594549760,
+        "disk_bytes": 48056113039,
+        "disk_max_bytes": 68719476736,
+        "disk_entries": 12,
+        "idle_spills": 0,
+        "pressure_spills": 25,
+        "restores": 7,
+        "restore_failures": 0,
+        "spill_failures": 0,
+        "disk_evictions": 0,
+        "bytes_written": 104903745551,
+        "bytes_read": 73164260435
+      },
+      "version": 2,
+      "layout_name": "qwen38-27b-hybrid-layer-segments-v1",
+      "layer_segments": {
+        "schema": "apcv2.layer-segments.v1",
+        "entries": 5,
+        "disk_entries": 11,
+        "layers": 320,
+        "plane_layers": 320,
+        "segments": 336,
+        "logical_bytes": 10594549760,
+        "by_plane": {
+          "gdn_recurrent": {
+            "layers": 240,
+            "segments": 240,
+            "logical_bytes": 2001272832,
+            "invalid": 0
+          },
+          "attention_kv": {
+            "layers": 80,
+            "segments": 96,
+            "logical_bytes": 8593276928,
+            "invalid": 0
+          }
+        }
+      }
+    },
+    "scheduler": {
+      "prefill_rounds": 173,
+      "prefill_only_rounds": 172,
+      "decode_priority_release_rounds": 0,
+      "decode_priority_deferred_rounds": 0,
+      "adaptive_prefill_release_rounds": 1,
+      "adaptive_prefill_slack_deferred_rounds": 0,
+      "adaptive_prefill_deadline_forced_rounds": 0,
+      "adaptive_prefill_apc_priority_admissions": 0,
+      "adaptive_prefill_chunk_histogram": {
+        "20": 1
+      }
+    },
+    "metal_active_bytes": 79309588524,
+    "metal_peak_bytes": 105217568152,
+    "process_physical_footprint_bytes": 80211145008,
+    "execution": {
+      "architecture": "dense-hybrid-gdn-gqa",
+      "layout": "qwen38-27b-hybrid-layer-segments-v1",
+      "mtp_head_present": true,
+      "segmented_mtp": {
+        "requests": 0,
+        "engaged": 0,
+        "declined": 0,
+        "failures": 0,
+        "fallback_physical_b2": 0,
+        "physical_b2_formations": 0,
+        "b1_target_forwards": 0,
+        "b1_draft_forwards": 0,
+        "batched_target_forwards": 0,
+        "batched_draft_forwards": 0,
+        "true_batched_requests": 0,
+        "true_batched_engaged": 0,
+        "true_batched_declined": 0,
+        "live_width_change_deferrals": 0,
+        "layer_local_materializations": 0,
+        "recurrent_state_materializations": 0,
+        "recurrent_state_materialized_bytes": 0,
+        "row_state_splits": 0,
+        "segmented_attention_calls": 0,
+        "private_delta_requests": 0,
+        "private_delta_declines": 0,
+        "private_delta_preflight_declines": 0,
+        "private_delta_late_gather_fallbacks": 0,
+        "private_delta_attention_calls": 0,
+        "private_delta_rows": 0,
+        "private_delta_base_tokens_cumulative": 0,
+        "private_delta_base_tokens_last": 0,
+        "private_delta_base_tokens_min": 0,
+        "private_delta_base_tokens_max": 0,
+        "private_delta_duplicate_base_storage_bytes_not_formed_cumulative": 0,
+        "shared_qsa_rows": 0,
+        "shared_qsa_base_bytes": 0,
+        "shared_qsa_private_bytes": 0,
+        "shared_qsa_materializations": 0,
+        "shared_qsa_materialized_bytes": 0,
+        "shared_qsa_batched_selections": 0,
+        "shared_qsa_policy_checks": 0,
+        "shared_qsa_policy_admitted": 0,
+        "shared_qsa_policy_declined": 0,
+        "shared_qsa_policy_context_tokens_cumulative": 0,
+        "shared_qsa_policy_remaining_tokens_cumulative": 0,
+        "shared_qsa_policy_cutoff_tokens_cumulative": 0,
+        "exact_set_fold_requests": 0,
+        "exact_set_fold_declines": 0,
+        "exact_set_fold_preflight_declines": 0,
+        "exact_set_fold_private_fallbacks": 0,
+        "exact_set_fold_attention_calls": 0,
+        "exact_set_fold_rows": 0,
+        "exact_set_fold_device_proofs": 0,
+        "independent_lineages_consumed": 0,
+        "full_prefix_materializations": 0,
+        "full_prefix_materialized_bytes": 0,
+        "transaction_branches": 0,
+        "transaction_promotions": 0,
+        "transaction_rejections": 0,
+        "transaction_canonicalizations": 0,
+        "committed_cycles": 0,
+        "accepted_zero": 0,
+        "accepted_partial": 0,
+        "accepted_all": 0,
+        "async_qsa_promotion_requests": 0,
+        "async_qsa_promotion_queued": 0,
+        "async_qsa_promotion_engaged": 0,
+        "async_qsa_promotion_declined": 0,
+        "async_qsa_promotion_declined_shared_suffix": 0,
+        "async_qsa_promotion_declined_memory": 0,
+        "async_qsa_admission_settled": 0,
+        "async_qsa_promotion_failures": 0,
+        "async_qsa_promotion_reserved_bytes": 0,
+        "async_qsa_promotion_patched_bytes": 0,
+        "async_qsa_promotion_wait_ns": 0,
+        "async_qsa_prequeue_requests": 0,
+        "async_qsa_prequeue_queued": 0,
+        "async_qsa_prequeue_bound": 0,
+        "async_qsa_prequeue_declined": 0,
+        "async_qsa_shared_prefix_fused_layers": 0,
+        "async_qsa_budget_checks": 0,
+        "async_qsa_budget_retained_segmented": 0,
+        "async_qsa_budget_promotions": 0,
+        "async_qsa_budget_remaining_tokens_cumulative": 0,
+        "async_qsa_budget_cutoff_tokens_cumulative": 0,
+        "device_synchronizations": 0,
+        "proposal_ns": 0,
+        "commit_ns": 0,
+        "private_delta_width_1_requests": 0,
+        "private_delta_width_1_engaged": 0,
+        "private_delta_width_1_declined": 0,
+        "private_delta_width_2_requests": 0,
+        "private_delta_width_2_engaged": 0,
+        "private_delta_width_2_declined": 0,
+        "private_delta_width_3_requests": 0,
+        "private_delta_width_3_engaged": 0,
+        "private_delta_width_3_declined": 0,
+        "private_delta_width_4_requests": 0,
+        "private_delta_width_4_engaged": 0,
+        "private_delta_width_4_declined": 0,
+        "private_delta_width_5_requests": 0,
+        "private_delta_width_5_engaged": 0,
+        "private_delta_width_5_declined": 0,
+        "private_delta_width_6_requests": 0,
+        "private_delta_width_6_engaged": 0,
+        "private_delta_width_6_declined": 0,
+        "private_delta_width_7_requests": 0,
+        "private_delta_width_7_engaged": 0,
+        "private_delta_width_7_declined": 0,
+        "private_delta_width_8_requests": 0,
+        "private_delta_width_8_engaged": 0,
+        "private_delta_width_8_declined": 0,
+        "private_delta_width_9_requests": 0,
+        "private_delta_width_9_engaged": 0,
+        "private_delta_width_9_declined": 0,
+        "private_delta_width_other_requests": 0,
+        "private_delta_width_other_engaged": 0,
+        "private_delta_width_other_declined": 0,
+        "private_delta_decline_reasons": {},
+        "exact_set_fold_decline_reasons": {},
+        "environment_enabled": true,
+        "true_batched_environment_enabled": true,
+        "qsa_private_delta_environment_enabled": true,
+        "qsa_exact_set_fold_environment_enabled": true,
+        "shared_qsa_suffix_mode": "off",
+        "shared_qsa_suffix_environment_enabled": false,
+        "async_qsa_promotion_environment_enabled": false,
+        "timing_enabled": false,
+        "counter_scope": "segmented_mechanism_only",
+        "array_readbacks": 0
+      }
+    },
+    "admission": {},
+    "memory_waiting": 0,
+    "headroom_bytes": 39384023040,
+    "healthy": true,
+    "error": null,
+    "inflight": 0,
+    "queue_depth": 0,
+    "counts": {
+      "admitted": 30,
+      "cycles": 1114,
+      "multi_request_cycles": 294,
+      "completed": 29,
+      "cancelled": 1
+    },
+    "recent_receipts": [
+      {
+        "request_id": "chatcmpl-a2519de956f044eb8a0b3b2035d1af19",
+        "cache": "apcv2",
+        "cached_tokens": 0,
+        "profile": "qwen38-27b-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": false,
+          "top_logprobs": 0,
+          "logprob_semantics": null,
+          "thinking": false,
+          "sampling": {
+            "temperature": 0
+          },
+          "reasoning_effort": "none",
+          "effort_semantics": "thinking_toggle",
+          "context_limit": 262144
+        },
+        "ordinary_compute_width": 1,
+        "mtp": null,
+        "speculation": null,
+        "prompt_tokens": 18,
+        "completion_tokens": 4,
+        "ttft_seconds": 0.34817470900088665,
+        "elapsed_seconds": 0.45233870900119655
+      },
+      {
+        "request_id": "chatcmpl-b419043290a54b54a7317bc4268566cb",
+        "cache": "apcv2",
+        "cached_tokens": 0,
+        "profile": "qwen38-27b-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": false,
+          "top_logprobs": 0,
+          "logprob_semantics": null,
+          "thinking": false,
+          "sampling": {
+            "temperature": 0
+          },
+          "reasoning_effort": null,
+          "effort_semantics": "thinking_toggle",
+          "context_limit": 262144
+        },
+        "ordinary_compute_width": 1,
+        "mtp": null,
+        "speculation": null,
+        "prompt_tokens": 19,
+        "completion_tokens": 8,
+        "ttft_seconds": 0.16692695900019316,
+        "elapsed_seconds": 0.4025729170007253
+      },
+      {
+        "request_id": "chatcmpl-1c2bb658de074f649e85b64a722596ad",
+        "cache": "apcv2",
+        "cached_tokens": 18,
+        "profile": "qwen38-27b-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": true,
+          "top_logprobs": 3,
+          "logprob_semantics": "execution_target: ordinary=post_processor_pre_sampler; mtp=transformed_target_verifier",
+          "thinking": false,
+          "sampling": {
+            "temperature": 0
+          },
+          "reasoning_effort": null,
+          "effort_semantics": "thinking_toggle",
+          "context_limit": 262144
+        },
+        "ordinary_compute_width": 1,
+        "mtp": null,
+        "speculation": null,
+        "prompt_tokens": 19,
+        "completion_tokens": 8,
+        "ttft_seconds": 0.08816141699935542,
+        "elapsed_seconds": 0.32368783299898496
+      },
+      {
+        "request_id": "chatcmpl-f8687e985317437c9e008815b8fb05fe",
+        "cache": "apcv2",
+        "cached_tokens": 18,
+        "profile": "qwen38-27b-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": true,
+          "top_logprobs": 3,
+          "logprob_semantics": "execution_target: ordinary=post_processor_pre_sampler; mtp=transformed_target_verifier",
+          "thinking": false,
+          "sampling": {
+            "temperature": 0
+          },
+          "reasoning_effort": null,
+          "effort_semantics": "thinking_toggle",
+          "context_limit": 262144
+        },
+        "ordinary_compute_width": 1,
+        "mtp": null,
+        "speculation": null,
+        "prompt_tokens": 19,
+        "completion_tokens": 8,
+        "ttft_seconds": 0.08823375000065425,
+        "elapsed_seconds": 0.3242597080006817
+      },
+      {
+        "request_id": "chatcmpl-3b0c18bd36cf46798015206f81ba1b3c",
+        "cache": "apcv2",
+        "cached_tokens": 0,
+        "profile": "qwen38-27b-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": false,
+          "top_logprobs": 0,
+          "logprob_semantics": null,
+          "thinking": false,
+          "sampling": {
+            "temperature": 0.7,
+            "top_p": 0.9,
+            "top_k": 24,
+            "min_p": 0.05,
+            "repetition_penalty": 1.05,
+            "presence_penalty": 0.1,
+            "frequency_penalty": 0.1,
+            "seed": 237
+          },
+          "reasoning_effort": null,
+          "effort_semantics": "thinking_toggle",
+          "context_limit": 262144
+        },
+        "ordinary_compute_width": 1,
+        "mtp": null,
+        "speculation": null,
+        "prompt_tokens": 16,
+        "completion_tokens": 18,
+        "ttft_seconds": 0.18404758299948298,
+        "elapsed_seconds": 0.7461858749993553
+      },
+      {
+        "request_id": "chatcmpl-d729117cc09f4f64a488b9a770e24f33",
+        "cache": "apcv2",
+        "cached_tokens": 15,
+        "profile": "qwen38-27b-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": false,
+          "top_logprobs": 0,
+          "logprob_semantics": null,
+          "thinking": false,
+          "sampling": {
+            "temperature": 0.7,
+            "top_p": 0.9,
+            "top_k": 24,
+            "min_p": 0.05,
+            "repetition_penalty": 1.05,
+            "presence_penalty": 0.1,
+            "frequency_penalty": 0.1,
+            "seed": 237
+          },
+          "reasoning_effort": null,
+          "effort_semantics": "thinking_toggle",
+          "context_limit": 262144
+        },
+        "ordinary_compute_width": 1,
+        "mtp": null,
+        "speculation": null,
+        "prompt_tokens": 16,
+        "completion_tokens": 18,
+        "ttft_seconds": 0.09002920799866843,
+        "elapsed_seconds": 0.6517633329985983
+      },
+      {
+        "request_id": "chatcmpl-89533b3be0bc4ce5b2cc288555f14f9f",
+        "cache": "apcv2",
+        "cached_tokens": 0,
+        "profile": "qwen38-27b-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": false,
+          "top_logprobs": 0,
+          "logprob_semantics": null,
+          "thinking": false,
+          "sampling": {
+            "temperature": 0
+          },
+          "reasoning_effort": null,
+          "effort_semantics": "thinking_toggle",
+          "context_limit": 262144
+        },
+        "ordinary_compute_width": 1,
+        "mtp": null,
+        "speculation": null,
+        "prompt_tokens": 19,
+        "completion_tokens": 5,
+        "ttft_seconds": 0.1620000409984641,
+        "elapsed_seconds": 0.300485124998886
+      },
+      {
+        "request_id": "chatcmpl-102b376d48ba4010ba52fc79a7514e25",
+        "cache": "apcv2",
+        "cached_tokens": 18,
+        "profile": "qwen38-27b-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": false,
+          "top_logprobs": 0,
+          "logprob_semantics": null,
+          "thinking": false,
+          "sampling": {
+            "temperature": 0
+          },
+          "reasoning_effort": null,
+          "effort_semantics": "thinking_toggle",
+          "context_limit": 262144
+        },
+        "ordinary_compute_width": 1,
+        "mtp": null,
+        "speculation": null,
+        "prompt_tokens": 19,
+        "completion_tokens": 5,
+        "ttft_seconds": 0.09020358300040243,
+        "elapsed_seconds": 0.24289104099989345
+      },
+      {
+        "request_id": "chatcmpl-2b46a7ffa6ba4e94800144dcf8b5bef4",
+        "cache": "apcv2",
+        "cached_tokens": 18,
+        "profile": "qwen38-27b-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": false,
+          "top_logprobs": 0,
+          "logprob_semantics": null,
+          "thinking": false,
+          "sampling": {
+            "temperature": 0
+          },
+          "reasoning_effort": null,
+          "effort_semantics": "thinking_toggle",
+          "context_limit": 262144
+        },
+        "ordinary_compute_width": 1,
+        "mtp": null,
+        "speculation": null,
+        "prompt_tokens": 19,
+        "completion_tokens": 5,
+        "ttft_seconds": 0.088823833000788,
+        "elapsed_seconds": 0.22754650000024412
+      },
+      {
+        "request_id": "chatcmpl-4221860018814260b75355aa25773325",
+        "cache": "apcv2",
+        "cached_tokens": 0,
+        "profile": "qwen38-27b-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": false,
+          "top_logprobs": 0,
+          "logprob_semantics": null,
+          "thinking": false,
+          "sampling": {
+            "temperature": 0
+          },
+          "reasoning_effort": null,
+          "effort_semantics": "thinking_toggle",
+          "context_limit": 262144
+        },
+        "ordinary_compute_width": 1,
+        "mtp": null,
+        "speculation": null,
+        "prompt_tokens": 279,
+        "completion_tokens": 26,
+        "ttft_seconds": 0.43516162500054634,
+        "elapsed_seconds": 1.2473405420005292
+      },
+      {
+        "request_id": "chatcmpl-ec17f7aed5354857980a500b863f3e8c",
+        "cache": "apcv2",
+        "cached_tokens": 305,
+        "profile": "qwen38-27b-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": false,
+          "top_logprobs": 0,
+          "logprob_semantics": null,
+          "thinking": false,
+          "sampling": {
+            "temperature": 0
+          },
+          "reasoning_effort": null,
+          "effort_semantics": "thinking_toggle",
+          "context_limit": 262144
+        },
+        "ordinary_compute_width": 1,
+        "mtp": null,
+        "speculation": null,
+        "prompt_tokens": 337,
+        "completion_tokens": 33,
+        "ttft_seconds": 0.1953010830002313,
+        "elapsed_seconds": 1.230259207999552
+      },
+      {
+        "request_id": "chatcmpl-7d19c7e5eabf419caa0c980379396af3",
+        "cache": "apcv2",
+        "cached_tokens": 0,
+        "profile": "qwen38-27b-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": false,
+          "top_logprobs": 0,
+          "logprob_semantics": null,
+          "thinking": true,
+          "sampling": {
+            "temperature": 0
+          },
+          "reasoning_effort": null,
+          "effort_semantics": "thinking_toggle",
+          "context_limit": 262144
+        },
+        "ordinary_compute_width": 1,
+        "mtp": null,
+        "speculation": null,
+        "prompt_tokens": 62,
+        "completion_tokens": 28,
+        "ttft_seconds": 0.1855302500007383,
+        "elapsed_seconds": 1.0605084580001858
+      },
+      {
+        "request_id": "chatcmpl-dd538ef5dcb84ac0aa644542b908d3d1",
+        "cache": "apcv2",
+        "cached_tokens": 18,
+        "profile": "qwen38-27b-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": false,
+          "top_logprobs": 0,
+          "logprob_semantics": null,
+          "thinking": false,
+          "sampling": {
+            "temperature": 0
+          },
+          "reasoning_effort": null,
+          "effort_semantics": "thinking_toggle",
+          "context_limit": 262144
+        },
+        "ordinary_compute_width": 1,
+        "mtp": null,
+        "speculation": null,
+        "prompt_tokens": 19,
+        "completion_tokens": 4,
+        "ttft_seconds": 0.09008662500127684,
+        "elapsed_seconds": 0.1860660000002099
+      },
+      {
+        "request_id": "chatcmpl-f68af41e2e734c668c527561d65b2877",
+        "cache": "apcv2",
+        "cached_tokens": 0,
+        "profile": "qwen38-27b-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": false,
+          "top_logprobs": 0,
+          "logprob_semantics": null,
+          "thinking": false,
+          "sampling": {
+            "temperature": 0.7,
+            "seed": 123
+          },
+          "reasoning_effort": null,
+          "effort_semantics": "thinking_toggle",
+          "context_limit": 262144
+        },
+        "ordinary_compute_width": 1,
+        "mtp": null,
+        "speculation": null,
+        "prompt_tokens": 19,
+        "completion_tokens": 64,
+        "ttft_seconds": 0.16578083399872412,
+        "elapsed_seconds": 2.225135999999111
+      },
+      {
+        "request_id": "chatcmpl-03ab3271943b4a8b8fcc9436c2e92e59",
+        "cache": "apcv2",
+        "cached_tokens": 18,
+        "profile": "qwen38-27b-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": false,
+          "top_logprobs": 0,
+          "logprob_semantics": null,
+          "thinking": false,
+          "sampling": {
+            "temperature": 0.7,
+            "seed": 123
+          },
+          "reasoning_effort": null,
+          "effort_semantics": "thinking_toggle",
+          "context_limit": 262144
+        },
+        "ordinary_compute_width": 1,
+        "mtp": null,
+        "speculation": null,
+        "prompt_tokens": 19,
+        "completion_tokens": 64,
+        "ttft_seconds": 0.09078574999875855,
+        "elapsed_seconds": 2.151570999998512
+      },
+      {
+        "request_id": "chatcmpl-ea736aa00d0f4049a58055a8813f0896",
+        "cache": "apcv2",
+        "cached_tokens": 0,
+        "profile": "qwen38-27b-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": false,
+          "top_logprobs": 0,
+          "logprob_semantics": null,
+          "thinking": false,
+          "sampling": {
+            "temperature": 0
+          },
+          "reasoning_effort": null,
+          "effort_semantics": "thinking_toggle",
+          "context_limit": 262144
+        },
+        "ordinary_compute_width": 4,
+        "mtp": null,
+        "speculation": null,
+        "prompt_tokens": 21,
+        "completion_tokens": 160,
+        "ttft_seconds": 0.30164666599921475,
+        "elapsed_seconds": 6.888900040999943
+      },
+      {
+        "request_id": "chatcmpl-bd97b266898846e89271da86a5b62682",
+        "cache": "apcv2",
+        "cached_tokens": 0,
+        "profile": "qwen38-27b-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": false,
+          "top_logprobs": 0,
+          "logprob_semantics": null,
+          "thinking": false,
+          "sampling": {
+            "temperature": 0
+          },
+          "reasoning_effort": null,
+          "effort_semantics": "thinking_toggle",
+          "context_limit": 262144
+        },
+        "ordinary_compute_width": 4,
+        "mtp": null,
+        "speculation": null,
+        "prompt_tokens": 21,
+        "completion_tokens": 160,
+        "ttft_seconds": 0.30113566600084596,
+        "elapsed_seconds": 6.8915940830011095
+      },
+      {
+        "request_id": "chatcmpl-5d1ff0d7d87a487e961decb41715a1b7",
+        "cache": "apcv2",
+        "cached_tokens": 0,
+        "profile": "qwen38-27b-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": false,
+          "top_logprobs": 0,
+          "logprob_semantics": null,
+          "thinking": false,
+          "sampling": {
+            "temperature": 0
+          },
+          "reasoning_effort": null,
+          "effort_semantics": "thinking_toggle",
+          "context_limit": 262144
+        },
+        "ordinary_compute_width": 4,
+        "mtp": null,
+        "speculation": null,
+        "prompt_tokens": 21,
+        "completion_tokens": 160,
+        "ttft_seconds": 0.42852241699984006,
+        "elapsed_seconds": 6.975998959000208
+      },
+      {
+        "request_id": "chatcmpl-a27685a621dd4bcb965023200102c5f7",
+        "cache": "apcv2",
+        "cached_tokens": 0,
+        "profile": "qwen38-27b-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": false,
+          "top_logprobs": 0,
+          "logprob_semantics": null,
+          "thinking": false,
+          "sampling": {
+            "temperature": 0
+          },
+          "reasoning_effort": null,
+          "effort_semantics": "thinking_toggle",
+          "context_limit": 262144
+        },
+        "ordinary_compute_width": 4,
+        "mtp": null,
+        "speculation": null,
+        "prompt_tokens": 21,
+        "completion_tokens": 160,
+        "ttft_seconds": 0.42813495900009,
+        "elapsed_seconds": 6.978915792000407
+      },
+      {
+        "request_id": "chatcmpl-835e9c4ef02941dab07615d0a140b307",
+        "cache": "apcv2",
+        "cached_tokens": 0,
+        "profile": "qwen38-27b-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": false,
+          "top_logprobs": 0,
+          "logprob_semantics": null,
+          "thinking": false,
+          "sampling": {
+            "temperature": 0
+          },
+          "reasoning_effort": null,
+          "effort_semantics": "thinking_toggle",
+          "context_limit": 262144
+        },
+        "ordinary_compute_width": 1,
+        "mtp": null,
+        "speculation": null,
+        "prompt_tokens": 23,
+        "completion_tokens": 64,
+        "ttft_seconds": 0.1764978750015871,
+        "elapsed_seconds": 2.207812417000241
+      },
+      {
+        "request_id": "chatcmpl-0888820095284b4581fed01ff3e06c77",
+        "cache": "apcv2",
+        "cached_tokens": 0,
+        "profile": "qwen38-27b-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": false,
+          "top_logprobs": 0,
+          "logprob_semantics": null,
+          "thinking": false,
+          "sampling": {
+            "temperature": 0
+          },
+          "reasoning_effort": null,
+          "effort_semantics": "thinking_toggle",
+          "context_limit": 262144
+        },
+        "ordinary_compute_width": 1,
+        "mtp": null,
+        "speculation": null,
+        "prompt_tokens": 24,
+        "completion_tokens": 64,
+        "ttft_seconds": 0.16849783300131094,
+        "elapsed_seconds": 2.1968150829998194
+      },
+      {
+        "request_id": "chatcmpl-648bfea3efac4492b01e3d3459f8894d",
+        "cache": "apcv2",
+        "cached_tokens": 22,
+        "profile": "qwen38-27b-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": false,
+          "top_logprobs": 0,
+          "logprob_semantics": null,
+          "thinking": false,
+          "sampling": {
+            "temperature": 0
+          },
+          "reasoning_effort": null,
+          "effort_semantics": "thinking_toggle",
+          "context_limit": 262144
+        },
+        "ordinary_compute_width": 2,
+        "mtp": null,
+        "speculation": null,
+        "prompt_tokens": 23,
+        "completion_tokens": 64,
+        "ttft_seconds": 0.10218999999960943,
+        "elapsed_seconds": 2.2155411250005272
+      },
+      {
+        "request_id": "chatcmpl-1811997c98784e6f98ad42859dded666",
+        "cache": "apcv2",
+        "cached_tokens": 23,
+        "profile": "qwen38-27b-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": false,
+          "top_logprobs": 0,
+          "logprob_semantics": null,
+          "thinking": false,
+          "sampling": {
+            "temperature": 0
+          },
+          "reasoning_effort": null,
+          "effort_semantics": "thinking_toggle",
+          "context_limit": 262144
+        },
+        "ordinary_compute_width": 2,
+        "mtp": null,
+        "speculation": null,
+        "prompt_tokens": 24,
+        "completion_tokens": 64,
+        "ttft_seconds": 0.1004773339991516,
+        "elapsed_seconds": 2.2172383749984874
+      },
+      {
+        "request_id": "chatcmpl-1a2fef063ccf4c8083b9c648ac2c4de7",
+        "cache": "apcv2",
+        "cached_tokens": 0,
+        "profile": "qwen38-27b-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": false,
+          "top_logprobs": 0,
+          "logprob_semantics": null,
+          "thinking": false,
+          "sampling": {
+            "temperature": 0
+          },
+          "reasoning_effort": null,
+          "effort_semantics": "thinking_toggle",
+          "context_limit": 262144
+        },
+        "ordinary_compute_width": 1,
+        "mtp": null,
+        "speculation": null,
+        "prompt_tokens": 262051,
+        "completion_tokens": 64,
+        "ttft_seconds": 954.9046062079997,
+        "elapsed_seconds": 961.7665928750012
+      },
+      {
+        "request_id": "chatcmpl-553f8101297c4ccdae4add537aee8e4a",
+        "cache": "apcv2",
+        "cached_tokens": 262050,
+        "profile": "qwen38-27b-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": false,
+          "top_logprobs": 0,
+          "logprob_semantics": null,
+          "thinking": false,
+          "sampling": {
+            "temperature": 0
+          },
+          "reasoning_effort": null,
+          "effort_semantics": "thinking_toggle",
+          "context_limit": 262144
+        },
+        "ordinary_compute_width": 1,
+        "mtp": null,
+        "speculation": null,
+        "prompt_tokens": 262051,
+        "completion_tokens": 64,
+        "ttft_seconds": 8.254543749999357,
+        "elapsed_seconds": 16.345414833000177
+      },
+      {
+        "request_id": "chatcmpl-66f9289037a84c67ac9bb7e2c9a23ff8",
+        "cache": "apcv2",
+        "cached_tokens": 65536,
+        "profile": "qwen38-27b-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": false,
+          "top_logprobs": 0,
+          "logprob_semantics": null,
+          "thinking": false,
+          "sampling": {
+            "temperature": 0
+          },
+          "reasoning_effort": null,
+          "effort_semantics": "thinking_toggle",
+          "context_limit": 262144
+        },
+        "ordinary_compute_width": 1,
+        "mtp": null,
+        "speculation": null,
+        "prompt_tokens": 130979,
+        "completion_tokens": 64,
+        "ttft_seconds": 198.75584537500072,
+        "elapsed_seconds": 203.68243741600054
+      },
+      {
+        "request_id": "chatcmpl-0657e895e70b4aa684a24643086449f2",
+        "cache": "apcv2",
+        "cached_tokens": 130978,
+        "profile": "qwen38-27b-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": false,
+          "top_logprobs": 0,
+          "logprob_semantics": null,
+          "thinking": false,
+          "sampling": {
+            "temperature": 0
+          },
+          "reasoning_effort": null,
+          "effort_semantics": "thinking_toggle",
+          "context_limit": 262144
+        },
+        "ordinary_compute_width": 2,
+        "mtp": null,
+        "speculation": null,
+        "prompt_tokens": 130979,
+        "completion_tokens": 64,
+        "ttft_seconds": 3.92824895800004,
+        "elapsed_seconds": 9.937647249998918
+      },
+      {
+        "request_id": "chatcmpl-64ee021b291b47178b5705dc95065a98",
+        "cache": "apcv2",
+        "cached_tokens": 130978,
+        "profile": "qwen38-27b-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": false,
+          "top_logprobs": 0,
+          "logprob_semantics": null,
+          "thinking": false,
+          "sampling": {
+            "temperature": 0
+          },
+          "reasoning_effort": null,
+          "effort_semantics": "thinking_toggle",
+          "context_limit": 262144
+        },
+        "ordinary_compute_width": 2,
+        "mtp": null,
+        "speculation": null,
+        "prompt_tokens": 130979,
+        "completion_tokens": 64,
+        "ttft_seconds": 2.0858823340004164,
+        "elapsed_seconds": 8.14574116699987
+      },
+      {
+        "request_id": "chatcmpl-7e6744d8cf524f45b86576ef64a3ed2f",
+        "cache": "apcv2",
+        "cached_tokens": 18,
+        "profile": "qwen38-27b-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": false,
+          "top_logprobs": 0,
+          "logprob_semantics": null,
+          "thinking": false,
+          "sampling": {
+            "temperature": 0
+          },
+          "reasoning_effort": null,
+          "effort_semantics": "thinking_toggle",
+          "context_limit": 262144
+        },
+        "ordinary_compute_width": 1,
+        "mtp": null,
+        "speculation": null,
+        "prompt_tokens": 19,
+        "completion_tokens": 5,
+        "ttft_seconds": 0.1433939590006048,
+        "elapsed_seconds": 0.3403939590007212
+      }
+    ]
+  },
+  "feature_observations": {
+    "indexed_fused_merge": 0,
+    "indexed_output_gate": 0,
+    "shared_qsa": 0,
+    "async_promotion": 0,
+    "indexed_qsa": 0,
+    "private_delta": 0,
+    "known_tail_prefetch": 0,
+    "file_backed_ple": 0,
+    "compiled_ple": 0,
+    "pooled_qsa": 0,
+    "scatter_qsa": 0,
+    "fused_gdn_decode": 0,
+    "fused_gdn_verify": 0,
+    "eager_dispatch": 0,
+    "fused_moe": 0,
+    "external_draft": 0,
+    "proposal_distribution": 0,
+    "paired_draft_cache": 0,
+    "segmented_transaction": 0,
+    "segmented_rollback": 0
+  }
+}

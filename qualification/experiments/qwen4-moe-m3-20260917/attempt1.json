@@ -1,0 +1,82 @@
+{
+  "arms": {
+    "candidate": "M=3 Metal router + tile4 q4 down/weight/reduce kernel",
+    "stock": "precise softmax + argpartition + gather_qmm + weighted sum"
+  },
+  "engagement": {
+    "candidate_down_calls": 16,
+    "candidate_router_calls": 16,
+    "passed": true
+  },
+  "engagement_gate": [
+    "candidate_router_calls > 0",
+    "candidate_down_calls > 0"
+  ],
+  "geometry": {
+    "expert_hidden_size": 640,
+    "hidden_size": 2560,
+    "num_experts": 512,
+    "quantization": "affine-q4-group64",
+    "top_k": 10
+  },
+  "parameters": {
+    "order": "counterbalanced",
+    "rounds": 12,
+    "seed": 17,
+    "warmups": 3
+  },
+  "parity": {
+    "indices_equal": true,
+    "output_atol": 0.0078125,
+    "output_max_abs": 0.005859375,
+    "passed": true,
+    "router_score_atol": 0.0078125,
+    "router_score_max_abs": 0.0
+  },
+  "passed": true,
+  "qualification": "A passing microbenchmark is evidence, not route qualification.",
+  "schema": "mlx2.qwen4-moe-m3-candidate-benchmark.v1",
+  "status": "implemented_candidate_unqualified",
+  "timing": {
+    "candidate": {
+      "max_ms": 1.087083,
+      "median_ms": 0.5359585,
+      "min_ms": 0.471208,
+      "samples_ms": [
+        0.478,
+        0.471208,
+        1.087083,
+        0.99375,
+        0.604209,
+        0.53625,
+        0.535667,
+        1.04425,
+        0.476958,
+        0.998708,
+        0.525334,
+        0.472625
+      ],
+      "speedup_vs_stock": 0.8056043518294793
+    },
+    "stock": {
+      "max_ms": 1.139791,
+      "median_ms": 0.4317705,
+      "min_ms": 0.377208,
+      "samples_ms": [
+        0.409792,
+        1.05775,
+        1.133542,
+        0.896833,
+        1.139791,
+        0.450583,
+        0.501834,
+        0.400708,
+        0.412958,
+        0.377208,
+        0.392541,
+        0.398916
+      ]
+    }
+  },
+  "token_width": 3
+}

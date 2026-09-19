@@ -1,0 +1,8 @@
+PASS long_prompt_compacted {"codes": [200, 200], "receipts": [{"schema": "mlx2.spomin-live-surgery.v1", "request_id": "chatcmpl-5c14b33fa4bd478c8e7707ac59d3272c", "status": "applied", "reason": "committed", "source_tokens": 13277, "target_tokens": 10205, "strategy": "oldest_contiguous", "epoch": 1, "selected": true, "source_transcript_digest": "85a14795b797579484d20709797547cfb3fb57ac12ce131a24cec50236c72e91", "retained_tokens": 10205, "retained_token_digest": "5964c5c47e7152b5cbaf33a26bde2ac89ebf8831385b00e4ee55a2c8f0978
+PASS compacted_state_never_published {"cached_tokens": [0, 0], "skipped": 4}
+PASS protected_prefix_recall {"answer": "The vault code is \"ALPHA-7319\". but the user asks for", "recalled": true, "receipt": "applied"}
+PASS short_prompt_stays_exact {"receipt": {"request_id": "chatcmpl-e2145deaba704bf2ba252f1cadf8558c", "status": "declined", "reason": "below_pressure"}, "warm_cached_tokens": 122, "answer": "SHORT_OK"}
+FAIL compacted_lane_batches_with_exact_lanes {"codes": [200, 200, 200], "answers": ["Lisbon", "One, two, three, four, five, six, seven, eight, nine, ten.", "The user asks: \"Name three primary colors.\"\n\nWe need to answ"], "widths": [3, 3, 3], "receipt": "declined", "errors": [null, null, null]}
+FAIL manager_status {"counts": {"applied": 3, "reason:committed": 3, "declined": 5, "reason:below_pressure": 1, "reason:shared_apcv2_state": 4}, "active_epochs": 0}
+PASS server_alive_final {"inflight": 0, "error": null}
+SUMMARY 5/7

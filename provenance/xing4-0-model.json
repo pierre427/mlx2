@@ -1,0 +1,68 @@
+{
+  "source_repository": "~/Desktop/mlx-uag/mlx-lm-unified",
+  "source_revision": "13eb83388750435bcc751d0b9e33857a38152544",
+  "license": "MIT",
+  "license_source": "LICENSE",
+  "notice": "provenance/xing4-0-model.NOTICE",
+  "source_files": {
+    "mlx_lm/models/deepseek_v3.py": {"sha256": "caa60f3db0403d0f0822ead3227eb39f437a515a2fd2d616741089ab4c0df12c"},
+    "mlx_lm/models/mla.py": {"sha256": "f86f51a5507cd4f7950faa7c5555c516e85b33dfcce028bd9ee92da63735a688"}
+  },
+  "reference_sources": {
+    "origin": "Hugging Face Xing4.0-29B-A4B repository files (model card license apache-2.0), fetched 2026-09-18; used as the numerical reference, not copied",
+    "license": "Apache-2.0",
+    "files": {
+      "modeling_xing4_0.py": {"sha256": "51341dbd177ebd0181d338924356f2de72848c409580c0e3080d87ee70935cef"},
+      "configuration_xing4_0.py": {"sha256": "8012e9b83bad20b95f7815ddd458c7e721509285fd76b7fef38dd4adaef618c7"}
+    },
+    "secondary_evidence": {
+      "vllm PR 57135 vllm_xing4_0.py": {"sha256": "6ef10b98f1e0ab770389a892019aa58252eceff1e09d66e8e92c094dd51b9a82"},
+      "sglang PR 39793 sgl_xing4_0.py": {"sha256": "c98004f89c1acb93b5714c9e4d02701f81e93185d0cc7c96cbd1785f8f3763a4"}
+    }
+  },
+  "destination": "src/mlx2/runtime/models/xing4_0.py",
+  "mined_symbols": [
+    "DeepseekV3Attention -> Xing4_0Attention",
+    "DeepseekV3MLP -> Xing4_0MLP",
+    "MoEGate/group_expert_select -> MoEGate/router_select",
+    "DeepseekV3MoE -> Xing4_0MoE",
+    "Model.sanitize expert stacking and kv_b_proj folding",
+    "mla.MultiLinear, mla.QuantizedMultiLinear, mla.absorbed_max_query, mla.use_absorbed_path"
+  ],
+  "modifications": [
+    "Replaced the single residual with hc_mult mHC streams per the HF reference: fp32 unweighted RMSNorm + hc_fn projection, sigmoid pre, 2*sigmoid post, clamp(+-30) comb logits, 20 Sinkhorn row-then-column iterations with eps 1e-6, comb @ H in HF orientation (no vLLM transpose, no hc_pre_eps)",
+    "Added an mx.compile(shapeless) mHC coefficient/collapse span and stream-update span with an uncompiled reference path, fail-closed demotion and call counters",
+    "Router follows HF Xing4_0TopkRouter: fp32 logits, no group-limited selection, /(sum+1e-20) normalisation even at top_k=1",
+    "MoE iff layer_idx >= first_k_dense_replace (HF ignores moe_layer_freq)",
+    "Attention calls mx.fast SDPA directly so a cache bucketed-attention hook cannot read the rope keys as values; quantized latent caches refused (unqualified)",
+    "RoPE traditional flag follows rope_interleave; YaRN via mlx2 rope_utils with legacy rope_scaling type key",
+    "Added a DeepSeek-V3 MTP head (checkpoint layer num_hidden_layers) with mlx2's native self-MTP interface; MTP embed/head copies are dropped only when proven bit-equal to the trunk tensors",
+    "Removed fp8/int4 compressed-tensor dequantisation (refused), FarSkip, gated attention, pipeline and sharding",
+    "Standard mlx2 KVCache per layer holding the MLA latent; no model-specific cache class"
+  ],
+  "original_files": [
+    "tests/test_xing4_0_model.py",
+    "scripts/xing4_0_reference_fixture.py",
+    "tests/fixtures/xing4_0_tiny/"
+  ],
+  "validation": {
+    "stage": "CPU only; real weights not loaded; no GPU use",
+    "fixture": "tests/fixtures/xing4_0_tiny from scripts/xing4_0_reference_fixture.py under torch 2.12.1 / transformers 5.12.1, fp32 eager, tiny config (hidden 64, 4 layers = 2 dense + 2 MoE, 8 experts top-2, hc_mult 4, vocab 128, real YaRN rope parameters)",
+    "command": "PYTHONPATH=src .venv/bin/python -m pytest tests/test_xing4_0_model.py -q",
+    "result": "22 passed; full-sequence logits max abs error ~3e-6 vs HF fp32; MTP logits ~1.5e-6 vs DeepSeek-MTP reference built from HF blocks",
+    "coverage": [
+      "full-sequence logits and post-norm hidden vs HF",
+      "standalone mHC vs HF; compiled vs reference mHC and stream update",
+      "absorbed vs expanded MLA branches",
+      "chunked/incremental decode vs full forward",
+      "trim rollback exactness",
+      "left-padded BatchKVCache prefill+decode, merged caches with right-padded ragged verify and ragged trim",
+      "MTP step parity, incremental, batched right-padded, trim",
+      "greedy batched self-MTP through hybrid_speculative equals plain greedy decode",
+      "sanitize idempotence, MTP dedupe/keep branches, MTP disabled/absent",
+      "quant/cast predicates keep hc_* and router full precision",
+      "bf16 forward tracks fp32"
+    ],
+    "qualification": "No route selected; real-artifact load, GPU parity and serving qualification outstanding"
+  }
+}

@@ -1,0 +1,10 @@
+2026-09-16T04:16:56Z
+vm.swapusage: total = 0.00M  used = 0.00M  free = 0.00M  (encrypted)
+Note: No thermal warning level has been recorded
+Note: No performance warning level has been recorded
+Note: No CPU power status has been recorded
+{"sample": {"battery_temperature_c": 30.84, "command": ["$TMPDIR/mlx2-thermal-probe-4f1cadeaa344082e"], "pmset_no_cpu_power_warning": true, "pmset_no_performance_warning": true, "pmset_no_thermal_warning": true, "raw": "Note: No thermal warning level has been recorded\nNote: No performance warning level has been recorded\nNote: No CPU power status has been recorded", "raw_evidence": {"ioreg_temperature_fields": {"Temperature": 3084, "VirtualTemperature": 3519}, "pmset": "Note: No thermal warning level has been recorded\nNote: No performance warning level has been recorded\nNote: No CPU power status has been recorded", "thermal_probe": "{\"thermal_state\":1}"}, "thermal_state": 1, "timestamp": 1789532216.121753, "virtual_temperature_c": 35.19}, "stable": false}
+Traceback (most recent call last):
+  File "<stdin>", line 3, in <module>
+AssertionError
+STOP: thermal envelope breached

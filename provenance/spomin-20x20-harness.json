@@ -1,0 +1,19 @@
+{
+  "component": "Spomin 20x20 long multi-turn exact-rebuild evaluation harness",
+  "source_repository": "~/Desktop/mlx-uag",
+  "source_revision": "e4ffadf9940088e0546acabeb555166aef61edb5",
+  "source_paths": [
+    "bench_spomin_20x20_long_multiturn.py",
+    "results/spomin-20x20-long-multiturn-corpus-20260915.json",
+    "results/spomin-20x20-long-multiturn-b20-full-20260915.json"
+  ],
+  "license": "Internal project code; no top-level license file was present at the recorded revision",
+  "modifications": [
+    "Removed imports of mlx-lm-unified and all legacy serving/cache dependencies",
+    "Reimplemented only the deterministic client-side transcript construction and exact HTTP rebuild",
+    "Bound every request to mlx2 route receipts and APCv2 identity, required positive multi-request compute batching for each 20-request domain batch, and checked configured mechanism counters",
+    "Made comparative route ordering explicit while allowing a declared ordinary-only model to record no arm-order claim",
+    "Kept the frozen corpus SHA-256 and paired full/compacted acceptance gates"
+  ],
+  "validation": "CPU unit tests cover corpus geometry, deterministic protected-segment rebuild, comparative and ordinary-only scheduling, alternating transcript arms, receipt gating, and paired acceptance; live model evidence is recorded separately"
+}

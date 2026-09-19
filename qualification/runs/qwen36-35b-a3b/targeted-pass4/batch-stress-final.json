@@ -1,0 +1,1633 @@
+{
+  "cells": {
+    "0e7e3e7a0c51a8a2a45e69d7d3738551f7fbb4862457880ea2e710e2b36c0577": {
+      "attempts": [],
+      "cell_manifest": {
+        "arm": "mtp2",
+        "arm_order_claim": "alternating",
+        "cell_id": "0e7e3e7a0c51a8a2a45e69d7d3738551f7fbb4862457880ea2e710e2b36c0577",
+        "model": "qwen36-35b-a3b",
+        "requested_width": 20,
+        "run": 0,
+        "semantics": "20 rounds x 20 simultaneous requests per arm",
+        "suite": "batch_stress"
+      },
+      "error": "AssertionError: batch request missed APCv2 warm state",
+      "failed_at": 1789653033.043562,
+      "passed": false
+    },
+    "1751e0a9fb4252c1dcfe13f1ff124de1b80bdc90ea98e538bdaaaec3418ce290": {
+      "attempts": [],
+      "cell_manifest": {
+        "arm": "ordinary",
+        "arm_order_claim": "alternating",
+        "cell_id": "1751e0a9fb4252c1dcfe13f1ff124de1b80bdc90ea98e538bdaaaec3418ce290",
+        "model": "qwen36-35b-a3b",
+        "requested_width": 20,
+        "run": 14,
+        "semantics": "20 rounds x 20 simultaneous requests per arm",
+        "suite": "batch_stress"
+      },
+      "error": "AssertionError: batch request missed APCv2 warm state",
+      "failed_at": 1789652616.781367,
+      "passed": false
+    },
+    "239e4b97af378d573500cd87ecba92737c3bf04cc5918b6ce05451b4ec866781": {
+      "attempts": [],
+      "cell_manifest": {
+        "arm": "mtp-artifact-ordinary",
+        "arm_order_claim": "alternating",
+        "cell_id": "239e4b97af378d573500cd87ecba92737c3bf04cc5918b6ce05451b4ec866781",
+        "model": "qwen36-35b-a3b",
+        "requested_width": 20,
+        "run": 2,
+        "semantics": "20 rounds x 20 simultaneous requests per arm",
+        "suite": "batch_stress"
+      },
+      "error": "AssertionError: batch request missed APCv2 warm state",
+      "failed_at": 1789652746.802832,
+      "passed": false
+    },
+    "26cc0114bd17dcdf5b7aacaf75d1ef33a80b8e05184bfaafd72dbb0c5efc258c": {
+      "attempts": [],
+      "cell_manifest": {
+        "arm": "ordinary",
+        "arm_order_claim": "alternating",
+        "cell_id": "26cc0114bd17dcdf5b7aacaf75d1ef33a80b8e05184bfaafd72dbb0c5efc258c",
+        "model": "qwen36-35b-a3b",
+        "requested_width": 20,
+        "run": 10,
+        "semantics": "20 rounds x 20 simultaneous requests per arm",
+        "suite": "batch_stress"
+      },
+      "error": "AssertionError: batch request missed APCv2 warm state",
+      "failed_at": 1789652552.0833411,
+      "passed": false
+    },
+    "280ab8c7bbafded6050fbb992a76d830fa14b190b9ca70e97709b1a592f28362": {
+      "attempts": [],
+      "cell_manifest": {
+        "arm": "mtp-artifact-ordinary",
+        "arm_order_claim": "alternating",
+        "cell_id": "280ab8c7bbafded6050fbb992a76d830fa14b190b9ca70e97709b1a592f28362",
+        "model": "qwen36-35b-a3b",
+        "requested_width": 20,
+        "run": 8,
+        "semantics": "20 rounds x 20 simultaneous requests per arm",
+        "suite": "batch_stress"
+      },
+      "error": "AssertionError: batch request missed APCv2 warm state",
+      "failed_at": 1789652837.889612,
+      "passed": false
+    },
+    "29475f87e910f55b8dcb1d8fa27330416c81832887a57863cac6030c41fb49ba": {
+      "attempts": [],
+      "cell_manifest": {
+        "arm": "mtp2",
+        "arm_order_claim": "alternating",
+        "cell_id": "29475f87e910f55b8dcb1d8fa27330416c81832887a57863cac6030c41fb49ba",
+        "model": "qwen36-35b-a3b",
+        "requested_width": 20,
+        "run": 14,
+        "semantics": "20 rounds x 20 simultaneous requests per arm",
+        "suite": "batch_stress"
+      },
+      "error": "AssertionError: batch request missed APCv2 warm state",
+      "failed_at": 1789653383.933592,
+      "passed": false
+    },
+    "2a8a37d59f3d819e5fd63bd826436b9056912efccafaebe0b4120a1a9374e826": {
+      "attempts": [],
+      "cell_manifest": {
+        "arm": "mtp2",
+        "arm_order_claim": "alternating",
+        "cell_id": "2a8a37d59f3d819e5fd63bd826436b9056912efccafaebe0b4120a1a9374e826",
+        "model": "qwen36-35b-a3b",
+        "requested_width": 20,
+        "run": 19,
+        "semantics": "20 rounds x 20 simultaneous requests per arm",
+        "suite": "batch_stress"
+      },
+      "error": "AssertionError: batch request missed APCv2 warm state",
+      "failed_at": 1789653509.785413,
+      "passed": false
+    },
+    "2b4e71ac4dd683b63771979029b3bc947771f0075341768e1d133b89e6160942": {
+      "attempts": [],
+      "cell_manifest": {
+        "arm": "mtp-artifact-ordinary",
+        "arm_order_claim": "alternating",
+        "cell_id": "2b4e71ac4dd683b63771979029b3bc947771f0075341768e1d133b89e6160942",
+        "model": "qwen36-35b-a3b",
+        "requested_width": 20,
+        "run": 11,
+        "semantics": "20 rounds x 20 simultaneous requests per arm",
+        "suite": "batch_stress"
+      },
+      "error": "AssertionError: batch request missed APCv2 warm state",
+      "failed_at": 1789652883.399034,
+      "passed": false
+    },
+    "32d2606d8ef2bd969592746f49a5ac7c8be27a39045ac6e1ec99a43a83ebcea9": {
+      "attempts": [],
+      "cell_manifest": {
+        "arm": "mtp-artifact-ordinary",
+        "arm_order_claim": "alternating",
+        "cell_id": "32d2606d8ef2bd969592746f49a5ac7c8be27a39045ac6e1ec99a43a83ebcea9",
+        "model": "qwen36-35b-a3b",
+        "requested_width": 20,
+        "run": 17,
+        "semantics": "20 rounds x 20 simultaneous requests per arm",
+        "suite": "batch_stress"
+      },
+      "error": "AssertionError: batch request missed APCv2 warm state",
+      "failed_at": 1789652974.352177,
+      "passed": false
+    },
+    "3d8581b96476aa3eafeec1bd55f9092ddf36f4fc32c032f481a90004f1150a32": {
+      "attempts": [],
+      "cell_manifest": {
+        "arm": "mtp2",
+        "arm_order_claim": "alternating",
+        "cell_id": "3d8581b96476aa3eafeec1bd55f9092ddf36f4fc32c032f481a90004f1150a32",
+        "model": "qwen36-35b-a3b",
+        "requested_width": 20,
+        "run": 12,
+        "semantics": "20 rounds x 20 simultaneous requests per arm",
+        "suite": "batch_stress"
+      },
+      "error": "AssertionError: batch request missed APCv2 warm state",
+      "failed_at": 1789653332.969353,
+      "passed": false
+    },
+    "4188c212ec63c3827450e15e9372ab3f22c9d37e442530d588992c4dbebc4bea": {
+      "attempts": [],
+      "cell_manifest": {
+        "arm": "mtp-artifact-ordinary",
+        "arm_order_claim": "alternating",
+        "cell_id": "4188c212ec63c3827450e15e9372ab3f22c9d37e442530d588992c4dbebc4bea",
+        "model": "qwen36-35b-a3b",
+        "requested_width": 20,
+        "run": 6,
+        "semantics": "20 rounds x 20 simultaneous requests per arm",
+        "suite": "batch_stress"
+      },
+      "error": "AssertionError: batch request missed APCv2 warm state",
+      "failed_at": 1789652807.609387,
+      "passed": false
+    },
+    "48cab1f24cd92bc221327d9984f92d6b8c9bd56ef63f21673106dfe7cf85f675": {
+      "attempts": [],
+      "cell_manifest": {
+        "arm": "mtp-artifact-ordinary",
+        "arm_order_claim": "alternating",
+        "cell_id": "48cab1f24cd92bc221327d9984f92d6b8c9bd56ef63f21673106dfe7cf85f675",
+        "model": "qwen36-35b-a3b",
+        "requested_width": 20,
+        "run": 13,
+        "semantics": "20 rounds x 20 simultaneous requests per arm",
+        "suite": "batch_stress"
+      },
+      "error": "AssertionError: batch request missed APCv2 warm state",
+      "failed_at": 1789652913.6491818,
+      "passed": false
+    },
+    "4e69fc1c9052e155060c1a79c654b7ba136b7f7440f5c197c5528f9ff810179c": {
+      "attempts": [],
+      "cell_manifest": {
+        "arm": "mtp-artifact-ordinary",
+        "arm_order_claim": "alternating",
+        "cell_id": "4e69fc1c9052e155060c1a79c654b7ba136b7f7440f5c197c5528f9ff810179c",
+        "model": "qwen36-35b-a3b",
+        "requested_width": 20,
+        "run": 3,
+        "semantics": "20 rounds x 20 simultaneous requests per arm",
+        "suite": "batch_stress"
+      },
+      "error": "AssertionError: batch request missed APCv2 warm state",
+      "failed_at": 1789652762.02798,
+      "passed": false
+    },
+    "4f4bcd5d40b731a7f80a636c991f41093b0a4a407b7279e953c114af9d249b99": {
+      "attempts": [],
+      "cell_manifest": {
+        "arm": "ordinary",
+        "arm_order_claim": "alternating",
+        "cell_id": "4f4bcd5d40b731a7f80a636c991f41093b0a4a407b7279e953c114af9d249b99",
+        "model": "qwen36-35b-a3b",
+        "requested_width": 20,
+        "run": 1,
+        "semantics": "20 rounds x 20 simultaneous requests per arm",
+        "suite": "batch_stress"
+      },
+      "error": "AssertionError: batch request missed APCv2 warm state",
+      "failed_at": 1789652407.391371,
+      "passed": false
+    },
+    "4ff64c8fb846ccdea64afd945b7c37a16400e28c7801bd0b67b0b26797e01506": {
+      "attempts": [],
+      "cell_manifest": {
+        "arm": "mtp-artifact-ordinary",
+        "arm_order_claim": "alternating",
+        "cell_id": "4ff64c8fb846ccdea64afd945b7c37a16400e28c7801bd0b67b0b26797e01506",
+        "model": "qwen36-35b-a3b",
+        "requested_width": 20,
+        "run": 7,
+        "semantics": "20 rounds x 20 simultaneous requests per arm",
+        "suite": "batch_stress"
+      },
+      "error": "AssertionError: batch request missed APCv2 warm state",
+      "failed_at": 1789652822.7501109,
+      "passed": false
+    },
+    "5818ed14aa5f99aebab487e21d9a16262376a1990a42b98f47b055d8ff882221": {
+      "attempts": [],
+      "cell_manifest": {
+        "arm": "mtp2",
+        "arm_order_claim": "alternating",
+        "cell_id": "5818ed14aa5f99aebab487e21d9a16262376a1990a42b98f47b055d8ff882221",
+        "model": "qwen36-35b-a3b",
+        "requested_width": 20,
+        "run": 13,
+        "semantics": "20 rounds x 20 simultaneous requests per arm",
+        "suite": "batch_stress"
+      },
+      "error": "AssertionError: batch request missed APCv2 warm state",
+      "failed_at": 1789653358.164927,
+      "passed": false
+    },
+    "5982f90a4d20aea6f0ee8976700423a4b0f408fcd64c14aed60e4d14c97cff3c": {
+      "attempts": [],
+      "cell_manifest": {
+        "arm": "mtp2",
+        "arm_order_claim": "alternating",
+        "cell_id": "5982f90a4d20aea6f0ee8976700423a4b0f408fcd64c14aed60e4d14c97cff3c",
+        "model": "qwen36-35b-a3b",
+        "requested_width": 20,
+        "run": 17,
+        "semantics": "20 rounds x 20 simultaneous requests per arm",
+        "suite": "batch_stress"
+      },
+      "error": "AssertionError: batch request missed APCv2 warm state",
+      "failed_at": 1789653459.1667368,
+      "passed": false
+    },
+    "64a5471f73693f63a5e9389bf6aea57ed21a612aec335a96550b45640e0fd1bc": {
+      "attempts": [],
+      "cell_manifest": {
+        "arm": "ordinary",
+        "arm_order_claim": "alternating",
+        "cell_id": "64a5471f73693f63a5e9389bf6aea57ed21a612aec335a96550b45640e0fd1bc",
+        "model": "qwen36-35b-a3b",
+        "requested_width": 20,
+        "run": 4,
+        "semantics": "20 rounds x 20 simultaneous requests per arm",
+        "suite": "batch_stress"
+      },
+      "error": "AssertionError: batch request missed APCv2 warm state",
+      "failed_at": 1789652454.924855,
+      "passed": false
+    },
+    "662730f746f290d14af770c1d5f64499e52f132194816a0b5d747271751ef2c4": {
+      "attempts": [],
+      "cell_manifest": {
+        "arm": "mtp2",
+        "arm_order_claim": "alternating",
+        "cell_id": "662730f746f290d14af770c1d5f64499e52f132194816a0b5d747271751ef2c4",
+        "model": "qwen36-35b-a3b",
+        "requested_width": 20,
+        "run": 5,
+        "semantics": "20 rounds x 20 simultaneous requests per arm",
+        "suite": "batch_stress"
+      },
+      "error": "AssertionError: batch request missed APCv2 warm state",
+      "failed_at": 1789653157.5475671,
+      "passed": false
+    },
+    "665c98b3d1603bb7c8f7441ea22db4ddbc39b99ea18debbfdb458500c1b084b7": {
+      "attempts": [],
+      "cell_manifest": {
+        "arm": "mtp2",
+        "arm_order_claim": "alternating",
+        "cell_id": "665c98b3d1603bb7c8f7441ea22db4ddbc39b99ea18debbfdb458500c1b084b7",
+        "model": "qwen36-35b-a3b",
+        "requested_width": 20,
+        "run": 7,
+        "semantics": "20 rounds x 20 simultaneous requests per arm",
+        "suite": "batch_stress"
+      },
+      "error": "AssertionError: batch request missed APCv2 warm state",
+      "failed_at": 1789653207.9762921,
+      "passed": false
+    },
+    "67283fa315a1b7734adb5d51ffa17cf0d08568db60f426db14c5f1f64a7ed499": {
+      "attempts": [],
+      "cell_manifest": {
+        "arm": "ordinary",
+        "arm_order_claim": "alternating",
+        "cell_id": "67283fa315a1b7734adb5d51ffa17cf0d08568db60f426db14c5f1f64a7ed499",
+        "model": "qwen36-35b-a3b",
+        "requested_width": 20,
+        "run": 18,
+        "semantics": "20 rounds x 20 simultaneous requests per arm",
+        "suite": "batch_stress"
+      },
+      "error": "AssertionError: batch request missed APCv2 warm state",
+      "failed_at": 1789652681.593366,
+      "passed": false
+    },
+    "6ae4cf58c1d49c640a47f7c3fd3eb28ef892521d7fc5bc0c777cce446f564643": {
+      "attempts": [],
+      "cell_manifest": {
+        "arm": "mtp2",
+        "arm_order_claim": "alternating",
+        "cell_id": "6ae4cf58c1d49c640a47f7c3fd3eb28ef892521d7fc5bc0c777cce446f564643",
+        "model": "qwen36-35b-a3b",
+        "requested_width": 20,
+        "run": 8,
+        "semantics": "20 rounds x 20 simultaneous requests per arm",
+        "suite": "batch_stress"
+      },
+      "error": "AssertionError: batch request missed APCv2 warm state",
+      "failed_at": 1789653232.5298061,
+      "passed": false
+    },
+    "6cc6bb160307c64b8f98c4330616f522c3d5e3a4f99fdbe1fda712e135395fd7": {
+      "attempts": [],
+      "cell_manifest": {
+        "arm": "ordinary",
+        "arm_order_claim": "alternating",
+        "cell_id": "6cc6bb160307c64b8f98c4330616f522c3d5e3a4f99fdbe1fda712e135395fd7",
+        "model": "qwen36-35b-a3b",
+        "requested_width": 20,
+        "run": 16,
+        "semantics": "20 rounds x 20 simultaneous requests per arm",
+        "suite": "batch_stress"
+      },
+      "error": "AssertionError: batch request missed APCv2 warm state",
+      "failed_at": 1789652649.1579578,
+      "passed": false
+    },
+    "73e0d8c8a4311b7e3057b7d571cd3cc901093f803c28daba84fee4b73e8bae95": {
+      "attempts": [],
+      "cell_manifest": {
+        "arm": "mtp2",
+        "arm_order_claim": "alternating",
+        "cell_id": "73e0d8c8a4311b7e3057b7d571cd3cc901093f803c28daba84fee4b73e8bae95",
+        "model": "qwen36-35b-a3b",
+        "requested_width": 20,
+        "run": 10,
+        "semantics": "20 rounds x 20 simultaneous requests per arm",
+        "suite": "batch_stress"
+      },
+      "error": "AssertionError: batch request missed APCv2 warm state",
+      "failed_at": 1789653283.1995142,
+      "passed": false
+    },
+    "79db0b069fd851c1bfc9bce37e1614d197c1bc479a2ef6a1b0b4eb0b3cd2d0e3": {
+      "attempts": [],
+      "cell_manifest": {
+        "arm": "mtp-artifact-ordinary",
+        "arm_order_claim": "alternating",
+        "cell_id": "79db0b069fd851c1bfc9bce37e1614d197c1bc479a2ef6a1b0b4eb0b3cd2d0e3",
+        "model": "qwen36-35b-a3b",
+        "requested_width": 20,
+        "run": 0,
+        "semantics": "20 rounds x 20 simultaneous requests per arm",
+        "suite": "batch_stress"
+      },
+      "error": "AssertionError: batch request missed APCv2 warm state",
+      "failed_at": 1789652716.618609,
+      "passed": false
+    },
+    "7a35768bb9542e896d7b89848a9b4c9f5a4819dd0b0b48be3d2f7f4d5da6adfe": {
+      "attempts": [],
+      "cell_manifest": {
+        "arm": "ordinary",
+        "arm_order_claim": "alternating",
+        "cell_id": "7a35768bb9542e896d7b89848a9b4c9f5a4819dd0b0b48be3d2f7f4d5da6adfe",
+        "model": "qwen36-35b-a3b",
+        "requested_width": 20,
+        "run": 6,
+        "semantics": "20 rounds x 20 simultaneous requests per arm",
+        "suite": "batch_stress"
+      },
+      "error": "AssertionError: batch request missed APCv2 warm state",
+      "failed_at": 1789652487.320117,
+      "passed": false
+    },
+    "7a61a33fbdf233df6d1896eb8b502079879f66597c99047d41dc93e6627b0672": {
+      "attempts": [],
+      "cell_manifest": {
+        "arm": "ordinary",
+        "arm_order_claim": "alternating",
+        "cell_id": "7a61a33fbdf233df6d1896eb8b502079879f66597c99047d41dc93e6627b0672",
+        "model": "qwen36-35b-a3b",
+        "requested_width": 20,
+        "run": 11,
+        "semantics": "20 rounds x 20 simultaneous requests per arm",
+        "suite": "batch_stress"
+      },
+      "error": "AssertionError: batch request missed APCv2 warm state",
+      "failed_at": 1789652568.2600162,
+      "passed": false
+    },
+    "84d8205645ad9f2c71cee9b5dcb0666c02fafeeca5185ad57721137f251e6818": {
+      "attempts": [],
+      "cell_manifest": {
+        "arm": "mtp2",
+        "arm_order_claim": "alternating",
+        "cell_id": "84d8205645ad9f2c71cee9b5dcb0666c02fafeeca5185ad57721137f251e6818",
+        "model": "qwen36-35b-a3b",
+        "requested_width": 20,
+        "run": 2,
+        "semantics": "20 rounds x 20 simultaneous requests per arm",
+        "suite": "batch_stress"
+      },
+      "error": "AssertionError: batch request missed APCv2 warm state",
+      "failed_at": 1789653083.717149,
+      "passed": false
+    },
+    "85620a4d46fde3efc1e848a5de7c8bda2087f72134fb0f1974fff95b08177223": {
+      "attempts": [],
+      "cell_manifest": {
+        "arm": "ordinary",
+        "arm_order_claim": "alternating",
+        "cell_id": "85620a4d46fde3efc1e848a5de7c8bda2087f72134fb0f1974fff95b08177223",
+        "model": "qwen36-35b-a3b",
+        "requested_width": 20,
+        "run": 17,
+        "semantics": "20 rounds x 20 simultaneous requests per arm",
+        "suite": "batch_stress"
+      },
+      "error": "AssertionError: batch request missed APCv2 warm state",
+      "failed_at": 1789652665.397942,
+      "passed": false
+    },
+    "8d21df75c401781ef15db3869a8bc72969377c09ee92947ee1a2be1a44b65333": {
+      "attempts": [],
+      "cell_manifest": {
+        "arm": "mtp2",
+        "arm_order_claim": "alternating",
+        "cell_id": "8d21df75c401781ef15db3869a8bc72969377c09ee92947ee1a2be1a44b65333",
+        "model": "qwen36-35b-a3b",
+        "requested_width": 20,
+        "run": 9,
+        "semantics": "20 rounds x 20 simultaneous requests per arm",
+        "suite": "batch_stress"
+      },
+      "error": "AssertionError: batch request missed APCv2 warm state",
+      "failed_at": 1789653258.2068071,
+      "passed": false
+    },
+    "9b60dac680a92670bd1084468d8b094c76bf4003ae850265be9c57f7bf40f830": {
+      "attempts": [],
+      "cell_manifest": {
+        "arm": "mtp2",
+        "arm_order_claim": "alternating",
+        "cell_id": "9b60dac680a92670bd1084468d8b094c76bf4003ae850265be9c57f7bf40f830",
+        "model": "qwen36-35b-a3b",
+        "requested_width": 20,
+        "run": 3,
+        "semantics": "20 rounds x 20 simultaneous requests per arm",
+        "suite": "batch_stress"
+      },
+      "error": "AssertionError: batch request missed APCv2 warm state",
+      "failed_at": 1789653108.594083,
+      "passed": false
+    },
+    "a3d9b6bd229a7acfdd416e11dce2b64f8f0fbe571b70cc41ffd04fa6ab545108": {
+      "attempts": [],
+      "cell_manifest": {
+        "arm": "ordinary",
+        "arm_order_claim": "alternating",
+        "cell_id": "a3d9b6bd229a7acfdd416e11dce2b64f8f0fbe571b70cc41ffd04fa6ab545108",
+        "model": "qwen36-35b-a3b",
+        "requested_width": 20,
+        "run": 8,
+        "semantics": "20 rounds x 20 simultaneous requests per arm",
+        "suite": "batch_stress"
+      },
+      "error": "AssertionError: batch request missed APCv2 warm state",
+      "failed_at": 1789652519.59498,
+      "passed": false
+    },
+    "a432285f7abfe453c0a05494adfbceb6e86319be0194b6647fb959e33e7cf65e": {
+      "attempts": [],
+      "cell_manifest": {
+        "arm": "mtp2",
+        "arm_order_claim": "alternating",
+        "cell_id": "a432285f7abfe453c0a05494adfbceb6e86319be0194b6647fb959e33e7cf65e",
+        "model": "qwen36-35b-a3b",
+        "requested_width": 20,
+        "run": 15,
+        "semantics": "20 rounds x 20 simultaneous requests per arm",
+        "suite": "batch_stress"
+      },
+      "error": "AssertionError: batch request missed APCv2 warm state",
+      "failed_at": 1789653408.6941051,
+      "passed": false
+    },
+    "a51f00d75cea0a36252ee3ed2948d76dbc77251c6502d9bb2d3b413d819386fb": {
+      "attempts": [],
+      "cell_manifest": {
+        "arm": "mtp2",
+        "arm_order_claim": "alternating",
+        "cell_id": "a51f00d75cea0a36252ee3ed2948d76dbc77251c6502d9bb2d3b413d819386fb",
+        "model": "qwen36-35b-a3b",
+        "requested_width": 20,
+        "run": 6,
+        "semantics": "20 rounds x 20 simultaneous requests per arm",
+        "suite": "batch_stress"
+      },
+      "error": "AssertionError: batch request missed APCv2 warm state",
+      "failed_at": 1789653182.327774,
+      "passed": false
+    },
+    "a62ae0fc08a9382986cfa130507e69b7367f0d2c1df7e83a93e13bf123fab58e": {
+      "attempts": [],
+      "cell_manifest": {
+        "arm": "mtp-artifact-ordinary",
+        "arm_order_claim": "alternating",
+        "cell_id": "a62ae0fc08a9382986cfa130507e69b7367f0d2c1df7e83a93e13bf123fab58e",
+        "model": "qwen36-35b-a3b",
+        "requested_width": 20,
+        "run": 9,
+        "semantics": "20 rounds x 20 simultaneous requests per arm",
+        "suite": "batch_stress"
+      },
+      "error": "AssertionError: batch request missed APCv2 warm state",
+      "failed_at": 1789652853.068735,
+      "passed": false
+    },
+    "aa56276ffde46dba8bbf3810822a143df08453d705daa8ad9774ad7a7a3c8af2": {
+      "attempts": [],
+      "cell_manifest": {
+        "arm": "ordinary",
+        "arm_order_claim": "alternating",
+        "cell_id": "aa56276ffde46dba8bbf3810822a143df08453d705daa8ad9774ad7a7a3c8af2",
+        "model": "qwen36-35b-a3b",
+        "requested_width": 20,
+        "run": 0,
+        "semantics": "20 rounds x 20 simultaneous requests per arm",
+        "suite": "batch_stress"
+      },
+      "error": "AssertionError: batch request missed APCv2 warm state",
+      "failed_at": 1789652392.20336,
+      "passed": false
+    },
+    "af2689940ab91522873ada2de78ea098a7b8cb9748464c731d03f29a25dae60d": {
+      "attempts": [],
+      "cell_manifest": {
+        "arm": "ordinary",
+        "arm_order_claim": "alternating",
+        "cell_id": "af2689940ab91522873ada2de78ea098a7b8cb9748464c731d03f29a25dae60d",
+        "model": "qwen36-35b-a3b",
+        "requested_width": 20,
+        "run": 7,
+        "semantics": "20 rounds x 20 simultaneous requests per arm",
+        "suite": "batch_stress"
+      },
+      "error": "AssertionError: batch request missed APCv2 warm state",
+      "failed_at": 1789652503.437584,
+      "passed": false
+    },
+    "b0ac6211707a2d69f4ea9b0af58e6a4d44bbab0297716001eb6978b6130c0edb": {
+      "attempts": [],
+      "cell_manifest": {
+        "arm": "mtp-artifact-ordinary",
+        "arm_order_claim": "alternating",
+        "cell_id": "b0ac6211707a2d69f4ea9b0af58e6a4d44bbab0297716001eb6978b6130c0edb",
+        "model": "qwen36-35b-a3b",
+        "requested_width": 20,
+        "run": 5,
+        "semantics": "20 rounds x 20 simultaneous requests per arm",
+        "suite": "batch_stress"
+      },
+      "error": "AssertionError: batch request missed APCv2 warm state",
+      "failed_at": 1789652792.393345,
+      "passed": false
+    },
+    "b527a1555eb56ddbd34259eb545b47307b13d9680a72068d1306fd3993917620": {
+      "attempts": [],
+      "cell_manifest": {
+        "arm": "mtp-artifact-ordinary",
+        "arm_order_claim": "alternating",
+        "cell_id": "b527a1555eb56ddbd34259eb545b47307b13d9680a72068d1306fd3993917620",
+        "model": "qwen36-35b-a3b",
+        "requested_width": 20,
+        "run": 18,
+        "semantics": "20 rounds x 20 simultaneous requests per arm",
+        "suite": "batch_stress"
+      },
+      "error": "AssertionError: batch request missed APCv2 warm state",
+      "failed_at": 1789652989.5439382,
+      "passed": false
+    },
+    "bb8b9a255223466862fd3cb2ae57dfbb6b2c3b63fc3359ad277c2e476973b3dc": {
+      "attempts": [],
+      "cell_manifest": {
+        "arm": "mtp-artifact-ordinary",
+        "arm_order_claim": "alternating",
+        "cell_id": "bb8b9a255223466862fd3cb2ae57dfbb6b2c3b63fc3359ad277c2e476973b3dc",
+        "model": "qwen36-35b-a3b",
+        "requested_width": 20,
+        "run": 15,
+        "semantics": "20 rounds x 20 simultaneous requests per arm",
+        "suite": "batch_stress"
+      },
+      "error": "AssertionError: batch request missed APCv2 warm state",
+      "failed_at": 1789652943.984688,
+      "passed": false
+    },
+    "c011c58802703d5142bbefc678725f23cd70bcdfdad519dbfa6aa730bee09810": {
+      "attempts": [],
+      "cell_manifest": {
+        "arm": "mtp2",
+        "arm_order_claim": "alternating",
+        "cell_id": "c011c58802703d5142bbefc678725f23cd70bcdfdad519dbfa6aa730bee09810",
+        "model": "qwen36-35b-a3b",
+        "requested_width": 20,
+        "run": 16,
+        "semantics": "20 rounds x 20 simultaneous requests per arm",
+        "suite": "batch_stress"
+      },
+      "error": "AssertionError: batch request missed APCv2 warm state",
+      "failed_at": 1789653433.925751,
+      "passed": false
+    },
+    "c2204fe19e1ca49b125347a788ca067f90db4fe556a0f1bdd9650843ed4863f2": {
+      "attempts": [],
+      "cell_manifest": {
+        "arm": "mtp-artifact-ordinary",
+        "arm_order_claim": "alternating",
+        "cell_id": "c2204fe19e1ca49b125347a788ca067f90db4fe556a0f1bdd9650843ed4863f2",
+        "model": "qwen36-35b-a3b",
+        "requested_width": 20,
+        "run": 16,
+        "semantics": "20 rounds x 20 simultaneous requests per arm",
+        "suite": "batch_stress"
+      },
+      "error": "AssertionError: batch request missed APCv2 warm state",
+      "failed_at": 1789652959.135041,
+      "passed": false
+    },
+    "c39958ccc5f7323ffcfb2c71eeb2dcafc33bea843e41f1ce969cda8cf44f3c0a": {
+      "attempts": [],
+      "cell_manifest": {
+        "arm": "mtp-artifact-ordinary",
+        "arm_order_claim": "alternating",
+        "cell_id": "c39958ccc5f7323ffcfb2c71eeb2dcafc33bea843e41f1ce969cda8cf44f3c0a",
+        "model": "qwen36-35b-a3b",
+        "requested_width": 20,
+        "run": 10,
+        "semantics": "20 rounds x 20 simultaneous requests per arm",
+        "suite": "batch_stress"
+      },
+      "error": "AssertionError: batch request missed APCv2 warm state",
+      "failed_at": 1789652868.22629,
+      "passed": false
+    },
+    "c768843a7ddf3de1cea2e2a86db0c4e9b9ca5119b05a0c84fe2631e12a92467f": {
+      "attempts": [],
+      "cell_manifest": {
+        "arm": "ordinary",
+        "arm_order_claim": "alternating",
+        "cell_id": "c768843a7ddf3de1cea2e2a86db0c4e9b9ca5119b05a0c84fe2631e12a92467f",
+        "model": "qwen36-35b-a3b",
+        "requested_width": 20,
+        "run": 9,
+        "semantics": "20 rounds x 20 simultaneous requests per arm",
+        "suite": "batch_stress"
+      },
+      "error": "AssertionError: batch request missed APCv2 warm state",
+      "failed_at": 1789652535.744716,
+      "passed": false
+    },
+    "c9ad1c01980973ec251247f95dc958ebbe75394b9a7d8c23fe85e9863d882bd2": {
+      "attempts": [],
+      "cell_manifest": {
+        "arm": "mtp-artifact-ordinary",
+        "arm_order_claim": "alternating",
+        "cell_id": "c9ad1c01980973ec251247f95dc958ebbe75394b9a7d8c23fe85e9863d882bd2",
+        "model": "qwen36-35b-a3b",
+        "requested_width": 20,
+        "run": 4,
+        "semantics": "20 rounds x 20 simultaneous requests per arm",
+        "suite": "batch_stress"
+      },
+      "error": "AssertionError: batch request missed APCv2 warm state",
+      "failed_at": 1789652777.2408051,
+      "passed": false
+    },
+    "cc1d52e4b97490b0ef6440abb322ce680c1e9b4fd935871ad1209c0645e34459": {
+      "attempts": [],
+      "cell_manifest": {
+        "arm": "mtp-artifact-ordinary",
+        "arm_order_claim": "alternating",
+        "cell_id": "cc1d52e4b97490b0ef6440abb322ce680c1e9b4fd935871ad1209c0645e34459",
+        "model": "qwen36-35b-a3b",
+        "requested_width": 20,
+        "run": 14,
+        "semantics": "20 rounds x 20 simultaneous requests per arm",
+        "suite": "batch_stress"
+      },
+      "error": "AssertionError: batch request missed APCv2 warm state",
+      "failed_at": 1789652928.8036108,
+      "passed": false
+    },
+    "cdb9a00911fdecab5b822582bd843a7e1646d239a17bc284416689723d43f12e": {
+      "attempts": [],
+      "cell_manifest": {
+        "arm": "mtp-artifact-ordinary",
+        "arm_order_claim": "alternating",
+        "cell_id": "cdb9a00911fdecab5b822582bd843a7e1646d239a17bc284416689723d43f12e",
+        "model": "qwen36-35b-a3b",
+        "requested_width": 20,
+        "run": 12,
+        "semantics": "20 rounds x 20 simultaneous requests per arm",
+        "suite": "batch_stress"
+      },
+      "error": "AssertionError: batch request missed APCv2 warm state",
+      "failed_at": 1789652898.551671,
+      "passed": false
+    },
+    "da520b79570064c8646bb1c36cf2560b2dd577d8137ac1bf365990e2d0cab7e0": {
+      "attempts": [],
+      "cell_manifest": {
+        "arm": "ordinary",
+        "arm_order_claim": "alternating",
+        "cell_id": "da520b79570064c8646bb1c36cf2560b2dd577d8137ac1bf365990e2d0cab7e0",
+        "model": "qwen36-35b-a3b",
+        "requested_width": 20,
+        "run": 5,
+        "semantics": "20 rounds x 20 simultaneous requests per arm",
+        "suite": "batch_stress"
+      },
+      "error": "AssertionError: batch request missed APCv2 warm state",
+      "failed_at": 1789652471.167615,
+      "passed": false
+    },
+    "dfe4ad00cf497178417a587024f4b18bd52a066641484705e967539d85ccc7a8": {
+      "attempts": [],
+      "cell_manifest": {
+        "arm": "ordinary",
+        "arm_order_claim": "alternating",
+        "cell_id": "dfe4ad00cf497178417a587024f4b18bd52a066641484705e967539d85ccc7a8",
+        "model": "qwen36-35b-a3b",
+        "requested_width": 20,
+        "run": 15,
+        "semantics": "20 rounds x 20 simultaneous requests per arm",
+        "suite": "batch_stress"
+      },
+      "error": "AssertionError: batch request missed APCv2 warm state",
+      "failed_at": 1789652632.967915,
+      "passed": false
+    },
+    "e192955cdf41dc943b6517ad6643ea1ba4269b9ead9cba82c33bc1ba7de53cc3": {
+      "attempts": [],
+      "cell_manifest": {
+        "arm": "mtp-artifact-ordinary",
+        "arm_order_claim": "alternating",
+        "cell_id": "e192955cdf41dc943b6517ad6643ea1ba4269b9ead9cba82c33bc1ba7de53cc3",
+        "model": "qwen36-35b-a3b",
+        "requested_width": 20,
+        "run": 19,
+        "semantics": "20 rounds x 20 simultaneous requests per arm",
+        "suite": "batch_stress"
+      },
+      "error": "AssertionError: batch request missed APCv2 warm state",
+      "failed_at": 1789653004.640266,
+      "passed": false
+    },
+    "e7a250e0da52b09f98ed111921d4fbeeca095828486e7ff204309300ca45bd84": {
+      "attempts": [],
+      "cell_manifest": {
+        "arm": "ordinary",
+        "arm_order_claim": "alternating",
+        "cell_id": "e7a250e0da52b09f98ed111921d4fbeeca095828486e7ff204309300ca45bd84",
+        "model": "qwen36-35b-a3b",
+        "requested_width": 20,
+        "run": 19,
+        "semantics": "20 rounds x 20 simultaneous requests per arm",
+        "suite": "batch_stress"
+      },
+      "error": "AssertionError: batch request missed APCv2 warm state",
+      "failed_at": 1789652697.790069,
+      "passed": false
+    },
+    "e8fd0a8df4b2180a80b39f9e375a932293cf23975751242e109f0e6fef7f42ad": {
+      "attempts": [],
+      "cell_manifest": {
+        "arm": "ordinary",
+        "arm_order_claim": "alternating",
+        "cell_id": "e8fd0a8df4b2180a80b39f9e375a932293cf23975751242e109f0e6fef7f42ad",
+        "model": "qwen36-35b-a3b",
+        "requested_width": 20,
+        "run": 2,
+        "semantics": "20 rounds x 20 simultaneous requests per arm",
+        "suite": "batch_stress"
+      },
+      "error": "AssertionError: batch request missed APCv2 warm state",
+      "failed_at": 1789652422.5607371,
+      "passed": false
+    },
+    "ec41d1cde91b7ace2418287f4a49c5ee552fb5a1b6387f421bedb34f93399eb5": {
+      "attempts": [],
+      "cell_manifest": {
+        "arm": "mtp2",
+        "arm_order_claim": "alternating",
+        "cell_id": "ec41d1cde91b7ace2418287f4a49c5ee552fb5a1b6387f421bedb34f93399eb5",
+        "model": "qwen36-35b-a3b",
+        "requested_width": 20,
+        "run": 1,
+        "semantics": "20 rounds x 20 simultaneous requests per arm",
+        "suite": "batch_stress"
+      },
+      "error": "AssertionError: batch request missed APCv2 warm state",
+      "failed_at": 1789653058.947849,
+      "passed": false
+    },
+    "edd2c9e479f42f7377ce489f881086793d6346cf1f1ed30c577d5e3469b6187c": {
+      "attempts": [],
+      "cell_manifest": {
+        "arm": "ordinary",
+        "arm_order_claim": "alternating",
+        "cell_id": "edd2c9e479f42f7377ce489f881086793d6346cf1f1ed30c577d5e3469b6187c",
+        "model": "qwen36-35b-a3b",
+        "requested_width": 20,
+        "run": 3,
+        "semantics": "20 rounds x 20 simultaneous requests per arm",
+        "suite": "batch_stress"
+      },
+      "error": "AssertionError: batch request missed APCv2 warm state",
+      "failed_at": 1789652438.8132029,
+      "passed": false
+    },
+    "f3d0c503c7c76766003b271ae40dfdd526f5f4cfa82b0524ff02a13f3d8a00ef": {
+      "attempts": [],
+      "cell_manifest": {
+        "arm": "mtp2",
+        "arm_order_claim": "alternating",
+        "cell_id": "f3d0c503c7c76766003b271ae40dfdd526f5f4cfa82b0524ff02a13f3d8a00ef",
+        "model": "qwen36-35b-a3b",
+        "requested_width": 20,
+        "run": 18,
+        "semantics": "20 rounds x 20 simultaneous requests per arm",
+        "suite": "batch_stress"
+      },
+      "error": "AssertionError: batch request missed APCv2 warm state",
+      "failed_at": 1789653484.857832,
+      "passed": false
+    },
+    "f3df7c207d1347fb14cd9cfe47a8eeefbdea8d69528ac6c330e30134b2f062a9": {
+      "attempts": [],
+      "cell_manifest": {
+        "arm": "ordinary",
+        "arm_order_claim": "alternating",
+        "cell_id": "f3df7c207d1347fb14cd9cfe47a8eeefbdea8d69528ac6c330e30134b2f062a9",
+        "model": "qwen36-35b-a3b",
+        "requested_width": 20,
+        "run": 13,
+        "semantics": "20 rounds x 20 simultaneous requests per arm",
+        "suite": "batch_stress"
+      },
+      "error": "AssertionError: batch request missed APCv2 warm state",
+      "failed_at": 1789652600.601758,
+      "passed": false
+    },
+    "f5db216fb41afc1169855132f58fa8a0d38ba5c6632fe674e13d89ce52b9a7ed": {
+      "attempts": [],
+      "cell_manifest": {
+        "arm": "ordinary",
+        "arm_order_claim": "alternating",
+        "cell_id": "f5db216fb41afc1169855132f58fa8a0d38ba5c6632fe674e13d89ce52b9a7ed",
+        "model": "qwen36-35b-a3b",
+        "requested_width": 20,
+        "run": 12,
+        "semantics": "20 rounds x 20 simultaneous requests per arm",
+        "suite": "batch_stress"
+      },
+      "error": "AssertionError: batch request missed APCv2 warm state",
+      "failed_at": 1789652584.427692,
+      "passed": false
+    },
+    "f7046d14e1896391ec3ac6419e431ee098a997330274fc687494c82d4ef6a5f7": {
+      "attempts": [],
+      "cell_manifest": {
+        "arm": "mtp2",
+        "arm_order_claim": "alternating",
+        "cell_id": "f7046d14e1896391ec3ac6419e431ee098a997330274fc687494c82d4ef6a5f7",
+        "model": "qwen36-35b-a3b",
+        "requested_width": 20,
+        "run": 4,
+        "semantics": "20 rounds x 20 simultaneous requests per arm",
+        "suite": "batch_stress"
+      },
+      "error": "AssertionError: batch request missed APCv2 warm state",
+      "failed_at": 1789653132.9081988,
+      "passed": false
+    },
+    "fdcd9a2be9c7c6771604631de648147e88711da265829c99ba0f3763606c06d6": {
+      "attempts": [],
+      "cell_manifest": {
+        "arm": "mtp2",
+        "arm_order_claim": "alternating",
+        "cell_id": "fdcd9a2be9c7c6771604631de648147e88711da265829c99ba0f3763606c06d6",
+        "model": "qwen36-35b-a3b",
+        "requested_width": 20,
+        "run": 11,
+        "semantics": "20 rounds x 20 simultaneous requests per arm",
+        "suite": "batch_stress"
+      },
+      "error": "AssertionError: batch request missed APCv2 warm state",
+      "failed_at": 1789653308.189908,
+      "passed": false
+    },
+    "fe9d373c3e8222eec93f8a39a2cbef592d4176bb3b2d38b1b27a709ac275ae38": {
+      "attempts": [],
+      "cell_manifest": {
+        "arm": "mtp-artifact-ordinary",
+        "arm_order_claim": "alternating",
+        "cell_id": "fe9d373c3e8222eec93f8a39a2cbef592d4176bb3b2d38b1b27a709ac275ae38",
+        "model": "qwen36-35b-a3b",
+        "requested_width": 20,
+        "run": 1,
+        "semantics": "20 rounds x 20 simultaneous requests per arm",
+        "suite": "batch_stress"
+      },
+      "error": "AssertionError: batch request missed APCv2 warm state",
+      "failed_at": 1789652731.7183502,
+      "passed": false
+    }
+  },
+  "completed_at": 1789653509.787075,
+  "host": {
+    "git_revision": "5fc4c28e181f2d9d9e0d9cbb4114eb3519197626",
+    "git_status": "M scripts/activate_qualification_arm.py\n M scripts/qualify_serving.py\n M scripts/run_qualification_matrix.py\n M src/mlx2/qualification.py\n M src/mlx2/runtime/hybrid_speculative.py\n M src/mlx2/server.py\n M src/mlx2/serving.py\n M src/mlx2/structured_output.py\n M tests/test_qualification.py\n M tests/test_qualification_matrix.py\n M tests/test_qualify_serving_receipts.py\n M tests/test_segmented_mtp.py\n M tests/test_serving_contract.py\n M tests/test_serving_retention.py\n M tests/test_structured_output.py\n?? qualification/policies/qwen36-mtp-artifact-ordinary.json\n?? qualification/policies/qwen36-mtp2.json\n?? qualification/policies/qwen36-ordinary.json\n?? qualification/qwen36-overnight-experiments.json\n?? qualification/runs/qwen36-35b-a3b/overnight-campaign-pass1-20260916T1754/\n?? qualification/runs/qwen36-35b-a3b/overnight-campaign-pass2-20260916T1813/\n?? qualification/runs/qwen36-35b-a3b/overnight-campaign/\n?? qualification/runs/qwen36-35b-a3b/remediation-active.json\n?? qualification/runs/qwen36-35b-a3b/targeted-pass4/\n?? scripts/qwen36_http_qualification.py\n?? scripts/run_qwen36_overnight.py\n?? tests/test_activate_qualification_arm.py\n?? tests/test_qwen36_http_qualification.py\n?? tests/test_qwen36_overnight.py",
+    "harness_source": {
+      "activate_qualification_arm.py": "36ff6b6ffd72e4fee08a02534307fc3b6c0a68a6d8715afc3530613dbb57b3c1",
+      "build_context_prompts.py": "11c065c214848629087f2ebb3a40b9a423f929c97a9f7d8571f914d12411e7c1",
+      "run_qualification_matrix.py": "f4cd85d37b8ac1baf44dc49222b85138b8140c32bebfe83eee6dd66c91e41e08",
+      "run_spomin_20x20.py": "c0da60754e3fe1a381ac895a4f608658bee3c2cf0f6cbd80cce5231525a08b73",
+      "thermal_probe.swift": "4f1cadeaa344082e231227f0c1e4b53f7f7fadf1a31858d7ecc0ec36ed3f284b"
+    },
+    "harness_source_sha256": "ceaeff2376ad8b63c061e0212e93b6ce6621e4d0b563a47b764a853b616fefc5",
+    "macos": "26.7",
+    "mlx": "0.32.2.dev20260915+2a817ad94",
+    "platform": "macOS-26.7-arm64-arm-64bit",
+    "python": "3.12.13 (main, May 10 2026, 19:20:41) [Clang 22.1.3 ]",
+    "sw_vers": "ProductName:\t\tmacOS\nProductVersion:\t\t26.7\nBuildVersion:\t\t25G229",
+    "uname": "Darwin <host> 25.6.0 Darwin Kernel Version 25.6.0: Tue Aug 18 17:51:47 PDT 2026; root:xnu-12377.161.15.700.19~2/RELEASE_ARM64_T6050 arm64"
+  },
+  "last_progress_at": 1789653509.785415,
+  "manifest": {
+    "calibration_source": {
+      "path": "~/Desktop/mlx2/qualification/runs/qwen36-35b-a3b/overnight-campaign/inputs/qwen36-overnight-experiments.template.json",
+      "sha256": "2dbfcb9333c17d6baa87f7fbe76e318fa2687d84960f92a9620499e88e9f75ed"
+    },
+    "models": [
+      {
+        "arm_order_claim": "alternating",
+        "arms": [
+          {
+            "activate_command": [
+              "~/Desktop/mlx2/.venv/bin/python",
+              "~/Desktop/mlx2/scripts/activate_qualification_arm.py",
+              "--state",
+              "~/Desktop/mlx2/qualification/runs/qwen36-35b-a3b/overnight-campaign/activation/server.json",
+              "--log",
+              "~/Desktop/mlx2/qualification/runs/qwen36-35b-a3b/overnight-campaign/logs/matrix/ordinary-context.log",
+              "--cwd",
+              "~/Desktop/mlx2",
+              "--",
+              "/usr/bin/env",
+              "PYTHONPATH=src",
+              "~/Desktop/mlx2/.venv/bin/python",
+              "-u",
+              "-m",
+              "mlx2.server",
+              "--model",
+              "~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit",
+              "--host",
+              "127.0.0.1",
+              "--port",
+              "8296",
+              "--max-context",
+              "262144",
+              "--max-lanes",
+              "4",
+              "--max-inflight",
+              "8",
+              "--cache-bytes",
+              "12884901888",
+              "--cache-dir",
+              "~/Desktop/mlx2/qualification/runs/qwen36-35b-a3b/overnight-campaign/cache/matrix/ordinary/context",
+              "--execution-policy",
+              "~/Desktop/mlx2/qualification/policies/qwen36-ordinary.json",
+              "--qualification-mode",
+              "--ordinary"
+            ],
+            "activation_key": "qwen36-ordinary-context-max4",
+            "after_status_requirements": [
+              {
+                "equals": 0,
+                "path": "apcv2.cow.active_leases"
+              }
+            ],
+            "counter_requirements": [
+              {
+                "delta_gte": 1,
+                "path": "apcv2.hits"
+              },
+              {
+                "delta_gte": 1,
+                "path": "apcv2.stores"
+              }
+            ],
+            "name": "ordinary",
+            "qualification_receipt": {
+              "path": "~/Desktop/mlx2/qualification/runs/qwen36-35b-a3b/overnight-campaign/artifacts/ordinary-serving-qualification.json",
+              "required_checks": [
+                "unit_tests",
+                "cold_text",
+                "warm_prefix",
+                "batch",
+                "cache_leases",
+                "runtime_stable"
+              ]
+            },
+            "receipt_requirements": [
+              {
+                "equals": "apcv2",
+                "path": "cache"
+              },
+              {
+                "equals": "qwen36-35b-a3b-apcv2-ordinary",
+                "path": "profile"
+              },
+              {
+                "equals": null,
+                "path": "mtp"
+              },
+              {
+                "gte": 1,
+                "path": "ordinary_compute_width"
+              }
+            ],
+            "status_requirements": [
+              {
+                "equals": "qwen36-35b-a3b-apcv2-ordinary",
+                "path": "profile"
+              },
+              {
+                "equals": 4,
+                "path": "max_lanes"
+              },
+              {
+                "equals": "ordinary",
+                "path": "settings.speculation"
+              }
+            ],
+            "suites": {
+              "batch_stress": {
+                "activate_command": [
+                  "~/Desktop/mlx2/.venv/bin/python",
+                  "~/Desktop/mlx2/scripts/activate_qualification_arm.py",
+                  "--state",
+                  "~/Desktop/mlx2/qualification/runs/qwen36-35b-a3b/overnight-campaign/activation/server.json",
+                  "--log",
+                  "~/Desktop/mlx2/qualification/runs/qwen36-35b-a3b/overnight-campaign/logs/matrix/ordinary-batch_stress.log",
+                  "--cwd",
+                  "~/Desktop/mlx2",
+                  "--",
+                  "/usr/bin/env",
+                  "PYTHONPATH=src",
+                  "~/Desktop/mlx2/.venv/bin/python",
+                  "-u",
+                  "-m",
+                  "mlx2.server",
+                  "--model",
+                  "~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit",
+                  "--host",
+                  "127.0.0.1",
+                  "--port",
+                  "8296",
+                  "--max-context",
+                  "262144",
+                  "--max-lanes",
+                  "20",
+                  "--max-inflight",
+                  "40",
+                  "--cache-bytes",
+                  "12884901888",
+                  "--cache-dir",
+                  "~/Desktop/mlx2/qualification/runs/qwen36-35b-a3b/overnight-campaign/cache/matrix/ordinary/batch_stress",
+                  "--execution-policy",
+                  "~/Desktop/mlx2/qualification/policies/qwen36-ordinary.json",
+                  "--qualification-mode",
+                  "--ordinary"
+                ],
+                "activation_key": "qwen36-ordinary-batch-max20",
+                "qualification_receipt": {
+                  "path": "~/Desktop/mlx2/qualification/runs/qwen36-35b-a3b/overnight-campaign/artifacts/ordinary-b20-serving-qualification.json",
+                  "required_checks": [
+                    "unit_tests",
+                    "cold_text",
+                    "warm_prefix",
+                    "batch",
+                    "cache_leases",
+                    "runtime_stable"
+                  ]
+                },
+                "status_requirements": [
+                  {
+                    "equals": "qwen36-35b-a3b-apcv2-ordinary",
+                    "path": "profile"
+                  },
+                  {
+                    "equals": 20,
+                    "path": "max_lanes"
+                  },
+                  {
+                    "equals": 40,
+                    "path": "settings.max_inflight"
+                  },
+                  {
+                    "equals": "ordinary",
+                    "path": "settings.speculation"
+                  }
+                ]
+              }
+            },
+            "url": "http://127.0.0.1:8296"
+          },
+          {
+            "activate_command": [
+              "~/Desktop/mlx2/.venv/bin/python",
+              "~/Desktop/mlx2/scripts/activate_qualification_arm.py",
+              "--state",
+              "~/Desktop/mlx2/qualification/runs/qwen36-35b-a3b/overnight-campaign/activation/server.json",
+              "--log",
+              "~/Desktop/mlx2/qualification/runs/qwen36-35b-a3b/overnight-campaign/logs/matrix/mtp-artifact-ordinary-context.log",
+              "--cwd",
+              "~/Desktop/mlx2",
+              "--",
+              "/usr/bin/env",
+              "PYTHONPATH=src",
+              "~/Desktop/mlx2/.venv/bin/python",
+              "-u",
+              "-m",
+              "mlx2.server",
+              "--model",
+              "~/mlx-models/Qwen3.6-35B-A3B-uncensored-heretic-Native-MTP-Preserved-oQ4e-mtp",
+              "--host",
+              "127.0.0.1",
+              "--port",
+              "8296",
+              "--max-context",
+              "262144",
+              "--max-lanes",
+              "4",
+              "--max-inflight",
+              "8",
+              "--cache-bytes",
+              "12884901888",
+              "--cache-dir",
+              "~/Desktop/mlx2/qualification/runs/qwen36-35b-a3b/overnight-campaign/cache/matrix/mtp-artifact-ordinary/context",
+              "--execution-policy",
+              "~/Desktop/mlx2/qualification/policies/qwen36-mtp-artifact-ordinary.json",
+              "--qualification-mode",
+              "--ordinary"
+            ],
+            "activation_key": "qwen36-mtp-artifact-ordinary-context-max4",
+            "after_status_requirements": [
+              {
+                "equals": 0,
+                "path": "apcv2.cow.active_leases"
+              }
+            ],
+            "counter_requirements": [
+              {
+                "delta_gte": 1,
+                "path": "apcv2.hits"
+              },
+              {
+                "delta_gte": 1,
+                "path": "apcv2.stores"
+              }
+            ],
+            "name": "mtp-artifact-ordinary",
+            "qualification_receipt": {
+              "path": "~/Desktop/mlx2/qualification/runs/qwen36-35b-a3b/overnight-campaign/artifacts/mtp-artifact-ordinary-serving-qualification.json",
+              "required_checks": [
+                "unit_tests",
+                "cold_text",
+                "warm_prefix",
+                "batch",
+                "cache_leases",
+                "runtime_stable"
+              ]
+            },
+            "receipt_requirements": [
+              {
+                "equals": "apcv2",
+                "path": "cache"
+              },
+              {
+                "equals": "qwen36-35b-a3b-apcv2-ordinary",
+                "path": "profile"
+              },
+              {
+                "equals": null,
+                "path": "mtp"
+              },
+              {
+                "gte": 1,
+                "path": "ordinary_compute_width"
+              }
+            ],
+            "status_requirements": [
+              {
+                "equals": "qwen36-35b-a3b-apcv2-ordinary",
+                "path": "profile"
+              },
+              {
+                "equals": 4,
+                "path": "max_lanes"
+              },
+              {
+                "equals": "ordinary",
+                "path": "settings.speculation"
+              }
+            ],
+            "suites": {
+              "batch_stress": {
+                "activate_command": [
+                  "~/Desktop/mlx2/.venv/bin/python",
+                  "~/Desktop/mlx2/scripts/activate_qualification_arm.py",
+                  "--state",
+                  "~/Desktop/mlx2/qualification/runs/qwen36-35b-a3b/overnight-campaign/activation/server.json",
+                  "--log",
+                  "~/Desktop/mlx2/qualification/runs/qwen36-35b-a3b/overnight-campaign/logs/matrix/mtp-artifact-ordinary-batch_stress.log",
+                  "--cwd",
+                  "~/Desktop/mlx2",
+                  "--",
+                  "/usr/bin/env",
+                  "PYTHONPATH=src",
+                  "~/Desktop/mlx2/.venv/bin/python",
+                  "-u",
+                  "-m",
+                  "mlx2.server",
+                  "--model",
+                  "~/mlx-models/Qwen3.6-35B-A3B-uncensored-heretic-Native-MTP-Preserved-oQ4e-mtp",
+                  "--host",
+                  "127.0.0.1",
+                  "--port",
+                  "8296",
+                  "--max-context",
+                  "262144",
+                  "--max-lanes",
+                  "20",
+                  "--max-inflight",
+                  "40",
+                  "--cache-bytes",
+                  "12884901888",
+                  "--cache-dir",
+                  "~/Desktop/mlx2/qualification/runs/qwen36-35b-a3b/overnight-campaign/cache/matrix/mtp-artifact-ordinary/batch_stress",
+                  "--execution-policy",
+                  "~/Desktop/mlx2/qualification/policies/qwen36-mtp-artifact-ordinary.json",
+                  "--qualification-mode",
+                  "--ordinary"
+                ],
+                "activation_key": "qwen36-mtp-artifact-ordinary-batch-max20",
+                "qualification_receipt": {
+                  "path": "~/Desktop/mlx2/qualification/runs/qwen36-35b-a3b/overnight-campaign/artifacts/mtp-artifact-ordinary-b20-serving-qualification.json",
+                  "required_checks": [
+                    "unit_tests",
+                    "cold_text",
+                    "warm_prefix",
+                    "batch",
+                    "cache_leases",
+                    "runtime_stable"
+                  ]
+                },
+                "status_requirements": [
+                  {
+                    "equals": "qwen36-35b-a3b-apcv2-ordinary",
+                    "path": "profile"
+                  },
+                  {
+                    "equals": 20,
+                    "path": "max_lanes"
+                  },
+                  {
+                    "equals": 40,
+                    "path": "settings.max_inflight"
+                  },
+                  {
+                    "equals": "ordinary",
+                    "path": "settings.speculation"
+                  }
+                ]
+              }
+            },
+            "url": "http://127.0.0.1:8296"
+          },
+          {
+            "activate_command": [
+              "~/Desktop/mlx2/.venv/bin/python",
+              "~/Desktop/mlx2/scripts/activate_qualification_arm.py",
+              "--state",
+              "~/Desktop/mlx2/qualification/runs/qwen36-35b-a3b/overnight-campaign/activation/server.json",
+              "--log",
+              "~/Desktop/mlx2/qualification/runs/qwen36-35b-a3b/overnight-campaign/logs/matrix/mtp2-context.log",
+              "--cwd",
+              "~/Desktop/mlx2",
+              "--",
+              "/usr/bin/env",
+              "PYTHONPATH=src",
+              "~/Desktop/mlx2/.venv/bin/python",
+              "-u",
+              "-m",
+              "mlx2.server",
+              "--model",
+              "~/mlx-models/Qwen3.6-35B-A3B-uncensored-heretic-Native-MTP-Preserved-oQ4e-mtp",
+              "--host",
+              "127.0.0.1",
+              "--port",
+              "8296",
+              "--max-context",
+              "262144",
+              "--max-lanes",
+              "4",
+              "--max-inflight",
+              "8",
+              "--cache-bytes",
+              "12884901888",
+              "--cache-dir",
+              "~/Desktop/mlx2/qualification/runs/qwen36-35b-a3b/overnight-campaign/cache/matrix/mtp2/context",
+              "--execution-policy",
+              "~/Desktop/mlx2/qualification/policies/qwen36-mtp2.json",
+              "--qualification-mode"
+            ],
+            "activation_key": "qwen36-mtp2-context-max4",
+            "after_status_requirements": [
+              {
+                "equals": 0,
+                "path": "apcv2.cow.active_leases"
+              },
+              {
+                "equals": 0,
+                "path": "execution.segmented_mtp.failures"
+              },
+              {
+                "equals": 0,
+                "path": "execution.segmented_mtp.full_prefix_materializations"
+              }
+            ],
+            "counter_requirements": [
+              {
+                "delta_gte": 1,
+                "path": "apcv2.hits"
+              },
+              {
+                "delta_gte": 1,
+                "path": "apcv2.stores"
+              },
+              {
+                "delta_gte": 1,
+                "path": "execution.segmented_mtp.engaged"
+              },
+              {
+                "delta_gte": 1,
+                "path": "execution.segmented_mtp.committed_cycles"
+              }
+            ],
+            "name": "mtp2",
+            "qualification_receipt": {
+              "path": "~/Desktop/mlx2/qualification/runs/qwen36-35b-a3b/overnight-campaign/artifacts/mtp2-serving-qualification.json",
+              "required_checks": [
+                "unit_tests",
+                "cold_text",
+                "warm_prefix",
+                "batch",
+                "cache_leases",
+                "runtime_stable",
+                "feature_segmented_transaction",
+                "feature_segmented_rollback"
+              ]
+            },
+            "receipt_requirements": [
+              {
+                "equals": "apcv2",
+                "path": "cache"
+              },
+              {
+                "equals": "qwen36-35b-a3b-apcv2-mtp2",
+                "path": "profile"
+              },
+              {
+                "equals": "segmented_self_mtp",
+                "path": "mtp.route"
+              },
+              {
+                "equals": 2,
+                "path": "mtp.num_draft"
+              },
+              {
+                "gt": 0,
+                "path": "mtp.stats.draft_proposed"
+              }
+            ],
+            "status_requirements": [
+              {
+                "equals": "qwen36-35b-a3b-apcv2-mtp2",
+                "path": "profile"
+              },
+              {
+                "equals": 4,
+                "path": "max_lanes"
+              },
+              {
+                "equals": "self_mtp",
+                "path": "settings.speculation"
+              }
+            ],
+            "suites": {
+              "batch_stress": {
+                "activate_command": [
+                  "~/Desktop/mlx2/.venv/bin/python",
+                  "~/Desktop/mlx2/scripts/activate_qualification_arm.py",
+                  "--state",
+                  "~/Desktop/mlx2/qualification/runs/qwen36-35b-a3b/overnight-campaign/activation/server.json",
+                  "--log",
+                  "~/Desktop/mlx2/qualification/runs/qwen36-35b-a3b/overnight-campaign/logs/matrix/mtp2-batch_stress.log",
+                  "--cwd",
+                  "~/Desktop/mlx2",
+                  "--",
+                  "/usr/bin/env",
+                  "PYTHONPATH=src",
+                  "~/Desktop/mlx2/.venv/bin/python",
+                  "-u",
+                  "-m",
+                  "mlx2.server",
+                  "--model",
+                  "~/mlx-models/Qwen3.6-35B-A3B-uncensored-heretic-Native-MTP-Preserved-oQ4e-mtp",
+                  "--host",
+                  "127.0.0.1",
+                  "--port",
+                  "8296",
+                  "--max-context",
+                  "262144",
+                  "--max-lanes",
+                  "20",
+                  "--max-inflight",
+                  "40",
+                  "--cache-bytes",
+                  "12884901888",
+                  "--cache-dir",
+                  "~/Desktop/mlx2/qualification/runs/qwen36-35b-a3b/overnight-campaign/cache/matrix/mtp2/batch_stress",
+                  "--execution-policy",
+                  "~/Desktop/mlx2/qualification/policies/qwen36-mtp2.json",
+                  "--qualification-mode"
+                ],
+                "activation_key": "qwen36-mtp2-batch-max20",
+                "qualification_receipt": {
+                  "path": "~/Desktop/mlx2/qualification/runs/qwen36-35b-a3b/overnight-campaign/artifacts/mtp2-b20-serving-qualification.json",
+                  "required_checks": [
+                    "unit_tests",
+                    "cold_text",
+                    "warm_prefix",
+                    "batch",
+                    "cache_leases",
+                    "runtime_stable",
+                    "feature_segmented_transaction",
+                    "feature_segmented_rollback"
+                  ]
+                },
+                "status_requirements": [
+                  {
+                    "equals": "qwen36-35b-a3b-apcv2-mtp2",
+                    "path": "profile"
+                  },
+                  {
+                    "equals": 20,
+                    "path": "max_lanes"
+                  },
+                  {
+                    "equals": 40,
+                    "path": "settings.max_inflight"
+                  },
+                  {
+                    "equals": "self_mtp",
+                    "path": "settings.speculation"
+                  }
+                ]
+              }
+            },
+            "url": "http://127.0.0.1:8296"
+          }
+        ],
+        "batch_stress": {
+          "max_tokens": 64,
+          "prompts": [
+            "Explain compiler optimization 01 in detail.",
+            "Explain compiler optimization 02 in detail.",
+            "Explain compiler optimization 03 in detail.",
+            "Explain compiler optimization 04 in detail.",
+            "Explain compiler optimization 05 in detail.",
+            "Explain compiler optimization 06 in detail.",
+            "Explain compiler optimization 07 in detail.",
+            "Explain compiler optimization 08 in detail.",
+            "Explain compiler optimization 09 in detail.",
+            "Explain compiler optimization 10 in detail.",
+            "Explain compiler optimization 11 in detail.",
+            "Explain compiler optimization 12 in detail.",
+            "Explain compiler optimization 13 in detail.",
+            "Explain compiler optimization 14 in detail.",
+            "Explain compiler optimization 15 in detail.",
+            "Explain compiler optimization 16 in detail.",
+            "Explain compiler optimization 17 in detail.",
+            "Explain compiler optimization 18 in detail.",
+            "Explain compiler optimization 19 in detail.",
+            "Explain compiler optimization 20 in detail."
+          ],
+          "rounds": 20,
+          "timeout_seconds": 7200,
+          "width": 20
+        },
+        "context": {
+          "max_tokens": 64,
+          "min_cached_tokens": 1,
+          "min_prime_to_warm_cache_gain_tokens": 1,
+          "prompt_token_tolerance": 0,
+          "runs_per_cell": 3,
+          "timeout_seconds": 14400
+        },
+        "contexts": [
+          {
+            "calibrated_prompt_tokens": 32768,
+            "prompt_path": "~/Desktop/mlx2/qualification/runs/qwen36-35b-a3b/overnight-campaign/inputs/prompts/qwen36-35b-a3b-32768.txt",
+            "prompt_sha256": "eba8a01163c76055c89d12cc8092368d2ffd8825fd12afbe085e656bd9334cd6",
+            "tokenizer_renderer": "qwen_direct",
+            "tokens": 32768
+          },
+          {
+            "calibrated_prompt_tokens": 65536,
+            "prompt_path": "~/Desktop/mlx2/qualification/runs/qwen36-35b-a3b/overnight-campaign/inputs/prompts/qwen36-35b-a3b-65536.txt",
+            "prompt_sha256": "d7d29edae7905cdc0668ec28f50ceb65527071d931a0be1d297f404806480858",
+            "tokenizer_renderer": "qwen_direct",
+            "tokens": 65536
+          },
+          {
+            "calibrated_prompt_tokens": 131072,
+            "prompt_path": "~/Desktop/mlx2/qualification/runs/qwen36-35b-a3b/overnight-campaign/inputs/prompts/qwen36-35b-a3b-131072.txt",
+            "prompt_sha256": "0d0956962b31394e6a9967f20450b770f253000318d6a12650e07485200992c1",
+            "tokenizer_renderer": "qwen_direct",
+            "tokens": 131072
+          },
+          {
+            "calibrated_prompt_tokens": 262016,
+            "prompt_path": "~/Desktop/mlx2/qualification/runs/qwen36-35b-a3b/overnight-campaign/inputs/prompts/qwen36-35b-a3b-262016.txt",
+            "prompt_sha256": "e30cf6c9aacf680c5c43face9723c93d3c6f3516fc31fd8616b6f7233e5954f5",
+            "tokenizer_renderer": "qwen_direct",
+            "tokens": 262016
+          }
+        ],
+        "name": "qwen36-35b-a3b",
+        "tokenizer_path": "~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit",
+        "tokenizer_renderer": "qwen_direct"
+      }
+    ],
+    "schema": "mlx2.qualification-matrix.v1",
+    "thermal": {
+      "consecutive_samples": 3,
+      "max_battery_temperature_c": 40.0,
+      "max_swap_growth_bytes": 2147483648,
+      "max_temperature_delta_c": 0.5,
+      "max_virtual_temperature_c": 45.0,
+      "max_wait_seconds": 1800,
+      "post_sample_interval_seconds": 15,
+      "require_temperatures": true,
+      "required_thermal_state": 0,
+      "sample_interval_seconds": 15
+    }
+  },
+  "manifest_sha256": "4e20ce095e4f1eb36c647b816d18f74abd878a75a486eca9666a801c949b4c20",
+  "passed": false,
+  "schema": "mlx2.qualification-matrix-report.v1",
+  "semantics": "20 rounds x actual compute width 20 for each model/arm; thermal gating intentionally disabled",
+  "started_at": 1789652372.386098,
+  "suite": "batch_stress",
+  "swap_baseline": {
+    "command": [
+      "/usr/sbin/sysctl",
+      "-n",
+      "vm.swapusage"
+    ],
+    "raw": "total = 5120.00M  used = 4238.19M  free = 881.81M  (encrypted)",
+    "timestamp": 1789652372.388936,
+    "used_bytes": 4444064317
+  }
+}

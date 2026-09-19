@@ -1,0 +1,7 @@
+base pooled_acceptance=0.358 median_req=0.349 tok/s {'1': 86.5, '2': 126.2, '4': 154.1}
+fix pooled_acceptance=0.740 median_req=0.734 tok/s {'1': 135.4, '2': 180.5, '4': 216.6}
+width 1: speedup x1.57
+width 2: speedup x1.43
+width 4: speedup x1.41
+greedy warmup outputs identical across arms: True
+all benchmark outputs identical across arms: False

@@ -1,0 +1,24 @@
+2026-09-18 19:11:12,708 INFO ubc_evict: evicted 4068.1 MB from UBC for ~/mlx-models/Xing4.0-29B-A4B-mlx-6bit/model-00001-of-00006.safetensors
+2026-09-18 19:11:12,741 INFO ubc_evict: evicted 4048.2 MB from UBC for ~/mlx-models/Xing4.0-29B-A4B-mlx-6bit/model-00002-of-00006.safetensors
+2026-09-18 19:11:12,774 INFO ubc_evict: evicted 4048.2 MB from UBC for ~/mlx-models/Xing4.0-29B-A4B-mlx-6bit/model-00003-of-00006.safetensors
+2026-09-18 19:11:12,806 INFO ubc_evict: evicted 4048.2 MB from UBC for ~/mlx-models/Xing4.0-29B-A4B-mlx-6bit/model-00004-of-00006.safetensors
+2026-09-18 19:11:12,841 INFO ubc_evict: evicted 4048.2 MB from UBC for ~/mlx-models/Xing4.0-29B-A4B-mlx-6bit/model-00005-of-00006.safetensors
+2026-09-18 19:11:12,870 INFO ubc_evict: evicted 3464.2 MB from UBC for ~/mlx-models/Xing4.0-29B-A4B-mlx-6bit/model-00006-of-00006.safetensors
+2026-09-18 19:11:12,870 INFO ubc_evict: pass complete total_mb=23725.2 elapsed_s=0.19
+2026-09-18 19:11:13,671 INFO "GET /health HTTP/1.1" 503 -
+2026-09-18 19:11:15,063 INFO int8 NAX prefill installed on 120 projections (scope mlp, threshold 512, cache auto, 0 skipped)
+2026-09-18 19:11:15,063 INFO int8 NAX prefill bound: 120 projections, 0 cached copies (0.0 MiB), decode/verify bound 8 rows < threshold 512
+2026-09-18 19:11:16,673 INFO "GET /health HTTP/1.1" 200 -
+2026-09-18 19:11:16,674 INFO "GET /health HTTP/1.1" 200 -
+2026-09-18 19:11:16,984 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-18 19:11:22,249 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-18 19:11:22,527 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-18 19:11:31,251 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-18 19:11:41,023 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-18 19:11:41,028 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-18 19:11:41,088 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-18 19:11:41,090 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-18 19:11:43,434 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-18 19:11:43,435 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-18 19:11:43,436 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-18 19:11:43,481 INFO "GET /health HTTP/1.1" 200 -

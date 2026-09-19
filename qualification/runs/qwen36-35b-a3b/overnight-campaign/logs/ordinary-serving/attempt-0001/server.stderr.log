@@ -1,0 +1,97 @@
+[transformers] PyTorch was not found. Models won't be available and only tokenizers, configuration and file/data utilities can be used.
+2026-09-16 18:46:24,387 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 18:46:25,393 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 18:46:25,920 INFO ubc_evict: evicted 5070.2 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-00001-of-00005.safetensors
+2026-09-16 18:46:25,958 INFO ubc_evict: evicted 5098.4 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-00002-of-00005.safetensors
+2026-09-16 18:46:25,997 INFO ubc_evict: evicted 5097.1 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-00003-of-00005.safetensors
+2026-09-16 18:46:26,035 INFO ubc_evict: evicted 5036.3 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-00004-of-00005.safetensors
+2026-09-16 18:46:26,054 INFO ubc_evict: evicted 2311.0 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-00005-of-00005.safetensors
+2026-09-16 18:46:26,054 INFO ubc_evict: evicted 851.8 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-vision-00001-of-00001.safetensors
+2026-09-16 18:46:26,054 INFO ubc_evict: pass complete total_mb=23464.8 elapsed_s=0.17
+2026-09-16 18:46:26,564 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 18:46:27,568 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 18:46:27,591 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 18:46:27,633 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 18:46:27,986 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 18:46:28,109 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 18:46:28,218 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 18:46:28,259 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 18:46:28,602 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 18:46:28,853 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 18:46:28,953 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 18:46:29,029 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 18:46:31,885 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 18:46:31,926 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 18:46:32,319 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 18:46:32,533 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 18:46:36,759 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 18:46:36,822 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 18:46:37,418 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 18:46:37,970 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 18:46:39,999 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 18:46:40,002 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 18:46:40,031 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 18:46:40,031 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 18:46:40,611 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 18:46:41,188 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 18:46:41,851 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 18:46:41,851 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 18:50:27,608 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 18:50:29,972 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 18:51:17,473 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 18:51:19,953 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 18:51:19,994 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+[transformers] Token indices sequence length is longer than the specified maximum sequence length for this model (262156 > 262144). Running this sequence through the model will result in indexing errors
+2026-09-16 18:51:20,226 INFO "POST /v1/chat/completions HTTP/1.1" 400 -
+2026-09-16 18:51:20,229 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 18:51:20,542 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 18:51:20,543 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 18:51:20,758 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 18:51:20,915 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 18:51:20,916 INFO "GET /health HTTP/1.1" 200 -
+2026-09-16 18:51:20,917 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 18:51:21,251 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 18:51:21,288 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 18:51:24,854 ERROR generation worker failed
+Traceback (most recent call last):
+  File "~/Desktop/mlx2/src/mlx2/structured_output.py", line 182, in _allowed
+    match = self.constraint.fullmatch(
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^
+TimeoutError: regex timed out
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "~/Desktop/mlx2/src/mlx2/serving.py", line 768, in _run
+    prompts, responses = batch.next()
+                         ^^^^^^^^^^^^
+  File "~/Desktop/mlx2/src/mlx2/runtime/generate.py", line 3312, in next
+    return self._next()
+           ^^^^^^^^^^^^
+  File "~/Desktop/mlx2/src/mlx2/runtime/generate.py", line 3222, in _next
+    generation_responses = self._generation_batch.next()
+                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "~/Desktop/mlx2/src/mlx2/runtime/generate.py", line 697, in next
+    (tokens, logprobs) = self._step()
+                         ^^^^^^^^^^^^
+  File "~/Desktop/mlx2/src/mlx2/runtime/generate.py", line 618, in _step
+    sample_logits = processor(token_context[e], sample_logits)
+                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "~/Desktop/mlx2/src/mlx2/structured_output.py", line 208, in __call__
+    allowed = self._allowed(prefix)
+              ^^^^^^^^^^^^^^^^^^^^^
+  File "~/Desktop/mlx2/src/mlx2/structured_output.py", line 188, in _allowed
+    raise ValueError(
+ValueError: structured-output grammar exceeded its match budget
+2026-09-16 18:51:24,861 INFO "POST /v1/chat/completions HTTP/1.1" 503 -
+2026-09-16 18:51:24,876 INFO "POST /v1/chat/completions HTTP/1.1" 503 -
+2026-09-16 18:51:24,878 INFO "POST /v1/chat/completions HTTP/1.1" 503 -
+2026-09-16 18:51:24,879 INFO "POST /v1/chat/completions HTTP/1.1" 503 -
+2026-09-16 18:51:24,880 INFO "POST /v1/chat/completions HTTP/1.1" 429 -
+2026-09-16 18:51:24,881 INFO "GET /v1/status/batching HTTP/1.1" 200 -
+2026-09-16 18:51:24,883 INFO "POST /v1/chat/completions HTTP/1.1" 503 -
+2026-09-16 18:51:24,883 INFO "POST /v1/chat/completions HTTP/1.1" 503 -
+2026-09-16 18:51:24,883 INFO "POST /v1/chat/completions HTTP/1.1" 503 -
+2026-09-16 18:51:24,883 INFO "POST /v1/chat/completions HTTP/1.1" 503 -
+2026-09-16 18:51:24,890 INFO "GET /v1/status/batching HTTP/1.1" 200 -
+ValueError: structured-output grammar exceeded its match budget

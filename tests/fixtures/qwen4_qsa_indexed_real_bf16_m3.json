@@ -1,0 +1,14 @@
+{
+  "fixture": "qwen4_qsa_indexed_real_bf16_m3.safetensors",
+  "source_ledger": "results/qwen4-qsa-indexed-fix-20260901-captures/calls.jsonl:13",
+  "source_call": {
+    "layer_index": 3,
+    "call_counter": 2,
+    "query_width": 3,
+    "physical_width": 16387,
+    "causal_mask_present": true
+  },
+  "tensor_source": "mismatch-01-layer-003-call-000001.safetensors",
+  "derivation": "The capture cap retained only L=1 tensors. This fixture uses its real layer-3 BF16 Q/K/V values, remaps 257 selected blocks, preserves the earliest L=3 tail transitions, and repeats retained real query rows to form M=3.",
+  "source_mismatch_sha256": "ba101e86868e8de2b1d4dafdc7d012eb1667ceda8a9dddd367463ee7f38da884"
+}

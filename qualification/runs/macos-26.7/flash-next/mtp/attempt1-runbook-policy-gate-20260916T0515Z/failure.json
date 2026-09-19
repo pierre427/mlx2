@@ -1,0 +1,16 @@
+{
+  "arm": "flash-next-apcv2-mtp2",
+  "cleanup": {
+    "port_8285_clear": true,
+    "swap_zero": true,
+    "thermal_state": 0
+  },
+  "failure": "temp runbook compared normalized settings.execution_policy to source feature policy JSON",
+  "failure_stage": "initial_runbook_status_validation",
+  "qualification_complete": false,
+  "qualification_requests_started": false,
+  "route_receipt_written": false,
+  "runtime_source_sha256": "ad7fdc5caa4fda337258b2cec93a9c4dedc65de8cf3afa0f971a07259ce6b760",
+  "schema": "mlx2.qualification-attempt.v1",
+  "server_healthy": true
+}

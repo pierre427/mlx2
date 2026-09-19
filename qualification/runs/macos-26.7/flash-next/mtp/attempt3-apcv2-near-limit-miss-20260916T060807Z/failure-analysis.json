@@ -1,0 +1,30 @@
+{
+  "admission_fix_result": "passed_prior_failure_point_and_completed_both_requests_without_429",
+  "arm": "mtp",
+  "canonical_published": false,
+  "cold": {
+    "cached_tokens": 0,
+    "completion_tokens": 64,
+    "elapsed_seconds": 227.3220909169977,
+    "prompt_tokens": 261923,
+    "ttft_seconds": 224.46050987499984
+  },
+  "failed_gate": "context",
+  "failure_summary": "Both requests produced LONG_READY and completed. Warm cached_tokens remained 0; qualifier requires > near_limit_floor minus tolerance. APCv2 near-limit store/reuse is a separate gap.",
+  "ordinary_started": false,
+  "post_stop": {
+    "port_8285_clear": true,
+    "swap_used_mb": 0.0,
+    "thermal_warning": false
+  },
+  "runbook_sha256": "5ec6fdc8c76dbffc92fd98fc271158c1b40a987710019bc11975d529970bcd4b",
+  "runtime_source_sha256": "84a08d12ee5434553b6dae330b0828cfbb5f34231090ff59142bc284b5220967",
+  "schema": "mlx2.flash-next-failed-attempt.v1",
+  "warm": {
+    "cached_tokens": 0,
+    "completion_tokens": 64,
+    "elapsed_seconds": 234.23453854200125,
+    "prompt_tokens": 261923,
+    "ttft_seconds": 231.0975733339983
+  }
+}

@@ -1,0 +1,26 @@
+{
+  "component": "stock rotating-cache undo and accepted-prefix replay transaction",
+  "source_repository": "lab-owned mlx-lm-unified",
+  "source_revision": "13eb83388750435bcc751d0b9e33857a38152544",
+  "source_paths": [
+    "mlx_lm/models/cache.py",
+    "mlx_lm/generate.py"
+  ],
+  "license": "MIT",
+  "destination_paths": [
+    "src/mlx2/runtime/rotating_replay.py",
+    "src/mlx2/runtime/pld.py"
+  ],
+  "modifications": [
+    "Kept the compatibility transaction default-off and isolated from mlx2 segmented cache transactions.",
+    "Used stock RotatingKVCache speculative snapshots to restore the pre-verify ring, then replayed only accepted token IDs.",
+    "Added proposal-bound, extent, cache-type, and nested-transaction checks plus a bounded receipt.",
+    "Snapshot all participating cache objects before rollback and restore every object if any layer trim fails, preserving multi-cache atomicity.",
+    "Added commit_verified so a wholly accepted verify forward publishes without restore or replay, and wired the transaction into the prompt-lookup route behind the default-off rotating_replay policy knob; the transaction's replay callable is the round's single replay forward over every lane cache, and a refused transaction falls back to the copy snapshot."
+  ],
+  "validation": [
+    "tests/test_rotating_replay.py",
+    "2026-09-18 Apple-GPU synthetic rotating-cache smoke committed one accepted token from a two-token proposal with an observed committed receipt.",
+    "tests/test_pld_rotating_replay.py (CPU synthetic; implemented, default-off, not serving-qualified)"
+  ]
+}

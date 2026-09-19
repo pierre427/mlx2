@@ -1,0 +1,229 @@
+{
+  "4": {
+    "codes": {
+      "200": 4
+    },
+    "observed_widths": [
+      1,
+      2,
+      3,
+      4
+    ],
+    "wall_s": 8.4,
+    "agg_tok_s": 94.8,
+    "metal_active_delta_gib": 12.73,
+    "per_lane_gib": 3.183,
+    "min_headroom_gib": 68.8,
+    "max_inflight": 4,
+    "stages": [
+      "full"
+    ],
+    "admission": {
+      "modes": [
+        "self_mtp",
+        "self_mtp",
+        "self_mtp",
+        "self_mtp"
+      ],
+      "draft_depths": [
+        2,
+        2,
+        2,
+        2
+      ],
+      "stage": "full",
+      "estimated_gib": 12.57193603515625,
+      "usable_gib": 48.83555603027344,
+      "primary_rows": 4,
+      "speculative_rows": 8,
+      "optional_reclaim_wait": false
+    },
+    "errors": []
+  },
+  "8": {
+    "codes": {
+      "200": 8
+    },
+    "observed_widths": [
+      1,
+      2,
+      3,
+      4,
+      5
+    ],
+    "wall_s": 13.0,
+    "agg_tok_s": 123.3,
+    "metal_active_delta_gib": 16.35,
+    "per_lane_gib": 2.044,
+    "min_headroom_gib": 62.4,
+    "max_inflight": 8,
+    "stages": [
+      "full"
+    ],
+    "admission": {
+      "modes": [
+        "self_mtp"
+      ],
+      "draft_depths": [
+        2
+      ],
+      "stage": "full",
+      "estimated_gib": 3.1429840087890626,
+      "usable_gib": 42.0040283203125,
+      "primary_rows": 1,
+      "speculative_rows": 2,
+      "optional_reclaim_wait": false
+    },
+    "errors": []
+  },
+  "13": {
+    "codes": {
+      "200": 13
+    },
+    "observed_widths": [
+      1,
+      2,
+      3,
+      4
+    ],
+    "wall_s": 13.9,
+    "agg_tok_s": 187.5,
+    "metal_active_delta_gib": 13.13,
+    "per_lane_gib": 1.01,
+    "min_headroom_gib": 62.7,
+    "max_inflight": 13,
+    "stages": [
+      "full"
+    ],
+    "admission": {
+      "modes": [
+        "self_mtp"
+      ],
+      "draft_depths": [
+        2
+      ],
+      "stage": "full",
+      "estimated_gib": 3.1429840087890626,
+      "usable_gib": 44.946014404296875,
+      "primary_rows": 1,
+      "speculative_rows": 2,
+      "optional_reclaim_wait": false
+    },
+    "errors": []
+  },
+  "14": {
+    "codes": {
+      "200": 14
+    },
+    "observed_widths": [
+      1,
+      2,
+      3,
+      5,
+      6,
+      7
+    ],
+    "wall_s": 17.9,
+    "agg_tok_s": 156.6,
+    "metal_active_delta_gib": 23.89,
+    "per_lane_gib": 1.706,
+    "min_headroom_gib": 50.9,
+    "max_inflight": 14,
+    "stages": [
+      "full"
+    ],
+    "admission": {
+      "modes": [
+        "self_mtp"
+      ],
+      "draft_depths": [
+        2
+      ],
+      "stage": "full",
+      "estimated_gib": 3.1429840087890626,
+      "usable_gib": 30.860794067382812,
+      "primary_rows": 1,
+      "speculative_rows": 2,
+      "optional_reclaim_wait": false
+    },
+    "errors": []
+  },
+  "16": {
+    "codes": {
+      "200": 16
+    },
+    "observed_widths": [
+      1,
+      2,
+      3,
+      4
+    ],
+    "wall_s": 15.5,
+    "agg_tok_s": 206.7,
+    "metal_active_delta_gib": 12.97,
+    "per_lane_gib": 0.811,
+    "min_headroom_gib": 50.9,
+    "max_inflight": 16,
+    "stages": [
+      "full"
+    ],
+    "admission": {
+      "modes": [
+        "self_mtp"
+      ],
+      "draft_depths": [
+        2
+      ],
+      "stage": "full",
+      "estimated_gib": 3.1429840087890626,
+      "usable_gib": 46.094207763671875,
+      "primary_rows": 1,
+      "speculative_rows": 2,
+      "optional_reclaim_wait": false
+    },
+    "errors": []
+  },
+  "20": {
+    "codes": {
+      "200": 20
+    },
+    "observed_widths": [
+      1,
+      4,
+      5,
+      6,
+      7,
+      8,
+      10,
+      11,
+      12,
+      13,
+      14
+    ],
+    "wall_s": 24.6,
+    "agg_tok_s": 162.5,
+    "metal_active_delta_gib": 34.63,
+    "per_lane_gib": 1.731,
+    "min_headroom_gib": 41.7,
+    "max_inflight": 20,
+    "stages": [
+      "fewer_lanes",
+      "full"
+    ],
+    "admission": {
+      "modes": [
+        "self_mtp"
+      ],
+      "draft_depths": [
+        2
+      ],
+      "stage": "full",
+      "estimated_gib": 3.1429840087890626,
+      "usable_gib": 22.246963500976562,
+      "primary_rows": 1,
+      "speculative_rows": 2,
+      "optional_reclaim_wait": false
+    },
+    "errors": []
+  }
+}

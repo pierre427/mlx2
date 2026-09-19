@@ -1,0 +1,101 @@
+[transformers] PyTorch was not found. Models won't be available and only tokenizers, configuration and file/data utilities can be used.
+2026-09-15 20:34:45,298 INFO ubc_evict: evicted 4784.0 MB from UBC for ~/mlx-models/Qwen3.8-27B-oQ4e-mtp/model-00001-of-00004.safetensors
+2026-09-15 20:34:45,336 INFO ubc_evict: evicted 4785.1 MB from UBC for ~/mlx-models/Qwen3.8-27B-oQ4e-mtp/model-00002-of-00004.safetensors
+2026-09-15 20:34:45,373 INFO ubc_evict: evicted 4769.9 MB from UBC for ~/mlx-models/Qwen3.8-27B-oQ4e-mtp/model-00003-of-00004.safetensors
+2026-09-15 20:34:45,388 INFO ubc_evict: evicted 1846.3 MB from UBC for ~/mlx-models/Qwen3.8-27B-oQ4e-mtp/model-00004-of-00004.safetensors
+2026-09-15 20:34:45,388 INFO ubc_evict: pass complete total_mb=16185.5 elapsed_s=0.12
+2026-09-15 20:35:24,706 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-15 20:35:34,020 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-15 20:35:36,559 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-15 20:35:36,858 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-15 20:35:47,977 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-15 20:35:57,776 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-15 20:35:58,184 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-15 20:35:58,517 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-15 20:35:58,609 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-15 20:35:59,611 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-15 20:36:00,287 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-15 20:36:00,599 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-15 20:36:00,832 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-15 20:36:00,926 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-15 20:36:02,310 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-15 20:36:03,552 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-15 20:36:04,620 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-15 20:36:04,808 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-15 20:36:07,043 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-15 20:36:09,188 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-15 20:36:15,943 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-15 20:36:15,945 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-15 20:36:16,035 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-15 20:36:16,035 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-15 20:36:18,256 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-15 20:36:20,461 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-15 20:36:22,692 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-15 20:36:22,692 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-15 20:36:53,773 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-15 20:37:37,250 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-15 20:37:51,422 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-15 20:38:35,546 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-15 20:38:59,169 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-15 20:39:15,082 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-15 20:39:39,716 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-15 20:39:55,194 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-15 20:40:26,256 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-15 20:40:37,753 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-15 20:41:16,271 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-15 20:41:52,294 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-15 20:42:05,311 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-15 20:42:45,114 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-15 20:43:24,943 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-15 20:43:41,454 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-15 20:44:05,390 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-15 20:44:44,768 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-15 20:44:59,536 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-15 20:45:25,970 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-15 20:46:08,493 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-15 20:46:16,411 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-15 20:46:48,915 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-15 20:47:27,036 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-15 20:47:33,888 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-15 20:48:08,769 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-15 20:48:47,727 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-15 20:48:48,032 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-15 20:49:27,669 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-15 20:49:59,711 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-15 20:50:07,030 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-15 20:50:38,377 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-15 20:50:40,455 ERROR generation worker failed
+Traceback (most recent call last):
+  File "~/Desktop/mlx2/src/mlx2/serving.py", line 598, in _run
+    prompts, responses = batch.next()
+                         ^^^^^^^^^^^^
+  File "~/Desktop/mlx2/src/mlx2/runtime/generate.py", line 3168, in next
+    return self._next()
+           ^^^^^^^^^^^^
+  File "~/Desktop/mlx2/src/mlx2/runtime/generate.py", line 3113, in _next
+    prompt_responses.extend(self._promote_ready_prompts())
+                            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "~/Desktop/mlx2/src/mlx2/runtime/generate.py", line 3062, in _promote_ready_prompts
+    gen_batch = ready.generate(last_inputs)
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "~/Desktop/mlx2/src/mlx2/runtime/generate.py", line 459, in generate
+    generation = GenerationBatch(
+                 ^^^^^^^^^^^^^^^^
+  File "~/Desktop/mlx2/src/mlx2/runtime/generate.py", line 562, in __init__
+    self._step()
+  File "~/Desktop/mlx2/src/mlx2/runtime/generate.py", line 606, in _step
+    logits = self.model(inputs[:, None], cache=self.prompt_cache)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "~/Desktop/mlx2/src/mlx2/runtime/models/qwen38_27b.py", line 345, in __call__
+    return self.language_model(
+           ^^^^^^^^^^^^^^^^^^^^
+  File "~/Desktop/mlx2/src/mlx2/runtime/models/qwen38_27b.py", line 224, in __call__
+    out = self.model(inputs, cache, input_embeddings=input_embeddings)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "~/Desktop/mlx2/src/mlx2/runtime/models/qwen38_27b.py", line 164, in __call__
+    fa_mask = create_attention_mask(hidden_states, cache[self.fa_idx])
+                                                   ~~~~~^^^^^^^^^^^^^
+IndexError: list index out of range
+2026-09-15 20:50:40,465 INFO "POST /v1/chat/completions HTTP/1.1" 503 -
+2026-09-15 20:50:40,478 INFO "GET /v1/status HTTP/1.1" 200 -
+IndexError: list index out of range

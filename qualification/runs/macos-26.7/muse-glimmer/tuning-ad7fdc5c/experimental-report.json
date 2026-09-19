@@ -1,0 +1,484 @@
+{
+  "canonical_receipts": {
+    "dflash2": {
+      "path": "qualification/runs/macos-26.7/muse-glimmer/dflash2/route-qualification.json",
+      "sha256": "f6ad76b95d8afa41e03b1129eecddf24757df4537b3de1308b20c1d7db182ff3"
+    },
+    "ordinary": {
+      "path": "qualification/runs/macos-26.7/muse-glimmer/ordinary/route-qualification.json",
+      "sha256": "c4e4ee33ae2db8b16eeb36f5bdd8055f80a1af849edca2b60ed0a6cf7ad7b06c"
+    }
+  },
+  "controls": {
+    "canonical_publication_modified": false,
+    "fresh_isolated_cache_per_arm": true,
+    "swap_required_zero": true,
+    "thermal_pre_and_post_required": true,
+    "thermal_watchdog_seconds": 5
+  },
+  "excluded_attempts": [
+    {
+      "name": "b1-r2-ordinary",
+      "reason": "thermal watchdog observed thermal_state=1 during queued requests; server intentionally stopped and returned HTTP 503; no generation traceback"
+    },
+    {
+      "name": "b1-r2-valid-nd3",
+      "reason": "preflight thermal_state=1; server never started"
+    }
+  ],
+  "harnesses": {
+    "arm_runner_current": {
+      "path": "/tmp/mlx2-muse-target-width-20260915/tuning-ad7fdc5c/run-controlled-arm.sh",
+      "sha256": "b320c1f62bb1ac5d913fc2cd59c31ea85536e1fcb560f49e60a2bdfddda47af5"
+    },
+    "controlled_seeded": {
+      "path": "/tmp/mlx2-muse-target-width-20260915/tuning-ad7fdc5c/run-controlled.py",
+      "seed": 424242,
+      "sha256": "797abc279a8379842df2c7c50a44a97c2d4360db65dbf88df3308a4e03cabea7"
+    },
+    "controlled_unseeded_wrapper": {
+      "path": "/tmp/mlx2-muse-target-width-20260915/tuning-ad7fdc5c/run-controlled-unseeded.py",
+      "seed": null,
+      "sha256": "dc22c83f80eea2152143efd34918afb7e6d531f1fc3493bddd6c86154069735b"
+    },
+    "initial_arm_runner_sha256": "80943b1f99183e5622af3499274b0291ef71b1e0c103b96af37b428746521819",
+    "initial_unseeded_b4": {
+      "path": "/tmp/mlx2-muse-target-width-20260915/tuning-ad7fdc5c/run-b4.py",
+      "sha256": "fe9490e674b04c22b7e2fc5166d8890fb7a7f025e193047ec526cfb41cfa6c71"
+    }
+  },
+  "policies": {
+    "num_draft_2": {
+      "path": "/tmp/mlx2-muse-target-width-20260915/tuning-ad7fdc5c/policy-nd2.json",
+      "sha256": "25a6a74e2371d33017c4e42401645910d1f796acf7f30952dafe16c76dcb140c"
+    },
+    "num_draft_3": {
+      "path": "/tmp/mlx2-muse-target-width-20260915/tuning-ad7fdc5c/policy-nd3.json",
+      "sha256": "a1069ed3e38892f08aafb655992a4c321555a48eae571fa69f0946851f46e500"
+    }
+  },
+  "qualification_harness_sha256": "8d32f490519f91e0e4b96f0e6b60d05b088aba41930b1b5df24eb0292fcfa8c1",
+  "qualification_manifest_sha256": "b4cae832cfe3e783e2596458a3cdc31eac8884252da72a3504bc8c68392f8ff6",
+  "runtime": {
+    "dependencies": {
+      "jinja2": "3.1.6",
+      "numpy": "2.5.1",
+      "psutil": "7.2.2",
+      "regex": "2026.9.10",
+      "safetensors": "0.8.0",
+      "tokenizers": "0.22.2"
+    },
+    "macos": "26.7",
+    "mlx": "0.32.2.dev20260915+2a817ad94",
+    "mlx_native_sha256": "30335939714520c3306cfa58597100aae08bbeabdc60a4bc8c35c32c607450a8",
+    "python": "3.12.13",
+    "source_sha256": "ad7fdc5caa4fda337258b2cec93a9c4dedc65de8cf3afa0f971a07259ce6b760",
+    "transformers": "5.12.1"
+  },
+  "schema": "mlx2.muse-dflash-tuning-report.v1",
+  "semantics": {
+    "independent_draft_b1_target_b4_available": false,
+    "long_context_reuse": "skipped: qualification cache contained no safely reusable persisted state",
+    "max_lanes_1": "limits ExternalDraftBatchGenerator capacity and forces both target and draft execution width to 1; this is serialized B1, not an isolated draft-width control",
+    "segment_aware_cohort_size": "emitted by Muse adapter but not consumed by ExternalDraftBatchGenerator"
+  },
+  "status": "experimental_only",
+  "valid_cells": {
+    "b1_unseeded_three_runs_per_arm": {
+      "nd2": {
+        "acceptance": {
+          "max": 0.7014652014652014,
+          "mean": 0.6996177537222313,
+          "median": 0.6996268656716418,
+          "min": 0.6977611940298507,
+          "range": 0.003704007435350709
+        },
+        "accepted": [
+          375,
+          374,
+          383
+        ],
+        "aggregate_tps": {
+          "max": 41.87665816141206,
+          "mean": 38.060815052423706,
+          "median": 41.8554566439737,
+          "min": 30.45033035188535,
+          "range": 11.426327809526711
+        },
+        "external_rounds": [
+          270,
+          270,
+          275
+        ],
+        "fallbacks": [
+          0,
+          0,
+          0
+        ],
+        "paired_cache_resumes": [
+          4,
+          4,
+          4
+        ],
+        "per_request_tps": {
+          "max": 42.1105440639049,
+          "mean": 38.06611749900446,
+          "median": 41.67163228408221,
+          "min": 30.102403671915834,
+          "range": 12.008140391989063
+        },
+        "pooled_acceptance": 0.6996291718170581,
+        "proposed": [
+          536,
+          536,
+          546
+        ],
+        "rollbacks": [
+          105,
+          105,
+          106
+        ],
+        "run_values": [
+          41.87665816141206,
+          41.8554566439737,
+          30.45033035188535
+        ],
+        "runs": [
+          "b1-r1-nd2",
+          "b1-r2-valid-nd2",
+          "b1-r3-nd2"
+        ],
+        "swap_zero": true,
+        "thermal": {
+          "after_states": [
+            0,
+            0,
+            0
+          ],
+          "battery_c_range": [
+            30.78,
+            30.83
+          ],
+          "before_states": [
+            0,
+            0,
+            0
+          ],
+          "virtual_c_range": [
+            34.59,
+            35.09
+          ]
+        },
+        "ttft_seconds": {
+          "max": 0.08609045800039894,
+          "mean": 0.06673304841721499,
+          "median": 0.060037687499061576,
+          "min": 0.05899020799915888,
+          "range": 0.027100250001240056
+        },
+        "widths": [
+          [
+            1,
+            1
+          ]
+        ]
+      },
+      "nd3": {
+        "acceptance": {
+          "max": 0.6126760563380281,
+          "mean": 0.6058439661743857,
+          "median": 0.6039453717754173,
+          "min": 0.6009104704097117,
+          "range": 0.011765585928316447
+        },
+        "accepted": [
+          435,
+          398,
+          396
+        ],
+        "aggregate_tps": {
+          "max": 45.935924222324445,
+          "mean": 43.48716815434285,
+          "median": 45.8399844097669,
+          "min": 38.68559583093719,
+          "range": 7.2503283913872565
+        },
+        "external_rounds": [
+          238,
+          221,
+          221
+        ],
+        "fallbacks": [
+          0,
+          0,
+          0
+        ],
+        "paired_cache_resumes": [
+          4,
+          4,
+          4
+        ],
+        "per_request_tps": {
+          "max": 46.087101276024555,
+          "mean": 43.49415655522245,
+          "median": 45.79438150159681,
+          "min": 38.33527280863457,
+          "range": 7.751828467389984
+        },
+        "pooled_acceptance": 0.6060157790927022,
+        "proposed": [
+          710,
+          659,
+          659
+        ],
+        "rollbacks": [
+          140,
+          132,
+          133
+        ],
+        "run_values": [
+          38.68559583093719,
+          45.935924222324445,
+          45.8399844097669
+        ],
+        "runs": [
+          "b1-r1-nd3",
+          "b1-r2-valid-nd3-retry",
+          "b1-r3-nd3"
+        ],
+        "swap_zero": true,
+        "thermal": {
+          "after_states": [
+            0,
+            0,
+            0
+          ],
+          "battery_c_range": [
+            30.8,
+            30.83
+          ],
+          "before_states": [
+            0,
+            0,
+            0
+          ],
+          "virtual_c_range": [
+            34.79,
+            35.09
+          ]
+        },
+        "ttft_seconds": {
+          "max": 0.07568570800140151,
+          "mean": 0.06681575683372405,
+          "median": 0.06331281250095344,
+          "min": 0.06229275000077905,
+          "range": 0.013392958000622457
+        },
+        "widths": [
+          [
+            1,
+            1
+          ]
+        ]
+      },
+      "ordinary": {
+        "aggregate_tps": {
+          "max": 32.29348833404135,
+          "mean": 29.978313690247784,
+          "median": 32.249519233908835,
+          "min": 25.391933502793172,
+          "range": 6.901554831248177
+        },
+        "per_request_tps": {
+          "max": 32.38767643851163,
+          "mean": 29.981565924219183,
+          "median": 32.26754975351727,
+          "min": 25.230884437032355,
+          "range": 7.156792001479278
+        },
+        "run_values": [
+          32.29348833404135,
+          32.249519233908835,
+          25.391933502793172
+        ],
+        "runs": [
+          "b1-r1-ordinary",
+          "b1-r2-valid-ordinary",
+          "b1-r3-ordinary"
+        ],
+        "swap_zero": true,
+        "thermal": {
+          "after_states": [
+            0,
+            0,
+            0
+          ],
+          "battery_c_range": [
+            30.78,
+            30.83
+          ],
+          "before_states": [
+            0,
+            0,
+            0
+          ],
+          "virtual_c_range": [
+            34.59,
+            35.09
+          ]
+        },
+        "ttft_seconds": {
+          "max": 0.10362924999935785,
+          "mean": 0.0870801457494963,
+          "median": 0.08100477100015269,
+          "min": 0.07689391699750558,
+          "range": 0.02673533300185227
+        },
+        "widths": [
+          [
+            1,
+            null
+          ]
+        ]
+      }
+    },
+    "b4_seeded_single_run_exploratory": {
+      "nd2": {
+        "acceptance": 0.696526508226691,
+        "aggregate_tps": 48.51792199444976,
+        "name": "seeded-b4-nd2",
+        "scheduler_delta": {
+          "accepted_proposals": 381,
+          "draft_fallbacks": 0,
+          "draft_max_width": 2,
+          "external_rounds": 168,
+          "memory_deferred": 0,
+          "memory_pressure_evictions": 0,
+          "ordinary_rounds": 0,
+          "paired_cache_resumes": 4,
+          "prefill_rounds": 0,
+          "proposed_tokens": 547,
+          "segmented_rollbacks": 108,
+          "segmented_transactions": 274,
+          "target_max_width": 3
+        },
+        "ttfts": [
+          0.12082870800077217,
+          0.0644821249989036,
+          0.17597804199976963,
+          0.2739929999988817
+        ],
+        "widths": [
+          [
+            4,
+            3
+          ]
+        ]
+      },
+      "nd3": {
+        "acceptance": 0.5838235294117647,
+        "aggregate_tps": 34.525068338562455,
+        "name": "seeded-b4-nd3",
+        "scheduler_delta": {
+          "accepted_proposals": 397,
+          "draft_fallbacks": 0,
+          "draft_max_width": 3,
+          "external_rounds": 146,
+          "memory_deferred": 0,
+          "memory_pressure_evictions": 0,
+          "ordinary_rounds": 0,
+          "paired_cache_resumes": 4,
+          "prefill_rounds": 0,
+          "proposed_tokens": 680,
+          "segmented_rollbacks": 141,
+          "segmented_transactions": 227,
+          "target_max_width": 3
+        },
+        "ttfts": [
+          0.19047370800035424,
+          0.10206225000001723,
+          0.2787682079979277,
+          0.366002083002968
+        ],
+        "widths": [
+          [
+            4,
+            4
+          ]
+        ]
+      },
+      "ordinary": {
+        "acceptance": null,
+        "aggregate_tps": 104.43347502202953,
+        "name": "seeded-b4-ordinary",
+        "scheduler_delta": {
+          "accepted_proposals": 0,
+          "draft_fallbacks": 0,
+          "draft_max_width": 0,
+          "external_rounds": 0,
+          "memory_deferred": 0,
+          "memory_pressure_evictions": 0,
+          "ordinary_rounds": 0,
+          "paired_cache_resumes": 0,
+          "prefill_rounds": 0,
+          "proposed_tokens": 0,
+          "segmented_rollbacks": 0,
+          "segmented_transactions": 0,
+          "target_max_width": 0
+        },
+        "ttfts": [
+          0.15496279100261745,
+          0.1560453329984739,
+          0.1915270839999721,
+          0.19434349999937695
+        ],
+        "widths": [
+          [
+            4,
+            null
+          ]
+        ]
+      }
+    },
+    "b4_unseeded_dflash_single_run_exploratory": {
+      "nd2": {
+        "acceptance": 0.697632058287796,
+        "aggregate_tps": 48.61364025948817,
+        "scheduler_delta": {
+          "accepted_proposals": 383,
+          "draft_fallbacks": 0,
+          "draft_max_width": 2,
+          "external_rounds": 169,
+          "memory_deferred": 0,
+          "memory_pressure_evictions": 0,
+          "ordinary_rounds": 0,
+          "paired_cache_resumes": 4,
+          "prefill_rounds": 0,
+          "proposed_tokens": 549,
+          "segmented_rollbacks": 108,
+          "segmented_transactions": 275,
+          "target_max_width": 3
+        }
+      },
+      "nd3": {
+        "acceptance": 0.5801186943620178,
+        "aggregate_tps": 49.09513667605825,
+        "scheduler_delta": {
+          "accepted_proposals": 391,
+          "draft_fallbacks": 0,
+          "draft_max_width": 3,
+          "external_rounds": 144,
+          "memory_deferred": 0,
+          "memory_pressure_evictions": 0,
+          "ordinary_rounds": 0,
+          "paired_cache_resumes": 4,
+          "prefill_rounds": 0,
+          "proposed_tokens": 674,
+          "segmented_rollbacks": 141,
+          "segmented_transactions": 225,
+          "target_max_width": 3
+        }
+      }
+    }
+  }
+}

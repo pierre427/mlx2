@@ -1,0 +1,39 @@
+unit_tests: PASS
+hermes_client: PASS
+logprobs: PASS
+sampling_controls: PASS
+sampling_defaults: PASS
+cold_text: PASS
+warm_prefix: PASS
+structured_output: PASS
+structured_output_sampled: PASS
+structured_output_thinking: PASS
+stream: PASS
+Evidence: /private/tmp/mlx2-xing/qualification/runs/xing4-0-gpu-20260918/x6-ordinary-qualification.json
+Traceback (most recent call last):
+  File "/private/tmp/mlx2-xing/scripts/qualify_serving.py", line 1171, in <module>
+    main()
+  File "/private/tmp/mlx2-xing/scripts/qualify_serving.py", line 874, in main
+    tool_response = post(tool_request)
+                    ^^^^^^^^^^^^^^^^^^
+  File "/private/tmp/mlx2-xing/scripts/qualify_serving.py", line 637, in post
+    response = urlopen(
+               ^^^^^^^^
+  File "~/.local/share/uv/python/cpython-3.12.13-macos-aarch64-none/lib/python3.12/urllib/request.py", line 215, in urlopen
+    return opener.open(url, data, timeout)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "~/.local/share/uv/python/cpython-3.12.13-macos-aarch64-none/lib/python3.12/urllib/request.py", line 521, in open
+    response = meth(req, response)
+               ^^^^^^^^^^^^^^^^^^^
+  File "~/.local/share/uv/python/cpython-3.12.13-macos-aarch64-none/lib/python3.12/urllib/request.py", line 630, in http_response
+    response = self.parent.error(
+               ^^^^^^^^^^^^^^^^^^
+  File "~/.local/share/uv/python/cpython-3.12.13-macos-aarch64-none/lib/python3.12/urllib/request.py", line 559, in error
+    return self._call_chain(*args)
+           ^^^^^^^^^^^^^^^^^^^^^^^
+  File "~/.local/share/uv/python/cpython-3.12.13-macos-aarch64-none/lib/python3.12/urllib/request.py", line 492, in _call_chain
+    result = func(*args)
+             ^^^^^^^^^^^
+  File "~/.local/share/uv/python/cpython-3.12.13-macos-aarch64-none/lib/python3.12/urllib/request.py", line 639, in http_error_default
+    raise HTTPError(req.full_url, code, msg, hdrs, fp)
+urllib.error.HTTPError: HTTP Error 502: Bad Gateway

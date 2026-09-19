@@ -1,0 +1,63 @@
+{
+  "schema": "mlx2.cpu-qualification.v1",
+  "scope": "remaining-api-breadth-and-advanced-state",
+  "date": "2026-09-18",
+  "source_base": "77a8d20",
+  "branch": "codex/api-state-maturity",
+  "device_policy": "cpu-only",
+  "gpu_tests_run": false,
+  "implemented": {
+    "responses_state": {
+      "state": "implemented-cpu-qualified",
+      "scope": "bounded tenant-scoped process-local store",
+      "operations": ["create", "retrieve", "delete", "previous_response_id"],
+      "durability": "process lifetime only"
+    },
+    "responses_streaming_tools": {
+      "state": "implemented-cpu-qualified",
+      "behavior": "buffer through terminal contract validation, then emit typed function argument and item events"
+    },
+    "files": {
+      "state": "implemented-cpu-qualified",
+      "scope": "bounded multipart upload, metadata/content retrieval, delete, UTF-8 Responses input_file"
+    },
+    "batch": {
+      "state": "implemented-cpu-qualified",
+      "scope": "bounded asynchronous JSONL chat, completions, Responses and embeddings rows with Files API outputs"
+    },
+    "embeddings_rerank": {
+      "state": "wire-and-capability-contract-cpu-qualified",
+      "execution": "adapter-owned embed/rerank hooks",
+      "shipped_adapter_state": "unsupported-501"
+    },
+    "lora_lifecycle": {
+      "state": "wire-and-capability-contract-cpu-qualified",
+      "surface": ["/v1/load_lora_adapter", "/v1/unload_lora_adapter"],
+      "execution": "engine-owned revision-bound hooks",
+      "shipped_engine_state": "unsupported-501"
+    },
+    "multimodal_hosted_tools": {
+      "state": "fail-closed-capability-gates-cpu-qualified",
+      "supported": ["UTF-8 text files"],
+      "unsupported_501": ["images", "audio", "hosted tools", "MCP tools"]
+    },
+    "advanced_state": {
+      "spomin": "tiny North CPU qualified; exact pre-surgery APCv2 shadow reuse",
+      "approximate_kv": "tiny Qwen3.8 CPU qualified for Q8/K8V4 invariants",
+      "production_model_gpu_state": "unqualified"
+    }
+  },
+  "verification": {
+    "focused": "107 API, telemetry, Q8/K8V4 and Spomin tests passed",
+    "full_collected": 1088,
+    "full_result": "passed with configured skips",
+    "static": "changed-file ruff F/E9, compileall, git diff check and JSON validation passed; repository-wide ruff still has pre-existing findings outside this change set"
+  },
+  "standards_sources": [
+    "https://developers.openai.com/api/reference/resources/responses/methods/create",
+    "https://developers.openai.com/api/reference/resources/embeddings/methods/create",
+    "https://developers.openai.com/api/docs/guides/batch",
+    "https://docs.vllm.ai/en/latest/serving/openai_compatible_server.html",
+    "https://nvidia.github.io/TensorRT-LLM/llm-api/reference/LoRARequest.html"
+  ]
+}

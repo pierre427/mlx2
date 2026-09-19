@@ -1,0 +1,74 @@
+{
+  "schema": "mlx2.cache-capsule-live-smoke.v1",
+  "recorded_at": "2026-09-18T00:45:54-04:00",
+  "source_commit": "bc7ea81",
+  "branch": "codex/peer-advanced-imports-20260917",
+  "model": "~/mlx-models/Muse-Glimmer-30B-mlx-4bit",
+  "route": "ordinary",
+  "qualification_mode": true,
+  "cache_capsule_backend": "gpu",
+  "samples": 3,
+  "parallel_sampling": {
+    "schema": "mlx2.parallel-sampling-admission.v1",
+    "guard": "physical_footprint",
+    "required_headroom_bytes": 34359738368
+  },
+  "request_result": {
+    "http_status": 200,
+    "finish_reasons": ["length", "length", "length"],
+    "usage": {
+      "prompt_tokens": 327,
+      "completion_tokens": 48,
+      "total_tokens": 375
+    },
+    "leader": {
+      "cached_tokens": 0,
+      "cache_capsule": null,
+      "parallel_prefill_role": "prefill_leader"
+    },
+    "siblings": [
+      {
+        "cached_tokens": 108,
+        "parallel_prefill_role": "apcv2_sibling",
+        "cache_capsule": {
+          "schema": "mlx2.cache-capsule.v1",
+          "status": "engaged",
+          "rows": 2,
+          "planes": 52,
+          "capsule_planes": 13,
+          "ordinary_planes": 39
+        }
+      },
+      {
+        "cached_tokens": 108,
+        "parallel_prefill_role": "apcv2_sibling",
+        "cache_capsule": {
+          "schema": "mlx2.cache-capsule.v1",
+          "status": "engaged",
+          "rows": 2,
+          "planes": 52,
+          "capsule_planes": 13,
+          "ordinary_planes": 39
+        }
+      }
+    ]
+  },
+  "serialization": {
+    "cpg_campaign_id": "09a393c5d537430c955139ee522e4951",
+    "cpg_lease_id": "b9a4fdd1f19043639761be5b3f030bc7",
+    "lease_generation": 3,
+    "gpu_locks_held": [
+      "/tmp/gpu.lock",
+      "/Users/Shared/mlxuag/gpu.lock"
+    ]
+  },
+  "cleanup": {
+    "test_server_stopped": true,
+    "production_service": "com.example.fn-uncensored-mlx-serve",
+    "production_model": "Qwen3.8-Flash-Next-Uncensored-MLX-Serve-4bit",
+    "production_state": "ready",
+    "gpu_locks_removed": true,
+    "cpg_lease_released": true
+  },
+  "claim_boundary": "Observed-use mechanism smoke with finite outputs; not a performance, quality-parity, or production-selection qualification."
+}

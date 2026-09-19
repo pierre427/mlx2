@@ -1,0 +1,39 @@
+{
+  "schema": "mlx2.qwen4-gdn-replay-selection.v1",
+  "date": "2026-09-17",
+  "decision": "selected",
+  "scope": "mlx2.adapters.flash_next.configure_environment",
+  "configuration": {
+    "MLX_QWEN4_FUSED_GDN_VERIFY": "1",
+    "MLX_QWEN4_FUSED_GDN_REPLAY_ROLLBACK": "1"
+  },
+  "qualified": true,
+  "observed_used": true,
+  "reference_paths_retained": [
+    "snapshot fused verify rollback",
+    "generic recurrence replay"
+  ],
+  "evidence": [
+    {
+      "path": "qualification/experiments/qwen4-gdn-replay-20260917/kernel-microbench.json",
+      "sha256": "0500f61e8530dcd1c0d13c2d9ef36b1cf25927f80ccaf412347f5d8f5760ad59"
+    },
+    {
+      "path": "qualification/experiments/qwen4-gdn-replay-20260917/model-bound-r12.json",
+      "sha256": "14879d4b5a747db0e6d693d627af67430b110db96b6533405ee89d6af3044db9"
+    },
+    {
+      "path": "qualification/experiments/qwen4-gdn-replay-20260917/quick-ab-r6.json",
+      "sha256": "2e55e01adf17060db1eefbe3baa3787e08ef3bae64898764c8d93f4446780ae9"
+    },
+    {
+      "path": "qualification/experiments/qwen4-gdn-replay-20260917/post-promotion-smoke.json",
+      "sha256": "40c017aa61951ebad68dbb0ab52df26c2d9a946c31daa20470aa2862d44bf426"
+    }
+  ],
+  "limitations": [
+    "B=1 speculative verify only",
+    "width-3 full-round benefit remains small and workload-sensitive",
+    "new adapter loads receive the promoted default; no live service was restarted"
+  ]
+}

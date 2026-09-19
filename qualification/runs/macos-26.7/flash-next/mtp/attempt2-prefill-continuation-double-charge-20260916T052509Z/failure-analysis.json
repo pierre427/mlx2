@@ -1,0 +1,36 @@
+{
+  "arm": "flash-next-apcv2-mtp2",
+  "cleanup": {
+    "port_8285_clear": true,
+    "swap_zero": true,
+    "thermal_state": 0
+  },
+  "completion_tokens": 64,
+  "configuration_decision": "keep max_context=262144 and cache_bytes=17179869184; fix continuation ownership accounting and re-freeze",
+  "double_charge_bound": {
+    "full_final_cache_gib": 15.269279479980469,
+    "growth_horizon_gib": 0.058730125427246094,
+    "mtp_k2_transient_gib": 1.76,
+    "projected_incremental_gib": 17.088009605407716,
+    "shortfall_gib": 1.287417883276941
+  },
+  "failure_stage": "near_limit_sliced_prefill_continuation_admission",
+  "http_status": 429,
+  "observed": {
+    "hard_reserve_gib": 20.0,
+    "headroom_bytes": 38440592656,
+    "headroom_gib": 35.800591722130775,
+    "metal_active_bytes": 81179768034,
+    "process_physical_footprint_bytes": 81818491632,
+    "usable_gib": 15.800591722130775
+  },
+  "prompt_tokens": 261923,
+  "qualification_complete": false,
+  "qualification_harness_sha256": "8d32f490519f91e0e4b96f0e6b60d05b088aba41930b1b5df24eb0292fcfa8c1",
+  "root_cause": "sliced prefill continuation after 99x2048 tokens is marked resident=False and recharged for its complete final cache",
+  "route_receipt_written": false,
+  "runtime_source_sha256": "ad7fdc5caa4fda337258b2cec93a9c4dedc65de8cf3afa0f971a07259ce6b760",
+  "schema": "mlx2.qualification-attempt.v1",
+  "server_crashed": false,
+  "total_tokens": 261987
+}

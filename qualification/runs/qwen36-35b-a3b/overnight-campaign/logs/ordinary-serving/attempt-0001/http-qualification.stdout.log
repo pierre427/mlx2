@@ -1,0 +1,10 @@
+response_format_json_object: failed
+strict_json_schema: failed
+explicit_grammar: failed
+physical_n2: failed
+overload_429_retry_after: passed
+full_length_completions: failed
+latency_ttft_itl_percentiles: passed
+progress_events: failed
+tenant_jain_fairness: failed
+receipt: ~/Desktop/mlx2/qualification/runs/qwen36-35b-a3b/overnight-campaign/artifacts/ordinary-serving-http-qualification.json

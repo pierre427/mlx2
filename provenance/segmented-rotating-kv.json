@@ -1,0 +1,26 @@
+{
+  "implementation": "Original generic per-lane verification transaction and segmented compute view",
+  "files": ["src/mlx2/runtime/segmented_rotating_kv.py", "tests/test_segmented_rotating_kv_cpu.py"],
+  "source_repository": "~/Desktop/mlx-uag/mlx-lm-unified",
+  "source_revision": "1e2bc604f71d070bee970c3e7db8b60f7855599b",
+  "source_license": "MIT",
+  "source_paths": ["mlx_lm/models/cache.py:KVCache and RotatingKVCache exact state and update semantics", "mlx_lm/models/base.py:bucketed_attention seam"],
+  "reuse": "Calls existing mlx2 native cache classes and generic attention seam. No legacy APC/server import or model-name condition. New module is original project code; no upstream class copied into it.",
+  "interface": {
+    "owner": "SegmentedKVRows(rows=[per_lane_layer_cache_lists], note=optional_bounded_counter)",
+    "verify": "owner.begin(lengths) returns transaction with prepared transaction.caches layer views; model(inputs, cache=transaction.caches)",
+    "commit": "transaction.commit(accepted_lengths) publishes exact verified input prefix count for each lane; DFlash anchor+proposals uses 1+accepted_proposals",
+    "abort": "transaction.abort() or context-manager exception restores pre-round cache state including evicted ring tokens",
+    "membership": "owner.filter(indices), owner.extend(rows), owner.extract(index) only outside active transactions; clone_kv_row(caches) creates independent idle checkpoint",
+    "memory": "owner.nbytes includes authoritative arrays, full pre-round snapshot arrays and saved append arrays. transaction.snapshot_nbytes and retained_nbytes are exposed. Snapshot/replay may transiently require additional copy memory; native MLX allocator qualification is mandatory before serving admission is considered calibrated.",
+    "attention": "Projection/trunk remain batch-shaped; each row's native cache mask and SDPA are evaluated independently. No merged historical KV slab, new fused attention kernel, or shared rotating-cache rewind.",
+    "unsupported": "Only exact plain KVCache and RotatingKVCache types, B1 authoritative rows, equal layer topology across lanes. Quantized/ring subclasses and pre-existing speculation ownership rejected. Arbitrary external in-place array writes violate exclusive-owner contract and are not detectable solely through pointer/offset stamps."
+  },
+  "validation": {
+    "stage": "CPU/NumPy actual production class bodies only; no model load or GPU",
+    "tests": "13 tests pass, including 80 randomized multi-round cases across B1..B4 (200 lane-rounds), divergent accepted lengths, wrap/eviction restoration, global+ring layers, partial-forward cancellation, extraction/filter/extend, stale transaction and geometry guards, shared mask reuse, and closed-transaction reference release",
+    "oracle": "Independent full-history sliding/global attention, standalone native cache accepted-prefix replay, and offset-only rewind counterfactual that fails after eviction",
+    "native_gaps": "Actual MLX snapshot copy semantics, array-offset RoPE, native SDPA numerics/performance and memory admission remain unqualified; Muse owner may run explicit-CPU tiny target tests before any separately authorized GPU test"
+  },
+  "qualification": "implemented and CPU-oracle verified in isolated snapshot only; no production route enabled"
+}

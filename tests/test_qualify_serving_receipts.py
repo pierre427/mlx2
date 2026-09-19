@@ -1,0 +1,475 @@
+import importlib.util
+import hashlib
+import math
+import json
+from types import SimpleNamespace
+from pathlib import Path
+
+import pytest
+
+from mlx2.qualification import APPROVED_QUALIFICATION_HARNESS
+
+ROOT = Path(__file__).resolve().parents[1]
+spec = importlib.util.spec_from_file_location("qualify_serving", ROOT / "scripts" / "qualify_serving.py")
+qualify = importlib.util.module_from_spec(spec)
+assert spec.loader is not None
+spec.loader.exec_module(qualify)
+
+
+def test_qualification_harness_receipt_binds_portable_script_identity():
+    receipt = qualify.qualification_harness_identity()
+    assert receipt == {
+        "schema": "mlx2.qualification-harness.v1",
+        "name": "scripts/qualify_serving.py",
+        "sha256": hashlib.sha256(
+            (ROOT / "scripts" / "qualify_serving.py").read_bytes()
+        ).hexdigest(),
+    }
+    assert not receipt["name"].startswith("/")
+    assert receipt == APPROVED_QUALIFICATION_HARNESS
+
+
+def test_preflight_receipt_is_bound_to_git_runtime_tests_and_harness(tmp_path):
+    identity = {
+        "git": {"revision": "abc"}, "runtime": {"source_sha256": "runtime"},
+        "qualification_harness": {"sha256": "harness"}, "test_source_sha256": "tests",
+    }
+    path = tmp_path / "preflight.json"
+    receipt = qualify.write_preflight_receipt(
+        path,
+        run=lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout="42 passed", stderr=""),
+        identity_fn=lambda: identity,
+    )
+    assert receipt["passed"] and receipt["schema"] == qualify.PREFLIGHT_SCHEMA
+    evidence = qualify.validate_preflight_receipt(
+        path, identity["runtime"], identity_fn=lambda: identity
+    )
+    assert evidence["passed"] and evidence["identity"] == identity
+
+
+def test_unimplemented_generic_http_gates_are_machine_visible():
+    coverage = qualify.QUALIFICATION_COVERAGE
+    assert coverage["strict_json_schema"] is True
+    assert coverage["response_format_json_object"] is False
+    assert coverage["physical_n2"] is False
+    assert coverage["overload_429_retry_after"] is False
+    assert coverage["latency_ttft_itl_percentiles"] is False
+    assert coverage["tenant_jain_fairness"] is False
+    assert coverage["progress_events"] is False
+
+
+@pytest.mark.parametrize("mutation", ["failed", "identity", "active_runtime"])
+def test_preflight_receipt_rejects_failed_or_mismatched_evidence(tmp_path, mutation):
+    identity = {
+        "git": {"revision": "abc"}, "runtime": {"source_sha256": "runtime"},
+        "qualification_harness": {"sha256": "harness"}, "test_source_sha256": "tests",
+    }
+    receipt = {"schema": qualify.PREFLIGHT_SCHEMA, "passed": True, "identity": identity}
+    if mutation == "failed":
+        receipt["passed"] = False
+    path = tmp_path / "preflight.json"
+    path.write_text(json.dumps(receipt))
+    current = identity if mutation != "identity" else {**identity, "test_source_sha256": "changed"}
+    active = identity["runtime"] if mutation != "active_runtime" else {"source_sha256": "other"}
+    with pytest.raises(AssertionError, match="preflight receipt"):
+        qualify.validate_preflight_receipt(path, active, identity_fn=lambda: current)
+
+
+def test_long_context_probe_uses_one_consistent_safe_headroom():
+    cap = 1024
+    text = qualify.long_context_prompt(cap)
+    assert qualify.LONG_CONTEXT_HEADROOM == 256
+    assert text.endswith(qualify.LONG_CONTEXT_INSTRUCTION)
+    filler = text[: -len(qualify.LONG_CONTEXT_INSTRUCTION)].split(" ")
+    assert len(filler) == cap - qualify.LONG_CONTEXT_HEADROOM
+    assert set(filler) <= set(qualify.LONG_CONTEXT_WORDS)
+    # Varied, not one repeated token; identical bytes on every call.
+    assert len(set(filler)) > 40
+    assert text == qualify.long_context_prompt(cap)
+    assert qualify.long_context_filler(2048).startswith(qualify.long_context_filler(512))
+    with pytest.raises(ValueError, match="exceed near-limit headroom"):
+        qualify.long_context_prompt(qualify.LONG_CONTEXT_HEADROOM)
+
+
+def test_long_context_delegation_requires_generated_thermal_near_limit_matrix(tmp_path):
+    prompt = tmp_path / "prompt.json"
+    prompt.write_text("{}")
+    prompt_sha256 = hashlib.sha256(prompt.read_bytes()).hexdigest()
+    manifest = {
+        "schema": "mlx2.qualification-matrix.v1",
+        "thermal": {"consecutive_samples": 3, "max_wait_seconds": 1800},
+        "models": [{
+            "name": "qwen", "arms": [{"name": "ordinary"}],
+            "contexts": [{"tokens": 262016, "prompt_path": str(prompt),
+                          "prompt_sha256": prompt_sha256}],
+            "context": {"runs_per_cell": 3, "max_tokens": 64},
+        }],
+    }
+    path = tmp_path / "matrix.json"
+    path.write_text(json.dumps(manifest))
+    evidence = qualify.validate_context_matrix_delegation(path, 262144)
+    assert evidence["delegated_checks"] == list(qualify.LONG_CONTEXT_CHECKS)
+    assert evidence["manifest_sha256"] == hashlib.sha256(path.read_bytes()).hexdigest()
+
+    manifest["models"][0]["context"]["runs_per_cell"] = 1
+    path.write_text(json.dumps(manifest))
+    with pytest.raises(AssertionError, match="no generated, repeated near-limit"):
+        qualify.validate_context_matrix_delegation(path, 262144)
+
+
+def _reasoning_response(*, reasoning="work", content="221", finish_reason="stop"):
+    return {"choices": [{
+        "finish_reason": finish_reason,
+        "message": {"reasoning_content": reasoning, "content": content},
+    }]}
+
+
+def test_reasoning_probe_retries_cap_interrupted_channel_transition():
+    responses = iter([
+        _reasoning_response(content="", finish_reason="length"),
+        _reasoning_response(content="The answer is 221."),
+    ])
+    requests = []
+
+    def post(body):
+        requests.append(body)
+        return next(responses)
+
+    final, attempts = qualify.run_reasoning_probe(post)
+    assert qualify.reasoning_response_passes(final)
+    assert len(attempts) == 2
+    assert [request["max_tokens"] for request in requests] == [512, 1024]
+    assert all(request["enable_thinking"] is True for request in requests)
+    assert all(request["messages"] == [
+        {"role": "system", "content": qualify.REASONING_PROBE_SYSTEM},
+        {"role": "user", "content": "Calculate 13 times 17. Reply with the integer."},
+    ] for request in requests)
+
+
+def test_reasoning_probe_bounds_declared_state_aware_thinking():
+    requests = []
+
+    def post(body):
+        requests.append(body)
+        return _reasoning_response(content="The answer is 221.")
+
+    final, attempts = qualify.run_reasoning_probe(
+        post, thinking_budget=qualify.REASONING_PROBE_THINKING_BUDGET
+    )
+
+    assert qualify.reasoning_response_passes(final)
+    assert len(attempts) == 1
+    assert requests[0]["max_tokens"] == 512
+    assert requests[0]["thinking_budget"] == 128
+
+
+def test_structured_reasoning_probe_bounds_declared_state_aware_thinking():
+    requests = []
+
+    def post(body):
+        requests.append(body)
+        return {
+            "choices": [{
+                "finish_reason": "stop",
+                "message": {
+                    "reasoning_content": "work",
+                    "content": '{"answer": 221}',
+                },
+            }],
+            "mlx2": {
+                "request_controls": {
+                    "structured_output": {"deferred": True, "engine": "automaton"}
+                }
+            },
+        }
+
+    passed, _evidence = qualify.run_structured_thinking_probe(
+        post, {"structured_output": {"thinking_deferral": True}}
+    )
+
+    assert passed
+    assert requests[0]["thinking_budget"] == 128
+
+
+def test_reasoning_probe_uses_third_bounded_attempt_when_transition_stays_capped():
+    responses = iter([
+        _reasoning_response(content="", finish_reason="length"),
+        _reasoning_response(content="", finish_reason="length"),
+        _reasoning_response(content="221"),
+    ])
+    requests = []
+
+    def post(body):
+        requests.append(body)
+        return next(responses)
+
+    final, attempts = qualify.run_reasoning_probe(post)
+    assert qualify.reasoning_response_passes(final)
+    assert len(attempts) == 3
+    assert [request["max_tokens"] for request in requests] == [512, 1024, 2048]
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        _reasoning_response(reasoning=""),
+        _reasoning_response(content=""),
+        _reasoning_response(content="The answer is 2221."),
+        {"choices": []},
+    ],
+)
+def test_reasoning_oracle_requires_both_channels_and_exact_numeric_answer(response):
+    assert not qualify.reasoning_response_passes(response)
+
+
+def test_reasoning_probe_does_not_retry_non_truncation_failure():
+    requests = []
+
+    def post(body):
+        requests.append(body)
+        return _reasoning_response(content="wrong", finish_reason="stop")
+
+    final, attempts = qualify.run_reasoning_probe(post)
+    assert not qualify.reasoning_response_passes(final)
+    assert len(attempts) == len(requests) == 1
+
+
+@pytest.mark.parametrize(
+    ("family", "context_cap", "prompt_tokens"),
+    [
+        ("flash-next", 262144, 261923),
+        ("qwen38-27b", 262144, 261923),
+        ("muse-glimmer", 131072, 130898),
+        ("north-mini-code", 500000, 499883),
+    ],
+)
+def test_near_limit_headroom_fits_full_completion_across_templates(
+    family, context_cap, prompt_tokens
+):
+    usage = {
+        "prompt_tokens": prompt_tokens,
+        "completion_tokens": qualify.LONG_CONTEXT_COMPLETION_TOKENS,
+    }
+    assert family
+    assert qualify.near_limit_usage_passes(usage, context_cap)
+    assert (
+        prompt_tokens - 1
+        > qualify.near_limit_prompt_floor(context_cap)
+        - qualify.LONG_CONTEXT_CACHE_TOLERANCE
+    )
+
+
+def test_near_limit_gate_rejects_overflow_short_completion_and_distant_prompt():
+    cap = 131072
+    assert not qualify.near_limit_usage_passes(
+        {"prompt_tokens": 131026, "completion_tokens": 64}, cap
+    )
+    assert not qualify.near_limit_usage_passes(
+        {"prompt_tokens": 130898, "completion_tokens": 63}, cap
+    )
+    assert not qualify.near_limit_usage_passes(
+        {
+            "prompt_tokens": qualify.near_limit_prompt_floor(cap),
+            "completion_tokens": 64,
+        },
+        cap,
+    )
+
+
+def test_shared_qsa_probe_respects_auto_policy_context_budget_crossover():
+    settings = {
+        "mtp": True,
+        "environment": {
+            "MLX_LM_SHARED_QSA_SUFFIX": "auto",
+            "MLX_LM_SHARED_QSA_SUFFIX_MAX_REMAINING": "64",
+        }
+    }
+    assert qualify.shared_qsa_completion_budget(settings, 32768) == 32
+    assert qualify.shared_qsa_completion_budget(settings, 65536) == 64
+    assert qualify.shared_qsa_completion_budget(
+        {"mtp": True, "environment": {"MLX_LM_SHARED_QSA_SUFFIX": "1"}}, 32768
+    ) == qualify.LONG_CONTEXT_COMPLETION_TOKENS
+    assert qualify.shared_qsa_completion_budget({}, 32768) == 64
+    assert qualify.near_limit_usage_passes(
+        {"prompt_tokens": 32547, "completion_tokens": 32}, 32768, 32
+    )
+
+
+def test_route_mechanism_checks_require_apcv2_and_full_mtp_invariants():
+    before = {
+        "settings": {"mtp": True},
+        "apcv2": {"hits": 1, "stores": 2},
+        "execution": {"segmented_mtp": {
+            "segmented_attention_calls": 0, "transaction_branches": 0,
+            "committed_cycles": 0, "true_batched_engaged": 0,
+            "batched_target_forwards": 0, "full_prefix_materializations": 0,
+            "physical_b2_formations": 0, "failures": 0,
+        }},
+    }
+    after = {
+        "settings": {"mtp": True},
+        "apcv2": {"hits": 5, "stores": 7},
+        "execution": {"segmented_mtp": {
+            "segmented_attention_calls": 8, "transaction_branches": 9,
+            "committed_cycles": 6, "true_batched_engaged": 2,
+            "batched_target_forwards": 3, "full_prefix_materializations": 0,
+            "physical_b2_formations": 0, "failures": 0,
+        }},
+    }
+    checks = qualify.route_mechanism_checks(before, after)
+    assert checks and all(row["passed"] for row in checks.values())
+    after["execution"]["segmented_mtp"]["physical_b2_formations"] = 1
+    assert not qualify.route_mechanism_checks(before, after)["mtp_zero_physical_b2"]["passed"]
+
+
+def test_route_mechanism_checks_fail_closed_on_missing_counters():
+    checks = qualify.route_mechanism_checks(
+        {"settings": {"mtp": True}, "apcv2": {}},
+        {"settings": {"mtp": True}, "apcv2": {}, "execution": {"segmented_mtp": {}}},
+    )
+    assert checks and not any(row["passed"] for row in checks.values())
+
+def test_actual_compute_widths_cover_all_serving_routes():
+    assert qualify.observed_compute_widths({"mtp": {"observed_compute_widths": [1, 4]}, "ordinary_compute_width": None}) == [1, 4]
+    assert qualify.observed_compute_widths({"mtp": None, "speculation": {"target_width": 3}, "ordinary_compute_width": None}) == [3]
+    assert qualify.observed_compute_widths({"mtp": None, "speculation": None, "ordinary_compute_width": 2}) == [2]
+    assert qualify.observed_compute_widths({"mtp": None, "speculation": None, "ordinary_compute_width": None}) == []
+
+def test_dflash_width_wins_over_null_ordinary_width():
+    receipts = [{"mtp": None, "speculation": {"target_width": width}, "ordinary_compute_width": None} for width in (1, 4, 4, 2)]
+    widths = sorted({width for receipt in receipts for width in qualify.observed_compute_widths(receipt)})
+    assert widths == [1, 2, 4]
+    assert max(widths, default=0) >= 2
+
+
+def test_final_quiescence_waits_for_response_cleanup_and_records_samples():
+    statuses = iter([
+        {"inflight": 0, "queue_depth": 0,
+         "apcv2": {"cow": {"active_leases": 1}}},
+        {"inflight": 0, "queue_depth": 0,
+         "apcv2": {"cow": {"active_leases": 0}}},
+    ])
+    clock = iter([10.0, 10.0, 10.1])
+    final, evidence = qualify.wait_for_quiescence(
+        lambda: next(statuses),
+        timeout_seconds=1,
+        poll_interval_seconds=0,
+        sleep=lambda _: None,
+        monotonic=lambda: next(clock),
+    )
+    assert evidence["passed"] and not evidence["timed_out"]
+    assert evidence["attempts"] == 2
+    assert [row["active_cow_leases"] for row in evidence["samples"]] == [1, 0]
+    assert final["apcv2"]["cow"]["active_leases"] == 0
+
+
+def test_final_quiescence_times_out_fail_closed_with_evidence():
+    status = {"inflight": 0, "queue_depth": 0,
+              "apcv2": {"cow": {"active_leases": 1}}}
+    clock = iter([20.0, 20.0, 20.5, 21.0])
+    final, evidence = qualify.wait_for_quiescence(
+        lambda: status,
+        timeout_seconds=1,
+        poll_interval_seconds=0,
+        sleep=lambda _: None,
+        monotonic=lambda: next(clock),
+    )
+    assert not evidence["passed"] and evidence["timed_out"]
+    assert evidence["attempts"] == 3
+    assert evidence["samples"][-1]["active_cow_leases"] == 1
+    assert final is status
+
+
+def test_final_quiescence_rejects_missing_or_malformed_counters():
+    status = {"inflight": False, "queue_depth": 0, "apcv2": {"cow": {}}}
+    clock = iter([30.0, 30.0, 31.0])
+    _, evidence = qualify.wait_for_quiescence(
+        lambda: status,
+        timeout_seconds=1,
+        poll_interval_seconds=0,
+        sleep=lambda _: None,
+        monotonic=lambda: next(clock),
+    )
+    assert evidence["timed_out"] and not evidence["passed"]
+    assert evidence["samples"][-1]["inflight"] is None
+    assert evidence["samples"][-1]["active_cow_leases"] is None
+
+
+@pytest.mark.parametrize(
+    ("timeout", "interval"),
+    [(-1, 0.05), (math.inf, 0.05), (math.nan, 0.05),
+     (1, -0.01), (1, math.inf), (1, math.nan)],
+)
+def test_final_quiescence_requires_finite_bounded_timing(timeout, interval):
+    with pytest.raises(ValueError, match="positive and bounded"):
+        qualify.wait_for_quiescence(
+            lambda: {},
+            timeout_seconds=timeout,
+            poll_interval_seconds=interval,
+        )
+
+
+def test_long_context_answer_accepts_marker_or_topic_only():
+    assert qualify.long_context_answer_passes("LONG_READY\n1. Inlining")
+    assert qualify.long_context_answer_passes("The user wants a guide to compiler optimization.")
+    assert not qualify.long_context_answer_passes("")
+    assert not qualify.long_context_answer_passes("river stone garden market")
+
+
+@pytest.mark.parametrize("artifact", [
+    "Qwen3.6-35B-A3B-uncensored-heretic-Native-MTP-Preserved-oQ4e-mtp",
+    "Qwen3.8-27B-oQ4e-mtp", "Qwen3.8-Flash-Next-MLX-4bit-MTP",
+    "Muse-Glimmer-30B-mlx-4bit", "North-Mini-Code-1.0-mlx-4bit",
+    "Xing4.0-29B-A4B-mlx-6bit",
+])
+def test_long_context_words_are_one_token_in_supported_tokenizers(artifact, monkeypatch):
+    import os
+
+    path = os.path.expanduser("~/mlx-models/" + artifact)
+    if not os.path.isdir(path):
+        pytest.skip("tokenizer artifact is not present")
+    monkeypatch.setenv("HF_HUB_OFFLINE", "1")
+    monkeypatch.setenv("TRANSFORMERS_OFFLINE", "1")
+    from transformers import AutoTokenizer
+
+    if artifact.startswith("Xing"):
+        # Custom slow reference class; serving loads the stamped fast tokenizer.
+        from mlx2.adapters.xing_tokenizer import load_tokenizer
+
+        tokenizer, _ = load_tokenizer(path)
+    else:
+        tokenizer = AutoTokenizer.from_pretrained(path, local_files_only=True)
+    assert len(tokenizer.encode(qualify.long_context_filler(4000), add_special_tokens=False)) == 4000
+
+
+def test_thinking_default_servers_get_a_reasoning_allowance():
+    extra = qualify.THINKING_BUDGET_TOKENS
+    body = {"messages": [], "max_tokens": 64}
+    assert qualify.with_thinking_budget(body, True)["max_tokens"] == 64 + extra
+    assert body["max_tokens"] == 64  # the caller's request is not mutated
+    # A server that does not think by default keeps every budget as written.
+    assert qualify.with_thinking_budget(body, False) is body
+    assert qualify.with_thinking_budget({**body, "enable_thinking": True}, False)["max_tokens"] == 64
+    # Turning thinking off keeps the exact budget (near-limit checks rely on it).
+    for off in ({"enable_thinking": False}, {"think": False}, {"reasoning_effort": "none"}, {"reasoning_effort": "NONE"}):
+        assert qualify.with_thinking_budget({**body, **off}, True)["max_tokens"] == 64
+    assert qualify.with_thinking_budget({**body, "reasoning_effort": "low"}, True)["max_tokens"] == 64 + extra
+    assert "max_tokens" not in qualify.with_thinking_budget({"messages": []}, True)
+    # The allowance never crosses the API ceiling, and never lowers a budget.
+    assert qualify.with_thinking_budget({"max_tokens": 2_097_152}, True)["max_tokens"] == 2_097_152
+    assert qualify.with_thinking_budget({"max_tokens": 2_096_000}, True)["max_tokens"] == 2_097_152
+
+
+def test_thinking_allowance_follows_the_declared_model_value():
+    body = {"messages": [{"role": "user", "content": "hi"}], "max_tokens": 64}
+    assert qualify.with_thinking_budget(body, True, 4096)["max_tokens"] == 64 + 4096
+    assert qualify.with_thinking_budget(body, True, 9000)["max_tokens"] == 64 + 9000
+    near = {**body, "max_tokens": qualify.SERVER_MAX_TOKENS - 10}
+    assert qualify.with_thinking_budget(near, True, 9000)["max_tokens"] == qualify.SERVER_MAX_TOKENS
+    assert qualify.with_thinking_budget(body, False, 4096) is body
+
+
+def test_xing_declares_a_larger_thinking_allowance():
+    from mlx2.adapters.xing import XingAdapter
+
+    assert XingAdapter.thinking_allowance_tokens == 4096 > qualify.THINKING_BUDGET_TOKENS

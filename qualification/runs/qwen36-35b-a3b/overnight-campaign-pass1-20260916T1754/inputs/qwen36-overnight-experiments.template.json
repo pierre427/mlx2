@@ -1,0 +1,613 @@
+{
+  "models": [
+    {
+      "arm_order_claim": "alternating",
+      "arms": [
+        {
+          "activate_command": [
+            "~/Desktop/mlx2/.venv/bin/python",
+            "~/Desktop/mlx2/scripts/activate_qualification_arm.py",
+            "--state",
+            "~/Desktop/mlx2/qualification/runs/qwen36-35b-a3b/overnight-campaign/activation/server.json",
+            "--log",
+            "~/Desktop/mlx2/qualification/runs/qwen36-35b-a3b/overnight-campaign/logs/matrix/ordinary-context.log",
+            "--cwd",
+            "~/Desktop/mlx2",
+            "--",
+            "/usr/bin/env",
+            "PYTHONPATH=src",
+            "~/Desktop/mlx2/.venv/bin/python",
+            "-u",
+            "-m",
+            "mlx2.server",
+            "--model",
+            "~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit",
+            "--host",
+            "127.0.0.1",
+            "--port",
+            "8296",
+            "--max-context",
+            "262144",
+            "--max-lanes",
+            "4",
+            "--max-inflight",
+            "8",
+            "--cache-bytes",
+            "12884901888",
+            "--cache-dir",
+            "~/Desktop/mlx2/qualification/runs/qwen36-35b-a3b/overnight-campaign/cache/matrix/ordinary/context",
+            "--execution-policy",
+            "~/Desktop/mlx2/qualification/policies/qwen36-ordinary.json",
+            "--qualification-mode",
+            "--ordinary"
+          ],
+          "activation_key": "qwen36-ordinary-context-max4",
+          "after_status_requirements": [
+            {
+              "equals": 0,
+              "path": "apcv2.cow.active_leases"
+            }
+          ],
+          "counter_requirements": [
+            {
+              "delta_gte": 1,
+              "path": "apcv2.hits"
+            },
+            {
+              "delta_gte": 1,
+              "path": "apcv2.stores"
+            }
+          ],
+          "name": "ordinary",
+          "qualification_receipt": {
+            "path": "~/Desktop/mlx2/qualification/runs/qwen36-35b-a3b/overnight-campaign/artifacts/ordinary-serving-qualification.json",
+            "required_checks": [
+              "unit_tests",
+              "cold_text",
+              "warm_prefix",
+              "batch",
+              "cache_leases",
+              "runtime_stable"
+            ]
+          },
+          "receipt_requirements": [
+            {
+              "equals": "apcv2",
+              "path": "cache"
+            },
+            {
+              "equals": "qwen36-35b-a3b-apcv2-ordinary",
+              "path": "profile"
+            },
+            {
+              "equals": null,
+              "path": "mtp"
+            },
+            {
+              "gte": 1,
+              "path": "ordinary_compute_width"
+            }
+          ],
+          "status_requirements": [
+            {
+              "equals": "qwen36-35b-a3b-apcv2-ordinary",
+              "path": "profile"
+            },
+            {
+              "equals": 4,
+              "path": "max_lanes"
+            },
+            {
+              "equals": "ordinary",
+              "path": "settings.speculation"
+            }
+          ],
+          "suites": {
+            "batch_stress": {
+              "activate_command": [
+                "~/Desktop/mlx2/.venv/bin/python",
+                "~/Desktop/mlx2/scripts/activate_qualification_arm.py",
+                "--state",
+                "~/Desktop/mlx2/qualification/runs/qwen36-35b-a3b/overnight-campaign/activation/server.json",
+                "--log",
+                "~/Desktop/mlx2/qualification/runs/qwen36-35b-a3b/overnight-campaign/logs/matrix/ordinary-batch_stress.log",
+                "--cwd",
+                "~/Desktop/mlx2",
+                "--",
+                "/usr/bin/env",
+                "PYTHONPATH=src",
+                "~/Desktop/mlx2/.venv/bin/python",
+                "-u",
+                "-m",
+                "mlx2.server",
+                "--model",
+                "~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit",
+                "--host",
+                "127.0.0.1",
+                "--port",
+                "8296",
+                "--max-context",
+                "262144",
+                "--max-lanes",
+                "20",
+                "--max-inflight",
+                "40",
+                "--cache-bytes",
+                "12884901888",
+                "--cache-dir",
+                "~/Desktop/mlx2/qualification/runs/qwen36-35b-a3b/overnight-campaign/cache/matrix/ordinary/batch_stress",
+                "--execution-policy",
+                "~/Desktop/mlx2/qualification/policies/qwen36-ordinary.json",
+                "--qualification-mode",
+                "--ordinary"
+              ],
+              "activation_key": "qwen36-ordinary-batch-max20",
+              "qualification_receipt": {
+                "path": "~/Desktop/mlx2/qualification/runs/qwen36-35b-a3b/overnight-campaign/artifacts/ordinary-b20-serving-qualification.json",
+                "required_checks": [
+                  "unit_tests",
+                  "cold_text",
+                  "warm_prefix",
+                  "batch",
+                  "cache_leases",
+                  "runtime_stable"
+                ]
+              },
+              "status_requirements": [
+                {
+                  "equals": "qwen36-35b-a3b-apcv2-ordinary",
+                  "path": "profile"
+                },
+                {
+                  "equals": 20,
+                  "path": "max_lanes"
+                },
+                {
+                  "equals": 40,
+                  "path": "settings.max_inflight"
+                },
+                {
+                  "equals": "ordinary",
+                  "path": "settings.speculation"
+                }
+              ]
+            }
+          },
+          "url": "http://127.0.0.1:8296"
+        },
+        {
+          "activate_command": [
+            "~/Desktop/mlx2/.venv/bin/python",
+            "~/Desktop/mlx2/scripts/activate_qualification_arm.py",
+            "--state",
+            "~/Desktop/mlx2/qualification/runs/qwen36-35b-a3b/overnight-campaign/activation/server.json",
+            "--log",
+            "~/Desktop/mlx2/qualification/runs/qwen36-35b-a3b/overnight-campaign/logs/matrix/mtp-artifact-ordinary-context.log",
+            "--cwd",
+            "~/Desktop/mlx2",
+            "--",
+            "/usr/bin/env",
+            "PYTHONPATH=src",
+            "~/Desktop/mlx2/.venv/bin/python",
+            "-u",
+            "-m",
+            "mlx2.server",
+            "--model",
+            "~/mlx-models/Qwen3.6-35B-A3B-uncensored-heretic-Native-MTP-Preserved-oQ4e-mtp",
+            "--host",
+            "127.0.0.1",
+            "--port",
+            "8296",
+            "--max-context",
+            "262144",
+            "--max-lanes",
+            "4",
+            "--max-inflight",
+            "8",
+            "--cache-bytes",
+            "12884901888",
+            "--cache-dir",
+            "~/Desktop/mlx2/qualification/runs/qwen36-35b-a3b/overnight-campaign/cache/matrix/mtp-artifact-ordinary/context",
+            "--execution-policy",
+            "~/Desktop/mlx2/qualification/policies/qwen36-mtp-artifact-ordinary.json",
+            "--qualification-mode",
+            "--ordinary"
+          ],
+          "activation_key": "qwen36-mtp-artifact-ordinary-context-max4",
+          "after_status_requirements": [
+            {
+              "equals": 0,
+              "path": "apcv2.cow.active_leases"
+            }
+          ],
+          "counter_requirements": [
+            {
+              "delta_gte": 1,
+              "path": "apcv2.hits"
+            },
+            {
+              "delta_gte": 1,
+              "path": "apcv2.stores"
+            }
+          ],
+          "name": "mtp-artifact-ordinary",
+          "qualification_receipt": {
+            "path": "~/Desktop/mlx2/qualification/runs/qwen36-35b-a3b/overnight-campaign/artifacts/mtp-artifact-ordinary-serving-qualification.json",
+            "required_checks": [
+              "unit_tests",
+              "cold_text",
+              "warm_prefix",
+              "batch",
+              "cache_leases",
+              "runtime_stable"
+            ]
+          },
+          "receipt_requirements": [
+            {
+              "equals": "apcv2",
+              "path": "cache"
+            },
+            {
+              "equals": "qwen36-35b-a3b-apcv2-ordinary",
+              "path": "profile"
+            },
+            {
+              "equals": null,
+              "path": "mtp"
+            },
+            {
+              "gte": 1,
+              "path": "ordinary_compute_width"
+            }
+          ],
+          "status_requirements": [
+            {
+              "equals": "qwen36-35b-a3b-apcv2-ordinary",
+              "path": "profile"
+            },
+            {
+              "equals": 4,
+              "path": "max_lanes"
+            },
+            {
+              "equals": "ordinary",
+              "path": "settings.speculation"
+            }
+          ],
+          "suites": {
+            "batch_stress": {
+              "activate_command": [
+                "~/Desktop/mlx2/.venv/bin/python",
+                "~/Desktop/mlx2/scripts/activate_qualification_arm.py",
+                "--state",
+                "~/Desktop/mlx2/qualification/runs/qwen36-35b-a3b/overnight-campaign/activation/server.json",
+                "--log",
+                "~/Desktop/mlx2/qualification/runs/qwen36-35b-a3b/overnight-campaign/logs/matrix/mtp-artifact-ordinary-batch_stress.log",
+                "--cwd",
+                "~/Desktop/mlx2",
+                "--",
+                "/usr/bin/env",
+                "PYTHONPATH=src",
+                "~/Desktop/mlx2/.venv/bin/python",
+                "-u",
+                "-m",
+                "mlx2.server",
+                "--model",
+                "~/mlx-models/Qwen3.6-35B-A3B-uncensored-heretic-Native-MTP-Preserved-oQ4e-mtp",
+                "--host",
+                "127.0.0.1",
+                "--port",
+                "8296",
+                "--max-context",
+                "262144",
+                "--max-lanes",
+                "20",
+                "--max-inflight",
+                "40",
+                "--cache-bytes",
+                "12884901888",
+                "--cache-dir",
+                "~/Desktop/mlx2/qualification/runs/qwen36-35b-a3b/overnight-campaign/cache/matrix/mtp-artifact-ordinary/batch_stress",
+                "--execution-policy",
+                "~/Desktop/mlx2/qualification/policies/qwen36-mtp-artifact-ordinary.json",
+                "--qualification-mode",
+                "--ordinary"
+              ],
+              "activation_key": "qwen36-mtp-artifact-ordinary-batch-max20",
+              "qualification_receipt": {
+                "path": "~/Desktop/mlx2/qualification/runs/qwen36-35b-a3b/overnight-campaign/artifacts/mtp-artifact-ordinary-b20-serving-qualification.json",
+                "required_checks": [
+                  "unit_tests",
+                  "cold_text",
+                  "warm_prefix",
+                  "batch",
+                  "cache_leases",
+                  "runtime_stable"
+                ]
+              },
+              "status_requirements": [
+                {
+                  "equals": "qwen36-35b-a3b-apcv2-ordinary",
+                  "path": "profile"
+                },
+                {
+                  "equals": 20,
+                  "path": "max_lanes"
+                },
+                {
+                  "equals": 40,
+                  "path": "settings.max_inflight"
+                },
+                {
+                  "equals": "ordinary",
+                  "path": "settings.speculation"
+                }
+              ]
+            }
+          },
+          "url": "http://127.0.0.1:8296"
+        },
+        {
+          "activate_command": [
+            "~/Desktop/mlx2/.venv/bin/python",
+            "~/Desktop/mlx2/scripts/activate_qualification_arm.py",
+            "--state",
+            "~/Desktop/mlx2/qualification/runs/qwen36-35b-a3b/overnight-campaign/activation/server.json",
+            "--log",
+            "~/Desktop/mlx2/qualification/runs/qwen36-35b-a3b/overnight-campaign/logs/matrix/mtp2-context.log",
+            "--cwd",
+            "~/Desktop/mlx2",
+            "--",
+            "/usr/bin/env",
+            "PYTHONPATH=src",
+            "~/Desktop/mlx2/.venv/bin/python",
+            "-u",
+            "-m",
+            "mlx2.server",
+            "--model",
+            "~/mlx-models/Qwen3.6-35B-A3B-uncensored-heretic-Native-MTP-Preserved-oQ4e-mtp",
+            "--host",
+            "127.0.0.1",
+            "--port",
+            "8296",
+            "--max-context",
+            "262144",
+            "--max-lanes",
+            "4",
+            "--max-inflight",
+            "8",
+            "--cache-bytes",
+            "12884901888",
+            "--cache-dir",
+            "~/Desktop/mlx2/qualification/runs/qwen36-35b-a3b/overnight-campaign/cache/matrix/mtp2/context",
+            "--execution-policy",
+            "~/Desktop/mlx2/qualification/policies/qwen36-mtp2.json",
+            "--qualification-mode"
+          ],
+          "activation_key": "qwen36-mtp2-context-max4",
+          "after_status_requirements": [
+            {
+              "equals": 0,
+              "path": "apcv2.cow.active_leases"
+            },
+            {
+              "equals": 0,
+              "path": "execution.segmented_mtp.failures"
+            },
+            {
+              "equals": 0,
+              "path": "execution.segmented_mtp.full_prefix_materializations"
+            }
+          ],
+          "counter_requirements": [
+            {
+              "delta_gte": 1,
+              "path": "apcv2.hits"
+            },
+            {
+              "delta_gte": 1,
+              "path": "apcv2.stores"
+            },
+            {
+              "delta_gte": 1,
+              "path": "execution.segmented_mtp.engaged"
+            },
+            {
+              "delta_gte": 1,
+              "path": "execution.segmented_mtp.committed_cycles"
+            }
+          ],
+          "name": "mtp2",
+          "qualification_receipt": {
+            "path": "~/Desktop/mlx2/qualification/runs/qwen36-35b-a3b/overnight-campaign/artifacts/mtp2-serving-qualification.json",
+            "required_checks": [
+              "unit_tests",
+              "cold_text",
+              "warm_prefix",
+              "batch",
+              "cache_leases",
+              "runtime_stable",
+              "feature_segmented_transaction",
+              "feature_segmented_rollback"
+            ]
+          },
+          "receipt_requirements": [
+            {
+              "equals": "apcv2",
+              "path": "cache"
+            },
+            {
+              "equals": "qwen36-35b-a3b-apcv2-mtp2",
+              "path": "profile"
+            },
+            {
+              "equals": "segmented_self_mtp",
+              "path": "mtp.route"
+            },
+            {
+              "equals": 2,
+              "path": "mtp.num_draft"
+            },
+            {
+              "gt": 0,
+              "path": "mtp.stats.draft_proposed"
+            }
+          ],
+          "status_requirements": [
+            {
+              "equals": "qwen36-35b-a3b-apcv2-mtp2",
+              "path": "profile"
+            },
+            {
+              "equals": 4,
+              "path": "max_lanes"
+            },
+            {
+              "equals": "self_mtp",
+              "path": "settings.speculation"
+            }
+          ],
+          "suites": {
+            "batch_stress": {
+              "activate_command": [
+                "~/Desktop/mlx2/.venv/bin/python",
+                "~/Desktop/mlx2/scripts/activate_qualification_arm.py",
+                "--state",
+                "~/Desktop/mlx2/qualification/runs/qwen36-35b-a3b/overnight-campaign/activation/server.json",
+                "--log",
+                "~/Desktop/mlx2/qualification/runs/qwen36-35b-a3b/overnight-campaign/logs/matrix/mtp2-batch_stress.log",
+                "--cwd",
+                "~/Desktop/mlx2",
+                "--",
+                "/usr/bin/env",
+                "PYTHONPATH=src",
+                "~/Desktop/mlx2/.venv/bin/python",
+                "-u",
+                "-m",
+                "mlx2.server",
+                "--model",
+                "~/mlx-models/Qwen3.6-35B-A3B-uncensored-heretic-Native-MTP-Preserved-oQ4e-mtp",
+                "--host",
+                "127.0.0.1",
+                "--port",
+                "8296",
+                "--max-context",
+                "262144",
+                "--max-lanes",
+                "20",
+                "--max-inflight",
+                "40",
+                "--cache-bytes",
+                "12884901888",
+                "--cache-dir",
+                "~/Desktop/mlx2/qualification/runs/qwen36-35b-a3b/overnight-campaign/cache/matrix/mtp2/batch_stress",
+                "--execution-policy",
+                "~/Desktop/mlx2/qualification/policies/qwen36-mtp2.json",
+                "--qualification-mode"
+              ],
+              "activation_key": "qwen36-mtp2-batch-max20",
+              "qualification_receipt": {
+                "path": "~/Desktop/mlx2/qualification/runs/qwen36-35b-a3b/overnight-campaign/artifacts/mtp2-b20-serving-qualification.json",
+                "required_checks": [
+                  "unit_tests",
+                  "cold_text",
+                  "warm_prefix",
+                  "batch",
+                  "cache_leases",
+                  "runtime_stable",
+                  "feature_segmented_transaction",
+                  "feature_segmented_rollback"
+                ]
+              },
+              "status_requirements": [
+                {
+                  "equals": "qwen36-35b-a3b-apcv2-mtp2",
+                  "path": "profile"
+                },
+                {
+                  "equals": 20,
+                  "path": "max_lanes"
+                },
+                {
+                  "equals": 40,
+                  "path": "settings.max_inflight"
+                },
+                {
+                  "equals": "self_mtp",
+                  "path": "settings.speculation"
+                }
+              ]
+            }
+          },
+          "url": "http://127.0.0.1:8296"
+        }
+      ],
+      "batch_stress": {
+        "max_tokens": 64,
+        "prompts": [
+          "Explain compiler optimization 01 in detail.",
+          "Explain compiler optimization 02 in detail.",
+          "Explain compiler optimization 03 in detail.",
+          "Explain compiler optimization 04 in detail.",
+          "Explain compiler optimization 05 in detail.",
+          "Explain compiler optimization 06 in detail.",
+          "Explain compiler optimization 07 in detail.",
+          "Explain compiler optimization 08 in detail.",
+          "Explain compiler optimization 09 in detail.",
+          "Explain compiler optimization 10 in detail.",
+          "Explain compiler optimization 11 in detail.",
+          "Explain compiler optimization 12 in detail.",
+          "Explain compiler optimization 13 in detail.",
+          "Explain compiler optimization 14 in detail.",
+          "Explain compiler optimization 15 in detail.",
+          "Explain compiler optimization 16 in detail.",
+          "Explain compiler optimization 17 in detail.",
+          "Explain compiler optimization 18 in detail.",
+          "Explain compiler optimization 19 in detail.",
+          "Explain compiler optimization 20 in detail."
+        ],
+        "rounds": 20,
+        "timeout_seconds": 7200,
+        "width": 20
+      },
+      "context": {
+        "max_tokens": 64,
+        "min_cached_tokens": 1,
+        "min_prime_to_warm_cache_gain_tokens": 1,
+        "prompt_token_tolerance": 0,
+        "runs_per_cell": 3,
+        "timeout_seconds": 14400
+      },
+      "contexts": [
+        {
+          "tokens": 32768
+        },
+        {
+          "tokens": 65536
+        },
+        {
+          "tokens": 131072
+        },
+        {
+          "tokens": 262016
+        }
+      ],
+      "name": "qwen36-35b-a3b",
+      "tokenizer_path": "~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit",
+      "tokenizer_renderer": "qwen_direct"
+    }
+  ],
+  "schema": "mlx2.qualification-matrix.v1",
+  "thermal": {
+    "consecutive_samples": 3,
+    "max_battery_temperature_c": 40.0,
+    "max_swap_growth_bytes": 2147483648,
+    "max_temperature_delta_c": 0.5,
+    "max_virtual_temperature_c": 45.0,
+    "max_wait_seconds": 1800,
+    "post_sample_interval_seconds": 15,
+    "require_temperatures": true,
+    "required_thermal_state": 0,
+    "sample_interval_seconds": 15
+  }
+}

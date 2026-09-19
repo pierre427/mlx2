@@ -1,0 +1,108 @@
+{
+  "schema": "mlx2.telemetry-qualification.v1",
+  "created_at": "2026-09-18T17:26:00Z",
+  "branch": "codex/telemetry-observability",
+  "source_commit": "8f3bf60f5a4cbffdbcb3ddeee05aed695af16057",
+  "base_main": "d2892f5939889c025a2e11a7f142af598861c8a7",
+  "scope": "Prometheus telemetry contract and host-only advanced-mechanism snapshot translation",
+  "passed": true,
+  "gpu_used": false,
+  "metal_imported_by_passing_suites": false,
+  "checks": {
+    "telemetry_and_http_contracts": {
+      "passed": true,
+      "tests": 56,
+      "command": "python -m pytest --noconftest -p no:cacheprovider tests/test_serving_contract.py tests/test_prometheus.py -q",
+      "notes": "Executed with PYTHONPATH pointing at the isolated worktree; temporary loopback HTTP only."
+    },
+    "mlx_free_control_plane_regressions": {
+      "passed": true,
+      "tests": 84,
+      "command": "python -m pytest --noconftest -p no:cacheprovider tests/test_core.py tests/test_qualification.py tests/test_adapter_registry.py tests/test_batch_metrics.py tests/test_context_compaction.py tests/test_prometheus.py -q -k 'not http_metrics_endpoint'"
+    },
+    "serving_ownership_regressions": {
+      "passed": true,
+      "tests": 11,
+      "command": "python -m pytest --noconftest -p no:cacheprovider selected MLX-free tests/test_serving_retention.py node IDs"
+    },
+    "total_unique_tests": {
+      "passed": true,
+      "tests": 146
+    },
+    "prometheus_structure": {
+      "passed": true,
+      "evidence": [
+        "HELP and TYPE metadata",
+        "cumulative histogram buckets, count and sum",
+        "label escaping",
+        "seconds and bytes base units",
+        "Prometheus text 0.0.4 content type"
+      ]
+    },
+    "lifecycle_semantics": {
+      "passed": true,
+      "evidence": [
+        "monotonic counters",
+        "prompt and cached-token accounting is recorded once",
+        "bounded finish reasons",
+        "queue, TTFT, ITL, prefill, decode, inference, end-to-end and TPOT histograms"
+      ]
+    },
+    "advanced_mechanisms": {
+      "passed": true,
+      "evidence": [
+        "capability state and observed engagement",
+        "APCv2 lifetime, disk, COW and capsule capacity",
+        "scheduler, PLD, external speculation and adaptive MTP",
+        "segmented self-MTP events, bytes and optional timing",
+        "cache capsules, approximate KV, memory admission, structured output and Spomin",
+        "fail-closed counters"
+      ]
+    },
+    "scrape_non_mutation": {
+      "passed": true,
+      "evidence": "Repeated scrapes are byte-identical and leave diagnostic snapshots unchanged."
+    },
+    "concurrent_scrapes": {
+      "passed": true,
+      "evidence": "Eight threads performed 160 stable scrapes."
+    },
+    "cardinality_and_privacy": {
+      "passed": true,
+      "evidence": "Tests exclude request IDs, tenant IDs and free-form decline details and collapse unregistered admission/mechanism values to other."
+    },
+    "mlx_import_guard": {
+      "passed": true,
+      "evidence": "mlx2.prometheus, mlx2.batch_metrics and mlx2.server import while a guard rejects every mlx or mlx.* import."
+    },
+    "compile": {
+      "passed": true,
+      "command": "python -m compileall -q src/mlx2/prometheus.py src/mlx2/batch_metrics.py src/mlx2/server.py src/mlx2/serving.py tests/test_prometheus.py"
+    },
+    "ruff_f_e9": {
+      "passed": true,
+      "command": "ruff check --no-cache --select F,E9 changed-python-files"
+    },
+    "diff_check": {
+      "passed": true,
+      "command": "git diff --check main...HEAD"
+    }
+  },
+  "excluded": {
+    "full_repository_suite": "Not run because tests/conftest.py imports MLX before selecting mx.cpu and this headless sandbox reports no Metal device.",
+    "gpu_or_metal": "Explicitly prohibited; no model, Metal kernel, model server or GPU-backed qualification was run.",
+    "live_values": "No claim is made about metric values under a real model workload.",
+    "otlp": "OpenTelemetry export remains future work.",
+    "dashboards_and_alerts": "Not part of this implementation."
+  },
+  "setup_attempts": [
+    {
+      "status": "environment_abort",
+      "summary": "The ordinary pytest bootstrap imported MLX and aborted because no Metal device is available. Qualification was rerun with --noconftest only for an audited MLX-free test set."
+    },
+    {
+      "status": "sandbox_denial",
+      "summary": "The first loopback HTTP test could not bind inside the filesystem/network sandbox. The same CPU-only test passed with loopback permission."
+    }
+  ]
+}

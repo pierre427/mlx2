@@ -1,0 +1,39 @@
+[transformers] PyTorch was not found. Models won't be available and only tokenizers, configuration and file/data utilities can be used.
+2026-09-16 04:13:25,746 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 04:13:26,742 INFO ubc_evict: evicted 5090.2 MB from UBC for ~/mlx-models/Muse-Glimmer-30B-mlx-4bit/model-00001-of-00004.safetensors
+2026-09-16 04:13:26,781 INFO ubc_evict: evicted 5117.7 MB from UBC for ~/mlx-models/Muse-Glimmer-30B-mlx-4bit/model-00002-of-00004.safetensors
+2026-09-16 04:13:26,820 INFO ubc_evict: evicted 5111.0 MB from UBC for ~/mlx-models/Muse-Glimmer-30B-mlx-4bit/model-00003-of-00004.safetensors
+2026-09-16 04:13:26,830 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 04:13:26,836 INFO ubc_evict: evicted 5040.1 MB from UBC for ~/mlx-models/Muse-Glimmer-30B-mlx-4bit/model-00004-of-00004.safetensors
+2026-09-16 04:13:26,836 INFO ubc_evict: pass complete total_mb=20359.0 elapsed_s=0.11
+[transformers] You are using a model of type `muse_glimmer` to instantiate a model of type ``. This may be expected if you are loading a checkpoint that shares a subset of the architecture (e.g., loading a `sam2_video` checkpoint into `Sam2Model`), but is otherwise not supported and can yield errors. Please verify that the checkpoint is compatible with the model you are instantiating.
+2026-09-16 04:13:27,919 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 04:13:27,936 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 04:13:28,002 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 04:13:28,072 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 04:13:38,018 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 04:13:38,362 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 04:13:38,569 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 04:13:38,648 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 04:13:39,178 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 04:13:39,465 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 04:13:39,692 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 04:13:39,768 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 04:13:39,846 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 04:13:41,676 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 04:13:42,481 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 04:13:44,280 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 04:13:44,357 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 04:13:46,243 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 04:13:47,971 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 04:14:01,691 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 04:14:01,746 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 04:14:01,803 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 04:14:01,803 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 04:14:03,686 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 04:14:05,701 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 04:14:09,102 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 04:14:09,102 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 04:14:09,105 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 04:14:39,253 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 04:16:54,820 INFO "POST /v1/chat/completions HTTP/1.1" 503 -

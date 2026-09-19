@@ -1,0 +1,2633 @@
+{
+  "schema": "mlx2.serving-qualification.v1",
+  "timestamp": 1789548000.471749,
+  "runtime": {
+    "source_sha256": "b7924d2657a83fd8c236e29a862e1ba8fe95a1ac00c3dcd09502dac65c909457",
+    "mlx_native_sha256": "30335939714520c3306cfa58597100aae08bbeabdc60a4bc8c35c32c607450a8",
+    "python": "3.12.13",
+    "macos": "26.7",
+    "mlx": "0.32.2.dev20260915+2a817ad94",
+    "transformers": "5.12.1",
+    "dependencies": {
+      "numpy": "2.5.1",
+      "tokenizers": "0.22.2",
+      "jinja2": "3.1.6",
+      "psutil": "7.2.2",
+      "regex": "2026.9.10",
+      "safetensors": "0.8.0"
+    }
+  },
+  "qualification_harness": {
+    "schema": "mlx2.qualification-harness.v1",
+    "name": "scripts/qualify_serving.py",
+    "sha256": "8d32f490519f91e0e4b96f0e6b60d05b088aba41930b1b5df24eb0292fcfa8c1"
+  },
+  "artifact": "6c88a4d3a5387abe2d97ac3d5eb70e484fb33615bb0c0f2ff8e7ef22b442f2e4",
+  "settings": {
+    "max_context": 500000,
+    "max_lanes": 20,
+    "max_inflight": 40,
+    "prefill_step": 2048,
+    "cache_bytes": 17179869184,
+    "disk_cache": true,
+    "mtp": false,
+    "environment": {
+      "HF_HUB_OFFLINE": "1",
+      "TRANSFORMERS_OFFLINE": "1",
+      "MLX_ENABLE_TF32": "0",
+      "MLX_LM_COMPILED_DECODE": "0",
+      "MLX_LM_SEGMENTED_SELF_MTP": "0",
+      "MLX_LM_TRUE_BATCHED_SEGMENTED_MTP": "0",
+      "MLX_LM_SHARED_QSA_SUFFIX": "0"
+    },
+    "execution_policy": {
+      "persistent": true,
+      "num_draft": 0,
+      "rate_gate": false,
+      "prefill_step_size": 2048,
+      "segment_aware_live_tip": false,
+      "segment_aware_cohort_size": 20
+    },
+    "speculation": "ordinary",
+    "cache_budget": {
+      "schema": "north-mini-code-cache-geometry-v1",
+      "global_layers": 13,
+      "sliding_layers": 36,
+      "kv_heads": 4,
+      "head_dim": 128,
+      "sliding_window": 4096,
+      "item_bytes": 4,
+      "allocation_step": 256,
+      "checkpoint_copies": 4,
+      "transcript_bytes_per_token": 16,
+      "transient_gib_per_lane": 3.1,
+      "bound": "fp32-global-plus-window-and-restore-snapshots",
+      "workspace": "3.1-GiB-per-lane conservative static assumption; live qualification pending"
+    }
+  },
+  "checks": {
+    "unit_tests": {
+      "passed": true,
+      "evidence": "............................................................... [ 10%]\n........................................................................ [ 22%]\n........................................................................ [ 34%]\n...........................................................ssssssss..... [ 46%]\n........................................................................ [ 58%]\n..............................................................ss..ss........ss..............s.s....................................................................... [ 86%]\n........................................................................ [ 98%]\n...........                                                              [100%]\n584 passed, 16 skipped, 59 subtests passed in 9.29s\n"
+    },
+    "hermes_client": {
+      "passed": true,
+      "evidence": {
+        "id": "chatcmpl-04a5c9812c1a43efb33b0d076bf8da26",
+        "object": "chat.completion",
+        "created": 1789548009,
+        "model": "North-Mini-Code-1.0-mlx-4bit",
+        "choices": [
+          {
+            "index": 0,
+            "finish_reason": "stop",
+            "message": {
+              "role": "assistant",
+              "content": "HERMES_READY"
+            }
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 123,
+          "completion_tokens": 6,
+          "total_tokens": 129,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          }
+        },
+        "mlx2": {
+          "request_id": "chatcmpl-04a5c9812c1a43efb33b0d076bf8da26",
+          "cache": "apcv2",
+          "cached_tokens": 0,
+          "profile": "north-mini-code-apcv2-ordinary",
+          "qualification": "candidate",
+          "route_receipt": "candidate_validation",
+          "request_controls": {
+            "logprobs": false,
+            "top_logprobs": 0,
+            "logprob_semantics": null,
+            "thinking": false,
+            "sampling": {
+              "temperature": 0
+            },
+            "reasoning_effort": "none",
+            "effort_semantics": "thinking_toggle",
+            "context_limit": 262144
+          },
+          "ordinary_compute_width": 1,
+          "mtp": null,
+          "speculation": null,
+          "prompt_tokens": 123,
+          "completion_tokens": 6,
+          "ttft_seconds": 0.2954597499992815,
+          "elapsed_seconds": 0.3392767499972251
+        }
+      }
+    },
+    "logprobs": {
+      "passed": true,
+      "evidence": {
+        "reference": {
+          "id": "chatcmpl-59bbcf76d9b54a8fbeb95406de2957d6",
+          "object": "chat.completion",
+          "created": 1789548010,
+          "model": "North-Mini-Code-1.0-mlx-4bit",
+          "choices": [
+            {
+              "index": 0,
+              "finish_reason": "length",
+              "message": {
+                "role": "assistant",
+                "content": "Compilers translate high\u2011level code"
+              }
+            }
+          ],
+          "usage": {
+            "prompt_tokens": 124,
+            "completion_tokens": 8,
+            "total_tokens": 132,
+            "prompt_tokens_details": {
+              "cached_tokens": 111
+            }
+          },
+          "mlx2": {
+            "request_id": "chatcmpl-59bbcf76d9b54a8fbeb95406de2957d6",
+            "cache": "apcv2",
+            "cached_tokens": 111,
+            "profile": "north-mini-code-apcv2-ordinary",
+            "qualification": "candidate",
+            "route_receipt": "candidate_validation",
+            "request_controls": {
+              "logprobs": false,
+              "top_logprobs": 0,
+              "logprob_semantics": null,
+              "thinking": false,
+              "sampling": {
+                "temperature": 0
+              },
+              "reasoning_effort": null,
+              "effort_semantics": "thinking_toggle",
+              "context_limit": 500000
+            },
+            "ordinary_compute_width": 1,
+            "mtp": null,
+            "speculation": null,
+            "prompt_tokens": 124,
+            "completion_tokens": 8,
+            "ttft_seconds": 0.06803420800133608,
+            "elapsed_seconds": 0.1292067499962286
+          }
+        },
+        "response": {
+          "id": "chatcmpl-286cf1dc4a7c430fbfa753b211c25270",
+          "object": "chat.completion",
+          "created": 1789548010,
+          "model": "North-Mini-Code-1.0-mlx-4bit",
+          "choices": [
+            {
+              "index": 0,
+              "finish_reason": "length",
+              "logprobs": {
+                "content": [
+                  {
+                    "id": 255012,
+                    "token": "<|START_TEXT|>",
+                    "logprob": 0.0,
+                    "top_logprobs": [
+                      {
+                        "id": 255012,
+                        "token": "<|START_TEXT|>",
+                        "logprob": 0.0
+                      },
+                      {
+                        "id": 255014,
+                        "token": "<|START_ACTION|>",
+                        "logprob": -13.125
+                      },
+                      {
+                        "id": 255010,
+                        "token": "<|START_THINKING|>",
+                        "logprob": -17.0
+                      }
+                    ]
+                  },
+                  {
+                    "id": 4437,
+                    "token": "Comp",
+                    "logprob": -0.125,
+                    "top_logprobs": [
+                      {
+                        "id": 4437,
+                        "token": "Comp",
+                        "logprob": -0.125
+                      },
+                      {
+                        "id": 37,
+                        "token": "A",
+                        "logprob": -1.75
+                      },
+                      {
+                        "id": 102183,
+                        "token": "\u0120compilers",
+                        "logprob": -9.625
+                      }
+                    ]
+                  },
+                  {
+                    "id": 20463,
+                    "token": "ilers",
+                    "logprob": 0.0,
+                    "top_logprobs": [
+                      {
+                        "id": 20463,
+                        "token": "ilers",
+                        "logprob": 0.0
+                      },
+                      {
+                        "id": 102183,
+                        "token": "\u0120compilers",
+                        "logprob": -8.625
+                      },
+                      {
+                        "id": 2748,
+                        "token": "iles",
+                        "logprob": -9.625
+                      }
+                    ]
+                  },
+                  {
+                    "id": 10848,
+                    "token": "\u0120translate",
+                    "logprob": -0.125,
+                    "top_logprobs": [
+                      {
+                        "id": 10848,
+                        "token": "\u0120translate",
+                        "logprob": -0.125
+                      },
+                      {
+                        "id": 4817,
+                        "token": "\u0120transform",
+                        "logprob": -2.125
+                      },
+                      {
+                        "id": 436,
+                        "token": "\u0120are",
+                        "logprob": -4.0
+                      }
+                    ]
+                  },
+                  {
+                    "id": 1398,
+                    "token": "\u0120high",
+                    "logprob": 0.0,
+                    "top_logprobs": [
+                      {
+                        "id": 1398,
+                        "token": "\u0120high",
+                        "logprob": 0.0
+                      },
+                      {
+                        "id": 2858,
+                        "token": "\u0120human",
+                        "logprob": -5.625
+                      },
+                      {
+                        "id": 3149,
+                        "token": "\u0120source",
+                        "logprob": -6.125
+                      }
+                    ]
+                  },
+                  {
+                    "id": 50274,
+                    "token": "\u00e2\u0122\u0133",
+                    "logprob": -0.25,
+                    "top_logprobs": [
+                      {
+                        "id": 50274,
+                        "token": "\u00e2\u0122\u0133",
+                        "logprob": -0.25
+                      },
+                      {
+                        "id": 10674,
+                        "token": "-level",
+                        "logprob": -1.5
+                      },
+                      {
+                        "id": 1839,
+                        "token": "\u0120level",
+                        "logprob": -8.125
+                      }
+                    ]
+                  },
+                  {
+                    "id": 5614,
+                    "token": "level",
+                    "logprob": 0.0,
+                    "top_logprobs": [
+                      {
+                        "id": 5614,
+                        "token": "level",
+                        "logprob": 0.0
+                      },
+                      {
+                        "id": 1839,
+                        "token": "\u0120level",
+                        "logprob": -12.25
+                      },
+                      {
+                        "id": 24200,
+                        "token": "language",
+                        "logprob": -12.25
+                      }
+                    ]
+                  },
+                  {
+                    "id": 2363,
+                    "token": "\u0120code",
+                    "logprob": -0.75,
+                    "top_logprobs": [
+                      {
+                        "id": 2363,
+                        "token": "\u0120code",
+                        "logprob": -0.75
+                      },
+                      {
+                        "id": 11574,
+                        "token": "\u0120programming",
+                        "logprob": -0.875
+                      },
+                      {
+                        "id": 3149,
+                        "token": "\u0120source",
+                        "logprob": -2.0
+                      }
+                    ]
+                  }
+                ]
+              },
+              "message": {
+                "role": "assistant",
+                "content": "Compilers translate high\u2011level code"
+              }
+            }
+          ],
+          "usage": {
+            "prompt_tokens": 124,
+            "completion_tokens": 8,
+            "total_tokens": 132,
+            "prompt_tokens_details": {
+              "cached_tokens": 123
+            }
+          },
+          "mlx2": {
+            "request_id": "chatcmpl-286cf1dc4a7c430fbfa753b211c25270",
+            "cache": "apcv2",
+            "cached_tokens": 123,
+            "profile": "north-mini-code-apcv2-ordinary",
+            "qualification": "candidate",
+            "route_receipt": "candidate_validation",
+            "request_controls": {
+              "logprobs": true,
+              "top_logprobs": 3,
+              "logprob_semantics": "execution_target: ordinary=post_processor_pre_sampler; mtp=transformed_target_verifier",
+              "thinking": false,
+              "sampling": {
+                "temperature": 0
+              },
+              "reasoning_effort": null,
+              "effort_semantics": "thinking_toggle",
+              "context_limit": 500000
+            },
+            "ordinary_compute_width": 1,
+            "mtp": null,
+            "speculation": null,
+            "prompt_tokens": 124,
+            "completion_tokens": 8,
+            "ttft_seconds": 0.039431833996786736,
+            "elapsed_seconds": 0.10741895899991505
+          }
+        },
+        "stream_entries": [
+          {
+            "id": 255012,
+            "token": "<|START_TEXT|>",
+            "logprob": 0.0,
+            "top_logprobs": [
+              {
+                "id": 255012,
+                "token": "<|START_TEXT|>",
+                "logprob": 0.0
+              },
+              {
+                "id": 255014,
+                "token": "<|START_ACTION|>",
+                "logprob": -13.125
+              },
+              {
+                "id": 255010,
+                "token": "<|START_THINKING|>",
+                "logprob": -17.0
+              }
+            ]
+          },
+          {
+            "id": 4437,
+            "token": "Comp",
+            "logprob": -0.125,
+            "top_logprobs": [
+              {
+                "id": 4437,
+                "token": "Comp",
+                "logprob": -0.125
+              },
+              {
+                "id": 37,
+                "token": "A",
+                "logprob": -1.75
+              },
+              {
+                "id": 102183,
+                "token": "\u0120compilers",
+                "logprob": -9.625
+              }
+            ]
+          },
+          {
+            "id": 20463,
+            "token": "ilers",
+            "logprob": 0.0,
+            "top_logprobs": [
+              {
+                "id": 20463,
+                "token": "ilers",
+                "logprob": 0.0
+              },
+              {
+                "id": 102183,
+                "token": "\u0120compilers",
+                "logprob": -8.625
+              },
+              {
+                "id": 2748,
+                "token": "iles",
+                "logprob": -9.625
+              }
+            ]
+          },
+          {
+            "id": 10848,
+            "token": "\u0120translate",
+            "logprob": -0.125,
+            "top_logprobs": [
+              {
+                "id": 10848,
+                "token": "\u0120translate",
+                "logprob": -0.125
+              },
+              {
+                "id": 4817,
+                "token": "\u0120transform",
+                "logprob": -2.125
+              },
+              {
+                "id": 436,
+                "token": "\u0120are",
+                "logprob": -4.0
+              }
+            ]
+          },
+          {
+            "id": 1398,
+            "token": "\u0120high",
+            "logprob": 0.0,
+            "top_logprobs": [
+              {
+                "id": 1398,
+                "token": "\u0120high",
+                "logprob": 0.0
+              },
+              {
+                "id": 2858,
+                "token": "\u0120human",
+                "logprob": -5.625
+              },
+              {
+                "id": 3149,
+                "token": "\u0120source",
+                "logprob": -6.125
+              }
+            ]
+          },
+          {
+            "id": 50274,
+            "token": "\u00e2\u0122\u0133",
+            "logprob": -0.25,
+            "top_logprobs": [
+              {
+                "id": 50274,
+                "token": "\u00e2\u0122\u0133",
+                "logprob": -0.25
+              },
+              {
+                "id": 10674,
+                "token": "-level",
+                "logprob": -1.5
+              },
+              {
+                "id": 1839,
+                "token": "\u0120level",
+                "logprob": -8.125
+              }
+            ]
+          },
+          {
+            "id": 5614,
+            "token": "level",
+            "logprob": 0.0,
+            "top_logprobs": [
+              {
+                "id": 5614,
+                "token": "level",
+                "logprob": 0.0
+              },
+              {
+                "id": 1839,
+                "token": "\u0120level",
+                "logprob": -12.25
+              },
+              {
+                "id": 24200,
+                "token": "language",
+                "logprob": -12.25
+              }
+            ]
+          },
+          {
+            "id": 2363,
+            "token": "\u0120code",
+            "logprob": -0.75,
+            "top_logprobs": [
+              {
+                "id": 2363,
+                "token": "\u0120code",
+                "logprob": -0.75
+              },
+              {
+                "id": 11574,
+                "token": "\u0120programming",
+                "logprob": -0.875
+              },
+              {
+                "id": 3149,
+                "token": "\u0120source",
+                "logprob": -2.0
+              }
+            ]
+          }
+        ],
+        "stream_usage": {
+          "prompt_tokens": 124,
+          "completion_tokens": 8,
+          "total_tokens": 132,
+          "prompt_tokens_details": {
+            "cached_tokens": 123
+          }
+        }
+      }
+    },
+    "sampling_controls": {
+      "passed": true,
+      "evidence": [
+        {
+          "request_id": "chatcmpl-9715aa940c374d90b5e8deae8c7d5791",
+          "cache": "apcv2",
+          "cached_tokens": 111,
+          "profile": "north-mini-code-apcv2-ordinary",
+          "qualification": "candidate",
+          "route_receipt": "candidate_validation",
+          "request_controls": {
+            "logprobs": false,
+            "top_logprobs": 0,
+            "logprob_semantics": null,
+            "thinking": false,
+            "sampling": {
+              "temperature": 0.7,
+              "top_p": 0.9,
+              "top_k": 24,
+              "min_p": 0.05,
+              "repetition_penalty": 1.05,
+              "presence_penalty": 0.1,
+              "frequency_penalty": 0.1,
+              "seed": 237
+            },
+            "reasoning_effort": null,
+            "effort_semantics": "thinking_toggle",
+            "context_limit": 500000
+          },
+          "ordinary_compute_width": 1,
+          "mtp": null,
+          "speculation": null,
+          "prompt_tokens": 121,
+          "completion_tokens": 21,
+          "ttft_seconds": 0.06453137499920558,
+          "elapsed_seconds": 0.2151129999983823
+        },
+        {
+          "request_id": "chatcmpl-118a7082aa2d404497d8249005a12566",
+          "cache": "apcv2",
+          "cached_tokens": 120,
+          "profile": "north-mini-code-apcv2-ordinary",
+          "qualification": "candidate",
+          "route_receipt": "candidate_validation",
+          "request_controls": {
+            "logprobs": false,
+            "top_logprobs": 0,
+            "logprob_semantics": null,
+            "thinking": false,
+            "sampling": {
+              "temperature": 0.7,
+              "top_p": 0.9,
+              "top_k": 24,
+              "min_p": 0.05,
+              "repetition_penalty": 1.05,
+              "presence_penalty": 0.1,
+              "frequency_penalty": 0.1,
+              "seed": 237
+            },
+            "reasoning_effort": null,
+            "effort_semantics": "thinking_toggle",
+            "context_limit": 500000
+          },
+          "ordinary_compute_width": 1,
+          "mtp": null,
+          "speculation": null,
+          "prompt_tokens": 121,
+          "completion_tokens": 21,
+          "ttft_seconds": 0.04052645900083007,
+          "elapsed_seconds": 0.19340858399664285
+        }
+      ]
+    },
+    "cold_text": {
+      "passed": true,
+      "evidence": {
+        "request_id": "chatcmpl-c15c1f50c78f44c9b57141ac8c8c9ed6",
+        "cache": "apcv2",
+        "cached_tokens": 114,
+        "profile": "north-mini-code-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": false,
+          "top_logprobs": 0,
+          "logprob_semantics": null,
+          "thinking": false,
+          "sampling": {
+            "temperature": 0
+          },
+          "reasoning_effort": null,
+          "effort_semantics": "thinking_toggle",
+          "context_limit": 500000
+        },
+        "ordinary_compute_width": 1,
+        "mtp": null,
+        "speculation": null,
+        "prompt_tokens": 124,
+        "completion_tokens": 7,
+        "ttft_seconds": 0.06696699999884004,
+        "elapsed_seconds": 0.11791100000118604
+      }
+    },
+    "warm_prefix": {
+      "passed": true,
+      "evidence": {
+        "request_id": "chatcmpl-89e7116c5aef4ff19f479ad787075ede",
+        "cache": "apcv2",
+        "cached_tokens": 123,
+        "profile": "north-mini-code-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": false,
+          "top_logprobs": 0,
+          "logprob_semantics": null,
+          "thinking": false,
+          "sampling": {
+            "temperature": 0
+          },
+          "reasoning_effort": null,
+          "effort_semantics": "thinking_toggle",
+          "context_limit": 500000
+        },
+        "ordinary_compute_width": 1,
+        "mtp": null,
+        "speculation": null,
+        "prompt_tokens": 124,
+        "completion_tokens": 7,
+        "ttft_seconds": 0.03907937499752734,
+        "elapsed_seconds": 0.08913524999661604
+      }
+    },
+    "stream": {
+      "passed": true,
+      "evidence": [
+        {
+          "id": "chatcmpl-bbc851396a764306ace89a38db8149f1",
+          "object": "chat.completion.chunk",
+          "created": 1789548011,
+          "model": "North-Mini-Code-1.0-mlx-4bit",
+          "choices": [
+            {
+              "index": 0,
+              "finish_reason": null,
+              "delta": {
+                "content": "ML"
+              }
+            }
+          ]
+        },
+        {
+          "id": "chatcmpl-bbc851396a764306ace89a38db8149f1",
+          "object": "chat.completion.chunk",
+          "created": 1789548011,
+          "model": "North-Mini-Code-1.0-mlx-4bit",
+          "choices": [
+            {
+              "index": 0,
+              "finish_reason": null,
+              "delta": {
+                "content": "X"
+              }
+            }
+          ]
+        },
+        {
+          "id": "chatcmpl-bbc851396a764306ace89a38db8149f1",
+          "object": "chat.completion.chunk",
+          "created": 1789548011,
+          "model": "North-Mini-Code-1.0-mlx-4bit",
+          "choices": [
+            {
+              "index": 0,
+              "finish_reason": null,
+              "delta": {
+                "content": "2"
+              }
+            }
+          ]
+        },
+        {
+          "id": "chatcmpl-bbc851396a764306ace89a38db8149f1",
+          "object": "chat.completion.chunk",
+          "created": 1789548011,
+          "model": "North-Mini-Code-1.0-mlx-4bit",
+          "choices": [
+            {
+              "index": 0,
+              "finish_reason": null,
+              "delta": {
+                "content": "_READY"
+              }
+            }
+          ]
+        },
+        {
+          "id": "chatcmpl-bbc851396a764306ace89a38db8149f1",
+          "object": "chat.completion.chunk",
+          "created": 1789548011,
+          "model": "North-Mini-Code-1.0-mlx-4bit",
+          "choices": [
+            {
+              "index": 0,
+              "finish_reason": "stop",
+              "delta": {}
+            }
+          ],
+          "usage": {
+            "prompt_tokens": 124,
+            "completion_tokens": 7,
+            "total_tokens": 131,
+            "prompt_tokens_details": {
+              "cached_tokens": 123
+            }
+          },
+          "mlx2": {
+            "request_id": "chatcmpl-bbc851396a764306ace89a38db8149f1",
+            "cache": "apcv2",
+            "cached_tokens": 123,
+            "profile": "north-mini-code-apcv2-ordinary",
+            "qualification": "candidate",
+            "route_receipt": "candidate_validation",
+            "request_controls": {
+              "logprobs": false,
+              "top_logprobs": 0,
+              "logprob_semantics": null,
+              "thinking": false,
+              "sampling": {
+                "temperature": 0
+              },
+              "reasoning_effort": null,
+              "effort_semantics": "thinking_toggle",
+              "context_limit": 500000
+            },
+            "ordinary_compute_width": 1,
+            "mtp": null,
+            "speculation": null,
+            "prompt_tokens": 124,
+            "completion_tokens": 7,
+            "ttft_seconds": 0.038174417000846006,
+            "elapsed_seconds": 0.08915483400051016
+          }
+        }
+      ]
+    },
+    "tools": {
+      "passed": true,
+      "evidence": {
+        "id": "chatcmpl-20062cf2597342359973e17e62d19098",
+        "object": "chat.completion",
+        "created": 1789548011,
+        "model": "North-Mini-Code-1.0-mlx-4bit",
+        "choices": [
+          {
+            "index": 0,
+            "finish_reason": "tool_calls",
+            "message": {
+              "role": "assistant",
+              "content": "",
+              "tool_calls": [
+                {
+                  "id": "0",
+                  "type": "function",
+                  "function": {
+                    "name": "weather",
+                    "arguments": "{\"city\": \"Toronto\"}"
+                  }
+                }
+              ]
+            }
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 178,
+          "completion_tokens": 30,
+          "total_tokens": 208,
+          "prompt_tokens_details": {
+            "cached_tokens": 102
+          }
+        },
+        "mlx2": {
+          "request_id": "chatcmpl-20062cf2597342359973e17e62d19098",
+          "cache": "apcv2",
+          "cached_tokens": 102,
+          "profile": "north-mini-code-apcv2-ordinary",
+          "qualification": "candidate",
+          "route_receipt": "candidate_validation",
+          "request_controls": {
+            "logprobs": false,
+            "top_logprobs": 0,
+            "logprob_semantics": null,
+            "thinking": false,
+            "sampling": {
+              "temperature": 0
+            },
+            "reasoning_effort": null,
+            "effort_semantics": "thinking_toggle",
+            "context_limit": 500000
+          },
+          "ordinary_compute_width": 1,
+          "mtp": null,
+          "speculation": null,
+          "prompt_tokens": 178,
+          "completion_tokens": 30,
+          "ttft_seconds": 0.09863183299603406,
+          "elapsed_seconds": 0.3047327500025858
+        }
+      }
+    },
+    "tool_roundtrip": {
+      "passed": true,
+      "evidence": {
+        "id": "chatcmpl-fe12d1ff743e4fdb81d05624bd0dbf79",
+        "object": "chat.completion",
+        "created": 1789548011,
+        "model": "North-Mini-Code-1.0-mlx-4bit",
+        "choices": [
+          {
+            "index": 0,
+            "finish_reason": "stop",
+            "message": {
+              "role": "assistant",
+              "content": "The weather in Toronto is currently 21\u00b0C with sunny conditions."
+            }
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 267,
+          "completion_tokens": 16,
+          "total_tokens": 283,
+          "prompt_tokens_details": {
+            "cached_tokens": 176
+          }
+        },
+        "mlx2": {
+          "request_id": "chatcmpl-fe12d1ff743e4fdb81d05624bd0dbf79",
+          "cache": "apcv2",
+          "cached_tokens": 176,
+          "profile": "north-mini-code-apcv2-ordinary",
+          "qualification": "candidate",
+          "route_receipt": "candidate_validation",
+          "request_controls": {
+            "logprobs": false,
+            "top_logprobs": 0,
+            "logprob_semantics": null,
+            "thinking": false,
+            "sampling": {
+              "temperature": 0
+            },
+            "reasoning_effort": null,
+            "effort_semantics": "thinking_toggle",
+            "context_limit": 500000
+          },
+          "ordinary_compute_width": 1,
+          "mtp": null,
+          "speculation": null,
+          "prompt_tokens": 267,
+          "completion_tokens": 16,
+          "ttft_seconds": 0.11341470799379749,
+          "elapsed_seconds": 0.22547299999860115
+        }
+      }
+    },
+    "reasoning": {
+      "passed": true,
+      "evidence": {
+        "id": "chatcmpl-5834117bfa3e40f68a1bb7b1ba736b74",
+        "object": "chat.completion",
+        "created": 1789548011,
+        "model": "North-Mini-Code-1.0-mlx-4bit",
+        "choices": [
+          {
+            "index": 0,
+            "finish_reason": "stop",
+            "message": {
+              "role": "assistant",
+              "content": "13\u202f\u00d7\u202f17\u202f=\u202f221.",
+              "reasoning_content": "The user asks a simple arithmetic: 13 times 17. Compute: 13*17 = 221. Provide answer."
+            }
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 124,
+          "completion_tokens": 40,
+          "total_tokens": 164,
+          "prompt_tokens_details": {
+            "cached_tokens": 111
+          }
+        },
+        "mlx2": {
+          "request_id": "chatcmpl-5834117bfa3e40f68a1bb7b1ba736b74",
+          "cache": "apcv2",
+          "cached_tokens": 111,
+          "profile": "north-mini-code-apcv2-ordinary",
+          "qualification": "candidate",
+          "route_receipt": "candidate_validation",
+          "request_controls": {
+            "logprobs": false,
+            "top_logprobs": 0,
+            "logprob_semantics": null,
+            "thinking": true,
+            "sampling": {
+              "temperature": 0
+            },
+            "reasoning_effort": null,
+            "effort_semantics": "thinking_toggle",
+            "context_limit": 500000
+          },
+          "ordinary_compute_width": 1,
+          "mtp": null,
+          "speculation": null,
+          "prompt_tokens": 124,
+          "completion_tokens": 40,
+          "ttft_seconds": 0.06099570899823448,
+          "elapsed_seconds": 0.331219791994954
+        }
+      }
+    },
+    "stop": {
+      "passed": true,
+      "evidence": {
+        "id": "chatcmpl-7ecb0b19cf86446cb278f601e4af16cd",
+        "object": "chat.completion",
+        "created": 1789548012,
+        "model": "North-Mini-Code-1.0-mlx-4bit",
+        "choices": [
+          {
+            "index": 0,
+            "finish_reason": "stop",
+            "message": {
+              "role": "assistant",
+              "content": "MLX2"
+            }
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 124,
+          "completion_tokens": 5,
+          "total_tokens": 129,
+          "prompt_tokens_details": {
+            "cached_tokens": 123
+          }
+        },
+        "mlx2": {
+          "request_id": "chatcmpl-7ecb0b19cf86446cb278f601e4af16cd",
+          "cache": "apcv2",
+          "cached_tokens": 123,
+          "profile": "north-mini-code-apcv2-ordinary",
+          "qualification": "candidate",
+          "route_receipt": "candidate_validation",
+          "request_controls": {
+            "logprobs": false,
+            "top_logprobs": 0,
+            "logprob_semantics": null,
+            "thinking": false,
+            "sampling": {
+              "temperature": 0
+            },
+            "reasoning_effort": null,
+            "effort_semantics": "thinking_toggle",
+            "context_limit": 500000
+          },
+          "ordinary_compute_width": 1,
+          "mtp": null,
+          "speculation": null,
+          "prompt_tokens": 124,
+          "completion_tokens": 5,
+          "ttft_seconds": 0.039039458002662286,
+          "elapsed_seconds": 0.06600458300090395
+        }
+      }
+    },
+    "seed_repeat": {
+      "passed": true,
+      "evidence": {
+        "first": {
+          "id": "chatcmpl-65dd117789cd440e9468b4f11a6bcf4f",
+          "object": "chat.completion",
+          "created": 1789548012,
+          "model": "North-Mini-Code-1.0-mlx-4bit",
+          "choices": [
+            {
+              "index": 0,
+              "finish_reason": "length",
+              "message": {
+                "role": "assistant",
+                "content": "Here are three short facts about stars:\n\n1. **Stars are nuclear furnaces** \u2013 they fuse hydrogen atoms into helium in their cores, releasing enormous amounts of energy that makes them shine.\n\n2. **Stars have a wide range of sizes** \u2013 some are only a few percent of the Sun\u2019s size (like red"
+              }
+            }
+          ],
+          "usage": {
+            "prompt_tokens": 124,
+            "completion_tokens": 64,
+            "total_tokens": 188,
+            "prompt_tokens_details": {
+              "cached_tokens": 111
+            }
+          },
+          "mlx2": {
+            "request_id": "chatcmpl-65dd117789cd440e9468b4f11a6bcf4f",
+            "cache": "apcv2",
+            "cached_tokens": 111,
+            "profile": "north-mini-code-apcv2-ordinary",
+            "qualification": "candidate",
+            "route_receipt": "candidate_validation",
+            "request_controls": {
+              "logprobs": false,
+              "top_logprobs": 0,
+              "logprob_semantics": null,
+              "thinking": false,
+              "sampling": {
+                "temperature": 0.7,
+                "seed": 123
+              },
+              "reasoning_effort": null,
+              "effort_semantics": "thinking_toggle",
+              "context_limit": 500000
+            },
+            "ordinary_compute_width": 1,
+            "mtp": null,
+            "speculation": null,
+            "prompt_tokens": 124,
+            "completion_tokens": 64,
+            "ttft_seconds": 0.07068866700137733,
+            "elapsed_seconds": 0.5160806669955491
+          }
+        },
+        "second": {
+          "id": "chatcmpl-36560f2a451344a9b89406f264211968",
+          "object": "chat.completion",
+          "created": 1789548012,
+          "model": "North-Mini-Code-1.0-mlx-4bit",
+          "choices": [
+            {
+              "index": 0,
+              "finish_reason": "length",
+              "message": {
+                "role": "assistant",
+                "content": "Here are three short facts about stars:\n\n1. **Stars are nuclear furnaces** \u2013 they fuse hydrogen atoms into helium in their cores, releasing enormous amounts of energy that makes them shine.\n\n2. **Stars have a wide range of sizes** \u2013 some are only a few percent of the Sun\u2019s size (like red"
+              }
+            }
+          ],
+          "usage": {
+            "prompt_tokens": 124,
+            "completion_tokens": 64,
+            "total_tokens": 188,
+            "prompt_tokens_details": {
+              "cached_tokens": 123
+            }
+          },
+          "mlx2": {
+            "request_id": "chatcmpl-36560f2a451344a9b89406f264211968",
+            "cache": "apcv2",
+            "cached_tokens": 123,
+            "profile": "north-mini-code-apcv2-ordinary",
+            "qualification": "candidate",
+            "route_receipt": "candidate_validation",
+            "request_controls": {
+              "logprobs": false,
+              "top_logprobs": 0,
+              "logprob_semantics": null,
+              "thinking": false,
+              "sampling": {
+                "temperature": 0.7,
+                "seed": 123
+              },
+              "reasoning_effort": null,
+              "effort_semantics": "thinking_toggle",
+              "context_limit": 500000
+            },
+            "ordinary_compute_width": 1,
+            "mtp": null,
+            "speculation": null,
+            "prompt_tokens": 124,
+            "completion_tokens": 64,
+            "ttft_seconds": 0.03971208400616888,
+            "elapsed_seconds": 0.48255433400481706
+          }
+        }
+      }
+    },
+    "batch": {
+      "passed": true,
+      "evidence": {
+        "observed_widths": [
+          4
+        ],
+        "wall_seconds": 2.0473895839968463,
+        "aggregate_tokens_per_second": 312.59316986003864,
+        "request_receipts": [
+          {
+            "request_id": "chatcmpl-ac671c831880498685076fb10ed4e714",
+            "cache": "apcv2",
+            "cached_tokens": 111,
+            "profile": "north-mini-code-apcv2-ordinary",
+            "qualification": "candidate",
+            "route_receipt": "candidate_validation",
+            "request_controls": {
+              "logprobs": false,
+              "top_logprobs": 0,
+              "logprob_semantics": null,
+              "thinking": false,
+              "sampling": {
+                "temperature": 0
+              },
+              "reasoning_effort": null,
+              "effort_semantics": "thinking_toggle",
+              "context_limit": 500000
+            },
+            "ordinary_compute_width": 4,
+            "mtp": null,
+            "speculation": null,
+            "prompt_tokens": 125,
+            "completion_tokens": 160,
+            "ttft_seconds": 0.18398041700129397,
+            "elapsed_seconds": 2.0023970839974936
+          },
+          {
+            "request_id": "chatcmpl-2fb57194226246168691d7dbd81411cc",
+            "cache": "apcv2",
+            "cached_tokens": 111,
+            "profile": "north-mini-code-apcv2-ordinary",
+            "qualification": "candidate",
+            "route_receipt": "candidate_validation",
+            "request_controls": {
+              "logprobs": false,
+              "top_logprobs": 0,
+              "logprob_semantics": null,
+              "thinking": false,
+              "sampling": {
+                "temperature": 0
+              },
+              "reasoning_effort": null,
+              "effort_semantics": "thinking_toggle",
+              "context_limit": 500000
+            },
+            "ordinary_compute_width": 4,
+            "mtp": null,
+            "speculation": null,
+            "prompt_tokens": 125,
+            "completion_tokens": 160,
+            "ttft_seconds": 0.23872941699664807,
+            "elapsed_seconds": 2.042000541994639
+          },
+          {
+            "request_id": "chatcmpl-928b0204e13a4e21a4f554d51cf69353",
+            "cache": "apcv2",
+            "cached_tokens": 111,
+            "profile": "north-mini-code-apcv2-ordinary",
+            "qualification": "candidate",
+            "route_receipt": "candidate_validation",
+            "request_controls": {
+              "logprobs": false,
+              "top_logprobs": 0,
+              "logprob_semantics": null,
+              "thinking": false,
+              "sampling": {
+                "temperature": 0
+              },
+              "reasoning_effort": null,
+              "effort_semantics": "thinking_toggle",
+              "context_limit": 500000
+            },
+            "ordinary_compute_width": 4,
+            "mtp": null,
+            "speculation": null,
+            "prompt_tokens": 125,
+            "completion_tokens": 160,
+            "ttft_seconds": 0.18270816600124817,
+            "elapsed_seconds": 2.003058708003664
+          },
+          {
+            "request_id": "chatcmpl-b16fa2d3063749bc9518a427ac291017",
+            "cache": "apcv2",
+            "cached_tokens": 111,
+            "profile": "north-mini-code-apcv2-ordinary",
+            "qualification": "candidate",
+            "route_receipt": "candidate_validation",
+            "request_controls": {
+              "logprobs": false,
+              "top_logprobs": 0,
+              "logprob_semantics": null,
+              "thinking": false,
+              "sampling": {
+                "temperature": 0
+              },
+              "reasoning_effort": null,
+              "effort_semantics": "thinking_toggle",
+              "context_limit": 500000
+            },
+            "ordinary_compute_width": 4,
+            "mtp": null,
+            "speculation": null,
+            "prompt_tokens": 125,
+            "completion_tokens": 160,
+            "ttft_seconds": 0.23786924999876646,
+            "elapsed_seconds": 2.0429737500016927
+          }
+        ]
+      }
+    },
+    "mixed_warm": {
+      "passed": true,
+      "evidence": [
+        {
+          "request_id": "chatcmpl-89af1f7c16a04d86a0d88b21ba14f79b",
+          "cache": "apcv2",
+          "cached_tokens": 126,
+          "profile": "north-mini-code-apcv2-ordinary",
+          "qualification": "candidate",
+          "route_receipt": "candidate_validation",
+          "request_controls": {
+            "logprobs": false,
+            "top_logprobs": 0,
+            "logprob_semantics": null,
+            "thinking": false,
+            "sampling": {
+              "temperature": 0
+            },
+            "reasoning_effort": null,
+            "effort_semantics": "thinking_toggle",
+            "context_limit": 500000
+          },
+          "ordinary_compute_width": 2,
+          "mtp": null,
+          "speculation": null,
+          "prompt_tokens": 127,
+          "completion_tokens": 64,
+          "ttft_seconds": 0.053184625001449604,
+          "elapsed_seconds": 0.6224606250034412
+        },
+        {
+          "request_id": "chatcmpl-6d1ff98735e24ca7ac9ed7a6ff125e41",
+          "cache": "apcv2",
+          "cached_tokens": 127,
+          "profile": "north-mini-code-apcv2-ordinary",
+          "qualification": "candidate",
+          "route_receipt": "candidate_validation",
+          "request_controls": {
+            "logprobs": false,
+            "top_logprobs": 0,
+            "logprob_semantics": null,
+            "thinking": false,
+            "sampling": {
+              "temperature": 0
+            },
+            "reasoning_effort": null,
+            "effort_semantics": "thinking_toggle",
+            "context_limit": 500000
+          },
+          "ordinary_compute_width": 2,
+          "mtp": null,
+          "speculation": null,
+          "prompt_tokens": 128,
+          "completion_tokens": 64,
+          "ttft_seconds": 0.05413099999714177,
+          "elapsed_seconds": 0.621678041999985
+        }
+      ]
+    }
+  },
+  "responses": {
+    "sampling_controls": [
+      {
+        "id": "chatcmpl-9715aa940c374d90b5e8deae8c7d5791",
+        "object": "chat.completion",
+        "created": 1789548010,
+        "model": "North-Mini-Code-1.0-mlx-4bit",
+        "choices": [
+          {
+            "index": 0,
+            "finish_reason": "stop",
+            "message": {
+              "role": "assistant",
+              "content": "Sure! Here are three fruits:\n\n1. Apple  \n2. Banana  \n3. Orange"
+            }
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 121,
+          "completion_tokens": 21,
+          "total_tokens": 142,
+          "prompt_tokens_details": {
+            "cached_tokens": 111
+          }
+        },
+        "mlx2": {
+          "request_id": "chatcmpl-9715aa940c374d90b5e8deae8c7d5791",
+          "cache": "apcv2",
+          "cached_tokens": 111,
+          "profile": "north-mini-code-apcv2-ordinary",
+          "qualification": "candidate",
+          "route_receipt": "candidate_validation",
+          "request_controls": {
+            "logprobs": false,
+            "top_logprobs": 0,
+            "logprob_semantics": null,
+            "thinking": false,
+            "sampling": {
+              "temperature": 0.7,
+              "top_p": 0.9,
+              "top_k": 24,
+              "min_p": 0.05,
+              "repetition_penalty": 1.05,
+              "presence_penalty": 0.1,
+              "frequency_penalty": 0.1,
+              "seed": 237
+            },
+            "reasoning_effort": null,
+            "effort_semantics": "thinking_toggle",
+            "context_limit": 500000
+          },
+          "ordinary_compute_width": 1,
+          "mtp": null,
+          "speculation": null,
+          "prompt_tokens": 121,
+          "completion_tokens": 21,
+          "ttft_seconds": 0.06453137499920558,
+          "elapsed_seconds": 0.2151129999983823
+        }
+      },
+      {
+        "id": "chatcmpl-118a7082aa2d404497d8249005a12566",
+        "object": "chat.completion",
+        "created": 1789548010,
+        "model": "North-Mini-Code-1.0-mlx-4bit",
+        "choices": [
+          {
+            "index": 0,
+            "finish_reason": "stop",
+            "message": {
+              "role": "assistant",
+              "content": "Sure! Here are three fruits:\n\n1. Apple  \n2. Banana  \n3. Orange"
+            }
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 121,
+          "completion_tokens": 21,
+          "total_tokens": 142,
+          "prompt_tokens_details": {
+            "cached_tokens": 120
+          }
+        },
+        "mlx2": {
+          "request_id": "chatcmpl-118a7082aa2d404497d8249005a12566",
+          "cache": "apcv2",
+          "cached_tokens": 120,
+          "profile": "north-mini-code-apcv2-ordinary",
+          "qualification": "candidate",
+          "route_receipt": "candidate_validation",
+          "request_controls": {
+            "logprobs": false,
+            "top_logprobs": 0,
+            "logprob_semantics": null,
+            "thinking": false,
+            "sampling": {
+              "temperature": 0.7,
+              "top_p": 0.9,
+              "top_k": 24,
+              "min_p": 0.05,
+              "repetition_penalty": 1.05,
+              "presence_penalty": 0.1,
+              "frequency_penalty": 0.1,
+              "seed": 237
+            },
+            "reasoning_effort": null,
+            "effort_semantics": "thinking_toggle",
+            "context_limit": 500000
+          },
+          "ordinary_compute_width": 1,
+          "mtp": null,
+          "speculation": null,
+          "prompt_tokens": 121,
+          "completion_tokens": 21,
+          "ttft_seconds": 0.04052645900083007,
+          "elapsed_seconds": 0.19340858399664285
+        }
+      }
+    ],
+    "cold": {
+      "id": "chatcmpl-c15c1f50c78f44c9b57141ac8c8c9ed6",
+      "object": "chat.completion",
+      "created": 1789548011,
+      "model": "North-Mini-Code-1.0-mlx-4bit",
+      "choices": [
+        {
+          "index": 0,
+          "finish_reason": "stop",
+          "message": {
+            "role": "assistant",
+            "content": "MLX2_READY"
+          }
+        }
+      ],
+      "usage": {
+        "prompt_tokens": 124,
+        "completion_tokens": 7,
+        "total_tokens": 131,
+        "prompt_tokens_details": {
+          "cached_tokens": 114
+        }
+      },
+      "mlx2": {
+        "request_id": "chatcmpl-c15c1f50c78f44c9b57141ac8c8c9ed6",
+        "cache": "apcv2",
+        "cached_tokens": 114,
+        "profile": "north-mini-code-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": false,
+          "top_logprobs": 0,
+          "logprob_semantics": null,
+          "thinking": false,
+          "sampling": {
+            "temperature": 0
+          },
+          "reasoning_effort": null,
+          "effort_semantics": "thinking_toggle",
+          "context_limit": 500000
+        },
+        "ordinary_compute_width": 1,
+        "mtp": null,
+        "speculation": null,
+        "prompt_tokens": 124,
+        "completion_tokens": 7,
+        "ttft_seconds": 0.06696699999884004,
+        "elapsed_seconds": 0.11791100000118604
+      }
+    },
+    "warm": {
+      "id": "chatcmpl-89e7116c5aef4ff19f479ad787075ede",
+      "object": "chat.completion",
+      "created": 1789548011,
+      "model": "North-Mini-Code-1.0-mlx-4bit",
+      "choices": [
+        {
+          "index": 0,
+          "finish_reason": "stop",
+          "message": {
+            "role": "assistant",
+            "content": "MLX2_READY"
+          }
+        }
+      ],
+      "usage": {
+        "prompt_tokens": 124,
+        "completion_tokens": 7,
+        "total_tokens": 131,
+        "prompt_tokens_details": {
+          "cached_tokens": 123
+        }
+      },
+      "mlx2": {
+        "request_id": "chatcmpl-89e7116c5aef4ff19f479ad787075ede",
+        "cache": "apcv2",
+        "cached_tokens": 123,
+        "profile": "north-mini-code-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": false,
+          "top_logprobs": 0,
+          "logprob_semantics": null,
+          "thinking": false,
+          "sampling": {
+            "temperature": 0
+          },
+          "reasoning_effort": null,
+          "effort_semantics": "thinking_toggle",
+          "context_limit": 500000
+        },
+        "ordinary_compute_width": 1,
+        "mtp": null,
+        "speculation": null,
+        "prompt_tokens": 124,
+        "completion_tokens": 7,
+        "ttft_seconds": 0.03907937499752734,
+        "elapsed_seconds": 0.08913524999661604
+      }
+    },
+    "batch": [
+      {
+        "id": "chatcmpl-ac671c831880498685076fb10ed4e714",
+        "object": "chat.completion",
+        "created": 1789548013,
+        "model": "North-Mini-Code-1.0-mlx-4bit",
+        "choices": [
+          {
+            "index": 0,
+            "finish_reason": "length",
+            "message": {
+              "role": "assistant",
+              "content": "**Compiler Overview**\n\nA compiler is a software tool that translates source code written in a high\u2011level programming language into a lower\u2011level representation (usually machine code) that a computer can execute directly. The compilation process involves several distinct phases, each with specific tasks and outputs. Below is a detailed, step\u2011by\u2011step explanation of how a compiler works, from the moment the source file is read until the final executable is produced.\n\n---\n\n## 1. Front\u2011End (Analysis) Phase \u2013 \u201cParsing\u201d\n\n| Step | Description | Typical Output |\n|------|-------------|----------------|\n| **Lexical Analysis** | The source text is scanned character\u2011by\u2011character. The lexer groups characters into *tokens* (identifiers, literals, operators, keywords). It also discards whitespace and comments"
+            }
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 125,
+          "completion_tokens": 160,
+          "total_tokens": 285,
+          "prompt_tokens_details": {
+            "cached_tokens": 111
+          }
+        },
+        "mlx2": {
+          "request_id": "chatcmpl-ac671c831880498685076fb10ed4e714",
+          "cache": "apcv2",
+          "cached_tokens": 111,
+          "profile": "north-mini-code-apcv2-ordinary",
+          "qualification": "candidate",
+          "route_receipt": "candidate_validation",
+          "request_controls": {
+            "logprobs": false,
+            "top_logprobs": 0,
+            "logprob_semantics": null,
+            "thinking": false,
+            "sampling": {
+              "temperature": 0
+            },
+            "reasoning_effort": null,
+            "effort_semantics": "thinking_toggle",
+            "context_limit": 500000
+          },
+          "ordinary_compute_width": 4,
+          "mtp": null,
+          "speculation": null,
+          "prompt_tokens": 125,
+          "completion_tokens": 160,
+          "ttft_seconds": 0.18398041700129397,
+          "elapsed_seconds": 2.0023970839974936
+        }
+      },
+      {
+        "id": "chatcmpl-2fb57194226246168691d7dbd81411cc",
+        "object": "chat.completion",
+        "created": 1789548013,
+        "model": "North-Mini-Code-1.0-mlx-4bit",
+        "choices": [
+          {
+            "index": 0,
+            "finish_reason": "length",
+            "message": {
+              "role": "assistant",
+              "content": "**Compiler Overview**\n\nA compiler is a software tool that translates source code written in a high\u2011level programming language into a lower\u2011level representation (usually machine code) that a computer can execute directly. The compilation process involves several distinct phases, each with specific tasks and outputs. Below is a detailed, step\u2011by\u2011step explanation of how a compiler works, including the typical phases, the kind of work done in each phase, and the overall flow.\n\n---\n\n## 1. Front\u2011End (Analysis) Phase \u2013 \u201cParsing\u201d\n\n| Step | What Happens | Why It Matters |\n|------|--------------|----------------|\n| **Lexical Analysis** (Lexer) | Scans the source file character\u2011by\u2011character, grouping characters into **tokens** (identifiers, literals, operators, keywords"
+            }
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 125,
+          "completion_tokens": 160,
+          "total_tokens": 285,
+          "prompt_tokens_details": {
+            "cached_tokens": 111
+          }
+        },
+        "mlx2": {
+          "request_id": "chatcmpl-2fb57194226246168691d7dbd81411cc",
+          "cache": "apcv2",
+          "cached_tokens": 111,
+          "profile": "north-mini-code-apcv2-ordinary",
+          "qualification": "candidate",
+          "route_receipt": "candidate_validation",
+          "request_controls": {
+            "logprobs": false,
+            "top_logprobs": 0,
+            "logprob_semantics": null,
+            "thinking": false,
+            "sampling": {
+              "temperature": 0
+            },
+            "reasoning_effort": null,
+            "effort_semantics": "thinking_toggle",
+            "context_limit": 500000
+          },
+          "ordinary_compute_width": 4,
+          "mtp": null,
+          "speculation": null,
+          "prompt_tokens": 125,
+          "completion_tokens": 160,
+          "ttft_seconds": 0.23872941699664807,
+          "elapsed_seconds": 2.042000541994639
+        }
+      },
+      {
+        "id": "chatcmpl-928b0204e13a4e21a4f554d51cf69353",
+        "object": "chat.completion",
+        "created": 1789548013,
+        "model": "North-Mini-Code-1.0-mlx-4bit",
+        "choices": [
+          {
+            "index": 0,
+            "finish_reason": "length",
+            "message": {
+              "role": "assistant",
+              "content": "**Compiler Overview**\n\nA compiler is a software tool that translates source code written in a high\u2011level programming language into a lower\u2011level representation (usually machine code) that a computer can execute directly. The compilation process involves several distinct phases, each with specific tasks and outputs. Below is a detailed, step\u2011by\u2011step explanation of how a compiler works, from the moment the source file is read until the final executable is produced.\n\n---\n\n## 1. Front\u2011End (Analysis) Phase \u2013 \u201cParsing\u201d\n\n| Step | Description | Typical Output |\n|------|-------------|----------------|\n| **Lexical Analysis** | The source text is scanned character\u2011by\u2011character. The lexer groups characters into *tokens* (identifiers, literals, operators, keywords). It also discards whitespace and comments"
+            }
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 125,
+          "completion_tokens": 160,
+          "total_tokens": 285,
+          "prompt_tokens_details": {
+            "cached_tokens": 111
+          }
+        },
+        "mlx2": {
+          "request_id": "chatcmpl-928b0204e13a4e21a4f554d51cf69353",
+          "cache": "apcv2",
+          "cached_tokens": 111,
+          "profile": "north-mini-code-apcv2-ordinary",
+          "qualification": "candidate",
+          "route_receipt": "candidate_validation",
+          "request_controls": {
+            "logprobs": false,
+            "top_logprobs": 0,
+            "logprob_semantics": null,
+            "thinking": false,
+            "sampling": {
+              "temperature": 0
+            },
+            "reasoning_effort": null,
+            "effort_semantics": "thinking_toggle",
+            "context_limit": 500000
+          },
+          "ordinary_compute_width": 4,
+          "mtp": null,
+          "speculation": null,
+          "prompt_tokens": 125,
+          "completion_tokens": 160,
+          "ttft_seconds": 0.18270816600124817,
+          "elapsed_seconds": 2.003058708003664
+        }
+      },
+      {
+        "id": "chatcmpl-b16fa2d3063749bc9518a427ac291017",
+        "object": "chat.completion",
+        "created": 1789548013,
+        "model": "North-Mini-Code-1.0-mlx-4bit",
+        "choices": [
+          {
+            "index": 0,
+            "finish_reason": "length",
+            "message": {
+              "role": "assistant",
+              "content": "**Compiler Overview**\n\nA compiler is a software tool that translates source code written in a high\u2011level programming language into a lower\u2011level representation (usually machine code) that a computer can execute directly. The compilation process involves several distinct phases, each with specific tasks and outputs. Below is a detailed, step\u2011by\u2011step explanation of how a compiler works, including the typical phases, the kind of work done in each phase, and the overall flow.\n\n---\n\n## 1. Front\u2011End (Analysis) Phase \u2013 \u201cParsing\u201d\n\n| Step | What Happens | Why It Matters |\n|------|--------------|----------------|\n| **Lexical Analysis** (Lexer) | Scans the source file character\u2011by\u2011character, grouping characters into **tokens** (identifiers, literals, operators, keywords"
+            }
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 125,
+          "completion_tokens": 160,
+          "total_tokens": 285,
+          "prompt_tokens_details": {
+            "cached_tokens": 111
+          }
+        },
+        "mlx2": {
+          "request_id": "chatcmpl-b16fa2d3063749bc9518a427ac291017",
+          "cache": "apcv2",
+          "cached_tokens": 111,
+          "profile": "north-mini-code-apcv2-ordinary",
+          "qualification": "candidate",
+          "route_receipt": "candidate_validation",
+          "request_controls": {
+            "logprobs": false,
+            "top_logprobs": 0,
+            "logprob_semantics": null,
+            "thinking": false,
+            "sampling": {
+              "temperature": 0
+            },
+            "reasoning_effort": null,
+            "effort_semantics": "thinking_toggle",
+            "context_limit": 500000
+          },
+          "ordinary_compute_width": 4,
+          "mtp": null,
+          "speculation": null,
+          "prompt_tokens": 125,
+          "completion_tokens": 160,
+          "ttft_seconds": 0.23786924999876646,
+          "elapsed_seconds": 2.0429737500016927
+        }
+      }
+    ]
+  },
+  "passed": false,
+  "failure_status": {
+    "state": "ready",
+    "model": "North-Mini-Code-1.0-mlx-4bit",
+    "runtime": {
+      "source_sha256": "b7924d2657a83fd8c236e29a862e1ba8fe95a1ac00c3dcd09502dac65c909457",
+      "mlx_native_sha256": "30335939714520c3306cfa58597100aae08bbeabdc60a4bc8c35c32c607450a8",
+      "python": "3.12.13",
+      "macos": "26.7",
+      "mlx": "0.32.2.dev20260915+2a817ad94",
+      "transformers": "5.12.1",
+      "dependencies": {
+        "numpy": "2.5.1",
+        "tokenizers": "0.22.2",
+        "jinja2": "3.1.6",
+        "psutil": "7.2.2",
+        "regex": "2026.9.10",
+        "safetensors": "0.8.0"
+      }
+    },
+    "artifact": "6c88a4d3a5387abe2d97ac3d5eb70e484fb33615bb0c0f2ff8e7ef22b442f2e4",
+    "profile": "north-mini-code-apcv2-ordinary",
+    "settings": {
+      "max_context": 500000,
+      "max_lanes": 20,
+      "max_inflight": 40,
+      "prefill_step": 2048,
+      "cache_bytes": 17179869184,
+      "disk_cache": true,
+      "mtp": false,
+      "environment": {
+        "HF_HUB_OFFLINE": "1",
+        "TRANSFORMERS_OFFLINE": "1",
+        "MLX_ENABLE_TF32": "0",
+        "MLX_LM_COMPILED_DECODE": "0",
+        "MLX_LM_SEGMENTED_SELF_MTP": "0",
+        "MLX_LM_TRUE_BATCHED_SEGMENTED_MTP": "0",
+        "MLX_LM_SHARED_QSA_SUFFIX": "0"
+      },
+      "execution_policy": {
+        "persistent": true,
+        "num_draft": 0,
+        "rate_gate": false,
+        "prefill_step_size": 2048,
+        "segment_aware_live_tip": false,
+        "segment_aware_cohort_size": 20
+      },
+      "speculation": "ordinary",
+      "cache_budget": {
+        "schema": "north-mini-code-cache-geometry-v1",
+        "global_layers": 13,
+        "sliding_layers": 36,
+        "kv_heads": 4,
+        "head_dim": 128,
+        "sliding_window": 4096,
+        "item_bytes": 4,
+        "allocation_step": 256,
+        "checkpoint_copies": 4,
+        "transcript_bytes_per_token": 16,
+        "transient_gib_per_lane": 3.1,
+        "bound": "fp32-global-plus-window-and-restore-snapshots",
+        "workspace": "3.1-GiB-per-lane conservative static assumption; live qualification pending"
+      }
+    },
+    "route_receipt": "candidate_validation",
+    "qualification": "candidate",
+    "max_context": 500000,
+    "max_lanes": 20,
+    "apcv2": {
+      "lookups": 23,
+      "hits": 22,
+      "misses": 1,
+      "cached_tokens": 2621,
+      "stores": 45,
+      "clears": 0,
+      "lifetime": {
+        "lookups": 23,
+        "hits": 22,
+        "misses": 1,
+        "cached_tokens": 2621,
+        "stores": 45
+      },
+      "cow_enabled": true,
+      "cow": {
+        "sources": 45,
+        "source_bytes": 720125952,
+        "freeze_failures": 0,
+        "branches": 22,
+        "branch_failures": 0,
+        "stale_rejections": 0,
+        "invalidations": 31,
+        "active_leases": 0,
+        "peak_leases": 4,
+        "descriptor_aliases": 6566,
+        "descriptor_bytes": 1052692480,
+        "avoided_copy_bytes": 332566528,
+        "materializations": 0,
+        "materialized_bytes": 0,
+        "fallback_deepcopies": 0,
+        "fallback_bytes": 0,
+        "freeze_ns": 77417209,
+        "branch_ns": 7878831,
+        "fallback_ns": 0,
+        "releases": 22,
+        "planes": {
+          "attention_kv": {
+            "descriptor_aliases": 1742,
+            "descriptor_bytes": 279285760,
+            "materializations": 0,
+            "materialized_bytes": 0
+          },
+          "attention_ring": {
+            "descriptor_aliases": 4824,
+            "descriptor_bytes": 773406720,
+            "materializations": 0,
+            "materialized_bytes": 0
+          }
+        },
+        "materialized_bytes_are_estimated": true,
+        "array_readbacks": 0
+      },
+      "max_tokens": 500000,
+      "max_entry_tokens": 285,
+      "overlength_rejections": 0,
+      "idle_disk": {
+        "enabled": true,
+        "idle_seconds": 180.0,
+        "resident_bytes": 265431040,
+        "disk_bytes": 0,
+        "disk_max_bytes": 68719476736,
+        "disk_entries": 0,
+        "idle_spills": 0,
+        "pressure_spills": 0,
+        "restores": 0,
+        "restore_failures": 0,
+        "spill_failures": 0,
+        "disk_evictions": 0,
+        "bytes_written": 0,
+        "bytes_read": 0
+      },
+      "version": 2,
+      "layout_name": "north-mini-code-layer-segments-v1",
+      "layer_segments": {
+        "schema": "apcv2.layer-segments.v1",
+        "entries": 14,
+        "disk_entries": 0,
+        "layers": 686,
+        "plane_layers": 686,
+        "segments": 725,
+        "logical_bytes": 265431040,
+        "by_plane": {
+          "attention_kv": {
+            "layers": 182,
+            "segments": 221,
+            "logical_bytes": 70420480,
+            "invalid": 0
+          },
+          "attention_ring": {
+            "layers": 504,
+            "segments": 504,
+            "logical_bytes": 195010560,
+            "invalid": 0
+          }
+        }
+      }
+    },
+    "scheduler": {
+      "prefill_rounds": 12,
+      "prefill_only_rounds": 11,
+      "decode_priority_release_rounds": 0,
+      "decode_priority_deferred_rounds": 0,
+      "adaptive_prefill_release_rounds": 1,
+      "adaptive_prefill_slack_deferred_rounds": 0,
+      "adaptive_prefill_deadline_forced_rounds": 0,
+      "adaptive_prefill_apc_priority_admissions": 0,
+      "adaptive_prefill_chunk_histogram": {
+        "13": 1
+      }
+    },
+    "metal_active_bytes": 17717927982,
+    "metal_peak_bytes": 17757717932,
+    "process_physical_footprint_bytes": 18344703224,
+    "execution": {
+      "architecture": "cohere2_moe",
+      "cache_layout": "north-mini-code-layer-segments-v1",
+      "sliding_layers": 36,
+      "global_layers": 13,
+      "sliding_window": 4096,
+      "speculation": "none-qualified"
+    },
+    "admission": {},
+    "memory_waiting": 0,
+    "headroom_bytes": 101914381064,
+    "healthy": true,
+    "error": null,
+    "inflight": 0,
+    "queue_depth": 0,
+    "counts": {
+      "admitted": 23,
+      "cycles": 696,
+      "multi_request_cycles": 229,
+      "completed": 23
+    },
+    "recent_receipts": [
+      {
+        "request_id": "chatcmpl-04a5c9812c1a43efb33b0d076bf8da26",
+        "cache": "apcv2",
+        "cached_tokens": 0,
+        "profile": "north-mini-code-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": false,
+          "top_logprobs": 0,
+          "logprob_semantics": null,
+          "thinking": false,
+          "sampling": {
+            "temperature": 0
+          },
+          "reasoning_effort": "none",
+          "effort_semantics": "thinking_toggle",
+          "context_limit": 262144
+        },
+        "ordinary_compute_width": 1,
+        "mtp": null,
+        "speculation": null,
+        "prompt_tokens": 123,
+        "completion_tokens": 6,
+        "ttft_seconds": 0.2954597499992815,
+        "elapsed_seconds": 0.3392767499972251
+      },
+      {
+        "request_id": "chatcmpl-59bbcf76d9b54a8fbeb95406de2957d6",
+        "cache": "apcv2",
+        "cached_tokens": 111,
+        "profile": "north-mini-code-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": false,
+          "top_logprobs": 0,
+          "logprob_semantics": null,
+          "thinking": false,
+          "sampling": {
+            "temperature": 0
+          },
+          "reasoning_effort": null,
+          "effort_semantics": "thinking_toggle",
+          "context_limit": 500000
+        },
+        "ordinary_compute_width": 1,
+        "mtp": null,
+        "speculation": null,
+        "prompt_tokens": 124,
+        "completion_tokens": 8,
+        "ttft_seconds": 0.06803420800133608,
+        "elapsed_seconds": 0.1292067499962286
+      },
+      {
+        "request_id": "chatcmpl-286cf1dc4a7c430fbfa753b211c25270",
+        "cache": "apcv2",
+        "cached_tokens": 123,
+        "profile": "north-mini-code-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": true,
+          "top_logprobs": 3,
+          "logprob_semantics": "execution_target: ordinary=post_processor_pre_sampler; mtp=transformed_target_verifier",
+          "thinking": false,
+          "sampling": {
+            "temperature": 0
+          },
+          "reasoning_effort": null,
+          "effort_semantics": "thinking_toggle",
+          "context_limit": 500000
+        },
+        "ordinary_compute_width": 1,
+        "mtp": null,
+        "speculation": null,
+        "prompt_tokens": 124,
+        "completion_tokens": 8,
+        "ttft_seconds": 0.039431833996786736,
+        "elapsed_seconds": 0.10741895899991505
+      },
+      {
+        "request_id": "chatcmpl-25afb83ade094b62b09bb3b20b5683fc",
+        "cache": "apcv2",
+        "cached_tokens": 123,
+        "profile": "north-mini-code-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": true,
+          "top_logprobs": 3,
+          "logprob_semantics": "execution_target: ordinary=post_processor_pre_sampler; mtp=transformed_target_verifier",
+          "thinking": false,
+          "sampling": {
+            "temperature": 0
+          },
+          "reasoning_effort": null,
+          "effort_semantics": "thinking_toggle",
+          "context_limit": 500000
+        },
+        "ordinary_compute_width": 1,
+        "mtp": null,
+        "speculation": null,
+        "prompt_tokens": 124,
+        "completion_tokens": 8,
+        "ttft_seconds": 0.039313791996391956,
+        "elapsed_seconds": 0.10044674999517156
+      },
+      {
+        "request_id": "chatcmpl-9715aa940c374d90b5e8deae8c7d5791",
+        "cache": "apcv2",
+        "cached_tokens": 111,
+        "profile": "north-mini-code-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": false,
+          "top_logprobs": 0,
+          "logprob_semantics": null,
+          "thinking": false,
+          "sampling": {
+            "temperature": 0.7,
+            "top_p": 0.9,
+            "top_k": 24,
+            "min_p": 0.05,
+            "repetition_penalty": 1.05,
+            "presence_penalty": 0.1,
+            "frequency_penalty": 0.1,
+            "seed": 237
+          },
+          "reasoning_effort": null,
+          "effort_semantics": "thinking_toggle",
+          "context_limit": 500000
+        },
+        "ordinary_compute_width": 1,
+        "mtp": null,
+        "speculation": null,
+        "prompt_tokens": 121,
+        "completion_tokens": 21,
+        "ttft_seconds": 0.06453137499920558,
+        "elapsed_seconds": 0.2151129999983823
+      },
+      {
+        "request_id": "chatcmpl-118a7082aa2d404497d8249005a12566",
+        "cache": "apcv2",
+        "cached_tokens": 120,
+        "profile": "north-mini-code-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": false,
+          "top_logprobs": 0,
+          "logprob_semantics": null,
+          "thinking": false,
+          "sampling": {
+            "temperature": 0.7,
+            "top_p": 0.9,
+            "top_k": 24,
+            "min_p": 0.05,
+            "repetition_penalty": 1.05,
+            "presence_penalty": 0.1,
+            "frequency_penalty": 0.1,
+            "seed": 237
+          },
+          "reasoning_effort": null,
+          "effort_semantics": "thinking_toggle",
+          "context_limit": 500000
+        },
+        "ordinary_compute_width": 1,
+        "mtp": null,
+        "speculation": null,
+        "prompt_tokens": 121,
+        "completion_tokens": 21,
+        "ttft_seconds": 0.04052645900083007,
+        "elapsed_seconds": 0.19340858399664285
+      },
+      {
+        "request_id": "chatcmpl-c15c1f50c78f44c9b57141ac8c8c9ed6",
+        "cache": "apcv2",
+        "cached_tokens": 114,
+        "profile": "north-mini-code-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": false,
+          "top_logprobs": 0,
+          "logprob_semantics": null,
+          "thinking": false,
+          "sampling": {
+            "temperature": 0
+          },
+          "reasoning_effort": null,
+          "effort_semantics": "thinking_toggle",
+          "context_limit": 500000
+        },
+        "ordinary_compute_width": 1,
+        "mtp": null,
+        "speculation": null,
+        "prompt_tokens": 124,
+        "completion_tokens": 7,
+        "ttft_seconds": 0.06696699999884004,
+        "elapsed_seconds": 0.11791100000118604
+      },
+      {
+        "request_id": "chatcmpl-89e7116c5aef4ff19f479ad787075ede",
+        "cache": "apcv2",
+        "cached_tokens": 123,
+        "profile": "north-mini-code-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": false,
+          "top_logprobs": 0,
+          "logprob_semantics": null,
+          "thinking": false,
+          "sampling": {
+            "temperature": 0
+          },
+          "reasoning_effort": null,
+          "effort_semantics": "thinking_toggle",
+          "context_limit": 500000
+        },
+        "ordinary_compute_width": 1,
+        "mtp": null,
+        "speculation": null,
+        "prompt_tokens": 124,
+        "completion_tokens": 7,
+        "ttft_seconds": 0.03907937499752734,
+        "elapsed_seconds": 0.08913524999661604
+      },
+      {
+        "request_id": "chatcmpl-bbc851396a764306ace89a38db8149f1",
+        "cache": "apcv2",
+        "cached_tokens": 123,
+        "profile": "north-mini-code-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": false,
+          "top_logprobs": 0,
+          "logprob_semantics": null,
+          "thinking": false,
+          "sampling": {
+            "temperature": 0
+          },
+          "reasoning_effort": null,
+          "effort_semantics": "thinking_toggle",
+          "context_limit": 500000
+        },
+        "ordinary_compute_width": 1,
+        "mtp": null,
+        "speculation": null,
+        "prompt_tokens": 124,
+        "completion_tokens": 7,
+        "ttft_seconds": 0.038174417000846006,
+        "elapsed_seconds": 0.08915483400051016
+      },
+      {
+        "request_id": "chatcmpl-20062cf2597342359973e17e62d19098",
+        "cache": "apcv2",
+        "cached_tokens": 102,
+        "profile": "north-mini-code-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": false,
+          "top_logprobs": 0,
+          "logprob_semantics": null,
+          "thinking": false,
+          "sampling": {
+            "temperature": 0
+          },
+          "reasoning_effort": null,
+          "effort_semantics": "thinking_toggle",
+          "context_limit": 500000
+        },
+        "ordinary_compute_width": 1,
+        "mtp": null,
+        "speculation": null,
+        "prompt_tokens": 178,
+        "completion_tokens": 30,
+        "ttft_seconds": 0.09863183299603406,
+        "elapsed_seconds": 0.3047327500025858
+      },
+      {
+        "request_id": "chatcmpl-fe12d1ff743e4fdb81d05624bd0dbf79",
+        "cache": "apcv2",
+        "cached_tokens": 176,
+        "profile": "north-mini-code-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": false,
+          "top_logprobs": 0,
+          "logprob_semantics": null,
+          "thinking": false,
+          "sampling": {
+            "temperature": 0
+          },
+          "reasoning_effort": null,
+          "effort_semantics": "thinking_toggle",
+          "context_limit": 500000
+        },
+        "ordinary_compute_width": 1,
+        "mtp": null,
+        "speculation": null,
+        "prompt_tokens": 267,
+        "completion_tokens": 16,
+        "ttft_seconds": 0.11341470799379749,
+        "elapsed_seconds": 0.22547299999860115
+      },
+      {
+        "request_id": "chatcmpl-5834117bfa3e40f68a1bb7b1ba736b74",
+        "cache": "apcv2",
+        "cached_tokens": 111,
+        "profile": "north-mini-code-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": false,
+          "top_logprobs": 0,
+          "logprob_semantics": null,
+          "thinking": true,
+          "sampling": {
+            "temperature": 0
+          },
+          "reasoning_effort": null,
+          "effort_semantics": "thinking_toggle",
+          "context_limit": 500000
+        },
+        "ordinary_compute_width": 1,
+        "mtp": null,
+        "speculation": null,
+        "prompt_tokens": 124,
+        "completion_tokens": 40,
+        "ttft_seconds": 0.06099570899823448,
+        "elapsed_seconds": 0.331219791994954
+      },
+      {
+        "request_id": "chatcmpl-7ecb0b19cf86446cb278f601e4af16cd",
+        "cache": "apcv2",
+        "cached_tokens": 123,
+        "profile": "north-mini-code-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": false,
+          "top_logprobs": 0,
+          "logprob_semantics": null,
+          "thinking": false,
+          "sampling": {
+            "temperature": 0
+          },
+          "reasoning_effort": null,
+          "effort_semantics": "thinking_toggle",
+          "context_limit": 500000
+        },
+        "ordinary_compute_width": 1,
+        "mtp": null,
+        "speculation": null,
+        "prompt_tokens": 124,
+        "completion_tokens": 5,
+        "ttft_seconds": 0.039039458002662286,
+        "elapsed_seconds": 0.06600458300090395
+      },
+      {
+        "request_id": "chatcmpl-65dd117789cd440e9468b4f11a6bcf4f",
+        "cache": "apcv2",
+        "cached_tokens": 111,
+        "profile": "north-mini-code-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": false,
+          "top_logprobs": 0,
+          "logprob_semantics": null,
+          "thinking": false,
+          "sampling": {
+            "temperature": 0.7,
+            "seed": 123
+          },
+          "reasoning_effort": null,
+          "effort_semantics": "thinking_toggle",
+          "context_limit": 500000
+        },
+        "ordinary_compute_width": 1,
+        "mtp": null,
+        "speculation": null,
+        "prompt_tokens": 124,
+        "completion_tokens": 64,
+        "ttft_seconds": 0.07068866700137733,
+        "elapsed_seconds": 0.5160806669955491
+      },
+      {
+        "request_id": "chatcmpl-36560f2a451344a9b89406f264211968",
+        "cache": "apcv2",
+        "cached_tokens": 123,
+        "profile": "north-mini-code-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": false,
+          "top_logprobs": 0,
+          "logprob_semantics": null,
+          "thinking": false,
+          "sampling": {
+            "temperature": 0.7,
+            "seed": 123
+          },
+          "reasoning_effort": null,
+          "effort_semantics": "thinking_toggle",
+          "context_limit": 500000
+        },
+        "ordinary_compute_width": 1,
+        "mtp": null,
+        "speculation": null,
+        "prompt_tokens": 124,
+        "completion_tokens": 64,
+        "ttft_seconds": 0.03971208400616888,
+        "elapsed_seconds": 0.48255433400481706
+      },
+      {
+        "request_id": "chatcmpl-ac671c831880498685076fb10ed4e714",
+        "cache": "apcv2",
+        "cached_tokens": 111,
+        "profile": "north-mini-code-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": false,
+          "top_logprobs": 0,
+          "logprob_semantics": null,
+          "thinking": false,
+          "sampling": {
+            "temperature": 0
+          },
+          "reasoning_effort": null,
+          "effort_semantics": "thinking_toggle",
+          "context_limit": 500000
+        },
+        "ordinary_compute_width": 4,
+        "mtp": null,
+        "speculation": null,
+        "prompt_tokens": 125,
+        "completion_tokens": 160,
+        "ttft_seconds": 0.18398041700129397,
+        "elapsed_seconds": 2.0023970839974936
+      },
+      {
+        "request_id": "chatcmpl-928b0204e13a4e21a4f554d51cf69353",
+        "cache": "apcv2",
+        "cached_tokens": 111,
+        "profile": "north-mini-code-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": false,
+          "top_logprobs": 0,
+          "logprob_semantics": null,
+          "thinking": false,
+          "sampling": {
+            "temperature": 0
+          },
+          "reasoning_effort": null,
+          "effort_semantics": "thinking_toggle",
+          "context_limit": 500000
+        },
+        "ordinary_compute_width": 4,
+        "mtp": null,
+        "speculation": null,
+        "prompt_tokens": 125,
+        "completion_tokens": 160,
+        "ttft_seconds": 0.18270816600124817,
+        "elapsed_seconds": 2.003058708003664
+      },
+      {
+        "request_id": "chatcmpl-2fb57194226246168691d7dbd81411cc",
+        "cache": "apcv2",
+        "cached_tokens": 111,
+        "profile": "north-mini-code-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": false,
+          "top_logprobs": 0,
+          "logprob_semantics": null,
+          "thinking": false,
+          "sampling": {
+            "temperature": 0
+          },
+          "reasoning_effort": null,
+          "effort_semantics": "thinking_toggle",
+          "context_limit": 500000
+        },
+        "ordinary_compute_width": 4,
+        "mtp": null,
+        "speculation": null,
+        "prompt_tokens": 125,
+        "completion_tokens": 160,
+        "ttft_seconds": 0.23872941699664807,
+        "elapsed_seconds": 2.042000541994639
+      },
+      {
+        "request_id": "chatcmpl-b16fa2d3063749bc9518a427ac291017",
+        "cache": "apcv2",
+        "cached_tokens": 111,
+        "profile": "north-mini-code-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": false,
+          "top_logprobs": 0,
+          "logprob_semantics": null,
+          "thinking": false,
+          "sampling": {
+            "temperature": 0
+          },
+          "reasoning_effort": null,
+          "effort_semantics": "thinking_toggle",
+          "context_limit": 500000
+        },
+        "ordinary_compute_width": 4,
+        "mtp": null,
+        "speculation": null,
+        "prompt_tokens": 125,
+        "completion_tokens": 160,
+        "ttft_seconds": 0.23786924999876646,
+        "elapsed_seconds": 2.0429737500016927
+      },
+      {
+        "request_id": "chatcmpl-64d9f9772a964a8187889cdcc198af15",
+        "cache": "apcv2",
+        "cached_tokens": 116,
+        "profile": "north-mini-code-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": false,
+          "top_logprobs": 0,
+          "logprob_semantics": null,
+          "thinking": false,
+          "sampling": {
+            "temperature": 0
+          },
+          "reasoning_effort": null,
+          "effort_semantics": "thinking_toggle",
+          "context_limit": 500000
+        },
+        "ordinary_compute_width": 1,
+        "mtp": null,
+        "speculation": null,
+        "prompt_tokens": 127,
+        "completion_tokens": 64,
+        "ttft_seconds": 0.06636420800350606,
+        "elapsed_seconds": 0.496675292000873
+      },
+      {
+        "request_id": "chatcmpl-fa7c6cf9e52545a58fdac19194846b61",
+        "cache": "apcv2",
+        "cached_tokens": 114,
+        "profile": "north-mini-code-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": false,
+          "top_logprobs": 0,
+          "logprob_semantics": null,
+          "thinking": false,
+          "sampling": {
+            "temperature": 0
+          },
+          "reasoning_effort": null,
+          "effort_semantics": "thinking_toggle",
+          "context_limit": 500000
+        },
+        "ordinary_compute_width": 1,
+        "mtp": null,
+        "speculation": null,
+        "prompt_tokens": 128,
+        "completion_tokens": 64,
+        "ttft_seconds": 0.06840075000218349,
+        "elapsed_seconds": 0.49801333300274564
+      },
+      {
+        "request_id": "chatcmpl-6d1ff98735e24ca7ac9ed7a6ff125e41",
+        "cache": "apcv2",
+        "cached_tokens": 127,
+        "profile": "north-mini-code-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": false,
+          "top_logprobs": 0,
+          "logprob_semantics": null,
+          "thinking": false,
+          "sampling": {
+            "temperature": 0
+          },
+          "reasoning_effort": null,
+          "effort_semantics": "thinking_toggle",
+          "context_limit": 500000
+        },
+        "ordinary_compute_width": 2,
+        "mtp": null,
+        "speculation": null,
+        "prompt_tokens": 128,
+        "completion_tokens": 64,
+        "ttft_seconds": 0.05413099999714177,
+        "elapsed_seconds": 0.621678041999985
+      },
+      {
+        "request_id": "chatcmpl-89af1f7c16a04d86a0d88b21ba14f79b",
+        "cache": "apcv2",
+        "cached_tokens": 126,
+        "profile": "north-mini-code-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": false,
+          "top_logprobs": 0,
+          "logprob_semantics": null,
+          "thinking": false,
+          "sampling": {
+            "temperature": 0
+          },
+          "reasoning_effort": null,
+          "effort_semantics": "thinking_toggle",
+          "context_limit": 500000
+        },
+        "ordinary_compute_width": 2,
+        "mtp": null,
+        "speculation": null,
+        "prompt_tokens": 127,
+        "completion_tokens": 64,
+        "ttft_seconds": 0.053184625001449604,
+        "elapsed_seconds": 0.6224606250034412
+      }
+    ]
+  }
+}

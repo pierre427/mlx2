@@ -1,0 +1,21 @@
+2026-09-18 22:22:33,116 WARNING no reasoning signing key configured; using a random per-process reasoning signing key
+2026-09-18 22:22:35,044 INFO "GET /health HTTP/1.1" 503 -
+2026-09-18 22:22:35,061 INFO ubc_evict: evicted 4068.1 MB from UBC for ~/mlx-models/Xing4.0-29B-A4B-mlx-6bit/model-00001-of-00006.safetensors
+2026-09-18 22:22:35,092 INFO ubc_evict: evicted 4048.2 MB from UBC for ~/mlx-models/Xing4.0-29B-A4B-mlx-6bit/model-00002-of-00006.safetensors
+2026-09-18 22:22:35,123 INFO ubc_evict: evicted 4048.2 MB from UBC for ~/mlx-models/Xing4.0-29B-A4B-mlx-6bit/model-00003-of-00006.safetensors
+2026-09-18 22:22:35,154 INFO ubc_evict: evicted 4048.2 MB from UBC for ~/mlx-models/Xing4.0-29B-A4B-mlx-6bit/model-00004-of-00006.safetensors
+2026-09-18 22:22:35,187 INFO ubc_evict: evicted 4048.2 MB from UBC for ~/mlx-models/Xing4.0-29B-A4B-mlx-6bit/model-00005-of-00006.safetensors
+2026-09-18 22:22:35,215 INFO ubc_evict: evicted 3464.2 MB from UBC for ~/mlx-models/Xing4.0-29B-A4B-mlx-6bit/model-00006-of-00006.safetensors
+2026-09-18 22:22:35,215 INFO ubc_evict: pass complete total_mb=23725.2 elapsed_s=0.19
+2026-09-18 22:22:37,067 INFO "GET /health HTTP/1.1" 503 -
+2026-09-18 22:22:39,092 INFO "GET /health HTTP/1.1" 200 -
+2026-09-18 22:22:39,826 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-18 22:22:39,828 INFO "POST /v1/apc/sessions/dbg-0.0/park HTTP/1.1" 200 -
+2026-09-18 22:22:41,332 INFO "GET /v1/apc/sessions/dbg-0.0 HTTP/1.1" 200 -
+2026-09-18 22:22:41,944 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-18 22:22:42,453 INFO "POST /v1/apc/sessions/dbg-0.5/park HTTP/1.1" 200 -
+2026-09-18 22:22:43,963 INFO "GET /v1/apc/sessions/dbg-0.5 HTTP/1.1" 200 -
+2026-09-18 22:22:44,551 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-18 22:22:46,564 INFO "POST /v1/apc/sessions/dbg-2.0/park HTTP/1.1" 200 -
+2026-09-18 22:22:48,076 INFO "GET /v1/apc/sessions/dbg-2.0 HTTP/1.1" 200 -
+2026-09-18 22:22:48,079 INFO "GET /v1/status HTTP/1.1" 200 -

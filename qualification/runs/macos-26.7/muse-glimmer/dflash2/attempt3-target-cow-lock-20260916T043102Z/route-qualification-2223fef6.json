@@ -1,0 +1,130 @@
+{
+  "schema": "mlx2.serving-qualification.v1",
+  "timestamp": 1789533052.346011,
+  "runtime": {
+    "source_sha256": "2223fef66dfac69169fb7256bbcc0beb9919466fcd90e149ec0a639b870cbf26",
+    "mlx_native_sha256": "30335939714520c3306cfa58597100aae08bbeabdc60a4bc8c35c32c607450a8",
+    "python": "3.12.13",
+    "macos": "26.7",
+    "mlx": "0.32.2.dev20260915+2a817ad94",
+    "transformers": "5.12.1",
+    "dependencies": {
+      "numpy": "2.5.1",
+      "tokenizers": "0.22.2",
+      "jinja2": "3.1.6",
+      "psutil": "7.2.2",
+      "regex": "2026.9.10",
+      "safetensors": "0.8.0"
+    }
+  },
+  "qualification_harness": {
+    "schema": "mlx2.qualification-harness.v1",
+    "name": "scripts/qualify_serving.py",
+    "sha256": "8d32f490519f91e0e4b96f0e6b60d05b088aba41930b1b5df24eb0292fcfa8c1"
+  },
+  "artifact": "3f883af5c2266a32de1b221132f66d0fc4524c1434f418ab17b94ee9f808a4c8",
+  "settings": {
+    "max_context": 131072,
+    "max_lanes": 20,
+    "max_inflight": 40,
+    "prefill_step": 2048,
+    "cache_bytes": 12884901888,
+    "disk_cache": true,
+    "mtp": false,
+    "environment": {
+      "HF_HUB_OFFLINE": "1",
+      "TRANSFORMERS_OFFLINE": "1",
+      "MLX_ENABLE_TF32": "0",
+      "MLX_LM_COMPILED_DECODE": "0",
+      "MLX_LM_SEGMENTED_SELF_MTP": "0",
+      "MLX_LM_TRUE_BATCHED_SEGMENTED_MTP": "0"
+    },
+    "execution_policy": {
+      "persistent": true,
+      "num_draft": 4,
+      "backend": "external_draft",
+      "rate_gate": false,
+      "prefill_step_size": 2048,
+      "segment_aware_live_tip": false,
+      "segment_aware_cohort_size": 20
+    },
+    "speculation": "external_draft",
+    "cache_budget": null
+  },
+  "checks": {
+    "unit_tests": {
+      "passed": true,
+      "evidence": "............................................................... [ 11%]\n........................................................................ [ 24%]\n........................................................................ [ 37%]\n..............ssssssss.................................................. [ 50%]\n........................................................................ [ 63%]\n.................ss..ss........ss...... [ 70%]\n........s.s............................................ [ 80%]\n........................................................................ [ 93%]\n......................................                                   [100%]\n539 passed, 16 skipped, 59 subtests passed in 9.53s\n"
+    },
+    "hermes_client": {
+      "passed": true,
+      "evidence": {
+        "id": "chatcmpl-57da36e3d39340df8121507ee515d242",
+        "object": "chat.completion",
+        "created": 1789533062,
+        "model": "Muse-Glimmer-30B-mlx-4bit",
+        "choices": [
+          {
+            "index": 0,
+            "finish_reason": "stop",
+            "message": {
+              "role": "assistant",
+              "content": "HERMES_READY"
+            }
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 66,
+          "completion_tokens": 5,
+          "total_tokens": 71,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          }
+        },
+        "mlx2": {
+          "request_id": "chatcmpl-57da36e3d39340df8121507ee515d242",
+          "cache": "apcv2",
+          "cached_tokens": 0,
+          "profile": "muse-glimmer-apcv2-dflash2",
+          "qualification": "candidate",
+          "route_receipt": "candidate_validation",
+          "request_controls": {
+            "logprobs": false,
+            "top_logprobs": 0,
+            "logprob_semantics": null,
+            "thinking": false,
+            "sampling": {
+              "temperature": 0
+            },
+            "reasoning_effort": "none",
+            "effort_semantics": "reasoning_strength",
+            "context_limit": 131072
+          },
+          "ordinary_compute_width": null,
+          "mtp": null,
+          "speculation": {
+            "kind": "external_dflash2",
+            "execution": "external_draft_verify",
+            "current_execution": "external_draft_verify",
+            "ordinary_fallback": false,
+            "external_rounds": 1,
+            "accepted": 4,
+            "proposed": 4,
+            "round_accepted": 4,
+            "round_proposed": 4,
+            "target_width": 1,
+            "draft_width": 1,
+            "qualification_authority": "serving_route"
+          },
+          "prompt_tokens": 66,
+          "completion_tokens": 5,
+          "ttft_seconds": 0.35478158299883944,
+          "elapsed_seconds": 0.3567167920009524
+        }
+      }
+    }
+  },
+  "responses": {},
+  "passed": false,
+  "failure_status_error": "[Errno 54] Connection reset by peer"
+}

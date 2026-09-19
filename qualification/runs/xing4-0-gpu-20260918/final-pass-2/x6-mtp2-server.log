@@ -1,0 +1,22 @@
+2026-09-18 19:36:02,579 INFO ubc_evict: evicted 4068.1 MB from UBC for ~/mlx-models/Xing4.0-29B-A4B-mlx-6bit/model-00001-of-00006.safetensors
+2026-09-18 19:36:02,626 INFO ubc_evict: evicted 4048.2 MB from UBC for ~/mlx-models/Xing4.0-29B-A4B-mlx-6bit/model-00002-of-00006.safetensors
+2026-09-18 19:36:02,666 INFO ubc_evict: evicted 4048.2 MB from UBC for ~/mlx-models/Xing4.0-29B-A4B-mlx-6bit/model-00003-of-00006.safetensors
+2026-09-18 19:36:02,704 INFO ubc_evict: evicted 4048.2 MB from UBC for ~/mlx-models/Xing4.0-29B-A4B-mlx-6bit/model-00004-of-00006.safetensors
+2026-09-18 19:36:02,743 INFO ubc_evict: evicted 4048.2 MB from UBC for ~/mlx-models/Xing4.0-29B-A4B-mlx-6bit/model-00005-of-00006.safetensors
+2026-09-18 19:36:02,787 INFO ubc_evict: evicted 3464.2 MB from UBC for ~/mlx-models/Xing4.0-29B-A4B-mlx-6bit/model-00006-of-00006.safetensors
+2026-09-18 19:36:02,787 INFO ubc_evict: pass complete total_mb=23725.2 elapsed_s=0.27
+2026-09-18 19:36:03,522 INFO "GET /health HTTP/1.1" 503 -
+2026-09-18 19:36:06,529 INFO "GET /health HTTP/1.1" 200 -
+2026-09-18 19:36:06,530 INFO "GET /health HTTP/1.1" 200 -
+2026-09-18 19:36:06,821 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-18 19:36:12,957 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-18 19:36:18,882 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-18 19:36:25,944 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-18 19:36:38,138 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-18 19:36:38,304 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-18 19:36:38,559 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-18 19:36:38,593 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-18 19:36:40,095 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-18 19:36:40,096 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-18 19:36:40,097 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-18 19:36:40,158 INFO "GET /health HTTP/1.1" 200 -

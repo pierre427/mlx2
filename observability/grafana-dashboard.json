@@ -1,0 +1,66 @@
+{
+  "annotations": {"list": []},
+  "editable": true,
+  "graphTooltip": 1,
+  "panels": [
+    {
+      "type": "stat",
+      "title": "Ready",
+      "targets": [{"expr": "mlx2_ready", "refId": "A"}],
+      "gridPos": {"h": 4, "w": 4, "x": 0, "y": 0}
+    },
+    {
+      "type": "stat",
+      "title": "Running / Waiting",
+      "targets": [
+        {"expr": "mlx2_num_requests_running", "legendFormat": "running", "refId": "A"},
+        {"expr": "mlx2_num_requests_waiting", "legendFormat": "waiting", "refId": "B"}
+      ],
+      "gridPos": {"h": 4, "w": 8, "x": 4, "y": 0}
+    },
+    {
+      "type": "timeseries",
+      "title": "Request outcomes",
+      "targets": [{"expr": "sum by (outcome) (rate(mlx2_requests_total[5m]))", "legendFormat": "{{outcome}}", "refId": "A"}],
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 4}
+    },
+    {
+      "type": "timeseries",
+      "title": "Queue and end-to-end latency",
+      "targets": [
+        {"expr": "histogram_quantile(0.95, sum by (le) (rate(mlx2_request_queue_time_seconds_bucket[5m])))", "legendFormat": "queue p95", "refId": "A"},
+        {"expr": "histogram_quantile(0.95, sum by (le) (rate(mlx2_e2e_request_latency_seconds_bucket[5m])))", "legendFormat": "e2e p95", "refId": "B"}
+      ],
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 4}
+    },
+    {
+      "type": "timeseries",
+      "title": "Memory bytes",
+      "targets": [
+        {"expr": "mlx2_memory_active_bytes", "legendFormat": "active", "refId": "A"},
+        {"expr": "mlx2_memory_headroom_bytes", "legendFormat": "headroom", "refId": "B"},
+        {"expr": "mlx2_prefix_cache_logical_bytes", "legendFormat": "APCv2 logical", "refId": "C"}
+      ],
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 12}
+    },
+    {
+      "type": "timeseries",
+      "title": "Advanced path fallbacks",
+      "targets": [
+        {"expr": "sum by (event) (rate(mlx2_fused_gdn_events_total{event=~\".*fallbacks\"}[5m]))", "legendFormat": "GDN {{event}}", "refId": "A"},
+        {"expr": "rate(mlx2_moe_fallbacks_total[5m])", "legendFormat": "MoE", "refId": "B"},
+        {"expr": "rate(mlx2_ple_compile_events_total{event=\"fallbacks\"}[5m])", "legendFormat": "PLE compile", "refId": "C"},
+        {"expr": "rate(mlx2_indexed_qsa_fallbacks_total[5m])", "legendFormat": "indexed QSA", "refId": "D"}
+      ],
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 12}
+    }
+  ],
+  "schemaVersion": 39,
+  "tags": ["mlx2"],
+  "templating": {"list": []},
+  "time": {"from": "now-1h", "to": "now"},
+  "timezone": "browser",
+  "title": "mlx2 Serving",
+  "uid": "mlx2-serving",
+  "version": 1
+}

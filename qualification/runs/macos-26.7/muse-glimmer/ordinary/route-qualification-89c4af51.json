@@ -1,0 +1,1149 @@
+{
+  "schema": "mlx2.serving-qualification.v1",
+  "timestamp": 1789530522.1163578,
+  "runtime": {
+    "source_sha256": "89c4af514db53664930cdf573dd00a342169148e37948caa55748293c5c63aae",
+    "mlx_native_sha256": "30335939714520c3306cfa58597100aae08bbeabdc60a4bc8c35c32c607450a8",
+    "python": "3.12.13",
+    "macos": "26.7",
+    "mlx": "0.32.2.dev20260915+2a817ad94",
+    "transformers": "5.12.1",
+    "dependencies": {
+      "numpy": "2.5.1",
+      "tokenizers": "0.22.2",
+      "jinja2": "3.1.6",
+      "psutil": "7.2.2",
+      "regex": "2026.9.10",
+      "safetensors": "0.8.0"
+    }
+  },
+  "qualification_harness": {
+    "schema": "mlx2.qualification-harness.v1",
+    "name": "scripts/qualify_serving.py",
+    "sha256": "4c3da4b55f9b2b22aad4ee6616226275b084a3a3f1a28227a4e05c298cc39cbd"
+  },
+  "artifact": "df2301de1c0588378c756c1e9caa42dedeb84860ce6f21ae767d48a494fa99fe",
+  "settings": {
+    "max_context": 131072,
+    "max_lanes": 20,
+    "max_inflight": 40,
+    "prefill_step": 2048,
+    "cache_bytes": 12884901888,
+    "disk_cache": true,
+    "mtp": false,
+    "environment": {
+      "HF_HUB_OFFLINE": "1",
+      "TRANSFORMERS_OFFLINE": "1",
+      "MLX_ENABLE_TF32": "0",
+      "MLX_LM_COMPILED_DECODE": "0",
+      "MLX_LM_SEGMENTED_SELF_MTP": "0",
+      "MLX_LM_TRUE_BATCHED_SEGMENTED_MTP": "0"
+    },
+    "execution_policy": {
+      "persistent": true,
+      "num_draft": 0,
+      "backend": "ordinary",
+      "rate_gate": false,
+      "prefill_step_size": 2048,
+      "segment_aware_live_tip": false,
+      "segment_aware_cohort_size": 20
+    },
+    "speculation": "ordinary",
+    "cache_budget": null
+  },
+  "checks": {
+    "unit_tests": {
+      "passed": true,
+      "evidence": "............................................................... [ 11%]\n........................................................................ [ 24%]\n........................................................................ [ 37%]\n.............ssssssss................................................... [ 51%]\n........................................................................ [ 64%]\n........ss..ss........ss..............s [ 71%]\n.s..................................................... [ 81%]\n........................................................................ [ 94%]\n.............................                                            [100%]\n530 passed, 16 skipped, 59 subtests passed in 9.79s\n"
+    },
+    "hermes_client": {
+      "passed": true,
+      "evidence": {
+        "id": "chatcmpl-5d1cbe5752444956a59cfffbbbe7ee3f",
+        "object": "chat.completion",
+        "created": 1789530532,
+        "model": "Muse-Glimmer-30B-mlx-4bit",
+        "choices": [
+          {
+            "index": 0,
+            "finish_reason": "stop",
+            "message": {
+              "role": "assistant",
+              "content": "HERMES_READY"
+            }
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 66,
+          "completion_tokens": 5,
+          "total_tokens": 71,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          }
+        },
+        "mlx2": {
+          "request_id": "chatcmpl-5d1cbe5752444956a59cfffbbbe7ee3f",
+          "cache": "apcv2",
+          "cached_tokens": 0,
+          "profile": "muse-glimmer-apcv2-ordinary",
+          "qualification": "candidate",
+          "route_receipt": "candidate_validation",
+          "request_controls": {
+            "logprobs": false,
+            "top_logprobs": 0,
+            "logprob_semantics": null,
+            "thinking": false,
+            "sampling": {
+              "temperature": 0
+            },
+            "reasoning_effort": "none",
+            "effort_semantics": "reasoning_strength",
+            "context_limit": 131072
+          },
+          "ordinary_compute_width": 1,
+          "mtp": null,
+          "speculation": null,
+          "prompt_tokens": 66,
+          "completion_tokens": 5,
+          "ttft_seconds": 0.5550452080005925,
+          "elapsed_seconds": 0.6899014999999054
+        }
+      }
+    },
+    "logprobs": {
+      "passed": true,
+      "evidence": {
+        "reference": {
+          "id": "chatcmpl-5d16dd245cff419f95dc04d2bdab8683",
+          "object": "chat.completion",
+          "created": 1789530532,
+          "model": "Muse-Glimmer-30B-mlx-4bit",
+          "choices": [
+            {
+              "index": 0,
+              "finish_reason": "length",
+              "message": {
+                "role": "assistant",
+                "content": "",
+                "reasoning_content": "Write a short sentence about"
+              }
+            }
+          ],
+          "usage": {
+            "prompt_tokens": 63,
+            "completion_tokens": 8,
+            "total_tokens": 71,
+            "prompt_tokens_details": {
+              "cached_tokens": 37
+            }
+          },
+          "mlx2": {
+            "request_id": "chatcmpl-5d16dd245cff419f95dc04d2bdab8683",
+            "cache": "apcv2",
+            "cached_tokens": 37,
+            "profile": "muse-glimmer-apcv2-ordinary",
+            "qualification": "candidate",
+            "route_receipt": "candidate_validation",
+            "request_controls": {
+              "logprobs": false,
+              "top_logprobs": 0,
+              "logprob_semantics": null,
+              "thinking": false,
+              "sampling": {
+                "temperature": 0
+              },
+              "reasoning_effort": null,
+              "effort_semantics": "reasoning_strength",
+              "context_limit": 131072
+            },
+            "ordinary_compute_width": 1,
+            "mtp": null,
+            "speculation": null,
+            "prompt_tokens": 63,
+            "completion_tokens": 8,
+            "ttft_seconds": 0.18654200000128185,
+            "elapsed_seconds": 0.41791541700149537
+          }
+        },
+        "response": {
+          "id": "chatcmpl-ab399be222ce4de5ace7c3db3c40b4d6",
+          "object": "chat.completion",
+          "created": 1789530533,
+          "model": "Muse-Glimmer-30B-mlx-4bit",
+          "choices": [
+            {
+              "index": 0,
+              "finish_reason": "length",
+              "logprobs": {
+                "content": [
+                  {
+                    "id": 328,
+                    "token": "\u0120to",
+                    "logprob": 0.0,
+                    "top_logprobs": [
+                      {
+                        "id": 328,
+                        "token": "\u0120to",
+                        "logprob": 0.0
+                      },
+                      {
+                        "id": 517,
+                        "token": "\u0120with",
+                        "logprob": -12.25
+                      },
+                      {
+                        "id": 1154,
+                        "token": "\u0120self",
+                        "logprob": -14.5
+                      }
+                    ]
+                  },
+                  {
+                    "id": 19669,
+                    "token": "=self",
+                    "logprob": 0.0,
+                    "top_logprobs": [
+                      {
+                        "id": 19669,
+                        "token": "=self",
+                        "logprob": 0.0
+                      },
+                      {
+                        "id": 76976,
+                        "token": "=user",
+                        "logprob": -10.875
+                      },
+                      {
+                        "id": 2763,
+                        "token": "(self",
+                        "logprob": -18.125
+                      }
+                    ]
+                  },
+                  {
+                    "id": 200023,
+                    "token": "<|message|>",
+                    "logprob": 0.0,
+                    "top_logprobs": [
+                      {
+                        "id": 200023,
+                        "token": "<|message|>",
+                        "logprob": 0.0
+                      },
+                      {
+                        "id": 24,
+                        "token": ",",
+                        "logprob": -19.0
+                      },
+                      {
+                        "id": 198,
+                        "token": "\u010a",
+                        "logprob": -19.625
+                      }
+                    ]
+                  },
+                  {
+                    "id": 10064,
+                    "token": "Write",
+                    "logprob": 0.0,
+                    "top_logprobs": [
+                      {
+                        "id": 10064,
+                        "token": "Write",
+                        "logprob": 0.0
+                      },
+                      {
+                        "id": 2991,
+                        "token": "We",
+                        "logprob": -10.875
+                      },
+                      {
+                        "id": 180574,
+                        "token": "Probably",
+                        "logprob": -12.625
+                      }
+                    ]
+                  },
+                  {
+                    "id": 262,
+                    "token": "\u0120a",
+                    "logprob": 0.0,
+                    "top_logprobs": [
+                      {
+                        "id": 262,
+                        "token": "\u0120a",
+                        "logprob": 0.0
+                      },
+                      {
+                        "id": 4243,
+                        "token": "\u0120short",
+                        "logprob": -14.75
+                      },
+                      {
+                        "id": 1509,
+                        "token": "\u0120about",
+                        "logprob": -18.25
+                      }
+                    ]
+                  },
+                  {
+                    "id": 4243,
+                    "token": "\u0120short",
+                    "logprob": 0.0,
+                    "top_logprobs": [
+                      {
+                        "id": 4243,
+                        "token": "\u0120short",
+                        "logprob": 0.0
+                      },
+                      {
+                        "id": 17705,
+                        "token": "\u0120sentence",
+                        "logprob": -18.125
+                      },
+                      {
+                        "id": 1936,
+                        "token": "\u0120long",
+                        "logprob": -22.5
+                      }
+                    ]
+                  },
+                  {
+                    "id": 17705,
+                    "token": "\u0120sentence",
+                    "logprob": 0.0,
+                    "top_logprobs": [
+                      {
+                        "id": 17705,
+                        "token": "\u0120sentence",
+                        "logprob": 0.0
+                      },
+                      {
+                        "id": 4243,
+                        "token": "\u0120short",
+                        "logprob": -18.625
+                      },
+                      {
+                        "id": 262,
+                        "token": "\u0120a",
+                        "logprob": -19.0
+                      }
+                    ]
+                  },
+                  {
+                    "id": 1509,
+                    "token": "\u0120about",
+                    "logprob": 0.0,
+                    "top_logprobs": [
+                      {
+                        "id": 1509,
+                        "token": "\u0120about",
+                        "logprob": 0.0
+                      },
+                      {
+                        "id": 1574,
+                        "token": ".\u010a\u010a",
+                        "logprob": -19.75
+                      },
+                      {
+                        "id": 26,
+                        "token": ".",
+                        "logprob": -19.875
+                      }
+                    ]
+                  }
+                ]
+              },
+              "message": {
+                "role": "assistant",
+                "content": "",
+                "reasoning_content": "Write a short sentence about"
+              }
+            }
+          ],
+          "usage": {
+            "prompt_tokens": 63,
+            "completion_tokens": 8,
+            "total_tokens": 71,
+            "prompt_tokens_details": {
+              "cached_tokens": 62
+            }
+          },
+          "mlx2": {
+            "request_id": "chatcmpl-ab399be222ce4de5ace7c3db3c40b4d6",
+            "cache": "apcv2",
+            "cached_tokens": 62,
+            "profile": "muse-glimmer-apcv2-ordinary",
+            "qualification": "candidate",
+            "route_receipt": "candidate_validation",
+            "request_controls": {
+              "logprobs": true,
+              "top_logprobs": 3,
+              "logprob_semantics": "execution_target: ordinary=post_processor_pre_sampler; mtp=transformed_target_verifier",
+              "thinking": false,
+              "sampling": {
+                "temperature": 0
+              },
+              "reasoning_effort": null,
+              "effort_semantics": "reasoning_strength",
+              "context_limit": 131072
+            },
+            "ordinary_compute_width": 1,
+            "mtp": null,
+            "speculation": null,
+            "prompt_tokens": 63,
+            "completion_tokens": 8,
+            "ttft_seconds": 0.08423858300011489,
+            "elapsed_seconds": 0.3148213330005092
+          }
+        },
+        "stream_entries": [
+          {
+            "id": 328,
+            "token": "\u0120to",
+            "logprob": 0.0,
+            "top_logprobs": [
+              {
+                "id": 328,
+                "token": "\u0120to",
+                "logprob": 0.0
+              },
+              {
+                "id": 517,
+                "token": "\u0120with",
+                "logprob": -12.25
+              },
+              {
+                "id": 1154,
+                "token": "\u0120self",
+                "logprob": -14.5
+              }
+            ]
+          },
+          {
+            "id": 19669,
+            "token": "=self",
+            "logprob": 0.0,
+            "top_logprobs": [
+              {
+                "id": 19669,
+                "token": "=self",
+                "logprob": 0.0
+              },
+              {
+                "id": 76976,
+                "token": "=user",
+                "logprob": -10.875
+              },
+              {
+                "id": 2763,
+                "token": "(self",
+                "logprob": -18.125
+              }
+            ]
+          },
+          {
+            "id": 200023,
+            "token": "<|message|>",
+            "logprob": 0.0,
+            "top_logprobs": [
+              {
+                "id": 200023,
+                "token": "<|message|>",
+                "logprob": 0.0
+              },
+              {
+                "id": 24,
+                "token": ",",
+                "logprob": -19.0
+              },
+              {
+                "id": 198,
+                "token": "\u010a",
+                "logprob": -19.625
+              }
+            ]
+          },
+          {
+            "id": 10064,
+            "token": "Write",
+            "logprob": 0.0,
+            "top_logprobs": [
+              {
+                "id": 10064,
+                "token": "Write",
+                "logprob": 0.0
+              },
+              {
+                "id": 2991,
+                "token": "We",
+                "logprob": -10.875
+              },
+              {
+                "id": 180574,
+                "token": "Probably",
+                "logprob": -12.625
+              }
+            ]
+          },
+          {
+            "id": 262,
+            "token": "\u0120a",
+            "logprob": 0.0,
+            "top_logprobs": [
+              {
+                "id": 262,
+                "token": "\u0120a",
+                "logprob": 0.0
+              },
+              {
+                "id": 4243,
+                "token": "\u0120short",
+                "logprob": -14.75
+              },
+              {
+                "id": 1509,
+                "token": "\u0120about",
+                "logprob": -18.25
+              }
+            ]
+          },
+          {
+            "id": 4243,
+            "token": "\u0120short",
+            "logprob": 0.0,
+            "top_logprobs": [
+              {
+                "id": 4243,
+                "token": "\u0120short",
+                "logprob": 0.0
+              },
+              {
+                "id": 17705,
+                "token": "\u0120sentence",
+                "logprob": -18.125
+              },
+              {
+                "id": 1936,
+                "token": "\u0120long",
+                "logprob": -22.5
+              }
+            ]
+          },
+          {
+            "id": 17705,
+            "token": "\u0120sentence",
+            "logprob": 0.0,
+            "top_logprobs": [
+              {
+                "id": 17705,
+                "token": "\u0120sentence",
+                "logprob": 0.0
+              },
+              {
+                "id": 4243,
+                "token": "\u0120short",
+                "logprob": -18.625
+              },
+              {
+                "id": 262,
+                "token": "\u0120a",
+                "logprob": -19.0
+              }
+            ]
+          },
+          {
+            "id": 1509,
+            "token": "\u0120about",
+            "logprob": 0.0,
+            "top_logprobs": [
+              {
+                "id": 1509,
+                "token": "\u0120about",
+                "logprob": 0.0
+              },
+              {
+                "id": 1574,
+                "token": ".\u010a\u010a",
+                "logprob": -19.75
+              },
+              {
+                "id": 26,
+                "token": ".",
+                "logprob": -19.875
+              }
+            ]
+          }
+        ],
+        "stream_usage": {
+          "prompt_tokens": 63,
+          "completion_tokens": 8,
+          "total_tokens": 71,
+          "prompt_tokens_details": {
+            "cached_tokens": 62
+          }
+        }
+      }
+    },
+    "sampling_controls": {
+      "passed": false,
+      "evidence": [
+        {
+          "request_id": "chatcmpl-aa3e4c0225e9494ca3479c8055f6e2ed",
+          "cache": "apcv2",
+          "cached_tokens": 53,
+          "profile": "muse-glimmer-apcv2-ordinary",
+          "qualification": "candidate",
+          "route_receipt": "candidate_validation",
+          "request_controls": {
+            "logprobs": false,
+            "top_logprobs": 0,
+            "logprob_semantics": null,
+            "thinking": false,
+            "sampling": {
+              "temperature": 0.7,
+              "top_p": 0.9,
+              "top_k": 24,
+              "min_p": 0.05,
+              "repetition_penalty": 1.05,
+              "presence_penalty": 0.1,
+              "frequency_penalty": 0.1,
+              "seed": 237
+            },
+            "reasoning_effort": null,
+            "effort_semantics": "reasoning_strength",
+            "context_limit": 131072
+          },
+          "ordinary_compute_width": 1,
+          "mtp": null,
+          "speculation": null,
+          "prompt_tokens": 60,
+          "completion_tokens": 64,
+          "ttft_seconds": 0.17416979200061178,
+          "elapsed_seconds": 2.135329417000321
+        },
+        {
+          "request_id": "chatcmpl-fb483acde928409bb67402933b0c207d",
+          "cache": "apcv2",
+          "cached_tokens": 59,
+          "profile": "muse-glimmer-apcv2-ordinary",
+          "qualification": "candidate",
+          "route_receipt": "candidate_validation",
+          "request_controls": {
+            "logprobs": false,
+            "top_logprobs": 0,
+            "logprob_semantics": null,
+            "thinking": false,
+            "sampling": {
+              "temperature": 0.7,
+              "top_p": 0.9,
+              "top_k": 24,
+              "min_p": 0.05,
+              "repetition_penalty": 1.05,
+              "presence_penalty": 0.1,
+              "frequency_penalty": 0.1,
+              "seed": 237
+            },
+            "reasoning_effort": null,
+            "effort_semantics": "reasoning_strength",
+            "context_limit": 131072
+          },
+          "ordinary_compute_width": 1,
+          "mtp": null,
+          "speculation": null,
+          "prompt_tokens": 60,
+          "completion_tokens": 64,
+          "ttft_seconds": 0.08450379199894087,
+          "elapsed_seconds": 2.0607123329991737
+        }
+      ]
+    }
+  },
+  "responses": {
+    "sampling_controls": [
+      {
+        "id": "chatcmpl-aa3e4c0225e9494ca3479c8055f6e2ed",
+        "object": "chat.completion",
+        "created": 1789530533,
+        "model": "Muse-Glimmer-30B-mlx-4bit",
+        "choices": [
+          {
+            "index": 0,
+            "finish_reason": "length",
+            "message": {
+              "role": "assistant",
+              "content": "",
+              "reasoning_content": "Name three fruits.\n\nWe need to name three fruits. Simple. Probably comply. Could list apple, banana, orange. Might want three fruits. Possibly add variety.\n\nNo constraints. Just answer.\n\nMaybe follow simple format.\n\nPotential risk? No.\n\nJust give three fruits.\n\nCould be bullet list.\n\nProbably"
+            }
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 60,
+          "completion_tokens": 64,
+          "total_tokens": 124,
+          "prompt_tokens_details": {
+            "cached_tokens": 53
+          }
+        },
+        "mlx2": {
+          "request_id": "chatcmpl-aa3e4c0225e9494ca3479c8055f6e2ed",
+          "cache": "apcv2",
+          "cached_tokens": 53,
+          "profile": "muse-glimmer-apcv2-ordinary",
+          "qualification": "candidate",
+          "route_receipt": "candidate_validation",
+          "request_controls": {
+            "logprobs": false,
+            "top_logprobs": 0,
+            "logprob_semantics": null,
+            "thinking": false,
+            "sampling": {
+              "temperature": 0.7,
+              "top_p": 0.9,
+              "top_k": 24,
+              "min_p": 0.05,
+              "repetition_penalty": 1.05,
+              "presence_penalty": 0.1,
+              "frequency_penalty": 0.1,
+              "seed": 237
+            },
+            "reasoning_effort": null,
+            "effort_semantics": "reasoning_strength",
+            "context_limit": 131072
+          },
+          "ordinary_compute_width": 1,
+          "mtp": null,
+          "speculation": null,
+          "prompt_tokens": 60,
+          "completion_tokens": 64,
+          "ttft_seconds": 0.17416979200061178,
+          "elapsed_seconds": 2.135329417000321
+        }
+      },
+      {
+        "id": "chatcmpl-fb483acde928409bb67402933b0c207d",
+        "object": "chat.completion",
+        "created": 1789530535,
+        "model": "Muse-Glimmer-30B-mlx-4bit",
+        "choices": [
+          {
+            "index": 0,
+            "finish_reason": "length",
+            "message": {
+              "role": "assistant",
+              "content": "",
+              "reasoning_content": "Name three fruits.\n\nWe need to name three fruits. Simple. Probably comply. Could list apple, banana, orange. Might want three fruits. Possibly add variety.\n\nNo constraints. Just answer.\n\nMaybe follow simple format.\n\nPotential risk? No.\n\nJust give three fruits.\n\nCould be bullet list.\n\nProbably"
+            }
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 60,
+          "completion_tokens": 64,
+          "total_tokens": 124,
+          "prompt_tokens_details": {
+            "cached_tokens": 59
+          }
+        },
+        "mlx2": {
+          "request_id": "chatcmpl-fb483acde928409bb67402933b0c207d",
+          "cache": "apcv2",
+          "cached_tokens": 59,
+          "profile": "muse-glimmer-apcv2-ordinary",
+          "qualification": "candidate",
+          "route_receipt": "candidate_validation",
+          "request_controls": {
+            "logprobs": false,
+            "top_logprobs": 0,
+            "logprob_semantics": null,
+            "thinking": false,
+            "sampling": {
+              "temperature": 0.7,
+              "top_p": 0.9,
+              "top_k": 24,
+              "min_p": 0.05,
+              "repetition_penalty": 1.05,
+              "presence_penalty": 0.1,
+              "frequency_penalty": 0.1,
+              "seed": 237
+            },
+            "reasoning_effort": null,
+            "effort_semantics": "reasoning_strength",
+            "context_limit": 131072
+          },
+          "ordinary_compute_width": 1,
+          "mtp": null,
+          "speculation": null,
+          "prompt_tokens": 60,
+          "completion_tokens": 64,
+          "ttft_seconds": 0.08450379199894087,
+          "elapsed_seconds": 2.0607123329991737
+        }
+      }
+    ]
+  },
+  "passed": false,
+  "failure_status": {
+    "state": "ready",
+    "model": "Muse-Glimmer-30B-mlx-4bit",
+    "runtime": {
+      "source_sha256": "89c4af514db53664930cdf573dd00a342169148e37948caa55748293c5c63aae",
+      "mlx_native_sha256": "30335939714520c3306cfa58597100aae08bbeabdc60a4bc8c35c32c607450a8",
+      "python": "3.12.13",
+      "macos": "26.7",
+      "mlx": "0.32.2.dev20260915+2a817ad94",
+      "transformers": "5.12.1",
+      "dependencies": {
+        "numpy": "2.5.1",
+        "tokenizers": "0.22.2",
+        "jinja2": "3.1.6",
+        "psutil": "7.2.2",
+        "regex": "2026.9.10",
+        "safetensors": "0.8.0"
+      }
+    },
+    "artifact": "df2301de1c0588378c756c1e9caa42dedeb84860ce6f21ae767d48a494fa99fe",
+    "profile": "muse-glimmer-apcv2-ordinary",
+    "settings": {
+      "max_context": 131072,
+      "max_lanes": 20,
+      "max_inflight": 40,
+      "prefill_step": 2048,
+      "cache_bytes": 12884901888,
+      "disk_cache": true,
+      "mtp": false,
+      "environment": {
+        "HF_HUB_OFFLINE": "1",
+        "TRANSFORMERS_OFFLINE": "1",
+        "MLX_ENABLE_TF32": "0",
+        "MLX_LM_COMPILED_DECODE": "0",
+        "MLX_LM_SEGMENTED_SELF_MTP": "0",
+        "MLX_LM_TRUE_BATCHED_SEGMENTED_MTP": "0"
+      },
+      "execution_policy": {
+        "persistent": true,
+        "num_draft": 0,
+        "backend": "ordinary",
+        "rate_gate": false,
+        "prefill_step_size": 2048,
+        "segment_aware_live_tip": false,
+        "segment_aware_cohort_size": 20
+      },
+      "speculation": "ordinary",
+      "cache_budget": null
+    },
+    "route_receipt": "candidate_validation",
+    "qualification": "candidate",
+    "max_context": 131072,
+    "max_lanes": 20,
+    "apcv2": {
+      "lookups": 6,
+      "hits": 5,
+      "misses": 1,
+      "cached_tokens": 273,
+      "stores": 11,
+      "clears": 0,
+      "lifetime": {
+        "lookups": 6,
+        "hits": 5,
+        "misses": 1,
+        "cached_tokens": 273,
+        "stores": 11
+      },
+      "cow_enabled": true,
+      "cow": {
+        "sources": 11,
+        "source_bytes": 41373696,
+        "freeze_failures": 0,
+        "branches": 5,
+        "branch_failures": 0,
+        "stale_rejections": 0,
+        "invalidations": 7,
+        "active_leases": 1,
+        "peak_leases": 1,
+        "descriptor_aliases": 1664,
+        "descriptor_bytes": 63098880,
+        "avoided_copy_bytes": 21725184,
+        "materializations": 0,
+        "materialized_bytes": 0,
+        "fallback_deepcopies": 0,
+        "fallback_bytes": 0,
+        "freeze_ns": 21971417,
+        "branch_ns": 1850751,
+        "fallback_ns": 0,
+        "releases": 4,
+        "planes": {
+          "attention_ring": {
+            "descriptor_aliases": 1248,
+            "descriptor_bytes": 47324160,
+            "materializations": 0,
+            "materialized_bytes": 0
+          },
+          "attention_kv": {
+            "descriptor_aliases": 416,
+            "descriptor_bytes": 15774720,
+            "materializations": 0,
+            "materialized_bytes": 0
+          }
+        },
+        "materialized_bytes_are_estimated": true,
+        "array_readbacks": 0
+      },
+      "max_tokens": 131072,
+      "max_entry_tokens": 124,
+      "overlength_rejections": 0,
+      "idle_disk": {
+        "enabled": true,
+        "idle_seconds": 180.0,
+        "resident_bytes": 17305600,
+        "disk_bytes": 0,
+        "disk_max_bytes": 68719476736,
+        "disk_entries": 0,
+        "idle_spills": 0,
+        "pressure_spills": 0,
+        "restores": 0,
+        "restore_failures": 0,
+        "spill_failures": 0,
+        "disk_evictions": 0,
+        "bytes_written": 0,
+        "bytes_read": 0
+      },
+      "version": 2,
+      "layout_name": "muse-glimmer-layer-segments-v1:a58043c7c0bc041c",
+      "layer_segments": {
+        "schema": "apcv2.layer-segments.v1",
+        "entries": 4,
+        "disk_entries": 0,
+        "layers": 208,
+        "plane_layers": 208,
+        "segments": 208,
+        "logical_bytes": 17305600,
+        "by_plane": {
+          "attention_ring": {
+            "layers": 156,
+            "segments": 156,
+            "logical_bytes": 12979200,
+            "invalid": 0
+          },
+          "attention_kv": {
+            "layers": 52,
+            "segments": 52,
+            "logical_bytes": 4326400,
+            "invalid": 0
+          }
+        }
+      }
+    },
+    "scheduler": {
+      "prefill_rounds": 3,
+      "prefill_only_rounds": 3,
+      "decode_priority_release_rounds": 0,
+      "decode_priority_deferred_rounds": 0,
+      "adaptive_prefill_release_rounds": 0,
+      "adaptive_prefill_slack_deferred_rounds": 0,
+      "adaptive_prefill_deadline_forced_rounds": 0,
+      "adaptive_prefill_apc_priority_admissions": 0,
+      "adaptive_prefill_chunk_histogram": {}
+    },
+    "metal_active_bytes": 17672096216,
+    "metal_peak_bytes": 17716284572,
+    "process_physical_footprint_bytes": 18386024032,
+    "execution": {
+      "architecture": "muse_glimmer",
+      "cache_layout": "muse-glimmer-layer-segments-v1:a58043c7c0bc041c",
+      "sliding_layers": 39,
+      "global_layers": 13,
+      "speculation": "ordinary"
+    },
+    "admission": {},
+    "memory_waiting": 0,
+    "headroom_bytes": 100239310848,
+    "healthy": true,
+    "error": null,
+    "inflight": 0,
+    "queue_depth": 0,
+    "counts": {
+      "admitted": 6,
+      "cycles": 166,
+      "multi_request_cycles": 0,
+      "completed": 6
+    },
+    "recent_receipts": [
+      {
+        "request_id": "chatcmpl-5d1cbe5752444956a59cfffbbbe7ee3f",
+        "cache": "apcv2",
+        "cached_tokens": 0,
+        "profile": "muse-glimmer-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": false,
+          "top_logprobs": 0,
+          "logprob_semantics": null,
+          "thinking": false,
+          "sampling": {
+            "temperature": 0
+          },
+          "reasoning_effort": "none",
+          "effort_semantics": "reasoning_strength",
+          "context_limit": 131072
+        },
+        "ordinary_compute_width": 1,
+        "mtp": null,
+        "speculation": null,
+        "prompt_tokens": 66,
+        "completion_tokens": 5,
+        "ttft_seconds": 0.5550452080005925,
+        "elapsed_seconds": 0.6899014999999054
+      },
+      {
+        "request_id": "chatcmpl-5d16dd245cff419f95dc04d2bdab8683",
+        "cache": "apcv2",
+        "cached_tokens": 37,
+        "profile": "muse-glimmer-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": false,
+          "top_logprobs": 0,
+          "logprob_semantics": null,
+          "thinking": false,
+          "sampling": {
+            "temperature": 0
+          },
+          "reasoning_effort": null,
+          "effort_semantics": "reasoning_strength",
+          "context_limit": 131072
+        },
+        "ordinary_compute_width": 1,
+        "mtp": null,
+        "speculation": null,
+        "prompt_tokens": 63,
+        "completion_tokens": 8,
+        "ttft_seconds": 0.18654200000128185,
+        "elapsed_seconds": 0.41791541700149537
+      },
+      {
+        "request_id": "chatcmpl-ab399be222ce4de5ace7c3db3c40b4d6",
+        "cache": "apcv2",
+        "cached_tokens": 62,
+        "profile": "muse-glimmer-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": true,
+          "top_logprobs": 3,
+          "logprob_semantics": "execution_target: ordinary=post_processor_pre_sampler; mtp=transformed_target_verifier",
+          "thinking": false,
+          "sampling": {
+            "temperature": 0
+          },
+          "reasoning_effort": null,
+          "effort_semantics": "reasoning_strength",
+          "context_limit": 131072
+        },
+        "ordinary_compute_width": 1,
+        "mtp": null,
+        "speculation": null,
+        "prompt_tokens": 63,
+        "completion_tokens": 8,
+        "ttft_seconds": 0.08423858300011489,
+        "elapsed_seconds": 0.3148213330005092
+      },
+      {
+        "request_id": "chatcmpl-80b404ebe7644035a08d21e30369180c",
+        "cache": "apcv2",
+        "cached_tokens": 62,
+        "profile": "muse-glimmer-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": true,
+          "top_logprobs": 3,
+          "logprob_semantics": "execution_target: ordinary=post_processor_pre_sampler; mtp=transformed_target_verifier",
+          "thinking": false,
+          "sampling": {
+            "temperature": 0
+          },
+          "reasoning_effort": null,
+          "effort_semantics": "reasoning_strength",
+          "context_limit": 131072
+        },
+        "ordinary_compute_width": 1,
+        "mtp": null,
+        "speculation": null,
+        "prompt_tokens": 63,
+        "completion_tokens": 8,
+        "ttft_seconds": 0.08071654199920886,
+        "elapsed_seconds": 0.31056449999960023
+      },
+      {
+        "request_id": "chatcmpl-aa3e4c0225e9494ca3479c8055f6e2ed",
+        "cache": "apcv2",
+        "cached_tokens": 53,
+        "profile": "muse-glimmer-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": false,
+          "top_logprobs": 0,
+          "logprob_semantics": null,
+          "thinking": false,
+          "sampling": {
+            "temperature": 0.7,
+            "top_p": 0.9,
+            "top_k": 24,
+            "min_p": 0.05,
+            "repetition_penalty": 1.05,
+            "presence_penalty": 0.1,
+            "frequency_penalty": 0.1,
+            "seed": 237
+          },
+          "reasoning_effort": null,
+          "effort_semantics": "reasoning_strength",
+          "context_limit": 131072
+        },
+        "ordinary_compute_width": 1,
+        "mtp": null,
+        "speculation": null,
+        "prompt_tokens": 60,
+        "completion_tokens": 64,
+        "ttft_seconds": 0.17416979200061178,
+        "elapsed_seconds": 2.135329417000321
+      },
+      {
+        "request_id": "chatcmpl-fb483acde928409bb67402933b0c207d",
+        "cache": "apcv2",
+        "cached_tokens": 59,
+        "profile": "muse-glimmer-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": false,
+          "top_logprobs": 0,
+          "logprob_semantics": null,
+          "thinking": false,
+          "sampling": {
+            "temperature": 0.7,
+            "top_p": 0.9,
+            "top_k": 24,
+            "min_p": 0.05,
+            "repetition_penalty": 1.05,
+            "presence_penalty": 0.1,
+            "frequency_penalty": 0.1,
+            "seed": 237
+          },
+          "reasoning_effort": null,
+          "effort_semantics": "reasoning_strength",
+          "context_limit": 131072
+        },
+        "ordinary_compute_width": 1,
+        "mtp": null,
+        "speculation": null,
+        "prompt_tokens": 60,
+        "completion_tokens": 64,
+        "ttft_seconds": 0.08450379199894087,
+        "elapsed_seconds": 2.0607123329991737
+      }
+    ]
+  }
+}

@@ -1,0 +1,27 @@
+{
+  "source_repository": "~/Desktop/mlx-uag/mlx-lm-unified",
+  "source_revision": "13eb83388750435bcc751d0b9e33857a38152544",
+  "license": "MIT",
+  "license_source": "LICENSE",
+  "notice": "provenance/qwen36-35b.NOTICE",
+  "source_files": {
+    "mlx_lm/models/qwen3_5_moe.py": {"sha256": "8a4987f6053f44dda3c0f51e92f51a57e35b4eade8277799a1eb63c14480aee7"},
+    "mlx_lm/models/qwen3_5.py": {"sha256": "d2efbf2cf88a4ceb82050d8022c034d5a4bb2a96dc2b6d15401eb9815b1f9f2b"},
+    "mlx_lm/prompt_lookup.py": {"sha256": "44eae0a3d2e08d7d2d5da7eaf88070ce8b09a589c0f8c56eea72833145ce83d3"}
+  },
+  "destination_files": ["src/mlx2/runtime/models/qwen36_35b.py", "src/mlx2/runtime/models/qwen4_fused_gdn.py", "src/mlx2/adapters/qwen36_35b.py", "src/mlx2/runtime/prompt_lookup.py"],
+  "modifications": [
+    "Reused shared Qwen3.5 hybrid GDN and Qwen3 Next sparse-MoE contracts behind a model adapter",
+    "Kept compiled decode, fused router, fused expert and native GDN core unselected in the ordinary baseline",
+    "Normalized separate switch projections and legacy fused experts gate-up layouts",
+    "Added strict GPU-free topology inspection and actual embedded-MTP detection",
+    "Reused mlx2's existing MIT Qwen4/Agnes fused GDN Metal body with Qwen3.5 numerical boundaries and Qwen3.6 16-key/32-value-head geometry; kept it opt-in and unselected",
+    "Added an original bounded indexed prompt-lookup oracle, hot segments, adaptive lookback and exact acceptance receipt"
+  ],
+  "validation": {
+    "cpu": "The 2026-09-16 repository closeout passed 621 CPU tests, skipped 16 Metal-only tests and ran 59 parameterized subtests; focused Qwen3.6 checks are included",
+    "gpu": "Real 23 GiB artifact strict load and full-vs-split replay passed; HTTP ordinary/APCv2 cold and warm requests passed; fused GDN logits and all recurrent/conv states were bit-identical across bounded ordinary and MTP-artifact trials; candidate only",
+    "receipts": ["qualification/runs/qwen36-35b-a3b/ordinary-probe.json", "qualification/runs/qwen36-35b-a3b/candidate-smoke-20260916.json", "qualification/runs/qwen36-35b-a3b/fused-gdn-probe-20260916.json", "qualification/runs/qwen36-35b-a3b/fused-gdn-mtp-artifact-probe-20260916.json"],
+    "qualification": "No route selected; full qualification outstanding"
+  }
+}

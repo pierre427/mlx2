@@ -1,0 +1,2459 @@
+{
+  "schema": "mlx2.serving-qualification.v1",
+  "timestamp": 1789547209.895654,
+  "runtime": {
+    "source_sha256": "c59a29e820104248fbd7f8cf2ed9787ff1535976bf81daad7e13a3983f0b571f",
+    "mlx_native_sha256": "30335939714520c3306cfa58597100aae08bbeabdc60a4bc8c35c32c607450a8",
+    "python": "3.12.13",
+    "macos": "26.7",
+    "mlx": "0.32.2.dev20260915+2a817ad94",
+    "transformers": "5.12.1",
+    "dependencies": {
+      "numpy": "2.5.1",
+      "tokenizers": "0.22.2",
+      "jinja2": "3.1.6",
+      "psutil": "7.2.2",
+      "regex": "2026.9.10",
+      "safetensors": "0.8.0"
+    }
+  },
+  "qualification_harness": {
+    "schema": "mlx2.qualification-harness.v1",
+    "name": "scripts/qualify_serving.py",
+    "sha256": "8d32f490519f91e0e4b96f0e6b60d05b088aba41930b1b5df24eb0292fcfa8c1"
+  },
+  "artifact": "6c88a4d3a5387abe2d97ac3d5eb70e484fb33615bb0c0f2ff8e7ef22b442f2e4",
+  "settings": {
+    "max_context": 500000,
+    "max_lanes": 20,
+    "max_inflight": 40,
+    "prefill_step": 2048,
+    "cache_bytes": 17179869184,
+    "disk_cache": true,
+    "mtp": false,
+    "environment": {
+      "HF_HUB_OFFLINE": "1",
+      "TRANSFORMERS_OFFLINE": "1",
+      "MLX_ENABLE_TF32": "0",
+      "MLX_LM_COMPILED_DECODE": "0",
+      "MLX_LM_SEGMENTED_SELF_MTP": "0",
+      "MLX_LM_TRUE_BATCHED_SEGMENTED_MTP": "0",
+      "MLX_LM_SHARED_QSA_SUFFIX": "0"
+    },
+    "execution_policy": {
+      "persistent": true,
+      "num_draft": 0,
+      "rate_gate": false,
+      "prefill_step_size": 2048,
+      "segment_aware_live_tip": false,
+      "segment_aware_cohort_size": 20
+    },
+    "speculation": "ordinary",
+    "cache_budget": {
+      "schema": "north-mini-code-cache-geometry-v1",
+      "global_layers": 13,
+      "sliding_layers": 36,
+      "kv_heads": 4,
+      "head_dim": 128,
+      "sliding_window": 4096,
+      "item_bytes": 4,
+      "allocation_step": 256,
+      "checkpoint_copies": 4,
+      "transcript_bytes_per_token": 16,
+      "transient_gib_per_lane": 3.1,
+      "bound": "fp32-global-plus-window-and-restore-snapshots",
+      "workspace": "3.1-GiB-per-lane conservative static assumption; live qualification pending"
+    }
+  },
+  "checks": {
+    "unit_tests": {
+      "passed": true,
+      "evidence": "............................................................... [ 10%]\n........................................................................ [ 23%]\n........................................................................ [ 35%]\n...................................ssssssss............................. [ 48%]\n........................................................................ [ 60%]\n......................................ss..ss.... [ 69%]\n....ss..............s.s....................... [ 77%]\n........................................................................ [ 89%]\n...........................................................              [100%]\n560 passed, 16 skipped, 59 subtests passed in 9.68s\n"
+    },
+    "hermes_client": {
+      "passed": true,
+      "evidence": {
+        "id": "chatcmpl-f5b504e34f314f86b2620c8425b72505",
+        "object": "chat.completion",
+        "created": 1789547219,
+        "model": "North-Mini-Code-1.0-mlx-4bit",
+        "choices": [
+          {
+            "index": 0,
+            "finish_reason": "stop",
+            "message": {
+              "role": "assistant",
+              "content": "HERMES_READY"
+            }
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 123,
+          "completion_tokens": 6,
+          "total_tokens": 129,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          }
+        },
+        "mlx2": {
+          "request_id": "chatcmpl-f5b504e34f314f86b2620c8425b72505",
+          "cache": "apcv2",
+          "cached_tokens": 0,
+          "profile": "north-mini-code-apcv2-ordinary",
+          "qualification": "candidate",
+          "route_receipt": "candidate_validation",
+          "request_controls": {
+            "logprobs": false,
+            "top_logprobs": 0,
+            "logprob_semantics": null,
+            "thinking": false,
+            "sampling": {
+              "temperature": 0
+            },
+            "reasoning_effort": "none",
+            "effort_semantics": "thinking_toggle",
+            "context_limit": 262144
+          },
+          "ordinary_compute_width": 1,
+          "mtp": null,
+          "speculation": null,
+          "prompt_tokens": 123,
+          "completion_tokens": 6,
+          "ttft_seconds": 0.36011108300226624,
+          "elapsed_seconds": 0.4041138749998936
+        }
+      }
+    },
+    "logprobs": {
+      "passed": true,
+      "evidence": {
+        "reference": {
+          "id": "chatcmpl-dd72000a941141bdbe07bf5ead7a96df",
+          "object": "chat.completion",
+          "created": 1789547220,
+          "model": "North-Mini-Code-1.0-mlx-4bit",
+          "choices": [
+            {
+              "index": 0,
+              "finish_reason": "length",
+              "message": {
+                "role": "assistant",
+                "content": "",
+                "reasoning_content": "The user asks: \"Write a short"
+              }
+            }
+          ],
+          "usage": {
+            "prompt_tokens": 123,
+            "completion_tokens": 8,
+            "total_tokens": 131,
+            "prompt_tokens_details": {
+              "cached_tokens": 111
+            }
+          },
+          "mlx2": {
+            "request_id": "chatcmpl-dd72000a941141bdbe07bf5ead7a96df",
+            "cache": "apcv2",
+            "cached_tokens": 111,
+            "profile": "north-mini-code-apcv2-ordinary",
+            "qualification": "candidate",
+            "route_receipt": "candidate_validation",
+            "request_controls": {
+              "logprobs": false,
+              "top_logprobs": 0,
+              "logprob_semantics": null,
+              "thinking": false,
+              "sampling": {
+                "temperature": 0
+              },
+              "reasoning_effort": null,
+              "effort_semantics": "thinking_toggle",
+              "context_limit": 500000
+            },
+            "ordinary_compute_width": 1,
+            "mtp": null,
+            "speculation": null,
+            "prompt_tokens": 123,
+            "completion_tokens": 8,
+            "ttft_seconds": 0.07063583300259779,
+            "elapsed_seconds": 0.12928429200110259
+          }
+        },
+        "response": {
+          "id": "chatcmpl-cd4f43bc473d4129be081dfef8171d7a",
+          "object": "chat.completion",
+          "created": 1789547220,
+          "model": "North-Mini-Code-1.0-mlx-4bit",
+          "choices": [
+            {
+              "index": 0,
+              "finish_reason": "length",
+              "logprobs": {
+                "content": [
+                  {
+                    "id": 669,
+                    "token": "The",
+                    "logprob": -0.125,
+                    "top_logprobs": [
+                      {
+                        "id": 669,
+                        "token": "The",
+                        "logprob": -0.125
+                      },
+                      {
+                        "id": 2110,
+                        "token": "We",
+                        "logprob": -2.25
+                      },
+                      {
+                        "id": 2632,
+                        "token": "User",
+                        "logprob": -3.125
+                      }
+                    ]
+                  },
+                  {
+                    "id": 1756,
+                    "token": "\u0120user",
+                    "logprob": 0.0,
+                    "top_logprobs": [
+                      {
+                        "id": 1756,
+                        "token": "\u0120user",
+                        "logprob": 0.0
+                      },
+                      {
+                        "id": 3973,
+                        "token": "\u0120task",
+                        "logprob": -12.625
+                      },
+                      {
+                        "id": 19647,
+                        "token": "\u0120user's",
+                        "logprob": -12.75
+                      }
+                    ]
+                  },
+                  {
+                    "id": 23570,
+                    "token": "\u0120asks",
+                    "logprob": -0.125,
+                    "top_logprobs": [
+                      {
+                        "id": 23570,
+                        "token": "\u0120asks",
+                        "logprob": -0.125
+                      },
+                      {
+                        "id": 9002,
+                        "token": "\u0120wants",
+                        "logprob": -2.25
+                      },
+                      {
+                        "id": 10855,
+                        "token": "\u0120requests",
+                        "logprob": -10.125
+                      }
+                    ]
+                  },
+                  {
+                    "id": 30,
+                    "token": ":",
+                    "logprob": 0.0,
+                    "top_logprobs": [
+                      {
+                        "id": 30,
+                        "token": ":",
+                        "logprob": 0.0
+                      },
+                      {
+                        "id": 304,
+                        "token": "\u0120to",
+                        "logprob": -8.5
+                      },
+                      {
+                        "id": 373,
+                        "token": "\u0120\"",
+                        "logprob": -9.0
+                      }
+                    ]
+                  },
+                  {
+                    "id": 373,
+                    "token": "\u0120\"",
+                    "logprob": 0.0,
+                    "top_logprobs": [
+                      {
+                        "id": 373,
+                        "token": "\u0120\"",
+                        "logprob": 0.0
+                      },
+                      {
+                        "id": 4570,
+                        "token": "\u0120\u00e2\u0122\u013e",
+                        "logprob": -15.5
+                      },
+                      {
+                        "id": 11858,
+                        "token": "\u0120Write",
+                        "logprob": -16.0
+                      }
+                    ]
+                  },
+                  {
+                    "id": 11696,
+                    "token": "Write",
+                    "logprob": 0.0,
+                    "top_logprobs": [
+                      {
+                        "id": 11696,
+                        "token": "Write",
+                        "logprob": 0.0
+                      },
+                      {
+                        "id": 11858,
+                        "token": "\u0120Write",
+                        "logprob": -14.25
+                      },
+                      {
+                        "id": 11564,
+                        "token": "write",
+                        "logprob": -15.875
+                      }
+                    ]
+                  },
+                  {
+                    "id": 265,
+                    "token": "\u0120a",
+                    "logprob": 0.0,
+                    "top_logprobs": [
+                      {
+                        "id": 265,
+                        "token": "\u0120a",
+                        "logprob": 0.0
+                      },
+                      {
+                        "id": 387,
+                        "token": "\u0120an",
+                        "logprob": -14.5
+                      },
+                      {
+                        "id": 3211,
+                        "token": "\u0120short",
+                        "logprob": -15.5
+                      }
+                    ]
+                  },
+                  {
+                    "id": 3211,
+                    "token": "\u0120short",
+                    "logprob": 0.0,
+                    "top_logprobs": [
+                      {
+                        "id": 3211,
+                        "token": "\u0120short",
+                        "logprob": 0.0
+                      },
+                      {
+                        "id": 19288,
+                        "token": "short",
+                        "logprob": -16.25
+                      },
+                      {
+                        "id": 46468,
+                        "token": "\u0120shortest",
+                        "logprob": -16.25
+                      }
+                    ]
+                  }
+                ]
+              },
+              "message": {
+                "role": "assistant",
+                "content": "",
+                "reasoning_content": "The user asks: \"Write a short"
+              }
+            }
+          ],
+          "usage": {
+            "prompt_tokens": 123,
+            "completion_tokens": 8,
+            "total_tokens": 131,
+            "prompt_tokens_details": {
+              "cached_tokens": 122
+            }
+          },
+          "mlx2": {
+            "request_id": "chatcmpl-cd4f43bc473d4129be081dfef8171d7a",
+            "cache": "apcv2",
+            "cached_tokens": 122,
+            "profile": "north-mini-code-apcv2-ordinary",
+            "qualification": "candidate",
+            "route_receipt": "candidate_validation",
+            "request_controls": {
+              "logprobs": true,
+              "top_logprobs": 3,
+              "logprob_semantics": "execution_target: ordinary=post_processor_pre_sampler; mtp=transformed_target_verifier",
+              "thinking": false,
+              "sampling": {
+                "temperature": 0
+              },
+              "reasoning_effort": null,
+              "effort_semantics": "thinking_toggle",
+              "context_limit": 500000
+            },
+            "ordinary_compute_width": 1,
+            "mtp": null,
+            "speculation": null,
+            "prompt_tokens": 123,
+            "completion_tokens": 8,
+            "ttft_seconds": 0.0390896659991995,
+            "elapsed_seconds": 0.10541545800151653
+          }
+        },
+        "stream_entries": [
+          {
+            "id": 669,
+            "token": "The",
+            "logprob": -0.125,
+            "top_logprobs": [
+              {
+                "id": 669,
+                "token": "The",
+                "logprob": -0.125
+              },
+              {
+                "id": 2110,
+                "token": "We",
+                "logprob": -2.25
+              },
+              {
+                "id": 2632,
+                "token": "User",
+                "logprob": -3.125
+              }
+            ]
+          },
+          {
+            "id": 1756,
+            "token": "\u0120user",
+            "logprob": 0.0,
+            "top_logprobs": [
+              {
+                "id": 1756,
+                "token": "\u0120user",
+                "logprob": 0.0
+              },
+              {
+                "id": 3973,
+                "token": "\u0120task",
+                "logprob": -12.625
+              },
+              {
+                "id": 19647,
+                "token": "\u0120user's",
+                "logprob": -12.75
+              }
+            ]
+          },
+          {
+            "id": 23570,
+            "token": "\u0120asks",
+            "logprob": -0.125,
+            "top_logprobs": [
+              {
+                "id": 23570,
+                "token": "\u0120asks",
+                "logprob": -0.125
+              },
+              {
+                "id": 9002,
+                "token": "\u0120wants",
+                "logprob": -2.25
+              },
+              {
+                "id": 10855,
+                "token": "\u0120requests",
+                "logprob": -10.125
+              }
+            ]
+          },
+          {
+            "id": 30,
+            "token": ":",
+            "logprob": 0.0,
+            "top_logprobs": [
+              {
+                "id": 30,
+                "token": ":",
+                "logprob": 0.0
+              },
+              {
+                "id": 304,
+                "token": "\u0120to",
+                "logprob": -8.5
+              },
+              {
+                "id": 373,
+                "token": "\u0120\"",
+                "logprob": -9.0
+              }
+            ]
+          },
+          {
+            "id": 373,
+            "token": "\u0120\"",
+            "logprob": 0.0,
+            "top_logprobs": [
+              {
+                "id": 373,
+                "token": "\u0120\"",
+                "logprob": 0.0
+              },
+              {
+                "id": 4570,
+                "token": "\u0120\u00e2\u0122\u013e",
+                "logprob": -15.5
+              },
+              {
+                "id": 11858,
+                "token": "\u0120Write",
+                "logprob": -16.0
+              }
+            ]
+          },
+          {
+            "id": 11696,
+            "token": "Write",
+            "logprob": 0.0,
+            "top_logprobs": [
+              {
+                "id": 11696,
+                "token": "Write",
+                "logprob": 0.0
+              },
+              {
+                "id": 11858,
+                "token": "\u0120Write",
+                "logprob": -14.25
+              },
+              {
+                "id": 11564,
+                "token": "write",
+                "logprob": -15.875
+              }
+            ]
+          },
+          {
+            "id": 265,
+            "token": "\u0120a",
+            "logprob": 0.0,
+            "top_logprobs": [
+              {
+                "id": 265,
+                "token": "\u0120a",
+                "logprob": 0.0
+              },
+              {
+                "id": 387,
+                "token": "\u0120an",
+                "logprob": -14.5
+              },
+              {
+                "id": 3211,
+                "token": "\u0120short",
+                "logprob": -15.5
+              }
+            ]
+          },
+          {
+            "id": 3211,
+            "token": "\u0120short",
+            "logprob": 0.0,
+            "top_logprobs": [
+              {
+                "id": 3211,
+                "token": "\u0120short",
+                "logprob": 0.0
+              },
+              {
+                "id": 19288,
+                "token": "short",
+                "logprob": -16.25
+              },
+              {
+                "id": 46468,
+                "token": "\u0120shortest",
+                "logprob": -16.25
+              }
+            ]
+          }
+        ],
+        "stream_usage": {
+          "prompt_tokens": 123,
+          "completion_tokens": 8,
+          "total_tokens": 131,
+          "prompt_tokens_details": {
+            "cached_tokens": 122
+          }
+        }
+      }
+    },
+    "sampling_controls": {
+      "passed": true,
+      "evidence": [
+        {
+          "request_id": "chatcmpl-4a65d58635244410a51cbe33d8420799",
+          "cache": "apcv2",
+          "cached_tokens": 111,
+          "profile": "north-mini-code-apcv2-ordinary",
+          "qualification": "candidate",
+          "route_receipt": "candidate_validation",
+          "request_controls": {
+            "logprobs": false,
+            "top_logprobs": 0,
+            "logprob_semantics": null,
+            "thinking": false,
+            "sampling": {
+              "temperature": 0.7,
+              "top_p": 0.9,
+              "top_k": 24,
+              "min_p": 0.05,
+              "repetition_penalty": 1.05,
+              "presence_penalty": 0.1,
+              "frequency_penalty": 0.1,
+              "seed": 237
+            },
+            "reasoning_effort": null,
+            "effort_semantics": "thinking_toggle",
+            "context_limit": 500000
+          },
+          "ordinary_compute_width": 1,
+          "mtp": null,
+          "speculation": null,
+          "prompt_tokens": 120,
+          "completion_tokens": 48,
+          "ttft_seconds": 0.08186395899974741,
+          "elapsed_seconds": 0.41982225000174367
+        },
+        {
+          "request_id": "chatcmpl-d389d25d541a411191ec7d92a69022be",
+          "cache": "apcv2",
+          "cached_tokens": 119,
+          "profile": "north-mini-code-apcv2-ordinary",
+          "qualification": "candidate",
+          "route_receipt": "candidate_validation",
+          "request_controls": {
+            "logprobs": false,
+            "top_logprobs": 0,
+            "logprob_semantics": null,
+            "thinking": false,
+            "sampling": {
+              "temperature": 0.7,
+              "top_p": 0.9,
+              "top_k": 24,
+              "min_p": 0.05,
+              "repetition_penalty": 1.05,
+              "presence_penalty": 0.1,
+              "frequency_penalty": 0.1,
+              "seed": 237
+            },
+            "reasoning_effort": null,
+            "effort_semantics": "thinking_toggle",
+            "context_limit": 500000
+          },
+          "ordinary_compute_width": 1,
+          "mtp": null,
+          "speculation": null,
+          "prompt_tokens": 120,
+          "completion_tokens": 48,
+          "ttft_seconds": 0.04041466700073215,
+          "elapsed_seconds": 0.37706091700238176
+        }
+      ]
+    },
+    "cold_text": {
+      "passed": true,
+      "evidence": {
+        "request_id": "chatcmpl-b0ab991be3ed4f9da38031100cc256d0",
+        "cache": "apcv2",
+        "cached_tokens": 114,
+        "profile": "north-mini-code-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": false,
+          "top_logprobs": 0,
+          "logprob_semantics": null,
+          "thinking": false,
+          "sampling": {
+            "temperature": 0
+          },
+          "reasoning_effort": null,
+          "effort_semantics": "thinking_toggle",
+          "context_limit": 500000
+        },
+        "ordinary_compute_width": 1,
+        "mtp": null,
+        "speculation": null,
+        "prompt_tokens": 123,
+        "completion_tokens": 47,
+        "ttft_seconds": 0.0653064580001228,
+        "elapsed_seconds": 0.37656950000018696
+      }
+    },
+    "warm_prefix": {
+      "passed": true,
+      "evidence": {
+        "request_id": "chatcmpl-e48c44a71d7744e59ab01ee0cfaeef47",
+        "cache": "apcv2",
+        "cached_tokens": 122,
+        "profile": "north-mini-code-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": false,
+          "top_logprobs": 0,
+          "logprob_semantics": null,
+          "thinking": false,
+          "sampling": {
+            "temperature": 0
+          },
+          "reasoning_effort": null,
+          "effort_semantics": "thinking_toggle",
+          "context_limit": 500000
+        },
+        "ordinary_compute_width": 1,
+        "mtp": null,
+        "speculation": null,
+        "prompt_tokens": 123,
+        "completion_tokens": 47,
+        "ttft_seconds": 0.03878041699863388,
+        "elapsed_seconds": 0.3511337089985318
+      }
+    },
+    "stream": {
+      "passed": true,
+      "evidence": [
+        {
+          "id": "chatcmpl-dcaaf652ff954267855738cc8b319b77",
+          "object": "chat.completion.chunk",
+          "created": 1789547222,
+          "model": "North-Mini-Code-1.0-mlx-4bit",
+          "choices": [
+            {
+              "index": 0,
+              "finish_reason": null,
+              "delta": {
+                "reasoning_content": "The"
+              }
+            }
+          ]
+        },
+        {
+          "id": "chatcmpl-dcaaf652ff954267855738cc8b319b77",
+          "object": "chat.completion.chunk",
+          "created": 1789547222,
+          "model": "North-Mini-Code-1.0-mlx-4bit",
+          "choices": [
+            {
+              "index": 0,
+              "finish_reason": null,
+              "delta": {
+                "reasoning_content": " user"
+              }
+            }
+          ]
+        },
+        {
+          "id": "chatcmpl-dcaaf652ff954267855738cc8b319b77",
+          "object": "chat.completion.chunk",
+          "created": 1789547222,
+          "model": "North-Mini-Code-1.0-mlx-4bit",
+          "choices": [
+            {
+              "index": 0,
+              "finish_reason": null,
+              "delta": {
+                "reasoning_content": " asks"
+              }
+            }
+          ]
+        },
+        {
+          "id": "chatcmpl-dcaaf652ff954267855738cc8b319b77",
+          "object": "chat.completion.chunk",
+          "created": 1789547222,
+          "model": "North-Mini-Code-1.0-mlx-4bit",
+          "choices": [
+            {
+              "index": 0,
+              "finish_reason": null,
+              "delta": {
+                "reasoning_content": ":"
+              }
+            }
+          ]
+        },
+        {
+          "id": "chatcmpl-dcaaf652ff954267855738cc8b319b77",
+          "object": "chat.completion.chunk",
+          "created": 1789547222,
+          "model": "North-Mini-Code-1.0-mlx-4bit",
+          "choices": [
+            {
+              "index": 0,
+              "finish_reason": null,
+              "delta": {
+                "reasoning_content": " \""
+              }
+            }
+          ]
+        },
+        {
+          "id": "chatcmpl-dcaaf652ff954267855738cc8b319b77",
+          "object": "chat.completion.chunk",
+          "created": 1789547222,
+          "model": "North-Mini-Code-1.0-mlx-4bit",
+          "choices": [
+            {
+              "index": 0,
+              "finish_reason": null,
+              "delta": {
+                "reasoning_content": "Reply"
+              }
+            }
+          ]
+        },
+        {
+          "id": "chatcmpl-dcaaf652ff954267855738cc8b319b77",
+          "object": "chat.completion.chunk",
+          "created": 1789547222,
+          "model": "North-Mini-Code-1.0-mlx-4bit",
+          "choices": [
+            {
+              "index": 0,
+              "finish_reason": null,
+              "delta": {
+                "reasoning_content": " with"
+              }
+            }
+          ]
+        },
+        {
+          "id": "chatcmpl-dcaaf652ff954267855738cc8b319b77",
+          "object": "chat.completion.chunk",
+          "created": 1789547222,
+          "model": "North-Mini-Code-1.0-mlx-4bit",
+          "choices": [
+            {
+              "index": 0,
+              "finish_reason": null,
+              "delta": {
+                "reasoning_content": " exactly"
+              }
+            }
+          ]
+        },
+        {
+          "id": "chatcmpl-dcaaf652ff954267855738cc8b319b77",
+          "object": "chat.completion.chunk",
+          "created": 1789547222,
+          "model": "North-Mini-Code-1.0-mlx-4bit",
+          "choices": [
+            {
+              "index": 0,
+              "finish_reason": null,
+              "delta": {
+                "reasoning_content": " ML"
+              }
+            }
+          ]
+        },
+        {
+          "id": "chatcmpl-dcaaf652ff954267855738cc8b319b77",
+          "object": "chat.completion.chunk",
+          "created": 1789547222,
+          "model": "North-Mini-Code-1.0-mlx-4bit",
+          "choices": [
+            {
+              "index": 0,
+              "finish_reason": null,
+              "delta": {
+                "reasoning_content": "X"
+              }
+            }
+          ]
+        },
+        {
+          "id": "chatcmpl-dcaaf652ff954267855738cc8b319b77",
+          "object": "chat.completion.chunk",
+          "created": 1789547222,
+          "model": "North-Mini-Code-1.0-mlx-4bit",
+          "choices": [
+            {
+              "index": 0,
+              "finish_reason": null,
+              "delta": {
+                "reasoning_content": "2"
+              }
+            }
+          ]
+        },
+        {
+          "id": "chatcmpl-dcaaf652ff954267855738cc8b319b77",
+          "object": "chat.completion.chunk",
+          "created": 1789547222,
+          "model": "North-Mini-Code-1.0-mlx-4bit",
+          "choices": [
+            {
+              "index": 0,
+              "finish_reason": null,
+              "delta": {
+                "reasoning_content": "_READY"
+              }
+            }
+          ]
+        },
+        {
+          "id": "chatcmpl-dcaaf652ff954267855738cc8b319b77",
+          "object": "chat.completion.chunk",
+          "created": 1789547222,
+          "model": "North-Mini-Code-1.0-mlx-4bit",
+          "choices": [
+            {
+              "index": 0,
+              "finish_reason": null,
+              "delta": {
+                "reasoning_content": "\"."
+              }
+            }
+          ]
+        },
+        {
+          "id": "chatcmpl-dcaaf652ff954267855738cc8b319b77",
+          "object": "chat.completion.chunk",
+          "created": 1789547222,
+          "model": "North-Mini-Code-1.0-mlx-4bit",
+          "choices": [
+            {
+              "index": 0,
+              "finish_reason": null,
+              "delta": {
+                "reasoning_content": " So"
+              }
+            }
+          ]
+        },
+        {
+          "id": "chatcmpl-dcaaf652ff954267855738cc8b319b77",
+          "object": "chat.completion.chunk",
+          "created": 1789547222,
+          "model": "North-Mini-Code-1.0-mlx-4bit",
+          "choices": [
+            {
+              "index": 0,
+              "finish_reason": null,
+              "delta": {
+                "reasoning_content": " we"
+              }
+            }
+          ]
+        },
+        {
+          "id": "chatcmpl-dcaaf652ff954267855738cc8b319b77",
+          "object": "chat.completion.chunk",
+          "created": 1789547222,
+          "model": "North-Mini-Code-1.0-mlx-4bit",
+          "choices": [
+            {
+              "index": 0,
+              "finish_reason": null,
+              "delta": {
+                "reasoning_content": " need"
+              }
+            }
+          ]
+        },
+        {
+          "id": "chatcmpl-dcaaf652ff954267855738cc8b319b77",
+          "object": "chat.completion.chunk",
+          "created": 1789547222,
+          "model": "North-Mini-Code-1.0-mlx-4bit",
+          "choices": [
+            {
+              "index": 0,
+              "finish_reason": null,
+              "delta": {
+                "reasoning_content": " to"
+              }
+            }
+          ]
+        },
+        {
+          "id": "chatcmpl-dcaaf652ff954267855738cc8b319b77",
+          "object": "chat.completion.chunk",
+          "created": 1789547222,
+          "model": "North-Mini-Code-1.0-mlx-4bit",
+          "choices": [
+            {
+              "index": 0,
+              "finish_reason": null,
+              "delta": {
+                "reasoning_content": " output"
+              }
+            }
+          ]
+        },
+        {
+          "id": "chatcmpl-dcaaf652ff954267855738cc8b319b77",
+          "object": "chat.completion.chunk",
+          "created": 1789547222,
+          "model": "North-Mini-Code-1.0-mlx-4bit",
+          "choices": [
+            {
+              "index": 0,
+              "finish_reason": null,
+              "delta": {
+                "reasoning_content": " exactly"
+              }
+            }
+          ]
+        },
+        {
+          "id": "chatcmpl-dcaaf652ff954267855738cc8b319b77",
+          "object": "chat.completion.chunk",
+          "created": 1789547222,
+          "model": "North-Mini-Code-1.0-mlx-4bit",
+          "choices": [
+            {
+              "index": 0,
+              "finish_reason": null,
+              "delta": {
+                "reasoning_content": " that"
+              }
+            }
+          ]
+        },
+        {
+          "id": "chatcmpl-dcaaf652ff954267855738cc8b319b77",
+          "object": "chat.completion.chunk",
+          "created": 1789547222,
+          "model": "North-Mini-Code-1.0-mlx-4bit",
+          "choices": [
+            {
+              "index": 0,
+              "finish_reason": null,
+              "delta": {
+                "reasoning_content": " string"
+              }
+            }
+          ]
+        },
+        {
+          "id": "chatcmpl-dcaaf652ff954267855738cc8b319b77",
+          "object": "chat.completion.chunk",
+          "created": 1789547222,
+          "model": "North-Mini-Code-1.0-mlx-4bit",
+          "choices": [
+            {
+              "index": 0,
+              "finish_reason": null,
+              "delta": {
+                "reasoning_content": ","
+              }
+            }
+          ]
+        },
+        {
+          "id": "chatcmpl-dcaaf652ff954267855738cc8b319b77",
+          "object": "chat.completion.chunk",
+          "created": 1789547222,
+          "model": "North-Mini-Code-1.0-mlx-4bit",
+          "choices": [
+            {
+              "index": 0,
+              "finish_reason": null,
+              "delta": {
+                "reasoning_content": " no"
+              }
+            }
+          ]
+        },
+        {
+          "id": "chatcmpl-dcaaf652ff954267855738cc8b319b77",
+          "object": "chat.completion.chunk",
+          "created": 1789547222,
+          "model": "North-Mini-Code-1.0-mlx-4bit",
+          "choices": [
+            {
+              "index": 0,
+              "finish_reason": null,
+              "delta": {
+                "reasoning_content": " extra"
+              }
+            }
+          ]
+        },
+        {
+          "id": "chatcmpl-dcaaf652ff954267855738cc8b319b77",
+          "object": "chat.completion.chunk",
+          "created": 1789547222,
+          "model": "North-Mini-Code-1.0-mlx-4bit",
+          "choices": [
+            {
+              "index": 0,
+              "finish_reason": null,
+              "delta": {
+                "reasoning_content": " characters"
+              }
+            }
+          ]
+        },
+        {
+          "id": "chatcmpl-dcaaf652ff954267855738cc8b319b77",
+          "object": "chat.completion.chunk",
+          "created": 1789547222,
+          "model": "North-Mini-Code-1.0-mlx-4bit",
+          "choices": [
+            {
+              "index": 0,
+              "finish_reason": null,
+              "delta": {
+                "reasoning_content": "."
+              }
+            }
+          ]
+        },
+        {
+          "id": "chatcmpl-dcaaf652ff954267855738cc8b319b77",
+          "object": "chat.completion.chunk",
+          "created": 1789547222,
+          "model": "North-Mini-Code-1.0-mlx-4bit",
+          "choices": [
+            {
+              "index": 0,
+              "finish_reason": null,
+              "delta": {
+                "reasoning_content": " So"
+              }
+            }
+          ]
+        },
+        {
+          "id": "chatcmpl-dcaaf652ff954267855738cc8b319b77",
+          "object": "chat.completion.chunk",
+          "created": 1789547222,
+          "model": "North-Mini-Code-1.0-mlx-4bit",
+          "choices": [
+            {
+              "index": 0,
+              "finish_reason": null,
+              "delta": {
+                "reasoning_content": " respond"
+              }
+            }
+          ]
+        },
+        {
+          "id": "chatcmpl-dcaaf652ff954267855738cc8b319b77",
+          "object": "chat.completion.chunk",
+          "created": 1789547222,
+          "model": "North-Mini-Code-1.0-mlx-4bit",
+          "choices": [
+            {
+              "index": 0,
+              "finish_reason": null,
+              "delta": {
+                "reasoning_content": " with"
+              }
+            }
+          ]
+        },
+        {
+          "id": "chatcmpl-dcaaf652ff954267855738cc8b319b77",
+          "object": "chat.completion.chunk",
+          "created": 1789547222,
+          "model": "North-Mini-Code-1.0-mlx-4bit",
+          "choices": [
+            {
+              "index": 0,
+              "finish_reason": null,
+              "delta": {
+                "reasoning_content": " \""
+              }
+            }
+          ]
+        },
+        {
+          "id": "chatcmpl-dcaaf652ff954267855738cc8b319b77",
+          "object": "chat.completion.chunk",
+          "created": 1789547222,
+          "model": "North-Mini-Code-1.0-mlx-4bit",
+          "choices": [
+            {
+              "index": 0,
+              "finish_reason": null,
+              "delta": {
+                "reasoning_content": "ML"
+              }
+            }
+          ]
+        },
+        {
+          "id": "chatcmpl-dcaaf652ff954267855738cc8b319b77",
+          "object": "chat.completion.chunk",
+          "created": 1789547222,
+          "model": "North-Mini-Code-1.0-mlx-4bit",
+          "choices": [
+            {
+              "index": 0,
+              "finish_reason": null,
+              "delta": {
+                "reasoning_content": "X"
+              }
+            }
+          ]
+        },
+        {
+          "id": "chatcmpl-dcaaf652ff954267855738cc8b319b77",
+          "object": "chat.completion.chunk",
+          "created": 1789547222,
+          "model": "North-Mini-Code-1.0-mlx-4bit",
+          "choices": [
+            {
+              "index": 0,
+              "finish_reason": null,
+              "delta": {
+                "reasoning_content": "2"
+              }
+            }
+          ]
+        },
+        {
+          "id": "chatcmpl-dcaaf652ff954267855738cc8b319b77",
+          "object": "chat.completion.chunk",
+          "created": 1789547222,
+          "model": "North-Mini-Code-1.0-mlx-4bit",
+          "choices": [
+            {
+              "index": 0,
+              "finish_reason": null,
+              "delta": {
+                "reasoning_content": "_READY"
+              }
+            }
+          ]
+        },
+        {
+          "id": "chatcmpl-dcaaf652ff954267855738cc8b319b77",
+          "object": "chat.completion.chunk",
+          "created": 1789547222,
+          "model": "North-Mini-Code-1.0-mlx-4bit",
+          "choices": [
+            {
+              "index": 0,
+              "finish_reason": null,
+              "delta": {
+                "reasoning_content": "\"."
+              }
+            }
+          ]
+        },
+        {
+          "id": "chatcmpl-dcaaf652ff954267855738cc8b319b77",
+          "object": "chat.completion.chunk",
+          "created": 1789547222,
+          "model": "North-Mini-Code-1.0-mlx-4bit",
+          "choices": [
+            {
+              "index": 0,
+              "finish_reason": null,
+              "delta": {
+                "reasoning_content": " Ensure"
+              }
+            }
+          ]
+        },
+        {
+          "id": "chatcmpl-dcaaf652ff954267855738cc8b319b77",
+          "object": "chat.completion.chunk",
+          "created": 1789547222,
+          "model": "North-Mini-Code-1.0-mlx-4bit",
+          "choices": [
+            {
+              "index": 0,
+              "finish_reason": null,
+              "delta": {
+                "reasoning_content": " exactly"
+              }
+            }
+          ]
+        },
+        {
+          "id": "chatcmpl-dcaaf652ff954267855738cc8b319b77",
+          "object": "chat.completion.chunk",
+          "created": 1789547222,
+          "model": "North-Mini-Code-1.0-mlx-4bit",
+          "choices": [
+            {
+              "index": 0,
+              "finish_reason": null,
+              "delta": {
+                "reasoning_content": " that"
+              }
+            }
+          ]
+        },
+        {
+          "id": "chatcmpl-dcaaf652ff954267855738cc8b319b77",
+          "object": "chat.completion.chunk",
+          "created": 1789547222,
+          "model": "North-Mini-Code-1.0-mlx-4bit",
+          "choices": [
+            {
+              "index": 0,
+              "finish_reason": null,
+              "delta": {
+                "reasoning_content": "."
+              }
+            }
+          ]
+        },
+        {
+          "id": "chatcmpl-dcaaf652ff954267855738cc8b319b77",
+          "object": "chat.completion.chunk",
+          "created": 1789547222,
+          "model": "North-Mini-Code-1.0-mlx-4bit",
+          "choices": [
+            {
+              "index": 0,
+              "finish_reason": null,
+              "delta": {
+                "content": "ML"
+              }
+            }
+          ]
+        },
+        {
+          "id": "chatcmpl-dcaaf652ff954267855738cc8b319b77",
+          "object": "chat.completion.chunk",
+          "created": 1789547222,
+          "model": "North-Mini-Code-1.0-mlx-4bit",
+          "choices": [
+            {
+              "index": 0,
+              "finish_reason": null,
+              "delta": {
+                "content": "X"
+              }
+            }
+          ]
+        },
+        {
+          "id": "chatcmpl-dcaaf652ff954267855738cc8b319b77",
+          "object": "chat.completion.chunk",
+          "created": 1789547222,
+          "model": "North-Mini-Code-1.0-mlx-4bit",
+          "choices": [
+            {
+              "index": 0,
+              "finish_reason": null,
+              "delta": {
+                "content": "2"
+              }
+            }
+          ]
+        },
+        {
+          "id": "chatcmpl-dcaaf652ff954267855738cc8b319b77",
+          "object": "chat.completion.chunk",
+          "created": 1789547222,
+          "model": "North-Mini-Code-1.0-mlx-4bit",
+          "choices": [
+            {
+              "index": 0,
+              "finish_reason": null,
+              "delta": {
+                "content": "_READY"
+              }
+            }
+          ]
+        },
+        {
+          "id": "chatcmpl-dcaaf652ff954267855738cc8b319b77",
+          "object": "chat.completion.chunk",
+          "created": 1789547222,
+          "model": "North-Mini-Code-1.0-mlx-4bit",
+          "choices": [
+            {
+              "index": 0,
+              "finish_reason": "stop",
+              "delta": {}
+            }
+          ],
+          "usage": {
+            "prompt_tokens": 123,
+            "completion_tokens": 47,
+            "total_tokens": 170,
+            "prompt_tokens_details": {
+              "cached_tokens": 122
+            }
+          },
+          "mlx2": {
+            "request_id": "chatcmpl-dcaaf652ff954267855738cc8b319b77",
+            "cache": "apcv2",
+            "cached_tokens": 122,
+            "profile": "north-mini-code-apcv2-ordinary",
+            "qualification": "candidate",
+            "route_receipt": "candidate_validation",
+            "request_controls": {
+              "logprobs": false,
+              "top_logprobs": 0,
+              "logprob_semantics": null,
+              "thinking": false,
+              "sampling": {
+                "temperature": 0
+              },
+              "reasoning_effort": null,
+              "effort_semantics": "thinking_toggle",
+              "context_limit": 500000
+            },
+            "ordinary_compute_width": 1,
+            "mtp": null,
+            "speculation": null,
+            "prompt_tokens": 123,
+            "completion_tokens": 47,
+            "ttft_seconds": 0.03741562499999418,
+            "elapsed_seconds": 0.3534439590002876
+          }
+        }
+      ]
+    },
+    "tools": {
+      "passed": true,
+      "evidence": {
+        "id": "chatcmpl-7f567b02f3514e1bb8655c8510868ebf",
+        "object": "chat.completion",
+        "created": 1789547222,
+        "model": "North-Mini-Code-1.0-mlx-4bit",
+        "choices": [
+          {
+            "index": 0,
+            "finish_reason": "tool_calls",
+            "message": {
+              "role": "assistant",
+              "content": "",
+              "reasoning_content": "The user wants me to get the weather for Toronto. I have access to a weather function that takes a city parameter. The user has specified \"Toronto\" as the city, so I have all the required parameters to make the function call.",
+              "tool_calls": [
+                {
+                  "id": "0",
+                  "type": "function",
+                  "function": {
+                    "name": "weather",
+                    "arguments": "{\"city\": \"Toronto\"}"
+                  }
+                }
+              ]
+            }
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 177,
+          "completion_tokens": 79,
+          "total_tokens": 256,
+          "prompt_tokens_details": {
+            "cached_tokens": 102
+          }
+        },
+        "mlx2": {
+          "request_id": "chatcmpl-7f567b02f3514e1bb8655c8510868ebf",
+          "cache": "apcv2",
+          "cached_tokens": 102,
+          "profile": "north-mini-code-apcv2-ordinary",
+          "qualification": "candidate",
+          "route_receipt": "candidate_validation",
+          "request_controls": {
+            "logprobs": false,
+            "top_logprobs": 0,
+            "logprob_semantics": null,
+            "thinking": false,
+            "sampling": {
+              "temperature": 0
+            },
+            "reasoning_effort": null,
+            "effort_semantics": "thinking_toggle",
+            "context_limit": 500000
+          },
+          "ordinary_compute_width": 1,
+          "mtp": null,
+          "speculation": null,
+          "prompt_tokens": 177,
+          "completion_tokens": 79,
+          "ttft_seconds": 0.09734558399941307,
+          "elapsed_seconds": 0.6191383339973981
+        }
+      }
+    },
+    "tool_roundtrip": {
+      "passed": true,
+      "evidence": {
+        "id": "chatcmpl-cfec234c01c04cfba72258bb697c180a",
+        "object": "chat.completion",
+        "created": 1789547223,
+        "model": "North-Mini-Code-1.0-mlx-4bit",
+        "choices": [
+          {
+            "index": 0,
+            "finish_reason": "length",
+            "message": {
+              "role": "assistant",
+              "content": "The current weather in Toronto is:\n\n- **Temperature**: 21\u00b0C\n- **Condition**: Sunny\n\nIt's a",
+              "reasoning_content": "I got the weather data for Toronto. The result shows:\n- Temperature: 21\u00b0C\n- Condition: sunny\n\nI should present this information in a clear and helpful way to the user."
+            }
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 316,
+          "completion_tokens": 64,
+          "total_tokens": 380,
+          "prompt_tokens_details": {
+            "cached_tokens": 256
+          }
+        },
+        "mlx2": {
+          "request_id": "chatcmpl-cfec234c01c04cfba72258bb697c180a",
+          "cache": "apcv2",
+          "cached_tokens": 256,
+          "profile": "north-mini-code-apcv2-ordinary",
+          "qualification": "candidate",
+          "route_receipt": "candidate_validation",
+          "request_controls": {
+            "logprobs": false,
+            "top_logprobs": 0,
+            "logprob_semantics": null,
+            "thinking": false,
+            "sampling": {
+              "temperature": 0
+            },
+            "reasoning_effort": null,
+            "effort_semantics": "thinking_toggle",
+            "context_limit": 500000
+          },
+          "ordinary_compute_width": 1,
+          "mtp": null,
+          "speculation": null,
+          "prompt_tokens": 316,
+          "completion_tokens": 64,
+          "ttft_seconds": 0.12661724999998114,
+          "elapsed_seconds": 0.5618450839974685
+        }
+      }
+    },
+    "reasoning": {
+      "passed": true,
+      "evidence": {
+        "id": "chatcmpl-ff90ed2fa1d6464fbcf4b577f7a91b52",
+        "object": "chat.completion",
+        "created": 1789547223,
+        "model": "North-Mini-Code-1.0-mlx-4bit",
+        "choices": [
+          {
+            "index": 0,
+            "finish_reason": "stop",
+            "message": {
+              "role": "assistant",
+              "content": "13\u202f\u00d7\u202f17\u202f=\u202f221.",
+              "reasoning_content": "The user asks a simple arithmetic: 13 times 17. Compute: 13*17 = 221. Provide answer."
+            }
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 124,
+          "completion_tokens": 40,
+          "total_tokens": 164,
+          "prompt_tokens_details": {
+            "cached_tokens": 111
+          }
+        },
+        "mlx2": {
+          "request_id": "chatcmpl-ff90ed2fa1d6464fbcf4b577f7a91b52",
+          "cache": "apcv2",
+          "cached_tokens": 111,
+          "profile": "north-mini-code-apcv2-ordinary",
+          "qualification": "candidate",
+          "route_receipt": "candidate_validation",
+          "request_controls": {
+            "logprobs": false,
+            "top_logprobs": 0,
+            "logprob_semantics": null,
+            "thinking": true,
+            "sampling": {
+              "temperature": 0
+            },
+            "reasoning_effort": null,
+            "effort_semantics": "thinking_toggle",
+            "context_limit": 500000
+          },
+          "ordinary_compute_width": 1,
+          "mtp": null,
+          "speculation": null,
+          "prompt_tokens": 124,
+          "completion_tokens": 40,
+          "ttft_seconds": 0.060818250000011176,
+          "elapsed_seconds": 0.3263864999971702
+        }
+      }
+    },
+    "stop": {
+      "passed": false,
+      "evidence": {
+        "id": "chatcmpl-389b51815e0942c1aab7072e3989dcdd",
+        "object": "chat.completion",
+        "created": 1789547223,
+        "model": "North-Mini-Code-1.0-mlx-4bit",
+        "choices": [
+          {
+            "index": 0,
+            "finish_reason": "stop",
+            "message": {
+              "role": "assistant",
+              "content": "",
+              "reasoning_content": "The user asks: \"Reply with exactly MLX2"
+            }
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 123,
+          "completion_tokens": 12,
+          "total_tokens": 135,
+          "prompt_tokens_details": {
+            "cached_tokens": 122
+          }
+        },
+        "mlx2": {
+          "request_id": "chatcmpl-389b51815e0942c1aab7072e3989dcdd",
+          "cache": "apcv2",
+          "cached_tokens": 122,
+          "profile": "north-mini-code-apcv2-ordinary",
+          "qualification": "candidate",
+          "route_receipt": "candidate_validation",
+          "request_controls": {
+            "logprobs": false,
+            "top_logprobs": 0,
+            "logprob_semantics": null,
+            "thinking": false,
+            "sampling": {
+              "temperature": 0
+            },
+            "reasoning_effort": null,
+            "effort_semantics": "thinking_toggle",
+            "context_limit": 500000
+          },
+          "ordinary_compute_width": 1,
+          "mtp": null,
+          "speculation": null,
+          "prompt_tokens": 123,
+          "completion_tokens": 12,
+          "ttft_seconds": 0.03906166600063443,
+          "elapsed_seconds": 0.11184016599872848
+        }
+      }
+    }
+  },
+  "responses": {
+    "sampling_controls": [
+      {
+        "id": "chatcmpl-4a65d58635244410a51cbe33d8420799",
+        "object": "chat.completion",
+        "created": 1789547220,
+        "model": "North-Mini-Code-1.0-mlx-4bit",
+        "choices": [
+          {
+            "index": 0,
+            "finish_reason": "stop",
+            "message": {
+              "role": "assistant",
+              "content": "Sure! Here are three fruits:\n\n1. Apple  \n2. Banana  \n3. Orange",
+              "reasoning_content": "The user asks: \"Name three fruits.\" This is a straightforward request for educational content. It's allowed. Provide three fruit names."
+            }
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 120,
+          "completion_tokens": 48,
+          "total_tokens": 168,
+          "prompt_tokens_details": {
+            "cached_tokens": 111
+          }
+        },
+        "mlx2": {
+          "request_id": "chatcmpl-4a65d58635244410a51cbe33d8420799",
+          "cache": "apcv2",
+          "cached_tokens": 111,
+          "profile": "north-mini-code-apcv2-ordinary",
+          "qualification": "candidate",
+          "route_receipt": "candidate_validation",
+          "request_controls": {
+            "logprobs": false,
+            "top_logprobs": 0,
+            "logprob_semantics": null,
+            "thinking": false,
+            "sampling": {
+              "temperature": 0.7,
+              "top_p": 0.9,
+              "top_k": 24,
+              "min_p": 0.05,
+              "repetition_penalty": 1.05,
+              "presence_penalty": 0.1,
+              "frequency_penalty": 0.1,
+              "seed": 237
+            },
+            "reasoning_effort": null,
+            "effort_semantics": "thinking_toggle",
+            "context_limit": 500000
+          },
+          "ordinary_compute_width": 1,
+          "mtp": null,
+          "speculation": null,
+          "prompt_tokens": 120,
+          "completion_tokens": 48,
+          "ttft_seconds": 0.08186395899974741,
+          "elapsed_seconds": 0.41982225000174367
+        }
+      },
+      {
+        "id": "chatcmpl-d389d25d541a411191ec7d92a69022be",
+        "object": "chat.completion",
+        "created": 1789547220,
+        "model": "North-Mini-Code-1.0-mlx-4bit",
+        "choices": [
+          {
+            "index": 0,
+            "finish_reason": "stop",
+            "message": {
+              "role": "assistant",
+              "content": "Sure! Here are three fruits:\n\n1. Apple  \n2. Banana  \n3. Orange",
+              "reasoning_content": "The user asks: \"Name three fruits.\" This is a straightforward request for educational content. It's allowed. Provide three fruit names."
+            }
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 120,
+          "completion_tokens": 48,
+          "total_tokens": 168,
+          "prompt_tokens_details": {
+            "cached_tokens": 119
+          }
+        },
+        "mlx2": {
+          "request_id": "chatcmpl-d389d25d541a411191ec7d92a69022be",
+          "cache": "apcv2",
+          "cached_tokens": 119,
+          "profile": "north-mini-code-apcv2-ordinary",
+          "qualification": "candidate",
+          "route_receipt": "candidate_validation",
+          "request_controls": {
+            "logprobs": false,
+            "top_logprobs": 0,
+            "logprob_semantics": null,
+            "thinking": false,
+            "sampling": {
+              "temperature": 0.7,
+              "top_p": 0.9,
+              "top_k": 24,
+              "min_p": 0.05,
+              "repetition_penalty": 1.05,
+              "presence_penalty": 0.1,
+              "frequency_penalty": 0.1,
+              "seed": 237
+            },
+            "reasoning_effort": null,
+            "effort_semantics": "thinking_toggle",
+            "context_limit": 500000
+          },
+          "ordinary_compute_width": 1,
+          "mtp": null,
+          "speculation": null,
+          "prompt_tokens": 120,
+          "completion_tokens": 48,
+          "ttft_seconds": 0.04041466700073215,
+          "elapsed_seconds": 0.37706091700238176
+        }
+      }
+    ],
+    "cold": {
+      "id": "chatcmpl-b0ab991be3ed4f9da38031100cc256d0",
+      "object": "chat.completion",
+      "created": 1789547221,
+      "model": "North-Mini-Code-1.0-mlx-4bit",
+      "choices": [
+        {
+          "index": 0,
+          "finish_reason": "stop",
+          "message": {
+            "role": "assistant",
+            "content": "MLX2_READY",
+            "reasoning_content": "The user asks: \"Reply with exactly MLX2_READY\". So we need to output exactly that string, no extra characters. So respond with \"MLX2_READY\". Ensure exactly that."
+          }
+        }
+      ],
+      "usage": {
+        "prompt_tokens": 123,
+        "completion_tokens": 47,
+        "total_tokens": 170,
+        "prompt_tokens_details": {
+          "cached_tokens": 114
+        }
+      },
+      "mlx2": {
+        "request_id": "chatcmpl-b0ab991be3ed4f9da38031100cc256d0",
+        "cache": "apcv2",
+        "cached_tokens": 114,
+        "profile": "north-mini-code-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": false,
+          "top_logprobs": 0,
+          "logprob_semantics": null,
+          "thinking": false,
+          "sampling": {
+            "temperature": 0
+          },
+          "reasoning_effort": null,
+          "effort_semantics": "thinking_toggle",
+          "context_limit": 500000
+        },
+        "ordinary_compute_width": 1,
+        "mtp": null,
+        "speculation": null,
+        "prompt_tokens": 123,
+        "completion_tokens": 47,
+        "ttft_seconds": 0.0653064580001228,
+        "elapsed_seconds": 0.37656950000018696
+      }
+    },
+    "warm": {
+      "id": "chatcmpl-e48c44a71d7744e59ab01ee0cfaeef47",
+      "object": "chat.completion",
+      "created": 1789547221,
+      "model": "North-Mini-Code-1.0-mlx-4bit",
+      "choices": [
+        {
+          "index": 0,
+          "finish_reason": "stop",
+          "message": {
+            "role": "assistant",
+            "content": "MLX2_READY",
+            "reasoning_content": "The user asks: \"Reply with exactly MLX2_READY\". So we need to output exactly that string, no extra characters. So respond with \"MLX2_READY\". Ensure exactly that."
+          }
+        }
+      ],
+      "usage": {
+        "prompt_tokens": 123,
+        "completion_tokens": 47,
+        "total_tokens": 170,
+        "prompt_tokens_details": {
+          "cached_tokens": 122
+        }
+      },
+      "mlx2": {
+        "request_id": "chatcmpl-e48c44a71d7744e59ab01ee0cfaeef47",
+        "cache": "apcv2",
+        "cached_tokens": 122,
+        "profile": "north-mini-code-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": false,
+          "top_logprobs": 0,
+          "logprob_semantics": null,
+          "thinking": false,
+          "sampling": {
+            "temperature": 0
+          },
+          "reasoning_effort": null,
+          "effort_semantics": "thinking_toggle",
+          "context_limit": 500000
+        },
+        "ordinary_compute_width": 1,
+        "mtp": null,
+        "speculation": null,
+        "prompt_tokens": 123,
+        "completion_tokens": 47,
+        "ttft_seconds": 0.03878041699863388,
+        "elapsed_seconds": 0.3511337089985318
+      }
+    }
+  },
+  "passed": false,
+  "failure_status": {
+    "state": "ready",
+    "model": "North-Mini-Code-1.0-mlx-4bit",
+    "runtime": {
+      "source_sha256": "c59a29e820104248fbd7f8cf2ed9787ff1535976bf81daad7e13a3983f0b571f",
+      "mlx_native_sha256": "30335939714520c3306cfa58597100aae08bbeabdc60a4bc8c35c32c607450a8",
+      "python": "3.12.13",
+      "macos": "26.7",
+      "mlx": "0.32.2.dev20260915+2a817ad94",
+      "transformers": "5.12.1",
+      "dependencies": {
+        "numpy": "2.5.1",
+        "tokenizers": "0.22.2",
+        "jinja2": "3.1.6",
+        "psutil": "7.2.2",
+        "regex": "2026.9.10",
+        "safetensors": "0.8.0"
+      }
+    },
+    "artifact": "6c88a4d3a5387abe2d97ac3d5eb70e484fb33615bb0c0f2ff8e7ef22b442f2e4",
+    "profile": "north-mini-code-apcv2-ordinary",
+    "settings": {
+      "max_context": 500000,
+      "max_lanes": 20,
+      "max_inflight": 40,
+      "prefill_step": 2048,
+      "cache_bytes": 17179869184,
+      "disk_cache": true,
+      "mtp": false,
+      "environment": {
+        "HF_HUB_OFFLINE": "1",
+        "TRANSFORMERS_OFFLINE": "1",
+        "MLX_ENABLE_TF32": "0",
+        "MLX_LM_COMPILED_DECODE": "0",
+        "MLX_LM_SEGMENTED_SELF_MTP": "0",
+        "MLX_LM_TRUE_BATCHED_SEGMENTED_MTP": "0",
+        "MLX_LM_SHARED_QSA_SUFFIX": "0"
+      },
+      "execution_policy": {
+        "persistent": true,
+        "num_draft": 0,
+        "rate_gate": false,
+        "prefill_step_size": 2048,
+        "segment_aware_live_tip": false,
+        "segment_aware_cohort_size": 20
+      },
+      "speculation": "ordinary",
+      "cache_budget": {
+        "schema": "north-mini-code-cache-geometry-v1",
+        "global_layers": 13,
+        "sliding_layers": 36,
+        "kv_heads": 4,
+        "head_dim": 128,
+        "sliding_window": 4096,
+        "item_bytes": 4,
+        "allocation_step": 256,
+        "checkpoint_copies": 4,
+        "transcript_bytes_per_token": 16,
+        "transient_gib_per_lane": 3.1,
+        "bound": "fp32-global-plus-window-and-restore-snapshots",
+        "workspace": "3.1-GiB-per-lane conservative static assumption; live qualification pending"
+      }
+    },
+    "route_receipt": "candidate_validation",
+    "qualification": "candidate",
+    "max_context": 500000,
+    "max_lanes": 20,
+    "apcv2": {
+      "lookups": 11,
+      "hits": 10,
+      "misses": 1,
+      "cached_tokens": 1301,
+      "stores": 21,
+      "clears": 0,
+      "lifetime": {
+        "lookups": 11,
+        "hits": 10,
+        "misses": 1,
+        "cached_tokens": 1301,
+        "stores": 21
+      },
+      "cow_enabled": true,
+      "cow": {
+        "sources": 21,
+        "source_bytes": 321828864,
+        "freeze_failures": 0,
+        "branches": 10,
+        "branch_failures": 0,
+        "stale_rejections": 0,
+        "invalidations": 16,
+        "active_leases": 1,
+        "peak_leases": 1,
+        "descriptor_aliases": 3038,
+        "descriptor_bytes": 476571648,
+        "avoided_copy_bytes": 154742784,
+        "materializations": 0,
+        "materialized_bytes": 0,
+        "fallback_deepcopies": 0,
+        "fallback_bytes": 0,
+        "freeze_ns": 37731502,
+        "branch_ns": 3481500,
+        "fallback_ns": 0,
+        "releases": 9,
+        "planes": {
+          "attention_kv": {
+            "descriptor_aliases": 806,
+            "descriptor_bytes": 126437376,
+            "materializations": 0,
+            "materialized_bytes": 0
+          },
+          "attention_ring": {
+            "descriptor_aliases": 2232,
+            "descriptor_bytes": 350134272,
+            "materializations": 0,
+            "materialized_bytes": 0
+          }
+        },
+        "materialized_bytes_are_estimated": true,
+        "array_readbacks": 0
+      },
+      "max_tokens": 500000,
+      "max_entry_tokens": 315,
+      "overlength_rejections": 0,
+      "idle_disk": {
+        "enabled": true,
+        "idle_seconds": 180.0,
+        "resident_bytes": 91621376,
+        "disk_bytes": 0,
+        "disk_max_bytes": 68719476736,
+        "disk_entries": 0,
+        "idle_spills": 0,
+        "pressure_spills": 0,
+        "restores": 0,
+        "restore_failures": 0,
+        "spill_failures": 0,
+        "disk_evictions": 0,
+        "bytes_written": 0,
+        "bytes_read": 0
+      },
+      "version": 2,
+      "layout_name": "north-mini-code-layer-segments-v1",
+      "layer_segments": {
+        "schema": "apcv2.layer-segments.v1",
+        "entries": 5,
+        "disk_entries": 0,
+        "layers": 245,
+        "plane_layers": 245,
+        "segments": 258,
+        "logical_bytes": 91621376,
+        "by_plane": {
+          "attention_kv": {
+            "layers": 65,
+            "segments": 78,
+            "logical_bytes": 24307712,
+            "invalid": 0
+          },
+          "attention_ring": {
+            "layers": 180,
+            "segments": 180,
+            "logical_bytes": 67313664,
+            "invalid": 0
+          }
+        }
+      }
+    },
+    "scheduler": {
+      "prefill_rounds": 6,
+      "prefill_only_rounds": 6,
+      "decode_priority_release_rounds": 0,
+      "decode_priority_deferred_rounds": 0,
+      "adaptive_prefill_release_rounds": 0,
+      "adaptive_prefill_slack_deferred_rounds": 0,
+      "adaptive_prefill_deadline_forced_rounds": 0,
+      "adaptive_prefill_apc_priority_admissions": 0,
+      "adaptive_prefill_chunk_histogram": {}
+    },
+    "metal_active_bytes": 17404896976,
+    "metal_peak_bytes": 17464508416,
+    "process_physical_footprint_bytes": 18089538832,
+    "execution": {
+      "architecture": "cohere2_moe",
+      "cache_layout": "north-mini-code-layer-segments-v1",
+      "sliding_layers": 36,
+      "global_layers": 13,
+      "sliding_window": 4096,
+      "speculation": "none-qualified"
+    },
+    "admission": {},
+    "memory_waiting": 0,
+    "headroom_bytes": 98946859008,
+    "healthy": true,
+    "error": null,
+    "inflight": 0,
+    "queue_depth": 0,
+    "counts": {
+      "admitted": 13,
+      "cycles": 482,
+      "multi_request_cycles": 0,
+      "completed": 13
+    },
+    "recent_receipts": [
+      {
+        "request_id": "chatcmpl-f5b504e34f314f86b2620c8425b72505",
+        "cache": "apcv2",
+        "cached_tokens": 0,
+        "profile": "north-mini-code-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": false,
+          "top_logprobs": 0,
+          "logprob_semantics": null,
+          "thinking": false,
+          "sampling": {
+            "temperature": 0
+          },
+          "reasoning_effort": "none",
+          "effort_semantics": "thinking_toggle",
+          "context_limit": 262144
+        },
+        "ordinary_compute_width": 1,
+        "mtp": null,
+        "speculation": null,
+        "prompt_tokens": 123,
+        "completion_tokens": 6,
+        "ttft_seconds": 0.36011108300226624,
+        "elapsed_seconds": 0.4041138749998936
+      },
+      {
+        "request_id": "chatcmpl-dd72000a941141bdbe07bf5ead7a96df",
+        "cache": "apcv2",
+        "cached_tokens": 111,
+        "profile": "north-mini-code-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": false,
+          "top_logprobs": 0,
+          "logprob_semantics": null,
+          "thinking": false,
+          "sampling": {
+            "temperature": 0
+          },
+          "reasoning_effort": null,
+          "effort_semantics": "thinking_toggle",
+          "context_limit": 500000
+        },
+        "ordinary_compute_width": 1,
+        "mtp": null,
+        "speculation": null,
+        "prompt_tokens": 123,
+        "completion_tokens": 8,
+        "ttft_seconds": 0.07063583300259779,
+        "elapsed_seconds": 0.12928429200110259
+      },
+      {
+        "request_id": "chatcmpl-cd4f43bc473d4129be081dfef8171d7a",
+        "cache": "apcv2",
+        "cached_tokens": 122,
+        "profile": "north-mini-code-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": true,
+          "top_logprobs": 3,
+          "logprob_semantics": "execution_target: ordinary=post_processor_pre_sampler; mtp=transformed_target_verifier",
+          "thinking": false,
+          "sampling": {
+            "temperature": 0
+          },
+          "reasoning_effort": null,
+          "effort_semantics": "thinking_toggle",
+          "context_limit": 500000
+        },
+        "ordinary_compute_width": 1,
+        "mtp": null,
+        "speculation": null,
+        "prompt_tokens": 123,
+        "completion_tokens": 8,
+        "ttft_seconds": 0.0390896659991995,
+        "elapsed_seconds": 0.10541545800151653
+      },
+      {
+        "request_id": "chatcmpl-a778e0f9d96f40d0bf0beaab9dedd1a2",
+        "cache": "apcv2",
+        "cached_tokens": 122,
+        "profile": "north-mini-code-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": true,
+          "top_logprobs": 3,
+          "logprob_semantics": "execution_target: ordinary=post_processor_pre_sampler; mtp=transformed_target_verifier",
+          "thinking": false,
+          "sampling": {
+            "temperature": 0
+          },
+          "reasoning_effort": null,
+          "effort_semantics": "thinking_toggle",
+          "context_limit": 500000
+        },
+        "ordinary_compute_width": 1,
+        "mtp": null,
+        "speculation": null,
+        "prompt_tokens": 123,
+        "completion_tokens": 8,
+        "ttft_seconds": 0.03870062499845517,
+        "elapsed_seconds": 0.09777595799823757
+      },
+      {
+        "request_id": "chatcmpl-4a65d58635244410a51cbe33d8420799",
+        "cache": "apcv2",
+        "cached_tokens": 111,
+        "profile": "north-mini-code-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": false,
+          "top_logprobs": 0,
+          "logprob_semantics": null,
+          "thinking": false,
+          "sampling": {
+            "temperature": 0.7,
+            "top_p": 0.9,
+            "top_k": 24,
+            "min_p": 0.05,
+            "repetition_penalty": 1.05,
+            "presence_penalty": 0.1,
+            "frequency_penalty": 0.1,
+            "seed": 237
+          },
+          "reasoning_effort": null,
+          "effort_semantics": "thinking_toggle",
+          "context_limit": 500000
+        },
+        "ordinary_compute_width": 1,
+        "mtp": null,
+        "speculation": null,
+        "prompt_tokens": 120,
+        "completion_tokens": 48,
+        "ttft_seconds": 0.08186395899974741,
+        "elapsed_seconds": 0.41982225000174367
+      },
+      {
+        "request_id": "chatcmpl-d389d25d541a411191ec7d92a69022be",
+        "cache": "apcv2",
+        "cached_tokens": 119,
+        "profile": "north-mini-code-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": false,
+          "top_logprobs": 0,
+          "logprob_semantics": null,
+          "thinking": false,
+          "sampling": {
+            "temperature": 0.7,
+            "top_p": 0.9,
+            "top_k": 24,
+            "min_p": 0.05,
+            "repetition_penalty": 1.05,
+            "presence_penalty": 0.1,
+            "frequency_penalty": 0.1,
+            "seed": 237
+          },
+          "reasoning_effort": null,
+          "effort_semantics": "thinking_toggle",
+          "context_limit": 500000
+        },
+        "ordinary_compute_width": 1,
+        "mtp": null,
+        "speculation": null,
+        "prompt_tokens": 120,
+        "completion_tokens": 48,
+        "ttft_seconds": 0.04041466700073215,
+        "elapsed_seconds": 0.37706091700238176
+      },
+      {
+        "request_id": "chatcmpl-b0ab991be3ed4f9da38031100cc256d0",
+        "cache": "apcv2",
+        "cached_tokens": 114,
+        "profile": "north-mini-code-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": false,
+          "top_logprobs": 0,
+          "logprob_semantics": null,
+          "thinking": false,
+          "sampling": {
+            "temperature": 0
+          },
+          "reasoning_effort": null,
+          "effort_semantics": "thinking_toggle",
+          "context_limit": 500000
+        },
+        "ordinary_compute_width": 1,
+        "mtp": null,
+        "speculation": null,
+        "prompt_tokens": 123,
+        "completion_tokens": 47,
+        "ttft_seconds": 0.0653064580001228,
+        "elapsed_seconds": 0.37656950000018696
+      },
+      {
+        "request_id": "chatcmpl-e48c44a71d7744e59ab01ee0cfaeef47",
+        "cache": "apcv2",
+        "cached_tokens": 122,
+        "profile": "north-mini-code-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": false,
+          "top_logprobs": 0,
+          "logprob_semantics": null,
+          "thinking": false,
+          "sampling": {
+            "temperature": 0
+          },
+          "reasoning_effort": null,
+          "effort_semantics": "thinking_toggle",
+          "context_limit": 500000
+        },
+        "ordinary_compute_width": 1,
+        "mtp": null,
+        "speculation": null,
+        "prompt_tokens": 123,
+        "completion_tokens": 47,
+        "ttft_seconds": 0.03878041699863388,
+        "elapsed_seconds": 0.3511337089985318
+      },
+      {
+        "request_id": "chatcmpl-dcaaf652ff954267855738cc8b319b77",
+        "cache": "apcv2",
+        "cached_tokens": 122,
+        "profile": "north-mini-code-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": false,
+          "top_logprobs": 0,
+          "logprob_semantics": null,
+          "thinking": false,
+          "sampling": {
+            "temperature": 0
+          },
+          "reasoning_effort": null,
+          "effort_semantics": "thinking_toggle",
+          "context_limit": 500000
+        },
+        "ordinary_compute_width": 1,
+        "mtp": null,
+        "speculation": null,
+        "prompt_tokens": 123,
+        "completion_tokens": 47,
+        "ttft_seconds": 0.03741562499999418,
+        "elapsed_seconds": 0.3534439590002876
+      },
+      {
+        "request_id": "chatcmpl-7f567b02f3514e1bb8655c8510868ebf",
+        "cache": "apcv2",
+        "cached_tokens": 102,
+        "profile": "north-mini-code-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": false,
+          "top_logprobs": 0,
+          "logprob_semantics": null,
+          "thinking": false,
+          "sampling": {
+            "temperature": 0
+          },
+          "reasoning_effort": null,
+          "effort_semantics": "thinking_toggle",
+          "context_limit": 500000
+        },
+        "ordinary_compute_width": 1,
+        "mtp": null,
+        "speculation": null,
+        "prompt_tokens": 177,
+        "completion_tokens": 79,
+        "ttft_seconds": 0.09734558399941307,
+        "elapsed_seconds": 0.6191383339973981
+      },
+      {
+        "request_id": "chatcmpl-cfec234c01c04cfba72258bb697c180a",
+        "cache": "apcv2",
+        "cached_tokens": 256,
+        "profile": "north-mini-code-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": false,
+          "top_logprobs": 0,
+          "logprob_semantics": null,
+          "thinking": false,
+          "sampling": {
+            "temperature": 0
+          },
+          "reasoning_effort": null,
+          "effort_semantics": "thinking_toggle",
+          "context_limit": 500000
+        },
+        "ordinary_compute_width": 1,
+        "mtp": null,
+        "speculation": null,
+        "prompt_tokens": 316,
+        "completion_tokens": 64,
+        "ttft_seconds": 0.12661724999998114,
+        "elapsed_seconds": 0.5618450839974685
+      },
+      {
+        "request_id": "chatcmpl-ff90ed2fa1d6464fbcf4b577f7a91b52",
+        "cache": "apcv2",
+        "cached_tokens": 111,
+        "profile": "north-mini-code-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": false,
+          "top_logprobs": 0,
+          "logprob_semantics": null,
+          "thinking": true,
+          "sampling": {
+            "temperature": 0
+          },
+          "reasoning_effort": null,
+          "effort_semantics": "thinking_toggle",
+          "context_limit": 500000
+        },
+        "ordinary_compute_width": 1,
+        "mtp": null,
+        "speculation": null,
+        "prompt_tokens": 124,
+        "completion_tokens": 40,
+        "ttft_seconds": 0.060818250000011176,
+        "elapsed_seconds": 0.3263864999971702
+      },
+      {
+        "request_id": "chatcmpl-389b51815e0942c1aab7072e3989dcdd",
+        "cache": "apcv2",
+        "cached_tokens": 122,
+        "profile": "north-mini-code-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": false,
+          "top_logprobs": 0,
+          "logprob_semantics": null,
+          "thinking": false,
+          "sampling": {
+            "temperature": 0
+          },
+          "reasoning_effort": null,
+          "effort_semantics": "thinking_toggle",
+          "context_limit": 500000
+        },
+        "ordinary_compute_width": 1,
+        "mtp": null,
+        "speculation": null,
+        "prompt_tokens": 123,
+        "completion_tokens": 12,
+        "ttft_seconds": 0.03906166600063443,
+        "elapsed_seconds": 0.11184016599872848
+      }
+    ]
+  }
+}

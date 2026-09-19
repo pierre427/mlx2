@@ -1,0 +1,18 @@
+[transformers] PyTorch was not found. Models won't be available and only tokenizers, configuration and file/data utilities can be used.
+2026-09-18 12:54:08,606 INFO ubc_evict: evicted 5108.2 MB from UBC for ~/mlx-models/North-Mini-Code-1.0-mlx-4bit/model-00001-of-00004.safetensors
+2026-09-18 12:54:08,627 INFO ubc_evict: evicted 5118.0 MB from UBC for ~/mlx-models/North-Mini-Code-1.0-mlx-4bit/model-00002-of-00004.safetensors
+2026-09-18 12:54:08,654 INFO ubc_evict: evicted 5118.0 MB from UBC for ~/mlx-models/North-Mini-Code-1.0-mlx-4bit/model-00003-of-00004.safetensors
+2026-09-18 12:54:08,660 INFO ubc_evict: evicted 1015.2 MB from UBC for ~/mlx-models/North-Mini-Code-1.0-mlx-4bit/model-00004-of-00004.safetensors
+2026-09-18 12:54:08,661 INFO ubc_evict: pass complete total_mb=16359.3 elapsed_s=0.08
+2026-09-18 12:54:09,531 INFO "GET /health HTTP/1.1" 200 -
+2026-09-18 12:54:09,533 INFO "GET /health HTTP/1.1" 200 -
+2026-09-18 12:54:10,441 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-18 12:54:11,061 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-18 12:54:11,753 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-18 12:54:13,188 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-18 12:54:13,216 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-18 12:54:13,319 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-18 12:54:13,319 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-18 12:54:13,320 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-18 12:54:13,320 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-18 12:54:13,354 INFO "GET /health HTTP/1.1" 200 -

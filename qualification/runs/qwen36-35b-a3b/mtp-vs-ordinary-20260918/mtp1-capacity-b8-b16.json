@@ -1,0 +1,76 @@
+{
+  "8": {
+    "codes": {
+      "200": 8
+    },
+    "observed_widths": [
+      1,
+      2,
+      3,
+      4,
+      5
+    ],
+    "wall_s": 11.6,
+    "agg_tok_s": 138.1,
+    "metal_active_delta_gib": 17.69,
+    "per_lane_gib": 2.211,
+    "min_headroom_gib": 58.1,
+    "max_inflight": 8,
+    "stages": [
+      "full"
+    ],
+    "admission": {
+      "modes": [
+        "self_mtp",
+        "self_mtp"
+      ],
+      "draft_depths": [
+        1,
+        1
+      ],
+      "stage": "full",
+      "estimated_gib": 5.045968017578126,
+      "usable_gib": 40.46470642089844,
+      "primary_rows": 2,
+      "speculative_rows": 2,
+      "optional_reclaim_wait": false
+    },
+    "errors": []
+  },
+  "16": {
+    "codes": {
+      "200": 16
+    },
+    "observed_widths": [
+      1,
+      2,
+      3,
+      4,
+      5
+    ],
+    "wall_s": 15.4,
+    "agg_tok_s": 208.4,
+    "metal_active_delta_gib": 17.14,
+    "per_lane_gib": 1.071,
+    "min_headroom_gib": 57.7,
+    "max_inflight": 16,
+    "stages": [
+      "full"
+    ],
+    "admission": {
+      "modes": [
+        "self_mtp"
+      ],
+      "draft_depths": [
+        1
+      ],
+      "stage": "full",
+      "estimated_gib": 2.522984008789063,
+      "usable_gib": 37.7734375,
+      "primary_rows": 1,
+      "speculative_rows": 1,
+      "optional_reclaim_wait": false
+    },
+    "errors": []
+  }
+}

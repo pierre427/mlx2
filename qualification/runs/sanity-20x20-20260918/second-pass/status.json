@@ -1,0 +1,346 @@
+{
+  "started": "2026-09-18 14:13:14",
+  "phase": "done",
+  "stages": {
+    "qwen36-ordinary": {
+      "state": "passed",
+      "steps": {
+        "sanity": {
+          "returncode": 0,
+          "seconds": 94,
+          "failed_lines": [],
+          "last": "  explain              20/20 "
+        }
+      },
+      "started": "13:19:34",
+      "command": "mlx2.server --model ~/mlx-models/Qwen3.6-35B-A3B-uncensored-heretic-Native-MTP-Preserved-oQ4e-mtp --host 127.0.0.1 --port 8297 --cache-dir ~/Desktop/mlx2/qualification/runs/sanity-20x20-20260918/cache/qwen36-ordinary --max-context 32768 --max-lanes 20 --max-inflight 40 --cache-bytes 8589934592 --qualification-mode --ordinary --execution-policy ~/Desktop/mlx2/qualification/policies/qwen36-mtp-artifact-ordinary.json",
+      "server_alive": true,
+      "finished": "13:21:18"
+    },
+    "qwen36-mtp2": {
+      "state": "passed",
+      "steps": {
+        "sanity": {
+          "returncode": 0,
+          "seconds": 162,
+          "failed_lines": [],
+          "last": "  explain              20/20 "
+        }
+      },
+      "started": "13:21:18",
+      "command": "mlx2.server --model ~/mlx-models/Qwen3.6-35B-A3B-uncensored-heretic-Native-MTP-Preserved-oQ4e-mtp --host 127.0.0.1 --port 8297 --cache-dir ~/Desktop/mlx2/qualification/runs/sanity-20x20-20260918/cache/qwen36-mtp2 --max-context 32768 --max-lanes 20 --max-inflight 40 --cache-bytes 8589934592 --qualification-mode --execution-policy ~/Desktop/mlx2/qualification/policies/qwen36-mtp2.json",
+      "server_alive": true,
+      "finished": "13:24:06"
+    },
+    "qwen36-pld": {
+      "state": "passed",
+      "steps": {
+        "sanity": {
+          "returncode": 0,
+          "seconds": 227,
+          "failed_lines": [],
+          "last": "  explain              20/20 "
+        }
+      },
+      "started": "13:24:06",
+      "command": "mlx2.server --model ~/mlx-models/Qwen3.6-35B-A3B-uncensored-heretic-Native-MTP-Preserved-oQ4e-mtp --host 127.0.0.1 --port 8297 --cache-dir ~/Desktop/mlx2/qualification/runs/sanity-20x20-20260918/cache/qwen36-pld --max-context 32768 --max-lanes 20 --max-inflight 40 --cache-bytes 8589934592 --qualification-mode --prompt-lookup --execution-policy ~/Desktop/mlx2/qualification/runs/integration-gpu-20260918/policies/pld.json",
+      "server_alive": true,
+      "finished": "13:28:01"
+    },
+    "north-ordinary": {
+      "state": "failed",
+      "steps": {
+        "sanity": {
+          "returncode": 1,
+          "seconds": 112,
+          "failed_lines": [],
+          "last": "  explain              20/20 "
+        }
+      },
+      "started": "14:14:23",
+      "command": "mlx2.server --model ~/mlx-models/North-Mini-Code-1.0-mlx-4bit --host 127.0.0.1 --port 8297 --cache-dir ~/Desktop/mlx2/qualification/runs/sanity-20x20-20260918/cache/north-ordinary --max-context 32768 --max-lanes 20 --max-inflight 40 --cache-bytes 8589934592 --qualification-mode --ordinary",
+      "server_alive": true,
+      "finished": "14:16:21"
+    },
+    "north-pld": {
+      "state": "failed",
+      "steps": {
+        "sanity": {
+          "returncode": 1,
+          "seconds": 223,
+          "failed_lines": [],
+          "last": "  explain              20/20 "
+        }
+      },
+      "started": "14:16:21",
+      "command": "mlx2.server --model ~/mlx-models/North-Mini-Code-1.0-mlx-4bit --host 127.0.0.1 --port 8297 --cache-dir ~/Desktop/mlx2/qualification/runs/sanity-20x20-20260918/cache/north-pld --max-context 32768 --max-lanes 20 --max-inflight 40 --cache-bytes 8589934592 --qualification-mode --prompt-lookup --execution-policy ~/Desktop/mlx2/qualification/runs/integration-gpu-20260918/policies/pld.json",
+      "server_alive": true,
+      "finished": "14:20:11"
+    },
+    "muse-ordinary": {
+      "state": "passed",
+      "steps": {
+        "sanity": {
+          "returncode": 0,
+          "seconds": 286,
+          "failed_lines": [],
+          "last": "  explain              20/20 "
+        }
+      },
+      "started": "14:20:11",
+      "command": "mlx2.server --model ~/mlx-models/Muse-Glimmer-30B-mlx-4bit --host 127.0.0.1 --port 8297 --cache-dir ~/Desktop/mlx2/qualification/runs/sanity-20x20-20260918/cache/muse-ordinary --max-context 32768 --max-lanes 20 --max-inflight 40 --cache-bytes 8589934592 --qualification-mode --ordinary",
+      "server_alive": true,
+      "finished": "14:25:06"
+    },
+    "muse-dflash2": {
+      "state": "failed",
+      "steps": {
+        "sanity": {
+          "returncode": 1,
+          "seconds": 416,
+          "failed_lines": [],
+          "last": "  explain              20/20 "
+        }
+      },
+      "started": "14:25:06",
+      "command": "mlx2.server --model ~/mlx-models/Muse-Glimmer-30B-mlx-4bit --host 127.0.0.1 --port 8297 --cache-dir ~/Desktop/mlx2/qualification/runs/sanity-20x20-20260918/cache/muse-dflash2 --max-context 32768 --max-lanes 20 --max-inflight 40 --cache-bytes 8589934592 --qualification-mode --external-draft --execution-policy ~/Desktop/mlx2/qualification/policies/muse-dflash2.json",
+      "server_alive": true,
+      "finished": "14:32:12"
+    },
+    "muse-pld": {
+      "state": "passed",
+      "steps": {
+        "sanity": {
+          "returncode": 0,
+          "seconds": 597,
+          "failed_lines": [],
+          "last": "  explain              20/20 "
+        }
+      },
+      "started": "13:37:43",
+      "command": "mlx2.server --model ~/mlx-models/Muse-Glimmer-30B-mlx-4bit --host 127.0.0.1 --port 8297 --cache-dir ~/Desktop/mlx2/qualification/runs/sanity-20x20-20260918/cache/muse-pld --max-context 32768 --max-lanes 20 --max-inflight 40 --cache-bytes 8589934592 --qualification-mode --prompt-lookup --execution-policy ~/Desktop/mlx2/qualification/runs/integration-gpu-20260918/policies/pld.json",
+      "server_alive": true,
+      "finished": "13:47:49"
+    },
+    "qwen38-ordinary": {
+      "state": "passed",
+      "steps": {
+        "sanity": {
+          "returncode": 0,
+          "seconds": 371,
+          "failed_lines": [],
+          "last": "  explain              20/20 "
+        }
+      },
+      "started": "13:47:49",
+      "command": "mlx2.server --model ~/mlx-models/Qwen3.8-27B-oQ4e-mtp --host 127.0.0.1 --port 8297 --cache-dir ~/Desktop/mlx2/qualification/runs/sanity-20x20-20260918/cache/qwen38-ordinary --max-context 32768 --max-lanes 20 --max-inflight 40 --cache-bytes 8589934592 --qualification-mode --ordinary --execution-policy ~/Desktop/mlx2/qualification/policies/qwen38-27b-mtp2.json",
+      "server_alive": true,
+      "finished": "13:54:07"
+    },
+    "qwen38-mtp2": {
+      "state": "passed",
+      "steps": {
+        "sanity": {
+          "returncode": 0,
+          "seconds": 414,
+          "failed_lines": [],
+          "last": "  explain              20/20 "
+        }
+      },
+      "started": "14:32:12",
+      "command": "mlx2.server --model ~/mlx-models/Qwen3.8-27B-oQ4e-mtp --host 127.0.0.1 --port 8297 --cache-dir ~/Desktop/mlx2/qualification/runs/sanity-20x20-20260918/cache/qwen38-mtp2 --max-context 32768 --max-lanes 20 --max-inflight 40 --cache-bytes 8589934592 --qualification-mode --execution-policy ~/Desktop/mlx2/qualification/policies/qwen38-27b-mtp2.json",
+      "server_alive": true,
+      "finished": "14:39:12"
+    },
+    "flash-next-mtp2": {
+      "state": "passed",
+      "steps": {
+        "sanity": {
+          "returncode": 0,
+          "seconds": 283,
+          "failed_lines": [],
+          "last": "  explain              20/20 "
+        }
+      },
+      "started": "14:39:12",
+      "command": "mlx2.server --model ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP --host 127.0.0.1 --port 8297 --cache-dir ~/Desktop/mlx2/qualification/runs/sanity-20x20-20260918/cache/flash-next-mtp2 --max-context 32768 --max-lanes 20 --max-inflight 40 --cache-bytes 17179869184 --qualification-mode --execution-policy ~/Desktop/mlx2/qualification/policies/flash-next-mtp2.json",
+      "server_alive": true,
+      "finished": "14:44:08"
+    },
+    "flash-next-ordinary": {
+      "state": "passed",
+      "steps": {
+        "sanity": {
+          "returncode": 0,
+          "seconds": 286,
+          "failed_lines": [],
+          "last": "  explain              20/20 "
+        }
+      },
+      "started": "14:44:08",
+      "command": "mlx2.server --model ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP --host 127.0.0.1 --port 8297 --cache-dir ~/Desktop/mlx2/qualification/runs/sanity-20x20-20260918/cache/flash-next-ordinary --max-context 32768 --max-lanes 20 --max-inflight 40 --cache-bytes 17179869184 --qualification-mode --ordinary --execution-policy ~/Desktop/mlx2/qualification/policies/flash-next-mtp2.json",
+      "server_alive": true,
+      "finished": "14:49:06"
+    },
+    "north-qualifier": {
+      "state": "failed",
+      "steps": {
+        "qualifier": {
+          "returncode": 1,
+          "seconds": 0,
+          "failed_lines": [],
+          "last": "AssertionError: preflight receipt does not match current git/runtime source/harness identity"
+        }
+      },
+      "started": "14:49:06",
+      "command": "mlx2.server --model ~/mlx-models/North-Mini-Code-1.0-mlx-4bit --host 127.0.0.1 --port 8297 --cache-dir ~/Desktop/mlx2/qualification/runs/sanity-20x20-20260918/cache/north-qualifier --max-context 32768 --max-lanes 4 --max-inflight 40 --cache-bytes 2147483648 --qualification-mode --ordinary",
+      "server_alive": true,
+      "finished": "14:49:16"
+    }
+  },
+  "order": [
+    "qwen36-ordinary",
+    "qwen36-mtp2",
+    "qwen36-pld",
+    "north-ordinary",
+    "north-pld",
+    "muse-ordinary",
+    "muse-dflash2",
+    "muse-pld",
+    "qwen38-ordinary",
+    "qwen38-mtp2",
+    "flash-next-mtp2",
+    "flash-next-ordinary",
+    "north-qualifier"
+  ],
+  "history": [
+    {
+      "north-qualifier": {
+        "state": "failed",
+        "steps": {
+          "qualifier": {
+            "returncode": 1,
+            "seconds": 0,
+            "failed_lines": [],
+            "last": "AssertionError: preflight receipt does not match current git/runtime source/harness identity"
+          }
+        },
+        "started": "14:10:55",
+        "command": "mlx2.server --model ~/mlx-models/North-Mini-Code-1.0-mlx-4bit --host 127.0.0.1 --port 8297 --cache-dir ~/Desktop/mlx2/qualification/runs/sanity-20x20-20260918/cache/north-qualifier --max-context 32768 --max-lanes 4 --max-inflight 40 --cache-bytes 2147483648 --qualification-mode --ordinary",
+        "server_alive": true,
+        "finished": "14:11:01"
+      },
+      "north-ordinary": {
+        "state": "failed",
+        "steps": {
+          "sanity": {
+            "returncode": 1,
+            "seconds": 104,
+            "failed_lines": [],
+            "last": "  explain              20/20 "
+          }
+        },
+        "started": "13:28:01",
+        "command": "mlx2.server --model ~/mlx-models/North-Mini-Code-1.0-mlx-4bit --host 127.0.0.1 --port 8297 --cache-dir ~/Desktop/mlx2/qualification/runs/sanity-20x20-20260918/cache/north-ordinary --max-context 32768 --max-lanes 20 --max-inflight 40 --cache-bytes 8589934592 --qualification-mode --ordinary",
+        "server_alive": true,
+        "finished": "13:29:51"
+      },
+      "north-pld": {
+        "state": "failed",
+        "steps": {
+          "sanity": {
+            "returncode": 1,
+            "seconds": 204,
+            "failed_lines": [],
+            "last": "  explain              20/20 "
+          }
+        },
+        "started": "13:29:51",
+        "command": "mlx2.server --model ~/mlx-models/North-Mini-Code-1.0-mlx-4bit --host 127.0.0.1 --port 8297 --cache-dir ~/Desktop/mlx2/qualification/runs/sanity-20x20-20260918/cache/north-pld --max-context 32768 --max-lanes 20 --max-inflight 40 --cache-bytes 8589934592 --qualification-mode --prompt-lookup --execution-policy ~/Desktop/mlx2/qualification/runs/integration-gpu-20260918/policies/pld.json",
+        "server_alive": true,
+        "finished": "13:33:23"
+      },
+      "muse-ordinary": {
+        "state": "failed",
+        "steps": {
+          "sanity": {
+            "returncode": 1,
+            "seconds": 240,
+            "failed_lines": [],
+            "last": "  explain              20/20 "
+          }
+        },
+        "started": "13:33:23",
+        "command": "mlx2.server --model ~/mlx-models/Muse-Glimmer-30B-mlx-4bit --host 127.0.0.1 --port 8297 --cache-dir ~/Desktop/mlx2/qualification/runs/sanity-20x20-20260918/cache/muse-ordinary --max-context 32768 --max-lanes 20 --max-inflight 40 --cache-bytes 8589934592 --qualification-mode --ordinary",
+        "server_alive": true,
+        "finished": "13:37:32"
+      },
+      "muse-dflash2": {
+        "state": "failed",
+        "steps": {
+          "sanity": {
+            "returncode": 1,
+            "seconds": 6,
+            "failed_lines": [],
+            "last": "urllib.error.URLError: <urlopen error [Errno 61] Connection refused>"
+          }
+        },
+        "started": "13:37:32",
+        "command": "mlx2.server --model ~/mlx-models/Muse-Glimmer-30B-mlx-4bit --host 127.0.0.1 --port 8297 --cache-dir ~/Desktop/mlx2/qualification/runs/sanity-20x20-20260918/cache/muse-dflash2 --max-context 32768 --max-lanes 20 --max-inflight 40 --cache-bytes 8589934592 --qualification-mode --external-draft --execution-policy ~/Desktop/mlx2/qualification/policies/muse-dflash2.json",
+        "server_alive": false,
+        "reason": "PermissionError(1, 'Operation not permitted')"
+      },
+      "qwen38-mtp2": {
+        "state": "failed",
+        "steps": {
+          "sanity": {
+            "returncode": 1,
+            "seconds": 412,
+            "failed_lines": [],
+            "last": "  explain              20/20 "
+          }
+        },
+        "started": "13:54:07",
+        "command": "mlx2.server --model ~/mlx-models/Qwen3.8-27B-oQ4e-mtp --host 127.0.0.1 --port 8297 --cache-dir ~/Desktop/mlx2/qualification/runs/sanity-20x20-20260918/cache/qwen38-mtp2 --max-context 32768 --max-lanes 20 --max-inflight 40 --cache-bytes 8589934592 --qualification-mode --execution-policy ~/Desktop/mlx2/qualification/policies/qwen38-27b-mtp2.json",
+        "server_alive": true,
+        "finished": "14:01:06"
+      },
+      "flash-next-mtp2": {
+        "state": "failed",
+        "steps": {
+          "sanity": {
+            "returncode": 1,
+            "seconds": 275,
+            "failed_lines": [],
+            "last": "  explain              20/20 "
+          }
+        },
+        "started": "14:01:06",
+        "command": "mlx2.server --model ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP --host 127.0.0.1 --port 8297 --cache-dir ~/Desktop/mlx2/qualification/runs/sanity-20x20-20260918/cache/flash-next-mtp2 --max-context 32768 --max-lanes 20 --max-inflight 40 --cache-bytes 17179869184 --qualification-mode --execution-policy ~/Desktop/mlx2/qualification/policies/flash-next-mtp2.json",
+        "server_alive": true,
+        "finished": "14:05:54"
+      },
+      "flash-next-ordinary": {
+        "state": "failed",
+        "steps": {
+          "sanity": {
+            "returncode": 1,
+            "seconds": 288,
+            "failed_lines": [],
+            "last": "  explain              20/20 "
+          }
+        },
+        "started": "14:05:54",
+        "command": "mlx2.server --model ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP --host 127.0.0.1 --port 8297 --cache-dir ~/Desktop/mlx2/qualification/runs/sanity-20x20-20260918/cache/flash-next-ordinary --max-context 32768 --max-lanes 20 --max-inflight 40 --cache-bytes 17179869184 --qualification-mode --ordinary --execution-policy ~/Desktop/mlx2/qualification/policies/flash-next-mtp2.json",
+        "server_alive": true,
+        "finished": "14:10:55"
+      }
+    }
+  ],
+  "updated": "2026-09-18 14:49:28",
+  "preflight": {
+    "returncode": 0,
+    "tail": "Preflight evidence: ~/Desktop/mlx2/qualification/runs/sanity-20x20-20260918/preflight.json\n"
+  },
+  "production_restored": true
+}

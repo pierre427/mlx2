@@ -1,0 +1,12 @@
+unit_tests: PASS
+hermes_client: PASS
+logprobs: PASS
+sampling_controls: PASS
+cold_text: PASS
+warm_prefix: PASS
+structured_output: PASS
+stream: PASS
+tools: PASS
+tool_roundtrip: PASS
+reasoning: FAIL
+Evidence: ~/Desktop/mlx2/qualification/runs/qwen36-35b-a3b/overnight-campaign/artifacts/mtp-artifact-ordinary-serving-qualification.json

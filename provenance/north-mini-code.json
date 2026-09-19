@@ -1,0 +1,55 @@
+{
+  "source_repository": "~/Desktop/mlx-uag/mlx-lm-unified",
+  "source_revision": "1e2bc604f71d070bee970c3e7db8b60f7855599b",
+  "license": "MIT",
+  "license_source": "LICENSE",
+  "notice": "provenance/north-mini-code.NOTICE",
+  "source_files": {
+    "mlx_lm/models/cohere2_moe.py": {
+      "sha256": "ca309d5f5e9adba7fafb17e8527f1ea050667ab81c5fd9a4ea52167e35c29db6"
+    }
+  },
+  "destination": "src/mlx2/runtime/models/cohere2_moe.py",
+  "mined_symbols": [
+    "ModelArgs", "MLP", "Cohere2MoeSparseBlock", "Attention",
+    "DecoderLayer", "Cohere2MoeModel", "Model"
+  ],
+  "modifications": [
+    "Removed the locally trained MTP head because the target artifact has no embedded MTP tensors and the historical route was measured negative",
+    "Removed optional QKV projection fusion because the source records it as measured negative on North q4",
+    "Added strict topology and safetensors header validation, explicit APCv2 cache-layout identity, and exact full/sliding cache construction",
+    "Added an ordinary-only architecture-derived fp32 cache admission bound, including bounded sliding-cache restore snapshots",
+    "Reused mlx2 model base, attention, SwitchGLU, KVCache, RotatingKVCache, batching, APCv2, scheduler, and receipt contracts",
+    "Kept North-specific tensor math behind a metadata-selected adapter and ordinary reference route"
+  ],
+  "original_files": [
+    "src/mlx2/adapters/north_mini_code.py",
+    "src/mlx2/adapters/north_memory.py",
+    "src/mlx2/adapters/north_output.py",
+    "tests/test_north_mini_code_port.py",
+    "docs/ports/NORTH-MINI-CODE.md"
+  ],
+  "artifact_evidence": {
+    "q4_path": "~/mlx-models/North-Mini-Code-1.0-mlx-4bit",
+    "q4_fingerprint": "6c88a4d3a5387abe2d97ac3d5eb70e484fb33615bb0c0f2ff8e7ef22b442f2e4",
+    "q8_path": "~/mlx-models/North-Mini-Code-1.0-mlx-8bit",
+    "q8_fingerprint": "1a533fdcdc118be2426fa90f725e82b031c94f95aae97f8e25c511b31580c3c5",
+    "inspection": "metadata, tokenizer files, strict safetensors headers, index and shard stat only; no weight payload loaded"
+  },
+  "validation": {
+    "stage": "CPU/static only; production weights and GPU not loaded",
+    "command": "PYTHONPATH=src .venv/bin/python -m pytest tests/test_north_mini_code_port.py tests/test_adapter_registry.py -q",
+    "result": "focused North CPU/static tests passed; source-parity tiny ordinary and split replay were bit-exact",
+    "coverage": [
+      "GPU-free adapter import and registry dispatch",
+      "strict artifact topology, shard locality, identity, and speculative-tensor rejection",
+      "capability refusal for absent native MTP",
+      "chunk-safe reasoning, text, tool action and stop parsing",
+      "tiny native MLX CPU ordinary full versus split replay",
+      "mixed unbounded and rotating cache construction and offsets",
+      "all 1226 q4 and q8 index entries reconciled to safetensors headers without payload reads",
+      "48 router overrides confirmed q8 while expert and attention projections remain q4",
+      "ordinary cache projection is monotone and charges about 27.6 GiB at 500K tokens before workspace"
+    ]
+  }
+}

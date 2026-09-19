@@ -1,0 +1,150 @@
+{
+  "arguments": {
+    "entries": 2,
+    "entry_gib": 4.0,
+    "max_total_gib": 8.0,
+    "rescan_only": false,
+    "scratch_root": "/private/tmp"
+  },
+  "completed_at_unix": 1789782540.60497,
+  "device": "cpu",
+  "guardrails": {
+    "cleanup_on_exit": true,
+    "minimum_free_memory_bytes": 25769803776,
+    "requested_resident_bytes_per_entry": 4294967296,
+    "requested_total_bytes": 8589934592
+  },
+  "machine": {
+    "hw_memsize_bytes": 137438953472,
+    "machine": "arm64",
+    "platform": "macOS-26.7-arm64-arm-64bit",
+    "python": "3.12.13",
+    "scratch_filesystem": {
+      "free_bytes": 767289028608,
+      "path": "/private/tmp",
+      "total_bytes": 3996276899840,
+      "used_bytes": 3228987871232
+    }
+  },
+  "peak_rss_bytes": 12627050496,
+  "prefetch": {
+    "accepted_state": "disk",
+    "prefetch_hits": 1,
+    "prefetch_restores_ok_delta": 1,
+    "prefetch_service_seconds": 1.7280743750161491,
+    "prefetched_lookup_seconds": 0.0007551669841632247,
+    "resume_enqueue_seconds": 0.00029570795595645905,
+    "resume_to_resident_seconds": 1.7283700829721056
+  },
+  "restore_with_sha256": {
+    "per_entry_seconds": [
+      1.74484775000019,
+      1.7225011660484597
+    ],
+    "restore_digest_failures": 0,
+    "restore_failures": 0,
+    "sha256_bytes": 8589939866,
+    "sha256_calls": 6,
+    "sha256_seconds": 3.1927275410853326,
+    "sha256_verification": true,
+    "throughput_gib_per_second": 2.3072382369630993,
+    "timing_seconds": {
+      "count": 2,
+      "max": 1.74484775000019,
+      "mean": 1.7336744580243248,
+      "min": 1.7225011660484597,
+      "p50": 1.74484775000019
+    }
+  },
+  "restore_without_sha256": {
+    "per_entry_seconds": [
+      0.12825645902194083,
+      0.14517570903990418
+    ],
+    "restore_digest_failures": 0,
+    "restore_failures": 0,
+    "sha256_bytes": 0,
+    "sha256_calls": 0,
+    "sha256_seconds": 0.0,
+    "sha256_verification": false,
+    "throughput_gib_per_second": 29.25771337259249,
+    "timing_seconds": {
+      "count": 2,
+      "max": 0.14517570903990418,
+      "mean": 0.1367160840309225,
+      "min": 0.12825645902194083,
+      "p50": 0.14517570903990418
+    }
+  },
+  "schema": "mlx2.apcv2-persistence-benchmark.v1",
+  "source": {
+    "git_head": "08e605986e1b66937263fce941df816861290acb",
+    "requested_base_revision": "271b21e",
+    "script_sha256": "09aea567c1e0f83365f5f2123c7a54e9ca0e0511520682d4e9f1c3718725a006"
+  },
+  "spill": {
+    "digest_computed_once_per_payload": true,
+    "digest_seconds": 3.2021439589443617,
+    "manifest_write_calls": 8,
+    "manifest_write_seconds": 0.005035042995586991,
+    "mlx_clear_cache_seconds": 6.083300104364753e-05,
+    "park_latency_seconds": {
+      "count": 2,
+      "max": 2.0608017910271883,
+      "mean": 2.0421628745098133,
+      "min": 2.0235239579924382,
+      "p50": 2.0608017910271883
+    },
+    "payload_digest_calls": 6,
+    "payload_files": 6,
+    "payload_write_and_fsync_seconds": 0.8730458760401234,
+    "per_entry_breakdown": [
+      {
+        "digest_seconds": 1.6047449999605305,
+        "manifest_write_seconds": 0.0016622080001980066,
+        "mlx_clear_cache_seconds": 4.5833003241568804e-05,
+        "other_seconds": 0.0015647500404156744,
+        "payload_write_and_fsync_seconds": 0.4527840000228025,
+        "total_seconds": 2.0608017910271883
+      },
+      {
+        "digest_seconds": 1.597398958983831,
+        "manifest_write_seconds": 0.00225312594557181,
+        "mlx_clear_cache_seconds": 1.4999997802078724e-05,
+        "other_seconds": 0.0035949970479123294,
+        "payload_write_and_fsync_seconds": 0.4202618760173209,
+        "total_seconds": 2.0235239579924382
+      }
+    ],
+    "per_entry_park_seconds": [
+      2.0608017910271883,
+      2.0235239579924382
+    ],
+    "throughput_gib_per_second": 1.9587088306351481,
+    "total_seconds_including_fsync_digest_manifest": 4.0843257490196265
+  },
+  "startup_rescan": {
+    "entries": 2,
+    "internal_seconds": 0.0010037500178441405,
+    "metadata_only_confirmed": true,
+    "payload_read_bytes": 0,
+    "payload_read_calls": 0,
+    "total_payload_bytes": 8589939866,
+    "wall_seconds": 0.0015541249886155128
+  },
+  "synthetic": {
+    "persisted_total_bytes": 8589939866,
+    "requested_entry_bytes": 4294967296,
+    "resident_entry_bytes": [
+      4294967296,
+      4294967296
+    ],
+    "topology": {
+      "mtp_draft_kv_planes": 2,
+      "mtp_tail_hidden": true,
+      "recurrent_arrays_per_plane": 2,
+      "target_kv_planes": 4,
+      "target_recurrent_planes": 4
+    }
+  }
+}

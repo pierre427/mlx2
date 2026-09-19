@@ -1,0 +1,662 @@
+[transformers] PyTorch was not found. Models won't be available and only tokenizers, configuration and file/data utilities can be used.
+2026-09-17 16:28:36,938 INFO ubc_evict: evicted 5025.7 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00001-of-00020.safetensors
+2026-09-17 16:28:36,939 INFO ubc_evict: evicted 5006.8 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00002-of-00020.safetensors
+2026-09-17 16:28:36,939 INFO ubc_evict: evicted 5006.8 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00003-of-00020.safetensors
+2026-09-17 16:28:36,939 INFO ubc_evict: evicted 5006.8 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00004-of-00020.safetensors
+2026-09-17 16:28:36,939 INFO ubc_evict: evicted 5006.8 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00005-of-00020.safetensors
+2026-09-17 16:28:36,939 INFO ubc_evict: evicted 5006.8 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00006-of-00020.safetensors
+2026-09-17 16:28:36,956 INFO ubc_evict: evicted 5022.3 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00007-of-00020.safetensors
+2026-09-17 16:28:36,991 INFO ubc_evict: evicted 5076.7 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00008-of-00020.safetensors
+2026-09-17 16:28:37,026 INFO ubc_evict: evicted 5115.4 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00009-of-00020.safetensors
+2026-09-17 16:28:37,061 INFO ubc_evict: evicted 5115.4 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00010-of-00020.safetensors
+2026-09-17 16:28:37,115 INFO ubc_evict: evicted 5073.2 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00011-of-00020.safetensors
+2026-09-17 16:28:37,157 INFO ubc_evict: evicted 5115.4 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00012-of-00020.safetensors
+2026-09-17 16:28:37,166 INFO ubc_evict: evicted 5115.4 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00013-of-00020.safetensors
+2026-09-17 16:28:37,171 INFO ubc_evict: evicted 5073.2 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00014-of-00020.safetensors
+2026-09-17 16:28:37,177 INFO ubc_evict: evicted 5115.4 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00015-of-00020.safetensors
+2026-09-17 16:28:37,183 INFO ubc_evict: evicted 5115.4 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00016-of-00020.safetensors
+2026-09-17 16:28:37,190 INFO ubc_evict: evicted 5073.2 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00017-of-00020.safetensors
+2026-09-17 16:28:37,195 INFO ubc_evict: evicted 5115.4 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00018-of-00020.safetensors
+2026-09-17 16:28:37,200 INFO ubc_evict: evicted 5115.4 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00019-of-00020.safetensors
+2026-09-17 16:28:37,200 INFO ubc_evict: evicted 1704.3 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00020-of-00020.safetensors
+2026-09-17 16:28:37,201 INFO ubc_evict: evicted 1399.3 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-mtp-q4.safetensors
+2026-09-17 16:28:37,201 INFO ubc_evict: pass complete total_mb=99405.2 elapsed_s=0.29
+[transformers] You are using a model of type `qwen4_exp` to instantiate a model of type ``. This may be expected if you are loading a checkpoint that shares a subset of the architecture (e.g., loading a `sam2_video` checkpoint into `Sam2Model`), but is otherwise not supported and can yield errors. Please verify that the checkpoint is compatible with the model you are instantiating.
+2026-09-17 16:28:41,329 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 16:28:42,623 INFO Async QSA promotion retained segmented state: a lane terminated in the first segmented cycle
+2026-09-17 16:28:42,630 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-17 16:28:42,857 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-17 16:28:43,020 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-17 16:28:43,055 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-17 16:28:43,494 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-17 16:28:43,738 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-17 16:28:43,912 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-17 16:28:44,014 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-17 16:28:50,271 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-17 16:28:50,310 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-17 16:28:51,091 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-17 16:28:51,547 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-17 16:28:52,286 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-17 16:28:52,368 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-17 16:28:53,320 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-17 16:28:54,178 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-17 16:28:59,003 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-17 16:28:59,003 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-17 16:28:59,003 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-17 16:28:59,039 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-17 16:28:59,967 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-17 16:29:00,882 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-17 16:29:00,936 WARNING Async QSA promotion declined at queue: suffix-only promotion requires equal starting QSA offsets
+2026-09-17 16:29:02,152 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-17 16:29:02,152 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-17 16:33:31,499 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-17 16:33:34,311 INFO Async QSA promotion retained segmented state: memory_pressure_retains_segmented_owner
+2026-09-17 16:33:37,216 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-17 16:35:19,684 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-17 16:35:23,747 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-17 16:35:27,071 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+[transformers] Token indices sequence length is longer than the specified maximum sequence length for this model (262156 > 262144). Running this sequence through the model will result in indexing errors
+2026-09-17 16:35:27,329 INFO "POST /v1/chat/completions HTTP/1.1" 400 -
+2026-09-17 16:35:27,330 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 16:35:28,103 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-17 16:35:28,105 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 16:35:28,312 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 16:35:28,519 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-17 16:35:28,520 INFO "GET /health HTTP/1.1" 200 -
+2026-09-17 16:35:28,521 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 16:37:53,357 INFO "GET /v1/status HTTP/1.1" 200 -
+[transformers] PyTorch was not found. Models won't be available and only tokenizers, configuration and file/data utilities can be used.
+2026-09-17 16:44:56,382 INFO ubc_evict: evicted 5025.7 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00001-of-00020.safetensors
+2026-09-17 16:44:56,382 INFO ubc_evict: evicted 5006.8 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00002-of-00020.safetensors
+2026-09-17 16:44:56,382 INFO ubc_evict: evicted 5006.8 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00003-of-00020.safetensors
+2026-09-17 16:44:56,382 INFO ubc_evict: evicted 5006.8 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00004-of-00020.safetensors
+2026-09-17 16:44:56,383 INFO ubc_evict: evicted 5006.8 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00005-of-00020.safetensors
+2026-09-17 16:44:56,383 INFO ubc_evict: evicted 5006.8 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00006-of-00020.safetensors
+2026-09-17 16:44:56,398 INFO ubc_evict: evicted 5022.3 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00007-of-00020.safetensors
+2026-09-17 16:44:56,429 INFO ubc_evict: evicted 5076.7 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00008-of-00020.safetensors
+2026-09-17 16:44:56,462 INFO ubc_evict: evicted 5115.4 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00009-of-00020.safetensors
+2026-09-17 16:44:56,513 INFO ubc_evict: evicted 5115.4 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00010-of-00020.safetensors
+2026-09-17 16:44:56,551 INFO ubc_evict: evicted 5073.2 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00011-of-00020.safetensors
+2026-09-17 16:44:56,582 INFO ubc_evict: evicted 5115.4 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00012-of-00020.safetensors
+2026-09-17 16:44:56,600 INFO ubc_evict: evicted 5115.4 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00013-of-00020.safetensors
+2026-09-17 16:44:56,607 INFO ubc_evict: evicted 5073.2 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00014-of-00020.safetensors
+2026-09-17 16:44:56,614 INFO ubc_evict: evicted 5115.4 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00015-of-00020.safetensors
+2026-09-17 16:44:56,620 INFO ubc_evict: evicted 5115.4 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00016-of-00020.safetensors
+2026-09-17 16:44:56,626 INFO ubc_evict: evicted 5073.2 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00017-of-00020.safetensors
+2026-09-17 16:44:56,631 INFO ubc_evict: evicted 5115.4 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00018-of-00020.safetensors
+2026-09-17 16:44:56,637 INFO ubc_evict: evicted 5115.4 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00019-of-00020.safetensors
+2026-09-17 16:44:56,637 INFO ubc_evict: evicted 1704.3 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00020-of-00020.safetensors
+2026-09-17 16:44:56,637 INFO ubc_evict: evicted 1399.3 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-mtp-q4.safetensors
+2026-09-17 16:44:56,638 INFO ubc_evict: pass complete total_mb=99405.2 elapsed_s=0.28
+[transformers] You are using a model of type `qwen4_exp` to instantiate a model of type ``. This may be expected if you are loading a checkpoint that shares a subset of the architecture (e.g., loading a `sam2_video` checkpoint into `Sam2Model`), but is otherwise not supported and can yield errors. Please verify that the checkpoint is compatible with the model you are instantiating.
+2026-09-17 16:45:01,656 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 16:45:02,868 INFO Async QSA promotion retained segmented state: a lane terminated in the first segmented cycle
+2026-09-17 16:45:02,875 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-17 16:45:03,106 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-17 16:45:03,267 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-17 16:45:03,301 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-17 16:45:03,733 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-17 16:45:03,968 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-17 16:45:04,146 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-17 16:45:04,247 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-17 16:45:10,435 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-17 16:45:10,475 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-17 16:45:11,217 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-17 16:45:11,681 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-17 16:45:12,414 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-17 16:45:12,488 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-17 16:45:13,480 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-17 16:45:14,345 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-17 16:45:18,798 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-17 16:45:18,803 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-17 16:45:18,803 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-17 16:45:19,200 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-17 16:45:20,176 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-17 16:45:21,105 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-17 16:45:21,159 WARNING Async QSA promotion declined at queue: suffix-only promotion requires equal starting QSA offsets
+2026-09-17 16:45:22,375 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-17 16:45:22,375 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-17 16:50:44,343 INFO Async QSA promotion retained segmented state: memory_pressure_retains_segmented_owner
+2026-09-17 16:50:48,380 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-17 16:50:51,166 INFO Async QSA promotion retained segmented state: memory_pressure_retains_segmented_owner
+2026-09-17 16:50:54,027 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-17 16:52:29,322 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-17 16:52:30,319 INFO Async QSA promotion retained segmented state: shared_suffix_retains_segmented_owner
+2026-09-17 16:52:32,867 INFO "POST /v1/chat/completions HTTP/1.1" 429 -
+2026-09-17 16:52:32,867 INFO "POST /v1/chat/completions HTTP/1.1" 429 -
+2026-09-17 16:52:32,889 INFO "GET /v1/status HTTP/1.1" 200 -
+[transformers] PyTorch was not found. Models won't be available and only tokenizers, configuration and file/data utilities can be used.
+2026-09-17 16:54:59,731 INFO ubc_evict: evicted 5025.7 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00001-of-00020.safetensors
+2026-09-17 16:54:59,732 INFO ubc_evict: evicted 5006.8 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00002-of-00020.safetensors
+2026-09-17 16:54:59,732 INFO ubc_evict: evicted 5006.8 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00003-of-00020.safetensors
+2026-09-17 16:54:59,732 INFO ubc_evict: evicted 5006.8 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00004-of-00020.safetensors
+2026-09-17 16:54:59,732 INFO ubc_evict: evicted 5006.8 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00005-of-00020.safetensors
+2026-09-17 16:54:59,732 INFO ubc_evict: evicted 5006.8 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00006-of-00020.safetensors
+2026-09-17 16:54:59,745 INFO ubc_evict: evicted 5022.3 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00007-of-00020.safetensors
+2026-09-17 16:54:59,775 INFO ubc_evict: evicted 5076.7 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00008-of-00020.safetensors
+2026-09-17 16:54:59,807 INFO ubc_evict: evicted 5115.4 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00009-of-00020.safetensors
+2026-09-17 16:54:59,849 INFO ubc_evict: evicted 5115.4 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00010-of-00020.safetensors
+2026-09-17 16:54:59,878 INFO ubc_evict: evicted 5073.2 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00011-of-00020.safetensors
+2026-09-17 16:54:59,905 INFO ubc_evict: evicted 5115.4 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00012-of-00020.safetensors
+2026-09-17 16:54:59,938 INFO ubc_evict: evicted 5115.4 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00013-of-00020.safetensors
+2026-09-17 16:54:59,944 INFO ubc_evict: evicted 5073.2 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00014-of-00020.safetensors
+2026-09-17 16:54:59,949 INFO ubc_evict: evicted 5115.4 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00015-of-00020.safetensors
+2026-09-17 16:54:59,954 INFO ubc_evict: evicted 5115.4 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00016-of-00020.safetensors
+2026-09-17 16:54:59,960 INFO ubc_evict: evicted 5073.2 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00017-of-00020.safetensors
+2026-09-17 16:54:59,965 INFO ubc_evict: evicted 5115.4 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00018-of-00020.safetensors
+2026-09-17 16:54:59,968 INFO ubc_evict: evicted 5115.4 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00019-of-00020.safetensors
+2026-09-17 16:54:59,968 INFO ubc_evict: evicted 1704.3 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00020-of-00020.safetensors
+2026-09-17 16:54:59,968 INFO ubc_evict: evicted 1399.3 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-mtp-q4.safetensors
+2026-09-17 16:54:59,968 INFO ubc_evict: pass complete total_mb=99405.2 elapsed_s=0.26
+[transformers] You are using a model of type `qwen4_exp` to instantiate a model of type ``. This may be expected if you are loading a checkpoint that shares a subset of the architecture (e.g., loading a `sam2_video` checkpoint into `Sam2Model`), but is otherwise not supported and can yield errors. Please verify that the checkpoint is compatible with the model you are instantiating.
+2026-09-17 16:55:04,422 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 16:55:05,443 INFO Async QSA promotion retained segmented state: a lane terminated in the first segmented cycle
+2026-09-17 16:55:05,449 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-17 16:55:05,673 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-17 16:55:05,834 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-17 16:55:05,869 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-17 16:55:06,299 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-17 16:55:06,534 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-17 16:55:06,710 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-17 16:55:06,812 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-17 16:55:13,762 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-17 16:55:13,800 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-17 16:55:14,542 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-17 16:55:14,997 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-17 16:55:15,734 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-17 16:55:15,806 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-17 16:55:16,768 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-17 16:55:17,620 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-17 16:55:21,846 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-17 16:55:21,846 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-17 16:55:22,437 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-17 16:55:22,439 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-17 16:55:23,380 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-17 16:55:24,279 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-17 16:55:24,332 WARNING Async QSA promotion declined at queue: suffix-only promotion requires equal starting QSA offsets
+2026-09-17 16:55:25,558 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-17 16:55:25,558 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-17 16:57:01,412 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-17 16:57:02,267 INFO Async QSA promotion retained segmented state: shared_suffix_retains_segmented_owner
+2026-09-17 16:57:06,064 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-17 16:57:06,093 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-17 17:03:15,036 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-17 17:03:16,610 INFO Async QSA promotion retained segmented state: memory_pressure_retains_segmented_owner
+2026-09-17 17:03:20,465 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+[transformers] Token indices sequence length is longer than the specified maximum sequence length for this model (262156 > 262144). Running this sequence through the model will result in indexing errors
+2026-09-17 17:03:20,714 INFO "POST /v1/chat/completions HTTP/1.1" 400 -
+2026-09-17 17:03:20,716 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 17:03:22,016 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-17 17:03:22,019 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 17:03:22,231 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 17:03:22,450 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-17 17:03:22,451 INFO "GET /health HTTP/1.1" 200 -
+2026-09-17 17:03:22,452 INFO "GET /v1/status HTTP/1.1" 200 -
+[transformers] PyTorch was not found. Models won't be available and only tokenizers, configuration and file/data utilities can be used.
+2026-09-17 17:10:23,218 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 17:10:24,223 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 17:10:25,230 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 17:10:26,231 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 17:10:27,243 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 17:10:28,244 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 17:10:29,211 INFO ubc_evict: evicted 5025.7 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00001-of-00020.safetensors
+2026-09-17 17:10:29,211 INFO ubc_evict: evicted 5006.8 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00002-of-00020.safetensors
+2026-09-17 17:10:29,211 INFO ubc_evict: evicted 5006.8 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00003-of-00020.safetensors
+2026-09-17 17:10:29,212 INFO ubc_evict: evicted 5006.8 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00004-of-00020.safetensors
+2026-09-17 17:10:29,212 INFO ubc_evict: evicted 5006.8 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00005-of-00020.safetensors
+2026-09-17 17:10:29,212 INFO ubc_evict: evicted 5006.8 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00006-of-00020.safetensors
+2026-09-17 17:10:29,226 INFO ubc_evict: evicted 5022.3 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00007-of-00020.safetensors
+2026-09-17 17:10:29,259 INFO ubc_evict: evicted 5076.7 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00008-of-00020.safetensors
+2026-09-17 17:10:29,261 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 17:10:29,295 INFO ubc_evict: evicted 5115.4 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00009-of-00020.safetensors
+2026-09-17 17:10:29,327 INFO ubc_evict: evicted 5115.4 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00010-of-00020.safetensors
+2026-09-17 17:10:29,360 INFO ubc_evict: evicted 5073.2 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00011-of-00020.safetensors
+2026-09-17 17:10:29,394 INFO ubc_evict: evicted 5115.4 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00012-of-00020.safetensors
+2026-09-17 17:10:29,424 INFO ubc_evict: evicted 5115.4 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00013-of-00020.safetensors
+2026-09-17 17:10:29,432 INFO ubc_evict: evicted 5073.2 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00014-of-00020.safetensors
+2026-09-17 17:10:29,438 INFO ubc_evict: evicted 5115.4 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00015-of-00020.safetensors
+2026-09-17 17:10:29,441 INFO ubc_evict: evicted 5115.4 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00016-of-00020.safetensors
+2026-09-17 17:10:29,447 INFO ubc_evict: evicted 5073.2 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00017-of-00020.safetensors
+2026-09-17 17:10:29,451 INFO ubc_evict: evicted 5115.4 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00018-of-00020.safetensors
+2026-09-17 17:10:29,454 INFO ubc_evict: evicted 5115.4 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00019-of-00020.safetensors
+2026-09-17 17:10:29,454 INFO ubc_evict: evicted 1704.3 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00020-of-00020.safetensors
+2026-09-17 17:10:29,455 INFO ubc_evict: evicted 1399.3 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-mtp-q4.safetensors
+2026-09-17 17:10:29,455 INFO ubc_evict: pass complete total_mb=99405.2 elapsed_s=0.27
+[transformers] You are using a model of type `qwen4_exp` to instantiate a model of type ``. This may be expected if you are loading a checkpoint that shares a subset of the architecture (e.g., loading a `sam2_video` checkpoint into `Sam2Model`), but is otherwise not supported and can yield errors. Please verify that the checkpoint is compatible with the model you are instantiating.
+2026-09-17 17:10:31,160 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 17:10:31,165 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 17:10:33,615 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-17 17:12:05,281 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-17 17:12:05,310 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 17:12:05,371 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 17:12:05,431 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 17:12:05,492 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 17:12:05,554 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 17:12:05,615 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 17:12:05,671 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 17:12:05,729 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 17:12:05,790 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 17:12:05,852 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 17:12:05,913 INFO "GET /v1/status HTTP/1.1" 200 -
+[transformers] PyTorch was not found. Models won't be available and only tokenizers, configuration and file/data utilities can be used.
+2026-09-17 17:13:57,975 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 17:13:58,981 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 17:13:59,992 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 17:14:01,003 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 17:14:02,006 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 17:14:03,008 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 17:14:03,323 INFO ubc_evict: evicted 5025.7 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00001-of-00020.safetensors
+2026-09-17 17:14:03,323 INFO ubc_evict: evicted 5006.8 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00002-of-00020.safetensors
+2026-09-17 17:14:03,324 INFO ubc_evict: evicted 5006.8 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00003-of-00020.safetensors
+2026-09-17 17:14:03,324 INFO ubc_evict: evicted 5006.8 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00004-of-00020.safetensors
+2026-09-17 17:14:03,324 INFO ubc_evict: evicted 5006.8 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00005-of-00020.safetensors
+2026-09-17 17:14:03,324 INFO ubc_evict: evicted 5006.8 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00006-of-00020.safetensors
+2026-09-17 17:14:03,336 INFO ubc_evict: evicted 5022.3 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00007-of-00020.safetensors
+2026-09-17 17:14:03,373 INFO ubc_evict: evicted 5076.7 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00008-of-00020.safetensors
+2026-09-17 17:14:03,404 INFO ubc_evict: evicted 5115.4 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00009-of-00020.safetensors
+2026-09-17 17:14:03,437 INFO ubc_evict: evicted 5115.4 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00010-of-00020.safetensors
+2026-09-17 17:14:03,470 INFO ubc_evict: evicted 5073.2 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00011-of-00020.safetensors
+2026-09-17 17:14:03,501 INFO ubc_evict: evicted 5115.4 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00012-of-00020.safetensors
+2026-09-17 17:14:03,527 INFO ubc_evict: evicted 5115.4 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00013-of-00020.safetensors
+2026-09-17 17:14:03,533 INFO ubc_evict: evicted 5073.2 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00014-of-00020.safetensors
+2026-09-17 17:14:03,538 INFO ubc_evict: evicted 5115.4 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00015-of-00020.safetensors
+2026-09-17 17:14:03,542 INFO ubc_evict: evicted 5115.4 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00016-of-00020.safetensors
+2026-09-17 17:14:03,549 INFO ubc_evict: evicted 5073.2 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00017-of-00020.safetensors
+2026-09-17 17:14:03,554 INFO ubc_evict: evicted 5115.4 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00018-of-00020.safetensors
+2026-09-17 17:14:03,558 INFO ubc_evict: evicted 5115.4 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00019-of-00020.safetensors
+2026-09-17 17:14:03,559 INFO ubc_evict: evicted 1704.3 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00020-of-00020.safetensors
+2026-09-17 17:14:03,559 INFO ubc_evict: evicted 1399.3 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-mtp-q4.safetensors
+2026-09-17 17:14:03,559 INFO ubc_evict: pass complete total_mb=99405.2 elapsed_s=0.26
+[transformers] You are using a model of type `qwen4_exp` to instantiate a model of type ``. This may be expected if you are loading a checkpoint that shares a subset of the architecture (e.g., loading a `sam2_video` checkpoint into `Sam2Model`), but is otherwise not supported and can yield errors. Please verify that the checkpoint is compatible with the model you are instantiating.
+2026-09-17 17:14:04,020 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 17:14:05,217 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 17:14:05,222 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 17:14:07,607 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-17 17:14:39,062 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-17 17:14:39,091 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 17:14:39,152 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 17:14:39,208 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 17:14:39,269 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 17:14:39,332 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 17:14:39,388 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 17:14:39,441 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 17:14:39,503 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 17:14:39,559 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 17:14:39,620 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 17:14:39,678 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 17:14:39,739 INFO "GET /v1/status HTTP/1.1" 200 -
+[transformers] PyTorch was not found. Models won't be available and only tokenizers, configuration and file/data utilities can be used.
+2026-09-17 17:15:24,655 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 17:15:25,660 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 17:15:26,672 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 17:15:27,683 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 17:15:28,690 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 17:15:29,692 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 17:15:30,455 INFO ubc_evict: evicted 5025.7 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00001-of-00020.safetensors
+2026-09-17 17:15:30,456 INFO ubc_evict: evicted 5006.8 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00002-of-00020.safetensors
+2026-09-17 17:15:30,456 INFO ubc_evict: evicted 5006.8 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00003-of-00020.safetensors
+2026-09-17 17:15:30,456 INFO ubc_evict: evicted 5006.8 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00004-of-00020.safetensors
+2026-09-17 17:15:30,456 INFO ubc_evict: evicted 5006.8 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00005-of-00020.safetensors
+2026-09-17 17:15:30,456 INFO ubc_evict: evicted 5006.8 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00006-of-00020.safetensors
+2026-09-17 17:15:30,468 INFO ubc_evict: evicted 5022.3 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00007-of-00020.safetensors
+2026-09-17 17:15:30,499 INFO ubc_evict: evicted 5076.7 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00008-of-00020.safetensors
+2026-09-17 17:15:30,534 INFO ubc_evict: evicted 5115.4 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00009-of-00020.safetensors
+2026-09-17 17:15:30,564 INFO ubc_evict: evicted 5115.4 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00010-of-00020.safetensors
+2026-09-17 17:15:30,598 INFO ubc_evict: evicted 5073.2 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00011-of-00020.safetensors
+2026-09-17 17:15:30,628 INFO ubc_evict: evicted 5115.4 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00012-of-00020.safetensors
+2026-09-17 17:15:30,659 INFO ubc_evict: evicted 5115.4 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00013-of-00020.safetensors
+2026-09-17 17:15:30,672 INFO ubc_evict: evicted 5073.2 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00014-of-00020.safetensors
+2026-09-17 17:15:30,675 INFO ubc_evict: evicted 5115.4 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00015-of-00020.safetensors
+2026-09-17 17:15:30,679 INFO ubc_evict: evicted 5115.4 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00016-of-00020.safetensors
+2026-09-17 17:15:30,684 INFO ubc_evict: evicted 5073.2 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00017-of-00020.safetensors
+2026-09-17 17:15:30,688 INFO ubc_evict: evicted 5115.4 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00018-of-00020.safetensors
+2026-09-17 17:15:30,691 INFO ubc_evict: evicted 5115.4 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00019-of-00020.safetensors
+2026-09-17 17:15:30,691 INFO ubc_evict: evicted 1704.3 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00020-of-00020.safetensors
+2026-09-17 17:15:30,692 INFO ubc_evict: evicted 1399.3 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-mtp-q4.safetensors
+2026-09-17 17:15:30,692 INFO ubc_evict: pass complete total_mb=99405.2 elapsed_s=0.26
+[transformers] You are using a model of type `qwen4_exp` to instantiate a model of type ``. This may be expected if you are loading a checkpoint that shares a subset of the architecture (e.g., loading a `sam2_video` checkpoint into `Sam2Model`), but is otherwise not supported and can yield errors. Please verify that the checkpoint is compatible with the model you are instantiating.
+2026-09-17 17:15:30,704 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 17:15:32,196 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 17:15:32,202 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 17:15:38,243 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-17 17:16:09,993 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-17 17:16:10,023 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 17:16:10,084 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 17:16:10,138 INFO "GET /v1/status HTTP/1.1" 200 -
+[transformers] PyTorch was not found. Models won't be available and only tokenizers, configuration and file/data utilities can be used.
+2026-09-17 17:16:58,372 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 17:16:59,384 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 17:17:00,395 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 17:17:01,406 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 17:17:02,417 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 17:17:03,421 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 17:17:04,058 INFO ubc_evict: evicted 5025.7 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00001-of-00020.safetensors
+2026-09-17 17:17:04,058 INFO ubc_evict: evicted 5006.8 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00002-of-00020.safetensors
+2026-09-17 17:17:04,058 INFO ubc_evict: evicted 5006.8 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00003-of-00020.safetensors
+2026-09-17 17:17:04,058 INFO ubc_evict: evicted 5006.8 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00004-of-00020.safetensors
+2026-09-17 17:17:04,058 INFO ubc_evict: evicted 5006.8 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00005-of-00020.safetensors
+2026-09-17 17:17:04,059 INFO ubc_evict: evicted 5006.8 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00006-of-00020.safetensors
+2026-09-17 17:17:04,071 INFO ubc_evict: evicted 5022.3 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00007-of-00020.safetensors
+2026-09-17 17:17:04,103 INFO ubc_evict: evicted 5076.7 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00008-of-00020.safetensors
+2026-09-17 17:17:04,134 INFO ubc_evict: evicted 5115.4 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00009-of-00020.safetensors
+2026-09-17 17:17:04,169 INFO ubc_evict: evicted 5115.4 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00010-of-00020.safetensors
+2026-09-17 17:17:04,198 INFO ubc_evict: evicted 5073.2 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00011-of-00020.safetensors
+2026-09-17 17:17:04,233 INFO ubc_evict: evicted 5115.4 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00012-of-00020.safetensors
+2026-09-17 17:17:04,263 INFO ubc_evict: evicted 5115.4 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00013-of-00020.safetensors
+2026-09-17 17:17:04,273 INFO ubc_evict: evicted 5073.2 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00014-of-00020.safetensors
+2026-09-17 17:17:04,278 INFO ubc_evict: evicted 5115.4 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00015-of-00020.safetensors
+2026-09-17 17:17:04,282 INFO ubc_evict: evicted 5115.4 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00016-of-00020.safetensors
+2026-09-17 17:17:04,288 INFO ubc_evict: evicted 5073.2 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00017-of-00020.safetensors
+2026-09-17 17:17:04,293 INFO ubc_evict: evicted 5115.4 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00018-of-00020.safetensors
+2026-09-17 17:17:04,297 INFO ubc_evict: evicted 5115.4 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00019-of-00020.safetensors
+2026-09-17 17:17:04,297 INFO ubc_evict: evicted 1704.3 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00020-of-00020.safetensors
+2026-09-17 17:17:04,297 INFO ubc_evict: evicted 1399.3 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-mtp-q4.safetensors
+2026-09-17 17:17:04,297 INFO ubc_evict: pass complete total_mb=99405.2 elapsed_s=0.27
+[transformers] You are using a model of type `qwen4_exp` to instantiate a model of type ``. This may be expected if you are loading a checkpoint that shares a subset of the architecture (e.g., loading a `sam2_video` checkpoint into `Sam2Model`), but is otherwise not supported and can yield errors. Please verify that the checkpoint is compatible with the model you are instantiating.
+2026-09-17 17:17:04,544 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 17:17:06,025 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 17:17:06,029 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 17:17:27,714 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-17 17:17:59,612 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-17 17:17:59,648 INFO "GET /v1/status HTTP/1.1" 200 -
+[transformers] PyTorch was not found. Models won't be available and only tokenizers, configuration and file/data utilities can be used.
+2026-09-17 17:19:22,548 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 17:19:23,554 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 17:19:24,555 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 17:19:25,561 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 17:19:26,566 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 17:19:27,568 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 17:19:28,382 INFO ubc_evict: evicted 5025.7 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00001-of-00020.safetensors
+2026-09-17 17:19:28,382 INFO ubc_evict: evicted 5006.8 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00002-of-00020.safetensors
+2026-09-17 17:19:28,382 INFO ubc_evict: evicted 5006.8 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00003-of-00020.safetensors
+2026-09-17 17:19:28,382 INFO ubc_evict: evicted 5006.8 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00004-of-00020.safetensors
+2026-09-17 17:19:28,383 INFO ubc_evict: evicted 5006.8 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00005-of-00020.safetensors
+2026-09-17 17:19:28,383 INFO ubc_evict: evicted 5006.8 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00006-of-00020.safetensors
+2026-09-17 17:19:28,395 INFO ubc_evict: evicted 5022.3 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00007-of-00020.safetensors
+2026-09-17 17:19:28,431 INFO ubc_evict: evicted 5076.7 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00008-of-00020.safetensors
+2026-09-17 17:19:28,462 INFO ubc_evict: evicted 5115.4 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00009-of-00020.safetensors
+2026-09-17 17:19:28,498 INFO ubc_evict: evicted 5115.4 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00010-of-00020.safetensors
+2026-09-17 17:19:28,527 INFO ubc_evict: evicted 5073.2 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00011-of-00020.safetensors
+2026-09-17 17:19:28,567 INFO ubc_evict: evicted 5115.4 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00012-of-00020.safetensors
+2026-09-17 17:19:28,572 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 17:19:28,599 INFO ubc_evict: evicted 5115.4 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00013-of-00020.safetensors
+2026-09-17 17:19:28,606 INFO ubc_evict: evicted 5073.2 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00014-of-00020.safetensors
+2026-09-17 17:19:28,610 INFO ubc_evict: evicted 5115.4 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00015-of-00020.safetensors
+2026-09-17 17:19:28,617 INFO ubc_evict: evicted 5115.4 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00016-of-00020.safetensors
+2026-09-17 17:19:28,621 INFO ubc_evict: evicted 5073.2 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00017-of-00020.safetensors
+2026-09-17 17:19:28,624 INFO ubc_evict: evicted 5115.4 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00018-of-00020.safetensors
+2026-09-17 17:19:28,627 INFO ubc_evict: evicted 5115.4 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00019-of-00020.safetensors
+2026-09-17 17:19:28,627 INFO ubc_evict: evicted 1704.3 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00020-of-00020.safetensors
+2026-09-17 17:19:28,628 INFO ubc_evict: evicted 1399.3 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-mtp-q4.safetensors
+2026-09-17 17:19:28,628 INFO ubc_evict: pass complete total_mb=99405.2 elapsed_s=0.27
+[transformers] You are using a model of type `qwen4_exp` to instantiate a model of type ``. This may be expected if you are loading a checkpoint that shares a subset of the architecture (e.g., loading a `sam2_video` checkpoint into `Sam2Model`), but is otherwise not supported and can yield errors. Please verify that the checkpoint is compatible with the model you are instantiating.
+2026-09-17 17:19:30,364 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 17:19:30,369 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 17:20:47,269 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-17 17:21:19,356 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-17 17:21:19,387 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 17:21:19,443 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 17:21:19,500 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 17:21:19,556 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 17:21:19,613 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 17:21:19,666 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 17:21:19,724 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 17:21:19,781 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 17:21:19,837 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 17:21:19,893 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 17:21:19,947 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 17:21:20,028 INFO "GET /v1/status HTTP/1.1" 200 -
+[transformers] PyTorch was not found. Models won't be available and only tokenizers, configuration and file/data utilities can be used.
+2026-09-17 17:23:19,148 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 17:23:20,151 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 17:23:21,157 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 17:23:22,163 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 17:23:23,167 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 17:23:24,169 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 17:23:24,906 INFO ubc_evict: evicted 5025.7 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00001-of-00020.safetensors
+2026-09-17 17:23:24,906 INFO ubc_evict: evicted 5006.8 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00002-of-00020.safetensors
+2026-09-17 17:23:24,906 INFO ubc_evict: evicted 5006.8 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00003-of-00020.safetensors
+2026-09-17 17:23:24,906 INFO ubc_evict: evicted 5006.8 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00004-of-00020.safetensors
+2026-09-17 17:23:24,906 INFO ubc_evict: evicted 5006.8 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00005-of-00020.safetensors
+2026-09-17 17:23:24,907 INFO ubc_evict: evicted 5006.8 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00006-of-00020.safetensors
+2026-09-17 17:23:24,919 INFO ubc_evict: evicted 5022.3 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00007-of-00020.safetensors
+2026-09-17 17:23:24,948 INFO ubc_evict: evicted 5076.7 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00008-of-00020.safetensors
+2026-09-17 17:23:24,981 INFO ubc_evict: evicted 5115.4 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00009-of-00020.safetensors
+2026-09-17 17:23:25,021 INFO ubc_evict: evicted 5115.4 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00010-of-00020.safetensors
+2026-09-17 17:23:25,050 INFO ubc_evict: evicted 5073.2 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00011-of-00020.safetensors
+2026-09-17 17:23:25,080 INFO ubc_evict: evicted 5115.4 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00012-of-00020.safetensors
+2026-09-17 17:23:25,113 INFO ubc_evict: evicted 5115.4 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00013-of-00020.safetensors
+2026-09-17 17:23:25,119 INFO ubc_evict: evicted 5073.2 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00014-of-00020.safetensors
+2026-09-17 17:23:25,123 INFO ubc_evict: evicted 5115.4 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00015-of-00020.safetensors
+2026-09-17 17:23:25,129 INFO ubc_evict: evicted 5115.4 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00016-of-00020.safetensors
+2026-09-17 17:23:25,133 INFO ubc_evict: evicted 5073.2 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00017-of-00020.safetensors
+2026-09-17 17:23:25,137 INFO ubc_evict: evicted 5115.4 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00018-of-00020.safetensors
+2026-09-17 17:23:25,141 INFO ubc_evict: evicted 5115.4 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00019-of-00020.safetensors
+2026-09-17 17:23:25,141 INFO ubc_evict: evicted 1704.3 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00020-of-00020.safetensors
+2026-09-17 17:23:25,142 INFO ubc_evict: evicted 1399.3 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-mtp-q4.safetensors
+2026-09-17 17:23:25,142 INFO ubc_evict: pass complete total_mb=99405.2 elapsed_s=0.26
+[transformers] You are using a model of type `qwen4_exp` to instantiate a model of type ``. This may be expected if you are loading a checkpoint that shares a subset of the architecture (e.g., loading a `sam2_video` checkpoint into `Sam2Model`), but is otherwise not supported and can yield errors. Please verify that the checkpoint is compatible with the model you are instantiating.
+2026-09-17 17:23:25,249 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 17:23:26,995 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 17:23:26,999 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 17:25:57,014 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-17 17:26:30,594 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-17 17:26:30,624 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 17:26:30,681 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 17:26:30,737 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 17:26:30,791 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 17:26:30,848 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 17:26:30,902 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 17:26:30,957 INFO "GET /v1/status HTTP/1.1" 200 -
+[transformers] PyTorch was not found. Models won't be available and only tokenizers, configuration and file/data utilities can be used.
+2026-09-17 17:29:43,015 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 17:29:44,020 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 17:29:45,026 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 17:29:46,033 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 17:29:47,039 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 17:29:48,042 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 17:29:49,001 INFO ubc_evict: evicted 5025.7 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00001-of-00020.safetensors
+2026-09-17 17:29:49,002 INFO ubc_evict: evicted 5006.8 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00002-of-00020.safetensors
+2026-09-17 17:29:49,002 INFO ubc_evict: evicted 5006.8 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00003-of-00020.safetensors
+2026-09-17 17:29:49,002 INFO ubc_evict: evicted 5006.8 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00004-of-00020.safetensors
+2026-09-17 17:29:49,002 INFO ubc_evict: evicted 5006.8 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00005-of-00020.safetensors
+2026-09-17 17:29:49,002 INFO ubc_evict: evicted 5006.8 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00006-of-00020.safetensors
+2026-09-17 17:29:49,016 INFO ubc_evict: evicted 5022.3 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00007-of-00020.safetensors
+2026-09-17 17:29:49,048 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 17:29:49,049 INFO ubc_evict: evicted 5076.7 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00008-of-00020.safetensors
+2026-09-17 17:29:49,078 INFO ubc_evict: evicted 5115.4 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00009-of-00020.safetensors
+2026-09-17 17:29:49,123 INFO ubc_evict: evicted 5115.4 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00010-of-00020.safetensors
+2026-09-17 17:29:49,153 INFO ubc_evict: evicted 5073.2 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00011-of-00020.safetensors
+2026-09-17 17:29:49,184 INFO ubc_evict: evicted 5115.4 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00012-of-00020.safetensors
+2026-09-17 17:29:49,214 INFO ubc_evict: evicted 5115.4 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00013-of-00020.safetensors
+2026-09-17 17:29:49,219 INFO ubc_evict: evicted 5073.2 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00014-of-00020.safetensors
+2026-09-17 17:29:49,223 INFO ubc_evict: evicted 5115.4 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00015-of-00020.safetensors
+2026-09-17 17:29:49,229 INFO ubc_evict: evicted 5115.4 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00016-of-00020.safetensors
+2026-09-17 17:29:49,232 INFO ubc_evict: evicted 5073.2 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00017-of-00020.safetensors
+2026-09-17 17:29:49,236 INFO ubc_evict: evicted 5115.4 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00018-of-00020.safetensors
+2026-09-17 17:29:49,239 INFO ubc_evict: evicted 5115.4 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00019-of-00020.safetensors
+2026-09-17 17:29:49,239 INFO ubc_evict: evicted 1704.3 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00020-of-00020.safetensors
+2026-09-17 17:29:49,240 INFO ubc_evict: evicted 1399.3 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-mtp-q4.safetensors
+2026-09-17 17:29:49,240 INFO ubc_evict: pass complete total_mb=99405.2 elapsed_s=0.26
+[transformers] You are using a model of type `qwen4_exp` to instantiate a model of type ``. This may be expected if you are loading a checkpoint that shares a subset of the architecture (e.g., loading a `sam2_video` checkpoint into `Sam2Model`), but is otherwise not supported and can yield errors. Please verify that the checkpoint is compatible with the model you are instantiating.
+2026-09-17 17:29:50,889 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 17:29:50,894 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 17:35:21,441 INFO Async QSA promotion retained segmented state: memory_pressure_retains_segmented_owner
+2026-09-17 17:35:25,154 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-17 17:35:58,448 INFO Async QSA promotion retained segmented state: memory_pressure_retains_segmented_owner
+2026-09-17 17:36:01,536 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-17 17:36:01,594 INFO "GET /v1/status HTTP/1.1" 200 -
+[transformers] PyTorch was not found. Models won't be available and only tokenizers, configuration and file/data utilities can be used.
+2026-09-17 17:44:52,899 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 17:44:53,906 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 17:44:54,908 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 17:44:55,914 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 17:44:56,916 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 17:44:57,918 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 17:44:58,281 INFO ubc_evict: evicted 5025.7 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00001-of-00020.safetensors
+2026-09-17 17:44:58,281 INFO ubc_evict: evicted 5006.8 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00002-of-00020.safetensors
+2026-09-17 17:44:58,281 INFO ubc_evict: evicted 5006.8 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00003-of-00020.safetensors
+2026-09-17 17:44:58,281 INFO ubc_evict: evicted 5006.8 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00004-of-00020.safetensors
+2026-09-17 17:44:58,282 INFO ubc_evict: evicted 5006.8 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00005-of-00020.safetensors
+2026-09-17 17:44:58,282 INFO ubc_evict: evicted 5006.8 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00006-of-00020.safetensors
+2026-09-17 17:44:58,295 INFO ubc_evict: evicted 5022.3 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00007-of-00020.safetensors
+2026-09-17 17:44:58,325 INFO ubc_evict: evicted 5076.7 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00008-of-00020.safetensors
+2026-09-17 17:44:58,361 INFO ubc_evict: evicted 5115.4 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00009-of-00020.safetensors
+2026-09-17 17:44:58,395 INFO ubc_evict: evicted 5115.4 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00010-of-00020.safetensors
+2026-09-17 17:44:58,426 INFO ubc_evict: evicted 5073.2 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00011-of-00020.safetensors
+2026-09-17 17:44:58,466 INFO ubc_evict: evicted 5115.4 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00012-of-00020.safetensors
+2026-09-17 17:44:58,493 INFO ubc_evict: evicted 5115.4 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00013-of-00020.safetensors
+2026-09-17 17:44:58,498 INFO ubc_evict: evicted 5073.2 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00014-of-00020.safetensors
+2026-09-17 17:44:58,502 INFO ubc_evict: evicted 5115.4 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00015-of-00020.safetensors
+2026-09-17 17:44:58,506 INFO ubc_evict: evicted 5115.4 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00016-of-00020.safetensors
+2026-09-17 17:44:58,510 INFO ubc_evict: evicted 5073.2 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00017-of-00020.safetensors
+2026-09-17 17:44:58,514 INFO ubc_evict: evicted 5115.4 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00018-of-00020.safetensors
+2026-09-17 17:44:58,518 INFO ubc_evict: evicted 5115.4 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00019-of-00020.safetensors
+2026-09-17 17:44:58,518 INFO ubc_evict: evicted 1704.3 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00020-of-00020.safetensors
+2026-09-17 17:44:58,518 INFO ubc_evict: evicted 1399.3 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-mtp-q4.safetensors
+2026-09-17 17:44:58,518 INFO ubc_evict: pass complete total_mb=99405.2 elapsed_s=0.26
+[transformers] You are using a model of type `qwen4_exp` to instantiate a model of type ``. This may be expected if you are loading a checkpoint that shares a subset of the architecture (e.g., loading a `sam2_video` checkpoint into `Sam2Model`), but is otherwise not supported and can yield errors. Please verify that the checkpoint is compatible with the model you are instantiating.
+2026-09-17 17:44:58,924 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 17:45:00,298 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 17:45:00,303 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 17:45:21,841 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-17 17:45:53,611 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-17 17:45:53,643 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 17:45:53,700 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 17:45:53,756 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 17:45:53,813 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 17:45:53,870 INFO "GET /v1/status HTTP/1.1" 200 -
+[transformers] PyTorch was not found. Models won't be available and only tokenizers, configuration and file/data utilities can be used.
+2026-09-17 17:46:58,416 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 17:46:59,422 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 17:47:00,425 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 17:47:01,431 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 17:47:02,437 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 17:47:03,441 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 17:47:04,202 INFO ubc_evict: evicted 5025.7 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00001-of-00020.safetensors
+2026-09-17 17:47:04,203 INFO ubc_evict: evicted 5006.8 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00002-of-00020.safetensors
+2026-09-17 17:47:04,203 INFO ubc_evict: evicted 5006.8 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00003-of-00020.safetensors
+2026-09-17 17:47:04,203 INFO ubc_evict: evicted 5006.8 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00004-of-00020.safetensors
+2026-09-17 17:47:04,203 INFO ubc_evict: evicted 5006.8 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00005-of-00020.safetensors
+2026-09-17 17:47:04,203 INFO ubc_evict: evicted 5006.8 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00006-of-00020.safetensors
+2026-09-17 17:47:04,219 INFO ubc_evict: evicted 5022.3 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00007-of-00020.safetensors
+2026-09-17 17:47:04,255 INFO ubc_evict: evicted 5076.7 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00008-of-00020.safetensors
+2026-09-17 17:47:04,287 INFO ubc_evict: evicted 5115.4 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00009-of-00020.safetensors
+2026-09-17 17:47:04,322 INFO ubc_evict: evicted 5115.4 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00010-of-00020.safetensors
+2026-09-17 17:47:04,353 INFO ubc_evict: evicted 5073.2 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00011-of-00020.safetensors
+2026-09-17 17:47:04,387 INFO ubc_evict: evicted 5115.4 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00012-of-00020.safetensors
+2026-09-17 17:47:04,418 INFO ubc_evict: evicted 5115.4 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00013-of-00020.safetensors
+2026-09-17 17:47:04,425 INFO ubc_evict: evicted 5073.2 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00014-of-00020.safetensors
+2026-09-17 17:47:04,429 INFO ubc_evict: evicted 5115.4 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00015-of-00020.safetensors
+2026-09-17 17:47:04,433 INFO ubc_evict: evicted 5115.4 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00016-of-00020.safetensors
+2026-09-17 17:47:04,438 INFO ubc_evict: evicted 5073.2 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00017-of-00020.safetensors
+2026-09-17 17:47:04,442 INFO ubc_evict: evicted 5115.4 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00018-of-00020.safetensors
+2026-09-17 17:47:04,446 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 17:47:04,446 INFO ubc_evict: evicted 5115.4 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00019-of-00020.safetensors
+2026-09-17 17:47:04,446 INFO ubc_evict: evicted 1704.3 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00020-of-00020.safetensors
+2026-09-17 17:47:04,446 INFO ubc_evict: evicted 1399.3 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-mtp-q4.safetensors
+2026-09-17 17:47:04,446 INFO ubc_evict: pass complete total_mb=99405.2 elapsed_s=0.27
+[transformers] You are using a model of type `qwen4_exp` to instantiate a model of type ``. This may be expected if you are loading a checkpoint that shares a subset of the architecture (e.g., loading a `sam2_video` checkpoint into `Sam2Model`), but is otherwise not supported and can yield errors. Please verify that the checkpoint is compatible with the model you are instantiating.
+2026-09-17 17:47:06,218 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 17:47:06,223 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 17:48:15,968 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-17 17:48:48,004 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-17 17:48:48,035 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 17:48:48,091 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 17:48:48,147 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 17:48:48,204 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 17:48:48,262 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 17:48:48,320 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 17:48:48,377 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 17:48:48,431 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 17:48:48,487 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 17:48:48,544 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 17:48:48,598 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 17:48:48,655 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 17:48:48,710 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 17:48:48,788 INFO "GET /v1/status HTTP/1.1" 200 -
+[transformers] PyTorch was not found. Models won't be available and only tokenizers, configuration and file/data utilities can be used.
+2026-09-17 17:50:35,658 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 17:50:36,668 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 17:50:37,672 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 17:50:38,678 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 17:50:39,684 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 17:50:40,686 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 17:50:41,379 INFO ubc_evict: evicted 5025.7 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00001-of-00020.safetensors
+2026-09-17 17:50:41,380 INFO ubc_evict: evicted 5006.8 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00002-of-00020.safetensors
+2026-09-17 17:50:41,380 INFO ubc_evict: evicted 5006.8 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00003-of-00020.safetensors
+2026-09-17 17:50:41,380 INFO ubc_evict: evicted 5006.8 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00004-of-00020.safetensors
+2026-09-17 17:50:41,380 INFO ubc_evict: evicted 5006.8 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00005-of-00020.safetensors
+2026-09-17 17:50:41,380 INFO ubc_evict: evicted 5006.8 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00006-of-00020.safetensors
+2026-09-17 17:50:41,391 INFO ubc_evict: evicted 5022.3 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00007-of-00020.safetensors
+2026-09-17 17:50:41,437 INFO ubc_evict: evicted 5076.7 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00008-of-00020.safetensors
+2026-09-17 17:50:41,475 INFO ubc_evict: evicted 5115.4 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00009-of-00020.safetensors
+2026-09-17 17:50:41,516 INFO ubc_evict: evicted 5115.4 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00010-of-00020.safetensors
+2026-09-17 17:50:41,546 INFO ubc_evict: evicted 5073.2 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00011-of-00020.safetensors
+2026-09-17 17:50:41,577 INFO ubc_evict: evicted 5115.4 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00012-of-00020.safetensors
+2026-09-17 17:50:41,606 INFO ubc_evict: evicted 5115.4 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00013-of-00020.safetensors
+2026-09-17 17:50:41,611 INFO ubc_evict: evicted 5073.2 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00014-of-00020.safetensors
+2026-09-17 17:50:41,616 INFO ubc_evict: evicted 5115.4 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00015-of-00020.safetensors
+2026-09-17 17:50:41,621 INFO ubc_evict: evicted 5115.4 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00016-of-00020.safetensors
+2026-09-17 17:50:41,625 INFO ubc_evict: evicted 5073.2 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00017-of-00020.safetensors
+2026-09-17 17:50:41,629 INFO ubc_evict: evicted 5115.4 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00018-of-00020.safetensors
+2026-09-17 17:50:41,631 INFO ubc_evict: evicted 5115.4 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00019-of-00020.safetensors
+2026-09-17 17:50:41,632 INFO ubc_evict: evicted 1704.3 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00020-of-00020.safetensors
+2026-09-17 17:50:41,632 INFO ubc_evict: evicted 1399.3 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-mtp-q4.safetensors
+2026-09-17 17:50:41,632 INFO ubc_evict: pass complete total_mb=99405.2 elapsed_s=0.28
+[transformers] You are using a model of type `qwen4_exp` to instantiate a model of type ``. This may be expected if you are loading a checkpoint that shares a subset of the architecture (e.g., loading a `sam2_video` checkpoint into `Sam2Model`), but is otherwise not supported and can yield errors. Please verify that the checkpoint is compatible with the model you are instantiating.
+2026-09-17 17:50:41,740 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 17:50:43,491 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 17:50:43,495 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 17:52:52,809 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-17 17:53:26,094 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-17 17:53:26,125 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 17:53:26,182 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 17:53:26,238 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 17:53:26,291 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 17:53:26,346 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 17:53:26,403 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 17:53:26,459 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 17:53:26,514 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 17:53:26,571 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 17:53:26,627 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 17:53:26,684 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 17:53:26,741 INFO "GET /v1/status HTTP/1.1" 200 -
+[transformers] PyTorch was not found. Models won't be available and only tokenizers, configuration and file/data utilities can be used.
+2026-09-17 17:56:18,148 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 17:56:19,154 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 17:56:20,161 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 17:56:21,165 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 17:56:22,171 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 17:56:23,176 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 17:56:23,999 INFO ubc_evict: evicted 5025.7 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00001-of-00020.safetensors
+2026-09-17 17:56:23,999 INFO ubc_evict: evicted 5006.8 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00002-of-00020.safetensors
+2026-09-17 17:56:23,999 INFO ubc_evict: evicted 5006.8 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00003-of-00020.safetensors
+2026-09-17 17:56:24,000 INFO ubc_evict: evicted 5006.8 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00004-of-00020.safetensors
+2026-09-17 17:56:24,000 INFO ubc_evict: evicted 5006.8 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00005-of-00020.safetensors
+2026-09-17 17:56:24,000 INFO ubc_evict: evicted 5006.8 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00006-of-00020.safetensors
+2026-09-17 17:56:24,014 INFO ubc_evict: evicted 5022.3 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00007-of-00020.safetensors
+2026-09-17 17:56:24,045 INFO ubc_evict: evicted 5076.7 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00008-of-00020.safetensors
+2026-09-17 17:56:24,081 INFO ubc_evict: evicted 5115.4 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00009-of-00020.safetensors
+2026-09-17 17:56:24,122 INFO ubc_evict: evicted 5115.4 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00010-of-00020.safetensors
+2026-09-17 17:56:24,153 INFO ubc_evict: evicted 5073.2 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00011-of-00020.safetensors
+2026-09-17 17:56:24,182 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 17:56:24,186 INFO ubc_evict: evicted 5115.4 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00012-of-00020.safetensors
+2026-09-17 17:56:24,220 INFO ubc_evict: evicted 5115.4 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00013-of-00020.safetensors
+2026-09-17 17:56:24,225 INFO ubc_evict: evicted 5073.2 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00014-of-00020.safetensors
+2026-09-17 17:56:24,230 INFO ubc_evict: evicted 5115.4 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00015-of-00020.safetensors
+2026-09-17 17:56:24,236 INFO ubc_evict: evicted 5115.4 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00016-of-00020.safetensors
+2026-09-17 17:56:24,240 INFO ubc_evict: evicted 5073.2 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00017-of-00020.safetensors
+2026-09-17 17:56:24,244 INFO ubc_evict: evicted 5115.4 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00018-of-00020.safetensors
+2026-09-17 17:56:24,247 INFO ubc_evict: evicted 5115.4 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00019-of-00020.safetensors
+2026-09-17 17:56:24,248 INFO ubc_evict: evicted 1704.3 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00020-of-00020.safetensors
+2026-09-17 17:56:24,248 INFO ubc_evict: evicted 1399.3 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-mtp-q4.safetensors
+2026-09-17 17:56:24,248 INFO ubc_evict: pass complete total_mb=99405.2 elapsed_s=0.28
+[transformers] You are using a model of type `qwen4_exp` to instantiate a model of type ``. This may be expected if you are loading a checkpoint that shares a subset of the architecture (e.g., loading a `sam2_video` checkpoint into `Sam2Model`), but is otherwise not supported and can yield errors. Please verify that the checkpoint is compatible with the model you are instantiating.
+2026-09-17 17:56:25,980 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 17:56:25,984 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 18:01:52,526 INFO Async QSA promotion retained segmented state: memory_pressure_retains_segmented_owner
+2026-09-17 18:01:55,365 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-17 18:02:28,690 INFO Async QSA promotion retained segmented state: memory_pressure_retains_segmented_owner
+2026-09-17 18:02:31,981 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-17 18:02:32,018 INFO "GET /v1/status HTTP/1.1" 200 -

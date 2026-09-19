@@ -1,0 +1,40 @@
+{
+  "name": "QSA draft-loop group closure and APC cancellation boundary audit",
+  "date": "2026-09-16",
+  "sources": [
+    {
+      "repository": "NVIDIA/TensorRT-LLM",
+      "pull_request": 19138,
+      "revision": "60d8425e5e7f1fa0a25f37ce47f809e0a305db3e",
+      "license": "Apache-2.0",
+      "use": "Behavioral reference for appending compressed groups that close while an MTP-local QSA selection is reused; no implementation copied."
+    },
+    {
+      "repository": "Blaizzy/mlx-vlm",
+      "pull_request": 2262,
+      "revision": "8b8a23902ef0c84912ea1979b8af1f4dae0e4ecd",
+      "license": "MIT",
+      "use": "Differential reference for restore admission based on physical allocation and prompt expansion."
+    },
+    {
+      "repository": "Blaizzy/mlx-vlm",
+      "pull_request": 2273,
+      "revision": "3f87d09b053e1f09c082baf19134a16b1024ca3a",
+      "license": "MIT",
+      "use": "Behavioral reference for cancellation while surviving rows still contain unprocessed padding; no implementation copied."
+    },
+    {
+      "repository": "Blaizzy/mlx-vlm",
+      "pull_request": 2261,
+      "revision": "5d518fffec3a3f36a04a6ff7a696e8c357f3229e",
+      "license": "MIT",
+      "use": "Compared with mlx2 idle spill/restore ownership; no offload endpoint or implementation copied."
+    }
+  ],
+  "local_changes": [
+    "Track the block count captured with cycle-local QSA top-k state.",
+    "Append newly complete 4-token groups before reuse and fail closed on missing or rewound geometry.",
+    "Clamp batch-cache padding removal to columns already processed.",
+    "Add CPU qualification for tokens, selected sets, acceptance length, APC restore, padded ragged cancellation, survivor parity, and resident-byte accounting."
+  ]
+}

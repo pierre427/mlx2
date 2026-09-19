@@ -1,0 +1,2142 @@
+{
+  "schema": "mlx2.serving-qualification.v1",
+  "timestamp": 1789546408.0025861,
+  "runtime": {
+    "source_sha256": "c59a29e820104248fbd7f8cf2ed9787ff1535976bf81daad7e13a3983f0b571f",
+    "mlx_native_sha256": "30335939714520c3306cfa58597100aae08bbeabdc60a4bc8c35c32c607450a8",
+    "python": "3.12.13",
+    "macos": "26.7",
+    "mlx": "0.32.2.dev20260915+2a817ad94",
+    "transformers": "5.12.1",
+    "dependencies": {
+      "numpy": "2.5.1",
+      "tokenizers": "0.22.2",
+      "jinja2": "3.1.6",
+      "psutil": "7.2.2",
+      "regex": "2026.9.10",
+      "safetensors": "0.8.0"
+    }
+  },
+  "qualification_harness": {
+    "schema": "mlx2.qualification-harness.v1",
+    "name": "scripts/qualify_serving.py",
+    "sha256": "8d32f490519f91e0e4b96f0e6b60d05b088aba41930b1b5df24eb0292fcfa8c1"
+  },
+  "artifact": "3f883af5c2266a32de1b221132f66d0fc4524c1434f418ab17b94ee9f808a4c8",
+  "settings": {
+    "max_context": 131072,
+    "max_lanes": 20,
+    "max_inflight": 40,
+    "prefill_step": 2048,
+    "cache_bytes": 12884901888,
+    "disk_cache": true,
+    "mtp": false,
+    "environment": {
+      "HF_HUB_OFFLINE": "1",
+      "TRANSFORMERS_OFFLINE": "1",
+      "MLX_ENABLE_TF32": "0",
+      "MLX_LM_COMPILED_DECODE": "0",
+      "MLX_LM_SEGMENTED_SELF_MTP": "0",
+      "MLX_LM_TRUE_BATCHED_SEGMENTED_MTP": "0"
+    },
+    "execution_policy": {
+      "persistent": true,
+      "num_draft": 4,
+      "backend": "external_draft",
+      "rate_gate": false,
+      "prefill_step_size": 2048,
+      "segment_aware_live_tip": false,
+      "segment_aware_cohort_size": 20
+    },
+    "speculation": "external_draft",
+    "cache_budget": null
+  },
+  "checks": {
+    "unit_tests": {
+      "passed": true,
+      "evidence": "............................................................... [ 10%]\n........................................................................ [ 23%]\n........................................................................ [ 35%]\n...................................ssssssss............................. [ 48%]\n........................................................................ [ 60%]\n......................................ss..ss.... [ 69%]\n....ss..............s.s....................... [ 77%]\n........................................................................ [ 89%]\n...........................................................              [100%]\n560 passed, 16 skipped, 59 subtests passed in 9.42s\n"
+    },
+    "hermes_client": {
+      "passed": true,
+      "evidence": {
+        "id": "chatcmpl-8844ea0225ae4b2dba0a3232383e2880",
+        "object": "chat.completion",
+        "created": 1789546417,
+        "model": "Muse-Glimmer-30B-mlx-4bit",
+        "choices": [
+          {
+            "index": 0,
+            "finish_reason": "stop",
+            "message": {
+              "role": "assistant",
+              "content": "HERMES_READY"
+            }
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 66,
+          "completion_tokens": 5,
+          "total_tokens": 71,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          }
+        },
+        "mlx2": {
+          "request_id": "chatcmpl-8844ea0225ae4b2dba0a3232383e2880",
+          "cache": "apcv2",
+          "cached_tokens": 0,
+          "profile": "muse-glimmer-apcv2-dflash2",
+          "qualification": "candidate",
+          "route_receipt": "candidate_validation",
+          "request_controls": {
+            "logprobs": false,
+            "top_logprobs": 0,
+            "logprob_semantics": null,
+            "thinking": false,
+            "sampling": {
+              "temperature": 0
+            },
+            "reasoning_effort": "none",
+            "effort_semantics": "reasoning_strength",
+            "context_limit": 131072
+          },
+          "ordinary_compute_width": null,
+          "mtp": null,
+          "speculation": {
+            "kind": "external_dflash2",
+            "execution": "external_draft_verify",
+            "current_execution": "external_draft_verify",
+            "ordinary_fallback": false,
+            "external_rounds": 1,
+            "accepted": 4,
+            "proposed": 4,
+            "round_accepted": 4,
+            "round_proposed": 4,
+            "target_width": 1,
+            "draft_width": 1,
+            "qualification_authority": "serving_route"
+          },
+          "prompt_tokens": 66,
+          "completion_tokens": 5,
+          "ttft_seconds": 0.37246654199771,
+          "elapsed_seconds": 0.3745755839991034
+        }
+      }
+    },
+    "logprobs": {
+      "passed": true,
+      "evidence": {
+        "reference": {
+          "id": "chatcmpl-3492238998294885a45af5d19b2edf1c",
+          "object": "chat.completion",
+          "created": 1789546418,
+          "model": "Muse-Glimmer-30B-mlx-4bit",
+          "choices": [
+            {
+              "index": 0,
+              "finish_reason": "length",
+              "message": {
+                "role": "assistant",
+                "content": "Compilers translate high-level code into efficient"
+              }
+            }
+          ],
+          "usage": {
+            "prompt_tokens": 66,
+            "completion_tokens": 8,
+            "total_tokens": 74,
+            "prompt_tokens_details": {
+              "cached_tokens": 53
+            }
+          },
+          "mlx2": {
+            "request_id": "chatcmpl-3492238998294885a45af5d19b2edf1c",
+            "cache": "apcv2",
+            "cached_tokens": 53,
+            "profile": "muse-glimmer-apcv2-dflash2",
+            "qualification": "candidate",
+            "route_receipt": "candidate_validation",
+            "request_controls": {
+              "logprobs": false,
+              "top_logprobs": 0,
+              "logprob_semantics": null,
+              "thinking": false,
+              "sampling": {
+                "temperature": 0
+              },
+              "reasoning_effort": null,
+              "effort_semantics": "reasoning_strength",
+              "context_limit": 131072
+            },
+            "ordinary_compute_width": null,
+            "mtp": null,
+            "speculation": {
+              "kind": "external_dflash2",
+              "execution": "external_draft_verify",
+              "current_execution": "external_draft_verify",
+              "ordinary_fallback": false,
+              "external_rounds": 3,
+              "accepted": 5,
+              "proposed": 8,
+              "round_accepted": 1,
+              "round_proposed": 1,
+              "target_width": 1,
+              "draft_width": 1,
+              "qualification_authority": "serving_route"
+            },
+            "prompt_tokens": 66,
+            "completion_tokens": 8,
+            "ttft_seconds": 0.22751533400150947,
+            "elapsed_seconds": 0.3433425420007552
+          }
+        },
+        "response": {
+          "id": "chatcmpl-189bbcfeeb6c427c85920e4e47668532",
+          "object": "chat.completion",
+          "created": 1789546418,
+          "model": "Muse-Glimmer-30B-mlx-4bit",
+          "choices": [
+            {
+              "index": 0,
+              "finish_reason": "length",
+              "logprobs": {
+                "content": [
+                  {
+                    "id": 8183,
+                    "token": "Comp",
+                    "logprob": 0.0,
+                    "top_logprobs": [
+                      {
+                        "id": 8183,
+                        "token": "Comp",
+                        "logprob": 0.0
+                      },
+                      {
+                        "id": 0,
+                        "token": "\u00c0",
+                        "logprob": -9999.0
+                      },
+                      {
+                        "id": 1,
+                        "token": "\u00c1",
+                        "logprob": -9999.0
+                      }
+                    ]
+                  },
+                  {
+                    "id": 55375,
+                    "token": "ilers",
+                    "logprob": 0.0,
+                    "top_logprobs": [
+                      {
+                        "id": 55375,
+                        "token": "ilers",
+                        "logprob": 0.0
+                      },
+                      {
+                        "id": 0,
+                        "token": "\u00c0",
+                        "logprob": -9999.0
+                      },
+                      {
+                        "id": 1,
+                        "token": "\u00c1",
+                        "logprob": -9999.0
+                      }
+                    ]
+                  },
+                  {
+                    "id": 21022,
+                    "token": "\u0120translate",
+                    "logprob": 0.0,
+                    "top_logprobs": [
+                      {
+                        "id": 21022,
+                        "token": "\u0120translate",
+                        "logprob": 0.0
+                      },
+                      {
+                        "id": 0,
+                        "token": "\u00c0",
+                        "logprob": -9999.0
+                      },
+                      {
+                        "id": 1,
+                        "token": "\u00c1",
+                        "logprob": -9999.0
+                      }
+                    ]
+                  },
+                  {
+                    "id": 2244,
+                    "token": "\u0120high",
+                    "logprob": 0.0,
+                    "top_logprobs": [
+                      {
+                        "id": 2244,
+                        "token": "\u0120high",
+                        "logprob": 0.0
+                      },
+                      {
+                        "id": 0,
+                        "token": "\u00c0",
+                        "logprob": -9999.0
+                      },
+                      {
+                        "id": 1,
+                        "token": "\u00c1",
+                        "logprob": -9999.0
+                      }
+                    ]
+                  },
+                  {
+                    "id": 15636,
+                    "token": "-level",
+                    "logprob": 0.0,
+                    "top_logprobs": [
+                      {
+                        "id": 15636,
+                        "token": "-level",
+                        "logprob": 0.0
+                      },
+                      {
+                        "id": 0,
+                        "token": "\u00c0",
+                        "logprob": -9999.0
+                      },
+                      {
+                        "id": 1,
+                        "token": "\u00c1",
+                        "logprob": -9999.0
+                      }
+                    ]
+                  },
+                  {
+                    "id": 2963,
+                    "token": "\u0120code",
+                    "logprob": 0.0,
+                    "top_logprobs": [
+                      {
+                        "id": 2963,
+                        "token": "\u0120code",
+                        "logprob": 0.0
+                      },
+                      {
+                        "id": 0,
+                        "token": "\u00c0",
+                        "logprob": -9999.0
+                      },
+                      {
+                        "id": 1,
+                        "token": "\u00c1",
+                        "logprob": -9999.0
+                      }
+                    ]
+                  },
+                  {
+                    "id": 1629,
+                    "token": "\u0120into",
+                    "logprob": 0.0,
+                    "top_logprobs": [
+                      {
+                        "id": 1629,
+                        "token": "\u0120into",
+                        "logprob": 0.0
+                      },
+                      {
+                        "id": 0,
+                        "token": "\u00c0",
+                        "logprob": -9999.0
+                      },
+                      {
+                        "id": 1,
+                        "token": "\u00c1",
+                        "logprob": -9999.0
+                      }
+                    ]
+                  },
+                  {
+                    "id": 11592,
+                    "token": "\u0120efficient",
+                    "logprob": 0.0,
+                    "top_logprobs": [
+                      {
+                        "id": 11592,
+                        "token": "\u0120efficient",
+                        "logprob": 0.0
+                      },
+                      {
+                        "id": 0,
+                        "token": "\u00c0",
+                        "logprob": -9999.0
+                      },
+                      {
+                        "id": 1,
+                        "token": "\u00c1",
+                        "logprob": -9999.0
+                      }
+                    ]
+                  }
+                ]
+              },
+              "message": {
+                "role": "assistant",
+                "content": "Compilers translate high-level code into efficient"
+              }
+            }
+          ],
+          "usage": {
+            "prompt_tokens": 66,
+            "completion_tokens": 8,
+            "total_tokens": 74,
+            "prompt_tokens_details": {
+              "cached_tokens": 65
+            }
+          },
+          "mlx2": {
+            "request_id": "chatcmpl-189bbcfeeb6c427c85920e4e47668532",
+            "cache": "apcv2",
+            "cached_tokens": 65,
+            "profile": "muse-glimmer-apcv2-dflash2",
+            "qualification": "candidate",
+            "route_receipt": "candidate_validation",
+            "request_controls": {
+              "logprobs": true,
+              "top_logprobs": 3,
+              "logprob_semantics": "execution_target: external=transformed_target_verifier",
+              "thinking": false,
+              "sampling": {
+                "temperature": 0
+              },
+              "reasoning_effort": null,
+              "effort_semantics": "reasoning_strength",
+              "context_limit": 131072
+            },
+            "ordinary_compute_width": null,
+            "mtp": null,
+            "speculation": {
+              "kind": "external_dflash2",
+              "execution": "external_draft_verify",
+              "current_execution": "external_draft_verify",
+              "ordinary_fallback": false,
+              "external_rounds": 3,
+              "accepted": 5,
+              "proposed": 8,
+              "round_accepted": 1,
+              "round_proposed": 1,
+              "target_width": 1,
+              "draft_width": 1,
+              "qualification_authority": "serving_route"
+            },
+            "prompt_tokens": 66,
+            "completion_tokens": 8,
+            "ttft_seconds": 0.08643975000086357,
+            "elapsed_seconds": 0.20570904199848883
+          }
+        },
+        "stream_entries": [
+          {
+            "id": 8183,
+            "token": "Comp",
+            "logprob": 0.0,
+            "top_logprobs": [
+              {
+                "id": 8183,
+                "token": "Comp",
+                "logprob": 0.0
+              },
+              {
+                "id": 0,
+                "token": "\u00c0",
+                "logprob": -9999.0
+              },
+              {
+                "id": 1,
+                "token": "\u00c1",
+                "logprob": -9999.0
+              }
+            ]
+          },
+          {
+            "id": 55375,
+            "token": "ilers",
+            "logprob": 0.0,
+            "top_logprobs": [
+              {
+                "id": 55375,
+                "token": "ilers",
+                "logprob": 0.0
+              },
+              {
+                "id": 0,
+                "token": "\u00c0",
+                "logprob": -9999.0
+              },
+              {
+                "id": 1,
+                "token": "\u00c1",
+                "logprob": -9999.0
+              }
+            ]
+          },
+          {
+            "id": 21022,
+            "token": "\u0120translate",
+            "logprob": 0.0,
+            "top_logprobs": [
+              {
+                "id": 21022,
+                "token": "\u0120translate",
+                "logprob": 0.0
+              },
+              {
+                "id": 0,
+                "token": "\u00c0",
+                "logprob": -9999.0
+              },
+              {
+                "id": 1,
+                "token": "\u00c1",
+                "logprob": -9999.0
+              }
+            ]
+          },
+          {
+            "id": 2244,
+            "token": "\u0120high",
+            "logprob": 0.0,
+            "top_logprobs": [
+              {
+                "id": 2244,
+                "token": "\u0120high",
+                "logprob": 0.0
+              },
+              {
+                "id": 0,
+                "token": "\u00c0",
+                "logprob": -9999.0
+              },
+              {
+                "id": 1,
+                "token": "\u00c1",
+                "logprob": -9999.0
+              }
+            ]
+          },
+          {
+            "id": 15636,
+            "token": "-level",
+            "logprob": 0.0,
+            "top_logprobs": [
+              {
+                "id": 15636,
+                "token": "-level",
+                "logprob": 0.0
+              },
+              {
+                "id": 0,
+                "token": "\u00c0",
+                "logprob": -9999.0
+              },
+              {
+                "id": 1,
+                "token": "\u00c1",
+                "logprob": -9999.0
+              }
+            ]
+          },
+          {
+            "id": 2963,
+            "token": "\u0120code",
+            "logprob": 0.0,
+            "top_logprobs": [
+              {
+                "id": 2963,
+                "token": "\u0120code",
+                "logprob": 0.0
+              },
+              {
+                "id": 0,
+                "token": "\u00c0",
+                "logprob": -9999.0
+              },
+              {
+                "id": 1,
+                "token": "\u00c1",
+                "logprob": -9999.0
+              }
+            ]
+          },
+          {
+            "id": 1629,
+            "token": "\u0120into",
+            "logprob": 0.0,
+            "top_logprobs": [
+              {
+                "id": 1629,
+                "token": "\u0120into",
+                "logprob": 0.0
+              },
+              {
+                "id": 0,
+                "token": "\u00c0",
+                "logprob": -9999.0
+              },
+              {
+                "id": 1,
+                "token": "\u00c1",
+                "logprob": -9999.0
+              }
+            ]
+          },
+          {
+            "id": 11592,
+            "token": "\u0120efficient",
+            "logprob": 0.0,
+            "top_logprobs": [
+              {
+                "id": 11592,
+                "token": "\u0120efficient",
+                "logprob": 0.0
+              },
+              {
+                "id": 0,
+                "token": "\u00c0",
+                "logprob": -9999.0
+              },
+              {
+                "id": 1,
+                "token": "\u00c1",
+                "logprob": -9999.0
+              }
+            ]
+          }
+        ],
+        "stream_usage": {
+          "prompt_tokens": 66,
+          "completion_tokens": 8,
+          "total_tokens": 74,
+          "prompt_tokens_details": {
+            "cached_tokens": 65
+          }
+        }
+      }
+    },
+    "sampling_controls": {
+      "passed": true,
+      "evidence": [
+        {
+          "request_id": "chatcmpl-84201ad9653a42429cb1c44f138e1844",
+          "cache": "apcv2",
+          "cached_tokens": 53,
+          "profile": "muse-glimmer-apcv2-dflash2",
+          "qualification": "candidate",
+          "route_receipt": "candidate_validation",
+          "request_controls": {
+            "logprobs": false,
+            "top_logprobs": 0,
+            "logprob_semantics": null,
+            "thinking": false,
+            "sampling": {
+              "temperature": 0.7,
+              "top_p": 0.9,
+              "top_k": 24,
+              "min_p": 0.05,
+              "repetition_penalty": 1.05,
+              "presence_penalty": 0.1,
+              "frequency_penalty": 0.1,
+              "seed": 237
+            },
+            "reasoning_effort": null,
+            "effort_semantics": "reasoning_strength",
+            "context_limit": 131072
+          },
+          "ordinary_compute_width": null,
+          "mtp": null,
+          "speculation": {
+            "kind": "external_dflash2",
+            "execution": "external_draft_verify",
+            "current_execution": "external_draft_verify",
+            "ordinary_fallback": false,
+            "external_rounds": 4,
+            "accepted": 13,
+            "proposed": 16,
+            "round_accepted": 1,
+            "round_proposed": 4,
+            "target_width": 1,
+            "draft_width": 1,
+            "qualification_authority": "serving_route"
+          },
+          "prompt_tokens": 63,
+          "completion_tokens": 17,
+          "ttft_seconds": 0.2001144160021795,
+          "elapsed_seconds": 0.41016279100222164
+        },
+        {
+          "request_id": "chatcmpl-7373b5abb6914b4984dc8b73cfc32f4b",
+          "cache": "apcv2",
+          "cached_tokens": 62,
+          "profile": "muse-glimmer-apcv2-dflash2",
+          "qualification": "candidate",
+          "route_receipt": "candidate_validation",
+          "request_controls": {
+            "logprobs": false,
+            "top_logprobs": 0,
+            "logprob_semantics": null,
+            "thinking": false,
+            "sampling": {
+              "temperature": 0.7,
+              "top_p": 0.9,
+              "top_k": 24,
+              "min_p": 0.05,
+              "repetition_penalty": 1.05,
+              "presence_penalty": 0.1,
+              "frequency_penalty": 0.1,
+              "seed": 237
+            },
+            "reasoning_effort": null,
+            "effort_semantics": "reasoning_strength",
+            "context_limit": 131072
+          },
+          "ordinary_compute_width": null,
+          "mtp": null,
+          "speculation": {
+            "kind": "external_dflash2",
+            "execution": "external_draft_verify",
+            "current_execution": "external_draft_verify",
+            "ordinary_fallback": false,
+            "external_rounds": 4,
+            "accepted": 13,
+            "proposed": 16,
+            "round_accepted": 1,
+            "round_proposed": 4,
+            "target_width": 1,
+            "draft_width": 1,
+            "qualification_authority": "serving_route"
+          },
+          "prompt_tokens": 63,
+          "completion_tokens": 17,
+          "ttft_seconds": 0.07529637499828823,
+          "elapsed_seconds": 0.28615354200155707
+        }
+      ]
+    },
+    "cold_text": {
+      "passed": true,
+      "evidence": {
+        "request_id": "chatcmpl-942080927a0044f681f51b168298eb7b",
+        "cache": "apcv2",
+        "cached_tokens": 56,
+        "profile": "muse-glimmer-apcv2-dflash2",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": false,
+          "top_logprobs": 0,
+          "logprob_semantics": null,
+          "thinking": false,
+          "sampling": {
+            "temperature": 0
+          },
+          "reasoning_effort": null,
+          "effort_semantics": "reasoning_strength",
+          "context_limit": 131072
+        },
+        "ordinary_compute_width": null,
+        "mtp": null,
+        "speculation": {
+          "kind": "external_dflash2",
+          "execution": "external_draft_verify",
+          "current_execution": "external_draft_verify",
+          "ordinary_fallback": false,
+          "external_rounds": 1,
+          "accepted": 4,
+          "proposed": 4,
+          "round_accepted": 4,
+          "round_proposed": 4,
+          "target_width": 1,
+          "draft_width": 1,
+          "qualification_authority": "serving_route"
+        },
+        "prompt_tokens": 66,
+        "completion_tokens": 5,
+        "ttft_seconds": 0.22371325000131037,
+        "elapsed_seconds": 0.2255707500007702
+      }
+    },
+    "warm_prefix": {
+      "passed": true,
+      "evidence": {
+        "request_id": "chatcmpl-c5faea2a6b9442269c7d7fabc472e758",
+        "cache": "apcv2",
+        "cached_tokens": 65,
+        "profile": "muse-glimmer-apcv2-dflash2",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": false,
+          "top_logprobs": 0,
+          "logprob_semantics": null,
+          "thinking": false,
+          "sampling": {
+            "temperature": 0
+          },
+          "reasoning_effort": null,
+          "effort_semantics": "reasoning_strength",
+          "context_limit": 131072
+        },
+        "ordinary_compute_width": null,
+        "mtp": null,
+        "speculation": {
+          "kind": "external_dflash2",
+          "execution": "external_draft_verify",
+          "current_execution": "external_draft_verify",
+          "ordinary_fallback": false,
+          "external_rounds": 1,
+          "accepted": 4,
+          "proposed": 4,
+          "round_accepted": 4,
+          "round_proposed": 4,
+          "target_width": 1,
+          "draft_width": 1,
+          "qualification_authority": "serving_route"
+        },
+        "prompt_tokens": 66,
+        "completion_tokens": 5,
+        "ttft_seconds": 0.07334795900169411,
+        "elapsed_seconds": 0.0752504170013708
+      }
+    },
+    "stream": {
+      "passed": true,
+      "evidence": [
+        {
+          "id": "chatcmpl-3a724031b0bb4f93ade108b3af518e28",
+          "object": "chat.completion.chunk",
+          "created": 1789546419,
+          "model": "Muse-Glimmer-30B-mlx-4bit",
+          "choices": [
+            {
+              "index": 0,
+              "finish_reason": null,
+              "delta": {
+                "content": "ML"
+              }
+            }
+          ]
+        },
+        {
+          "id": "chatcmpl-3a724031b0bb4f93ade108b3af518e28",
+          "object": "chat.completion.chunk",
+          "created": 1789546419,
+          "model": "Muse-Glimmer-30B-mlx-4bit",
+          "choices": [
+            {
+              "index": 0,
+              "finish_reason": null,
+              "delta": {
+                "content": "X"
+              }
+            }
+          ]
+        },
+        {
+          "id": "chatcmpl-3a724031b0bb4f93ade108b3af518e28",
+          "object": "chat.completion.chunk",
+          "created": 1789546419,
+          "model": "Muse-Glimmer-30B-mlx-4bit",
+          "choices": [
+            {
+              "index": 0,
+              "finish_reason": null,
+              "delta": {
+                "content": "2"
+              }
+            }
+          ]
+        },
+        {
+          "id": "chatcmpl-3a724031b0bb4f93ade108b3af518e28",
+          "object": "chat.completion.chunk",
+          "created": 1789546419,
+          "model": "Muse-Glimmer-30B-mlx-4bit",
+          "choices": [
+            {
+              "index": 0,
+              "finish_reason": null,
+              "delta": {
+                "content": "_READY"
+              }
+            }
+          ]
+        },
+        {
+          "id": "chatcmpl-3a724031b0bb4f93ade108b3af518e28",
+          "object": "chat.completion.chunk",
+          "created": 1789546419,
+          "model": "Muse-Glimmer-30B-mlx-4bit",
+          "choices": [
+            {
+              "index": 0,
+              "finish_reason": "stop",
+              "delta": {}
+            }
+          ],
+          "usage": {
+            "prompt_tokens": 66,
+            "completion_tokens": 5,
+            "total_tokens": 71,
+            "prompt_tokens_details": {
+              "cached_tokens": 65
+            }
+          },
+          "mlx2": {
+            "request_id": "chatcmpl-3a724031b0bb4f93ade108b3af518e28",
+            "cache": "apcv2",
+            "cached_tokens": 65,
+            "profile": "muse-glimmer-apcv2-dflash2",
+            "qualification": "candidate",
+            "route_receipt": "candidate_validation",
+            "request_controls": {
+              "logprobs": false,
+              "top_logprobs": 0,
+              "logprob_semantics": null,
+              "thinking": false,
+              "sampling": {
+                "temperature": 0
+              },
+              "reasoning_effort": null,
+              "effort_semantics": "reasoning_strength",
+              "context_limit": 131072
+            },
+            "ordinary_compute_width": null,
+            "mtp": null,
+            "speculation": {
+              "kind": "external_dflash2",
+              "execution": "external_draft_verify",
+              "current_execution": "external_draft_verify",
+              "ordinary_fallback": false,
+              "external_rounds": 1,
+              "accepted": 4,
+              "proposed": 4,
+              "round_accepted": 4,
+              "round_proposed": 4,
+              "target_width": 1,
+              "draft_width": 1,
+              "qualification_authority": "serving_route"
+            },
+            "prompt_tokens": 66,
+            "completion_tokens": 5,
+            "ttft_seconds": 0.0750888339971425,
+            "elapsed_seconds": 0.07708208399708383
+          }
+        }
+      ]
+    },
+    "tools": {
+      "passed": true,
+      "evidence": {
+        "id": "chatcmpl-68da90d984cb49c1a6f4055700424cc9",
+        "object": "chat.completion",
+        "created": 1789546419,
+        "model": "Muse-Glimmer-30B-mlx-4bit",
+        "choices": [
+          {
+            "index": 0,
+            "finish_reason": "tool_calls",
+            "message": {
+              "role": "assistant",
+              "content": "I need to get the weather for Toronto. I'll use the weather tool with the city name \"Toronto\" to retrieve the current weather information.",
+              "tool_calls": [
+                {
+                  "id": "call_aaf4e575871e4a7bb2e3f256",
+                  "type": "function",
+                  "function": {
+                    "name": "weather",
+                    "arguments": "{\"city\": \"Toronto\"}"
+                  }
+                }
+              ]
+            }
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 405,
+          "completion_tokens": 75,
+          "total_tokens": 480,
+          "prompt_tokens_details": {
+            "cached_tokens": 39
+          }
+        },
+        "mlx2": {
+          "request_id": "chatcmpl-68da90d984cb49c1a6f4055700424cc9",
+          "cache": "apcv2",
+          "cached_tokens": 39,
+          "profile": "muse-glimmer-apcv2-dflash2",
+          "qualification": "candidate",
+          "route_receipt": "candidate_validation",
+          "request_controls": {
+            "logprobs": false,
+            "top_logprobs": 0,
+            "logprob_semantics": null,
+            "thinking": false,
+            "sampling": {
+              "temperature": 0
+            },
+            "reasoning_effort": null,
+            "effort_semantics": "reasoning_strength",
+            "context_limit": 131072
+          },
+          "ordinary_compute_width": null,
+          "mtp": null,
+          "speculation": {
+            "kind": "external_dflash2",
+            "execution": "external_draft_verify",
+            "current_execution": "external_draft_verify",
+            "ordinary_fallback": false,
+            "external_rounds": 20,
+            "accepted": 55,
+            "proposed": 80,
+            "round_accepted": 0,
+            "round_proposed": 4,
+            "target_width": 1,
+            "draft_width": 1,
+            "qualification_authority": "serving_route"
+          },
+          "prompt_tokens": 405,
+          "completion_tokens": 75,
+          "ttft_seconds": 0.5487416250034585,
+          "elapsed_seconds": 1.8285949170021922
+        }
+      }
+    },
+    "tool_roundtrip": {
+      "passed": true,
+      "evidence": {
+        "id": "chatcmpl-5ce229860c2d42eebe8272f468fbeb71",
+        "object": "chat.completion",
+        "created": 1789546421,
+        "model": "Muse-Glimmer-30B-mlx-4bit",
+        "choices": [
+          {
+            "index": 0,
+            "finish_reason": "stop",
+            "message": {
+              "role": "assistant",
+              "content": "The current weather in Toronto is 21\u00b0C and sunny."
+            }
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 480,
+          "completion_tokens": 13,
+          "total_tokens": 493,
+          "prompt_tokens_details": {
+            "cached_tokens": 403
+          }
+        },
+        "mlx2": {
+          "request_id": "chatcmpl-5ce229860c2d42eebe8272f468fbeb71",
+          "cache": "apcv2",
+          "cached_tokens": 403,
+          "profile": "muse-glimmer-apcv2-dflash2",
+          "qualification": "candidate",
+          "route_receipt": "candidate_validation",
+          "request_controls": {
+            "logprobs": false,
+            "top_logprobs": 0,
+            "logprob_semantics": null,
+            "thinking": false,
+            "sampling": {
+              "temperature": 0
+            },
+            "reasoning_effort": null,
+            "effort_semantics": "reasoning_strength",
+            "context_limit": 131072
+          },
+          "ordinary_compute_width": null,
+          "mtp": null,
+          "speculation": {
+            "kind": "external_dflash2",
+            "execution": "external_draft_verify",
+            "current_execution": "external_draft_verify",
+            "ordinary_fallback": false,
+            "external_rounds": 4,
+            "accepted": 9,
+            "proposed": 16,
+            "round_accepted": 1,
+            "round_proposed": 4,
+            "target_width": 1,
+            "draft_width": 1,
+            "qualification_authority": "serving_route"
+          },
+          "prompt_tokens": 480,
+          "completion_tokens": 13,
+          "ttft_seconds": 0.5969847090018447,
+          "elapsed_seconds": 0.8042193750006845
+        }
+      }
+    },
+    "reasoning": {
+      "passed": true,
+      "evidence": {
+        "id": "chatcmpl-f55efe824f5b44339f55194e192b07d0",
+        "object": "chat.completion",
+        "created": 1789546422,
+        "model": "Muse-Glimmer-30B-mlx-4bit",
+        "choices": [
+          {
+            "index": 0,
+            "finish_reason": "stop",
+            "message": {
+              "role": "assistant",
+              "content": "13 \u00d7 17 = 221\n\n13 \u00d7 10 = 130\n13 \u00d7 7 = 91\n130 + 91 = 221",
+              "reasoning_content": "What is 13 times 17?\n\n13 times 17 = ?\n\n13*17 = 221\n\n13*10=130\n13*7=91\n221\n\nAnswer 221.\n\nPossibly show calculation.\n\nJust answer.\n\nProbably simple.\n\nReturn 221.\n\nCould also note 13*17 = 221.\n\nDone."
+            }
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 64,
+          "completion_tokens": 108,
+          "total_tokens": 172,
+          "prompt_tokens_details": {
+            "cached_tokens": 37
+          }
+        },
+        "mlx2": {
+          "request_id": "chatcmpl-f55efe824f5b44339f55194e192b07d0",
+          "cache": "apcv2",
+          "cached_tokens": 37,
+          "profile": "muse-glimmer-apcv2-dflash2",
+          "qualification": "candidate",
+          "route_receipt": "candidate_validation",
+          "request_controls": {
+            "logprobs": false,
+            "top_logprobs": 0,
+            "logprob_semantics": null,
+            "thinking": true,
+            "sampling": {
+              "temperature": 0
+            },
+            "reasoning_effort": null,
+            "effort_semantics": "reasoning_strength",
+            "context_limit": 131072
+          },
+          "ordinary_compute_width": null,
+          "mtp": null,
+          "speculation": {
+            "kind": "external_dflash2",
+            "execution": "external_draft_verify",
+            "current_execution": "external_draft_verify",
+            "ordinary_fallback": false,
+            "external_rounds": 25,
+            "accepted": 83,
+            "proposed": 100,
+            "round_accepted": 4,
+            "round_proposed": 4,
+            "target_width": 1,
+            "draft_width": 1,
+            "qualification_authority": "serving_route"
+          },
+          "prompt_tokens": 64,
+          "completion_tokens": 108,
+          "ttft_seconds": 0.1941670839987637,
+          "elapsed_seconds": 1.797003625000798
+        }
+      }
+    },
+    "stop": {
+      "passed": true,
+      "evidence": {
+        "id": "chatcmpl-687f69bd51384750ae8f6525d8e63f29",
+        "object": "chat.completion",
+        "created": 1789546424,
+        "model": "Muse-Glimmer-30B-mlx-4bit",
+        "choices": [
+          {
+            "index": 0,
+            "finish_reason": "stop",
+            "message": {
+              "role": "assistant",
+              "content": "MLX2"
+            }
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 66,
+          "completion_tokens": 4,
+          "total_tokens": 70,
+          "prompt_tokens_details": {
+            "cached_tokens": 65
+          }
+        },
+        "mlx2": {
+          "request_id": "chatcmpl-687f69bd51384750ae8f6525d8e63f29",
+          "cache": "apcv2",
+          "cached_tokens": 65,
+          "profile": "muse-glimmer-apcv2-dflash2",
+          "qualification": "candidate",
+          "route_receipt": "candidate_validation",
+          "request_controls": {
+            "logprobs": false,
+            "top_logprobs": 0,
+            "logprob_semantics": null,
+            "thinking": false,
+            "sampling": {
+              "temperature": 0
+            },
+            "reasoning_effort": null,
+            "effort_semantics": "reasoning_strength",
+            "context_limit": 131072
+          },
+          "ordinary_compute_width": null,
+          "mtp": null,
+          "speculation": {
+            "kind": "external_dflash2",
+            "execution": "external_draft_verify",
+            "current_execution": "external_draft_verify",
+            "ordinary_fallback": false,
+            "external_rounds": 1,
+            "accepted": 4,
+            "proposed": 4,
+            "round_accepted": 4,
+            "round_proposed": 4,
+            "target_width": 1,
+            "draft_width": 1,
+            "qualification_authority": "serving_route"
+          },
+          "prompt_tokens": 66,
+          "completion_tokens": 4,
+          "ttft_seconds": 0.07561116699798731,
+          "elapsed_seconds": 0.07575124999857508
+        }
+      }
+    },
+    "seed_repeat": {
+      "passed": true,
+      "evidence": {
+        "first": {
+          "id": "chatcmpl-52ab6336ee4e4139baa9d64c5a9061e6",
+          "object": "chat.completion",
+          "created": 1789546424,
+          "model": "Muse-Glimmer-30B-mlx-4bit",
+          "choices": [
+            {
+              "index": 0,
+              "finish_reason": "length",
+              "message": {
+                "role": "assistant",
+                "content": "Sure! Here are three short facts about stars:\n\n1. **Stars shine by nuclear fusion**: Stars produce energy by fusing hydrogen atoms into helium in their cores, releasing light and heat.\n2. **They come in different sizes**: Stars range from small red dwarfs to massive blue giants, with our Sun being a"
+              }
+            }
+          ],
+          "usage": {
+            "prompt_tokens": 66,
+            "completion_tokens": 64,
+            "total_tokens": 130,
+            "prompt_tokens_details": {
+              "cached_tokens": 53
+            }
+          },
+          "mlx2": {
+            "request_id": "chatcmpl-52ab6336ee4e4139baa9d64c5a9061e6",
+            "cache": "apcv2",
+            "cached_tokens": 53,
+            "profile": "muse-glimmer-apcv2-dflash2",
+            "qualification": "candidate",
+            "route_receipt": "candidate_validation",
+            "request_controls": {
+              "logprobs": false,
+              "top_logprobs": 0,
+              "logprob_semantics": null,
+              "thinking": false,
+              "sampling": {
+                "temperature": 0.7,
+                "seed": 123
+              },
+              "reasoning_effort": null,
+              "effort_semantics": "reasoning_strength",
+              "context_limit": 131072
+            },
+            "ordinary_compute_width": null,
+            "mtp": null,
+            "speculation": {
+              "kind": "external_dflash2",
+              "execution": "external_draft_verify",
+              "current_execution": "external_draft_verify",
+              "ordinary_fallback": false,
+              "external_rounds": 25,
+              "accepted": 39,
+              "proposed": 97,
+              "round_accepted": 2,
+              "round_proposed": 2,
+              "target_width": 1,
+              "draft_width": 1,
+              "qualification_authority": "serving_route"
+            },
+            "prompt_tokens": 66,
+            "completion_tokens": 64,
+            "ttft_seconds": 0.2279988329974003,
+            "elapsed_seconds": 1.8856850829979521
+          }
+        },
+        "second": {
+          "id": "chatcmpl-c19100cbce6941f595251f8177b3eaeb",
+          "object": "chat.completion",
+          "created": 1789546426,
+          "model": "Muse-Glimmer-30B-mlx-4bit",
+          "choices": [
+            {
+              "index": 0,
+              "finish_reason": "length",
+              "message": {
+                "role": "assistant",
+                "content": "Sure! Here are three short facts about stars:\n\n1. **Stars shine by nuclear fusion**: Stars produce energy by fusing hydrogen atoms into helium in their cores, releasing light and heat.\n2. **They come in different sizes**: Stars range from small red dwarfs to massive blue giants, with our Sun being a"
+              }
+            }
+          ],
+          "usage": {
+            "prompt_tokens": 66,
+            "completion_tokens": 64,
+            "total_tokens": 130,
+            "prompt_tokens_details": {
+              "cached_tokens": 65
+            }
+          },
+          "mlx2": {
+            "request_id": "chatcmpl-c19100cbce6941f595251f8177b3eaeb",
+            "cache": "apcv2",
+            "cached_tokens": 65,
+            "profile": "muse-glimmer-apcv2-dflash2",
+            "qualification": "candidate",
+            "route_receipt": "candidate_validation",
+            "request_controls": {
+              "logprobs": false,
+              "top_logprobs": 0,
+              "logprob_semantics": null,
+              "thinking": false,
+              "sampling": {
+                "temperature": 0.7,
+                "seed": 123
+              },
+              "reasoning_effort": null,
+              "effort_semantics": "reasoning_strength",
+              "context_limit": 131072
+            },
+            "ordinary_compute_width": null,
+            "mtp": null,
+            "speculation": {
+              "kind": "external_dflash2",
+              "execution": "external_draft_verify",
+              "current_execution": "external_draft_verify",
+              "ordinary_fallback": false,
+              "external_rounds": 25,
+              "accepted": 39,
+              "proposed": 97,
+              "round_accepted": 2,
+              "round_proposed": 2,
+              "target_width": 1,
+              "draft_width": 1,
+              "qualification_authority": "serving_route"
+            },
+            "prompt_tokens": 66,
+            "completion_tokens": 64,
+            "ttft_seconds": 0.0773579160013469,
+            "elapsed_seconds": 1.7266722910026147
+          }
+        }
+      }
+    },
+    "batch": {
+      "passed": true,
+      "evidence": {
+        "observed_widths": [
+          3
+        ],
+        "wall_seconds": 13.831442457998492,
+        "aggregate_tokens_per_second": 46.27138506655889,
+        "request_receipts": [
+          {
+            "request_id": "chatcmpl-9077914daecc47d693344ab082e4c411",
+            "cache": "apcv2",
+            "cached_tokens": 53,
+            "profile": "muse-glimmer-apcv2-dflash2",
+            "qualification": "candidate",
+            "route_receipt": "candidate_validation",
+            "request_controls": {
+              "logprobs": false,
+              "top_logprobs": 0,
+              "logprob_semantics": null,
+              "thinking": false,
+              "sampling": {
+                "temperature": 0
+              },
+              "reasoning_effort": null,
+              "effort_semantics": "reasoning_strength",
+              "context_limit": 131072
+            },
+            "ordinary_compute_width": null,
+            "mtp": null,
+            "speculation": {
+              "kind": "external_dflash2",
+              "execution": "external_draft_verify",
+              "current_execution": "external_draft_verify",
+              "ordinary_fallback": false,
+              "external_rounds": 52,
+              "accepted": 108,
+              "proposed": 205,
+              "round_accepted": 1,
+              "round_proposed": 1,
+              "target_width": 3,
+              "draft_width": 2,
+              "qualification_authority": "serving_route"
+            },
+            "prompt_tokens": 67,
+            "completion_tokens": 160,
+            "ttft_seconds": 0.6601091249976889,
+            "elapsed_seconds": 13.827215540997713
+          },
+          {
+            "request_id": "chatcmpl-70a98dd4bc204e308319063825943a9f",
+            "cache": "apcv2",
+            "cached_tokens": 53,
+            "profile": "muse-glimmer-apcv2-dflash2",
+            "qualification": "candidate",
+            "route_receipt": "candidate_validation",
+            "request_controls": {
+              "logprobs": false,
+              "top_logprobs": 0,
+              "logprob_semantics": null,
+              "thinking": false,
+              "sampling": {
+                "temperature": 0
+              },
+              "reasoning_effort": null,
+              "effort_semantics": "reasoning_strength",
+              "context_limit": 131072
+            },
+            "ordinary_compute_width": null,
+            "mtp": null,
+            "speculation": {
+              "kind": "external_dflash2",
+              "execution": "external_draft_verify",
+              "current_execution": "external_draft_verify",
+              "ordinary_fallback": false,
+              "external_rounds": 52,
+              "accepted": 108,
+              "proposed": 205,
+              "round_accepted": 1,
+              "round_proposed": 1,
+              "target_width": 3,
+              "draft_width": 2,
+              "qualification_authority": "serving_route"
+            },
+            "prompt_tokens": 67,
+            "completion_tokens": 160,
+            "ttft_seconds": 0.22175974999845494,
+            "elapsed_seconds": 13.71531416599828
+          },
+          {
+            "request_id": "chatcmpl-ff59a1ce036d4a1f9b7cc099516282b6",
+            "cache": "apcv2",
+            "cached_tokens": 53,
+            "profile": "muse-glimmer-apcv2-dflash2",
+            "qualification": "candidate",
+            "route_receipt": "candidate_validation",
+            "request_controls": {
+              "logprobs": false,
+              "top_logprobs": 0,
+              "logprob_semantics": null,
+              "thinking": false,
+              "sampling": {
+                "temperature": 0
+              },
+              "reasoning_effort": null,
+              "effort_semantics": "reasoning_strength",
+              "context_limit": 131072
+            },
+            "ordinary_compute_width": null,
+            "mtp": null,
+            "speculation": {
+              "kind": "external_dflash2",
+              "execution": "external_draft_verify",
+              "current_execution": "external_draft_verify",
+              "ordinary_fallback": false,
+              "external_rounds": 52,
+              "accepted": 108,
+              "proposed": 205,
+              "round_accepted": 1,
+              "round_proposed": 1,
+              "target_width": 3,
+              "draft_width": 2,
+              "qualification_authority": "serving_route"
+            },
+            "prompt_tokens": 67,
+            "completion_tokens": 160,
+            "ttft_seconds": 0.4387387500028126,
+            "elapsed_seconds": 13.768898792000982
+          },
+          {
+            "request_id": "chatcmpl-3b1b8abed0ef4f75ba17151452918b5d",
+            "cache": "apcv2",
+            "cached_tokens": 53,
+            "profile": "muse-glimmer-apcv2-dflash2",
+            "qualification": "candidate",
+            "route_receipt": "candidate_validation",
+            "request_controls": {
+              "logprobs": false,
+              "top_logprobs": 0,
+              "logprob_semantics": null,
+              "thinking": false,
+              "sampling": {
+                "temperature": 0
+              },
+              "reasoning_effort": null,
+              "effort_semantics": "reasoning_strength",
+              "context_limit": 131072
+            },
+            "ordinary_compute_width": null,
+            "mtp": null,
+            "speculation": {
+              "kind": "external_dflash2",
+              "execution": "external_draft_verify",
+              "current_execution": "external_draft_verify",
+              "ordinary_fallback": false,
+              "external_rounds": 52,
+              "accepted": 108,
+              "proposed": 205,
+              "round_accepted": 1,
+              "round_proposed": 1,
+              "target_width": 3,
+              "draft_width": 2,
+              "qualification_authority": "serving_route"
+            },
+            "prompt_tokens": 67,
+            "completion_tokens": 160,
+            "ttft_seconds": 0.8768333750012971,
+            "elapsed_seconds": 13.827905124999234
+          }
+        ]
+      }
+    },
+    "mixed_warm": {
+      "passed": true,
+      "evidence": [
+        {
+          "request_id": "chatcmpl-f63751904b1640879f5ee963d89bddda",
+          "cache": "apcv2",
+          "cached_tokens": 68,
+          "profile": "muse-glimmer-apcv2-dflash2",
+          "qualification": "candidate",
+          "route_receipt": "candidate_validation",
+          "request_controls": {
+            "logprobs": false,
+            "top_logprobs": 0,
+            "logprob_semantics": null,
+            "thinking": false,
+            "sampling": {
+              "temperature": 0
+            },
+            "reasoning_effort": null,
+            "effort_semantics": "reasoning_strength",
+            "context_limit": 131072
+          },
+          "ordinary_compute_width": null,
+          "mtp": null,
+          "speculation": {
+            "kind": "external_dflash2",
+            "execution": "external_draft_verify",
+            "current_execution": "external_draft_verify",
+            "ordinary_fallback": false,
+            "external_rounds": 25,
+            "accepted": 39,
+            "proposed": 97,
+            "round_accepted": 1,
+            "round_proposed": 1,
+            "target_width": 2,
+            "draft_width": 2,
+            "qualification_authority": "serving_route"
+          },
+          "prompt_tokens": 69,
+          "completion_tokens": 64,
+          "ttft_seconds": 0.20056445799855283,
+          "elapsed_seconds": 3.3992571249982575
+        },
+        {
+          "request_id": "chatcmpl-397093b64748436395a75df5ab61f7d8",
+          "cache": "apcv2",
+          "cached_tokens": 69,
+          "profile": "muse-glimmer-apcv2-dflash2",
+          "qualification": "candidate",
+          "route_receipt": "candidate_validation",
+          "request_controls": {
+            "logprobs": false,
+            "top_logprobs": 0,
+            "logprob_semantics": null,
+            "thinking": false,
+            "sampling": {
+              "temperature": 0
+            },
+            "reasoning_effort": null,
+            "effort_semantics": "reasoning_strength",
+            "context_limit": 131072
+          },
+          "ordinary_compute_width": null,
+          "mtp": null,
+          "speculation": {
+            "kind": "external_dflash2",
+            "execution": "external_draft_verify",
+            "current_execution": "ordinary_target",
+            "ordinary_fallback": false,
+            "external_rounds": 26,
+            "accepted": 37,
+            "proposed": 103,
+            "round_accepted": 0,
+            "round_proposed": 0,
+            "target_width": 2,
+            "draft_width": 2,
+            "qualification_authority": "serving_route"
+          },
+          "prompt_tokens": 70,
+          "completion_tokens": 64,
+          "ttft_seconds": 0.07349462499769288,
+          "elapsed_seconds": 3.395296624999901
+        }
+      ]
+    }
+  },
+  "responses": {
+    "sampling_controls": [
+      {
+        "id": "chatcmpl-84201ad9653a42429cb1c44f138e1844",
+        "object": "chat.completion",
+        "created": 1789546418,
+        "model": "Muse-Glimmer-30B-mlx-4bit",
+        "choices": [
+          {
+            "index": 0,
+            "finish_reason": "stop",
+            "message": {
+              "role": "assistant",
+              "content": "Here are three fruits:\n\n1. Apple\n2. Banana\n3. Orange"
+            }
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 63,
+          "completion_tokens": 17,
+          "total_tokens": 80,
+          "prompt_tokens_details": {
+            "cached_tokens": 53
+          }
+        },
+        "mlx2": {
+          "request_id": "chatcmpl-84201ad9653a42429cb1c44f138e1844",
+          "cache": "apcv2",
+          "cached_tokens": 53,
+          "profile": "muse-glimmer-apcv2-dflash2",
+          "qualification": "candidate",
+          "route_receipt": "candidate_validation",
+          "request_controls": {
+            "logprobs": false,
+            "top_logprobs": 0,
+            "logprob_semantics": null,
+            "thinking": false,
+            "sampling": {
+              "temperature": 0.7,
+              "top_p": 0.9,
+              "top_k": 24,
+              "min_p": 0.05,
+              "repetition_penalty": 1.05,
+              "presence_penalty": 0.1,
+              "frequency_penalty": 0.1,
+              "seed": 237
+            },
+            "reasoning_effort": null,
+            "effort_semantics": "reasoning_strength",
+            "context_limit": 131072
+          },
+          "ordinary_compute_width": null,
+          "mtp": null,
+          "speculation": {
+            "kind": "external_dflash2",
+            "execution": "external_draft_verify",
+            "current_execution": "external_draft_verify",
+            "ordinary_fallback": false,
+            "external_rounds": 4,
+            "accepted": 13,
+            "proposed": 16,
+            "round_accepted": 1,
+            "round_proposed": 4,
+            "target_width": 1,
+            "draft_width": 1,
+            "qualification_authority": "serving_route"
+          },
+          "prompt_tokens": 63,
+          "completion_tokens": 17,
+          "ttft_seconds": 0.2001144160021795,
+          "elapsed_seconds": 0.41016279100222164
+        }
+      },
+      {
+        "id": "chatcmpl-7373b5abb6914b4984dc8b73cfc32f4b",
+        "object": "chat.completion",
+        "created": 1789546419,
+        "model": "Muse-Glimmer-30B-mlx-4bit",
+        "choices": [
+          {
+            "index": 0,
+            "finish_reason": "stop",
+            "message": {
+              "role": "assistant",
+              "content": "Here are three fruits:\n\n1. Apple\n2. Banana\n3. Orange"
+            }
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 63,
+          "completion_tokens": 17,
+          "total_tokens": 80,
+          "prompt_tokens_details": {
+            "cached_tokens": 62
+          }
+        },
+        "mlx2": {
+          "request_id": "chatcmpl-7373b5abb6914b4984dc8b73cfc32f4b",
+          "cache": "apcv2",
+          "cached_tokens": 62,
+          "profile": "muse-glimmer-apcv2-dflash2",
+          "qualification": "candidate",
+          "route_receipt": "candidate_validation",
+          "request_controls": {
+            "logprobs": false,
+            "top_logprobs": 0,
+            "logprob_semantics": null,
+            "thinking": false,
+            "sampling": {
+              "temperature": 0.7,
+              "top_p": 0.9,
+              "top_k": 24,
+              "min_p": 0.05,
+              "repetition_penalty": 1.05,
+              "presence_penalty": 0.1,
+              "frequency_penalty": 0.1,
+              "seed": 237
+            },
+            "reasoning_effort": null,
+            "effort_semantics": "reasoning_strength",
+            "context_limit": 131072
+          },
+          "ordinary_compute_width": null,
+          "mtp": null,
+          "speculation": {
+            "kind": "external_dflash2",
+            "execution": "external_draft_verify",
+            "current_execution": "external_draft_verify",
+            "ordinary_fallback": false,
+            "external_rounds": 4,
+            "accepted": 13,
+            "proposed": 16,
+            "round_accepted": 1,
+            "round_proposed": 4,
+            "target_width": 1,
+            "draft_width": 1,
+            "qualification_authority": "serving_route"
+          },
+          "prompt_tokens": 63,
+          "completion_tokens": 17,
+          "ttft_seconds": 0.07529637499828823,
+          "elapsed_seconds": 0.28615354200155707
+        }
+      }
+    ],
+    "cold": {
+      "id": "chatcmpl-942080927a0044f681f51b168298eb7b",
+      "object": "chat.completion",
+      "created": 1789546419,
+      "model": "Muse-Glimmer-30B-mlx-4bit",
+      "choices": [
+        {
+          "index": 0,
+          "finish_reason": "stop",
+          "message": {
+            "role": "assistant",
+            "content": "MLX2_READY"
+          }
+        }
+      ],
+      "usage": {
+        "prompt_tokens": 66,
+        "completion_tokens": 5,
+        "total_tokens": 71,
+        "prompt_tokens_details": {
+          "cached_tokens": 56
+        }
+      },
+      "mlx2": {
+        "request_id": "chatcmpl-942080927a0044f681f51b168298eb7b",
+        "cache": "apcv2",
+        "cached_tokens": 56,
+        "profile": "muse-glimmer-apcv2-dflash2",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": false,
+          "top_logprobs": 0,
+          "logprob_semantics": null,
+          "thinking": false,
+          "sampling": {
+            "temperature": 0
+          },
+          "reasoning_effort": null,
+          "effort_semantics": "reasoning_strength",
+          "context_limit": 131072
+        },
+        "ordinary_compute_width": null,
+        "mtp": null,
+        "speculation": {
+          "kind": "external_dflash2",
+          "execution": "external_draft_verify",
+          "current_execution": "external_draft_verify",
+          "ordinary_fallback": false,
+          "external_rounds": 1,
+          "accepted": 4,
+          "proposed": 4,
+          "round_accepted": 4,
+          "round_proposed": 4,
+          "target_width": 1,
+          "draft_width": 1,
+          "qualification_authority": "serving_route"
+        },
+        "prompt_tokens": 66,
+        "completion_tokens": 5,
+        "ttft_seconds": 0.22371325000131037,
+        "elapsed_seconds": 0.2255707500007702
+      }
+    },
+    "warm": {
+      "id": "chatcmpl-c5faea2a6b9442269c7d7fabc472e758",
+      "object": "chat.completion",
+      "created": 1789546419,
+      "model": "Muse-Glimmer-30B-mlx-4bit",
+      "choices": [
+        {
+          "index": 0,
+          "finish_reason": "stop",
+          "message": {
+            "role": "assistant",
+            "content": "MLX2_READY"
+          }
+        }
+      ],
+      "usage": {
+        "prompt_tokens": 66,
+        "completion_tokens": 5,
+        "total_tokens": 71,
+        "prompt_tokens_details": {
+          "cached_tokens": 65
+        }
+      },
+      "mlx2": {
+        "request_id": "chatcmpl-c5faea2a6b9442269c7d7fabc472e758",
+        "cache": "apcv2",
+        "cached_tokens": 65,
+        "profile": "muse-glimmer-apcv2-dflash2",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": false,
+          "top_logprobs": 0,
+          "logprob_semantics": null,
+          "thinking": false,
+          "sampling": {
+            "temperature": 0
+          },
+          "reasoning_effort": null,
+          "effort_semantics": "reasoning_strength",
+          "context_limit": 131072
+        },
+        "ordinary_compute_width": null,
+        "mtp": null,
+        "speculation": {
+          "kind": "external_dflash2",
+          "execution": "external_draft_verify",
+          "current_execution": "external_draft_verify",
+          "ordinary_fallback": false,
+          "external_rounds": 1,
+          "accepted": 4,
+          "proposed": 4,
+          "round_accepted": 4,
+          "round_proposed": 4,
+          "target_width": 1,
+          "draft_width": 1,
+          "qualification_authority": "serving_route"
+        },
+        "prompt_tokens": 66,
+        "completion_tokens": 5,
+        "ttft_seconds": 0.07334795900169411,
+        "elapsed_seconds": 0.0752504170013708
+      }
+    },
+    "batch": [
+      {
+        "id": "chatcmpl-9077914daecc47d693344ab082e4c411",
+        "object": "chat.completion",
+        "created": 1789546427,
+        "model": "Muse-Glimmer-30B-mlx-4bit",
+        "choices": [
+          {
+            "index": 0,
+            "finish_reason": "length",
+            "message": {
+              "role": "assistant",
+              "content": "A compiler is a program that translates source code written in a high-level programming language into machine code or another low-level language that a computer can execute. The process involves several stages, each with a specific purpose. Here's a detailed breakdown of how a compiler works:\n\n### 1. **Lexical Analysis (Scanning)**\n   - **Purpose**: The first step is to read the source code and break it into smaller units called **tokens**.\n   - **Process**: The compiler reads the source code character by character and groups them into meaningful chunks like keywords, identifiers, operators, literals, etc.\n   - **Example**: For the code `int x = 5;`, the tokens would be:\n     - `int` (keyword)\n     - `x` (identifier)\n     - `=`"
+            }
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 67,
+          "completion_tokens": 160,
+          "total_tokens": 227,
+          "prompt_tokens_details": {
+            "cached_tokens": 53
+          }
+        },
+        "mlx2": {
+          "request_id": "chatcmpl-9077914daecc47d693344ab082e4c411",
+          "cache": "apcv2",
+          "cached_tokens": 53,
+          "profile": "muse-glimmer-apcv2-dflash2",
+          "qualification": "candidate",
+          "route_receipt": "candidate_validation",
+          "request_controls": {
+            "logprobs": false,
+            "top_logprobs": 0,
+            "logprob_semantics": null,
+            "thinking": false,
+            "sampling": {
+              "temperature": 0
+            },
+            "reasoning_effort": null,
+            "effort_semantics": "reasoning_strength",
+            "context_limit": 131072
+          },
+          "ordinary_compute_width": null,
+          "mtp": null,
+          "speculation": {
+            "kind": "external_dflash2",
+            "execution": "external_draft_verify",
+            "current_execution": "external_draft_verify",
+            "ordinary_fallback": false,
+            "external_rounds": 52,
+            "accepted": 108,
+            "proposed": 205,
+            "round_accepted": 1,
+            "round_proposed": 1,
+            "target_width": 3,
+            "draft_width": 2,
+            "qualification_authority": "serving_route"
+          },
+          "prompt_tokens": 67,
+          "completion_tokens": 160,
+          "ttft_seconds": 0.6601091249976889,
+          "elapsed_seconds": 13.827215540997713
+        }
+      },
+      {
+        "id": "chatcmpl-70a98dd4bc204e308319063825943a9f",
+        "object": "chat.completion",
+        "created": 1789546427,
+        "model": "Muse-Glimmer-30B-mlx-4bit",
+        "choices": [
+          {
+            "index": 0,
+            "finish_reason": "length",
+            "message": {
+              "role": "assistant",
+              "content": "A compiler is a program that translates source code written in a high-level programming language into machine code or another low-level language that a computer can execute. The process involves several stages, each with a specific purpose. Here's a detailed breakdown of how a compiler works:\n\n### 1. **Lexical Analysis (Scanning)**\n   - **Purpose**: The first step is to read the source code and break it into smaller units called **tokens**.\n   - **Process**: The compiler reads the source code character by character and groups them into meaningful chunks like keywords, identifiers, operators, literals, etc.\n   - **Example**: For the code `int x = 5;`, the tokens would be:\n     - `int` (keyword)\n     - `x` (identifier)\n     - `=`"
+            }
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 67,
+          "completion_tokens": 160,
+          "total_tokens": 227,
+          "prompt_tokens_details": {
+            "cached_tokens": 53
+          }
+        },
+        "mlx2": {
+          "request_id": "chatcmpl-70a98dd4bc204e308319063825943a9f",
+          "cache": "apcv2",
+          "cached_tokens": 53,
+          "profile": "muse-glimmer-apcv2-dflash2",
+          "qualification": "candidate",
+          "route_receipt": "candidate_validation",
+          "request_controls": {
+            "logprobs": false,
+            "top_logprobs": 0,
+            "logprob_semantics": null,
+            "thinking": false,
+            "sampling": {
+              "temperature": 0
+            },
+            "reasoning_effort": null,
+            "effort_semantics": "reasoning_strength",
+            "context_limit": 131072
+          },
+          "ordinary_compute_width": null,
+          "mtp": null,
+          "speculation": {
+            "kind": "external_dflash2",
+            "execution": "external_draft_verify",
+            "current_execution": "external_draft_verify",
+            "ordinary_fallback": false,
+            "external_rounds": 52,
+            "accepted": 108,
+            "proposed": 205,
+            "round_accepted": 1,
+            "round_proposed": 1,
+            "target_width": 3,
+            "draft_width": 2,
+            "qualification_authority": "serving_route"
+          },
+          "prompt_tokens": 67,
+          "completion_tokens": 160,
+          "ttft_seconds": 0.22175974999845494,
+          "elapsed_seconds": 13.71531416599828
+        }
+      },
+      {
+        "id": "chatcmpl-ff59a1ce036d4a1f9b7cc099516282b6",
+        "object": "chat.completion",
+        "created": 1789546427,
+        "model": "Muse-Glimmer-30B-mlx-4bit",
+        "choices": [
+          {
+            "index": 0,
+            "finish_reason": "length",
+            "message": {
+              "role": "assistant",
+              "content": "A compiler is a program that translates source code written in a high-level programming language into machine code or another low-level language that a computer can execute. The process involves several stages, each with a specific purpose. Here's a detailed breakdown of how a compiler works:\n\n### 1. **Lexical Analysis (Scanning)**\n   - **Purpose**: The first step is to read the source code and break it into smaller units called **tokens**.\n   - **Process**: The compiler reads the source code character by character and groups them into meaningful chunks like keywords, identifiers, operators, literals, etc.\n   - **Example**: For the code `int x = 5;`, the tokens would be:\n     - `int` (keyword)\n     - `x` (identifier)\n     - `=`"
+            }
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 67,
+          "completion_tokens": 160,
+          "total_tokens": 227,
+          "prompt_tokens_details": {
+            "cached_tokens": 53
+          }
+        },
+        "mlx2": {
+          "request_id": "chatcmpl-ff59a1ce036d4a1f9b7cc099516282b6",
+          "cache": "apcv2",
+          "cached_tokens": 53,
+          "profile": "muse-glimmer-apcv2-dflash2",
+          "qualification": "candidate",
+          "route_receipt": "candidate_validation",
+          "request_controls": {
+            "logprobs": false,
+            "top_logprobs": 0,
+            "logprob_semantics": null,
+            "thinking": false,
+            "sampling": {
+              "temperature": 0
+            },
+            "reasoning_effort": null,
+            "effort_semantics": "reasoning_strength",
+            "context_limit": 131072
+          },
+          "ordinary_compute_width": null,
+          "mtp": null,
+          "speculation": {
+            "kind": "external_dflash2",
+            "execution": "external_draft_verify",
+            "current_execution": "external_draft_verify",
+            "ordinary_fallback": false,
+            "external_rounds": 52,
+            "accepted": 108,
+            "proposed": 205,
+            "round_accepted": 1,
+            "round_proposed": 1,
+            "target_width": 3,
+            "draft_width": 2,
+            "qualification_authority": "serving_route"
+          },
+          "prompt_tokens": 67,
+          "completion_tokens": 160,
+          "ttft_seconds": 0.4387387500028126,
+          "elapsed_seconds": 13.768898792000982
+        }
+      },
+      {
+        "id": "chatcmpl-3b1b8abed0ef4f75ba17151452918b5d",
+        "object": "chat.completion",
+        "created": 1789546427,
+        "model": "Muse-Glimmer-30B-mlx-4bit",
+        "choices": [
+          {
+            "index": 0,
+            "finish_reason": "length",
+            "message": {
+              "role": "assistant",
+              "content": "A compiler is a program that translates source code written in a high-level programming language into machine code or another low-level language that a computer can execute. The process involves several stages, each with a specific purpose. Here's a detailed breakdown of how a compiler works:\n\n### 1. **Lexical Analysis (Scanning)**\n   - **Purpose**: The first step is to read the source code and break it into smaller units called **tokens**.\n   - **Process**: The compiler reads the source code character by character and groups them into meaningful chunks like keywords, identifiers, operators, literals, etc.\n   - **Example**: For the code `int x = 5;`, the tokens would be:\n     - `int` (keyword)\n     - `x` (identifier)\n     - `=`"
+            }
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 67,
+          "completion_tokens": 160,
+          "total_tokens": 227,
+          "prompt_tokens_details": {
+            "cached_tokens": 53
+          }
+        },
+        "mlx2": {
+          "request_id": "chatcmpl-3b1b8abed0ef4f75ba17151452918b5d",
+          "cache": "apcv2",
+          "cached_tokens": 53,
+          "profile": "muse-glimmer-apcv2-dflash2",
+          "qualification": "candidate",
+          "route_receipt": "candidate_validation",
+          "request_controls": {
+            "logprobs": false,
+            "top_logprobs": 0,
+            "logprob_semantics": null,
+            "thinking": false,
+            "sampling": {
+              "temperature": 0
+            },
+            "reasoning_effort": null,
+            "effort_semantics": "reasoning_strength",
+            "context_limit": 131072
+          },
+          "ordinary_compute_width": null,
+          "mtp": null,
+          "speculation": {
+            "kind": "external_dflash2",
+            "execution": "external_draft_verify",
+            "current_execution": "external_draft_verify",
+            "ordinary_fallback": false,
+            "external_rounds": 52,
+            "accepted": 108,
+            "proposed": 205,
+            "round_accepted": 1,
+            "round_proposed": 1,
+            "target_width": 3,
+            "draft_width": 2,
+            "qualification_authority": "serving_route"
+          },
+          "prompt_tokens": 67,
+          "completion_tokens": 160,
+          "ttft_seconds": 0.8768333750012971,
+          "elapsed_seconds": 13.827905124999234
+        }
+      }
+    ]
+  },
+  "passed": false,
+  "failure_status_error": "<urlopen error [Errno 61] Connection refused>"
+}

@@ -1,0 +1,35 @@
+{
+  "failure": "near-limit HTTP request body exceeded fixed 2 MiB server cap before token admission",
+  "files": {
+    "north-gpu-qualification-runbook-b7924d26.sh": "8f58a38cc561071d307280967455b161e61ae367d1ab0b9cdcbc04f22f2339c1",
+    "preflight-thermal-stable.json": "bee977c04e1ff46277c47379637c8f884dc06b6531c25e0fcebb720d26bc430e",
+    "qualify-serving-thermal-barrier.py": "e12ea8a08d8ccba2d3084b09f8a1a2a2d8eae2feb10b2464f6a713b51f76ceba",
+    "route-qualification.candidate-b7924d26-8d32f490.json": "1100912382f19b9ca432b1bcf860929baa91d41f84c10a2fe194c5dce0aff8ad",
+    "server-b7924d26-8d32f490.log": "8d620aaf59059d93974c2c0e96fe25c1508d39b37ce79cbf7fe4c8907e843092",
+    "status-initial-b7924d26-8d32f490.json": "4b58cb36f981d81ab6f409f07661a6a6023e05e9eea958f89dd652272aad39ac",
+    "thermal-barrier-b7924d26-8d32f490.json": "82ce888b160d24afd529716cd86314a2a73967146c056dc6405d51f01e415ed4",
+    "watchdog-b7924d26-8d32f490.log": "33961ec9ea17528484e618f8bab1a785bce7c0812df0eb81f7f40cc9ef805c9f"
+  },
+  "qualification_complete": false,
+  "route_receipt_written": false,
+  "runtime_source_sha256": "b7924d2657a83fd8c236e29a862e1ba8fe95a1ac00c3dcd09502dac65c909457",
+  "schema": "mlx2.failed-qualification-attempt.v1",
+  "server_evidence": "HTTP 413 body must contain at most 2 MiB",
+  "short_gates_passed": [
+    "unit_tests",
+    "hermes_client",
+    "logprobs",
+    "sampling_controls",
+    "cold_text",
+    "warm_prefix",
+    "stream",
+    "tools",
+    "tool_roundtrip",
+    "reasoning",
+    "stop",
+    "seed_repeat",
+    "batch",
+    "mixed_warm"
+  ],
+  "thermal_barrier_passed": true
+}

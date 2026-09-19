@@ -1,0 +1,11 @@
+{
+  "agent_id": "root",
+  "binding_token": "[redacted]",
+  "campaign_id": "a7c8bc76c8e0462695fc182cf7cfb791",
+  "generation": 1,
+  "lease_id": "afae6deed32c47ae8da74a7fa69819c2",
+  "membership_id": "bf3f40afca9d44b4aa2b124715e3d71b",
+  "membership_token": "[redacted]",
+  "resource_key": "gpu",
+  "session_id": "59278a7e67bf4ff787598cbc40d40b4f"
+}

@@ -1,0 +1,61 @@
+{
+  "kind": "behavioral-design-inputs",
+  "recorded_at": "2026-09-17",
+  "code_copied": false,
+  "sources": [
+    {
+      "repository": "ollama/ollama",
+      "revision": "04124592beed1138ac9c27dff3506f497a6cb8a5",
+      "pull_request": "https://github.com/ollama/ollama/pull/18510",
+      "paths": ["mlxrunner/pipeline.go"],
+      "license": "MIT",
+      "lesson": "Trigger allocator reclamation when emitted-token progress crosses a threshold; speculative rounds can skip exact modulo values."
+    },
+    {
+      "repository": "vllm-project/vllm",
+      "revision": "12816851828aa7d070ef646b3ca57daab7aea476",
+      "pull_request": "https://github.com/vllm-project/vllm/pull/57261",
+      "paths": [
+        "vllm/v1/core/kv_cache_utils.py",
+        "vllm/v1/kv_cache_interface.py"
+      ],
+      "license": "Apache-2.0",
+      "lesson": "Speculative recurrent scratch is proportional to concurrently running requests, not every resident cache-capacity slot."
+    },
+    {
+      "repository": "vllm-project/vllm",
+      "revision": "55964a34ef46d4a5796b9ccb97f7d9ce1e3aab52",
+      "pull_request": "https://github.com/vllm-project/vllm/pull/57253",
+      "paths": ["vllm/v1/core/single_type_kv_cache_manager.py"],
+      "license": "Apache-2.0",
+      "lesson": "Do not retire recurrent state independently while a reusable attention-prefix boundary still refers to it."
+    },
+    {
+      "repository": "FlashML-org/FreeToken",
+      "revision": "ae8b3cfaef74bb3b687dce8e761f6355171c6137",
+      "pull_request": "https://github.com/FlashML-org/FreeToken/pull/505",
+      "paths": ["python/freetoken/scheduler/prefill.py"],
+      "license": "Apache-2.0",
+      "lesson": "A short final prefill chunk must publish recurrent state together with its exact logical sequence position."
+    },
+    {
+      "repository": "sgl-project/sglang",
+      "revision": "689bc20668e1a641ec26a1adb547101eb7677069",
+      "pull_request": "https://github.com/sgl-project/sglang/pull/39876",
+      "paths": ["python/sglang/srt/mem_cache/hybrid_cache/hybrid_pool_assembler.py"],
+      "license": "Apache-2.0",
+      "lesson": "Sparse global layer identifiers must not index storage allocated only by the number of participating layers."
+    }
+  ],
+  "mlx2_changes": [
+    "Generation allocator cleanup preserves its 512-round cadence but uses monotone threshold crossing so a future multi-step counter cannot skip reclamation.",
+    "Qwen3.8 cache geometry exposes resident recurrent bytes separately from per-running-lane speculative rollback scratch.",
+    "CPU regressions pin APCv2 atomic hybrid target/draft retirement and forced final short-chunk recurrent checkpoint metadata.",
+    "Static audit found no mlx2 transfer buffer indexed by sparse global layer id; PLE residency remains identity tuples and QSA summaries remain keyed by explicit layer identity."
+  ],
+  "validation": {
+    "syntax": "py_compile passed for all changed Python files",
+    "focused_cpu": ".venv/bin/python -m pytest -q tests/test_parallel_sampling.py tests/test_peer_pr_regressions.py tests/test_qwen38_memory.py tests/test_apcv2_lifecycle.py: 52 passed",
+    "gpu": "Apple M5 Max Metal-backed runtime suite passed 93 tests under CPG task f66db38878bb4affae24a23db6e7dda2 and /tmp/gpu.lock; no full-model route was selected or qualified"
+  }
+}

@@ -1,0 +1,14 @@
+unit_tests: PASS
+hermes_client: PASS
+logprobs: PASS
+sampling_controls: FAIL
+Evidence: /private/tmp/mlx2-xing/qualification/runs/xing4-0-gpu-20260918/x6-ordinary-qualification.json
+Traceback (most recent call last):
+  File "/private/tmp/mlx2-xing/scripts/qualify_serving.py", line 1163, in <module>
+    main()
+  File "/private/tmp/mlx2-xing/scripts/qualify_serving.py", line 731, in main
+    check("sampling_controls", content(sampling_a) == content(sampling_b) and bool(content(sampling_a))
+  File "/private/tmp/mlx2-xing/scripts/qualify_serving.py", line 680, in check
+    assert condition, name
+           ^^^^^^^^^
+AssertionError: sampling_controls

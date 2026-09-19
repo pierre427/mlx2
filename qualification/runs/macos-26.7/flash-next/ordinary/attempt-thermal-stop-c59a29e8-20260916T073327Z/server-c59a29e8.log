@@ -1,0 +1,72 @@
+[transformers] PyTorch was not found. Models won't be available and only tokenizers, configuration and file/data utilities can be used.
+2026-09-16 03:33:20,148 INFO "GET /health HTTP/1.1" 503 -
+2026-09-16 03:33:21,168 INFO "GET /health HTTP/1.1" 503 -
+2026-09-16 03:33:22,288 INFO "GET /health HTTP/1.1" 503 -
+2026-09-16 03:33:23,314 INFO "GET /health HTTP/1.1" 503 -
+2026-09-16 03:33:24,342 INFO "GET /health HTTP/1.1" 503 -
+2026-09-16 03:33:25,411 INFO "GET /health HTTP/1.1" 503 -
+----------------------------------------
+Exception occurred during processing of request from ('127.0.0.1', 50607)
+Traceback (most recent call last):
+  File "~/.local/share/uv/python/cpython-3.12.13-macos-aarch64-none/lib/python3.12/socketserver.py", line 697, in process_request_thread
+    self.finish_request(request, client_address)
+  File "~/.local/share/uv/python/cpython-3.12.13-macos-aarch64-none/lib/python3.12/socketserver.py", line 362, in finish_request
+    self.RequestHandlerClass(request, client_address, self)
+  File "~/.local/share/uv/python/cpython-3.12.13-macos-aarch64-none/lib/python3.12/socketserver.py", line 766, in __init__
+    self.handle()
+  File "~/.local/share/uv/python/cpython-3.12.13-macos-aarch64-none/lib/python3.12/http/server.py", line 442, in handle
+    self.handle_one_request()
+  File "~/.local/share/uv/python/cpython-3.12.13-macos-aarch64-none/lib/python3.12/http/server.py", line 408, in handle_one_request
+    self.raw_requestline = self.rfile.readline(65537)
+                           ^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "~/.local/share/uv/python/cpython-3.12.13-macos-aarch64-none/lib/python3.12/socket.py", line 720, in readinto
+    return self._sock.recv_into(b)
+           ^^^^^^^^^^^^^^^^^^^^^^^
+ConnectionResetError: [Errno 54] Connection reset by peer
+----------------------------------------
+2026-09-16 03:33:25,969 INFO ubc_evict: evicted 5025.7 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00001-of-00020.safetensors
+2026-09-16 03:33:25,970 INFO ubc_evict: evicted 5006.8 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00002-of-00020.safetensors
+2026-09-16 03:33:25,970 INFO ubc_evict: evicted 5006.8 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00003-of-00020.safetensors
+2026-09-16 03:33:25,970 INFO ubc_evict: evicted 5006.8 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00004-of-00020.safetensors
+2026-09-16 03:33:25,970 INFO ubc_evict: evicted 5006.8 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00005-of-00020.safetensors
+2026-09-16 03:33:25,970 INFO ubc_evict: evicted 5006.8 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00006-of-00020.safetensors
+2026-09-16 03:33:25,979 INFO ubc_evict: evicted 5022.3 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00007-of-00020.safetensors
+2026-09-16 03:33:26,013 INFO ubc_evict: evicted 5076.7 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00008-of-00020.safetensors
+2026-09-16 03:33:26,042 INFO ubc_evict: evicted 5115.4 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00009-of-00020.safetensors
+2026-09-16 03:33:26,076 INFO ubc_evict: evicted 5115.4 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00010-of-00020.safetensors
+2026-09-16 03:33:26,103 INFO ubc_evict: evicted 5073.2 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00011-of-00020.safetensors
+2026-09-16 03:33:26,130 INFO ubc_evict: evicted 5115.4 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00012-of-00020.safetensors
+2026-09-16 03:33:26,166 INFO ubc_evict: evicted 5115.4 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00013-of-00020.safetensors
+2026-09-16 03:33:26,197 INFO ubc_evict: evicted 5073.2 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00014-of-00020.safetensors
+2026-09-16 03:33:26,203 INFO ubc_evict: evicted 5115.4 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00015-of-00020.safetensors
+2026-09-16 03:33:26,207 INFO ubc_evict: evicted 5115.4 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00016-of-00020.safetensors
+2026-09-16 03:33:26,211 INFO ubc_evict: evicted 5073.2 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00017-of-00020.safetensors
+2026-09-16 03:33:26,216 INFO ubc_evict: evicted 5115.4 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00018-of-00020.safetensors
+2026-09-16 03:33:26,221 INFO ubc_evict: evicted 5115.4 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00019-of-00020.safetensors
+2026-09-16 03:33:26,221 INFO ubc_evict: evicted 1704.3 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00020-of-00020.safetensors
+2026-09-16 03:33:26,221 INFO ubc_evict: evicted 1399.3 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-mtp-q4.safetensors
+2026-09-16 03:33:26,221 INFO ubc_evict: pass complete total_mb=99405.2 elapsed_s=0.28
+[transformers] You are using a model of type `qwen4_exp` to instantiate a model of type ``. This may be expected if you are loading a checkpoint that shares a subset of the architecture (e.g., loading a `sam2_video` checkpoint into `Sam2Model`), but is otherwise not supported and can yield errors. Please verify that the checkpoint is compatible with the model you are instantiating.
+2026-09-16 03:33:26,558 INFO "GET /health HTTP/1.1" 503 -
+----------------------------------------
+Exception occurred during processing of request from ('127.0.0.1', 50608)
+Traceback (most recent call last):
+  File "~/.local/share/uv/python/cpython-3.12.13-macos-aarch64-none/lib/python3.12/socketserver.py", line 697, in process_request_thread
+    self.finish_request(request, client_address)
+  File "~/.local/share/uv/python/cpython-3.12.13-macos-aarch64-none/lib/python3.12/socketserver.py", line 362, in finish_request
+    self.RequestHandlerClass(request, client_address, self)
+  File "~/.local/share/uv/python/cpython-3.12.13-macos-aarch64-none/lib/python3.12/socketserver.py", line 766, in __init__
+    self.handle()
+  File "~/.local/share/uv/python/cpython-3.12.13-macos-aarch64-none/lib/python3.12/http/server.py", line 442, in handle
+    self.handle_one_request()
+  File "~/.local/share/uv/python/cpython-3.12.13-macos-aarch64-none/lib/python3.12/http/server.py", line 408, in handle_one_request
+    self.raw_requestline = self.rfile.readline(65537)
+                           ^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "~/.local/share/uv/python/cpython-3.12.13-macos-aarch64-none/lib/python3.12/socket.py", line 720, in readinto
+    return self._sock.recv_into(b)
+           ^^^^^^^^^^^^^^^^^^^^^^^
+ConnectionResetError: [Errno 54] Connection reset by peer
+----------------------------------------
+2026-09-16 03:33:27,698 INFO "GET /health HTTP/1.1" 200 -
+2026-09-16 03:33:27,824 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 03:33:27,902 INFO "GET /v1/status HTTP/1.1" 200 -

@@ -1,0 +1,31 @@
+unit_tests: PASS
+hermes_client: PASS
+logprobs: PASS
+sampling_controls: PASS
+cold_text: PASS
+warm_prefix: PASS
+stream: PASS
+tools: PASS
+tool_roundtrip: PASS
+reasoning: PASS
+stop: PASS
+seed_repeat: PASS
+batch: PASS
+mixed_warm: PASS
+context: PASS
+shared_cohort_priming: PASS
+shared_warm_requests: PASS
+context_bound: PASS
+cancel: PASS
+recovery: PASS
+cache_leases: FAIL
+Evidence: qualification/runs/macos-26.7/qwen38-27b/ordinary/route-qualification-0f478057.json
+Traceback (most recent call last):
+  File "~/Desktop/mlx2/scripts/qualify_serving.py", line 435, in <module>
+    main()
+  File "~/Desktop/mlx2/scripts/qualify_serving.py", line 412, in main
+    check(
+  File "~/Desktop/mlx2/scripts/qualify_serving.py", line 112, in check
+    assert condition, name
+           ^^^^^^^^^
+AssertionError: cache_leases

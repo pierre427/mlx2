@@ -1,0 +1,9 @@
+Traceback (most recent call last):
+  File "/private/tmp/mlx2-xing/scripts/qualify_serving.py", line 1168, in <module>
+    main()
+  File "/private/tmp/mlx2-xing/scripts/qualify_serving.py", line 677, in main
+    trusted_preflight = (validate_preflight_receipt(args.preflight_receipt, initial["runtime"])
+                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/private/tmp/mlx2-xing/scripts/qualify_serving.py", line 347, in validate_preflight_receipt
+    raise AssertionError("preflight receipt does not match current git/runtime source/harness identity")
+AssertionError: preflight receipt does not match current git/runtime source/harness identity

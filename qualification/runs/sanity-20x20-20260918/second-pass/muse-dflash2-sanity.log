@@ -1,0 +1,41 @@
+round 00   19.0s   611 tok    32.2 tok/s errors=2
+round 01   20.9s   707 tok    33.8 tok/s errors=2
+round 02   20.0s   661 tok    33.1 tok/s errors=2
+round 03   19.1s   662 tok    34.7 tok/s errors=2
+round 04   18.6s   641 tok    34.5 tok/s errors=2
+round 05   19.7s   675 tok    34.3 tok/s errors=2
+round 06   19.4s   706 tok    36.4 tok/s errors=2
+round 07   22.8s   785 tok    34.4 tok/s errors=2
+round 08   19.5s   672 tok    34.4 tok/s errors=2
+round 09   22.3s   766 tok    34.4 tok/s errors=2
+round 10   20.3s   716 tok    35.2 tok/s errors=2
+round 11   20.1s   658 tok    32.7 tok/s errors=2
+round 12   22.0s   731 tok    33.2 tok/s errors=2
+round 13   21.6s   727 tok    33.7 tok/s errors=2
+round 14   22.6s   766 tok    33.9 tok/s errors=2
+round 15   20.5s   708 tok    34.6 tok/s errors=2
+round 16   20.6s   730 tok    35.4 tok/s errors=2
+round 17   22.3s   728 tok    32.7 tok/s errors=2
+round 18   21.7s   725 tok    33.4 tok/s errors=2
+round 19   23.4s   717 tok    30.6 tok/s errors=2
+SUMMARY requests=400 correct=360 hard_failures=80 issues={'http_502': 40} healthy=True
+  arithmetic           20/20 
+  arithmetic_mul       20/20 
+  capital              20/20 
+  capital_sentence     20/20 
+  sequence             20/20 
+  translate            20/20 
+  code                 20/20 
+  list                 20/20 
+  json_object           0/20 {'http_502': 20}
+  json_schema           0/20 {'http_502': 20}
+  stop_string          20/20 
+  stream               20/20 
+  tool_call            20/20 
+  system_multi_turn    20/20 
+  needle               20/20 
+  sampled_prose        20/20 
+  sampled_topk         20/20 
+  logprobs             20/20 
+  two_samples          20/20 
+  explain              20/20 

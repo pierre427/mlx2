@@ -1,0 +1,12 @@
+{
+  "schema": "mlx2.kernel-qualification.v1",
+  "mlx_version": "0.32.2.dev20260915+2a817ad94",
+  "sdpa_header_sha256": "2100a4d1eaa8a524c5147c82c771cad75197495c72daffa03e7ea4c259aebf10",
+  "command": "MLX_QWEN4_QSA_INDEXED_TEST_METAL=1 MLX_QWEN4_QSA_INDEXED_ALLOW_UNVERIFIED_MLX=1 .venv/bin/python -m pytest tests/test_qwen4_qsa_indexed.py -q",
+  "exit_code": 0,
+  "tests": 62,
+  "skipped": 0,
+  "log": "....................................... [ 62%]\n.......................                                 [100%]\n",
+  "verified_by": "root exclusive GPU qualification, CPG radio seq1075",
+  "scope": "Indexed and private-delta Metal exactness; does not establish full-model or throughput qualification"
+}

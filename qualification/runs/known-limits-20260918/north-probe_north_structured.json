@@ -1,0 +1,134 @@
+{
+  "thinking_default_schema_valid": {
+    "ok": true,
+    "docs": [
+      {
+        "city": "Paris",
+        "population": 2165000,
+        "coastal": false
+      },
+      {
+        "city": "Budapest",
+        "population": 1770000,
+        "coastal": true
+      },
+      {
+        "city": "Lisbon",
+        "population": 544,
+        "coastal": true
+      },
+      {
+        "city": "Ottawa",
+        "population": 934000,
+        "coastal": true
+      },
+      {
+        "city": "Helsinki",
+        "population": 658571,
+        "coastal": true
+      },
+      {
+        "city": "Havana",
+        "population": 2164,
+        "coastal": true
+      }
+    ],
+    "deferred_tokens": [
+      84,
+      189,
+      117,
+      466,
+      239,
+      51
+    ],
+    "errors": [
+      null,
+      null,
+      null,
+      null,
+      null,
+      null
+    ],
+    "finish": [
+      "stop",
+      "stop",
+      "stop",
+      "stop",
+      "stop",
+      "stop"
+    ]
+  },
+  "reasoning_and_answer_are_separated": {
+    "ok": true,
+    "reasoning_chars": [
+      400,
+      933,
+      586,
+      1905,
+      937,
+      230
+    ],
+    "content": [
+      "{\n  \"city\": \"Paris\",\n  \"population\": 2165000,\n  \"coastal\": false\n  }",
+      "{\n  \"city\": \"Budapest\",\n  \"population\": 1770000,\n  \"coastal\":                   ",
+      "{\n  \"city\": \"Lisbon\",\n  \"population\": 544, \"coastal\":                           ",
+      "{\n  \"city\": \"Ottawa\",\n  \"population\": 934000,\n  \"coastal\": \t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t",
+      "{\n  \"city\": \"Helsinki\",\n  \"population\": 658571,\n  \"coastal\":                    ",
+      "{\n  \"city\": \"Havana\",\n  \"population\": 2164, \"coastal\":                          "
+    ]
+  },
+  "quality_with_thinking": {
+    "ok": false,
+    "coastal_correct": "4/6",
+    "padded_documents": 4,
+    "populations": [
+      2165000,
+      1770000,
+      544,
+      934000,
+      658571,
+      2164
+    ]
+  },
+  "thinking_off_still_enforced": {
+    "ok": true,
+    "content": [
+      "{\n  \"city\": \"Paris\",\n  \"population\": 2148000,\n  \"coastal\":                                ",
+      "{\n  \"city\": \"Budapest\",\n  \"population\": 1750000,\n  \"coastal\":                             ",
+      "{\n  \"city\": \"Lisbon\",\n  \"population\": 544,\n  \"coastal\":                                tru"
+    ],
+    "padded": 3
+  },
+  "json_object_thinking_default": {
+    "ok": true,
+    "content": "{\n  \"country\": \"Kenya\",\n  \"capital\": \"Nairobi\"\n}",
+    "receipt": {
+      "kind": "json_object",
+      "enforced": true,
+      "engine": "automaton",
+      "tail_mass_bound": 0.0,
+      "parallel_scans": 0,
+      "deferred": true,
+      "deferred_tokens": 109
+    }
+  },
+  "raw_grammar_thinking_default": {
+    "ok": true,
+    "content": "yes",
+    "receipt": {
+      "kind": "grammar",
+      "enforced": true,
+      "engine": "automaton",
+      "tail_mass_bound": 0.0,
+      "parallel_scans": 0,
+      "deferred": true,
+      "deferred_tokens": 45
+    },
+    "error": null
+  },
+  "server_alive_final": {
+    "ok": true,
+    "inflight": 0,
+    "error": null
+  }
+}

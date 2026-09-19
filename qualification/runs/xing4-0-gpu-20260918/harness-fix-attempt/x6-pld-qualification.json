@@ -1,0 +1,220 @@
+{
+  "schema": "mlx2.serving-qualification.v1",
+  "timestamp": 1789780419.5218391,
+  "runtime": {
+    "source_sha256": "1f9db15f64da2a8dcda2fc3ab705ed174f7a34f43e7fe3d7727f4918fdb01857",
+    "mlx_native_sha256": "30335939714520c3306cfa58597100aae08bbeabdc60a4bc8c35c32c607450a8",
+    "python": "3.12.13",
+    "macos": "26.7",
+    "mlx": "0.32.2.dev20260915+2a817ad94",
+    "transformers": "5.17.0",
+    "dependencies": {
+      "numpy": "2.5.1",
+      "tokenizers": "0.23.2",
+      "jinja2": "3.1.6",
+      "psutil": "7.2.2",
+      "regex": "2026.9.10",
+      "safetensors": "0.8.0"
+    }
+  },
+  "qualification_harness": {
+    "schema": "mlx2.qualification-harness.v1",
+    "name": "scripts/qualify_serving.py",
+    "sha256": "e4592aa06e86f92772461688e0e79814da99063b2fd7fa2f08453ecfa4813789"
+  },
+  "artifact": "70ae09c8721dfb83d42d5d89b47383790aaf326f81da64400161fd2eddd0498c",
+  "settings": {
+    "max_context": 32768,
+    "max_lanes": 4,
+    "max_inflight": 8,
+    "prefill_step": 2048,
+    "cache_bytes": 8589934592,
+    "disk_cache": true,
+    "host_prompt_cache_entries": 128,
+    "host_prompt_cache_tokens": 1048576,
+    "coalesce_window_ms": 5.0,
+    "batch_cohort_timeout_ms": 1000.0,
+    "mtp": false,
+    "tenant_scoped_cache": false,
+    "environment": {
+      "HF_HUB_OFFLINE": "1",
+      "TRANSFORMERS_OFFLINE": "1",
+      "MLX_ENABLE_TF32": "0",
+      "MLX_LM_COMPILED_DECODE": "0",
+      "MLX_LM_SEGMENTED_SELF_MTP": "1",
+      "MLX_LM_TRUE_BATCHED_SEGMENTED_MTP": "1",
+      "MLX_LM_SHARED_QSA_SUFFIX": "0",
+      "MLX_LM_MTP_BOUNDARY_COW": "1"
+    },
+    "adaptive_mtp_depth": {
+      "enabled": false,
+      "ewma_alpha": 0.25,
+      "shrink_gate": 0.35,
+      "grow_gate": 0.8,
+      "loss_rounds": 3,
+      "gain_rounds": 3,
+      "park_rounds": 4
+    },
+    "spomin_live_surgery": {
+      "enabled": false,
+      "capacity_tokens": 0,
+      "segment_tokens": 1024,
+      "strategy": "oldest_contiguous",
+      "protect_prefix_segments": 1
+    },
+    "thinking_budget": 0,
+    "thinking_steer": {
+      "alpha": 0.0,
+      "hammer": 0.0,
+      "calibration": {
+        "state": "unsupported"
+      }
+    },
+    "thinking_defaults_source": "none",
+    "cache_capsules": {
+      "enabled": false,
+      "backend": "gpu",
+      "fallback": "gpu",
+      "deadline_ms": 50.0,
+      "verify_raw_bits": false
+    },
+    "persistent_block_bytes": 0,
+    "approximate_kv": {
+      "enabled": false,
+      "operation": null,
+      "start_tokens": 0,
+      "evidence": [],
+      "descriptor": null
+    },
+    "execution_policy": {
+      "persistent": true,
+      "num_draft": 1,
+      "rate_gate": false,
+      "prefill_step_size": 2048,
+      "segment_aware_live_tip": true,
+      "segment_aware_cohort_size": 4
+    },
+    "prompt_lookup": {
+      "num_draft": 8,
+      "ngram_min": 3,
+      "ngram_max": 6
+    },
+    "decode_time_fairness": {
+      "enabled": false,
+      "fair_share": 0.5,
+      "stall_target_ms": 500.0
+    },
+    "speculation": "prompt_lookup",
+    "cache_budget": {
+      "schema": "xing4-0-mla-cache-geometry-v1",
+      "attention_layers": 40,
+      "mtp_layers": 0,
+      "latent_dim": 512,
+      "rope_dim": 64,
+      "item_bytes": 4,
+      "allocation_step": 256,
+      "transcript_bytes_per_token": 16,
+      "transient_gib_per_lane": 3.1,
+      "bound": "fp32-mla-latent-plus-rope-key",
+      "workspace": "3.1-GiB-per-lane conservative static assumption; live qualification pending"
+    }
+  },
+  "coverage": {
+    "response_format_json_object": false,
+    "strict_json_schema": true,
+    "explicit_grammar": false,
+    "physical_n2": false,
+    "overload_429_retry_after": false,
+    "latency_ttft_itl_percentiles": false,
+    "tenant_jain_fairness": false,
+    "progress_events": false
+  },
+  "checks": {
+    "unit_tests": {
+      "passed": true,
+      "evidence": {
+        "path": "/private/tmp/mlx2-xing/qualification/runs/xing4-0-gpu-20260918/preflight.json",
+        "sha256": "17016af59ecfee28e26170092c250747495b7da0910e8d180e73761f39827aac",
+        "identity": {
+          "git": {
+            "revision": "fd00ccf05f79dc224a65fbeb0c70969ea1d74f81"
+          },
+          "runtime": {
+            "source_sha256": "1f9db15f64da2a8dcda2fc3ab705ed174f7a34f43e7fe3d7727f4918fdb01857",
+            "mlx_native_sha256": "30335939714520c3306cfa58597100aae08bbeabdc60a4bc8c35c32c607450a8",
+            "python": "3.12.13",
+            "macos": "26.7",
+            "mlx": "0.32.2.dev20260915+2a817ad94",
+            "transformers": "5.17.0",
+            "dependencies": {
+              "numpy": "2.5.1",
+              "tokenizers": "0.23.2",
+              "jinja2": "3.1.6",
+              "psutil": "7.2.2",
+              "regex": "2026.9.10",
+              "safetensors": "0.8.0"
+            }
+          },
+          "qualification_harness": {
+            "schema": "mlx2.qualification-harness.v1",
+            "name": "scripts/qualify_serving.py",
+            "sha256": "e4592aa06e86f92772461688e0e79814da99063b2fd7fa2f08453ecfa4813789"
+          },
+          "test_source_sha256": "5faff0e084e5afadee2f40a7e0a3b99e34718bb9ea88daba6d22b1f512a263a9"
+        },
+        "passed": true
+      }
+    }
+  },
+  "responses": {},
+  "passed": false,
+  "thinking_budget": {
+    "thinking_default": true,
+    "extra_completion_tokens": 4096
+  },
+  "coverage_scope": {
+    "core_serving": "inline",
+    "long_context": {
+      "mode": "inline",
+      "checks": [
+        "context",
+        "shared_cohort_priming",
+        "shared_warm_requests",
+        "context_bound"
+      ]
+    }
+  },
+  "preflight_receipt": {
+    "path": "/private/tmp/mlx2-xing/qualification/runs/xing4-0-gpu-20260918/preflight.json",
+    "sha256": "17016af59ecfee28e26170092c250747495b7da0910e8d180e73761f39827aac",
+    "identity": {
+      "git": {
+        "revision": "fd00ccf05f79dc224a65fbeb0c70969ea1d74f81"
+      },
+      "runtime": {
+        "source_sha256": "1f9db15f64da2a8dcda2fc3ab705ed174f7a34f43e7fe3d7727f4918fdb01857",
+        "mlx_native_sha256": "30335939714520c3306cfa58597100aae08bbeabdc60a4bc8c35c32c607450a8",
+        "python": "3.12.13",
+        "macos": "26.7",
+        "mlx": "0.32.2.dev20260915+2a817ad94",
+        "transformers": "5.17.0",
+        "dependencies": {
+          "numpy": "2.5.1",
+          "tokenizers": "0.23.2",
+          "jinja2": "3.1.6",
+          "psutil": "7.2.2",
+          "regex": "2026.9.10",
+          "safetensors": "0.8.0"
+        }
+      },
+      "qualification_harness": {
+        "schema": "mlx2.qualification-harness.v1",
+        "name": "scripts/qualify_serving.py",
+        "sha256": "e4592aa06e86f92772461688e0e79814da99063b2fd7fa2f08453ecfa4813789"
+      },
+      "test_source_sha256": "5faff0e084e5afadee2f40a7e0a3b99e34718bb9ea88daba6d22b1f512a263a9"
+    },
+    "passed": true
+  },
+  "failure_status_error": "[Errno 54] Connection reset by peer"
+}

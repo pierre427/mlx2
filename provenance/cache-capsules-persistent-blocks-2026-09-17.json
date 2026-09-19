@@ -1,0 +1,39 @@
+{
+  "kind": "mined-implementation-and-design-inputs",
+  "recorded_at": "2026-09-17",
+  "sources": [
+    {
+      "repository": "local mlx-lm-unified",
+      "revision": "13eb83388750435bcc751d0b9e33857a38152544",
+      "paths": ["mlx_lm/cache_capsule.py", "tests/test_cache_capsule.py"],
+      "license": "MIT",
+      "use": "Generation-stamped cache-capsule ownership, external build staging/adoption, deadline fallback, late-result disposal, and bounded engagement counters."
+    },
+    {
+      "repository": "local Rapid-MLX",
+      "revision": "ee101f1bcfb20f343916edd877969aa2a2ac1b98",
+      "paths": ["vllm_mlx/memory_cache.py", "vllm_mlx/cache/protocol.py"],
+      "license": "Apache-2.0",
+      "use": "Design inputs only: save identity, explicit token-count validation, per-entry corruption detection, and exact compatibility gating."
+    }
+  ],
+  "mlx2_changes": [
+    "Kept APCv2 as the sole cache engine and added a default-off transient B1-to-Bn physical fanout boundary.",
+    "Bound every capsule to complete APC model, revision, adapter, tokenizer, cache-layout, semantic, and runtime-layout identity.",
+    "Reserved APCv2 resident capacity before publication and repeated the generation check after reservation.",
+    "Added ownership leases, first-consumer synchronization, one-worker external staging, deadline fallback, and late-result disposal.",
+    "Wired a qualification-only ordinary-serving path that prepares exact warm APCv2 fanout, transfers ownership into BatchGenerator, records per-request engagement receipts, and falls back atomically.",
+    "Required external adapters to stage allowlisted host-only buffers; worker threads are rejected before launch for MLX arrays or opaque wrappers, and stale/adoption/final-validation faults terminalize and dispose exactly once.",
+    "Added optional block-granular APCv2 disk snapshots with per-block and whole-file SHA-256 manifests, strict contained block paths, orphan cleanup, save identity, and logical token-count checks.",
+    "Made fanout attachment all-or-nothing across pending member removal, queued cancellation, and bind exceptions; inserted lanes are rolled back before terminal publication.",
+    "Declined capsule preparation when occupied scheduler width cannot attach every sibling before the next step, with an explicit per-request fallback receipt.",
+    "Reserved and generation-validated the complete mixed prepared-cache Bn footprint transactionally before any capsule build or ordinary merge, with per-plane byte claims, no double charge, and release after the final consumer.",
+    "Allowed mixed model caches to capsule at least one exact plain-KV plane while preserving unsupported mergeable planes through the ordinary batch merge; live Muse GPU evidence found and closed the previous all-planes gate.",
+    "Retained ordinary whole-file snapshots when persistent_block_bytes is zero."
+  ],
+  "validation": {
+    "focused_cpu": "PYTHONPATH=src ~/Desktop/mlx2/.venv/bin/python -m pytest -q tests/test_cache_capsule_and_blocks.py tests/test_serving_cache_capsule.py: 29 passed",
+    "serving_and_apcv2_regression": "PYTHONPATH=src ~/Desktop/mlx2/.venv/bin/python -m pytest -q tests/test_cache_capsule_and_blocks.py tests/test_serving_cache_capsule.py tests/test_parallel_sampling_fanout.py tests/test_serving_retention.py tests/test_serving_deferred_admission.py tests/test_apcv2_lifecycle.py tests/test_boundary_qualification.py tests/test_admission_progress.py tests/test_serving_adaptive_mtp.py tests/test_segmented_mtp.py: 183 passed",
+    "gpu": "Apple GPU mechanism smokes on 2026-09-18: exact final implementation commit bb882313c6434abb56e709a9f035b323352c9035 live Muse Glimmer B1-to-B2 fanout leased the 108-token committed APCv2 boundary and engaged a 52-plane mixed prepared cache (13 capsule plus 39 ordinary planes) for both siblings. Direct APCv2 persistence restored 511 tokens from nine verified blocks; synthetic GPU capsule construction used backend=gpu with raw-bit verification. These are observed-use/correctness smokes, not performance or production qualification."
+  }
+}

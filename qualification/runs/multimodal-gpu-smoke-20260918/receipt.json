@@ -1,0 +1,96 @@
+{
+  "schema": "mlx2.multimodal-gpu-smoke-summary.v1",
+  "date": "2026-09-18",
+  "scope": "candidate_smoke_only",
+  "gpu_used": true,
+  "production_qualification": false,
+  "source_sha256": "667cbf92386f13abc2bd7556d1810709b5e5e89e84001e1d9b56afba0daa201f",
+  "post_rebase_rerun": true,
+  "profile": "mlx-vlm-apcv2-ordinary",
+  "runtime": {
+    "python": "3.12.13",
+    "mlx": "0.32.2.dev20260915+2a817ad94",
+    "transformers": "5.17.0",
+    "mlx_vlm_source_revision": "653f1f13e238abb313fd45071bbd04b3de414635",
+    "mlx_vlm_current_upstream_reviewed": "e79b0e041677ec4ca5333ba750376bb4e8c434cb"
+  },
+  "models": {
+    "gemma3n": {
+      "artifact": "google/gemma-3n-E2B-it",
+      "snapshot": "5e092ebca197cdcd8d8b195040accf22693501bc",
+      "artifact_fingerprint": "28079b529f5164b90d5157e81858819f2423bb6c9b40c75095db0fe2bc284156",
+      "cases": {
+        "video_first": {
+          "passed": true,
+          "output": "Static",
+          "finish_reason": "stop",
+          "prompt_tokens": 575,
+          "completion_tokens": 2,
+          "cached_tokens": 0
+        },
+        "video_repeat": {
+          "passed": true,
+          "output": "Static",
+          "finish_reason": "stop",
+          "prompt_tokens": 575,
+          "completion_tokens": 2,
+          "cached_tokens": 574
+        },
+        "audio": {
+          "passed": true,
+          "finite_text_output": true,
+          "finish_reason": "length",
+          "prompt_tokens": 210,
+          "completion_tokens": 8,
+          "cached_tokens": 0
+        }
+      },
+      "post_repeat_apcv2": {
+        "lookups": 2,
+        "hits": 1,
+        "misses": 1,
+        "cached_tokens": 574,
+        "stores": 4,
+        "publication_errors": 0
+      },
+      "media_feature_cache": {
+        "entries": 1,
+        "misses": 1,
+        "stores": 1
+      }
+    },
+    "minicpmo": {
+      "artifact": "openbmb/MiniCPM-o-2_6",
+      "snapshot": "06849bfd36da94da1f5a88fa17e8ba63f08a4c4d",
+      "cases": {
+        "image_audio": {
+          "passed": true,
+          "output": "The image is a solid red background with",
+          "finish_reason": "length",
+          "prompt_tokens": 121,
+          "completion_tokens": 8,
+          "cached_tokens": 0
+        }
+      }
+    }
+  },
+  "assets": {
+    "video": {
+      "bytes": 2833,
+      "sha256": "529a122979f74d03e1c955275a6785f6db3d6baa57ccde989ad5cbffb57645c6"
+    },
+    "audio": {
+      "bytes": 40078,
+      "sha256": "09928b5b87cc9570d532b9ab6cc56437bb83a9f02dad4518d91b0a4737a57b4f"
+    },
+    "image": {
+      "bytes": 229,
+      "sha256": "295fd3f9d3c0cbcd4fd773e4f4f323b01bdba9313966c970360c10e9fadabe8d"
+    }
+  },
+  "limits": [
+    "Short deterministic prompts and at most eight generated tokens were used.",
+    "Finite output and route engagement were checked; semantic quality was not qualified.",
+    "The smoke does not cover concurrency, long context, restart recovery, output audio, or production load."
+  ]
+}

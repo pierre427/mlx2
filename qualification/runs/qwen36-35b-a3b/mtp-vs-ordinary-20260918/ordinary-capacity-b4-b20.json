@@ -1,0 +1,77 @@
+{
+  "4": {
+    "codes": {
+      "200": 4
+    },
+    "observed_widths": [],
+    "wall_s": 3.1,
+    "agg_tok_s": 262.0,
+    "metal_active_delta_gib": 0.6,
+    "per_lane_gib": 0.151,
+    "min_headroom_gib": 79.2,
+    "max_inflight": 4,
+    "stages": [],
+    "admission": {},
+    "errors": []
+  },
+  "8": {
+    "codes": {
+      "200": 8
+    },
+    "observed_widths": [],
+    "wall_s": 4.6,
+    "agg_tok_s": 350.4,
+    "metal_active_delta_gib": 0.99,
+    "per_lane_gib": 0.124,
+    "min_headroom_gib": 76.9,
+    "max_inflight": 8,
+    "stages": [],
+    "admission": {},
+    "errors": []
+  },
+  "13": {
+    "codes": {
+      "200": 13
+    },
+    "observed_widths": [],
+    "wall_s": 7.8,
+    "agg_tok_s": 335.2,
+    "metal_active_delta_gib": 1.4,
+    "per_lane_gib": 0.108,
+    "min_headroom_gib": 74.4,
+    "max_inflight": 13,
+    "stages": [],
+    "admission": {},
+    "errors": []
+  },
+  "16": {
+    "codes": {
+      "200": 16
+    },
+    "observed_widths": [],
+    "wall_s": 8.2,
+    "agg_tok_s": 390.7,
+    "metal_active_delta_gib": 0.0,
+    "per_lane_gib": 0.0,
+    "min_headroom_gib": 73.5,
+    "max_inflight": 16,
+    "stages": [],
+    "admission": {},
+    "errors": []
+  },
+  "20": {
+    "codes": {
+      "200": 20
+    },
+    "observed_widths": [],
+    "wall_s": 9.5,
+    "agg_tok_s": 422.8,
+    "metal_active_delta_gib": 2.19,
+    "per_lane_gib": 0.11,
+    "min_headroom_gib": 71.1,
+    "max_inflight": 20,
+    "stages": [],
+    "admission": {},
+    "errors": []
+  }
+}

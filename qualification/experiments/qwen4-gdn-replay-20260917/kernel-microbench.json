@@ -1,0 +1,815 @@
+{
+  "correctness": {
+    "exact": true,
+    "finite": true
+  },
+  "device": {
+    "architecture": "applegpu_g17s",
+    "device_name": "Apple M5 Max",
+    "max_buffer_length": 86586540032,
+    "max_recommended_working_set_size": 120259084288,
+    "memory_size": 137438953472,
+    "resource_limit": 499000
+  },
+  "limitations": [
+    "Synthetic production-geometry kernel inputs, not model activations.",
+    "Peak deltas are allocator observations for one layer, not process RSS.",
+    "This probe does not select a serving route."
+  ],
+  "locks": [
+    {
+      "acquired_at": "2026-09-17 18:05:39 UTC",
+      "campaign_id": "cdef0db4ca174ff9b068b6dcf2585908",
+      "generation": 1,
+      "lease_id": "0dd77c9d5f7e42caacdaa0de90145303",
+      "owner": "root",
+      "project": "~/Desktop/mlx2",
+      "purpose": "Qwen4 compact GDN replay GPU qualification",
+      "session_id": "cc4093dec7d14adc98d9aa32f0489bbf"
+    },
+    {
+      "acquired_at": "2026-09-17 18:05:39 UTC",
+      "campaign_id": "cdef0db4ca174ff9b068b6dcf2585908",
+      "generation": 1,
+      "lease_id": "0dd77c9d5f7e42caacdaa0de90145303",
+      "owner": "root",
+      "project": "~/Desktop/mlx2",
+      "purpose": "Qwen4 compact GDN replay GPU qualification",
+      "session_id": "cc4093dec7d14adc98d9aa32f0489bbf"
+    }
+  ],
+  "parameters": {
+    "rounds": 30,
+    "seed": 1709,
+    "warmups": 5,
+    "widths": [
+      3,
+      4,
+      8
+    ]
+  },
+  "passed": true,
+  "results": [
+    {
+      "parity": {
+        "final_conv_state": {
+          "exact": true,
+          "finite": true,
+          "max_abs": 0.0
+        },
+        "final_recurrent_state": {
+          "exact": true,
+          "finite": true,
+          "max_abs": 0.0
+        },
+        "output": {
+          "exact": true,
+          "finite": true,
+          "max_abs": 0.0
+        },
+        "partial": [
+          {
+            "accepted": 1,
+            "conv_state": {
+              "exact": true,
+              "finite": true,
+              "max_abs": 0.0
+            },
+            "recurrent_state": {
+              "exact": true,
+              "finite": true,
+              "max_abs": 0.0
+            }
+          },
+          {
+            "accepted": 2,
+            "conv_state": {
+              "exact": true,
+              "finite": true,
+              "max_abs": 0.0
+            },
+            "recurrent_state": {
+              "exact": true,
+              "finite": true,
+              "max_abs": 0.0
+            }
+          }
+        ]
+      },
+      "peak_delta_bytes": {
+        "replay_verify": 4,
+        "snapshot_verify": 9682948
+      },
+      "rollback_output_bytes": {
+        "reduction_ratio": 111.1130820399113,
+        "replay": 57728,
+        "snapshot": 6414336
+      },
+      "threadgroup_y": {
+        "replay": 32,
+        "snapshot": 32
+      },
+      "timing": {
+        "partial_rollback": {
+          "1": {
+            "maximum_ms": 0.258667,
+            "median_ms": 0.22841650000000002,
+            "minimum_ms": 0.199083,
+            "samples_ms": [
+              0.250292,
+              0.249,
+              0.236459,
+              0.2195,
+              0.255334,
+              0.209083,
+              0.230542,
+              0.237791,
+              0.229083,
+              0.217167,
+              0.219791,
+              0.208209,
+              0.230333,
+              0.24325,
+              0.227625,
+              0.225083,
+              0.239292,
+              0.223542,
+              0.230041,
+              0.217333,
+              0.222917,
+              0.235625,
+              0.22775,
+              0.226,
+              0.2495,
+              0.258667,
+              0.215958,
+              0.207292,
+              0.238916,
+              0.199083
+            ]
+          },
+          "2": {
+            "maximum_ms": 0.264333,
+            "median_ms": 0.2157705,
+            "minimum_ms": 0.189,
+            "samples_ms": [
+              0.233,
+              0.206792,
+              0.215708,
+              0.2125,
+              0.215833,
+              0.262958,
+              0.211667,
+              0.264333,
+              0.190375,
+              0.232667,
+              0.213458,
+              0.209583,
+              0.228959,
+              0.211958,
+              0.207125,
+              0.201167,
+              0.207083,
+              0.233875,
+              0.2305,
+              0.224709,
+              0.228334,
+              0.222083,
+              0.1925,
+              0.221625,
+              0.227042,
+              0.189,
+              0.2055,
+              0.207625,
+              0.237959,
+              0.227833
+            ]
+          }
+        },
+        "replay_verify": {
+          "maximum_ms": 0.934792,
+          "median_ms": 0.2327295,
+          "minimum_ms": 0.188917,
+          "samples_ms": [
+            0.815625,
+            0.734584,
+            0.814458,
+            0.775583,
+            0.763708,
+            0.280292,
+            0.247875,
+            0.210208,
+            0.195292,
+            0.197459,
+            0.25075,
+            0.199333,
+            0.223792,
+            0.188917,
+            0.191917,
+            0.204083,
+            0.236458,
+            0.31475,
+            0.22975,
+            0.868583,
+            0.933833,
+            0.934792,
+            0.277417,
+            0.220083,
+            0.202292,
+            0.235709,
+            0.191667,
+            0.198292,
+            0.195458,
+            0.20225
+          ],
+          "speedup_vs_snapshot": 1.5174096966650121
+        },
+        "snapshot_verify": {
+          "maximum_ms": 0.917125,
+          "median_ms": 0.35314599999999996,
+          "minimum_ms": 0.283208,
+          "samples_ms": [
+            0.426334,
+            0.336708,
+            0.346459,
+            0.760667,
+            0.791083,
+            0.804833,
+            0.917125,
+            0.364167,
+            0.283208,
+            0.305041,
+            0.304584,
+            0.302667,
+            0.284959,
+            0.348583,
+            0.338333,
+            0.700042,
+            0.660083,
+            0.661,
+            0.312292,
+            0.403208,
+            0.362542,
+            0.338583,
+            0.737583,
+            0.361125,
+            0.357709,
+            0.340125,
+            0.362917,
+            0.291959,
+            0.291834,
+            0.321083
+          ]
+        }
+      },
+      "width": 3
+    },
+    {
+      "parity": {
+        "final_conv_state": {
+          "exact": true,
+          "finite": true,
+          "max_abs": 0.0
+        },
+        "final_recurrent_state": {
+          "exact": true,
+          "finite": true,
+          "max_abs": 0.0
+        },
+        "output": {
+          "exact": true,
+          "finite": true,
+          "max_abs": 0.0
+        },
+        "partial": [
+          {
+            "accepted": 1,
+            "conv_state": {
+              "exact": true,
+              "finite": true,
+              "max_abs": 0.0
+            },
+            "recurrent_state": {
+              "exact": true,
+              "finite": true,
+              "max_abs": 0.0
+            }
+          },
+          {
+            "accepted": 2,
+            "conv_state": {
+              "exact": true,
+              "finite": true,
+              "max_abs": 0.0
+            },
+            "recurrent_state": {
+              "exact": true,
+              "finite": true,
+              "max_abs": 0.0
+            }
+          },
+          {
+            "accepted": 3,
+            "conv_state": {
+              "exact": true,
+              "finite": true,
+              "max_abs": 0.0
+            },
+            "recurrent_state": {
+              "exact": true,
+              "finite": true,
+              "max_abs": 0.0
+            }
+          }
+        ]
+      },
+      "peak_delta_bytes": {
+        "replay_verify": 4,
+        "snapshot_verify": 12894212
+      },
+      "rollback_output_bytes": {
+        "reduction_ratio": 111.1130820399113,
+        "replay": 86592,
+        "snapshot": 9621504
+      },
+      "threadgroup_y": {
+        "replay": 32,
+        "snapshot": 32
+      },
+      "timing": {
+        "partial_rollback": {
+          "1": {
+            "maximum_ms": 0.295792,
+            "median_ms": 0.21629199999999998,
+            "minimum_ms": 0.189167,
+            "samples_ms": [
+              0.219625,
+              0.217167,
+              0.229167,
+              0.233,
+              0.22425,
+              0.207125,
+              0.208541,
+              0.23875,
+              0.257166,
+              0.251292,
+              0.226208,
+              0.209875,
+              0.212958,
+              0.189167,
+              0.211666,
+              0.215417,
+              0.214875,
+              0.295792,
+              0.212291,
+              0.209292,
+              0.228458,
+              0.20975,
+              0.220417,
+              0.212958,
+              0.208666,
+              0.266583,
+              0.215334,
+              0.232917,
+              0.203834,
+              0.233625
+            ]
+          },
+          "3": {
+            "maximum_ms": 0.292916,
+            "median_ms": 0.22383350000000002,
+            "minimum_ms": 0.197,
+            "samples_ms": [
+              0.247083,
+              0.235958,
+              0.210875,
+              0.210875,
+              0.209125,
+              0.2215,
+              0.203916,
+              0.252083,
+              0.259708,
+              0.218166,
+              0.224,
+              0.219042,
+              0.197,
+              0.208292,
+              0.233916,
+              0.21575,
+              0.225959,
+              0.231208,
+              0.234667,
+              0.218625,
+              0.213208,
+              0.239042,
+              0.250125,
+              0.292916,
+              0.224,
+              0.2545,
+              0.276,
+              0.210417,
+              0.219042,
+              0.223667
+            ]
+          }
+        },
+        "replay_verify": {
+          "maximum_ms": 0.246041,
+          "median_ms": 0.20406249999999998,
+          "minimum_ms": 0.178667,
+          "samples_ms": [
+            0.189625,
+            0.193333,
+            0.178667,
+            0.232666,
+            0.19825,
+            0.193416,
+            0.2055,
+            0.215042,
+            0.214709,
+            0.206541,
+            0.194,
+            0.2055,
+            0.218917,
+            0.219,
+            0.1825,
+            0.197458,
+            0.212334,
+            0.190208,
+            0.246041,
+            0.200458,
+            0.214375,
+            0.208959,
+            0.178875,
+            0.194167,
+            0.198917,
+            0.212958,
+            0.208333,
+            0.231167,
+            0.197125,
+            0.202625
+          ],
+          "speedup_vs_snapshot": 1.0290964777947933
+        },
+        "snapshot_verify": {
+          "maximum_ms": 0.389,
+          "median_ms": 0.21,
+          "minimum_ms": 0.178291,
+          "samples_ms": [
+            0.208125,
+            0.230125,
+            0.191042,
+            0.189583,
+            0.207917,
+            0.389,
+            0.219083,
+            0.229166,
+            0.245875,
+            0.345125,
+            0.212917,
+            0.192375,
+            0.207709,
+            0.34875,
+            0.222584,
+            0.197166,
+            0.186,
+            0.197542,
+            0.212,
+            0.180708,
+            0.230084,
+            0.21575,
+            0.197916,
+            0.2005,
+            0.209583,
+            0.210417,
+            0.214875,
+            0.178291,
+            0.195417,
+            0.221959
+          ]
+        }
+      },
+      "width": 4
+    },
+    {
+      "parity": {
+        "final_conv_state": {
+          "exact": true,
+          "finite": true,
+          "max_abs": 0.0
+        },
+        "final_recurrent_state": {
+          "exact": true,
+          "finite": true,
+          "max_abs": 0.0
+        },
+        "output": {
+          "exact": true,
+          "finite": true,
+          "max_abs": 0.0
+        },
+        "partial": [
+          {
+            "accepted": 1,
+            "conv_state": {
+              "exact": true,
+              "finite": true,
+              "max_abs": 0.0
+            },
+            "recurrent_state": {
+              "exact": true,
+              "finite": true,
+              "max_abs": 0.0
+            }
+          },
+          {
+            "accepted": 2,
+            "conv_state": {
+              "exact": true,
+              "finite": true,
+              "max_abs": 0.0
+            },
+            "recurrent_state": {
+              "exact": true,
+              "finite": true,
+              "max_abs": 0.0
+            }
+          },
+          {
+            "accepted": 3,
+            "conv_state": {
+              "exact": true,
+              "finite": true,
+              "max_abs": 0.0
+            },
+            "recurrent_state": {
+              "exact": true,
+              "finite": true,
+              "max_abs": 0.0
+            }
+          },
+          {
+            "accepted": 4,
+            "conv_state": {
+              "exact": true,
+              "finite": true,
+              "max_abs": 0.0
+            },
+            "recurrent_state": {
+              "exact": true,
+              "finite": true,
+              "max_abs": 0.0
+            }
+          },
+          {
+            "accepted": 5,
+            "conv_state": {
+              "exact": true,
+              "finite": true,
+              "max_abs": 0.0
+            },
+            "recurrent_state": {
+              "exact": true,
+              "finite": true,
+              "max_abs": 0.0
+            }
+          },
+          {
+            "accepted": 6,
+            "conv_state": {
+              "exact": true,
+              "finite": true,
+              "max_abs": 0.0
+            },
+            "recurrent_state": {
+              "exact": true,
+              "finite": true,
+              "max_abs": 0.0
+            }
+          },
+          {
+            "accepted": 7,
+            "conv_state": {
+              "exact": true,
+              "finite": true,
+              "max_abs": 0.0
+            },
+            "recurrent_state": {
+              "exact": true,
+              "finite": true,
+              "max_abs": 0.0
+            }
+          }
+        ]
+      },
+      "peak_delta_bytes": {
+        "replay_verify": 4,
+        "snapshot_verify": 25772036
+      },
+      "rollback_output_bytes": {
+        "reduction_ratio": 111.1130820399113,
+        "replay": 202048,
+        "snapshot": 22450176
+      },
+      "threadgroup_y": {
+        "replay": 32,
+        "snapshot": 32
+      },
+      "timing": {
+        "partial_rollback": {
+          "1": {
+            "maximum_ms": 0.257916,
+            "median_ms": 0.23231200000000002,
+            "minimum_ms": 0.190292,
+            "samples_ms": [
+              0.243458,
+              0.240916,
+              0.206042,
+              0.232666,
+              0.249,
+              0.254041,
+              0.228417,
+              0.231958,
+              0.244917,
+              0.207958,
+              0.235084,
+              0.212834,
+              0.239667,
+              0.218,
+              0.225583,
+              0.207084,
+              0.218,
+              0.249208,
+              0.257916,
+              0.237292,
+              0.238,
+              0.238333,
+              0.193208,
+              0.234333,
+              0.230834,
+              0.240667,
+              0.204333,
+              0.190292,
+              0.202791,
+              0.221292
+            ]
+          },
+          "3": {
+            "maximum_ms": 0.318792,
+            "median_ms": 0.2269585,
+            "minimum_ms": 0.201458,
+            "samples_ms": [
+              0.241042,
+              0.214708,
+              0.234666,
+              0.222584,
+              0.226834,
+              0.222208,
+              0.239125,
+              0.235875,
+              0.240083,
+              0.261708,
+              0.21175,
+              0.205,
+              0.223458,
+              0.216041,
+              0.243459,
+              0.318792,
+              0.215917,
+              0.234542,
+              0.2045,
+              0.206125,
+              0.201458,
+              0.206166,
+              0.236959,
+              0.227083,
+              0.2325,
+              0.263042,
+              0.243667,
+              0.214083,
+              0.227959,
+              0.206
+            ]
+          },
+          "7": {
+            "maximum_ms": 0.276833,
+            "median_ms": 0.252021,
+            "minimum_ms": 0.215958,
+            "samples_ms": [
+              0.261667,
+              0.257084,
+              0.246041,
+              0.241375,
+              0.21875,
+              0.258,
+              0.235292,
+              0.225625,
+              0.252875,
+              0.220708,
+              0.22525,
+              0.215958,
+              0.274584,
+              0.255916,
+              0.256584,
+              0.234292,
+              0.224917,
+              0.251167,
+              0.261,
+              0.26125,
+              0.244542,
+              0.260333,
+              0.276833,
+              0.259,
+              0.25575,
+              0.254125,
+              0.259083,
+              0.223209,
+              0.225875,
+              0.228958
+            ]
+          }
+        },
+        "replay_verify": {
+          "maximum_ms": 0.318708,
+          "median_ms": 0.2138745,
+          "minimum_ms": 0.19325,
+          "samples_ms": [
+            0.22775,
+            0.19325,
+            0.218167,
+            0.227791,
+            0.202416,
+            0.19875,
+            0.206,
+            0.245416,
+            0.196667,
+            0.201875,
+            0.198875,
+            0.201,
+            0.318708,
+            0.236209,
+            0.216666,
+            0.239125,
+            0.201875,
+            0.200292,
+            0.205916,
+            0.206417,
+            0.24125,
+            0.219125,
+            0.227334,
+            0.206208,
+            0.205875,
+            0.211083,
+            0.234,
+            0.274792,
+            0.235458,
+            0.236167
+          ],
+          "speedup_vs_snapshot": 1.1760214518327337
+        },
+        "snapshot_verify": {
+          "maximum_ms": 0.517875,
+          "median_ms": 0.251521,
+          "minimum_ms": 0.219166,
+          "samples_ms": [
+            0.227417,
+            0.251667,
+            0.266708,
+            0.259292,
+            0.228083,
+            0.230875,
+            0.2285,
+            0.258084,
+            0.266458,
+            0.267333,
+            0.517875,
+            0.247417,
+            0.223708,
+            0.256959,
+            0.240791,
+            0.247167,
+            0.340584,
+            0.25975,
+            0.254792,
+            0.219166,
+            0.226959,
+            0.22875,
+            0.229875,
+            0.226041,
+            0.266792,
+            0.270292,
+            0.253334,
+            0.251375,
+            0.271375,
+            0.249375
+          ]
+        }
+      },
+      "width": 8
+    }
+  ],
+  "route_selected": false,
+  "schema": "mlx2.qwen4-gdn-replay-gpu-microbench.v1",
+  "source_hash": "e181f69e8950530ba1eae9c94012eb31194d5ebf2189fef14ef69eece94a7531",
+  "status": "isolated_kernel_qualification"
+}

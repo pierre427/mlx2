@@ -1,0 +1,7 @@
+PASS every_run_compacted_and_correct {"answers": ["Lisbon", "Lisbon", "Lisbon"], "receipts": [[13228, 10156], [13228, 10156], [13228, 10156]]}
+PASS repeat_warm_hits_the_exact_boundary {"cached_tokens": [0, 13228, 13228], "source_tokens": 13228, "retained_tokens": 10156, "seconds": [15.03, 0.2, 0.2], "ttft": [14.954533583979355, 0.11496612502378412, 0.11457970898482017]}
+PASS identical_answers_cold_and_warm {"answers": ["Lisbon", "Lisbon", "Lisbon"]}
+PASS compacted_end_state_still_not_published {"skipped": 3}
+PASS different_question_same_context {"answer": "ALPHA-7319", "cached_tokens": 0}
+PASS server_alive_final {"inflight": 0, "error": null}
+SUMMARY 6/6

@@ -1,0 +1,685 @@
+{
+  "counts": {
+    "blocked": 6,
+    "failed": 5,
+    "passed": 27
+  },
+  "generated_at": 1789595682.0387032,
+  "identity": {
+    "artifacts": [
+      {
+        "device": 16777230,
+        "exists": true,
+        "fingerprint": "15e7f23c4309fd75fece9c665eec5b6174d88044c2e683fbd285c6690a325a25",
+        "inode": 8244785,
+        "metadata_sha256": {
+          "config.json": "cfb9d34208e818c1a2d66ec54132f624d6a2f13563cbee4059933339d07af080",
+          "generation_config.json": "9a0ac39c982ca7a67073948ab0a7ac4e52db932c983399a29e99a57182a42a3d",
+          "model.safetensors.index.json": "143b582771054c9645849143853139b49fe107149107a03cde515a33a10cb391",
+          "tokenizer.json": "87a7830d63fcf43bf241c3c5242e96e62dd3fdc29224ca26fed8ea333db72de4",
+          "tokenizer_config.json": "253684edcbcae5b893442b7de203b7d48230f6eea05de71f2d8e1a0575007528"
+        },
+        "mtime_ns": 1779318545780718594,
+        "path": "~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit"
+      },
+      {
+        "device": 16777230,
+        "exists": true,
+        "fingerprint": "922e0c47704e4081c0692843ecf75ce7a70408b50e5187f107dfb8e82ea0cb94",
+        "inode": 175257217,
+        "metadata_sha256": {
+          "config.json": "cb39a2ee10670cd7536cb2c629d60d41bf4857c5aa880213c17bbd2a06925fad",
+          "generation_config.json": "d403197d7feb1b2e2d78121fd438a9fdb50ce1b9ec421b023515bccd64d97c15",
+          "model.safetensors.index.json": "9c7922fe43b30715356465e7b04918646fbd73823431e41ae06427144a9400dd",
+          "tokenizer.json": "6f32ce20dc35f57a7f9ad1eac03525bd7d30f9df8cea6507e958279cc3657706",
+          "tokenizer_config.json": "b78d7687432566598b66847cae8b2d44bf06c733c42bdd10c2ac588e12e59983"
+        },
+        "mtime_ns": 1788468510326139378,
+        "path": "~/mlx-models/Qwen3.6-35B-A3B-uncensored-heretic-Native-MTP-Preserved-oQ4e-mtp"
+      }
+    ],
+    "git_head": "5fc4c28e181f2d9d9e0d9cbb4114eb3519197626",
+    "git_status": "M scripts/activate_qualification_arm.py\n M scripts/qualify_serving.py\n M scripts/run_qualification_matrix.py\n M src/mlx2/qualification.py\n M tests/test_qualification_matrix.py\n M tests/test_qualify_serving_receipts.py\n?? qualification/policies/qwen36-mtp-artifact-ordinary.json\n?? qualification/policies/qwen36-mtp2.json\n?? qualification/policies/qwen36-ordinary.json\n?? qualification/qwen36-overnight-experiments.json\n?? qualification/runs/qwen36-35b-a3b/overnight-campaign/\n?? scripts/qwen36_http_qualification.py\n?? scripts/run_qwen36_overnight.py\n?? tests/test_activate_qualification_arm.py\n?? tests/test_qwen36_http_qualification.py\n?? tests/test_qwen36_overnight.py",
+    "harness_sha256": {
+      "activate_qualification_arm.py": "300896d844ee2207cf0d26e18b4b3d85ab694b40d03294800c007b4fa299911f",
+      "benchmark_serving.py": "5f182f728536bf85a4e24ca66ed5314fb650018d415df69e3478b654d114df49",
+      "qualify_serving.py": "886d1bea0370c13ab9aa076ce393cdab5cdd38c6b4740a0483e1a7948ab637e0",
+      "qwen36_fused_gdn_probe.py": "859f3e9faf697713fa39d1e43d4b7a5049fef7ce6e993fc512bc1d94436f1c1c",
+      "qwen36_http_qualification.py": "fa651bbaf9e1bb30aa97f5067ddfdd2411bb0ae15c832d5fa135d0783fc00027",
+      "run_qualification_matrix.py": "ad0afd378f2326010aaebf194954f6e1b228b2d4df8ffa30e10de1ee9e691341",
+      "run_qwen36_overnight.py": "1dbe9bdbc6b5ff193d417e493a362e8ff9bc13a8d94354841a7c0d82242ff8b4",
+      "thermal_probe.swift": "4f1cadeaa344082e231227f0c1e4b53f7f7fadf1a31858d7ecc0ec36ed3f284b"
+    },
+    "runtime_source_sha256": "0aa8803bc39cda5ee8df5a43e70bd14b157f5599bae66c235acc92ce7908ada9",
+    "settings": {
+      "hard_deadline": "2026-09-17T08:00:00-04:00",
+      "manifest": "~/Desktop/mlx2/qualification/qwen36-overnight-experiments.json",
+      "manifest_sha256": "22d17a0cfaa0f7bae581c7acd71b4185f295dff8b29d52bd59da3520d55b517b",
+      "mtp_model": "~/mlx-models/Qwen3.6-35B-A3B-uncensored-heretic-Native-MTP-Preserved-oQ4e-mtp",
+      "ordinary_model": "~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit",
+      "policy_sha256": {
+        "qwen36-mtp-artifact-ordinary.json": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356",
+        "qwen36-mtp2.json": "e97da76c699622dd022f26f535ae733b30856b952d85263d0f7da951f87776a2",
+        "qwen36-ordinary.json": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356"
+      },
+      "python": ".venv/bin/python"
+    },
+    "sha256": "9b8ede62f5034c1f60d7f7e5b6034103322a749904c5e003c8b92716f0665d57"
+  },
+  "qualification_installed": false,
+  "schema": "mlx2.qwen36-overnight-summary.v1",
+  "steps": {
+    "activation-cleanup": {
+      "attempts": [
+        {
+          "attempt": 1,
+          "finished_at": 1789595455.406141,
+          "log_dir": "~/Desktop/mlx2/qualification/runs/qwen36-35b-a3b/overnight-campaign/logs/activation-cleanup/attempt-0001",
+          "reason": "",
+          "receipt": "~/Desktop/mlx2/qualification/runs/qwen36-35b-a3b/overnight-campaign/receipts/activation-cleanup/attempt-0001.json",
+          "receipt_sha256": "e898839ab4ddade635451c0220edf33a58f5d580eb6ba1be86e65ec3c0f8b1f7",
+          "started_at": 1789595455.4056199,
+          "status": "passed"
+        }
+      ],
+      "finished_at": 1789595455.406141,
+      "reason": "",
+      "started_at": 1789595455.4056199,
+      "status": "passed"
+    },
+    "batch-20x20": {
+      "attempts": [
+        {
+          "attempt": 1,
+          "finished_at": 1789595682.019584,
+          "log_dir": "~/Desktop/mlx2/qualification/runs/qwen36-35b-a3b/overnight-campaign/logs/batch-20x20/attempt-0001",
+          "reason": "RuntimeError: no batch_stress arm has a passing serving and HTTP qualification step",
+          "receipt": "~/Desktop/mlx2/qualification/runs/qwen36-35b-a3b/overnight-campaign/receipts/batch-20x20/attempt-0001.json",
+          "receipt_sha256": "57005df0d5b123b3c18bfbcdd99fb7dc8699a338d01b805355d257cb01000d19",
+          "started_at": 1789595682.017924,
+          "status": "failed"
+        }
+      ],
+      "finished_at": 1789595682.019584,
+      "reason": "RuntimeError: no batch_stress arm has a passing serving and HTTP qualification step",
+      "started_at": 1789595682.017924,
+      "status": "failed"
+    },
+    "closeout": {
+      "attempts": [
+        {
+          "attempt": 1,
+          "finished_at": 1789595682.0345228,
+          "log_dir": "~/Desktop/mlx2/qualification/runs/qwen36-35b-a3b/overnight-campaign/logs/closeout/attempt-0001",
+          "reason": "",
+          "receipt": "~/Desktop/mlx2/qualification/runs/qwen36-35b-a3b/overnight-campaign/receipts/closeout/attempt-0001.json",
+          "receipt_sha256": "658aeffd9175e8325342df4e5879d3717810c2a7f855579d770dd738864ec53a",
+          "started_at": 1789595682.0335848,
+          "status": "passed"
+        }
+      ],
+      "finished_at": 1789595682.0345228,
+      "reason": "",
+      "started_at": 1789595682.0335848,
+      "status": "passed"
+    },
+    "context-ladder": {
+      "attempts": [
+        {
+          "attempt": 1,
+          "finished_at": 1789595682.002464,
+          "log_dir": "~/Desktop/mlx2/qualification/runs/qwen36-35b-a3b/overnight-campaign/logs/context-ladder/attempt-0001",
+          "reason": "RuntimeError: no context arm has a passing serving and HTTP qualification step",
+          "receipt": "~/Desktop/mlx2/qualification/runs/qwen36-35b-a3b/overnight-campaign/receipts/context-ladder/attempt-0001.json",
+          "receipt_sha256": "b4fafecfdf7530bfb7bb5ea63e45d0fc9e9a6b14b29a2f36b51ad2e23567f930",
+          "started_at": 1789595682.000056,
+          "status": "failed"
+        }
+      ],
+      "finished_at": 1789595682.002464,
+      "reason": "RuntimeError: no context arm has a passing serving and HTTP qualification step",
+      "started_at": 1789595682.000056,
+      "status": "failed"
+    },
+    "fused-mtp-artifact-r1": {
+      "attempts": [
+        {
+          "attempt": 1,
+          "finished_at": 1789595574.228529,
+          "log_dir": "~/Desktop/mlx2/qualification/runs/qwen36-35b-a3b/overnight-campaign/logs/fused-mtp-artifact-r1/attempt-0001",
+          "reason": "",
+          "receipt": "~/Desktop/mlx2/qualification/runs/qwen36-35b-a3b/overnight-campaign/receipts/fused-mtp-artifact-r1/attempt-0001.json",
+          "receipt_sha256": "c69683808b0da86933c73dce9c3e51f8f7950c2ff0159f9903dc105832edacf1",
+          "started_at": 1789595554.7689338,
+          "status": "passed"
+        }
+      ],
+      "finished_at": 1789595574.228529,
+      "reason": "",
+      "started_at": 1789595554.7689338,
+      "status": "passed"
+    },
+    "fused-mtp-artifact-r2": {
+      "attempts": [
+        {
+          "attempt": 1,
+          "finished_at": 1789595593.670382,
+          "log_dir": "~/Desktop/mlx2/qualification/runs/qwen36-35b-a3b/overnight-campaign/logs/fused-mtp-artifact-r2/attempt-0001",
+          "reason": "",
+          "receipt": "~/Desktop/mlx2/qualification/runs/qwen36-35b-a3b/overnight-campaign/receipts/fused-mtp-artifact-r2/attempt-0001.json",
+          "receipt_sha256": "a1c75680344b2a070e18d7ed2d46c4e2cfa636c863dc65c990bf78d4ab88a469",
+          "started_at": 1789595574.231848,
+          "status": "passed"
+        }
+      ],
+      "finished_at": 1789595593.670382,
+      "reason": "",
+      "started_at": 1789595574.231848,
+      "status": "passed"
+    },
+    "fused-mtp-artifact-r3": {
+      "attempts": [
+        {
+          "attempt": 1,
+          "finished_at": 1789595613.120428,
+          "log_dir": "~/Desktop/mlx2/qualification/runs/qwen36-35b-a3b/overnight-campaign/logs/fused-mtp-artifact-r3/attempt-0001",
+          "reason": "",
+          "receipt": "~/Desktop/mlx2/qualification/runs/qwen36-35b-a3b/overnight-campaign/receipts/fused-mtp-artifact-r3/attempt-0001.json",
+          "receipt_sha256": "6a165b7ae6a04ab1475c20cc8bc83630928f18a0709cb46548add736ee686c0c",
+          "started_at": 1789595593.673408,
+          "status": "passed"
+        }
+      ],
+      "finished_at": 1789595613.120428,
+      "reason": "",
+      "started_at": 1789595593.673408,
+      "status": "passed"
+    },
+    "fused-mtp-artifact-r4": {
+      "attempts": [
+        {
+          "attempt": 1,
+          "finished_at": 1789595632.602802,
+          "log_dir": "~/Desktop/mlx2/qualification/runs/qwen36-35b-a3b/overnight-campaign/logs/fused-mtp-artifact-r4/attempt-0001",
+          "reason": "",
+          "receipt": "~/Desktop/mlx2/qualification/runs/qwen36-35b-a3b/overnight-campaign/receipts/fused-mtp-artifact-r4/attempt-0001.json",
+          "receipt_sha256": "416b5ff12c69072136a5cd36356701538e8c6f6fecb632b3c5a830f80f7391f4",
+          "started_at": 1789595613.1233768,
+          "status": "passed"
+        }
+      ],
+      "finished_at": 1789595632.602802,
+      "reason": "",
+      "started_at": 1789595613.1233768,
+      "status": "passed"
+    },
+    "fused-mtp-artifact-r5": {
+      "attempts": [
+        {
+          "attempt": 1,
+          "finished_at": 1789595652.46546,
+          "log_dir": "~/Desktop/mlx2/qualification/runs/qwen36-35b-a3b/overnight-campaign/logs/fused-mtp-artifact-r5/attempt-0001",
+          "reason": "",
+          "receipt": "~/Desktop/mlx2/qualification/runs/qwen36-35b-a3b/overnight-campaign/receipts/fused-mtp-artifact-r5/attempt-0001.json",
+          "receipt_sha256": "ccf889200b6f4329595097bcdc99a573e32347cd8ab57cfdd850da48dcc4eb38",
+          "started_at": 1789595632.6063051,
+          "status": "passed"
+        }
+      ],
+      "finished_at": 1789595652.46546,
+      "reason": "",
+      "started_at": 1789595632.6063051,
+      "status": "passed"
+    },
+    "fused-ordinary-r1": {
+      "attempts": [
+        {
+          "attempt": 1,
+          "finished_at": 1789595475.5017972,
+          "log_dir": "~/Desktop/mlx2/qualification/runs/qwen36-35b-a3b/overnight-campaign/logs/fused-ordinary-r1/attempt-0001",
+          "reason": "",
+          "receipt": "~/Desktop/mlx2/qualification/runs/qwen36-35b-a3b/overnight-campaign/receipts/fused-ordinary-r1/attempt-0001.json",
+          "receipt_sha256": "77d5a4f2836dd26a9bfd516d89765f80dfb55deffe429fb73dc87dd3564f5a34",
+          "started_at": 1789595455.838785,
+          "status": "passed"
+        }
+      ],
+      "finished_at": 1789595475.5017972,
+      "reason": "",
+      "started_at": 1789595455.838785,
+      "status": "passed"
+    },
+    "fused-ordinary-r2": {
+      "attempts": [
+        {
+          "attempt": 1,
+          "finished_at": 1789595495.171822,
+          "log_dir": "~/Desktop/mlx2/qualification/runs/qwen36-35b-a3b/overnight-campaign/logs/fused-ordinary-r2/attempt-0001",
+          "reason": "",
+          "receipt": "~/Desktop/mlx2/qualification/runs/qwen36-35b-a3b/overnight-campaign/receipts/fused-ordinary-r2/attempt-0001.json",
+          "receipt_sha256": "474f3972ac6e9d2b746c2d93b7083254a0dc74e50e1e06ca539569d861a018c9",
+          "started_at": 1789595475.5063071,
+          "status": "passed"
+        }
+      ],
+      "finished_at": 1789595495.171822,
+      "reason": "",
+      "started_at": 1789595475.5063071,
+      "status": "passed"
+    },
+    "fused-ordinary-r3": {
+      "attempts": [
+        {
+          "attempt": 1,
+          "finished_at": 1789595515.245172,
+          "log_dir": "~/Desktop/mlx2/qualification/runs/qwen36-35b-a3b/overnight-campaign/logs/fused-ordinary-r3/attempt-0001",
+          "reason": "",
+          "receipt": "~/Desktop/mlx2/qualification/runs/qwen36-35b-a3b/overnight-campaign/receipts/fused-ordinary-r3/attempt-0001.json",
+          "receipt_sha256": "9e481dfea6d7c0248189b4e27ac800eeebcbf78b6642d6f82d2e3e8493fe9cef",
+          "started_at": 1789595495.174853,
+          "status": "passed"
+        }
+      ],
+      "finished_at": 1789595515.245172,
+      "reason": "",
+      "started_at": 1789595495.174853,
+      "status": "passed"
+    },
+    "fused-ordinary-r4": {
+      "attempts": [
+        {
+          "attempt": 1,
+          "finished_at": 1789595535.114218,
+          "log_dir": "~/Desktop/mlx2/qualification/runs/qwen36-35b-a3b/overnight-campaign/logs/fused-ordinary-r4/attempt-0001",
+          "reason": "",
+          "receipt": "~/Desktop/mlx2/qualification/runs/qwen36-35b-a3b/overnight-campaign/receipts/fused-ordinary-r4/attempt-0001.json",
+          "receipt_sha256": "ee0ca4e1f29600a67b47d6384e83db726276ebd60ec10754f852c4f19b709dbb",
+          "started_at": 1789595515.2494159,
+          "status": "passed"
+        }
+      ],
+      "finished_at": 1789595535.114218,
+      "reason": "",
+      "started_at": 1789595515.2494159,
+      "status": "passed"
+    },
+    "fused-ordinary-r5": {
+      "attempts": [
+        {
+          "attempt": 1,
+          "finished_at": 1789595554.765357,
+          "log_dir": "~/Desktop/mlx2/qualification/runs/qwen36-35b-a3b/overnight-campaign/logs/fused-ordinary-r5/attempt-0001",
+          "reason": "",
+          "receipt": "~/Desktop/mlx2/qualification/runs/qwen36-35b-a3b/overnight-campaign/receipts/fused-ordinary-r5/attempt-0001.json",
+          "receipt_sha256": "2c65dd3cacd64a80b61153a62cb95b74b2b83c9077c1f2bd198c5b6ff99763c0",
+          "started_at": 1789595535.117454,
+          "status": "passed"
+        }
+      ],
+      "finished_at": 1789595554.765357,
+      "reason": "",
+      "started_at": 1789595535.117454,
+      "status": "passed"
+    },
+    "gpu-lease": {
+      "attempts": [
+        {
+          "attempt": 1,
+          "finished_at": 1789595455.836061,
+          "log_dir": "~/Desktop/mlx2/qualification/runs/qwen36-35b-a3b/overnight-campaign/logs/gpu-lease/attempt-0001",
+          "reason": "",
+          "receipt": "~/Desktop/mlx2/qualification/runs/qwen36-35b-a3b/overnight-campaign/receipts/gpu-lease/attempt-0001.json",
+          "receipt_sha256": "838b25e4a3be1adc25b19eb556baa0c4ce54212cc24bd60ede3cc41b3246d3fc",
+          "started_at": 1789595455.8352482,
+          "status": "passed"
+        }
+      ],
+      "finished_at": 1789595455.836061,
+      "reason": "",
+      "started_at": 1789595455.8352482,
+      "status": "passed"
+    },
+    "matched-report": {
+      "attempts": [
+        {
+          "attempt": 1,
+          "finished_at": 1789595682.0301282,
+          "log_dir": "~/Desktop/mlx2/qualification/runs/qwen36-35b-a3b/overnight-campaign/logs/matched-report/attempt-0001",
+          "reason": "",
+          "receipt": "~/Desktop/mlx2/qualification/runs/qwen36-35b-a3b/overnight-campaign/receipts/matched-report/attempt-0001.json",
+          "receipt_sha256": "9920c83a4b779477ea85fec44a164aaa9c214e3c4e242baa26624f1a27e877ce",
+          "started_at": 1789595682.029147,
+          "status": "passed"
+        }
+      ],
+      "finished_at": 1789595682.0301282,
+      "reason": "",
+      "started_at": 1789595682.029147,
+      "status": "passed"
+    },
+    "matrix-fail-soft": {
+      "attempts": [
+        {
+          "attempt": 1,
+          "finished_at": 1789595455.4016,
+          "log_dir": "~/Desktop/mlx2/qualification/runs/qwen36-35b-a3b/overnight-campaign/logs/matrix-fail-soft/attempt-0001",
+          "reason": "",
+          "receipt": "~/Desktop/mlx2/qualification/runs/qwen36-35b-a3b/overnight-campaign/receipts/matrix-fail-soft/attempt-0001.json",
+          "receipt_sha256": "657ed36004dfc64271f549da1fdff1db74a91b8b1dcad6737f92a80ace91fe78",
+          "started_at": 1789595455.4010549,
+          "status": "passed"
+        }
+      ],
+      "finished_at": 1789595455.4016,
+      "reason": "",
+      "started_at": 1789595455.4010549,
+      "status": "passed"
+    },
+    "matrix-manifest": {
+      "attempts": [
+        {
+          "attempt": 1,
+          "finished_at": 1789595455.831856,
+          "log_dir": "~/Desktop/mlx2/qualification/runs/qwen36-35b-a3b/overnight-campaign/logs/matrix-manifest/attempt-0001",
+          "reason": "",
+          "receipt": "~/Desktop/mlx2/qualification/runs/qwen36-35b-a3b/overnight-campaign/receipts/matrix-manifest/attempt-0001.json",
+          "receipt_sha256": "84abcded8e4865d10e1639f839017070e3f165fc1f18fbfd203e082e087c03be",
+          "started_at": 1789595455.408031,
+          "status": "passed"
+        }
+      ],
+      "finished_at": 1789595455.831856,
+      "reason": "",
+      "started_at": 1789595455.408031,
+      "status": "passed"
+    },
+    "matrix-schedule": {
+      "attempts": [
+        {
+          "attempt": 1,
+          "finished_at": 1789595455.403889,
+          "log_dir": "~/Desktop/mlx2/qualification/runs/qwen36-35b-a3b/overnight-campaign/logs/matrix-schedule/attempt-0001",
+          "reason": "",
+          "receipt": "~/Desktop/mlx2/qualification/runs/qwen36-35b-a3b/overnight-campaign/receipts/matrix-schedule/attempt-0001.json",
+          "receipt_sha256": "a4a0754393f63da99aed2e47b75d7873c73f2081036106891e3d00d46f7b6d57",
+          "started_at": 1789595455.4033349,
+          "status": "passed"
+        }
+      ],
+      "finished_at": 1789595455.403889,
+      "reason": "",
+      "started_at": 1789595455.4033349,
+      "status": "passed"
+    },
+    "mtp-artifact-ordinary-b20-serving": {
+      "attempts": [],
+      "finished_at": 1789595682.009364,
+      "reason": "dependencies did not pass: ['mtp-artifact-ordinary-serving']",
+      "status": "blocked"
+    },
+    "mtp-artifact-ordinary-serving": {
+      "attempts": [
+        {
+          "attempt": 1,
+          "finished_at": 1789595675.413381,
+          "log_dir": "~/Desktop/mlx2/qualification/runs/qwen36-35b-a3b/overnight-campaign/logs/mtp-artifact-ordinary-serving/attempt-0001",
+          "reason": "command qualification failed",
+          "receipt": "~/Desktop/mlx2/qualification/runs/qwen36-35b-a3b/overnight-campaign/receipts/mtp-artifact-ordinary-serving/attempt-0001.json",
+          "receipt_sha256": "5dae4ad03f8b6b590c685412903db38e3372ae4fbc89f3c2c7869cff27692cd8",
+          "started_at": 1789595663.6152031,
+          "status": "failed"
+        }
+      ],
+      "finished_at": 1789595675.413381,
+      "reason": "command qualification failed",
+      "started_at": 1789595663.6152031,
+      "status": "failed"
+    },
+    "mtp2-b20-serving": {
+      "attempts": [],
+      "finished_at": 1789595682.012127,
+      "reason": "dependencies did not pass: ['mtp2-serving']",
+      "status": "blocked"
+    },
+    "mtp2-serving": {
+      "attempts": [
+        {
+          "attempt": 1,
+          "finished_at": 1789595681.986398,
+          "log_dir": "~/Desktop/mlx2/qualification/runs/qwen36-35b-a3b/overnight-campaign/logs/mtp2-serving/attempt-0001",
+          "reason": "command qualification failed",
+          "receipt": "~/Desktop/mlx2/qualification/runs/qwen36-35b-a3b/overnight-campaign/receipts/mtp2-serving/attempt-0001.json",
+          "receipt_sha256": "1d6ba0bf40f550a36c13f0dbc4cf849e8717f539b4ff6cc5c52eaf52941d7740",
+          "started_at": 1789595675.417601,
+          "status": "failed"
+        }
+      ],
+      "finished_at": 1789595681.986398,
+      "reason": "command qualification failed",
+      "started_at": 1789595675.417601,
+      "status": "failed"
+    },
+    "ordinary-b20-serving": {
+      "attempts": [],
+      "finished_at": 1789595682.006628,
+      "reason": "dependencies did not pass: ['ordinary-serving']",
+      "status": "blocked"
+    },
+    "ordinary-serving": {
+      "attempts": [
+        {
+          "attempt": 1,
+          "finished_at": 1789595663.611592,
+          "log_dir": "~/Desktop/mlx2/qualification/runs/qwen36-35b-a3b/overnight-campaign/logs/ordinary-serving/attempt-0001",
+          "reason": "command qualification failed",
+          "receipt": "~/Desktop/mlx2/qualification/runs/qwen36-35b-a3b/overnight-campaign/receipts/ordinary-serving/attempt-0001.json",
+          "receipt_sha256": "71a45ec69c839d20e04f5a48a8df9c297a0c43e41cbafbde1f996d5117bd2885",
+          "started_at": 1789595652.4692311,
+          "status": "failed"
+        }
+      ],
+      "finished_at": 1789595663.611592,
+      "reason": "command qualification failed",
+      "started_at": 1789595652.4692311,
+      "status": "failed"
+    },
+    "pld-b20-serving": {
+      "attempts": [],
+      "finished_at": 1789595682.014943,
+      "reason": "dependencies did not pass: ['pld-prerequisite', 'pld-serving']",
+      "status": "blocked"
+    },
+    "pld-prerequisite": {
+      "attempts": [],
+      "finished_at": 1789595681.992486,
+      "reason": "missing prerequisites: ['qualification/policies/qwen36-pld.json']",
+      "status": "blocked"
+    },
+    "pld-serving": {
+      "attempts": [],
+      "finished_at": 1789595681.9961731,
+      "reason": "dependencies did not pass: ['pld-prerequisite']",
+      "status": "blocked"
+    },
+    "policies": {
+      "attempts": [
+        {
+          "attempt": 1,
+          "finished_at": 1789595455.392013,
+          "log_dir": "~/Desktop/mlx2/qualification/runs/qwen36-35b-a3b/overnight-campaign/logs/policies/attempt-0001",
+          "reason": "",
+          "receipt": "~/Desktop/mlx2/qualification/runs/qwen36-35b-a3b/overnight-campaign/receipts/policies/attempt-0001.json",
+          "receipt_sha256": "d4a3c6f5eb97657398ffbb6552e432c227a137f8fa0569b2ebbcc04b86cae435",
+          "started_at": 1789595455.391409,
+          "status": "passed"
+        }
+      ],
+      "finished_at": 1789595455.392013,
+      "reason": "",
+      "started_at": 1789595455.391409,
+      "status": "passed"
+    },
+    "preflight-build": {
+      "attempts": [
+        {
+          "attempt": 1,
+          "finished_at": 1789595455.375432,
+          "log_dir": "~/Desktop/mlx2/qualification/runs/qwen36-35b-a3b/overnight-campaign/logs/preflight-build/attempt-0001",
+          "reason": "",
+          "receipt": "~/Desktop/mlx2/qualification/runs/qwen36-35b-a3b/overnight-campaign/receipts/preflight-build/attempt-0001.json",
+          "receipt_sha256": "4c93ca0d53af36adb3cc9b52f9d125ce70fc07156d4ece8c5f4f3674e850ca47",
+          "started_at": 1789595453.934688,
+          "status": "passed"
+        }
+      ],
+      "finished_at": 1789595455.375432,
+      "reason": "",
+      "started_at": 1789595453.934688,
+      "status": "passed"
+    },
+    "preflight-diff": {
+      "attempts": [
+        {
+          "attempt": 1,
+          "finished_at": 1789595453.931874,
+          "log_dir": "~/Desktop/mlx2/qualification/runs/qwen36-35b-a3b/overnight-campaign/logs/preflight-diff/attempt-0001",
+          "reason": "",
+          "receipt": "~/Desktop/mlx2/qualification/runs/qwen36-35b-a3b/overnight-campaign/receipts/preflight-diff/attempt-0001.json",
+          "receipt_sha256": "fb5d5653a9cb82e9025e4506c588f19d3f887107fdd25087c53f909a419bfe63",
+          "started_at": 1789595453.717351,
+          "status": "passed"
+        }
+      ],
+      "finished_at": 1789595453.931874,
+      "reason": "",
+      "started_at": 1789595453.717351,
+      "status": "passed"
+    },
+    "preflight-focused": {
+      "attempts": [
+        {
+          "attempt": 1,
+          "finished_at": 1789595453.7143848,
+          "log_dir": "~/Desktop/mlx2/qualification/runs/qwen36-35b-a3b/overnight-campaign/logs/preflight-focused/attempt-0001",
+          "reason": "",
+          "receipt": "~/Desktop/mlx2/qualification/runs/qwen36-35b-a3b/overnight-campaign/receipts/preflight-focused/attempt-0001.json",
+          "receipt_sha256": "2bbdfd4932f7a6bc4fd2def44bf5a281fce85d1e0f2e6b691926cafb1f307d9e",
+          "started_at": 1789595445.738893,
+          "status": "passed"
+        }
+      ],
+      "finished_at": 1789595453.7143848,
+      "reason": "",
+      "started_at": 1789595445.738893,
+      "status": "passed"
+    },
+    "preflight-full": {
+      "attempts": [
+        {
+          "attempt": 1,
+          "finished_at": 1789595445.736436,
+          "log_dir": "~/Desktop/mlx2/qualification/runs/qwen36-35b-a3b/overnight-campaign/logs/preflight-full/attempt-0001",
+          "reason": "",
+          "receipt": "~/Desktop/mlx2/qualification/runs/qwen36-35b-a3b/overnight-campaign/receipts/preflight-full/attempt-0001.json",
+          "receipt_sha256": "f8c0a14ca65c24f89d3147608309fb88236e9f330d6dc6879683c56c21d6243e",
+          "started_at": 1789595428.357824,
+          "status": "passed"
+        }
+      ],
+      "finished_at": 1789595445.736436,
+      "reason": "",
+      "started_at": 1789595428.357824,
+      "status": "passed"
+    },
+    "preflight-json": {
+      "attempts": [
+        {
+          "attempt": 1,
+          "finished_at": 1789595455.383748,
+          "log_dir": "~/Desktop/mlx2/qualification/runs/qwen36-35b-a3b/overnight-campaign/logs/preflight-json/attempt-0001",
+          "reason": "",
+          "receipt": "~/Desktop/mlx2/qualification/runs/qwen36-35b-a3b/overnight-campaign/receipts/preflight-json/attempt-0001.json",
+          "receipt_sha256": "515cd87c5c46ba8be2f6b8d158c4d40a3d53a8eeab15d58f9a3b041c6bdd7730",
+          "started_at": 1789595455.383178,
+          "status": "passed"
+        }
+      ],
+      "finished_at": 1789595455.383748,
+      "reason": "",
+      "started_at": 1789595455.383178,
+      "status": "passed"
+    },
+    "preflight-ports": {
+      "attempts": [
+        {
+          "attempt": 1,
+          "finished_at": 1789595455.386761,
+          "log_dir": "~/Desktop/mlx2/qualification/runs/qwen36-35b-a3b/overnight-campaign/logs/preflight-ports/attempt-0001",
+          "reason": "",
+          "receipt": "~/Desktop/mlx2/qualification/runs/qwen36-35b-a3b/overnight-campaign/receipts/preflight-ports/attempt-0001.json",
+          "receipt_sha256": "7fc99ef16e292436ddcae23d865de5908bccca846211c2aa4cec17af5ad0ce5e",
+          "started_at": 1789595455.3862112,
+          "status": "passed"
+        }
+      ],
+      "finished_at": 1789595455.386761,
+      "reason": "",
+      "started_at": 1789595455.3862112,
+      "status": "passed"
+    },
+    "preflight-ready": {
+      "attempts": [
+        {
+          "attempt": 1,
+          "finished_at": 1789595455.389301,
+          "log_dir": "~/Desktop/mlx2/qualification/runs/qwen36-35b-a3b/overnight-campaign/logs/preflight-ready/attempt-0001",
+          "reason": "",
+          "receipt": "~/Desktop/mlx2/qualification/runs/qwen36-35b-a3b/overnight-campaign/receipts/preflight-ready/attempt-0001.json",
+          "receipt_sha256": "5492f500803aa0d3195bd8fc8924053b0165aa5f923538dc5e0069092b492f20",
+          "started_at": 1789595455.388662,
+          "status": "passed"
+        }
+      ],
+      "finished_at": 1789595455.389301,
+      "reason": "",
+      "started_at": 1789595455.388662,
+      "status": "passed"
+    },
+    "qualifier-contract": {
+      "attempts": [
+        {
+          "attempt": 1,
+          "finished_at": 1789595455.3946218,
+          "log_dir": "~/Desktop/mlx2/qualification/runs/qwen36-35b-a3b/overnight-campaign/logs/qualifier-contract/attempt-0001",
+          "reason": "",
+          "receipt": "~/Desktop/mlx2/qualification/runs/qwen36-35b-a3b/overnight-campaign/receipts/qualifier-contract/attempt-0001.json",
+          "receipt_sha256": "cd9b0a4c60d956f15cd98031d1b58526b2031de1e12c06a043306a1331fabdc0",
+          "started_at": 1789595455.393992,
+          "status": "passed"
+        }
+      ],
+      "finished_at": 1789595455.3946218,
+      "reason": "",
+      "started_at": 1789595455.393992,
+      "status": "passed"
+    },
+    "qualifier-http-coverage": {
+      "attempts": [
+        {
+          "attempt": 1,
+          "finished_at": 1789595455.399223,
+          "log_dir": "~/Desktop/mlx2/qualification/runs/qwen36-35b-a3b/overnight-campaign/logs/qualifier-http-coverage/attempt-0001",
+          "reason": "",
+          "receipt": "~/Desktop/mlx2/qualification/runs/qwen36-35b-a3b/overnight-campaign/receipts/qualifier-http-coverage/attempt-0001.json",
+          "receipt_sha256": "7bb2a2a4a384d6232d8bbab418ddfad8dcbd140121a94fe322c08a15010cad35",
+          "started_at": 1789595455.398646,
+          "status": "passed"
+        }
+      ],
+      "finished_at": 1789595455.399223,
+      "reason": "",
+      "started_at": 1789595455.398646,
+      "status": "passed"
+    }
+  }
+}

@@ -1,0 +1,28 @@
+unit_tests: PASS
+hermes_client: PASS
+logprobs: PASS
+sampling_controls: PASS
+sampling_defaults: PASS
+cold_text: PASS
+warm_prefix: PASS
+structured_output: PASS
+structured_output_sampled: PASS
+structured_output_thinking: PASS
+stream: PASS
+tools: PASS
+tool_roundtrip: PASS
+reasoning: PASS
+stop: PASS
+seed_repeat: PASS
+batch: PASS
+mixed_warm: FAIL
+Evidence: /private/tmp/mlx2-xing/qualification/runs/xing4-0-gpu-20260918/x6-mtp1-qualification.json
+Traceback (most recent call last):
+  File "/private/tmp/mlx2-xing/scripts/qualify_serving.py", line 1205, in <module>
+    main()
+  File "/private/tmp/mlx2-xing/scripts/qualify_serving.py", line 1015, in main
+    check(
+  File "/private/tmp/mlx2-xing/scripts/qualify_serving.py", line 718, in check
+    assert condition, name
+           ^^^^^^^^^
+AssertionError: mixed_warm

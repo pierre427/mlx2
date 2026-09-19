@@ -1,0 +1,3062 @@
+{
+  "schema": "mlx2.async-mtp-observed-trace.v1",
+  "scope": "post-verification host-visible proposal outcomes",
+  "started_at_ns": 1789665632467040000,
+  "finished_at_ns": 1789665711129443000,
+  "argv": [
+    "--model",
+    "~/mlx-models/Qwen3.6-35B-A3B-uncensored-heretic-Native-MTP-Preserved-oQ4e-mtp",
+    "--host",
+    "127.0.0.1",
+    "--port",
+    "8297",
+    "--execution-policy",
+    "artifacts/aspire-gpu-2026-09-17/policy-k1.json",
+    "--max-context",
+    "32768",
+    "--max-lanes",
+    "4",
+    "--max-inflight",
+    "8",
+    "--cache-bytes",
+    "12884901888",
+    "--cache-dir",
+    "~/Library/Caches/mlx2/aspire-long-k1-2026-09-17",
+    "--qualification-mode"
+  ],
+  "records": [
+    {
+      "request_id": "0",
+      "round_index": 0,
+      "context_length": 15224,
+      "batch_size": 1,
+      "draft_depth": 1,
+      "accepted_prefix": 1,
+      "cycle_ns": 24515875
+    },
+    {
+      "request_id": "0",
+      "round_index": 1,
+      "context_length": 15226,
+      "batch_size": 1,
+      "draft_depth": 1,
+      "accepted_prefix": 0,
+      "cycle_ns": 16682375
+    },
+    {
+      "request_id": "0",
+      "round_index": 2,
+      "context_length": 15227,
+      "batch_size": 1,
+      "draft_depth": 1,
+      "accepted_prefix": 0,
+      "cycle_ns": 15532500
+    },
+    {
+      "request_id": "0",
+      "round_index": 3,
+      "context_length": 15228,
+      "batch_size": 1,
+      "draft_depth": 1,
+      "accepted_prefix": 0,
+      "cycle_ns": 15476291
+    },
+    {
+      "request_id": "0",
+      "round_index": 4,
+      "context_length": 15229,
+      "batch_size": 1,
+      "draft_depth": 1,
+      "accepted_prefix": 1,
+      "cycle_ns": 14810250
+    },
+    {
+      "request_id": "0",
+      "round_index": 5,
+      "context_length": 15231,
+      "batch_size": 1,
+      "draft_depth": 1,
+      "accepted_prefix": 1,
+      "cycle_ns": 14561833
+    },
+    {
+      "request_id": "0",
+      "round_index": 6,
+      "context_length": 15233,
+      "batch_size": 1,
+      "draft_depth": 1,
+      "accepted_prefix": 0,
+      "cycle_ns": 15238041
+    },
+    {
+      "request_id": "0",
+      "round_index": 7,
+      "context_length": 15234,
+      "batch_size": 1,
+      "draft_depth": 1,
+      "accepted_prefix": 0,
+      "cycle_ns": 15507917
+    },
+    {
+      "request_id": "0",
+      "round_index": 8,
+      "context_length": 15235,
+      "batch_size": 1,
+      "draft_depth": 1,
+      "accepted_prefix": 1,
+      "cycle_ns": 14857459
+    },
+    {
+      "request_id": "0",
+      "round_index": 9,
+      "context_length": 15237,
+      "batch_size": 1,
+      "draft_depth": 1,
+      "accepted_prefix": 1,
+      "cycle_ns": 14793250
+    },
+    {
+      "request_id": "0",
+      "round_index": 10,
+      "context_length": 15239,
+      "batch_size": 1,
+      "draft_depth": 1,
+      "accepted_prefix": 0,
+      "cycle_ns": 15476459
+    },
+    {
+      "request_id": "0",
+      "round_index": 11,
+      "context_length": 15240,
+      "batch_size": 1,
+      "draft_depth": 1,
+      "accepted_prefix": 1,
+      "cycle_ns": 14766959
+    },
+    {
+      "request_id": "0",
+      "round_index": 12,
+      "context_length": 15242,
+      "batch_size": 1,
+      "draft_depth": 1,
+      "accepted_prefix": 0,
+      "cycle_ns": 15410250
+    },
+    {
+      "request_id": "0",
+      "round_index": 13,
+      "context_length": 15243,
+      "batch_size": 1,
+      "draft_depth": 1,
+      "accepted_prefix": 1,
+      "cycle_ns": 14641292
+    },
+    {
+      "request_id": "0",
+      "round_index": 14,
+      "context_length": 15245,
+      "batch_size": 1,
+      "draft_depth": 1,
+      "accepted_prefix": 0,
+      "cycle_ns": 15523250
+    },
+    {
+      "request_id": "0",
+      "round_index": 15,
+      "context_length": 15246,
+      "batch_size": 1,
+      "draft_depth": 1,
+      "accepted_prefix": 1,
+      "cycle_ns": 14947667
+    },
+    {
+      "request_id": "0",
+      "round_index": 16,
+      "context_length": 15248,
+      "batch_size": 1,
+      "draft_depth": 1,
+      "accepted_prefix": 0,
+      "cycle_ns": 15680292
+    },
+    {
+      "request_id": "0",
+      "round_index": 17,
+      "context_length": 15249,
+      "batch_size": 1,
+      "draft_depth": 1,
+      "accepted_prefix": 1,
+      "cycle_ns": 14895000
+    },
+    {
+      "request_id": "0",
+      "round_index": 18,
+      "context_length": 15251,
+      "batch_size": 1,
+      "draft_depth": 1,
+      "accepted_prefix": 1,
+      "cycle_ns": 14764584
+    },
+    {
+      "request_id": "0",
+      "round_index": 19,
+      "context_length": 15253,
+      "batch_size": 1,
+      "draft_depth": 1,
+      "accepted_prefix": 0,
+      "cycle_ns": 15722584
+    },
+    {
+      "request_id": "0",
+      "round_index": 20,
+      "context_length": 15254,
+      "batch_size": 1,
+      "draft_depth": 1,
+      "accepted_prefix": 0,
+      "cycle_ns": 15857167
+    },
+    {
+      "request_id": "0",
+      "round_index": 21,
+      "context_length": 15255,
+      "batch_size": 1,
+      "draft_depth": 1,
+      "accepted_prefix": 0,
+      "cycle_ns": 16198417
+    },
+    {
+      "request_id": "0",
+      "round_index": 22,
+      "context_length": 15256,
+      "batch_size": 1,
+      "draft_depth": 1,
+      "accepted_prefix": 1,
+      "cycle_ns": 14925750
+    },
+    {
+      "request_id": "0",
+      "round_index": 23,
+      "context_length": 15258,
+      "batch_size": 1,
+      "draft_depth": 1,
+      "accepted_prefix": 1,
+      "cycle_ns": 15379667
+    },
+    {
+      "request_id": "0",
+      "round_index": 24,
+      "context_length": 15260,
+      "batch_size": 1,
+      "draft_depth": 1,
+      "accepted_prefix": 0,
+      "cycle_ns": 16335459
+    },
+    {
+      "request_id": "0",
+      "round_index": 25,
+      "context_length": 15261,
+      "batch_size": 1,
+      "draft_depth": 1,
+      "accepted_prefix": 1,
+      "cycle_ns": 15242125
+    },
+    {
+      "request_id": "0",
+      "round_index": 26,
+      "context_length": 15263,
+      "batch_size": 1,
+      "draft_depth": 1,
+      "accepted_prefix": 0,
+      "cycle_ns": 16253000
+    },
+    {
+      "request_id": "0",
+      "round_index": 27,
+      "context_length": 15264,
+      "batch_size": 1,
+      "draft_depth": 1,
+      "accepted_prefix": 1,
+      "cycle_ns": 14938792
+    },
+    {
+      "request_id": "0",
+      "round_index": 28,
+      "context_length": 15266,
+      "batch_size": 1,
+      "draft_depth": 1,
+      "accepted_prefix": 0,
+      "cycle_ns": 16166250
+    },
+    {
+      "request_id": "0",
+      "round_index": 29,
+      "context_length": 15267,
+      "batch_size": 1,
+      "draft_depth": 1,
+      "accepted_prefix": 0,
+      "cycle_ns": 16022459
+    },
+    {
+      "request_id": "0",
+      "round_index": 30,
+      "context_length": 15268,
+      "batch_size": 1,
+      "draft_depth": 1,
+      "accepted_prefix": 1,
+      "cycle_ns": 15025125
+    },
+    {
+      "request_id": "0",
+      "round_index": 31,
+      "context_length": 15270,
+      "batch_size": 1,
+      "draft_depth": 1,
+      "accepted_prefix": 1,
+      "cycle_ns": 15131958
+    },
+    {
+      "request_id": "0",
+      "round_index": 32,
+      "context_length": 15272,
+      "batch_size": 1,
+      "draft_depth": 1,
+      "accepted_prefix": 0,
+      "cycle_ns": 16272833
+    },
+    {
+      "request_id": "0",
+      "round_index": 33,
+      "context_length": 15273,
+      "batch_size": 1,
+      "draft_depth": 1,
+      "accepted_prefix": 0,
+      "cycle_ns": 16298542
+    },
+    {
+      "request_id": "0",
+      "round_index": 34,
+      "context_length": 15274,
+      "batch_size": 1,
+      "draft_depth": 1,
+      "accepted_prefix": 0,
+      "cycle_ns": 16091042
+    },
+    {
+      "request_id": "0",
+      "round_index": 35,
+      "context_length": 15275,
+      "batch_size": 1,
+      "draft_depth": 1,
+      "accepted_prefix": 1,
+      "cycle_ns": 14809042
+    },
+    {
+      "request_id": "0",
+      "round_index": 36,
+      "context_length": 15277,
+      "batch_size": 1,
+      "draft_depth": 1,
+      "accepted_prefix": 1,
+      "cycle_ns": 14835625
+    },
+    {
+      "request_id": "0",
+      "round_index": 37,
+      "context_length": 15279,
+      "batch_size": 1,
+      "draft_depth": 1,
+      "accepted_prefix": 1,
+      "cycle_ns": 14821791
+    },
+    {
+      "request_id": "0",
+      "round_index": 38,
+      "context_length": 15281,
+      "batch_size": 1,
+      "draft_depth": 1,
+      "accepted_prefix": 0,
+      "cycle_ns": 16026334
+    },
+    {
+      "request_id": "0",
+      "round_index": 39,
+      "context_length": 15282,
+      "batch_size": 1,
+      "draft_depth": 1,
+      "accepted_prefix": 1,
+      "cycle_ns": 14907208
+    },
+    {
+      "request_id": "0",
+      "round_index": 40,
+      "context_length": 15284,
+      "batch_size": 1,
+      "draft_depth": 1,
+      "accepted_prefix": 1,
+      "cycle_ns": 14796833
+    },
+    {
+      "request_id": "0",
+      "round_index": 41,
+      "context_length": 15286,
+      "batch_size": 1,
+      "draft_depth": 0,
+      "accepted_prefix": 0,
+      "cycle_ns": 12493500
+    },
+    {
+      "request_id": "1",
+      "round_index": 0,
+      "context_length": 15225,
+      "batch_size": 1,
+      "draft_depth": 1,
+      "accepted_prefix": 1,
+      "cycle_ns": 15763042
+    },
+    {
+      "request_id": "1",
+      "round_index": 1,
+      "context_length": 15227,
+      "batch_size": 1,
+      "draft_depth": 1,
+      "accepted_prefix": 0,
+      "cycle_ns": 15747875
+    },
+    {
+      "request_id": "1",
+      "round_index": 2,
+      "context_length": 15228,
+      "batch_size": 1,
+      "draft_depth": 1,
+      "accepted_prefix": 0,
+      "cycle_ns": 15522875
+    },
+    {
+      "request_id": "1",
+      "round_index": 3,
+      "context_length": 15229,
+      "batch_size": 1,
+      "draft_depth": 1,
+      "accepted_prefix": 1,
+      "cycle_ns": 14736375
+    },
+    {
+      "request_id": "1",
+      "round_index": 4,
+      "context_length": 15231,
+      "batch_size": 1,
+      "draft_depth": 1,
+      "accepted_prefix": 1,
+      "cycle_ns": 14651875
+    },
+    {
+      "request_id": "1",
+      "round_index": 5,
+      "context_length": 15233,
+      "batch_size": 1,
+      "draft_depth": 1,
+      "accepted_prefix": 1,
+      "cycle_ns": 15076000
+    },
+    {
+      "request_id": "1",
+      "round_index": 6,
+      "context_length": 15235,
+      "batch_size": 1,
+      "draft_depth": 1,
+      "accepted_prefix": 1,
+      "cycle_ns": 15095292
+    },
+    {
+      "request_id": "1",
+      "round_index": 7,
+      "context_length": 15237,
+      "batch_size": 1,
+      "draft_depth": 1,
+      "accepted_prefix": 0,
+      "cycle_ns": 15540667
+    },
+    {
+      "request_id": "1",
+      "round_index": 8,
+      "context_length": 15238,
+      "batch_size": 1,
+      "draft_depth": 1,
+      "accepted_prefix": 0,
+      "cycle_ns": 15568041
+    },
+    {
+      "request_id": "1",
+      "round_index": 9,
+      "context_length": 15239,
+      "batch_size": 1,
+      "draft_depth": 1,
+      "accepted_prefix": 1,
+      "cycle_ns": 14924375
+    },
+    {
+      "request_id": "1",
+      "round_index": 10,
+      "context_length": 15241,
+      "batch_size": 1,
+      "draft_depth": 1,
+      "accepted_prefix": 1,
+      "cycle_ns": 15182708
+    },
+    {
+      "request_id": "1",
+      "round_index": 11,
+      "context_length": 15243,
+      "batch_size": 1,
+      "draft_depth": 1,
+      "accepted_prefix": 0,
+      "cycle_ns": 15452500
+    },
+    {
+      "request_id": "1",
+      "round_index": 12,
+      "context_length": 15244,
+      "batch_size": 1,
+      "draft_depth": 1,
+      "accepted_prefix": 0,
+      "cycle_ns": 15489209
+    },
+    {
+      "request_id": "1",
+      "round_index": 13,
+      "context_length": 15245,
+      "batch_size": 1,
+      "draft_depth": 1,
+      "accepted_prefix": 1,
+      "cycle_ns": 14734833
+    },
+    {
+      "request_id": "1",
+      "round_index": 14,
+      "context_length": 15247,
+      "batch_size": 1,
+      "draft_depth": 1,
+      "accepted_prefix": 0,
+      "cycle_ns": 15530458
+    },
+    {
+      "request_id": "1",
+      "round_index": 15,
+      "context_length": 15248,
+      "batch_size": 1,
+      "draft_depth": 1,
+      "accepted_prefix": 1,
+      "cycle_ns": 14605667
+    },
+    {
+      "request_id": "1",
+      "round_index": 16,
+      "context_length": 15250,
+      "batch_size": 1,
+      "draft_depth": 1,
+      "accepted_prefix": 0,
+      "cycle_ns": 15661709
+    },
+    {
+      "request_id": "1",
+      "round_index": 17,
+      "context_length": 15251,
+      "batch_size": 1,
+      "draft_depth": 1,
+      "accepted_prefix": 1,
+      "cycle_ns": 14960834
+    },
+    {
+      "request_id": "1",
+      "round_index": 18,
+      "context_length": 15253,
+      "batch_size": 1,
+      "draft_depth": 1,
+      "accepted_prefix": 0,
+      "cycle_ns": 15758958
+    },
+    {
+      "request_id": "1",
+      "round_index": 19,
+      "context_length": 15254,
+      "batch_size": 1,
+      "draft_depth": 1,
+      "accepted_prefix": 0,
+      "cycle_ns": 15977125
+    },
+    {
+      "request_id": "1",
+      "round_index": 20,
+      "context_length": 15255,
+      "batch_size": 1,
+      "draft_depth": 1,
+      "accepted_prefix": 1,
+      "cycle_ns": 15489083
+    },
+    {
+      "request_id": "2",
+      "round_index": 0,
+      "context_length": 15227,
+      "batch_size": 1,
+      "draft_depth": 1,
+      "accepted_prefix": 0,
+      "cycle_ns": 16278166
+    },
+    {
+      "request_id": "2",
+      "round_index": 1,
+      "context_length": 15228,
+      "batch_size": 1,
+      "draft_depth": 1,
+      "accepted_prefix": 1,
+      "cycle_ns": 15940375
+    },
+    {
+      "request_id": "2",
+      "round_index": 2,
+      "context_length": 15230,
+      "batch_size": 1,
+      "draft_depth": 1,
+      "accepted_prefix": 1,
+      "cycle_ns": 14859541
+    },
+    {
+      "request_id": "2",
+      "round_index": 3,
+      "context_length": 15232,
+      "batch_size": 1,
+      "draft_depth": 1,
+      "accepted_prefix": 0,
+      "cycle_ns": 15264500
+    },
+    {
+      "request_id": "2",
+      "round_index": 4,
+      "context_length": 15233,
+      "batch_size": 1,
+      "draft_depth": 1,
+      "accepted_prefix": 0,
+      "cycle_ns": 15457292
+    },
+    {
+      "request_id": "2",
+      "round_index": 5,
+      "context_length": 15234,
+      "batch_size": 1,
+      "draft_depth": 1,
+      "accepted_prefix": 1,
+      "cycle_ns": 14856375
+    },
+    {
+      "request_id": "2",
+      "round_index": 6,
+      "context_length": 15236,
+      "batch_size": 1,
+      "draft_depth": 1,
+      "accepted_prefix": 1,
+      "cycle_ns": 14849084
+    },
+    {
+      "request_id": "2",
+      "round_index": 7,
+      "context_length": 15238,
+      "batch_size": 1,
+      "draft_depth": 1,
+      "accepted_prefix": 1,
+      "cycle_ns": 14947209
+    },
+    {
+      "request_id": "2",
+      "round_index": 8,
+      "context_length": 15240,
+      "batch_size": 1,
+      "draft_depth": 1,
+      "accepted_prefix": 1,
+      "cycle_ns": 14804167
+    },
+    {
+      "request_id": "2",
+      "round_index": 9,
+      "context_length": 15242,
+      "batch_size": 1,
+      "draft_depth": 1,
+      "accepted_prefix": 0,
+      "cycle_ns": 15579916
+    },
+    {
+      "request_id": "2",
+      "round_index": 10,
+      "context_length": 15243,
+      "batch_size": 1,
+      "draft_depth": 1,
+      "accepted_prefix": 0,
+      "cycle_ns": 15697292
+    },
+    {
+      "request_id": "2",
+      "round_index": 11,
+      "context_length": 15244,
+      "batch_size": 1,
+      "draft_depth": 1,
+      "accepted_prefix": 0,
+      "cycle_ns": 15493625
+    },
+    {
+      "request_id": "2",
+      "round_index": 12,
+      "context_length": 15245,
+      "batch_size": 1,
+      "draft_depth": 1,
+      "accepted_prefix": 1,
+      "cycle_ns": 15030291
+    },
+    {
+      "request_id": "2",
+      "round_index": 13,
+      "context_length": 15247,
+      "batch_size": 1,
+      "draft_depth": 1,
+      "accepted_prefix": 1,
+      "cycle_ns": 14752750
+    },
+    {
+      "request_id": "2",
+      "round_index": 14,
+      "context_length": 15249,
+      "batch_size": 1,
+      "draft_depth": 1,
+      "accepted_prefix": 0,
+      "cycle_ns": 15488334
+    },
+    {
+      "request_id": "2",
+      "round_index": 15,
+      "context_length": 15250,
+      "batch_size": 1,
+      "draft_depth": 1,
+      "accepted_prefix": 0,
+      "cycle_ns": 15550459
+    },
+    {
+      "request_id": "2",
+      "round_index": 16,
+      "context_length": 15251,
+      "batch_size": 1,
+      "draft_depth": 1,
+      "accepted_prefix": 0,
+      "cycle_ns": 15991750
+    },
+    {
+      "request_id": "2",
+      "round_index": 17,
+      "context_length": 15252,
+      "batch_size": 1,
+      "draft_depth": 1,
+      "accepted_prefix": 0,
+      "cycle_ns": 15551500
+    },
+    {
+      "request_id": "2",
+      "round_index": 18,
+      "context_length": 15253,
+      "batch_size": 1,
+      "draft_depth": 1,
+      "accepted_prefix": 0,
+      "cycle_ns": 15816166
+    },
+    {
+      "request_id": "2",
+      "round_index": 19,
+      "context_length": 15254,
+      "batch_size": 1,
+      "draft_depth": 1,
+      "accepted_prefix": 1,
+      "cycle_ns": 14883292
+    },
+    {
+      "request_id": "2",
+      "round_index": 20,
+      "context_length": 15256,
+      "batch_size": 1,
+      "draft_depth": 1,
+      "accepted_prefix": 0,
+      "cycle_ns": 15787500
+    },
+    {
+      "request_id": "2",
+      "round_index": 21,
+      "context_length": 15257,
+      "batch_size": 1,
+      "draft_depth": 1,
+      "accepted_prefix": 1,
+      "cycle_ns": 14951583
+    },
+    {
+      "request_id": "2",
+      "round_index": 22,
+      "context_length": 15259,
+      "batch_size": 1,
+      "draft_depth": 1,
+      "accepted_prefix": 0,
+      "cycle_ns": 16352084
+    },
+    {
+      "request_id": "2",
+      "round_index": 23,
+      "context_length": 15260,
+      "batch_size": 1,
+      "draft_depth": 1,
+      "accepted_prefix": 1,
+      "cycle_ns": 14920750
+    },
+    {
+      "request_id": "2",
+      "round_index": 24,
+      "context_length": 15262,
+      "batch_size": 1,
+      "draft_depth": 1,
+      "accepted_prefix": 1,
+      "cycle_ns": 14911417
+    },
+    {
+      "request_id": "2",
+      "round_index": 25,
+      "context_length": 15264,
+      "batch_size": 1,
+      "draft_depth": 1,
+      "accepted_prefix": 1,
+      "cycle_ns": 14786959
+    },
+    {
+      "request_id": "2",
+      "round_index": 26,
+      "context_length": 15266,
+      "batch_size": 1,
+      "draft_depth": 1,
+      "accepted_prefix": 1,
+      "cycle_ns": 14903041
+    },
+    {
+      "request_id": "2",
+      "round_index": 27,
+      "context_length": 15268,
+      "batch_size": 1,
+      "draft_depth": 1,
+      "accepted_prefix": 0,
+      "cycle_ns": 16094917
+    },
+    {
+      "request_id": "2",
+      "round_index": 28,
+      "context_length": 15269,
+      "batch_size": 1,
+      "draft_depth": 1,
+      "accepted_prefix": 1,
+      "cycle_ns": 14958916
+    },
+    {
+      "request_id": "2",
+      "round_index": 29,
+      "context_length": 15271,
+      "batch_size": 1,
+      "draft_depth": 1,
+      "accepted_prefix": 1,
+      "cycle_ns": 14899000
+    },
+    {
+      "request_id": "2",
+      "round_index": 30,
+      "context_length": 15273,
+      "batch_size": 1,
+      "draft_depth": 1,
+      "accepted_prefix": 0,
+      "cycle_ns": 16042333
+    },
+    {
+      "request_id": "2",
+      "round_index": 31,
+      "context_length": 15274,
+      "batch_size": 1,
+      "draft_depth": 1,
+      "accepted_prefix": 0,
+      "cycle_ns": 16153958
+    },
+    {
+      "request_id": "2",
+      "round_index": 32,
+      "context_length": 15275,
+      "batch_size": 1,
+      "draft_depth": 1,
+      "accepted_prefix": 0,
+      "cycle_ns": 16588834
+    },
+    {
+      "request_id": "2",
+      "round_index": 33,
+      "context_length": 15276,
+      "batch_size": 1,
+      "draft_depth": 1,
+      "accepted_prefix": 1,
+      "cycle_ns": 15323791
+    },
+    {
+      "request_id": "2",
+      "round_index": 34,
+      "context_length": 15278,
+      "batch_size": 1,
+      "draft_depth": 1,
+      "accepted_prefix": 1,
+      "cycle_ns": 15892667
+    },
+    {
+      "request_id": "2",
+      "round_index": 35,
+      "context_length": 15280,
+      "batch_size": 1,
+      "draft_depth": 1,
+      "accepted_prefix": 1,
+      "cycle_ns": 15431250
+    },
+    {
+      "request_id": "2",
+      "round_index": 36,
+      "context_length": 15282,
+      "batch_size": 1,
+      "draft_depth": 1,
+      "accepted_prefix": 1,
+      "cycle_ns": 15134083
+    },
+    {
+      "request_id": "2",
+      "round_index": 37,
+      "context_length": 15284,
+      "batch_size": 1,
+      "draft_depth": 1,
+      "accepted_prefix": 0,
+      "cycle_ns": 16074625
+    },
+    {
+      "request_id": "2",
+      "round_index": 38,
+      "context_length": 15285,
+      "batch_size": 1,
+      "draft_depth": 1,
+      "accepted_prefix": 1,
+      "cycle_ns": 14844375
+    },
+    {
+      "request_id": "2",
+      "round_index": 39,
+      "context_length": 15287,
+      "batch_size": 1,
+      "draft_depth": 1,
+      "accepted_prefix": 0,
+      "cycle_ns": 16289500
+    },
+    {
+      "request_id": "2",
+      "round_index": 40,
+      "context_length": 15288,
+      "batch_size": 1,
+      "draft_depth": 1,
+      "accepted_prefix": 0,
+      "cycle_ns": 16372291
+    },
+    {
+      "request_id": "2",
+      "round_index": 41,
+      "context_length": 15289,
+      "batch_size": 1,
+      "draft_depth": 0,
+      "accepted_prefix": 0,
+      "cycle_ns": 12677334
+    },
+    {
+      "request_id": "3",
+      "round_index": 0,
+      "context_length": 15225,
+      "batch_size": 1,
+      "draft_depth": 1,
+      "accepted_prefix": 1,
+      "cycle_ns": 15771250
+    },
+    {
+      "request_id": "3",
+      "round_index": 1,
+      "context_length": 15227,
+      "batch_size": 1,
+      "draft_depth": 1,
+      "accepted_prefix": 0,
+      "cycle_ns": 15895458
+    },
+    {
+      "request_id": "3",
+      "round_index": 2,
+      "context_length": 15228,
+      "batch_size": 1,
+      "draft_depth": 1,
+      "accepted_prefix": 0,
+      "cycle_ns": 15906708
+    },
+    {
+      "request_id": "3",
+      "round_index": 3,
+      "context_length": 15229,
+      "batch_size": 1,
+      "draft_depth": 1,
+      "accepted_prefix": 1,
+      "cycle_ns": 14932709
+    },
+    {
+      "request_id": "3",
+      "round_index": 4,
+      "context_length": 15231,
+      "batch_size": 1,
+      "draft_depth": 1,
+      "accepted_prefix": 0,
+      "cycle_ns": 15362208
+    },
+    {
+      "request_id": "3",
+      "round_index": 5,
+      "context_length": 15232,
+      "batch_size": 1,
+      "draft_depth": 1,
+      "accepted_prefix": 1,
+      "cycle_ns": 14707708
+    },
+    {
+      "request_id": "3",
+      "round_index": 6,
+      "context_length": 15234,
+      "batch_size": 1,
+      "draft_depth": 1,
+      "accepted_prefix": 0,
+      "cycle_ns": 15640250
+    },
+    {
+      "request_id": "3",
+      "round_index": 7,
+      "context_length": 15235,
+      "batch_size": 1,
+      "draft_depth": 1,
+      "accepted_prefix": 1,
+      "cycle_ns": 14907583
+    },
+    {
+      "request_id": "3",
+      "round_index": 8,
+      "context_length": 15237,
+      "batch_size": 1,
+      "draft_depth": 1,
+      "accepted_prefix": 0,
+      "cycle_ns": 15323084
+    },
+    {
+      "request_id": "3",
+      "round_index": 9,
+      "context_length": 15238,
+      "batch_size": 1,
+      "draft_depth": 1,
+      "accepted_prefix": 1,
+      "cycle_ns": 14869708
+    },
+    {
+      "request_id": "3",
+      "round_index": 10,
+      "context_length": 15240,
+      "batch_size": 1,
+      "draft_depth": 1,
+      "accepted_prefix": 1,
+      "cycle_ns": 14808917
+    },
+    {
+      "request_id": "3",
+      "round_index": 11,
+      "context_length": 15242,
+      "batch_size": 1,
+      "draft_depth": 1,
+      "accepted_prefix": 0,
+      "cycle_ns": 15676750
+    },
+    {
+      "request_id": "3",
+      "round_index": 12,
+      "context_length": 15243,
+      "batch_size": 1,
+      "draft_depth": 1,
+      "accepted_prefix": 0,
+      "cycle_ns": 16023584
+    },
+    {
+      "request_id": "3",
+      "round_index": 13,
+      "context_length": 15244,
+      "batch_size": 1,
+      "draft_depth": 1,
+      "accepted_prefix": 1,
+      "cycle_ns": 15346666
+    },
+    {
+      "request_id": "3",
+      "round_index": 14,
+      "context_length": 15246,
+      "batch_size": 1,
+      "draft_depth": 1,
+      "accepted_prefix": 1,
+      "cycle_ns": 14925209
+    },
+    {
+      "request_id": "3",
+      "round_index": 15,
+      "context_length": 15248,
+      "batch_size": 1,
+      "draft_depth": 1,
+      "accepted_prefix": 1,
+      "cycle_ns": 14856875
+    },
+    {
+      "request_id": "3",
+      "round_index": 16,
+      "context_length": 15250,
+      "batch_size": 1,
+      "draft_depth": 1,
+      "accepted_prefix": 0,
+      "cycle_ns": 15785541
+    },
+    {
+      "request_id": "3",
+      "round_index": 17,
+      "context_length": 15251,
+      "batch_size": 1,
+      "draft_depth": 1,
+      "accepted_prefix": 1,
+      "cycle_ns": 14886042
+    },
+    {
+      "request_id": "3",
+      "round_index": 18,
+      "context_length": 15253,
+      "batch_size": 1,
+      "draft_depth": 1,
+      "accepted_prefix": 0,
+      "cycle_ns": 15868708
+    },
+    {
+      "request_id": "3",
+      "round_index": 19,
+      "context_length": 15254,
+      "batch_size": 1,
+      "draft_depth": 1,
+      "accepted_prefix": 1,
+      "cycle_ns": 14927833
+    },
+    {
+      "request_id": "3",
+      "round_index": 20,
+      "context_length": 15256,
+      "batch_size": 1,
+      "draft_depth": 1,
+      "accepted_prefix": 0,
+      "cycle_ns": 16029625
+    },
+    {
+      "request_id": "3",
+      "round_index": 21,
+      "context_length": 15257,
+      "batch_size": 1,
+      "draft_depth": 1,
+      "accepted_prefix": 1,
+      "cycle_ns": 14924500
+    },
+    {
+      "request_id": "3",
+      "round_index": 22,
+      "context_length": 15259,
+      "batch_size": 1,
+      "draft_depth": 1,
+      "accepted_prefix": 0,
+      "cycle_ns": 15914375
+    },
+    {
+      "request_id": "3",
+      "round_index": 23,
+      "context_length": 15260,
+      "batch_size": 1,
+      "draft_depth": 1,
+      "accepted_prefix": 1,
+      "cycle_ns": 15298042
+    },
+    {
+      "request_id": "3",
+      "round_index": 24,
+      "context_length": 15262,
+      "batch_size": 1,
+      "draft_depth": 1,
+      "accepted_prefix": 1,
+      "cycle_ns": 15070541
+    },
+    {
+      "request_id": "3",
+      "round_index": 25,
+      "context_length": 15264,
+      "batch_size": 1,
+      "draft_depth": 1,
+      "accepted_prefix": 0,
+      "cycle_ns": 16129166
+    },
+    {
+      "request_id": "3",
+      "round_index": 26,
+      "context_length": 15265,
+      "batch_size": 1,
+      "draft_depth": 1,
+      "accepted_prefix": 0,
+      "cycle_ns": 16321833
+    },
+    {
+      "request_id": "3",
+      "round_index": 27,
+      "context_length": 15266,
+      "batch_size": 1,
+      "draft_depth": 1,
+      "accepted_prefix": 1,
+      "cycle_ns": 14982667
+    },
+    {
+      "request_id": "3",
+      "round_index": 28,
+      "context_length": 15268,
+      "batch_size": 1,
+      "draft_depth": 1,
+      "accepted_prefix": 0,
+      "cycle_ns": 15972417
+    },
+    {
+      "request_id": "3",
+      "round_index": 29,
+      "context_length": 15269,
+      "batch_size": 1,
+      "draft_depth": 1,
+      "accepted_prefix": 0,
+      "cycle_ns": 16101875
+    },
+    {
+      "request_id": "3",
+      "round_index": 30,
+      "context_length": 15270,
+      "batch_size": 1,
+      "draft_depth": 1,
+      "accepted_prefix": 1,
+      "cycle_ns": 14977542
+    },
+    {
+      "request_id": "3",
+      "round_index": 31,
+      "context_length": 15272,
+      "batch_size": 1,
+      "draft_depth": 1,
+      "accepted_prefix": 0,
+      "cycle_ns": 16206250
+    },
+    {
+      "request_id": "3",
+      "round_index": 32,
+      "context_length": 15273,
+      "batch_size": 1,
+      "draft_depth": 1,
+      "accepted_prefix": 1,
+      "cycle_ns": 15540875
+    },
+    {
+      "request_id": "3",
+      "round_index": 33,
+      "context_length": 15275,
+      "batch_size": 1,
+      "draft_depth": 1,
+      "accepted_prefix": 0,
+      "cycle_ns": 16615042
+    },
+    {
+      "request_id": "3",
+      "round_index": 34,
+      "context_length": 15276,
+      "batch_size": 1,
+      "draft_depth": 1,
+      "accepted_prefix": 1,
+      "cycle_ns": 15346000
+    },
+    {
+      "request_id": "3",
+      "round_index": 35,
+      "context_length": 15278,
+      "batch_size": 1,
+      "draft_depth": 1,
+      "accepted_prefix": 0,
+      "cycle_ns": 16339167
+    },
+    {
+      "request_id": "3",
+      "round_index": 36,
+      "context_length": 15279,
+      "batch_size": 1,
+      "draft_depth": 1,
+      "accepted_prefix": 1,
+      "cycle_ns": 15075041
+    },
+    {
+      "request_id": "3",
+      "round_index": 37,
+      "context_length": 15281,
+      "batch_size": 1,
+      "draft_depth": 1,
+      "accepted_prefix": 0,
+      "cycle_ns": 16351167
+    },
+    {
+      "request_id": "3",
+      "round_index": 38,
+      "context_length": 15282,
+      "batch_size": 1,
+      "draft_depth": 1,
+      "accepted_prefix": 1,
+      "cycle_ns": 15463459
+    },
+    {
+      "request_id": "3",
+      "round_index": 39,
+      "context_length": 15284,
+      "batch_size": 1,
+      "draft_depth": 1,
+      "accepted_prefix": 1,
+      "cycle_ns": 15623625
+    },
+    {
+      "request_id": "3",
+      "round_index": 40,
+      "context_length": 15286,
+      "batch_size": 1,
+      "draft_depth": 1,
+      "accepted_prefix": 0,
+      "cycle_ns": 16719500
+    },
+    {
+      "request_id": "3",
+      "round_index": 41,
+      "context_length": 15287,
+      "batch_size": 1,
+      "draft_depth": 0,
+      "accepted_prefix": 0,
+      "cycle_ns": 12892750
+    },
+    {
+      "request_id": "4",
+      "round_index": 0,
+      "context_length": 15224,
+      "batch_size": 1,
+      "draft_depth": 1,
+      "accepted_prefix": 1,
+      "cycle_ns": 14951583
+    },
+    {
+      "request_id": "4",
+      "round_index": 1,
+      "context_length": 15226,
+      "batch_size": 1,
+      "draft_depth": 1,
+      "accepted_prefix": 0,
+      "cycle_ns": 15254042
+    },
+    {
+      "request_id": "4",
+      "round_index": 2,
+      "context_length": 15227,
+      "batch_size": 1,
+      "draft_depth": 1,
+      "accepted_prefix": 0,
+      "cycle_ns": 15228583
+    },
+    {
+      "request_id": "4",
+      "round_index": 3,
+      "context_length": 15228,
+      "batch_size": 1,
+      "draft_depth": 1,
+      "accepted_prefix": 0,
+      "cycle_ns": 15186667
+    },
+    {
+      "request_id": "4",
+      "round_index": 4,
+      "context_length": 15229,
+      "batch_size": 1,
+      "draft_depth": 1,
+      "accepted_prefix": 1,
+      "cycle_ns": 14573542
+    },
+    {
+      "request_id": "4",
+      "round_index": 5,
+      "context_length": 15231,
+      "batch_size": 1,
+      "draft_depth": 1,
+      "accepted_prefix": 1,
+      "cycle_ns": 14367000
+    },
+    {
+      "request_id": "4",
+      "round_index": 6,
+      "context_length": 15233,
+      "batch_size": 1,
+      "draft_depth": 1,
+      "accepted_prefix": 0,
+      "cycle_ns": 14949042
+    },
+    {
+      "request_id": "4",
+      "round_index": 7,
+      "context_length": 15234,
+      "batch_size": 1,
+      "draft_depth": 1,
+      "accepted_prefix": 0,
+      "cycle_ns": 15366708
+    },
+    {
+      "request_id": "4",
+      "round_index": 8,
+      "context_length": 15235,
+      "batch_size": 1,
+      "draft_depth": 1,
+      "accepted_prefix": 1,
+      "cycle_ns": 15264375
+    },
+    {
+      "request_id": "4",
+      "round_index": 9,
+      "context_length": 15237,
+      "batch_size": 1,
+      "draft_depth": 1,
+      "accepted_prefix": 1,
+      "cycle_ns": 14822666
+    },
+    {
+      "request_id": "4",
+      "round_index": 10,
+      "context_length": 15239,
+      "batch_size": 1,
+      "draft_depth": 1,
+      "accepted_prefix": 0,
+      "cycle_ns": 15340459
+    },
+    {
+      "request_id": "4",
+      "round_index": 11,
+      "context_length": 15240,
+      "batch_size": 1,
+      "draft_depth": 1,
+      "accepted_prefix": 1,
+      "cycle_ns": 14890875
+    },
+    {
+      "request_id": "4",
+      "round_index": 12,
+      "context_length": 15242,
+      "batch_size": 1,
+      "draft_depth": 1,
+      "accepted_prefix": 0,
+      "cycle_ns": 15692459
+    },
+    {
+      "request_id": "4",
+      "round_index": 13,
+      "context_length": 15243,
+      "batch_size": 1,
+      "draft_depth": 1,
+      "accepted_prefix": 1,
+      "cycle_ns": 15393708
+    },
+    {
+      "request_id": "4",
+      "round_index": 14,
+      "context_length": 15245,
+      "batch_size": 1,
+      "draft_depth": 1,
+      "accepted_prefix": 0,
+      "cycle_ns": 16174875
+    },
+    {
+      "request_id": "4",
+      "round_index": 15,
+      "context_length": 15246,
+      "batch_size": 1,
+      "draft_depth": 1,
+      "accepted_prefix": 1,
+      "cycle_ns": 15029417
+    },
+    {
+      "request_id": "4",
+      "round_index": 16,
+      "context_length": 15248,
+      "batch_size": 1,
+      "draft_depth": 1,
+      "accepted_prefix": 0,
+      "cycle_ns": 15761833
+    },
+    {
+      "request_id": "4",
+      "round_index": 17,
+      "context_length": 15249,
+      "batch_size": 1,
+      "draft_depth": 1,
+      "accepted_prefix": 1,
+      "cycle_ns": 15085041
+    },
+    {
+      "request_id": "4",
+      "round_index": 18,
+      "context_length": 15251,
+      "batch_size": 1,
+      "draft_depth": 1,
+      "accepted_prefix": 1,
+      "cycle_ns": 14647042
+    },
+    {
+      "request_id": "4",
+      "round_index": 19,
+      "context_length": 15253,
+      "batch_size": 1,
+      "draft_depth": 1,
+      "accepted_prefix": 0,
+      "cycle_ns": 15566709
+    },
+    {
+      "request_id": "4",
+      "round_index": 20,
+      "context_length": 15254,
+      "batch_size": 1,
+      "draft_depth": 1,
+      "accepted_prefix": 0,
+      "cycle_ns": 15936291
+    },
+    {
+      "request_id": "4",
+      "round_index": 21,
+      "context_length": 15255,
+      "batch_size": 1,
+      "draft_depth": 1,
+      "accepted_prefix": 0,
+      "cycle_ns": 16140167
+    },
+    {
+      "request_id": "4",
+      "round_index": 22,
+      "context_length": 15256,
+      "batch_size": 1,
+      "draft_depth": 1,
+      "accepted_prefix": 1,
+      "cycle_ns": 15478041
+    },
+    {
+      "request_id": "4",
+      "round_index": 23,
+      "context_length": 15258,
+      "batch_size": 1,
+      "draft_depth": 1,
+      "accepted_prefix": 1,
+      "cycle_ns": 14875959
+    },
+    {
+      "request_id": "4",
+      "round_index": 24,
+      "context_length": 15260,
+      "batch_size": 1,
+      "draft_depth": 1,
+      "accepted_prefix": 0,
+      "cycle_ns": 15680917
+    },
+    {
+      "request_id": "4",
+      "round_index": 25,
+      "context_length": 15261,
+      "batch_size": 1,
+      "draft_depth": 1,
+      "accepted_prefix": 1,
+      "cycle_ns": 14736875
+    },
+    {
+      "request_id": "4",
+      "round_index": 26,
+      "context_length": 15263,
+      "batch_size": 1,
+      "draft_depth": 1,
+      "accepted_prefix": 0,
+      "cycle_ns": 15871458
+    },
+    {
+      "request_id": "4",
+      "round_index": 27,
+      "context_length": 15264,
+      "batch_size": 1,
+      "draft_depth": 1,
+      "accepted_prefix": 1,
+      "cycle_ns": 14697333
+    },
+    {
+      "request_id": "4",
+      "round_index": 28,
+      "context_length": 15266,
+      "batch_size": 1,
+      "draft_depth": 1,
+      "accepted_prefix": 0,
+      "cycle_ns": 15687000
+    },
+    {
+      "request_id": "4",
+      "round_index": 29,
+      "context_length": 15267,
+      "batch_size": 1,
+      "draft_depth": 1,
+      "accepted_prefix": 0,
+      "cycle_ns": 15717750
+    },
+    {
+      "request_id": "4",
+      "round_index": 30,
+      "context_length": 15268,
+      "batch_size": 1,
+      "draft_depth": 1,
+      "accepted_prefix": 1,
+      "cycle_ns": 14990458
+    },
+    {
+      "request_id": "4",
+      "round_index": 31,
+      "context_length": 15270,
+      "batch_size": 1,
+      "draft_depth": 1,
+      "accepted_prefix": 1,
+      "cycle_ns": 15083750
+    },
+    {
+      "request_id": "4",
+      "round_index": 32,
+      "context_length": 15272,
+      "batch_size": 1,
+      "draft_depth": 1,
+      "accepted_prefix": 0,
+      "cycle_ns": 16510500
+    },
+    {
+      "request_id": "4",
+      "round_index": 33,
+      "context_length": 15273,
+      "batch_size": 1,
+      "draft_depth": 1,
+      "accepted_prefix": 0,
+      "cycle_ns": 16298083
+    },
+    {
+      "request_id": "4",
+      "round_index": 34,
+      "context_length": 15274,
+      "batch_size": 1,
+      "draft_depth": 1,
+      "accepted_prefix": 0,
+      "cycle_ns": 16172625
+    },
+    {
+      "request_id": "4",
+      "round_index": 35,
+      "context_length": 15275,
+      "batch_size": 1,
+      "draft_depth": 1,
+      "accepted_prefix": 1,
+      "cycle_ns": 14667041
+    },
+    {
+      "request_id": "4",
+      "round_index": 36,
+      "context_length": 15277,
+      "batch_size": 1,
+      "draft_depth": 1,
+      "accepted_prefix": 1,
+      "cycle_ns": 14819666
+    },
+    {
+      "request_id": "4",
+      "round_index": 37,
+      "context_length": 15279,
+      "batch_size": 1,
+      "draft_depth": 1,
+      "accepted_prefix": 1,
+      "cycle_ns": 14733750
+    },
+    {
+      "request_id": "4",
+      "round_index": 38,
+      "context_length": 15281,
+      "batch_size": 1,
+      "draft_depth": 1,
+      "accepted_prefix": 0,
+      "cycle_ns": 15918333
+    },
+    {
+      "request_id": "4",
+      "round_index": 39,
+      "context_length": 15282,
+      "batch_size": 1,
+      "draft_depth": 1,
+      "accepted_prefix": 1,
+      "cycle_ns": 14923875
+    },
+    {
+      "request_id": "4",
+      "round_index": 40,
+      "context_length": 15284,
+      "batch_size": 1,
+      "draft_depth": 1,
+      "accepted_prefix": 1,
+      "cycle_ns": 15194625
+    },
+    {
+      "request_id": "4",
+      "round_index": 41,
+      "context_length": 15286,
+      "batch_size": 1,
+      "draft_depth": 0,
+      "accepted_prefix": 0,
+      "cycle_ns": 12664041
+    },
+    {
+      "request_id": "5",
+      "round_index": 0,
+      "context_length": 15224,
+      "batch_size": 4,
+      "draft_depth": 1,
+      "accepted_prefix": 1,
+      "cycle_ns": 38330625
+    },
+    {
+      "request_id": "6",
+      "round_index": 0,
+      "context_length": 15225,
+      "batch_size": 4,
+      "draft_depth": 1,
+      "accepted_prefix": 1,
+      "cycle_ns": 38330625
+    },
+    {
+      "request_id": "7",
+      "round_index": 0,
+      "context_length": 15227,
+      "batch_size": 4,
+      "draft_depth": 1,
+      "accepted_prefix": 0,
+      "cycle_ns": 38330625
+    },
+    {
+      "request_id": "8",
+      "round_index": 0,
+      "context_length": 15225,
+      "batch_size": 4,
+      "draft_depth": 1,
+      "accepted_prefix": 1,
+      "cycle_ns": 38330625
+    },
+    {
+      "request_id": "5",
+      "round_index": 1,
+      "context_length": 15226,
+      "batch_size": 4,
+      "draft_depth": 1,
+      "accepted_prefix": 0,
+      "cycle_ns": 38053542
+    },
+    {
+      "request_id": "6",
+      "round_index": 1,
+      "context_length": 15227,
+      "batch_size": 4,
+      "draft_depth": 1,
+      "accepted_prefix": 0,
+      "cycle_ns": 38053542
+    },
+    {
+      "request_id": "7",
+      "round_index": 1,
+      "context_length": 15228,
+      "batch_size": 4,
+      "draft_depth": 1,
+      "accepted_prefix": 1,
+      "cycle_ns": 38053542
+    },
+    {
+      "request_id": "8",
+      "round_index": 1,
+      "context_length": 15227,
+      "batch_size": 4,
+      "draft_depth": 1,
+      "accepted_prefix": 0,
+      "cycle_ns": 38053542
+    },
+    {
+      "request_id": "5",
+      "round_index": 2,
+      "context_length": 15227,
+      "batch_size": 4,
+      "draft_depth": 1,
+      "accepted_prefix": 0,
+      "cycle_ns": 36796292
+    },
+    {
+      "request_id": "6",
+      "round_index": 2,
+      "context_length": 15228,
+      "batch_size": 4,
+      "draft_depth": 1,
+      "accepted_prefix": 0,
+      "cycle_ns": 36796292
+    },
+    {
+      "request_id": "7",
+      "round_index": 2,
+      "context_length": 15230,
+      "batch_size": 4,
+      "draft_depth": 1,
+      "accepted_prefix": 1,
+      "cycle_ns": 36796292
+    },
+    {
+      "request_id": "8",
+      "round_index": 2,
+      "context_length": 15228,
+      "batch_size": 4,
+      "draft_depth": 1,
+      "accepted_prefix": 0,
+      "cycle_ns": 36796292
+    },
+    {
+      "request_id": "5",
+      "round_index": 3,
+      "context_length": 15228,
+      "batch_size": 4,
+      "draft_depth": 1,
+      "accepted_prefix": 0,
+      "cycle_ns": 36016125
+    },
+    {
+      "request_id": "6",
+      "round_index": 3,
+      "context_length": 15229,
+      "batch_size": 4,
+      "draft_depth": 1,
+      "accepted_prefix": 1,
+      "cycle_ns": 36016125
+    },
+    {
+      "request_id": "7",
+      "round_index": 3,
+      "context_length": 15232,
+      "batch_size": 4,
+      "draft_depth": 1,
+      "accepted_prefix": 0,
+      "cycle_ns": 36016125
+    },
+    {
+      "request_id": "8",
+      "round_index": 3,
+      "context_length": 15229,
+      "batch_size": 4,
+      "draft_depth": 1,
+      "accepted_prefix": 1,
+      "cycle_ns": 36016125
+    },
+    {
+      "request_id": "5",
+      "round_index": 4,
+      "context_length": 15229,
+      "batch_size": 4,
+      "draft_depth": 1,
+      "accepted_prefix": 1,
+      "cycle_ns": 33959667
+    },
+    {
+      "request_id": "6",
+      "round_index": 4,
+      "context_length": 15231,
+      "batch_size": 4,
+      "draft_depth": 1,
+      "accepted_prefix": 1,
+      "cycle_ns": 33959667
+    },
+    {
+      "request_id": "7",
+      "round_index": 4,
+      "context_length": 15233,
+      "batch_size": 4,
+      "draft_depth": 1,
+      "accepted_prefix": 0,
+      "cycle_ns": 33959667
+    },
+    {
+      "request_id": "8",
+      "round_index": 4,
+      "context_length": 15231,
+      "batch_size": 4,
+      "draft_depth": 1,
+      "accepted_prefix": 0,
+      "cycle_ns": 33959667
+    },
+    {
+      "request_id": "5",
+      "round_index": 5,
+      "context_length": 15231,
+      "batch_size": 4,
+      "draft_depth": 1,
+      "accepted_prefix": 1,
+      "cycle_ns": 49542458
+    },
+    {
+      "request_id": "6",
+      "round_index": 5,
+      "context_length": 15233,
+      "batch_size": 4,
+      "draft_depth": 1,
+      "accepted_prefix": 1,
+      "cycle_ns": 49542458
+    },
+    {
+      "request_id": "7",
+      "round_index": 5,
+      "context_length": 15234,
+      "batch_size": 4,
+      "draft_depth": 1,
+      "accepted_prefix": 1,
+      "cycle_ns": 49542458
+    },
+    {
+      "request_id": "8",
+      "round_index": 5,
+      "context_length": 15232,
+      "batch_size": 4,
+      "draft_depth": 1,
+      "accepted_prefix": 1,
+      "cycle_ns": 49542458
+    },
+    {
+      "request_id": "5",
+      "round_index": 6,
+      "context_length": 15233,
+      "batch_size": 4,
+      "draft_depth": 1,
+      "accepted_prefix": 0,
+      "cycle_ns": 33296250
+    },
+    {
+      "request_id": "6",
+      "round_index": 6,
+      "context_length": 15235,
+      "batch_size": 4,
+      "draft_depth": 1,
+      "accepted_prefix": 1,
+      "cycle_ns": 33296250
+    },
+    {
+      "request_id": "7",
+      "round_index": 6,
+      "context_length": 15236,
+      "batch_size": 4,
+      "draft_depth": 1,
+      "accepted_prefix": 1,
+      "cycle_ns": 33296250
+    },
+    {
+      "request_id": "8",
+      "round_index": 6,
+      "context_length": 15234,
+      "batch_size": 4,
+      "draft_depth": 1,
+      "accepted_prefix": 0,
+      "cycle_ns": 33296250
+    },
+    {
+      "request_id": "5",
+      "round_index": 7,
+      "context_length": 15234,
+      "batch_size": 4,
+      "draft_depth": 1,
+      "accepted_prefix": 0,
+      "cycle_ns": 34681917
+    },
+    {
+      "request_id": "6",
+      "round_index": 7,
+      "context_length": 15237,
+      "batch_size": 4,
+      "draft_depth": 1,
+      "accepted_prefix": 0,
+      "cycle_ns": 34681917
+    },
+    {
+      "request_id": "7",
+      "round_index": 7,
+      "context_length": 15238,
+      "batch_size": 4,
+      "draft_depth": 1,
+      "accepted_prefix": 1,
+      "cycle_ns": 34681917
+    },
+    {
+      "request_id": "8",
+      "round_index": 7,
+      "context_length": 15235,
+      "batch_size": 4,
+      "draft_depth": 1,
+      "accepted_prefix": 1,
+      "cycle_ns": 34681917
+    },
+    {
+      "request_id": "5",
+      "round_index": 8,
+      "context_length": 15235,
+      "batch_size": 4,
+      "draft_depth": 1,
+      "accepted_prefix": 1,
+      "cycle_ns": 34927625
+    },
+    {
+      "request_id": "6",
+      "round_index": 8,
+      "context_length": 15238,
+      "batch_size": 4,
+      "draft_depth": 1,
+      "accepted_prefix": 0,
+      "cycle_ns": 34927625
+    },
+    {
+      "request_id": "7",
+      "round_index": 8,
+      "context_length": 15240,
+      "batch_size": 4,
+      "draft_depth": 1,
+      "accepted_prefix": 1,
+      "cycle_ns": 34927625
+    },
+    {
+      "request_id": "8",
+      "round_index": 8,
+      "context_length": 15237,
+      "batch_size": 4,
+      "draft_depth": 1,
+      "accepted_prefix": 0,
+      "cycle_ns": 34927625
+    },
+    {
+      "request_id": "5",
+      "round_index": 9,
+      "context_length": 15237,
+      "batch_size": 4,
+      "draft_depth": 1,
+      "accepted_prefix": 1,
+      "cycle_ns": 36113250
+    },
+    {
+      "request_id": "6",
+      "round_index": 9,
+      "context_length": 15239,
+      "batch_size": 4,
+      "draft_depth": 1,
+      "accepted_prefix": 0,
+      "cycle_ns": 36113250
+    },
+    {
+      "request_id": "7",
+      "round_index": 9,
+      "context_length": 15242,
+      "batch_size": 4,
+      "draft_depth": 1,
+      "accepted_prefix": 0,
+      "cycle_ns": 36113250
+    },
+    {
+      "request_id": "8",
+      "round_index": 9,
+      "context_length": 15238,
+      "batch_size": 4,
+      "draft_depth": 1,
+      "accepted_prefix": 1,
+      "cycle_ns": 36113250
+    },
+    {
+      "request_id": "5",
+      "round_index": 10,
+      "context_length": 15239,
+      "batch_size": 4,
+      "draft_depth": 1,
+      "accepted_prefix": 0,
+      "cycle_ns": 36149833
+    },
+    {
+      "request_id": "6",
+      "round_index": 10,
+      "context_length": 15240,
+      "batch_size": 4,
+      "draft_depth": 1,
+      "accepted_prefix": 0,
+      "cycle_ns": 36149833
+    },
+    {
+      "request_id": "7",
+      "round_index": 10,
+      "context_length": 15243,
+      "batch_size": 4,
+      "draft_depth": 1,
+      "accepted_prefix": 0,
+      "cycle_ns": 36149833
+    },
+    {
+      "request_id": "8",
+      "round_index": 10,
+      "context_length": 15240,
+      "batch_size": 4,
+      "draft_depth": 1,
+      "accepted_prefix": 1,
+      "cycle_ns": 36149833
+    },
+    {
+      "request_id": "5",
+      "round_index": 11,
+      "context_length": 15240,
+      "batch_size": 4,
+      "draft_depth": 1,
+      "accepted_prefix": 1,
+      "cycle_ns": 36520958
+    },
+    {
+      "request_id": "6",
+      "round_index": 11,
+      "context_length": 15241,
+      "batch_size": 4,
+      "draft_depth": 1,
+      "accepted_prefix": 1,
+      "cycle_ns": 36520958
+    },
+    {
+      "request_id": "7",
+      "round_index": 11,
+      "context_length": 15244,
+      "batch_size": 4,
+      "draft_depth": 1,
+      "accepted_prefix": 0,
+      "cycle_ns": 36520958
+    },
+    {
+      "request_id": "8",
+      "round_index": 11,
+      "context_length": 15242,
+      "batch_size": 4,
+      "draft_depth": 1,
+      "accepted_prefix": 0,
+      "cycle_ns": 36520958
+    },
+    {
+      "request_id": "5",
+      "round_index": 12,
+      "context_length": 15242,
+      "batch_size": 4,
+      "draft_depth": 1,
+      "accepted_prefix": 0,
+      "cycle_ns": 36063625
+    },
+    {
+      "request_id": "6",
+      "round_index": 12,
+      "context_length": 15243,
+      "batch_size": 4,
+      "draft_depth": 1,
+      "accepted_prefix": 0,
+      "cycle_ns": 36063625
+    },
+    {
+      "request_id": "7",
+      "round_index": 12,
+      "context_length": 15245,
+      "batch_size": 4,
+      "draft_depth": 1,
+      "accepted_prefix": 1,
+      "cycle_ns": 36063625
+    },
+    {
+      "request_id": "8",
+      "round_index": 12,
+      "context_length": 15243,
+      "batch_size": 4,
+      "draft_depth": 1,
+      "accepted_prefix": 0,
+      "cycle_ns": 36063625
+    },
+    {
+      "request_id": "5",
+      "round_index": 13,
+      "context_length": 15243,
+      "batch_size": 4,
+      "draft_depth": 1,
+      "accepted_prefix": 1,
+      "cycle_ns": 35390500
+    },
+    {
+      "request_id": "6",
+      "round_index": 13,
+      "context_length": 15244,
+      "batch_size": 4,
+      "draft_depth": 1,
+      "accepted_prefix": 0,
+      "cycle_ns": 35390500
+    },
+    {
+      "request_id": "7",
+      "round_index": 13,
+      "context_length": 15247,
+      "batch_size": 4,
+      "draft_depth": 1,
+      "accepted_prefix": 1,
+      "cycle_ns": 35390500
+    },
+    {
+      "request_id": "8",
+      "round_index": 13,
+      "context_length": 15244,
+      "batch_size": 4,
+      "draft_depth": 1,
+      "accepted_prefix": 1,
+      "cycle_ns": 35390500
+    },
+    {
+      "request_id": "5",
+      "round_index": 14,
+      "context_length": 15245,
+      "batch_size": 4,
+      "draft_depth": 1,
+      "accepted_prefix": 0,
+      "cycle_ns": 34453584
+    },
+    {
+      "request_id": "6",
+      "round_index": 14,
+      "context_length": 15245,
+      "batch_size": 4,
+      "draft_depth": 1,
+      "accepted_prefix": 1,
+      "cycle_ns": 34453584
+    },
+    {
+      "request_id": "7",
+      "round_index": 14,
+      "context_length": 15249,
+      "batch_size": 4,
+      "draft_depth": 1,
+      "accepted_prefix": 0,
+      "cycle_ns": 34453584
+    },
+    {
+      "request_id": "8",
+      "round_index": 14,
+      "context_length": 15246,
+      "batch_size": 4,
+      "draft_depth": 1,
+      "accepted_prefix": 1,
+      "cycle_ns": 34453584
+    },
+    {
+      "request_id": "5",
+      "round_index": 15,
+      "context_length": 15246,
+      "batch_size": 4,
+      "draft_depth": 1,
+      "accepted_prefix": 1,
+      "cycle_ns": 35153708
+    },
+    {
+      "request_id": "6",
+      "round_index": 15,
+      "context_length": 15247,
+      "batch_size": 4,
+      "draft_depth": 1,
+      "accepted_prefix": 0,
+      "cycle_ns": 35153708
+    },
+    {
+      "request_id": "7",
+      "round_index": 15,
+      "context_length": 15250,
+      "batch_size": 4,
+      "draft_depth": 1,
+      "accepted_prefix": 0,
+      "cycle_ns": 35153708
+    },
+    {
+      "request_id": "8",
+      "round_index": 15,
+      "context_length": 15248,
+      "batch_size": 4,
+      "draft_depth": 1,
+      "accepted_prefix": 1,
+      "cycle_ns": 35153708
+    },
+    {
+      "request_id": "5",
+      "round_index": 16,
+      "context_length": 15248,
+      "batch_size": 4,
+      "draft_depth": 1,
+      "accepted_prefix": 0,
+      "cycle_ns": 36459500
+    },
+    {
+      "request_id": "6",
+      "round_index": 16,
+      "context_length": 15248,
+      "batch_size": 4,
+      "draft_depth": 1,
+      "accepted_prefix": 1,
+      "cycle_ns": 36459500
+    },
+    {
+      "request_id": "7",
+      "round_index": 16,
+      "context_length": 15251,
+      "batch_size": 4,
+      "draft_depth": 1,
+      "accepted_prefix": 0,
+      "cycle_ns": 36459500
+    },
+    {
+      "request_id": "8",
+      "round_index": 16,
+      "context_length": 15250,
+      "batch_size": 4,
+      "draft_depth": 1,
+      "accepted_prefix": 0,
+      "cycle_ns": 36459500
+    },
+    {
+      "request_id": "5",
+      "round_index": 17,
+      "context_length": 15249,
+      "batch_size": 4,
+      "draft_depth": 1,
+      "accepted_prefix": 1,
+      "cycle_ns": 36621584
+    },
+    {
+      "request_id": "6",
+      "round_index": 17,
+      "context_length": 15250,
+      "batch_size": 4,
+      "draft_depth": 1,
+      "accepted_prefix": 0,
+      "cycle_ns": 36621584
+    },
+    {
+      "request_id": "7",
+      "round_index": 17,
+      "context_length": 15252,
+      "batch_size": 4,
+      "draft_depth": 1,
+      "accepted_prefix": 0,
+      "cycle_ns": 36621584
+    },
+    {
+      "request_id": "8",
+      "round_index": 17,
+      "context_length": 15251,
+      "batch_size": 4,
+      "draft_depth": 1,
+      "accepted_prefix": 1,
+      "cycle_ns": 36621584
+    },
+    {
+      "request_id": "5",
+      "round_index": 18,
+      "context_length": 15251,
+      "batch_size": 4,
+      "draft_depth": 1,
+      "accepted_prefix": 1,
+      "cycle_ns": 35531584
+    },
+    {
+      "request_id": "6",
+      "round_index": 18,
+      "context_length": 15251,
+      "batch_size": 4,
+      "draft_depth": 1,
+      "accepted_prefix": 1,
+      "cycle_ns": 35531584
+    },
+    {
+      "request_id": "7",
+      "round_index": 18,
+      "context_length": 15253,
+      "batch_size": 4,
+      "draft_depth": 1,
+      "accepted_prefix": 0,
+      "cycle_ns": 35531584
+    },
+    {
+      "request_id": "8",
+      "round_index": 18,
+      "context_length": 15253,
+      "batch_size": 4,
+      "draft_depth": 1,
+      "accepted_prefix": 0,
+      "cycle_ns": 35531584
+    },
+    {
+      "request_id": "5",
+      "round_index": 19,
+      "context_length": 15253,
+      "batch_size": 4,
+      "draft_depth": 1,
+      "accepted_prefix": 0,
+      "cycle_ns": 35137084
+    },
+    {
+      "request_id": "6",
+      "round_index": 19,
+      "context_length": 15253,
+      "batch_size": 4,
+      "draft_depth": 1,
+      "accepted_prefix": 0,
+      "cycle_ns": 35137084
+    },
+    {
+      "request_id": "7",
+      "round_index": 19,
+      "context_length": 15254,
+      "batch_size": 4,
+      "draft_depth": 1,
+      "accepted_prefix": 1,
+      "cycle_ns": 35137084
+    },
+    {
+      "request_id": "8",
+      "round_index": 19,
+      "context_length": 15254,
+      "batch_size": 4,
+      "draft_depth": 1,
+      "accepted_prefix": 1,
+      "cycle_ns": 35137084
+    },
+    {
+      "request_id": "5",
+      "round_index": 20,
+      "context_length": 15254,
+      "batch_size": 4,
+      "draft_depth": 1,
+      "accepted_prefix": 0,
+      "cycle_ns": 37532125
+    },
+    {
+      "request_id": "6",
+      "round_index": 20,
+      "context_length": 15254,
+      "batch_size": 4,
+      "draft_depth": 1,
+      "accepted_prefix": 0,
+      "cycle_ns": 37532125
+    },
+    {
+      "request_id": "7",
+      "round_index": 20,
+      "context_length": 15256,
+      "batch_size": 4,
+      "draft_depth": 1,
+      "accepted_prefix": 0,
+      "cycle_ns": 37532125
+    },
+    {
+      "request_id": "8",
+      "round_index": 20,
+      "context_length": 15256,
+      "batch_size": 4,
+      "draft_depth": 1,
+      "accepted_prefix": 0,
+      "cycle_ns": 37532125
+    },
+    {
+      "request_id": "5",
+      "round_index": 21,
+      "context_length": 15255,
+      "batch_size": 4,
+      "draft_depth": 1,
+      "accepted_prefix": 0,
+      "cycle_ns": 37591500
+    },
+    {
+      "request_id": "6",
+      "round_index": 21,
+      "context_length": 15255,
+      "batch_size": 4,
+      "draft_depth": 1,
+      "accepted_prefix": 1,
+      "cycle_ns": 37591500
+    },
+    {
+      "request_id": "7",
+      "round_index": 21,
+      "context_length": 15257,
+      "batch_size": 4,
+      "draft_depth": 1,
+      "accepted_prefix": 1,
+      "cycle_ns": 37591500
+    },
+    {
+      "request_id": "8",
+      "round_index": 21,
+      "context_length": 15257,
+      "batch_size": 4,
+      "draft_depth": 1,
+      "accepted_prefix": 1,
+      "cycle_ns": 37591500
+    },
+    {
+      "request_id": "5",
+      "round_index": 22,
+      "context_length": 15256,
+      "batch_size": 3,
+      "draft_depth": 1,
+      "accepted_prefix": 1,
+      "cycle_ns": 32106042
+    },
+    {
+      "request_id": "7",
+      "round_index": 22,
+      "context_length": 15259,
+      "batch_size": 3,
+      "draft_depth": 1,
+      "accepted_prefix": 0,
+      "cycle_ns": 32106042
+    },
+    {
+      "request_id": "8",
+      "round_index": 22,
+      "context_length": 15259,
+      "batch_size": 3,
+      "draft_depth": 1,
+      "accepted_prefix": 0,
+      "cycle_ns": 32106042
+    },
+    {
+      "request_id": "5",
+      "round_index": 23,
+      "context_length": 15258,
+      "batch_size": 3,
+      "draft_depth": 1,
+      "accepted_prefix": 1,
+      "cycle_ns": 29940875
+    },
+    {
+      "request_id": "7",
+      "round_index": 23,
+      "context_length": 15260,
+      "batch_size": 3,
+      "draft_depth": 1,
+      "accepted_prefix": 1,
+      "cycle_ns": 29940875
+    },
+    {
+      "request_id": "8",
+      "round_index": 23,
+      "context_length": 15260,
+      "batch_size": 3,
+      "draft_depth": 1,
+      "accepted_prefix": 1,
+      "cycle_ns": 29940875
+    },
+    {
+      "request_id": "5",
+      "round_index": 24,
+      "context_length": 15260,
+      "batch_size": 3,
+      "draft_depth": 1,
+      "accepted_prefix": 0,
+      "cycle_ns": 28324375
+    },
+    {
+      "request_id": "7",
+      "round_index": 24,
+      "context_length": 15262,
+      "batch_size": 3,
+      "draft_depth": 1,
+      "accepted_prefix": 1,
+      "cycle_ns": 28324375
+    },
+    {
+      "request_id": "8",
+      "round_index": 24,
+      "context_length": 15262,
+      "batch_size": 3,
+      "draft_depth": 1,
+      "accepted_prefix": 1,
+      "cycle_ns": 28324375
+    },
+    {
+      "request_id": "5",
+      "round_index": 25,
+      "context_length": 15261,
+      "batch_size": 3,
+      "draft_depth": 1,
+      "accepted_prefix": 1,
+      "cycle_ns": 30050000
+    },
+    {
+      "request_id": "7",
+      "round_index": 25,
+      "context_length": 15264,
+      "batch_size": 3,
+      "draft_depth": 1,
+      "accepted_prefix": 1,
+      "cycle_ns": 30050000
+    },
+    {
+      "request_id": "8",
+      "round_index": 25,
+      "context_length": 15264,
+      "batch_size": 3,
+      "draft_depth": 1,
+      "accepted_prefix": 0,
+      "cycle_ns": 30050000
+    },
+    {
+      "request_id": "5",
+      "round_index": 26,
+      "context_length": 15263,
+      "batch_size": 3,
+      "draft_depth": 1,
+      "accepted_prefix": 0,
+      "cycle_ns": 31571375
+    },
+    {
+      "request_id": "7",
+      "round_index": 26,
+      "context_length": 15266,
+      "batch_size": 3,
+      "draft_depth": 1,
+      "accepted_prefix": 1,
+      "cycle_ns": 31571375
+    },
+    {
+      "request_id": "8",
+      "round_index": 26,
+      "context_length": 15265,
+      "batch_size": 3,
+      "draft_depth": 1,
+      "accepted_prefix": 0,
+      "cycle_ns": 31571375
+    },
+    {
+      "request_id": "5",
+      "round_index": 27,
+      "context_length": 15264,
+      "batch_size": 3,
+      "draft_depth": 1,
+      "accepted_prefix": 1,
+      "cycle_ns": 29962083
+    },
+    {
+      "request_id": "7",
+      "round_index": 27,
+      "context_length": 15268,
+      "batch_size": 3,
+      "draft_depth": 1,
+      "accepted_prefix": 0,
+      "cycle_ns": 29962083
+    },
+    {
+      "request_id": "8",
+      "round_index": 27,
+      "context_length": 15266,
+      "batch_size": 3,
+      "draft_depth": 1,
+      "accepted_prefix": 1,
+      "cycle_ns": 29962083
+    },
+    {
+      "request_id": "5",
+      "round_index": 28,
+      "context_length": 15266,
+      "batch_size": 3,
+      "draft_depth": 1,
+      "accepted_prefix": 0,
+      "cycle_ns": 30818208
+    },
+    {
+      "request_id": "7",
+      "round_index": 28,
+      "context_length": 15269,
+      "batch_size": 3,
+      "draft_depth": 1,
+      "accepted_prefix": 1,
+      "cycle_ns": 30818208
+    },
+    {
+      "request_id": "8",
+      "round_index": 28,
+      "context_length": 15268,
+      "batch_size": 3,
+      "draft_depth": 1,
+      "accepted_prefix": 0,
+      "cycle_ns": 30818208
+    },
+    {
+      "request_id": "5",
+      "round_index": 29,
+      "context_length": 15267,
+      "batch_size": 3,
+      "draft_depth": 1,
+      "accepted_prefix": 0,
+      "cycle_ns": 51210542
+    },
+    {
+      "request_id": "7",
+      "round_index": 29,
+      "context_length": 15271,
+      "batch_size": 3,
+      "draft_depth": 1,
+      "accepted_prefix": 1,
+      "cycle_ns": 51210542
+    },
+    {
+      "request_id": "8",
+      "round_index": 29,
+      "context_length": 15269,
+      "batch_size": 3,
+      "draft_depth": 1,
+      "accepted_prefix": 0,
+      "cycle_ns": 51210542
+    },
+    {
+      "request_id": "5",
+      "round_index": 30,
+      "context_length": 15268,
+      "batch_size": 3,
+      "draft_depth": 1,
+      "accepted_prefix": 1,
+      "cycle_ns": 30593625
+    },
+    {
+      "request_id": "7",
+      "round_index": 30,
+      "context_length": 15273,
+      "batch_size": 3,
+      "draft_depth": 1,
+      "accepted_prefix": 0,
+      "cycle_ns": 30593625
+    },
+    {
+      "request_id": "8",
+      "round_index": 30,
+      "context_length": 15270,
+      "batch_size": 3,
+      "draft_depth": 1,
+      "accepted_prefix": 1,
+      "cycle_ns": 30593625
+    },
+    {
+      "request_id": "5",
+      "round_index": 31,
+      "context_length": 15270,
+      "batch_size": 3,
+      "draft_depth": 1,
+      "accepted_prefix": 1,
+      "cycle_ns": 31275875
+    },
+    {
+      "request_id": "7",
+      "round_index": 31,
+      "context_length": 15274,
+      "batch_size": 3,
+      "draft_depth": 1,
+      "accepted_prefix": 0,
+      "cycle_ns": 31275875
+    },
+    {
+      "request_id": "8",
+      "round_index": 31,
+      "context_length": 15272,
+      "batch_size": 3,
+      "draft_depth": 1,
+      "accepted_prefix": 0,
+      "cycle_ns": 31275875
+    },
+    {
+      "request_id": "5",
+      "round_index": 32,
+      "context_length": 15272,
+      "batch_size": 3,
+      "draft_depth": 1,
+      "accepted_prefix": 0,
+      "cycle_ns": 32032250
+    },
+    {
+      "request_id": "7",
+      "round_index": 32,
+      "context_length": 15275,
+      "batch_size": 3,
+      "draft_depth": 1,
+      "accepted_prefix": 0,
+      "cycle_ns": 32032250
+    },
+    {
+      "request_id": "8",
+      "round_index": 32,
+      "context_length": 15273,
+      "batch_size": 3,
+      "draft_depth": 1,
+      "accepted_prefix": 1,
+      "cycle_ns": 32032250
+    },
+    {
+      "request_id": "5",
+      "round_index": 33,
+      "context_length": 15273,
+      "batch_size": 3,
+      "draft_depth": 1,
+      "accepted_prefix": 0,
+      "cycle_ns": 32197667
+    },
+    {
+      "request_id": "7",
+      "round_index": 33,
+      "context_length": 15276,
+      "batch_size": 3,
+      "draft_depth": 1,
+      "accepted_prefix": 1,
+      "cycle_ns": 32197667
+    },
+    {
+      "request_id": "8",
+      "round_index": 33,
+      "context_length": 15275,
+      "batch_size": 3,
+      "draft_depth": 1,
+      "accepted_prefix": 0,
+      "cycle_ns": 32197667
+    },
+    {
+      "request_id": "5",
+      "round_index": 34,
+      "context_length": 15274,
+      "batch_size": 3,
+      "draft_depth": 1,
+      "accepted_prefix": 0,
+      "cycle_ns": 31699750
+    },
+    {
+      "request_id": "7",
+      "round_index": 34,
+      "context_length": 15278,
+      "batch_size": 3,
+      "draft_depth": 1,
+      "accepted_prefix": 1,
+      "cycle_ns": 31699750
+    },
+    {
+      "request_id": "8",
+      "round_index": 34,
+      "context_length": 15276,
+      "batch_size": 3,
+      "draft_depth": 1,
+      "accepted_prefix": 1,
+      "cycle_ns": 31699750
+    },
+    {
+      "request_id": "5",
+      "round_index": 35,
+      "context_length": 15275,
+      "batch_size": 3,
+      "draft_depth": 1,
+      "accepted_prefix": 1,
+      "cycle_ns": 30301292
+    },
+    {
+      "request_id": "7",
+      "round_index": 35,
+      "context_length": 15280,
+      "batch_size": 3,
+      "draft_depth": 1,
+      "accepted_prefix": 1,
+      "cycle_ns": 30301292
+    },
+    {
+      "request_id": "8",
+      "round_index": 35,
+      "context_length": 15278,
+      "batch_size": 3,
+      "draft_depth": 1,
+      "accepted_prefix": 0,
+      "cycle_ns": 30301292
+    },
+    {
+      "request_id": "5",
+      "round_index": 36,
+      "context_length": 15277,
+      "batch_size": 3,
+      "draft_depth": 1,
+      "accepted_prefix": 1,
+      "cycle_ns": 28963917
+    },
+    {
+      "request_id": "7",
+      "round_index": 36,
+      "context_length": 15282,
+      "batch_size": 3,
+      "draft_depth": 1,
+      "accepted_prefix": 1,
+      "cycle_ns": 28963917
+    },
+    {
+      "request_id": "8",
+      "round_index": 36,
+      "context_length": 15279,
+      "batch_size": 3,
+      "draft_depth": 1,
+      "accepted_prefix": 1,
+      "cycle_ns": 28963917
+    },
+    {
+      "request_id": "5",
+      "round_index": 37,
+      "context_length": 15279,
+      "batch_size": 3,
+      "draft_depth": 1,
+      "accepted_prefix": 1,
+      "cycle_ns": 30551917
+    },
+    {
+      "request_id": "7",
+      "round_index": 37,
+      "context_length": 15284,
+      "batch_size": 3,
+      "draft_depth": 1,
+      "accepted_prefix": 0,
+      "cycle_ns": 30551917
+    },
+    {
+      "request_id": "8",
+      "round_index": 37,
+      "context_length": 15281,
+      "batch_size": 3,
+      "draft_depth": 1,
+      "accepted_prefix": 0,
+      "cycle_ns": 30551917
+    },
+    {
+      "request_id": "5",
+      "round_index": 38,
+      "context_length": 15281,
+      "batch_size": 3,
+      "draft_depth": 1,
+      "accepted_prefix": 0,
+      "cycle_ns": 31610000
+    },
+    {
+      "request_id": "7",
+      "round_index": 38,
+      "context_length": 15285,
+      "batch_size": 3,
+      "draft_depth": 1,
+      "accepted_prefix": 1,
+      "cycle_ns": 31610000
+    },
+    {
+      "request_id": "8",
+      "round_index": 38,
+      "context_length": 15282,
+      "batch_size": 3,
+      "draft_depth": 1,
+      "accepted_prefix": 1,
+      "cycle_ns": 31610000
+    },
+    {
+      "request_id": "5",
+      "round_index": 39,
+      "context_length": 15282,
+      "batch_size": 3,
+      "draft_depth": 1,
+      "accepted_prefix": 1,
+      "cycle_ns": 30155875
+    },
+    {
+      "request_id": "7",
+      "round_index": 39,
+      "context_length": 15287,
+      "batch_size": 3,
+      "draft_depth": 1,
+      "accepted_prefix": 0,
+      "cycle_ns": 30155875
+    },
+    {
+      "request_id": "8",
+      "round_index": 39,
+      "context_length": 15284,
+      "batch_size": 3,
+      "draft_depth": 1,
+      "accepted_prefix": 1,
+      "cycle_ns": 30155875
+    },
+    {
+      "request_id": "5",
+      "round_index": 40,
+      "context_length": 15284,
+      "batch_size": 3,
+      "draft_depth": 1,
+      "accepted_prefix": 1,
+      "cycle_ns": 31932875
+    },
+    {
+      "request_id": "7",
+      "round_index": 40,
+      "context_length": 15288,
+      "batch_size": 3,
+      "draft_depth": 1,
+      "accepted_prefix": 0,
+      "cycle_ns": 31932875
+    },
+    {
+      "request_id": "8",
+      "round_index": 40,
+      "context_length": 15286,
+      "batch_size": 3,
+      "draft_depth": 1,
+      "accepted_prefix": 0,
+      "cycle_ns": 31932875
+    },
+    {
+      "request_id": "5",
+      "round_index": 41,
+      "context_length": 15286,
+      "batch_size": 3,
+      "draft_depth": 0,
+      "accepted_prefix": 0,
+      "cycle_ns": 23626583
+    },
+    {
+      "request_id": "7",
+      "round_index": 41,
+      "context_length": 15289,
+      "batch_size": 3,
+      "draft_depth": 0,
+      "accepted_prefix": 0,
+      "cycle_ns": 23626583
+    },
+    {
+      "request_id": "8",
+      "round_index": 41,
+      "context_length": 15287,
+      "batch_size": 3,
+      "draft_depth": 0,
+      "accepted_prefix": 0,
+      "cycle_ns": 23626583
+    }
+  ]
+}

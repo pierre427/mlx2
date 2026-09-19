@@ -1,0 +1,598 @@
+{
+  "experiment": {
+    "a": "current all-features worktree with peer-PR paths restored from HEAD",
+    "b": "same current all-features worktree with peer-PR paths retained",
+    "kind": "exploratory-source-ab-context-ladder",
+    "qualification_claim": false,
+    "runs_per_cell": 1,
+    "source_freeze": {
+      "a": {
+        "source_sha256": "b8def8bd9cef20c5d518c6dd010ebd469503a52859df42d73a6890b8c0093e3c",
+        "src": "qualification/runs/flash-next-peer-pr-ab-20260917/inputs/source-a/src"
+      },
+      "a_path_baseline_revision": "4036baa816b7c95ee454c64a26653d7f5ec31eae",
+      "b": {
+        "source_sha256": "3d57ce6ee8f0a40261cb62f42ef4bbf60293823f4fb91e64d5fea06cf749b32c",
+        "src": "qualification/runs/flash-next-peer-pr-ab-20260917/inputs/source-b/src"
+      },
+      "path_audit": [
+        {
+          "a_sha256": "6b992b52e34713957779ad2739676b0e3e7197c8909c8a34c8acc970b0f59068",
+          "b_sha256": "e93dafd6802e9321243d774999662b2345d87c6be0186854b37689d556c7d7ae",
+          "different": true,
+          "path": "src/mlx2/runtime/generate.py"
+        },
+        {
+          "a_sha256": "37ca32d4e0815e46f11b8523e56a75790a5e93c4c9202c8b21efd778f3059bd9",
+          "b_sha256": "ad90d9ae27d15c5b19975052ae209a9290bbc11c25c32e687b9bc9ec72998ce6",
+          "different": true,
+          "path": "src/mlx2/adapters/qwen38_memory.py"
+        },
+        {
+          "a_sha256": "3db275add63eeba3e36cc460af3c0f37b0e81dd819f6ec70b95d9e98fbffc8d9",
+          "b_sha256": "1da246dca29e88f757c8e2dda7e9344b7b9ce52e29f2b3422ffd23d8669f4e61",
+          "different": true,
+          "path": "src/mlx2/runtime/cache_planes.py"
+        }
+      ],
+      "worktree_revision": "c0b5e3d38b3607519a77785a0c4c5133865f5661"
+    }
+  },
+  "models": [
+    {
+      "arm_order_claim": "alternating",
+      "arms": [
+        {
+          "activate_command": [
+            "~/Desktop/mlx2/.venv/bin/python",
+            "~/Desktop/mlx2/scripts/activate_qualification_arm.py",
+            "--state",
+            "~/Desktop/mlx2/qualification/runs/flash-next-peer-pr-ab-20260917/server.json",
+            "--log",
+            "~/Desktop/mlx2/qualification/runs/flash-next-peer-pr-ab-20260917/server-A.log",
+            "--cwd",
+            "~/Desktop/mlx2",
+            "--bootout-label",
+            "com.example.mlx2-flash-next",
+            "--",
+            "/usr/bin/env",
+            "PYTHONPATH=qualification/runs/flash-next-peer-pr-ab-20260917/inputs/source-a/src",
+            ".venv/bin/python",
+            "-u",
+            "-m",
+            "mlx2.server",
+            "--model",
+            "~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP",
+            "--host",
+            "127.0.0.1",
+            "--port",
+            "8285",
+            "--max-context",
+            "262144",
+            "--max-lanes",
+            "20",
+            "--max-inflight",
+            "40",
+            "--cache-bytes",
+            "17179869184",
+            "--cache-dir",
+            "~/Desktop/mlx2/qualification/runs/flash-next-peer-pr-ab-20260917/cache-A",
+            "--execution-policy",
+            "qualification/policies/flash-next-mtp2.json",
+            "--qualification-mode"
+          ],
+          "activation_key": "flash-next-mtp-context-ab-a",
+          "after_status_requirements": [
+            {
+              "equals": 0,
+              "path": "apcv2.cow.active_leases"
+            },
+            {
+              "equals": 0,
+              "path": "execution.segmented_mtp.failures"
+            },
+            {
+              "equals": 0,
+              "path": "execution.segmented_mtp.full_prefix_materializations"
+            },
+            {
+              "equals": 0,
+              "path": "execution.segmented_mtp.physical_b2_formations"
+            },
+            {
+              "equals": true,
+              "path": "execution.ple_compile.enabled"
+            },
+            {
+              "gt": 0,
+              "path": "execution.ple_compile.counts.builds"
+            },
+            {
+              "gt": 0,
+              "path": "execution.ple_compile.counts.hits"
+            },
+            {
+              "equals": 0,
+              "path": "execution.ple_compile.counts.fallbacks"
+            },
+            {
+              "equals": 0,
+              "path": "execution.ple_compile.counts.overflow"
+            },
+            {
+              "equals": 0,
+              "path": "execution.ple_compile.counts.skips"
+            }
+          ],
+          "counter_requirements": [
+            {
+              "delta_gte": 1,
+              "path": "apcv2.hits"
+            },
+            {
+              "delta_gte": 1,
+              "path": "apcv2.stores"
+            },
+            {
+              "delta_gte": 1,
+              "max_context_tokens": 131072,
+              "path": "execution.fused_gdn.verify_calls"
+            },
+            {
+              "delta_gte": 1,
+              "path": "execution.ple_tables.0.lookups"
+            },
+            {
+              "delta_gte": 1,
+              "paths": [
+                "execution.ple_tables.0.cache_hits",
+                "execution.ple_tables.0.cache_misses"
+              ]
+            },
+            {
+              "delta_gte": 1,
+              "path": "execution.ple_tables.0.rows"
+            },
+            {
+              "delta_gte": 1,
+              "path": "execution.ple_tables.0.unique_rows"
+            },
+            {
+              "delta_gte": 1,
+              "path": "execution.ple_compile.counts.hits"
+            },
+            {
+              "delta_gte": 1,
+              "max_context_tokens": 131072,
+              "path": "execution.round_levers.ple_tail_prefetch_tables"
+            },
+            {
+              "delta_gte": 1,
+              "path": "execution.round_levers.qsa_pooled_key_cache_hits"
+            },
+            {
+              "delta_gte": 1,
+              "path": "execution.round_levers.qsa_scatter_chosen_calls"
+            },
+            {
+              "delta_gte": 1,
+              "path": "execution.round_levers.eager_async_evals"
+            },
+            {
+              "delta_gte": 1,
+              "paths": [
+                "execution.moe.dispatches.scalar",
+                "execution.moe.dispatches.tile4"
+              ]
+            }
+          ],
+          "name": "A",
+          "qualification_receipt": {
+            "path": "~/Desktop/mlx2/qualification/runs/flash-next-peer-pr-ab-20260917/route-A.json",
+            "required_checks": [
+              "feature_file_backed_ple",
+              "feature_compiled_ple",
+              "feature_pooled_qsa",
+              "feature_scatter_qsa",
+              "feature_fused_gdn_decode",
+              "feature_eager_dispatch",
+              "feature_fused_moe",
+              "feature_fused_gdn_verify",
+              "feature_shared_qsa",
+              "feature_async_promotion",
+              "feature_known_tail_prefetch",
+              "feature_indexed_qsa",
+              "feature_private_delta"
+            ],
+            "scope": "aggregate advanced-feature probes on distinct eligible workloads; bound to active runtime, artifact, and settings before matrix execution"
+          },
+          "receipt_requirements": [
+            {
+              "equals": "apcv2",
+              "path": "cache"
+            },
+            {
+              "equals": "flash-next-apcv2-mtp2",
+              "path": "profile"
+            },
+            {
+              "contains": "self_mtp",
+              "max_context_tokens": 131072,
+              "path": "mtp.route"
+            },
+            {
+              "equals": 2,
+              "max_context_tokens": 131072,
+              "path": "mtp.num_draft"
+            },
+            {
+              "gt": 0,
+              "max_context_tokens": 131072,
+              "path": "mtp.stats.draft_proposed"
+            },
+            {
+              "equals": null,
+              "min_context_tokens": 262016,
+              "path": "mtp"
+            },
+            {
+              "gte": 1,
+              "min_context_tokens": 262016,
+              "path": "ordinary_compute_width"
+            }
+          ],
+          "source_variant": {
+            "name": "A",
+            "source_sha256": "b8def8bd9cef20c5d518c6dd010ebd469503a52859df42d73a6890b8c0093e3c",
+            "src": "qualification/runs/flash-next-peer-pr-ab-20260917/inputs/source-a/src"
+          },
+          "status_requirements": [
+            {
+              "equals": "flash-next-apcv2-mtp2",
+              "path": "profile"
+            },
+            {
+              "equals": "self_mtp",
+              "path": "settings.speculation"
+            },
+            {
+              "equals": "1",
+              "path": "settings.environment.MLX_QWEN4_PLE_COMPILE"
+            }
+          ],
+          "url": "http://127.0.0.1:8285"
+        },
+        {
+          "activate_command": [
+            "~/Desktop/mlx2/.venv/bin/python",
+            "~/Desktop/mlx2/scripts/activate_qualification_arm.py",
+            "--state",
+            "~/Desktop/mlx2/qualification/runs/flash-next-peer-pr-ab-20260917/server.json",
+            "--log",
+            "~/Desktop/mlx2/qualification/runs/flash-next-peer-pr-ab-20260917/server-B.log",
+            "--cwd",
+            "~/Desktop/mlx2",
+            "--bootout-label",
+            "com.example.mlx2-flash-next",
+            "--",
+            "/usr/bin/env",
+            "PYTHONPATH=qualification/runs/flash-next-peer-pr-ab-20260917/inputs/source-b/src",
+            ".venv/bin/python",
+            "-u",
+            "-m",
+            "mlx2.server",
+            "--model",
+            "~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP",
+            "--host",
+            "127.0.0.1",
+            "--port",
+            "8285",
+            "--max-context",
+            "262144",
+            "--max-lanes",
+            "20",
+            "--max-inflight",
+            "40",
+            "--cache-bytes",
+            "17179869184",
+            "--cache-dir",
+            "~/Desktop/mlx2/qualification/runs/flash-next-peer-pr-ab-20260917/cache-B",
+            "--execution-policy",
+            "qualification/policies/flash-next-mtp2.json",
+            "--qualification-mode"
+          ],
+          "activation_key": "flash-next-mtp-context-ab-b",
+          "after_status_requirements": [
+            {
+              "equals": 0,
+              "path": "apcv2.cow.active_leases"
+            },
+            {
+              "equals": 0,
+              "path": "execution.segmented_mtp.failures"
+            },
+            {
+              "equals": 0,
+              "path": "execution.segmented_mtp.full_prefix_materializations"
+            },
+            {
+              "equals": 0,
+              "path": "execution.segmented_mtp.physical_b2_formations"
+            },
+            {
+              "equals": true,
+              "path": "execution.ple_compile.enabled"
+            },
+            {
+              "gt": 0,
+              "path": "execution.ple_compile.counts.builds"
+            },
+            {
+              "gt": 0,
+              "path": "execution.ple_compile.counts.hits"
+            },
+            {
+              "equals": 0,
+              "path": "execution.ple_compile.counts.fallbacks"
+            },
+            {
+              "equals": 0,
+              "path": "execution.ple_compile.counts.overflow"
+            },
+            {
+              "equals": 0,
+              "path": "execution.ple_compile.counts.skips"
+            }
+          ],
+          "counter_requirements": [
+            {
+              "delta_gte": 1,
+              "path": "apcv2.hits"
+            },
+            {
+              "delta_gte": 1,
+              "path": "apcv2.stores"
+            },
+            {
+              "delta_gte": 1,
+              "max_context_tokens": 131072,
+              "path": "execution.fused_gdn.verify_calls"
+            },
+            {
+              "delta_gte": 1,
+              "path": "execution.ple_tables.0.lookups"
+            },
+            {
+              "delta_gte": 1,
+              "paths": [
+                "execution.ple_tables.0.cache_hits",
+                "execution.ple_tables.0.cache_misses"
+              ]
+            },
+            {
+              "delta_gte": 1,
+              "path": "execution.ple_tables.0.rows"
+            },
+            {
+              "delta_gte": 1,
+              "path": "execution.ple_tables.0.unique_rows"
+            },
+            {
+              "delta_gte": 1,
+              "path": "execution.ple_compile.counts.hits"
+            },
+            {
+              "delta_gte": 1,
+              "max_context_tokens": 131072,
+              "path": "execution.round_levers.ple_tail_prefetch_tables"
+            },
+            {
+              "delta_gte": 1,
+              "path": "execution.round_levers.qsa_pooled_key_cache_hits"
+            },
+            {
+              "delta_gte": 1,
+              "path": "execution.round_levers.qsa_scatter_chosen_calls"
+            },
+            {
+              "delta_gte": 1,
+              "path": "execution.round_levers.eager_async_evals"
+            },
+            {
+              "delta_gte": 1,
+              "paths": [
+                "execution.moe.dispatches.scalar",
+                "execution.moe.dispatches.tile4"
+              ]
+            }
+          ],
+          "name": "B",
+          "qualification_receipt": {
+            "path": "~/Desktop/mlx2/qualification/runs/flash-next-peer-pr-ab-20260917/route-B.json",
+            "required_checks": [
+              "feature_file_backed_ple",
+              "feature_compiled_ple",
+              "feature_pooled_qsa",
+              "feature_scatter_qsa",
+              "feature_fused_gdn_decode",
+              "feature_eager_dispatch",
+              "feature_fused_moe",
+              "feature_fused_gdn_verify",
+              "feature_shared_qsa",
+              "feature_async_promotion",
+              "feature_known_tail_prefetch",
+              "feature_indexed_qsa",
+              "feature_private_delta"
+            ],
+            "scope": "aggregate advanced-feature probes on distinct eligible workloads; bound to active runtime, artifact, and settings before matrix execution"
+          },
+          "receipt_requirements": [
+            {
+              "equals": "apcv2",
+              "path": "cache"
+            },
+            {
+              "equals": "flash-next-apcv2-mtp2",
+              "path": "profile"
+            },
+            {
+              "contains": "self_mtp",
+              "max_context_tokens": 131072,
+              "path": "mtp.route"
+            },
+            {
+              "equals": 2,
+              "max_context_tokens": 131072,
+              "path": "mtp.num_draft"
+            },
+            {
+              "gt": 0,
+              "max_context_tokens": 131072,
+              "path": "mtp.stats.draft_proposed"
+            },
+            {
+              "contains": "self_mtp",
+              "min_context_tokens": 262016,
+              "path": "mtp.route"
+            },
+            {
+              "equals": 2,
+              "min_context_tokens": 262016,
+              "path": "mtp.num_draft"
+            },
+            {
+              "gt": 0,
+              "min_context_tokens": 262016,
+              "path": "mtp.stats.draft_proposed"
+            }
+          ],
+          "source_variant": {
+            "name": "B",
+            "source_sha256": "3d57ce6ee8f0a40261cb62f42ef4bbf60293823f4fb91e64d5fea06cf749b32c",
+            "src": "qualification/runs/flash-next-peer-pr-ab-20260917/inputs/source-b/src"
+          },
+          "status_requirements": [
+            {
+              "equals": "flash-next-apcv2-mtp2",
+              "path": "profile"
+            },
+            {
+              "equals": "self_mtp",
+              "path": "settings.speculation"
+            },
+            {
+              "equals": "1",
+              "path": "settings.environment.MLX_QWEN4_PLE_COMPILE"
+            }
+          ],
+          "url": "http://127.0.0.1:8285"
+        }
+      ],
+      "batch_stress": {
+        "max_tokens": 64,
+        "prompts": [
+          "Explain compiler optimization 01 in detail.",
+          "Explain compiler optimization 02 in detail.",
+          "Explain compiler optimization 03 in detail.",
+          "Explain compiler optimization 04 in detail.",
+          "Explain compiler optimization 05 in detail.",
+          "Explain compiler optimization 06 in detail.",
+          "Explain compiler optimization 07 in detail.",
+          "Explain compiler optimization 08 in detail.",
+          "Explain compiler optimization 09 in detail.",
+          "Explain compiler optimization 10 in detail.",
+          "Explain compiler optimization 11 in detail.",
+          "Explain compiler optimization 12 in detail.",
+          "Explain compiler optimization 13 in detail.",
+          "Explain compiler optimization 14 in detail.",
+          "Explain compiler optimization 15 in detail.",
+          "Explain compiler optimization 16 in detail.",
+          "Explain compiler optimization 17 in detail.",
+          "Explain compiler optimization 18 in detail.",
+          "Explain compiler optimization 19 in detail.",
+          "Explain compiler optimization 20 in detail."
+        ],
+        "rounds": 20,
+        "timeout_seconds": 3600,
+        "width": 20
+      },
+      "context": {
+        "max_tokens": 64,
+        "min_cached_tokens": 1,
+        "prompt_token_tolerance": 0,
+        "runs_per_cell": 1,
+        "timeout_seconds": 7200
+      },
+      "contexts": [
+        {
+          "calibrated_prompt_tokens": 2048,
+          "prompt_path": "~/Desktop/mlx2/qualification/runs/flash-next-peer-pr-ab-20260917/inputs/prompts/flash-next-2048.txt",
+          "prompt_sha256": "e179e26d755621c864a7f037ed18b2c47ad0d2506ac92579cea6f01d4670bbb6",
+          "tokenizer_renderer": "qwen_direct",
+          "tokens": 2048
+        },
+        {
+          "calibrated_prompt_tokens": 8192,
+          "prompt_path": "~/Desktop/mlx2/qualification/runs/flash-next-peer-pr-ab-20260917/inputs/prompts/flash-next-8192.txt",
+          "prompt_sha256": "51b45271116112845858fd5e946d42111d04fdc4181ff03b91be6003588cb05b",
+          "tokenizer_renderer": "qwen_direct",
+          "tokens": 8192
+        },
+        {
+          "calibrated_prompt_tokens": 32768,
+          "prompt_path": "~/Desktop/mlx2/qualification/runs/flash-next-peer-pr-ab-20260917/inputs/prompts/flash-next-32768.txt",
+          "prompt_sha256": "eba8a01163c76055c89d12cc8092368d2ffd8825fd12afbe085e656bd9334cd6",
+          "tokenizer_renderer": "qwen_direct",
+          "tokens": 32768
+        },
+        {
+          "calibrated_prompt_tokens": 65536,
+          "prompt_path": "~/Desktop/mlx2/qualification/runs/flash-next-peer-pr-ab-20260917/inputs/prompts/flash-next-65536.txt",
+          "prompt_sha256": "d7d29edae7905cdc0668ec28f50ceb65527071d931a0be1d297f404806480858",
+          "tokenizer_renderer": "qwen_direct",
+          "tokens": 65536
+        },
+        {
+          "calibrated_prompt_tokens": 131072,
+          "prompt_path": "~/Desktop/mlx2/qualification/runs/flash-next-peer-pr-ab-20260917/inputs/prompts/flash-next-131072.txt",
+          "prompt_sha256": "0d0956962b31394e6a9967f20450b770f253000318d6a12650e07485200992c1",
+          "tokenizer_renderer": "qwen_direct",
+          "tokens": 131072
+        },
+        {
+          "calibrated_prompt_tokens": 262016,
+          "prompt_path": "~/Desktop/mlx2/qualification/runs/flash-next-peer-pr-ab-20260917/inputs/prompts/flash-next-262016.txt",
+          "prompt_sha256": "e30cf6c9aacf680c5c43face9723c93d3c6f3516fc31fd8616b6f7233e5954f5",
+          "tokenizer_renderer": "qwen_direct",
+          "tokens": 262016
+        }
+      ],
+      "name": "flash-next",
+      "spomin20x20": {
+        "capacity_tokens": 8192,
+        "corpus_path": "corpora/spomin-20x20-long-multiturn-corpus-20260915.json",
+        "corpus_sha256": "5d7233f805b310e354cb628a0d0b1d12299cc90dbfeebb890eaf35dac966ad12",
+        "max_tokens": 192,
+        "serving_arm": "mtp",
+        "source_receipts_path": "~/Desktop/mlx-uag/results/spomin-20x20-long-multiturn-b20-full-20260915.json",
+        "source_receipts_sha256": "1dd6c0019dca233fd62f887d9ad70daff0aa7bbf1a415cb95dcb3a3991714f25",
+        "source_reconciliation_tokenizer_path": "~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP",
+        "timeout_seconds": 1800,
+        "tokenizer_path": "~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP"
+      },
+      "tokenizer_path": "~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP",
+      "tokenizer_renderer": "qwen_direct"
+    }
+  ],
+  "schema": "mlx2.qualification-matrix.v1",
+  "thermal": {
+    "consecutive_samples": 3,
+    "max_battery_temperature_c": 40.0,
+    "max_temperature_delta_c": 0.5,
+    "max_virtual_temperature_c": 45.0,
+    "max_wait_seconds": 1800,
+    "require_temperatures": true,
+    "required_thermal_state": 0,
+    "sample_interval_seconds": 15
+  }
+}

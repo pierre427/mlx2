@@ -1,0 +1,73 @@
+{
+  "schema": "mlx2.qwen36-candidate-smoke.v1",
+  "timestamp": "2026-09-16T20:11:24Z",
+  "passed": true,
+  "qualification": "candidate-only",
+  "route_selected": false,
+  "runtime": {
+    "source_sha256": "70d727f946baec936d2a24b625c103a4adcbfe4b14a7f9e757ac11cd0ece5df9",
+    "mlx_native_sha256": "30335939714520c3306cfa58597100aae08bbeabdc60a4bc8c35c32c607450a8",
+    "mlx": "0.32.2.dev20260915+2a817ad94",
+    "macos": "26.7",
+    "python": "3.12.13"
+  },
+  "ordinary": {
+    "artifact": "Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit",
+    "cold_output": "READY",
+    "warm_output": "READY",
+    "warm_cached_tokens": 15,
+    "structured_json": {"answer": "yes", "score": 3},
+    "parallel_sampling": {
+      "samples": 2,
+      "peak_active_lanes": 2,
+      "batch_width_2_cycles": 4,
+      "physical_footprint_guard": true
+    },
+    "context_ladder": {
+      "32015_tokens": {
+        "cold_ttft_seconds": 8.381503416996566,
+        "warm_ttft_seconds": 0.35669749999942724,
+        "warm_cached_tokens": 32014,
+        "output": "READY"
+      },
+      "64015_tokens": {
+        "cold_ttft_seconds": 21.056446333008353,
+        "warm_ttft_seconds": 0.4059347919974243,
+        "warm_cached_tokens": 64014,
+        "output": "READY"
+      }
+    }
+  },
+  "native_mtp2": {
+    "artifact": "Qwen3.6-35B-A3B-uncensored-heretic-Native-MTP-Preserved-oQ4e-mtp",
+    "cold_output": "READY",
+    "warm_cached_tokens": 15,
+    "warm_batched_outputs_equal": true,
+    "observed_compute_width": 2,
+    "true_batched_engaged": 6,
+    "batched_target_forwards": 6,
+    "batched_draft_forwards": 12,
+    "segmented_attention_calls": 72,
+    "transaction_branches": 12,
+    "committed_cycles": 6,
+    "full_prefix_materializations": 0,
+    "physical_b2_formations": 0,
+    "failures": 0
+  },
+  "resource_safety": {
+    "swap_before_mib": 6161.69,
+    "swap_after_mib": 6105.69,
+    "swap_growth_mib": -56.0,
+    "thermal_state_after": 0
+  },
+  "not_yet_run": [
+    "forced rollback/rejection oracle on the production artifact",
+    "near-limit context ladder above 64K",
+    "five-round ordinary versus MTP benchmark",
+    "compiled decode replay",
+    "optimized GDN core",
+    "optimized MoE router and expert kernels",
+    "PLD target-forward integration and performance",
+    "live compaction/KV surgery soak"
+  ]
+}

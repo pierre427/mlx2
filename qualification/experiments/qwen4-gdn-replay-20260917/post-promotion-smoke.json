@@ -1,0 +1,2014 @@
+{
+  "device": {
+    "architecture": "applegpu_g17s",
+    "device_name": "Apple M5 Max",
+    "max_buffer_length": 86586540032,
+    "max_recommended_working_set_size": 120259084288,
+    "memory_size": 137438953472,
+    "resource_limit": 499000
+  },
+  "final_stats": {
+    "catchup_calls": 0,
+    "catchup_fallbacks": 0,
+    "catchup_last_fallbacks": {},
+    "decode_fallback_reasons": {},
+    "fallbacks": 0,
+    "fused_calls": 72,
+    "fused_outproj_calls": 0,
+    "last_fallbacks": {},
+    "replay_fallback_reasons": {},
+    "replay_fallbacks": 0,
+    "replay_rollback_calls": 36,
+    "replay_rollback_tokens": 144,
+    "replay_verify_calls": 36,
+    "verify_calls": 36,
+    "verify_fallback_reasons": {},
+    "verify_fallbacks": 0,
+    "verify_last_fallbacks": {}
+  },
+  "finished_at": 1789670072.535601,
+  "limitations": [
+    "Bounded single-lane model qualification, not a serving load test.",
+    "Peak deltas are MLX allocator observations, not process RSS.",
+    "Selection is scoped to the Flash-Next adapter profile."
+  ],
+  "linear_gdn_layers": 36,
+  "locks": [
+    {
+      "acquired_at": "2026-09-17 18:32:07 UTC",
+      "agent_id": "root",
+      "campaign_id": "cfda95c094ca41cebacc2c9cdce89e72",
+      "generation": 1,
+      "lease_id": "43bee72dd95f4a5097fc0aad39b82fad",
+      "owner": "root",
+      "owner_agent_id": "root",
+      "project": "~/Desktop/mlx2",
+      "purpose": "Post-promotion Qwen4 compact GDN replay default-profile smoke",
+      "resource_key": "gpu",
+      "session_id": "10576702614645f2a5cc5bff25a0ad81",
+      "task_id": "904784e6991049dc9d8877be508851fa"
+    },
+    {
+      "acquired_at": "2026-09-17 18:32:07 UTC",
+      "agent_id": "root",
+      "campaign_id": "cfda95c094ca41cebacc2c9cdce89e72",
+      "generation": 1,
+      "lease_id": "43bee72dd95f4a5097fc0aad39b82fad",
+      "owner": "root",
+      "owner_agent_id": "root",
+      "project": "~/Desktop/mlx2",
+      "purpose": "Post-promotion Qwen4 compact GDN replay default-profile smoke",
+      "resource_key": "gpu",
+      "session_id": "10576702614645f2a5cc5bff25a0ad81",
+      "task_id": "904784e6991049dc9d8877be508851fa"
+    }
+  ],
+  "model": "~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP",
+  "model_identity": {
+    "files": [
+      [
+        "model-00001-of-00020.safetensors",
+        5269867108,
+        1787763792019276613
+      ],
+      [
+        "model-00002-of-00020.safetensors",
+        5250035154,
+        1787763795112301395
+      ],
+      [
+        "model-00003-of-00020.safetensors",
+        5250035156,
+        1787763797568853436
+      ],
+      [
+        "model-00004-of-00020.safetensors",
+        5250035164,
+        1787763799795899554
+      ],
+      [
+        "model-00005-of-00020.safetensors",
+        5250035154,
+        1787763802219521492
+      ],
+      [
+        "model-00006-of-00020.safetensors",
+        5250035197,
+        1787763804628789963
+      ],
+      [
+        "model-00007-of-00020.safetensors",
+        5266267219,
+        1787763807202765530
+      ],
+      [
+        "model-00008-of-00020.safetensors",
+        5323321374,
+        1787763811607771778
+      ],
+      [
+        "model-00009-of-00020.safetensors",
+        5363888722,
+        1787763816707510759
+      ],
+      [
+        "model-00010-of-00020.safetensors",
+        5363888860,
+        1787763824197616574
+      ],
+      [
+        "model-00011-of-00020.safetensors",
+        5319600417,
+        1787763836593095132
+      ],
+      [
+        "model-00012-of-00020.safetensors",
+        5363888848,
+        1787763843735070415
+      ],
+      [
+        "model-00013-of-00020.safetensors",
+        5363888820,
+        1787763847449561808
+      ],
+      [
+        "model-00014-of-00020.safetensors",
+        5319600423,
+        1787763851288691395
+      ],
+      [
+        "model-00015-of-00020.safetensors",
+        5363888836,
+        1787763855198899940
+      ],
+      [
+        "model-00016-of-00020.safetensors",
+        5363888826,
+        1787763858503468595
+      ],
+      [
+        "model-00017-of-00020.safetensors",
+        5319600387,
+        1787763862716925024
+      ],
+      [
+        "model-00018-of-00020.safetensors",
+        5363888842,
+        1787763866563154407
+      ],
+      [
+        "model-00019-of-00020.safetensors",
+        5363888866,
+        1787763870894658903
+      ],
+      [
+        "model-00020-of-00020.safetensors",
+        1787099916,
+        1787763872212807079
+      ],
+      [
+        "model-mtp-q4.safetensors",
+        1467251930,
+        1787767069242346395
+      ],
+      [
+        "ple_rows.bin",
+        32000153600,
+        1787788508308843315
+      ]
+    ],
+    "fingerprint": "77a35a9692b49e736bd0daa708d8b14c71c05abb03f81f8c707a1fc1e372bb25",
+    "path": "~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP"
+  },
+  "observed_used": true,
+  "probes": {
+    "3": {
+      "compact": 32,
+      "snapshot": 32
+    },
+    "4": {
+      "compact": 32,
+      "snapshot": 32
+    },
+    "8": {
+      "compact": 32,
+      "snapshot": 32
+    }
+  },
+  "profile_default": {
+    "environment": "1",
+    "initial_module_modes": [
+      "compact"
+    ],
+    "passed": true
+  },
+  "prompt_tokens": 8,
+  "qualified": true,
+  "results": [
+    {
+      "accepted": 1,
+      "memory": {
+        "compact_peak_delta_median_bytes": 124380068,
+        "peak_delta_reduction_ratio": 2.8229069467947228,
+        "snapshot_peak_delta_median_bytes": 351113358
+      },
+      "repetitions": [
+        {
+          "arms": {
+            "compact": {
+              "peak_delta_bytes": 124380068,
+              "rollback_ms": 1.248541,
+              "rollback_stats": {
+                "catchup_calls": 0,
+                "catchup_fallbacks": 0,
+                "catchup_last_fallbacks": {},
+                "decode_fallback_reasons": {},
+                "fallbacks": 0,
+                "fused_calls": 0,
+                "fused_outproj_calls": 0,
+                "last_fallbacks": {},
+                "replay_fallback_reasons": {},
+                "replay_fallbacks": 0,
+                "replay_rollback_calls": 36,
+                "replay_rollback_tokens": 36,
+                "replay_verify_calls": 36,
+                "verify_calls": 36,
+                "verify_fallback_reasons": {},
+                "verify_fallbacks": 0,
+                "verify_last_fallbacks": {}
+              },
+              "verify_ms": 29.460625,
+              "verify_stats": {
+                "catchup_calls": 0,
+                "catchup_fallbacks": 0,
+                "catchup_last_fallbacks": {},
+                "decode_fallback_reasons": {},
+                "fallbacks": 0,
+                "fused_calls": 0,
+                "fused_outproj_calls": 0,
+                "last_fallbacks": {},
+                "replay_fallback_reasons": {},
+                "replay_fallbacks": 0,
+                "replay_rollback_calls": 0,
+                "replay_rollback_tokens": 0,
+                "replay_verify_calls": 36,
+                "verify_calls": 36,
+                "verify_fallback_reasons": {},
+                "verify_fallbacks": 0,
+                "verify_last_fallbacks": {}
+              }
+            },
+            "snapshots": {
+              "peak_delta_bytes": 351113358,
+              "rollback_ms": 0.987666,
+              "rollback_stats": {
+                "catchup_calls": 0,
+                "catchup_fallbacks": 0,
+                "catchup_last_fallbacks": {},
+                "decode_fallback_reasons": {},
+                "fallbacks": 0,
+                "fused_calls": 0,
+                "fused_outproj_calls": 0,
+                "last_fallbacks": {},
+                "replay_fallback_reasons": {},
+                "replay_fallbacks": 0,
+                "replay_rollback_calls": 0,
+                "replay_rollback_tokens": 0,
+                "replay_verify_calls": 0,
+                "verify_calls": 36,
+                "verify_fallback_reasons": {},
+                "verify_fallbacks": 0,
+                "verify_last_fallbacks": {}
+              },
+              "verify_ms": 31.843625,
+              "verify_stats": {
+                "catchup_calls": 0,
+                "catchup_fallbacks": 0,
+                "catchup_last_fallbacks": {},
+                "decode_fallback_reasons": {},
+                "fallbacks": 0,
+                "fused_calls": 0,
+                "fused_outproj_calls": 0,
+                "last_fallbacks": {},
+                "replay_fallback_reasons": {},
+                "replay_fallbacks": 0,
+                "replay_rollback_calls": 0,
+                "replay_rollback_tokens": 0,
+                "replay_verify_calls": 0,
+                "verify_calls": 36,
+                "verify_fallback_reasons": {},
+                "verify_fallbacks": 0,
+                "verify_last_fallbacks": {}
+              }
+            }
+          },
+          "cache_parity": [
+            {
+              "conv": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              },
+              "layer": 0,
+              "recurrent": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              }
+            },
+            {
+              "conv": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              },
+              "layer": 1,
+              "recurrent": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              }
+            },
+            {
+              "conv": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              },
+              "layer": 2,
+              "recurrent": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              }
+            },
+            {
+              "conv": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              },
+              "layer": 4,
+              "recurrent": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              }
+            },
+            {
+              "conv": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              },
+              "layer": 5,
+              "recurrent": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              }
+            },
+            {
+              "conv": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              },
+              "layer": 6,
+              "recurrent": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              }
+            },
+            {
+              "conv": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              },
+              "layer": 8,
+              "recurrent": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              }
+            },
+            {
+              "conv": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              },
+              "layer": 9,
+              "recurrent": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              }
+            },
+            {
+              "conv": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              },
+              "layer": 10,
+              "recurrent": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              }
+            },
+            {
+              "conv": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              },
+              "layer": 12,
+              "recurrent": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              }
+            },
+            {
+              "conv": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              },
+              "layer": 13,
+              "recurrent": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              }
+            },
+            {
+              "conv": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              },
+              "layer": 14,
+              "recurrent": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              }
+            },
+            {
+              "conv": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              },
+              "layer": 16,
+              "recurrent": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              }
+            },
+            {
+              "conv": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              },
+              "layer": 17,
+              "recurrent": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              }
+            },
+            {
+              "conv": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              },
+              "layer": 18,
+              "recurrent": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              }
+            },
+            {
+              "conv": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              },
+              "layer": 20,
+              "recurrent": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              }
+            },
+            {
+              "conv": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              },
+              "layer": 21,
+              "recurrent": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              }
+            },
+            {
+              "conv": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              },
+              "layer": 22,
+              "recurrent": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              }
+            },
+            {
+              "conv": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              },
+              "layer": 24,
+              "recurrent": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              }
+            },
+            {
+              "conv": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              },
+              "layer": 25,
+              "recurrent": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              }
+            },
+            {
+              "conv": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              },
+              "layer": 26,
+              "recurrent": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              }
+            },
+            {
+              "conv": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              },
+              "layer": 28,
+              "recurrent": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              }
+            },
+            {
+              "conv": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              },
+              "layer": 29,
+              "recurrent": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              }
+            },
+            {
+              "conv": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              },
+              "layer": 30,
+              "recurrent": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              }
+            },
+            {
+              "conv": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              },
+              "layer": 32,
+              "recurrent": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              }
+            },
+            {
+              "conv": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              },
+              "layer": 33,
+              "recurrent": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              }
+            },
+            {
+              "conv": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              },
+              "layer": 34,
+              "recurrent": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              }
+            },
+            {
+              "conv": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              },
+              "layer": 36,
+              "recurrent": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              }
+            },
+            {
+              "conv": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              },
+              "layer": 37,
+              "recurrent": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              }
+            },
+            {
+              "conv": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              },
+              "layer": 38,
+              "recurrent": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              }
+            },
+            {
+              "conv": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              },
+              "layer": 40,
+              "recurrent": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              }
+            },
+            {
+              "conv": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              },
+              "layer": 41,
+              "recurrent": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              }
+            },
+            {
+              "conv": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              },
+              "layer": 42,
+              "recurrent": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              }
+            },
+            {
+              "conv": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              },
+              "layer": 44,
+              "recurrent": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              }
+            },
+            {
+              "conv": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              },
+              "layer": 45,
+              "recurrent": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              }
+            },
+            {
+              "conv": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              },
+              "layer": 46,
+              "recurrent": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              }
+            }
+          ],
+          "continuation_parity": {
+            "exact": true,
+            "finite": true,
+            "max_abs": 0.0
+          },
+          "order": [
+            "snapshots",
+            "compact"
+          ],
+          "prefill_parity": {
+            "exact": true,
+            "finite": true,
+            "max_abs": 0.0
+          },
+          "repetition": 0,
+          "same_continuation_argmax": true,
+          "verify_parity": {
+            "exact": true,
+            "finite": true,
+            "max_abs": 0.0
+          }
+        }
+      ],
+      "timing": {
+        "compact_median_ms": 29.460625,
+        "compact_verify_plus_rollback_median_ms": 30.709166,
+        "snapshot_median_ms": 31.843625,
+        "snapshot_verify_plus_rollback_median_ms": 32.831291,
+        "speedup": 1.0808876254322506,
+        "verify_plus_rollback_speedup": 1.0691039606871773
+      },
+      "width": 3
+    },
+    {
+      "accepted": 2,
+      "memory": {
+        "compact_peak_delta_median_bytes": 124541022,
+        "peak_delta_reduction_ratio": 3.7804073745275675,
+        "snapshot_peak_delta_median_bytes": 470815798
+      },
+      "repetitions": [
+        {
+          "arms": {
+            "compact": {
+              "peak_delta_bytes": 124541022,
+              "rollback_ms": 1.44425,
+              "rollback_stats": {
+                "catchup_calls": 0,
+                "catchup_fallbacks": 0,
+                "catchup_last_fallbacks": {},
+                "decode_fallback_reasons": {},
+                "fallbacks": 0,
+                "fused_calls": 0,
+                "fused_outproj_calls": 0,
+                "last_fallbacks": {},
+                "replay_fallback_reasons": {},
+                "replay_fallbacks": 0,
+                "replay_rollback_calls": 36,
+                "replay_rollback_tokens": 72,
+                "replay_verify_calls": 36,
+                "verify_calls": 36,
+                "verify_fallback_reasons": {},
+                "verify_fallbacks": 0,
+                "verify_last_fallbacks": {}
+              },
+              "verify_ms": 38.04325,
+              "verify_stats": {
+                "catchup_calls": 0,
+                "catchup_fallbacks": 0,
+                "catchup_last_fallbacks": {},
+                "decode_fallback_reasons": {},
+                "fallbacks": 0,
+                "fused_calls": 0,
+                "fused_outproj_calls": 0,
+                "last_fallbacks": {},
+                "replay_fallback_reasons": {},
+                "replay_fallbacks": 0,
+                "replay_rollback_calls": 0,
+                "replay_rollback_tokens": 0,
+                "replay_verify_calls": 36,
+                "verify_calls": 36,
+                "verify_fallback_reasons": {},
+                "verify_fallbacks": 0,
+                "verify_last_fallbacks": {}
+              }
+            },
+            "snapshots": {
+              "peak_delta_bytes": 470815798,
+              "rollback_ms": 0.918667,
+              "rollback_stats": {
+                "catchup_calls": 0,
+                "catchup_fallbacks": 0,
+                "catchup_last_fallbacks": {},
+                "decode_fallback_reasons": {},
+                "fallbacks": 0,
+                "fused_calls": 0,
+                "fused_outproj_calls": 0,
+                "last_fallbacks": {},
+                "replay_fallback_reasons": {},
+                "replay_fallbacks": 0,
+                "replay_rollback_calls": 0,
+                "replay_rollback_tokens": 0,
+                "replay_verify_calls": 0,
+                "verify_calls": 36,
+                "verify_fallback_reasons": {},
+                "verify_fallbacks": 0,
+                "verify_last_fallbacks": {}
+              },
+              "verify_ms": 46.556875,
+              "verify_stats": {
+                "catchup_calls": 0,
+                "catchup_fallbacks": 0,
+                "catchup_last_fallbacks": {},
+                "decode_fallback_reasons": {},
+                "fallbacks": 0,
+                "fused_calls": 0,
+                "fused_outproj_calls": 0,
+                "last_fallbacks": {},
+                "replay_fallback_reasons": {},
+                "replay_fallbacks": 0,
+                "replay_rollback_calls": 0,
+                "replay_rollback_tokens": 0,
+                "replay_verify_calls": 0,
+                "verify_calls": 36,
+                "verify_fallback_reasons": {},
+                "verify_fallbacks": 0,
+                "verify_last_fallbacks": {}
+              }
+            }
+          },
+          "cache_parity": [
+            {
+              "conv": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              },
+              "layer": 0,
+              "recurrent": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              }
+            },
+            {
+              "conv": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              },
+              "layer": 1,
+              "recurrent": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              }
+            },
+            {
+              "conv": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              },
+              "layer": 2,
+              "recurrent": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              }
+            },
+            {
+              "conv": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              },
+              "layer": 4,
+              "recurrent": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              }
+            },
+            {
+              "conv": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              },
+              "layer": 5,
+              "recurrent": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              }
+            },
+            {
+              "conv": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              },
+              "layer": 6,
+              "recurrent": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              }
+            },
+            {
+              "conv": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              },
+              "layer": 8,
+              "recurrent": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              }
+            },
+            {
+              "conv": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              },
+              "layer": 9,
+              "recurrent": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              }
+            },
+            {
+              "conv": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              },
+              "layer": 10,
+              "recurrent": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              }
+            },
+            {
+              "conv": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              },
+              "layer": 12,
+              "recurrent": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              }
+            },
+            {
+              "conv": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              },
+              "layer": 13,
+              "recurrent": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              }
+            },
+            {
+              "conv": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              },
+              "layer": 14,
+              "recurrent": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              }
+            },
+            {
+              "conv": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              },
+              "layer": 16,
+              "recurrent": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              }
+            },
+            {
+              "conv": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              },
+              "layer": 17,
+              "recurrent": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              }
+            },
+            {
+              "conv": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              },
+              "layer": 18,
+              "recurrent": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              }
+            },
+            {
+              "conv": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              },
+              "layer": 20,
+              "recurrent": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              }
+            },
+            {
+              "conv": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              },
+              "layer": 21,
+              "recurrent": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              }
+            },
+            {
+              "conv": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              },
+              "layer": 22,
+              "recurrent": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              }
+            },
+            {
+              "conv": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              },
+              "layer": 24,
+              "recurrent": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              }
+            },
+            {
+              "conv": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              },
+              "layer": 25,
+              "recurrent": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              }
+            },
+            {
+              "conv": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              },
+              "layer": 26,
+              "recurrent": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              }
+            },
+            {
+              "conv": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              },
+              "layer": 28,
+              "recurrent": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              }
+            },
+            {
+              "conv": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              },
+              "layer": 29,
+              "recurrent": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              }
+            },
+            {
+              "conv": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              },
+              "layer": 30,
+              "recurrent": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              }
+            },
+            {
+              "conv": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              },
+              "layer": 32,
+              "recurrent": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              }
+            },
+            {
+              "conv": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              },
+              "layer": 33,
+              "recurrent": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              }
+            },
+            {
+              "conv": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              },
+              "layer": 34,
+              "recurrent": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              }
+            },
+            {
+              "conv": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              },
+              "layer": 36,
+              "recurrent": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              }
+            },
+            {
+              "conv": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              },
+              "layer": 37,
+              "recurrent": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              }
+            },
+            {
+              "conv": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              },
+              "layer": 38,
+              "recurrent": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              }
+            },
+            {
+              "conv": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              },
+              "layer": 40,
+              "recurrent": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              }
+            },
+            {
+              "conv": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              },
+              "layer": 41,
+              "recurrent": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              }
+            },
+            {
+              "conv": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              },
+              "layer": 42,
+              "recurrent": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              }
+            },
+            {
+              "conv": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              },
+              "layer": 44,
+              "recurrent": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              }
+            },
+            {
+              "conv": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              },
+              "layer": 45,
+              "recurrent": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              }
+            },
+            {
+              "conv": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              },
+              "layer": 46,
+              "recurrent": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              }
+            }
+          ],
+          "continuation_parity": {
+            "exact": true,
+            "finite": true,
+            "max_abs": 0.0
+          },
+          "order": [
+            "snapshots",
+            "compact"
+          ],
+          "prefill_parity": {
+            "exact": true,
+            "finite": true,
+            "max_abs": 0.0
+          },
+          "repetition": 0,
+          "same_continuation_argmax": true,
+          "verify_parity": {
+            "exact": true,
+            "finite": true,
+            "max_abs": 0.0
+          }
+        }
+      ],
+      "timing": {
+        "compact_median_ms": 38.04325,
+        "compact_verify_plus_rollback_median_ms": 39.4875,
+        "snapshot_median_ms": 46.556875,
+        "snapshot_verify_plus_rollback_median_ms": 47.475542,
+        "speedup": 1.2237880570140562,
+        "verify_plus_rollback_speedup": 1.202292928141817
+      },
+      "width": 4
+    },
+    {
+      "accepted": 4,
+      "memory": {
+        "compact_peak_delta_median_bytes": 145683646,
+        "peak_delta_reduction_ratio": 6.456389168074501,
+        "snapshot_peak_delta_median_bytes": 940590314
+      },
+      "repetitions": [
+        {
+          "arms": {
+            "compact": {
+              "peak_delta_bytes": 145683646,
+              "rollback_ms": 1.156625,
+              "rollback_stats": {
+                "catchup_calls": 0,
+                "catchup_fallbacks": 0,
+                "catchup_last_fallbacks": {},
+                "decode_fallback_reasons": {},
+                "fallbacks": 0,
+                "fused_calls": 0,
+                "fused_outproj_calls": 0,
+                "last_fallbacks": {},
+                "replay_fallback_reasons": {},
+                "replay_fallbacks": 0,
+                "replay_rollback_calls": 36,
+                "replay_rollback_tokens": 144,
+                "replay_verify_calls": 36,
+                "verify_calls": 36,
+                "verify_fallback_reasons": {},
+                "verify_fallbacks": 0,
+                "verify_last_fallbacks": {}
+              },
+              "verify_ms": 40.634875,
+              "verify_stats": {
+                "catchup_calls": 0,
+                "catchup_fallbacks": 0,
+                "catchup_last_fallbacks": {},
+                "decode_fallback_reasons": {},
+                "fallbacks": 0,
+                "fused_calls": 0,
+                "fused_outproj_calls": 0,
+                "last_fallbacks": {},
+                "replay_fallback_reasons": {},
+                "replay_fallbacks": 0,
+                "replay_rollback_calls": 0,
+                "replay_rollback_tokens": 0,
+                "replay_verify_calls": 36,
+                "verify_calls": 36,
+                "verify_fallback_reasons": {},
+                "verify_fallbacks": 0,
+                "verify_last_fallbacks": {}
+              }
+            },
+            "snapshots": {
+              "peak_delta_bytes": 940590314,
+              "rollback_ms": 0.581375,
+              "rollback_stats": {
+                "catchup_calls": 0,
+                "catchup_fallbacks": 0,
+                "catchup_last_fallbacks": {},
+                "decode_fallback_reasons": {},
+                "fallbacks": 0,
+                "fused_calls": 0,
+                "fused_outproj_calls": 0,
+                "last_fallbacks": {},
+                "replay_fallback_reasons": {},
+                "replay_fallbacks": 0,
+                "replay_rollback_calls": 0,
+                "replay_rollback_tokens": 0,
+                "replay_verify_calls": 0,
+                "verify_calls": 36,
+                "verify_fallback_reasons": {},
+                "verify_fallbacks": 0,
+                "verify_last_fallbacks": {}
+              },
+              "verify_ms": 43.866791,
+              "verify_stats": {
+                "catchup_calls": 0,
+                "catchup_fallbacks": 0,
+                "catchup_last_fallbacks": {},
+                "decode_fallback_reasons": {},
+                "fallbacks": 0,
+                "fused_calls": 0,
+                "fused_outproj_calls": 0,
+                "last_fallbacks": {},
+                "replay_fallback_reasons": {},
+                "replay_fallbacks": 0,
+                "replay_rollback_calls": 0,
+                "replay_rollback_tokens": 0,
+                "replay_verify_calls": 0,
+                "verify_calls": 36,
+                "verify_fallback_reasons": {},
+                "verify_fallbacks": 0,
+                "verify_last_fallbacks": {}
+              }
+            }
+          },
+          "cache_parity": [
+            {
+              "conv": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              },
+              "layer": 0,
+              "recurrent": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              }
+            },
+            {
+              "conv": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              },
+              "layer": 1,
+              "recurrent": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              }
+            },
+            {
+              "conv": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              },
+              "layer": 2,
+              "recurrent": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              }
+            },
+            {
+              "conv": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              },
+              "layer": 4,
+              "recurrent": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              }
+            },
+            {
+              "conv": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              },
+              "layer": 5,
+              "recurrent": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              }
+            },
+            {
+              "conv": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              },
+              "layer": 6,
+              "recurrent": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              }
+            },
+            {
+              "conv": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              },
+              "layer": 8,
+              "recurrent": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              }
+            },
+            {
+              "conv": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              },
+              "layer": 9,
+              "recurrent": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              }
+            },
+            {
+              "conv": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              },
+              "layer": 10,
+              "recurrent": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              }
+            },
+            {
+              "conv": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              },
+              "layer": 12,
+              "recurrent": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              }
+            },
+            {
+              "conv": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              },
+              "layer": 13,
+              "recurrent": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              }
+            },
+            {
+              "conv": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              },
+              "layer": 14,
+              "recurrent": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              }
+            },
+            {
+              "conv": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              },
+              "layer": 16,
+              "recurrent": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              }
+            },
+            {
+              "conv": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              },
+              "layer": 17,
+              "recurrent": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              }
+            },
+            {
+              "conv": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              },
+              "layer": 18,
+              "recurrent": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              }
+            },
+            {
+              "conv": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              },
+              "layer": 20,
+              "recurrent": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              }
+            },
+            {
+              "conv": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              },
+              "layer": 21,
+              "recurrent": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              }
+            },
+            {
+              "conv": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              },
+              "layer": 22,
+              "recurrent": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              }
+            },
+            {
+              "conv": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              },
+              "layer": 24,
+              "recurrent": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              }
+            },
+            {
+              "conv": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              },
+              "layer": 25,
+              "recurrent": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              }
+            },
+            {
+              "conv": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              },
+              "layer": 26,
+              "recurrent": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              }
+            },
+            {
+              "conv": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              },
+              "layer": 28,
+              "recurrent": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              }
+            },
+            {
+              "conv": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              },
+              "layer": 29,
+              "recurrent": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              }
+            },
+            {
+              "conv": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              },
+              "layer": 30,
+              "recurrent": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              }
+            },
+            {
+              "conv": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              },
+              "layer": 32,
+              "recurrent": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              }
+            },
+            {
+              "conv": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              },
+              "layer": 33,
+              "recurrent": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              }
+            },
+            {
+              "conv": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              },
+              "layer": 34,
+              "recurrent": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              }
+            },
+            {
+              "conv": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              },
+              "layer": 36,
+              "recurrent": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              }
+            },
+            {
+              "conv": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              },
+              "layer": 37,
+              "recurrent": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              }
+            },
+            {
+              "conv": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              },
+              "layer": 38,
+              "recurrent": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              }
+            },
+            {
+              "conv": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              },
+              "layer": 40,
+              "recurrent": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              }
+            },
+            {
+              "conv": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              },
+              "layer": 41,
+              "recurrent": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              }
+            },
+            {
+              "conv": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              },
+              "layer": 42,
+              "recurrent": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              }
+            },
+            {
+              "conv": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              },
+              "layer": 44,
+              "recurrent": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              }
+            },
+            {
+              "conv": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              },
+              "layer": 45,
+              "recurrent": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              }
+            },
+            {
+              "conv": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              },
+              "layer": 46,
+              "recurrent": {
+                "exact": true,
+                "finite": true,
+                "max_abs": 0.0
+              }
+            }
+          ],
+          "continuation_parity": {
+            "exact": true,
+            "finite": true,
+            "max_abs": 0.0
+          },
+          "order": [
+            "snapshots",
+            "compact"
+          ],
+          "prefill_parity": {
+            "exact": true,
+            "finite": true,
+            "max_abs": 0.0
+          },
+          "repetition": 0,
+          "same_continuation_argmax": true,
+          "verify_parity": {
+            "exact": true,
+            "finite": true,
+            "max_abs": 0.0
+          }
+        }
+      ],
+      "timing": {
+        "compact_median_ms": 40.634875,
+        "compact_verify_plus_rollback_median_ms": 41.7915,
+        "snapshot_median_ms": 43.866791,
+        "snapshot_verify_plus_rollback_median_ms": 44.448166,
+        "speedup": 1.0795355221346195,
+        "verify_plus_rollback_speedup": 1.0635695296890517
+      },
+      "width": 8
+    }
+  ],
+  "schema": "mlx2.qwen4-gdn-replay-model-qualification.v1",
+  "selected": true,
+  "source_hash": "db77dfe9ef364e0f6a51ff3a9a525037275de93b04633ae7da108b2a3c220bc5",
+  "started_at": 1789670063.1627688,
+  "status": "qualified_selected"
+}

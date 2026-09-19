@@ -1,0 +1,7 @@
+unit_tests: PASS
+hermes_client: PASS
+logprobs: PASS
+sampling_controls: PASS
+cold_text: PASS
+warm_prefix: PASS
+Evidence: ~/Desktop/mlx2/qualification/runs/qwen36-35b-a3b/overnight-campaign/artifacts/mtp2-serving-qualification.json

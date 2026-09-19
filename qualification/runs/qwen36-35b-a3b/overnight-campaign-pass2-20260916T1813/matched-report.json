@@ -1,0 +1,206 @@
+{
+  "artifacts": [
+    {
+      "passed": true,
+      "path": "~/Desktop/mlx2/qualification/runs/qwen36-35b-a3b/overnight-campaign/artifacts/fused-mtp-artifact-r1.json",
+      "schema": "mlx2.qwen36-fused-gdn-probe.v1",
+      "sha256": "656165442c20fa49ab11bdb42ba864160b58f17cf7fa66bcaf4fb65e949f26cb",
+      "summary": null
+    },
+    {
+      "passed": true,
+      "path": "~/Desktop/mlx2/qualification/runs/qwen36-35b-a3b/overnight-campaign/artifacts/fused-mtp-artifact-r2.json",
+      "schema": "mlx2.qwen36-fused-gdn-probe.v1",
+      "sha256": "6b327c28575a83b88be371b0c6e299a6f23ff7e6edde77d14a3b197861179813",
+      "summary": null
+    },
+    {
+      "passed": true,
+      "path": "~/Desktop/mlx2/qualification/runs/qwen36-35b-a3b/overnight-campaign/artifacts/fused-mtp-artifact-r3.json",
+      "schema": "mlx2.qwen36-fused-gdn-probe.v1",
+      "sha256": "957b97c2bc05a5477fc281c3efce7fb36b4a4557f847dcde2599685b98a5953d",
+      "summary": null
+    },
+    {
+      "passed": true,
+      "path": "~/Desktop/mlx2/qualification/runs/qwen36-35b-a3b/overnight-campaign/artifacts/fused-mtp-artifact-r4.json",
+      "schema": "mlx2.qwen36-fused-gdn-probe.v1",
+      "sha256": "0a315f257dcc87476573943f1b28f04cb6853272c9e2875d71d0f390521d4416",
+      "summary": null
+    },
+    {
+      "passed": true,
+      "path": "~/Desktop/mlx2/qualification/runs/qwen36-35b-a3b/overnight-campaign/artifacts/fused-mtp-artifact-r5.json",
+      "schema": "mlx2.qwen36-fused-gdn-probe.v1",
+      "sha256": "0cefc2f2d9927fd49d8fcd57fb51b1eb7e4bbc1dffedfdce7932615f274c5390",
+      "summary": null
+    },
+    {
+      "passed": true,
+      "path": "~/Desktop/mlx2/qualification/runs/qwen36-35b-a3b/overnight-campaign/artifacts/fused-ordinary-r1.json",
+      "schema": "mlx2.qwen36-fused-gdn-probe.v1",
+      "sha256": "9a644e2c1ca501b67356263fd87b66aa1fdeca9ac4f8d31daf7766ecd4fa12d6",
+      "summary": null
+    },
+    {
+      "passed": true,
+      "path": "~/Desktop/mlx2/qualification/runs/qwen36-35b-a3b/overnight-campaign/artifacts/fused-ordinary-r2.json",
+      "schema": "mlx2.qwen36-fused-gdn-probe.v1",
+      "sha256": "7fb02be49981f4e17afd362f7051ba5124951c60e518e65454e9ac5eaeffdec8",
+      "summary": null
+    },
+    {
+      "passed": true,
+      "path": "~/Desktop/mlx2/qualification/runs/qwen36-35b-a3b/overnight-campaign/artifacts/fused-ordinary-r3.json",
+      "schema": "mlx2.qwen36-fused-gdn-probe.v1",
+      "sha256": "4d4cf911e209de446ceae3b2fba1c5a2a76915e8737ae0382d7918ad5a0a79a9",
+      "summary": null
+    },
+    {
+      "passed": true,
+      "path": "~/Desktop/mlx2/qualification/runs/qwen36-35b-a3b/overnight-campaign/artifacts/fused-ordinary-r4.json",
+      "schema": "mlx2.qwen36-fused-gdn-probe.v1",
+      "sha256": "948f0cbf664025247ac6709559b5ab8661566e23a35c01f826e70e04be48e881",
+      "summary": null
+    },
+    {
+      "passed": true,
+      "path": "~/Desktop/mlx2/qualification/runs/qwen36-35b-a3b/overnight-campaign/artifacts/fused-ordinary-r5.json",
+      "schema": "mlx2.qwen36-fused-gdn-probe.v1",
+      "sha256": "ab3ca78218443b26862a20052216fa28e4b2af7f43c0f30dbd703cbf91f96ad5",
+      "summary": null
+    },
+    {
+      "passed": false,
+      "path": "~/Desktop/mlx2/qualification/runs/qwen36-35b-a3b/overnight-campaign/artifacts/mtp-artifact-ordinary-serving-qualification.json",
+      "schema": "mlx2.serving-qualification.v1",
+      "sha256": "55ba79f4760b941a83efd7f11e3c761976a795adf9ffc6842a2e8eab868e6113",
+      "summary": null
+    },
+    {
+      "passed": false,
+      "path": "~/Desktop/mlx2/qualification/runs/qwen36-35b-a3b/overnight-campaign/artifacts/mtp2-serving-qualification.json",
+      "schema": "mlx2.serving-qualification.v1",
+      "sha256": "7fec40294cc682165bb2a4326d9e4f8e63bbb9d7e69ba058e710e5cd916087fb",
+      "summary": null
+    },
+    {
+      "passed": false,
+      "path": "~/Desktop/mlx2/qualification/runs/qwen36-35b-a3b/overnight-campaign/artifacts/ordinary-serving-qualification.json",
+      "schema": "mlx2.serving-qualification.v1",
+      "sha256": "dc8ccdc896cea4a7dd73a064e4c4884f5f2ce4a52d980517b24d348b5d218223",
+      "summary": null
+    },
+    {
+      "passed": true,
+      "path": "~/Desktop/mlx2/qualification/runs/qwen36-35b-a3b/overnight-campaign/artifacts/preflight.json",
+      "schema": "mlx2.qualification-preflight.v1",
+      "sha256": "d60b46c995a08bb3f18494c5b069acec5be432fddfe3041c8efada4b5bc789fe",
+      "summary": null
+    }
+  ],
+  "generated_at": 1789597482.283377,
+  "identity": {
+    "artifacts": [
+      {
+        "device": 16777230,
+        "exists": true,
+        "fingerprint": "15e7f23c4309fd75fece9c665eec5b6174d88044c2e683fbd285c6690a325a25",
+        "inode": 8244785,
+        "metadata_sha256": {
+          "config.json": "cfb9d34208e818c1a2d66ec54132f624d6a2f13563cbee4059933339d07af080",
+          "generation_config.json": "9a0ac39c982ca7a67073948ab0a7ac4e52db932c983399a29e99a57182a42a3d",
+          "model.safetensors.index.json": "143b582771054c9645849143853139b49fe107149107a03cde515a33a10cb391",
+          "tokenizer.json": "87a7830d63fcf43bf241c3c5242e96e62dd3fdc29224ca26fed8ea333db72de4",
+          "tokenizer_config.json": "253684edcbcae5b893442b7de203b7d48230f6eea05de71f2d8e1a0575007528"
+        },
+        "mtime_ns": 1779318545780718594,
+        "path": "~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit"
+      },
+      {
+        "device": 16777230,
+        "exists": true,
+        "fingerprint": "922e0c47704e4081c0692843ecf75ce7a70408b50e5187f107dfb8e82ea0cb94",
+        "inode": 175257217,
+        "metadata_sha256": {
+          "config.json": "cb39a2ee10670cd7536cb2c629d60d41bf4857c5aa880213c17bbd2a06925fad",
+          "generation_config.json": "d403197d7feb1b2e2d78121fd438a9fdb50ce1b9ec421b023515bccd64d97c15",
+          "model.safetensors.index.json": "9c7922fe43b30715356465e7b04918646fbd73823431e41ae06427144a9400dd",
+          "tokenizer.json": "6f32ce20dc35f57a7f9ad1eac03525bd7d30f9df8cea6507e958279cc3657706",
+          "tokenizer_config.json": "b78d7687432566598b66847cae8b2d44bf06c733c42bdd10c2ac588e12e59983"
+        },
+        "mtime_ns": 1788468510326139378,
+        "path": "~/mlx-models/Qwen3.6-35B-A3B-uncensored-heretic-Native-MTP-Preserved-oQ4e-mtp"
+      }
+    ],
+    "git_head": "5fc4c28e181f2d9d9e0d9cbb4114eb3519197626",
+    "git_status": "M scripts/activate_qualification_arm.py\n M scripts/qualify_serving.py\n M scripts/run_qualification_matrix.py\n M src/mlx2/qualification.py\n M src/mlx2/runtime/hybrid_speculative.py\n M tests/test_qualification_matrix.py\n M tests/test_qualify_serving_receipts.py\n M tests/test_segmented_mtp.py\n?? qualification/policies/qwen36-mtp-artifact-ordinary.json\n?? qualification/policies/qwen36-mtp2.json\n?? qualification/policies/qwen36-ordinary.json\n?? qualification/qwen36-overnight-experiments.json\n?? qualification/runs/qwen36-35b-a3b/overnight-campaign-pass1-20260916T1754/\n?? qualification/runs/qwen36-35b-a3b/overnight-campaign/\n?? qualification/runs/qwen36-35b-a3b/remediation-active.json\n?? scripts/qwen36_http_qualification.py\n?? scripts/run_qwen36_overnight.py\n?? tests/test_activate_qualification_arm.py\n?? tests/test_qwen36_http_qualification.py\n?? tests/test_qwen36_overnight.py",
+    "harness_sha256": {
+      "activate_qualification_arm.py": "300896d844ee2207cf0d26e18b4b3d85ab694b40d03294800c007b4fa299911f",
+      "benchmark_serving.py": "5f182f728536bf85a4e24ca66ed5314fb650018d415df69e3478b654d114df49",
+      "qualify_serving.py": "668249d8c4a925566a53e6a2024c8bef6adf35c06387ac60b0dedef222fb3418",
+      "qwen36_fused_gdn_probe.py": "859f3e9faf697713fa39d1e43d4b7a5049fef7ce6e993fc512bc1d94436f1c1c",
+      "qwen36_http_qualification.py": "fa651bbaf9e1bb30aa97f5067ddfdd2411bb0ae15c832d5fa135d0783fc00027",
+      "run_qualification_matrix.py": "ad0afd378f2326010aaebf194954f6e1b228b2d4df8ffa30e10de1ee9e691341",
+      "run_qwen36_overnight.py": "1dbe9bdbc6b5ff193d417e493a362e8ff9bc13a8d94354841a7c0d82242ff8b4",
+      "thermal_probe.swift": "4f1cadeaa344082e231227f0c1e4b53f7f7fadf1a31858d7ecc0ec36ed3f284b"
+    },
+    "runtime_source_sha256": "4926889ed5eed25dd34606f49d09b13fd075c6b10cebed6c90991496d267685b",
+    "settings": {
+      "hard_deadline": "2026-09-17T08:00:00-04:00",
+      "manifest": "~/Desktop/mlx2/qualification/qwen36-overnight-experiments.json",
+      "manifest_sha256": "22d17a0cfaa0f7bae581c7acd71b4185f295dff8b29d52bd59da3520d55b517b",
+      "mtp_model": "~/mlx-models/Qwen3.6-35B-A3B-uncensored-heretic-Native-MTP-Preserved-oQ4e-mtp",
+      "ordinary_model": "~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit",
+      "policy_sha256": {
+        "qwen36-mtp-artifact-ordinary.json": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356",
+        "qwen36-mtp2.json": "e97da76c699622dd022f26f535ae733b30856b952d85263d0f7da951f87776a2",
+        "qwen36-ordinary.json": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356"
+      },
+      "python": ".venv/bin/python"
+    },
+    "sha256": "71f9f9effceaf2f5758bdfffef01587e0aa966cb82414e1560dfbc60ccb51c85"
+  },
+  "note": "Only passed, identity-bound source receipts are eligible for performance claims.",
+  "schema": "mlx2.qwen36-overnight-matched-report.v1",
+  "steps": {
+    "activation-cleanup": "passed",
+    "batch-20x20": "failed",
+    "closeout": "planned",
+    "context-ladder": "failed",
+    "fused-mtp-artifact-r1": "passed",
+    "fused-mtp-artifact-r2": "passed",
+    "fused-mtp-artifact-r3": "passed",
+    "fused-mtp-artifact-r4": "passed",
+    "fused-mtp-artifact-r5": "passed",
+    "fused-ordinary-r1": "passed",
+    "fused-ordinary-r2": "passed",
+    "fused-ordinary-r3": "passed",
+    "fused-ordinary-r4": "passed",
+    "fused-ordinary-r5": "passed",
+    "gpu-lease": "passed",
+    "matched-report": "planned",
+    "matrix-fail-soft": "passed",
+    "matrix-manifest": "passed",
+    "matrix-schedule": "passed",
+    "mtp-artifact-ordinary-b20-serving": "blocked",
+    "mtp-artifact-ordinary-serving": "failed",
+    "mtp2-b20-serving": "blocked",
+    "mtp2-serving": "failed",
+    "ordinary-b20-serving": "blocked",
+    "ordinary-serving": "failed",
+    "pld-b20-serving": "blocked",
+    "pld-prerequisite": "blocked",
+    "pld-serving": "blocked",
+    "policies": "passed",
+    "preflight-build": "passed",
+    "preflight-diff": "passed",
+    "preflight-focused": "passed",
+    "preflight-full": "passed",
+    "preflight-json": "passed",
+    "preflight-ports": "passed",
+    "preflight-ready": "passed",
+    "qualifier-contract": "passed",
+    "qualifier-http-coverage": "passed"
+  }
+}

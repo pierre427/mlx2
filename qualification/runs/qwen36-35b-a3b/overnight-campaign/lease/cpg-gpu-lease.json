@@ -1,0 +1,18 @@
+{
+  "campaign": "a7c8bc76c8e0462695fc182cf7cfb791",
+  "campaign_id": "a7c8bc76c8e0462695fc182cf7cfb791",
+  "expires_at": 1789662955,
+  "generation": 7,
+  "issued_at": 1789644656.384994,
+  "lease_id": "afae6deed32c47ae8da74a7fa69819c2",
+  "lease_seconds": 7200,
+  "mode": "exclusive",
+  "owner": "root",
+  "purpose": "Qwen3.6 35B-A3B overnight qualification",
+  "release_generation": 8,
+  "released_at": 1789661649.633781,
+  "renewed_at": 1789649522.436998,
+  "resource_key": "gpu",
+  "session_id": "59278a7e67bf4ff787598cbc40d40b4f",
+  "status": "released"
+}

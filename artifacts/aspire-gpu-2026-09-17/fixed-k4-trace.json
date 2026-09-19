@@ -1,0 +1,28 @@
+{
+  "schema": "mlx2.async-mtp-observed-trace.v1",
+  "scope": "post-verification host-visible proposal outcomes",
+  "started_at_ns": 1789665343303249000,
+  "finished_at_ns": 1789665343420428000,
+  "argv": [
+    "--model",
+    "~/mlx-models/Qwen3.6-35B-A3B-uncensored-heretic-Native-MTP-Preserved-oQ4e-mtp",
+    "--host",
+    "127.0.0.1",
+    "--port",
+    "8297",
+    "--execution-policy",
+    "artifacts/aspire-gpu-2026-09-17/policy-k4.json",
+    "--max-context",
+    "32768",
+    "--max-lanes",
+    "4",
+    "--max-inflight",
+    "8",
+    "--cache-bytes",
+    "12884901888",
+    "--cache-dir",
+    "~/Library/Caches/mlx2/aspire-fixed-k4-2026-09-17",
+    "--qualification-mode"
+  ],
+  "records": []
+}

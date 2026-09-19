@@ -1,0 +1,202 @@
+import json
+import pytest
+
+from mlx2.output import OutputParser
+from mlx2.runtime.tool_parsers.qwen3_coder import parse_tool_call
+from mlx2.memory import available_execution_bytes
+
+
+def test_reasoning_markers_at_every_chunk_boundary():
+    text = "<think>reason</think>answer"
+    for split in range(len(text) + 1):
+        parser = OutputParser(chat=True)
+        events = parser.push(text[:split]) + parser.push(text[split:], final=True)
+        assert "".join(e.get("reasoning_content", "") for e in events) == "reason"
+        assert "".join(e.get("content", "") for e in events) == "answer"
+
+
+def test_stop_at_every_chunk_boundary():
+    text = "hello STOP hidden"
+    for split in range(len(text) + 1):
+        parser = OutputParser(stops=["STOP"])
+        events = parser.push(text[:split]) + parser.push(text[split:], final=True)
+        assert "".join(e.get("content", "") for e in events) == "hello "
+        assert parser.stopped
+        assert parser.stop_sequence == "STOP"
+
+
+def test_tool_call_at_every_boundary():
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "sum",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"x": {"type": "integer"}},
+                },
+            },
+        }
+    ]
+    text = (
+        "<tool_call><function=sum><parameter=x>123</parameter></function></tool_call>"
+    )
+    for split in range(len(text) + 1):
+        parser = OutputParser(chat=True, tools=tools, parse_tool=parse_tool_call)
+        events = parser.push(text[:split]) + parser.push(text[split:], final=True)
+        calls = [c for e in events for c in e.get("tool_calls", [])]
+        assert len(calls) == 1
+        assert json.loads(calls[0]["function"]["arguments"]) == {"x": 123}
+
+
+def test_unfinished_tool_falls_back_to_content_when_unconstrained():
+    parser = OutputParser(
+        chat=True, tools=[{}], parse_tool=parse_tool_call,
+        tolerant_tool_markers=True,
+    )
+    assert parser.push("<tool_call><function=sum>", final=True) == [
+        {"content": "<tool_call><function=sum>"}
+    ]
+    assert parser.tool_call_parse_fallbacks == 1
+
+
+def test_footprint_is_admission_floor():
+    assert (
+        available_execution_bytes(
+            available=80, recommended=100, active=20, cached=10, footprint=90
+        )
+        == 10
+    )
+    assert (
+        available_execution_bytes(
+            available=80, recommended=100, active=20, cached=10, footprint=None
+        )
+        == 0
+    )
+
+
+def test_client_stop_inside_tool_call_is_a_stop_not_a_server_error():
+    tools = [{"type": "function", "function": {"name": "sum", "parameters": {}}}]
+    parser = OutputParser(
+        chat=True, tools=tools, parse_tool=parse_tool_call, stops=["\n\n"]
+    )
+    events = parser.push("<tool_call><function=sum>\n\n<parameter=x>1")
+    assert parser.stopped
+    assert events == []
+    assert parser.tool_count == 0
+    # Further pushes are inert once stopped.
+    assert parser.push("</parameter></function></tool_call>", final=True) == []
+
+
+def test_model_truncated_tool_call_still_fails_closed_without_a_stop():
+    parser = OutputParser(
+        chat=True, tools=[{}], parse_tool=parse_tool_call, stops=["\n\n"],
+        constrained_tools=True,
+    )
+    with pytest.raises(ValueError, match="incomplete"):
+        parser.push("<tool_call><function=sum>", final=True)
+
+
+def test_tool_markers_inside_reasoning_are_never_executable():
+    tools = [{"type": "function", "function": {"name": "sum", "parameters": {}}}]
+    text = (
+        "<think>consider <tool_call><function=sum></function></tool_call> carefully"
+        "</think>answer"
+    )
+    for split in range(len(text) + 1):
+        parser = OutputParser(
+            chat=True, thinking=True, tools=tools, parse_tool=parse_tool_call,
+            tolerant_tool_markers=True,
+        )
+        events = parser.push(text[:split]) + parser.push(text[split:], final=True)
+        assert not any(event.get("tool_calls") for event in events)
+        reasoning = "".join(event.get("reasoning_content", "") for event in events)
+        assert "<tool_call>" in reasoning and "<function=sum>" in reasoning
+        assert "".join(event.get("content", "") for event in events) == "answer"
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "<function=missing></function>",
+        "not a function",
+        "<function=sum><parameter=x>bad",
+    ],
+)
+def test_malformed_or_undeclared_tool_blocks_fall_back_as_raw_content(body):
+    tools = [{"type": "function", "function": {"name": "sum", "parameters": {}}}]
+    parser = OutputParser(
+        chat=True, tools=tools, parse_tool=parse_tool_call,
+        tolerant_tool_markers=True,
+    )
+    raw = f"<tool_call>{body}</tool_call>"
+    assert parser.push(raw, final=True) == [{"content": raw}]
+    assert parser.tool_call_parse_fallbacks == 1
+
+
+def test_constrained_tool_parse_failure_stays_fail_closed():
+    tools = [{"type": "function", "function": {"name": "sum", "parameters": {}}}]
+    parser = OutputParser(
+        chat=True,
+        tools=tools,
+        parse_tool=parse_tool_call,
+        constrained_tools=True,
+    )
+    with pytest.raises(ValueError, match="undeclared"):
+        parser.push(
+            "<tool_call><function=missing></function></tool_call>", final=True
+        )
+
+
+def test_parallel_tool_calls_false_rejects_a_second_auto_call():
+    tools = [
+        {"type": "function", "function": {"name": name, "parameters": {}}}
+        for name in ("one", "two")
+    ]
+    parser = OutputParser(
+        chat=True,
+        tools=tools,
+        parse_tool=parse_tool_call,
+        parallel_tool_calls=False,
+    )
+    first = "<tool_call><function=one></function></tool_call>"
+    second = "<tool_call><function=two></function></tool_call>"
+    assert parser.push(first)[0]["tool_calls"][0]["function"]["name"] == "one"
+    with pytest.raises(ValueError, match="at most one") as caught:
+        parser.push(second, final=True)
+    assert getattr(caught.value, "tool_call_constraint_error", False)
+
+
+def test_qwen_tool_argument_types_resolve_local_schema_refs():
+    tools = [{
+        "type": "function",
+        "function": {
+            "name": "sum",
+            "parameters": {
+                "$defs": {"count": {"type": "integer"}},
+                "type": "object",
+                "properties": {"x": {"$ref": "#/$defs/count"}},
+            },
+        },
+    }]
+    call = parse_tool_call(
+        "<function=sum><parameter=x>123</parameter></function>", tools
+    )
+    assert call == {"name": "sum", "arguments": {"x": 123}}
+
+
+def test_qwen_non_strict_recursive_ref_keeps_legacy_raw_argument_fallback():
+    tools = [{
+        "type": "function",
+        "function": {
+            "name": "sum",
+            "parameters": {
+                "$defs": {"loop": {"$ref": "#/$defs/loop"}},
+                "type": "object",
+                "properties": {"x": {"$ref": "#/$defs/loop"}},
+            },
+        },
+    }]
+    assert parse_tool_call(
+        "<function=sum><parameter=x>123</parameter></function>", tools
+    ) == {"name": "sum", "arguments": {"x": "123"}}

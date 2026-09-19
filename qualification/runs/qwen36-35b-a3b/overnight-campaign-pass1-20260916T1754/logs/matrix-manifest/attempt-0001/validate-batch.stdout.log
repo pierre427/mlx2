@@ -1,0 +1,607 @@
+{
+  "manifest_sha256": "4e20ce095e4f1eb36c647b816d18f74abd878a75a486eca9666a801c949b4c20",
+  "suite": "batch_stress",
+  "cells": [
+    {
+      "suite": "batch_stress",
+      "model": "qwen36-35b-a3b",
+      "arm": "ordinary",
+      "run": 0,
+      "requested_width": 20,
+      "arm_order_claim": "alternating",
+      "semantics": "20 rounds x 20 simultaneous requests per arm",
+      "cell_id": "aa56276ffde46dba8bbf3810822a143df08453d705daa8ad9774ad7a7a3c8af2"
+    },
+    {
+      "suite": "batch_stress",
+      "model": "qwen36-35b-a3b",
+      "arm": "ordinary",
+      "run": 1,
+      "requested_width": 20,
+      "arm_order_claim": "alternating",
+      "semantics": "20 rounds x 20 simultaneous requests per arm",
+      "cell_id": "4f4bcd5d40b731a7f80a636c991f41093b0a4a407b7279e953c114af9d249b99"
+    },
+    {
+      "suite": "batch_stress",
+      "model": "qwen36-35b-a3b",
+      "arm": "ordinary",
+      "run": 2,
+      "requested_width": 20,
+      "arm_order_claim": "alternating",
+      "semantics": "20 rounds x 20 simultaneous requests per arm",
+      "cell_id": "e8fd0a8df4b2180a80b39f9e375a932293cf23975751242e109f0e6fef7f42ad"
+    },
+    {
+      "suite": "batch_stress",
+      "model": "qwen36-35b-a3b",
+      "arm": "ordinary",
+      "run": 3,
+      "requested_width": 20,
+      "arm_order_claim": "alternating",
+      "semantics": "20 rounds x 20 simultaneous requests per arm",
+      "cell_id": "edd2c9e479f42f7377ce489f881086793d6346cf1f1ed30c577d5e3469b6187c"
+    },
+    {
+      "suite": "batch_stress",
+      "model": "qwen36-35b-a3b",
+      "arm": "ordinary",
+      "run": 4,
+      "requested_width": 20,
+      "arm_order_claim": "alternating",
+      "semantics": "20 rounds x 20 simultaneous requests per arm",
+      "cell_id": "64a5471f73693f63a5e9389bf6aea57ed21a612aec335a96550b45640e0fd1bc"
+    },
+    {
+      "suite": "batch_stress",
+      "model": "qwen36-35b-a3b",
+      "arm": "ordinary",
+      "run": 5,
+      "requested_width": 20,
+      "arm_order_claim": "alternating",
+      "semantics": "20 rounds x 20 simultaneous requests per arm",
+      "cell_id": "da520b79570064c8646bb1c36cf2560b2dd577d8137ac1bf365990e2d0cab7e0"
+    },
+    {
+      "suite": "batch_stress",
+      "model": "qwen36-35b-a3b",
+      "arm": "ordinary",
+      "run": 6,
+      "requested_width": 20,
+      "arm_order_claim": "alternating",
+      "semantics": "20 rounds x 20 simultaneous requests per arm",
+      "cell_id": "7a35768bb9542e896d7b89848a9b4c9f5a4819dd0b0b48be3d2f7f4d5da6adfe"
+    },
+    {
+      "suite": "batch_stress",
+      "model": "qwen36-35b-a3b",
+      "arm": "ordinary",
+      "run": 7,
+      "requested_width": 20,
+      "arm_order_claim": "alternating",
+      "semantics": "20 rounds x 20 simultaneous requests per arm",
+      "cell_id": "af2689940ab91522873ada2de78ea098a7b8cb9748464c731d03f29a25dae60d"
+    },
+    {
+      "suite": "batch_stress",
+      "model": "qwen36-35b-a3b",
+      "arm": "ordinary",
+      "run": 8,
+      "requested_width": 20,
+      "arm_order_claim": "alternating",
+      "semantics": "20 rounds x 20 simultaneous requests per arm",
+      "cell_id": "a3d9b6bd229a7acfdd416e11dce2b64f8f0fbe571b70cc41ffd04fa6ab545108"
+    },
+    {
+      "suite": "batch_stress",
+      "model": "qwen36-35b-a3b",
+      "arm": "ordinary",
+      "run": 9,
+      "requested_width": 20,
+      "arm_order_claim": "alternating",
+      "semantics": "20 rounds x 20 simultaneous requests per arm",
+      "cell_id": "c768843a7ddf3de1cea2e2a86db0c4e9b9ca5119b05a0c84fe2631e12a92467f"
+    },
+    {
+      "suite": "batch_stress",
+      "model": "qwen36-35b-a3b",
+      "arm": "ordinary",
+      "run": 10,
+      "requested_width": 20,
+      "arm_order_claim": "alternating",
+      "semantics": "20 rounds x 20 simultaneous requests per arm",
+      "cell_id": "26cc0114bd17dcdf5b7aacaf75d1ef33a80b8e05184bfaafd72dbb0c5efc258c"
+    },
+    {
+      "suite": "batch_stress",
+      "model": "qwen36-35b-a3b",
+      "arm": "ordinary",
+      "run": 11,
+      "requested_width": 20,
+      "arm_order_claim": "alternating",
+      "semantics": "20 rounds x 20 simultaneous requests per arm",
+      "cell_id": "7a61a33fbdf233df6d1896eb8b502079879f66597c99047d41dc93e6627b0672"
+    },
+    {
+      "suite": "batch_stress",
+      "model": "qwen36-35b-a3b",
+      "arm": "ordinary",
+      "run": 12,
+      "requested_width": 20,
+      "arm_order_claim": "alternating",
+      "semantics": "20 rounds x 20 simultaneous requests per arm",
+      "cell_id": "f5db216fb41afc1169855132f58fa8a0d38ba5c6632fe674e13d89ce52b9a7ed"
+    },
+    {
+      "suite": "batch_stress",
+      "model": "qwen36-35b-a3b",
+      "arm": "ordinary",
+      "run": 13,
+      "requested_width": 20,
+      "arm_order_claim": "alternating",
+      "semantics": "20 rounds x 20 simultaneous requests per arm",
+      "cell_id": "f3df7c207d1347fb14cd9cfe47a8eeefbdea8d69528ac6c330e30134b2f062a9"
+    },
+    {
+      "suite": "batch_stress",
+      "model": "qwen36-35b-a3b",
+      "arm": "ordinary",
+      "run": 14,
+      "requested_width": 20,
+      "arm_order_claim": "alternating",
+      "semantics": "20 rounds x 20 simultaneous requests per arm",
+      "cell_id": "1751e0a9fb4252c1dcfe13f1ff124de1b80bdc90ea98e538bdaaaec3418ce290"
+    },
+    {
+      "suite": "batch_stress",
+      "model": "qwen36-35b-a3b",
+      "arm": "ordinary",
+      "run": 15,
+      "requested_width": 20,
+      "arm_order_claim": "alternating",
+      "semantics": "20 rounds x 20 simultaneous requests per arm",
+      "cell_id": "dfe4ad00cf497178417a587024f4b18bd52a066641484705e967539d85ccc7a8"
+    },
+    {
+      "suite": "batch_stress",
+      "model": "qwen36-35b-a3b",
+      "arm": "ordinary",
+      "run": 16,
+      "requested_width": 20,
+      "arm_order_claim": "alternating",
+      "semantics": "20 rounds x 20 simultaneous requests per arm",
+      "cell_id": "6cc6bb160307c64b8f98c4330616f522c3d5e3a4f99fdbe1fda712e135395fd7"
+    },
+    {
+      "suite": "batch_stress",
+      "model": "qwen36-35b-a3b",
+      "arm": "ordinary",
+      "run": 17,
+      "requested_width": 20,
+      "arm_order_claim": "alternating",
+      "semantics": "20 rounds x 20 simultaneous requests per arm",
+      "cell_id": "85620a4d46fde3efc1e848a5de7c8bda2087f72134fb0f1974fff95b08177223"
+    },
+    {
+      "suite": "batch_stress",
+      "model": "qwen36-35b-a3b",
+      "arm": "ordinary",
+      "run": 18,
+      "requested_width": 20,
+      "arm_order_claim": "alternating",
+      "semantics": "20 rounds x 20 simultaneous requests per arm",
+      "cell_id": "67283fa315a1b7734adb5d51ffa17cf0d08568db60f426db14c5f1f64a7ed499"
+    },
+    {
+      "suite": "batch_stress",
+      "model": "qwen36-35b-a3b",
+      "arm": "ordinary",
+      "run": 19,
+      "requested_width": 20,
+      "arm_order_claim": "alternating",
+      "semantics": "20 rounds x 20 simultaneous requests per arm",
+      "cell_id": "e7a250e0da52b09f98ed111921d4fbeeca095828486e7ff204309300ca45bd84"
+    },
+    {
+      "suite": "batch_stress",
+      "model": "qwen36-35b-a3b",
+      "arm": "mtp-artifact-ordinary",
+      "run": 0,
+      "requested_width": 20,
+      "arm_order_claim": "alternating",
+      "semantics": "20 rounds x 20 simultaneous requests per arm",
+      "cell_id": "79db0b069fd851c1bfc9bce37e1614d197c1bc479a2ef6a1b0b4eb0b3cd2d0e3"
+    },
+    {
+      "suite": "batch_stress",
+      "model": "qwen36-35b-a3b",
+      "arm": "mtp-artifact-ordinary",
+      "run": 1,
+      "requested_width": 20,
+      "arm_order_claim": "alternating",
+      "semantics": "20 rounds x 20 simultaneous requests per arm",
+      "cell_id": "fe9d373c3e8222eec93f8a39a2cbef592d4176bb3b2d38b1b27a709ac275ae38"
+    },
+    {
+      "suite": "batch_stress",
+      "model": "qwen36-35b-a3b",
+      "arm": "mtp-artifact-ordinary",
+      "run": 2,
+      "requested_width": 20,
+      "arm_order_claim": "alternating",
+      "semantics": "20 rounds x 20 simultaneous requests per arm",
+      "cell_id": "239e4b97af378d573500cd87ecba92737c3bf04cc5918b6ce05451b4ec866781"
+    },
+    {
+      "suite": "batch_stress",
+      "model": "qwen36-35b-a3b",
+      "arm": "mtp-artifact-ordinary",
+      "run": 3,
+      "requested_width": 20,
+      "arm_order_claim": "alternating",
+      "semantics": "20 rounds x 20 simultaneous requests per arm",
+      "cell_id": "4e69fc1c9052e155060c1a79c654b7ba136b7f7440f5c197c5528f9ff810179c"
+    },
+    {
+      "suite": "batch_stress",
+      "model": "qwen36-35b-a3b",
+      "arm": "mtp-artifact-ordinary",
+      "run": 4,
+      "requested_width": 20,
+      "arm_order_claim": "alternating",
+      "semantics": "20 rounds x 20 simultaneous requests per arm",
+      "cell_id": "c9ad1c01980973ec251247f95dc958ebbe75394b9a7d8c23fe85e9863d882bd2"
+    },
+    {
+      "suite": "batch_stress",
+      "model": "qwen36-35b-a3b",
+      "arm": "mtp-artifact-ordinary",
+      "run": 5,
+      "requested_width": 20,
+      "arm_order_claim": "alternating",
+      "semantics": "20 rounds x 20 simultaneous requests per arm",
+      "cell_id": "b0ac6211707a2d69f4ea9b0af58e6a4d44bbab0297716001eb6978b6130c0edb"
+    },
+    {
+      "suite": "batch_stress",
+      "model": "qwen36-35b-a3b",
+      "arm": "mtp-artifact-ordinary",
+      "run": 6,
+      "requested_width": 20,
+      "arm_order_claim": "alternating",
+      "semantics": "20 rounds x 20 simultaneous requests per arm",
+      "cell_id": "4188c212ec63c3827450e15e9372ab3f22c9d37e442530d588992c4dbebc4bea"
+    },
+    {
+      "suite": "batch_stress",
+      "model": "qwen36-35b-a3b",
+      "arm": "mtp-artifact-ordinary",
+      "run": 7,
+      "requested_width": 20,
+      "arm_order_claim": "alternating",
+      "semantics": "20 rounds x 20 simultaneous requests per arm",
+      "cell_id": "4ff64c8fb846ccdea64afd945b7c37a16400e28c7801bd0b67b0b26797e01506"
+    },
+    {
+      "suite": "batch_stress",
+      "model": "qwen36-35b-a3b",
+      "arm": "mtp-artifact-ordinary",
+      "run": 8,
+      "requested_width": 20,
+      "arm_order_claim": "alternating",
+      "semantics": "20 rounds x 20 simultaneous requests per arm",
+      "cell_id": "280ab8c7bbafded6050fbb992a76d830fa14b190b9ca70e97709b1a592f28362"
+    },
+    {
+      "suite": "batch_stress",
+      "model": "qwen36-35b-a3b",
+      "arm": "mtp-artifact-ordinary",
+      "run": 9,
+      "requested_width": 20,
+      "arm_order_claim": "alternating",
+      "semantics": "20 rounds x 20 simultaneous requests per arm",
+      "cell_id": "a62ae0fc08a9382986cfa130507e69b7367f0d2c1df7e83a93e13bf123fab58e"
+    },
+    {
+      "suite": "batch_stress",
+      "model": "qwen36-35b-a3b",
+      "arm": "mtp-artifact-ordinary",
+      "run": 10,
+      "requested_width": 20,
+      "arm_order_claim": "alternating",
+      "semantics": "20 rounds x 20 simultaneous requests per arm",
+      "cell_id": "c39958ccc5f7323ffcfb2c71eeb2dcafc33bea843e41f1ce969cda8cf44f3c0a"
+    },
+    {
+      "suite": "batch_stress",
+      "model": "qwen36-35b-a3b",
+      "arm": "mtp-artifact-ordinary",
+      "run": 11,
+      "requested_width": 20,
+      "arm_order_claim": "alternating",
+      "semantics": "20 rounds x 20 simultaneous requests per arm",
+      "cell_id": "2b4e71ac4dd683b63771979029b3bc947771f0075341768e1d133b89e6160942"
+    },
+    {
+      "suite": "batch_stress",
+      "model": "qwen36-35b-a3b",
+      "arm": "mtp-artifact-ordinary",
+      "run": 12,
+      "requested_width": 20,
+      "arm_order_claim": "alternating",
+      "semantics": "20 rounds x 20 simultaneous requests per arm",
+      "cell_id": "cdb9a00911fdecab5b822582bd843a7e1646d239a17bc284416689723d43f12e"
+    },
+    {
+      "suite": "batch_stress",
+      "model": "qwen36-35b-a3b",
+      "arm": "mtp-artifact-ordinary",
+      "run": 13,
+      "requested_width": 20,
+      "arm_order_claim": "alternating",
+      "semantics": "20 rounds x 20 simultaneous requests per arm",
+      "cell_id": "48cab1f24cd92bc221327d9984f92d6b8c9bd56ef63f21673106dfe7cf85f675"
+    },
+    {
+      "suite": "batch_stress",
+      "model": "qwen36-35b-a3b",
+      "arm": "mtp-artifact-ordinary",
+      "run": 14,
+      "requested_width": 20,
+      "arm_order_claim": "alternating",
+      "semantics": "20 rounds x 20 simultaneous requests per arm",
+      "cell_id": "cc1d52e4b97490b0ef6440abb322ce680c1e9b4fd935871ad1209c0645e34459"
+    },
+    {
+      "suite": "batch_stress",
+      "model": "qwen36-35b-a3b",
+      "arm": "mtp-artifact-ordinary",
+      "run": 15,
+      "requested_width": 20,
+      "arm_order_claim": "alternating",
+      "semantics": "20 rounds x 20 simultaneous requests per arm",
+      "cell_id": "bb8b9a255223466862fd3cb2ae57dfbb6b2c3b63fc3359ad277c2e476973b3dc"
+    },
+    {
+      "suite": "batch_stress",
+      "model": "qwen36-35b-a3b",
+      "arm": "mtp-artifact-ordinary",
+      "run": 16,
+      "requested_width": 20,
+      "arm_order_claim": "alternating",
+      "semantics": "20 rounds x 20 simultaneous requests per arm",
+      "cell_id": "c2204fe19e1ca49b125347a788ca067f90db4fe556a0f1bdd9650843ed4863f2"
+    },
+    {
+      "suite": "batch_stress",
+      "model": "qwen36-35b-a3b",
+      "arm": "mtp-artifact-ordinary",
+      "run": 17,
+      "requested_width": 20,
+      "arm_order_claim": "alternating",
+      "semantics": "20 rounds x 20 simultaneous requests per arm",
+      "cell_id": "32d2606d8ef2bd969592746f49a5ac7c8be27a39045ac6e1ec99a43a83ebcea9"
+    },
+    {
+      "suite": "batch_stress",
+      "model": "qwen36-35b-a3b",
+      "arm": "mtp-artifact-ordinary",
+      "run": 18,
+      "requested_width": 20,
+      "arm_order_claim": "alternating",
+      "semantics": "20 rounds x 20 simultaneous requests per arm",
+      "cell_id": "b527a1555eb56ddbd34259eb545b47307b13d9680a72068d1306fd3993917620"
+    },
+    {
+      "suite": "batch_stress",
+      "model": "qwen36-35b-a3b",
+      "arm": "mtp-artifact-ordinary",
+      "run": 19,
+      "requested_width": 20,
+      "arm_order_claim": "alternating",
+      "semantics": "20 rounds x 20 simultaneous requests per arm",
+      "cell_id": "e192955cdf41dc943b6517ad6643ea1ba4269b9ead9cba82c33bc1ba7de53cc3"
+    },
+    {
+      "suite": "batch_stress",
+      "model": "qwen36-35b-a3b",
+      "arm": "mtp2",
+      "run": 0,
+      "requested_width": 20,
+      "arm_order_claim": "alternating",
+      "semantics": "20 rounds x 20 simultaneous requests per arm",
+      "cell_id": "0e7e3e7a0c51a8a2a45e69d7d3738551f7fbb4862457880ea2e710e2b36c0577"
+    },
+    {
+      "suite": "batch_stress",
+      "model": "qwen36-35b-a3b",
+      "arm": "mtp2",
+      "run": 1,
+      "requested_width": 20,
+      "arm_order_claim": "alternating",
+      "semantics": "20 rounds x 20 simultaneous requests per arm",
+      "cell_id": "ec41d1cde91b7ace2418287f4a49c5ee552fb5a1b6387f421bedb34f93399eb5"
+    },
+    {
+      "suite": "batch_stress",
+      "model": "qwen36-35b-a3b",
+      "arm": "mtp2",
+      "run": 2,
+      "requested_width": 20,
+      "arm_order_claim": "alternating",
+      "semantics": "20 rounds x 20 simultaneous requests per arm",
+      "cell_id": "84d8205645ad9f2c71cee9b5dcb0666c02fafeeca5185ad57721137f251e6818"
+    },
+    {
+      "suite": "batch_stress",
+      "model": "qwen36-35b-a3b",
+      "arm": "mtp2",
+      "run": 3,
+      "requested_width": 20,
+      "arm_order_claim": "alternating",
+      "semantics": "20 rounds x 20 simultaneous requests per arm",
+      "cell_id": "9b60dac680a92670bd1084468d8b094c76bf4003ae850265be9c57f7bf40f830"
+    },
+    {
+      "suite": "batch_stress",
+      "model": "qwen36-35b-a3b",
+      "arm": "mtp2",
+      "run": 4,
+      "requested_width": 20,
+      "arm_order_claim": "alternating",
+      "semantics": "20 rounds x 20 simultaneous requests per arm",
+      "cell_id": "f7046d14e1896391ec3ac6419e431ee098a997330274fc687494c82d4ef6a5f7"
+    },
+    {
+      "suite": "batch_stress",
+      "model": "qwen36-35b-a3b",
+      "arm": "mtp2",
+      "run": 5,
+      "requested_width": 20,
+      "arm_order_claim": "alternating",
+      "semantics": "20 rounds x 20 simultaneous requests per arm",
+      "cell_id": "662730f746f290d14af770c1d5f64499e52f132194816a0b5d747271751ef2c4"
+    },
+    {
+      "suite": "batch_stress",
+      "model": "qwen36-35b-a3b",
+      "arm": "mtp2",
+      "run": 6,
+      "requested_width": 20,
+      "arm_order_claim": "alternating",
+      "semantics": "20 rounds x 20 simultaneous requests per arm",
+      "cell_id": "a51f00d75cea0a36252ee3ed2948d76dbc77251c6502d9bb2d3b413d819386fb"
+    },
+    {
+      "suite": "batch_stress",
+      "model": "qwen36-35b-a3b",
+      "arm": "mtp2",
+      "run": 7,
+      "requested_width": 20,
+      "arm_order_claim": "alternating",
+      "semantics": "20 rounds x 20 simultaneous requests per arm",
+      "cell_id": "665c98b3d1603bb7c8f7441ea22db4ddbc39b99ea18debbfdb458500c1b084b7"
+    },
+    {
+      "suite": "batch_stress",
+      "model": "qwen36-35b-a3b",
+      "arm": "mtp2",
+      "run": 8,
+      "requested_width": 20,
+      "arm_order_claim": "alternating",
+      "semantics": "20 rounds x 20 simultaneous requests per arm",
+      "cell_id": "6ae4cf58c1d49c640a47f7c3fd3eb28ef892521d7fc5bc0c777cce446f564643"
+    },
+    {
+      "suite": "batch_stress",
+      "model": "qwen36-35b-a3b",
+      "arm": "mtp2",
+      "run": 9,
+      "requested_width": 20,
+      "arm_order_claim": "alternating",
+      "semantics": "20 rounds x 20 simultaneous requests per arm",
+      "cell_id": "8d21df75c401781ef15db3869a8bc72969377c09ee92947ee1a2be1a44b65333"
+    },
+    {
+      "suite": "batch_stress",
+      "model": "qwen36-35b-a3b",
+      "arm": "mtp2",
+      "run": 10,
+      "requested_width": 20,
+      "arm_order_claim": "alternating",
+      "semantics": "20 rounds x 20 simultaneous requests per arm",
+      "cell_id": "73e0d8c8a4311b7e3057b7d571cd3cc901093f803c28daba84fee4b73e8bae95"
+    },
+    {
+      "suite": "batch_stress",
+      "model": "qwen36-35b-a3b",
+      "arm": "mtp2",
+      "run": 11,
+      "requested_width": 20,
+      "arm_order_claim": "alternating",
+      "semantics": "20 rounds x 20 simultaneous requests per arm",
+      "cell_id": "fdcd9a2be9c7c6771604631de648147e88711da265829c99ba0f3763606c06d6"
+    },
+    {
+      "suite": "batch_stress",
+      "model": "qwen36-35b-a3b",
+      "arm": "mtp2",
+      "run": 12,
+      "requested_width": 20,
+      "arm_order_claim": "alternating",
+      "semantics": "20 rounds x 20 simultaneous requests per arm",
+      "cell_id": "3d8581b96476aa3eafeec1bd55f9092ddf36f4fc32c032f481a90004f1150a32"
+    },
+    {
+      "suite": "batch_stress",
+      "model": "qwen36-35b-a3b",
+      "arm": "mtp2",
+      "run": 13,
+      "requested_width": 20,
+      "arm_order_claim": "alternating",
+      "semantics": "20 rounds x 20 simultaneous requests per arm",
+      "cell_id": "5818ed14aa5f99aebab487e21d9a16262376a1990a42b98f47b055d8ff882221"
+    },
+    {
+      "suite": "batch_stress",
+      "model": "qwen36-35b-a3b",
+      "arm": "mtp2",
+      "run": 14,
+      "requested_width": 20,
+      "arm_order_claim": "alternating",
+      "semantics": "20 rounds x 20 simultaneous requests per arm",
+      "cell_id": "29475f87e910f55b8dcb1d8fa27330416c81832887a57863cac6030c41fb49ba"
+    },
+    {
+      "suite": "batch_stress",
+      "model": "qwen36-35b-a3b",
+      "arm": "mtp2",
+      "run": 15,
+      "requested_width": 20,
+      "arm_order_claim": "alternating",
+      "semantics": "20 rounds x 20 simultaneous requests per arm",
+      "cell_id": "a432285f7abfe453c0a05494adfbceb6e86319be0194b6647fb959e33e7cf65e"
+    },
+    {
+      "suite": "batch_stress",
+      "model": "qwen36-35b-a3b",
+      "arm": "mtp2",
+      "run": 16,
+      "requested_width": 20,
+      "arm_order_claim": "alternating",
+      "semantics": "20 rounds x 20 simultaneous requests per arm",
+      "cell_id": "c011c58802703d5142bbefc678725f23cd70bcdfdad519dbfa6aa730bee09810"
+    },
+    {
+      "suite": "batch_stress",
+      "model": "qwen36-35b-a3b",
+      "arm": "mtp2",
+      "run": 17,
+      "requested_width": 20,
+      "arm_order_claim": "alternating",
+      "semantics": "20 rounds x 20 simultaneous requests per arm",
+      "cell_id": "5982f90a4d20aea6f0ee8976700423a4b0f408fcd64c14aed60e4d14c97cff3c"
+    },
+    {
+      "suite": "batch_stress",
+      "model": "qwen36-35b-a3b",
+      "arm": "mtp2",
+      "run": 18,
+      "requested_width": 20,
+      "arm_order_claim": "alternating",
+      "semantics": "20 rounds x 20 simultaneous requests per arm",
+      "cell_id": "f3d0c503c7c76766003b271ae40dfdd526f5f4cfa82b0524ff02a13f3d8a00ef"
+    },
+    {
+      "suite": "batch_stress",
+      "model": "qwen36-35b-a3b",
+      "arm": "mtp2",
+      "run": 19,
+      "requested_width": 20,
+      "arm_order_claim": "alternating",
+      "semantics": "20 rounds x 20 simultaneous requests per arm",
+      "cell_id": "2a8a37d59f3d819e5fd63bd826436b9056912efccafaebe0b4120a1a9374e826"
+    }
+  ],
+  "cell_count": 60
+}

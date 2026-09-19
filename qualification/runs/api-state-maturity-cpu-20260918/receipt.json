@@ -1,0 +1,91 @@
+{
+  "schema": "mlx2.cpu-qualification.v1",
+  "scope": "openai-api-and-advanced-state-maturity",
+  "date": "2026-09-18",
+  "source_base": "9d1a0b1",
+  "branch": "codex/api-state-maturity",
+  "device_policy": "cpu-only",
+  "gpu_tests_run": false,
+  "implemented": {
+    "responses_api": {
+      "state": "implemented-cpu-qualified",
+      "surface": [
+        "stateless text input",
+        "instructions",
+        "typed text SSE with monotonic sequence numbers",
+        "nonstreaming function-call items",
+        "metadata",
+        "usage",
+        "strict text formats",
+        "route receipts"
+      ]
+    },
+    "function_tools": {
+      "state": "implemented-cpu-qualified",
+      "controls": [
+        "auto",
+        "none",
+        "required",
+        "named function",
+        "parallel_tool_calls=false",
+        "bounded strict JSON schema"
+      ],
+      "enforcement": "terminal validation fails closed with HTTP 502 before a nonstreaming success response"
+    },
+    "spomin_exact_shadow": {
+      "state": "implemented-cpu-qualified-tiny-model",
+      "behavior": "publish the exact full-prompt pre-surgery boundary to APCv2 while excluding compacted state and completion state from exact stores",
+      "repeat_prompt_evidence": "second identical tiny-model request restored all 12 committed prompt tokens and applied a fresh private surgery"
+    },
+    "approximate_kv": {
+      "state": "existing-implementation-requalified-cpu",
+      "operations": ["kv_q8", "kv_k8v4"],
+      "boundary": "no GPU or production-model route qualification claimed"
+    }
+  },
+  "unsupported_fail_closed": [
+    "stored or previous-response state",
+    "image, audio, and file input",
+    "hosted tools",
+    "streaming function tools",
+    "adapter or LoRA lifecycle",
+    "embeddings and reranking"
+  ],
+  "verification": [
+    {
+      "kind": "focused_pytest",
+      "collected": 201,
+      "result": "passed",
+      "files": [
+        "tests/test_serving_contract.py",
+        "tests/test_prometheus.py",
+        "tests/test_spomin_live_surgery.py",
+        "tests/test_spomin_standard_surgery.py",
+        "tests/test_approximate_kv_serving.py",
+        "tests/test_structured_output.py",
+        "tests/test_structured_automaton.py",
+        "tests/test_structured_bytes.py"
+      ]
+    },
+    {
+      "kind": "broad_pytest",
+      "collected": 1079,
+      "result": "passed on settled source with configured skips",
+      "note": "An earlier broad run observed one deferred-admission timeout-counter timing failure; the focused three-case test passed immediately and the complete suite then passed on the settled concurrent source."
+    },
+    {
+      "kind": "static",
+      "result": "passed",
+      "checks": [
+        "ruff F and E9 on changed Python files",
+        "compileall",
+        "git diff --check"
+      ]
+    }
+  ],
+  "standards_sources": [
+    "https://developers.openai.com/api/reference/resources/responses/methods/create",
+    "https://developers.openai.com/api/reference/resources/chat/methods/create",
+    "https://developers.openai.com/api/docs/guides/function-calling"
+  ]
+}

@@ -1,0 +1,18 @@
+[transformers] PyTorch was not found. Models won't be available and only tokenizers, configuration and file/data utilities can be used.
+2026-09-16 01:04:21,313 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 01:04:22,296 INFO ubc_evict: evicted 5090.2 MB from UBC for ~/mlx-models/Muse-Glimmer-30B-mlx-4bit/model-00001-of-00004.safetensors
+2026-09-16 01:04:22,316 INFO ubc_evict: evicted 5117.7 MB from UBC for ~/mlx-models/Muse-Glimmer-30B-mlx-4bit/model-00002-of-00004.safetensors
+2026-09-16 01:04:22,340 INFO ubc_evict: evicted 5111.0 MB from UBC for ~/mlx-models/Muse-Glimmer-30B-mlx-4bit/model-00003-of-00004.safetensors
+2026-09-16 01:04:22,356 INFO ubc_evict: evicted 5040.1 MB from UBC for ~/mlx-models/Muse-Glimmer-30B-mlx-4bit/model-00004-of-00004.safetensors
+2026-09-16 01:04:22,356 INFO ubc_evict: pass complete total_mb=20359.0 elapsed_s=0.08
+[transformers] You are using a model of type `muse_glimmer` to instantiate a model of type ``. This may be expected if you are loading a checkpoint that shares a subset of the architecture (e.g., loading a `sam2_video` checkpoint into `Sam2Model`), but is otherwise not supported and can yield errors. Please verify that the checkpoint is compatible with the model you are instantiating.
+2026-09-16 01:04:22,484 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 01:04:24,129 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 01:04:24,190 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 01:04:28,009 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 01:04:28,011 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 01:04:31,484 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 01:04:34,971 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 01:04:38,449 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 01:04:41,972 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 01:04:41,973 INFO "GET /v1/status HTTP/1.1" 200 -

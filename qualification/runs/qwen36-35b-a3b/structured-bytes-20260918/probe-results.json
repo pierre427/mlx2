@@ -1,0 +1,122 @@
+{
+  "grammar_requires_U+10FFFF": {
+    "ok": true,
+    "code": 200,
+    "content": "'=\\U0010ffff='",
+    "tokens": 7,
+    "receipt": {
+      "kind": "grammar",
+      "enforced": true,
+      "engine": "automaton",
+      "tail_mass_bound": 0.0,
+      "parallel_scans": 0,
+      "deferred": false,
+      "deferred_tokens": 0
+    },
+    "error": null,
+    "s": 2.01
+  },
+  "grammar_emoji_class": {
+    "ok": true,
+    "code": 200,
+    "content": "😊😊😊",
+    "receipt": {
+      "kind": "grammar",
+      "enforced": true,
+      "engine": "automaton",
+      "tail_mass_bound": 0.0,
+      "parallel_scans": 0,
+      "deferred": false,
+      "deferred_tokens": 0
+    },
+    "error": null,
+    "s": 0.11
+  },
+  "json_object_astral_greedy": {
+    "ok": true,
+    "code": 200,
+    "content": "{\n  \"symbol\": \"🜊\\u10FFFF\",\n  \"name\": \"vinegar\"\n}",
+    "receipt": {
+      "kind": "json_object",
+      "enforced": true,
+      "engine": "automaton",
+      "tail_mass_bound": 0.0,
+      "parallel_scans": 0,
+      "deferred": false,
+      "deferred_tokens": 0
+    },
+    "finish": "stop",
+    "error": null,
+    "s": 0.53
+  },
+  "json_object_astral_sampled": {
+    "ok": 4,
+    "outs": [
+      [
+        200,
+        "{\"mood\": \"😊\", \"rare\": \"🜲\"}",
+        0.0
+      ],
+      [
+        200,
+        "{\"mood\": \"😌\", \"rare\": \"🜲\"}",
+        0.0
+      ],
+      [
+        200,
+        "{\"mood\": \"😌\", \"rare\": \"🜲\"}",
+        0.0
+      ],
+      [
+        200,
+        "{\"mood\": \"😌\", \"rare\": \"🜲\"}",
+        0.0
+      ]
+    ]
+  },
+  "thinking_deferral_astral": {
+    "ok": true,
+    "code": 200,
+    "content": "\n\n{\"glyph\": \"🜲\"}",
+    "reasoning_chars": 1086,
+    "receipt": {
+      "kind": "json_object",
+      "enforced": true,
+      "engine": "automaton",
+      "tail_mass_bound": 0.0,
+      "parallel_scans": 0,
+      "deferred": true,
+      "deferred_tokens": 338
+    },
+    "finish": "stop",
+    "error": null,
+    "s": 2.95
+  },
+  "schema_control": {
+    "ok": false,
+    "code": 200,
+    "content": "{\n  \"city\": \"Paris\",\n  \"population\": 216100000000000000000000000000000000000000000",
+    "receipt": {
+      "kind": "json_schema",
+      "enforced": true,
+      "engine": "automaton",
+      "tail_mass_bound": 0.0,
+      "parallel_scans": 0,
+      "deferred": false,
+      "deferred_tokens": 0
+    },
+    "tok_per_s": 101.9
+  },
+  "server_alive_final": {
+    "ok": true,
+    "structured_output": {
+      "engines": [
+        "automaton",
+        "scanner"
+      ],
+      "thinking_deferral": true
+    },
+    "failures_delta": 0,
+    "completed_delta": 9
+  }
+}

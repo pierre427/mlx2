@@ -1,0 +1,6 @@
+Traceback (most recent call last):
+  File "/private/tmp/mlx2-flash-next-d529504e-20260916/qualify-serving-thermal-barrier.py", line 388, in <module>
+    main()
+  File "/private/tmp/mlx2-flash-next-d529504e-20260916/qualify-serving-thermal-barrier.py", line 349, in main
+    raise RuntimeError("deterministic private-delta preprobe did not engage")
+RuntimeError: deterministic private-delta preprobe did not engage

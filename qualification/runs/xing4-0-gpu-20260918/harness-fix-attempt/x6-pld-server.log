@@ -1,0 +1,35 @@
+2026-09-18 21:13:35,445 INFO ubc_evict: evicted 4068.1 MB from UBC for ~/mlx-models/Xing4.0-29B-A4B-mlx-6bit/model-00001-of-00006.safetensors
+2026-09-18 21:13:35,476 INFO ubc_evict: evicted 4048.2 MB from UBC for ~/mlx-models/Xing4.0-29B-A4B-mlx-6bit/model-00002-of-00006.safetensors
+2026-09-18 21:13:35,507 INFO ubc_evict: evicted 4048.2 MB from UBC for ~/mlx-models/Xing4.0-29B-A4B-mlx-6bit/model-00003-of-00006.safetensors
+2026-09-18 21:13:35,539 INFO ubc_evict: evicted 4048.2 MB from UBC for ~/mlx-models/Xing4.0-29B-A4B-mlx-6bit/model-00004-of-00006.safetensors
+2026-09-18 21:13:35,570 INFO ubc_evict: evicted 4048.2 MB from UBC for ~/mlx-models/Xing4.0-29B-A4B-mlx-6bit/model-00005-of-00006.safetensors
+2026-09-18 21:13:35,598 INFO ubc_evict: evicted 3464.2 MB from UBC for ~/mlx-models/Xing4.0-29B-A4B-mlx-6bit/model-00006-of-00006.safetensors
+2026-09-18 21:13:35,598 INFO ubc_evict: pass complete total_mb=23725.2 elapsed_s=0.18
+2026-09-18 21:13:36,437 INFO "GET /health HTTP/1.1" 503 -
+2026-09-18 21:13:39,448 INFO "GET /health HTTP/1.1" 200 -
+2026-09-18 21:13:39,450 INFO "GET /health HTTP/1.1" 200 -
+2026-09-18 21:13:39,521 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-18 21:13:39,886 ERROR generation worker failed
+Traceback (most recent call last):
+  File "/private/tmp/mlx2-xing/src/mlx2/serving.py", line 2582, in _run
+    prompts, responses = batch.next()
+                         ^^^^^^^^^^^^
+  File "/private/tmp/mlx2-xing/src/mlx2/runtime/pld.py", line 978, in next
+    self._round_batched(together)
+  File "/private/tmp/mlx2-xing/src/mlx2/runtime/pld.py", line 743, in _round_batched
+    logits = self.model(
+             ^^^^^^^^^^^
+  File "/private/tmp/mlx2-xing/src/mlx2/runtime/models/xing4_0.py", line 855, in __call__
+    return self.lm_head(self.model(inputs, cache, input_embeddings=input_embeddings))
+                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/private/tmp/mlx2-xing/src/mlx2/runtime/models/xing4_0.py", line 729, in __call__
+    fused = self._fused_trunk(streams, mask, cache)
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/private/tmp/mlx2-xing/src/mlx2/runtime/models/xing4_0.py", line 775, in _fused_trunk
+    a = layer.self_attn(x, mask, layer_cache)
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/private/tmp/mlx2-xing/src/mlx2/runtime/models/xing4_0.py", line 333, in __call__
+    raise NotImplementedError("Xing4.0 MLA does not support a quantized KV cache")
+NotImplementedError: Xing4.0 MLA does not support a quantized KV cache
+2026-09-18 21:13:39,892 INFO "POST /v1/chat/completions HTTP/1.1" 503 -
+NotImplementedError: Xing4.0 MLA does not support a quantized KV cache

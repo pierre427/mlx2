@@ -1,0 +1,70 @@
+{
+  "long_prompt_ttft": {
+    "ok": true,
+    "prompt_words": 7006,
+    "ttft_s": [
+      7.454,
+      0.172
+    ]
+  },
+  "single_stream": {
+    "ok": true,
+    "tokens": 512,
+    "seconds": 15.11,
+    "tok_s": 33.9,
+    "head": "# How Compilers Optimize Loops: A Detailed Technical Essay\n\n## Introduction\n\nLoops are among the most critical construct"
+  },
+  "four_way": {
+    "ok": true,
+    "tokens": 1536,
+    "wall_s": 15.56,
+    "aggregate_tok_s": 98.7
+  },
+  "thinking_channel": {
+    "ok": true,
+    "content": "17 * 23 = 391",
+    "reasoning_chars": 293
+  },
+  "_mechanisms": {
+    "ok": true,
+    "profile": "xing4-0-apcv2-ordinary-int8-prefill-all",
+    "int8_prefill": {
+      "schema": "mlx2.int8-prefill.v1",
+      "enabled": true,
+      "scope": "all",
+      "row_threshold": 512,
+      "cache": "auto",
+      "ttl_s": 120.0,
+      "active": true,
+      "fidelity": "approximate",
+      "revision": "b5e905e4ac85f30da6e4dddb1a088882f9640457a1449c2d0296048ad679ef62",
+      "kernel_revision": "5da9f1513267dac8",
+      "device": "Apple M5 Max (applegpu_g17s)",
+      "modules": 240,
+      "module_kinds": {
+        "q6": 240
+      },
+      "skipped": 40,
+      "experts": "stock",
+      "weight_bytes": 0,
+      "resident_estimate_bytes": 0,
+      "counts": {
+        "engaged_calls": 1200,
+        "engaged_rows": 2355840,
+        "fallback_rows": 257520,
+        "fallback_dtype": 0,
+        "fallback_unbound": 0,
+        "weight_builds": 1200,
+        "weight_evictions": 0,
+        "activation_reuse": 200
+      }
+    },
+    "scheduler": {},
+    "diagnostics": null
+  },
+  "server_alive_final": {
+    "ok": true,
+    "inflight": 0,
+    "error": null
+  }
+}

@@ -1,0 +1,26 @@
+{
+  "component": "CPU-only ASPIRE-inspired request-local draft-depth policy and offline trace replay prototype",
+  "source_repository": "https://arxiv.org/abs/2609.17943",
+  "source_revision": "arXiv:2609.17943v1 (2026-09-16)",
+  "source_paths": [
+    "Section 4.2 Speculation Scheduler",
+    "Appendix A Scheduler Algorithm"
+  ],
+  "license": "Creative Commons Attribution 4.0 International (CC BY 4.0)",
+  "license_url": "https://creativecommons.org/licenses/by/4.0/",
+  "authors": [
+    "Amir Ziashahabi",
+    "Hossein Entezari Zarch",
+    "Lei Gao",
+    "Murali Annavaram",
+    "Salman Avestimehr"
+  ],
+  "modifications": [
+    "Implemented the published acceptance estimator, exponential smoothing, expected-yield objective, and homogeneous batch-aware linear cost equations as an independent pure-Python policy model",
+    "Bound policy state per request and added fixed-depth and one-step feedback baselines",
+    "Added deterministic replay over counterfactual accepted-prefix observations and a synthetic CPU microbenchmark",
+    "Excluded unified mixed-forward execution, attention refresh, model/cache mutation, route registration, and qualification claims",
+    "Report normalized cost rather than hardware time; policy-dependent model-state trajectories are explicitly outside the replay model"
+  ],
+  "validation": "Focused CPU unit tests and the deterministic synthetic microbenchmark; no MLX, Metal, model artifact, GPU lease, or live service is used"
+}

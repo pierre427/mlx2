@@ -1,0 +1,22 @@
+{
+  "schema": "mlx2.north-qualification-attempt.v1",
+  "runtime_source_sha256": "c59a29e820104248fbd7f8cf2ed9787ff1535976bf81daad7e13a3983f0b571f",
+  "qualifier_sha256": "8d32f490519f91e0e4b96f0e6b60d05b088aba41930b1b5df24eb0292fcfa8c1",
+  "artifact": "6c88a4d3a5387abe2d97ac3d5eb70e484fb33615bb0c0f2ff8e7ef22b442f2e4",
+  "published": false,
+  "thermal_barrier_fired": false,
+  "failed_check": "stop",
+  "observed": {
+    "finish_reason": "stop",
+    "content": "",
+    "reasoning_content": "The user asks: \"Reply with exactly MLX2",
+    "requested_stop": "_READY",
+    "interpretation": "The requested stop fired inside North reasoning output although request controls reported thinking=false, so the visible-content stop contract failed."
+  },
+  "secondary_runbook_gap": "The zsh watchdog capture_health function used the reserved read-only variable name status and exited; rename it before retry.",
+  "unqualified_optimization_gaps": [
+    "No native MTP tensors or qualified native speculative route.",
+    "Local official EAGLE head is not integrated; it needs revision-bound hidden-feature, three rotating-cache, APCv2 sidecar, rollback, cancellation and batching contracts plus live correctness/performance qualification.",
+    "No qualified ordinary-plus-PLD route or observed PLD receipt counters."
+  ]
+}

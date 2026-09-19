@@ -1,0 +1,124 @@
+{
+  "schema": "mlx2.openrouter-cost-ledger.v1",
+  "currency": "USD",
+  "basis": "Provider usage.cost receipts, response IDs deduplicated; unbilled HTTP errors not estimated",
+  "groups": {
+    "mimo-muse-logs": {
+      "requests": 58,
+      "cost_usd": 0.20186277444000003,
+      "input_tokens": 3414555,
+      "output_tokens": 48926,
+      "cached_input_tokens": 2018080,
+      "providers": [
+        "DeepInfra",
+        "GMICloud"
+      ],
+      "first_request": 1789507799,
+      "last_request": 1789509711
+    },
+    "glm-qwen38-logs": {
+      "requests": 78,
+      "cost_usd": 0.24447840949999997,
+      "input_tokens": 6528460,
+      "output_tokens": 50204,
+      "cached_input_tokens": 5314590,
+      "providers": [
+        "Morph",
+        "Relace"
+      ],
+      "first_request": 1789507476,
+      "last_request": 1789509024
+    },
+    "deepseek41-qwen38-logs": {
+      "requests": 58,
+      "cost_usd": 0.28569186,
+      "input_tokens": 5955140,
+      "output_tokens": 78815,
+      "cached_input_tokens": 4762624,
+      "providers": [
+        "Alibaba",
+        "Relace"
+      ],
+      "first_request": 1789507804,
+      "last_request": 1789509292
+    },
+    "glm-qwen38-logs-attempt1": {
+      "requests": 2,
+      "cost_usd": 0.00012162,
+      "input_tokens": 1782,
+      "output_tokens": 42,
+      "cached_input_tokens": 891,
+      "providers": [
+        "Morph"
+      ],
+      "first_request": 1789507266,
+      "last_request": 1789507269
+    },
+    "glm-muse-logs": {
+      "requests": 60,
+      "cost_usd": 0.16804697299999996,
+      "input_tokens": 3580788,
+      "output_tokens": 65306,
+      "cached_input_tokens": 2654346,
+      "providers": [
+        "Morph",
+        "Relace"
+      ],
+      "first_request": 1789507490,
+      "last_request": 1789508995
+    },
+    "deepseek41-muse-logs": {
+      "requests": 58,
+      "cost_usd": 0.18115868999999996,
+      "input_tokens": 4020331,
+      "output_tokens": 56938,
+      "cached_input_tokens": 3378176,
+      "providers": [
+        "Alibaba",
+        "Relace"
+      ],
+      "first_request": 1789507799,
+      "last_request": 1789508855
+    },
+    "glm-muse-logs-attempt2-infrastructure-failure": {
+      "requests": 18,
+      "cost_usd": 0.0019341088000000002,
+      "input_tokens": 27667,
+      "output_tokens": 2643,
+      "cached_input_tokens": 21462,
+      "providers": [
+        "Morph",
+        "Relace"
+      ],
+      "first_request": 1789507382,
+      "last_request": 1789507446
+    },
+    "glm-qwen38-logs-attempt2-infrastructure-failure": {
+      "requests": 13,
+      "cost_usd": 0.0014881916,
+      "input_tokens": 17616,
+      "output_tokens": 2252,
+      "cached_input_tokens": 12800,
+      "providers": [
+        "Relace"
+      ],
+      "first_request": 1789507370,
+      "last_request": 1789507416
+    },
+    "mimo-qwen38-logs": {
+      "requests": 60,
+      "cost_usd": 0.12725239424,
+      "input_tokens": 4848902,
+      "output_tokens": 27203,
+      "cached_input_tokens": 4000640,
+      "providers": [
+        "DeepInfra",
+        "GMICloud"
+      ],
+      "first_request": 1789507799,
+      "last_request": 1789509003
+    }
+  },
+  "smoke_usd": 6.6e-06,
+  "total_usd": 1.2120416215800003
+}

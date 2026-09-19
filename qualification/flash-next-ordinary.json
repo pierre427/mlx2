@@ -1,0 +1,1755 @@
+{
+  "schema": "mlx2.serving-qualification.v1",
+  "timestamp": 1789505267.060721,
+  "runtime": {
+    "source_sha256": "5195d36fabc652ef122148085ba7c6bad6dd19ec0ffa7baebe94ae6773e967c0",
+    "mlx_native_sha256": "30335939714520c3306cfa58597100aae08bbeabdc60a4bc8c35c32c607450a8",
+    "python": "3.12.13",
+    "macos": "26.6.2",
+    "mlx": "0.32.2.dev20260915+2a817ad94",
+    "transformers": "5.12.1",
+    "dependencies": {
+      "numpy": "2.5.1",
+      "tokenizers": "0.22.2",
+      "jinja2": "3.1.6",
+      "psutil": "7.2.2",
+      "regex": "2026.9.10",
+      "safetensors": "0.8.0"
+    }
+  },
+  "artifact": "77a35a9692b49e736bd0daa708d8b14c71c05abb03f81f8c707a1fc1e372bb25",
+  "settings": {
+    "max_context": 16384,
+    "max_lanes": 4,
+    "max_inflight": 8,
+    "prefill_step": 2048,
+    "cache_bytes": 12884901888,
+    "disk_cache": true,
+    "mtp": false,
+    "environment": {
+      "HF_HUB_OFFLINE": "1",
+      "TRANSFORMERS_OFFLINE": "1",
+      "MLX_ENABLE_TF32": "0",
+      "MLX_QWEN4_PLE_NVME": "~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/ple_rows.bin",
+      "MLX_QWEN4_PLE_NVME_LRU_MB": "2048",
+      "MLX_QWEN4_PLE_COMPILE": "1",
+      "MLX_QWEN4_QSA_POOLED_KEY_CACHE": "1",
+      "MLX_QWEN4_FUSED_GDN_DECODE": "1",
+      "MLX_QWEN4_FUSED_GDN_VERIFY": "1",
+      "MLX_QWEN4_EAGER_DISPATCH": "1",
+      "MLX_QWEN4_MEGAKERNEL": "0",
+      "MLX_LM_COMPILED_DECODE": "0",
+      "MLX_LM_SEGMENTED_SELF_MTP": "1",
+      "MLX_LM_TRUE_BATCHED_SEGMENTED_MTP": "1",
+      "MLX_LM_SHARED_QSA_SUFFIX": "0"
+    }
+  },
+  "checks": {
+    "unit_tests": {
+      "passed": true,
+      "evidence": "............................................................... [ 61%]\n.......................................                                  [100%]\n102 passed, 9 subtests passed in 2.99s\n"
+    },
+    "cold_text": {
+      "passed": true,
+      "evidence": {
+        "request_id": "chatcmpl-34bdbc8f7ce94842831cee2a8b6186b8",
+        "cache": "apcv2",
+        "cached_tokens": 0,
+        "profile": "flash-next-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "ordinary_compute_width": 1,
+        "mtp": null,
+        "prompt_tokens": 19,
+        "completion_tokens": 5,
+        "ttft_seconds": 0.756917208986124,
+        "elapsed_seconds": 0.8459927089861594
+      }
+    },
+    "warm_prefix": {
+      "passed": true,
+      "evidence": {
+        "request_id": "chatcmpl-a830730f269a43e9b10fd6871db8cca3",
+        "cache": "apcv2",
+        "cached_tokens": 18,
+        "profile": "flash-next-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "ordinary_compute_width": 1,
+        "mtp": null,
+        "prompt_tokens": 19,
+        "completion_tokens": 5,
+        "ttft_seconds": 0.06130995799321681,
+        "elapsed_seconds": 0.1318296669924166
+      }
+    },
+    "stream": {
+      "passed": true,
+      "evidence": [
+        {
+          "id": "chatcmpl-402e9958aaa34178969063ff44ee67bc",
+          "object": "chat.completion.chunk",
+          "created": 1789505271,
+          "model": "Qwen3.8-Flash-Next-MLX-4bit-MTP",
+          "choices": [
+            {
+              "index": 0,
+              "finish_reason": null,
+              "delta": {
+                "content": "ML"
+              }
+            }
+          ]
+        },
+        {
+          "id": "chatcmpl-402e9958aaa34178969063ff44ee67bc",
+          "object": "chat.completion.chunk",
+          "created": 1789505271,
+          "model": "Qwen3.8-Flash-Next-MLX-4bit-MTP",
+          "choices": [
+            {
+              "index": 0,
+              "finish_reason": null,
+              "delta": {
+                "content": "X"
+              }
+            }
+          ]
+        },
+        {
+          "id": "chatcmpl-402e9958aaa34178969063ff44ee67bc",
+          "object": "chat.completion.chunk",
+          "created": 1789505271,
+          "model": "Qwen3.8-Flash-Next-MLX-4bit-MTP",
+          "choices": [
+            {
+              "index": 0,
+              "finish_reason": null,
+              "delta": {
+                "content": "2"
+              }
+            }
+          ]
+        },
+        {
+          "id": "chatcmpl-402e9958aaa34178969063ff44ee67bc",
+          "object": "chat.completion.chunk",
+          "created": 1789505271,
+          "model": "Qwen3.8-Flash-Next-MLX-4bit-MTP",
+          "choices": [
+            {
+              "index": 0,
+              "finish_reason": null,
+              "delta": {
+                "content": "_READY"
+              }
+            }
+          ]
+        },
+        {
+          "id": "chatcmpl-402e9958aaa34178969063ff44ee67bc",
+          "object": "chat.completion.chunk",
+          "created": 1789505271,
+          "model": "Qwen3.8-Flash-Next-MLX-4bit-MTP",
+          "choices": [
+            {
+              "index": 0,
+              "finish_reason": "stop",
+              "delta": {}
+            }
+          ],
+          "usage": {
+            "prompt_tokens": 19,
+            "completion_tokens": 5,
+            "total_tokens": 24,
+            "prompt_tokens_details": {
+              "cached_tokens": 18
+            }
+          },
+          "mlx2": {
+            "request_id": "chatcmpl-402e9958aaa34178969063ff44ee67bc",
+            "cache": "apcv2",
+            "cached_tokens": 18,
+            "profile": "flash-next-apcv2-ordinary",
+            "qualification": "candidate",
+            "route_receipt": "candidate_validation",
+            "ordinary_compute_width": 1,
+            "mtp": null,
+            "prompt_tokens": 19,
+            "completion_tokens": 5,
+            "ttft_seconds": 0.05884212499950081,
+            "elapsed_seconds": 0.12979016700410284
+          }
+        }
+      ]
+    },
+    "tools": {
+      "passed": true,
+      "evidence": {
+        "id": "chatcmpl-2e131c357f934b118f711552cc7b27be",
+        "object": "chat.completion",
+        "created": 1789505271,
+        "model": "Qwen3.8-Flash-Next-MLX-4bit-MTP",
+        "choices": [
+          {
+            "index": 0,
+            "finish_reason": "tool_calls",
+            "message": {
+              "role": "assistant",
+              "content": "",
+              "tool_calls": [
+                {
+                  "id": "call_b65924c0ff5d48b3acc30921",
+                  "type": "function",
+                  "function": {
+                    "name": "weather",
+                    "arguments": "{\"city\": \"Toronto\"}"
+                  }
+                }
+              ]
+            }
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 279,
+          "completion_tokens": 26,
+          "total_tokens": 305,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          }
+        },
+        "mlx2": {
+          "request_id": "chatcmpl-2e131c357f934b118f711552cc7b27be",
+          "cache": "apcv2",
+          "cached_tokens": 0,
+          "profile": "flash-next-apcv2-ordinary",
+          "qualification": "candidate",
+          "route_receipt": "candidate_validation",
+          "ordinary_compute_width": 1,
+          "mtp": null,
+          "prompt_tokens": 279,
+          "completion_tokens": 26,
+          "ttft_seconds": 0.41621250001480803,
+          "elapsed_seconds": 0.95114495800226
+        }
+      }
+    },
+    "tool_roundtrip": {
+      "passed": true,
+      "evidence": {
+        "id": "chatcmpl-c6aab041a5ce4972a88a70efcc3c89a3",
+        "object": "chat.completion",
+        "created": 1789505272,
+        "model": "Qwen3.8-Flash-Next-MLX-4bit-MTP",
+        "choices": [
+          {
+            "index": 0,
+            "finish_reason": "stop",
+            "message": {
+              "role": "assistant",
+              "content": "Here is the current weather in Toronto:\n\n*   **Condition:** Sunny\n*   **Temperature:** 21\u00b0C"
+            }
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 337,
+          "completion_tokens": 26,
+          "total_tokens": 363,
+          "prompt_tokens_details": {
+            "cached_tokens": 305
+          }
+        },
+        "mlx2": {
+          "request_id": "chatcmpl-c6aab041a5ce4972a88a70efcc3c89a3",
+          "cache": "apcv2",
+          "cached_tokens": 305,
+          "profile": "flash-next-apcv2-ordinary",
+          "qualification": "candidate",
+          "route_receipt": "candidate_validation",
+          "ordinary_compute_width": 1,
+          "mtp": null,
+          "prompt_tokens": 337,
+          "completion_tokens": 26,
+          "ttft_seconds": 0.19057083400548436,
+          "elapsed_seconds": 0.6537874590139836
+        }
+      }
+    },
+    "reasoning": {
+      "passed": true,
+      "evidence": {
+        "id": "chatcmpl-8beda3a2b9d646239c8aad953b29f620",
+        "object": "chat.completion",
+        "created": 1789505272,
+        "model": "Qwen3.8-Flash-Next-MLX-4bit-MTP",
+        "choices": [
+          {
+            "index": 0,
+            "finish_reason": "stop",
+            "message": {
+              "role": "assistant",
+              "content": "\n\n13 \u00d7 17 = 221",
+              "reasoning_content": "We need answer simple arithmetic. Need final answer. Compute 13*17 = 221. Keep concise.\n"
+            }
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 62,
+          "completion_tokens": 41,
+          "total_tokens": 103,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          }
+        },
+        "mlx2": {
+          "request_id": "chatcmpl-8beda3a2b9d646239c8aad953b29f620",
+          "cache": "apcv2",
+          "cached_tokens": 0,
+          "profile": "flash-next-apcv2-ordinary",
+          "qualification": "candidate",
+          "route_receipt": "candidate_validation",
+          "ordinary_compute_width": 1,
+          "mtp": null,
+          "prompt_tokens": 62,
+          "completion_tokens": 41,
+          "ttft_seconds": 0.24394233300699852,
+          "elapsed_seconds": 1.1273478750081267
+        }
+      }
+    },
+    "stop": {
+      "passed": true,
+      "evidence": {
+        "id": "chatcmpl-030d20e6ec23440bb0d3a52ca424adaf",
+        "object": "chat.completion",
+        "created": 1789505274,
+        "model": "Qwen3.8-Flash-Next-MLX-4bit-MTP",
+        "choices": [
+          {
+            "index": 0,
+            "finish_reason": "stop",
+            "message": {
+              "role": "assistant",
+              "content": "MLX2"
+            }
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 19,
+          "completion_tokens": 4,
+          "total_tokens": 23,
+          "prompt_tokens_details": {
+            "cached_tokens": 18
+          }
+        },
+        "mlx2": {
+          "request_id": "chatcmpl-030d20e6ec23440bb0d3a52ca424adaf",
+          "cache": "apcv2",
+          "cached_tokens": 18,
+          "profile": "flash-next-apcv2-ordinary",
+          "qualification": "candidate",
+          "route_receipt": "candidate_validation",
+          "ordinary_compute_width": 1,
+          "mtp": null,
+          "prompt_tokens": 19,
+          "completion_tokens": 4,
+          "ttft_seconds": 0.06493158300872892,
+          "elapsed_seconds": 0.11873083299724385
+        }
+      }
+    },
+    "seed_repeat": {
+      "passed": true,
+      "evidence": {
+        "first": {
+          "id": "chatcmpl-d39936dbc53c42ce955e00aef3fb8213",
+          "object": "chat.completion",
+          "created": 1789505274,
+          "model": "Qwen3.8-Flash-Next-MLX-4bit-MTP",
+          "choices": [
+            {
+              "index": 0,
+              "finish_reason": "length",
+              "message": {
+                "role": "assistant",
+                "content": "Here are three short facts about stars:\n\n1. **They are massive balls of plasma**: Stars are composed primarily of hydrogen and helium held together by gravity, undergoing nuclear fusion in their cores to produce light and heat.\n2. **Our Sun is a typical star**: The Sun is a G-type main-sequence"
+              }
+            }
+          ],
+          "usage": {
+            "prompt_tokens": 19,
+            "completion_tokens": 64,
+            "total_tokens": 83,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            }
+          },
+          "mlx2": {
+            "request_id": "chatcmpl-d39936dbc53c42ce955e00aef3fb8213",
+            "cache": "apcv2",
+            "cached_tokens": 0,
+            "profile": "flash-next-apcv2-ordinary",
+            "qualification": "candidate",
+            "route_receipt": "candidate_validation",
+            "ordinary_compute_width": 1,
+            "mtp": null,
+            "prompt_tokens": 19,
+            "completion_tokens": 64,
+            "ttft_seconds": 0.14209287500125356,
+            "elapsed_seconds": 1.5846839580044616
+          }
+        },
+        "second": {
+          "id": "chatcmpl-ddbc52a30c594824bcf3716ea8557b1e",
+          "object": "chat.completion",
+          "created": 1789505275,
+          "model": "Qwen3.8-Flash-Next-MLX-4bit-MTP",
+          "choices": [
+            {
+              "index": 0,
+              "finish_reason": "length",
+              "message": {
+                "role": "assistant",
+                "content": "Here are three short facts about stars:\n\n1. **They are massive balls of plasma**: Stars are composed primarily of hydrogen and helium held together by gravity, undergoing nuclear fusion in their cores to produce light and heat.\n2. **Our Sun is a typical star**: The Sun is a G-type main-sequence"
+              }
+            }
+          ],
+          "usage": {
+            "prompt_tokens": 19,
+            "completion_tokens": 64,
+            "total_tokens": 83,
+            "prompt_tokens_details": {
+              "cached_tokens": 18
+            }
+          },
+          "mlx2": {
+            "request_id": "chatcmpl-ddbc52a30c594824bcf3716ea8557b1e",
+            "cache": "apcv2",
+            "cached_tokens": 18,
+            "profile": "flash-next-apcv2-ordinary",
+            "qualification": "candidate",
+            "route_receipt": "candidate_validation",
+            "ordinary_compute_width": 1,
+            "mtp": null,
+            "prompt_tokens": 19,
+            "completion_tokens": 64,
+            "ttft_seconds": 0.06430791699676774,
+            "elapsed_seconds": 1.2535157919919584
+          }
+        }
+      }
+    },
+    "batch": {
+      "passed": true,
+      "evidence": {
+        "observed_widths": [
+          4
+        ],
+        "wall_seconds": 5.560940791008761,
+        "aggregate_tokens_per_second": 115.0884398975777,
+        "request_receipts": [
+          {
+            "request_id": "chatcmpl-3cc5205902764a98a089b138b4a3ae7b",
+            "cache": "apcv2",
+            "cached_tokens": 0,
+            "profile": "flash-next-apcv2-ordinary",
+            "qualification": "candidate",
+            "route_receipt": "candidate_validation",
+            "ordinary_compute_width": 4,
+            "mtp": null,
+            "prompt_tokens": 21,
+            "completion_tokens": 160,
+            "ttft_seconds": 0.4412740830157418,
+            "elapsed_seconds": 5.555356750002829
+          },
+          {
+            "request_id": "chatcmpl-b26b1ae47ebf4c6aab4cc5766701ad73",
+            "cache": "apcv2",
+            "cached_tokens": 0,
+            "profile": "flash-next-apcv2-ordinary",
+            "qualification": "candidate",
+            "route_receipt": "candidate_validation",
+            "ordinary_compute_width": 4,
+            "mtp": null,
+            "prompt_tokens": 21,
+            "completion_tokens": 160,
+            "ttft_seconds": 0.3301455419859849,
+            "elapsed_seconds": 5.478084917005617
+          },
+          {
+            "request_id": "chatcmpl-d3954da6122948ab9cffee589d828df6",
+            "cache": "apcv2",
+            "cached_tokens": 0,
+            "profile": "flash-next-apcv2-ordinary",
+            "qualification": "candidate",
+            "route_receipt": "candidate_validation",
+            "ordinary_compute_width": 4,
+            "mtp": null,
+            "prompt_tokens": 21,
+            "completion_tokens": 160,
+            "ttft_seconds": 0.33080329198855907,
+            "elapsed_seconds": 5.476126749999821
+          },
+          {
+            "request_id": "chatcmpl-405b2a3b36c44be6ace85d61b7c43389",
+            "cache": "apcv2",
+            "cached_tokens": 0,
+            "profile": "flash-next-apcv2-ordinary",
+            "qualification": "candidate",
+            "route_receipt": "candidate_validation",
+            "ordinary_compute_width": 4,
+            "mtp": null,
+            "prompt_tokens": 21,
+            "completion_tokens": 160,
+            "ttft_seconds": 0.44094991698511876,
+            "elapsed_seconds": 5.557622708991403
+          }
+        ]
+      }
+    },
+    "mixed_warm": {
+      "passed": true,
+      "evidence": [
+        {
+          "request_id": "chatcmpl-5636f58d2e984d25b25aefeabaa1e045",
+          "cache": "apcv2",
+          "cached_tokens": 22,
+          "profile": "flash-next-apcv2-ordinary",
+          "qualification": "candidate",
+          "route_receipt": "candidate_validation",
+          "ordinary_compute_width": 2,
+          "mtp": null,
+          "prompt_tokens": 23,
+          "completion_tokens": 64,
+          "ttft_seconds": 0.08582666699658148,
+          "elapsed_seconds": 1.5397504169959575
+        },
+        {
+          "request_id": "chatcmpl-f44c6c618da0440593ba9eccdb797de9",
+          "cache": "apcv2",
+          "cached_tokens": 23,
+          "profile": "flash-next-apcv2-ordinary",
+          "qualification": "candidate",
+          "route_receipt": "candidate_validation",
+          "ordinary_compute_width": 2,
+          "mtp": null,
+          "prompt_tokens": 24,
+          "completion_tokens": 64,
+          "ttft_seconds": 0.08417937500053085,
+          "elapsed_seconds": 1.5410161250038072
+        }
+      ]
+    },
+    "context": {
+      "passed": true,
+      "evidence": {
+        "cold": {
+          "id": "chatcmpl-c911278a2c694731ae7522d41a4331e3",
+          "object": "chat.completion",
+          "created": 1789505286,
+          "model": "Qwen3.8-Flash-Next-MLX-4bit-MTP",
+          "choices": [
+            {
+              "index": 0,
+              "finish_reason": "stop",
+              "message": {
+                "role": "assistant",
+                "content": "LONG_READY"
+              }
+            }
+          ],
+          "usage": {
+            "prompt_tokens": 16353,
+            "completion_tokens": 3,
+            "total_tokens": 16356,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            }
+          },
+          "mlx2": {
+            "request_id": "chatcmpl-c911278a2c694731ae7522d41a4331e3",
+            "cache": "apcv2",
+            "cached_tokens": 0,
+            "profile": "flash-next-apcv2-ordinary",
+            "qualification": "candidate",
+            "route_receipt": "candidate_validation",
+            "ordinary_compute_width": 1,
+            "mtp": null,
+            "prompt_tokens": 16353,
+            "completion_tokens": 3,
+            "ttft_seconds": 12.730067791999318,
+            "elapsed_seconds": 12.78239800001029
+          }
+        },
+        "warm": {
+          "id": "chatcmpl-234572fe45c54296b15d137fd07a2ef9",
+          "object": "chat.completion",
+          "created": 1789505299,
+          "model": "Qwen3.8-Flash-Next-MLX-4bit-MTP",
+          "choices": [
+            {
+              "index": 0,
+              "finish_reason": "stop",
+              "message": {
+                "role": "assistant",
+                "content": "LONG_READY"
+              }
+            }
+          ],
+          "usage": {
+            "prompt_tokens": 16353,
+            "completion_tokens": 3,
+            "total_tokens": 16356,
+            "prompt_tokens_details": {
+              "cached_tokens": 16352
+            }
+          },
+          "mlx2": {
+            "request_id": "chatcmpl-234572fe45c54296b15d137fd07a2ef9",
+            "cache": "apcv2",
+            "cached_tokens": 16352,
+            "profile": "flash-next-apcv2-ordinary",
+            "qualification": "candidate",
+            "route_receipt": "candidate_validation",
+            "ordinary_compute_width": 1,
+            "mtp": null,
+            "prompt_tokens": 16353,
+            "completion_tokens": 3,
+            "ttft_seconds": 0.08996295800898224,
+            "elapsed_seconds": 0.13962970799184404
+          }
+        }
+      }
+    },
+    "context_bound": {
+      "passed": true,
+      "evidence": "prompt plus output beyond limit rejected with400"
+    },
+    "cancel": {
+      "passed": true,
+      "evidence": {
+        "admitted": 20,
+        "cycles": 637,
+        "multi_request_cycles": 229,
+        "completed": 19,
+        "cancelled": 1
+      }
+    },
+    "recovery": {
+      "passed": true,
+      "evidence": {
+        "id": "chatcmpl-9e1f49e5f9f84f72bd0f193042481dde",
+        "object": "chat.completion",
+        "created": 1789505300,
+        "model": "Qwen3.8-Flash-Next-MLX-4bit-MTP",
+        "choices": [
+          {
+            "index": 0,
+            "finish_reason": "stop",
+            "message": {
+              "role": "assistant",
+              "content": "MLX2_READY"
+            }
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 19,
+          "completion_tokens": 5,
+          "total_tokens": 24,
+          "prompt_tokens_details": {
+            "cached_tokens": 18
+          }
+        },
+        "mlx2": {
+          "request_id": "chatcmpl-9e1f49e5f9f84f72bd0f193042481dde",
+          "cache": "apcv2",
+          "cached_tokens": 18,
+          "profile": "flash-next-apcv2-ordinary",
+          "qualification": "candidate",
+          "route_receipt": "candidate_validation",
+          "ordinary_compute_width": 1,
+          "mtp": null,
+          "prompt_tokens": 19,
+          "completion_tokens": 5,
+          "ttft_seconds": 0.0820717079914175,
+          "elapsed_seconds": 0.1574150410015136
+        }
+      }
+    },
+    "cache_leases": {
+      "passed": true,
+      "evidence": {
+        "lookups": 18,
+        "hits": 7,
+        "misses": 11,
+        "cached_tokens": 422,
+        "stores": 33,
+        "clears": 0,
+        "lifetime": {
+          "lookups": 18,
+          "hits": 7,
+          "misses": 11,
+          "cached_tokens": 422,
+          "stores": 33
+        },
+        "cow_enabled": true,
+        "cow": {
+          "sources": 33,
+          "source_bytes": 7949907008,
+          "freeze_failures": 0,
+          "branches": 7,
+          "branch_failures": 0,
+          "stale_rejections": 0,
+          "invalidations": 17,
+          "active_leases": 0,
+          "peak_leases": 2,
+          "descriptor_aliases": 7988,
+          "descriptor_bytes": 9580881184,
+          "avoided_copy_bytes": 1630974176,
+          "materializations": 0,
+          "materialized_bytes": 0,
+          "fallback_deepcopies": 0,
+          "fallback_bytes": 0,
+          "freeze_ns": 89126957,
+          "branch_ns": 6378791,
+          "fallback_ns": 0,
+          "releases": 7,
+          "planes": {
+            "gdn_recurrent": {
+              "descriptor_aliases": 6068,
+              "descriptor_bytes": 9482675488,
+              "materializations": 0,
+              "materialized_bytes": 0
+            },
+            "qsa_summary": {
+              "descriptor_aliases": 960,
+              "descriptor_bytes": 13221888,
+              "materializations": 0,
+              "materialized_bytes": 0
+            },
+            "attention_kv": {
+              "descriptor_aliases": 960,
+              "descriptor_bytes": 84983808,
+              "materializations": 0,
+              "materialized_bytes": 0
+            }
+          },
+          "materialized_bytes_are_estimated": true,
+          "array_readbacks": 0
+        },
+        "max_tokens": 16384,
+        "max_entry_tokens": 363,
+        "overlength_rejections": 0,
+        "idle_disk": {
+          "enabled": true,
+          "idle_seconds": 180.0,
+          "resident_bytes": 3990722080,
+          "disk_bytes": 0,
+          "disk_max_bytes": 68719476736,
+          "disk_entries": 0,
+          "idle_spills": 0,
+          "pressure_spills": 0,
+          "restores": 0,
+          "restore_failures": 0,
+          "spill_failures": 0,
+          "disk_evictions": 0,
+          "bytes_written": 0,
+          "bytes_read": 0
+        },
+        "version": 2,
+        "layout_name": "qwen4-exp-layer-segments-v1",
+        "layer_segments": {
+          "schema": "apcv2.layer-segments.v1",
+          "entries": 16,
+          "disk_entries": 0,
+          "layers": 768,
+          "plane_layers": 960,
+          "segments": 1056,
+          "logical_bytes": 3990722080,
+          "by_plane": {
+            "gdn_recurrent": {
+              "layers": 576,
+              "segments": 576,
+              "logical_bytes": 3931841056,
+              "invalid": 0
+            },
+            "attention_kv": {
+              "layers": 192,
+              "segments": 240,
+              "logical_bytes": 50946048,
+              "invalid": 0
+            },
+            "qsa_summary": {
+              "layers": 192,
+              "segments": 240,
+              "logical_bytes": 7934976,
+              "invalid": 0
+            }
+          }
+        }
+      }
+    },
+    "runtime_stable": {
+      "passed": true,
+      "evidence": {
+        "source_sha256": "5195d36fabc652ef122148085ba7c6bad6dd19ec0ffa7baebe94ae6773e967c0",
+        "mlx_native_sha256": "30335939714520c3306cfa58597100aae08bbeabdc60a4bc8c35c32c607450a8",
+        "python": "3.12.13",
+        "macos": "26.6.2",
+        "mlx": "0.32.2.dev20260915+2a817ad94",
+        "transformers": "5.12.1",
+        "dependencies": {
+          "numpy": "2.5.1",
+          "tokenizers": "0.22.2",
+          "jinja2": "3.1.6",
+          "psutil": "7.2.2",
+          "regex": "2026.9.10",
+          "safetensors": "0.8.0"
+        }
+      }
+    }
+  },
+  "responses": {
+    "cold": {
+      "id": "chatcmpl-34bdbc8f7ce94842831cee2a8b6186b8",
+      "object": "chat.completion",
+      "created": 1789505270,
+      "model": "Qwen3.8-Flash-Next-MLX-4bit-MTP",
+      "choices": [
+        {
+          "index": 0,
+          "finish_reason": "stop",
+          "message": {
+            "role": "assistant",
+            "content": "MLX2_READY"
+          }
+        }
+      ],
+      "usage": {
+        "prompt_tokens": 19,
+        "completion_tokens": 5,
+        "total_tokens": 24,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        }
+      },
+      "mlx2": {
+        "request_id": "chatcmpl-34bdbc8f7ce94842831cee2a8b6186b8",
+        "cache": "apcv2",
+        "cached_tokens": 0,
+        "profile": "flash-next-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "ordinary_compute_width": 1,
+        "mtp": null,
+        "prompt_tokens": 19,
+        "completion_tokens": 5,
+        "ttft_seconds": 0.756917208986124,
+        "elapsed_seconds": 0.8459927089861594
+      }
+    },
+    "warm": {
+      "id": "chatcmpl-a830730f269a43e9b10fd6871db8cca3",
+      "object": "chat.completion",
+      "created": 1789505271,
+      "model": "Qwen3.8-Flash-Next-MLX-4bit-MTP",
+      "choices": [
+        {
+          "index": 0,
+          "finish_reason": "stop",
+          "message": {
+            "role": "assistant",
+            "content": "MLX2_READY"
+          }
+        }
+      ],
+      "usage": {
+        "prompt_tokens": 19,
+        "completion_tokens": 5,
+        "total_tokens": 24,
+        "prompt_tokens_details": {
+          "cached_tokens": 18
+        }
+      },
+      "mlx2": {
+        "request_id": "chatcmpl-a830730f269a43e9b10fd6871db8cca3",
+        "cache": "apcv2",
+        "cached_tokens": 18,
+        "profile": "flash-next-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "ordinary_compute_width": 1,
+        "mtp": null,
+        "prompt_tokens": 19,
+        "completion_tokens": 5,
+        "ttft_seconds": 0.06130995799321681,
+        "elapsed_seconds": 0.1318296669924166
+      }
+    },
+    "batch": [
+      {
+        "id": "chatcmpl-3cc5205902764a98a089b138b4a3ae7b",
+        "object": "chat.completion",
+        "created": 1789505277,
+        "model": "Qwen3.8-Flash-Next-MLX-4bit-MTP",
+        "choices": [
+          {
+            "index": 0,
+            "finish_reason": "length",
+            "message": {
+              "role": "assistant",
+              "content": "# How a Compiler Works: A Detailed Explanation\n\nA **compiler** is a program that translates source code written in a high-level programming language (like C, C++, Java, or Rust) into a lower-level representation (like machine code or bytecode) that a computer can execute. This process involves several distinct phases, each transforming the code from one representation to another.\n\n---\n\n## High-Level Overview\n\n```\nSource Code \u2192 [Frontend] \u2192 Intermediate Representation \u2192 [Backend] \u2192 Target Code\n```\n\nThe compilation process is typically divided into two major parts:\n\n1. **Frontend** \u2013 Analyzes the source code and produces an intermediate representation (IR).\n2. **Backend** \u2013 Optimizes the IR and generates target machine code.\n\n---\n\n## Phase 1"
+            }
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 21,
+          "completion_tokens": 160,
+          "total_tokens": 181,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          }
+        },
+        "mlx2": {
+          "request_id": "chatcmpl-3cc5205902764a98a089b138b4a3ae7b",
+          "cache": "apcv2",
+          "cached_tokens": 0,
+          "profile": "flash-next-apcv2-ordinary",
+          "qualification": "candidate",
+          "route_receipt": "candidate_validation",
+          "ordinary_compute_width": 4,
+          "mtp": null,
+          "prompt_tokens": 21,
+          "completion_tokens": 160,
+          "ttft_seconds": 0.4412740830157418,
+          "elapsed_seconds": 5.555356750002829
+        }
+      },
+      {
+        "id": "chatcmpl-b26b1ae47ebf4c6aab4cc5766701ad73",
+        "object": "chat.completion",
+        "created": 1789505277,
+        "model": "Qwen3.8-Flash-Next-MLX-4bit-MTP",
+        "choices": [
+          {
+            "index": 0,
+            "finish_reason": "length",
+            "message": {
+              "role": "assistant",
+              "content": "# How a Compiler Works: A Detailed Explanation\n\nA **compiler** is a program that translates source code written in a high-level programming language (like C, C++, Java, or Rust) into a lower-level representation (like machine code or bytecode) that a computer can execute. This process involves several distinct phases, each transforming the code from one representation to another.\n\n---\n\n## High-Level Overview\n\n```\nSource Code \u2192 [Frontend] \u2192 Intermediate Representation \u2192 [Backend] \u2192 Target Code\n```\n\nThe compilation process is typically divided into two major parts:\n\n1. **Frontend** \u2013 Analyzes the source code and produces an intermediate representation (IR).\n2. **Backend** \u2013 Optimizes the IR and generates target machine code.\n\n---\n\n## Phase 1"
+            }
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 21,
+          "completion_tokens": 160,
+          "total_tokens": 181,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          }
+        },
+        "mlx2": {
+          "request_id": "chatcmpl-b26b1ae47ebf4c6aab4cc5766701ad73",
+          "cache": "apcv2",
+          "cached_tokens": 0,
+          "profile": "flash-next-apcv2-ordinary",
+          "qualification": "candidate",
+          "route_receipt": "candidate_validation",
+          "ordinary_compute_width": 4,
+          "mtp": null,
+          "prompt_tokens": 21,
+          "completion_tokens": 160,
+          "ttft_seconds": 0.3301455419859849,
+          "elapsed_seconds": 5.478084917005617
+        }
+      },
+      {
+        "id": "chatcmpl-d3954da6122948ab9cffee589d828df6",
+        "object": "chat.completion",
+        "created": 1789505277,
+        "model": "Qwen3.8-Flash-Next-MLX-4bit-MTP",
+        "choices": [
+          {
+            "index": 0,
+            "finish_reason": "length",
+            "message": {
+              "role": "assistant",
+              "content": "# How a Compiler Works: A Detailed Explanation\n\nA **compiler** is a program that translates source code written in a high-level programming language (like C, C++, Java, or Rust) into a lower-level representation (like machine code or bytecode) that a computer can execute. This process involves several distinct phases, each transforming the code from one representation to another.\n\n---\n\n## High-Level Overview\n\n```\nSource Code \u2192 [Frontend] \u2192 Intermediate Representation \u2192 [Backend] \u2192 Target Code\n```\n\nThe compilation process is typically divided into two major parts:\n\n1. **Frontend** \u2013 Analyzes the source code and produces an intermediate representation (IR).\n2. **Backend** \u2013 Optimizes the IR and generates target machine code.\n\n---\n\n## Phase 1"
+            }
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 21,
+          "completion_tokens": 160,
+          "total_tokens": 181,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          }
+        },
+        "mlx2": {
+          "request_id": "chatcmpl-d3954da6122948ab9cffee589d828df6",
+          "cache": "apcv2",
+          "cached_tokens": 0,
+          "profile": "flash-next-apcv2-ordinary",
+          "qualification": "candidate",
+          "route_receipt": "candidate_validation",
+          "ordinary_compute_width": 4,
+          "mtp": null,
+          "prompt_tokens": 21,
+          "completion_tokens": 160,
+          "ttft_seconds": 0.33080329198855907,
+          "elapsed_seconds": 5.476126749999821
+        }
+      },
+      {
+        "id": "chatcmpl-405b2a3b36c44be6ace85d61b7c43389",
+        "object": "chat.completion",
+        "created": 1789505277,
+        "model": "Qwen3.8-Flash-Next-MLX-4bit-MTP",
+        "choices": [
+          {
+            "index": 0,
+            "finish_reason": "length",
+            "message": {
+              "role": "assistant",
+              "content": "# How a Compiler Works: A Detailed Explanation\n\nA **compiler** is a program that translates source code written in a high-level programming language (like C, C++, Java, or Rust) into a lower-level representation (like machine code or bytecode) that a computer can execute. This process involves several distinct phases, each transforming the code from one representation to another.\n\n---\n\n## High-Level Overview\n\n```\nSource Code \u2192 [Frontend] \u2192 Intermediate Representation \u2192 [Backend] \u2192 Target Code\n```\n\nThe compilation process is typically divided into two major parts:\n\n1. **Frontend** \u2013 Analyzes the source code and produces an intermediate representation (IR).\n2. **Backend** \u2013 Optimizes the IR and generates target machine code.\n\n---\n\n## Phase 1"
+            }
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 21,
+          "completion_tokens": 160,
+          "total_tokens": 181,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          }
+        },
+        "mlx2": {
+          "request_id": "chatcmpl-405b2a3b36c44be6ace85d61b7c43389",
+          "cache": "apcv2",
+          "cached_tokens": 0,
+          "profile": "flash-next-apcv2-ordinary",
+          "qualification": "candidate",
+          "route_receipt": "candidate_validation",
+          "ordinary_compute_width": 4,
+          "mtp": null,
+          "prompt_tokens": 21,
+          "completion_tokens": 160,
+          "ttft_seconds": 0.44094991698511876,
+          "elapsed_seconds": 5.557622708991403
+        }
+      }
+    ]
+  },
+  "passed": true,
+  "final_status": {
+    "state": "ready",
+    "model": "Qwen3.8-Flash-Next-MLX-4bit-MTP",
+    "runtime": {
+      "source_sha256": "5195d36fabc652ef122148085ba7c6bad6dd19ec0ffa7baebe94ae6773e967c0",
+      "mlx_native_sha256": "30335939714520c3306cfa58597100aae08bbeabdc60a4bc8c35c32c607450a8",
+      "python": "3.12.13",
+      "macos": "26.6.2",
+      "mlx": "0.32.2.dev20260915+2a817ad94",
+      "transformers": "5.12.1",
+      "dependencies": {
+        "numpy": "2.5.1",
+        "tokenizers": "0.22.2",
+        "jinja2": "3.1.6",
+        "psutil": "7.2.2",
+        "regex": "2026.9.10",
+        "safetensors": "0.8.0"
+      }
+    },
+    "artifact": "77a35a9692b49e736bd0daa708d8b14c71c05abb03f81f8c707a1fc1e372bb25",
+    "profile": "flash-next-apcv2-ordinary",
+    "settings": {
+      "max_context": 16384,
+      "max_lanes": 4,
+      "max_inflight": 8,
+      "prefill_step": 2048,
+      "cache_bytes": 12884901888,
+      "disk_cache": true,
+      "mtp": false,
+      "environment": {
+        "HF_HUB_OFFLINE": "1",
+        "TRANSFORMERS_OFFLINE": "1",
+        "MLX_ENABLE_TF32": "0",
+        "MLX_QWEN4_PLE_NVME": "~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/ple_rows.bin",
+        "MLX_QWEN4_PLE_NVME_LRU_MB": "2048",
+        "MLX_QWEN4_PLE_COMPILE": "1",
+        "MLX_QWEN4_QSA_POOLED_KEY_CACHE": "1",
+        "MLX_QWEN4_FUSED_GDN_DECODE": "1",
+        "MLX_QWEN4_FUSED_GDN_VERIFY": "1",
+        "MLX_QWEN4_EAGER_DISPATCH": "1",
+        "MLX_QWEN4_MEGAKERNEL": "0",
+        "MLX_LM_COMPILED_DECODE": "0",
+        "MLX_LM_SEGMENTED_SELF_MTP": "1",
+        "MLX_LM_TRUE_BATCHED_SEGMENTED_MTP": "1",
+        "MLX_LM_SHARED_QSA_SUFFIX": "0"
+      }
+    },
+    "route_receipt": "candidate_validation",
+    "qualification": "candidate",
+    "max_context": 16384,
+    "max_lanes": 4,
+    "apcv2": {
+      "lookups": 18,
+      "hits": 7,
+      "misses": 11,
+      "cached_tokens": 422,
+      "stores": 33,
+      "clears": 0,
+      "lifetime": {
+        "lookups": 18,
+        "hits": 7,
+        "misses": 11,
+        "cached_tokens": 422,
+        "stores": 33
+      },
+      "cow_enabled": true,
+      "cow": {
+        "sources": 33,
+        "source_bytes": 7949907008,
+        "freeze_failures": 0,
+        "branches": 7,
+        "branch_failures": 0,
+        "stale_rejections": 0,
+        "invalidations": 17,
+        "active_leases": 0,
+        "peak_leases": 2,
+        "descriptor_aliases": 7988,
+        "descriptor_bytes": 9580881184,
+        "avoided_copy_bytes": 1630974176,
+        "materializations": 0,
+        "materialized_bytes": 0,
+        "fallback_deepcopies": 0,
+        "fallback_bytes": 0,
+        "freeze_ns": 89126957,
+        "branch_ns": 6378791,
+        "fallback_ns": 0,
+        "releases": 7,
+        "planes": {
+          "gdn_recurrent": {
+            "descriptor_aliases": 6068,
+            "descriptor_bytes": 9482675488,
+            "materializations": 0,
+            "materialized_bytes": 0
+          },
+          "qsa_summary": {
+            "descriptor_aliases": 960,
+            "descriptor_bytes": 13221888,
+            "materializations": 0,
+            "materialized_bytes": 0
+          },
+          "attention_kv": {
+            "descriptor_aliases": 960,
+            "descriptor_bytes": 84983808,
+            "materializations": 0,
+            "materialized_bytes": 0
+          }
+        },
+        "materialized_bytes_are_estimated": true,
+        "array_readbacks": 0
+      },
+      "max_tokens": 16384,
+      "max_entry_tokens": 363,
+      "overlength_rejections": 0,
+      "idle_disk": {
+        "enabled": true,
+        "idle_seconds": 180.0,
+        "resident_bytes": 3990722080,
+        "disk_bytes": 0,
+        "disk_max_bytes": 68719476736,
+        "disk_entries": 0,
+        "idle_spills": 0,
+        "pressure_spills": 0,
+        "restores": 0,
+        "restore_failures": 0,
+        "spill_failures": 0,
+        "disk_evictions": 0,
+        "bytes_written": 0,
+        "bytes_read": 0
+      },
+      "version": 2,
+      "layout_name": "qwen4-exp-layer-segments-v1",
+      "layer_segments": {
+        "schema": "apcv2.layer-segments.v1",
+        "entries": 16,
+        "disk_entries": 0,
+        "layers": 768,
+        "plane_layers": 960,
+        "segments": 1056,
+        "logical_bytes": 3990722080,
+        "by_plane": {
+          "gdn_recurrent": {
+            "layers": 576,
+            "segments": 576,
+            "logical_bytes": 3931841056,
+            "invalid": 0
+          },
+          "attention_kv": {
+            "layers": 192,
+            "segments": 240,
+            "logical_bytes": 50946048,
+            "invalid": 0
+          },
+          "qsa_summary": {
+            "layers": 192,
+            "segments": 240,
+            "logical_bytes": 7934976,
+            "invalid": 0
+          }
+        }
+      }
+    },
+    "scheduler": {
+      "prefill_rounds": 17,
+      "prefill_only_rounds": 16,
+      "decode_priority_release_rounds": 0,
+      "decode_priority_deferred_rounds": 0,
+      "adaptive_prefill_release_rounds": 1,
+      "adaptive_prefill_slack_deferred_rounds": 0,
+      "adaptive_prefill_deadline_forced_rounds": 0,
+      "adaptive_prefill_apc_priority_admissions": 0,
+      "adaptive_prefill_chunk_histogram": {
+        "20": 1
+      }
+    },
+    "metal_active_bytes": 75884625011,
+    "metal_peak_bytes": 78723081359,
+    "process_physical_footprint_bytes": 79865403592,
+    "execution": {
+      "fused_gdn": {
+        "fused_calls": 3924,
+        "fused_outproj_calls": 0,
+        "fallbacks": 18576,
+        "last_fallbacks": {
+          "rollback geometry not describable": 36
+        },
+        "decode_fallback_reasons": {
+          "uninitialized cache": 324,
+          "rollback geometry not describable": 15876,
+          "qkv shape (1, 31, 10240), expected (1, 1, 10240)": 36,
+          "qkv shape (2, 1, 10240), expected (1, 1, 10240)": 2340
+        },
+        "verify_calls": 0,
+        "verify_fallbacks": 0,
+        "verify_last_fallbacks": {},
+        "verify_fallback_reasons": {},
+        "catchup_calls": 0,
+        "catchup_fallbacks": 0,
+        "catchup_last_fallbacks": {}
+      },
+      "ple_compile": {
+        "enabled": true,
+        "cache_max": 32,
+        "counts": {
+          "builds": 15,
+          "hits": 610,
+          "fallbacks": 0,
+          "overflow": 0,
+          "skips": 0,
+          "retraces": 0,
+          "invalidations": 0
+        },
+        "last_receipt": {
+          "event": "builds",
+          "signature": "((1, 2016, 10240), (1, 2016, 2560), (1, 9, 10240), True, True, 'mlx.core.bfloat16', 'mlx.core.bfloat16', (0, True, 8))"
+        }
+      },
+      "indexed_qsa": {
+        "enabled": true,
+        "mode": "auto",
+        "min_query_width": 2,
+        "max_query_width": 8,
+        "min_context": 16384,
+        "max_context": 0,
+        "auto_min_context_m3": 16384,
+        "auto_min_context_m1": 65536,
+        "splits_override": 0,
+        "split_candidates": [
+          128,
+          64,
+          32,
+          16,
+          8
+        ],
+        "hpt_override": 0,
+        "hpt_candidates": [
+          12
+        ],
+        "hpt_ladder_enabled": false,
+        "mlx_version": "0.32.2.dev20260915+2a817ad94",
+        "mlx_build_hash": "2a817ad94",
+        "mlx_build_verified": false,
+        "mlx_build_allow_unverified": false,
+        "sdpa_header_verified": true,
+        "sdpa_header_sha256_prefix": "2100a4d1eaa8",
+        "counts": {
+          "dense_by_construction": 7416,
+          "width_out_of_range": 84
+        },
+        "query_width_counts": {
+          "1": {
+            "declined": 7296
+          },
+          "2-8": {},
+          "9-17": {},
+          ">17": {
+            "declined": 204
+          }
+        },
+        "candidate": null,
+        "geometry_candidates": {},
+        "fallbacks": 0,
+        "device_attestation": {
+          "expected": 0,
+          "observed": 0,
+          "mismatches": 0,
+          "pending": 0
+        },
+        "fused_merge": {
+          "engaged": false,
+          "fallbacks": 0,
+          "candidate": null,
+          "gate_engaged": false,
+          "gate_path": null
+        },
+        "fully_masked_output": "zero",
+        "last_decision": {
+          "engaged": false,
+          "reason": "width_out_of_range",
+          "query_width": 2016,
+          "physical_kv": 16352,
+          "splits": null,
+          "heads_per_threadgroup": null,
+          "candidate": null,
+          "exception_class": null,
+          "geometry_key": null,
+          "candidate_timings_ms": null,
+          "fully_masked_output": "zero"
+        }
+      },
+      "segmented_mtp": {
+        "requests": 0,
+        "engaged": 0,
+        "declined": 0,
+        "failures": 0,
+        "fallback_physical_b2": 0,
+        "physical_b2_formations": 0,
+        "b1_target_forwards": 0,
+        "b1_draft_forwards": 0,
+        "batched_target_forwards": 0,
+        "batched_draft_forwards": 0,
+        "true_batched_requests": 0,
+        "true_batched_engaged": 0,
+        "true_batched_declined": 0,
+        "live_width_change_deferrals": 0,
+        "layer_local_materializations": 0,
+        "recurrent_state_materializations": 0,
+        "recurrent_state_materialized_bytes": 0,
+        "row_state_splits": 0,
+        "segmented_attention_calls": 0,
+        "private_delta_requests": 0,
+        "private_delta_declines": 0,
+        "private_delta_preflight_declines": 0,
+        "private_delta_late_gather_fallbacks": 0,
+        "private_delta_attention_calls": 0,
+        "private_delta_rows": 0,
+        "private_delta_base_tokens_cumulative": 0,
+        "private_delta_base_tokens_last": 0,
+        "private_delta_base_tokens_min": 0,
+        "private_delta_base_tokens_max": 0,
+        "private_delta_duplicate_base_storage_bytes_not_formed_cumulative": 0,
+        "shared_qsa_rows": 0,
+        "shared_qsa_base_bytes": 0,
+        "shared_qsa_private_bytes": 0,
+        "shared_qsa_materializations": 0,
+        "shared_qsa_materialized_bytes": 0,
+        "shared_qsa_batched_selections": 0,
+        "shared_qsa_policy_checks": 0,
+        "shared_qsa_policy_admitted": 0,
+        "shared_qsa_policy_declined": 0,
+        "shared_qsa_policy_context_tokens_cumulative": 0,
+        "shared_qsa_policy_remaining_tokens_cumulative": 0,
+        "shared_qsa_policy_cutoff_tokens_cumulative": 0,
+        "exact_set_fold_requests": 0,
+        "exact_set_fold_declines": 0,
+        "exact_set_fold_preflight_declines": 0,
+        "exact_set_fold_private_fallbacks": 0,
+        "exact_set_fold_attention_calls": 0,
+        "exact_set_fold_rows": 0,
+        "exact_set_fold_device_proofs": 0,
+        "independent_lineages_consumed": 0,
+        "full_prefix_materializations": 0,
+        "full_prefix_materialized_bytes": 0,
+        "transaction_branches": 0,
+        "transaction_promotions": 0,
+        "transaction_rejections": 0,
+        "transaction_canonicalizations": 0,
+        "committed_cycles": 0,
+        "accepted_zero": 0,
+        "accepted_partial": 0,
+        "accepted_all": 0,
+        "async_qsa_promotion_requests": 0,
+        "async_qsa_promotion_queued": 0,
+        "async_qsa_promotion_engaged": 0,
+        "async_qsa_promotion_declined": 0,
+        "async_qsa_promotion_failures": 0,
+        "async_qsa_promotion_reserved_bytes": 0,
+        "async_qsa_promotion_patched_bytes": 0,
+        "async_qsa_promotion_wait_ns": 0,
+        "async_qsa_prequeue_requests": 0,
+        "async_qsa_prequeue_queued": 0,
+        "async_qsa_prequeue_bound": 0,
+        "async_qsa_prequeue_declined": 0,
+        "async_qsa_shared_prefix_fused_layers": 0,
+        "async_qsa_budget_checks": 0,
+        "async_qsa_budget_retained_segmented": 0,
+        "async_qsa_budget_promotions": 0,
+        "async_qsa_budget_remaining_tokens_cumulative": 0,
+        "async_qsa_budget_cutoff_tokens_cumulative": 0,
+        "device_synchronizations": 0,
+        "proposal_ns": 0,
+        "commit_ns": 0,
+        "private_delta_width_1_requests": 0,
+        "private_delta_width_1_engaged": 0,
+        "private_delta_width_1_declined": 0,
+        "private_delta_width_2_requests": 0,
+        "private_delta_width_2_engaged": 0,
+        "private_delta_width_2_declined": 0,
+        "private_delta_width_3_requests": 0,
+        "private_delta_width_3_engaged": 0,
+        "private_delta_width_3_declined": 0,
+        "private_delta_width_4_requests": 0,
+        "private_delta_width_4_engaged": 0,
+        "private_delta_width_4_declined": 0,
+        "private_delta_width_5_requests": 0,
+        "private_delta_width_5_engaged": 0,
+        "private_delta_width_5_declined": 0,
+        "private_delta_width_6_requests": 0,
+        "private_delta_width_6_engaged": 0,
+        "private_delta_width_6_declined": 0,
+        "private_delta_width_7_requests": 0,
+        "private_delta_width_7_engaged": 0,
+        "private_delta_width_7_declined": 0,
+        "private_delta_width_8_requests": 0,
+        "private_delta_width_8_engaged": 0,
+        "private_delta_width_8_declined": 0,
+        "private_delta_width_9_requests": 0,
+        "private_delta_width_9_engaged": 0,
+        "private_delta_width_9_declined": 0,
+        "private_delta_width_other_requests": 0,
+        "private_delta_width_other_engaged": 0,
+        "private_delta_width_other_declined": 0,
+        "private_delta_decline_reasons": {},
+        "exact_set_fold_decline_reasons": {},
+        "environment_enabled": true,
+        "true_batched_environment_enabled": true,
+        "qsa_private_delta_environment_enabled": true,
+        "qsa_exact_set_fold_environment_enabled": true,
+        "shared_qsa_suffix_environment_enabled": false,
+        "async_qsa_promotion_environment_enabled": false,
+        "timing_enabled": false,
+        "counter_scope": "segmented_mechanism_only",
+        "array_readbacks": 0
+      }
+    },
+    "admission": {},
+    "headroom_bytes": 41302550328,
+    "healthy": true,
+    "error": null,
+    "inflight": 0,
+    "queue_depth": 0,
+    "counts": {
+      "admitted": 21,
+      "cycles": 643,
+      "multi_request_cycles": 229,
+      "completed": 20,
+      "cancelled": 1
+    },
+    "recent_receipts": [
+      {
+        "request_id": "chatcmpl-34bdbc8f7ce94842831cee2a8b6186b8",
+        "cache": "apcv2",
+        "cached_tokens": 0,
+        "profile": "flash-next-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "ordinary_compute_width": 1,
+        "mtp": null,
+        "prompt_tokens": 19,
+        "completion_tokens": 5,
+        "ttft_seconds": 0.756917208986124,
+        "elapsed_seconds": 0.8459927089861594
+      },
+      {
+        "request_id": "chatcmpl-a830730f269a43e9b10fd6871db8cca3",
+        "cache": "apcv2",
+        "cached_tokens": 18,
+        "profile": "flash-next-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "ordinary_compute_width": 1,
+        "mtp": null,
+        "prompt_tokens": 19,
+        "completion_tokens": 5,
+        "ttft_seconds": 0.06130995799321681,
+        "elapsed_seconds": 0.1318296669924166
+      },
+      {
+        "request_id": "chatcmpl-402e9958aaa34178969063ff44ee67bc",
+        "cache": "apcv2",
+        "cached_tokens": 18,
+        "profile": "flash-next-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "ordinary_compute_width": 1,
+        "mtp": null,
+        "prompt_tokens": 19,
+        "completion_tokens": 5,
+        "ttft_seconds": 0.05884212499950081,
+        "elapsed_seconds": 0.12979016700410284
+      },
+      {
+        "request_id": "chatcmpl-2e131c357f934b118f711552cc7b27be",
+        "cache": "apcv2",
+        "cached_tokens": 0,
+        "profile": "flash-next-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "ordinary_compute_width": 1,
+        "mtp": null,
+        "prompt_tokens": 279,
+        "completion_tokens": 26,
+        "ttft_seconds": 0.41621250001480803,
+        "elapsed_seconds": 0.95114495800226
+      },
+      {
+        "request_id": "chatcmpl-c6aab041a5ce4972a88a70efcc3c89a3",
+        "cache": "apcv2",
+        "cached_tokens": 305,
+        "profile": "flash-next-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "ordinary_compute_width": 1,
+        "mtp": null,
+        "prompt_tokens": 337,
+        "completion_tokens": 26,
+        "ttft_seconds": 0.19057083400548436,
+        "elapsed_seconds": 0.6537874590139836
+      },
+      {
+        "request_id": "chatcmpl-8beda3a2b9d646239c8aad953b29f620",
+        "cache": "apcv2",
+        "cached_tokens": 0,
+        "profile": "flash-next-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "ordinary_compute_width": 1,
+        "mtp": null,
+        "prompt_tokens": 62,
+        "completion_tokens": 41,
+        "ttft_seconds": 0.24394233300699852,
+        "elapsed_seconds": 1.1273478750081267
+      },
+      {
+        "request_id": "chatcmpl-030d20e6ec23440bb0d3a52ca424adaf",
+        "cache": "apcv2",
+        "cached_tokens": 18,
+        "profile": "flash-next-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "ordinary_compute_width": 1,
+        "mtp": null,
+        "prompt_tokens": 19,
+        "completion_tokens": 4,
+        "ttft_seconds": 0.06493158300872892,
+        "elapsed_seconds": 0.11873083299724385
+      },
+      {
+        "request_id": "chatcmpl-d39936dbc53c42ce955e00aef3fb8213",
+        "cache": "apcv2",
+        "cached_tokens": 0,
+        "profile": "flash-next-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "ordinary_compute_width": 1,
+        "mtp": null,
+        "prompt_tokens": 19,
+        "completion_tokens": 64,
+        "ttft_seconds": 0.14209287500125356,
+        "elapsed_seconds": 1.5846839580044616
+      },
+      {
+        "request_id": "chatcmpl-ddbc52a30c594824bcf3716ea8557b1e",
+        "cache": "apcv2",
+        "cached_tokens": 18,
+        "profile": "flash-next-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "ordinary_compute_width": 1,
+        "mtp": null,
+        "prompt_tokens": 19,
+        "completion_tokens": 64,
+        "ttft_seconds": 0.06430791699676774,
+        "elapsed_seconds": 1.2535157919919584
+      },
+      {
+        "request_id": "chatcmpl-d3954da6122948ab9cffee589d828df6",
+        "cache": "apcv2",
+        "cached_tokens": 0,
+        "profile": "flash-next-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "ordinary_compute_width": 4,
+        "mtp": null,
+        "prompt_tokens": 21,
+        "completion_tokens": 160,
+        "ttft_seconds": 0.33080329198855907,
+        "elapsed_seconds": 5.476126749999821
+      },
+      {
+        "request_id": "chatcmpl-b26b1ae47ebf4c6aab4cc5766701ad73",
+        "cache": "apcv2",
+        "cached_tokens": 0,
+        "profile": "flash-next-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "ordinary_compute_width": 4,
+        "mtp": null,
+        "prompt_tokens": 21,
+        "completion_tokens": 160,
+        "ttft_seconds": 0.3301455419859849,
+        "elapsed_seconds": 5.478084917005617
+      },
+      {
+        "request_id": "chatcmpl-3cc5205902764a98a089b138b4a3ae7b",
+        "cache": "apcv2",
+        "cached_tokens": 0,
+        "profile": "flash-next-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "ordinary_compute_width": 4,
+        "mtp": null,
+        "prompt_tokens": 21,
+        "completion_tokens": 160,
+        "ttft_seconds": 0.4412740830157418,
+        "elapsed_seconds": 5.555356750002829
+      },
+      {
+        "request_id": "chatcmpl-405b2a3b36c44be6ace85d61b7c43389",
+        "cache": "apcv2",
+        "cached_tokens": 0,
+        "profile": "flash-next-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "ordinary_compute_width": 4,
+        "mtp": null,
+        "prompt_tokens": 21,
+        "completion_tokens": 160,
+        "ttft_seconds": 0.44094991698511876,
+        "elapsed_seconds": 5.557622708991403
+      },
+      {
+        "request_id": "chatcmpl-81272216ac654cc49b69d952d4a2e19b",
+        "cache": "apcv2",
+        "cached_tokens": 0,
+        "profile": "flash-next-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "ordinary_compute_width": 1,
+        "mtp": null,
+        "prompt_tokens": 23,
+        "completion_tokens": 64,
+        "ttft_seconds": 0.14402816697838716,
+        "elapsed_seconds": 1.41665266698692
+      },
+      {
+        "request_id": "chatcmpl-e4ff51bee14848de82c345ce047f5475",
+        "cache": "apcv2",
+        "cached_tokens": 0,
+        "profile": "flash-next-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "ordinary_compute_width": 1,
+        "mtp": null,
+        "prompt_tokens": 24,
+        "completion_tokens": 64,
+        "ttft_seconds": 0.14126050000777468,
+        "elapsed_seconds": 1.3991171660018153
+      },
+      {
+        "request_id": "chatcmpl-5636f58d2e984d25b25aefeabaa1e045",
+        "cache": "apcv2",
+        "cached_tokens": 22,
+        "profile": "flash-next-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "ordinary_compute_width": 2,
+        "mtp": null,
+        "prompt_tokens": 23,
+        "completion_tokens": 64,
+        "ttft_seconds": 0.08582666699658148,
+        "elapsed_seconds": 1.5397504169959575
+      },
+      {
+        "request_id": "chatcmpl-f44c6c618da0440593ba9eccdb797de9",
+        "cache": "apcv2",
+        "cached_tokens": 23,
+        "profile": "flash-next-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "ordinary_compute_width": 2,
+        "mtp": null,
+        "prompt_tokens": 24,
+        "completion_tokens": 64,
+        "ttft_seconds": 0.08417937500053085,
+        "elapsed_seconds": 1.5410161250038072
+      },
+      {
+        "request_id": "chatcmpl-c911278a2c694731ae7522d41a4331e3",
+        "cache": "apcv2",
+        "cached_tokens": 0,
+        "profile": "flash-next-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "ordinary_compute_width": 1,
+        "mtp": null,
+        "prompt_tokens": 16353,
+        "completion_tokens": 3,
+        "ttft_seconds": 12.730067791999318,
+        "elapsed_seconds": 12.78239800001029
+      },
+      {
+        "request_id": "chatcmpl-234572fe45c54296b15d137fd07a2ef9",
+        "cache": "apcv2",
+        "cached_tokens": 16352,
+        "profile": "flash-next-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "ordinary_compute_width": 1,
+        "mtp": null,
+        "prompt_tokens": 16353,
+        "completion_tokens": 3,
+        "ttft_seconds": 0.08996295800898224,
+        "elapsed_seconds": 0.13962970799184404
+      },
+      {
+        "request_id": "chatcmpl-9e1f49e5f9f84f72bd0f193042481dde",
+        "cache": "apcv2",
+        "cached_tokens": 18,
+        "profile": "flash-next-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "ordinary_compute_width": 1,
+        "mtp": null,
+        "prompt_tokens": 19,
+        "completion_tokens": 5,
+        "ttft_seconds": 0.0820717079914175,
+        "elapsed_seconds": 0.1574150410015136
+      }
+    ]
+  }
+}

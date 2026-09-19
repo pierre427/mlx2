@@ -1,0 +1,71 @@
+round 00    5.3s     8 tok     1.5 tok/s errors=16
+round 01    0.1s     0 tok     0.0 tok/s errors=20
+round 02    0.0s     0 tok     0.0 tok/s errors=20
+round 03    0.0s     0 tok     0.0 tok/s errors=20
+round 04    0.0s     0 tok     0.0 tok/s errors=20
+round 05    0.0s     0 tok     0.0 tok/s errors=20
+round 06    0.0s     0 tok     0.0 tok/s errors=20
+round 07    0.0s     0 tok     0.0 tok/s errors=20
+round 08    0.0s     0 tok     0.0 tok/s errors=20
+round 09    0.0s     0 tok     0.0 tok/s errors=20
+round 10    0.0s     0 tok     0.0 tok/s errors=20
+round 11    0.0s     0 tok     0.0 tok/s errors=20
+round 12    0.0s     0 tok     0.0 tok/s errors=20
+round 13    0.0s     0 tok     0.0 tok/s errors=20
+round 14    0.0s     0 tok     0.0 tok/s errors=20
+round 15    0.0s     0 tok     0.0 tok/s errors=20
+round 16    0.0s     0 tok     0.0 tok/s errors=20
+round 17    0.0s     0 tok     0.0 tok/s errors=20
+round 18    0.0s     0 tok     0.0 tok/s errors=20
+round 19    0.0s     0 tok     0.0 tok/s errors=20
+Traceback (most recent call last):
+  File "~/.local/share/uv/python/cpython-3.12.13-macos-aarch64-none/lib/python3.12/urllib/request.py", line 1344, in do_open
+    h.request(req.get_method(), req.selector, req.data, headers,
+  File "~/.local/share/uv/python/cpython-3.12.13-macos-aarch64-none/lib/python3.12/http/client.py", line 1358, in request
+    self._send_request(method, url, body, headers, encode_chunked)
+  File "~/.local/share/uv/python/cpython-3.12.13-macos-aarch64-none/lib/python3.12/http/client.py", line 1404, in _send_request
+    self.endheaders(body, encode_chunked=encode_chunked)
+  File "~/.local/share/uv/python/cpython-3.12.13-macos-aarch64-none/lib/python3.12/http/client.py", line 1353, in endheaders
+    self._send_output(message_body, encode_chunked=encode_chunked)
+  File "~/.local/share/uv/python/cpython-3.12.13-macos-aarch64-none/lib/python3.12/http/client.py", line 1113, in _send_output
+    self.send(msg)
+  File "~/.local/share/uv/python/cpython-3.12.13-macos-aarch64-none/lib/python3.12/http/client.py", line 1057, in send
+    self.connect()
+  File "~/.local/share/uv/python/cpython-3.12.13-macos-aarch64-none/lib/python3.12/http/client.py", line 1023, in connect
+    self.sock = self._create_connection(
+                ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "~/.local/share/uv/python/cpython-3.12.13-macos-aarch64-none/lib/python3.12/socket.py", line 865, in create_connection
+    raise exceptions[0]
+  File "~/.local/share/uv/python/cpython-3.12.13-macos-aarch64-none/lib/python3.12/socket.py", line 850, in create_connection
+    sock.connect(sa)
+ConnectionRefusedError: [Errno 61] Connection refused
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "~/Desktop/mlx2/qualification/runs/sanity-20x20-20260918/sanity_20x20.py", line 228, in <module>
+    main()
+  File "~/Desktop/mlx2/qualification/runs/sanity-20x20-20260918/sanity_20x20.py", line 196, in main
+    after = status()
+            ^^^^^^^^
+  File "~/Desktop/mlx2/qualification/runs/sanity-20x20-20260918/sanity_20x20.py", line 164, in status
+    with urllib.request.urlopen(BASE + "/v1/status", timeout=30) as response:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "~/.local/share/uv/python/cpython-3.12.13-macos-aarch64-none/lib/python3.12/urllib/request.py", line 215, in urlopen
+    return opener.open(url, data, timeout)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "~/.local/share/uv/python/cpython-3.12.13-macos-aarch64-none/lib/python3.12/urllib/request.py", line 515, in open
+    response = self._open(req, data)
+               ^^^^^^^^^^^^^^^^^^^^^
+  File "~/.local/share/uv/python/cpython-3.12.13-macos-aarch64-none/lib/python3.12/urllib/request.py", line 532, in _open
+    result = self._call_chain(self.handle_open, protocol, protocol +
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "~/.local/share/uv/python/cpython-3.12.13-macos-aarch64-none/lib/python3.12/urllib/request.py", line 492, in _call_chain
+    result = func(*args)
+             ^^^^^^^^^^^
+  File "~/.local/share/uv/python/cpython-3.12.13-macos-aarch64-none/lib/python3.12/urllib/request.py", line 1373, in http_open
+    return self.do_open(http.client.HTTPConnection, req)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "~/.local/share/uv/python/cpython-3.12.13-macos-aarch64-none/lib/python3.12/urllib/request.py", line 1347, in do_open
+    raise URLError(err)
+urllib.error.URLError: <urlopen error [Errno 61] Connection refused>

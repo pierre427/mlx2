@@ -1,0 +1,161 @@
+{
+  "arguments": {
+    "entries": 8,
+    "entry_gib": 0.01,
+    "max_total_gib": 8.0,
+    "rescan_only": true,
+    "scratch_root": "/private/tmp"
+  },
+  "completed_at_unix": 1789782555.8788118,
+  "device": "cpu",
+  "guardrails": {
+    "cleanup_on_exit": true,
+    "minimum_free_memory_bytes": 25769803776,
+    "requested_resident_bytes_per_entry": 10737418,
+    "requested_total_bytes": 85899344
+  },
+  "machine": {
+    "hw_memsize_bytes": 137438953472,
+    "machine": "arm64",
+    "platform": "macOS-26.7-arm64-arm-64bit",
+    "python": "3.12.13",
+    "scratch_filesystem": {
+      "free_bytes": 767288012800,
+      "path": "/private/tmp",
+      "total_bytes": 3996276899840,
+      "used_bytes": 3228988887040
+    }
+  },
+  "peak_rss_bytes": 151240704,
+  "schema": "mlx2.apcv2-persistence-benchmark.v1",
+  "source": {
+    "git_head": "08e605986e1b66937263fce941df816861290acb",
+    "requested_base_revision": "271b21e",
+    "script_sha256": "09aea567c1e0f83365f5f2123c7a54e9ca0e0511520682d4e9f1c3718725a006"
+  },
+  "spill": {
+    "digest_computed_once_per_payload": true,
+    "digest_seconds": 0.036866707843728364,
+    "manifest_write_calls": 32,
+    "manifest_write_seconds": 0.012344542017672211,
+    "mlx_clear_cache_seconds": 0.0001184600405395031,
+    "park_latency_seconds": {
+      "count": 8,
+      "max": 0.020558874995913357,
+      "mean": 0.016069807497842703,
+      "min": 0.012305332988034934,
+      "p50": 0.01699933403870091
+    },
+    "payload_digest_calls": 24,
+    "payload_files": 24,
+    "payload_write_and_fsync_seconds": 0.03471062192693353,
+    "per_entry_breakdown": [
+      {
+        "digest_seconds": 0.004519374982919544,
+        "manifest_write_seconds": 0.0011498749954625964,
+        "mlx_clear_cache_seconds": 3.2875046599656343e-05,
+        "other_seconds": 0.0014298349269665778,
+        "payload_write_and_fsync_seconds": 0.006193457054905593,
+        "total_seconds": 0.013325417006853968
+      },
+      {
+        "digest_seconds": 0.004412417009007186,
+        "manifest_write_seconds": 0.0010815010173246264,
+        "mlx_clear_cache_seconds": 1.3042008504271507e-05,
+        "other_seconds": 0.00277012400329113,
+        "payload_write_and_fsync_seconds": 0.00402824894990772,
+        "total_seconds": 0.012305332988034934
+      },
+      {
+        "digest_seconds": 0.004698332981206477,
+        "manifest_write_seconds": 0.0013227069284766912,
+        "mlx_clear_cache_seconds": 9.417010005563498e-06,
+        "other_seconds": 0.004162294149864465,
+        "payload_write_and_fsync_seconds": 0.0038329579401761293,
+        "total_seconds": 0.014025709009729326
+      },
+      {
+        "digest_seconds": 0.004838666005525738,
+        "manifest_write_seconds": 0.001301499956753105,
+        "mlx_clear_cache_seconds": 1.6208970919251442e-05,
+        "other_seconds": 0.005194459052290767,
+        "payload_write_and_fsync_seconds": 0.003974207967985421,
+        "total_seconds": 0.015325041953474283
+      },
+      {
+        "digest_seconds": 0.0046427499619312584,
+        "manifest_write_seconds": 0.0011794590391218662,
+        "mlx_clear_cache_seconds": 1.1750031262636185e-05,
+        "other_seconds": 0.006553416955284774,
+        "payload_write_and_fsync_seconds": 0.004611958051100373,
+        "total_seconds": 0.01699933403870091
+      },
+      {
+        "digest_seconds": 0.004634582961443812,
+        "manifest_write_seconds": 0.0012042499729432166,
+        "mlx_clear_cache_seconds": 1.087499549612403e-05,
+        "other_seconds": 0.00782095908652991,
+        "payload_write_and_fsync_seconds": 0.00397874996997416,
+        "total_seconds": 0.017649416986387223
+      },
+      {
+        "digest_seconds": 0.004666582972276956,
+        "manifest_write_seconds": 0.0010919159976765513,
+        "mlx_clear_cache_seconds": 1.4582998119294643e-05,
+        "other_seconds": 0.008828791964333504,
+        "payload_write_and_fsync_seconds": 0.003767459071241319,
+        "total_seconds": 0.018369333003647625
+      },
+      {
+        "digest_seconds": 0.004454000969417393,
+        "manifest_write_seconds": 0.0011281260522082448,
+        "mlx_clear_cache_seconds": 9.70897963270545e-06,
+        "other_seconds": 0.010643456073012203,
+        "payload_write_and_fsync_seconds": 0.00432358292164281,
+        "total_seconds": 0.020558874995913357
+      }
+    ],
+    "per_entry_park_seconds": [
+      0.013325417006853968,
+      0.012305332988034934,
+      0.014025709009729326,
+      0.015325041953474283,
+      0.01699933403870091,
+      0.017649416986387223,
+      0.018369333003647625,
+      0.020558874995913357
+    ],
+    "throughput_gib_per_second": 0.622428240489489,
+    "total_seconds_including_fsync_digest_manifest": 0.12855845998274162
+  },
+  "startup_rescan": {
+    "entries": 8,
+    "internal_seconds": 0.0022837499855086207,
+    "metadata_only_confirmed": true,
+    "payload_read_bytes": 0,
+    "payload_read_calls": 0,
+    "total_payload_bytes": 85919120,
+    "wall_seconds": 0.0030593329574912786
+  },
+  "synthetic": {
+    "persisted_total_bytes": 85919120,
+    "requested_entry_bytes": 10737418,
+    "resident_entry_bytes": [
+      10737418,
+      10737418,
+      10737418,
+      10737418,
+      10737418,
+      10737418,
+      10737418,
+      10737418
+    ],
+    "topology": {
+      "mtp_draft_kv_planes": 2,
+      "mtp_tail_hidden": true,
+      "recurrent_arrays_per_plane": 2,
+      "target_kv_planes": 4,
+      "target_recurrent_planes": 4
+    }
+  }
+}

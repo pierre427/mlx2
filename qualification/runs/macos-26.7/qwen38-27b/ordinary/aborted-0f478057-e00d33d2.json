@@ -1,0 +1,16 @@
+{
+  "schema": "mlx2.qualification-abort.v1",
+  "timestamp": 1789522766.034129,
+  "runtime_source_sha256": "0f4780573f8d6c3639f13c566f721d75ed322c7f978ffc69a4d1ab50131417d8",
+  "qualification_harness_sha256": "e00d33d2fda6406396754e8078341ecba012ff944ded9c7778463a9a420e53c0",
+  "reason": "aborted by root: independent audit found a src-level harness-selection binding gap that will change runtime source identity",
+  "qualification_complete": false,
+  "mtp_started": false,
+  "artifacts": [
+    "server-0f478057-e00d33d2.log",
+    "qualify-0f478057-e00d33d2.log",
+    "status-initial-0f478057-e00d33d2.json"
+  ],
+  "route_receipt_written": false,
+  "partial_checks_log_only": true
+}

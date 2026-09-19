@@ -1,0 +1,41 @@
+[transformers] PyTorch was not found. Models won't be available and only tokenizers, configuration and file/data utilities can be used.
+2026-09-16 19:58:13,710 INFO ubc_evict: evicted 5070.2 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-00001-of-00005.safetensors
+2026-09-16 19:58:13,748 INFO ubc_evict: evicted 5098.4 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-00002-of-00005.safetensors
+2026-09-16 19:58:13,786 INFO ubc_evict: evicted 5097.1 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-00003-of-00005.safetensors
+2026-09-16 19:58:13,824 INFO ubc_evict: evicted 5036.3 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-00004-of-00005.safetensors
+2026-09-16 19:58:13,842 INFO ubc_evict: evicted 2311.0 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-00005-of-00005.safetensors
+2026-09-16 19:58:13,842 INFO ubc_evict: evicted 851.8 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-vision-00001-of-00001.safetensors
+2026-09-16 19:58:13,842 INFO ubc_evict: pass complete total_mb=23464.8 elapsed_s=0.17
+2026-09-16 19:58:23,561 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 19:58:34,612 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 19:58:35,083 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 19:58:35,209 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 19:58:35,326 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 19:58:35,368 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 19:58:35,709 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 19:58:35,963 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 19:58:36,062 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 19:58:36,140 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 19:58:39,329 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 19:58:39,374 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 19:58:39,768 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 19:58:39,986 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 19:58:44,314 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 19:58:44,380 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 19:58:44,980 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 19:58:45,542 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 19:58:47,598 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 19:58:47,598 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 19:58:47,627 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 19:58:47,627 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 19:58:48,221 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 19:58:48,817 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 19:58:49,498 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 19:58:49,498 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 19:58:49,499 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 19:58:49,567 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 19:58:49,567 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 19:58:49,779 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 19:58:49,878 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 19:58:49,879 INFO "GET /health HTTP/1.1" 200 -
+2026-09-16 19:58:49,879 INFO "GET /v1/status HTTP/1.1" 200 -

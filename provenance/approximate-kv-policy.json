@@ -1,0 +1,23 @@
+{
+  "component": "explicit approximate KV operation control plane",
+  "source_repository": "original mlx2 implementation informed by Rapid-MLX K8V4 and TurboQuant experiments",
+  "source_revision": "ee101f1bcfb20f343916edd877969aa2a2ac1b98",
+  "source_paths": [
+    "vllm_mlx/cache/quantized_kv.py",
+    "vllm_mlx/cache/turboquant.py"
+  ],
+  "license": "Apache-2.0",
+  "destination_paths": [
+    "src/mlx2/runtime/approximate_state.py"
+  ],
+  "modifications": [
+    "Added no peer tensor math; defined only an adapter-owned, revision-bound selection seam.",
+    "Kept approximate operations default-off and required explicit qualification evidence before selection.",
+    "Privately deep-staged source state before adapter execution so a rejected in-place operation cannot corrupt the published state.",
+    "Required adapters to advance the state revision and emitted an approximate-fidelity receipt."
+  ],
+  "validation": [
+    "tests/test_approximate_state.py",
+    "2026-09-18 Apple-GPU synthetic private-stage smoke advanced r1 to r1:k8v4-smoke and preserved the original revision; this validates the control seam, not K8V4 tensor math."
+  ]
+}

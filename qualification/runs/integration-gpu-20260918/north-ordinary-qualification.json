@@ -1,0 +1,3315 @@
+{
+  "schema": "mlx2.serving-qualification.v1",
+  "timestamp": 1789749830.774805,
+  "runtime": {
+    "source_sha256": "cc2de1c74f7ace7ef772b6a2e0b0ec47f53b7a70d3a8bed612c054686ca7f1bd",
+    "mlx_native_sha256": "30335939714520c3306cfa58597100aae08bbeabdc60a4bc8c35c32c607450a8",
+    "python": "3.12.13",
+    "macos": "26.7",
+    "mlx": "0.32.2.dev20260915+2a817ad94",
+    "transformers": "5.12.1",
+    "dependencies": {
+      "numpy": "2.5.1",
+      "tokenizers": "0.22.2",
+      "jinja2": "3.1.6",
+      "psutil": "7.2.2",
+      "regex": "2026.9.10",
+      "safetensors": "0.8.0"
+    }
+  },
+  "qualification_harness": {
+    "schema": "mlx2.qualification-harness.v1",
+    "name": "scripts/qualify_serving.py",
+    "sha256": "7d9e1a3b3b0b111dcf7025aae2f8594e307fac03fbb2bc6a5d8eaad6af023720"
+  },
+  "artifact": "6c88a4d3a5387abe2d97ac3d5eb70e484fb33615bb0c0f2ff8e7ef22b442f2e4",
+  "settings": {
+    "max_context": 32768,
+    "max_lanes": 4,
+    "max_inflight": 8,
+    "prefill_step": 2048,
+    "cache_bytes": 2147483648,
+    "disk_cache": true,
+    "host_prompt_cache_entries": 128,
+    "host_prompt_cache_tokens": 1048576,
+    "coalesce_window_ms": 5.0,
+    "batch_cohort_timeout_ms": 1000.0,
+    "mtp": false,
+    "tenant_scoped_cache": false,
+    "environment": {
+      "HF_HUB_OFFLINE": "1",
+      "TRANSFORMERS_OFFLINE": "1",
+      "MLX_ENABLE_TF32": "0",
+      "MLX_LM_COMPILED_DECODE": "0",
+      "MLX_LM_SEGMENTED_SELF_MTP": "0",
+      "MLX_LM_TRUE_BATCHED_SEGMENTED_MTP": "0",
+      "MLX_LM_SHARED_QSA_SUFFIX": "0"
+    },
+    "adaptive_mtp_depth": {
+      "enabled": false,
+      "ewma_alpha": 0.25,
+      "shrink_gate": 0.35,
+      "grow_gate": 0.8,
+      "loss_rounds": 3,
+      "gain_rounds": 3,
+      "park_rounds": 4
+    },
+    "spomin_live_surgery": {
+      "enabled": false,
+      "capacity_tokens": 0,
+      "segment_tokens": 1024,
+      "strategy": "oldest_contiguous",
+      "protect_prefix_segments": 1
+    },
+    "cache_capsules": {
+      "enabled": false,
+      "backend": "gpu",
+      "fallback": "gpu",
+      "deadline_ms": 50.0,
+      "verify_raw_bits": false
+    },
+    "persistent_block_bytes": 0,
+    "approximate_kv": {
+      "enabled": false,
+      "operation": null,
+      "start_tokens": 0,
+      "evidence": [],
+      "descriptor": null
+    },
+    "execution_policy": {
+      "persistent": true,
+      "num_draft": 0,
+      "rate_gate": false,
+      "prefill_step_size": 2048,
+      "segment_aware_live_tip": false,
+      "segment_aware_cohort_size": 4
+    },
+    "prompt_lookup": {},
+    "decode_time_fairness": {
+      "enabled": true,
+      "fair_share": 0.5,
+      "stall_target_ms": 500.0
+    },
+    "speculation": "ordinary",
+    "cache_budget": {
+      "schema": "north-mini-code-cache-geometry-v1",
+      "global_layers": 13,
+      "sliding_layers": 36,
+      "kv_heads": 4,
+      "head_dim": 128,
+      "sliding_window": 4096,
+      "item_bytes": 4,
+      "allocation_step": 256,
+      "checkpoint_copies": 4,
+      "transcript_bytes_per_token": 16,
+      "transient_gib_per_lane": 3.1,
+      "bound": "fp32-global-plus-window-and-restore-snapshots",
+      "workspace": "3.1-GiB-per-lane conservative static assumption; live qualification pending"
+    }
+  },
+  "coverage": {
+    "response_format_json_object": false,
+    "strict_json_schema": true,
+    "explicit_grammar": false,
+    "physical_n2": false,
+    "overload_429_retry_after": false,
+    "latency_ttft_itl_percentiles": false,
+    "tenant_jain_fairness": false,
+    "progress_events": false
+  },
+  "checks": {
+    "unit_tests": {
+      "passed": true,
+      "evidence": {
+        "path": "~/Desktop/mlx2/qualification/runs/integration-gpu-20260918/preflight.json",
+        "sha256": "af1f8102bcf0f9b944b23d09c9e69459c2b5ca1ac47fdce1e58f0ba28461e63d",
+        "identity": {
+          "git": {
+            "revision": "dc8fccf5b9b611bf5db90545fbf2195a91ce389d"
+          },
+          "runtime": {
+            "source_sha256": "cc2de1c74f7ace7ef772b6a2e0b0ec47f53b7a70d3a8bed612c054686ca7f1bd",
+            "mlx_native_sha256": "30335939714520c3306cfa58597100aae08bbeabdc60a4bc8c35c32c607450a8",
+            "python": "3.12.13",
+            "macos": "26.7",
+            "mlx": "0.32.2.dev20260915+2a817ad94",
+            "transformers": "5.12.1",
+            "dependencies": {
+              "numpy": "2.5.1",
+              "tokenizers": "0.22.2",
+              "jinja2": "3.1.6",
+              "psutil": "7.2.2",
+              "regex": "2026.9.10",
+              "safetensors": "0.8.0"
+            }
+          },
+          "qualification_harness": {
+            "schema": "mlx2.qualification-harness.v1",
+            "name": "scripts/qualify_serving.py",
+            "sha256": "7d9e1a3b3b0b111dcf7025aae2f8594e307fac03fbb2bc6a5d8eaad6af023720"
+          },
+          "test_source_sha256": "c8ffc39edc8d8f511942e40b30b8013b9cbef5f8c9ca7c9dfa9134c3c060d656"
+        },
+        "passed": true
+      }
+    },
+    "hermes_client": {
+      "passed": true,
+      "evidence": {
+        "id": "chatcmpl-2944d80a1f3c4806928a620c864fe91a",
+        "object": "chat.completion",
+        "created": 1789749830,
+        "model": "North-Mini-Code-1.0-mlx-4bit",
+        "choices": [
+          {
+            "index": 0,
+            "finish_reason": "stop",
+            "message": {
+              "role": "assistant",
+              "content": "HERMES_READY"
+            }
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 123,
+          "completion_tokens": 6,
+          "total_tokens": 129,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          }
+        },
+        "mlx2": {
+          "request_id": "chatcmpl-2944d80a1f3c4806928a620c864fe91a",
+          "cache": "apcv2",
+          "cached_tokens": 0,
+          "parallel_prefill": null,
+          "profile": "north-mini-code-apcv2-ordinary",
+          "qualification": "candidate",
+          "route_receipt": "candidate_validation",
+          "request_controls": {
+            "logprobs": false,
+            "top_logprobs": 0,
+            "logprob_semantics": null,
+            "thinking": false,
+            "sampling": {
+              "temperature": 0
+            },
+            "min_tokens": 0,
+            "batch_cohort": null,
+            "reasoning_effort": "none",
+            "effort_semantics": "thinking_toggle",
+            "context_limit": 32768,
+            "structured_output": null
+          },
+          "ordinary_compute_width": 1,
+          "mtp": null,
+          "speculation": null,
+          "spomin_live_surgery": null,
+          "approximate_kv": null,
+          "cache_capsule": null,
+          "prompt_tokens": 123,
+          "completion_tokens": 6,
+          "ttft_seconds": 0.26353550000931136,
+          "elapsed_seconds": 0.3089219589892309
+        }
+      }
+    },
+    "logprobs": {
+      "passed": true,
+      "evidence": {
+        "reference": {
+          "id": "chatcmpl-895bfa5c44714793a5714a980dcd9e7b",
+          "object": "chat.completion",
+          "created": 1789749831,
+          "model": "North-Mini-Code-1.0-mlx-4bit",
+          "choices": [
+            {
+              "index": 0,
+              "finish_reason": "length",
+              "message": {
+                "role": "assistant",
+                "content": "Compilers translate high\u2011level code"
+              }
+            }
+          ],
+          "usage": {
+            "prompt_tokens": 124,
+            "completion_tokens": 8,
+            "total_tokens": 132,
+            "prompt_tokens_details": {
+              "cached_tokens": 111
+            }
+          },
+          "mlx2": {
+            "request_id": "chatcmpl-895bfa5c44714793a5714a980dcd9e7b",
+            "cache": "apcv2",
+            "cached_tokens": 111,
+            "parallel_prefill": null,
+            "profile": "north-mini-code-apcv2-ordinary",
+            "qualification": "candidate",
+            "route_receipt": "candidate_validation",
+            "request_controls": {
+              "logprobs": false,
+              "top_logprobs": 0,
+              "logprob_semantics": null,
+              "thinking": false,
+              "sampling": {
+                "temperature": 0
+              },
+              "min_tokens": 0,
+              "batch_cohort": null,
+              "reasoning_effort": null,
+              "effort_semantics": "thinking_toggle",
+              "context_limit": 32768,
+              "structured_output": null
+            },
+            "ordinary_compute_width": 1,
+            "mtp": null,
+            "speculation": null,
+            "spomin_live_surgery": null,
+            "approximate_kv": null,
+            "cache_capsule": null,
+            "prompt_tokens": 124,
+            "completion_tokens": 8,
+            "ttft_seconds": 0.06741824999335222,
+            "elapsed_seconds": 0.12283683399436995
+          }
+        },
+        "response": {
+          "id": "chatcmpl-b26e023ee182415eba304cd7c8a8eb02",
+          "object": "chat.completion",
+          "created": 1789749831,
+          "model": "North-Mini-Code-1.0-mlx-4bit",
+          "choices": [
+            {
+              "index": 0,
+              "finish_reason": "length",
+              "logprobs": {
+                "content": [
+                  {
+                    "id": 255012,
+                    "token": "<|START_TEXT|>",
+                    "logprob": 0.0,
+                    "top_logprobs": [
+                      {
+                        "id": 255012,
+                        "token": "<|START_TEXT|>",
+                        "logprob": 0.0
+                      },
+                      {
+                        "id": 255014,
+                        "token": "<|START_ACTION|>",
+                        "logprob": -13.125
+                      },
+                      {
+                        "id": 255010,
+                        "token": "<|START_THINKING|>",
+                        "logprob": -17.0
+                      }
+                    ]
+                  },
+                  {
+                    "id": 4437,
+                    "token": "Comp",
+                    "logprob": -0.125,
+                    "top_logprobs": [
+                      {
+                        "id": 4437,
+                        "token": "Comp",
+                        "logprob": -0.125
+                      },
+                      {
+                        "id": 37,
+                        "token": "A",
+                        "logprob": -1.75
+                      },
+                      {
+                        "id": 102183,
+                        "token": "\u0120compilers",
+                        "logprob": -9.625
+                      }
+                    ]
+                  },
+                  {
+                    "id": 20463,
+                    "token": "ilers",
+                    "logprob": 0.0,
+                    "top_logprobs": [
+                      {
+                        "id": 20463,
+                        "token": "ilers",
+                        "logprob": 0.0
+                      },
+                      {
+                        "id": 102183,
+                        "token": "\u0120compilers",
+                        "logprob": -8.625
+                      },
+                      {
+                        "id": 2748,
+                        "token": "iles",
+                        "logprob": -9.625
+                      }
+                    ]
+                  },
+                  {
+                    "id": 10848,
+                    "token": "\u0120translate",
+                    "logprob": -0.125,
+                    "top_logprobs": [
+                      {
+                        "id": 10848,
+                        "token": "\u0120translate",
+                        "logprob": -0.125
+                      },
+                      {
+                        "id": 4817,
+                        "token": "\u0120transform",
+                        "logprob": -2.125
+                      },
+                      {
+                        "id": 436,
+                        "token": "\u0120are",
+                        "logprob": -4.0
+                      }
+                    ]
+                  },
+                  {
+                    "id": 1398,
+                    "token": "\u0120high",
+                    "logprob": 0.0,
+                    "top_logprobs": [
+                      {
+                        "id": 1398,
+                        "token": "\u0120high",
+                        "logprob": 0.0
+                      },
+                      {
+                        "id": 2858,
+                        "token": "\u0120human",
+                        "logprob": -5.625
+                      },
+                      {
+                        "id": 3149,
+                        "token": "\u0120source",
+                        "logprob": -6.125
+                      }
+                    ]
+                  },
+                  {
+                    "id": 50274,
+                    "token": "\u00e2\u0122\u0133",
+                    "logprob": -0.25,
+                    "top_logprobs": [
+                      {
+                        "id": 50274,
+                        "token": "\u00e2\u0122\u0133",
+                        "logprob": -0.25
+                      },
+                      {
+                        "id": 10674,
+                        "token": "-level",
+                        "logprob": -1.5
+                      },
+                      {
+                        "id": 1839,
+                        "token": "\u0120level",
+                        "logprob": -8.125
+                      }
+                    ]
+                  },
+                  {
+                    "id": 5614,
+                    "token": "level",
+                    "logprob": 0.0,
+                    "top_logprobs": [
+                      {
+                        "id": 5614,
+                        "token": "level",
+                        "logprob": 0.0
+                      },
+                      {
+                        "id": 1839,
+                        "token": "\u0120level",
+                        "logprob": -12.25
+                      },
+                      {
+                        "id": 24200,
+                        "token": "language",
+                        "logprob": -12.25
+                      }
+                    ]
+                  },
+                  {
+                    "id": 2363,
+                    "token": "\u0120code",
+                    "logprob": -0.75,
+                    "top_logprobs": [
+                      {
+                        "id": 2363,
+                        "token": "\u0120code",
+                        "logprob": -0.75
+                      },
+                      {
+                        "id": 11574,
+                        "token": "\u0120programming",
+                        "logprob": -0.875
+                      },
+                      {
+                        "id": 3149,
+                        "token": "\u0120source",
+                        "logprob": -2.0
+                      }
+                    ]
+                  }
+                ]
+              },
+              "message": {
+                "role": "assistant",
+                "content": "Compilers translate high\u2011level code"
+              }
+            }
+          ],
+          "usage": {
+            "prompt_tokens": 124,
+            "completion_tokens": 8,
+            "total_tokens": 132,
+            "prompt_tokens_details": {
+              "cached_tokens": 123
+            }
+          },
+          "mlx2": {
+            "request_id": "chatcmpl-b26e023ee182415eba304cd7c8a8eb02",
+            "cache": "apcv2",
+            "cached_tokens": 123,
+            "parallel_prefill": null,
+            "profile": "north-mini-code-apcv2-ordinary",
+            "qualification": "candidate",
+            "route_receipt": "candidate_validation",
+            "request_controls": {
+              "logprobs": true,
+              "top_logprobs": 3,
+              "logprob_semantics": "execution_target: ordinary=post_processor_pre_sampler; mtp=transformed_target_verifier",
+              "thinking": false,
+              "sampling": {
+                "temperature": 0
+              },
+              "min_tokens": 0,
+              "batch_cohort": null,
+              "reasoning_effort": null,
+              "effort_semantics": "thinking_toggle",
+              "context_limit": 32768,
+              "structured_output": null
+            },
+            "ordinary_compute_width": 1,
+            "mtp": null,
+            "speculation": null,
+            "spomin_live_surgery": null,
+            "approximate_kv": null,
+            "cache_capsule": null,
+            "prompt_tokens": 124,
+            "completion_tokens": 8,
+            "ttft_seconds": 0.037960999994538724,
+            "elapsed_seconds": 0.09621633400092833
+          }
+        },
+        "stream_entries": [
+          {
+            "id": 255012,
+            "token": "<|START_TEXT|>",
+            "logprob": 0.0,
+            "top_logprobs": [
+              {
+                "id": 255012,
+                "token": "<|START_TEXT|>",
+                "logprob": 0.0
+              },
+              {
+                "id": 255014,
+                "token": "<|START_ACTION|>",
+                "logprob": -13.125
+              },
+              {
+                "id": 255010,
+                "token": "<|START_THINKING|>",
+                "logprob": -17.0
+              }
+            ]
+          },
+          {
+            "id": 4437,
+            "token": "Comp",
+            "logprob": -0.125,
+            "top_logprobs": [
+              {
+                "id": 4437,
+                "token": "Comp",
+                "logprob": -0.125
+              },
+              {
+                "id": 37,
+                "token": "A",
+                "logprob": -1.75
+              },
+              {
+                "id": 102183,
+                "token": "\u0120compilers",
+                "logprob": -9.625
+              }
+            ]
+          },
+          {
+            "id": 20463,
+            "token": "ilers",
+            "logprob": 0.0,
+            "top_logprobs": [
+              {
+                "id": 20463,
+                "token": "ilers",
+                "logprob": 0.0
+              },
+              {
+                "id": 102183,
+                "token": "\u0120compilers",
+                "logprob": -8.625
+              },
+              {
+                "id": 2748,
+                "token": "iles",
+                "logprob": -9.625
+              }
+            ]
+          },
+          {
+            "id": 10848,
+            "token": "\u0120translate",
+            "logprob": -0.125,
+            "top_logprobs": [
+              {
+                "id": 10848,
+                "token": "\u0120translate",
+                "logprob": -0.125
+              },
+              {
+                "id": 4817,
+                "token": "\u0120transform",
+                "logprob": -2.125
+              },
+              {
+                "id": 436,
+                "token": "\u0120are",
+                "logprob": -4.0
+              }
+            ]
+          },
+          {
+            "id": 1398,
+            "token": "\u0120high",
+            "logprob": 0.0,
+            "top_logprobs": [
+              {
+                "id": 1398,
+                "token": "\u0120high",
+                "logprob": 0.0
+              },
+              {
+                "id": 2858,
+                "token": "\u0120human",
+                "logprob": -5.625
+              },
+              {
+                "id": 3149,
+                "token": "\u0120source",
+                "logprob": -6.125
+              }
+            ]
+          },
+          {
+            "id": 50274,
+            "token": "\u00e2\u0122\u0133",
+            "logprob": -0.25,
+            "top_logprobs": [
+              {
+                "id": 50274,
+                "token": "\u00e2\u0122\u0133",
+                "logprob": -0.25
+              },
+              {
+                "id": 10674,
+                "token": "-level",
+                "logprob": -1.5
+              },
+              {
+                "id": 1839,
+                "token": "\u0120level",
+                "logprob": -8.125
+              }
+            ]
+          },
+          {
+            "id": 5614,
+            "token": "level",
+            "logprob": 0.0,
+            "top_logprobs": [
+              {
+                "id": 5614,
+                "token": "level",
+                "logprob": 0.0
+              },
+              {
+                "id": 1839,
+                "token": "\u0120level",
+                "logprob": -12.25
+              },
+              {
+                "id": 24200,
+                "token": "language",
+                "logprob": -12.25
+              }
+            ]
+          },
+          {
+            "id": 2363,
+            "token": "\u0120code",
+            "logprob": -0.75,
+            "top_logprobs": [
+              {
+                "id": 2363,
+                "token": "\u0120code",
+                "logprob": -0.75
+              },
+              {
+                "id": 11574,
+                "token": "\u0120programming",
+                "logprob": -0.875
+              },
+              {
+                "id": 3149,
+                "token": "\u0120source",
+                "logprob": -2.0
+              }
+            ]
+          }
+        ],
+        "stream_usage": {
+          "prompt_tokens": 124,
+          "completion_tokens": 8,
+          "total_tokens": 132,
+          "prompt_tokens_details": {
+            "cached_tokens": 123
+          }
+        }
+      }
+    },
+    "sampling_controls": {
+      "passed": true,
+      "evidence": [
+        {
+          "request_id": "chatcmpl-ed7bec9296ea4e74aed42152ca74adc2",
+          "cache": "apcv2",
+          "cached_tokens": 111,
+          "parallel_prefill": null,
+          "profile": "north-mini-code-apcv2-ordinary",
+          "qualification": "candidate",
+          "route_receipt": "candidate_validation",
+          "request_controls": {
+            "logprobs": false,
+            "top_logprobs": 0,
+            "logprob_semantics": null,
+            "thinking": false,
+            "sampling": {
+              "temperature": 0.7,
+              "top_p": 0.9,
+              "top_k": 24,
+              "min_p": 0.05,
+              "repetition_penalty": 1.05,
+              "presence_penalty": 0.1,
+              "frequency_penalty": 0.1,
+              "seed": 237
+            },
+            "min_tokens": 0,
+            "batch_cohort": null,
+            "reasoning_effort": null,
+            "effort_semantics": "thinking_toggle",
+            "context_limit": 32768,
+            "structured_output": null
+          },
+          "ordinary_compute_width": 1,
+          "mtp": null,
+          "speculation": null,
+          "spomin_live_surgery": null,
+          "approximate_kv": null,
+          "cache_capsule": null,
+          "prompt_tokens": 121,
+          "completion_tokens": 21,
+          "ttft_seconds": 0.061233790998812765,
+          "elapsed_seconds": 0.22317124999244697
+        },
+        {
+          "request_id": "chatcmpl-ad49367e9ae3408f9157657cce4b5f95",
+          "cache": "apcv2",
+          "cached_tokens": 120,
+          "parallel_prefill": null,
+          "profile": "north-mini-code-apcv2-ordinary",
+          "qualification": "candidate",
+          "route_receipt": "candidate_validation",
+          "request_controls": {
+            "logprobs": false,
+            "top_logprobs": 0,
+            "logprob_semantics": null,
+            "thinking": false,
+            "sampling": {
+              "temperature": 0.7,
+              "top_p": 0.9,
+              "top_k": 24,
+              "min_p": 0.05,
+              "repetition_penalty": 1.05,
+              "presence_penalty": 0.1,
+              "frequency_penalty": 0.1,
+              "seed": 237
+            },
+            "min_tokens": 0,
+            "batch_cohort": null,
+            "reasoning_effort": null,
+            "effort_semantics": "thinking_toggle",
+            "context_limit": 32768,
+            "structured_output": null
+          },
+          "ordinary_compute_width": 1,
+          "mtp": null,
+          "speculation": null,
+          "spomin_live_surgery": null,
+          "approximate_kv": null,
+          "cache_capsule": null,
+          "prompt_tokens": 121,
+          "completion_tokens": 21,
+          "ttft_seconds": 0.045315666997339576,
+          "elapsed_seconds": 0.2266372090089135
+        }
+      ]
+    },
+    "cold_text": {
+      "passed": true,
+      "evidence": {
+        "request_id": "chatcmpl-f34dfa91623b49f2bf2faddbb048548e",
+        "cache": "apcv2",
+        "cached_tokens": 114,
+        "parallel_prefill": null,
+        "profile": "north-mini-code-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": false,
+          "top_logprobs": 0,
+          "logprob_semantics": null,
+          "thinking": false,
+          "sampling": {
+            "temperature": 0
+          },
+          "min_tokens": 0,
+          "batch_cohort": null,
+          "reasoning_effort": null,
+          "effort_semantics": "thinking_toggle",
+          "context_limit": 32768,
+          "structured_output": null
+        },
+        "ordinary_compute_width": 1,
+        "mtp": null,
+        "speculation": null,
+        "spomin_live_surgery": null,
+        "approximate_kv": null,
+        "cache_capsule": null,
+        "prompt_tokens": 124,
+        "completion_tokens": 7,
+        "ttft_seconds": 0.05683704200782813,
+        "elapsed_seconds": 0.10711091701523401
+      }
+    },
+    "warm_prefix": {
+      "passed": true,
+      "evidence": {
+        "request_id": "chatcmpl-24c47507b8234afc88225e893891bff9",
+        "cache": "apcv2",
+        "cached_tokens": 123,
+        "parallel_prefill": null,
+        "profile": "north-mini-code-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": false,
+          "top_logprobs": 0,
+          "logprob_semantics": null,
+          "thinking": false,
+          "sampling": {
+            "temperature": 0
+          },
+          "min_tokens": 0,
+          "batch_cohort": null,
+          "reasoning_effort": null,
+          "effort_semantics": "thinking_toggle",
+          "context_limit": 32768,
+          "structured_output": null
+        },
+        "ordinary_compute_width": 1,
+        "mtp": null,
+        "speculation": null,
+        "spomin_live_surgery": null,
+        "approximate_kv": null,
+        "cache_capsule": null,
+        "prompt_tokens": 124,
+        "completion_tokens": 7,
+        "ttft_seconds": 0.038237208005739376,
+        "elapsed_seconds": 0.08719845800078474
+      }
+    },
+    "stream": {
+      "passed": true,
+      "evidence": [
+        {
+          "id": "chatcmpl-cc2f44d1705c4679a96b5d08d4536179",
+          "object": "chat.completion.chunk",
+          "created": 1789749832,
+          "model": "North-Mini-Code-1.0-mlx-4bit",
+          "choices": [
+            {
+              "index": 0,
+              "finish_reason": null,
+              "delta": {
+                "content": "ML"
+              }
+            }
+          ]
+        },
+        {
+          "id": "chatcmpl-cc2f44d1705c4679a96b5d08d4536179",
+          "object": "chat.completion.chunk",
+          "created": 1789749832,
+          "model": "North-Mini-Code-1.0-mlx-4bit",
+          "choices": [
+            {
+              "index": 0,
+              "finish_reason": null,
+              "delta": {
+                "content": "X"
+              }
+            }
+          ]
+        },
+        {
+          "id": "chatcmpl-cc2f44d1705c4679a96b5d08d4536179",
+          "object": "chat.completion.chunk",
+          "created": 1789749832,
+          "model": "North-Mini-Code-1.0-mlx-4bit",
+          "choices": [
+            {
+              "index": 0,
+              "finish_reason": null,
+              "delta": {
+                "content": "2"
+              }
+            }
+          ]
+        },
+        {
+          "id": "chatcmpl-cc2f44d1705c4679a96b5d08d4536179",
+          "object": "chat.completion.chunk",
+          "created": 1789749832,
+          "model": "North-Mini-Code-1.0-mlx-4bit",
+          "choices": [
+            {
+              "index": 0,
+              "finish_reason": null,
+              "delta": {
+                "content": "_READY"
+              }
+            }
+          ]
+        },
+        {
+          "id": "chatcmpl-cc2f44d1705c4679a96b5d08d4536179",
+          "object": "chat.completion.chunk",
+          "created": 1789749832,
+          "model": "North-Mini-Code-1.0-mlx-4bit",
+          "choices": [
+            {
+              "index": 0,
+              "finish_reason": "stop",
+              "delta": {}
+            }
+          ],
+          "usage": {
+            "prompt_tokens": 124,
+            "completion_tokens": 7,
+            "total_tokens": 131,
+            "prompt_tokens_details": {
+              "cached_tokens": 123
+            }
+          },
+          "mlx2": {
+            "request_id": "chatcmpl-cc2f44d1705c4679a96b5d08d4536179",
+            "cache": "apcv2",
+            "cached_tokens": 123,
+            "parallel_prefill": null,
+            "profile": "north-mini-code-apcv2-ordinary",
+            "qualification": "candidate",
+            "route_receipt": "candidate_validation",
+            "request_controls": {
+              "logprobs": false,
+              "top_logprobs": 0,
+              "logprob_semantics": null,
+              "thinking": false,
+              "sampling": {
+                "temperature": 0
+              },
+              "min_tokens": 0,
+              "batch_cohort": null,
+              "reasoning_effort": null,
+              "effort_semantics": "thinking_toggle",
+              "context_limit": 32768,
+              "structured_output": null
+            },
+            "ordinary_compute_width": 1,
+            "mtp": null,
+            "speculation": null,
+            "spomin_live_surgery": null,
+            "approximate_kv": null,
+            "cache_capsule": null,
+            "prompt_tokens": 124,
+            "completion_tokens": 7,
+            "ttft_seconds": 0.0376287079998292,
+            "elapsed_seconds": 0.08638266698108055
+          }
+        }
+      ]
+    },
+    "tools": {
+      "passed": true,
+      "evidence": {
+        "id": "chatcmpl-eda6d47af0e7412ba6e1ed472cdbe8d2",
+        "object": "chat.completion",
+        "created": 1789749832,
+        "model": "North-Mini-Code-1.0-mlx-4bit",
+        "choices": [
+          {
+            "index": 0,
+            "finish_reason": "tool_calls",
+            "message": {
+              "role": "assistant",
+              "content": "",
+              "tool_calls": [
+                {
+                  "id": "0",
+                  "type": "function",
+                  "function": {
+                    "name": "weather",
+                    "arguments": "{\"city\": \"Toronto\"}"
+                  }
+                }
+              ]
+            }
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 178,
+          "completion_tokens": 30,
+          "total_tokens": 208,
+          "prompt_tokens_details": {
+            "cached_tokens": 102
+          }
+        },
+        "mlx2": {
+          "request_id": "chatcmpl-eda6d47af0e7412ba6e1ed472cdbe8d2",
+          "cache": "apcv2",
+          "cached_tokens": 102,
+          "parallel_prefill": null,
+          "profile": "north-mini-code-apcv2-ordinary",
+          "qualification": "candidate",
+          "route_receipt": "candidate_validation",
+          "request_controls": {
+            "logprobs": false,
+            "top_logprobs": 0,
+            "logprob_semantics": null,
+            "thinking": false,
+            "sampling": {
+              "temperature": 0
+            },
+            "min_tokens": 0,
+            "batch_cohort": null,
+            "reasoning_effort": null,
+            "effort_semantics": "thinking_toggle",
+            "context_limit": 32768,
+            "structured_output": null
+          },
+          "ordinary_compute_width": 1,
+          "mtp": null,
+          "speculation": null,
+          "spomin_live_surgery": null,
+          "approximate_kv": null,
+          "cache_capsule": null,
+          "prompt_tokens": 178,
+          "completion_tokens": 30,
+          "ttft_seconds": 0.10010958401835524,
+          "elapsed_seconds": 0.29418145900126547
+        }
+      }
+    },
+    "tool_roundtrip": {
+      "passed": true,
+      "evidence": {
+        "id": "chatcmpl-226190767f604829ad35e7d665d43977",
+        "object": "chat.completion",
+        "created": 1789749832,
+        "model": "North-Mini-Code-1.0-mlx-4bit",
+        "choices": [
+          {
+            "index": 0,
+            "finish_reason": "stop",
+            "message": {
+              "role": "assistant",
+              "content": "The weather in Toronto is currently 21\u00b0C with sunny conditions."
+            }
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 267,
+          "completion_tokens": 16,
+          "total_tokens": 283,
+          "prompt_tokens_details": {
+            "cached_tokens": 176
+          }
+        },
+        "mlx2": {
+          "request_id": "chatcmpl-226190767f604829ad35e7d665d43977",
+          "cache": "apcv2",
+          "cached_tokens": 176,
+          "parallel_prefill": null,
+          "profile": "north-mini-code-apcv2-ordinary",
+          "qualification": "candidate",
+          "route_receipt": "candidate_validation",
+          "request_controls": {
+            "logprobs": false,
+            "top_logprobs": 0,
+            "logprob_semantics": null,
+            "thinking": false,
+            "sampling": {
+              "temperature": 0
+            },
+            "min_tokens": 0,
+            "batch_cohort": null,
+            "reasoning_effort": null,
+            "effort_semantics": "thinking_toggle",
+            "context_limit": 32768,
+            "structured_output": null
+          },
+          "ordinary_compute_width": 1,
+          "mtp": null,
+          "speculation": null,
+          "spomin_live_surgery": null,
+          "approximate_kv": null,
+          "cache_capsule": null,
+          "prompt_tokens": 267,
+          "completion_tokens": 16,
+          "ttft_seconds": 0.11433133302489296,
+          "elapsed_seconds": 0.2226735000149347
+        }
+      }
+    },
+    "reasoning": {
+      "passed": true,
+      "evidence": {
+        "attempts": [
+          {
+            "id": "chatcmpl-9fe599112e5d42539947c25153b0db19",
+            "object": "chat.completion",
+            "created": 1789749832,
+            "model": "North-Mini-Code-1.0-mlx-4bit",
+            "choices": [
+              {
+                "index": 0,
+                "finish_reason": "stop",
+                "message": {
+                  "role": "assistant",
+                  "content": "221",
+                  "reasoning_content": "We need to compute 13 * 17. 13*10=130, 13*7=91, sum=221. So answer integer 221."
+                }
+              }
+            ],
+            "usage": {
+              "prompt_tokens": 166,
+              "completion_tokens": 39,
+              "total_tokens": 205,
+              "prompt_tokens_details": {
+                "cached_tokens": 109
+              }
+            },
+            "mlx2": {
+              "request_id": "chatcmpl-9fe599112e5d42539947c25153b0db19",
+              "cache": "apcv2",
+              "cached_tokens": 109,
+              "parallel_prefill": null,
+              "profile": "north-mini-code-apcv2-ordinary",
+              "qualification": "candidate",
+              "route_receipt": "candidate_validation",
+              "request_controls": {
+                "logprobs": false,
+                "top_logprobs": 0,
+                "logprob_semantics": null,
+                "thinking": true,
+                "sampling": {
+                  "temperature": 0
+                },
+                "min_tokens": 0,
+                "batch_cohort": null,
+                "reasoning_effort": null,
+                "effort_semantics": "thinking_toggle",
+                "context_limit": 32768,
+                "structured_output": null
+              },
+              "ordinary_compute_width": 1,
+              "mtp": null,
+              "speculation": null,
+              "spomin_live_surgery": null,
+              "approximate_kv": null,
+              "cache_capsule": null,
+              "prompt_tokens": 166,
+              "completion_tokens": 39,
+              "ttft_seconds": 0.1138220000138972,
+              "elapsed_seconds": 0.366618792002555
+            }
+          }
+        ]
+      }
+    },
+    "stop": {
+      "passed": true,
+      "evidence": {
+        "id": "chatcmpl-54563d605f6647d493457e124dc35d61",
+        "object": "chat.completion",
+        "created": 1789749833,
+        "model": "North-Mini-Code-1.0-mlx-4bit",
+        "choices": [
+          {
+            "index": 0,
+            "finish_reason": "stop",
+            "message": {
+              "role": "assistant",
+              "content": "MLX2"
+            }
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 124,
+          "completion_tokens": 5,
+          "total_tokens": 129,
+          "prompt_tokens_details": {
+            "cached_tokens": 123
+          }
+        },
+        "mlx2": {
+          "request_id": "chatcmpl-54563d605f6647d493457e124dc35d61",
+          "cache": "apcv2",
+          "cached_tokens": 123,
+          "parallel_prefill": null,
+          "profile": "north-mini-code-apcv2-ordinary",
+          "qualification": "candidate",
+          "route_receipt": "candidate_validation",
+          "request_controls": {
+            "logprobs": false,
+            "top_logprobs": 0,
+            "logprob_semantics": null,
+            "thinking": false,
+            "sampling": {
+              "temperature": 0
+            },
+            "min_tokens": 0,
+            "batch_cohort": null,
+            "reasoning_effort": null,
+            "effort_semantics": "thinking_toggle",
+            "context_limit": 32768,
+            "structured_output": null
+          },
+          "ordinary_compute_width": 1,
+          "mtp": null,
+          "speculation": null,
+          "spomin_live_surgery": null,
+          "approximate_kv": null,
+          "cache_capsule": null,
+          "prompt_tokens": 124,
+          "completion_tokens": 5,
+          "ttft_seconds": 0.03944054199382663,
+          "elapsed_seconds": 0.06488437499501742
+        }
+      }
+    },
+    "seed_repeat": {
+      "passed": true,
+      "evidence": {
+        "first": {
+          "id": "chatcmpl-d2cae9e99bd94ef8931429f4db453d14",
+          "object": "chat.completion",
+          "created": 1789749833,
+          "model": "North-Mini-Code-1.0-mlx-4bit",
+          "choices": [
+            {
+              "index": 0,
+              "finish_reason": "length",
+              "message": {
+                "role": "assistant",
+                "content": "Here are three short facts about stars:\n\n1. **Stars are nuclear furnaces** \u2013 they fuse hydrogen atoms into helium in their cores, releasing enormous amounts of energy that makes them shine.\n\n2. **Stars have a wide range of sizes** \u2013 some are only a few percent of the Sun\u2019s size (like red"
+              }
+            }
+          ],
+          "usage": {
+            "prompt_tokens": 124,
+            "completion_tokens": 64,
+            "total_tokens": 188,
+            "prompt_tokens_details": {
+              "cached_tokens": 111
+            }
+          },
+          "mlx2": {
+            "request_id": "chatcmpl-d2cae9e99bd94ef8931429f4db453d14",
+            "cache": "apcv2",
+            "cached_tokens": 111,
+            "parallel_prefill": null,
+            "profile": "north-mini-code-apcv2-ordinary",
+            "qualification": "candidate",
+            "route_receipt": "candidate_validation",
+            "request_controls": {
+              "logprobs": false,
+              "top_logprobs": 0,
+              "logprob_semantics": null,
+              "thinking": false,
+              "sampling": {
+                "temperature": 0.7,
+                "seed": 123
+              },
+              "min_tokens": 0,
+              "batch_cohort": null,
+              "reasoning_effort": null,
+              "effort_semantics": "thinking_toggle",
+              "context_limit": 32768,
+              "structured_output": null
+            },
+            "ordinary_compute_width": 1,
+            "mtp": null,
+            "speculation": null,
+            "spomin_live_surgery": null,
+            "approximate_kv": null,
+            "cache_capsule": null,
+            "prompt_tokens": 124,
+            "completion_tokens": 64,
+            "ttft_seconds": 0.06763637499534525,
+            "elapsed_seconds": 0.4962508330063429
+          }
+        },
+        "second": {
+          "id": "chatcmpl-83eda36dbf8c4c30b370c1293fede8f7",
+          "object": "chat.completion",
+          "created": 1789749833,
+          "model": "North-Mini-Code-1.0-mlx-4bit",
+          "choices": [
+            {
+              "index": 0,
+              "finish_reason": "length",
+              "message": {
+                "role": "assistant",
+                "content": "Here are three short facts about stars:\n\n1. **Stars are nuclear furnaces** \u2013 they fuse hydrogen atoms into helium in their cores, releasing enormous amounts of energy that makes them shine.\n\n2. **Stars have a wide range of sizes** \u2013 some are only a few percent of the Sun\u2019s size (like red"
+              }
+            }
+          ],
+          "usage": {
+            "prompt_tokens": 124,
+            "completion_tokens": 64,
+            "total_tokens": 188,
+            "prompt_tokens_details": {
+              "cached_tokens": 123
+            }
+          },
+          "mlx2": {
+            "request_id": "chatcmpl-83eda36dbf8c4c30b370c1293fede8f7",
+            "cache": "apcv2",
+            "cached_tokens": 123,
+            "parallel_prefill": null,
+            "profile": "north-mini-code-apcv2-ordinary",
+            "qualification": "candidate",
+            "route_receipt": "candidate_validation",
+            "request_controls": {
+              "logprobs": false,
+              "top_logprobs": 0,
+              "logprob_semantics": null,
+              "thinking": false,
+              "sampling": {
+                "temperature": 0.7,
+                "seed": 123
+              },
+              "min_tokens": 0,
+              "batch_cohort": null,
+              "reasoning_effort": null,
+              "effort_semantics": "thinking_toggle",
+              "context_limit": 32768,
+              "structured_output": null
+            },
+            "ordinary_compute_width": 1,
+            "mtp": null,
+            "speculation": null,
+            "spomin_live_surgery": null,
+            "approximate_kv": null,
+            "cache_capsule": null,
+            "prompt_tokens": 124,
+            "completion_tokens": 64,
+            "ttft_seconds": 0.038727000006474555,
+            "elapsed_seconds": 0.4619538749975618
+          }
+        }
+      }
+    },
+    "batch": {
+      "passed": true,
+      "evidence": {
+        "observed_widths": [
+          4
+        ],
+        "wall_seconds": 1.959515791008016,
+        "lane_seconds": 7.742024541978026,
+        "prompt_lookup_route": false,
+        "aggregate_tokens_per_second": 326.6113000654976,
+        "request_receipts": [
+          {
+            "request_id": "chatcmpl-407e91c5beb743549c4b3706bb835587",
+            "cache": "apcv2",
+            "cached_tokens": 111,
+            "parallel_prefill": null,
+            "profile": "north-mini-code-apcv2-ordinary",
+            "qualification": "candidate",
+            "route_receipt": "candidate_validation",
+            "request_controls": {
+              "logprobs": false,
+              "top_logprobs": 0,
+              "logprob_semantics": null,
+              "thinking": false,
+              "sampling": {
+                "temperature": 0
+              },
+              "min_tokens": 0,
+              "batch_cohort": null,
+              "reasoning_effort": null,
+              "effort_semantics": "thinking_toggle",
+              "context_limit": 32768,
+              "structured_output": null
+            },
+            "ordinary_compute_width": 4,
+            "mtp": null,
+            "speculation": null,
+            "spomin_live_surgery": null,
+            "approximate_kv": null,
+            "cache_capsule": null,
+            "prompt_tokens": 125,
+            "completion_tokens": 160,
+            "ttft_seconds": 0.15400433400645852,
+            "elapsed_seconds": 1.9156628749915399
+          },
+          {
+            "request_id": "chatcmpl-6b0fd41976324feb818bab4f658fe89e",
+            "cache": "apcv2",
+            "cached_tokens": 111,
+            "parallel_prefill": null,
+            "profile": "north-mini-code-apcv2-ordinary",
+            "qualification": "candidate",
+            "route_receipt": "candidate_validation",
+            "request_controls": {
+              "logprobs": false,
+              "top_logprobs": 0,
+              "logprob_semantics": null,
+              "thinking": false,
+              "sampling": {
+                "temperature": 0
+              },
+              "min_tokens": 0,
+              "batch_cohort": null,
+              "reasoning_effort": null,
+              "effort_semantics": "thinking_toggle",
+              "context_limit": 32768,
+              "structured_output": null
+            },
+            "ordinary_compute_width": 4,
+            "mtp": null,
+            "speculation": null,
+            "spomin_live_surgery": null,
+            "approximate_kv": null,
+            "cache_capsule": null,
+            "prompt_tokens": 125,
+            "completion_tokens": 160,
+            "ttft_seconds": 0.1528244579967577,
+            "elapsed_seconds": 1.9162712919933256
+          },
+          {
+            "request_id": "chatcmpl-bd2b97e319884758b2ab6eeeb45350fc",
+            "cache": "apcv2",
+            "cached_tokens": 111,
+            "parallel_prefill": null,
+            "profile": "north-mini-code-apcv2-ordinary",
+            "qualification": "candidate",
+            "route_receipt": "candidate_validation",
+            "request_controls": {
+              "logprobs": false,
+              "top_logprobs": 0,
+              "logprob_semantics": null,
+              "thinking": false,
+              "sampling": {
+                "temperature": 0
+              },
+              "min_tokens": 0,
+              "batch_cohort": null,
+              "reasoning_effort": null,
+              "effort_semantics": "thinking_toggle",
+              "context_limit": 32768,
+              "structured_output": null
+            },
+            "ordinary_compute_width": 4,
+            "mtp": null,
+            "speculation": null,
+            "spomin_live_surgery": null,
+            "approximate_kv": null,
+            "cache_capsule": null,
+            "prompt_tokens": 125,
+            "completion_tokens": 160,
+            "ttft_seconds": 0.2053245829883963,
+            "elapsed_seconds": 1.954465082992101
+          },
+          {
+            "request_id": "chatcmpl-4924d7f1246d42c3818eabcfffcda78b",
+            "cache": "apcv2",
+            "cached_tokens": 111,
+            "parallel_prefill": null,
+            "profile": "north-mini-code-apcv2-ordinary",
+            "qualification": "candidate",
+            "route_receipt": "candidate_validation",
+            "request_controls": {
+              "logprobs": false,
+              "top_logprobs": 0,
+              "logprob_semantics": null,
+              "thinking": false,
+              "sampling": {
+                "temperature": 0
+              },
+              "min_tokens": 0,
+              "batch_cohort": null,
+              "reasoning_effort": null,
+              "effort_semantics": "thinking_toggle",
+              "context_limit": 32768,
+              "structured_output": null
+            },
+            "ordinary_compute_width": 4,
+            "mtp": null,
+            "speculation": null,
+            "spomin_live_surgery": null,
+            "approximate_kv": null,
+            "cache_capsule": null,
+            "prompt_tokens": 125,
+            "completion_tokens": 160,
+            "ttft_seconds": 0.20467679199646227,
+            "elapsed_seconds": 1.9556252920010593
+          }
+        ]
+      }
+    },
+    "mixed_warm": {
+      "passed": true,
+      "evidence": [
+        {
+          "request_id": "chatcmpl-70c08fcc9d074e66a29e341332ca88a8",
+          "cache": "apcv2",
+          "cached_tokens": 126,
+          "parallel_prefill": null,
+          "profile": "north-mini-code-apcv2-ordinary",
+          "qualification": "candidate",
+          "route_receipt": "candidate_validation",
+          "request_controls": {
+            "logprobs": false,
+            "top_logprobs": 0,
+            "logprob_semantics": null,
+            "thinking": false,
+            "sampling": {
+              "temperature": 0
+            },
+            "min_tokens": 0,
+            "batch_cohort": null,
+            "reasoning_effort": null,
+            "effort_semantics": "thinking_toggle",
+            "context_limit": 32768,
+            "structured_output": null
+          },
+          "ordinary_compute_width": 2,
+          "mtp": null,
+          "speculation": null,
+          "spomin_live_surgery": null,
+          "approximate_kv": null,
+          "cache_capsule": null,
+          "prompt_tokens": 127,
+          "completion_tokens": 64,
+          "ttft_seconds": 0.05420662500546314,
+          "elapsed_seconds": 0.5973190420190804
+        },
+        {
+          "request_id": "chatcmpl-b9439799fb484abcb01d50c2fc74c4ff",
+          "cache": "apcv2",
+          "cached_tokens": 127,
+          "parallel_prefill": null,
+          "profile": "north-mini-code-apcv2-ordinary",
+          "qualification": "candidate",
+          "route_receipt": "candidate_validation",
+          "request_controls": {
+            "logprobs": false,
+            "top_logprobs": 0,
+            "logprob_semantics": null,
+            "thinking": false,
+            "sampling": {
+              "temperature": 0
+            },
+            "min_tokens": 0,
+            "batch_cohort": null,
+            "reasoning_effort": null,
+            "effort_semantics": "thinking_toggle",
+            "context_limit": 32768,
+            "structured_output": null
+          },
+          "ordinary_compute_width": 2,
+          "mtp": null,
+          "speculation": null,
+          "spomin_live_surgery": null,
+          "approximate_kv": null,
+          "cache_capsule": null,
+          "prompt_tokens": 128,
+          "completion_tokens": 64,
+          "ttft_seconds": 0.05507283398765139,
+          "elapsed_seconds": 0.5961879589885939
+        }
+      ]
+    },
+    "shared_cohort_priming": {
+      "passed": false,
+      "evidence": {
+        "id": "chatcmpl-392b4a7f60944cd9adfe479a82c6ccae",
+        "object": "chat.completion",
+        "created": 1789749837,
+        "model": "North-Mini-Code-1.0-mlx-4bit",
+        "choices": [
+          {
+            "index": 0,
+            "finish_reason": "stop",
+            "message": {
+              "role": "assistant",
+              "content": ""
+            }
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 32652,
+          "completion_tokens": 2,
+          "total_tokens": 32654,
+          "prompt_tokens_details": {
+            "cached_tokens": 111
+          }
+        },
+        "mlx2": {
+          "request_id": "chatcmpl-392b4a7f60944cd9adfe479a82c6ccae",
+          "cache": "apcv2",
+          "cached_tokens": 111,
+          "parallel_prefill": null,
+          "profile": "north-mini-code-apcv2-ordinary",
+          "qualification": "candidate",
+          "route_receipt": "candidate_validation",
+          "request_controls": {
+            "logprobs": false,
+            "top_logprobs": 0,
+            "logprob_semantics": null,
+            "thinking": false,
+            "sampling": {
+              "temperature": 0
+            },
+            "min_tokens": 0,
+            "batch_cohort": null,
+            "reasoning_effort": null,
+            "effort_semantics": "thinking_toggle",
+            "context_limit": 32768,
+            "structured_output": null
+          },
+          "ordinary_compute_width": 1,
+          "mtp": null,
+          "speculation": null,
+          "spomin_live_surgery": null,
+          "approximate_kv": null,
+          "cache_capsule": null,
+          "prompt_tokens": 32652,
+          "completion_tokens": 2,
+          "ttft_seconds": 11.170416249980917,
+          "elapsed_seconds": 11.541009540989762
+        }
+      }
+    }
+  },
+  "responses": {
+    "sampling_controls": [
+      {
+        "id": "chatcmpl-ed7bec9296ea4e74aed42152ca74adc2",
+        "object": "chat.completion",
+        "created": 1789749831,
+        "model": "North-Mini-Code-1.0-mlx-4bit",
+        "choices": [
+          {
+            "index": 0,
+            "finish_reason": "stop",
+            "message": {
+              "role": "assistant",
+              "content": "Sure! Here are three fruits:\n\n1. Apple  \n2. Banana  \n3. Orange"
+            }
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 121,
+          "completion_tokens": 21,
+          "total_tokens": 142,
+          "prompt_tokens_details": {
+            "cached_tokens": 111
+          }
+        },
+        "mlx2": {
+          "request_id": "chatcmpl-ed7bec9296ea4e74aed42152ca74adc2",
+          "cache": "apcv2",
+          "cached_tokens": 111,
+          "parallel_prefill": null,
+          "profile": "north-mini-code-apcv2-ordinary",
+          "qualification": "candidate",
+          "route_receipt": "candidate_validation",
+          "request_controls": {
+            "logprobs": false,
+            "top_logprobs": 0,
+            "logprob_semantics": null,
+            "thinking": false,
+            "sampling": {
+              "temperature": 0.7,
+              "top_p": 0.9,
+              "top_k": 24,
+              "min_p": 0.05,
+              "repetition_penalty": 1.05,
+              "presence_penalty": 0.1,
+              "frequency_penalty": 0.1,
+              "seed": 237
+            },
+            "min_tokens": 0,
+            "batch_cohort": null,
+            "reasoning_effort": null,
+            "effort_semantics": "thinking_toggle",
+            "context_limit": 32768,
+            "structured_output": null
+          },
+          "ordinary_compute_width": 1,
+          "mtp": null,
+          "speculation": null,
+          "spomin_live_surgery": null,
+          "approximate_kv": null,
+          "cache_capsule": null,
+          "prompt_tokens": 121,
+          "completion_tokens": 21,
+          "ttft_seconds": 0.061233790998812765,
+          "elapsed_seconds": 0.22317124999244697
+        }
+      },
+      {
+        "id": "chatcmpl-ad49367e9ae3408f9157657cce4b5f95",
+        "object": "chat.completion",
+        "created": 1789749831,
+        "model": "North-Mini-Code-1.0-mlx-4bit",
+        "choices": [
+          {
+            "index": 0,
+            "finish_reason": "stop",
+            "message": {
+              "role": "assistant",
+              "content": "Sure! Here are three fruits:\n\n1. Apple  \n2. Banana  \n3. Orange"
+            }
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 121,
+          "completion_tokens": 21,
+          "total_tokens": 142,
+          "prompt_tokens_details": {
+            "cached_tokens": 120
+          }
+        },
+        "mlx2": {
+          "request_id": "chatcmpl-ad49367e9ae3408f9157657cce4b5f95",
+          "cache": "apcv2",
+          "cached_tokens": 120,
+          "parallel_prefill": null,
+          "profile": "north-mini-code-apcv2-ordinary",
+          "qualification": "candidate",
+          "route_receipt": "candidate_validation",
+          "request_controls": {
+            "logprobs": false,
+            "top_logprobs": 0,
+            "logprob_semantics": null,
+            "thinking": false,
+            "sampling": {
+              "temperature": 0.7,
+              "top_p": 0.9,
+              "top_k": 24,
+              "min_p": 0.05,
+              "repetition_penalty": 1.05,
+              "presence_penalty": 0.1,
+              "frequency_penalty": 0.1,
+              "seed": 237
+            },
+            "min_tokens": 0,
+            "batch_cohort": null,
+            "reasoning_effort": null,
+            "effort_semantics": "thinking_toggle",
+            "context_limit": 32768,
+            "structured_output": null
+          },
+          "ordinary_compute_width": 1,
+          "mtp": null,
+          "speculation": null,
+          "spomin_live_surgery": null,
+          "approximate_kv": null,
+          "cache_capsule": null,
+          "prompt_tokens": 121,
+          "completion_tokens": 21,
+          "ttft_seconds": 0.045315666997339576,
+          "elapsed_seconds": 0.2266372090089135
+        }
+      }
+    ],
+    "cold": {
+      "id": "chatcmpl-f34dfa91623b49f2bf2faddbb048548e",
+      "object": "chat.completion",
+      "created": 1789749831,
+      "model": "North-Mini-Code-1.0-mlx-4bit",
+      "choices": [
+        {
+          "index": 0,
+          "finish_reason": "stop",
+          "message": {
+            "role": "assistant",
+            "content": "MLX2_READY"
+          }
+        }
+      ],
+      "usage": {
+        "prompt_tokens": 124,
+        "completion_tokens": 7,
+        "total_tokens": 131,
+        "prompt_tokens_details": {
+          "cached_tokens": 114
+        }
+      },
+      "mlx2": {
+        "request_id": "chatcmpl-f34dfa91623b49f2bf2faddbb048548e",
+        "cache": "apcv2",
+        "cached_tokens": 114,
+        "parallel_prefill": null,
+        "profile": "north-mini-code-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": false,
+          "top_logprobs": 0,
+          "logprob_semantics": null,
+          "thinking": false,
+          "sampling": {
+            "temperature": 0
+          },
+          "min_tokens": 0,
+          "batch_cohort": null,
+          "reasoning_effort": null,
+          "effort_semantics": "thinking_toggle",
+          "context_limit": 32768,
+          "structured_output": null
+        },
+        "ordinary_compute_width": 1,
+        "mtp": null,
+        "speculation": null,
+        "spomin_live_surgery": null,
+        "approximate_kv": null,
+        "cache_capsule": null,
+        "prompt_tokens": 124,
+        "completion_tokens": 7,
+        "ttft_seconds": 0.05683704200782813,
+        "elapsed_seconds": 0.10711091701523401
+      }
+    },
+    "warm": {
+      "id": "chatcmpl-24c47507b8234afc88225e893891bff9",
+      "object": "chat.completion",
+      "created": 1789749832,
+      "model": "North-Mini-Code-1.0-mlx-4bit",
+      "choices": [
+        {
+          "index": 0,
+          "finish_reason": "stop",
+          "message": {
+            "role": "assistant",
+            "content": "MLX2_READY"
+          }
+        }
+      ],
+      "usage": {
+        "prompt_tokens": 124,
+        "completion_tokens": 7,
+        "total_tokens": 131,
+        "prompt_tokens_details": {
+          "cached_tokens": 123
+        }
+      },
+      "mlx2": {
+        "request_id": "chatcmpl-24c47507b8234afc88225e893891bff9",
+        "cache": "apcv2",
+        "cached_tokens": 123,
+        "parallel_prefill": null,
+        "profile": "north-mini-code-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": false,
+          "top_logprobs": 0,
+          "logprob_semantics": null,
+          "thinking": false,
+          "sampling": {
+            "temperature": 0
+          },
+          "min_tokens": 0,
+          "batch_cohort": null,
+          "reasoning_effort": null,
+          "effort_semantics": "thinking_toggle",
+          "context_limit": 32768,
+          "structured_output": null
+        },
+        "ordinary_compute_width": 1,
+        "mtp": null,
+        "speculation": null,
+        "spomin_live_surgery": null,
+        "approximate_kv": null,
+        "cache_capsule": null,
+        "prompt_tokens": 124,
+        "completion_tokens": 7,
+        "ttft_seconds": 0.038237208005739376,
+        "elapsed_seconds": 0.08719845800078474
+      }
+    },
+    "batch": [
+      {
+        "id": "chatcmpl-407e91c5beb743549c4b3706bb835587",
+        "object": "chat.completion",
+        "created": 1789749834,
+        "model": "North-Mini-Code-1.0-mlx-4bit",
+        "choices": [
+          {
+            "index": 0,
+            "finish_reason": "length",
+            "message": {
+              "role": "assistant",
+              "content": "**Compiler Overview**\n\nA compiler is a software tool that translates source code written in a high\u2011level programming language into a lower\u2011level representation (usually machine code) that a computer can execute directly. The compilation process involves several distinct phases, each with specific tasks and outputs. Below is a detailed, step\u2011by\u2011step explanation of how a compiler works, from the moment the source file is read until the final executable is produced.\n\n---\n\n## 1. Front\u2011End (Analysis) Phase \u2013 \u201cParsing\u201d\n\n| Step | Description | Typical Output |\n|------|-------------|----------------|\n| **Lexical Analysis** | The source text is scanned character\u2011by\u2011character. The lexer groups characters into *tokens* (identifiers, literals, operators, keywords). It also discards whitespace and comments"
+            }
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 125,
+          "completion_tokens": 160,
+          "total_tokens": 285,
+          "prompt_tokens_details": {
+            "cached_tokens": 111
+          }
+        },
+        "mlx2": {
+          "request_id": "chatcmpl-407e91c5beb743549c4b3706bb835587",
+          "cache": "apcv2",
+          "cached_tokens": 111,
+          "parallel_prefill": null,
+          "profile": "north-mini-code-apcv2-ordinary",
+          "qualification": "candidate",
+          "route_receipt": "candidate_validation",
+          "request_controls": {
+            "logprobs": false,
+            "top_logprobs": 0,
+            "logprob_semantics": null,
+            "thinking": false,
+            "sampling": {
+              "temperature": 0
+            },
+            "min_tokens": 0,
+            "batch_cohort": null,
+            "reasoning_effort": null,
+            "effort_semantics": "thinking_toggle",
+            "context_limit": 32768,
+            "structured_output": null
+          },
+          "ordinary_compute_width": 4,
+          "mtp": null,
+          "speculation": null,
+          "spomin_live_surgery": null,
+          "approximate_kv": null,
+          "cache_capsule": null,
+          "prompt_tokens": 125,
+          "completion_tokens": 160,
+          "ttft_seconds": 0.15400433400645852,
+          "elapsed_seconds": 1.9156628749915399
+        }
+      },
+      {
+        "id": "chatcmpl-6b0fd41976324feb818bab4f658fe89e",
+        "object": "chat.completion",
+        "created": 1789749834,
+        "model": "North-Mini-Code-1.0-mlx-4bit",
+        "choices": [
+          {
+            "index": 0,
+            "finish_reason": "length",
+            "message": {
+              "role": "assistant",
+              "content": "**Compiler Overview**\n\nA compiler is a software tool that translates source code written in a high\u2011level programming language into a lower\u2011level representation (usually machine code) that a computer can execute directly. The compilation process involves several distinct phases, each with specific tasks and outputs. Below is a detailed, step\u2011by\u2011step explanation of how a compiler works, from the moment the source file is read until the final executable is produced.\n\n---\n\n## 1. Front\u2011End (Analysis) Phase \u2013 \u201cParsing\u201d\n\n| Step | Description | Typical Output |\n|------|-------------|----------------|\n| **Lexical Analysis** | The source text is scanned character\u2011by\u2011character. The lexer groups characters into *tokens* (identifiers, literals, operators, keywords). It also discards whitespace and comments"
+            }
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 125,
+          "completion_tokens": 160,
+          "total_tokens": 285,
+          "prompt_tokens_details": {
+            "cached_tokens": 111
+          }
+        },
+        "mlx2": {
+          "request_id": "chatcmpl-6b0fd41976324feb818bab4f658fe89e",
+          "cache": "apcv2",
+          "cached_tokens": 111,
+          "parallel_prefill": null,
+          "profile": "north-mini-code-apcv2-ordinary",
+          "qualification": "candidate",
+          "route_receipt": "candidate_validation",
+          "request_controls": {
+            "logprobs": false,
+            "top_logprobs": 0,
+            "logprob_semantics": null,
+            "thinking": false,
+            "sampling": {
+              "temperature": 0
+            },
+            "min_tokens": 0,
+            "batch_cohort": null,
+            "reasoning_effort": null,
+            "effort_semantics": "thinking_toggle",
+            "context_limit": 32768,
+            "structured_output": null
+          },
+          "ordinary_compute_width": 4,
+          "mtp": null,
+          "speculation": null,
+          "spomin_live_surgery": null,
+          "approximate_kv": null,
+          "cache_capsule": null,
+          "prompt_tokens": 125,
+          "completion_tokens": 160,
+          "ttft_seconds": 0.1528244579967577,
+          "elapsed_seconds": 1.9162712919933256
+        }
+      },
+      {
+        "id": "chatcmpl-bd2b97e319884758b2ab6eeeb45350fc",
+        "object": "chat.completion",
+        "created": 1789749834,
+        "model": "North-Mini-Code-1.0-mlx-4bit",
+        "choices": [
+          {
+            "index": 0,
+            "finish_reason": "length",
+            "message": {
+              "role": "assistant",
+              "content": "**Compiler Overview**\n\nA compiler is a software tool that translates source code written in a high\u2011level programming language into a lower\u2011level representation (usually machine code) that a computer can execute directly. The compilation process involves several distinct phases, each with specific tasks and outputs. Below is a detailed, step\u2011by\u2011step explanation of how a compiler works, including the typical phases, the kind of work done in each phase, and the overall flow.\n\n---\n\n## 1. Front\u2011End (Analysis) Phase \u2013 \u201cParsing\u201d\n\n| Step | What Happens | Why It Matters |\n|------|--------------|----------------|\n| **Lexical Analysis** (Lexer) | Scans the source file character\u2011by\u2011character, grouping characters into **tokens** (identifiers, literals, operators, keywords"
+            }
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 125,
+          "completion_tokens": 160,
+          "total_tokens": 285,
+          "prompt_tokens_details": {
+            "cached_tokens": 111
+          }
+        },
+        "mlx2": {
+          "request_id": "chatcmpl-bd2b97e319884758b2ab6eeeb45350fc",
+          "cache": "apcv2",
+          "cached_tokens": 111,
+          "parallel_prefill": null,
+          "profile": "north-mini-code-apcv2-ordinary",
+          "qualification": "candidate",
+          "route_receipt": "candidate_validation",
+          "request_controls": {
+            "logprobs": false,
+            "top_logprobs": 0,
+            "logprob_semantics": null,
+            "thinking": false,
+            "sampling": {
+              "temperature": 0
+            },
+            "min_tokens": 0,
+            "batch_cohort": null,
+            "reasoning_effort": null,
+            "effort_semantics": "thinking_toggle",
+            "context_limit": 32768,
+            "structured_output": null
+          },
+          "ordinary_compute_width": 4,
+          "mtp": null,
+          "speculation": null,
+          "spomin_live_surgery": null,
+          "approximate_kv": null,
+          "cache_capsule": null,
+          "prompt_tokens": 125,
+          "completion_tokens": 160,
+          "ttft_seconds": 0.2053245829883963,
+          "elapsed_seconds": 1.954465082992101
+        }
+      },
+      {
+        "id": "chatcmpl-4924d7f1246d42c3818eabcfffcda78b",
+        "object": "chat.completion",
+        "created": 1789749834,
+        "model": "North-Mini-Code-1.0-mlx-4bit",
+        "choices": [
+          {
+            "index": 0,
+            "finish_reason": "length",
+            "message": {
+              "role": "assistant",
+              "content": "**Compiler Overview**\n\nA compiler is a software tool that translates source code written in a high\u2011level programming language into a lower\u2011level representation (usually machine code) that a computer can execute directly. The compilation process involves several distinct phases, each with specific tasks and outputs. Below is a detailed, step\u2011by\u2011step explanation of how a compiler works, including the typical phases, the kind of work done in each phase, and the overall flow.\n\n---\n\n## 1. Front\u2011End (Analysis) Phase \u2013 \u201cParsing\u201d\n\n| Step | What Happens | Why It Matters |\n|------|--------------|----------------|\n| **Lexical Analysis** (Lexer) | Scans the source file character\u2011by\u2011character, grouping characters into **tokens** (identifiers, literals, operators, keywords"
+            }
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 125,
+          "completion_tokens": 160,
+          "total_tokens": 285,
+          "prompt_tokens_details": {
+            "cached_tokens": 111
+          }
+        },
+        "mlx2": {
+          "request_id": "chatcmpl-4924d7f1246d42c3818eabcfffcda78b",
+          "cache": "apcv2",
+          "cached_tokens": 111,
+          "parallel_prefill": null,
+          "profile": "north-mini-code-apcv2-ordinary",
+          "qualification": "candidate",
+          "route_receipt": "candidate_validation",
+          "request_controls": {
+            "logprobs": false,
+            "top_logprobs": 0,
+            "logprob_semantics": null,
+            "thinking": false,
+            "sampling": {
+              "temperature": 0
+            },
+            "min_tokens": 0,
+            "batch_cohort": null,
+            "reasoning_effort": null,
+            "effort_semantics": "thinking_toggle",
+            "context_limit": 32768,
+            "structured_output": null
+          },
+          "ordinary_compute_width": 4,
+          "mtp": null,
+          "speculation": null,
+          "spomin_live_surgery": null,
+          "approximate_kv": null,
+          "cache_capsule": null,
+          "prompt_tokens": 125,
+          "completion_tokens": 160,
+          "ttft_seconds": 0.20467679199646227,
+          "elapsed_seconds": 1.9556252920010593
+        }
+      }
+    ]
+  },
+  "passed": false,
+  "coverage_scope": {
+    "core_serving": "inline",
+    "long_context": {
+      "mode": "inline",
+      "checks": [
+        "context",
+        "shared_cohort_priming",
+        "shared_warm_requests",
+        "context_bound"
+      ]
+    }
+  },
+  "preflight_receipt": {
+    "path": "~/Desktop/mlx2/qualification/runs/integration-gpu-20260918/preflight.json",
+    "sha256": "af1f8102bcf0f9b944b23d09c9e69459c2b5ca1ac47fdce1e58f0ba28461e63d",
+    "identity": {
+      "git": {
+        "revision": "dc8fccf5b9b611bf5db90545fbf2195a91ce389d"
+      },
+      "runtime": {
+        "source_sha256": "cc2de1c74f7ace7ef772b6a2e0b0ec47f53b7a70d3a8bed612c054686ca7f1bd",
+        "mlx_native_sha256": "30335939714520c3306cfa58597100aae08bbeabdc60a4bc8c35c32c607450a8",
+        "python": "3.12.13",
+        "macos": "26.7",
+        "mlx": "0.32.2.dev20260915+2a817ad94",
+        "transformers": "5.12.1",
+        "dependencies": {
+          "numpy": "2.5.1",
+          "tokenizers": "0.22.2",
+          "jinja2": "3.1.6",
+          "psutil": "7.2.2",
+          "regex": "2026.9.10",
+          "safetensors": "0.8.0"
+        }
+      },
+      "qualification_harness": {
+        "schema": "mlx2.qualification-harness.v1",
+        "name": "scripts/qualify_serving.py",
+        "sha256": "7d9e1a3b3b0b111dcf7025aae2f8594e307fac03fbb2bc6a5d8eaad6af023720"
+      },
+      "test_source_sha256": "c8ffc39edc8d8f511942e40b30b8013b9cbef5f8c9ca7c9dfa9134c3c060d656"
+    },
+    "passed": true
+  },
+  "failure_status": {
+    "state": "ready",
+    "model": "North-Mini-Code-1.0-mlx-4bit",
+    "runtime": {
+      "source_sha256": "cc2de1c74f7ace7ef772b6a2e0b0ec47f53b7a70d3a8bed612c054686ca7f1bd",
+      "mlx_native_sha256": "30335939714520c3306cfa58597100aae08bbeabdc60a4bc8c35c32c607450a8",
+      "python": "3.12.13",
+      "macos": "26.7",
+      "mlx": "0.32.2.dev20260915+2a817ad94",
+      "transformers": "5.12.1",
+      "dependencies": {
+        "numpy": "2.5.1",
+        "tokenizers": "0.22.2",
+        "jinja2": "3.1.6",
+        "psutil": "7.2.2",
+        "regex": "2026.9.10",
+        "safetensors": "0.8.0"
+      }
+    },
+    "artifact": "6c88a4d3a5387abe2d97ac3d5eb70e484fb33615bb0c0f2ff8e7ef22b442f2e4",
+    "profile": "north-mini-code-apcv2-ordinary",
+    "settings": {
+      "max_context": 32768,
+      "max_lanes": 4,
+      "max_inflight": 8,
+      "prefill_step": 2048,
+      "cache_bytes": 2147483648,
+      "disk_cache": true,
+      "host_prompt_cache_entries": 128,
+      "host_prompt_cache_tokens": 1048576,
+      "coalesce_window_ms": 5.0,
+      "batch_cohort_timeout_ms": 1000.0,
+      "mtp": false,
+      "tenant_scoped_cache": false,
+      "environment": {
+        "HF_HUB_OFFLINE": "1",
+        "TRANSFORMERS_OFFLINE": "1",
+        "MLX_ENABLE_TF32": "0",
+        "MLX_LM_COMPILED_DECODE": "0",
+        "MLX_LM_SEGMENTED_SELF_MTP": "0",
+        "MLX_LM_TRUE_BATCHED_SEGMENTED_MTP": "0",
+        "MLX_LM_SHARED_QSA_SUFFIX": "0"
+      },
+      "adaptive_mtp_depth": {
+        "enabled": false,
+        "ewma_alpha": 0.25,
+        "shrink_gate": 0.35,
+        "grow_gate": 0.8,
+        "loss_rounds": 3,
+        "gain_rounds": 3,
+        "park_rounds": 4
+      },
+      "spomin_live_surgery": {
+        "enabled": false,
+        "capacity_tokens": 0,
+        "segment_tokens": 1024,
+        "strategy": "oldest_contiguous",
+        "protect_prefix_segments": 1
+      },
+      "cache_capsules": {
+        "enabled": false,
+        "backend": "gpu",
+        "fallback": "gpu",
+        "deadline_ms": 50.0,
+        "verify_raw_bits": false
+      },
+      "persistent_block_bytes": 0,
+      "approximate_kv": {
+        "enabled": false,
+        "operation": null,
+        "start_tokens": 0,
+        "evidence": [],
+        "descriptor": null
+      },
+      "execution_policy": {
+        "persistent": true,
+        "num_draft": 0,
+        "rate_gate": false,
+        "prefill_step_size": 2048,
+        "segment_aware_live_tip": false,
+        "segment_aware_cohort_size": 4
+      },
+      "prompt_lookup": {},
+      "decode_time_fairness": {
+        "enabled": true,
+        "fair_share": 0.5,
+        "stall_target_ms": 500.0
+      },
+      "speculation": "ordinary",
+      "cache_budget": {
+        "schema": "north-mini-code-cache-geometry-v1",
+        "global_layers": 13,
+        "sliding_layers": 36,
+        "kv_heads": 4,
+        "head_dim": 128,
+        "sliding_window": 4096,
+        "item_bytes": 4,
+        "allocation_step": 256,
+        "checkpoint_copies": 4,
+        "transcript_bytes_per_token": 16,
+        "transient_gib_per_lane": 3.1,
+        "bound": "fp32-global-plus-window-and-restore-snapshots",
+        "workspace": "3.1-GiB-per-lane conservative static assumption; live qualification pending"
+      }
+    },
+    "route_receipt": "candidate_validation",
+    "capabilities": [
+      "apc_v2",
+      "continuous_batch",
+      "layered_cache",
+      "prefix_reuse",
+      "reasoning",
+      "streaming",
+      "text",
+      "tools"
+    ],
+    "qualification": "candidate",
+    "max_context": 32768,
+    "max_lanes": 4,
+    "structured_output": {
+      "engines": [
+        "automaton",
+        "scanner"
+      ],
+      "thinking_deferral": false
+    },
+    "http": {
+      "max_request_bytes": 2097152
+    },
+    "apcv2": {
+      "lookups": 24,
+      "hits": 23,
+      "misses": 1,
+      "cached_tokens": 2730,
+      "stores": 45,
+      "clears": 0,
+      "lifetime": {
+        "lookups": 24,
+        "hits": 23,
+        "misses": 1,
+        "cached_tokens": 2730,
+        "stores": 45
+      },
+      "cow_enabled": true,
+      "cow": {
+        "sources": 45,
+        "source_bytes": 728455168,
+        "freeze_failures": 0,
+        "branches": 23,
+        "branch_failures": 0,
+        "stale_rejections": 0,
+        "invalidations": 31,
+        "active_leases": 1,
+        "peak_leases": 4,
+        "descriptor_aliases": 6664,
+        "descriptor_bytes": 1073364992,
+        "avoided_copy_bytes": 344909824,
+        "materializations": 0,
+        "materialized_bytes": 0,
+        "fallback_deepcopies": 0,
+        "fallback_bytes": 0,
+        "freeze_ns": 88360206,
+        "branch_ns": 8239458,
+        "fallback_ns": 0,
+        "releases": 22,
+        "planes": {
+          "attention_kv": {
+            "descriptor_aliases": 1768,
+            "descriptor_bytes": 284770304,
+            "materializations": 0,
+            "materialized_bytes": 0
+          },
+          "attention_ring": {
+            "descriptor_aliases": 4896,
+            "descriptor_bytes": 788594688,
+            "materializations": 0,
+            "materialized_bytes": 0
+          }
+        },
+        "materialized_bytes_are_estimated": true,
+        "array_readbacks": 0
+      },
+      "max_tokens": 32768,
+      "max_entry_tokens": 285,
+      "overlength_rejections": 0,
+      "idle_disk": {
+        "enabled": true,
+        "block_bytes": 0,
+        "idle_seconds": 180.0,
+        "resident_bytes": 269545472,
+        "disk_bytes": 0,
+        "disk_max_bytes": 68719476736,
+        "disk_entries": 0,
+        "idle_spills": 0,
+        "pressure_spills": 0,
+        "restores": 0,
+        "restore_failures": 0,
+        "restore_budget_deferrals": 0,
+        "spill_failures": 0,
+        "disk_evictions": 0,
+        "bytes_written": 0,
+        "bytes_read": 0
+      },
+      "cache_capsules": {
+        "reservations": 0,
+        "reservation_rejections": 0,
+        "reserved_bytes_peak": 0,
+        "reserved_bytes": 0
+      },
+      "version": 2,
+      "layout_name": "north-mini-code-layer-segments-v1",
+      "layer_segments": {
+        "schema": "apcv2.layer-segments.v1",
+        "entries": 14,
+        "disk_entries": 0,
+        "layers": 686,
+        "plane_layers": 686,
+        "segments": 725,
+        "logical_bytes": 269545472,
+        "by_plane": {
+          "attention_kv": {
+            "layers": 182,
+            "segments": 221,
+            "logical_bytes": 71512064,
+            "invalid": 0
+          },
+          "attention_ring": {
+            "layers": 504,
+            "segments": 504,
+            "logical_bytes": 198033408,
+            "invalid": 0
+          }
+        }
+      }
+    },
+    "cache_capsules": null,
+    "approximate_kv": {
+      "enabled": false,
+      "state": "implemented",
+      "fidelity": "exact",
+      "applied": 0,
+      "declined": 0,
+      "requantized_prefix_hits": 0,
+      "apcv2_store_skipped_approximate": 0
+    },
+    "scheduler": {
+      "prefill_rounds": 28,
+      "prefill_only_rounds": 27,
+      "decode_priority_release_rounds": 0,
+      "decode_priority_deferred_rounds": 0,
+      "adaptive_prefill_release_rounds": 1,
+      "adaptive_prefill_slack_deferred_rounds": 0,
+      "adaptive_prefill_deadline_forced_rounds": 0,
+      "adaptive_prefill_apc_priority_admissions": 0,
+      "adaptive_prefill_chunk_histogram": {
+        "13": 1
+      },
+      "decode_fairness_prefill_chunks": 1,
+      "decode_fairness_debt_deferrals": 0,
+      "decode_fairness_debt_repayments": 1,
+      "decode_fairness_cap_clamps": 0
+    },
+    "metal_active_bytes": 19028517306,
+    "metal_peak_bytes": 19809845966,
+    "process_physical_footprint_bytes": 21530031400,
+    "execution": {
+      "architecture": "cohere2_moe",
+      "cache_layout": "north-mini-code-layer-segments-v1",
+      "sliding_layers": 36,
+      "global_layers": 13,
+      "sliding_window": 4096,
+      "speculation": "none-qualified"
+    },
+    "admission": {},
+    "memory_waiting": 0,
+    "headroom_bytes": 92081094656,
+    "healthy": true,
+    "error": null,
+    "inflight": 0,
+    "queue_depth": 0,
+    "counts": {
+      "admitted": 24,
+      "cycles": 714,
+      "multi_request_cycles": 229,
+      "completed": 24
+    },
+    "recent_receipts": [
+      {
+        "request_id": "chatcmpl-2944d80a1f3c4806928a620c864fe91a",
+        "cache": "apcv2",
+        "cached_tokens": 0,
+        "parallel_prefill": null,
+        "profile": "north-mini-code-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": false,
+          "top_logprobs": 0,
+          "logprob_semantics": null,
+          "thinking": false,
+          "sampling": {
+            "temperature": 0
+          },
+          "min_tokens": 0,
+          "batch_cohort": null,
+          "reasoning_effort": "none",
+          "effort_semantics": "thinking_toggle",
+          "context_limit": 32768,
+          "structured_output": null
+        },
+        "ordinary_compute_width": 1,
+        "mtp": null,
+        "speculation": null,
+        "spomin_live_surgery": null,
+        "approximate_kv": null,
+        "cache_capsule": null,
+        "prompt_tokens": 123,
+        "completion_tokens": 6,
+        "ttft_seconds": 0.26353550000931136,
+        "elapsed_seconds": 0.3089219589892309
+      },
+      {
+        "request_id": "chatcmpl-895bfa5c44714793a5714a980dcd9e7b",
+        "cache": "apcv2",
+        "cached_tokens": 111,
+        "parallel_prefill": null,
+        "profile": "north-mini-code-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": false,
+          "top_logprobs": 0,
+          "logprob_semantics": null,
+          "thinking": false,
+          "sampling": {
+            "temperature": 0
+          },
+          "min_tokens": 0,
+          "batch_cohort": null,
+          "reasoning_effort": null,
+          "effort_semantics": "thinking_toggle",
+          "context_limit": 32768,
+          "structured_output": null
+        },
+        "ordinary_compute_width": 1,
+        "mtp": null,
+        "speculation": null,
+        "spomin_live_surgery": null,
+        "approximate_kv": null,
+        "cache_capsule": null,
+        "prompt_tokens": 124,
+        "completion_tokens": 8,
+        "ttft_seconds": 0.06741824999335222,
+        "elapsed_seconds": 0.12283683399436995
+      },
+      {
+        "request_id": "chatcmpl-b26e023ee182415eba304cd7c8a8eb02",
+        "cache": "apcv2",
+        "cached_tokens": 123,
+        "parallel_prefill": null,
+        "profile": "north-mini-code-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": true,
+          "top_logprobs": 3,
+          "logprob_semantics": "execution_target: ordinary=post_processor_pre_sampler; mtp=transformed_target_verifier",
+          "thinking": false,
+          "sampling": {
+            "temperature": 0
+          },
+          "min_tokens": 0,
+          "batch_cohort": null,
+          "reasoning_effort": null,
+          "effort_semantics": "thinking_toggle",
+          "context_limit": 32768,
+          "structured_output": null
+        },
+        "ordinary_compute_width": 1,
+        "mtp": null,
+        "speculation": null,
+        "spomin_live_surgery": null,
+        "approximate_kv": null,
+        "cache_capsule": null,
+        "prompt_tokens": 124,
+        "completion_tokens": 8,
+        "ttft_seconds": 0.037960999994538724,
+        "elapsed_seconds": 0.09621633400092833
+      },
+      {
+        "request_id": "chatcmpl-33f915263cf94e848d3a311f50936fd3",
+        "cache": "apcv2",
+        "cached_tokens": 123,
+        "parallel_prefill": null,
+        "profile": "north-mini-code-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": true,
+          "top_logprobs": 3,
+          "logprob_semantics": "execution_target: ordinary=post_processor_pre_sampler; mtp=transformed_target_verifier",
+          "thinking": false,
+          "sampling": {
+            "temperature": 0
+          },
+          "min_tokens": 0,
+          "batch_cohort": null,
+          "reasoning_effort": null,
+          "effort_semantics": "thinking_toggle",
+          "context_limit": 32768,
+          "structured_output": null
+        },
+        "ordinary_compute_width": 1,
+        "mtp": null,
+        "speculation": null,
+        "spomin_live_surgery": null,
+        "approximate_kv": null,
+        "cache_capsule": null,
+        "prompt_tokens": 124,
+        "completion_tokens": 8,
+        "ttft_seconds": 0.03784137501497753,
+        "elapsed_seconds": 0.09629841599962674
+      },
+      {
+        "request_id": "chatcmpl-ed7bec9296ea4e74aed42152ca74adc2",
+        "cache": "apcv2",
+        "cached_tokens": 111,
+        "parallel_prefill": null,
+        "profile": "north-mini-code-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": false,
+          "top_logprobs": 0,
+          "logprob_semantics": null,
+          "thinking": false,
+          "sampling": {
+            "temperature": 0.7,
+            "top_p": 0.9,
+            "top_k": 24,
+            "min_p": 0.05,
+            "repetition_penalty": 1.05,
+            "presence_penalty": 0.1,
+            "frequency_penalty": 0.1,
+            "seed": 237
+          },
+          "min_tokens": 0,
+          "batch_cohort": null,
+          "reasoning_effort": null,
+          "effort_semantics": "thinking_toggle",
+          "context_limit": 32768,
+          "structured_output": null
+        },
+        "ordinary_compute_width": 1,
+        "mtp": null,
+        "speculation": null,
+        "spomin_live_surgery": null,
+        "approximate_kv": null,
+        "cache_capsule": null,
+        "prompt_tokens": 121,
+        "completion_tokens": 21,
+        "ttft_seconds": 0.061233790998812765,
+        "elapsed_seconds": 0.22317124999244697
+      },
+      {
+        "request_id": "chatcmpl-ad49367e9ae3408f9157657cce4b5f95",
+        "cache": "apcv2",
+        "cached_tokens": 120,
+        "parallel_prefill": null,
+        "profile": "north-mini-code-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": false,
+          "top_logprobs": 0,
+          "logprob_semantics": null,
+          "thinking": false,
+          "sampling": {
+            "temperature": 0.7,
+            "top_p": 0.9,
+            "top_k": 24,
+            "min_p": 0.05,
+            "repetition_penalty": 1.05,
+            "presence_penalty": 0.1,
+            "frequency_penalty": 0.1,
+            "seed": 237
+          },
+          "min_tokens": 0,
+          "batch_cohort": null,
+          "reasoning_effort": null,
+          "effort_semantics": "thinking_toggle",
+          "context_limit": 32768,
+          "structured_output": null
+        },
+        "ordinary_compute_width": 1,
+        "mtp": null,
+        "speculation": null,
+        "spomin_live_surgery": null,
+        "approximate_kv": null,
+        "cache_capsule": null,
+        "prompt_tokens": 121,
+        "completion_tokens": 21,
+        "ttft_seconds": 0.045315666997339576,
+        "elapsed_seconds": 0.2266372090089135
+      },
+      {
+        "request_id": "chatcmpl-f34dfa91623b49f2bf2faddbb048548e",
+        "cache": "apcv2",
+        "cached_tokens": 114,
+        "parallel_prefill": null,
+        "profile": "north-mini-code-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": false,
+          "top_logprobs": 0,
+          "logprob_semantics": null,
+          "thinking": false,
+          "sampling": {
+            "temperature": 0
+          },
+          "min_tokens": 0,
+          "batch_cohort": null,
+          "reasoning_effort": null,
+          "effort_semantics": "thinking_toggle",
+          "context_limit": 32768,
+          "structured_output": null
+        },
+        "ordinary_compute_width": 1,
+        "mtp": null,
+        "speculation": null,
+        "spomin_live_surgery": null,
+        "approximate_kv": null,
+        "cache_capsule": null,
+        "prompt_tokens": 124,
+        "completion_tokens": 7,
+        "ttft_seconds": 0.05683704200782813,
+        "elapsed_seconds": 0.10711091701523401
+      },
+      {
+        "request_id": "chatcmpl-24c47507b8234afc88225e893891bff9",
+        "cache": "apcv2",
+        "cached_tokens": 123,
+        "parallel_prefill": null,
+        "profile": "north-mini-code-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": false,
+          "top_logprobs": 0,
+          "logprob_semantics": null,
+          "thinking": false,
+          "sampling": {
+            "temperature": 0
+          },
+          "min_tokens": 0,
+          "batch_cohort": null,
+          "reasoning_effort": null,
+          "effort_semantics": "thinking_toggle",
+          "context_limit": 32768,
+          "structured_output": null
+        },
+        "ordinary_compute_width": 1,
+        "mtp": null,
+        "speculation": null,
+        "spomin_live_surgery": null,
+        "approximate_kv": null,
+        "cache_capsule": null,
+        "prompt_tokens": 124,
+        "completion_tokens": 7,
+        "ttft_seconds": 0.038237208005739376,
+        "elapsed_seconds": 0.08719845800078474
+      },
+      {
+        "request_id": "chatcmpl-cc2f44d1705c4679a96b5d08d4536179",
+        "cache": "apcv2",
+        "cached_tokens": 123,
+        "parallel_prefill": null,
+        "profile": "north-mini-code-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": false,
+          "top_logprobs": 0,
+          "logprob_semantics": null,
+          "thinking": false,
+          "sampling": {
+            "temperature": 0
+          },
+          "min_tokens": 0,
+          "batch_cohort": null,
+          "reasoning_effort": null,
+          "effort_semantics": "thinking_toggle",
+          "context_limit": 32768,
+          "structured_output": null
+        },
+        "ordinary_compute_width": 1,
+        "mtp": null,
+        "speculation": null,
+        "spomin_live_surgery": null,
+        "approximate_kv": null,
+        "cache_capsule": null,
+        "prompt_tokens": 124,
+        "completion_tokens": 7,
+        "ttft_seconds": 0.0376287079998292,
+        "elapsed_seconds": 0.08638266698108055
+      },
+      {
+        "request_id": "chatcmpl-eda6d47af0e7412ba6e1ed472cdbe8d2",
+        "cache": "apcv2",
+        "cached_tokens": 102,
+        "parallel_prefill": null,
+        "profile": "north-mini-code-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": false,
+          "top_logprobs": 0,
+          "logprob_semantics": null,
+          "thinking": false,
+          "sampling": {
+            "temperature": 0
+          },
+          "min_tokens": 0,
+          "batch_cohort": null,
+          "reasoning_effort": null,
+          "effort_semantics": "thinking_toggle",
+          "context_limit": 32768,
+          "structured_output": null
+        },
+        "ordinary_compute_width": 1,
+        "mtp": null,
+        "speculation": null,
+        "spomin_live_surgery": null,
+        "approximate_kv": null,
+        "cache_capsule": null,
+        "prompt_tokens": 178,
+        "completion_tokens": 30,
+        "ttft_seconds": 0.10010958401835524,
+        "elapsed_seconds": 0.29418145900126547
+      },
+      {
+        "request_id": "chatcmpl-226190767f604829ad35e7d665d43977",
+        "cache": "apcv2",
+        "cached_tokens": 176,
+        "parallel_prefill": null,
+        "profile": "north-mini-code-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": false,
+          "top_logprobs": 0,
+          "logprob_semantics": null,
+          "thinking": false,
+          "sampling": {
+            "temperature": 0
+          },
+          "min_tokens": 0,
+          "batch_cohort": null,
+          "reasoning_effort": null,
+          "effort_semantics": "thinking_toggle",
+          "context_limit": 32768,
+          "structured_output": null
+        },
+        "ordinary_compute_width": 1,
+        "mtp": null,
+        "speculation": null,
+        "spomin_live_surgery": null,
+        "approximate_kv": null,
+        "cache_capsule": null,
+        "prompt_tokens": 267,
+        "completion_tokens": 16,
+        "ttft_seconds": 0.11433133302489296,
+        "elapsed_seconds": 0.2226735000149347
+      },
+      {
+        "request_id": "chatcmpl-9fe599112e5d42539947c25153b0db19",
+        "cache": "apcv2",
+        "cached_tokens": 109,
+        "parallel_prefill": null,
+        "profile": "north-mini-code-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": false,
+          "top_logprobs": 0,
+          "logprob_semantics": null,
+          "thinking": true,
+          "sampling": {
+            "temperature": 0
+          },
+          "min_tokens": 0,
+          "batch_cohort": null,
+          "reasoning_effort": null,
+          "effort_semantics": "thinking_toggle",
+          "context_limit": 32768,
+          "structured_output": null
+        },
+        "ordinary_compute_width": 1,
+        "mtp": null,
+        "speculation": null,
+        "spomin_live_surgery": null,
+        "approximate_kv": null,
+        "cache_capsule": null,
+        "prompt_tokens": 166,
+        "completion_tokens": 39,
+        "ttft_seconds": 0.1138220000138972,
+        "elapsed_seconds": 0.366618792002555
+      },
+      {
+        "request_id": "chatcmpl-54563d605f6647d493457e124dc35d61",
+        "cache": "apcv2",
+        "cached_tokens": 123,
+        "parallel_prefill": null,
+        "profile": "north-mini-code-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": false,
+          "top_logprobs": 0,
+          "logprob_semantics": null,
+          "thinking": false,
+          "sampling": {
+            "temperature": 0
+          },
+          "min_tokens": 0,
+          "batch_cohort": null,
+          "reasoning_effort": null,
+          "effort_semantics": "thinking_toggle",
+          "context_limit": 32768,
+          "structured_output": null
+        },
+        "ordinary_compute_width": 1,
+        "mtp": null,
+        "speculation": null,
+        "spomin_live_surgery": null,
+        "approximate_kv": null,
+        "cache_capsule": null,
+        "prompt_tokens": 124,
+        "completion_tokens": 5,
+        "ttft_seconds": 0.03944054199382663,
+        "elapsed_seconds": 0.06488437499501742
+      },
+      {
+        "request_id": "chatcmpl-d2cae9e99bd94ef8931429f4db453d14",
+        "cache": "apcv2",
+        "cached_tokens": 111,
+        "parallel_prefill": null,
+        "profile": "north-mini-code-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": false,
+          "top_logprobs": 0,
+          "logprob_semantics": null,
+          "thinking": false,
+          "sampling": {
+            "temperature": 0.7,
+            "seed": 123
+          },
+          "min_tokens": 0,
+          "batch_cohort": null,
+          "reasoning_effort": null,
+          "effort_semantics": "thinking_toggle",
+          "context_limit": 32768,
+          "structured_output": null
+        },
+        "ordinary_compute_width": 1,
+        "mtp": null,
+        "speculation": null,
+        "spomin_live_surgery": null,
+        "approximate_kv": null,
+        "cache_capsule": null,
+        "prompt_tokens": 124,
+        "completion_tokens": 64,
+        "ttft_seconds": 0.06763637499534525,
+        "elapsed_seconds": 0.4962508330063429
+      },
+      {
+        "request_id": "chatcmpl-83eda36dbf8c4c30b370c1293fede8f7",
+        "cache": "apcv2",
+        "cached_tokens": 123,
+        "parallel_prefill": null,
+        "profile": "north-mini-code-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": false,
+          "top_logprobs": 0,
+          "logprob_semantics": null,
+          "thinking": false,
+          "sampling": {
+            "temperature": 0.7,
+            "seed": 123
+          },
+          "min_tokens": 0,
+          "batch_cohort": null,
+          "reasoning_effort": null,
+          "effort_semantics": "thinking_toggle",
+          "context_limit": 32768,
+          "structured_output": null
+        },
+        "ordinary_compute_width": 1,
+        "mtp": null,
+        "speculation": null,
+        "spomin_live_surgery": null,
+        "approximate_kv": null,
+        "cache_capsule": null,
+        "prompt_tokens": 124,
+        "completion_tokens": 64,
+        "ttft_seconds": 0.038727000006474555,
+        "elapsed_seconds": 0.4619538749975618
+      },
+      {
+        "request_id": "chatcmpl-407e91c5beb743549c4b3706bb835587",
+        "cache": "apcv2",
+        "cached_tokens": 111,
+        "parallel_prefill": null,
+        "profile": "north-mini-code-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": false,
+          "top_logprobs": 0,
+          "logprob_semantics": null,
+          "thinking": false,
+          "sampling": {
+            "temperature": 0
+          },
+          "min_tokens": 0,
+          "batch_cohort": null,
+          "reasoning_effort": null,
+          "effort_semantics": "thinking_toggle",
+          "context_limit": 32768,
+          "structured_output": null
+        },
+        "ordinary_compute_width": 4,
+        "mtp": null,
+        "speculation": null,
+        "spomin_live_surgery": null,
+        "approximate_kv": null,
+        "cache_capsule": null,
+        "prompt_tokens": 125,
+        "completion_tokens": 160,
+        "ttft_seconds": 0.15400433400645852,
+        "elapsed_seconds": 1.9156628749915399
+      },
+      {
+        "request_id": "chatcmpl-6b0fd41976324feb818bab4f658fe89e",
+        "cache": "apcv2",
+        "cached_tokens": 111,
+        "parallel_prefill": null,
+        "profile": "north-mini-code-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": false,
+          "top_logprobs": 0,
+          "logprob_semantics": null,
+          "thinking": false,
+          "sampling": {
+            "temperature": 0
+          },
+          "min_tokens": 0,
+          "batch_cohort": null,
+          "reasoning_effort": null,
+          "effort_semantics": "thinking_toggle",
+          "context_limit": 32768,
+          "structured_output": null
+        },
+        "ordinary_compute_width": 4,
+        "mtp": null,
+        "speculation": null,
+        "spomin_live_surgery": null,
+        "approximate_kv": null,
+        "cache_capsule": null,
+        "prompt_tokens": 125,
+        "completion_tokens": 160,
+        "ttft_seconds": 0.1528244579967577,
+        "elapsed_seconds": 1.9162712919933256
+      },
+      {
+        "request_id": "chatcmpl-bd2b97e319884758b2ab6eeeb45350fc",
+        "cache": "apcv2",
+        "cached_tokens": 111,
+        "parallel_prefill": null,
+        "profile": "north-mini-code-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": false,
+          "top_logprobs": 0,
+          "logprob_semantics": null,
+          "thinking": false,
+          "sampling": {
+            "temperature": 0
+          },
+          "min_tokens": 0,
+          "batch_cohort": null,
+          "reasoning_effort": null,
+          "effort_semantics": "thinking_toggle",
+          "context_limit": 32768,
+          "structured_output": null
+        },
+        "ordinary_compute_width": 4,
+        "mtp": null,
+        "speculation": null,
+        "spomin_live_surgery": null,
+        "approximate_kv": null,
+        "cache_capsule": null,
+        "prompt_tokens": 125,
+        "completion_tokens": 160,
+        "ttft_seconds": 0.2053245829883963,
+        "elapsed_seconds": 1.954465082992101
+      },
+      {
+        "request_id": "chatcmpl-4924d7f1246d42c3818eabcfffcda78b",
+        "cache": "apcv2",
+        "cached_tokens": 111,
+        "parallel_prefill": null,
+        "profile": "north-mini-code-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": false,
+          "top_logprobs": 0,
+          "logprob_semantics": null,
+          "thinking": false,
+          "sampling": {
+            "temperature": 0
+          },
+          "min_tokens": 0,
+          "batch_cohort": null,
+          "reasoning_effort": null,
+          "effort_semantics": "thinking_toggle",
+          "context_limit": 32768,
+          "structured_output": null
+        },
+        "ordinary_compute_width": 4,
+        "mtp": null,
+        "speculation": null,
+        "spomin_live_surgery": null,
+        "approximate_kv": null,
+        "cache_capsule": null,
+        "prompt_tokens": 125,
+        "completion_tokens": 160,
+        "ttft_seconds": 0.20467679199646227,
+        "elapsed_seconds": 1.9556252920010593
+      },
+      {
+        "request_id": "chatcmpl-3403ed8898de4d8b8e4bed371826c5c9",
+        "cache": "apcv2",
+        "cached_tokens": 116,
+        "parallel_prefill": null,
+        "profile": "north-mini-code-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": false,
+          "top_logprobs": 0,
+          "logprob_semantics": null,
+          "thinking": false,
+          "sampling": {
+            "temperature": 0
+          },
+          "min_tokens": 0,
+          "batch_cohort": null,
+          "reasoning_effort": null,
+          "effort_semantics": "thinking_toggle",
+          "context_limit": 32768,
+          "structured_output": null
+        },
+        "ordinary_compute_width": 1,
+        "mtp": null,
+        "speculation": null,
+        "spomin_live_surgery": null,
+        "approximate_kv": null,
+        "cache_capsule": null,
+        "prompt_tokens": 127,
+        "completion_tokens": 64,
+        "ttft_seconds": 0.06524258400895633,
+        "elapsed_seconds": 0.4758266670105513
+      },
+      {
+        "request_id": "chatcmpl-0aa6d82212f14e438e15da473ebc7067",
+        "cache": "apcv2",
+        "cached_tokens": 114,
+        "parallel_prefill": null,
+        "profile": "north-mini-code-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": false,
+          "top_logprobs": 0,
+          "logprob_semantics": null,
+          "thinking": false,
+          "sampling": {
+            "temperature": 0
+          },
+          "min_tokens": 0,
+          "batch_cohort": null,
+          "reasoning_effort": null,
+          "effort_semantics": "thinking_toggle",
+          "context_limit": 32768,
+          "structured_output": null
+        },
+        "ordinary_compute_width": 1,
+        "mtp": null,
+        "speculation": null,
+        "spomin_live_surgery": null,
+        "approximate_kv": null,
+        "cache_capsule": null,
+        "prompt_tokens": 128,
+        "completion_tokens": 64,
+        "ttft_seconds": 0.06857979102642275,
+        "elapsed_seconds": 0.4856925409985706
+      },
+      {
+        "request_id": "chatcmpl-b9439799fb484abcb01d50c2fc74c4ff",
+        "cache": "apcv2",
+        "cached_tokens": 127,
+        "parallel_prefill": null,
+        "profile": "north-mini-code-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": false,
+          "top_logprobs": 0,
+          "logprob_semantics": null,
+          "thinking": false,
+          "sampling": {
+            "temperature": 0
+          },
+          "min_tokens": 0,
+          "batch_cohort": null,
+          "reasoning_effort": null,
+          "effort_semantics": "thinking_toggle",
+          "context_limit": 32768,
+          "structured_output": null
+        },
+        "ordinary_compute_width": 2,
+        "mtp": null,
+        "speculation": null,
+        "spomin_live_surgery": null,
+        "approximate_kv": null,
+        "cache_capsule": null,
+        "prompt_tokens": 128,
+        "completion_tokens": 64,
+        "ttft_seconds": 0.05507283398765139,
+        "elapsed_seconds": 0.5961879589885939
+      },
+      {
+        "request_id": "chatcmpl-70c08fcc9d074e66a29e341332ca88a8",
+        "cache": "apcv2",
+        "cached_tokens": 126,
+        "parallel_prefill": null,
+        "profile": "north-mini-code-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": false,
+          "top_logprobs": 0,
+          "logprob_semantics": null,
+          "thinking": false,
+          "sampling": {
+            "temperature": 0
+          },
+          "min_tokens": 0,
+          "batch_cohort": null,
+          "reasoning_effort": null,
+          "effort_semantics": "thinking_toggle",
+          "context_limit": 32768,
+          "structured_output": null
+        },
+        "ordinary_compute_width": 2,
+        "mtp": null,
+        "speculation": null,
+        "spomin_live_surgery": null,
+        "approximate_kv": null,
+        "cache_capsule": null,
+        "prompt_tokens": 127,
+        "completion_tokens": 64,
+        "ttft_seconds": 0.05420662500546314,
+        "elapsed_seconds": 0.5973190420190804
+      },
+      {
+        "request_id": "chatcmpl-392b4a7f60944cd9adfe479a82c6ccae",
+        "cache": "apcv2",
+        "cached_tokens": 111,
+        "parallel_prefill": null,
+        "profile": "north-mini-code-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": false,
+          "top_logprobs": 0,
+          "logprob_semantics": null,
+          "thinking": false,
+          "sampling": {
+            "temperature": 0
+          },
+          "min_tokens": 0,
+          "batch_cohort": null,
+          "reasoning_effort": null,
+          "effort_semantics": "thinking_toggle",
+          "context_limit": 32768,
+          "structured_output": null
+        },
+        "ordinary_compute_width": 1,
+        "mtp": null,
+        "speculation": null,
+        "spomin_live_surgery": null,
+        "approximate_kv": null,
+        "cache_capsule": null,
+        "prompt_tokens": 32652,
+        "completion_tokens": 2,
+        "ttft_seconds": 11.170416249980917,
+        "elapsed_seconds": 11.541009540989762
+      }
+    ],
+    "host_prompt_cache": {
+      "schema": "mlx2.host-prompt-cache.v1",
+      "entries": 12,
+      "tokens": 34259,
+      "max_entries": 128,
+      "max_tokens": 1048576,
+      "misses": 12,
+      "stores": 12,
+      "hits": 12
+    },
+    "spomin_live_surgery": {
+      "enabled": false
+    }
+  }
+}

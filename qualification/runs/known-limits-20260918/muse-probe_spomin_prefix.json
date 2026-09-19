@@ -1,0 +1,66 @@
+{
+  "every_run_compacted_and_correct": {
+    "ok": true,
+    "answers": [
+      "Lisbon",
+      "Lisbon",
+      "Lisbon"
+    ],
+    "receipts": [
+      [
+        13228,
+        10156
+      ],
+      [
+        13228,
+        10156
+      ],
+      [
+        13228,
+        10156
+      ]
+    ]
+  },
+  "repeat_warm_hits_the_exact_boundary": {
+    "ok": true,
+    "cached_tokens": [
+      0,
+      13228,
+      13228
+    ],
+    "source_tokens": 13228,
+    "retained_tokens": 10156,
+    "seconds": [
+      15.03,
+      0.2,
+      0.2
+    ],
+    "ttft": [
+      14.954533583979355,
+      0.11496612502378412,
+      0.11457970898482017
+    ]
+  },
+  "identical_answers_cold_and_warm": {
+    "ok": true,
+    "answers": [
+      "Lisbon",
+      "Lisbon",
+      "Lisbon"
+    ]
+  },
+  "compacted_end_state_still_not_published": {
+    "ok": true,
+    "skipped": 3
+  },
+  "different_question_same_context": {
+    "ok": true,
+    "answer": "ALPHA-7319",
+    "cached_tokens": 0
+  },
+  "server_alive_final": {
+    "ok": true,
+    "inflight": 0,
+    "error": null
+  }
+}

@@ -1,0 +1,67 @@
+{
+  "every_run_compacted_and_correct": {
+    "ok": true,
+    "answers": [
+      "The meeting is in Lisbon.",
+      "The meeting is in Lisbon.",
+      "The meeting is in Lisbon."
+    ],
+    "receipts": [
+      [
+        13274,
+        10202
+      ],
+      [
+        13274,
+        10202
+      ],
+      [
+        13274,
+        10202
+      ]
+    ]
+  },
+  "repeat_warm_hits_the_exact_boundary": {
+    "ok": true,
+    "cached_tokens": [
+      0,
+      13274,
+      13274
+    ],
+    "source_tokens": 13274,
+    "retained_tokens": 10202,
+    "seconds": [
+      3.87,
+      0.16,
+      0.16
+    ],
+    "ttft": [
+      3.792059125000378,
+      0.08088116699946113,
+      0.07612083299318328
+    ]
+  },
+  "identical_answers_cold_and_warm": {
+    "ok": true,
+    "answers": [
+      "The meeting is in Lisbon.",
+      "The meeting is in Lisbon.",
+      "The meeting is in Lisbon."
+    ]
+  },
+  "compacted_end_state_still_not_published": {
+    "ok": true,
+    "skipped": 3
+  },
+  "exact_prefix_serves_a_different_question": {
+    "ok": false,
+    "answer": "The vault code is a single word: \"ALPHA-7319\".The vault code",
+    "cached_tokens": 0,
+    "receipt": "applied"
+  },
+  "server_alive_final": {
+    "ok": true,
+    "inflight": 0,
+    "error": null
+  }
+}

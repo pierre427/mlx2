@@ -1,0 +1,36 @@
+{
+  "cell_manifest": {
+    "arm": "mtp2",
+    "arm_order_claim": "alternating",
+    "cell_id": "0e7e3e7a0c51a8a2a45e69d7d3738551f7fbb4862457880ea2e710e2b36c0577",
+    "model": "qwen36-35b-a3b",
+    "requested_width": 20,
+    "run": 0,
+    "semantics": "20 rounds x 20 simultaneous requests per arm",
+    "suite": "batch_stress"
+  },
+  "error": "HTTPError: HTTP Error 429: Too Many Requests",
+  "finished_at": 1789659810.1898339,
+  "host": {
+    "git_revision": "5fc4c28e181f2d9d9e0d9cbb4114eb3519197626",
+    "git_status": "M scripts/activate_qualification_arm.py\n M scripts/qualify_serving.py\n M scripts/run_qualification_matrix.py\n M src/mlx2/qualification.py\n M src/mlx2/runtime/generate.py\n M src/mlx2/runtime/hybrid_speculative.py\n M src/mlx2/runtime/memory_policy.py\n M src/mlx2/server.py\n M src/mlx2/serving.py\n M src/mlx2/structured_output.py\n M tests/test_admission_progress.py\n M tests/test_apcv2_lifecycle.py\n M tests/test_flash_next_memory.py\n M tests/test_parallel_sampling.py\n M tests/test_qualification.py\n M tests/test_qualification_matrix.py\n M tests/test_qualify_serving_receipts.py\n M tests/test_segmented_mtp.py\n M tests/test_serving_batch_features.py\n M tests/test_serving_contract.py\n M tests/test_serving_retention.py\n M tests/test_structured_output.py\n?? qualification/policies/qwen36-mtp-artifact-ordinary.json\n?? qualification/policies/qwen36-mtp2.json\n?? qualification/policies/qwen36-ordinary.json\n?? qualification/qwen36-overnight-experiments.json\n?? qualification/runs/qwen36-35b-a3b/overnight-campaign-pass1-20260916T1754/\n?? qualification/runs/qwen36-35b-a3b/overnight-campaign-pass2-20260916T1813/\n?? qualification/runs/qwen36-35b-a3b/overnight-campaign/\n?? qualification/runs/qwen36-35b-a3b/remediation-active.json\n?? qualification/runs/qwen36-35b-a3b/targeted-pass4/\n?? scripts/qwen36_http_qualification.py\n?? scripts/run_qwen36_overnight.py\n?? tests/test_activate_qualification_arm.py\n?? tests/test_qwen36_http_qualification.py\n?? tests/test_qwen36_overnight.py",
+    "harness_source": {
+      "activate_qualification_arm.py": "36ff6b6ffd72e4fee08a02534307fc3b6c0a68a6d8715afc3530613dbb57b3c1",
+      "build_context_prompts.py": "11c065c214848629087f2ebb3a40b9a423f929c97a9f7d8571f914d12411e7c1",
+      "run_qualification_matrix.py": "47a96f0dd54c0c6ac7d1748d1ca89e19bc7124cac93e326454c711355a6645b5",
+      "run_spomin_20x20.py": "c0da60754e3fe1a381ac895a4f608658bee3c2cf0f6cbd80cce5231525a08b73",
+      "thermal_probe.swift": "4f1cadeaa344082e231227f0c1e4b53f7f7fadf1a31858d7ecc0ec36ed3f284b"
+    },
+    "harness_source_sha256": "2faf2ccdc714aea4d304ec14c415860756a8e3509a7ee157c97606f766435aa9",
+    "macos": "26.7",
+    "mlx": "0.32.2.dev20260915+2a817ad94",
+    "platform": "macOS-26.7-arm64-arm-64bit",
+    "python": "3.12.13 (main, May 10 2026, 19:20:41) [Clang 22.1.3 ]",
+    "sw_vers": "ProductName:\t\tmacOS\nProductVersion:\t\t26.7\nBuildVersion:\t\t25G229",
+    "uname": "Darwin <host> 25.6.0 Darwin Kernel Version 25.6.0: Tue Aug 18 17:51:47 PDT 2026; root:xnu-12377.161.15.700.19~2/RELEASE_ARM64_T6050 arm64"
+  },
+  "manifest_sha256": "f3a2b1080806a643cd1203d6b44bec2cdb8d4680ae167b1c38b0ba591fd5b5fb",
+  "passed": false,
+  "schema": "mlx2.targeted-b20-live.v1",
+  "started_at": 1789659789.298295
+}

@@ -1,0 +1,2604 @@
+{
+  "schema": "mlx2.serving-qualification.v1",
+  "timestamp": 1789531271.236516,
+  "runtime": {
+    "source_sha256": "1e5085e865c02487fce7831b4a1ea333e17730cb0109cab3594a9580fe0fe063",
+    "mlx_native_sha256": "30335939714520c3306cfa58597100aae08bbeabdc60a4bc8c35c32c607450a8",
+    "python": "3.12.13",
+    "macos": "26.7",
+    "mlx": "0.32.2.dev20260915+2a817ad94",
+    "transformers": "5.12.1",
+    "dependencies": {
+      "numpy": "2.5.1",
+      "tokenizers": "0.22.2",
+      "jinja2": "3.1.6",
+      "psutil": "7.2.2",
+      "regex": "2026.9.10",
+      "safetensors": "0.8.0"
+    }
+  },
+  "qualification_harness": {
+    "schema": "mlx2.qualification-harness.v1",
+    "name": "scripts/qualify_serving.py",
+    "sha256": "4c3da4b55f9b2b22aad4ee6616226275b084a3a3f1a28227a4e05c298cc39cbd"
+  },
+  "artifact": "df2301de1c0588378c756c1e9caa42dedeb84860ce6f21ae767d48a494fa99fe",
+  "settings": {
+    "max_context": 131072,
+    "max_lanes": 20,
+    "max_inflight": 40,
+    "prefill_step": 2048,
+    "cache_bytes": 12884901888,
+    "disk_cache": true,
+    "mtp": false,
+    "environment": {
+      "HF_HUB_OFFLINE": "1",
+      "TRANSFORMERS_OFFLINE": "1",
+      "MLX_ENABLE_TF32": "0",
+      "MLX_LM_COMPILED_DECODE": "0",
+      "MLX_LM_SEGMENTED_SELF_MTP": "0",
+      "MLX_LM_TRUE_BATCHED_SEGMENTED_MTP": "0"
+    },
+    "execution_policy": {
+      "persistent": true,
+      "num_draft": 0,
+      "backend": "ordinary",
+      "rate_gate": false,
+      "prefill_step_size": 2048,
+      "segment_aware_live_tip": false,
+      "segment_aware_cohort_size": 20
+    },
+    "speculation": "ordinary",
+    "cache_budget": null
+  },
+  "checks": {
+    "unit_tests": {
+      "passed": true,
+      "evidence": "............................................................... [ 11%]\n........................................................................ [ 24%]\n........................................................................ [ 37%]\n.............ssssssss................................................... [ 50%]\n........................................................................ [ 64%]\n..........ss..ss........ss............. [ 71%]\n.s.s................................................... [ 81%]\n........................................................................ [ 94%]\n...............................                                          [100%]\n532 passed, 16 skipped, 59 subtests passed in 9.47s\n"
+    },
+    "hermes_client": {
+      "passed": true,
+      "evidence": {
+        "id": "chatcmpl-69e3fe2a42984abe8de9658cd215a833",
+        "object": "chat.completion",
+        "created": 1789531280,
+        "model": "Muse-Glimmer-30B-mlx-4bit",
+        "choices": [
+          {
+            "index": 0,
+            "finish_reason": "stop",
+            "message": {
+              "role": "assistant",
+              "content": "HERMES_READY"
+            }
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 66,
+          "completion_tokens": 5,
+          "total_tokens": 71,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          }
+        },
+        "mlx2": {
+          "request_id": "chatcmpl-69e3fe2a42984abe8de9658cd215a833",
+          "cache": "apcv2",
+          "cached_tokens": 0,
+          "profile": "muse-glimmer-apcv2-ordinary",
+          "qualification": "candidate",
+          "route_receipt": "candidate_validation",
+          "request_controls": {
+            "logprobs": false,
+            "top_logprobs": 0,
+            "logprob_semantics": null,
+            "thinking": false,
+            "sampling": {
+              "temperature": 0
+            },
+            "reasoning_effort": "none",
+            "effort_semantics": "reasoning_strength",
+            "context_limit": 131072
+          },
+          "ordinary_compute_width": 1,
+          "mtp": null,
+          "speculation": null,
+          "prompt_tokens": 66,
+          "completion_tokens": 5,
+          "ttft_seconds": 0.3988950830007525,
+          "elapsed_seconds": 0.533626042000833
+        }
+      }
+    },
+    "logprobs": {
+      "passed": true,
+      "evidence": {
+        "reference": {
+          "id": "chatcmpl-cab93aa311c84d3ea61979100cf05500",
+          "object": "chat.completion",
+          "created": 1789531281,
+          "model": "Muse-Glimmer-30B-mlx-4bit",
+          "choices": [
+            {
+              "index": 0,
+              "finish_reason": "length",
+              "message": {
+                "role": "assistant",
+                "content": "Compilers translate high-level code into efficient"
+              }
+            }
+          ],
+          "usage": {
+            "prompt_tokens": 66,
+            "completion_tokens": 8,
+            "total_tokens": 74,
+            "prompt_tokens_details": {
+              "cached_tokens": 53
+            }
+          },
+          "mlx2": {
+            "request_id": "chatcmpl-cab93aa311c84d3ea61979100cf05500",
+            "cache": "apcv2",
+            "cached_tokens": 53,
+            "profile": "muse-glimmer-apcv2-ordinary",
+            "qualification": "candidate",
+            "route_receipt": "candidate_validation",
+            "request_controls": {
+              "logprobs": false,
+              "top_logprobs": 0,
+              "logprob_semantics": null,
+              "thinking": false,
+              "sampling": {
+                "temperature": 0
+              },
+              "reasoning_effort": null,
+              "effort_semantics": "reasoning_strength",
+              "context_limit": 131072
+            },
+            "ordinary_compute_width": 1,
+            "mtp": null,
+            "speculation": null,
+            "prompt_tokens": 66,
+            "completion_tokens": 8,
+            "ttft_seconds": 0.1729538750005304,
+            "elapsed_seconds": 0.4081175829996937
+          }
+        },
+        "response": {
+          "id": "chatcmpl-b66d1dc145b341d4904669277205117b",
+          "object": "chat.completion",
+          "created": 1789531281,
+          "model": "Muse-Glimmer-30B-mlx-4bit",
+          "choices": [
+            {
+              "index": 0,
+              "finish_reason": "length",
+              "logprobs": {
+                "content": [
+                  {
+                    "id": 8183,
+                    "token": "Comp",
+                    "logprob": -0.25,
+                    "top_logprobs": [
+                      {
+                        "id": 8183,
+                        "token": "Comp",
+                        "logprob": -0.25
+                      },
+                      {
+                        "id": 45,
+                        "token": "A",
+                        "logprob": -1.875
+                      },
+                      {
+                        "id": 442,
+                        "token": "**",
+                        "logprob": -6.0625
+                      }
+                    ]
+                  },
+                  {
+                    "id": 55375,
+                    "token": "ilers",
+                    "logprob": 0.0,
+                    "top_logprobs": [
+                      {
+                        "id": 55375,
+                        "token": "ilers",
+                        "logprob": 0.0
+                      },
+                      {
+                        "id": 10646,
+                        "token": "iling",
+                        "logprob": -10.125
+                      },
+                      {
+                        "id": 320,
+                        "token": "il",
+                        "logprob": -10.8125
+                      }
+                    ]
+                  },
+                  {
+                    "id": 21022,
+                    "token": "\u0120translate",
+                    "logprob": -0.125,
+                    "top_logprobs": [
+                      {
+                        "id": 21022,
+                        "token": "\u0120translate",
+                        "logprob": -0.125
+                      },
+                      {
+                        "id": 583,
+                        "token": "\u0120are",
+                        "logprob": -3.0
+                      },
+                      {
+                        "id": 5684,
+                        "token": "\u0120transform",
+                        "logprob": -3.375
+                      }
+                    ]
+                  },
+                  {
+                    "id": 2244,
+                    "token": "\u0120high",
+                    "logprob": -0.5625,
+                    "top_logprobs": [
+                      {
+                        "id": 2244,
+                        "token": "\u0120high",
+                        "logprob": -0.5625
+                      },
+                      {
+                        "id": 6023,
+                        "token": "\u0120human",
+                        "logprob": -0.875
+                      },
+                      {
+                        "id": 4263,
+                        "token": "\u0120source",
+                        "logprob": -3.75
+                      }
+                    ]
+                  },
+                  {
+                    "id": 15636,
+                    "token": "-level",
+                    "logprob": 0.0,
+                    "top_logprobs": [
+                      {
+                        "id": 15636,
+                        "token": "-level",
+                        "logprob": 0.0
+                      },
+                      {
+                        "id": 3015,
+                        "token": "\u0120level",
+                        "logprob": -8.375
+                      },
+                      {
+                        "id": 25850,
+                        "token": "\u00e2\u0122\u0133",
+                        "logprob": -9.0
+                      }
+                    ]
+                  },
+                  {
+                    "id": 2963,
+                    "token": "\u0120code",
+                    "logprob": -0.1875,
+                    "top_logprobs": [
+                      {
+                        "id": 2963,
+                        "token": "\u0120code",
+                        "logprob": -0.1875
+                      },
+                      {
+                        "id": 18027,
+                        "token": "\u0120programming",
+                        "logprob": -2.3125
+                      },
+                      {
+                        "id": 4263,
+                        "token": "\u0120source",
+                        "logprob": -3.0
+                      }
+                    ]
+                  },
+                  {
+                    "id": 1629,
+                    "token": "\u0120into",
+                    "logprob": 0.0,
+                    "top_logprobs": [
+                      {
+                        "id": 1629,
+                        "token": "\u0120into",
+                        "logprob": 0.0
+                      },
+                      {
+                        "id": 24,
+                        "token": ",",
+                        "logprob": -9.25
+                      },
+                      {
+                        "id": 1933,
+                        "token": "\u0120like",
+                        "logprob": -9.5
+                      }
+                    ]
+                  },
+                  {
+                    "id": 11592,
+                    "token": "\u0120efficient",
+                    "logprob": -0.3125,
+                    "top_logprobs": [
+                      {
+                        "id": 11592,
+                        "token": "\u0120efficient",
+                        "logprob": -0.3125
+                      },
+                      {
+                        "id": 8875,
+                        "token": "\u0120machine",
+                        "logprob": -2.09375
+                      },
+                      {
+                        "id": 53756,
+                        "token": "\u0120executable",
+                        "logprob": -2.15625
+                      }
+                    ]
+                  }
+                ]
+              },
+              "message": {
+                "role": "assistant",
+                "content": "Compilers translate high-level code into efficient"
+              }
+            }
+          ],
+          "usage": {
+            "prompt_tokens": 66,
+            "completion_tokens": 8,
+            "total_tokens": 74,
+            "prompt_tokens_details": {
+              "cached_tokens": 65
+            }
+          },
+          "mlx2": {
+            "request_id": "chatcmpl-b66d1dc145b341d4904669277205117b",
+            "cache": "apcv2",
+            "cached_tokens": 65,
+            "profile": "muse-glimmer-apcv2-ordinary",
+            "qualification": "candidate",
+            "route_receipt": "candidate_validation",
+            "request_controls": {
+              "logprobs": true,
+              "top_logprobs": 3,
+              "logprob_semantics": "execution_target: ordinary=post_processor_pre_sampler; mtp=transformed_target_verifier",
+              "thinking": false,
+              "sampling": {
+                "temperature": 0
+              },
+              "reasoning_effort": null,
+              "effort_semantics": "reasoning_strength",
+              "context_limit": 131072
+            },
+            "ordinary_compute_width": 1,
+            "mtp": null,
+            "speculation": null,
+            "prompt_tokens": 66,
+            "completion_tokens": 8,
+            "ttft_seconds": 0.08501158400031272,
+            "elapsed_seconds": 0.3189763339996716
+          }
+        },
+        "stream_entries": [
+          {
+            "id": 8183,
+            "token": "Comp",
+            "logprob": -0.25,
+            "top_logprobs": [
+              {
+                "id": 8183,
+                "token": "Comp",
+                "logprob": -0.25
+              },
+              {
+                "id": 45,
+                "token": "A",
+                "logprob": -1.875
+              },
+              {
+                "id": 442,
+                "token": "**",
+                "logprob": -6.0625
+              }
+            ]
+          },
+          {
+            "id": 55375,
+            "token": "ilers",
+            "logprob": 0.0,
+            "top_logprobs": [
+              {
+                "id": 55375,
+                "token": "ilers",
+                "logprob": 0.0
+              },
+              {
+                "id": 10646,
+                "token": "iling",
+                "logprob": -10.125
+              },
+              {
+                "id": 320,
+                "token": "il",
+                "logprob": -10.8125
+              }
+            ]
+          },
+          {
+            "id": 21022,
+            "token": "\u0120translate",
+            "logprob": -0.125,
+            "top_logprobs": [
+              {
+                "id": 21022,
+                "token": "\u0120translate",
+                "logprob": -0.125
+              },
+              {
+                "id": 583,
+                "token": "\u0120are",
+                "logprob": -3.0
+              },
+              {
+                "id": 5684,
+                "token": "\u0120transform",
+                "logprob": -3.375
+              }
+            ]
+          },
+          {
+            "id": 2244,
+            "token": "\u0120high",
+            "logprob": -0.5625,
+            "top_logprobs": [
+              {
+                "id": 2244,
+                "token": "\u0120high",
+                "logprob": -0.5625
+              },
+              {
+                "id": 6023,
+                "token": "\u0120human",
+                "logprob": -0.875
+              },
+              {
+                "id": 4263,
+                "token": "\u0120source",
+                "logprob": -3.75
+              }
+            ]
+          },
+          {
+            "id": 15636,
+            "token": "-level",
+            "logprob": 0.0,
+            "top_logprobs": [
+              {
+                "id": 15636,
+                "token": "-level",
+                "logprob": 0.0
+              },
+              {
+                "id": 3015,
+                "token": "\u0120level",
+                "logprob": -8.375
+              },
+              {
+                "id": 25850,
+                "token": "\u00e2\u0122\u0133",
+                "logprob": -9.0
+              }
+            ]
+          },
+          {
+            "id": 2963,
+            "token": "\u0120code",
+            "logprob": -0.1875,
+            "top_logprobs": [
+              {
+                "id": 2963,
+                "token": "\u0120code",
+                "logprob": -0.1875
+              },
+              {
+                "id": 18027,
+                "token": "\u0120programming",
+                "logprob": -2.3125
+              },
+              {
+                "id": 4263,
+                "token": "\u0120source",
+                "logprob": -3.0
+              }
+            ]
+          },
+          {
+            "id": 1629,
+            "token": "\u0120into",
+            "logprob": 0.0,
+            "top_logprobs": [
+              {
+                "id": 1629,
+                "token": "\u0120into",
+                "logprob": 0.0
+              },
+              {
+                "id": 24,
+                "token": ",",
+                "logprob": -9.25
+              },
+              {
+                "id": 1933,
+                "token": "\u0120like",
+                "logprob": -9.5
+              }
+            ]
+          },
+          {
+            "id": 11592,
+            "token": "\u0120efficient",
+            "logprob": -0.3125,
+            "top_logprobs": [
+              {
+                "id": 11592,
+                "token": "\u0120efficient",
+                "logprob": -0.3125
+              },
+              {
+                "id": 8875,
+                "token": "\u0120machine",
+                "logprob": -2.09375
+              },
+              {
+                "id": 53756,
+                "token": "\u0120executable",
+                "logprob": -2.15625
+              }
+            ]
+          }
+        ],
+        "stream_usage": {
+          "prompt_tokens": 66,
+          "completion_tokens": 8,
+          "total_tokens": 74,
+          "prompt_tokens_details": {
+            "cached_tokens": 65
+          }
+        }
+      }
+    },
+    "sampling_controls": {
+      "passed": true,
+      "evidence": [
+        {
+          "request_id": "chatcmpl-de83baedd0104e4ba7b7569220f5690c",
+          "cache": "apcv2",
+          "cached_tokens": 53,
+          "profile": "muse-glimmer-apcv2-ordinary",
+          "qualification": "candidate",
+          "route_receipt": "candidate_validation",
+          "request_controls": {
+            "logprobs": false,
+            "top_logprobs": 0,
+            "logprob_semantics": null,
+            "thinking": false,
+            "sampling": {
+              "temperature": 0.7,
+              "top_p": 0.9,
+              "top_k": 24,
+              "min_p": 0.05,
+              "repetition_penalty": 1.05,
+              "presence_penalty": 0.1,
+              "frequency_penalty": 0.1,
+              "seed": 237
+            },
+            "reasoning_effort": null,
+            "effort_semantics": "reasoning_strength",
+            "context_limit": 131072
+          },
+          "ordinary_compute_width": 1,
+          "mtp": null,
+          "speculation": null,
+          "prompt_tokens": 63,
+          "completion_tokens": 17,
+          "ttft_seconds": 0.15374858299946936,
+          "elapsed_seconds": 0.6631656249992375
+        },
+        {
+          "request_id": "chatcmpl-62698f65709544cbaff89427aafac1f1",
+          "cache": "apcv2",
+          "cached_tokens": 62,
+          "profile": "muse-glimmer-apcv2-ordinary",
+          "qualification": "candidate",
+          "route_receipt": "candidate_validation",
+          "request_controls": {
+            "logprobs": false,
+            "top_logprobs": 0,
+            "logprob_semantics": null,
+            "thinking": false,
+            "sampling": {
+              "temperature": 0.7,
+              "top_p": 0.9,
+              "top_k": 24,
+              "min_p": 0.05,
+              "repetition_penalty": 1.05,
+              "presence_penalty": 0.1,
+              "frequency_penalty": 0.1,
+              "seed": 237
+            },
+            "reasoning_effort": null,
+            "effort_semantics": "reasoning_strength",
+            "context_limit": 131072
+          },
+          "ordinary_compute_width": 1,
+          "mtp": null,
+          "speculation": null,
+          "prompt_tokens": 63,
+          "completion_tokens": 17,
+          "ttft_seconds": 0.08504254199942807,
+          "elapsed_seconds": 0.6060059999999794
+        }
+      ]
+    },
+    "cold_text": {
+      "passed": true,
+      "evidence": {
+        "request_id": "chatcmpl-3c2f024b4fcc4beab5ceda6e590f6924",
+        "cache": "apcv2",
+        "cached_tokens": 56,
+        "profile": "muse-glimmer-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": false,
+          "top_logprobs": 0,
+          "logprob_semantics": null,
+          "thinking": false,
+          "sampling": {
+            "temperature": 0
+          },
+          "reasoning_effort": null,
+          "effort_semantics": "reasoning_strength",
+          "context_limit": 131072
+        },
+        "ordinary_compute_width": 1,
+        "mtp": null,
+        "speculation": null,
+        "prompt_tokens": 66,
+        "completion_tokens": 5,
+        "ttft_seconds": 0.14796641700013424,
+        "elapsed_seconds": 0.28716179200091574
+      }
+    },
+    "warm_prefix": {
+      "passed": true,
+      "evidence": {
+        "request_id": "chatcmpl-a8d04fb610de4bebada149877683721f",
+        "cache": "apcv2",
+        "cached_tokens": 65,
+        "profile": "muse-glimmer-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": false,
+          "top_logprobs": 0,
+          "logprob_semantics": null,
+          "thinking": false,
+          "sampling": {
+            "temperature": 0
+          },
+          "reasoning_effort": null,
+          "effort_semantics": "reasoning_strength",
+          "context_limit": 131072
+        },
+        "ordinary_compute_width": 1,
+        "mtp": null,
+        "speculation": null,
+        "prompt_tokens": 66,
+        "completion_tokens": 5,
+        "ttft_seconds": 0.08396408400039945,
+        "elapsed_seconds": 0.22180104200015194
+      }
+    },
+    "stream": {
+      "passed": true,
+      "evidence": [
+        {
+          "id": "chatcmpl-9406fcd22bdf423985db33f945cc8c7a",
+          "object": "chat.completion.chunk",
+          "created": 1789531284,
+          "model": "Muse-Glimmer-30B-mlx-4bit",
+          "choices": [
+            {
+              "index": 0,
+              "finish_reason": null,
+              "delta": {
+                "content": "ML"
+              }
+            }
+          ]
+        },
+        {
+          "id": "chatcmpl-9406fcd22bdf423985db33f945cc8c7a",
+          "object": "chat.completion.chunk",
+          "created": 1789531284,
+          "model": "Muse-Glimmer-30B-mlx-4bit",
+          "choices": [
+            {
+              "index": 0,
+              "finish_reason": null,
+              "delta": {
+                "content": "X"
+              }
+            }
+          ]
+        },
+        {
+          "id": "chatcmpl-9406fcd22bdf423985db33f945cc8c7a",
+          "object": "chat.completion.chunk",
+          "created": 1789531284,
+          "model": "Muse-Glimmer-30B-mlx-4bit",
+          "choices": [
+            {
+              "index": 0,
+              "finish_reason": null,
+              "delta": {
+                "content": "2"
+              }
+            }
+          ]
+        },
+        {
+          "id": "chatcmpl-9406fcd22bdf423985db33f945cc8c7a",
+          "object": "chat.completion.chunk",
+          "created": 1789531284,
+          "model": "Muse-Glimmer-30B-mlx-4bit",
+          "choices": [
+            {
+              "index": 0,
+              "finish_reason": null,
+              "delta": {
+                "content": "_READY"
+              }
+            }
+          ]
+        },
+        {
+          "id": "chatcmpl-9406fcd22bdf423985db33f945cc8c7a",
+          "object": "chat.completion.chunk",
+          "created": 1789531284,
+          "model": "Muse-Glimmer-30B-mlx-4bit",
+          "choices": [
+            {
+              "index": 0,
+              "finish_reason": "stop",
+              "delta": {}
+            }
+          ],
+          "usage": {
+            "prompt_tokens": 66,
+            "completion_tokens": 5,
+            "total_tokens": 71,
+            "prompt_tokens_details": {
+              "cached_tokens": 65
+            }
+          },
+          "mlx2": {
+            "request_id": "chatcmpl-9406fcd22bdf423985db33f945cc8c7a",
+            "cache": "apcv2",
+            "cached_tokens": 65,
+            "profile": "muse-glimmer-apcv2-ordinary",
+            "qualification": "candidate",
+            "route_receipt": "candidate_validation",
+            "request_controls": {
+              "logprobs": false,
+              "top_logprobs": 0,
+              "logprob_semantics": null,
+              "thinking": false,
+              "sampling": {
+                "temperature": 0
+              },
+              "reasoning_effort": null,
+              "effort_semantics": "reasoning_strength",
+              "context_limit": 131072
+            },
+            "ordinary_compute_width": 1,
+            "mtp": null,
+            "speculation": null,
+            "prompt_tokens": 66,
+            "completion_tokens": 5,
+            "ttft_seconds": 0.0826354579985491,
+            "elapsed_seconds": 0.22088116699887905
+          }
+        }
+      ]
+    },
+    "tools": {
+      "passed": true,
+      "evidence": {
+        "id": "chatcmpl-a9fa00050682437ebde21dc1bd92bb2e",
+        "object": "chat.completion",
+        "created": 1789531284,
+        "model": "Muse-Glimmer-30B-mlx-4bit",
+        "choices": [
+          {
+            "index": 0,
+            "finish_reason": "tool_calls",
+            "message": {
+              "role": "assistant",
+              "content": "I need to get the weather for Toronto. I'll use the weather tool with the city name \"Toronto\" to retrieve the current weather information.",
+              "tool_calls": [
+                {
+                  "id": "call_8924a85db5cd4ae6986b585c",
+                  "type": "function",
+                  "function": {
+                    "name": "weather",
+                    "arguments": "{\"city\": \"Toronto\"}"
+                  }
+                }
+              ]
+            }
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 405,
+          "completion_tokens": 75,
+          "total_tokens": 480,
+          "prompt_tokens_details": {
+            "cached_tokens": 39
+          }
+        },
+        "mlx2": {
+          "request_id": "chatcmpl-a9fa00050682437ebde21dc1bd92bb2e",
+          "cache": "apcv2",
+          "cached_tokens": 39,
+          "profile": "muse-glimmer-apcv2-ordinary",
+          "qualification": "candidate",
+          "route_receipt": "candidate_validation",
+          "request_controls": {
+            "logprobs": false,
+            "top_logprobs": 0,
+            "logprob_semantics": null,
+            "thinking": false,
+            "sampling": {
+              "temperature": 0
+            },
+            "reasoning_effort": null,
+            "effort_semantics": "reasoning_strength",
+            "context_limit": 131072
+          },
+          "ordinary_compute_width": 1,
+          "mtp": null,
+          "speculation": null,
+          "prompt_tokens": 405,
+          "completion_tokens": 75,
+          "ttft_seconds": 0.4859539170010976,
+          "elapsed_seconds": 2.764461000000665
+        }
+      }
+    },
+    "tool_roundtrip": {
+      "passed": true,
+      "evidence": {
+        "id": "chatcmpl-6b5bbe8773c44fdfb7cdd246633a544d",
+        "object": "chat.completion",
+        "created": 1789531287,
+        "model": "Muse-Glimmer-30B-mlx-4bit",
+        "choices": [
+          {
+            "index": 0,
+            "finish_reason": "stop",
+            "message": {
+              "role": "assistant",
+              "content": "The current weather in Toronto is 21\u00b0C and sunny."
+            }
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 480,
+          "completion_tokens": 13,
+          "total_tokens": 493,
+          "prompt_tokens_details": {
+            "cached_tokens": 403
+          }
+        },
+        "mlx2": {
+          "request_id": "chatcmpl-6b5bbe8773c44fdfb7cdd246633a544d",
+          "cache": "apcv2",
+          "cached_tokens": 403,
+          "profile": "muse-glimmer-apcv2-ordinary",
+          "qualification": "candidate",
+          "route_receipt": "candidate_validation",
+          "request_controls": {
+            "logprobs": false,
+            "top_logprobs": 0,
+            "logprob_semantics": null,
+            "thinking": false,
+            "sampling": {
+              "temperature": 0
+            },
+            "reasoning_effort": null,
+            "effort_semantics": "reasoning_strength",
+            "context_limit": 131072
+          },
+          "ordinary_compute_width": 1,
+          "mtp": null,
+          "speculation": null,
+          "prompt_tokens": 480,
+          "completion_tokens": 13,
+          "ttft_seconds": 0.24346895800044877,
+          "elapsed_seconds": 0.6261820830004581
+        }
+      }
+    },
+    "reasoning": {
+      "passed": true,
+      "evidence": {
+        "id": "chatcmpl-2a9786d40cd742a1b318fc970111a360",
+        "object": "chat.completion",
+        "created": 1789531287,
+        "model": "Muse-Glimmer-30B-mlx-4bit",
+        "choices": [
+          {
+            "index": 0,
+            "finish_reason": "stop",
+            "message": {
+              "role": "assistant",
+              "content": "13 \u00d7 17 = 221\n\n13 \u00d7 10 = 130\n13 \u00d7 7 = 91\n130 + 91 = 221",
+              "reasoning_content": "What is 13 times 17?\n\n13 * 17 = ?\n\n13*17 = 221\n\nCompute: 13*10=130, 13*7=91, sum=221.\n\nAnswer 221.\n\nPossibly want explanation.\n\nJust answer.\n\nProbably simple.\n\nReturn 221.\n\nCould also show method.\n\nFinal answer: 221.\n\nProbably fine.\n\nNo constraints.\n\nOutput.\n\n"
+            }
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 64,
+          "completion_tokens": 120,
+          "total_tokens": 184,
+          "prompt_tokens_details": {
+            "cached_tokens": 37
+          }
+        },
+        "mlx2": {
+          "request_id": "chatcmpl-2a9786d40cd742a1b318fc970111a360",
+          "cache": "apcv2",
+          "cached_tokens": 37,
+          "profile": "muse-glimmer-apcv2-ordinary",
+          "qualification": "candidate",
+          "route_receipt": "candidate_validation",
+          "request_controls": {
+            "logprobs": false,
+            "top_logprobs": 0,
+            "logprob_semantics": null,
+            "thinking": true,
+            "sampling": {
+              "temperature": 0
+            },
+            "reasoning_effort": null,
+            "effort_semantics": "reasoning_strength",
+            "context_limit": 131072
+          },
+          "ordinary_compute_width": 1,
+          "mtp": null,
+          "speculation": null,
+          "prompt_tokens": 64,
+          "completion_tokens": 120,
+          "ttft_seconds": 0.17840112500016403,
+          "elapsed_seconds": 3.848427916000219
+        }
+      }
+    },
+    "stop": {
+      "passed": true,
+      "evidence": {
+        "id": "chatcmpl-f9d683f0655647f0a2ad3bdd58313876",
+        "object": "chat.completion",
+        "created": 1789531291,
+        "model": "Muse-Glimmer-30B-mlx-4bit",
+        "choices": [
+          {
+            "index": 0,
+            "finish_reason": "stop",
+            "message": {
+              "role": "assistant",
+              "content": "MLX2"
+            }
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 66,
+          "completion_tokens": 4,
+          "total_tokens": 70,
+          "prompt_tokens_details": {
+            "cached_tokens": 65
+          }
+        },
+        "mlx2": {
+          "request_id": "chatcmpl-f9d683f0655647f0a2ad3bdd58313876",
+          "cache": "apcv2",
+          "cached_tokens": 65,
+          "profile": "muse-glimmer-apcv2-ordinary",
+          "qualification": "candidate",
+          "route_receipt": "candidate_validation",
+          "request_controls": {
+            "logprobs": false,
+            "top_logprobs": 0,
+            "logprob_semantics": null,
+            "thinking": false,
+            "sampling": {
+              "temperature": 0
+            },
+            "reasoning_effort": null,
+            "effort_semantics": "reasoning_strength",
+            "context_limit": 131072
+          },
+          "ordinary_compute_width": 1,
+          "mtp": null,
+          "speculation": null,
+          "prompt_tokens": 66,
+          "completion_tokens": 4,
+          "ttft_seconds": 0.07621295799981453,
+          "elapsed_seconds": 0.1674787079991802
+        }
+      }
+    },
+    "seed_repeat": {
+      "passed": true,
+      "evidence": {
+        "first": {
+          "id": "chatcmpl-c40685d5416a4be3a3a381a9593beb6a",
+          "object": "chat.completion",
+          "created": 1789531291,
+          "model": "Muse-Glimmer-30B-mlx-4bit",
+          "choices": [
+            {
+              "index": 0,
+              "finish_reason": "stop",
+              "message": {
+                "role": "assistant",
+                "content": "* Stars are massive balls of hot gas, mostly hydrogen and helium, that shine by nuclear fusion.\n* A star's color indicates its surface temperature, with blue stars being hotter than red stars.\n* Stars form in nebulae and can live for millions to billions of years before dying."
+              }
+            }
+          ],
+          "usage": {
+            "prompt_tokens": 66,
+            "completion_tokens": 58,
+            "total_tokens": 124,
+            "prompt_tokens_details": {
+              "cached_tokens": 53
+            }
+          },
+          "mlx2": {
+            "request_id": "chatcmpl-c40685d5416a4be3a3a381a9593beb6a",
+            "cache": "apcv2",
+            "cached_tokens": 53,
+            "profile": "muse-glimmer-apcv2-ordinary",
+            "qualification": "candidate",
+            "route_receipt": "candidate_validation",
+            "request_controls": {
+              "logprobs": false,
+              "top_logprobs": 0,
+              "logprob_semantics": null,
+              "thinking": false,
+              "sampling": {
+                "temperature": 0.7,
+                "seed": 123
+              },
+              "reasoning_effort": null,
+              "effort_semantics": "reasoning_strength",
+              "context_limit": 131072
+            },
+            "ordinary_compute_width": 1,
+            "mtp": null,
+            "speculation": null,
+            "prompt_tokens": 66,
+            "completion_tokens": 58,
+            "ttft_seconds": 0.17849958299848367,
+            "elapsed_seconds": 1.9579192499986675
+          }
+        },
+        "second": {
+          "id": "chatcmpl-265db5dbeb16446bbb513ca2f53e4f60",
+          "object": "chat.completion",
+          "created": 1789531293,
+          "model": "Muse-Glimmer-30B-mlx-4bit",
+          "choices": [
+            {
+              "index": 0,
+              "finish_reason": "stop",
+              "message": {
+                "role": "assistant",
+                "content": "* Stars are massive balls of hot gas, mostly hydrogen and helium, that shine by nuclear fusion.\n* A star's color indicates its surface temperature, with blue stars being hotter than red stars.\n* Stars form in nebulae and can live for millions to billions of years before dying."
+              }
+            }
+          ],
+          "usage": {
+            "prompt_tokens": 66,
+            "completion_tokens": 58,
+            "total_tokens": 124,
+            "prompt_tokens_details": {
+              "cached_tokens": 65
+            }
+          },
+          "mlx2": {
+            "request_id": "chatcmpl-265db5dbeb16446bbb513ca2f53e4f60",
+            "cache": "apcv2",
+            "cached_tokens": 65,
+            "profile": "muse-glimmer-apcv2-ordinary",
+            "qualification": "candidate",
+            "route_receipt": "candidate_validation",
+            "request_controls": {
+              "logprobs": false,
+              "top_logprobs": 0,
+              "logprob_semantics": null,
+              "thinking": false,
+              "sampling": {
+                "temperature": 0.7,
+                "seed": 123
+              },
+              "reasoning_effort": null,
+              "effort_semantics": "reasoning_strength",
+              "context_limit": 131072
+            },
+            "ordinary_compute_width": 1,
+            "mtp": null,
+            "speculation": null,
+            "prompt_tokens": 66,
+            "completion_tokens": 58,
+            "ttft_seconds": 0.08239816700006486,
+            "elapsed_seconds": 1.8595071249983448
+          }
+        }
+      }
+    },
+    "batch": {
+      "passed": true,
+      "evidence": {
+        "observed_widths": [
+          4
+        ],
+        "wall_seconds": 6.648773540999173,
+        "aggregate_tokens_per_second": 96.25835442484048,
+        "request_receipts": [
+          {
+            "request_id": "chatcmpl-cb1d1bbb3b2b4b32b060d588caa157fa",
+            "cache": "apcv2",
+            "cached_tokens": 53,
+            "profile": "muse-glimmer-apcv2-ordinary",
+            "qualification": "candidate",
+            "route_receipt": "candidate_validation",
+            "request_controls": {
+              "logprobs": false,
+              "top_logprobs": 0,
+              "logprob_semantics": null,
+              "thinking": false,
+              "sampling": {
+                "temperature": 0
+              },
+              "reasoning_effort": null,
+              "effort_semantics": "reasoning_strength",
+              "context_limit": 131072
+            },
+            "ordinary_compute_width": 4,
+            "mtp": null,
+            "speculation": null,
+            "prompt_tokens": 67,
+            "completion_tokens": 160,
+            "ttft_seconds": 0.3518911669998488,
+            "elapsed_seconds": 6.552215582998542
+          },
+          {
+            "request_id": "chatcmpl-273ee96919ae4b429e104e799564d2d8",
+            "cache": "apcv2",
+            "cached_tokens": 53,
+            "profile": "muse-glimmer-apcv2-ordinary",
+            "qualification": "candidate",
+            "route_receipt": "candidate_validation",
+            "request_controls": {
+              "logprobs": false,
+              "top_logprobs": 0,
+              "logprob_semantics": null,
+              "thinking": false,
+              "sampling": {
+                "temperature": 0
+              },
+              "reasoning_effort": null,
+              "effort_semantics": "reasoning_strength",
+              "context_limit": 131072
+            },
+            "ordinary_compute_width": 4,
+            "mtp": null,
+            "speculation": null,
+            "prompt_tokens": 67,
+            "completion_tokens": 160,
+            "ttft_seconds": 0.4741868750006688,
+            "elapsed_seconds": 6.643040000000838
+          },
+          {
+            "request_id": "chatcmpl-a3687ce065834b3c8740a119e6627eb7",
+            "cache": "apcv2",
+            "cached_tokens": 53,
+            "profile": "muse-glimmer-apcv2-ordinary",
+            "qualification": "candidate",
+            "route_receipt": "candidate_validation",
+            "request_controls": {
+              "logprobs": false,
+              "top_logprobs": 0,
+              "logprob_semantics": null,
+              "thinking": false,
+              "sampling": {
+                "temperature": 0
+              },
+              "reasoning_effort": null,
+              "effort_semantics": "reasoning_strength",
+              "context_limit": 131072
+            },
+            "ordinary_compute_width": 4,
+            "mtp": null,
+            "speculation": null,
+            "prompt_tokens": 67,
+            "completion_tokens": 160,
+            "ttft_seconds": 0.35071174999939103,
+            "elapsed_seconds": 6.552864708000925
+          },
+          {
+            "request_id": "chatcmpl-913bc442abfe44e48cfd6aac78150d1c",
+            "cache": "apcv2",
+            "cached_tokens": 53,
+            "profile": "muse-glimmer-apcv2-ordinary",
+            "qualification": "candidate",
+            "route_receipt": "candidate_validation",
+            "request_controls": {
+              "logprobs": false,
+              "top_logprobs": 0,
+              "logprob_semantics": null,
+              "thinking": false,
+              "sampling": {
+                "temperature": 0
+              },
+              "reasoning_effort": null,
+              "effort_semantics": "reasoning_strength",
+              "context_limit": 131072
+            },
+            "ordinary_compute_width": 4,
+            "mtp": null,
+            "speculation": null,
+            "prompt_tokens": 67,
+            "completion_tokens": 160,
+            "ttft_seconds": 0.47330562500064843,
+            "elapsed_seconds": 6.644140500000503
+          }
+        ]
+      }
+    },
+    "mixed_warm": {
+      "passed": true,
+      "evidence": [
+        {
+          "request_id": "chatcmpl-baef3612bce94c22a50d083f61fb9b63",
+          "cache": "apcv2",
+          "cached_tokens": 68,
+          "profile": "muse-glimmer-apcv2-ordinary",
+          "qualification": "candidate",
+          "route_receipt": "candidate_validation",
+          "request_controls": {
+            "logprobs": false,
+            "top_logprobs": 0,
+            "logprob_semantics": null,
+            "thinking": false,
+            "sampling": {
+              "temperature": 0
+            },
+            "reasoning_effort": null,
+            "effort_semantics": "reasoning_strength",
+            "context_limit": 131072
+          },
+          "ordinary_compute_width": 2,
+          "mtp": null,
+          "speculation": null,
+          "prompt_tokens": 69,
+          "completion_tokens": 64,
+          "ttft_seconds": 0.0971901249995426,
+          "elapsed_seconds": 2.145621207999284
+        },
+        {
+          "request_id": "chatcmpl-044c5988626f4e42bde253b5f8b9bc74",
+          "cache": "apcv2",
+          "cached_tokens": 69,
+          "profile": "muse-glimmer-apcv2-ordinary",
+          "qualification": "candidate",
+          "route_receipt": "candidate_validation",
+          "request_controls": {
+            "logprobs": false,
+            "top_logprobs": 0,
+            "logprob_semantics": null,
+            "thinking": false,
+            "sampling": {
+              "temperature": 0
+            },
+            "reasoning_effort": null,
+            "effort_semantics": "reasoning_strength",
+            "context_limit": 131072
+          },
+          "ordinary_compute_width": 2,
+          "mtp": null,
+          "speculation": null,
+          "prompt_tokens": 70,
+          "completion_tokens": 64,
+          "ttft_seconds": 0.09820495900021342,
+          "elapsed_seconds": 2.144721499998923
+        }
+      ]
+    }
+  },
+  "responses": {
+    "sampling_controls": [
+      {
+        "id": "chatcmpl-de83baedd0104e4ba7b7569220f5690c",
+        "object": "chat.completion",
+        "created": 1789531282,
+        "model": "Muse-Glimmer-30B-mlx-4bit",
+        "choices": [
+          {
+            "index": 0,
+            "finish_reason": "stop",
+            "message": {
+              "role": "assistant",
+              "content": "Here are three fruits:\n\n1. Apple\n2. Banana\n3. Orange"
+            }
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 63,
+          "completion_tokens": 17,
+          "total_tokens": 80,
+          "prompt_tokens_details": {
+            "cached_tokens": 53
+          }
+        },
+        "mlx2": {
+          "request_id": "chatcmpl-de83baedd0104e4ba7b7569220f5690c",
+          "cache": "apcv2",
+          "cached_tokens": 53,
+          "profile": "muse-glimmer-apcv2-ordinary",
+          "qualification": "candidate",
+          "route_receipt": "candidate_validation",
+          "request_controls": {
+            "logprobs": false,
+            "top_logprobs": 0,
+            "logprob_semantics": null,
+            "thinking": false,
+            "sampling": {
+              "temperature": 0.7,
+              "top_p": 0.9,
+              "top_k": 24,
+              "min_p": 0.05,
+              "repetition_penalty": 1.05,
+              "presence_penalty": 0.1,
+              "frequency_penalty": 0.1,
+              "seed": 237
+            },
+            "reasoning_effort": null,
+            "effort_semantics": "reasoning_strength",
+            "context_limit": 131072
+          },
+          "ordinary_compute_width": 1,
+          "mtp": null,
+          "speculation": null,
+          "prompt_tokens": 63,
+          "completion_tokens": 17,
+          "ttft_seconds": 0.15374858299946936,
+          "elapsed_seconds": 0.6631656249992375
+        }
+      },
+      {
+        "id": "chatcmpl-62698f65709544cbaff89427aafac1f1",
+        "object": "chat.completion",
+        "created": 1789531283,
+        "model": "Muse-Glimmer-30B-mlx-4bit",
+        "choices": [
+          {
+            "index": 0,
+            "finish_reason": "stop",
+            "message": {
+              "role": "assistant",
+              "content": "Here are three fruits:\n\n1. Apple\n2. Banana\n3. Orange"
+            }
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 63,
+          "completion_tokens": 17,
+          "total_tokens": 80,
+          "prompt_tokens_details": {
+            "cached_tokens": 62
+          }
+        },
+        "mlx2": {
+          "request_id": "chatcmpl-62698f65709544cbaff89427aafac1f1",
+          "cache": "apcv2",
+          "cached_tokens": 62,
+          "profile": "muse-glimmer-apcv2-ordinary",
+          "qualification": "candidate",
+          "route_receipt": "candidate_validation",
+          "request_controls": {
+            "logprobs": false,
+            "top_logprobs": 0,
+            "logprob_semantics": null,
+            "thinking": false,
+            "sampling": {
+              "temperature": 0.7,
+              "top_p": 0.9,
+              "top_k": 24,
+              "min_p": 0.05,
+              "repetition_penalty": 1.05,
+              "presence_penalty": 0.1,
+              "frequency_penalty": 0.1,
+              "seed": 237
+            },
+            "reasoning_effort": null,
+            "effort_semantics": "reasoning_strength",
+            "context_limit": 131072
+          },
+          "ordinary_compute_width": 1,
+          "mtp": null,
+          "speculation": null,
+          "prompt_tokens": 63,
+          "completion_tokens": 17,
+          "ttft_seconds": 0.08504254199942807,
+          "elapsed_seconds": 0.6060059999999794
+        }
+      }
+    ],
+    "cold": {
+      "id": "chatcmpl-3c2f024b4fcc4beab5ceda6e590f6924",
+      "object": "chat.completion",
+      "created": 1789531283,
+      "model": "Muse-Glimmer-30B-mlx-4bit",
+      "choices": [
+        {
+          "index": 0,
+          "finish_reason": "stop",
+          "message": {
+            "role": "assistant",
+            "content": "MLX2_READY"
+          }
+        }
+      ],
+      "usage": {
+        "prompt_tokens": 66,
+        "completion_tokens": 5,
+        "total_tokens": 71,
+        "prompt_tokens_details": {
+          "cached_tokens": 56
+        }
+      },
+      "mlx2": {
+        "request_id": "chatcmpl-3c2f024b4fcc4beab5ceda6e590f6924",
+        "cache": "apcv2",
+        "cached_tokens": 56,
+        "profile": "muse-glimmer-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": false,
+          "top_logprobs": 0,
+          "logprob_semantics": null,
+          "thinking": false,
+          "sampling": {
+            "temperature": 0
+          },
+          "reasoning_effort": null,
+          "effort_semantics": "reasoning_strength",
+          "context_limit": 131072
+        },
+        "ordinary_compute_width": 1,
+        "mtp": null,
+        "speculation": null,
+        "prompt_tokens": 66,
+        "completion_tokens": 5,
+        "ttft_seconds": 0.14796641700013424,
+        "elapsed_seconds": 0.28716179200091574
+      }
+    },
+    "warm": {
+      "id": "chatcmpl-a8d04fb610de4bebada149877683721f",
+      "object": "chat.completion",
+      "created": 1789531284,
+      "model": "Muse-Glimmer-30B-mlx-4bit",
+      "choices": [
+        {
+          "index": 0,
+          "finish_reason": "stop",
+          "message": {
+            "role": "assistant",
+            "content": "MLX2_READY"
+          }
+        }
+      ],
+      "usage": {
+        "prompt_tokens": 66,
+        "completion_tokens": 5,
+        "total_tokens": 71,
+        "prompt_tokens_details": {
+          "cached_tokens": 65
+        }
+      },
+      "mlx2": {
+        "request_id": "chatcmpl-a8d04fb610de4bebada149877683721f",
+        "cache": "apcv2",
+        "cached_tokens": 65,
+        "profile": "muse-glimmer-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": false,
+          "top_logprobs": 0,
+          "logprob_semantics": null,
+          "thinking": false,
+          "sampling": {
+            "temperature": 0
+          },
+          "reasoning_effort": null,
+          "effort_semantics": "reasoning_strength",
+          "context_limit": 131072
+        },
+        "ordinary_compute_width": 1,
+        "mtp": null,
+        "speculation": null,
+        "prompt_tokens": 66,
+        "completion_tokens": 5,
+        "ttft_seconds": 0.08396408400039945,
+        "elapsed_seconds": 0.22180104200015194
+      }
+    },
+    "batch": [
+      {
+        "id": "chatcmpl-cb1d1bbb3b2b4b32b060d588caa157fa",
+        "object": "chat.completion",
+        "created": 1789531295,
+        "model": "Muse-Glimmer-30B-mlx-4bit",
+        "choices": [
+          {
+            "index": 0,
+            "finish_reason": "length",
+            "message": {
+              "role": "assistant",
+              "content": "A compiler is a program that translates source code written in a high-level programming language into machine code or another low-level language that a computer can execute. The process is complex and involves several stages, each with its own specific tasks. Here's a detailed overview of how a compiler works:\n\n### 1. **Lexical Analysis (Scanning)**\n   - **Purpose**: The first step is to read the source code and break it into smaller elements called **tokens**.\n   - **Process**: The compiler reads the source code character by character and groups them into meaningful chunks. For example, in the code `int x = 5;`, the tokens would be `int`, `x`, `=`, `5`, and `;`.\n   - **Tools Used**: A **lexer** or **scanner"
+            }
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 67,
+          "completion_tokens": 160,
+          "total_tokens": 227,
+          "prompt_tokens_details": {
+            "cached_tokens": 53
+          }
+        },
+        "mlx2": {
+          "request_id": "chatcmpl-cb1d1bbb3b2b4b32b060d588caa157fa",
+          "cache": "apcv2",
+          "cached_tokens": 53,
+          "profile": "muse-glimmer-apcv2-ordinary",
+          "qualification": "candidate",
+          "route_receipt": "candidate_validation",
+          "request_controls": {
+            "logprobs": false,
+            "top_logprobs": 0,
+            "logprob_semantics": null,
+            "thinking": false,
+            "sampling": {
+              "temperature": 0
+            },
+            "reasoning_effort": null,
+            "effort_semantics": "reasoning_strength",
+            "context_limit": 131072
+          },
+          "ordinary_compute_width": 4,
+          "mtp": null,
+          "speculation": null,
+          "prompt_tokens": 67,
+          "completion_tokens": 160,
+          "ttft_seconds": 0.3518911669998488,
+          "elapsed_seconds": 6.552215582998542
+        }
+      },
+      {
+        "id": "chatcmpl-273ee96919ae4b429e104e799564d2d8",
+        "object": "chat.completion",
+        "created": 1789531295,
+        "model": "Muse-Glimmer-30B-mlx-4bit",
+        "choices": [
+          {
+            "index": 0,
+            "finish_reason": "length",
+            "message": {
+              "role": "assistant",
+              "content": "A compiler is a program that translates source code written in a high-level programming language into machine code or another low-level language that a computer can execute. The process is complex and involves several stages, each with its own specific tasks. Here's a detailed overview of how a compiler works:\n\n### 1. **Lexical Analysis (Scanning)**\n   - **Purpose**: The first step is to read the source code and break it into smaller elements called **tokens**.\n   - **Process**: The compiler reads the source code character by character and groups them into meaningful chunks like keywords, identifiers, operators, literals, etc.\n   - **Example**: For the code `int x = 5;`, the tokens would be:\n     - `int` (keyword)\n     - `x` (identifier)\n"
+            }
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 67,
+          "completion_tokens": 160,
+          "total_tokens": 227,
+          "prompt_tokens_details": {
+            "cached_tokens": 53
+          }
+        },
+        "mlx2": {
+          "request_id": "chatcmpl-273ee96919ae4b429e104e799564d2d8",
+          "cache": "apcv2",
+          "cached_tokens": 53,
+          "profile": "muse-glimmer-apcv2-ordinary",
+          "qualification": "candidate",
+          "route_receipt": "candidate_validation",
+          "request_controls": {
+            "logprobs": false,
+            "top_logprobs": 0,
+            "logprob_semantics": null,
+            "thinking": false,
+            "sampling": {
+              "temperature": 0
+            },
+            "reasoning_effort": null,
+            "effort_semantics": "reasoning_strength",
+            "context_limit": 131072
+          },
+          "ordinary_compute_width": 4,
+          "mtp": null,
+          "speculation": null,
+          "prompt_tokens": 67,
+          "completion_tokens": 160,
+          "ttft_seconds": 0.4741868750006688,
+          "elapsed_seconds": 6.643040000000838
+        }
+      },
+      {
+        "id": "chatcmpl-a3687ce065834b3c8740a119e6627eb7",
+        "object": "chat.completion",
+        "created": 1789531295,
+        "model": "Muse-Glimmer-30B-mlx-4bit",
+        "choices": [
+          {
+            "index": 0,
+            "finish_reason": "length",
+            "message": {
+              "role": "assistant",
+              "content": "A compiler is a program that translates source code written in a high-level programming language into machine code or another low-level language that a computer can execute. The process is complex and involves several stages, each with its own specific tasks. Here's a detailed overview of how a compiler works:\n\n### 1. **Lexical Analysis (Scanning)**\n   - **Purpose**: The first step is to read the source code and break it into smaller elements called **tokens**.\n   - **Process**: The compiler reads the source code character by character and groups them into meaningful chunks. For example, in the code `int x = 5;`, the tokens would be `int`, `x`, `=`, `5`, and `;`.\n   - **Tools Used**: A **lexer** or **scanner"
+            }
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 67,
+          "completion_tokens": 160,
+          "total_tokens": 227,
+          "prompt_tokens_details": {
+            "cached_tokens": 53
+          }
+        },
+        "mlx2": {
+          "request_id": "chatcmpl-a3687ce065834b3c8740a119e6627eb7",
+          "cache": "apcv2",
+          "cached_tokens": 53,
+          "profile": "muse-glimmer-apcv2-ordinary",
+          "qualification": "candidate",
+          "route_receipt": "candidate_validation",
+          "request_controls": {
+            "logprobs": false,
+            "top_logprobs": 0,
+            "logprob_semantics": null,
+            "thinking": false,
+            "sampling": {
+              "temperature": 0
+            },
+            "reasoning_effort": null,
+            "effort_semantics": "reasoning_strength",
+            "context_limit": 131072
+          },
+          "ordinary_compute_width": 4,
+          "mtp": null,
+          "speculation": null,
+          "prompt_tokens": 67,
+          "completion_tokens": 160,
+          "ttft_seconds": 0.35071174999939103,
+          "elapsed_seconds": 6.552864708000925
+        }
+      },
+      {
+        "id": "chatcmpl-913bc442abfe44e48cfd6aac78150d1c",
+        "object": "chat.completion",
+        "created": 1789531295,
+        "model": "Muse-Glimmer-30B-mlx-4bit",
+        "choices": [
+          {
+            "index": 0,
+            "finish_reason": "length",
+            "message": {
+              "role": "assistant",
+              "content": "A compiler is a program that translates source code written in a high-level programming language into machine code or another low-level language that a computer can execute. The process is complex and involves several stages, each with its own specific tasks. Here's a detailed overview of how a compiler works:\n\n### 1. **Lexical Analysis (Scanning)**\n   - **Purpose**: The first step is to read the source code and break it into smaller elements called **tokens**.\n   - **Process**: The compiler reads the source code character by character and groups them into meaningful chunks like keywords, identifiers, operators, literals, etc.\n   - **Example**: For the code `int x = 5;`, the tokens would be:\n     - `int` (keyword)\n     - `x` (identifier)\n"
+            }
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 67,
+          "completion_tokens": 160,
+          "total_tokens": 227,
+          "prompt_tokens_details": {
+            "cached_tokens": 53
+          }
+        },
+        "mlx2": {
+          "request_id": "chatcmpl-913bc442abfe44e48cfd6aac78150d1c",
+          "cache": "apcv2",
+          "cached_tokens": 53,
+          "profile": "muse-glimmer-apcv2-ordinary",
+          "qualification": "candidate",
+          "route_receipt": "candidate_validation",
+          "request_controls": {
+            "logprobs": false,
+            "top_logprobs": 0,
+            "logprob_semantics": null,
+            "thinking": false,
+            "sampling": {
+              "temperature": 0
+            },
+            "reasoning_effort": null,
+            "effort_semantics": "reasoning_strength",
+            "context_limit": 131072
+          },
+          "ordinary_compute_width": 4,
+          "mtp": null,
+          "speculation": null,
+          "prompt_tokens": 67,
+          "completion_tokens": 160,
+          "ttft_seconds": 0.47330562500064843,
+          "elapsed_seconds": 6.644140500000503
+        }
+      }
+    ]
+  },
+  "passed": false,
+  "failure_status": {
+    "state": "ready",
+    "model": "Muse-Glimmer-30B-mlx-4bit",
+    "runtime": {
+      "source_sha256": "1e5085e865c02487fce7831b4a1ea333e17730cb0109cab3594a9580fe0fe063",
+      "mlx_native_sha256": "30335939714520c3306cfa58597100aae08bbeabdc60a4bc8c35c32c607450a8",
+      "python": "3.12.13",
+      "macos": "26.7",
+      "mlx": "0.32.2.dev20260915+2a817ad94",
+      "transformers": "5.12.1",
+      "dependencies": {
+        "numpy": "2.5.1",
+        "tokenizers": "0.22.2",
+        "jinja2": "3.1.6",
+        "psutil": "7.2.2",
+        "regex": "2026.9.10",
+        "safetensors": "0.8.0"
+      }
+    },
+    "artifact": "df2301de1c0588378c756c1e9caa42dedeb84860ce6f21ae767d48a494fa99fe",
+    "profile": "muse-glimmer-apcv2-ordinary",
+    "settings": {
+      "max_context": 131072,
+      "max_lanes": 20,
+      "max_inflight": 40,
+      "prefill_step": 2048,
+      "cache_bytes": 12884901888,
+      "disk_cache": true,
+      "mtp": false,
+      "environment": {
+        "HF_HUB_OFFLINE": "1",
+        "TRANSFORMERS_OFFLINE": "1",
+        "MLX_ENABLE_TF32": "0",
+        "MLX_LM_COMPILED_DECODE": "0",
+        "MLX_LM_SEGMENTED_SELF_MTP": "0",
+        "MLX_LM_TRUE_BATCHED_SEGMENTED_MTP": "0"
+      },
+      "execution_policy": {
+        "persistent": true,
+        "num_draft": 0,
+        "backend": "ordinary",
+        "rate_gate": false,
+        "prefill_step_size": 2048,
+        "segment_aware_live_tip": false,
+        "segment_aware_cohort_size": 20
+      },
+      "speculation": "ordinary",
+      "cache_budget": null
+    },
+    "route_receipt": "candidate_validation",
+    "qualification": "candidate",
+    "max_context": 131072,
+    "max_lanes": 20,
+    "apcv2": {
+      "lookups": 23,
+      "hits": 22,
+      "misses": 1,
+      "cached_tokens": 1609,
+      "stores": 43,
+      "clears": 0,
+      "lifetime": {
+        "lookups": 23,
+        "hits": 22,
+        "misses": 1,
+        "cached_tokens": 1609,
+        "stores": 43
+      },
+      "cow_enabled": true,
+      "cow": {
+        "sources": 43,
+        "source_bytes": 293076992,
+        "freeze_failures": 0,
+        "branches": 22,
+        "branch_failures": 0,
+        "stale_rejections": 0,
+        "invalidations": 28,
+        "active_leases": 2,
+        "peak_leases": 4,
+        "descriptor_aliases": 6760,
+        "descriptor_bytes": 418316288,
+        "avoided_copy_bytes": 125239296,
+        "materializations": 0,
+        "materialized_bytes": 0,
+        "fallback_deepcopies": 0,
+        "fallback_bytes": 0,
+        "freeze_ns": 90690914,
+        "branch_ns": 9027247,
+        "fallback_ns": 0,
+        "releases": 20,
+        "planes": {
+          "attention_ring": {
+            "descriptor_aliases": 5070,
+            "descriptor_bytes": 313737216,
+            "materializations": 0,
+            "materialized_bytes": 0
+          },
+          "attention_kv": {
+            "descriptor_aliases": 1690,
+            "descriptor_bytes": 104579072,
+            "materializations": 0,
+            "materialized_bytes": 0
+          }
+        },
+        "materialized_bytes_are_estimated": true,
+        "array_readbacks": 0
+      },
+      "max_tokens": 131072,
+      "max_entry_tokens": 493,
+      "overlength_rejections": 0,
+      "idle_disk": {
+        "enabled": true,
+        "idle_seconds": 180.0,
+        "resident_bytes": 133120000,
+        "disk_bytes": 0,
+        "disk_max_bytes": 68719476736,
+        "disk_entries": 0,
+        "idle_spills": 0,
+        "pressure_spills": 0,
+        "restores": 0,
+        "restore_failures": 0,
+        "spill_failures": 0,
+        "disk_evictions": 0,
+        "bytes_written": 0,
+        "bytes_read": 0
+      },
+      "version": 2,
+      "layout_name": "muse-glimmer-layer-segments-v1:a58043c7c0bc041c",
+      "layer_segments": {
+        "schema": "apcv2.layer-segments.v1",
+        "entries": 15,
+        "disk_entries": 0,
+        "layers": 780,
+        "plane_layers": 780,
+        "segments": 806,
+        "logical_bytes": 133120000,
+        "by_plane": {
+          "attention_ring": {
+            "layers": 585,
+            "segments": 585,
+            "logical_bytes": 99840000,
+            "invalid": 0
+          },
+          "attention_kv": {
+            "layers": 195,
+            "segments": 221,
+            "logical_bytes": 33280000,
+            "invalid": 0
+          }
+        }
+      }
+    },
+    "scheduler": {
+      "prefill_rounds": 12,
+      "prefill_only_rounds": 11,
+      "decode_priority_release_rounds": 0,
+      "decode_priority_deferred_rounds": 0,
+      "adaptive_prefill_release_rounds": 1,
+      "adaptive_prefill_slack_deferred_rounds": 0,
+      "adaptive_prefill_deadline_forced_rounds": 0,
+      "adaptive_prefill_apc_priority_admissions": 0,
+      "adaptive_prefill_chunk_histogram": {
+        "13": 1
+      }
+    },
+    "metal_active_bytes": 17915169660,
+    "metal_peak_bytes": 18061089892,
+    "process_physical_footprint_bytes": 18630768224,
+    "execution": {
+      "architecture": "muse_glimmer",
+      "cache_layout": "muse-glimmer-layer-segments-v1:a58043c7c0bc041c",
+      "sliding_layers": 39,
+      "global_layers": 13,
+      "speculation": "ordinary"
+    },
+    "admission": {},
+    "memory_waiting": 0,
+    "headroom_bytes": 98994814976,
+    "healthy": true,
+    "error": null,
+    "inflight": 0,
+    "queue_depth": 0,
+    "counts": {
+      "admitted": 23,
+      "cycles": 790,
+      "multi_request_cycles": 229,
+      "completed": 23
+    },
+    "recent_receipts": [
+      {
+        "request_id": "chatcmpl-69e3fe2a42984abe8de9658cd215a833",
+        "cache": "apcv2",
+        "cached_tokens": 0,
+        "profile": "muse-glimmer-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": false,
+          "top_logprobs": 0,
+          "logprob_semantics": null,
+          "thinking": false,
+          "sampling": {
+            "temperature": 0
+          },
+          "reasoning_effort": "none",
+          "effort_semantics": "reasoning_strength",
+          "context_limit": 131072
+        },
+        "ordinary_compute_width": 1,
+        "mtp": null,
+        "speculation": null,
+        "prompt_tokens": 66,
+        "completion_tokens": 5,
+        "ttft_seconds": 0.3988950830007525,
+        "elapsed_seconds": 0.533626042000833
+      },
+      {
+        "request_id": "chatcmpl-cab93aa311c84d3ea61979100cf05500",
+        "cache": "apcv2",
+        "cached_tokens": 53,
+        "profile": "muse-glimmer-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": false,
+          "top_logprobs": 0,
+          "logprob_semantics": null,
+          "thinking": false,
+          "sampling": {
+            "temperature": 0
+          },
+          "reasoning_effort": null,
+          "effort_semantics": "reasoning_strength",
+          "context_limit": 131072
+        },
+        "ordinary_compute_width": 1,
+        "mtp": null,
+        "speculation": null,
+        "prompt_tokens": 66,
+        "completion_tokens": 8,
+        "ttft_seconds": 0.1729538750005304,
+        "elapsed_seconds": 0.4081175829996937
+      },
+      {
+        "request_id": "chatcmpl-b66d1dc145b341d4904669277205117b",
+        "cache": "apcv2",
+        "cached_tokens": 65,
+        "profile": "muse-glimmer-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": true,
+          "top_logprobs": 3,
+          "logprob_semantics": "execution_target: ordinary=post_processor_pre_sampler; mtp=transformed_target_verifier",
+          "thinking": false,
+          "sampling": {
+            "temperature": 0
+          },
+          "reasoning_effort": null,
+          "effort_semantics": "reasoning_strength",
+          "context_limit": 131072
+        },
+        "ordinary_compute_width": 1,
+        "mtp": null,
+        "speculation": null,
+        "prompt_tokens": 66,
+        "completion_tokens": 8,
+        "ttft_seconds": 0.08501158400031272,
+        "elapsed_seconds": 0.3189763339996716
+      },
+      {
+        "request_id": "chatcmpl-a68ed5ab678b4f03b75f3ef83f6514f5",
+        "cache": "apcv2",
+        "cached_tokens": 65,
+        "profile": "muse-glimmer-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": true,
+          "top_logprobs": 3,
+          "logprob_semantics": "execution_target: ordinary=post_processor_pre_sampler; mtp=transformed_target_verifier",
+          "thinking": false,
+          "sampling": {
+            "temperature": 0
+          },
+          "reasoning_effort": null,
+          "effort_semantics": "reasoning_strength",
+          "context_limit": 131072
+        },
+        "ordinary_compute_width": 1,
+        "mtp": null,
+        "speculation": null,
+        "prompt_tokens": 66,
+        "completion_tokens": 8,
+        "ttft_seconds": 0.08339458299997204,
+        "elapsed_seconds": 0.31296149999980116
+      },
+      {
+        "request_id": "chatcmpl-de83baedd0104e4ba7b7569220f5690c",
+        "cache": "apcv2",
+        "cached_tokens": 53,
+        "profile": "muse-glimmer-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": false,
+          "top_logprobs": 0,
+          "logprob_semantics": null,
+          "thinking": false,
+          "sampling": {
+            "temperature": 0.7,
+            "top_p": 0.9,
+            "top_k": 24,
+            "min_p": 0.05,
+            "repetition_penalty": 1.05,
+            "presence_penalty": 0.1,
+            "frequency_penalty": 0.1,
+            "seed": 237
+          },
+          "reasoning_effort": null,
+          "effort_semantics": "reasoning_strength",
+          "context_limit": 131072
+        },
+        "ordinary_compute_width": 1,
+        "mtp": null,
+        "speculation": null,
+        "prompt_tokens": 63,
+        "completion_tokens": 17,
+        "ttft_seconds": 0.15374858299946936,
+        "elapsed_seconds": 0.6631656249992375
+      },
+      {
+        "request_id": "chatcmpl-62698f65709544cbaff89427aafac1f1",
+        "cache": "apcv2",
+        "cached_tokens": 62,
+        "profile": "muse-glimmer-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": false,
+          "top_logprobs": 0,
+          "logprob_semantics": null,
+          "thinking": false,
+          "sampling": {
+            "temperature": 0.7,
+            "top_p": 0.9,
+            "top_k": 24,
+            "min_p": 0.05,
+            "repetition_penalty": 1.05,
+            "presence_penalty": 0.1,
+            "frequency_penalty": 0.1,
+            "seed": 237
+          },
+          "reasoning_effort": null,
+          "effort_semantics": "reasoning_strength",
+          "context_limit": 131072
+        },
+        "ordinary_compute_width": 1,
+        "mtp": null,
+        "speculation": null,
+        "prompt_tokens": 63,
+        "completion_tokens": 17,
+        "ttft_seconds": 0.08504254199942807,
+        "elapsed_seconds": 0.6060059999999794
+      },
+      {
+        "request_id": "chatcmpl-3c2f024b4fcc4beab5ceda6e590f6924",
+        "cache": "apcv2",
+        "cached_tokens": 56,
+        "profile": "muse-glimmer-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": false,
+          "top_logprobs": 0,
+          "logprob_semantics": null,
+          "thinking": false,
+          "sampling": {
+            "temperature": 0
+          },
+          "reasoning_effort": null,
+          "effort_semantics": "reasoning_strength",
+          "context_limit": 131072
+        },
+        "ordinary_compute_width": 1,
+        "mtp": null,
+        "speculation": null,
+        "prompt_tokens": 66,
+        "completion_tokens": 5,
+        "ttft_seconds": 0.14796641700013424,
+        "elapsed_seconds": 0.28716179200091574
+      },
+      {
+        "request_id": "chatcmpl-a8d04fb610de4bebada149877683721f",
+        "cache": "apcv2",
+        "cached_tokens": 65,
+        "profile": "muse-glimmer-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": false,
+          "top_logprobs": 0,
+          "logprob_semantics": null,
+          "thinking": false,
+          "sampling": {
+            "temperature": 0
+          },
+          "reasoning_effort": null,
+          "effort_semantics": "reasoning_strength",
+          "context_limit": 131072
+        },
+        "ordinary_compute_width": 1,
+        "mtp": null,
+        "speculation": null,
+        "prompt_tokens": 66,
+        "completion_tokens": 5,
+        "ttft_seconds": 0.08396408400039945,
+        "elapsed_seconds": 0.22180104200015194
+      },
+      {
+        "request_id": "chatcmpl-9406fcd22bdf423985db33f945cc8c7a",
+        "cache": "apcv2",
+        "cached_tokens": 65,
+        "profile": "muse-glimmer-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": false,
+          "top_logprobs": 0,
+          "logprob_semantics": null,
+          "thinking": false,
+          "sampling": {
+            "temperature": 0
+          },
+          "reasoning_effort": null,
+          "effort_semantics": "reasoning_strength",
+          "context_limit": 131072
+        },
+        "ordinary_compute_width": 1,
+        "mtp": null,
+        "speculation": null,
+        "prompt_tokens": 66,
+        "completion_tokens": 5,
+        "ttft_seconds": 0.0826354579985491,
+        "elapsed_seconds": 0.22088116699887905
+      },
+      {
+        "request_id": "chatcmpl-a9fa00050682437ebde21dc1bd92bb2e",
+        "cache": "apcv2",
+        "cached_tokens": 39,
+        "profile": "muse-glimmer-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": false,
+          "top_logprobs": 0,
+          "logprob_semantics": null,
+          "thinking": false,
+          "sampling": {
+            "temperature": 0
+          },
+          "reasoning_effort": null,
+          "effort_semantics": "reasoning_strength",
+          "context_limit": 131072
+        },
+        "ordinary_compute_width": 1,
+        "mtp": null,
+        "speculation": null,
+        "prompt_tokens": 405,
+        "completion_tokens": 75,
+        "ttft_seconds": 0.4859539170010976,
+        "elapsed_seconds": 2.764461000000665
+      },
+      {
+        "request_id": "chatcmpl-6b5bbe8773c44fdfb7cdd246633a544d",
+        "cache": "apcv2",
+        "cached_tokens": 403,
+        "profile": "muse-glimmer-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": false,
+          "top_logprobs": 0,
+          "logprob_semantics": null,
+          "thinking": false,
+          "sampling": {
+            "temperature": 0
+          },
+          "reasoning_effort": null,
+          "effort_semantics": "reasoning_strength",
+          "context_limit": 131072
+        },
+        "ordinary_compute_width": 1,
+        "mtp": null,
+        "speculation": null,
+        "prompt_tokens": 480,
+        "completion_tokens": 13,
+        "ttft_seconds": 0.24346895800044877,
+        "elapsed_seconds": 0.6261820830004581
+      },
+      {
+        "request_id": "chatcmpl-2a9786d40cd742a1b318fc970111a360",
+        "cache": "apcv2",
+        "cached_tokens": 37,
+        "profile": "muse-glimmer-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": false,
+          "top_logprobs": 0,
+          "logprob_semantics": null,
+          "thinking": true,
+          "sampling": {
+            "temperature": 0
+          },
+          "reasoning_effort": null,
+          "effort_semantics": "reasoning_strength",
+          "context_limit": 131072
+        },
+        "ordinary_compute_width": 1,
+        "mtp": null,
+        "speculation": null,
+        "prompt_tokens": 64,
+        "completion_tokens": 120,
+        "ttft_seconds": 0.17840112500016403,
+        "elapsed_seconds": 3.848427916000219
+      },
+      {
+        "request_id": "chatcmpl-f9d683f0655647f0a2ad3bdd58313876",
+        "cache": "apcv2",
+        "cached_tokens": 65,
+        "profile": "muse-glimmer-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": false,
+          "top_logprobs": 0,
+          "logprob_semantics": null,
+          "thinking": false,
+          "sampling": {
+            "temperature": 0
+          },
+          "reasoning_effort": null,
+          "effort_semantics": "reasoning_strength",
+          "context_limit": 131072
+        },
+        "ordinary_compute_width": 1,
+        "mtp": null,
+        "speculation": null,
+        "prompt_tokens": 66,
+        "completion_tokens": 4,
+        "ttft_seconds": 0.07621295799981453,
+        "elapsed_seconds": 0.1674787079991802
+      },
+      {
+        "request_id": "chatcmpl-c40685d5416a4be3a3a381a9593beb6a",
+        "cache": "apcv2",
+        "cached_tokens": 53,
+        "profile": "muse-glimmer-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": false,
+          "top_logprobs": 0,
+          "logprob_semantics": null,
+          "thinking": false,
+          "sampling": {
+            "temperature": 0.7,
+            "seed": 123
+          },
+          "reasoning_effort": null,
+          "effort_semantics": "reasoning_strength",
+          "context_limit": 131072
+        },
+        "ordinary_compute_width": 1,
+        "mtp": null,
+        "speculation": null,
+        "prompt_tokens": 66,
+        "completion_tokens": 58,
+        "ttft_seconds": 0.17849958299848367,
+        "elapsed_seconds": 1.9579192499986675
+      },
+      {
+        "request_id": "chatcmpl-265db5dbeb16446bbb513ca2f53e4f60",
+        "cache": "apcv2",
+        "cached_tokens": 65,
+        "profile": "muse-glimmer-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": false,
+          "top_logprobs": 0,
+          "logprob_semantics": null,
+          "thinking": false,
+          "sampling": {
+            "temperature": 0.7,
+            "seed": 123
+          },
+          "reasoning_effort": null,
+          "effort_semantics": "reasoning_strength",
+          "context_limit": 131072
+        },
+        "ordinary_compute_width": 1,
+        "mtp": null,
+        "speculation": null,
+        "prompt_tokens": 66,
+        "completion_tokens": 58,
+        "ttft_seconds": 0.08239816700006486,
+        "elapsed_seconds": 1.8595071249983448
+      },
+      {
+        "request_id": "chatcmpl-cb1d1bbb3b2b4b32b060d588caa157fa",
+        "cache": "apcv2",
+        "cached_tokens": 53,
+        "profile": "muse-glimmer-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": false,
+          "top_logprobs": 0,
+          "logprob_semantics": null,
+          "thinking": false,
+          "sampling": {
+            "temperature": 0
+          },
+          "reasoning_effort": null,
+          "effort_semantics": "reasoning_strength",
+          "context_limit": 131072
+        },
+        "ordinary_compute_width": 4,
+        "mtp": null,
+        "speculation": null,
+        "prompt_tokens": 67,
+        "completion_tokens": 160,
+        "ttft_seconds": 0.3518911669998488,
+        "elapsed_seconds": 6.552215582998542
+      },
+      {
+        "request_id": "chatcmpl-a3687ce065834b3c8740a119e6627eb7",
+        "cache": "apcv2",
+        "cached_tokens": 53,
+        "profile": "muse-glimmer-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": false,
+          "top_logprobs": 0,
+          "logprob_semantics": null,
+          "thinking": false,
+          "sampling": {
+            "temperature": 0
+          },
+          "reasoning_effort": null,
+          "effort_semantics": "reasoning_strength",
+          "context_limit": 131072
+        },
+        "ordinary_compute_width": 4,
+        "mtp": null,
+        "speculation": null,
+        "prompt_tokens": 67,
+        "completion_tokens": 160,
+        "ttft_seconds": 0.35071174999939103,
+        "elapsed_seconds": 6.552864708000925
+      },
+      {
+        "request_id": "chatcmpl-273ee96919ae4b429e104e799564d2d8",
+        "cache": "apcv2",
+        "cached_tokens": 53,
+        "profile": "muse-glimmer-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": false,
+          "top_logprobs": 0,
+          "logprob_semantics": null,
+          "thinking": false,
+          "sampling": {
+            "temperature": 0
+          },
+          "reasoning_effort": null,
+          "effort_semantics": "reasoning_strength",
+          "context_limit": 131072
+        },
+        "ordinary_compute_width": 4,
+        "mtp": null,
+        "speculation": null,
+        "prompt_tokens": 67,
+        "completion_tokens": 160,
+        "ttft_seconds": 0.4741868750006688,
+        "elapsed_seconds": 6.643040000000838
+      },
+      {
+        "request_id": "chatcmpl-913bc442abfe44e48cfd6aac78150d1c",
+        "cache": "apcv2",
+        "cached_tokens": 53,
+        "profile": "muse-glimmer-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": false,
+          "top_logprobs": 0,
+          "logprob_semantics": null,
+          "thinking": false,
+          "sampling": {
+            "temperature": 0
+          },
+          "reasoning_effort": null,
+          "effort_semantics": "reasoning_strength",
+          "context_limit": 131072
+        },
+        "ordinary_compute_width": 4,
+        "mtp": null,
+        "speculation": null,
+        "prompt_tokens": 67,
+        "completion_tokens": 160,
+        "ttft_seconds": 0.47330562500064843,
+        "elapsed_seconds": 6.644140500000503
+      },
+      {
+        "request_id": "chatcmpl-f095b3b84104430ab4d0f0a8e62880b2",
+        "cache": "apcv2",
+        "cached_tokens": 58,
+        "profile": "muse-glimmer-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": false,
+          "top_logprobs": 0,
+          "logprob_semantics": null,
+          "thinking": false,
+          "sampling": {
+            "temperature": 0
+          },
+          "reasoning_effort": null,
+          "effort_semantics": "reasoning_strength",
+          "context_limit": 131072
+        },
+        "ordinary_compute_width": 1,
+        "mtp": null,
+        "speculation": null,
+        "prompt_tokens": 69,
+        "completion_tokens": 64,
+        "ttft_seconds": 0.16016095800114272,
+        "elapsed_seconds": 2.104983417000767
+      },
+      {
+        "request_id": "chatcmpl-3d167a33585147cab788d1e056c72a7b",
+        "cache": "apcv2",
+        "cached_tokens": 56,
+        "profile": "muse-glimmer-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": false,
+          "top_logprobs": 0,
+          "logprob_semantics": null,
+          "thinking": false,
+          "sampling": {
+            "temperature": 0
+          },
+          "reasoning_effort": null,
+          "effort_semantics": "reasoning_strength",
+          "context_limit": 131072
+        },
+        "ordinary_compute_width": 1,
+        "mtp": null,
+        "speculation": null,
+        "prompt_tokens": 70,
+        "completion_tokens": 64,
+        "ttft_seconds": 0.19091137500072364,
+        "elapsed_seconds": 2.1349821669991798
+      },
+      {
+        "request_id": "chatcmpl-044c5988626f4e42bde253b5f8b9bc74",
+        "cache": "apcv2",
+        "cached_tokens": 69,
+        "profile": "muse-glimmer-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": false,
+          "top_logprobs": 0,
+          "logprob_semantics": null,
+          "thinking": false,
+          "sampling": {
+            "temperature": 0
+          },
+          "reasoning_effort": null,
+          "effort_semantics": "reasoning_strength",
+          "context_limit": 131072
+        },
+        "ordinary_compute_width": 2,
+        "mtp": null,
+        "speculation": null,
+        "prompt_tokens": 70,
+        "completion_tokens": 64,
+        "ttft_seconds": 0.09820495900021342,
+        "elapsed_seconds": 2.144721499998923
+      },
+      {
+        "request_id": "chatcmpl-baef3612bce94c22a50d083f61fb9b63",
+        "cache": "apcv2",
+        "cached_tokens": 68,
+        "profile": "muse-glimmer-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": false,
+          "top_logprobs": 0,
+          "logprob_semantics": null,
+          "thinking": false,
+          "sampling": {
+            "temperature": 0
+          },
+          "reasoning_effort": null,
+          "effort_semantics": "reasoning_strength",
+          "context_limit": 131072
+        },
+        "ordinary_compute_width": 2,
+        "mtp": null,
+        "speculation": null,
+        "prompt_tokens": 69,
+        "completion_tokens": 64,
+        "ttft_seconds": 0.0971901249995426,
+        "elapsed_seconds": 2.145621207999284
+      }
+    ]
+  }
+}

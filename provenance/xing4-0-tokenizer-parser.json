@@ -1,0 +1,55 @@
+{
+  "component": "Xing4.0 fast tokenizer build, exact reference decode/streaming, and reasoning/tool-call output parser",
+  "source_repository": "Hugging Face Xing4.0-29B-A4B repository files; vLLM PR 57135 and SGLang PR 39793 (unmerged), fetched 2026-09-18",
+  "source_revision": "files as fetched 2026-09-18 (identified by sha256 below; the PRs were not merged)",
+  "license": "Apache-2.0",
+  "license_source": "Xing4.0 model card (license: apache-2.0); vLLM and SGLang SPDX headers (Apache-2.0)",
+  "reference_sources": {
+    "tokenization_xing4_0.py": {
+      "sha256": "4c18df574fad90ee3cadb25586d47b8b32c62c7239e76f246a1bfaedf177799f",
+      "use": "behavioural reference only (slow Xing4_0Tokenizer, run with trust_remote_code to generate the parity corpus and fixture); no code copied"
+    },
+    "tokenizer.model": {
+      "sha256": "fdcbbfdf8655a2e8b8a9fe478de0e9347e857c9b043f9752d04ed660286c3ac5",
+      "use": "input to scripts/xing4_0_tokenizer.py; not committed"
+    },
+    "chat_template.jinja": {
+      "sha256": "9dfe2d6edfcf86d379d5763582b52e7d618f6035c2d197b29384274653fe2a22",
+      "use": "rendered unchanged through transformers apply_chat_template; not copied"
+    },
+    "vllm_xing4_0_tool_parser.py (vLLM PR 57135)": {
+      "sha256": "fffc55f951c7225996b1ec3505d3d54128c1490893f37070b5ceac1eca3c5ba5",
+      "use": "tool-call semantics adapted: _deserialize (json.loads then ast.literal_eval then raw), _json_arguments (arguments/parameters/object), NAME{json} payload split with longest declared name first, string-typed parameters kept raw, key/value strip"
+    },
+    "vllm_xing4_0_reasoning_parser.py (vLLM PR 57135)": {
+      "sha256": "0828f8875db8ed9133dd3ac7e95dc422e49788fc21bc2aaaec6c51015d20d9db",
+      "use": "channel semantics: output starts in reasoning when thinking is on, </think> ends it, thinking off is all content, unterminated reasoning stays reasoning"
+    },
+    "sgl_xing4_0_detector.py (SGLang PR 39793)": {
+      "sha256": "9604ea718ebb52916ca8cbcdbfa031aa4aad7f66a1a60a58cf8ff542f5fe4bc4",
+      "use": "pure-JSON tool-call body {\"name\", \"arguments\"} acceptance"
+    },
+    "sgl_patches.txt (SGLang PR 39793 reasoning detector)": {
+      "sha256": "5eaa9437daf4791f59b73951cfd7bfd945702660b658d18e13f2bcdc4e41b05e",
+      "use": "force_nonempty_content=True reviewed and deliberately not reproduced (see src/mlx2/adapters/xing_output.py docstring)"
+    }
+  },
+  "destination_paths": [
+    "scripts/xing4_0_tokenizer.py",
+    "src/mlx2/adapters/xing_tokenizer.py",
+    "src/mlx2/adapters/xing_output.py",
+    "tests/test_xing_tokenizer.py",
+    "tests/test_xing_output.py",
+    "tests/fixtures/xing4_0_tokenizer/expected.json"
+  ],
+  "modifications": [
+    "Tokenizer: original construction with the tokenizers library (no transformers SPM converter): BPE merges derived from SentencePiece piece scores, Prepend+Replace normalizer applied per chunk between registered specials (per-chunk dummy-prefix quirk), isolating Split pre-tokenizer for user-defined symbols with BPE ignore_merges, byte_fallback; build asserts every standalone NORMAL piece is merge-reachable",
+    "Decode: exact reimplementation of the reference decode (per-run sp.decode between registered specials, one leading U+2581 consumed per run, control pieces empty, <_unk> as ' ⁇ ', per-byte U+FFFD) installed on the loaded fast tokenizer, plus a linear streaming detokenizer that equals the full decode at every step",
+    "Kept reference quirks: <_observation>/<_sep>/<_controlN>/<reserveN> behave exactly as the slow tokenizer (unregistered controls encode as literal text), add_bos_token false",
+    "Parser: rewritten for the mlx2 delta-event contract; tool calls only in content and only with declared tools; union schemas admitting string keep raw text and 'null' decodes to None when null is admitted; non-finite or non-JSON literal values stay text; undeclared tools, missing required/undeclared parameters, duplicate/malformed parameters and incomplete blocks raise instead of leaking markup; whitespace adjacent to tool calls dropped; one template newline before </think> dropped; stops apply to content only"
+  ],
+  "validation": [
+    "scripts/xing4_0_tokenizer.py parity vs the live slow reference (transformers 5.12.1, tokenizers 0.22.2, sentencepiece 0.2.1): 254,983 strings (250,000 seeded unicode fuzz, 4,009 chat renders, 974 structured) and 634,966 decode checks (both skip modes, 62,500 random id sequences, streaming) all identical; separately 26,245 strings incl. 88 real-text files identical",
+    "tests/test_xing_tokenizer.py, tests/test_xing_output.py (CPU; model-backed cases skip without tokenizer.model)"
+  ]
+}

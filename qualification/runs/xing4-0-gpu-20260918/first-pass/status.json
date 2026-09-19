@@ -1,0 +1,191 @@
+{
+  "started": "2026-09-18 17:37:49",
+  "phase": "done",
+  "stages": {
+    "x6-mtp1": {
+      "state": "failed",
+      "steps": {
+        "probe_perf": {
+          "returncode": 0,
+          "seconds": 43,
+          "failed_lines": [],
+          "last": "SUMMARY 6/6"
+        },
+        "qualifier": {
+          "returncode": 1,
+          "seconds": 4,
+          "failed_lines": [
+            "sampling_controls: FAIL"
+          ],
+          "last": "AssertionError: sampling_controls"
+        }
+      },
+      "started": "17:39:04",
+      "command": "mlx2.server --model ~/mlx-models/Xing4.0-29B-A4B-mlx-6bit --host 127.0.0.1 --port 8297 --cache-dir /private/tmp/mlx2-xing/qualification/runs/xing4-0-gpu-20260918/cache/x6-mtp1 --max-context 32768 --max-lanes 4 --max-inflight 8 --cache-bytes 8589934592 --qualification-mode --execution-policy /private/tmp/mlx2-xing/qualification/runs/xing4-0-gpu-20260918/policies/mtp1.json",
+      "server_alive": true,
+      "finished": "17:40:00"
+    },
+    "x6-ordinary": {
+      "state": "failed",
+      "steps": {
+        "probe_perf": {
+          "returncode": 0,
+          "seconds": 42,
+          "failed_lines": [],
+          "last": "SUMMARY 6/6"
+        },
+        "qualifier": {
+          "returncode": 1,
+          "seconds": 5,
+          "failed_lines": [
+            "sampling_controls: FAIL"
+          ],
+          "last": "AssertionError: sampling_controls"
+        }
+      },
+      "started": "17:40:00",
+      "command": "mlx2.server --model ~/mlx-models/Xing4.0-29B-A4B-mlx-6bit --host 127.0.0.1 --port 8297 --cache-dir /private/tmp/mlx2-xing/qualification/runs/xing4-0-gpu-20260918/cache/x6-ordinary --max-context 32768 --max-lanes 4 --max-inflight 8 --cache-bytes 8589934592 --qualification-mode --ordinary",
+      "server_alive": true,
+      "finished": "17:40:57"
+    },
+    "x6-mtp2": {
+      "state": "passed",
+      "steps": {
+        "probe_perf": {
+          "returncode": 0,
+          "seconds": 46,
+          "failed_lines": [],
+          "last": "SUMMARY 6/6"
+        }
+      },
+      "started": "17:40:57",
+      "command": "mlx2.server --model ~/mlx-models/Xing4.0-29B-A4B-mlx-6bit --host 127.0.0.1 --port 8297 --cache-dir /private/tmp/mlx2-xing/qualification/runs/xing4-0-gpu-20260918/cache/x6-mtp2 --max-context 32768 --max-lanes 4 --max-inflight 8 --cache-bytes 8589934592 --qualification-mode --execution-policy /private/tmp/mlx2-xing/qualification/runs/xing4-0-gpu-20260918/policies/mtp2.json",
+      "server_alive": true,
+      "finished": "17:41:53"
+    },
+    "x6-int8-mlp": {
+      "state": "passed",
+      "steps": {
+        "probe_perf": {
+          "returncode": 0,
+          "seconds": 42,
+          "failed_lines": [],
+          "last": "SUMMARY 6/6"
+        }
+      },
+      "started": "17:41:53",
+      "command": "mlx2.server --model ~/mlx-models/Xing4.0-29B-A4B-mlx-6bit --host 127.0.0.1 --port 8297 --cache-dir /private/tmp/mlx2-xing/qualification/runs/xing4-0-gpu-20260918/cache/x6-int8-mlp --max-context 32768 --max-lanes 4 --max-inflight 8 --cache-bytes 8589934592 --qualification-mode --ordinary --int8-prefill mlp",
+      "server_alive": true,
+      "finished": "17:42:44"
+    },
+    "x6-int8-all": {
+      "state": "passed",
+      "steps": {
+        "probe_perf": {
+          "returncode": 0,
+          "seconds": 43,
+          "failed_lines": [],
+          "last": "SUMMARY 6/6"
+        }
+      },
+      "started": "17:42:44",
+      "command": "mlx2.server --model ~/mlx-models/Xing4.0-29B-A4B-mlx-6bit --host 127.0.0.1 --port 8297 --cache-dir /private/tmp/mlx2-xing/qualification/runs/xing4-0-gpu-20260918/cache/x6-int8-all --max-context 32768 --max-lanes 4 --max-inflight 8 --cache-bytes 8589934592 --qualification-mode --ordinary --int8-prefill all",
+      "server_alive": true,
+      "finished": "17:43:36"
+    },
+    "x6-pld": {
+      "state": "failed",
+      "steps": {
+        "probe_pld": {
+          "returncode": 0,
+          "seconds": 16,
+          "failed_lines": [],
+          "last": "SUMMARY 5/5"
+        },
+        "qualifier": {
+          "returncode": 1,
+          "seconds": 0,
+          "failed_lines": [],
+          "last": "AssertionError: preflight receipt does not match current git/runtime source/harness identity"
+        }
+      },
+      "started": "17:43:36",
+      "command": "mlx2.server --model ~/mlx-models/Xing4.0-29B-A4B-mlx-6bit --host 127.0.0.1 --port 8297 --cache-dir /private/tmp/mlx2-xing/qualification/runs/xing4-0-gpu-20260918/cache/x6-pld --max-context 32768 --max-lanes 4 --max-inflight 8 --cache-bytes 8589934592 --qualification-mode --prompt-lookup --execution-policy /private/tmp/mlx2-xing/qualification/runs/xing4-0-gpu-20260918/policies/pld.json",
+      "server_alive": true,
+      "finished": "17:44:02"
+    },
+    "x16-mtp1": {
+      "state": "failed",
+      "steps": {
+        "probe_perf": {
+          "returncode": 0,
+          "seconds": 64,
+          "failed_lines": [],
+          "last": "SUMMARY 6/6"
+        },
+        "qualifier": {
+          "returncode": 1,
+          "seconds": 0,
+          "failed_lines": [],
+          "last": "AssertionError: preflight receipt does not match current git/runtime source/harness identity"
+        }
+      },
+      "started": "17:44:02",
+      "command": "mlx2.server --model ~/mlx-models/Xing4.0-29B-A4B-mlx-bf16 --host 127.0.0.1 --port 8297 --cache-dir /private/tmp/mlx2-xing/qualification/runs/xing4-0-gpu-20260918/cache/x16-mtp1 --max-context 32768 --max-lanes 4 --max-inflight 8 --cache-bytes 8589934592 --qualification-mode --execution-policy /private/tmp/mlx2-xing/qualification/runs/xing4-0-gpu-20260918/policies/mtp1.json",
+      "server_alive": true,
+      "finished": "17:45:19"
+    },
+    "x16-ordinary": {
+      "state": "failed",
+      "steps": {
+        "probe_perf": {
+          "returncode": 0,
+          "seconds": 55,
+          "failed_lines": [],
+          "last": "SUMMARY 6/6"
+        },
+        "qualifier": {
+          "returncode": 1,
+          "seconds": 0,
+          "failed_lines": [],
+          "last": "AssertionError: preflight receipt does not match current git/runtime source/harness identity"
+        }
+      },
+      "started": "17:45:19",
+      "command": "mlx2.server --model ~/mlx-models/Xing4.0-29B-A4B-mlx-bf16 --host 127.0.0.1 --port 8297 --cache-dir /private/tmp/mlx2-xing/qualification/runs/xing4-0-gpu-20260918/cache/x16-ordinary --max-context 32768 --max-lanes 4 --max-inflight 8 --cache-bytes 8589934592 --qualification-mode --ordinary",
+      "server_alive": true,
+      "finished": "17:46:26"
+    },
+    "x16-int8-mlp": {
+      "state": "passed",
+      "steps": {
+        "probe_perf": {
+          "returncode": 0,
+          "seconds": 54,
+          "failed_lines": [],
+          "last": "SUMMARY 6/6"
+        }
+      },
+      "started": "17:46:26",
+      "command": "mlx2.server --model ~/mlx-models/Xing4.0-29B-A4B-mlx-bf16 --host 127.0.0.1 --port 8297 --cache-dir /private/tmp/mlx2-xing/qualification/runs/xing4-0-gpu-20260918/cache/x16-int8-mlp --max-context 32768 --max-lanes 4 --max-inflight 8 --cache-bytes 8589934592 --qualification-mode --ordinary --int8-prefill mlp",
+      "server_alive": true,
+      "finished": "17:47:33"
+    }
+  },
+  "order": [
+    "x6-mtp1",
+    "x6-ordinary",
+    "x6-mtp2",
+    "x6-int8-mlp",
+    "x6-int8-all",
+    "x6-pld",
+    "x16-mtp1",
+    "x16-ordinary",
+    "x16-int8-mlp"
+  ],
+  "updated": "2026-09-18 17:47:33",
+  "preflight": {
+    "returncode": 0,
+    "tail": "Preflight evidence: /private/tmp/mlx2-xing/qualification/runs/xing4-0-gpu-20260918/preflight.json\n"
+  }
+}

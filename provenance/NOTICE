@@ -1,0 +1,82 @@
+Adapted source notices for Flash-Next runtime
+Source revision: 1e2bc604f71d070bee970c3e7db8b60f7855599b
+Licenses: source repository MIT (LICENSE.unified-MIT); explicitly marked files
+Apache-2.0 (../LICENSE). Per-file attribution is in flashnext.json.
+
+mlx_lm/cache_branch_transaction.py
+# Copyright © 2026 Pierre Lamy (mlx-uag)
+# SPDX-License-Identifier: Apache-2.0
+
+mlx_lm/cache_planes.py
+# Copyright © 2026 Pierre Lamy (mlx-uag)
+# SPDX-License-Identifier: Apache-2.0
+
+mlx_lm/cow_cache.py
+# Copyright © 2026 Pierre Lamy (mlx-uag)
+# SPDX-License-Identifier: Apache-2.0
+
+mlx_lm/generate.py
+# Copyright © 2023-2026 Apple Inc.
+
+mlx_lm/models/activations.py
+# Copyright © 2023-2026 Apple Inc.
+
+mlx_lm/models/base.py
+# Copyright © 2023-2026 Apple Inc.
+
+mlx_lm/models/cache.py
+# Copyright © 2023-2026 Apple Inc.
+
+mlx_lm/models/pipeline.py
+# Copyright © 2025 Apple Inc.
+
+mlx_lm/models/qwen3_5.py
+# Copyright © 2026 Apple Inc.
+
+mlx_lm/models/qwen3_next.py
+# Copyright © 2025 Apple Inc.
+
+mlx_lm/models/qwen4_fused_gdn.py
+# Copyright © 2025 Prince Canuma. Used under the MIT License.
+
+mlx_lm/models/qwen4_fused_gdn_verify.py
+# (Copyright © 2025 Prince Canuma, MIT).
+
+mlx_lm/models/rope_utils.py
+# Copyright © 2023-2024 Apple Inc.
+
+mlx_lm/models/switch_layers.py
+# Copyright © 2023-2024 Apple Inc.
+
+mlx_lm/qsa_shared_suffix.py
+# Copyright © 2026 Pierre Lamy (mlx-uag)
+# SPDX-License-Identifier: Apache-2.0
+
+mlx_lm/sample_utils.py
+# Copyright © 2023-2026 Apple Inc.
+
+mlx_lm/segmented_batch_cache.py
+# Copyright © 2026 Pierre Lamy (mlx-uag)
+# SPDX-License-Identifier: Apache-2.0
+
+mlx_lm/segmented_physical_promotion.py
+# Copyright © 2026 Pierre Lamy (mlx-uag)
+# SPDX-License-Identifier: Apache-2.0
+
+mlx_lm/segmented_self_mtp.py
+# Copyright © 2026 Pierre Lamy (mlx-uag)
+# SPDX-License-Identifier: Apache-2.0
+
+mlx_lm/ubc_evict.py
+# Copyright © 2026 raullenchai and the Rapid-MLX contributors (original work)
+# Copyright © 2026 Pierre Lamy (mlx-uag port and adaptation)
+# SPDX-License-Identifier: Apache-2.0
+
+
+tool_parsers/qwen3_coder.py
+# Copyright © 2025-2026 Apple Inc.
+
+tool_parsers/_schema.py
+
+
+os_memory.py

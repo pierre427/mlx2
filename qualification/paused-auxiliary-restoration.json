@@ -1,0 +1,20 @@
+[
+  {
+    "label": "music3",
+    "port": 8600,
+    "http": 200,
+    "body": "{\"status\": \"ok\", \"model\": \"MiniMaxAI/MiniMax-Music3\", \"loaded\": false, \"busy\": false, \"lifecycle\": \"on_demand\", \"idle_unload_seconds\": 900, \"idle_for_seconds\": null, \"quant_ar\": 6}"
+  },
+  {
+    "label": "yue2",
+    "port": 8620,
+    "http": 200,
+    "body": "{\"status\":\"ok\",\"backend\":\"metal\",\"models\":1,\"ui\":true,\"ui_management\":false}"
+  },
+  {
+    "label": "ltx25",
+    "port": 8610,
+    "http": 200,
+    "body": "{\"status\":\"healthy\",\"ready\":true,\"model_loaded\":true,\"model_name\":\"ltx-2.5-mlx-q8\",\"model_type\":\"video-gen\",\"engine_type\":\"video\",\"mcp\":null}"
+  }
+]

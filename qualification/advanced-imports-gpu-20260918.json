@@ -1,0 +1,109 @@
+{
+  "schema": "mlx2.advanced-imports-gpu-smoke.v1",
+  "recorded_at": "2026-09-18T07:56:36-04:00",
+  "branch": "codex/peer-advanced-imports-20260917",
+  "base_commit_before_gpu_fix": "85c0f170f2b519e995ae35e86aae8d3039a58f9d",
+  "exact_post_fix_cache_capsule_commit": "bb882313c6434abb56e709a9f035b323352c9035",
+  "device": {
+    "backend": "mlx-metal",
+    "default_device": "Device(gpu, 0)",
+    "architecture": "applegpu_g17s"
+  },
+  "serialization": {
+    "cpg_campaign_id": "09a393c5d537430c955139ee522e4951",
+    "cpg_lease_id": "b9a4fdd1f19043639761be5b3f030bc7",
+    "gpu_lock_paths": [
+      "/tmp/gpu.lock",
+      "/Users/Shared/mlxuag/gpu.lock"
+    ],
+    "production_service": "com.example.fn-uncensored-mlx-serve",
+    "service_restoration_required": true
+  },
+  "results": {
+    "metal_unit_tests": {
+      "status": "passed",
+      "tests": 18,
+      "command_scope": [
+        "tests/test_segmented_qsa_metal.py",
+        "tests/test_qsa_optional_epilogues_metal.py"
+      ]
+    },
+    "adaptive_mtp": {
+      "status": "observed-used",
+      "model": "Qwen3.6-35B-A3B-uncensored-heretic-Native-MTP-Preserved-oQ4e-mtp",
+      "concurrent_requests": 2,
+      "completion_tokens": [127, 160],
+      "finish_reasons": ["stop", "length"],
+      "observed_compute_widths": [[2], [1, 2]],
+      "adaptive_boundaries": [81, 98],
+      "depth_changes": [1, 1],
+      "final_depth": [1, 1],
+      "native_mtp_acceptance": [0.45544554455445546, 0.5213675213675214],
+      "qualification": "mechanism engagement and finite-output smoke only"
+    },
+    "cache_capsules": {
+      "status": "observed-used-on-exact-post-fix-source",
+      "model": "Muse-Glimmer-30B-mlx-4bit",
+      "samples": 3,
+      "leader_cached_tokens": 0,
+      "sibling_cached_tokens": [108, 108],
+      "sibling_receipts": [
+        {"status": "engaged", "rows": 2, "planes": 52, "capsule_planes": 13, "ordinary_planes": 39},
+        {"status": "engaged", "rows": 2, "planes": 52, "capsule_planes": 13, "ordinary_planes": 39}
+      ],
+      "live_fix": "Changed serving compatibility from every plane being exact KVCache to at least one compatible plane; unsupported mergeable planes retain the ordinary merge path.",
+      "exact_boundary_tokens": 108,
+      "exact_boundary_reason": "boundary_reused",
+      "receipt": "qualification/receipts/advanced-imports-gpu-20260918/muse-mixed-capsule-bb88231.json",
+      "qualification": "mechanism engagement and finite-output smoke only"
+    },
+    "persistent_blocks": {
+      "status": "passed",
+      "source_device": "gpu",
+      "logical_tokens_restored": 511,
+      "blocks": 9,
+      "block_bytes": 4096,
+      "bytes_written": 37492,
+      "bytes_read": 37492,
+      "restore_failures": 0
+    },
+    "spomin": {
+      "status": "synthetic-gpu-passed",
+      "tests": 2,
+      "tf32": false,
+      "scope": "Qwen4 attention-only gather/rephase and compacted-continuation parity"
+    },
+    "rotating_replay": {
+      "status": "synthetic-gpu-passed",
+      "proposed_tokens": 2,
+      "accepted_tokens": 1
+    },
+    "approximate_state": {
+      "status": "synthetic-gpu-control-seam-passed",
+      "source_revision": "r1",
+      "target_revision": "r1:k8v4-smoke",
+      "tensor_math_qualified": false
+    },
+    "cpu_regression_after_live_fix": {
+      "status": "passed",
+      "collected_tests": 924,
+      "configured_skips": 20
+    }
+  },
+  "assessment": {
+    "qualified": [],
+    "observed_used": ["adaptive_mtp", "cache_capsules"],
+    "mechanism_smoke_only": [
+      "persistent_blocks",
+      "spomin",
+      "rotating_replay",
+      "approximate_state"
+    ],
+    "not_claimed": [
+      "performance improvement",
+      "quality parity",
+      "production selection",
+      "K8V4 or TurboQuant tensor implementation"
+    ]
+  }
+}

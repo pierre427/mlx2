@@ -1,0 +1,40 @@
+{
+  "identity": {
+    "git": {
+      "revision": "5fc4c28e181f2d9d9e0d9cbb4114eb3519197626"
+    },
+    "qualification_harness": {
+      "name": "scripts/qualify_serving.py",
+      "schema": "mlx2.qualification-harness.v1",
+      "sha256": "20440b4ed2102feab20e394231c43687ac8472d8ced850dfa9ac7af1b6774e50"
+    },
+    "runtime": {
+      "dependencies": {
+        "jinja2": "3.1.6",
+        "numpy": "2.5.1",
+        "psutil": "7.2.2",
+        "regex": "2026.9.10",
+        "safetensors": "0.8.0",
+        "tokenizers": "0.22.2"
+      },
+      "macos": "26.7",
+      "mlx": "0.32.2.dev20260915+2a817ad94",
+      "mlx_native_sha256": "30335939714520c3306cfa58597100aae08bbeabdc60a4bc8c35c32c607450a8",
+      "python": "3.12.13",
+      "source_sha256": "5599f794e49e3c0cf07acf2d8a70e6f4e8685c4f26de69248e98ba2aa8bcce17",
+      "transformers": "5.12.1"
+    },
+    "test_source_sha256": "fda625e5f903f217a2529f25f5f86ae78a69012ed69b17712a737847797d8948"
+  },
+  "output_sha256": "4f6cac0c111b5b5e21503598e543897920058b6c2470e88e632a13a30c81a7e2",
+  "output_tail": "........................................................................ [  9%]\n............................................................... [ 18%]\n........................................................................ [ 28%]\n......................................................................F. [ 38%]\n..........ssssssss...................................................... [ 48%]\n........................................................................ [ 58%]\n.......................................................................ss..ss........ss..............s.s.............................................................. [ 81%]\n........................................................................ [ 91%]\n..............................................................           [100%]\n=================================== FAILURES ===================================\n______________ test_parallel_submission_reserves_the_whole_cohort ______________\n\n    def test_parallel_submission_reserves_the_whole_cohort():\n        engine = object.__new__(ServingEngine)\n        engine.ready = threading.Event()\n        engine.ready.set()\n        engine.error = None\n        engine.thread = SimpleNamespace(is_alive=lambda: True)\n        engine.slots = threading.BoundedSemaphore(2)\n        engine.submission_lock = threading.Lock()\n        engine.incoming = queue.Queue(maxsize=2)\n        engine.lock = threading.Lock()\n        engine.jobs = {}\n        engine.qualification_mode = True\n        engine.route_capabilities = frozenset()\n        engine.batch_metrics = SimpleNamespace(\n            rejected=lambda *_: None, admitted=lambda *_: None\n        )\n    \n        with pytest.raises(Overloaded, match=\"whole|available|capacity|inflight\"):\n>           engine.submit_many([{\"n\": 1}, {\"n\": 1}, {\"n\": 1}])\n\ntests/test_parallel_sampling.py:49: \n_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ \n\nself = <mlx2.serving.ServingEngine object at 0x117c54ec0>\nrequests = [{'n': 1}, {'n': 1}, {'n': 1}], tenant_id = 'default'\n\n    def submit_many(self, requests, *, tenant_id=\"default\"):\n        \"\"\"Reserve a parallel-sampling cohort before publishing any job.\"\"\"\n        requests = list(requests)\n        if not requests:\n            raise ValueError(\"parallel submission requires at least one request\")\n        if not self.ready.is_set() or self.error or not self.thread.is_alive():\n            raise RuntimeError(self.error or \"model is not ready\")\n        jobs = [\n            self._prepare_job(request, tenant_id=tenant_id) for request in requests\n        ]\n        reserved = 0\n        with self.submission_lock:\n            for _ in jobs:\n                if not self.slots.acquire(blocking=False):\n                    for _ in range(reserved):\n                        self.slots.release()\n                    self.batch_metrics.rejected(\n>                       \"maximum_inflight\", self.queued_jobs\n                                            ^^^^^^^^^^^^^^^^\n                    )\nE                   AttributeError: 'ServingEngine' object has no attribute 'queued_jobs'\n\nsrc/mlx2/serving.py:431: AttributeError\n=========================== short test summary info ============================\nFAILED tests/test_parallel_sampling.py::test_parallel_submission_reserves_the_whole_cohort\n1 failed, 706 passed, 16 skipped, 59 subtests passed in 17.55s\n",
+  "passed": false,
+  "returncode": 1,
+  "schema": "mlx2.qualification-preflight.v1",
+  "test_command": [
+    "~/Desktop/mlx2/.venv/bin/python",
+    "-m",
+    "pytest"
+  ],
+  "timestamp": 1789657432.35318
+}

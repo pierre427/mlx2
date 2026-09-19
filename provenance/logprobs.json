@@ -1,0 +1,11 @@
+{
+  "implementation": "Original mlx2 API serializer and request/response hooks; no tensor implementation copied",
+  "files": ["src/mlx2/logprobs.py", "src/mlx2/server.py", "src/mlx2/serving.py", "tests/test_logprobs_cpu.py", "tests/test_serving_contract.py"],
+  "source_repository": "~/Desktop/mlx-uag/mlx-lm-unified",
+  "source_revision": "1e2bc604f71d070bee970c3e7db8b60f7855599b",
+  "source_license": "MIT",
+  "source_paths": ["mlx_lm/server.py:_format_top_logprobs, continuous batch response and choice assembly", "mlx_lm/tool_protocol.py:unsupported_constraint", "mlx_lm/hybrid_speculative.py:propose_batched_self_mtp target output rows"],
+  "modifications": ["Use actual emitted token as the main logprob entry even when it is not a top candidate", "Sort top alternatives descending, cap at 11, serialize negative infinity as -9999 for finite JSON", "No tensor imports in serializer; use worker-supplied backend", "Support token probability SSE events as well as source nonstreaming behavior", "Normalize response_format type:text; constrained schema/grammar/strict tools remain unsupported", "Preserve route-provided target distribution semantics, including transformed MTP verifier probabilities"],
+  "validation": "50 CPU serializer, actual MTP output-construction, HTTP and qualification contract checks pass under an MLX import guard. Live model qualification pending root.",
+  "qualification": "implemented; root must qualify against new runtime identity"
+}

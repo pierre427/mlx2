@@ -1,0 +1,42 @@
+{
+  "implementation": "Host-only decode fairness and cohort-safe adaptive MTP policy",
+  "destination_files": [
+    "src/mlx2/runtime/adaptive_policy.py",
+    "src/mlx2/runtime/generate.py",
+    "src/mlx2/qualification.py",
+    "src/mlx2/server.py",
+    "src/mlx2/serving.py",
+    "scripts/qualify_serving.py",
+    "tests/test_adaptive_policy.py",
+    "tests/test_segmented_mtp.py",
+    "tests/test_serving_adaptive_mtp.py"
+  ],
+  "sources": [
+    {
+      "repository": "~/Desktop/omlx",
+      "revision": "94530d8d49541ede9e99ef04a4431ee4953117a6",
+      "license": "Apache-2.0",
+      "paths": [
+        "omlx/scheduler.py:_contended_prefill_cap",
+        "omlx/scheduler.py:_prefill_gate_open",
+        "omlx/scheduler.py:_accrue_decode_debt",
+        "omlx/scheduler.py:_repay_decode_debt"
+      ]
+    },
+    {
+      "repository": "~/Desktop/mlx-uag/Rapid-MLX",
+      "revision": "ee101f1bcfb20f343916edd877969aa2a2ac1b98",
+      "license": "Apache-2.0",
+      "paths": [
+        "vllm_mlx/spec_decode/mtp/draft_k_controller_v2.py:DepthController"
+      ]
+    }
+  ],
+  "modifications": [
+    "Reimplemented both policies as model-neutral host-only state machines; no peer scheduler or serving tree was copied.",
+    "Decode fairness derives a grid-aligned token cap from best observed prefill throughput, accrues bounded wall-time debt, and admits another chunk only after decode repays it.",
+    "Adaptive MTP aggregates acceptance across a whole physical cohort, applies one depth at a closed transaction boundary, supports depth-zero ordinary target parks, and guarantees bounded depth-one re-entry probes.",
+    "Only default-on bounded integer counters are retained; no device reads, synchronization, allocation, or hot-path timers are introduced by these policy objects."
+  ],
+  "validation": "CPU policy, runtime, and serving tests cover wall-time cap/debt accounting, route-conditional fairness identity, contention reset, uniform physical-cohort depth changes, exact K=0 target parks, bounded K=1 re-entry, growth, admission-cap clamping, strict settings validation, qualification-only CLI selection, BatchGenerator propagation, profile identity, and receipt fields. On 2026-09-18, two concurrent live Qwen3.6-35B Apple-GPU requests observed adaptive_depth.selected=true, 81/98 boundaries, one depth change, current depth 1, and native-MTP acceptance 0.455/0.521. Decode fairness is selected only on ordinary/native-MTP BatchGenerator routes. The live run establishes mechanism engagement and finite output, not performance or quality qualification; adaptive MTP remains default-off and qualification-only."
+}

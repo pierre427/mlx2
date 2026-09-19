@@ -1,0 +1,6 @@
+PASS long_prompt_ttft {"prompt_words": 7006, "ttft_s": [8.343, 0.247]}
+PASS single_stream {"tokens": 512, "seconds": 25.38, "tok_s": 20.2, "head": "# Loop Optimization in Compilers: A Detailed Technical Essay\n\n## 1. Introduction\n\nLoops are among the most frequently ex"}
+PASS four_way {"tokens": 1536, "wall_s": 28.08, "aggregate_tok_s": 54.7}
+PASS thinking_channel {"content": "17 * 23 = 391", "reasoning_chars": 405}
+PASS server_alive_final {"inflight": 0, "error": null}
+SUMMARY 6/6

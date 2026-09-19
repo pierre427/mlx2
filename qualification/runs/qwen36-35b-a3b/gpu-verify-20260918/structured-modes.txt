@@ -1,0 +1,12 @@
+READY
+sampled json_object default  code=200 valid=False finish=length 21.8s tokens=160 per_tok=0.137s bound=0.0 scans=177 :: '{\n  "city": {\n    "name": "Paris",\n ' 
+sampled schema default       code=200 valid=True finish=stop 4.5s tokens=37 per_tok=0.122s bound=0.0 scans=45 :: '{\n  "city": "Paris",\n  "country": "F' 
+sampled long string          code=200 valid=True finish=stop 22.7s tokens=166 per_tok=0.137s bound=0.0 scans=262 :: '{\n  "essay": "Paris, the City of Lig' 
+greedy json_object           code=200 valid=False finish=length 3.3s tokens=160 per_tok=0.02s bound=0.0 scans=0 :: '{\n  "city": "Paris",\n  "country": "F' 
+top_k only                   code=200 valid=True finish=stop 3.4s tokens=37 per_tok=0.091s bound=0.0 scans=29 :: '{\n  "city": "Paris",\n  "country": "F' 
+pure temp                    code=200 valid=True finish=stop 6.1s tokens=33 per_tok=0.185s bound=0.0 scans=69 :: '{\n  "city": "Paris",\n  "country": "F' 
+elapsed=0.76s
+elapsed=0.94s
+budget=0 overrun=0 skip=0 scans=95
+
+[exited with code 0]

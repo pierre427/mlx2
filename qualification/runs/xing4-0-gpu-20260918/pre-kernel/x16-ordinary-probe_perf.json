@@ -1,0 +1,51 @@
+{
+  "long_prompt_ttft": {
+    "ok": true,
+    "prompt_words": 7006,
+    "ttft_s": [
+      8.343,
+      0.247
+    ]
+  },
+  "single_stream": {
+    "ok": true,
+    "tokens": 512,
+    "seconds": 25.38,
+    "tok_s": 20.2,
+    "head": "# Loop Optimization in Compilers: A Detailed Technical Essay\n\n## 1. Introduction\n\nLoops are among the most frequently ex"
+  },
+  "four_way": {
+    "ok": true,
+    "tokens": 1536,
+    "wall_s": 28.08,
+    "aggregate_tok_s": 54.7
+  },
+  "thinking_channel": {
+    "ok": true,
+    "content": "17 * 23 = 391",
+    "reasoning_chars": 405
+  },
+  "_mechanisms": {
+    "ok": true,
+    "profile": "xing4-0-apcv2-ordinary",
+    "int8_prefill": {
+      "schema": "mlx2.int8-prefill.v1",
+      "enabled": false,
+      "scope": "mlp",
+      "row_threshold": 512,
+      "cache": "auto",
+      "ttl_s": 120.0,
+      "active": false,
+      "fidelity": "exact",
+      "modules": 0,
+      "counts": {}
+    },
+    "scheduler": {},
+    "diagnostics": null
+  },
+  "server_alive_final": {
+    "ok": true,
+    "inflight": 0,
+    "error": null
+  }
+}

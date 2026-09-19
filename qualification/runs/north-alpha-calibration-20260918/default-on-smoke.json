@@ -1,0 +1,36 @@
+{
+ "settings": {
+  "thinking_budget": 512,
+  "thinking_steer": {
+   "alpha": 0.2,
+   "hammer": 0.0
+  },
+  "thinking_defaults_source": "adapter"
+ },
+ "default": {
+  "content": "Budapest",
+  "tokens": 75,
+  "guard": {
+   "schema": "mlx2.thinking-guard.v1",
+   "budget": 2048,
+   "soft_budget": 1638,
+   "think_tokens": 69,
+   "tripped": null,
+   "tripped_at": null,
+   "released_at": 69,
+   "forced_close": false,
+   "steering": {
+    "layer": 28,
+    "alpha": 0.2,
+    "hammer": 0.0,
+    "steered_steps": 70,
+    "source": "north_mini_code_commit_direction.npz:L28"
+   }
+  }
+ },
+ "request_off": {
+  "content": "",
+  "tokens": 2400,
+  "guard": null
+ }
+}

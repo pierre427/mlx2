@@ -1,0 +1,17 @@
+unit_tests: PASS
+hermes_client: PASS
+logprobs: PASS
+sampling_controls: PASS
+sampling_defaults: PASS
+cold_text: PASS
+warm_prefix: PASS
+structured_output: PASS
+structured_output_sampled: PASS
+structured_output_thinking: PASS
+stream: PASS
+tools: PASS
+tool_roundtrip: PASS
+reasoning: PASS
+stop: PASS
+seed_repeat: PASS
+batch: PASS

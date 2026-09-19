@@ -1,0 +1,1 @@
+Stopped fail-closed during near-limit context qualification after an independent thermal probe observed thermal_state=1 at 64 completed 2048-token prefill rounds. At stop: healthy=true, inflight=1, headroom=73.31 GiB, Metal active=26.21 GiB, Metal peak=34.54 GiB, memory_waiting=0, MTP failures=0, swap=0. This attempt is not canonical and must not be published.

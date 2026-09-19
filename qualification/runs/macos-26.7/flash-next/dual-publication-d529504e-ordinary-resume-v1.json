@@ -1,0 +1,15 @@
+{
+  "published": [
+    {
+      "candidate": "~/Desktop/mlx2/qualification/runs/macos-26.7/flash-next/mtp/route-qualification-d529504e-private-delta-v6.json",
+      "canonical": "~/Desktop/mlx2/qualification/runs/macos-26.7/flash-next/mtp/route-qualification.json",
+      "sha256": "4bdd35b5d08f9f33dd68803dab842bb30463755343764a16c3a1d739872bfe0c"
+    },
+    {
+      "candidate": "~/Desktop/mlx2/qualification/runs/macos-26.7/flash-next/ordinary/route-qualification-d529504e-ordinary-resume-v1.json",
+      "canonical": "~/Desktop/mlx2/qualification/runs/macos-26.7/flash-next/ordinary/route-qualification.json",
+      "sha256": "5a3227cffa489147a58072f661a33a74e236283c0a15d62f5bd0890218a26b57"
+    }
+  ],
+  "schema": "mlx2.dual-route-publication.v1"
+}

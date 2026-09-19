@@ -1,0 +1,54 @@
+{
+  "schema": "mlx2.qwen36-gpu-plan.v1",
+  "auto_start": false,
+  "route_selection": "forbidden-until-matching-receipt",
+  "ordered_arms": [
+    {
+      "name": "ordinary-strict-load-split-replay",
+      "artifact": "~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit",
+      "command": ".venv/bin/python scripts/qwen36_gpu_probe.py --model ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit --output qualification/runs/qwen36-35b-a3b/ordinary-probe.json",
+      "stop_conditions": ["non-finite logits", "split replay argmax mismatch", "swap growth above 2048 MiB", "thermal state above nominal"]
+    },
+    {
+      "name": "ordinary-http-apcv2",
+      "depends_on": ["ordinary-strict-load-split-replay"],
+      "profile": "qwen36-35b-a3b-apcv2-ordinary",
+      "requirements": ["cold response", "warm APCv2 hit", "tool response", "structured JSON response", "batch telemetry"]
+    },
+    {
+      "name": "stock-vs-fused-gdn",
+      "depends_on": ["ordinary-http-apcv2"],
+      "status": "bounded-trials-passed-five-rounds-outstanding",
+      "receipts": [
+        "qualification/runs/qwen36-35b-a3b/fused-gdn-probe-20260916.json",
+        "qualification/runs/qwen36-35b-a3b/fused-gdn-mtp-artifact-probe-20260916.json"
+      ],
+      "requirements": ["finite equality oracle", "mechanism counter nonzero", "five matched rounds", "no cache-state drift"]
+    },
+    {
+      "name": "stock-vs-optimized-moe",
+      "depends_on": ["ordinary-http-apcv2"],
+      "status": "candidate-only",
+      "requirements": ["router/expert counters nonzero", "finite equality oracle", "five matched rounds"]
+    },
+    {
+      "name": "native-mtp2",
+      "artifact": "~/mlx-models/Qwen3.6-35B-A3B-uncensored-heretic-Native-MTP-Preserved-oQ4e-mtp",
+      "depends_on": ["ordinary-http-apcv2"],
+      "status": "candidate-only",
+      "requirements": ["strict MTP load", "rollback oracle", "segmented target/draft counters", "ordinary fallback"]
+    },
+    {
+      "name": "compiled-decode-replay",
+      "depends_on": ["ordinary-http-apcv2"],
+      "status": "candidate-only",
+      "requirements": ["cold compile", "steady replay", "APCv2-hit replay", "eager equality"]
+    },
+    {
+      "name": "long-context-and-overload",
+      "depends_on": ["ordinary-http-apcv2"],
+      "status": "candidate-only",
+      "requirements": ["32K", "64K", "near-limit", "429 Retry-After", "TTFT/ITL percentiles", "Jain fairness"]
+    }
+  ]
+}

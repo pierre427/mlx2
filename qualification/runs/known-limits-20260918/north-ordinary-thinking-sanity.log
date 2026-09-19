@@ -1,0 +1,41 @@
+round 00   14.4s  3220 tok   223.0 tok/s errors=0
+round 01   17.1s  3351 tok   196.0 tok/s errors=0
+round 02   14.4s  3111 tok   216.0 tok/s errors=0
+round 03   16.4s  3173 tok   193.8 tok/s errors=0
+round 04   13.2s  2906 tok   219.4 tok/s errors=0
+round 05   18.8s  3937 tok   209.2 tok/s errors=0
+round 06   18.7s  4146 tok   221.3 tok/s errors=0
+round 07   19.1s  4235 tok   222.3 tok/s errors=0
+round 08   16.8s  3412 tok   202.8 tok/s errors=0
+round 09   17.7s  3786 tok   213.9 tok/s errors=0
+round 10   13.0s  2944 tok   226.3 tok/s errors=0
+round 11   17.8s  3798 tok   213.4 tok/s errors=0
+round 12   20.3s  4569 tok   225.2 tok/s errors=0
+round 13   17.2s  3714 tok   215.6 tok/s errors=0
+round 14   17.5s  3955 tok   226.1 tok/s errors=0
+round 15   17.5s  3769 tok   215.2 tok/s errors=0
+round 16   19.2s  4223 tok   219.6 tok/s errors=0
+round 17   19.5s  4262 tok   218.9 tok/s errors=0
+round 18   19.9s  4765 tok   239.2 tok/s errors=0
+round 19   18.1s  3822 tok   211.5 tok/s errors=0
+SUMMARY requests=400 correct=386 hard_failures=16 issues={'empty': 16, 'json_padding': 9} healthy=True
+  arithmetic           20/20 
+  arithmetic_mul       20/20 
+  capital              18/20 {'empty': 1}
+  capital_sentence     20/20 
+  sequence             20/20 
+  translate            20/20 
+  code                 20/20 
+  list                 20/20 
+  json_object          20/20 
+  json_schema          20/20 {'json_padding': 9}
+  stop_string          20/20 
+  stream               20/20 
+  tool_call            20/20 
+  system_multi_turn    20/20 
+  needle               19/20 
+  sampled_prose        20/20 
+  sampled_topk         19/20 {'empty': 1}
+  logprobs             20/20 
+  two_samples          20/20 {'empty': 4}
+  explain              10/20 {'empty': 10}

@@ -1,0 +1,114 @@
+{
+  "long_prompt_compacted": {
+    "ok": true,
+    "codes": [
+      200,
+      200
+    ],
+    "receipts": [
+      {
+        "schema": "mlx2.spomin-live-surgery.v1",
+        "request_id": "chatcmpl-72baffad6d96440b80fc22ca860d2e2d",
+        "status": "applied",
+        "reason": "committed",
+        "source_tokens": 13278,
+        "target_tokens": 10206,
+        "strategy": "oldest_contiguous",
+        "epoch": 1,
+        "selected": true,
+        "source_transcript_digest": "d635482cddbdb9d1b96e28ff99999210561fd223797aaad40c24711a023eda49",
+        "retained_tokens": 10206,
+        "retained_token_digest": "331599490f95abbe5278947a6be5fcc1d15bc3451411499f27210dcf4faef13d"
+      },
+      {
+        "schema": "mlx2.spomin-live-surgery.v1",
+        "request_id": "chatcmpl-93a985e6b203452aa022fdac41d6b313",
+        "status": "applied",
+        "reason": "committed",
+        "source_tokens": 13278,
+        "target_tokens": 10206,
+        "strategy": "oldest_contiguous",
+        "epoch": 2,
+        "selected": true,
+        "source_transcript_digest": "9459d4dfd92e6504c136f145ad1ec20bd7b8755d7e781ec90df4b1a787b2b9d8",
+        "retained_tokens": 10206,
+        "retained_token_digest": "331599490f95abbe5278947a6be5fcc1d15bc3451411499f27210dcf4faef13d"
+      }
+    ],
+    "answers": [
+      "Lisbon",
+      "Lisbon"
+    ],
+    "prompt_tokens": [
+      13279,
+      13279
+    ],
+    "seconds": [
+      3.8,
+      3.8
+    ]
+  },
+  "compacted_state_never_published": {
+    "ok": true,
+    "cached_tokens": [
+      0,
+      0
+    ],
+    "skipped": 4
+  },
+  "protected_prefix_recall": {
+    "ok": true,
+    "answer": "The vault code is **ALPHA-7319**.The vault code",
+    "recalled": true,
+    "receipt": "applied"
+  },
+  "short_prompt_stays_exact": {
+    "ok": true,
+    "receipt": {
+      "request_id": "chatcmpl-e3074dbfb6f44a7592680658fe64ef10",
+      "status": "declined",
+      "reason": "below_pressure"
+    },
+    "warm_cached_tokens": 122,
+    "answer": "SHORT_OK"
+  },
+  "compacted_lane_batches_with_exact_lanes": {
+    "ok": true,
+    "codes": [
+      200,
+      200,
+      200
+    ],
+    "answers": [
+      "The user asks: \"which city is the meeting in: Answer with th",
+      "One, two, three, four, five, six, seven, eight, nine, ten.",
+      "The user asks: \"Name three primary colors.\"\n\nWe need to answ"
+    ],
+    "widths": [
+      3,
+      3,
+      3
+    ],
+    "receipt": "applied",
+    "errors": [
+      null,
+      null,
+      null
+    ]
+  },
+  "manager_status": {
+    "ok": true,
+    "counts": {
+      "applied": 4,
+      "reason:committed": 4,
+      "declined": 4,
+      "reason:below_pressure": 4
+    },
+    "active_epochs": 0
+  },
+  "server_alive_final": {
+    "ok": true,
+    "inflight": 0,
+    "error": null
+  }
+}

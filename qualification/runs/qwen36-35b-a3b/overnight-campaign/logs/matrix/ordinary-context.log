@@ -1,0 +1,745 @@
+[transformers] PyTorch was not found. Models won't be available and only tokenizers, configuration and file/data utilities can be used.
+2026-09-16 19:50:59,316 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 19:51:00,324 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 19:51:00,866 INFO ubc_evict: evicted 5070.2 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-00001-of-00005.safetensors
+2026-09-16 19:51:00,904 INFO ubc_evict: evicted 5098.4 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-00002-of-00005.safetensors
+2026-09-16 19:51:00,943 INFO ubc_evict: evicted 5097.1 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-00003-of-00005.safetensors
+2026-09-16 19:51:00,980 INFO ubc_evict: evicted 5036.3 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-00004-of-00005.safetensors
+2026-09-16 19:51:00,998 INFO ubc_evict: evicted 2311.0 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-00005-of-00005.safetensors
+2026-09-16 19:51:00,999 INFO ubc_evict: evicted 851.8 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-vision-00001-of-00001.safetensors
+2026-09-16 19:51:00,999 INFO ubc_evict: pass complete total_mb=23464.8 elapsed_s=0.17
+2026-09-16 19:51:01,494 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 19:51:02,506 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 19:51:02,513 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 19:51:16,623 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 19:51:47,656 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 19:51:47,685 INFO "GET /v1/status HTTP/1.1" 200 -
+[transformers] PyTorch was not found. Models won't be available and only tokenizers, configuration and file/data utilities can be used.
+2026-09-16 20:02:53,487 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 20:02:54,499 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 20:02:55,008 INFO ubc_evict: evicted 5070.2 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-00001-of-00005.safetensors
+2026-09-16 20:02:55,047 INFO ubc_evict: evicted 5098.4 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-00002-of-00005.safetensors
+2026-09-16 20:02:55,086 INFO ubc_evict: evicted 5097.1 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-00003-of-00005.safetensors
+2026-09-16 20:02:55,125 INFO ubc_evict: evicted 5036.3 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-00004-of-00005.safetensors
+2026-09-16 20:02:55,143 INFO ubc_evict: evicted 2311.0 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-00005-of-00005.safetensors
+2026-09-16 20:02:55,143 INFO ubc_evict: evicted 851.8 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-vision-00001-of-00001.safetensors
+2026-09-16 20:02:55,143 INFO ubc_evict: pass complete total_mb=23464.8 elapsed_s=0.17
+2026-09-16 20:02:55,650 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 20:02:56,655 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 20:02:56,665 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 20:03:06,109 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 20:03:37,103 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 20:03:37,132 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 20:03:37,187 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 20:03:37,248 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 20:03:37,304 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 20:03:37,361 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 20:03:37,421 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 20:03:37,482 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 20:03:37,544 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 20:03:37,606 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 20:03:37,659 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 20:03:37,718 INFO "GET /v1/status HTTP/1.1" 200 -
+[transformers] PyTorch was not found. Models won't be available and only tokenizers, configuration and file/data utilities can be used.
+2026-09-16 20:05:07,486 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 20:05:08,496 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 20:05:09,022 INFO ubc_evict: evicted 5070.2 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-00001-of-00005.safetensors
+2026-09-16 20:05:09,061 INFO ubc_evict: evicted 5098.4 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-00002-of-00005.safetensors
+2026-09-16 20:05:09,100 INFO ubc_evict: evicted 5097.1 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-00003-of-00005.safetensors
+2026-09-16 20:05:09,138 INFO ubc_evict: evicted 5036.3 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-00004-of-00005.safetensors
+2026-09-16 20:05:09,158 INFO ubc_evict: evicted 2311.0 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-00005-of-00005.safetensors
+2026-09-16 20:05:09,158 INFO ubc_evict: evicted 851.8 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-vision-00001-of-00001.safetensors
+2026-09-16 20:05:09,158 INFO ubc_evict: pass complete total_mb=23464.8 elapsed_s=0.17
+2026-09-16 20:05:09,661 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 20:05:10,672 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 20:05:10,681 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 20:05:19,904 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 20:05:50,895 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 20:05:50,924 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 20:05:50,985 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 20:05:51,046 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 20:05:51,102 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 20:05:51,163 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 20:05:51,225 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 20:05:51,286 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 20:05:51,345 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 20:05:51,403 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 20:05:51,465 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 20:05:51,519 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 20:05:51,576 INFO "GET /v1/status HTTP/1.1" 200 -
+[transformers] PyTorch was not found. Models won't be available and only tokenizers, configuration and file/data utilities can be used.
+2026-09-16 20:07:20,942 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 20:07:21,945 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 20:07:22,461 INFO ubc_evict: evicted 5070.2 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-00001-of-00005.safetensors
+2026-09-16 20:07:22,502 INFO ubc_evict: evicted 5098.4 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-00002-of-00005.safetensors
+2026-09-16 20:07:22,542 INFO ubc_evict: evicted 5097.1 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-00003-of-00005.safetensors
+2026-09-16 20:07:22,582 INFO ubc_evict: evicted 5036.3 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-00004-of-00005.safetensors
+2026-09-16 20:07:22,602 INFO ubc_evict: evicted 2311.0 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-00005-of-00005.safetensors
+2026-09-16 20:07:22,602 INFO ubc_evict: evicted 851.8 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-vision-00001-of-00001.safetensors
+2026-09-16 20:07:22,602 INFO ubc_evict: pass complete total_mb=23464.8 elapsed_s=0.18
+2026-09-16 20:07:23,095 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 20:07:24,103 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 20:07:24,112 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 20:07:33,373 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 20:08:04,410 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 20:08:04,439 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 20:08:04,500 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 20:08:04,562 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 20:08:04,622 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 20:08:04,677 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 20:08:04,736 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 20:08:04,792 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 20:08:04,852 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 20:08:04,911 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 20:08:04,973 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 20:08:05,036 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 20:08:05,089 INFO "GET /v1/status HTTP/1.1" 200 -
+[transformers] PyTorch was not found. Models won't be available and only tokenizers, configuration and file/data utilities can be used.
+2026-09-16 20:09:34,596 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 20:09:35,605 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 20:09:36,116 INFO ubc_evict: evicted 5070.2 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-00001-of-00005.safetensors
+2026-09-16 20:09:36,154 INFO ubc_evict: evicted 5098.4 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-00002-of-00005.safetensors
+2026-09-16 20:09:36,192 INFO ubc_evict: evicted 5097.1 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-00003-of-00005.safetensors
+2026-09-16 20:09:36,230 INFO ubc_evict: evicted 5036.3 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-00004-of-00005.safetensors
+2026-09-16 20:09:36,249 INFO ubc_evict: evicted 2311.0 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-00005-of-00005.safetensors
+2026-09-16 20:09:36,249 INFO ubc_evict: evicted 851.8 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-vision-00001-of-00001.safetensors
+2026-09-16 20:09:36,249 INFO ubc_evict: pass complete total_mb=23464.8 elapsed_s=0.17
+2026-09-16 20:09:36,733 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 20:09:37,739 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 20:09:37,748 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 20:10:00,130 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 20:10:31,347 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 20:10:31,377 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 20:10:31,437 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 20:10:31,498 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 20:10:31,560 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 20:10:31,617 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 20:10:31,674 INFO "GET /v1/status HTTP/1.1" 200 -
+[transformers] PyTorch was not found. Models won't be available and only tokenizers, configuration and file/data utilities can be used.
+2026-09-16 20:12:33,874 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 20:12:34,876 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 20:12:35,391 INFO ubc_evict: evicted 5070.2 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-00001-of-00005.safetensors
+2026-09-16 20:12:35,430 INFO ubc_evict: evicted 5098.4 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-00002-of-00005.safetensors
+2026-09-16 20:12:35,468 INFO ubc_evict: evicted 5097.1 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-00003-of-00005.safetensors
+2026-09-16 20:12:35,505 INFO ubc_evict: evicted 5036.3 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-00004-of-00005.safetensors
+2026-09-16 20:12:35,524 INFO ubc_evict: evicted 2311.0 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-00005-of-00005.safetensors
+2026-09-16 20:12:35,524 INFO ubc_evict: evicted 851.8 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-vision-00001-of-00001.safetensors
+2026-09-16 20:12:35,524 INFO ubc_evict: pass complete total_mb=23464.8 elapsed_s=0.17
+2026-09-16 20:12:36,013 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 20:12:37,017 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 20:12:37,027 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 20:13:05,522 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 20:13:36,718 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 20:13:36,747 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 20:13:36,808 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 20:13:36,869 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 20:13:36,930 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 20:13:36,987 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 20:13:37,049 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 20:13:37,108 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 20:13:37,166 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 20:13:37,222 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 20:13:37,283 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 20:13:37,345 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 20:13:37,398 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 20:13:37,460 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 20:13:37,522 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 20:13:37,578 INFO "GET /v1/status HTTP/1.1" 200 -
+[transformers] PyTorch was not found. Models won't be available and only tokenizers, configuration and file/data utilities can be used.
+2026-09-16 20:15:42,835 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 20:15:43,845 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 20:15:44,346 INFO ubc_evict: evicted 5070.2 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-00001-of-00005.safetensors
+2026-09-16 20:15:44,384 INFO ubc_evict: evicted 5098.4 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-00002-of-00005.safetensors
+2026-09-16 20:15:44,425 INFO ubc_evict: evicted 5097.1 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-00003-of-00005.safetensors
+2026-09-16 20:15:44,465 INFO ubc_evict: evicted 5036.3 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-00004-of-00005.safetensors
+2026-09-16 20:15:44,484 INFO ubc_evict: evicted 2311.0 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-00005-of-00005.safetensors
+2026-09-16 20:15:44,484 INFO ubc_evict: evicted 851.8 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-vision-00001-of-00001.safetensors
+2026-09-16 20:15:44,484 INFO ubc_evict: pass complete total_mb=23464.8 elapsed_s=0.17
+2026-09-16 20:15:44,971 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 20:15:45,982 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 20:15:45,991 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 20:16:12,485 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 20:16:43,641 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 20:16:43,670 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 20:16:43,731 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 20:16:43,792 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 20:16:43,847 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 20:16:43,904 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 20:16:43,957 INFO "GET /v1/status HTTP/1.1" 200 -
+[transformers] PyTorch was not found. Models won't be available and only tokenizers, configuration and file/data utilities can be used.
+2026-09-16 20:18:50,940 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 20:18:51,952 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 20:18:52,545 INFO ubc_evict: evicted 5070.2 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-00001-of-00005.safetensors
+2026-09-16 20:18:52,584 INFO ubc_evict: evicted 5098.4 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-00002-of-00005.safetensors
+2026-09-16 20:18:52,623 INFO ubc_evict: evicted 5097.1 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-00003-of-00005.safetensors
+2026-09-16 20:18:52,661 INFO ubc_evict: evicted 5036.3 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-00004-of-00005.safetensors
+2026-09-16 20:18:52,681 INFO ubc_evict: evicted 2311.0 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-00005-of-00005.safetensors
+2026-09-16 20:18:52,681 INFO ubc_evict: evicted 851.8 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-vision-00001-of-00001.safetensors
+2026-09-16 20:18:52,681 INFO ubc_evict: pass complete total_mb=23464.8 elapsed_s=0.17
+2026-09-16 20:18:53,178 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 20:18:54,187 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 20:18:54,196 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 20:20:09,543 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 20:20:41,140 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 20:20:41,171 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 20:20:41,232 INFO "GET /v1/status HTTP/1.1" 200 -
+[transformers] PyTorch was not found. Models won't be available and only tokenizers, configuration and file/data utilities can be used.
+2026-09-16 20:24:20,865 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 20:24:21,876 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 20:24:22,394 INFO ubc_evict: evicted 5070.2 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-00001-of-00005.safetensors
+2026-09-16 20:24:22,434 INFO ubc_evict: evicted 5098.4 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-00002-of-00005.safetensors
+2026-09-16 20:24:22,473 INFO ubc_evict: evicted 5097.1 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-00003-of-00005.safetensors
+2026-09-16 20:24:22,511 INFO ubc_evict: evicted 5036.3 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-00004-of-00005.safetensors
+2026-09-16 20:24:22,530 INFO ubc_evict: evicted 2311.0 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-00005-of-00005.safetensors
+2026-09-16 20:24:22,530 INFO ubc_evict: evicted 851.8 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-vision-00001-of-00001.safetensors
+2026-09-16 20:24:22,530 INFO ubc_evict: pass complete total_mb=23464.8 elapsed_s=0.17
+2026-09-16 20:24:23,025 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 20:24:24,029 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 20:24:24,039 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 20:25:37,732 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 20:26:09,310 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 20:26:09,344 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 20:26:09,405 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 20:26:09,466 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 20:26:09,526 INFO "GET /v1/status HTTP/1.1" 200 -
+[transformers] PyTorch was not found. Models won't be available and only tokenizers, configuration and file/data utilities can be used.
+2026-09-16 20:29:47,281 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 20:29:48,291 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 20:29:48,809 INFO ubc_evict: evicted 5070.2 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-00001-of-00005.safetensors
+2026-09-16 20:29:48,848 INFO ubc_evict: evicted 5098.4 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-00002-of-00005.safetensors
+2026-09-16 20:29:48,887 INFO ubc_evict: evicted 5097.1 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-00003-of-00005.safetensors
+2026-09-16 20:29:48,925 INFO ubc_evict: evicted 5036.3 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-00004-of-00005.safetensors
+2026-09-16 20:29:48,944 INFO ubc_evict: evicted 2311.0 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-00005-of-00005.safetensors
+2026-09-16 20:29:48,944 INFO ubc_evict: evicted 851.8 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-vision-00001-of-00001.safetensors
+2026-09-16 20:29:48,944 INFO ubc_evict: pass complete total_mb=23464.8 elapsed_s=0.17
+2026-09-16 20:29:49,429 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 20:29:50,440 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 20:29:50,450 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 20:31:02,571 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 20:31:34,127 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 20:31:34,158 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 20:31:34,219 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 20:31:34,280 INFO "GET /v1/status HTTP/1.1" 200 -
+[transformers] PyTorch was not found. Models won't be available and only tokenizers, configuration and file/data utilities can be used.
+2026-09-16 21:53:33,537 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 21:53:34,548 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 21:53:35,051 INFO ubc_evict: evicted 5070.2 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-00001-of-00005.safetensors
+2026-09-16 21:53:35,089 INFO ubc_evict: evicted 5098.4 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-00002-of-00005.safetensors
+2026-09-16 21:53:35,128 INFO ubc_evict: evicted 5097.1 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-00003-of-00005.safetensors
+2026-09-16 21:53:35,166 INFO ubc_evict: evicted 5036.3 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-00004-of-00005.safetensors
+2026-09-16 21:53:35,184 INFO ubc_evict: evicted 2311.0 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-00005-of-00005.safetensors
+2026-09-16 21:53:35,184 INFO ubc_evict: evicted 851.8 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-vision-00001-of-00001.safetensors
+2026-09-16 21:53:35,184 INFO ubc_evict: pass complete total_mb=23464.8 elapsed_s=0.17
+2026-09-16 21:53:35,678 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 21:53:36,684 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 21:53:36,694 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 21:53:46,167 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 21:54:17,213 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 21:54:17,242 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 21:54:17,300 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 21:54:17,361 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 21:54:17,422 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 21:54:17,483 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 21:54:17,545 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 21:54:17,601 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 21:54:17,653 INFO "GET /v1/status HTTP/1.1" 200 -
+[transformers] PyTorch was not found. Models won't be available and only tokenizers, configuration and file/data utilities can be used.
+2026-09-16 21:56:17,309 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 21:56:18,320 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 21:56:18,818 INFO ubc_evict: evicted 5070.2 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-00001-of-00005.safetensors
+2026-09-16 21:56:18,858 INFO ubc_evict: evicted 5098.4 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-00002-of-00005.safetensors
+2026-09-16 21:56:18,897 INFO ubc_evict: evicted 5097.1 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-00003-of-00005.safetensors
+2026-09-16 21:56:18,935 INFO ubc_evict: evicted 5036.3 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-00004-of-00005.safetensors
+2026-09-16 21:56:18,954 INFO ubc_evict: evicted 2311.0 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-00005-of-00005.safetensors
+2026-09-16 21:56:18,954 INFO ubc_evict: evicted 851.8 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-vision-00001-of-00001.safetensors
+2026-09-16 21:56:18,954 INFO ubc_evict: pass complete total_mb=23464.8 elapsed_s=0.17
+2026-09-16 21:56:19,443 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 21:56:20,452 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 21:56:20,461 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 21:56:29,675 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 21:57:00,659 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 21:57:00,688 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 21:57:00,749 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 21:57:00,810 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 21:57:00,871 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 21:57:00,933 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 21:57:00,993 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 21:57:01,055 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 21:57:01,110 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 21:57:01,170 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 21:57:01,229 INFO "GET /v1/status HTTP/1.1" 200 -
+[transformers] PyTorch was not found. Models won't be available and only tokenizers, configuration and file/data utilities can be used.
+2026-09-16 21:58:30,791 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 21:58:31,803 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 21:58:32,314 INFO ubc_evict: evicted 5070.2 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-00001-of-00005.safetensors
+2026-09-16 21:58:32,353 INFO ubc_evict: evicted 5098.4 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-00002-of-00005.safetensors
+2026-09-16 21:58:32,394 INFO ubc_evict: evicted 5097.1 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-00003-of-00005.safetensors
+2026-09-16 21:58:32,433 INFO ubc_evict: evicted 5036.3 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-00004-of-00005.safetensors
+2026-09-16 21:58:32,454 INFO ubc_evict: evicted 2311.0 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-00005-of-00005.safetensors
+2026-09-16 21:58:32,454 INFO ubc_evict: evicted 851.8 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-vision-00001-of-00001.safetensors
+2026-09-16 21:58:32,454 INFO ubc_evict: pass complete total_mb=23464.8 elapsed_s=0.18
+2026-09-16 21:58:32,959 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 21:58:33,970 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 21:58:33,980 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 21:58:43,202 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 21:59:14,182 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 21:59:14,211 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 21:59:14,273 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 21:59:14,334 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 21:59:14,385 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 21:59:14,441 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 21:59:14,502 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 21:59:14,564 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 21:59:14,619 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 21:59:14,678 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 21:59:14,736 INFO "GET /v1/status HTTP/1.1" 200 -
+[transformers] PyTorch was not found. Models won't be available and only tokenizers, configuration and file/data utilities can be used.
+2026-09-16 22:00:44,006 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 22:00:45,018 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 22:00:45,535 INFO ubc_evict: evicted 5070.2 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-00001-of-00005.safetensors
+2026-09-16 22:00:45,574 INFO ubc_evict: evicted 5098.4 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-00002-of-00005.safetensors
+2026-09-16 22:00:45,613 INFO ubc_evict: evicted 5097.1 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-00003-of-00005.safetensors
+2026-09-16 22:00:45,652 INFO ubc_evict: evicted 5036.3 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-00004-of-00005.safetensors
+2026-09-16 22:00:45,672 INFO ubc_evict: evicted 2311.0 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-00005-of-00005.safetensors
+2026-09-16 22:00:45,672 INFO ubc_evict: evicted 851.8 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-vision-00001-of-00001.safetensors
+2026-09-16 22:00:45,672 INFO ubc_evict: pass complete total_mb=23464.8 elapsed_s=0.17
+2026-09-16 22:00:46,187 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 22:00:47,195 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 22:00:47,205 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 22:01:09,961 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 22:01:41,184 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 22:01:41,214 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 22:01:41,275 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 22:01:41,335 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 22:01:41,397 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 22:01:41,454 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 22:01:41,514 INFO "GET /v1/status HTTP/1.1" 200 -
+[transformers] PyTorch was not found. Models won't be available and only tokenizers, configuration and file/data utilities can be used.
+2026-09-16 22:03:41,832 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 22:03:42,843 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 22:03:43,346 INFO ubc_evict: evicted 5070.2 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-00001-of-00005.safetensors
+2026-09-16 22:03:43,385 INFO ubc_evict: evicted 5098.4 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-00002-of-00005.safetensors
+2026-09-16 22:03:43,424 INFO ubc_evict: evicted 5097.1 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-00003-of-00005.safetensors
+2026-09-16 22:03:43,463 INFO ubc_evict: evicted 5036.3 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-00004-of-00005.safetensors
+2026-09-16 22:03:43,482 INFO ubc_evict: evicted 2311.0 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-00005-of-00005.safetensors
+2026-09-16 22:03:43,482 INFO ubc_evict: evicted 851.8 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-vision-00001-of-00001.safetensors
+2026-09-16 22:03:43,482 INFO ubc_evict: pass complete total_mb=23464.8 elapsed_s=0.17
+2026-09-16 22:03:43,975 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 22:03:44,987 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 22:03:44,996 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 22:04:11,691 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 22:04:42,910 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 22:04:42,939 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 22:04:43,000 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 22:04:43,061 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 22:04:43,118 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 22:04:43,176 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 22:04:43,238 INFO "GET /v1/status HTTP/1.1" 200 -
+[transformers] PyTorch was not found. Models won't be available and only tokenizers, configuration and file/data utilities can be used.
+2026-09-16 22:06:46,880 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 22:06:47,885 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 22:06:48,394 INFO ubc_evict: evicted 5070.2 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-00001-of-00005.safetensors
+2026-09-16 22:06:48,432 INFO ubc_evict: evicted 5098.4 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-00002-of-00005.safetensors
+2026-09-16 22:06:48,472 INFO ubc_evict: evicted 5097.1 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-00003-of-00005.safetensors
+2026-09-16 22:06:48,509 INFO ubc_evict: evicted 5036.3 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-00004-of-00005.safetensors
+2026-09-16 22:06:48,528 INFO ubc_evict: evicted 2311.0 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-00005-of-00005.safetensors
+2026-09-16 22:06:48,529 INFO ubc_evict: evicted 851.8 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-vision-00001-of-00001.safetensors
+2026-09-16 22:06:48,529 INFO ubc_evict: pass complete total_mb=23464.8 elapsed_s=0.17
+2026-09-16 22:06:49,028 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 22:06:50,036 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 22:06:50,046 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 22:07:16,271 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 22:07:47,441 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 22:07:47,471 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 22:07:47,531 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 22:07:47,592 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 22:07:47,653 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 22:07:47,706 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 22:07:47,761 INFO "GET /v1/status HTTP/1.1" 200 -
+[transformers] PyTorch was not found. Models won't be available and only tokenizers, configuration and file/data utilities can be used.
+2026-09-16 22:09:50,630 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 22:09:51,642 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 22:09:52,147 INFO ubc_evict: evicted 5070.2 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-00001-of-00005.safetensors
+2026-09-16 22:09:52,186 INFO ubc_evict: evicted 5098.4 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-00002-of-00005.safetensors
+2026-09-16 22:09:52,224 INFO ubc_evict: evicted 5097.1 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-00003-of-00005.safetensors
+2026-09-16 22:09:52,262 INFO ubc_evict: evicted 5036.3 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-00004-of-00005.safetensors
+2026-09-16 22:09:52,282 INFO ubc_evict: evicted 2311.0 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-00005-of-00005.safetensors
+2026-09-16 22:09:52,282 INFO ubc_evict: evicted 851.8 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-vision-00001-of-00001.safetensors
+2026-09-16 22:09:52,282 INFO ubc_evict: pass complete total_mb=23464.8 elapsed_s=0.17
+2026-09-16 22:09:52,770 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 22:09:53,774 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 22:09:53,784 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 22:11:06,883 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 22:11:38,439 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 22:11:38,469 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 22:11:38,530 INFO "GET /v1/status HTTP/1.1" 200 -
+[transformers] PyTorch was not found. Models won't be available and only tokenizers, configuration and file/data utilities can be used.
+2026-09-16 22:15:14,417 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 22:15:15,422 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 22:15:15,934 INFO ubc_evict: evicted 5070.2 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-00001-of-00005.safetensors
+2026-09-16 22:15:15,973 INFO ubc_evict: evicted 5098.4 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-00002-of-00005.safetensors
+2026-09-16 22:15:16,011 INFO ubc_evict: evicted 5097.1 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-00003-of-00005.safetensors
+2026-09-16 22:15:16,049 INFO ubc_evict: evicted 5036.3 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-00004-of-00005.safetensors
+2026-09-16 22:15:16,069 INFO ubc_evict: evicted 2311.0 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-00005-of-00005.safetensors
+2026-09-16 22:15:16,069 INFO ubc_evict: evicted 851.8 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-vision-00001-of-00001.safetensors
+2026-09-16 22:15:16,069 INFO ubc_evict: pass complete total_mb=23464.8 elapsed_s=0.17
+2026-09-16 22:15:16,552 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 22:15:17,562 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 22:15:17,572 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 22:16:29,926 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 22:17:01,476 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 22:17:01,508 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 22:17:01,569 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 22:17:01,630 INFO "GET /v1/status HTTP/1.1" 200 -
+[transformers] PyTorch was not found. Models won't be available and only tokenizers, configuration and file/data utilities can be used.
+2026-09-16 22:20:36,279 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 22:20:37,290 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 22:20:37,805 INFO ubc_evict: evicted 5070.2 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-00001-of-00005.safetensors
+2026-09-16 22:20:37,845 INFO ubc_evict: evicted 5098.4 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-00002-of-00005.safetensors
+2026-09-16 22:20:37,884 INFO ubc_evict: evicted 5097.1 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-00003-of-00005.safetensors
+2026-09-16 22:20:37,923 INFO ubc_evict: evicted 5036.3 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-00004-of-00005.safetensors
+2026-09-16 22:20:37,943 INFO ubc_evict: evicted 2311.0 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-00005-of-00005.safetensors
+2026-09-16 22:20:37,943 INFO ubc_evict: evicted 851.8 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-vision-00001-of-00001.safetensors
+2026-09-16 22:20:37,943 INFO ubc_evict: pass complete total_mb=23464.8 elapsed_s=0.18
+2026-09-16 22:20:38,431 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 22:20:39,435 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 22:20:39,444 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 22:21:50,633 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 22:22:22,183 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 22:22:22,212 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 22:22:22,273 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 22:22:22,334 INFO "GET /v1/status HTTP/1.1" 200 -
+[transformers] PyTorch was not found. Models won't be available and only tokenizers, configuration and file/data utilities can be used.
+2026-09-16 22:25:55,016 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 22:25:56,021 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 22:25:56,628 INFO ubc_evict: evicted 5070.2 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-00001-of-00005.safetensors
+2026-09-16 22:25:56,668 INFO ubc_evict: evicted 5098.4 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-00002-of-00005.safetensors
+2026-09-16 22:25:56,708 INFO ubc_evict: evicted 5097.1 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-00003-of-00005.safetensors
+2026-09-16 22:25:56,748 INFO ubc_evict: evicted 5036.3 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-00004-of-00005.safetensors
+2026-09-16 22:25:56,769 INFO ubc_evict: evicted 2311.0 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-00005-of-00005.safetensors
+2026-09-16 22:25:56,769 INFO ubc_evict: evicted 851.8 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-vision-00001-of-00001.safetensors
+2026-09-16 22:25:56,769 INFO ubc_evict: pass complete total_mb=23464.8 elapsed_s=0.18
+2026-09-16 22:25:57,298 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 22:25:58,309 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 22:25:58,319 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 22:29:42,957 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 22:31:15,504 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 22:31:15,534 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 22:31:15,591 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 22:31:15,652 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 22:31:15,708 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 22:31:15,769 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 22:31:15,830 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 22:31:15,892 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 22:31:15,951 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 22:31:16,012 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 22:31:16,070 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 22:31:16,135 INFO "GET /v1/status HTTP/1.1" 200 -
+[transformers] PyTorch was not found. Models won't be available and only tokenizers, configuration and file/data utilities can be used.
+2026-09-16 22:41:47,554 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 22:41:48,565 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 22:41:49,061 INFO ubc_evict: evicted 5070.2 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-00001-of-00005.safetensors
+2026-09-16 22:41:49,101 INFO ubc_evict: evicted 5098.4 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-00002-of-00005.safetensors
+2026-09-16 22:41:49,141 INFO ubc_evict: evicted 5097.1 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-00003-of-00005.safetensors
+2026-09-16 22:41:49,179 INFO ubc_evict: evicted 5036.3 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-00004-of-00005.safetensors
+2026-09-16 22:41:49,199 INFO ubc_evict: evicted 2311.0 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-00005-of-00005.safetensors
+2026-09-16 22:41:49,199 INFO ubc_evict: evicted 851.8 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-vision-00001-of-00001.safetensors
+2026-09-16 22:41:49,199 INFO ubc_evict: pass complete total_mb=23464.8 elapsed_s=0.17
+2026-09-16 22:41:49,683 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 22:41:50,692 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 22:41:50,701 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 22:45:16,342 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 22:47:03,959 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 22:47:03,989 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 22:47:04,050 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 22:47:04,112 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 22:47:04,173 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 22:47:04,235 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 22:47:04,290 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 22:47:04,344 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 22:47:04,403 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 22:47:04,463 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 22:47:04,539 INFO "GET /v1/status HTTP/1.1" 200 -
+[transformers] PyTorch was not found. Models won't be available and only tokenizers, configuration and file/data utilities can be used.
+2026-09-16 22:57:32,850 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 22:57:33,862 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 22:57:34,359 INFO ubc_evict: evicted 5070.2 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-00001-of-00005.safetensors
+2026-09-16 22:57:34,396 INFO ubc_evict: evicted 5098.4 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-00002-of-00005.safetensors
+2026-09-16 22:57:34,434 INFO ubc_evict: evicted 5097.1 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-00003-of-00005.safetensors
+2026-09-16 22:57:34,473 INFO ubc_evict: evicted 5036.3 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-00004-of-00005.safetensors
+2026-09-16 22:57:34,492 INFO ubc_evict: evicted 2311.0 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-00005-of-00005.safetensors
+2026-09-16 22:57:34,492 INFO ubc_evict: evicted 851.8 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-vision-00001-of-00001.safetensors
+2026-09-16 22:57:34,492 INFO ubc_evict: pass complete total_mb=23464.8 elapsed_s=0.17
+2026-09-16 22:57:34,988 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 22:57:35,997 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 22:57:36,006 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 23:01:02,454 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 23:02:50,043 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 23:02:50,074 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 23:02:50,135 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 23:02:50,196 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 23:02:50,257 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 23:02:50,319 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 23:02:50,381 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 23:02:50,440 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 23:02:50,502 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 23:02:50,564 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 23:02:50,634 INFO "GET /v1/status HTTP/1.1" 200 -
+[transformers] PyTorch was not found. Models won't be available and only tokenizers, configuration and file/data utilities can be used.
+2026-09-17 08:13:06,634 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 08:13:07,637 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 08:13:08,167 INFO ubc_evict: evicted 5070.2 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-00001-of-00005.safetensors
+2026-09-17 08:13:08,207 INFO ubc_evict: evicted 5098.4 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-00002-of-00005.safetensors
+2026-09-17 08:13:08,248 INFO ubc_evict: evicted 5097.1 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-00003-of-00005.safetensors
+2026-09-17 08:13:08,288 INFO ubc_evict: evicted 5036.3 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-00004-of-00005.safetensors
+2026-09-17 08:13:08,307 INFO ubc_evict: evicted 2311.0 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-00005-of-00005.safetensors
+2026-09-17 08:13:08,308 INFO ubc_evict: evicted 851.8 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-vision-00001-of-00001.safetensors
+2026-09-17 08:13:08,308 INFO ubc_evict: pass complete total_mb=23464.8 elapsed_s=0.18
+2026-09-17 08:13:08,823 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 08:13:09,825 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 08:13:09,830 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 08:13:19,342 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-17 08:13:50,373 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-17 08:13:50,405 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 08:13:50,461 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 08:13:50,518 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 08:13:50,574 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 08:13:50,629 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 08:13:50,685 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 08:13:50,738 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 08:13:50,794 INFO "GET /v1/status HTTP/1.1" 200 -
+[transformers] PyTorch was not found. Models won't be available and only tokenizers, configuration and file/data utilities can be used.
+2026-09-17 08:15:20,319 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 08:15:21,326 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 08:15:21,837 INFO ubc_evict: evicted 5070.2 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-00001-of-00005.safetensors
+2026-09-17 08:15:21,878 INFO ubc_evict: evicted 5098.4 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-00002-of-00005.safetensors
+2026-09-17 08:15:21,918 INFO ubc_evict: evicted 5097.1 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-00003-of-00005.safetensors
+2026-09-17 08:15:21,958 INFO ubc_evict: evicted 5036.3 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-00004-of-00005.safetensors
+2026-09-17 08:15:21,978 INFO ubc_evict: evicted 2311.0 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-00005-of-00005.safetensors
+2026-09-17 08:15:21,978 INFO ubc_evict: evicted 851.8 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-vision-00001-of-00001.safetensors
+2026-09-17 08:15:21,978 INFO ubc_evict: pass complete total_mb=23464.8 elapsed_s=0.18
+2026-09-17 08:15:22,495 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 08:15:23,499 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 08:15:23,508 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 08:15:33,002 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-17 08:16:04,025 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-17 08:16:04,056 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 08:16:04,111 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 08:16:04,167 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 08:16:04,223 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 08:16:04,281 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 08:16:04,336 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 08:16:04,394 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 08:16:04,451 INFO "GET /v1/status HTTP/1.1" 200 -
+[transformers] PyTorch was not found. Models won't be available and only tokenizers, configuration and file/data utilities can be used.
+2026-09-17 08:17:49,577 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 08:17:50,583 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 08:17:51,459 INFO ubc_evict: evicted 5070.2 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-00001-of-00005.safetensors
+2026-09-17 08:17:51,500 INFO ubc_evict: evicted 5098.4 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-00002-of-00005.safetensors
+2026-09-17 08:17:51,542 INFO ubc_evict: evicted 5097.1 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-00003-of-00005.safetensors
+2026-09-17 08:17:51,582 INFO ubc_evict: evicted 5036.3 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-00004-of-00005.safetensors
+2026-09-17 08:17:51,589 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 08:17:51,603 INFO ubc_evict: evicted 2311.0 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-00005-of-00005.safetensors
+2026-09-17 08:17:51,603 INFO ubc_evict: evicted 851.8 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-vision-00001-of-00001.safetensors
+2026-09-17 08:17:51,603 INFO ubc_evict: pass complete total_mb=23464.8 elapsed_s=0.18
+2026-09-17 08:17:52,595 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 08:17:52,603 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 08:18:02,050 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-17 08:18:33,134 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-17 08:18:33,167 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 08:18:33,224 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 08:18:33,280 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 08:18:33,335 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 08:18:33,392 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 08:18:33,450 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 08:18:33,508 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 08:18:33,567 INFO "GET /v1/status HTTP/1.1" 200 -
+[transformers] PyTorch was not found. Models won't be available and only tokenizers, configuration and file/data utilities can be used.
+2026-09-17 08:20:04,391 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 08:20:05,398 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 08:20:05,923 INFO ubc_evict: evicted 5070.2 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-00001-of-00005.safetensors
+2026-09-17 08:20:05,963 INFO ubc_evict: evicted 5098.4 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-00002-of-00005.safetensors
+2026-09-17 08:20:06,003 INFO ubc_evict: evicted 5097.1 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-00003-of-00005.safetensors
+2026-09-17 08:20:06,042 INFO ubc_evict: evicted 5036.3 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-00004-of-00005.safetensors
+2026-09-17 08:20:06,062 INFO ubc_evict: evicted 2311.0 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-00005-of-00005.safetensors
+2026-09-17 08:20:06,063 INFO ubc_evict: evicted 851.8 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-vision-00001-of-00001.safetensors
+2026-09-17 08:20:06,063 INFO ubc_evict: pass complete total_mb=23464.8 elapsed_s=0.18
+2026-09-17 08:20:06,588 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 08:20:07,593 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 08:20:07,602 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 08:20:30,841 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-17 08:21:02,076 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-17 08:21:02,107 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 08:21:02,163 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 08:21:02,219 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 08:21:02,274 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 08:21:02,327 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 08:21:02,384 INFO "GET /v1/status HTTP/1.1" 200 -
+[transformers] PyTorch was not found. Models won't be available and only tokenizers, configuration and file/data utilities can be used.
+2026-09-17 08:23:03,366 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 08:23:04,371 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 08:23:04,891 INFO ubc_evict: evicted 5070.2 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-00001-of-00005.safetensors
+2026-09-17 08:23:04,931 INFO ubc_evict: evicted 5098.4 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-00002-of-00005.safetensors
+2026-09-17 08:23:04,973 INFO ubc_evict: evicted 5097.1 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-00003-of-00005.safetensors
+2026-09-17 08:23:05,016 INFO ubc_evict: evicted 5036.3 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-00004-of-00005.safetensors
+2026-09-17 08:23:05,037 INFO ubc_evict: evicted 2311.0 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-00005-of-00005.safetensors
+2026-09-17 08:23:05,037 INFO ubc_evict: evicted 851.8 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-vision-00001-of-00001.safetensors
+2026-09-17 08:23:05,037 INFO ubc_evict: pass complete total_mb=23464.8 elapsed_s=0.18
+2026-09-17 08:23:05,541 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 08:23:06,547 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 08:23:06,559 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 08:23:33,301 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-17 08:24:04,559 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-17 08:24:04,588 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 08:24:04,644 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 08:24:04,701 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 08:24:04,757 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 08:24:04,813 INFO "GET /v1/status HTTP/1.1" 200 -
+[transformers] PyTorch was not found. Models won't be available and only tokenizers, configuration and file/data utilities can be used.
+2026-09-17 08:26:09,197 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 08:26:10,199 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 08:26:10,739 INFO ubc_evict: evicted 5070.2 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-00001-of-00005.safetensors
+2026-09-17 08:26:10,779 INFO ubc_evict: evicted 5098.4 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-00002-of-00005.safetensors
+2026-09-17 08:26:10,819 INFO ubc_evict: evicted 5097.1 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-00003-of-00005.safetensors
+2026-09-17 08:26:10,859 INFO ubc_evict: evicted 5036.3 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-00004-of-00005.safetensors
+2026-09-17 08:26:10,879 INFO ubc_evict: evicted 2311.0 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-00005-of-00005.safetensors
+2026-09-17 08:26:10,879 INFO ubc_evict: evicted 851.8 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-vision-00001-of-00001.safetensors
+2026-09-17 08:26:10,879 INFO ubc_evict: pass complete total_mb=23464.8 elapsed_s=0.18
+2026-09-17 08:26:11,398 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 08:26:12,403 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 08:26:12,414 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 08:26:38,681 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-17 08:27:09,933 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-17 08:27:09,968 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 08:27:10,024 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 08:27:10,080 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 08:27:10,133 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 08:27:10,189 INFO "GET /v1/status HTTP/1.1" 200 -
+[transformers] PyTorch was not found. Models won't be available and only tokenizers, configuration and file/data utilities can be used.
+2026-09-17 08:29:13,096 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 08:29:14,102 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 08:29:14,622 INFO ubc_evict: evicted 5070.2 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-00001-of-00005.safetensors
+2026-09-17 08:29:14,663 INFO ubc_evict: evicted 5098.4 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-00002-of-00005.safetensors
+2026-09-17 08:29:14,704 INFO ubc_evict: evicted 5097.1 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-00003-of-00005.safetensors
+2026-09-17 08:29:14,743 INFO ubc_evict: evicted 5036.3 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-00004-of-00005.safetensors
+2026-09-17 08:29:14,764 INFO ubc_evict: evicted 2311.0 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-00005-of-00005.safetensors
+2026-09-17 08:29:14,764 INFO ubc_evict: evicted 851.8 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-vision-00001-of-00001.safetensors
+2026-09-17 08:29:14,764 INFO ubc_evict: pass complete total_mb=23464.8 elapsed_s=0.18
+2026-09-17 08:29:15,289 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 08:29:16,296 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 08:29:16,306 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 08:30:30,385 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-17 08:31:02,032 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-17 08:31:02,063 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 08:31:02,119 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 08:31:02,175 INFO "GET /v1/status HTTP/1.1" 200 -
+[transformers] PyTorch was not found. Models won't be available and only tokenizers, configuration and file/data utilities can be used.
+2026-09-17 08:34:38,922 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 08:34:39,927 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 08:34:40,448 INFO ubc_evict: evicted 5070.2 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-00001-of-00005.safetensors
+2026-09-17 08:34:40,489 INFO ubc_evict: evicted 5098.4 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-00002-of-00005.safetensors
+2026-09-17 08:34:40,529 INFO ubc_evict: evicted 5097.1 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-00003-of-00005.safetensors
+2026-09-17 08:34:40,568 INFO ubc_evict: evicted 5036.3 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-00004-of-00005.safetensors
+2026-09-17 08:34:40,589 INFO ubc_evict: evicted 2311.0 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-00005-of-00005.safetensors
+2026-09-17 08:34:40,589 INFO ubc_evict: evicted 851.8 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-vision-00001-of-00001.safetensors
+2026-09-17 08:34:40,589 INFO ubc_evict: pass complete total_mb=23464.8 elapsed_s=0.18
+2026-09-17 08:34:41,153 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 08:34:42,156 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 08:34:42,165 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 08:35:55,979 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-17 08:36:27,546 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-17 08:36:27,577 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 08:36:27,633 INFO "GET /v1/status HTTP/1.1" 200 -
+[transformers] PyTorch was not found. Models won't be available and only tokenizers, configuration and file/data utilities can be used.
+2026-09-17 08:40:03,469 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 08:40:04,474 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 08:40:04,992 INFO ubc_evict: evicted 5070.2 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-00001-of-00005.safetensors
+2026-09-17 08:40:05,032 INFO ubc_evict: evicted 5098.4 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-00002-of-00005.safetensors
+2026-09-17 08:40:05,073 INFO ubc_evict: evicted 5097.1 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-00003-of-00005.safetensors
+2026-09-17 08:40:05,112 INFO ubc_evict: evicted 5036.3 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-00004-of-00005.safetensors
+2026-09-17 08:40:05,133 INFO ubc_evict: evicted 2311.0 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-00005-of-00005.safetensors
+2026-09-17 08:40:05,134 INFO ubc_evict: evicted 851.8 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-vision-00001-of-00001.safetensors
+2026-09-17 08:40:05,134 INFO ubc_evict: pass complete total_mb=23464.8 elapsed_s=0.18
+2026-09-17 08:40:05,641 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 08:40:06,646 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 08:40:06,654 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 08:41:21,221 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-17 08:41:52,866 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-17 08:41:52,897 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 08:41:52,954 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 08:41:53,010 INFO "GET /v1/status HTTP/1.1" 200 -
+[transformers] PyTorch was not found. Models won't be available and only tokenizers, configuration and file/data utilities can be used.
+2026-09-17 08:45:29,178 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 08:45:30,185 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 08:45:30,697 INFO ubc_evict: evicted 5070.2 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-00001-of-00005.safetensors
+2026-09-17 08:45:30,738 INFO ubc_evict: evicted 5098.4 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-00002-of-00005.safetensors
+2026-09-17 08:45:30,778 INFO ubc_evict: evicted 5097.1 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-00003-of-00005.safetensors
+2026-09-17 08:45:30,817 INFO ubc_evict: evicted 5036.3 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-00004-of-00005.safetensors
+2026-09-17 08:45:30,838 INFO ubc_evict: evicted 2311.0 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-00005-of-00005.safetensors
+2026-09-17 08:45:30,838 INFO ubc_evict: evicted 851.8 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-vision-00001-of-00001.safetensors
+2026-09-17 08:45:30,838 INFO ubc_evict: pass complete total_mb=23464.8 elapsed_s=0.18
+2026-09-17 08:45:31,345 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 08:45:32,352 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 08:45:32,364 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 08:49:28,903 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-17 08:51:01,516 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-17 08:51:01,548 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 08:51:01,604 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 08:51:01,659 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 08:51:01,715 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 08:51:01,772 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 08:51:01,829 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 08:51:01,887 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 08:51:01,945 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 08:51:02,002 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 08:51:02,059 INFO "GET /v1/status HTTP/1.1" 200 -
+[transformers] PyTorch was not found. Models won't be available and only tokenizers, configuration and file/data utilities can be used.
+2026-09-17 09:02:21,303 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 09:02:22,305 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 09:02:22,877 INFO ubc_evict: evicted 5070.2 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-00001-of-00005.safetensors
+2026-09-17 09:02:22,917 INFO ubc_evict: evicted 5098.4 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-00002-of-00005.safetensors
+2026-09-17 09:02:22,956 INFO ubc_evict: evicted 5097.1 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-00003-of-00005.safetensors
+2026-09-17 09:02:22,994 INFO ubc_evict: evicted 5036.3 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-00004-of-00005.safetensors
+2026-09-17 09:02:23,015 INFO ubc_evict: evicted 2311.0 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-00005-of-00005.safetensors
+2026-09-17 09:02:23,016 INFO ubc_evict: evicted 851.8 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-vision-00001-of-00001.safetensors
+2026-09-17 09:02:23,016 INFO ubc_evict: pass complete total_mb=23464.8 elapsed_s=0.17
+2026-09-17 09:02:23,514 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 09:02:24,533 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 09:02:24,542 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 09:06:04,772 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-17 09:08:07,536 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-17 09:08:07,569 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 09:08:07,625 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 09:08:07,682 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 09:08:07,738 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 09:08:07,790 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 09:08:07,847 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 09:08:07,901 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 09:08:07,956 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 09:08:08,013 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 09:08:08,070 INFO "GET /v1/status HTTP/1.1" 200 -
+[transformers] PyTorch was not found. Models won't be available and only tokenizers, configuration and file/data utilities can be used.
+2026-09-17 09:19:39,993 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 09:19:40,999 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 09:19:41,902 INFO ubc_evict: evicted 5070.2 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-00001-of-00005.safetensors
+2026-09-17 09:19:41,941 INFO ubc_evict: evicted 5098.4 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-00002-of-00005.safetensors
+2026-09-17 09:19:41,980 INFO ubc_evict: evicted 5097.1 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-00003-of-00005.safetensors
+2026-09-17 09:19:42,005 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 09:19:42,019 INFO ubc_evict: evicted 5036.3 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-00004-of-00005.safetensors
+2026-09-17 09:19:42,039 INFO ubc_evict: evicted 2311.0 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-00005-of-00005.safetensors
+2026-09-17 09:19:42,039 INFO ubc_evict: evicted 851.8 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit/model-vision-00001-of-00001.safetensors
+2026-09-17 09:19:42,039 INFO ubc_evict: pass complete total_mb=23464.8 elapsed_s=0.17
+2026-09-17 09:19:43,012 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 09:19:43,021 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 09:23:18,685 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-17 09:25:21,364 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-17 09:25:21,395 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 09:25:21,451 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 09:25:21,507 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 09:25:21,564 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 09:25:21,621 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 09:25:21,678 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 09:25:21,735 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 09:25:21,790 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 09:25:21,843 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-17 09:25:21,900 INFO "GET /v1/status HTTP/1.1" 200 -

@@ -1,0 +1,39 @@
+{
+  "schema": "mlx2.qualification-failure.v1",
+  "timestamp": 1789525381.653537,
+  "runtime_source_sha256": "af05e25c7d7b311070aedcbf50b3fbd93277240143a791d9d6079d5fdfb1e5fc",
+  "qualification_harness_sha256": "4c3da4b55f9b2b22aad4ee6616226275b084a3a3f1a28227a4e05c298cc39cbd",
+  "manifest_sha256": "d00016f7375d54944c8765e049a5d3821b826638a1a4dffb78260386ba5c6530",
+  "artifact_sha256": "fb827b658dc3d26ac569efacefd0466dbf41cc1a5cb5e3a40fc1c6175298810f",
+  "profile": "qwen38-27b-apcv2-mtp2",
+  "execution_policy": {
+    "num_draft": 2
+  },
+  "qualification_complete": false,
+  "passed": false,
+  "canonical_receipt_published": false,
+  "reason": "fresh 262K self-MTP lane entered monolithic _make_mtp_batch preparation; incremental gating required active decode/nonempty history, so prepare_self_mtp_lane synchronously consumed target+draft chunks before returning and scheduler/status could not progress",
+  "observed": {
+    "long_request_elapsed_seconds_before_abort": 700,
+    "healthy": true,
+    "inflight": 1,
+    "queue_depth": 0,
+    "memory_waiting": 0,
+    "cycles": 298,
+    "completed": 23,
+    "stores": 43,
+    "prefill_rounds": 0,
+    "metal_active_bytes": 27128944264,
+    "process_physical_footprint_bytes": 32011040016,
+    "swap_used_bytes": 0,
+    "server_error": null,
+    "short_mtp_committed_cycles": 257,
+    "short_mtp_true_batched_engaged": 257,
+    "short_mtp_failures": 0
+  },
+  "artifacts": [
+    "status-initial-af05e25c-4c3da4b5.json",
+    "qualify-af05e25c-4c3da4b5.log",
+    "server-af05e25c-4c3da4b5.log"
+  ]
+}

@@ -1,0 +1,44 @@
+{
+  "short_prompt_is_an_exact_lane_and_is_published": {
+    "ok": true,
+    "prompt_tokens": 1408,
+    "start_tokens": 2500,
+    "reason": "below_start_tokens",
+    "warm_cached": 1407,
+    "texts": [
+      "line 70: account 410 moved",
+      "line 70: account 410 moved"
+    ],
+    "error": null
+  },
+  "long_prompt_quantizes_a_warm_exact_prefix": {
+    "ok": true,
+    "prompt_tokens": 5311,
+    "cached_tokens": 1420,
+    "text": "5521.",
+    "status": "applied",
+    "requantized_prefix_hits": 1,
+    "error": null
+  },
+  "exact_entry_is_untouched_by_the_quantized_branch": {
+    "ok": true,
+    "text": "line 70: account 410 moved",
+    "cached_tokens": 1407
+  },
+  "long_prompt_repeat_is_stable_and_never_cached_as_exact": {
+    "ok": true,
+    "text": "5521.",
+    "cached_tokens": 1420
+  },
+  "counters": {
+    "ok": false,
+    "skipped": 4,
+    "applied": 2,
+    "requantized_prefix_hits": 2
+  },
+  "server_alive_final": {
+    "ok": true,
+    "inflight": 0,
+    "error": null
+  }
+}

@@ -1,0 +1,5214 @@
+{
+  "schema": "mlx2.serving-qualification.v1",
+  "timestamp": 1789760060.259032,
+  "runtime": {
+    "source_sha256": "f2dc4260cd07d7f0cdc70b0fbe7d695bc8b15eb0faacf8fd944db78fbfca6690",
+    "mlx_native_sha256": "30335939714520c3306cfa58597100aae08bbeabdc60a4bc8c35c32c607450a8",
+    "python": "3.12.13",
+    "macos": "26.7",
+    "mlx": "0.32.2.dev20260915+2a817ad94",
+    "transformers": "5.12.1",
+    "dependencies": {
+      "numpy": "2.5.1",
+      "tokenizers": "0.22.2",
+      "jinja2": "3.1.6",
+      "psutil": "7.2.2",
+      "regex": "2026.9.10",
+      "safetensors": "0.8.0"
+    }
+  },
+  "qualification_harness": {
+    "schema": "mlx2.qualification-harness.v1",
+    "name": "scripts/qualify_serving.py",
+    "sha256": "619c695a4740cfde6b76ebcd04936365acaa46f8982092a3fdc4e10f7efe6599"
+  },
+  "artifact": "6c88a4d3a5387abe2d97ac3d5eb70e484fb33615bb0c0f2ff8e7ef22b442f2e4",
+  "settings": {
+    "max_context": 32768,
+    "max_lanes": 4,
+    "max_inflight": 40,
+    "prefill_step": 2048,
+    "cache_bytes": 8589934592,
+    "disk_cache": true,
+    "host_prompt_cache_entries": 128,
+    "host_prompt_cache_tokens": 1048576,
+    "coalesce_window_ms": 5.0,
+    "batch_cohort_timeout_ms": 1000.0,
+    "mtp": false,
+    "tenant_scoped_cache": false,
+    "environment": {
+      "HF_HUB_OFFLINE": "1",
+      "TRANSFORMERS_OFFLINE": "1",
+      "MLX_ENABLE_TF32": "0",
+      "MLX_LM_COMPILED_DECODE": "0",
+      "MLX_LM_SEGMENTED_SELF_MTP": "0",
+      "MLX_LM_TRUE_BATCHED_SEGMENTED_MTP": "0",
+      "MLX_LM_SHARED_QSA_SUFFIX": "0"
+    },
+    "adaptive_mtp_depth": {
+      "enabled": false,
+      "ewma_alpha": 0.25,
+      "shrink_gate": 0.35,
+      "grow_gate": 0.8,
+      "loss_rounds": 3,
+      "gain_rounds": 3,
+      "park_rounds": 4
+    },
+    "spomin_live_surgery": {
+      "enabled": false,
+      "capacity_tokens": 0,
+      "segment_tokens": 1024,
+      "strategy": "oldest_contiguous",
+      "protect_prefix_segments": 1
+    },
+    "cache_capsules": {
+      "enabled": false,
+      "backend": "gpu",
+      "fallback": "gpu",
+      "deadline_ms": 50.0,
+      "verify_raw_bits": false
+    },
+    "persistent_block_bytes": 0,
+    "approximate_kv": {
+      "enabled": false,
+      "operation": null,
+      "start_tokens": 0,
+      "evidence": [],
+      "descriptor": null
+    },
+    "execution_policy": {
+      "persistent": true,
+      "num_draft": 0,
+      "rate_gate": false,
+      "prefill_step_size": 2048,
+      "segment_aware_live_tip": false,
+      "segment_aware_cohort_size": 4
+    },
+    "prompt_lookup": {},
+    "decode_time_fairness": {
+      "enabled": true,
+      "fair_share": 0.5,
+      "stall_target_ms": 500.0
+    },
+    "speculation": "ordinary",
+    "cache_budget": {
+      "schema": "north-mini-code-cache-geometry-v1",
+      "global_layers": 13,
+      "sliding_layers": 36,
+      "kv_heads": 4,
+      "head_dim": 128,
+      "sliding_window": 4096,
+      "item_bytes": 4,
+      "allocation_step": 256,
+      "checkpoint_copies": 4,
+      "transcript_bytes_per_token": 16,
+      "transient_gib_per_lane": 3.1,
+      "bound": "fp32-global-plus-window-and-restore-snapshots",
+      "workspace": "3.1-GiB-per-lane conservative static assumption; live qualification pending"
+    }
+  },
+  "coverage": {
+    "response_format_json_object": false,
+    "strict_json_schema": true,
+    "explicit_grammar": false,
+    "physical_n2": false,
+    "overload_429_retry_after": false,
+    "latency_ttft_itl_percentiles": false,
+    "tenant_jain_fairness": false,
+    "progress_events": false
+  },
+  "checks": {
+    "unit_tests": {
+      "passed": true,
+      "evidence": {
+        "path": "~/Desktop/mlx2/qualification/runs/sanity-20x20-20260918/preflight.json",
+        "sha256": "f841f85b20e57d863592bcb3ecf970ebd8a02d5c2423373475d1cfba801ff7e1",
+        "identity": {
+          "git": {
+            "revision": "3d3f27efcd1b1c00eb0f002a715029b5355d7a29"
+          },
+          "runtime": {
+            "source_sha256": "f2dc4260cd07d7f0cdc70b0fbe7d695bc8b15eb0faacf8fd944db78fbfca6690",
+            "mlx_native_sha256": "30335939714520c3306cfa58597100aae08bbeabdc60a4bc8c35c32c607450a8",
+            "python": "3.12.13",
+            "macos": "26.7",
+            "mlx": "0.32.2.dev20260915+2a817ad94",
+            "transformers": "5.12.1",
+            "dependencies": {
+              "numpy": "2.5.1",
+              "tokenizers": "0.22.2",
+              "jinja2": "3.1.6",
+              "psutil": "7.2.2",
+              "regex": "2026.9.10",
+              "safetensors": "0.8.0"
+            }
+          },
+          "qualification_harness": {
+            "schema": "mlx2.qualification-harness.v1",
+            "name": "scripts/qualify_serving.py",
+            "sha256": "619c695a4740cfde6b76ebcd04936365acaa46f8982092a3fdc4e10f7efe6599"
+          },
+          "test_source_sha256": "b9d646cae4dd18ca16eda71a3577e540e1b9769c30639ea21dcf6fcc04b61b5a"
+        },
+        "passed": true
+      }
+    },
+    "hermes_client": {
+      "passed": true,
+      "evidence": {
+        "id": "chatcmpl-a6d12d30a55f4d1a8fd522df800617c6",
+        "object": "chat.completion",
+        "created": 1789760060,
+        "model": "North-Mini-Code-1.0-mlx-4bit",
+        "choices": [
+          {
+            "index": 0,
+            "finish_reason": "stop",
+            "message": {
+              "role": "assistant",
+              "content": "HERMES_READY"
+            }
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 123,
+          "completion_tokens": 6,
+          "total_tokens": 129,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          }
+        },
+        "mlx2": {
+          "request_id": "chatcmpl-a6d12d30a55f4d1a8fd522df800617c6",
+          "cache": "apcv2",
+          "cached_tokens": 0,
+          "parallel_prefill": null,
+          "profile": "north-mini-code-apcv2-ordinary",
+          "qualification": "candidate",
+          "route_receipt": "candidate_validation",
+          "request_controls": {
+            "logprobs": false,
+            "top_logprobs": 0,
+            "logprob_semantics": null,
+            "thinking": false,
+            "sampling": {
+              "temperature": 0
+            },
+            "min_tokens": 0,
+            "batch_cohort": null,
+            "reasoning_effort": "none",
+            "effort_semantics": "thinking_toggle",
+            "context_limit": 32768,
+            "structured_output": null
+          },
+          "ordinary_compute_width": 1,
+          "mtp": null,
+          "speculation": null,
+          "spomin_live_surgery": null,
+          "approximate_kv": null,
+          "cache_capsule": null,
+          "prompt_tokens": 123,
+          "completion_tokens": 6,
+          "ttft_seconds": 0.26689833399723284,
+          "elapsed_seconds": 0.31082000001333654
+        }
+      }
+    },
+    "logprobs": {
+      "passed": true,
+      "evidence": {
+        "reference": {
+          "id": "chatcmpl-f520f5f564a14f1b88a22dc8575386d1",
+          "object": "chat.completion",
+          "created": 1789760060,
+          "model": "North-Mini-Code-1.0-mlx-4bit",
+          "choices": [
+            {
+              "index": 0,
+              "finish_reason": "length",
+              "message": {
+                "role": "assistant",
+                "content": "",
+                "reasoning_content": "The user asks: \"Write a short"
+              }
+            }
+          ],
+          "usage": {
+            "prompt_tokens": 123,
+            "completion_tokens": 8,
+            "total_tokens": 131,
+            "prompt_tokens_details": {
+              "cached_tokens": 111
+            }
+          },
+          "mlx2": {
+            "request_id": "chatcmpl-f520f5f564a14f1b88a22dc8575386d1",
+            "cache": "apcv2",
+            "cached_tokens": 111,
+            "parallel_prefill": null,
+            "profile": "north-mini-code-apcv2-ordinary",
+            "qualification": "candidate",
+            "route_receipt": "candidate_validation",
+            "request_controls": {
+              "logprobs": false,
+              "top_logprobs": 0,
+              "logprob_semantics": null,
+              "thinking": true,
+              "sampling": {
+                "temperature": 0
+              },
+              "min_tokens": 0,
+              "batch_cohort": null,
+              "reasoning_effort": null,
+              "effort_semantics": "thinking_toggle",
+              "context_limit": 32768,
+              "structured_output": null
+            },
+            "ordinary_compute_width": 1,
+            "mtp": null,
+            "speculation": null,
+            "spomin_live_surgery": null,
+            "approximate_kv": null,
+            "cache_capsule": null,
+            "prompt_tokens": 123,
+            "completion_tokens": 8,
+            "ttft_seconds": 0.06435741600580513,
+            "elapsed_seconds": 0.12085400000796653
+          }
+        },
+        "response": {
+          "id": "chatcmpl-73048f6051cc4f4aa8ed354a0959c569",
+          "object": "chat.completion",
+          "created": 1789760060,
+          "model": "North-Mini-Code-1.0-mlx-4bit",
+          "choices": [
+            {
+              "index": 0,
+              "finish_reason": "length",
+              "logprobs": {
+                "content": [
+                  {
+                    "id": 669,
+                    "token": "The",
+                    "logprob": -0.125,
+                    "top_logprobs": [
+                      {
+                        "id": 669,
+                        "token": "The",
+                        "logprob": -0.125
+                      },
+                      {
+                        "id": 2110,
+                        "token": "We",
+                        "logprob": -2.25
+                      },
+                      {
+                        "id": 2632,
+                        "token": "User",
+                        "logprob": -3.125
+                      }
+                    ]
+                  },
+                  {
+                    "id": 1756,
+                    "token": "\u0120user",
+                    "logprob": 0.0,
+                    "top_logprobs": [
+                      {
+                        "id": 1756,
+                        "token": "\u0120user",
+                        "logprob": 0.0
+                      },
+                      {
+                        "id": 3973,
+                        "token": "\u0120task",
+                        "logprob": -12.625
+                      },
+                      {
+                        "id": 19647,
+                        "token": "\u0120user's",
+                        "logprob": -12.75
+                      }
+                    ]
+                  },
+                  {
+                    "id": 23570,
+                    "token": "\u0120asks",
+                    "logprob": -0.125,
+                    "top_logprobs": [
+                      {
+                        "id": 23570,
+                        "token": "\u0120asks",
+                        "logprob": -0.125
+                      },
+                      {
+                        "id": 9002,
+                        "token": "\u0120wants",
+                        "logprob": -2.25
+                      },
+                      {
+                        "id": 10855,
+                        "token": "\u0120requests",
+                        "logprob": -10.125
+                      }
+                    ]
+                  },
+                  {
+                    "id": 30,
+                    "token": ":",
+                    "logprob": 0.0,
+                    "top_logprobs": [
+                      {
+                        "id": 30,
+                        "token": ":",
+                        "logprob": 0.0
+                      },
+                      {
+                        "id": 304,
+                        "token": "\u0120to",
+                        "logprob": -8.5
+                      },
+                      {
+                        "id": 373,
+                        "token": "\u0120\"",
+                        "logprob": -9.0
+                      }
+                    ]
+                  },
+                  {
+                    "id": 373,
+                    "token": "\u0120\"",
+                    "logprob": 0.0,
+                    "top_logprobs": [
+                      {
+                        "id": 373,
+                        "token": "\u0120\"",
+                        "logprob": 0.0
+                      },
+                      {
+                        "id": 4570,
+                        "token": "\u0120\u00e2\u0122\u013e",
+                        "logprob": -15.5
+                      },
+                      {
+                        "id": 11858,
+                        "token": "\u0120Write",
+                        "logprob": -16.0
+                      }
+                    ]
+                  },
+                  {
+                    "id": 11696,
+                    "token": "Write",
+                    "logprob": 0.0,
+                    "top_logprobs": [
+                      {
+                        "id": 11696,
+                        "token": "Write",
+                        "logprob": 0.0
+                      },
+                      {
+                        "id": 11858,
+                        "token": "\u0120Write",
+                        "logprob": -14.25
+                      },
+                      {
+                        "id": 11564,
+                        "token": "write",
+                        "logprob": -15.875
+                      }
+                    ]
+                  },
+                  {
+                    "id": 265,
+                    "token": "\u0120a",
+                    "logprob": 0.0,
+                    "top_logprobs": [
+                      {
+                        "id": 265,
+                        "token": "\u0120a",
+                        "logprob": 0.0
+                      },
+                      {
+                        "id": 387,
+                        "token": "\u0120an",
+                        "logprob": -14.5
+                      },
+                      {
+                        "id": 3211,
+                        "token": "\u0120short",
+                        "logprob": -15.5
+                      }
+                    ]
+                  },
+                  {
+                    "id": 3211,
+                    "token": "\u0120short",
+                    "logprob": 0.0,
+                    "top_logprobs": [
+                      {
+                        "id": 3211,
+                        "token": "\u0120short",
+                        "logprob": 0.0
+                      },
+                      {
+                        "id": 19288,
+                        "token": "short",
+                        "logprob": -16.25
+                      },
+                      {
+                        "id": 46468,
+                        "token": "\u0120shortest",
+                        "logprob": -16.25
+                      }
+                    ]
+                  }
+                ]
+              },
+              "message": {
+                "role": "assistant",
+                "content": "",
+                "reasoning_content": "The user asks: \"Write a short"
+              }
+            }
+          ],
+          "usage": {
+            "prompt_tokens": 123,
+            "completion_tokens": 8,
+            "total_tokens": 131,
+            "prompt_tokens_details": {
+              "cached_tokens": 122
+            }
+          },
+          "mlx2": {
+            "request_id": "chatcmpl-73048f6051cc4f4aa8ed354a0959c569",
+            "cache": "apcv2",
+            "cached_tokens": 122,
+            "parallel_prefill": null,
+            "profile": "north-mini-code-apcv2-ordinary",
+            "qualification": "candidate",
+            "route_receipt": "candidate_validation",
+            "request_controls": {
+              "logprobs": true,
+              "top_logprobs": 3,
+              "logprob_semantics": "execution_target: ordinary=post_processor_pre_sampler; mtp=transformed_target_verifier",
+              "thinking": true,
+              "sampling": {
+                "temperature": 0
+              },
+              "min_tokens": 0,
+              "batch_cohort": null,
+              "reasoning_effort": null,
+              "effort_semantics": "thinking_toggle",
+              "context_limit": 32768,
+              "structured_output": null
+            },
+            "ordinary_compute_width": 1,
+            "mtp": null,
+            "speculation": null,
+            "spomin_live_surgery": null,
+            "approximate_kv": null,
+            "cache_capsule": null,
+            "prompt_tokens": 123,
+            "completion_tokens": 8,
+            "ttft_seconds": 0.03719062500749715,
+            "elapsed_seconds": 0.10196566599188372
+          }
+        },
+        "stream_entries": [
+          {
+            "id": 669,
+            "token": "The",
+            "logprob": -0.125,
+            "top_logprobs": [
+              {
+                "id": 669,
+                "token": "The",
+                "logprob": -0.125
+              },
+              {
+                "id": 2110,
+                "token": "We",
+                "logprob": -2.25
+              },
+              {
+                "id": 2632,
+                "token": "User",
+                "logprob": -3.125
+              }
+            ]
+          },
+          {
+            "id": 1756,
+            "token": "\u0120user",
+            "logprob": 0.0,
+            "top_logprobs": [
+              {
+                "id": 1756,
+                "token": "\u0120user",
+                "logprob": 0.0
+              },
+              {
+                "id": 3973,
+                "token": "\u0120task",
+                "logprob": -12.625
+              },
+              {
+                "id": 19647,
+                "token": "\u0120user's",
+                "logprob": -12.75
+              }
+            ]
+          },
+          {
+            "id": 23570,
+            "token": "\u0120asks",
+            "logprob": -0.125,
+            "top_logprobs": [
+              {
+                "id": 23570,
+                "token": "\u0120asks",
+                "logprob": -0.125
+              },
+              {
+                "id": 9002,
+                "token": "\u0120wants",
+                "logprob": -2.25
+              },
+              {
+                "id": 10855,
+                "token": "\u0120requests",
+                "logprob": -10.125
+              }
+            ]
+          },
+          {
+            "id": 30,
+            "token": ":",
+            "logprob": 0.0,
+            "top_logprobs": [
+              {
+                "id": 30,
+                "token": ":",
+                "logprob": 0.0
+              },
+              {
+                "id": 304,
+                "token": "\u0120to",
+                "logprob": -8.5
+              },
+              {
+                "id": 373,
+                "token": "\u0120\"",
+                "logprob": -9.0
+              }
+            ]
+          },
+          {
+            "id": 373,
+            "token": "\u0120\"",
+            "logprob": 0.0,
+            "top_logprobs": [
+              {
+                "id": 373,
+                "token": "\u0120\"",
+                "logprob": 0.0
+              },
+              {
+                "id": 4570,
+                "token": "\u0120\u00e2\u0122\u013e",
+                "logprob": -15.5
+              },
+              {
+                "id": 11858,
+                "token": "\u0120Write",
+                "logprob": -16.0
+              }
+            ]
+          },
+          {
+            "id": 11696,
+            "token": "Write",
+            "logprob": 0.0,
+            "top_logprobs": [
+              {
+                "id": 11696,
+                "token": "Write",
+                "logprob": 0.0
+              },
+              {
+                "id": 11858,
+                "token": "\u0120Write",
+                "logprob": -14.25
+              },
+              {
+                "id": 11564,
+                "token": "write",
+                "logprob": -15.875
+              }
+            ]
+          },
+          {
+            "id": 265,
+            "token": "\u0120a",
+            "logprob": 0.0,
+            "top_logprobs": [
+              {
+                "id": 265,
+                "token": "\u0120a",
+                "logprob": 0.0
+              },
+              {
+                "id": 387,
+                "token": "\u0120an",
+                "logprob": -14.5
+              },
+              {
+                "id": 3211,
+                "token": "\u0120short",
+                "logprob": -15.5
+              }
+            ]
+          },
+          {
+            "id": 3211,
+            "token": "\u0120short",
+            "logprob": 0.0,
+            "top_logprobs": [
+              {
+                "id": 3211,
+                "token": "\u0120short",
+                "logprob": 0.0
+              },
+              {
+                "id": 19288,
+                "token": "short",
+                "logprob": -16.25
+              },
+              {
+                "id": 46468,
+                "token": "\u0120shortest",
+                "logprob": -16.25
+              }
+            ]
+          }
+        ],
+        "stream_usage": {
+          "prompt_tokens": 123,
+          "completion_tokens": 8,
+          "total_tokens": 131,
+          "prompt_tokens_details": {
+            "cached_tokens": 122
+          }
+        }
+      }
+    },
+    "sampling_controls": {
+      "passed": true,
+      "evidence": [
+        {
+          "request_id": "chatcmpl-b3a35d8517ee48828e93c379d35d436e",
+          "cache": "apcv2",
+          "cached_tokens": 111,
+          "parallel_prefill": null,
+          "profile": "north-mini-code-apcv2-ordinary",
+          "qualification": "candidate",
+          "route_receipt": "candidate_validation",
+          "request_controls": {
+            "logprobs": false,
+            "top_logprobs": 0,
+            "logprob_semantics": null,
+            "thinking": true,
+            "sampling": {
+              "temperature": 0.7,
+              "top_p": 0.9,
+              "top_k": 24,
+              "min_p": 0.05,
+              "repetition_penalty": 1.05,
+              "presence_penalty": 0.1,
+              "frequency_penalty": 0.1,
+              "seed": 237
+            },
+            "min_tokens": 0,
+            "batch_cohort": null,
+            "reasoning_effort": null,
+            "effort_semantics": "thinking_toggle",
+            "context_limit": 32768,
+            "structured_output": null
+          },
+          "ordinary_compute_width": 1,
+          "mtp": null,
+          "speculation": null,
+          "spomin_live_surgery": null,
+          "approximate_kv": null,
+          "cache_capsule": null,
+          "prompt_tokens": 120,
+          "completion_tokens": 48,
+          "ttft_seconds": 0.06298975000390783,
+          "elapsed_seconds": 0.4050006250035949
+        },
+        {
+          "request_id": "chatcmpl-2868376c3eb74067a7da3ef86ef70d40",
+          "cache": "apcv2",
+          "cached_tokens": 119,
+          "parallel_prefill": null,
+          "profile": "north-mini-code-apcv2-ordinary",
+          "qualification": "candidate",
+          "route_receipt": "candidate_validation",
+          "request_controls": {
+            "logprobs": false,
+            "top_logprobs": 0,
+            "logprob_semantics": null,
+            "thinking": true,
+            "sampling": {
+              "temperature": 0.7,
+              "top_p": 0.9,
+              "top_k": 24,
+              "min_p": 0.05,
+              "repetition_penalty": 1.05,
+              "presence_penalty": 0.1,
+              "frequency_penalty": 0.1,
+              "seed": 237
+            },
+            "min_tokens": 0,
+            "batch_cohort": null,
+            "reasoning_effort": null,
+            "effort_semantics": "thinking_toggle",
+            "context_limit": 32768,
+            "structured_output": null
+          },
+          "ordinary_compute_width": 1,
+          "mtp": null,
+          "speculation": null,
+          "spomin_live_surgery": null,
+          "approximate_kv": null,
+          "cache_capsule": null,
+          "prompt_tokens": 120,
+          "completion_tokens": 48,
+          "ttft_seconds": 0.03811837499961257,
+          "elapsed_seconds": 0.3769197080109734
+        }
+      ]
+    },
+    "cold_text": {
+      "passed": true,
+      "evidence": {
+        "request_id": "chatcmpl-36be08acd841406bb153afe4e6778422",
+        "cache": "apcv2",
+        "cached_tokens": 114,
+        "parallel_prefill": null,
+        "profile": "north-mini-code-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": false,
+          "top_logprobs": 0,
+          "logprob_semantics": null,
+          "thinking": true,
+          "sampling": {
+            "temperature": 0
+          },
+          "min_tokens": 0,
+          "batch_cohort": null,
+          "reasoning_effort": null,
+          "effort_semantics": "thinking_toggle",
+          "context_limit": 32768,
+          "structured_output": null
+        },
+        "ordinary_compute_width": 1,
+        "mtp": null,
+        "speculation": null,
+        "spomin_live_surgery": null,
+        "approximate_kv": null,
+        "cache_capsule": null,
+        "prompt_tokens": 123,
+        "completion_tokens": 47,
+        "ttft_seconds": 0.05393079199711792,
+        "elapsed_seconds": 0.3668063330114819
+      }
+    },
+    "warm_prefix": {
+      "passed": true,
+      "evidence": {
+        "request_id": "chatcmpl-087f3a11b2b84a9b8e4fe6cfac824c73",
+        "cache": "apcv2",
+        "cached_tokens": 122,
+        "parallel_prefill": null,
+        "profile": "north-mini-code-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": false,
+          "top_logprobs": 0,
+          "logprob_semantics": null,
+          "thinking": true,
+          "sampling": {
+            "temperature": 0
+          },
+          "min_tokens": 0,
+          "batch_cohort": null,
+          "reasoning_effort": null,
+          "effort_semantics": "thinking_toggle",
+          "context_limit": 32768,
+          "structured_output": null
+        },
+        "ordinary_compute_width": 1,
+        "mtp": null,
+        "speculation": null,
+        "spomin_live_surgery": null,
+        "approximate_kv": null,
+        "cache_capsule": null,
+        "prompt_tokens": 123,
+        "completion_tokens": 47,
+        "ttft_seconds": 0.03923454199684784,
+        "elapsed_seconds": 0.35242612499860115
+      }
+    },
+    "structured_output": {
+      "passed": true,
+      "evidence": {
+        "engine": "automaton",
+        "response": {
+          "id": "chatcmpl-8b03a59efde946fb9aa33e920ffdc122",
+          "object": "chat.completion",
+          "created": 1789760062,
+          "model": "North-Mini-Code-1.0-mlx-4bit",
+          "choices": [
+            {
+              "index": 0,
+              "finish_reason": "stop",
+              "message": {
+                "role": "assistant",
+                "content": "{\n  \"answer\": \"yes\"\n}"
+              }
+            }
+          ],
+          "usage": {
+            "prompt_tokens": 126,
+            "completion_tokens": 10,
+            "total_tokens": 136,
+            "prompt_tokens_details": {
+              "cached_tokens": 111
+            }
+          },
+          "mlx2": {
+            "request_id": "chatcmpl-8b03a59efde946fb9aa33e920ffdc122",
+            "cache": "apcv2",
+            "cached_tokens": 111,
+            "parallel_prefill": null,
+            "profile": "north-mini-code-apcv2-ordinary",
+            "qualification": "candidate",
+            "route_receipt": "candidate_validation",
+            "request_controls": {
+              "logprobs": false,
+              "top_logprobs": 0,
+              "logprob_semantics": null,
+              "thinking": false,
+              "sampling": {
+                "temperature": 0
+              },
+              "min_tokens": 0,
+              "batch_cohort": null,
+              "reasoning_effort": null,
+              "effort_semantics": "thinking_toggle",
+              "context_limit": 32768,
+              "structured_output": {
+                "kind": "json_schema",
+                "enforced": true,
+                "engine": "automaton",
+                "tail_mass_bound": 0.0,
+                "parallel_scans": 0,
+                "deferred": false,
+                "deferred_tokens": 0
+              }
+            },
+            "ordinary_compute_width": 1,
+            "mtp": null,
+            "speculation": null,
+            "spomin_live_surgery": null,
+            "approximate_kv": null,
+            "cache_capsule": null,
+            "prompt_tokens": 126,
+            "completion_tokens": 10,
+            "ttft_seconds": 0.8476270420069341,
+            "elapsed_seconds": 0.9425729170034174
+          }
+        }
+      }
+    },
+    "structured_output_sampled": {
+      "passed": true,
+      "evidence": {
+        "engine": "automaton",
+        "response": {
+          "id": "chatcmpl-25d39f31d1c2455ebb12b6fa6fb222dc",
+          "object": "chat.completion",
+          "created": 1789760063,
+          "model": "North-Mini-Code-1.0-mlx-4bit",
+          "choices": [
+            {
+              "index": 0,
+              "finish_reason": "stop",
+              "message": {
+                "role": "assistant",
+                "content": "{\n  \"answer\": \"yes\"\n}"
+              }
+            }
+          ],
+          "usage": {
+            "prompt_tokens": 126,
+            "completion_tokens": 10,
+            "total_tokens": 136,
+            "prompt_tokens_details": {
+              "cached_tokens": 125
+            }
+          },
+          "mlx2": {
+            "request_id": "chatcmpl-25d39f31d1c2455ebb12b6fa6fb222dc",
+            "cache": "apcv2",
+            "cached_tokens": 125,
+            "parallel_prefill": null,
+            "profile": "north-mini-code-apcv2-ordinary",
+            "qualification": "candidate",
+            "route_receipt": "candidate_validation",
+            "request_controls": {
+              "logprobs": false,
+              "top_logprobs": 0,
+              "logprob_semantics": null,
+              "thinking": false,
+              "sampling": {
+                "temperature": 0.7,
+                "seed": 7
+              },
+              "min_tokens": 0,
+              "batch_cohort": null,
+              "reasoning_effort": null,
+              "effort_semantics": "thinking_toggle",
+              "context_limit": 32768,
+              "structured_output": {
+                "kind": "json_schema",
+                "enforced": true,
+                "engine": "automaton",
+                "tail_mass_bound": 0.0,
+                "parallel_scans": 0,
+                "deferred": false,
+                "deferred_tokens": 0
+              }
+            },
+            "ordinary_compute_width": 1,
+            "mtp": null,
+            "speculation": null,
+            "spomin_live_surgery": null,
+            "approximate_kv": null,
+            "cache_capsule": null,
+            "prompt_tokens": 126,
+            "completion_tokens": 10,
+            "ttft_seconds": 0.04046495899092406,
+            "elapsed_seconds": 0.11475779200554825
+          }
+        }
+      }
+    },
+    "structured_output_thinking": {
+      "passed": true,
+      "evidence": {
+        "outcome": "skipped_unsupported",
+        "http_status": 400,
+        "adapter_declares_marker": false,
+        "note": null,
+        "error": "{\"error\": {\"message\": \"structured output requires thinking to be disabled\", \"type\": \"invalid_request_error\"}}"
+      }
+    },
+    "stream": {
+      "passed": true,
+      "evidence": [
+        {
+          "id": "chatcmpl-f6805f2b739f484e957daea4261b775b",
+          "object": "chat.completion.chunk",
+          "created": 1789760063,
+          "model": "North-Mini-Code-1.0-mlx-4bit",
+          "choices": [
+            {
+              "index": 0,
+              "finish_reason": null,
+              "delta": {
+                "reasoning_content": "The"
+              }
+            }
+          ]
+        },
+        {
+          "id": "chatcmpl-f6805f2b739f484e957daea4261b775b",
+          "object": "chat.completion.chunk",
+          "created": 1789760063,
+          "model": "North-Mini-Code-1.0-mlx-4bit",
+          "choices": [
+            {
+              "index": 0,
+              "finish_reason": null,
+              "delta": {
+                "reasoning_content": " user"
+              }
+            }
+          ]
+        },
+        {
+          "id": "chatcmpl-f6805f2b739f484e957daea4261b775b",
+          "object": "chat.completion.chunk",
+          "created": 1789760063,
+          "model": "North-Mini-Code-1.0-mlx-4bit",
+          "choices": [
+            {
+              "index": 0,
+              "finish_reason": null,
+              "delta": {
+                "reasoning_content": " asks"
+              }
+            }
+          ]
+        },
+        {
+          "id": "chatcmpl-f6805f2b739f484e957daea4261b775b",
+          "object": "chat.completion.chunk",
+          "created": 1789760063,
+          "model": "North-Mini-Code-1.0-mlx-4bit",
+          "choices": [
+            {
+              "index": 0,
+              "finish_reason": null,
+              "delta": {
+                "reasoning_content": ":"
+              }
+            }
+          ]
+        },
+        {
+          "id": "chatcmpl-f6805f2b739f484e957daea4261b775b",
+          "object": "chat.completion.chunk",
+          "created": 1789760063,
+          "model": "North-Mini-Code-1.0-mlx-4bit",
+          "choices": [
+            {
+              "index": 0,
+              "finish_reason": null,
+              "delta": {
+                "reasoning_content": " \""
+              }
+            }
+          ]
+        },
+        {
+          "id": "chatcmpl-f6805f2b739f484e957daea4261b775b",
+          "object": "chat.completion.chunk",
+          "created": 1789760063,
+          "model": "North-Mini-Code-1.0-mlx-4bit",
+          "choices": [
+            {
+              "index": 0,
+              "finish_reason": null,
+              "delta": {
+                "reasoning_content": "Reply"
+              }
+            }
+          ]
+        },
+        {
+          "id": "chatcmpl-f6805f2b739f484e957daea4261b775b",
+          "object": "chat.completion.chunk",
+          "created": 1789760063,
+          "model": "North-Mini-Code-1.0-mlx-4bit",
+          "choices": [
+            {
+              "index": 0,
+              "finish_reason": null,
+              "delta": {
+                "reasoning_content": " with"
+              }
+            }
+          ]
+        },
+        {
+          "id": "chatcmpl-f6805f2b739f484e957daea4261b775b",
+          "object": "chat.completion.chunk",
+          "created": 1789760063,
+          "model": "North-Mini-Code-1.0-mlx-4bit",
+          "choices": [
+            {
+              "index": 0,
+              "finish_reason": null,
+              "delta": {
+                "reasoning_content": " exactly"
+              }
+            }
+          ]
+        },
+        {
+          "id": "chatcmpl-f6805f2b739f484e957daea4261b775b",
+          "object": "chat.completion.chunk",
+          "created": 1789760063,
+          "model": "North-Mini-Code-1.0-mlx-4bit",
+          "choices": [
+            {
+              "index": 0,
+              "finish_reason": null,
+              "delta": {
+                "reasoning_content": " ML"
+              }
+            }
+          ]
+        },
+        {
+          "id": "chatcmpl-f6805f2b739f484e957daea4261b775b",
+          "object": "chat.completion.chunk",
+          "created": 1789760063,
+          "model": "North-Mini-Code-1.0-mlx-4bit",
+          "choices": [
+            {
+              "index": 0,
+              "finish_reason": null,
+              "delta": {
+                "reasoning_content": "X"
+              }
+            }
+          ]
+        },
+        {
+          "id": "chatcmpl-f6805f2b739f484e957daea4261b775b",
+          "object": "chat.completion.chunk",
+          "created": 1789760063,
+          "model": "North-Mini-Code-1.0-mlx-4bit",
+          "choices": [
+            {
+              "index": 0,
+              "finish_reason": null,
+              "delta": {
+                "reasoning_content": "2"
+              }
+            }
+          ]
+        },
+        {
+          "id": "chatcmpl-f6805f2b739f484e957daea4261b775b",
+          "object": "chat.completion.chunk",
+          "created": 1789760063,
+          "model": "North-Mini-Code-1.0-mlx-4bit",
+          "choices": [
+            {
+              "index": 0,
+              "finish_reason": null,
+              "delta": {
+                "reasoning_content": "_READY"
+              }
+            }
+          ]
+        },
+        {
+          "id": "chatcmpl-f6805f2b739f484e957daea4261b775b",
+          "object": "chat.completion.chunk",
+          "created": 1789760063,
+          "model": "North-Mini-Code-1.0-mlx-4bit",
+          "choices": [
+            {
+              "index": 0,
+              "finish_reason": null,
+              "delta": {
+                "reasoning_content": "\"."
+              }
+            }
+          ]
+        },
+        {
+          "id": "chatcmpl-f6805f2b739f484e957daea4261b775b",
+          "object": "chat.completion.chunk",
+          "created": 1789760063,
+          "model": "North-Mini-Code-1.0-mlx-4bit",
+          "choices": [
+            {
+              "index": 0,
+              "finish_reason": null,
+              "delta": {
+                "reasoning_content": " So"
+              }
+            }
+          ]
+        },
+        {
+          "id": "chatcmpl-f6805f2b739f484e957daea4261b775b",
+          "object": "chat.completion.chunk",
+          "created": 1789760063,
+          "model": "North-Mini-Code-1.0-mlx-4bit",
+          "choices": [
+            {
+              "index": 0,
+              "finish_reason": null,
+              "delta": {
+                "reasoning_content": " we"
+              }
+            }
+          ]
+        },
+        {
+          "id": "chatcmpl-f6805f2b739f484e957daea4261b775b",
+          "object": "chat.completion.chunk",
+          "created": 1789760063,
+          "model": "North-Mini-Code-1.0-mlx-4bit",
+          "choices": [
+            {
+              "index": 0,
+              "finish_reason": null,
+              "delta": {
+                "reasoning_content": " need"
+              }
+            }
+          ]
+        },
+        {
+          "id": "chatcmpl-f6805f2b739f484e957daea4261b775b",
+          "object": "chat.completion.chunk",
+          "created": 1789760063,
+          "model": "North-Mini-Code-1.0-mlx-4bit",
+          "choices": [
+            {
+              "index": 0,
+              "finish_reason": null,
+              "delta": {
+                "reasoning_content": " to"
+              }
+            }
+          ]
+        },
+        {
+          "id": "chatcmpl-f6805f2b739f484e957daea4261b775b",
+          "object": "chat.completion.chunk",
+          "created": 1789760063,
+          "model": "North-Mini-Code-1.0-mlx-4bit",
+          "choices": [
+            {
+              "index": 0,
+              "finish_reason": null,
+              "delta": {
+                "reasoning_content": " output"
+              }
+            }
+          ]
+        },
+        {
+          "id": "chatcmpl-f6805f2b739f484e957daea4261b775b",
+          "object": "chat.completion.chunk",
+          "created": 1789760063,
+          "model": "North-Mini-Code-1.0-mlx-4bit",
+          "choices": [
+            {
+              "index": 0,
+              "finish_reason": null,
+              "delta": {
+                "reasoning_content": " exactly"
+              }
+            }
+          ]
+        },
+        {
+          "id": "chatcmpl-f6805f2b739f484e957daea4261b775b",
+          "object": "chat.completion.chunk",
+          "created": 1789760063,
+          "model": "North-Mini-Code-1.0-mlx-4bit",
+          "choices": [
+            {
+              "index": 0,
+              "finish_reason": null,
+              "delta": {
+                "reasoning_content": " that"
+              }
+            }
+          ]
+        },
+        {
+          "id": "chatcmpl-f6805f2b739f484e957daea4261b775b",
+          "object": "chat.completion.chunk",
+          "created": 1789760063,
+          "model": "North-Mini-Code-1.0-mlx-4bit",
+          "choices": [
+            {
+              "index": 0,
+              "finish_reason": null,
+              "delta": {
+                "reasoning_content": " string"
+              }
+            }
+          ]
+        },
+        {
+          "id": "chatcmpl-f6805f2b739f484e957daea4261b775b",
+          "object": "chat.completion.chunk",
+          "created": 1789760063,
+          "model": "North-Mini-Code-1.0-mlx-4bit",
+          "choices": [
+            {
+              "index": 0,
+              "finish_reason": null,
+              "delta": {
+                "reasoning_content": ","
+              }
+            }
+          ]
+        },
+        {
+          "id": "chatcmpl-f6805f2b739f484e957daea4261b775b",
+          "object": "chat.completion.chunk",
+          "created": 1789760063,
+          "model": "North-Mini-Code-1.0-mlx-4bit",
+          "choices": [
+            {
+              "index": 0,
+              "finish_reason": null,
+              "delta": {
+                "reasoning_content": " no"
+              }
+            }
+          ]
+        },
+        {
+          "id": "chatcmpl-f6805f2b739f484e957daea4261b775b",
+          "object": "chat.completion.chunk",
+          "created": 1789760063,
+          "model": "North-Mini-Code-1.0-mlx-4bit",
+          "choices": [
+            {
+              "index": 0,
+              "finish_reason": null,
+              "delta": {
+                "reasoning_content": " extra"
+              }
+            }
+          ]
+        },
+        {
+          "id": "chatcmpl-f6805f2b739f484e957daea4261b775b",
+          "object": "chat.completion.chunk",
+          "created": 1789760063,
+          "model": "North-Mini-Code-1.0-mlx-4bit",
+          "choices": [
+            {
+              "index": 0,
+              "finish_reason": null,
+              "delta": {
+                "reasoning_content": " characters"
+              }
+            }
+          ]
+        },
+        {
+          "id": "chatcmpl-f6805f2b739f484e957daea4261b775b",
+          "object": "chat.completion.chunk",
+          "created": 1789760063,
+          "model": "North-Mini-Code-1.0-mlx-4bit",
+          "choices": [
+            {
+              "index": 0,
+              "finish_reason": null,
+              "delta": {
+                "reasoning_content": "."
+              }
+            }
+          ]
+        },
+        {
+          "id": "chatcmpl-f6805f2b739f484e957daea4261b775b",
+          "object": "chat.completion.chunk",
+          "created": 1789760063,
+          "model": "North-Mini-Code-1.0-mlx-4bit",
+          "choices": [
+            {
+              "index": 0,
+              "finish_reason": null,
+              "delta": {
+                "reasoning_content": " So"
+              }
+            }
+          ]
+        },
+        {
+          "id": "chatcmpl-f6805f2b739f484e957daea4261b775b",
+          "object": "chat.completion.chunk",
+          "created": 1789760063,
+          "model": "North-Mini-Code-1.0-mlx-4bit",
+          "choices": [
+            {
+              "index": 0,
+              "finish_reason": null,
+              "delta": {
+                "reasoning_content": " respond"
+              }
+            }
+          ]
+        },
+        {
+          "id": "chatcmpl-f6805f2b739f484e957daea4261b775b",
+          "object": "chat.completion.chunk",
+          "created": 1789760063,
+          "model": "North-Mini-Code-1.0-mlx-4bit",
+          "choices": [
+            {
+              "index": 0,
+              "finish_reason": null,
+              "delta": {
+                "reasoning_content": " with"
+              }
+            }
+          ]
+        },
+        {
+          "id": "chatcmpl-f6805f2b739f484e957daea4261b775b",
+          "object": "chat.completion.chunk",
+          "created": 1789760063,
+          "model": "North-Mini-Code-1.0-mlx-4bit",
+          "choices": [
+            {
+              "index": 0,
+              "finish_reason": null,
+              "delta": {
+                "reasoning_content": " \""
+              }
+            }
+          ]
+        },
+        {
+          "id": "chatcmpl-f6805f2b739f484e957daea4261b775b",
+          "object": "chat.completion.chunk",
+          "created": 1789760063,
+          "model": "North-Mini-Code-1.0-mlx-4bit",
+          "choices": [
+            {
+              "index": 0,
+              "finish_reason": null,
+              "delta": {
+                "reasoning_content": "ML"
+              }
+            }
+          ]
+        },
+        {
+          "id": "chatcmpl-f6805f2b739f484e957daea4261b775b",
+          "object": "chat.completion.chunk",
+          "created": 1789760063,
+          "model": "North-Mini-Code-1.0-mlx-4bit",
+          "choices": [
+            {
+              "index": 0,
+              "finish_reason": null,
+              "delta": {
+                "reasoning_content": "X"
+              }
+            }
+          ]
+        },
+        {
+          "id": "chatcmpl-f6805f2b739f484e957daea4261b775b",
+          "object": "chat.completion.chunk",
+          "created": 1789760063,
+          "model": "North-Mini-Code-1.0-mlx-4bit",
+          "choices": [
+            {
+              "index": 0,
+              "finish_reason": null,
+              "delta": {
+                "reasoning_content": "2"
+              }
+            }
+          ]
+        },
+        {
+          "id": "chatcmpl-f6805f2b739f484e957daea4261b775b",
+          "object": "chat.completion.chunk",
+          "created": 1789760063,
+          "model": "North-Mini-Code-1.0-mlx-4bit",
+          "choices": [
+            {
+              "index": 0,
+              "finish_reason": null,
+              "delta": {
+                "reasoning_content": "_READY"
+              }
+            }
+          ]
+        },
+        {
+          "id": "chatcmpl-f6805f2b739f484e957daea4261b775b",
+          "object": "chat.completion.chunk",
+          "created": 1789760063,
+          "model": "North-Mini-Code-1.0-mlx-4bit",
+          "choices": [
+            {
+              "index": 0,
+              "finish_reason": null,
+              "delta": {
+                "reasoning_content": "\"."
+              }
+            }
+          ]
+        },
+        {
+          "id": "chatcmpl-f6805f2b739f484e957daea4261b775b",
+          "object": "chat.completion.chunk",
+          "created": 1789760063,
+          "model": "North-Mini-Code-1.0-mlx-4bit",
+          "choices": [
+            {
+              "index": 0,
+              "finish_reason": null,
+              "delta": {
+                "reasoning_content": " Ensure"
+              }
+            }
+          ]
+        },
+        {
+          "id": "chatcmpl-f6805f2b739f484e957daea4261b775b",
+          "object": "chat.completion.chunk",
+          "created": 1789760063,
+          "model": "North-Mini-Code-1.0-mlx-4bit",
+          "choices": [
+            {
+              "index": 0,
+              "finish_reason": null,
+              "delta": {
+                "reasoning_content": " exactly"
+              }
+            }
+          ]
+        },
+        {
+          "id": "chatcmpl-f6805f2b739f484e957daea4261b775b",
+          "object": "chat.completion.chunk",
+          "created": 1789760063,
+          "model": "North-Mini-Code-1.0-mlx-4bit",
+          "choices": [
+            {
+              "index": 0,
+              "finish_reason": null,
+              "delta": {
+                "reasoning_content": " that"
+              }
+            }
+          ]
+        },
+        {
+          "id": "chatcmpl-f6805f2b739f484e957daea4261b775b",
+          "object": "chat.completion.chunk",
+          "created": 1789760063,
+          "model": "North-Mini-Code-1.0-mlx-4bit",
+          "choices": [
+            {
+              "index": 0,
+              "finish_reason": null,
+              "delta": {
+                "reasoning_content": "."
+              }
+            }
+          ]
+        },
+        {
+          "id": "chatcmpl-f6805f2b739f484e957daea4261b775b",
+          "object": "chat.completion.chunk",
+          "created": 1789760063,
+          "model": "North-Mini-Code-1.0-mlx-4bit",
+          "choices": [
+            {
+              "index": 0,
+              "finish_reason": null,
+              "delta": {
+                "content": "ML"
+              }
+            }
+          ]
+        },
+        {
+          "id": "chatcmpl-f6805f2b739f484e957daea4261b775b",
+          "object": "chat.completion.chunk",
+          "created": 1789760063,
+          "model": "North-Mini-Code-1.0-mlx-4bit",
+          "choices": [
+            {
+              "index": 0,
+              "finish_reason": null,
+              "delta": {
+                "content": "X"
+              }
+            }
+          ]
+        },
+        {
+          "id": "chatcmpl-f6805f2b739f484e957daea4261b775b",
+          "object": "chat.completion.chunk",
+          "created": 1789760063,
+          "model": "North-Mini-Code-1.0-mlx-4bit",
+          "choices": [
+            {
+              "index": 0,
+              "finish_reason": null,
+              "delta": {
+                "content": "2"
+              }
+            }
+          ]
+        },
+        {
+          "id": "chatcmpl-f6805f2b739f484e957daea4261b775b",
+          "object": "chat.completion.chunk",
+          "created": 1789760063,
+          "model": "North-Mini-Code-1.0-mlx-4bit",
+          "choices": [
+            {
+              "index": 0,
+              "finish_reason": null,
+              "delta": {
+                "content": "_READY"
+              }
+            }
+          ]
+        },
+        {
+          "id": "chatcmpl-f6805f2b739f484e957daea4261b775b",
+          "object": "chat.completion.chunk",
+          "created": 1789760063,
+          "model": "North-Mini-Code-1.0-mlx-4bit",
+          "choices": [
+            {
+              "index": 0,
+              "finish_reason": "stop",
+              "delta": {}
+            }
+          ],
+          "usage": {
+            "prompt_tokens": 123,
+            "completion_tokens": 47,
+            "total_tokens": 170,
+            "prompt_tokens_details": {
+              "cached_tokens": 122
+            }
+          },
+          "mlx2": {
+            "request_id": "chatcmpl-f6805f2b739f484e957daea4261b775b",
+            "cache": "apcv2",
+            "cached_tokens": 122,
+            "parallel_prefill": null,
+            "profile": "north-mini-code-apcv2-ordinary",
+            "qualification": "candidate",
+            "route_receipt": "candidate_validation",
+            "request_controls": {
+              "logprobs": false,
+              "top_logprobs": 0,
+              "logprob_semantics": null,
+              "thinking": true,
+              "sampling": {
+                "temperature": 0
+              },
+              "min_tokens": 0,
+              "batch_cohort": null,
+              "reasoning_effort": null,
+              "effort_semantics": "thinking_toggle",
+              "context_limit": 32768,
+              "structured_output": null
+            },
+            "ordinary_compute_width": 1,
+            "mtp": null,
+            "speculation": null,
+            "spomin_live_surgery": null,
+            "approximate_kv": null,
+            "cache_capsule": null,
+            "prompt_tokens": 123,
+            "completion_tokens": 47,
+            "ttft_seconds": 0.03894295799545944,
+            "elapsed_seconds": 0.3538602909829933
+          }
+        }
+      ]
+    },
+    "tools": {
+      "passed": true,
+      "evidence": {
+        "id": "chatcmpl-9391b86db05742cc8db934d973927fc7",
+        "object": "chat.completion",
+        "created": 1789760063,
+        "model": "North-Mini-Code-1.0-mlx-4bit",
+        "choices": [
+          {
+            "index": 0,
+            "finish_reason": "tool_calls",
+            "message": {
+              "role": "assistant",
+              "content": "",
+              "reasoning_content": "The user wants me to get the weather for Toronto. I have access to a weather function that takes a city parameter. The user has specified \"Toronto\" as the city, so I have all the required parameters to make the function call.",
+              "tool_calls": [
+                {
+                  "id": "0",
+                  "type": "function",
+                  "function": {
+                    "name": "weather",
+                    "arguments": "{\"city\": \"Toronto\"}"
+                  }
+                }
+              ]
+            }
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 177,
+          "completion_tokens": 79,
+          "total_tokens": 256,
+          "prompt_tokens_details": {
+            "cached_tokens": 102
+          }
+        },
+        "mlx2": {
+          "request_id": "chatcmpl-9391b86db05742cc8db934d973927fc7",
+          "cache": "apcv2",
+          "cached_tokens": 102,
+          "parallel_prefill": null,
+          "profile": "north-mini-code-apcv2-ordinary",
+          "qualification": "candidate",
+          "route_receipt": "candidate_validation",
+          "request_controls": {
+            "logprobs": false,
+            "top_logprobs": 0,
+            "logprob_semantics": null,
+            "thinking": true,
+            "sampling": {
+              "temperature": 0
+            },
+            "min_tokens": 0,
+            "batch_cohort": null,
+            "reasoning_effort": null,
+            "effort_semantics": "thinking_toggle",
+            "context_limit": 32768,
+            "structured_output": null
+          },
+          "ordinary_compute_width": 1,
+          "mtp": null,
+          "speculation": null,
+          "spomin_live_surgery": null,
+          "approximate_kv": null,
+          "cache_capsule": null,
+          "prompt_tokens": 177,
+          "completion_tokens": 79,
+          "ttft_seconds": 0.10154570898157544,
+          "elapsed_seconds": 0.6282797500025481
+        }
+      }
+    },
+    "tool_roundtrip": {
+      "passed": true,
+      "evidence": {
+        "id": "chatcmpl-e57588917c5b46b8b9316e9173938736",
+        "object": "chat.completion",
+        "created": 1789760064,
+        "model": "North-Mini-Code-1.0-mlx-4bit",
+        "choices": [
+          {
+            "index": 0,
+            "finish_reason": "length",
+            "message": {
+              "role": "assistant",
+              "content": "The current weather in Toronto is:\n\n- **Temperature**: 21\u00b0C\n- **Condition**: Sunny\n\nIt's a",
+              "reasoning_content": "I got the weather data for Toronto. The result shows:\n- Temperature: 21\u00b0C\n- Condition: sunny\n\nI should present this information in a clear and helpful way to the user."
+            }
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 316,
+          "completion_tokens": 64,
+          "total_tokens": 380,
+          "prompt_tokens_details": {
+            "cached_tokens": 256
+          }
+        },
+        "mlx2": {
+          "request_id": "chatcmpl-e57588917c5b46b8b9316e9173938736",
+          "cache": "apcv2",
+          "cached_tokens": 256,
+          "parallel_prefill": null,
+          "profile": "north-mini-code-apcv2-ordinary",
+          "qualification": "candidate",
+          "route_receipt": "candidate_validation",
+          "request_controls": {
+            "logprobs": false,
+            "top_logprobs": 0,
+            "logprob_semantics": null,
+            "thinking": true,
+            "sampling": {
+              "temperature": 0
+            },
+            "min_tokens": 0,
+            "batch_cohort": null,
+            "reasoning_effort": null,
+            "effort_semantics": "thinking_toggle",
+            "context_limit": 32768,
+            "structured_output": null
+          },
+          "ordinary_compute_width": 1,
+          "mtp": null,
+          "speculation": null,
+          "spomin_live_surgery": null,
+          "approximate_kv": null,
+          "cache_capsule": null,
+          "prompt_tokens": 316,
+          "completion_tokens": 64,
+          "ttft_seconds": 0.12732079101260751,
+          "elapsed_seconds": 0.560763666027924
+        }
+      }
+    },
+    "reasoning": {
+      "passed": true,
+      "evidence": {
+        "attempts": [
+          {
+            "id": "chatcmpl-1fd1f95d86644db5a29ccbfd80ded04c",
+            "object": "chat.completion",
+            "created": 1789760065,
+            "model": "North-Mini-Code-1.0-mlx-4bit",
+            "choices": [
+              {
+                "index": 0,
+                "finish_reason": "stop",
+                "message": {
+                  "role": "assistant",
+                  "content": "221",
+                  "reasoning_content": "We need to compute 13 * 17. 13*10=130, 13*7=91, sum=221. So answer integer 221."
+                }
+              }
+            ],
+            "usage": {
+              "prompt_tokens": 166,
+              "completion_tokens": 39,
+              "total_tokens": 205,
+              "prompt_tokens_details": {
+                "cached_tokens": 109
+              }
+            },
+            "mlx2": {
+              "request_id": "chatcmpl-1fd1f95d86644db5a29ccbfd80ded04c",
+              "cache": "apcv2",
+              "cached_tokens": 109,
+              "parallel_prefill": null,
+              "profile": "north-mini-code-apcv2-ordinary",
+              "qualification": "candidate",
+              "route_receipt": "candidate_validation",
+              "request_controls": {
+                "logprobs": false,
+                "top_logprobs": 0,
+                "logprob_semantics": null,
+                "thinking": true,
+                "sampling": {
+                  "temperature": 0
+                },
+                "min_tokens": 0,
+                "batch_cohort": null,
+                "reasoning_effort": null,
+                "effort_semantics": "thinking_toggle",
+                "context_limit": 32768,
+                "structured_output": null
+              },
+              "ordinary_compute_width": 1,
+              "mtp": null,
+              "speculation": null,
+              "spomin_live_surgery": null,
+              "approximate_kv": null,
+              "cache_capsule": null,
+              "prompt_tokens": 166,
+              "completion_tokens": 39,
+              "ttft_seconds": 0.11529095901641995,
+              "elapsed_seconds": 0.376173791999463
+            }
+          }
+        ]
+      }
+    },
+    "stop": {
+      "passed": true,
+      "evidence": {
+        "id": "chatcmpl-312d7a847f404aaabe294c720645bd64",
+        "object": "chat.completion",
+        "created": 1789760065,
+        "model": "North-Mini-Code-1.0-mlx-4bit",
+        "choices": [
+          {
+            "index": 0,
+            "finish_reason": "stop",
+            "message": {
+              "role": "assistant",
+              "content": "MLX2",
+              "reasoning_content": "The user asks: \"Reply with exactly MLX2_READY\". So we need to output exactly that string, no extra characters. So respond with \"MLX2_READY\". Ensure exactly that."
+            }
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 123,
+          "completion_tokens": 45,
+          "total_tokens": 168,
+          "prompt_tokens_details": {
+            "cached_tokens": 122
+          }
+        },
+        "mlx2": {
+          "request_id": "chatcmpl-312d7a847f404aaabe294c720645bd64",
+          "cache": "apcv2",
+          "cached_tokens": 122,
+          "parallel_prefill": null,
+          "profile": "north-mini-code-apcv2-ordinary",
+          "qualification": "candidate",
+          "route_receipt": "candidate_validation",
+          "request_controls": {
+            "logprobs": false,
+            "top_logprobs": 0,
+            "logprob_semantics": null,
+            "thinking": true,
+            "sampling": {
+              "temperature": 0
+            },
+            "min_tokens": 0,
+            "batch_cohort": null,
+            "reasoning_effort": null,
+            "effort_semantics": "thinking_toggle",
+            "context_limit": 32768,
+            "structured_output": null
+          },
+          "ordinary_compute_width": 1,
+          "mtp": null,
+          "speculation": null,
+          "spomin_live_surgery": null,
+          "approximate_kv": null,
+          "cache_capsule": null,
+          "prompt_tokens": 123,
+          "completion_tokens": 45,
+          "ttft_seconds": 0.03834349999669939,
+          "elapsed_seconds": 0.3292054169869516
+        }
+      }
+    },
+    "seed_repeat": {
+      "passed": true,
+      "evidence": {
+        "first": {
+          "id": "chatcmpl-752d56b45b6948fda5236e427b55f862",
+          "object": "chat.completion",
+          "created": 1789760065,
+          "model": "North-Mini-Code-1.0-mlx-4bit",
+          "choices": [
+            {
+              "index": 0,
+              "finish_reason": "length",
+              "message": {
+                "role": "assistant",
+                "content": "1. **Stars are nuclear furnaces** \u2013 they fuse hydrogen atoms into helium in their cores, releasing enormous amounts of energy that",
+                "reasoning_content": "The user asks: \"Give three short facts about stars.\" This is a straightforward request for educational content, allowed. Provide three short facts. Ensure compliance with safety guidelines. No issues."
+              }
+            }
+          ],
+          "usage": {
+            "prompt_tokens": 123,
+            "completion_tokens": 64,
+            "total_tokens": 187,
+            "prompt_tokens_details": {
+              "cached_tokens": 111
+            }
+          },
+          "mlx2": {
+            "request_id": "chatcmpl-752d56b45b6948fda5236e427b55f862",
+            "cache": "apcv2",
+            "cached_tokens": 111,
+            "parallel_prefill": null,
+            "profile": "north-mini-code-apcv2-ordinary",
+            "qualification": "candidate",
+            "route_receipt": "candidate_validation",
+            "request_controls": {
+              "logprobs": false,
+              "top_logprobs": 0,
+              "logprob_semantics": null,
+              "thinking": true,
+              "sampling": {
+                "temperature": 0.7,
+                "seed": 123
+              },
+              "min_tokens": 0,
+              "batch_cohort": null,
+              "reasoning_effort": null,
+              "effort_semantics": "thinking_toggle",
+              "context_limit": 32768,
+              "structured_output": null
+            },
+            "ordinary_compute_width": 1,
+            "mtp": null,
+            "speculation": null,
+            "spomin_live_surgery": null,
+            "approximate_kv": null,
+            "cache_capsule": null,
+            "prompt_tokens": 123,
+            "completion_tokens": 64,
+            "ttft_seconds": 0.06520920901675709,
+            "elapsed_seconds": 0.5029266250203364
+          }
+        },
+        "second": {
+          "id": "chatcmpl-77c6a93fed0549c185d7ff2830a67f69",
+          "object": "chat.completion",
+          "created": 1789760066,
+          "model": "North-Mini-Code-1.0-mlx-4bit",
+          "choices": [
+            {
+              "index": 0,
+              "finish_reason": "length",
+              "message": {
+                "role": "assistant",
+                "content": "1. **Stars are nuclear furnaces** \u2013 they fuse hydrogen atoms into helium in their cores, releasing enormous amounts of energy that",
+                "reasoning_content": "The user asks: \"Give three short facts about stars.\" This is a straightforward request for educational content, allowed. Provide three short facts. Ensure compliance with safety guidelines. No issues."
+              }
+            }
+          ],
+          "usage": {
+            "prompt_tokens": 123,
+            "completion_tokens": 64,
+            "total_tokens": 187,
+            "prompt_tokens_details": {
+              "cached_tokens": 122
+            }
+          },
+          "mlx2": {
+            "request_id": "chatcmpl-77c6a93fed0549c185d7ff2830a67f69",
+            "cache": "apcv2",
+            "cached_tokens": 122,
+            "parallel_prefill": null,
+            "profile": "north-mini-code-apcv2-ordinary",
+            "qualification": "candidate",
+            "route_receipt": "candidate_validation",
+            "request_controls": {
+              "logprobs": false,
+              "top_logprobs": 0,
+              "logprob_semantics": null,
+              "thinking": true,
+              "sampling": {
+                "temperature": 0.7,
+                "seed": 123
+              },
+              "min_tokens": 0,
+              "batch_cohort": null,
+              "reasoning_effort": null,
+              "effort_semantics": "thinking_toggle",
+              "context_limit": 32768,
+              "structured_output": null
+            },
+            "ordinary_compute_width": 1,
+            "mtp": null,
+            "speculation": null,
+            "spomin_live_surgery": null,
+            "approximate_kv": null,
+            "cache_capsule": null,
+            "prompt_tokens": 123,
+            "completion_tokens": 64,
+            "ttft_seconds": 0.03999737501726486,
+            "elapsed_seconds": 0.47987437501433305
+          }
+        }
+      }
+    },
+    "batch": {
+      "passed": true,
+      "evidence": {
+        "observed_widths": [
+          4
+        ],
+        "wall_seconds": 1.977250208001351,
+        "lane_seconds": 7.811901291017421,
+        "prompt_lookup_route": false,
+        "aggregate_tokens_per_second": 323.68184735048095,
+        "request_receipts": [
+          {
+            "request_id": "chatcmpl-e949e350a0d74f01b6af8e0c346f02d7",
+            "cache": "apcv2",
+            "cached_tokens": 111,
+            "parallel_prefill": null,
+            "profile": "north-mini-code-apcv2-ordinary",
+            "qualification": "candidate",
+            "route_receipt": "candidate_validation",
+            "request_controls": {
+              "logprobs": false,
+              "top_logprobs": 0,
+              "logprob_semantics": null,
+              "thinking": true,
+              "sampling": {
+                "temperature": 0
+              },
+              "min_tokens": 0,
+              "batch_cohort": null,
+              "reasoning_effort": null,
+              "effort_semantics": "thinking_toggle",
+              "context_limit": 32768,
+              "structured_output": null
+            },
+            "ordinary_compute_width": 4,
+            "mtp": null,
+            "speculation": null,
+            "spomin_live_surgery": null,
+            "approximate_kv": null,
+            "cache_capsule": null,
+            "prompt_tokens": 124,
+            "completion_tokens": 160,
+            "ttft_seconds": 0.1303410830150824,
+            "elapsed_seconds": 1.9331680000177585
+          },
+          {
+            "request_id": "chatcmpl-f090a3cdaab94c538b3f6d1f7f37100c",
+            "cache": "apcv2",
+            "cached_tokens": 111,
+            "parallel_prefill": null,
+            "profile": "north-mini-code-apcv2-ordinary",
+            "qualification": "candidate",
+            "route_receipt": "candidate_validation",
+            "request_controls": {
+              "logprobs": false,
+              "top_logprobs": 0,
+              "logprob_semantics": null,
+              "thinking": true,
+              "sampling": {
+                "temperature": 0
+              },
+              "min_tokens": 0,
+              "batch_cohort": null,
+              "reasoning_effort": null,
+              "effort_semantics": "thinking_toggle",
+              "context_limit": 32768,
+              "structured_output": null
+            },
+            "ordinary_compute_width": 4,
+            "mtp": null,
+            "speculation": null,
+            "spomin_live_surgery": null,
+            "approximate_kv": null,
+            "cache_capsule": null,
+            "prompt_tokens": 124,
+            "completion_tokens": 160,
+            "ttft_seconds": 0.12913604200002737,
+            "elapsed_seconds": 1.9337654580012895
+          },
+          {
+            "request_id": "chatcmpl-fa8f76ef8fa242919042fc87047df653",
+            "cache": "apcv2",
+            "cached_tokens": 111,
+            "parallel_prefill": null,
+            "profile": "north-mini-code-apcv2-ordinary",
+            "qualification": "candidate",
+            "route_receipt": "candidate_validation",
+            "request_controls": {
+              "logprobs": false,
+              "top_logprobs": 0,
+              "logprob_semantics": null,
+              "thinking": true,
+              "sampling": {
+                "temperature": 0
+              },
+              "min_tokens": 0,
+              "batch_cohort": null,
+              "reasoning_effort": null,
+              "effort_semantics": "thinking_toggle",
+              "context_limit": 32768,
+              "structured_output": null
+            },
+            "ordinary_compute_width": 4,
+            "mtp": null,
+            "speculation": null,
+            "spomin_live_surgery": null,
+            "approximate_kv": null,
+            "cache_capsule": null,
+            "prompt_tokens": 124,
+            "completion_tokens": 160,
+            "ttft_seconds": 0.18187224998837337,
+            "elapsed_seconds": 1.9719060829957016
+          },
+          {
+            "request_id": "chatcmpl-7752d8da2aba4041876dcc99ca8e89e4",
+            "cache": "apcv2",
+            "cached_tokens": 111,
+            "parallel_prefill": null,
+            "profile": "north-mini-code-apcv2-ordinary",
+            "qualification": "candidate",
+            "route_receipt": "candidate_validation",
+            "request_controls": {
+              "logprobs": false,
+              "top_logprobs": 0,
+              "logprob_semantics": null,
+              "thinking": true,
+              "sampling": {
+                "temperature": 0
+              },
+              "min_tokens": 0,
+              "batch_cohort": null,
+              "reasoning_effort": null,
+              "effort_semantics": "thinking_toggle",
+              "context_limit": 32768,
+              "structured_output": null
+            },
+            "ordinary_compute_width": 4,
+            "mtp": null,
+            "speculation": null,
+            "spomin_live_surgery": null,
+            "approximate_kv": null,
+            "cache_capsule": null,
+            "prompt_tokens": 124,
+            "completion_tokens": 160,
+            "ttft_seconds": 0.1812144159921445,
+            "elapsed_seconds": 1.973061750002671
+          }
+        ]
+      }
+    },
+    "mixed_warm": {
+      "passed": true,
+      "evidence": [
+        {
+          "request_id": "chatcmpl-38fd81e05c3e435a9893e2979e03754a",
+          "cache": "apcv2",
+          "cached_tokens": 125,
+          "parallel_prefill": null,
+          "profile": "north-mini-code-apcv2-ordinary",
+          "qualification": "candidate",
+          "route_receipt": "candidate_validation",
+          "request_controls": {
+            "logprobs": false,
+            "top_logprobs": 0,
+            "logprob_semantics": null,
+            "thinking": true,
+            "sampling": {
+              "temperature": 0
+            },
+            "min_tokens": 0,
+            "batch_cohort": null,
+            "reasoning_effort": null,
+            "effort_semantics": "thinking_toggle",
+            "context_limit": 32768,
+            "structured_output": null
+          },
+          "ordinary_compute_width": 2,
+          "mtp": null,
+          "speculation": null,
+          "spomin_live_surgery": null,
+          "approximate_kv": null,
+          "cache_capsule": null,
+          "prompt_tokens": 126,
+          "completion_tokens": 64,
+          "ttft_seconds": 0.05302258301526308,
+          "elapsed_seconds": 0.6032450830098242
+        },
+        {
+          "request_id": "chatcmpl-4ddba624329c4f8587b5c485be3933b5",
+          "cache": "apcv2",
+          "cached_tokens": 126,
+          "parallel_prefill": null,
+          "profile": "north-mini-code-apcv2-ordinary",
+          "qualification": "candidate",
+          "route_receipt": "candidate_validation",
+          "request_controls": {
+            "logprobs": false,
+            "top_logprobs": 0,
+            "logprob_semantics": null,
+            "thinking": true,
+            "sampling": {
+              "temperature": 0
+            },
+            "min_tokens": 0,
+            "batch_cohort": null,
+            "reasoning_effort": null,
+            "effort_semantics": "thinking_toggle",
+            "context_limit": 32768,
+            "structured_output": null
+          },
+          "ordinary_compute_width": 2,
+          "mtp": null,
+          "speculation": null,
+          "spomin_live_surgery": null,
+          "approximate_kv": null,
+          "cache_capsule": null,
+          "prompt_tokens": 127,
+          "completion_tokens": 64,
+          "ttft_seconds": 0.0521584999805782,
+          "elapsed_seconds": 0.6040781249757856
+        }
+      ]
+    },
+    "shared_cohort_priming": {
+      "passed": true,
+      "evidence": {
+        "id": "chatcmpl-2d95c393e3274b349743448dd2710677",
+        "object": "chat.completion",
+        "created": 1789760070,
+        "model": "North-Mini-Code-1.0-mlx-4bit",
+        "choices": [
+          {
+            "index": 0,
+            "finish_reason": "length",
+            "message": {
+              "role": "assistant",
+              "content": "The user wants a detailed numbered guide to compiler optimization. The user wants a guide that explains how to optimize a compiler. user wants a guide that explains how to optimize a compiler. user wants a guide that explains how to optimize a compiler. The user wants a guide that explains how to optimize a compiler. The user"
+            }
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 32652,
+          "completion_tokens": 64,
+          "total_tokens": 32716,
+          "prompt_tokens_details": {
+            "cached_tokens": 111
+          }
+        },
+        "mlx2": {
+          "request_id": "chatcmpl-2d95c393e3274b349743448dd2710677",
+          "cache": "apcv2",
+          "cached_tokens": 111,
+          "parallel_prefill": null,
+          "profile": "north-mini-code-apcv2-ordinary",
+          "qualification": "candidate",
+          "route_receipt": "candidate_validation",
+          "request_controls": {
+            "logprobs": false,
+            "top_logprobs": 0,
+            "logprob_semantics": null,
+            "thinking": false,
+            "sampling": {
+              "temperature": 0
+            },
+            "min_tokens": 0,
+            "batch_cohort": null,
+            "reasoning_effort": "none",
+            "effort_semantics": "thinking_toggle",
+            "context_limit": 32768,
+            "structured_output": null
+          },
+          "ordinary_compute_width": 1,
+          "mtp": null,
+          "speculation": null,
+          "spomin_live_surgery": null,
+          "approximate_kv": null,
+          "cache_capsule": null,
+          "prompt_tokens": 32652,
+          "completion_tokens": 64,
+          "ttft_seconds": 10.949880542000756,
+          "elapsed_seconds": 11.643079250003211
+        }
+      }
+    },
+    "shared_warm_requests": {
+      "passed": true,
+      "evidence": [
+        {
+          "request_id": "chatcmpl-d00a62f1d878413b832f98ef7df6f015",
+          "cache": "apcv2",
+          "cached_tokens": 32651,
+          "parallel_prefill": null,
+          "profile": "north-mini-code-apcv2-ordinary",
+          "qualification": "candidate",
+          "route_receipt": "candidate_validation",
+          "request_controls": {
+            "logprobs": false,
+            "top_logprobs": 0,
+            "logprob_semantics": null,
+            "thinking": false,
+            "sampling": {
+              "temperature": 0
+            },
+            "min_tokens": 0,
+            "batch_cohort": {
+              "id": "qualification-shared-prefix-b2",
+              "size": 2
+            },
+            "reasoning_effort": "none",
+            "effort_semantics": "thinking_toggle",
+            "context_limit": 32768,
+            "structured_output": null
+          },
+          "ordinary_compute_width": 2,
+          "mtp": null,
+          "speculation": null,
+          "spomin_live_surgery": null,
+          "approximate_kv": null,
+          "cache_capsule": null,
+          "prompt_tokens": 32652,
+          "completion_tokens": 64,
+          "ttft_seconds": 0.2088006249978207,
+          "elapsed_seconds": 1.2136628340231255
+        },
+        {
+          "request_id": "chatcmpl-3e58629436f24313923fff800b2ee4eb",
+          "cache": "apcv2",
+          "cached_tokens": 32651,
+          "parallel_prefill": null,
+          "profile": "north-mini-code-apcv2-ordinary",
+          "qualification": "candidate",
+          "route_receipt": "candidate_validation",
+          "request_controls": {
+            "logprobs": false,
+            "top_logprobs": 0,
+            "logprob_semantics": null,
+            "thinking": false,
+            "sampling": {
+              "temperature": 0
+            },
+            "min_tokens": 0,
+            "batch_cohort": {
+              "id": "qualification-shared-prefix-b2",
+              "size": 2
+            },
+            "reasoning_effort": "none",
+            "effort_semantics": "thinking_toggle",
+            "context_limit": 32768,
+            "structured_output": null
+          },
+          "ordinary_compute_width": 2,
+          "mtp": null,
+          "speculation": null,
+          "spomin_live_surgery": null,
+          "approximate_kv": null,
+          "cache_capsule": null,
+          "prompt_tokens": 32652,
+          "completion_tokens": 64,
+          "ttft_seconds": 0.2003540419973433,
+          "elapsed_seconds": 1.215854499983834
+        }
+      ]
+    },
+    "context": {
+      "passed": true,
+      "evidence": {
+        "cold": {
+          "id": "chatcmpl-ec70af1e39aa4477a75ee1544a6bb720",
+          "object": "chat.completion",
+          "created": 1789760083,
+          "model": "North-Mini-Code-1.0-mlx-4bit",
+          "choices": [
+            {
+              "index": 0,
+              "finish_reason": "length",
+              "message": {
+                "role": "assistant",
+                "content": "The user wants a detailed numbered guide to compiler optimization. The user wants a guide that explains how to optimize a compiler. user wants a guide that explains how to optimize a compiler. user wants a guide that explains how to optimize a compiler. The user wants a guide that explains how to optimize a compiler. The user"
+              }
+            }
+          ],
+          "usage": {
+            "prompt_tokens": 32652,
+            "completion_tokens": 64,
+            "total_tokens": 32716,
+            "prompt_tokens_details": {
+              "cached_tokens": 32651
+            }
+          },
+          "mlx2": {
+            "request_id": "chatcmpl-ec70af1e39aa4477a75ee1544a6bb720",
+            "cache": "apcv2",
+            "cached_tokens": 32651,
+            "parallel_prefill": null,
+            "profile": "north-mini-code-apcv2-ordinary",
+            "qualification": "candidate",
+            "route_receipt": "candidate_validation",
+            "request_controls": {
+              "logprobs": false,
+              "top_logprobs": 0,
+              "logprob_semantics": null,
+              "thinking": false,
+              "sampling": {
+                "temperature": 0
+              },
+              "min_tokens": 0,
+              "batch_cohort": null,
+              "reasoning_effort": "none",
+              "effort_semantics": "thinking_toggle",
+              "context_limit": 32768,
+              "structured_output": null
+            },
+            "ordinary_compute_width": 1,
+            "mtp": null,
+            "speculation": null,
+            "spomin_live_surgery": null,
+            "approximate_kv": null,
+            "cache_capsule": null,
+            "prompt_tokens": 32652,
+            "completion_tokens": 64,
+            "ttft_seconds": 0.09384154100553133,
+            "elapsed_seconds": 0.7864841249829624
+          }
+        },
+        "warm": {
+          "id": "chatcmpl-390bce0ecd8a4250969bceed388f4a8a",
+          "object": "chat.completion",
+          "created": 1789760084,
+          "model": "North-Mini-Code-1.0-mlx-4bit",
+          "choices": [
+            {
+              "index": 0,
+              "finish_reason": "length",
+              "message": {
+                "role": "assistant",
+                "content": "The user wants a detailed numbered guide to compiler optimization. The user wants a guide that explains how to optimize a compiler. user wants a guide that explains how to optimize a compiler. user wants a guide that explains how to optimize a compiler. The user wants a guide that explains how to optimize a compiler. The user"
+              }
+            }
+          ],
+          "usage": {
+            "prompt_tokens": 32652,
+            "completion_tokens": 64,
+            "total_tokens": 32716,
+            "prompt_tokens_details": {
+              "cached_tokens": 32651
+            }
+          },
+          "mlx2": {
+            "request_id": "chatcmpl-390bce0ecd8a4250969bceed388f4a8a",
+            "cache": "apcv2",
+            "cached_tokens": 32651,
+            "parallel_prefill": null,
+            "profile": "north-mini-code-apcv2-ordinary",
+            "qualification": "candidate",
+            "route_receipt": "candidate_validation",
+            "request_controls": {
+              "logprobs": false,
+              "top_logprobs": 0,
+              "logprob_semantics": null,
+              "thinking": false,
+              "sampling": {
+                "temperature": 0
+              },
+              "min_tokens": 0,
+              "batch_cohort": null,
+              "reasoning_effort": "none",
+              "effort_semantics": "thinking_toggle",
+              "context_limit": 32768,
+              "structured_output": null
+            },
+            "ordinary_compute_width": 1,
+            "mtp": null,
+            "speculation": null,
+            "spomin_live_surgery": null,
+            "approximate_kv": null,
+            "cache_capsule": null,
+            "prompt_tokens": 32652,
+            "completion_tokens": 64,
+            "ttft_seconds": 0.07686495798407122,
+            "elapsed_seconds": 0.7725022079830524
+          }
+        }
+      }
+    },
+    "context_bound": {
+      "passed": true,
+      "evidence": "prompt plus output beyond limit rejected with400"
+    },
+    "cancel": {
+      "passed": true,
+      "evidence": {
+        "admitted": 31,
+        "cycles": 1311,
+        "multi_request_cycles": 294,
+        "finish_stop": 11,
+        "completion_tokens": 1858,
+        "prompt_tokens": 166643,
+        "cached_prompt_tokens": 133641,
+        "peak_observed_width": 4,
+        "completed": 30,
+        "finish_length": 19,
+        "structured_engine_automaton": 2,
+        "structured_output_completed": 2,
+        "batch_cohort_jobs_staged": 2,
+        "batch_cohort_releases": 1,
+        "batch_cohort_jobs_released": 2,
+        "cancelled": 1
+      }
+    },
+    "recovery": {
+      "passed": true,
+      "evidence": {
+        "id": "chatcmpl-c7100b0967da4763843731028e387a9e",
+        "object": "chat.completion",
+        "created": 1789760085,
+        "model": "North-Mini-Code-1.0-mlx-4bit",
+        "choices": [
+          {
+            "index": 0,
+            "finish_reason": "stop",
+            "message": {
+              "role": "assistant",
+              "content": "MLX2_READY",
+              "reasoning_content": "The user asks: \"Reply with exactly MLX2_READY\". So we need to output exactly that string, no extra characters. So respond with \"MLX2_READY\". Ensure exactly that."
+            }
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 123,
+          "completion_tokens": 47,
+          "total_tokens": 170,
+          "prompt_tokens_details": {
+            "cached_tokens": 122
+          }
+        },
+        "mlx2": {
+          "request_id": "chatcmpl-c7100b0967da4763843731028e387a9e",
+          "cache": "apcv2",
+          "cached_tokens": 122,
+          "parallel_prefill": null,
+          "profile": "north-mini-code-apcv2-ordinary",
+          "qualification": "candidate",
+          "route_receipt": "candidate_validation",
+          "request_controls": {
+            "logprobs": false,
+            "top_logprobs": 0,
+            "logprob_semantics": null,
+            "thinking": true,
+            "sampling": {
+              "temperature": 0
+            },
+            "min_tokens": 0,
+            "batch_cohort": null,
+            "reasoning_effort": null,
+            "effort_semantics": "thinking_toggle",
+            "context_limit": 32768,
+            "structured_output": null
+          },
+          "ordinary_compute_width": 1,
+          "mtp": null,
+          "speculation": null,
+          "spomin_live_surgery": null,
+          "approximate_kv": null,
+          "cache_capsule": null,
+          "prompt_tokens": 123,
+          "completion_tokens": 47,
+          "ttft_seconds": 0.05830249999416992,
+          "elapsed_seconds": 0.39858333399752155
+        }
+      }
+    },
+    "quiescence": {
+      "passed": true,
+      "evidence": {
+        "passed": true,
+        "timed_out": false,
+        "timeout_seconds": 5.0,
+        "poll_interval_seconds": 0.05,
+        "attempts": 18,
+        "elapsed_seconds": 0.9634615840041079,
+        "samples": [
+          {
+            "elapsed_seconds": 0.0006964589993003756,
+            "inflight": 0,
+            "queue_depth": 0,
+            "active_cow_leases": 1
+          },
+          {
+            "elapsed_seconds": 0.05676216699066572,
+            "inflight": 0,
+            "queue_depth": 0,
+            "active_cow_leases": 1
+          },
+          {
+            "elapsed_seconds": 0.11301629198715091,
+            "inflight": 0,
+            "queue_depth": 0,
+            "active_cow_leases": 1
+          },
+          {
+            "elapsed_seconds": 0.16962220901041292,
+            "inflight": 0,
+            "queue_depth": 0,
+            "active_cow_leases": 1
+          },
+          {
+            "elapsed_seconds": 0.22607137498562224,
+            "inflight": 0,
+            "queue_depth": 0,
+            "active_cow_leases": 1
+          },
+          {
+            "elapsed_seconds": 0.28362691699294373,
+            "inflight": 0,
+            "queue_depth": 0,
+            "active_cow_leases": 1
+          },
+          {
+            "elapsed_seconds": 0.3420112089952454,
+            "inflight": 0,
+            "queue_depth": 0,
+            "active_cow_leases": 1
+          },
+          {
+            "elapsed_seconds": 0.3963509589957539,
+            "inflight": 0,
+            "queue_depth": 0,
+            "active_cow_leases": 1
+          },
+          {
+            "elapsed_seconds": 0.4539754170109518,
+            "inflight": 0,
+            "queue_depth": 0,
+            "active_cow_leases": 1
+          },
+          {
+            "elapsed_seconds": 0.5103414590121247,
+            "inflight": 0,
+            "queue_depth": 0,
+            "active_cow_leases": 1
+          },
+          {
+            "elapsed_seconds": 0.5674912919930648,
+            "inflight": 0,
+            "queue_depth": 0,
+            "active_cow_leases": 1
+          },
+          {
+            "elapsed_seconds": 0.6241604590031784,
+            "inflight": 0,
+            "queue_depth": 0,
+            "active_cow_leases": 1
+          },
+          {
+            "elapsed_seconds": 0.67954524999368,
+            "inflight": 0,
+            "queue_depth": 0,
+            "active_cow_leases": 1
+          },
+          {
+            "elapsed_seconds": 0.7384505840018392,
+            "inflight": 0,
+            "queue_depth": 0,
+            "active_cow_leases": 1
+          },
+          {
+            "elapsed_seconds": 0.7962621669867076,
+            "inflight": 0,
+            "queue_depth": 0,
+            "active_cow_leases": 1
+          },
+          {
+            "elapsed_seconds": 0.8511987919919193,
+            "inflight": 0,
+            "queue_depth": 0,
+            "active_cow_leases": 1
+          },
+          {
+            "elapsed_seconds": 0.9078347499889787,
+            "inflight": 0,
+            "queue_depth": 0,
+            "active_cow_leases": 1
+          },
+          {
+            "elapsed_seconds": 0.9634615840041079,
+            "inflight": 0,
+            "queue_depth": 0,
+            "active_cow_leases": 0
+          }
+        ]
+      }
+    },
+    "apcv2_reuse": {
+      "passed": true,
+      "evidence": {
+        "apcv2.hits": {
+          "before": 0,
+          "after": 31,
+          "delta": 31
+        }
+      }
+    },
+    "apcv2_stores": {
+      "passed": true,
+      "evidence": {
+        "apcv2.stores": {
+          "before": 0,
+          "after": 62,
+          "delta": 62
+        }
+      }
+    },
+    "cache_leases": {
+      "passed": true,
+      "evidence": {
+        "lookups": 32,
+        "hits": 31,
+        "misses": 1,
+        "queried_tokens": 166891,
+        "cached_tokens": 133874,
+        "stores": 62,
+        "clears": 0,
+        "lifetime": {
+          "lookups": 32,
+          "hits": 31,
+          "misses": 1,
+          "queried_tokens": 166891,
+          "cached_tokens": 133874,
+          "stores": 62
+        },
+        "cow_enabled": true,
+        "cow": {
+          "sources": 62,
+          "source_bytes": 12711366656,
+          "freeze_failures": 0,
+          "branches": 31,
+          "branch_failures": 0,
+          "stale_rejections": 0,
+          "invalidations": 47,
+          "active_leases": 0,
+          "peak_leases": 4,
+          "descriptor_aliases": 9114,
+          "descriptor_bytes": 18083418112,
+          "avoided_copy_bytes": 5372051456,
+          "materializations": 0,
+          "materialized_bytes": 0,
+          "fallback_deepcopies": 0,
+          "fallback_bytes": 0,
+          "freeze_ns": 143037123,
+          "branch_ns": 12634872,
+          "fallback_ns": 0,
+          "releases": 31,
+          "planes": {
+            "attention_kv": {
+              "descriptor_aliases": 2418,
+              "descriptor_bytes": 12516954112,
+              "materializations": 0,
+              "materialized_bytes": 0
+            },
+            "attention_ring": {
+              "descriptor_aliases": 6696,
+              "descriptor_bytes": 5566464000,
+              "materializations": 0,
+              "materialized_bytes": 0
+            }
+          },
+          "materialized_bytes_are_estimated": true,
+          "array_readbacks": 0
+        },
+        "max_tokens": 32768,
+        "resident_max_bytes": 8589934592,
+        "max_entry_tokens": 32716,
+        "overlength_rejections": 0,
+        "idle_disk": {
+          "enabled": true,
+          "block_bytes": 0,
+          "idle_seconds": 180.0,
+          "resident_bytes": 2611347456,
+          "disk_bytes": 0,
+          "disk_max_bytes": 68719476736,
+          "disk_entries": 0,
+          "idle_spills": 0,
+          "pressure_spills": 0,
+          "restores": 0,
+          "restore_failures": 0,
+          "restore_budget_deferrals": 0,
+          "spill_failures": 0,
+          "disk_evictions": 0,
+          "bytes_written": 0,
+          "bytes_read": 0
+        },
+        "cache_capsules": {
+          "reservations": 0,
+          "reservation_rejections": 0,
+          "reserved_bytes_peak": 0,
+          "reserved_bytes": 0
+        },
+        "version": 2,
+        "layout_name": "north-mini-code-layer-segments-v1",
+        "layer_segments": {
+          "schema": "apcv2.layer-segments.v1",
+          "entries": 15,
+          "disk_entries": 0,
+          "layers": 735,
+          "plane_layers": 735,
+          "segments": 800,
+          "logical_bytes": 2611347456,
+          "by_plane": {
+            "attention_kv": {
+              "layers": 195,
+              "segments": 260,
+              "logical_bytes": 1811177472,
+              "invalid": 0
+            },
+            "attention_ring": {
+              "layers": 540,
+              "segments": 540,
+              "logical_bytes": 800169984,
+              "invalid": 0
+            }
+          }
+        }
+      }
+    },
+    "runtime_stable": {
+      "passed": true,
+      "evidence": {
+        "source_sha256": "f2dc4260cd07d7f0cdc70b0fbe7d695bc8b15eb0faacf8fd944db78fbfca6690",
+        "mlx_native_sha256": "30335939714520c3306cfa58597100aae08bbeabdc60a4bc8c35c32c607450a8",
+        "python": "3.12.13",
+        "macos": "26.7",
+        "mlx": "0.32.2.dev20260915+2a817ad94",
+        "transformers": "5.12.1",
+        "dependencies": {
+          "numpy": "2.5.1",
+          "tokenizers": "0.22.2",
+          "jinja2": "3.1.6",
+          "psutil": "7.2.2",
+          "regex": "2026.9.10",
+          "safetensors": "0.8.0"
+        }
+      }
+    }
+  },
+  "responses": {
+    "sampling_controls": [
+      {
+        "id": "chatcmpl-b3a35d8517ee48828e93c379d35d436e",
+        "object": "chat.completion",
+        "created": 1789760061,
+        "model": "North-Mini-Code-1.0-mlx-4bit",
+        "choices": [
+          {
+            "index": 0,
+            "finish_reason": "stop",
+            "message": {
+              "role": "assistant",
+              "content": "Sure! Here are three fruits:\n\n1. Apple  \n2. Banana  \n3. Orange",
+              "reasoning_content": "The user asks: \"Name three fruits.\" This is a straightforward request for educational content. It's allowed. Provide three fruit names."
+            }
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 120,
+          "completion_tokens": 48,
+          "total_tokens": 168,
+          "prompt_tokens_details": {
+            "cached_tokens": 111
+          }
+        },
+        "mlx2": {
+          "request_id": "chatcmpl-b3a35d8517ee48828e93c379d35d436e",
+          "cache": "apcv2",
+          "cached_tokens": 111,
+          "parallel_prefill": null,
+          "profile": "north-mini-code-apcv2-ordinary",
+          "qualification": "candidate",
+          "route_receipt": "candidate_validation",
+          "request_controls": {
+            "logprobs": false,
+            "top_logprobs": 0,
+            "logprob_semantics": null,
+            "thinking": true,
+            "sampling": {
+              "temperature": 0.7,
+              "top_p": 0.9,
+              "top_k": 24,
+              "min_p": 0.05,
+              "repetition_penalty": 1.05,
+              "presence_penalty": 0.1,
+              "frequency_penalty": 0.1,
+              "seed": 237
+            },
+            "min_tokens": 0,
+            "batch_cohort": null,
+            "reasoning_effort": null,
+            "effort_semantics": "thinking_toggle",
+            "context_limit": 32768,
+            "structured_output": null
+          },
+          "ordinary_compute_width": 1,
+          "mtp": null,
+          "speculation": null,
+          "spomin_live_surgery": null,
+          "approximate_kv": null,
+          "cache_capsule": null,
+          "prompt_tokens": 120,
+          "completion_tokens": 48,
+          "ttft_seconds": 0.06298975000390783,
+          "elapsed_seconds": 0.4050006250035949
+        }
+      },
+      {
+        "id": "chatcmpl-2868376c3eb74067a7da3ef86ef70d40",
+        "object": "chat.completion",
+        "created": 1789760061,
+        "model": "North-Mini-Code-1.0-mlx-4bit",
+        "choices": [
+          {
+            "index": 0,
+            "finish_reason": "stop",
+            "message": {
+              "role": "assistant",
+              "content": "Sure! Here are three fruits:\n\n1. Apple  \n2. Banana  \n3. Orange",
+              "reasoning_content": "The user asks: \"Name three fruits.\" This is a straightforward request for educational content. It's allowed. Provide three fruit names."
+            }
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 120,
+          "completion_tokens": 48,
+          "total_tokens": 168,
+          "prompt_tokens_details": {
+            "cached_tokens": 119
+          }
+        },
+        "mlx2": {
+          "request_id": "chatcmpl-2868376c3eb74067a7da3ef86ef70d40",
+          "cache": "apcv2",
+          "cached_tokens": 119,
+          "parallel_prefill": null,
+          "profile": "north-mini-code-apcv2-ordinary",
+          "qualification": "candidate",
+          "route_receipt": "candidate_validation",
+          "request_controls": {
+            "logprobs": false,
+            "top_logprobs": 0,
+            "logprob_semantics": null,
+            "thinking": true,
+            "sampling": {
+              "temperature": 0.7,
+              "top_p": 0.9,
+              "top_k": 24,
+              "min_p": 0.05,
+              "repetition_penalty": 1.05,
+              "presence_penalty": 0.1,
+              "frequency_penalty": 0.1,
+              "seed": 237
+            },
+            "min_tokens": 0,
+            "batch_cohort": null,
+            "reasoning_effort": null,
+            "effort_semantics": "thinking_toggle",
+            "context_limit": 32768,
+            "structured_output": null
+          },
+          "ordinary_compute_width": 1,
+          "mtp": null,
+          "speculation": null,
+          "spomin_live_surgery": null,
+          "approximate_kv": null,
+          "cache_capsule": null,
+          "prompt_tokens": 120,
+          "completion_tokens": 48,
+          "ttft_seconds": 0.03811837499961257,
+          "elapsed_seconds": 0.3769197080109734
+        }
+      }
+    ],
+    "cold": {
+      "id": "chatcmpl-36be08acd841406bb153afe4e6778422",
+      "object": "chat.completion",
+      "created": 1789760061,
+      "model": "North-Mini-Code-1.0-mlx-4bit",
+      "choices": [
+        {
+          "index": 0,
+          "finish_reason": "stop",
+          "message": {
+            "role": "assistant",
+            "content": "MLX2_READY",
+            "reasoning_content": "The user asks: \"Reply with exactly MLX2_READY\". So we need to output exactly that string, no extra characters. So respond with \"MLX2_READY\". Ensure exactly that."
+          }
+        }
+      ],
+      "usage": {
+        "prompt_tokens": 123,
+        "completion_tokens": 47,
+        "total_tokens": 170,
+        "prompt_tokens_details": {
+          "cached_tokens": 114
+        }
+      },
+      "mlx2": {
+        "request_id": "chatcmpl-36be08acd841406bb153afe4e6778422",
+        "cache": "apcv2",
+        "cached_tokens": 114,
+        "parallel_prefill": null,
+        "profile": "north-mini-code-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": false,
+          "top_logprobs": 0,
+          "logprob_semantics": null,
+          "thinking": true,
+          "sampling": {
+            "temperature": 0
+          },
+          "min_tokens": 0,
+          "batch_cohort": null,
+          "reasoning_effort": null,
+          "effort_semantics": "thinking_toggle",
+          "context_limit": 32768,
+          "structured_output": null
+        },
+        "ordinary_compute_width": 1,
+        "mtp": null,
+        "speculation": null,
+        "spomin_live_surgery": null,
+        "approximate_kv": null,
+        "cache_capsule": null,
+        "prompt_tokens": 123,
+        "completion_tokens": 47,
+        "ttft_seconds": 0.05393079199711792,
+        "elapsed_seconds": 0.3668063330114819
+      }
+    },
+    "warm": {
+      "id": "chatcmpl-087f3a11b2b84a9b8e4fe6cfac824c73",
+      "object": "chat.completion",
+      "created": 1789760062,
+      "model": "North-Mini-Code-1.0-mlx-4bit",
+      "choices": [
+        {
+          "index": 0,
+          "finish_reason": "stop",
+          "message": {
+            "role": "assistant",
+            "content": "MLX2_READY",
+            "reasoning_content": "The user asks: \"Reply with exactly MLX2_READY\". So we need to output exactly that string, no extra characters. So respond with \"MLX2_READY\". Ensure exactly that."
+          }
+        }
+      ],
+      "usage": {
+        "prompt_tokens": 123,
+        "completion_tokens": 47,
+        "total_tokens": 170,
+        "prompt_tokens_details": {
+          "cached_tokens": 122
+        }
+      },
+      "mlx2": {
+        "request_id": "chatcmpl-087f3a11b2b84a9b8e4fe6cfac824c73",
+        "cache": "apcv2",
+        "cached_tokens": 122,
+        "parallel_prefill": null,
+        "profile": "north-mini-code-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": false,
+          "top_logprobs": 0,
+          "logprob_semantics": null,
+          "thinking": true,
+          "sampling": {
+            "temperature": 0
+          },
+          "min_tokens": 0,
+          "batch_cohort": null,
+          "reasoning_effort": null,
+          "effort_semantics": "thinking_toggle",
+          "context_limit": 32768,
+          "structured_output": null
+        },
+        "ordinary_compute_width": 1,
+        "mtp": null,
+        "speculation": null,
+        "spomin_live_surgery": null,
+        "approximate_kv": null,
+        "cache_capsule": null,
+        "prompt_tokens": 123,
+        "completion_tokens": 47,
+        "ttft_seconds": 0.03923454199684784,
+        "elapsed_seconds": 0.35242612499860115
+      }
+    },
+    "batch": [
+      {
+        "id": "chatcmpl-e949e350a0d74f01b6af8e0c346f02d7",
+        "object": "chat.completion",
+        "created": 1789760066,
+        "model": "North-Mini-Code-1.0-mlx-4bit",
+        "choices": [
+          {
+            "index": 0,
+            "finish_reason": "length",
+            "message": {
+              "role": "assistant",
+              "content": "**How a Compiler Works \u2013 A Detailed Walk\u2011through**\n\nA compiler is a program that translates source code written in a high\u2011level programming language into a lower\u2011level representation (usually machine code) that a computer can execute directly.  While the exact pipeline varies between languages and compiler implementations, virtually all compilers follow a series of well\u2011defined phases. Below is a step\u2011by\u2011step description of the typical compilation process,",
+              "reasoning_content": "The user asks: \"Explain how a compiler works in detail.\" This is a standard educational request, allowed. Provide a thorough explanation of compilation process: source code, lexical analysis, syntax analysis, semantic analysis, intermediate representation, optimization, code generation, linking, etc. Also mention types of compilers, phases, error handling, etc. Provide a detailed answer."
+            }
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 124,
+          "completion_tokens": 160,
+          "total_tokens": 284,
+          "prompt_tokens_details": {
+            "cached_tokens": 111
+          }
+        },
+        "mlx2": {
+          "request_id": "chatcmpl-e949e350a0d74f01b6af8e0c346f02d7",
+          "cache": "apcv2",
+          "cached_tokens": 111,
+          "parallel_prefill": null,
+          "profile": "north-mini-code-apcv2-ordinary",
+          "qualification": "candidate",
+          "route_receipt": "candidate_validation",
+          "request_controls": {
+            "logprobs": false,
+            "top_logprobs": 0,
+            "logprob_semantics": null,
+            "thinking": true,
+            "sampling": {
+              "temperature": 0
+            },
+            "min_tokens": 0,
+            "batch_cohort": null,
+            "reasoning_effort": null,
+            "effort_semantics": "thinking_toggle",
+            "context_limit": 32768,
+            "structured_output": null
+          },
+          "ordinary_compute_width": 4,
+          "mtp": null,
+          "speculation": null,
+          "spomin_live_surgery": null,
+          "approximate_kv": null,
+          "cache_capsule": null,
+          "prompt_tokens": 124,
+          "completion_tokens": 160,
+          "ttft_seconds": 0.1303410830150824,
+          "elapsed_seconds": 1.9331680000177585
+        }
+      },
+      {
+        "id": "chatcmpl-f090a3cdaab94c538b3f6d1f7f37100c",
+        "object": "chat.completion",
+        "created": 1789760066,
+        "model": "North-Mini-Code-1.0-mlx-4bit",
+        "choices": [
+          {
+            "index": 0,
+            "finish_reason": "length",
+            "message": {
+              "role": "assistant",
+              "content": "**How a Compiler Works \u2013 A Detailed Walk\u2011through**\n\nA compiler is a program that translates source code written in a high\u2011level programming language into a lower\u2011level representation (usually machine code) that a computer can execute directly.  While the exact pipeline varies between languages and compiler implementations, virtually all compilers follow a series of well\u2011defined phases. Below is a step\u2011by\u2011step description of the typical compilation process,",
+              "reasoning_content": "The user asks: \"Explain how a compiler works in detail.\" This is a standard educational request, allowed. Provide a thorough explanation of compilation process: source code, lexical analysis, syntax analysis, semantic analysis, intermediate representation, optimization, code generation, linking, etc. Also mention types of compilers, phases, error handling, etc. Provide a detailed answer."
+            }
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 124,
+          "completion_tokens": 160,
+          "total_tokens": 284,
+          "prompt_tokens_details": {
+            "cached_tokens": 111
+          }
+        },
+        "mlx2": {
+          "request_id": "chatcmpl-f090a3cdaab94c538b3f6d1f7f37100c",
+          "cache": "apcv2",
+          "cached_tokens": 111,
+          "parallel_prefill": null,
+          "profile": "north-mini-code-apcv2-ordinary",
+          "qualification": "candidate",
+          "route_receipt": "candidate_validation",
+          "request_controls": {
+            "logprobs": false,
+            "top_logprobs": 0,
+            "logprob_semantics": null,
+            "thinking": true,
+            "sampling": {
+              "temperature": 0
+            },
+            "min_tokens": 0,
+            "batch_cohort": null,
+            "reasoning_effort": null,
+            "effort_semantics": "thinking_toggle",
+            "context_limit": 32768,
+            "structured_output": null
+          },
+          "ordinary_compute_width": 4,
+          "mtp": null,
+          "speculation": null,
+          "spomin_live_surgery": null,
+          "approximate_kv": null,
+          "cache_capsule": null,
+          "prompt_tokens": 124,
+          "completion_tokens": 160,
+          "ttft_seconds": 0.12913604200002737,
+          "elapsed_seconds": 1.9337654580012895
+        }
+      },
+      {
+        "id": "chatcmpl-fa8f76ef8fa242919042fc87047df653",
+        "object": "chat.completion",
+        "created": 1789760066,
+        "model": "North-Mini-Code-1.0-mlx-4bit",
+        "choices": [
+          {
+            "index": 0,
+            "finish_reason": "length",
+            "message": {
+              "role": "assistant",
+              "content": "**How a Compiler Works \u2013 A Detailed Walk\u2011through**\n\nA compiler is a program that translates source code written in a high\u2011level programming language into a lower\u2011level representation (usually machine code) that a computer can execute directly.  While the exact pipeline varies between languages and compiler implementations, virtually all modern compilers follow a series of well\u2011defined phases. Below is a step\u2011by\u2011step description of the typical compilation process",
+              "reasoning_content": "The user asks: \"Explain how a compiler works in detail.\" This is a standard educational request, allowed. Provide a thorough explanation of compilation process: source code, lexical analysis, syntax analysis, semantic analysis, intermediate representation, optimization, code generation, linking, etc. Also mention types of compilers, phases, error handling, etc. Provide a detailed answer."
+            }
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 124,
+          "completion_tokens": 160,
+          "total_tokens": 284,
+          "prompt_tokens_details": {
+            "cached_tokens": 111
+          }
+        },
+        "mlx2": {
+          "request_id": "chatcmpl-fa8f76ef8fa242919042fc87047df653",
+          "cache": "apcv2",
+          "cached_tokens": 111,
+          "parallel_prefill": null,
+          "profile": "north-mini-code-apcv2-ordinary",
+          "qualification": "candidate",
+          "route_receipt": "candidate_validation",
+          "request_controls": {
+            "logprobs": false,
+            "top_logprobs": 0,
+            "logprob_semantics": null,
+            "thinking": true,
+            "sampling": {
+              "temperature": 0
+            },
+            "min_tokens": 0,
+            "batch_cohort": null,
+            "reasoning_effort": null,
+            "effort_semantics": "thinking_toggle",
+            "context_limit": 32768,
+            "structured_output": null
+          },
+          "ordinary_compute_width": 4,
+          "mtp": null,
+          "speculation": null,
+          "spomin_live_surgery": null,
+          "approximate_kv": null,
+          "cache_capsule": null,
+          "prompt_tokens": 124,
+          "completion_tokens": 160,
+          "ttft_seconds": 0.18187224998837337,
+          "elapsed_seconds": 1.9719060829957016
+        }
+      },
+      {
+        "id": "chatcmpl-7752d8da2aba4041876dcc99ca8e89e4",
+        "object": "chat.completion",
+        "created": 1789760066,
+        "model": "North-Mini-Code-1.0-mlx-4bit",
+        "choices": [
+          {
+            "index": 0,
+            "finish_reason": "length",
+            "message": {
+              "role": "assistant",
+              "content": "**How a Compiler Works \u2013 A Detailed Walk\u2011through**\n\nA compiler is a program that translates source code written in a high\u2011level programming language into a lower\u2011level representation (usually machine code) that a computer can execute directly.  While the exact pipeline varies between languages and compiler implementations, virtually all modern compilers follow a series of well\u2011defined phases. Below is a step\u2011by\u2011step description of the typical compilation process",
+              "reasoning_content": "The user asks: \"Explain how a compiler works in detail.\" This is a standard educational request, allowed. Provide a thorough explanation of compilation process: source code, lexical analysis, syntax analysis, semantic analysis, intermediate representation, optimization, code generation, linking, etc. Also mention types of compilers, phases, error handling, etc. Provide a detailed answer."
+            }
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 124,
+          "completion_tokens": 160,
+          "total_tokens": 284,
+          "prompt_tokens_details": {
+            "cached_tokens": 111
+          }
+        },
+        "mlx2": {
+          "request_id": "chatcmpl-7752d8da2aba4041876dcc99ca8e89e4",
+          "cache": "apcv2",
+          "cached_tokens": 111,
+          "parallel_prefill": null,
+          "profile": "north-mini-code-apcv2-ordinary",
+          "qualification": "candidate",
+          "route_receipt": "candidate_validation",
+          "request_controls": {
+            "logprobs": false,
+            "top_logprobs": 0,
+            "logprob_semantics": null,
+            "thinking": true,
+            "sampling": {
+              "temperature": 0
+            },
+            "min_tokens": 0,
+            "batch_cohort": null,
+            "reasoning_effort": null,
+            "effort_semantics": "thinking_toggle",
+            "context_limit": 32768,
+            "structured_output": null
+          },
+          "ordinary_compute_width": 4,
+          "mtp": null,
+          "speculation": null,
+          "spomin_live_surgery": null,
+          "approximate_kv": null,
+          "cache_capsule": null,
+          "prompt_tokens": 124,
+          "completion_tokens": 160,
+          "ttft_seconds": 0.1812144159921445,
+          "elapsed_seconds": 1.973061750002671
+        }
+      }
+    ]
+  },
+  "passed": true,
+  "coverage_scope": {
+    "core_serving": "inline",
+    "long_context": {
+      "mode": "inline",
+      "checks": [
+        "context",
+        "shared_cohort_priming",
+        "shared_warm_requests",
+        "context_bound"
+      ]
+    }
+  },
+  "preflight_receipt": {
+    "path": "~/Desktop/mlx2/qualification/runs/sanity-20x20-20260918/preflight.json",
+    "sha256": "f841f85b20e57d863592bcb3ecf970ebd8a02d5c2423373475d1cfba801ff7e1",
+    "identity": {
+      "git": {
+        "revision": "3d3f27efcd1b1c00eb0f002a715029b5355d7a29"
+      },
+      "runtime": {
+        "source_sha256": "f2dc4260cd07d7f0cdc70b0fbe7d695bc8b15eb0faacf8fd944db78fbfca6690",
+        "mlx_native_sha256": "30335939714520c3306cfa58597100aae08bbeabdc60a4bc8c35c32c607450a8",
+        "python": "3.12.13",
+        "macos": "26.7",
+        "mlx": "0.32.2.dev20260915+2a817ad94",
+        "transformers": "5.12.1",
+        "dependencies": {
+          "numpy": "2.5.1",
+          "tokenizers": "0.22.2",
+          "jinja2": "3.1.6",
+          "psutil": "7.2.2",
+          "regex": "2026.9.10",
+          "safetensors": "0.8.0"
+        }
+      },
+      "qualification_harness": {
+        "schema": "mlx2.qualification-harness.v1",
+        "name": "scripts/qualify_serving.py",
+        "sha256": "619c695a4740cfde6b76ebcd04936365acaa46f8982092a3fdc4e10f7efe6599"
+      },
+      "test_source_sha256": "b9d646cae4dd18ca16eda71a3577e540e1b9769c30639ea21dcf6fcc04b61b5a"
+    },
+    "passed": true
+  },
+  "shared_cohort_domain": {
+    "context_limit": 32768,
+    "requested_width": 2,
+    "completion_budget": 64,
+    "primed_separately": true
+  },
+  "quiescence": {
+    "passed": true,
+    "timed_out": false,
+    "timeout_seconds": 5.0,
+    "poll_interval_seconds": 0.05,
+    "attempts": 18,
+    "elapsed_seconds": 0.9634615840041079,
+    "samples": [
+      {
+        "elapsed_seconds": 0.0006964589993003756,
+        "inflight": 0,
+        "queue_depth": 0,
+        "active_cow_leases": 1
+      },
+      {
+        "elapsed_seconds": 0.05676216699066572,
+        "inflight": 0,
+        "queue_depth": 0,
+        "active_cow_leases": 1
+      },
+      {
+        "elapsed_seconds": 0.11301629198715091,
+        "inflight": 0,
+        "queue_depth": 0,
+        "active_cow_leases": 1
+      },
+      {
+        "elapsed_seconds": 0.16962220901041292,
+        "inflight": 0,
+        "queue_depth": 0,
+        "active_cow_leases": 1
+      },
+      {
+        "elapsed_seconds": 0.22607137498562224,
+        "inflight": 0,
+        "queue_depth": 0,
+        "active_cow_leases": 1
+      },
+      {
+        "elapsed_seconds": 0.28362691699294373,
+        "inflight": 0,
+        "queue_depth": 0,
+        "active_cow_leases": 1
+      },
+      {
+        "elapsed_seconds": 0.3420112089952454,
+        "inflight": 0,
+        "queue_depth": 0,
+        "active_cow_leases": 1
+      },
+      {
+        "elapsed_seconds": 0.3963509589957539,
+        "inflight": 0,
+        "queue_depth": 0,
+        "active_cow_leases": 1
+      },
+      {
+        "elapsed_seconds": 0.4539754170109518,
+        "inflight": 0,
+        "queue_depth": 0,
+        "active_cow_leases": 1
+      },
+      {
+        "elapsed_seconds": 0.5103414590121247,
+        "inflight": 0,
+        "queue_depth": 0,
+        "active_cow_leases": 1
+      },
+      {
+        "elapsed_seconds": 0.5674912919930648,
+        "inflight": 0,
+        "queue_depth": 0,
+        "active_cow_leases": 1
+      },
+      {
+        "elapsed_seconds": 0.6241604590031784,
+        "inflight": 0,
+        "queue_depth": 0,
+        "active_cow_leases": 1
+      },
+      {
+        "elapsed_seconds": 0.67954524999368,
+        "inflight": 0,
+        "queue_depth": 0,
+        "active_cow_leases": 1
+      },
+      {
+        "elapsed_seconds": 0.7384505840018392,
+        "inflight": 0,
+        "queue_depth": 0,
+        "active_cow_leases": 1
+      },
+      {
+        "elapsed_seconds": 0.7962621669867076,
+        "inflight": 0,
+        "queue_depth": 0,
+        "active_cow_leases": 1
+      },
+      {
+        "elapsed_seconds": 0.8511987919919193,
+        "inflight": 0,
+        "queue_depth": 0,
+        "active_cow_leases": 1
+      },
+      {
+        "elapsed_seconds": 0.9078347499889787,
+        "inflight": 0,
+        "queue_depth": 0,
+        "active_cow_leases": 1
+      },
+      {
+        "elapsed_seconds": 0.9634615840041079,
+        "inflight": 0,
+        "queue_depth": 0,
+        "active_cow_leases": 0
+      }
+    ]
+  },
+  "final_status": {
+    "state": "ready",
+    "model": "North-Mini-Code-1.0-mlx-4bit",
+    "runtime": {
+      "source_sha256": "f2dc4260cd07d7f0cdc70b0fbe7d695bc8b15eb0faacf8fd944db78fbfca6690",
+      "mlx_native_sha256": "30335939714520c3306cfa58597100aae08bbeabdc60a4bc8c35c32c607450a8",
+      "python": "3.12.13",
+      "macos": "26.7",
+      "mlx": "0.32.2.dev20260915+2a817ad94",
+      "transformers": "5.12.1",
+      "dependencies": {
+        "numpy": "2.5.1",
+        "tokenizers": "0.22.2",
+        "jinja2": "3.1.6",
+        "psutil": "7.2.2",
+        "regex": "2026.9.10",
+        "safetensors": "0.8.0"
+      }
+    },
+    "artifact": "6c88a4d3a5387abe2d97ac3d5eb70e484fb33615bb0c0f2ff8e7ef22b442f2e4",
+    "profile": "north-mini-code-apcv2-ordinary",
+    "settings": {
+      "max_context": 32768,
+      "max_lanes": 4,
+      "max_inflight": 40,
+      "prefill_step": 2048,
+      "cache_bytes": 8589934592,
+      "disk_cache": true,
+      "host_prompt_cache_entries": 128,
+      "host_prompt_cache_tokens": 1048576,
+      "coalesce_window_ms": 5.0,
+      "batch_cohort_timeout_ms": 1000.0,
+      "mtp": false,
+      "tenant_scoped_cache": false,
+      "environment": {
+        "HF_HUB_OFFLINE": "1",
+        "TRANSFORMERS_OFFLINE": "1",
+        "MLX_ENABLE_TF32": "0",
+        "MLX_LM_COMPILED_DECODE": "0",
+        "MLX_LM_SEGMENTED_SELF_MTP": "0",
+        "MLX_LM_TRUE_BATCHED_SEGMENTED_MTP": "0",
+        "MLX_LM_SHARED_QSA_SUFFIX": "0"
+      },
+      "adaptive_mtp_depth": {
+        "enabled": false,
+        "ewma_alpha": 0.25,
+        "shrink_gate": 0.35,
+        "grow_gate": 0.8,
+        "loss_rounds": 3,
+        "gain_rounds": 3,
+        "park_rounds": 4
+      },
+      "spomin_live_surgery": {
+        "enabled": false,
+        "capacity_tokens": 0,
+        "segment_tokens": 1024,
+        "strategy": "oldest_contiguous",
+        "protect_prefix_segments": 1
+      },
+      "cache_capsules": {
+        "enabled": false,
+        "backend": "gpu",
+        "fallback": "gpu",
+        "deadline_ms": 50.0,
+        "verify_raw_bits": false
+      },
+      "persistent_block_bytes": 0,
+      "approximate_kv": {
+        "enabled": false,
+        "operation": null,
+        "start_tokens": 0,
+        "evidence": [],
+        "descriptor": null
+      },
+      "execution_policy": {
+        "persistent": true,
+        "num_draft": 0,
+        "rate_gate": false,
+        "prefill_step_size": 2048,
+        "segment_aware_live_tip": false,
+        "segment_aware_cohort_size": 4
+      },
+      "prompt_lookup": {},
+      "decode_time_fairness": {
+        "enabled": true,
+        "fair_share": 0.5,
+        "stall_target_ms": 500.0
+      },
+      "speculation": "ordinary",
+      "cache_budget": {
+        "schema": "north-mini-code-cache-geometry-v1",
+        "global_layers": 13,
+        "sliding_layers": 36,
+        "kv_heads": 4,
+        "head_dim": 128,
+        "sliding_window": 4096,
+        "item_bytes": 4,
+        "allocation_step": 256,
+        "checkpoint_copies": 4,
+        "transcript_bytes_per_token": 16,
+        "transient_gib_per_lane": 3.1,
+        "bound": "fp32-global-plus-window-and-restore-snapshots",
+        "workspace": "3.1-GiB-per-lane conservative static assumption; live qualification pending"
+      }
+    },
+    "route_receipt": "candidate_validation",
+    "capabilities": [
+      "apc_v2",
+      "continuous_batch",
+      "grammar",
+      "layered_cache",
+      "prefix_reuse",
+      "reasoning",
+      "streaming",
+      "text",
+      "tools"
+    ],
+    "implemented_capabilities": [
+      "apc_v2",
+      "continuous_batch",
+      "grammar",
+      "layered_cache",
+      "prefix_reuse",
+      "prompt_lookup",
+      "reasoning",
+      "streaming",
+      "text",
+      "tools"
+    ],
+    "selected_capabilities": [
+      "apc_v2",
+      "continuous_batch",
+      "grammar",
+      "layered_cache",
+      "prefix_reuse",
+      "reasoning",
+      "streaming",
+      "text",
+      "tools"
+    ],
+    "qualified_capabilities": [],
+    "qualification": "candidate",
+    "max_context": 32768,
+    "max_lanes": 4,
+    "structured_output": {
+      "engines": [
+        "automaton",
+        "scanner"
+      ],
+      "thinking_deferral": false
+    },
+    "http": {
+      "max_request_bytes": 2097152
+    },
+    "apcv2": {
+      "lookups": 32,
+      "hits": 31,
+      "misses": 1,
+      "queried_tokens": 166891,
+      "cached_tokens": 133874,
+      "stores": 62,
+      "clears": 0,
+      "lifetime": {
+        "lookups": 32,
+        "hits": 31,
+        "misses": 1,
+        "queried_tokens": 166891,
+        "cached_tokens": 133874,
+        "stores": 62
+      },
+      "cow_enabled": true,
+      "cow": {
+        "sources": 62,
+        "source_bytes": 12711366656,
+        "freeze_failures": 0,
+        "branches": 31,
+        "branch_failures": 0,
+        "stale_rejections": 0,
+        "invalidations": 47,
+        "active_leases": 0,
+        "peak_leases": 4,
+        "descriptor_aliases": 9114,
+        "descriptor_bytes": 18083418112,
+        "avoided_copy_bytes": 5372051456,
+        "materializations": 0,
+        "materialized_bytes": 0,
+        "fallback_deepcopies": 0,
+        "fallback_bytes": 0,
+        "freeze_ns": 143037123,
+        "branch_ns": 12634872,
+        "fallback_ns": 0,
+        "releases": 31,
+        "planes": {
+          "attention_kv": {
+            "descriptor_aliases": 2418,
+            "descriptor_bytes": 12516954112,
+            "materializations": 0,
+            "materialized_bytes": 0
+          },
+          "attention_ring": {
+            "descriptor_aliases": 6696,
+            "descriptor_bytes": 5566464000,
+            "materializations": 0,
+            "materialized_bytes": 0
+          }
+        },
+        "materialized_bytes_are_estimated": true,
+        "array_readbacks": 0
+      },
+      "max_tokens": 32768,
+      "resident_max_bytes": 8589934592,
+      "max_entry_tokens": 32716,
+      "overlength_rejections": 0,
+      "idle_disk": {
+        "enabled": true,
+        "block_bytes": 0,
+        "idle_seconds": 180.0,
+        "resident_bytes": 2611347456,
+        "disk_bytes": 0,
+        "disk_max_bytes": 68719476736,
+        "disk_entries": 0,
+        "idle_spills": 0,
+        "pressure_spills": 0,
+        "restores": 0,
+        "restore_failures": 0,
+        "restore_budget_deferrals": 0,
+        "spill_failures": 0,
+        "disk_evictions": 0,
+        "bytes_written": 0,
+        "bytes_read": 0
+      },
+      "cache_capsules": {
+        "reservations": 0,
+        "reservation_rejections": 0,
+        "reserved_bytes_peak": 0,
+        "reserved_bytes": 0
+      },
+      "version": 2,
+      "layout_name": "north-mini-code-layer-segments-v1",
+      "layer_segments": {
+        "schema": "apcv2.layer-segments.v1",
+        "entries": 15,
+        "disk_entries": 0,
+        "layers": 735,
+        "plane_layers": 735,
+        "segments": 800,
+        "logical_bytes": 2611347456,
+        "by_plane": {
+          "attention_kv": {
+            "layers": 195,
+            "segments": 260,
+            "logical_bytes": 1811177472,
+            "invalid": 0
+          },
+          "attention_ring": {
+            "layers": 540,
+            "segments": 540,
+            "logical_bytes": 800169984,
+            "invalid": 0
+          }
+        }
+      }
+    },
+    "cache_capsules": null,
+    "approximate_kv": {
+      "enabled": false,
+      "state": "implemented",
+      "fidelity": "exact",
+      "applied": 0,
+      "declined": 0,
+      "requantized_prefix_hits": 0,
+      "apcv2_store_skipped_approximate": 0
+    },
+    "scheduler": {
+      "prefill_rounds": 30,
+      "prefill_only_rounds": 29,
+      "decode_priority_release_rounds": 0,
+      "decode_priority_deferred_rounds": 0,
+      "adaptive_prefill_release_rounds": 1,
+      "adaptive_prefill_slack_deferred_rounds": 0,
+      "adaptive_prefill_deadline_forced_rounds": 0,
+      "adaptive_prefill_apc_priority_admissions": 0,
+      "adaptive_prefill_chunk_histogram": {
+        "12": 1
+      },
+      "decode_fairness_prefill_chunks": 1,
+      "decode_fairness_debt_deferrals": 0,
+      "decode_fairness_debt_repayments": 1,
+      "decode_fairness_cap_clamps": 0
+    },
+    "segmented_self_mtp": {
+      "requests": 0,
+      "physical_join_flag_reconciled": 0,
+      "width_lock_plain_fallbacks": 0,
+      "engaged": 0,
+      "declined": 0,
+      "failures": 0,
+      "fallback_physical_b2": 0,
+      "physical_b2_formations": 0,
+      "b1_target_forwards": 0,
+      "b1_draft_forwards": 0,
+      "batched_target_forwards": 0,
+      "batched_draft_forwards": 0,
+      "true_batched_requests": 0,
+      "true_batched_engaged": 0,
+      "true_batched_declined": 0,
+      "live_width_change_deferrals": 0,
+      "layer_local_materializations": 0,
+      "recurrent_state_materializations": 0,
+      "recurrent_state_materialized_bytes": 0,
+      "row_state_splits": 0,
+      "segmented_attention_calls": 0,
+      "private_delta_requests": 0,
+      "private_delta_declines": 0,
+      "private_delta_preflight_declines": 0,
+      "private_delta_late_gather_fallbacks": 0,
+      "private_delta_attention_calls": 0,
+      "private_delta_rows": 0,
+      "private_delta_base_tokens_cumulative": 0,
+      "private_delta_base_tokens_last": 0,
+      "private_delta_base_tokens_min": 0,
+      "private_delta_base_tokens_max": 0,
+      "private_delta_duplicate_base_storage_bytes_not_formed_cumulative": 0,
+      "shared_qsa_rows": 0,
+      "shared_qsa_base_bytes": 0,
+      "shared_qsa_private_bytes": 0,
+      "shared_qsa_materializations": 0,
+      "shared_qsa_materialized_bytes": 0,
+      "shared_qsa_batched_selections": 0,
+      "shared_qsa_policy_checks": 0,
+      "shared_qsa_policy_admitted": 0,
+      "shared_qsa_policy_declined": 0,
+      "shared_qsa_policy_context_tokens_cumulative": 0,
+      "shared_qsa_policy_remaining_tokens_cumulative": 0,
+      "shared_qsa_policy_cutoff_tokens_cumulative": 0,
+      "exact_set_fold_requests": 0,
+      "exact_set_fold_declines": 0,
+      "exact_set_fold_preflight_declines": 0,
+      "exact_set_fold_private_fallbacks": 0,
+      "exact_set_fold_attention_calls": 0,
+      "exact_set_fold_rows": 0,
+      "exact_set_fold_device_proofs": 0,
+      "independent_lineages_consumed": 0,
+      "full_prefix_materializations": 0,
+      "full_prefix_materialized_bytes": 0,
+      "transaction_branches": 0,
+      "transaction_promotions": 0,
+      "transaction_rejections": 0,
+      "transaction_canonicalizations": 0,
+      "committed_cycles": 0,
+      "accepted_zero": 0,
+      "accepted_partial": 0,
+      "accepted_all": 0,
+      "async_qsa_promotion_requests": 0,
+      "async_qsa_promotion_queued": 0,
+      "async_qsa_promotion_engaged": 0,
+      "async_qsa_promotion_declined": 0,
+      "async_qsa_promotion_declined_shared_suffix": 0,
+      "async_qsa_promotion_declined_memory": 0,
+      "async_qsa_admission_settled": 0,
+      "async_qsa_promotion_failures": 0,
+      "async_qsa_promotion_reserved_bytes": 0,
+      "async_qsa_promotion_patched_bytes": 0,
+      "async_qsa_promotion_wait_ns": 0,
+      "async_qsa_prequeue_requests": 0,
+      "async_qsa_prequeue_queued": 0,
+      "async_qsa_prequeue_bound": 0,
+      "async_qsa_prequeue_declined": 0,
+      "async_qsa_shared_prefix_fused_layers": 0,
+      "async_qsa_budget_checks": 0,
+      "async_qsa_budget_retained_segmented": 0,
+      "async_qsa_budget_promotions": 0,
+      "async_qsa_budget_remaining_tokens_cumulative": 0,
+      "async_qsa_budget_cutoff_tokens_cumulative": 0,
+      "device_synchronizations": 0,
+      "proposal_ns": 0,
+      "commit_ns": 0,
+      "private_delta_width_1_requests": 0,
+      "private_delta_width_1_engaged": 0,
+      "private_delta_width_1_declined": 0,
+      "private_delta_width_2_requests": 0,
+      "private_delta_width_2_engaged": 0,
+      "private_delta_width_2_declined": 0,
+      "private_delta_width_3_requests": 0,
+      "private_delta_width_3_engaged": 0,
+      "private_delta_width_3_declined": 0,
+      "private_delta_width_4_requests": 0,
+      "private_delta_width_4_engaged": 0,
+      "private_delta_width_4_declined": 0,
+      "private_delta_width_5_requests": 0,
+      "private_delta_width_5_engaged": 0,
+      "private_delta_width_5_declined": 0,
+      "private_delta_width_6_requests": 0,
+      "private_delta_width_6_engaged": 0,
+      "private_delta_width_6_declined": 0,
+      "private_delta_width_7_requests": 0,
+      "private_delta_width_7_engaged": 0,
+      "private_delta_width_7_declined": 0,
+      "private_delta_width_8_requests": 0,
+      "private_delta_width_8_engaged": 0,
+      "private_delta_width_8_declined": 0,
+      "private_delta_width_9_requests": 0,
+      "private_delta_width_9_engaged": 0,
+      "private_delta_width_9_declined": 0,
+      "private_delta_width_other_requests": 0,
+      "private_delta_width_other_engaged": 0,
+      "private_delta_width_other_declined": 0,
+      "private_delta_decline_reasons": {},
+      "exact_set_fold_decline_reasons": {},
+      "environment_enabled": false,
+      "true_batched_environment_enabled": false,
+      "qsa_private_delta_environment_enabled": true,
+      "qsa_exact_set_fold_environment_enabled": true,
+      "shared_qsa_suffix_mode": "off",
+      "shared_qsa_suffix_environment_enabled": false,
+      "async_qsa_promotion_environment_enabled": false,
+      "timing_enabled": false,
+      "counter_scope": "segmented_mechanism_only",
+      "array_readbacks": 0
+    },
+    "spomin_live_surgery": {
+      "enabled": false
+    },
+    "metal_active_bytes": 21385289774,
+    "metal_peak_bytes": 25021338280,
+    "process_physical_footprint_bytes": 22217913784,
+    "execution": {
+      "architecture": "cohere2_moe",
+      "cache_layout": "north-mini-code-layer-segments-v1",
+      "sliding_layers": 36,
+      "global_layers": 13,
+      "sliding_window": 4096,
+      "speculation": "none-qualified"
+    },
+    "admission": {},
+    "memory_waiting": 0,
+    "headroom_bytes": 89179324416,
+    "healthy": true,
+    "error": null,
+    "inflight": 0,
+    "queue_depth": 0,
+    "counts": {
+      "admitted": 32,
+      "cycles": 1359,
+      "multi_request_cycles": 294,
+      "finish_stop": 12,
+      "completion_tokens": 1905,
+      "prompt_tokens": 166766,
+      "cached_prompt_tokens": 133763,
+      "peak_observed_width": 4,
+      "completed": 31,
+      "finish_length": 19,
+      "structured_engine_automaton": 2,
+      "structured_output_completed": 2,
+      "batch_cohort_jobs_staged": 2,
+      "batch_cohort_releases": 1,
+      "batch_cohort_jobs_released": 2,
+      "cancelled": 1
+    },
+    "recent_receipts": [
+      {
+        "request_id": "chatcmpl-a6d12d30a55f4d1a8fd522df800617c6",
+        "cache": "apcv2",
+        "cached_tokens": 0,
+        "parallel_prefill": null,
+        "profile": "north-mini-code-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": false,
+          "top_logprobs": 0,
+          "logprob_semantics": null,
+          "thinking": false,
+          "sampling": {
+            "temperature": 0
+          },
+          "min_tokens": 0,
+          "batch_cohort": null,
+          "reasoning_effort": "none",
+          "effort_semantics": "thinking_toggle",
+          "context_limit": 32768,
+          "structured_output": null
+        },
+        "ordinary_compute_width": 1,
+        "mtp": null,
+        "speculation": null,
+        "spomin_live_surgery": null,
+        "approximate_kv": null,
+        "cache_capsule": null,
+        "prompt_tokens": 123,
+        "completion_tokens": 6,
+        "ttft_seconds": 0.26689833399723284,
+        "elapsed_seconds": 0.31082000001333654
+      },
+      {
+        "request_id": "chatcmpl-f520f5f564a14f1b88a22dc8575386d1",
+        "cache": "apcv2",
+        "cached_tokens": 111,
+        "parallel_prefill": null,
+        "profile": "north-mini-code-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": false,
+          "top_logprobs": 0,
+          "logprob_semantics": null,
+          "thinking": true,
+          "sampling": {
+            "temperature": 0
+          },
+          "min_tokens": 0,
+          "batch_cohort": null,
+          "reasoning_effort": null,
+          "effort_semantics": "thinking_toggle",
+          "context_limit": 32768,
+          "structured_output": null
+        },
+        "ordinary_compute_width": 1,
+        "mtp": null,
+        "speculation": null,
+        "spomin_live_surgery": null,
+        "approximate_kv": null,
+        "cache_capsule": null,
+        "prompt_tokens": 123,
+        "completion_tokens": 8,
+        "ttft_seconds": 0.06435741600580513,
+        "elapsed_seconds": 0.12085400000796653
+      },
+      {
+        "request_id": "chatcmpl-73048f6051cc4f4aa8ed354a0959c569",
+        "cache": "apcv2",
+        "cached_tokens": 122,
+        "parallel_prefill": null,
+        "profile": "north-mini-code-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": true,
+          "top_logprobs": 3,
+          "logprob_semantics": "execution_target: ordinary=post_processor_pre_sampler; mtp=transformed_target_verifier",
+          "thinking": true,
+          "sampling": {
+            "temperature": 0
+          },
+          "min_tokens": 0,
+          "batch_cohort": null,
+          "reasoning_effort": null,
+          "effort_semantics": "thinking_toggle",
+          "context_limit": 32768,
+          "structured_output": null
+        },
+        "ordinary_compute_width": 1,
+        "mtp": null,
+        "speculation": null,
+        "spomin_live_surgery": null,
+        "approximate_kv": null,
+        "cache_capsule": null,
+        "prompt_tokens": 123,
+        "completion_tokens": 8,
+        "ttft_seconds": 0.03719062500749715,
+        "elapsed_seconds": 0.10196566599188372
+      },
+      {
+        "request_id": "chatcmpl-9bfb8f307e1142c89fcbdc46e8757144",
+        "cache": "apcv2",
+        "cached_tokens": 122,
+        "parallel_prefill": null,
+        "profile": "north-mini-code-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": true,
+          "top_logprobs": 3,
+          "logprob_semantics": "execution_target: ordinary=post_processor_pre_sampler; mtp=transformed_target_verifier",
+          "thinking": true,
+          "sampling": {
+            "temperature": 0
+          },
+          "min_tokens": 0,
+          "batch_cohort": null,
+          "reasoning_effort": null,
+          "effort_semantics": "thinking_toggle",
+          "context_limit": 32768,
+          "structured_output": null
+        },
+        "ordinary_compute_width": 1,
+        "mtp": null,
+        "speculation": null,
+        "spomin_live_surgery": null,
+        "approximate_kv": null,
+        "cache_capsule": null,
+        "prompt_tokens": 123,
+        "completion_tokens": 8,
+        "ttft_seconds": 0.041007791995070875,
+        "elapsed_seconds": 0.1117465830175206
+      },
+      {
+        "request_id": "chatcmpl-b3a35d8517ee48828e93c379d35d436e",
+        "cache": "apcv2",
+        "cached_tokens": 111,
+        "parallel_prefill": null,
+        "profile": "north-mini-code-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": false,
+          "top_logprobs": 0,
+          "logprob_semantics": null,
+          "thinking": true,
+          "sampling": {
+            "temperature": 0.7,
+            "top_p": 0.9,
+            "top_k": 24,
+            "min_p": 0.05,
+            "repetition_penalty": 1.05,
+            "presence_penalty": 0.1,
+            "frequency_penalty": 0.1,
+            "seed": 237
+          },
+          "min_tokens": 0,
+          "batch_cohort": null,
+          "reasoning_effort": null,
+          "effort_semantics": "thinking_toggle",
+          "context_limit": 32768,
+          "structured_output": null
+        },
+        "ordinary_compute_width": 1,
+        "mtp": null,
+        "speculation": null,
+        "spomin_live_surgery": null,
+        "approximate_kv": null,
+        "cache_capsule": null,
+        "prompt_tokens": 120,
+        "completion_tokens": 48,
+        "ttft_seconds": 0.06298975000390783,
+        "elapsed_seconds": 0.4050006250035949
+      },
+      {
+        "request_id": "chatcmpl-2868376c3eb74067a7da3ef86ef70d40",
+        "cache": "apcv2",
+        "cached_tokens": 119,
+        "parallel_prefill": null,
+        "profile": "north-mini-code-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": false,
+          "top_logprobs": 0,
+          "logprob_semantics": null,
+          "thinking": true,
+          "sampling": {
+            "temperature": 0.7,
+            "top_p": 0.9,
+            "top_k": 24,
+            "min_p": 0.05,
+            "repetition_penalty": 1.05,
+            "presence_penalty": 0.1,
+            "frequency_penalty": 0.1,
+            "seed": 237
+          },
+          "min_tokens": 0,
+          "batch_cohort": null,
+          "reasoning_effort": null,
+          "effort_semantics": "thinking_toggle",
+          "context_limit": 32768,
+          "structured_output": null
+        },
+        "ordinary_compute_width": 1,
+        "mtp": null,
+        "speculation": null,
+        "spomin_live_surgery": null,
+        "approximate_kv": null,
+        "cache_capsule": null,
+        "prompt_tokens": 120,
+        "completion_tokens": 48,
+        "ttft_seconds": 0.03811837499961257,
+        "elapsed_seconds": 0.3769197080109734
+      },
+      {
+        "request_id": "chatcmpl-36be08acd841406bb153afe4e6778422",
+        "cache": "apcv2",
+        "cached_tokens": 114,
+        "parallel_prefill": null,
+        "profile": "north-mini-code-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": false,
+          "top_logprobs": 0,
+          "logprob_semantics": null,
+          "thinking": true,
+          "sampling": {
+            "temperature": 0
+          },
+          "min_tokens": 0,
+          "batch_cohort": null,
+          "reasoning_effort": null,
+          "effort_semantics": "thinking_toggle",
+          "context_limit": 32768,
+          "structured_output": null
+        },
+        "ordinary_compute_width": 1,
+        "mtp": null,
+        "speculation": null,
+        "spomin_live_surgery": null,
+        "approximate_kv": null,
+        "cache_capsule": null,
+        "prompt_tokens": 123,
+        "completion_tokens": 47,
+        "ttft_seconds": 0.05393079199711792,
+        "elapsed_seconds": 0.3668063330114819
+      },
+      {
+        "request_id": "chatcmpl-087f3a11b2b84a9b8e4fe6cfac824c73",
+        "cache": "apcv2",
+        "cached_tokens": 122,
+        "parallel_prefill": null,
+        "profile": "north-mini-code-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": false,
+          "top_logprobs": 0,
+          "logprob_semantics": null,
+          "thinking": true,
+          "sampling": {
+            "temperature": 0
+          },
+          "min_tokens": 0,
+          "batch_cohort": null,
+          "reasoning_effort": null,
+          "effort_semantics": "thinking_toggle",
+          "context_limit": 32768,
+          "structured_output": null
+        },
+        "ordinary_compute_width": 1,
+        "mtp": null,
+        "speculation": null,
+        "spomin_live_surgery": null,
+        "approximate_kv": null,
+        "cache_capsule": null,
+        "prompt_tokens": 123,
+        "completion_tokens": 47,
+        "ttft_seconds": 0.03923454199684784,
+        "elapsed_seconds": 0.35242612499860115
+      },
+      {
+        "request_id": "chatcmpl-8b03a59efde946fb9aa33e920ffdc122",
+        "cache": "apcv2",
+        "cached_tokens": 111,
+        "parallel_prefill": null,
+        "profile": "north-mini-code-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": false,
+          "top_logprobs": 0,
+          "logprob_semantics": null,
+          "thinking": false,
+          "sampling": {
+            "temperature": 0
+          },
+          "min_tokens": 0,
+          "batch_cohort": null,
+          "reasoning_effort": null,
+          "effort_semantics": "thinking_toggle",
+          "context_limit": 32768,
+          "structured_output": {
+            "kind": "json_schema",
+            "enforced": true,
+            "engine": "automaton",
+            "tail_mass_bound": 0.0,
+            "parallel_scans": 0,
+            "deferred": false,
+            "deferred_tokens": 0
+          }
+        },
+        "ordinary_compute_width": 1,
+        "mtp": null,
+        "speculation": null,
+        "spomin_live_surgery": null,
+        "approximate_kv": null,
+        "cache_capsule": null,
+        "prompt_tokens": 126,
+        "completion_tokens": 10,
+        "ttft_seconds": 0.8476270420069341,
+        "elapsed_seconds": 0.9425729170034174
+      },
+      {
+        "request_id": "chatcmpl-25d39f31d1c2455ebb12b6fa6fb222dc",
+        "cache": "apcv2",
+        "cached_tokens": 125,
+        "parallel_prefill": null,
+        "profile": "north-mini-code-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": false,
+          "top_logprobs": 0,
+          "logprob_semantics": null,
+          "thinking": false,
+          "sampling": {
+            "temperature": 0.7,
+            "seed": 7
+          },
+          "min_tokens": 0,
+          "batch_cohort": null,
+          "reasoning_effort": null,
+          "effort_semantics": "thinking_toggle",
+          "context_limit": 32768,
+          "structured_output": {
+            "kind": "json_schema",
+            "enforced": true,
+            "engine": "automaton",
+            "tail_mass_bound": 0.0,
+            "parallel_scans": 0,
+            "deferred": false,
+            "deferred_tokens": 0
+          }
+        },
+        "ordinary_compute_width": 1,
+        "mtp": null,
+        "speculation": null,
+        "spomin_live_surgery": null,
+        "approximate_kv": null,
+        "cache_capsule": null,
+        "prompt_tokens": 126,
+        "completion_tokens": 10,
+        "ttft_seconds": 0.04046495899092406,
+        "elapsed_seconds": 0.11475779200554825
+      },
+      {
+        "request_id": "chatcmpl-f6805f2b739f484e957daea4261b775b",
+        "cache": "apcv2",
+        "cached_tokens": 122,
+        "parallel_prefill": null,
+        "profile": "north-mini-code-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": false,
+          "top_logprobs": 0,
+          "logprob_semantics": null,
+          "thinking": true,
+          "sampling": {
+            "temperature": 0
+          },
+          "min_tokens": 0,
+          "batch_cohort": null,
+          "reasoning_effort": null,
+          "effort_semantics": "thinking_toggle",
+          "context_limit": 32768,
+          "structured_output": null
+        },
+        "ordinary_compute_width": 1,
+        "mtp": null,
+        "speculation": null,
+        "spomin_live_surgery": null,
+        "approximate_kv": null,
+        "cache_capsule": null,
+        "prompt_tokens": 123,
+        "completion_tokens": 47,
+        "ttft_seconds": 0.03894295799545944,
+        "elapsed_seconds": 0.3538602909829933
+      },
+      {
+        "request_id": "chatcmpl-9391b86db05742cc8db934d973927fc7",
+        "cache": "apcv2",
+        "cached_tokens": 102,
+        "parallel_prefill": null,
+        "profile": "north-mini-code-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": false,
+          "top_logprobs": 0,
+          "logprob_semantics": null,
+          "thinking": true,
+          "sampling": {
+            "temperature": 0
+          },
+          "min_tokens": 0,
+          "batch_cohort": null,
+          "reasoning_effort": null,
+          "effort_semantics": "thinking_toggle",
+          "context_limit": 32768,
+          "structured_output": null
+        },
+        "ordinary_compute_width": 1,
+        "mtp": null,
+        "speculation": null,
+        "spomin_live_surgery": null,
+        "approximate_kv": null,
+        "cache_capsule": null,
+        "prompt_tokens": 177,
+        "completion_tokens": 79,
+        "ttft_seconds": 0.10154570898157544,
+        "elapsed_seconds": 0.6282797500025481
+      },
+      {
+        "request_id": "chatcmpl-e57588917c5b46b8b9316e9173938736",
+        "cache": "apcv2",
+        "cached_tokens": 256,
+        "parallel_prefill": null,
+        "profile": "north-mini-code-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": false,
+          "top_logprobs": 0,
+          "logprob_semantics": null,
+          "thinking": true,
+          "sampling": {
+            "temperature": 0
+          },
+          "min_tokens": 0,
+          "batch_cohort": null,
+          "reasoning_effort": null,
+          "effort_semantics": "thinking_toggle",
+          "context_limit": 32768,
+          "structured_output": null
+        },
+        "ordinary_compute_width": 1,
+        "mtp": null,
+        "speculation": null,
+        "spomin_live_surgery": null,
+        "approximate_kv": null,
+        "cache_capsule": null,
+        "prompt_tokens": 316,
+        "completion_tokens": 64,
+        "ttft_seconds": 0.12732079101260751,
+        "elapsed_seconds": 0.560763666027924
+      },
+      {
+        "request_id": "chatcmpl-1fd1f95d86644db5a29ccbfd80ded04c",
+        "cache": "apcv2",
+        "cached_tokens": 109,
+        "parallel_prefill": null,
+        "profile": "north-mini-code-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": false,
+          "top_logprobs": 0,
+          "logprob_semantics": null,
+          "thinking": true,
+          "sampling": {
+            "temperature": 0
+          },
+          "min_tokens": 0,
+          "batch_cohort": null,
+          "reasoning_effort": null,
+          "effort_semantics": "thinking_toggle",
+          "context_limit": 32768,
+          "structured_output": null
+        },
+        "ordinary_compute_width": 1,
+        "mtp": null,
+        "speculation": null,
+        "spomin_live_surgery": null,
+        "approximate_kv": null,
+        "cache_capsule": null,
+        "prompt_tokens": 166,
+        "completion_tokens": 39,
+        "ttft_seconds": 0.11529095901641995,
+        "elapsed_seconds": 0.376173791999463
+      },
+      {
+        "request_id": "chatcmpl-312d7a847f404aaabe294c720645bd64",
+        "cache": "apcv2",
+        "cached_tokens": 122,
+        "parallel_prefill": null,
+        "profile": "north-mini-code-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": false,
+          "top_logprobs": 0,
+          "logprob_semantics": null,
+          "thinking": true,
+          "sampling": {
+            "temperature": 0
+          },
+          "min_tokens": 0,
+          "batch_cohort": null,
+          "reasoning_effort": null,
+          "effort_semantics": "thinking_toggle",
+          "context_limit": 32768,
+          "structured_output": null
+        },
+        "ordinary_compute_width": 1,
+        "mtp": null,
+        "speculation": null,
+        "spomin_live_surgery": null,
+        "approximate_kv": null,
+        "cache_capsule": null,
+        "prompt_tokens": 123,
+        "completion_tokens": 45,
+        "ttft_seconds": 0.03834349999669939,
+        "elapsed_seconds": 0.3292054169869516
+      },
+      {
+        "request_id": "chatcmpl-752d56b45b6948fda5236e427b55f862",
+        "cache": "apcv2",
+        "cached_tokens": 111,
+        "parallel_prefill": null,
+        "profile": "north-mini-code-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": false,
+          "top_logprobs": 0,
+          "logprob_semantics": null,
+          "thinking": true,
+          "sampling": {
+            "temperature": 0.7,
+            "seed": 123
+          },
+          "min_tokens": 0,
+          "batch_cohort": null,
+          "reasoning_effort": null,
+          "effort_semantics": "thinking_toggle",
+          "context_limit": 32768,
+          "structured_output": null
+        },
+        "ordinary_compute_width": 1,
+        "mtp": null,
+        "speculation": null,
+        "spomin_live_surgery": null,
+        "approximate_kv": null,
+        "cache_capsule": null,
+        "prompt_tokens": 123,
+        "completion_tokens": 64,
+        "ttft_seconds": 0.06520920901675709,
+        "elapsed_seconds": 0.5029266250203364
+      },
+      {
+        "request_id": "chatcmpl-77c6a93fed0549c185d7ff2830a67f69",
+        "cache": "apcv2",
+        "cached_tokens": 122,
+        "parallel_prefill": null,
+        "profile": "north-mini-code-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": false,
+          "top_logprobs": 0,
+          "logprob_semantics": null,
+          "thinking": true,
+          "sampling": {
+            "temperature": 0.7,
+            "seed": 123
+          },
+          "min_tokens": 0,
+          "batch_cohort": null,
+          "reasoning_effort": null,
+          "effort_semantics": "thinking_toggle",
+          "context_limit": 32768,
+          "structured_output": null
+        },
+        "ordinary_compute_width": 1,
+        "mtp": null,
+        "speculation": null,
+        "spomin_live_surgery": null,
+        "approximate_kv": null,
+        "cache_capsule": null,
+        "prompt_tokens": 123,
+        "completion_tokens": 64,
+        "ttft_seconds": 0.03999737501726486,
+        "elapsed_seconds": 0.47987437501433305
+      },
+      {
+        "request_id": "chatcmpl-e949e350a0d74f01b6af8e0c346f02d7",
+        "cache": "apcv2",
+        "cached_tokens": 111,
+        "parallel_prefill": null,
+        "profile": "north-mini-code-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": false,
+          "top_logprobs": 0,
+          "logprob_semantics": null,
+          "thinking": true,
+          "sampling": {
+            "temperature": 0
+          },
+          "min_tokens": 0,
+          "batch_cohort": null,
+          "reasoning_effort": null,
+          "effort_semantics": "thinking_toggle",
+          "context_limit": 32768,
+          "structured_output": null
+        },
+        "ordinary_compute_width": 4,
+        "mtp": null,
+        "speculation": null,
+        "spomin_live_surgery": null,
+        "approximate_kv": null,
+        "cache_capsule": null,
+        "prompt_tokens": 124,
+        "completion_tokens": 160,
+        "ttft_seconds": 0.1303410830150824,
+        "elapsed_seconds": 1.9331680000177585
+      },
+      {
+        "request_id": "chatcmpl-f090a3cdaab94c538b3f6d1f7f37100c",
+        "cache": "apcv2",
+        "cached_tokens": 111,
+        "parallel_prefill": null,
+        "profile": "north-mini-code-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": false,
+          "top_logprobs": 0,
+          "logprob_semantics": null,
+          "thinking": true,
+          "sampling": {
+            "temperature": 0
+          },
+          "min_tokens": 0,
+          "batch_cohort": null,
+          "reasoning_effort": null,
+          "effort_semantics": "thinking_toggle",
+          "context_limit": 32768,
+          "structured_output": null
+        },
+        "ordinary_compute_width": 4,
+        "mtp": null,
+        "speculation": null,
+        "spomin_live_surgery": null,
+        "approximate_kv": null,
+        "cache_capsule": null,
+        "prompt_tokens": 124,
+        "completion_tokens": 160,
+        "ttft_seconds": 0.12913604200002737,
+        "elapsed_seconds": 1.9337654580012895
+      },
+      {
+        "request_id": "chatcmpl-fa8f76ef8fa242919042fc87047df653",
+        "cache": "apcv2",
+        "cached_tokens": 111,
+        "parallel_prefill": null,
+        "profile": "north-mini-code-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": false,
+          "top_logprobs": 0,
+          "logprob_semantics": null,
+          "thinking": true,
+          "sampling": {
+            "temperature": 0
+          },
+          "min_tokens": 0,
+          "batch_cohort": null,
+          "reasoning_effort": null,
+          "effort_semantics": "thinking_toggle",
+          "context_limit": 32768,
+          "structured_output": null
+        },
+        "ordinary_compute_width": 4,
+        "mtp": null,
+        "speculation": null,
+        "spomin_live_surgery": null,
+        "approximate_kv": null,
+        "cache_capsule": null,
+        "prompt_tokens": 124,
+        "completion_tokens": 160,
+        "ttft_seconds": 0.18187224998837337,
+        "elapsed_seconds": 1.9719060829957016
+      },
+      {
+        "request_id": "chatcmpl-7752d8da2aba4041876dcc99ca8e89e4",
+        "cache": "apcv2",
+        "cached_tokens": 111,
+        "parallel_prefill": null,
+        "profile": "north-mini-code-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": false,
+          "top_logprobs": 0,
+          "logprob_semantics": null,
+          "thinking": true,
+          "sampling": {
+            "temperature": 0
+          },
+          "min_tokens": 0,
+          "batch_cohort": null,
+          "reasoning_effort": null,
+          "effort_semantics": "thinking_toggle",
+          "context_limit": 32768,
+          "structured_output": null
+        },
+        "ordinary_compute_width": 4,
+        "mtp": null,
+        "speculation": null,
+        "spomin_live_surgery": null,
+        "approximate_kv": null,
+        "cache_capsule": null,
+        "prompt_tokens": 124,
+        "completion_tokens": 160,
+        "ttft_seconds": 0.1812144159921445,
+        "elapsed_seconds": 1.973061750002671
+      },
+      {
+        "request_id": "chatcmpl-6378e1cd1a9b4b439961e8ceb5f4e765",
+        "cache": "apcv2",
+        "cached_tokens": 116,
+        "parallel_prefill": null,
+        "profile": "north-mini-code-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": false,
+          "top_logprobs": 0,
+          "logprob_semantics": null,
+          "thinking": true,
+          "sampling": {
+            "temperature": 0
+          },
+          "min_tokens": 0,
+          "batch_cohort": null,
+          "reasoning_effort": null,
+          "effort_semantics": "thinking_toggle",
+          "context_limit": 32768,
+          "structured_output": null
+        },
+        "ordinary_compute_width": 1,
+        "mtp": null,
+        "speculation": null,
+        "spomin_live_surgery": null,
+        "approximate_kv": null,
+        "cache_capsule": null,
+        "prompt_tokens": 126,
+        "completion_tokens": 64,
+        "ttft_seconds": 0.06526179201318882,
+        "elapsed_seconds": 0.4924518340267241
+      },
+      {
+        "request_id": "chatcmpl-30b0a6a5669545a4aa3c4ea23dd3e8e9",
+        "cache": "apcv2",
+        "cached_tokens": 114,
+        "parallel_prefill": null,
+        "profile": "north-mini-code-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": false,
+          "top_logprobs": 0,
+          "logprob_semantics": null,
+          "thinking": true,
+          "sampling": {
+            "temperature": 0
+          },
+          "min_tokens": 0,
+          "batch_cohort": null,
+          "reasoning_effort": null,
+          "effort_semantics": "thinking_toggle",
+          "context_limit": 32768,
+          "structured_output": null
+        },
+        "ordinary_compute_width": 1,
+        "mtp": null,
+        "speculation": null,
+        "spomin_live_surgery": null,
+        "approximate_kv": null,
+        "cache_capsule": null,
+        "prompt_tokens": 127,
+        "completion_tokens": 64,
+        "ttft_seconds": 0.06800791699788533,
+        "elapsed_seconds": 0.49440791699453257
+      },
+      {
+        "request_id": "chatcmpl-38fd81e05c3e435a9893e2979e03754a",
+        "cache": "apcv2",
+        "cached_tokens": 125,
+        "parallel_prefill": null,
+        "profile": "north-mini-code-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": false,
+          "top_logprobs": 0,
+          "logprob_semantics": null,
+          "thinking": true,
+          "sampling": {
+            "temperature": 0
+          },
+          "min_tokens": 0,
+          "batch_cohort": null,
+          "reasoning_effort": null,
+          "effort_semantics": "thinking_toggle",
+          "context_limit": 32768,
+          "structured_output": null
+        },
+        "ordinary_compute_width": 2,
+        "mtp": null,
+        "speculation": null,
+        "spomin_live_surgery": null,
+        "approximate_kv": null,
+        "cache_capsule": null,
+        "prompt_tokens": 126,
+        "completion_tokens": 64,
+        "ttft_seconds": 0.05302258301526308,
+        "elapsed_seconds": 0.6032450830098242
+      },
+      {
+        "request_id": "chatcmpl-4ddba624329c4f8587b5c485be3933b5",
+        "cache": "apcv2",
+        "cached_tokens": 126,
+        "parallel_prefill": null,
+        "profile": "north-mini-code-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": false,
+          "top_logprobs": 0,
+          "logprob_semantics": null,
+          "thinking": true,
+          "sampling": {
+            "temperature": 0
+          },
+          "min_tokens": 0,
+          "batch_cohort": null,
+          "reasoning_effort": null,
+          "effort_semantics": "thinking_toggle",
+          "context_limit": 32768,
+          "structured_output": null
+        },
+        "ordinary_compute_width": 2,
+        "mtp": null,
+        "speculation": null,
+        "spomin_live_surgery": null,
+        "approximate_kv": null,
+        "cache_capsule": null,
+        "prompt_tokens": 127,
+        "completion_tokens": 64,
+        "ttft_seconds": 0.0521584999805782,
+        "elapsed_seconds": 0.6040781249757856
+      },
+      {
+        "request_id": "chatcmpl-2d95c393e3274b349743448dd2710677",
+        "cache": "apcv2",
+        "cached_tokens": 111,
+        "parallel_prefill": null,
+        "profile": "north-mini-code-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": false,
+          "top_logprobs": 0,
+          "logprob_semantics": null,
+          "thinking": false,
+          "sampling": {
+            "temperature": 0
+          },
+          "min_tokens": 0,
+          "batch_cohort": null,
+          "reasoning_effort": "none",
+          "effort_semantics": "thinking_toggle",
+          "context_limit": 32768,
+          "structured_output": null
+        },
+        "ordinary_compute_width": 1,
+        "mtp": null,
+        "speculation": null,
+        "spomin_live_surgery": null,
+        "approximate_kv": null,
+        "cache_capsule": null,
+        "prompt_tokens": 32652,
+        "completion_tokens": 64,
+        "ttft_seconds": 10.949880542000756,
+        "elapsed_seconds": 11.643079250003211
+      },
+      {
+        "request_id": "chatcmpl-d00a62f1d878413b832f98ef7df6f015",
+        "cache": "apcv2",
+        "cached_tokens": 32651,
+        "parallel_prefill": null,
+        "profile": "north-mini-code-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": false,
+          "top_logprobs": 0,
+          "logprob_semantics": null,
+          "thinking": false,
+          "sampling": {
+            "temperature": 0
+          },
+          "min_tokens": 0,
+          "batch_cohort": {
+            "id": "qualification-shared-prefix-b2",
+            "size": 2
+          },
+          "reasoning_effort": "none",
+          "effort_semantics": "thinking_toggle",
+          "context_limit": 32768,
+          "structured_output": null
+        },
+        "ordinary_compute_width": 2,
+        "mtp": null,
+        "speculation": null,
+        "spomin_live_surgery": null,
+        "approximate_kv": null,
+        "cache_capsule": null,
+        "prompt_tokens": 32652,
+        "completion_tokens": 64,
+        "ttft_seconds": 0.2088006249978207,
+        "elapsed_seconds": 1.2136628340231255
+      },
+      {
+        "request_id": "chatcmpl-3e58629436f24313923fff800b2ee4eb",
+        "cache": "apcv2",
+        "cached_tokens": 32651,
+        "parallel_prefill": null,
+        "profile": "north-mini-code-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": false,
+          "top_logprobs": 0,
+          "logprob_semantics": null,
+          "thinking": false,
+          "sampling": {
+            "temperature": 0
+          },
+          "min_tokens": 0,
+          "batch_cohort": {
+            "id": "qualification-shared-prefix-b2",
+            "size": 2
+          },
+          "reasoning_effort": "none",
+          "effort_semantics": "thinking_toggle",
+          "context_limit": 32768,
+          "structured_output": null
+        },
+        "ordinary_compute_width": 2,
+        "mtp": null,
+        "speculation": null,
+        "spomin_live_surgery": null,
+        "approximate_kv": null,
+        "cache_capsule": null,
+        "prompt_tokens": 32652,
+        "completion_tokens": 64,
+        "ttft_seconds": 0.2003540419973433,
+        "elapsed_seconds": 1.215854499983834
+      },
+      {
+        "request_id": "chatcmpl-ec70af1e39aa4477a75ee1544a6bb720",
+        "cache": "apcv2",
+        "cached_tokens": 32651,
+        "parallel_prefill": null,
+        "profile": "north-mini-code-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": false,
+          "top_logprobs": 0,
+          "logprob_semantics": null,
+          "thinking": false,
+          "sampling": {
+            "temperature": 0
+          },
+          "min_tokens": 0,
+          "batch_cohort": null,
+          "reasoning_effort": "none",
+          "effort_semantics": "thinking_toggle",
+          "context_limit": 32768,
+          "structured_output": null
+        },
+        "ordinary_compute_width": 1,
+        "mtp": null,
+        "speculation": null,
+        "spomin_live_surgery": null,
+        "approximate_kv": null,
+        "cache_capsule": null,
+        "prompt_tokens": 32652,
+        "completion_tokens": 64,
+        "ttft_seconds": 0.09384154100553133,
+        "elapsed_seconds": 0.7864841249829624
+      },
+      {
+        "request_id": "chatcmpl-390bce0ecd8a4250969bceed388f4a8a",
+        "cache": "apcv2",
+        "cached_tokens": 32651,
+        "parallel_prefill": null,
+        "profile": "north-mini-code-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": false,
+          "top_logprobs": 0,
+          "logprob_semantics": null,
+          "thinking": false,
+          "sampling": {
+            "temperature": 0
+          },
+          "min_tokens": 0,
+          "batch_cohort": null,
+          "reasoning_effort": "none",
+          "effort_semantics": "thinking_toggle",
+          "context_limit": 32768,
+          "structured_output": null
+        },
+        "ordinary_compute_width": 1,
+        "mtp": null,
+        "speculation": null,
+        "spomin_live_surgery": null,
+        "approximate_kv": null,
+        "cache_capsule": null,
+        "prompt_tokens": 32652,
+        "completion_tokens": 64,
+        "ttft_seconds": 0.07686495798407122,
+        "elapsed_seconds": 0.7725022079830524
+      },
+      {
+        "request_id": "chatcmpl-c7100b0967da4763843731028e387a9e",
+        "cache": "apcv2",
+        "cached_tokens": 122,
+        "parallel_prefill": null,
+        "profile": "north-mini-code-apcv2-ordinary",
+        "qualification": "candidate",
+        "route_receipt": "candidate_validation",
+        "request_controls": {
+          "logprobs": false,
+          "top_logprobs": 0,
+          "logprob_semantics": null,
+          "thinking": true,
+          "sampling": {
+            "temperature": 0
+          },
+          "min_tokens": 0,
+          "batch_cohort": null,
+          "reasoning_effort": null,
+          "effort_semantics": "thinking_toggle",
+          "context_limit": 32768,
+          "structured_output": null
+        },
+        "ordinary_compute_width": 1,
+        "mtp": null,
+        "speculation": null,
+        "spomin_live_surgery": null,
+        "approximate_kv": null,
+        "cache_capsule": null,
+        "prompt_tokens": 123,
+        "completion_tokens": 47,
+        "ttft_seconds": 0.05830249999416992,
+        "elapsed_seconds": 0.39858333399752155
+      }
+    ],
+    "host_prompt_cache": {
+      "schema": "mlx2.host-prompt-cache.v1",
+      "entries": 15,
+      "tokens": 67435,
+      "max_entries": 128,
+      "max_tokens": 1048576,
+      "misses": 15,
+      "stores": 15,
+      "hits": 18
+    }
+  },
+  "feature_observations": {
+    "indexed_fused_merge": 0,
+    "indexed_output_gate": 0,
+    "shared_qsa": 0,
+    "async_promotion": 0,
+    "indexed_qsa": 0,
+    "private_delta": 0,
+    "known_tail_prefetch": 0,
+    "file_backed_ple": 0,
+    "compiled_ple": 0,
+    "pooled_qsa": 0,
+    "scatter_qsa": 0,
+    "fused_gdn_decode": 0,
+    "fused_gdn_verify": 0,
+    "fused_gdn_replay_rollback": 0,
+    "eager_dispatch": 0,
+    "fused_moe": 0,
+    "external_draft": 0,
+    "proposal_distribution": 0,
+    "paired_draft_cache": 0,
+    "segmented_transaction": 0,
+    "segmented_rollback": 0,
+    "prompt_lookup": 0,
+    "prompt_lookup_proposals": 0,
+    "prompt_lookup_rollback": 0,
+    "prompt_lookup_rotating_replay": 0,
+    "adaptive_mtp_depth": 0,
+    "spomin_surgery": 0,
+    "approximate_kv": 0
+  }
+}

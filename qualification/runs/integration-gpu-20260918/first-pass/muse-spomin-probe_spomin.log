@@ -1,0 +1,8 @@
+PASS long_prompt_compacted {"codes": [200, 200], "receipts": [{"schema": "mlx2.spomin-live-surgery.v1", "request_id": "chatcmpl-4701262c5a044c2b89f77f1953927965", "status": "applied", "reason": "committed", "source_tokens": 13220, "target_tokens": 10148, "strategy": "oldest_contiguous", "epoch": 1, "selected": true, "source_transcript_digest": "2e5fdb698f506bfa338ebf02e19530564c479ddea0bd1eed8927ebc16bd0ea41", "retained_tokens": 10148, "retained_token_digest": "6b8d3303b5bce7883cb3696f435309924eba0ce1f3502307d7f356cf62c55
+PASS compacted_state_never_published {"cached_tokens": [0, 0], "skipped": 4}
+PASS protected_prefix_recall {"answer": "ALPHA-7319", "recalled": true, "receipt": "applied"}
+PASS short_prompt_stays_exact {"receipt": {"request_id": "chatcmpl-09be4e39689d4f9481dceb500f8000ad", "status": "declined", "reason": "below_pressure"}, "warm_cached_tokens": 64, "answer": "SHORT_OK"}
+FAIL compacted_lane_batches_with_exact_lanes {"codes": [200, 200, 200], "answers": ["Lisbon", "One, two, three, four, five, six, seven, eight, nine, ten.", "The three primary colors are red, blue, and yellow."], "widths": [2, 2, 2], "receipt": "declined", "errors": [null, null, null]}
+FAIL manager_status {"counts": {"applied": 3, "reason:committed": 3, "declined": 5, "reason:below_pressure": 1, "reason:shared_apcv2_state": 4}, "active_epochs": 0}
+PASS server_alive_final {"inflight": 0, "error": null}
+SUMMARY 5/7

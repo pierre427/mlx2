@@ -1,0 +1,241 @@
+{
+  "arguments": {
+    "entries": 16,
+    "entry_gib": 0.01,
+    "max_total_gib": 8.0,
+    "rescan_only": true,
+    "scratch_root": "/private/tmp"
+  },
+  "completed_at_unix": 1789782557.8878899,
+  "device": "cpu",
+  "guardrails": {
+    "cleanup_on_exit": true,
+    "minimum_free_memory_bytes": 25769803776,
+    "requested_resident_bytes_per_entry": 10737418,
+    "requested_total_bytes": 171798688
+  },
+  "machine": {
+    "hw_memsize_bytes": 137438953472,
+    "machine": "arm64",
+    "platform": "macOS-26.7-arm64-arm-64bit",
+    "python": "3.12.13",
+    "scratch_filesystem": {
+      "free_bytes": 767287955456,
+      "path": "/private/tmp",
+      "total_bytes": 3996276899840,
+      "used_bytes": 3228988944384
+    }
+  },
+  "peak_rss_bytes": 234209280,
+  "schema": "mlx2.apcv2-persistence-benchmark.v1",
+  "source": {
+    "git_head": "08e605986e1b66937263fce941df816861290acb",
+    "requested_base_revision": "271b21e",
+    "script_sha256": "09aea567c1e0f83365f5f2123c7a54e9ca0e0511520682d4e9f1c3718725a006"
+  },
+  "spill": {
+    "digest_computed_once_per_payload": true,
+    "digest_seconds": 0.07336962601402774,
+    "manifest_write_calls": 64,
+    "manifest_write_seconds": 0.02527446433668956,
+    "mlx_clear_cache_seconds": 0.0002450421452522278,
+    "park_latency_seconds": {
+      "count": 16,
+      "max": 0.029314666986465454,
+      "mean": 0.020833226441027364,
+      "min": 0.012631500023417175,
+      "p50": 0.02141491702059284
+    },
+    "payload_digest_calls": 48,
+    "payload_files": 48,
+    "payload_write_and_fsync_seconds": 0.06420637480914593,
+    "per_entry_breakdown": [
+      {
+        "digest_seconds": 0.004745958023704588,
+        "manifest_write_seconds": 0.0012060419539920986,
+        "mlx_clear_cache_seconds": 3.304198617115617e-05,
+        "other_seconds": 0.0013509580167010427,
+        "payload_write_and_fsync_seconds": 0.005295500042848289,
+        "total_seconds": 0.012631500023417175
+      },
+      {
+        "digest_seconds": 0.004665668006055057,
+        "manifest_write_seconds": 0.001181458996143192,
+        "mlx_clear_cache_seconds": 9.666953701525927e-06,
+        "other_seconds": 0.0031904979841783643,
+        "payload_write_and_fsync_seconds": 0.003930041042622179,
+        "total_seconds": 0.012977332982700318
+      },
+      {
+        "digest_seconds": 0.004632041964214295,
+        "manifest_write_seconds": 0.001101043017115444,
+        "mlx_clear_cache_seconds": 8.917006198316813e-06,
+        "other_seconds": 0.004007164039649069,
+        "payload_write_and_fsync_seconds": 0.003993958991486579,
+        "total_seconds": 0.013743125018663704
+      },
+      {
+        "digest_seconds": 0.004879666958004236,
+        "manifest_write_seconds": 0.0012412499636411667,
+        "mlx_clear_cache_seconds": 1.6042031347751617e-05,
+        "other_seconds": 0.005256957025267184,
+        "payload_write_and_fsync_seconds": 0.004208834026940167,
+        "total_seconds": 0.015602750005200505
+      },
+      {
+        "digest_seconds": 0.004714248992968351,
+        "manifest_write_seconds": 0.0011740430491045117,
+        "mlx_clear_cache_seconds": 9.666022378951311e-06,
+        "other_seconds": 0.0064785819267854095,
+        "payload_write_and_fsync_seconds": 0.003996126062702388,
+        "total_seconds": 0.01637266605393961
+      },
+      {
+        "digest_seconds": 0.004409916989970952,
+        "manifest_write_seconds": 0.0011885840795002878,
+        "mlx_clear_cache_seconds": 1.2958014849573374e-05,
+        "other_seconds": 0.007800914929248393,
+        "payload_write_and_fsync_seconds": 0.0034879170125350356,
+        "total_seconds": 0.01690029102610424
+      },
+      {
+        "digest_seconds": 0.004453832982107997,
+        "manifest_write_seconds": 0.0012105410569347441,
+        "mlx_clear_cache_seconds": 1.8542050383985043e-05,
+        "other_seconds": 0.008987584034912288,
+        "payload_write_and_fsync_seconds": 0.003979499917477369,
+        "total_seconds": 0.018650000041816384
+      },
+      {
+        "digest_seconds": 0.004510541039053351,
+        "manifest_write_seconds": 0.0012507921201176941,
+        "mlx_clear_cache_seconds": 1.1500029359012842e-05,
+        "other_seconds": 0.01027658284874633,
+        "payload_write_and_fsync_seconds": 0.004151416942477226,
+        "total_seconds": 0.020200832979753613
+      },
+      {
+        "digest_seconds": 0.004596584010869265,
+        "manifest_write_seconds": 0.001191251038108021,
+        "mlx_clear_cache_seconds": 1.5375029761344194e-05,
+        "other_seconds": 0.011328455933835357,
+        "payload_write_and_fsync_seconds": 0.004283251008018851,
+        "total_seconds": 0.02141491702059284
+      },
+      {
+        "digest_seconds": 0.004395916999783367,
+        "manifest_write_seconds": 0.0012352500343695283,
+        "mlx_clear_cache_seconds": 1.087499549612403e-05,
+        "other_seconds": 0.012777208990883082,
+        "payload_write_and_fsync_seconds": 0.004169831983745098,
+        "total_seconds": 0.0225890830042772
+      },
+      {
+        "digest_seconds": 0.004640790983103216,
+        "manifest_write_seconds": 0.001316708978265524,
+        "mlx_clear_cache_seconds": 2.504198346287012e-05,
+        "other_seconds": 0.014929042023140937,
+        "payload_write_and_fsync_seconds": 0.003971748985350132,
+        "total_seconds": 0.02488333295332268
+      },
+      {
+        "digest_seconds": 0.004599125066306442,
+        "manifest_write_seconds": 0.0012935830163769424,
+        "mlx_clear_cache_seconds": 1.6624981071799994e-05,
+        "other_seconds": 0.015075666946358979,
+        "payload_write_and_fsync_seconds": 0.0037845829501748085,
+        "total_seconds": 0.02476958296028897
+      },
+      {
+        "digest_seconds": 0.004514749918598682,
+        "manifest_write_seconds": 0.0013066260144114494,
+        "mlx_clear_cache_seconds": 1.770805101841688e-05,
+        "other_seconds": 0.01675920799607411,
+        "payload_write_and_fsync_seconds": 0.004198666021693498,
+        "total_seconds": 0.026796958001796156
+      },
+      {
+        "digest_seconds": 0.004553165985271335,
+        "manifest_write_seconds": 0.0013573350152000785,
+        "mlx_clear_cache_seconds": 1.3541022781282663e-05,
+        "other_seconds": 0.01800137502141297,
+        "payload_write_and_fsync_seconds": 0.003768957976717502,
+        "total_seconds": 0.027694375021383166
+      },
+      {
+        "digest_seconds": 0.004507001023739576,
+        "manifest_write_seconds": 0.0013243330758996308,
+        "mlx_clear_cache_seconds": 1.4291959814727306e-05,
+        "other_seconds": 0.019211540988180786,
+        "payload_write_and_fsync_seconds": 0.0037330419290810823,
+        "total_seconds": 0.028790208976715803
+      },
+      {
+        "digest_seconds": 0.004550417070277035,
+        "manifest_write_seconds": 0.0013138329377397895,
+        "mlx_clear_cache_seconds": 1.12500274553895e-05,
+        "other_seconds": 0.020186167035717517,
+        "payload_write_and_fsync_seconds": 0.0032529999152757227,
+        "total_seconds": 0.029314666986465454
+      }
+    ],
+    "per_entry_park_seconds": [
+      0.012631500023417175,
+      0.012977332982700318,
+      0.013743125018663704,
+      0.015602750005200505,
+      0.01637266605393961,
+      0.01690029102610424,
+      0.018650000041816384,
+      0.020200832979753613,
+      0.02141491702059284,
+      0.0225890830042772,
+      0.02488333295332268,
+      0.02476958296028897,
+      0.026796958001796156,
+      0.027694375021383166,
+      0.028790208976715803,
+      0.029314666986465454
+    ],
+    "throughput_gib_per_second": 0.48011295966088396,
+    "total_seconds_including_fsync_digest_manifest": 0.3333316230564378
+  },
+  "startup_rescan": {
+    "entries": 16,
+    "internal_seconds": 0.004212583997286856,
+    "metadata_only_confirmed": true,
+    "payload_read_bytes": 0,
+    "payload_read_calls": 0,
+    "total_payload_bytes": 171838240,
+    "wall_seconds": 0.005448165989946574
+  },
+  "synthetic": {
+    "persisted_total_bytes": 171838240,
+    "requested_entry_bytes": 10737418,
+    "resident_entry_bytes": [
+      10737418,
+      10737418,
+      10737418,
+      10737418,
+      10737418,
+      10737418,
+      10737418,
+      10737418,
+      10737418,
+      10737418,
+      10737418,
+      10737418,
+      10737418,
+      10737418,
+      10737418,
+      10737418
+    ],
+    "topology": {
+      "mtp_draft_kv_planes": 2,
+      "mtp_tail_hidden": true,
+      "recurrent_arrays_per_plane": 2,
+      "target_kv_planes": 4,
+      "target_recurrent_planes": 4
+    }
+  }
+}

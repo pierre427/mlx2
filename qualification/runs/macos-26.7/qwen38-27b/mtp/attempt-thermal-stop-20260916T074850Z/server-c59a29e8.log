@@ -1,0 +1,58 @@
+[transformers] PyTorch was not found. Models won't be available and only tokenizers, configuration and file/data utilities can be used.
+2026-09-16 03:43:18,928 INFO "GET /health HTTP/1.1" 503 -
+----------------------------------------
+Exception occurred during processing of request from ('127.0.0.1', 50943)
+Traceback (most recent call last):
+  File "~/.local/share/uv/python/cpython-3.12.13-macos-aarch64-none/lib/python3.12/socketserver.py", line 697, in process_request_thread
+    self.finish_request(request, client_address)
+  File "~/.local/share/uv/python/cpython-3.12.13-macos-aarch64-none/lib/python3.12/socketserver.py", line 362, in finish_request
+    self.RequestHandlerClass(request, client_address, self)
+  File "~/.local/share/uv/python/cpython-3.12.13-macos-aarch64-none/lib/python3.12/socketserver.py", line 766, in __init__
+    self.handle()
+  File "~/.local/share/uv/python/cpython-3.12.13-macos-aarch64-none/lib/python3.12/http/server.py", line 442, in handle
+    self.handle_one_request()
+  File "~/.local/share/uv/python/cpython-3.12.13-macos-aarch64-none/lib/python3.12/http/server.py", line 408, in handle_one_request
+    self.raw_requestline = self.rfile.readline(65537)
+                           ^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "~/.local/share/uv/python/cpython-3.12.13-macos-aarch64-none/lib/python3.12/socket.py", line 720, in readinto
+    return self._sock.recv_into(b)
+           ^^^^^^^^^^^^^^^^^^^^^^^
+ConnectionResetError: [Errno 54] Connection reset by peer
+----------------------------------------
+2026-09-16 03:43:19,950 INFO "GET /health HTTP/1.1" 503 -
+2026-09-16 03:43:20,135 INFO ubc_evict: evicted 4784.0 MB from UBC for ~/mlx-models/Qwen3.8-27B-oQ4e-mtp/model-00001-of-00004.safetensors
+2026-09-16 03:43:20,176 INFO ubc_evict: evicted 4785.1 MB from UBC for ~/mlx-models/Qwen3.8-27B-oQ4e-mtp/model-00002-of-00004.safetensors
+2026-09-16 03:43:20,212 INFO ubc_evict: evicted 4769.9 MB from UBC for ~/mlx-models/Qwen3.8-27B-oQ4e-mtp/model-00003-of-00004.safetensors
+2026-09-16 03:43:20,227 INFO ubc_evict: evicted 1846.3 MB from UBC for ~/mlx-models/Qwen3.8-27B-oQ4e-mtp/model-00004-of-00004.safetensors
+2026-09-16 03:43:20,227 INFO ubc_evict: pass complete total_mb=16185.5 elapsed_s=0.12
+2026-09-16 03:43:20,984 INFO "GET /health HTTP/1.1" 200 -
+2026-09-16 03:43:21,063 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 03:43:21,184 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 03:43:21,242 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 03:43:31,165 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 03:43:31,489 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 03:43:31,734 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 03:43:31,784 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 03:43:32,583 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 03:43:33,073 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 03:43:33,327 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 03:43:33,471 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 03:43:33,522 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 03:43:34,449 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 03:43:35,145 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 03:43:35,772 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 03:43:35,867 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 03:43:37,284 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 03:43:38,595 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 03:43:46,775 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 03:43:46,776 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 03:43:46,776 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 03:43:46,778 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 03:43:48,147 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 03:43:49,501 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 03:43:51,563 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 03:43:51,563 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 03:46:28,615 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 03:47:30,643 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 03:48:34,993 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 03:48:50,877 INFO "POST /v1/chat/completions HTTP/1.1" 503 -

@@ -1,0 +1,34 @@
+{
+  "component": "revision-bound Spomin Qwen4 live KV surgery",
+  "source_repository": "lab-owned mlx-lm-unified",
+  "source_revision": "13eb83388750435bcc751d0b9e33857a38152544",
+  "source_paths": [
+    "mlx_lm/context_compaction.py",
+    "mlx_lm/spomin_layer.py",
+    "mlx_lm/spomin_qwen4_surgery.py",
+    "mlx_lm/spomin_live_surgery.py"
+  ],
+  "license": "MIT",
+  "destination_paths": [
+    "src/mlx2/context_compaction.py",
+    "src/mlx2/runtime/spomin_layer.py",
+    "src/mlx2/runtime/spomin_qwen4_surgery.py",
+    "src/mlx2/runtime/spomin_live_surgery.py",
+    "src/mlx2/runtime/generate.py",
+    "src/mlx2/serving.py"
+  ],
+  "modifications": [
+    "Adapted imports to mlx2 runtime contracts and cache-plane layout.",
+    "Kept live surgery explicitly default-off pending artifact qualification.",
+    "Added selected/declined route receipts and retained uncompacted transcript semantics.",
+    "Preserved fail-closed B=1 unquantized QSA, inactive-MTP, default-RoPE, epoch, and drained-barrier requirements.",
+    "Wired a qualification-only, default-off ordinary-decode serving boundary after isolated prefill and before decode publication.",
+    "Refused MTP, external draft, prompt lookup, batched lanes, and restored/shared APCv2 cache state; synchronized the generation stream before mutation.",
+    "Published bounded observed receipts with source transcript and retained token digests."
+  ],
+  "validation": [
+    "tests/test_spomin_live_surgery.py",
+    "tests/test_approximate_state.py",
+    "2026-09-18 Apple-GPU synthetic Qwen4 attention-only surgery and compacted-continuation parity smokes passed with MLX_ENABLE_TF32=0; no live supported-model serving route was selected."
+  ]
+}

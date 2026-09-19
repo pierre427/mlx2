@@ -1,0 +1,8 @@
+PASS long_prompt_compacted {"codes": [200, 200], "receipts": [{"schema": "mlx2.spomin-live-surgery.v1", "request_id": "chatcmpl-efa5a0b61bad46249e4b0d4275a6d416", "status": "applied", "reason": "committed", "source_tokens": 13225, "target_tokens": 10153, "strategy": "oldest_contiguous", "epoch": 1, "selected": true, "source_transcript_digest": "e11b7872bdf16591a418bc03ab7ec9ba9827acfacfde46059afacd6b812b0ab4", "retained_tokens": 10153, "retained_token_digest": "9d7f563bf14f46b13fe6264a1c7ffa286d37eef783f276c57f92de76d3e36
+PASS compacted_state_never_published {"cached_tokens": [0, 0], "skipped": 4}
+PASS protected_prefix_recall {"answer": "ALPHA-7319", "recalled": true, "receipt": "applied"}
+PASS short_prompt_stays_exact {"receipt": {"request_id": "chatcmpl-7596c0bd925e4ca58480819c85215ad9", "status": "declined", "reason": "below_pressure"}, "warm_cached_tokens": 64, "answer": "SHORT_OK"}
+PASS compacted_lane_batches_with_exact_lanes {"codes": [200, 200, 200], "answers": ["Lisbon", "One, two, three, four, five, six, seven, eight, nine, ten.", "The three primary colors are red, blue, and yellow."], "widths": [2, 2, 2], "receipt": "applied", "errors": [null, null, null]}
+PASS manager_status {"counts": {"applied": 4, "reason:committed": 4, "declined": 4, "reason:below_pressure": 4}, "active_epochs": 0}
+PASS server_alive_final {"inflight": 0, "error": null}
+SUMMARY 7/7

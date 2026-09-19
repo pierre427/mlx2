@@ -1,0 +1,1443 @@
+{
+  "schema": "mlx2.qualification-matrix.v1",
+  "thermal": {
+    "required_thermal_state": 0,
+    "max_battery_temperature_c": 40.0,
+    "max_virtual_temperature_c": 45.0,
+    "max_temperature_delta_c": 0.5,
+    "consecutive_samples": 3,
+    "sample_interval_seconds": 15,
+    "max_wait_seconds": 1800,
+    "require_temperatures": true
+  },
+  "models": [
+    {
+      "name": "flash-next",
+      "tokenizer_renderer": "qwen_direct",
+      "tokenizer_path": "~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP",
+      "contexts": [
+        {
+          "tokens": 2048
+        },
+        {
+          "tokens": 8192
+        },
+        {
+          "tokens": 32768
+        },
+        {
+          "tokens": 65536
+        },
+        {
+          "tokens": 131072
+        },
+        {
+          "tokens": 262016
+        }
+      ],
+      "context": {
+        "runs_per_cell": 3,
+        "max_tokens": 64,
+        "prompt_token_tolerance": 0,
+        "min_cached_tokens": 1,
+        "timeout_seconds": 7200
+      },
+      "batch_stress": {
+        "rounds": 20,
+        "width": 20,
+        "max_tokens": 64,
+        "timeout_seconds": 3600,
+        "prompts": [
+          "Explain compiler optimization 01 in detail.",
+          "Explain compiler optimization 02 in detail.",
+          "Explain compiler optimization 03 in detail.",
+          "Explain compiler optimization 04 in detail.",
+          "Explain compiler optimization 05 in detail.",
+          "Explain compiler optimization 06 in detail.",
+          "Explain compiler optimization 07 in detail.",
+          "Explain compiler optimization 08 in detail.",
+          "Explain compiler optimization 09 in detail.",
+          "Explain compiler optimization 10 in detail.",
+          "Explain compiler optimization 11 in detail.",
+          "Explain compiler optimization 12 in detail.",
+          "Explain compiler optimization 13 in detail.",
+          "Explain compiler optimization 14 in detail.",
+          "Explain compiler optimization 15 in detail.",
+          "Explain compiler optimization 16 in detail.",
+          "Explain compiler optimization 17 in detail.",
+          "Explain compiler optimization 18 in detail.",
+          "Explain compiler optimization 19 in detail.",
+          "Explain compiler optimization 20 in detail."
+        ]
+      },
+      "spomin20x20": {
+        "serving_arm": "mtp",
+        "corpus_path": "corpora/spomin-20x20-long-multiturn-corpus-20260915.json",
+        "corpus_sha256": "5d7233f805b310e354cb628a0d0b1d12299cc90dbfeebb890eaf35dac966ad12",
+        "source_receipts_path": "~/Desktop/mlx-uag/results/spomin-20x20-long-multiturn-b20-full-20260915.json",
+        "source_receipts_sha256": "1dd6c0019dca233fd62f887d9ad70daff0aa7bbf1a415cb95dcb3a3991714f25",
+        "tokenizer_path": "~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP",
+        "capacity_tokens": 8192,
+        "max_tokens": 192,
+        "timeout_seconds": 1800,
+        "source_reconciliation_tokenizer_path": "~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP"
+      },
+      "arms": [
+        {
+          "name": "ordinary",
+          "url": "http://127.0.0.1:8285",
+          "activation_key": "flash-next-ordinary-b20",
+          "activate_command": [
+            "~/Desktop/mlx2/.venv/bin/python",
+            "~/Desktop/mlx2/scripts/activate_qualification_arm.py",
+            "--state",
+            "/tmp/mlx2-qualification/server.json",
+            "--log",
+            "/tmp/mlx2-qualification/flash-next-ordinary.log",
+            "--cwd",
+            "~/Desktop/mlx2",
+            "--",
+            "/usr/bin/env",
+            "PYTHONPATH=src",
+            ".venv/bin/python",
+            "-u",
+            "-m",
+            "mlx2.server",
+            "--model",
+            "~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP",
+            "--host",
+            "127.0.0.1",
+            "--port",
+            "8285",
+            "--max-context",
+            "262144",
+            "--max-lanes",
+            "20",
+            "--max-inflight",
+            "40",
+            "--cache-bytes",
+            "17179869184",
+            "--cache-dir",
+            "/tmp/mlx2-qualification/flash-next-ordinary-apc",
+            "--execution-policy",
+            "qualification/policies/flash-next-mtp2.json",
+            "--ordinary",
+            "--qualification-mode"
+          ],
+          "status_requirements": [
+            {
+              "path": "profile",
+              "equals": "flash-next-apcv2-ordinary"
+            },
+            {
+              "path": "settings.speculation",
+              "equals": "ordinary"
+            },
+            {
+              "path": "settings.environment.MLX_QWEN4_PLE_COMPILE",
+              "equals": "1"
+            }
+          ],
+          "receipt_requirements": [
+            {
+              "path": "cache",
+              "equals": "apcv2"
+            },
+            {
+              "path": "profile",
+              "equals": "flash-next-apcv2-ordinary"
+            },
+            {
+              "path": "mtp",
+              "equals": null
+            },
+            {
+              "path": "speculation",
+              "equals": null
+            },
+            {
+              "path": "ordinary_compute_width",
+              "gte": 1
+            }
+          ],
+          "counter_requirements": [
+            {
+              "path": "apcv2.hits",
+              "delta_gte": 1
+            },
+            {
+              "path": "apcv2.stores",
+              "delta_gte": 1
+            },
+            {
+              "path": "execution.ple_tables.0.lookups",
+              "delta_gte": 1
+            },
+            {
+              "paths": [
+                "execution.ple_tables.0.cache_hits",
+                "execution.ple_tables.0.cache_misses"
+              ],
+              "delta_gte": 1
+            },
+            {
+              "path": "execution.ple_tables.0.rows",
+              "delta_gte": 1
+            },
+            {
+              "path": "execution.ple_tables.0.unique_rows",
+              "delta_gte": 1
+            },
+            {
+              "path": "execution.ple_compile.counts.hits",
+              "delta_gte": 1
+            },
+            {
+              "path": "execution.fused_gdn.fused_calls",
+              "delta_gte": 1
+            },
+            {
+              "path": "execution.round_levers.qsa_pooled_key_cache_hits",
+              "delta_gte": 1
+            },
+            {
+              "path": "execution.round_levers.qsa_scatter_chosen_calls",
+              "delta_gte": 1
+            },
+            {
+              "path": "execution.round_levers.eager_async_evals",
+              "delta_gte": 1
+            },
+            {
+              "paths": [
+                "execution.moe.dispatches.scalar",
+                "execution.moe.dispatches.tile4"
+              ],
+              "delta_gte": 1
+            }
+          ],
+          "after_status_requirements": [
+            {
+              "path": "apcv2.cow.active_leases",
+              "equals": 0
+            },
+            {
+              "path": "execution.ple_compile.enabled",
+              "equals": true
+            },
+            {
+              "path": "execution.ple_compile.counts.builds",
+              "gt": 0
+            },
+            {
+              "path": "execution.ple_compile.counts.hits",
+              "gt": 0
+            },
+            {
+              "path": "execution.ple_compile.counts.fallbacks",
+              "equals": 0
+            },
+            {
+              "path": "execution.ple_compile.counts.overflow",
+              "equals": 0
+            },
+            {
+              "path": "execution.ple_compile.counts.skips",
+              "equals": 0
+            }
+          ],
+          "qualification_receipt": {
+            "path": "~/Desktop/mlx2/qualification/runs/macos-26.7/flash-next/ordinary/route-qualification.json",
+            "required_checks": [
+              "feature_file_backed_ple",
+              "feature_compiled_ple",
+              "feature_pooled_qsa",
+              "feature_scatter_qsa",
+              "feature_fused_gdn_decode",
+              "feature_eager_dispatch",
+              "feature_fused_moe"
+            ],
+            "scope": "aggregate advanced-feature probes on distinct eligible workloads; bound to active runtime, artifact, and settings before matrix execution"
+          }
+        },
+        {
+          "name": "mtp",
+          "url": "http://127.0.0.1:8285",
+          "activation_key": "flash-next-mtp-b20",
+          "activate_command": [
+            "~/Desktop/mlx2/.venv/bin/python",
+            "~/Desktop/mlx2/scripts/activate_qualification_arm.py",
+            "--state",
+            "/tmp/mlx2-qualification/server.json",
+            "--log",
+            "/tmp/mlx2-qualification/flash-next-mtp.log",
+            "--cwd",
+            "~/Desktop/mlx2",
+            "--",
+            "/usr/bin/env",
+            "PYTHONPATH=src",
+            ".venv/bin/python",
+            "-u",
+            "-m",
+            "mlx2.server",
+            "--model",
+            "~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP",
+            "--host",
+            "127.0.0.1",
+            "--port",
+            "8285",
+            "--max-context",
+            "262144",
+            "--max-lanes",
+            "20",
+            "--max-inflight",
+            "40",
+            "--cache-bytes",
+            "17179869184",
+            "--cache-dir",
+            "/tmp/mlx2-qualification/flash-next-mtp-apc",
+            "--execution-policy",
+            "qualification/policies/flash-next-mtp2.json",
+            "--qualification-mode"
+          ],
+          "status_requirements": [
+            {
+              "path": "profile",
+              "equals": "flash-next-apcv2-mtp2"
+            },
+            {
+              "path": "settings.speculation",
+              "equals": "self_mtp"
+            },
+            {
+              "path": "settings.environment.MLX_QWEN4_PLE_COMPILE",
+              "equals": "1"
+            }
+          ],
+          "receipt_requirements": [
+            {
+              "path": "cache",
+              "equals": "apcv2"
+            },
+            {
+              "path": "profile",
+              "equals": "flash-next-apcv2-mtp2"
+            },
+            {
+              "path": "mtp.route",
+              "equals": "segmented_self_mtp"
+            },
+            {
+              "path": "mtp.num_draft",
+              "equals": 2
+            },
+            {
+              "path": "mtp.stats.draft_proposed",
+              "gt": 0
+            }
+          ],
+          "counter_requirements": [
+            {
+              "path": "apcv2.hits",
+              "delta_gte": 1
+            },
+            {
+              "path": "apcv2.stores",
+              "delta_gte": 1
+            },
+            {
+              "path": "execution.segmented_mtp.engaged",
+              "delta_gte": 1
+            },
+            {
+              "path": "execution.segmented_mtp.committed_cycles",
+              "delta_gte": 1
+            },
+            {
+              "path": "execution.fused_gdn.verify_calls",
+              "delta_gte": 1
+            },
+            {
+              "path": "execution.ple_tables.0.lookups",
+              "delta_gte": 1
+            },
+            {
+              "paths": [
+                "execution.ple_tables.0.cache_hits",
+                "execution.ple_tables.0.cache_misses"
+              ],
+              "delta_gte": 1
+            },
+            {
+              "path": "execution.ple_tables.0.rows",
+              "delta_gte": 1
+            },
+            {
+              "path": "execution.ple_tables.0.unique_rows",
+              "delta_gte": 1
+            },
+            {
+              "path": "execution.ple_compile.counts.hits",
+              "delta_gte": 1
+            },
+            {
+              "path": "execution.round_levers.ple_tail_prefetch_tables",
+              "delta_gte": 1
+            },
+            {
+              "path": "execution.indexed_qsa.counts.engaged",
+              "delta_gte": 1,
+              "min_context_tokens": 32768
+            },
+            {
+              "path": "execution.segmented_mtp.private_delta_attention_calls",
+              "delta_gte": 1,
+              "min_context_tokens": 65536
+            },
+            {
+              "path": "execution.round_levers.qsa_pooled_key_cache_hits",
+              "delta_gte": 1
+            },
+            {
+              "path": "execution.round_levers.qsa_scatter_chosen_calls",
+              "delta_gte": 1
+            },
+            {
+              "path": "execution.round_levers.eager_async_evals",
+              "delta_gte": 1
+            },
+            {
+              "paths": [
+                "execution.moe.dispatches.scalar",
+                "execution.moe.dispatches.tile4"
+              ],
+              "delta_gte": 1
+            }
+          ],
+          "after_status_requirements": [
+            {
+              "path": "apcv2.cow.active_leases",
+              "equals": 0
+            },
+            {
+              "path": "execution.segmented_mtp.failures",
+              "equals": 0
+            },
+            {
+              "path": "execution.segmented_mtp.full_prefix_materializations",
+              "equals": 0
+            },
+            {
+              "path": "execution.segmented_mtp.physical_b2_formations",
+              "equals": 0
+            },
+            {
+              "path": "execution.ple_compile.enabled",
+              "equals": true
+            },
+            {
+              "path": "execution.ple_compile.counts.builds",
+              "gt": 0
+            },
+            {
+              "path": "execution.ple_compile.counts.hits",
+              "gt": 0
+            },
+            {
+              "path": "execution.ple_compile.counts.fallbacks",
+              "equals": 0
+            },
+            {
+              "path": "execution.ple_compile.counts.overflow",
+              "equals": 0
+            },
+            {
+              "path": "execution.ple_compile.counts.skips",
+              "equals": 0
+            }
+          ],
+          "qualification_receipt": {
+            "path": "~/Desktop/mlx2/qualification/runs/macos-26.7/flash-next/mtp/route-qualification.json",
+            "required_checks": [
+              "feature_file_backed_ple",
+              "feature_compiled_ple",
+              "feature_pooled_qsa",
+              "feature_scatter_qsa",
+              "feature_fused_gdn_decode",
+              "feature_eager_dispatch",
+              "feature_fused_moe",
+              "feature_fused_gdn_verify",
+              "feature_shared_qsa",
+              "feature_async_promotion",
+              "feature_known_tail_prefetch",
+              "feature_indexed_qsa",
+              "feature_private_delta"
+            ],
+            "scope": "aggregate advanced-feature probes on distinct eligible workloads; bound to active runtime, artifact, and settings before matrix execution"
+          }
+        }
+      ],
+      "arm_order_claim": "alternating"
+    },
+    {
+      "name": "qwen38-27b",
+      "tokenizer_renderer": "qwen_direct",
+      "tokenizer_path": "~/mlx-models/Qwen3.8-27B-oQ4e-mtp",
+      "contexts": [
+        {
+          "tokens": 2048
+        },
+        {
+          "tokens": 8192
+        },
+        {
+          "tokens": 32768
+        },
+        {
+          "tokens": 65536
+        },
+        {
+          "tokens": 131072
+        },
+        {
+          "tokens": 262016
+        }
+      ],
+      "context": {
+        "runs_per_cell": 3,
+        "max_tokens": 64,
+        "prompt_token_tolerance": 0,
+        "min_cached_tokens": 1,
+        "timeout_seconds": 7200
+      },
+      "batch_stress": {
+        "rounds": 20,
+        "width": 20,
+        "max_tokens": 64,
+        "timeout_seconds": 3600,
+        "prompts": [
+          "Explain database scheduling 01.",
+          "Explain database scheduling 02.",
+          "Explain database scheduling 03.",
+          "Explain database scheduling 04.",
+          "Explain database scheduling 05.",
+          "Explain database scheduling 06.",
+          "Explain database scheduling 07.",
+          "Explain database scheduling 08.",
+          "Explain database scheduling 09.",
+          "Explain database scheduling 10.",
+          "Explain database scheduling 11.",
+          "Explain database scheduling 12.",
+          "Explain database scheduling 13.",
+          "Explain database scheduling 14.",
+          "Explain database scheduling 15.",
+          "Explain database scheduling 16.",
+          "Explain database scheduling 17.",
+          "Explain database scheduling 18.",
+          "Explain database scheduling 19.",
+          "Explain database scheduling 20."
+        ]
+      },
+      "spomin20x20": {
+        "serving_arm": "mtp",
+        "corpus_path": "corpora/spomin-20x20-long-multiturn-corpus-20260915.json",
+        "corpus_sha256": "5d7233f805b310e354cb628a0d0b1d12299cc90dbfeebb890eaf35dac966ad12",
+        "source_receipts_path": "~/Desktop/mlx-uag/results/spomin-20x20-long-multiturn-b20-full-20260915.json",
+        "source_receipts_sha256": "1dd6c0019dca233fd62f887d9ad70daff0aa7bbf1a415cb95dcb3a3991714f25",
+        "tokenizer_path": "~/mlx-models/Qwen3.8-27B-oQ4e-mtp",
+        "capacity_tokens": 8192,
+        "max_tokens": 192,
+        "timeout_seconds": 1800,
+        "source_reconciliation_tokenizer_path": "~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP"
+      },
+      "arms": [
+        {
+          "name": "ordinary",
+          "url": "http://127.0.0.1:8285",
+          "activation_key": "qwen38-ordinary-b20",
+          "activate_command": [
+            "~/Desktop/mlx2/.venv/bin/python",
+            "~/Desktop/mlx2/scripts/activate_qualification_arm.py",
+            "--state",
+            "/tmp/mlx2-qualification/server.json",
+            "--log",
+            "/tmp/mlx2-qualification/qwen38-ordinary.log",
+            "--cwd",
+            "~/Desktop/mlx2",
+            "--",
+            "/usr/bin/env",
+            "PYTHONPATH=src",
+            ".venv/bin/python",
+            "-u",
+            "-m",
+            "mlx2.server",
+            "--model",
+            "~/mlx-models/Qwen3.8-27B-oQ4e-mtp",
+            "--host",
+            "127.0.0.1",
+            "--port",
+            "8285",
+            "--max-context",
+            "262144",
+            "--max-lanes",
+            "20",
+            "--max-inflight",
+            "40",
+            "--cache-bytes",
+            "17179869184",
+            "--cache-dir",
+            "/tmp/mlx2-qualification/qwen38-ordinary-apc",
+            "--execution-policy",
+            "qualification/policies/qwen38-27b-mtp2.json",
+            "--ordinary",
+            "--qualification-mode"
+          ],
+          "status_requirements": [
+            {
+              "path": "profile",
+              "equals": "qwen38-27b-apcv2-ordinary"
+            },
+            {
+              "path": "settings.speculation",
+              "equals": "ordinary"
+            }
+          ],
+          "receipt_requirements": [
+            {
+              "path": "cache",
+              "equals": "apcv2"
+            },
+            {
+              "path": "profile",
+              "equals": "qwen38-27b-apcv2-ordinary"
+            },
+            {
+              "path": "mtp",
+              "equals": null
+            },
+            {
+              "path": "speculation",
+              "equals": null
+            },
+            {
+              "path": "ordinary_compute_width",
+              "gte": 1
+            }
+          ],
+          "counter_requirements": [
+            {
+              "path": "apcv2.hits",
+              "delta_gte": 1
+            },
+            {
+              "path": "apcv2.stores",
+              "delta_gte": 1
+            }
+          ],
+          "after_status_requirements": [
+            {
+              "path": "apcv2.cow.active_leases",
+              "equals": 0
+            }
+          ],
+          "qualification_receipt": {
+            "path": "runs/macos-26.7/qwen38-27b/ordinary/route-qualification.json",
+            "required_checks": [
+              "apcv2_reuse",
+              "apcv2_stores",
+              "cache_leases",
+              "quiescence",
+              "runtime_stable"
+            ]
+          }
+        },
+        {
+          "name": "mtp",
+          "url": "http://127.0.0.1:8285",
+          "activation_key": "qwen38-mtp-b20",
+          "activate_command": [
+            "~/Desktop/mlx2/.venv/bin/python",
+            "~/Desktop/mlx2/scripts/activate_qualification_arm.py",
+            "--state",
+            "/tmp/mlx2-qualification/server.json",
+            "--log",
+            "/tmp/mlx2-qualification/qwen38-mtp.log",
+            "--cwd",
+            "~/Desktop/mlx2",
+            "--",
+            "/usr/bin/env",
+            "PYTHONPATH=src",
+            ".venv/bin/python",
+            "-u",
+            "-m",
+            "mlx2.server",
+            "--model",
+            "~/mlx-models/Qwen3.8-27B-oQ4e-mtp",
+            "--host",
+            "127.0.0.1",
+            "--port",
+            "8285",
+            "--max-context",
+            "262144",
+            "--max-lanes",
+            "20",
+            "--max-inflight",
+            "40",
+            "--cache-bytes",
+            "17179869184",
+            "--cache-dir",
+            "/tmp/mlx2-qualification/qwen38-mtp-apc",
+            "--execution-policy",
+            "qualification/policies/qwen38-27b-mtp2.json",
+            "--qualification-mode"
+          ],
+          "status_requirements": [
+            {
+              "path": "profile",
+              "equals": "qwen38-27b-apcv2-mtp2"
+            },
+            {
+              "path": "settings.speculation",
+              "equals": "self_mtp"
+            }
+          ],
+          "receipt_requirements": [
+            {
+              "path": "cache",
+              "equals": "apcv2"
+            },
+            {
+              "path": "profile",
+              "equals": "qwen38-27b-apcv2-mtp2"
+            },
+            {
+              "path": "mtp.route",
+              "equals": "segmented_self_mtp"
+            },
+            {
+              "path": "mtp.num_draft",
+              "equals": 2
+            },
+            {
+              "path": "mtp.stats.draft_proposed",
+              "gt": 0
+            }
+          ],
+          "counter_requirements": [
+            {
+              "path": "apcv2.hits",
+              "delta_gte": 1
+            },
+            {
+              "path": "apcv2.stores",
+              "delta_gte": 1
+            },
+            {
+              "path": "execution.segmented_mtp.engaged",
+              "delta_gte": 1
+            },
+            {
+              "path": "execution.segmented_mtp.true_batched_engaged",
+              "delta_gte": 1,
+              "suite": "batch_stress"
+            },
+            {
+              "path": "execution.segmented_mtp.batched_target_forwards",
+              "delta_gte": 1
+            },
+            {
+              "path": "execution.segmented_mtp.segmented_attention_calls",
+              "delta_gte": 1
+            },
+            {
+              "path": "execution.segmented_mtp.transaction_branches",
+              "delta_gte": 1
+            },
+            {
+              "path": "execution.segmented_mtp.committed_cycles",
+              "delta_gte": 1
+            }
+          ],
+          "after_status_requirements": [
+            {
+              "path": "apcv2.cow.active_leases",
+              "equals": 0
+            },
+            {
+              "path": "execution.segmented_mtp.failures",
+              "equals": 0
+            },
+            {
+              "path": "execution.segmented_mtp.full_prefix_materializations",
+              "equals": 0
+            },
+            {
+              "path": "execution.segmented_mtp.physical_b2_formations",
+              "equals": 0
+            }
+          ],
+          "qualification_receipt": {
+            "path": "runs/macos-26.7/qwen38-27b/mtp/route-qualification.json",
+            "required_checks": [
+              "apcv2_reuse",
+              "apcv2_stores",
+              "cache_leases",
+              "quiescence",
+              "runtime_stable",
+              "mtp_execution",
+              "mtp_segmented_attention",
+              "mtp_transaction_branches",
+              "mtp_committed_cycles",
+              "mtp_true_batching",
+              "mtp_zero_full_prefix_materializations",
+              "mtp_zero_physical_b2",
+              "mtp_zero_failures"
+            ]
+          }
+        }
+      ],
+      "arm_order_claim": "alternating"
+    },
+    {
+      "name": "muse-glimmer",
+      "tokenizer_renderer": "muse_direct",
+      "tokenizer_path": "~/mlx-models/Muse-Glimmer-30B-mlx-4bit",
+      "contexts": [
+        {
+          "tokens": 2048
+        },
+        {
+          "tokens": 8192
+        },
+        {
+          "tokens": 32768
+        },
+        {
+          "tokens": 65536
+        },
+        {
+          "tokens": 98304
+        },
+        {
+          "tokens": 131008
+        }
+      ],
+      "context": {
+        "runs_per_cell": 3,
+        "max_tokens": 64,
+        "prompt_token_tolerance": 0,
+        "min_cached_tokens": 1,
+        "timeout_seconds": 7200
+      },
+      "batch_stress": {
+        "rounds": 20,
+        "width": 20,
+        "max_tokens": 64,
+        "timeout_seconds": 3600,
+        "prompts": [
+          "Explain music synthesis 01.",
+          "Explain music synthesis 02.",
+          "Explain music synthesis 03.",
+          "Explain music synthesis 04.",
+          "Explain music synthesis 05.",
+          "Explain music synthesis 06.",
+          "Explain music synthesis 07.",
+          "Explain music synthesis 08.",
+          "Explain music synthesis 09.",
+          "Explain music synthesis 10.",
+          "Explain music synthesis 11.",
+          "Explain music synthesis 12.",
+          "Explain music synthesis 13.",
+          "Explain music synthesis 14.",
+          "Explain music synthesis 15.",
+          "Explain music synthesis 16.",
+          "Explain music synthesis 17.",
+          "Explain music synthesis 18.",
+          "Explain music synthesis 19.",
+          "Explain music synthesis 20."
+        ]
+      },
+      "spomin20x20": {
+        "serving_arm": "dflash2",
+        "corpus_path": "corpora/spomin-20x20-long-multiturn-corpus-20260915.json",
+        "corpus_sha256": "5d7233f805b310e354cb628a0d0b1d12299cc90dbfeebb890eaf35dac966ad12",
+        "source_receipts_path": "~/Desktop/mlx-uag/results/spomin-20x20-long-multiturn-b20-full-20260915.json",
+        "source_receipts_sha256": "1dd6c0019dca233fd62f887d9ad70daff0aa7bbf1a415cb95dcb3a3991714f25",
+        "tokenizer_path": "~/mlx-models/Muse-Glimmer-30B-mlx-4bit",
+        "capacity_tokens": 8192,
+        "max_tokens": 192,
+        "timeout_seconds": 1800,
+        "source_reconciliation_tokenizer_path": "~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP"
+      },
+      "arms": [
+        {
+          "name": "ordinary",
+          "url": "http://127.0.0.1:8285",
+          "activation_key": "muse-ordinary-b20",
+          "activate_command": [
+            "~/Desktop/mlx2/.venv/bin/python",
+            "~/Desktop/mlx2/scripts/activate_qualification_arm.py",
+            "--state",
+            "/tmp/mlx2-qualification/server.json",
+            "--log",
+            "/tmp/mlx2-qualification/muse-ordinary.log",
+            "--cwd",
+            "~/Desktop/mlx2",
+            "--",
+            "/usr/bin/env",
+            "PYTHONPATH=src",
+            ".venv/bin/python",
+            "-u",
+            "-m",
+            "mlx2.server",
+            "--model",
+            "~/mlx-models/Muse-Glimmer-30B-mlx-4bit",
+            "--host",
+            "127.0.0.1",
+            "--port",
+            "8285",
+            "--max-context",
+            "131072",
+            "--max-lanes",
+            "20",
+            "--max-inflight",
+            "40",
+            "--cache-dir",
+            "/tmp/mlx2-qualification/muse-ordinary-apc",
+            "--ordinary",
+            "--qualification-mode"
+          ],
+          "status_requirements": [
+            {
+              "path": "profile",
+              "equals": "muse-glimmer-apcv2-ordinary"
+            },
+            {
+              "path": "settings.speculation",
+              "equals": "ordinary"
+            }
+          ],
+          "receipt_requirements": [
+            {
+              "path": "cache",
+              "equals": "apcv2"
+            },
+            {
+              "path": "profile",
+              "equals": "muse-glimmer-apcv2-ordinary"
+            },
+            {
+              "path": "mtp",
+              "equals": null
+            },
+            {
+              "path": "speculation",
+              "equals": null
+            },
+            {
+              "path": "ordinary_compute_width",
+              "gte": 1
+            }
+          ],
+          "counter_requirements": [
+            {
+              "path": "apcv2.hits",
+              "delta_gte": 1
+            },
+            {
+              "path": "apcv2.stores",
+              "delta_gte": 1
+            }
+          ],
+          "after_status_requirements": [
+            {
+              "path": "apcv2.cow.active_leases",
+              "equals": 0
+            }
+          ],
+          "qualification_receipt": {
+            "path": "~/Desktop/mlx2/qualification/runs/macos-26.7/muse-glimmer/ordinary/route-qualification.json",
+            "required_checks": [
+              "apcv2_reuse",
+              "apcv2_stores",
+              "cache_leases",
+              "quiescence",
+              "runtime_stable"
+            ],
+            "scope": "full ordinary serving qualification bound to the active runtime, Muse artifact, complete settings and approved qualification harness"
+          }
+        },
+        {
+          "name": "dflash2",
+          "url": "http://127.0.0.1:8285",
+          "activation_key": "muse-dflash2-b20",
+          "activate_command": [
+            "~/Desktop/mlx2/.venv/bin/python",
+            "~/Desktop/mlx2/scripts/activate_qualification_arm.py",
+            "--state",
+            "/tmp/mlx2-qualification/server.json",
+            "--log",
+            "/tmp/mlx2-qualification/muse-dflash2.log",
+            "--cwd",
+            "~/Desktop/mlx2",
+            "--",
+            "/usr/bin/env",
+            "PYTHONPATH=src",
+            ".venv/bin/python",
+            "-u",
+            "-m",
+            "mlx2.server",
+            "--model",
+            "~/mlx-models/Muse-Glimmer-30B-mlx-4bit",
+            "--host",
+            "127.0.0.1",
+            "--port",
+            "8285",
+            "--max-context",
+            "131072",
+            "--max-lanes",
+            "20",
+            "--max-inflight",
+            "40",
+            "--cache-dir",
+            "/tmp/mlx2-qualification/muse-dflash2-apc",
+            "--execution-policy",
+            "qualification/policies/muse-dflash2.json",
+            "--external-draft",
+            "--qualification-mode"
+          ],
+          "status_requirements": [
+            {
+              "path": "profile",
+              "equals": "muse-glimmer-apcv2-dflash2"
+            },
+            {
+              "path": "settings.speculation",
+              "equals": "external_draft"
+            }
+          ],
+          "receipt_requirements": [
+            {
+              "path": "cache",
+              "equals": "apcv2"
+            },
+            {
+              "path": "profile",
+              "equals": "muse-glimmer-apcv2-dflash2"
+            },
+            {
+              "path": "speculation.kind",
+              "equals": "external_dflash2"
+            },
+            {
+              "path": "speculation.execution",
+              "equals": "external_draft_verify"
+            },
+            {
+              "path": "speculation.ordinary_fallback",
+              "equals": false
+            },
+            {
+              "path": "speculation.proposed",
+              "gt": 0
+            },
+            {
+              "path": "speculation.target_width",
+              "gte": 1
+            },
+            {
+              "path": "speculation.draft_width",
+              "gte": 1
+            }
+          ],
+          "counter_requirements": [
+            {
+              "path": "apcv2.hits",
+              "delta_gte": 1
+            },
+            {
+              "path": "apcv2.stores",
+              "delta_gte": 1
+            },
+            {
+              "path": "scheduler.external_rounds",
+              "delta_gte": 1
+            },
+            {
+              "path": "scheduler.proposed_tokens",
+              "delta_gte": 1
+            }
+          ],
+          "after_status_requirements": [
+            {
+              "path": "apcv2.cow.active_leases",
+              "equals": 0
+            },
+            {
+              "path": "scheduler.draft_fallbacks",
+              "equals": 0
+            }
+          ],
+          "qualification_receipt": {
+            "path": "~/Desktop/mlx2/qualification/runs/macos-26.7/muse-glimmer/dflash2/route-qualification.json",
+            "required_checks": [
+              "feature_external_draft",
+              "feature_proposal_distribution",
+              "feature_paired_draft_cache",
+              "feature_segmented_transaction"
+            ],
+            "scope": "live external execution and paired-cache resume; segmented rollback exactness is supplied by the mandatory forced-rejection CPU oracle"
+          }
+        },
+        {
+          "name": "prompt-lookup",
+          "url": "http://127.0.0.1:8285",
+          "activation_key": "muse-glimmer-prompt-lookup-b20",
+          "activate_command": [
+            "~/Desktop/mlx2/.venv/bin/python",
+            "~/Desktop/mlx2/scripts/activate_qualification_arm.py",
+            "--state",
+            "/tmp/mlx2-qualification/server.json",
+            "--log",
+            "/tmp/mlx2-qualification/muse-prompt-lookup.log",
+            "--cwd",
+            "~/Desktop/mlx2",
+            "--",
+            "/usr/bin/env",
+            "PYTHONPATH=src",
+            ".venv/bin/python",
+            "-u",
+            "-m",
+            "mlx2.server",
+            "--model",
+            "~/mlx-models/Muse-Glimmer-30B-mlx-4bit",
+            "--host",
+            "127.0.0.1",
+            "--port",
+            "8285",
+            "--max-context",
+            "131072",
+            "--max-lanes",
+            "20",
+            "--max-inflight",
+            "40",
+            "--cache-dir",
+            "/tmp/mlx2-qualification/muse-prompt-lookup-apc",
+            "--execution-policy",
+            "qualification/policies/prompt-lookup.json",
+            "--prompt-lookup",
+            "--qualification-mode"
+          ],
+          "status_requirements": [
+            {
+              "path": "profile",
+              "equals": "muse-glimmer-apcv2-ordinary-pld"
+            },
+            {
+              "path": "settings.speculation",
+              "equals": "prompt_lookup"
+            }
+          ],
+          "receipt_requirements": [
+            {
+              "path": "cache",
+              "equals": "apcv2"
+            },
+            {
+              "path": "profile",
+              "equals": "muse-glimmer-apcv2-ordinary-pld"
+            },
+            {
+              "path": "mtp",
+              "equals": null
+            },
+            {
+              "path": "speculation.schema",
+              "equals": "mlx2.prompt-lookup-live.v1"
+            },
+            {
+              "path": "speculation.execution",
+              "equals": "prompt_lookup_verify"
+            },
+            {
+              "path": "speculation.ordinary_fallback",
+              "equals": false
+            },
+            {
+              "path": "speculation.target_width",
+              "gte": 1
+            }
+          ],
+          "counter_requirements": [
+            {
+              "path": "apcv2.hits",
+              "delta_gte": 1
+            },
+            {
+              "path": "apcv2.stores",
+              "delta_gte": 1
+            },
+            {
+              "path": "scheduler.pld_cycles",
+              "delta_gte": 1
+            },
+            {
+              "path": "scheduler.pld_batched_rounds",
+              "delta_gte": 1
+            }
+          ],
+          "after_status_requirements": [
+            {
+              "path": "apcv2.cow.active_leases",
+              "equals": 0
+            },
+            {
+              "path": "scheduler.pld_rotating_replay_rebuilds",
+              "equals": 0
+            }
+          ],
+          "qualification_receipt": {
+            "path": "~/Desktop/mlx2/qualification/runs/macos-26.7/muse-glimmer/prompt-lookup/route-qualification.json",
+            "required_checks": [
+              "apcv2_reuse",
+              "apcv2_stores",
+              "cache_leases",
+              "quiescence",
+              "runtime_stable",
+              "feature_prompt_lookup",
+              "feature_prompt_lookup_proposals",
+              "feature_prompt_lookup_rollback"
+            ],
+            "scope": "full prompt-lookup serving qualification (batched target verification) bound to the active runtime and Muse artifact"
+          }
+        }
+      ],
+      "arm_order_claim": "alternating"
+    },
+    {
+      "name": "north-mini-code",
+      "arm_order_claim": "none",
+      "tokenizer_renderer": "north_direct",
+      "tokenizer_path": "~/mlx-models/North-Mini-Code-1.0-mlx-4bit",
+      "contexts": [
+        {
+          "tokens": 2048
+        },
+        {
+          "tokens": 8192
+        },
+        {
+          "tokens": 32768
+        },
+        {
+          "tokens": 65536
+        },
+        {
+          "tokens": 131072
+        },
+        {
+          "tokens": 262144
+        },
+        {
+          "tokens": 499936
+        }
+      ],
+      "context": {
+        "runs_per_cell": 3,
+        "max_tokens": 64,
+        "prompt_token_tolerance": 0,
+        "min_cached_tokens": 1,
+        "timeout_seconds": 7200
+      },
+      "batch_stress": {
+        "rounds": 20,
+        "width": 20,
+        "max_tokens": 64,
+        "timeout_seconds": 3600,
+        "prompts": [
+          "Explain a safe compiler transformation for code example 01.",
+          "Explain a safe compiler transformation for code example 02.",
+          "Explain a safe compiler transformation for code example 03.",
+          "Explain a safe compiler transformation for code example 04.",
+          "Explain a safe compiler transformation for code example 05.",
+          "Explain a safe compiler transformation for code example 06.",
+          "Explain a safe compiler transformation for code example 07.",
+          "Explain a safe compiler transformation for code example 08.",
+          "Explain a safe compiler transformation for code example 09.",
+          "Explain a safe compiler transformation for code example 10.",
+          "Explain a safe compiler transformation for code example 11.",
+          "Explain a safe compiler transformation for code example 12.",
+          "Explain a safe compiler transformation for code example 13.",
+          "Explain a safe compiler transformation for code example 14.",
+          "Explain a safe compiler transformation for code example 15.",
+          "Explain a safe compiler transformation for code example 16.",
+          "Explain a safe compiler transformation for code example 17.",
+          "Explain a safe compiler transformation for code example 18.",
+          "Explain a safe compiler transformation for code example 19.",
+          "Explain a safe compiler transformation for code example 20."
+        ]
+      },
+      "spomin20x20": {
+        "serving_arm": "ordinary",
+        "corpus_path": "corpora/spomin-20x20-long-multiturn-corpus-20260915.json",
+        "corpus_sha256": "5d7233f805b310e354cb628a0d0b1d12299cc90dbfeebb890eaf35dac966ad12",
+        "source_receipts_path": "~/Desktop/mlx-uag/results/spomin-20x20-long-multiturn-b20-full-20260915.json",
+        "source_receipts_sha256": "1dd6c0019dca233fd62f887d9ad70daff0aa7bbf1a415cb95dcb3a3991714f25",
+        "tokenizer_path": "~/mlx-models/North-Mini-Code-1.0-mlx-4bit",
+        "capacity_tokens": 8192,
+        "max_tokens": 192,
+        "timeout_seconds": 1800,
+        "source_reconciliation_tokenizer_path": "~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP"
+      },
+      "arms": [
+        {
+          "name": "ordinary",
+          "url": "http://127.0.0.1:8285",
+          "activation_key": "north-mini-code-ordinary-b20",
+          "activate_command": [
+            "~/Desktop/mlx2/.venv/bin/python",
+            "~/Desktop/mlx2/scripts/activate_qualification_arm.py",
+            "--state",
+            "/tmp/mlx2-qualification/server.json",
+            "--log",
+            "/tmp/mlx2-qualification/north-mini-code-ordinary.log",
+            "--cwd",
+            "~/Desktop/mlx2",
+            "--",
+            "/usr/bin/env",
+            "PYTHONPATH=src",
+            ".venv/bin/python",
+            "-u",
+            "-m",
+            "mlx2.server",
+            "--model",
+            "~/mlx-models/North-Mini-Code-1.0-mlx-4bit",
+            "--host",
+            "127.0.0.1",
+            "--port",
+            "8285",
+            "--max-context",
+            "500000",
+            "--max-lanes",
+            "20",
+            "--max-inflight",
+            "40",
+            "--cache-bytes",
+            "17179869184",
+            "--cache-dir",
+            "/tmp/mlx2-qualification/north-mini-code-ordinary-apc",
+            "--ordinary",
+            "--qualification-mode"
+          ],
+          "status_requirements": [
+            {
+              "path": "profile",
+              "equals": "north-mini-code-apcv2-ordinary"
+            },
+            {
+              "path": "settings.speculation",
+              "equals": "ordinary"
+            },
+            {
+              "path": "settings.mtp",
+              "equals": false
+            },
+            {
+              "path": "settings.execution_policy.num_draft",
+              "equals": 0
+            },
+            {
+              "path": "execution.cache_layout",
+              "equals": "north-mini-code-layer-segments-v1"
+            },
+            {
+              "path": "execution.sliding_layers",
+              "equals": 36
+            },
+            {
+              "path": "execution.global_layers",
+              "equals": 13
+            },
+            {
+              "path": "settings.thinking_defaults_source",
+              "equals": "adapter"
+            },
+            {
+              "path": "settings.thinking_budget",
+              "equals": 512
+            },
+            {
+              "path": "settings.thinking_steer.alpha",
+              "equals": 0.2
+            },
+            {
+              "path": "settings.thinking_steer.calibration.state",
+              "equals": "calibrated"
+            },
+            {
+              "path": "thinking_default",
+              "equals": true
+            }
+          ],
+          "receipt_requirements": [
+            {
+              "path": "cache",
+              "equals": "apcv2"
+            },
+            {
+              "path": "profile",
+              "equals": "north-mini-code-apcv2-ordinary"
+            },
+            {
+              "path": "mtp",
+              "equals": null
+            },
+            {
+              "path": "speculation",
+              "equals": null
+            },
+            {
+              "path": "ordinary_compute_width",
+              "gte": 1
+            }
+          ],
+          "counter_requirements": [
+            {
+              "path": "apcv2.hits",
+              "delta_gte": 1
+            },
+            {
+              "path": "apcv2.stores",
+              "delta_gte": 1
+            }
+          ],
+          "after_status_requirements": [
+            {
+              "path": "apcv2.cow.active_leases",
+              "equals": 0
+            }
+          ],
+          "qualification_receipt": {
+            "path": "runs/macos-26.7/north-mini-code/ordinary/route-qualification.json",
+            "required_checks": [
+              "apcv2_reuse",
+              "apcv2_stores",
+              "cache_leases",
+              "quiescence",
+              "runtime_stable"
+            ],
+            "scope": "full ordinary serving qualification bound to the active runtime, North artifact, complete settings and approved qualification harness"
+          }
+        }
+      ]
+    }
+  ],
+  "host_services": [
+    {
+      "label": "com.example.fn-uncensored-mlx-serve",
+      "plist": "~/Library/LaunchAgents/com.example.fn-uncensored-mlx-serve.plist",
+      "ready_url": "http://127.0.0.1:8282/v1/models",
+      "ready_contains": "\"state\":\"ready\""
+    }
+  ]
+}

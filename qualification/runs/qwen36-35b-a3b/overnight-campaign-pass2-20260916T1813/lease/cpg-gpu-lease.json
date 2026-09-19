@@ -1,0 +1,12 @@
+{
+  "campaign": "a7c8bc76c8e0462695fc182cf7cfb791",
+  "expires_at": 1789603900,
+  "generation": 1,
+  "issued_at": 1789595384.757906,
+  "lease_id": "afae6deed32c47ae8da74a7fa69819c2",
+  "lease_seconds": 7200,
+  "mode": "exclusive",
+  "owner": "root",
+  "purpose": "Qwen3.6 35B-A3B overnight qualification",
+  "resource_key": "gpu"
+}

@@ -1,0 +1,41 @@
+round 00   12.1s   987 tok    81.3 tok/s errors=0
+round 01   10.4s   998 tok    95.9 tok/s errors=0
+round 02   11.0s  1058 tok    96.1 tok/s errors=0
+round 03   11.3s  1059 tok    93.7 tok/s errors=0
+round 04   10.7s  1005 tok    93.7 tok/s errors=0
+round 05   10.1s   937 tok    92.9 tok/s errors=0
+round 06   11.2s  1104 tok    98.4 tok/s errors=0
+round 07   10.5s   988 tok    94.3 tok/s errors=0
+round 08   11.2s  1094 tok    97.5 tok/s errors=0
+round 09   10.9s  1030 tok    94.6 tok/s errors=0
+round 10   11.6s  1150 tok    99.3 tok/s errors=0
+round 11   12.3s  1175 tok    95.8 tok/s errors=0
+round 12   12.2s  1010 tok    83.1 tok/s errors=0
+round 13   11.7s  1076 tok    92.0 tok/s errors=0
+round 14   10.2s   955 tok    93.3 tok/s errors=0
+round 15   11.1s  1010 tok    91.2 tok/s errors=0
+round 16   11.3s  1035 tok    91.9 tok/s errors=0
+round 17   11.9s  1144 tok    96.5 tok/s errors=0
+round 18   11.1s   978 tok    88.0 tok/s errors=0
+round 19   10.6s   996 tok    93.9 tok/s errors=0
+SUMMARY requests=400 correct=392 hard_failures=6 issues={'char_run': 6} healthy=True
+  arithmetic           18/20 
+  arithmetic_mul       20/20 
+  capital              20/20 
+  capital_sentence     20/20 
+  sequence             20/20 
+  translate            20/20 
+  code                 20/20 
+  list                 20/20 
+  json_object          20/20 
+  json_schema          14/20 {'char_run': 6}
+  stop_string          20/20 
+  stream               20/20 
+  tool_call            20/20 
+  system_multi_turn    20/20 
+  needle               20/20 
+  sampled_prose        20/20 
+  sampled_topk         20/20 
+  logprobs             20/20 
+  two_samples          20/20 
+  explain              20/20 

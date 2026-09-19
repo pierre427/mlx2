@@ -1,0 +1,122 @@
+{
+  "artifact": "~/mlx-models/Xing4.0-29B-A4B-mlx-bf16",
+  "layers": 40,
+  "results": {
+    "decode_b1": {
+      "model_step_ms": 37.563,
+      "per_layer_ms": {
+        "mhc_pre": 0.48,
+        "mhc_pre_eager": 0.62,
+        "mhc_update": 0.177,
+        "rms_norm": 0.159,
+        "attention": 0.401,
+        "moe_mlp": 0.471,
+        "dense_mlp": 0.541
+      },
+      "estimated_ms": {
+        "mhc": 52.56,
+        "norms": 12.72,
+        "attention": 16.04,
+        "moe": 17.9,
+        "dense_mlp": 1.08,
+        "lm_head": 1.85
+      },
+      "estimated_share": {
+        "mhc": 0.515,
+        "norms": 0.125,
+        "attention": 0.157,
+        "moe": 0.175,
+        "dense_mlp": 0.011,
+        "lm_head": 0.018
+      },
+      "estimated_sum_ms": 102.15
+    },
+    "decode_b4": {
+      "model_step_ms": 60.576,
+      "per_layer_ms": {
+        "mhc_pre": 0.493,
+        "mhc_pre_eager": 0.632,
+        "mhc_update": 0.182,
+        "rms_norm": 0.158,
+        "attention": 0.629,
+        "moe_mlp": 0.861,
+        "dense_mlp": 0.522
+      },
+      "estimated_ms": {
+        "mhc": 54.0,
+        "norms": 12.64,
+        "attention": 25.16,
+        "moe": 32.72,
+        "dense_mlp": 1.04,
+        "lm_head": 1.86
+      },
+      "estimated_share": {
+        "mhc": 0.424,
+        "norms": 0.099,
+        "attention": 0.197,
+        "moe": 0.257,
+        "dense_mlp": 0.008,
+        "lm_head": 0.015
+      },
+      "estimated_sum_ms": 127.42
+    },
+    "prefill_2k": {
+      "model_step_ms": 1128.417,
+      "per_layer_ms": {
+        "mhc_pre": 2.302,
+        "mhc_pre_eager": 2.867,
+        "mhc_update": 2.067,
+        "rms_norm": 0.201,
+        "attention": 6.255,
+        "moe_mlp": 11.907,
+        "dense_mlp": 10.443
+      },
+      "estimated_ms": {
+        "mhc": 349.52,
+        "norms": 16.08,
+        "attention": 250.2,
+        "moe": 452.47,
+        "dense_mlp": 20.89,
+        "lm_head": 43.07
+      },
+      "estimated_share": {
+        "mhc": 0.309,
+        "norms": 0.014,
+        "attention": 0.221,
+        "moe": 0.4,
+        "dense_mlp": 0.018,
+        "lm_head": 0.038
+      },
+      "estimated_sum_ms": 1132.22
+    },
+    "prefill_8k_tail": {
+      "model_step_ms": 1772.045,
+      "per_layer_ms": {
+        "mhc_pre": 2.293,
+        "mhc_pre_eager": 2.861,
+        "mhc_update": 2.007,
+        "rms_norm": 0.21,
+        "attention": 19.588,
+        "moe_mlp": 11.359,
+        "dense_mlp": 12.189
+      },
+      "estimated_ms": {
+        "mhc": 344.0,
+        "norms": 16.8,
+        "attention": 783.52,
+        "moe": 431.64,
+        "dense_mlp": 24.38,
+        "lm_head": 39.53
+      },
+      "estimated_share": {
+        "mhc": 0.21,
+        "norms": 0.01,
+        "attention": 0.478,
+        "moe": 0.263,
+        "dense_mlp": 0.015,
+        "lm_head": 0.024
+      },
+      "estimated_sum_ms": 1639.87
+    }
+  }
+}

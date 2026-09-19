@@ -1,0 +1,721 @@
+{
+  "arguments": {
+    "entries": 64,
+    "entry_gib": 0.01,
+    "max_total_gib": 8.0,
+    "rescan_only": true,
+    "scratch_root": "/private/tmp"
+  },
+  "completed_at_unix": 1789782571.575739,
+  "device": "cpu",
+  "guardrails": {
+    "cleanup_on_exit": true,
+    "minimum_free_memory_bytes": 25769803776,
+    "requested_resident_bytes_per_entry": 10737418,
+    "requested_total_bytes": 687194752
+  },
+  "machine": {
+    "hw_memsize_bytes": 137438953472,
+    "machine": "arm64",
+    "platform": "macOS-26.7-arm64-arm-64bit",
+    "python": "3.12.13",
+    "scratch_filesystem": {
+      "free_bytes": 767287967744,
+      "path": "/private/tmp",
+      "total_bytes": 3996276899840,
+      "used_bytes": 3228988932096
+    }
+  },
+  "peak_rss_bytes": 297451520,
+  "schema": "mlx2.apcv2-persistence-benchmark.v1",
+  "source": {
+    "git_head": "08e605986e1b66937263fce941df816861290acb",
+    "requested_base_revision": "271b21e",
+    "script_sha256": "09aea567c1e0f83365f5f2123c7a54e9ca0e0511520682d4e9f1c3718725a006"
+  },
+  "spill": {
+    "digest_computed_once_per_payload": true,
+    "digest_seconds": 0.30452525842702016,
+    "manifest_write_calls": 256,
+    "manifest_write_seconds": 0.10561287560267374,
+    "mlx_clear_cache_seconds": 0.0010366635979153216,
+    "park_latency_seconds": {
+      "count": 64,
+      "max": 0.0714083329658024,
+      "mean": 0.046947324231950915,
+      "min": 0.010603624978102744,
+      "p50": 0.053653832990676165
+    },
+    "payload_digest_calls": 192,
+    "payload_files": 192,
+    "payload_write_and_fsync_seconds": 0.2691660751006566,
+    "per_entry_breakdown": [
+      {
+        "digest_seconds": 0.00460816704435274,
+        "manifest_write_seconds": 0.0012300829403102398,
+        "mlx_clear_cache_seconds": 4.22910088673234e-05,
+        "other_seconds": 0.0013567929854616523,
+        "payload_write_and_fsync_seconds": 0.003366290999110788,
+        "total_seconds": 0.010603624978102744
+      },
+      {
+        "digest_seconds": 0.004971791990101337,
+        "manifest_write_seconds": 0.0011749580735340714,
+        "mlx_clear_cache_seconds": 1.1499971151351929e-05,
+        "other_seconds": 0.0027059169951826334,
+        "payload_write_and_fsync_seconds": 0.0034967909450642765,
+        "total_seconds": 0.01236095797503367
+      },
+      {
+        "digest_seconds": 0.0047692080261185765,
+        "manifest_write_seconds": 0.0012546659563668072,
+        "mlx_clear_cache_seconds": 1.1665979400277138e-05,
+        "other_seconds": 0.004184502060525119,
+        "payload_write_and_fsync_seconds": 0.0034076249576173723,
+        "total_seconds": 0.013627666980028152
+      },
+      {
+        "digest_seconds": 0.0047935000620782375,
+        "manifest_write_seconds": 0.0010889589902944863,
+        "mlx_clear_cache_seconds": 1.0249961633235216e-05,
+        "other_seconds": 0.005314040055964142,
+        "payload_write_and_fsync_seconds": 0.0033087919582612813,
+        "total_seconds": 0.014515541028231382
+      },
+      {
+        "digest_seconds": 0.004660167032852769,
+        "manifest_write_seconds": 0.0012862500734627247,
+        "mlx_clear_cache_seconds": 9.374984074383974e-06,
+        "other_seconds": 0.006685998756438494,
+        "payload_write_and_fsync_seconds": 0.0033450431074015796,
+        "total_seconds": 0.01598683395422995
+      },
+      {
+        "digest_seconds": 0.004720084019936621,
+        "manifest_write_seconds": 0.001309292041696608,
+        "mlx_clear_cache_seconds": 1.7125043086707592e-05,
+        "other_seconds": 0.007684749900363386,
+        "payload_write_and_fsync_seconds": 0.003192581993062049,
+        "total_seconds": 0.01692383299814537
+      },
+      {
+        "digest_seconds": 0.004702748963609338,
+        "manifest_write_seconds": 0.0011547080357559025,
+        "mlx_clear_cache_seconds": 8.541042916476727e-06,
+        "other_seconds": 0.009393293934408575,
+        "payload_write_and_fsync_seconds": 0.003388873999938369,
+        "total_seconds": 0.01864816597662866
+      },
+      {
+        "digest_seconds": 0.004749124986119568,
+        "manifest_write_seconds": 0.0013647080049850047,
+        "mlx_clear_cache_seconds": 1.4999997802078724e-05,
+        "other_seconds": 0.010392709984444082,
+        "payload_write_and_fsync_seconds": 0.003508373978547752,
+        "total_seconds": 0.020029916951898485
+      },
+      {
+        "digest_seconds": 0.004860458022449166,
+        "manifest_write_seconds": 0.00132395897526294,
+        "mlx_clear_cache_seconds": 1.4666002243757248e-05,
+        "other_seconds": 0.011449417972471565,
+        "payload_write_and_fsync_seconds": 0.0033815830247476697,
+        "total_seconds": 0.021030083997175097
+      },
+      {
+        "digest_seconds": 0.004764832963701338,
+        "manifest_write_seconds": 0.0012938749860040843,
+        "mlx_clear_cache_seconds": 1.233298098668456e-05,
+        "other_seconds": 0.01287416712148115,
+        "payload_write_and_fsync_seconds": 0.003503457992337644,
+        "total_seconds": 0.0224486660445109
+      },
+      {
+        "digest_seconds": 0.004683249979279935,
+        "manifest_write_seconds": 0.001232542039360851,
+        "mlx_clear_cache_seconds": 9.833020158112049e-06,
+        "other_seconds": 0.014163415937218815,
+        "payload_write_and_fsync_seconds": 0.003668959019705653,
+        "total_seconds": 0.023757999995723367
+      },
+      {
+        "digest_seconds": 0.004675917036365718,
+        "manifest_write_seconds": 0.0012755420175381005,
+        "mlx_clear_cache_seconds": 1.6167003195732832e-05,
+        "other_seconds": 0.01521520788082853,
+        "payload_write_and_fsync_seconds": 0.0035358330351300538,
+        "total_seconds": 0.024718666973058134
+      },
+      {
+        "digest_seconds": 0.0046569170081056654,
+        "manifest_write_seconds": 0.001221542013809085,
+        "mlx_clear_cache_seconds": 1.195794902741909e-05,
+        "other_seconds": 0.016512333939317614,
+        "payload_write_and_fsync_seconds": 0.0035023740492761135,
+        "total_seconds": 0.025905124959535897
+      },
+      {
+        "digest_seconds": 0.004806166980415583,
+        "manifest_write_seconds": 0.001224831969011575,
+        "mlx_clear_cache_seconds": 1.166702713817358e-05,
+        "other_seconds": 0.01760025107068941,
+        "payload_write_and_fsync_seconds": 0.003676749998703599,
+        "total_seconds": 0.02731966704595834
+      },
+      {
+        "digest_seconds": 0.004846125026233494,
+        "manifest_write_seconds": 0.0014574159285984933,
+        "mlx_clear_cache_seconds": 1.4582998119294643e-05,
+        "other_seconds": 0.018995210120920092,
+        "payload_write_and_fsync_seconds": 0.00351516593946144,
+        "total_seconds": 0.028828500013332814
+      },
+      {
+        "digest_seconds": 0.004557708045467734,
+        "manifest_write_seconds": 0.0013932090369053185,
+        "mlx_clear_cache_seconds": 1.4457968063652515e-05,
+        "other_seconds": 0.020648749952670187,
+        "payload_write_and_fsync_seconds": 0.003326374979224056,
+        "total_seconds": 0.029940499982330948
+      },
+      {
+        "digest_seconds": 0.004980916972272098,
+        "manifest_write_seconds": 0.0012474999530240893,
+        "mlx_clear_cache_seconds": 1.0040996130555868e-05,
+        "other_seconds": 0.021290167060215026,
+        "payload_write_and_fsync_seconds": 0.0034402500023134053,
+        "total_seconds": 0.030968874983955175
+      },
+      {
+        "digest_seconds": 0.004823291965294629,
+        "manifest_write_seconds": 0.001324417011346668,
+        "mlx_clear_cache_seconds": 1.8083956092596054e-05,
+        "other_seconds": 0.02310045703779906,
+        "payload_write_and_fsync_seconds": 0.003555583010893315,
+        "total_seconds": 0.03282183298142627
+      },
+      {
+        "digest_seconds": 0.004757373942993581,
+        "manifest_write_seconds": 0.001246958039700985,
+        "mlx_clear_cache_seconds": 2.099998528137803e-05,
+        "other_seconds": 0.023902875022031367,
+        "payload_write_and_fsync_seconds": 0.003803875995799899,
+        "total_seconds": 0.03373208298580721
+      },
+      {
+        "digest_seconds": 0.004836374951992184,
+        "manifest_write_seconds": 0.0012568748788908124,
+        "mlx_clear_cache_seconds": 9.832961950451136e-06,
+        "other_seconds": 0.025509961182251573,
+        "payload_write_and_fsync_seconds": 0.0034681649995036423,
+        "total_seconds": 0.03508120897458866
+      },
+      {
+        "digest_seconds": 0.004591250035446137,
+        "manifest_write_seconds": 0.0014137510443106294,
+        "mlx_clear_cache_seconds": 1.4166987966746092e-05,
+        "other_seconds": 0.02694233093643561,
+        "payload_write_and_fsync_seconds": 0.0032126260339282453,
+        "total_seconds": 0.03617412503808737
+      },
+      {
+        "digest_seconds": 0.004701709025539458,
+        "manifest_write_seconds": 0.0012542500044219196,
+        "mlx_clear_cache_seconds": 1.3582990504801273e-05,
+        "other_seconds": 0.027605374925769866,
+        "payload_write_and_fsync_seconds": 0.0031927080708555877,
+        "total_seconds": 0.03676762501709163
+      },
+      {
+        "digest_seconds": 0.004761209012940526,
+        "manifest_write_seconds": 0.0014300839975476265,
+        "mlx_clear_cache_seconds": 1.7832964658737183e-05,
+        "other_seconds": 0.02942949894350022,
+        "payload_write_and_fsync_seconds": 0.0034840000444091856,
+        "total_seconds": 0.039122624963056296
+      },
+      {
+        "digest_seconds": 0.004883626010268927,
+        "manifest_write_seconds": 0.0013549579889513552,
+        "mlx_clear_cache_seconds": 1.895800232887268e-05,
+        "other_seconds": 0.03078395896591246,
+        "payload_write_and_fsync_seconds": 0.00325087399687618,
+        "total_seconds": 0.040292374964337796
+      },
+      {
+        "digest_seconds": 0.00476125004934147,
+        "manifest_write_seconds": 0.0011861249804496765,
+        "mlx_clear_cache_seconds": 1.1124997399747372e-05,
+        "other_seconds": 0.031490250024944544,
+        "payload_write_and_fsync_seconds": 0.0070567079819738865,
+        "total_seconds": 0.044505458034109324
+      },
+      {
+        "digest_seconds": 0.004901750013232231,
+        "manifest_write_seconds": 0.0014103329740464687,
+        "mlx_clear_cache_seconds": 1.4458026271313429e-05,
+        "other_seconds": 0.033905210031662136,
+        "payload_write_and_fsync_seconds": 0.008303165959659964,
+        "total_seconds": 0.04853491700487211
+      },
+      {
+        "digest_seconds": 0.004902207932900637,
+        "manifest_write_seconds": 0.0013563750544562936,
+        "mlx_clear_cache_seconds": 1.5124969650059938e-05,
+        "other_seconds": 0.03449295897735283,
+        "payload_write_and_fsync_seconds": 0.007260042068082839,
+        "total_seconds": 0.04802670900244266
+      },
+      {
+        "digest_seconds": 0.004802250012289733,
+        "manifest_write_seconds": 0.0013319989666342735,
+        "mlx_clear_cache_seconds": 1.6749952919781208e-05,
+        "other_seconds": 0.035516751115210354,
+        "payload_write_and_fsync_seconds": 0.006972207978833467,
+        "total_seconds": 0.04863995802588761
+      },
+      {
+        "digest_seconds": 0.004794250009581447,
+        "manifest_write_seconds": 0.0012909580254927278,
+        "mlx_clear_cache_seconds": 1.1874944902956486e-05,
+        "other_seconds": 0.03680837509455159,
+        "payload_write_and_fsync_seconds": 0.006843999959528446,
+        "total_seconds": 0.04974945803405717
+      },
+      {
+        "digest_seconds": 0.004900000989437103,
+        "manifest_write_seconds": 0.0012495419941842556,
+        "mlx_clear_cache_seconds": 1.2582982890307903e-05,
+        "other_seconds": 0.03816999797709286,
+        "payload_write_and_fsync_seconds": 0.007945292047224939,
+        "total_seconds": 0.05227741599082947
+      },
+      {
+        "digest_seconds": 0.004856250016018748,
+        "manifest_write_seconds": 0.0013894580770283937,
+        "mlx_clear_cache_seconds": 1.333397813141346e-05,
+        "other_seconds": 0.038886041031219065,
+        "payload_write_and_fsync_seconds": 0.0036476669483818114,
+        "total_seconds": 0.04879275005077943
+      },
+      {
+        "digest_seconds": 0.004903834022115916,
+        "manifest_write_seconds": 0.0013698750990442932,
+        "mlx_clear_cache_seconds": 1.6291975043714046e-05,
+        "other_seconds": 0.040367414825595915,
+        "payload_write_and_fsync_seconds": 0.006996417068876326,
+        "total_seconds": 0.053653832990676165
+      },
+      {
+        "digest_seconds": 0.0048459169920533895,
+        "manifest_write_seconds": 0.0013475000159814954,
+        "mlx_clear_cache_seconds": 1.1000025551766157e-05,
+        "other_seconds": 0.04160166595829651,
+        "payload_write_and_fsync_seconds": 0.006836250016931444,
+        "total_seconds": 0.0546423330088146
+      },
+      {
+        "digest_seconds": 0.004790542065165937,
+        "manifest_write_seconds": 0.001415541977621615,
+        "mlx_clear_cache_seconds": 1.4666991773992777e-05,
+        "other_seconds": 0.043021498946473,
+        "payload_write_and_fsync_seconds": 0.006883667025249451,
+        "total_seconds": 0.056125917006284
+      },
+      {
+        "digest_seconds": 0.004616082995198667,
+        "manifest_write_seconds": 0.0013433339772745967,
+        "mlx_clear_cache_seconds": 2.0792009308934212e-05,
+        "other_seconds": 0.04397458297898993,
+        "payload_write_and_fsync_seconds": 0.0034312490024603903,
+        "total_seconds": 0.05338604096323252
+      },
+      {
+        "digest_seconds": 0.004660958016756922,
+        "manifest_write_seconds": 0.0013452090206556022,
+        "mlx_clear_cache_seconds": 2.254202263429761e-05,
+        "other_seconds": 0.045798456936609,
+        "payload_write_and_fsync_seconds": 0.006791874999180436,
+        "total_seconds": 0.05861904099583626
+      },
+      {
+        "digest_seconds": 0.004741873941384256,
+        "manifest_write_seconds": 0.0012914990074932575,
+        "mlx_clear_cache_seconds": 2.174999099224806e-05,
+        "other_seconds": 0.04720641806488857,
+        "payload_write_and_fsync_seconds": 0.008035083999857306,
+        "total_seconds": 0.061296625004615635
+      },
+      {
+        "digest_seconds": 0.004741000011563301,
+        "manifest_write_seconds": 0.0012850839411839843,
+        "mlx_clear_cache_seconds": 1.066701952368021e-05,
+        "other_seconds": 0.04847945901565254,
+        "payload_write_and_fsync_seconds": 0.003852999012451619,
+        "total_seconds": 0.05836920900037512
+      },
+      {
+        "digest_seconds": 0.004886291979346424,
+        "manifest_write_seconds": 0.007150624005589634,
+        "mlx_clear_cache_seconds": 1.1666968930512667e-05,
+        "other_seconds": 0.04896616702899337,
+        "payload_write_and_fsync_seconds": 0.008101249986793846,
+        "total_seconds": 0.06911599996965379
+      },
+      {
+        "digest_seconds": 0.004782167088706046,
+        "manifest_write_seconds": 0.0013102510129101574,
+        "mlx_clear_cache_seconds": 1.4124962035566568e-05,
+        "other_seconds": 0.04986037383787334,
+        "payload_write_and_fsync_seconds": 0.003501917060930282,
+        "total_seconds": 0.05946883396245539
+      },
+      {
+        "digest_seconds": 0.005211042065639049,
+        "manifest_write_seconds": 0.001375126012135297,
+        "mlx_clear_cache_seconds": 1.999997766688466e-05,
+        "other_seconds": 0.051815747981891036,
+        "payload_write_and_fsync_seconds": 0.003951750986743718,
+        "total_seconds": 0.062373667024075985
+      },
+      {
+        "digest_seconds": 0.004766501078847796,
+        "manifest_write_seconds": 0.0013162500108592212,
+        "mlx_clear_cache_seconds": 1.579197123646736e-05,
+        "other_seconds": 0.05085862404666841,
+        "payload_write_and_fsync_seconds": 0.003539040917530656,
+        "total_seconds": 0.06049620802514255
+      },
+      {
+        "digest_seconds": 0.004607041948474944,
+        "manifest_write_seconds": 0.001230625028256327,
+        "mlx_clear_cache_seconds": 1.0417017620056868e-05,
+        "other_seconds": 0.0466436239075847,
+        "payload_write_and_fsync_seconds": 0.002859083062503487,
+        "total_seconds": 0.05535079096443951
+      },
+      {
+        "digest_seconds": 0.004619748971890658,
+        "manifest_write_seconds": 0.0012930840020999312,
+        "mlx_clear_cache_seconds": 1.4416989870369434e-05,
+        "other_seconds": 0.054159709077794105,
+        "payload_write_and_fsync_seconds": 0.0037724579451605678,
+        "total_seconds": 0.06385941698681563
+      },
+      {
+        "digest_seconds": 0.004727043036837131,
+        "manifest_write_seconds": 0.001311665982939303,
+        "mlx_clear_cache_seconds": 1.487502595409751e-05,
+        "other_seconds": 0.05202870903303847,
+        "payload_write_and_fsync_seconds": 0.003770790935959667,
+        "total_seconds": 0.061853084014728665
+      },
+      {
+        "digest_seconds": 0.004793541040271521,
+        "manifest_write_seconds": 0.0012977919541299343,
+        "mlx_clear_cache_seconds": 1.9875005818903446e-05,
+        "other_seconds": 0.05718920793151483,
+        "payload_write_and_fsync_seconds": 0.003539334109518677,
+        "total_seconds": 0.06683975004125386
+      },
+      {
+        "digest_seconds": 0.004748792038299143,
+        "manifest_write_seconds": 0.001433708006516099,
+        "mlx_clear_cache_seconds": 1.6625039279460907e-05,
+        "other_seconds": 0.05362395790871233,
+        "payload_write_and_fsync_seconds": 0.0038112510228529572,
+        "total_seconds": 0.06363433401565999
+      },
+      {
+        "digest_seconds": 0.004636125988326967,
+        "manifest_write_seconds": 0.0012693749740719795,
+        "mlx_clear_cache_seconds": 1.2792006600648165e-05,
+        "other_seconds": 0.05199054203694686,
+        "payload_write_and_fsync_seconds": 0.003491123963613063,
+        "total_seconds": 0.06139995896955952
+      },
+      {
+        "digest_seconds": 0.004691208072472364,
+        "manifest_write_seconds": 0.001260708027984947,
+        "mlx_clear_cache_seconds": 1.6790989320725203e-05,
+        "other_seconds": 0.05324754398316145,
+        "payload_write_and_fsync_seconds": 0.0034519159817136824,
+        "total_seconds": 0.06266816705465317
+      },
+      {
+        "digest_seconds": 0.004777916939929128,
+        "manifest_write_seconds": 0.0012652080040425062,
+        "mlx_clear_cache_seconds": 1.12500274553895e-05,
+        "other_seconds": 0.05268637405242771,
+        "payload_write_and_fsync_seconds": 0.003738000988960266,
+        "total_seconds": 0.062478750012815
+      },
+      {
+        "digest_seconds": 0.004636791010852903,
+        "manifest_write_seconds": 0.00123179197544232,
+        "mlx_clear_cache_seconds": 1.4624965842813253e-05,
+        "other_seconds": 0.05496012605726719,
+        "payload_write_and_fsync_seconds": 0.0038336249999701977,
+        "total_seconds": 0.06467695900937542
+      },
+      {
+        "digest_seconds": 0.004685542022343725,
+        "manifest_write_seconds": 0.0011545410379767418,
+        "mlx_clear_cache_seconds": 1.570803578943014e-05,
+        "other_seconds": 0.05208575091091916,
+        "payload_write_and_fsync_seconds": 0.0033790830057114363,
+        "total_seconds": 0.06132062501274049
+      },
+      {
+        "digest_seconds": 0.004717375093605369,
+        "manifest_write_seconds": 0.001183417101856321,
+        "mlx_clear_cache_seconds": 1.775001874193549e-05,
+        "other_seconds": 0.05684079177444801,
+        "payload_write_and_fsync_seconds": 0.003421708010137081,
+        "total_seconds": 0.06618104199878871
+      },
+      {
+        "digest_seconds": 0.0046905409544706345,
+        "manifest_write_seconds": 0.0011727510136552155,
+        "mlx_clear_cache_seconds": 1.2249976862221956e-05,
+        "other_seconds": 0.05455408204579726,
+        "payload_write_and_fsync_seconds": 0.0031917510204948485,
+        "total_seconds": 0.06362137501128018
+      },
+      {
+        "digest_seconds": 0.004728125990368426,
+        "manifest_write_seconds": 0.0012542910408228636,
+        "mlx_clear_cache_seconds": 1.0917021427303553e-05,
+        "other_seconds": 0.05511387391015887,
+        "payload_write_and_fsync_seconds": 0.003375500033143908,
+        "total_seconds": 0.06448270799592137
+      },
+      {
+        "digest_seconds": 0.004603707988280803,
+        "manifest_write_seconds": 0.001254958042409271,
+        "mlx_clear_cache_seconds": 1.4582998119294643e-05,
+        "other_seconds": 0.05327933497028425,
+        "payload_write_and_fsync_seconds": 0.003193165990523994,
+        "total_seconds": 0.062345749989617616
+      },
+      {
+        "digest_seconds": 0.004801916016731411,
+        "manifest_write_seconds": 0.0012342070112936199,
+        "mlx_clear_cache_seconds": 1.6624981071799994e-05,
+        "other_seconds": 0.05445750104263425,
+        "payload_write_and_fsync_seconds": 0.0033261669450439513,
+        "total_seconds": 0.06383641599677503
+      },
+      {
+        "digest_seconds": 0.004684792016632855,
+        "manifest_write_seconds": 0.001194500073324889,
+        "mlx_clear_cache_seconds": 1.6457983292639256e-05,
+        "other_seconds": 0.05283941689413041,
+        "payload_write_and_fsync_seconds": 0.0033894170192070305,
+        "total_seconds": 0.06212458398658782
+      },
+      {
+        "digest_seconds": 0.004671292030252516,
+        "manifest_write_seconds": 0.0011350830318406224,
+        "mlx_clear_cache_seconds": 1.0750023648142815e-05,
+        "other_seconds": 0.0621393749024719,
+        "payload_write_and_fsync_seconds": 0.00345183297758922,
+        "total_seconds": 0.0714083329658024
+      },
+      {
+        "digest_seconds": 0.0047347089857794344,
+        "manifest_write_seconds": 0.0012132920091971755,
+        "mlx_clear_cache_seconds": 1.1041993275284767e-05,
+        "other_seconds": 0.054464832006487995,
+        "payload_write_and_fsync_seconds": 0.0035506249987520278,
+        "total_seconds": 0.06397449999349192
+      },
+      {
+        "digest_seconds": 0.004653959011193365,
+        "manifest_write_seconds": 0.0012105420464649796,
+        "mlx_clear_cache_seconds": 0.00010258296970278025,
+        "other_seconds": 0.056295084010344,
+        "payload_write_and_fsync_seconds": 0.0034838319988921285,
+        "total_seconds": 0.06574600003659725
+      },
+      {
+        "digest_seconds": 0.004663666943088174,
+        "manifest_write_seconds": 0.001245457970071584,
+        "mlx_clear_cache_seconds": 1.2874952517449856e-05,
+        "other_seconds": 0.055780291091650724,
+        "payload_write_and_fsync_seconds": 0.0035851250286214054,
+        "total_seconds": 0.06528741598594934
+      },
+      {
+        "digest_seconds": 0.004737583978567272,
+        "manifest_write_seconds": 0.0012388338800519705,
+        "mlx_clear_cache_seconds": 1.1832977179437876e-05,
+        "other_seconds": 0.05699862417532131,
+        "payload_write_and_fsync_seconds": 0.0033477499382570386,
+        "total_seconds": 0.06633462494937703
+      },
+      {
+        "digest_seconds": 0.004887749964836985,
+        "manifest_write_seconds": 0.0012820831034332514,
+        "mlx_clear_cache_seconds": 2.2167048882693052e-05,
+        "other_seconds": 0.05561229190789163,
+        "payload_write_and_fsync_seconds": 0.0037189999711699784,
+        "total_seconds": 0.06552329199621454
+      }
+    ],
+    "per_entry_park_seconds": [
+      0.010603624978102744,
+      0.01236095797503367,
+      0.013627666980028152,
+      0.014515541028231382,
+      0.01598683395422995,
+      0.01692383299814537,
+      0.01864816597662866,
+      0.020029916951898485,
+      0.021030083997175097,
+      0.0224486660445109,
+      0.023757999995723367,
+      0.024718666973058134,
+      0.025905124959535897,
+      0.02731966704595834,
+      0.028828500013332814,
+      0.029940499982330948,
+      0.030968874983955175,
+      0.03282183298142627,
+      0.03373208298580721,
+      0.03508120897458866,
+      0.03617412503808737,
+      0.03676762501709163,
+      0.039122624963056296,
+      0.040292374964337796,
+      0.044505458034109324,
+      0.04853491700487211,
+      0.04802670900244266,
+      0.04863995802588761,
+      0.04974945803405717,
+      0.05227741599082947,
+      0.04879275005077943,
+      0.053653832990676165,
+      0.0546423330088146,
+      0.056125917006284,
+      0.05338604096323252,
+      0.05861904099583626,
+      0.061296625004615635,
+      0.05836920900037512,
+      0.06911599996965379,
+      0.05946883396245539,
+      0.062373667024075985,
+      0.06049620802514255,
+      0.05535079096443951,
+      0.06385941698681563,
+      0.061853084014728665,
+      0.06683975004125386,
+      0.06363433401565999,
+      0.06139995896955952,
+      0.06266816705465317,
+      0.062478750012815,
+      0.06467695900937542,
+      0.06132062501274049,
+      0.06618104199878871,
+      0.06362137501128018,
+      0.06448270799592137,
+      0.062345749989617616,
+      0.06383641599677503,
+      0.06212458398658782,
+      0.0714083329658024,
+      0.06397449999349192,
+      0.06574600003659725,
+      0.06528741598594934,
+      0.06633462494937703,
+      0.06552329199621454
+    ],
+    "throughput_gib_per_second": 0.213053718598935,
+    "total_seconds_including_fsync_digest_manifest": 3.0046287508448586
+  },
+  "startup_rescan": {
+    "entries": 64,
+    "internal_seconds": 0.014028750010766089,
+    "metadata_only_confirmed": true,
+    "payload_read_bytes": 0,
+    "payload_read_calls": 0,
+    "total_payload_bytes": 687352960,
+    "wall_seconds": 0.018697666004300117
+  },
+  "synthetic": {
+    "persisted_total_bytes": 687352960,
+    "requested_entry_bytes": 10737418,
+    "resident_entry_bytes": [
+      10737418,
+      10737418,
+      10737418,
+      10737418,
+      10737418,
+      10737418,
+      10737418,
+      10737418,
+      10737418,
+      10737418,
+      10737418,
+      10737418,
+      10737418,
+      10737418,
+      10737418,
+      10737418,
+      10737418,
+      10737418,
+      10737418,
+      10737418,
+      10737418,
+      10737418,
+      10737418,
+      10737418,
+      10737418,
+      10737418,
+      10737418,
+      10737418,
+      10737418,
+      10737418,
+      10737418,
+      10737418,
+      10737418,
+      10737418,
+      10737418,
+      10737418,
+      10737418,
+      10737418,
+      10737418,
+      10737418,
+      10737418,
+      10737418,
+      10737418,
+      10737418,
+      10737418,
+      10737418,
+      10737418,
+      10737418,
+      10737418,
+      10737418,
+      10737418,
+      10737418,
+      10737418,
+      10737418,
+      10737418,
+      10737418,
+      10737418,
+      10737418,
+      10737418,
+      10737418,
+      10737418,
+      10737418,
+      10737418,
+      10737418
+    ],
+    "topology": {
+      "mtp_draft_kv_planes": 2,
+      "mtp_tail_hidden": true,
+      "recurrent_arrays_per_plane": 2,
+      "target_kv_planes": 4,
+      "target_recurrent_planes": 4
+    }
+  }
+}

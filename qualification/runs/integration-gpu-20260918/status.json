@@ -1,0 +1,415 @@
+{
+  "started": "2026-09-18 12:59:10",
+  "phase": "done",
+  "stages": {
+    "qwen36-ordinary": {
+      "state": "passed",
+      "steps": {
+        "qualifier": {
+          "returncode": 0,
+          "seconds": 28,
+          "failed_lines": [],
+          "last": "Evidence: ~/Desktop/mlx2/qualification/runs/integration-gpu-20260918/qwen36-ordinary-qualification.json"
+        }
+      },
+      "started": "12:59:18",
+      "command": "mlx2.server --model ~/mlx-models/Qwen3.6-35B-A3B-uncensored-heretic-Native-MTP-Preserved-oQ4e-mtp --host 127.0.0.1 --port 8297 --cache-dir ~/Desktop/mlx2/qualification/runs/integration-gpu-20260918/cache/qwen36-ordinary --max-context 32768 --max-lanes 4 --max-inflight 8 --cache-bytes 2147483648 --qualification-mode --ordinary --execution-policy ~/Desktop/mlx2/qualification/policies/qwen36-mtp-artifact-ordinary.json",
+      "server_alive": true,
+      "finished": "12:59:56"
+    },
+    "qwen36-approx-k8v4": {
+      "state": "passed",
+      "steps": {
+        "probe_approx": {
+          "returncode": 0,
+          "seconds": 4,
+          "failed_lines": [],
+          "last": "SUMMARY 6/6"
+        }
+      },
+      "started": "12:39:21",
+      "command": "mlx2.server --model ~/mlx-models/Qwen3.6-35B-A3B-uncensored-heretic-Native-MTP-Preserved-oQ4e-mtp --host 127.0.0.1 --port 8297 --cache-dir ~/Desktop/mlx2/qualification/runs/integration-gpu-20260918/cache/qwen36-approx-k8v4 --max-context 32768 --max-lanes 4 --max-inflight 8 --cache-bytes 2147483648 --qualification-mode --ordinary --approximate-kv {\"operation\": \"kv_k8v4\", \"enabled\": true}",
+      "server_alive": true,
+      "finished": "12:39:31"
+    },
+    "qwen36-approx-q8": {
+      "state": "passed",
+      "steps": {
+        "probe_approx": {
+          "returncode": 0,
+          "seconds": 3,
+          "failed_lines": [],
+          "last": "SUMMARY 6/6"
+        }
+      },
+      "started": "12:39:31",
+      "command": "mlx2.server --model ~/mlx-models/Qwen3.6-35B-A3B-uncensored-heretic-Native-MTP-Preserved-oQ4e-mtp --host 127.0.0.1 --port 8297 --cache-dir ~/Desktop/mlx2/qualification/runs/integration-gpu-20260918/cache/qwen36-approx-q8 --max-context 32768 --max-lanes 4 --max-inflight 8 --cache-bytes 2147483648 --qualification-mode --ordinary --approximate-kv {\"operation\": \"kv_q8\", \"enabled\": true}",
+      "server_alive": true,
+      "finished": "12:39:41"
+    },
+    "north-spomin": {
+      "state": "passed",
+      "steps": {
+        "probe_spomin": {
+          "returncode": 0,
+          "seconds": 17,
+          "failed_lines": [],
+          "last": "SUMMARY 7/7"
+        }
+      },
+      "started": "12:59:56",
+      "command": "mlx2.server --model ~/mlx-models/North-Mini-Code-1.0-mlx-4bit --host 127.0.0.1 --port 8297 --cache-dir ~/Desktop/mlx2/qualification/runs/integration-gpu-20260918/cache/north-spomin --max-context 32768 --max-lanes 4 --max-inflight 8 --cache-bytes 2147483648 --qualification-mode --ordinary --spomin-live-surgery {\"enabled\": true, \"capacity_tokens\": 16384, \"segment_tokens\": 1024}",
+      "server_alive": true,
+      "finished": "13:00:19"
+    },
+    "muse-spomin": {
+      "state": "passed",
+      "steps": {
+        "probe_spomin": {
+          "returncode": 0,
+          "seconds": 70,
+          "failed_lines": [],
+          "last": "SUMMARY 7/7"
+        }
+      },
+      "started": "12:52:39",
+      "command": "mlx2.server --model ~/mlx-models/Muse-Glimmer-30B-mlx-4bit --host 127.0.0.1 --port 8297 --cache-dir ~/Desktop/mlx2/qualification/runs/integration-gpu-20260918/cache/muse-spomin --max-context 32768 --max-lanes 4 --max-inflight 8 --cache-bytes 2147483648 --qualification-mode --ordinary --spomin-live-surgery {\"enabled\": true, \"capacity_tokens\": 16384, \"segment_tokens\": 1024}",
+      "server_alive": true,
+      "finished": "12:53:56"
+    },
+    "north-pld": {
+      "state": "passed",
+      "steps": {
+        "probe_pld": {
+          "returncode": 0,
+          "seconds": 4,
+          "failed_lines": [],
+          "last": "SUMMARY 5/5"
+        }
+      },
+      "started": "12:53:56",
+      "command": "mlx2.server --model ~/mlx-models/North-Mini-Code-1.0-mlx-4bit --host 127.0.0.1 --port 8297 --cache-dir ~/Desktop/mlx2/qualification/runs/integration-gpu-20260918/cache/north-pld --max-context 32768 --max-lanes 4 --max-inflight 8 --cache-bytes 2147483648 --qualification-mode --prompt-lookup --execution-policy ~/Desktop/mlx2/qualification/runs/integration-gpu-20260918/policies/pld.json",
+      "server_alive": true,
+      "finished": "12:54:06"
+    },
+    "north-pld-rotating": {
+      "state": "passed",
+      "steps": {
+        "probe_pld": {
+          "returncode": 0,
+          "seconds": 4,
+          "failed_lines": [],
+          "last": "SUMMARY 5/5"
+        }
+      },
+      "started": "12:54:06",
+      "command": "mlx2.server --model ~/mlx-models/North-Mini-Code-1.0-mlx-4bit --host 127.0.0.1 --port 8297 --cache-dir ~/Desktop/mlx2/qualification/runs/integration-gpu-20260918/cache/north-pld-rotating --max-context 32768 --max-lanes 4 --max-inflight 8 --cache-bytes 2147483648 --qualification-mode --prompt-lookup --execution-policy ~/Desktop/mlx2/qualification/runs/integration-gpu-20260918/policies/pld-rotating.json",
+      "server_alive": true,
+      "finished": "12:54:16"
+    },
+    "muse-pld": {
+      "state": "passed",
+      "steps": {
+        "probe_pld": {
+          "returncode": 0,
+          "seconds": 19,
+          "failed_lines": [],
+          "last": "SUMMARY 5/5"
+        }
+      },
+      "started": "12:54:16",
+      "command": "mlx2.server --model ~/mlx-models/Muse-Glimmer-30B-mlx-4bit --host 127.0.0.1 --port 8297 --cache-dir ~/Desktop/mlx2/qualification/runs/integration-gpu-20260918/cache/muse-pld --max-context 32768 --max-lanes 4 --max-inflight 8 --cache-bytes 2147483648 --qualification-mode --prompt-lookup --execution-policy ~/Desktop/mlx2/qualification/runs/integration-gpu-20260918/policies/pld.json",
+      "server_alive": true,
+      "finished": "12:54:42"
+    },
+    "muse-pld-rotating": {
+      "state": "passed",
+      "steps": {
+        "probe_pld": {
+          "returncode": 0,
+          "seconds": 20,
+          "failed_lines": [],
+          "last": "SUMMARY 5/5"
+        },
+        "qualifier": {
+          "returncode": 0,
+          "seconds": 110,
+          "failed_lines": [],
+          "last": "Evidence: ~/Desktop/mlx2/qualification/runs/integration-gpu-20260918/muse-pld-rotating-qualification.json"
+        }
+      },
+      "started": "12:54:42",
+      "command": "mlx2.server --model ~/mlx-models/Muse-Glimmer-30B-mlx-4bit --host 127.0.0.1 --port 8297 --cache-dir ~/Desktop/mlx2/qualification/runs/integration-gpu-20260918/cache/muse-pld-rotating --max-context 32768 --max-lanes 4 --max-inflight 8 --cache-bytes 2147483648 --qualification-mode --prompt-lookup --execution-policy ~/Desktop/mlx2/qualification/runs/integration-gpu-20260918/policies/pld-rotating.json",
+      "server_alive": true,
+      "finished": "12:57:01"
+    },
+    "qwen38-approx-k8v4": {
+      "state": "passed",
+      "steps": {
+        "probe_approx": {
+          "returncode": 0,
+          "seconds": 17,
+          "failed_lines": [],
+          "last": "SUMMARY 6/6"
+        }
+      },
+      "started": "12:42:01",
+      "command": "mlx2.server --model ~/mlx-models/Qwen3.8-27B-oQ4e-mtp --host 127.0.0.1 --port 8297 --cache-dir ~/Desktop/mlx2/qualification/runs/integration-gpu-20260918/cache/qwen38-approx-k8v4 --max-context 32768 --max-lanes 4 --max-inflight 8 --cache-bytes 2147483648 --qualification-mode --ordinary --execution-policy ~/Desktop/mlx2/qualification/policies/qwen38-27b-mtp2.json --approximate-kv {\"operation\": \"kv_k8v4\", \"enabled\": true}",
+      "server_alive": true,
+      "finished": "12:42:24"
+    },
+    "qwen36-mtp2": {
+      "state": "passed",
+      "steps": {
+        "qualifier": {
+          "returncode": 0,
+          "seconds": 34,
+          "failed_lines": [],
+          "last": "Evidence: ~/Desktop/mlx2/qualification/runs/integration-gpu-20260918/qwen36-mtp2-qualification.json"
+        }
+      },
+      "started": "13:00:19",
+      "command": "mlx2.server --model ~/mlx-models/Qwen3.6-35B-A3B-uncensored-heretic-Native-MTP-Preserved-oQ4e-mtp --host 127.0.0.1 --port 8297 --cache-dir ~/Desktop/mlx2/qualification/runs/integration-gpu-20260918/cache/qwen36-mtp2 --max-context 32768 --max-lanes 4 --max-inflight 8 --cache-bytes 2147483648 --qualification-mode --execution-policy ~/Desktop/mlx2/qualification/policies/qwen36-mtp2.json",
+      "server_alive": true,
+      "finished": "13:01:00"
+    },
+    "qwen36-pld": {
+      "state": "passed",
+      "steps": {
+        "qualifier": {
+          "returncode": 0,
+          "seconds": 38,
+          "failed_lines": [],
+          "last": "Evidence: ~/Desktop/mlx2/qualification/runs/integration-gpu-20260918/qwen36-pld-qualification.json"
+        }
+      },
+      "started": "13:01:00",
+      "command": "mlx2.server --model ~/mlx-models/Qwen3.6-35B-A3B-uncensored-heretic-Native-MTP-Preserved-oQ4e-mtp --host 127.0.0.1 --port 8297 --cache-dir ~/Desktop/mlx2/qualification/runs/integration-gpu-20260918/cache/qwen36-pld --max-context 32768 --max-lanes 4 --max-inflight 8 --cache-bytes 2147483648 --qualification-mode --prompt-lookup --execution-policy ~/Desktop/mlx2/qualification/runs/integration-gpu-20260918/policies/pld.json",
+      "server_alive": true,
+      "finished": "13:01:45"
+    },
+    "north-ordinary": {
+      "state": "failed",
+      "steps": {
+        "qualifier": {
+          "returncode": 1,
+          "seconds": 19,
+          "failed_lines": [
+            "shared_cohort_priming: FAIL"
+          ],
+          "last": "AssertionError: shared_cohort_priming"
+        }
+      },
+      "started": "12:43:47",
+      "command": "mlx2.server --model ~/mlx-models/North-Mini-Code-1.0-mlx-4bit --host 127.0.0.1 --port 8297 --cache-dir ~/Desktop/mlx2/qualification/runs/integration-gpu-20260918/cache/north-ordinary --max-context 32768 --max-lanes 4 --max-inflight 8 --cache-bytes 2147483648 --qualification-mode --ordinary",
+      "server_alive": true,
+      "finished": "12:44:12"
+    },
+    "muse-ordinary": {
+      "state": "passed",
+      "steps": {
+        "qualifier": {
+          "returncode": 0,
+          "seconds": 104,
+          "failed_lines": [],
+          "last": "Evidence: ~/Desktop/mlx2/qualification/runs/integration-gpu-20260918/muse-ordinary-qualification.json"
+        }
+      },
+      "started": "13:01:45",
+      "command": "mlx2.server --model ~/mlx-models/Muse-Glimmer-30B-mlx-4bit --host 127.0.0.1 --port 8297 --cache-dir ~/Desktop/mlx2/qualification/runs/integration-gpu-20260918/cache/muse-ordinary --max-context 32768 --max-lanes 4 --max-inflight 8 --cache-bytes 2147483648 --qualification-mode --ordinary",
+      "server_alive": true,
+      "finished": "13:03:38"
+    },
+    "north-spomin-qualifier": {
+      "state": "failed",
+      "steps": {
+        "qualifier": {
+          "returncode": 1,
+          "seconds": 20,
+          "failed_lines": [
+            "shared_cohort_priming: FAIL"
+          ],
+          "last": "AssertionError: shared_cohort_priming"
+        }
+      },
+      "started": "12:45:42",
+      "command": "mlx2.server --model ~/mlx-models/North-Mini-Code-1.0-mlx-4bit --host 127.0.0.1 --port 8297 --cache-dir ~/Desktop/mlx2/qualification/runs/integration-gpu-20260918/cache/north-spomin-qualifier --max-context 32768 --max-lanes 4 --max-inflight 8 --cache-bytes 2147483648 --qualification-mode --ordinary --spomin-live-surgery {\"enabled\": true, \"capacity_tokens\": 28672, \"segment_tokens\": 1024}",
+      "server_alive": true,
+      "finished": "12:46:12"
+    }
+  },
+  "order": [
+    "qwen36-ordinary",
+    "qwen36-approx-k8v4",
+    "qwen36-approx-q8",
+    "north-spomin",
+    "muse-spomin",
+    "north-pld",
+    "north-pld-rotating",
+    "muse-pld",
+    "muse-pld-rotating",
+    "qwen38-approx-k8v4",
+    "qwen36-mtp2",
+    "qwen36-pld",
+    "north-ordinary",
+    "muse-ordinary",
+    "north-spomin-qualifier"
+  ],
+  "history": [
+    {
+      "north-spomin": {
+        "state": "failed",
+        "steps": {
+          "probe_spomin": {
+            "returncode": 1,
+            "seconds": 17,
+            "failed_lines": [
+              "FAIL compacted_lane_batches_with_exact_lanes {\"codes\": [200, 200, 200], \"answers\": [\"Lisbon\", \"One, two, three, four, five, six, seven, eight, nine, ten.\", \"The user asks: \\\"Name three primary colors.\\\"\\n\\nWe need to answ\"], \"widths\": [3, 3, 3], \"receipt\": \"declined\", \"errors\": [null, null, null]}",
+              "FAIL manager_status {\"counts\": {\"applied\": 3, \"reason:committed\": 3, \"declined\": 5, \"reason:below_pressure\": 1, \"reason:shared_apcv2_state\": 4}, \"active_epochs\": 0}"
+            ],
+            "last": "SUMMARY 5/7"
+          }
+        },
+        "started": "12:39:41",
+        "command": "mlx2.server --model ~/mlx-models/North-Mini-Code-1.0-mlx-4bit --host 127.0.0.1 --port 8297 --cache-dir ~/Desktop/mlx2/qualification/runs/integration-gpu-20260918/cache/north-spomin --max-context 32768 --max-lanes 4 --max-inflight 8 --cache-bytes 2147483648 --qualification-mode --ordinary --spomin-live-surgery {\"enabled\": true, \"capacity_tokens\": 16384, \"segment_tokens\": 1024}",
+        "server_alive": true,
+        "finished": "12:40:04"
+      },
+      "muse-spomin": {
+        "state": "failed",
+        "steps": {
+          "probe_spomin": {
+            "returncode": 1,
+            "seconds": 71,
+            "failed_lines": [
+              "FAIL compacted_lane_batches_with_exact_lanes {\"codes\": [200, 200, 200], \"answers\": [\"Lisbon\", \"One, two, three, four, five, six, seven, eight, nine, ten.\", \"The three primary colors are red, blue, and yellow.\"], \"widths\": [2, 2, 2], \"receipt\": \"declined\", \"errors\": [null, null, null]}",
+              "FAIL manager_status {\"counts\": {\"applied\": 3, \"reason:committed\": 3, \"declined\": 5, \"reason:below_pressure\": 1, \"reason:shared_apcv2_state\": 4}, \"active_epochs\": 0}"
+            ],
+            "last": "SUMMARY 5/7"
+          }
+        },
+        "started": "12:40:04",
+        "command": "mlx2.server --model ~/mlx-models/Muse-Glimmer-30B-mlx-4bit --host 127.0.0.1 --port 8297 --cache-dir ~/Desktop/mlx2/qualification/runs/integration-gpu-20260918/cache/muse-spomin --max-context 32768 --max-lanes 4 --max-inflight 8 --cache-bytes 2147483648 --qualification-mode --ordinary --spomin-live-surgery {\"enabled\": true, \"capacity_tokens\": 16384, \"segment_tokens\": 1024}",
+        "server_alive": true,
+        "finished": "12:41:25"
+      },
+      "north-pld": {
+        "state": "failed",
+        "steps": {},
+        "started": "12:41:25",
+        "command": "mlx2.server --model ~/mlx-models/North-Mini-Code-1.0-mlx-4bit --host 127.0.0.1 --port 8297 --cache-dir ~/Desktop/mlx2/qualification/runs/integration-gpu-20260918/cache/north-pld --max-context 32768 --max-lanes 4 --max-inflight 8 --cache-bytes 2147483648 --qualification-mode --prompt-lookup --execution-policy ~/Desktop/mlx2/qualification/runs/integration-gpu-20260918/policies/pld.json",
+        "reason": "server exited 1",
+        "log_tail": "[transformers] PyTorch was not found. Models won't be available and only tokenizers, configuration and file/data utilities can be used.\n2026-09-18 12:41:27,219 INFO ubc_evict: evicted 5108.2 MB from UBC for ~/mlx-models/North-Mini-Code-1.0-mlx-4bit/model-00001-of-00004.safetensors\n2026-09-18 12:41:27,241 INFO ubc_evict: evicted 5118.0 MB from UBC for ~/mlx-models/North-Mini-Code-1.0-mlx-4bit/model-00002-of-00004.safetensors\n2026-09-18 12:41:27,266 INFO ubc_evict: evicted 5118.0 MB from UBC for ~/mlx-models/North-Mini-Code-1.0-mlx-4bit/model-00003-of-00004.safetensors\n2026-09-18 12:41:27,273 INFO ubc_evict: evicted 1015.2 MB from UBC for ~/mlx-models/North-Mini-Code-1.0-mlx-4bit/model-00004-of-00004.safetensors\n2026-09-18 12:41:27,273 INFO ubc_evict: pass complete total_mb=16359.3 elapsed_s=0.08\n2026-09-18 12:41:28,020 ERROR generation worker failed\nTraceback (most recent call last):\n  File \"~/Desktop/mlx2/src/mlx2/serving.py\", line 1227, in _run\n    raise ValueError(\nValueError: model adapter does not declare prompt-lookup execution\nValueError: model adapter does not declare prompt-lookup execution\n",
+        "finished": "12:41:34"
+      },
+      "north-pld-rotating": {
+        "state": "failed",
+        "steps": {},
+        "started": "12:41:34",
+        "command": "mlx2.server --model ~/mlx-models/North-Mini-Code-1.0-mlx-4bit --host 127.0.0.1 --port 8297 --cache-dir ~/Desktop/mlx2/qualification/runs/integration-gpu-20260918/cache/north-pld-rotating --max-context 32768 --max-lanes 4 --max-inflight 8 --cache-bytes 2147483648 --qualification-mode --prompt-lookup --execution-policy ~/Desktop/mlx2/qualification/runs/integration-gpu-20260918/policies/pld-rotating.json",
+        "reason": "server exited 1",
+        "log_tail": "[transformers] PyTorch was not found. Models won't be available and only tokenizers, configuration and file/data utilities can be used.\n2026-09-18 12:41:36,241 INFO ubc_evict: evicted 5108.2 MB from UBC for ~/mlx-models/North-Mini-Code-1.0-mlx-4bit/model-00001-of-00004.safetensors\n2026-09-18 12:41:36,262 INFO ubc_evict: evicted 5118.0 MB from UBC for ~/mlx-models/North-Mini-Code-1.0-mlx-4bit/model-00002-of-00004.safetensors\n2026-09-18 12:41:36,286 INFO ubc_evict: evicted 5118.0 MB from UBC for ~/mlx-models/North-Mini-Code-1.0-mlx-4bit/model-00003-of-00004.safetensors\n2026-09-18 12:41:36,293 INFO ubc_evict: evicted 1015.2 MB from UBC for ~/mlx-models/North-Mini-Code-1.0-mlx-4bit/model-00004-of-00004.safetensors\n2026-09-18 12:41:36,293 INFO ubc_evict: pass complete total_mb=16359.3 elapsed_s=0.07\n2026-09-18 12:41:37,001 ERROR generation worker failed\nTraceback (most recent call last):\n  File \"~/Desktop/mlx2/src/mlx2/serving.py\", line 1227, in _run\n    raise ValueError(\nValueError: model adapter does not declare prompt-lookup execution\nValueError: model adapter does not declare prompt-lookup execution\n",
+        "finished": "12:41:43"
+      },
+      "muse-pld": {
+        "state": "failed",
+        "steps": {},
+        "started": "12:41:43",
+        "command": "mlx2.server --model ~/mlx-models/Muse-Glimmer-30B-mlx-4bit --host 127.0.0.1 --port 8297 --cache-dir ~/Desktop/mlx2/qualification/runs/integration-gpu-20260918/cache/muse-pld --max-context 32768 --max-lanes 4 --max-inflight 8 --cache-bytes 2147483648 --qualification-mode --prompt-lookup --execution-policy ~/Desktop/mlx2/qualification/runs/integration-gpu-20260918/policies/pld.json",
+        "reason": "server exited 1",
+        "log_tail": " tokenizers, configuration and file/data utilities can be used.\n2026-09-18 12:41:45,285 INFO ubc_evict: evicted 5090.2 MB from UBC for ~/mlx-models/Muse-Glimmer-30B-mlx-4bit/model-00001-of-00004.safetensors\n2026-09-18 12:41:45,308 INFO ubc_evict: evicted 5117.7 MB from UBC for ~/mlx-models/Muse-Glimmer-30B-mlx-4bit/model-00002-of-00004.safetensors\n2026-09-18 12:41:45,331 INFO ubc_evict: evicted 5111.0 MB from UBC for ~/mlx-models/Muse-Glimmer-30B-mlx-4bit/model-00003-of-00004.safetensors\n2026-09-18 12:41:45,343 INFO ubc_evict: evicted 5040.1 MB from UBC for ~/mlx-models/Muse-Glimmer-30B-mlx-4bit/model-00004-of-00004.safetensors\n2026-09-18 12:41:45,343 INFO ubc_evict: pass complete total_mb=20359.0 elapsed_s=0.08\n[transformers] You are using a model of type `muse_glimmer` to instantiate a model of type ``. This may be expected if you are loading a checkpoint that shares a subset of the architecture (e.g., loading a `sam2_video` checkpoint into `Sam2Model`), but is otherwise not supported and can yield errors. Please verify that the checkpoint is compatible with the model you are instantiating.\n2026-09-18 12:41:46,144 ERROR generation worker failed\nTraceback (most recent call last):\n  File \"~/Desktop/mlx2/src/mlx2/serving.py\", line 1227, in _run\n    raise ValueError(\nValueError: model adapter does not declare prompt-lookup execution\nValueError: model adapter does not declare prompt-lookup execution\n",
+        "finished": "12:41:52"
+      },
+      "muse-pld-rotating": {
+        "state": "failed",
+        "steps": {},
+        "started": "12:41:52",
+        "command": "mlx2.server --model ~/mlx-models/Muse-Glimmer-30B-mlx-4bit --host 127.0.0.1 --port 8297 --cache-dir ~/Desktop/mlx2/qualification/runs/integration-gpu-20260918/cache/muse-pld-rotating --max-context 32768 --max-lanes 4 --max-inflight 8 --cache-bytes 2147483648 --qualification-mode --prompt-lookup --execution-policy ~/Desktop/mlx2/qualification/runs/integration-gpu-20260918/policies/pld-rotating.json",
+        "reason": "server exited 1",
+        "log_tail": " tokenizers, configuration and file/data utilities can be used.\n2026-09-18 12:41:54,291 INFO ubc_evict: evicted 5090.2 MB from UBC for ~/mlx-models/Muse-Glimmer-30B-mlx-4bit/model-00001-of-00004.safetensors\n2026-09-18 12:41:54,312 INFO ubc_evict: evicted 5117.7 MB from UBC for ~/mlx-models/Muse-Glimmer-30B-mlx-4bit/model-00002-of-00004.safetensors\n2026-09-18 12:41:54,335 INFO ubc_evict: evicted 5111.0 MB from UBC for ~/mlx-models/Muse-Glimmer-30B-mlx-4bit/model-00003-of-00004.safetensors\n2026-09-18 12:41:54,346 INFO ubc_evict: evicted 5040.1 MB from UBC for ~/mlx-models/Muse-Glimmer-30B-mlx-4bit/model-00004-of-00004.safetensors\n2026-09-18 12:41:54,346 INFO ubc_evict: pass complete total_mb=20359.0 elapsed_s=0.08\n[transformers] You are using a model of type `muse_glimmer` to instantiate a model of type ``. This may be expected if you are loading a checkpoint that shares a subset of the architecture (e.g., loading a `sam2_video` checkpoint into `Sam2Model`), but is otherwise not supported and can yield errors. Please verify that the checkpoint is compatible with the model you are instantiating.\n2026-09-18 12:41:55,130 ERROR generation worker failed\nTraceback (most recent call last):\n  File \"~/Desktop/mlx2/src/mlx2/serving.py\", line 1227, in _run\n    raise ValueError(\nValueError: model adapter does not declare prompt-lookup execution\nValueError: model adapter does not declare prompt-lookup execution\n",
+        "finished": "12:42:01"
+      }
+    },
+    {
+      "north-spomin": {
+        "state": "failed",
+        "steps": {
+          "probe_spomin": {
+            "returncode": 1,
+            "seconds": 16,
+            "failed_lines": [
+              "FAIL long_prompt_compacted {\"codes\": [200, 200], \"receipts\": [{\"schema\": \"mlx2.spomin-live-surgery.v1\", \"request_id\": \"chatcmpl-d82fcf4c1687401794b25feb976c1a35\", \"status\": \"applied\", \"reason\": \"committed\", \"source_tokens\": 13280, \"target_tokens\": 10208, \"strategy\": \"oldest_contiguous\", \"epoch\": 1, "
+            ],
+            "last": "SUMMARY 6/7"
+          }
+        },
+        "started": "12:52:16",
+        "command": "mlx2.server --model ~/mlx-models/North-Mini-Code-1.0-mlx-4bit --host 127.0.0.1 --port 8297 --cache-dir ~/Desktop/mlx2/qualification/runs/integration-gpu-20260918/cache/north-spomin --max-context 32768 --max-lanes 4 --max-inflight 8 --cache-bytes 2147483648 --qualification-mode --ordinary --spomin-live-surgery {\"enabled\": true, \"capacity_tokens\": 16384, \"segment_tokens\": 1024}",
+        "server_alive": true,
+        "finished": "12:52:39"
+      },
+      "qwen36-ordinary": {
+        "state": "passed",
+        "steps": {
+          "qualifier": {
+            "returncode": 0,
+            "seconds": 28,
+            "failed_lines": [],
+            "last": "Evidence: ~/Desktop/mlx2/qualification/runs/integration-gpu-20260918/qwen36-ordinary-qualification.json"
+          }
+        },
+        "started": "12:38:46",
+        "command": "mlx2.server --model ~/mlx-models/Qwen3.6-35B-A3B-uncensored-heretic-Native-MTP-Preserved-oQ4e-mtp --host 127.0.0.1 --port 8297 --cache-dir ~/Desktop/mlx2/qualification/runs/integration-gpu-20260918/cache/qwen36-ordinary --max-context 32768 --max-lanes 4 --max-inflight 8 --cache-bytes 2147483648 --qualification-mode --ordinary --execution-policy ~/Desktop/mlx2/qualification/policies/qwen36-mtp-artifact-ordinary.json",
+        "server_alive": true,
+        "finished": "12:39:21"
+      },
+      "qwen36-mtp2": {
+        "state": "passed",
+        "steps": {
+          "qualifier": {
+            "returncode": 0,
+            "seconds": 34,
+            "failed_lines": [],
+            "last": "Evidence: ~/Desktop/mlx2/qualification/runs/integration-gpu-20260918/qwen36-mtp2-qualification.json"
+          }
+        },
+        "started": "12:42:24",
+        "command": "mlx2.server --model ~/mlx-models/Qwen3.6-35B-A3B-uncensored-heretic-Native-MTP-Preserved-oQ4e-mtp --host 127.0.0.1 --port 8297 --cache-dir ~/Desktop/mlx2/qualification/runs/integration-gpu-20260918/cache/qwen36-mtp2 --max-context 32768 --max-lanes 4 --max-inflight 8 --cache-bytes 2147483648 --qualification-mode --execution-policy ~/Desktop/mlx2/qualification/policies/qwen36-mtp2.json",
+        "server_alive": true,
+        "finished": "12:43:05"
+      },
+      "qwen36-pld": {
+        "state": "passed",
+        "steps": {
+          "qualifier": {
+            "returncode": 0,
+            "seconds": 36,
+            "failed_lines": [],
+            "last": "Evidence: ~/Desktop/mlx2/qualification/runs/integration-gpu-20260918/qwen36-pld-qualification.json"
+          }
+        },
+        "started": "12:43:05",
+        "command": "mlx2.server --model ~/mlx-models/Qwen3.6-35B-A3B-uncensored-heretic-Native-MTP-Preserved-oQ4e-mtp --host 127.0.0.1 --port 8297 --cache-dir ~/Desktop/mlx2/qualification/runs/integration-gpu-20260918/cache/qwen36-pld --max-context 32768 --max-lanes 4 --max-inflight 8 --cache-bytes 2147483648 --qualification-mode --prompt-lookup --execution-policy ~/Desktop/mlx2/qualification/runs/integration-gpu-20260918/policies/pld.json",
+        "server_alive": true,
+        "finished": "12:43:47"
+      },
+      "muse-ordinary": {
+        "state": "passed",
+        "steps": {
+          "qualifier": {
+            "returncode": 0,
+            "seconds": 83,
+            "failed_lines": [],
+            "last": "Evidence: ~/Desktop/mlx2/qualification/runs/integration-gpu-20260918/muse-ordinary-qualification.json"
+          }
+        },
+        "started": "12:44:12",
+        "command": "mlx2.server --model ~/mlx-models/Muse-Glimmer-30B-mlx-4bit --host 127.0.0.1 --port 8297 --cache-dir ~/Desktop/mlx2/qualification/runs/integration-gpu-20260918/cache/muse-ordinary --max-context 32768 --max-lanes 4 --max-inflight 8 --cache-bytes 2147483648 --qualification-mode --ordinary",
+        "server_alive": true,
+        "finished": "12:45:42"
+      }
+    }
+  ],
+  "updated": "2026-09-18 13:03:53",
+  "production_restored": true
+}

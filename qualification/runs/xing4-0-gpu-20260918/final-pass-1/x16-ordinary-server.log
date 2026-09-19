@@ -1,0 +1,35 @@
+2026-09-18 19:09:40,694 INFO "GET /health HTTP/1.1" 503 -
+2026-09-18 19:09:42,441 INFO ubc_evict: evicted 3724.8 MB from UBC for ~/mlx-models/Xing4.0-29B-A4B-mlx-bf16/model-00001-of-00016.safetensors
+2026-09-18 19:09:42,473 INFO ubc_evict: evicted 3737.9 MB from UBC for ~/mlx-models/Xing4.0-29B-A4B-mlx-bf16/model-00002-of-00016.safetensors
+2026-09-18 19:09:42,503 INFO ubc_evict: evicted 3814.9 MB from UBC for ~/mlx-models/Xing4.0-29B-A4B-mlx-bf16/model-00003-of-00016.safetensors
+2026-09-18 19:09:42,533 INFO ubc_evict: evicted 3814.9 MB from UBC for ~/mlx-models/Xing4.0-29B-A4B-mlx-bf16/model-00004-of-00016.safetensors
+2026-09-18 19:09:42,565 INFO ubc_evict: evicted 3737.9 MB from UBC for ~/mlx-models/Xing4.0-29B-A4B-mlx-bf16/model-00005-of-00016.safetensors
+2026-09-18 19:09:42,596 INFO ubc_evict: evicted 3814.9 MB from UBC for ~/mlx-models/Xing4.0-29B-A4B-mlx-bf16/model-00006-of-00016.safetensors
+2026-09-18 19:09:42,628 INFO ubc_evict: evicted 3814.9 MB from UBC for ~/mlx-models/Xing4.0-29B-A4B-mlx-bf16/model-00007-of-00016.safetensors
+2026-09-18 19:09:42,658 INFO ubc_evict: evicted 3737.9 MB from UBC for ~/mlx-models/Xing4.0-29B-A4B-mlx-bf16/model-00008-of-00016.safetensors
+2026-09-18 19:09:42,694 INFO ubc_evict: evicted 3814.9 MB from UBC for ~/mlx-models/Xing4.0-29B-A4B-mlx-bf16/model-00009-of-00016.safetensors
+2026-09-18 19:09:42,728 INFO ubc_evict: evicted 3814.9 MB from UBC for ~/mlx-models/Xing4.0-29B-A4B-mlx-bf16/model-00010-of-00016.safetensors
+2026-09-18 19:09:42,759 INFO ubc_evict: evicted 3737.9 MB from UBC for ~/mlx-models/Xing4.0-29B-A4B-mlx-bf16/model-00011-of-00016.safetensors
+2026-09-18 19:09:42,787 INFO ubc_evict: evicted 3814.9 MB from UBC for ~/mlx-models/Xing4.0-29B-A4B-mlx-bf16/model-00012-of-00016.safetensors
+2026-09-18 19:09:42,802 INFO ubc_evict: evicted 3814.9 MB from UBC for ~/mlx-models/Xing4.0-29B-A4B-mlx-bf16/model-00013-of-00016.safetensors
+2026-09-18 19:09:42,831 INFO ubc_evict: evicted 3737.9 MB from UBC for ~/mlx-models/Xing4.0-29B-A4B-mlx-bf16/model-00014-of-00016.safetensors
+2026-09-18 19:09:42,857 INFO ubc_evict: evicted 3862.6 MB from UBC for ~/mlx-models/Xing4.0-29B-A4B-mlx-bf16/model-00015-of-00016.safetensors
+2026-09-18 19:09:42,859 INFO ubc_evict: evicted 950.2 MB from UBC for ~/mlx-models/Xing4.0-29B-A4B-mlx-bf16/model-00016-of-00016.safetensors
+2026-09-18 19:09:42,859 INFO ubc_evict: pass complete total_mb=57746.1 elapsed_s=0.44
+[transformers] PyTorch was not found. Models won't be available and only tokenizers, configuration and file/data utilities can be used.
+2026-09-18 19:09:44,027 INFO "GET /health HTTP/1.1" 503 -
+2026-09-18 19:09:47,034 INFO "GET /health HTTP/1.1" 200 -
+2026-09-18 19:09:47,034 INFO "GET /health HTTP/1.1" 200 -
+2026-09-18 19:09:48,149 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-18 19:09:53,508 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-18 19:09:53,858 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-18 19:10:06,229 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-18 19:10:21,095 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-18 19:10:21,095 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-18 19:10:21,175 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-18 19:10:21,175 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-18 19:10:25,086 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-18 19:10:25,087 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-18 19:10:25,087 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-18 19:10:25,189 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-18 19:10:25,383 INFO "GET /health HTTP/1.1" 200 -

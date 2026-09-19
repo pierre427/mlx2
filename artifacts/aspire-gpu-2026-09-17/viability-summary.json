@@ -1,0 +1,55 @@
+{
+  "schema": "mlx2.aspire-gpu-viability.v1",
+  "date": "2026-09-17",
+  "verdict": "not_helpful_on_measured_native_mtp_artifact",
+  "decision": "do_not_integrate_async_scheduler_or_enable_heterogeneous_depths",
+  "model": "~/mlx-models/Qwen3.6-35B-A3B-uncensored-heretic-Native-MTP-Preserved-oQ4e-mtp",
+  "artifact_fingerprint": "414a2fc7b4b3cb6451401032b9517ab91a73c1ffb95fe3c67323c685acf134fa",
+  "runtime_source_sha256": "7756c1a0b9a543c0ebbdb73a7d9bd501b68d8eae778baa146824347b6659e978",
+  "mlx": "0.32.2.dev20260915+2a817ad94",
+  "gpu_lease": {
+    "campaign": "14ec08afc0c0454d9144575c0d0c525b",
+    "lease_id": "1bd77023be4d453fb6a21b2371d57b39",
+    "generation": 1,
+    "owner": "root"
+  },
+  "short_context_tokens_per_second": {
+    "B1": {"ordinary": 123.20437674510315, "K1": 85.11801783138228, "K2": 76.58906013282589, "K3": 80.60299437666298},
+    "B2": {"ordinary": 199.83795497284368, "K1": 119.08490230323211, "K2": 117.2463761485252, "K3": 108.95694157731528},
+    "B4": {"ordinary": 301.60986657112824, "K1": 161.86329094352143, "K2": 148.43514752068984, "K3": 132.41666260696127}
+  },
+  "long_context": {
+    "observed_prompt_tokens": [15224, 15225, 15227, 15225],
+    "tokens_per_second": {
+      "B1": {"ordinary": 101.1721744928111, "K1": 78.63866242713749, "K2": 69.35642559969916},
+      "B4": {"ordinary": 203.76868592577316, "K1": 127.43997033847224, "K2": 107.68500408556723}
+    },
+    "relative_to_ordinary": {
+      "B1": {"K1": 0.7772755979730894, "K2": 0.6855286638583356},
+      "B4": {"K1": 0.6254148902196621, "K2": 0.5284668917421083}
+    },
+    "observed_acceptance": {
+      "K1": {"overall": 0.509090909090909, "B1": 0.5135135135135135, "B4": 0.4772727272727273},
+      "K2": {"overall": 0.28821656050955413, "B1": 0.2979942693409742, "B4": 0.26875}
+    }
+  },
+  "correctness": {
+    "finite_outputs": true,
+    "runtime_failures": 0,
+    "cross_arm_temperature_zero_output_hashes_match": false,
+    "note": "Ordinary decode also changed some output hashes across batch widths, so the mismatch is not uniquely attributable to MTP; exact route equivalence is nevertheless not established."
+  },
+  "route_evidence": {
+    "ordinary_profile": "qwen36-35b-a3b-apcv2-ordinary",
+    "mtp_profiles": ["qwen36-35b-a3b-apcv2-mtp1", "qwen36-35b-a3b-apcv2-mtp2", "qwen36-35b-a3b-apcv2-mtp3"],
+    "mtp_route": "segmented_self_mtp",
+    "observed_compute_widths": [1, 2, 3, 4],
+    "K4_rejected_by_adapter": "num_draft must be 1, 2, or 3"
+  },
+  "scope_limits": [
+    "The ASPIRE unified mixed forward and intra-draft attention refresh are not implemented.",
+    "Current production batching explicitly excludes heterogeneous per-lane self-MTP depth.",
+    "The observed oracle over supported K=0,1,2,3 selects K=0 (ordinary) for every measured batch width.",
+    "These results apply to this native-MTP artifact and the recorded deterministic synthetic-content workloads, not ASPIRE's sparse-attention CUDA implementation."
+  ]
+}

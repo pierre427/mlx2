@@ -1,0 +1,91 @@
+{
+  "arguments": {
+    "entries": 1,
+    "entry_gib": 0.01,
+    "max_total_gib": 8.0,
+    "rescan_only": true,
+    "scratch_root": "/private/tmp"
+  },
+  "completed_at_unix": 1789782554.8370829,
+  "device": "cpu",
+  "guardrails": {
+    "cleanup_on_exit": true,
+    "minimum_free_memory_bytes": 25769803776,
+    "requested_resident_bytes_per_entry": 10737418,
+    "requested_total_bytes": 10737418
+  },
+  "machine": {
+    "hw_memsize_bytes": 137438953472,
+    "machine": "arm64",
+    "platform": "macOS-26.7-arm64-arm-64bit",
+    "python": "3.12.13",
+    "scratch_filesystem": {
+      "free_bytes": 767288008704,
+      "path": "/private/tmp",
+      "total_bytes": 3996276899840,
+      "used_bytes": 3228988891136
+    }
+  },
+  "peak_rss_bytes": 78430208,
+  "schema": "mlx2.apcv2-persistence-benchmark.v1",
+  "source": {
+    "git_head": "08e605986e1b66937263fce941df816861290acb",
+    "requested_base_revision": "271b21e",
+    "script_sha256": "09aea567c1e0f83365f5f2123c7a54e9ca0e0511520682d4e9f1c3718725a006"
+  },
+  "spill": {
+    "digest_computed_once_per_payload": true,
+    "digest_seconds": 0.0046432079980149865,
+    "manifest_write_calls": 4,
+    "manifest_write_seconds": 0.0014927929732948542,
+    "mlx_clear_cache_seconds": 3.925000783056021e-05,
+    "park_latency_seconds": {
+      "count": 1,
+      "max": 0.010874958010390401,
+      "mean": 0.010874958010390401,
+      "min": 0.010874958010390401,
+      "p50": 0.010874958010390401
+    },
+    "payload_digest_calls": 3,
+    "payload_files": 3,
+    "payload_write_and_fsync_seconds": 0.0036912080249749124,
+    "per_entry_breakdown": [
+      {
+        "digest_seconds": 0.0046432079980149865,
+        "manifest_write_seconds": 0.0011617509881034493,
+        "mlx_clear_cache_seconds": 3.925000783056021e-05,
+        "other_seconds": 0.0013395409914664924,
+        "payload_write_and_fsync_seconds": 0.0036912080249749124,
+        "total_seconds": 0.010874958010390401
+      }
+    ],
+    "per_entry_park_seconds": [
+      0.010874958010390401
+    ],
+    "throughput_gib_per_second": 0.9197554598675602,
+    "total_seconds_including_fsync_digest_manifest": 0.010874958010390401
+  },
+  "startup_rescan": {
+    "entries": 1,
+    "internal_seconds": 0.00058562500635162,
+    "metadata_only_confirmed": true,
+    "payload_read_bytes": 0,
+    "payload_read_calls": 0,
+    "total_payload_bytes": 10739890,
+    "wall_seconds": 0.0009864169987849891
+  },
+  "synthetic": {
+    "persisted_total_bytes": 10739890,
+    "requested_entry_bytes": 10737418,
+    "resident_entry_bytes": [
+      10737418
+    ],
+    "topology": {
+      "mtp_draft_kv_planes": 2,
+      "mtp_tail_hidden": true,
+      "recurrent_arrays_per_plane": 2,
+      "target_kv_planes": 4,
+      "target_recurrent_planes": 4
+    }
+  }
+}

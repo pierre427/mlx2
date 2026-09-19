@@ -1,0 +1,77 @@
+{
+  "schema": "mlx2.telemetry-qualification.v2",
+  "created_at": "2026-09-18T19:10:48Z",
+  "branch": "codex/telemetry-hardening",
+  "source_commit": "6ffafed0e2871e6643ccf800dc84cfb7b6516ecc",
+  "base_main": "5a4af5099fa0fe5aa441ad3b7b127bb74f57f6fd",
+  "scope": "Bounded Prometheus schema v2, advanced execution metrics, operational metrics, dashboards, alerts, and optional host-only OTLP tracing",
+  "passed": true,
+  "gpu_used": false,
+  "model_loaded": false,
+  "metal_imported_by_passing_suites": false,
+  "checks": {
+    "observability_and_http_contracts": {
+      "passed": true,
+      "tests": 63,
+      "command": ".venv/bin/python -m pytest --noconftest -p no:cacheprovider tests/test_serving_contract.py tests/test_prometheus.py tests/test_batch_metrics.py -q",
+      "evidence": [
+        "Prometheus text parsed by prometheus-client 0.26.0",
+        "loopback metrics endpoint and serving contracts",
+        "HTTP 503 with telemetry source unavailable on exporter failure",
+        "bounded capability, scheduler, segmented-MTP, COW, Spomin, HTTP, and advanced-execution labels",
+        "lazy disabled tracing and enabled OTLP batch-processor setup"
+      ]
+    },
+    "mlx_free_control_plane_regressions": {
+      "passed": true,
+      "tests": 88,
+      "command": ".venv/bin/python -m pytest --noconftest -p no:cacheprovider tests/test_core.py tests/test_qualification.py tests/test_adapter_registry.py tests/test_batch_metrics.py tests/test_context_compaction.py tests/test_prometheus.py -q -k 'not http_metrics_endpoint'"
+    },
+    "serving_ownership_prefix": {
+      "passed": true,
+      "tests": 11,
+      "command": ".venv/bin/python -m pytest --noconftest -p no:cacheprovider tests/test_serving_retention.py -q",
+      "notes": "The first eleven MLX-free ownership tests passed. The next test imports APCv2 and was excluded from qualification after the environment rejected MLX device initialization."
+    },
+    "mlx_import_guard": {
+      "passed": true,
+      "evidence": "prometheus, batch_metrics, server, serving, and tracing imported while a meta-path guard rejected mlx and mlx.*"
+    },
+    "observability_artifacts": {
+      "passed": true,
+      "evidence": [
+        "Grafana dashboard is valid JSON with six panels",
+        "Prometheus rule file is valid YAML with eight alert rules"
+      ]
+    },
+    "compile": {
+      "passed": true,
+      "command": ".venv/bin/python -m compileall -q changed Python files"
+    },
+    "ruff_f_e9": {
+      "passed": true,
+      "command": ".venv/bin/ruff check --no-cache --select F,E9 changed Python files"
+    },
+    "diff_check": {
+      "passed": true,
+      "command": "git diff --check"
+    }
+  },
+  "qualification_boundaries": {
+    "gpu_or_metal": "Explicitly excluded. No GPU test, model load, Metal kernel, or GPU-backed server was run.",
+    "live_model_metrics": "No claim is made about values under a real model workload.",
+    "otlp_delivery": "SDK construction and asynchronous batch-processor wiring were exercised without sending spans to a live collector.",
+    "alert_thresholds": "Rules are structurally validated examples, not SLO or performance qualification.",
+    "apcv2_runtime": "The queried-token and resident-capacity additions were compile-checked; APCv2 runtime tests require MLX and were not run."
+  },
+  "environment_events": [
+    {
+      "status": "expected_environment_abort",
+      "summary": "An attempted broader serving suite imported MLX and aborted because this headless environment has no Metal device. The attempt was stopped and is not counted as a passing CPU test."
+    },
+    {
+      "status": "sandbox_permission",
+      "summary": "Loopback-only HTTP tests required permission to bind temporary localhost sockets; the CPU-only suite then passed."
+    }
+  ]
+}

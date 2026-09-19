@@ -1,0 +1,42 @@
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mlx2"
+version = "0.1.0"
+description = "Capability-driven MLX inference runtime for Apple Silicon"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "Apache-2.0"
+license-files = ["LICENSE", "provenance/*.NOTICE", "provenance/LICENSE*"]
+authors = [{ name = "Pierre Lamy" }]
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "ruff>=0.16"]
+mlx = ["mlx>=0.32"]
+serve = ["mlx>=0.32.2.dev20260829", "transformers>=5.12,<6", "numpy>=2", "psutil>=7", "jinja2>=3.1", "regex>=2024.11"]
+observability = [
+    "opentelemetry-api>=1.29",
+    "opentelemetry-sdk>=1.29",
+    "opentelemetry-exporter-otlp-proto-http>=1.29",
+    "prometheus-client>=0.21",
+]
+# mlx-vlm stays on 0.6.x: the live multimodal smoke qualified on 0.6.17
+# (fork 653f1f13), and 0.7.1 is reported slower per MTP cycle (omlx#3750:
+# +10.6% ms/cycle) and a suspect in a cold-path drift (Rapid#3551). A/B first.
+multimodal = ["pillow>=10", "opencv-python>=4.10", "mlx-vlm>=0.6.17,<0.7"]
+
+[project.scripts]
+mlx2-serve = "mlx2.server:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+addopts = "-q"
+testpaths = ["tests"]
+
+[tool.setuptools.package-data]
+"mlx2.adapters" = ["assets/*.npz", "assets/*.json"]

@@ -1,0 +1,366 @@
+[
+  {
+    "path": "~/mlx-models/Qwen3.8-27B-CRACK-MLX-4bit",
+    "identity": {
+      "path": "~/mlx-models/Qwen3.8-27B-CRACK-MLX-4bit",
+      "fingerprint": "661121dbb4c7cec4821bf97bba7d8a09181920d0821bd4832622421941db6d7f",
+      "files": [
+        [
+          "model-00001-of-00005.safetensors",
+          4345010703,
+          1787063448300422039
+        ],
+        [
+          "model-00002-of-00005.safetensors",
+          4332653281,
+          1787063461577881005
+        ],
+        [
+          "model-00003-of-00005.safetensors",
+          4312410865,
+          1787063469566356614
+        ],
+        [
+          "model-00004-of-00005.safetensors",
+          4300213224,
+          1787063477474733841
+        ],
+        [
+          "model-00005-of-00005.safetensors",
+          593246228,
+          1787063478617106885
+        ]
+      ]
+    },
+    "has_mtp": false,
+    "mtp_tensor_count": 0,
+    "quantization": {
+      "group_size": 64,
+      "bits": 4,
+      "mode": "affine"
+    }
+  },
+  {
+    "path": "~/mlx-models/Qwen3.8-27B-CRACK-MLX-8bit",
+    "identity": {
+      "path": "~/mlx-models/Qwen3.8-27B-CRACK-MLX-8bit",
+      "fingerprint": "aa9c948d1bde1431f99b8ea34a2ab821282be4226bdf860ed2b67b76a4b3b1e6",
+      "files": [
+        [
+          "model-00001-of-00008.safetensors",
+          4300549571,
+          1787016225542789624
+        ],
+        [
+          "model-00002-of-00008.safetensors",
+          4357408891,
+          1787016230190619343
+        ],
+        [
+          "model-00003-of-00008.safetensors",
+          4300842409,
+          1787016235230254371
+        ],
+        [
+          "model-00004-of-00008.safetensors",
+          4305766694,
+          1787016240241083606
+        ],
+        [
+          "model-00005-of-00008.safetensors",
+          4350374785,
+          1787016245450493255
+        ],
+        [
+          "model-00006-of-00008.safetensors",
+          4316950412,
+          1787016250614830458
+        ],
+        [
+          "model-00007-of-00008.safetensors",
+          4367042861,
+          1787016255772844549
+        ],
+        [
+          "model-00008-of-00008.safetensors",
+          395576573,
+          1787016256284981347
+        ]
+      ]
+    },
+    "has_mtp": false,
+    "mtp_tensor_count": 0,
+    "quantization": {
+      "group_size": 64,
+      "bits": 8,
+      "mode": "affine"
+    }
+  },
+  {
+    "path": "~/mlx-models/Qwen3.8-27B-CRACK-MLX-bf16",
+    "identity": {
+      "path": "~/mlx-models/Qwen3.8-27B-CRACK-MLX-bf16",
+      "fingerprint": "9fb41099df41f3e181e3422ea7eda92904ee732164ffcc2a295a9b1b38919c91",
+      "files": [
+        [
+          "model-00001-of-00013.safetensors",
+          6007112384,
+          1787016112010087324
+        ],
+        [
+          "model-00002-of-00013.safetensors",
+          4335119020,
+          1787016119838709468
+        ],
+        [
+          "model-00003-of-00013.safetensors",
+          4441066533,
+          1787016123843543231
+        ],
+        [
+          "model-00004-of-00013.safetensors",
+          4335139687,
+          1787016127290554871
+        ],
+        [
+          "model-00005-of-00013.safetensors",
+          4345584106,
+          1787016130953877838
+        ],
+        [
+          "model-00006-of-00013.safetensors",
+          4377085299,
+          1787016134742014063
+        ],
+        [
+          "model-00007-of-00013.safetensors",
+          4399121009,
+          1787016138812174989
+        ],
+        [
+          "model-00008-of-00013.safetensors",
+          4377085299,
+          1787016142354856009
+        ],
+        [
+          "model-00009-of-00013.safetensors",
+          4345584098,
+          1787016146042975209
+        ],
+        [
+          "model-00010-of-00013.safetensors",
+          4441066607,
+          1787016149883537664
+        ],
+        [
+          "model-00011-of-00013.safetensors",
+          4335139705,
+          1787016153242762292
+        ],
+        [
+          "model-00012-of-00013.safetensors",
+          4304750296,
+          1787016156769954910
+        ],
+        [
+          "model-00013-of-00013.safetensors",
+          671111062,
+          1787016157210081724
+        ]
+      ]
+    },
+    "has_mtp": false,
+    "mtp_tensor_count": 0,
+    "quantization": {}
+  },
+  {
+    "path": "~/mlx-models/Qwen3.8-27B-MLX-4bit",
+    "identity": {
+      "path": "~/mlx-models/Qwen3.8-27B-MLX-4bit",
+      "fingerprint": "d950130eaa79094228aa6f62a80e27f94fb4b522c85fd0804e25838ff85804ce",
+      "files": [
+        [
+          "model-00001-of-00003.safetensors",
+          5343268662,
+          1786730104075992440
+        ],
+        [
+          "model-00002-of-00003.safetensors",
+          5354185130,
+          1786730128129451852
+        ],
+        [
+          "model-00003-of-00003.safetensors",
+          5357087557,
+          1786730151011909750
+        ]
+      ]
+    },
+    "has_mtp": false,
+    "mtp_tensor_count": 0,
+    "quantization": {
+      "group_size": 64,
+      "bits": 4,
+      "mode": "affine"
+    }
+  },
+  {
+    "path": "~/mlx-models/Qwen3.8-27B-MLX-6bit",
+    "identity": {
+      "path": "~/mlx-models/Qwen3.8-27B-MLX-6bit",
+      "fingerprint": "04c4632425dca0113a104c9a428a59079296454b17119b5069a0b0ff3de45171",
+      "files": [
+        [
+          "model-00001-of-00005.safetensors",
+          5362726174,
+          1786730220748079237
+        ],
+        [
+          "model-00002-of-00005.safetensors",
+          5344282130,
+          1786730237658663101
+        ],
+        [
+          "model-00003-of-00005.safetensors",
+          5331479350,
+          1786730254408295732
+        ],
+        [
+          "model-00004-of-00005.safetensors",
+          5331479370,
+          1786730271172030581
+        ],
+        [
+          "model-00005-of-00005.safetensors",
+          1407912945,
+          1786730275533842784
+        ]
+      ]
+    },
+    "has_mtp": false,
+    "mtp_tensor_count": 0,
+    "quantization": {
+      "group_size": 64,
+      "bits": 6,
+      "mode": "affine"
+    }
+  },
+  {
+    "path": "~/mlx-models/Qwen3.8-27B-MLX-8bit",
+    "identity": {
+      "path": "~/mlx-models/Qwen3.8-27B-MLX-8bit",
+      "fingerprint": "b723cd51a3cd51e2ca96cca9a70b52dc369390efd38a00a03266c1fb93123903",
+      "files": [
+        [
+          "model-00001-of-00006.safetensors",
+          5317707581,
+          1786730331826974567
+        ],
+        [
+          "model-00002-of-00006.safetensors",
+          5354102610,
+          1786730344887857808
+        ],
+        [
+          "model-00003-of-00006.safetensors",
+          5354184694,
+          1786730357834507896
+        ],
+        [
+          "model-00004-of-00006.safetensors",
+          5337309653,
+          1786730370676059758
+        ],
+        [
+          "model-00005-of-00006.safetensors",
+          5292848464,
+          1786730383385255326
+        ],
+        [
+          "model-00006-of-00006.safetensors",
+          2845065477,
+          1786730390133494049
+        ]
+      ]
+    },
+    "has_mtp": false,
+    "mtp_tensor_count": 0,
+    "quantization": {
+      "group_size": 64,
+      "bits": 8,
+      "mode": "affine"
+    }
+  },
+  {
+    "path": "~/mlx-models/Qwen3.8-27B-Uncensored-oQ4e-fp16-mtp",
+    "identity": {
+      "path": "~/mlx-models/Qwen3.8-27B-Uncensored-oQ4e-fp16-mtp",
+      "fingerprint": "f25e967889acceba3250914406e95170eb79cc1966c87d518d792cedc2df1e19",
+      "files": [
+        [
+          "model-00001-of-00004.safetensors",
+          5009182006,
+          1787408879612418148
+        ],
+        [
+          "model-00002-of-00004.safetensors",
+          5027740895,
+          1787408876175442373
+        ],
+        [
+          "model-00003-of-00004.safetensors",
+          5031316897,
+          1787408807107764806
+        ],
+        [
+          "model-00004-of-00004.safetensors",
+          2824900344,
+          1787408796881968233
+        ]
+      ]
+    },
+    "has_mtp": true,
+    "mtp_tensor_count": 29,
+    "quantization": {
+      "group_size": 64,
+      "bits": 4,
+      "mode": "affine"
+    }
+  },
+  {
+    "path": "~/mlx-models/Qwen3.8-27B-oQ4e-mtp",
+    "identity": {
+      "path": "~/mlx-models/Qwen3.8-27B-oQ4e-mtp",
+      "fingerprint": "fb827b658dc3d26ac569efacefd0466dbf41cc1a5cb5e3a40fc1c6175298810f",
+      "files": [
+        [
+          "model-00001-of-00004.safetensors",
+          5016415582,
+          1787407438140285659
+        ],
+        [
+          "model-00002-of-00004.safetensors",
+          5017583687,
+          1787407429264908286
+        ],
+        [
+          "model-00003-of-00004.safetensors",
+          5001653251,
+          1787407416242228193
+        ],
+        [
+          "model-00004-of-00004.safetensors",
+          1936029038,
+          1787407201563071881
+        ]
+      ]
+    },
+    "has_mtp": true,
+    "mtp_tensor_count": 29,
+    "quantization": {
+      "group_size": 64,
+      "bits": 4,
+      "mode": "affine"
+    }
+  }
+]

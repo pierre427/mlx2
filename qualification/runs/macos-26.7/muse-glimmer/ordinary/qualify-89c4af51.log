@@ -1,0 +1,14 @@
+unit_tests: PASS
+hermes_client: PASS
+logprobs: PASS
+sampling_controls: FAIL
+Evidence: ~/Desktop/mlx2/qualification/runs/macos-26.7/muse-glimmer/ordinary/route-qualification-89c4af51.json
+Traceback (most recent call last):
+  File "~/Desktop/mlx2/scripts/qualify_serving.py", line 605, in <module>
+    main()
+  File "~/Desktop/mlx2/scripts/qualify_serving.py", line 326, in main
+    check("sampling_controls", content(sampling_a) == content(sampling_b) and bool(content(sampling_a))
+  File "~/Desktop/mlx2/scripts/qualify_serving.py", line 278, in check
+    assert condition, name
+           ^^^^^^^^^
+AssertionError: sampling_controls

@@ -1,0 +1,522 @@
+{
+ "off": [
+  {
+   "content": "10",
+   "tokens": 172,
+   "think": 167,
+   "tripped": null,
+   "steered": null,
+   "correct": true
+  },
+  {
+   "content": "25",
+   "tokens": 77,
+   "think": 72,
+   "tripped": null,
+   "steered": null,
+   "correct": true
+  },
+  {
+   "content": "2",
+   "tokens": 87,
+   "think": 82,
+   "tripped": null,
+   "steered": null,
+   "correct": true
+  },
+  {
+   "content": "2",
+   "tokens": 143,
+   "think": 138,
+   "tripped": null,
+   "steered": null,
+   "correct": true
+  },
+  {
+   "content": "24",
+   "tokens": 194,
+   "think": 189,
+   "tripped": null,
+   "steered": null,
+   "correct": true
+  },
+  {
+   "content": "100",
+   "tokens": 84,
+   "think": 79,
+   "tripped": null,
+   "steered": null,
+   "correct": true
+  },
+  {
+   "content": "48",
+   "tokens": 97,
+   "think": 92,
+   "tripped": null,
+   "steered": null,
+   "correct": true
+  },
+  {
+   "content": "43",
+   "tokens": 128,
+   "think": 123,
+   "tripped": null,
+   "steered": null,
+   "correct": true
+  },
+  {
+   "content": "144",
+   "tokens": 67,
+   "think": 62,
+   "tripped": null,
+   "steered": null,
+   "correct": true
+  },
+  {
+   "content": "12",
+   "tokens": 115,
+   "think": 110,
+   "tripped": null,
+   "steered": null,
+   "correct": true
+  },
+  {
+   "content": "7.5",
+   "tokens": 174,
+   "think": 167,
+   "tripped": null,
+   "steered": null,
+   "correct": true
+  },
+  {
+   "content": "728",
+   "tokens": 196,
+   "think": 191,
+   "tripped": null,
+   "steered": null,
+   "correct": true
+  },
+  {
+   "content": "10",
+   "tokens": 150,
+   "think": 145,
+   "tripped": null,
+   "steered": null,
+   "correct": true
+  },
+  {
+   "content": "2520",
+   "tokens": 228,
+   "think": 222,
+   "tripped": null,
+   "steered": null,
+   "correct": true
+  },
+  {
+   "content": "def is_palindrome(s):\n    s = s.lower()\n    return s == s[::-1]",
+   "tokens": 134,
+   "think": 110,
+   "tripped": null,
+   "steered": null,
+   "correct": true
+  },
+  {
+   "content": "204",
+   "tokens": 211,
+   "think": 206,
+   "tripped": null,
+   "steered": null,
+   "correct": true
+  }
+ ],
+ "guard_only": [
+  {
+   "content": "10.0",
+   "tokens": 190,
+   "think": 183,
+   "tripped": null,
+   "steered": null,
+   "correct": true
+  },
+  {
+   "content": "25",
+   "tokens": 77,
+   "think": 72,
+   "tripped": null,
+   "steered": null,
+   "correct": true
+  },
+  {
+   "content": "2",
+   "tokens": 87,
+   "think": 82,
+   "tripped": null,
+   "steered": null,
+   "correct": true
+  },
+  {
+   "content": "2",
+   "tokens": 146,
+   "think": 141,
+   "tripped": null,
+   "steered": null,
+   "correct": true
+  },
+  {
+   "content": "24",
+   "tokens": 194,
+   "think": 189,
+   "tripped": null,
+   "steered": null,
+   "correct": true
+  },
+  {
+   "content": "100",
+   "tokens": 84,
+   "think": 79,
+   "tripped": null,
+   "steered": null,
+   "correct": true
+  },
+  {
+   "content": "48",
+   "tokens": 97,
+   "think": 92,
+   "tripped": null,
+   "steered": null,
+   "correct": true
+  },
+  {
+   "content": "43",
+   "tokens": 131,
+   "think": 126,
+   "tripped": null,
+   "steered": null,
+   "correct": true
+  },
+  {
+   "content": "144",
+   "tokens": 67,
+   "think": 62,
+   "tripped": null,
+   "steered": null,
+   "correct": true
+  },
+  {
+   "content": "12",
+   "tokens": 112,
+   "think": 107,
+   "tripped": null,
+   "steered": null,
+   "correct": true
+  },
+  {
+   "content": "7.5",
+   "tokens": 228,
+   "think": 221,
+   "tripped": null,
+   "steered": null,
+   "correct": true
+  },
+  {
+   "content": "728",
+   "tokens": 217,
+   "think": 212,
+   "tripped": null,
+   "steered": null,
+   "correct": true
+  },
+  {
+   "content": "10",
+   "tokens": 150,
+   "think": 145,
+   "tripped": null,
+   "steered": null,
+   "correct": true
+  },
+  {
+   "content": "2520",
+   "tokens": 228,
+   "think": 222,
+   "tripped": null,
+   "steered": null,
+   "correct": true
+  },
+  {
+   "content": "def is_palindrome(s):\n    s = s.lower()\n    return s == s[::-1]",
+   "tokens": 134,
+   "think": 110,
+   "tripped": null,
+   "steered": null,
+   "correct": true
+  },
+  {
+   "content": "204",
+   "tokens": 211,
+   "think": 206,
+   "tripped": null,
+   "steered": null,
+   "correct": true
+  }
+ ],
+ "alpha_0.2": [
+  {
+   "content": "10",
+   "tokens": 60,
+   "think": 55,
+   "tripped": null,
+   "steered": 56,
+   "correct": true
+  },
+  {
+   "content": "25",
+   "tokens": 66,
+   "think": 61,
+   "tripped": null,
+   "steered": 62,
+   "correct": true
+  },
+  {
+   "content": "2",
+   "tokens": 105,
+   "think": 100,
+   "tripped": null,
+   "steered": 101,
+   "correct": true
+  },
+  {
+   "content": "2",
+   "tokens": 126,
+   "think": 121,
+   "tripped": null,
+   "steered": 122,
+   "correct": true
+  },
+  {
+   "content": "24",
+   "tokens": 169,
+   "think": 164,
+   "tripped": null,
+   "steered": 165,
+   "correct": true
+  },
+  {
+   "content": "100",
+   "tokens": 81,
+   "think": 76,
+   "tripped": null,
+   "steered": 77,
+   "correct": true
+  },
+  {
+   "content": "48",
+   "tokens": 143,
+   "think": 138,
+   "tripped": null,
+   "steered": 139,
+   "correct": true
+  },
+  {
+   "content": "43",
+   "tokens": 136,
+   "think": 131,
+   "tripped": null,
+   "steered": 132,
+   "correct": true
+  },
+  {
+   "content": "144",
+   "tokens": 63,
+   "think": 58,
+   "tripped": null,
+   "steered": 59,
+   "correct": true
+  },
+  {
+   "content": "12",
+   "tokens": 77,
+   "think": 72,
+   "tripped": null,
+   "steered": 73,
+   "correct": true
+  },
+  {
+   "content": "7.5",
+   "tokens": 150,
+   "think": 143,
+   "tripped": null,
+   "steered": 144,
+   "correct": true
+  },
+  {
+   "content": "728",
+   "tokens": 244,
+   "think": 239,
+   "tripped": null,
+   "steered": 240,
+   "correct": true
+  },
+  {
+   "content": "10",
+   "tokens": 123,
+   "think": 118,
+   "tripped": null,
+   "steered": 119,
+   "correct": true
+  },
+  {
+   "content": "2520",
+   "tokens": 56,
+   "think": 50,
+   "tripped": null,
+   "steered": 51,
+   "correct": true
+  },
+  {
+   "content": "def is_palindrome(s):\n    s = s.lower()\n    return s == s[::-1]",
+   "tokens": 87,
+   "think": 63,
+   "tripped": null,
+   "steered": 64,
+   "correct": true
+  },
+  {
+   "content": "204",
+   "tokens": 195,
+   "think": 190,
+   "tripped": null,
+   "steered": 191,
+   "correct": true
+  }
+ ],
+ "alpha_0.4": [
+  {
+   "content": "10",
+   "tokens": 66,
+   "think": 61,
+   "tripped": null,
+   "steered": 62,
+   "correct": true
+  },
+  {
+   "content": "25",
+   "tokens": 62,
+   "think": 57,
+   "tripped": null,
+   "steered": 58,
+   "correct": true
+  },
+  {
+   "content": "2",
+   "tokens": 104,
+   "think": 99,
+   "tripped": null,
+   "steered": 100,
+   "correct": true
+  },
+  {
+   "content": "2",
+   "tokens": 131,
+   "think": 126,
+   "tripped": null,
+   "steered": 127,
+   "correct": true
+  },
+  {
+   "content": "24",
+   "tokens": 38,
+   "think": 33,
+   "tripped": null,
+   "steered": 34,
+   "correct": true
+  },
+  {
+   "content": "100",
+   "tokens": 83,
+   "think": 78,
+   "tripped": null,
+   "steered": 79,
+   "correct": true
+  },
+  {
+   "content": "48",
+   "tokens": 95,
+   "think": 90,
+   "tripped": null,
+   "steered": 91,
+   "correct": true
+  },
+  {
+   "content": "43",
+   "tokens": 62,
+   "think": 57,
+   "tripped": null,
+   "steered": 58,
+   "correct": true
+  },
+  {
+   "content": "144",
+   "tokens": 57,
+   "think": 52,
+   "tripped": null,
+   "steered": 53,
+   "correct": true
+  },
+  {
+   "content": "12",
+   "tokens": 76,
+   "think": 71,
+   "tripped": null,
+   "steered": 72,
+   "correct": true
+  },
+  {
+   "content": "7.5",
+   "tokens": 146,
+   "think": 139,
+   "tripped": null,
+   "steered": 140,
+   "correct": true
+  },
+  {
+   "content": "728",
+   "tokens": 175,
+   "think": 170,
+   "tripped": null,
+   "steered": 171,
+   "correct": true
+  },
+  {
+   "content": "10",
+   "tokens": 136,
+   "think": 131,
+   "tripped": null,
+   "steered": 132,
+   "correct": true
+  },
+  {
+   "content": "2520",
+   "tokens": 211,
+   "think": 205,
+   "tripped": null,
+   "steered": 206,
+   "correct": true
+  },
+  {
+   "content": "```python\ndef is_palindrome(s: str) -> bool:\n    s = s.lower()\n    return s == s[::-1]\n```",
+   "tokens": 41,
+   "think": 8,
+   "tripped": null,
+   "steered": 9,
+   "correct": true
+  },
+  {
+   "content": "204",
+   "tokens": 97,
+   "think": 92,
+   "tripped": null,
+   "steered": 93,
+   "correct": true
+  }
+ ]
+}

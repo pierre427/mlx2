@@ -1,0 +1,108 @@
+{
+  "attempt": null,
+  "commands": [],
+  "identity": {
+    "artifacts": [
+      {
+        "device": 16777230,
+        "exists": true,
+        "fingerprint": "15e7f23c4309fd75fece9c665eec5b6174d88044c2e683fbd285c6690a325a25",
+        "inode": 8244785,
+        "metadata_sha256": {
+          "config.json": "cfb9d34208e818c1a2d66ec54132f624d6a2f13563cbee4059933339d07af080",
+          "generation_config.json": "9a0ac39c982ca7a67073948ab0a7ac4e52db932c983399a29e99a57182a42a3d",
+          "model.safetensors.index.json": "143b582771054c9645849143853139b49fe107149107a03cde515a33a10cb391",
+          "tokenizer.json": "87a7830d63fcf43bf241c3c5242e96e62dd3fdc29224ca26fed8ea333db72de4",
+          "tokenizer_config.json": "253684edcbcae5b893442b7de203b7d48230f6eea05de71f2d8e1a0575007528"
+        },
+        "mtime_ns": 1779318545780718594,
+        "path": "~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit"
+      },
+      {
+        "device": 16777230,
+        "exists": true,
+        "fingerprint": "922e0c47704e4081c0692843ecf75ce7a70408b50e5187f107dfb8e82ea0cb94",
+        "inode": 175257217,
+        "metadata_sha256": {
+          "config.json": "cb39a2ee10670cd7536cb2c629d60d41bf4857c5aa880213c17bbd2a06925fad",
+          "generation_config.json": "d403197d7feb1b2e2d78121fd438a9fdb50ce1b9ec421b023515bccd64d97c15",
+          "model.safetensors.index.json": "9c7922fe43b30715356465e7b04918646fbd73823431e41ae06427144a9400dd",
+          "tokenizer.json": "6f32ce20dc35f57a7f9ad1eac03525bd7d30f9df8cea6507e958279cc3657706",
+          "tokenizer_config.json": "b78d7687432566598b66847cae8b2d44bf06c733c42bdd10c2ac588e12e59983"
+        },
+        "mtime_ns": 1788468510326139378,
+        "path": "~/mlx-models/Qwen3.6-35B-A3B-uncensored-heretic-Native-MTP-Preserved-oQ4e-mtp"
+      }
+    ],
+    "git_head": "5fc4c28e181f2d9d9e0d9cbb4114eb3519197626",
+    "git_status": "M scripts/activate_qualification_arm.py\n M scripts/qualify_serving.py\n M scripts/run_qualification_matrix.py\n M src/mlx2/qualification.py\n M src/mlx2/runtime/hybrid_speculative.py\n M tests/test_qualification.py\n M tests/test_qualification_matrix.py\n M tests/test_qualify_serving_receipts.py\n M tests/test_segmented_mtp.py\n?? qualification/policies/qwen36-mtp-artifact-ordinary.json\n?? qualification/policies/qwen36-mtp2.json\n?? qualification/policies/qwen36-ordinary.json\n?? qualification/qwen36-overnight-experiments.json\n?? qualification/runs/qwen36-35b-a3b/overnight-campaign-pass1-20260916T1754/\n?? qualification/runs/qwen36-35b-a3b/overnight-campaign-pass2-20260916T1813/\n?? qualification/runs/qwen36-35b-a3b/overnight-campaign/\n?? qualification/runs/qwen36-35b-a3b/remediation-active.json\n?? scripts/qwen36_http_qualification.py\n?? scripts/run_qwen36_overnight.py\n?? tests/test_activate_qualification_arm.py\n?? tests/test_qwen36_http_qualification.py\n?? tests/test_qwen36_overnight.py\n?? uv.lock",
+    "harness_sha256": {
+      "activate_qualification_arm.py": "300896d844ee2207cf0d26e18b4b3d85ab694b40d03294800c007b4fa299911f",
+      "benchmark_serving.py": "5f182f728536bf85a4e24ca66ed5314fb650018d415df69e3478b654d114df49",
+      "qualify_serving.py": "4f71baf3b043b0ee96c8671131cd3915b096c5b16b1363bdeeece130b85d919f",
+      "qwen36_fused_gdn_probe.py": "859f3e9faf697713fa39d1e43d4b7a5049fef7ce6e993fc512bc1d94436f1c1c",
+      "qwen36_http_qualification.py": "fa651bbaf9e1bb30aa97f5067ddfdd2411bb0ae15c832d5fa135d0783fc00027",
+      "run_qualification_matrix.py": "ad0afd378f2326010aaebf194954f6e1b228b2d4df8ffa30e10de1ee9e691341",
+      "run_qwen36_overnight.py": "1dbe9bdbc6b5ff193d417e493a362e8ff9bc13a8d94354841a7c0d82242ff8b4",
+      "thermal_probe.swift": "4f1cadeaa344082e231227f0c1e4b53f7f7fadf1a31858d7ecc0ec36ed3f284b"
+    },
+    "runtime_source_sha256": "ecc311933ff212d637f558f35e6c524a0f8ead58d3c19b6921654cc68a9d9530",
+    "settings": {
+      "hard_deadline": "2026-09-17T08:00:00-04:00",
+      "manifest": "~/Desktop/mlx2/qualification/qwen36-overnight-experiments.json",
+      "manifest_sha256": "22d17a0cfaa0f7bae581c7acd71b4185f295dff8b29d52bd59da3520d55b517b",
+      "mtp_model": "~/mlx-models/Qwen3.6-35B-A3B-uncensored-heretic-Native-MTP-Preserved-oQ4e-mtp",
+      "ordinary_model": "~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit",
+      "policy_sha256": {
+        "qwen36-mtp-artifact-ordinary.json": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356",
+        "qwen36-mtp2.json": "e97da76c699622dd022f26f535ae733b30856b952d85263d0f7da951f87776a2",
+        "qwen36-ordinary.json": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356"
+      },
+      "python": ".venv/bin/python"
+    },
+    "sha256": "d3d58299cc8587267866b190494796fdd456d46c0faa303dad5b47facd706538"
+  },
+  "installed": false,
+  "qualified": false,
+  "reason": "campaign cancellation requested",
+  "schema": "mlx2.qwen36-overnight-step-receipt.v1",
+  "status": "cancelled",
+  "step": {
+    "always_run": false,
+    "audit": null,
+    "commands": [
+      {
+        "argv": [
+          "~/Desktop/mlx2/.venv/bin/python",
+          "~/Desktop/mlx2/scripts/run_qualification_matrix.py",
+          "--manifest",
+          "~/Desktop/mlx2/qualification/qwen36-overnight-experiments.json",
+          "--suite",
+          "context",
+          "--output",
+          "~/Desktop/mlx2/qualification/runs/qwen36-35b-a3b/overnight-campaign/artifacts/context-ladder.json",
+          "--resume",
+          "--continue-on-error"
+        ],
+        "name": "context",
+        "timeout": 43200
+      }
+    ],
+    "dependencies": [
+      "preflight-ready",
+      "matrix-manifest",
+      "matrix-fail-soft",
+      "matrix-schedule",
+      "activation-cleanup",
+      "gpu-lease"
+    ],
+    "gpu": true,
+    "label": "Alternating thermally controlled context ladder",
+    "optional": false,
+    "phase": "4",
+    "required_paths": [],
+    "server": null,
+    "step_id": "context-ladder"
+  },
+  "written_at": 1789599089.1695302
+}

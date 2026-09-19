@@ -1,0 +1,43 @@
+{
+  "schema": "mlx2.peer-pr-regressions.gpu-runtime.v1",
+  "source_head": "4036baa816b7c95ee454c64a26653d7f5ec31eae",
+  "worktree_state": "dirty shared worktree with concurrent sibling-task changes",
+  "gpu_lease": {
+    "cpg_task_id": "f66db38878bb4affae24a23db6e7dda2",
+    "agent_id": "pr-sweep-implementation",
+    "lease_generation": 1,
+    "lock": "/tmp/gpu.lock"
+  },
+  "device": {
+    "default_device": "Device(gpu, 0)",
+    "metal_available": true,
+    "device_name": "Apple M5 Max",
+    "architecture": "applegpu_g17s",
+    "memory_size": 137438953472,
+    "max_recommended_working_set_size": 120259084288
+  },
+  "command": ".venv/bin/python -m pytest -q tests/test_peer_pr_regressions.py tests/test_qwen38_memory.py tests/test_apcv2_lifecycle.py tests/test_external_dflash2_cpu.py tests/test_batched_mtp.py",
+  "collection": {
+    "tests/test_peer_pr_regressions.py": 10,
+    "tests/test_qwen38_memory.py": 8,
+    "tests/test_apcv2_lifecycle.py": 31,
+    "tests/test_external_dflash2_cpu.py": 38,
+    "tests/test_batched_mtp.py": 6,
+    "total": 93
+  },
+  "result": "passed",
+  "failures": 0,
+  "changed_file_sha256": {
+    "src/mlx2/runtime/generate.py": "e93dafd6802e9321243d774999662b2345d87c6be0186854b37689d556c7d7ae",
+    "src/mlx2/adapters/qwen38_memory.py": "ad90d9ae27d15c5b19975052ae209a9290bbc11c25c32e687b9bc9ec72998ce6",
+    "src/mlx2/runtime/cache_planes.py": "1da246dca29e88f757c8e2dda7e9344b7b9ce52e29f2b3422ffd23d8669f4e61",
+    "tests/test_peer_pr_regressions.py": "112cd857034e8fcef85726b5903f1831b5264416c3c98753a1882d9d8985a853"
+  },
+  "state_claims": {
+    "implemented": true,
+    "gpu_runtime_verified": true,
+    "full_model_route_qualified": false,
+    "selected": false,
+    "observed_used_in_serving": false
+  }
+}

@@ -1,0 +1,24 @@
+{
+  "sample": {
+    "battery_temperature_c": 30.68,
+    "command": [
+      "$TMPDIR/mlx2-thermal-probe-4f1cadeaa344082e"
+    ],
+    "pmset_no_cpu_power_warning": true,
+    "pmset_no_performance_warning": true,
+    "pmset_no_thermal_warning": true,
+    "raw": "Note: No thermal warning level has been recorded\nNote: No performance warning level has been recorded\nNote: No CPU power status has been recorded",
+    "raw_evidence": {
+      "ioreg_temperature_fields": {
+        "Temperature": 3068,
+        "VirtualTemperature": 3359
+      },
+      "pmset": "Note: No thermal warning level has been recorded\nNote: No performance warning level has been recorded\nNote: No CPU power status has been recorded",
+      "thermal_probe": "{\"thermal_state\":1}"
+    },
+    "thermal_state": 1,
+    "timestamp": 1789546630.582359,
+    "virtual_temperature_c": 33.59
+  },
+  "stable": false
+}

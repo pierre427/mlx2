@@ -1,0 +1,11 @@
+unit_tests: FAIL
+Evidence: qualification/runs/macos-26.7/qwen38-27b/ordinary/route-qualification.json
+Traceback (most recent call last):
+  File "~/Desktop/mlx2/scripts/qualify_serving.py", line 400, in <module>
+    main()
+  File "~/Desktop/mlx2/scripts/qualify_serving.py", line 73, in main
+    check("unit_tests", tests.returncode == 0, tests.stdout + tests.stderr)
+  File "~/Desktop/mlx2/scripts/qualify_serving.py", line 67, in check
+    assert condition, name
+           ^^^^^^^^^
+AssertionError: unit_tests

@@ -1,0 +1,54 @@
+Notice for the Xing4.0 MLX model port (src/mlx2/runtime/models/xing4_0.py).
+
+1. MLA attention, MultiLinear/QuantizedMultiLinear, the absorbed-path gate,
+   the noaux_tc MoE block and the expert-stacking / kv_b_proj folding
+   sanitize logic are adapted from mlx-lm-unified
+   (mlx_lm/models/deepseek_v3.py and mlx_lm/models/mla.py, revision
+   13eb83388750435bcc751d0b9e33857a38152544).
+
+Original file notices:
+Copyright © 2024 Apple Inc. (deepseek_v3.py)
+Copyright © 2026 Apple Inc. (mla.py)
+
+Source repository license:
+MIT License
+
+Copyright © 2023 Apple Inc.
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+2. The mHC (Manifold-constrained Hyper-Connections) math, router
+   semantics, stream expansion/contraction and decoder-layer wiring are a
+   re-implementation in MLX of the Xing4.0-29B-A4B Hugging Face reference
+   modeling code (modeling_xing4_0.py / configuration_xing4_0.py, Copyright
+   China Telecom Artificial Intelligence Technology Co., Ltd., distributed
+   under the Apache License, Version 2.0 per the model card). No upstream
+   source text is copied into this repository; the reference files are only
+   imported (from an out-of-tree directory) by
+   scripts/xing4_0_reference_fixture.py to generate test fixtures.
+
+   Licensed under the Apache License, Version 2.0 (the "License"); you may
+   not use those files except in compliance with the License. You may obtain
+   a copy of the License at http://www.apache.org/licenses/LICENSE-2.0 .
+   Unless required by applicable law or agreed to in writing, software
+   distributed under the License is distributed on an "AS IS" BASIS,
+   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+   Modifications: translated from PyTorch to MLX; fp32 mHC projection and
+   stream update; optional compiled mHC spans; latent KV cache; MTP head
+   added from the DeepSeek-V3 MTP definition (the HF reference ignores it).

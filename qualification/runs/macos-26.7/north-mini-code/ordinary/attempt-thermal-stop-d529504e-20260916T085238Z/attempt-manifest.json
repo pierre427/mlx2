@@ -1,0 +1,45 @@
+{
+  "breach": {
+    "battery_temperature_c": 30.64,
+    "healthy": true,
+    "inflight": 1,
+    "prefill_rounds": 90,
+    "queue_depth": 0,
+    "swap_used_mib": 0,
+    "thermal_state": 1,
+    "virtual_temperature_c": 33.19
+  },
+  "failure": "manual fail-closed stop after thermal_state changed from 0 to 1 during near-limit prefill",
+  "files": {
+    "north-gpu-qualification-runbook-d529504e.sh": "a0927864e20edfc78a58e0496a52a7cfb95dcb04132894261d24cef8506b48d9",
+    "post-stop-thermal.json": "a3495b3bb35caf4336128bb7ef21de8604f07702fad944b89be9b93115ed7f65",
+    "preflight-thermal-stable.json": "3f84aa84cfa7531252f1c68813c3617f074e88d9b5046958fdcab14abb764ce3",
+    "qualify-serving-thermal-barrier.py": "e12ea8a08d8ccba2d3084b09f8a1a2a2d8eae2feb10b2464f6a713b51f76ceba",
+    "route-qualification.candidate-d529504e-8d32f490.json": "24151cbbb0c597e0ebfab5d38e2191a65367e1aa72bdd2fa825358cdac1742c3",
+    "server-d529504e-8d32f490.log": "75653c7b70a9d56a19301d4d371d96645c91c991b588990680a020c5b4493b45",
+    "status-initial-d529504e-8d32f490.json": "2cc6d641270ee866e4fafe1590feff0b273600d9ed59dccc4679527bd0bd6f49",
+    "thermal-barrier-d529504e-8d32f490.json": "ff0f2bfa1787eac9894d4fee864c09f2e51fdfc5a1a9850ed174463ff434ba7d",
+    "watchdog-d529504e-8d32f490.log": "10ee2169dff699e0c0be6685e633f5b49cd3ebf0ecfbf20c84bdea3f9f5822f3"
+  },
+  "qualification_complete": false,
+  "route_receipt_written": false,
+  "runtime_source_sha256": "d529504ee25593c8bbd051aea6a163fea081b1912bb5c79eb3465a6501b1d6cd",
+  "schema": "mlx2.failed-qualification-attempt.v1",
+  "short_gates_passed": [
+    "unit_tests",
+    "hermes_client",
+    "logprobs",
+    "sampling_controls",
+    "cold_text",
+    "warm_prefix",
+    "stream",
+    "tools",
+    "tool_roundtrip",
+    "reasoning",
+    "stop",
+    "seed_repeat",
+    "batch",
+    "mixed_warm"
+  ],
+  "thermal_barrier_passed": true
+}

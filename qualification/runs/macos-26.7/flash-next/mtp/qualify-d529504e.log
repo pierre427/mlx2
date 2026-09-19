@@ -1,0 +1,52 @@
+unit_tests: PASS
+hermes_client: PASS
+logprobs: PASS
+sampling_controls: PASS
+cold_text: PASS
+warm_prefix: PASS
+stream: PASS
+tools: PASS
+tool_roundtrip: PASS
+reasoning: PASS
+stop: PASS
+seed_repeat: PASS
+batch: PASS
+mixed_warm: PASS
+context: PASS
+shared_cohort_priming: PASS
+shared_warm_requests: PASS
+context_bound: PASS
+cancel: PASS
+recovery: PASS
+quiescence: PASS
+apcv2_reuse: PASS
+apcv2_stores: PASS
+mtp_segmented_attention: PASS
+mtp_transaction_branches: PASS
+mtp_committed_cycles: PASS
+mtp_true_batching: PASS
+mtp_zero_full_prefix_materializations: PASS
+mtp_zero_physical_b2: PASS
+mtp_zero_failures: PASS
+mtp_execution: PASS
+feature_async_promotion: PASS
+feature_compiled_ple: PASS
+feature_eager_dispatch: PASS
+feature_file_backed_ple: PASS
+feature_fused_gdn_decode: PASS
+feature_fused_gdn_verify: PASS
+feature_fused_moe: PASS
+feature_indexed_qsa: PASS
+feature_known_tail_prefetch: PASS
+feature_pooled_qsa: PASS
+feature_private_delta: FAIL
+Evidence: ~/Desktop/mlx2/qualification/runs/macos-26.7/flash-next/mtp/route-qualification-d529504e.json
+Traceback (most recent call last):
+  File "/private/tmp/mlx2-flash-next-d529504e-20260916/qualify-serving-thermal-barrier.py", line 137, in <module>
+    qualifier.main()
+  File "~/Desktop/mlx2/scripts/qualify_serving.py", line 621, in main
+    check("feature_" + feature, observed[feature] > 0, execution)
+  File "~/Desktop/mlx2/scripts/qualify_serving.py", line 311, in check
+    assert condition, name
+           ^^^^^^^^^
+AssertionError: feature_private_delta

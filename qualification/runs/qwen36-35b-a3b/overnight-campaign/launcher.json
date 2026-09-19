@@ -1,0 +1,14 @@
+{
+  "pid": 29634,
+  "argv": [
+    "~/Desktop/mlx2/.venv/bin/python",
+    "~/Desktop/mlx2/scripts/run_qwen36_overnight.py",
+    "run",
+    "--hard-deadline",
+    "2026-09-17T08:00:00-04:00",
+    "--gpu-lease-receipt",
+    "~/Desktop/mlx2/qualification/runs/qwen36-35b-a3b/overnight-campaign/lease/cpg-gpu-lease.json"
+  ],
+  "started_at": 1789598553.148118,
+  "pass": 3
+}

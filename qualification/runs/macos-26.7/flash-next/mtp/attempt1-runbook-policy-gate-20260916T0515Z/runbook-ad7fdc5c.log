@@ -1,0 +1,25 @@
+{
+  "dependencies": {
+    "jinja2": "3.1.6",
+    "numpy": "2.5.1",
+    "psutil": "7.2.2",
+    "regex": "2026.9.10",
+    "safetensors": "0.8.0",
+    "tokenizers": "0.22.2"
+  },
+  "macos": "26.7",
+  "mlx": "0.32.2.dev20260915+2a817ad94",
+  "mlx_native_sha256": "30335939714520c3306cfa58597100aae08bbeabdc60a4bc8c35c32c607450a8",
+  "python": "3.12.13",
+  "source_sha256": "ad7fdc5caa4fda337258b2cec93a9c4dedc65de8cf3afa0f971a07259ce6b760",
+  "transformers": "5.12.1"
+}
+77a35a9692b49e736bd0daa708d8b14c71c05abb03f81f8c707a1fc1e372bb25
+vm.swapusage: total = 0.00M  used = 0.00M  free = 0.00M  (encrypted)
+Note: No thermal warning level has been recorded
+Note: No performance warning level has been recorded
+Note: No CPU power status has been recorded
+{"battery_temperature_c": 30.77, "command": ["$TMPDIR/mlx2-thermal-probe-4f1cadeaa344082e"], "pmset_no_cpu_power_warning": true, "pmset_no_performance_warning": true, "pmset_no_thermal_warning": true, "raw": "Note: No thermal warning level has been recorded\nNote: No performance warning level has been recorded\nNote: No CPU power status has been recorded", "raw_evidence": {"ioreg_temperature_fields": {"Temperature": 3077, "VirtualTemperature": 3450}, "pmset": "Note: No thermal warning level has been recorded\nNote: No performance warning level has been recorded\nNote: No CPU power status has been recorded", "thermal_probe": "{\"thermal_state\":0}"}, "thermal_state": 0, "timestamp": 1789535713.041467, "virtual_temperature_c": 34.5}
+Traceback (most recent call last):
+  File "<stdin>", line 15, in <module>
+AssertionError

@@ -1,0 +1,401 @@
+{
+  "arguments": {
+    "entries": 32,
+    "entry_gib": 0.01,
+    "max_total_gib": 8.0,
+    "rescan_only": true,
+    "scratch_root": "/private/tmp"
+  },
+  "completed_at_unix": 1789782562.171607,
+  "device": "cpu",
+  "guardrails": {
+    "cleanup_on_exit": true,
+    "minimum_free_memory_bytes": 25769803776,
+    "requested_resident_bytes_per_entry": 10737418,
+    "requested_total_bytes": 343597376
+  },
+  "machine": {
+    "hw_memsize_bytes": 137438953472,
+    "machine": "arm64",
+    "platform": "macOS-26.7-arm64-arm-64bit",
+    "python": "3.12.13",
+    "scratch_filesystem": {
+      "free_bytes": 767287922688,
+      "path": "/private/tmp",
+      "total_bytes": 3996276899840,
+      "used_bytes": 3228988977152
+    }
+  },
+  "peak_rss_bytes": 294420480,
+  "schema": "mlx2.apcv2-persistence-benchmark.v1",
+  "source": {
+    "git_head": "08e605986e1b66937263fce941df816861290acb",
+    "requested_base_revision": "271b21e",
+    "script_sha256": "09aea567c1e0f83365f5f2123c7a54e9ca0e0511520682d4e9f1c3718725a006"
+  },
+  "spill": {
+    "digest_computed_once_per_payload": true,
+    "digest_seconds": 0.15182099782396108,
+    "manifest_write_calls": 128,
+    "manifest_write_seconds": 0.04918883758364245,
+    "mlx_clear_cache_seconds": 0.0003406258183531463,
+    "park_latency_seconds": {
+      "count": 32,
+      "max": 0.05458862503292039,
+      "mean": 0.0323094335708447,
+      "min": 0.011329458036925644,
+      "p50": 0.035144834022503346
+    },
+    "payload_digest_calls": 96,
+    "payload_files": 96,
+    "payload_write_and_fsync_seconds": 0.16792154335416853,
+    "per_entry_breakdown": [
+      {
+        "digest_seconds": 0.004787167010363191,
+        "manifest_write_seconds": 0.0012306260177865624,
+        "mlx_clear_cache_seconds": 2.945796586573124e-05,
+        "other_seconds": 0.0013605400454252958,
+        "payload_write_and_fsync_seconds": 0.003921666997484863,
+        "total_seconds": 0.011329458036925644
+      },
+      {
+        "digest_seconds": 0.004674916039220989,
+        "manifest_write_seconds": 0.0011334159644320607,
+        "mlx_clear_cache_seconds": 9.25001222640276e-06,
+        "other_seconds": 0.00268595787929371,
+        "payload_write_and_fsync_seconds": 0.004023460089229047,
+        "total_seconds": 0.01252699998440221
+      },
+      {
+        "digest_seconds": 0.004705666040536016,
+        "manifest_write_seconds": 0.001244292943738401,
+        "mlx_clear_cache_seconds": 1.1458003427833319e-05,
+        "other_seconds": 0.004141583922319114,
+        "payload_write_and_fsync_seconds": 0.003393082064576447,
+        "total_seconds": 0.013496082974597812
+      },
+      {
+        "digest_seconds": 0.0046818749397061765,
+        "manifest_write_seconds": 0.0011808749404735863,
+        "mlx_clear_cache_seconds": 7.874972652643919e-06,
+        "other_seconds": 0.005278833152260631,
+        "payload_write_and_fsync_seconds": 0.003929292026441544,
+        "total_seconds": 0.015078750031534582
+      },
+      {
+        "digest_seconds": 0.0046569580445066094,
+        "manifest_write_seconds": 0.0011343330261297524,
+        "mlx_clear_cache_seconds": 8.750008419156075e-06,
+        "other_seconds": 0.006493457884062082,
+        "payload_write_and_fsync_seconds": 0.003396917076315731,
+        "total_seconds": 0.01569041603943333
+      },
+      {
+        "digest_seconds": 0.004810625105164945,
+        "manifest_write_seconds": 0.0012840420822612941,
+        "mlx_clear_cache_seconds": 9.750016033649445e-06,
+        "other_seconds": 0.007860206707846373,
+        "payload_write_and_fsync_seconds": 0.003896542068105191,
+        "total_seconds": 0.017861165979411453
+      },
+      {
+        "digest_seconds": 0.004767542006447911,
+        "manifest_write_seconds": 0.001182457897812128,
+        "mlx_clear_cache_seconds": 8.375034667551517e-06,
+        "other_seconds": 0.00918058300158009,
+        "payload_write_and_fsync_seconds": 0.00368666707072407,
+        "total_seconds": 0.01882562501123175
+      },
+      {
+        "digest_seconds": 0.004817416018340737,
+        "manifest_write_seconds": 0.0011941250413656235,
+        "mlx_clear_cache_seconds": 7.957976777106524e-06,
+        "other_seconds": 0.010279958019964397,
+        "payload_write_and_fsync_seconds": 0.003776375961024314,
+        "total_seconds": 0.020075833017472178
+      },
+      {
+        "digest_seconds": 0.0046428750501945615,
+        "manifest_write_seconds": 0.0012638760381378233,
+        "mlx_clear_cache_seconds": 1.191697083413601e-05,
+        "other_seconds": 0.011618040967732668,
+        "payload_write_and_fsync_seconds": 0.004397540993522853,
+        "total_seconds": 0.02193425002042204
+      },
+      {
+        "digest_seconds": 0.00463074998697266,
+        "manifest_write_seconds": 0.0013046250096522272,
+        "mlx_clear_cache_seconds": 1.0166957508772612e-05,
+        "other_seconds": 0.012969708011951298,
+        "payload_write_and_fsync_seconds": 0.004123750026337802,
+        "total_seconds": 0.02303899999242276
+      },
+      {
+        "digest_seconds": 0.004564832954201847,
+        "manifest_write_seconds": 0.0012611260171979666,
+        "mlx_clear_cache_seconds": 9.499955922365189e-06,
+        "other_seconds": 0.014382457069586962,
+        "payload_write_and_fsync_seconds": 0.004497000016272068,
+        "total_seconds": 0.02471491601318121
+      },
+      {
+        "digest_seconds": 0.004619748971890658,
+        "manifest_write_seconds": 0.0012714169570244849,
+        "mlx_clear_cache_seconds": 1.0999967344105244e-05,
+        "other_seconds": 0.015362959122285247,
+        "payload_write_and_fsync_seconds": 0.003907207981683314,
+        "total_seconds": 0.02517233300022781
+      },
+      {
+        "digest_seconds": 0.004567708063405007,
+        "manifest_write_seconds": 0.0012165840016677976,
+        "mlx_clear_cache_seconds": 8.541974239051342e-06,
+        "other_seconds": 0.01636049902299419,
+        "payload_write_and_fsync_seconds": 0.006567875971086323,
+        "total_seconds": 0.02872120903339237
+      },
+      {
+        "digest_seconds": 0.004453624947927892,
+        "manifest_write_seconds": 0.0011693330015987158,
+        "mlx_clear_cache_seconds": 7.2499969974160194e-06,
+        "other_seconds": 0.0177726250840351,
+        "payload_write_and_fsync_seconds": 0.0039564999751746655,
+        "total_seconds": 0.027359333005733788
+      },
+      {
+        "digest_seconds": 0.004531291022431105,
+        "manifest_write_seconds": 0.0012185839586891234,
+        "mlx_clear_cache_seconds": 7.4169947765767574e-06,
+        "other_seconds": 0.018958708038553596,
+        "payload_write_and_fsync_seconds": 0.0035921669914387167,
+        "total_seconds": 0.028308167005889118
+      },
+      {
+        "digest_seconds": 0.004546415933873504,
+        "manifest_write_seconds": 0.0013592500472441316,
+        "mlx_clear_cache_seconds": 8.66700429469347e-06,
+        "other_seconds": 0.020239375007804483,
+        "payload_write_and_fsync_seconds": 0.003747709037270397,
+        "total_seconds": 0.02990141703048721
+      },
+      {
+        "digest_seconds": 0.004560833040159196,
+        "manifest_write_seconds": 0.0013102509547024965,
+        "mlx_clear_cache_seconds": 1.1750031262636185e-05,
+        "other_seconds": 0.02208929299376905,
+        "payload_write_and_fsync_seconds": 0.007172707002609968,
+        "total_seconds": 0.035144834022503346
+      },
+      {
+        "digest_seconds": 0.0045472499914467335,
+        "manifest_write_seconds": 0.0012919989530928433,
+        "mlx_clear_cache_seconds": 1.287501072511077e-05,
+        "other_seconds": 0.0231451679719612,
+        "payload_write_and_fsync_seconds": 0.006831458071246743,
+        "total_seconds": 0.03582874999847263
+      },
+      {
+        "digest_seconds": 0.0047619169927202165,
+        "manifest_write_seconds": 0.0013818340376019478,
+        "mlx_clear_cache_seconds": 1.2082979083061218e-05,
+        "other_seconds": 0.023939790960866958,
+        "payload_write_and_fsync_seconds": 0.006603000045288354,
+        "total_seconds": 0.03669862501556054
+      },
+      {
+        "digest_seconds": 0.0045834589982405305,
+        "manifest_write_seconds": 0.0012378329993225634,
+        "mlx_clear_cache_seconds": 9.166949894279242e-06,
+        "other_seconds": 0.025267959048505872,
+        "payload_write_and_fsync_seconds": 0.006864373979624361,
+        "total_seconds": 0.037962791975587606
+      },
+      {
+        "digest_seconds": 0.004593915946315974,
+        "manifest_write_seconds": 0.0013116240152157843,
+        "mlx_clear_cache_seconds": 1.550000160932541e-05,
+        "other_seconds": 0.02651841804618016,
+        "payload_write_and_fsync_seconds": 0.006405416992492974,
+        "total_seconds": 0.038844875001814216
+      },
+      {
+        "digest_seconds": 0.004848418058827519,
+        "manifest_write_seconds": 0.0012414580560289323,
+        "mlx_clear_cache_seconds": 8.792034350335598e-06,
+        "other_seconds": 0.027923790796194226,
+        "payload_write_and_fsync_seconds": 0.007351166044827551,
+        "total_seconds": 0.041373624990228564
+      },
+      {
+        "digest_seconds": 0.004799792019184679,
+        "manifest_write_seconds": 0.0012044580071233213,
+        "mlx_clear_cache_seconds": 1.0834017302840948e-05,
+        "other_seconds": 0.02927191596245393,
+        "payload_write_and_fsync_seconds": 0.0070104170008562505,
+        "total_seconds": 0.04229741700692102
+      },
+      {
+        "digest_seconds": 0.0049301249091513455,
+        "manifest_write_seconds": 0.0013329999637790024,
+        "mlx_clear_cache_seconds": 1.2708012945950031e-05,
+        "other_seconds": 0.030629583110567182,
+        "payload_write_and_fsync_seconds": 0.004396042029839009,
+        "total_seconds": 0.04130145802628249
+      },
+      {
+        "digest_seconds": 0.004903208988253027,
+        "manifest_write_seconds": 0.0011997509864158928,
+        "mlx_clear_cache_seconds": 9.624985978007317e-06,
+        "other_seconds": 0.032272624026518315,
+        "payload_write_and_fsync_seconds": 0.006615207996219397,
+        "total_seconds": 0.04500041698338464
+      },
+      {
+        "digest_seconds": 0.004964041989296675,
+        "manifest_write_seconds": 0.0013117500930093229,
+        "mlx_clear_cache_seconds": 8.70897201821208e-06,
+        "other_seconds": 0.03289191494695842,
+        "payload_write_and_fsync_seconds": 0.009351708984468132,
+        "total_seconds": 0.048528124985750765
+      },
+      {
+        "digest_seconds": 0.005020541953854263,
+        "manifest_write_seconds": 0.0012954159756191075,
+        "mlx_clear_cache_seconds": 1.1457945220172405e-05,
+        "other_seconds": 0.034301584120839834,
+        "payload_write_and_fsync_seconds": 0.0037556670140475035,
+        "total_seconds": 0.04438466700958088
+      },
+      {
+        "digest_seconds": 0.0049978329334408045,
+        "manifest_write_seconds": 0.0013399170129559934,
+        "mlx_clear_cache_seconds": 7.708033081144094e-06,
+        "other_seconds": 0.035335541993845254,
+        "payload_write_and_fsync_seconds": 0.006634082994423807,
+        "total_seconds": 0.048315082967747
+      },
+      {
+        "digest_seconds": 0.0050568749429658055,
+        "manifest_write_seconds": 0.0013650820474140346,
+        "mlx_clear_cache_seconds": 1.1582975275814533e-05,
+        "other_seconds": 0.03653441811911762,
+        "payload_write_and_fsync_seconds": 0.006891791941598058,
+        "total_seconds": 0.04985975002637133
+      },
+      {
+        "digest_seconds": 0.004957916971761733,
+        "manifest_write_seconds": 0.001338791975285858,
+        "mlx_clear_cache_seconds": 9.750016033649445e-06,
+        "other_seconds": 0.03761095704976469,
+        "payload_write_and_fsync_seconds": 0.006796583998948336,
+        "total_seconds": 0.05071400001179427
+      },
+      {
+        "digest_seconds": 0.004894457990303636,
+        "manifest_write_seconds": 0.001299374969676137,
+        "mlx_clear_cache_seconds": 8.000002708286047e-06,
+        "other_seconds": 0.039213084150105715,
+        "payload_write_and_fsync_seconds": 0.003608957922551781,
+        "total_seconds": 0.049023875035345554
+      },
+      {
+        "digest_seconds": 0.0049409999628551304,
+        "manifest_write_seconds": 0.0013492919970303774,
+        "mlx_clear_cache_seconds": 1.2750038877129555e-05,
+        "other_seconds": 0.04146637604571879,
+        "payload_write_and_fsync_seconds": 0.006819206988438964,
+        "total_seconds": 0.05458862503292039
+      }
+    ],
+    "per_entry_park_seconds": [
+      0.011329458036925644,
+      0.01252699998440221,
+      0.013496082974597812,
+      0.015078750031534582,
+      0.01569041603943333,
+      0.017861165979411453,
+      0.01882562501123175,
+      0.020075833017472178,
+      0.02193425002042204,
+      0.02303899999242276,
+      0.02471491601318121,
+      0.02517233300022781,
+      0.02872120903339237,
+      0.027359333005733788,
+      0.028308167005889118,
+      0.02990141703048721,
+      0.035144834022503346,
+      0.03582874999847263,
+      0.03669862501556054,
+      0.037962791975587606,
+      0.038844875001814216,
+      0.041373624990228564,
+      0.04229741700692102,
+      0.04130145802628249,
+      0.04500041698338464,
+      0.048528124985750765,
+      0.04438466700958088,
+      0.048315082967747,
+      0.04985975002637133,
+      0.05071400001179427,
+      0.049023875035345554,
+      0.05458862503292039
+    ],
+    "throughput_gib_per_second": 0.3095783769763417,
+    "total_seconds_including_fsync_digest_manifest": 1.0339018742670305
+  },
+  "startup_rescan": {
+    "entries": 32,
+    "internal_seconds": 0.008922667009755969,
+    "metadata_only_confirmed": true,
+    "payload_read_bytes": 0,
+    "payload_read_calls": 0,
+    "total_payload_bytes": 343676480,
+    "wall_seconds": 0.01108716701855883
+  },
+  "synthetic": {
+    "persisted_total_bytes": 343676480,
+    "requested_entry_bytes": 10737418,
+    "resident_entry_bytes": [
+      10737418,
+      10737418,
+      10737418,
+      10737418,
+      10737418,
+      10737418,
+      10737418,
+      10737418,
+      10737418,
+      10737418,
+      10737418,
+      10737418,
+      10737418,
+      10737418,
+      10737418,
+      10737418,
+      10737418,
+      10737418,
+      10737418,
+      10737418,
+      10737418,
+      10737418,
+      10737418,
+      10737418,
+      10737418,
+      10737418,
+      10737418,
+      10737418,
+      10737418,
+      10737418,
+      10737418,
+      10737418
+    ],
+    "topology": {
+      "mtp_draft_kv_planes": 2,
+      "mtp_tail_hidden": true,
+      "recurrent_arrays_per_plane": 2,
+      "target_kv_planes": 4,
+      "target_recurrent_planes": 4
+    }
+  }
+}

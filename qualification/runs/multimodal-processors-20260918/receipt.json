@@ -1,0 +1,112 @@
+{
+  "checks": {
+    "gemma3n_video_processor": {
+      "artifact": "~/.cache/huggingface/hub/models--google--gemma-3n-E2B-it/snapshots/5e092ebca197cdcd8d8b195040accf22693501bc",
+      "config_sha256": "11c9aa9516fdfc9d16bf0d5f8a0ff4c53d3789aad479760d489714b0c48db3cb",
+      "fingerprint": "5ac19073723f177db7150a18d8a502eb31ef0bf14aaec7b6eb2b007ab28dafd9",
+      "frame_batch_size": 2,
+      "frames": 3,
+      "image_soft_tokens": 768,
+      "media_token_end": 830,
+      "passed": true,
+      "pixel_values_shape": [
+        3,
+        3,
+        768,
+        768
+      ],
+      "processor_class": "Gemma3nProcessor",
+      "timestamps_seconds": [
+        0.0,
+        1.0,
+        2.0
+      ]
+    },
+    "minicpmo_media_processor": {
+      "artifact": "~/.cache/huggingface/hub/models--openbmb--MiniCPM-o-2_6/snapshots/06849bfd36da94da1f5a88fa17e8ba63f08a4c4d",
+      "audio_bounds": [
+        [
+          199,
+          209
+        ],
+        [
+          211,
+          221
+        ],
+        [
+          223,
+          225
+        ]
+      ],
+      "audio_chunk_samples": [
+        16000,
+        16000,
+        4000
+      ],
+      "audio_chunks": 3,
+      "audio_feature_lengths": [
+        100,
+        100,
+        25
+      ],
+      "config_sha256": "917813ee571faf0447669b6b3549c8357c583141b5e4a8be1bcf9cc800a7c8cf",
+      "fingerprint": "999e681dc3f1b0fc2bfc817d34958e09eba66e1316eaff129654ca33edcdd46a",
+      "image_bounds": [
+        [
+          1,
+          65
+        ],
+        [
+          67,
+          131
+        ],
+        [
+          133,
+          197
+        ]
+      ],
+      "media_token_end": 225,
+      "passed": true,
+      "pixel_values_shapes": [
+        [
+          3,
+          322,
+          630
+        ],
+        [
+          3,
+          448,
+          448
+        ],
+        [
+          3,
+          448,
+          448
+        ]
+      ],
+      "policy": {
+        "audio_chunk_length": 1.0,
+        "audio_sample_rate": 16000,
+        "batch_vision_input": true,
+        "chunk_input": true,
+        "max_slice_nums": 9,
+        "slice_mode": true,
+        "vision_batch_size": 16
+      },
+      "processor_class": "MiniCPMOProcessor",
+      "vision_batches": 1,
+      "vision_slices": 3
+    }
+  },
+  "gpu_used": false,
+  "metal_imported": false,
+  "passed": true,
+  "schema": "mlx2.multimodal-processor-qualification.v1",
+  "scope": "processor_only_no_model_weights",
+  "source": {
+    "path": "~/Desktop/mlx-uag/mlx-vlm-qwen4-exp",
+    "repository": "Blaizzy/mlx-vlm",
+    "revision": "653f1f13e238abb313fd45071bbd04b3de414635"
+  },
+  "torch_default_device": "cpu"
+}

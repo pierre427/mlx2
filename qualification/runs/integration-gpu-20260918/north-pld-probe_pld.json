@@ -1,0 +1,73 @@
+{
+  "requests_complete": {
+    "ok": true,
+    "outputs": [
+      {
+        "code": 200,
+        "content": "The harbor master logged each vessel: the Meridian carried tin, the Oriole carri",
+        "finish": "stop",
+        "tokens": 183,
+        "seconds": 0.92
+      },
+      {
+        "code": 200,
+        "content": "Here are three rewrites of the original function, each with a different name but",
+        "finish": "stop",
+        "tokens": 79,
+        "seconds": 0.72
+      },
+      {
+        "code": 200,
+        "content": "1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30",
+        "finish": "stop",
+        "tokens": 82,
+        "seconds": 0.73
+      }
+    ]
+  },
+  "concurrent_lanes": {
+    "ok": true,
+    "codes": [
+      200,
+      200,
+      200
+    ],
+    "errors": [
+      null,
+      null,
+      null
+    ]
+  },
+  "mechanism_counters": {
+    "ok": true,
+    "rotating_replay": false,
+    "pld": {
+      "pld_cycles": 295,
+      "pld_retrieval_cycles": 44,
+      "pld_plain_cycles": 251,
+      "pld_proposed": 352,
+      "pld_accepted": 305,
+      "pld_bonus": 295,
+      "pld_fallbacks": 0,
+      "pld_rollbacks": 9,
+      "pld_prefill_rounds": 3,
+      "pld_rotating_replay_rounds": 0,
+      "pld_rotating_replay_replayed_tokens": 0,
+      "pld_rotating_replay_refusals": 0,
+      "pld_rotating_replay_rebuilds": 0
+    }
+  },
+  "_outputs": {
+    "ok": true,
+    "contents": [
+      "The harbor master logged each vessel: the Meridian carried tin, the Oriole carried salt, the Kestrel carried cedar, and the Lantern carried glass. The harbor master logged each vessel: the Meridian carried tin, the Oriole carried salt, the Kestrel carried cedar, and the Lantern carried glass. The harbor master logged each vessel: the Meridian carried tin, the Oriole carried salt, the Kestrel carried cedar, and the Lantern carried glass. The harbor master logged each vessel: the Meridian carried tin, the Oriole carried salt, the Kestrel carried cedar, and the Lantern carried glass. The harbor master logged each vessel: the Meridian carried tin, the Oriole carried salt, the Kestrel carried cedar, and the Lantern carried glass. The harbor master logged each vessel: the Meridian carried tin, the Oriole carried salt, the Kestrel carried cedar, and the Lantern carried glass.",
+      "Here are three rewrites of the original function, each with a different name but identical behavior:\n\n```python\ndef area_one(width, height):\n    result = width * height\n    return result\n\ndef area_two(width, height):\n    result = width * height\n    return result\n\ndef area_three(width, height):\n    result = width * height\n    return result\n```",
+      "1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40"
+    ]
+  },
+  "server_alive_final": {
+    "ok": true,
+    "inflight": 0,
+    "error": null
+  }
+}

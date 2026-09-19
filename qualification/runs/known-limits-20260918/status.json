@@ -1,0 +1,260 @@
+{
+  "started": "2026-09-18 16:23:26",
+  "phase": "done",
+  "stages": {
+    "north-spomin-prefix": {
+      "state": "passed",
+      "steps": {
+        "probe_spomin_prefix": {
+          "returncode": 0,
+          "seconds": 9,
+          "failed_lines": [],
+          "last": "SUMMARY 6/6"
+        }
+      },
+      "started": "16:23:26",
+      "command": "mlx2.server --model ~/mlx-models/North-Mini-Code-1.0-mlx-4bit --host 127.0.0.1 --port 8297 --cache-dir /private/tmp/mlx2-claude-limits/qualification/runs/known-limits-20260918/cache/north-spomin-prefix --max-context 32768 --max-lanes 4 --max-inflight 40 --cache-bytes 8589934592 --qualification-mode --ordinary --spomin-live-surgery {\"enabled\": true, \"capacity_tokens\": 16384, \"segment_tokens\": 1024}",
+      "server_alive": true,
+      "finished": "16:23:42"
+    },
+    "muse-spomin-prefix": {
+      "state": "passed",
+      "steps": {
+        "probe_spomin_prefix": {
+          "returncode": 0,
+          "seconds": 33,
+          "failed_lines": [],
+          "last": "SUMMARY 6/6"
+        }
+      },
+      "started": "16:09:51",
+      "command": "mlx2.server --model ~/mlx-models/Muse-Glimmer-30B-mlx-4bit --host 127.0.0.1 --port 8297 --cache-dir /private/tmp/mlx2-claude-limits/qualification/runs/known-limits-20260918/cache/muse-spomin-prefix --max-context 32768 --max-lanes 4 --max-inflight 40 --cache-bytes 8589934592 --qualification-mode --ordinary --spomin-live-surgery {\"enabled\": true, \"capacity_tokens\": 16384, \"segment_tokens\": 1024}",
+      "server_alive": true,
+      "finished": "16:10:33"
+    },
+    "north-structured-thinking": {
+      "state": "failed",
+      "steps": {
+        "probe_north_structured": {
+          "returncode": 1,
+          "seconds": 11,
+          "failed_lines": [
+            "FAIL quality_with_thinking {\"coastal_correct\": \"4/6\", \"padded_documents\": 4, \"populations\": [2165000, 1770000, 544, 934000, 658571, 2164]}"
+          ],
+          "last": "SUMMARY 6/7"
+        }
+      },
+      "started": "16:00:59",
+      "command": "mlx2.server --model ~/mlx-models/North-Mini-Code-1.0-mlx-4bit --host 127.0.0.1 --port 8297 --cache-dir /private/tmp/mlx2-claude-limits/qualification/runs/known-limits-20260918/cache/north-structured-thinking --max-context 32768 --max-lanes 8 --max-inflight 40 --cache-bytes 8589934592 --qualification-mode --ordinary",
+      "server_alive": true,
+      "finished": "16:01:16"
+    },
+    "qwen36-approx-warm-prefix": {
+      "state": "passed",
+      "steps": {
+        "probe_approx_prefix": {
+          "returncode": 0,
+          "seconds": 4,
+          "failed_lines": [],
+          "last": "SUMMARY 6/6"
+        }
+      },
+      "started": "16:20:49",
+      "command": "mlx2.server --model ~/mlx-models/Qwen3.6-35B-A3B-uncensored-heretic-Native-MTP-Preserved-oQ4e-mtp --host 127.0.0.1 --port 8297 --cache-dir /private/tmp/mlx2-claude-limits/qualification/runs/known-limits-20260918/cache/qwen36-approx-warm-prefix --max-context 32768 --max-lanes 1 --max-inflight 40 --cache-bytes 8589934592 --qualification-mode --ordinary --approximate-kv {\"operation\": \"kv_k8v4\", \"enabled\": true, \"start_tokens\": 2500}",
+      "server_alive": true,
+      "finished": "16:21:03"
+    },
+    "north-pld-batched": {
+      "state": "passed",
+      "steps": {
+        "sanity": {
+          "returncode": 0,
+          "seconds": 215,
+          "failed_lines": [],
+          "last": "  explain              20/20 "
+        }
+      },
+      "started": "16:23:42",
+      "command": "mlx2.server --model ~/mlx-models/North-Mini-Code-1.0-mlx-4bit --host 127.0.0.1 --port 8297 --cache-dir /private/tmp/mlx2-claude-limits/qualification/runs/known-limits-20260918/cache/north-pld-batched --max-context 32768 --max-lanes 20 --max-inflight 40 --cache-bytes 8589934592 --qualification-mode --prompt-lookup --execution-policy /private/tmp/mlx2-claude-limits/qualification/runs/integration-gpu-20260918/policies/pld.json",
+      "server_alive": true,
+      "finished": "16:27:23"
+    },
+    "muse-pld-batched": {
+      "state": "passed",
+      "steps": {
+        "sanity": {
+          "returncode": 0,
+          "seconds": 364,
+          "failed_lines": [],
+          "last": "  explain              20/20 "
+        }
+      },
+      "started": "16:14:23",
+      "command": "mlx2.server --model ~/mlx-models/Muse-Glimmer-30B-mlx-4bit --host 127.0.0.1 --port 8297 --cache-dir /private/tmp/mlx2-claude-limits/qualification/runs/known-limits-20260918/cache/muse-pld-batched --max-context 32768 --max-lanes 20 --max-inflight 40 --cache-bytes 8589934592 --qualification-mode --prompt-lookup --execution-policy /private/tmp/mlx2-claude-limits/qualification/runs/integration-gpu-20260918/policies/pld.json",
+      "server_alive": true,
+      "finished": "16:20:36"
+    },
+    "north-ordinary-thinking": {
+      "state": "failed",
+      "steps": {
+        "sanity": {
+          "returncode": 1,
+          "seconds": 347,
+          "failed_lines": [],
+          "last": "  explain              10/20 {'empty': 10}"
+        }
+      },
+      "started": "16:01:52",
+      "command": "mlx2.server --model ~/mlx-models/North-Mini-Code-1.0-mlx-4bit --host 127.0.0.1 --port 8297 --cache-dir /private/tmp/mlx2-claude-limits/qualification/runs/known-limits-20260918/cache/north-ordinary-thinking --max-context 32768 --max-lanes 20 --max-inflight 40 --cache-bytes 8589934592 --qualification-mode --ordinary",
+      "server_alive": true,
+      "finished": "16:07:45"
+    }
+  },
+  "order": [
+    "north-spomin-prefix",
+    "muse-spomin-prefix",
+    "north-structured-thinking",
+    "qwen36-approx-warm-prefix",
+    "north-pld-batched",
+    "muse-pld-batched",
+    "north-ordinary-thinking"
+  ],
+  "history": [
+    {
+      "north-spomin-prefix": {
+        "state": "failed",
+        "steps": {
+          "probe_spomin_prefix": {
+            "returncode": 1,
+            "seconds": 9,
+            "failed_lines": [
+              "FAIL exact_prefix_serves_a_different_question {\"answer\": \"The vault code is a single word: \\\"ALPHA-7319\\\".The vault code\", \"cached_tokens\": 0, \"receipt\": \"applied\"}"
+            ],
+            "last": "SUMMARY 5/6"
+          }
+        },
+        "started": "16:00:04",
+        "command": "mlx2.server --model ~/mlx-models/North-Mini-Code-1.0-mlx-4bit --host 127.0.0.1 --port 8297 --cache-dir /private/tmp/mlx2-claude-limits/qualification/runs/known-limits-20260918/cache/north-spomin-prefix --max-context 32768 --max-lanes 4 --max-inflight 40 --cache-bytes 8589934592 --qualification-mode --ordinary --spomin-live-surgery {\"enabled\": true, \"capacity_tokens\": 16384, \"segment_tokens\": 1024}",
+        "server_alive": true,
+        "finished": "16:00:19"
+      },
+      "muse-spomin-prefix": {
+        "state": "failed",
+        "steps": {
+          "probe_spomin_prefix": {
+            "returncode": 1,
+            "seconds": 34,
+            "failed_lines": [
+              "FAIL exact_prefix_serves_a_different_question {\"answer\": \"ALPHA-7319\", \"cached_tokens\": 0, \"receipt\": \"applied\"}"
+            ],
+            "last": "SUMMARY 5/6"
+          }
+        },
+        "started": "16:00:19",
+        "command": "mlx2.server --model ~/mlx-models/Muse-Glimmer-30B-mlx-4bit --host 127.0.0.1 --port 8297 --cache-dir /private/tmp/mlx2-claude-limits/qualification/runs/known-limits-20260918/cache/muse-spomin-prefix --max-context 32768 --max-lanes 4 --max-inflight 40 --cache-bytes 8589934592 --qualification-mode --ordinary --spomin-live-surgery {\"enabled\": true, \"capacity_tokens\": 16384, \"segment_tokens\": 1024}",
+        "server_alive": true,
+        "finished": "16:00:59"
+      },
+      "qwen36-approx-warm-prefix": {
+        "state": "failed",
+        "steps": {
+          "probe_approx_prefix": {
+            "returncode": 1,
+            "seconds": 4,
+            "failed_lines": [
+              "FAIL long_prompt_quantizes_a_warm_exact_prefix {\"prompt_tokens\": 5326, \"cached_tokens\": 0, \"answer\": \"ORCHID-5521\", \"receipt\": {\"schema\": \"mlx2.approximate-kv.v1\", \"request_id\": \"chatcmpl-95210d710b544a9ca1bc21cc0fbb5c85\", \"fidelity\": \"approximate\", \"source_revision\": \"9e05e8868c18387811e6bc942c9128"
+            ],
+            "last": "SUMMARY 5/6"
+          }
+        },
+        "started": "16:01:16",
+        "command": "mlx2.server --model ~/mlx-models/Qwen3.6-35B-A3B-uncensored-heretic-Native-MTP-Preserved-oQ4e-mtp --host 127.0.0.1 --port 8297 --cache-dir /private/tmp/mlx2-claude-limits/qualification/runs/known-limits-20260918/cache/qwen36-approx-warm-prefix --max-context 32768 --max-lanes 1 --max-inflight 40 --cache-bytes 8589934592 --qualification-mode --ordinary --approximate-kv {\"operation\": \"kv_k8v4\", \"enabled\": true, \"start_tokens\": 2500}",
+        "server_alive": true,
+        "finished": "16:01:27"
+      },
+      "north-pld-batched": {
+        "state": "failed",
+        "steps": {
+          "sanity": {
+            "returncode": 1,
+            "seconds": 3,
+            "failed_lines": [],
+            "last": "urllib.error.URLError: <urlopen error [Errno 61] Connection refused>"
+          }
+        },
+        "started": "16:01:27",
+        "command": "mlx2.server --model ~/mlx-models/North-Mini-Code-1.0-mlx-4bit --host 127.0.0.1 --port 8297 --cache-dir /private/tmp/mlx2-claude-limits/qualification/runs/known-limits-20260918/cache/north-pld-batched --max-context 32768 --max-lanes 20 --max-inflight 40 --cache-bytes 8589934592 --qualification-mode --prompt-lookup --execution-policy /private/tmp/mlx2-claude-limits/qualification/runs/integration-gpu-20260918/policies/pld.json",
+        "server_alive": false,
+        "finished": "16:01:36"
+      },
+      "muse-pld-batched": {
+        "state": "failed",
+        "steps": {
+          "sanity": {
+            "returncode": 1,
+            "seconds": 6,
+            "failed_lines": [],
+            "last": "urllib.error.URLError: <urlopen error [Errno 61] Connection refused>"
+          }
+        },
+        "started": "16:01:36",
+        "command": "mlx2.server --model ~/mlx-models/Muse-Glimmer-30B-mlx-4bit --host 127.0.0.1 --port 8297 --cache-dir /private/tmp/mlx2-claude-limits/qualification/runs/known-limits-20260918/cache/muse-pld-batched --max-context 32768 --max-lanes 20 --max-inflight 40 --cache-bytes 8589934592 --qualification-mode --prompt-lookup --execution-policy /private/tmp/mlx2-claude-limits/qualification/runs/integration-gpu-20260918/policies/pld.json",
+        "server_alive": false,
+        "finished": "16:01:52"
+      }
+    },
+    {
+      "qwen36-approx-warm-prefix": {
+        "state": "failed",
+        "steps": {
+          "probe_approx_prefix": {
+            "returncode": 1,
+            "seconds": 3,
+            "failed_lines": [
+              "FAIL counters {\"skipped\": 4, \"applied\": 2, \"requantized_prefix_hits\": 2}"
+            ],
+            "last": "SUMMARY 5/6"
+          }
+        },
+        "started": "16:10:33",
+        "command": "mlx2.server --model ~/mlx-models/Qwen3.6-35B-A3B-uncensored-heretic-Native-MTP-Preserved-oQ4e-mtp --host 127.0.0.1 --port 8297 --cache-dir /private/tmp/mlx2-claude-limits/qualification/runs/known-limits-20260918/cache/qwen36-approx-warm-prefix --max-context 32768 --max-lanes 1 --max-inflight 40 --cache-bytes 8589934592 --qualification-mode --ordinary --approximate-kv {\"operation\": \"kv_k8v4\", \"enabled\": true, \"start_tokens\": 2500}",
+        "server_alive": true,
+        "finished": "16:10:43"
+      }
+    },
+    {
+      "north-spomin-prefix": {
+        "state": "passed",
+        "steps": {
+          "probe_spomin_prefix": {
+            "returncode": 0,
+            "seconds": 10,
+            "failed_lines": [],
+            "last": "SUMMARY 6/6"
+          }
+        },
+        "started": "16:09:35",
+        "command": "mlx2.server --model ~/mlx-models/North-Mini-Code-1.0-mlx-4bit --host 127.0.0.1 --port 8297 --cache-dir /private/tmp/mlx2-claude-limits/qualification/runs/known-limits-20260918/cache/north-spomin-prefix --max-context 32768 --max-lanes 4 --max-inflight 40 --cache-bytes 8589934592 --qualification-mode --ordinary --spomin-live-surgery {\"enabled\": true, \"capacity_tokens\": 16384, \"segment_tokens\": 1024}",
+        "server_alive": true,
+        "finished": "16:09:51"
+      },
+      "north-pld-batched": {
+        "state": "passed",
+        "steps": {
+          "sanity": {
+            "returncode": 0,
+            "seconds": 214,
+            "failed_lines": [],
+            "last": "  explain              20/20 "
+          }
+        },
+        "started": "16:10:43",
+        "command": "mlx2.server --model ~/mlx-models/North-Mini-Code-1.0-mlx-4bit --host 127.0.0.1 --port 8297 --cache-dir /private/tmp/mlx2-claude-limits/qualification/runs/known-limits-20260918/cache/north-pld-batched --max-context 32768 --max-lanes 20 --max-inflight 40 --cache-bytes 8589934592 --qualification-mode --prompt-lookup --execution-policy /private/tmp/mlx2-claude-limits/qualification/runs/integration-gpu-20260918/policies/pld.json",
+        "server_alive": true,
+        "finished": "16:14:23"
+      }
+    }
+  ],
+  "updated": "2026-09-18 16:27:23",
+  "production_restored": null
+}

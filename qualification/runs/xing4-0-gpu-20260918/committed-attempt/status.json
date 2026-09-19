@@ -1,0 +1,41 @@
+{
+  "started": "2026-09-18 19:47:46",
+  "phase": "stages",
+  "stages": {
+    "x6-mtp1": {
+      "state": "failed",
+      "steps": {
+        "qualifier": {
+          "returncode": 1,
+          "seconds": 169,
+          "failed_lines": [
+            "mixed_warm: FAIL"
+          ],
+          "last": "AssertionError: mixed_warm"
+        }
+      },
+      "started": "20:23:06",
+      "command": "mlx2.server --model ~/mlx-models/Xing4.0-29B-A4B-mlx-6bit --host 127.0.0.1 --port 8297 --cache-dir /private/tmp/mlx2-xing/qualification/runs/xing4-0-gpu-20260918/cache/x6-mtp1 --max-context 32768 --max-lanes 4 --max-inflight 8 --cache-bytes 8589934592 --qualification-mode --execution-policy /private/tmp/mlx2-xing/qualification/runs/xing4-0-gpu-20260918/policies/mtp1.json",
+      "server_alive": true,
+      "finished": "20:26:04"
+    },
+    "x6-ordinary": {
+      "state": "running",
+      "steps": {},
+      "started": "20:26:04",
+      "command": "mlx2.server --model ~/mlx-models/Xing4.0-29B-A4B-mlx-6bit --host 127.0.0.1 --port 8297 --cache-dir /private/tmp/mlx2-xing/qualification/runs/xing4-0-gpu-20260918/cache/x6-ordinary --max-context 32768 --max-lanes 4 --max-inflight 8 --cache-bytes 8589934592 --qualification-mode --ordinary"
+    }
+  },
+  "order": [
+    "x6-mtp1",
+    "x6-ordinary",
+    "x6-pld",
+    "x16-mtp1",
+    "x16-ordinary"
+  ],
+  "updated": "2026-09-18 20:26:10",
+  "preflight": {
+    "returncode": 0,
+    "tail": "Preflight evidence: /private/tmp/mlx2-xing/qualification/runs/xing4-0-gpu-20260918/preflight.json\n"
+  }
+}

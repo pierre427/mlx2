@@ -1,0 +1,134 @@
+[transformers] PyTorch was not found. Models won't be available and only tokenizers, configuration and file/data utilities can be used.
+2026-09-16 03:26:44,800 INFO "GET /health HTTP/1.1" 503 -
+2026-09-16 03:26:45,823 INFO "GET /health HTTP/1.1" 503 -
+2026-09-16 03:26:46,843 INFO "GET /health HTTP/1.1" 503 -
+2026-09-16 03:26:47,868 INFO "GET /health HTTP/1.1" 503 -
+2026-09-16 03:26:48,888 INFO "GET /health HTTP/1.1" 503 -
+----------------------------------------
+Exception occurred during processing of request from ('127.0.0.1', 50393)
+Traceback (most recent call last):
+  File "~/.local/share/uv/python/cpython-3.12.13-macos-aarch64-none/lib/python3.12/socketserver.py", line 697, in process_request_thread
+    self.finish_request(request, client_address)
+  File "~/.local/share/uv/python/cpython-3.12.13-macos-aarch64-none/lib/python3.12/socketserver.py", line 362, in finish_request
+    self.RequestHandlerClass(request, client_address, self)
+  File "~/.local/share/uv/python/cpython-3.12.13-macos-aarch64-none/lib/python3.12/socketserver.py", line 766, in __init__
+    self.handle()
+  File "~/.local/share/uv/python/cpython-3.12.13-macos-aarch64-none/lib/python3.12/http/server.py", line 442, in handle
+    self.handle_one_request()
+  File "~/.local/share/uv/python/cpython-3.12.13-macos-aarch64-none/lib/python3.12/http/server.py", line 408, in handle_one_request
+    self.raw_requestline = self.rfile.readline(65537)
+                           ^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "~/.local/share/uv/python/cpython-3.12.13-macos-aarch64-none/lib/python3.12/socket.py", line 720, in readinto
+    return self._sock.recv_into(b)
+           ^^^^^^^^^^^^^^^^^^^^^^^
+ConnectionResetError: [Errno 54] Connection reset by peer
+----------------------------------------
+2026-09-16 03:26:49,973 INFO "GET /health HTTP/1.1" 503 -
+----------------------------------------
+Exception occurred during processing of request from ('127.0.0.1', 50395)
+Traceback (most recent call last):
+  File "~/.local/share/uv/python/cpython-3.12.13-macos-aarch64-none/lib/python3.12/socketserver.py", line 697, in process_request_thread
+    self.finish_request(request, client_address)
+  File "~/.local/share/uv/python/cpython-3.12.13-macos-aarch64-none/lib/python3.12/socketserver.py", line 362, in finish_request
+    self.RequestHandlerClass(request, client_address, self)
+  File "~/.local/share/uv/python/cpython-3.12.13-macos-aarch64-none/lib/python3.12/socketserver.py", line 766, in __init__
+    self.handle()
+  File "~/.local/share/uv/python/cpython-3.12.13-macos-aarch64-none/lib/python3.12/http/server.py", line 442, in handle
+    self.handle_one_request()
+  File "~/.local/share/uv/python/cpython-3.12.13-macos-aarch64-none/lib/python3.12/http/server.py", line 408, in handle_one_request
+    self.raw_requestline = self.rfile.readline(65537)
+                           ^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "~/.local/share/uv/python/cpython-3.12.13-macos-aarch64-none/lib/python3.12/socket.py", line 720, in readinto
+    return self._sock.recv_into(b)
+           ^^^^^^^^^^^^^^^^^^^^^^^
+ConnectionResetError: [Errno 54] Connection reset by peer
+----------------------------------------
+2026-09-16 03:26:50,519 INFO ubc_evict: evicted 5025.7 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00001-of-00020.safetensors
+2026-09-16 03:26:50,520 INFO ubc_evict: evicted 5006.8 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00002-of-00020.safetensors
+2026-09-16 03:26:50,520 INFO ubc_evict: evicted 5006.8 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00003-of-00020.safetensors
+2026-09-16 03:26:50,520 INFO ubc_evict: evicted 5006.8 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00004-of-00020.safetensors
+2026-09-16 03:26:50,520 INFO ubc_evict: evicted 5006.8 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00005-of-00020.safetensors
+2026-09-16 03:26:50,520 INFO ubc_evict: evicted 5006.8 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00006-of-00020.safetensors
+2026-09-16 03:26:50,535 INFO ubc_evict: evicted 5022.3 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00007-of-00020.safetensors
+2026-09-16 03:26:50,569 INFO ubc_evict: evicted 5076.7 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00008-of-00020.safetensors
+2026-09-16 03:26:50,602 INFO ubc_evict: evicted 5115.4 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00009-of-00020.safetensors
+2026-09-16 03:26:50,643 INFO ubc_evict: evicted 5115.4 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00010-of-00020.safetensors
+2026-09-16 03:26:50,673 INFO ubc_evict: evicted 5073.2 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00011-of-00020.safetensors
+2026-09-16 03:26:50,703 INFO ubc_evict: evicted 5115.4 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00012-of-00020.safetensors
+2026-09-16 03:26:50,734 INFO ubc_evict: evicted 5115.4 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00013-of-00020.safetensors
+2026-09-16 03:26:50,746 INFO ubc_evict: evicted 5073.2 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00014-of-00020.safetensors
+2026-09-16 03:26:50,750 INFO ubc_evict: evicted 5115.4 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00015-of-00020.safetensors
+2026-09-16 03:26:50,754 INFO ubc_evict: evicted 5115.4 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00016-of-00020.safetensors
+2026-09-16 03:26:50,761 INFO ubc_evict: evicted 5073.2 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00017-of-00020.safetensors
+2026-09-16 03:26:50,767 INFO ubc_evict: evicted 5115.4 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00018-of-00020.safetensors
+2026-09-16 03:26:50,772 INFO ubc_evict: evicted 5115.4 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00019-of-00020.safetensors
+2026-09-16 03:26:50,772 INFO ubc_evict: evicted 1704.3 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00020-of-00020.safetensors
+2026-09-16 03:26:50,772 INFO ubc_evict: evicted 1399.3 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-mtp-q4.safetensors
+2026-09-16 03:26:50,772 INFO ubc_evict: pass complete total_mb=99405.2 elapsed_s=0.28
+[transformers] You are using a model of type `qwen4_exp` to instantiate a model of type ``. This may be expected if you are loading a checkpoint that shares a subset of the architecture (e.g., loading a `sam2_video` checkpoint into `Sam2Model`), but is otherwise not supported and can yield errors. Please verify that the checkpoint is compatible with the model you are instantiating.
+2026-09-16 03:26:51,124 INFO "GET /health HTTP/1.1" 503 -
+----------------------------------------
+Exception occurred during processing of request from ('127.0.0.1', 50396)
+Traceback (most recent call last):
+  File "~/.local/share/uv/python/cpython-3.12.13-macos-aarch64-none/lib/python3.12/socketserver.py", line 697, in process_request_thread
+    self.finish_request(request, client_address)
+  File "~/.local/share/uv/python/cpython-3.12.13-macos-aarch64-none/lib/python3.12/socketserver.py", line 362, in finish_request
+    self.RequestHandlerClass(request, client_address, self)
+  File "~/.local/share/uv/python/cpython-3.12.13-macos-aarch64-none/lib/python3.12/socketserver.py", line 766, in __init__
+    self.handle()
+  File "~/.local/share/uv/python/cpython-3.12.13-macos-aarch64-none/lib/python3.12/http/server.py", line 442, in handle
+    self.handle_one_request()
+  File "~/.local/share/uv/python/cpython-3.12.13-macos-aarch64-none/lib/python3.12/http/server.py", line 408, in handle_one_request
+    self.raw_requestline = self.rfile.readline(65537)
+                           ^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "~/.local/share/uv/python/cpython-3.12.13-macos-aarch64-none/lib/python3.12/socket.py", line 720, in readinto
+    return self._sock.recv_into(b)
+           ^^^^^^^^^^^^^^^^^^^^^^^
+ConnectionResetError: [Errno 54] Connection reset by peer
+----------------------------------------
+2026-09-16 03:26:52,471 INFO "GET /health HTTP/1.1" 200 -
+2026-09-16 03:26:52,602 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 03:26:52,679 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 03:26:52,729 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 03:27:03,350 INFO Async QSA promotion retained segmented state: a lane terminated in the first segmented cycle
+2026-09-16 03:27:03,356 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 03:27:03,588 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 03:27:03,749 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 03:27:03,784 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 03:27:04,230 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 03:27:04,469 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 03:27:04,650 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 03:27:04,753 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 03:27:04,787 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 03:27:05,577 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 03:27:06,030 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 03:27:06,686 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 03:27:06,755 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 03:27:07,732 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 03:27:08,595 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 03:27:12,723 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 03:27:12,723 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 03:27:12,723 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 03:27:12,723 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 03:27:13,691 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 03:27:14,614 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 03:27:14,668 WARNING Async QSA promotion declined at queue: suffix-only promotion requires equal starting QSA offsets
+2026-09-16 03:27:15,896 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 03:27:15,896 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 03:31:00,904 INFO Async QSA promotion retained segmented state: memory_pressure_retains_segmented_owner
+2026-09-16 03:31:05,026 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 03:31:07,735 INFO Async QSA promotion retained segmented state: memory_pressure_retains_segmented_owner
+2026-09-16 03:31:10,831 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 03:32:54,436 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 03:32:55,572 INFO Async QSA promotion retained segmented state: shared_suffix_retains_segmented_owner
+2026-09-16 03:33:00,668 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 03:33:02,342 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+[transformers] Token indices sequence length is longer than the specified maximum sequence length for this model (262156 > 262144). Running this sequence through the model will result in indexing errors
+2026-09-16 03:33:02,587 INFO "POST /v1/chat/completions HTTP/1.1" 400 -
+2026-09-16 03:33:02,595 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 03:33:02,839 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 03:33:02,841 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 03:33:03,044 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 03:33:03,253 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 03:33:03,254 INFO "GET /health HTTP/1.1" 200 -
+2026-09-16 03:33:03,255 INFO "GET /v1/status HTTP/1.1" 200 -

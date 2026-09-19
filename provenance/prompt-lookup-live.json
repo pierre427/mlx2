@@ -1,0 +1,26 @@
+{
+  "implementation": "Live target-verified prompt-lookup serving route",
+  "files": [
+    "src/mlx2/runtime/pld.py",
+    "src/mlx2/runtime/prompt_lookup.py",
+    "src/mlx2/serving.py",
+    "tests/test_pld_live.py"
+  ],
+  "source_repository": "~/Desktop/mlx-uag/mlx-lm-unified",
+  "source_revision": "13eb83388750435bcc751d0b9e33857a38152544",
+  "source_license": "MIT",
+  "source_paths": [
+    "mlx_lm/generate.py:prompt_lookup_generate_step and exact rollback helpers",
+    "mlx_lm/prompt_lookup.py:adaptive indexed proposal policy, rolling admission, and verify-cliff planning"
+  ],
+  "modifications": [
+    "Rebuilt the mechanism as a distinct mlx2 batch-executor seam rather than copying the unified streaming API.",
+    "Uses APCv2 branches and mlx2 request-local samplers, logits processors, stop matching, lifecycle receipts, and qualification gates.",
+    "Verification is B1 per lane; multi-position target rows are amortized within a lane. No cross-request target batching is claimed.",
+    "Partial acceptance, stop, and length boundaries rewind and replay the exact committed input prefix before publication.",
+    "Low-acceptance requests delatch to ordinary one-token target rounds while retaining a truthful request-level PLD receipt.",
+    "Optional deferred admission measures next-token retrieval hits on ordinary target rounds; bounded rolling windows can later re-enter PLD only at a committed boundary.",
+    "Optional verify-cliff planning extends across or snaps below a configured measured plateau without inventing continuation tokens."
+  ],
+  "qualification": "implemented; rolling admission and verify-cliff planning remain default-off and are selectable only with a matching current-source qualification receipt containing nonzero mechanism counters, observed proposal and rollback checks"
+}

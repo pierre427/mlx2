@@ -1,0 +1,34 @@
+{
+  "source_repository": "~/Desktop/mlx-uag/mlx-lm-unified",
+  "source_revision": "1e2bc604f71d070bee970c3e7db8b60f7855599b",
+  "source_paths": [
+    "mlx_lm/models/muse_glimmer.py"
+  ],
+  "source_sha256": "8b91aae9726ea5567f5a42cce7949272fb0e0f8251eff74b7b02704a3930a73c",
+  "license": "MIT",
+  "retained_notices": "provenance/muse-glimmer.NOTICE",
+  "destinations": [
+    "src/mlx2/runtime/models/muse_glimmer.py",
+    "src/mlx2/adapters/muse_glimmer_config.py"
+  ],
+  "modifications": [
+    "Split configuration into GPU-free module with strict topology validation",
+    "Use existing mlx2 cache and attention primitives only",
+    "Declare revision-bound model cache layout",
+    "Honor per-layer RoPE theta and reject mismatched cache lengths",
+    "Keep ordinary decode reference; no native MTP or DFlash route enabled"
+  ],
+  "validation": [
+    "39 Muse CPU/static tests plus11 adapter-registry tests passed",
+    "Local tokenizer and ATEM tool-history roundtrip passed, 131 tokens; BPE detokenizer preserves channel tokens",
+    "Four local safetensors headers inspected without opening tensor payloads; q/k/gate/lm_head packed shapes match config",
+    "No MLX import, model load, tensor computation or GPU test performed"
+  ],
+  "inspected_not_mined": [
+    {
+      "repository": "~/Desktop/mlx-uag/worktrees/agnes-vlm-support",
+      "revision": "8a5e704e0fe43cd8654c144c4ecbd4c8aececeb5",
+      "path": "mlx_vlm/speculative/drafters/dflash2/dflash2.py"
+    }
+  ]
+}

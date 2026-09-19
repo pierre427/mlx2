@@ -1,0 +1,145 @@
+{
+  "plan": {
+    "device": "gpu",
+    "bits": [
+      4,
+      8
+    ],
+    "group_size": 64,
+    "m": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8
+    ],
+    "shapes": {
+      "dense27b_qkv": [
+        8192,
+        5120
+      ],
+      "dense27b_up": [
+        17408,
+        5120
+      ],
+      "dense27b_down": [
+        5120,
+        17408
+      ],
+      "a3b_attn": [
+        4096,
+        2048
+      ],
+      "a3b_expert_up": [
+        512,
+        2048
+      ],
+      "a3b_lm_head": [
+        151936,
+        2048
+      ]
+    },
+    "will_execute": true
+  }
+}
+{"shape": "dense27b_qkv", "bits": 4, "m": 1, "us": 38.17, "ratio_vs_m1": 1.0, "per_column_speedup_vs_m_matvecs": 1.0}
+{"shape": "dense27b_qkv", "bits": 4, "m": 2, "us": 41.41, "ratio_vs_m1": 1.085, "per_column_speedup_vs_m_matvecs": 1.843}
+{"shape": "dense27b_qkv", "bits": 4, "m": 3, "us": 48.36, "ratio_vs_m1": 1.267, "per_column_speedup_vs_m_matvecs": 2.368}
+{"shape": "dense27b_qkv", "bits": 4, "m": 4, "us": 57.04, "ratio_vs_m1": 1.495, "per_column_speedup_vs_m_matvecs": 2.676}
+{"shape": "dense27b_qkv", "bits": 4, "m": 5, "us": 67.65, "ratio_vs_m1": 1.772, "per_column_speedup_vs_m_matvecs": 2.821}
+{"shape": "dense27b_qkv", "bits": 4, "m": 6, "us": 90.21, "ratio_vs_m1": 2.364, "per_column_speedup_vs_m_matvecs": 2.539}
+{"shape": "dense27b_qkv", "bits": 4, "m": 7, "us": 111.56, "ratio_vs_m1": 2.923, "per_column_speedup_vs_m_matvecs": 2.395}
+{"shape": "dense27b_qkv", "bits": 4, "m": 8, "us": 123.69, "ratio_vs_m1": 3.241, "per_column_speedup_vs_m_matvecs": 2.468}
+{"shape": "dense27b_qkv", "bits": 8, "m": 1, "us": 59.11, "ratio_vs_m1": 1.0, "per_column_speedup_vs_m_matvecs": 1.0}
+{"shape": "dense27b_qkv", "bits": 8, "m": 2, "us": 64.41, "ratio_vs_m1": 1.09, "per_column_speedup_vs_m_matvecs": 1.835}
+{"shape": "dense27b_qkv", "bits": 8, "m": 3, "us": 73.84, "ratio_vs_m1": 1.249, "per_column_speedup_vs_m_matvecs": 2.401}
+{"shape": "dense27b_qkv", "bits": 8, "m": 4, "us": 84.08, "ratio_vs_m1": 1.422, "per_column_speedup_vs_m_matvecs": 2.812}
+{"shape": "dense27b_qkv", "bits": 8, "m": 5, "us": 94.24, "ratio_vs_m1": 1.594, "per_column_speedup_vs_m_matvecs": 3.136}
+{"shape": "dense27b_qkv", "bits": 8, "m": 6, "us": 165.05, "ratio_vs_m1": 2.792, "per_column_speedup_vs_m_matvecs": 2.149}
+{"shape": "dense27b_qkv", "bits": 8, "m": 7, "us": 203.13, "ratio_vs_m1": 3.437, "per_column_speedup_vs_m_matvecs": 2.037}
+{"shape": "dense27b_qkv", "bits": 8, "m": 8, "us": 160.04, "ratio_vs_m1": 2.708, "per_column_speedup_vs_m_matvecs": 2.955}
+{"shape": "dense27b_up", "bits": 4, "m": 1, "us": 67.11, "ratio_vs_m1": 1.0, "per_column_speedup_vs_m_matvecs": 1.0}
+{"shape": "dense27b_up", "bits": 4, "m": 2, "us": 89.48, "ratio_vs_m1": 1.333, "per_column_speedup_vs_m_matvecs": 1.5}
+{"shape": "dense27b_up", "bits": 4, "m": 3, "us": 114.69, "ratio_vs_m1": 1.709, "per_column_speedup_vs_m_matvecs": 1.755}
+{"shape": "dense27b_up", "bits": 4, "m": 4, "us": 140.95, "ratio_vs_m1": 2.1, "per_column_speedup_vs_m_matvecs": 1.904}
+{"shape": "dense27b_up", "bits": 4, "m": 5, "us": 163.89, "ratio_vs_m1": 2.442, "per_column_speedup_vs_m_matvecs": 2.047}
+{"shape": "dense27b_up", "bits": 4, "m": 6, "us": 236.22, "ratio_vs_m1": 3.52, "per_column_speedup_vs_m_matvecs": 1.705}
+{"shape": "dense27b_up", "bits": 4, "m": 7, "us": 299.29, "ratio_vs_m1": 4.46, "per_column_speedup_vs_m_matvecs": 1.57}
+{"shape": "dense27b_up", "bits": 4, "m": 8, "us": 395.69, "ratio_vs_m1": 5.896, "per_column_speedup_vs_m_matvecs": 1.357}
+{"shape": "dense27b_up", "bits": 8, "m": 1, "us": 169.62, "ratio_vs_m1": 1.0, "per_column_speedup_vs_m_matvecs": 1.0}
+{"shape": "dense27b_up", "bits": 8, "m": 2, "us": 169.41, "ratio_vs_m1": 0.999, "per_column_speedup_vs_m_matvecs": 2.002}
+{"shape": "dense27b_up", "bits": 8, "m": 3, "us": 169.54, "ratio_vs_m1": 1.0, "per_column_speedup_vs_m_matvecs": 3.001}
+{"shape": "dense27b_up", "bits": 8, "m": 4, "us": 170.45, "ratio_vs_m1": 1.005, "per_column_speedup_vs_m_matvecs": 3.98}
+{"shape": "dense27b_up", "bits": 8, "m": 5, "us": 178.33, "ratio_vs_m1": 1.051, "per_column_speedup_vs_m_matvecs": 4.756}
+{"shape": "dense27b_up", "bits": 8, "m": 6, "us": 306.18, "ratio_vs_m1": 1.805, "per_column_speedup_vs_m_matvecs": 3.324}
+{"shape": "dense27b_up", "bits": 8, "m": 7, "us": 592.87, "ratio_vs_m1": 3.495, "per_column_speedup_vs_m_matvecs": 2.003}
+{"shape": "dense27b_up", "bits": 8, "m": 8, "us": 368.27, "ratio_vs_m1": 2.171, "per_column_speedup_vs_m_matvecs": 3.685}
+{"shape": "dense27b_down", "bits": 4, "m": 1, "us": 67.38, "ratio_vs_m1": 1.0, "per_column_speedup_vs_m_matvecs": 1.0}
+{"shape": "dense27b_down", "bits": 4, "m": 2, "us": 100.72, "ratio_vs_m1": 1.495, "per_column_speedup_vs_m_matvecs": 1.338}
+{"shape": "dense27b_down", "bits": 4, "m": 3, "us": 131.04, "ratio_vs_m1": 1.945, "per_column_speedup_vs_m_matvecs": 1.542}
+{"shape": "dense27b_down", "bits": 4, "m": 4, "us": 158.61, "ratio_vs_m1": 2.354, "per_column_speedup_vs_m_matvecs": 1.699}
+{"shape": "dense27b_down", "bits": 4, "m": 5, "us": 184.98, "ratio_vs_m1": 2.746, "per_column_speedup_vs_m_matvecs": 1.821}
+{"shape": "dense27b_down", "bits": 4, "m": 6, "us": 309.06, "ratio_vs_m1": 4.587, "per_column_speedup_vs_m_matvecs": 1.308}
+{"shape": "dense27b_down", "bits": 4, "m": 7, "us": 409.72, "ratio_vs_m1": 6.081, "per_column_speedup_vs_m_matvecs": 1.151}
+{"shape": "dense27b_down", "bits": 4, "m": 8, "us": 292.15, "ratio_vs_m1": 4.336, "per_column_speedup_vs_m_matvecs": 1.845}
+{"shape": "dense27b_down", "bits": 8, "m": 1, "us": 167.27, "ratio_vs_m1": 1.0, "per_column_speedup_vs_m_matvecs": 1.0}
+{"shape": "dense27b_down", "bits": 8, "m": 2, "us": 169.72, "ratio_vs_m1": 1.015, "per_column_speedup_vs_m_matvecs": 1.971}
+{"shape": "dense27b_down", "bits": 8, "m": 3, "us": 176.86, "ratio_vs_m1": 1.057, "per_column_speedup_vs_m_matvecs": 2.837}
+{"shape": "dense27b_down", "bits": 8, "m": 4, "us": 177.56, "ratio_vs_m1": 1.062, "per_column_speedup_vs_m_matvecs": 3.768}
+{"shape": "dense27b_down", "bits": 8, "m": 5, "us": 202.95, "ratio_vs_m1": 1.213, "per_column_speedup_vs_m_matvecs": 4.121}
+{"shape": "dense27b_down", "bits": 8, "m": 6, "us": 492.93, "ratio_vs_m1": 2.947, "per_column_speedup_vs_m_matvecs": 2.036}
+{"shape": "dense27b_down", "bits": 8, "m": 7, "us": 386.35, "ratio_vs_m1": 2.31, "per_column_speedup_vs_m_matvecs": 3.031}
+{"shape": "dense27b_down", "bits": 8, "m": 8, "us": 377.97, "ratio_vs_m1": 2.26, "per_column_speedup_vs_m_matvecs": 3.54}
+{"shape": "a3b_attn", "bits": 4, "m": 1, "us": 16.79, "ratio_vs_m1": 1.0, "per_column_speedup_vs_m_matvecs": 1.0}
+{"shape": "a3b_attn", "bits": 4, "m": 2, "us": 20.29, "ratio_vs_m1": 1.209, "per_column_speedup_vs_m_matvecs": 1.655}
+{"shape": "a3b_attn", "bits": 4, "m": 3, "us": 25.07, "ratio_vs_m1": 1.494, "per_column_speedup_vs_m_matvecs": 2.008}
+{"shape": "a3b_attn", "bits": 4, "m": 4, "us": 25.47, "ratio_vs_m1": 1.517, "per_column_speedup_vs_m_matvecs": 2.636}
+{"shape": "a3b_attn", "bits": 4, "m": 5, "us": 27.49, "ratio_vs_m1": 1.638, "per_column_speedup_vs_m_matvecs": 3.053}
+{"shape": "a3b_attn", "bits": 4, "m": 6, "us": 37.08, "ratio_vs_m1": 2.209, "per_column_speedup_vs_m_matvecs": 2.716}
+{"shape": "a3b_attn", "bits": 4, "m": 7, "us": 40.86, "ratio_vs_m1": 2.434, "per_column_speedup_vs_m_matvecs": 2.876}
+{"shape": "a3b_attn", "bits": 4, "m": 8, "us": 39.43, "ratio_vs_m1": 2.349, "per_column_speedup_vs_m_matvecs": 3.406}
+{"shape": "a3b_attn", "bits": 8, "m": 1, "us": 17.7, "ratio_vs_m1": 1.0, "per_column_speedup_vs_m_matvecs": 1.0}
+{"shape": "a3b_attn", "bits": 8, "m": 2, "us": 22.88, "ratio_vs_m1": 1.292, "per_column_speedup_vs_m_matvecs": 1.548}
+{"shape": "a3b_attn", "bits": 8, "m": 3, "us": 24.76, "ratio_vs_m1": 1.399, "per_column_speedup_vs_m_matvecs": 2.145}
+{"shape": "a3b_attn", "bits": 8, "m": 4, "us": 25.87, "ratio_vs_m1": 1.461, "per_column_speedup_vs_m_matvecs": 2.737}
+{"shape": "a3b_attn", "bits": 8, "m": 5, "us": 26.91, "ratio_vs_m1": 1.52, "per_column_speedup_vs_m_matvecs": 3.289}
+{"shape": "a3b_attn", "bits": 8, "m": 6, "us": 35.55, "ratio_vs_m1": 2.008, "per_column_speedup_vs_m_matvecs": 2.988}
+{"shape": "a3b_attn", "bits": 8, "m": 7, "us": 38.71, "ratio_vs_m1": 2.187, "per_column_speedup_vs_m_matvecs": 3.201}
+{"shape": "a3b_attn", "bits": 8, "m": 8, "us": 37.41, "ratio_vs_m1": 2.113, "per_column_speedup_vs_m_matvecs": 3.785}
+{"shape": "a3b_expert_up", "bits": 4, "m": 1, "us": 10.97, "ratio_vs_m1": 1.0, "per_column_speedup_vs_m_matvecs": 1.0}
+{"shape": "a3b_expert_up", "bits": 4, "m": 2, "us": 11.2, "ratio_vs_m1": 1.02, "per_column_speedup_vs_m_matvecs": 1.96}
+{"shape": "a3b_expert_up", "bits": 4, "m": 3, "us": 12.11, "ratio_vs_m1": 1.103, "per_column_speedup_vs_m_matvecs": 2.719}
+{"shape": "a3b_expert_up", "bits": 4, "m": 4, "us": 13.01, "ratio_vs_m1": 1.186, "per_column_speedup_vs_m_matvecs": 3.373}
+{"shape": "a3b_expert_up", "bits": 4, "m": 5, "us": 13.51, "ratio_vs_m1": 1.231, "per_column_speedup_vs_m_matvecs": 4.061}
+{"shape": "a3b_expert_up", "bits": 4, "m": 6, "us": 14.21, "ratio_vs_m1": 1.295, "per_column_speedup_vs_m_matvecs": 4.633}
+{"shape": "a3b_expert_up", "bits": 4, "m": 7, "us": 14.79, "ratio_vs_m1": 1.348, "per_column_speedup_vs_m_matvecs": 5.192}
+{"shape": "a3b_expert_up", "bits": 4, "m": 8, "us": 13.96, "ratio_vs_m1": 1.272, "per_column_speedup_vs_m_matvecs": 6.289}
+{"shape": "a3b_expert_up", "bits": 8, "m": 1, "us": 12.94, "ratio_vs_m1": 1.0, "per_column_speedup_vs_m_matvecs": 1.0}
+{"shape": "a3b_expert_up", "bits": 8, "m": 2, "us": 12.69, "ratio_vs_m1": 0.981, "per_column_speedup_vs_m_matvecs": 2.04}
+{"shape": "a3b_expert_up", "bits": 8, "m": 3, "us": 13.06, "ratio_vs_m1": 1.009, "per_column_speedup_vs_m_matvecs": 2.973}
+{"shape": "a3b_expert_up", "bits": 8, "m": 4, "us": 13.41, "ratio_vs_m1": 1.036, "per_column_speedup_vs_m_matvecs": 3.859}
+{"shape": "a3b_expert_up", "bits": 8, "m": 5, "us": 13.23, "ratio_vs_m1": 1.023, "per_column_speedup_vs_m_matvecs": 4.889}
+{"shape": "a3b_expert_up", "bits": 8, "m": 6, "us": 13.59, "ratio_vs_m1": 1.05, "per_column_speedup_vs_m_matvecs": 5.712}
+{"shape": "a3b_expert_up", "bits": 8, "m": 7, "us": 15.01, "ratio_vs_m1": 1.16, "per_column_speedup_vs_m_matvecs": 6.035}
+{"shape": "a3b_expert_up", "bits": 8, "m": 8, "us": 14.97, "ratio_vs_m1": 1.157, "per_column_speedup_vs_m_matvecs": 6.912}
+{"shape": "a3b_lm_head", "bits": 4, "m": 1, "us": 305.76, "ratio_vs_m1": 1.0, "per_column_speedup_vs_m_matvecs": 1.0}
+{"shape": "a3b_lm_head", "bits": 4, "m": 2, "us": 290.2, "ratio_vs_m1": 0.949, "per_column_speedup_vs_m_matvecs": 2.107}
+{"shape": "a3b_lm_head", "bits": 4, "m": 3, "us": 467.92, "ratio_vs_m1": 1.53, "per_column_speedup_vs_m_matvecs": 1.96}
+{"shape": "a3b_lm_head", "bits": 4, "m": 4, "us": 795.35, "ratio_vs_m1": 2.601, "per_column_speedup_vs_m_matvecs": 1.538}
+{"shape": "a3b_lm_head", "bits": 4, "m": 5, "us": 722.6, "ratio_vs_m1": 2.363, "per_column_speedup_vs_m_matvecs": 2.116}
+{"shape": "a3b_lm_head", "bits": 4, "m": 6, "us": 1221.21, "ratio_vs_m1": 3.994, "per_column_speedup_vs_m_matvecs": 1.502}
+{"shape": "a3b_lm_head", "bits": 4, "m": 7, "us": 1401.79, "ratio_vs_m1": 4.585, "per_column_speedup_vs_m_matvecs": 1.527}
+{"shape": "a3b_lm_head", "bits": 4, "m": 8, "us": 1316.05, "ratio_vs_m1": 4.304, "per_column_speedup_vs_m_matvecs": 1.859}
+{"shape": "a3b_lm_head", "bits": 8, "m": 1, "us": 472.15, "ratio_vs_m1": 1.0, "per_column_speedup_vs_m_matvecs": 1.0}
+{"shape": "a3b_lm_head", "bits": 8, "m": 2, "us": 547.27, "ratio_vs_m1": 1.159, "per_column_speedup_vs_m_matvecs": 1.725}
+{"shape": "a3b_lm_head", "bits": 8, "m": 3, "us": 686.57, "ratio_vs_m1": 1.454, "per_column_speedup_vs_m_matvecs": 2.063}
+{"shape": "a3b_lm_head", "bits": 8, "m": 4, "us": 942.36, "ratio_vs_m1": 1.996, "per_column_speedup_vs_m_matvecs": 2.004}
+{"shape": "a3b_lm_head", "bits": 8, "m": 5, "us": 1242.55, "ratio_vs_m1": 2.632, "per_column_speedup_vs_m_matvecs": 1.9}
+{"shape": "a3b_lm_head", "bits": 8, "m": 6, "us": 1788.08, "ratio_vs_m1": 3.787, "per_column_speedup_vs_m_matvecs": 1.584}
+{"shape": "a3b_lm_head", "bits": 8, "m": 7, "us": 1938.97, "ratio_vs_m1": 4.107, "per_column_speedup_vs_m_matvecs": 1.705}
+{"shape": "a3b_lm_head", "bits": 8, "m": 8, "us": 1898.11, "ratio_vs_m1": 4.02, "per_column_speedup_vs_m_matvecs": 1.99}
+mx.metal.device_info is deprecated and will be removed in a future version. Use mx.device_info instead.
+{"device_info": {"device_name": "Apple M5 Max", "max_recommended_working_set_size": 120259084288, "memory_size": 137438953472, "architecture": "applegpu_g17s", "max_buffer_length": 86586540032, "resource_limit": 499000}}

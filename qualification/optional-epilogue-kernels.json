@@ -1,0 +1,11 @@
+{
+  "schema": "mlx2.kernel-qualification.v1",
+  "mlx_version": "0.32.2.dev20260915+2a817ad94",
+  "command": "MLX2_TEST_OPTIONAL_METAL=1 .venv/bin/python -m pytest tests/test_qsa_optional_epilogues_metal.py -q",
+  "exit_code": 0,
+  "tests": 8,
+  "skipped": 0,
+  "log": "........                                                                 [100%]\n",
+  "scope": "Native M1/M3 gate32randomseedcases plus6 sequentialmerge BF16/FP32 cases; bitexact versus control and mechanism engagement. Full-model benefit remains separate.",
+  "verified_by": "root exclusive GPU qualification, 2026-09-15 21:42UTC"
+}

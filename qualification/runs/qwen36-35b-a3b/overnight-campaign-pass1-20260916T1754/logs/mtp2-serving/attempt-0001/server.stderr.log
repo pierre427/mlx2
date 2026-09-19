@@ -1,0 +1,59 @@
+[transformers] PyTorch was not found. Models won't be available and only tokenizers, configuration and file/data utilities can be used.
+2026-09-16 17:54:36,426 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 17:54:37,430 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 17:54:37,756 INFO ubc_evict: evicted 4772.0 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-uncensored-heretic-Native-MTP-Preserved-oQ4e-mtp/model-00001-of-00005.safetensors
+2026-09-16 17:54:37,794 INFO ubc_evict: evicted 4896.0 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-uncensored-heretic-Native-MTP-Preserved-oQ4e-mtp/model-00002-of-00005.safetensors
+2026-09-16 17:54:37,832 INFO ubc_evict: evicted 4896.0 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-uncensored-heretic-Native-MTP-Preserved-oQ4e-mtp/model-00003-of-00005.safetensors
+2026-09-16 17:54:37,871 INFO ubc_evict: evicted 4896.0 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-uncensored-heretic-Native-MTP-Preserved-oQ4e-mtp/model-00004-of-00005.safetensors
+2026-09-16 17:54:37,881 INFO ubc_evict: evicted 1152.0 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-uncensored-heretic-Native-MTP-Preserved-oQ4e-mtp/model-00005-of-00005.safetensors
+2026-09-16 17:54:37,881 INFO ubc_evict: pass complete total_mb=20612.0 elapsed_s=0.16
+2026-09-16 17:54:38,441 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 17:54:38,452 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 17:54:38,488 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-16 17:54:38,869 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 17:54:39,009 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 17:54:39,118 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 17:54:39,140 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 17:54:39,497 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 17:54:39,754 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 17:54:39,902 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 17:54:39,998 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-16 17:54:41,588 ERROR generation worker failed
+Traceback (most recent call last):
+  File "~/Desktop/mlx2/src/mlx2/serving.py", line 768, in _run
+    prompts, responses = batch.next()
+                         ^^^^^^^^^^^^
+  File "~/Desktop/mlx2/src/mlx2/runtime/generate.py", line 3312, in next
+    return self._next()
+           ^^^^^^^^^^^^
+  File "~/Desktop/mlx2/src/mlx2/runtime/generate.py", line 3216, in _next
+    return self._next_mtp()
+           ^^^^^^^^^^^^^^^^
+  File "~/Desktop/mlx2/src/mlx2/runtime/generate.py", line 3009, in _next_mtp
+    generation_responses.extend(self._generation_batch.next())
+                                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "~/Desktop/mlx2/src/mlx2/runtime/generate.py", line 1658, in next
+    proposal = propose_batched_self_mtp(self.model, self.state)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "~/Desktop/mlx2/src/mlx2/runtime/hybrid_speculative.py", line 1847, in propose_batched_self_mtp
+    return _propose_segmented_self_mtp(model, batch)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "~/Desktop/mlx2/src/mlx2/runtime/hybrid_speculative.py", line 1432, in _propose_segmented_self_mtp
+    proposal = _propose_batched_self_mtp_impl(model, batched_state)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "~/Desktop/mlx2/src/mlx2/runtime/hybrid_speculative.py", line 1507, in _propose_batched_self_mtp_impl
+    return _propose_batched_self_mtp_round(model, batch)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "~/Desktop/mlx2/src/mlx2/runtime/hybrid_speculative.py", line 1711, in _propose_batched_self_mtp_round
+    _apply_logits_processors(
+  File "~/Desktop/mlx2/src/mlx2/runtime/hybrid_speculative.py", line 287, in _apply_logits_processors
+    batched = processor(y, batched)
+              ^^^^^^^^^^^^^^^^^^^^^
+  File "~/Desktop/mlx2/src/mlx2/structured_output.py", line 208, in __call__
+    allowed = self._allowed(prefix)
+              ^^^^^^^^^^^^^^^^^^^^^
+  File "~/Desktop/mlx2/src/mlx2/structured_output.py", line 194, in _allowed
+    raise ValueError("structured-output grammar has no valid token continuation")
+ValueError: structured-output grammar has no valid token continuation
+2026-09-16 17:54:41,614 INFO "POST /v1/chat/completions HTTP/1.1" 503 -
+ValueError: structured-output grammar has no valid token continuation

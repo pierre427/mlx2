@@ -1,0 +1,93 @@
+{
+  "started": "2026-09-18 22:26:44",
+  "phase": "done",
+  "stages": {
+    "x6-mtp1": {
+      "state": "passed",
+      "steps": {
+        "qualifier": {
+          "returncode": 0,
+          "seconds": 232,
+          "failed_lines": [],
+          "last": "Evidence: /private/tmp/mlx2-xing/qualification/runs/xing4-0-gpu-20260918/x6-mtp1-qualification.json"
+        }
+      },
+      "started": "22:28:09",
+      "command": "mlx2.server --model ~/mlx-models/Xing4.0-29B-A4B-mlx-6bit --host 127.0.0.1 --port 8297 --cache-dir /private/tmp/mlx2-xing/qualification/runs/xing4-0-gpu-20260918/cache/x6-mtp1 --max-context 32768 --max-lanes 4 --max-inflight 8 --cache-bytes 8589934592 --qualification-mode --execution-policy /private/tmp/mlx2-xing/qualification/runs/xing4-0-gpu-20260918/policies/mtp1.json",
+      "server_alive": true,
+      "finished": "22:32:12"
+    },
+    "x6-ordinary": {
+      "state": "passed",
+      "steps": {
+        "qualifier": {
+          "returncode": 0,
+          "seconds": 250,
+          "failed_lines": [],
+          "last": "Evidence: /private/tmp/mlx2-xing/qualification/runs/xing4-0-gpu-20260918/x6-ordinary-qualification.json"
+        }
+      },
+      "started": "22:32:12",
+      "command": "mlx2.server --model ~/mlx-models/Xing4.0-29B-A4B-mlx-6bit --host 127.0.0.1 --port 8297 --cache-dir /private/tmp/mlx2-xing/qualification/runs/xing4-0-gpu-20260918/cache/x6-ordinary --max-context 32768 --max-lanes 4 --max-inflight 8 --cache-bytes 8589934592 --qualification-mode --ordinary",
+      "server_alive": true,
+      "finished": "22:36:31"
+    },
+    "x6-pld": {
+      "state": "passed",
+      "steps": {
+        "qualifier": {
+          "returncode": 0,
+          "seconds": 320,
+          "failed_lines": [],
+          "last": "Evidence: /private/tmp/mlx2-xing/qualification/runs/xing4-0-gpu-20260918/x6-pld-qualification.json"
+        }
+      },
+      "started": "22:36:31",
+      "command": "mlx2.server --model ~/mlx-models/Xing4.0-29B-A4B-mlx-6bit --host 127.0.0.1 --port 8297 --cache-dir /private/tmp/mlx2-xing/qualification/runs/xing4-0-gpu-20260918/cache/x6-pld --max-context 32768 --max-lanes 4 --max-inflight 8 --cache-bytes 8589934592 --qualification-mode --prompt-lookup --execution-policy /private/tmp/mlx2-xing/qualification/runs/xing4-0-gpu-20260918/policies/pld.json",
+      "server_alive": true,
+      "finished": "22:42:01"
+    },
+    "x16-mtp1": {
+      "state": "passed",
+      "steps": {
+        "qualifier": {
+          "returncode": 0,
+          "seconds": 277,
+          "failed_lines": [],
+          "last": "Evidence: /private/tmp/mlx2-xing/qualification/runs/xing4-0-gpu-20260918/x16-mtp1-qualification.json"
+        }
+      },
+      "started": "22:42:01",
+      "command": "mlx2.server --model ~/mlx-models/Xing4.0-29B-A4B-mlx-bf16 --host 127.0.0.1 --port 8297 --cache-dir /private/tmp/mlx2-xing/qualification/runs/xing4-0-gpu-20260918/cache/x16-mtp1 --max-context 32768 --max-lanes 4 --max-inflight 8 --cache-bytes 8589934592 --qualification-mode --execution-policy /private/tmp/mlx2-xing/qualification/runs/xing4-0-gpu-20260918/policies/mtp1.json",
+      "server_alive": true,
+      "finished": "22:46:51"
+    },
+    "x16-ordinary": {
+      "state": "passed",
+      "steps": {
+        "qualifier": {
+          "returncode": 0,
+          "seconds": 320,
+          "failed_lines": [],
+          "last": "Evidence: /private/tmp/mlx2-xing/qualification/runs/xing4-0-gpu-20260918/x16-ordinary-qualification.json"
+        }
+      },
+      "started": "22:46:51",
+      "command": "mlx2.server --model ~/mlx-models/Xing4.0-29B-A4B-mlx-bf16 --host 127.0.0.1 --port 8297 --cache-dir /private/tmp/mlx2-xing/qualification/runs/xing4-0-gpu-20260918/cache/x16-ordinary --max-context 32768 --max-lanes 4 --max-inflight 8 --cache-bytes 8589934592 --qualification-mode --ordinary",
+      "server_alive": true,
+      "finished": "22:52:23"
+    }
+  },
+  "order": [
+    "x6-mtp1",
+    "x6-ordinary",
+    "x6-pld",
+    "x16-mtp1",
+    "x16-ordinary"
+  ],
+  "updated": "2026-09-18 22:52:23",
+  "preflight": {
+    "returncode": 0,
+    "tail": "Preflight evidence: /private/tmp/mlx2-xing/qualification/runs/xing4-0-gpu-20260918/preflight.json\n"
+  }
+}

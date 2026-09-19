@@ -1,0 +1,66 @@
+{
+  "every_run_compacted_and_correct": {
+    "ok": true,
+    "answers": [
+      "The user gave a long log of sensor readi",
+      "The user gave a long log of sensor readi",
+      "The user gave a long log of sensor readi"
+    ],
+    "receipts": [
+      [
+        13278,
+        10206
+      ],
+      [
+        13278,
+        10206
+      ],
+      [
+        13278,
+        10206
+      ]
+    ]
+  },
+  "repeat_warm_hits_the_exact_boundary": {
+    "ok": true,
+    "cached_tokens": [
+      0,
+      13278,
+      13278
+    ],
+    "source_tokens": 13278,
+    "retained_tokens": 10206,
+    "seconds": [
+      4.28,
+      0.59,
+      0.6
+    ],
+    "ttft": [
+      3.7727596670156345,
+      0.08170029098982923,
+      0.07740558401565067
+    ]
+  },
+  "identical_answers_cold_and_warm": {
+    "ok": true,
+    "answers": [
+      "The user gave a long log of sensor readings, with a note at the meeting city is Lisbon. The question asks: \"which city is the meeting in?\" The answer should be a single word, likely \"Lisbon\". So output: Lisbon.Lisbon",
+      "The user gave a long log of sensor readings, with a note at the meeting city is Lisbon. The question asks: \"which city is the meeting in?\" The answer should be a single word, likely \"Lisbon\". So output: Lisbon.Lisbon",
+      "The user gave a long log of sensor readings, with a note at the meeting city is Lisbon. The question asks: \"which city is the meeting in?\" The answer should be a single word, likely \"Lisbon\". So output: Lisbon.Lisbon"
+    ]
+  },
+  "compacted_end_state_still_not_published": {
+    "ok": true,
+    "skipped": 3
+  },
+  "different_question_same_context": {
+    "ok": true,
+    "answer": "The vault code is \"ALPHA-7319\". The single word is \"ALPHA-73",
+    "cached_tokens": 0
+  },
+  "server_alive_final": {
+    "ok": true,
+    "inflight": 0,
+    "error": null
+  }
+}

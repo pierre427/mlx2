@@ -1,0 +1,104 @@
+{
+  "fanout_n3": {
+    "ok": true,
+    "code": 200,
+    "choices": 3,
+    "completion_tokens": [
+      320,
+      320,
+      320
+    ],
+    "elapsed_s": 10.6,
+    "fanout_boundaries": 1,
+    "cohort_attach_failures": 0,
+    "widths": [
+      null,
+      null,
+      null
+    ]
+  },
+  "json_object": {
+    "ok": true,
+    "code": 200,
+    "content": "{\n  \"name\": \"Eiffel Tower\",\n  \"year\": 1889\n}",
+    "elapsed_s": 0.6,
+    "receipt_structured": {
+      "kind": "json_object",
+      "enforced": true,
+      "tail_mass_bound": 0.0,
+      "parallel_scans": 0
+    }
+  },
+  "json_schema_optional_chain": {
+    "ok": false,
+    "code": 200,
+    "content": "{\n  \"city\": \"Paris\",\n  \"country\": \"France\",\n  \"population\": 216100000000000000000000000000000000000000000000000000000",
+    "elapsed_s": 1.3
+  },
+  "thinking_plus_structured_400": {
+    "ok": true,
+    "code": 400,
+    "error": "structured output requires thinking to be disabled"
+  },
+  "grammar_dead_end_502_alive": {
+    "ok": true,
+    "code": 200,
+    "error": null,
+    "alive": true,
+    "structured_failures": 0
+  },
+  "grammar_redos_alive": {
+    "ok": true,
+    "code": 200,
+    "elapsed_s": 19.4,
+    "alive": true,
+    "error": null,
+    "content": "aaaaaaaaaaaaaaaaaaaaaaaab"
+  },
+  "top_k_eq_vocab_400": {
+    "ok": true,
+    "code": 400,
+    "error": "sampling token IDs and top_k must fit the model vocabulary",
+    "alive": true
+  },
+  "temperature_floor": {
+    "ok": true,
+    "reject": 400,
+    "accept": 200,
+    "content": "Hello! How can I help you today"
+  },
+  "min_tokens_structured_400": {
+    "ok": true,
+    "code": 400
+  },
+  "stop_inside_tool_call": {
+    "ok": true,
+    "code": 200,
+    "finish": "stop",
+    "error": null
+  },
+  "slowloris_408": {
+    "ok": true,
+    "status_line": "HTTP/1.1 408 Request Timeout",
+    "waited_s": 30.0,
+    "concurrent_request": 200
+  },
+  "apc_warm_hit": {
+    "ok": true,
+    "cold_cached": {
+      "cached_tokens": 0
+    },
+    "warm_cached": {
+      "cached_tokens": 40
+    },
+    "mtp": null
+  },
+  "server_alive_final": {
+    "ok": true,
+    "inflight": 0,
+    "counts": {
+      "completed": 18,
+      "apcv2_fanout_boundaries": 1
+    }
+  }
+}

@@ -1,0 +1,23 @@
+2026-09-18 19:10:30,981 INFO ubc_evict: evicted 4068.1 MB from UBC for ~/mlx-models/Xing4.0-29B-A4B-mlx-6bit/model-00001-of-00006.safetensors
+2026-09-18 19:10:31,013 INFO ubc_evict: evicted 4048.2 MB from UBC for ~/mlx-models/Xing4.0-29B-A4B-mlx-6bit/model-00002-of-00006.safetensors
+2026-09-18 19:10:31,045 INFO ubc_evict: evicted 4048.2 MB from UBC for ~/mlx-models/Xing4.0-29B-A4B-mlx-6bit/model-00003-of-00006.safetensors
+2026-09-18 19:10:31,077 INFO ubc_evict: evicted 4048.2 MB from UBC for ~/mlx-models/Xing4.0-29B-A4B-mlx-6bit/model-00004-of-00006.safetensors
+2026-09-18 19:10:31,109 INFO ubc_evict: evicted 4048.2 MB from UBC for ~/mlx-models/Xing4.0-29B-A4B-mlx-6bit/model-00005-of-00006.safetensors
+2026-09-18 19:10:31,137 INFO ubc_evict: evicted 3464.2 MB from UBC for ~/mlx-models/Xing4.0-29B-A4B-mlx-6bit/model-00006-of-00006.safetensors
+2026-09-18 19:10:31,137 INFO ubc_evict: pass complete total_mb=23725.2 elapsed_s=0.19
+[transformers] PyTorch was not found. Models won't be available and only tokenizers, configuration and file/data utilities can be used.
+2026-09-18 19:10:31,953 INFO "GET /health HTTP/1.1" 503 -
+2026-09-18 19:10:34,957 INFO "GET /health HTTP/1.1" 200 -
+2026-09-18 19:10:34,958 INFO "GET /health HTTP/1.1" 200 -
+2026-09-18 19:10:35,356 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-18 19:10:40,570 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-18 19:10:45,991 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-18 19:10:52,991 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-18 19:11:05,238 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-18 19:11:05,408 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-18 19:11:05,664 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-18 19:11:05,697 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-18 19:11:07,247 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-18 19:11:07,248 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-18 19:11:07,249 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-18 19:11:07,259 INFO "GET /health HTTP/1.1" 200 -
