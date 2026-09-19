@@ -11,6 +11,8 @@ A clean inference runtime for Apple Silicon, starting with Qwen4 Flash-Next.
 Proven mechanisms are mined with provenance into this project. Serving does
 not depend on the unified checkout or a legacy server.
 
+Contact: Pierre Lamy, [pierre@userid.org](mailto:pierre@userid.org)
+
 ## Serving stack
 
 - OpenAI-compatible chat/completions, SSE streaming, function calls, reasoning,
