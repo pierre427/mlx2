@@ -219,7 +219,10 @@ def test_streaming_responses_preserve_requested_reasoning_logprobs_and_store_con
 
         with _post(base, {"model": "fixture", "input": "plain"}) as response:
             plain = json.load(response)
-        assert all(item["type"] != "reasoning" for item in plain["output"])
+        plain_reasoning = next(
+            item for item in plain["output"] if item["type"] == "reasoning"
+        )
+        assert "encrypted_content" not in plain_reasoning
         assert not any(
             "reasoning_content" in message
             for message in store.context("tenant-a", plain["id"])

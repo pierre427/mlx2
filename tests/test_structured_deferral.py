@@ -499,7 +499,8 @@ def test_serving_receipt_records_effective_output_limit_and_defaulting(scripted_
         )
     )
     assert overflow["status"] == 400
-    assert "prompt plus output" in overflow["error"]
+    assert overflow["code"] == "context_length_exceeded"
+    assert "maximum context length" in overflow["error"]
 
 
 THINKING_JSON_REQUEST = {
