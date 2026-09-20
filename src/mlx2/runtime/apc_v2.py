@@ -122,6 +122,7 @@ class APCLookup:
     # request that diverges at the same point.  0 when nothing is shared past
     # ``cached_tokens``.
     branch_tokens: int = 0
+    target_only_plain_fallback: bool = False
 
 
 @dataclass
@@ -2275,6 +2276,42 @@ class APCv2(PrefixIndex):
                 session_tag=session_tag,
             )
 
+    def _resident_trie_result_locked(self, key, tokens):
+        """Select the best resident path while deferred disk entries stay indexed."""
+        exact = shorter = longer = None
+        common_prefix = 0
+        for candidate_key, path, entry in self._entry_records_locked():
+            if candidate_key != key or not entry.prompt_cache:
+                continue
+            shared = 0
+            for left, right in zip(tokens, path):
+                if left != right:
+                    break
+                shared += 1
+            if shared == len(tokens) == len(path):
+                exact = list(path)
+                break
+            if shared == len(path) < len(tokens):
+                if len(path) > len(shorter or ()) and len(path) > 1:
+                    shorter = list(path)
+                continue
+            if shared and shared < len(path) and (
+                shared > common_prefix
+                or (
+                    shared == common_prefix
+                    and (longer is None or len(path) < len(longer))
+                )
+            ):
+                longer = list(path)
+                common_prefix = shared
+        return type(self._trie.search(key, tokens))(
+            key,
+            exact,
+            None if exact is not None else shorter,
+            None if exact is not None else longer,
+            0 if exact is not None else common_prefix,
+        )
+
     def _lookup_locked(
         self,
         key: Hashable,
@@ -2302,6 +2339,9 @@ class APCv2(PrefixIndex):
                 expected_prefetch = expected_prefetch or (
                     session_tag in getattr(candidate, "_apc_prefetch_expected", set())
                 )
+        restore_deferred = False
+        restore_requires_admission = False
+        deferred_entries = []
         while True:
             trie_result = self._trie.search(key, tokens)
             retry = False
@@ -2322,15 +2362,24 @@ class APCv2(PrefixIndex):
                     if not allow_disk_restore:
                         # Admission may inspect resident state, but disk I/O and
                         # array restoration require the cold allocation gate.
-                        return APCLookup(None, tokens, 0, False, None,
-                                         "disk_restore_requires_admission")
+                        # A disk neighbor must not hide an already-resident
+                        # prefix, so defer only that entry during selection.
+                        restore_requires_admission = True
+                        deferred_entries.append(
+                            (trie_result.model, list(path), entry)
+                        )
+                        continue
                     restored = self._restore_entry_locked(trie_result.model, path, entry)
                     if restored is None:
-                        self._apc_stats["lookups"] += 1
-                        self._apc_stats["misses"] += 1
-                        return APCLookup(None, tokens, 0, False, None,
-                                         "disk_restore_budget_unavailable",
-                                         capsule_generation=self._capsule_generation.current)
+                        # One healthy disk neighbor being temporarily too large
+                        # must not hide a resident prefix that another lane is
+                        # already leasing.  Keep the snapshot indexed and let
+                        # selection below consider only resident candidates.
+                        restore_deferred = True
+                        deferred_entries.append(
+                            (trie_result.model, list(path), entry)
+                        )
+                        continue
                     if not restored:
                         self._drop_entry_locked(trie_result.model, path, entry)
                         retry = True
@@ -2340,7 +2389,11 @@ class APCv2(PrefixIndex):
                 # the selection phase consume a fresh, internally consistent
                 # trie result without repeatedly restoring mutually exclusive
                 # neighbors under a tight resident budget.
-                trie_result = self._trie.search(key, tokens)
+                trie_result = (
+                    self._resident_trie_result_locked(key, tokens)
+                    if restore_deferred or restore_requires_admission
+                    else self._trie.search(key, tokens)
+                )
                 break
         # A longer stored path shares ``common_prefix`` tokens with this
         # prompt.  (An exact path reports 0: its only junction would be the
@@ -2457,13 +2510,31 @@ class APCv2(PrefixIndex):
                     ),
                     branch_tokens=branch_beyond(covered),
                 )
+        hidden = []
+        if restore_deferred or restore_requires_admission:
+            for deferred_key, path, entry in deferred_entries:
+                try:
+                    if self._trie.get(deferred_key, path) is entry:
+                        hidden.append(
+                            (
+                                deferred_key,
+                                path,
+                                self._trie.pop(deferred_key, path),
+                            )
+                        )
+                except KeyError:
+                    pass
         try:
-            (cache, remaining) = super().fetch_nearest_cache(key, tokens)
-        except COWCacheStale:
-            (cache, remaining) = (None, tokens)
-            stale_generation = True
-        else:
-            stale_generation = False
+            try:
+                (cache, remaining) = super().fetch_nearest_cache(key, tokens)
+            except COWCacheStale:
+                (cache, remaining) = (None, tokens)
+                stale_generation = True
+            else:
+                stale_generation = False
+        finally:
+            for deferred_key, path, entry in hidden:
+                self._trie.add(deferred_key, path, entry)
         malformed_topology = False
         if cache is not None:
             prep_telemetry = getattr(cache, "cow_prep_telemetry", None)
@@ -2541,6 +2612,10 @@ class APCv2(PrefixIndex):
                 reason = "malformed_cache_topology"
             elif stale_generation:
                 reason = "stale_cow_generation"
+            elif restore_requires_admission:
+                reason = "disk_restore_requires_admission"
+            elif restore_deferred:
+                reason = "disk_restore_budget_unavailable"
             else:
                 reason = (
                     "untrimmable_branch"

@@ -4183,6 +4183,10 @@ class ServingEngine:
                     and hit.cached_tokens
                     and hit.sidecar is None
                 ):
+                    if int(hit.cached_tokens) == len(tokens) - 1:
+                        hit.target_only_plain_fallback = True
+                        self.counts["mtp_sidecar_missing_plain_fallbacks"] += 1
+                        return hit
                     branch = hit.cache
                     if hasattr(branch, "close"):
                         branch.close()
@@ -5407,6 +5411,8 @@ class ServingEngine:
                                 )
                             processors.append(structured)
                         sampling_config = {"sampling_temp": temp, "top_p": top_p, "top_k": top_k, "min_p": min_p, "shared_prefix_attestation": shared_prefix_attestation(hit)}
+                        if getattr(hit, "target_only_plain_fallback", False):
+                            sampling_config["target_only_plain_fallback"] = True
                         if job.request.get("batch_cohort") is not None:
                             sampling_config["batch_cohort"] = {
                                 "tenant_id": job.tenant_id,

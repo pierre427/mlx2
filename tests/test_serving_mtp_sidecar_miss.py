@@ -1,4 +1,4 @@
-"""The self-MTP route treats a warm target hit without draft state as a miss."""
+"""The self-MTP route safely handles warm target hits without draft state."""
 
 from types import SimpleNamespace as NS
 
@@ -7,7 +7,7 @@ from mlx2.runtime import apc_v2, generate, os_memory
 from mlx2.server import collect_nonstream_job
 
 
-def test_mtp_route_converts_sidecar_less_hit_into_a_miss(monkeypatch):
+def test_mtp_route_marks_prompt_boundary_hit_for_plain_fallback(monkeypatch):
     inserted = []
     closed = []
 
@@ -52,7 +52,15 @@ def test_mtp_route_converts_sidecar_less_hit_into_a_miss(monkeypatch):
             self.lanes = {}
 
         def insert(self, prompts, *, caches, all_tokens, **kw):
-            inserted.append((prompts, caches, all_tokens, kw.get("mtp_states")))
+            inserted.append(
+                (
+                    prompts,
+                    caches,
+                    all_tokens,
+                    kw.get("mtp_states"),
+                    kw.get("self_mtp_configs"),
+                )
+            )
             self.lanes[0] = 0
             return [0]
 
@@ -142,12 +150,14 @@ def test_mtp_route_converts_sidecar_less_hit_into_a_miss(monkeypatch):
         _choice, _usage, receipt = collect_nonstream_job(job, body, chat=False)
     finally:
         engine.close()
-    prompts, caches, all_tokens, mtp_states = inserted[0]
-    assert prompts == [[1, 2, 3, 4]] and caches == [None] and all_tokens == [[]]
+    prompts, caches, all_tokens, mtp_states, configs = inserted[0]
+    assert prompts == [[4]] and caches[0] is not None and all_tokens == [[1, 2, 3]]
     assert mtp_states == [None]
-    assert closed == [True], "the unusable warm lease must be released"
-    assert receipt["cached_tokens"] == 0
-    assert engine.counts["mtp_sidecar_missing_misses"] == 1
+    assert configs[0]["target_only_plain_fallback"] is True
+    assert closed == [True], "the warm lease is released only after the request"
+    assert receipt["cached_tokens"] == 3
+    assert engine.counts["mtp_sidecar_missing_plain_fallbacks"] == 1
+    assert engine.counts["mtp_sidecar_missing_misses"] == 0
 
 
 def test_checkpoint_publication_failure_does_not_escape():

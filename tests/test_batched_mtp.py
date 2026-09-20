@@ -1,6 +1,5 @@
 # Adapted from unified tests/test_batched_self_mtp_qwen4.py at 1e2bc604, MIT.
 import unittest
-import os
 from itertools import product
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -403,8 +402,8 @@ class TestQwen4ForcedAcceptanceCacheEquality(unittest.TestCase):
 
 def test_mtp_warm_prefix_without_draft_state_is_refused_at_insert():
     """An ordinary-route checkpoint has no paired draft state.  Inserting it
-    into a self-MTP lane used to raise only inside ``next`` (killing the whole
-    batch); the request boundary must refuse it instead."""
+    into an unmarked self-MTP lane used to raise only inside ``next`` (killing
+    the whole batch); the request boundary must refuse it instead."""
     import pytest
 
     from mlx2.runtime.generate import BatchGenerator
@@ -423,7 +422,7 @@ def test_mtp_warm_prefix_without_draft_state_is_refused_at_insert():
             model, self_mtp={"num_draft": 2, "persistent": True}, prefill_step_size=4
         )
         try:
-            with pytest.raises(ValueError, match="sidecar-less APC hit as a miss"):
+            with pytest.raises(ValueError, match="target-only ordinary fallback"):
                 gen.insert(
                     [[6, 7, 8]], max_tokens=[8], caches=[cache], all_tokens=[prefix],
                     mtp_states=[None], lane_rngs=[LaneRNG(3)],

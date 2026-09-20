@@ -3025,10 +3025,11 @@ class BatchGenerator:
                 # teacher-forced into a consistent self-MTP lane; the mismatch
                 # would only surface inside ``next`` and take the whole batch
                 # down.  Refuse at the request boundary instead.
-                raise ValueError(
-                    "self-MTP lane requires draft state for a warm target prefix; "
-                    "treat a sidecar-less APC hit as a miss"
-                )
+                if not mtp_config.get("target_only_plain_fallback", False):
+                    raise ValueError(
+                        "self-MTP lane requires draft state for a warm target prefix; "
+                        "use the target-only ordinary fallback"
+                    )
             self._unprocessed_sequences.append(
                 (self._uid_count, seq, m, c, at, s, lp, sm, time.monotonic(), prefill_input)
             )
@@ -4537,6 +4538,74 @@ class BatchGenerator:
         )
         return uid
 
+    def _admit_target_only_plain_fallbacks(self):
+        """Start target-warm, draft-less lanes on the ordinary decode path."""
+        capacity = self.completion_batch_size - len(
+            self._generation_batch.mtp_cycle_state()
+        ) - len(self._plain_fallback_batch)
+        if capacity <= 0:
+            return []
+        queued = list(self._unprocessed_sequences)
+        candidates = [
+            index
+            for index, sequence in enumerate(queued)
+            if self._mtp_configs.get(sequence[0], {}).get(
+                "target_only_plain_fallback", False
+            )
+        ]
+        if not candidates:
+            return []
+        first_config = self._mtp_configs.get(queued[candidates[0]][0], {})
+        cohort = first_config.get("batch_cohort")
+        if cohort is None:
+            indices = candidates[:capacity]
+        else:
+            cohort_key = (
+                str(cohort["tenant_id"]),
+                str(cohort["id"]),
+                int(cohort["size"]),
+            )
+
+            def queued_cohort_key(index):
+                value = self._mtp_configs.get(queued[index][0], {}).get(
+                    "batch_cohort"
+                )
+                if value is None:
+                    return None
+                return (
+                    str(value["tenant_id"]),
+                    str(value["id"]),
+                    int(value["size"]),
+                )
+
+            indices = [
+                index
+                for index in candidates
+                if queued_cohort_key(index) == cohort_key
+            ]
+            if len(indices) != cohort_key[2] or len(indices) > capacity:
+                return []
+        for index in indices:
+            sequence = queued[index]
+            if sum(len(segment) for segment in sequence[1]) != 1:
+                raise RuntimeError(
+                    "target-only ordinary fallback requires a committed "
+                    "prompt-boundary checkpoint"
+                )
+        uids = [queued[index][0] for index in indices]
+        self._prompt_batch.extend(
+            self._make_batch(len(indices), indices=indices)
+        )
+        for uid in uids:
+            self._mtp_states.pop(uid, None)
+            self._mtp_lane_rngs.pop(uid, None)
+            self._mtp_configs.pop(uid, None)
+        self.scheduler_stats["mtp_target_only_plain_fallbacks"] = (
+            self.scheduler_stats.get("mtp_target_only_plain_fallbacks", 0)
+            + len(uids)
+        )
+        return self._promote_ready_prompts(self._plain_fallback_batch)
+
     def _next_mtp(self):
         generation_responses = []
         prompt_responses = []
@@ -4596,6 +4665,7 @@ class BatchGenerator:
                 ALLOCATOR_RECLAIM_MTP_TOKEN_INTERVAL,
             ):
                 mx.clear_cache()
+        prompt_responses.extend(self._admit_target_only_plain_fallbacks())
         occupied = len(self._generation_batch.mtp_cycle_state()) + len(
             self._plain_fallback_batch
         )
@@ -4902,7 +4972,7 @@ class BatchGenerator:
             }
             self._record_state_checkpoint(uid, position, checkpoint)
 
-    def _promote_ready_prompts(self):
+    def _promote_ready_prompts(self, destination=None):
         keep = []
         split = []
         for i, seq in enumerate(self._currently_processing):
@@ -4975,7 +5045,9 @@ class BatchGenerator:
                 prompt_responses.append(
                     PromptProcessingBatch.Response(gen_batch.uids[i], p, True, True)
                 )
-            self._generation_batch.extend(gen_batch)
+            (self._generation_batch if destination is None else destination).extend(
+                gen_batch
+            )
         return prompt_responses
 
     def _next(self):
