@@ -7,7 +7,26 @@ from dataclasses import dataclass, field
 
 @dataclass
 class HybridStats:
-    """Per-source accounting for one prompt-lookup generation run."""
+    """Per-source accounting for one prompt-lookup generation run.
+
+    Two per-round distributions are kept, both as plain ``{value: rounds}``
+    host dicts so a receipt consumer can post-process them by truncation:
+
+    ``verify_span_hist``
+        Verification-forward width (positions fed to the target) per round.
+        ``sum(width * rounds)`` is the total verified positions.
+    ``verify_accept_hist``
+        Speculative tokens *accepted* per round, i.e. the same quantity the
+        route's ``accepted`` aggregate sums.  Because a draft accepted to
+        depth k would also have been accepted under any shallower cap, the
+        commit rate at every depth below the one actually run follows by
+        truncation from this one histogram::
+
+            tau(k) = sum(min(a, k) + 1 for each round) / rounds
+
+        which keeps numerator and denominator inside a single run instead of
+        comparing two runs.
+    """
 
     cycles: int = 0
     retrieval_cycles: int = 0
@@ -21,6 +40,7 @@ class HybridStats:
     span_extend_cycles: int = 0
     span_extend_tokens: int = 0
     verify_span_hist: dict[int, int] = field(default_factory=dict)
+    verify_accept_hist: dict[int, int] = field(default_factory=dict)
     latched: bool = False
     rate_gate_probed: bool = False
     rate_gate_delatched: bool = False

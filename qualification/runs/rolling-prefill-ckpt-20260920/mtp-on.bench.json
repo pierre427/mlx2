@@ -1,0 +1,110 @@
+{
+  "model": "Qwen3.6-35B-A3B-uncensored-heretic-Native-MTP-Preserved-oQ4e-mtp",
+  "results": {
+    "cold": {
+      "wall_s": 18.6106,
+      "prompt_tokens": 52018,
+      "cached_tokens": 0,
+      "text": "The document lists 2,399 records of \"cold\" data,",
+      "checkpoint_role": null
+    },
+    "cancel_abandoned": true,
+    "cancel_retry": {
+      "wall_s": 13.5444,
+      "prompt_tokens": 52018,
+      "cached_tokens": 20480,
+      "text": "The document lists 2,399 records, each identified by a \"",
+      "checkpoint_role": "prefill_rolling"
+    },
+    "concurrent_second": {
+      "wall_s": 33.5586,
+      "prompt_tokens": 52018,
+      "cached_tokens": 12288,
+      "text": "The document lists 2,399 shared records, each containing a value",
+      "checkpoint_role": "prefill_rolling"
+    },
+    "concurrent_first": {
+      "wall_s": 22.0087,
+      "prompt_tokens": 52018,
+      "cached_tokens": 0,
+      "text": "The document lists 2,399 shared records, each containing a value",
+      "checkpoint_role": null
+    },
+    "repeat": {
+      "wall_s": 0.4278,
+      "prompt_tokens": 52018,
+      "cached_tokens": 52017,
+      "text": "The document lists 2,399 records of \"cold\" data,",
+      "checkpoint_role": "committed_prompt_boundary"
+    }
+  },
+  "before": {
+    "rolling_counts": {
+      "apc_interior_positions_planned_turn": 0,
+      "apc_interior_positions_planned_tail": 0,
+      "apc_interior_positions_planned_lattice": 0,
+      "apc_interior_positions_skipped_media": 0,
+      "apc_interior_requests_skipped_continuation": 0,
+      "apc_interior_positions_headroom_capped": 0,
+      "apc_interior_hits": 0,
+      "apc_interior_hits_turn_boundary": 0,
+      "apc_interior_hit_tokens": 0,
+      "apc_interior_turn_marker_missing": 0,
+      "apc_rolling_checkpoints_planned": 0,
+      "apc_rolling_checkpoints_degraded": 0,
+      "apc_interior_checkpoints_degraded": 0,
+      "apc_interior_checkpoints_captured": 0
+    },
+    "apc_lifetime": {
+      "lookups": 1,
+      "hits": 0,
+      "misses": 1,
+      "queried_tokens": 14,
+      "cached_tokens": 0,
+      "stores": 1,
+      "interior_hits": 0,
+      "rolling_hits": 0,
+      "junction_hits": 0
+    },
+    "settings_rolling": {
+      "interval_tokens": 4096
+    }
+  },
+  "after": {
+    "rolling_counts": {
+      "apc_interior_positions_planned_turn": 0,
+      "apc_interior_positions_planned_tail": 0,
+      "apc_interior_positions_planned_lattice": 0,
+      "apc_interior_positions_skipped_media": 0,
+      "apc_interior_requests_skipped_continuation": 0,
+      "apc_interior_positions_headroom_capped": 0,
+      "apc_interior_hits": 0,
+      "apc_interior_hits_turn_boundary": 0,
+      "apc_interior_hit_tokens": 0,
+      "apc_interior_turn_marker_missing": 0,
+      "apc_rolling_checkpoints_planned": 52,
+      "apc_rolling_checkpoints_degraded": 0,
+      "apc_interior_checkpoints_degraded": 0,
+      "apc_interior_checkpoints_captured": 0,
+      "apc_rolling_checkpoints_published": 45,
+      "apc_rolling_checkpoints_retired": 43,
+      "cancelled": 1,
+      "apc_rolling_checkpoints_retire_deferred": 2,
+      "apc_rolling_checkpoints_retire_shared": 1
+    },
+    "apc_lifetime": {
+      "lookups": 8,
+      "hits": 3,
+      "misses": 5,
+      "queried_tokens": 312140,
+      "cached_tokens": 84785,
+      "stores": 58,
+      "interior_hits": 0,
+      "rolling_hits": 2,
+      "junction_hits": 0
+    },
+    "settings_rolling": {
+      "interval_tokens": 4096
+    }
+  }
+}

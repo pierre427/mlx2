@@ -3,7 +3,7 @@
 from __future__ import annotations
 from typing import Any, Sequence
 import mlx.core as mx
-from .models.cache import ArraysCache, KVCache
+from .models.cache import ArraysCache, KVCache, QuantizedKVCache
 from .models.qwen4_exp import (
     BatchQSAKVCache,
     QSACompactBlocks,
@@ -887,6 +887,12 @@ def build_segmented_batch_cache_group(groups, *, note=None, shared_qsa_prefix=Fa
                     layer_rows, note=note, shared_qsa_prefix=shared_qsa_prefix
                 )
             )
+        elif type(first) is QuantizedKVCache:
+            # Approximate KV composed with self-MTP: target rows quantized by
+            # the adapter-declared operation.  Exact rows never reach here.
+            from .segmented_plain_kv import SegmentedBatchQuantizedKVCache
+
+            result.append(SegmentedBatchQuantizedKVCache(layer_rows, note=note))
         elif isinstance(first, KVCache):
             from .segmented_plain_kv import SegmentedBatchKVCache
             result.append(SegmentedBatchKVCache(layer_rows, note=note))

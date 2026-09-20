@@ -1,0 +1,39 @@
+{
+ "source_path_check": {
+  "expected_src": "/private/tmp/mlx2-rm06b-north-norm/src",
+  "mlx2_file": "/private/tmp/mlx2-rm06b-north-norm/src/mlx2/__init__.py",
+  "commit_direction_schema": "mlx2.commit-direction.v2",
+  "cohere2_moe_file": "/private/tmp/mlx2-rm06b-north-norm/src/mlx2/runtime/models/cohere2_moe.py",
+  "main_checkout_in_server_log": false
+ },
+ "runtime": {
+  "source_sha256": "929bdd64f9bbc452085f51231751316b86a9aee99831e11be382ad0f00cc5bbb",
+  "mlx_native_sha256": "74571029425cf0bdc22d6120af189774effc8a4b88a114cfa9e10476c66385aa",
+  "python": "3.12.13",
+  "macos": "26.7",
+  "mlx": "0.32.2.dev20260919+39400a0d4",
+  "transformers": "5.17.0",
+  "dependencies": {
+   "numpy": "2.5.1",
+   "tokenizers": "0.23.2",
+   "jinja2": "3.1.6",
+   "psutil": "7.2.2",
+   "regex": "2026.9.10",
+   "safetensors": "0.8.0"
+  }
+ },
+ "artifact": "6c88a4d3a5387abe2d97ac3d5eb70e484fb33615bb0c0f2ff8e7ef22b442f2e4",
+ "profile": "north-mini-code-apcv2-ordinary",
+ "thinking_steer": {
+  "alpha": 0.2,
+  "hammer": 0.0,
+  "calibration": {
+   "artifact_identity": "1d2ebefc69c139b239392bbd1975c755a4e76d60a8ba3b166979bf396cfd490f",
+   "state": "calibrated",
+   "layer": 32,
+   "source": "north_mini_code_commit_direction.npz:L32",
+   "origin": "shipped"
+  }
+ },
+ "thinking_defaults_source": "adapter"
+}

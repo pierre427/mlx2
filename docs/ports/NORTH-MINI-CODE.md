@@ -1,5 +1,45 @@
 # North Mini Code 1.0 port
 
+## 2026-09-20 correction: the port ran the wrong normalization
+
+Until 2026-09-20 this port built North's per-layer `input_layernorm` and its
+final `model.norm` as `nn.LayerNorm(hidden, eps=layer_norm_eps=1e-5)` -- the
+mean-centred Cohere norm. The reference is `RMSNorm` with `eps=1e-6`:
+HF transformers `models/cohere2_moe/modeling_cohere2_moe.py` selects the norm
+*class* from `rms_norm_eps` (decoder layer and final norm), and this
+checkpoint's `config.json` sets `rms_norm_eps: 1e-06`. The `layer_norm_eps:
+1e-05` beside it is only `Cohere2MoeConfig`'s own default being serialized and
+is inert here. mlx-vlm's independent `cohere2_moe` port agrees.
+
+The selector never reached the model: `BaseModelArgs.from_dict` drops keys the
+dataclass does not declare, and `rms_norm_eps` was not declared. The weights
+could not catch it either -- both norms have identical parameter shapes (one
+`[hidden]` gamma, no bias), and the checkpoint carries no `*.bias` tensor at
+all, so the wrong norm loaded perfectly clean.
+
+**Consequently every North measurement taken before 2026-09-20 was taken on a
+mis-normalized model**, including this document's serving numbers, the
+integration and 20x20 sanity campaigns, the alpha-steering calibration, and
+rm06's speculation study. Greedy outputs changed with the fix; that is a
+deliberate serving-behaviour change for North.
+
+The shipped alpha-steering commit direction was calibrated in the old residual
+geometry and stopped binding (`thinking_calibration.SCHEMA` is now
+`mlx2.commit-direction.v2`). It was **recalibrated on the corrected body on
+2026-09-20** and re-shipped at layer 32 (was 28), passing the held-out and
+random-control gates; see `qualification/runs/north-requal-20260920/`.
+
+The list of every pre-2026-09-20 North record this voids, with per-record
+status, is `qualification/runs/north-requal-20260920/INVENTORY.md`. Two things
+it surfaced: North had **no passing serving qualification record even before the
+fix** (`integration-gpu-20260918`'s north-ordinary run and its first-pass twin
+both failed `shared_cohort_priming`), and the three records that did pass were
+produced by a qualifier hash that `src/mlx2/qualification.py` no longer pins.
+
+See `wiki/docs/experiments/mlx2-rm06b-north-norm-2026-09-20.md`,
+`wiki/docs/experiments/mlx2-north-requalification-2026-09-20.md` and
+`tests/test_north_norm_choice.py`.
+
 ## Current state
 
 North Mini Code has a CPU-validated ordinary serving slice in mlx2. It is
@@ -39,9 +79,19 @@ No production tensor payload was loaded during this port.
 - North reasoning, text, and JSON action blocks are parsed incrementally across
   chunk boundaries. Tool history is normalized without mutating the request.
   Image content fails closed.
+- Required and named tool requests constrain North's trained action branch at
+  `<|START_ACTION|>`. The request-scoped processor is a pure function of token
+  history, activates after `<|END_THINKING|>` when reasoning is enabled, and is
+  safe for prompt-lookup/speculative probes. Function-name identity remains an
+  authoritative post-generation check because the action JSON permits flexible
+  key order and an optional `tool_call_id`.
+- An action block truncated by the output-token budget now terminates as
+  `length` / Anthropic `max_tokens` while preserving prior parsed output;
+  malformed action blocks ending by EOS or stop continue to fail closed.
 - The candidate profile is `north-mini-code-apcv2-ordinary`. Native MTP and
-  external-draft capabilities are absent and native MTP requests fail before
-  model allocation.
+  external-draft capabilities are absent. With no route flag the adapter
+  selects ordinary; explicit `--ordinary` is equivalent, while `--native-mtp`
+  fails before listener binding or model allocation.
 
 ## Speculation and optimization gaps
 
@@ -76,8 +126,9 @@ this sigmoid router. Router weights remain q8 in the local q4 artifact.
 
 ## Qualification contract
 
-The first GPU window should use the q4 target, `--ordinary`,
-`--max-context 500000`, and a distinct APCv2 directory.
+The first GPU window should use the q4 target, `--max-context 500000`, and a
+distinct APCv2 directory. Omitting a route flag selects North's ordinary
+default; retaining `--ordinary` documents the same resolved route explicitly.
 
 The HTTP request envelope is bounded independently from token admission. By
 default, `max_request_bytes` is derived from `max_context` at 32 bytes per

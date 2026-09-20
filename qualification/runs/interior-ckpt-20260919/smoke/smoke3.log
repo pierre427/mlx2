@@ -1,0 +1,37 @@
+[cpg_job 2026-09-19T21:51:19+00:00 pid=66427] label=rm04-smoke3 agent_id=job-rm04-smoke3-66427 command=env PYTHONPATH=/private/tmp/mlx2-rm04-interior-ckpt-qual/src ~/Desktop/mlx2/.venv/bin/python /private/tmp/mlx2-rm04-interior-ckpt-qual/scripts/qualify_interior_checkpoints.py --model ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP --route mtp --base-policy /private/tmp/mlx2-rm04-interior-ckpt-qual/qualification/runs/quality-campaign-20260919/policies/flash-next-mtp2.json --arms off,auto --workloads shared_system,rag --rounds 1 --scale 0.05 --max-tokens 16 --out /private/tmp/claude-501/-Users-user-Desktop-mlx2/dcc2c62c-d339-4686-a019-625b816d27d9/scratchpad/roadmap/rm04/gpu/smoke3/smoke.json --i-own-the-gpu
+[cpg_job 2026-09-19T21:51:20+00:00 pid=66427] created workflow 4be77da6682f441e8d49e47d63dedb6c (cpg-job drivers); record it as workflows.cpg-job-drivers in /Users/Shared/mlxuag/cpg-radio.json to reuse it
+[cpg_job 2026-09-19T21:51:20+00:00 pid=66427] registered worker 164dbbc718be4ebdb6d48a4744c2c221 as job-rm04-smoke3-66427 in session 3c65a7827e83456a89fffdeefadec196
+[cpg_job 2026-09-19T21:51:20+00:00 pid=66427] took /Users/Shared/mlxuag/gpu.lock
+[cpg_job 2026-09-19T21:51:20+00:00 pid=66427] child pid 66433 started
+[off r0] shared_system#0 P=2609 cached=0 ttft=2.973s interior_hits+=0 match=True
+[off r0] shared_system#1 P=2609 cached=0 ttft=2.020s interior_hits+=0 match=True
+[off r0] shared_system#2 P=2609 cached=0 ttft=2.035s interior_hits+=0 match=True
+[off r0] shared_system#3 P=2609 cached=0 ttft=2.031s interior_hits+=0 match=True
+[off r0] shared_system#4 P=2609 cached=0 ttft=2.077s interior_hits+=0 match=True
+[off r0] shared_system#5 P=2609 cached=0 ttft=1.983s interior_hits+=0 match=True
+[off r0] shared_system#6 P=2609 cached=0 ttft=2.029s interior_hits+=0 match=True
+[off r0] shared_system#7 P=2609 cached=0 ttft=2.094s interior_hits+=0 match=True
+[off r0] rag#0 P=6859 cached=0 ttft=5.270s interior_hits+=0 match=True
+[off r0] rag#1 P=6859 cached=0 ttft=5.215s interior_hits+=0 match=True
+[off r0] rag#2 P=6859 cached=0 ttft=5.226s interior_hits+=0 match=True
+[off r0] rag#3 P=6859 cached=0 ttft=5.249s interior_hits+=0 match=True
+[off r0] rag#4 P=6859 cached=0 ttft=5.193s interior_hits+=0 match=True
+[off r0] rag#5 P=6859 cached=0 ttft=5.249s interior_hits+=0 match=True
+[auto r0] shared_system#0 P=2609 cached=0 ttft=2.423s interior_hits+=0 match=True
+[auto r0] shared_system#1 P=2609 cached=2545 ttft=0.260s interior_hits+=1 match=True
+[auto r0] shared_system#2 P=2609 cached=2545 ttft=0.264s interior_hits+=1 match=True
+[auto r0] shared_system#3 P=2609 cached=2545 ttft=0.268s interior_hits+=1 match=True
+[auto r0] shared_system#4 P=2609 cached=2545 ttft=0.273s interior_hits+=1 match=True
+[auto r0] shared_system#5 P=2609 cached=2545 ttft=0.270s interior_hits+=1 match=True
+[auto r0] shared_system#6 P=2609 cached=2545 ttft=0.273s interior_hits+=1 match=True
+[auto r0] shared_system#7 P=2609 cached=2545 ttft=0.277s interior_hits+=1 match=True
+[auto r0] rag#0 P=6859 cached=0 ttft=5.851s interior_hits+=0 match=True
+[auto r0] rag#1 P=6859 cached=6656 ttft=0.615s interior_hits+=1 match=True
+[auto r0] rag#2 P=6859 cached=6656 ttft=0.608s interior_hits+=1 match=True
+[auto r0] rag#3 P=6859 cached=6656 ttft=0.621s interior_hits+=1 match=True
+[auto r0] rag#4 P=6859 cached=6656 ttft=0.655s interior_hits+=1 match=True
+[auto r0] rag#5 P=6859 cached=6656 ttft=0.620s interior_hits+=1 match=True
+[cpg_job 2026-09-19T21:52:59+00:00 pid=66427] child exited rc=0
+[cpg_job 2026-09-19T21:52:59+00:00 pid=66427] worker 164dbbc718be4ebdb6d48a4744c2c221 closed completed
+[cpg_job 2026-09-19T21:52:59+00:00 pid=66427] released /Users/Shared/mlxuag/gpu.lock
+[cpg_job 2026-09-19T21:52:59+00:00 pid=66427] wrote /private/tmp/claude-501/-Users-user-Desktop-mlx2/dcc2c62c-d339-4686-a019-625b816d27d9/scratchpad/roadmap/rm04/gpu/smoke3b.try1.log.done

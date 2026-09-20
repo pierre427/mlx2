@@ -1,0 +1,164 @@
+{
+ "schema": "mlx2.rm06-external-draft-acceptance.v1",
+ "plan": {
+  "schema": "mlx2.rm06-external-draft-acceptance.v1",
+  "kind": "execution_plan",
+  "family": "laguna",
+  "target": "~/.cache/huggingface/hub/models--AtomicChat--Laguna-XS-2.1-MLX-8bit/snapshots/ba635f7386219675b9b71acdc2812d12fa69aab2",
+  "draft": "~/.cache/huggingface/hub/models--poolside--Laguna-XS-2.1-DFlash/snapshots/2e783135b1590c16c392ad9613e427f1090daa48",
+  "will_execute": true,
+  "arms": 4,
+  "prompts": 4,
+  "max_tokens": 64,
+  "depths": [
+   7
+  ],
+  "widths": [
+   1,
+   4
+  ],
+  "temperatures": [
+   0.0
+  ],
+  "interleaving": "ordinary/external alternating per (repeat, temp, width, depth)",
+  "go_criterion": {
+   "greedy_parity": "mean greedy common-prefix ratio vs ordinary >= 0.9 (exact count also reported)",
+   "b1_speedup_min": 1.25,
+   "b4_speedup_min": 1.0,
+   "arm_refused_if": "external_rounds == 0 or proposed_tokens == 0"
+  },
+  "order": [
+   [
+    "ordinary",
+    0,
+    1,
+    0.0,
+    0
+   ],
+   [
+    "external",
+    7,
+    1,
+    0.0,
+    0
+   ],
+   [
+    "ordinary",
+    0,
+    4,
+    0.0,
+    0
+   ],
+   [
+    "external",
+    7,
+    4,
+    0.0,
+    0
+   ]
+  ]
+ },
+ "arms": [
+  {
+   "kind": "ordinary",
+   "num_draft": 0,
+   "width": 1,
+   "temperature": 0.0,
+   "repeat": 0,
+   "decode_tok_s": 99.72771760896693,
+   "mechanism": {}
+  },
+  {
+   "kind": "external",
+   "num_draft": 7,
+   "width": 1,
+   "temperature": 0.0,
+   "repeat": 0,
+   "decode_tok_s": 82.66277123887677,
+   "mechanism": {
+    "external_rounds": 91,
+    "proposed_tokens": 611,
+    "accepted_proposals": 164,
+    "mean_acceptance_length": 2.802197802197802,
+    "draft_stats": {
+     "committed_positions": 367,
+     "block_drafts": 91
+    }
+   },
+   "greedy_parity": 3,
+   "greedy_prompts": 4,
+   "greedy_prefix_ratio": 0.796875
+  },
+  {
+   "kind": "ordinary",
+   "num_draft": 0,
+   "width": 4,
+   "temperature": 0.0,
+   "repeat": 0,
+   "decode_tok_s": 241.43146133068046,
+   "mechanism": {}
+  },
+  {
+   "kind": "external",
+   "num_draft": 7,
+   "width": 4,
+   "temperature": 0.0,
+   "repeat": 0,
+   "decode_tok_s": 92.37669477222012,
+   "mechanism": {
+    "external_rounds": 52,
+    "proposed_tokens": 601,
+    "accepted_proposals": 165,
+    "mean_acceptance_length": 4.173076923076923,
+    "draft_stats": {
+     "committed_positions": 733,
+     "block_drafts": 181
+    }
+   },
+   "greedy_parity": 2,
+   "greedy_prompts": 4,
+   "greedy_prefix_ratio": 0.73046875
+  }
+ ],
+ "refused": [],
+ "summary": [
+  {
+   "width": 1,
+   "temperature": 0.0,
+   "num_draft": 7,
+   "ordinary_tok_s": 99.72771760896693,
+   "external_tok_s": 82.66277123887677,
+   "speedup": 0.8288846192489642,
+   "mean_acceptance_length": 2.802197802197802,
+   "greedy_parity": [
+    3
+   ],
+   "greedy_prefix_ratio": [
+    0.796875
+   ],
+   "ordinary_spread": 0.0
+  },
+  {
+   "width": 4,
+   "temperature": 0.0,
+   "num_draft": 7,
+   "ordinary_tok_s": 241.43146133068046,
+   "external_tok_s": 92.37669477222012,
+   "speedup": 0.38262078298774366,
+   "mean_acceptance_length": 4.173076923076923,
+   "greedy_parity": [
+    2
+   ],
+   "greedy_prefix_ratio": [
+    0.73046875
+   ],
+   "ordinary_spread": 0.0
+  }
+ ],
+ "verdict": {
+  "greedy_parity": false,
+  "best_b1_speedup": 0.8288846192489642,
+  "best_b4_speedup": 0.38262078298774366,
+  "go": false
+ }
+}

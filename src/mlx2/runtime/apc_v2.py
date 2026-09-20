@@ -115,6 +115,13 @@ class APCLookup:
     capsule_generation: Optional[int] = None
     segment_manifest: Any = None
     retention_role: Optional[str] = None
+    # Deepest position a stored path shares with this prompt when that is
+    # beyond what was restored.  On a checkpointed hybrid the shared prefix
+    # cannot be branched from the longer entry (recurrent state does not
+    # trim), so admission may plan a junction snapshot here for the next
+    # request that diverges at the same point.  0 when nothing is shared past
+    # ``cached_tokens``.
+    branch_tokens: int = 0
 
 
 @dataclass
@@ -340,7 +347,7 @@ class APCv2(PrefixIndex):
 
     _STAT_KEYS = (
         "lookups", "hits", "misses", "queried_tokens", "cached_tokens", "stores",
-        "interior_hits",
+        "interior_hits", "rolling_hits", "junction_hits",
     )
     _DISK_STAT_KEYS = (
         "idle_spills",
@@ -376,8 +383,18 @@ class APCv2(PrefixIndex):
     _RETENTION_DEFAULT = "default"
     _RETENTION_INTERIOR = "interior_checkpoint"
     _RETENTION_PROMPT_BOUNDARY = "committed_prompt_boundary"
+    # Disposable prefill progress points (state_boundaries.ROLLING): evicted
+    # first, retired by their publisher once a later boundary supersedes them.
+    _RETENTION_ROLLING = "prefill_rolling"
+    _RETENTION_JUNCTION = "junction"
     _RETENTION_ROLES = frozenset(
-        {_RETENTION_DEFAULT, _RETENTION_INTERIOR, _RETENTION_PROMPT_BOUNDARY}
+        {
+            _RETENTION_DEFAULT,
+            _RETENTION_INTERIOR,
+            _RETENTION_PROMPT_BOUNDARY,
+            _RETENTION_ROLLING,
+            _RETENTION_JUNCTION,
+        }
     )
 
     def __init__(
@@ -404,16 +421,33 @@ class APCv2(PrefixIndex):
         prefetch_ttl_seconds: int = 30,
         quarantine_max_entries: int = 128,
         quarantine_max_bytes: int = 1 << 30,
+        max_interior_entries: Optional[int] = None,
     ):
         if not layout_name:
             raise ValueError("APCv2 requires a model cache-layout declaration")
         super().__init__(max_size=max_size, max_bytes=max_bytes, max_tokens=max_tokens)
+        # Interior checkpoints get their own resident-entry allowance.  Sharing
+        # ``max_size`` with prompt boundaries and finished lanes, whose count
+        # grows with every request, meant that once the cache was full a fresh
+        # interior checkpoint (lowest retention rank, never yet reused) was
+        # evicted by its own publication and could never earn a hit.  Bytes
+        # stay one shared budget, where interiors are still evicted first.
+        if max_interior_entries is None:
+            max_interior_entries = max_size
+        if (
+            isinstance(max_interior_entries, bool)
+            or not isinstance(max_interior_entries, int)
+            or max_interior_entries < 0
+        ):
+            raise ValueError("max_interior_entries must be a non-negative integer")
+        self.max_interior_entries = int(max_interior_entries)
         self._apc_lock = threading.RLock()
         self._cow_branching = True
         self._cow_telemetry = COWCacheTelemetry()
         self._apc_stats = {key: 0 for key in self._STAT_KEYS}
         self._apc_lifetime = {key: 0 for key in self._STAT_KEYS}
         self._apc_clears = 0
+        self._interior_reused_entries = 0
         age_buckets = (1, 5, 30, 120, 600, 3600)
         self._reuse_histograms = {
             "hit_age_seconds": _FixedHistogram(age_buckets),
@@ -509,6 +543,8 @@ class APCv2(PrefixIndex):
         self._persist_lock_file = None
         self._prefetch_slot = threading.BoundedSemaphore(1)
         self._pending_prefetch = None
+        # (key, tokens) -> role of retirements a live lease deferred.
+        self._pending_retirements = {}
         self._closed = False
         self._layer_segments = True
         self.layout_name = str(layout_name)
@@ -1091,9 +1127,20 @@ class APCv2(PrefixIndex):
     @classmethod
     def _entry_retention_rank(cls, entry) -> int:
         role = getattr(entry, "_apc_retention_role", cls._RETENTION_DEFAULT)
+        if role == cls._RETENTION_INTERIOR and int(
+            getattr(entry, "_apc_hit_count", 0)
+        ) > 0:
+            # A reused interior checkpoint (typically a preamble shared across
+            # sessions) has proven its value; evict it like ordinary entries
+            # instead of first.
+            return 1
         return {
+            cls._RETENTION_ROLLING: -1,
             cls._RETENTION_INTERIOR: 0,
             cls._RETENTION_DEFAULT: 1,
+            # A junction is where two observed conversations diverged; it is
+            # retained like an ordinary exact entry.
+            cls._RETENTION_JUNCTION: 1,
             cls._RETENTION_PROMPT_BOUNDARY: 2,
         }.get(role, 1)
 
@@ -1104,8 +1151,17 @@ class APCv2(PrefixIndex):
         entry._apc_last_access_wall = self._wall_time()
         entry._apc_hit_count = int(getattr(entry, "_apc_hit_count", 0)) + 1
         self._reuse_histograms["hit_age_seconds"].observe(now - inserted)
-        if getattr(entry, "_apc_retention_role", None) == self._RETENTION_INTERIOR:
+        role = getattr(entry, "_apc_retention_role", None)
+        if role == self._RETENTION_INTERIOR:
             self._apc_stats["interior_hits"] += 1
+            if entry._apc_hit_count == 1:
+                self._interior_reused_entries = (
+                    getattr(self, "_interior_reused_entries", 0) + 1
+                )
+        elif role == self._RETENTION_ROLLING:
+            self._apc_stats["rolling_hits"] += 1
+        elif role == self._RETENTION_JUNCTION:
+            self._apc_stats["junction_hits"] += 1
 
     def _record_entry_eviction_locked(self, entry) -> None:
         now = self._now()
@@ -1604,20 +1660,40 @@ class APCv2(PrefixIndex):
             self._enforce_disk_limit_locked(exclude=exclude)
         return spilled
 
-    def _resident_entry_count_locked(self) -> int:
+    def _resident_entry_count_locked(self, *, interior: Optional[bool] = None) -> int:
+        """Resident entries; ``interior`` selects one count pool (None: all)."""
         return sum(
-            bool(entry.prompt_cache) for _key, _tokens, entry in self._entry_records_locked()
+            bool(entry.prompt_cache)
+            and (interior is None or self._is_interior_entry(entry) == interior)
+            for _key, _tokens, entry in self._entry_records_locked()
         )
 
-    def _enforce_entry_limits_locked(self, *, publication=None) -> bool:
-        """Apply APC count/resident limits after the retention role is visible."""
-        publication_rejected = False
-        while self._resident_entry_count_locked() > self.max_size:
-            records = self._retention_ordered_candidates_locked(
-                resident_only=True,
-                exclude=None,
-                include_exclude=True,
-            )
+    @classmethod
+    def _is_interior_entry(cls, entry) -> bool:
+        return (
+            getattr(entry, "_apc_retention_role", cls._RETENTION_DEFAULT)
+            == cls._RETENTION_INTERIOR
+        )
+
+    def _count_pools_fit_locked(self) -> bool:
+        return (
+            self._resident_entry_count_locked(interior=False) <= self.max_size
+            and self._resident_entry_count_locked(interior=True)
+            <= self.max_interior_entries
+        )
+
+    def _enforce_count_pool_locked(self, *, interior: bool, limit: int) -> None:
+        """Spill or drop within one count pool, in retention order."""
+        while self._resident_entry_count_locked(interior=interior) > limit:
+            records = [
+                record
+                for record in self._retention_ordered_candidates_locked(
+                    resident_only=True,
+                    exclude=None,
+                    include_exclude=True,
+                )
+                if self._is_interior_entry(record[4]) == interior
+            ]
             if not records:
                 break
             progressed = False
@@ -1634,6 +1710,14 @@ class APCv2(PrefixIndex):
                 break
             if not progressed:
                 break
+
+    def _enforce_entry_limits_locked(self, *, publication=None) -> bool:
+        """Apply APC count/resident limits after the retention role is visible."""
+        publication_rejected = False
+        self._enforce_count_pool_locked(interior=False, limit=self.max_size)
+        self._enforce_count_pool_locked(
+            interior=True, limit=self.max_interior_entries
+        )
         if self._idle_disk_dir is not None:
             self._spill_resident_budget_locked(
                 exclude=None, include_exclude=True
@@ -1660,10 +1744,7 @@ class APCv2(PrefixIndex):
                 break
             _rank, _last_access, key, tokens, entry = victim
             self._drop_entry_locked(key, tokens, entry)
-        fits = (
-            self._resident_entry_count_locked() <= self.max_size
-            and self._n_bytes <= self.max_bytes
-        )
+        fits = self._count_pools_fit_locked() and self._n_bytes <= self.max_bytes
         if not fits and publication is not None:
             key, tokens, entry = publication
             try:
@@ -1674,10 +1755,7 @@ class APCv2(PrefixIndex):
                 self._drop_entry_locked(key, tokens, entry)
                 self._disk_stats["publication_rejections"] += 1
                 publication_rejected = True
-            fits = (
-                self._resident_entry_count_locked() <= self.max_size
-                and self._n_bytes <= self.max_bytes
-            )
+            fits = self._count_pools_fit_locked() and self._n_bytes <= self.max_bytes
         self._enforce_disk_limit_locked()
         if publication is not None and not publication_rejected:
             key, tokens, entry = publication
@@ -2099,6 +2177,7 @@ class APCv2(PrefixIndex):
         with self._apc_lock:
             if self._idle_disk_dir is None:
                 raise ValueError("APCv2 suspension requires a configured disk tier")
+            self._sweep_retirements_locked()
             records = tuple(self._entry_records_locked())
             active_leases = sum(
                 int(getattr(entry.prompt_cache.cow_owner, "pin_count", 0) or 0)
@@ -2188,6 +2267,7 @@ class APCv2(PrefixIndex):
         session_tag: Optional[tuple] = None,
     ) -> APCLookup:
         with self._apc_lock:
+            self._sweep_retirements_locked()
             return self._lookup_locked(
                 key,
                 tokens,
@@ -2262,6 +2342,16 @@ class APCv2(PrefixIndex):
                 # neighbors under a tight resident budget.
                 trie_result = self._trie.search(key, tokens)
                 break
+        # A longer stored path shares ``common_prefix`` tokens with this
+        # prompt.  (An exact path reports 0: its only junction would be the
+        # whole prompt, which the committed prompt boundary already covers.)
+        shared_tokens = (
+            int(trie_result.common_prefix) if trie_result.longer is not None else 0
+        )
+
+        def branch_beyond(cached):
+            return shared_tokens if shared_tokens > int(cached) else 0
+
         sidecar_candidates = []
         for path, common in (
             (trie_result.exact, len(tokens)),
@@ -2310,6 +2400,7 @@ class APCv2(PrefixIndex):
                     None,
                     "stale_cow_generation",
                     capsule_generation=self._capsule_generation.current,
+                    branch_tokens=branch_beyond(0),
                 )
             self._apc_stats["lookups"] += 1
             self._apc_stats["hits"] += 1
@@ -2364,6 +2455,7 @@ class APCv2(PrefixIndex):
                     retention_role=getattr(
                         entry, "_apc_retention_role", self._RETENTION_DEFAULT
                     ),
+                    branch_tokens=branch_beyond(covered),
                 )
         try:
             (cache, remaining) = super().fetch_nearest_cache(key, tokens)
@@ -2486,6 +2578,7 @@ class APCv2(PrefixIndex):
                 if selected_entry is not None
                 else None
             ),
+            branch_tokens=branch_beyond(cached_tokens),
         )
 
     def store(
@@ -2506,6 +2599,7 @@ class APCv2(PrefixIndex):
         if retention_role not in self._RETENTION_ROLES:
             raise ValueError(f"unknown APCv2 retention role: {retention_role!r}")
         with self._apc_lock:
+            self._sweep_retirements_locked()
             return self._store_locked(
                 key,
                 tokens,
@@ -2640,6 +2734,16 @@ class APCv2(PrefixIndex):
         if survivor.exact is not None:
             stored_entry = self._trie.get(key, survivor.exact)
             now = self._now()
+            if retention_role == self._RETENTION_ROLLING and replaced_entry is not None:
+                # A disposable progress point never downgrades a published
+                # state at the same tokens; a stronger role upgrades it.
+                prior_role = getattr(
+                    replaced_entry, "_apc_retention_role", self._RETENTION_DEFAULT
+                )
+                if prior_role != self._RETENTION_ROLLING:
+                    retention_role = prior_role
+            # This publication supersedes any deferred retirement of the path.
+            self._pending_retirements.pop((key, tuple(survivor.exact)), None)
             stored_entry._apc_retention_role = retention_role
             stored_entry._apc_inserted_at = getattr(
                 replaced_entry, "_apc_inserted_at", now
@@ -2663,6 +2767,49 @@ class APCv2(PrefixIndex):
         self._apc_stats["stores"] += 1
         survivor = self._trie.search(key, tokens)
         return replace(capabilities, stored=survivor.exact is not None)
+
+    def retire(self, key: Hashable, tokens: Iterable[int], *, role: str) -> bool:
+        """Drop a disposable checkpoint its publisher no longer needs.
+
+        Returns True when the postcondition already holds: the entry was
+        dropped, or is absent, replaced, or upgraded to another role.  Returns
+        False while a live lease pins it; the drop then happens at the first
+        APCv2 operation after the lease is released.  Design reference:
+        Splash ``StateCache::retireCheckpoint`` (rev f58d36dd).
+        """
+        if role not in self._RETENTION_ROLES:
+            raise ValueError(f"unknown APCv2 retention role: {role!r}")
+        tokens = tuple(int(token) for token in tokens)
+        with self._apc_lock:
+            self._sweep_retirements_locked()
+            return self._retire_locked(key, tokens, role)
+
+    def _retire_locked(self, key, tokens: tuple, role: str) -> bool:
+        try:
+            entry = self._trie.get(key, list(tokens))
+        except (KeyError, TypeError):
+            entry = None
+        if (
+            entry is None
+            or getattr(entry, "_apc_retention_role", self._RETENTION_DEFAULT) != role
+        ):
+            self._pending_retirements.pop((key, tokens), None)
+            return True
+        if self._entry_pinned(entry):
+            self._pending_retirements[(key, tokens)] = role
+            return False
+        self._pending_retirements.pop((key, tokens), None)
+        self._drop_entry_locked(key, list(tokens), entry)
+        return True
+
+    def sweep_retirements(self) -> None:
+        """Complete retirements whose deferring leases have been released."""
+        with self._apc_lock:
+            self._sweep_retirements_locked()
+
+    def _sweep_retirements_locked(self) -> None:
+        for (key, tokens), role in tuple(self._pending_retirements.items()):
+            self._retire_locked(key, tokens, role)
 
     def clear(self, *, release_memory: bool = True) -> dict:
         """Drop every stored prefix, its MTP sidecar, and its bytes.
@@ -2690,6 +2837,7 @@ class APCv2(PrefixIndex):
             ),
             "bytes": int(self._n_bytes),
         }
+        self._pending_retirements.clear()
         fresh_trie = PromptTrie()
         fresh_lru = PrefixIndex.CacheOrder(list(self._lru._ordering))
         self._trie = fresh_trie
@@ -2715,6 +2863,21 @@ class APCv2(PrefixIndex):
         if release_memory:
             mx.clear_cache()
         return report
+
+    def lifetime_stats(self) -> dict:
+        """Live lifetime counters, without ``apc_stats``' whole-trie walk.
+
+        ``apc_stats`` aggregates per-entry segment statistics, so serving
+        snapshots it at most once a second.  The hit/lookup counters are plain
+        integers and need no such cadence: exporting them from the snapshot
+        made every ``mlx2_prefix_cache_*_hits_total`` series read 0 until the
+        first refresh, and ``junction_hits`` reads 0 for a whole short run.
+        """
+        with self._apc_lock:
+            lifetime = dict(self._apc_lifetime)
+            for key in self._STAT_KEYS:
+                lifetime[key] += self._apc_stats[key]
+            return lifetime
 
     @property
     def _storage_stats(self):
@@ -2772,6 +2935,27 @@ class APCv2(PrefixIndex):
             stats["cache_capsules"] = {
                 **self._capsule_capacity,
                 "reserved_bytes": self._capsule_reserved_bytes,
+            }
+            interior_entries = interior_bytes = interior_reused = 0
+            for entry in _iter_trie_entries(self._trie):
+                if (
+                    getattr(entry, "_apc_retention_role", None)
+                    != self._RETENTION_INTERIOR
+                ):
+                    continue
+                interior_entries += 1
+                if int(getattr(entry, "_apc_hit_count", 0)) > 0:
+                    interior_reused += 1
+                if not getattr(entry, "_apc_disk", None):
+                    interior_bytes += int(getattr(entry, "nbytes", 0) or 0)
+            stats["interior"] = {
+                "entries": interior_entries,
+                "max_entries": self.max_interior_entries,
+                "resident_bytes": interior_bytes,
+                "reused_entries": interior_reused,
+                "lifetime_reused_entries": getattr(
+                    self, "_interior_reused_entries", 0
+                ),
             }
             stats["reuse_telemetry"] = {
                 name: histogram.snapshot()

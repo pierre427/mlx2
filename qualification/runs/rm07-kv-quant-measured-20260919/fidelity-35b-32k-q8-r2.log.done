@@ -1,0 +1,38 @@
+{
+ "agent_id": "job-rm07-fid-35b-32k-q8-r2-59630",
+ "child_pid": 59634,
+ "command": [
+  "env",
+  "PYTHONPATH=/private/tmp/mlx2-rm07-kv-quant-measured/src",
+  "~/Desktop/mlx2/.venv/bin/python",
+  "/private/tmp/mlx2-rm07-kv-quant-measured/scripts/measure_kv_quant_fidelity.py",
+  "--i-own-the-gpu",
+  "--model",
+  "~/mlx-models/Qwen3.6-35B-A3B-uncensored-heretic-Native-MTP-Preserved-oQ4e-mtp",
+  "--operations",
+  "kv_q8",
+  "--contexts",
+  "32768",
+  "--out",
+  "/private/tmp/mlx2-rm07-kv-quant-measured/qualification/runs/rm07-kv-quant-measured-20260919/fidelity-35b-32k-q8.json"
+ ],
+ "ended_at": "2026-09-20T02:55:10+00:00",
+ "label": "rm07-fid-35b-32k-q8-r2",
+ "out": "/private/tmp/mlx2-rm07-kv-quant-measured/qualification/runs/rm07-kv-quant-measured-20260919/fidelity-35b-32k-q8-r2.log",
+ "pid": 59630,
+ "radio": {
+  "error": null,
+  "heartbeat_failures": 0,
+  "heartbeats": 0,
+  "lease_generation": null,
+  "lease_task": null,
+  "lock_dir": "/Users/Shared/mlxuag/gpu.lock",
+  "status": "closed:completed"
+ },
+ "rc": 0,
+ "refusal": null,
+ "session_id": "3c65a7827e83456a89fffdeefadec196",
+ "signal": null,
+ "started_at": "2026-09-20T02:51:05+00:00",
+ "worker_id": "ea036cf4dca3469897c939c22f986824"
+}

@@ -2388,3 +2388,118 @@ def test_width_lock_deferral_is_bounded_and_falls_back_to_plain_decode():
     assert segmented_self_mtp_stats()["width_lock_plain_fallbacks"] == 1
     assert active.scheduler_waiting_uids() == []
     active.close()
+
+
+# --- per-round verification histograms -------------------------------------
+
+
+def _depth_proposal(depth, accepted):
+    """One self-MTP round of ``depth`` drafts of which ``accepted`` verify."""
+
+    def propose(_model, row_state):
+        lane = row_state.lanes[0]
+        for cache in row_state.caches.target:
+            cache.offset += accepted + 1
+        drafts = tuple(31 + index for index in range(depth))
+        bonus = 51
+        logprobs = mx.zeros((depth + 1, 64))
+        hidden = mx.zeros((1, depth + 1, 2))
+        outputs = tuple(
+            [MTPToken(drafts[index], logprobs[index], True) for index in range(accepted)]
+            + [MTPToken(bonus, logprobs[accepted], False)]
+        )
+        proposal = SelfMTPCycleResult(
+            membership_epoch=row_state.membership_epoch,
+            lane_uids=(lane.uid,),
+            draft_depths=(depth,),
+            accepted_lengths=(accepted,),
+            target_drops=(depth - accepted,),
+            head_drops=(depth,),
+            outputs=(outputs,),
+            _old_curs=(lane.cur,),
+            _old_seed_hs=(lane.seed_h,),
+            _drafts=(drafts,),
+            _vhidden=(hidden,),
+            _logprobs=(logprobs,),
+            _bonuses=(bonus,),
+        )
+        row_state.proposal_open = True
+        row_state._open_proposal = proposal
+        return proposal
+
+    return propose
+
+
+def _run_self_mtp_rounds(depth, accept_pattern):
+    """Commit one round per entry of ``accept_pattern`` and return the stats."""
+    state = attach_segmented_self_mtp_lanes(object(), None, [_detached(0)])
+    try:
+        for accepted in accept_pattern:
+            capped = min(int(accepted), depth)
+            with patch(
+                "mlx2.runtime.hybrid_speculative._propose_batched_self_mtp_impl",
+                side_effect=_depth_proposal(depth, capped),
+            ):
+                proposal = propose_batched_self_mtp(object(), state)
+            commit_batched_self_mtp(
+                state,
+                proposal,
+                emitted_counts=[capped + 1],
+                terminal=[False],
+            )
+        return state.lanes[0].stats
+    finally:
+        close_segmented_self_mtp_state(state)
+
+
+def _tau_from_hist(hist, cap):
+    """Committed tokens per verification forward at draft cap ``cap``."""
+    rounds = sum(hist.values())
+    committed = sum((min(int(a), cap) + 1) * n for a, n in hist.items())
+    return committed / rounds
+
+
+def test_self_mtp_verify_histograms_sum_to_the_round_count():
+    pattern = [0, 1, 4, 2, 4, 3, 0, 4, 1, 2]
+    stats = _run_self_mtp_rounds(4, pattern)
+
+    assert sum(stats.verify_accept_hist.values()) == stats.cycles == len(pattern)
+    assert sum(stats.verify_span_hist.values()) == stats.cycles
+    # Every round drafted the same depth, so the span histogram is one bucket
+    # at depth + 1 -- the positions the target verification forward covered.
+    assert stats.verify_span_hist == {5: len(pattern)}
+    # The accept histogram's first moment is exactly the existing aggregate.
+    assert (
+        sum(int(a) * n for a, n in stats.verify_accept_hist.items())
+        == stats.draft_accepted
+        == sum(pattern)
+    )
+    assert stats.draft_cycles == len(pattern)
+
+
+def test_tau_truncated_from_one_deep_run_matches_a_measured_shallow_run():
+    """The point of the histogram: a depth sweep from a single deep run.
+
+    A draft accepted to depth k would also have been accepted under any
+    shallower cap, so tau at every depth below the one that ran follows from
+    the deepest run's accept histogram by truncation. Each shallower depth is
+    also actually run here, and its tau is measured from its own aggregates,
+    so the identity is checked against measurement rather than restated.
+    """
+    deepest = 4
+    pattern = [0, 1, 4, 2, 4, 3, 0, 4, 1, 2]
+    deep = _run_self_mtp_rounds(deepest, pattern)
+
+    for cap in range(1, deepest + 1):
+        shallow = _run_self_mtp_rounds(cap, pattern)
+        measured = (shallow.draft_accepted + shallow.cycles) / shallow.cycles
+        derived = _tau_from_hist(deep.verify_accept_hist, cap)
+        assert derived == measured
+        # and the shallow run's own histogram agrees with its aggregates
+        assert _tau_from_hist(shallow.verify_accept_hist, cap) == measured
+        assert sum(shallow.verify_accept_hist.values()) == len(pattern)
+
+    # The deepest point is the one that was actually served.
+    assert _tau_from_hist(deep.verify_accept_hist, deepest) == (
+        deep.draft_accepted + deep.cycles
+    ) / deep.cycles

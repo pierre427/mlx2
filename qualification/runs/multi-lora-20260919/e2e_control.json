@@ -1,0 +1,216 @@
+{
+ "schema": "mlx2.multi-lora-e2e.v1",
+ "args": {
+  "model": "~/mlx-models/Qwen3.8-27B-MLX-4bit",
+  "adapters": "0,4",
+  "lanes": 8,
+  "rank": 16,
+  "targets": "self_attn.q_proj,self_attn.v_proj,self_attn.o_proj",
+  "max_tokens": 128,
+  "parity_tokens": 32,
+  "interleave": 2,
+  "out": "qualification/runs/multi-lora-20260919/e2e_control.json",
+  "i_own_the_gpu": true,
+  "dry_run": false,
+  "tiny_cpu_smoke": false
+ },
+ "arms": {
+  "base": {
+   "runs": [
+    {
+     "rows": [
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null
+     ],
+     "wall_s": 9.854465874959715,
+     "completion_tokens": 882,
+     "tok_s": 89.5025677892061,
+     "mixed_forwards": 0,
+     "delta_applications": 0
+    },
+    {
+     "rows": [
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null
+     ],
+     "wall_s": 9.18930220801849,
+     "completion_tokens": 881,
+     "tok_s": 95.87235026738468,
+     "mixed_forwards": 0,
+     "delta_applications": 0
+    }
+   ],
+   "median_tok_s": 92.6874590282954
+  },
+  "mix4": {
+   "runs": [
+    {
+     "rows": [
+      "lora0",
+      "lora1",
+      "lora2",
+      "lora3",
+      "lora0",
+      "lora1",
+      "lora2",
+      "lora3"
+     ],
+     "wall_s": 10.984024583012797,
+     "completion_tokens": 997,
+     "tok_s": 90.76818724003019,
+     "mixed_forwards": 142,
+     "delta_applications": 6816
+    },
+    {
+     "rows": [
+      "lora0",
+      "lora1",
+      "lora2",
+      "lora3",
+      "lora0",
+      "lora1",
+      "lora2",
+      "lora3"
+     ],
+     "wall_s": 10.367401499999687,
+     "completion_tokens": 992,
+     "tok_s": 95.68453580195866,
+     "mixed_forwards": 135,
+     "delta_applications": 6480
+    }
+   ],
+   "median_tok_s": 93.22636152099443
+  }
+ },
+ "parity": {
+  "lora0": {
+   "identical": true,
+   "first_divergence_char": null,
+   "mixed_prefix": "To list the ten most recent orders, you need to sort the orders by their date in descending order and limit the results ",
+   "alone_prefix": "To list the ten most recent orders, you need to sort the orders by their date in descending order and limit the results "
+  },
+  "lora1": {
+   "identical": true,
+   "first_divergence_char": null,
+   "mixed_prefix": "A charismatic mastermind assembles a team of elite specialists to execute an impossible robbery, targeting a heavily for",
+   "alone_prefix": "A charismatic mastermind assembles a team of elite specialists to execute an impossible robbery, targeting a heavily for"
+  },
+  "lora2": {
+   "identical": false,
+   "first_divergence_char": 145,
+   "mixed_prefix": "Hello! Welcome to the team. Let\u2019s break down what a **Radix Tree** (also known as a **Patricia Trie**) is, why it exists",
+   "alone_prefix": "Hello! Welcome to the team. Let\u2019s break down what a **Radix Tree** (also known as a **Patricia Trie**) is, why it exists"
+  },
+  "lora3": {
+   "identical": false,
+   "first_divergence_char": 284,
+   "mixed_prefix": "Here are three essential tips for writing clear and effective commit messages:\n\n1. **Use the Imperative Mood**\n   Write ",
+   "alone_prefix": "Here are three essential tips for writing clear and effective commit messages:\n\n1. **Use the Imperative Mood**\n   Write "
+  }
+ },
+ "registrations": [
+  {
+   "status": "loaded",
+   "mode": "concurrent",
+   "fingerprint": "82a5302fb88a5b8c4d0481fa428e1c1901e7333d4376fc6f916d50502ec7bc94",
+   "rank": 16,
+   "drained": true,
+   "model_revision": 0
+  },
+  {
+   "status": "loaded",
+   "mode": "concurrent",
+   "fingerprint": "bafa12016ae33dfbf06f9521cee399316efeae2b94d3b7f78f21b160b72b50a5",
+   "rank": 16,
+   "drained": false,
+   "model_revision": 0
+  },
+  {
+   "status": "loaded",
+   "mode": "concurrent",
+   "fingerprint": "920eb9f16ddf052e59044602b1ecef389349fca5b4864ebdc15ea5b500c1cc0f",
+   "rank": 16,
+   "drained": false,
+   "model_revision": 0
+  },
+  {
+   "status": "loaded",
+   "mode": "concurrent",
+   "fingerprint": "530ac5ef8c0411f00115699dd6044b2345005aeda733fee7c6d7ab973c227010",
+   "rank": 16,
+   "drained": false,
+   "model_revision": 0
+  }
+ ],
+ "keys": 48,
+ "base_batch_control": {
+  "identical": true,
+  "first_divergence_char": null,
+  "mixed_prefix": "```sql\nSELECT *\nFROM orders\nORDER BY order_date DESC\nLIMIT 10;\n```",
+  "alone_prefix": "```sql\nSELECT *\nFROM orders\nORDER BY order_date DESC\nLIMIT 10;\n```"
+ },
+ "verdict": {
+  "ratio_widest_over_base": 1.0058141899491981,
+  "throughput_go": true,
+  "throughput_nogo": false,
+  "parity_go": true
+ },
+ "multi_lora_status": {
+  "enabled": true,
+  "max_loras": 4,
+  "max_lora_rank": 16,
+  "schema": "mlx2.multi-lora.v1",
+  "registered": [
+   "lora0",
+   "lora1",
+   "lora2",
+   "lora3"
+  ],
+  "resident": {
+   "1": "lora0",
+   "2": "lora1",
+   "3": "lora2",
+   "4": "lora3"
+  },
+  "pinned_slots": 0,
+  "wrapped_modules": 48,
+  "reserved_bytes": 89128960,
+  "registered_bytes": 71303168,
+  "counts": {
+   "forwards": 1067,
+   "base_only_forwards": 301,
+   "mixed_forwards": 277,
+   "single_adapter_forwards": 489,
+   "rows_base": 1811,
+   "rows_adapter": 2502,
+   "slot_hits": 16,
+   "slot_loads": 4,
+   "slot_evictions": 0,
+   "slot_deferred": 0,
+   "registrations": 4,
+   "unregistrations": 0,
+   "structural_wraps": 48,
+   "materializations": 4,
+   "delta_applications": 36768,
+   "delta_skips": 14448
+  },
+  "rows_by_adapter": {
+   "lora0": 647,
+   "lora1": 561,
+   "lora2": 647,
+   "lora3": 647
+  }
+ }
+}

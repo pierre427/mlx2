@@ -1,0 +1,762 @@
+{
+ "schema": "mlx2.rm06-external-route-serving-smoke.v1",
+ "family": "north",
+ "expected_kind": "external_cohere_eagle",
+ "policy": {
+  "draft_model": "~/.cache/huggingface/hub/models--CohereLabs--North-Mini-Code-1.0-eagle/snapshots/8c7fcb575f107e9968b61cc93a756e6fc2c86713",
+  "num_draft": 3
+ },
+ "server_command": [
+  "~/Desktop/mlx2/.venv/bin/python",
+  "-m",
+  "mlx2.server",
+  "--model",
+  "~/mlx-models/North-Mini-Code-1.0-mlx-4bit",
+  "--port",
+  "8297",
+  "--external-draft",
+  "--execution-policy",
+  "$TMPDIR/rm06-serving-smoke-h0hg9iuz/policy.json",
+  "--qualification-mode",
+  "--max-lanes",
+  "4",
+  "--max-inflight",
+  "8",
+  "--max-context",
+  "32768",
+  "--cache-bytes",
+  "4294967296",
+  "--cache-dir",
+  "$TMPDIR/rm06-serving-smoke-h0hg9iuz/cache"
+ ],
+ "will_execute": true,
+ "steps": {
+  "nonstream": [
+   200,
+   {
+    "mlx2": {
+     "request_id": "chatcmpl-821ed7c2edd1481a9bd9e70e5d3b14f2",
+     "cache": "apcv2",
+     "cached_tokens": 0,
+     "cache_checkpoint_role": null,
+     "stop_sequence": null,
+     "parallel_prefill": null,
+     "profile": "north-mini-code-apcv2-cohere-eagle",
+     "qualification": "candidate",
+     "route_receipt": "candidate_validation",
+     "request_controls": {
+      "max_tokens": 128,
+      "max_tokens_defaulted": false,
+      "default_max_tokens": 65536,
+      "logprobs": false,
+      "top_logprobs": 0,
+      "logprob_semantics": null,
+      "thinking": true,
+      "thinking_budget": null,
+      "thinking_budget_mode": "state_aware",
+      "thinking_budget_fired": false,
+      "thinking_mechanisms": {
+       "state_aware_guard": true,
+       "history_budget": false,
+       "steering": true
+      },
+      "sampling": {
+       "temperature": 0
+      },
+      "effective_sampling": {
+       "temperature": 0,
+       "top_p": 0.95,
+       "top_k": 0,
+       "min_p": 0.0,
+       "repetition_penalty": 1.0,
+       "presence_penalty": 0.0,
+       "frequency_penalty": 0.0
+      },
+      "sampling_defaults": {
+       "schema": "mlx2.sampling-defaults.v1",
+       "explicit": [
+        "temperature"
+       ],
+       "applied": {
+        "top_p": 0.95
+       },
+       "sources": {
+        "top_p": "model card (CohereLabs/North-Mini-Code-1.0)"
+       },
+       "profile": "general",
+       "profile_reason": "general",
+       "model": "CohereLabs/North-Mini-Code-1.0",
+       "fallback": {
+        "top_k": 0,
+        "min_p": 0.0,
+        "repetition_penalty": 1.0,
+        "presence_penalty": 0.0,
+        "frequency_penalty": 0.0
+       },
+       "fallback_kind": "neutral"
+      },
+      "min_tokens": 0,
+      "thinking_guard": {
+       "schema": "mlx2.thinking-guard.v1",
+       "budget": 2048,
+       "soft_budget": 1638,
+       "think_tokens": 105,
+       "tripped": null,
+       "tripped_at": null,
+       "released_at": 105,
+       "forced_close": false,
+       "steering": {
+        "layer": 28,
+        "alpha": 0.2,
+        "hammer": 0.0,
+        "steered_steps": 47,
+        "source": "north_mini_code_commit_direction.npz:L28"
+       }
+      },
+      "batch_cohort": null,
+      "skip_writing_prefix_cache": false,
+      "session_id": null,
+      "reasoning_effort": null,
+      "effort_semantics": "thinking_toggle",
+      "context_limit": 32768,
+      "structured_output": null,
+      "tool_choice": null
+     },
+     "ordinary_compute_width": null,
+     "mtp": null,
+     "speculation": {
+      "kind": "external_cohere_eagle",
+      "execution": "external_draft_verify",
+      "current_execution": "external_draft_verify",
+      "ordinary_fallback": false,
+      "external_rounds": 60,
+      "accepted": 68,
+      "proposed": 177,
+      "round_accepted": 1,
+      "round_proposed": 1,
+      "target_width": 1,
+      "draft_width": 1,
+      "qualification_authority": "serving_route",
+      "verification": "exact",
+      "relaxed_accepts": 0
+     },
+     "spomin_live_surgery": null,
+     "approximate_kv": null,
+     "cache_capsule": null,
+     "prompt_tokens": 129,
+     "completion_tokens": 128,
+     "ttft_seconds": 0.6971274169627577,
+     "elapsed_seconds": 3.0860535839456134
+    },
+    "text_head": "Here\u2019s a simple, robust Python function that tells you whether a given string is a palindrome.  \nIt"
+   }
+  ],
+  "nonstream_s": 3.0875048330053687,
+  "repeat": [
+   200,
+   {
+    "mlx2": {
+     "request_id": "chatcmpl-b47484dc7d904cbeaacca789455971c9",
+     "cache": "apcv2",
+     "cached_tokens": 128,
+     "cache_checkpoint_role": "committed_prompt_boundary",
+     "stop_sequence": null,
+     "parallel_prefill": null,
+     "profile": "north-mini-code-apcv2-cohere-eagle",
+     "qualification": "candidate",
+     "route_receipt": "candidate_validation",
+     "request_controls": {
+      "max_tokens": 128,
+      "max_tokens_defaulted": false,
+      "default_max_tokens": 65536,
+      "logprobs": false,
+      "top_logprobs": 0,
+      "logprob_semantics": null,
+      "thinking": true,
+      "thinking_budget": null,
+      "thinking_budget_mode": "state_aware",
+      "thinking_budget_fired": false,
+      "thinking_mechanisms": {
+       "state_aware_guard": true,
+       "history_budget": false,
+       "steering": true
+      },
+      "sampling": {
+       "temperature": 0
+      },
+      "effective_sampling": {
+       "temperature": 0,
+       "top_p": 0.95,
+       "top_k": 0,
+       "min_p": 0.0,
+       "repetition_penalty": 1.0,
+       "presence_penalty": 0.0,
+       "frequency_penalty": 0.0
+      },
+      "sampling_defaults": {
+       "schema": "mlx2.sampling-defaults.v1",
+       "explicit": [
+        "temperature"
+       ],
+       "applied": {
+        "top_p": 0.95
+       },
+       "sources": {
+        "top_p": "model card (CohereLabs/North-Mini-Code-1.0)"
+       },
+       "profile": "general",
+       "profile_reason": "general",
+       "model": "CohereLabs/North-Mini-Code-1.0",
+       "fallback": {
+        "top_k": 0,
+        "min_p": 0.0,
+        "repetition_penalty": 1.0,
+        "presence_penalty": 0.0,
+        "frequency_penalty": 0.0
+       },
+       "fallback_kind": "neutral"
+      },
+      "min_tokens": 0,
+      "thinking_guard": {
+       "schema": "mlx2.thinking-guard.v1",
+       "budget": 2048,
+       "soft_budget": 1638,
+       "think_tokens": 105,
+       "tripped": null,
+       "tripped_at": null,
+       "released_at": 105,
+       "forced_close": false,
+       "steering": {
+        "layer": 28,
+        "alpha": 0.2,
+        "hammer": 0.0,
+        "steered_steps": 47,
+        "source": "north_mini_code_commit_direction.npz:L28"
+       }
+      },
+      "batch_cohort": null,
+      "skip_writing_prefix_cache": false,
+      "session_id": null,
+      "reasoning_effort": null,
+      "effort_semantics": "thinking_toggle",
+      "context_limit": 32768,
+      "structured_output": null,
+      "tool_choice": null
+     },
+     "ordinary_compute_width": null,
+     "mtp": null,
+     "speculation": {
+      "kind": "external_cohere_eagle",
+      "execution": "external_draft_verify",
+      "current_execution": "external_draft_verify",
+      "ordinary_fallback": false,
+      "external_rounds": 60,
+      "accepted": 68,
+      "proposed": 177,
+      "round_accepted": 1,
+      "round_proposed": 1,
+      "target_width": 1,
+      "draft_width": 1,
+      "qualification_authority": "serving_route",
+      "verification": "exact",
+      "relaxed_accepts": 0
+     },
+     "spomin_live_surgery": null,
+     "approximate_kv": null,
+     "cache_capsule": null,
+     "prompt_tokens": 129,
+     "completion_tokens": 128,
+     "ttft_seconds": 0.05118637497071177,
+     "elapsed_seconds": 2.3049162089591846
+    },
+    "text_head": "Here\u2019s a simple, robust Python function that tells you whether a given string is a palindrome.  \nIt"
+   }
+  ],
+  "stream": [
+   200,
+   {
+    "chunks": 73,
+    "mlx2": {
+     "request_id": "chatcmpl-86bf5dbce56f4ca0ade2884ef7b14ac1",
+     "cache": "apcv2",
+     "cached_tokens": 111,
+     "cache_checkpoint_role": "committed_prompt_boundary",
+     "stop_sequence": null,
+     "parallel_prefill": null,
+     "profile": "north-mini-code-apcv2-cohere-eagle",
+     "qualification": "candidate",
+     "route_receipt": "candidate_validation",
+     "request_controls": {
+      "max_tokens": 128,
+      "max_tokens_defaulted": false,
+      "default_max_tokens": 65536,
+      "logprobs": false,
+      "top_logprobs": 0,
+      "logprob_semantics": null,
+      "thinking": true,
+      "thinking_budget": null,
+      "thinking_budget_mode": "state_aware",
+      "thinking_budget_fired": false,
+      "thinking_mechanisms": {
+       "state_aware_guard": true,
+       "history_budget": false,
+       "steering": true
+      },
+      "sampling": {
+       "temperature": 0
+      },
+      "effective_sampling": {
+       "temperature": 0,
+       "top_p": 0.95,
+       "top_k": 0,
+       "min_p": 0.0,
+       "repetition_penalty": 1.0,
+       "presence_penalty": 0.0,
+       "frequency_penalty": 0.0
+      },
+      "sampling_defaults": {
+       "schema": "mlx2.sampling-defaults.v1",
+       "explicit": [
+        "temperature"
+       ],
+       "applied": {
+        "top_p": 0.95
+       },
+       "sources": {
+        "top_p": "model card (CohereLabs/North-Mini-Code-1.0)"
+       },
+       "profile": "general",
+       "profile_reason": "general",
+       "model": "CohereLabs/North-Mini-Code-1.0",
+       "fallback": {
+        "top_k": 0,
+        "min_p": 0.0,
+        "repetition_penalty": 1.0,
+        "presence_penalty": 0.0,
+        "frequency_penalty": 0.0
+       },
+       "fallback_kind": "neutral"
+      },
+      "min_tokens": 0,
+      "thinking_guard": {
+       "schema": "mlx2.thinking-guard.v1",
+       "budget": 2048,
+       "soft_budget": 1638,
+       "think_tokens": 16,
+       "tripped": null,
+       "tripped_at": null,
+       "released_at": 16,
+       "forced_close": false,
+       "steering": {
+        "layer": 28,
+        "alpha": 0.2,
+        "hammer": 0.0,
+        "steered_steps": 7,
+        "source": "north_mini_code_commit_direction.npz:L28"
+       }
+      },
+      "batch_cohort": null,
+      "skip_writing_prefix_cache": false,
+      "session_id": null,
+      "reasoning_effort": null,
+      "effort_semantics": "thinking_toggle",
+      "context_limit": 32768,
+      "structured_output": null,
+      "tool_choice": null
+     },
+     "ordinary_compute_width": null,
+     "mtp": null,
+     "speculation": {
+      "kind": "external_cohere_eagle",
+      "execution": "external_draft_verify",
+      "current_execution": "external_draft_verify",
+      "ordinary_fallback": false,
+      "external_rounds": 40,
+      "accepted": 36,
+      "proposed": 120,
+      "round_accepted": 1,
+      "round_proposed": 3,
+      "target_width": 1,
+      "draft_width": 1,
+      "qualification_authority": "serving_route",
+      "verification": "exact",
+      "relaxed_accepts": 0
+     },
+     "spomin_live_surgery": null,
+     "approximate_kv": null,
+     "cache_capsule": null,
+     "prompt_tokens": 125,
+     "completion_tokens": 76,
+     "ttft_seconds": 0.14550479198805988,
+     "elapsed_seconds": 1.5264952919678763
+    },
+    "text": "A mutex (short for mutual exclusion) is a synchronization primitive that ensures only one thread or process can access a shared resource at a time, preventing race conditions. It works by locking the resource; any other thread attempting to acquire the same lock will block until the lock is released."
+   }
+  ],
+  "thinking": [
+   200,
+   {
+    "mlx2": {
+     "request_id": "chatcmpl-bbc3f4e765864424a3b22c3e305bf0fc",
+     "cache": "apcv2",
+     "cached_tokens": 113,
+     "cache_checkpoint_role": "committed_prompt_boundary",
+     "stop_sequence": null,
+     "parallel_prefill": null,
+     "profile": "north-mini-code-apcv2-cohere-eagle",
+     "qualification": "candidate",
+     "route_receipt": "candidate_validation",
+     "request_controls": {
+      "max_tokens": 128,
+      "max_tokens_defaulted": false,
+      "default_max_tokens": 65536,
+      "logprobs": false,
+      "top_logprobs": 0,
+      "logprob_semantics": null,
+      "thinking": true,
+      "thinking_budget": null,
+      "thinking_budget_mode": "state_aware",
+      "thinking_budget_fired": false,
+      "thinking_mechanisms": {
+       "state_aware_guard": true,
+       "history_budget": false,
+       "steering": true
+      },
+      "sampling": {
+       "temperature": 0
+      },
+      "effective_sampling": {
+       "temperature": 0,
+       "top_p": 0.95,
+       "top_k": 0,
+       "min_p": 0.0,
+       "repetition_penalty": 1.0,
+       "presence_penalty": 0.0,
+       "frequency_penalty": 0.0
+      },
+      "sampling_defaults": {
+       "schema": "mlx2.sampling-defaults.v1",
+       "explicit": [
+        "temperature"
+       ],
+       "applied": {
+        "top_p": 0.95
+       },
+       "sources": {
+        "top_p": "model card (CohereLabs/North-Mini-Code-1.0)"
+       },
+       "profile": "general",
+       "profile_reason": "general",
+       "model": "CohereLabs/North-Mini-Code-1.0",
+       "fallback": {
+        "top_k": 0,
+        "min_p": 0.0,
+        "repetition_penalty": 1.0,
+        "presence_penalty": 0.0,
+        "frequency_penalty": 0.0
+       },
+       "fallback_kind": "neutral"
+      },
+      "min_tokens": 0,
+      "thinking_guard": {
+       "schema": "mlx2.thinking-guard.v1",
+       "budget": 2048,
+       "soft_budget": 1638,
+       "think_tokens": 67,
+       "tripped": null,
+       "tripped_at": null,
+       "released_at": 67,
+       "forced_close": false,
+       "steering": {
+        "layer": 28,
+        "alpha": 0.2,
+        "hammer": 0.0,
+        "steered_steps": 31,
+        "source": "north_mini_code_commit_direction.npz:L28"
+       }
+      },
+      "batch_cohort": null,
+      "skip_writing_prefix_cache": false,
+      "session_id": null,
+      "reasoning_effort": "high",
+      "effort_semantics": "thinking_toggle",
+      "context_limit": 32768,
+      "structured_output": null,
+      "tool_choice": null
+     },
+     "ordinary_compute_width": null,
+     "mtp": null,
+     "speculation": {
+      "kind": "external_cohere_eagle",
+      "execution": "external_draft_verify",
+      "current_execution": "external_draft_verify",
+      "ordinary_fallback": false,
+      "external_rounds": 61,
+      "accepted": 67,
+      "proposed": 180,
+      "round_accepted": 1,
+      "round_proposed": 1,
+      "target_width": 1,
+      "draft_width": 1,
+      "qualification_authority": "serving_route",
+      "verification": "exact",
+      "relaxed_accepts": 0
+     },
+     "spomin_live_surgery": null,
+     "approximate_kv": null,
+     "cache_capsule": null,
+     "prompt_tokens": 126,
+     "completion_tokens": 128,
+     "ttft_seconds": 0.13786408299347386,
+     "elapsed_seconds": 2.277933832956478
+    },
+    "text_head": "Here\u2019s a simple SQL query that returns the number of orders for each customer:\n\n```sql\nSELECT\n    c.customer_id,\n    c.customer_name,      -- optional: include the customer\u2019s name\n    COUNT(o.order_id"
+   }
+  ],
+  "sampled": [
+   200,
+   {
+    "mlx2": {
+     "request_id": "chatcmpl-46401be3117543d89fef2faba3596408",
+     "cache": "apcv2",
+     "cached_tokens": 111,
+     "cache_checkpoint_role": "committed_prompt_boundary",
+     "stop_sequence": null,
+     "parallel_prefill": null,
+     "profile": "north-mini-code-apcv2-cohere-eagle",
+     "qualification": "candidate",
+     "route_receipt": "candidate_validation",
+     "request_controls": {
+      "max_tokens": 128,
+      "max_tokens_defaulted": false,
+      "default_max_tokens": 65536,
+      "logprobs": false,
+      "top_logprobs": 0,
+      "logprob_semantics": null,
+      "thinking": true,
+      "thinking_budget": null,
+      "thinking_budget_mode": "state_aware",
+      "thinking_budget_fired": false,
+      "thinking_mechanisms": {
+       "state_aware_guard": true,
+       "history_budget": false,
+       "steering": true
+      },
+      "sampling": {
+       "temperature": 0.7
+      },
+      "effective_sampling": {
+       "temperature": 0.7,
+       "top_p": 0.95,
+       "top_k": 0,
+       "min_p": 0.0,
+       "repetition_penalty": 1.0,
+       "presence_penalty": 0.0,
+       "frequency_penalty": 0.0
+      },
+      "sampling_defaults": {
+       "schema": "mlx2.sampling-defaults.v1",
+       "explicit": [
+        "temperature"
+       ],
+       "applied": {
+        "top_p": 0.95
+       },
+       "sources": {
+        "top_p": "model card (CohereLabs/North-Mini-Code-1.0)"
+       },
+       "profile": "general",
+       "profile_reason": "general",
+       "model": "CohereLabs/North-Mini-Code-1.0",
+       "fallback": {
+        "top_k": 0,
+        "min_p": 0.0,
+        "repetition_penalty": 1.0,
+        "presence_penalty": 0.0,
+        "frequency_penalty": 0.0
+       },
+       "fallback_kind": "neutral"
+      },
+      "min_tokens": 0,
+      "thinking_guard": {
+       "schema": "mlx2.thinking-guard.v1",
+       "budget": 2048,
+       "soft_budget": 1638,
+       "think_tokens": 54,
+       "tripped": null,
+       "tripped_at": null,
+       "released_at": 54,
+       "forced_close": false,
+       "steering": {
+        "layer": 28,
+        "alpha": 0.2,
+        "hammer": 0.0,
+        "steered_steps": 23,
+        "source": "north_mini_code_commit_direction.npz:L28"
+       }
+      },
+      "batch_cohort": null,
+      "skip_writing_prefix_cache": false,
+      "session_id": null,
+      "reasoning_effort": null,
+      "effort_semantics": "thinking_toggle",
+      "context_limit": 32768,
+      "structured_output": null,
+      "tool_choice": null
+     },
+     "ordinary_compute_width": null,
+     "mtp": null,
+     "speculation": {
+      "kind": "external_cohere_eagle",
+      "execution": "external_draft_verify",
+      "current_execution": "external_draft_verify",
+      "ordinary_fallback": false,
+      "external_rounds": 59,
+      "accepted": 69,
+      "proposed": 176,
+      "round_accepted": 2,
+      "round_proposed": 2,
+      "target_width": 1,
+      "draft_width": 1,
+      "qualification_authority": "serving_route",
+      "verification": "exact",
+      "relaxed_accepts": 0
+     },
+     "spomin_live_surgery": null,
+     "approximate_kv": null,
+     "cache_capsule": null,
+     "prompt_tokens": 124,
+     "completion_tokens": 128,
+     "ttft_seconds": 0.1481055409531109,
+     "elapsed_seconds": 2.531795999966562
+    },
+    "text_head": "Here is a simple, idiomatic **FizzBuzz** implementation in JavaScript.  \nIt can be run in any browser console, Node.js, or a JavaScript environment.\n\n```js\n/**\n * Prints the classic FizzBuzz sequence "
+   }
+  ],
+  "b4": [
+   [
+    200,
+    {
+     "mlx2_kind": "external_cohere_eagle"
+    }
+   ],
+   [
+    200,
+    {
+     "mlx2_kind": "external_cohere_eagle"
+    }
+   ],
+   [
+    200,
+    {
+     "mlx2_kind": "external_cohere_eagle"
+    }
+   ],
+   [
+    200,
+    {
+     "mlx2_kind": "external_cohere_eagle"
+    }
+   ]
+  ],
+  "b4_s": 5.619658290990628
+ },
+ "failures": [],
+ "startup_s": 6.020827054977417,
+ "models": {
+  "object": "list",
+  "data": [
+   {
+    "id": "North-Mini-Code-1.0-mlx-4bit",
+    "object": "model",
+    "owned_by": "mlx2",
+    "loaded": true,
+    "capabilities": [
+     "apc_v2",
+     "continuous_batch",
+     "external_draft",
+     "grammar",
+     "layered_cache",
+     "prefix_reuse",
+     "reasoning",
+     "streaming",
+     "text",
+     "tools"
+    ],
+    "qualification": "candidate"
+   }
+  ]
+ },
+ "status": {
+  "model": "North-Mini-Code-1.0-mlx-4bit",
+  "capabilities": [
+   "apc_v2",
+   "continuous_batch",
+   "external_draft",
+   "grammar",
+   "layered_cache",
+   "prefix_reuse",
+   "reasoning",
+   "streaming",
+   "text",
+   "tools"
+  ],
+  "qualification": "candidate",
+  "scheduler": {
+   "external_rounds": 389,
+   "accepted_proposals": 554,
+   "proposed_tokens": 1479,
+   "ordinary_rounds": 2,
+   "cancelled": 0,
+   "target_max_width": 4,
+   "draft_max_width": 4,
+   "prefill_rounds": 4,
+   "paired_cache_resumes": 5,
+   "segmented_transactions": 499,
+   "segmented_rollbacks": 410,
+   "draft_fallbacks": 0,
+   "recovery_checkpoint_captures": 499,
+   "recovery_checkpoint_restores": 0,
+   "external_draft_masked_positions": 1479,
+   "external_ordinary_fast_path_rounds": 0,
+   "external_ordinary_fast_path_lanes": 0,
+   "external_draft_context_skipped": 0,
+   "external_taps_skipped": 0,
+   "external_transactions_skipped": 0,
+   "fly_relaxed_accepts": 0,
+   "external_context_token_pairings": 2161,
+   "external_verify_steer_rounds": 221,
+   "external_verify_steered_lanes": 251,
+   "reservation_bytes": 216909824
+  }
+ },
+ "scheduler": {
+  "external_rounds": 389,
+  "accepted_proposals": 554,
+  "proposed_tokens": 1479,
+  "ordinary_rounds": 2,
+  "cancelled": 0,
+  "target_max_width": 4,
+  "draft_max_width": 4,
+  "prefill_rounds": 4,
+  "paired_cache_resumes": 5,
+  "segmented_transactions": 499,
+  "segmented_rollbacks": 410,
+  "draft_fallbacks": 0,
+  "recovery_checkpoint_captures": 499,
+  "recovery_checkpoint_restores": 0,
+  "external_draft_masked_positions": 1479,
+  "external_ordinary_fast_path_rounds": 0,
+  "external_ordinary_fast_path_lanes": 0,
+  "external_draft_context_skipped": 0,
+  "external_taps_skipped": 0,
+  "external_transactions_skipped": 0,
+  "fly_relaxed_accepts": 0,
+  "external_context_token_pairings": 2161,
+  "external_verify_steer_rounds": 221,
+  "external_verify_steered_lanes": 251,
+  "reservation_bytes": 216909824
+ },
+ "server_log_tail": "2026-09-19 17:35:09,734 WARNING no reasoning signing key configured; using a random per-process reasoning signing key\n2026-09-19 17:35:12,650 INFO \"GET /health HTTP/1.1\" 503 -\n2026-09-19 17:35:12,982 INFO ubc_evict: evicted 5108.2 MB from UBC for ~/mlx-models/North-Mini-Code-1.0-mlx-4bit/model-00001-of-00004.safetensors\n2026-09-19 17:35:13,024 INFO ubc_evict: evicted 5118.0 MB from UBC for ~/mlx-models/North-Mini-Code-1.0-mlx-4bit/model-00002-of-00004.safetensors\n2026-09-19 17:35:13,067 INFO ubc_evict: evicted 5118.0 MB from UBC for ~/mlx-models/North-Mini-Code-1.0-mlx-4bit/model-00003-of-00004.safetensors\n2026-09-19 17:35:13,075 INFO ubc_evict: evicted 1015.2 MB from UBC for ~/mlx-models/North-Mini-Code-1.0-mlx-4bit/model-00004-of-00004.safetensors\n2026-09-19 17:35:13,075 INFO ubc_evict: pass complete total_mb=16359.3 elapsed_s=0.13\n2026-09-19 17:35:15,657 INFO \"GET /health HTTP/1.1\" 200 -\n2026-09-19 17:35:15,658 INFO \"GET /v1/models HTTP/1.1\" 200 -\n2026-09-19 17:35:18,745 INFO \"POST /v1/chat/completions HTTP/1.1\" 200 -\n2026-09-19 17:35:21,052 INFO \"POST /v1/chat/completions HTTP/1.1\" 200 -\n2026-09-19 17:35:21,199 INFO \"POST /v1/chat/completions HTTP/1.1\" 200 -\n2026-09-19 17:35:24,859 INFO \"POST /v1/chat/completions HTTP/1.1\" 200 -\n2026-09-19 17:35:27,392 INFO \"POST /v1/chat/completions HTTP/1.1\" 200 -\n2026-09-19 17:35:31,357 INFO \"POST /v1/chat/completions HTTP/1.1\" 200 -\n2026-09-19 17:35:32,963 INFO \"POST /v1/chat/completions HTTP/1.1\" 200 -\n2026-09-19 17:35:32,998 INFO \"POST /v1/chat/completions HTTP/1.1\" 200 -\n2026-09-19 17:35:33,012 INFO \"POST /v1/chat/completions HTTP/1.1\" 200 -\n2026-09-19 17:35:36,017 INFO \"GET /v1/status HTTP/1.1\" 200 -\n",
+ "go": true
+}

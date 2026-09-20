@@ -1,0 +1,18 @@
+{
+ "agent_id": "job-rm07-kvq-mtp-35b-r2-47711",
+ "complete_worker": {
+  "already_terminal": false,
+  "finished_at": 1789870584,
+  "status": "completed",
+  "worker_id": "d38f3f1bec2842278ca966cad684bdd7"
+ },
+ "register_worker": {
+  "worker_id": "d38f3f1bec2842278ca966cad684bdd7",
+  "workflow_id": "de3da0c2851d4ffbada94e2552bcadec"
+ },
+ "updated_at": "2026-09-20T02:16:25+00:00",
+ "worker_heartbeat": {
+  "heartbeat_at": 1789870373,
+  "worker_id": "d38f3f1bec2842278ca966cad684bdd7"
+ }
+}

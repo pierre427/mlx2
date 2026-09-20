@@ -1,0 +1,75 @@
+[cpg_job 2026-09-20T01:17:09+00:00 pid=33512] label=rm01-ab-27b-t0-v2 agent_id=job-rm01-ab-27b-t0-v2-33512 command=env PYTHONPATH=/private/tmp/mlx2-rm01-copy-mtp/src ~/Desktop/mlx2/.venv/bin/python /private/tmp/mlx2-rm01-copy-mtp/scripts/ab_copy_mtp.py --model ~/mlx-models/Qwen3.8-27B-oQ4e-mtp --reps 3 --widths 1 4 --temperatures 0 --copy-policy '{"enabled": true}' --out /private/tmp/mlx2-rm01-copy-mtp/qualification/runs/copy-mtp-20260919/ab-27b-t0-v2.json --i-own-the-gpu
+[cpg_job 2026-09-20T01:17:09+00:00 pid=33512] created workflow 65e7d3a407b44db7a41fb0bd74dd017b (cpg-job drivers); record it as workflows.cpg-job-drivers in /Users/Shared/mlxuag/cpg-radio.json to reuse it
+[cpg_job 2026-09-20T01:17:09+00:00 pid=33512] registered worker a1d9c8651ae84e00bcab013ba9e0fd25 as job-rm01-ab-27b-t0-v2-33512 in session 3c65a7827e83456a89fffdeefadec196
+[cpg_job 2026-09-20T01:17:09+00:00 pid=33512] took /Users/Shared/mlxuag/gpu.lock
+[cpg_job 2026-09-20T01:17:09+00:00 pid=33512] child pid 33516 started
+{"arm": "off", "rep": 0, "corpus": "prose", "width": 1, "temperature": 0.0, "decode_tok_s_mean": 46.44378216578437, "copy_counter_delta": {}, "metal_peak_bytes": 18904192328}
+{"arm": "off", "rep": 0, "corpus": "prose", "width": 4, "temperature": 0.0, "decode_tok_s_mean": 20.995177635078342, "copy_counter_delta": {}, "metal_peak_bytes": 21578195824}
+{"arm": "off", "rep": 0, "corpus": "code", "width": 1, "temperature": 0.0, "decode_tok_s_mean": 58.59050580579145, "copy_counter_delta": {}, "metal_peak_bytes": 21578195824}
+{"arm": "off", "rep": 0, "corpus": "code", "width": 4, "temperature": 0.0, "decode_tok_s_mean": 30.955931097695316, "copy_counter_delta": {}, "metal_peak_bytes": 21578195824}
+{"arm": "on", "rep": 0, "corpus": "prose", "width": 1, "temperature": 0.0, "decode_tok_s_mean": 45.39671572953226, "copy_counter_delta": {"self_mtp_copy_rounds": 37, "self_mtp_copy_proposed_tokens": 139, "self_mtp_copy_accepted_tokens": 83, "self_mtp_copy_probe_rounds": 0, "self_mtp_copy_gate_declines": 14, "self_mtp_copy_lookup_misses": 819}, "metal_peak_bytes": 18903886402}
+{"arm": "on", "rep": 0, "corpus": "prose", "width": 4, "temperature": 0.0, "decode_tok_s_mean": 21.061299955718997, "copy_counter_delta": {"self_mtp_copy_rounds": 0, "self_mtp_copy_proposed_tokens": 0, "self_mtp_copy_accepted_tokens": 0, "self_mtp_copy_probe_rounds": 0, "self_mtp_copy_gate_declines": 0, "self_mtp_copy_lookup_misses": 819}, "metal_peak_bytes": 21474903316}
+{"arm": "on", "rep": 0, "corpus": "code", "width": 1, "temperature": 0.0, "decode_tok_s_mean": 70.61868202614065, "copy_counter_delta": {"self_mtp_copy_rounds": 149, "self_mtp_copy_proposed_tokens": 751, "self_mtp_copy_accepted_tokens": 537, "self_mtp_copy_probe_rounds": 4, "self_mtp_copy_gate_declines": 69, "self_mtp_copy_lookup_misses": 55}, "metal_peak_bytes": 21474903316}
+{"arm": "on", "rep": 0, "corpus": "code", "width": 4, "temperature": 0.0, "decode_tok_s_mean": 31.387000004429716, "copy_counter_delta": {"self_mtp_copy_rounds": 7, "self_mtp_copy_proposed_tokens": 30, "self_mtp_copy_accepted_tokens": 23, "self_mtp_copy_probe_rounds": 0, "self_mtp_copy_gate_declines": 0, "self_mtp_copy_lookup_misses": 330}, "metal_peak_bytes": 21474903316}
+{"arm": "on", "rep": 1, "corpus": "prose", "width": 1, "temperature": 0.0, "decode_tok_s_mean": 47.05879742971285, "copy_counter_delta": {"self_mtp_copy_rounds": 35, "self_mtp_copy_proposed_tokens": 131, "self_mtp_copy_accepted_tokens": 76, "self_mtp_copy_probe_rounds": 0, "self_mtp_copy_gate_declines": 17, "self_mtp_copy_lookup_misses": 746}, "metal_peak_bytes": 18903139405}
+{"arm": "on", "rep": 1, "corpus": "prose", "width": 4, "temperature": 0.0, "decode_tok_s_mean": 20.44205412647395, "copy_counter_delta": {"self_mtp_copy_rounds": 0, "self_mtp_copy_proposed_tokens": 0, "self_mtp_copy_accepted_tokens": 0, "self_mtp_copy_probe_rounds": 0, "self_mtp_copy_gate_declines": 0, "self_mtp_copy_lookup_misses": 857}, "metal_peak_bytes": 21577822872}
+{"arm": "on", "rep": 1, "corpus": "code", "width": 1, "temperature": 0.0, "decode_tok_s_mean": 69.54596687414589, "copy_counter_delta": {"self_mtp_copy_rounds": 147, "self_mtp_copy_proposed_tokens": 745, "self_mtp_copy_accepted_tokens": 535, "self_mtp_copy_probe_rounds": 4, "self_mtp_copy_gate_declines": 69, "self_mtp_copy_lookup_misses": 52}, "metal_peak_bytes": 21577822872}
+{"arm": "on", "rep": 1, "corpus": "code", "width": 4, "temperature": 0.0, "decode_tok_s_mean": 31.106143862681048, "copy_counter_delta": {"self_mtp_copy_rounds": 12, "self_mtp_copy_proposed_tokens": 48, "self_mtp_copy_accepted_tokens": 28, "self_mtp_copy_probe_rounds": 1, "self_mtp_copy_gate_declines": 15, "self_mtp_copy_lookup_misses": 330}, "metal_peak_bytes": 21577822872}
+{"arm": "off", "rep": 1, "corpus": "prose", "width": 1, "temperature": 0.0, "decode_tok_s_mean": 46.04410900265956, "copy_counter_delta": {}, "metal_peak_bytes": 18904094154}
+{"arm": "off", "rep": 1, "corpus": "prose", "width": 4, "temperature": 0.0, "decode_tok_s_mean": 20.60712639972893, "copy_counter_delta": {}, "metal_peak_bytes": 21508196872}
+{"arm": "off", "rep": 1, "corpus": "code", "width": 1, "temperature": 0.0, "decode_tok_s_mean": 57.14844360874187, "copy_counter_delta": {}, "metal_peak_bytes": 21508196872}
+{"arm": "off", "rep": 1, "corpus": "code", "width": 4, "temperature": 0.0, "decode_tok_s_mean": 30.455937406755183, "copy_counter_delta": {}, "metal_peak_bytes": 21508196872}
+{"arm": "off", "rep": 2, "corpus": "prose", "width": 1, "temperature": 0.0, "decode_tok_s_mean": 44.72643756617841, "copy_counter_delta": {}, "metal_peak_bytes": 18903952976}
+{"arm": "off", "rep": 2, "corpus": "prose", "width": 4, "temperature": 0.0, "decode_tok_s_mean": 20.50478641569262, "copy_counter_delta": {}, "metal_peak_bytes": 21576304014}
+{"arm": "off", "rep": 2, "corpus": "code", "width": 1, "temperature": 0.0, "decode_tok_s_mean": 56.97824364735376, "copy_counter_delta": {}, "metal_peak_bytes": 21576304014}
+{"arm": "off", "rep": 2, "corpus": "code", "width": 4, "temperature": 0.0, "decode_tok_s_mean": 30.75137800358321, "copy_counter_delta": {}, "metal_peak_bytes": 21576304014}
+{"arm": "on", "rep": 2, "corpus": "prose", "width": 1, "temperature": 0.0, "decode_tok_s_mean": 44.68570906533406, "copy_counter_delta": {"self_mtp_copy_rounds": 21, "self_mtp_copy_proposed_tokens": 59, "self_mtp_copy_accepted_tokens": 21, "self_mtp_copy_probe_rounds": 0, "self_mtp_copy_gate_declines": 18, "self_mtp_copy_lookup_misses": 801}, "metal_peak_bytes": 18903158793}
+{"arm": "on", "rep": 2, "corpus": "prose", "width": 4, "temperature": 0.0, "decode_tok_s_mean": 20.769870978453515, "copy_counter_delta": {"self_mtp_copy_rounds": 0, "self_mtp_copy_proposed_tokens": 0, "self_mtp_copy_accepted_tokens": 0, "self_mtp_copy_probe_rounds": 0, "self_mtp_copy_gate_declines": 0, "self_mtp_copy_lookup_misses": 843}, "metal_peak_bytes": 21576892088}
+{"arm": "on", "rep": 2, "corpus": "code", "width": 1, "temperature": 0.0, "decode_tok_s_mean": 67.82835284078166, "copy_counter_delta": {"self_mtp_copy_rounds": 149, "self_mtp_copy_proposed_tokens": 751, "self_mtp_copy_accepted_tokens": 537, "self_mtp_copy_probe_rounds": 4, "self_mtp_copy_gate_declines": 69, "self_mtp_copy_lookup_misses": 47}, "metal_peak_bytes": 21576892088}
+{"arm": "on", "rep": 2, "corpus": "code", "width": 4, "temperature": 0.0, "decode_tok_s_mean": 30.482951690915108, "copy_counter_delta": {"self_mtp_copy_rounds": 9, "self_mtp_copy_proposed_tokens": 40, "self_mtp_copy_accepted_tokens": 24, "self_mtp_copy_probe_rounds": 0, "self_mtp_copy_gate_declines": 13, "self_mtp_copy_lookup_misses": 330}, "metal_peak_bytes": 21576892088}
+{
+  "cells": {
+    "prose/B1/t0.0": {
+      "on_mean": 45.71374074152639,
+      "off_mean": 45.73810957820745,
+      "ratio": 0.9994672093598579,
+      "worst_on_vs_best_off": 0.9621462116462707
+    },
+    "prose/B4/t0.0": {
+      "on_mean": 20.757741686882152,
+      "off_mean": 20.702363483499965,
+      "ratio": 1.0026749701031152,
+      "worst_on_vs_best_off": 0.973654735472195
+    },
+    "code/B1/t0.0": {
+      "on_mean": 69.33100058035606,
+      "off_mean": 57.57239768729569,
+      "ratio": 1.2042402846747358,
+      "worst_on_vs_best_off": 1.1576679857588306
+    },
+    "code/B4/t0.0": {
+      "on_mean": 30.99203185267529,
+      "off_mean": 30.72108216934457,
+      "ratio": 1.0088196659817241,
+      "worst_on_vs_best_off": 0.9847208793272116
+    }
+  },
+  "go": true,
+  "reasons": [],
+  "greedy_output_mismatches": 9,
+  "greedy_output_mismatches_vs_ordinary": 0,
+  "greedy_within_arm_nondeterminism": {
+    "off": 9,
+    "on": 8,
+    "ord": 0
+  },
+  "peak_memory": {
+    "on_bytes": 21577822872,
+    "off_bytes": 21578195824,
+    "delta_gib": -0.00034733861684799194
+  }
+}
+[cpg_job 2026-09-20T01:28:23+00:00 pid=33512] child exited rc=0
+[cpg_job 2026-09-20T01:28:23+00:00 pid=33512] worker a1d9c8651ae84e00bcab013ba9e0fd25 closed completed
+[cpg_job 2026-09-20T01:28:23+00:00 pid=33512] released /Users/Shared/mlxuag/gpu.lock
+[cpg_job 2026-09-20T01:28:23+00:00 pid=33512] wrote ~/Desktop/mlx-uag/results/rm01-ab-27b-t0-v2.a1.log.done

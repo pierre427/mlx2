@@ -167,6 +167,21 @@ class ResponseStore:
             self._counts["retrievals"] += 1
             return deepcopy(entry[1]["payload"])
 
+    def agent_compat_enabled(self, tenant_id, response_id):
+        """The stored response's agent-compat mode (no counters touched).
+
+        Recorded in the payload's ``mlx2.agent_compat`` receipt; responses
+        without one were produced with translation off, as on main.
+        Returns None for an unknown id.
+        """
+        key = self._key(tenant_id, response_id)
+        with self._lock:
+            entry = self._entries.get(key)
+            if entry is None:
+                return None
+            receipt = entry[1]["payload"].get("mlx2") or {}
+            return bool((receipt.get("agent_compat") or {}).get("enabled"))
+
     def context(self, tenant_id, response_id):
         key = self._key(tenant_id, response_id)
         with self._lock:

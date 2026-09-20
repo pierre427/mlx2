@@ -12,6 +12,7 @@ from pathlib import Path
 
 from ..contracts import Capability, ModelDescriptor, StatePlane
 from ..sampling_defaults import SamplingDefaults, VendorSampling
+from .external_draft_policy import ExternalDraftAdapterMixin
 
 CACHE_LAYOUT = "north-mini-code-layer-segments-v1"
 _SAFETENSORS_HEADER_LIMIT = 64 << 20
@@ -253,6 +254,13 @@ def inspect_artifact(model_path: str | Path) -> dict:
         "use_qk_norm": False,
         "norm_topk_prob": False,
         "tie_word_embeddings": None,
+        # Pinned, not decorative: upstream Cohere2Moe selects the norm *class*
+        # from rms_norm_eps (present -> RMSNorm, absent -> mean-centred
+        # LayerNorm).  Both have the same parameter shapes, so an artifact that
+        # dropped this key would load clean and silently mis-normalize.  Fail
+        # closed instead.  See runtime/models/cohere2_moe._norm_layer.
+        "rms_norm_eps": 1e-06,
+        "layer_norm_eps": 1e-05,
     }
     if any(config.get(key) != value for key, value in expected.items()):
         raise ValueError("artifact topology does not match North Mini Code 1.0")
@@ -373,6 +381,104 @@ def reasoning_policy(request: dict) -> tuple[str, bool]:
     return effort, thinking
 
 
+def chat_template(tokenizer, request: dict, *, tokenize: bool):
+    """Render a chat request with North's reasoning controls (ids or text)."""
+    effort, thinking = reasoning_policy(request)
+    return tokenizer.apply_chat_template(
+        normalize_messages(request["messages"]),
+        add_generation_prompt=True,
+        tokenize=tokenize,
+        reasoning=thinking,
+        reasoning_effort=effort,
+        skip_thinking=not thinking,
+        tools=request.get("tools") if request.get("tool_choice") != "none" else None,
+    )
+
+
+class NorthActionProcessor:
+    """Force North's action branch once its optional thinking block closes.
+
+    The mask is derived only from the committed token history.  Replaying a
+    prompt-lookup or speculative probe row therefore produces the same result
+    without advancing request-local state.
+    """
+
+    history_pure = True  # P5
+
+    def __init__(
+        self,
+        *,
+        prompt_length: int,
+        action_open,
+        thinking_close=None,
+    ):
+        self.prompt_length = int(prompt_length)
+        self.action_open = tuple(int(token) for token in action_open)
+        self.thinking_close = (
+            tuple(int(token) for token in thinking_close)
+            if thinking_close is not None
+            else None
+        )
+        if (
+            self.prompt_length < 0
+            or not self.action_open
+            or self.thinking_close == ()
+        ):
+            raise ValueError("North action constraints require nonempty markers")
+
+    def __call__(self, tokens, logits):
+        import mlx.core as mx
+
+        generated = tokens[self.prompt_length :]
+        length = generated.shape[0]
+        vocabulary = mx.arange(logits.shape[-1])
+        if self.thinking_close is None:
+            compared = min(length, len(self.action_open))
+            matches = (
+                mx.array(True)
+                if compared == 0
+                else mx.all(
+                    generated[:compared]
+                    == mx.array(self.action_open[:compared], dtype=tokens.dtype)
+                )
+            )
+            if length >= len(self.action_open):
+                allowed = matches
+            else:
+                allowed = mx.logical_and(
+                    matches, vocabulary == self.action_open[length]
+                )
+        else:
+            # The decision boundary is a suffix until ACTION_OPEN completes.
+            # Looking only at these bounded suffixes avoids rescanning an
+            # arbitrarily long reasoning history on every generated token.
+            active = mx.array(False)
+            constrained = mx.zeros((logits.shape[-1],), dtype=mx.bool_)
+            for offset in range(len(self.action_open)):
+                suffix = (*self.thinking_close, *self.action_open[:offset])
+                if length < len(suffix):
+                    continue
+                matches = mx.all(
+                    generated[-len(suffix) :]
+                    == mx.array(suffix, dtype=tokens.dtype)
+                )
+                active = mx.logical_or(active, matches)
+                constrained = mx.logical_or(
+                    constrained,
+                    mx.logical_and(
+                        matches, vocabulary == self.action_open[offset]
+                    ),
+                )
+            allowed = mx.logical_or(constrained, ~active)
+        return mx.where(
+            allowed, logits, mx.array(float("-inf"), dtype=logits.dtype)
+        )
+
+    def probe(self, tokens, logits):
+        """Speculative probes use the same pure history-derived mask."""
+        return self(tokens, logits)
+
+
 # Vendor sampling defaults.  CohereLabs/North-Mini-Code-1.0 model card:
 # temperature 1.0, top_p 0.95 for all generation, code and agentic tool use
 # alike, with no thinking-specific or task-specific profile (read 2026-09-18).
@@ -386,7 +492,8 @@ NORTH_MINI_CODE_SAMPLING = VendorSampling.single(
 )
 
 
-class NorthMiniCodeAdapter:
+class NorthMiniCodeAdapter(ExternalDraftAdapterMixin):
+    default_route = "ordinary"
     descriptor = NORTH_MINI_CODE
     sampling_defaults = NORTH_MINI_CODE_SAMPLING
     reasoning_effort_semantics = "thinking_toggle"
@@ -474,12 +581,17 @@ class NorthMiniCodeAdapter:
     # Guidance.  Start with `--thinking-budget 512`: levers 1+2 act only on a
     # detected run-on and leave healthy reasoning untouched, and they work on
     # every route.  Add `--thinking-steer-alpha 0.2` when reasoning tokens are
-    # the cost that matters; it applies on the ordinary route only (the batched
-    # decode step), pulls *all* reasoning shorter, and is unproven on problems
+    # the cost that matters; it applies to the ordinary decode step and to the
+    # verify forwards of the prompt-lookup and external-draft routes (the
+    # external EAGLE route since rm06), pulls *all* reasoning shorter, and is unproven on problems
     # that need long deliberate work - the lab saw an over-strong hammer (0.8
     # from token 140) drop a material guard from a Qwen3.8 code fix.  Keep
     # alpha <= 0.4, and re-run the calibration script if the weights,
-    # quantization or chat template change: the direction is a property of this
+    # quantization or chat template change - or if the MODEL BODY changes, which
+    # the artifact hash cannot see.  On 2026-09-20 the norm correction changed
+    # the residual geometry without touching a single weight byte; the direction
+    # had to be recalibrated and `thinking_calibration.SCHEMA` is what forced it.
+    # The direction is a property of this
     # exact artifact - which is why the server binds every direction to an
     # artifact identity and recalibrates by itself rather than reuse this one on
     # another build (see `commit_direction_assets`).  Steered lanes are not
@@ -511,7 +623,12 @@ class NorthMiniCodeAdapter:
         return dict(self.THINKING_GUARD_DEFAULTS)
 
     COMMIT_DIRECTION_ASSET = "north_mini_code_commit_direction.npz"
-    COMMIT_DIRECTION_LAYER = 28
+    # L32 on the corrected RMSNorm body (2026-09-20 recalibration): cross-trace
+    # consistency peaks there (+0.518, against +0.511 at L28), and L32 is what
+    # `choose_layer` selects.  The pre-fix asset's L28 was measured in the
+    # LayerNorm residual geometry and is void.  See
+    # `qualification/runs/north-requal-20260920/`.
+    COMMIT_DIRECTION_LAYER = 32
 
     def commit_direction_assets(self):
         """Shipped calibrations the server may use IF their identity matches.
@@ -521,8 +638,10 @@ class NorthMiniCodeAdapter:
         tokenizer, chat template and sampled weight bytes).  The shipped file is
         bound to `North-Mini-Code-1.0-mlx-4bit`; the 8-bit build, a re-quant or
         a fine-tune hashes differently and will NOT pick it up - a wrong
-        direction is a same-norm random vector, which the campaign measured as
-        worse than no steering.  For those the server runs the calibration
+        direction is a same-norm random vector, which the 2026-09-20 held-out
+        grid measured as no better than not steering at all (7,169 reasoning
+        tokens against 7,683 unsteered, versus 2,404 calibrated).  For those
+        the server runs the calibration
         itself at startup (about two minutes: 24 natural traces, a positional
         direction per layer, then a held-out check against no steering and a
         random control) and stores the result under
@@ -557,7 +676,16 @@ class NorthMiniCodeAdapter:
             raise ValueError("North Mini Code has no qualified native MTP route")
         return "north-mini-code-apcv2-ordinary"
 
+    # The vendor card serves the EAGLE head with 3 speculative tokens; a chain
+    # has no trained block, so EXTERNAL_MAX_BLOCK caps proposals per round.
+    EXTERNAL_DEFAULT_NUM_DRAFT = 3
+    EXTERNAL_MAX_BLOCK = 8
+    EXTERNAL_ROUTE_TAG = "external-cohere-eagle-v1"
+    EXTERNAL_PROFILE = "north-mini-code-apcv2-cohere-eagle"
+
     def execution_config(self, *, max_lanes, prefill_step):
+        if getattr(self, "draft_model", None) is not None:
+            return self._external_execution_config(max_lanes=max_lanes, prefill_step=prefill_step)
         return {
             "persistent": True,
             "num_draft": 0,
@@ -573,9 +701,19 @@ class NorthMiniCodeAdapter:
         return NorthCacheBudget.from_config(self.config, mtp=mtp)
 
     def __init__(self, model_path: str, *, execution_policy=None):
-        if execution_policy not in (None, {}):
-            raise ValueError("North execution policy has no qualified overrides")
+        external = self._parse_external_policy(execution_policy, family="North")
         artifact = inspect_artifact(model_path)
+        draft_record = None
+        if external:
+            # Header-only drafter inspection before any target tensor loads.
+            from .cohere_eagle import inspect_drafter
+
+            draft_record = inspect_drafter(
+                self.external_policy["draft_model"],
+                target_config=artifact["config"],
+                block_size=self.EXTERNAL_MAX_BLOCK,
+            )
+            self._check_num_draft(draft_record)
         self.identity = artifact["identity"]
         self.config = artifact["config"]
         self.environment = configure_environment()
@@ -588,14 +726,11 @@ class NorthMiniCodeAdapter:
 
         from ..runtime.models.cohere2_moe import Model, ModelArgs
         from ..runtime.tokenizer_utils import BPEStreamingDetokenizer, TokenizerWrapper
-        from ..runtime.ubc_evict import ubc_evict_paths
+        from ..runtime.ubc_evict import load_shards_evicting
 
         self.model = Model(ModelArgs.from_dict(config))
-        weights = {}
         files = [path / name for name in sorted(set(artifact["weight_map"].values()))]
-        for file in files:
-            weights.update(mx.load(str(file)))
-        weights = self.model.sanitize(weights)
+        weights = self.model.sanitize(load_shards_evicting(files))
         quant = config.get("quantization", config.get("quantization_config"))
         if quant:
             def predicate(name, module):
@@ -615,7 +750,7 @@ class NorthMiniCodeAdapter:
         self.model.eval()
         mx.eval(self.model.parameters())
         weights.clear()
-        ubc_evict_paths([str(file) for file in files])
+        mx.clear_cache()
         tokenizer = AutoTokenizer.from_pretrained(
             path, local_files_only=True, trust_remote_code=False
         )
@@ -626,20 +761,21 @@ class NorthMiniCodeAdapter:
             eos_token_ids=[eos] if isinstance(eos, int) else list(eos or []),
         )
         self.max_context = int(config["max_position_embeddings"])
+        if draft_record is not None:
+            from .cohere_eagle import load_drafter
+
+            self._bind_external_drafter(draft_record, load_drafter, NORTH_MINI_CODE)
 
     def prompt_tokens(self, request: dict) -> list[int]:
         if "messages" not in request:
             return self.tokenizer.encode(request["prompt"], add_special_tokens=False)
-        effort, thinking = reasoning_policy(request)
-        return self.tokenizer.apply_chat_template(
-            normalize_messages(request["messages"]),
-            add_generation_prompt=True,
-            tokenize=True,
-            reasoning=thinking,
-            reasoning_effort=effort,
-            skip_thinking=not thinking,
-            tools=request.get("tools") if request.get("tool_choice") != "none" else None,
-        )
+        return chat_template(self.tokenizer, request, tokenize=True)
+
+    def render_prompt(self, request: dict) -> str:
+        """Prompt text whose special-token-free encoding is ``prompt_tokens``."""
+        if "messages" not in request:
+            return request["prompt"]
+        return chat_template(self.tokenizer, request, tokenize=False)
 
     def output_parser(self, request):
         from .north_output import NorthOutputParser
@@ -652,6 +788,37 @@ class NorthMiniCodeAdapter:
             stops=request.get("stop", ()),
             parallel_tool_calls=request.get("parallel_tool_calls", True),
         )
+
+    def request_logits_processors(self, request, *, prompt_length):
+        """Constrain required/named tool requests to North's action branch."""
+        if "messages" not in request:
+            return ()
+        choice = request.get("tool_choice", "auto")
+        if choice != "required" and not isinstance(choice, dict):
+            return ()
+        if not request.get("tools"):
+            return ()
+        from .north_output import ACTION_OPEN, THINK_CLOSE
+
+        _, thinking = reasoning_policy(request)
+        action_open = self.tokenizer.encode(
+            ACTION_OPEN, add_special_tokens=False
+        )
+        thinking_close = (
+            self.tokenizer.encode(THINK_CLOSE, add_special_tokens=False)
+            if thinking
+            else None
+        )
+        return (
+            NorthActionProcessor(
+                prompt_length=prompt_length,
+                action_open=action_open,
+                thinking_close=thinking_close,
+            ),
+        )
+
+    # Item 12: opener free text must avoid for the ``auto`` tool grammar.
+    tool_call_open_marker = "<|START_ACTION|>"
 
     def tool_constraint(self, request):
         from ..output import constrained_tool_choice
@@ -672,7 +839,11 @@ class NorthMiniCodeAdapter:
             "sliding_layers": 36,
             "global_layers": 13,
             "sliding_window": 4096,
-            "speculation": "none-qualified",
+            "speculation": (
+                "external-cohere-eagle-implemented-unqualified"
+                if getattr(self, "draft_model", None) is not None
+                else "none-qualified"
+            ),
         }
 
     def close(self):
@@ -682,6 +853,7 @@ class NorthMiniCodeAdapter:
             getattr(self, name, None) is not None for name in ("model", "tokenizer")
         )
         self.model = None
+        self.draft_model = None
         self.tokenizer = None
         if had_resources:
             import mlx.core as mx

@@ -1,0 +1,26 @@
+{
+  "component": "GPU-resident accepted count for native MTP/GDN rollback",
+  "source_repository": "Splash",
+  "source_revision": "f58d36dd",
+  "source_paths": [
+    "runtime/metal/kernels/decode/sampling.metal",
+    "runtime/model/Runtime.mm"
+  ],
+  "license": "Apache-2.0",
+  "destination_paths": [
+    "src/mlx2/runtime/models/qwen4_fused_gdn_verify.py",
+    "src/mlx2/runtime/models/qwen4_exp.py",
+    "src/mlx2/runtime/models/qwen3_5.py",
+    "src/mlx2/adapters/flash_next_policy.py"
+  ],
+  "modifications": [
+    "Idea only; no Splash code copied. Splash's verifier writes the accepted draft count into a device buffer (DecodeTensor::AcceptedCount) that later kernels read.",
+    "Adapted to mlx2's compact GDN replay: a reconstruct-kernel variant derived by text replacement from the existing template kernel reads the accepted prefix from an int32 buffer per row (clamped to the tape) instead of a template parameter.",
+    "Generic GDN rollback replays the full verify width with a = b = -inf past each row's count (decay 1, beta 0), which equals the sliced replay bit for bit, as a one-graph per-row rollback.",
+    "Both are default-off: MLX_QWEN4_FUSED_GDN_DYNAMIC_ACCEPT (Flash-Next policy key fused_gdn_dynamic_accept) and MLX_LM_GDN_ARRAY_ACCEPT. The host-int fn(m) contract is unchanged."
+  ],
+  "validation": [
+    "tests/test_gpu_accept_count.py (CPU references, dispatch contract, masked == sliced replay, one hybrid.* verify sync per greedy round)",
+    "scripts/bench_gpu_accept_count.py --device gpu (dynamic vs template kernel bit equality and timing; pending GPU queue)"
+  ]
+}

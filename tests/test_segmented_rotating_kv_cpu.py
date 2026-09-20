@@ -282,3 +282,47 @@ def test_closed_transaction_cannot_pin_departed_authoritative_caches():
     assert tx.retained_nbytes == 0
     with pytest.raises(RuntimeError, match="closed"):
         tx.caches[0].make_mask(3)
+
+
+def test_integrity_scan_runs_once_per_round_not_once_per_layer():
+    """The O(lanes x layers) stamp scan is a boundary check, not a hot one.
+
+    It cost about 8 ms of Python per external round on a 49-layer target.
+    One scan opens the round (first view call) and one closes it (commit).
+    """
+    rng, rows, _ = setup([3, 9])
+    owner = SegmentedKVRows(rows)
+    assert owner.integrity_scans == 0
+    tx = owner.begin([2, 2])
+    forward(tx, rng)
+    assert owner.integrity_scans == 1
+    tx.commit([1, 1])
+    assert owner.integrity_scans == 2
+
+
+def test_outside_mutation_during_the_forward_still_fails_before_publishing():
+    rng, rows, _ = setup([3, 9])
+    owner = SegmentedKVRows(rows)
+    before = [row[0].offset for row in rows]
+    tx = owner.begin([2, 2])
+    forward(tx, rng)
+    rows[0][1].offset += 1  # another owner appends behind the transaction
+    with pytest.raises(RuntimeError, match="outside"):
+        tx.commit([1, 1])
+    rows[0][1].offset -= 1
+    tx.abort()
+    assert [row[0].offset for row in rows] == before
+
+
+def test_closed_and_stale_transactions_still_fail_on_the_hot_path():
+    rng, rows, _ = setup([3, 9])
+    owner = SegmentedKVRows(rows)
+    tx = owner.begin([2, 2])
+    forward(tx, rng)
+    tx.abort()
+    with pytest.raises(RuntimeError, match="closed KV compute view"):
+        tx.caches[0].make_mask(2)
+    second = owner.begin([1, 1])
+    second.closed = True
+    with pytest.raises(RuntimeError, match="stale or closed"):
+        second._check()

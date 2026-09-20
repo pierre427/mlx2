@@ -1,0 +1,61 @@
+[cpg_job 2026-09-19T21:03:47+00:00 pid=49559] label=rm11-tenant-auth-smoke agent_id=job-rm11-tenant-auth-smoke-49559 command=~/Desktop/mlx2/.venv/bin/python /private/tmp/mlx2-rm11-tenant-auth/scripts/smoke_tenant_auth_server.py --i-own-the-gpu --model ~/mlx-models/Qwen3.8-27B-oQ4e-mtp --port 8391 --out /private/tmp/claude-501/-Users-user-Desktop-mlx2/dcc2c62c-d339-4686-a019-625b816d27d9/scratchpad/roadmap/rm11/gpu-smoke-detail.json
+[cpg_job 2026-09-19T21:03:48+00:00 pid=49559] created workflow f53b5d640c3b4a4cbb6f8718d8ac0b16 (cpg-job drivers); record it as workflows.cpg-job-drivers in /Users/Shared/mlxuag/cpg-radio.json to reuse it
+[cpg_job 2026-09-19T21:03:48+00:00 pid=49559] registered worker dbe730e25ea2405f99968bb702f05cca as job-rm11-tenant-auth-smoke-49559 in session 3c65a7827e83456a89fffdeefadec196
+[cpg_job 2026-09-19T21:03:48+00:00 pid=49559] took /Users/Shared/mlxuag/gpu.lock
+[cpg_job 2026-09-19T21:03:48+00:00 pid=49559] child pid 49562 started
+2026-09-19 17:03:48,490 WARNING no reasoning signing key configured; using a random per-process reasoning signing key
+2026-09-19 17:03:50,404 INFO "GET /health HTTP/1.1" 503 -
+2026-09-19 17:03:51,460 INFO ubc_evict: evicted 4784.0 MB from UBC for ~/mlx-models/Qwen3.8-27B-oQ4e-mtp/model-00001-of-00004.safetensors
+2026-09-19 17:03:51,502 INFO ubc_evict: evicted 4785.1 MB from UBC for ~/mlx-models/Qwen3.8-27B-oQ4e-mtp/model-00002-of-00004.safetensors
+2026-09-19 17:03:51,544 INFO ubc_evict: evicted 4769.9 MB from UBC for ~/mlx-models/Qwen3.8-27B-oQ4e-mtp/model-00003-of-00004.safetensors
+2026-09-19 17:03:51,561 INFO ubc_evict: evicted 1846.3 MB from UBC for ~/mlx-models/Qwen3.8-27B-oQ4e-mtp/model-00004-of-00004.safetensors
+2026-09-19 17:03:51,561 INFO ubc_evict: pass complete total_mb=16185.5 elapsed_s=0.13
+2026-09-19 17:03:52,407 INFO "GET /health HTTP/1.1" 200 -
+2026-09-19 17:03:52,408 INFO "GET /v1/models HTTP/1.1" 200 -
+2026-09-19 17:03:52,824 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-19 17:03:52,825 WARNING tenant auth refused POST chat_completions from 127.0.0.1: missing
+2026-09-19 17:03:52,826 INFO "POST /v1/chat/completions HTTP/1.1" 401 -
+2026-09-19 17:03:52,826 WARNING tenant auth refused POST chat_completions from 127.0.0.1: tenant_mismatch
+2026-09-19 17:03:52,826 INFO "POST /v1/chat/completions HTTP/1.1" 403 -
+2026-09-19 17:03:52,827 INFO "GET /v1/status HTTP/1.1" 200 -
+{
+  "authenticated": [
+    200,
+    "api_key"
+  ],
+  "unauthenticated": 401,
+  "spoofed": 403,
+  "tenant_auth": {
+    "enabled": true,
+    "methods": [
+      "api_key"
+    ],
+    "header_policy": "must-match",
+    "cache_isolation": "tenant",
+    "token_max_ttl_seconds": 604800,
+    "configured_keys": 2,
+    "configured_key_tenants": 2,
+    "verified": {
+      "api_key": 3,
+      "token": 0
+    },
+    "failures": {
+      "missing": 1,
+      "malformed": 0,
+      "ambiguous": 0,
+      "unknown_key": 0,
+      "disabled": 0,
+      "bad_signature": 0,
+      "expired": 0,
+      "tenant_mismatch": 1,
+      "scope": 0
+    },
+    "tenant_header_matched": 0,
+    "tenant_header_ignored": 0
+  },
+  "go": true
+}
+[cpg_job 2026-09-19T21:03:53+00:00 pid=49559] child exited rc=0
+[cpg_job 2026-09-19T21:03:53+00:00 pid=49559] worker dbe730e25ea2405f99968bb702f05cca closed completed
+[cpg_job 2026-09-19T21:03:53+00:00 pid=49559] released /Users/Shared/mlxuag/gpu.lock
+[cpg_job 2026-09-19T21:03:53+00:00 pid=49559] wrote /private/tmp/claude-501/-Users-user-Desktop-mlx2/dcc2c62c-d339-4686-a019-625b816d27d9/scratchpad/roadmap/rm11/gpu-smoke.log.done

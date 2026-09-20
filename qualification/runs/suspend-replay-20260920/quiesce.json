@@ -1,0 +1,1 @@
+{"state": "draining", "since": 1789897795.381717, "timestamps": {"serving": 1789897784.691704, "draining": 1789897795.381717}, "drain_deadline": 1789898395.381714, "suspend_requested": false, "last_transition": {"from": "serving", "to": "draining", "at": 1789897795.381717, "result": {"status": "accepted", "drain_timeout_seconds": 600.0, "suspend": false}}}

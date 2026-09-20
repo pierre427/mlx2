@@ -12,6 +12,7 @@ import math
 from collections.abc import Mapping
 from copy import deepcopy
 
+from . import agent_compat as _agent
 from .api_resources import CapabilityUnavailable
 
 
@@ -42,6 +43,8 @@ RESPONSES_FIELDS = frozenset(
         "service_tier",
         "stream_options",
         "top_logprobs",
+        "return_progress",
+        "client_metadata",
     }
 )
 
@@ -117,7 +120,10 @@ def _responses_messages(
     model=None,
     tenant_id="default",
     rejection_counter=None,
+    compat=None,
+    counts=None,
 ) -> list[dict]:
+    compat_on = compat is not None and compat.enabled
     if isinstance(value, str):
         if not value:
             raise ValueError("input must not be empty")
@@ -129,10 +135,25 @@ def _responses_messages(
         if not isinstance(item, Mapping):
             raise ValueError("Responses input items must be objects")
         item_type = item.get("type", "message")
+        if not compat_on and (
+            item_type in {"custom_tool_call", "custom_tool_call_output"}
+            or (item_type == "function_call" and "namespace" in item)
+            or (item_type == "message" and "phase" in item)
+        ):
+            _agent.require_compat(
+                compat,
+                f"{item_type} items"
+                + (" with namespace" if item_type == "function_call" else "")
+                + (" with phase" if item_type == "message" else ""),
+            )
         if item_type == "reasoning":
             unknown = set(item) - {
                 "type", "id", "status", "summary", "encrypted_content"
             }
+            if compat_on:
+                # Codex sends ``content`` (null or reasoning_text parts).  It is
+                # never trusted: replay still requires the signed payload.
+                unknown -= {"content"}
             if unknown:
                 raise ValueError("unsupported reasoning item fields")
             summary = item.get("summary", [])
@@ -164,41 +185,56 @@ def _responses_messages(
                     {"role": "assistant", "content": "", "reasoning_content": replay}
                 )
             continue
-        if item_type == "function_call_output":
+        if item_type == "function_call_output" or (
+            compat_on and item_type == "custom_tool_call_output"
+        ):
             if set(item) - {"type", "call_id", "output", "id", "status"}:
-                raise ValueError("unsupported function_call_output fields")
+                raise ValueError(f"unsupported {item_type} fields")
             call_id, output = item.get("call_id"), item.get("output")
             if not isinstance(call_id, str) or not call_id:
-                raise ValueError("function_call_output requires call_id")
+                raise ValueError(f"{item_type} requires call_id")
+            if compat_on:
+                output = _agent.tool_output_text(output, kind=item_type)
             if not isinstance(output, str):
                 raise ValueError("function_call_output requires text output")
             messages.append(
                 {"role": "tool", "tool_call_id": call_id, "content": output}
             )
             continue
+        if compat_on and item_type == "custom_tool_call":
+            if set(item) - {"type", "call_id", "name", "input", "id", "status"}:
+                raise ValueError("unsupported custom_tool_call fields")
+            if not all(
+                isinstance(item.get(key), str) and item[key]
+                for key in ("call_id", "name")
+            ) or not isinstance(item.get("input"), str):
+                raise ValueError("custom_tool_call requires call_id, name, and input")
+            _append_call(
+                messages,
+                item["call_id"],
+                item["name"],
+                _agent.shim_arguments(item["input"]),
+                merge=True,
+            )
+            _agent.count(counts, "agent_compat_custom_tool_replays")
+            continue
         if item_type == "function_call":
-            if set(item) - {"type", "call_id", "name", "arguments", "id", "status"}:
+            allowed = {"type", "call_id", "name", "arguments", "id", "status"}
+            if compat_on:
+                allowed = allowed | {"namespace"}
+            if set(item) - allowed:
                 raise ValueError("unsupported function_call fields")
             if not all(
                 isinstance(item.get(key), str) and item[key]
                 for key in ("call_id", "name", "arguments")
             ):
                 raise ValueError("function_call requires call_id, name, and arguments")
-            messages.append(
-                {
-                    "role": "assistant",
-                    "content": "",
-                    "tool_calls": [
-                        {
-                            "id": item["call_id"],
-                            "type": "function",
-                            "function": {
-                                "name": item["name"],
-                                "arguments": item["arguments"],
-                            },
-                        }
-                    ],
-                }
+            _append_call(
+                messages,
+                item["call_id"],
+                _agent.qualified_call_name(item) if compat_on else item["name"],
+                item["arguments"],
+                merge=compat_on,
             )
             continue
         if item_type != "message":
@@ -206,15 +242,53 @@ def _responses_messages(
         role = item.get("role")
         if role not in {"user", "assistant", "system", "developer"}:
             raise ValueError("unsupported Responses message role")
+        if compat_on:
+            unknown = set(item) - {"type", "role", "content", "id", "status", "phase"}
+            if unknown:
+                raise ValueError(
+                    "unsupported Responses message fields: " + ", ".join(sorted(unknown))
+                )
+            phase = item.get("phase")
+            if phase is not None:
+                if phase not in _agent.MESSAGE_PHASES:
+                    raise ValueError("message phase must be commentary or final_answer")
+                _agent.count(counts, "agent_compat_phase_inputs")
+        content = _responses_content(item.get("content"), file_resolver=file_resolver)
+        previous = messages[-1] if messages else None
+        if (
+            compat_on
+            and role == "assistant"
+            and isinstance(content, str)
+            and previous is not None
+            and previous.get("role") == "assistant"
+            and not previous.get("content")
+            and not previous.get("tool_calls")
+        ):
+            # A replayed reasoning item precedes its message: one turn.
+            previous["content"] = content
+            continue
         messages.append(
             {
                 "role": "system" if role == "developer" else role,
-                "content": _responses_content(
-                    item.get("content"), file_resolver=file_resolver
-                ),
+                "content": content,
             }
         )
     return messages
+
+
+def _append_call(messages, call_id, name, arguments, *, merge):
+    call = {
+        "id": call_id,
+        "type": "function",
+        "function": {"name": name, "arguments": arguments},
+    }
+    previous = messages[-1] if messages else None
+    if merge and previous is not None and previous.get("role") == "assistant":
+        # Reasoning, commentary text and (parallel) calls of one model turn
+        # render as the single assistant message the model produced.
+        previous.setdefault("tool_calls", []).append(call)
+        return
+    messages.append({"role": "assistant", "content": "", "tool_calls": [call]})
 
 
 def _responses_tools(value, *, tool_backend=None):
@@ -302,8 +376,11 @@ def responses_to_chat_request(
     signer=None,
     tenant_id="default",
     model=None,
+    agent_compat=None,
+    counts=None,
 ) -> tuple[dict, dict]:
     """Translate one bounded Responses request to chat serving."""
+    compat_on = agent_compat is not None and agent_compat.enabled
     if not isinstance(body, Mapping):
         raise ValueError("request must be a JSON object")
     unknown = set(body) - RESPONSES_FIELDS
@@ -315,6 +392,24 @@ def responses_to_chat_request(
         raise ValueError("store must be boolean")
     if "user" in body and not isinstance(body["user"], str):
         raise ValueError("user must be text")
+    if "client_metadata" in body:
+        # Client telemetry (Codex sends turn/session ids).  Validated and
+        # ignored like ``user``: it never changes local execution.
+        client_metadata = body["client_metadata"]
+        if (
+            not isinstance(client_metadata, Mapping)
+            or len(client_metadata) > 32
+            or any(
+                not isinstance(key, str)
+                or not isinstance(value, str)
+                or len(key) > 256
+                or len(value) > 8192
+                for key, value in client_metadata.items()
+            )
+        ):
+            raise ValueError(
+                "client_metadata must map at most 32 text keys to text values"
+            )
     if "prompt_cache_key" in body and (
         not isinstance(body["prompt_cache_key"], str)
         or not body["prompt_cache_key"]
@@ -362,6 +457,8 @@ def responses_to_chat_request(
         model=model or body.get("model"),
         tenant_id=tenant_id,
         rejection_counter=rejection_counter,
+        compat=agent_compat,
+        counts=counts,
     )
     messages = list(context_messages)
     instructions = body.get("instructions")
@@ -382,6 +479,7 @@ def responses_to_chat_request(
         "tool_choice": "tool_choice",
         "top_p": "top_p",
         "top_logprobs": "top_logprobs",
+        "return_progress": "return_progress",
     }
     for source, target in aliases.items():
         if source in body:
@@ -404,14 +502,28 @@ def responses_to_chat_request(
             raise ValueError("reasoning.summary must be auto, concise, or detailed")
     choice = request.get("tool_choice")
     if isinstance(choice, Mapping) and set(choice) == {"type", "name"}:
-        if choice.get("type") != "function":
+        allowed_choice = {"function", "custom"} if compat_on else {"function"}
+        if choice.get("type") not in allowed_choice:
             raise ValueError("mlx2 Responses supports function tool_choice only")
         request["tool_choice"] = {
             "type": "function",
             "function": {"name": choice.get("name")},
         }
     tool_executors = {}
-    if "tools" in body:
+    tool_map = None
+    if "tools" in body and compat_on and tool_backend is None:
+        tools, tool_map = _agent.translate_responses_tools(
+            body["tools"], agent_compat, counts
+        )
+        if tools:
+            request["tools"] = tools
+        else:
+            # Every declared tool was hosted and dropped: plain generation.
+            request.pop("parallel_tool_calls", None)
+            if request.get("tool_choice") not in {None, "auto", "none"}:
+                raise ValueError("tool_choice names a tool this route cannot run")
+            request.pop("tool_choice", None)
+    elif "tools" in body:
         request["tools"], tool_executors = _responses_tools(
             body["tools"], tool_backend=tool_backend
         )
@@ -429,6 +541,11 @@ def responses_to_chat_request(
         options["include"] = include
     if rejection_counter[0]:
         options["reasoning_signature_rejections"] = rejection_counter[0]
+    if compat_on:
+        options["agent_compat"] = tool_map or {
+            "custom": {}, "namespaces": {}, "dropped": []
+        }
+        _agent.count(counts, "agent_compat_requests")
     return request, options
 
 
@@ -520,16 +637,24 @@ def _validate_schema_value(schema, value, path="arguments"):
                 _validate_schema_value(properties[name], item, f"{path}.{name}")
 
 
-def enforce_tool_contract(body: Mapping, calls: list[dict]) -> None:
+def enforce_tool_contract(
+    body: Mapping,
+    calls: list[dict],
+    *,
+    finish_reason: str | None = None,
+) -> None:
     """Fail closed if generated calls violate requested choice/schema controls."""
     choice = body.get("tool_choice", "auto")
+    exhausted = finish_reason == "length" and not calls
     if choice == "none" and calls:
         raise ToolContractError("model emitted a tool call while tool_choice was none")
-    if choice == "required" and not calls:
+    if choice == "required" and not calls and not exhausted:
         raise ToolContractError("model did not emit a required tool call")
     if isinstance(choice, Mapping):
         required_name = choice["function"]["name"]
-        if not calls or any(call.get("function", {}).get("name") != required_name for call in calls):
+        if (not calls and not exhausted) or any(
+            call.get("function", {}).get("name") != required_name for call in calls
+        ):
             raise ToolContractError(
                 f"model did not exclusively call required function {required_name!r}"
             )
@@ -820,6 +945,9 @@ def responses_payload(
     signer=None,
     tenant_id="default",
     include=(),
+    agent_compat=None,
+    compat_tool_map=None,
+    counts=None,
 ):
     """Render a completed chat choice as a Responses API object."""
     message = choice["message"]
@@ -878,7 +1006,7 @@ def responses_payload(
                 "arguments": function["arguments"],
             }
         )
-    return {
+    payload = {
         "id": response_identifier,
         "object": "response",
         "created_at": int(job.created),
@@ -901,3 +1029,9 @@ def responses_payload(
         },
         "mlx2": receipt,
     }
+    if compat_tool_map is not None and agent_compat is not None:
+        payload["mlx2"] = dict(receipt) if isinstance(receipt, Mapping) else receipt
+        _agent.rewrite_responses_output(
+            payload, compat_tool_map, agent_compat, counts
+        )
+    return payload

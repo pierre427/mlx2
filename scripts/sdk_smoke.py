@@ -187,6 +187,7 @@ def run_client(base_url, *, scripted=True):
 
     def chat_nonstream():
         response = openai_client.chat.completions.create(
+            temperature=0,
             model=MODEL,
             messages=[{
                 "role": "user",
@@ -225,6 +226,7 @@ def run_client(base_url, *, scripted=True):
 
     def chat_stream():
         stream = openai_client.chat.completions.create(
+            temperature=0,
             model=MODEL,
             messages=[{"role": "user", "content": "stream text"}],
             stream=True,
@@ -252,6 +254,7 @@ def run_client(base_url, *, scripted=True):
 
     def chat_tools():
         parallel = openai_client.chat.completions.create(
+            temperature=0,
             model=MODEL,
             messages=[{
                 "role": "user",
@@ -270,6 +273,7 @@ def run_client(base_url, *, scripted=True):
             call.function.name in {"weather", "clock"} for call in calls
         )
         named = openai_client.chat.completions.create(
+            temperature=0,
             model=MODEL,
             messages=[{
                 "role": "user",
@@ -304,6 +308,7 @@ def run_client(base_url, *, scripted=True):
 
     def responses_nonstream():
         response = openai_client.responses.create(
+            temperature=0,
             model=MODEL,
             input=(
                 "__json__" if scripted else
@@ -359,6 +364,7 @@ def run_client(base_url, *, scripted=True):
 
     def responses_tools():
         first = openai_client.responses.create(
+            temperature=0,
             model=MODEL,
             input=(
                 "call a tool" if scripted else
@@ -370,6 +376,7 @@ def run_client(base_url, *, scripted=True):
         )
         call = next(item for item in first.output if item.type == "function_call")
         second = openai_client.responses.create(
+            temperature=0,
             model=MODEL,
             input=[
                 {
@@ -395,6 +402,7 @@ def run_client(base_url, *, scripted=True):
 
     def responses_store():
         first = openai_client.responses.create(
+            temperature=0,
             model=MODEL,
             input="stored first turn",
             store=True,
@@ -406,6 +414,7 @@ def run_client(base_url, *, scripted=True):
         items = openai_client.responses.input_items.list(first.id)
         assert len(items.data) == 1 and items.data[0].type == "message"
         continued = openai_client.responses.create(
+            temperature=0,
             model=MODEL,
             input="continued turn",
             previous_response_id=first.id,
@@ -443,6 +452,7 @@ def run_client(base_url, *, scripted=True):
             {"type": "tool", "name": "weather"},
         ):
             message = anthropic_client.messages.create(
+                temperature=0,
                 model=MODEL,
                 max_tokens=64,
                 system=[
@@ -464,6 +474,7 @@ def run_client(base_url, *, scripted=True):
 
     def anthropic_tool_roundtrip():
         first = anthropic_client.messages.create(
+            temperature=0,
             model=MODEL,
             max_tokens=64,
             messages=[{
@@ -478,6 +489,7 @@ def run_client(base_url, *, scripted=True):
         )
         call = next(block for block in first.content if block.type == "tool_use")
         second = anthropic_client.messages.create(
+            temperature=0,
             model=MODEL,
             max_tokens=64,
             messages=[
@@ -499,6 +511,7 @@ def run_client(base_url, *, scripted=True):
 
     def anthropic_thinking_roundtrip():
         first = anthropic_client.messages.create(
+            temperature=0,
             model=MODEL,
             max_tokens=2048,
             messages=[{"role": "user", "content": "think"}],
@@ -507,6 +520,7 @@ def run_client(base_url, *, scripted=True):
         thinking = next(block for block in first.content if block.type == "thinking")
         assert thinking.signature
         second = anthropic_client.messages.create(
+            temperature=0,
             model=MODEL,
             max_tokens=2048,
             messages=[
@@ -520,14 +534,16 @@ def run_client(base_url, *, scripted=True):
 
     def anthropic_stops():
         stopped = anthropic_client.messages.create(
+            temperature=0,
             model=MODEL,
             max_tokens=64,
             stop_sequences=["END"],
-            messages=[{"role": "user", "content": "__stop_sequence__" if scripted else "Write A, then the exact marker END, then B."}],
+            messages=[{"role": "user", "content": "__stop_sequence__" if scripted else "Repeat this line exactly and output nothing else: A END B"}],
             thinking={"type": "disabled"},
         )
         assert stopped.stop_reason == "stop_sequence" and stopped.stop_sequence == "END"
         limited = anthropic_client.messages.create(
+            temperature=0,
             model=MODEL,
             max_tokens=1,
             messages=[{"role": "user", "content": "__length__"}],
@@ -564,6 +580,7 @@ def run_client(base_url, *, scripted=True):
     def anthropic_errors():
         try:
             anthropic_client.messages.create(
+                temperature=0,
                 model="not-loaded",
                 max_tokens=8,
                 messages=[{"role": "user", "content": "hello"}],
@@ -574,6 +591,7 @@ def run_client(base_url, *, scripted=True):
             raise AssertionError("unknown model did not raise NotFoundError")
         try:
             anthropic_client.messages.create(
+                temperature=0,
                 model=MODEL,
                 max_tokens=8,
                 messages=[],

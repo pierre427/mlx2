@@ -1,0 +1,20 @@
+### job 13-progress-tokenize
+### started 2026-09-20T00:26:20
+### worktree /private/tmp/mlx2-splash-13-progress-tokenize
+### models ~/mlx-models/North-Mini-Code-1.0-mlx-4bit ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP
+    ok   /private/tmp/mlx2-splash-13-progress-tokenize/src/mlx2/server.py
+    ok   model ~/mlx-models/North-Mini-Code-1.0-mlx-4bit
+    ok   model ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP
+[runner] model North-Mini-Code-1.0-mlx-4bit
+[runner] server pid 87922  log /private/tmp/claude-501/-Users-user-Desktop-mlx2/b569b1f6-d687-4876-a42a-e5fdf0abeabc/scratchpad/gpu-queue/13-out/North-Mini-Code-1.0-mlx-4bit.log
+[runner] ready: http://127.0.0.1:8313/health after 5s
+{"model": "North-Mini-Code-1.0-mlx-4bit", "failures": [], "updates": 5, "wall_off": 0.215, "wall_on": 1.922, "progress_tail": [{"processed": 6421, "total": 6422, "cached": 0, "replay": false, "time_ms": 1701}, {"processed": 6422, "total": 6422, "cached": 0, "replay": false, "time_ms": 1744}]}
+{"model": "North-Mini-Code-1.0-mlx-4bit", "failures": [], "updates": 5, "wall_off": 1.763, "wall_on": 1.845, "progress_tail": [{"processed": 6421, "total": 6422, "cached": 0, "replay": false, "time_ms": 1641}, {"processed": 6422, "total": 6422, "cached": 0, "replay": false, "time_ms": 1667}]}
+[runner] server stopped
+[runner] model Qwen3.8-Flash-Next-MLX-4bit-MTP
+[runner] server pid 87972  log /private/tmp/claude-501/-Users-user-Desktop-mlx2/b569b1f6-d687-4876-a42a-e5fdf0abeabc/scratchpad/gpu-queue/13-out/Qwen3.8-Flash-Next-MLX-4bit-MTP.log
+[runner] ready: http://127.0.0.1:8313/health after 10s
+{"model": "Qwen3.8-Flash-Next-MLX-4bit-MTP", "failures": [], "updates": 5, "wall_off": 0.092, "wall_on": 5.413, "progress_tail": [{"processed": 8192, "total": 8216, "cached": 0, "replay": false, "time_ms": 5208}, {"processed": 8216, "total": 8216, "cached": 0, "replay": false, "time_ms": 5350}]}
+{"model": "Qwen3.8-Flash-Next-MLX-4bit-MTP", "failures": [], "updates": 1, "wall_off": 0.091, "wall_on": 0.518, "progress_tail": [{"processed": 8216, "total": 8216, "cached": 8215, "replay": false, "time_ms": 461}]}
+[runner] server stopped
+### finished 2026-09-20T00:27:06 status=ok duration=46s

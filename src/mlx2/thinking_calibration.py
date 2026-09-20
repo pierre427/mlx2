@@ -29,7 +29,16 @@ from pathlib import Path
 
 log = logging.getLogger(__name__)
 
-SCHEMA = "mlx2.commit-direction.v1"
+# v2 (2026-09-20): North's body math changed.  Until then mlx2 ran North's
+# Cohere2Moe norms as mean-centred LayerNorm(eps=1e-5) where the reference uses
+# RMSNorm(eps=1e-6) (see runtime/models/cohere2_moe._norm_layer).  A commit
+# direction is a property of the residual geometry at a given layer, so every v1
+# direction -- including the shipped North asset -- was measured in the wrong
+# geometry and must not be reused.  The identity hash covers artifact *files*
+# only and would still have matched, so the schema string is what fails this
+# closed: v1 files no longer bind, and the server recalibrates at startup
+# behind its own held-out and random-control gates (or serves guard-only).
+SCHEMA = "mlx2.commit-direction.v2"
 COMMIT_TAIL = 24
 REFLECT_FRACTION = 0.45
 # Fail-closed gates for an automatic calibration.

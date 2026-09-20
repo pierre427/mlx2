@@ -1,0 +1,486 @@
+[
+ {
+  "model": "<text>",
+  "instructions": "<text>",
+  "input": [
+   {
+    "type": "message",
+    "role": "developer",
+    "content": [
+     {
+      "type": "input_text",
+      "text": "<text>"
+     },
+     {
+      "type": "input_text",
+      "text": "<text>"
+     }
+    ]
+   },
+   {
+    "type": "message",
+    "role": "user",
+    "content": [
+     {
+      "type": "input_text",
+      "text": "<text>"
+     }
+    ]
+   },
+   {
+    "type": "message",
+    "role": "user",
+    "content": [
+     {
+      "type": "input_text",
+      "text": "<text>"
+     }
+    ]
+   }
+  ],
+  "tools": [
+   {
+    "type": "function",
+    "name": "exec_command",
+    "description": "<text>",
+    "strict": false,
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "arg": {
+       "type": "string"
+      }
+     },
+     "required": [],
+     "additionalProperties": false
+    }
+   },
+   {
+    "type": "function",
+    "name": "write_stdin",
+    "description": "<text>",
+    "strict": false,
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "arg": {
+       "type": "string"
+      }
+     },
+     "required": [],
+     "additionalProperties": false
+    }
+   },
+   {
+    "type": "function",
+    "name": "update_plan",
+    "description": "<text>",
+    "strict": false,
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "arg": {
+       "type": "string"
+      }
+     },
+     "required": [],
+     "additionalProperties": false
+    }
+   },
+   {
+    "type": "function",
+    "name": "request_user_input",
+    "description": "<text>",
+    "strict": false,
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "arg": {
+       "type": "string"
+      }
+     },
+     "required": [],
+     "additionalProperties": false
+    }
+   },
+   {
+    "type": "custom",
+    "name": "apply_patch",
+    "description": "<text>",
+    "format": {
+     "type": "grammar",
+     "syntax": "lark",
+     "definition": "start: begin_patch hunk+ end_patch\nbegin_patch: \"*** Begin Patch\" LF\nend_patch: \"*** End Patch\" LF?\n\nhunk: add_hunk | delete_hunk | update_hunk\nadd_hunk: \"*** Add File: \" filename LF add_line+\ndelete_hunk: \"*** Delete File: \" filename LF\nupdate_hunk: \"*** Update File: \" filename LF change_move? change?\n\nfilename: /(.+)/\nadd_line: \"+\" /(.*)/ LF -> line\n\nchange_move: \"*** Move to: \" filename LF\nchange: (change_context | change_line)+ eof_line?\nchange_context: (\"@@\" | \"@@ \" /(.+)/) LF\nchange_line: (\"+\" | \"-\" | \" \") /(.*)/ LF\neof_line: \"*** End of File\" LF\n\n%import common.LF\n"
+    }
+   },
+   {
+    "type": "function",
+    "name": "view_image",
+    "description": "<text>",
+    "strict": false,
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "arg": {
+       "type": "string"
+      }
+     },
+     "required": [],
+     "additionalProperties": false
+    }
+   },
+   {
+    "type": "function",
+    "name": "get_goal",
+    "description": "<text>",
+    "strict": false,
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "arg": {
+       "type": "string"
+      }
+     },
+     "required": [],
+     "additionalProperties": false
+    }
+   },
+   {
+    "type": "function",
+    "name": "create_goal",
+    "description": "<text>",
+    "strict": false,
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "arg": {
+       "type": "string"
+      }
+     },
+     "required": [],
+     "additionalProperties": false
+    }
+   },
+   {
+    "type": "function",
+    "name": "update_goal",
+    "description": "<text>",
+    "strict": false,
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "arg": {
+       "type": "string"
+      }
+     },
+     "required": [],
+     "additionalProperties": false
+    }
+   },
+   {
+    "type": "tool_search",
+    "execution": "client",
+    "description": "<text>",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "arg": {
+       "type": "string"
+      }
+     },
+     "required": [],
+     "additionalProperties": false
+    }
+   },
+   {
+    "type": "web_search",
+    "external_web_access": false,
+    "search_content_types": [
+     "<text>",
+     "<text>"
+    ]
+   }
+  ],
+  "tool_choice": "auto",
+  "parallel_tool_calls": true,
+  "reasoning": {
+   "effort": "medium"
+  },
+  "store": false,
+  "stream": true,
+  "include": [
+   "reasoning.encrypted_content"
+  ],
+  "prompt_cache_key": "<cache-key>",
+  "text": {
+   "verbosity": "low"
+  },
+  "client_metadata": {
+   "thread_id": "<id>",
+   "x-codex-installation-id": "<id>",
+   "turn_id": "<id>",
+   "session_id": "<id>",
+   "x-codex-window-id": "<id>",
+   "x-codex-turn-metadata": "<id>"
+  }
+ },
+ {
+  "model": "<text>",
+  "instructions": "<text>",
+  "input": [
+   {
+    "type": "message",
+    "role": "developer",
+    "content": [
+     {
+      "type": "input_text",
+      "text": "<text>"
+     },
+     {
+      "type": "input_text",
+      "text": "<text>"
+     }
+    ]
+   },
+   {
+    "type": "message",
+    "role": "user",
+    "content": [
+     {
+      "type": "input_text",
+      "text": "<text>"
+     }
+    ]
+   },
+   {
+    "type": "message",
+    "role": "user",
+    "content": [
+     {
+      "type": "input_text",
+      "text": "<text>"
+     }
+    ]
+   },
+   {
+    "type": "reasoning",
+    "summary": [
+     {
+      "type": "summary_text",
+      "text": "<text>"
+     }
+    ],
+    "content": null,
+    "encrypted_content": "mlx2.reasoning.v1.081bdfd0d4aa6943.Y2FyZWZ1bCB0aG91Z2h0.Ce-IxfgsMlqJYzjAUS_on3EAJB9gMHG085ezItoNAyQ"
+   },
+   {
+    "type": "message",
+    "role": "assistant",
+    "content": [
+     {
+      "type": "output_text",
+      "text": "<text>"
+     }
+    ],
+    "phase": "commentary"
+   },
+   {
+    "type": "custom_tool_call",
+    "status": "completed",
+    "call_id": "<call_id>",
+    "name": "apply_patch",
+    "input": "*** Begin Patch\n*** Add File: hello.txt\n+hello from mlx2\n*** End Patch\n"
+   },
+   {
+    "type": "custom_tool_call_output",
+    "call_id": "<call_id>",
+    "output": "<text>"
+   }
+  ],
+  "tools": [
+   {
+    "type": "function",
+    "name": "exec_command",
+    "description": "<text>",
+    "strict": false,
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "arg": {
+       "type": "string"
+      }
+     },
+     "required": [],
+     "additionalProperties": false
+    }
+   },
+   {
+    "type": "function",
+    "name": "write_stdin",
+    "description": "<text>",
+    "strict": false,
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "arg": {
+       "type": "string"
+      }
+     },
+     "required": [],
+     "additionalProperties": false
+    }
+   },
+   {
+    "type": "function",
+    "name": "update_plan",
+    "description": "<text>",
+    "strict": false,
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "arg": {
+       "type": "string"
+      }
+     },
+     "required": [],
+     "additionalProperties": false
+    }
+   },
+   {
+    "type": "function",
+    "name": "request_user_input",
+    "description": "<text>",
+    "strict": false,
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "arg": {
+       "type": "string"
+      }
+     },
+     "required": [],
+     "additionalProperties": false
+    }
+   },
+   {
+    "type": "custom",
+    "name": "apply_patch",
+    "description": "<text>",
+    "format": {
+     "type": "grammar",
+     "syntax": "lark",
+     "definition": "start: begin_patch hunk+ end_patch\nbegin_patch: \"*** Begin Patch\" LF\nend_patch: \"*** End Patch\" LF?\n\nhunk: add_hunk | delete_hunk | update_hunk\nadd_hunk: \"*** Add File: \" filename LF add_line+\ndelete_hunk: \"*** Delete File: \" filename LF\nupdate_hunk: \"*** Update File: \" filename LF change_move? change?\n\nfilename: /(.+)/\nadd_line: \"+\" /(.*)/ LF -> line\n\nchange_move: \"*** Move to: \" filename LF\nchange: (change_context | change_line)+ eof_line?\nchange_context: (\"@@\" | \"@@ \" /(.+)/) LF\nchange_line: (\"+\" | \"-\" | \" \") /(.*)/ LF\neof_line: \"*** End of File\" LF\n\n%import common.LF\n"
+    }
+   },
+   {
+    "type": "function",
+    "name": "view_image",
+    "description": "<text>",
+    "strict": false,
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "arg": {
+       "type": "string"
+      }
+     },
+     "required": [],
+     "additionalProperties": false
+    }
+   },
+   {
+    "type": "function",
+    "name": "get_goal",
+    "description": "<text>",
+    "strict": false,
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "arg": {
+       "type": "string"
+      }
+     },
+     "required": [],
+     "additionalProperties": false
+    }
+   },
+   {
+    "type": "function",
+    "name": "create_goal",
+    "description": "<text>",
+    "strict": false,
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "arg": {
+       "type": "string"
+      }
+     },
+     "required": [],
+     "additionalProperties": false
+    }
+   },
+   {
+    "type": "function",
+    "name": "update_goal",
+    "description": "<text>",
+    "strict": false,
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "arg": {
+       "type": "string"
+      }
+     },
+     "required": [],
+     "additionalProperties": false
+    }
+   },
+   {
+    "type": "tool_search",
+    "execution": "client",
+    "description": "<text>",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "arg": {
+       "type": "string"
+      }
+     },
+     "required": [],
+     "additionalProperties": false
+    }
+   },
+   {
+    "type": "web_search",
+    "external_web_access": false,
+    "search_content_types": [
+     "<text>",
+     "<text>"
+    ]
+   }
+  ],
+  "tool_choice": "auto",
+  "parallel_tool_calls": true,
+  "reasoning": {
+   "effort": "medium"
+  },
+  "store": false,
+  "stream": true,
+  "include": [
+   "reasoning.encrypted_content"
+  ],
+  "prompt_cache_key": "<cache-key>",
+  "text": {
+   "verbosity": "low"
+  },
+  "client_metadata": {
+   "x-codex-turn-metadata": "<id>",
+   "thread_id": "<id>",
+   "session_id": "<id>",
+   "x-codex-window-id": "<id>",
+   "x-codex-installation-id": "<id>",
+   "turn_id": "<id>"
+  }
+ }
+]

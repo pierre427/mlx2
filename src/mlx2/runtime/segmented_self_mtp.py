@@ -108,6 +108,10 @@ _ZERO = {
     "proposal_ns": 0,
     "commit_ns": 0,
     "zero_depth_fast_rounds": 0,
+    # Approximate-KV composition: segmented layers whose rows are quantized
+    # (target-only kv_q8/kv_k8v4 under compose_mtp) and their attention calls.
+    "quantized_kv_segmented_layers": 0,
+    "quantized_kv_segmented_attention_calls": 0,
 }
 for _width in range(1, 10):
     for _event in ("requests", "engaged", "declined"):

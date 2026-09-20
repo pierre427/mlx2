@@ -1,0 +1,24 @@
+{
+  "component": "preempt-and-replay under memory pressure (memory_preemption policy)",
+  "source_repository": "Splash",
+  "source_revision": "f58d36dd",
+  "source_paths": [
+    "runtime/engine/Engine.cpp",
+    "runtime/engine/Scheduler.cpp"
+  ],
+  "license": "Apache-2.0",
+  "destination_paths": [
+    "src/mlx2/memory_preemption.py",
+    "src/mlx2/serving.py"
+  ],
+  "modifications": [
+    "Design only; no code copied. Took Splash's suspendForGrowth/admitQueued shape: a blocked lane yields, its committed history is replayed through normal prefill, and while any preempted request waits admission recovers one lane at a time.",
+    "Victim is the youngest preemptible lane by first admission time (Splash: lowest priority, then least completed work).",
+    "Replay goes through mlx2's ordinary admission path and APCv2 lookup; the replay prefix is leased at preemption so pressure eviction cannot reclaim it while the job waits.",
+    "Added exactness gating Splash does not need: decode-phase lanes replay only when greedy or ordinary-route sampled (LaneRNG rebuilt from seed + delivered draws) and every logits processor declares history_pure; cohorts, parallel samples, capsules, multimodal, approximate, steered and int8-prefill decode lanes are never preempted.",
+    "Replay cap (2 per job) and drain cancellation (503) are mlx2 additions; the triggers are mlx2's existing stall watchdog plus a host pressure level."
+  ],
+  "validation": [
+    "tests/test_suspend_replay.py (CPU: greedy decode/prefill, sampled ordinary and history-pure-processor replays token-identical on a tiny hybrid model; scripted stall/pause/cap/drain state machine)"
+  ]
+}

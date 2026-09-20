@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import argparse
 import base64
+import contextlib
 from copy import deepcopy
+from dataclasses import dataclass
 from email import policy as email_policy
 from email.parser import BytesParser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -13,7 +15,6 @@ import logging
 import math
 import hmac
 import ipaddress
-import itertools
 import os
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlsplit
@@ -22,7 +23,6 @@ import re
 import select
 import signal
 import socket
-import stat
 import threading
 import time
 import struct
@@ -31,8 +31,10 @@ import uuid
 from .serving import (
     AdmissionClosed,
     Overloaded,
+    PromptTemplateFailure,
     ServingEngine,
     SuspendUnavailable,
+    take_prompt_progress,
 )
 from .logprobs import MAX_TOP_LOGPROBS, wants_logprobs
 from .request_limits import (
@@ -60,6 +62,20 @@ from .api_resources import (
     ResourceNotFound,
     ResponseStore,
 )
+from .agent_compat import (
+    AgentCompat,
+    AgentCompatError,
+    AgentCompatPolicy,
+    load_tenant_policy,
+    fold_system_messages,
+)
+from .http_security import (
+    GateRejection,
+    authorize as authorize_http_request,
+    load_api_key,
+    load_secret_file,
+    policy_for_bind,
+)
 from .anthropic_compat import (
     AnthropicStreamTranslator,
     ModelOutputError,
@@ -82,38 +98,66 @@ ADMIN_PREFETCH_LIMIT = 32
 
 def load_admin_token(path):
     """Load an optional admin bearer token from an owner-only regular file."""
-    candidate = Path(path).expanduser().resolve()
-    with candidate.open("rb") as token_file:
-        metadata = os.fstat(token_file.fileno())
-        if not stat.S_ISREG(metadata.st_mode):
-            raise ValueError("--admin-token-file must be a regular file")
-        if metadata.st_uid != os.getuid():
-            raise ValueError("--admin-token-file must be owned by the process uid")
-        if stat.S_IMODE(metadata.st_mode) != 0o600:
-            raise ValueError("--admin-token-file permissions must be exactly 0600")
-        raw = token_file.read(4097)
-    if len(raw) > 4096:
-        raise ValueError("--admin-token-file must contain at most 4096 bytes")
-    raw = raw.rstrip(b"\r\n")
-    if not raw or b"\n" in raw or b"\r" in raw:
-        raise ValueError("--admin-token-file must contain one nonempty token")
+    return load_secret_file(path, flag="--admin-token-file")
+
+
+# CONTRACT-STUB(owner=item 11)
+def load_api_key_file(path):
+    """Load an API key from an owner-only 0600 regular file."""
     try:
-        return raw.decode("utf-8")
-    except UnicodeDecodeError as error:
-        raise ValueError("--admin-token-file must contain UTF-8 text") from error
+        return load_admin_token(path)
+    except ValueError as error:
+        raise ValueError(
+            str(error).replace("--admin-token-file", "--api-key-file")
+        ) from error
+
+
+def resolve_reasoning_signing_key(args):
+    """Persist the reasoning signing key beside durable API state.
+
+    Stored Responses outlive the process under ``--api-state-dir``; a random
+    per-process key would make every signature issued before a restart fail
+    verification. Configured sources and the explicit ephemeral opt-out win.
+    """
+    if (
+        args.api_state_dir is None
+        or args.reasoning_signing_key_file
+        or args.reasoning_signing_key_env
+        or args.reasoning_signing_ephemeral
+    ):
+        return None
+    from .reasoning_signatures import PERSISTENT_KEY_NAME, ensure_persistent_key
+
+    path = ensure_persistent_key(
+        Path(args.api_state_dir).expanduser().resolve() / PERSISTENT_KEY_NAME
+    )
+    args.reasoning_signing_key_file = str(path)
+    return path
+
+
+def is_loopback_address(client_address):
+    try:
+        address = ipaddress.ip_address(str(client_address).split("%", 1)[0])
+    except ValueError:
+        return False
+    return (
+        isinstance(address, ipaddress.IPv4Address)
+        and address in ipaddress.ip_network("127.0.0.0/8")
+    ) or address == ipaddress.ip_address("::1")
+
+
+# With tenant auth on, every path is guarded except this allowlist (vLLM
+# #56269: enumerate exemptions, never the guarded prefixes).
+TENANT_AUTH_OPEN_PATHS = frozenset({"/health"})
+TENANT_AUTH_LOOPBACK_OPEN_PATHS = frozenset({"/metrics"})
+TENANT_AUTH_ADAPTER_PATHS = frozenset(
+    {"/v1/load_lora_adapter", "/v1/unload_lora_adapter"}
+)
 
 
 def authorize_admin(client_address, authorization, token=None):
     """Return an HTTP status/message pair for the fail-closed admin surface."""
-    try:
-        address = ipaddress.ip_address(str(client_address).split("%", 1)[0])
-    except ValueError:
-        return 403, "admin endpoints require a loopback client"
-    loopback = (
-        isinstance(address, ipaddress.IPv4Address)
-        and address in ipaddress.ip_network("127.0.0.0/8")
-    ) or address == ipaddress.ip_address("::1")
-    if not loopback:
+    if not is_loopback_address(client_address):
         return 403, "admin endpoints require a loopback client"
     if token is None:
         return None
@@ -370,6 +414,8 @@ def validate_request(
         "mlx_fault",
         "skip_writing_prefix_cache",
         "session_id",
+        "return_progress",
+        "verify_bitexact",
     }
     unknown = set(body) - supported
     if unknown:
@@ -449,6 +495,8 @@ def validate_request(
             raise ValueError("min_tokens cannot be combined with structured output")
     if "logprobs" in body and not isinstance(body["logprobs"], bool):
         raise ValueError("logprobs must be boolean")
+    if "verify_bitexact" in body and not isinstance(body["verify_bitexact"], bool):
+        raise ValueError("verify_bitexact must be boolean")
     top_logprobs = body.get("top_logprobs", 0)
     if isinstance(top_logprobs, bool) or not isinstance(top_logprobs, int) or not 0 <= top_logprobs <= MAX_TOP_LOGPROBS:
         raise ValueError("top_logprobs must be an integer from 0 to 11")
@@ -480,6 +528,8 @@ def validate_request(
                 function.get("parameters", {}), dict
             ):
                 raise ValueError("tool strict must be boolean and parameters an object")
+            if not isinstance(function.get("description", ""), str):
+                raise ValueError("tool description must be text")
             declared_parameters = function.get("parameters", {})
             parameters = declared_parameters
             if strict:
@@ -497,8 +547,21 @@ def validate_request(
                         },
                     }
                 )
+            # ``description`` is optional in the OpenAI and Anthropic tool
+            # schemas we accept, but a chat template that renders it through
+            # ``tojson`` raises on the Jinja Undefined a missing key leaves
+            # behind.  Carry the absent optional field as the empty string --
+            # the same defaulting ``parameters`` already gets -- so a request
+            # that is legal by the schema renders instead of failing.
             normalized_tools.append(
-                {**tool, "function": {**function, "parameters": parameters}}
+                {
+                    **tool,
+                    "function": {
+                        "description": "",
+                        **function,
+                        "parameters": parameters,
+                    },
+                }
             )
         body = {**body, "tools": normalized_tools}
     body = normalize_tool_choice(body)
@@ -628,9 +691,15 @@ def validate_request(
                 or not isinstance(value, (int, float)) or not math.isfinite(value)
                 or not -100 <= value <= 100):
                 raise ValueError("invalid logit_bias token or value")
-    for key in ("stream", "enable_thinking", "skip_writing_prefix_cache"):
+    for key in (
+        "stream", "enable_thinking", "skip_writing_prefix_cache", "return_progress"
+    ):
         if key in body and not isinstance(body[key], bool):
             raise ValueError(f"{key} must be boolean")
+    if body.get("return_progress") and not body.get("stream"):
+        # Progress is a pre-output stream event; a non-streaming response has
+        # nowhere to put it.  Reject rather than silently ignore.
+        raise ValueError("return_progress requires stream")
     if "session_id" in body:
         validate_session_id(body["session_id"])
     if body.get("thinking_budget_mode", "state_aware") not in {
@@ -914,6 +983,52 @@ def rerank_payload(engine, body):
     }
 
 
+def prompt_render_payload(engine, body, path):
+    """Answer ``POST /tokenize`` or ``POST /apply-template`` without generating.
+
+    The body is a Chat (``messages``) or Completions (``prompt``) request and is
+    validated exactly like one, then rendered through the same adapter call
+    admission uses.  Media parts are rejected: their prompt tokens depend on
+    encoder preparation that these read-only endpoints do not run.
+    """
+    if not isinstance(body, dict):
+        raise ValueError("request must be a JSON object")
+    status = engine.status()
+    model = status.get("model")
+    if body.get("model", model) != model:
+        raise ResourceNotFound("unknown model")
+    request = validate_request(
+        body,
+        "messages" in body,
+        structured_thinking=bool(
+            (status.get("structured_output") or {}).get("thinking_deferral")
+        ),
+        allow_buffered_tool_stream=True,
+        allow_strict_auto=True,
+        constrained_tool_grammar=bool(
+            (status.get("settings") or {}).get("constrained_tool_grammar")
+        ),
+    )
+    if any(
+        isinstance(message.get("content"), list)
+        for message in request.get("messages", ())
+    ):
+        raise ValueError(f"{path} does not render image, video, or audio content")
+    if path == "/tokenize":
+        tokens = engine.render_prompt(request)
+        return {
+            "tokens": tokens,
+            "count": len(tokens),
+            "max_model_len": getattr(engine, "max_context", None),
+        }
+    prompt = engine.apply_template(request)
+    if prompt is None:
+        raise CapabilityUnavailable(
+            "the loaded adapter does not expose a text prompt renderer"
+        )
+    return {"prompt": prompt}
+
+
 def lora_control_payload(engine, body, *, load):
     """Execute vLLM-compatible dynamic LoRA control through an engine hook."""
     if not isinstance(body, dict):
@@ -992,7 +1107,11 @@ def collect_nonstream_job(job, body, *, chat):
                 {key: value for key, value in call.items() if key != "index"}
                 for call in calls
             ]
-        enforce_tool_contract(body, message.get("tool_calls", []))
+        enforce_tool_contract(
+            body,
+            message.get("tool_calls", []),
+            finish_reason=event["finish_reason"],
+        )
         choice.update({"message": message} if chat else {"text": "".join(parts)})
         return choice, {
             "prompt_tokens": job.prompt_tokens,
@@ -1061,7 +1180,14 @@ def handler_for(
     api_state_dir=None,
     tool_backend=None,
     admin_token=None,
+    http_security=None,
+    tenant_authenticator=None,
+    agent_compat=None,
 ):
+    compat_policy = AgentCompatPolicy.coerce(agent_compat)
+    engine.agent_compat = compat_policy
+    if tenant_authenticator is not None:
+        engine.tenant_authenticator = tenant_authenticator
     if request_tracer is not None:
         engine.request_tracer = request_tracer
     # Preserve the standalone/test embedding contract: callers that do not
@@ -1136,7 +1262,21 @@ def handler_for(
             raise ValueError("input_file content must not be empty")
         return f"\n<file name={json.dumps(filename)}>\n{text}\n</file>\n"
 
-    def prepare_responses_request(raw_body, tenant_id):
+    def check_compat_chain(tenant_id, previous_id, agent_compat):
+        """A conversation must keep one agent-compat mode across its chain."""
+        stored_enabled = response_store.agent_compat_enabled(tenant_id, previous_id)
+        if stored_enabled is not None and stored_enabled != agent_compat.enabled:
+            engine_counts = getattr(engine, "counts", None)
+            if engine_counts is not None:
+                engine_counts["agent_compat_mode_conflicts"] += 1
+            raise AgentCompatError(
+                f"previous_response_id {previous_id!r} was created with "
+                f"agent-compat {'on' if stored_enabled else 'off'}, but this "
+                f"request resolved {agent_compat.describe()}; a conversation "
+                "must keep one agent-compat mode (set X-MLX2-Agent-Compat)"
+            )
+
+    def prepare_responses_request(raw_body, tenant_id, agent_compat):
         request, options = responses_to_chat_request(
             raw_body,
             file_resolver=lambda part: tenant_file_text(tenant_id, part),
@@ -1144,6 +1284,8 @@ def handler_for(
             signer=getattr(engine, "reasoning_signer", None),
             tenant_id=tenant_id,
             model=raw_body.get("model") or engine.status().get("model"),
+            agent_compat=agent_compat,
+            counts=getattr(engine, "counts", None),
         )
         rejections = options.get("reasoning_signature_rejections", 0)
         if rejections:
@@ -1158,6 +1300,14 @@ def handler_for(
             instruction = request["messages"][:1] if "instructions" in raw_body else []
             current = request["messages"][len(instruction) :]
             request["messages"] = instruction + previous_context + current
+        if options["previous_response_id"] is not None:
+            check_compat_chain(
+                tenant_id, options["previous_response_id"], agent_compat
+            )
+        if agent_compat.enabled:
+            request["messages"] = fold_system_messages(
+                request["messages"], getattr(engine, "counts", None)
+            )
         options["previous_context"] = previous_context
         return request, options
 
@@ -1200,8 +1350,11 @@ def handler_for(
         responses_api = endpoint == "/v1/responses"
         options = None
         body = raw_body
+        batch_compat = compat_policy.resolve(
+            {}, tenant_id, endpoint, getattr(engine, "counts", None)
+        )
         if responses_api:
-            body, options = prepare_responses_request(raw_body, tenant_id)
+            body, options = prepare_responses_request(raw_body, tenant_id, batch_compat)
         chat = endpoint != "/v1/completions"
         status = engine.status()
         body = validate_request(
@@ -1227,6 +1380,8 @@ def handler_for(
             choice, usage, receipt = collect_nonstream_job(job, body, chat=chat)
         finally:
             job.cancelled.set()
+        if responses_api and batch_compat.notable:
+            receipt = {**(receipt or {}), "agent_compat": batch_compat.receipt()}
         choice["index"] = 0
         if responses_api:
             payload = responses_payload(
@@ -1241,6 +1396,9 @@ def handler_for(
                 signer=getattr(engine, "reasoning_signer", None),
                 tenant_id=tenant_id,
                 include=options.get("include", ()),
+                agent_compat=batch_compat,
+                compat_tool_map=options.get("agent_compat"),
+                counts=getattr(engine, "counts", None),
             )
             store_response(tenant_id, options, payload, choice["message"])
             return 200, payload
@@ -1285,6 +1443,59 @@ def handler_for(
             )
             self._http_recorded = False
             self._request_trace = None
+            self._tenant_id = "default"
+            self._tenant_auth_method = None
+
+        def end_headers(self):
+            # Tenant-auth receipt on every response, streams included.  The
+            # method only: never the tenant, key id or credential.
+            if self._tenant_auth_method is not None:
+                self.send_header("X-MLX2-Tenant-Auth", self._tenant_auth_method)
+            super().end_headers()
+
+        def _authenticate_tenant(self, path):
+            """Bind ``self._tenant_id`` for this request; False = refused."""
+            self._tenant_auth_method = None
+            if tenant_authenticator is None:
+                self._tenant_id = self.headers.get("X-Tenant-ID", "default")
+                return True
+            self._tenant_id = None
+            if path in TENANT_AUTH_OPEN_PATHS or (
+                path in TENANT_AUTH_LOOPBACK_OPEN_PATHS
+                and is_loopback_address(self.client_address[0])
+            ):
+                return True
+            from .tenant_auth import TenantAuthError
+
+            try:
+                principal = tenant_authenticator.authenticate(
+                    self.headers,
+                    required_scope="adapters"
+                    if path in TENANT_AUTH_ADAPTER_PATHS
+                    else "inference",
+                )
+            except TenantAuthError as failure:
+                logging.getLogger("mlx2.tenant_auth").warning(
+                    "tenant auth refused %s %s from %s: %s",
+                    self.command,
+                    self._metric_route(),
+                    self.client_address[0],
+                    failure.reason,
+                )
+                # The body (if any) is unread; do not reuse the connection.
+                self.close_connection = True
+                self.api_error(
+                    failure.status,
+                    failure.public_message,
+                    anthropic=path.startswith("/v1/messages"),
+                    headers={"WWW-Authenticate": "Bearer"}
+                    if failure.status == 401
+                    else None,
+                )
+                return False
+            self._tenant_id = principal.tenant
+            self._tenant_auth_method = principal.method
+            return True
 
         def _ensure_trace(self):
             if self._request_trace is not None or request_tracer is None:
@@ -1328,6 +1539,8 @@ def handler_for(
                 "/v1/rerank": "rerank",
                 "/v1/messages": "anthropic_messages",
                 "/v1/messages/count_tokens": "anthropic_count_tokens",
+                "/tokenize": "tokenize",
+                "/apply-template": "apply_template",
                 "/v1/load_lora_adapter": "load_lora_adapter",
                 "/v1/unload_lora_adapter": "unload_lora_adapter",
             }.get(path, "other")
@@ -1350,6 +1563,32 @@ def handler_for(
                 getattr(engine, "apc_sessions_enabled", False)
                 and hasattr(engine, "apc_session_state")
             )
+
+        def _authorize_request(self):
+            """Host/Origin/API-key gate; ``http_security=None`` disables it."""
+            if http_security is None:
+                return True
+            path = self.path.split("?", 1)[0]
+            try:
+                authorize_http_request(
+                    http_security,
+                    self.command,
+                    # Raw target: only the exact ``/health`` route is exempt.
+                    self.path,
+                    self.headers,
+                    local_address=self.connection.getsockname()[0],
+                    admin_token_configured=admin_token is not None,
+                )
+            except GateRejection as rejection:
+                # The body (if any) is unread; close rather than parse it as
+                # the next request on this connection.
+                self.send_json(
+                    rejection.status,
+                    rejection.payload(anthropic=path.startswith("/v1/messages")),
+                    headers={"Connection": "close", **(rejection.headers or {})},
+                )
+                return False
+            return True
 
         def _authorize_admin(self):
             failure = authorize_admin(
@@ -1484,26 +1723,34 @@ def handler_for(
             )
 
         def api_error(
-            self, status, message, *, anthropic=False, retry_after=False, mlx2=None
+            self,
+            status,
+            message,
+            *,
+            anthropic=False,
+            retry_after=False,
+            mlx2=None,
+            headers=None,
         ):
             payload = translated_api_error(status, message, anthropic=anthropic)
             if mlx2 is not None:
                 payload["mlx2"] = mlx2
-            self.send_json(
-                status,
-                payload,
-                headers={"Retry-After": "1"}
-                if status == 429 or retry_after
-                else None,
-            )
+            extra = dict(headers or {})
+            if status == 429 or retry_after:
+                extra["Retry-After"] = "1"
+            self.send_json(status, payload, headers=extra or None)
 
         def do_GET(self):
             self._ensure_trace()
+            if not self._authorize_request():
+                return
             path = self.path.split("?", 1)[0]
             if path == "/v1/admin/state":
                 if not self._authorize_admin():
                     return
                 self.send_json(200, engine.service_state())
+                return
+            if not self._authenticate_tenant(path):
                 return
             try:
                 session_route = self._session_route()
@@ -1515,7 +1762,7 @@ def handler_for(
                 if not self._sessions_available() or action is not None:
                     self.error(404, "unknown endpoint")
                     return
-                tenant = self.headers.get("X-Tenant-ID", "default")
+                tenant = self._tenant_id
                 try:
                     if session_id is not None:
                         value = engine.apc_session_state(tenant, session_id)
@@ -1536,7 +1783,7 @@ def handler_for(
                 except Exception as error:
                     self._session_failure(error)
                 return
-            tenant_id = self.headers.get("X-Tenant-ID", "default")
+            tenant_id = self._tenant_id
             parsed = urlsplit(self.path)
             path = parsed.path
             query = parse_qs(parsed.query, keep_blank_values=True)
@@ -1686,6 +1933,8 @@ def handler_for(
                     )
                     self.send_text(503, payload, content_type=CONTENT_TYPE)
                     return
+                if tenant_authenticator is not None:
+                    payload += tenant_authenticator.prometheus()
                 self.send_text(200, payload, content_type=CONTENT_TYPE)
                 return
             status = engine.status()
@@ -1719,7 +1968,21 @@ def handler_for(
                                 "qualification": status.get(
                                     "qualification", "unavailable"
                                 ),
-                            }
+                            },
+                            # vLLM shape: each concurrent LoRA adapter is a
+                            # selectable model whose parent is the base.
+                            *(
+                                {
+                                    "id": name,
+                                    "object": "model",
+                                    "owned_by": "mlx2",
+                                    "parent": status.get("model", Path(engine.model_path).name),
+                                    "loaded": status["healthy"],
+                                }
+                                for name in (status.get("multi_lora") or {}).get(
+                                    "registered", ()
+                                )
+                            ),
                         ],
                     },
                 )
@@ -1732,6 +1995,10 @@ def handler_for(
                             name: resource.status()
                             for name, resource in engine.api_resources.items()
                         },
+                        "tenant_auth": tenant_authenticator.status()
+                        if tenant_authenticator is not None
+                        else {"enabled": False},
+                        "agent_compat": compat_policy.status(),
                     },
                 )
             elif self.path == "/v1/status/batching":
@@ -1751,6 +2018,10 @@ def handler_for(
 
         def do_DELETE(self):
             self._ensure_trace()
+            if not self._authorize_request():
+                return
+            if not self._authenticate_tenant(self.path.split("?", 1)[0]):
+                return
             try:
                 session_route = self._session_route()
             except ValueError as error:
@@ -1767,13 +2038,13 @@ def handler_for(
                     return
                 try:
                     value = engine.apc_session_delete(
-                        self.headers.get("X-Tenant-ID", "default"), session_id
+                        self._tenant_id, session_id
                     )
                     self.send_json(200, value)
                 except Exception as error:
                     self._session_failure(error)
                 return
-            tenant_id = self.headers.get("X-Tenant-ID", "default")
+            tenant_id = self._tenant_id
             path = self.path.split("?", 1)[0]
             try:
                 if path.startswith("/v1/responses/"):
@@ -1795,6 +2066,8 @@ def handler_for(
 
         def do_POST(self):
             self._ensure_trace()
+            if not self._authorize_request():
+                return
             path = self.path.split("?", 1)[0]
             if path in {"/v1/admin/quiesce", "/v1/admin/resume"}:
                 if not self._authorize_admin():
@@ -1812,6 +2085,8 @@ def handler_for(
                     self.api_error(409, str(error))
                 except (ValueError, json.JSONDecodeError) as error:
                     self.api_error(400, str(error))
+                return
+            if not self._authenticate_tenant(path):
                 return
             try:
                 session_route = self._session_route()
@@ -1833,7 +2108,7 @@ def handler_for(
                         raise ValueError(
                             "session controls only accept ttl_seconds"
                         )
-                    tenant = self.headers.get("X-Tenant-ID", "default")
+                    tenant = self._tenant_id
                     if action == "park":
                         if "ttl_seconds" not in body:
                             raise ValueError("park requires ttl_seconds")
@@ -1864,6 +2139,8 @@ def handler_for(
                 "/v1/unload_lora_adapter",
                 "/v1/messages",
                 "/v1/messages/count_tokens",
+                "/tokenize",
+                "/apply-template",
             } and not (path.startswith("/v1/batches/") and path.endswith("/cancel")):
                 self.error(404, "unknown endpoint")
                 return
@@ -1880,8 +2157,16 @@ def handler_for(
             anthropic_translator = None
             response_metadata = {}
             response_options = None
-            tenant_id = self.headers.get("X-Tenant-ID", "default")
+            tenant_id = self._tenant_id
             response_message_started = False
+            agent_compat = None
+            # Item 12: tool calls streamed as they complete because the decode
+            # grammar is engaged (tool_grammar_streaming); Responses ids and
+            # output indexes already sent for function_call items.
+            grammar_tool_stream = False
+            grammar_stream_ready = False
+            grammar_message_index = None
+            streamed_calls = {}
             self._responses_sequence = 0
             try:
                 size = int(self.headers.get("Content-Length", "0"))
@@ -1932,6 +2217,13 @@ def handler_for(
                     body = resolve_request_session(
                         body, self.headers.get("X-mlx2-Session-ID")
                     )
+                if responses_api or anthropic:
+                    agent_compat = compat_policy.resolve(
+                        self.headers,
+                        tenant_id,
+                        self.path,
+                        getattr(engine, "counts", None),
+                    )
                 if path == "/v1/audio/speech":
                     speech = validate_speech_request(body)
                     if speech["stream_format"] == "sse":
@@ -1979,6 +2271,9 @@ def handler_for(
                 if path == "/v1/load_lora_adapter":
                     self.send_json(200, lora_control_payload(engine, body, load=True))
                     return
+                if path in {"/tokenize", "/apply-template"}:
+                    self.send_json(200, prompt_render_payload(engine, body, path))
+                    return
                 if path == "/v1/unload_lora_adapter":
                     self.send_json(200, lora_control_payload(engine, body, load=False))
                     return
@@ -1997,6 +2292,8 @@ def handler_for(
                         tenant_id=tenant_id,
                         model=body.get("model") or engine.status().get("model"),
                         translation_metadata=translation_metadata,
+                        agent_compat=agent_compat,
+                        counts=getattr(engine, "counts", None),
                     )
                     rejections = translation_metadata.get(
                         "reasoning_signature_rejections", 0
@@ -2012,7 +2309,7 @@ def handler_for(
                         return
                 if responses_api:
                     body, response_options = prepare_responses_request(
-                        body, tenant_id
+                        body, tenant_id, agent_compat
                     )
                     response_metadata = response_options["metadata"]
                 chat = path != "/v1/completions"
@@ -2068,6 +2365,12 @@ def handler_for(
                     and body.get("stream")
                     and response_options.get("tool_executors")
                 )
+                grammar_stream_ready = bool(
+                    body.get("stream")
+                    and body.get("tools")
+                    and not buffered_hosted_stream
+                    and (status.get("settings") or {}).get("tool_grammar_streaming")
+                )
                 model = status.get("model")
                 if body.get("model", model) != model:
                     self.api_error(404, "unknown model", anthropic=anthropic)
@@ -2086,7 +2389,7 @@ def handler_for(
                             sample["seed"] = (base_seed + index) % (2**32)
                         samples.append(sample)
                     submit_many_kwargs = {
-                        "tenant_id": self.headers.get("X-Tenant-ID", "default")
+                        "tenant_id": self._tenant_id
                     }
                     if admission_lease is not None:
                         submit_many_kwargs["admitted"] = True
@@ -2171,6 +2474,32 @@ def handler_for(
                                 mlx2=mlx2,
                             )
                         return
+                    prompt_progress = None
+                    if "prompt_progress" in event:
+                        prompt_progress = take_prompt_progress(job, event)
+                        if (
+                            not body.get("stream")
+                            or buffered_tool_stream
+                            or buffered_hosted_stream
+                        ):
+                            # Buffered streams commit no bytes before terminal
+                            # validation, so there is no stream to report into.
+                            continue
+                    if (
+                        grammar_stream_ready
+                        and not streaming
+                        and getattr(job, "tool_grammar_status", None) == "engaged"
+                    ):
+                        # Admission engaged the tool grammar before the first
+                        # token, so calls are well-formed as they complete:
+                        # stream them; the terminal contract still runs at the
+                        # end and a failure becomes an SSE error event.
+                        grammar_tool_stream = True
+                        buffered_tool_stream = False
+                        engine_counts = getattr(engine, "counts", None)
+                        if engine_counts is not None:
+                            with getattr(engine, "lock", None) or contextlib.nullcontext():
+                                engine_counts["constrained_tool_grammar_streams"] += 1
                     if (
                         body.get("stream")
                         and not streaming
@@ -2210,6 +2539,42 @@ def handler_for(
                                     },
                                 }
                             )
+                    if prompt_progress is not None:
+                        if anthropic:
+                            self._anthropic_sse(
+                                {"type": "ping", "prompt_progress": prompt_progress}
+                            )
+                        elif responses_api:
+                            self._responses_sse(
+                                {
+                                    "type": "response.in_progress",
+                                    "response": {
+                                        "id": response_id(job),
+                                        "object": "response",
+                                        "created_at": int(job.created),
+                                        "status": "in_progress",
+                                        "model": model,
+                                        "output": [],
+                                    },
+                                    "prompt_progress": prompt_progress,
+                                }
+                            )
+                        else:
+                            choice = {"index": 0, "finish_reason": None}
+                            choice.update({"delta": {}} if chat else {"text": ""})
+                            self._sse(
+                                {
+                                    "id": job.id,
+                                    "object": "chat.completion.chunk"
+                                    if chat
+                                    else "text_completion",
+                                    "created": int(job.created),
+                                    "model": model,
+                                    "choices": [choice],
+                                    "prompt_progress": prompt_progress,
+                                }
+                            )
+                        continue
                     if "logprob" in event:
                         probabilities.append(event["logprob"])
                         if streaming:
@@ -2261,6 +2626,15 @@ def handler_for(
                                         and "reasoning.encrypted_content"
                                         in response_options.get("include", ())
                                     )
+                                    if grammar_tool_stream:
+                                        # Text after streamed calls follows them.
+                                        if grammar_message_index is None:
+                                            grammar_message_index = int(
+                                                any(reasoning)
+                                                and "reasoning.encrypted_content"
+                                                in response_options.get("include", ())
+                                            ) + len(streamed_calls)
+                                        response_message_index = grammar_message_index
                                     if not response_message_started:
                                         self._responses_message_start(
                                             job, response_message_index
@@ -2275,6 +2649,19 @@ def handler_for(
                                             "delta": content,
                                         }
                                     )
+                                if grammar_tool_stream:
+                                    for call in delta.get("tool_calls", ()):
+                                        self._responses_call_stream(
+                                            job,
+                                            call,
+                                            streamed_calls,
+                                            offset=int(
+                                                any(reasoning)
+                                                and "reasoning.encrypted_content"
+                                                in response_options.get("include", ())
+                                            )
+                                            + int(response_message_started),
+                                        )
                             else:
                                 choice = {"index": 0, "finish_reason": None}
                                 choice.update(
@@ -2295,6 +2682,11 @@ def handler_for(
                                 )
                     if "finish_reason" in event:
                         receipt = event["receipt"]
+                        if agent_compat is not None and agent_compat.notable:
+                            receipt = {
+                                **(receipt or {}),
+                                "agent_compat": agent_compat.receipt(),
+                            }
                         usage = {
                             "prompt_tokens": job.prompt_tokens,
                             "completion_tokens": job.completion_tokens,
@@ -2425,7 +2817,11 @@ def handler_for(
                                 ]
                             # The defining property of this path: validate the
                             # terminal contract before committing HTTP bytes.
-                            enforce_tool_contract(body, message.get("tool_calls", []))
+                            enforce_tool_contract(
+                                body,
+                                message.get("tool_calls", []),
+                                finish_reason=event["finish_reason"],
+                            )
                             self.send_response(200)
                             self.send_header("Content-Type", "text/event-stream")
                             self.send_header("Cache-Control", "no-cache")
@@ -2488,7 +2884,9 @@ def handler_for(
                                         for call in calls
                                     ]
                                 enforce_tool_contract(
-                                    body, message.get("tool_calls", [])
+                                    body,
+                                    message.get("tool_calls", []),
+                                    finish_reason=event["finish_reason"],
                                 )
                                 for final in anthropic_translator.finish(
                                     event["finish_reason"], usage, receipt
@@ -2507,7 +2905,9 @@ def handler_for(
                                         for call in calls
                                     ]
                                 enforce_tool_contract(
-                                    body, message.get("tool_calls", [])
+                                    body,
+                                    message.get("tool_calls", []),
+                                    finish_reason=event["finish_reason"],
                                 )
                                 choice["message"] = message
                                 if wants_logprobs(body):
@@ -2526,12 +2926,32 @@ def handler_for(
                                     signer=getattr(engine, "reasoning_signer", None),
                                     tenant_id=tenant_id,
                                     include=response_options.get("include", ()),
+                                    agent_compat=agent_compat,
+                                    compat_tool_map=response_options.get(
+                                        "agent_compat"
+                                    ),
+                                    counts=getattr(engine, "counts", None),
                                 )
+                                if streamed_calls:
+                                    # Keep the payload in the order streamed:
+                                    # a message begun after the calls follows.
+                                    payload["output"].sort(
+                                        key=lambda item: (
+                                            streamed_calls[item["id"]]
+                                            if item["id"] in streamed_calls
+                                            else grammar_message_index
+                                            if item["type"] == "message"
+                                            and grammar_message_index is not None
+                                            else -1
+                                        )
+                                    )
                                 store_response(
                                     tenant_id, response_options, payload, message
                                 )
                                 for output_index, item in enumerate(payload["output"]):
-                                    if item["type"] == "message":
+                                    if item["id"] in streamed_calls:
+                                        pass  # opened on arrival; closed below
+                                    elif item["type"] == "message":
                                         if not response_message_started:
                                             self._responses_message_start(
                                                 job, output_index
@@ -2553,6 +2973,34 @@ def handler_for(
                                                 "output_index": output_index,
                                                 "content_index": 0,
                                                 "part": item["content"][0],
+                                            }
+                                        )
+                                    elif item["type"] == "custom_tool_call":
+                                        self._responses_sse(
+                                            {
+                                                "type": "response.output_item.added",
+                                                "output_index": output_index,
+                                                "item": {
+                                                    **item,
+                                                    "status": "in_progress",
+                                                    "input": "",
+                                                },
+                                            }
+                                        )
+                                        self._responses_sse(
+                                            {
+                                                "type": "response.custom_tool_call_input.delta",
+                                                "item_id": item["id"],
+                                                "output_index": output_index,
+                                                "delta": item["input"],
+                                            }
+                                        )
+                                        self._responses_sse(
+                                            {
+                                                "type": "response.custom_tool_call_input.done",
+                                                "item_id": item["id"],
+                                                "output_index": output_index,
+                                                "input": item["input"],
                                             }
                                         )
                                     elif item["type"] == "function_call":
@@ -2612,6 +3060,17 @@ def handler_for(
                                     {"type": "response.completed", "response": payload}
                                 )
                             else:
+                                if grammar_tool_stream:
+                                    # Terminal contract before the final chunk;
+                                    # a violation becomes an SSE error event.
+                                    enforce_tool_contract(
+                                        body,
+                                        [
+                                            {k: v for k, v in c.items() if k != "index"}
+                                            for c in calls
+                                        ],
+                                        finish_reason=event["finish_reason"],
+                                    )
                                 choice.update({"delta": {}} if chat else {"text": ""})
                                 self._sse(
                                     {
@@ -2639,7 +3098,11 @@ def handler_for(
                                     {k: v for k, v in c.items() if k != "index"}
                                     for c in calls
                                 ]
-                            enforce_tool_contract(body, message.get("tool_calls", []))
+                            enforce_tool_contract(
+                                body,
+                                message.get("tool_calls", []),
+                                finish_reason=event["finish_reason"],
+                            )
                             choice.update(
                                 {"message": message}
                                 if chat
@@ -2680,6 +3143,11 @@ def handler_for(
                                     signer=getattr(engine, "reasoning_signer", None),
                                     tenant_id=tenant_id,
                                     include=response_options.get("include", ()),
+                                    agent_compat=agent_compat,
+                                    compat_tool_map=response_options.get(
+                                        "agent_compat"
+                                    ),
+                                    counts=getattr(engine, "counts", None),
                                 )
                                 store_response(
                                     tenant_id, response_options, payload, message
@@ -2748,6 +3216,27 @@ def handler_for(
                     self._record_http(200)
                 else:
                     self.api_error(400, str(exc), anthropic=anthropic)
+            except PromptTemplateFailure as exc:
+                # A template that fails for a reason the request does not
+                # explain is a server fault, but the caller is told which
+                # stage failed rather than reading an unhandled TypeError.
+                logging.getLogger("mlx2.server").exception(
+                    "chat template rendering failed",
+                    exc_info=(type(exc), exc, exc.__traceback__),
+                )
+                if streaming and anthropic and anthropic_translator is not None:
+                    for failure in anthropic_translator.failure(str(exc), 500):
+                        self._anthropic_sse(failure)
+                    self._record_http(200)
+                elif streaming and responses_api:
+                    self._responses_failure(job, str(exc), "server_error")
+                    self._record_http(200)
+                elif streaming:
+                    self._sse({"error": {"message": str(exc)}})
+                    self._sse("[DONE]")
+                    self._record_http(200)
+                else:
+                    self.api_error(500, str(exc), anthropic=anthropic)
             except ResourceNotFound as exc:
                 self.api_error(404, str(exc).strip("'"), anthropic=anthropic)
             except CapabilityUnavailable as exc:
@@ -2796,6 +3285,48 @@ def handler_for(
             )
             self.wfile.write(f"data: {data}\n\n".encode())
             self.wfile.flush()
+
+        def _responses_call_stream(self, job, call, streamed, *, offset):
+            """Item 12: open one grammar-engaged function_call item early.
+
+            ``output_item.done`` is withheld until the terminal tool contract
+            has passed; ``streamed`` maps item ids to the index sent.
+            """
+            index = len(streamed)
+            function = call["function"]
+            item = {
+                "id": call.get("id", f"fc_{job.id}_{index}"),
+                "type": "function_call",
+                "status": "in_progress",
+                "call_id": call.get("id", f"call_{job.id}_{index}"),
+                "name": function["name"],
+                "arguments": "",
+            }
+            output_index = offset + index
+            streamed[item["id"]] = output_index
+            self._responses_sse(
+                {
+                    "type": "response.output_item.added",
+                    "output_index": output_index,
+                    "item": item,
+                }
+            )
+            self._responses_sse(
+                {
+                    "type": "response.function_call_arguments.delta",
+                    "item_id": item["id"],
+                    "output_index": output_index,
+                    "delta": function["arguments"],
+                }
+            )
+            self._responses_sse(
+                {
+                    "type": "response.function_call_arguments.done",
+                    "item_id": item["id"],
+                    "output_index": output_index,
+                    "arguments": function["arguments"],
+                }
+            )
 
         def _responses_message_start(self, job, output_index):
             self._responses_sse(
@@ -2853,6 +3384,40 @@ def handler_for(
     return Handler
 
 
+def build_tenant_authenticator(args):
+    """Return the configured TenantAuthenticator, or None when auth is off."""
+    from .tenant_auth import configured
+
+    enabled = bool(
+        args.tenant_auth_keys_file
+        or args.tenant_auth_token_secret_file
+        or args.tenant_auth_token_secret_env
+    )
+    if not enabled:
+        if args.tenant_auth_allow_shared_cache:
+            raise ValueError("--tenant-auth-allow-shared-cache requires tenant auth")
+        if not is_loopback_address(args.host) and args.host != "localhost":
+            logging.getLogger("mlx2.tenant_auth").warning(
+                "serving on non-loopback host %s without tenant auth: "
+                "X-Tenant-ID is unauthenticated",
+                args.host,
+            )
+        return None
+    if not args.tenant_scoped_cache and not args.tenant_auth_allow_shared_cache:
+        raise ValueError(
+            "tenant auth requires --tenant-scoped-cache (or explicitly "
+            "--tenant-auth-allow-shared-cache)"
+        )
+    return configured(
+        keys_file=args.tenant_auth_keys_file,
+        token_secret_file=args.tenant_auth_token_secret_file,
+        token_secret_env=args.tenant_auth_token_secret_env,
+        header_policy=args.tenant_header_policy,
+        token_max_ttl=args.tenant_auth_token_max_ttl,
+        cache_isolation="tenant" if args.tenant_scoped_cache else "shared",
+    )
+
+
 def build_parser():
     parser = argparse.ArgumentParser(description="mlx2 APCv2 Flash-Next server")
     parser.add_argument("--model", required=True)
@@ -2861,6 +3426,68 @@ def build_parser():
     parser.add_argument(
         "--admin-token-file",
         help="owner-only 0600 file containing the loopback admin bearer token",
+    )
+    tenant_auth = parser.add_argument_group(
+        "tenant authentication",
+        "opt-in: derive the tenant from a verified credential instead of "
+        "X-Tenant-ID; unauthenticated requests fail closed with 401/403",
+    )
+    tenant_auth.add_argument(
+        "--tenant-auth-keys-file",
+        help="JSON keys file mapping SHA-256 API-key digests to tenant ids",
+    )
+    tenant_secret = tenant_auth.add_mutually_exclusive_group()
+    tenant_secret.add_argument(
+        "--tenant-auth-token-secret-file",
+        help="owner-only 0600 file with the HMAC secret for mlx2t1 tenant tokens",
+    )
+    tenant_secret.add_argument(
+        "--tenant-auth-token-secret-env",
+        help="environment variable holding the HMAC secret for tenant tokens",
+    )
+    tenant_auth.add_argument(
+        "--tenant-header-policy",
+        choices=("must-match", "ignore"),
+        default="must-match",
+        help="authenticated mode: a present X-Tenant-ID must match (403 "
+        "otherwise) or is ignored",
+    )
+    tenant_auth.add_argument(
+        "--tenant-auth-token-max-ttl",
+        type=int,
+        default=7 * 24 * 3600,
+        metavar="SECONDS",
+        help="reject tenant tokens whose exp - iat exceeds this",
+    )
+    tenant_auth.add_argument(
+        "--tenant-auth-allow-shared-cache",
+        action="store_true",
+        help="permit tenant auth without --tenant-scoped-cache (a shared "
+        "prefix cache leaks prompts across tenants through TTFT/cached_tokens)",
+    )
+    parser.add_argument(
+        "--allowed-host",
+        action="append",
+        default=[],
+        metavar="NAME",
+        help=(
+            "extra Host header name accepted (any port; repeatable). Loopback "
+            "binds always accept localhost, 127.0.0.1 and [::1]; a non-loopback "
+            "bind checks Host only when at least one --allowed-host is given"
+        ),
+    )
+    api_key = parser.add_mutually_exclusive_group()
+    api_key.add_argument(
+        "--api-key-file",
+        help=(
+            "owner-only 0600 file with the API key required on every route "
+            "except GET /health (Authorization: Bearer or x-api-key)"
+        ),
+    )
+    api_key.add_argument(
+        "--api-key-env",
+        metavar="NAME",
+        help="environment variable holding the API key (e.g. MLX2_API_KEY)",
     )
     parser.add_argument(
         "--drain-on-sigterm",
@@ -2943,15 +3570,72 @@ def build_parser():
         help="allowlisted directory containing dynamically loadable LoRA adapters",
     )
     parser.add_argument(
+        "--max-loras",
+        type=int,
+        default=0,
+        help=(
+            "concurrent multi-LoRA: resident adapter slots served in one mixed "
+            "batch, selected per request by model=<lora_name> (default 0: off; "
+            "ordinary route only; requires --lora-dir)"
+        ),
+    )
+    parser.add_argument(
+        "--max-lora-rank",
+        type=int,
+        default=16,
+        help="concurrent multi-LoRA: padded slot rank (adapters above it are refused)",
+    )
+    parser.add_argument(
         "--tool-backend-config",
         type=Path,
         help="JSON allowlist for Responses MCP Streamable HTTP execution",
+    )
+    parser.add_argument(
+        "--agent-compat",
+        nargs="?",
+        const="on",
+        default="auto",
+        choices=("off", "on", "opt-in", "auto"),
+        help=(
+            "coding-agent wire translation (Codex custom/namespace tools, "
+            "message phase, hosted-tool drop; Claude Code adaptive thinking, "
+            "output_config, context_management, mid-conversation system). "
+            "auto (default): X-MLX2-Agent-Compat header > tenant policy > "
+            "client detection; opt-in: header > tenant policy; on: always "
+            "unless the header says off; off: never. A bare --agent-compat "
+            "means on."
+        ),
+    )
+    parser.add_argument(
+        "--agent-compat-tenants",
+        help=(
+            "JSON file mapping tenant id to {agent_compat: on|off, optional "
+            "custom_tool_grammar: validate|off}"
+        ),
+    )
+    parser.add_argument(
+        "--custom-tool-grammar",
+        choices=("off", "validate"),
+        default="off",
+        help=(
+            "default custom-tool grammar mode for agent-compat requests "
+            "(X-MLX2-Custom-Tool-Grammar header > tenant policy > this); "
+            "'validate' fails closed on non-matching inputs"
+        ),
     )
     signing = parser.add_mutually_exclusive_group()
     signing.add_argument("--reasoning-signing-key-file")
     signing.add_argument(
         "--reasoning-signing-key-env",
         help="environment variable containing the shared reasoning signing secret",
+    )
+    signing.add_argument(
+        "--reasoning-signing-ephemeral",
+        action="store_true",
+        help=(
+            "use a random per-process reasoning signing key even with "
+            "--api-state-dir (default there: <state>/reasoning-signing.key)"
+        ),
     )
     parser.add_argument(
         "--persistent-block-bytes",
@@ -2984,6 +3668,11 @@ def build_parser():
     )
     execution = parser.add_mutually_exclusive_group()
     execution.add_argument("--ordinary", action="store_true", help="ordinary decode reference with APCv2")
+    execution.add_argument(
+        "--native-mtp",
+        action="store_true",
+        help="native self-MTP route; fails if the resolved artifact has no MTP head",
+    )
     execution.add_argument("--external-draft", action="store_true", help="external draft/verify; requires draft_model execution policy")
     execution.add_argument(
         "--prompt-lookup",
@@ -3004,6 +3693,25 @@ def build_parser():
         help=(
             "qualification-only cohort-wide adaptive native-MTP depth "
             "(default: disabled)"
+        ),
+    )
+    parser.add_argument(
+        "--mtp-acceptance-log",
+        type=Path,
+        help=(
+            "qualification-only JSONL of per-draft-position features and "
+            "acceptance labels (default: disabled)"
+        ),
+    )
+    parser.add_argument(
+        "--mtp-acceptance-log-lookahead",
+        type=int,
+        default=0,
+        help=(
+            "unverified greedy lookahead drafts per cycle, so the acceptance "
+            "log observes positions past the served depth (default: 0). "
+            "Requires --mtp-acceptance-log; the drafts are dropped before "
+            "verification, so output is unchanged"
         ),
     )
     parser.add_argument(
@@ -3074,6 +3782,18 @@ def build_parser():
             "declare the scope; separate APCv2 namespace (default: off)"
         ),
     )
+    parser.add_argument(
+        "--verify-bitexact",
+        action="store_true",
+        help=(
+            "batch-invariant quantized matmuls: every verify/decode row gets "
+            "the single-row (M=1) qmv arithmetic, so greedy output does not "
+            "depend on how many lanes share a verify call.  Needs an mlx "
+            "build with mx.metal.set_qmv_bitexact; slower at 4 lanes "
+            "(bypasses NAX/split-K); requests may then set "
+            "verify_bitexact=true (default: off)"
+        ),
+    )
     parser.add_argument("--qualification-mode", action="store_true")
     parser.add_argument("--qualification")
     parser.add_argument(
@@ -3104,13 +3824,33 @@ def approximate_kv_mode(args, native_mtp):
                 "--approximate-kv requires --qualification-mode or a "
                 "--qualification record carrying its evidence"
             )
-        if native_mtp or args.external_draft or getattr(args, "prompt_lookup", False):
-            raise ValueError("--approximate-kv requires the --ordinary route")
+        if args.external_draft or getattr(args, "prompt_lookup", False):
+            raise ValueError(
+                "--approximate-kv requires the --ordinary route or native MTP "
+                "with compose_mtp"
+            )
+        if native_mtp and not policy.compose_mtp:
+            raise ValueError(
+                "--approximate-kv on native MTP requires \"compose_mtp\": true "
+                "(target-only quantization); otherwise use --ordinary"
+            )
+        if policy.compose_mtp and not native_mtp:
+            raise ValueError("--approximate-kv compose_mtp requires native MTP")
     return policy.as_dict()
 
 
-def native_mtp_mode(args, policy):
-    """Validate route intent before binding a listener or allocating a model."""
+@dataclass(frozen=True)
+class RouteSelection:
+    route: str
+    source: str
+
+    @property
+    def native_mtp(self):
+        return self.route == "native_mtp"
+
+
+def resolve_route_selection(args, policy, adapter_resolution=None):
+    """Resolve explicit intent or an adapter default before weights are loaded."""
     external_policy = bool((policy or {}).get("draft_model"))
     if args.ordinary and external_policy:
         raise ValueError("--ordinary cannot select an external draft policy")
@@ -3121,7 +3861,41 @@ def native_mtp_mode(args, policy):
     prompt_lookup = bool(getattr(args, "prompt_lookup", False))
     if prompt_lookup and external_policy:
         raise ValueError("--prompt-lookup cannot select an external draft policy")
-    return not (args.ordinary or args.external_draft or prompt_lookup)
+    native_mtp = bool(getattr(args, "native_mtp", False))
+    if args.ordinary:
+        route = "ordinary"
+    elif args.external_draft:
+        route = "external_draft"
+    elif prompt_lookup:
+        route = "prompt_lookup"
+    elif native_mtp:
+        route = "native_mtp"
+    else:
+        route = (
+            adapter_resolution.default_route
+            if adapter_resolution is not None
+            else "native_mtp"
+        )
+    source = (
+        "explicit_flag"
+        if args.ordinary or args.external_draft or prompt_lookup or native_mtp
+        else "adapter_default"
+    )
+    if route == "native_mtp" and adapter_resolution is not None:
+        from .contracts import Capability
+
+        if Capability.MTP not in adapter_resolution.descriptor.capabilities:
+            prefix = "--native-mtp requested, but" if native_mtp else "adapter default selected"
+            raise ValueError(
+                f"{prefix} {adapter_resolution.descriptor.family} artifact has "
+                "no implemented native MTP route"
+            )
+    return RouteSelection(route, source)
+
+
+def native_mtp_mode(args, policy, adapter_resolution=None):
+    """Compatibility helper returning whether the resolved route is native MTP."""
+    return resolve_route_selection(args, policy, adapter_resolution).native_mtp
 
 
 def serving_engine_kwargs(
@@ -3129,6 +3903,7 @@ def serving_engine_kwargs(
     policy,
     *,
     native_mtp,
+    route_selection_source="engine_argument",
     approximate_kv,
     max_request_bytes,
 ):
@@ -3146,12 +3921,21 @@ def serving_engine_kwargs(
         "coalesce_window_ms": args.coalesce_window_ms,
         "batch_cohort_timeout_ms": args.batch_cohort_timeout_ms,
         "mtp": native_mtp,
+        "route_selection_source": route_selection_source,
         "prompt_lookup": args.prompt_lookup,
         "tenant_scoped_cache": args.tenant_scoped_cache,
         "qualification_mode": args.qualification_mode,
         "qualification": args.qualification,
         "execution_policy": policy,
         "adaptive_mtp_depth": args.adaptive_mtp_depth,
+        "mtp_acceptance_log": (
+            None
+            if args.mtp_acceptance_log is None
+            else {
+                "path": str(args.mtp_acceptance_log),
+                "lookahead": args.mtp_acceptance_log_lookahead,
+            }
+        ),
         "spomin_live_surgery": args.spomin_live_surgery,
         "thinking_budget": args.thinking_budget,
         "thinking_steer_alpha": args.thinking_steer_alpha,
@@ -3166,6 +3950,8 @@ def serving_engine_kwargs(
         "persistent_block_bytes": args.persistent_block_bytes,
         "approximate_kv": approximate_kv,
         "lora_root": args.lora_dir,
+        "max_loras": args.max_loras,
+        "max_lora_rank": args.max_lora_rank,
         "reasoning_signing_key_file": args.reasoning_signing_key_file,
         "reasoning_signing_key_env": args.reasoning_signing_key_env,
         "apc_persist_dir": args.apc_persist_dir,
@@ -3186,21 +3972,48 @@ def serving_engine_kwargs(
         "apc_quarantine_max_entries": args.apc_quarantine_max_entries,
         "apc_quarantine_max_bytes": args.apc_quarantine_max_bytes,
         "int8_prefill": args.int8_prefill,
+        "verify_bitexact": bool(getattr(args, "verify_bitexact", False)),
     }
 
 
 class SignalShutdownController:
-    """First-signal graceful drain with a second-signal immediate escape hatch."""
+    """First-signal graceful drain with a second-signal immediate escape hatch.
 
-    def __init__(self, server, engine, drain_seconds=None):
+    A supervisor that signals the whole process group can deliver SIGINT and
+    SIGTERM together (sglang #35202).  That is one request to stop, so a
+    signal of a different kind within ``coalesce_seconds`` of the first is
+    ignored; a repeat of the same kind, or any signal after the window,
+    escalates to immediate shutdown.
+    """
+
+    def __init__(self, server, engine, drain_seconds=None, *,
+                 coalesce_seconds=1.0, clock=time.monotonic):
         self.server = server
         self.engine = engine
         self.drain_seconds = drain_seconds
-        self._signals = itertools.count(1)
+        self.coalesce_seconds = coalesce_seconds
+        self._clock = clock
+        self._first = None  # (signum, monotonic time) of the first signal
 
-    def __call__(self, *_):
-        sequence = next(self._signals)
-        target = self._graceful if self.drain_seconds is not None and sequence == 1 else self.server.shutdown
+    def __call__(self, signum=None, _frame=None):
+        now = self._clock()
+        if self._first is None:
+            self._first = (signum, now)
+            target = self._graceful if self.drain_seconds is not None else self.server.shutdown
+        else:
+            first_signum, first_at = self._first
+            if (
+                signum is not None
+                and first_signum is not None
+                and signum != first_signum
+                and now - first_at < self.coalesce_seconds
+            ):
+                logging.getLogger("mlx2.server").info(
+                    "signal %s arrived %.3fs after signal %s; treating both as "
+                    "one shutdown request", signum, now - first_at, first_signum,
+                )
+                return
+            target = self.server.shutdown
         threading.Thread(target=target, daemon=True).start()
 
     def _graceful(self):
@@ -3239,9 +4052,24 @@ def main():
         )
     except (OSError, ValueError) as error:
         parser.error(str(error))
+    try:
+        http_security = policy_for_bind(
+            args.host,
+            allowed_hosts=args.allowed_host,
+            api_key=load_api_key(
+                key_file=args.api_key_file, key_env=args.api_key_env
+            ),
+        )
+        tenant_authenticator = build_tenant_authenticator(args)
+    except (OSError, ValueError) as error:
+        parser.error(str(error))
     policy = json.loads(args.execution_policy.read_text()) if args.execution_policy else None
     try:
-        native_mtp = native_mtp_mode(args, policy)
+        from .adapters.registry import inspect_model
+
+        adapter_resolution = inspect_model(args.model)
+        route_selection = resolve_route_selection(args, policy, adapter_resolution)
+        native_mtp = route_selection.native_mtp
     except ValueError as error:
         parser.error(str(error))
     if args.adaptive_mtp_depth and not args.qualification_mode:
@@ -3250,6 +4078,12 @@ def main():
         parser.error("--adaptive-mtp-depth requires the native self-MTP route")
     if args.spomin_live_surgery and not args.qualification_mode:
         parser.error("--spomin-live-surgery is restricted to --qualification-mode")
+    if args.mtp_acceptance_log_lookahead and args.mtp_acceptance_log is None:
+        parser.error("--mtp-acceptance-log-lookahead requires --mtp-acceptance-log")
+    if args.mtp_acceptance_log is not None and not args.qualification_mode:
+        parser.error("--mtp-acceptance-log is restricted to --qualification-mode")
+    if args.mtp_acceptance_log is not None and not native_mtp:
+        parser.error("--mtp-acceptance-log requires the native self-MTP route")
     try:
         approximate_kv = approximate_kv_mode(args, native_mtp)
     except ValueError as error:
@@ -3257,8 +4091,21 @@ def main():
     logging.basicConfig(
         level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s"
     )
+    logging.getLogger("mlx2.server").info(
+        "selected %s route from %s",
+        route_selection.route,
+        route_selection.source,
+    )
     if not args.qualification_mode and not args.qualification:
         parser.error("provide --qualification or explicitly run --qualification-mode")
+    try:
+        signing_key_path = resolve_reasoning_signing_key(args)
+    except (OSError, ValueError) as error:
+        parser.error(f"cannot use persistent reasoning signing key: {error}")
+    if signing_key_path is not None:
+        logging.getLogger("mlx2.server").info(
+            "reasoning signing key persisted at %s", signing_key_path
+        )
     server = BoundedHTTPServer((args.host, args.port), BaseHTTPRequestHandler)
     request_tracer = None
     try:
@@ -3271,6 +4118,7 @@ def main():
                 args,
                 policy,
                 native_mtp=native_mtp,
+                route_selection_source=route_selection.source,
                 approximate_kv=approximate_kv,
                 max_request_bytes=max_request_bytes,
             ),
@@ -3280,6 +4128,16 @@ def main():
             request_tracer.close()
         server.server_close()
         raise
+    if tenant_authenticator is not None and tenant_authenticator.uses_secret(
+        getattr(getattr(engine, "reasoning_signer", None), "_secret", None)
+    ):
+        engine.close()
+        if request_tracer is not None:
+            request_tracer.close()
+        server.server_close()
+        parser.error(
+            "the tenant token secret must differ from the reasoning signing key"
+        )
     tool_backend = None
     if args.tool_backend_config is not None:
         from .tool_backend import ConfiguredToolBackend
@@ -3292,6 +4150,15 @@ def main():
         api_state_dir=args.api_state_dir,
         tool_backend=tool_backend,
         admin_token=admin_token,
+        http_security=http_security,
+        tenant_authenticator=tenant_authenticator,
+        agent_compat=AgentCompatPolicy(
+            args.agent_compat,
+            args.custom_tool_grammar,
+            load_tenant_policy(args.agent_compat_tenants)
+            if args.agent_compat_tenants
+            else None,
+        ),
     )
 
     stop = SignalShutdownController(server, engine, args.drain_on_sigterm)

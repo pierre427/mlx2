@@ -1,0 +1,19 @@
+2026-09-19 18:30:56,357 WARNING no reasoning signing key configured; using a random per-process reasoning signing key
+2026-09-19 18:30:59,299 INFO ubc_evict: evicted 4784.0 MB from UBC for ~/mlx-models/Qwen3.8-27B-oQ4e-mtp/model-00001-of-00004.safetensors
+2026-09-19 18:30:59,337 INFO ubc_evict: evicted 4785.1 MB from UBC for ~/mlx-models/Qwen3.8-27B-oQ4e-mtp/model-00002-of-00004.safetensors
+2026-09-19 18:30:59,376 INFO ubc_evict: evicted 4769.9 MB from UBC for ~/mlx-models/Qwen3.8-27B-oQ4e-mtp/model-00003-of-00004.safetensors
+2026-09-19 18:30:59,392 INFO ubc_evict: evicted 1846.3 MB from UBC for ~/mlx-models/Qwen3.8-27B-oQ4e-mtp/model-00004-of-00004.safetensors
+2026-09-19 18:30:59,392 INFO ubc_evict: pass complete total_mb=16185.5 elapsed_s=0.12
+2026-09-19 18:31:01,267 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-19 18:31:01,368 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-19 18:31:15,744 INFO "POST /v1/responses HTTP/1.1" 200 -
+2026-09-19 18:31:19,789 INFO "POST /v1/responses HTTP/1.1" 200 -
+2026-09-19 18:31:21,243 INFO "POST /v1/responses HTTP/1.1" 200 -
+2026-09-19 18:31:23,656 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-19 18:31:23,658 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-19 18:31:37,922 INFO "POST /v1/responses HTTP/1.1" 200 -
+2026-09-19 18:31:39,809 INFO "POST /v1/responses HTTP/1.1" 200 -
+2026-09-19 18:31:43,363 INFO "POST /v1/responses HTTP/1.1" 200 -
+2026-09-19 18:31:45,239 INFO "POST /v1/responses HTTP/1.1" 200 -
+2026-09-19 18:31:46,853 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-19 18:31:46,868 INFO "GET /v1/status HTTP/1.1" 200 -

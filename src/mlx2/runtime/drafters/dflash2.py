@@ -376,3 +376,131 @@ def _make_serializable_cache(self):
     return caches
 
 DFlash2DraftModel.make_cache = _make_serializable_cache
+
+
+# Batched pairwise selection (Splash-derived design; see
+# provenance/splash-02-dflash-pair-select.json).  The sequential path above
+# reads edges back to the host once per position.  Every edge the walk can
+# need is known after one trunk pass: position k's predecessor is one of
+# position k-1's C candidates (the anchor at k=0), so the whole block has a
+# [B, K, C, C] score table and the walk is K gathers over it.
+def pairwise_score_table(self, anchors, features, candidates, unary):
+    """Return ``[B, K, C, C]`` f32 scores: ``[b, k, j, i]`` is candidate ``i``
+    at position ``k`` after predecessor candidate ``j`` (row-constant at k=0).
+
+    Mirrors the sequential expression and dtype exactly, so each entry equals
+    the value the host path would score for that predecessor.
+    """
+    selector = self.candidate_selector
+    batch, _, count = candidates.shape
+    predecessors = mx.concatenate(
+        [
+            mx.broadcast_to(anchors.reshape(batch, 1, 1), (batch, 1, count)),
+            candidates[:, :-1],
+        ],
+        axis=1,
+    )
+    projected = selector.hidden_projection(features)
+    edges = mx.sum(
+        selector.predecessor_codebook(predecessors)[:, :, :, None]
+        * projected[:, :, None, None]
+        * selector.successor_codebook(candidates)[:, :, None],
+        axis=-1,
+    )
+    return (unary[:, :, None, :] + edges).astype(mx.float32)
+
+
+def pairwise_walk(candidates, scores, uniforms, temperatures):
+    """Sample a whole block from a pair-score table with pre-drawn uniforms.
+
+    Pure mx ops (the reference any fused kernel must match).  Per row and
+    position this reproduces ``RequestRNG.sample(softmax(scores, t))``:
+    inverse CDF with ``searchsorted(side="right")``; ``t == 0`` is the argmax
+    one-hot law and still consumes its uniform.  Returns ``(tokens [B,K]
+    int32, cand_q [B,K,C] f32, invalid [B] bool)``; ``invalid`` marks rows
+    whose walked scores the sequential softmax would reject.
+    """
+    batch, length, count = candidates.shape
+    temperatures = mx.array(temperatures, dtype=mx.float32).reshape(batch, 1)
+    greedy = temperatures == 0
+    safe = mx.where(greedy, mx.ones_like(temperatures), temperatures)
+    # f32 rounding may lift u < 1 to exactly 1.0; keep it inside the CDF.
+    uniforms = mx.minimum(
+        mx.array(uniforms, dtype=mx.float32).reshape(batch, length),
+        mx.array(1.0 - 2.0**-24, dtype=mx.float32),
+    )
+    columns = mx.arange(count, dtype=mx.int32)[None]
+    selected = mx.zeros((batch,), dtype=mx.int32)
+    tokens, laws = [], []
+    invalid = mx.zeros((batch,), dtype=mx.bool_)
+    for position in range(length):
+        row = mx.take_along_axis(
+            scores[:, position],
+            mx.broadcast_to(selected[:, None, None], (batch, 1, count)),
+            axis=1,
+        )[:, 0]
+        invalid = invalid | mx.any(mx.isnan(row), axis=-1) | ~mx.any(
+            mx.isfinite(row), axis=-1
+        )
+        best = mx.argmax(row, axis=-1).astype(mx.int32)
+        one_hot = (columns == best[:, None]).astype(mx.float32)
+        x = row / safe
+        weights = mx.exp(x - mx.max(x, axis=-1, keepdims=True))
+        q = weights / mx.sum(weights, axis=-1, keepdims=True)
+        cdf = mx.cumsum(q, axis=-1)
+        cdf = cdf / cdf[:, -1:]
+        drawn = mx.minimum(
+            mx.sum(cdf <= uniforms[:, position, None], axis=-1).astype(mx.int32),
+            count - 1,
+        )
+        selected = mx.where(greedy[:, 0], best, drawn)
+        laws.append(mx.where(greedy, one_hot, q))
+        tokens.append(
+            mx.take_along_axis(candidates[:, position], selected[:, None], axis=-1)[
+                :, 0
+            ]
+        )
+    return mx.stack(tokens, axis=1), mx.stack(laws, axis=1), invalid
+
+
+def _propose_block(self, anchors, hidden, cache, proposal_length, uniforms, temperatures):
+    """P3: one trunk pass, one pair table, one walk, one host read.
+
+    ``uniforms`` is ``[B][proposal_length]`` drawn in position order from each
+    lane's RequestRNG, the same draws the sequential path consumes.  Rows with
+    logits processors must use ``draft_distributions``.
+    """
+    from ..verify_sync import record_verify_sync
+    from .draft_block import DraftBlock
+
+    anchor_values = [int(value) for value in anchors]
+    anchors = mx.array(anchor_values, dtype=mx.int32).reshape(-1)
+    batch = anchors.shape[0]
+    temperatures = [float(value) for value in temperatures]
+    if len(temperatures) != batch or len(uniforms) != batch:
+        raise ValueError("DFlash2 block rows must match the draft batch")
+    if any(value < 0 for value in temperatures):
+        raise ValueError("Temperature cannot be negative")
+    if any(len(row) != proposal_length for row in uniforms):
+        raise ValueError("DFlash2 block needs one uniform per proposed position")
+    inputs = mx.concatenate([anchors[:, None], mx.full((batch, proposal_length), self.config.mask_token_id, dtype=mx.int32)], axis=1)
+    features = self._hidden(inputs, hidden, cache)[:, 1:]
+    logits = self._logits(features)
+    count = min(self.candidate_selector.top_k, logits.shape[-1])
+    candidates = mx.argpartition(logits, -count, axis=-1)[..., -count:]
+    unary = mx.take_along_axis(logits, candidates, axis=-1)
+    scores = self.pairwise_score_table(anchors, features, candidates, unary)
+    tokens, cand_q, invalid = pairwise_walk(
+        candidates, scores, uniforms, temperatures
+    )
+    candidates = candidates.astype(mx.int32)
+    mx.eval(tokens, candidates, cand_q, invalid)
+    record_verify_sync("external.draft.block_eval")
+    # The sequential softmax rejects the same rows (NaN or no finite score).
+    if bool(invalid.any().item()):
+        raise ValueError("Invalid selector scores")
+    return DraftBlock(tokens, candidates, cand_q, (int(proposal_length),) * batch)
+
+
+DFlash2DraftModel.pairwise_score_table = pairwise_score_table
+DFlash2DraftModel.propose_block = _propose_block

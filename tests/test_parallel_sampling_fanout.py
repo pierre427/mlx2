@@ -381,6 +381,9 @@ def test_parallel_sample_guard_waits_for_headroom_before_refusing(monkeypatch):
     engine.max_lanes = 4
     engine.queued_jobs = 0
     engine.counts = Counter()
+    # The guard charges the host-scaled service/driver reserve; pin it to the
+    # 128 GiB calibration value so this test does not depend on the test host.
+    engine._hard_reserve_gib = 20.0
     rejected = []
     engine.batch_metrics = type("M", (), {"rejected": lambda self, *a: rejected.append(a)})()
     readings = iter([21, 22, 25])  # GiB: two short readings, then enough for n=2

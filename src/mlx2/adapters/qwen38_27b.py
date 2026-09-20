@@ -13,6 +13,7 @@ from pathlib import Path
 
 from ..contracts import Capability, ModelDescriptor, StatePlane
 from .flash_next import FlashNextAdapter
+from .mtp_depth_cap import validate_self_mtp_num_draft
 
 CACHE_LAYOUT = "qwen38-27b-hybrid-layer-segments-v1"
 
@@ -184,6 +185,7 @@ def configure_environment() -> dict[str, str]:
 
 
 class Qwen3827BAdapter(FlashNextAdapter):
+    default_route = "native_mtp"
     """Dense text adapter using shared chat parsing and modern runtime state."""
 
     descriptor = QWEN38_27B
@@ -199,9 +201,7 @@ class Qwen3827BAdapter(FlashNextAdapter):
         policy = {} if execution_policy is None else dict(execution_policy)
         if set(policy) - {"num_draft"}:
             raise ValueError("Qwen3.8 27B execution policy supports only num_draft")
-        self._num_draft = policy.get("num_draft", 2)
-        if type(self._num_draft) is not int or not 1 <= self._num_draft <= 3:
-            raise ValueError("num_draft must be 1, 2, or 3")
+        self._num_draft = validate_self_mtp_num_draft(policy.get("num_draft", 2))
         artifact = inspect_artifact(model_path)
         if require_mtp and not artifact["has_mtp"]:
             raise ValueError("requested MTP requires embedded head weights")
@@ -217,7 +217,7 @@ class Qwen3827BAdapter(FlashNextAdapter):
         from transformers import AutoTokenizer
         from ..runtime.models.qwen38_27b import Model, ModelArgs
         from ..runtime.tokenizer_utils import TokenizerWrapper, BPEStreamingDetokenizer
-        from ..runtime.ubc_evict import ubc_evict_paths
+        from ..runtime.ubc_evict import load_shards_evicting
 
         # Conversion configs may advertise a head that was stripped from weights.
         config = dict(config)
@@ -225,11 +225,8 @@ class Qwen3827BAdapter(FlashNextAdapter):
         if not artifact["has_mtp"]:
             config["text_config"]["mtp_num_hidden_layers"] = 0
         self.model = Model(ModelArgs.from_dict(config))
-        weights = {}
         files = [path / name for name in sorted(set(artifact["weight_map"].values()))]
-        for file in files:
-            weights.update(mx.load(str(file)))
-        weights = self.model.sanitize(weights)
+        weights = self.model.sanitize(load_shards_evicting(files))
         quant = config.get("quantization", config.get("quantization_config"))
         if quant:
 
@@ -249,7 +246,7 @@ class Qwen3827BAdapter(FlashNextAdapter):
         self.model.eval()
         mx.eval(self.model.parameters())
         weights.clear()
-        ubc_evict_paths([str(file) for file in files])
+        mx.clear_cache()
         tokenizer = AutoTokenizer.from_pretrained(
             path, local_files_only=True, trust_remote_code=False
         )

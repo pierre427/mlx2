@@ -90,6 +90,7 @@ def test_ordinary_artifact_registry_and_descriptor():
         resolved = inspect_model(root)
         assert not artifact["has_mtp"]
         assert resolved.adapter_type is Qwen3635BA3BAdapter
+        assert resolved.default_route == "ordinary"
         assert resolved.descriptor.cache_layout == CACHE_LAYOUT
         assert Capability.APC_V2 in resolved.descriptor.capabilities
         assert Capability.MTP not in resolved.descriptor.capabilities
@@ -99,6 +100,10 @@ def test_embedded_mtp_requires_complete_sparse_head():
     with tempfile.TemporaryDirectory() as directory:
         root = make_artifact(Path(directory), mtp=True)
         assert inspect_artifact(root)["has_mtp"]
+        resolved = inspect_model(root)
+        assert Capability.MTP in resolved.descriptor.capabilities
+        # Measured default: ordinary even with a complete head (--native-mtp opts in).
+        assert resolved.default_route == "ordinary"
         index_path = root / "model.safetensors.index.json"
         index = json.loads(index_path.read_text())
         del index["weight_map"][

@@ -692,3 +692,46 @@ def test_serving_int8_binds_settings_receipts_and_namespace(serving_host, fake_d
     assert not any(
         ip._STATE_ATTR in m.__dict__ for _, m in model.named_modules()
     )
+
+
+# --------------------------------------------------------------------------
+# weight-copy accounting (admission / receipts / status / Prometheus)
+# --------------------------------------------------------------------------
+
+
+def test_weight_copy_bytes_reports_resident_plus_worst_transient(fake_device):
+    """int8 prefill builds per-projection int8 copies that admission cannot
+    otherwise see: resident cached copies plus the largest per-call transient."""
+    model = _Model(bits=6)
+    handle = ip.apply(model, ip.Int8PrefillPolicy.from_value("mlp"))
+    try:
+        resident = handle.resident_estimate_bytes()
+        transient = handle.transient_weight_bytes_max()
+        assert handle.weight_copy_bytes() == resident + transient
+        assert handle.status()["weight_copy_bytes"] == resident + transient
+        assert handle.status()["transient_weight_bytes_max"] == transient
+        assert handle.receipt()["weight_copy_bytes"] == resident + transient
+        # Packed weights are requantized per call, so the transient bound is a
+        # real per-projection tensor, not zero.
+        assert transient > 0
+    finally:
+        ip.remove(handle)
+
+
+def test_qualifier_observes_int8_prefill_engaged_calls():
+    """required_feature_checks demands feature_int8_prefill whenever the policy
+    is enabled, so feature_observations must carry the key (else KeyError)."""
+    import importlib.util
+    from pathlib import Path as _Path
+
+    root = _Path(__file__).resolve().parents[1]
+    spec = importlib.util.spec_from_file_location(
+        "qualify_serving_probe", root / "scripts" / "qualify_serving.py"
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    observed = module.feature_observations(
+        {"int8_prefill": {"enabled": True, "counts": {"engaged_calls": 7}}}
+    )
+    assert observed["int8_prefill"] == 7
+    assert module.feature_observations({})["int8_prefill"] == 0

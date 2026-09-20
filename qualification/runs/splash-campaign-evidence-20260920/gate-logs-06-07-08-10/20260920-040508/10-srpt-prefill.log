@@ -1,0 +1,129 @@
+### job 10-srpt-prefill
+### started 2026-09-20T04:14:22
+### worktree /private/tmp/mlx2-reb-10
+### branch   claude/splash-10-onmain @ 1a11f56  (merge-base with main: f4955f3)
+### models ~/mlx-models/Qwen3.6-35B-A3B-uncensored-heretic-Native-MTP-Preserved-oQ4e-mtp
+### runner  repaired 2026-09-20 (real gate enforcement, per-spec lease)
+    ok   /private/tmp/mlx2-reb-10/scripts/bench_srpt_prefill.py
+    ok   model ~/mlx-models/Qwen3.6-35B-A3B-uncensored-heretic-Native-MTP-Preserved-oQ4e-mtp
+### [runner] yielding 20s before next spec at 2026-09-20T04:14:22
+[runner] waiter: REGISTERED mlx2-76.splash-10-srpt-prefill.65093.1789892082 at 2026-09-20T04:14:42
+[runner] lease: ACQUIRED for splash-10-srpt-prefill at 2026-09-20T04:14:42 after 0s -> /tmp/gpu.lock /Users/Shared/mlxuag/gpu.lock
+[runner] waiter: removed mlx2-76.splash-10-srpt-prefill.65093.1789892082
+### lease wanted-at 2026-09-20T04:14:42 acquired-at 2026-09-20T04:14:42 queued-for 0s
+### tree under test: mlx2.__file__ = /private/tmp/mlx2-reb-10/src/mlx2/__init__.py
+GATE PASS  PYTHONPATH pin: mlx2 resolves inside /private/tmp/mlx2-reb-10
+[runner] gate 10a: --max-lanes 3 with max_bypass 3 must be REFUSED
+[runner] server pid 68198  log /private/tmp/claude-501/-Users-user-Desktop-mlx2/b569b1f6-d687-4876-a42a-e5fdf0abeabc/scratchpad/gpu-queue/10-refusal/refusal.log  PYTHONPATH=/private/tmp/mlx2-reb-10/src
+GATE PASS  10a: refused --max-lanes 3 + max_bypass 3 with the documented message
+[runner] arm mtp-off (--native-mtp)
+[runner] server pid 68220  log qualification/runs/srpt-prefill-20260920/mtp-off.server.log  PYTHONPATH=/private/tmp/mlx2-reb-10/src
+[runner] ready: http://127.0.0.1:8297 answered a real completion 200 after 6s, 1 probe attempt(s)
+### resolved route: segmented_self_mtp (source: explicit_flag)
+### resolved route: segmented_self_mtp (source: explicit_flag)
+GATE FAIL  route MISLABELLED: arm claims 'native_mtp' but the server resolved 'segmented_self_mtp' (source explicit_flag) - every number from this arm describes a different code path
+{
+  "short_ttft_p50": 1.2806375625077635,
+  "short_ttft_max": 1.8340709170443006,
+  "long_ttft": 9.830425457970705,
+  "long_wall": 10.256621124979574
+}
+{
+  "short_ttft_p50": 0.04379247949691489,
+  "short_ttft_max": 0.05096783401677385,
+  "long_ttft": 0.052208750043064356,
+  "long_wall": 0.4675633340375498
+}
+[runner] server stopped
+[runner] arm mtp-on (--native-mtp)
+[runner] server pid 68358  log qualification/runs/srpt-prefill-20260920/mtp-on.server.log  PYTHONPATH=/private/tmp/mlx2-reb-10/src
+[runner] ready: http://127.0.0.1:8297 answered a real completion 200 after 6s, 1 probe attempt(s)
+### resolved route: segmented_self_mtp (source: explicit_flag)
+### resolved route: segmented_self_mtp (source: explicit_flag)
+GATE FAIL  route MISLABELLED: arm claims 'native_mtp' but the server resolved 'segmented_self_mtp' (source explicit_flag) - every number from this arm describes a different code path
+{
+  "short_ttft_p50": 0.5398696250340436,
+  "short_ttft_max": 0.7201787090161815,
+  "long_ttft": 8.343418166972697,
+  "long_wall": 8.721055792004336
+}
+{
+  "short_ttft_p50": 0.0453509790240787,
+  "short_ttft_max": 0.05391354201128706,
+  "long_ttft": 0.05290929100010544,
+  "long_wall": 0.42560470796888694
+}
+[runner] server stopped
+[runner] arm ord-off (--ordinary)
+[runner] server pid 68577  log qualification/runs/srpt-prefill-20260920/ord-off.server.log  PYTHONPATH=/private/tmp/mlx2-reb-10/src
+[runner] ready: http://127.0.0.1:8297 answered a real completion 200 after 5s, 1 probe attempt(s)
+### resolved route: ordinary (source: explicit_flag)
+### resolved route: ordinary (source: explicit_flag)
+GATE PASS  route is 'ordinary' as the arm claims ('ordinary', source explicit_flag)
+{
+  "short_ttft_p50": 1.6384188960073516,
+  "short_ttft_max": 1.698480750026647,
+  "long_ttft": 8.976616041967645,
+  "long_wall": 9.288559417007491
+}
+{
+  "short_ttft_p50": 0.06104116601636633,
+  "short_ttft_max": 0.08703445800347254,
+  "long_ttft": 0.08119749999605119,
+  "long_wall": 0.39718895801343024
+}
+[runner] server stopped
+[runner] arm ord-on (--ordinary)
+[runner] server pid 68673  log qualification/runs/srpt-prefill-20260920/ord-on.server.log  PYTHONPATH=/private/tmp/mlx2-reb-10/src
+[runner] ready: http://127.0.0.1:8297 answered a real completion 200 after 5s, 1 probe attempt(s)
+### resolved route: ordinary (source: explicit_flag)
+### resolved route: ordinary (source: explicit_flag)
+GATE PASS  route is 'ordinary' as the arm claims ('ordinary', source explicit_flag)
+{
+  "short_ttft_p50": 1.5927382500085514,
+  "short_ttft_max": 2.0930944160209037,
+  "long_ttft": 8.786508499993943,
+  "long_wall": 9.112302708032075
+}
+{
+  "short_ttft_p50": 0.05545764649286866,
+  "short_ttft_max": 0.0673471670015715,
+  "long_ttft": 0.07696712500182912,
+  "long_wall": 0.3896698330063373
+}
+[runner] server stopped
+GATE PASS  job 10 commands all exited 0
+### spec-gate evaluation (gates.py 10)
+  --- spec gates for job 10 over qualification/runs/srpt-prefill-20260920 ---
+  spec PASS  mtp-off g1 settings do NOT carry prefill_scheduling: got False want False
+  spec PASS  mtp-off g1 smoke non-empty: got True want True
+  spec PASS  mtp-off g1 finish_reason in stop/length: got True want True
+  spec PASS  mtp-off g2 no tracebacks: got 0 want 0
+  spec PASS  mtp-on g1 settings carry prefill_scheduling: got True want True
+  spec PASS  mtp-on g1 smoke non-empty: got True want True
+  spec PASS  mtp-on g1 finish_reason in stop/length: got True want True
+  spec PASS  mtp-on g2 no tracebacks: got 0 want 0
+  spec PASS  ord-off g1 settings do NOT carry prefill_scheduling: got False want False
+  spec PASS  ord-off g1 smoke non-empty: got True want True
+  spec PASS  ord-off g1 finish_reason in stop/length: got True want True
+  spec PASS  ord-off g2 no tracebacks: got 0 want 0
+  spec PASS  ord-on g1 settings carry prefill_scheduling: got True want True
+  spec PASS  ord-on g1 smoke non-empty: got True want True
+  spec PASS  ord-on g1 finish_reason in stop/length: got True want True
+  spec PASS  ord-on g2 no tracebacks: got 0 want 0
+  spec ????  10 greedy text equality on == off per route: NOT EVALUATED (requires per-prompt text from the bench JSONs; the bench schema is not pinned here -- compare by hand from the *.bench.json artifacts)
+  spec ????  10 perf accept/reject thresholds: NOT EVALUATED (spec thresholds are ratios over bench JSON fields; reported, not auto-gated)
+  spec PASS  mtp-on 10b scheduler counters exposed: got ['prefill_scheduling_bypass_forced', 'prefill_scheduling_bypasses', 'prefill_scheduling_one_slice_clamps'] want ['prefill_scheduling_bypass_forced', 'prefill_scheduling_bypasses', 'prefill_scheduling_one_slice_clamps']
+       mtp-on: bypass_forced=0 (window = --max-lanes = 4 = max_bypass+1, the minimum legal config)
+  spec PASS  ord-on 10b scheduler counters exposed: got ['prefill_scheduling_bypass_forced', 'prefill_scheduling_bypasses', 'prefill_scheduling_one_slice_clamps'] want ['prefill_scheduling_bypass_forced', 'prefill_scheduling_bypasses', 'prefill_scheduling_one_slice_clamps']
+       ord-on: bypass_forced=0 (window = --max-lanes = 4 = max_bypass+1, the minimum legal config)
+  spec PASS  mtp-off 10b off-arm exposes NO scheduler counters: got [] want []
+  spec PASS  ord-off 10b off-arm exposes NO scheduler counters: got [] want []
+  spec PASS  10d mtp_short_prefill_interleaved > 0 (SRPT engaged): 6
+  --- 21 passed, 0 failed, 2 NOT EVALUATED ---
+GATE PASS  spec gates for job 10
+### GATE SUMMARY: 6/8 passed, 2 failed
+[runner] lease: RELEASED /tmp/gpu.lock for splash-10-srpt-prefill at 2026-09-20T04:16:08
+[runner] lease: RELEASED /Users/Shared/mlxuag/gpu.lock for splash-10-srpt-prefill at 2026-09-20T04:16:08
+### lease held 86s for 10-srpt-prefill (wanted 04:14:42, acquired 04:14:42, released 04:16:08, queued 0s)
+### finished 2026-09-20T04:16:08 status=FAILED(rc=1) duration=86s

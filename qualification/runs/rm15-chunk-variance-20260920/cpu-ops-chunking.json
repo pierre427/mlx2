@@ -1,0 +1,144 @@
+{
+  "device": "cpu",
+  "mlx": "0.32.2.dev20260919+39400a0d4",
+  "probes": [
+    {
+      "probe": "matmul",
+      "M": 512,
+      "K": 256,
+      "N": 256,
+      "dtype": "mlx.core.float32",
+      "max_abs_delta_vs_unchunked": {
+        "64": 0.0,
+        "128": 0.0,
+        "256": 0.0
+      }
+    },
+    {
+      "probe": "sdpa_static",
+      "Lq": 512,
+      "Lk": 1024,
+      "H": 4,
+      "D": 64,
+      "dtype": "mlx.core.float32",
+      "max_abs_delta_vs_unchunked": {
+        "64": 0.0,
+        "128": 0.0,
+        "256": 0.0
+      }
+    },
+    {
+      "probe": "sdpa_causal_prefill",
+      "L": 512,
+      "H": 4,
+      "D": 64,
+      "dtype": "mlx.core.float32",
+      "max_abs_delta_vs_unchunked": {
+        "64": {
+          "all_rows": 0.0,
+          "last_row": 0.0
+        },
+        "128": {
+          "all_rows": 0.0,
+          "last_row": 0.0
+        },
+        "256": {
+          "all_rows": 0.0,
+          "last_row": 0.0
+        }
+      }
+    },
+    {
+      "probe": "matmul",
+      "M": 512,
+      "K": 256,
+      "N": 256,
+      "dtype": "mlx.core.bfloat16",
+      "max_abs_delta_vs_unchunked": {
+        "64": 0.0,
+        "128": 0.0,
+        "256": 0.0
+      }
+    },
+    {
+      "probe": "sdpa_static",
+      "Lq": 512,
+      "Lk": 1024,
+      "H": 4,
+      "D": 64,
+      "dtype": "mlx.core.bfloat16",
+      "max_abs_delta_vs_unchunked": {
+        "64": 0.0,
+        "128": 0.0,
+        "256": 0.0
+      }
+    },
+    {
+      "probe": "sdpa_causal_prefill",
+      "L": 512,
+      "H": 4,
+      "D": 64,
+      "dtype": "mlx.core.bfloat16",
+      "max_abs_delta_vs_unchunked": {
+        "64": {
+          "all_rows": 0.0,
+          "last_row": 0.0
+        },
+        "128": {
+          "all_rows": 0.0,
+          "last_row": 0.0
+        },
+        "256": {
+          "all_rows": 0.0,
+          "last_row": 0.0
+        }
+      }
+    },
+    {
+      "probe": "matmul",
+      "M": 512,
+      "K": 256,
+      "N": 256,
+      "dtype": "mlx.core.float16",
+      "max_abs_delta_vs_unchunked": {
+        "64": 0.0,
+        "128": 0.0,
+        "256": 0.0
+      }
+    },
+    {
+      "probe": "sdpa_static",
+      "Lq": 512,
+      "Lk": 1024,
+      "H": 4,
+      "D": 64,
+      "dtype": "mlx.core.float16",
+      "max_abs_delta_vs_unchunked": {
+        "64": 0.0,
+        "128": 0.0,
+        "256": 0.0
+      }
+    },
+    {
+      "probe": "sdpa_causal_prefill",
+      "L": 512,
+      "H": 4,
+      "D": 64,
+      "dtype": "mlx.core.float16",
+      "max_abs_delta_vs_unchunked": {
+        "64": {
+          "all_rows": 0.0,
+          "last_row": 0.0
+        },
+        "128": {
+          "all_rows": 0.0,
+          "last_row": 0.0
+        },
+        "256": {
+          "all_rows": 0.0,
+          "last_row": 0.0
+        }
+      }
+    }
+  ]
+}

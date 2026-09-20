@@ -9,12 +9,33 @@ is [`laguna-xs21.NOTICE`](../provenance/laguna-xs21.NOTICE). mlx2 adds strict
 artifact topology/shard inspection, APCv2 full/sliding cache binding, ordinary
 decode, continuous batching, prompt lookup, grammar, reasoning-channel and
 tool-call integration. The locally cached causal Laguna DFlash artifact uses a
-different draft contract from mlx2's qualified DFlash2 closure, so speculation
-remains fail-closed and unselected rather than being represented as delivered.
+different draft contract from mlx2's qualified DFlash2 closure; since rm06 it
+has its own drafter (`runtime/drafters/laguna_dflash.py`, mined from mlx-vlm,
+[`laguna-dflash.json`](../provenance/laguna-dflash.json)) on the external
+draft route, implemented and CPU-verified but unqualified and unselected.
 The dedicated Laguna q8 expert-down/top-8 reduction and sigmoid/correction-bias
 router Metal kernels are original mlx2 work. They preserve the ordinary MLX
 graph as the reference route and remain candidate-gated until exact-device
 numerical and performance qualification records engagement for each arm.
+
+## North Mini Code Cohere EAGLE drafter (rm06, 2026-09-19)
+
+The external-route drafter for `CohereLabs/North-Mini-Code-1.0-eagle`
+(`runtime/drafters/cohere_eagle.py`, `adapters/cohere_eagle.py`) follows the
+draft architecture of vLLM `cohere_eagle.py`/`commandr.py` (Apache-2.0) and
+the tap semantics of vLLM #49819; see
+[`north-cohere-eagle.json`](../provenance/north-cohere-eagle.json). The chain
+drafting loop, committed-only draft KV cache, executor context-token pairing,
+final-norm target tap and external-route steering are original mlx2 work.
+Implemented and CPU-verified only; unqualified and unselected.
+
+## Laguna XS 2.1 causal DFlash drafter (rm06, 2026-09-19)
+
+`runtime/drafters/laguna_dflash.py` ports the draft math of mlx-vlm's
+`laguna_dflash` drafter (MIT, mlx-vlm #2151) onto mlx2's external draft/verify
+executor; see [`laguna-dflash.json`](../provenance/laguna-dflash.json). The
+exact per-position law export, committed-only context cache, processor-aware
+masking, Laguna target taps and artifact inspection are original mlx2 work.
 
 This file is append-only. Every implementation mined from another tree must
 record its origin and the validation performed after adaptation.
@@ -507,3 +528,236 @@ checks do not qualify Muse GPU execution or select its external route.
   `tests/test_decode_allocator_reclaim.py`,
   `tests/test_short_request_prefill_starvation.py`,
   `tests/test_apc_hits_hybrid_gdn_self_mtp.py` (CPU). No GPU qualification yet.
+
+## 2026-09-19 — authenticated tenant identity (ideas only, no code mined)
+
+- `src/mlx2/tenant_auth.py` and the `server.py` tenant resolver are original
+  mlx2 code. No source was copied.
+- Design inputs:
+  - vLLM `--api-key` middleware: compare SHA-256 digests, not the raw keys.
+  - vLLM `cache_salt`: namespace the prefix cache per request and reject a bad
+    salt rather than ignoring it.
+  - vLLM PR #56269 (merged 2026-09-11, Apache-2.0 docs), which fixed a doc
+    about which path prefixes the API key guards. mlx2 therefore guards
+    every path and allowlists only `/health` and loopback `/metrics`.
+  - sglang PRs #38577 and #39162: storage pages namespaced by a request extra
+    key.
+- Modifications relative to those ideas:
+  - tenant ids come from a hashed-key file or HMAC `mlx2t1` tokens with
+    expiry;
+  - every guarded path fails closed;
+  - `X-Tenant-ID` must match the credential or is ignored;
+  - LoRA lifecycle needs an `adapters` scope;
+  - tenant auth requires `--tenant-scoped-cache`;
+  - the token secret must differ from the reasoning signing key.
+- Validation: `tests/test_tenant_auth.py` (CPU) and
+  `scripts/bench_tenant_auth.py`. This is control-plane code, so no GPU
+  qualification is needed.
+## 2026-09-19 — concurrent multi-LoRA serving (ideas only, no code mined)
+
+- `runtime/multi_lora.py` and the serving wiring are original mlx2 code.
+- Ideas:
+  - vLLM LoRA serving (Apache-2.0): per-forward LoRA mapping, preallocated
+    slots bounded by `--max-loras` and zero-padded to `--max-lora-rank`,
+    adapter selection with `model=<lora_name>`, and `/v1/load_lora_adapter`
+    dynamic registration.
+  - Punica (Chen et al., arXiv 2310.18547): the gathered per-row BGMV/SGMV
+    delta.
+  - S-LoRA (Sheng et al., arXiv 2311.03285): slot residency with LRU over a
+    registered pool.
+  - llama.cpp server `/lora-adapters`, and the mlx-lm per-request `adapters`
+    field, were read as peer behavior. Neither batches mixed adapters.
+- Changes from the peers:
+  - The delta is MLX `gather_mm` over stacked `(slots, in, rank)` and
+    `(slots, rank, out)` tensors, with the scale folded into B.
+  - Slot 0 is the base model, and an all-base batch skips the delta.
+  - Rows are bound through the ordinary generator seams from batch uids, so no
+    model code changes.
+  - The APCv2 namespace carries the adapter content fingerprint, so prefixes are
+    never reused across adapters.
+  - When every slot is pinned, requests are deferred through the memory
+    deferral queue.
+  - Header-only registration: the tensors are materialized by the worker.
+  - v1 is ordinary-route only.
+  - The single-adapter mutation path (`runtime/lora.py`, derived from
+    mlx-lm-unified `LoRALinear`) stays as the reference route.
+- Validation: `tests/test_multi_lora.py` (13 CPU tests). No GPU qualification
+  yet; see `scripts/bench_multi_lora.py` and
+  `scripts/gpu_multi_lora_throughput.py`.
+## 2026-09-19 — agent-client conformance (`--agent-compat`)
+
+- `agent_compat.py`, `lark_regex.py`, the Responses/Messages translation hooks
+  and `scripts/agent_client_conformance.py`: original mlx2 code. No code was
+  copied from any peer.
+- Ideas:
+  - `custom` tools as one-string-argument function shims,
+    `custom_tool_call(_output)` items and
+    `response.custom_tool_call_input.delta/.done` events, nullable message
+    `phase`: SGLang PR #38690 (merged 2026-09-12, Apache-2.0) and the open
+    vLLM PRs #57322 and #56418.
+  - `namespace` tool flattening to `ns.inner` and text-array tool output: the
+    open SGLang PR #35216.
+
+  All three peers describe grammars to the model without enforcing them.
+  mlx2 goes further: it lowers non-recursive Lark to its existing regex
+  automaton and fails closed on violations, which is new here.
+- Wire shapes come from the locally installed clients, observed on the wire
+  against a scripted CPU server:
+  - codex-cli 0.145.0 (`@openai/codex`, Apache-2.0);
+  - Claude Code 2.1.269.
+
+  The Codex `apply_patch` Lark grammar in
+  `tests/fixtures/agent_clients/codex_0.145.0_session.json` is reproduced
+  verbatim from the openai/codex request body (Apache-2.0) as a test fixture.
+  All other fixture text, ids and tool schemas are scrubbed placeholders.
+- The Anthropic `thinking.display:"omitted"` carrying signature reuses the
+  construction of mlx2's own Responses `encrypted_content`. It is
+  authenticated, not encrypted.
+- Client-detection rules are derived only from identity headers observed on
+  the wire from those binaries and from the official OpenAI Python SDK 2.33.0
+  and Anthropic Python SDK 0.116.0, recorded in
+  `tests/fixtures/agent_clients/headers.json` (ids scrubbed).
+- Validation: `tests/test_agent_conformance.py`,
+  `tests/test_agent_compat_selection.py` and
+  `tests/test_agent_client_harness.py` (CPU). The live scripted run of both
+  real binaries is gated by `MLX2_AGENT_CLIENTS=1`. No GPU qualification yet.
+## 2026-09-19 — bit-exact (batch-invariant) verify kernels (rm09)
+
+- Idea source: Blaizzy/mlx-vlm #2106, "Accelerate exact Qwen MXFP4
+  verification" (MIT, merged 2026-09-08). It adds short-block verify QMV
+  kernels that keep the singleton reduction order while sharing input loads
+  across verify rows. The affine analogue already in mlx-vlm is
+  `mlx_vlm/models/quantized_verifier.py` `_TARGET_VERIFY_QMV_SOURCE`. The
+  `singleton_quantized_linear` gather trick and the
+  `Qwen3_5BatchInvariantForward` per-position attention were read at
+  `/private/tmp/mlx-vlm-upstream-e79b0e0`.
+- No code copied. The fork kernel `affine_qmv_fast_multi` is
+  `qmv_fast_impl` (mlx, MIT) with 2..8 rows per threadgroup, written in the
+  fork's native dispatch rather than as a JIT `metal_kernel`. Modifications:
+  - partial-row handling for any N;
+  - a process-global mode with a host-side route counter;
+  - bit-exact routing for `qmv_quad`, generic `qmv`, non-split `qmm` and
+    `gather_qmv`.
+- mlx2 side (`runtime/verify_bitexact.py`, server/serving wiring): original.
+- Fork: branch `claude/rm09-bitexact-verify-20260919` @ `2e2a55468`, off
+  `integ/v0322-all` 79c250b44.
+- Record: `provenance/verify-bitexact-2026-09-19.json`.
+- Validation:
+  - `tests/test_verify_bitexact.py` (CPU);
+  - fork `test_qmv_bitexact_across_m`, `test_qmv_bitexact_gather` and
+    `test_qmv_bitexact_mode_off_is_unchanged` (Metal, GPU-pending).
+## 2026-09-19 — self-MTP copy drafts (rm01; ideas only, no code mined)
+
+- `runtime/copy_draft.py` and the copy branch of the self-MTP round/commit in
+  `runtime/hybrid_speculative.py` are original mlx2 code.
+- Design inputs, from PR descriptions only (Rapid-MLX, `raullenchai/Rapid-MLX`):
+  - #3398 (merged 2026-09-13): a congestion-window span sizer (probe at 2
+    rows, double on a saturated block, fall back to 1.5x measured
+    acceptance), and a windowed ratio-of-sums copy gate over 32 rounds
+    instead of an EWMA.
+  - #3417 (merged 2026-09-13): point-mass (`q = delta_d`) acceptance under
+    sampling, and indexing the full request prompt rather than the uncached
+    tail on prefix-cache hits.
+- SwitchSD (arXiv 2609.20186) motivated copy-intent gating between copy and
+  model drafts. mlx2 v1 gates on n-gram match plus measured yield; no probe is
+  learned.
+- mlx2 modifications:
+  - drafts are chosen per lane inside one batched self-MTP verify transaction
+    with ragged spans, not as a separate route;
+  - the gate uses a verify-cost model (no wall clock in the hot path) and
+    re-probes periodically;
+  - `batched_max_span` bounds cohort padding (default 0: no cohort copies,
+    per the 2026-09-19 GPU A/B);
+  - a watermarked shared index keeps the segmented recovery snapshot at O(1);
+  - adaptive depth sees head-only evidence.
+- Validation: `tests/test_copy_draft_self_mtp.py` (CPU: exactness vs copy-off,
+  point-mass law, ragged B=2, segmented abort restore, serving and
+  qualification wiring). CPU replay probe `scripts/probe_copy_mtp_replay.py`.
+  GPU A/B `scripts/ab_copy_mtp.py` is pending; the lever is implemented, not
+  qualified.
+## 2026-09-19 — measured KV quantization and self-MTP composition (rm07)
+
+- Newly written here (original mlx2 work, no code mined):
+  `runtime/kv_quant_fidelity.py` (teacher-forced exact-vs-quantized
+  measurement and the fail-closed selection gate),
+  `scripts/measure_kv_quant_fidelity.py`, `scripts/bench_kv_quant_mtp.py`,
+  the `compose_mtp` policy key and `SegmentedBatchQuantizedKVCache`
+  (`runtime/segmented_plain_kv.py`).
+- Design inputs, ideas only: llama.cpp `--cache-type-k/--cache-type-v`
+  (per-tensor K/V cache types, `common/arg.cpp`, MIT); vLLM
+  `--kv-cache-dtype fp8` and its CPU fp8 attention (vllm-project/vllm#39445,
+  Apache-2.0); mlx-lm server KV quantization (ml-explore/mlx-lm#1832, MIT),
+  whose own table shows 4-bit KV saving cache bytes while peak memory rose
+  13.2 % at 2K prefill — the reason the harness measures bytes and tok/s
+  instead of assuming them. None of these ships a fidelity gate; the
+  thresholds are mlx2 priors pending GPU evidence.
+- Modifications relative to those peers: quantization stays adapter-declared
+  and revision-bound through the approximate-state seam; target-only
+  quantization under self-MTP with an exact draft cache; a quantized
+  segmented row view instead of a joined batch slab; selection requires a
+  measured report bound to the adapter fingerprint.
+- License: Apache-2.0 (mlx2).
+- Validation: CPU tests `tests/test_approximate_kv_mtp.py`,
+  `tests/test_kv_quant_fidelity.py`; GPU plan in
+  `mlx-uag/wiki/docs/plans/mlx2-rm07-kv-quant-measured.md`. No GPU claim.
+## 2026-09-19 — APC interior checkpoint placement (rm04; ideas only, no code mined)
+
+- `runtime/interior_placement.py`, the serving placement/budget wiring and
+  APCv2 reused-interior promotion are original mlx2 code.
+- Ideas:
+  - jundot/omlx#3456 (open; license Apache-2.0), budgeted retained boundary
+    checkpoints. Three ideas come from it: checkpoints on an absolute
+    lattice, nested power-of-two strides, and a small budget so checkpoints
+    do not crowd out the prefix they protect. The measured costs it reports
+    are 115.6 MB per GDN checkpoint, and 24 s vs 207 s for a 234K-token turn.
+  - vLLM #45238 fix (a): K checkpoints spread across the prompt.
+- Modifications: mlx2 adds chat-template turn-boundary placement (the marker
+  is detected from the tokenizer's generation prompt), a tail-dense nested
+  lattice (stride factor 4), the `auto` priority order (preamble, branch
+  point, tail, turns) and a headroom-fraction cap. It also stops evicting an
+  interior entry first once that entry has been reused.
+- Validation: `tests/test_apc_interior_placement.py` and
+  `tests/test_qualify_interior_checkpoints_script.py` (CPU). GPU qualification
+  is pending: `scripts/qualify_interior_checkpoints.py`.
+## 2026-09-19 — rm10 confidence-scheduled self-MTP depth (ideas only, no code mined)
+
+- `runtime/mtp_confidence.py`, the probe in `hybrid_speculative.py`, and the
+  acceptance-log wiring in `generate.py` / `serving.py` / `server.py` are
+  original mlx2 code.
+- **Scope on this tree.** The confidence *scheduler* described below was
+  implemented, measured on GPU and found a no-go
+  (`qualification/runs/mtp-confidence-20260919/README.md`); it is not on
+  `main`. What is here is the measurement apparatus: the device probe, the
+  confidence models and their offline fit, the acceptance log, and
+  `scripts/best_constant_depth.py`. The ideas below are recorded because they
+  are what that apparatus was derived from.
+- Ideas are adapted from DSpark, "Confidence-Scheduled Speculative Decoding
+  with Semi-Autoregressive Generation"
+  ([arXiv 2607.05147](https://arxiv.org/abs/2607.05147)), read from the arXiv
+  HTML only:
+  - the confidence head `c_k = sigmoid(w^T[h_k; W1[x_{k-1}]])`;
+  - prefix survival as a product of `c_k`;
+  - Sequential Temperature Scaling;
+  - throughput-maximising verification length (Algorithm 1);
+  - lagged, two-step-old confidence for zero-overhead scheduling.
+- The vLLM speculators docs (default `markov_rank = 256`) and vLLM
+  [#47808](https://github.com/vllm-project/vllm/pull/47808) supplied the
+  objective only; no code was read or copied.
+- The earlier lab concept `mlx-lm-unified/mlx_lm/verify_cost_policy.py`
+  (cost-aware truncation, MIT) informed the cost framing; no code was copied.
+- Changes relative to DSpark:
+  - The mlx2 version has no trained drafter. It is a post-hoc head over
+    self-MTP draft statistics, with hashed rank-1 token tables instead of the
+    rank-r Markov embedding, and optional random sketches of the MTP hidden
+    state.
+  - Supervision is the observed conditional accept/reject label, not the
+    analytic `1 - TV`.
+  - Unverified lookahead drafts replace the always-drafted γ-position block,
+    and serve the log rather than a scheduler.
+  - Cost comes from a GPU-measured `cycle_table`, consumed offline by
+    `scripts/best_constant_depth.py`.
+- Validation:
+  - `tests/test_mtp_confidence.py` (CPU): tiny-Qwen4 greedy bit-exactness with
+    lookahead, identical verify-sync sites, and BatchGenerator log counters.
+  - GPU: `qualification/runs/mtp-confidence-20260919/` (the scheduler no-go,
+    the measured cycle tables, the acceptance logs and the trained heads).

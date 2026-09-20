@@ -45,6 +45,12 @@ components. Headless artifacts expose an ordinary descriptor; requesting MTP
 fails before any tensor import. Incomplete heads and unexpected topology fail
 closed.
 
+With no route flag, a complete embedded-head artifact selects the adapter's
+`native_mtp` default, while a headless artifact resolves to `ordinary` from its
+capability-pruned descriptor. Explicit `--ordinary`, `--native-mtp`, and
+`--prompt-lookup` selections override that default; impossible native-MTP
+requests fail before weight loading.
+
 The existing Hermes launcher in Application Support selects the Uncensored
 artifact with unified revision `69dcb538965a7b546e9d63fab473c2ad721e1d33` on
 port 8283. That file was inspected; this port did not inspect or modify its

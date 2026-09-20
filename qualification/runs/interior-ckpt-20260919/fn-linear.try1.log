@@ -1,0 +1,49 @@
+[cpg_job 2026-09-20T02:45:43+00:00 pid=58538] label=rm04-fn-linear agent_id=job-rm04-fn-linear-58538 command=env PYTHONPATH=/private/tmp/mlx2-rm04-interior-ckpt-qual/src ~/Desktop/mlx2/.venv/bin/python /private/tmp/mlx2-rm04-interior-ckpt-qual/scripts/qualify_interior_checkpoints.py --model ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP --route mtp --base-policy /private/tmp/mlx2-rm04-interior-ckpt-qual/qualification/runs/quality-campaign-20260919/policies/flash-next-mtp2.json --arms off,auto --workloads linear --rounds 2 --auto-headroom-fraction 0.5 --cache-gib 12 --out /private/tmp/mlx2-rm04-interior-ckpt-qual/qualification/runs/interior-ckpt-20260919/flashnext-linear.json --i-own-the-gpu
+[cpg_job 2026-09-20T02:45:43+00:00 pid=58538] created workflow 905770f825de490bb58d35c3a15f5d00 (cpg-job drivers); record it as workflows.cpg-job-drivers in /Users/Shared/mlxuag/cpg-radio.json to reuse it
+[cpg_job 2026-09-20T02:45:43+00:00 pid=58538] registered worker 660609f21318477eb142e4576ab93b72 as job-rm04-fn-linear-58538 in session 3c65a7827e83456a89fffdeefadec196
+[cpg_job 2026-09-20T02:45:43+00:00 pid=58538] took /Users/Shared/mlxuag/gpu.lock
+[cpg_job 2026-09-20T02:45:43+00:00 pid=58538] child pid 58543 started
+[off r0] linear#0 P=15363 cached=0 ttft=11.832s interior_hits+=0 match=True
+[off r0] linear#1 P=20017 cached=15362 ttft=3.655s interior_hits+=0 match=True
+[off r0] linear#2 P=24671 cached=20023 ttft=3.671s interior_hits+=0 match=True
+[off r0] linear#3 P=29325 cached=24677 ttft=3.765s interior_hits+=0 match=True
+[off r0] linear#4 P=33979 cached=29356 ttft=3.801s interior_hits+=0 match=True
+[off r0] linear#5 P=38633 cached=34010 ttft=3.806s interior_hits+=0 match=True
+[off r0] linear#6 P=43287 cached=38664 ttft=4.051s interior_hits+=0 match=True
+[off r0] linear#7 P=47941 cached=43318 ttft=4.099s interior_hits+=0 match=True
+[auto r0] linear#0 P=15363 cached=0 ttft=11.849s interior_hits+=0 match=True
+[auto r0] linear#1 P=20017 cached=15362 ttft=4.218s interior_hits+=0 match=True
+[auto r0] linear#2 P=24671 cached=20023 ttft=3.937s interior_hits+=0 match=True
+[auto r0] linear#3 P=29325 cached=24677 ttft=3.766s interior_hits+=0 match=True
+[auto r0] linear#4 P=33979 cached=29356 ttft=4.411s interior_hits+=0 match=True
+[auto r0] linear#5 P=38633 cached=34010 ttft=3.762s interior_hits+=0 match=True
+[auto r0] linear#6 P=43287 cached=38664 ttft=4.023s interior_hits+=0 match=True
+[auto r0] linear#7 P=47941 cached=43318 ttft=3.875s interior_hits+=0 match=True
+[auto r1] linear#0 P=15363 cached=0 ttft=11.719s interior_hits+=0 match=True
+[auto r1] linear#1 P=20017 cached=15362 ttft=4.179s interior_hits+=0 match=True
+[auto r1] linear#2 P=24671 cached=20023 ttft=3.976s interior_hits+=0 match=True
+[auto r1] linear#3 P=29325 cached=24677 ttft=3.684s interior_hits+=0 match=True
+[auto r1] linear#4 P=33979 cached=29356 ttft=4.393s interior_hits+=0 match=True
+[auto r1] linear#5 P=38633 cached=34010 ttft=3.810s interior_hits+=0 match=True
+[auto r1] linear#6 P=43287 cached=38664 ttft=3.842s interior_hits+=0 match=True
+[auto r1] linear#7 P=47941 cached=43318 ttft=3.854s interior_hits+=0 match=True
+[off r1] linear#0 P=15363 cached=0 ttft=11.452s interior_hits+=0 match=True
+[off r1] linear#1 P=20017 cached=15362 ttft=3.643s interior_hits+=0 match=True
+[off r1] linear#2 P=24671 cached=20023 ttft=3.682s interior_hits+=0 match=True
+[off r1] linear#3 P=29325 cached=24677 ttft=3.711s interior_hits+=0 match=True
+[off r1] linear#4 P=33979 cached=29356 ttft=3.752s interior_hits+=0 match=True
+[off r1] linear#5 P=38633 cached=34010 ttft=3.815s interior_hits+=0 match=True
+[off r1] linear#6 P=43287 cached=38664 ttft=3.603s interior_hits+=0 match=True
+[off r1] linear#7 P=47941 cached=43318 ttft=3.862s interior_hits+=0 match=True
+{
+  "refused_arms": [],
+  "correctness_diffs": 0,
+  "cold_replay_diffs": 0,
+  "ttft_cut": {},
+  "linear_ttft_regression": 0.039352621240263286,
+  "go": false
+}
+[cpg_job 2026-09-20T02:49:51+00:00 pid=58538] child exited rc=1
+[cpg_job 2026-09-20T02:49:51+00:00 pid=58538] worker 660609f21318477eb142e4576ab93b72 closed failed
+[cpg_job 2026-09-20T02:49:51+00:00 pid=58538] released /Users/Shared/mlxuag/gpu.lock
+[cpg_job 2026-09-20T02:49:51+00:00 pid=58538] wrote /private/tmp/claude-501/-Users-user-Desktop-mlx2/dcc2c62c-d339-4686-a019-625b816d27d9/scratchpad/roadmap/rm04/gpu/fn-linear.try1.log.done

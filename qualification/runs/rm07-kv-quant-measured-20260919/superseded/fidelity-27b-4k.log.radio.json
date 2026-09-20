@@ -1,0 +1,18 @@
+{
+ "agent_id": "job-rm07-fid-27b-4k-43447",
+ "complete_worker": {
+  "already_terminal": false,
+  "finished_at": 1789851826,
+  "status": "completed",
+  "worker_id": "476d7293339f4bb8bf194698361bf2ef"
+ },
+ "register_worker": {
+  "worker_id": "476d7293339f4bb8bf194698361bf2ef",
+  "workflow_id": "9660619796634181aa7b7b4a5a6a5c39"
+ },
+ "updated_at": "2026-09-19T21:03:46+00:00",
+ "worker_heartbeat": {
+  "heartbeat_at": 1789851758,
+  "worker_id": "476d7293339f4bb8bf194698361bf2ef"
+ }
+}

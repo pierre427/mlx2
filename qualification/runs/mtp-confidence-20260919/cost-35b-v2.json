@@ -1,0 +1,267 @@
+{
+ "schema": "mlx2.mtp_verify_cost.v1",
+ "m_points": [
+  1,
+  2,
+  3,
+  4,
+  5,
+  6,
+  8,
+  12,
+  16
+ ],
+ "costs": [
+  1.0,
+  1.0,
+  1.03,
+  1.12,
+  1.27,
+  1.53,
+  1.57,
+  1.63,
+  1.65
+ ],
+ "draft_step_cost": 0.06,
+ "overhead": 0.0,
+ "source": "profile:Qwen3.6-35B-A3B-uncensored-heretic-Native-MTP-Preserved-oQ4e-mtp:20260919",
+ "cycle_table": {
+  "1": [
+   1.0,
+   1.2344618732687067,
+   1.4433246060068055,
+   1.4134466204229665
+  ],
+  "2": [
+   1.3923455960856985,
+   1.7150404384585907,
+   1.9101985311789806,
+   2.1879129210125132
+  ],
+  "4": [
+   1.8328394897182538,
+   2.5813724240830735,
+   3.0969982941165464,
+   3.5479117258450543
+  ]
+ },
+ "raw": [
+  {
+   "rep": 0,
+   "lanes": 1,
+   "depth": 0,
+   "seconds_per_cycle": 0.013709608734643552
+  },
+  {
+   "rep": 0,
+   "lanes": 1,
+   "depth": 1,
+   "seconds_per_cycle": 0.016302916015774827
+  },
+  {
+   "rep": 0,
+   "lanes": 1,
+   "depth": 2,
+   "seconds_per_cycle": 0.017190587233926635
+  },
+  {
+   "rep": 0,
+   "lanes": 1,
+   "depth": 3,
+   "seconds_per_cycle": 0.018297595703188563
+  },
+  {
+   "rep": 0,
+   "lanes": 2,
+   "depth": 0,
+   "seconds_per_cycle": 0.017310188796727743
+  },
+  {
+   "rep": 0,
+   "lanes": 2,
+   "depth": 1,
+   "seconds_per_cycle": 0.02131082421874453
+  },
+  {
+   "rep": 0,
+   "lanes": 2,
+   "depth": 2,
+   "seconds_per_cycle": 0.024796259765025752
+  },
+  {
+   "rep": 0,
+   "lanes": 2,
+   "depth": 3,
+   "seconds_per_cycle": 0.027984564453618077
+  },
+  {
+   "rep": 0,
+   "lanes": 4,
+   "depth": 0,
+   "seconds_per_cycle": 0.02347845248368685
+  },
+  {
+   "rep": 0,
+   "lanes": 4,
+   "depth": 1,
+   "seconds_per_cycle": 0.03345938735947129
+  },
+  {
+   "rep": 0,
+   "lanes": 4,
+   "depth": 2,
+   "seconds_per_cycle": 0.040321925781427126
+  },
+  {
+   "rep": 0,
+   "lanes": 4,
+   "depth": 3,
+   "seconds_per_cycle": 0.04605539128078817
+  },
+  {
+   "rep": 1,
+   "lanes": 1,
+   "depth": 0,
+   "seconds_per_cycle": 0.012862016281360411
+  },
+  {
+   "rep": 1,
+   "lanes": 1,
+   "depth": 1,
+   "seconds_per_cycle": 0.015541516281700751
+  },
+  {
+   "rep": 1,
+   "lanes": 1,
+   "depth": 2,
+   "seconds_per_cycle": 0.01967451757809613
+  },
+  {
+   "rep": 1,
+   "lanes": 1,
+   "depth": 3,
+   "seconds_per_cycle": 0.0183479303286731
+  },
+  {
+   "rep": 1,
+   "lanes": 2,
+   "depth": 0,
+   "seconds_per_cycle": 0.018498818359148572
+  },
+  {
+   "rep": 1,
+   "lanes": 2,
+   "depth": 1,
+   "seconds_per_cycle": 0.02226291535953351
+  },
+  {
+   "rep": 1,
+   "lanes": 2,
+   "depth": 2,
+   "seconds_per_cycle": 0.025262178391130874
+  },
+  {
+   "rep": 1,
+   "lanes": 2,
+   "depth": 3,
+   "seconds_per_cycle": 0.029623992828419432
+  },
+  {
+   "rep": 1,
+   "lanes": 4,
+   "depth": 0,
+   "seconds_per_cycle": 0.02379206315617921
+  },
+  {
+   "rep": 1,
+   "lanes": 4,
+   "depth": 1,
+   "seconds_per_cycle": 0.034445779297129775
+  },
+  {
+   "rep": 1,
+   "lanes": 4,
+   "depth": 2,
+   "seconds_per_cycle": 0.040182810546866676
+  },
+  {
+   "rep": 1,
+   "lanes": 4,
+   "depth": 3,
+   "seconds_per_cycle": 0.047369030608933826
+  },
+  {
+   "rep": 2,
+   "lanes": 1,
+   "depth": 0,
+   "seconds_per_cycle": 0.012980985672584211
+  },
+  {
+   "rep": 2,
+   "lanes": 1,
+   "depth": 1,
+   "seconds_per_cycle": 0.016024531890252547
+  },
+  {
+   "rep": 2,
+   "lanes": 1,
+   "depth": 2,
+   "seconds_per_cycle": 0.018735776031462592
+  },
+  {
+   "rep": 2,
+   "lanes": 1,
+   "depth": 3,
+   "seconds_per_cycle": 0.01854714128148771
+  },
+  {
+   "rep": 2,
+   "lanes": 2,
+   "depth": 0,
+   "seconds_per_cycle": 0.018074018234074174
+  },
+  {
+   "rep": 2,
+   "lanes": 2,
+   "depth": 1,
+   "seconds_per_cycle": 0.023093285796676355
+  },
+  {
+   "rep": 2,
+   "lanes": 2,
+   "depth": 2,
+   "seconds_per_cycle": 0.024288475266075693
+  },
+  {
+   "rep": 2,
+   "lanes": 2,
+   "depth": 3,
+   "seconds_per_cycle": 0.028401266280525306
+  },
+  {
+   "rep": 2,
+   "lanes": 4,
+   "depth": 0,
+   "seconds_per_cycle": 0.024283080078021158
+  },
+  {
+   "rep": 2,
+   "lanes": 4,
+   "depth": 1,
+   "seconds_per_cycle": 0.03350875845262635
+  },
+  {
+   "rep": 2,
+   "lanes": 4,
+   "depth": 2,
+   "seconds_per_cycle": 0.04020209048394463
+  },
+  {
+   "rep": 2,
+   "lanes": 4,
+   "depth": 3,
+   "seconds_per_cycle": 0.04571880534331285
+  }
+ ],
+ "probe_overhead": []
+}

@@ -65,9 +65,11 @@ def test_registry_inspection_does_not_import_mlx(tmp_path):
 def test_descriptor_tracks_embedded_mtp(tmp_path):
     with_mtp = inspect_model(_artifact(tmp_path / "a"))
     assert with_mtp.adapter_type is xing.XingAdapter
+    assert with_mtp.default_route == "native_mtp"
     assert {Capability.MTP, Capability.SEGMENTED_MTP} <= with_mtp.descriptor.capabilities
     assert with_mtp.descriptor.cache_layout == xing.CACHE_LAYOUT
     ordinary = inspect_model(_artifact(tmp_path / "b", mtp=False))
+    assert ordinary.default_route == "ordinary"
     assert Capability.MTP not in ordinary.descriptor.capabilities
     for capability in (Capability.APC_V2, Capability.PROMPT_LOOKUP, Capability.GRAMMAR,
                        Capability.CONTINUOUS_BATCH, Capability.TOOLS, Capability.REASONING):

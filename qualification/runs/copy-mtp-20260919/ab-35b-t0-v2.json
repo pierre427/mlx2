@@ -1,0 +1,3310 @@
+{
+  "schema": "mlx2.copy-mtp-ab.v1",
+  "plan": {
+    "model": "~/mlx-models/Qwen3.6-35B-A3B-uncensored-heretic-Native-MTP-Preserved-oQ4e-mtp",
+    "policies": {
+      "off": {
+        "num_draft": 2
+      },
+      "on": {
+        "num_draft": 2,
+        "self_mtp_copy_draft": {
+          "enabled": true
+        }
+      }
+    },
+    "order": [
+      [
+        "off",
+        "on",
+        "ord"
+      ],
+      [
+        "on",
+        "ord",
+        "off"
+      ],
+      [
+        "ord",
+        "off",
+        "on"
+      ]
+    ],
+    "widths": [
+      1,
+      4
+    ],
+    "temperatures": [
+      0.0
+    ],
+    "corpora": {
+      "prose": 4,
+      "code": 4
+    },
+    "max_tokens": 512,
+    "native_mtp_flag": false,
+    "ordinary_arm": true
+  },
+  "cells": [
+    {
+      "arm": "off",
+      "rep": 0,
+      "corpus": "prose",
+      "width": 1,
+      "temperature": 0.0,
+      "decode_tok_s_mean": 124.14211300940948,
+      "rows": [
+        {
+          "completion_tokens": 512,
+          "decode_tok_s": 126.65350780002532,
+          "output_sha256": "389c8145724e50bda459f1ebc167efca4d1b7a4c383893d1d2008548182086b9",
+          "output_chars": 2506,
+          "output_head": "Here is an explanation of how a compiler works, broken down into numbered sections:\n\n1. **Lexical Analysis (Scanning)**\n   The compiler first reads the source code character by character and groups th",
+          "copy_draft": null
+        },
+        {
+          "completion_tokens": 512,
+          "decode_tok_s": 130.8440027107903,
+          "output_sha256": "5092b1ffe438d1fbf4d2342a3008456465697f6faa115bf87f9aa72fcb135f3e",
+          "output_chars": 2456,
+          "output_head": "Here is an explanation of how a database transaction works, broken down into numbered sections:\n\n### 1. Definition and Purpose\nA **database transaction** is a single logical unit of work that accesses",
+          "copy_draft": null
+        },
+        {
+          "completion_tokens": 512,
+          "decode_tok_s": 128.20527963989375,
+          "output_sha256": "f75b57f9d78fe1b68ee83384fa00c531bd026dd5fd5e781ab07fb4d1957713cf",
+          "output_chars": 2201,
+          "output_head": "Here is a step-by-step explanation of how a Metal compute kernel is dispatched on Apple Silicon, explained in plain language.\n\n### The Big Picture Analogy\nThink of your GPU as a **factory floor** and ",
+          "copy_draft": null
+        },
+        {
+          "completion_tokens": 435,
+          "decode_tok_s": 110.86566188692856,
+          "output_sha256": "5ea86ec12c5d31ac3351c0c3453e6894a39c2dce1206a462dd012112f0f6dc6e",
+          "output_chars": 2498,
+          "output_head": "**The Civic Heart: Why Cities Invest in Public Libraries**\n\nIn an era dominated by digital information and private subscription services, the existence of a public library might seem like a relic of t",
+          "copy_draft": null
+        }
+      ],
+      "copy_counter_delta": {},
+      "metal_peak_bytes": 21875381371
+    },
+    {
+      "arm": "off",
+      "rep": 0,
+      "corpus": "prose",
+      "width": 4,
+      "temperature": 0.0,
+      "decode_tok_s_mean": 53.52939964852848,
+      "rows": [
+        {
+          "completion_tokens": 512,
+          "decode_tok_s": 53.82123671209914,
+          "output_sha256": "e2f6930a5c72e2b7121d6d81686a195b8ef21a8a8ee8a33a8c9245d34baa3311",
+          "output_chars": 2611,
+          "output_head": "Here is an explanation of how a compiler works, broken down into numbered sections:\n\n1. **Lexical Analysis (Scanning)**\n   The compiler first reads the source code character by character and groups th",
+          "copy_draft": null
+        },
+        {
+          "completion_tokens": 512,
+          "decode_tok_s": 57.2610966939666,
+          "output_sha256": "ab34861572110aad44c02ed5d12db4ab76cfec990577957f9ddf955d53fcceb6",
+          "output_chars": 2379,
+          "output_head": "Here is an explanation of how a database transaction works, broken down into numbered sections:\n\n### 1. Definition and Purpose\nA **database transaction** is a single logical unit of work that accesses",
+          "copy_draft": null
+        },
+        {
+          "completion_tokens": 512,
+          "decode_tok_s": 53.059945285783456,
+          "output_sha256": "c531c2b2f0f95050f5b61deda8eca9081f110969659074e999d01f964396d2a5",
+          "output_chars": 2179,
+          "output_head": "Here is a step-by-step explanation of how a Metal compute kernel is dispatched on Apple Silicon, from start to finish, in plain language.\n\n### The Big Picture Analogy\nThink of dispatching a Metal comp",
+          "copy_draft": null
+        },
+        {
+          "completion_tokens": 480,
+          "decode_tok_s": 49.97531990226472,
+          "output_sha256": "af961e2256ae80ebb8d1fc3a859ad497c8b369ac3a3fece725dd36bad2fdb192",
+          "output_chars": 2685,
+          "output_head": "**The Civic Heart: Why Cities Invest in Public Libraries**\n\nIn an era dominated by digital information and private subscription services, the existence of a public library might seem like a relic of t",
+          "copy_draft": null
+        }
+      ],
+      "copy_counter_delta": {},
+      "metal_peak_bytes": 22989086468
+    },
+    {
+      "arm": "off",
+      "rep": 0,
+      "corpus": "code",
+      "width": 1,
+      "temperature": 0.0,
+      "decode_tok_s_mean": 163.34172596718216,
+      "rows": [
+        {
+          "completion_tokens": 356,
+          "decode_tok_s": 164.70383003805733,
+          "output_sha256": "b8998f7ae7ed272cc431d773bea48bc0e3476cd287a09eedd95a647e89d6d6e9",
+          "output_chars": 1307,
+          "output_head": "```python\nclass AdaptiveLookback:\n    \"\"\"Miss-driven lookback with rejection backoff inside a scheduler cap.\"\"\"\n\n    def __init__(self, ladder=(256, 1024, 4096, 16384), *, misses=4, rejects=2):\n      ",
+          "copy_draft": null
+        },
+        {
+          "completion_tokens": 146,
+          "decode_tok_s": 161.93845178218197,
+          "output_sha256": "572599a0c21b8900767d6b489803847f6ba3b2dae1b254fbb2d46243204be31b",
+          "output_chars": 448,
+          "output_head": "```python\ndef merge_intervals(intervals):\n    \"\"\"Merge overlapping closed intervals [start, end].\"\"\"\n    ordered = sorted(intervals)\n    merged = []\n    for start, end in ordered:\n        if merged an",
+          "copy_draft": null
+        },
+        {
+          "completion_tokens": 416,
+          "decode_tok_s": 161.7259077109652,
+          "output_sha256": "93c366cba76ca83e73eb60bc68dd3812605fb48248d4d7a5750d2eb14d463c26",
+          "output_chars": 1442,
+          "output_head": "```python\nclass AdaptiveLookback:\n    \"\"\"Miss-driven lookback with rejection backoff inside a scheduler cap.\"\"\"\n\n    def __init__(self, ladder: tuple[int, ...] = (256, 1024, 4096, 16384), *, misses: i",
+          "copy_draft": null
+        },
+        {
+          "completion_tokens": 138,
+          "decode_tok_s": 164.99871433752412,
+          "output_sha256": "9ce8e9c41a4728be66bfd4aa0c8768d308d15857e913a7069ba2b7153f0d6ff1",
+          "output_chars": 470,
+          "output_head": "```python\ndef merge_intervals(intervals):\n    \"\"\"Merge overlapping closed intervals [start, end].\"\"\"\n    ordered = sorted(intervals)\n    merged = []\n    for start, end in ordered:\n        if merged an",
+          "copy_draft": null
+        }
+      ],
+      "copy_counter_delta": {},
+      "metal_peak_bytes": 22989086468
+    },
+    {
+      "arm": "off",
+      "rep": 0,
+      "corpus": "code",
+      "width": 4,
+      "temperature": 0.0,
+      "decode_tok_s_mean": 81.6470986386034,
+      "rows": [
+        {
+          "completion_tokens": 356,
+          "decode_tok_s": 91.01200964448883,
+          "output_sha256": "b8998f7ae7ed272cc431d773bea48bc0e3476cd287a09eedd95a647e89d6d6e9",
+          "output_chars": 1307,
+          "output_head": "```python\nclass AdaptiveLookback:\n    \"\"\"Miss-driven lookback with rejection backoff inside a scheduler cap.\"\"\"\n\n    def __init__(self, ladder=(256, 1024, 4096, 16384), *, misses=4, rejects=2):\n      ",
+          "copy_draft": null
+        },
+        {
+          "completion_tokens": 146,
+          "decode_tok_s": 68.762117099813,
+          "output_sha256": "572599a0c21b8900767d6b489803847f6ba3b2dae1b254fbb2d46243204be31b",
+          "output_chars": 448,
+          "output_head": "```python\ndef merge_intervals(intervals):\n    \"\"\"Merge overlapping closed intervals [start, end].\"\"\"\n    ordered = sorted(intervals)\n    merged = []\n    for start, end in ordered:\n        if merged an",
+          "copy_draft": null
+        },
+        {
+          "completion_tokens": 416,
+          "decode_tok_s": 96.86266871549758,
+          "output_sha256": "93c366cba76ca83e73eb60bc68dd3812605fb48248d4d7a5750d2eb14d463c26",
+          "output_chars": 1442,
+          "output_head": "```python\nclass AdaptiveLookback:\n    \"\"\"Miss-driven lookback with rejection backoff inside a scheduler cap.\"\"\"\n\n    def __init__(self, ladder: tuple[int, ...] = (256, 1024, 4096, 16384), *, misses: i",
+          "copy_draft": null
+        },
+        {
+          "completion_tokens": 154,
+          "decode_tok_s": 69.9515990946142,
+          "output_sha256": "5e79c4bf3f6ba2f7880784b4eb0aaa248e7a1058269031d38e9c1888ab2328fe",
+          "output_chars": 492,
+          "output_head": "```python\ndef merge_intervals(intervals):\n    \"\"\"Merge overlapping closed intervals [start, end].\"\"\"\n    ordered = sorted(intervals)\n    merged = []\n    for start, end in ordered:\n        if merged an",
+          "copy_draft": null
+        }
+      ],
+      "copy_counter_delta": {},
+      "metal_peak_bytes": 22989086468
+    },
+    {
+      "arm": "on",
+      "rep": 0,
+      "corpus": "prose",
+      "width": 1,
+      "temperature": 0.0,
+      "decode_tok_s_mean": 125.36778287177073,
+      "rows": [
+        {
+          "completion_tokens": 512,
+          "decode_tok_s": 130.22977846749816,
+          "output_sha256": "b66be089260289b034a1a38f723cab523976686935992d881fe3631384c84f7e",
+          "output_chars": 2513,
+          "output_head": "Here is an explanation of how a compiler works, broken down into numbered sections:\n\n1. **Lexical Analysis (Scanning)**\n   The compiler first reads the source code character by character and groups th",
+          "copy_draft": {
+            "schema": "mlx2.self-mtp-copy-draft.v1",
+            "enabled": true,
+            "verification": "exact",
+            "policy": {
+              "enabled": true,
+              "ngram_min": 3,
+              "ngram_max": 6,
+              "max_span": 8,
+              "batched_max_span": 0,
+              "probe_span": 2,
+              "lookback": 8192,
+              "min_samples": 3,
+              "gate_window": 32,
+              "reprobe_interval": 16,
+              "min_yield_ratio": 1.0,
+              "verify_row_cost": 0.1,
+              "draft_step_cost": 0.15
+            },
+            "copy_rounds": 4,
+            "copy_proposed": 10,
+            "copy_accepted": 3,
+            "copy_acceptance": 0.3,
+            "head_rounds": 213,
+            "head_proposed": 423,
+            "head_accepted": 291,
+            "head_acceptance": 0.6879432624113475,
+            "gate_declines": 6,
+            "probe_rounds": 0,
+            "lookup_misses": 206,
+            "index_tokens": 564,
+            "sizer_width": 2
+          }
+        },
+        {
+          "completion_tokens": 512,
+          "decode_tok_s": 135.2244139666089,
+          "output_sha256": "07b9bce82c8c5dd7d1013c18ac4b617b45cfcdb5def3f8f6f7d930aaaf04f193",
+          "output_chars": 2514,
+          "output_head": "Here is an explanation of how a database transaction works, broken down into numbered sections:\n\n### 1. Definition and Purpose\nA **database transaction** is a single logical unit of work that accesses",
+          "copy_draft": {
+            "schema": "mlx2.self-mtp-copy-draft.v1",
+            "enabled": true,
+            "verification": "exact",
+            "policy": {
+              "enabled": true,
+              "ngram_min": 3,
+              "ngram_max": 6,
+              "max_span": 8,
+              "batched_max_span": 0,
+              "probe_span": 2,
+              "lookback": 8192,
+              "min_samples": 3,
+              "gate_window": 32,
+              "reprobe_interval": 16,
+              "min_yield_ratio": 1.0,
+              "verify_row_cost": 0.1,
+              "draft_step_cost": 0.15
+            },
+            "copy_rounds": 3,
+            "copy_proposed": 8,
+            "copy_accepted": 2,
+            "copy_acceptance": 0.25,
+            "head_rounds": 205,
+            "head_proposed": 409,
+            "head_accepted": 301,
+            "head_acceptance": 0.7359413202933985,
+            "gate_declines": 5,
+            "probe_rounds": 0,
+            "lookup_misses": 200,
+            "index_tokens": 565,
+            "sizer_width": 2
+          }
+        },
+        {
+          "completion_tokens": 512,
+          "decode_tok_s": 120.52392293713231,
+          "output_sha256": "6d1569d980546dcec0c39cc8181445fb2394fa8bc89aa95690de5495b30d3aac",
+          "output_chars": 2141,
+          "output_head": "Here is a step-by-step explanation of how a Metal compute kernel is dispatched on Apple Silicon, from start to finish, in plain language.\n\n### The Big Picture Analogy\nThink of dispatching a Metal comp",
+          "copy_draft": {
+            "schema": "mlx2.self-mtp-copy-draft.v1",
+            "enabled": true,
+            "verification": "exact",
+            "policy": {
+              "enabled": true,
+              "ngram_min": 3,
+              "ngram_max": 6,
+              "max_span": 8,
+              "batched_max_span": 0,
+              "probe_span": 2,
+              "lookback": 8192,
+              "min_samples": 3,
+              "gate_window": 32,
+              "reprobe_interval": 16,
+              "min_yield_ratio": 1.0,
+              "verify_row_cost": 0.1,
+              "draft_step_cost": 0.15
+            },
+            "copy_rounds": 4,
+            "copy_proposed": 10,
+            "copy_accepted": 3,
+            "copy_acceptance": 0.3,
+            "head_rounds": 222,
+            "head_proposed": 443,
+            "head_accepted": 282,
+            "head_acceptance": 0.636568848758465,
+            "gate_declines": 10,
+            "probe_rounds": 0,
+            "lookup_misses": 212,
+            "index_tokens": 582,
+            "sizer_width": 2
+          }
+        },
+        {
+          "completion_tokens": 512,
+          "decode_tok_s": 115.49301611584353,
+          "output_sha256": "1509ee734afa0cabae58946635690535bfe35459e658de0c799219a12d2a2a8c",
+          "output_chars": 2868,
+          "output_head": "**The Civic Heart: Why Cities Invest in Public Libraries**\n\nIn an era dominated by digital connectivity and private consumerism, the public library remains one of the most enduring symbols of urban ci",
+          "copy_draft": {
+            "schema": "mlx2.self-mtp-copy-draft.v1",
+            "enabled": true,
+            "verification": "exact",
+            "policy": {
+              "enabled": true,
+              "ngram_min": 3,
+              "ngram_max": 6,
+              "max_span": 8,
+              "batched_max_span": 0,
+              "probe_span": 2,
+              "lookback": 8192,
+              "min_samples": 3,
+              "gate_window": 32,
+              "reprobe_interval": 16,
+              "min_yield_ratio": 1.0,
+              "verify_row_cost": 0.1,
+              "draft_step_cost": 0.15
+            },
+            "copy_rounds": 1,
+            "copy_proposed": 2,
+            "copy_accepted": 1,
+            "copy_acceptance": 0.5,
+            "head_rounds": 235,
+            "head_proposed": 469,
+            "head_accepted": 274,
+            "head_acceptance": 0.5842217484008528,
+            "gate_declines": 0,
+            "probe_rounds": 0,
+            "lookup_misses": 235,
+            "index_tokens": 565,
+            "sizer_width": 2
+          }
+        }
+      ],
+      "copy_counter_delta": {
+        "self_mtp_copy_rounds": 29,
+        "self_mtp_copy_proposed_tokens": 144,
+        "self_mtp_copy_accepted_tokens": 110,
+        "self_mtp_copy_probe_rounds": 0,
+        "self_mtp_copy_gate_declines": 21,
+        "self_mtp_copy_lookup_misses": 855
+      },
+      "metal_peak_bytes": 21886031700
+    },
+    {
+      "arm": "on",
+      "rep": 0,
+      "corpus": "prose",
+      "width": 4,
+      "temperature": 0.0,
+      "decode_tok_s_mean": 55.51542144893915,
+      "rows": [
+        {
+          "completion_tokens": 512,
+          "decode_tok_s": 57.14767296766863,
+          "output_sha256": "2e6dab7b57d7302a30aa9ec9a687af2ce3b46e72782fab8191ca9d49d8971dba",
+          "output_chars": 2641,
+          "output_head": "Here is an explanation of how a compiler works, broken down into numbered sections:\n\n1. **Lexical Analysis (Scanning)**\n   The compiler first reads the source code character by character and groups th",
+          "copy_draft": {
+            "schema": "mlx2.self-mtp-copy-draft.v1",
+            "enabled": true,
+            "verification": "exact",
+            "policy": {
+              "enabled": true,
+              "ngram_min": 3,
+              "ngram_max": 6,
+              "max_span": 8,
+              "batched_max_span": 0,
+              "probe_span": 2,
+              "lookback": 8192,
+              "min_samples": 3,
+              "gate_window": 32,
+              "reprobe_interval": 16,
+              "min_yield_ratio": 1.0,
+              "verify_row_cost": 0.1,
+              "draft_step_cost": 0.15
+            },
+            "copy_rounds": 0,
+            "copy_proposed": 0,
+            "copy_accepted": 0,
+            "copy_acceptance": 0.0,
+            "head_rounds": 215,
+            "head_proposed": 428,
+            "head_accepted": 296,
+            "head_acceptance": 0.6915887850467289,
+            "gate_declines": 0,
+            "probe_rounds": 0,
+            "lookup_misses": 0,
+            "index_tokens": 563,
+            "sizer_width": 2
+          }
+        },
+        {
+          "completion_tokens": 512,
+          "decode_tok_s": 59.46293132770939,
+          "output_sha256": "6aae84f25e9588115c651c29ccde65f752e5c962a2ff32dc9a040f405bba5c8c",
+          "output_chars": 2479,
+          "output_head": "Here is an explanation of how a database transaction works, broken down into numbered sections:\n\n### 1. Definition and Purpose\nA **database transaction** is a logical unit of work that accesses and po",
+          "copy_draft": {
+            "schema": "mlx2.self-mtp-copy-draft.v1",
+            "enabled": true,
+            "verification": "exact",
+            "policy": {
+              "enabled": true,
+              "ngram_min": 3,
+              "ngram_max": 6,
+              "max_span": 8,
+              "batched_max_span": 0,
+              "probe_span": 2,
+              "lookback": 8192,
+              "min_samples": 3,
+              "gate_window": 32,
+              "reprobe_interval": 16,
+              "min_yield_ratio": 1.0,
+              "verify_row_cost": 0.1,
+              "draft_step_cost": 0.15
+            },
+            "copy_rounds": 0,
+            "copy_proposed": 0,
+            "copy_accepted": 0,
+            "copy_acceptance": 0.0,
+            "head_rounds": 202,
+            "head_proposed": 402,
+            "head_accepted": 309,
+            "head_acceptance": 0.7686567164179104,
+            "gate_declines": 0,
+            "probe_rounds": 0,
+            "lookup_misses": 0,
+            "index_tokens": 564,
+            "sizer_width": 2
+          }
+        },
+        {
+          "completion_tokens": 512,
+          "decode_tok_s": 56.89960826688284,
+          "output_sha256": "829165c90ba862fa4e609f0b9cf6a04c1192e899ad20ea0f9ad119ef25210285",
+          "output_chars": 2066,
+          "output_head": "Here is a step-by-step explanation of how a Metal compute kernel is dispatched on Apple Silicon, from start to finish, in plain language.\n\n### The Big Picture Analogy\nThink of dispatching a Metal comp",
+          "copy_draft": {
+            "schema": "mlx2.self-mtp-copy-draft.v1",
+            "enabled": true,
+            "verification": "exact",
+            "policy": {
+              "enabled": true,
+              "ngram_min": 3,
+              "ngram_max": 6,
+              "max_span": 8,
+              "batched_max_span": 0,
+              "probe_span": 2,
+              "lookback": 8192,
+              "min_samples": 3,
+              "gate_window": 32,
+              "reprobe_interval": 16,
+              "min_yield_ratio": 1.0,
+              "verify_row_cost": 0.1,
+              "draft_step_cost": 0.15
+            },
+            "copy_rounds": 0,
+            "copy_proposed": 0,
+            "copy_accepted": 0,
+            "copy_acceptance": 0.0,
+            "head_rounds": 217,
+            "head_proposed": 432,
+            "head_accepted": 294,
+            "head_acceptance": 0.6805555555555556,
+            "gate_declines": 0,
+            "probe_rounds": 0,
+            "lookup_misses": 1,
+            "index_tokens": 581,
+            "sizer_width": 2
+          }
+        },
+        {
+          "completion_tokens": 403,
+          "decode_tok_s": 48.55147323349575,
+          "output_sha256": "8276c9e82b541c49b2d51cebad0e9960c3bad01dfc80f14e59a2a038e9ec8e05",
+          "output_chars": 2314,
+          "output_head": "**The Civic Heart: Why Cities Invest in Public Libraries**\n\nIn an era dominated by digital information and private subscription services, the existence of a public library might seem like a relic of t",
+          "copy_draft": {
+            "schema": "mlx2.self-mtp-copy-draft.v1",
+            "enabled": true,
+            "verification": "exact",
+            "policy": {
+              "enabled": true,
+              "ngram_min": 3,
+              "ngram_max": 6,
+              "max_span": 8,
+              "batched_max_span": 0,
+              "probe_span": 2,
+              "lookback": 8192,
+              "min_samples": 3,
+              "gate_window": 32,
+              "reprobe_interval": 16,
+              "min_yield_ratio": 1.0,
+              "verify_row_cost": 0.1,
+              "draft_step_cost": 0.15
+            },
+            "copy_rounds": 0,
+            "copy_proposed": 0,
+            "copy_accepted": 0,
+            "copy_acceptance": 0.0,
+            "head_rounds": 193,
+            "head_proposed": 386,
+            "head_accepted": 211,
+            "head_acceptance": 0.5466321243523317,
+            "gate_declines": 0,
+            "probe_rounds": 0,
+            "lookup_misses": 0,
+            "index_tokens": 455,
+            "sizer_width": 2
+          }
+        }
+      ],
+      "copy_counter_delta": {
+        "self_mtp_copy_rounds": 0,
+        "self_mtp_copy_proposed_tokens": 0,
+        "self_mtp_copy_accepted_tokens": 0,
+        "self_mtp_copy_probe_rounds": 0,
+        "self_mtp_copy_gate_declines": 0,
+        "self_mtp_copy_lookup_misses": 819
+      },
+      "metal_peak_bytes": 22994499260
+    },
+    {
+      "arm": "on",
+      "rep": 0,
+      "corpus": "code",
+      "width": 1,
+      "temperature": 0.0,
+      "decode_tok_s_mean": 212.1793995502241,
+      "rows": [
+        {
+          "completion_tokens": 356,
+          "decode_tok_s": 216.5619018324395,
+          "output_sha256": "b8998f7ae7ed272cc431d773bea48bc0e3476cd287a09eedd95a647e89d6d6e9",
+          "output_chars": 1307,
+          "output_head": "```python\nclass AdaptiveLookback:\n    \"\"\"Miss-driven lookback with rejection backoff inside a scheduler cap.\"\"\"\n\n    def __init__(self, ladder=(256, 1024, 4096, 16384), *, misses=4, rejects=2):\n      ",
+          "copy_draft": {
+            "schema": "mlx2.self-mtp-copy-draft.v1",
+            "enabled": true,
+            "verification": "exact",
+            "policy": {
+              "enabled": true,
+              "ngram_min": 3,
+              "ngram_max": 6,
+              "max_span": 8,
+              "batched_max_span": 0,
+              "probe_span": 2,
+              "lookback": 8192,
+              "min_samples": 3,
+              "gate_window": 32,
+              "reprobe_interval": 16,
+              "min_yield_ratio": 1.0,
+              "verify_row_cost": 0.1,
+              "draft_step_cost": 0.15
+            },
+            "copy_rounds": 71,
+            "copy_proposed": 368,
+            "copy_accepted": 269,
+            "copy_acceptance": 0.7309782608695652,
+            "head_rounds": 5,
+            "head_proposed": 10,
+            "head_accepted": 10,
+            "head_acceptance": 1.0,
+            "gate_declines": 0,
+            "probe_rounds": 0,
+            "lookup_misses": 5,
+            "index_tokens": 785,
+            "sizer_width": 2
+          }
+        },
+        {
+          "completion_tokens": 146,
+          "decode_tok_s": 236.0812306651947,
+          "output_sha256": "572599a0c21b8900767d6b489803847f6ba3b2dae1b254fbb2d46243204be31b",
+          "output_chars": 448,
+          "output_head": "```python\ndef merge_intervals(intervals):\n    \"\"\"Merge overlapping closed intervals [start, end].\"\"\"\n    ordered = sorted(intervals)\n    merged = []\n    for start, end in ordered:\n        if merged an",
+          "copy_draft": {
+            "schema": "mlx2.self-mtp-copy-draft.v1",
+            "enabled": true,
+            "verification": "exact",
+            "policy": {
+              "enabled": true,
+              "ngram_min": 3,
+              "ngram_max": 6,
+              "max_span": 8,
+              "batched_max_span": 0,
+              "probe_span": 2,
+              "lookback": 8192,
+              "min_samples": 3,
+              "gate_window": 32,
+              "reprobe_interval": 16,
+              "min_yield_ratio": 1.0,
+              "verify_row_cost": 0.1,
+              "draft_step_cost": 0.15
+            },
+            "copy_rounds": 21,
+            "copy_proposed": 122,
+            "copy_accepted": 99,
+            "copy_acceptance": 0.8114754098360656,
+            "head_rounds": 9,
+            "head_proposed": 18,
+            "head_accepted": 16,
+            "head_acceptance": 0.8888888888888888,
+            "gate_declines": 0,
+            "probe_rounds": 0,
+            "lookup_misses": 9,
+            "index_tokens": 338,
+            "sizer_width": 2
+          }
+        },
+        {
+          "completion_tokens": 416,
+          "decode_tok_s": 163.25699142265415,
+          "output_sha256": "93c366cba76ca83e73eb60bc68dd3812605fb48248d4d7a5750d2eb14d463c26",
+          "output_chars": 1442,
+          "output_head": "```python\nclass AdaptiveLookback:\n    \"\"\"Miss-driven lookback with rejection backoff inside a scheduler cap.\"\"\"\n\n    def __init__(self, ladder: tuple[int, ...] = (256, 1024, 4096, 16384), *, misses: i",
+          "copy_draft": {
+            "schema": "mlx2.self-mtp-copy-draft.v1",
+            "enabled": true,
+            "verification": "exact",
+            "policy": {
+              "enabled": true,
+              "ngram_min": 3,
+              "ngram_max": 6,
+              "max_span": 8,
+              "batched_max_span": 0,
+              "probe_span": 2,
+              "lookback": 8192,
+              "min_samples": 3,
+              "gate_window": 32,
+              "reprobe_interval": 16,
+              "min_yield_ratio": 1.0,
+              "verify_row_cost": 0.1,
+              "draft_step_cost": 0.15
+            },
+            "copy_rounds": 43,
+            "copy_proposed": 167,
+            "copy_accepted": 92,
+            "copy_acceptance": 0.5508982035928144,
+            "head_rounds": 95,
+            "head_proposed": 190,
+            "head_accepted": 187,
+            "head_acceptance": 0.9842105263157894,
+            "gate_declines": 71,
+            "probe_rounds": 4,
+            "lookup_misses": 24,
+            "index_tokens": 840,
+            "sizer_width": 4
+          }
+        },
+        {
+          "completion_tokens": 154,
+          "decode_tok_s": 232.81747428060802,
+          "output_sha256": "5e79c4bf3f6ba2f7880784b4eb0aaa248e7a1058269031d38e9c1888ab2328fe",
+          "output_chars": 492,
+          "output_head": "```python\ndef merge_intervals(intervals):\n    \"\"\"Merge overlapping closed intervals [start, end].\"\"\"\n    ordered = sorted(intervals)\n    merged = []\n    for start, end in ordered:\n        if merged an",
+          "copy_draft": {
+            "schema": "mlx2.self-mtp-copy-draft.v1",
+            "enabled": true,
+            "verification": "exact",
+            "policy": {
+              "enabled": true,
+              "ngram_min": 3,
+              "ngram_max": 6,
+              "max_span": 8,
+              "batched_max_span": 0,
+              "probe_span": 2,
+              "lookback": 8192,
+              "min_samples": 3,
+              "gate_window": 32,
+              "reprobe_interval": 16,
+              "min_yield_ratio": 1.0,
+              "verify_row_cost": 0.1,
+              "draft_step_cost": 0.15
+            },
+            "copy_rounds": 21,
+            "copy_proposed": 124,
+            "copy_accepted": 102,
+            "copy_acceptance": 0.8225806451612904,
+            "head_rounds": 10,
+            "head_proposed": 20,
+            "head_accepted": 20,
+            "head_acceptance": 1.0,
+            "gate_declines": 0,
+            "probe_rounds": 0,
+            "lookup_misses": 10,
+            "index_tokens": 347,
+            "sizer_width": 3
+          }
+        }
+      ],
+      "copy_counter_delta": {
+        "self_mtp_copy_rounds": 154,
+        "self_mtp_copy_proposed_tokens": 765,
+        "self_mtp_copy_accepted_tokens": 552,
+        "self_mtp_copy_probe_rounds": 4,
+        "self_mtp_copy_gate_declines": 71,
+        "self_mtp_copy_lookup_misses": 55
+      },
+      "metal_peak_bytes": 22994499260
+    },
+    {
+      "arm": "on",
+      "rep": 0,
+      "corpus": "code",
+      "width": 4,
+      "temperature": 0.0,
+      "decode_tok_s_mean": 81.10448286257454,
+      "rows": [
+        {
+          "completion_tokens": 356,
+          "decode_tok_s": 89.44657170597462,
+          "output_sha256": "b8998f7ae7ed272cc431d773bea48bc0e3476cd287a09eedd95a647e89d6d6e9",
+          "output_chars": 1307,
+          "output_head": "```python\nclass AdaptiveLookback:\n    \"\"\"Miss-driven lookback with rejection backoff inside a scheduler cap.\"\"\"\n\n    def __init__(self, ladder=(256, 1024, 4096, 16384), *, misses=4, rejects=2):\n      ",
+          "copy_draft": {
+            "schema": "mlx2.self-mtp-copy-draft.v1",
+            "enabled": true,
+            "verification": "exact",
+            "policy": {
+              "enabled": true,
+              "ngram_min": 3,
+              "ngram_max": 6,
+              "max_span": 8,
+              "batched_max_span": 0,
+              "probe_span": 2,
+              "lookback": 8192,
+              "min_samples": 3,
+              "gate_window": 32,
+              "reprobe_interval": 16,
+              "min_yield_ratio": 1.0,
+              "verify_row_cost": 0.1,
+              "draft_step_cost": 0.15
+            },
+            "copy_rounds": 0,
+            "copy_proposed": 0,
+            "copy_accepted": 0,
+            "copy_acceptance": 0.0,
+            "head_rounds": 119,
+            "head_proposed": 238,
+            "head_accepted": 238,
+            "head_acceptance": 1.0,
+            "gate_declines": 0,
+            "probe_rounds": 0,
+            "lookup_misses": 0,
+            "index_tokens": 785,
+            "sizer_width": 2
+          }
+        },
+        {
+          "completion_tokens": 146,
+          "decode_tok_s": 67.96117207480945,
+          "output_sha256": "572599a0c21b8900767d6b489803847f6ba3b2dae1b254fbb2d46243204be31b",
+          "output_chars": 448,
+          "output_head": "```python\ndef merge_intervals(intervals):\n    \"\"\"Merge overlapping closed intervals [start, end].\"\"\"\n    ordered = sorted(intervals)\n    merged = []\n    for start, end in ordered:\n        if merged an",
+          "copy_draft": {
+            "schema": "mlx2.self-mtp-copy-draft.v1",
+            "enabled": true,
+            "verification": "exact",
+            "policy": {
+              "enabled": true,
+              "ngram_min": 3,
+              "ngram_max": 6,
+              "max_span": 8,
+              "batched_max_span": 0,
+              "probe_span": 2,
+              "lookback": 8192,
+              "min_samples": 3,
+              "gate_window": 32,
+              "reprobe_interval": 16,
+              "min_yield_ratio": 1.0,
+              "verify_row_cost": 0.1,
+              "draft_step_cost": 0.15
+            },
+            "copy_rounds": 0,
+            "copy_proposed": 0,
+            "copy_accepted": 0,
+            "copy_acceptance": 0.0,
+            "head_rounds": 50,
+            "head_proposed": 100,
+            "head_accepted": 96,
+            "head_acceptance": 0.96,
+            "gate_declines": 0,
+            "probe_rounds": 0,
+            "lookup_misses": 0,
+            "index_tokens": 338,
+            "sizer_width": 2
+          }
+        },
+        {
+          "completion_tokens": 416,
+          "decode_tok_s": 97.84557598595218,
+          "output_sha256": "93c366cba76ca83e73eb60bc68dd3812605fb48248d4d7a5750d2eb14d463c26",
+          "output_chars": 1442,
+          "output_head": "```python\nclass AdaptiveLookback:\n    \"\"\"Miss-driven lookback with rejection backoff inside a scheduler cap.\"\"\"\n\n    def __init__(self, ladder: tuple[int, ...] = (256, 1024, 4096, 16384), *, misses: i",
+          "copy_draft": {
+            "schema": "mlx2.self-mtp-copy-draft.v1",
+            "enabled": true,
+            "verification": "exact",
+            "policy": {
+              "enabled": true,
+              "ngram_min": 3,
+              "ngram_max": 6,
+              "max_span": 8,
+              "batched_max_span": 0,
+              "probe_span": 2,
+              "lookback": 8192,
+              "min_samples": 3,
+              "gate_window": 32,
+              "reprobe_interval": 16,
+              "min_yield_ratio": 1.0,
+              "verify_row_cost": 0.1,
+              "draft_step_cost": 0.15
+            },
+            "copy_rounds": 12,
+            "copy_proposed": 68,
+            "copy_accepted": 50,
+            "copy_acceptance": 0.7352941176470589,
+            "head_rounds": 119,
+            "head_proposed": 238,
+            "head_accepted": 234,
+            "head_acceptance": 0.9831932773109243,
+            "gate_declines": 0,
+            "probe_rounds": 0,
+            "lookup_misses": 0,
+            "index_tokens": 840,
+            "sizer_width": 2
+          }
+        },
+        {
+          "completion_tokens": 154,
+          "decode_tok_s": 69.16461168356192,
+          "output_sha256": "5e79c4bf3f6ba2f7880784b4eb0aaa248e7a1058269031d38e9c1888ab2328fe",
+          "output_chars": 492,
+          "output_head": "```python\ndef merge_intervals(intervals):\n    \"\"\"Merge overlapping closed intervals [start, end].\"\"\"\n    ordered = sorted(intervals)\n    merged = []\n    for start, end in ordered:\n        if merged an",
+          "copy_draft": {
+            "schema": "mlx2.self-mtp-copy-draft.v1",
+            "enabled": true,
+            "verification": "exact",
+            "policy": {
+              "enabled": true,
+              "ngram_min": 3,
+              "ngram_max": 6,
+              "max_span": 8,
+              "batched_max_span": 0,
+              "probe_span": 2,
+              "lookback": 8192,
+              "min_samples": 3,
+              "gate_window": 32,
+              "reprobe_interval": 16,
+              "min_yield_ratio": 1.0,
+              "verify_row_cost": 0.1,
+              "draft_step_cost": 0.15
+            },
+            "copy_rounds": 0,
+            "copy_proposed": 0,
+            "copy_accepted": 0,
+            "copy_acceptance": 0.0,
+            "head_rounds": 52,
+            "head_proposed": 104,
+            "head_accepted": 103,
+            "head_acceptance": 0.9903846153846154,
+            "gate_declines": 0,
+            "probe_rounds": 0,
+            "lookup_misses": 0,
+            "index_tokens": 347,
+            "sizer_width": 2
+          }
+        }
+      ],
+      "copy_counter_delta": {
+        "self_mtp_copy_rounds": 2,
+        "self_mtp_copy_proposed_tokens": 16,
+        "self_mtp_copy_accepted_tokens": 10,
+        "self_mtp_copy_probe_rounds": 0,
+        "self_mtp_copy_gate_declines": 0,
+        "self_mtp_copy_lookup_misses": 298
+      },
+      "metal_peak_bytes": 22994499260
+    },
+    {
+      "arm": "ord",
+      "rep": 0,
+      "corpus": "prose",
+      "width": 1,
+      "temperature": 0.0,
+      "decode_tok_s_mean": 117.46983791796387,
+      "rows": [
+        {
+          "completion_tokens": 512,
+          "decode_tok_s": 118.21947362235916,
+          "output_sha256": "5ddbfd245629cc6d157d2134d72ac5254b0589978ea755ff74e9f736d2b08b26",
+          "output_chars": 2624,
+          "output_head": "Here is an explanation of how a compiler works, broken down into numbered sections:\n\n1. **Lexical Analysis (Scanning)**\n   The first stage involves reading the source code character by character and g",
+          "copy_draft": null
+        },
+        {
+          "completion_tokens": 512,
+          "decode_tok_s": 119.8427093666422,
+          "output_sha256": "9bd7d4f39f9fc89065c0e8894008ffbe1c49a89de5d10dd7a2aaa9ee5f30e336",
+          "output_chars": 2532,
+          "output_head": "Here is an explanation of how a database transaction works, broken down into numbered sections:\n\n### 1. Definition and Purpose\nA **database transaction** is a single logical unit of work that accesses",
+          "copy_draft": null
+        },
+        {
+          "completion_tokens": 512,
+          "decode_tok_s": 117.79836470134192,
+          "output_sha256": "7c4368ed7f4218255df7a879ded9c9ea4d355cacaa414ac09b31f9ba24c4b4cf",
+          "output_chars": 2216,
+          "output_head": "Here is a step-by-step explanation of how a Metal compute kernel is dispatched on Apple Silicon, from start to finish, in plain language.\n\n### The Big Picture Analogy\nThink of dispatching a Metal comp",
+          "copy_draft": null
+        },
+        {
+          "completion_tokens": 476,
+          "decode_tok_s": 114.01880398151218,
+          "output_sha256": "378a82e9bcb37d1fb8df4d7a209d7b23d333a26859e122cfe1d80aee7446ca6c",
+          "output_chars": 2751,
+          "output_head": "**The Civic Heart: Why Cities Invest in Public Libraries**\n\nIn an era dominated by digital information and private connectivity, the public library might seem like a relic of the past. Yet, cities con",
+          "copy_draft": null
+        }
+      ],
+      "copy_counter_delta": {},
+      "metal_peak_bytes": 22094026547
+    },
+    {
+      "arm": "ord",
+      "rep": 0,
+      "corpus": "prose",
+      "width": 4,
+      "temperature": 0.0,
+      "decode_tok_s_mean": 70.17989862192846,
+      "rows": [
+        {
+          "completion_tokens": 512,
+          "decode_tok_s": 70.20714794994878,
+          "output_sha256": "3250076014b123b6d428c6e84c7b295f512e319a607db4673ed370b40e56f30d",
+          "output_chars": 2638,
+          "output_head": "Here is an explanation of how a compiler works, broken down into numbered sections:\n\n1. **Lexical Analysis (Scanning)**\n   The compiler first reads the source code character by character and groups th",
+          "copy_draft": null
+        },
+        {
+          "completion_tokens": 512,
+          "decode_tok_s": 70.42826293118715,
+          "output_sha256": "2fcaee28dcc212c073d396e88f91515eac35215d006efe9e587581a7e51a1c48",
+          "output_chars": 2516,
+          "output_head": "Here is an explanation of how a database transaction works, broken down into numbered sections:\n\n### 1. Definition and Purpose\nA **database transaction** is a single logical unit of work that accesses",
+          "copy_draft": null
+        },
+        {
+          "completion_tokens": 512,
+          "decode_tok_s": 70.23718077957093,
+          "output_sha256": "aed7b4e566486393b277789e670bc98faa9baf133328d783ee41479e0c4bcd65",
+          "output_chars": 2047,
+          "output_head": "Here is a step-by-step explanation of how a Metal compute kernel is dispatched on Apple Silicon, explained in plain language.\n\n### The Big Picture Analogy\nThink of your GPU as a **factory floor** and ",
+          "copy_draft": null
+        },
+        {
+          "completion_tokens": 456,
+          "decode_tok_s": 69.84700282700696,
+          "output_sha256": "766c20b32c0beaaf5ac5dcb6e46c44895c43ca7edadb247340d29e2c5c67c065",
+          "output_chars": 2624,
+          "output_head": "**The Civic Heart: Why Cities Invest in Public Libraries**\n\nIn an era dominated by digital connectivity and private subscription services, the public library might seem like a relic of the past. Howev",
+          "copy_draft": null
+        }
+      ],
+      "copy_counter_delta": {},
+      "metal_peak_bytes": 22738396624
+    },
+    {
+      "arm": "ord",
+      "rep": 0,
+      "corpus": "code",
+      "width": 1,
+      "temperature": 0.0,
+      "decode_tok_s_mean": 116.07984739195238,
+      "rows": [
+        {
+          "completion_tokens": 356,
+          "decode_tok_s": 116.57018978483148,
+          "output_sha256": "b8998f7ae7ed272cc431d773bea48bc0e3476cd287a09eedd95a647e89d6d6e9",
+          "output_chars": 1307,
+          "output_head": "```python\nclass AdaptiveLookback:\n    \"\"\"Miss-driven lookback with rejection backoff inside a scheduler cap.\"\"\"\n\n    def __init__(self, ladder=(256, 1024, 4096, 16384), *, misses=4, rejects=2):\n      ",
+          "copy_draft": null
+        },
+        {
+          "completion_tokens": 146,
+          "decode_tok_s": 116.63566831469248,
+          "output_sha256": "572599a0c21b8900767d6b489803847f6ba3b2dae1b254fbb2d46243204be31b",
+          "output_chars": 448,
+          "output_head": "```python\ndef merge_intervals(intervals):\n    \"\"\"Merge overlapping closed intervals [start, end].\"\"\"\n    ordered = sorted(intervals)\n    merged = []\n    for start, end in ordered:\n        if merged an",
+          "copy_draft": null
+        },
+        {
+          "completion_tokens": 416,
+          "decode_tok_s": 115.11368746939146,
+          "output_sha256": "93c366cba76ca83e73eb60bc68dd3812605fb48248d4d7a5750d2eb14d463c26",
+          "output_chars": 1442,
+          "output_head": "```python\nclass AdaptiveLookback:\n    \"\"\"Miss-driven lookback with rejection backoff inside a scheduler cap.\"\"\"\n\n    def __init__(self, ladder: tuple[int, ...] = (256, 1024, 4096, 16384), *, misses: i",
+          "copy_draft": null
+        },
+        {
+          "completion_tokens": 154,
+          "decode_tok_s": 115.99984399889411,
+          "output_sha256": "5e79c4bf3f6ba2f7880784b4eb0aaa248e7a1058269031d38e9c1888ab2328fe",
+          "output_chars": 492,
+          "output_head": "```python\ndef merge_intervals(intervals):\n    \"\"\"Merge overlapping closed intervals [start, end].\"\"\"\n    ordered = sorted(intervals)\n    merged = []\n    for start, end in ordered:\n        if merged an",
+          "copy_draft": null
+        }
+      ],
+      "copy_counter_delta": {},
+      "metal_peak_bytes": 23191361190
+    },
+    {
+      "arm": "ord",
+      "rep": 0,
+      "corpus": "code",
+      "width": 4,
+      "temperature": 0.0,
+      "decode_tok_s_mean": 78.23950888194119,
+      "rows": [
+        {
+          "completion_tokens": 356,
+          "decode_tok_s": 83.84016864439232,
+          "output_sha256": "b8998f7ae7ed272cc431d773bea48bc0e3476cd287a09eedd95a647e89d6d6e9",
+          "output_chars": 1307,
+          "output_head": "```python\nclass AdaptiveLookback:\n    \"\"\"Miss-driven lookback with rejection backoff inside a scheduler cap.\"\"\"\n\n    def __init__(self, ladder=(256, 1024, 4096, 16384), *, misses=4, rejects=2):\n      ",
+          "copy_draft": null
+        },
+        {
+          "completion_tokens": 125,
+          "decode_tok_s": 69.29083025172979,
+          "output_sha256": "8d1071018d1d685ac486b69ca3f852d7579c56fe964afe523ccbc01b8aa989c6",
+          "output_chars": 414,
+          "output_head": "```python\ndef merge_intervals(intervals):\n    \"\"\"Merge overlapping closed intervals [start, end].\"\"\"\n    ordered = sorted(intervals)\n    merged = []\n    for start, end in ordered:\n        if merged an",
+          "copy_draft": null
+        },
+        {
+          "completion_tokens": 416,
+          "decode_tok_s": 88.08733500708203,
+          "output_sha256": "93c366cba76ca83e73eb60bc68dd3812605fb48248d4d7a5750d2eb14d463c26",
+          "output_chars": 1442,
+          "output_head": "```python\nclass AdaptiveLookback:\n    \"\"\"Miss-driven lookback with rejection backoff inside a scheduler cap.\"\"\"\n\n    def __init__(self, ladder: tuple[int, ...] = (256, 1024, 4096, 16384), *, misses: i",
+          "copy_draft": null
+        },
+        {
+          "completion_tokens": 154,
+          "decode_tok_s": 71.73970162456061,
+          "output_sha256": "5e79c4bf3f6ba2f7880784b4eb0aaa248e7a1058269031d38e9c1888ab2328fe",
+          "output_chars": 492,
+          "output_head": "```python\ndef merge_intervals(intervals):\n    \"\"\"Merge overlapping closed intervals [start, end].\"\"\"\n    ordered = sorted(intervals)\n    merged = []\n    for start, end in ordered:\n        if merged an",
+          "copy_draft": null
+        }
+      ],
+      "copy_counter_delta": {},
+      "metal_peak_bytes": 23720789622
+    },
+    {
+      "arm": "on",
+      "rep": 1,
+      "corpus": "prose",
+      "width": 1,
+      "temperature": 0.0,
+      "decode_tok_s_mean": 122.44232327373749,
+      "rows": [
+        {
+          "completion_tokens": 512,
+          "decode_tok_s": 128.70923371800376,
+          "output_sha256": "6be28e084ebdf2188aac6b8b1d882a19670f1d5233856c237c5e2f3c2dbd7912",
+          "output_chars": 2623,
+          "output_head": "Here is an explanation of how a compiler works, broken down into numbered sections:\n\n1. **Lexical Analysis (Scanning)**\n   The compiler first reads the source code character by character and groups th",
+          "copy_draft": {
+            "schema": "mlx2.self-mtp-copy-draft.v1",
+            "enabled": true,
+            "verification": "exact",
+            "policy": {
+              "enabled": true,
+              "ngram_min": 3,
+              "ngram_max": 6,
+              "max_span": 8,
+              "batched_max_span": 0,
+              "probe_span": 2,
+              "lookback": 8192,
+              "min_samples": 3,
+              "gate_window": 32,
+              "reprobe_interval": 16,
+              "min_yield_ratio": 1.0,
+              "verify_row_cost": 0.1,
+              "draft_step_cost": 0.15
+            },
+            "copy_rounds": 3,
+            "copy_proposed": 6,
+            "copy_accepted": 1,
+            "copy_acceptance": 0.16666666666666666,
+            "head_rounds": 217,
+            "head_proposed": 434,
+            "head_accepted": 290,
+            "head_acceptance": 0.6682027649769585,
+            "gate_declines": 3,
+            "probe_rounds": 0,
+            "lookup_misses": 214,
+            "index_tokens": 566,
+            "sizer_width": 2
+          }
+        },
+        {
+          "completion_tokens": 512,
+          "decode_tok_s": 127.76166224472296,
+          "output_sha256": "4d5a86f8f986491703eada2b63d8ab65efb8d32c0056f5b2fe3f43de1a85d5f9",
+          "output_chars": 2602,
+          "output_head": "Here is an explanation of how a database transaction works, broken down into numbered sections:\n\n1. **Definition and Purpose**  \n   A database transaction is a logical unit of work that accesses and p",
+          "copy_draft": {
+            "schema": "mlx2.self-mtp-copy-draft.v1",
+            "enabled": true,
+            "verification": "exact",
+            "policy": {
+              "enabled": true,
+              "ngram_min": 3,
+              "ngram_max": 6,
+              "max_span": 8,
+              "batched_max_span": 0,
+              "probe_span": 2,
+              "lookback": 8192,
+              "min_samples": 3,
+              "gate_window": 32,
+              "reprobe_interval": 16,
+              "min_yield_ratio": 1.0,
+              "verify_row_cost": 0.1,
+              "draft_step_cost": 0.15
+            },
+            "copy_rounds": 12,
+            "copy_proposed": 33,
+            "copy_accepted": 12,
+            "copy_acceptance": 0.36363636363636365,
+            "head_rounds": 202,
+            "head_proposed": 404,
+            "head_accepted": 285,
+            "head_acceptance": 0.7054455445544554,
+            "gate_declines": 3,
+            "probe_rounds": 0,
+            "lookup_misses": 199,
+            "index_tokens": 567,
+            "sizer_width": 2
+          }
+        },
+        {
+          "completion_tokens": 512,
+          "decode_tok_s": 115.32592381154484,
+          "output_sha256": "3426627c1d85905434a78079f5a42de566c653c6b97d880f1420fb364e6ba345",
+          "output_chars": 2172,
+          "output_head": "Here is a step-by-step explanation of how a Metal compute kernel is dispatched on Apple Silicon, from start to finish, in plain language.\n\n### The Big Picture Analogy\nThink of dispatching a Metal comp",
+          "copy_draft": {
+            "schema": "mlx2.self-mtp-copy-draft.v1",
+            "enabled": true,
+            "verification": "exact",
+            "policy": {
+              "enabled": true,
+              "ngram_min": 3,
+              "ngram_max": 6,
+              "max_span": 8,
+              "batched_max_span": 0,
+              "probe_span": 2,
+              "lookback": 8192,
+              "min_samples": 3,
+              "gate_window": 32,
+              "reprobe_interval": 16,
+              "min_yield_ratio": 1.0,
+              "verify_row_cost": 0.1,
+              "draft_step_cost": 0.15
+            },
+            "copy_rounds": 12,
+            "copy_proposed": 31,
+            "copy_accepted": 10,
+            "copy_acceptance": 0.3225806451612903,
+            "head_rounds": 216,
+            "head_proposed": 431,
+            "head_accepted": 273,
+            "head_acceptance": 0.6334106728538283,
+            "gate_declines": 5,
+            "probe_rounds": 0,
+            "lookup_misses": 211,
+            "index_tokens": 584,
+            "sizer_width": 2
+          }
+        },
+        {
+          "completion_tokens": 425,
+          "decode_tok_s": 117.9724733206784,
+          "output_sha256": "2f5e066f8975094be70fe69c0677aad19c6a7a5325181ba9b5cd1b91a877cc7d",
+          "output_chars": 2490,
+          "output_head": "**The Civic Heart: Why Cities Invest in Public Libraries**\n\nIn an era dominated by digital information and private subscription services, the public library might seem like a relic of the past. Howeve",
+          "copy_draft": {
+            "schema": "mlx2.self-mtp-copy-draft.v1",
+            "enabled": true,
+            "verification": "exact",
+            "policy": {
+              "enabled": true,
+              "ngram_min": 3,
+              "ngram_max": 6,
+              "max_span": 8,
+              "batched_max_span": 0,
+              "probe_span": 2,
+              "lookback": 8192,
+              "min_samples": 3,
+              "gate_window": 32,
+              "reprobe_interval": 16,
+              "min_yield_ratio": 1.0,
+              "verify_row_cost": 0.1,
+              "draft_step_cost": 0.15
+            },
+            "copy_rounds": 1,
+            "copy_proposed": 2,
+            "copy_accepted": 0,
+            "copy_acceptance": 0.0,
+            "head_rounds": 189,
+            "head_proposed": 378,
+            "head_accepted": 234,
+            "head_acceptance": 0.6190476190476191,
+            "gate_declines": 0,
+            "probe_rounds": 0,
+            "lookup_misses": 189,
+            "index_tokens": 480,
+            "sizer_width": 2
+          }
+        }
+      ],
+      "copy_counter_delta": {
+        "self_mtp_copy_rounds": 45,
+        "self_mtp_copy_proposed_tokens": 186,
+        "self_mtp_copy_accepted_tokens": 124,
+        "self_mtp_copy_probe_rounds": 0,
+        "self_mtp_copy_gate_declines": 11,
+        "self_mtp_copy_lookup_misses": 785
+      },
+      "metal_peak_bytes": 21874779845
+    },
+    {
+      "arm": "on",
+      "rep": 1,
+      "corpus": "prose",
+      "width": 4,
+      "temperature": 0.0,
+      "decode_tok_s_mean": 54.4106989767016,
+      "rows": [
+        {
+          "completion_tokens": 512,
+          "decode_tok_s": 54.886926466425685,
+          "output_sha256": "e2e1d4e103eae101dd9c9b63aa958709649249c2051e76ba2e343898e89effa2",
+          "output_chars": 2540,
+          "output_head": "Here is an explanation of how a compiler works, broken down into numbered sections:\n\n1. **Lexical Analysis (Scanning)**\n   The compiler first reads the source code character by character and groups th",
+          "copy_draft": {
+            "schema": "mlx2.self-mtp-copy-draft.v1",
+            "enabled": true,
+            "verification": "exact",
+            "policy": {
+              "enabled": true,
+              "ngram_min": 3,
+              "ngram_max": 6,
+              "max_span": 8,
+              "batched_max_span": 0,
+              "probe_span": 2,
+              "lookback": 8192,
+              "min_samples": 3,
+              "gate_window": 32,
+              "reprobe_interval": 16,
+              "min_yield_ratio": 1.0,
+              "verify_row_cost": 0.1,
+              "draft_step_cost": 0.15
+            },
+            "copy_rounds": 0,
+            "copy_proposed": 0,
+            "copy_accepted": 0,
+            "copy_acceptance": 0.0,
+            "head_rounds": 216,
+            "head_proposed": 432,
+            "head_accepted": 295,
+            "head_acceptance": 0.6828703703703703,
+            "gate_declines": 0,
+            "probe_rounds": 0,
+            "lookup_misses": 0,
+            "index_tokens": 565,
+            "sizer_width": 2
+          }
+        },
+        {
+          "completion_tokens": 512,
+          "decode_tok_s": 56.41854029506356,
+          "output_sha256": "aaad92015c007ef897730079df35909119a45180c2b4f0ecea96d4ca45a251a6",
+          "output_chars": 2537,
+          "output_head": "Here is an explanation of how a database transaction works, broken down into numbered sections:\n\n### 1. Definition and Purpose\nA **database transaction** is a single logical unit of work that accesses",
+          "copy_draft": {
+            "schema": "mlx2.self-mtp-copy-draft.v1",
+            "enabled": true,
+            "verification": "exact",
+            "policy": {
+              "enabled": true,
+              "ngram_min": 3,
+              "ngram_max": 6,
+              "max_span": 8,
+              "batched_max_span": 0,
+              "probe_span": 2,
+              "lookback": 8192,
+              "min_samples": 3,
+              "gate_window": 32,
+              "reprobe_interval": 16,
+              "min_yield_ratio": 1.0,
+              "verify_row_cost": 0.1,
+              "draft_step_cost": 0.15
+            },
+            "copy_rounds": 0,
+            "copy_proposed": 0,
+            "copy_accepted": 0,
+            "copy_acceptance": 0.0,
+            "head_rounds": 209,
+            "head_proposed": 416,
+            "head_accepted": 302,
+            "head_acceptance": 0.7259615384615384,
+            "gate_declines": 0,
+            "probe_rounds": 0,
+            "lookup_misses": 0,
+            "index_tokens": 566,
+            "sizer_width": 2
+          }
+        },
+        {
+          "completion_tokens": 512,
+          "decode_tok_s": 54.20691016105746,
+          "output_sha256": "a2261c0872209fac3c06fc838d833f8ab55ea6614f7db22ff9968095eeb29a04",
+          "output_chars": 2138,
+          "output_head": "Here is a step-by-step explanation of how a Metal compute kernel is dispatched on Apple Silicon, written in plain language.\n\n### The Big Picture Analogy\nThink of dispatching a Metal compute kernel lik",
+          "copy_draft": {
+            "schema": "mlx2.self-mtp-copy-draft.v1",
+            "enabled": true,
+            "verification": "exact",
+            "policy": {
+              "enabled": true,
+              "ngram_min": 3,
+              "ngram_max": 6,
+              "max_span": 8,
+              "batched_max_span": 0,
+              "probe_span": 2,
+              "lookback": 8192,
+              "min_samples": 3,
+              "gate_window": 32,
+              "reprobe_interval": 16,
+              "min_yield_ratio": 1.0,
+              "verify_row_cost": 0.1,
+              "draft_step_cost": 0.15
+            },
+            "copy_rounds": 0,
+            "copy_proposed": 0,
+            "copy_accepted": 0,
+            "copy_acceptance": 0.0,
+            "head_rounds": 220,
+            "head_proposed": 437,
+            "head_accepted": 291,
+            "head_acceptance": 0.665903890160183,
+            "gate_declines": 0,
+            "probe_rounds": 0,
+            "lookup_misses": 0,
+            "index_tokens": 583,
+            "sizer_width": 2
+          }
+        },
+        {
+          "completion_tokens": 512,
+          "decode_tok_s": 52.130418984259705,
+          "output_sha256": "aa60d60ffe3d69b5ef188e3760c4b2c37c1d05903dd9b54a0c34a3c96c3beb66",
+          "output_chars": 3006,
+          "output_head": "**The Civic Heart: Why Cities Invest in Public Libraries**\n\nIn an era dominated by digital connectivity and private enterprise, the public library might seem like a relic of the past. Yet, cities cont",
+          "copy_draft": {
+            "schema": "mlx2.self-mtp-copy-draft.v1",
+            "enabled": true,
+            "verification": "exact",
+            "policy": {
+              "enabled": true,
+              "ngram_min": 3,
+              "ngram_max": 6,
+              "max_span": 8,
+              "batched_max_span": 0,
+              "probe_span": 2,
+              "lookback": 8192,
+              "min_samples": 3,
+              "gate_window": 32,
+              "reprobe_interval": 16,
+              "min_yield_ratio": 1.0,
+              "verify_row_cost": 0.1,
+              "draft_step_cost": 0.15
+            },
+            "copy_rounds": 0,
+            "copy_proposed": 0,
+            "copy_accepted": 0,
+            "copy_acceptance": 0.0,
+            "head_rounds": 241,
+            "head_proposed": 479,
+            "head_accepted": 270,
+            "head_acceptance": 0.5636743215031316,
+            "gate_declines": 0,
+            "probe_rounds": 0,
+            "lookup_misses": 20,
+            "index_tokens": 566,
+            "sizer_width": 2
+          }
+        }
+      ],
+      "copy_counter_delta": {
+        "self_mtp_copy_rounds": 0,
+        "self_mtp_copy_proposed_tokens": 0,
+        "self_mtp_copy_accepted_tokens": 0,
+        "self_mtp_copy_probe_rounds": 0,
+        "self_mtp_copy_gate_declines": 0,
+        "self_mtp_copy_lookup_misses": 893
+      },
+      "metal_peak_bytes": 22989957036
+    },
+    {
+      "arm": "on",
+      "rep": 1,
+      "corpus": "code",
+      "width": 1,
+      "temperature": 0.0,
+      "decode_tok_s_mean": 214.189528152202,
+      "rows": [
+        {
+          "completion_tokens": 356,
+          "decode_tok_s": 215.5872954703112,
+          "output_sha256": "b8998f7ae7ed272cc431d773bea48bc0e3476cd287a09eedd95a647e89d6d6e9",
+          "output_chars": 1307,
+          "output_head": "```python\nclass AdaptiveLookback:\n    \"\"\"Miss-driven lookback with rejection backoff inside a scheduler cap.\"\"\"\n\n    def __init__(self, ladder=(256, 1024, 4096, 16384), *, misses=4, rejects=2):\n      ",
+          "copy_draft": {
+            "schema": "mlx2.self-mtp-copy-draft.v1",
+            "enabled": true,
+            "verification": "exact",
+            "policy": {
+              "enabled": true,
+              "ngram_min": 3,
+              "ngram_max": 6,
+              "max_span": 8,
+              "batched_max_span": 0,
+              "probe_span": 2,
+              "lookback": 8192,
+              "min_samples": 3,
+              "gate_window": 32,
+              "reprobe_interval": 16,
+              "min_yield_ratio": 1.0,
+              "verify_row_cost": 0.1,
+              "draft_step_cost": 0.15
+            },
+            "copy_rounds": 71,
+            "copy_proposed": 368,
+            "copy_accepted": 269,
+            "copy_acceptance": 0.7309782608695652,
+            "head_rounds": 5,
+            "head_proposed": 10,
+            "head_accepted": 10,
+            "head_acceptance": 1.0,
+            "gate_declines": 0,
+            "probe_rounds": 0,
+            "lookup_misses": 5,
+            "index_tokens": 785,
+            "sizer_width": 2
+          }
+        },
+        {
+          "completion_tokens": 146,
+          "decode_tok_s": 237.74665349042684,
+          "output_sha256": "572599a0c21b8900767d6b489803847f6ba3b2dae1b254fbb2d46243204be31b",
+          "output_chars": 448,
+          "output_head": "```python\ndef merge_intervals(intervals):\n    \"\"\"Merge overlapping closed intervals [start, end].\"\"\"\n    ordered = sorted(intervals)\n    merged = []\n    for start, end in ordered:\n        if merged an",
+          "copy_draft": {
+            "schema": "mlx2.self-mtp-copy-draft.v1",
+            "enabled": true,
+            "verification": "exact",
+            "policy": {
+              "enabled": true,
+              "ngram_min": 3,
+              "ngram_max": 6,
+              "max_span": 8,
+              "batched_max_span": 0,
+              "probe_span": 2,
+              "lookback": 8192,
+              "min_samples": 3,
+              "gate_window": 32,
+              "reprobe_interval": 16,
+              "min_yield_ratio": 1.0,
+              "verify_row_cost": 0.1,
+              "draft_step_cost": 0.15
+            },
+            "copy_rounds": 21,
+            "copy_proposed": 122,
+            "copy_accepted": 99,
+            "copy_acceptance": 0.8114754098360656,
+            "head_rounds": 9,
+            "head_proposed": 18,
+            "head_accepted": 16,
+            "head_acceptance": 0.8888888888888888,
+            "gate_declines": 0,
+            "probe_rounds": 0,
+            "lookup_misses": 9,
+            "index_tokens": 338,
+            "sizer_width": 2
+          }
+        },
+        {
+          "completion_tokens": 416,
+          "decode_tok_s": 163.9935390522373,
+          "output_sha256": "93c366cba76ca83e73eb60bc68dd3812605fb48248d4d7a5750d2eb14d463c26",
+          "output_chars": 1442,
+          "output_head": "```python\nclass AdaptiveLookback:\n    \"\"\"Miss-driven lookback with rejection backoff inside a scheduler cap.\"\"\"\n\n    def __init__(self, ladder: tuple[int, ...] = (256, 1024, 4096, 16384), *, misses: i",
+          "copy_draft": {
+            "schema": "mlx2.self-mtp-copy-draft.v1",
+            "enabled": true,
+            "verification": "exact",
+            "policy": {
+              "enabled": true,
+              "ngram_min": 3,
+              "ngram_max": 6,
+              "max_span": 8,
+              "batched_max_span": 0,
+              "probe_span": 2,
+              "lookback": 8192,
+              "min_samples": 3,
+              "gate_window": 32,
+              "reprobe_interval": 16,
+              "min_yield_ratio": 1.0,
+              "verify_row_cost": 0.1,
+              "draft_step_cost": 0.15
+            },
+            "copy_rounds": 43,
+            "copy_proposed": 167,
+            "copy_accepted": 91,
+            "copy_acceptance": 0.5449101796407185,
+            "head_rounds": 95,
+            "head_proposed": 190,
+            "head_accepted": 187,
+            "head_acceptance": 0.9842105263157894,
+            "gate_declines": 70,
+            "probe_rounds": 4,
+            "lookup_misses": 25,
+            "index_tokens": 840,
+            "sizer_width": 2
+          }
+        },
+        {
+          "completion_tokens": 154,
+          "decode_tok_s": 239.4306245958327,
+          "output_sha256": "5e79c4bf3f6ba2f7880784b4eb0aaa248e7a1058269031d38e9c1888ab2328fe",
+          "output_chars": 492,
+          "output_head": "```python\ndef merge_intervals(intervals):\n    \"\"\"Merge overlapping closed intervals [start, end].\"\"\"\n    ordered = sorted(intervals)\n    merged = []\n    for start, end in ordered:\n        if merged an",
+          "copy_draft": {
+            "schema": "mlx2.self-mtp-copy-draft.v1",
+            "enabled": true,
+            "verification": "exact",
+            "policy": {
+              "enabled": true,
+              "ngram_min": 3,
+              "ngram_max": 6,
+              "max_span": 8,
+              "batched_max_span": 0,
+              "probe_span": 2,
+              "lookback": 8192,
+              "min_samples": 3,
+              "gate_window": 32,
+              "reprobe_interval": 16,
+              "min_yield_ratio": 1.0,
+              "verify_row_cost": 0.1,
+              "draft_step_cost": 0.15
+            },
+            "copy_rounds": 21,
+            "copy_proposed": 124,
+            "copy_accepted": 102,
+            "copy_acceptance": 0.8225806451612904,
+            "head_rounds": 10,
+            "head_proposed": 20,
+            "head_accepted": 20,
+            "head_acceptance": 1.0,
+            "gate_declines": 0,
+            "probe_rounds": 0,
+            "lookup_misses": 10,
+            "index_tokens": 347,
+            "sizer_width": 3
+          }
+        }
+      ],
+      "copy_counter_delta": {
+        "self_mtp_copy_rounds": 149,
+        "self_mtp_copy_proposed_tokens": 753,
+        "self_mtp_copy_accepted_tokens": 545,
+        "self_mtp_copy_probe_rounds": 4,
+        "self_mtp_copy_gate_declines": 70,
+        "self_mtp_copy_lookup_misses": 65
+      },
+      "metal_peak_bytes": 22989957036
+    },
+    {
+      "arm": "on",
+      "rep": 1,
+      "corpus": "code",
+      "width": 4,
+      "temperature": 0.0,
+      "decode_tok_s_mean": 84.57801604410729,
+      "rows": [
+        {
+          "completion_tokens": 356,
+          "decode_tok_s": 93.09784284158165,
+          "output_sha256": "b8998f7ae7ed272cc431d773bea48bc0e3476cd287a09eedd95a647e89d6d6e9",
+          "output_chars": 1307,
+          "output_head": "```python\nclass AdaptiveLookback:\n    \"\"\"Miss-driven lookback with rejection backoff inside a scheduler cap.\"\"\"\n\n    def __init__(self, ladder=(256, 1024, 4096, 16384), *, misses=4, rejects=2):\n      ",
+          "copy_draft": {
+            "schema": "mlx2.self-mtp-copy-draft.v1",
+            "enabled": true,
+            "verification": "exact",
+            "policy": {
+              "enabled": true,
+              "ngram_min": 3,
+              "ngram_max": 6,
+              "max_span": 8,
+              "batched_max_span": 0,
+              "probe_span": 2,
+              "lookback": 8192,
+              "min_samples": 3,
+              "gate_window": 32,
+              "reprobe_interval": 16,
+              "min_yield_ratio": 1.0,
+              "verify_row_cost": 0.1,
+              "draft_step_cost": 0.15
+            },
+            "copy_rounds": 0,
+            "copy_proposed": 0,
+            "copy_accepted": 0,
+            "copy_acceptance": 0.0,
+            "head_rounds": 119,
+            "head_proposed": 238,
+            "head_accepted": 238,
+            "head_acceptance": 1.0,
+            "gate_declines": 0,
+            "probe_rounds": 0,
+            "lookup_misses": 0,
+            "index_tokens": 782,
+            "sizer_width": 2
+          }
+        },
+        {
+          "completion_tokens": 125,
+          "decode_tok_s": 72.80787381834963,
+          "output_sha256": "8d1071018d1d685ac486b69ca3f852d7579c56fe964afe523ccbc01b8aa989c6",
+          "output_chars": 414,
+          "output_head": "```python\ndef merge_intervals(intervals):\n    \"\"\"Merge overlapping closed intervals [start, end].\"\"\"\n    ordered = sorted(intervals)\n    merged = []\n    for start, end in ordered:\n        if merged an",
+          "copy_draft": {
+            "schema": "mlx2.self-mtp-copy-draft.v1",
+            "enabled": true,
+            "verification": "exact",
+            "policy": {
+              "enabled": true,
+              "ngram_min": 3,
+              "ngram_max": 6,
+              "max_span": 8,
+              "batched_max_span": 0,
+              "probe_span": 2,
+              "lookback": 8192,
+              "min_samples": 3,
+              "gate_window": 32,
+              "reprobe_interval": 16,
+              "min_yield_ratio": 1.0,
+              "verify_row_cost": 0.1,
+              "draft_step_cost": 0.15
+            },
+            "copy_rounds": 0,
+            "copy_proposed": 0,
+            "copy_accepted": 0,
+            "copy_acceptance": 0.0,
+            "head_rounds": 42,
+            "head_proposed": 84,
+            "head_accepted": 83,
+            "head_acceptance": 0.9880952380952381,
+            "gate_declines": 0,
+            "probe_rounds": 0,
+            "lookup_misses": 0,
+            "index_tokens": 314,
+            "sizer_width": 2
+          }
+        },
+        {
+          "completion_tokens": 423,
+          "decode_tok_s": 99.38876301644292,
+          "output_sha256": "a03bcaa1a9f3a036619767f7e1d9155cf7086cb3a32d76a0625ae025e1198fdd",
+          "output_chars": 1475,
+          "output_head": "```python\nfrom typing import Tuple, List\n\n\nclass AdaptiveLookback:\n    \"\"\"Miss-driven lookback with rejection backoff inside a scheduler cap.\"\"\"\n\n    def __init__(self, ladder: Tuple[int, ...] = (256,",
+          "copy_draft": {
+            "schema": "mlx2.self-mtp-copy-draft.v1",
+            "enabled": true,
+            "verification": "exact",
+            "policy": {
+              "enabled": true,
+              "ngram_min": 3,
+              "ngram_max": 6,
+              "max_span": 8,
+              "batched_max_span": 0,
+              "probe_span": 2,
+              "lookback": 8192,
+              "min_samples": 3,
+              "gate_window": 32,
+              "reprobe_interval": 16,
+              "min_yield_ratio": 1.0,
+              "verify_row_cost": 0.1,
+              "draft_step_cost": 0.15
+            },
+            "copy_rounds": 6,
+            "copy_proposed": 22,
+            "copy_accepted": 10,
+            "copy_acceptance": 0.45454545454545453,
+            "head_rounds": 136,
+            "head_proposed": 272,
+            "head_accepted": 271,
+            "head_acceptance": 0.9963235294117647,
+            "gate_declines": 17,
+            "probe_rounds": 1,
+            "lookup_misses": 0,
+            "index_tokens": 844,
+            "sizer_width": 2
+          }
+        },
+        {
+          "completion_tokens": 154,
+          "decode_tok_s": 73.01758450005495,
+          "output_sha256": "5e79c4bf3f6ba2f7880784b4eb0aaa248e7a1058269031d38e9c1888ab2328fe",
+          "output_chars": 492,
+          "output_head": "```python\ndef merge_intervals(intervals):\n    \"\"\"Merge overlapping closed intervals [start, end].\"\"\"\n    ordered = sorted(intervals)\n    merged = []\n    for start, end in ordered:\n        if merged an",
+          "copy_draft": {
+            "schema": "mlx2.self-mtp-copy-draft.v1",
+            "enabled": true,
+            "verification": "exact",
+            "policy": {
+              "enabled": true,
+              "ngram_min": 3,
+              "ngram_max": 6,
+              "max_span": 8,
+              "batched_max_span": 0,
+              "probe_span": 2,
+              "lookback": 8192,
+              "min_samples": 3,
+              "gate_window": 32,
+              "reprobe_interval": 16,
+              "min_yield_ratio": 1.0,
+              "verify_row_cost": 0.1,
+              "draft_step_cost": 0.15
+            },
+            "copy_rounds": 0,
+            "copy_proposed": 0,
+            "copy_accepted": 0,
+            "copy_acceptance": 0.0,
+            "head_rounds": 52,
+            "head_proposed": 104,
+            "head_accepted": 103,
+            "head_acceptance": 0.9903846153846154,
+            "gate_declines": 0,
+            "probe_rounds": 0,
+            "lookup_misses": 0,
+            "index_tokens": 344,
+            "sizer_width": 2
+          }
+        }
+      ],
+      "copy_counter_delta": {
+        "self_mtp_copy_rounds": 13,
+        "self_mtp_copy_proposed_tokens": 50,
+        "self_mtp_copy_accepted_tokens": 26,
+        "self_mtp_copy_probe_rounds": 1,
+        "self_mtp_copy_gate_declines": 17,
+        "self_mtp_copy_lookup_misses": 338
+      },
+      "metal_peak_bytes": 22989957036
+    },
+    {
+      "arm": "ord",
+      "rep": 1,
+      "corpus": "prose",
+      "width": 1,
+      "temperature": 0.0,
+      "decode_tok_s_mean": 118.37411244464202,
+      "rows": [
+        {
+          "completion_tokens": 512,
+          "decode_tok_s": 119.04864406820798,
+          "output_sha256": "5e5538cc3dfcb6b894aa2cc8215c82e3fbbe383f70c00be439583a4497544b0f",
+          "output_chars": 2624,
+          "output_head": "Here is an explanation of how a compiler works, broken down into numbered sections:\n\n1. **Lexical Analysis (Scanning)**\n   The compiler first reads the source code character by character and groups th",
+          "copy_draft": null
+        },
+        {
+          "completion_tokens": 512,
+          "decode_tok_s": 118.72559457016537,
+          "output_sha256": "e04790f3c485e5878d452839c9b24dec12787d6e49a4d6739f3fdab74f7d0685",
+          "output_chars": 2610,
+          "output_head": "Here is an explanation of how a database transaction works, broken down into numbered sections:\n\n### 1. Definition and Purpose\nA **database transaction** is a logical unit of work that accesses and po",
+          "copy_draft": null
+        },
+        {
+          "completion_tokens": 512,
+          "decode_tok_s": 116.93094261026393,
+          "output_sha256": "481ce374a8e771722d68a96b24d40c70ba7e7f2bfec555478f61bb3d7affb159",
+          "output_chars": 2243,
+          "output_head": "Here is a step-by-step explanation of how a Metal compute kernel is dispatched on Apple Silicon, explained in plain language.\n\n### The Big Picture\nThink of dispatching a Metal compute kernel like send",
+          "copy_draft": null
+        },
+        {
+          "completion_tokens": 452,
+          "decode_tok_s": 118.7912685299308,
+          "output_sha256": "f5a9f96267dcd5be58ac7bfb1f7d40d9543fc382c2b91b1f89793703a5e916a0",
+          "output_chars": 2641,
+          "output_head": "**The Civic Heart: Why Cities Invest in Public Libraries**\n\nIn an era dominated by digital information and private subscription services, the public library might seem like a relic of the past. Yet, c",
+          "copy_draft": null
+        }
+      ],
+      "copy_counter_delta": {},
+      "metal_peak_bytes": 22095516672
+    },
+    {
+      "arm": "ord",
+      "rep": 1,
+      "corpus": "prose",
+      "width": 4,
+      "temperature": 0.0,
+      "decode_tok_s_mean": 71.18201643566891,
+      "rows": [
+        {
+          "completion_tokens": 512,
+          "decode_tok_s": 71.10670153736126,
+          "output_sha256": "10cce6417fdade3afda4a1d306b1023737200dc88c5203075ce6bd4d52af283b",
+          "output_chars": 2626,
+          "output_head": "Here is an explanation of how a compiler works, broken down into numbered sections:\n\n1. **Lexical Analysis (Scanning)**\n   The compiler first reads the source code character by character and groups th",
+          "copy_draft": null
+        },
+        {
+          "completion_tokens": 512,
+          "decode_tok_s": 71.13572282029621,
+          "output_sha256": "7bf3f3a97fd549480fcb48fa07061047feb361c08d71cca42367cfa47f3bc932",
+          "output_chars": 2537,
+          "output_head": "Here is an explanation of how a database transaction works, broken down into numbered sections:\n\n1. **Definition and Purpose**  \n   A database transaction is a single logical unit of work that accesse",
+          "copy_draft": null
+        },
+        {
+          "completion_tokens": 512,
+          "decode_tok_s": 71.84367014515121,
+          "output_sha256": "6942b6ef7fb9ba031e40691795a8ccda24f483ef55d6a0c6b98d4843822c37fd",
+          "output_chars": 2109,
+          "output_head": "Here is a step-by-step explanation of how a Metal compute kernel is dispatched on Apple Silicon, from start to finish, in plain language.\n\n### The Big Picture Analogy\nThink of dispatching a Metal comp",
+          "copy_draft": null
+        },
+        {
+          "completion_tokens": 462,
+          "decode_tok_s": 70.64197123986698,
+          "output_sha256": "9cbd763abd33b0ab2d30bb62198132b647d0176e925ed4bd21bf46c6a72fda07",
+          "output_chars": 2632,
+          "output_head": "**The Civic Heart: Why Cities Invest in Public Libraries**\n\nIn an era dominated by digital information and private convenience, the public library might seem like a relic of the past. Yet, cities cont",
+          "copy_draft": null
+        }
+      ],
+      "copy_counter_delta": {},
+      "metal_peak_bytes": 22934625912
+    },
+    {
+      "arm": "ord",
+      "rep": 1,
+      "corpus": "code",
+      "width": 1,
+      "temperature": 0.0,
+      "decode_tok_s_mean": 116.97404037043594,
+      "rows": [
+        {
+          "completion_tokens": 356,
+          "decode_tok_s": 116.07925793698878,
+          "output_sha256": "b8998f7ae7ed272cc431d773bea48bc0e3476cd287a09eedd95a647e89d6d6e9",
+          "output_chars": 1307,
+          "output_head": "```python\nclass AdaptiveLookback:\n    \"\"\"Miss-driven lookback with rejection backoff inside a scheduler cap.\"\"\"\n\n    def __init__(self, ladder=(256, 1024, 4096, 16384), *, misses=4, rejects=2):\n      ",
+          "copy_draft": null
+        },
+        {
+          "completion_tokens": 125,
+          "decode_tok_s": 117.8311654375757,
+          "output_sha256": "8d1071018d1d685ac486b69ca3f852d7579c56fe964afe523ccbc01b8aa989c6",
+          "output_chars": 414,
+          "output_head": "```python\ndef merge_intervals(intervals):\n    \"\"\"Merge overlapping closed intervals [start, end].\"\"\"\n    ordered = sorted(intervals)\n    merged = []\n    for start, end in ordered:\n        if merged an",
+          "copy_draft": null
+        },
+        {
+          "completion_tokens": 416,
+          "decode_tok_s": 118.56309104608765,
+          "output_sha256": "93c366cba76ca83e73eb60bc68dd3812605fb48248d4d7a5750d2eb14d463c26",
+          "output_chars": 1442,
+          "output_head": "```python\nclass AdaptiveLookback:\n    \"\"\"Miss-driven lookback with rejection backoff inside a scheduler cap.\"\"\"\n\n    def __init__(self, ladder: tuple[int, ...] = (256, 1024, 4096, 16384), *, misses: i",
+          "copy_draft": null
+        },
+        {
+          "completion_tokens": 154,
+          "decode_tok_s": 115.42264706109162,
+          "output_sha256": "5e79c4bf3f6ba2f7880784b4eb0aaa248e7a1058269031d38e9c1888ab2328fe",
+          "output_chars": 492,
+          "output_head": "```python\ndef merge_intervals(intervals):\n    \"\"\"Merge overlapping closed intervals [start, end].\"\"\"\n    ordered = sorted(intervals)\n    merged = []\n    for start, end in ordered:\n        if merged an",
+          "copy_draft": null
+        }
+      ],
+      "copy_counter_delta": {},
+      "metal_peak_bytes": 23379329974
+    },
+    {
+      "arm": "ord",
+      "rep": 1,
+      "corpus": "code",
+      "width": 4,
+      "temperature": 0.0,
+      "decode_tok_s_mean": 77.23220755898944,
+      "rows": [
+        {
+          "completion_tokens": 356,
+          "decode_tok_s": 83.27269429478673,
+          "output_sha256": "b8998f7ae7ed272cc431d773bea48bc0e3476cd287a09eedd95a647e89d6d6e9",
+          "output_chars": 1307,
+          "output_head": "```python\nclass AdaptiveLookback:\n    \"\"\"Miss-driven lookback with rejection backoff inside a scheduler cap.\"\"\"\n\n    def __init__(self, ladder=(256, 1024, 4096, 16384), *, misses=4, rejects=2):\n      ",
+          "copy_draft": null
+        },
+        {
+          "completion_tokens": 125,
+          "decode_tok_s": 68.54993959810965,
+          "output_sha256": "8d1071018d1d685ac486b69ca3f852d7579c56fe964afe523ccbc01b8aa989c6",
+          "output_chars": 414,
+          "output_head": "```python\ndef merge_intervals(intervals):\n    \"\"\"Merge overlapping closed intervals [start, end].\"\"\"\n    ordered = sorted(intervals)\n    merged = []\n    for start, end in ordered:\n        if merged an",
+          "copy_draft": null
+        },
+        {
+          "completion_tokens": 416,
+          "decode_tok_s": 85.91313617803519,
+          "output_sha256": "93c366cba76ca83e73eb60bc68dd3812605fb48248d4d7a5750d2eb14d463c26",
+          "output_chars": 1442,
+          "output_head": "```python\nclass AdaptiveLookback:\n    \"\"\"Miss-driven lookback with rejection backoff inside a scheduler cap.\"\"\"\n\n    def __init__(self, ladder: tuple[int, ...] = (256, 1024, 4096, 16384), *, misses: i",
+          "copy_draft": null
+        },
+        {
+          "completion_tokens": 154,
+          "decode_tok_s": 71.19306016502618,
+          "output_sha256": "5e79c4bf3f6ba2f7880784b4eb0aaa248e7a1058269031d38e9c1888ab2328fe",
+          "output_chars": 492,
+          "output_head": "```python\ndef merge_intervals(intervals):\n    \"\"\"Merge overlapping closed intervals [start, end].\"\"\"\n    ordered = sorted(intervals)\n    merged = []\n    for start, end in ordered:\n        if merged an",
+          "copy_draft": null
+        }
+      ],
+      "copy_counter_delta": {},
+      "metal_peak_bytes": 23861746790
+    },
+    {
+      "arm": "off",
+      "rep": 1,
+      "corpus": "prose",
+      "width": 1,
+      "temperature": 0.0,
+      "decode_tok_s_mean": 125.19114920379286,
+      "rows": [
+        {
+          "completion_tokens": 512,
+          "decode_tok_s": 133.80292223819862,
+          "output_sha256": "d269fb796f949989a6b2c34613e0ca8047c4ea0e5d8e239ebf71bf1ebb3678e3",
+          "output_chars": 2584,
+          "output_head": "Here is an explanation of how a compiler works, broken down into numbered sections:\n\n1. **Lexical Analysis (Scanning)**\n   The compiler first reads the source code character by character and groups th",
+          "copy_draft": null
+        },
+        {
+          "completion_tokens": 512,
+          "decode_tok_s": 130.6981179774275,
+          "output_sha256": "8380246ffd4188377b7e2ddab218224782c2aaaaec62193cef624c432b945d74",
+          "output_chars": 2589,
+          "output_head": "Here is an explanation of how a database transaction works, broken down into numbered sections:\n\n### 1. Definition and Purpose\nA **database transaction** is a logical unit of work that accesses and po",
+          "copy_draft": null
+        },
+        {
+          "completion_tokens": 512,
+          "decode_tok_s": 125.3207371217677,
+          "output_sha256": "95e1ca9db65eb0090b37c98c73acb120ebfeb7cb8bb925b283a8735ec960bac9",
+          "output_chars": 2049,
+          "output_head": "Here is a step-by-step explanation of how a Metal compute kernel is dispatched on Apple Silicon, explained in plain language.\n\n### The Big Picture Analogy\nThink of your GPU as a **factory floor** and ",
+          "copy_draft": null
+        },
+        {
+          "completion_tokens": 497,
+          "decode_tok_s": 110.94281947777759,
+          "output_sha256": "4b92616ab4a47e41752d5e88bf4d829d89b0b988c8310467299e7e186e6f182b",
+          "output_chars": 2823,
+          "output_head": "**The Civic Heart: Why Cities Invest in Public Libraries**\n\nIn an era dominated by digital information and private convenience, the public library might seem like a relic of the past. Yet, cities cont",
+          "copy_draft": null
+        }
+      ],
+      "copy_counter_delta": {},
+      "metal_peak_bytes": 21875027706
+    },
+    {
+      "arm": "off",
+      "rep": 1,
+      "corpus": "prose",
+      "width": 4,
+      "temperature": 0.0,
+      "decode_tok_s_mean": 53.62019131575783,
+      "rows": [
+        {
+          "completion_tokens": 512,
+          "decode_tok_s": 55.02913454779587,
+          "output_sha256": "95685136402ab9a12ed0428844a75ef0eb31f9e2d64926635a833edcdc2ac985",
+          "output_chars": 2647,
+          "output_head": "Here is an explanation of how a compiler works, broken down into numbered sections:\n\n1. **Lexical Analysis (Scanning)**\n   The compiler first reads the source code character by character and groups th",
+          "copy_draft": null
+        },
+        {
+          "completion_tokens": 512,
+          "decode_tok_s": 56.85417320391536,
+          "output_sha256": "4d5a86f8f986491703eada2b63d8ab65efb8d32c0056f5b2fe3f43de1a85d5f9",
+          "output_chars": 2602,
+          "output_head": "Here is an explanation of how a database transaction works, broken down into numbered sections:\n\n1. **Definition and Purpose**  \n   A database transaction is a logical unit of work that accesses and p",
+          "copy_draft": null
+        },
+        {
+          "completion_tokens": 512,
+          "decode_tok_s": 54.169598147934174,
+          "output_sha256": "2c181e1742f998308a9c8f1d90b942cdbdbf4dadf4c97d4b9d44c77b42596f0a",
+          "output_chars": 2106,
+          "output_head": "Here is a step-by-step explanation of how a Metal compute kernel is dispatched on Apple Silicon, explained in plain language.\n\n### The Big Picture Analogy\nThink of your GPU as a **factory floor** and ",
+          "copy_draft": null
+        },
+        {
+          "completion_tokens": 440,
+          "decode_tok_s": 48.42785936338592,
+          "output_sha256": "c8ce09f153bda93c2b62821d26efed03353696cd496344ee6c63541ce22ac533",
+          "output_chars": 2566,
+          "output_head": "**The Civic Heart: Why Cities Invest in Public Libraries**\n\nIn an era dominated by digital information and private subscription services, the public library might seem like a relic of the past. Howeve",
+          "copy_draft": null
+        }
+      ],
+      "copy_counter_delta": {},
+      "metal_peak_bytes": 22995812772
+    },
+    {
+      "arm": "off",
+      "rep": 1,
+      "corpus": "code",
+      "width": 1,
+      "temperature": 0.0,
+      "decode_tok_s_mean": 165.11513435636311,
+      "rows": [
+        {
+          "completion_tokens": 356,
+          "decode_tok_s": 164.37848086282926,
+          "output_sha256": "b8998f7ae7ed272cc431d773bea48bc0e3476cd287a09eedd95a647e89d6d6e9",
+          "output_chars": 1307,
+          "output_head": "```python\nclass AdaptiveLookback:\n    \"\"\"Miss-driven lookback with rejection backoff inside a scheduler cap.\"\"\"\n\n    def __init__(self, ladder=(256, 1024, 4096, 16384), *, misses=4, rejects=2):\n      ",
+          "copy_draft": null
+        },
+        {
+          "completion_tokens": 125,
+          "decode_tok_s": 169.76088601132082,
+          "output_sha256": "8d1071018d1d685ac486b69ca3f852d7579c56fe964afe523ccbc01b8aa989c6",
+          "output_chars": 414,
+          "output_head": "```python\ndef merge_intervals(intervals):\n    \"\"\"Merge overlapping closed intervals [start, end].\"\"\"\n    ordered = sorted(intervals)\n    merged = []\n    for start, end in ordered:\n        if merged an",
+          "copy_draft": null
+        },
+        {
+          "completion_tokens": 416,
+          "decode_tok_s": 165.8423281926691,
+          "output_sha256": "93c366cba76ca83e73eb60bc68dd3812605fb48248d4d7a5750d2eb14d463c26",
+          "output_chars": 1442,
+          "output_head": "```python\nclass AdaptiveLookback:\n    \"\"\"Miss-driven lookback with rejection backoff inside a scheduler cap.\"\"\"\n\n    def __init__(self, ladder: tuple[int, ...] = (256, 1024, 4096, 16384), *, misses: i",
+          "copy_draft": null
+        },
+        {
+          "completion_tokens": 154,
+          "decode_tok_s": 160.47884235863327,
+          "output_sha256": "5e79c4bf3f6ba2f7880784b4eb0aaa248e7a1058269031d38e9c1888ab2328fe",
+          "output_chars": 492,
+          "output_head": "```python\ndef merge_intervals(intervals):\n    \"\"\"Merge overlapping closed intervals [start, end].\"\"\"\n    ordered = sorted(intervals)\n    merged = []\n    for start, end in ordered:\n        if merged an",
+          "copy_draft": null
+        }
+      ],
+      "copy_counter_delta": {},
+      "metal_peak_bytes": 22995812772
+    },
+    {
+      "arm": "off",
+      "rep": 1,
+      "corpus": "code",
+      "width": 4,
+      "temperature": 0.0,
+      "decode_tok_s_mean": 84.34169432983884,
+      "rows": [
+        {
+          "completion_tokens": 356,
+          "decode_tok_s": 93.2303750471076,
+          "output_sha256": "b8998f7ae7ed272cc431d773bea48bc0e3476cd287a09eedd95a647e89d6d6e9",
+          "output_chars": 1307,
+          "output_head": "```python\nclass AdaptiveLookback:\n    \"\"\"Miss-driven lookback with rejection backoff inside a scheduler cap.\"\"\"\n\n    def __init__(self, ladder=(256, 1024, 4096, 16384), *, misses=4, rejects=2):\n      ",
+          "copy_draft": null
+        },
+        {
+          "completion_tokens": 125,
+          "decode_tok_s": 72.43465054669015,
+          "output_sha256": "8d1071018d1d685ac486b69ca3f852d7579c56fe964afe523ccbc01b8aa989c6",
+          "output_chars": 414,
+          "output_head": "```python\ndef merge_intervals(intervals):\n    \"\"\"Merge overlapping closed intervals [start, end].\"\"\"\n    ordered = sorted(intervals)\n    merged = []\n    for start, end in ordered:\n        if merged an",
+          "copy_draft": null
+        },
+        {
+          "completion_tokens": 416,
+          "decode_tok_s": 98.90863360415375,
+          "output_sha256": "93c366cba76ca83e73eb60bc68dd3812605fb48248d4d7a5750d2eb14d463c26",
+          "output_chars": 1442,
+          "output_head": "```python\nclass AdaptiveLookback:\n    \"\"\"Miss-driven lookback with rejection backoff inside a scheduler cap.\"\"\"\n\n    def __init__(self, ladder: tuple[int, ...] = (256, 1024, 4096, 16384), *, misses: i",
+          "copy_draft": null
+        },
+        {
+          "completion_tokens": 154,
+          "decode_tok_s": 72.79311812140391,
+          "output_sha256": "5e79c4bf3f6ba2f7880784b4eb0aaa248e7a1058269031d38e9c1888ab2328fe",
+          "output_chars": 492,
+          "output_head": "```python\ndef merge_intervals(intervals):\n    \"\"\"Merge overlapping closed intervals [start, end].\"\"\"\n    ordered = sorted(intervals)\n    merged = []\n    for start, end in ordered:\n        if merged an",
+          "copy_draft": null
+        }
+      ],
+      "copy_counter_delta": {},
+      "metal_peak_bytes": 22995812772
+    },
+    {
+      "arm": "ord",
+      "rep": 2,
+      "corpus": "prose",
+      "width": 1,
+      "temperature": 0.0,
+      "decode_tok_s_mean": 117.43188340626752,
+      "rows": [
+        {
+          "completion_tokens": 512,
+          "decode_tok_s": 118.69563370465869,
+          "output_sha256": "1fa2b9e3b846806a5011210e0440a684c2b47ea9de6c8d4e5c380d20bf3719ad",
+          "output_chars": 2601,
+          "output_head": "Here is an explanation of how a compiler works, broken down into numbered sections:\n\n1. **Lexical Analysis (Scanning)**\n   The compiler first reads the source code character by character and groups th",
+          "copy_draft": null
+        },
+        {
+          "completion_tokens": 512,
+          "decode_tok_s": 117.00264748839646,
+          "output_sha256": "4d441ed8ab3e43b68b3f4762dc3baa47497be910158ead5c8c8f82bc38fb1862",
+          "output_chars": 2510,
+          "output_head": "Here is an explanation of how a database transaction works, broken down into numbered sections:\n\n### 1. Definition and Purpose\nA **database transaction** is a single logical unit of work that accesses",
+          "copy_draft": null
+        },
+        {
+          "completion_tokens": 512,
+          "decode_tok_s": 117.63906229248529,
+          "output_sha256": "c6dc8fd5c87c3d49655607e67e8ccdefd94c06e7a9e289ee2306e48d6be4ad38",
+          "output_chars": 2168,
+          "output_head": "Here is a step-by-step explanation of how a Metal compute kernel is dispatched on Apple Silicon, from start to finish, in plain language.\n\n### The Big Picture\nThink of dispatching a Metal compute kern",
+          "copy_draft": null
+        },
+        {
+          "completion_tokens": 512,
+          "decode_tok_s": 116.39019013952964,
+          "output_sha256": "1c2f034d1cd69853e8f49d0c3628487ce442eefbddc3e7745ff4061cc4fbd68c",
+          "output_chars": 3024,
+          "output_head": "**The Civic Heart: Why Cities Invest in Public Libraries**\n\nIn an era dominated by digital information and private subscription services, the existence of a public library might seem like a relic of t",
+          "copy_draft": null
+        }
+      ],
+      "copy_counter_delta": {},
+      "metal_peak_bytes": 22094059509
+    },
+    {
+      "arm": "ord",
+      "rep": 2,
+      "corpus": "prose",
+      "width": 4,
+      "temperature": 0.0,
+      "decode_tok_s_mean": 70.28902422739355,
+      "rows": [
+        {
+          "completion_tokens": 512,
+          "decode_tok_s": 70.28945090949603,
+          "output_sha256": "30a5ca521e744087a374d8fb3ec1bb1bde463166d01a05c19dea12f1b2f0aebf",
+          "output_chars": 2552,
+          "output_head": "Here is an explanation of how a compiler works, broken down into numbered sections:\n\n1. **Lexical Analysis (Scanning)**\n   The compiler first reads the source code character by character and groups th",
+          "copy_draft": null
+        },
+        {
+          "completion_tokens": 512,
+          "decode_tok_s": 70.4720780570214,
+          "output_sha256": "132221827a3d4b68904a093203ef24a88aaff5499b3da1226bbe018cdf5bff23",
+          "output_chars": 2612,
+          "output_head": "Here is an explanation of how a database transaction works, broken down into numbered sections:\n\n1. **Definition and Purpose**  \n   A database transaction is a logical unit of work that accesses and p",
+          "copy_draft": null
+        },
+        {
+          "completion_tokens": 512,
+          "decode_tok_s": 70.25665533848546,
+          "output_sha256": "6f794a509ca5b5870be087d88a6ebda54b22de4f64566385731ae0339e0b4e18",
+          "output_chars": 2111,
+          "output_head": "Here is a step-by-step explanation of how a Metal compute kernel is dispatched on Apple Silicon, explained in plain language.\n\n### The Big Picture Analogy\nThink of your GPU as a **factory floor** and ",
+          "copy_draft": null
+        },
+        {
+          "completion_tokens": 469,
+          "decode_tok_s": 70.13791260457134,
+          "output_sha256": "cabe2c702d25184b421c3efa075442a4669e5876926e1b59af7613a2a0b76639",
+          "output_chars": 2648,
+          "output_head": "**The Civic Heart: Why Cities Invest in Public Libraries**\n\nIn an era dominated by digital information and private connectivity, the public library might seem like a relic of the past. Yet, cities con",
+          "copy_draft": null
+        }
+      ],
+      "copy_counter_delta": {},
+      "metal_peak_bytes": 22738429236
+    },
+    {
+      "arm": "ord",
+      "rep": 2,
+      "corpus": "code",
+      "width": 1,
+      "temperature": 0.0,
+      "decode_tok_s_mean": 115.80482564249297,
+      "rows": [
+        {
+          "completion_tokens": 356,
+          "decode_tok_s": 109.83855665861866,
+          "output_sha256": "b8998f7ae7ed272cc431d773bea48bc0e3476cd287a09eedd95a647e89d6d6e9",
+          "output_chars": 1307,
+          "output_head": "```python\nclass AdaptiveLookback:\n    \"\"\"Miss-driven lookback with rejection backoff inside a scheduler cap.\"\"\"\n\n    def __init__(self, ladder=(256, 1024, 4096, 16384), *, misses=4, rejects=2):\n      ",
+          "copy_draft": null
+        },
+        {
+          "completion_tokens": 125,
+          "decode_tok_s": 117.27664709493669,
+          "output_sha256": "8d1071018d1d685ac486b69ca3f852d7579c56fe964afe523ccbc01b8aa989c6",
+          "output_chars": 414,
+          "output_head": "```python\ndef merge_intervals(intervals):\n    \"\"\"Merge overlapping closed intervals [start, end].\"\"\"\n    ordered = sorted(intervals)\n    merged = []\n    for start, end in ordered:\n        if merged an",
+          "copy_draft": null
+        },
+        {
+          "completion_tokens": 416,
+          "decode_tok_s": 117.22699404355211,
+          "output_sha256": "93c366cba76ca83e73eb60bc68dd3812605fb48248d4d7a5750d2eb14d463c26",
+          "output_chars": 1442,
+          "output_head": "```python\nclass AdaptiveLookback:\n    \"\"\"Miss-driven lookback with rejection backoff inside a scheduler cap.\"\"\"\n\n    def __init__(self, ladder: tuple[int, ...] = (256, 1024, 4096, 16384), *, misses: i",
+          "copy_draft": null
+        },
+        {
+          "completion_tokens": 154,
+          "decode_tok_s": 118.8771047728644,
+          "output_sha256": "5e79c4bf3f6ba2f7880784b4eb0aaa248e7a1058269031d38e9c1888ab2328fe",
+          "output_chars": 492,
+          "output_head": "```python\ndef merge_intervals(intervals):\n    \"\"\"Merge overlapping closed intervals [start, end].\"\"\"\n    ordered = sorted(intervals)\n    merged = []\n    for start, end in ordered:\n        if merged an",
+          "copy_draft": null
+        }
+      ],
+      "copy_counter_delta": {},
+      "metal_peak_bytes": 23189048956
+    },
+    {
+      "arm": "ord",
+      "rep": 2,
+      "corpus": "code",
+      "width": 4,
+      "temperature": 0.0,
+      "decode_tok_s_mean": 78.8101349912153,
+      "rows": [
+        {
+          "completion_tokens": 356,
+          "decode_tok_s": 84.92531331344352,
+          "output_sha256": "b8998f7ae7ed272cc431d773bea48bc0e3476cd287a09eedd95a647e89d6d6e9",
+          "output_chars": 1307,
+          "output_head": "```python\nclass AdaptiveLookback:\n    \"\"\"Miss-driven lookback with rejection backoff inside a scheduler cap.\"\"\"\n\n    def __init__(self, ladder=(256, 1024, 4096, 16384), *, misses=4, rejects=2):\n      ",
+          "copy_draft": null
+        },
+        {
+          "completion_tokens": 146,
+          "decode_tok_s": 70.73224212228789,
+          "output_sha256": "572599a0c21b8900767d6b489803847f6ba3b2dae1b254fbb2d46243204be31b",
+          "output_chars": 448,
+          "output_head": "```python\ndef merge_intervals(intervals):\n    \"\"\"Merge overlapping closed intervals [start, end].\"\"\"\n    ordered = sorted(intervals)\n    merged = []\n    for start, end in ordered:\n        if merged an",
+          "copy_draft": null
+        },
+        {
+          "completion_tokens": 416,
+          "decode_tok_s": 88.02042540569941,
+          "output_sha256": "93c366cba76ca83e73eb60bc68dd3812605fb48248d4d7a5750d2eb14d463c26",
+          "output_chars": 1442,
+          "output_head": "```python\nclass AdaptiveLookback:\n    \"\"\"Miss-driven lookback with rejection backoff inside a scheduler cap.\"\"\"\n\n    def __init__(self, ladder: tuple[int, ...] = (256, 1024, 4096, 16384), *, misses: i",
+          "copy_draft": null
+        },
+        {
+          "completion_tokens": 154,
+          "decode_tok_s": 71.56255912343043,
+          "output_sha256": "5e79c4bf3f6ba2f7880784b4eb0aaa248e7a1058269031d38e9c1888ab2328fe",
+          "output_chars": 492,
+          "output_head": "```python\ndef merge_intervals(intervals):\n    \"\"\"Merge overlapping closed intervals [start, end].\"\"\"\n    ordered = sorted(intervals)\n    merged = []\n    for start, end in ordered:\n        if merged an",
+          "copy_draft": null
+        }
+      ],
+      "copy_counter_delta": {},
+      "metal_peak_bytes": 23732100198
+    },
+    {
+      "arm": "off",
+      "rep": 2,
+      "corpus": "prose",
+      "width": 1,
+      "temperature": 0.0,
+      "decode_tok_s_mean": 128.35605909341538,
+      "rows": [
+        {
+          "completion_tokens": 512,
+          "decode_tok_s": 131.15519882251408,
+          "output_sha256": "1f96eaed8a5a0af0bb96964689aca9e55f627e3584137b8cf9508f064af43f90",
+          "output_chars": 2617,
+          "output_head": "Here is an explanation of how a compiler works, broken down into numbered sections:\n\n1. **Lexical Analysis (Scanning)**\n   The compiler first reads the source code character by character and groups th",
+          "copy_draft": null
+        },
+        {
+          "completion_tokens": 512,
+          "decode_tok_s": 142.27511223726395,
+          "output_sha256": "f98a81ceb05ab791a6ecc3d5afcb3be5b868a393f958b3b90e79c10225475bfe",
+          "output_chars": 2475,
+          "output_head": "Here is an explanation of how a database transaction works, broken down into numbered sections:\n\n### 1. Definition and Purpose\nA **database transaction** is a single logical unit of work that accesses",
+          "copy_draft": null
+        },
+        {
+          "completion_tokens": 512,
+          "decode_tok_s": 123.81950337074838,
+          "output_sha256": "a317db569f8cf5701aafc1a5ba4eb81d5eca074948dda9a90dd9530af724d0fc",
+          "output_chars": 2138,
+          "output_head": "Here is a step-by-step explanation of how a Metal compute kernel is dispatched on Apple Silicon, from start to finish, in plain language.\n\n### The Big Picture Analogy\nThink of dispatching a Metal comp",
+          "copy_draft": null
+        },
+        {
+          "completion_tokens": 459,
+          "decode_tok_s": 116.17442194313512,
+          "output_sha256": "a7fc231bd81ced6a5097b13e8ea780bb170f05d876b1d3bcde55a4850656bc41",
+          "output_chars": 2584,
+          "output_head": "**The Civic Heart: Why Cities Invest in Public Libraries**\n\nIn an era dominated by digital information and private subscription services, the existence of a public library might seem like a relic of t",
+          "copy_draft": null
+        }
+      ],
+      "copy_counter_delta": {},
+      "metal_peak_bytes": 21875118373
+    },
+    {
+      "arm": "off",
+      "rep": 2,
+      "corpus": "prose",
+      "width": 4,
+      "temperature": 0.0,
+      "decode_tok_s_mean": 56.085537868926316,
+      "rows": [
+        {
+          "completion_tokens": 512,
+          "decode_tok_s": 57.44952254640072,
+          "output_sha256": "5c0b01003b791bbce683324cfedbbd3fd5bac61accb1d35222574bd9e2eef241",
+          "output_chars": 2401,
+          "output_head": "Here is an explanation of how a compiler works, broken down into numbered sections:\n\n1. **Lexical Analysis (Scanning)**\n   The first stage involves reading the source code character by character and g",
+          "copy_draft": null
+        },
+        {
+          "completion_tokens": 512,
+          "decode_tok_s": 58.94181194260629,
+          "output_sha256": "1b3916a42cb9bf7343457ebef7df8b5777ca7f167875ed8e10b62f96cc6abdee",
+          "output_chars": 2460,
+          "output_head": "Here is an explanation of how a database transaction works, broken down into numbered sections:\n\n1. **Definition and Purpose**  \n   A database transaction is a logical unit of work that accesses and p",
+          "copy_draft": null
+        },
+        {
+          "completion_tokens": 512,
+          "decode_tok_s": 56.17061040243457,
+          "output_sha256": "941d3801db82d71c66fa6a1405af8b530b8624c69f1e13ce01fa2632a8b637c2",
+          "output_chars": 2055,
+          "output_head": "Here is a step-by-step explanation of how a Metal compute kernel is dispatched on Apple Silicon, written in plain language.\n\n### The Big Picture Analogy\nThink of dispatching a Metal compute kernel lik",
+          "copy_draft": null
+        },
+        {
+          "completion_tokens": 421,
+          "decode_tok_s": 51.78020658426368,
+          "output_sha256": "c225c8dd12ab9f4f22346d2ccd9c772397e3c81f1d3763758edb2b7fbbd8f0c5",
+          "output_chars": 2369,
+          "output_head": "**The Civic Heart: Why Cities Invest in Public Libraries**\n\nIn an era dominated by digital information and private subscription services, the public library might seem like a relic of the past. Howeve",
+          "copy_draft": null
+        }
+      ],
+      "copy_counter_delta": {},
+      "metal_peak_bytes": 22970949968
+    },
+    {
+      "arm": "off",
+      "rep": 2,
+      "corpus": "code",
+      "width": 1,
+      "temperature": 0.0,
+      "decode_tok_s_mean": 162.06000980553824,
+      "rows": [
+        {
+          "completion_tokens": 356,
+          "decode_tok_s": 167.04484089466962,
+          "output_sha256": "b8998f7ae7ed272cc431d773bea48bc0e3476cd287a09eedd95a647e89d6d6e9",
+          "output_chars": 1307,
+          "output_head": "```python\nclass AdaptiveLookback:\n    \"\"\"Miss-driven lookback with rejection backoff inside a scheduler cap.\"\"\"\n\n    def __init__(self, ladder=(256, 1024, 4096, 16384), *, misses=4, rejects=2):\n      ",
+          "copy_draft": null
+        },
+        {
+          "completion_tokens": 146,
+          "decode_tok_s": 155.11808793758254,
+          "output_sha256": "572599a0c21b8900767d6b489803847f6ba3b2dae1b254fbb2d46243204be31b",
+          "output_chars": 448,
+          "output_head": "```python\ndef merge_intervals(intervals):\n    \"\"\"Merge overlapping closed intervals [start, end].\"\"\"\n    ordered = sorted(intervals)\n    merged = []\n    for start, end in ordered:\n        if merged an",
+          "copy_draft": null
+        },
+        {
+          "completion_tokens": 416,
+          "decode_tok_s": 165.72583974322683,
+          "output_sha256": "93c366cba76ca83e73eb60bc68dd3812605fb48248d4d7a5750d2eb14d463c26",
+          "output_chars": 1442,
+          "output_head": "```python\nclass AdaptiveLookback:\n    \"\"\"Miss-driven lookback with rejection backoff inside a scheduler cap.\"\"\"\n\n    def __init__(self, ladder: tuple[int, ...] = (256, 1024, 4096, 16384), *, misses: i",
+          "copy_draft": null
+        },
+        {
+          "completion_tokens": 154,
+          "decode_tok_s": 160.35127064667392,
+          "output_sha256": "5e79c4bf3f6ba2f7880784b4eb0aaa248e7a1058269031d38e9c1888ab2328fe",
+          "output_chars": 492,
+          "output_head": "```python\ndef merge_intervals(intervals):\n    \"\"\"Merge overlapping closed intervals [start, end].\"\"\"\n    ordered = sorted(intervals)\n    merged = []\n    for start, end in ordered:\n        if merged an",
+          "copy_draft": null
+        }
+      ],
+      "copy_counter_delta": {},
+      "metal_peak_bytes": 22970949968
+    },
+    {
+      "arm": "off",
+      "rep": 2,
+      "corpus": "code",
+      "width": 4,
+      "temperature": 0.0,
+      "decode_tok_s_mean": 81.08843337830918,
+      "rows": [
+        {
+          "completion_tokens": 356,
+          "decode_tok_s": 89.87293613897945,
+          "output_sha256": "b8998f7ae7ed272cc431d773bea48bc0e3476cd287a09eedd95a647e89d6d6e9",
+          "output_chars": 1307,
+          "output_head": "```python\nclass AdaptiveLookback:\n    \"\"\"Miss-driven lookback with rejection backoff inside a scheduler cap.\"\"\"\n\n    def __init__(self, ladder=(256, 1024, 4096, 16384), *, misses=4, rejects=2):\n      ",
+          "copy_draft": null
+        },
+        {
+          "completion_tokens": 146,
+          "decode_tok_s": 68.74803178762498,
+          "output_sha256": "572599a0c21b8900767d6b489803847f6ba3b2dae1b254fbb2d46243204be31b",
+          "output_chars": 448,
+          "output_head": "```python\ndef merge_intervals(intervals):\n    \"\"\"Merge overlapping closed intervals [start, end].\"\"\"\n    ordered = sorted(intervals)\n    merged = []\n    for start, end in ordered:\n        if merged an",
+          "copy_draft": null
+        },
+        {
+          "completion_tokens": 416,
+          "decode_tok_s": 95.70331603020603,
+          "output_sha256": "93c366cba76ca83e73eb60bc68dd3812605fb48248d4d7a5750d2eb14d463c26",
+          "output_chars": 1442,
+          "output_head": "```python\nclass AdaptiveLookback:\n    \"\"\"Miss-driven lookback with rejection backoff inside a scheduler cap.\"\"\"\n\n    def __init__(self, ladder: tuple[int, ...] = (256, 1024, 4096, 16384), *, misses: i",
+          "copy_draft": null
+        },
+        {
+          "completion_tokens": 154,
+          "decode_tok_s": 70.02944955642624,
+          "output_sha256": "5e79c4bf3f6ba2f7880784b4eb0aaa248e7a1058269031d38e9c1888ab2328fe",
+          "output_chars": 492,
+          "output_head": "```python\ndef merge_intervals(intervals):\n    \"\"\"Merge overlapping closed intervals [start, end].\"\"\"\n    ordered = sorted(intervals)\n    merged = []\n    for start, end in ordered:\n        if merged an",
+          "copy_draft": null
+        }
+      ],
+      "copy_counter_delta": {},
+      "metal_peak_bytes": 22970949968
+    },
+    {
+      "arm": "on",
+      "rep": 2,
+      "corpus": "prose",
+      "width": 1,
+      "temperature": 0.0,
+      "decode_tok_s_mean": 123.41569068092748,
+      "rows": [
+        {
+          "completion_tokens": 512,
+          "decode_tok_s": 131.56669499074556,
+          "output_sha256": "499ba4ebc888e4a7a0e91cd5f0a4647745a81b39453f5969b9333ef4730cd95e",
+          "output_chars": 2637,
+          "output_head": "Here is an explanation of how a compiler works, broken down into numbered sections:\n\n1. **Lexical Analysis (Scanning)**\n   The compiler first reads the source code character by character and groups th",
+          "copy_draft": {
+            "schema": "mlx2.self-mtp-copy-draft.v1",
+            "enabled": true,
+            "verification": "exact",
+            "policy": {
+              "enabled": true,
+              "ngram_min": 3,
+              "ngram_max": 6,
+              "max_span": 8,
+              "batched_max_span": 0,
+              "probe_span": 2,
+              "lookback": 8192,
+              "min_samples": 3,
+              "gate_window": 32,
+              "reprobe_interval": 16,
+              "min_yield_ratio": 1.0,
+              "verify_row_cost": 0.1,
+              "draft_step_cost": 0.15
+            },
+            "copy_rounds": 3,
+            "copy_proposed": 6,
+            "copy_accepted": 2,
+            "copy_acceptance": 0.3333333333333333,
+            "head_rounds": 211,
+            "head_proposed": 422,
+            "head_accepted": 295,
+            "head_acceptance": 0.6990521327014217,
+            "gate_declines": 4,
+            "probe_rounds": 0,
+            "lookup_misses": 207,
+            "index_tokens": 564,
+            "sizer_width": 2
+          }
+        },
+        {
+          "completion_tokens": 512,
+          "decode_tok_s": 124.05767278662512,
+          "output_sha256": "9201b90e034d36a606828376a776661b9dc6fb8425c24b90c39df05ce95700de",
+          "output_chars": 2531,
+          "output_head": "Here is an explanation of how a database transaction works, broken down into numbered sections:\n\n### 1. Definition and Purpose\nA **database transaction** is a single logical unit of work that accesses",
+          "copy_draft": {
+            "schema": "mlx2.self-mtp-copy-draft.v1",
+            "enabled": true,
+            "verification": "exact",
+            "policy": {
+              "enabled": true,
+              "ngram_min": 3,
+              "ngram_max": 6,
+              "max_span": 8,
+              "batched_max_span": 0,
+              "probe_span": 2,
+              "lookback": 8192,
+              "min_samples": 3,
+              "gate_window": 32,
+              "reprobe_interval": 16,
+              "min_yield_ratio": 1.0,
+              "verify_row_cost": 0.1,
+              "draft_step_cost": 0.15
+            },
+            "copy_rounds": 4,
+            "copy_proposed": 10,
+            "copy_accepted": 3,
+            "copy_acceptance": 0.3,
+            "head_rounds": 212,
+            "head_proposed": 422,
+            "head_accepted": 292,
+            "head_acceptance": 0.6919431279620853,
+            "gate_declines": 3,
+            "probe_rounds": 0,
+            "lookup_misses": 208,
+            "index_tokens": 565,
+            "sizer_width": 2
+          }
+        },
+        {
+          "completion_tokens": 512,
+          "decode_tok_s": 121.33797915528858,
+          "output_sha256": "2c0f32b1d408fec33141aeb0ae58cc3cdf796cb37c11c1a1cdf0c930ec955a81",
+          "output_chars": 2245,
+          "output_head": "Here is a step-by-step explanation of how a Metal compute kernel is dispatched on Apple Silicon, explained in plain language.\n\n### The Big Picture Analogy\nThink of your GPU as a **factory floor** and ",
+          "copy_draft": {
+            "schema": "mlx2.self-mtp-copy-draft.v1",
+            "enabled": true,
+            "verification": "exact",
+            "policy": {
+              "enabled": true,
+              "ngram_min": 3,
+              "ngram_max": 6,
+              "max_span": 8,
+              "batched_max_span": 0,
+              "probe_span": 2,
+              "lookback": 8192,
+              "min_samples": 3,
+              "gate_window": 32,
+              "reprobe_interval": 16,
+              "min_yield_ratio": 1.0,
+              "verify_row_cost": 0.1,
+              "draft_step_cost": 0.15
+            },
+            "copy_rounds": 6,
+            "copy_proposed": 14,
+            "copy_accepted": 4,
+            "copy_acceptance": 0.2857142857142857,
+            "head_rounds": 220,
+            "head_proposed": 437,
+            "head_accepted": 281,
+            "head_acceptance": 0.6430205949656751,
+            "gate_declines": 18,
+            "probe_rounds": 1,
+            "lookup_misses": 201,
+            "index_tokens": 582,
+            "sizer_width": 2
+          }
+        },
+        {
+          "completion_tokens": 453,
+          "decode_tok_s": 116.70041579105069,
+          "output_sha256": "18e499be5e61d285b03d63e6eb1c0e725f9ec0933b86a871d5e2bdd444610b1e",
+          "output_chars": 2553,
+          "output_head": "**The Civic Heart: Why Cities Invest in Public Libraries**\n\nIn an era dominated by digital connectivity and private consumerism, the public library might seem like a relic of a bygone age. Yet, cities",
+          "copy_draft": {
+            "schema": "mlx2.self-mtp-copy-draft.v1",
+            "enabled": true,
+            "verification": "exact",
+            "policy": {
+              "enabled": true,
+              "ngram_min": 3,
+              "ngram_max": 6,
+              "max_span": 8,
+              "batched_max_span": 0,
+              "probe_span": 2,
+              "lookback": 8192,
+              "min_samples": 3,
+              "gate_window": 32,
+              "reprobe_interval": 16,
+              "min_yield_ratio": 1.0,
+              "verify_row_cost": 0.1,
+              "draft_step_cost": 0.15
+            },
+            "copy_rounds": 0,
+            "copy_proposed": 0,
+            "copy_accepted": 0,
+            "copy_acceptance": 0.0,
+            "head_rounds": 206,
+            "head_proposed": 412,
+            "head_accepted": 247,
+            "head_acceptance": 0.5995145631067961,
+            "gate_declines": 0,
+            "probe_rounds": 0,
+            "lookup_misses": 206,
+            "index_tokens": 506,
+            "sizer_width": 2
+          }
+        }
+      ],
+      "copy_counter_delta": {
+        "self_mtp_copy_rounds": 30,
+        "self_mtp_copy_proposed_tokens": 144,
+        "self_mtp_copy_accepted_tokens": 110,
+        "self_mtp_copy_probe_rounds": 1,
+        "self_mtp_copy_gate_declines": 25,
+        "self_mtp_copy_lookup_misses": 785
+      },
+      "metal_peak_bytes": 21874525088
+    },
+    {
+      "arm": "on",
+      "rep": 2,
+      "corpus": "prose",
+      "width": 4,
+      "temperature": 0.0,
+      "decode_tok_s_mean": 53.85594560618543,
+      "rows": [
+        {
+          "completion_tokens": 512,
+          "decode_tok_s": 55.05874535191515,
+          "output_sha256": "9c44be50a8e12f4782d91fc60809041abde08247b387db08863da913a09fc6e9",
+          "output_chars": 2646,
+          "output_head": "Here is an explanation of how a compiler works, broken down into numbered sections:\n\n1. **Lexical Analysis (Scanning)**\n   The compiler first reads the source code character by character and groups th",
+          "copy_draft": {
+            "schema": "mlx2.self-mtp-copy-draft.v1",
+            "enabled": true,
+            "verification": "exact",
+            "policy": {
+              "enabled": true,
+              "ngram_min": 3,
+              "ngram_max": 6,
+              "max_span": 8,
+              "batched_max_span": 0,
+              "probe_span": 2,
+              "lookback": 8192,
+              "min_samples": 3,
+              "gate_window": 32,
+              "reprobe_interval": 16,
+              "min_yield_ratio": 1.0,
+              "verify_row_cost": 0.1,
+              "draft_step_cost": 0.15
+            },
+            "copy_rounds": 0,
+            "copy_proposed": 0,
+            "copy_accepted": 0,
+            "copy_acceptance": 0.0,
+            "head_rounds": 216,
+            "head_proposed": 430,
+            "head_accepted": 295,
+            "head_acceptance": 0.686046511627907,
+            "gate_declines": 0,
+            "probe_rounds": 0,
+            "lookup_misses": 0,
+            "index_tokens": 568,
+            "sizer_width": 2
+          }
+        },
+        {
+          "completion_tokens": 512,
+          "decode_tok_s": 55.07389423946378,
+          "output_sha256": "cdede5564e8fe40245f62d662cd72dfb2040f14200ed5e65ce95149106e71f7f",
+          "output_chars": 2571,
+          "output_head": "Here is an explanation of how a database transaction works, broken down into numbered sections:\n\n### 1. Definition and Purpose\nA **database transaction** is a logical unit of work that accesses and po",
+          "copy_draft": {
+            "schema": "mlx2.self-mtp-copy-draft.v1",
+            "enabled": true,
+            "verification": "exact",
+            "policy": {
+              "enabled": true,
+              "ngram_min": 3,
+              "ngram_max": 6,
+              "max_span": 8,
+              "batched_max_span": 0,
+              "probe_span": 2,
+              "lookback": 8192,
+              "min_samples": 3,
+              "gate_window": 32,
+              "reprobe_interval": 16,
+              "min_yield_ratio": 1.0,
+              "verify_row_cost": 0.1,
+              "draft_step_cost": 0.15
+            },
+            "copy_rounds": 0,
+            "copy_proposed": 0,
+            "copy_accepted": 0,
+            "copy_acceptance": 0.0,
+            "head_rounds": 216,
+            "head_proposed": 430,
+            "head_accepted": 295,
+            "head_acceptance": 0.686046511627907,
+            "gate_declines": 0,
+            "probe_rounds": 0,
+            "lookup_misses": 0,
+            "index_tokens": 569,
+            "sizer_width": 2
+          }
+        },
+        {
+          "completion_tokens": 512,
+          "decode_tok_s": 55.6227964227647,
+          "output_sha256": "bcc29ea20e3d0c800e35f91342433f9191321234a32dc8d72fa5856d7428c2a1",
+          "output_chars": 2147,
+          "output_head": "Here is a step-by-step explanation of how a Metal compute kernel is dispatched on Apple Silicon, explained in plain language.\n\n### The Big Picture Analogy\nThink of your GPU as a **factory floor** and ",
+          "copy_draft": {
+            "schema": "mlx2.self-mtp-copy-draft.v1",
+            "enabled": true,
+            "verification": "exact",
+            "policy": {
+              "enabled": true,
+              "ngram_min": 3,
+              "ngram_max": 6,
+              "max_span": 8,
+              "batched_max_span": 0,
+              "probe_span": 2,
+              "lookback": 8192,
+              "min_samples": 3,
+              "gate_window": 32,
+              "reprobe_interval": 16,
+              "min_yield_ratio": 1.0,
+              "verify_row_cost": 0.1,
+              "draft_step_cost": 0.15
+            },
+            "copy_rounds": 0,
+            "copy_proposed": 0,
+            "copy_accepted": 0,
+            "copy_acceptance": 0.0,
+            "head_rounds": 213,
+            "head_proposed": 426,
+            "head_accepted": 298,
+            "head_acceptance": 0.6995305164319249,
+            "gate_declines": 0,
+            "probe_rounds": 0,
+            "lookup_misses": 0,
+            "index_tokens": 586,
+            "sizer_width": 2
+          }
+        },
+        {
+          "completion_tokens": 455,
+          "decode_tok_s": 49.66834641059809,
+          "output_sha256": "57467ee67c7cb95e454f953dd57641fe1d5f56b71a584b68abbb7d45f9368635",
+          "output_chars": 2682,
+          "output_head": "**The Civic Heart: Why Cities Invest in Public Libraries**\n\nIn an era dominated by digital connectivity and private enterprise, the public library might seem like a relic of a bygone age. Yet, cities ",
+          "copy_draft": {
+            "schema": "mlx2.self-mtp-copy-draft.v1",
+            "enabled": true,
+            "verification": "exact",
+            "policy": {
+              "enabled": true,
+              "ngram_min": 3,
+              "ngram_max": 6,
+              "max_span": 8,
+              "batched_max_span": 0,
+              "probe_span": 2,
+              "lookback": 8192,
+              "min_samples": 3,
+              "gate_window": 32,
+              "reprobe_interval": 16,
+              "min_yield_ratio": 1.0,
+              "verify_row_cost": 0.1,
+              "draft_step_cost": 0.15
+            },
+            "copy_rounds": 0,
+            "copy_proposed": 0,
+            "copy_accepted": 0,
+            "copy_acceptance": 0.0,
+            "head_rounds": 212,
+            "head_proposed": 424,
+            "head_accepted": 244,
+            "head_acceptance": 0.5754716981132075,
+            "gate_declines": 0,
+            "probe_rounds": 0,
+            "lookup_misses": 0,
+            "index_tokens": 512,
+            "sizer_width": 2
+          }
+        }
+      ],
+      "copy_counter_delta": {
+        "self_mtp_copy_rounds": 0,
+        "self_mtp_copy_proposed_tokens": 0,
+        "self_mtp_copy_accepted_tokens": 0,
+        "self_mtp_copy_probe_rounds": 0,
+        "self_mtp_copy_gate_declines": 0,
+        "self_mtp_copy_lookup_misses": 890
+      },
+      "metal_peak_bytes": 22989670146
+    },
+    {
+      "arm": "on",
+      "rep": 2,
+      "corpus": "code",
+      "width": 1,
+      "temperature": 0.0,
+      "decode_tok_s_mean": 217.13607792592592,
+      "rows": [
+        {
+          "completion_tokens": 356,
+          "decode_tok_s": 208.00557806717245,
+          "output_sha256": "b8998f7ae7ed272cc431d773bea48bc0e3476cd287a09eedd95a647e89d6d6e9",
+          "output_chars": 1307,
+          "output_head": "```python\nclass AdaptiveLookback:\n    \"\"\"Miss-driven lookback with rejection backoff inside a scheduler cap.\"\"\"\n\n    def __init__(self, ladder=(256, 1024, 4096, 16384), *, misses=4, rejects=2):\n      ",
+          "copy_draft": {
+            "schema": "mlx2.self-mtp-copy-draft.v1",
+            "enabled": true,
+            "verification": "exact",
+            "policy": {
+              "enabled": true,
+              "ngram_min": 3,
+              "ngram_max": 6,
+              "max_span": 8,
+              "batched_max_span": 0,
+              "probe_span": 2,
+              "lookback": 8192,
+              "min_samples": 3,
+              "gate_window": 32,
+              "reprobe_interval": 16,
+              "min_yield_ratio": 1.0,
+              "verify_row_cost": 0.1,
+              "draft_step_cost": 0.15
+            },
+            "copy_rounds": 71,
+            "copy_proposed": 368,
+            "copy_accepted": 269,
+            "copy_acceptance": 0.7309782608695652,
+            "head_rounds": 5,
+            "head_proposed": 10,
+            "head_accepted": 10,
+            "head_acceptance": 1.0,
+            "gate_declines": 0,
+            "probe_rounds": 0,
+            "lookup_misses": 5,
+            "index_tokens": 786,
+            "sizer_width": 2
+          }
+        },
+        {
+          "completion_tokens": 146,
+          "decode_tok_s": 229.91853243679913,
+          "output_sha256": "572599a0c21b8900767d6b489803847f6ba3b2dae1b254fbb2d46243204be31b",
+          "output_chars": 448,
+          "output_head": "```python\ndef merge_intervals(intervals):\n    \"\"\"Merge overlapping closed intervals [start, end].\"\"\"\n    ordered = sorted(intervals)\n    merged = []\n    for start, end in ordered:\n        if merged an",
+          "copy_draft": {
+            "schema": "mlx2.self-mtp-copy-draft.v1",
+            "enabled": true,
+            "verification": "exact",
+            "policy": {
+              "enabled": true,
+              "ngram_min": 3,
+              "ngram_max": 6,
+              "max_span": 8,
+              "batched_max_span": 0,
+              "probe_span": 2,
+              "lookback": 8192,
+              "min_samples": 3,
+              "gate_window": 32,
+              "reprobe_interval": 16,
+              "min_yield_ratio": 1.0,
+              "verify_row_cost": 0.1,
+              "draft_step_cost": 0.15
+            },
+            "copy_rounds": 21,
+            "copy_proposed": 122,
+            "copy_accepted": 99,
+            "copy_acceptance": 0.8114754098360656,
+            "head_rounds": 9,
+            "head_proposed": 18,
+            "head_accepted": 16,
+            "head_acceptance": 0.8888888888888888,
+            "gate_declines": 0,
+            "probe_rounds": 0,
+            "lookup_misses": 9,
+            "index_tokens": 339,
+            "sizer_width": 2
+          }
+        },
+        {
+          "completion_tokens": 416,
+          "decode_tok_s": 161.94033130795725,
+          "output_sha256": "93c366cba76ca83e73eb60bc68dd3812605fb48248d4d7a5750d2eb14d463c26",
+          "output_chars": 1442,
+          "output_head": "```python\nclass AdaptiveLookback:\n    \"\"\"Miss-driven lookback with rejection backoff inside a scheduler cap.\"\"\"\n\n    def __init__(self, ladder: tuple[int, ...] = (256, 1024, 4096, 16384), *, misses: i",
+          "copy_draft": {
+            "schema": "mlx2.self-mtp-copy-draft.v1",
+            "enabled": true,
+            "verification": "exact",
+            "policy": {
+              "enabled": true,
+              "ngram_min": 3,
+              "ngram_max": 6,
+              "max_span": 8,
+              "batched_max_span": 0,
+              "probe_span": 2,
+              "lookback": 8192,
+              "min_samples": 3,
+              "gate_window": 32,
+              "reprobe_interval": 16,
+              "min_yield_ratio": 1.0,
+              "verify_row_cost": 0.1,
+              "draft_step_cost": 0.15
+            },
+            "copy_rounds": 43,
+            "copy_proposed": 167,
+            "copy_accepted": 91,
+            "copy_acceptance": 0.5449101796407185,
+            "head_rounds": 95,
+            "head_proposed": 190,
+            "head_accepted": 187,
+            "head_acceptance": 0.9842105263157894,
+            "gate_declines": 70,
+            "probe_rounds": 4,
+            "lookup_misses": 25,
+            "index_tokens": 841,
+            "sizer_width": 2
+          }
+        },
+        {
+          "completion_tokens": 138,
+          "decode_tok_s": 268.6798698917749,
+          "output_sha256": "9ce8e9c41a4728be66bfd4aa0c8768d308d15857e913a7069ba2b7153f0d6ff1",
+          "output_chars": 470,
+          "output_head": "```python\ndef merge_intervals(intervals):\n    \"\"\"Merge overlapping closed intervals [start, end].\"\"\"\n    ordered = sorted(intervals)\n    merged = []\n    for start, end in ordered:\n        if merged an",
+          "copy_draft": {
+            "schema": "mlx2.self-mtp-copy-draft.v1",
+            "enabled": true,
+            "verification": "exact",
+            "policy": {
+              "enabled": true,
+              "ngram_min": 3,
+              "ngram_max": 6,
+              "max_span": 8,
+              "batched_max_span": 0,
+              "probe_span": 2,
+              "lookback": 8192,
+              "min_samples": 3,
+              "gate_window": 32,
+              "reprobe_interval": 16,
+              "min_yield_ratio": 1.0,
+              "verify_row_cost": 0.1,
+              "draft_step_cost": 0.15
+            },
+            "copy_rounds": 18,
+            "copy_proposed": 118,
+            "copy_accepted": 102,
+            "copy_acceptance": 0.864406779661017,
+            "head_rounds": 6,
+            "head_proposed": 12,
+            "head_accepted": 11,
+            "head_acceptance": 0.9166666666666666,
+            "gate_declines": 0,
+            "probe_rounds": 0,
+            "lookup_misses": 6,
+            "index_tokens": 332,
+            "sizer_width": 3
+          }
+        }
+      ],
+      "copy_counter_delta": {
+        "self_mtp_copy_rounds": 134,
+        "self_mtp_copy_proposed_tokens": 655,
+        "self_mtp_copy_accepted_tokens": 459,
+        "self_mtp_copy_probe_rounds": 3,
+        "self_mtp_copy_gate_declines": 54,
+        "self_mtp_copy_lookup_misses": 43
+      },
+      "metal_peak_bytes": 22989670146
+    },
+    {
+      "arm": "on",
+      "rep": 2,
+      "corpus": "code",
+      "width": 4,
+      "temperature": 0.0,
+      "decode_tok_s_mean": 84.4956338107337,
+      "rows": [
+        {
+          "completion_tokens": 356,
+          "decode_tok_s": 92.41823070328834,
+          "output_sha256": "b8998f7ae7ed272cc431d773bea48bc0e3476cd287a09eedd95a647e89d6d6e9",
+          "output_chars": 1307,
+          "output_head": "```python\nclass AdaptiveLookback:\n    \"\"\"Miss-driven lookback with rejection backoff inside a scheduler cap.\"\"\"\n\n    def __init__(self, ladder=(256, 1024, 4096, 16384), *, misses=4, rejects=2):\n      ",
+          "copy_draft": {
+            "schema": "mlx2.self-mtp-copy-draft.v1",
+            "enabled": true,
+            "verification": "exact",
+            "policy": {
+              "enabled": true,
+              "ngram_min": 3,
+              "ngram_max": 6,
+              "max_span": 8,
+              "batched_max_span": 0,
+              "probe_span": 2,
+              "lookback": 8192,
+              "min_samples": 3,
+              "gate_window": 32,
+              "reprobe_interval": 16,
+              "min_yield_ratio": 1.0,
+              "verify_row_cost": 0.1,
+              "draft_step_cost": 0.15
+            },
+            "copy_rounds": 0,
+            "copy_proposed": 0,
+            "copy_accepted": 0,
+            "copy_acceptance": 0.0,
+            "head_rounds": 119,
+            "head_proposed": 238,
+            "head_accepted": 238,
+            "head_acceptance": 1.0,
+            "gate_declines": 0,
+            "probe_rounds": 0,
+            "lookup_misses": 0,
+            "index_tokens": 783,
+            "sizer_width": 2
+          }
+        },
+        {
+          "completion_tokens": 125,
+          "decode_tok_s": 70.75089857595898,
+          "output_sha256": "8d1071018d1d685ac486b69ca3f852d7579c56fe964afe523ccbc01b8aa989c6",
+          "output_chars": 414,
+          "output_head": "```python\ndef merge_intervals(intervals):\n    \"\"\"Merge overlapping closed intervals [start, end].\"\"\"\n    ordered = sorted(intervals)\n    merged = []\n    for start, end in ordered:\n        if merged an",
+          "copy_draft": {
+            "schema": "mlx2.self-mtp-copy-draft.v1",
+            "enabled": true,
+            "verification": "exact",
+            "policy": {
+              "enabled": true,
+              "ngram_min": 3,
+              "ngram_max": 6,
+              "max_span": 8,
+              "batched_max_span": 0,
+              "probe_span": 2,
+              "lookback": 8192,
+              "min_samples": 3,
+              "gate_window": 32,
+              "reprobe_interval": 16,
+              "min_yield_ratio": 1.0,
+              "verify_row_cost": 0.1,
+              "draft_step_cost": 0.15
+            },
+            "copy_rounds": 0,
+            "copy_proposed": 0,
+            "copy_accepted": 0,
+            "copy_acceptance": 0.0,
+            "head_rounds": 42,
+            "head_proposed": 84,
+            "head_accepted": 83,
+            "head_acceptance": 0.9880952380952381,
+            "gate_declines": 0,
+            "probe_rounds": 0,
+            "lookup_misses": 0,
+            "index_tokens": 315,
+            "sizer_width": 2
+          }
+        },
+        {
+          "completion_tokens": 416,
+          "decode_tok_s": 100.79084993995438,
+          "output_sha256": "93c366cba76ca83e73eb60bc68dd3812605fb48248d4d7a5750d2eb14d463c26",
+          "output_chars": 1442,
+          "output_head": "```python\nclass AdaptiveLookback:\n    \"\"\"Miss-driven lookback with rejection backoff inside a scheduler cap.\"\"\"\n\n    def __init__(self, ladder: tuple[int, ...] = (256, 1024, 4096, 16384), *, misses: i",
+          "copy_draft": {
+            "schema": "mlx2.self-mtp-copy-draft.v1",
+            "enabled": true,
+            "verification": "exact",
+            "policy": {
+              "enabled": true,
+              "ngram_min": 3,
+              "ngram_max": 6,
+              "max_span": 8,
+              "batched_max_span": 0,
+              "probe_span": 2,
+              "lookback": 8192,
+              "min_samples": 3,
+              "gate_window": 32,
+              "reprobe_interval": 16,
+              "min_yield_ratio": 1.0,
+              "verify_row_cost": 0.1,
+              "draft_step_cost": 0.15
+            },
+            "copy_rounds": 12,
+            "copy_proposed": 68,
+            "copy_accepted": 50,
+            "copy_acceptance": 0.7352941176470589,
+            "head_rounds": 119,
+            "head_proposed": 238,
+            "head_accepted": 234,
+            "head_acceptance": 0.9831932773109243,
+            "gate_declines": 0,
+            "probe_rounds": 0,
+            "lookup_misses": 0,
+            "index_tokens": 838,
+            "sizer_width": 2
+          }
+        },
+        {
+          "completion_tokens": 154,
+          "decode_tok_s": 74.02255602373305,
+          "output_sha256": "5e79c4bf3f6ba2f7880784b4eb0aaa248e7a1058269031d38e9c1888ab2328fe",
+          "output_chars": 492,
+          "output_head": "```python\ndef merge_intervals(intervals):\n    \"\"\"Merge overlapping closed intervals [start, end].\"\"\"\n    ordered = sorted(intervals)\n    merged = []\n    for start, end in ordered:\n        if merged an",
+          "copy_draft": {
+            "schema": "mlx2.self-mtp-copy-draft.v1",
+            "enabled": true,
+            "verification": "exact",
+            "policy": {
+              "enabled": true,
+              "ngram_min": 3,
+              "ngram_max": 6,
+              "max_span": 8,
+              "batched_max_span": 0,
+              "probe_span": 2,
+              "lookback": 8192,
+              "min_samples": 3,
+              "gate_window": 32,
+              "reprobe_interval": 16,
+              "min_yield_ratio": 1.0,
+              "verify_row_cost": 0.1,
+              "draft_step_cost": 0.15
+            },
+            "copy_rounds": 0,
+            "copy_proposed": 0,
+            "copy_accepted": 0,
+            "copy_acceptance": 0.0,
+            "head_rounds": 51,
+            "head_proposed": 102,
+            "head_accepted": 102,
+            "head_acceptance": 1.0,
+            "gate_declines": 0,
+            "probe_rounds": 0,
+            "lookup_misses": 0,
+            "index_tokens": 345,
+            "sizer_width": 2
+          }
+        }
+      ],
+      "copy_counter_delta": {
+        "self_mtp_copy_rounds": 28,
+        "self_mtp_copy_proposed_tokens": 180,
+        "self_mtp_copy_accepted_tokens": 150,
+        "self_mtp_copy_probe_rounds": 1,
+        "self_mtp_copy_gate_declines": 16,
+        "self_mtp_copy_lookup_misses": 337
+      },
+      "metal_peak_bytes": 22989670146
+    }
+  ],
+  "verdict": {
+    "cells": {
+      "prose/B1/t0.0": {
+        "on_mean": 123.74193227547856,
+        "off_mean": 125.89644043553925,
+        "ratio": 0.9828866634147307,
+        "worst_on_vs_best_off": 0.9539271004310441,
+        "ord_mean": 117.75861125629113,
+        "on_vs_ord": 1.0508100507925087,
+        "off_vs_ord": 1.0691060219921995
+      },
+      "prose/B4/t0.0": {
+        "on_mean": 54.594022010608725,
+        "off_mean": 54.411709611070876,
+        "ratio": 1.0033506096544476,
+        "worst_on_vs_best_off": 0.9602465742960063,
+        "ord_mean": 70.55031309499698,
+        "on_vs_ord": 0.7738310379586426,
+        "off_vs_ord": 0.7712468906807649
+      },
+      "code/B1/t0.0": {
+        "on_mean": 214.50166854278402,
+        "off_mean": 163.50562337636117,
+        "ratio": 1.311891689798576,
+        "worst_on_vs_best_off": 1.2850390751721377,
+        "ord_mean": 116.2862378016271,
+        "on_vs_ord": 1.8446006388881786,
+        "off_vs_ord": 1.4060616842320217
+      },
+      "code/B4/t0.0": {
+        "on_mean": 83.39271090580517,
+        "off_mean": 82.35907544891714,
+        "ratio": 1.012550352845196,
+        "worst_on_vs_best_off": 0.9616178985614826,
+        "ord_mean": 78.09395047738198,
+        "on_vs_ord": 1.0678510998103221,
+        "off_vs_ord": 1.054615305608985
+      }
+    },
+    "go": false,
+    "reasons": [
+      "prose regression prose/B1/t0.0: 0.983 (worst 0.954)"
+    ],
+    "greedy_output_mismatches": 10,
+    "greedy_output_mismatches_vs_ordinary": 11,
+    "greedy_within_arm_nondeterminism": {
+      "off": 11,
+      "on": 11,
+      "ord": 10
+    },
+    "peak_memory": {
+      "on_bytes": 22994499260,
+      "off_bytes": 22995812772,
+      "delta_gib": -0.0012233033776283264
+    }
+  }
+}

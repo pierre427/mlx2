@@ -102,6 +102,10 @@ class SegmentedKVRows:
         self.rows = [list(row) for row in rows]
         self.note = note
         self.revision = 0
+        # Bounded, sync-free: how many full lane/stamp integrity scans ran.
+        # One per transaction open and one per commit or abort is the healthy
+        # shape; a zero here means a round published without ever verifying.
+        self.integrity_scans = 0
         self._active = None
         self._validate(self.rows)
 
@@ -186,6 +190,7 @@ class SegmentedKVTransaction:
         self.snapshot_nbytes = sum(item[2] for row in self._snapshots for item in row)
         self._before = [[_mask_state(cache) for cache in row] for row in self._rows]
         self._expected = [[_stamp(cache) for cache in row] for row in self._rows]
+        self._verified = False
         self.caches = [SegmentedKVView(self, layer) for layer in range(len(self._rows[0]))]
         if owner.note is not None:
             owner.note("snapshot_bytes", self.snapshot_nbytes)
@@ -197,6 +202,23 @@ class SegmentedKVTransaction:
             if pair is not None for array in pair)
 
     def _check(self):
+        """Hot-path guard for a per-layer view call.
+
+        Lane membership and the O(lanes x layers) stamp scan are verified at
+        the transaction boundaries (``_check_full``: open, commit, abort) and
+        on the first view call of a round, not once per layer.  A layer of a
+        49-layer target cost about 8 ms of Python per external round scanning
+        stamps that only the model forward between these calls could change,
+        and that forward cannot reach the authoritative rows: the views hold
+        the appends.  An outside mutation is still caught before anything is
+        published, because commit and abort re-run the full scan and restore.
+        """
+        if self.closed or self.owner._active is not self or self.owner.revision != self.revision:
+            raise RuntimeError("stale or closed KV transaction")
+        if not self._verified:
+            self._check_full()
+
+    def _check_full(self):
         if self.closed or self.owner._active is not self or self.owner.revision != self.revision:
             raise RuntimeError("stale or closed KV transaction")
         if len(self.owner.rows) != len(self._rows) or any(
@@ -207,6 +229,8 @@ class SegmentedKVTransaction:
         if any(_stamp(cache) != expected for row, stamps in zip(self._rows, self._expected)
                for cache, expected in zip(row, stamps)):
             raise RuntimeError("KV state changed outside its transaction")
+        self._verified = True
+        self.owner.integrity_scans += 1
 
     def _restore(self, lane, layer):
         cache = self._rows[lane][layer]
@@ -226,7 +250,7 @@ class SegmentedKVTransaction:
 
     def commit(self, accepted_lengths):
         """Publish exact verified-input prefix counts, independently per lane."""
-        self._check()
+        self._check_full()
         accepted = _counts(accepted_lengths, len(self._rows), "accepted lengths")
         if any(a > length for a, length in zip(accepted, self.lengths)):
             raise ValueError("accepted prefix exceeds verified input length")
@@ -258,7 +282,7 @@ class SegmentedKVTransaction:
 
     def abort(self):
         """Cancel a partial or complete forward and restore pre-round state."""
-        self._check()
+        self._check_full()
         for lane in range(len(self._rows)):
             for layer in range(len(self.caches)):
                 self._restore(lane, layer)

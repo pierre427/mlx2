@@ -1,0 +1,109 @@
+### job 06-junction-snapshots
+### started 2026-09-20T04:05:59
+### worktree /private/tmp/mlx2-reb-06
+### branch   claude/splash-06-onmain @ 4c1c7f0  (merge-base with main: f4955f3)
+### models ~/mlx-models/Qwen3.6-35B-A3B-uncensored-heretic-Native-MTP-Preserved-oQ4e-mtp
+### runner  repaired 2026-09-20 (real gate enforcement, per-spec lease)
+    ok   /private/tmp/mlx2-reb-06/scripts/bench_06_junction_snapshots.py
+    ok   model ~/mlx-models/Qwen3.6-35B-A3B-uncensored-heretic-Native-MTP-Preserved-oQ4e-mtp
+### [runner] yielding 20s before next spec at 2026-09-20T04:05:59
+[runner] waiter: REGISTERED mlx2-76.splash-06-junction-snapshots.65093.1789891579 at 2026-09-20T04:06:19
+[runner] lease: ACQUIRED for splash-06-junction-snapshots at 2026-09-20T04:06:19 after 0s -> /tmp/gpu.lock /Users/Shared/mlxuag/gpu.lock
+[runner] waiter: removed mlx2-76.splash-06-junction-snapshots.65093.1789891579
+### lease wanted-at 2026-09-20T04:06:19 acquired-at 2026-09-20T04:06:19 queued-for 0s
+### tree under test: mlx2.__file__ = /private/tmp/mlx2-reb-06/src/mlx2/__init__.py
+GATE PASS  PYTHONPATH pin: mlx2 resolves inside /private/tmp/mlx2-reb-06
+[runner] arm mtp-off (--native-mtp)
+[runner] server pid 66090  log qualification/runs/junction-snapshots-20260920/mtp-off.server.log  PYTHONPATH=/private/tmp/mlx2-reb-06/src
+[runner] ready: http://127.0.0.1:8297 answered a real completion 200 after 6s, 1 probe attempt(s)
+### resolved route: segmented_self_mtp (source: explicit_flag)
+### resolved route: segmented_self_mtp (source: explicit_flag)
+GATE FAIL  route MISLABELLED: arm claims 'native_mtp' but the server resolved 'segmented_self_mtp' (source explicit_flag) - every number from this arm describes a different code path
+{"turn": 0, "wall_s": 5.0448, "prompt_tokens": 21866, "cached_tokens": 0, "finish_reason": "stop", "text": "Three prime numbers are 2, 3, and 5.", "checkpoint_role": null}
+{"turn": 1, "wall_s": 5.2117, "prompt_tokens": 21868, "cached_tokens": 0, "finish_reason": "stop", "text": "Blue", "checkpoint_role": null}
+{"turn": 2, "wall_s": 5.6364, "prompt_tokens": 21867, "cached_tokens": 0, "finish_reason": "stop", "text": "Two plus two is four.", "checkpoint_role": null}
+{"turn": 3, "wall_s": 5.9645, "prompt_tokens": 21867, "cached_tokens": 0, "finish_reason": "stop", "text": "The word \"cache\" spelled backwards is **ehcac**.", "checkpoint_role": null}
+{"turn": 4, "wall_s": 5.9668, "prompt_tokens": 21870, "cached_tokens": 0, "finish_reason": "stop", "text": "free", "checkpoint_role": null}
+[runner] server stopped
+[runner] arm mtp-on (--native-mtp)
+[runner] server pid 66211  log qualification/runs/junction-snapshots-20260920/mtp-on.server.log  PYTHONPATH=/private/tmp/mlx2-reb-06/src
+[runner] ready: http://127.0.0.1:8297 answered a real completion 200 after 5s, 1 probe attempt(s)
+### resolved route: segmented_self_mtp (source: explicit_flag)
+### resolved route: segmented_self_mtp (source: explicit_flag)
+GATE FAIL  route MISLABELLED: arm claims 'native_mtp' but the server resolved 'segmented_self_mtp' (source explicit_flag) - every number from this arm describes a different code path
+{"turn": 0, "wall_s": 6.5606, "prompt_tokens": 21866, "cached_tokens": 0, "finish_reason": "length", "text": "Here are three prime numbers:\n\n1. 2\n2. 3", "checkpoint_role": null}
+{"turn": 1, "wall_s": 7.0295, "prompt_tokens": 21868, "cached_tokens": 0, "finish_reason": "stop", "text": "Blue", "checkpoint_role": null}
+{"turn": 2, "wall_s": 0.1858, "prompt_tokens": 21867, "cached_tokens": 21852, "finish_reason": "stop", "text": "Two plus two is four.", "checkpoint_role": "junction"}
+{"turn": 3, "wall_s": 0.2634, "prompt_tokens": 21867, "cached_tokens": 21852, "finish_reason": "stop", "text": "The word \"cache\" spelled backwards is **ehcac**.", "checkpoint_role": "junction"}
+{"turn": 4, "wall_s": 0.1768, "prompt_tokens": 21870, "cached_tokens": 21852, "finish_reason": "stop", "text": "free", "checkpoint_role": "junction"}
+[runner] server stopped
+[runner] arm ord-off (--ordinary)
+[runner] server pid 66329  log qualification/runs/junction-snapshots-20260920/ord-off.server.log  PYTHONPATH=/private/tmp/mlx2-reb-06/src
+[runner] ready: http://127.0.0.1:8297 answered a real completion 200 after 5s, 1 probe attempt(s)
+### resolved route: ordinary (source: explicit_flag)
+### resolved route: ordinary (source: explicit_flag)
+GATE PASS  route is 'ordinary' as the arm claims ('ordinary', source explicit_flag)
+{"turn": 0, "wall_s": 6.3024, "prompt_tokens": 21866, "cached_tokens": 0, "finish_reason": "length", "text": "Three prime numbers are:\n\n1. 2\n2. 3\n", "checkpoint_role": null}
+{"turn": 1, "wall_s": 0.6077, "prompt_tokens": 21868, "cached_tokens": 20480, "finish_reason": "stop", "text": "Blue", "checkpoint_role": "committed_prompt_boundary"}
+{"turn": 2, "wall_s": 0.6952, "prompt_tokens": 21867, "cached_tokens": 20480, "finish_reason": "stop", "text": "Two plus two is four.", "checkpoint_role": "committed_prompt_boundary"}
+{"turn": 3, "wall_s": 0.7399, "prompt_tokens": 21867, "cached_tokens": 20480, "finish_reason": "stop", "text": "The word \"cache\" spelled backwards is **ehcac**.", "checkpoint_role": "committed_prompt_boundary"}
+{"turn": 4, "wall_s": 0.627, "prompt_tokens": 21870, "cached_tokens": 20480, "finish_reason": "stop", "text": "free", "checkpoint_role": "committed_prompt_boundary"}
+[runner] server stopped
+[runner] arm ord-on (--ordinary)
+[runner] server pid 66422  log qualification/runs/junction-snapshots-20260920/ord-on.server.log  PYTHONPATH=/private/tmp/mlx2-reb-06/src
+[runner] ready: http://127.0.0.1:8297 answered a real completion 200 after 5s, 1 probe attempt(s)
+### resolved route: ordinary (source: explicit_flag)
+### resolved route: ordinary (source: explicit_flag)
+GATE PASS  route is 'ordinary' as the arm claims ('ordinary', source explicit_flag)
+{"turn": 0, "wall_s": 6.3196, "prompt_tokens": 21866, "cached_tokens": 0, "finish_reason": "length", "text": "Here are three prime numbers:\n\n1. 2\n2. 3", "checkpoint_role": null}
+{"turn": 1, "wall_s": 1.4831, "prompt_tokens": 21868, "cached_tokens": 18433, "finish_reason": "stop", "text": "Blue", "checkpoint_role": "committed_prompt_boundary"}
+{"turn": 2, "wall_s": 0.1932, "prompt_tokens": 21867, "cached_tokens": 21852, "finish_reason": "stop", "text": "Two plus two is four.", "checkpoint_role": "junction"}
+{"turn": 3, "wall_s": 0.2574, "prompt_tokens": 21867, "cached_tokens": 21852, "finish_reason": "stop", "text": "The word \"cache\" spelled backwards is **ehcac**.", "checkpoint_role": "junction"}
+{"turn": 4, "wall_s": 0.1632, "prompt_tokens": 21870, "cached_tokens": 21852, "finish_reason": "stop", "text": "free", "checkpoint_role": "junction"}
+[runner] server stopped
+GATE PASS  job 06 commands all exited 0
+### spec-gate evaluation (gates.py 06)
+  --- spec gates for job 06 over qualification/runs/junction-snapshots-20260920 ---
+  spec PASS  mtp-off g1 settings do NOT carry apc_junction_checkpoints: got False want False
+  spec PASS  mtp-off g1 smoke non-empty: got True want True
+  spec PASS  mtp-off g1 finish_reason in stop/length: got True want True
+  spec PASS  mtp-off g2 no tracebacks: got 0 want 0
+  spec ????  mtp-off apcv2_store_failures == 0: NOT EVALUATED (counter absent from /v1/status)
+  spec ????  mtp-off apc_junction_checkpoints_skipped_publish_failed == 0: NOT EVALUATED (counter absent from /v1/status)
+  spec PASS  mtp-on g1 settings carry apc_junction_checkpoints: got True want True
+  spec PASS  mtp-on g1 smoke non-empty: got True want True
+  spec PASS  mtp-on g1 finish_reason in stop/length: got True want True
+  spec PASS  mtp-on g2 no tracebacks: got 0 want 0
+  spec ????  mtp-on apcv2_store_failures == 0: NOT EVALUATED (counter absent from /v1/status)
+  spec ????  mtp-on apc_junction_checkpoints_skipped_publish_failed == 0: NOT EVALUATED (counter absent from /v1/status)
+  spec PASS  ord-off g1 settings do NOT carry apc_junction_checkpoints: got False want False
+  spec PASS  ord-off g1 smoke non-empty: got True want True
+  spec PASS  ord-off g1 finish_reason in stop/length: got True want True
+  spec PASS  ord-off g2 no tracebacks: got 0 want 0
+  spec ????  ord-off apcv2_store_failures == 0: NOT EVALUATED (counter absent from /v1/status)
+  spec ????  ord-off apc_junction_checkpoints_skipped_publish_failed == 0: NOT EVALUATED (counter absent from /v1/status)
+  spec PASS  ord-on g1 settings carry apc_junction_checkpoints: got True want True
+  spec PASS  ord-on g1 smoke non-empty: got True want True
+  spec PASS  ord-on g1 finish_reason in stop/length: got True want True
+  spec PASS  ord-on g2 no tracebacks: got 0 want 0
+  spec ????  ord-on apcv2_store_failures == 0: NOT EVALUATED (counter absent from /v1/status)
+  spec ????  ord-on apc_junction_checkpoints_skipped_publish_failed == 0: NOT EVALUATED (counter absent from /v1/status)
+  spec ????  06 greedy text equality on == off per route: NOT EVALUATED (requires per-prompt text from the bench JSONs; the bench schema is not pinned here -- compare by hand from the *.bench.json artifacts)
+  spec ????  06 perf accept/reject thresholds: NOT EVALUATED (spec thresholds are ratios over bench JSON fields; reported, not auto-gated)
+       mtp-on: captured=3 published=3 hits=0 degraded=None
+  spec PASS  mtp-on 06a captured >= 1: got True want True
+  spec PASS  mtp-on 06a published >= 1: got True want True
+  spec FAIL  mtp-on 06b EVICT-BEFORE-USE: published 3 but only 0 hit(s): entries were published and lost before the branching turn; at 4 seated lanes the rank-1 count pool cycles ~4x faster than when this gate was written
+  spec ????  mtp-on 06d degraded == 0: NOT EVALUATED (counter absent)
+       ord-on: captured=3 published=3 hits=0 degraded=None
+  spec PASS  ord-on 06a captured >= 1: got True want True
+  spec PASS  ord-on 06a published >= 1: got True want True
+  spec FAIL  ord-on 06b EVICT-BEFORE-USE: published 3 but only 0 hit(s): entries were published and lost before the branching turn; at 4 seated lanes the rank-1 count pool cycles ~4x faster than when this gate was written
+  spec ????  ord-on 06d degraded == 0: NOT EVALUATED (counter absent)
+  --- 20 passed, 2 failed, 12 NOT EVALUATED ---
+GATE FAIL  spec gates for job 06 (gates.py rc=1)
+### GATE SUMMARY: 4/7 passed, 3 failed
+[runner] lease: RELEASED /tmp/gpu.lock for splash-06-junction-snapshots at 2026-09-20T04:07:50
+[runner] lease: RELEASED /Users/Shared/mlxuag/gpu.lock for splash-06-junction-snapshots at 2026-09-20T04:07:50
+### lease held 91s for 06-junction-snapshots (wanted 04:06:19, acquired 04:06:19, released 04:07:50, queued 0s)
+### finished 2026-09-20T04:07:50 status=FAILED(rc=1) duration=91s

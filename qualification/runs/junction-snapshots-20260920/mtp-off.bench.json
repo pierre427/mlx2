@@ -1,0 +1,104 @@
+{
+  "model": "Qwen3.6-35B-A3B-uncensored-heretic-Native-MTP-Preserved-oQ4e-mtp",
+  "results": [
+    {
+      "turn": 0,
+      "wall_s": 5.0448,
+      "prompt_tokens": 21866,
+      "cached_tokens": 0,
+      "finish_reason": "stop",
+      "text": "Three prime numbers are 2, 3, and 5.",
+      "checkpoint_role": null
+    },
+    {
+      "turn": 1,
+      "wall_s": 5.2117,
+      "prompt_tokens": 21868,
+      "cached_tokens": 0,
+      "finish_reason": "stop",
+      "text": "Blue",
+      "checkpoint_role": null
+    },
+    {
+      "turn": 2,
+      "wall_s": 5.6364,
+      "prompt_tokens": 21867,
+      "cached_tokens": 0,
+      "finish_reason": "stop",
+      "text": "Two plus two is four.",
+      "checkpoint_role": null
+    },
+    {
+      "turn": 3,
+      "wall_s": 5.9645,
+      "prompt_tokens": 21867,
+      "cached_tokens": 0,
+      "finish_reason": "stop",
+      "text": "The word \"cache\" spelled backwards is **ehcac**.",
+      "checkpoint_role": null
+    },
+    {
+      "turn": 4,
+      "wall_s": 5.9668,
+      "prompt_tokens": 21870,
+      "cached_tokens": 0,
+      "finish_reason": "stop",
+      "text": "free",
+      "checkpoint_role": null
+    }
+  ],
+  "before": {
+    "junction_counts": {
+      "apc_interior_positions_planned_turn": 0,
+      "apc_interior_positions_planned_tail": 0,
+      "apc_interior_positions_planned_lattice": 0,
+      "apc_interior_positions_skipped_media": 0,
+      "apc_interior_requests_skipped_continuation": 0,
+      "apc_interior_positions_headroom_capped": 0,
+      "apc_interior_hits": 0,
+      "apc_interior_hits_turn_boundary": 0,
+      "apc_interior_hit_tokens": 0,
+      "apc_interior_turn_marker_missing": 0,
+      "apc_interior_checkpoints_degraded": 0,
+      "apc_interior_checkpoints_captured": 0
+    },
+    "apc_lifetime": {
+      "lookups": 2,
+      "hits": 0,
+      "misses": 2,
+      "queried_tokens": 32,
+      "cached_tokens": 0,
+      "stores": 3,
+      "interior_hits": 0,
+      "rolling_hits": 0,
+      "junction_hits": 0
+    }
+  },
+  "after": {
+    "junction_counts": {
+      "apc_interior_positions_planned_turn": 0,
+      "apc_interior_positions_planned_tail": 0,
+      "apc_interior_positions_planned_lattice": 0,
+      "apc_interior_positions_skipped_media": 0,
+      "apc_interior_requests_skipped_continuation": 0,
+      "apc_interior_positions_headroom_capped": 0,
+      "apc_interior_hits": 0,
+      "apc_interior_hits_turn_boundary": 0,
+      "apc_interior_hit_tokens": 0,
+      "apc_interior_turn_marker_missing": 0,
+      "apc_interior_checkpoints_degraded": 0,
+      "apc_interior_checkpoints_captured": 0
+    },
+    "apc_lifetime": {
+      "lookups": 7,
+      "hits": 0,
+      "misses": 7,
+      "queried_tokens": 109370,
+      "cached_tokens": 0,
+      "stores": 13,
+      "interior_hits": 0,
+      "rolling_hits": 0,
+      "junction_hits": 0
+    }
+  }
+}

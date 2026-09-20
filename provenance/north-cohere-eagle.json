@@ -1,0 +1,35 @@
+{
+  "component": "North Mini Code Cohere EAGLE chain drafter (external draft route)",
+  "source_repository": "https://github.com/vllm-project/vllm",
+  "source_revision": "main as fetched 2026-09-19 (raw.githubusercontent.com)",
+  "source_paths": [
+    "vllm/model_executor/models/cohere_eagle.py",
+    "vllm/model_executor/models/commandr.py",
+    "vllm/model_executor/models/cohere2_moe.py"
+  ],
+  "related_prs": ["vllm-project/vllm#49819 (Cohere2MoE EAGLE3/DFlash auxiliary hidden states, merged 2026-09-17)"],
+  "license": "Apache-2.0 (vLLM); drafter weights CohereLabs/North-Mini-Code-1.0-eagle Apache-2.0",
+  "mined": [
+    "draft math: fc(cat(embed(next_token), target_final_norm_hidden)) with bias",
+    "parallel Cohere decoder block (RMSNorm when rms_norm_eps is set, attention + gated SiLU MLP from the same normed input)",
+    "explicit final LayerNorm on the draft output; shared target embedding and vocabulary head; draft logit_scale",
+    "GPT-J (interleaved) RoPE; SWA sees [pos - sliding_window, pos]",
+    "draft output hidden fed back as the next chain step's feature (EAGLE-1 proposer semantics)",
+    "tap semantics: target_layer_ids k -> output of decoder layer k"
+  ],
+  "original_mlx2_work": [
+    "chain drafting against the mlx2 external draft/verify executor with exact per-step proposal laws for verify_proposals",
+    "committed-only draft KV (EagleWindowKVCache, serializable model-local cache class) paired with the target boundary",
+    "opt-in executor context-token pairing (requires_context_tokens) and pending prompt tail",
+    "cohere2_moe.forward_with_taps/prefill_body with a final-norm sentinel tap",
+    "thinking-guard residual steering on external verify forwards"
+  ],
+  "modifications": [
+    "no torch/vLLM runtime; MLX modules only",
+    "chain KV is round-local and never committed; only target-backed positions enter the draft cache",
+    "zero proposals (ordinary verify) when no target feature exists yet"
+  ],
+  "validation": [
+    "tests/test_cohere_eagle_cpu.py (tiny random target/drafter greedy parity, steered parity, sidecar pairing, serialization, real-checkpoint header schema and strict CPU load)"
+  ]
+}

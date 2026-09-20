@@ -278,3 +278,152 @@ class SegmentedBatchKVCache:
 
     def empty(self):
         return all(row.empty() for row in self.rows)
+
+
+class SegmentedBatchQuantizedKVCache(SegmentedBatchKVCache):
+    """Segmented compute view over independently owned quantized KV rows.
+
+    The approximate-KV + self-MTP composition quantizes each lane's *target*
+    attention planes (``QuantizedKVCache``) and keeps the MTP draft cache
+    exact.  Rows stay authoritative B1 caches exactly as in the plain view;
+    only the per-row reduction differs (quantized SDPA over the packed
+    ``(weight, scale, bias)`` history).  Normalized (KVarN) rows are refused:
+    their frozen per-row channel scales have no batch contract.
+    """
+
+    def __init__(self, rows, note=None):
+        from .models.cache import QuantizedKVCache
+
+        rows = list(rows)
+        if not rows or any(type(row) is not QuantizedKVCache for row in rows):
+            from .segmented_batch_cache import SegmentedBatchUnsupported
+
+            raise SegmentedBatchUnsupported(
+                "segmented quantized KV requires QuantizedKVCache rows only"
+            )
+        layout = {
+            (row.group_size, row.key_bits, row.value_bits, bool(row.rotate))
+            for row in rows
+        }
+        if len(layout) != 1 or any(row.normalize for row in rows):
+            from .segmented_batch_cache import SegmentedBatchUnsupported
+
+            raise SegmentedBatchUnsupported(
+                "segmented quantized KV rows must share one un-normalized layout"
+            )
+        if len({id(row) for row in rows}) != len(rows):
+            raise ValueError("segmented quantized KV rows must have distinct owners")
+        (self.group_size, self.key_bits, self.value_bits, self.rotate) = layout.pop()
+        self.rows = rows
+        self._note = note
+        self.keys = self.values = None
+        self._step_lengths = None
+        self._right_padding = None
+        self._updated = False
+        self._value_dim = None
+        self._refresh_geometry()
+        self._bump("quantized_kv_segmented_layers")
+
+    def update_and_fetch(self, keys, values):
+        if self._step_lengths is None or self._updated:
+            raise RuntimeError("segmented KV append requires one prepared step")
+        width = max(self._step_lengths, default=0)
+        if (
+            keys.ndim != 4
+            or values.ndim != 4
+            or keys.shape[:3] != values.shape[:3]
+            or keys.shape[0] != self.batch_size
+            or keys.shape[2] != width
+        ):
+            raise ValueError("segmented KV append geometry mismatch")
+        if self._host_offsets() != self._base_lengths:
+            raise RuntimeError("segmented KV row changed after preparation")
+        for row, valid in zip(self.rows, self._step_lengths):
+            if valid and row.keys is not None:
+                # Packed history: (weight, scale, bias); scales carry D/group.
+                if (
+                    row.keys[1].shape[:2] != (1, keys.shape[1])
+                    or row.keys[1].shape[-1] * self.group_size != keys.shape[-1]
+                    or row.values[1].shape[:2] != (1, values.shape[1])
+                    or row.values[1].shape[-1] * self.group_size != values.shape[-1]
+                ):
+                    raise ValueError("segmented quantized KV row geometry mismatch")
+        try:
+            for index, (row, valid) in enumerate(zip(self.rows, self._step_lengths)):
+                if valid:
+                    row.update_and_fetch(
+                        mx.contiguous(keys[index : index + 1, :, :valid]),
+                        mx.contiguous(values[index : index + 1, :, :valid]),
+                    )
+        except BaseException:
+            for row, offset in zip(self.rows, self._base_lengths):
+                if row.offset >= offset:
+                    row.trim(row.offset - offset)
+            raise
+        self._updated = True
+        self._value_dim = values.shape[-1]
+        self.offset = mx.array(self._host_offsets())
+        self._bump("row_state_splits", self.batch_size)
+        return None, None
+
+    def bucketed_attention(self, queries, scale, mask, *, sinks=None):
+        from .models.base import quantized_scaled_dot_product_attention
+        from .models.base import hadamard_size_ok, rotate_last
+
+        if sinks is not None:
+            raise ValueError("Quantized SDPA does not support attention sinks.")
+        if not self._updated or self._step_lengths is None:
+            raise RuntimeError("segmented KV attention requires an appended step")
+        width = self.step_width
+        if (
+            queries.ndim != 4
+            or queries.shape[0] != self.batch_size
+            or queries.shape[2] != width
+        ):
+            raise ValueError("segmented KV query geometry mismatch")
+        if self.rotate and hadamard_size_ok(queries.shape[-1]):
+            queries = rotate_last(queries)
+        outputs = []
+        for index, valid, keys, values, row_mask in self.row_views(mask):
+            if not valid:
+                outputs.append(
+                    mx.zeros(
+                        (1, queries.shape[1], width, self._value_dim),
+                        dtype=queries.dtype,
+                    )
+                )
+                continue
+            output = quantized_scaled_dot_product_attention(
+                queries[index : index + 1, :, :valid],
+                keys,
+                values,
+                scale=scale,
+                mask=row_mask,
+                group_size=self.group_size,
+                key_bits=self.key_bits,
+                value_bits=self.value_bits,
+            )
+            if valid < width:
+                output = mx.pad(output, [(0, 0), (0, 0), (0, width - valid), (0, 0)])
+            outputs.append(output)
+        self.note_attention()
+        self._bump("quantized_kv_segmented_attention_calls")
+        return mx.concatenate(outputs, axis=0)
+
+    def extract(self, index):
+        """Standalone quantized snapshot; the original row stays authoritative."""
+        from .models.cache import QuantizedKVCache
+
+        row = self.rows[index]
+        result = QuantizedKVCache(
+            group_size=self.group_size,
+            key_bits=self.key_bits,
+            value_bits=self.value_bits,
+            rotate=self.rotate,
+        )
+        if row.offset:
+            keys, values = row.keys_and_values()
+            result.keys = tuple(mx.array(x) for x in keys)
+            result.values = tuple(mx.array(x) for x in values)
+            result.offset = row.offset
+        return result

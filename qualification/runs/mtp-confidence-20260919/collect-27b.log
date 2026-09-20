@@ -1,0 +1,10 @@
+[cpg_job 2026-09-19T21:33:06+00:00 pid=60000] label=rm10-collect-27b agent_id=job-rm10-collect-27b-60000 command=env PYTHONPATH=/private/tmp/mlx2-rm10-dspark-confidence/src ~/Desktop/mlx2/.venv/bin/python /private/tmp/mlx2-rm10-dspark-confidence/scripts/mtp_confidence_gpu.py collect --i-own-the-gpu --model ~/mlx-models/Qwen3.8-27B-oQ4e-mtp --execution-policy /private/tmp/mlx2-rm10-dspark-confidence/qualification/runs/mtp-confidence-20260919/nd3.json --lookahead 2 --port 8310 --out /private/tmp/mlx2-rm10-dspark-confidence/qualification/runs/mtp-confidence-20260919/accept-27b.jsonl
+[cpg_job 2026-09-19T21:33:06+00:00 pid=60000] created workflow 3c05142126b64da993d5935b5566f6fa (cpg-job drivers); record it as workflows.cpg-job-drivers in /Users/Shared/mlxuag/cpg-radio.json to reuse it
+[cpg_job 2026-09-19T21:33:06+00:00 pid=60000] registered worker ab0a56514654496c91a6ed64aca8a22d as job-rm10-collect-27b-60000 in session 3c65a7827e83456a89fffdeefadec196
+[cpg_job 2026-09-19T21:33:06+00:00 pid=60000] took /Users/Shared/mlxuag/gpu.lock
+[cpg_job 2026-09-19T21:33:06+00:00 pid=60000] child pid 60003 started
+{"records": 1489, "log": "/private/tmp/mlx2-rm10-dspark-confidence/qualification/runs/mtp-confidence-20260919/accept-27b.jsonl"}
+[cpg_job 2026-09-19T21:34:44+00:00 pid=60000] child exited rc=0
+[cpg_job 2026-09-19T21:34:44+00:00 pid=60000] worker ab0a56514654496c91a6ed64aca8a22d closed completed
+[cpg_job 2026-09-19T21:34:44+00:00 pid=60000] released /Users/Shared/mlxuag/gpu.lock
+[cpg_job 2026-09-19T21:34:44+00:00 pid=60000] wrote /private/tmp/mlx2-rm10-dspark-confidence/qualification/runs/mtp-confidence-20260919/collect-27b.log.done

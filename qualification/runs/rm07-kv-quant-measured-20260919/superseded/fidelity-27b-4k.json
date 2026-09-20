@@ -1,0 +1,330 @@
+{
+  "schema": "mlx2.kv-quant-fidelity-bundle.v1",
+  "harness": {
+    "name": "scripts/measure_kv_quant_fidelity.py",
+    "sha256": "767838fc39a20f1ecde44cb63e685ebee7318b1b9ec068a994f4a685f9fd17d6"
+  },
+  "plan": {
+    "mode": "gpu",
+    "model": "~/mlx-models/Qwen3.8-27B-oQ4e-mtp",
+    "operations": [
+      "kv_q8",
+      "kv_k8v4"
+    ],
+    "contexts": [
+      4096
+    ],
+    "score_tokens": 256,
+    "needles": 9,
+    "needle_contexts": "4096,32768",
+    "decode_tokens": 128,
+    "repeats": 3,
+    "prefill_step": 2048,
+    "out": "/private/tmp/mlx2-rm07-kv-quant-measured/qualification/runs/rm07-kv-quant-measured-20260919/fidelity-27b-4k.json"
+  },
+  "platform": "macOS-26.7-arm64-arm-64bit",
+  "mlx_version": "0.32.2.dev20260919+39400a0d4",
+  "reports": {
+    "kv_q8": {
+      "schema": "mlx2.kv-quant-fidelity.v1",
+      "device": "gpu",
+      "adapter_fingerprint": "fb827b658dc3d26ac569efacefd0466dbf41cc1a5cb5e3a40fc1c6175298810f",
+      "operation": "kv_q8",
+      "operation_revision": "c9a6fce8ce640ed86509c8ca41af1a8356da063406e9dd42deb5627d65daf945",
+      "descriptor": {
+        "key_bits": 8,
+        "value_bits": 8,
+        "group_size": 64,
+        "rotate": false,
+        "start": 0
+      },
+      "corpus_sha256": "4810934d0de0a9fd98d5120b65d44f2d23f16b7804b1c8294adcd52f8647f2bc",
+      "contexts": [
+        {
+          "context": 4096,
+          "scored_tokens": 256,
+          "kl_mean": 0.0009477595329427935,
+          "kl_p99": 0.004277692385949194,
+          "kl_max": 0.0065781534649431705,
+          "top1_agreement": 0.98828125,
+          "top5_overlap": 0.9796875012107193,
+          "logprob_delta_mean": -0.0025319457054138184,
+          "quantized_planes": 16,
+          "exact_quantized_planes": 0,
+          "kv_bytes_exact": 285212672,
+          "kv_bytes_quant": 151519232,
+          "kv_bytes_per_token_exact": 65536.0,
+          "kv_bytes_per_token_quant": 34816.0,
+          "kv_bytes_ratio": 0.53125,
+          "needles": {
+            "total": 9,
+            "exact_hits": 0,
+            "quant_hits": 0,
+            "quant_losses": 0,
+            "answers_agree": 9,
+            "detail": [
+              {
+                "depth": 0.1,
+                "name": "Orion",
+                "exact": false,
+                "quant": false,
+                "answers_agree": true
+              },
+              {
+                "depth": 0.2,
+                "name": "Vega",
+                "exact": false,
+                "quant": false,
+                "answers_agree": true
+              },
+              {
+                "depth": 0.3,
+                "name": "Lyra",
+                "exact": false,
+                "quant": false,
+                "answers_agree": true
+              },
+              {
+                "depth": 0.4,
+                "name": "Draco",
+                "exact": false,
+                "quant": false,
+                "answers_agree": true
+              },
+              {
+                "depth": 0.5,
+                "name": "Cygnus",
+                "exact": false,
+                "quant": false,
+                "answers_agree": true
+              },
+              {
+                "depth": 0.6,
+                "name": "Perseus",
+                "exact": false,
+                "quant": false,
+                "answers_agree": true
+              },
+              {
+                "depth": 0.7,
+                "name": "Aquila",
+                "exact": false,
+                "quant": false,
+                "answers_agree": true
+              },
+              {
+                "depth": 0.8,
+                "name": "Hydra",
+                "exact": false,
+                "quant": false,
+                "answers_agree": true
+              },
+              {
+                "depth": 0.9,
+                "name": "Carina",
+                "exact": false,
+                "quant": false,
+                "answers_agree": true
+              }
+            ]
+          },
+          "decode": {
+            "decode_tokens": 128,
+            "repeats": 3,
+            "exact_tok_s": [
+              24.97446052136877,
+              24.20073755522366,
+              24.17142031062927
+            ],
+            "quant_tok_s": [
+              23.388191760408642,
+              23.61709620390919,
+              24.05574825989674
+            ],
+            "exact_tok_s_median": 24.20073755522366,
+            "quant_tok_s_median": 23.61709620390919,
+            "quant_over_exact": 0.9758833238043815
+          },
+          "wall_s": 179.50400912499754
+        }
+      ]
+    },
+    "kv_k8v4": {
+      "schema": "mlx2.kv-quant-fidelity.v1",
+      "device": "gpu",
+      "adapter_fingerprint": "fb827b658dc3d26ac569efacefd0466dbf41cc1a5cb5e3a40fc1c6175298810f",
+      "operation": "kv_k8v4",
+      "operation_revision": "8ab3d80ff623ff2c1064f94f046f5f35bb8c9838bb0e87b5b35de09a5baeeb6e",
+      "descriptor": {
+        "key_bits": 8,
+        "value_bits": 4,
+        "group_size": 64,
+        "rotate": false,
+        "start": 0
+      },
+      "corpus_sha256": "4810934d0de0a9fd98d5120b65d44f2d23f16b7804b1c8294adcd52f8647f2bc",
+      "contexts": [
+        {
+          "context": 4096,
+          "scored_tokens": 256,
+          "kl_mean": 0.0035637833786386075,
+          "kl_p99": 0.013195472955703731,
+          "kl_max": 0.014764406718313694,
+          "top1_agreement": 0.984375,
+          "top5_overlap": 0.9609375023283064,
+          "logprob_delta_mean": -0.004648096859455109,
+          "quantized_planes": 16,
+          "exact_quantized_planes": 0,
+          "kv_bytes_exact": 285212672,
+          "kv_bytes_quant": 115867648,
+          "kv_bytes_per_token_exact": 65536.0,
+          "kv_bytes_per_token_quant": 26624.0,
+          "kv_bytes_ratio": 0.40625,
+          "needles": {
+            "total": 9,
+            "exact_hits": 0,
+            "quant_hits": 0,
+            "quant_losses": 0,
+            "answers_agree": 9,
+            "detail": [
+              {
+                "depth": 0.1,
+                "name": "Orion",
+                "exact": false,
+                "quant": false,
+                "answers_agree": true
+              },
+              {
+                "depth": 0.2,
+                "name": "Vega",
+                "exact": false,
+                "quant": false,
+                "answers_agree": true
+              },
+              {
+                "depth": 0.3,
+                "name": "Lyra",
+                "exact": false,
+                "quant": false,
+                "answers_agree": true
+              },
+              {
+                "depth": 0.4,
+                "name": "Draco",
+                "exact": false,
+                "quant": false,
+                "answers_agree": true
+              },
+              {
+                "depth": 0.5,
+                "name": "Cygnus",
+                "exact": false,
+                "quant": false,
+                "answers_agree": true
+              },
+              {
+                "depth": 0.6,
+                "name": "Perseus",
+                "exact": false,
+                "quant": false,
+                "answers_agree": true
+              },
+              {
+                "depth": 0.7,
+                "name": "Aquila",
+                "exact": false,
+                "quant": false,
+                "answers_agree": true
+              },
+              {
+                "depth": 0.8,
+                "name": "Hydra",
+                "exact": false,
+                "quant": false,
+                "answers_agree": true
+              },
+              {
+                "depth": 0.9,
+                "name": "Carina",
+                "exact": false,
+                "quant": false,
+                "answers_agree": true
+              }
+            ]
+          },
+          "decode": {
+            "decode_tokens": 128,
+            "repeats": 3,
+            "exact_tok_s": [
+              25.873860363877032,
+              26.138863786162748,
+              27.913890554281146
+            ],
+            "quant_tok_s": [
+              25.021852580830032,
+              26.3370556714176,
+              27.186076960292862
+            ],
+            "exact_tok_s_median": 26.138863786162748,
+            "quant_tok_s_median": 26.3370556714176,
+            "quant_over_exact": 1.0075822685666913
+          },
+          "wall_s": 184.80106783297379
+        }
+      ]
+    }
+  },
+  "verdicts": {
+    "kv_q8": {
+      "passed": false,
+      "failures": [
+        "missing context 16384",
+        "missing context 32768",
+        "context 4096: top1_agreement 0.988281 not >= 0.99"
+      ],
+      "operation": "kv_q8",
+      "thresholds": {
+        "kl_mean_max": 0.005,
+        "kl_p99_max": 0.05,
+        "top1_agreement_min": 0.99,
+        "bytes_ratio_max": 0.55,
+        "needle_losses_max": 0,
+        "min_context": 4096,
+        "required_contexts": [
+          4096,
+          16384,
+          32768
+        ],
+        "min_scored_tokens": 128,
+        "devices": [
+          "gpu"
+        ]
+      }
+    },
+    "kv_k8v4": {
+      "passed": false,
+      "failures": [
+        "missing context 16384",
+        "missing context 32768"
+      ],
+      "operation": "kv_k8v4",
+      "thresholds": {
+        "kl_mean_max": 0.02,
+        "kl_p99_max": 0.2,
+        "top1_agreement_min": 0.97,
+        "bytes_ratio_max": 0.42,
+        "needle_losses_max": 1,
+        "min_context": 4096,
+        "required_contexts": [
+          4096,
+          16384,
+          32768
+        ],
+        "min_scored_tokens": 128,
+        "devices": [
+          "gpu"
+        ]
+      }
+    }
+  }
+}

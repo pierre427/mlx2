@@ -1,0 +1,86 @@
+{
+  "context": 512,
+  "layer": "first gdn layer",
+  "device": "cpu",
+  "reference": "unchunked",
+  "arms": {
+    "256": {
+      "postnorm_q_last": 0.0,
+      "postnorm_k_last": 0.0,
+      "in_q_last": 0.0,
+      "in_k_last": 0.0,
+      "in_v_last": 0.0,
+      "in_a_last": 0.0,
+      "in_b_last": 0.0,
+      "in_state": "missing/shape",
+      "out_state": 0.0,
+      "out_y_last": 0.0,
+      "mask_is_none": 0.0
+    },
+    "128": {
+      "postnorm_q_last": 0.0,
+      "postnorm_k_last": 0.0,
+      "in_q_last": 0.0,
+      "in_k_last": 0.0,
+      "in_v_last": 0.0,
+      "in_a_last": 0.0,
+      "in_b_last": 0.0,
+      "in_state": "missing/shape",
+      "out_state": 0.0,
+      "out_y_last": 0.0,
+      "mask_is_none": 0.0
+    },
+    "64": {
+      "postnorm_q_last": 4.470348358154297e-08,
+      "postnorm_k_last": 2.682209014892578e-07,
+      "in_q_last": 0.0,
+      "in_k_last": 0.0,
+      "in_v_last": 0.0,
+      "in_a_last": 2.980232238769531e-07,
+      "in_b_last": 9.313225746154785e-09,
+      "in_state": "missing/shape",
+      "out_state": 2.9103830456733704e-11,
+      "out_y_last": 3.637978807091713e-12,
+      "mask_is_none": 0.0
+    },
+    "32": {
+      "postnorm_q_last": 4.470348358154297e-08,
+      "postnorm_k_last": 2.682209014892578e-07,
+      "in_q_last": 0.0,
+      "in_k_last": 0.0,
+      "in_v_last": 0.0,
+      "in_a_last": 2.980232238769531e-07,
+      "in_b_last": 9.313225746154785e-09,
+      "in_state": "missing/shape",
+      "out_state": 2.9103830456733704e-11,
+      "out_y_last": 3.637978807091713e-12,
+      "mask_is_none": 0.0
+    },
+    "16": {
+      "postnorm_q_last": 0.0,
+      "postnorm_k_last": 0.0,
+      "in_q_last": 0.0,
+      "in_k_last": 0.0,
+      "in_v_last": 0.0,
+      "in_a_last": 0.0,
+      "in_b_last": 0.0,
+      "in_state": "missing/shape",
+      "out_state": 0.0,
+      "out_y_last": 0.0,
+      "mask_is_none": 0.0
+    },
+    "8": {
+      "postnorm_q_last": 4.470348358154297e-08,
+      "postnorm_k_last": 2.682209014892578e-07,
+      "in_q_last": 0.0,
+      "in_k_last": 0.0,
+      "in_v_last": 0.0,
+      "in_a_last": 2.980232238769531e-07,
+      "in_b_last": 9.313225746154785e-09,
+      "in_state": "missing/shape",
+      "out_state": 2.9103830456733704e-11,
+      "out_y_last": 3.637978807091713e-12,
+      "mask_is_none": 0.0
+    }
+  }
+}

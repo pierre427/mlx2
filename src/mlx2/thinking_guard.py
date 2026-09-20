@@ -14,7 +14,12 @@ problems, so the guard is state-aware:
   being cut mid-thought.
 
 The guard is a pure function of the generated ids, so speculative verify rows
-and rollbacks need no bookkeeping.  It is off unless a request asks for a
+and rollbacks need no bookkeeping from the caller.  Internally it is
+incremental: each step reads only the tail of the token context and a rollback
+undoes the alarm state position by position, so a step costs O(new tokens +
+``rewrite_window``) rather than O(generated tokens).  The one contract that
+buys: a caller only ever rewrites the last ``rewrite_window`` generated tokens
+(speculative verify rows and rollbacks rewrite at most the draft depth).  It is off unless a request asks for a
 ``thinking_budget``; nothing about it is model-specific beyond the close ids the
 adapter declares.
 """
@@ -23,9 +28,14 @@ from __future__ import annotations
 
 
 class ThinkingGuard:
+    # P5: a pure function of the generated ids (see the module docstring).
+    history_pure = True
+
     def __init__(self, prompt_length, close_ids, *, budget, soft_ratio=0.8, ramp_nats=2.0,
-                 tau=2.5, ngram=6, direction=None, alpha=0.0, hammer=0.0):
+                 tau=2.5, ngram=6, direction=None, alpha=0.0, hammer=0.0,
+                 rewrite_window=256):
         self.prompt_length = int(prompt_length)
+        self.rewrite_window = max(1, int(rewrite_window))
         self.close_ids = tuple(int(token) for token in close_ids)
         if len(self.close_ids) != 1:
             raise ValueError("the thinking guard needs a single-token close marker")
@@ -38,10 +48,13 @@ class ThinkingGuard:
         self.ramp_nats = float(ramp_nats)
         self.tau = float(tau)
         self.ngram = int(ngram)
-        self._ids = []
+        self._ids = []  # alarm input: generated ids before any close marker
         self._seen = {}
         self._cusum = 0.0
         self._tripped_at = None
+        self._undo = []  # per _ids position: alarm state before advancing it
+        self._generated = []  # every generated id seen, close marker included
+        self._close_at = None  # index of the first close marker in _generated
         self.trip_reason = None
         self.released_at = None
         self.forced = False
@@ -67,60 +80,97 @@ class ThinkingGuard:
         self.steered_steps += 1
         return self._direction["layer"], self._direction["vector"] * strength
 
-    def _reset(self):
-        self._ids, self._seen, self._cusum = [], {}, 0.0
-        self._tripped_at = self.trip_reason = None
-
     def _advance(self, token):
         """CUSUM run-on alarm: +1 for a recurring n-gram, -0.25 for a novel one."""
+        undo = (self._cusum, self._tripped_at, self.trip_reason, None, None)
         self._ids.append(token)
         position = len(self._ids)
         if position >= self.ngram:
             gram = tuple(self._ids[-self.ngram:])
-            repeated = gram in self._seen
+            previous = self._seen.get(gram)
+            undo = undo[:3] + (gram, previous)
             self._seen[gram] = position
-            self._cusum = max(0.0, self._cusum + (1.0 if repeated else -0.25))
+            self._cusum = max(0.0, self._cusum + (1.0 if previous is not None else -0.25))
+        self._undo.append(undo)
         if self._tripped_at is None:
             if self._cusum >= self.tau * self.ngram:
                 self._tripped_at, self.trip_reason = position, "run_on"
             elif self.soft is not None and position >= self.soft:
                 self._tripped_at, self.trip_reason = position, "budget_soft"
 
-    def _track(self, ids):
-        common = 0
-        for ours, theirs in zip(self._ids, ids):
+    def _truncate(self, length):
+        """Undo the alarm back to ``length`` ids, one position at a time."""
+        while len(self._ids) > length:
+            self._ids.pop()
+            self._cusum, self._tripped_at, self.trip_reason, gram, previous = (
+                self._undo.pop()
+            )
+            if gram is not None:
+                if previous is None:
+                    del self._seen[gram]
+                else:
+                    self._seen[gram] = previous
+
+    def _sync(self, tokens):
+        """Mirror the generated ids, reading only the rewritable tail."""
+        length = max(0, tokens.size - self.prompt_length)
+        known = self._generated
+        start = max(0, min(len(known), length) - self.rewrite_window)
+        begin = self.prompt_length + start
+        tail = [int(item) for item in tokens[begin : self.prompt_length + length].tolist()]
+        common = start
+        for ours, theirs in zip(known[start:], tail):
             if ours != theirs:
                 break
             common += 1
-        if common < len(self._ids):  # rollback or divergence: re-derive
-            self._reset()
-            common = 0
-        for token in ids[common:]:
-            self._advance(token)
+        del known[common:]
+        known.extend(tail[common - start :])
+        if self._close_at is not None and self._close_at >= common:
+            self._close_at = None
+        if self._close_at is None:
+            close = self.close_ids[0]
+            self._close_at = next(
+                (index for index in range(common, len(known)) if known[index] == close),
+                None,
+            )
+        self._truncate(min(len(self._ids), common))
+        return length
 
     def __call__(self, tokens, logits):
         import mlx.core as mx
 
-        ids = [int(item) for item in tokens.tolist()][self.prompt_length:]
+        length = self._sync(tokens)
         close = self.close_ids[0]
-        if close in ids:
+        if self._close_at is not None:
             self._open = False
             if self.released_at is None:
-                self.released_at = ids.index(close)
+                self.released_at = self._close_at
                 self.think_tokens = self.released_at
             return logits
-        self._track(ids)
-        self.think_tokens = len(ids)
+        for token in self._generated[len(self._ids):]:
+            self._advance(token)
+        self.think_tokens = length
         if self._tripped_at is None or close >= logits.shape[-1]:
             return logits
-        if self.budget is not None and len(ids) >= self.budget:
+        if self.budget is not None and length >= self.budget:
             self.forced = True
             keep = mx.arange(logits.shape[-1]) == close
             return mx.where(keep, logits, mx.array(-float("inf"), dtype=logits.dtype))
-        bias = self.ramp_nats * (len(ids) - self._tripped_at + 1)
+        bias = self.ramp_nats * (length - self._tripped_at + 1)
         boost = mx.where(mx.arange(logits.shape[-1]) == close,
                          mx.array(bias, dtype=logits.dtype), mx.array(0.0, dtype=logits.dtype))
         return logits + boost
+
+    def dormant(self, tokens):
+        """P5: True once the close marker is generated (logits pass through).
+
+        Side-effect free; before the marker the alarm may bias at any step,
+        so the guard is never reported dormant there.
+        """
+        generated = tokens[self.prompt_length :]
+        if hasattr(generated, "tolist"):
+            generated = generated.tolist()
+        return self.close_ids[0] in [int(item) for item in generated]
 
     def receipt(self):
         return {

@@ -1,0 +1,34 @@
+[cpg_job 2026-09-19T21:47:16+00:00 pid=65352] label=rm07-fid-35b-4k16k agent_id=job-rm07-fid-35b-4k16k-65352 command=env PYTHONPATH=/private/tmp/mlx2-rm07-kv-quant-measured/src ~/Desktop/mlx2/.venv/bin/python /private/tmp/mlx2-rm07-kv-quant-measured/scripts/measure_kv_quant_fidelity.py --i-own-the-gpu --model ~/mlx-models/Qwen3.6-35B-A3B-uncensored-heretic-Native-MTP-Preserved-oQ4e-mtp --operations kv_q8,kv_k8v4 --contexts 4096,16384 --out /private/tmp/mlx2-rm07-kv-quant-measured/qualification/runs/rm07-kv-quant-measured-20260919/fidelity-35b-4k16k.json
+[cpg_job 2026-09-19T21:47:16+00:00 pid=65352] created workflow 8c7a16a23c8149f09b8cd5ab2bca3fdf (cpg-job drivers); record it as workflows.cpg-job-drivers in /Users/Shared/mlxuag/cpg-radio.json to reuse it
+[cpg_job 2026-09-19T21:47:16+00:00 pid=65352] registered worker 68c4984da4c94ba38247f00dc550982c as job-rm07-fid-35b-4k16k-65352 in session 3c65a7827e83456a89fffdeefadec196
+[cpg_job 2026-09-19T21:47:16+00:00 pid=65352] took /Users/Shared/mlxuag/gpu.lock
+[cpg_job 2026-09-19T21:47:16+00:00 pid=65352] child pid 65358 started
+{"operation": "kv_q8", "context": 4096, "scored_tokens": 256, "kl_mean": 0.005464209592755953, "kl_p99": 0.028644114453345484, "kl_max": 0.04404807463288307, "top1_agreement": 0.9375, "top5_overlap": 0.9406250035390258, "logprob_delta_mean": -0.002398185431957245, "quantized_planes": 10, "exact_quantized_planes": 0, "kv_bytes_exact": 89128960, "kv_bytes_quant": 47349760, "kv_bytes_per_token_exact": 20480.0, "kv_bytes_per_token_quant": 10880.0, "kv_bytes_ratio": 0.53125, "wall_s": 37.00882541696774}
+{"operation": "kv_q8", "context": 16384, "scored_tokens": 256, "kl_mean": 0.0035411235424755994, "kl_p99": 0.0252205585129559, "kl_max": 0.038113947957754135, "top1_agreement": 0.8671875, "top5_overlap": 0.9257812544237822, "logprob_delta_mean": 0.015023194253444672, "quantized_planes": 10, "exact_quantized_planes": 0, "kv_bytes_exact": 340787200, "kv_bytes_quant": 181043200, "kv_bytes_per_token_exact": 20480.0, "kv_bytes_per_token_quant": 10880.0, "kv_bytes_ratio": 0.53125, "wall_s": 33.112606874958146}
+{"operation": "kv_k8v4", "context": 4096, "scored_tokens": 256, "kl_mean": 0.012040229572230388, "kl_p99": 0.05005984548479308, "kl_max": 0.1320580691099167, "top1_agreement": 0.91796875, "top5_overlap": 0.9265625043772161, "logprob_delta_mean": -0.014793671667575836, "quantized_planes": 10, "exact_quantized_planes": 0, "kv_bytes_exact": 89128960, "kv_bytes_quant": 36208640, "kv_bytes_per_token_exact": 20480.0, "kv_bytes_per_token_quant": 8320.0, "kv_bytes_ratio": 0.40625, "wall_s": 39.047193000034895}
+{"operation": "kv_k8v4", "context": 16384, "scored_tokens": 256, "kl_mean": 0.00855668413863686, "kl_p99": 0.042783500812947746, "kl_max": 0.22950555384159088, "top1_agreement": 0.86328125, "top5_overlap": 0.8898437564494088, "logprob_delta_mean": 0.007592037320137024, "quantized_planes": 10, "exact_quantized_planes": 0, "kv_bytes_exact": 340787200, "kv_bytes_quant": 138444800, "kv_bytes_per_token_exact": 20480.0, "kv_bytes_per_token_quant": 8320.0, "kv_bytes_ratio": 0.40625, "wall_s": 33.5149249159731}
+{
+  "verdicts": {
+    "kv_q8": {
+      "passed": false,
+      "failures": [
+        "missing context 32768",
+        "context 4096: kl_mean 0.00546421 not <= 0.005",
+        "context 4096: top1_agreement 0.9375 not >= 0.99",
+        "context 16384: top1_agreement 0.867188 not >= 0.99"
+      ]
+    },
+    "kv_k8v4": {
+      "passed": false,
+      "failures": [
+        "missing context 32768",
+        "context 4096: top1_agreement 0.917969 not >= 0.97",
+        "context 16384: top1_agreement 0.863281 not >= 0.97"
+      ]
+    }
+  }
+}
+[cpg_job 2026-09-19T21:49:43+00:00 pid=65352] child exited rc=0
+[cpg_job 2026-09-19T21:49:43+00:00 pid=65352] worker 68c4984da4c94ba38247f00dc550982c closed completed
+[cpg_job 2026-09-19T21:49:43+00:00 pid=65352] released /Users/Shared/mlxuag/gpu.lock
+[cpg_job 2026-09-19T21:49:43+00:00 pid=65352] wrote /private/tmp/mlx2-rm07-kv-quant-measured/qualification/runs/rm07-kv-quant-measured-20260919/fidelity-35b-4k16k.log.done

@@ -1,0 +1,1503 @@
+{
+ "schema": "mlx2.rm06-external-draft-acceptance.v1",
+ "plan": {
+  "schema": "mlx2.rm06-external-draft-acceptance.v1",
+  "kind": "execution_plan",
+  "family": "north",
+  "target": "~/mlx-models/North-Mini-Code-1.0-mlx-4bit",
+  "draft": "~/.cache/huggingface/hub/models--CohereLabs--North-Mini-Code-1.0-eagle/snapshots/8c7fcb575f107e9968b61cc93a756e6fc2c86713",
+  "will_execute": true,
+  "arms": 48,
+  "prompts": 16,
+  "max_tokens": 256,
+  "depths": [
+   1,
+   2,
+   3,
+   4
+  ],
+  "widths": [
+   1,
+   4
+  ],
+  "temperatures": [
+   0.0
+  ],
+  "interleaving": "ordinary/external alternating per (repeat, temp, width, depth)",
+  "go_criterion": {
+   "greedy_parity": "mean greedy common-prefix ratio vs ordinary >= 0.9 (exact count also reported)",
+   "b1_speedup_min": 1.25,
+   "b4_speedup_min": 1.0,
+   "arm_refused_if": "external_rounds == 0 or proposed_tokens == 0"
+  },
+  "order": [
+   [
+    "ordinary",
+    0,
+    1,
+    0.0,
+    0
+   ],
+   [
+    "external",
+    1,
+    1,
+    0.0,
+    0
+   ],
+   [
+    "ordinary",
+    0,
+    1,
+    0.0,
+    0
+   ],
+   [
+    "external",
+    2,
+    1,
+    0.0,
+    0
+   ],
+   [
+    "ordinary",
+    0,
+    1,
+    0.0,
+    0
+   ],
+   [
+    "external",
+    3,
+    1,
+    0.0,
+    0
+   ],
+   [
+    "ordinary",
+    0,
+    1,
+    0.0,
+    0
+   ],
+   [
+    "external",
+    4,
+    1,
+    0.0,
+    0
+   ],
+   [
+    "ordinary",
+    0,
+    4,
+    0.0,
+    0
+   ],
+   [
+    "external",
+    1,
+    4,
+    0.0,
+    0
+   ],
+   [
+    "ordinary",
+    0,
+    4,
+    0.0,
+    0
+   ],
+   [
+    "external",
+    2,
+    4,
+    0.0,
+    0
+   ],
+   [
+    "ordinary",
+    0,
+    4,
+    0.0,
+    0
+   ],
+   [
+    "external",
+    3,
+    4,
+    0.0,
+    0
+   ],
+   [
+    "ordinary",
+    0,
+    4,
+    0.0,
+    0
+   ],
+   [
+    "external",
+    4,
+    4,
+    0.0,
+    0
+   ],
+   [
+    "ordinary",
+    0,
+    1,
+    0.0,
+    1
+   ],
+   [
+    "external",
+    1,
+    1,
+    0.0,
+    1
+   ],
+   [
+    "ordinary",
+    0,
+    1,
+    0.0,
+    1
+   ],
+   [
+    "external",
+    2,
+    1,
+    0.0,
+    1
+   ],
+   [
+    "ordinary",
+    0,
+    1,
+    0.0,
+    1
+   ],
+   [
+    "external",
+    3,
+    1,
+    0.0,
+    1
+   ],
+   [
+    "ordinary",
+    0,
+    1,
+    0.0,
+    1
+   ],
+   [
+    "external",
+    4,
+    1,
+    0.0,
+    1
+   ],
+   [
+    "ordinary",
+    0,
+    4,
+    0.0,
+    1
+   ],
+   [
+    "external",
+    1,
+    4,
+    0.0,
+    1
+   ],
+   [
+    "ordinary",
+    0,
+    4,
+    0.0,
+    1
+   ],
+   [
+    "external",
+    2,
+    4,
+    0.0,
+    1
+   ],
+   [
+    "ordinary",
+    0,
+    4,
+    0.0,
+    1
+   ],
+   [
+    "external",
+    3,
+    4,
+    0.0,
+    1
+   ],
+   [
+    "ordinary",
+    0,
+    4,
+    0.0,
+    1
+   ],
+   [
+    "external",
+    4,
+    4,
+    0.0,
+    1
+   ],
+   [
+    "ordinary",
+    0,
+    1,
+    0.0,
+    2
+   ],
+   [
+    "external",
+    1,
+    1,
+    0.0,
+    2
+   ],
+   [
+    "ordinary",
+    0,
+    1,
+    0.0,
+    2
+   ],
+   [
+    "external",
+    2,
+    1,
+    0.0,
+    2
+   ],
+   [
+    "ordinary",
+    0,
+    1,
+    0.0,
+    2
+   ],
+   [
+    "external",
+    3,
+    1,
+    0.0,
+    2
+   ],
+   [
+    "ordinary",
+    0,
+    1,
+    0.0,
+    2
+   ],
+   [
+    "external",
+    4,
+    1,
+    0.0,
+    2
+   ],
+   [
+    "ordinary",
+    0,
+    4,
+    0.0,
+    2
+   ],
+   [
+    "external",
+    1,
+    4,
+    0.0,
+    2
+   ],
+   [
+    "ordinary",
+    0,
+    4,
+    0.0,
+    2
+   ],
+   [
+    "external",
+    2,
+    4,
+    0.0,
+    2
+   ],
+   [
+    "ordinary",
+    0,
+    4,
+    0.0,
+    2
+   ],
+   [
+    "external",
+    3,
+    4,
+    0.0,
+    2
+   ],
+   [
+    "ordinary",
+    0,
+    4,
+    0.0,
+    2
+   ],
+   [
+    "external",
+    4,
+    4,
+    0.0,
+    2
+   ]
+  ]
+ },
+ "arms": [
+  {
+   "kind": "ordinary",
+   "num_draft": 0,
+   "width": 1,
+   "temperature": 0.0,
+   "repeat": 0,
+   "decode_tok_s": 149.13724586879476,
+   "mechanism": {}
+  },
+  {
+   "kind": "external",
+   "num_draft": 1,
+   "width": 1,
+   "temperature": 0.0,
+   "repeat": 0,
+   "decode_tok_s": 96.03213099642001,
+   "mechanism": {
+    "external_rounds": 2034,
+    "proposed_tokens": 2034,
+    "accepted_proposals": 1228,
+    "mean_acceptance_length": 1.6037364798426745,
+    "draft_stats": {
+     "committed_positions": 5316,
+     "chain_steps": 0,
+     "draft_calls": 2034
+    },
+    "round_times_ms": {
+     "recovery_capture": 0.4683284835252112,
+     "draft": 2.6895210971999015,
+     "transaction_begin": 0.32948093883044866,
+     "verify_forward": 11.034671835967174,
+     "verify_laws": 1.7480956616405317,
+     "transaction_commit": 0.3445494788432825,
+     "emit": 0.09842043169732906
+    }
+   },
+   "greedy_parity": 1,
+   "greedy_prompts": 16,
+   "greedy_prefix_ratio": 0.22156364214762167
+  },
+  {
+   "kind": "ordinary",
+   "num_draft": 0,
+   "width": 1,
+   "temperature": 0.0,
+   "repeat": 0,
+   "decode_tok_s": 144.92025949203406,
+   "mechanism": {}
+  },
+  {
+   "kind": "external",
+   "num_draft": 2,
+   "width": 1,
+   "temperature": 0.0,
+   "repeat": 0,
+   "decode_tok_s": 86.96697048027718,
+   "mechanism": {
+    "external_rounds": 1729,
+    "proposed_tokens": 3451,
+    "accepted_proposals": 1534,
+    "mean_acceptance_length": 1.8872180451127818,
+    "draft_stats": {
+     "committed_positions": 10627,
+     "chain_steps": 1722,
+     "draft_calls": 3763
+    },
+    "round_times_ms": {
+     "recovery_capture": 0.5009773392294911,
+     "draft": 4.919917299533386,
+     "transaction_begin": 0.35854783012844654,
+     "verify_forward": 13.049793070259769,
+     "verify_laws": 2.356671468026725,
+     "transaction_commit": 0.4792710707416276,
+     "emit": 0.1173372315259046
+    }
+   },
+   "greedy_parity": 1,
+   "greedy_prompts": 16,
+   "greedy_prefix_ratio": 0.22156364214762167
+  },
+  {
+   "kind": "ordinary",
+   "num_draft": 0,
+   "width": 1,
+   "temperature": 0.0,
+   "repeat": 0,
+   "decode_tok_s": 141.97814999037544,
+   "mechanism": {}
+  },
+  {
+   "kind": "external",
+   "num_draft": 3,
+   "width": 1,
+   "temperature": 0.0,
+   "repeat": 0,
+   "decode_tok_s": 77.78732874923469,
+   "mechanism": {
+    "external_rounds": 1629,
+    "proposed_tokens": 4867,
+    "accepted_proposals": 1634,
+    "mean_acceptance_length": 2.0030693677102516,
+    "draft_stats": {
+     "committed_positions": 15940,
+     "chain_steps": 4960,
+     "draft_calls": 5392
+    },
+    "round_times_ms": {
+     "recovery_capture": 0.4760995799529225,
+     "draft": 7.062793186326335,
+     "transaction_begin": 0.3142953621142957,
+     "verify_forward": 14.372693035940818,
+     "verify_laws": 2.962620762800552,
+     "transaction_commit": 0.5422804361418521,
+     "emit": 0.12457823398551046
+    }
+   },
+   "greedy_parity": 1,
+   "greedy_prompts": 16,
+   "greedy_prefix_ratio": 0.22156364214762167
+  },
+  {
+   "kind": "ordinary",
+   "num_draft": 0,
+   "width": 1,
+   "temperature": 0.0,
+   "repeat": 0,
+   "decode_tok_s": 149.09822044257754,
+   "mechanism": {}
+  },
+  {
+   "kind": "external",
+   "num_draft": 4,
+   "width": 1,
+   "temperature": 0.0,
+   "repeat": 0,
+   "decode_tok_s": 69.04666348466581,
+   "mechanism": {
+    "external_rounds": 1583,
+    "proposed_tokens": 6300,
+    "accepted_proposals": 1729,
+    "mean_acceptance_length": 2.0922299431459255,
+    "draft_stats": {
+     "committed_positions": 21298,
+     "chain_steps": 9677,
+     "draft_calls": 6975
+    },
+    "round_times_ms": {
+     "recovery_capture": 0.4768597193159968,
+     "draft": 9.309379969086953,
+     "transaction_begin": 0.3554019727302916,
+     "verify_forward": 16.043569493501384,
+     "verify_laws": 3.569109626892432,
+     "transaction_commit": 0.566113338929578,
+     "emit": 0.13033006459695776
+    }
+   },
+   "greedy_parity": 3,
+   "greedy_prompts": 16,
+   "greedy_prefix_ratio": 0.3201971404594486
+  },
+  {
+   "kind": "ordinary",
+   "num_draft": 0,
+   "width": 4,
+   "temperature": 0.0,
+   "repeat": 0,
+   "decode_tok_s": 261.43857880737534,
+   "mechanism": {}
+  },
+  {
+   "kind": "external",
+   "num_draft": 1,
+   "width": 4,
+   "temperature": 0.0,
+   "repeat": 0,
+   "decode_tok_s": 117.56477330649057,
+   "mechanism": {
+    "external_rounds": 963,
+    "proposed_tokens": 2035,
+    "accepted_proposals": 1227,
+    "mean_acceptance_length": 2.2741433021806854,
+    "draft_stats": {
+     "committed_positions": 26613,
+     "chain_steps": 9677,
+     "draft_calls": 8376
+    },
+    "round_times_ms": {
+     "recovery_capture": 0.9586860654611616,
+     "draft": 4.532451982146201,
+     "transaction_begin": 0.6115621998243669,
+     "verify_forward": 17.124483576537664,
+     "verify_laws": 3.665491272376218,
+     "transaction_commit": 0.7002020338385803,
+     "emit": 0.1968936091637082
+    }
+   },
+   "greedy_parity": 1,
+   "greedy_prompts": 16,
+   "greedy_prefix_ratio": 0.18671603801929634
+  },
+  {
+   "kind": "ordinary",
+   "num_draft": 0,
+   "width": 4,
+   "temperature": 0.0,
+   "repeat": 0,
+   "decode_tok_s": 264.6334837113738,
+   "mechanism": {}
+  },
+  {
+   "kind": "external",
+   "num_draft": 2,
+   "width": 4,
+   "temperature": 0.0,
+   "repeat": 0,
+   "decode_tok_s": 104.47494687477241,
+   "mechanism": {
+    "external_rounds": 928,
+    "proposed_tokens": 3489,
+    "accepted_proposals": 1626,
+    "mean_acceptance_length": 2.752155172413793,
+    "draft_stats": {
+     "committed_positions": 32036,
+     "chain_steps": 11095,
+     "draft_calls": 9801
+    },
+    "round_times_ms": {
+     "recovery_capture": 0.8578155140702589,
+     "draft": 8.212306115794867,
+     "transaction_begin": 0.5416254761853608,
+     "verify_forward": 18.319232705897743,
+     "verify_laws": 4.790766565402636,
+     "transaction_commit": 0.8579486747576397,
+     "emit": 0.20714399497905858
+    }
+   },
+   "greedy_parity": 1,
+   "greedy_prompts": 16,
+   "greedy_prefix_ratio": 0.1933418298401116
+  },
+  {
+   "kind": "ordinary",
+   "num_draft": 0,
+   "width": 4,
+   "temperature": 0.0,
+   "repeat": 0,
+   "decode_tok_s": 280.5457652949107,
+   "mechanism": {}
+  },
+  {
+   "kind": "external",
+   "num_draft": 3,
+   "width": 4,
+   "temperature": 0.0,
+   "repeat": 0,
+   "decode_tok_s": 91.12744372804708,
+   "mechanism": {
+    "external_rounds": 859,
+    "proposed_tokens": 4614,
+    "accepted_proposals": 1690,
+    "mean_acceptance_length": 2.967403958090803,
+    "draft_stats": {
+     "committed_positions": 37314,
+     "chain_steps": 13681,
+     "draft_calls": 11100
+    },
+    "round_times_ms": {
+     "recovery_capture": 0.863190046598326,
+     "draft": 11.631858382239608,
+     "transaction_begin": 0.5758270585114772,
+     "verify_forward": 20.315912497155065,
+     "verify_laws": 5.709722388426776,
+     "transaction_commit": 0.9017801914462761,
+     "emit": 0.21562814250115708
+    }
+   },
+   "greedy_parity": 2,
+   "greedy_prompts": 16,
+   "greedy_prefix_ratio": 0.29336583474603295
+  },
+  {
+   "kind": "ordinary",
+   "num_draft": 0,
+   "width": 4,
+   "temperature": 0.0,
+   "repeat": 0,
+   "decode_tok_s": 279.3396080830728,
+   "mechanism": {}
+  },
+  {
+   "kind": "external",
+   "num_draft": 4,
+   "width": 4,
+   "temperature": 0.0,
+   "repeat": 0,
+   "decode_tok_s": 78.54476840373562,
+   "mechanism": {
+    "external_rounds": 852,
+    "proposed_tokens": 6195,
+    "accepted_proposals": 1738,
+    "mean_acceptance_length": 3.039906103286385,
+    "draft_stats": {
+     "committed_positions": 42648,
+     "chain_steps": 17584,
+     "draft_calls": 12408
+    },
+    "round_times_ms": {
+     "recovery_capture": 0.8776479260230813,
+     "draft": 15.520112215092585,
+     "transaction_begin": 0.512528891413923,
+     "verify_forward": 23.148020517292537,
+     "verify_laws": 6.884076842161534,
+     "transaction_commit": 0.976840097527129,
+     "emit": 0.22221437444693973
+    }
+   },
+   "greedy_parity": 1,
+   "greedy_prompts": 16,
+   "greedy_prefix_ratio": 0.168566351942236
+  },
+  {
+   "kind": "ordinary",
+   "num_draft": 0,
+   "width": 1,
+   "temperature": 0.0,
+   "repeat": 1,
+   "decode_tok_s": 146.97685941102563,
+   "mechanism": {}
+  },
+  {
+   "kind": "external",
+   "num_draft": 1,
+   "width": 1,
+   "temperature": 0.0,
+   "repeat": 1,
+   "decode_tok_s": 95.39621954166144,
+   "mechanism": {
+    "external_rounds": 2034,
+    "proposed_tokens": 2034,
+    "accepted_proposals": 1228,
+    "mean_acceptance_length": 1.6037364798426745,
+    "draft_stats": {
+     "committed_positions": 47964,
+     "chain_steps": 17584,
+     "draft_calls": 14442
+    },
+    "round_times_ms": {
+     "recovery_capture": 0.4750924209414843,
+     "draft": 2.703515526781595,
+     "transaction_begin": 0.3167374734984273,
+     "verify_forward": 11.112451192995234,
+     "verify_laws": 1.7603873126410248,
+     "transaction_commit": 0.3531127694202999,
+     "emit": 0.09977749431864776
+    }
+   },
+   "greedy_parity": 1,
+   "greedy_prompts": 16,
+   "greedy_prefix_ratio": 0.22156364214762167
+  },
+  {
+   "kind": "ordinary",
+   "num_draft": 0,
+   "width": 1,
+   "temperature": 0.0,
+   "repeat": 1,
+   "decode_tok_s": 141.57673646642408,
+   "mechanism": {}
+  },
+  {
+   "kind": "external",
+   "num_draft": 2,
+   "width": 1,
+   "temperature": 0.0,
+   "repeat": 1,
+   "decode_tok_s": 86.01327816462504,
+   "mechanism": {
+    "external_rounds": 1729,
+    "proposed_tokens": 3451,
+    "accepted_proposals": 1534,
+    "mean_acceptance_length": 1.8872180451127818,
+    "draft_stats": {
+     "committed_positions": 53275,
+     "chain_steps": 19306,
+     "draft_calls": 16171
+    },
+    "round_times_ms": {
+     "recovery_capture": 0.48068039802788065,
+     "draft": 4.949478913548884,
+     "transaction_begin": 0.3833862895791313,
+     "verify_forward": 13.219701546902012,
+     "verify_laws": 2.364618114946909,
+     "transaction_commit": 0.4823766633956556,
+     "emit": 0.11806045992848258
+    }
+   },
+   "greedy_parity": 1,
+   "greedy_prompts": 16,
+   "greedy_prefix_ratio": 0.22156364214762167
+  },
+  {
+   "kind": "ordinary",
+   "num_draft": 0,
+   "width": 1,
+   "temperature": 0.0,
+   "repeat": 1,
+   "decode_tok_s": 139.51345486051338,
+   "mechanism": {}
+  },
+  {
+   "kind": "external",
+   "num_draft": 3,
+   "width": 1,
+   "temperature": 0.0,
+   "repeat": 1,
+   "decode_tok_s": 76.01391496857383,
+   "mechanism": {
+    "external_rounds": 1629,
+    "proposed_tokens": 4867,
+    "accepted_proposals": 1634,
+    "mean_acceptance_length": 2.0030693677102516,
+    "draft_stats": {
+     "committed_positions": 58588,
+     "chain_steps": 22544,
+     "draft_calls": 17800
+    },
+    "round_times_ms": {
+     "recovery_capture": 0.4898764500640301,
+     "draft": 7.119531561316095,
+     "transaction_begin": 0.3275075303350602,
+     "verify_forward": 14.850830221730195,
+     "verify_laws": 2.9761305030911562,
+     "transaction_commit": 0.5592262637006785,
+     "emit": 0.12901537088897969
+    }
+   },
+   "greedy_parity": 1,
+   "greedy_prompts": 16,
+   "greedy_prefix_ratio": 0.22156364214762167
+  },
+  {
+   "kind": "ordinary",
+   "num_draft": 0,
+   "width": 1,
+   "temperature": 0.0,
+   "repeat": 1,
+   "decode_tok_s": 142.7414535775056,
+   "mechanism": {}
+  },
+  {
+   "kind": "external",
+   "num_draft": 4,
+   "width": 1,
+   "temperature": 0.0,
+   "repeat": 1,
+   "decode_tok_s": 69.27080048766396,
+   "mechanism": {
+    "external_rounds": 1583,
+    "proposed_tokens": 6300,
+    "accepted_proposals": 1729,
+    "mean_acceptance_length": 2.0922299431459255,
+    "draft_stats": {
+     "committed_positions": 63946,
+     "chain_steps": 27261,
+     "draft_calls": 19383
+    },
+    "round_times_ms": {
+     "recovery_capture": 0.47617748063334175,
+     "draft": 9.239022435912531,
+     "transaction_begin": 0.3518457331433445,
+     "verify_forward": 16.025579094769704,
+     "verify_laws": 3.5644121654419934,
+     "transaction_commit": 0.5662874485229554,
+     "emit": 0.13068683527231179
+    }
+   },
+   "greedy_parity": 3,
+   "greedy_prompts": 16,
+   "greedy_prefix_ratio": 0.3201971404594486
+  },
+  {
+   "kind": "ordinary",
+   "num_draft": 0,
+   "width": 4,
+   "temperature": 0.0,
+   "repeat": 1,
+   "decode_tok_s": 265.6896584753228,
+   "mechanism": {}
+  },
+  {
+   "kind": "external",
+   "num_draft": 1,
+   "width": 4,
+   "temperature": 0.0,
+   "repeat": 1,
+   "decode_tok_s": 118.03847305054565,
+   "mechanism": {
+    "external_rounds": 963,
+    "proposed_tokens": 2035,
+    "accepted_proposals": 1227,
+    "mean_acceptance_length": 2.2741433021806854,
+    "draft_stats": {
+     "committed_positions": 69261,
+     "chain_steps": 27261,
+     "draft_calls": 20784
+    },
+    "round_times_ms": {
+     "recovery_capture": 0.9576777609883347,
+     "draft": 4.523110145249386,
+     "transaction_begin": 0.6481470238066328,
+     "verify_forward": 16.98375948601299,
+     "verify_laws": 3.6622814312243595,
+     "transaction_commit": 0.7046210982252651,
+     "emit": 0.19793234663258227
+    }
+   },
+   "greedy_parity": 1,
+   "greedy_prompts": 16,
+   "greedy_prefix_ratio": 0.18671603801929634
+  },
+  {
+   "kind": "ordinary",
+   "num_draft": 0,
+   "width": 4,
+   "temperature": 0.0,
+   "repeat": 1,
+   "decode_tok_s": 261.68607597520105,
+   "mechanism": {}
+  },
+  {
+   "kind": "external",
+   "num_draft": 2,
+   "width": 4,
+   "temperature": 0.0,
+   "repeat": 1,
+   "decode_tok_s": 101.47737694609411,
+   "mechanism": {
+    "external_rounds": 928,
+    "proposed_tokens": 3489,
+    "accepted_proposals": 1626,
+    "mean_acceptance_length": 2.752155172413793,
+    "draft_stats": {
+     "committed_positions": 74684,
+     "chain_steps": 28679,
+     "draft_calls": 22209
+    },
+    "round_times_ms": {
+     "recovery_capture": 0.8947201423670149,
+     "draft": 8.420665410963482,
+     "transaction_begin": 0.6294057970833443,
+     "verify_forward": 18.857102097485793,
+     "verify_laws": 4.9177095901666625,
+     "transaction_commit": 0.8674191427918889,
+     "emit": 0.2196353704268153
+    }
+   },
+   "greedy_parity": 1,
+   "greedy_prompts": 16,
+   "greedy_prefix_ratio": 0.1933418298401116
+  },
+  {
+   "kind": "ordinary",
+   "num_draft": 0,
+   "width": 4,
+   "temperature": 0.0,
+   "repeat": 1,
+   "decode_tok_s": 268.15867350189643,
+   "mechanism": {}
+  },
+  {
+   "kind": "external",
+   "num_draft": 3,
+   "width": 4,
+   "temperature": 0.0,
+   "repeat": 1,
+   "decode_tok_s": 90.06550760162051,
+   "mechanism": {
+    "external_rounds": 859,
+    "proposed_tokens": 4614,
+    "accepted_proposals": 1690,
+    "mean_acceptance_length": 2.967403958090803,
+    "draft_stats": {
+     "committed_positions": 79962,
+     "chain_steps": 31265,
+     "draft_calls": 23508
+    },
+    "round_times_ms": {
+     "recovery_capture": 0.831349631210375,
+     "draft": 11.782406681711645,
+     "transaction_begin": 0.5625857680502572,
+     "verify_forward": 20.571502656673164,
+     "verify_laws": 5.755715075949677,
+     "transaction_commit": 0.9580841592900082,
+     "emit": 0.2203215508151483
+    }
+   },
+   "greedy_parity": 2,
+   "greedy_prompts": 16,
+   "greedy_prefix_ratio": 0.29336583474603295
+  },
+  {
+   "kind": "ordinary",
+   "num_draft": 0,
+   "width": 4,
+   "temperature": 0.0,
+   "repeat": 1,
+   "decode_tok_s": 255.58885757363618,
+   "mechanism": {}
+  },
+  {
+   "kind": "external",
+   "num_draft": 4,
+   "width": 4,
+   "temperature": 0.0,
+   "repeat": 1,
+   "decode_tok_s": 76.56244958413053,
+   "mechanism": {
+    "external_rounds": 852,
+    "proposed_tokens": 6195,
+    "accepted_proposals": 1738,
+    "mean_acceptance_length": 3.039906103286385,
+    "draft_stats": {
+     "committed_positions": 85296,
+     "chain_steps": 35168,
+     "draft_calls": 24816
+    },
+    "round_times_ms": {
+     "recovery_capture": 0.8916104002117875,
+     "draft": 15.745597248014278,
+     "transaction_begin": 0.5725086502678377,
+     "verify_forward": 23.926839308347006,
+     "verify_laws": 6.980550898722168,
+     "transaction_commit": 0.9970892408065839,
+     "emit": 0.2284212705532762
+    }
+   },
+   "greedy_parity": 1,
+   "greedy_prompts": 16,
+   "greedy_prefix_ratio": 0.168566351942236
+  },
+  {
+   "kind": "ordinary",
+   "num_draft": 0,
+   "width": 1,
+   "temperature": 0.0,
+   "repeat": 2,
+   "decode_tok_s": 142.5643075171432,
+   "mechanism": {}
+  },
+  {
+   "kind": "external",
+   "num_draft": 1,
+   "width": 1,
+   "temperature": 0.0,
+   "repeat": 2,
+   "decode_tok_s": 91.85866659616491,
+   "mechanism": {
+    "external_rounds": 2034,
+    "proposed_tokens": 2034,
+    "accepted_proposals": 1228,
+    "mean_acceptance_length": 1.6037364798426745,
+    "draft_stats": {
+     "committed_positions": 90612,
+     "chain_steps": 35168,
+     "draft_calls": 26850
+    },
+    "round_times_ms": {
+     "recovery_capture": 0.4778946674030069,
+     "draft": 2.7125620458553468,
+     "transaction_begin": 0.3499962352152141,
+     "verify_forward": 11.679432215558268,
+     "verify_laws": 1.7834243928336408,
+     "transaction_commit": 0.36182011339828124,
+     "emit": 0.10202600715238686
+    }
+   },
+   "greedy_parity": 1,
+   "greedy_prompts": 16,
+   "greedy_prefix_ratio": 0.22156364214762167
+  },
+  {
+   "kind": "ordinary",
+   "num_draft": 0,
+   "width": 1,
+   "temperature": 0.0,
+   "repeat": 2,
+   "decode_tok_s": 136.57743812297804,
+   "mechanism": {}
+  },
+  {
+   "kind": "external",
+   "num_draft": 2,
+   "width": 1,
+   "temperature": 0.0,
+   "repeat": 2,
+   "decode_tok_s": 80.41982140689299,
+   "mechanism": {
+    "external_rounds": 1729,
+    "proposed_tokens": 3451,
+    "accepted_proposals": 1534,
+    "mean_acceptance_length": 1.8872180451127818,
+    "draft_stats": {
+     "committed_positions": 95923,
+     "chain_steps": 36890,
+     "draft_calls": 28579
+    },
+    "round_times_ms": {
+     "recovery_capture": 0.4891632587682324,
+     "draft": 4.982711094480865,
+     "transaction_begin": 0.38166622364082353,
+     "verify_forward": 14.620104507166632,
+     "verify_laws": 2.425200199630777,
+     "transaction_commit": 0.4956620184022194,
+     "emit": 0.1222390496412248
+    }
+   },
+   "greedy_parity": 1,
+   "greedy_prompts": 16,
+   "greedy_prefix_ratio": 0.22156364214762167
+  },
+  {
+   "kind": "ordinary",
+   "num_draft": 0,
+   "width": 1,
+   "temperature": 0.0,
+   "repeat": 2,
+   "decode_tok_s": 136.6782376526471,
+   "mechanism": {}
+  },
+  {
+   "kind": "external",
+   "num_draft": 3,
+   "width": 1,
+   "temperature": 0.0,
+   "repeat": 2,
+   "decode_tok_s": 73.08195502499716,
+   "mechanism": {
+    "external_rounds": 1629,
+    "proposed_tokens": 4867,
+    "accepted_proposals": 1634,
+    "mean_acceptance_length": 2.0030693677102516,
+    "draft_stats": {
+     "committed_positions": 101236,
+     "chain_steps": 40128,
+     "draft_calls": 30208
+    },
+    "round_times_ms": {
+     "recovery_capture": 0.4842424287633402,
+     "draft": 7.185106712659024,
+     "transaction_begin": 0.33057897976708833,
+     "verify_forward": 15.805553007505587,
+     "verify_laws": 3.012828915252735,
+     "transaction_commit": 0.5585483609163588,
+     "emit": 0.12665913302932755
+    }
+   },
+   "greedy_parity": 1,
+   "greedy_prompts": 16,
+   "greedy_prefix_ratio": 0.22156364214762167
+  },
+  {
+   "kind": "ordinary",
+   "num_draft": 0,
+   "width": 1,
+   "temperature": 0.0,
+   "repeat": 2,
+   "decode_tok_s": 141.93547760682233,
+   "mechanism": {}
+  },
+  {
+   "kind": "external",
+   "num_draft": 4,
+   "width": 1,
+   "temperature": 0.0,
+   "repeat": 2,
+   "decode_tok_s": 67.6305350576199,
+   "mechanism": {
+    "external_rounds": 1583,
+    "proposed_tokens": 6300,
+    "accepted_proposals": 1729,
+    "mean_acceptance_length": 2.0922299431459255,
+    "draft_stats": {
+     "committed_positions": 106594,
+     "chain_steps": 44845,
+     "draft_calls": 31791
+    },
+    "round_times_ms": {
+     "recovery_capture": 0.47744619768184676,
+     "draft": 9.273257790363099,
+     "transaction_begin": 0.3560654439466852,
+     "verify_forward": 16.693722878009744,
+     "verify_laws": 3.580463482180242,
+     "transaction_commit": 0.5698011747860854,
+     "emit": 0.1313260270180257
+    }
+   },
+   "greedy_parity": 3,
+   "greedy_prompts": 16,
+   "greedy_prefix_ratio": 0.3201971404594486
+  },
+  {
+   "kind": "ordinary",
+   "num_draft": 0,
+   "width": 4,
+   "temperature": 0.0,
+   "repeat": 2,
+   "decode_tok_s": 268.16044458743835,
+   "mechanism": {}
+  },
+  {
+   "kind": "external",
+   "num_draft": 1,
+   "width": 4,
+   "temperature": 0.0,
+   "repeat": 2,
+   "decode_tok_s": 117.99753054243384,
+   "mechanism": {
+    "external_rounds": 963,
+    "proposed_tokens": 2035,
+    "accepted_proposals": 1227,
+    "mean_acceptance_length": 2.2741433021806854,
+    "draft_stats": {
+     "committed_positions": 111909,
+     "chain_steps": 44845,
+     "draft_calls": 33192
+    },
+    "round_times_ms": {
+     "recovery_capture": 0.9942464423481944,
+     "draft": 4.519974775752584,
+     "transaction_begin": 0.6494240626535134,
+     "verify_forward": 16.990071458515718,
+     "verify_laws": 3.6466810462424806,
+     "transaction_commit": 0.7009042748143686,
+     "emit": 0.19324606193591254
+    }
+   },
+   "greedy_parity": 1,
+   "greedy_prompts": 16,
+   "greedy_prefix_ratio": 0.18671603801929634
+  },
+  {
+   "kind": "ordinary",
+   "num_draft": 0,
+   "width": 4,
+   "temperature": 0.0,
+   "repeat": 2,
+   "decode_tok_s": 267.0148076326364,
+   "mechanism": {}
+  },
+  {
+   "kind": "external",
+   "num_draft": 2,
+   "width": 4,
+   "temperature": 0.0,
+   "repeat": 2,
+   "decode_tok_s": 103.94412087392323,
+   "mechanism": {
+    "external_rounds": 928,
+    "proposed_tokens": 3489,
+    "accepted_proposals": 1626,
+    "mean_acceptance_length": 2.752155172413793,
+    "draft_stats": {
+     "committed_positions": 117332,
+     "chain_steps": 46263,
+     "draft_calls": 34617
+    },
+    "round_times_ms": {
+     "recovery_capture": 0.9026689964731962,
+     "draft": 8.217885998513747,
+     "transaction_begin": 0.515563948409118,
+     "verify_forward": 18.470741549867068,
+     "verify_laws": 4.817128683874937,
+     "transaction_commit": 0.8320541105761016,
+     "emit": 0.20923819064246973
+    }
+   },
+   "greedy_parity": 1,
+   "greedy_prompts": 16,
+   "greedy_prefix_ratio": 0.1933418298401116
+  },
+  {
+   "kind": "ordinary",
+   "num_draft": 0,
+   "width": 4,
+   "temperature": 0.0,
+   "repeat": 2,
+   "decode_tok_s": 268.4129650085837,
+   "mechanism": {}
+  },
+  {
+   "kind": "external",
+   "num_draft": 3,
+   "width": 4,
+   "temperature": 0.0,
+   "repeat": 2,
+   "decode_tok_s": 91.2796505420363,
+   "mechanism": {
+    "external_rounds": 859,
+    "proposed_tokens": 4614,
+    "accepted_proposals": 1690,
+    "mean_acceptance_length": 2.967403958090803,
+    "draft_stats": {
+     "committed_positions": 122610,
+     "chain_steps": 48849,
+     "draft_calls": 35916
+    },
+    "round_times_ms": {
+     "recovery_capture": 0.865086187037712,
+     "draft": 11.588122573170521,
+     "transaction_begin": 0.5759844388807359,
+     "verify_forward": 20.28687281350576,
+     "verify_laws": 5.718305544009946,
+     "transaction_commit": 0.899875627497777,
+     "emit": 0.2160662105111828
+    }
+   },
+   "greedy_parity": 2,
+   "greedy_prompts": 16,
+   "greedy_prefix_ratio": 0.29336583474603295
+  },
+  {
+   "kind": "ordinary",
+   "num_draft": 0,
+   "width": 4,
+   "temperature": 0.0,
+   "repeat": 2,
+   "decode_tok_s": 286.3243621235669,
+   "mechanism": {}
+  },
+  {
+   "kind": "external",
+   "num_draft": 4,
+   "width": 4,
+   "temperature": 0.0,
+   "repeat": 2,
+   "decode_tok_s": 78.63328581453756,
+   "mechanism": {
+    "external_rounds": 852,
+    "proposed_tokens": 6195,
+    "accepted_proposals": 1738,
+    "mean_acceptance_length": 3.039906103286385,
+    "draft_stats": {
+     "committed_positions": 127944,
+     "chain_steps": 52752,
+     "draft_calls": 37224
+    },
+    "round_times_ms": {
+     "recovery_capture": 0.8335329085028788,
+     "draft": 15.51963992305089,
+     "transaction_begin": 0.5528875813817282,
+     "verify_forward": 23.12670016298923,
+     "verify_laws": 6.879182456185857,
+     "transaction_commit": 0.9712722411946538,
+     "emit": 0.2218311956013496
+    }
+   },
+   "greedy_parity": 1,
+   "greedy_prompts": 16,
+   "greedy_prefix_ratio": 0.168566351942236
+  }
+ ],
+ "refused": [],
+ "summary": [
+  {
+   "width": 1,
+   "temperature": 0.0,
+   "num_draft": 1,
+   "ordinary_tok_s": 142.27122875375932,
+   "external_tok_s": 95.39621954166144,
+   "speedup": 0.6705236215171209,
+   "mean_acceptance_length": 1.6037364798426745,
+   "greedy_parity": [
+    1,
+    1,
+    1
+   ],
+   "greedy_prefix_ratio": [
+    0.22156364214762167,
+    0.22156364214762167,
+    0.22156364214762167
+   ],
+   "ordinary_spread": 0.08828072868868683
+  },
+  {
+   "width": 1,
+   "temperature": 0.0,
+   "num_draft": 2,
+   "ordinary_tok_s": 142.27122875375932,
+   "external_tok_s": 86.01327816462504,
+   "speedup": 0.6045725401971146,
+   "mean_acceptance_length": 1.8872180451127818,
+   "greedy_parity": [
+    1,
+    1,
+    1
+   ],
+   "greedy_prefix_ratio": [
+    0.22156364214762167,
+    0.22156364214762167,
+    0.22156364214762167
+   ],
+   "ordinary_spread": 0.08828072868868683
+  },
+  {
+   "width": 1,
+   "temperature": 0.0,
+   "num_draft": 3,
+   "ordinary_tok_s": 142.27122875375932,
+   "external_tok_s": 76.01391496857383,
+   "speedup": 0.5342887359195966,
+   "mean_acceptance_length": 2.0030693677102516,
+   "greedy_parity": [
+    1,
+    1,
+    1
+   ],
+   "greedy_prefix_ratio": [
+    0.22156364214762167,
+    0.22156364214762167,
+    0.22156364214762167
+   ],
+   "ordinary_spread": 0.08828072868868683
+  },
+  {
+   "width": 1,
+   "temperature": 0.0,
+   "num_draft": 4,
+   "ordinary_tok_s": 142.27122875375932,
+   "external_tok_s": 69.04666348466581,
+   "speedup": 0.4853171234232512,
+   "mean_acceptance_length": 2.0922299431459255,
+   "greedy_parity": [
+    3,
+    3,
+    3
+   ],
+   "greedy_prefix_ratio": [
+    0.3201971404594486,
+    0.3201971404594486,
+    0.3201971404594486
+   ],
+   "ordinary_spread": 0.08828072868868683
+  },
+  {
+   "width": 4,
+   "temperature": 0.0,
+   "num_draft": 1,
+   "ordinary_tok_s": 267.5867405672664,
+   "external_tok_s": 117.99753054243384,
+   "speedup": 0.44096927333651426,
+   "mean_acceptance_length": 2.2741433021806854,
+   "greedy_parity": [
+    1,
+    1,
+    1
+   ],
+   "greedy_prefix_ratio": [
+    0.18671603801929634,
+    0.18671603801929634,
+    0.18671603801929634
+   ],
+   "ordinary_spread": 0.11486183689361243
+  },
+  {
+   "width": 4,
+   "temperature": 0.0,
+   "num_draft": 2,
+   "ordinary_tok_s": 267.5867405672664,
+   "external_tok_s": 103.94412087392323,
+   "speedup": 0.3884501924630812,
+   "mean_acceptance_length": 2.752155172413793,
+   "greedy_parity": [
+    1,
+    1,
+    1
+   ],
+   "greedy_prefix_ratio": [
+    0.1933418298401116,
+    0.1933418298401116,
+    0.1933418298401116
+   ],
+   "ordinary_spread": 0.11486183689361243
+  },
+  {
+   "width": 4,
+   "temperature": 0.0,
+   "num_draft": 3,
+   "ordinary_tok_s": 267.5867405672664,
+   "external_tok_s": 91.12744372804708,
+   "speedup": 0.34055291205708793,
+   "mean_acceptance_length": 2.967403958090803,
+   "greedy_parity": [
+    2,
+    2,
+    2
+   ],
+   "greedy_prefix_ratio": [
+    0.29336583474603295,
+    0.29336583474603295,
+    0.29336583474603295
+   ],
+   "ordinary_spread": 0.11486183689361243
+  },
+  {
+   "width": 4,
+   "temperature": 0.0,
+   "num_draft": 4,
+   "ordinary_tok_s": 267.5867405672664,
+   "external_tok_s": 78.54476840373562,
+   "speedup": 0.2935301212504993,
+   "mean_acceptance_length": 3.039906103286385,
+   "greedy_parity": [
+    1,
+    1,
+    1
+   ],
+   "greedy_prefix_ratio": [
+    0.168566351942236,
+    0.168566351942236,
+    0.168566351942236
+   ],
+   "ordinary_spread": 0.11486183689361243
+  }
+ ],
+ "verdict": {
+  "greedy_parity": false,
+  "best_b1_speedup": 0.6705236215171209,
+  "best_b4_speedup": 0.44096927333651426,
+  "go": false
+ }
+}

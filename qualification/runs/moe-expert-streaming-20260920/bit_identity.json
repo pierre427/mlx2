@@ -1,0 +1,51 @@
+{
+  "schema": "mlx2.expert-streaming-bit-identity.v1",
+  "reference": "A_resident",
+  "steps": 16,
+  "vocab": 248320,
+  "arms": {
+    "A_resident": {
+      "mode": "resident",
+      "cache_gib": null,
+      "max_abs_logit_delta": 0.0,
+      "bit_identical": true,
+      "tokens_match": true,
+      "page_ins": null,
+      "evictions": null,
+      "hits": null,
+      "misses": null,
+      "resident_bytes": null,
+      "decode_seconds_NOT_A_BENCHMARK": 0.658
+    },
+    "B_streamed_big": {
+      "mode": "streamed",
+      "cache_gib": 20.0,
+      "max_abs_logit_delta": 0.0,
+      "bit_identical": true,
+      "tokens_match": true,
+      "page_ins": 9894,
+      "evictions": 0,
+      "hits": 12369,
+      "misses": 9894,
+      "resident_bytes": 5835718656,
+      "decode_seconds_NOT_A_BENCHMARK": 4.457
+    },
+    "C_streamed_tight": {
+      "mode": "streamed",
+      "cache_gib": 1.0,
+      "max_abs_logit_delta": 0.0,
+      "bit_identical": true,
+      "tokens_match": true,
+      "page_ins": 15678,
+      "evictions": 13878,
+      "hits": 6585,
+      "misses": 15678,
+      "resident_bytes": 1061683200,
+      "decode_seconds_NOT_A_BENCHMARK": 4.234
+    }
+  },
+  "note": "Gate is max absolute logit delta, not token equality: argmax agreement can hide a cache bug that moves a logit below the decision margin. Timings are diagnostic, never benchmarks.",
+  "cache_actually_evicted": true,
+  "eviction_counts_differ": true,
+  "verdict": "PASS: bit-identical across arms, and the cache demonstrably evicted"
+}

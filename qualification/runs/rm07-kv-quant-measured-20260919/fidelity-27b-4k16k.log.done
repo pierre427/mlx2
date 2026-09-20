@@ -1,0 +1,38 @@
+{
+ "agent_id": "job-rm07-fid-27b-4k16k-56897",
+ "child_pid": 56902,
+ "command": [
+  "env",
+  "PYTHONPATH=/private/tmp/mlx2-rm07-kv-quant-measured/src",
+  "~/Desktop/mlx2/.venv/bin/python",
+  "/private/tmp/mlx2-rm07-kv-quant-measured/scripts/measure_kv_quant_fidelity.py",
+  "--i-own-the-gpu",
+  "--model",
+  "~/mlx-models/Qwen3.8-27B-oQ4e-mtp",
+  "--operations",
+  "kv_q8,kv_k8v4",
+  "--contexts",
+  "4096,16384",
+  "--out",
+  "/private/tmp/mlx2-rm07-kv-quant-measured/qualification/runs/rm07-kv-quant-measured-20260919/fidelity-27b-4k16k.json"
+ ],
+ "ended_at": "2026-09-19T21:31:00+00:00",
+ "label": "rm07-fid-27b-4k16k",
+ "out": "/private/tmp/mlx2-rm07-kv-quant-measured/qualification/runs/rm07-kv-quant-measured-20260919/fidelity-27b-4k16k.log",
+ "pid": 56897,
+ "radio": {
+  "error": null,
+  "heartbeat_failures": 0,
+  "heartbeats": 2,
+  "lease_generation": null,
+  "lease_task": null,
+  "lock_dir": "/Users/Shared/mlxuag/gpu.lock",
+  "status": "closed:completed"
+ },
+ "rc": 0,
+ "refusal": null,
+ "session_id": "3c65a7827e83456a89fffdeefadec196",
+ "signal": null,
+ "started_at": "2026-09-19T21:19:44+00:00",
+ "worker_id": "249d043351c54340b84ef564f993c1d6"
+}

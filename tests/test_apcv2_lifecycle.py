@@ -157,7 +157,14 @@ def test_apcv2_republish_preserves_retention_age_and_hits_without_eviction():
 
 
 def test_apcv2_evicts_interior_checkpoint_before_default_and_boundary():
-    apc = APCv2(max_size=2, layout_name="retention-order-v1")
+    """Under the shared byte budget, an unreused interior checkpoint goes first."""
+    probe = APCv2(max_size=8, layout_name="retention-order-v1")
+    probe.store(APCKey("probe"), [9], [_state(KVCache(), 1)])
+    entry_bytes = int(probe.nbytes)
+    probe.clear(release_memory=False)
+    apc = APCv2(
+        max_size=8, max_bytes=2 * entry_bytes, layout_name="retention-order-v1"
+    )
     key = APCKey("retention")
     apc.store(
         key,
@@ -165,13 +172,13 @@ def test_apcv2_evicts_interior_checkpoint_before_default_and_boundary():
         [_state(KVCache(), 1)],
         retention_role="committed_prompt_boundary",
     )
-    apc.store(key, [2], [_state(KVCache(), 1)])
     apc.store(
         key,
         [3],
         [_state(KVCache(), 1)],
         retention_role="interior_checkpoint",
     )
+    apc.store(key, [2], [_state(KVCache(), 1)])
     assert apc.lookup(key, [3, 4]).hit is False
     default = apc.lookup(key, [2, 4])
     boundary = apc.lookup(key, [1, 4])
@@ -179,6 +186,45 @@ def test_apcv2_evicts_interior_checkpoint_before_default_and_boundary():
     assert boundary.hit and boundary.retention_role == "committed_prompt_boundary"
     default.cache.close()
     boundary.cache.close()
+    apc.clear(release_memory=False)
+
+
+def test_apcv2_interior_checkpoint_survives_a_count_full_cache():
+    """Regression (rm04 GPU smoke): with ``max_size`` shared, a full cache of
+    prompt boundaries/finished lanes evicted every fresh interior checkpoint
+    at its own publication (captured 4/request, published 0, no RAG hits)."""
+    apc = APCv2(max_size=2, layout_name="interior-pool-v1")
+    key = APCKey("pool")
+    apc.store(key, [1], [_state(KVCache(), 1)], retention_role="committed_prompt_boundary")
+    apc.store(key, [2], [_state(KVCache(), 1)])
+    stored = apc.store(
+        key, [3], [_state(KVCache(), 1)], retention_role="interior_checkpoint"
+    )
+    assert stored.stored is True
+    hit = apc.lookup(key, [3, 4])
+    assert hit.hit and hit.retention_role == "interior_checkpoint"
+    hit.cache.close()
+    # The ordinary pool is still capped at max_size, and interiors do not
+    # relieve it: a third ordinary entry evicts the least-recent ordinary one.
+    apc.store(key, [5], [_state(KVCache(), 1)])
+    assert apc._resident_entry_count_locked(interior=False) == 2
+    assert apc.lookup(key, [3, 4]).hit
+    assert not apc.lookup(key, [2, 4]).hit
+    assert apc.apc_stats["interior"]["max_entries"] == 2
+    apc.clear(release_memory=False)
+
+
+def test_apcv2_interior_pool_has_its_own_count_cap():
+    apc = APCv2(max_size=8, max_interior_entries=2, layout_name="interior-pool-cap-v1")
+    key = APCKey("pool-cap")
+    for token in (11, 12, 13):
+        apc.store(key, [token], [_state(KVCache(), 1)], retention_role="interior_checkpoint")
+    assert apc._resident_entry_count_locked(interior=True) == 2
+    # Least-recent unreused interior goes first; the newest publication stays.
+    assert not apc.lookup(key, [11, 0]).hit
+    assert apc.lookup(key, [13, 0]).hit
+    with pytest.raises(ValueError):
+        APCv2(max_size=2, max_interior_entries=-1, layout_name="bad-v1")
     apc.clear(release_memory=False)
 
 

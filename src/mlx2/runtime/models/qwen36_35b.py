@@ -246,6 +246,22 @@ class Model(nn.Module):
     def mtp_step(self, hidden, tokens, mtp_cache):
         return self.language_model.mtp_step(hidden, tokens, mtp_cache)
 
+    @staticmethod
+    def shard_prune(weights):
+        """Drop, per shard, the tensors ``sanitize`` discards outright.
+
+        This is the key-local subset of ``sanitize``'s first rule, split out
+        so a shard-streaming loader can discard the vision tower *before*
+        materialising it. ``sanitize`` still applies the same filter to the
+        full dict, so it remains authoritative: under-dropping here is merely
+        a missed saving, and over-dropping fails loudly in ``load_weights``.
+        """
+        return {
+            key: value
+            for key, value in weights.items()
+            if not key.startswith(("vision_tower", "model.visual"))
+        }
+
     def sanitize(self, weights):
         normalized = {}
         for key, value in weights.items():

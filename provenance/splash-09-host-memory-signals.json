@@ -1,0 +1,23 @@
+{
+  "component": "host memory signals (Mach VM statistics estimate and memorystatus pressure level)",
+  "source_repository": "Splash engine",
+  "source_revision": "f58d36dd",
+  "source_paths": [
+    "runtime/engine/MemoryGovernor.cpp",
+    "runtime/engine/MemoryGovernor.hpp"
+  ],
+  "license": "Apache-2.0",
+  "destination_paths": [
+    "src/mlx2/runtime/os_memory.py",
+    "src/mlx2/memory.py"
+  ],
+  "modifications": [
+    "Re-expressed estimateHostAvailableMemory's page arithmetic in Python (estimate_host_available_bytes); Python integers remove the overflow guards, the file-backed/purgeable underflow guards are kept.",
+    "Replaced the C++ Mach calls with ctypes host_page_size + host_statistics64(HOST_VM_INFO64) using the fixed rev1 structure prefix, and hw.memsize read once per process.",
+    "Polled kern.memorystatus_vm_pressure_level via sysctlbyname instead of Splash's dispatch memory-pressure source, and added a rise-immediately/fall-after-stable hysteresis monitor that Splash does not have.",
+    "Used the estimate only as the opt-in host term of mlx2's existing admission headroom, keeping mlx2's 20 GiB reserve and physical-footprint floor; no reservation/governor object was ported."
+  ],
+  "validation": [
+    "tests/test_host_memory_signals.py (formula units, hysteresis with a fake clock, live Darwin cross-check against vm_stat and sysctl)"
+  ]
+}

@@ -1,0 +1,24 @@
+[cpg_job 2026-09-19T22:25:54+00:00 pid=82780] label=rm10-profile-35b agent_id=job-rm10-profile-35b-82780 command=env PYTHONPATH=/private/tmp/mlx2-rm10-dspark-confidence/src ~/Desktop/mlx2/.venv/bin/python /private/tmp/mlx2-rm10-dspark-confidence/scripts/mtp_confidence_gpu.py profile --i-own-the-gpu --model ~/mlx-models/Qwen3.6-35B-A3B-uncensored-heretic-Native-MTP-Preserved-oQ4e-mtp --out /private/tmp/mlx2-rm10-dspark-confidence/qualification/runs/mtp-confidence-20260919/cost-35b.json --max-depth 3 --probe-overhead --probe-reps 2
+[cpg_job 2026-09-19T22:25:54+00:00 pid=82780] created workflow 62d3e7a5e562494caae1608ee18226ea (cpg-job drivers); record it as workflows.cpg-job-drivers in /Users/Shared/mlxuag/cpg-radio.json to reuse it
+[cpg_job 2026-09-19T22:25:54+00:00 pid=82780] registered worker 85fcf814e2e24cf4bc7fd4f266a21c99 as job-rm10-profile-35b-82780 in session 3c65a7827e83456a89fffdeefadec196
+[cpg_job 2026-09-19T22:25:54+00:00 pid=82780] took /Users/Shared/mlxuag/gpu.lock
+[cpg_job 2026-09-19T22:25:54+00:00 pid=82780] child pid 82785 started
+{"lanes": 1, "depth": 0, "seconds_per_cycle": 0.013617987640827778}
+{"lanes": 1, "depth": 1, "seconds_per_cycle": 0.016612528000223392}
+{"lanes": 1, "depth": 2, "seconds_per_cycle": 0.018581644530968333}
+{"lanes": 1, "depth": 3, "seconds_per_cycle": 0.01814227343766106}
+{"lanes": 2, "depth": 0, "seconds_per_cycle": 0.01715567773408111}
+{"lanes": 2, "depth": 1, "seconds_per_cycle": 0.023036978515847295}
+{"lanes": 2, "depth": 2, "seconds_per_cycle": 0.025224218109542562}
+{"lanes": 2, "depth": 3, "seconds_per_cycle": 0.028997786453146546}
+{"lanes": 4, "depth": 0, "seconds_per_cycle": 0.023669312499805528}
+{"lanes": 4, "depth": 1, "seconds_per_cycle": 0.03355998242204805}
+{"lanes": 4, "depth": 2, "seconds_per_cycle": 0.040065725265776564}
+{"lanes": 4, "depth": 3, "seconds_per_cycle": 0.04808705598406959}
+{"lanes": 1, "depth": 3, "off_seconds": [0.019019112640307867, 0.01905445443753706], "on_seconds": [0.019702383468938933, 0.020141479812991747], "feature_cycles": [71, 71], "overhead": 0.046496725680213125}
+{"lanes": 2, "depth": 3, "off_seconds": [0.029190270187427814, 0.029580449874629267], "on_seconds": [0.032097148437969736, 0.031051599609781988], "feature_cycles": [71, 71], "overhead": 0.07449335283065794}
+{"lanes": 4, "depth": 3, "off_seconds": [0.0481106269535303, 0.04872970573433122], "on_seconds": [0.05000282942182821, 0.049983708344370825], "feature_cycles": [71, 71], "overhead": 0.03248858188538506}
+[cpg_job 2026-09-19T22:26:51+00:00 pid=82780] child exited rc=0
+[cpg_job 2026-09-19T22:26:52+00:00 pid=82780] worker 85fcf814e2e24cf4bc7fd4f266a21c99 closed completed
+[cpg_job 2026-09-19T22:26:52+00:00 pid=82780] released /Users/Shared/mlxuag/gpu.lock
+[cpg_job 2026-09-19T22:26:52+00:00 pid=82780] wrote /private/tmp/mlx2-rm10-dspark-confidence/qualification/runs/mtp-confidence-20260919/profile-35b.log.done

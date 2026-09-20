@@ -18,6 +18,7 @@ import struct
 from pathlib import Path
 
 from ..contracts import Capability, ModelDescriptor, StatePlane
+from .mtp_depth_cap import validate_self_mtp_num_draft
 from ..sampling_defaults import XING4_SAMPLING
 
 CACHE_LAYOUT = "xing4-0-mla-latent-layer-segments-v1"
@@ -263,6 +264,7 @@ def _tools(request):
 
 class XingAdapter:
     descriptor = XING4_0
+    default_route = "native_mtp"
     sampling_defaults = XING4_SAMPLING
     reasoning_effort_semantics = "thinking_toggle"
     # Xing reasons at length but not pathologically: with 8192 tokens and no
@@ -294,9 +296,7 @@ class XingAdapter:
                 "Xing4.0 execution policy supports only num_draft and tokenizer_reference_fallback"
             )
         # One trained MTP layer; vLLM's recommended depth is 1.
-        self._num_draft = policy.get("num_draft", 1)
-        if type(self._num_draft) is not int or not 1 <= self._num_draft <= 3:
-            raise ValueError("num_draft must be 1, 2, or 3")
+        self._num_draft = validate_self_mtp_num_draft(policy.get("num_draft", 1))
         fallback = policy.get("tokenizer_reference_fallback", False)
         if type(fallback) is not bool:
             raise ValueError("tokenizer_reference_fallback must be boolean")
@@ -317,7 +317,7 @@ class XingAdapter:
         import mlx.nn as nn
 
         from ..runtime.models.xing4_0 import Model, ModelArgs
-        from ..runtime.ubc_evict import ubc_evict_paths
+        from ..runtime.ubc_evict import load_shards_evicting
         from .xing_tokenizer import load_tokenizer, make_tokenizer_wrapper
 
         self.model = None
@@ -326,11 +326,8 @@ class XingAdapter:
             self.model = Model(ModelArgs.from_dict(config))
             if self.model.apc_v2_layout != CACHE_LAYOUT:
                 raise ValueError("Xing4.0 model and adapter cache layouts disagree")
-            weights = {}
             files = [path / name for name in sorted(set(artifact["weight_map"].values()))]
-            for file in files:
-                weights.update(mx.load(str(file)))
-            weights = self.model.sanitize(weights)
+            weights = self.model.sanitize(load_shards_evicting(files))
             quant = config.get("quantization", config.get("quantization_config"))
             if quant:
                 def predicate(name, module):
@@ -350,7 +347,7 @@ class XingAdapter:
             self.model.eval()
             mx.eval(self.model.parameters())
             weights.clear()
-            ubc_evict_paths([str(file) for file in files])
+            mx.clear_cache()
             tokenizer, self.tokenizer_receipt = load_tokenizer(
                 path, allow_reference_fallback=fallback
             )
@@ -370,6 +367,20 @@ class XingAdapter:
 
         _, thinking = reasoning_policy(request)
         return render_prompt(
+            self.tokenizer,
+            request["messages"],
+            tools=_tools(request),
+            enable_thinking=thinking,
+        )
+
+    def render_prompt(self, request: dict) -> str:
+        """Prompt text whose special-token-free encoding is ``prompt_tokens``."""
+        if "messages" not in request:
+            return request["prompt"]
+        from .xing_tokenizer import render_prompt_text
+
+        _, thinking = reasoning_policy(request)
+        return render_prompt_text(
             self.tokenizer,
             request["messages"],
             tools=_tools(request),

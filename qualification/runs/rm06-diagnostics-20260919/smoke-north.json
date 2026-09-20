@@ -1,0 +1,166 @@
+{
+ "schema": "mlx2.rm06-external-draft-acceptance.v1",
+ "plan": {
+  "schema": "mlx2.rm06-external-draft-acceptance.v1",
+  "kind": "execution_plan",
+  "family": "north",
+  "target": "~/mlx-models/North-Mini-Code-1.0-mlx-4bit",
+  "draft": "~/.cache/huggingface/hub/models--CohereLabs--North-Mini-Code-1.0-eagle/snapshots/8c7fcb575f107e9968b61cc93a756e6fc2c86713",
+  "will_execute": true,
+  "arms": 4,
+  "prompts": 4,
+  "max_tokens": 64,
+  "depths": [
+   3
+  ],
+  "widths": [
+   1,
+   4
+  ],
+  "temperatures": [
+   0.0
+  ],
+  "interleaving": "ordinary/external alternating per (repeat, temp, width, depth)",
+  "go_criterion": {
+   "greedy_parity": "mean greedy common-prefix ratio vs ordinary >= 0.9 (exact count also reported)",
+   "b1_speedup_min": 1.25,
+   "b4_speedup_min": 1.0,
+   "arm_refused_if": "external_rounds == 0 or proposed_tokens == 0"
+  },
+  "order": [
+   [
+    "ordinary",
+    0,
+    1,
+    0.0,
+    0
+   ],
+   [
+    "external",
+    3,
+    1,
+    0.0,
+    0
+   ],
+   [
+    "ordinary",
+    0,
+    4,
+    0.0,
+    0
+   ],
+   [
+    "external",
+    3,
+    4,
+    0.0,
+    0
+   ]
+  ]
+ },
+ "arms": [
+  {
+   "kind": "ordinary",
+   "num_draft": 0,
+   "width": 1,
+   "temperature": 0.0,
+   "repeat": 0,
+   "decode_tok_s": 150.22439762995856,
+   "mechanism": {}
+  },
+  {
+   "kind": "external",
+   "num_draft": 3,
+   "width": 1,
+   "temperature": 0.0,
+   "repeat": 0,
+   "decode_tok_s": 77.50427176046566,
+   "mechanism": {
+    "external_rounds": 107,
+    "proposed_tokens": 315,
+    "accepted_proposals": 122,
+    "mean_acceptance_length": 2.1401869158878504,
+    "draft_stats": {
+     "committed_positions": 757,
+     "chain_steps": 208,
+     "draft_calls": 107
+    }
+   },
+   "greedy_parity": 1,
+   "greedy_prompts": 4,
+   "greedy_prefix_ratio": 0.5721072635135135
+  },
+  {
+   "kind": "ordinary",
+   "num_draft": 0,
+   "width": 4,
+   "temperature": 0.0,
+   "repeat": 0,
+   "decode_tok_s": 286.0788451599875,
+   "mechanism": {}
+  },
+  {
+   "kind": "external",
+   "num_draft": 3,
+   "width": 4,
+   "temperature": 0.0,
+   "repeat": 0,
+   "decode_tok_s": 81.91186853782311,
+   "mechanism": {
+    "external_rounds": 57,
+    "proposed_tokens": 305,
+    "accepted_proposals": 125,
+    "mean_acceptance_length": 3.192982456140351,
+    "draft_stats": {
+     "committed_positions": 1514,
+     "chain_steps": 378,
+     "draft_calls": 194
+    }
+   },
+   "greedy_parity": 2,
+   "greedy_prompts": 4,
+   "greedy_prefix_ratio": 0.76171875
+  }
+ ],
+ "refused": [],
+ "summary": [
+  {
+   "width": 1,
+   "temperature": 0.0,
+   "num_draft": 3,
+   "ordinary_tok_s": 150.22439762995856,
+   "external_tok_s": 77.50427176046566,
+   "speedup": 0.5159233319169545,
+   "mean_acceptance_length": 2.1401869158878504,
+   "greedy_parity": [
+    1
+   ],
+   "greedy_prefix_ratio": [
+    0.5721072635135135
+   ],
+   "ordinary_spread": 0.0
+  },
+  {
+   "width": 4,
+   "temperature": 0.0,
+   "num_draft": 3,
+   "ordinary_tok_s": 286.0788451599875,
+   "external_tok_s": 81.91186853782311,
+   "speedup": 0.2863261996601479,
+   "mean_acceptance_length": 3.192982456140351,
+   "greedy_parity": [
+    2
+   ],
+   "greedy_prefix_ratio": [
+    0.76171875
+   ],
+   "ordinary_spread": 0.0
+  }
+ ],
+ "verdict": {
+  "greedy_parity": false,
+  "best_b1_speedup": 0.5159233319169545,
+  "best_b4_speedup": 0.2863261996601479,
+  "go": false
+ }
+}

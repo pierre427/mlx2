@@ -1,0 +1,18 @@
+
+--- stderr ---
+Reading additional input from stdin...
+OpenAI Codex v0.145.0
+--------
+workdir: /private/tmp/mlx2-rm08-responses-agent-conformance/qualification/runs/rm08-20260919/flashnext-auto-rep2/codex-add_file-9uv8ubg8
+model: Qwen3.8-Flash-Next-MLX-4bit-MTP
+provider: mlx2
+approval: never
+sandbox: workspace-write [workdir, /tmp, $TMPDIR]
+reasoning effort: none
+reasoning summaries: none
+session id: 01a0bccf-0303-7770-babd-af1dd1be918a
+--------
+user
+Create a file named hello.txt whose only content is the line: hello from mlx2
+ERROR: stream disconnected before completion: custom tool 'apply_patch' input does not match its declared grammar
+ERROR: stream disconnected before completion: custom tool 'apply_patch' input does not match its declared grammar

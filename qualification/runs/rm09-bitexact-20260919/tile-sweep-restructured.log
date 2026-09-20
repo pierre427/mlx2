@@ -1,0 +1,57 @@
+[cpg_job 2026-09-19T22:27:33+00:00 pid=83468] label=rm09-tile-sweep agent_id=job-rm09-tile-sweep-83468 command=bash /private/tmp/claude-501/-Users-user-Desktop-mlx2/dcc2c62c-d339-4686-a019-625b816d27d9/scratchpad/roadmap/rm09/sweep.sh
+[cpg_job 2026-09-19T22:27:33+00:00 pid=83468] created workflow 1ac0692d2df64637a00416ca995b19b2 (cpg-job drivers); record it as workflows.cpg-job-drivers in /Users/Shared/mlxuag/cpg-radio.json to reuse it
+[cpg_job 2026-09-19T22:27:33+00:00 pid=83468] registered worker 26a0663b78c74bb5b03b394950ed6100 as job-rm09-tile-sweep-83468 in session 3c65a7827e83456a89fffdeefadec196
+[cpg_job 2026-09-19T22:27:33+00:00 pid=83468] took /Users/Shared/mlxuag/gpu.lock
+[cpg_job 2026-09-19T22:27:33+00:00 pid=83468] child pid 83478 started
+=== fork tests tile=8 ===
+test_qmv_bitexact_across_m (test_quantized.TestQuantized.test_qmv_bitexact_across_m) ... ok
+test_qmv_bitexact_gather (test_quantized.TestQuantized.test_qmv_bitexact_gather) ... ok
+test_qmv_bitexact_mode_off_is_unchanged (test_quantized.TestQuantized.test_qmv_bitexact_mode_off_is_unchanged) ... ok
+test_qmv_nax_small_m (test_quantized.TestQuantized.test_qmv_nax_small_m) ... ok
+test_qmv_strided_batch_and_wide_tiles (test_quantized.TestQuantized.test_qmv_strided_batch_and_wide_tiles) ... ok
+test_qmv_wide (test_quantized.TestQuantized.test_qmv_wide) ... ok
+test_quantize_strided (test_quantized.TestQuantized.test_quantize_strided) ... ok
+
+----------------------------------------------------------------------
+Ran 7 tests in 4.377s
+
+OK
+=== fork tests tile=4 ===
+test_qmv_bitexact_across_m (test_quantized.TestQuantized.test_qmv_bitexact_across_m) ... ok
+test_qmv_bitexact_gather (test_quantized.TestQuantized.test_qmv_bitexact_gather) ... ok
+test_qmv_bitexact_mode_off_is_unchanged (test_quantized.TestQuantized.test_qmv_bitexact_mode_off_is_unchanged) ... ok
+test_qmv_nax_small_m (test_quantized.TestQuantized.test_qmv_nax_small_m) ... ok
+test_qmv_strided_batch_and_wide_tiles (test_quantized.TestQuantized.test_qmv_strided_batch_and_wide_tiles) ... ok
+test_qmv_wide (test_quantized.TestQuantized.test_qmv_wide) ... ok
+test_quantize_strided (test_quantized.TestQuantized.test_quantize_strided) ... ok
+
+----------------------------------------------------------------------
+Ran 7 tests in 1.462s
+
+OK
+=== fork tests tile=1 ===
+test_qmv_bitexact_across_m (test_quantized.TestQuantized.test_qmv_bitexact_across_m) ... ok
+test_qmv_bitexact_gather (test_quantized.TestQuantized.test_qmv_bitexact_gather) ... ok
+test_qmv_bitexact_mode_off_is_unchanged (test_quantized.TestQuantized.test_qmv_bitexact_mode_off_is_unchanged) ... ok
+test_qmv_nax_small_m (test_quantized.TestQuantized.test_qmv_nax_small_m) ... ok
+test_qmv_strided_batch_and_wide_tiles (test_quantized.TestQuantized.test_qmv_strided_batch_and_wide_tiles) ... ok
+test_qmv_wide (test_quantized.TestQuantized.test_qmv_wide) ... ok
+test_quantize_strided (test_quantized.TestQuantized.test_quantize_strided) ... ok
+
+----------------------------------------------------------------------
+Ran 7 tests in 1.456s
+
+OK
+fork_tests_rc=0
+=== bench tile=1 ===
+bench tile=1 rc=0
+=== bench tile=2 ===
+bench tile=2 rc=0
+=== bench tile=4 ===
+bench tile=4 rc=0
+=== bench tile=8 ===
+bench tile=8 rc=0
+[cpg_job 2026-09-19T22:30:54+00:00 pid=83468] child exited rc=0
+[cpg_job 2026-09-19T22:30:54+00:00 pid=83468] worker 26a0663b78c74bb5b03b394950ed6100 closed completed
+[cpg_job 2026-09-19T22:30:54+00:00 pid=83468] released /Users/Shared/mlxuag/gpu.lock
+[cpg_job 2026-09-19T22:30:54+00:00 pid=83468] wrote /private/tmp/claude-501/-Users-user-Desktop-mlx2/dcc2c62c-d339-4686-a019-625b816d27d9/scratchpad/roadmap/rm09/sweep.log.done

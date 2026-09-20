@@ -1,0 +1,14 @@
+{
+ "agent_id": "job-rm10-profile-27b-v2-87484",
+ "complete_worker": {
+  "already_terminal": false,
+  "finished_at": 1789857460,
+  "status": "completed",
+  "worker_id": "97f35877bd6e426ba21833b0c5a6cdb6"
+ },
+ "register_worker": {
+  "worker_id": "97f35877bd6e426ba21833b0c5a6cdb6",
+  "workflow_id": "a2b4ae1ed113420eb66bf3d4a55324be"
+ },
+ "updated_at": "2026-09-19T22:37:40+00:00"
+}

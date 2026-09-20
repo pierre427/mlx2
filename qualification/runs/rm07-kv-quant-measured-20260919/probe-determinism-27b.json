@@ -1,0 +1,61 @@
+{
+  "model": "~/mlx-models/Qwen3.8-27B-oQ4e-mtp",
+  "contexts": [
+    {
+      "context": 4096,
+      "prefill_steps": {
+        "a": 2048,
+        "a2": 2048,
+        "b": 1536,
+        "c": 4096
+      },
+      "scored_tokens": 256,
+      "arms": {
+        "a2": {
+          "top1_agreement": 1.0,
+          "kl_mean": 0.0,
+          "max_abs_logit_delta": 0.0
+        },
+        "b": {
+          "top1_agreement": 0.98828125,
+          "kl_mean": 0.0008252770045510949,
+          "max_abs_logit_delta": 1.890625
+        },
+        "c": {
+          "top1_agreement": 0.9921875,
+          "kl_mean": 0.000828206165614298,
+          "max_abs_logit_delta": 1.578125
+        }
+      },
+      "wall_s": 52.94645062502241
+    },
+    {
+      "context": 16384,
+      "prefill_steps": {
+        "a": 2048,
+        "a2": 2048,
+        "b": 1536,
+        "c": 4096
+      },
+      "scored_tokens": 256,
+      "arms": {
+        "a2": {
+          "top1_agreement": 1.0,
+          "kl_mean": 0.0,
+          "max_abs_logit_delta": 0.0
+        },
+        "b": {
+          "top1_agreement": 0.890625,
+          "kl_mean": 0.0008901870787234034,
+          "max_abs_logit_delta": 2.5703125
+        },
+        "c": {
+          "top1_agreement": 0.90234375,
+          "kl_mean": 0.0008447755001828317,
+          "max_abs_logit_delta": 6.427734375
+        }
+      },
+      "wall_s": 131.12085304100765
+    }
+  ]
+}

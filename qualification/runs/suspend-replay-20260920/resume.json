@@ -1,0 +1,1 @@
+{"state": "serving", "since": 1789897795.39528, "timestamps": {"serving": 1789897795.39528, "draining": 1789897795.381717}, "drain_deadline": null, "suspend_requested": false, "last_transition": {"from": "draining", "to": "serving", "at": 1789897795.39528, "result": {"status": "drain_cancelled", "prefetches_queued": 0}}}

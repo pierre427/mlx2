@@ -1,0 +1,30 @@
+{
+  "mode": "resident",
+  "model": "~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-q4",
+  "prompt": "Explain in one paragraph why unified memory changes how large models are served.",
+  "tokens": [
+    271,
+    248068,
+    198,
+    8160,
+    579,
+    264,
+    7047,
+    1817,
+    25,
+    271,
+    16,
+    13,
+    220,
+    2972,
+    2014,
+    53983
+  ],
+  "text": "\n\n<think>\nHere's a thinking process:\n\n1.  **Analyze",
+  "load_seconds": 6.252,
+  "decode_seconds_NOT_A_BENCHMARK": 0.658,
+  "active_bytes_after_load": 19684645128,
+  "active_bytes_after_install": 19684645128,
+  "peak_bytes": 19811328398,
+  "cache_gib": null
+}

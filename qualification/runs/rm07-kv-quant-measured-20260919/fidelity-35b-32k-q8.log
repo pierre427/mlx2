@@ -1,0 +1,42 @@
+[cpg_job 2026-09-19T22:07:10+00:00 pid=76255] label=rm07-fid-35b-32k-q8 agent_id=job-rm07-fid-35b-32k-q8-76255 command=env PYTHONPATH=/private/tmp/mlx2-rm07-kv-quant-measured/src ~/Desktop/mlx2/.venv/bin/python /private/tmp/mlx2-rm07-kv-quant-measured/scripts/measure_kv_quant_fidelity.py --i-own-the-gpu --model ~/mlx-models/Qwen3.6-35B-A3B-uncensored-heretic-Native-MTP-Preserved-oQ4e-mtp --operations kv_q8 --contexts 32768 --out /private/tmp/mlx2-rm07-kv-quant-measured/qualification/runs/rm07-kv-quant-measured-20260919/fidelity-35b-32k-q8.json
+[cpg_job 2026-09-19T22:07:11+00:00 pid=76255] created workflow f88b0aaa62fd408ab1649e11d7690948 (cpg-job drivers); record it as workflows.cpg-job-drivers in /Users/Shared/mlxuag/cpg-radio.json to reuse it
+[cpg_job 2026-09-19T22:07:11+00:00 pid=76255] registered worker b230e86d048e446c8222364ca3cf6e94 as job-rm07-fid-35b-32k-q8-76255 in session 3c65a7827e83456a89fffdeefadec196
+[cpg_job 2026-09-19T22:07:11+00:00 pid=76255] [cpg_job] /Users/Shared/mlxuag/gpu.lock is already held; owner.json: {
+ "agent": "cpg_job",
+ "agent_id": "job-rm05-lora-kernel-76256",
+ "command": [
+  "env",
+  "PYTHONPATH=src",
+  "~/Desktop/mlx2/.venv/bin/python",
+  "scripts/bench_multi_lora.py",
+  "--device",
+  "gpu",
+  "--dtype",
+  "bfloat16",
+  "--quantized-base",
+  "--cold-rotate-gib",
+  "1",
+  "--batch",
+  "1,4,8,16,32",
+  "--adapters",
+  "1,2,4",
+  "--ranks",
+  "8,16,64",
+  "--shapes",
+  "5120x5120,5120x1024,2048x4096",
+  "--out",
+  "qualification/runs/multi-lora-20260919/kernel.json",
+  "--i-own-the-gpu"
+ ],
+ "cpg_agent": "job-rm05-lora-kernel-76256",
+ "cpg_generation": null,
+ "cpg_session": "3c65a7827e83456a89fffdeefadec196",
+ "cpg_task": "2362c6c845d244eea73b27334add9154",
+ "cpg_worker": "77872543420d4d9c9390b033e48091dc",
+ "done_file": "/private/tmp/claude-501/-Users-user-Desktop-mlx2/dcc2c62c-d339-4686-a019-625b816d27d9/scratchpad/roadmap/rm05/gpu/kernel.log.done",
+ "label": "rm05-lora-kernel",
+ "log": "/private/tmp/claude-501/-Users-user-Desktop-mlx2/dcc2c62c-d339-4686-a019-625b816d27d9/scratchpad/roadmap/rm05/gpu/kernel.log",
+ "pid": 76256,
+ "started": "2026-09-19T22:07:10+00:00"
+}
+[cpg_job 2026-09-19T22:07:11+00:00 pid=76255] worker b230e86d048e446c8222364ca3cf6e94 closed failed

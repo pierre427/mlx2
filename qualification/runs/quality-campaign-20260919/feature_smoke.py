@@ -433,7 +433,7 @@ def core_checks(matrix: Matrix):
     matrix.check("chat", lambda: _ok_text(_chat(h, "Reply with exactly CHAT_OK.")), applies=text)
     matrix.check("completions", lambda: (lambda r: Outcome(r["status"] == 200 and bool(((r.get("body") or {}).get("choices") or [{}])[0].get("text", "").strip()), f"http={r['status']}", r))(h.post("/v1/completions", {"model": MODEL_ID, "prompt": "Reply with exactly COMPLETION_OK.", "temperature": 0, "max_tokens": 32})), applies=text)
     matrix.check("streaming", lambda: (lambda r: Outcome(r["status"] == 200 and bool(_stream_text(r).strip()) and "[DONE]" in r["events"], "typed SSE plus DONE", r))(_chat(h, "Reply with exactly STREAM_OK.", stream=True, stream_options={"include_usage": True})), applies=text)
-    matrix.check("stop_strings", lambda: (lambda r: Outcome(r["status"] == 200 and "CAMPAIGN_STOP" not in _text(r) and _finish(r) == "stop", f"finish={_finish(r)}", r))(_chat(h, "Write A then CAMPAIGN_STOP then B.", stop=["CAMPAIGN_STOP"])), applies=text)
+    matrix.check("stop_strings", lambda: (lambda r: Outcome(r["status"] == 200 and "CAMPAIGN_STOP" not in _text(r) and _finish(r) == "stop", f"finish={_finish(r)}", r))(_chat(h, "Repeat this line exactly and output nothing else: A CAMPAIGN_STOP B", stop=["CAMPAIGN_STOP"])), applies=text)
     matrix.check("logprobs_including_bytes", lambda: (lambda r: Outcome(r["status"] == 200 and any(item.get("bytes") is not None for item in (((r.get("body") or {}).get("choices") or [{}])[0].get("logprobs") or {}).get("content", [])), "logprob bytes present", r))(_chat(h, "Say apple.", max_tokens=8, logprobs=True, top_logprobs=2)), applies=text)
     matrix.check("n_2", lambda: (lambda r: Outcome(r["status"] == 200 and len((r.get("body") or {}).get("choices", [])) == 2, "two choices", r))(_chat(h, "Name a boat.", n=2, temperature=0.7, seed=19, max_tokens=16)), applies=text)
 
@@ -473,22 +473,22 @@ def responses_checks(matrix: Matrix, *, applies: bool):
     h = matrix.http
     def response_text(body):
         return "".join(part.get("text", "") for item in body.get("output", []) if item.get("type") == "message" for part in item.get("content", []) if part.get("type") == "output_text")
-    matrix.check("responses_text", lambda: (lambda r: Outcome(r["status"] == 200 and bool(response_text(r["body"]).strip()), "output_text present", r))(h.post("/v1/responses", {"model": MODEL_ID, "input": "Reply with RESPONSES_OK.", "max_output_tokens": 64, "reasoning": {"effort": "none"}})), applies=applies)
-    matrix.check("responses_stream", lambda: (lambda r: Outcome(r["status"] == 200 and any(isinstance(e, dict) and e.get("type") == "response.completed" for e in r["events"]), "typed response.completed", r))(h.post("/v1/responses", {"model": MODEL_ID, "input": "Reply with STREAM_OK.", "stream": True, "reasoning": {"effort": "none"}}, stream=True)), applies=applies)
+    matrix.check("responses_text", lambda: (lambda r: Outcome(r["status"] == 200 and bool(response_text(r["body"]).strip()), "output_text present", r))(h.post("/v1/responses", {"model": MODEL_ID, "temperature": 0, "input": "Reply with RESPONSES_OK.", "max_output_tokens": 64, "reasoning": {"effort": "none"}})), applies=applies)
+    matrix.check("responses_stream", lambda: (lambda r: Outcome(r["status"] == 200 and any(isinstance(e, dict) and e.get("type") == "response.completed" for e in r["events"]), "typed response.completed", r))(h.post("/v1/responses", {"model": MODEL_ID, "temperature": 0, "input": "Reply with STREAM_OK.", "stream": True, "reasoning": {"effort": "none"}}, stream=True)), applies=applies)
 
     def tool_roundtrip():
-        first = h.post("/v1/responses", {"model": MODEL_ID, "input": "Use weather for Toronto.", "tools": [{"type": "function", "name": "weather", "description": "Weather", "parameters": TOOLS[0]["function"]["parameters"], "strict": True}], "tool_choice": {"type": "function", "name": "weather"}, "max_output_tokens": 256})
+        first = h.post("/v1/responses", {"model": MODEL_ID, "temperature": 0, "input": "Use weather for Toronto.", "tools": [{"type": "function", "name": "weather", "description": "Weather", "parameters": TOOLS[0]["function"]["parameters"], "strict": True}], "tool_choice": {"type": "function", "name": "weather"}, "max_output_tokens": 256})
         calls = [item for item in (first.get("body") or {}).get("output", []) if item.get("type") == "function_call"]
         if not calls:
             return Outcome(False, "no function_call", first)
         call = calls[0]
-        second = h.post("/v1/responses", {"model": MODEL_ID, "input": [{"type": "message", "role": "user", "content": "Use weather for Toronto."}, {"type": "function_call", "call_id": call["call_id"], "name": call["name"], "arguments": call["arguments"]}, {"type": "function_call_output", "call_id": call["call_id"], "output": "21 C"}], "max_output_tokens": 256, "reasoning": {"effort": "none"}})
+        second = h.post("/v1/responses", {"model": MODEL_ID, "temperature": 0, "input": [{"type": "message", "role": "user", "content": "Use weather for Toronto."}, {"type": "function_call", "call_id": call["call_id"], "name": call["name"], "arguments": call["arguments"]}, {"type": "function_call_output", "call_id": call["call_id"], "output": "21 C"}], "max_output_tokens": 256, "reasoning": {"effort": "none"}})
         return Outcome(second["status"] == 200 and bool(response_text(second["body"]).strip()), "function output accepted", {"first": first, "second": second})
     matrix.check("responses_function_roundtrip", tool_roundtrip, applies=applies and "tools" in matrix.args.capabilities, reason="adapter does not declare tools")
 
     state = {}
     def store_lifecycle():
-        first = h.post("/v1/responses", {"model": MODEL_ID, "input": "Remember CAMPAIGN_19.", "store": True, "max_output_tokens": 64, "reasoning": {"effort": "none"}})
+        first = h.post("/v1/responses", {"model": MODEL_ID, "temperature": 0, "input": "Remember CAMPAIGN_19.", "store": True, "max_output_tokens": 64, "reasoning": {"effort": "none"}})
         rid = (first.get("body") or {}).get("id"); state["id"] = rid
         get = h.get(f"/v1/responses/{rid}") if rid else {"status": -1}
         items = h.get(f"/v1/responses/{rid}/input_items") if rid else {"status": -1}
@@ -496,13 +496,13 @@ def responses_checks(matrix: Matrix, *, applies: bool):
         return Outcome(first["status"] == get["status"] == items["status"] == delete["status"] == 200, "store/retrieve/input_items/delete", {"create": first, "retrieve": get, "items": items, "delete": delete})
     matrix.check("responses_store_retrieve_input_items_delete", store_lifecycle, applies=applies)
     def previous():
-        first = h.post("/v1/responses", {"model": MODEL_ID, "input": "Remember BLUE.", "store": True, "max_output_tokens": 64, "reasoning": {"effort": "none"}})
+        first = h.post("/v1/responses", {"model": MODEL_ID, "temperature": 0, "input": "Remember BLUE.", "store": True, "max_output_tokens": 64, "reasoning": {"effort": "none"}})
         rid = (first.get("body") or {}).get("id")
-        second = h.post("/v1/responses", {"model": MODEL_ID, "input": "What color?", "previous_response_id": rid, "store": True, "max_output_tokens": 64, "reasoning": {"effort": "none"}})
+        second = h.post("/v1/responses", {"model": MODEL_ID, "temperature": 0, "input": "What color?", "previous_response_id": rid, "store": True, "max_output_tokens": 64, "reasoning": {"effort": "none"}})
         return Outcome(second["status"] == 200 and (second.get("body") or {}).get("previous_response_id") == rid, "previous response linked", {"first": first, "second": second})
     matrix.check("responses_previous_response_id", previous, applies=applies)
     def include():
-        r = h.post("/v1/responses", {"model": MODEL_ID, "input": "Say yes.", "include": ["reasoning.encrypted_content", "message.output_text.logprobs"], "top_logprobs": 1, "reasoning": {"effort": "low"}, "max_output_tokens": 256})
+        r = h.post("/v1/responses", {"model": MODEL_ID, "temperature": 0, "input": "Say yes.", "include": ["reasoning.encrypted_content", "message.output_text.logprobs"], "top_logprobs": 1, "reasoning": {"effort": "low"}, "max_output_tokens": 256})
         output = (r.get("body") or {}).get("output", [])
         encrypted = any(item.get("type") == "reasoning" and item.get("encrypted_content") for item in output)
         logs = any(part.get("logprobs") for item in output for part in item.get("content", []))
@@ -513,7 +513,7 @@ def responses_checks(matrix: Matrix, *, applies: bool):
 def messages_checks(matrix: Matrix, *, applies: bool):
     h = matrix.http
     def post(body, stream=False):
-        return h.post("/v1/messages", {"model": MODEL_ID, "max_tokens": 256, "thinking": {"type": "disabled"}, **body}, stream=stream)
+        return h.post("/v1/messages", {"model": MODEL_ID, "max_tokens": 256, "temperature": 0, "thinking": {"type": "disabled"}, **body}, stream=stream)
     def blocks(reply, kind):
         return [item for item in (reply.get("body") or {}).get("content", []) if item.get("type") == kind]
     matrix.check("messages_text", lambda: (lambda r: Outcome(r["status"] == 200 and bool(blocks(r, "text")), "text block", r))(post({"messages": [{"role": "user", "content": "Reply MESSAGE_OK."}]})), applies=applies)
@@ -538,7 +538,7 @@ def messages_checks(matrix: Matrix, *, applies: bool):
     matrix.check("messages_thinking_signature_roundtrip", thinking_signature, applies=applies and "thinking-deferral" in matrix.args.capabilities, reason="adapter does not declare budgeted thinking")
     matrix.check("messages_count_tokens", lambda: (lambda r: Outcome(r["status"] == 200 and (r.get("body") or {}).get("input_tokens", 0) > 0, "positive token count", r))(h.post("/v1/messages/count_tokens", {"model": MODEL_ID, "messages": [{"role": "user", "content": "Count this."}]})), applies=applies)
     matrix.check("messages_max_tokens_32000", lambda: (lambda r: Outcome(r["status"] == 200, "32K accepted by 2M ceiling", r))(post({"messages": [{"role": "user", "content": "Reply briefly."}], "max_tokens": 32000})), applies=applies)
-    matrix.check("messages_stop_sequences", lambda: (lambda r: Outcome(r["status"] == 200 and (r.get("body") or {}).get("stop_reason") == "stop_sequence", "stop_sequence reported", r))(post({"messages": [{"role": "user", "content": "Write A, then the exact marker END, then B."}], "stop_sequences": ["END"], "thinking": {"type": "disabled"}})), applies=applies)
+    matrix.check("messages_stop_sequences", lambda: (lambda r: Outcome(r["status"] == 200 and (r.get("body") or {}).get("stop_reason") == "stop_sequence", "stop_sequence reported", r))(post({"messages": [{"role": "user", "content": "Repeat this line exactly and output nothing else: A END B"}], "stop_sequences": ["END"], "thinking": {"type": "disabled"}})), applies=applies)
 
 
 def apc_checks(matrix: Matrix, *, applies: bool):

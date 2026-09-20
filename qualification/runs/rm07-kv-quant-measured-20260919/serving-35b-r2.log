@@ -1,0 +1,151 @@
+[cpg_job 2026-09-20T02:07:53+00:00 pid=47711] label=rm07-kvq-mtp-35b-r2 agent_id=job-rm07-kvq-mtp-35b-r2-47711 command=env PYTHONPATH=/private/tmp/mlx2-rm07-kv-quant-measured/src ~/Desktop/mlx2/.venv/bin/python /private/tmp/mlx2-rm07-kv-quant-measured/scripts/bench_kv_quant_mtp.py --i-own-the-gpu --model ~/mlx-models/Qwen3.6-35B-A3B-uncensored-heretic-Native-MTP-Preserved-oQ4e-mtp --arms ordinary_exact,ordinary_kv_q8,mtp_exact,mtp_kv_q8 --interleave 3 --lanes 1,4 --prompt-tokens 16384 --max-tokens 256 --out /private/tmp/mlx2-rm07-kv-quant-measured/qualification/runs/rm07-kv-quant-measured-20260919/serving-35b.json
+[cpg_job 2026-09-20T02:07:53+00:00 pid=47711] created workflow de3da0c2851d4ffbada94e2552bcadec (cpg-job drivers); record it as workflows.cpg-job-drivers in /Users/Shared/mlxuag/cpg-radio.json to reuse it
+[cpg_job 2026-09-20T02:07:53+00:00 pid=47711] registered worker d38f3f1bec2842278ca966cad684bdd7 as job-rm07-kvq-mtp-35b-r2-47711 in session 3c65a7827e83456a89fffdeefadec196
+[cpg_job 2026-09-20T02:07:53+00:00 pid=47711] took /Users/Shared/mlxuag/gpu.lock
+[cpg_job 2026-09-20T02:07:53+00:00 pid=47711] child pid 47718 started
+no reasoning signing key configured; using a random per-process reasoning signing key
+{"arm": "ordinary_exact", "lanes": 1, "wall_s": 6.426169291953556, "aggregate_tok_s": 39.8371079829078, "per_request_decode_tok_s": [106.2173506768603], "ttft_s": [4.006718417047523], "prompt_tokens": [15771], "completion_tokens": 256, "mtp_acceptance": null, "tokens_per_cycle": null, "approximate_kv": {"applied": 0, "declined": 0, "mtp_lanes": 0, "operation": null, "compose_mtp": null, "draft_cache": null}, "segmented": {"true_batched_engaged": 0, "true_batched_declined": 0, "b1_target_forwards": 0, "quantized_kv_segmented_layers": 0, "quantized_kv_segmented_attention_calls": 0}, "peak_rss_note": "see cpg_job wrapper memory samples", "round": 0}
+no reasoning signing key configured; using a random per-process reasoning signing key
+{"arm": "ordinary_kv_q8", "lanes": 1, "wall_s": 6.664300916949287, "aggregate_tok_s": 38.41363155569946, "per_request_decode_tok_s": [100.51802119257113], "ttft_s": [4.1159241249552], "prompt_tokens": [15771], "completion_tokens": 256, "mtp_acceptance": null, "tokens_per_cycle": null, "approximate_kv": {"applied": 1, "declined": 0, "mtp_lanes": 0, "operation": "kv_q8", "compose_mtp": false, "draft_cache": null}, "segmented": {"true_batched_engaged": 0, "true_batched_declined": 0, "b1_target_forwards": 0, "quantized_kv_segmented_layers": 0, "quantized_kv_segmented_attention_calls": 0}, "peak_rss_note": "see cpg_job wrapper memory samples", "round": 0}
+no reasoning signing key configured; using a random per-process reasoning signing key
+{"arm": "mtp_exact", "lanes": 1, "wall_s": 6.109072915976867, "aggregate_tok_s": 41.904885327279565, "per_request_decode_tok_s": [110.46009455163343], "ttft_s": [3.7900821670191363], "prompt_tokens": [15771], "completion_tokens": 256, "mtp_acceptance": 0.7623762376237624, "tokens_per_cycle": 2.5346534653465347, "approximate_kv": {"applied": 0, "declined": 0, "mtp_lanes": 0, "operation": null, "compose_mtp": null, "draft_cache": null}, "segmented": {"true_batched_engaged": 101, "true_batched_declined": 0, "b1_target_forwards": 0, "quantized_kv_segmented_layers": 0, "quantized_kv_segmented_attention_calls": 0}, "peak_rss_note": "see cpg_job wrapper memory samples", "round": 0}
+no reasoning signing key configured; using a random per-process reasoning signing key
+{"arm": "mtp_kv_q8", "lanes": 1, "wall_s": 6.318728582991753, "aggregate_tok_s": 40.51447955670707, "per_request_decode_tok_s": [99.61519738880655], "ttft_s": [3.7474443330429494], "prompt_tokens": [15771], "completion_tokens": 256, "mtp_acceptance": 0.7014218009478673, "tokens_per_cycle": 2.392523364485981, "approximate_kv": {"applied": 1, "declined": 0, "mtp_lanes": 1, "operation": "kv_q8", "compose_mtp": true, "draft_cache": "exact"}, "segmented": {"true_batched_engaged": 107, "true_batched_declined": 0, "b1_target_forwards": 0, "quantized_kv_segmented_layers": 10, "quantized_kv_segmented_attention_calls": 1070}, "peak_rss_note": "see cpg_job wrapper memory samples", "round": 0}
+no reasoning signing key configured; using a random per-process reasoning signing key
+{"arm": "ordinary_exact", "lanes": 4, "wall_s": 23.921015625004657, "aggregate_tok_s": 42.80754697261315, "per_request_decode_tok_s": [22.71581625419389, 22.684213870367135, 82.47647649373842, 82.01298524723133], "ttft_s": [7.876373292005155, 7.772297832998447, 20.680804167001043, 20.665807624987792], "prompt_tokens": [15771, 15771, 15771, 15771], "completion_tokens": 1024, "mtp_acceptance": null, "tokens_per_cycle": null, "approximate_kv": {"applied": 0, "declined": 0, "mtp_lanes": 0, "operation": null, "compose_mtp": null, "draft_cache": null}, "segmented": {"true_batched_engaged": 0, "true_batched_declined": 0, "b1_target_forwards": 0, "quantized_kv_segmented_layers": 0, "quantized_kv_segmented_attention_calls": 0}, "peak_rss_note": "see cpg_job wrapper memory samples", "round": 0}
+no reasoning signing key configured; using a random per-process reasoning signing key
+{"arm": "ordinary_kv_q8", "lanes": 4, "wall_s": 25.63405845797388, "aggregate_tok_s": 39.94685436482137, "per_request_decode_tok_s": [20.509642450076164, 20.509629852087254, 72.26361965342836, 72.26373098925218], "ttft_s": [8.485606709029526, 8.379447291023098, 21.97047904098872, 21.955549625039566], "prompt_tokens": [15771, 15771, 15771, 15771], "completion_tokens": 1024, "mtp_acceptance": null, "tokens_per_cycle": null, "approximate_kv": {"applied": 4, "declined": 0, "mtp_lanes": 0, "operation": "kv_q8", "compose_mtp": false, "draft_cache": null}, "segmented": {"true_batched_engaged": 0, "true_batched_declined": 0, "b1_target_forwards": 0, "quantized_kv_segmented_layers": 0, "quantized_kv_segmented_attention_calls": 0}, "peak_rss_note": "see cpg_job wrapper memory samples", "round": 0}
+no reasoning signing key configured; using a random per-process reasoning signing key
+{"arm": "mtp_exact", "lanes": 4, "wall_s": 31.442312875005882, "aggregate_tok_s": 32.56757872968047, "per_request_decode_tok_s": [33.86472342692548, 31.669960250266254, 32.3864803511306, 107.77101647904568], "ttft_s": [4.5287366670090705, 12.701723416044842, 20.78137170802802, 28.92938587500248], "prompt_tokens": [15771, 15771, 15771, 15771], "completion_tokens": 1024, "mtp_acceptance": 0.7696139476961394, "tokens_per_cycle": 2.5472636815920398, "approximate_kv": {"applied": 0, "declined": 0, "mtp_lanes": 0, "operation": null, "compose_mtp": null, "draft_cache": null}, "segmented": {"true_batched_engaged": 402, "true_batched_declined": 0, "b1_target_forwards": 0, "quantized_kv_segmented_layers": 0, "quantized_kv_segmented_attention_calls": 0}, "peak_rss_note": "see cpg_job wrapper memory samples", "round": 0}
+no reasoning signing key configured; using a random per-process reasoning signing key
+{"arm": "mtp_kv_q8", "lanes": 4, "wall_s": 32.15798937500222, "aggregate_tok_s": 31.842786812909363, "per_request_decode_tok_s": [30.094481831554717, 29.383031375661805, 24.900399111257908, 73.22945184825089], "ttft_s": [4.452271833026316, 13.564867416978814, 20.78992708300939, 28.529839124996215], "prompt_tokens": [15771, 15771, 15771, 15771], "completion_tokens": 1024, "mtp_acceptance": 0.7365853658536585, "tokens_per_cycle": 3.282051282051282, "approximate_kv": {"applied": 4, "declined": 0, "mtp_lanes": 4, "operation": "kv_q8", "compose_mtp": true, "draft_cache": "exact"}, "segmented": {"true_batched_engaged": 312, "true_batched_declined": 0, "b1_target_forwards": 0, "quantized_kv_segmented_layers": 30, "quantized_kv_segmented_attention_calls": 3120}, "peak_rss_note": "see cpg_job wrapper memory samples", "round": 0}
+no reasoning signing key configured; using a random per-process reasoning signing key
+{"arm": "ordinary_exact", "lanes": 1, "wall_s": 6.80255316599505, "aggregate_tok_s": 37.63292895375017, "per_request_decode_tok_s": [104.4703196660389], "ttft_s": [4.350724040996283], "prompt_tokens": [15771], "completion_tokens": 256, "mtp_acceptance": null, "tokens_per_cycle": null, "approximate_kv": {"applied": 0, "declined": 0, "mtp_lanes": 0, "operation": null, "compose_mtp": null, "draft_cache": null}, "segmented": {"true_batched_engaged": 0, "true_batched_declined": 0, "b1_target_forwards": 0, "quantized_kv_segmented_layers": 0, "quantized_kv_segmented_attention_calls": 0}, "peak_rss_note": "see cpg_job wrapper memory samples", "round": 1}
+no reasoning signing key configured; using a random per-process reasoning signing key
+{"arm": "ordinary_kv_q8", "lanes": 1, "wall_s": 7.007605499995407, "aggregate_tok_s": 36.53173683937656, "per_request_decode_tok_s": [98.47230413684649], "ttft_s": [4.406451374990866], "prompt_tokens": [15771], "completion_tokens": 256, "mtp_acceptance": null, "tokens_per_cycle": null, "approximate_kv": {"applied": 1, "declined": 0, "mtp_lanes": 0, "operation": "kv_q8", "compose_mtp": false, "draft_cache": null}, "segmented": {"true_batched_engaged": 0, "true_batched_declined": 0, "b1_target_forwards": 0, "quantized_kv_segmented_layers": 0, "quantized_kv_segmented_attention_calls": 0}, "peak_rss_note": "see cpg_job wrapper memory samples", "round": 1}
+no reasoning signing key configured; using a random per-process reasoning signing key
+{"arm": "mtp_exact", "lanes": 1, "wall_s": 6.311776207992807, "aggregate_tok_s": 40.55910595749876, "per_request_decode_tok_s": [110.68589438586402], "ttft_s": [3.997507374966517], "prompt_tokens": [15771], "completion_tokens": 256, "mtp_acceptance": 0.7623762376237624, "tokens_per_cycle": 2.5346534653465347, "approximate_kv": {"applied": 0, "declined": 0, "mtp_lanes": 0, "operation": null, "compose_mtp": null, "draft_cache": null}, "segmented": {"true_batched_engaged": 101, "true_batched_declined": 0, "b1_target_forwards": 0, "quantized_kv_segmented_layers": 0, "quantized_kv_segmented_attention_calls": 0}, "peak_rss_note": "see cpg_job wrapper memory samples", "round": 1}
+no reasoning signing key configured; using a random per-process reasoning signing key
+{"arm": "mtp_kv_q8", "lanes": 1, "wall_s": 6.418093999964185, "aggregate_tok_s": 39.88723131843014, "per_request_decode_tok_s": [99.32735141314994], "ttft_s": [3.8390097920200787], "prompt_tokens": [15771], "completion_tokens": 256, "mtp_acceptance": 0.7014218009478673, "tokens_per_cycle": 2.392523364485981, "approximate_kv": {"applied": 1, "declined": 0, "mtp_lanes": 1, "operation": "kv_q8", "compose_mtp": true, "draft_cache": "exact"}, "segmented": {"true_batched_engaged": 107, "true_batched_declined": 0, "b1_target_forwards": 0, "quantized_kv_segmented_layers": 10, "quantized_kv_segmented_attention_calls": 1070}, "peak_rss_note": "see cpg_job wrapper memory samples", "round": 1}
+no reasoning signing key configured; using a random per-process reasoning signing key
+{"arm": "ordinary_exact", "lanes": 4, "wall_s": 24.090173791977577, "aggregate_tok_s": 42.5069577680261, "per_request_decode_tok_s": [22.542464476266247, 22.51096697996867, 82.1688247131332, 81.69081152770363], "ttft_s": [7.968761208001524, 7.861166167014744, 20.833756875013933, 20.818290875002276], "prompt_tokens": [15771, 15771, 15771, 15771], "completion_tokens": 1024, "mtp_acceptance": null, "tokens_per_cycle": null, "approximate_kv": {"applied": 0, "declined": 0, "mtp_lanes": 0, "operation": null, "compose_mtp": null, "draft_cache": null}, "segmented": {"true_batched_engaged": 0, "true_batched_declined": 0, "b1_target_forwards": 0, "quantized_kv_segmented_layers": 0, "quantized_kv_segmented_attention_calls": 0}, "peak_rss_note": "see cpg_job wrapper memory samples", "round": 1}
+no reasoning signing key configured; using a random per-process reasoning signing key
+{"arm": "ordinary_kv_q8", "lanes": 4, "wall_s": 25.46653979102848, "aggregate_tok_s": 40.20962440923134, "per_request_decode_tok_s": [19.748877149229095, 19.748888321124173, 70.89652275675944, 70.89646713304577], "ttft_s": [8.250561958993785, 8.148534833977465, 21.738481333013624, 21.723435708961915], "prompt_tokens": [15771, 15771, 15771, 15771], "completion_tokens": 1024, "mtp_acceptance": null, "tokens_per_cycle": null, "approximate_kv": {"applied": 4, "declined": 0, "mtp_lanes": 0, "operation": "kv_q8", "compose_mtp": false, "draft_cache": null}, "segmented": {"true_batched_engaged": 0, "true_batched_declined": 0, "b1_target_forwards": 0, "quantized_kv_segmented_layers": 0, "quantized_kv_segmented_attention_calls": 0}, "peak_rss_note": "see cpg_job wrapper memory samples", "round": 1}
+no reasoning signing key configured; using a random per-process reasoning signing key
+{"arm": "mtp_exact", "lanes": 4, "wall_s": 31.24089695897419, "aggregate_tok_s": 32.77754801165682, "per_request_decode_tok_s": [33.76638186970703, 31.829413900522834, 33.27383523180503, 109.90275714954211], "ttft_s": [4.482955334009603, 12.811805583012756, 20.846046124992426, 28.78204995795386], "prompt_tokens": [15771, 15771, 15771, 15771], "completion_tokens": 1024, "mtp_acceptance": 0.7696139476961394, "tokens_per_cycle": 2.5472636815920398, "approximate_kv": {"applied": 0, "declined": 0, "mtp_lanes": 0, "operation": null, "compose_mtp": null, "draft_cache": null}, "segmented": {"true_batched_engaged": 402, "true_batched_declined": 0, "b1_target_forwards": 0, "quantized_kv_segmented_layers": 0, "quantized_kv_segmented_attention_calls": 0}, "peak_rss_note": "see cpg_job wrapper memory samples", "round": 1}
+no reasoning signing key configured; using a random per-process reasoning signing key
+{"arm": "mtp_kv_q8", "lanes": 4, "wall_s": 32.65362720901612, "aggregate_tok_s": 31.359456437882628, "per_request_decode_tok_s": [30.006889131680516, 29.911357225559215, 26.237542435880464, 76.79416748371504], "ttft_s": [4.47948987496784, 13.799426499987021, 21.469392541970592, 29.185796207981184], "prompt_tokens": [15771, 15771, 15771, 15771], "completion_tokens": 1024, "mtp_acceptance": 0.7365853658536585, "tokens_per_cycle": 3.282051282051282, "approximate_kv": {"applied": 4, "declined": 0, "mtp_lanes": 4, "operation": "kv_q8", "compose_mtp": true, "draft_cache": "exact"}, "segmented": {"true_batched_engaged": 312, "true_batched_declined": 0, "b1_target_forwards": 0, "quantized_kv_segmented_layers": 30, "quantized_kv_segmented_attention_calls": 3120}, "peak_rss_note": "see cpg_job wrapper memory samples", "round": 1}
+no reasoning signing key configured; using a random per-process reasoning signing key
+{"arm": "ordinary_exact", "lanes": 1, "wall_s": 6.761887417000253, "aggregate_tok_s": 37.85925204202353, "per_request_decode_tok_s": [105.36512382352804], "ttft_s": [4.330750665976666], "prompt_tokens": [15771], "completion_tokens": 256, "mtp_acceptance": null, "tokens_per_cycle": null, "approximate_kv": {"applied": 0, "declined": 0, "mtp_lanes": 0, "operation": null, "compose_mtp": null, "draft_cache": null}, "segmented": {"true_batched_engaged": 0, "true_batched_declined": 0, "b1_target_forwards": 0, "quantized_kv_segmented_layers": 0, "quantized_kv_segmented_attention_calls": 0}, "peak_rss_note": "see cpg_job wrapper memory samples", "round": 2}
+no reasoning signing key configured; using a random per-process reasoning signing key
+{"arm": "ordinary_kv_q8", "lanes": 1, "wall_s": 7.020552541012876, "aggregate_tok_s": 36.46436637351426, "per_request_decode_tok_s": [98.89081175900506], "ttft_s": [4.430600541993044], "prompt_tokens": [15771], "completion_tokens": 256, "mtp_acceptance": null, "tokens_per_cycle": null, "approximate_kv": {"applied": 1, "declined": 0, "mtp_lanes": 0, "operation": "kv_q8", "compose_mtp": false, "draft_cache": null}, "segmented": {"true_batched_engaged": 0, "true_batched_declined": 0, "b1_target_forwards": 0, "quantized_kv_segmented_layers": 0, "quantized_kv_segmented_attention_calls": 0}, "peak_rss_note": "see cpg_job wrapper memory samples", "round": 2}
+no reasoning signing key configured; using a random per-process reasoning signing key
+{"arm": "mtp_exact", "lanes": 1, "wall_s": 6.191237582999747, "aggregate_tok_s": 41.34876049708372, "per_request_decode_tok_s": [110.04379415513152], "ttft_s": [3.8635287919896655], "prompt_tokens": [15771], "completion_tokens": 256, "mtp_acceptance": 0.7623762376237624, "tokens_per_cycle": 2.5346534653465347, "approximate_kv": {"applied": 0, "declined": 0, "mtp_lanes": 0, "operation": null, "compose_mtp": null, "draft_cache": null}, "segmented": {"true_batched_engaged": 101, "true_batched_declined": 0, "b1_target_forwards": 0, "quantized_kv_segmented_layers": 0, "quantized_kv_segmented_attention_calls": 0}, "peak_rss_note": "see cpg_job wrapper memory samples", "round": 2}
+no reasoning signing key configured; using a random per-process reasoning signing key
+{"arm": "mtp_kv_q8", "lanes": 1, "wall_s": 6.382168916985393, "aggregate_tok_s": 40.11175563195861, "per_request_decode_tok_s": [99.64287662012286], "ttft_s": [3.811331499950029], "prompt_tokens": [15771], "completion_tokens": 256, "mtp_acceptance": 0.7014218009478673, "tokens_per_cycle": 2.392523364485981, "approximate_kv": {"applied": 1, "declined": 0, "mtp_lanes": 1, "operation": "kv_q8", "compose_mtp": true, "draft_cache": "exact"}, "segmented": {"true_batched_engaged": 107, "true_batched_declined": 0, "b1_target_forwards": 0, "quantized_kv_segmented_layers": 10, "quantized_kv_segmented_attention_calls": 1070}, "peak_rss_note": "see cpg_job wrapper memory samples", "round": 2}
+no reasoning signing key configured; using a random per-process reasoning signing key
+{"arm": "ordinary_exact", "lanes": 4, "wall_s": 24.28902637498686, "aggregate_tok_s": 42.158956237724205, "per_request_decode_tok_s": [22.883847917407863, 22.851299624770448, 82.41204606539536, 81.93910599766882], "ttft_s": [7.986632541986182, 7.876825166982599, 21.040003166999668, 21.024733458005358], "prompt_tokens": [15771, 15771, 15771, 15771], "completion_tokens": 1024, "mtp_acceptance": null, "tokens_per_cycle": null, "approximate_kv": {"applied": 0, "declined": 0, "mtp_lanes": 0, "operation": null, "compose_mtp": null, "draft_cache": null}, "segmented": {"true_batched_engaged": 0, "true_batched_declined": 0, "b1_target_forwards": 0, "quantized_kv_segmented_layers": 0, "quantized_kv_segmented_attention_calls": 0}, "peak_rss_note": "see cpg_job wrapper memory samples", "round": 2}
+no reasoning signing key configured; using a random per-process reasoning signing key
+{"arm": "ordinary_kv_q8", "lanes": 4, "wall_s": 25.468497750000097, "aggregate_tok_s": 40.206533186669645, "per_request_decode_tok_s": [19.876636805914583, 19.87662278825407, 71.81197941437708, 71.81213972321542], "ttft_s": [8.370998208003584, 8.26523866696516, 21.782971791981254, 21.767805667012], "prompt_tokens": [15771, 15771, 15771, 15771], "completion_tokens": 1024, "mtp_acceptance": null, "tokens_per_cycle": null, "approximate_kv": {"applied": 4, "declined": 0, "mtp_lanes": 0, "operation": "kv_q8", "compose_mtp": false, "draft_cache": null}, "segmented": {"true_batched_engaged": 0, "true_batched_declined": 0, "b1_target_forwards": 0, "quantized_kv_segmented_layers": 0, "quantized_kv_segmented_attention_calls": 0}, "peak_rss_note": "see cpg_job wrapper memory samples", "round": 2}
+no reasoning signing key configured; using a random per-process reasoning signing key
+{"arm": "mtp_exact", "lanes": 4, "wall_s": 31.7020947089768, "aggregate_tok_s": 32.30070471368704, "per_request_decode_tok_s": [34.04849111245483, 32.79856528631909, 31.791599772667652, 104.92164303617665], "ttft_s": [4.419493124994915, 12.555880541040096, 21.082604291965254, 29.12215195799945], "prompt_tokens": [15771, 15771, 15771, 15771], "completion_tokens": 1024, "mtp_acceptance": 0.7546239210850801, "tokens_per_cycle": 2.5098039215686274, "approximate_kv": {"applied": 0, "declined": 0, "mtp_lanes": 0, "operation": null, "compose_mtp": null, "draft_cache": null}, "segmented": {"true_batched_engaged": 408, "true_batched_declined": 0, "b1_target_forwards": 0, "quantized_kv_segmented_layers": 0, "quantized_kv_segmented_attention_calls": 0}, "peak_rss_note": "see cpg_job wrapper memory samples", "round": 2}
+no reasoning signing key configured; using a random per-process reasoning signing key
+{"arm": "mtp_kv_q8", "lanes": 4, "wall_s": 32.193099041003734, "aggregate_tok_s": 31.808059196033, "per_request_decode_tok_s": [30.211134376394316, 30.14797237210157, 25.379879563431732, 72.34144568854926], "ttft_s": [4.575776792014949, 13.816179207991809, 21.078125, 28.513869207992684], "prompt_tokens": [15771, 15771, 15771, 15771], "completion_tokens": 1024, "mtp_acceptance": 0.7365853658536585, "tokens_per_cycle": 3.282051282051282, "approximate_kv": {"applied": 4, "declined": 0, "mtp_lanes": 4, "operation": "kv_q8", "compose_mtp": true, "draft_cache": "exact"}, "segmented": {"true_batched_engaged": 312, "true_batched_declined": 0, "b1_target_forwards": 0, "quantized_kv_segmented_layers": 30, "quantized_kv_segmented_attention_calls": 3120}, "peak_rss_note": "see cpg_job wrapper memory samples", "round": 2}
+{
+  "ordinary_exact@1": {
+    "aggregate_tok_s": [
+      39.8371079829078,
+      37.63292895375017,
+      37.85925204202353
+    ],
+    "acceptance": [],
+    "aggregate_tok_s_median": 37.85925204202353
+  },
+  "ordinary_kv_q8@1": {
+    "aggregate_tok_s": [
+      38.41363155569946,
+      36.53173683937656,
+      36.46436637351426
+    ],
+    "acceptance": [],
+    "aggregate_tok_s_median": 36.53173683937656
+  },
+  "mtp_exact@1": {
+    "aggregate_tok_s": [
+      41.904885327279565,
+      40.55910595749876,
+      41.34876049708372
+    ],
+    "acceptance": [
+      0.7623762376237624,
+      0.7623762376237624,
+      0.7623762376237624
+    ],
+    "aggregate_tok_s_median": 41.34876049708372,
+    "acceptance_median": 0.7623762376237624
+  },
+  "mtp_kv_q8@1": {
+    "aggregate_tok_s": [
+      40.51447955670707,
+      39.88723131843014,
+      40.11175563195861
+    ],
+    "acceptance": [
+      0.7014218009478673,
+      0.7014218009478673,
+      0.7014218009478673
+    ],
+    "aggregate_tok_s_median": 40.11175563195861,
+    "acceptance_median": 0.7014218009478673
+  },
+  "ordinary_exact@4": {
+    "aggregate_tok_s": [
+      42.80754697261315,
+      42.5069577680261,
+      42.158956237724205
+    ],
+    "acceptance": [],
+    "aggregate_tok_s_median": 42.5069577680261
+  },
+  "ordinary_kv_q8@4": {
+    "aggregate_tok_s": [
+      39.94685436482137,
+      40.20962440923134,
+      40.206533186669645
+    ],
+    "acceptance": [],
+    "aggregate_tok_s_median": 40.206533186669645
+  },
+  "mtp_exact@4": {
+    "aggregate_tok_s": [
+      32.56757872968047,
+      32.77754801165682,
+      32.30070471368704
+    ],
+    "acceptance": [
+      0.7696139476961394,
+      0.7696139476961394,
+      0.7546239210850801
+    ],
+    "aggregate_tok_s_median": 32.56757872968047,
+    "acceptance_median": 0.7696139476961394
+  },
+  "mtp_kv_q8@4": {
+    "aggregate_tok_s": [
+      31.842786812909363,
+      31.359456437882628,
+      31.808059196033
+    ],
+    "acceptance": [
+      0.7365853658536585,
+      0.7365853658536585,
+      0.7365853658536585
+    ],
+    "aggregate_tok_s_median": 31.808059196033,
+    "acceptance_median": 0.7365853658536585
+  }
+}
+[cpg_job 2026-09-20T02:16:24+00:00 pid=47711] child exited rc=0
+[cpg_job 2026-09-20T02:16:25+00:00 pid=47711] worker d38f3f1bec2842278ca966cad684bdd7 closed completed
+[cpg_job 2026-09-20T02:16:25+00:00 pid=47711] released /Users/Shared/mlxuag/gpu.lock
+[cpg_job 2026-09-20T02:16:25+00:00 pid=47711] wrote /private/tmp/mlx2-rm07-kv-quant-measured/qualification/runs/rm07-kv-quant-measured-20260919/serving-35b-r2.log.done

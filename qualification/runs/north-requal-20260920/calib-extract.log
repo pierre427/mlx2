@@ -1,0 +1,30 @@
+[extract] trace  0 close@49
+[extract] trace  1 close@51
+[extract] trace  2 close@53
+[extract] trace  3 close@48
+[extract] trace  6 close@52
+[extract] trace  7 close@45
+[extract] trace  8 close@90
+[extract] trace  9 close@164
+[extract] trace 10 close@100
+[extract] trace 11 close@46
+[extract] trace 12 close@70
+[extract] trace 13 close@86
+[extract] trace 14 close@55
+[extract] trace 15 close@49
+[extract] trace 16 close@57
+[extract] trace 17 close@60
+[extract] trace 18 close@151
+[extract] trace 19 close@70
+[extract] trace 20 close@112
+[extract] trace 22 close@57
+[extract] trace 23 close@113
+  L12 rms=   25.93 rel=0.224 consistency=+0.409
+  L16 rms=   31.17 rel=0.251 consistency=+0.447
+  L20 rms=   37.71 rel=0.267 consistency=+0.470
+  L24 rms=   44.01 rel=0.281 consistency=+0.489
+  L28 rms=   54.63 rel=0.301 consistency=+0.511
+  L32 rms=   67.84 rel=0.317 consistency=+0.518
+  L36 rms=   84.71 rel=0.314 consistency=+0.513
+  L40 rms=  103.41 rel=0.301 consistency=+0.500
+  L44 rms=  126.75 rel=0.288 consistency=+0.500

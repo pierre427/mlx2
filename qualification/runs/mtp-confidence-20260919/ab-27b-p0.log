@@ -1,0 +1,224 @@
+[cpg_job 2026-09-19T21:35:36+00:00 pid=61647] label=rm10-ab-27b-p0 agent_id=job-rm10-ab-27b-p0-61647 command=env PYTHONPATH=/private/tmp/mlx2-rm10-dspark-confidence/src ~/Desktop/mlx2/.venv/bin/python /private/tmp/mlx2-rm10-dspark-confidence/scripts/mtp_confidence_gpu.py ab --i-own-the-gpu --model ~/mlx-models/Qwen3.8-27B-oQ4e-mtp --execution-policy /private/tmp/mlx2-rm10-dspark-confidence/qualification/runs/mtp-confidence-20260919/nd3.json --arms ewma,fixed,top1,trained --pairs 1 --pair-start 0 --top1-model /private/tmp/mlx2-rm10-dspark-confidence/qualification/runs/mtp-confidence-20260919/top1sts-27b.json --confidence-model /private/tmp/mlx2-rm10-dspark-confidence/qualification/runs/mtp-confidence-20260919/conf-27b.json --cost-profile /private/tmp/mlx2-rm10-dspark-confidence/qualification/runs/mtp-confidence-20260919/cost-27b.json --lookahead 2 --port 8310 --out /private/tmp/mlx2-rm10-dspark-confidence/qualification/runs/mtp-confidence-20260919/ab-27b
+[cpg_job 2026-09-19T21:35:37+00:00 pid=61647] created workflow 7bd0658813464324aa3a4540ad43dc34 (cpg-job drivers); record it as workflows.cpg-job-drivers in /Users/Shared/mlxuag/cpg-radio.json to reuse it
+[cpg_job 2026-09-19T21:35:37+00:00 pid=61647] registered worker 1b3368aad73643b7ae8eb5a764f710ed as job-rm10-ab-27b-p0-61647 in session 3c65a7827e83456a89fffdeefadec196
+[cpg_job 2026-09-19T21:35:37+00:00 pid=61647] took /Users/Shared/mlxuag/gpu.lock
+[cpg_job 2026-09-19T21:35:37+00:00 pid=61647] child pid 61656 started
+round=0 width=1 aggregate=46.80 tokens/s
+round=0 width=2 aggregate=59.73 tokens/s
+round=0 width=4 aggregate=80.12 tokens/s
+round=1 width=4 aggregate=82.22 tokens/s
+round=1 width=2 aggregate=61.03 tokens/s
+round=1 width=1 aggregate=46.10 tokens/s
+round=2 width=1 aggregate=46.25 tokens/s
+round=2 width=2 aggregate=61.16 tokens/s
+round=2 width=4 aggregate=81.92 tokens/s
+round=0 width=1 aggregate=46.59 tokens/s
+round=0 width=2 aggregate=60.93 tokens/s
+round=0 width=4 aggregate=81.92 tokens/s
+round=1 width=4 aggregate=81.52 tokens/s
+round=1 width=2 aggregate=61.10 tokens/s
+round=1 width=1 aggregate=46.77 tokens/s
+round=2 width=1 aggregate=47.13 tokens/s
+round=2 width=2 aggregate=60.65 tokens/s
+round=2 width=4 aggregate=81.56 tokens/s
+round=0 width=1 aggregate=42.05 tokens/s
+round=0 width=2 aggregate=58.31 tokens/s
+round=0 width=4 aggregate=80.47 tokens/s
+round=1 width=4 aggregate=79.92 tokens/s
+round=1 width=2 aggregate=58.33 tokens/s
+round=1 width=1 aggregate=42.97 tokens/s
+round=2 width=1 aggregate=40.37 tokens/s
+round=2 width=2 aggregate=57.65 tokens/s
+round=2 width=4 aggregate=78.27 tokens/s
+round=0 width=1 aggregate=42.78 tokens/s
+round=0 width=2 aggregate=58.62 tokens/s
+round=0 width=4 aggregate=80.97 tokens/s
+round=1 width=4 aggregate=80.21 tokens/s
+round=1 width=2 aggregate=57.70 tokens/s
+round=1 width=1 aggregate=41.55 tokens/s
+round=2 width=1 aggregate=41.41 tokens/s
+round=2 width=2 aggregate=57.03 tokens/s
+round=2 width=4 aggregate=80.86 tokens/s
+{
+ "median_tps": {
+  "ewma": {
+   "1": 46.25341329706699,
+   "2": 61.03424070575989,
+   "4": 81.92126194570902
+  },
+  "fixed": {
+   "1": 46.76532668855052,
+   "2": 60.926405434108524,
+   "4": 81.56165073118993
+  },
+  "top1": {
+   "1": 42.05020673925688,
+   "2": 58.31283873710169,
+   "4": 79.92314335810214
+  },
+  "trained": {
+   "1": 41.55489432652044,
+   "2": 57.700822456287156,
+   "4": 80.85804174504919
+  }
+ },
+ "delta_vs": "ewma",
+ "deltas": {
+  "fixed": {
+   "1": 0.01106758085496784,
+   "2": -0.001766799593219015,
+   "4": -0.004389717711592578
+  },
+  "top1": {
+   "1": -0.09087343523848967,
+   "2": -0.04458811868861956,
+   "4": -0.02439072031057188
+  },
+  "trained": {
+   "1": -0.1015821025006276,
+   "2": -0.054615543847638226,
+   "4": -0.012978562285386297
+  }
+ },
+ "deltas_vs_fixed": {
+  "ewma": {
+   "1": -0.010946430351974068,
+   "2": 0.001769926698990787,
+   "4": 0.004409072294334626
+  },
+  "top1": {
+   "1": -0.10082512586078096,
+   "2": -0.04289710969135352,
+   "4": -0.020089188465397423
+  },
+  "trained": {
+   "1": -0.11141657144257144,
+   "2": -0.052942282657883255,
+   "4": -0.008626713410444409
+  }
+ },
+ "pairs": [
+  0
+ ],
+ "width1_greedy_identical": true,
+ "width1_matches_ordinary": null,
+ "width1_output_sets": {
+  "ewma": [
+   "34b6d91de335213bfd1543b2119fa8b4d7372819829e66bf02afd2b742449a47"
+  ],
+  "fixed": [
+   "34b6d91de335213bfd1543b2119fa8b4d7372819829e66bf02afd2b742449a47"
+  ],
+  "top1": [
+   "34b6d91de335213bfd1543b2119fa8b4d7372819829e66bf02afd2b742449a47"
+  ],
+  "trained": [
+   "34b6d91de335213bfd1543b2119fa8b4d7372819829e66bf02afd2b742449a47"
+  ]
+ },
+ "counters": {
+  "ewma": [
+   {
+    "adaptive_mtp_boundaries": 83,
+    "adaptive_mtp_depth_changes": 4,
+    "adaptive_mtp_parks": 0,
+    "adaptive_mtp_reentries": 0,
+    "adaptive_mtp_probes": 0,
+    "routes": {
+     "segmented_self_mtp": 25
+    }
+   }
+  ],
+  "fixed": [
+   {
+    "routes": {
+     "segmented_self_mtp": 25
+    }
+   }
+  ],
+  "top1": [
+   {
+    "mtp_confidence_feature_cycles": 991,
+    "adaptive_mtp_boundaries": 82,
+    "adaptive_mtp_depth_changes": 19,
+    "adaptive_mtp_parks": 0,
+    "adaptive_mtp_reentries": 0,
+    "adaptive_mtp_probes": 0,
+    "adaptive_mtp_confidence_cycles": 81,
+    "adaptive_mtp_confidence_positions": 873,
+    "adaptive_mtp_confidence_lookahead_positions": 70,
+    "adaptive_mtp_confidence_fallbacks": 0,
+    "routes": {
+     "segmented_self_mtp": 25
+    }
+   }
+  ],
+  "trained": [
+   {
+    "mtp_confidence_feature_cycles": 1005,
+    "adaptive_mtp_boundaries": 82,
+    "adaptive_mtp_depth_changes": 9,
+    "adaptive_mtp_parks": 0,
+    "adaptive_mtp_reentries": 0,
+    "adaptive_mtp_probes": 0,
+    "adaptive_mtp_confidence_cycles": 81,
+    "adaptive_mtp_confidence_positions": 786,
+    "adaptive_mtp_confidence_lookahead_positions": 74,
+    "adaptive_mtp_confidence_fallbacks": 0,
+    "routes": {
+     "segmented_self_mtp": 25
+    }
+   }
+  ]
+ },
+ "samples": {
+  "ewma": {
+   "1": [
+    46.25341329706699
+   ],
+   "2": [
+    61.03424070575989
+   ],
+   "4": [
+    81.92126194570902
+   ]
+  },
+  "fixed": {
+   "1": [
+    46.76532668855052
+   ],
+   "2": [
+    60.926405434108524
+   ],
+   "4": [
+    81.56165073118993
+   ]
+  },
+  "top1": {
+   "1": [
+    42.05020673925688
+   ],
+   "2": [
+    58.31283873710169
+   ],
+   "4": [
+    79.92314335810214
+   ]
+  },
+  "trained": {
+   "1": [
+    41.55489432652044
+   ],
+   "2": [
+    57.700822456287156
+   ],
+   "4": [
+    80.85804174504919
+   ]
+  }
+ }
+}
+[cpg_job 2026-09-19T21:41:24+00:00 pid=61647] child exited rc=0
+[cpg_job 2026-09-19T21:41:24+00:00 pid=61647] worker 1b3368aad73643b7ae8eb5a764f710ed closed completed
+[cpg_job 2026-09-19T21:41:24+00:00 pid=61647] released /Users/Shared/mlxuag/gpu.lock
+[cpg_job 2026-09-19T21:41:24+00:00 pid=61647] wrote /private/tmp/mlx2-rm10-dspark-confidence/qualification/runs/mtp-confidence-20260919/ab-27b-p0.log.done

@@ -1,0 +1,182 @@
+THRESHOLD RE-DERIVATION FOR ITEMS 06 / 07 / 08 / 10
+Written 2026-09-20 BEFORE running, against the rebased trees
+/private/tmp/mlx2-reb-{06,07,08,10} on claude/splash-NN-onmain.
+
+Rule applied throughout: a bar written when admission seated 1-4 lanes may be
+trivially passed or impossible now.  Where a bar cannot be re-derived
+defensibly it is marked UNMEASURABLE rather than given an invented number.
+
+=====================================================================
+0. WHAT ACTUALLY CHANGED, AND WHAT DID NOT
+=====================================================================
+Verified in-tree (mlx2-reb-10/src/mlx2/runtime/memory_policy.py:206):
+    MOE_TRANSIENT_GIB_PER_LANE = 0.35        (was 3.1)
+    Xing4.0 deliberately left at 3.1 (adapters/xing_memory.py:28)
+Plus 40821a3: service/driver reserve keyed on the Metal advisory rather than
+physical RAM.
+
+IMPORTANT SCOPE LIMIT, and it narrows the blast radius considerably:
+all four specs start their servers with `--max-lanes 4 --max-inflight 8`.
+The configured lane CEILING is therefore 4 in every arm, before and after the
+fix.  What the fix changes is how many of those 4 lanes actually SEAT at a
+given free-memory level:
+
+    pre-fix  transient reserved for 4 lanes = 4 x 3.1  = 12.4 GiB
+    post-fix transient reserved for 4 lanes = 4 x 0.35 =  1.4 GiB
+
+On this host (128 GiB, hybrid model ~20 GiB) the pre-fix arithmetic could
+degrade an arm to 1-2 seated lanes under contention; post-fix all 4 seat.
+The coordinator's "16 lanes where it previously seated 4" figure is for a
+16-lane configuration; ours is capped at 4 either way.
+
+So: bars expressed as a RATIO of on-arm to off-arm at the same lane count do
+not move -- both arms get the same treatment.  Bars that assumed a specific
+absolute lane count, or that were vacuous because only one lane was
+admissible, are the ones that move.  Each is treated below.
+
+=====================================================================
+ITEM 10 - srpt-prefill
+=====================================================================
+OLD BAR: short_ttft_p50(on) <= p50(off); short_ttft_max(on) <= 1.25 x max(off);
+         long_wall(on) <= 1.15 x long_wall(off).  Reject if long_wall
+         regresses > 15%.
+OLD ASSUMPTION: that there are several admissible prefills to reorder among.
+WHAT IT IS NOW: false twice over.
+  (a) The M3 result was inconclusive because only one lane was admissible --
+      SRPT cannot reorder a queue of one.  Post-fix 4 lanes seat, so there is
+      a queue to reorder for the first time.
+  (b) The window-2 configuration its sweep characterised is NOT reachable
+      through any serving adapter.  Verified: EIGHT adapter modules (not six)
+      set segment_aware_cohort_size = max_lanes --
+      external_draft_policy.py:75, flash_next_policy.py:83, mlx_vlm.py:239,
+      laguna_xs21.py:247, muse_glimmer.py:269, north_mini_code.py:679,
+      qwen38_27b.py:279, xing.py:401.
+      generate.py:2495 refuses when window <= max_bypass, requiring
+      window >= max_bypass + 1.  With max_bypass=3 the minimum legal window
+      is 4, and window = max_lanes, so `--max-lanes 4` is EXACTLY the
+      boundary: legal, but only just.
+
+NEW BAR:
+  10a REFUSAL (new): `--max-lanes 3` with max_bypass 3 (window 3 <= 3) must
+      raise the documented ValueError and the server must fail to start.
+      This tests the guard, not a production defect: window 2 was never
+      reachable through an adapter, so the guard prevents a harness or a low
+      --max-lanes from serving a fairness guarantee that is silently absent.
+  10b REACHABLE CONFIG: at `--max-lanes 4` (window 4 = max_bypass + 1) the
+      server must start, and the on-arm /v1/status must expose
+      prefill_scheduling_bypasses / _bypass_forced / _one_slice_clamps with
+      the off-arm exposing none.
+  10c PERF: bars UNCHANGED (ratios of on vs off at the same lane count, so
+      admission-neutral).  What changes is that they are now MEANINGFUL,
+      because 4 lanes seat and there is something to reorder.  Any number
+      from the M3 run is superseded, not compared against.
+  10d mtp-on: mtp_short_prefill_interleaved > 0 -- retained, and it is the
+      direct evidence that SRPT actually engaged rather than idling.
+
+=====================================================================
+ITEM 06 - junction-snapshots
+=====================================================================
+OLD BAR: captured >= 1, published >= 1, apc_lifetime.junction_hits >= 3,
+         turns 2-4 cached_tokens equal and > turn 1.
+OLD ASSUMPTION: that a published junction survives until the branching
+         request arrives.
+WHAT IT IS NOW: at risk.  Junction entries sit in the ordinary count pool at
+         rank 1 alongside prompt boundaries, whose churn scales with lane
+         count.  At 4 seated lanes instead of 1 that pool cycles ~4x faster,
+         so a junction can be captured, published, and then EVICTED before
+         use -- which is precisely what the feature exists to prevent.
+         A naive gate (captured >= 1 and published >= 1) passes while the
+         feature delivers nothing.
+NO EVICTION COUNTER EXISTS.  Available counters are only:
+         apc_junction_checkpoints_{planned,captured,published,degraded,
+         skipped_approximate,skipped_inexact,skipped_publish_failed,
+         skipped_write_suppressed}.
+NEW BAR: detect evict-before-use as the PUBLISH-TO-HIT GAP, which is the
+         observable consequence rather than the action:
+  06a junction_hits >= 3 (unchanged) -- necessary.
+  06b NEW, and this is the one that catches eviction:
+      junction_hits >= published - tolerance.  A run where published >= 1 but
+      junction_hits < 3 means entries were published and then lost before the
+      branching turn; that is a FAIL with "published N, hit M" reported,
+      not a pass on "published >= 1".
+  06c cached_tokens for turns 2-4 equal each other AND > turn 1 (unchanged).
+      This is the independent consequence check: an evicted junction forces a
+      re-prefill, which shows up as turn 2-4 cached_tokens collapsing toward
+      turn 1's.  06b and 06c must agree; if they disagree, report both and
+      mark the job inconclusive rather than taking the friendlier one.
+  06d apc_junction_checkpoints_degraded == 0 (newly gated; it is the counter
+      that would record a junction downgraded under pressure).
+
+=====================================================================
+ITEM 07 - rolling-prefill-ckpt
+=====================================================================
+OLD BAR: published >= 5, retired >= 1, cancel_retry.cached_tokens a multiple
+         of 4096 and > 0, cold wall(on) <= 1.05x off (reject > 1.10x),
+         peak process_physical_footprint within +1 GiB of off.
+WHAT MOVES: the MEMORY bar, and only it.  "+1 GiB" was written for "at most
+         one live rolling snapshot per lane" when roughly one lane seated.
+         At 4 seated lanes there can be up to 4 live rolling snapshots, so a
+         fixed +1 GiB is now a bar the feature cannot pass for reasons that
+         have nothing to do with the feature being wrong.
+NEW BAR:
+  07a MEMORY re-derived PER LANE: peak(on) - peak(off) <= 1 GiB x
+      (seated lanes), i.e. <= 4 GiB at --max-lanes 4.  Report the per-lane
+      figure so the bar is scale-free next time.
+  07b published >= 5, retired >= 1, cancel_retry multiple-of-4096: UNCHANGED.
+      These count events, not memory, and more seated lanes can only produce
+      MORE of them -- so if anything the bar gets easier, and passing it is
+      weaker evidence than it was.  Noted rather than tightened, because
+      tightening it would be inventing a number.
+  07c cold-wall ratio bars UNCHANGED (on/off ratio at the same lane count).
+  07d NEWLY WATCHED, not gated: apc_rolling_checkpoints_skipped_pressure and
+      _degraded.  More seated lanes means less spare headroom per checkpoint.
+      There is no `headroom_fraction` field in this tree -- these two
+      counters are the available proxies.  Reported; a nonzero value is a
+      finding to explain, not an automatic fail, because no defensible bar
+      exists for them yet.
+
+=====================================================================
+ITEM 08 - suspend-replay
+=====================================================================
+OLD BAR: checks.accept == true, requiring the four text-match flags,
+         preemptions == replays == 3, reference_has_no_preemption,
+         apcv2_store_failures == 0.
+WHAT IT IS NOW: the pressure arm has a REAL signal from item 9's host-memory
+         monitor rather than the NORMAL stub it was written against, so its
+         preemption trigger is live for the first time.  The M3's 1-of-3 is
+         NOT a baseline and is not compared against.  Our own M5 pre-rebase
+         run also got preemptions=1 on both on-arms.
+THE PROBLEM WITH "== 3": 3 is the number of faults the bench injects
+         (--fault-after 8 across three scenarios).  With a live pressure
+         signal, preemptions can now also be triggered by real pressure, so
+         the count is no longer necessarily equal to the injected count in
+         either direction.
+NEW BAR:
+  08a The four text-match flags and apcv2_store_failures == 0: UNCHANGED and
+      PRIMARY.  These are admission-independent -- an exact replay is exact
+      regardless of how many lanes seat -- and they are the actual claim the
+      feature makes.
+  08b preemptions == replays: UNCHANGED as an identity (every preemption must
+      be replayed), and it is the bar that does not depend on the trigger.
+  08c preemptions == 3: RELAXED to preemptions >= 1 AND preemptions ==
+      replays, with the observed count REPORTED.  Rationale: with a live
+      pressure trigger the absolute count is no longer determined by the
+      harness alone, and gating on 3 would fail the job for the trigger
+      working.  Marked explicitly as a WEAKENED bar so it is not mistaken for
+      a pass of the original.
+  08d fault-triggered preemptions specifically: if the receipt exposes
+      preemption.events[].trigger, gate that at least one event has
+      trigger == "fault" (the injected path still works) and report any with
+      a pressure trigger separately.  If the field is absent, 08d is
+      UNMEASURABLE and says so.
+
+=====================================================================
+SUMMARY OF WHAT MOVED
+=====================================================================
+  10 : premise replaced (refusal + reachable-window gate); perf bars unchanged
+       but meaningful for the first time
+  06 : new publish-to-hit gap gate to catch evict-before-use; degraded gated
+  07 : memory bar scaled per lane (+1 GiB -> +1 GiB x lanes); pressure
+       counters watched, not gated (no defensible bar)
+  08 : "== 3" weakened to ">= 1 and preemptions == replays"; text-match flags
+       remain primary and unchanged

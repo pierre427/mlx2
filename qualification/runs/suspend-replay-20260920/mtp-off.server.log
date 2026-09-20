@@ -1,0 +1,34 @@
+2026-09-20 05:49:56,514 INFO selected native_mtp route from explicit_flag
+2026-09-20 05:49:56,553 WARNING no reasoning signing key configured; using a random per-process reasoning signing key
+2026-09-20 05:49:58,643 INFO ubc_evict: evicted 4772.0 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-uncensored-heretic-Native-MTP-Preserved-oQ4e-mtp/model-00001-of-00005.safetensors
+2026-09-20 05:49:58,643 INFO ubc_evict: pass complete total_mb=4772.0 elapsed_s=0.03
+2026-09-20 05:49:59,054 INFO ubc_evict: evicted 4896.0 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-uncensored-heretic-Native-MTP-Preserved-oQ4e-mtp/model-00002-of-00005.safetensors
+2026-09-20 05:49:59,054 INFO ubc_evict: pass complete total_mb=4896.0 elapsed_s=0.04
+2026-09-20 05:49:59,468 INFO ubc_evict: evicted 4896.0 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-uncensored-heretic-Native-MTP-Preserved-oQ4e-mtp/model-00003-of-00005.safetensors
+2026-09-20 05:49:59,468 INFO ubc_evict: pass complete total_mb=4896.0 elapsed_s=0.04
+2026-09-20 05:49:59,879 INFO ubc_evict: evicted 4896.0 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-uncensored-heretic-Native-MTP-Preserved-oQ4e-mtp/model-00004-of-00005.safetensors
+2026-09-20 05:49:59,880 INFO ubc_evict: pass complete total_mb=4896.0 elapsed_s=0.04
+2026-09-20 05:49:59,978 INFO ubc_evict: evicted 1152.0 MB from UBC for ~/mlx-models/Qwen3.6-35B-A3B-uncensored-heretic-Native-MTP-Preserved-oQ4e-mtp/model-00005-of-00005.safetensors
+2026-09-20 05:49:59,978 INFO ubc_evict: pass complete total_mb=1152.0 elapsed_s=0.01
+2026-09-20 05:50:00,509 INFO lane admission budget: host=128.0 advisory=112.0 service_reserve=16 driver_allowance=4 transient_per_lane=0.35 max_lanes=4
+2026-09-20 05:50:01,478 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-20 05:50:01,492 INFO "GET /health HTTP/1.1" 200 -
+2026-09-20 05:50:01,504 INFO "GET /v1/models HTTP/1.1" 200 -
+2026-09-20 05:50:01,689 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-20 05:50:01,702 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-20 05:50:01,742 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-20 05:50:01,916 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-20 05:50:01,959 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-20 05:50:04,214 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-20 05:50:04,485 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-20 05:50:04,754 WARNING qualification memory_preempt fault on request chatcmpl-edd54458cfbc400391ee92ab3820e760 never fired (after_tokens=8, completion_tokens=25): never_reached
+2026-09-20 05:50:04,754 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-20 05:50:05,026 WARNING qualification memory_preempt fault on request chatcmpl-1b652fda97de4af6be4eeb4e4c770c5e never fired (after_tokens=0, completion_tokens=25): never_reached
+2026-09-20 05:50:05,026 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-20 05:50:07,694 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-20 05:50:08,119 WARNING qualification memory_preempt fault on request chatcmpl-c1194896f5644618b31989835443575f never fired (after_tokens=8, completion_tokens=25): never_reached
+2026-09-20 05:50:08,121 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-20 05:50:08,555 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-20 05:50:08,557 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-20 05:50:08,572 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-20 05:50:08,581 INFO "GET /metrics HTTP/1.1" 200 -

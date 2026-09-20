@@ -78,6 +78,7 @@ def test_registry_dispatch_is_metadata_only(tmp_path):
     assert result.returncode == 0, result.stderr
     resolved = inspect_model(artifact(tmp_path))
     assert resolved.adapter_type is LagunaXS21Adapter
+    assert resolved.default_route == "ordinary"
     assert resolved.artifact["qualification"] == "pending"
     with pytest.raises(ValueError, match="native MTP"):
         resolve_adapter(tmp_path, mtp=True)

@@ -13,6 +13,11 @@ separate candidate arms in
 The single-token fused GDN kernel is implemented as an opt-in trial but remains
 off in the adapter baseline.
 
+Route selection follows the inspected artifact: a complete embedded MTP head
+defaults to `native_mtp`, while a headless artifact defaults to `ordinary`.
+Explicit route flags still win and remain part of operational provenance, but
+qualification identity is the resolved route rather than the flag spelling.
+
 ## Evidence
 
 - GPU-free inspection validates topology, indexed shards and actual MTP

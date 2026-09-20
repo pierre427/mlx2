@@ -1,0 +1,1287 @@
+{
+ "schema": "mlx2.rm06-external-draft-acceptance.v1",
+ "plan": {
+  "schema": "mlx2.rm06-external-draft-acceptance.v1",
+  "kind": "execution_plan",
+  "family": "north",
+  "target": "~/mlx-models/North-Mini-Code-1.0-mlx-4bit",
+  "draft": "~/.cache/huggingface/hub/models--CohereLabs--North-Mini-Code-1.0-eagle/snapshots/8c7fcb575f107e9968b61cc93a756e6fc2c86713",
+  "will_execute": true,
+  "arms": 48,
+  "prompts": 16,
+  "max_tokens": 256,
+  "depths": [
+   1,
+   2,
+   3,
+   4
+  ],
+  "widths": [
+   1,
+   4
+  ],
+  "temperatures": [
+   0.0
+  ],
+  "interleaving": "ordinary/external alternating per (repeat, temp, width, depth)",
+  "go_criterion": {
+   "greedy_parity": "mean greedy common-prefix ratio vs ordinary >= 0.9 (exact count also reported)",
+   "b1_speedup_min": 1.25,
+   "b4_speedup_min": 1.0,
+   "arm_refused_if": "external_rounds == 0 or proposed_tokens == 0"
+  },
+  "order": [
+   [
+    "ordinary",
+    0,
+    1,
+    0.0,
+    0
+   ],
+   [
+    "external",
+    1,
+    1,
+    0.0,
+    0
+   ],
+   [
+    "ordinary",
+    0,
+    1,
+    0.0,
+    0
+   ],
+   [
+    "external",
+    2,
+    1,
+    0.0,
+    0
+   ],
+   [
+    "ordinary",
+    0,
+    1,
+    0.0,
+    0
+   ],
+   [
+    "external",
+    3,
+    1,
+    0.0,
+    0
+   ],
+   [
+    "ordinary",
+    0,
+    1,
+    0.0,
+    0
+   ],
+   [
+    "external",
+    4,
+    1,
+    0.0,
+    0
+   ],
+   [
+    "ordinary",
+    0,
+    4,
+    0.0,
+    0
+   ],
+   [
+    "external",
+    1,
+    4,
+    0.0,
+    0
+   ],
+   [
+    "ordinary",
+    0,
+    4,
+    0.0,
+    0
+   ],
+   [
+    "external",
+    2,
+    4,
+    0.0,
+    0
+   ],
+   [
+    "ordinary",
+    0,
+    4,
+    0.0,
+    0
+   ],
+   [
+    "external",
+    3,
+    4,
+    0.0,
+    0
+   ],
+   [
+    "ordinary",
+    0,
+    4,
+    0.0,
+    0
+   ],
+   [
+    "external",
+    4,
+    4,
+    0.0,
+    0
+   ],
+   [
+    "ordinary",
+    0,
+    1,
+    0.0,
+    1
+   ],
+   [
+    "external",
+    1,
+    1,
+    0.0,
+    1
+   ],
+   [
+    "ordinary",
+    0,
+    1,
+    0.0,
+    1
+   ],
+   [
+    "external",
+    2,
+    1,
+    0.0,
+    1
+   ],
+   [
+    "ordinary",
+    0,
+    1,
+    0.0,
+    1
+   ],
+   [
+    "external",
+    3,
+    1,
+    0.0,
+    1
+   ],
+   [
+    "ordinary",
+    0,
+    1,
+    0.0,
+    1
+   ],
+   [
+    "external",
+    4,
+    1,
+    0.0,
+    1
+   ],
+   [
+    "ordinary",
+    0,
+    4,
+    0.0,
+    1
+   ],
+   [
+    "external",
+    1,
+    4,
+    0.0,
+    1
+   ],
+   [
+    "ordinary",
+    0,
+    4,
+    0.0,
+    1
+   ],
+   [
+    "external",
+    2,
+    4,
+    0.0,
+    1
+   ],
+   [
+    "ordinary",
+    0,
+    4,
+    0.0,
+    1
+   ],
+   [
+    "external",
+    3,
+    4,
+    0.0,
+    1
+   ],
+   [
+    "ordinary",
+    0,
+    4,
+    0.0,
+    1
+   ],
+   [
+    "external",
+    4,
+    4,
+    0.0,
+    1
+   ],
+   [
+    "ordinary",
+    0,
+    1,
+    0.0,
+    2
+   ],
+   [
+    "external",
+    1,
+    1,
+    0.0,
+    2
+   ],
+   [
+    "ordinary",
+    0,
+    1,
+    0.0,
+    2
+   ],
+   [
+    "external",
+    2,
+    1,
+    0.0,
+    2
+   ],
+   [
+    "ordinary",
+    0,
+    1,
+    0.0,
+    2
+   ],
+   [
+    "external",
+    3,
+    1,
+    0.0,
+    2
+   ],
+   [
+    "ordinary",
+    0,
+    1,
+    0.0,
+    2
+   ],
+   [
+    "external",
+    4,
+    1,
+    0.0,
+    2
+   ],
+   [
+    "ordinary",
+    0,
+    4,
+    0.0,
+    2
+   ],
+   [
+    "external",
+    1,
+    4,
+    0.0,
+    2
+   ],
+   [
+    "ordinary",
+    0,
+    4,
+    0.0,
+    2
+   ],
+   [
+    "external",
+    2,
+    4,
+    0.0,
+    2
+   ],
+   [
+    "ordinary",
+    0,
+    4,
+    0.0,
+    2
+   ],
+   [
+    "external",
+    3,
+    4,
+    0.0,
+    2
+   ],
+   [
+    "ordinary",
+    0,
+    4,
+    0.0,
+    2
+   ],
+   [
+    "external",
+    4,
+    4,
+    0.0,
+    2
+   ]
+  ]
+ },
+ "arms": [
+  {
+   "kind": "ordinary",
+   "num_draft": 0,
+   "width": 1,
+   "temperature": 0.0,
+   "repeat": 0,
+   "decode_tok_s": 143.13879552154006,
+   "mechanism": {}
+  },
+  {
+   "kind": "external",
+   "num_draft": 1,
+   "width": 1,
+   "temperature": 0.0,
+   "repeat": 0,
+   "decode_tok_s": 91.72763189644571,
+   "mechanism": {
+    "external_rounds": 1962,
+    "proposed_tokens": 1962,
+    "accepted_proposals": 1241,
+    "mean_acceptance_length": 1.6325178389398571,
+    "draft_stats": {
+     "committed_positions": 5252,
+     "chain_steps": 0,
+     "draft_calls": 1962
+    }
+   },
+   "greedy_parity": 2,
+   "greedy_prompts": 16,
+   "greedy_prefix_ratio": 0.33168941848232686
+  },
+  {
+   "kind": "ordinary",
+   "num_draft": 0,
+   "width": 1,
+   "temperature": 0.0,
+   "repeat": 0,
+   "decode_tok_s": 139.7567548688615,
+   "mechanism": {}
+  },
+  {
+   "kind": "external",
+   "num_draft": 2,
+   "width": 1,
+   "temperature": 0.0,
+   "repeat": 0,
+   "decode_tok_s": 71.369397689292,
+   "mechanism": {
+    "external_rounds": 1666,
+    "proposed_tokens": 3331,
+    "accepted_proposals": 1532,
+    "mean_acceptance_length": 1.9195678271308525,
+    "draft_stats": {
+     "committed_positions": 10504,
+     "chain_steps": 1665,
+     "draft_calls": 3628
+    }
+   },
+   "greedy_parity": 2,
+   "greedy_prompts": 16,
+   "greedy_prefix_ratio": 0.33168941848232686
+  },
+  {
+   "kind": "ordinary",
+   "num_draft": 0,
+   "width": 1,
+   "temperature": 0.0,
+   "repeat": 0,
+   "decode_tok_s": 138.00514440980854,
+   "mechanism": {}
+  },
+  {
+   "kind": "external",
+   "num_draft": 3,
+   "width": 1,
+   "temperature": 0.0,
+   "repeat": 0,
+   "decode_tok_s": 77.21412159605,
+   "mechanism": {
+    "external_rounds": 1551,
+    "proposed_tokens": 4649,
+    "accepted_proposals": 1650,
+    "mean_acceptance_length": 2.0638297872340425,
+    "draft_stats": {
+     "committed_positions": 15741,
+     "chain_steps": 4763,
+     "draft_calls": 5179
+    }
+   },
+   "greedy_parity": 2,
+   "greedy_prompts": 16,
+   "greedy_prefix_ratio": 0.33168941848232686
+  },
+  {
+   "kind": "ordinary",
+   "num_draft": 0,
+   "width": 1,
+   "temperature": 0.0,
+   "repeat": 0,
+   "decode_tok_s": 131.26629507892426,
+   "mechanism": {}
+  },
+  {
+   "kind": "external",
+   "num_draft": 4,
+   "width": 1,
+   "temperature": 0.0,
+   "repeat": 0,
+   "decode_tok_s": 65.33146629809889,
+   "mechanism": {
+    "external_rounds": 1576,
+    "proposed_tokens": 6265,
+    "accepted_proposals": 1687,
+    "mean_acceptance_length": 2.0704314720812182,
+    "draft_stats": {
+     "committed_positions": 21055,
+     "chain_steps": 9452,
+     "draft_calls": 6755
+    }
+   },
+   "greedy_parity": 2,
+   "greedy_prompts": 16,
+   "greedy_prefix_ratio": 0.2711595508441424
+  },
+  {
+   "kind": "ordinary",
+   "num_draft": 0,
+   "width": 4,
+   "temperature": 0.0,
+   "repeat": 0,
+   "decode_tok_s": 236.81235259021258,
+   "mechanism": {}
+  },
+  {
+   "kind": "external",
+   "num_draft": 1,
+   "width": 4,
+   "temperature": 0.0,
+   "repeat": 0,
+   "decode_tok_s": 118.01263188121642,
+   "mechanism": {
+    "external_rounds": 921,
+    "proposed_tokens": 1965,
+    "accepted_proposals": 1236,
+    "mean_acceptance_length": 2.342019543973941,
+    "draft_stats": {
+     "committed_positions": 26308,
+     "chain_steps": 9452,
+     "draft_calls": 8068
+    }
+   },
+   "greedy_parity": 2,
+   "greedy_prompts": 16,
+   "greedy_prefix_ratio": 0.30488520714210426
+  },
+  {
+   "kind": "ordinary",
+   "num_draft": 0,
+   "width": 4,
+   "temperature": 0.0,
+   "repeat": 0,
+   "decode_tok_s": 233.9875262447496,
+   "mechanism": {}
+  },
+  {
+   "kind": "external",
+   "num_draft": 2,
+   "width": 4,
+   "temperature": 0.0,
+   "repeat": 0,
+   "decode_tok_s": 103.9245104853315,
+   "mechanism": {
+    "external_rounds": 850,
+    "proposed_tokens": 3279,
+    "accepted_proposals": 1535,
+    "mean_acceptance_length": 2.8058823529411763,
+    "draft_stats": {
+     "committed_positions": 31538,
+     "chain_steps": 10759,
+     "draft_calls": 9380
+    }
+   },
+   "greedy_parity": 2,
+   "greedy_prompts": 16,
+   "greedy_prefix_ratio": 0.32550421126253143
+  },
+  {
+   "kind": "ordinary",
+   "num_draft": 0,
+   "width": 4,
+   "temperature": 0.0,
+   "repeat": 0,
+   "decode_tok_s": 243.63267547579397,
+   "mechanism": {}
+  },
+  {
+   "kind": "external",
+   "num_draft": 3,
+   "width": 4,
+   "temperature": 0.0,
+   "repeat": 0,
+   "decode_tok_s": 91.15769171199817,
+   "mechanism": {
+    "external_rounds": 852,
+    "proposed_tokens": 4911,
+    "accepted_proposals": 1753,
+    "mean_acceptance_length": 3.057511737089202,
+    "draft_stats": {
+     "committed_positions": 36984,
+     "chain_steps": 13439,
+     "draft_calls": 10726
+    }
+   },
+   "greedy_parity": 2,
+   "greedy_prompts": 16,
+   "greedy_prefix_ratio": 0.29889412253167963
+  },
+  {
+   "kind": "ordinary",
+   "num_draft": 0,
+   "width": 4,
+   "temperature": 0.0,
+   "repeat": 0,
+   "decode_tok_s": 241.53457814270604,
+   "mechanism": {}
+  },
+  {
+   "kind": "external",
+   "num_draft": 4,
+   "width": 4,
+   "temperature": 0.0,
+   "repeat": 0,
+   "decode_tok_s": 74.22360539804309,
+   "mechanism": {
+    "external_rounds": 800,
+    "proposed_tokens": 5532,
+    "accepted_proposals": 1446,
+    "mean_acceptance_length": 2.8075,
+    "draft_stats": {
+     "committed_positions": 41871,
+     "chain_steps": 16981,
+     "draft_calls": 11916
+    }
+   },
+   "greedy_parity": 3,
+   "greedy_prompts": 16,
+   "greedy_prefix_ratio": 0.3231552638324872
+  },
+  {
+   "kind": "ordinary",
+   "num_draft": 0,
+   "width": 1,
+   "temperature": 0.0,
+   "repeat": 1,
+   "decode_tok_s": 145.642905142067,
+   "mechanism": {}
+  },
+  {
+   "kind": "external",
+   "num_draft": 1,
+   "width": 1,
+   "temperature": 0.0,
+   "repeat": 1,
+   "decode_tok_s": 97.1617232254974,
+   "mechanism": {
+    "external_rounds": 1962,
+    "proposed_tokens": 1962,
+    "accepted_proposals": 1241,
+    "mean_acceptance_length": 1.6325178389398571,
+    "draft_stats": {
+     "committed_positions": 47123,
+     "chain_steps": 16981,
+     "draft_calls": 13878
+    }
+   },
+   "greedy_parity": 2,
+   "greedy_prompts": 16,
+   "greedy_prefix_ratio": 0.33168941848232686
+  },
+  {
+   "kind": "ordinary",
+   "num_draft": 0,
+   "width": 1,
+   "temperature": 0.0,
+   "repeat": 1,
+   "decode_tok_s": 145.80259580652273,
+   "mechanism": {}
+  },
+  {
+   "kind": "external",
+   "num_draft": 2,
+   "width": 1,
+   "temperature": 0.0,
+   "repeat": 1,
+   "decode_tok_s": 87.70346574192742,
+   "mechanism": {
+    "external_rounds": 1666,
+    "proposed_tokens": 3331,
+    "accepted_proposals": 1532,
+    "mean_acceptance_length": 1.9195678271308525,
+    "draft_stats": {
+     "committed_positions": 52375,
+     "chain_steps": 18646,
+     "draft_calls": 15544
+    }
+   },
+   "greedy_parity": 2,
+   "greedy_prompts": 16,
+   "greedy_prefix_ratio": 0.33168941848232686
+  },
+  {
+   "kind": "ordinary",
+   "num_draft": 0,
+   "width": 1,
+   "temperature": 0.0,
+   "repeat": 1,
+   "decode_tok_s": 145.90825553072065,
+   "mechanism": {}
+  },
+  {
+   "kind": "external",
+   "num_draft": 3,
+   "width": 1,
+   "temperature": 0.0,
+   "repeat": 1,
+   "decode_tok_s": 79.36230956933525,
+   "mechanism": {
+    "external_rounds": 1551,
+    "proposed_tokens": 4649,
+    "accepted_proposals": 1650,
+    "mean_acceptance_length": 2.0638297872340425,
+    "draft_stats": {
+     "committed_positions": 57612,
+     "chain_steps": 21744,
+     "draft_calls": 17095
+    }
+   },
+   "greedy_parity": 2,
+   "greedy_prompts": 16,
+   "greedy_prefix_ratio": 0.33168941848232686
+  },
+  {
+   "kind": "ordinary",
+   "num_draft": 0,
+   "width": 1,
+   "temperature": 0.0,
+   "repeat": 1,
+   "decode_tok_s": 145.63668042081162,
+   "mechanism": {}
+  },
+  {
+   "kind": "external",
+   "num_draft": 4,
+   "width": 1,
+   "temperature": 0.0,
+   "repeat": 1,
+   "decode_tok_s": 67.05216539990722,
+   "mechanism": {
+    "external_rounds": 1576,
+    "proposed_tokens": 6265,
+    "accepted_proposals": 1687,
+    "mean_acceptance_length": 2.0704314720812182,
+    "draft_stats": {
+     "committed_positions": 62926,
+     "chain_steps": 26433,
+     "draft_calls": 18671
+    }
+   },
+   "greedy_parity": 2,
+   "greedy_prompts": 16,
+   "greedy_prefix_ratio": 0.2711595508441424
+  },
+  {
+   "kind": "ordinary",
+   "num_draft": 0,
+   "width": 4,
+   "temperature": 0.0,
+   "repeat": 1,
+   "decode_tok_s": 244.7058419794872,
+   "mechanism": {}
+  },
+  {
+   "kind": "external",
+   "num_draft": 1,
+   "width": 4,
+   "temperature": 0.0,
+   "repeat": 1,
+   "decode_tok_s": 119.86529014454378,
+   "mechanism": {
+    "external_rounds": 921,
+    "proposed_tokens": 1965,
+    "accepted_proposals": 1236,
+    "mean_acceptance_length": 2.342019543973941,
+    "draft_stats": {
+     "committed_positions": 68179,
+     "chain_steps": 26433,
+     "draft_calls": 19984
+    }
+   },
+   "greedy_parity": 2,
+   "greedy_prompts": 16,
+   "greedy_prefix_ratio": 0.30488520714210426
+  },
+  {
+   "kind": "ordinary",
+   "num_draft": 0,
+   "width": 4,
+   "temperature": 0.0,
+   "repeat": 1,
+   "decode_tok_s": 240.44111623209884,
+   "mechanism": {}
+  },
+  {
+   "kind": "external",
+   "num_draft": 2,
+   "width": 4,
+   "temperature": 0.0,
+   "repeat": 1,
+   "decode_tok_s": 102.42361668526915,
+   "mechanism": {
+    "external_rounds": 850,
+    "proposed_tokens": 3279,
+    "accepted_proposals": 1535,
+    "mean_acceptance_length": 2.8058823529411763,
+    "draft_stats": {
+     "committed_positions": 73409,
+     "chain_steps": 27740,
+     "draft_calls": 21296
+    }
+   },
+   "greedy_parity": 2,
+   "greedy_prompts": 16,
+   "greedy_prefix_ratio": 0.32550421126253143
+  },
+  {
+   "kind": "ordinary",
+   "num_draft": 0,
+   "width": 4,
+   "temperature": 0.0,
+   "repeat": 1,
+   "decode_tok_s": 226.57784344192862,
+   "mechanism": {}
+  },
+  {
+   "kind": "external",
+   "num_draft": 3,
+   "width": 4,
+   "temperature": 0.0,
+   "repeat": 1,
+   "decode_tok_s": 90.49280175627322,
+   "mechanism": {
+    "external_rounds": 852,
+    "proposed_tokens": 4911,
+    "accepted_proposals": 1753,
+    "mean_acceptance_length": 3.057511737089202,
+    "draft_stats": {
+     "committed_positions": 78855,
+     "chain_steps": 30420,
+     "draft_calls": 22642
+    }
+   },
+   "greedy_parity": 2,
+   "greedy_prompts": 16,
+   "greedy_prefix_ratio": 0.29889412253167963
+  },
+  {
+   "kind": "ordinary",
+   "num_draft": 0,
+   "width": 4,
+   "temperature": 0.0,
+   "repeat": 1,
+   "decode_tok_s": 241.5014452871931,
+   "mechanism": {}
+  },
+  {
+   "kind": "external",
+   "num_draft": 4,
+   "width": 4,
+   "temperature": 0.0,
+   "repeat": 1,
+   "decode_tok_s": 74.51393109192604,
+   "mechanism": {
+    "external_rounds": 800,
+    "proposed_tokens": 5532,
+    "accepted_proposals": 1446,
+    "mean_acceptance_length": 2.8075,
+    "draft_stats": {
+     "committed_positions": 83742,
+     "chain_steps": 33962,
+     "draft_calls": 23832
+    }
+   },
+   "greedy_parity": 3,
+   "greedy_prompts": 16,
+   "greedy_prefix_ratio": 0.3231552638324872
+  },
+  {
+   "kind": "ordinary",
+   "num_draft": 0,
+   "width": 1,
+   "temperature": 0.0,
+   "repeat": 2,
+   "decode_tok_s": 140.3529703140625,
+   "mechanism": {}
+  },
+  {
+   "kind": "external",
+   "num_draft": 1,
+   "width": 1,
+   "temperature": 0.0,
+   "repeat": 2,
+   "decode_tok_s": 87.66481075886638,
+   "mechanism": {
+    "external_rounds": 1962,
+    "proposed_tokens": 1962,
+    "accepted_proposals": 1241,
+    "mean_acceptance_length": 1.6325178389398571,
+    "draft_stats": {
+     "committed_positions": 88994,
+     "chain_steps": 33962,
+     "draft_calls": 25794
+    }
+   },
+   "greedy_parity": 2,
+   "greedy_prompts": 16,
+   "greedy_prefix_ratio": 0.33168941848232686
+  },
+  {
+   "kind": "ordinary",
+   "num_draft": 0,
+   "width": 1,
+   "temperature": 0.0,
+   "repeat": 2,
+   "decode_tok_s": 145.6336053905523,
+   "mechanism": {}
+  },
+  {
+   "kind": "external",
+   "num_draft": 2,
+   "width": 1,
+   "temperature": 0.0,
+   "repeat": 2,
+   "decode_tok_s": 87.34003888011408,
+   "mechanism": {
+    "external_rounds": 1666,
+    "proposed_tokens": 3331,
+    "accepted_proposals": 1532,
+    "mean_acceptance_length": 1.9195678271308525,
+    "draft_stats": {
+     "committed_positions": 94246,
+     "chain_steps": 35627,
+     "draft_calls": 27460
+    }
+   },
+   "greedy_parity": 2,
+   "greedy_prompts": 16,
+   "greedy_prefix_ratio": 0.33168941848232686
+  },
+  {
+   "kind": "ordinary",
+   "num_draft": 0,
+   "width": 1,
+   "temperature": 0.0,
+   "repeat": 2,
+   "decode_tok_s": 146.43643017013684,
+   "mechanism": {}
+  },
+  {
+   "kind": "external",
+   "num_draft": 3,
+   "width": 1,
+   "temperature": 0.0,
+   "repeat": 2,
+   "decode_tok_s": 79.16864799681926,
+   "mechanism": {
+    "external_rounds": 1551,
+    "proposed_tokens": 4649,
+    "accepted_proposals": 1650,
+    "mean_acceptance_length": 2.0638297872340425,
+    "draft_stats": {
+     "committed_positions": 99483,
+     "chain_steps": 38725,
+     "draft_calls": 29011
+    }
+   },
+   "greedy_parity": 2,
+   "greedy_prompts": 16,
+   "greedy_prefix_ratio": 0.33168941848232686
+  },
+  {
+   "kind": "ordinary",
+   "num_draft": 0,
+   "width": 1,
+   "temperature": 0.0,
+   "repeat": 2,
+   "decode_tok_s": 146.15548996689293,
+   "mechanism": {}
+  },
+  {
+   "kind": "external",
+   "num_draft": 4,
+   "width": 1,
+   "temperature": 0.0,
+   "repeat": 2,
+   "decode_tok_s": 67.95125768521356,
+   "mechanism": {
+    "external_rounds": 1576,
+    "proposed_tokens": 6265,
+    "accepted_proposals": 1687,
+    "mean_acceptance_length": 2.0704314720812182,
+    "draft_stats": {
+     "committed_positions": 104797,
+     "chain_steps": 43414,
+     "draft_calls": 30587
+    }
+   },
+   "greedy_parity": 2,
+   "greedy_prompts": 16,
+   "greedy_prefix_ratio": 0.2711595508441424
+  },
+  {
+   "kind": "ordinary",
+   "num_draft": 0,
+   "width": 4,
+   "temperature": 0.0,
+   "repeat": 2,
+   "decode_tok_s": 247.06210114169104,
+   "mechanism": {}
+  },
+  {
+   "kind": "external",
+   "num_draft": 1,
+   "width": 4,
+   "temperature": 0.0,
+   "repeat": 2,
+   "decode_tok_s": 121.0827734339818,
+   "mechanism": {
+    "external_rounds": 921,
+    "proposed_tokens": 1965,
+    "accepted_proposals": 1236,
+    "mean_acceptance_length": 2.342019543973941,
+    "draft_stats": {
+     "committed_positions": 110050,
+     "chain_steps": 43414,
+     "draft_calls": 31900
+    }
+   },
+   "greedy_parity": 2,
+   "greedy_prompts": 16,
+   "greedy_prefix_ratio": 0.30488520714210426
+  },
+  {
+   "kind": "ordinary",
+   "num_draft": 0,
+   "width": 4,
+   "temperature": 0.0,
+   "repeat": 2,
+   "decode_tok_s": 247.55961356109546,
+   "mechanism": {}
+  },
+  {
+   "kind": "external",
+   "num_draft": 2,
+   "width": 4,
+   "temperature": 0.0,
+   "repeat": 2,
+   "decode_tok_s": 105.0687854530255,
+   "mechanism": {
+    "external_rounds": 850,
+    "proposed_tokens": 3279,
+    "accepted_proposals": 1535,
+    "mean_acceptance_length": 2.8058823529411763,
+    "draft_stats": {
+     "committed_positions": 115280,
+     "chain_steps": 44721,
+     "draft_calls": 33212
+    }
+   },
+   "greedy_parity": 2,
+   "greedy_prompts": 16,
+   "greedy_prefix_ratio": 0.32550421126253143
+  },
+  {
+   "kind": "ordinary",
+   "num_draft": 0,
+   "width": 4,
+   "temperature": 0.0,
+   "repeat": 2,
+   "decode_tok_s": 247.26362109642523,
+   "mechanism": {}
+  },
+  {
+   "kind": "external",
+   "num_draft": 3,
+   "width": 4,
+   "temperature": 0.0,
+   "repeat": 2,
+   "decode_tok_s": 91.28537703593402,
+   "mechanism": {
+    "external_rounds": 852,
+    "proposed_tokens": 4911,
+    "accepted_proposals": 1753,
+    "mean_acceptance_length": 3.057511737089202,
+    "draft_stats": {
+     "committed_positions": 120726,
+     "chain_steps": 47401,
+     "draft_calls": 34558
+    }
+   },
+   "greedy_parity": 2,
+   "greedy_prompts": 16,
+   "greedy_prefix_ratio": 0.29889412253167963
+  },
+  {
+   "kind": "ordinary",
+   "num_draft": 0,
+   "width": 4,
+   "temperature": 0.0,
+   "repeat": 2,
+   "decode_tok_s": 247.03178676480343,
+   "mechanism": {}
+  },
+  {
+   "kind": "external",
+   "num_draft": 4,
+   "width": 4,
+   "temperature": 0.0,
+   "repeat": 2,
+   "decode_tok_s": 74.38463899185129,
+   "mechanism": {
+    "external_rounds": 800,
+    "proposed_tokens": 5532,
+    "accepted_proposals": 1446,
+    "mean_acceptance_length": 2.8075,
+    "draft_stats": {
+     "committed_positions": 125613,
+     "chain_steps": 50943,
+     "draft_calls": 35748
+    }
+   },
+   "greedy_parity": 3,
+   "greedy_prompts": 16,
+   "greedy_prefix_ratio": 0.3231552638324872
+  }
+ ],
+ "refused": [],
+ "summary": [
+  {
+   "width": 1,
+   "temperature": 0.0,
+   "num_draft": 1,
+   "ordinary_tok_s": 145.63514290568196,
+   "external_tok_s": 91.72763189644571,
+   "speedup": 0.6298454484701642,
+   "mean_acceptance_length": 1.6325178389398571,
+   "greedy_parity": [
+    2,
+    2,
+    2
+   ],
+   "greedy_prefix_ratio": [
+    0.33168941848232686,
+    0.33168941848232686,
+    0.33168941848232686
+   ],
+   "ordinary_spread": 0.10416534627934727
+  },
+  {
+   "width": 1,
+   "temperature": 0.0,
+   "num_draft": 2,
+   "ordinary_tok_s": 145.63514290568196,
+   "external_tok_s": 87.34003888011408,
+   "speedup": 0.5997181527584885,
+   "mean_acceptance_length": 1.9195678271308525,
+   "greedy_parity": [
+    2,
+    2,
+    2
+   ],
+   "greedy_prefix_ratio": [
+    0.33168941848232686,
+    0.33168941848232686,
+    0.33168941848232686
+   ],
+   "ordinary_spread": 0.10416534627934727
+  },
+  {
+   "width": 1,
+   "temperature": 0.0,
+   "num_draft": 3,
+   "ordinary_tok_s": 145.63514290568196,
+   "external_tok_s": 79.16864799681926,
+   "speedup": 0.5436095053519564,
+   "mean_acceptance_length": 2.0638297872340425,
+   "greedy_parity": [
+    2,
+    2,
+    2
+   ],
+   "greedy_prefix_ratio": [
+    0.33168941848232686,
+    0.33168941848232686,
+    0.33168941848232686
+   ],
+   "ordinary_spread": 0.10416534627934727
+  },
+  {
+   "width": 1,
+   "temperature": 0.0,
+   "num_draft": 4,
+   "ordinary_tok_s": 145.63514290568196,
+   "external_tok_s": 67.05216539990722,
+   "speedup": 0.4604119861600464,
+   "mean_acceptance_length": 2.0704314720812182,
+   "greedy_parity": [
+    2,
+    2,
+    2
+   ],
+   "greedy_prefix_ratio": [
+    0.2711595508441424,
+    0.2711595508441424,
+    0.2711595508441424
+   ],
+   "ordinary_spread": 0.10416534627934727
+  },
+  {
+   "width": 4,
+   "temperature": 0.0,
+   "num_draft": 1,
+   "ordinary_tok_s": 242.58362680925,
+   "external_tok_s": 119.86529014454378,
+   "speedup": 0.49411945777691363,
+   "mean_acceptance_length": 2.342019543973941,
+   "greedy_parity": [
+    2,
+    2,
+    2
+   ],
+   "greedy_prefix_ratio": [
+    0.30488520714210426,
+    0.30488520714210426,
+    0.30488520714210426
+   ],
+   "ordinary_spread": 0.08649293604495972
+  },
+  {
+   "width": 4,
+   "temperature": 0.0,
+   "num_draft": 2,
+   "ordinary_tok_s": 242.58362680925,
+   "external_tok_s": 103.9245104853315,
+   "speedup": 0.4284069450699165,
+   "mean_acceptance_length": 2.8058823529411763,
+   "greedy_parity": [
+    2,
+    2,
+    2
+   ],
+   "greedy_prefix_ratio": [
+    0.32550421126253143,
+    0.32550421126253143,
+    0.32550421126253143
+   ],
+   "ordinary_spread": 0.08649293604495972
+  },
+  {
+   "width": 4,
+   "temperature": 0.0,
+   "num_draft": 3,
+   "ordinary_tok_s": 242.58362680925,
+   "external_tok_s": 91.15769171199817,
+   "speedup": 0.37577841881174406,
+   "mean_acceptance_length": 3.057511737089202,
+   "greedy_parity": [
+    2,
+    2,
+    2
+   ],
+   "greedy_prefix_ratio": [
+    0.29889412253167963,
+    0.29889412253167963,
+    0.29889412253167963
+   ],
+   "ordinary_spread": 0.08649293604495972
+  },
+  {
+   "width": 4,
+   "temperature": 0.0,
+   "num_draft": 4,
+   "ordinary_tok_s": 242.58362680925,
+   "external_tok_s": 74.38463899185129,
+   "speedup": 0.3066350353906693,
+   "mean_acceptance_length": 2.8075,
+   "greedy_parity": [
+    3,
+    3,
+    3
+   ],
+   "greedy_prefix_ratio": [
+    0.3231552638324872,
+    0.3231552638324872,
+    0.3231552638324872
+   ],
+   "ordinary_spread": 0.08649293604495972
+  }
+ ],
+ "verdict": {
+  "greedy_parity": false,
+  "best_b1_speedup": 0.6298454484701642,
+  "best_b4_speedup": 0.49411945777691363,
+  "go": false
+ }
+}

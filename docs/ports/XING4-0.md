@@ -10,6 +10,11 @@ passed the full serving qualifier in `--qualification-mode` on 2026-09-18.
 They remain **unselected** until those records are approved against the
 committed revision (the run bound an uncommitted tree).
 
+Both converted artifacts contain the embedded head and therefore select the
+adapter's `native_mtp` default when no route flag is present. `--ordinary` and
+`--prompt-lookup` remain explicit comparison routes; `--native-mtp` can make
+the default choice explicit.
+
 Artifacts (built by `scripts/convert_xing4_0.py`, tokenizer by
 `scripts/xing4_0_tokenizer.py`):
 
@@ -194,4 +199,3 @@ per-row view MLA needs.
 - Under load, ordinary decode beats MTP; a load-aware MTP depth policy.
 - A custom MLA flash kernel (prefill attention is ~2x its compute floor) and a
   grouped W6A8 NAX expert kernel (no per-call requant) are the next levers.
-

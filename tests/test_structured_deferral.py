@@ -710,7 +710,7 @@ def test_unconstrained_tool_parse_fallback_is_counted_in_serving(scripted_engine
     assert engine.counts["tool_call_parse_fallbacks"] == 1
 
 
-def test_auto_parallel_false_fails_closed_on_a_second_call(scripted_engine):
+def test_auto_parallel_false_truncates_a_second_call(scripted_engine):
     build, state = scripted_engine
     engine = build(declare_marker=True)
     state["script"] = [TOOL_CALL, TOOL_CALL]
@@ -727,10 +727,22 @@ def test_auto_parallel_false_fails_closed_on_a_second_call(scripted_engine):
         "temperature": 0,
         "top_k": 5,
     }
-    _, _, final = _collect(engine.submit(request))
-    assert final["status"] == 502
-    assert "at most one tool call" in final["error"]
-    assert engine.counts["tool_call_constraint_failures"] == 1
+    job = engine.submit(request)
+    calls, final = [], None
+    while True:
+        event = job.events.get(timeout=10)
+        if "delta" in event:
+            calls.extend(event["delta"].get("tool_calls", ()))
+        if "finish_reason" in event or "error" in event:
+            final = event
+            break
+    # Pre-fix this lane finished with {"error": ..., "status": 502}, which every
+    # surface shaped as a server fault (Chat 502, Responses/Anthropic in-stream
+    # error) for something only the model did.  The bound is honoured instead.
+    assert "error" not in final
+    assert len(calls) == 1
+    assert engine.counts["tool_call_constraint_failures"] == 0
+    assert engine.counts["tool_call_constraint_truncations"] == 1
 
 
 def test_serving_length_or_eos_before_the_marker_is_not_a_failure(scripted_engine):

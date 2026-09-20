@@ -3,8 +3,6 @@
 import math
 import os
 import platform
-import re
-import subprocess
 from dataclasses import dataclass, replace
 from typing import (
     Callable,
@@ -48,10 +46,11 @@ class SelfMTPLaneAdmissionController:
     """Fail-closed memory/context policy for the M=(k+1)N verify forward.
 
     The production PLE-offload operating point is about 72.5 GiB resident on
-    a 128 GiB host, leaving about 55.5 GiB free.  A 20 GiB hard margin (16 GiB
-    service reserve plus 4 GiB for the driver) leaves 35.5 GiB for lane cache
-    growth and the verify transient.  The linear envelope below is calibrated
-    so that this operating point admits N=16 around 1K and N=4 around 16K:
+    the 128 GiB calibration host, leaving about 55.5 GiB free.  A 20 GiB hard
+    margin (16 GiB service reserve plus 4 GiB for the driver) leaves 35.5 GiB
+    for lane cache growth and the verify transient.  The linear envelope below
+    is calibrated so that this operating point admits N=16 around 1K and N=4
+    around 16K:
 
       cache/context share: 0.44 GiB per 1K tokens per lane
       k=2 verify transient: 1.76 GiB per lane
@@ -70,9 +69,87 @@ class SelfMTPLaneAdmissionController:
     N~16 knee holds regardless of how much memory is free.  At Flash-Next's
     72.5 GiB PLE operating point the memory envelope already caps near 16 at
     1K, so this cap is a no-op there and only binds when free memory is large.
-    The k=2 transient is calibrated on Flash-Next (MoE, 6B active); a dense
-    27B measures ~3.1 GiB/lane, so ``transient_gib_per_lane`` is configurable
-    for dense deployments at long context where the transient dominates.
+    ``transient_gib_per_lane`` is the peak *transient* device memory of one
+    lane's M=(k+1) verify forward: the activation working set that is
+    allocated and released inside the forward, measured above the resident
+    state that survives it, and therefore excluding both the model weights
+    and the K/V + recurrent cache (including that cache's own growth during
+    the forward).  ``TRANSIENT_SCALE`` rescales it for other depths.  It is
+    charged per lane and is context-independent.
+
+    The k=2 figure is calibrated on Flash-Next (MoE, 6B active) at 1.76, and
+    a dense Qwen3.8-27B measures ~3.1 GiB/lane, so it is configurable per
+    adapter for dense deployments at long context where it dominates.  The
+    dense 3.1 was then copied onto three small-active MoE adapters it was
+    never measured on.  Direct measurement on an M3 Pro (see
+    ``MOE_TRANSIENT_GIB_PER_LANE`` and provenance/lane-transient-moe.json)
+    shows that figure is wrong by two orders of magnitude for that class and
+    large enough, on a small host, to consume the whole lane budget and
+    silently disable the self-MTP route it is meant to size.
+
+    The hard margin is *not* an absolute.  16 GiB and 4 GiB are the values of
+    a rule on the 128 GiB calibration host, not the rule itself.  Held fixed
+    they scale catastrophically downward: the same M3 Pro has only ~11.5 GiB
+    of advisory residue left after a 16 GiB model, so a flat 20 GiB reserve
+    refuses every request before a single lane is costed.  3fa14e7 made them
+    host-scaled; ``host_scaled_reserves`` below re-derives the basis, capped
+    at the calibrated absolutes on larger hosts and floored by
+    ``MIN_SERVICE_RESERVE_GIB`` / ``MIN_DRIVER_ALLOWANCE_GIB``.
+
+    3fa14e7 keyed both figures off **physical** unified memory and argued
+    that Metal's ``max_recommended_working_set_size`` must not enter, because
+    the advisory is a per-process ceiling already applied once by
+    ``available_execution_bytes``, so scaling the reserve by it too would
+    subtract the OS margin twice.  The premise is right and the conclusion
+    does not follow: it is the *physical* rule that double-charges, and by a
+    margin that grows as the host shrinks.
+
+    ``available_execution_bytes`` hands ``decide``
+    ``min(host available, advisory - in use)``.  The second term is where the
+    OS margin already lives.  ``host - advisory`` is exactly what macOS has
+    withheld from this process before we reserve anything, and that share is
+    **not** a constant fraction of the host:
+
+      128 GiB host -> 112.00 GiB advisory: 16.00 GiB withheld, 12.5%
+       36 GiB host ->  28.08 GiB advisory:  7.92 GiB withheld, 22.0%
+
+    (both measured, 2026-09-19).  A reserve of 12.5% of physical RAM is
+    therefore a second copy of the OS margin *sized as if macOS always
+    withheld 12.5%*.  On the calibration host that happens to be true, so the
+    two charges together withhold 32 GiB = 25% of the machine.  On the M3 Pro
+    macOS has already taken 22% and the physical rule charges another 12.5%
+    on top, withholding 34.5% of a host that has a third of the RAM -- and it
+    charges it against the term that binds there, the advisory residue, which
+    a resident model drives toward zero.  Muse-Glimmer-30B + DFlash2 at
+    21.56 GiB resident leaves 6.52 GiB of residue; a 5.625 GiB reserve takes
+    86% of it and the request 429s with the machine two-thirds empty.
+
+    The rule below charges the quota **once**.  The host's non-lane share is
+    ``NON_LANE_HOST_QUOTA_FRACTION`` of physical RAM -- 25%, read off the
+    calibration host, where the advisory's 16 GiB and the reserve's 16 GiB
+    make it up between them -- and the service reserve supplies only the part
+    the advisory has not already collected:
+
+        service = clamp(floor, 16.0, advisory - 0.75 * host)
+
+    128 GiB: ``112 - 96 = 16.0``, bit for bit, so nothing calibrated there
+    moves.  36 GiB: ``28.08 - 27.0 = 1.08``, i.e. macOS has already collected
+    all but 1.08 GiB of the quota, and the floor below takes over.
+
+    The driver allowance is a different quantity and keeps a different basis.
+    It is the Metal/IOGPU driver's own working set, which is charged *inside*
+    our process budget and is not withheld by the advisory at all, so it
+    scales with the advisory rather than with the host:
+    ``advisory * 4.0 / 112.0`` -- again exactly 4.0 on the calibration host,
+    and 1.003 on the M3.
+
+    With only one of the two readings available the other is imputed at the
+    calibration host's ratio (``ADVISORY_RATIO`` = 0.875).  Under that
+    imputation ``service = 0.875h - 0.75h = 0.125h`` and
+    ``driver = 0.875h * 4/112 = 0.03125h``: 3fa14e7's physical rule *is* this
+    rule evaluated at a 0.875 advisory ratio.  It is not a different policy,
+    it is this policy with a hardcoded assumption about macOS, and the
+    assumption is what fails on a small host.
 
     ``decide`` is stateless on purpose.  The server calls it at every decode
     cycle boundary with fresh free memory and current per-lane contexts, so
@@ -83,30 +160,157 @@ class SelfMTPLaneAdmissionController:
     HOST_MEMORY_GIB = 128.0
     SERVICE_RESERVE_GIB = 16.0
     DRIVER_ALLOWANCE_GIB = 4.0
+    # Metal's max_recommended_working_set_size on the calibration host,
+    # measured 2026-09-19: 112.0 GiB of 128.0, i.e. macOS withholds 16.0 GiB
+    # from this process before admission reserves anything.
+    CALIBRATION_ADVISORY_GIB = 112.0
+    ADVISORY_RATIO = CALIBRATION_ADVISORY_GIB / HOST_MEMORY_GIB  # 0.875
+    # The share of physical RAM withheld from lane use in total, counting
+    # what the advisory already withholds: (16.0 + (128.0 - 112.0)) / 128.0.
+    # Read off the calibration host, charged once.
+    NON_LANE_HOST_QUOTA_FRACTION = (
+        SERVICE_RESERVE_GIB + (HOST_MEMORY_GIB - CALIBRATION_ADVISORY_GIB)
+    ) / HOST_MEMORY_GIB  # 0.25
+    # Floors.  The quota above protects the rest of the machine; these floors
+    # protect us from ourselves once the advisory has collected the quota.
+    # The advisory is a recommendation, not a hard cap -- exceeding it does
+    # not fail an allocation, it starts swapping -- and lane_gib is an
+    # envelope with error.  3.0 GiB covers the largest unmodelled excursion
+    # we have measured (peak-minus-steady across the MoE transient sweep in
+    # provenance/lane-transient-moe.json tops out at 0.281 GiB/lane on the
+    # cold-allocator forward; prefill temporaries on a 20 GiB MoE at 16K are
+    # the next term) with roughly an order of magnitude of margin, and it is
+    # also what macOS idles at in wired plus compressed pages.  0.75 GiB is
+    # the driver working set that does not shrink to nothing on a small
+    # machine.  Both are unchanged from 3fa14e7.
+    MIN_SERVICE_RESERVE_GIB = 3.0
+    MIN_DRIVER_ALLOWANCE_GIB = 0.75
     CACHE_GIB_PER_1K_TOKENS = 0.44
     TRANSIENT_SCALE = {0: 1.0 / 3.0, 1: 0.8, 2: 1.0, 3: 1.25, 4: 1.55}
     K2_TRANSIENT_GIB_PER_LANE = 1.76
+    # Measured 2026-09-19 on an M3 Pro (36 GiB, Metal advisory 28.08 GiB) with
+    # mx.get_peak_memory()/get_active_memory() around real verify forwards, on
+    # two small-active MoE models: Qwen3.6-35B-A3B (256 experts, 8 active,
+    # 20 GiB q4) and North-Mini-Code-1.0 (128 experts, 8 active, 16 GiB q4).
+    # Sweep k in {0,1,2} x context in {1K,4K,16K} x lanes in {1,2,4}, 3 reps.
+    # The k=2 per-lane transient stayed between 0.015 and 0.071 GiB across all
+    # 36 measured cells -- flat in context (a 16x context range moved it by
+    # under 2x) and sublinear in batch -- and the largest value seen anywhere,
+    # including the cold-allocator spike on the first forward after a cache
+    # flush, was 0.281 GiB/lane.  0.35 is 1.25x that worst observation and
+    # about 5x the worst steady-state cell.  Raw numbers in
+    # provenance/lane-transient-moe.json.  This replaces the dense-27B 3.1
+    # that had been copied onto MoE adapters; the dense 3.1 and Flash-Next's
+    # own 1.76 are untouched (Flash-Next's 127 GB artifact is not on the M3,
+    # so it could not be re-measured and was not changed).
+    MOE_TRANSIENT_GIB_PER_LANE = 0.35
     SATURATION_LANE_CAP = 16
     RESIDENT_GROWTH_HORIZON_TOKENS = 1024
     READMIT_MARGIN_GIB = 4.0
     READMIT_MAX_HOLDS = 8
 
+    @staticmethod
+    def _reading(value: Optional[float]) -> Optional[float]:
+        """A probe result, or ``None`` for "unknown" (never an error)."""
+        if value is None:
+            return None
+        candidate = float(value)
+        if not math.isfinite(candidate) or candidate <= 0:
+            return None
+        return candidate
+
+    @classmethod
+    def host_scaled_reserves(
+        cls,
+        host_memory_gib: Optional[float] = None,
+        advisory_gib: Optional[float] = None,
+    ) -> Tuple[float, float]:
+        """Return ``(service_reserve_gib, driver_allowance_gib)`` for a host.
+
+        ``host_memory_gib`` is *physical* unified memory and ``advisory_gib``
+        is Metal's ``max_recommended_working_set_size``; both are best-effort
+        probes and either may be ``None``.  See the class docstring for why
+        the rule needs both: the service reserve supplies only the part of
+        the host's non-lane quota that the advisory has not already taken.
+
+        With neither reading this returns the 128 GiB calibration, so an
+        unmeasurable host degrades to what shipped rather than to a guess.
+        With one reading the other is imputed at ``ADVISORY_RATIO``, which
+        reproduces 3fa14e7's physical-RAM rule exactly.
+        """
+        host = cls._reading(host_memory_gib)
+        advisory = cls._reading(advisory_gib)
+        if host is None and advisory is None:
+            (host, advisory) = (cls.HOST_MEMORY_GIB, cls.CALIBRATION_ADVISORY_GIB)
+        elif advisory is None:
+            advisory = cls.ADVISORY_RATIO * host
+        elif host is None:
+            host = advisory / cls.ADVISORY_RATIO
+        # An advisory above physical RAM is not a reading we can reason
+        # about; fall back to the imputed one rather than hand the service
+        # term a bonus for it.
+        advisory = min(advisory, host)
+        # Charge the host's non-lane quota once: the advisory has already
+        # taken ``host - advisory`` of it.
+        already_withheld = host - advisory
+        shortfall = cls.NON_LANE_HOST_QUOTA_FRACTION * host - already_withheld
+        service = max(
+            cls.MIN_SERVICE_RESERVE_GIB,
+            min(cls.SERVICE_RESERVE_GIB, shortfall),
+        )
+        driver = max(
+            cls.MIN_DRIVER_ALLOWANCE_GIB,
+            min(
+                cls.DRIVER_ALLOWANCE_GIB,
+                advisory * cls.DRIVER_ALLOWANCE_GIB / cls.CALIBRATION_ADVISORY_GIB,
+            ),
+        )
+        return (service, driver)
+
     def __init__(
         self,
         *,
-        service_reserve_gib: float = SERVICE_RESERVE_GIB,
-        driver_allowance_gib: float = DRIVER_ALLOWANCE_GIB,
+        host_memory_gib: Optional[float] = None,
+        advisory_gib: Optional[float] = None,
+        service_reserve_gib: Optional[float] = None,
+        driver_allowance_gib: Optional[float] = None,
         transient_gib_per_lane: float = K2_TRANSIENT_GIB_PER_LANE,
+        stream_reserve_gib: float = 0.0,
         saturation_lane_cap: Optional[int] = SATURATION_LANE_CAP,
         verification_row_cap: Optional[int] = None,
         cache_estimator: Optional[Callable[[int], int]] = None,
     ):
-        if service_reserve_gib < self.SERVICE_RESERVE_GIB:
-            raise ValueError("self-MTP service reserve must be at least 16 GiB")
-        if driver_allowance_gib < 0:
+        (service_floor, driver_floor) = self.host_scaled_reserves(
+            host_memory_gib, advisory_gib
+        )
+        if service_reserve_gib is None:
+            service_reserve_gib = service_floor
+        if driver_allowance_gib is None:
+            driver_allowance_gib = driver_floor
+        service_reserve_gib = float(service_reserve_gib)
+        driver_allowance_gib = float(driver_allowance_gib)
+        # An explicit override may raise the reserve but never lower it below
+        # what this host needs; the floor is host-scaled instead of a flat
+        # 16 GiB so a small Mac is configurable at all.
+        if not math.isfinite(service_reserve_gib) or service_reserve_gib <= 0:
+            raise ValueError("self-MTP service reserve must be finite and positive")
+        if service_reserve_gib < service_floor:
+            raise ValueError(
+                "self-MTP service reserve must be at least the host-scaled "
+                f"floor of {service_floor:.4g} GiB"
+            )
+        if not math.isfinite(driver_allowance_gib) or driver_allowance_gib < 0:
             raise ValueError("self-MTP driver allowance must be non-negative")
+        if driver_allowance_gib < driver_floor:
+            raise ValueError(
+                "self-MTP driver allowance must be at least the host-scaled "
+                f"floor of {driver_floor:.4g} GiB"
+            )
         if not math.isfinite(transient_gib_per_lane) or transient_gib_per_lane <= 0:
             raise ValueError("self-MTP transient GiB per lane must be positive")
+        stream_reserve_gib = float(stream_reserve_gib or 0.0)
+        if not math.isfinite(stream_reserve_gib) or stream_reserve_gib < 0:
+            raise ValueError("streamed weight reserve must be non-negative")
         if saturation_lane_cap is not None and (
             isinstance(saturation_lane_cap, bool)
             or not isinstance(saturation_lane_cap, int)
@@ -122,15 +326,41 @@ class SelfMTPLaneAdmissionController:
         ):
             raise ValueError("verification row cap must be a positive int or None")
         self.cache_estimator = cache_estimator
+        self.host_memory_gib = host_memory_gib
+        self.advisory_gib = advisory_gib
         self.service_reserve_gib = float(service_reserve_gib)
         self.driver_allowance_gib = float(driver_allowance_gib)
         self.transient_gib_per_lane = float(transient_gib_per_lane)
+        self.stream_reserve_gib = stream_reserve_gib
         self.saturation_lane_cap = saturation_lane_cap
         self.verification_row_cap = verification_row_cap
 
     @property
     def hard_reserve_gib(self) -> float:
-        return self.service_reserve_gib + self.driver_allowance_gib
+        """Service + driver + the streamed weight cache ceiling.
+
+        ``stream_reserve_gib`` is the streaming manager's **enforced** ceiling,
+        not an estimate of its working set, and it is subtracted exactly once
+        here -- before any lane is costed -- so a lane admitted at cycle N
+        cannot be starved by expert cache growth at cycle N+1.  A streamed
+        model's resident charge is therefore ``R_fixed + B_stream``: its
+        non-streamable remainder plus this ceiling, never its file size.
+
+        It composes with, rather than replaces, the other two terms.  The
+        service and driver reserves protect the rest of the host and key off
+        physical RAM (or, if the in-flight advisory re-keying lands, off the
+        Metal advisory); this term protects admission from our own cache and
+        is sized against ``max_recommended_working_set_size`` by
+        ``mlx2.runtime.weight_stream``.  Whichever way the other two are
+        derived, adding a third independent reservation here is still correct.
+        This branch assumes ``main``; if the advisory re-keying lands first,
+        nothing here needs to change.
+        """
+        return (
+            self.service_reserve_gib
+            + self.driver_allowance_gib
+            + self.stream_reserve_gib
+        )
 
     def lane_gib(
         self,
@@ -410,37 +640,21 @@ def _system_available_memory_bytes() -> Optional[int]:
     """Return reclaimable system memory without using allocator headroom."""
     try:
         if platform.system() == "Darwin":
-            result = subprocess.run(
-                ["/usr/bin/vm_stat"],
-                check=True,
-                capture_output=True,
-                text=True,
-                timeout=1.0,
-            )
-            match = re.search("page size of (\\d+) bytes", result.stdout)
-            if match is None:
+            # Same free + inactive + speculative pages the vm_stat parse used,
+            # read through host_statistics64 instead of a subprocess per call.
+            from .os_memory import host_memory_snapshot
+
+            snapshot = host_memory_snapshot()
+            if snapshot is None:
                 return None
-            page_size = int(match.group(1))
-            counts = {}
-            for line in result.stdout.splitlines()[1:]:
-                if ":" not in line:
-                    continue
-                (name, value) = line.split(":", 1)
-                counts[name] = int(value.strip().rstrip("."))
-            pages = sum(
-                (
-                    counts.get(name, 0)
-                    for name in ("Pages free", "Pages inactive", "Pages speculative")
-                )
-            )
-            return pages * page_size if pages > 0 else None
+            available = snapshot.reclaimable_bytes
+            return available if available > 0 else None
         pages = int(os.sysconf("SC_AVPHYS_PAGES"))
         page_size = int(os.sysconf("SC_PAGE_SIZE"))
         return pages * page_size if pages > 0 and page_size > 0 else None
     except (
         KeyError,
         OSError,
-        subprocess.SubprocessError,
         TypeError,
         ValueError,
         OverflowError,

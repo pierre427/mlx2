@@ -1,0 +1,32 @@
+2026-09-19 16:26:40,707 INFO selected prompt_lookup route from explicit_flag
+2026-09-19 16:26:40,746 WARNING no reasoning signing key configured; using a random per-process reasoning signing key
+2026-09-19 16:26:43,634 INFO "GET /health HTTP/1.1" 503 -
+2026-09-19 16:26:43,832 INFO ubc_evict: evicted 5108.2 MB from UBC for ~/mlx-models/North-Mini-Code-1.0-mlx-4bit/model-00001-of-00004.safetensors
+2026-09-19 16:26:43,874 INFO ubc_evict: evicted 5118.0 MB from UBC for ~/mlx-models/North-Mini-Code-1.0-mlx-4bit/model-00002-of-00004.safetensors
+2026-09-19 16:26:43,916 INFO ubc_evict: evicted 5118.0 MB from UBC for ~/mlx-models/North-Mini-Code-1.0-mlx-4bit/model-00003-of-00004.safetensors
+2026-09-19 16:26:43,926 INFO ubc_evict: evicted 1015.2 MB from UBC for ~/mlx-models/North-Mini-Code-1.0-mlx-4bit/model-00004-of-00004.safetensors
+2026-09-19 16:26:43,926 INFO ubc_evict: pass complete total_mb=16359.3 elapsed_s=0.14
+2026-09-19 16:26:44,888 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-19 16:26:45,694 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-19 16:26:46,638 INFO "GET /health HTTP/1.1" 200 -
+2026-09-19 16:26:46,639 INFO "GET /health HTTP/1.1" 200 -
+2026-09-19 16:26:47,916 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-19 16:26:48,354 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-19 16:26:49,754 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-19 16:26:50,023 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-19 16:26:51,222 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-19 16:26:51,863 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-19 16:26:52,702 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-19 16:26:53,165 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-19 16:26:54,082 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-19 16:26:54,697 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-19 16:26:55,124 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-19 16:26:55,824 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-19 16:26:56,606 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-19 16:26:59,692 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-19 16:27:00,909 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-19 16:27:02,131 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-19 16:27:03,303 INFO "POST /v1/chat/completions HTTP/1.1" 502 -
+2026-09-19 16:27:04,876 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-19 16:27:05,019 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-19 16:27:05,019 INFO "POST /v1/chat/completions HTTP/1.1" 200 -

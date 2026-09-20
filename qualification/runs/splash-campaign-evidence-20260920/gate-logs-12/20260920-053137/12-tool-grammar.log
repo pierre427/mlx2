@@ -1,0 +1,988 @@
+### job 12-tool-grammar
+### started 2026-09-20T05:31:37
+### worktree /private/tmp/mlx2-reb-12
+### branch   claude/splash-12-onmain @ 83a445c  (merge-base with main: 96a60eb)
+### models ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP
+### runner  repaired 2026-09-20 (real gate enforcement, per-spec lease)
+    ok   /private/tmp/mlx2-reb-12/scripts/bench_tool_grammar.py
+    ok   model ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP
+[runner] waiter: REGISTERED mlx2-76.splash-12-tool-grammar.84107.1789896697 at 2026-09-20T05:31:37
+[runner] lease: ACQUIRED for splash-12-tool-grammar at 2026-09-20T05:31:37 after 0s -> /tmp/gpu.lock /Users/Shared/mlxuag/gpu.lock
+[runner] waiter: removed mlx2-76.splash-12-tool-grammar.84107.1789896697
+### lease wanted-at 2026-09-20T05:31:37 acquired-at 2026-09-20T05:31:37 queued-for 0s
+### tree under test: mlx2.__file__ = /private/tmp/mlx2-reb-12/src/mlx2/__init__.py
+GATE PASS  PYTHONPATH pin: mlx2 resolves inside /private/tmp/mlx2-reb-12
+[runner] flashnext arm A on port 8412
+[runner] server pid 84283  log /private/tmp/claude-501/-Users-user-Desktop-mlx2/b569b1f6-d687-4876-a42a-e5fdf0abeabc/scratchpad/gpu-queue/12-out-reb/server-flashnext-A.log  PYTHONPATH=/private/tmp/mlx2-reb-12/src
+[runner] ready: http://127.0.0.1:8412 answered a real completion 200 after 33s, 1 probe attempt(s)
+### resolved route: native_mtp,segmented_self_mtp (source: adapter_default)
+{
+  "label": "A",
+  "scenarios": {
+    "auto_needs_tool": {
+      "ok": 3,
+      "n": 3,
+      "median_elapsed_seconds": 0.431
+    },
+    "auto_no_tool": {
+      "ok": 3,
+      "n": 3,
+      "median_elapsed_seconds": 0.075
+    },
+    "auto_single": {
+      "ok": 3,
+      "n": 3,
+      "median_elapsed_seconds": 0.931
+    },
+    "auto_parallel": {
+      "ok": 3,
+      "n": 3,
+      "median_elapsed_seconds": 0.922
+    },
+    "required": {
+      "ok": 3,
+      "n": 3,
+      "median_elapsed_seconds": 0.653
+    },
+    "answer_or_call_tool": {
+      "ok": 3,
+      "n": 3,
+      "median_elapsed_seconds": 0.6
+    },
+    "answer_or_call_text": {
+      "ok": 3,
+      "n": 3,
+      "median_elapsed_seconds": 0.145
+    },
+    "stream_required": {
+      "ok": 3,
+      "n": 3,
+      "median_elapsed_seconds": 0.649
+    },
+    "stream_auto": {
+      "ok": 3,
+      "n": 3,
+      "median_elapsed_seconds": 0.432
+    }
+  },
+  "rows": [
+    {
+      "scenario": "auto_needs_tool",
+      "status": 200,
+      "ok": true,
+      "calls": 1,
+      "content_chars": 0,
+      "decode_grammar": "skipped_strict_auto",
+      "grammar": null,
+      "engine": null,
+      "completion_tokens": 39,
+      "elapsed_seconds": 0.861,
+      "first_call_seconds": null,
+      "stream_chunks": 0
+    },
+    {
+      "scenario": "auto_needs_tool",
+      "status": 200,
+      "ok": true,
+      "calls": 1,
+      "content_chars": 0,
+      "decode_grammar": "skipped_strict_auto",
+      "grammar": null,
+      "engine": null,
+      "completion_tokens": 39,
+      "elapsed_seconds": 0.427,
+      "first_call_seconds": null,
+      "stream_chunks": 0
+    },
+    {
+      "scenario": "auto_needs_tool",
+      "status": 200,
+      "ok": true,
+      "calls": 1,
+      "content_chars": 0,
+      "decode_grammar": "skipped_strict_auto",
+      "grammar": null,
+      "engine": null,
+      "completion_tokens": 39,
+      "elapsed_seconds": 0.431,
+      "first_call_seconds": null,
+      "stream_chunks": 0
+    },
+    {
+      "scenario": "auto_no_tool",
+      "status": 200,
+      "ok": true,
+      "calls": 0,
+      "content_chars": 2,
+      "decode_grammar": "skipped_strict_auto",
+      "grammar": null,
+      "engine": null,
+      "completion_tokens": 3,
+      "elapsed_seconds": 0.441,
+      "first_call_seconds": null,
+      "stream_chunks": 0
+    },
+    {
+      "scenario": "auto_no_tool",
+      "status": 200,
+      "ok": true,
+      "calls": 0,
+      "content_chars": 2,
+      "decode_grammar": "skipped_strict_auto",
+      "grammar": null,
+      "engine": null,
+      "completion_tokens": 3,
+      "elapsed_seconds": 0.075,
+      "first_call_seconds": null,
+      "stream_chunks": 0
+    },
+    {
+      "scenario": "auto_no_tool",
+      "status": 200,
+      "ok": true,
+      "calls": 0,
+      "content_chars": 2,
+      "decode_grammar": "skipped_strict_auto",
+      "grammar": null,
+      "engine": null,
+      "completion_tokens": 3,
+      "elapsed_seconds": 0.073,
+      "first_call_seconds": null,
+      "stream_chunks": 0
+    },
+    {
+      "scenario": "auto_single",
+      "status": 200,
+      "ok": true,
+      "calls": 1,
+      "content_chars": 57,
+      "decode_grammar": "skipped_strict_auto",
+      "grammar": null,
+      "engine": null,
+      "completion_tokens": 90,
+      "elapsed_seconds": 1.27,
+      "first_call_seconds": null,
+      "stream_chunks": 0
+    },
+    {
+      "scenario": "auto_single",
+      "status": 200,
+      "ok": true,
+      "calls": 1,
+      "content_chars": 57,
+      "decode_grammar": "skipped_strict_auto",
+      "grammar": null,
+      "engine": null,
+      "completion_tokens": 90,
+      "elapsed_seconds": 0.931,
+      "first_call_seconds": null,
+      "stream_chunks": 0
+    },
+    {
+      "scenario": "auto_single",
+      "status": 200,
+      "ok": true,
+      "calls": 1,
+      "content_chars": 57,
+      "decode_grammar": "skipped_strict_auto",
+      "grammar": null,
+      "engine": null,
+      "completion_tokens": 90,
+      "elapsed_seconds": 0.919,
+      "first_call_seconds": null,
+      "stream_chunks": 0
+    },
+    {
+      "scenario": "auto_parallel",
+      "status": 200,
+      "ok": true,
+      "calls": 2,
+      "content_chars": 57,
+      "decode_grammar": "skipped_strict_auto",
+      "grammar": null,
+      "engine": null,
+      "completion_tokens": 90,
+      "elapsed_seconds": 0.922,
+      "first_call_seconds": null,
+      "stream_chunks": 0
+    },
+    {
+      "scenario": "auto_parallel",
+      "status": 200,
+      "ok": true,
+      "calls": 2,
+      "content_chars": 57,
+      "decode_grammar": "skipped_strict_auto",
+      "grammar": null,
+      "engine": null,
+      "completion_tokens": 90,
+      "elapsed_seconds": 0.942,
+      "first_call_seconds": null,
+      "stream_chunks": 0
+    },
+    {
+      "scenario": "auto_parallel",
+      "status": 200,
+      "ok": true,
+      "calls": 2,
+      "content_chars": 57,
+      "decode_grammar": "skipped_strict_auto",
+      "grammar": null,
+      "engine": null,
+      "completion_tokens": 90,
+      "elapsed_seconds": 0.916,
+      "first_call_seconds": null,
+      "stream_chunks": 0
+    },
+    {
+      "scenario": "required",
+      "status": 200,
+      "ok": true,
+      "calls": 1,
+      "content_chars": 0,
+      "decode_grammar": "engaged",
+      "grammar": null,
+      "engine": "scanner",
+      "completion_tokens": 39,
+      "elapsed_seconds": 1.366,
+      "first_call_seconds": null,
+      "stream_chunks": 0
+    },
+    {
+      "scenario": "required",
+      "status": 200,
+      "ok": true,
+      "calls": 1,
+      "content_chars": 0,
+      "decode_grammar": "engaged",
+      "grammar": null,
+      "engine": "scanner",
+      "completion_tokens": 39,
+      "elapsed_seconds": 0.648,
+      "first_call_seconds": null,
+      "stream_chunks": 0
+    },
+    {
+      "scenario": "required",
+      "status": 200,
+      "ok": true,
+      "calls": 1,
+      "content_chars": 0,
+      "decode_grammar": "engaged",
+      "grammar": null,
+      "engine": "scanner",
+      "completion_tokens": 39,
+      "elapsed_seconds": 0.653,
+      "first_call_seconds": null,
+      "stream_chunks": 0
+    },
+    {
+      "scenario": "answer_or_call_tool",
+      "status": 200,
+      "ok": true,
+      "calls": 0,
+      "content_chars": 184,
+      "decode_grammar": "skipped_strict_auto",
+      "grammar": null,
+      "engine": "automaton",
+      "completion_tokens": 42,
+      "elapsed_seconds": 1.022,
+      "first_call_seconds": null,
+      "stream_chunks": 0
+    },
+    {
+      "scenario": "answer_or_call_tool",
+      "status": 200,
+      "ok": true,
+      "calls": 0,
+      "content_chars": 184,
+      "decode_grammar": "skipped_strict_auto",
+      "grammar": null,
+      "engine": "automaton",
+      "completion_tokens": 42,
+      "elapsed_seconds": 0.6,
+      "first_call_seconds": null,
+      "stream_chunks": 0
+    },
+    {
+      "scenario": "answer_or_call_tool",
+      "status": 200,
+      "ok": true,
+      "calls": 0,
+      "content_chars": 184,
+      "decode_grammar": "skipped_strict_auto",
+      "grammar": null,
+      "engine": "automaton",
+      "completion_tokens": 42,
+      "elapsed_seconds": 0.6,
+      "first_call_seconds": null,
+      "stream_chunks": 0
+    },
+    {
+      "scenario": "answer_or_call_text",
+      "status": 200,
+      "ok": true,
+      "calls": 0,
+      "content_chars": 16,
+      "decode_grammar": "skipped_strict_auto",
+      "grammar": null,
+      "engine": "automaton",
+      "completion_tokens": 8,
+      "elapsed_seconds": 0.145,
+      "first_call_seconds": null,
+      "stream_chunks": 0
+    },
+    {
+      "scenario": "answer_or_call_text",
+      "status": 200,
+      "ok": true,
+      "calls": 0,
+      "content_chars": 16,
+      "decode_grammar": "skipped_strict_auto",
+      "grammar": null,
+      "engine": "automaton",
+      "completion_tokens": 8,
+      "elapsed_seconds": 0.152,
+      "first_call_seconds": null,
+      "stream_chunks": 0
+    },
+    {
+      "scenario": "answer_or_call_text",
+      "status": 200,
+      "ok": true,
+      "calls": 0,
+      "content_chars": 16,
+      "decode_grammar": "skipped_strict_auto",
+      "grammar": null,
+      "engine": "automaton",
+      "completion_tokens": 8,
+      "elapsed_seconds": 0.143,
+      "first_call_seconds": null,
+      "stream_chunks": 0
+    },
+    {
+      "scenario": "stream_required",
+      "status": 200,
+      "ok": true,
+      "calls": 1,
+      "content_chars": 0,
+      "decode_grammar": "engaged",
+      "grammar": null,
+      "engine": "scanner",
+      "completion_tokens": 39,
+      "elapsed_seconds": 0.645,
+      "first_call_seconds": 0.645,
+      "stream_chunks": 2
+    },
+    {
+      "scenario": "stream_required",
+      "status": 200,
+      "ok": true,
+      "calls": 1,
+      "content_chars": 0,
+      "decode_grammar": "engaged",
+      "grammar": null,
+      "engine": "scanner",
+      "completion_tokens": 39,
+      "elapsed_seconds": 0.649,
+      "first_call_seconds": 0.649,
+      "stream_chunks": 2
+    },
+    {
+      "scenario": "stream_required",
+      "status": 200,
+      "ok": true,
+      "calls": 1,
+      "content_chars": 0,
+      "decode_grammar": "engaged",
+      "grammar": null,
+      "engine": "scanner",
+      "completion_tokens": 39,
+      "elapsed_seconds": 0.665,
+      "first_call_seconds": 0.665,
+      "stream_chunks": 2
+    },
+    {
+      "scenario": "stream_auto",
+      "status": 200,
+      "ok": true,
+      "calls": 1,
+      "content_chars": 0,
+      "decode_grammar": "skipped_strict_auto",
+      "grammar": null,
+      "engine": null,
+      "completion_tokens": 39,
+      "elapsed_seconds": 0.435,
+      "first_call_seconds": 0.435,
+      "stream_chunks": 2
+    },
+    {
+      "scenario": "stream_auto",
+      "status": 200,
+      "ok": true,
+      "calls": 1,
+      "content_chars": 0,
+      "decode_grammar": "skipped_strict_auto",
+      "grammar": null,
+      "engine": null,
+      "completion_tokens": 39,
+      "elapsed_seconds": 0.432,
+      "first_call_seconds": 0.432,
+      "stream_chunks": 2
+    },
+    {
+      "scenario": "stream_auto",
+      "status": 200,
+      "ok": true,
+      "calls": 1,
+      "content_chars": 0,
+      "decode_grammar": "skipped_strict_auto",
+      "grammar": null,
+      "engine": null,
+      "completion_tokens": 39,
+      "elapsed_seconds": 0.428,
+      "first_call_seconds": 0.428,
+      "stream_chunks": 2
+    }
+  ]
+}
+[runner] server stopped
+[runner] flashnext arm B on port 8413
+[runner] server pid 84428  log /private/tmp/claude-501/-Users-user-Desktop-mlx2/b569b1f6-d687-4876-a42a-e5fdf0abeabc/scratchpad/gpu-queue/12-out-reb/server-flashnext-B.log  PYTHONPATH=/private/tmp/mlx2-reb-12/src
+[runner] ready: http://127.0.0.1:8413 answered a real completion 200 after 16s, 1 probe attempt(s)
+### resolved route: native_mtp,segmented_self_mtp (source: adapter_default)
+{
+  "label": "B",
+  "scenarios": {
+    "auto_needs_tool": {
+      "ok": 3,
+      "n": 3,
+      "median_elapsed_seconds": 0.698
+    },
+    "auto_no_tool": {
+      "ok": 3,
+      "n": 3,
+      "median_elapsed_seconds": 0.091
+    },
+    "auto_single": {
+      "ok": 3,
+      "n": 3,
+      "median_elapsed_seconds": 1.918
+    },
+    "auto_parallel": {
+      "ok": 3,
+      "n": 3,
+      "median_elapsed_seconds": 2.061
+    },
+    "required": {
+      "ok": 3,
+      "n": 3,
+      "median_elapsed_seconds": 0.651
+    },
+    "answer_or_call_tool": {
+      "ok": 3,
+      "n": 3,
+      "median_elapsed_seconds": 0.668
+    },
+    "answer_or_call_text": {
+      "ok": 3,
+      "n": 3,
+      "median_elapsed_seconds": 0.663
+    },
+    "stream_required": {
+      "ok": 3,
+      "n": 3,
+      "median_elapsed_seconds": 0.649
+    },
+    "stream_auto": {
+      "ok": 3,
+      "n": 3,
+      "median_elapsed_seconds": 0.7
+    }
+  },
+  "rows": [
+    {
+      "scenario": "auto_needs_tool",
+      "status": 200,
+      "ok": true,
+      "calls": 1,
+      "content_chars": 0,
+      "decode_grammar": "engaged",
+      "grammar": {
+        "shape": "text_or_calls",
+        "calls": "*"
+      },
+      "engine": "scanner",
+      "completion_tokens": 39,
+      "elapsed_seconds": 1.811,
+      "first_call_seconds": null,
+      "stream_chunks": 0
+    },
+    {
+      "scenario": "auto_needs_tool",
+      "status": 200,
+      "ok": true,
+      "calls": 1,
+      "content_chars": 0,
+      "decode_grammar": "engaged",
+      "grammar": {
+        "shape": "text_or_calls",
+        "calls": "*"
+      },
+      "engine": "scanner",
+      "completion_tokens": 39,
+      "elapsed_seconds": 0.697,
+      "first_call_seconds": null,
+      "stream_chunks": 0
+    },
+    {
+      "scenario": "auto_needs_tool",
+      "status": 200,
+      "ok": true,
+      "calls": 1,
+      "content_chars": 0,
+      "decode_grammar": "engaged",
+      "grammar": {
+        "shape": "text_or_calls",
+        "calls": "*"
+      },
+      "engine": "scanner",
+      "completion_tokens": 39,
+      "elapsed_seconds": 0.698,
+      "first_call_seconds": null,
+      "stream_chunks": 0
+    },
+    {
+      "scenario": "auto_no_tool",
+      "status": 200,
+      "ok": true,
+      "calls": 0,
+      "content_chars": 2,
+      "decode_grammar": "engaged",
+      "grammar": {
+        "shape": "text_or_calls",
+        "calls": "*"
+      },
+      "engine": "scanner",
+      "completion_tokens": 3,
+      "elapsed_seconds": 0.457,
+      "first_call_seconds": null,
+      "stream_chunks": 0
+    },
+    {
+      "scenario": "auto_no_tool",
+      "status": 200,
+      "ok": true,
+      "calls": 0,
+      "content_chars": 2,
+      "decode_grammar": "engaged",
+      "grammar": {
+        "shape": "text_or_calls",
+        "calls": "*"
+      },
+      "engine": "scanner",
+      "completion_tokens": 3,
+      "elapsed_seconds": 0.09,
+      "first_call_seconds": null,
+      "stream_chunks": 0
+    },
+    {
+      "scenario": "auto_no_tool",
+      "status": 200,
+      "ok": true,
+      "calls": 0,
+      "content_chars": 2,
+      "decode_grammar": "engaged",
+      "grammar": {
+        "shape": "text_or_calls",
+        "calls": "*"
+      },
+      "engine": "scanner",
+      "completion_tokens": 3,
+      "elapsed_seconds": 0.091,
+      "first_call_seconds": null,
+      "stream_chunks": 0
+    },
+    {
+      "scenario": "auto_single",
+      "status": 200,
+      "ok": true,
+      "calls": 1,
+      "content_chars": 181,
+      "decode_grammar": "engaged",
+      "grammar": {
+        "shape": "text_or_calls",
+        "calls": "?"
+      },
+      "engine": "scanner",
+      "completion_tokens": 92,
+      "elapsed_seconds": 2.296,
+      "first_call_seconds": null,
+      "stream_chunks": 0
+    },
+    {
+      "scenario": "auto_single",
+      "status": 200,
+      "ok": true,
+      "calls": 1,
+      "content_chars": 181,
+      "decode_grammar": "engaged",
+      "grammar": {
+        "shape": "text_or_calls",
+        "calls": "?"
+      },
+      "engine": "scanner",
+      "completion_tokens": 92,
+      "elapsed_seconds": 1.918,
+      "first_call_seconds": null,
+      "stream_chunks": 0
+    },
+    {
+      "scenario": "auto_single",
+      "status": 200,
+      "ok": true,
+      "calls": 1,
+      "content_chars": 181,
+      "decode_grammar": "engaged",
+      "grammar": {
+        "shape": "text_or_calls",
+        "calls": "?"
+      },
+      "engine": "scanner",
+      "completion_tokens": 92,
+      "elapsed_seconds": 1.897,
+      "first_call_seconds": null,
+      "stream_chunks": 0
+    },
+    {
+      "scenario": "auto_parallel",
+      "status": 200,
+      "ok": true,
+      "calls": 2,
+      "content_chars": 57,
+      "decode_grammar": "engaged",
+      "grammar": {
+        "shape": "text_or_calls",
+        "calls": "*"
+      },
+      "engine": "scanner",
+      "completion_tokens": 90,
+      "elapsed_seconds": 2.061,
+      "first_call_seconds": null,
+      "stream_chunks": 0
+    },
+    {
+      "scenario": "auto_parallel",
+      "status": 200,
+      "ok": true,
+      "calls": 2,
+      "content_chars": 57,
+      "decode_grammar": "engaged",
+      "grammar": {
+        "shape": "text_or_calls",
+        "calls": "*"
+      },
+      "engine": "scanner",
+      "completion_tokens": 90,
+      "elapsed_seconds": 2.077,
+      "first_call_seconds": null,
+      "stream_chunks": 0
+    },
+    {
+      "scenario": "auto_parallel",
+      "status": 200,
+      "ok": true,
+      "calls": 2,
+      "content_chars": 57,
+      "decode_grammar": "engaged",
+      "grammar": {
+        "shape": "text_or_calls",
+        "calls": "*"
+      },
+      "engine": "scanner",
+      "completion_tokens": 90,
+      "elapsed_seconds": 2.057,
+      "first_call_seconds": null,
+      "stream_chunks": 0
+    },
+    {
+      "scenario": "required",
+      "status": 200,
+      "ok": true,
+      "calls": 1,
+      "content_chars": 0,
+      "decode_grammar": "engaged",
+      "grammar": {
+        "shape": "calls",
+        "calls": "+"
+      },
+      "engine": "scanner",
+      "completion_tokens": 39,
+      "elapsed_seconds": 0.651,
+      "first_call_seconds": null,
+      "stream_chunks": 0
+    },
+    {
+      "scenario": "required",
+      "status": 200,
+      "ok": true,
+      "calls": 1,
+      "content_chars": 0,
+      "decode_grammar": "engaged",
+      "grammar": {
+        "shape": "calls",
+        "calls": "+"
+      },
+      "engine": "scanner",
+      "completion_tokens": 39,
+      "elapsed_seconds": 0.641,
+      "first_call_seconds": null,
+      "stream_chunks": 0
+    },
+    {
+      "scenario": "required",
+      "status": 200,
+      "ok": true,
+      "calls": 1,
+      "content_chars": 0,
+      "decode_grammar": "engaged",
+      "grammar": {
+        "shape": "calls",
+        "calls": "+"
+      },
+      "engine": "scanner",
+      "completion_tokens": 39,
+      "elapsed_seconds": 0.664,
+      "first_call_seconds": null,
+      "stream_chunks": 0
+    },
+    {
+      "scenario": "answer_or_call_tool",
+      "status": 200,
+      "ok": true,
+      "calls": 1,
+      "content_chars": 0,
+      "decode_grammar": "engaged",
+      "grammar": {
+        "shape": "calls_or_answer",
+        "calls": "*"
+      },
+      "engine": "scanner",
+      "completion_tokens": 39,
+      "elapsed_seconds": 0.673,
+      "first_call_seconds": null,
+      "stream_chunks": 0
+    },
+    {
+      "scenario": "answer_or_call_tool",
+      "status": 200,
+      "ok": true,
+      "calls": 1,
+      "content_chars": 0,
+      "decode_grammar": "engaged",
+      "grammar": {
+        "shape": "calls_or_answer",
+        "calls": "*"
+      },
+      "engine": "scanner",
+      "completion_tokens": 39,
+      "elapsed_seconds": 0.664,
+      "first_call_seconds": null,
+      "stream_chunks": 0
+    },
+    {
+      "scenario": "answer_or_call_tool",
+      "status": 200,
+      "ok": true,
+      "calls": 1,
+      "content_chars": 0,
+      "decode_grammar": "engaged",
+      "grammar": {
+        "shape": "calls_or_answer",
+        "calls": "*"
+      },
+      "engine": "scanner",
+      "completion_tokens": 39,
+      "elapsed_seconds": 0.668,
+      "first_call_seconds": null,
+      "stream_chunks": 0
+    },
+    {
+      "scenario": "answer_or_call_text",
+      "status": 200,
+      "ok": true,
+      "calls": 1,
+      "content_chars": 0,
+      "decode_grammar": "engaged",
+      "grammar": {
+        "shape": "calls_or_answer",
+        "calls": "*"
+      },
+      "engine": "scanner",
+      "completion_tokens": 39,
+      "elapsed_seconds": 0.661,
+      "first_call_seconds": null,
+      "stream_chunks": 0
+    },
+    {
+      "scenario": "answer_or_call_text",
+      "status": 200,
+      "ok": true,
+      "calls": 1,
+      "content_chars": 0,
+      "decode_grammar": "engaged",
+      "grammar": {
+        "shape": "calls_or_answer",
+        "calls": "*"
+      },
+      "engine": "scanner",
+      "completion_tokens": 39,
+      "elapsed_seconds": 0.663,
+      "first_call_seconds": null,
+      "stream_chunks": 0
+    },
+    {
+      "scenario": "answer_or_call_text",
+      "status": 200,
+      "ok": true,
+      "calls": 1,
+      "content_chars": 0,
+      "decode_grammar": "engaged",
+      "grammar": {
+        "shape": "calls_or_answer",
+        "calls": "*"
+      },
+      "engine": "scanner",
+      "completion_tokens": 39,
+      "elapsed_seconds": 0.674,
+      "first_call_seconds": null,
+      "stream_chunks": 0
+    },
+    {
+      "scenario": "stream_required",
+      "status": 200,
+      "ok": true,
+      "calls": 1,
+      "content_chars": 0,
+      "decode_grammar": "engaged",
+      "grammar": {
+        "shape": "calls",
+        "calls": "+"
+      },
+      "engine": "scanner",
+      "completion_tokens": 39,
+      "elapsed_seconds": 0.656,
+      "first_call_seconds": 0.655,
+      "stream_chunks": 2
+    },
+    {
+      "scenario": "stream_required",
+      "status": 200,
+      "ok": true,
+      "calls": 1,
+      "content_chars": 0,
+      "decode_grammar": "engaged",
+      "grammar": {
+        "shape": "calls",
+        "calls": "+"
+      },
+      "engine": "scanner",
+      "completion_tokens": 39,
+      "elapsed_seconds": 0.644,
+      "first_call_seconds": 0.644,
+      "stream_chunks": 2
+    },
+    {
+      "scenario": "stream_required",
+      "status": 200,
+      "ok": true,
+      "calls": 1,
+      "content_chars": 0,
+      "decode_grammar": "engaged",
+      "grammar": {
+        "shape": "calls",
+        "calls": "+"
+      },
+      "engine": "scanner",
+      "completion_tokens": 39,
+      "elapsed_seconds": 0.649,
+      "first_call_seconds": 0.649,
+      "stream_chunks": 2
+    },
+    {
+      "scenario": "stream_auto",
+      "status": 200,
+      "ok": true,
+      "calls": 1,
+      "content_chars": 0,
+      "decode_grammar": "engaged",
+      "grammar": {
+        "shape": "text_or_calls",
+        "calls": "*"
+      },
+      "engine": "scanner",
+      "completion_tokens": 39,
+      "elapsed_seconds": 0.704,
+      "first_call_seconds": 0.704,
+      "stream_chunks": 2
+    },
+    {
+      "scenario": "stream_auto",
+      "status": 200,
+      "ok": true,
+      "calls": 1,
+      "content_chars": 0,
+      "decode_grammar": "engaged",
+      "grammar": {
+        "shape": "text_or_calls",
+        "calls": "*"
+      },
+      "engine": "scanner",
+      "completion_tokens": 39,
+      "elapsed_seconds": 0.695,
+      "first_call_seconds": 0.695,
+      "stream_chunks": 2
+    },
+    {
+      "scenario": "stream_auto",
+      "status": 200,
+      "ok": true,
+      "calls": 1,
+      "content_chars": 0,
+      "decode_grammar": "engaged",
+      "grammar": {
+        "shape": "text_or_calls",
+        "calls": "*"
+      },
+      "engine": "scanner",
+      "completion_tokens": 39,
+      "elapsed_seconds": 0.7,
+      "first_call_seconds": 0.7,
+      "stream_chunks": 2
+    }
+  ]
+}
+[runner] server stopped
+[runner] north/muse arms skipped (pass --full to include them; spec marks them 'if time allows')
+GATE PASS  job 12 commands all exited 0
+### spec-gate evaluation (gates.py 12)
+  --- spec gates for job 12 over /private/tmp/claude-501/-Users-user-Desktop-mlx2/b569b1f6-d687-4876-a42a-e5fdf0abeabc/scratchpad/gpu-queue/12-out-reb ---
+  spec PASS  flashnext-A.json g1 no HTTP 5xx: got [] want []
+  spec PASS  flashnext-A.json g1/g2 every scenario row ok: 27 rows
+  spec ????  flashnext-A.json g1 structured_output_failures == 0: NOT EVALUATED (counter absent from bench JSON)
+  spec ????  flashnext-A.json g1 dead_end == 0: NOT EVALUATED (counter absent from bench JSON)
+  spec PASS  flashnext-B.json g1 no HTTP 5xx: got [] want []
+  spec PASS  flashnext-B.json g1/g2 every scenario row ok: 27 rows
+  spec ????  flashnext-B.json g1 structured_output_failures == 0: NOT EVALUATED (counter absent from bench JSON)
+  spec ????  flashnext-B.json g1 dead_end == 0: NOT EVALUATED (counter absent from bench JSON)
+  spec PASS  g3 auto_no_tool: B >= A: A=3 B=3 clean rows
+  spec ????  g4 answer_or_call_* schema conformance: NOT EVALUATED (requires the per-row response bodies; bench JSON records only ok/calls)
+  spec ????  g5 streamed Responses SSE output_index ordering: NOT EVALUATED (requires parsing responses-B.sse against the final response.completed order; not implemented -- evaluate by hand from the .sse artifact)
+  spec ????  g6 thinking models keep reasoning_content: NOT EVALUATED (only the flashnext arm ran (north/muse are --full); not evaluated)
+  --- 5 passed, 0 failed, 7 NOT EVALUATED ---
+GATE PASS  spec gates for job 12
+### GATE SUMMARY: 3/3 passed, 0 failed
+[runner] lease: RELEASED /tmp/gpu.lock for splash-12-tool-grammar at 2026-09-20T05:33:17
+[runner] lease: RELEASED /Users/Shared/mlxuag/gpu.lock for splash-12-tool-grammar at 2026-09-20T05:33:17
+### lease held 100s for 12-tool-grammar (wanted 05:31:37, acquired 05:31:37, released 05:33:17, queued 0s)
+### finished 2026-09-20T05:33:17 status=ok duration=100s

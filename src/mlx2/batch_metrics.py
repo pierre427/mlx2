@@ -542,7 +542,9 @@ class BatchFaultSpec:
     kind: str
     after_tokens: int = 0
 
-    KINDS = frozenset({"lane_abort", "cache_evict", "cache_reallocate"})
+    KINDS = frozenset(
+        {"lane_abort", "cache_evict", "cache_reallocate", "memory_preempt"}
+    )
 
     @classmethod
     def parse(cls, value: Any, *, enabled: bool) -> "BatchFaultSpec | None":
@@ -555,6 +557,8 @@ class BatchFaultSpec:
         after_tokens = value.get("after_tokens", 0)
         if isinstance(after_tokens, bool) or not isinstance(after_tokens, int) or after_tokens < 0:
             raise ValueError("mlx_fault.after_tokens must be a non-negative integer")
-        if value["kind"] != "lane_abort" and after_tokens:
-            raise ValueError("after_tokens is only valid for lane_abort")
+        if value["kind"] not in {"lane_abort", "memory_preempt"} and after_tokens:
+            raise ValueError(
+                "after_tokens is only valid for lane_abort and memory_preempt"
+            )
         return cls(value["kind"], after_tokens)

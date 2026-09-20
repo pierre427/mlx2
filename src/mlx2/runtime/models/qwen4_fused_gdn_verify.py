@@ -239,6 +239,54 @@ _RECONSTRUCT_SOURCE = r"""
 """
 
 
+def _derive_reconstruct_dynamic_source() -> str:
+    """Read the accepted prefix from a device buffer instead of template ``M``.
+
+    Splash keeps the verifier's accepted count in a GPU buffer that later
+    kernels consume directly (Apache-2.0, see provenance/splash-01-gpu-accept-count.json).
+    Here that means one specialization per verify width instead of one per
+    partial acceptance, a ragged per-row rebuild in one dispatch, and no host
+    integer on the rollback path.  The per-step arithmetic is textually the
+    template kernel's; only the loop bound and the row offsets change.  The
+    count is clamped to ``0..SNAPS``: zero returns the checkpoint unchanged.
+    """
+    source = _RECONSTRUCT_SOURCE
+    replacements = (
+        (
+            "  const uint hv = threadgroup_position_in_grid.z;\n",
+            "  const uint row = threadgroup_position_in_grid.z / (uint)HV;\n"
+            "  const uint hv = threadgroup_position_in_grid.z % (uint)HV;\n",
+        ),
+        (
+            "  device const float* si = recurrent_state + (size_t)hv * DV * DK;\n"
+            "  device float* so = recurrent_state_out + (size_t)hv * DV * DK;\n",
+            "  const size_t head = ((size_t)row * HV + hv) * DV * DK;\n"
+            "  device const float* si = recurrent_state + head;\n"
+            "  device float* so = recurrent_state_out + head;\n"
+            "  const int requested = accepted[row];\n"
+            "  const uint steps = requested <= 0\n"
+            "      ? 0u : min((uint)requested, (uint)SNAPS);\n"
+            "  device const float* row_decay =\n"
+            "      replay_decay + (size_t)row * SNAPS * HV;\n"
+            "  device const float* row_corrections =\n"
+            "      replay_corrections + (size_t)row * SNAPS * HV * DV;\n"
+            "  device const T* row_keys = replay_keys + (size_t)row * SNAPS * KD;\n",
+        ),
+        ("for (uint t = 0; t < (uint)M; ++t)", "for (uint t = 0; t < steps; ++t)"),
+        ("replay_decay[(size_t)t", "row_decay[(size_t)t"),
+        ("            replay_corrections[((size_t)t", "            row_corrections[((size_t)t"),
+        ("float(replay_keys[(size_t)t", "float(row_keys[(size_t)t"),
+    )
+    for old, new in replacements:
+        if source.count(old) != 1:
+            raise RuntimeError("fused GDN dynamic-accept source derivation drifted")
+        source = source.replace(old, new, 1)
+    return source
+
+
+_RECONSTRUCT_DYNAMIC_SOURCE = _derive_reconstruct_dynamic_source()
+
+
 @lru_cache(maxsize=None)
 def _kernel():
     return mx.fast.metal_kernel(
@@ -336,6 +384,23 @@ def _reconstruct_kernel():
         ],
         output_names=["recurrent_state_out"],
         source=_RECONSTRUCT_SOURCE,
+        ensure_row_contiguous=True,
+    )
+
+
+@lru_cache(maxsize=None)
+def _reconstruct_dynamic_kernel():
+    return mx.fast.metal_kernel(
+        name="qwen4_fused_gdn_reconstruct_dynamic",
+        input_names=[
+            "recurrent_state",
+            "replay_keys",
+            "replay_corrections",
+            "replay_decay",
+            "accepted",
+        ],
+        output_names=["recurrent_state_out"],
+        source=_RECONSTRUCT_DYNAMIC_SOURCE,
         ensure_row_contiguous=True,
     )
 
@@ -500,14 +565,30 @@ def qwen4_fused_gdn_reconstruct(
     replay_keys,
     replay_corrections,
     replay_decay,
-    accepted: int,
+    accepted: int | mx.array,
     *,
     threadgroup_y: int,
 ):
-    """Reconstruct one partial-acceptance state from the pre-verify checkpoint."""
+    """Reconstruct one partial-acceptance state from the pre-verify checkpoint.
+
+    A host ``int`` selects the template kernel specialized on that prefix.  An
+    ``mx.array`` (scalar or one entry per row, any integer dtype) stays on the
+    device and selects the dynamic kernel: row ``b`` replays
+    ``clamp(accepted[b], 0, tape_steps)`` tape steps, so no host read or
+    per-prefix specialization is needed.
+    """
     if threadgroup_y not in _THREADGROUP_Y_CANDIDATES:
         raise ValueError(
             f"unsupported threadgroup_y {threadgroup_y}; expected one of {_THREADGROUP_Y_CANDIDATES}"
+        )
+    if isinstance(accepted, mx.array):
+        return _reconstruct_dynamic(
+            recurrent_state,
+            replay_keys,
+            replay_corrections,
+            replay_decay,
+            accepted,
+            threadgroup_y=threadgroup_y,
         )
     accepted = validate_qwen4_gdn_replay_acceptance(
         accepted, int(replay_decay.shape[1])
@@ -595,29 +676,89 @@ def qwen4_fused_gdn_catchup(
     return tuple(outputs)
 
 
+def _reconstruct_dynamic(
+    recurrent_state,
+    replay_keys,
+    replay_corrections,
+    replay_decay,
+    accepted,
+    *,
+    threadgroup_y: int,
+):
+    rows = int(recurrent_state.shape[0])
+    tape_steps = int(replay_decay.shape[1])
+    if tape_steps < 1:
+        raise ValueError("compact replay tape must contain at least one step")
+    tapes = (replay_keys, replay_corrections, replay_decay)
+    if any(int(tape.shape[0]) != rows for tape in tapes):
+        raise ValueError("compact replay tape rows do not match the checkpoint rows")
+    if accepted.ndim > 1 or accepted.size not in (1, rows):
+        raise ValueError(
+            f"accepted count shape {accepted.shape} does not cover {rows} rows"
+        )
+    if not mx.issubdtype(accepted.dtype, mx.integer):
+        raise ValueError(
+            f"accepted count must be an integer array, got {accepted.dtype}"
+        )
+    accepted = mx.broadcast_to(accepted.reshape(-1).astype(mx.int32), (rows,))
+    return _reconstruct_dynamic_kernel()(
+        inputs=[
+            recurrent_state,
+            replay_keys,
+            replay_corrections,
+            replay_decay,
+            accepted,
+        ],
+        template=[
+            ("T", replay_keys.dtype),
+            ("HK", NUM_KEY_HEADS),
+            ("HV", NUM_VALUE_HEADS),
+            ("DK", KEY_HEAD_DIM),
+            ("DV", VALUE_HEAD_DIM),
+            ("SNAPS", tape_steps),
+            ("TY", threadgroup_y),
+            ("RATIO", NUM_VALUE_HEADS // NUM_KEY_HEADS),
+        ],
+        grid=(32, threadgroup_y, rows * NUM_VALUE_HEADS),
+        threadgroup=(32, threadgroup_y, 1),
+        output_shapes=[
+            (rows, NUM_VALUE_HEADS, VALUE_HEAD_DIM, KEY_HEAD_DIM),
+        ],
+        output_dtypes=[mx.float32],
+    )[0]
+
+
 _PROBED_STEPS: dict[int, Optional[int]] = {}
 _PROBED_CATCHUP_STEPS: dict[int, Optional[int]] = {}
 _PROBED_REPLAY_STEPS: dict[int, Optional[int]] = {}
+_PROBED_DYNAMIC_REPLAY_STEPS: dict[int, Optional[int]] = {}
 _PROBE_LOCK = Lock()
 
 
-def probe_qwen4_fused_gdn_replay_verify(dtype, steps: int) -> Optional[int]:
-    """Compile the compact verify and every partial reconstruction width."""
+def probe_qwen4_fused_gdn_replay_verify(
+    dtype, steps: int, *, dynamic_accept: bool = False
+) -> Optional[int]:
+    """Compile the compact verify and every reconstruction it can dispatch.
+
+    The template reconstruction needs one specialization per partial width;
+    ``dynamic_accept`` compiles the single device-count kernel instead.
+    """
     steps = int(steps)
-    if steps in _PROBED_REPLAY_STEPS:
-        return _PROBED_REPLAY_STEPS[steps]
+    probed = _PROBED_DYNAMIC_REPLAY_STEPS if dynamic_accept else _PROBED_REPLAY_STEPS
+    if steps in probed:
+        return probed[steps]
     with _PROBE_LOCK:
-        if steps in _PROBED_REPLAY_STEPS:
-            return _PROBED_REPLAY_STEPS[steps]
+        if steps in probed:
+            return probed[steps]
         if (
             not 2 <= steps <= MAX_VERIFY_WIDTH_PROVEN
             or not fused_gdn_runtime_supported()
         ):
-            _PROBED_REPLAY_STEPS[steps] = None
+            probed[steps] = None
             return None
         start = probe_qwen4_fused_gdn_decode(dtype)
         if start is None:
-            _PROBED_REPLAY_STEPS[steps] = None
+            probed[steps] = None
             return None
         qkv = mx.zeros((1, steps, CONV_DIM), dtype=dtype)
         z = mx.zeros((1, steps, VALUE_DIM), dtype=dtype)
@@ -647,6 +788,11 @@ def probe_qwen4_fused_gdn_replay_verify(dtype, steps: int) -> Optional[int]:
                     1e-06,
                     threadgroup_y=threadgroup_y,
                 )
+                widths = (
+                    [mx.array([steps - 1], dtype=mx.int32)]
+                    if dynamic_accept
+                    else range(1, steps)
+                )
                 replays = [
                     qwen4_fused_gdn_reconstruct(
                         recurrent_state,
@@ -656,7 +802,7 @@ def probe_qwen4_fused_gdn_replay_verify(dtype, steps: int) -> Optional[int]:
                         accepted,
                         threadgroup_y=threadgroup_y,
                     )
-                    for accepted in range(1, steps)
+                    for accepted in widths
                 ]
                 mx.eval(*outputs, *replays)
                 result = threadgroup_y
@@ -674,7 +820,7 @@ def probe_qwen4_fused_gdn_replay_verify(dtype, steps: int) -> Optional[int]:
                     exc,
                 )
                 continue
-        _PROBED_REPLAY_STEPS[steps] = result
+        probed[steps] = result
         return result
 
 

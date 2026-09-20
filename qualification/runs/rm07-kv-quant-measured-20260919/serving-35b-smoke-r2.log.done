@@ -1,0 +1,42 @@
+{
+ "agent_id": "job-rm07-kvq-mtp-35b-smoke-r2-36382",
+ "child_pid": 36387,
+ "command": [
+  "env",
+  "PYTHONPATH=/private/tmp/mlx2-rm07-kv-quant-measured/src",
+  "~/Desktop/mlx2/.venv/bin/python",
+  "/private/tmp/mlx2-rm07-kv-quant-measured/scripts/bench_kv_quant_mtp.py",
+  "--i-own-the-gpu",
+  "--model",
+  "~/mlx-models/Qwen3.6-35B-A3B-uncensored-heretic-Native-MTP-Preserved-oQ4e-mtp",
+  "--interleave",
+  "1",
+  "--lanes",
+  "1,2",
+  "--prompt-tokens",
+  "2048",
+  "--max-tokens",
+  "48",
+  "--out",
+  "/private/tmp/mlx2-rm07-kv-quant-measured/qualification/runs/rm07-kv-quant-measured-20260919/serving-35b-smoke.json"
+ ],
+ "ended_at": "2026-09-20T01:29:50+00:00",
+ "label": "rm07-kvq-mtp-35b-smoke-r2",
+ "out": "/private/tmp/mlx2-rm07-kv-quant-measured/qualification/runs/rm07-kv-quant-measured-20260919/serving-35b-smoke-r2.log",
+ "pid": 36382,
+ "radio": {
+  "error": null,
+  "heartbeat_failures": 0,
+  "heartbeats": 0,
+  "lease_generation": null,
+  "lease_task": null,
+  "lock_dir": "/Users/Shared/mlxuag/gpu.lock",
+  "status": "closed:completed"
+ },
+ "rc": 0,
+ "refusal": null,
+ "session_id": "3c65a7827e83456a89fffdeefadec196",
+ "signal": null,
+ "started_at": "2026-09-20T01:29:07+00:00",
+ "worker_id": "5cf93462c7a84104a5180e1150d6e915"
+}

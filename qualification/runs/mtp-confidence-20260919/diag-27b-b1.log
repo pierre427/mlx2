@@ -1,0 +1,19 @@
+[cpg_job 2026-09-19T22:31:51+00:00 pid=86129] label=rm10-diag-27b agent_id=job-rm10-diag-27b-86129 command=env PYTHONPATH=/private/tmp/mlx2-rm10-dspark-confidence/src ~/Desktop/mlx2/.venv/bin/python /private/tmp/mlx2-rm10-dspark-confidence/scripts/mtp_confidence_gpu.py diag --i-own-the-gpu --model ~/mlx-models/Qwen3.8-27B-oQ4e-mtp --widths 1 --probe-reps 2 --out /private/tmp/mlx2-rm10-dspark-confidence/qualification/runs/mtp-confidence-20260919/diag-27b-b1.json
+[cpg_job 2026-09-19T22:31:51+00:00 pid=86129] created workflow 2a05c1e5e15f46b88e86b090a3fea526 (cpg-job drivers); record it as workflows.cpg-job-drivers in /Users/Shared/mlxuag/cpg-radio.json to reuse it
+[cpg_job 2026-09-19T22:31:52+00:00 pid=86129] registered worker 68aae16c4d3a40629fb5550003cb209a as job-rm10-diag-27b-86129 in session 3c65a7827e83456a89fffdeefadec196
+[cpg_job 2026-09-19T22:31:52+00:00 pid=86129] took /Users/Shared/mlxuag/gpu.lock
+[cpg_job 2026-09-19T22:31:52+00:00 pid=86129] child pid 86138 started
+{"rep": 0, "arm": "static2", "lanes": 1, "ms_per_cycle": 59.084803374389594, "tokens_per_cycle": 2.40625, "tok_s": 40.725361896405886, "stats": {"mtp_short_prefill_interleaved": 0}}
+{"rep": 0, "arm": "static3", "lanes": 1, "ms_per_cycle": 65.2704518288374, "tokens_per_cycle": 2.828125, "tok_s": 43.32933081904138, "stats": {"mtp_short_prefill_interleaved": 0}}
+{"rep": 0, "arm": "ewma_pin2", "lanes": 1, "ms_per_cycle": 55.370015625157976, "tokens_per_cycle": 2.40625, "tok_s": 43.457636282600106, "stats": {"mtp_short_prefill_interleaved": 0}}
+{"rep": 0, "arm": "conf_pin2_la0", "lanes": 1, "ms_per_cycle": 55.07561914055259, "tokens_per_cycle": 2.40625, "tok_s": 43.689930999400424, "stats": {"mtp_short_prefill_interleaved": 0, "mtp_confidence_feature_cycles": 71}}
+{"rep": 0, "arm": "conf_pin2_la2", "lanes": 1, "ms_per_cycle": 55.598791672309744, "tokens_per_cycle": 2.40625, "tok_s": 43.278818255296756, "stats": {"mtp_short_prefill_interleaved": 0, "mtp_confidence_feature_cycles": 71}}
+{"rep": 1, "arm": "static2", "lanes": 1, "ms_per_cycle": 54.64498893707059, "tokens_per_cycle": 2.40625, "tok_s": 44.03422979499635, "stats": {"mtp_short_prefill_interleaved": 0}}
+{"rep": 1, "arm": "static3", "lanes": 1, "ms_per_cycle": 63.07872590605257, "tokens_per_cycle": 2.828125, "tok_s": 44.83484660441808, "stats": {"mtp_short_prefill_interleaved": 0}}
+{"rep": 1, "arm": "ewma_pin2", "lanes": 1, "ms_per_cycle": 55.00552995272301, "tokens_per_cycle": 2.40625, "tok_s": 43.74560161620405, "stats": {"mtp_short_prefill_interleaved": 0}}
+{"rep": 1, "arm": "conf_pin2_la0", "lanes": 1, "ms_per_cycle": 55.50477539054555, "tokens_per_cycle": 2.40625, "tok_s": 43.3521257057437, "stats": {"mtp_short_prefill_interleaved": 0, "mtp_confidence_feature_cycles": 71}}
+{"rep": 1, "arm": "conf_pin2_la2", "lanes": 1, "ms_per_cycle": 56.235223953081004, "tokens_per_cycle": 2.40625, "tok_s": 42.789017822843874, "stats": {"mtp_short_prefill_interleaved": 0, "mtp_confidence_feature_cycles": 71}}
+[cpg_job 2026-09-19T22:32:38+00:00 pid=86129] child exited rc=0
+[cpg_job 2026-09-19T22:32:38+00:00 pid=86129] worker 68aae16c4d3a40629fb5550003cb209a closed completed
+[cpg_job 2026-09-19T22:32:38+00:00 pid=86129] released /Users/Shared/mlxuag/gpu.lock
+[cpg_job 2026-09-19T22:32:38+00:00 pid=86129] wrote /private/tmp/mlx2-rm10-dspark-confidence/qualification/runs/mtp-confidence-20260919/diag-27b-b1.log.done

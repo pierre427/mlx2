@@ -1,0 +1,98 @@
+{
+  "model": "Qwen3.6-35B-A3B-uncensored-heretic-Native-MTP-Preserved-oQ4e-mtp",
+  "results": {
+    "cold": {
+      "wall_s": 19.827,
+      "prompt_tokens": 52018,
+      "cached_tokens": 0,
+      "text": "The document lists 2,399 records of \"cold\" data,",
+      "checkpoint_role": null
+    },
+    "cancel_abandoned": true,
+    "cancel_retry": {
+      "wall_s": 19.6386,
+      "prompt_tokens": 52018,
+      "cached_tokens": 0,
+      "text": "The document lists 2,399 records, each identified by a \"",
+      "checkpoint_role": null
+    },
+    "concurrent_second": {
+      "wall_s": 36.0476,
+      "prompt_tokens": 52018,
+      "cached_tokens": 0,
+      "text": "The document lists 2,399 records, each identified by a unique",
+      "checkpoint_role": null
+    },
+    "concurrent_first": {
+      "wall_s": 21.7328,
+      "prompt_tokens": 52018,
+      "cached_tokens": 0,
+      "text": "The document lists 2,399 shared records, each containing a value",
+      "checkpoint_role": null
+    },
+    "repeat": {
+      "wall_s": 0.4084,
+      "prompt_tokens": 52018,
+      "cached_tokens": 52017,
+      "text": "The document lists 2,399 records of \"cold\" data,",
+      "checkpoint_role": "committed_prompt_boundary"
+    }
+  },
+  "before": {
+    "rolling_counts": {
+      "apc_interior_positions_planned_turn": 0,
+      "apc_interior_positions_planned_tail": 0,
+      "apc_interior_positions_planned_lattice": 0,
+      "apc_interior_positions_skipped_media": 0,
+      "apc_interior_requests_skipped_continuation": 0,
+      "apc_interior_positions_headroom_capped": 0,
+      "apc_interior_hits": 0,
+      "apc_interior_hits_turn_boundary": 0,
+      "apc_interior_hit_tokens": 0,
+      "apc_interior_turn_marker_missing": 0,
+      "apc_interior_checkpoints_degraded": 0,
+      "apc_interior_checkpoints_captured": 0
+    },
+    "apc_lifetime": {
+      "lookups": 1,
+      "hits": 0,
+      "misses": 1,
+      "queried_tokens": 14,
+      "cached_tokens": 0,
+      "stores": 1,
+      "interior_hits": 0,
+      "rolling_hits": 0,
+      "junction_hits": 0
+    },
+    "settings_rolling": null
+  },
+  "after": {
+    "rolling_counts": {
+      "apc_interior_positions_planned_turn": 0,
+      "apc_interior_positions_planned_tail": 0,
+      "apc_interior_positions_planned_lattice": 0,
+      "apc_interior_positions_skipped_media": 0,
+      "apc_interior_requests_skipped_continuation": 0,
+      "apc_interior_positions_headroom_capped": 0,
+      "apc_interior_hits": 0,
+      "apc_interior_hits_turn_boundary": 0,
+      "apc_interior_hit_tokens": 0,
+      "apc_interior_turn_marker_missing": 0,
+      "apc_interior_checkpoints_degraded": 0,
+      "apc_interior_checkpoints_captured": 0,
+      "cancelled": 1
+    },
+    "apc_lifetime": {
+      "lookups": 7,
+      "hits": 0,
+      "misses": 7,
+      "queried_tokens": 260122,
+      "cached_tokens": 0,
+      "stores": 11,
+      "interior_hits": 0,
+      "rolling_hits": 0,
+      "junction_hits": 0
+    },
+    "settings_rolling": null
+  }
+}

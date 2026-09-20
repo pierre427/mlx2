@@ -1,0 +1,49 @@
+{
+  "model": "qwen4_exp (QSA indexer, tiny random weights)",
+  "device": "cpu",
+  "context": 1024,
+  "indexer_budget": 64,
+  "compress_ratio": 8,
+  "reference": "unchunked",
+  "arms": {
+    "full": {
+      "prefill_step": 1024,
+      "reference": true
+    },
+    "1024": {
+      "prefill_step": 1024,
+      "max_abs_logit_delta": 0.0,
+      "mean_abs_logit_delta": 0.0,
+      "top1_agreement": 1.0,
+      "logit_scale": 1.0725525617599487
+    },
+    "512": {
+      "prefill_step": 512,
+      "max_abs_logit_delta": 1.7881393432617188e-07,
+      "mean_abs_logit_delta": 3.213131094526034e-08,
+      "top1_agreement": 1.0,
+      "logit_scale": 1.0725525617599487
+    },
+    "256": {
+      "prefill_step": 256,
+      "max_abs_logit_delta": 1.7881393432617188e-07,
+      "mean_abs_logit_delta": 3.213131094526034e-08,
+      "top1_agreement": 1.0,
+      "logit_scale": 1.0725525617599487
+    },
+    "128": {
+      "prefill_step": 128,
+      "max_abs_logit_delta": 1.7881393432617188e-07,
+      "mean_abs_logit_delta": 3.213131094526034e-08,
+      "top1_agreement": 1.0,
+      "logit_scale": 1.0725525617599487
+    },
+    "100": {
+      "prefill_step": 100,
+      "max_abs_logit_delta": 1.7881393432617188e-07,
+      "mean_abs_logit_delta": 3.300579010101501e-08,
+      "top1_agreement": 1.0,
+      "logit_scale": 1.0725525617599487
+    }
+  }
+}

@@ -1,0 +1,15 @@
+2026-09-19 16:27:28,258 INFO selected ordinary route from explicit_flag
+2026-09-19 16:27:28,294 WARNING no reasoning signing key configured; using a random per-process reasoning signing key
+2026-09-19 16:27:31,191 INFO "GET /health HTTP/1.1" 503 -
+2026-09-19 16:27:31,398 INFO ubc_evict: evicted 5090.2 MB from UBC for ~/mlx-models/Muse-Glimmer-30B-mlx-4bit/model-00001-of-00004.safetensors
+2026-09-19 16:27:31,439 INFO ubc_evict: evicted 5117.7 MB from UBC for ~/mlx-models/Muse-Glimmer-30B-mlx-4bit/model-00002-of-00004.safetensors
+2026-09-19 16:27:31,480 INFO ubc_evict: evicted 5111.0 MB from UBC for ~/mlx-models/Muse-Glimmer-30B-mlx-4bit/model-00003-of-00004.safetensors
+2026-09-19 16:27:31,496 INFO ubc_evict: evicted 5040.1 MB from UBC for ~/mlx-models/Muse-Glimmer-30B-mlx-4bit/model-00004-of-00004.safetensors
+2026-09-19 16:27:31,496 INFO ubc_evict: pass complete total_mb=20359.0 elapsed_s=0.14
+2026-09-19 16:27:34,195 INFO "GET /health HTTP/1.1" 200 -
+2026-09-19 16:27:34,196 INFO "GET /health HTTP/1.1" 200 -
+2026-09-19 16:27:37,501 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-19 16:27:38,910 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-19 16:27:39,866 INFO "POST /v1/chat/completions HTTP/1.1" 502 -
+2026-09-19 16:27:40,810 INFO "POST /v1/chat/completions HTTP/1.1" 502 -
+2026-09-19 16:27:42,685 INFO "POST /v1/chat/completions HTTP/1.1" 200 -

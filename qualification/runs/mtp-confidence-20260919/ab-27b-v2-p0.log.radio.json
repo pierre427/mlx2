@@ -1,0 +1,18 @@
+{
+ "agent_id": "job-rm10-ab-27b-v2-p0-32037",
+ "complete_worker": {
+  "already_terminal": false,
+  "finished_at": 1789867029,
+  "status": "completed",
+  "worker_id": "84f607c71c1f4c62901ab518cdcd45ba"
+ },
+ "register_worker": {
+  "worker_id": "84f607c71c1f4c62901ab518cdcd45ba",
+  "workflow_id": "79afb01bc0ff49028784f958f78d083e"
+ },
+ "updated_at": "2026-09-20T01:17:09+00:00",
+ "worker_heartbeat": {
+  "heartbeat_at": 1789867014,
+  "worker_id": "84f607c71c1f4c62901ab518cdcd45ba"
+ }
+}

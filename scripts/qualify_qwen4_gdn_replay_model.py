@@ -53,6 +53,10 @@ def _compare(mx, left, right) -> dict:
     }
 
 
+# --dynamic-accept: the compact arm reconstructs from a device-count kernel.
+_DYNAMIC_ACCEPT = False
+
+
 def _set_mode(model, replay_mode: str) -> int:
     from mlx2.runtime.models.qwen4_exp import GatedDeltaNet
 
@@ -61,6 +65,8 @@ def _set_mode(model, replay_mode: str) -> int:
         if isinstance(module, GatedDeltaNet):
             module.set_fused_gdn_verify_mode("fused")
             module.set_fused_gdn_replay_rollback_mode(replay_mode)
+            if _DYNAMIC_ACCEPT:
+                module.set_fused_gdn_dynamic_accept(replay_mode == "compact")
             count += 1
     return count
 
@@ -142,7 +148,14 @@ def main() -> int:
         "--prompt",
         default="Explain why exact transactional state matters in speculative decoding.",
     )
+    parser.add_argument(
+        "--dynamic-accept",
+        action="store_true",
+        help="compact arm uses the device-count reconstruct kernel",
+    )
     args = parser.parse_args()
+    global _DYNAMIC_ACCEPT
+    _DYNAMIC_ACCEPT = args.dynamic_accept
     locks = _require_lock()
 
     import mlx.core as mx
@@ -382,6 +395,7 @@ def main() -> int:
             "prompt_tokens": len(prompt),
             "linear_gdn_layers": len(linear_indices),
             "probes": probes,
+            "dynamic_accept": args.dynamic_accept,
             "results": results,
             "final_stats": qwen4_fused_gdn_stats(adapter.model),
             "started_at": started_at,

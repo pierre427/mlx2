@@ -4,9 +4,10 @@ import json
 import re
 import uuid
 
-from ..output import ToolCallConstraintError, _safe_prefix
+from ..output import StopSequenceMatcher, _safe_prefix, within_parallel_bound
 from ..runtime.tool_parsers._schema import (
     raw_string_pattern,
+    required_parameter_names,
     resolve_local_refs,
     schema_value_matches,
 )
@@ -146,9 +147,17 @@ def constrained_tool_grammar(tools, tool_choice, *, parallel_tool_calls=True):
                 blocks.append(block if key in required else f"(?:{block})?")
             body = "".join(blocks)
         else:
-            body = (
+            # Free values, but required arguments must appear (sglang #40051).
+            required = required_parameter_names(function)
+            for key in required:
+                if not isinstance(key, str) or not re.fullmatch(r"[\w.-]+", key, re.ASCII):
+                    raise ValueError("tool parameter name is not representable in ATEM")
+            body = "".join(
+                rf'<atem:parameter name="{re.escape(key)}">[^<]{{0,4096}}</atem:parameter>'
+                for key in required
+            ) + (
                 r'(?:<atem:parameter name="[\w.-]{1,128}">'
-                r"[^<]{0,4096}</atem:parameter>){0,64}"
+                rf"[^<]{{0,4096}}</atem:parameter>){{0,{max(0, 64 - len(required))}}}"
             )
         invocations.append(
             rf'<atem:invoke name="{re.escape(name)}">{body}</atem:invoke>'
@@ -163,30 +172,24 @@ class MuseOutputParser:
         self, *, chat=False, tools=None, stops=(), parallel_tool_calls=True
     ):
         self.chat, self.tools = chat, tools or []
-        self.stops = (stops,) if isinstance(stops, str) else tuple(stops)
-        self.buffer = self.stop_buffer = ""
+        self.stop_matcher = StopSequenceMatcher(stops)
+        self.buffer = ""
         self.state = "header" if chat else "body"
         self.channel = "content"
         self.parallel_tool_calls = bool(parallel_tool_calls)
         self.stopped, self.tool_count = False, 0
+        self.tool_call_constraint_truncations = 0
+
+    @property
+    def stop_sequence(self):
+        return self.stop_matcher.stop_sequence
 
     def push(self, text, *, final=False):
         if self.stopped:
             return []
-        self.stop_buffer += text
-        matches = [
-            self.stop_buffer.find(s) for s in self.stops if s in self.stop_buffer
-        ]
-        if matches:
-            text, self.stop_buffer = self.stop_buffer[: min(matches)], ""
+        text, stop_hit = self.stop_matcher.push(text, final=final)
+        if stop_hit:
             self.stopped, final = True, True
-        else:
-            end = (
-                len(self.stop_buffer)
-                if final
-                else _safe_prefix(self.stop_buffer, self.stops)
-            )
-            text, self.stop_buffer = self.stop_buffer[:end], self.stop_buffer[end:]
         self.buffer += text
         events = []
         while self.buffer:
@@ -222,13 +225,7 @@ class MuseOutputParser:
                         raise ValueError("Model produced an incomplete ATEM tool call")
                     break
                 calls = parse_atem(self.buffer[:end], self.tools)
-                if (
-                    not self.parallel_tool_calls
-                    and self.tool_count + len(calls) > 1
-                ):
-                    raise ToolCallConstraintError(
-                        "parallel_tool_calls:false permits at most one tool call"
-                    )
+                calls = within_parallel_bound(self, calls)
                 for call in calls:
                     events.append(
                         {

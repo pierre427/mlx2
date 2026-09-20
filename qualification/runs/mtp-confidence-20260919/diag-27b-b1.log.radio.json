@@ -1,0 +1,14 @@
+{
+ "agent_id": "job-rm10-diag-27b-86129",
+ "complete_worker": {
+  "already_terminal": false,
+  "finished_at": 1789857158,
+  "status": "completed",
+  "worker_id": "68aae16c4d3a40629fb5550003cb209a"
+ },
+ "register_worker": {
+  "worker_id": "68aae16c4d3a40629fb5550003cb209a",
+  "workflow_id": "2a05c1e5e15f46b88e86b090a3fea526"
+ },
+ "updated_at": "2026-09-19T22:32:38+00:00"
+}

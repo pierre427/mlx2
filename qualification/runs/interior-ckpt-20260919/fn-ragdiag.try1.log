@@ -1,0 +1,34 @@
+[cpg_job 2026-09-19T22:31:51+00:00 pid=86135] label=rm04-fn-ragdiag agent_id=job-rm04-fn-ragdiag-86135 command=env PYTHONPATH=/private/tmp/mlx2-rm04-interior-ckpt-qual/src ~/Desktop/mlx2/.venv/bin/python /private/tmp/mlx2-rm04-interior-ckpt-qual/scripts/qualify_interior_checkpoints.py --model ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP --route mtp --base-policy /private/tmp/mlx2-rm04-interior-ckpt-qual/qualification/runs/quality-campaign-20260919/policies/flash-next-mtp2.json --arms off,auto --workloads rag --rounds 1 --auto-headroom-fraction 1.0 --out /private/tmp/mlx2-rm04-interior-ckpt-qual/qualification/runs/interior-ckpt-20260919/flashnext-rag-headroom1.json --i-own-the-gpu
+[cpg_job 2026-09-19T22:31:52+00:00 pid=86135] created workflow d9af88c0ad9d4897b337aa1595d05197 (cpg-job drivers); record it as workflows.cpg-job-drivers in /Users/Shared/mlxuag/cpg-radio.json to reuse it
+[cpg_job 2026-09-19T22:31:52+00:00 pid=86135] registered worker 3e7404c37c4b4178b468ca95c9f55c5b as job-rm04-fn-ragdiag-86135 in session 3c65a7827e83456a89fffdeefadec196
+[cpg_job 2026-09-19T22:31:52+00:00 pid=86135] [cpg_job] /Users/Shared/mlxuag/gpu.lock is already held; owner.json: {
+ "agent": "cpg_job",
+ "agent_id": "job-rm10-diag-27b-86129",
+ "command": [
+  "env",
+  "PYTHONPATH=/private/tmp/mlx2-rm10-dspark-confidence/src",
+  "~/Desktop/mlx2/.venv/bin/python",
+  "/private/tmp/mlx2-rm10-dspark-confidence/scripts/mtp_confidence_gpu.py",
+  "diag",
+  "--i-own-the-gpu",
+  "--model",
+  "~/mlx-models/Qwen3.8-27B-oQ4e-mtp",
+  "--widths",
+  "1",
+  "--probe-reps",
+  "2",
+  "--out",
+  "/private/tmp/mlx2-rm10-dspark-confidence/qualification/runs/mtp-confidence-20260919/diag-27b-b1.json"
+ ],
+ "cpg_agent": "job-rm10-diag-27b-86129",
+ "cpg_generation": null,
+ "cpg_session": "3c65a7827e83456a89fffdeefadec196",
+ "cpg_task": "2362c6c845d244eea73b27334add9154",
+ "cpg_worker": "68aae16c4d3a40629fb5550003cb209a",
+ "done_file": "/private/tmp/mlx2-rm10-dspark-confidence/qualification/runs/mtp-confidence-20260919/diag-27b-b1.log.done",
+ "label": "rm10-diag-27b",
+ "log": "/private/tmp/mlx2-rm10-dspark-confidence/qualification/runs/mtp-confidence-20260919/diag-27b-b1.log",
+ "pid": 86129,
+ "started": "2026-09-19T22:31:51+00:00"
+}
+[cpg_job 2026-09-19T22:31:52+00:00 pid=86135] worker 3e7404c37c4b4178b468ca95c9f55c5b closed failed

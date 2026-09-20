@@ -20,6 +20,7 @@ from mlx2.adapters.north_mini_code import (
 )
 from mlx2.adapters.north_output import NorthOutputParser, parse_actions
 from mlx2.adapters.north_memory import NorthCacheBudget
+from mlx2.runtime.memory_policy import SelfMTPLaneAdmissionController as C
 from mlx2.adapters.registry import inspect_model, resolve_adapter
 from mlx2.contracts import Capability, StatePlane
 
@@ -48,6 +49,8 @@ def north_config():
         "use_qk_norm": False,
         "norm_topk_prob": False,
         "tie_word_embeddings": None,
+        "rms_norm_eps": 1e-06,
+        "layer_norm_eps": 1e-05,
         "layer_types": [
             "full_attention" if i % 4 == 0 else "sliding_attention"
             for i in range(49)
@@ -124,6 +127,7 @@ def test_import_and_registry_inspection_do_not_import_mlx(tmp_path):
     assert result.returncode == 0, result.stderr
     resolved = inspect_model(artifact(tmp_path))
     assert resolved.adapter_type is NorthMiniCodeAdapter
+    assert resolved.default_route == "ordinary"
     assert resolved.artifact["qualification"] == "pending"
 
 
@@ -221,7 +225,13 @@ def test_north_cache_budget_is_architecture_bound_monotone_and_ordinary_only():
     assert 27 < points[-1] / (1 << 30) < 29
     assert budget.global_layers == 13 and budget.sliding_layers == 36
     assert budget.checkpoint_copies == 4
-    assert budget.transient_gib_per_lane == 3.1
+    # Measured on this model on an M3 Pro, 2026-09-19: the k=2 verify
+    # transient is 0.044-0.071 GiB/lane across 1K/4K/16K x 1/2/4 lanes.  The
+    # 3.1 that stood here was the dense Qwen3.8-27B figure used as a
+    # placeholder.  See provenance/lane-transient-moe.json and
+    # tests/test_lane_transient_calibration.py.
+    assert budget.transient_gib_per_lane == C.MOE_TRANSIENT_GIB_PER_LANE
+    assert budget.transient_gib_per_lane == 0.35
     with pytest.raises(ValueError, match="native MTP"):
         NorthCacheBudget.from_config(north_config(), mtp=True)
     adapter = object.__new__(NorthMiniCodeAdapter)
@@ -371,6 +381,73 @@ def test_prompt_policy_uses_native_north_controls_only():
     ).channel == "reasoning_content"
 
 
+def test_action_processor_is_history_pure_thinking_aware_and_probe_safe():
+    import mlx.core as mx
+    import numpy as np
+
+    from mlx2.adapters.north_mini_code import NorthActionProcessor
+    from mlx2.runtime.processor_probe import isolated_logits_processor
+
+    logits = mx.arange(64, dtype=mx.float32)[None, :]
+    processor = NorthActionProcessor(
+        prompt_length=2,
+        action_open=(10, 11),
+        thinking_close=(8, 9),
+    )
+
+    def finite(history):
+        masked = processor(mx.array([1, 2, *history]), logits)
+        return set(np.flatnonzero(np.isfinite(np.asarray(masked[0]))).tolist())
+
+    assert finite([]) == set(range(64))
+    assert finite([7, 8]) == set(range(64))
+    assert finite([7, 8, 9]) == {10}
+    assert finite([7, 8, 9, 10]) == {11}
+    assert finite([7, 8, 9, 10, 11]) == set(range(64))
+    first = processor(mx.array([1, 2, 7, 8, 9]), logits)
+    second = processor(mx.array([1, 2, 7, 8, 9]), logits)
+    assert mx.array_equal(first, second)
+    assert mx.array_equal(
+        isolated_logits_processor(processor)(mx.array([1, 2, 7, 8, 9]), logits),
+        first,
+    )
+
+
+def test_adapter_action_processors_cover_required_and_named_only():
+    class Tokenizer:
+        markers = {
+            "<|START_ACTION|>": [10, 11],
+            "<|END_THINKING|>": [8, 9],
+        }
+
+        def encode(self, text, **kwargs):
+            return self.markers[text]
+
+    adapter = object.__new__(NorthMiniCodeAdapter)
+    adapter.tokenizer = Tokenizer()
+    base = {"messages": [], "tools": TOOLS}
+    named = {"type": "function", "function": {"name": "echo"}}
+
+    required = adapter.request_logits_processors(
+        {**base, "tool_choice": "required", "enable_thinking": False},
+        prompt_length=7,
+    )[0]
+    selected = adapter.request_logits_processors(
+        {**base, "tool_choice": named, "enable_thinking": True},
+        prompt_length=7,
+    )[0]
+    assert required.prompt_length == selected.prompt_length == 7
+    assert required.action_open == selected.action_open == (10, 11)
+    assert required.thinking_close is None
+    assert selected.thinking_close == (8, 9)
+    assert adapter.request_logits_processors(
+        {**base, "tool_choice": "auto"}, prompt_length=7
+    ) == ()
+    assert adapter.request_logits_processors(
+        {**base, "tool_choice": "none"}, prompt_length=7
+    ) == ()
+
+
 def test_message_normalization_is_text_only_and_nonmutating():
     messages = [
         {
@@ -426,6 +503,23 @@ def test_output_channels_and_actions_are_chunk_safe(split):
     assert json.loads(call["function"]["arguments"]) == {"value": 2}
 
 
+def test_incomplete_action_is_only_tolerated_for_length_finish():
+    partial = (
+        "thought<|END_THINKING|><|START_ACTION|>"
+        '[{"tool_name":"echo","parameters":{"value":'
+    )
+    parser = NorthOutputParser(chat=True, thinking=True, tools=TOOLS)
+    events = parser.finish(partial, "length")
+    assert "".join(event.get("reasoning_content", "") for event in events) == (
+        "thought"
+    )
+    assert not any(event.get("tool_calls") for event in events)
+
+    parser = NorthOutputParser(chat=True, thinking=True, tools=TOOLS)
+    with pytest.raises(ValueError, match="incomplete North action block"):
+        parser.finish(partial, "stop")
+
+
 @pytest.mark.parametrize("split", range(1, 18))
 def test_visible_stop_ignores_reasoning_and_is_chunk_safe(split):
     text = (
@@ -474,7 +568,7 @@ def test_action_parser_fails_closed(value):
         parse_actions(value, TOOLS)
 
 
-def test_north_auto_parallel_false_rejects_a_second_call():
+def test_north_auto_parallel_false_drops_a_second_call():
     from mlx2.adapters.north_output import ACTION_CLOSE, ACTION_OPEN
 
     parser = NorthOutputParser(
@@ -485,8 +579,10 @@ def test_north_auto_parallel_false_rejects_a_second_call():
     )
     action = {"tool_name": "echo", "parameters": {"value": 2}}
     text = ACTION_OPEN + json.dumps([action, action], separators=(",", ":")) + ACTION_CLOSE
-    with pytest.raises(ValueError, match="at most one"):
-        parser.push(text, final=True)
+    events = parser.push(text, final=True)
+    calls = [call for event in events for call in event.get("tool_calls", ())]
+    assert len(calls) == 1
+    assert parser.tool_call_constraint_truncations == 1
 
 
 def test_tiny_native_cpu_split_replay_and_layered_cache():
@@ -603,3 +699,32 @@ def test_north_declares_grammar_deferral_marker_and_answer_envelope():
     assert adapter.structured_envelope_token_ids() == ((255012,), (255013,))
     table["<|START_TEXT|>"] = [1, 2]  # not atomic: undeclared, framing stays masked
     assert adapter.structured_envelope_token_ids() is None
+
+
+def test_artifact_check_fails_closed_on_a_missing_norm_selector(tmp_path):
+    """An artifact that drops rms_norm_eps must be rejected, not mis-normalized.
+
+    Upstream Cohere2Moe selects the norm *class* from rms_norm_eps (present ->
+    RMSNorm eps 1e-6, absent -> mean-centred LayerNorm eps 1e-5).  Both have the
+    same parameter shapes, so a config that lost this key would load cleanly and
+    serve the wrong normalization in silence.  See
+    mlx2/runtime/models/cohere2_moe._norm_layer and tests/test_north_norm_choice.py.
+    """
+    root = artifact(tmp_path)
+    for field in ("rms_norm_eps", "layer_norm_eps"):
+        config = json.loads((root / "config.json").read_text())
+        assert config[field] is not None
+        del config[field]
+        (root / "config.json").write_text(json.dumps(config))
+        with pytest.raises(ValueError, match="topology"):
+            inspect_artifact(root)
+        artifact(tmp_path)
+
+
+def test_artifact_check_rejects_a_flipped_norm_selector(tmp_path):
+    root = artifact(tmp_path)
+    config = json.loads((root / "config.json").read_text())
+    config["rms_norm_eps"] = 1e-05
+    (root / "config.json").write_text(json.dumps(config))
+    with pytest.raises(ValueError, match="topology"):
+        inspect_artifact(root)

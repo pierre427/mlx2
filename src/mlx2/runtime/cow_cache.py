@@ -64,6 +64,25 @@ def mtp_boundary_cow_enabled(value: Optional[bool] = None) -> bool:
     }
 
 
+def external_round_cow_enabled(value: Optional[bool] = None) -> bool:
+    """Resolve descriptor snapshots for external/PLD boundaries. Default is off.
+
+    ``MLX_LM_EXTERNAL_ROUND_COW=1`` replaces the deep copies of the external
+    draft round checkpoint and the external/PLD prompt-boundary and finish
+    caches.  ``mx.array.__deepcopy__`` already shares the immutable buffer,
+    so the deep copy never duplicated KV bytes; descriptor COW adds
+    stable-source validation at a small host cost and stays opt-in.
+    """
+    if value is not None:
+        return bool(value)
+    return os.environ.get("MLX_LM_EXTERNAL_ROUND_COW", "0").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
 @dataclass(frozen=True)
 class COWPromptMetadata:
     """Host-only identity pinned to the immutable cache generation."""
@@ -1482,6 +1501,30 @@ def snapshot_prompt_cache_descriptors(
             "snapshot_bytes": int(_tree_nbytes((snapshot, snapshot_sidecar))),
         },
     )
+
+
+def snapshot_committed_cache(
+    prompt_cache: Iterable[Any], sidecar: Any = None, *, enabled: Optional[bool] = None
+) -> tuple[list[Any], Any, str]:
+    """Return an independent copy of one committed boundary.
+
+    Descriptor COW is preferred (see :func:`snapshot_prompt_cache_descriptors`);
+    a graph that cannot be frozen, e.g. one inside a speculation transaction,
+    falls back to the historical deep copy.  The mode is ``descriptor_cow``,
+    ``deepcopy_fallback`` or ``deepcopy_disabled``.
+    """
+    if external_round_cow_enabled(enabled):
+        try:
+            cache, frozen_sidecar, _receipt = snapshot_prompt_cache_descriptors(
+                prompt_cache, sidecar
+            )
+            return cache, frozen_sidecar, "descriptor_cow"
+        except COWCacheUnsupported:
+            mode = "deepcopy_fallback"
+    else:
+        mode = "deepcopy_disabled"
+    cache, frozen_sidecar = copy.deepcopy((list(prompt_cache), sidecar))
+    return cache, frozen_sidecar, mode
 
 
 def restore_prompt_cache(prompt_cache: Any) -> COWPromptCacheBranch:

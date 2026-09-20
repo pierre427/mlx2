@@ -10,6 +10,7 @@ import copy
 import hashlib
 import json
 import os
+import re
 from pathlib import Path
 
 from ..contracts import Capability, ModelDescriptor, StatePlane
@@ -143,6 +144,136 @@ def normalize_messages(messages: list[dict]) -> list[dict]:
     return messages
 
 
+_MUSE_TOOL_NAME = re.compile(r"[\w.-]+\Z", re.ASCII)
+
+
+def _thinking_enabled(request: dict) -> bool:
+    effort = request.get(
+        "reasoning_effort",
+        "high" if request.get("enable_thinking", False) else "none",
+    )
+    return bool(request.get("enable_thinking", effort != "none"))
+
+
+def _tool_names(request: dict) -> tuple[str, ...]:
+    names = tuple(tool["function"]["name"] for tool in request.get("tools", ()))
+    if any(_MUSE_TOOL_NAME.fullmatch(name) is None for name in names):
+        raise ValueError(
+            "Muse tool names may contain only letters, digits, '_', '-', and '.'"
+        )
+    return names
+
+
+def _recipient_header(name: str) -> str:
+    return f" to={name}<|message|>"
+
+
+def render_prompt_text(tokenizer, request: dict) -> str:
+    """Muse prompt text; ``prompt_tokens`` is its special-token-free encoding."""
+    if "messages" not in request:
+        return request["prompt"]
+    effort = request.get(
+        "reasoning_effort",
+        "high" if request.get("enable_thinking", False) else "none",
+    )
+    strengths = {
+        "none": "low",
+        "minimal": "low",
+        "low": "low",
+        "medium": "medium",
+        "high": "high",
+        "xhigh": "high",
+        "max": "high",
+        "ultra": "high",
+    }
+    if effort not in strengths:
+        raise ValueError("Unsupported Muse reasoning_effort")
+    prompt = tokenizer.apply_chat_template(
+        normalize_messages(request["messages"]),
+        add_generation_prompt=True,
+        tokenize=False,
+        reasoning_strength=strengths[effort],
+        tools=request.get("tools")
+        if request.get("tool_choice") != "none"
+        else None,
+    )
+    if not _thinking_enabled(request):
+        choice = request.get("tool_choice", "auto")
+        names = _tool_names(request)
+        if isinstance(choice, dict):
+            # The template renders prior tool turns with this exact header.
+            # Opening it in the prompt makes the selected ATEM body the
+            # first generated token span.
+            prompt += _recipient_header(choice["function"]["name"])
+        elif not names or choice == "none":
+            # Preserve the established no-tool/direct-answer prompt exactly.
+            prompt += " to=user<|message|>"
+    return prompt
+
+
+class MuseRecipientProcessor:
+    """Constrain Muse's first generated recipient header from token history.
+
+    The processor has no evolving state: target decode, speculative probes, and
+    replaying the same history all produce the same mask. Once one complete
+    header is present it becomes a passthrough and the output parser plus main's
+    terminal tool contract remain authoritative for the body.
+    """
+
+    history_pure = True  # P5
+
+    def __init__(self, prompt_length: int, headers):
+        sequences = tuple(
+            dict.fromkeys(tuple(int(token) for token in row) for row in headers)
+        )
+        if prompt_length < 0 or not sequences or any(not row for row in sequences):
+            raise ValueError(
+                "Muse recipient constraints require nonempty token headers"
+            )
+        self.prompt_length = int(prompt_length)
+        self.headers = sequences
+
+    def __call__(self, tokens, logits):
+        import mlx.core as mx
+
+        generated = tokens[self.prompt_length :]
+        length = generated.shape[0]
+        vocabulary = mx.arange(logits.shape[-1])
+        mask = mx.zeros((logits.shape[-1],), dtype=mx.bool_)
+        complete = mx.array(False)
+        for header in self.headers:
+            compared = min(length, len(header))
+            matches = (
+                mx.array(True)
+                if compared == 0
+                else mx.all(
+                    generated[:compared]
+                    == mx.array(header[:compared], dtype=tokens.dtype)
+                )
+            )
+            if length >= len(header):
+                complete = mx.logical_or(complete, matches)
+            else:
+                mask = mx.logical_or(
+                    mask,
+                    mx.logical_and(matches, vocabulary == header[length]),
+                )
+        mask = mx.logical_or(mask, complete)
+        return mx.where(mask, logits, mx.array(float("-inf"), dtype=logits.dtype))
+
+    def dormant(self, tokens):
+        """P5: passthrough once one complete recipient header is generated."""
+        generated = tokens[self.prompt_length :]
+        if hasattr(generated, "tolist"):
+            generated = generated.tolist()
+        generated = tuple(int(item) for item in generated)
+        return any(generated[: len(header)] == header for header in self.headers)
+
+    def probe(self, tokens, logits):
+        """Speculative probes are identical because the processor is pure."""
+        return self(tokens, logits)
+
+
 # Vendor sampling defaults.  Muse-Glimmer-30B model card ("To achieve best
 # performance ... Sampling Parameters", ~/mlx-models/
 # Muse-Glimmer-30B/README.md): temperature 1.0, top_p 0.95, top_k 64, for all
@@ -160,6 +291,7 @@ MUSE_GLIMMER_SAMPLING = VendorSampling.single(
 
 
 class MuseGlimmerAdapter:
+    default_route = "ordinary"
     descriptor = MUSE_GLIMMER
     sampling_defaults = MUSE_GLIMMER_SAMPLING
     reasoning_effort_semantics = "reasoning_strength"
@@ -180,7 +312,7 @@ class MuseGlimmerAdapter:
         return "muse-glimmer-apcv2-ordinary"
 
     def execution_config(self, *, max_lanes, prefill_step):
-        return {
+        config = {
             "persistent": True,
             "num_draft": self.external_policy.get("num_draft", 4) if getattr(self,"draft_model",None) is not None else 0,
             "backend": "external_draft" if getattr(self,"draft_model",None) is not None else "ordinary",
@@ -189,13 +321,19 @@ class MuseGlimmerAdapter:
             "segment_aware_live_tip": False,
             "segment_aware_cohort_size": max_lanes,
         }
+        if (getattr(self, "external_policy", None) or {}).get("pairwise_selection") == "batched":
+            # Only a selected non-default policy enters settings/receipts.
+            config["pairwise_selection"] = "batched"
+        return config
 
     def __init__(self, model_path: str, *, execution_policy=None):
         self.external_policy = dict(execution_policy or {})
-        if set(self.external_policy) - {"draft_model", "num_draft"}:
+        if set(self.external_policy) - {"draft_model", "num_draft", "pairwise_selection"}:
             raise ValueError("Unsupported Muse execution policy")
         if self.external_policy and not self.external_policy.get("draft_model"):
             raise ValueError("Muse policy overrides require draft_model")
+        if self.external_policy.get("pairwise_selection", "host") not in ("host", "batched"):
+            raise ValueError("pairwise_selection must be 'host' or 'batched'")
         self.draft_model = None
         draft_record = None
         if self.external_policy:
@@ -215,13 +353,11 @@ class MuseGlimmerAdapter:
         from transformers import AutoTokenizer
         from ..runtime.models.muse_glimmer import Model
         from ..runtime.tokenizer_utils import TokenizerWrapper, BPEStreamingDetokenizer
-        from ..runtime.ubc_evict import ubc_evict_paths
+        from ..runtime.ubc_evict import load_shards_evicting
 
         self.model = Model(ModelArgs.from_dict(config))
-        weights = {}
         files = [path / record[0] for record in self.identity["files"]]
-        for file in files:
-            weights.update(self.model.sanitize(mx.load(str(file))))
+        weights = load_shards_evicting(files, sanitize=self.model.sanitize)
         quant = config.get("quantization", config.get("quantization_config"))
         if quant:
 
@@ -242,7 +378,7 @@ class MuseGlimmerAdapter:
         self.model.eval()
         mx.eval(self.model.parameters())
         weights.clear()
-        ubc_evict_paths([str(file) for file in files])
+        mx.clear_cache()
         tokenizer = AutoTokenizer.from_pretrained(
             path, local_files_only=True, trust_remote_code=False
         )
@@ -277,41 +413,33 @@ class MuseGlimmerAdapter:
         if self.draft_model is None:
             raise ValueError("No external draft model bound")
         from ..runtime.external_speculative import ExternalDraftBatchGenerator
-        return ExternalDraftBatchGenerator(self.model, draft_model=self.draft_model, binding=self.identity["fingerprint"], num_draft=self.external_policy.get("num_draft",4), **kwargs)
+        return ExternalDraftBatchGenerator(self.model, draft_model=self.draft_model, binding=self.identity["fingerprint"], num_draft=self.external_policy.get("num_draft",4), pairwise_selection=self.external_policy.get("pairwise_selection","host"), **kwargs)
 
     def prompt_tokens(self, request: dict) -> list[int]:
-        if "messages" not in request:
-            return self.tokenizer.encode(request["prompt"], add_special_tokens=False)
-        effort = request.get(
-            "reasoning_effort",
-            "high" if request.get("enable_thinking", False) else "none",
+        return self.tokenizer.encode(
+            render_prompt_text(self.tokenizer, request), add_special_tokens=False
         )
-        strengths = {
-            "none": "low",
-            "minimal": "low",
-            "low": "low",
-            "medium": "medium",
-            "high": "high",
-            "xhigh": "high",
-            "max": "high",
-            "ultra": "high",
-        }
-        if effort not in strengths:
-            raise ValueError("Unsupported Muse reasoning_effort")
-        prompt = self.tokenizer.apply_chat_template(
-            normalize_messages(request["messages"]),
-            add_generation_prompt=True,
-            tokenize=False,
-            reasoning_strength=strengths[effort],
-            tools=request.get("tools")
-            if request.get("tool_choice") != "none"
-            else None,
-        )
-        if request.get("enable_thinking", effort != "none") is False:
-            # Muse's template ends at assistant; finish its user recipient header
-            # to select a direct answer. This is a prompt policy, not a token budget.
-            prompt += " to=user<|message|>"
-        return self.tokenizer.encode(prompt, add_special_tokens=False)
+
+    def render_prompt(self, request: dict) -> str:
+        """Prompt text whose special-token-free encoding is ``prompt_tokens``."""
+        return render_prompt_text(self.tokenizer, request)
+
+    def request_logits_processors(self, request, *, prompt_length):
+        """Return the request-scoped Muse recipient policy, if one is needed."""
+        if "messages" not in request or _thinking_enabled(request):
+            return ()
+        choice = request.get("tool_choice", "auto")
+        names = _tool_names(request)
+        if not names or choice == "none" or isinstance(choice, dict):
+            return ()
+        recipients = names if choice == "required" else ("user", *names)
+        headers = [
+            self.tokenizer.encode(
+                _recipient_header(recipient), add_special_tokens=False
+            )
+            for recipient in recipients
+        ]
+        return (MuseRecipientProcessor(prompt_length, headers),)
 
     def output_parser(self, request):
         from .muse_glimmer_output import MuseOutputParser
@@ -325,17 +453,31 @@ class MuseGlimmerAdapter:
             parallel_tool_calls=request.get("parallel_tool_calls", True),
         )
 
+    # Item 12: opener free text must avoid for the ``auto`` tool grammar.
+    tool_call_open_marker = "<atem:function_calls>"
+
     def tool_constraint(self, request):
         from ..output import constrained_tool_choice
         from .muse_glimmer_output import constrained_tool_grammar
 
         if not constrained_tool_choice(request):
             return None
-        return constrained_tool_grammar(
+        grammar = constrained_tool_grammar(
             request["tools"],
             request["tool_choice"],
             parallel_tool_calls=request.get("parallel_tool_calls", True),
         )
+        if not _thinking_enabled(request) and request["tool_choice"] == "required":
+            headers = (
+                "(?:"
+                + "|".join(
+                    re.escape(_recipient_header(name))
+                    for name in _tool_names(request)
+                )
+                + ")"
+            )
+            return headers + grammar
+        return grammar
 
     def diagnostics(self):
         return {

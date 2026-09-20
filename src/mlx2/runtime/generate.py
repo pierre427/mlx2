@@ -24,6 +24,8 @@ from .models.cache import (
     record_state_checkpoints,
 )
 from .sample_utils import LaneRNG, draw_key
+from .state_boundaries import BoundaryPurpose, StateBoundary
+from .multi_lora import bind_lora_rows, clear_lora_rows
 
 DEFAULT_MAX_TOKENS = 100
 MTP_STARVED_BOUNDARIES_BEFORE_PLAIN = 8
@@ -516,7 +518,13 @@ class PromptProcessingBatch:
             if BATCH_UID_HOOK is not None:
                 BATCH_UID_HOOK(list(self.uids))
             kwargs = media_inputs[0] if media_inputs and processed == 0 else {}
-            self.model(tokens[:, :n_to_process], cache=self.prompt_cache, **kwargs)
+            # Concurrent multi-LoRA: publish per-row adapter slots for exactly
+            # this forward (no-op unless a manager is attached to the model).
+            lora_rows = bind_lora_rows(self.model, self.uids)
+            try:
+                self.model(tokens[:, :n_to_process], cache=self.prompt_cache, **kwargs)
+            finally:
+                clear_lora_rows(lora_rows)
             if kwargs:
                 self.prefill_inputs[0] = None
             if prefill_prefetch is not None and tokens.shape[1] > n_to_process:
@@ -740,9 +748,11 @@ class GenerationBatch:
         taps, steer = self._residual_steer(inputs)
         if steer is not None:
             taps.steer = steer
+        lora_rows = bind_lora_rows(self.model, self.uids)
         try:
             logits = self.model(inputs[:, None], cache=self.prompt_cache)
         finally:
+            clear_lora_rows(lora_rows)
             if steer is not None:
                 taps.steer = None
         logits = logits[:, -1, :]
@@ -759,6 +769,7 @@ class GenerationBatch:
                     sample_logits = processor(token_context[e], sample_logits)
                 processed_logits.append(sample_logits)
             logits = mx.concatenate(processed_logits, axis=0)
+        logits = logits.astype(mx.float32)
         logprobs = logits - mx.logsumexp(logits, axis=-1, keepdims=True)
         if any(self.samplers):
             groups = {}
@@ -923,7 +934,22 @@ def _segment_aware_cohort_size(config: Optional[Mapping[str, Any]]) -> int:
 
     This is an admission-window target, not permission to widen a live
     true-batched cohort.  The latter remains rejected by MTPGenerationBatch's
-    width lock.  Leaving this unspecified preserves the qualified N=2 policy.
+    width lock.
+
+    The default of 2 is a floor for callers that supply no value: every serving
+    adapter sets this to ``max_lanes`` in ``execution_config``, so served
+    routes never reach it, and no qualification receipt in the tree records a
+    cohort size of 2 (796 record 20, 421 record 4, 37 record 1).  The earlier
+    note here -- "preserves the qualified N=2 policy" -- described ``num_draft``,
+    which f7076a6 did qualify at 2; that commit's receipts carry no cohort size
+    at all and ran at ``max_lanes`` 4.
+
+    Operators still set this window: adapters bind it to ``max_lanes``, so
+    ``--max-lanes`` is the lever, and it defaults to 4.  Receipts in the tree
+    record windows of 20, 4 and 1, so narrow windows are shipped
+    configurations rather than test-only states, and mechanisms keyed to this
+    width (segmented prefill ordering among them) behave differently at 1 or 4
+    than at 16.
     """
     value = config.get("segment_aware_cohort_size", 2) if config is not None else 2
     try:
@@ -1049,6 +1075,27 @@ def _close_segmented_detached(detached: Any, *, release_cache: bool) -> None:
         raise first_error
 
 
+def _note_copy_draft_round(stats: Dict[str, Any], proposal: Any) -> None:
+    """Sync-free host counters for one committed copy-draft-capable round."""
+    for span, accepted, decision in zip(
+        proposal.copy_spans, proposal.accepted_lengths, proposal.copy_decisions
+    ):
+        if decision == "off":
+            continue
+        if span:
+            _bump_bounded_counter(stats, "self_mtp_copy_rounds")
+            _bump_bounded_counter(stats, "self_mtp_copy_proposed_tokens", span)
+            _bump_bounded_counter(
+                stats, "self_mtp_copy_accepted_tokens", min(accepted, span)
+            )
+            if decision == "probe":
+                _bump_bounded_counter(stats, "self_mtp_copy_probe_rounds")
+        elif decision == "declined":
+            _bump_bounded_counter(stats, "self_mtp_copy_gate_declines")
+        else:
+            _bump_bounded_counter(stats, "self_mtp_copy_lookup_misses")
+
+
 class MTPGenerationBatch:
     """Scheduler wrapper for Agent A's batched self-MTP transaction."""
 
@@ -1068,6 +1115,7 @@ class MTPGenerationBatch:
         async_qsa_prequeue: Optional[Any] = None,
         adaptive_depth_policy: Optional[Any] = None,
         scheduler_stats: Optional[Dict[str, Any]] = None,
+        acceptance_logger: Optional[Any] = None,
         mtp_admission: Optional[
             Callable[
                 [Sequence[Tuple[int, int, int, bool, float]]],
@@ -1125,6 +1173,7 @@ class MTPGenerationBatch:
         self.mtp_admission = mtp_admission
         self._base_mtp_admission = mtp_admission
         self.adaptive_depth_policy = adaptive_depth_policy
+        self.acceptance_logger = acceptance_logger
         self.scheduler_stats = scheduler_stats if scheduler_stats is not None else {}
         self._adaptive_admitted_cap = min(
             (int(lane.lane.num_draft) for lane in detached_lanes), default=0
@@ -1712,6 +1761,8 @@ class MTPGenerationBatch:
             self.mtp_admission = batch.mtp_admission
             self.adaptive_depth_policy = batch.adaptive_depth_policy
             self._adaptive_admitted_cap = batch._adaptive_admitted_cap
+        if getattr(self, "acceptance_logger", None) is None:
+            self.acceptance_logger = getattr(batch, "acceptance_logger", None)
         if self.segmented_live_tip and was_empty:
             # Output-budget policy belongs to the incoming cohort. A completed
             # short response must not permanently disable future promotion.
@@ -1837,6 +1888,11 @@ class MTPGenerationBatch:
             response.lane_rng = lane.rng
             response.rng_draws = lane.rng.draws if lane.rng is not None else 0
             stats = dict(vars(lane.stats))
+            # ``vars`` hands out the live dicts; a delivered receipt must not
+            # keep mutating behind the caller.
+            for _hist in ("verify_span_hist", "verify_accept_hist"):
+                if isinstance(stats.get(_hist), dict):
+                    stats[_hist] = dict(stats[_hist])
             stats["total_emitted"] = int(lane.stats.total_emitted)
             stats["draft_acceptance"] = float(lane.stats.draft_accepted) / max(
                 int(lane.stats.draft_proposed), 1
@@ -1874,6 +1930,11 @@ class MTPGenerationBatch:
                     else None
                 ),
                 "relaxed_accepts": int(lane.relaxed_accepts),
+                **(
+                    {"copy_draft": lane.copy_draft.receipt()}
+                    if getattr(lane, "copy_draft", None) is not None
+                    else {}
+                ),
                 "fly_disabled": bool(
                     lane.fly_verification is not None
                     and lane.fly_verification.enabled
@@ -1962,6 +2023,35 @@ class MTPGenerationBatch:
             self._complete_responses(terminal, last)
         return responses
 
+    def _set_confidence_probes(self) -> None:
+        """Attach this cycle's draft-confidence probe to every lane (or none)."""
+        probe = None
+        policy_probe = getattr(self.adaptive_depth_policy, "probe", None)
+        if callable(policy_probe):
+            probe = policy_probe()
+        elif getattr(self, "acceptance_logger", None) is not None:
+            probe = self.acceptance_logger.probe
+        for lane in self.state.lanes:
+            lane.confidence_probe = probe
+
+    def _observe_draft_confidence(self, proposal) -> None:
+        from .mtp_confidence import rows_from_proposal
+
+        rows = rows_from_proposal(proposal, proposal._old_curs)
+        if not rows:
+            return
+        _bump_bounded_counter(self.scheduler_stats, "mtp_confidence_feature_cycles")
+        observe = getattr(self.adaptive_depth_policy, "observe_confidence", None)
+        if callable(observe):
+            observe(rows)
+        logger = getattr(self, "acceptance_logger", None)
+        if logger is not None:
+            written = logger.record(rows)
+            if written:
+                _bump_bounded_counter(
+                    self.scheduler_stats, "mtp_acceptance_log_records", written
+                )
+
     def next(self) -> List[Response]:
         if any((output is not None for output in self._initial_outputs)):
             return self._emit_initial()
@@ -1999,10 +2089,16 @@ class MTPGenerationBatch:
             # target/draft ownership intact for a later bounded re-entry probe.
             for lane in self.state.lanes:
                 lane.num_draft = cohort_depth
+        self._set_confidence_probes()
         zero_depth = all(
             min(lane.num_draft, max(lane.max_tokens - lane.ntoks - 1, 0)) == 0
             for lane in self.state.lanes
         )
+        if zero_depth:
+            from .hybrid_speculative import copy_draft_candidate_pending
+
+            # A K=0 cohort still verifies a copied span when one exists.
+            zero_depth = not copy_draft_candidate_pending(self.state)
         if zero_depth:
             try:
                 proposal = advance_batched_self_mtp_zero(self.model, self.state)
@@ -2067,9 +2163,26 @@ class MTPGenerationBatch:
                     terminal=terminal,
                 )
             if self.adaptive_depth_policy is not None:
-                self.adaptive_depth_policy.observe(
-                    sum(proposal.draft_depths), sum(proposal.accepted_lengths)
+                # Head-only evidence: copied spans never steer MTP depth.
+                copy_spans = proposal.copy_spans or (0,) * len(
+                    proposal.draft_depths
                 )
+                self.adaptive_depth_policy.observe(
+                    sum(
+                        depth
+                        for (depth, copy) in zip(proposal.draft_depths, copy_spans)
+                        if not copy
+                    ),
+                    sum(
+                        accepted
+                        for (accepted, copy) in zip(
+                            proposal.accepted_lengths, copy_spans
+                        )
+                        if not copy
+                    ),
+                )
+            if proposal.draft_features:
+                self._observe_draft_confidence(proposal)
             if true_batched_segmented:
                 self._segmented_compute_width_locked = True
             ticket = self._async_qsa_ticket
@@ -2139,6 +2252,8 @@ class MTPGenerationBatch:
             _bump_bounded_counter(
                 self.scheduler_stats, "fly_relaxed_accepts", relaxed_accepts
             )
+        if proposal.copy_decisions:
+            _note_copy_draft_round(self.scheduler_stats, proposal)
         terminal_indices = [i for (i, value) in enumerate(terminal) if value]
         if terminal_indices:
             self._complete_responses(terminal_indices, last)
@@ -2225,6 +2340,10 @@ class BatchGenerator:
         adaptive_mtp_depth: Optional[Mapping[str, Any]] = None,
         fly_verification=None,
         apc_interior_checkpoints: Optional[Mapping[str, int]] = None,
+        prefill_scheduling: Optional[Mapping[str, Any]] = None,
+        memory_pressure_level: Optional[Callable[[], int]] = None,
+        copy_draft=None,
+        mtp_acceptance_log: Optional[Any] = None,
     ):
         if decode_priority_cadence < 1:
             raise ValueError("decode_priority_cadence must be positive")
@@ -2257,11 +2376,33 @@ class BatchGenerator:
         self.adaptive_mtp_depth = (
             None if adaptive_mtp_depth is None else dict(adaptive_mtp_depth)
         )
+        if mtp_acceptance_log is not None and self.self_mtp is None:
+            raise ValueError("MTP acceptance logging requires a self-MTP route")
+        self.mtp_acceptance_logger = None
+        if mtp_acceptance_log is not None:
+            from .mtp_confidence import MTPAcceptanceLogger
+
+            self.mtp_acceptance_logger = (
+                mtp_acceptance_log
+                if isinstance(mtp_acceptance_log, MTPAcceptanceLogger)
+                else MTPAcceptanceLogger(
+                    **(
+                        {"path": mtp_acceptance_log}
+                        if not isinstance(mtp_acceptance_log, Mapping)
+                        else dict(mtp_acceptance_log)
+                    )
+                )
+            )
         from .speculative_sampling import FLyVerificationPolicy
 
         self.fly_verification = FLyVerificationPolicy.from_value(fly_verification)
         if self.fly_verification.enabled and self.self_mtp is None:
             raise ValueError("FLy verification requires a self-MTP route")
+        from .copy_draft import CopyDraftPolicy
+
+        self.copy_draft = CopyDraftPolicy.from_value(copy_draft)
+        if self.copy_draft.enabled and self.self_mtp is None:
+            raise ValueError("self-MTP copy drafts require a self-MTP route")
         if self.self_mtp is not None:
             if not self.self_mtp.get("persistent", True):
                 raise ValueError("batched self-MTP requires persistent_mtp=True")
@@ -2300,13 +2441,37 @@ class BatchGenerator:
         self._last_decode_duration_ms = None
         self._prefill_ms_per_token_ewma = None
         self.scheduler_stats = scheduler_stats if scheduler_stats is not None else {}
+        if self.copy_draft.enabled:
+            # Mechanism counters are present (as zero) from the first scrape so
+            # a harness can refuse an enabled arm that never copied.
+            for key in (
+                "self_mtp_copy_rounds",
+                "self_mtp_copy_proposed_tokens",
+                "self_mtp_copy_accepted_tokens",
+                "self_mtp_copy_probe_rounds",
+                "self_mtp_copy_gate_declines",
+                "self_mtp_copy_lookup_misses",
+            ):
+                self.scheduler_stats.setdefault(key, 0)
         self.post_prefill_transform = post_prefill_transform
         self._post_prefill_receipts = {}
+        # rm15: per-request prefill chunk sizes.  The chunk size is chosen per
+        # round from measured timing and current concurrency, and a different
+        # chunk size gives a different (still deterministic) answer, so a
+        # receipt that does not record it cannot explain why the same prompt
+        # answered differently.  A histogram, so it stays bounded by the number
+        # of DISTINCT sizes rather than by the number of rounds.
+        self._prefill_chunk_trace = {}
         from .adaptive_policy import DecodeTimeFairness
 
         self.decode_time_fairness = DecodeTimeFairness(
             **dict(decode_time_fairness or {})
         )
+        from .adaptive_policy import PrefillOrder
+
+        self.prefill_order = PrefillOrder.from_value(prefill_scheduling)
+        if self.prefill_order.enabled:
+            self._sync_prefill_order_stats()
         for key in (
             "prefill_rounds",
             "prefill_only_rounds",
@@ -2321,10 +2486,42 @@ class BatchGenerator:
             "apc_interior_checkpoints_captured",
             "apc_interior_checkpoints_skipped_trimmable",
             "apc_interior_checkpoints_skipped_inexact",
+            "prefill_chunk_rounds_recorded",
+            "prefill_chunk_varied_requests",
         ):
             self.scheduler_stats.setdefault(key, 0)
         self.scheduler_stats.setdefault("adaptive_prefill_chunk_histogram", {})
         self.completion_batch_size = max(completion_batch_size, prefill_batch_size)
+        if self.prefill_order.enabled and self.self_mtp is not None:
+            # The self-MTP prefill admission window is a FIFO prefix of the
+            # queue (``_next_mtp``: ``list(self._unprocessed_sequences)[:n]``),
+            # and ``PrefillOrder`` chooses *inside* it.  A request can only be
+            # overtaken while it is still a candidate, so the forced-bypass cap
+            # needs a window of at least ``max_bypass + 1``; narrower than that
+            # the served request never accumulates ``max_bypass`` consecutive
+            # bypasses and the cap can never fire.  Measured on CPU with the
+            # default cap of 3: the cap first fires at window 4 (window 2 and 3
+            # give bypass_forced == 0).  Fail closed rather than serve a
+            # fairness guarantee that is silently absent.
+            #
+            # The window is ``--max-lanes``; see _segment_aware_cohort_size's
+            # docstring for why.  This guard is therefore tripped by a low
+            # ``--max-lanes`` (default 4, i.e. exactly the boundary), or by a
+            # harness constructing BatchGenerator directly.
+            window = self.completion_batch_size
+            if _segment_aware_live_tip_enabled(self.self_mtp):
+                window = min(window, _segment_aware_cohort_size(self.self_mtp))
+            if window <= self.prefill_order.max_bypass:
+                raise ValueError(
+                    "prefill_scheduling max_bypass="
+                    f"{self.prefill_order.max_bypass} requires a self-MTP prefill "
+                    f"admission window of at least "
+                    f"{self.prefill_order.max_bypass + 1}, but this configuration "
+                    f"admits at most {window} "
+                    "(--max-lanes, which also sets segment_aware_cohort_size "
+                    "through the adapter's execution_config); raise "
+                    "--max-lanes or lower max_bypass"
+                )
         self.max_kv_size = max_kv_size
         self.kv_bits = kv_bits
         self.kv_group_size = kv_group_size
@@ -2332,6 +2529,9 @@ class BatchGenerator:
         self.apc_interior_checkpoints = dict(
             apc_interior_checkpoints or {"count": 0, "min_stride": 1}
         )
+        # Host pressure gate for disposable rolling captures (P4); None means
+        # the signal is unavailable and captures always proceed.
+        self.memory_pressure_level = memory_pressure_level
         self.prompt_trim_rollback_tokens = max(0, int(prompt_trim_rollback_tokens))
         if state_budget is not None and (
             kv_budget_bytes is not None or kv_cost is not None
@@ -2424,9 +2624,14 @@ class BatchGenerator:
         # remaining growth before allowing the next slice.
         self._mtp_prefill_resident = set()
         self._mtp_prefill_projection_bytes = {}
+        self._mtp_prefill_failures = []
         self._prompt_boundaries = {}
         self._interior_checkpoint_positions = {}
         self._interior_checkpoints = {}
+        # Purpose of each planned position; absent positions are INTERIOR.
+        self._state_boundary_purposes = {}
+        # Rolling/junction snapshots awaiting immediate publication.
+        self._state_checkpoints = []
         self._cache_capsule_pending = {}
         self._cache_capsule_by_uid = {}
         self._cache_capsule_receipts = {}
@@ -2457,6 +2662,23 @@ class BatchGenerator:
             policy = self.decode_time_fairness = DecodeTimeFairness()
         return policy
 
+    def _prefill_order(self):
+        policy = getattr(self, "prefill_order", None)
+        if policy is None:
+            from .adaptive_policy import PrefillOrder
+
+            policy = self.prefill_order = PrefillOrder()
+        return policy
+
+    def _bounded_prefill_chunks(self):
+        """Whether prefill slices follow ``_adaptive_prefill_decision``."""
+        order = getattr(self, "prefill_order", None)
+        return bool(
+            self.adaptive_prefill
+            or self._fairness().enabled
+            or (order is not None and order.one_slice_contention)
+        )
+
     def close(self):
         if getattr(self, "_old_wired_limit", None) is not None:
             mx.synchronize(self._stream)
@@ -2468,9 +2690,16 @@ class BatchGenerator:
         getattr(self, "_prompt_boundaries", {}).clear()
         getattr(self, "_interior_checkpoint_positions", {}).clear()
         getattr(self, "_interior_checkpoints", {}).clear()
+        getattr(self, "_state_boundary_purposes", {}).clear()
+        getattr(self, "_state_checkpoints", []).clear()
         getattr(self, "_post_prefill_receipts", {}).clear()
+        getattr(self, "_prefill_chunk_trace", {}).clear()
         getattr(self, "_mtp_prefill_resident", set()).clear()
         getattr(self, "_mtp_prefill_projection_bytes", {}).clear()
+        getattr(self, "_mtp_prefill_failures", []).clear()
+        logger = getattr(self, "mtp_acceptance_logger", None)
+        if logger is not None:
+            logger.close()
         self.release_cache_capsules()
 
     def release_cache_capsules(self):
@@ -2531,6 +2760,7 @@ class BatchGenerator:
         self_mtp_configs: Optional[List[dict]] = None,
         apc_interior_positions: Optional[List[Optional[Sequence[int]]]] = None,
         prefill_inputs: Optional[List[Optional[dict]]] = None,
+        state_boundaries: Optional[List[Optional[Sequence[StateBoundary]]]] = None,
     ):
         return self.insert_segments(
             [[p] for p in prompts],
@@ -2545,6 +2775,7 @@ class BatchGenerator:
             self_mtp_configs,
             apc_interior_positions,
             prefill_inputs,
+            state_boundaries,
         )
 
     def bind_cache_capsule(self, group, uid, prepared, expected_rows):
@@ -2659,7 +2890,15 @@ class BatchGenerator:
         self_mtp_configs: Optional[List[dict]] = None,
         apc_interior_positions: Optional[List[Optional[Sequence[int]]]] = None,
         prefill_inputs: Optional[List[Optional[dict]]] = None,
+        state_boundaries: Optional[List[Optional[Sequence[StateBoundary]]]] = None,
     ):
+        """Queue prompts; ``state_boundaries`` plans exact prefill snapshots.
+
+        ``apc_interior_positions`` is the INTERIOR-only alias of
+        ``state_boundaries``; a lane's non-None ``state_boundaries`` entry
+        wins.  With neither, a positive ``apc_interior_checkpoints.count``
+        plans the default interior lattice.
+        """
         uids = []
         max_tokens = max_tokens or [self.max_tokens] * len(segments)
         all_tokens = all_tokens or [[] for _ in segments]
@@ -2677,12 +2916,16 @@ class BatchGenerator:
             else apc_interior_positions
         )
         prefill_inputs = prefill_inputs or [None for _ in segments]
+        state_boundaries = (
+            [None] * len(segments) if state_boundaries is None else state_boundaries
+        )
         for name, values in (
             ("mtp_states", mtp_states),
             ("lane_rngs", lane_rngs),
             ("self_mtp_configs", self_mtp_configs),
             ("apc_interior_positions", apc_interior_positions),
             ("prefill_inputs", prefill_inputs),
+            ("state_boundaries", state_boundaries),
         ):
             if len(values) != len(segments):
                 raise ValueError(f"{name} must have one entry per sequence")
@@ -2707,37 +2950,54 @@ class BatchGenerator:
                 "apc_interior_checkpoints",
                 {"count": 0, "min_stride": 1},
             )
-            if int(policy.get("count", 0)) > 0:
+            total = len(all_tokens[i]) + sum(len(part) for part in segments[i])
+            requested = state_boundaries[i]
+            if requested is None and apc_interior_positions[i] is not None:
+                requested = tuple(
+                    StateBoundary(position, BoundaryPurpose.INTERIOR)
+                    for position in apc_interior_positions[i]
+                )
+            if requested is None and int(policy.get("count", 0)) > 0:
+                requested = tuple(
+                    StateBoundary(position, BoundaryPurpose.INTERIOR)
+                    for position in interior_checkpoint_positions(
+                        total,
+                        count=int(policy["count"]),
+                        min_stride=int(policy["min_stride"]),
+                    )
+                )
+            if requested or int(policy.get("count", 0)) > 0:
                 from .apc_v2 import inspect_apc_capabilities
 
-                total = len(all_tokens[i]) + sum(len(part) for part in segments[i])
                 capabilities = inspect_apc_capabilities(caches[i])
                 if capabilities.interior_checkpoint_target:
-                    requested = apc_interior_positions[i]
-                    positions = (
-                        interior_checkpoint_positions(
-                            total,
-                            count=int(policy["count"]),
-                            min_stride=int(policy["min_stride"]),
-                        )
-                        if requested is None
-                        else tuple(requested)
-                    )
+                    requested = tuple(requested or ())
+                    if not all(
+                        isinstance(bound, StateBoundary) for bound in requested
+                    ):
+                        raise ValueError("invalid APC interior checkpoint positions")
                     passed = len(all_tokens[i])
-                    positions = tuple(
-                        position for position in positions if position > passed
+                    requested = tuple(
+                        bound for bound in requested if bound.position > passed
                     )
+                    positions = tuple(bound.position for bound in requested)
                     if any(
-                        isinstance(position, bool)
-                        or not isinstance(position, int)
-                        or position >= total - 1
-                        for position in positions
+                        isinstance(bound.position, bool)
+                        or not isinstance(bound.position, int)
+                        or bound.position >= total - 1
+                        for bound in requested
                     ) or tuple(sorted(set(positions))) != positions:
                         raise ValueError("invalid APC interior checkpoint positions")
                     if positions:
-                        self._interior_checkpoint_positions[self._uid_count + i] = deque(
-                            positions
-                        )
+                        uid = self._uid_count + i
+                        self._interior_checkpoint_positions[uid] = deque(positions)
+                        purposes = {
+                            bound.position: BoundaryPurpose(bound.purpose)
+                            for bound in requested
+                            if bound.purpose != BoundaryPurpose.INTERIOR
+                        }
+                        if purposes:
+                            self._state_boundary_purposes[uid] = purposes
                 else:
                     _bump_bounded_counter(
                         self.scheduler_stats,
@@ -2929,7 +3189,14 @@ class BatchGenerator:
                     # An append-only cache exceeded its bound. Growing the
                     # reservation after granting ownership can strand a lane
                     # behind its own allocation, so reject this row instead.
+                    # Rejection is terminal: the resident bytes only grow, so
+                    # the row would fail this check at every later boundary.
+                    # Surface it for the server to fail closed; never leave it
+                    # queued with no memory or scheduler wait to explain it.
                     bound_violations.add(int(uid))
+                    self._record_mtp_prefill_failure(
+                        uid, current_bytes, projected_bytes
+                    )
                     joining.append(
                         (
                             int(uid),
@@ -3059,6 +3326,47 @@ class BatchGenerator:
         getattr(self, "_atomic_cohort_failures", []).clear()
         return failures
 
+    def _mtp_prefill_resident_bytes(self, uid, prompt_cache):
+        """Target + draft bytes a bounded self-MTP prefill currently holds."""
+        from .apc_v2 import _walk_cache_entries
+
+        total = sum(
+            int(getattr(leaf, "nbytes", 0))
+            for leaf in _walk_cache_entries(prompt_cache)
+        )
+        mtp_state = self._mtp_states.get(uid)
+        if mtp_state is not None:
+            total += sum(int(getattr(leaf, "nbytes", 0)) for leaf in mtp_state[0])
+        return total
+
+    def _record_mtp_prefill_failure(self, uid, current_bytes, projected_bytes):
+        failures = getattr(self, "_mtp_prefill_failures", None)
+        if failures is None:
+            failures = self._mtp_prefill_failures = []
+        uid = int(uid)
+        if any(item["uid"] == uid for item in failures):
+            return
+        failures.append(
+            {
+                "uid": uid,
+                "current_bytes": int(current_bytes),
+                "projected_bytes": int(projected_bytes),
+                "reason": (
+                    "self-MTP prefill cache outgrew its admitted reservation "
+                    f"({int(current_bytes)} > {int(projected_bytes)} bytes)"
+                ),
+            }
+        )
+        self.scheduler_stats["mtp_prefill_bound_violations"] = (
+            self.scheduler_stats.get("mtp_prefill_bound_violations", 0) + 1
+        )
+
+    def take_mtp_prefill_failures(self):
+        """Transfer bounded-prefill lanes that can never be admitted."""
+        failures = list(getattr(self, "_mtp_prefill_failures", ()))
+        getattr(self, "_mtp_prefill_failures", []).clear()
+        return failures
+
     def _make_mtp_batch(self, n: int):
         from .hybrid_speculative import prepare_self_mtp_lane
         from .adaptive_policy import CohortAdaptiveMTPDepth
@@ -3175,6 +3483,15 @@ class BatchGenerator:
             )
             lane.lane._requested_num_draft = config.get("requested_num_draft")
             lane.lane._batch_cohort = config.get("batch_cohort")
+            copy_policy = getattr(self, "copy_draft", None)
+            if copy_policy is not None and copy_policy.enabled:
+                from .copy_draft import CopyDraftState
+
+                # Index the *full* context, APC-restored history included, so
+                # a prefix-cache hit still copies from its cached prompt.
+                lane.lane.copy_draft = CopyDraftState(
+                    copy_policy, list(history) + list(prompt) + [int(first.token)]
+                )
             detached.append(lane)
             initial.append(first)
             stop_matchers.append(matcher)
@@ -3223,6 +3540,7 @@ class BatchGenerator:
                     )
                 ),
                 scheduler_stats=self.scheduler_stats,
+                acceptance_logger=getattr(self, "mtp_acceptance_logger", None),
             ),
             progress,
         )
@@ -3235,11 +3553,70 @@ class BatchGenerator:
             positions.popleft()
         return None if not positions else int(positions[0])
 
+    def _boundary_purpose(self, uid: int, position: int) -> BoundaryPurpose:
+        return getattr(self, "_state_boundary_purposes", {}).get(
+            int(uid), {}
+        ).get(int(position), BoundaryPurpose.INTERIOR)
+
+    def _boundary_counter(self, purpose: BoundaryPurpose, event: str) -> str:
+        name = "interior" if purpose == BoundaryPurpose.INTERIOR else purpose.name.lower()
+        return f"apc_{name}_checkpoints_{event}"
+
+    def _consume_state_boundary(self, uid: int, position: int) -> None:
+        self._interior_checkpoint_positions[int(uid)].popleft()
+        purposes = getattr(self, "_state_boundary_purposes", {}).get(int(uid))
+        if purposes is not None:
+            purposes.pop(int(position), None)
+
+    def _skip_state_boundary_for_pressure(self, uid: int, position: int) -> bool:
+        """Disposable rolling snapshots are the first thing pressure drops."""
+        purpose = self._boundary_purpose(uid, position)
+        probe = getattr(self, "memory_pressure_level", None)
+        if purpose != BoundaryPurpose.ROLLING or probe is None:
+            return False
+        from .os_memory import PressureLevel
+
+        try:
+            level = int(probe())
+        except Exception:  # noqa: BLE001 - a broken probe must not stop prefill
+            return False
+        if level < PressureLevel.WARN:
+            return False
+        _bump_bounded_counter(
+            self.scheduler_stats, "apc_rolling_checkpoints_skipped_pressure"
+        )
+        self._consume_state_boundary(uid, position)
+        return True
+
+    def _record_state_checkpoint(self, uid: int, position: int, checkpoint) -> None:
+        purpose = self._boundary_purpose(uid, position)
+        checkpoint["purpose"] = purpose
+        if purpose == BoundaryPurpose.INTERIOR:
+            self._interior_checkpoints.setdefault(int(uid), []).append(checkpoint)
+        else:
+            self._state_checkpoints.append((int(uid), checkpoint))
+        self._consume_state_boundary(uid, position)
+        _bump_bounded_counter(
+            self.scheduler_stats, self._boundary_counter(purpose, "captured")
+        )
+
+    def drain_state_checkpoints(self):
+        """Transfer rolling/junction snapshots for immediate publication.
+
+        Called once per serving loop after ``next``.  Interior snapshots stay
+        with ``pop_interior_checkpoints`` and publish when the prompt ends.
+        """
+        drained = getattr(self, "_state_checkpoints", [])
+        self._state_checkpoints = []
+        return drained
+
     def _capture_mtp_interior_checkpoint(
         self, uid: int, history, prompt_cache, mtp_state
     ) -> bool:
         position = self._next_interior_checkpoint(uid, len(history) - 1)
         if position is None or position != len(history):
+            return False
+        if self._skip_state_boundary_for_pressure(uid, position):
             return False
         from .hybrid_speculative import capture_self_mtp_checkpoint
 
@@ -3253,16 +3630,14 @@ class BatchGenerator:
         if checkpoint is None:
             _bump_bounded_counter(
                 self.scheduler_stats,
-                "apc_interior_checkpoints_skipped_inexact",
+                self._boundary_counter(
+                    self._boundary_purpose(uid, position), "skipped_inexact"
+                ),
             )
             return False
         checkpoint["tokens"] = list(history)
         checkpoint["interior"] = True
-        self._interior_checkpoints.setdefault(int(uid), []).append(checkpoint)
-        self._interior_checkpoint_positions[int(uid)].popleft()
-        _bump_bounded_counter(
-            self.scheduler_stats, "apc_interior_checkpoints_captured"
-        )
+        self._record_state_checkpoint(uid, position, checkpoint)
         return True
 
     def _advance_mtp_prefill(self, index: int, max_tokens: int):
@@ -3305,6 +3680,7 @@ class BatchGenerator:
         toc = time.perf_counter()
         remaining = remaining.tolist()
         history = list(history) + prompt[:processed]
+        self._record_prefill_chunk(uid, int(processed))
         self._mtp_states[uid] = mtp_state
         self._capture_mtp_interior_checkpoint(
             uid, history, prompt_cache, mtp_state
@@ -3318,9 +3694,21 @@ class BatchGenerator:
             )
             if cache_projection is not None:
                 total = len(history) + len(remaining)
-                self._mtp_prefill_projection_bytes[uid] = int(
-                    cache_projection(total)
+                projected = int(cache_projection(total))
+                # The bytes this slice already allocated are a hard floor. An
+                # adapter bound below them would make the very next boundary
+                # read as an append-only bound violation, and the lane would
+                # never be offered to admission again.
+                resident = self._mtp_prefill_resident_bytes(
+                    uid, prompt_cache
                 )
+                if resident > projected:
+                    _bump_bounded_counter(
+                        self.scheduler_stats,
+                        "mtp_prefill_projection_floored_to_resident",
+                    )
+                    projected = resident
+                self._mtp_prefill_projection_bytes[uid] = projected
         remaining_segments = (
             [remaining[:-1], remaining[-1:]] if len(remaining) > 1 else [remaining]
         )
@@ -3539,11 +3927,69 @@ class BatchGenerator:
     def pop_interior_checkpoints(self, uid: int):
         """Transfer exact budgeted interior checkpoints to the server."""
         getattr(self, "_interior_checkpoint_positions", {}).pop(int(uid), None)
+        getattr(self, "_state_boundary_purposes", {}).pop(int(uid), None)
         return getattr(self, "_interior_checkpoints", {}).pop(int(uid), [])
 
     def pop_post_prefill_receipt(self, uid: int):
         """Transfer one optional state-transform receipt to the server."""
         return self._post_prefill_receipts.pop(int(uid), None)
+
+    def _record_prefill_chunk(self, uid, width: int):
+        """Note that ``uid``'s prefill advanced by ``width`` tokens this round.
+
+        Sync-free and default-on: one dict update per request per round, no
+        device work.  Bounded by the number of distinct widths a request can
+        see, which is the number of adaptive slices plus the configured step.
+        """
+        if width <= 0:
+            return
+        trace = getattr(self, "_prefill_chunk_trace", None)
+        if trace is None:
+            trace = {}
+            self._prefill_chunk_trace = trace
+        entry = trace.get(int(uid))
+        if entry is None:
+            entry = {"widths": {}, "first": int(width), "last": int(width)}
+            trace[int(uid)] = entry
+        widths = entry["widths"]
+        key = str(int(width))
+        widths[key] = min(_COUNTER_MAX, int(widths.get(key, 0)) + 1)
+        entry["last"] = int(width)
+        stats = getattr(self, "scheduler_stats", None)
+        if stats is not None:
+            _bump_bounded_counter(stats, "prefill_chunk_rounds_recorded")
+
+    def pop_prefill_chunk_trace(self, uid: int):
+        """Transfer one request's prefill chunk histogram to the server.
+
+        ``varied`` is the fact an auditor needs: the request's prefill did not
+        run at one fixed chunk size, so its answer is reproducible only by
+        replaying the same chunk schedule, not by replaying the prompt.
+        """
+        entry = getattr(self, "_prefill_chunk_trace", {}).pop(int(uid), None)
+        if entry is None:
+            return None
+        widths = entry["widths"]
+        # A single trailing short chunk is the arithmetic remainder of the
+        # prompt length, not a scheduling decision, so it does not by itself
+        # make a request's chunking load-dependent.
+        scheduled = {w: c for w, c in widths.items()
+                     if c > 1 or int(w) == entry["first"]}
+        varied = len(scheduled) > 1
+        stats = getattr(self, "scheduler_stats", None)
+        if varied and stats is not None:
+            _bump_bounded_counter(stats, "prefill_chunk_varied_requests")
+        return {
+            "schema": "mlx2.prefill-chunk-trace.v1",
+            "configured_step": int(getattr(self, "prefill_step_size", 0)),
+            "adaptive": bool(getattr(self, "adaptive_prefill", False)),
+            "adaptive_slices": list(getattr(self, "adaptive_prefill_slices", ())),
+            "widths": dict(widths),
+            "rounds": int(sum(widths.values())),
+            "first": entry["first"],
+            "last": entry["last"],
+            "varied": varied,
+        }
 
     def remove(self, uids, return_prompt_caches=False):
         caches = {}
@@ -3557,10 +4003,18 @@ class BatchGenerator:
         )
         found = self._find_uids(uids)
         memory_queued = getattr(self, "_memory_queued_prefill", None)
+        if getattr(self, "_state_checkpoints", None):
+            # An undrained snapshot has lost its owner (and with it the tenant
+            # namespace it must be published under); drop it with the lane.
+            removed = set(uids)
+            self._state_checkpoints = [
+                item for item in self._state_checkpoints if item[0] not in removed
+            ]
         for uid in uids:
             self._prompt_boundaries.pop(uid, None)
             getattr(self, "_interior_checkpoint_positions", {}).pop(uid, None)
             getattr(self, "_interior_checkpoints", {}).pop(uid, None)
+            getattr(self, "_state_boundary_purposes", {}).pop(uid, None)
             if memory_queued is not None:
                 memory_queued.discard(uid)
         for stage, idx in found.values():
@@ -3604,7 +4058,10 @@ class BatchGenerator:
         )
         total += sum(
             int(getattr(leaf, "nbytes", 0))
-            for checkpoints in getattr(self, "_interior_checkpoints", {}).values()
+            for checkpoints in (
+                *getattr(self, "_interior_checkpoints", {}).values(),
+                [item[1] for item in getattr(self, "_state_checkpoints", ())],
+            )
             for snapshot in checkpoints
             for leaf in list(snapshot.get("target_cache", ()))
             + list((snapshot.get("mtp_state") or ((), None))[0])
@@ -3739,7 +4196,7 @@ class BatchGenerator:
             return False
         step = (
             adaptive_chunk
-            if self.adaptive_prefill or self._fairness().enabled
+            if BatchGenerator._bounded_prefill_chunks(self)
             else self.prefill_step_size
         )
         if any(
@@ -3826,6 +4283,104 @@ class BatchGenerator:
                 selected_lengths.append(candidate_lengths[best])
             remaining.remove(best)
         return sorted(selected)
+
+    def _queued_prefill_candidate(self, sequence):
+        return self._prefill_order().candidate(
+            sequence[0],
+            sum(len(segment) for segment in sequence[1]),
+            len(sequence[4]) if sequence[4] else 0,
+            sequence[8] if len(sequence) > 8 else 0.0,
+        )
+
+    def _order_prefill_queue(self, n: int):
+        """Move up to ``n`` ``PrefillOrder`` picks to the head of the queue.
+
+        Returns ``(count, candidates)``; ``candidates`` describes the whole
+        queue before the move so the caller can commit bypass counts for the
+        rows it actually admits.  A media row keeps the isolation of
+        ``_select_prefill_indices``: it is admitted only as the sole pick.
+        """
+        queued = list(self._unprocessed_sequences)
+        candidates = [self._queued_prefill_candidate(seq) for seq in queued]
+        order = self._prefill_order()
+        pool = list(range(len(queued)))
+        picks = []
+        while pool and len(picks) < n:
+            pick = pool[order.select([candidates[i] for i in pool])]
+            pool.remove(pick)
+            if len(queued[pick]) > 9 and queued[pick][9] is not None:
+                if picks:
+                    continue
+                picks.append(pick)
+                break
+            picks.append(pick)
+        chosen = set(picks)
+        self._unprocessed_sequences = deque(
+            [queued[i] for i in picks]
+            + [seq for (i, seq) in enumerate(queued) if i not in chosen]
+        )
+        return (len(picks), candidates)
+
+    def _commit_prefill_order(self, served, candidates):
+        self._prefill_order().commit(
+            served,
+            candidates,
+            pending=[sequence[0] for sequence in self._unprocessed_sequences],
+        )
+        self._sync_prefill_order_stats()
+
+    def _sync_prefill_order_stats(self):
+        for key, value in self._prefill_order().counters.items():
+            self.scheduler_stats[f"prefill_scheduling_{key}"] = int(value)
+
+    def _one_slice_contended(self, bound: int) -> bool:
+        """A long prefill runs while another prompt fits one bounded slice.
+
+        ``bound`` is the slice being considered; a candidate fits only when
+        its whole residual (less the final token kept for the generation
+        boundary) is within ``bound`` *and* within its next interior
+        checkpoint, because that boundary clamps its chunk too.
+        """
+        rows = []
+        for index, sequence in enumerate(self._currently_processing):
+            if len(sequence[0]) == 1 and len(sequence[0][0]) == 1:
+                continue
+            uid = self._prompt_batch.uids[index]
+            covered = int(sequence[4] or 0) + int(sequence[1])
+            rows.append((uid, sum(len(s) for s in sequence[0]), covered))
+        for sequence in self._unprocessed_sequences:
+            rows.append(
+                (
+                    sequence[0],
+                    sum(len(s) for s in sequence[1]),
+                    len(sequence[4]) if sequence[4] else 0,
+                )
+            )
+        long_uids = {uid for (uid, remaining, _) in rows if remaining - 1 > bound}
+        if not long_uids:
+            return False
+        for uid, remaining, covered in rows:
+            if uid in long_uids:
+                continue
+            limit = bound
+            boundary = self._next_interior_checkpoint(uid, covered)
+            if boundary is not None:
+                limit = min(limit, boundary - covered)
+            if remaining - 1 <= limit:
+                return True
+        return False
+
+    def _one_slice_bound(self, chunk: int) -> int:
+        """Apply the stall bound to ``chunk`` under one-slice contention."""
+        order = self._prefill_order()
+        if not order.one_slice_contention:
+            return chunk
+        bound = self._fairness().stall_bound(chunk)
+        if bound < chunk and self._one_slice_contended(bound):
+            order.note_one_slice_clamp()
+            self._sync_prefill_order_stats()
+            return bound
+        return chunk
 
     def _capped_tokens(self, tokens):
         if self.max_kv_size is not None:
@@ -4079,10 +4634,15 @@ class BatchGenerator:
                 ):
                     incremental_indices.append(index)
             incremental_prefill = bool(incremental_indices)
-            adaptive_residual = (
-                incremental_prefill
-                and (self.adaptive_prefill or self._fairness().enabled)
-                and active_decode
+            order = self._prefill_order()
+            adaptive_residual = incremental_prefill and (
+                (
+                    (self.adaptive_prefill or self._fairness().enabled)
+                    and active_decode
+                )
+                # One-slice contention bounds a long slice on an idle server
+                # too: the waiting short prompt is the contender.
+                or order.one_slice_contention
             )
             (adaptive_defer, adaptive_chunk, deadline_forced) = (
                 self._adaptive_prefill_decision(time.perf_counter())
@@ -4100,14 +4660,47 @@ class BatchGenerator:
             short_indices = [
                 i for i in range(len(candidates)) if i not in incremental_indices
             ]
+            has_cohort = any(
+                self._mtp_configs.get(candidate[0], {}).get("batch_cohort")
+                for candidate in candidates
+            )
+            prefill_candidates = (
+                [self._queued_prefill_candidate(c) for c in candidates]
+                if order.enabled
+                else None
+            )
+            srpt_selected = None
             if (
+                incremental_prefill
+                and order.enabled
+                and not deadline_forced
+                and not has_cohort
+            ):
+                # SRPT over every candidate replaces the fixed alternation
+                # below: a one-call prompt is always shorter than a multi-slice
+                # residual, and the bypass cap (not a turn flag) bounds how
+                # many of them may overtake a long prefill in a row.
+                srpt_selected = order.select(prefill_candidates)
+                if srpt_selected in short_indices:
+                    self._commit_prefill_order(
+                        [candidates[srpt_selected][0]], prefill_candidates
+                    )
+                    queued = list(self._unprocessed_sequences)
+                    queued.insert(0, queued.pop(srpt_selected))
+                    self._unprocessed_sequences = deque(queued)
+                    self.scheduler_stats["mtp_short_prefill_interleaved"] = (
+                        self.scheduler_stats.get("mtp_short_prefill_interleaved", 0) + 1
+                    )
+                    (batch, progress) = self._make_mtp_batch(1)
+                    self._generation_batch.extend(batch)
+                    prompt_responses.extend(progress)
+                    generation_responses.extend(self._migrate_plain_fallbacks())
+                    return (prompt_responses, generation_responses)
+            elif (
                 incremental_prefill
                 and short_indices
                 and not deadline_forced
-                and not any(
-                    self._mtp_configs.get(candidate[0], {}).get("batch_cohort")
-                    for candidate in candidates
-                )
+                and not has_cohort
             ):
                 # A request that fits in one chunk would otherwise wait for
                 # every chunk of a long prefill ahead of it (omlx#3726: short
@@ -4129,21 +4722,29 @@ class BatchGenerator:
                     generation_responses.extend(self._migrate_plain_fallbacks())
                     return (prompt_responses, generation_responses)
             if incremental_prefill:
-                if deadline_forced or len(incremental_indices) == 1:
+                if srpt_selected is not None:
+                    selected = srpt_selected
+                elif deadline_forced or len(incremental_indices) == 1:
                     selected = incremental_indices[0]
                 else:
-                    selected = min(
-                        incremental_indices,
-                        key=lambda i: (
-                            sum(len(segment) for segment in candidates[i][1]),
-                            -len(candidates[i][4]) if candidates[i][4] else 0,
-                            i,
-                        ),
-                    )
+                    # Shortest residual among multi-slice prompts: the same
+                    # ordering ``PrefillOrder`` applies when enabled, here
+                    # without a bypass cap (disabled policy).
+                    subset = [
+                        prefill_candidates[i]
+                        if prefill_candidates is not None
+                        else self._queued_prefill_candidate(candidates[i])
+                        for i in incremental_indices
+                    ]
+                    selected = incremental_indices[order.select(subset)]
                     if selected and candidates[selected][4]:
                         self.scheduler_stats[
                             "adaptive_prefill_apc_priority_admissions"
                         ] += 1
+                if prefill_candidates is not None:
+                    self._commit_prefill_order(
+                        [candidates[selected][0]], prefill_candidates
+                    )
                 adaptive_chunk = min(adaptive_chunk, candidate_steps[selected])
                 (batch, progress) = self._advance_mtp_prefill(selected, adaptive_chunk)
                 if batch is not None:
@@ -4225,6 +4826,7 @@ class BatchGenerator:
             chunk = self._fairness().cap(
                 self.prefill_step_size, contended=contended
             )
+            chunk = self._one_slice_bound(chunk)
             self._sync_decode_fairness_stats()
             return (False, chunk, False)
         forced = self._oldest_prefill_age_ms(now) >= self.adaptive_prefill_max_defer_ms
@@ -4240,6 +4842,7 @@ class BatchGenerator:
             self.scheduler_stats["adaptive_prefill_deadline_forced_rounds"] += 1
             chunk = self.adaptive_prefill_slices[0]
         chunk = self._fairness().cap(chunk, contended=contended)
+        chunk = self._one_slice_bound(chunk)
         self._sync_decode_fairness_stats()
         return (False, chunk, forced)
 
@@ -4269,6 +4872,8 @@ class BatchGenerator:
             position = self._next_interior_checkpoint(uid, covered - 1)
             if position is None or position != covered:
                 continue
+            if self._skip_state_boundary_for_pressure(uid, position):
+                continue
             target = self._prompt_batch.extract_cache(index)
             try:
                 saved_target, _, receipt = snapshot_prompt_cache_descriptors(target)
@@ -4279,9 +4884,11 @@ class BatchGenerator:
                         close()
                 _bump_bounded_counter(
                     self.scheduler_stats,
-                    "apc_interior_checkpoints_skipped_inexact",
+                    self._boundary_counter(
+                        self._boundary_purpose(uid, position), "skipped_inexact"
+                    ),
                 )
-                self._interior_checkpoint_positions[uid].popleft()
+                self._consume_state_boundary(uid, position)
                 continue
             mx.eval([cache.state for cache in saved_target])
             checkpoint = {
@@ -4293,11 +4900,7 @@ class BatchGenerator:
                 "snapshot_mode": "descriptor_cow",
                 **receipt,
             }
-            self._interior_checkpoints.setdefault(uid, []).append(checkpoint)
-            self._interior_checkpoint_positions[uid].popleft()
-            _bump_bounded_counter(
-                self.scheduler_stats, "apc_interior_checkpoints_captured"
-            )
+            self._record_state_checkpoint(uid, position, checkpoint)
 
     def _promote_ready_prompts(self):
         keep = []
@@ -4424,8 +5027,17 @@ class BatchGenerator:
             self.completion_batch_size - len(self._generation_batch),
             len(self._unprocessed_sequences),
         )
+        ordered = None
+        if n > 0 and self._prefill_order().enabled:
+            (n, ordered) = self._order_prefill_queue(n)
         n = self._budget_admissible(n)
-        if n > 0:
+        if n > 0 and ordered is not None:
+            # The ordered picks are the queue head, so the budget above
+            # measured exactly the rows admitted here.
+            served = [self._unprocessed_sequences[i][0] for i in range(n)]
+            self._prompt_batch.extend(self._make_batch(n, indices=list(range(n))))
+            self._commit_prefill_order(served, ordered)
+        elif n > 0:
             self._prompt_batch.extend(self._make_batch(n))
         elif self._admit_one_chunk_overflow(adaptive_chunk):
             self.scheduler_stats["short_prefill_overflow_admissions"] = (
@@ -4440,7 +5052,7 @@ class BatchGenerator:
             segments = seq[0]
             step_size = (
                 adaptive_chunk
-                if self.adaptive_prefill or self._fairness().enabled
+                if self._bounded_prefill_chunks()
                 else self.prefill_step_size
             )
             if len(seq) > 6 and seq[6] is not None:
@@ -4453,6 +5065,9 @@ class BatchGenerator:
             if next_checkpoint is not None:
                 n = min(n, next_checkpoint - covered)
             prompts.append(segments[0][:n])
+            self._record_prefill_chunk(
+                self._prompt_batch.uids[i], len(prompts[-1])
+            )
             segments[0] = segments[0][n:]
             if len(segments[0]) == 0:
                 segments.pop(0)

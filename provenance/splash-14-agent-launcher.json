@@ -1,0 +1,26 @@
+{
+  "component": "persistent reasoning signing key and mlx2 coding-agent launcher",
+  "source_repository": "Splash",
+  "source_revision": "f58d36ddb046726adc8937ab67d07bdde015c0d6",
+  "source_paths": [
+    "install/clients.py",
+    "install/launcher.py",
+    "server/thinking.py"
+  ],
+  "license": "Apache-2.0",
+  "destination_paths": [
+    "src/mlx2/clients.py",
+    "src/mlx2/cli.py",
+    "src/mlx2/reasoning_signatures.py",
+    "src/mlx2/server.py"
+  ],
+  "modifications": [
+    "clients.py: kept the Claude Code, Codex and OpenCode argv/environment construction; dropped Hermes (it writes a profile file); renamed the provider and key variable to mlx2/MLX2_API_KEY; the key is an explicit argument; OpenCode image input follows the served model's vision capability instead of always on; Claude Code also receives CLAUDE_CODE_SUBAGENT_MODEL and the four newer provider switches found in Claude Code 2.1.269.",
+    "cli.py: replaced Splash's local status probe with GET /v1/models (model) and GET /v1/status (max_context) against --url/MLX2_URL, sending the API key as a bearer token; launcher options precede the agent name.",
+    "reasoning_signatures.py: adopted the temporary-file plus os.link publication and owner/mode checks from load_thinking_key for an HMAC secret; no Fernet/cryptography dependency, tokens stay signed, not encrypted.",
+    "server.py: the key defaults to <api-state-dir>/reasoning-signing.key only when --api-state-dir is set and no key source is configured; --reasoning-signing-ephemeral opts out."
+  ],
+  "validation": [
+    "tests/test_agent_launcher.py"
+  ]
+}

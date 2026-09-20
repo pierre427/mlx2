@@ -1,0 +1,71 @@
+[cpg_job 2026-09-20T01:36:35+00:00 pid=39514] label=rm04-fn-linbranch2 agent_id=job-rm04-fn-linbranch2-39514 command=env PYTHONPATH=/private/tmp/mlx2-rm04-interior-ckpt-qual/src ~/Desktop/mlx2/.venv/bin/python /private/tmp/mlx2-rm04-interior-ckpt-qual/scripts/qualify_interior_checkpoints.py --model ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP --route mtp --base-policy /private/tmp/mlx2-rm04-interior-ckpt-qual/qualification/runs/quality-campaign-20260919/policies/flash-next-mtp2.json --arms off,auto --workloads linear,branch --rounds 2 --auto-headroom-fraction 0.5 --cache-gib 16 --out /private/tmp/mlx2-rm04-interior-ckpt-qual/qualification/runs/interior-ckpt-20260919/flashnext-linear-branch.json --i-own-the-gpu
+[cpg_job 2026-09-20T01:36:36+00:00 pid=39514] created workflow a36a65409cc842d6b5603119f889380c (cpg-job drivers); record it as workflows.cpg-job-drivers in /Users/Shared/mlxuag/cpg-radio.json to reuse it
+[cpg_job 2026-09-20T01:36:36+00:00 pid=39514] registered worker 558a092f864a42d68363d2ff28dc264e as job-rm04-fn-linbranch2-39514 in session 3c65a7827e83456a89fffdeefadec196
+[cpg_job 2026-09-20T01:36:36+00:00 pid=39514] took /Users/Shared/mlxuag/gpu.lock
+[cpg_job 2026-09-20T01:36:36+00:00 pid=39514] child pid 39517 started
+[off r0] linear#0 P=15363 cached=0 ttft=11.802s interior_hits+=0 match=True
+[off r0] linear#1 P=20017 cached=15362 ttft=3.548s interior_hits+=0 match=True
+[off r0] linear#2 P=24671 cached=20023 ttft=3.607s interior_hits+=0 match=True
+[off r0] linear#3 P=29325 cached=24677 ttft=3.702s interior_hits+=0 match=True
+[off r0] linear#4 P=33979 cached=29356 ttft=3.679s interior_hits+=0 match=True
+[off r0] linear#5 P=38633 cached=34010 ttft=3.762s interior_hits+=0 match=True
+[off r0] linear#6 P=43287 cached=38664 ttft=4.035s interior_hits+=0 match=True
+[off r0] linear#7 P=47941 cached=43318 ttft=4.026s interior_hits+=0 match=True
+[off r0] branch#0 P=15363 cached=0 ttft=11.784s interior_hits+=0 match=True
+[off r0] branch#1 P=20017 cached=15362 ttft=4.422s interior_hits+=0 match=True
+[off r0] branch#2 P=24671 cached=20023 ttft=3.779s interior_hits+=0 match=True
+[off r0] branch#3 P=29325 cached=24677 ttft=11.051s interior_hits+=0 match=True
+[off r0] branch#4 P=33979 cached=0 ttft=25.322s interior_hits+=0 match=True
+[off r0] branch#5 P=38633 cached=34010 ttft=3.899s interior_hits+=0 match=True
+[off r0] branch#6 P=25455 cached=0 ttft=18.711s interior_hits+=0 match=True
+[off r0] branch#7 P=25455 cached=0 ttft=19.089s interior_hits+=0 match=True
+[off r0] branch#8 P=25455 cached=0 ttft=19.305s interior_hits+=0 match=True
+[auto r0] linear#0 P=15363 cached=0 ttft=11.921s interior_hits+=0 match=True
+[auto r0] linear#1 P=20017 cached=15362 ttft=4.331s interior_hits+=0 match=True
+[auto r0] linear#2 P=24671 cached=20023 ttft=4.096s interior_hits+=0 match=True
+[auto r0] linear#3 P=29325 cached=24677 ttft=3.837s interior_hits+=0 match=True
+[auto r0] linear#4 P=33979 cached=29356 ttft=4.543s interior_hits+=0 match=True
+[auto r0] linear#5 P=38633 cached=34010 ttft=3.901s interior_hits+=0 match=True
+[auto r0] linear#6 P=43287 cached=38664 ttft=4.144s interior_hits+=0 match=True
+[auto r0] linear#7 P=47941 cached=43318 ttft=5.045s interior_hits+=0 match=True
+[auto r0] branch#0 P=15363 cached=0 ttft=12.301s interior_hits+=0 match=True
+[auto r0] branch#1 P=20017 cached=15362 ttft=4.917s interior_hits+=0 match=True
+[auto r0] branch#2 P=24671 cached=20023 ttft=8.778s interior_hits+=0 match=True
+Traceback (most recent call last):
+  File "/private/tmp/mlx2-rm04-interior-ckpt-qual/scripts/qualify_interior_checkpoints.py", line 548, in <module>
+    raise SystemExit(main())
+                     ^^^^^^
+  File "/private/tmp/mlx2-rm04-interior-ckpt-qual/scripts/qualify_interior_checkpoints.py", line 537, in main
+    runs.append(run_arm(args, arm, round_index, workloads, reference, log_dir))
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/private/tmp/mlx2-rm04-interior-ckpt-qual/scripts/qualify_interior_checkpoints.py", line 318, in run_arm
+    warm = client.chat(
+           ^^^^^^^^^^^^
+  File "/private/tmp/mlx2-rm04-interior-ckpt-qual/scripts/qualify_interior_checkpoints.py", line 149, in chat
+    return self._stream(request)
+           ^^^^^^^^^^^^^^^^^^^^^
+  File "/private/tmp/mlx2-rm04-interior-ckpt-qual/scripts/qualify_interior_checkpoints.py", line 166, in _stream
+    with urllib.request.urlopen(request, timeout=self.timeout) as response:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "~/.local/share/uv/python/cpython-3.12.13-macos-aarch64-none/lib/python3.12/urllib/request.py", line 215, in urlopen
+    return opener.open(url, data, timeout)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "~/.local/share/uv/python/cpython-3.12.13-macos-aarch64-none/lib/python3.12/urllib/request.py", line 521, in open
+    response = meth(req, response)
+               ^^^^^^^^^^^^^^^^^^^
+  File "~/.local/share/uv/python/cpython-3.12.13-macos-aarch64-none/lib/python3.12/urllib/request.py", line 630, in http_response
+    response = self.parent.error(
+               ^^^^^^^^^^^^^^^^^^
+  File "~/.local/share/uv/python/cpython-3.12.13-macos-aarch64-none/lib/python3.12/urllib/request.py", line 559, in error
+    return self._call_chain(*args)
+           ^^^^^^^^^^^^^^^^^^^^^^^
+  File "~/.local/share/uv/python/cpython-3.12.13-macos-aarch64-none/lib/python3.12/urllib/request.py", line 492, in _call_chain
+    result = func(*args)
+             ^^^^^^^^^^^
+  File "~/.local/share/uv/python/cpython-3.12.13-macos-aarch64-none/lib/python3.12/urllib/request.py", line 639, in http_error_default
+    raise HTTPError(req.full_url, code, msg, hdrs, fp)
+urllib.error.HTTPError: HTTP Error 429: Too Many Requests
+[cpg_job 2026-09-20T01:45:35+00:00 pid=39514] child exited rc=1
+[cpg_job 2026-09-20T01:45:35+00:00 pid=39514] worker 558a092f864a42d68363d2ff28dc264e closed failed
+[cpg_job 2026-09-20T01:45:35+00:00 pid=39514] released /Users/Shared/mlxuag/gpu.lock
+[cpg_job 2026-09-20T01:45:35+00:00 pid=39514] wrote /private/tmp/claude-501/-Users-user-Desktop-mlx2/dcc2c62c-d339-4686-a019-625b816d27d9/scratchpad/roadmap/rm04/gpu/fn-linbranch2.try1.log.done

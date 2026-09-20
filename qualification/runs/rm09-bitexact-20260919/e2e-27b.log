@@ -1,0 +1,14 @@
+[cpg_job 2026-09-20T01:34:17+00:00 pid=39006] label=rm09-e2e agent_id=job-rm09-e2e-39006 command=env MLX_ENABLE_TF32=0 ~/Desktop/mlx2/.venv/bin/python /private/tmp/mlx2-rm09-bitexact-verify/scripts/gpu_check_verify_bitexact.py --i-own-the-gpu --overlay /private/tmp/claude-501/-Users-user-Desktop-mlx2/dcc2c62c-d339-4686-a019-625b816d27d9/scratchpad/roadmap/rm09/overlay --out /private/tmp/claude-501/-Users-user-Desktop-mlx2/dcc2c62c-d339-4686-a019-625b816d27d9/scratchpad/roadmap/rm09/e2e/e2e.jsonl
+[cpg_job 2026-09-20T01:34:17+00:00 pid=39006] created workflow 5ce4788053fe403aadce296479aec736 (cpg-job drivers); record it as workflows.cpg-job-drivers in /Users/Shared/mlxuag/cpg-radio.json to reuse it
+[cpg_job 2026-09-20T01:34:17+00:00 pid=39006] registered worker 15ac946f7f60458e821f7333aba5447b as job-rm09-e2e-39006 in session 3c65a7827e83456a89fffdeefadec196
+[cpg_job 2026-09-20T01:34:17+00:00 pid=39006] took /Users/Shared/mlxuag/gpu.lock
+[cpg_job 2026-09-20T01:34:17+00:00 pid=39006] child pid 39013 started
+{"arm": "bitexact", "rep": 0, "matches": [true, true, true, true], "identical": 4, "prompts": 4, "tok_s_1lane": 35.57, "tok_s_4lane": 47.0, "bitexact_dispatch_delta": 175242, "first_divergence": [null, null, null, null]}
+{"arm": "control", "rep": 0, "matches": [false, true, false, true], "identical": 2, "prompts": 4, "tok_s_1lane": 46.08, "tok_s_4lane": 85.55, "bitexact_dispatch_delta": 0, "first_divergence": [65, null, 366, null]}
+{"arm": "bitexact", "rep": 1, "matches": [true, true, true, true], "identical": 4, "prompts": 4, "tok_s_1lane": 35.8, "tok_s_4lane": 47.29, "bitexact_dispatch_delta": 175242, "first_divergence": [null, null, null, null]}
+{"arm": "control", "rep": 1, "matches": [false, true, false, true], "identical": 2, "prompts": 4, "tok_s_1lane": 46.29, "tok_s_4lane": 86.12, "bitexact_dispatch_delta": 0, "first_divergence": [65, null, 366, null]}
+{"verdict": "GO", "bitexact_reps": 2}
+[cpg_job 2026-09-20T01:36:35+00:00 pid=39006] child exited rc=0
+[cpg_job 2026-09-20T01:36:35+00:00 pid=39006] worker 15ac946f7f60458e821f7333aba5447b closed completed
+[cpg_job 2026-09-20T01:36:35+00:00 pid=39006] released /Users/Shared/mlxuag/gpu.lock
+[cpg_job 2026-09-20T01:36:35+00:00 pid=39006] wrote /private/tmp/claude-501/-Users-user-Desktop-mlx2/dcc2c62c-d339-4686-a019-625b816d27d9/scratchpad/roadmap/rm09/e2e.log.done

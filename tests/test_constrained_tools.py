@@ -300,6 +300,41 @@ def test_non_strict_north_required_grammar_keeps_recursive_json_arguments():
     grammar = north_grammar(_tools(strict=False), "required", parallel_tool_calls=False)
     text = (
         '<|START_ACTION|>[{"tool_name":"sum","parameters":'
-        '{"nested":{"items":[1,true,null]}}}]<|END_ACTION|>'
+        '{"x":4,"nested":{"items":[1,true,null]}}}]<|END_ACTION|>'
     )
     assert _matches(grammar, text)
+
+
+def test_non_strict_named_tool_grammars_enforce_required_parameters():
+    # sglang #40051: a non-strict tool body of optional-only parameters let
+    # greedy decoding close a forced call with no arguments.
+    choice = {"type": "function", "function": {"name": "sum"}}
+    tools = _tools(strict=False)
+    qwen = qwen_grammar(tools, choice, parallel_tool_calls=False)
+    empty = "<tool_call>\n<function=sum>\n</function>\n</tool_call>"
+    label_only = (
+        "<tool_call>\n<function=sum>\n<parameter=label>\nok\n</parameter>"
+        "\n</function>\n</tool_call>"
+    )
+    with_x = (
+        "<tool_call>\n<function=sum>\n<parameter=x>\n3\n</parameter>"
+        "\n<parameter=extra>\nok\n</parameter>\n</function>\n</tool_call>"
+    )
+    assert not _matches(qwen, empty)
+    assert not _matches(qwen, label_only)
+    assert _matches(qwen, with_x)
+    assert parse_tool_call(with_x, tools)["arguments"]["x"] == 3
+
+    muse = muse_grammar(tools, choice, parallel_tool_calls=False)
+    wrap = '<atem:function_calls><atem:invoke name="sum">{}</atem:invoke></atem:function_calls>'
+    assert not _matches(muse, wrap.format(""))
+    assert _matches(muse, wrap.format(
+        '<atem:parameter name="x">4</atem:parameter>'
+        '<atem:parameter name="label">ok</atem:parameter>'
+    ))
+
+    north = north_grammar(tools, choice, parallel_tool_calls=False)
+    action = '<|START_ACTION|>[{{"tool_name":"sum","parameters":{}}}]<|END_ACTION|>'
+    assert not _matches(north, action.format("{}"))
+    assert not _matches(north, action.format('{"label":"ok"}'))
+    assert _matches(north, action.format('{"x":[1,{"a":null}],"label":"ok"}'))

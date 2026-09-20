@@ -9,7 +9,7 @@ transactional cache machinery.
 from __future__ import annotations
 
 import math
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -68,6 +68,19 @@ class DecodeTimeFairness:
         configured = max(1, int(configured))
         if not self.enabled or not contended:
             return configured
+        value = self.stall_bound(configured)
+        if value < configured:
+            _bump(self.counters, "cap_clamps")
+        return value
+
+    def stall_bound(self, configured: int) -> int:
+        """Largest grid-aligned chunk expected to finish within the stall target.
+
+        Pure: it neither consults ``enabled`` nor bumps counters, so the
+        one-slice contention rule of :class:`PrefillOrder` can bound a slice
+        with the same measurement while decode fairness itself is off.
+        """
+        configured = max(1, int(configured))
         if self.best_prefill_tokens_per_second > 0:
             value = int(
                 self.best_prefill_tokens_per_second * self.stall_target_ms / 1000.0
@@ -75,10 +88,7 @@ class DecodeTimeFairness:
             value = max(self.grid, (value // self.grid) * self.grid)
         else:
             value = self.fallback_cap
-        value = max(self.floor, min(configured, value))
-        if value < configured:
-            _bump(self.counters, "cap_clamps")
-        return value
+        return max(self.floor, min(configured, value))
 
     def may_prefill(self, *, contended: bool) -> bool:
         if not self.enabled or not contended:
@@ -110,6 +120,165 @@ class DecodeTimeFairness:
         if self.enabled and contended and seconds:
             self.debt_seconds += seconds * self.fair_share
             _bump(self.counters, "prefill_chunks")
+
+
+@dataclass(frozen=True)
+class PrefillCandidate:
+    """One request with prefill work left, as :class:`PrefillOrder` sees it.
+
+    ``uid`` is the scheduler's monotonic insertion id and therefore the
+    arrival order; ``queued_at`` is informational only because the MTP path
+    rewrites it to the time of the latest prefill slice.
+    """
+
+    uid: int
+    remaining: int
+    cached: int = 0
+    queued_at: float = 0.0
+    bypassed: int = 0
+
+
+_PREFILL_ORDERS = ("srpt",)
+
+
+@dataclass
+class PrefillOrder:
+    """Choose which queued prompt receives the next prefill service.
+
+    Disabled (the default) this is exactly the ordering main already applied
+    on the self-MTP path: shortest remaining prompt, then deepest APC reuse,
+    then queue position, with no bypass bound (the age deadline and the
+    short-prompt interleave in ``BatchGenerator`` bound starvation instead).
+    The ordinary path stays FIFO unless enabled.
+
+    Enabled (``order="srpt"``) both paths use shortest-remaining-first and a
+    request that later arrivals have overtaken ``max_bypass`` consecutive
+    times is served first (oldest first among such requests).  Bypass counts
+    reset whenever the request is served.  Design reference: Splash
+    ``Scheduler::nextPrefill`` (bounded overtakes) and ``prefillBudget``
+    (a peer that fits one slice makes a long prefill contended).
+    """
+
+    enabled: bool = False
+    order: str = "srpt"
+    max_bypass: int = 3
+    one_slice_contention: bool = False
+    counters: dict[str, int] = field(default_factory=dict)
+    _bypassed: dict[int, int] = field(default_factory=dict, repr=False)
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.enabled, bool):
+            raise ValueError("prefill_scheduling enabled must be boolean")
+        if self.order not in _PREFILL_ORDERS:
+            raise ValueError(
+                f"prefill_scheduling order must be one of {list(_PREFILL_ORDERS)}"
+            )
+        self.max_bypass = _positive_integer(
+            self.max_bypass, name="prefill_scheduling max_bypass"
+        )
+        if not isinstance(self.one_slice_contention, bool):
+            raise ValueError("prefill_scheduling one_slice_contention must be boolean")
+        if self.one_slice_contention and not self.enabled:
+            raise ValueError("one_slice_contention requires prefill_scheduling")
+        if self.enabled:
+            for name in ("bypasses", "bypass_forced", "one_slice_clamps"):
+                self.counters.setdefault(name, 0)
+
+    @classmethod
+    def from_value(
+        cls, value: Mapping[str, Any] | PrefillOrder | None
+    ) -> PrefillOrder:
+        """Parse the server-owned ``prefill_scheduling`` object; absent = off."""
+        if value is None:
+            return cls()
+        if isinstance(value, cls):
+            return value
+        if not isinstance(value, Mapping):
+            raise ValueError("prefill_scheduling must be an object")
+        allowed = {"order", "max_bypass", "one_slice_contention"}
+        unknown = set(value) - allowed
+        if unknown:
+            raise ValueError(
+                f"unknown prefill_scheduling settings: {sorted(unknown)}"
+            )
+        return cls(
+            enabled=True,
+            order=value.get("order", "srpt"),
+            max_bypass=value.get("max_bypass", 3),
+            one_slice_contention=value.get("one_slice_contention", True),
+        )
+
+    def as_dict(self) -> dict[str, bool | int | str]:
+        return {
+            "order": self.order,
+            "max_bypass": self.max_bypass,
+            "one_slice_contention": self.one_slice_contention,
+        }
+
+    def candidate(
+        self, uid: int, remaining: int, cached: int = 0, queued_at: float = 0.0
+    ) -> PrefillCandidate:
+        return PrefillCandidate(
+            uid=int(uid),
+            remaining=int(remaining),
+            cached=int(cached),
+            queued_at=float(queued_at),
+            bypassed=self._bypassed.get(int(uid), 0),
+        )
+
+    def select(self, candidates: Sequence[PrefillCandidate]) -> int:
+        """Return the index into ``candidates`` of the request to serve next."""
+        if not candidates:
+            raise ValueError("prefill order needs at least one candidate")
+        if self.enabled:
+            overdue = [
+                index
+                for index, candidate in enumerate(candidates)
+                if candidate.bypassed >= self.max_bypass
+            ]
+            if overdue:
+                _bump(self.counters, "bypass_forced")
+                return min(overdue, key=lambda index: (candidates[index].uid, index))
+        return min(
+            range(len(candidates)),
+            key=lambda index: (
+                candidates[index].remaining,
+                -candidates[index].cached,
+                index,
+            ),
+        )
+
+    def commit(
+        self,
+        served: Sequence[int],
+        candidates: Sequence[PrefillCandidate],
+        *,
+        pending: Sequence[int] | None = None,
+    ) -> None:
+        """Record one service decision.
+
+        Every unserved candidate that arrived before the youngest served
+        request was overtaken once more; served requests reset.  ``pending``
+        (uids still waiting for prefill) prunes counts of requests that were
+        admitted, finished, or removed through any other path.
+        """
+        if not self.enabled or not served:
+            return
+        served = {int(uid) for uid in served}
+        youngest = max(served)
+        for candidate in candidates:
+            if candidate.uid in served:
+                self._bypassed.pop(candidate.uid, None)
+            elif candidate.uid < youngest:
+                self._bypassed[candidate.uid] = candidate.bypassed + 1
+                _bump(self.counters, "bypasses")
+        if pending is not None:
+            keep = {int(uid) for uid in pending}
+            for uid in [uid for uid in self._bypassed if uid not in keep]:
+                del self._bypassed[uid]
+
+    def note_one_slice_clamp(self) -> None:
+        _bump(self.counters, "one_slice_clamps")
 
 
 @dataclass

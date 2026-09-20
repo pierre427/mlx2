@@ -1,0 +1,80 @@
+2026-09-20 01:03:30,487 INFO selected native_mtp route from adapter_default
+2026-09-20 01:03:30,546 WARNING no reasoning signing key configured; using a random per-process reasoning signing key
+2026-09-20 01:03:35,366 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-20 01:03:35,408 INFO "GET /health HTTP/1.1" 503 -
+----------------------------------------
+Exception occurred during processing of request from ('127.0.0.1', 55474)
+Traceback (most recent call last):
+  File "~/.local/share/uv/python/cpython-3.12.13-macos-aarch64-none/lib/python3.12/socketserver.py", line 697, in process_request_thread
+    self.finish_request(request, client_address)
+  File "~/.local/share/uv/python/cpython-3.12.13-macos-aarch64-none/lib/python3.12/socketserver.py", line 362, in finish_request
+    self.RequestHandlerClass(request, client_address, self)
+  File "~/.local/share/uv/python/cpython-3.12.13-macos-aarch64-none/lib/python3.12/socketserver.py", line 766, in __init__
+    self.handle()
+  File "~/.local/share/uv/python/cpython-3.12.13-macos-aarch64-none/lib/python3.12/http/server.py", line 442, in handle
+    self.handle_one_request()
+  File "~/.local/share/uv/python/cpython-3.12.13-macos-aarch64-none/lib/python3.12/http/server.py", line 408, in handle_one_request
+    self.raw_requestline = self.rfile.readline(65537)
+                           ^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "~/.local/share/uv/python/cpython-3.12.13-macos-aarch64-none/lib/python3.12/socket.py", line 720, in readinto
+    return self._sock.recv_into(b)
+           ^^^^^^^^^^^^^^^^^^^^^^^
+ConnectionResetError: [Errno 54] Connection reset by peer
+----------------------------------------
+2026-09-20 01:03:38,381 INFO ubc_evict: evicted 5025.7 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00001-of-00020.safetensors
+2026-09-20 01:03:38,381 INFO ubc_evict: evicted 5006.8 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00002-of-00020.safetensors
+2026-09-20 01:03:38,382 INFO ubc_evict: evicted 5006.8 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00003-of-00020.safetensors
+2026-09-20 01:03:38,382 INFO ubc_evict: evicted 5006.8 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00004-of-00020.safetensors
+2026-09-20 01:03:38,382 INFO ubc_evict: evicted 5006.8 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00005-of-00020.safetensors
+2026-09-20 01:03:38,382 INFO ubc_evict: evicted 5006.8 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00006-of-00020.safetensors
+2026-09-20 01:03:38,397 INFO ubc_evict: evicted 5022.3 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00007-of-00020.safetensors
+2026-09-20 01:03:38,428 INFO ubc_evict: evicted 5076.7 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00008-of-00020.safetensors
+2026-09-20 01:03:38,459 INFO ubc_evict: evicted 5115.4 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00009-of-00020.safetensors
+2026-09-20 01:03:38,495 INFO ubc_evict: evicted 5115.4 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00010-of-00020.safetensors
+2026-09-20 01:03:38,524 INFO ubc_evict: evicted 5073.2 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00011-of-00020.safetensors
+2026-09-20 01:03:38,561 INFO ubc_evict: evicted 5115.4 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00012-of-00020.safetensors
+2026-09-20 01:03:38,588 INFO ubc_evict: evicted 5115.4 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00013-of-00020.safetensors
+2026-09-20 01:03:38,619 INFO ubc_evict: evicted 5073.2 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00014-of-00020.safetensors
+2026-09-20 01:03:38,623 INFO ubc_evict: evicted 5115.4 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00015-of-00020.safetensors
+2026-09-20 01:03:38,627 INFO ubc_evict: evicted 5115.4 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00016-of-00020.safetensors
+2026-09-20 01:03:38,632 INFO ubc_evict: evicted 5073.2 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00017-of-00020.safetensors
+2026-09-20 01:03:38,636 INFO ubc_evict: evicted 5115.4 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00018-of-00020.safetensors
+2026-09-20 01:03:38,639 INFO ubc_evict: evicted 5115.4 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00019-of-00020.safetensors
+2026-09-20 01:03:38,640 INFO ubc_evict: evicted 1704.3 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00020-of-00020.safetensors
+2026-09-20 01:03:38,640 INFO ubc_evict: evicted 1399.3 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-mtp-q4.safetensors
+2026-09-20 01:03:38,640 INFO ubc_evict: pass complete total_mb=99405.2 elapsed_s=0.28
+2026-09-20 01:03:40,439 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-20 01:03:40,453 INFO "GET /health HTTP/1.1" 200 -
+2026-09-20 01:03:43,045 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-20 01:03:45,771 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-20 01:03:46,276 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-20 01:03:50,818 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-20 01:03:50,818 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-20 01:03:50,818 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-20 01:03:50,818 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-20 01:03:50,829 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-20 01:03:50,838 INFO "GET /metrics HTTP/1.1" 200 -
+2026-09-20 01:03:50,898 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-20 01:03:53,002 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-20 01:03:55,082 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-20 01:03:57,300 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-20 01:03:59,278 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-20 01:04:01,235 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-20 01:04:01,335 WARNING Async QSA promotion declined at queue: suffix-only promotion requires equal starting QSA offsets
+2026-09-20 01:04:06,417 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-20 01:04:06,500 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-20 01:04:06,500 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-20 01:04:06,533 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-20 01:04:06,685 WARNING Async QSA promotion declined at queue: suffix-only promotion requires equal starting QSA offsets
+2026-09-20 01:04:11,590 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-20 01:04:11,673 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-20 01:04:11,673 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-20 01:04:11,704 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-20 01:04:13,643 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-20 01:04:15,568 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-20 01:04:15,670 WARNING Async QSA promotion declined at queue: suffix-only promotion requires equal starting QSA offsets
+2026-09-20 01:04:20,671 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-20 01:04:20,755 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-20 01:04:20,755 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-20 01:04:20,788 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-20 01:04:20,790 INFO "GET /v1/status HTTP/1.1" 200 -

@@ -30,6 +30,7 @@ multimodal = ["pillow>=10", "opencv-python>=4.10", "mlx-vlm>=0.6.17,<0.7"]
 
 [project.scripts]
 mlx2-serve = "mlx2.server:main"
+mlx2 = "mlx2.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

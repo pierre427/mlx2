@@ -1,0 +1,123 @@
+{
+ "family": "laguna",
+ "num_draft": 7,
+ "target_forward_ms_by_M": {
+  "1": {
+   "median_ms": 11.10954099567607,
+   "min_ms": 10.952458018437028
+  },
+  "2": {
+   "median_ms": 11.951541993767023,
+   "min_ms": 11.570832983125001
+  },
+  "4": {
+   "median_ms": 13.793499965686351,
+   "min_ms": 13.335124996956438
+  },
+  "8": {
+   "median_ms": 18.5230000060983,
+   "min_ms": 18.254041962791234
+  },
+  "16": {
+   "median_ms": 23.07433303212747,
+   "min_ms": 22.670332982670516
+  }
+ },
+ "cache_deepcopy_ms": 0.24691596627235413,
+ "prefill_offsets": [
+  26,
+  26
+ ],
+ "external_wall_s": 5.380977209017146,
+ "ordinary_tok_s": 98.59085351388393,
+ "external_tok_s": 76.01761772148019,
+ "mechanism": {
+  "external_rounds": 132,
+  "proposed_tokens": 888,
+  "accepted_proposals": 252,
+  "mean_acceptance_length": 2.909090909090909,
+  "round_times_ms": {
+   "recovery_capture": 1.146281213026889,
+   "draft": 6.276217190492334,
+   "transaction_begin": 0.6256896515630863,
+   "verify_forward": 27.245879817090817,
+   "verify_laws": 2.9317404987523332,
+   "transaction_commit": 0.6786589903199594,
+   "emit": 0.12890975984081512
+  }
+ },
+ "draft_stats": {
+  "committed_positions": 497,
+  "block_drafts": 132
+ },
+ "cprofile_cumulative": "         6684243 function calls (6519598 primitive calls) in 5.380 seconds\n\n   Ordered by: cumulative time\n   List reduced from 376 to 45 due to restriction <45>\n\n   ncalls  tottime  percall  cumtime  percall filename:lineno(function)\n        1    0.023    0.023    5.381    5.381 /private/tmp/mlx2-rm06-spec-north-laguna/scripts/bench_external_draft_acceptance.py:153(_run_external)\n      384    0.005    0.000    5.357    0.014 /private/tmp/mlx2-rm06-spec-north-laguna/src/mlx2/runtime/external_speculative.py:698(next)\n      132    2.839    0.022    5.154    0.039 /private/tmp/mlx2-rm06-spec-north-laguna/src/mlx2/runtime/external_speculative.py:305(_round)\n      132    0.003    0.000    0.817    0.006 /private/tmp/mlx2-rm06-spec-north-laguna/src/mlx2/runtime/drafters/laguna_dflash.py:305(draft_distributions)\n      136    0.001    0.000    0.783    0.006 /private/tmp/mlx2-rm06-spec-north-laguna/src/mlx2/runtime/models/laguna.py:379(forward_with_taps)\n      136    0.003    0.000    0.782    0.006 /private/tmp/mlx2-rm06-spec-north-laguna/src/mlx2/runtime/models/laguna.py:342(__call__)\n     5440    0.009    0.000    0.765    0.000 /private/tmp/mlx2-rm06-spec-north-laguna/src/mlx2/runtime/models/laguna.py:327(__call__)\n     5440    0.048    0.000    0.610    0.000 /private/tmp/mlx2-rm06-spec-north-laguna/src/mlx2/runtime/models/laguna.py:295(__call__)\n     3948    0.474    0.000    0.474    0.000 {built-in method numpy.asarray}\n35528/24572    0.041    0.000    0.455    0.000 {built-in method builtins.any}\n    10956    0.008    0.000    0.440    0.000 /private/tmp/mlx2-rm06-spec-north-laguna/src/mlx2/runtime/segmented_rotating_kv.py:199(_check)\n    10824    0.002    0.000    0.434    0.000 /private/tmp/mlx2-rm06-spec-north-laguna/src/mlx2/runtime/segmented_rotating_kv.py:300(_check)\n   449196    0.054    0.000    0.370    0.000 /private/tmp/mlx2-rm06-spec-north-laguna/src/mlx2/runtime/segmented_rotating_kv.py:207(<genexpr>)\n   458720    0.153    0.000    0.338    0.000 /private/tmp/mlx2-rm06-spec-north-laguna/src/mlx2/runtime/segmented_rotating_kv.py:27(_stamp)\n     1020    0.002    0.000    0.267    0.000 /private/tmp/mlx2-rm06-spec-north-laguna/src/mlx2/runtime/speculative_sampling.py:49(sample)\n     5440    0.002    0.000    0.262    0.000 /private/tmp/mlx2-rm06-spec-north-laguna/src/mlx2/runtime/models/base.py:182(scaled_dot_product_attention)\n     5280    0.024    0.000    0.262    0.000 /private/tmp/mlx2-rm06-spec-north-laguna/src/mlx2/runtime/segmented_rotating_kv.py:312(update_and_fetch)\n     5280    0.032    0.000    0.260    0.000 /private/tmp/mlx2-rm06-spec-north-laguna/src/mlx2/runtime/segmented_rotating_kv.py:375(bucketed_attention)\n     2928    0.001    0.000    0.238    0.000 ~/Desktop/mlx2/.venv/lib/python3.12/site-packages/numpy/_core/fromnumeric.py:48(_wrapfunc)\n     2928    0.121    0.000    0.204    0.000 /private/tmp/mlx2-rm06-spec-north-laguna/src/mlx2/runtime/speculative_sampling.py:14(probability)\n        4    0.185    0.046    0.197    0.049 /private/tmp/mlx2-rm06-spec-north-laguna/src/mlx2/runtime/external_speculative.py:245(_prefill)\n     1020    0.185    0.000    0.195    0.000 /private/tmp/mlx2-rm06-spec-north-laguna/src/mlx2/runtime/external_speculative.py:267(_target_law)\n     1020    0.000    0.000    0.192    0.000 ~/Desktop/mlx2/.venv/lib/python3.12/site-packages/numpy/_core/fromnumeric.py:2876(cumsum)\n     1020    0.192    0.000    0.192    0.000 {method 'cumsum' of 'numpy.ndarray' objects}\n      132    0.009    0.000    0.185    0.001 /private/tmp/mlx2-rm06-spec-north-laguna/src/mlx2/runtime/speculative_sampling.py:164(verify_proposals)\n  1583547    0.158    0.000    0.158    0.000 {built-in method builtins.id}\n136703/148    0.061    0.000    0.157    0.001 ~/.local/share/uv/python/cpython-3.12.13-macos-aarch64-none/lib/python3.12/copy.py:118(deepcopy)\n 6936/460    0.012    0.000    0.154    0.000 ~/.local/share/uv/python/cpython-3.12.13-macos-aarch64-none/lib/python3.12/copy.py:217(_deepcopy_dict)\n      132    0.001    0.000    0.151    0.001 /private/tmp/mlx2-rm06-spec-north-laguna/src/mlx2/runtime/committed_recovery.py:62(capture)\n 4736/536    0.003    0.000    0.136    0.000 ~/.local/share/uv/python/cpython-3.12.13-macos-aarch64-none/lib/python3.12/copy.py:191(_deepcopy_list)\n     5304    0.021    0.000    0.136    0.000 /private/tmp/mlx2-rm06-spec-north-laguna/src/mlx2/runtime/models/laguna.py:208(__call__)\n16572/11976    0.010    0.000    0.133    0.000 ~/.local/share/uv/python/cpython-3.12.13-macos-aarch64-none/lib/python3.12/copy.py:247(_reconstruct)\n      132    0.015    0.000    0.088    0.001 /private/tmp/mlx2-rm06-spec-north-laguna/src/mlx2/runtime/segmented_rotating_kv.py:227(commit)\n      888    0.017    0.000    0.082    0.000 /private/tmp/mlx2-rm06-spec-north-laguna/src/mlx2/runtime/speculative_sampling.py:21(softmax)\n    13612    0.078    0.000    0.078    0.000 {method 'reduce' of 'numpy.ufunc' objects}\n     5980    0.001    0.000    0.071    0.000 {method 'sum' of 'numpy.ndarray' objects}\n     1152    0.000    0.000    0.070    0.000 /private/tmp/mlx2-rm06-spec-north-laguna/src/mlx2/runtime/speculative_sampling.py:173(<genexpr>)\n     5980    0.001    0.000    0.069    0.000 ~/Desktop/mlx2/.venv/lib/python3.12/site-packages/numpy/_core/_methods.py:47(_sum)\n     1020    0.000    0.000    0.065    0.000 /private/tmp/mlx2-rm06-spec-north-laguna/src/mlx2/runtime/speculative_sampling.py:172(<genexpr>)\n      132    0.000    0.000    0.065    0.000 /private/tmp/mlx2-rm06-spec-north-laguna/src/mlx2/runtime/segmented_rotating_kv.py:138(begin)\n     5304    0.012    0.000    0.062    0.000 /private/tmp/mlx2-rm06-spec-north-laguna/src/mlx2/runtime/models/switch_layers.py:195(__call__)\n  1481485    0.055    0.000    0.056    0.000 {built-in method builtins.getattr}\n      132    0.003    0.000    0.051    0.000 /private/tmp/mlx2-rm06-spec-north-laguna/src/mlx2/runtime/segmented_rotating_kv.py:179(__init__)\n      888    0.000    0.000    0.044    0.000 ~/Desktop/mlx2/.venv/lib/python3.12/site-packages/numpy/_core/fromnumeric.py:1259(argmax)\n      888    0.044    0.000    0.044    0.000 {method 'argmax' of 'numpy.ndarray' objects}\n\n\n",
+ "cprofile_tottime": "         6684243 function calls (6519598 primitive calls) in 5.380 seconds\n\n   Ordered by: internal time\n   List reduced from 376 to 30 due to restriction <30>\n\n   ncalls  tottime  percall  cumtime  percall filename:lineno(function)\n      132    2.839    0.022    5.154    0.039 /private/tmp/mlx2-rm06-spec-north-laguna/src/mlx2/runtime/external_speculative.py:305(_round)\n     3948    0.474    0.000    0.474    0.000 {built-in method numpy.asarray}\n     1020    0.192    0.000    0.192    0.000 {method 'cumsum' of 'numpy.ndarray' objects}\n     1020    0.185    0.000    0.195    0.000 /private/tmp/mlx2-rm06-spec-north-laguna/src/mlx2/runtime/external_speculative.py:267(_target_law)\n        4    0.185    0.046    0.197    0.049 /private/tmp/mlx2-rm06-spec-north-laguna/src/mlx2/runtime/external_speculative.py:245(_prefill)\n  1583547    0.158    0.000    0.158    0.000 {built-in method builtins.id}\n   458720    0.153    0.000    0.338    0.000 /private/tmp/mlx2-rm06-spec-north-laguna/src/mlx2/runtime/segmented_rotating_kv.py:27(_stamp)\n     2928    0.121    0.000    0.204    0.000 /private/tmp/mlx2-rm06-spec-north-laguna/src/mlx2/runtime/speculative_sampling.py:14(probability)\n    13612    0.078    0.000    0.078    0.000 {method 'reduce' of 'numpy.ufunc' objects}\n136703/148    0.061    0.000    0.157    0.001 ~/.local/share/uv/python/cpython-3.12.13-macos-aarch64-none/lib/python3.12/copy.py:118(deepcopy)\n  1481485    0.055    0.000    0.056    0.000 {built-in method builtins.getattr}\n   449196    0.054    0.000    0.370    0.000 /private/tmp/mlx2-rm06-spec-north-laguna/src/mlx2/runtime/segmented_rotating_kv.py:207(<genexpr>)\n     5440    0.048    0.000    0.610    0.000 /private/tmp/mlx2-rm06-spec-north-laguna/src/mlx2/runtime/models/laguna.py:295(__call__)\n      888    0.044    0.000    0.044    0.000 {method 'argmax' of 'numpy.ndarray' objects}\n35528/24572    0.041    0.000    0.455    0.000 {built-in method builtins.any}\n     5280    0.032    0.000    0.260    0.000 /private/tmp/mlx2-rm06-spec-north-laguna/src/mlx2/runtime/segmented_rotating_kv.py:375(bucketed_attention)\n    49088    0.031    0.000    0.033    0.000 ~/Desktop/mlx2/.venv/lib/python3.12/site-packages/mlx/nn/layers/quantized.py:270(__call__)\n   531953    0.027    0.000    0.027    0.000 {method 'get' of 'dict' objects}\n     5280    0.024    0.000    0.262    0.000 /private/tmp/mlx2-rm06-spec-north-laguna/src/mlx2/runtime/segmented_rotating_kv.py:312(update_and_fetch)\n     5304    0.024    0.000    0.029    0.000 /private/tmp/mlx2-rm06-spec-north-laguna/src/mlx2/runtime/models/laguna.py:147(__call__)\n        1    0.023    0.023    5.381    5.381 /private/tmp/mlx2-rm06-spec-north-laguna/scripts/bench_external_draft_acceptance.py:153(_run_external)\n     5304    0.021    0.000    0.136    0.000 /private/tmp/mlx2-rm06-spec-north-laguna/src/mlx2/runtime/models/laguna.py:208(__call__)\n    15912    0.020    0.000    0.022    0.000 /private/tmp/mlx2-rm06-spec-north-laguna/src/mlx2/runtime/models/switch_layers.py:88(__call__)\n   449196    0.017    0.000    0.017    0.000 /private/tmp/mlx2-rm06-spec-north-laguna/src/mlx2/runtime/segmented_rotating_kv.py:203(<genexpr>)\n      888    0.017    0.000    0.082    0.000 /private/tmp/mlx2-rm06-spec-north-laguna/src/mlx2/runtime/speculative_sampling.py:21(softmax)\n   152977    0.016    0.000    0.024    0.000 ~/Desktop/mlx2/.venv/lib/python3.12/site-packages/mlx/nn/layers/base.py:99(__getattr__)\n     5280    0.016    0.000    0.016    0.000 /private/tmp/mlx2-rm06-spec-north-laguna/src/mlx2/runtime/models/base.py:60(create_causal_mask)\n      132    0.015    0.000    0.088    0.001 /private/tmp/mlx2-rm06-spec-north-laguna/src/mlx2/runtime/segmented_rotating_kv.py:227(commit)\n     5187    0.015    0.000    0.015    0.000 /private/tmp/mlx2-rm06-spec-north-laguna/src/mlx2/runtime/models/switch_layers.py:23(_gather_sort)\n    26780    0.013    0.000    0.013    0.000 ~/Desktop/mlx2/.venv/lib/python3.12/site-packages/mlx/nn/layers/normalization.py:163(__call__)\n\n\n",
+ "round_times_ms": {
+  "recovery_capture": 1.146281213026889,
+  "draft": 6.276217190492334,
+  "transaction_begin": 0.6256896515630863,
+  "verify_forward": 27.245879817090817,
+  "verify_laws": 2.9317404987523332,
+  "transaction_commit": 0.6786589903199594,
+  "emit": 0.12890975984081512
+ },
+ "parity": [
+  {
+   "prompt": 0,
+   "ordinary_len": 96,
+   "external_len": 96,
+   "first_divergence": 96
+  },
+  {
+   "prompt": 1,
+   "ordinary_len": 96,
+   "external_len": 96,
+   "first_divergence": 12,
+   "ordinary_token": 466,
+   "external_token": 5025,
+   "full_prefill_argmax": 466,
+   "top2": [
+    466,
+    5025
+   ],
+   "top2_margin": 1.0,
+   "margin_ord_vs_ext": 1.0,
+   "ordinary_text": " independent instance of a program in execution, with its own memory",
+   "external_text": " independent instance of a program in execution, containing its own memory"
+  },
+  {
+   "prompt": 2,
+   "ordinary_len": 96,
+   "external_len": 96,
+   "first_divergence": 93,
+   "ordinary_token": 794,
+   "external_token": 6863,
+   "full_prefill_argmax": 794,
+   "top2": [
+    794,
+    6863
+   ],
+   "top2_margin": 0.0,
+   "margin_ord_vs_ext": 0.0,
+   "ordinary_text": " into a new list\n\nThe result is more concise and",
+   "external_text": " into a new list\n\nThe result is equivalent to the"
+  },
+  {
+   "prompt": 3,
+   "ordinary_len": 96,
+   "external_len": 96,
+   "first_divergence": 65,
+   "ordinary_token": 785,
+   "external_token": 740,
+   "full_prefill_argmax": 785,
+   "top2": [
+    785,
+    740
+   ],
+   "top2_margin": 0.125,
+   "margin_ord_vs_ext": 0.125,
+   "ordinary_text": " the monetary value of each order).\n\nThe query aggregates the",
+   "external_text": " the monetary value of each order).\n\n### Solution Code\n"
+  }
+ ]
+}

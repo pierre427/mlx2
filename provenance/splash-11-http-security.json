@@ -1,0 +1,22 @@
+{
+  "component": "HTTP request gate: Host allowlist, Origin == Host, optional API key",
+  "source_repository": "Splash",
+  "source_revision": "f58d36dd",
+  "source_paths": [
+    "server/http_security.py",
+    "server/server.py (parse_request gate, allowed_hosts construction)"
+  ],
+  "license": "Apache-2.0",
+  "destination_paths": [
+    "src/mlx2/http_security.py",
+    "src/mlx2/server.py"
+  ],
+  "modifications": [
+    "Host check is enabled only for loopback binds or when --allowed-host is given; a non-loopback bind without an allowlist warns and skips it (Splash always checks).",
+    "Untrusted Host answers 421 and malformed/duplicate Host 400; cross-origin answers 403 (Splash uses 403 for all).",
+    "API key accepted when any single presented Authorization Bearer or x-api-key value matches, instead of requiring exactly one header form.",
+    "Key loaded from an owner-only 0600 file (shared with --admin-token-file rules) or a named environment variable; no plain --api-key argument and no implicit environment default.",
+    "Admin routes with a configured admin token keep that token as their credential; /health exempt from the key only.",
+    "Refusals close the connection before the request body is read; error bodies use the OpenAI or Anthropic shape by route."
+  ]
+}

@@ -1,0 +1,45 @@
+[cpg_job 2026-09-20T00:04:57+00:00 pid=13046] label=rm10-profile-35b-v2 agent_id=job-rm10-profile-35b-v2-13046 command=env PYTHONPATH=/private/tmp/mlx2-rm10-dspark-confidence/src ~/Desktop/mlx2/.venv/bin/python /private/tmp/mlx2-rm10-dspark-confidence/scripts/mtp_confidence_gpu.py profile --i-own-the-gpu --model ~/mlx-models/Qwen3.6-35B-A3B-uncensored-heretic-Native-MTP-Preserved-oQ4e-mtp --out /private/tmp/mlx2-rm10-dspark-confidence/qualification/runs/mtp-confidence-20260919/cost-35b-v2.json --max-depth 3 --cycle-reps 3
+[cpg_job 2026-09-20T00:04:58+00:00 pid=13046] created workflow 728324f98d634bc8ac6de71265fbe74d (cpg-job drivers); record it as workflows.cpg-job-drivers in /Users/Shared/mlxuag/cpg-radio.json to reuse it
+[cpg_job 2026-09-20T00:04:58+00:00 pid=13046] registered worker fe6999ac6f0445c79ba6fa23e4ef014c as job-rm10-profile-35b-v2-13046 in session 3c65a7827e83456a89fffdeefadec196
+[cpg_job 2026-09-20T00:04:58+00:00 pid=13046] took /Users/Shared/mlxuag/gpu.lock
+[cpg_job 2026-09-20T00:04:58+00:00 pid=13046] child pid 13055 started
+{"rep": 0, "lanes": 1, "depth": 0, "seconds_per_cycle": 0.013709608734643552}
+{"rep": 0, "lanes": 1, "depth": 1, "seconds_per_cycle": 0.016302916015774827}
+{"rep": 0, "lanes": 1, "depth": 2, "seconds_per_cycle": 0.017190587233926635}
+{"rep": 0, "lanes": 1, "depth": 3, "seconds_per_cycle": 0.018297595703188563}
+{"rep": 0, "lanes": 2, "depth": 0, "seconds_per_cycle": 0.017310188796727743}
+{"rep": 0, "lanes": 2, "depth": 1, "seconds_per_cycle": 0.02131082421874453}
+{"rep": 0, "lanes": 2, "depth": 2, "seconds_per_cycle": 0.024796259765025752}
+{"rep": 0, "lanes": 2, "depth": 3, "seconds_per_cycle": 0.027984564453618077}
+{"rep": 0, "lanes": 4, "depth": 0, "seconds_per_cycle": 0.02347845248368685}
+{"rep": 0, "lanes": 4, "depth": 1, "seconds_per_cycle": 0.03345938735947129}
+{"rep": 0, "lanes": 4, "depth": 2, "seconds_per_cycle": 0.040321925781427126}
+{"rep": 0, "lanes": 4, "depth": 3, "seconds_per_cycle": 0.04605539128078817}
+{"rep": 1, "lanes": 1, "depth": 0, "seconds_per_cycle": 0.012862016281360411}
+{"rep": 1, "lanes": 1, "depth": 1, "seconds_per_cycle": 0.015541516281700751}
+{"rep": 1, "lanes": 1, "depth": 2, "seconds_per_cycle": 0.01967451757809613}
+{"rep": 1, "lanes": 1, "depth": 3, "seconds_per_cycle": 0.0183479303286731}
+{"rep": 1, "lanes": 2, "depth": 0, "seconds_per_cycle": 0.018498818359148572}
+{"rep": 1, "lanes": 2, "depth": 1, "seconds_per_cycle": 0.02226291535953351}
+{"rep": 1, "lanes": 2, "depth": 2, "seconds_per_cycle": 0.025262178391130874}
+{"rep": 1, "lanes": 2, "depth": 3, "seconds_per_cycle": 0.029623992828419432}
+{"rep": 1, "lanes": 4, "depth": 0, "seconds_per_cycle": 0.02379206315617921}
+{"rep": 1, "lanes": 4, "depth": 1, "seconds_per_cycle": 0.034445779297129775}
+{"rep": 1, "lanes": 4, "depth": 2, "seconds_per_cycle": 0.040182810546866676}
+{"rep": 1, "lanes": 4, "depth": 3, "seconds_per_cycle": 0.047369030608933826}
+{"rep": 2, "lanes": 1, "depth": 0, "seconds_per_cycle": 0.012980985672584211}
+{"rep": 2, "lanes": 1, "depth": 1, "seconds_per_cycle": 0.016024531890252547}
+{"rep": 2, "lanes": 1, "depth": 2, "seconds_per_cycle": 0.018735776031462592}
+{"rep": 2, "lanes": 1, "depth": 3, "seconds_per_cycle": 0.01854714128148771}
+{"rep": 2, "lanes": 2, "depth": 0, "seconds_per_cycle": 0.018074018234074174}
+{"rep": 2, "lanes": 2, "depth": 1, "seconds_per_cycle": 0.023093285796676355}
+{"rep": 2, "lanes": 2, "depth": 2, "seconds_per_cycle": 0.024288475266075693}
+{"rep": 2, "lanes": 2, "depth": 3, "seconds_per_cycle": 0.028401266280525306}
+{"rep": 2, "lanes": 4, "depth": 0, "seconds_per_cycle": 0.024283080078021158}
+{"rep": 2, "lanes": 4, "depth": 1, "seconds_per_cycle": 0.03350875845262635}
+{"rep": 2, "lanes": 4, "depth": 2, "seconds_per_cycle": 0.04020209048394463}
+{"rep": 2, "lanes": 4, "depth": 3, "seconds_per_cycle": 0.04571880534331285}
+[cpg_job 2026-09-20T00:06:11+00:00 pid=13046] child exited rc=0
+[cpg_job 2026-09-20T00:06:11+00:00 pid=13046] worker fe6999ac6f0445c79ba6fa23e4ef014c closed completed
+[cpg_job 2026-09-20T00:06:11+00:00 pid=13046] released /Users/Shared/mlxuag/gpu.lock
+[cpg_job 2026-09-20T00:06:11+00:00 pid=13046] wrote /private/tmp/mlx2-rm10-dspark-confidence/qualification/runs/mtp-confidence-20260919/profile-35b-v2.log.done

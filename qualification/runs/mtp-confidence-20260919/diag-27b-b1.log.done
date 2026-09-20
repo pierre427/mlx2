@@ -1,0 +1,39 @@
+{
+ "agent_id": "job-rm10-diag-27b-86129",
+ "child_pid": 86138,
+ "command": [
+  "env",
+  "PYTHONPATH=/private/tmp/mlx2-rm10-dspark-confidence/src",
+  "~/Desktop/mlx2/.venv/bin/python",
+  "/private/tmp/mlx2-rm10-dspark-confidence/scripts/mtp_confidence_gpu.py",
+  "diag",
+  "--i-own-the-gpu",
+  "--model",
+  "~/mlx-models/Qwen3.8-27B-oQ4e-mtp",
+  "--widths",
+  "1",
+  "--probe-reps",
+  "2",
+  "--out",
+  "/private/tmp/mlx2-rm10-dspark-confidence/qualification/runs/mtp-confidence-20260919/diag-27b-b1.json"
+ ],
+ "ended_at": "2026-09-19T22:32:38+00:00",
+ "label": "rm10-diag-27b",
+ "out": "/private/tmp/mlx2-rm10-dspark-confidence/qualification/runs/mtp-confidence-20260919/diag-27b-b1.log",
+ "pid": 86129,
+ "radio": {
+  "error": null,
+  "heartbeat_failures": 0,
+  "heartbeats": 0,
+  "lease_generation": null,
+  "lease_task": null,
+  "lock_dir": "/Users/Shared/mlxuag/gpu.lock",
+  "status": "closed:completed"
+ },
+ "rc": 0,
+ "refusal": null,
+ "session_id": "3c65a7827e83456a89fffdeefadec196",
+ "signal": null,
+ "started_at": "2026-09-19T22:31:51+00:00",
+ "worker_id": "68aae16c4d3a40629fb5550003cb209a"
+}

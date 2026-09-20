@@ -1,0 +1,171 @@
+{
+  "cpu_reference": {
+    "device": "cpu",
+    "results": [
+      {
+        "all_prefixes_bit_exact": true,
+        "width": 2
+      },
+      {
+        "all_prefixes_bit_exact": true,
+        "width": 3
+      },
+      {
+        "all_prefixes_bit_exact": true,
+        "width": 4
+      },
+      {
+        "all_prefixes_bit_exact": true,
+        "width": 5
+      },
+      {
+        "all_prefixes_bit_exact": true,
+        "width": 8
+      },
+      {
+        "all_prefixes_bit_exact": true,
+        "width": 17
+      }
+    ]
+  },
+  "generic_masked_ab": [
+    {
+      "bitwise_mismatch_prefixes": [],
+      "one_graph_masked_us": 436.15625,
+      "per_distinct_length_sliced_us": 282.80625,
+      "rows": 4,
+      "width": 2
+    },
+    {
+      "bitwise_mismatch_prefixes": [],
+      "one_graph_masked_us": 575.0292,
+      "per_distinct_length_sliced_us": 583.975,
+      "rows": 4,
+      "width": 3
+    },
+    {
+      "bitwise_mismatch_prefixes": [],
+      "one_graph_masked_us": 741.56875,
+      "per_distinct_length_sliced_us": 1000.2208499999999,
+      "rows": 4,
+      "width": 4
+    },
+    {
+      "bitwise_mismatch_prefixes": [],
+      "one_graph_masked_us": 877.7041999999999,
+      "per_distinct_length_sliced_us": 1553.38125,
+      "rows": 4,
+      "width": 5
+    },
+    {
+      "bitwise_mismatch_prefixes": [],
+      "one_graph_masked_us": 1143.48125,
+      "per_distinct_length_sliced_us": 1478.925,
+      "rows": 4,
+      "width": 8
+    },
+    {
+      "bitwise_mismatch_prefixes": [],
+      "one_graph_masked_us": 2041.0208,
+      "per_distinct_length_sliced_us": 1477.7833500000002,
+      "rows": 4,
+      "width": 17
+    }
+  ],
+  "pass": true,
+  "probe_compile": [
+    {
+      "dynamic_probe_s": 0.0009002499864436686,
+      "template_probe_s": 0.009241583000402898,
+      "width": 2
+    },
+    {
+      "dynamic_probe_s": 0.0012297919602133334,
+      "template_probe_s": 0.0009339170064777136,
+      "width": 3
+    },
+    {
+      "dynamic_probe_s": 0.0014906669966876507,
+      "template_probe_s": 0.0017530409968458116,
+      "width": 4
+    },
+    {
+      "dynamic_probe_s": 0.0009099579765461385,
+      "template_probe_s": 0.0014596250257454813,
+      "width": 5
+    },
+    {
+      "dynamic_probe_s": 0.0014281669864431024,
+      "template_probe_s": 0.0019354590331204236,
+      "width": 8
+    },
+    {
+      "dynamic_probe_s": 0.00151983299292624,
+      "template_probe_s": 0.005212749994825572,
+      "width": 17
+    }
+  ],
+  "reconstruct_kernel_ab": [
+    {
+      "bitwise_mismatches": [],
+      "dynamic_us": 176.820415,
+      "ragged_dynamic_us": 191.395,
+      "ragged_template_loop_us": 194.251875,
+      "ragged_vs_reference_max_abs": 9.5367431640625e-07,
+      "rows": 4,
+      "template_us": 209.91729,
+      "width": 2
+    },
+    {
+      "bitwise_mismatches": [],
+      "dynamic_us": 177.48021,
+      "ragged_dynamic_us": 193.07625,
+      "ragged_template_loop_us": 191.55625,
+      "ragged_vs_reference_max_abs": 9.5367431640625e-07,
+      "rows": 4,
+      "template_us": 172.659585,
+      "width": 3
+    },
+    {
+      "bitwise_mismatches": [],
+      "dynamic_us": 176.19583,
+      "ragged_dynamic_us": 229.750835,
+      "ragged_template_loop_us": 189.93417000000002,
+      "ragged_vs_reference_max_abs": 1.9073486328125e-06,
+      "rows": 4,
+      "template_us": 174.635625,
+      "width": 4
+    },
+    {
+      "bitwise_mismatches": [],
+      "dynamic_us": 182.348125,
+      "ragged_dynamic_us": 249.999165,
+      "ragged_template_loop_us": 196.43042000000003,
+      "ragged_vs_reference_max_abs": 1.9073486328125e-06,
+      "rows": 4,
+      "template_us": 170.88729,
+      "width": 5
+    },
+    {
+      "bitwise_mismatches": [],
+      "dynamic_us": 187.85771,
+      "ragged_dynamic_us": 259.152085,
+      "ragged_template_loop_us": 217.54,
+      "ragged_vs_reference_max_abs": 1.9073486328125e-06,
+      "rows": 4,
+      "template_us": 171.76708499999998,
+      "width": 8
+    },
+    {
+      "bitwise_mismatches": [],
+      "dynamic_us": 224.45104,
+      "ragged_dynamic_us": 315.256665,
+      "ragged_template_loop_us": 283.529165,
+      "ragged_vs_reference_max_abs": 1.9073486328125e-06,
+      "rows": 4,
+      "template_us": 182.640625,
+      "width": 17
+    }
+  ],
+  "reference_pass": true
+}

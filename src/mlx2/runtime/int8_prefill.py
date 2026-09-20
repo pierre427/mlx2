@@ -905,6 +905,25 @@ class Int8PrefillHandle:
             if self._cache_mode(b) != "none"
         )
 
+    def transient_weight_bytes_max(self) -> int:
+        """Largest int8 weight tensor one call builds and drops (cache none).
+
+        This is memory that exists only during a prefill call and is not
+        otherwise visible to admission."""
+        return max(
+            (
+                b.spec.n * (b.spec.k + 4)
+                for b in tuple(self._bound.values())
+                if self._cache_mode(b) == "none"
+            ),
+            default=0,
+        )
+
+    def weight_copy_bytes(self) -> int:
+        """Admission-facing int8 weight-copy bytes: resident copies once built
+        plus the worst per-call transient copy."""
+        return self.resident_estimate_bytes() + self.transient_weight_bytes_max()
+
     def status(self) -> dict:
         kinds: dict = {}
         for bound in tuple(self._bound.values()):
@@ -926,6 +945,8 @@ class Int8PrefillHandle:
             "experts": "stock",
             "weight_bytes": self.weight_bytes(),
             "resident_estimate_bytes": self.resident_estimate_bytes(),
+            "transient_weight_bytes_max": self.transient_weight_bytes_max(),
+            "weight_copy_bytes": self.weight_copy_bytes(),
             "counts": dict(self.counts),
         }
 
@@ -942,6 +963,7 @@ class Int8PrefillHandle:
             "revision": self.policy.revision,
             "applies_to": "forward calls with rows >= row_threshold",
             "modules": len(self._bound),
+            "weight_copy_bytes": self.weight_copy_bytes(),
         }
 
 
@@ -1082,6 +1104,7 @@ def bind_for_serving(
         "revision": policy.revision,
         "fidelity": policy.fidelity.value,
         "max_decode_rows": bound,
+        "weight_copy_bytes": handle.weight_copy_bytes(),
     }
     logger.info(
         "int8 NAX prefill bound: %d projections, %d cached copies (%.1f MiB), "

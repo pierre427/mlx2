@@ -1,0 +1,21 @@
+2026-09-20 03:57:48,632 INFO selected native_mtp route from explicit_flag
+2026-09-20 03:57:48,673 WARNING no reasoning signing key configured; using a random per-process reasoning signing key
+2026-09-20 03:57:50,890 INFO ubc_evict: evicted 4784.0 MB from UBC for ~/mlx-models/Qwen3.8-27B-oQ4e-mtp/model-00001-of-00004.safetensors
+2026-09-20 03:57:50,890 INFO ubc_evict: pass complete total_mb=4784.0 elapsed_s=0.03
+2026-09-20 03:57:51,306 INFO ubc_evict: evicted 4785.1 MB from UBC for ~/mlx-models/Qwen3.8-27B-oQ4e-mtp/model-00002-of-00004.safetensors
+2026-09-20 03:57:51,306 INFO ubc_evict: pass complete total_mb=4785.1 elapsed_s=0.04
+2026-09-20 03:57:51,722 INFO ubc_evict: evicted 4769.9 MB from UBC for ~/mlx-models/Qwen3.8-27B-oQ4e-mtp/model-00003-of-00004.safetensors
+2026-09-20 03:57:51,722 INFO ubc_evict: pass complete total_mb=4769.9 elapsed_s=0.04
+2026-09-20 03:57:51,884 INFO ubc_evict: evicted 1846.3 MB from UBC for ~/mlx-models/Qwen3.8-27B-oQ4e-mtp/model-00004-of-00004.safetensors
+2026-09-20 03:57:51,884 INFO ubc_evict: pass complete total_mb=1846.3 elapsed_s=0.02
+2026-09-20 03:57:52,247 INFO lane admission budget: host=128.0 advisory=112.0 service_reserve=16 driver_allowance=4 transient_per_lane=3.1 max_lanes=8
+2026-09-20 03:57:53,557 INFO "GET /v1/models HTTP/1.1" 200 -
+2026-09-20 03:57:53,856 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-20 03:57:53,858 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-20 03:57:57,175 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-20 03:58:01,970 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-20 03:58:02,071 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-20 03:58:03,791 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-20 03:58:08,710 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-20 03:58:09,427 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-20 03:58:10,111 INFO "POST /v1/chat/completions HTTP/1.1" 200 -

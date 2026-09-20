@@ -5,7 +5,6 @@
 
 from __future__ import annotations
 
-import copy
 import math
 from collections import deque
 from contextlib import suppress
@@ -16,7 +15,7 @@ from typing import Any
 import mlx.core as mx
 
 from .committed_recovery import CommittedRecoverySlot
-from .cow_cache import snapshot_prompt_cache_descriptors
+from .cow_cache import snapshot_committed_cache, snapshot_prompt_cache_descriptors
 from .generate import (
     ALLOCATOR_RECLAIM_STEP_INTERVAL,
     GenerationBatch,
@@ -492,12 +491,16 @@ class PromptLookupBatchGenerator:
             lane.history.extend(inputs)
             self.scheduler_stats["pld_prefill_rounds"] += 1
         done = len(lane.remaining) == 1
+        # (done, span) over the whole prompt, as the ordinary generator's
+        # prompt responses report it; the final token is consumed by decode.
+        span = len(lane.history) + len(lane.remaining)
+        progress = (span if done else len(lane.history), span)
         if done:
             lane.anchor = lane.remaining.popleft()
             self.boundaries[lane.uid] = {
                 "committed_only": True,
                 "tokens": list(lane.history),
-                "target_cache": copy.deepcopy(lane.cache),
+                "target_cache": self._freeze_cache(lane.cache),
                 "covered_tokens": len(lane.history),
             }
             self._capture_lane_recovery(lane)
@@ -505,9 +508,27 @@ class PromptLookupBatchGenerator:
         return SimpleNamespace(
             uid=lane.uid,
             prompt_progress=(len(lane.history), len(lane.lookup_history)),
+            progress=progress,
             end_of_prompt=done,
             end_of_segment=done,
         )
+
+    def _freeze_cache(self, cache):
+        """Independent committed cache for boundaries and finishes.
+
+        Deep copy by default; ``MLX_LM_EXTERNAL_ROUND_COW=1`` selects
+        descriptor COW, falling back to the deep copy for a graph with live
+        speculation state.
+        """
+        frozen, _sidecar, mode = snapshot_committed_cache(cache)
+        if mode == "descriptor_cow":
+            key = "pld_cow_snapshots"
+        elif mode == "deepcopy_fallback":
+            key = "pld_cow_fallbacks"
+        else:
+            return frozen
+        self.scheduler_stats[key] = self.scheduler_stats.get(key, 0) + 1
+        return frozen
 
     @staticmethod
     def _snapshot_recovery_cache(cache):
@@ -605,7 +626,8 @@ class PromptLookupBatchGenerator:
             tokens = mx.array(lane.lookup_history + tentative, dtype=mx.uint32)
             for processor in lane.processors:
                 value = processor(tokens, value)
-        row = value[0] - mx.logsumexp(value[0])
+        row = value[0].astype(mx.float32)
+        row = row - mx.logsumexp(row)
         mx.eval(row)
         return row
 
@@ -853,6 +875,10 @@ class PromptLookupBatchGenerator:
         self._capture_lane_recovery(lane)
         lane.stats.cycles += 1
         lane.stats.verify_span_hist[len(inputs)] = lane.stats.verify_span_hist.get(len(inputs), 0) + 1
+        _round_accepted = sum(item[2] for item in delivered)
+        lane.stats.verify_accept_hist[_round_accepted] = (
+            lane.stats.verify_accept_hist.get(_round_accepted, 0) + 1
+        )
         probe_matched = int(
             bool(probing and delivered and probe_candidate and probe_candidate[0] == delivered[0][0])
         )
@@ -950,6 +976,7 @@ class PromptLookupBatchGenerator:
             "admission_delatches": lane.stats.admission_delatches,
             "admission_reentries": lane.stats.admission_reentries,
             "verify_span_hist": dict(lane.stats.verify_span_hist),
+            "verify_accept_hist": dict(lane.stats.verify_accept_hist),
             "span_snap_cycles": lane.stats.span_snap_cycles,
             "span_extend_cycles": lane.stats.span_extend_cycles,
             "target_width": getattr(lane, "round_width", 1),
@@ -965,7 +992,9 @@ class PromptLookupBatchGenerator:
                 token=token,
                 logprobs=row,
                 finish_reason=finish_reason if final else None,
-                prompt_cache=copy.deepcopy(lane.cache) if final and finish_reason else None,
+                prompt_cache=(
+                    self._freeze_cache(lane.cache) if final and finish_reason else None
+                ),
                 all_tokens=list(lane.history) if final and finish_reason else None,
                 from_draft=from_draft,
                 execution_width=getattr(lane, "round_width", 1),

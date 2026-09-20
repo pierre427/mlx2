@@ -1,0 +1,1859 @@
+{
+  "schema": "mlx2.rm15.prefill-chunk-variance.v1",
+  "model": "~/mlx-models/Qwen3.8-27B-oQ4e-mtp",
+  "contexts": [
+    4096
+  ],
+  "arms": "full,2048,2048r,4096,1024",
+  "score_tokens": 128,
+  "cache_tail": 16,
+  "out": "/private/tmp/mlx2-rm15-chunkvar/qualification/runs/rm15-chunk-variance-20260920/chunkvar-27b-4k.json",
+  "reference_arm": "full (one chunk of the whole context)",
+  "mlx_version": "0.32.2.dev20260919+39400a0d4",
+  "n_layers": 64,
+  "results": [
+    {
+      "context": 4096,
+      "arms": {
+        "full": {
+          "prefill_step": 4096,
+          "n_chunks": 1,
+          "reference": true,
+          "prefill_s": 6.234416667022742
+        },
+        "2048": {
+          "first_divergent_layer": {
+            "layer": "L0.gdn",
+            "max_abs_delta": 0.0009765625
+          },
+          "first_divergent_cache_field": {
+            "layer": 0,
+            "kind": "gdn",
+            "field": "arr1",
+            "max_abs_delta": 0.06645774841308594
+          },
+          "n_differing_cache_fields": 127,
+          "differing_cache_fields": [
+            {
+              "layer": 0,
+              "kind": "gdn",
+              "field": "arr1",
+              "max_abs_delta": 0.06645774841308594
+            },
+            {
+              "layer": 1,
+              "kind": "gdn",
+              "field": "arr0",
+              "max_abs_delta": 0.0078125
+            },
+            {
+              "layer": 1,
+              "kind": "gdn",
+              "field": "arr1",
+              "max_abs_delta": 0.0016544163227081299
+            },
+            {
+              "layer": 2,
+              "kind": "gdn",
+              "field": "arr0",
+              "max_abs_delta": 0.015625
+            },
+            {
+              "layer": 2,
+              "kind": "gdn",
+              "field": "arr1",
+              "max_abs_delta": 0.0015449225902557373
+            },
+            {
+              "layer": 3,
+              "kind": "attn",
+              "field": "keys_tail",
+              "max_abs_delta": 0.0625
+            },
+            {
+              "layer": 3,
+              "kind": "attn",
+              "field": "values_tail",
+              "max_abs_delta": 0.015625
+            },
+            {
+              "layer": 4,
+              "kind": "gdn",
+              "field": "arr0",
+              "max_abs_delta": 0.015625
+            },
+            {
+              "layer": 4,
+              "kind": "gdn",
+              "field": "arr1",
+              "max_abs_delta": 0.0012873262166976929
+            },
+            {
+              "layer": 5,
+              "kind": "gdn",
+              "field": "arr0",
+              "max_abs_delta": 0.03125
+            },
+            {
+              "layer": 5,
+              "kind": "gdn",
+              "field": "arr1",
+              "max_abs_delta": 0.002053588628768921
+            },
+            {
+              "layer": 6,
+              "kind": "gdn",
+              "field": "arr0",
+              "max_abs_delta": 0.03125
+            },
+            {
+              "layer": 6,
+              "kind": "gdn",
+              "field": "arr1",
+              "max_abs_delta": 0.00615459680557251
+            },
+            {
+              "layer": 7,
+              "kind": "attn",
+              "field": "keys_tail",
+              "max_abs_delta": 0.0625
+            },
+            {
+              "layer": 7,
+              "kind": "attn",
+              "field": "values_tail",
+              "max_abs_delta": 0.015625
+            },
+            {
+              "layer": 8,
+              "kind": "gdn",
+              "field": "arr0",
+              "max_abs_delta": 0.03125
+            },
+            {
+              "layer": 8,
+              "kind": "gdn",
+              "field": "arr1",
+              "max_abs_delta": 0.002389863133430481
+            },
+            {
+              "layer": 9,
+              "kind": "gdn",
+              "field": "arr0",
+              "max_abs_delta": 0.0625
+            },
+            {
+              "layer": 9,
+              "kind": "gdn",
+              "field": "arr1",
+              "max_abs_delta": 0.00412653386592865
+            },
+            {
+              "layer": 10,
+              "kind": "gdn",
+              "field": "arr0",
+              "max_abs_delta": 0.0625
+            },
+            {
+              "layer": 10,
+              "kind": "gdn",
+              "field": "arr1",
+              "max_abs_delta": 0.008182480931282043
+            },
+            {
+              "layer": 11,
+              "kind": "attn",
+              "field": "keys_tail",
+              "max_abs_delta": 0.0625
+            },
+            {
+              "layer": 11,
+              "kind": "attn",
+              "field": "values_tail",
+              "max_abs_delta": 0.03125
+            },
+            {
+              "layer": 12,
+              "kind": "gdn",
+              "field": "arr0",
+              "max_abs_delta": 0.03125
+            },
+            {
+              "layer": 12,
+              "kind": "gdn",
+              "field": "arr1",
+              "max_abs_delta": 0.0035340189933776855
+            },
+            {
+              "layer": 13,
+              "kind": "gdn",
+              "field": "arr0",
+              "max_abs_delta": 0.03125
+            },
+            {
+              "layer": 13,
+              "kind": "gdn",
+              "field": "arr1",
+              "max_abs_delta": 0.003722667694091797
+            },
+            {
+              "layer": 14,
+              "kind": "gdn",
+              "field": "arr0",
+              "max_abs_delta": 0.0625
+            },
+            {
+              "layer": 14,
+              "kind": "gdn",
+              "field": "arr1",
+              "max_abs_delta": 0.0034982026554644108
+            },
+            {
+              "layer": 15,
+              "kind": "attn",
+              "field": "keys_tail",
+              "max_abs_delta": 0.0625
+            },
+            {
+              "layer": 15,
+              "kind": "attn",
+              "field": "values_tail",
+              "max_abs_delta": 0.03125
+            },
+            {
+              "layer": 16,
+              "kind": "gdn",
+              "field": "arr0",
+              "max_abs_delta": 0.0625
+            },
+            {
+              "layer": 16,
+              "kind": "gdn",
+              "field": "arr1",
+              "max_abs_delta": 0.0024893656373023987
+            },
+            {
+              "layer": 17,
+              "kind": "gdn",
+              "field": "arr0",
+              "max_abs_delta": 0.0625
+            },
+            {
+              "layer": 17,
+              "kind": "gdn",
+              "field": "arr1",
+              "max_abs_delta": 0.005660057067871094
+            },
+            {
+              "layer": 18,
+              "kind": "gdn",
+              "field": "arr0",
+              "max_abs_delta": 0.0625
+            },
+            {
+              "layer": 18,
+              "kind": "gdn",
+              "field": "arr1",
+              "max_abs_delta": 0.004493236541748047
+            },
+            {
+              "layer": 19,
+              "kind": "attn",
+              "field": "keys_tail",
+              "max_abs_delta": 0.0625
+            },
+            {
+              "layer": 19,
+              "kind": "attn",
+              "field": "values_tail",
+              "max_abs_delta": 0.03125
+            },
+            {
+              "layer": 20,
+              "kind": "gdn",
+              "field": "arr0",
+              "max_abs_delta": 0.0625
+            }
+          ],
+          "per_layer_last_pos_max_abs_delta": [
+            {
+              "layer": "L0.gdn",
+              "max_abs_delta": 0.0009765625
+            },
+            {
+              "layer": "L1.gdn",
+              "max_abs_delta": 0.001953125
+            },
+            {
+              "layer": "L2.gdn",
+              "max_abs_delta": 0.001953125
+            },
+            {
+              "layer": "L3.attn",
+              "max_abs_delta": 0.00390625
+            },
+            {
+              "layer": "L4.gdn",
+              "max_abs_delta": 0.00390625
+            },
+            {
+              "layer": "L5.gdn",
+              "max_abs_delta": 0.0078125
+            },
+            {
+              "layer": "L6.gdn",
+              "max_abs_delta": 0.0078125
+            },
+            {
+              "layer": "L7.attn",
+              "max_abs_delta": 0.0078125
+            },
+            {
+              "layer": "L8.gdn",
+              "max_abs_delta": 0.0078125
+            },
+            {
+              "layer": "L9.gdn",
+              "max_abs_delta": 0.0078125
+            },
+            {
+              "layer": "L10.gdn",
+              "max_abs_delta": 0.0078125
+            },
+            {
+              "layer": "L11.attn",
+              "max_abs_delta": 0.01171875
+            },
+            {
+              "layer": "L12.gdn",
+              "max_abs_delta": 0.01953125
+            },
+            {
+              "layer": "L13.gdn",
+              "max_abs_delta": 0.0234375
+            },
+            {
+              "layer": "L14.gdn",
+              "max_abs_delta": 0.0234375
+            },
+            {
+              "layer": "L15.attn",
+              "max_abs_delta": 0.0234375
+            },
+            {
+              "layer": "L16.gdn",
+              "max_abs_delta": 0.0234375
+            },
+            {
+              "layer": "L17.gdn",
+              "max_abs_delta": 0.03125
+            },
+            {
+              "layer": "L18.gdn",
+              "max_abs_delta": 0.03125
+            },
+            {
+              "layer": "L19.attn",
+              "max_abs_delta": 0.03125
+            },
+            {
+              "layer": "L20.gdn",
+              "max_abs_delta": 0.03125
+            },
+            {
+              "layer": "L21.gdn",
+              "max_abs_delta": 0.03125
+            },
+            {
+              "layer": "L22.gdn",
+              "max_abs_delta": 0.0390625
+            },
+            {
+              "layer": "L23.attn",
+              "max_abs_delta": 0.046875
+            },
+            {
+              "layer": "L24.gdn",
+              "max_abs_delta": 0.046875
+            },
+            {
+              "layer": "L25.gdn",
+              "max_abs_delta": 0.046875
+            },
+            {
+              "layer": "L26.gdn",
+              "max_abs_delta": 0.046875
+            },
+            {
+              "layer": "L27.attn",
+              "max_abs_delta": 0.046875
+            },
+            {
+              "layer": "L28.gdn",
+              "max_abs_delta": 0.0625
+            },
+            {
+              "layer": "L29.gdn",
+              "max_abs_delta": 0.0546875
+            },
+            {
+              "layer": "L30.gdn",
+              "max_abs_delta": 0.0625
+            },
+            {
+              "layer": "L31.attn",
+              "max_abs_delta": 0.078125
+            },
+            {
+              "layer": "L32.gdn",
+              "max_abs_delta": 0.078125
+            },
+            {
+              "layer": "L33.gdn",
+              "max_abs_delta": 0.078125
+            },
+            {
+              "layer": "L34.gdn",
+              "max_abs_delta": 0.078125
+            },
+            {
+              "layer": "L35.attn",
+              "max_abs_delta": 0.25
+            },
+            {
+              "layer": "L36.gdn",
+              "max_abs_delta": 0.25
+            },
+            {
+              "layer": "L37.gdn",
+              "max_abs_delta": 0.25
+            },
+            {
+              "layer": "L38.gdn",
+              "max_abs_delta": 0.25
+            },
+            {
+              "layer": "L39.attn",
+              "max_abs_delta": 0.25
+            },
+            {
+              "layer": "L40.gdn",
+              "max_abs_delta": 0.25
+            },
+            {
+              "layer": "L41.gdn",
+              "max_abs_delta": 0.109375
+            },
+            {
+              "layer": "L42.gdn",
+              "max_abs_delta": 0.109375
+            },
+            {
+              "layer": "L43.attn",
+              "max_abs_delta": 0.09375
+            },
+            {
+              "layer": "L44.gdn",
+              "max_abs_delta": 0.125
+            },
+            {
+              "layer": "L45.gdn",
+              "max_abs_delta": 0.125
+            },
+            {
+              "layer": "L46.gdn",
+              "max_abs_delta": 0.125
+            },
+            {
+              "layer": "L47.attn",
+              "max_abs_delta": 0.125
+            },
+            {
+              "layer": "L48.gdn",
+              "max_abs_delta": 0.125
+            },
+            {
+              "layer": "L49.gdn",
+              "max_abs_delta": 0.125
+            },
+            {
+              "layer": "L50.gdn",
+              "max_abs_delta": 0.15625
+            },
+            {
+              "layer": "L51.attn",
+              "max_abs_delta": 0.25
+            },
+            {
+              "layer": "L52.gdn",
+              "max_abs_delta": 0.5
+            },
+            {
+              "layer": "L53.gdn",
+              "max_abs_delta": 0.5
+            },
+            {
+              "layer": "L54.gdn",
+              "max_abs_delta": 0.25
+            },
+            {
+              "layer": "L55.attn",
+              "max_abs_delta": 1.0
+            },
+            {
+              "layer": "L56.gdn",
+              "max_abs_delta": 1.5
+            },
+            {
+              "layer": "L57.gdn",
+              "max_abs_delta": 2.0
+            },
+            {
+              "layer": "L58.gdn",
+              "max_abs_delta": 0.375
+            },
+            {
+              "layer": "L59.attn",
+              "max_abs_delta": 3.0
+            },
+            {
+              "layer": "L60.gdn",
+              "max_abs_delta": 3.0
+            },
+            {
+              "layer": "L61.gdn",
+              "max_abs_delta": 3.0
+            },
+            {
+              "layer": "L62.gdn",
+              "max_abs_delta": 2.5
+            },
+            {
+              "layer": "L63.attn",
+              "max_abs_delta": 2.0
+            }
+          ],
+          "decode_top1_agreement": 0.9921875,
+          "decode_kl_mean": 0.0007653408101759851,
+          "decode_kl_max": 0.0033750655129551888,
+          "decode_max_abs_logit_delta": 0.796875,
+          "prefill_step": 2048,
+          "n_chunks": 2,
+          "prefill_s": 6.124924832955003
+        },
+        "2048r": {
+          "first_divergent_layer": {
+            "layer": "L0.gdn",
+            "max_abs_delta": 0.0009765625
+          },
+          "first_divergent_cache_field": {
+            "layer": 0,
+            "kind": "gdn",
+            "field": "arr1",
+            "max_abs_delta": 0.06645774841308594
+          },
+          "n_differing_cache_fields": 127,
+          "differing_cache_fields": [
+            {
+              "layer": 0,
+              "kind": "gdn",
+              "field": "arr1",
+              "max_abs_delta": 0.06645774841308594
+            },
+            {
+              "layer": 1,
+              "kind": "gdn",
+              "field": "arr0",
+              "max_abs_delta": 0.0078125
+            },
+            {
+              "layer": 1,
+              "kind": "gdn",
+              "field": "arr1",
+              "max_abs_delta": 0.0016544163227081299
+            },
+            {
+              "layer": 2,
+              "kind": "gdn",
+              "field": "arr0",
+              "max_abs_delta": 0.015625
+            },
+            {
+              "layer": 2,
+              "kind": "gdn",
+              "field": "arr1",
+              "max_abs_delta": 0.0015449225902557373
+            },
+            {
+              "layer": 3,
+              "kind": "attn",
+              "field": "keys_tail",
+              "max_abs_delta": 0.0625
+            },
+            {
+              "layer": 3,
+              "kind": "attn",
+              "field": "values_tail",
+              "max_abs_delta": 0.015625
+            },
+            {
+              "layer": 4,
+              "kind": "gdn",
+              "field": "arr0",
+              "max_abs_delta": 0.015625
+            },
+            {
+              "layer": 4,
+              "kind": "gdn",
+              "field": "arr1",
+              "max_abs_delta": 0.0012873262166976929
+            },
+            {
+              "layer": 5,
+              "kind": "gdn",
+              "field": "arr0",
+              "max_abs_delta": 0.03125
+            },
+            {
+              "layer": 5,
+              "kind": "gdn",
+              "field": "arr1",
+              "max_abs_delta": 0.002053588628768921
+            },
+            {
+              "layer": 6,
+              "kind": "gdn",
+              "field": "arr0",
+              "max_abs_delta": 0.03125
+            },
+            {
+              "layer": 6,
+              "kind": "gdn",
+              "field": "arr1",
+              "max_abs_delta": 0.00615459680557251
+            },
+            {
+              "layer": 7,
+              "kind": "attn",
+              "field": "keys_tail",
+              "max_abs_delta": 0.0625
+            },
+            {
+              "layer": 7,
+              "kind": "attn",
+              "field": "values_tail",
+              "max_abs_delta": 0.015625
+            },
+            {
+              "layer": 8,
+              "kind": "gdn",
+              "field": "arr0",
+              "max_abs_delta": 0.03125
+            },
+            {
+              "layer": 8,
+              "kind": "gdn",
+              "field": "arr1",
+              "max_abs_delta": 0.002389863133430481
+            },
+            {
+              "layer": 9,
+              "kind": "gdn",
+              "field": "arr0",
+              "max_abs_delta": 0.0625
+            },
+            {
+              "layer": 9,
+              "kind": "gdn",
+              "field": "arr1",
+              "max_abs_delta": 0.00412653386592865
+            },
+            {
+              "layer": 10,
+              "kind": "gdn",
+              "field": "arr0",
+              "max_abs_delta": 0.0625
+            },
+            {
+              "layer": 10,
+              "kind": "gdn",
+              "field": "arr1",
+              "max_abs_delta": 0.008182480931282043
+            },
+            {
+              "layer": 11,
+              "kind": "attn",
+              "field": "keys_tail",
+              "max_abs_delta": 0.0625
+            },
+            {
+              "layer": 11,
+              "kind": "attn",
+              "field": "values_tail",
+              "max_abs_delta": 0.03125
+            },
+            {
+              "layer": 12,
+              "kind": "gdn",
+              "field": "arr0",
+              "max_abs_delta": 0.03125
+            },
+            {
+              "layer": 12,
+              "kind": "gdn",
+              "field": "arr1",
+              "max_abs_delta": 0.0035340189933776855
+            },
+            {
+              "layer": 13,
+              "kind": "gdn",
+              "field": "arr0",
+              "max_abs_delta": 0.03125
+            },
+            {
+              "layer": 13,
+              "kind": "gdn",
+              "field": "arr1",
+              "max_abs_delta": 0.003722667694091797
+            },
+            {
+              "layer": 14,
+              "kind": "gdn",
+              "field": "arr0",
+              "max_abs_delta": 0.0625
+            },
+            {
+              "layer": 14,
+              "kind": "gdn",
+              "field": "arr1",
+              "max_abs_delta": 0.0034982026554644108
+            },
+            {
+              "layer": 15,
+              "kind": "attn",
+              "field": "keys_tail",
+              "max_abs_delta": 0.0625
+            },
+            {
+              "layer": 15,
+              "kind": "attn",
+              "field": "values_tail",
+              "max_abs_delta": 0.03125
+            },
+            {
+              "layer": 16,
+              "kind": "gdn",
+              "field": "arr0",
+              "max_abs_delta": 0.0625
+            },
+            {
+              "layer": 16,
+              "kind": "gdn",
+              "field": "arr1",
+              "max_abs_delta": 0.0024893656373023987
+            },
+            {
+              "layer": 17,
+              "kind": "gdn",
+              "field": "arr0",
+              "max_abs_delta": 0.0625
+            },
+            {
+              "layer": 17,
+              "kind": "gdn",
+              "field": "arr1",
+              "max_abs_delta": 0.005660057067871094
+            },
+            {
+              "layer": 18,
+              "kind": "gdn",
+              "field": "arr0",
+              "max_abs_delta": 0.0625
+            },
+            {
+              "layer": 18,
+              "kind": "gdn",
+              "field": "arr1",
+              "max_abs_delta": 0.004493236541748047
+            },
+            {
+              "layer": 19,
+              "kind": "attn",
+              "field": "keys_tail",
+              "max_abs_delta": 0.0625
+            },
+            {
+              "layer": 19,
+              "kind": "attn",
+              "field": "values_tail",
+              "max_abs_delta": 0.03125
+            },
+            {
+              "layer": 20,
+              "kind": "gdn",
+              "field": "arr0",
+              "max_abs_delta": 0.0625
+            }
+          ],
+          "per_layer_last_pos_max_abs_delta": [
+            {
+              "layer": "L0.gdn",
+              "max_abs_delta": 0.0009765625
+            },
+            {
+              "layer": "L1.gdn",
+              "max_abs_delta": 0.001953125
+            },
+            {
+              "layer": "L2.gdn",
+              "max_abs_delta": 0.001953125
+            },
+            {
+              "layer": "L3.attn",
+              "max_abs_delta": 0.00390625
+            },
+            {
+              "layer": "L4.gdn",
+              "max_abs_delta": 0.00390625
+            },
+            {
+              "layer": "L5.gdn",
+              "max_abs_delta": 0.0078125
+            },
+            {
+              "layer": "L6.gdn",
+              "max_abs_delta": 0.0078125
+            },
+            {
+              "layer": "L7.attn",
+              "max_abs_delta": 0.0078125
+            },
+            {
+              "layer": "L8.gdn",
+              "max_abs_delta": 0.0078125
+            },
+            {
+              "layer": "L9.gdn",
+              "max_abs_delta": 0.0078125
+            },
+            {
+              "layer": "L10.gdn",
+              "max_abs_delta": 0.0078125
+            },
+            {
+              "layer": "L11.attn",
+              "max_abs_delta": 0.01171875
+            },
+            {
+              "layer": "L12.gdn",
+              "max_abs_delta": 0.01953125
+            },
+            {
+              "layer": "L13.gdn",
+              "max_abs_delta": 0.0234375
+            },
+            {
+              "layer": "L14.gdn",
+              "max_abs_delta": 0.0234375
+            },
+            {
+              "layer": "L15.attn",
+              "max_abs_delta": 0.0234375
+            },
+            {
+              "layer": "L16.gdn",
+              "max_abs_delta": 0.0234375
+            },
+            {
+              "layer": "L17.gdn",
+              "max_abs_delta": 0.03125
+            },
+            {
+              "layer": "L18.gdn",
+              "max_abs_delta": 0.03125
+            },
+            {
+              "layer": "L19.attn",
+              "max_abs_delta": 0.03125
+            },
+            {
+              "layer": "L20.gdn",
+              "max_abs_delta": 0.03125
+            },
+            {
+              "layer": "L21.gdn",
+              "max_abs_delta": 0.03125
+            },
+            {
+              "layer": "L22.gdn",
+              "max_abs_delta": 0.0390625
+            },
+            {
+              "layer": "L23.attn",
+              "max_abs_delta": 0.046875
+            },
+            {
+              "layer": "L24.gdn",
+              "max_abs_delta": 0.046875
+            },
+            {
+              "layer": "L25.gdn",
+              "max_abs_delta": 0.046875
+            },
+            {
+              "layer": "L26.gdn",
+              "max_abs_delta": 0.046875
+            },
+            {
+              "layer": "L27.attn",
+              "max_abs_delta": 0.046875
+            },
+            {
+              "layer": "L28.gdn",
+              "max_abs_delta": 0.0625
+            },
+            {
+              "layer": "L29.gdn",
+              "max_abs_delta": 0.0546875
+            },
+            {
+              "layer": "L30.gdn",
+              "max_abs_delta": 0.0625
+            },
+            {
+              "layer": "L31.attn",
+              "max_abs_delta": 0.078125
+            },
+            {
+              "layer": "L32.gdn",
+              "max_abs_delta": 0.078125
+            },
+            {
+              "layer": "L33.gdn",
+              "max_abs_delta": 0.078125
+            },
+            {
+              "layer": "L34.gdn",
+              "max_abs_delta": 0.078125
+            },
+            {
+              "layer": "L35.attn",
+              "max_abs_delta": 0.25
+            },
+            {
+              "layer": "L36.gdn",
+              "max_abs_delta": 0.25
+            },
+            {
+              "layer": "L37.gdn",
+              "max_abs_delta": 0.25
+            },
+            {
+              "layer": "L38.gdn",
+              "max_abs_delta": 0.25
+            },
+            {
+              "layer": "L39.attn",
+              "max_abs_delta": 0.25
+            },
+            {
+              "layer": "L40.gdn",
+              "max_abs_delta": 0.25
+            },
+            {
+              "layer": "L41.gdn",
+              "max_abs_delta": 0.109375
+            },
+            {
+              "layer": "L42.gdn",
+              "max_abs_delta": 0.109375
+            },
+            {
+              "layer": "L43.attn",
+              "max_abs_delta": 0.09375
+            },
+            {
+              "layer": "L44.gdn",
+              "max_abs_delta": 0.125
+            },
+            {
+              "layer": "L45.gdn",
+              "max_abs_delta": 0.125
+            },
+            {
+              "layer": "L46.gdn",
+              "max_abs_delta": 0.125
+            },
+            {
+              "layer": "L47.attn",
+              "max_abs_delta": 0.125
+            },
+            {
+              "layer": "L48.gdn",
+              "max_abs_delta": 0.125
+            },
+            {
+              "layer": "L49.gdn",
+              "max_abs_delta": 0.125
+            },
+            {
+              "layer": "L50.gdn",
+              "max_abs_delta": 0.15625
+            },
+            {
+              "layer": "L51.attn",
+              "max_abs_delta": 0.25
+            },
+            {
+              "layer": "L52.gdn",
+              "max_abs_delta": 0.5
+            },
+            {
+              "layer": "L53.gdn",
+              "max_abs_delta": 0.5
+            },
+            {
+              "layer": "L54.gdn",
+              "max_abs_delta": 0.25
+            },
+            {
+              "layer": "L55.attn",
+              "max_abs_delta": 1.0
+            },
+            {
+              "layer": "L56.gdn",
+              "max_abs_delta": 1.5
+            },
+            {
+              "layer": "L57.gdn",
+              "max_abs_delta": 2.0
+            },
+            {
+              "layer": "L58.gdn",
+              "max_abs_delta": 0.375
+            },
+            {
+              "layer": "L59.attn",
+              "max_abs_delta": 3.0
+            },
+            {
+              "layer": "L60.gdn",
+              "max_abs_delta": 3.0
+            },
+            {
+              "layer": "L61.gdn",
+              "max_abs_delta": 3.0
+            },
+            {
+              "layer": "L62.gdn",
+              "max_abs_delta": 2.5
+            },
+            {
+              "layer": "L63.attn",
+              "max_abs_delta": 2.0
+            }
+          ],
+          "decode_top1_agreement": 0.9921875,
+          "decode_kl_mean": 0.0007653408101759851,
+          "decode_kl_max": 0.0033750655129551888,
+          "decode_max_abs_logit_delta": 0.796875,
+          "prefill_step": 2048,
+          "n_chunks": 2,
+          "prefill_s": 6.109842333011329
+        },
+        "4096": {
+          "first_divergent_layer": null,
+          "first_divergent_cache_field": null,
+          "n_differing_cache_fields": 0,
+          "differing_cache_fields": [],
+          "per_layer_last_pos_max_abs_delta": [
+            {
+              "layer": "L0.gdn",
+              "max_abs_delta": 0.0
+            },
+            {
+              "layer": "L1.gdn",
+              "max_abs_delta": 0.0
+            },
+            {
+              "layer": "L2.gdn",
+              "max_abs_delta": 0.0
+            },
+            {
+              "layer": "L3.attn",
+              "max_abs_delta": 0.0
+            },
+            {
+              "layer": "L4.gdn",
+              "max_abs_delta": 0.0
+            },
+            {
+              "layer": "L5.gdn",
+              "max_abs_delta": 0.0
+            },
+            {
+              "layer": "L6.gdn",
+              "max_abs_delta": 0.0
+            },
+            {
+              "layer": "L7.attn",
+              "max_abs_delta": 0.0
+            },
+            {
+              "layer": "L8.gdn",
+              "max_abs_delta": 0.0
+            },
+            {
+              "layer": "L9.gdn",
+              "max_abs_delta": 0.0
+            },
+            {
+              "layer": "L10.gdn",
+              "max_abs_delta": 0.0
+            },
+            {
+              "layer": "L11.attn",
+              "max_abs_delta": 0.0
+            },
+            {
+              "layer": "L12.gdn",
+              "max_abs_delta": 0.0
+            },
+            {
+              "layer": "L13.gdn",
+              "max_abs_delta": 0.0
+            },
+            {
+              "layer": "L14.gdn",
+              "max_abs_delta": 0.0
+            },
+            {
+              "layer": "L15.attn",
+              "max_abs_delta": 0.0
+            },
+            {
+              "layer": "L16.gdn",
+              "max_abs_delta": 0.0
+            },
+            {
+              "layer": "L17.gdn",
+              "max_abs_delta": 0.0
+            },
+            {
+              "layer": "L18.gdn",
+              "max_abs_delta": 0.0
+            },
+            {
+              "layer": "L19.attn",
+              "max_abs_delta": 0.0
+            },
+            {
+              "layer": "L20.gdn",
+              "max_abs_delta": 0.0
+            },
+            {
+              "layer": "L21.gdn",
+              "max_abs_delta": 0.0
+            },
+            {
+              "layer": "L22.gdn",
+              "max_abs_delta": 0.0
+            },
+            {
+              "layer": "L23.attn",
+              "max_abs_delta": 0.0
+            },
+            {
+              "layer": "L24.gdn",
+              "max_abs_delta": 0.0
+            },
+            {
+              "layer": "L25.gdn",
+              "max_abs_delta": 0.0
+            },
+            {
+              "layer": "L26.gdn",
+              "max_abs_delta": 0.0
+            },
+            {
+              "layer": "L27.attn",
+              "max_abs_delta": 0.0
+            },
+            {
+              "layer": "L28.gdn",
+              "max_abs_delta": 0.0
+            },
+            {
+              "layer": "L29.gdn",
+              "max_abs_delta": 0.0
+            },
+            {
+              "layer": "L30.gdn",
+              "max_abs_delta": 0.0
+            },
+            {
+              "layer": "L31.attn",
+              "max_abs_delta": 0.0
+            },
+            {
+              "layer": "L32.gdn",
+              "max_abs_delta": 0.0
+            },
+            {
+              "layer": "L33.gdn",
+              "max_abs_delta": 0.0
+            },
+            {
+              "layer": "L34.gdn",
+              "max_abs_delta": 0.0
+            },
+            {
+              "layer": "L35.attn",
+              "max_abs_delta": 0.0
+            },
+            {
+              "layer": "L36.gdn",
+              "max_abs_delta": 0.0
+            },
+            {
+              "layer": "L37.gdn",
+              "max_abs_delta": 0.0
+            },
+            {
+              "layer": "L38.gdn",
+              "max_abs_delta": 0.0
+            },
+            {
+              "layer": "L39.attn",
+              "max_abs_delta": 0.0
+            },
+            {
+              "layer": "L40.gdn",
+              "max_abs_delta": 0.0
+            },
+            {
+              "layer": "L41.gdn",
+              "max_abs_delta": 0.0
+            },
+            {
+              "layer": "L42.gdn",
+              "max_abs_delta": 0.0
+            },
+            {
+              "layer": "L43.attn",
+              "max_abs_delta": 0.0
+            },
+            {
+              "layer": "L44.gdn",
+              "max_abs_delta": 0.0
+            },
+            {
+              "layer": "L45.gdn",
+              "max_abs_delta": 0.0
+            },
+            {
+              "layer": "L46.gdn",
+              "max_abs_delta": 0.0
+            },
+            {
+              "layer": "L47.attn",
+              "max_abs_delta": 0.0
+            },
+            {
+              "layer": "L48.gdn",
+              "max_abs_delta": 0.0
+            },
+            {
+              "layer": "L49.gdn",
+              "max_abs_delta": 0.0
+            },
+            {
+              "layer": "L50.gdn",
+              "max_abs_delta": 0.0
+            },
+            {
+              "layer": "L51.attn",
+              "max_abs_delta": 0.0
+            },
+            {
+              "layer": "L52.gdn",
+              "max_abs_delta": 0.0
+            },
+            {
+              "layer": "L53.gdn",
+              "max_abs_delta": 0.0
+            },
+            {
+              "layer": "L54.gdn",
+              "max_abs_delta": 0.0
+            },
+            {
+              "layer": "L55.attn",
+              "max_abs_delta": 0.0
+            },
+            {
+              "layer": "L56.gdn",
+              "max_abs_delta": 0.0
+            },
+            {
+              "layer": "L57.gdn",
+              "max_abs_delta": 0.0
+            },
+            {
+              "layer": "L58.gdn",
+              "max_abs_delta": 0.0
+            },
+            {
+              "layer": "L59.attn",
+              "max_abs_delta": 0.0
+            },
+            {
+              "layer": "L60.gdn",
+              "max_abs_delta": 0.0
+            },
+            {
+              "layer": "L61.gdn",
+              "max_abs_delta": 0.0
+            },
+            {
+              "layer": "L62.gdn",
+              "max_abs_delta": 0.0
+            },
+            {
+              "layer": "L63.attn",
+              "max_abs_delta": 0.0
+            }
+          ],
+          "decode_top1_agreement": 1.0,
+          "decode_kl_mean": 0.0,
+          "decode_kl_max": 0.0,
+          "decode_max_abs_logit_delta": 0.0,
+          "prefill_step": 4096,
+          "n_chunks": 1,
+          "prefill_s": 6.372827249986585
+        },
+        "1024": {
+          "first_divergent_layer": {
+            "layer": "L0.gdn",
+            "max_abs_delta": 0.0009765625
+          },
+          "first_divergent_cache_field": {
+            "layer": 0,
+            "kind": "gdn",
+            "field": "arr1",
+            "max_abs_delta": 0.046924591064453125
+          },
+          "n_differing_cache_fields": 127,
+          "differing_cache_fields": [
+            {
+              "layer": 0,
+              "kind": "gdn",
+              "field": "arr1",
+              "max_abs_delta": 0.046924591064453125
+            },
+            {
+              "layer": 1,
+              "kind": "gdn",
+              "field": "arr0",
+              "max_abs_delta": 0.015625
+            },
+            {
+              "layer": 1,
+              "kind": "gdn",
+              "field": "arr1",
+              "max_abs_delta": 0.0014577507972717285
+            },
+            {
+              "layer": 2,
+              "kind": "gdn",
+              "field": "arr0",
+              "max_abs_delta": 0.015625
+            },
+            {
+              "layer": 2,
+              "kind": "gdn",
+              "field": "arr1",
+              "max_abs_delta": 0.002152666449546814
+            },
+            {
+              "layer": 3,
+              "kind": "attn",
+              "field": "keys_tail",
+              "max_abs_delta": 0.0625
+            },
+            {
+              "layer": 3,
+              "kind": "attn",
+              "field": "values_tail",
+              "max_abs_delta": 0.0234375
+            },
+            {
+              "layer": 4,
+              "kind": "gdn",
+              "field": "arr0",
+              "max_abs_delta": 0.015625
+            },
+            {
+              "layer": 4,
+              "kind": "gdn",
+              "field": "arr1",
+              "max_abs_delta": 0.0017703622579574585
+            },
+            {
+              "layer": 5,
+              "kind": "gdn",
+              "field": "arr0",
+              "max_abs_delta": 0.03125
+            },
+            {
+              "layer": 5,
+              "kind": "gdn",
+              "field": "arr1",
+              "max_abs_delta": 0.0014557614922523499
+            },
+            {
+              "layer": 6,
+              "kind": "gdn",
+              "field": "arr0",
+              "max_abs_delta": 0.03125
+            },
+            {
+              "layer": 6,
+              "kind": "gdn",
+              "field": "arr1",
+              "max_abs_delta": 0.004195690155029297
+            },
+            {
+              "layer": 7,
+              "kind": "attn",
+              "field": "keys_tail",
+              "max_abs_delta": 0.07421875
+            },
+            {
+              "layer": 7,
+              "kind": "attn",
+              "field": "values_tail",
+              "max_abs_delta": 0.0234375
+            },
+            {
+              "layer": 8,
+              "kind": "gdn",
+              "field": "arr0",
+              "max_abs_delta": 0.03125
+            },
+            {
+              "layer": 8,
+              "kind": "gdn",
+              "field": "arr1",
+              "max_abs_delta": 0.002188652753829956
+            },
+            {
+              "layer": 9,
+              "kind": "gdn",
+              "field": "arr0",
+              "max_abs_delta": 0.0625
+            },
+            {
+              "layer": 9,
+              "kind": "gdn",
+              "field": "arr1",
+              "max_abs_delta": 0.0034329071640968323
+            },
+            {
+              "layer": 10,
+              "kind": "gdn",
+              "field": "arr0",
+              "max_abs_delta": 0.0625
+            },
+            {
+              "layer": 10,
+              "kind": "gdn",
+              "field": "arr1",
+              "max_abs_delta": 0.004188671708106995
+            },
+            {
+              "layer": 11,
+              "kind": "attn",
+              "field": "keys_tail",
+              "max_abs_delta": 0.0625
+            },
+            {
+              "layer": 11,
+              "kind": "attn",
+              "field": "values_tail",
+              "max_abs_delta": 0.03125
+            },
+            {
+              "layer": 12,
+              "kind": "gdn",
+              "field": "arr0",
+              "max_abs_delta": 0.0625
+            },
+            {
+              "layer": 12,
+              "kind": "gdn",
+              "field": "arr1",
+              "max_abs_delta": 0.004606880247592926
+            },
+            {
+              "layer": 13,
+              "kind": "gdn",
+              "field": "arr0",
+              "max_abs_delta": 0.03125
+            },
+            {
+              "layer": 13,
+              "kind": "gdn",
+              "field": "arr1",
+              "max_abs_delta": 0.002132996916770935
+            },
+            {
+              "layer": 14,
+              "kind": "gdn",
+              "field": "arr0",
+              "max_abs_delta": 0.0625
+            },
+            {
+              "layer": 14,
+              "kind": "gdn",
+              "field": "arr1",
+              "max_abs_delta": 0.003252938389778137
+            },
+            {
+              "layer": 15,
+              "kind": "attn",
+              "field": "keys_tail",
+              "max_abs_delta": 0.0546875
+            },
+            {
+              "layer": 15,
+              "kind": "attn",
+              "field": "values_tail",
+              "max_abs_delta": 0.0234375
+            },
+            {
+              "layer": 16,
+              "kind": "gdn",
+              "field": "arr0",
+              "max_abs_delta": 0.0625
+            },
+            {
+              "layer": 16,
+              "kind": "gdn",
+              "field": "arr1",
+              "max_abs_delta": 0.0018558967858552933
+            },
+            {
+              "layer": 17,
+              "kind": "gdn",
+              "field": "arr0",
+              "max_abs_delta": 0.033203125
+            },
+            {
+              "layer": 17,
+              "kind": "gdn",
+              "field": "arr1",
+              "max_abs_delta": 0.002696394920349121
+            },
+            {
+              "layer": 18,
+              "kind": "gdn",
+              "field": "arr0",
+              "max_abs_delta": 0.0625
+            },
+            {
+              "layer": 18,
+              "kind": "gdn",
+              "field": "arr1",
+              "max_abs_delta": 0.003782033920288086
+            },
+            {
+              "layer": 19,
+              "kind": "attn",
+              "field": "keys_tail",
+              "max_abs_delta": 0.09375
+            },
+            {
+              "layer": 19,
+              "kind": "attn",
+              "field": "values_tail",
+              "max_abs_delta": 0.078125
+            },
+            {
+              "layer": 20,
+              "kind": "gdn",
+              "field": "arr0",
+              "max_abs_delta": 0.125
+            }
+          ],
+          "per_layer_last_pos_max_abs_delta": [
+            {
+              "layer": "L0.gdn",
+              "max_abs_delta": 0.0009765625
+            },
+            {
+              "layer": "L1.gdn",
+              "max_abs_delta": 0.001953125
+            },
+            {
+              "layer": "L2.gdn",
+              "max_abs_delta": 0.00390625
+            },
+            {
+              "layer": "L3.attn",
+              "max_abs_delta": 0.00390625
+            },
+            {
+              "layer": "L4.gdn",
+              "max_abs_delta": 0.00390625
+            },
+            {
+              "layer": "L5.gdn",
+              "max_abs_delta": 0.0078125
+            },
+            {
+              "layer": "L6.gdn",
+              "max_abs_delta": 0.0078125
+            },
+            {
+              "layer": "L7.attn",
+              "max_abs_delta": 0.01171875
+            },
+            {
+              "layer": "L8.gdn",
+              "max_abs_delta": 0.015625
+            },
+            {
+              "layer": "L9.gdn",
+              "max_abs_delta": 0.015625
+            },
+            {
+              "layer": "L10.gdn",
+              "max_abs_delta": 0.015625
+            },
+            {
+              "layer": "L11.attn",
+              "max_abs_delta": 0.0078125
+            },
+            {
+              "layer": "L12.gdn",
+              "max_abs_delta": 0.015625
+            },
+            {
+              "layer": "L13.gdn",
+              "max_abs_delta": 0.015625
+            },
+            {
+              "layer": "L14.gdn",
+              "max_abs_delta": 0.015625
+            },
+            {
+              "layer": "L15.attn",
+              "max_abs_delta": 0.015625
+            },
+            {
+              "layer": "L16.gdn",
+              "max_abs_delta": 0.015625
+            },
+            {
+              "layer": "L17.gdn",
+              "max_abs_delta": 0.015625
+            },
+            {
+              "layer": "L18.gdn",
+              "max_abs_delta": 0.0205078125
+            },
+            {
+              "layer": "L19.attn",
+              "max_abs_delta": 0.03125
+            },
+            {
+              "layer": "L20.gdn",
+              "max_abs_delta": 0.03125
+            },
+            {
+              "layer": "L21.gdn",
+              "max_abs_delta": 0.03125
+            },
+            {
+              "layer": "L22.gdn",
+              "max_abs_delta": 0.0390625
+            },
+            {
+              "layer": "L23.attn",
+              "max_abs_delta": 0.0390625
+            },
+            {
+              "layer": "L24.gdn",
+              "max_abs_delta": 0.046875
+            },
+            {
+              "layer": "L25.gdn",
+              "max_abs_delta": 0.046875
+            },
+            {
+              "layer": "L26.gdn",
+              "max_abs_delta": 0.046875
+            },
+            {
+              "layer": "L27.attn",
+              "max_abs_delta": 0.046875
+            },
+            {
+              "layer": "L28.gdn",
+              "max_abs_delta": 0.046875
+            },
+            {
+              "layer": "L29.gdn",
+              "max_abs_delta": 0.0625
+            },
+            {
+              "layer": "L30.gdn",
+              "max_abs_delta": 0.0625
+            },
+            {
+              "layer": "L31.attn",
+              "max_abs_delta": 0.0625
+            },
+            {
+              "layer": "L32.gdn",
+              "max_abs_delta": 0.0625
+            },
+            {
+              "layer": "L33.gdn",
+              "max_abs_delta": 0.0625
+            },
+            {
+              "layer": "L34.gdn",
+              "max_abs_delta": 0.0625
+            },
+            {
+              "layer": "L35.attn",
+              "max_abs_delta": 0.09375
+            },
+            {
+              "layer": "L36.gdn",
+              "max_abs_delta": 0.09375
+            },
+            {
+              "layer": "L37.gdn",
+              "max_abs_delta": 0.125
+            },
+            {
+              "layer": "L38.gdn",
+              "max_abs_delta": 0.125
+            },
+            {
+              "layer": "L39.attn",
+              "max_abs_delta": 0.109375
+            },
+            {
+              "layer": "L40.gdn",
+              "max_abs_delta": 0.109375
+            },
+            {
+              "layer": "L41.gdn",
+              "max_abs_delta": 0.109375
+            },
+            {
+              "layer": "L42.gdn",
+              "max_abs_delta": 0.09375
+            },
+            {
+              "layer": "L43.attn",
+              "max_abs_delta": 0.09375
+            },
+            {
+              "layer": "L44.gdn",
+              "max_abs_delta": 0.09375
+            },
+            {
+              "layer": "L45.gdn",
+              "max_abs_delta": 0.09375
+            },
+            {
+              "layer": "L46.gdn",
+              "max_abs_delta": 0.125
+            },
+            {
+              "layer": "L47.attn",
+              "max_abs_delta": 0.09375
+            },
+            {
+              "layer": "L48.gdn",
+              "max_abs_delta": 0.109375
+            },
+            {
+              "layer": "L49.gdn",
+              "max_abs_delta": 0.125
+            },
+            {
+              "layer": "L50.gdn",
+              "max_abs_delta": 0.09375
+            },
+            {
+              "layer": "L51.attn",
+              "max_abs_delta": 0.5
+            },
+            {
+              "layer": "L52.gdn",
+              "max_abs_delta": 0.5
+            },
+            {
+              "layer": "L53.gdn",
+              "max_abs_delta": 0.15625
+            },
+            {
+              "layer": "L54.gdn",
+              "max_abs_delta": 1.0
+            },
+            {
+              "layer": "L55.attn",
+              "max_abs_delta": 1.0
+            },
+            {
+              "layer": "L56.gdn",
+              "max_abs_delta": 1.0
+            },
+            {
+              "layer": "L57.gdn",
+              "max_abs_delta": 1.0
+            },
+            {
+              "layer": "L58.gdn",
+              "max_abs_delta": 1.5
+            },
+            {
+              "layer": "L59.attn",
+              "max_abs_delta": 0.21875
+            },
+            {
+              "layer": "L60.gdn",
+              "max_abs_delta": 0.265625
+            },
+            {
+              "layer": "L61.gdn",
+              "max_abs_delta": 0.25
+            },
+            {
+              "layer": "L62.gdn",
+              "max_abs_delta": 0.375
+            },
+            {
+              "layer": "L63.attn",
+              "max_abs_delta": 1.5
+            }
+          ],
+          "decode_top1_agreement": 0.9765625,
+          "decode_kl_mean": 0.0009044579928740859,
+          "decode_kl_max": 0.006356325000524521,
+          "decode_max_abs_logit_delta": 0.4375,
+          "prefill_step": 1024,
+          "n_chunks": 4,
+          "prefill_s": 6.177239999989979
+        }
+      },
+      "wall_s": 54.50075079099042
+    }
+  ]
+}

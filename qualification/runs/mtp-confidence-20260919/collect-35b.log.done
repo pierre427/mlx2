@@ -1,0 +1,41 @@
+{
+ "agent_id": "job-rm10-collect-35b-36248",
+ "child_pid": 36256,
+ "command": [
+  "env",
+  "PYTHONPATH=/private/tmp/mlx2-rm10-dspark-confidence/src",
+  "~/Desktop/mlx2/.venv/bin/python",
+  "/private/tmp/mlx2-rm10-dspark-confidence/scripts/mtp_confidence_gpu.py",
+  "collect",
+  "--i-own-the-gpu",
+  "--model",
+  "~/mlx-models/Qwen3.6-35B-A3B-uncensored-heretic-Native-MTP-Preserved-oQ4e-mtp",
+  "--execution-policy",
+  "/private/tmp/mlx2-rm10-dspark-confidence/qualification/runs/mtp-confidence-20260919/nd3.json",
+  "--lookahead",
+  "2",
+  "--port",
+  "8310",
+  "--out",
+  "/private/tmp/mlx2-rm10-dspark-confidence/qualification/runs/mtp-confidence-20260919/accept-35b.jsonl"
+ ],
+ "ended_at": "2026-09-20T01:29:04+00:00",
+ "label": "rm10-collect-35b",
+ "out": "/private/tmp/mlx2-rm10-dspark-confidence/qualification/runs/mtp-confidence-20260919/collect-35b.log",
+ "pid": 36248,
+ "radio": {
+  "error": null,
+  "heartbeat_failures": 0,
+  "heartbeats": 0,
+  "lease_generation": null,
+  "lease_task": null,
+  "lock_dir": "/Users/Shared/mlxuag/gpu.lock",
+  "status": "closed:completed"
+ },
+ "rc": 0,
+ "refusal": null,
+ "session_id": "3c65a7827e83456a89fffdeefadec196",
+ "signal": null,
+ "started_at": "2026-09-20T01:28:24+00:00",
+ "worker_id": "7e55a8b5209048d0acbe9ef22f9e089d"
+}

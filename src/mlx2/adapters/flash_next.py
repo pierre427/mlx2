@@ -80,8 +80,32 @@ def configure_environment(model_path: Path, policy=None) -> dict[str, str]:
     return profile
 
 
+def chat_template(tokenizer, request: dict, *, tokenize: bool):
+    """Render a chat request through the Qwen template (ids or text)."""
+    messages = copy.deepcopy(request["messages"])
+    for message in messages:
+        for call in message.get("tool_calls", []):
+            function = call["function"]
+            arguments = function.get("arguments", {})
+            if isinstance(arguments, str):
+                arguments = json.loads(arguments)
+            if not isinstance(arguments, dict):
+                raise ValueError("tool call arguments must be a JSON object")
+            function["arguments"] = arguments
+    return tokenizer.apply_chat_template(
+        messages,
+        add_generation_prompt=True,
+        tokenize=tokenize,
+        enable_thinking=request.get("enable_thinking", False),
+        tools=request.get("tools")
+        if request.get("tool_choice") != "none"
+        else None,
+    )
+
+
 class FlashNextAdapter:
     from .qwen import QWEN4_FLASH_NEXT as descriptor
+    default_route = "native_mtp"
     # Vendor sampling defaults: Qwen/Qwen3.8-Flash-Next model card and the
     # artifact's generation_config.json (see ``adapters/qwen.py``).
     from .qwen import QWEN38_FLASH_NEXT_SAMPLING as sampling_defaults
@@ -121,7 +145,7 @@ class FlashNextAdapter:
         from ..runtime.models.qwen4_exp import Model, ModelArgs
         from ..runtime.models.qwen4_ple_nvme import install_file_backed_ple
         from ..runtime.tokenizer_utils import TokenizerWrapper, BPEStreamingDetokenizer
-        from ..runtime.ubc_evict import ubc_evict_paths
+        from ..runtime.ubc_evict import load_shards_evicting, ubc_evict_paths
 
         config = json.loads((path / "config.json").read_text())
         if config.get("model_type") != "qwen4_exp" or config.get("ngram_table"):
@@ -133,10 +157,17 @@ class FlashNextAdapter:
             "weight_map"
         ]
         files = [path / name for name in sorted(set(index.values()))]
-        weights = {}
-        for file in files:
-            weights.update(mx.load(str(file)))
-        weights = self.model.sanitize(weights)
+        # install_file_backed_ple below prunes the PLE shard tensors and rebinds
+        # them to the sidecar, so they must never be materialised: keep them lazy
+        # and hold back eviction of their files until that prune has run.
+        held_files: list[str] = []
+        weights = self.model.sanitize(
+            load_shards_evicting(
+                files,
+                keep_lazy=lambda name: ".shard_" in name,
+                deferred=held_files,
+            )
+        )
         self._tables = []
         try:
             weights = install_file_backed_ple(
@@ -146,6 +177,7 @@ class FlashNextAdapter:
                 path,
                 _owned_tables=self._tables,
             )
+            ubc_evict_paths(held_files)
             quant = config["quantization"]
 
             def predicate(name, module):
@@ -172,7 +204,7 @@ class FlashNextAdapter:
                 module for _, module in self.model.named_modules()
             )
             weights.clear()
-            ubc_evict_paths([str(file) for file in files])
+            mx.clear_cache()
             tokenizer = AutoTokenizer.from_pretrained(
                 path, local_files_only=True, trust_remote_code=False
             )
@@ -194,26 +226,14 @@ class FlashNextAdapter:
 
     def prompt_tokens(self, request: dict) -> list[int]:
         if "messages" in request:
-            messages = copy.deepcopy(request["messages"])
-            for message in messages:
-                for call in message.get("tool_calls", []):
-                    function = call["function"]
-                    arguments = function.get("arguments", {})
-                    if isinstance(arguments, str):
-                        arguments = json.loads(arguments)
-                    if not isinstance(arguments, dict):
-                        raise ValueError("tool call arguments must be a JSON object")
-                    function["arguments"] = arguments
-            return self.tokenizer.apply_chat_template(
-                messages,
-                add_generation_prompt=True,
-                tokenize=True,
-                enable_thinking=request.get("enable_thinking", False),
-                tools=request.get("tools")
-                if request.get("tool_choice") != "none"
-                else None,
-            )
+            return chat_template(self.tokenizer, request, tokenize=True)
         return self.tokenizer.encode(request["prompt"], add_special_tokens=False)
+
+    def render_prompt(self, request: dict) -> str:
+        """Prompt text whose special-token-free encoding is ``prompt_tokens``."""
+        if "messages" in request:
+            return chat_template(self.tokenizer, request, tokenize=False)
+        return request["prompt"]
 
     def thinking_close_token_ids(self):
         """Token ids that end the reasoning channel, or None when undeclared.
@@ -250,6 +270,9 @@ class FlashNextAdapter:
             parallel_tool_calls=request.get("parallel_tool_calls", True),
             tolerant_tool_markers=request.get("_tolerant_tool_markers", False),
         )
+
+    # Item 12: opener free text must avoid for the ``auto`` tool grammar.
+    tool_call_open_marker = "<tool_call>"
 
     def tool_constraint(self, request):
         """Adapter-owned Qwen XML grammar for forced/strict tool calls."""

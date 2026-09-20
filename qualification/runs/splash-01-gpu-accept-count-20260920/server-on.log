@@ -1,0 +1,61 @@
+2026-09-20 01:04:22,138 INFO selected native_mtp route from adapter_default
+2026-09-20 01:04:22,188 WARNING no reasoning signing key configured; using a random per-process reasoning signing key
+2026-09-20 01:04:27,033 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-20 01:04:27,044 INFO "GET /health HTTP/1.1" 503 -
+2026-09-20 01:04:30,017 INFO ubc_evict: evicted 5025.7 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00001-of-00020.safetensors
+2026-09-20 01:04:30,018 INFO ubc_evict: evicted 5006.8 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00002-of-00020.safetensors
+2026-09-20 01:04:30,018 INFO ubc_evict: evicted 5006.8 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00003-of-00020.safetensors
+2026-09-20 01:04:30,018 INFO ubc_evict: evicted 5006.8 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00004-of-00020.safetensors
+2026-09-20 01:04:30,018 INFO ubc_evict: evicted 5006.8 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00005-of-00020.safetensors
+2026-09-20 01:04:30,018 INFO ubc_evict: evicted 5006.8 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00006-of-00020.safetensors
+2026-09-20 01:04:30,030 INFO ubc_evict: evicted 5022.3 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00007-of-00020.safetensors
+2026-09-20 01:04:30,062 INFO ubc_evict: evicted 5076.7 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00008-of-00020.safetensors
+2026-09-20 01:04:30,098 INFO ubc_evict: evicted 5115.4 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00009-of-00020.safetensors
+2026-09-20 01:04:30,131 INFO ubc_evict: evicted 5115.4 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00010-of-00020.safetensors
+2026-09-20 01:04:30,162 INFO ubc_evict: evicted 5073.2 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00011-of-00020.safetensors
+2026-09-20 01:04:30,196 INFO ubc_evict: evicted 5115.4 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00012-of-00020.safetensors
+2026-09-20 01:04:30,231 INFO ubc_evict: evicted 5115.4 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00013-of-00020.safetensors
+2026-09-20 01:04:30,248 INFO ubc_evict: evicted 5073.2 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00014-of-00020.safetensors
+2026-09-20 01:04:30,252 INFO ubc_evict: evicted 5115.4 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00015-of-00020.safetensors
+2026-09-20 01:04:30,258 INFO ubc_evict: evicted 5115.4 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00016-of-00020.safetensors
+2026-09-20 01:04:30,263 INFO ubc_evict: evicted 5073.2 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00017-of-00020.safetensors
+2026-09-20 01:04:30,267 INFO ubc_evict: evicted 5115.4 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00018-of-00020.safetensors
+2026-09-20 01:04:30,271 INFO ubc_evict: evicted 5115.4 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00019-of-00020.safetensors
+2026-09-20 01:04:30,272 INFO ubc_evict: evicted 1704.3 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00020-of-00020.safetensors
+2026-09-20 01:04:30,272 INFO ubc_evict: evicted 1399.3 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-mtp-q4.safetensors
+2026-09-20 01:04:30,272 INFO ubc_evict: pass complete total_mb=99405.2 elapsed_s=0.28
+2026-09-20 01:04:32,077 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-20 01:04:32,087 INFO "GET /health HTTP/1.1" 200 -
+2026-09-20 01:04:34,865 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-20 01:04:37,596 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-20 01:04:38,107 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-20 01:04:42,644 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-20 01:04:42,644 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-20 01:04:42,644 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-20 01:04:42,644 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-20 01:04:42,653 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-20 01:04:42,663 INFO "GET /metrics HTTP/1.1" 200 -
+2026-09-20 01:04:42,724 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-20 01:04:44,846 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-20 01:04:46,934 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-20 01:04:49,171 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-20 01:04:51,223 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-20 01:04:53,200 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-20 01:04:53,299 WARNING Async QSA promotion declined at queue: suffix-only promotion requires equal starting QSA offsets
+2026-09-20 01:04:58,396 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-20 01:04:58,475 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-20 01:04:58,477 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-20 01:04:58,510 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-20 01:04:58,612 WARNING Async QSA promotion declined at queue: suffix-only promotion requires equal starting QSA offsets
+2026-09-20 01:05:03,565 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-20 01:05:03,647 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-20 01:05:03,647 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-20 01:05:03,680 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-20 01:05:05,644 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-20 01:05:07,593 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-20 01:05:07,740 WARNING Async QSA promotion declined at queue: suffix-only promotion requires equal starting QSA offsets
+2026-09-20 01:05:12,691 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-20 01:05:12,774 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-20 01:05:12,774 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-20 01:05:12,805 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-20 01:05:12,807 INFO "GET /v1/status HTTP/1.1" 200 -

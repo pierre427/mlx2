@@ -1,0 +1,14 @@
+{
+ "agent_id": "job-rm15-chunkvar-27b-4k-69857",
+ "complete_worker": {
+  "already_terminal": false,
+  "finished_at": 1789875122,
+  "status": "completed",
+  "worker_id": "c6c00e3ed43045a7a36ca439eb1e78f3"
+ },
+ "register_worker": {
+  "worker_id": "c6c00e3ed43045a7a36ca439eb1e78f3",
+  "workflow_id": "ff395232b1304940ba4da4fd1ad711ea"
+ },
+ "updated_at": "2026-09-20T03:32:02+00:00"
+}

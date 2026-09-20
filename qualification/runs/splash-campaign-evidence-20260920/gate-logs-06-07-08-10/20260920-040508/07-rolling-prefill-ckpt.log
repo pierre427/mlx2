@@ -1,0 +1,102 @@
+### job 07-rolling-prefill-ckpt
+### started 2026-09-20T04:07:50
+### worktree /private/tmp/mlx2-reb-07
+### branch   claude/splash-07-onmain @ 31b1717  (merge-base with main: f4955f3)
+### models ~/mlx-models/Qwen3.6-35B-A3B-uncensored-heretic-Native-MTP-Preserved-oQ4e-mtp
+### runner  repaired 2026-09-20 (real gate enforcement, per-spec lease)
+    ok   /private/tmp/mlx2-reb-07/scripts/bench_rolling_prefill_ckpt.py
+    ok   model ~/mlx-models/Qwen3.6-35B-A3B-uncensored-heretic-Native-MTP-Preserved-oQ4e-mtp
+### [runner] yielding 20s before next spec at 2026-09-20T04:07:50
+[runner] waiter: REGISTERED mlx2-76.splash-07-rolling-prefill-ckpt.65093.1789891690 at 2026-09-20T04:08:10
+[runner] lease: ACQUIRED for splash-07-rolling-prefill-ckpt at 2026-09-20T04:08:10 after 0s -> /tmp/gpu.lock /Users/Shared/mlxuag/gpu.lock
+[runner] waiter: removed mlx2-76.splash-07-rolling-prefill-ckpt.65093.1789891690
+### lease wanted-at 2026-09-20T04:08:10 acquired-at 2026-09-20T04:08:11 queued-for 1s
+### tree under test: mlx2.__file__ = /private/tmp/mlx2-reb-07/src/mlx2/__init__.py
+GATE PASS  PYTHONPATH pin: mlx2 resolves inside /private/tmp/mlx2-reb-07
+[runner] arm mtp-off (--native-mtp)
+[runner] server pid 66677  log qualification/runs/rolling-prefill-ckpt-20260920/mtp-off.server.log  PYTHONPATH=/private/tmp/mlx2-reb-07/src
+[runner] ready: http://127.0.0.1:8298 answered a real completion 200 after 5s, 1 probe attempt(s)
+### resolved route: segmented_self_mtp (source: explicit_flag)
+### resolved route: segmented_self_mtp (source: explicit_flag)
+GATE FAIL  route MISLABELLED: arm claims 'native_mtp' but the server resolved 'segmented_self_mtp' (source explicit_flag) - every number from this arm describes a different code path
+cold {"wall_s": 19.827, "prompt_tokens": 52018, "cached_tokens": 0, "text": "The document lists 2,399 records of \"cold\" data,", "checkpoint_role": null}
+cancel_retry {"wall_s": 19.6386, "prompt_tokens": 52018, "cached_tokens": 0, "text": "The document lists 2,399 records, each identified by a \"", "checkpoint_role": null}
+concurrent {"wall_s": 36.0476, "prompt_tokens": 52018, "cached_tokens": 0, "text": "The document lists 2,399 records, each identified by a unique", "checkpoint_role": null}
+repeat {"wall_s": 0.4084, "prompt_tokens": 52018, "cached_tokens": 52017, "text": "The document lists 2,399 records of \"cold\" data,", "checkpoint_role": "committed_prompt_boundary"}
+[runner] server stopped
+[runner] arm mtp-on (--native-mtp)
+[runner] server pid 67091  log qualification/runs/rolling-prefill-ckpt-20260920/mtp-on.server.log  PYTHONPATH=/private/tmp/mlx2-reb-07/src
+[runner] ready: http://127.0.0.1:8298 answered a real completion 200 after 5s, 1 probe attempt(s)
+### resolved route: segmented_self_mtp (source: explicit_flag)
+### resolved route: segmented_self_mtp (source: explicit_flag)
+GATE FAIL  route MISLABELLED: arm claims 'native_mtp' but the server resolved 'segmented_self_mtp' (source explicit_flag) - every number from this arm describes a different code path
+cold {"wall_s": 18.6106, "prompt_tokens": 52018, "cached_tokens": 0, "text": "The document lists 2,399 records of \"cold\" data,", "checkpoint_role": null}
+cancel_retry {"wall_s": 13.5444, "prompt_tokens": 52018, "cached_tokens": 20480, "text": "The document lists 2,399 records, each identified by a \"", "checkpoint_role": "prefill_rolling"}
+concurrent {"wall_s": 33.5586, "prompt_tokens": 52018, "cached_tokens": 12288, "text": "The document lists 2,399 shared records, each containing a value", "checkpoint_role": "prefill_rolling"}
+repeat {"wall_s": 0.4278, "prompt_tokens": 52018, "cached_tokens": 52017, "text": "The document lists 2,399 records of \"cold\" data,", "checkpoint_role": "committed_prompt_boundary"}
+[runner] server stopped
+[runner] arm ord-off (--ordinary)
+[runner] server pid 67347  log qualification/runs/rolling-prefill-ckpt-20260920/ord-off.server.log  PYTHONPATH=/private/tmp/mlx2-reb-07/src
+[runner] ready: http://127.0.0.1:8298 answered a real completion 200 after 5s, 1 probe attempt(s)
+### resolved route: ordinary (source: explicit_flag)
+### resolved route: ordinary (source: explicit_flag)
+GATE PASS  route is 'ordinary' as the arm claims ('ordinary', source explicit_flag)
+cold {"wall_s": 19.2975, "prompt_tokens": 52018, "cached_tokens": 0, "text": "The document lists 2,399 records of \"cold\" data,", "checkpoint_role": null}
+cancel_retry {"wall_s": 20.8329, "prompt_tokens": 52018, "cached_tokens": 0, "text": "The document lists 2,399 records, each identified by a \"", "checkpoint_role": null}
+concurrent {"wall_s": 40.441, "prompt_tokens": 52018, "cached_tokens": 0, "text": "The document lists 2,399 records, each containing a shared identifier", "checkpoint_role": null}
+repeat {"wall_s": 0.3694, "prompt_tokens": 52018, "cached_tokens": 52017, "text": "The document lists 2,399 records of \"cold\" data,", "checkpoint_role": "committed_prompt_boundary"}
+[runner] server stopped
+[runner] arm ord-on (--ordinary)
+[runner] server pid 67781  log qualification/runs/rolling-prefill-ckpt-20260920/ord-on.server.log  PYTHONPATH=/private/tmp/mlx2-reb-07/src
+[runner] ready: http://127.0.0.1:8298 answered a real completion 200 after 5s, 1 probe attempt(s)
+### resolved route: ordinary (source: explicit_flag)
+### resolved route: ordinary (source: explicit_flag)
+GATE PASS  route is 'ordinary' as the arm claims ('ordinary', source explicit_flag)
+cold {"wall_s": 20.2226, "prompt_tokens": 52018, "cached_tokens": 0, "text": "The document lists 2,399 records of \"cold\" data,", "checkpoint_role": null}
+cancel_retry {"wall_s": 13.7465, "prompt_tokens": 52018, "cached_tokens": 20480, "text": "The document lists 2,399 records, each identified by a \"", "checkpoint_role": "prefill_rolling"}
+concurrent {"wall_s": 35.2797, "prompt_tokens": 52018, "cached_tokens": 12288, "text": "The document lists 2,399 shared records, each containing a value", "checkpoint_role": "prefill_rolling"}
+repeat {"wall_s": 0.3588, "prompt_tokens": 52018, "cached_tokens": 52017, "text": "The document lists 2,399 records of \"cold\" data,", "checkpoint_role": "committed_prompt_boundary"}
+[runner] server stopped
+[runner] if the off-arm cancel_retry shows no cancellation, rerun both arms of that route with --repeats 4800
+GATE PASS  job 07 commands all exited 0
+### spec-gate evaluation (gates.py 07)
+  --- spec gates for job 07 over qualification/runs/rolling-prefill-ckpt-20260920 ---
+  spec PASS  mtp-off g1 settings do NOT carry apc_rolling_checkpoints: got False want False
+  spec PASS  mtp-off g1 smoke non-empty: got True want True
+  spec PASS  mtp-off g1 finish_reason in stop/length: got True want True
+  spec PASS  mtp-off g2 no tracebacks: got 0 want 0
+  spec ????  mtp-off apcv2_store_failures == 0: NOT EVALUATED (counter absent from /v1/status)
+  spec ????  mtp-off apc_rolling_checkpoints_skipped_publish_failed == 0: NOT EVALUATED (counter absent from /v1/status)
+  spec PASS  mtp-on g1 settings carry apc_rolling_checkpoints: got True want True
+  spec PASS  mtp-on g1 smoke non-empty: got True want True
+  spec PASS  mtp-on g1 finish_reason in stop/length: got True want True
+  spec PASS  mtp-on g2 no tracebacks: got 0 want 0
+  spec ????  mtp-on apcv2_store_failures == 0: NOT EVALUATED (counter absent from /v1/status)
+  spec ????  mtp-on apc_rolling_checkpoints_skipped_publish_failed == 0: NOT EVALUATED (counter absent from /v1/status)
+  spec PASS  ord-off g1 settings do NOT carry apc_rolling_checkpoints: got False want False
+  spec PASS  ord-off g1 smoke non-empty: got True want True
+  spec PASS  ord-off g1 finish_reason in stop/length: got True want True
+  spec PASS  ord-off g2 no tracebacks: got 0 want 0
+  spec ????  ord-off apcv2_store_failures == 0: NOT EVALUATED (counter absent from /v1/status)
+  spec ????  ord-off apc_rolling_checkpoints_skipped_publish_failed == 0: NOT EVALUATED (counter absent from /v1/status)
+  spec PASS  ord-on g1 settings carry apc_rolling_checkpoints: got True want True
+  spec PASS  ord-on g1 smoke non-empty: got True want True
+  spec PASS  ord-on g1 finish_reason in stop/length: got True want True
+  spec PASS  ord-on g2 no tracebacks: got 0 want 0
+  spec ????  ord-on apcv2_store_failures == 0: NOT EVALUATED (counter absent from /v1/status)
+  spec ????  ord-on apc_rolling_checkpoints_skipped_publish_failed == 0: NOT EVALUATED (counter absent from /v1/status)
+  spec ????  07 greedy text equality on == off per route: NOT EVALUATED (requires per-prompt text from the bench JSONs; the bench schema is not pinned here -- compare by hand from the *.bench.json artifacts)
+  spec ????  07 perf accept/reject thresholds: NOT EVALUATED (spec thresholds are ratios over bench JSON fields; reported, not auto-gated)
+  spec PASS  mtp 07a peak delta <= 1 GiB x 4 lanes: +1.54 GiB total, +0.38 GiB/lane, budget 4.0 GiB
+       [watched, not gated] mtp-on apc_rolling_checkpoints_skipped_pressure = None
+       [watched, not gated] mtp-on apc_rolling_checkpoints_degraded = 0
+  spec PASS  ord 07a peak delta <= 1 GiB x 4 lanes: +2.67 GiB total, +0.67 GiB/lane, budget 4.0 GiB
+       [watched, not gated] ord-on apc_rolling_checkpoints_skipped_pressure = None
+       [watched, not gated] ord-on apc_rolling_checkpoints_degraded = 0
+  --- 18 passed, 0 failed, 10 NOT EVALUATED ---
+GATE PASS  spec gates for job 07
+### GATE SUMMARY: 5/7 passed, 2 failed
+[runner] lease: RELEASED /tmp/gpu.lock for splash-07-rolling-prefill-ckpt at 2026-09-20T04:14:22
+[runner] lease: RELEASED /Users/Shared/mlxuag/gpu.lock for splash-07-rolling-prefill-ckpt at 2026-09-20T04:14:22
+### lease held 371s for 07-rolling-prefill-ckpt (wanted 04:08:10, acquired 04:08:11, released 04:14:22, queued 1s)
+### finished 2026-09-20T04:14:22 status=FAILED(rc=1) duration=371s

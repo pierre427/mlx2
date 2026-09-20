@@ -769,6 +769,35 @@ def batch_cell(manifest_path: Path, model: dict[str, Any], arm: dict[str, Any], 
             "passed": True}
 
 
+def validate_arm_source_tree(label: str, command: list[str]) -> None:
+    """Refuse an arm that does not DECLARE the tree its server imports.
+
+    ``/usr/bin/env PYTHONPATH=src ... -m mlx2.server`` resolves ``src``
+    against whatever ``--cwd`` the arm happens to carry, so an arm meant for a
+    worktree silently imports mlx2 from another checkout and the run measures
+    the wrong engine while every receipt still looks healthy.  A run that
+    measured the wrong tree is worse than a run that refused, so the path must
+    be absolute and must name a real ``src`` directory's parent.
+    """
+    if "--" not in command:
+        return
+    tail = command[command.index("--") + 1 :]
+    if "mlx2.server" not in tail:
+        return
+    declared = [arg for arg in tail if isinstance(arg, str) and arg.startswith("PYTHONPATH=")]
+    if not declared:
+        raise ValueError(f"{label} must declare PYTHONPATH for its mlx2.server arm")
+    for entry in declared:
+        value = entry.split("=", 1)[1]
+        for part in value.split(os.pathsep):
+            if part and not os.path.isabs(part):
+                raise ValueError(
+                    f"{label} declares a relative PYTHONPATH entry {part!r}; it "
+                    f"resolves against --cwd and can import mlx2 from another "
+                    f"checkout -- use the absolute path of the tree under test"
+                )
+
+
 def validate_manifest(
     manifest: dict[str, Any], *, allow_exploratory_single_run: bool = False
 ) -> None:
@@ -798,6 +827,9 @@ def validate_manifest(
         if selected is not None and selected not in {arm["name"] for arm in arms}:
             raise ValueError(f"{model['name']} selected_arm {selected!r} is not one of its arms")
         for arm in arms:
+            validate_arm_source_tree(
+                f"{model['name']}/{arm['name']}", arm.get("activate_command") or []
+            )
             unknown = set(arm.get("suites", {})) - {"context", "batch_stress"}
             if unknown:
                 raise ValueError(f"{model['name']}/{arm['name']} has unknown suite overrides {sorted(unknown)}")

@@ -1,0 +1,31 @@
+{
+  "schema": "mlx2.rm06b-north-norm-ab.v1",
+  "kind": "execution_plan",
+  "target": "~/mlx-models/North-Mini-Code-1.0-mlx-4bit",
+  "arms": [
+    "legacy",
+    "fixed"
+  ],
+  "will_execute": false,
+  "route": "ordinary (BatchGenerator, width 1, temperature 0)",
+  "metrics": [
+    "teacher-forced mean NLL and perplexity over PASSAGES",
+    "greedy continuations of 8 fixed prompts",
+    "arm-vs-arm greedy common-prefix ratio"
+  ],
+  "prompts": 8,
+  "passages": [
+    "code",
+    "prose"
+  ],
+  "max_tokens": 128,
+  "mechanism_gate": {
+    "legacy": "norm_counters legacy_override delta == 50",
+    "fixed": "norm_counters rms delta == 50",
+    "arm_refused_if": "the arm's norm counter did not move by exactly that"
+  },
+  "go_criterion": {
+    "perplexity": "mean ppl(fixed) <= ppl(legacy), or worse by < 1% relative",
+    "greedy_divergence": "expected; documented as a North serving-behaviour change"
+  }
+}

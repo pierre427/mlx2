@@ -1,0 +1,933 @@
+### job 12-tool-grammar
+### started 2026-09-20T00:27:06
+### worktree /private/tmp/mlx2-splash-12-tool-grammar
+### models ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP
+    ok   /private/tmp/mlx2-splash-12-tool-grammar/scripts/bench_tool_grammar.py
+    ok   model ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP
+[runner] flashnext arm A on port 8412
+[runner] server pid 88094  log /private/tmp/claude-501/-Users-user-Desktop-mlx2/b569b1f6-d687-4876-a42a-e5fdf0abeabc/scratchpad/gpu-queue/12-out/server-flashnext-A.log
+[runner] ready: http://127.0.0.1:8412/health after 10s
+{
+  "label": "A",
+  "scenarios": {
+    "auto_needs_tool": {
+      "ok": 3,
+      "n": 3,
+      "median_elapsed_seconds": 0.427
+    },
+    "auto_no_tool": {
+      "ok": 3,
+      "n": 3,
+      "median_elapsed_seconds": 0.076
+    },
+    "auto_single": {
+      "ok": 0,
+      "n": 3,
+      "median_elapsed_seconds": 0.0
+    },
+    "auto_parallel": {
+      "ok": 3,
+      "n": 3,
+      "median_elapsed_seconds": 0.806
+    },
+    "required": {
+      "ok": 3,
+      "n": 3,
+      "median_elapsed_seconds": 0.806
+    },
+    "answer_or_call_tool": {
+      "ok": 3,
+      "n": 3,
+      "median_elapsed_seconds": 0.346
+    },
+    "answer_or_call_text": {
+      "ok": 3,
+      "n": 3,
+      "median_elapsed_seconds": 0.204
+    },
+    "stream_required": {
+      "ok": 3,
+      "n": 3,
+      "median_elapsed_seconds": 0.742
+    },
+    "stream_auto": {
+      "ok": 3,
+      "n": 3,
+      "median_elapsed_seconds": 0.432
+    }
+  },
+  "rows": [
+    {
+      "scenario": "auto_needs_tool",
+      "status": 200,
+      "ok": true,
+      "calls": 1,
+      "content_chars": 0,
+      "decode_grammar": "skipped_strict_auto",
+      "grammar": null,
+      "engine": null,
+      "completion_tokens": 39,
+      "elapsed_seconds": 1.047,
+      "first_call_seconds": null,
+      "stream_chunks": 0
+    },
+    {
+      "scenario": "auto_needs_tool",
+      "status": 200,
+      "ok": true,
+      "calls": 1,
+      "content_chars": 0,
+      "decode_grammar": "skipped_strict_auto",
+      "grammar": null,
+      "engine": null,
+      "completion_tokens": 39,
+      "elapsed_seconds": 0.426,
+      "first_call_seconds": null,
+      "stream_chunks": 0
+    },
+    {
+      "scenario": "auto_needs_tool",
+      "status": 200,
+      "ok": true,
+      "calls": 1,
+      "content_chars": 0,
+      "decode_grammar": "skipped_strict_auto",
+      "grammar": null,
+      "engine": null,
+      "completion_tokens": 39,
+      "elapsed_seconds": 0.427,
+      "first_call_seconds": null,
+      "stream_chunks": 0
+    },
+    {
+      "scenario": "auto_no_tool",
+      "status": 200,
+      "ok": true,
+      "calls": 0,
+      "content_chars": 2,
+      "decode_grammar": "skipped_strict_auto",
+      "grammar": null,
+      "engine": null,
+      "completion_tokens": 3,
+      "elapsed_seconds": 0.44,
+      "first_call_seconds": null,
+      "stream_chunks": 0
+    },
+    {
+      "scenario": "auto_no_tool",
+      "status": 200,
+      "ok": true,
+      "calls": 0,
+      "content_chars": 2,
+      "decode_grammar": "skipped_strict_auto",
+      "grammar": null,
+      "engine": null,
+      "completion_tokens": 3,
+      "elapsed_seconds": 0.076,
+      "first_call_seconds": null,
+      "stream_chunks": 0
+    },
+    {
+      "scenario": "auto_no_tool",
+      "status": 200,
+      "ok": true,
+      "calls": 0,
+      "content_chars": 2,
+      "decode_grammar": "skipped_strict_auto",
+      "grammar": null,
+      "engine": null,
+      "completion_tokens": 3,
+      "elapsed_seconds": 0.073,
+      "first_call_seconds": null,
+      "stream_chunks": 0
+    },
+    {
+      "scenario": "auto_single",
+      "status": 502,
+      "ok": false,
+      "error": "{\"error\": {\"message\": \"parallel_tool_calls:false permits at most one tool call\", \"type\": \"server_error\"}}"
+    },
+    {
+      "scenario": "auto_single",
+      "status": 502,
+      "ok": false,
+      "error": "{\"error\": {\"message\": \"parallel_tool_calls:false permits at most one tool call\", \"type\": \"server_error\"}}"
+    },
+    {
+      "scenario": "auto_single",
+      "status": 502,
+      "ok": false,
+      "error": "{\"error\": {\"message\": \"parallel_tool_calls:false permits at most one tool call\", \"type\": \"server_error\"}}"
+    },
+    {
+      "scenario": "auto_parallel",
+      "status": 200,
+      "ok": true,
+      "calls": 2,
+      "content_chars": 1,
+      "decode_grammar": "skipped_strict_auto",
+      "grammar": null,
+      "engine": null,
+      "completion_tokens": 79,
+      "elapsed_seconds": 0.805,
+      "first_call_seconds": null,
+      "stream_chunks": 0
+    },
+    {
+      "scenario": "auto_parallel",
+      "status": 200,
+      "ok": true,
+      "calls": 2,
+      "content_chars": 1,
+      "decode_grammar": "skipped_strict_auto",
+      "grammar": null,
+      "engine": null,
+      "completion_tokens": 79,
+      "elapsed_seconds": 0.806,
+      "first_call_seconds": null,
+      "stream_chunks": 0
+    },
+    {
+      "scenario": "auto_parallel",
+      "status": 200,
+      "ok": true,
+      "calls": 2,
+      "content_chars": 1,
+      "decode_grammar": "skipped_strict_auto",
+      "grammar": null,
+      "engine": null,
+      "completion_tokens": 79,
+      "elapsed_seconds": 0.808,
+      "first_call_seconds": null,
+      "stream_chunks": 0
+    },
+    {
+      "scenario": "required",
+      "status": 200,
+      "ok": true,
+      "calls": 1,
+      "content_chars": 0,
+      "decode_grammar": "engaged",
+      "grammar": null,
+      "engine": "scanner",
+      "completion_tokens": 47,
+      "elapsed_seconds": 1.55,
+      "first_call_seconds": null,
+      "stream_chunks": 0
+    },
+    {
+      "scenario": "required",
+      "status": 200,
+      "ok": true,
+      "calls": 1,
+      "content_chars": 0,
+      "decode_grammar": "engaged",
+      "grammar": null,
+      "engine": "scanner",
+      "completion_tokens": 47,
+      "elapsed_seconds": 0.805,
+      "first_call_seconds": null,
+      "stream_chunks": 0
+    },
+    {
+      "scenario": "required",
+      "status": 200,
+      "ok": true,
+      "calls": 1,
+      "content_chars": 0,
+      "decode_grammar": "engaged",
+      "grammar": null,
+      "engine": "scanner",
+      "completion_tokens": 47,
+      "elapsed_seconds": 0.806,
+      "first_call_seconds": null,
+      "stream_chunks": 0
+    },
+    {
+      "scenario": "answer_or_call_tool",
+      "status": 200,
+      "ok": true,
+      "calls": 0,
+      "content_chars": 78,
+      "decode_grammar": "skipped_strict_auto",
+      "grammar": null,
+      "engine": "automaton",
+      "completion_tokens": 21,
+      "elapsed_seconds": 0.742,
+      "first_call_seconds": null,
+      "stream_chunks": 0
+    },
+    {
+      "scenario": "answer_or_call_tool",
+      "status": 200,
+      "ok": true,
+      "calls": 0,
+      "content_chars": 78,
+      "decode_grammar": "skipped_strict_auto",
+      "grammar": null,
+      "engine": "automaton",
+      "completion_tokens": 21,
+      "elapsed_seconds": 0.346,
+      "first_call_seconds": null,
+      "stream_chunks": 0
+    },
+    {
+      "scenario": "answer_or_call_tool",
+      "status": 200,
+      "ok": true,
+      "calls": 0,
+      "content_chars": 78,
+      "decode_grammar": "skipped_strict_auto",
+      "grammar": null,
+      "engine": "automaton",
+      "completion_tokens": 21,
+      "elapsed_seconds": 0.325,
+      "first_call_seconds": null,
+      "stream_chunks": 0
+    },
+    {
+      "scenario": "answer_or_call_text",
+      "status": 200,
+      "ok": true,
+      "calls": 0,
+      "content_chars": 16,
+      "decode_grammar": "skipped_strict_auto",
+      "grammar": null,
+      "engine": "automaton",
+      "completion_tokens": 10,
+      "elapsed_seconds": 0.213,
+      "first_call_seconds": null,
+      "stream_chunks": 0
+    },
+    {
+      "scenario": "answer_or_call_text",
+      "status": 200,
+      "ok": true,
+      "calls": 0,
+      "content_chars": 16,
+      "decode_grammar": "skipped_strict_auto",
+      "grammar": null,
+      "engine": "automaton",
+      "completion_tokens": 10,
+      "elapsed_seconds": 0.204,
+      "first_call_seconds": null,
+      "stream_chunks": 0
+    },
+    {
+      "scenario": "answer_or_call_text",
+      "status": 200,
+      "ok": true,
+      "calls": 0,
+      "content_chars": 16,
+      "decode_grammar": "skipped_strict_auto",
+      "grammar": null,
+      "engine": "automaton",
+      "completion_tokens": 10,
+      "elapsed_seconds": 0.201,
+      "first_call_seconds": null,
+      "stream_chunks": 0
+    },
+    {
+      "scenario": "stream_required",
+      "status": 200,
+      "ok": true,
+      "calls": 1,
+      "content_chars": 0,
+      "decode_grammar": "engaged",
+      "grammar": null,
+      "engine": "scanner",
+      "completion_tokens": 45,
+      "elapsed_seconds": 0.743,
+      "first_call_seconds": 0.743,
+      "stream_chunks": 2
+    },
+    {
+      "scenario": "stream_required",
+      "status": 200,
+      "ok": true,
+      "calls": 1,
+      "content_chars": 0,
+      "decode_grammar": "engaged",
+      "grammar": null,
+      "engine": "scanner",
+      "completion_tokens": 45,
+      "elapsed_seconds": 0.74,
+      "first_call_seconds": 0.74,
+      "stream_chunks": 2
+    },
+    {
+      "scenario": "stream_required",
+      "status": 200,
+      "ok": true,
+      "calls": 1,
+      "content_chars": 0,
+      "decode_grammar": "engaged",
+      "grammar": null,
+      "engine": "scanner",
+      "completion_tokens": 45,
+      "elapsed_seconds": 0.742,
+      "first_call_seconds": 0.742,
+      "stream_chunks": 2
+    },
+    {
+      "scenario": "stream_auto",
+      "status": 200,
+      "ok": true,
+      "calls": 1,
+      "content_chars": 0,
+      "decode_grammar": "skipped_strict_auto",
+      "grammar": null,
+      "engine": null,
+      "completion_tokens": 39,
+      "elapsed_seconds": 0.427,
+      "first_call_seconds": 0.427,
+      "stream_chunks": 2
+    },
+    {
+      "scenario": "stream_auto",
+      "status": 200,
+      "ok": true,
+      "calls": 1,
+      "content_chars": 0,
+      "decode_grammar": "skipped_strict_auto",
+      "grammar": null,
+      "engine": null,
+      "completion_tokens": 39,
+      "elapsed_seconds": 0.448,
+      "first_call_seconds": 0.448,
+      "stream_chunks": 2
+    },
+    {
+      "scenario": "stream_auto",
+      "status": 200,
+      "ok": true,
+      "calls": 1,
+      "content_chars": 0,
+      "decode_grammar": "skipped_strict_auto",
+      "grammar": null,
+      "engine": null,
+      "completion_tokens": 39,
+      "elapsed_seconds": 0.432,
+      "first_call_seconds": 0.432,
+      "stream_chunks": 2
+    }
+  ]
+}
+[runner] server stopped
+[runner] flashnext arm B on port 8413
+[runner] server pid 88153  log /private/tmp/claude-501/-Users-user-Desktop-mlx2/b569b1f6-d687-4876-a42a-e5fdf0abeabc/scratchpad/gpu-queue/12-out/server-flashnext-B.log
+[runner] ready: http://127.0.0.1:8413/health after 10s
+{
+  "label": "B",
+  "scenarios": {
+    "auto_needs_tool": {
+      "ok": 0,
+      "n": 3,
+      "median_elapsed_seconds": 6.045
+    },
+    "auto_no_tool": {
+      "ok": 3,
+      "n": 3,
+      "median_elapsed_seconds": 0.092
+    },
+    "auto_single": {
+      "ok": 3,
+      "n": 3,
+      "median_elapsed_seconds": 0.286
+    },
+    "auto_parallel": {
+      "ok": 0,
+      "n": 3,
+      "median_elapsed_seconds": 0.283
+    },
+    "required": {
+      "ok": 3,
+      "n": 3,
+      "median_elapsed_seconds": 0.828
+    },
+    "answer_or_call_tool": {
+      "ok": 3,
+      "n": 3,
+      "median_elapsed_seconds": 0.763
+    },
+    "answer_or_call_text": {
+      "ok": 3,
+      "n": 3,
+      "median_elapsed_seconds": 0.83
+    },
+    "stream_required": {
+      "ok": 3,
+      "n": 3,
+      "median_elapsed_seconds": 0.739
+    },
+    "stream_auto": {
+      "ok": 0,
+      "n": 3,
+      "median_elapsed_seconds": 6.127
+    }
+  },
+  "rows": [
+    {
+      "scenario": "auto_needs_tool",
+      "status": 200,
+      "ok": false,
+      "calls": 0,
+      "content_chars": 865,
+      "decode_grammar": "engaged",
+      "grammar": {
+        "shape": "text_or_calls",
+        "calls": "*"
+      },
+      "engine": "scanner",
+      "completion_tokens": 195,
+      "elapsed_seconds": 7.76,
+      "first_call_seconds": null,
+      "stream_chunks": 0
+    },
+    {
+      "scenario": "auto_needs_tool",
+      "status": 200,
+      "ok": false,
+      "calls": 0,
+      "content_chars": 865,
+      "decode_grammar": "engaged",
+      "grammar": {
+        "shape": "text_or_calls",
+        "calls": "*"
+      },
+      "engine": "scanner",
+      "completion_tokens": 195,
+      "elapsed_seconds": 6.045,
+      "first_call_seconds": null,
+      "stream_chunks": 0
+    },
+    {
+      "scenario": "auto_needs_tool",
+      "status": 200,
+      "ok": false,
+      "calls": 0,
+      "content_chars": 865,
+      "decode_grammar": "engaged",
+      "grammar": {
+        "shape": "text_or_calls",
+        "calls": "*"
+      },
+      "engine": "scanner",
+      "completion_tokens": 195,
+      "elapsed_seconds": 6.043,
+      "first_call_seconds": null,
+      "stream_chunks": 0
+    },
+    {
+      "scenario": "auto_no_tool",
+      "status": 200,
+      "ok": true,
+      "calls": 0,
+      "content_chars": 2,
+      "decode_grammar": "engaged",
+      "grammar": {
+        "shape": "text_or_calls",
+        "calls": "*"
+      },
+      "engine": "scanner",
+      "completion_tokens": 3,
+      "elapsed_seconds": 0.469,
+      "first_call_seconds": null,
+      "stream_chunks": 0
+    },
+    {
+      "scenario": "auto_no_tool",
+      "status": 200,
+      "ok": true,
+      "calls": 0,
+      "content_chars": 2,
+      "decode_grammar": "engaged",
+      "grammar": {
+        "shape": "text_or_calls",
+        "calls": "*"
+      },
+      "engine": "scanner",
+      "completion_tokens": 3,
+      "elapsed_seconds": 0.09,
+      "first_call_seconds": null,
+      "stream_chunks": 0
+    },
+    {
+      "scenario": "auto_no_tool",
+      "status": 200,
+      "ok": true,
+      "calls": 0,
+      "content_chars": 2,
+      "decode_grammar": "engaged",
+      "grammar": {
+        "shape": "text_or_calls",
+        "calls": "*"
+      },
+      "engine": "scanner",
+      "completion_tokens": 3,
+      "elapsed_seconds": 0.092,
+      "first_call_seconds": null,
+      "stream_chunks": 0
+    },
+    {
+      "scenario": "auto_single",
+      "status": 200,
+      "ok": true,
+      "calls": 0,
+      "content_chars": 55,
+      "decode_grammar": "engaged",
+      "grammar": {
+        "shape": "text_or_calls",
+        "calls": "?"
+      },
+      "engine": "scanner",
+      "completion_tokens": 13,
+      "elapsed_seconds": 0.643,
+      "first_call_seconds": null,
+      "stream_chunks": 0
+    },
+    {
+      "scenario": "auto_single",
+      "status": 200,
+      "ok": true,
+      "calls": 0,
+      "content_chars": 55,
+      "decode_grammar": "engaged",
+      "grammar": {
+        "shape": "text_or_calls",
+        "calls": "?"
+      },
+      "engine": "scanner",
+      "completion_tokens": 13,
+      "elapsed_seconds": 0.284,
+      "first_call_seconds": null,
+      "stream_chunks": 0
+    },
+    {
+      "scenario": "auto_single",
+      "status": 200,
+      "ok": true,
+      "calls": 0,
+      "content_chars": 55,
+      "decode_grammar": "engaged",
+      "grammar": {
+        "shape": "text_or_calls",
+        "calls": "?"
+      },
+      "engine": "scanner",
+      "completion_tokens": 13,
+      "elapsed_seconds": 0.286,
+      "first_call_seconds": null,
+      "stream_chunks": 0
+    },
+    {
+      "scenario": "auto_parallel",
+      "status": 200,
+      "ok": false,
+      "calls": 0,
+      "content_chars": 55,
+      "decode_grammar": "engaged",
+      "grammar": {
+        "shape": "text_or_calls",
+        "calls": "*"
+      },
+      "engine": "scanner",
+      "completion_tokens": 13,
+      "elapsed_seconds": 0.282,
+      "first_call_seconds": null,
+      "stream_chunks": 0
+    },
+    {
+      "scenario": "auto_parallel",
+      "status": 200,
+      "ok": false,
+      "calls": 0,
+      "content_chars": 55,
+      "decode_grammar": "engaged",
+      "grammar": {
+        "shape": "text_or_calls",
+        "calls": "*"
+      },
+      "engine": "scanner",
+      "completion_tokens": 13,
+      "elapsed_seconds": 0.283,
+      "first_call_seconds": null,
+      "stream_chunks": 0
+    },
+    {
+      "scenario": "auto_parallel",
+      "status": 200,
+      "ok": false,
+      "calls": 0,
+      "content_chars": 55,
+      "decode_grammar": "engaged",
+      "grammar": {
+        "shape": "text_or_calls",
+        "calls": "*"
+      },
+      "engine": "scanner",
+      "completion_tokens": 13,
+      "elapsed_seconds": 0.286,
+      "first_call_seconds": null,
+      "stream_chunks": 0
+    },
+    {
+      "scenario": "required",
+      "status": 200,
+      "ok": true,
+      "calls": 1,
+      "content_chars": 0,
+      "decode_grammar": "engaged",
+      "grammar": {
+        "shape": "calls",
+        "calls": "+"
+      },
+      "engine": "scanner",
+      "completion_tokens": 47,
+      "elapsed_seconds": 0.828,
+      "first_call_seconds": null,
+      "stream_chunks": 0
+    },
+    {
+      "scenario": "required",
+      "status": 200,
+      "ok": true,
+      "calls": 1,
+      "content_chars": 0,
+      "decode_grammar": "engaged",
+      "grammar": {
+        "shape": "calls",
+        "calls": "+"
+      },
+      "engine": "scanner",
+      "completion_tokens": 47,
+      "elapsed_seconds": 0.81,
+      "first_call_seconds": null,
+      "stream_chunks": 0
+    },
+    {
+      "scenario": "required",
+      "status": 200,
+      "ok": true,
+      "calls": 1,
+      "content_chars": 0,
+      "decode_grammar": "engaged",
+      "grammar": {
+        "shape": "calls",
+        "calls": "+"
+      },
+      "engine": "scanner",
+      "completion_tokens": 47,
+      "elapsed_seconds": 0.83,
+      "first_call_seconds": null,
+      "stream_chunks": 0
+    },
+    {
+      "scenario": "answer_or_call_tool",
+      "status": 200,
+      "ok": true,
+      "calls": 1,
+      "content_chars": 0,
+      "decode_grammar": "engaged",
+      "grammar": {
+        "shape": "calls_or_answer",
+        "calls": "*"
+      },
+      "engine": "scanner",
+      "completion_tokens": 45,
+      "elapsed_seconds": 0.764,
+      "first_call_seconds": null,
+      "stream_chunks": 0
+    },
+    {
+      "scenario": "answer_or_call_tool",
+      "status": 200,
+      "ok": true,
+      "calls": 1,
+      "content_chars": 0,
+      "decode_grammar": "engaged",
+      "grammar": {
+        "shape": "calls_or_answer",
+        "calls": "*"
+      },
+      "engine": "scanner",
+      "completion_tokens": 45,
+      "elapsed_seconds": 0.763,
+      "first_call_seconds": null,
+      "stream_chunks": 0
+    },
+    {
+      "scenario": "answer_or_call_tool",
+      "status": 200,
+      "ok": true,
+      "calls": 1,
+      "content_chars": 0,
+      "decode_grammar": "engaged",
+      "grammar": {
+        "shape": "calls_or_answer",
+        "calls": "*"
+      },
+      "engine": "scanner",
+      "completion_tokens": 45,
+      "elapsed_seconds": 0.761,
+      "first_call_seconds": null,
+      "stream_chunks": 0
+    },
+    {
+      "scenario": "answer_or_call_text",
+      "status": 200,
+      "ok": true,
+      "calls": 0,
+      "content_chars": 16,
+      "decode_grammar": "engaged",
+      "grammar": {
+        "shape": "calls_or_answer",
+        "calls": "*"
+      },
+      "engine": "scanner",
+      "completion_tokens": 10,
+      "elapsed_seconds": 0.838,
+      "first_call_seconds": null,
+      "stream_chunks": 0
+    },
+    {
+      "scenario": "answer_or_call_text",
+      "status": 200,
+      "ok": true,
+      "calls": 0,
+      "content_chars": 16,
+      "decode_grammar": "engaged",
+      "grammar": {
+        "shape": "calls_or_answer",
+        "calls": "*"
+      },
+      "engine": "scanner",
+      "completion_tokens": 10,
+      "elapsed_seconds": 0.811,
+      "first_call_seconds": null,
+      "stream_chunks": 0
+    },
+    {
+      "scenario": "answer_or_call_text",
+      "status": 200,
+      "ok": true,
+      "calls": 0,
+      "content_chars": 16,
+      "decode_grammar": "engaged",
+      "grammar": {
+        "shape": "calls_or_answer",
+        "calls": "*"
+      },
+      "engine": "scanner",
+      "completion_tokens": 10,
+      "elapsed_seconds": 0.83,
+      "first_call_seconds": null,
+      "stream_chunks": 0
+    },
+    {
+      "scenario": "stream_required",
+      "status": 200,
+      "ok": true,
+      "calls": 1,
+      "content_chars": 0,
+      "decode_grammar": "engaged",
+      "grammar": {
+        "shape": "calls",
+        "calls": "+"
+      },
+      "engine": "scanner",
+      "completion_tokens": 45,
+      "elapsed_seconds": 0.739,
+      "first_call_seconds": 0.739,
+      "stream_chunks": 2
+    },
+    {
+      "scenario": "stream_required",
+      "status": 200,
+      "ok": true,
+      "calls": 1,
+      "content_chars": 0,
+      "decode_grammar": "engaged",
+      "grammar": {
+        "shape": "calls",
+        "calls": "+"
+      },
+      "engine": "scanner",
+      "completion_tokens": 45,
+      "elapsed_seconds": 0.762,
+      "first_call_seconds": 0.761,
+      "stream_chunks": 2
+    },
+    {
+      "scenario": "stream_required",
+      "status": 200,
+      "ok": true,
+      "calls": 1,
+      "content_chars": 0,
+      "decode_grammar": "engaged",
+      "grammar": {
+        "shape": "calls",
+        "calls": "+"
+      },
+      "engine": "scanner",
+      "completion_tokens": 45,
+      "elapsed_seconds": 0.739,
+      "first_call_seconds": 0.739,
+      "stream_chunks": 2
+    },
+    {
+      "scenario": "stream_auto",
+      "status": 200,
+      "ok": false,
+      "calls": 0,
+      "content_chars": 865,
+      "decode_grammar": "engaged",
+      "grammar": {
+        "shape": "text_or_calls",
+        "calls": "*"
+      },
+      "engine": "scanner",
+      "completion_tokens": 195,
+      "elapsed_seconds": 6.088,
+      "first_call_seconds": null,
+      "stream_chunks": 195
+    },
+    {
+      "scenario": "stream_auto",
+      "status": 200,
+      "ok": false,
+      "calls": 0,
+      "content_chars": 865,
+      "decode_grammar": "engaged",
+      "grammar": {
+        "shape": "text_or_calls",
+        "calls": "*"
+      },
+      "engine": "scanner",
+      "completion_tokens": 195,
+      "elapsed_seconds": 6.127,
+      "first_call_seconds": null,
+      "stream_chunks": 195
+    },
+    {
+      "scenario": "stream_auto",
+      "status": 200,
+      "ok": false,
+      "calls": 0,
+      "content_chars": 865,
+      "decode_grammar": "engaged",
+      "grammar": {
+        "shape": "text_or_calls",
+        "calls": "*"
+      },
+      "engine": "scanner",
+      "completion_tokens": 195,
+      "elapsed_seconds": 6.16,
+      "first_call_seconds": null,
+      "stream_chunks": 195
+    }
+  ]
+}
+[runner] server stopped
+[runner] north/muse arms skipped (pass --full to include them; spec marks them 'if time allows')
+### finished 2026-09-20T00:28:37 status=ok duration=90s

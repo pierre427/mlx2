@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 
 from ..contracts import Capability, ModelDescriptor, StatePlane
+from .external_draft_policy import ExternalDraftAdapterMixin
 from ..sampling_defaults import GENERATION_CONFIG, SamplingDefaults, VendorSampling
 
 CACHE_LAYOUT = "laguna-xs21-layer-segments-v1"
@@ -197,7 +198,8 @@ LAGUNA_XS21_SAMPLING = VendorSampling.single(
 )
 
 
-class LagunaXS21Adapter:
+class LagunaXS21Adapter(ExternalDraftAdapterMixin):
+    default_route = "ordinary"
     sampling_defaults = LAGUNA_XS21_SAMPLING
     descriptor = LAGUNA_XS21
     reasoning_effort_semantics = "thinking_toggle"
@@ -226,7 +228,16 @@ class LagunaXS21Adapter:
             raise ValueError("Laguna XS 2.1 has no implemented native MTP route")
         return "laguna-xs21-apcv2-ordinary"
 
+    # Candidate external route: poolside's causal DFlash block drafter.  The
+    # card measures K=15; the default starts shallower because every verify
+    # row is a full MoE forward on the target (see the rm06 GPU sweep).
+    EXTERNAL_DEFAULT_NUM_DRAFT = 7
+    EXTERNAL_ROUTE_TAG = "external-laguna-dflash-v1"
+    EXTERNAL_PROFILE = "laguna-xs21-apcv2-laguna-dflash"
+
     def execution_config(self, *, max_lanes, prefill_step):
+        if getattr(self, "draft_model", None) is not None:
+            return self._external_execution_config(max_lanes=max_lanes, prefill_step=prefill_step)
         return {
             "persistent": True,
             "num_draft": 0,
@@ -237,9 +248,17 @@ class LagunaXS21Adapter:
         }
 
     def __init__(self, model_path: str, *, execution_policy=None):
-        if execution_policy not in (None, {}):
-            raise ValueError("Laguna execution policy has no qualified overrides")
+        external = self._parse_external_policy(execution_policy, family="Laguna")
         artifact = inspect_artifact(model_path)
+        draft_record = None
+        if external:
+            # Header-only drafter inspection before any target tensor loads.
+            from .laguna_dflash import inspect_drafter
+
+            draft_record = inspect_drafter(
+                self.external_policy["draft_model"], target_config=artifact["config"]
+            )
+            self._check_num_draft(draft_record)
         self.identity = artifact["identity"]
         self.config = artifact["config"]
         self.environment = configure_environment()
@@ -252,14 +271,11 @@ class LagunaXS21Adapter:
 
         from ..runtime.models.laguna import Model, ModelArgs
         from ..runtime.tokenizer_utils import BPEStreamingDetokenizer, TokenizerWrapper
-        from ..runtime.ubc_evict import ubc_evict_paths
+        from ..runtime.ubc_evict import load_shards_evicting
 
         self.model = Model(ModelArgs.from_dict(self.config))
-        weights = {}
         files = [path / name for name in sorted(set(artifact["weight_map"].values()))]
-        for file in files:
-            weights.update(mx.load(str(file)))
-        weights = self.model.sanitize(weights)
+        weights = self.model.sanitize(load_shards_evicting(files))
         quant = self.config.get("quantization", self.config.get("quantization_config"))
         if quant:
             normalized_quant = {
@@ -284,7 +300,7 @@ class LagunaXS21Adapter:
         self.model.eval()
         mx.eval(self.model.parameters())
         weights.clear()
-        ubc_evict_paths([str(file) for file in files])
+        mx.clear_cache()
         tokenizer = AutoTokenizer.from_pretrained(
             path, local_files_only=True, trust_remote_code=False, fix_mistral_regex=True
         )
@@ -295,6 +311,10 @@ class LagunaXS21Adapter:
             eos_token_ids=[eos] if isinstance(eos, int) else list(eos or []),
         )
         self.max_context = int(self.config["max_position_embeddings"])
+        if draft_record is not None:
+            from .laguna_dflash import load_drafter
+
+            self._bind_external_drafter(draft_record, load_drafter, LAGUNA_XS21)
 
     def prompt_tokens(self, request: dict) -> list[int]:
         if "messages" not in request:
@@ -336,7 +356,11 @@ class LagunaXS21Adapter:
             "sliding_layers": 30,
             "global_layers": 10,
             "sliding_window": 512,
-            "speculation": "none-qualified",
+            "speculation": (
+                "external-laguna-dflash-implemented-unqualified"
+                if getattr(self, "draft_model", None) is not None
+                else "none-qualified"
+            ),
             "fused_moe": {
                 "status": "implemented-candidate-unselected",
                 "candidate_token_widths": [1, 2, 4, 8],
@@ -360,6 +384,7 @@ class LagunaXS21Adapter:
     def close(self):
         had_resources = any(getattr(self, name, None) is not None for name in ("model", "tokenizer"))
         self.model = None
+        self.draft_model = None
         self.tokenizer = None
         if had_resources:
             import mlx.core as mx

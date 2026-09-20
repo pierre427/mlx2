@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import uuid
 
+from . import agent_compat as _agent
+
 class ModelOutputError(RuntimeError):
     """The model emitted a wire value that cannot be represented safely."""
 
@@ -45,7 +47,11 @@ def _chat_tool(tool, *, anthropic=False, default_strict=None):
             _cache_control(tool["cache_control"])
         name = _text(tool.get("name"), "tool name", empty=False)
         schema = _object(tool.get("input_schema"), "tool input_schema")
-        function = {"name": name, "parameters": schema}
+        # ``description`` is optional here; the empty default keeps a chat
+        # template that renders it (``| tojson``) from meeting a Jinja
+        # Undefined.  ``/v1/messages/count_tokens`` renders without passing
+        # through ``validate_request``, so the default has to be set here too.
+        function = {"name": name, "description": "", "parameters": schema}
         if "description" in tool:
             function["description"] = _text(tool["description"], "tool description")
         return {"type": "function", "function": function}
@@ -59,6 +65,7 @@ def _chat_tool(tool, *, anthropic=False, default_strict=None):
         raise ValueError("only function tools are supported")
     function = {
         "name": _text(tool.get("name"), "tool name", empty=False),
+        "description": "",
         "parameters": _object(tool.get("parameters", {}), "tool parameters"),
     }
     if "description" in tool:
@@ -90,11 +97,18 @@ def _anthropic_system(value):
 
 
 def _anthropic_message(
-    message, *, signer=None, model=None, tenant_id="default"
+    message, *, signer=None, model=None, tenant_id="default", compat=False,
+    counts=None, resolved=None,
 ):
     message = _object(message, "message")
     _only(message, {"role", "content"}, "message")
     role = message.get("role")
+    if compat and role == "system":
+        # Claude Code's mid-conversation-system beta.  Folded into a user turn
+        # by ``fold_system_messages`` once the whole transcript is known.
+        return [{"role": "system", "content": _anthropic_system(
+            message.get("content")
+        )}], 0
     if role not in {"user", "assistant"}:
         raise ValueError("Anthropic message role must be user or assistant")
     content = message.get("content")
@@ -167,6 +181,25 @@ def _anthropic_message(
                 thinking = _text(block.get("thinking"), "thinking text")
                 signature = block.get("signature")
                 if (
+                    not compat
+                    and isinstance(signature, str)
+                    and signature.startswith("mlx2.thinkingc.")
+                ):
+                    _agent.require_compat(resolved, "omitted-display thinking signatures")
+                restored = (
+                    signer.verify_anthropic_carrying(
+                        signature, model=model, tenant=tenant_id
+                    )
+                    if compat
+                    and not thinking
+                    and signer is not None
+                    and isinstance(signature, str)
+                    else None
+                )
+                if restored is not None:
+                    reasoning.append(restored)
+                    _agent.count(counts, "agent_compat_thinking_restored")
+                elif (
                     signer is not None
                     and isinstance(signature, str)
                     and signer.verify_anthropic(
@@ -293,12 +326,16 @@ def anthropic_request_to_chat(
     tenant_id="default",
     model=None,
     translation_metadata=None,
+    agent_compat=None,
+    counts=None,
 ):
     """Translate Anthropic Messages/count_tokens input to a chat request."""
     body = _object(body, "request")
+    compat = agent_compat is not None and agent_compat.enabled
     _only(
         body,
         {
+            *(("context_management", "output_config") if compat else ()),
             "model",
             "system",
             "messages",
@@ -316,6 +353,7 @@ def anthropic_request_to_chat(
             "container",
             "mcp_servers",
             "session_id",
+            "return_progress",
         },
         "Anthropic request",
     )
@@ -346,10 +384,19 @@ def anthropic_request_to_chat(
             signer=signer,
             model=model or body.get("model"),
             tenant_id=tenant_id,
+            compat=compat,
+            counts=counts,
+            resolved=agent_compat,
         )
         messages.extend(translated)
         rejections += dropped
-    result = {"messages": messages}
+    if compat:
+        if "context_management" in body:
+            messages = _context_management(body["context_management"], messages, counts)
+        messages = _agent.fold_system_messages(messages, counts)
+    # Anthropic extended thinking is opt-in.  Keep this explicit so adapters
+    # whose native default is thinking-on do not override Messages semantics.
+    result = {"messages": messages, "enable_thinking": False}
     if translation_metadata is not None:
         translation_metadata["reasoning_signature_rejections"] = rejections
     if "session_id" in body:
@@ -363,6 +410,7 @@ def anthropic_request_to_chat(
         ("top_p", "top_p"),
         ("top_k", "top_k"),
         ("stream", "stream"),
+        ("return_progress", "return_progress"),
     ):
         if source in body:
             result[target] = body[source]
@@ -399,14 +447,82 @@ def anthropic_request_to_chat(
                 and budget >= body["max_tokens"]
             ):
                 raise ValueError("thinking budget_tokens must be less than max_tokens")
+        elif compat and kind == "adaptive":
+            _only(thinking, {"type", "display"}, "thinking")
+            if thinking.get("display", "summarized") not in {"summarized", "omitted"}:
+                raise ValueError("thinking display must be summarized or omitted")
+            # Effort-scaled default budget; never the history-pure close mode.
+            result["enable_thinking"] = True
+            _agent.count(counts, "agent_compat_adaptive_thinking")
+            if thinking.get("display") == "omitted":
+                _agent.count(counts, "agent_compat_thinking_omitted")
         else:
             raise ValueError("thinking type must be enabled or disabled")
+    if compat and "output_config" in body:
+        config = _object(body["output_config"], "output_config")
+        _only(config, {"effort"}, "output_config")
+        if "effort" in config:
+            if config["effort"] not in {"low", "medium", "high", "xhigh", "max"}:
+                raise ValueError("output_config effort must be low, medium, high, xhigh, or max")
+            result["reasoning_effort"] = config["effort"]
+            _agent.count(counts, "agent_compat_output_effort")
     if "metadata" in body:
         _object(body["metadata"], "metadata")
     return result
 
 
 anthropic_to_chat = anthropic_request_to_chat
+
+
+def _context_management(value, messages, counts=None):
+    """Apply the context edits mlx2 can reproduce exactly; reject the rest."""
+    value = _object(value, "context_management")
+    _only(value, {"edits"}, "context_management")
+    edits = value.get("edits", [])
+    if not isinstance(edits, list):
+        raise ValueError("context_management edits must be a list")
+    for edit in edits:
+        edit = _object(edit, "context_management edit")
+        if edit.get("type") != "clear_thinking_20251015":
+            raise ValueError(
+                f"unsupported context_management edit: {edit.get('type')!r}"
+            )
+        _only(edit, {"type", "keep"}, "clear_thinking edit")
+        keep = edit.get("keep", {"type": "thinking_turns", "value": 1})
+        if keep == "all":
+            continue
+        keep = _object(keep, "clear_thinking keep")
+        _only(keep, {"type", "value"}, "clear_thinking keep")
+        turns = keep.get("value")
+        if (
+            keep.get("type") != "thinking_turns"
+            or isinstance(turns, bool)
+            or not isinstance(turns, int)
+            or turns < 1
+        ):
+            raise ValueError("clear_thinking keep must be all or thinking_turns >= 1")
+        thinking = [
+            index
+            for index, message in enumerate(messages)
+            if message.get("role") == "assistant" and message.get("reasoning_content")
+        ]
+        cleared = thinking[: max(0, len(thinking) - turns)]
+        if cleared:
+            messages = [dict(message) for message in messages]
+            for index in cleared:
+                messages[index].pop("reasoning_content", None)
+            _agent.count(counts, "agent_compat_thinking_cleared", len(cleared))
+    return messages
+
+
+def thinking_omitted(request) -> bool:
+    """Whether the (agent-compat) request asked for omitted thinking display."""
+    thinking = (request or {}).get("thinking")
+    return (
+        isinstance(thinking, dict)
+        and thinking.get("type") == "adaptive"
+        and thinking.get("display") == "omitted"
+    )
 
 
 def _anthropic_stop(finish, request, receipt):
@@ -421,10 +537,22 @@ def _anthropic_stop(finish, request, receipt):
 
 
 def _anthropic_content(
-    message, *, signer=None, model=None, tenant_id="default"
+    message, *, signer=None, model=None, tenant_id="default", omitted=False
 ):
     content = []
     reasoning = message.get("reasoning_content", "")
+    if reasoning:
+        if omitted and signer is not None:
+            content.append(
+                {
+                    "type": "thinking",
+                    "thinking": "",
+                    "signature": signer.sign_anthropic_carrying(
+                        model=model, tenant=tenant_id, text=reasoning
+                    ),
+                }
+            )
+            reasoning = ""
     if reasoning:
         signature = (
             signer.sign_anthropic(model=model, tenant=tenant_id, text=reasoning)
@@ -484,6 +612,7 @@ def chat_result_to_anthropic(
             signer=signer,
             model=result.get("model"),
             tenant_id=tenant_id,
+            omitted=thinking_omitted(request),
         ),
         "stop_reason": stop_reason,
         "stop_sequence": stop_sequence,
@@ -553,6 +682,7 @@ class AnthropicStreamTranslator:
         self.blocks = []
         self.calls = []
         self.active = None
+        self.omitted = thinking_omitted(self.request) and signer is not None
 
     @staticmethod
     def _event(kind, **values):
@@ -591,7 +721,11 @@ class AnthropicStreamTranslator:
         if block["key"] == "reasoning":
             text = "".join(block["parts"])
             signature = (
-                self.signer.sign_anthropic(
+                self.signer.sign_anthropic_carrying(
+                    model=self.model, tenant=self.tenant_id, text=text
+                )
+                if self.omitted
+                else self.signer.sign_anthropic(
                     model=self.model, tenant=self.tenant_id, text=text
                 )
                 if self.signer is not None
@@ -633,13 +767,14 @@ class AnthropicStreamTranslator:
                 )
             )
             self.blocks[self.active]["parts"].append(reasoning)
-            events.append(
-                self._event(
-                    "content_block_delta",
-                    index=self.active,
-                    delta={"type": "thinking_delta", "thinking": reasoning},
+            if not self.omitted:
+                events.append(
+                    self._event(
+                        "content_block_delta",
+                        index=self.active,
+                        delta={"type": "thinking_delta", "thinking": reasoning},
+                    )
                 )
-            )
         text = delta.get("content", "")
         if text:
             events.extend(self._open("text", {"type": "text", "text": ""}))

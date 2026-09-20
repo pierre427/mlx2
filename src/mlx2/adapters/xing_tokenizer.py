@@ -489,6 +489,17 @@ def normalize_messages(messages: list[dict]) -> list[dict]:
     return messages
 
 
+def render_prompt_text(tokenizer, messages, tools=None, enable_thinking=True) -> str:
+    """The Xing chat prompt text that ``render_prompt`` encodes."""
+    return tokenizer.apply_chat_template(
+        normalize_messages(messages),
+        tools=list(tools) if tools else None,
+        tokenize=False,
+        add_generation_prompt=True,
+        enable_thinking=True if enable_thinking is None else bool(enable_thinking),
+    )
+
+
 def render_prompt(tokenizer, messages, tools=None, enable_thinking=True) -> list[int]:
     """Token ids of the Xing chat prompt with the generation prompt appended.
 
@@ -496,11 +507,5 @@ def render_prompt(tokenizer, messages, tools=None, enable_thinking=True) -> list
     starts inside reasoning); False ends it with ``<_bot></think>``.
     Identical to ``apply_chat_template(..., tokenize=True)`` of the reference.
     """
-    text = tokenizer.apply_chat_template(
-        normalize_messages(messages),
-        tools=list(tools) if tools else None,
-        tokenize=False,
-        add_generation_prompt=True,
-        enable_thinking=True if enable_thinking is None else bool(enable_thinking),
-    )
+    text = render_prompt_text(tokenizer, messages, tools, enable_thinking)
     return list(tokenizer.encode(text, add_special_tokens=False))

@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: MIT
 # Adapted from mlx-lm-unified; see docs/PROVENANCE.md and provenance/flashnext.json.
+import os
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Union
 import mlx.core as mx
@@ -10,6 +11,9 @@ from .gated_delta import gated_delta_update, normalize_gdn_qk
 from .qwen3_next import Qwen3NextRMSNormGated as RMSNormGated
 
 _GDN_FUSED_MAX_ROWS = 8
+# Opt-in: stage a one-graph per-row rollback that takes the accepted count as
+# a device array (see GatedDeltaNet._masked_rollback).
+_GDN_ARRAY_ACCEPT = os.environ.get("MLX_LM_GDN_ARRAY_ACCEPT") == "1"
 
 
 @dataclass
@@ -149,6 +153,33 @@ class GatedDeltaNet(nn.Module):
         """Architecture-specific decode shortcut; stock models opt out."""
         return None
 
+    def _masked_rollback(
+        self, accepted, q, k, v, a, b, state, conv_input, use_kernel
+    ):
+        """Replay the full verify width with rejected steps made identities.
+
+        ``accepted`` is a per-row count (host list, or a device array that is
+        never read back). Positions ``>= accepted[row]`` get ``a = b = -inf``,
+        i.e. decay ``exp(-exp(A) * softplus(-inf)) == 1`` and ``beta ==
+        sigmoid(-inf) == 0``, so those steps leave the state bit-for-bit
+        unchanged while the accepted prefix runs the same kernel arithmetic as
+        the sliced ``q[:, :m]`` replay. One graph serves every row length.
+        """
+        (B, S) = a.shape[:2]
+        if not isinstance(accepted, mx.array):
+            accepted = mx.array([int(value) for value in accepted])
+        ends = mx.broadcast_to(accepted.reshape(-1).astype(mx.int32), (B,))
+        live = (mx.arange(S)[None, :] < ends[:, None])[..., None]
+        a = mx.where(live, a, -mx.inf)
+        b = mx.where(live, b, -mx.inf)
+        (_, restored_state) = self._gated_delta_update(
+            q, k, v, a, b, state, None, use_kernel
+        )
+        n_keep = self.conv_kernel_size - 1
+        positions = (ends[:, None] + mx.arange(n_keep))[..., None]
+        restored_conv = mx.take_along_axis(conv_input, positions, axis=1)
+        return [mx.contiguous(restored_conv), restored_state]
+
     def __call__(
         self,
         inputs: mx.array,
@@ -219,7 +250,23 @@ class GatedDeltaNet(nn.Module):
                 )
                 return [mx.contiguous(ci[:, m : m + nk, :]), s_m]
 
-            cache.record_rollback(S, _rollback, [conv_state, state])
+            if not _GDN_ARRAY_ACCEPT:
+                cache.record_rollback(S, _rollback, [conv_state, state])
+            else:
+
+                def _rollback_rows(
+                    lengths, q=q, k=k, v=v, a=a, b=b, S0=state, ci=conv_input
+                ):
+                    return self._masked_rollback(
+                        lengths, q, k, v, a, b, S0, ci, use_kernel
+                    )
+
+                def _rollback_any(m, sliced=_rollback, rows=_rollback_rows):
+                    return rows(m) if isinstance(m, mx.array) else sliced(m)
+
+                cache.record_rollback(
+                    S, _rollback_any, [conv_state, state], per_row_fn=_rollback_rows
+                )
         (out, state) = self._gated_delta_update(
             q, k, v, a, b, state, mask, not self.training
         )

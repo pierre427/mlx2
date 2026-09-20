@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import uuid
 
-from ..output import ToolCallConstraintError, _safe_prefix
+from ..output import StopSequenceMatcher, _safe_prefix, within_parallel_bound
 
 THINK_OPEN = "<|START_THINKING|>"
 THINK_CLOSE = "<|END_THINKING|>"
@@ -58,8 +58,16 @@ def constrained_tool_grammar(tools, tool_choice, *, parallel_tool_calls=True):
     """Regex for North's JSON-in-action-tags tool-call wire format."""
     import regex
 
-    from ..runtime.tool_parsers._schema import resolve_local_refs
-    from ..structured_output import _schema_pattern, recursive_json_object_pattern
+    from ..runtime.tool_parsers._schema import (
+        required_parameter_names,
+        resolve_local_refs,
+    )
+    from ..structured_output import (
+        _STRING,
+        _WS,
+        _schema_pattern,
+        recursive_json_object_pattern,
+    )
 
     functions = [tool["function"] for tool in tools]
     if isinstance(tool_choice, dict):
@@ -76,7 +84,19 @@ def constrained_tool_grammar(tools, tool_choice, *, parallel_tool_calls=True):
                 resolve_local_refs(function.get("parameters", {}))
             )
         else:
-            parameters = generic_root
+            # Free values, but required keys must appear (sglang #40051).
+            required = required_parameter_names(function)
+            if required:
+                members = [
+                    rf"{_WS}{regex.escape(json.dumps(key, ensure_ascii=True))}{_WS}:(?&value)"
+                    for key in required
+                ]
+                parameters = (
+                    r"\{" + ",".join(members)
+                    + rf"(?:,{_WS}{_STRING}{_WS}:(?&value))*{_WS}\}}"
+                )
+            else:
+                parameters = generic_root
             needs_definitions = True
         name = regex.escape(json.dumps(function["name"], ensure_ascii=True))
         calls.append(
@@ -96,36 +116,45 @@ class NorthOutputParser:
         self.chat = chat
         self.tools = tools or []
         self.channel = "reasoning_content" if chat and thinking else "content"
-        self.buffer = self.stop_buffer = ""
-        self.stops = (stops,) if isinstance(stops, str) else tuple(stops)
+        self.buffer = ""
+        self.stop_matcher = StopSequenceMatcher(stops)
         self.stopped = False
         self.tool_count = 0
+        self.tool_call_constraint_truncations = 0
         self.parallel_tool_calls = bool(parallel_tool_calls)
+
+    @property
+    def stop_sequence(self):
+        return self.stop_matcher.stop_sequence
 
     def _emit(self, text: str, *, final: bool = False) -> list[dict]:
         """Apply user stop strings only to visible content."""
         if self.channel != "content":
             return [{self.channel: text}] if text else []
-        self.stop_buffer += text
-        hits = [
-            self.stop_buffer.find(stop)
-            for stop in self.stops
-            if stop in self.stop_buffer
-        ]
-        if hits:
-            end = min(hits)
-            visible, self.stop_buffer = self.stop_buffer[:end], ""
+        visible, stop_hit = self.stop_matcher.push(text, final=final)
+        if stop_hit:
             self.stopped = True
             return [{"content": visible}] if visible else []
-        end = (
-            len(self.stop_buffer)
-            if final
-            else _safe_prefix(self.stop_buffer, self.stops)
-        )
-        visible, self.stop_buffer = self.stop_buffer[:end], self.stop_buffer[end:]
         return [{"content": visible}] if visible else []
 
     def push(self, text: str, *, final=False):
+        return self._push(text, final=final, allow_incomplete_action=False)
+
+    def finish(self, text: str, finish_reason: str):
+        """Finalize, preserving max-token truncation as a length finish."""
+        return self._push(
+            text,
+            final=True,
+            allow_incomplete_action=finish_reason == "length",
+        )
+
+    def _push(
+        self,
+        text: str,
+        *,
+        final: bool,
+        allow_incomplete_action: bool,
+    ):
         if self.stopped:
             return []
         self.buffer += text
@@ -139,16 +168,13 @@ class NorthOutputParser:
                 end = self.buffer.find(ACTION_CLOSE)
                 if end < 0:
                     if final:
+                        if allow_incomplete_action:
+                            self.buffer = ""
+                            break
                         raise ValueError("Model produced an incomplete North action block")
                     break
                 calls = parse_actions(self.buffer[:end], self.tools)
-                if (
-                    not self.parallel_tool_calls
-                    and self.tool_count + len(calls) > 1
-                ):
-                    raise ToolCallConstraintError(
-                        "parallel_tool_calls:false permits at most one tool call"
-                    )
+                calls = within_parallel_bound(self, calls)
                 for call in calls:
                     events.append(
                         {

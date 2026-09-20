@@ -1,0 +1,45 @@
+{
+  "implementation": "Original fork kernel (qmv_fast_impl multi-row, shares weight loads only) and original mlx2 serving mode; idea from mlx-vlm short-block exact verify kernels",
+  "files": [
+    "src/mlx2/runtime/verify_bitexact.py",
+    "src/mlx2/server.py",
+    "src/mlx2/serving.py",
+    "src/mlx2/qualification.py",
+    "src/mlx2/prometheus.py",
+    "scripts/qualify_serving.py",
+    "scripts/bench_qmv_bitexact.py",
+    "scripts/gpu_check_verify_bitexact.py",
+    "tests/test_verify_bitexact.py"
+  ],
+  "fork": {
+    "branch": "claude/rm09-bitexact-verify-20260919",
+    "commit": "2e2a55468",
+    "base": "integ/v0322-all@79c250b44",
+    "files": [
+      "mlx/backend/metal/kernels/quantized.h",
+      "mlx/backend/metal/kernels/quantized.metal",
+      "mlx/backend/metal/quantized.cpp",
+      "mlx/backend/metal/metal.h",
+      "mlx/backend/metal/metal.cpp",
+      "mlx/backend/metal/no_metal.cpp",
+      "python/src/metal.cpp",
+      "python/tests/test_quantized.py"
+    ]
+  },
+  "source_repository": "Blaizzy/mlx-vlm",
+  "source_pr": 2106,
+  "source_revision": "b89ce72741e2ff91ad631fe451a9eb5e1990f805 (PR head); local read at /private/tmp/mlx-vlm-upstream-e79b0e0",
+  "source_license": "MIT",
+  "source_paths": [
+    "mlx_vlm/models/quantized_verifier.py:_TARGET_VERIFY_QMV_SOURCE, singleton_quantized_linear",
+    "mlx_vlm/models/qwen3_5/speculative_verifier.py:Qwen3_5BatchInvariantForward"
+  ],
+  "modifications": [
+    "Native fork dispatch instead of JIT metal_kernel",
+    "Covers affine 2-8 bit, any N (partial rows), all verify M <= max_m (default 64)",
+    "qmv_quad / generic qmv / non-split qmm / gather_qmv bit-exact routes",
+    "Process-global mode with host-side dispatch counter; fail-closed serving receipts"
+  ],
+  "validation": "CPU contract tests pass; Metal kernel bit-equality, microbench and 27B e2e pending GPU",
+  "qualification": "implemented; opt-in; GPU-pending"
+}

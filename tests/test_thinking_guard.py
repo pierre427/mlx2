@@ -52,6 +52,64 @@ def test_guard_is_a_pure_function_of_the_ids_across_rollbacks():
         ThinkingGuard(2, (1, 2), budget=10)
 
 
+class _CountingTokens:
+    """Token context that records how many ids the guard reads per step."""
+
+    def __init__(self, ids):
+        self.array = mx.array(ids, dtype=mx.uint32)
+        self.read = 0
+
+    @property
+    def size(self):
+        return self.array.size
+
+    def __getitem__(self, key):
+        return _CountingTokens(self.array[key].tolist())._counted(self)
+
+    def _counted(self, parent):
+        parent.read += self.array.size
+        return self
+
+    def tolist(self):
+        return self.array.tolist()
+
+
+def test_guard_step_reads_only_the_tail_of_a_long_reasoning_channel():
+    # vllm #52677: rescanning every generated id made each step O(n).
+    prompt, window = (1, 2), 64
+    guard = ThinkingGuard(2, (CLOSE,), budget=None, rewrite_window=window)
+    ids = [8 + (i * 5 + i // 9) % 8 for i in range(4096)]
+    reads = []
+    for n in range(1, len(ids) + 1):
+        tokens = _CountingTokens(list(prompt) + ids[:n])
+        guard(tokens, mx.zeros((1, VOCAB)))
+        reads.append(tokens.read)
+    assert max(reads) <= window + 1
+    assert guard.receipt()["think_tokens"] == len(ids)
+
+
+def test_incremental_guard_matches_a_fresh_guard_under_random_rollbacks():
+    rng = np.random.default_rng(0)
+    def make():
+        return ThinkingGuard(2, (CLOSE,), budget=300, soft_ratio=0.8, tau=2.5,
+                             ngram=4, rewrite_window=32)
+    live, ids = make(), []
+    for _ in range(600):
+        if ids and rng.random() < 0.2:
+            del ids[len(ids) - int(rng.integers(1, min(len(ids), 12) + 1)):]
+        ids += [int(token) for token in rng.integers(8, 12, size=int(rng.integers(1, 4)))]
+        if rng.random() < 0.01:
+            ids.append(CLOSE)
+        ours = _call(live, ids)
+        fresh_guard = make()
+        np.testing.assert_array_equal(ours, _call(fresh_guard, ids))
+        if CLOSE in ids:  # a fresh guard never runs the alarm past a close
+            continue
+        mine, theirs = live.receipt(), fresh_guard.receipt()
+        for key in ("think_tokens", "tripped", "tripped_at"):
+            assert mine[key] == theirs[key], key
+
+
 def test_juice_ladder_scales_the_anchor_by_effort_and_explicit_budgets_win():
     from mlx2.thinking_guard import resolve_thinking_budget
 
@@ -214,8 +272,25 @@ def test_north_ships_guard_and_steering_defaults_and_an_identity_bound_asset():
     assets = adapter.commit_direction_assets()
     (npz,) = assets["paths"]
     meta = json.loads(Path(npz).with_suffix(".json").read_text())
-    assert assets["layer"] == meta["layer"] == 28 and meta["schema"] == SCHEMA
+    assert assets["layer"] == meta["layer"] == 32
     assert len(meta["artifact_identity"]) == 64 and meta["artifact"].endswith("4bit")
+    # 2026-09-20: re-shipped after the normalization correction.  The previous
+    # asset was calibrated on 2026-09-18 against a North body that ran
+    # mean-centred LayerNorm where the reference uses RMSNorm; a commit
+    # direction is a property of that residual geometry, so it was invalid
+    # under the corrected norm.  The artifact-file identity hash cannot see a
+    # code change and would still have matched, so SCHEMA is what failed it
+    # closed -- which is why this asset must now declare the CURRENT schema and
+    # not a pinned literal: the next body change bumps SCHEMA and this asset
+    # must go stale with it rather than keep binding.
+    assert meta["schema"] == SCHEMA
+    # The replacement is a gated calibration, not just a fresh one: it beat no
+    # steering on the held-out set and a same-norm random direction did not.
+    assert meta["gate_failures"] == []
+    assert meta["validation"]["calibrated"]["think_tokens"] < meta["validation"]["off"]["think_tokens"]
+    assert meta["validation"]["calibrated"]["think_tokens"] < meta["validation"]["random"]["think_tokens"]
+    assert meta["validation"]["calibrated"]["correct"] >= meta["validation"]["off"]["correct"]
+    assert meta["supersedes"]["schema"] == "mlx2.commit-direction.v1"
 
 
 def test_explicit_zero_budget_turns_the_guard_off_for_a_request():

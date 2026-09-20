@@ -1,0 +1,132 @@
+### job 02-dflash-pair-select
+### started 2026-09-20T03:38:16
+### worktree /private/tmp/mlx2-splash-02-dflash-pair-select
+### branch   claude/splash-02-dflash-pair-select @ f7a14f0  (merge-base with main: f7a14f0)
+### models ~/mlx-models/Muse-Glimmer-30B-mlx-4bit ~/mlx-models/Muse-Glimmer-30B-DFlash2
+### runner  repaired 2026-09-20 (real gate enforcement, per-spec lease)
+    ok   /private/tmp/mlx2-splash-02-dflash-pair-select/scripts/bench_dflash_pair_select.py
+    ok   /private/tmp/mlx2-splash-02-dflash-pair-select/qualification/policies/muse-dflash2.json
+    ok   model ~/mlx-models/Muse-Glimmer-30B-mlx-4bit
+    ok   model ~/mlx-models/Muse-Glimmer-30B-DFlash2
+[runner] waiter: REGISTERED mlx2-76.splash-02-dflash-pair-select.57375.1789889896 at 2026-09-20T03:38:16
+[runner] lease: WAITING on /Users/Shared/mlxuag/gpu.lock held by pid=57448 label=hv2-xing-t4 started=2026-09-20T07:38:15+00:00  [job splash-02-dflash-pair-select, waited 0s]
+[runner] waiter: REGISTERED mlx2-76.splash-02-dflash-pair-select.57375.1789889896 at 2026-09-20T03:38:16
+[runner] waiter: REGISTERED mlx2-76.splash-02-dflash-pair-select.57375.1789889896 at 2026-09-20T03:38:26
+[runner] waiter: REGISTERED mlx2-76.splash-02-dflash-pair-select.57375.1789889896 at 2026-09-20T03:38:36
+[runner] waiter: REGISTERED mlx2-76.splash-02-dflash-pair-select.57375.1789889896 at 2026-09-20T03:38:46
+[runner] waiter: REGISTERED mlx2-76.splash-02-dflash-pair-select.57375.1789889896 at 2026-09-20T03:38:56
+[runner] waiter: REGISTERED mlx2-76.splash-02-dflash-pair-select.57375.1789889896 at 2026-09-20T03:39:06
+[runner] waiter: REGISTERED mlx2-76.splash-02-dflash-pair-select.57375.1789889896 at 2026-09-20T03:39:16
+[runner] waiter: REGISTERED mlx2-76.splash-02-dflash-pair-select.57375.1789889896 at 2026-09-20T03:39:27
+[runner] waiter: REGISTERED mlx2-76.splash-02-dflash-pair-select.57375.1789889896 at 2026-09-20T03:39:37
+[runner] waiter: REGISTERED mlx2-76.splash-02-dflash-pair-select.57375.1789889896 at 2026-09-20T03:39:47
+[runner] waiter: REGISTERED mlx2-76.splash-02-dflash-pair-select.57375.1789889896 at 2026-09-20T03:39:57
+[runner] waiter: REGISTERED mlx2-76.splash-02-dflash-pair-select.57375.1789889896 at 2026-09-20T03:40:07
+[runner] waiter: REGISTERED mlx2-76.splash-02-dflash-pair-select.57375.1789889896 at 2026-09-20T03:40:17
+[runner] waiter: REGISTERED mlx2-76.splash-02-dflash-pair-select.57375.1789889896 at 2026-09-20T03:40:27
+[runner] waiter: REGISTERED mlx2-76.splash-02-dflash-pair-select.57375.1789889896 at 2026-09-20T03:40:37
+[runner] waiter: REGISTERED mlx2-76.splash-02-dflash-pair-select.57375.1789889896 at 2026-09-20T03:40:47
+[runner] waiter: REGISTERED mlx2-76.splash-02-dflash-pair-select.57375.1789889896 at 2026-09-20T03:40:57
+[runner] waiter: REGISTERED mlx2-76.splash-02-dflash-pair-select.57375.1789889896 at 2026-09-20T03:41:07
+[runner] waiter: REGISTERED mlx2-76.splash-02-dflash-pair-select.57375.1789889896 at 2026-09-20T03:41:17
+[runner] waiter: REGISTERED mlx2-76.splash-02-dflash-pair-select.57375.1789889896 at 2026-09-20T03:41:27
+[runner] waiter: REGISTERED mlx2-76.splash-02-dflash-pair-select.57375.1789889896 at 2026-09-20T03:41:37
+[runner] waiter: REGISTERED mlx2-76.splash-02-dflash-pair-select.57375.1789889896 at 2026-09-20T03:41:47
+[runner] waiter: REGISTERED mlx2-76.splash-02-dflash-pair-select.57375.1789889896 at 2026-09-20T03:41:57
+[runner] waiter: REGISTERED mlx2-76.splash-02-dflash-pair-select.57375.1789889896 at 2026-09-20T03:42:07
+[runner] waiter: REGISTERED mlx2-76.splash-02-dflash-pair-select.57375.1789889896 at 2026-09-20T03:42:17
+[runner] waiter: REGISTERED mlx2-76.splash-02-dflash-pair-select.57375.1789889896 at 2026-09-20T03:42:27
+[runner] waiter: REGISTERED mlx2-76.splash-02-dflash-pair-select.57375.1789889896 at 2026-09-20T03:42:37
+[runner] waiter: REGISTERED mlx2-76.splash-02-dflash-pair-select.57375.1789889896 at 2026-09-20T03:42:47
+[runner] lease: ACQUIRED for splash-02-dflash-pair-select at 2026-09-20T03:42:57 after 280s -> /tmp/gpu.lock /Users/Shared/mlxuag/gpu.lock
+[runner] waiter: removed mlx2-76.splash-02-dflash-pair-select.57375.1789889896
+### lease wanted-at 2026-09-20T03:38:16 acquired-at 2026-09-20T03:42:57 queued-for 281s
+### tree under test: mlx2.__file__ = /private/tmp/mlx2-splash-02-dflash-pair-select/src/mlx2/__init__.py
+GATE PASS  PYTHONPATH pin: mlx2 resolves inside /private/tmp/mlx2-splash-02-dflash-pair-select
+[runner] step 1: A/B bench (host vs batched)
+{"width": 1, "num_draft": 4, "host_ms_median": 16.254874994046986, "batched_ms_median": 14.315792010165751, "token_or_rng_mismatches": 0, "max_abs_q_diff": 0.0}
+{"width": 4, "num_draft": 4, "host_ms_median": 29.99316604109481, "batched_ms_median": 27.06970804138109, "token_or_rng_mismatches": 0, "max_abs_q_diff": 2.329002537493352e-07}
+{"width": 8, "num_draft": 4, "host_ms_median": 36.06412501540035, "batched_ms_median": 33.213375019840896, "token_or_rng_mismatches": 0, "max_abs_q_diff": 3.0557884211912523e-07}
+{"width": 1, "temp": 0.0, "num_draft": 4, "identical_tokens": true, "identical_receipts": true, "identical_rng_draws": true, "host_tok_s": 32.512411867667254, "batched_tok_s": 33.085248183675105, "speedup": 1.0176190040388091, "host_acceptance": 0.4, "batched_acceptance": 0.4}
+{"width": 1, "temp": 0.8, "num_draft": 4, "identical_tokens": true, "identical_receipts": true, "identical_rng_draws": true, "host_tok_s": 32.08510406982591, "batched_tok_s": 32.503408731626365, "speedup": 1.013037347826272, "host_acceptance": 0.3979591836734694, "batched_acceptance": 0.3979591836734694}
+{"width": 4, "temp": 0.0, "num_draft": 4, "identical_tokens": true, "identical_receipts": true, "identical_rng_draws": true, "host_tok_s": 45.25636971200722, "batched_tok_s": 46.25515195547144, "speedup": 1.0220694291172725, "host_acceptance": 0.4898255813953488, "batched_acceptance": 0.4898255813953488}
+{"width": 4, "temp": 0.8, "num_draft": 4, "identical_tokens": true, "identical_receipts": true, "identical_rng_draws": true, "host_tok_s": 43.14467021443105, "batched_tok_s": 43.91448391886892, "speedup": 1.0178426141771824, "host_acceptance": 0.4347240915208614, "batched_acceptance": 0.4347240915208614}
+{"width": 8, "temp": 0.0, "num_draft": 4, "identical_tokens": true, "identical_receipts": true, "identical_rng_draws": true, "host_tok_s": 52.26857356499321, "batched_tok_s": 53.39871697482526, "speedup": 1.021621852917543, "host_acceptance": 0.4781319495922906, "batched_acceptance": 0.4781319495922906}
+{"width": 8, "temp": 0.8, "num_draft": 4, "identical_tokens": true, "identical_receipts": true, "identical_rng_draws": true, "host_tok_s": 50.16411123410473, "batched_tok_s": 51.839547227369664, "speedup": 1.0333990965263202, "host_acceptance": 0.49958915365653245, "batched_acceptance": 0.49958915365653245}
+{"width": 1, "num_draft": 7, "host_ms_median": 18.98858300410211, "batched_ms_median": 15.786166011821479, "token_or_rng_mismatches": 0, "max_abs_q_diff": 0.0}
+{"width": 8, "num_draft": 7, "host_ms_median": 40.65662500215694, "batched_ms_median": 36.43504099454731, "token_or_rng_mismatches": 0, "max_abs_q_diff": 2.5763875788342716e-07}
+{"width": 1, "temp": 0.0, "num_draft": 7, "identical_tokens": true, "identical_receipts": true, "identical_rng_draws": true, "host_tok_s": 25.2946051596771, "batched_tok_s": 25.57267048704594, "speedup": 1.010993068506644, "host_acceptance": 0.23795180722891565, "batched_acceptance": 0.23795180722891565}
+{"width": 1, "temp": 0.8, "num_draft": 7, "identical_tokens": true, "identical_receipts": true, "identical_rng_draws": true, "host_tok_s": 30.777284837099046, "batched_tok_s": 31.709867923720374, "speedup": 1.0303010188051802, "host_acceptance": 0.3371212121212121, "batched_acceptance": 0.3371212121212121}
+{"width": 8, "temp": 0.0, "num_draft": 7, "identical_tokens": true, "identical_receipts": true, "identical_rng_draws": true, "host_tok_s": 46.23621613451781, "batched_tok_s": 47.428977247446845, "speedup": 1.0257971177714642, "host_acceptance": 0.31916902738432484, "batched_acceptance": 0.31916902738432484}
+{"width": 8, "temp": 0.8, "num_draft": 7, "identical_tokens": true, "identical_receipts": true, "identical_rng_draws": true, "host_tok_s": 43.33415111499597, "batched_tok_s": 45.053600788754615, "speedup": 1.039678859041123, "host_acceptance": 0.2947269303201507, "batched_acceptance": 0.2947269303201507}
+[runner] step 2: serving smoke (feature on, real route)
+[runner] server pid 60983  log /private/tmp/claude-501/-Users-user-Desktop-mlx2/b569b1f6-d687-4876-a42a-e5fdf0abeabc/scratchpad/gpu-queue/logs-02-server.log  PYTHONPATH=/private/tmp/mlx2-splash-02-dflash-pair-select/src
+[runner] ready: http://127.0.0.1:8295 answered a real completion 200 after 5s, 1 probe attempt(s)
+### resolved route: external_draft (source: explicit_flag)
+### resolved route: external_draft (source: explicit_flag)
+GATE PASS  route is 'external_draft' as the arm claims ('external_draft', source explicit_flag)
+[runner] served model id: Muse-Glimmer-30B-mlx-4bit
+poem 200
+math 200
+tool 500
+mlx2_scheduler_events_total{event="external_pairwise_selection_groups",mechanism="external_speculative"} 31
+mlx2_scheduler_events_total{event="external_pairwise_selection_lanes",mechanism="external_speculative"} 31
+            "pairwise_selection": "batched"
+        "external_pairwise_selection_groups": 31,
+        "external_pairwise_selection_lanes": 31,
+[runner] server stopped
+GATE PASS  job 02 commands all exited 0
+### spec-gate evaluation (gates.py 02)
+  --- spec gates for job 02 over /private/tmp/claude-501/-Users-user-Desktop-mlx2/b569b1f6-d687-4876-a42a-e5fdf0abeabc/scratchpad/gpu-queue/02-out ---
+  spec PASS  k=4 micro w1 token_or_rng_mismatches == 0: got 0 want 0
+  spec PASS  k=4 micro w1 max_abs_q_diff <= 1e-3: 0
+  spec PASS  k=4 PERF micro w1 batched <= host: batched 14.32 ms vs host 16.25 ms
+  spec PASS  k=4 micro w4 token_or_rng_mismatches == 0: got 0 want 0
+  spec PASS  k=4 micro w4 max_abs_q_diff <= 1e-3: 2.33e-07
+  spec PASS  k=4 PERF micro w4 batched <= host: batched 27.07 ms vs host 29.99 ms
+  spec PASS  k=4 micro w8 token_or_rng_mismatches == 0: got 0 want 0
+  spec PASS  k=4 micro w8 max_abs_q_diff <= 1e-3: 3.06e-07
+  spec PASS  k=4 PERF micro w8 batched <= host: batched 33.21 ms vs host 36.06 ms
+  spec PASS  k=4 e2e w1 T0.0 identical_tokens: got True want True
+  spec PASS  k=4 e2e w1 T0.0 identical_receipts: got True want True
+  spec PASS  k=4 e2e w1 T0.0 identical_rng_draws: got True want True
+  spec PASS  k=4 e2e w1 T0.8 identical_rng_draws: got True want True
+  spec PASS  k=4 e2e w4 T0.0 identical_tokens: got True want True
+  spec PASS  k=4 e2e w4 T0.0 identical_receipts: got True want True
+  spec PASS  k=4 e2e w4 T0.0 identical_rng_draws: got True want True
+  spec FAIL  k=4 e2e w4 T0.0 PERF speedup >= 1.03: 1.0221
+  spec PASS  k=4 e2e w4 T0.8 identical_rng_draws: got True want True
+  spec FAIL  k=4 e2e w4 T0.8 PERF speedup >= 1.03: 1.0178
+  spec PASS  k=4 e2e w8 T0.0 identical_tokens: got True want True
+  spec PASS  k=4 e2e w8 T0.0 identical_receipts: got True want True
+  spec PASS  k=4 e2e w8 T0.0 identical_rng_draws: got True want True
+  spec FAIL  k=4 e2e w8 T0.0 PERF speedup >= 1.03: 1.0216
+  spec PASS  k=4 e2e w8 T0.8 identical_rng_draws: got True want True
+  spec PASS  k=4 e2e w8 T0.8 PERF speedup >= 1.03: 1.0334
+  spec PASS  k=7 micro w1 token_or_rng_mismatches == 0: got 0 want 0
+  spec PASS  k=7 micro w1 max_abs_q_diff <= 1e-3: 0
+  spec PASS  k=7 PERF micro w1 batched <= host: batched 15.79 ms vs host 18.99 ms
+  spec PASS  k=7 micro w8 token_or_rng_mismatches == 0: got 0 want 0
+  spec PASS  k=7 micro w8 max_abs_q_diff <= 1e-3: 2.58e-07
+  spec PASS  k=7 PERF micro w8 batched <= host: batched 36.44 ms vs host 40.66 ms
+  spec PASS  k=7 e2e w1 T0.0 identical_tokens: got True want True
+  spec PASS  k=7 e2e w1 T0.0 identical_receipts: got True want True
+  spec PASS  k=7 e2e w1 T0.0 identical_rng_draws: got True want True
+  spec PASS  k=7 e2e w1 T0.8 identical_rng_draws: got True want True
+  spec PASS  k=7 e2e w8 T0.0 identical_tokens: got True want True
+  spec PASS  k=7 e2e w8 T0.0 identical_receipts: got True want True
+  spec PASS  k=7 e2e w8 T0.0 identical_rng_draws: got True want True
+  spec FAIL  k=7 e2e w8 T0.0 PERF speedup >= 1.03: 1.0258
+  spec PASS  k=7 e2e w8 T0.8 identical_rng_draws: got True want True
+  spec PASS  k=7 e2e w8 T0.8 PERF speedup >= 1.03: 1.0397
+  spec PASS  serving smoke poem -> 200: got '200' want '200'
+  spec PASS  serving smoke math -> 200: got '200' want '200'
+  spec FAIL  serving smoke tool -> 200: got '500' want '200'
+  spec PASS  external_pairwise_selection_groups > 0: 31
+  --- 40 passed, 5 failed, 0 NOT EVALUATED ---
+GATE FAIL  spec gates for job 02 (gates.py rc=1)
+### GATE SUMMARY: 3/4 passed, 1 failed
+[runner] lease: RELEASED /tmp/gpu.lock for splash-02-dflash-pair-select at 2026-09-20T03:51:24
+[runner] lease: RELEASED /Users/Shared/mlxuag/gpu.lock for splash-02-dflash-pair-select at 2026-09-20T03:51:24
+### lease held 507s for 02-dflash-pair-select (wanted 03:38:16, acquired 03:42:57, released 03:51:24, queued 281s)
+### finished 2026-09-20T03:51:24 status=FAILED(rc=1) duration=507s

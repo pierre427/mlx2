@@ -8,14 +8,21 @@ from __future__ import annotations
 
 import copy
 import json
-from collections import deque
+import os
+import time
+from collections import defaultdict, deque
 from dataclasses import dataclass, field
 from types import SimpleNamespace
 
 import numpy as np
 
 from .committed_recovery import CommittedRecoverySlot
-from .cow_cache import snapshot_prompt_cache_descriptors
+from .cow_cache import (
+    COWCacheUnsupported,
+    external_round_cow_enabled,
+    snapshot_committed_cache,
+    snapshot_prompt_cache_descriptors,
+)
 from .speculative_sampling import (
     FLyVerificationPolicy,
     RequestRNG,
@@ -78,6 +85,68 @@ class Lane:
     target_max_width: int = 0
     draft_max_width: int = 0
     relaxed_accepts: int = 0
+    # Per-round distributions over external verify rounds, ``{value: rounds}``.
+    # Same contract as the self-MTP route (see prompt_lookup.HybridStats):
+    # ``verify_accept_hist`` truncates to tau(k) for every k below the depth
+    # actually run, ``verify_span_hist`` counts verified positions per round.
+    verify_span_hist: dict = field(default_factory=dict)
+    verify_accept_hist: dict = field(default_factory=dict)
+
+
+# Lane fields frozen as cache planes; every other field is host state.
+_LANE_PLANES = frozenset({"cache", "draft_cache", "tail"})
+
+
+@dataclass(frozen=True)
+class RoundSnapshot:
+    """One lane's committed-boundary checkpoint for a single round."""
+    slot: CommittedRecoverySlot
+    boundary: int
+    mode: str  # "descriptor_cow" or "deepcopy"
+
+
+@dataclass
+class HostDraftRow:
+    """One row's host-sampled draft: tokens and their dense proposal laws.
+
+    Exposes the ``lengths``/``dense_laws`` surface of a one-row compact
+    ``DraftBlock`` so the verify phase reads both the same way.
+    """
+    tokens: list
+    laws: list
+    width: int = 1
+
+    @property
+    def lengths(self):
+        return (len(self.tokens),)
+
+    def dense_laws(self, vocab):
+        return [list(self.laws)]
+
+
+@dataclass
+class RoundDecision:
+    """Verify outcome for one row, before commit.
+
+    ``emitted`` is already stop-truncated; ``target_laws`` holds the dense
+    target law per emitted token (``None`` when the verifier kept no dense
+    law); ``relaxed`` counts FLy relaxed accepts.
+    """
+    accepted: int
+    emitted: list
+    target_laws: object
+    relaxed: int = 0
+
+
+def _block_row(block, vocab):
+    """(draft tokens, dense proposal laws) of a one-row proposal block."""
+    if block is None:
+        return [], []
+    if isinstance(block, HostDraftRow):
+        return list(block.tokens), list(block.laws)
+    length = int(block.lengths[0])
+    tokens = [int(t) for t in np.asarray(block.tokens)[0, :length].tolist()]
+    return tokens, (None if vocab is None else block.dense_laws(vocab)[0])
 
 
 class ExternalDraftBatchGenerator:
@@ -90,7 +159,7 @@ class ExternalDraftBatchGenerator:
     def __init__(self, model, *, draft_model, binding, completion_batch_size=4,
                  prefill_step_size=2048, num_draft=4, stop_tokens=(), memory_headroom=None,
                  reclaim_memory=None, evict_checkpoint=None, fly_verification=None,
-                 **kwargs):
+                 pairwise_selection="host", **kwargs):
         import mlx.core as mx
         self.mx = mx; self.model = model; self.draft = draft_model
         self.memory_headroom = memory_headroom
@@ -99,6 +168,9 @@ class ExternalDraftBatchGenerator:
         self.binding = binding; self.capacity = completion_batch_size
         self.fly_verification = FLyVerificationPolicy.from_value(fly_verification)
         self.prefill_step = prefill_step_size; self.num_draft = int(num_draft)
+        if pairwise_selection not in ("host", "batched"):
+            raise ValueError("pairwise_selection must be 'host' or 'batched'")
+        self.pairwise_selection = pairwise_selection
         if not 1 <= self.num_draft < draft_model.config.block_size:
             raise ValueError("External draft count must fit trained block")
         if any(len(t) != 1 for t in stop_tokens):
@@ -106,11 +178,70 @@ class ExternalDraftBatchGenerator:
         self.stops = {int(t[0]) for t in stop_tokens}
         self.layers = tuple(draft_model.config.target_layer_ids)
         self.lanes = {}; self.next_uid = 0; self.boundaries = {}
-        self.scheduler_stats = {"external_rounds": 0, "accepted_proposals": 0, "proposed_tokens": 0, "ordinary_rounds": 0, "cancelled": 0, "target_max_width": 0, "draft_max_width": 1, "prefill_rounds": 0, "paired_cache_resumes": 0, "segmented_transactions": 0, "segmented_rollbacks": 0, "draft_fallbacks": 0, "recovery_checkpoint_captures": 0, "recovery_checkpoint_restores": 0, "external_draft_masked_positions": 0, "external_ordinary_fast_path_rounds": 0, "external_ordinary_fast_path_lanes": 0, "external_draft_context_skipped": 0, "external_taps_skipped": 0, "external_transactions_skipped": 0, "fly_relaxed_accepts": 0}
+        self.scheduler_stats = {"external_rounds": 0, "accepted_proposals": 0, "proposed_tokens": 0, "ordinary_rounds": 0, "cancelled": 0, "target_max_width": 0, "draft_max_width": 1, "prefill_rounds": 0, "paired_cache_resumes": 0, "segmented_transactions": 0, "segmented_rollbacks": 0, "draft_fallbacks": 0, "recovery_checkpoint_captures": 0, "recovery_checkpoint_restores": 0, "external_draft_masked_positions": 0, "external_ordinary_fast_path_rounds": 0, "external_ordinary_fast_path_lanes": 0, "external_draft_context_skipped": 0, "external_taps_skipped": 0, "external_transactions_skipped": 0, "fly_relaxed_accepts": 0, "external_context_token_pairings": 0, "external_verify_steer_rounds": 0, "external_verify_steered_lanes": 0}
+        # Drafters that fuse each target feature with the token that follows
+        # it (EAGLE) opt in; DFlash-family drafters keep the original calls.
+        self.pair_context_tokens = bool(getattr(draft_model, "requires_context_tokens", False))
+        self.receipt_kind = str(getattr(draft_model, "receipt_kind", "external_dflash2"))
+        if pairwise_selection == "batched":
+            # Default-off receipts keep their existing key set.
+            self.scheduler_stats.update(external_pairwise_selection_groups=0, external_pairwise_selection_lanes=0)
         self._open = False
+        # Host-time attribution for one external round.  Default off: a
+        # perf_counter in this path is cheap but the block exists only for
+        # tuning, and the bounded integer counters above stay always-on.
+        self.round_timing = bool(os.environ.get("MLX2_EXTERNAL_ROUND_TIMING"))
+        self.round_times = defaultdict(float)
 
     def _empty_hidden(self):
         return self.mx.zeros((1, 0, len(self.layers)*self.model.args.hidden_size))
+
+    def _append_context(self, lane, following):
+        """Commit ``lane.tail`` to the draft plane.
+
+        ``following`` is the token after the tail's last position; a pairing
+        drafter receives ``(history + [following])[-L:]``, the token that
+        follows each tail feature.
+        """
+        if not self.pair_context_tokens:
+            return self.draft.append_context(lane.tail, lane.draft_cache)
+        length = int(lane.tail.shape[1])
+        tokens = (list(lane.history) + [int(following)])[-length:]
+        _bump(self.scheduler_stats, "external_context_token_pairings", length)
+        return self.draft.append_context(lane.tail, lane.draft_cache, context_tokens=[tokens])
+
+    def _verify_steer(self, cohort, inputs, proposal_counts):
+        """Thinking-guard residual steering for one verify forward.
+
+        Mirrors the prompt-lookup route: one vector per lane over its verify
+        block, skipped when the block already carries the close token.  The
+        verified target law is then the steered law the ordinary route would
+        sample from, so speculative exactness is unchanged.
+        """
+        taps = getattr(getattr(self.model, "model", None), "residual_taps", None)
+        if taps is None:
+            return None, None
+        rows, layer = {}, None
+        for index, lane in enumerate(cohort):
+            block = inputs[index][: proposal_counts[index] + 1]
+            for processor in lane.processors:
+                ask = getattr(processor, "residual_steer", None)
+                if ask is None:
+                    continue
+                if any(token in getattr(processor, "close_ids", ()) for token in block[1:]):
+                    continue
+                request = ask(block[0])
+                if request is not None and (layer is None or request[0] == layer):
+                    layer, rows[index] = request[0], request[1]
+        if not rows:
+            return None, None
+        mx = self.mx
+        sample = next(iter(rows.values()))
+        zero = mx.zeros(sample.shape, dtype=sample.dtype)
+        stacked = mx.stack([rows.get(index, zero) for index in range(len(cohort))])
+        _bump(self.scheduler_stats, "external_verify_steer_rounds")
+        _bump(self.scheduler_stats, "external_verify_steered_lanes", len(rows))
+        return taps, (layer, stacked[:, None, :])
 
     @staticmethod
     def _snapshot_draft_state(draft_cache, tail):
@@ -187,22 +318,28 @@ class ExternalDraftBatchGenerator:
     def _prefill(self, lane):
         if len(lane.remaining) > 1:
             n = min(self.prefill_step, len(lane.remaining)-1)
-            inputs = [lane.remaining.popleft() for _ in range(n)]
             if lane.tail.shape[1]:
-                self.draft.append_context(lane.tail, lane.draft_cache)
+                self._append_context(lane, lane.remaining[0])
+            inputs = [lane.remaining.popleft() for _ in range(n)]
             lane.tail = self.model.prefill_body(self.mx.array([inputs]), lane.cache, self.layers)
             lane.history.extend(inputs)
             self.mx.eval(lane.tail, [c.state for c in lane.cache], [c.state for c in lane.draft_cache if c.offset])
             self.scheduler_stats["prefill_rounds"] += 1
         done = len(lane.remaining) == 1
+        # (done, span) over the whole prompt; the final token is consumed by
+        # the first decode round, so the prompt counts as done here.
+        span = len(lane.history) + len(lane.remaining)
+        progress = (span if done else len(lane.history), span)
         if done:
             lane.anchor = lane.remaining.popleft()
             if lane.history:
-                if lane.tail.shape[1]:
-                    self.draft.append_context(lane.tail, lane.draft_cache)
+                # A pairing (EAGLE) drafter keeps the last prompt chunk pending:
+                # its final feature must be drafted from in the first round.
+                if lane.tail.shape[1] and not self.pair_context_tokens:
+                    self._append_context(lane, lane.anchor)
                     lane.tail = lane.tail[:, :0]
-                self.boundaries[lane.uid] = {"committed_only": True, "tokens": list(lane.history), "target_cache": copy.deepcopy(lane.cache), "covered_tokens": len(lane.history), "cache_sidecar": self._sidecar(lane)}
-        return SimpleNamespace(uid=lane.uid, end_of_prompt=done)
+                self.boundaries[lane.uid] = {"committed_only": True, "tokens": list(lane.history), "target_cache": self._freeze_cache(lane.cache), "covered_tokens": len(lane.history), "cache_sidecar": self._sidecar(lane)}
+        return SimpleNamespace(uid=lane.uid, progress=progress, end_of_prompt=done)
 
     def _target_law(self, lane, logits, history, reachable=True):
         from .sample_utils import make_transformed_logprobs
@@ -222,203 +359,387 @@ class ExternalDraftBatchGenerator:
         return probability(np.asarray(self.mx.exp(transform(value)[0])))
 
     def _verification_receipt(self, lane):
+        hists = {
+            "verify_span_hist": dict(lane.verify_span_hist),
+            "verify_accept_hist": dict(lane.verify_accept_hist),
+        }
         if self.fly_verification.enabled and not lane.processors:
             return {
                 "verification": "fly",
                 "parameters": self.fly_verification.as_dict(),
                 "relaxed_accepts": lane.relaxed_accepts,
+                **hists,
             }
         result = {
             "verification": "exact",
             "relaxed_accepts": lane.relaxed_accepts,
+            **hists,
         }
         if self.fly_verification.enabled and lane.processors:
             result["fly_disabled"] = "logits_processors"
         return result
 
+    def _propose_pairwise(self, lanes, arguments):
+        """Batched DFlash2 selection: one pair-table walk, one host read.
+
+        Uniforms come off each lane's stream in position order, exactly the
+        draws the sequential sampler makes, so RNG state and receipts match.
+        """
+        count = arguments[3]
+        block = self.draft.propose_block(
+            *arguments[:4],
+            [[lane.rng.uniform() for _ in range(count)] for lane in lanes],
+            arguments[5],
+        )
+        _bump(self.scheduler_stats, "external_pairwise_selection_groups")
+        _bump(self.scheduler_stats, "external_pairwise_selection_lanes", len(lanes))
+        return block.token_lists(), block.dense_laws(self.draft.config.vocab_size)
+
+    def _freeze_lane(self, lane):
+        """Freeze one lane at its committed boundary; returns (state, mode).
+
+        Both modes alias the immutable MLX buffers (``mx.array`` deep copies
+        share them), so the live round and the checkpoint already form a free
+        current/next double buffer.  Opt-in descriptor COW
+        (``MLX_LM_EXTERNAL_ROUND_COW=1``) additionally rejects cache graphs
+        with live transaction state.  Host-side fields (history, RNG,
+        processors, ...) are deep-copied in both modes.
+        """
+        fields = vars(lane)
+        if external_round_cow_enabled():
+            try:
+                cache, (draft_cache, tail), _receipt = (
+                    snapshot_prompt_cache_descriptors(
+                        fields["cache"], (fields["draft_cache"], fields["tail"])
+                    )
+                )
+            except COWCacheUnsupported:
+                _bump(self.scheduler_stats, "external_cow_fallbacks")
+            else:
+                host = copy.deepcopy(
+                    {k: v for k, v in fields.items() if k not in _LANE_PLANES}
+                )
+                _bump(self.scheduler_stats, "external_cow_snapshots")
+                return (host, cache, draft_cache, tail), "descriptor_cow"
+        return copy.deepcopy(fields), "deepcopy"
+
+    @staticmethod
+    def _thaw_lane(frozen):
+        # Re-clone so the checkpoint itself stays pristine after a restore.
+        host, cache, draft_cache, tail = frozen
+        cache, (draft_cache, tail), _receipt = snapshot_prompt_cache_descriptors(
+            cache, (draft_cache, tail)
+        )
+        return {
+            **copy.deepcopy(host),
+            "cache": cache,
+            "draft_cache": draft_cache,
+            "tail": tail,
+        }
+
+    def _freeze_cache(self, cache):
+        """Independent committed target cache for boundaries and finishes."""
+        frozen, _sidecar, mode = snapshot_committed_cache(cache)
+        if mode == "descriptor_cow":
+            _bump(self.scheduler_stats, "external_cow_snapshots")
+        elif mode == "deepcopy_fallback":
+            _bump(self.scheduler_stats, "external_cow_fallbacks")
+        return frozen
+
+    def _snapshot_round(self, cohort):
+        """Capture every lane's committed boundary before the round mutates it.
+
+        Must run outside ``SegmentedKVRows.begin/commit``: descriptor COW
+        rejects live transactions, which then fall back to deep copies.
+        """
+        snapshots = []
+        for lane in cohort:
+            frozen, mode = self._freeze_lane(lane)
+            slot = CommittedRecoverySlot()
+            boundary = len(lane.history)
+            slot.capture(
+                route="external_dflash2",
+                revision=self.binding,
+                boundary=boundary,
+                value=frozen,
+                snapshot=lambda value: value,
+                restore=(
+                    self._thaw_lane if mode == "descriptor_cow" else copy.deepcopy
+                ),
+            )
+            snapshots.append(RoundSnapshot(slot, boundary, mode))
+        return snapshots
+
+    def _restore_round(self, cohort, snapshots):
+        for lane, snapshot in zip(cohort, snapshots):
+            state = snapshot.slot.restore(
+                route="external_dflash2",
+                revision=self.binding,
+                boundary=snapshot.boundary,
+            )
+            lane.__dict__.clear(); lane.__dict__.update(state)
+
+    def _propose(self, cohort):
+        """Draft phase: one proposal block per cohort row, ``None`` for no draft.
+
+        A zero-count round only appends pending draft context so the draft
+        plane stays paired with the target boundary.
+        """
+        requested_count = min(self.num_draft, min(l.maximum-l.generated-1 for l in cohort))
+        if any(l.ordinary for l in cohort): requested_count = 0
+        blocks = [None]*len(cohort)
+        if not requested_count:
+            for lane in cohort:
+                if lane.tail.shape[1]: self._append_context(lane, lane.anchor)
+            return blocks
+        groups = {}
+        for row,lane in enumerate(cohort):
+            groups.setdefault((int(lane.tail.shape[1]),str(lane.tail.dtype)),[]).append(row)
+        for indices in groups.values():
+            lanes = [cohort[i] for i in indices]
+            processors = [lane.processors for lane in lanes]
+            arguments = (
+                [l.anchor for l in lanes],
+                self.mx.concatenate([l.tail for l in lanes],axis=0),
+                self.draft.batch_caches([l.draft_cache for l in lanes]),
+                requested_count,
+                [l.rng for l in lanes],
+                [float(l.sampling.get("sampling_temp",0)) for l in lanes],
+            )
+            if self.pair_context_tokens:
+                pairing = [
+                    (list(l.history) + [int(l.anchor)])[-int(l.tail.shape[1]):]
+                    if l.tail.shape[1] else []
+                    for l in lanes
+                ]
+                _bump(
+                    self.scheduler_stats,
+                    "external_context_token_pairings",
+                    sum(len(row) for row in pairing),
+                )
+            try:
+                import inspect
+
+                supports_processors = bool(
+                    getattr(
+                        self.draft,
+                        "supports_logits_processors",
+                        False,
+                    )
+                )
+                try:
+                    parameters = inspect.signature(
+                        self.draft.draft_distributions
+                    ).parameters
+                    supports_processors = supports_processors or (
+                        "logits_processors" in parameters
+                        or any(
+                            parameter.kind is inspect.Parameter.VAR_KEYWORD
+                            for parameter in parameters.values()
+                        )
+                    )
+                except (TypeError, ValueError):
+                    pass
+                extra = {"context_tokens": pairing} if self.pair_context_tokens else {}
+                if (
+                    self.pairwise_selection == "batched"
+                    and not any(processors)
+                    and not self.pair_context_tokens
+                ):
+                    # Processor rows keep the sequential host path; so do
+                    # pairing (EAGLE) drafters, which have no pair table.
+                    tokens, q = self._propose_pairwise(lanes, arguments)
+                elif any(processors) and supports_processors:
+                    tokens,q = self.draft.draft_distributions(
+                        *arguments,
+                        logits_processors=processors,
+                        processor_histories=[list(l.history) for l in lanes],
+                        **extra,
+                    )
+                elif extra:
+                    tokens,q = self.draft.draft_distributions(*arguments, **extra)
+                else:
+                    # Preserve the unstructured fast path byte-for-byte:
+                    # no processor lists, prefixes or keyword handling.
+                    tokens,q = self.draft.draft_distributions(*arguments)
+            except DraftUnavailable as error:
+                failed_rows = getattr(error, "failed_rows", None)
+                if failed_rows is None:
+                    error.failed_uids = tuple(lane.uid for lane in lanes)
+                else:
+                    error.failed_uids = tuple(
+                        lanes[int(local_row)].uid for local_row in failed_rows
+                    )
+                raise
+            _bump(
+                self.scheduler_stats,
+                "external_draft_masked_positions",
+                requested_count * sum(bool(value) for value in processors),
+            )
+            self.scheduler_stats["draft_max_width"] = max(self.scheduler_stats["draft_max_width"],len(lanes))
+            for j,row in enumerate(indices):
+                blocks[row] = HostDraftRow(tokens[j], q[j], len(lanes))
+        return blocks
+
+    def _verify(self, cohort, blocks, logits):
+        """Accept phase over the target logits of one verify forward."""
+        vocab = int(logits.shape[-1])
+        decisions = []
+        for row, lane in enumerate(cohort):
+            drafts, laws = _block_row(blocks[row], vocab)
+            inputs = [lane.anchor] + drafts
+            targets, reachable = [], True
+            count = len(drafts)
+            for j in range(count+1):
+                targets.append(self._target_law(lane, logits[row,j], lane.history + inputs[:j+1], reachable))
+                if reachable and j < count and lane.processors and targets[-1][int(drafts[j])] <= 0:
+                    reachable = False
+            if self.fly_verification.enabled and not lane.processors:
+                result = verify_proposals(
+                    drafts,
+                    laws,
+                    targets,
+                    lane.rng,
+                    fly_verification=self.fly_verification,
+                )
+            else:
+                # Preserve exact/default-off verification, including its
+                # RNG draw schedule and existing call seam.
+                result = verify_proposals(
+                    drafts, laws, targets, lane.rng
+                )
+            # Stop/length truncation is part of the same transaction.
+            emitted = list(result.emitted)
+            for j,t in enumerate(emitted):
+                if t in self.stops:
+                    emitted = emitted[:j+1]; break
+            decisions.append(
+                RoundDecision(
+                    result.accepted,
+                    emitted,
+                    result.target_probabilities,
+                    result.relaxed_accepts,
+                )
+            )
+        return decisions
+
+    def _commit(self, cohort, decisions, features, *, blocks, transaction):
+        """Commit accepted prefixes, then publish responses for every row."""
+        proposal_counts = [0 if block is None else int(block.lengths[0]) for block in blocks]
+        consumed = [
+            min(decision.accepted+1, len(decision.emitted)) for decision in decisions
+        ]
+        clock = time.perf_counter() if self.round_timing else None
+        rows = transaction.commit(accepted_lengths=consumed)
+        self.scheduler_stats["segmented_transactions"] += len(decisions)
+        self.scheduler_stats["segmented_rollbacks"] += sum(
+            int(used < count + 1)
+            for count,used in zip(proposal_counts,consumed)
+        )
+        if clock is not None:
+            clock = self._mark("transaction_commit", clock)
+        for row, (lane, decision) in enumerate(zip(cohort,decisions)):
+            count = proposal_counts[row]
+            emitted = decision.emitted
+            drafts, _laws = _block_row(blocks[row], None)
+            inputs = [lane.anchor] + drafts
+            lane.cache = rows[row]
+            lane.tail = features[row:row+1,:consumed[row]]
+            lane.history.extend(inputs[:consumed[row]])
+            lane.anchor = emitted[-1]
+            round_accepted = min(decision.accepted, len(emitted)-1)
+            self.scheduler_stats["accepted_proposals"] += round_accepted
+            self.scheduler_stats["proposed_tokens"] += count
+            lane.external_rounds += int(count > 0)
+            lane.proposed += count
+            lane.accepted += round_accepted
+            if count:
+                # Two host dict bumps on ints already in hand: no device work,
+                # no eval, no per-round allocation beyond the at-most-(K+1)
+                # integer keys each histogram ever holds.
+                lane.verify_span_hist[count + 1] = (
+                    lane.verify_span_hist.get(count + 1, 0) + 1
+                )
+                lane.verify_accept_hist[round_accepted] = (
+                    lane.verify_accept_hist.get(round_accepted, 0) + 1
+                )
+            lane.relaxed_accepts += decision.relaxed
+            _bump(
+                self.scheduler_stats,
+                "fly_relaxed_accepts",
+                decision.relaxed,
+            )
+            lane.target_max_width = max(lane.target_max_width, len(cohort))
+            if count:
+                lane.draft_max_width = max(lane.draft_max_width, getattr(blocks[row], "width", 1))
+            for j,token in enumerate(emitted):
+                lane.generated += 1
+                finish = "stop" if token in self.stops else "length" if lane.generated >= lane.maximum else None
+                final = j == len(emitted)-1
+                logp = None if decision.target_laws is None else self.mx.log(self.mx.array(decision.target_laws[j].astype(np.float32)))
+                lane.ready.append(SimpleNamespace(uid=lane.uid, token=token, logprobs=logp, finish_reason=finish, execution_width=len(cohort), all_tokens=list(lane.history) if final else None, prompt_cache=self._freeze_cache(lane.cache) if finish else None, cache_sidecar=self._sidecar(lane) if finish else None, mtp_state=None, mtp_receipt=None, speculative_receipt={"kind":self.receipt_kind, "execution":"external_draft_verify" if lane.external_rounds else "ordinary_target", "current_execution":"ordinary_target" if count == 0 else "external_draft_verify", "ordinary_fallback":lane.ordinary, "external_rounds":lane.external_rounds, "accepted":lane.accepted,"proposed":lane.proposed,"round_accepted":round_accepted,"round_proposed":count,"target_width":lane.target_max_width,"draft_width":lane.draft_max_width,"qualification_authority":"serving_route", **self._verification_receipt(lane)}))
+        if clock is not None:
+            self._mark("emit", clock)
+        self.scheduler_stats[
+            "external_rounds" if any(proposal_counts) else "ordinary_rounds"
+        ] += 1
+        self.scheduler_stats["target_max_width"] = max(self.scheduler_stats["target_max_width"],len(cohort))
+
+    def _mark(self, phase, since):
+        """Accumulate host time for ``phase``; returns the new reference time."""
+        now = time.perf_counter()
+        self.round_times[phase] += now - since
+        return now
+
     def _round(self, cohort):
         from .segmented_rotating_kv import SegmentedKVRows
         if cohort and all(lane.ordinary for lane in cohort):
             return self._ordinary_round(cohort)
-        recovery = []
-        for lane in cohort:
-            slot = CommittedRecoverySlot()
-            slot.capture(
-                route="external_dflash2",
-                revision=self.binding,
-                boundary=len(lane.history),
-                value=lane.__dict__,
-                snapshot=copy.deepcopy,
-                restore=copy.deepcopy,
-            )
-            recovery.append((slot, len(lane.history)))
+        clock = time.perf_counter() if self.round_timing else None
+        recovery = self._snapshot_round(cohort)
         self.scheduler_stats["recovery_checkpoint_captures"] += len(recovery)
+        if clock is not None:
+            clock = self._mark("recovery_capture", clock)
         stats_snapshot = dict(self.scheduler_stats)
         self._open = True
         transaction = None
         try:
-            requested_count = min(self.num_draft, min(l.maximum-l.generated-1 for l in cohort))
-            if any(l.ordinary for l in cohort): requested_count = 0
-            drafts, laws = [None]*len(cohort), [None]*len(cohort)
-            draft_widths = [1]*len(cohort)
-            if requested_count:
-                groups = {}
-                for row,lane in enumerate(cohort):
-                    groups.setdefault((int(lane.tail.shape[1]),str(lane.tail.dtype)),[]).append(row)
-                for indices in groups.values():
-                    lanes = [cohort[i] for i in indices]
-                    processors = [lane.processors for lane in lanes]
-                    arguments = (
-                        [l.anchor for l in lanes],
-                        self.mx.concatenate([l.tail for l in lanes],axis=0),
-                        self.draft.batch_caches([l.draft_cache for l in lanes]),
-                        requested_count,
-                        [l.rng for l in lanes],
-                        [float(l.sampling.get("sampling_temp",0)) for l in lanes],
-                    )
-                    try:
-                        import inspect
-
-                        supports_processors = bool(
-                            getattr(
-                                self.draft,
-                                "supports_logits_processors",
-                                False,
-                            )
-                        )
-                        try:
-                            parameters = inspect.signature(
-                                self.draft.draft_distributions
-                            ).parameters
-                            supports_processors = supports_processors or (
-                                "logits_processors" in parameters
-                                or any(
-                                    parameter.kind is inspect.Parameter.VAR_KEYWORD
-                                    for parameter in parameters.values()
-                                )
-                            )
-                        except (TypeError, ValueError):
-                            pass
-                        if any(processors) and supports_processors:
-                            tokens,q = self.draft.draft_distributions(
-                                *arguments,
-                                logits_processors=processors,
-                                processor_histories=[list(l.history) for l in lanes],
-                            )
-                        else:
-                            # Preserve the unstructured fast path byte-for-byte:
-                            # no processor lists, prefixes or keyword handling.
-                            tokens,q = self.draft.draft_distributions(*arguments)
-                    except DraftUnavailable as error:
-                        failed_rows = getattr(error, "failed_rows", None)
-                        if failed_rows is None:
-                            error.failed_uids = tuple(lane.uid for lane in lanes)
-                        else:
-                            error.failed_uids = tuple(
-                                lanes[int(local_row)].uid for local_row in failed_rows
-                            )
-                        raise
-                    _bump(
-                        self.scheduler_stats,
-                        "external_draft_masked_positions",
-                        requested_count * sum(bool(value) for value in processors),
-                    )
-                    self.scheduler_stats["draft_max_width"] = max(self.scheduler_stats["draft_max_width"],len(lanes))
-                    for j,row in enumerate(indices):
-                        drafts[row],laws[row] = tokens[j],q[j]
-                        draft_widths[row] = len(lanes)
-            else:
-                for row,lane in enumerate(cohort):
-                    if lane.tail.shape[1]: self.draft.append_context(lane.tail,lane.draft_cache)
-                    drafts[row],laws[row] = [],[]
-            proposal_counts = [len(row) for row in drafts]
+            blocks = self._propose(cohort)
+            if clock is not None:
+                clock = self._mark("draft", clock)
+            proposal_counts = [0 if block is None else int(block.lengths[0]) for block in blocks]
             verify_width = max(proposal_counts, default=0) + 1
             owner = SegmentedKVRows([l.cache for l in cohort])
             transaction = owner.begin(lengths=[count+1 for count in proposal_counts])
             inputs = [
-                [lane.anchor]+draft+[0]*(verify_width-len(draft)-1)
-                for lane,draft in zip(cohort,drafts)
+                [lane.anchor]+_block_row(block, None)[0]+[0]*(verify_width-count-1)
+                for lane,block,count in zip(cohort,blocks,proposal_counts)
             ]
-            logits, features = self.model.forward_with_taps(self.mx.array(inputs), transaction.caches, self.layers)
-            self.mx.eval(logits, features)
-            results = []
-            for row, lane in enumerate(cohort):
-                targets, reachable = [], True
-                count = proposal_counts[row]
-                for j in range(count+1):
-                    targets.append(self._target_law(lane, logits[row,j], lane.history + inputs[row][:j+1], reachable))
-                    if reachable and j < count and lane.processors and targets[-1][int(drafts[row][j])] <= 0:
-                        reachable = False
-                if self.fly_verification.enabled and not lane.processors:
-                    result = verify_proposals(
-                        drafts[row],
-                        laws[row],
-                        targets,
-                        lane.rng,
-                        fly_verification=self.fly_verification,
-                    )
-                else:
-                    # Preserve exact/default-off verification, including its
-                    # RNG draw schedule and existing call seam.
-                    result = verify_proposals(
-                        drafts[row], laws[row], targets, lane.rng
-                    )
-                # Stop/length truncation is part of the same transaction.
-                emitted = list(result.emitted)
-                for j,t in enumerate(emitted):
-                    if t in self.stops:
-                        emitted = emitted[:j+1]; break
-                consumed = min(result.accepted+1, len(emitted))
-                results.append((result, emitted, consumed))
-            rows = transaction.commit(accepted_lengths=[r[2] for r in results]); transaction = None
-            self.scheduler_stats["segmented_transactions"] += len(results)
-            self.scheduler_stats["segmented_rollbacks"] += sum(
-                int(consumed < count + 1)
-                for count,(_, _, consumed) in zip(proposal_counts,results)
+            if clock is not None:
+                clock = self._mark("transaction_begin", clock)
+            taps, steer = self._verify_steer(cohort, inputs, proposal_counts)
+            if steer is not None:
+                taps.steer = steer
+            try:
+                logits, features = self.model.forward_with_taps(self.mx.array(inputs), transaction.caches, self.layers)
+                self.mx.eval(logits, features)
+            finally:
+                if steer is not None:
+                    taps.steer = None
+            if clock is not None:
+                clock = self._mark("verify_forward", clock)
+            decisions = self._verify(cohort, blocks, logits)
+            if clock is not None:
+                self._mark("verify_laws", clock)
+            self._commit(
+                cohort, decisions, features, blocks=blocks, transaction=transaction
             )
-            for row, (lane, (result, emitted, consumed)) in enumerate(zip(cohort,results)):
-                count = proposal_counts[row]
-                lane.cache = rows[row]
-                lane.tail = features[row:row+1,:consumed]
-                lane.history.extend(inputs[row][:consumed])
-                lane.anchor = emitted[-1]
-                round_accepted = min(result.accepted, len(emitted)-1)
-                self.scheduler_stats["accepted_proposals"] += round_accepted
-                self.scheduler_stats["proposed_tokens"] += count
-                lane.external_rounds += int(count > 0)
-                lane.proposed += count
-                lane.accepted += round_accepted
-                lane.relaxed_accepts += result.relaxed_accepts
-                _bump(
-                    self.scheduler_stats,
-                    "fly_relaxed_accepts",
-                    result.relaxed_accepts,
-                )
-                lane.target_max_width = max(lane.target_max_width, len(cohort))
-                if count:
-                    lane.draft_max_width = max(lane.draft_max_width, draft_widths[row])
-                for j,token in enumerate(emitted):
-                    lane.generated += 1
-                    finish = "stop" if token in self.stops else "length" if lane.generated >= lane.maximum else None
-                    final = j == len(emitted)-1
-                    logp = self.mx.log(self.mx.array(result.target_probabilities[j].astype(np.float32)))
-                    lane.ready.append(SimpleNamespace(uid=lane.uid, token=token, logprobs=logp, finish_reason=finish, execution_width=len(cohort), all_tokens=list(lane.history) if final else None, prompt_cache=copy.deepcopy(lane.cache) if finish else None, cache_sidecar=self._sidecar(lane) if finish else None, mtp_state=None, mtp_receipt=None, speculative_receipt={"kind":"external_dflash2", "execution":"external_draft_verify" if lane.external_rounds else "ordinary_target", "current_execution":"ordinary_target" if count == 0 else "external_draft_verify", "ordinary_fallback":lane.ordinary, "external_rounds":lane.external_rounds, "accepted":lane.accepted,"proposed":lane.proposed,"round_accepted":round_accepted,"round_proposed":count,"target_width":lane.target_max_width,"draft_width":lane.draft_max_width,"qualification_authority":"serving_route", **self._verification_receipt(lane)}))
-            self.scheduler_stats[
-                "external_rounds" if any(proposal_counts) else "ordinary_rounds"
-            ] += 1
-            self.scheduler_stats["target_max_width"] = max(self.scheduler_stats["target_max_width"],len(cohort))
         except BaseException:
             if transaction is not None and not transaction.closed:
                 try: transaction.abort()
                 except BaseException:  # noqa: BLE001, S110 - authoritative snapshots restore below
                     pass
-            for lane, (slot, boundary) in zip(cohort, recovery):
-                state = slot.restore(
-                    route="external_dflash2",
-                    revision=self.binding,
-                    boundary=boundary,
-                )
-                lane.__dict__.clear(); lane.__dict__.update(state)
+            self._restore_round(cohort, recovery)
             self.scheduler_stats = stats_snapshot
             self.scheduler_stats["recovery_checkpoint_restores"] += len(recovery)
             raise
@@ -431,7 +752,7 @@ class ExternalDraftBatchGenerator:
         transient depth-zero round, these rows can never need DFlash context
         again, so avoid draft append, target taps and speculative rollback.
         """
-        snapshots = [copy.deepcopy(lane.__dict__) for lane in cohort]
+        snapshots = self._snapshot_round(cohort)
         stats_snapshot = dict(self.scheduler_stats)
         self._open = True
         try:
@@ -491,14 +812,14 @@ class ExternalDraftBatchGenerator:
                         # the request continues. Match the multi-token round
                         # contract consumed by serving and downstream adapters.
                         all_tokens=list(lane.history),
-                        prompt_cache=copy.deepcopy(lane.cache) if finish else None,
+                        prompt_cache=self._freeze_cache(lane.cache) if finish else None,
                         # The draft plane stopped at fallback and is stale by
                         # construction.  Publish this completion as target-only.
                         cache_sidecar=None,
                         mtp_state=None,
                         mtp_receipt=None,
                         speculative_receipt={
-                            "kind":"external_dflash2",
+                            "kind":self.receipt_kind,
                             "execution":"external_draft_verify" if lane.external_rounds else "ordinary_target",
                             "current_execution":"ordinary_target",
                             "ordinary_fallback":True,
@@ -525,8 +846,7 @@ class ExternalDraftBatchGenerator:
                 self.scheduler_stats["target_max_width"], len(cohort)
             )
         except BaseException:
-            for lane,state in zip(cohort,snapshots):
-                lane.__dict__.clear(); lane.__dict__.update(state)
+            self._restore_round(cohort, snapshots)
             self.scheduler_stats = stats_snapshot
             raise
         finally:
@@ -658,7 +978,7 @@ class ExternalDraftBatchGenerator:
             lane = self.lanes.pop(uid,None); self.boundaries.pop(uid,None)
             if lane is not None:
                 lane.cancelled = bool(cancelled); self.scheduler_stats["cancelled"] += int(cancelled)
-                if return_prompt_caches: result[uid] = copy.deepcopy(lane.cache)
+                if return_prompt_caches: result[uid] = self._freeze_cache(lane.cache)
                 lane.ready.clear()
         return result
 

@@ -1,0 +1,240 @@
+[
+  {
+    "run": "ab-27b-t0-v2.json",
+    "go": true,
+    "cells": {
+      "prose/B1/t0.0": {
+        "ratio": 0.999,
+        "worst": 0.962
+      },
+      "prose/B4/t0.0": {
+        "ratio": 1.003,
+        "worst": 0.974
+      },
+      "code/B1/t0.0": {
+        "ratio": 1.204,
+        "worst": 1.158
+      },
+      "code/B4/t0.0": {
+        "ratio": 1.009,
+        "worst": 0.985
+      }
+    },
+    "peak_delta_gib": -0.0,
+    "greedy_mismatches": 9,
+    "within_arm": {
+      "off": 9,
+      "on": 8,
+      "ord": 0
+    },
+    "reps": 3,
+    "policy": {
+      "enabled": true
+    }
+  },
+  {
+    "run": "ab-27b-t0.json",
+    "go": false,
+    "cells": {
+      "prose/B1/t0.0": {
+        "ratio": 1.005,
+        "worst": 0.986
+      },
+      "prose/B4/t0.0": {
+        "ratio": 0.967,
+        "worst": 0.927
+      },
+      "code/B1/t0.0": {
+        "ratio": 1.202,
+        "worst": 1.192
+      },
+      "code/B4/t0.0": {
+        "ratio": 0.948,
+        "worst": 0.944
+      }
+    },
+    "peak_delta_gib": 0.017,
+    "greedy_mismatches": 9,
+    "within_arm": null,
+    "reps": 3,
+    "policy": {
+      "enabled": true
+    }
+  },
+  {
+    "run": "ab-27b-t07.json",
+    "go": false,
+    "cells": {
+      "prose/B1/t0.7": {
+        "ratio": 0.981,
+        "worst": 0.948
+      },
+      "prose/B4/t0.7": {
+        "ratio": 0.998,
+        "worst": 0.956
+      },
+      "code/B1/t0.7": {
+        "ratio": 1.261,
+        "worst": 1.234
+      },
+      "code/B4/t0.7": {
+        "ratio": 0.994,
+        "worst": 0.97
+      }
+    },
+    "peak_delta_gib": -0.018,
+    "greedy_mismatches": 0,
+    "within_arm": {
+      "off": 0,
+      "on": 0,
+      "ord": 0
+    },
+    "reps": 3,
+    "policy": {
+      "enabled": true
+    }
+  },
+  {
+    "run": "ab-35b-t0-gate.json",
+    "go": false,
+    "cells": {
+      "prose/B1/t0.0": {
+        "ratio": 0.995,
+        "worst": 0.952
+      },
+      "prose/B4/t0.0": {
+        "ratio": 0.982,
+        "worst": 0.954
+      },
+      "code/B1/t0.0": {
+        "ratio": 1.303,
+        "worst": 1.2
+      },
+      "code/B4/t0.0": {
+        "ratio": 0.973,
+        "worst": 0.929
+      }
+    },
+    "peak_delta_gib": -0.006,
+    "greedy_mismatches": 10,
+    "within_arm": {
+      "off": 11,
+      "on": 10,
+      "ord": 0
+    },
+    "reps": 4,
+    "policy": {
+      "enabled": true,
+      "min_samples": 1,
+      "min_yield_ratio": 1.15,
+      "reprobe_interval": 64
+    }
+  },
+  {
+    "run": "ab-35b-t0-reps6.json",
+    "go": false,
+    "cells": {
+      "prose/B1/t0.0": {
+        "ratio": 0.98,
+        "worst": 0.909
+      },
+      "prose/B4/t0.0": {
+        "ratio": 0.98,
+        "worst": 0.884
+      },
+      "code/B1/t0.0": {
+        "ratio": 1.334,
+        "worst": 1.138
+      },
+      "code/B4/t0.0": {
+        "ratio": 1.033,
+        "worst": 0.948
+      }
+    },
+    "peak_delta_gib": -0.005,
+    "greedy_mismatches": 11,
+    "within_arm": {
+      "off": 11,
+      "on": 10,
+      "ord": 0
+    },
+    "reps": 6,
+    "policy": {
+      "enabled": true
+    }
+  },
+  {
+    "run": "ab-35b-t0-v2.json",
+    "go": false,
+    "cells": {
+      "prose/B1/t0.0": {
+        "ratio": 0.983,
+        "worst": 0.954,
+        "on_vs_ord": 1.051
+      },
+      "prose/B4/t0.0": {
+        "ratio": 1.003,
+        "worst": 0.96,
+        "on_vs_ord": 0.774
+      },
+      "code/B1/t0.0": {
+        "ratio": 1.312,
+        "worst": 1.285,
+        "on_vs_ord": 1.845
+      },
+      "code/B4/t0.0": {
+        "ratio": 1.013,
+        "worst": 0.962,
+        "on_vs_ord": 1.068
+      }
+    },
+    "peak_delta_gib": -0.001,
+    "greedy_mismatches": 10,
+    "within_arm": {
+      "off": 11,
+      "on": 11,
+      "ord": 10
+    },
+    "reps": 3,
+    "policy": {
+      "enabled": true
+    }
+  },
+  {
+    "run": "ab-35b-t0.json",
+    "go": false,
+    "cells": {
+      "prose/B1/t0.0": {
+        "ratio": 0.97,
+        "worst": 0.942,
+        "on_vs_ord": 1.06
+      },
+      "prose/B4/t0.0": {
+        "ratio": 0.985,
+        "worst": 0.955,
+        "on_vs_ord": 0.755
+      },
+      "code/B1/t0.0": {
+        "ratio": 1.298,
+        "worst": 1.267,
+        "on_vs_ord": 1.847
+      },
+      "code/B4/t0.0": {
+        "ratio": 0.992,
+        "worst": 0.967,
+        "on_vs_ord": 1.02
+      }
+    },
+    "peak_delta_gib": -0.045,
+    "greedy_mismatches": 11,
+    "within_arm": {
+      "off": 10,
+      "on": 12,
+      "ord": 9
+    },
+    "reps": 3,
+    "policy": {
+      "enabled": true
+    }
+  }
+]

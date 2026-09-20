@@ -1,0 +1,66 @@
+2026-09-19 19:03:08,565 WARNING no reasoning signing key configured; using a random per-process reasoning signing key
+2026-09-19 19:03:10,459 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-19 19:03:12,466 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-19 19:03:14,472 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-19 19:03:16,482 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-19 19:03:16,950 INFO ubc_evict: evicted 5025.7 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00001-of-00020.safetensors
+2026-09-19 19:03:16,950 INFO ubc_evict: evicted 5006.8 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00002-of-00020.safetensors
+2026-09-19 19:03:16,950 INFO ubc_evict: evicted 5006.8 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00003-of-00020.safetensors
+2026-09-19 19:03:16,950 INFO ubc_evict: evicted 5006.8 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00004-of-00020.safetensors
+2026-09-19 19:03:16,951 INFO ubc_evict: evicted 5006.8 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00005-of-00020.safetensors
+2026-09-19 19:03:16,951 INFO ubc_evict: evicted 5006.8 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00006-of-00020.safetensors
+2026-09-19 19:03:16,968 INFO ubc_evict: evicted 5022.3 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00007-of-00020.safetensors
+2026-09-19 19:03:17,006 INFO ubc_evict: evicted 5076.7 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00008-of-00020.safetensors
+2026-09-19 19:03:17,049 INFO ubc_evict: evicted 5115.4 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00009-of-00020.safetensors
+2026-09-19 19:03:17,107 INFO ubc_evict: evicted 5115.4 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00010-of-00020.safetensors
+2026-09-19 19:03:17,144 INFO ubc_evict: evicted 5073.2 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00011-of-00020.safetensors
+2026-09-19 19:03:17,180 INFO ubc_evict: evicted 5115.4 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00012-of-00020.safetensors
+2026-09-19 19:03:17,204 INFO ubc_evict: evicted 5115.4 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00013-of-00020.safetensors
+2026-09-19 19:03:17,209 INFO ubc_evict: evicted 5073.2 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00014-of-00020.safetensors
+2026-09-19 19:03:17,213 INFO ubc_evict: evicted 5115.4 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00015-of-00020.safetensors
+2026-09-19 19:03:17,217 INFO ubc_evict: evicted 5115.4 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00016-of-00020.safetensors
+2026-09-19 19:03:17,222 INFO ubc_evict: evicted 5073.2 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00017-of-00020.safetensors
+2026-09-19 19:03:17,227 INFO ubc_evict: evicted 5115.4 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00018-of-00020.safetensors
+2026-09-19 19:03:17,231 INFO ubc_evict: evicted 5115.4 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00019-of-00020.safetensors
+2026-09-19 19:03:17,231 INFO ubc_evict: evicted 1704.3 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00020-of-00020.safetensors
+2026-09-19 19:03:17,231 INFO ubc_evict: evicted 1399.3 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-mtp-q4.safetensors
+2026-09-19 19:03:17,231 INFO ubc_evict: pass complete total_mb=99405.2 elapsed_s=0.31
+2026-09-19 19:03:19,134 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-19 19:03:22,506 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-19 19:03:23,823 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-19 19:03:26,913 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-19 19:03:29,249 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-19 19:03:31,533 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-19 19:03:31,955 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-19 19:03:34,418 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-19 19:03:36,783 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-19 19:03:38,575 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-19 19:03:40,637 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-19 19:03:42,575 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-19 19:03:44,028 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-19 19:03:44,084 WARNING Async QSA promotion declined at queue: suffix-only promotion requires equal starting QSA offsets
+2026-09-19 19:03:47,747 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-19 19:03:48,707 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-19 19:03:48,762 WARNING Async QSA promotion declined at queue: suffix-only promotion requires equal starting QSA offsets
+2026-09-19 19:03:49,156 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-19 19:03:51,373 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-19 19:03:51,429 WARNING Async QSA promotion declined at queue: suffix-only promotion requires equal starting QSA offsets
+2026-09-19 19:03:55,155 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-19 19:03:55,199 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-19 19:03:55,255 WARNING Async QSA promotion declined at queue: suffix-only promotion requires equal starting QSA offsets
+2026-09-19 19:03:58,003 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-19 19:03:58,275 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-19 19:03:58,378 WARNING Async QSA promotion declined at queue: suffix-only promotion requires equal starting QSA offsets
+2026-09-19 19:04:01,534 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-19 19:04:03,471 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-19 19:04:04,298 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-19 19:04:04,779 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-19 19:04:04,929 WARNING Async QSA promotion declined at queue: suffix-only promotion requires equal starting QSA offsets
+2026-09-19 19:04:05,521 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-19 19:04:09,837 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-19 19:04:09,837 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-19 19:04:09,918 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-19 19:04:09,974 WARNING Async QSA promotion declined at queue: suffix-only promotion requires equal starting QSA offsets
+2026-09-19 19:04:12,753 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-19 19:04:13,027 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-19 19:04:13,029 INFO "GET /v1/status HTTP/1.1" 200 -

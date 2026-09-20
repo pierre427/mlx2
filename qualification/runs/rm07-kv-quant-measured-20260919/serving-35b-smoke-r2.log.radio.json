@@ -1,0 +1,14 @@
+{
+ "agent_id": "job-rm07-kvq-mtp-35b-smoke-r2-36382",
+ "complete_worker": {
+  "already_terminal": false,
+  "finished_at": 1789867790,
+  "status": "completed",
+  "worker_id": "5cf93462c7a84104a5180e1150d6e915"
+ },
+ "register_worker": {
+  "worker_id": "5cf93462c7a84104a5180e1150d6e915",
+  "workflow_id": "14b101b48a884d3a9e06805ec67f4ed2"
+ },
+ "updated_at": "2026-09-20T01:29:50+00:00"
+}

@@ -1,0 +1,23 @@
+{
+  "component": "external draft round snapshots without deepcopy (round phases P2)",
+  "source_repository": "Splash (reference only)",
+  "source_revision": "f58d36ddb046726adc8937ab67d07bdde015c0d6",
+  "source_paths": [
+    "runtime/model/QwenState.hpp"
+  ],
+  "license": "Apache-2.0",
+  "destination_paths": [
+    "src/mlx2/runtime/external_speculative.py",
+    "src/mlx2/runtime/pld.py",
+    "src/mlx2/runtime/cow_cache.py"
+  ],
+  "modifications": [
+    "Idea only: Splash keeps immutable per-round state snapshots instead of copying live state. No Splash code was copied.",
+    "Implementation reuses mlx2's own descriptor COW (snapshot_prompt_cache_descriptors), the pattern already used by the native MTP committed boundary.",
+    "External round restructured into _snapshot_round/_restore_round, _propose, _verify, _commit phases; opt-in descriptor COW via MLX_LM_EXTERNAL_ROUND_COW=1 (default off: mx.array deep copies already share buffers) with deepcopy fallback on COWCacheUnsupported."
+  ],
+  "validation": [
+    "tests/test_04_gdn_double_buffer.py (CPU)",
+    "tests/test_external_dflash2_cpu.py, tests/test_pld_*.py in both MLX_LM_EXTERNAL_ROUND_COW modes"
+  ]
+}

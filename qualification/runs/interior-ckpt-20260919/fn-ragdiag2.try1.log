@@ -1,0 +1,31 @@
+[cpg_job 2026-09-20T00:17:23+00:00 pid=16120] label=rm04-fn-ragdiag agent_id=job-rm04-fn-ragdiag-16120 command=env PYTHONPATH=/private/tmp/mlx2-rm04-interior-ckpt-qual/src ~/Desktop/mlx2/.venv/bin/python /private/tmp/mlx2-rm04-interior-ckpt-qual/scripts/qualify_interior_checkpoints.py --model ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP --route mtp --base-policy /private/tmp/mlx2-rm04-interior-ckpt-qual/qualification/runs/quality-campaign-20260919/policies/flash-next-mtp2.json --arms off,auto --workloads rag --rounds 1 --auto-headroom-fraction 1.0 --out /private/tmp/mlx2-rm04-interior-ckpt-qual/qualification/runs/interior-ckpt-20260919/flashnext-rag-headroom1.json --i-own-the-gpu
+[cpg_job 2026-09-20T00:17:24+00:00 pid=16120] created workflow d72a6200994a45ca885e0a6704538884 (cpg-job drivers); record it as workflows.cpg-job-drivers in /Users/Shared/mlxuag/cpg-radio.json to reuse it
+[cpg_job 2026-09-20T00:17:24+00:00 pid=16120] registered worker 9198460fb8134a738d3e778bd5103be8 as job-rm04-fn-ragdiag-16120 in session 3c65a7827e83456a89fffdeefadec196
+[cpg_job 2026-09-20T00:17:24+00:00 pid=16120] took /Users/Shared/mlxuag/gpu.lock
+[cpg_job 2026-09-20T00:17:24+00:00 pid=16120] child pid 16127 started
+[off r0] rag#0 P=30549 cached=0 ttft=24.896s interior_hits+=0 match=True
+[off r0] rag#1 P=30549 cached=0 ttft=24.013s interior_hits+=0 match=True
+[off r0] rag#2 P=30549 cached=0 ttft=24.022s interior_hits+=0 match=True
+[off r0] rag#3 P=30549 cached=0 ttft=24.018s interior_hits+=0 match=True
+[off r0] rag#4 P=30549 cached=0 ttft=24.103s interior_hits+=0 match=True
+[off r0] rag#5 P=30549 cached=0 ttft=24.560s interior_hits+=0 match=True
+[auto r0] rag#0 P=30549 cached=0 ttft=24.832s interior_hits+=0 match=True
+[auto r0] rag#1 P=30549 cached=30464 ttft=0.409s interior_hits+=1 match=True
+[auto r0] rag#2 P=30549 cached=30464 ttft=0.420s interior_hits+=1 match=True
+[auto r0] rag#3 P=30549 cached=30464 ttft=0.373s interior_hits+=1 match=True
+[auto r0] rag#4 P=30549 cached=30464 ttft=0.395s interior_hits+=1 match=True
+[auto r0] rag#5 P=30549 cached=30464 ttft=1.220s interior_hits+=1 match=True
+{
+  "refused_arms": [],
+  "correctness_diffs": 0,
+  "cold_replay_diffs": 0,
+  "ttft_cut": {
+    "auto/rag": 0.9829850670981257
+  },
+  "linear_ttft_regression": null,
+  "go": true
+}
+[cpg_job 2026-09-20T00:20:55+00:00 pid=16120] child exited rc=0
+[cpg_job 2026-09-20T00:20:55+00:00 pid=16120] worker 9198460fb8134a738d3e778bd5103be8 closed completed
+[cpg_job 2026-09-20T00:20:55+00:00 pid=16120] released /Users/Shared/mlxuag/gpu.lock
+[cpg_job 2026-09-20T00:20:55+00:00 pid=16120] wrote /private/tmp/claude-501/-Users-user-Desktop-mlx2/dcc2c62c-d339-4686-a019-625b816d27d9/scratchpad/roadmap/rm04/gpu/fn-ragdiag2.try1.log.done

@@ -1,0 +1,21 @@
+[cpg_job 2026-09-19T22:42:39+00:00 pid=90846] label=rm07-fid-27b-32k-q8 agent_id=job-rm07-fid-27b-32k-q8-90846 command=env PYTHONPATH=/private/tmp/mlx2-rm07-kv-quant-measured/src ~/Desktop/mlx2/.venv/bin/python /private/tmp/mlx2-rm07-kv-quant-measured/scripts/measure_kv_quant_fidelity.py --i-own-the-gpu --model ~/mlx-models/Qwen3.8-27B-oQ4e-mtp --operations kv_q8 --contexts 32768 --out /private/tmp/mlx2-rm07-kv-quant-measured/qualification/runs/rm07-kv-quant-measured-20260919/fidelity-27b-32k-q8.json
+[cpg_job 2026-09-19T22:42:39+00:00 pid=90846] created workflow 6be6870236824737aad7f14b80a715da (cpg-job drivers); record it as workflows.cpg-job-drivers in /Users/Shared/mlxuag/cpg-radio.json to reuse it
+[cpg_job 2026-09-19T22:42:40+00:00 pid=90846] registered worker 9ee7bb03aec340168e31750734645b98 as job-rm07-fid-27b-32k-q8-90846 in session 3c65a7827e83456a89fffdeefadec196
+[cpg_job 2026-09-19T22:42:40+00:00 pid=90846] took /Users/Shared/mlxuag/gpu.lock
+[cpg_job 2026-09-19T22:42:40+00:00 pid=90846] child pid 90849 started
+{"operation": "kv_q8", "context": 32768, "scored_tokens": 256, "kl_mean": 0.0009852720185580324, "kl_p99": 0.005519156926311547, "kl_max": 0.009767011739313602, "top1_agreement": 0.9921875, "top5_overlap": 0.9796875012107193, "logprob_delta_mean": -0.0015789717435836792, "quantized_planes": 16, "exact_quantized_planes": 0, "kv_bytes_exact": 2164260864, "kv_bytes_quant": 1149763584, "kv_bytes_per_token_exact": 65536.0, "kv_bytes_per_token_quant": 34816.0, "kv_bytes_ratio": 0.53125, "wall_s": 1223.5151022920036}
+{
+  "verdicts": {
+    "kv_q8": {
+      "passed": false,
+      "failures": [
+        "missing context 4096",
+        "missing context 16384"
+      ]
+    }
+  }
+}
+[cpg_job 2026-09-19T23:03:07+00:00 pid=90846] child exited rc=0
+[cpg_job 2026-09-19T23:03:07+00:00 pid=90846] worker 9ee7bb03aec340168e31750734645b98 closed completed
+[cpg_job 2026-09-19T23:03:07+00:00 pid=90846] released /Users/Shared/mlxuag/gpu.lock
+[cpg_job 2026-09-19T23:03:07+00:00 pid=90846] wrote /private/tmp/mlx2-rm07-kv-quant-measured/qualification/runs/rm07-kv-quant-measured-20260919/fidelity-27b-32k-q8.log.done

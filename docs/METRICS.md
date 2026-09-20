@@ -66,7 +66,8 @@ map. These metrics are host counters and do not synchronize MLX device state.
   declared/selected/qualified state separate from observed engagement.
 - Flash-Next execution: bounded MoE dispatch/router/fallback counters, PLE
   prefetch and compilation lifecycle, fused-GDN calls/fallbacks/rollback
-  tokens, indexed-QSA fallbacks and device attestations, and shared-QSA MTP
+  tokens (plus `event="replay_dynamic_rollback_calls"`, only when device-count
+  rollback is selected), indexed-QSA fallbacks and device attestations, and shared-QSA MTP
   amendment calls/blocks. Private diagnostic dictionary keys are not labels.
 - Sanity counters (`mlx2_runtime_events_total`): `component="request_finish"`
   with `event` in `stop`, `length`, `unknown`, `cancelled`,
@@ -75,23 +76,69 @@ map. These metrics are host counters and do not synchronize MLX device state.
   `dead_end` (a grammar step with no valid token continuation).
   `mlx2_peak_observed_batch_width` is the widest ordinary compute width a
   completed request has reported. Prompt-lookup rotating-replay counters
-  (`pld_rotating_replay_*`) arrive through the scheduler events.
+  (`pld_rotating_replay_*`) arrive through the scheduler events, as do the
+  committed-boundary snapshot counters `external_cow_snapshots` /
+  `external_cow_fallbacks` (external draft route) and `pld_cow_snapshots` /
+  `pld_cow_fallbacks` (prompt lookup): descriptor-COW captures versus deep-copy
+  fallbacks for graphs that cannot be frozen.
   Tool-call events separately count default-off decode-grammar engagements,
   grammar skips that retain main's post-generation validation, tolerant-marker
-  requests, and actual parse fallbacks.
+  requests, and actual parse fallbacks. With `constrained_tool_grammar_auto`,
+  `decode_grammar_auto_engaged` counts engagements of the `auto` text-or-calls
+  and calls-or-answer shapes (also counted in `decode_grammar_engaged`); with
+  `tool_grammar_streaming`, `decode_grammar_streamed` counts HTTP streams whose
+  tool calls were sent as they completed instead of buffered.
 - APCv2: lifetime lookups, hits, misses, stores and cached tokens; resident and
   disk bytes/entries; spill/restore events and bytes; COW leases,
   materializations, byte accounting and optional host timing. Session
   lifecycle, startup rescan, write suppression, exact interior
   capture/publish/degrade, reuse and reclaim-before-evict use bounded events.
+  Interior placement adds `apcv2_interior` events: `planned_turn`,
+  `planned_tail`, `planned_lattice`, `skipped_media`, `headroom_capped`,
+  `admitted_hit`, `turn_boundary_hit`, `hit_token` and `turn_marker_missing`.
+  `/v1/status.apcv2.interior` reports resident interior entries, bytes and
+  reused entries.
+  Rolling prefill checkpoints report `apcv2_rolling` runtime events
+  (`planned`, `degraded`, `published`, `cancel_published`, `retired`,
+  `retire_deferred`, `retire_shared`, `skipped_*`), scheduler events
+  `apc_rolling_checkpoints_{captured,skipped_inexact,skipped_pressure}`, and
+  `mlx2_prefix_cache_rolling_hits_total`. Junction checkpoints use the same
+  shape (`apcv2_junction`, `apc_junction_checkpoints_*`,
+  `mlx2_prefix_cache_junction_hits_total`).
+  The four `mlx2_prefix_cache_{hits,interior_hits,rolling_hits,junction_hits}`
+  series are read live from `APCv2.lifetime_stats()`, not from the `apcv2`
+  status snapshot. That snapshot aggregates per-entry segment statistics, so
+  serving refreshes it at most once a second and seeds it all-zero at
+  readiness; exporting hit counts from it reported 0 for any run shorter than
+  the cadence, which is how a working junction hit was read as
+  `junction_hits: 0` on a GPU gate. `/v1/status.apcv2` still carries the
+  periodic snapshot and still lags by up to a second -- prefer `/metrics` or
+  the engine's own `counts` when gating on a hit.
+- Per-round verification histograms (`verify_span_hist`,
+  `verify_accept_hist`) are **receipt** fields on the self-MTP, external-draft
+  and prompt-lookup routes, not Prometheus series: their key space is the
+  route's draft depth and they are per-request, so exporting them would add
+  request-scoped cardinality for something a receipt consumer already gets
+  exactly. The scheduler-level aggregates they decompose
+  (`pld_accepted`, `accepted_proposals`, the self-MTP cycle counters) are
+  exported as before and are unchanged. See `docs/SERVING.md`, "Per-round
+  verification histograms in the receipt".
 - Cache capsules: capacity reservations and rejections plus request, success,
   fallback, timeout, stale, error and late-disposal outcomes.
 - Scheduling/speculation: ordinary, adaptive-prefill, prompt-lookup, external
   draft, adaptive-MTP and cache-capsule events through bounded `mechanism` and
   `event` labels. Configured-width/high-water values are gauges.
+  Default-off SRPT prefill scheduling reports `mechanism="prefill_scheduling"`
+  with `event` in `prefill_scheduling_bypasses` (older requests overtaken),
+  `prefill_scheduling_bypass_forced` (bypass-cap services) and
+  `prefill_scheduling_one_slice_clamps` (long slices bounded because a peer
+  fit one slice); the keys exist only when the policy is selected.
   Processor-probe masking, permanent-ordinary fast paths, self-MTP depth-zero
   rounds and FLy relaxed accepts retain always-on bounded host counters while
-  their output-changing policies remain default-off.
+  their output-changing policies remain default-off. Batched DFlash2 pairwise
+  selection (`pairwise_selection: "batched"`) adds
+  `external_pairwise_selection_groups`/`_lanes` events under
+  `mechanism="external_speculative"`; the keys exist only when it is enabled.
 - Segmented self-MTP: engagement/lifecycle events, materialized bytes, optional
   timing, transaction outcomes, forwards, attention calls and explicit device
   synchronization counts. Free-form decline details are intentionally omitted.
@@ -100,6 +147,28 @@ map. These metrics are host counters and do not synchronize MLX device state.
   reports exact pre-surgery boundary stores plus snapshot/store failures, so a
   repeated long prompt cannot silently fall back to full re-prefill. Full
   revision-bound receipts remain JSON-only.
+- Host memory signals (only with `execution_policy.host_memory_signals`
+  enabled; otherwise absent): `mlx2_host_memory_pressure_level` is the kernel
+  memorystatus level after fall hysteresis (0 normal, 1 warn, 2 critical) and
+  `mlx2_host_memory_available_bytes` is the Mach-statistics host estimate that
+  then also feeds `mlx2_memory_headroom_bytes`.
+- MoE expert disk streaming (only with `execution_policy.moe_expert_streaming`
+  enabled; otherwise absent). `mlx2_runtime_events_total{component="expert_stream"}`
+  counts `page_in`, `page_in_byte`, `hit`, `miss`, `eviction` and
+  `working_set_refusal`; `mlx2_expert_stream_resident_bytes` is the bytes the
+  bounded per-layer LRU currently holds, which never exceeds the configured
+  `cache_gib` ceiling. `component="expert_atlas"` counts `observation`,
+  `trace_record` and `trace_dropped`: the atlas **collects only** and never
+  influences residency, so there is deliberately no pinned-bytes or
+  pinned-hit-rate metric to read. Page-in counts are the diagnostic for this
+  feature; throughput measured on a streamed configuration is not a benchmark
+  and must not be recorded as one.
+- Memory preemption (default-off): `component="memory_preemption"` with
+  `event` in `preempted`, `preempted_stall`, `preempted_pressure`,
+  `preempted_fault` (qualification-mode injection), `replayed`
+  and `drain_cancelled` (`memory_preemptions*`, `preempted_replays`,
+  `memory_preemption_drain_cancellations` in `/v1/status` counts, present
+  there only when the policy is enabled).
 - Process-local API resources: `mlx2_api_resources` reports bounded Responses,
   Files and Batch objects; `mlx2_api_resource_events_total` reports bounded
   store/retrieve/continue/delete/evict outcomes; `mlx2_api_batches` and

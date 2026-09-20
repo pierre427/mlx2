@@ -1,0 +1,1415 @@
+{
+  "context": 512,
+  "dtype": "float32",
+  "device": "cpu",
+  "reference": "step=512 (unchunked)",
+  "arms": {
+    "256": {
+      "prefill_step": 256,
+      "differing": [],
+      "n_differing": 0
+    },
+    "128": {
+      "prefill_step": 128,
+      "differing": [],
+      "n_differing": 0
+    },
+    "100": {
+      "prefill_step": 100,
+      "differing": [
+        {
+          "layer": 0,
+          "kind": "gdn",
+          "field": "arr0",
+          "max_abs_delta": 4.172325134277344e-07
+        },
+        {
+          "layer": 0,
+          "kind": "gdn",
+          "field": "arr1",
+          "max_abs_delta": 1.862645149230957e-09
+        },
+        {
+          "layer": 1,
+          "kind": "gdn",
+          "field": "arr0",
+          "max_abs_delta": 5.960464477539062e-07
+        },
+        {
+          "layer": 1,
+          "kind": "gdn",
+          "field": "arr1",
+          "max_abs_delta": 5.587935447692871e-09
+        },
+        {
+          "layer": 2,
+          "kind": "gdn",
+          "field": "arr0",
+          "max_abs_delta": 6.854534149169922e-07
+        },
+        {
+          "layer": 2,
+          "kind": "gdn",
+          "field": "arr1",
+          "max_abs_delta": 2.561137080192566e-09
+        },
+        {
+          "layer": 3,
+          "kind": "attn",
+          "field": "keys",
+          "max_abs_delta": 1.7881393432617188e-06
+        },
+        {
+          "layer": 3,
+          "kind": "attn",
+          "field": "values",
+          "max_abs_delta": 1.0728836059570312e-06
+        },
+        {
+          "layer": 4,
+          "kind": "gdn",
+          "field": "arr0",
+          "max_abs_delta": 1.0728836059570312e-06
+        },
+        {
+          "layer": 4,
+          "kind": "gdn",
+          "field": "arr1",
+          "max_abs_delta": 4.6566128730773926e-09
+        },
+        {
+          "layer": 5,
+          "kind": "gdn",
+          "field": "arr0",
+          "max_abs_delta": 9.834766387939453e-07
+        },
+        {
+          "layer": 5,
+          "kind": "gdn",
+          "field": "arr1",
+          "max_abs_delta": 4.190951585769653e-09
+        },
+        {
+          "layer": 6,
+          "kind": "gdn",
+          "field": "arr0",
+          "max_abs_delta": 1.1026859283447266e-06
+        },
+        {
+          "layer": 6,
+          "kind": "gdn",
+          "field": "arr1",
+          "max_abs_delta": 6.05359673500061e-09
+        },
+        {
+          "layer": 7,
+          "kind": "attn",
+          "field": "keys",
+          "max_abs_delta": 3.6954879760742188e-06
+        },
+        {
+          "layer": 7,
+          "kind": "attn",
+          "field": "values",
+          "max_abs_delta": 1.8477439880371094e-06
+        }
+      ],
+      "n_differing": 16
+    },
+    "96": {
+      "prefill_step": 96,
+      "differing": [
+        {
+          "layer": 0,
+          "kind": "gdn",
+          "field": "arr1",
+          "max_abs_delta": 1.3969838619232178e-09
+        },
+        {
+          "layer": 1,
+          "kind": "gdn",
+          "field": "arr0",
+          "max_abs_delta": 7.152557373046875e-07
+        },
+        {
+          "layer": 1,
+          "kind": "gdn",
+          "field": "arr1",
+          "max_abs_delta": 3.725290298461914e-09
+        },
+        {
+          "layer": 2,
+          "kind": "gdn",
+          "field": "arr0",
+          "max_abs_delta": 5.960464477539062e-07
+        },
+        {
+          "layer": 2,
+          "kind": "gdn",
+          "field": "arr1",
+          "max_abs_delta": 3.026798367500305e-09
+        },
+        {
+          "layer": 3,
+          "kind": "attn",
+          "field": "keys",
+          "max_abs_delta": 2.2649765014648438e-06
+        },
+        {
+          "layer": 3,
+          "kind": "attn",
+          "field": "values",
+          "max_abs_delta": 1.3113021850585938e-06
+        },
+        {
+          "layer": 4,
+          "kind": "gdn",
+          "field": "arr0",
+          "max_abs_delta": 9.5367431640625e-07
+        },
+        {
+          "layer": 4,
+          "kind": "gdn",
+          "field": "arr1",
+          "max_abs_delta": 6.05359673500061e-09
+        },
+        {
+          "layer": 5,
+          "kind": "gdn",
+          "field": "arr0",
+          "max_abs_delta": 1.0132789611816406e-06
+        },
+        {
+          "layer": 5,
+          "kind": "gdn",
+          "field": "arr1",
+          "max_abs_delta": 5.122274160385132e-09
+        },
+        {
+          "layer": 6,
+          "kind": "gdn",
+          "field": "arr0",
+          "max_abs_delta": 9.611248970031738e-07
+        },
+        {
+          "layer": 6,
+          "kind": "gdn",
+          "field": "arr1",
+          "max_abs_delta": 3.725290298461914e-09
+        },
+        {
+          "layer": 7,
+          "kind": "attn",
+          "field": "keys",
+          "max_abs_delta": 5.125999450683594e-06
+        },
+        {
+          "layer": 7,
+          "kind": "attn",
+          "field": "values",
+          "max_abs_delta": 2.1457672119140625e-06
+        }
+      ],
+      "n_differing": 15
+    },
+    "64": {
+      "prefill_step": 64,
+      "differing": [
+        {
+          "layer": 0,
+          "kind": "gdn",
+          "field": "arr1",
+          "max_abs_delta": 1.3969838619232178e-09
+        },
+        {
+          "layer": 1,
+          "kind": "gdn",
+          "field": "arr0",
+          "max_abs_delta": 7.152557373046875e-07
+        },
+        {
+          "layer": 1,
+          "kind": "gdn",
+          "field": "arr1",
+          "max_abs_delta": 3.725290298461914e-09
+        },
+        {
+          "layer": 2,
+          "kind": "gdn",
+          "field": "arr0",
+          "max_abs_delta": 5.960464477539062e-07
+        },
+        {
+          "layer": 2,
+          "kind": "gdn",
+          "field": "arr1",
+          "max_abs_delta": 3.026798367500305e-09
+        },
+        {
+          "layer": 3,
+          "kind": "attn",
+          "field": "keys",
+          "max_abs_delta": 2.2649765014648438e-06
+        },
+        {
+          "layer": 3,
+          "kind": "attn",
+          "field": "values",
+          "max_abs_delta": 1.3113021850585938e-06
+        },
+        {
+          "layer": 4,
+          "kind": "gdn",
+          "field": "arr0",
+          "max_abs_delta": 9.5367431640625e-07
+        },
+        {
+          "layer": 4,
+          "kind": "gdn",
+          "field": "arr1",
+          "max_abs_delta": 6.05359673500061e-09
+        },
+        {
+          "layer": 5,
+          "kind": "gdn",
+          "field": "arr0",
+          "max_abs_delta": 1.0132789611816406e-06
+        },
+        {
+          "layer": 5,
+          "kind": "gdn",
+          "field": "arr1",
+          "max_abs_delta": 5.122274160385132e-09
+        },
+        {
+          "layer": 6,
+          "kind": "gdn",
+          "field": "arr0",
+          "max_abs_delta": 9.611248970031738e-07
+        },
+        {
+          "layer": 6,
+          "kind": "gdn",
+          "field": "arr1",
+          "max_abs_delta": 3.725290298461914e-09
+        },
+        {
+          "layer": 7,
+          "kind": "attn",
+          "field": "keys",
+          "max_abs_delta": 5.125999450683594e-06
+        },
+        {
+          "layer": 7,
+          "kind": "attn",
+          "field": "values",
+          "max_abs_delta": 2.1457672119140625e-06
+        }
+      ],
+      "n_differing": 15
+    },
+    "48": {
+      "prefill_step": 48,
+      "differing": [
+        {
+          "layer": 0,
+          "kind": "gdn",
+          "field": "arr1",
+          "max_abs_delta": 1.3969838619232178e-09
+        },
+        {
+          "layer": 1,
+          "kind": "gdn",
+          "field": "arr0",
+          "max_abs_delta": 7.152557373046875e-07
+        },
+        {
+          "layer": 1,
+          "kind": "gdn",
+          "field": "arr1",
+          "max_abs_delta": 3.725290298461914e-09
+        },
+        {
+          "layer": 2,
+          "kind": "gdn",
+          "field": "arr0",
+          "max_abs_delta": 5.960464477539062e-07
+        },
+        {
+          "layer": 2,
+          "kind": "gdn",
+          "field": "arr1",
+          "max_abs_delta": 3.026798367500305e-09
+        },
+        {
+          "layer": 3,
+          "kind": "attn",
+          "field": "keys",
+          "max_abs_delta": 2.2649765014648438e-06
+        },
+        {
+          "layer": 3,
+          "kind": "attn",
+          "field": "values",
+          "max_abs_delta": 1.3113021850585938e-06
+        },
+        {
+          "layer": 4,
+          "kind": "gdn",
+          "field": "arr0",
+          "max_abs_delta": 9.5367431640625e-07
+        },
+        {
+          "layer": 4,
+          "kind": "gdn",
+          "field": "arr1",
+          "max_abs_delta": 6.05359673500061e-09
+        },
+        {
+          "layer": 5,
+          "kind": "gdn",
+          "field": "arr0",
+          "max_abs_delta": 1.0132789611816406e-06
+        },
+        {
+          "layer": 5,
+          "kind": "gdn",
+          "field": "arr1",
+          "max_abs_delta": 5.122274160385132e-09
+        },
+        {
+          "layer": 6,
+          "kind": "gdn",
+          "field": "arr0",
+          "max_abs_delta": 9.611248970031738e-07
+        },
+        {
+          "layer": 6,
+          "kind": "gdn",
+          "field": "arr1",
+          "max_abs_delta": 3.725290298461914e-09
+        },
+        {
+          "layer": 7,
+          "kind": "attn",
+          "field": "keys",
+          "max_abs_delta": 5.125999450683594e-06
+        },
+        {
+          "layer": 7,
+          "kind": "attn",
+          "field": "values",
+          "max_abs_delta": 2.1457672119140625e-06
+        }
+      ],
+      "n_differing": 15
+    },
+    "32": {
+      "prefill_step": 32,
+      "differing": [
+        {
+          "layer": 0,
+          "kind": "gdn",
+          "field": "arr1",
+          "max_abs_delta": 1.3969838619232178e-09
+        },
+        {
+          "layer": 1,
+          "kind": "gdn",
+          "field": "arr0",
+          "max_abs_delta": 7.152557373046875e-07
+        },
+        {
+          "layer": 1,
+          "kind": "gdn",
+          "field": "arr1",
+          "max_abs_delta": 3.725290298461914e-09
+        },
+        {
+          "layer": 2,
+          "kind": "gdn",
+          "field": "arr0",
+          "max_abs_delta": 5.960464477539062e-07
+        },
+        {
+          "layer": 2,
+          "kind": "gdn",
+          "field": "arr1",
+          "max_abs_delta": 3.026798367500305e-09
+        },
+        {
+          "layer": 3,
+          "kind": "attn",
+          "field": "keys",
+          "max_abs_delta": 2.2649765014648438e-06
+        },
+        {
+          "layer": 3,
+          "kind": "attn",
+          "field": "values",
+          "max_abs_delta": 1.3113021850585938e-06
+        },
+        {
+          "layer": 4,
+          "kind": "gdn",
+          "field": "arr0",
+          "max_abs_delta": 9.5367431640625e-07
+        },
+        {
+          "layer": 4,
+          "kind": "gdn",
+          "field": "arr1",
+          "max_abs_delta": 6.05359673500061e-09
+        },
+        {
+          "layer": 5,
+          "kind": "gdn",
+          "field": "arr0",
+          "max_abs_delta": 1.0132789611816406e-06
+        },
+        {
+          "layer": 5,
+          "kind": "gdn",
+          "field": "arr1",
+          "max_abs_delta": 5.122274160385132e-09
+        },
+        {
+          "layer": 6,
+          "kind": "gdn",
+          "field": "arr0",
+          "max_abs_delta": 9.611248970031738e-07
+        },
+        {
+          "layer": 6,
+          "kind": "gdn",
+          "field": "arr1",
+          "max_abs_delta": 3.725290298461914e-09
+        },
+        {
+          "layer": 7,
+          "kind": "attn",
+          "field": "keys",
+          "max_abs_delta": 5.125999450683594e-06
+        },
+        {
+          "layer": 7,
+          "kind": "attn",
+          "field": "values",
+          "max_abs_delta": 2.1457672119140625e-06
+        }
+      ],
+      "n_differing": 15
+    },
+    "20": {
+      "prefill_step": 20,
+      "differing": [
+        {
+          "layer": 0,
+          "kind": "gdn",
+          "field": "arr0",
+          "max_abs_delta": 4.172325134277344e-07
+        },
+        {
+          "layer": 0,
+          "kind": "gdn",
+          "field": "arr1",
+          "max_abs_delta": 1.862645149230957e-09
+        },
+        {
+          "layer": 1,
+          "kind": "gdn",
+          "field": "arr0",
+          "max_abs_delta": 5.960464477539062e-07
+        },
+        {
+          "layer": 1,
+          "kind": "gdn",
+          "field": "arr1",
+          "max_abs_delta": 5.587935447692871e-09
+        },
+        {
+          "layer": 2,
+          "kind": "gdn",
+          "field": "arr0",
+          "max_abs_delta": 6.854534149169922e-07
+        },
+        {
+          "layer": 2,
+          "kind": "gdn",
+          "field": "arr1",
+          "max_abs_delta": 2.561137080192566e-09
+        },
+        {
+          "layer": 3,
+          "kind": "attn",
+          "field": "keys",
+          "max_abs_delta": 2.384185791015625e-06
+        },
+        {
+          "layer": 3,
+          "kind": "attn",
+          "field": "values",
+          "max_abs_delta": 1.2516975402832031e-06
+        },
+        {
+          "layer": 4,
+          "kind": "gdn",
+          "field": "arr0",
+          "max_abs_delta": 1.1920928955078125e-06
+        },
+        {
+          "layer": 4,
+          "kind": "gdn",
+          "field": "arr1",
+          "max_abs_delta": 5.587935447692871e-09
+        },
+        {
+          "layer": 5,
+          "kind": "gdn",
+          "field": "arr0",
+          "max_abs_delta": 1.1920928955078125e-06
+        },
+        {
+          "layer": 5,
+          "kind": "gdn",
+          "field": "arr1",
+          "max_abs_delta": 4.423782229423523e-09
+        },
+        {
+          "layer": 6,
+          "kind": "gdn",
+          "field": "arr0",
+          "max_abs_delta": 1.3113021850585938e-06
+        },
+        {
+          "layer": 6,
+          "kind": "gdn",
+          "field": "arr1",
+          "max_abs_delta": 6.984919309616089e-09
+        },
+        {
+          "layer": 7,
+          "kind": "attn",
+          "field": "keys",
+          "max_abs_delta": 4.887580871582031e-06
+        },
+        {
+          "layer": 7,
+          "kind": "attn",
+          "field": "values",
+          "max_abs_delta": 2.6226043701171875e-06
+        }
+      ],
+      "n_differing": 16
+    },
+    "16": {
+      "prefill_step": 16,
+      "differing": [],
+      "n_differing": 0
+    },
+    "12": {
+      "prefill_step": 12,
+      "differing": [
+        {
+          "layer": 0,
+          "kind": "gdn",
+          "field": "arr1",
+          "max_abs_delta": 1.3969838619232178e-09
+        },
+        {
+          "layer": 1,
+          "kind": "gdn",
+          "field": "arr0",
+          "max_abs_delta": 7.152557373046875e-07
+        },
+        {
+          "layer": 1,
+          "kind": "gdn",
+          "field": "arr1",
+          "max_abs_delta": 3.725290298461914e-09
+        },
+        {
+          "layer": 2,
+          "kind": "gdn",
+          "field": "arr0",
+          "max_abs_delta": 8.940696716308594e-07
+        },
+        {
+          "layer": 2,
+          "kind": "gdn",
+          "field": "arr1",
+          "max_abs_delta": 2.0954757928848267e-09
+        },
+        {
+          "layer": 3,
+          "kind": "attn",
+          "field": "keys",
+          "max_abs_delta": 2.6226043701171875e-06
+        },
+        {
+          "layer": 3,
+          "kind": "attn",
+          "field": "values",
+          "max_abs_delta": 1.6093254089355469e-06
+        },
+        {
+          "layer": 4,
+          "kind": "gdn",
+          "field": "arr0",
+          "max_abs_delta": 9.834766387939453e-07
+        },
+        {
+          "layer": 4,
+          "kind": "gdn",
+          "field": "arr1",
+          "max_abs_delta": 5.122274160385132e-09
+        },
+        {
+          "layer": 5,
+          "kind": "gdn",
+          "field": "arr0",
+          "max_abs_delta": 9.760260581970215e-07
+        },
+        {
+          "layer": 5,
+          "kind": "gdn",
+          "field": "arr1",
+          "max_abs_delta": 4.889443516731262e-09
+        },
+        {
+          "layer": 6,
+          "kind": "gdn",
+          "field": "arr0",
+          "max_abs_delta": 9.5367431640625e-07
+        },
+        {
+          "layer": 6,
+          "kind": "gdn",
+          "field": "arr1",
+          "max_abs_delta": 6.51925802230835e-09
+        },
+        {
+          "layer": 7,
+          "kind": "attn",
+          "field": "keys",
+          "max_abs_delta": 4.947185516357422e-06
+        },
+        {
+          "layer": 7,
+          "kind": "attn",
+          "field": "values",
+          "max_abs_delta": 2.8014183044433594e-06
+        }
+      ],
+      "n_differing": 15
+    },
+    "8": {
+      "prefill_step": 8,
+      "differing": [
+        {
+          "layer": 0,
+          "kind": "gdn",
+          "field": "arr1",
+          "max_abs_delta": 1.3969838619232178e-09
+        },
+        {
+          "layer": 1,
+          "kind": "gdn",
+          "field": "arr0",
+          "max_abs_delta": 7.152557373046875e-07
+        },
+        {
+          "layer": 1,
+          "kind": "gdn",
+          "field": "arr1",
+          "max_abs_delta": 3.725290298461914e-09
+        },
+        {
+          "layer": 2,
+          "kind": "gdn",
+          "field": "arr0",
+          "max_abs_delta": 5.960464477539062e-07
+        },
+        {
+          "layer": 2,
+          "kind": "gdn",
+          "field": "arr1",
+          "max_abs_delta": 3.026798367500305e-09
+        },
+        {
+          "layer": 3,
+          "kind": "attn",
+          "field": "keys",
+          "max_abs_delta": 2.2649765014648438e-06
+        },
+        {
+          "layer": 3,
+          "kind": "attn",
+          "field": "values",
+          "max_abs_delta": 1.3113021850585938e-06
+        },
+        {
+          "layer": 4,
+          "kind": "gdn",
+          "field": "arr0",
+          "max_abs_delta": 9.5367431640625e-07
+        },
+        {
+          "layer": 4,
+          "kind": "gdn",
+          "field": "arr1",
+          "max_abs_delta": 6.05359673500061e-09
+        },
+        {
+          "layer": 5,
+          "kind": "gdn",
+          "field": "arr0",
+          "max_abs_delta": 1.0132789611816406e-06
+        },
+        {
+          "layer": 5,
+          "kind": "gdn",
+          "field": "arr1",
+          "max_abs_delta": 5.122274160385132e-09
+        },
+        {
+          "layer": 6,
+          "kind": "gdn",
+          "field": "arr0",
+          "max_abs_delta": 9.611248970031738e-07
+        },
+        {
+          "layer": 6,
+          "kind": "gdn",
+          "field": "arr1",
+          "max_abs_delta": 3.725290298461914e-09
+        },
+        {
+          "layer": 7,
+          "kind": "attn",
+          "field": "keys",
+          "max_abs_delta": 5.125999450683594e-06
+        },
+        {
+          "layer": 7,
+          "kind": "attn",
+          "field": "values",
+          "max_abs_delta": 2.1457672119140625e-06
+        }
+      ],
+      "n_differing": 15
+    },
+    "7": {
+      "prefill_step": 7,
+      "differing": [
+        {
+          "layer": 0,
+          "kind": "gdn",
+          "field": "arr0",
+          "max_abs_delta": 4.172325134277344e-07
+        },
+        {
+          "layer": 0,
+          "kind": "gdn",
+          "field": "arr1",
+          "max_abs_delta": 2.3283064365386963e-09
+        },
+        {
+          "layer": 1,
+          "kind": "gdn",
+          "field": "arr0",
+          "max_abs_delta": 7.152557373046875e-07
+        },
+        {
+          "layer": 1,
+          "kind": "gdn",
+          "field": "arr1",
+          "max_abs_delta": 4.889443516731262e-09
+        },
+        {
+          "layer": 2,
+          "kind": "gdn",
+          "field": "arr0",
+          "max_abs_delta": 8.940696716308594e-07
+        },
+        {
+          "layer": 2,
+          "kind": "gdn",
+          "field": "arr1",
+          "max_abs_delta": 3.026798367500305e-09
+        },
+        {
+          "layer": 3,
+          "kind": "attn",
+          "field": "keys",
+          "max_abs_delta": 2.9802322387695312e-06
+        },
+        {
+          "layer": 3,
+          "kind": "attn",
+          "field": "values",
+          "max_abs_delta": 1.817941665649414e-06
+        },
+        {
+          "layer": 4,
+          "kind": "gdn",
+          "field": "arr0",
+          "max_abs_delta": 1.0728836059570312e-06
+        },
+        {
+          "layer": 4,
+          "kind": "gdn",
+          "field": "arr1",
+          "max_abs_delta": 5.820766091346741e-09
+        },
+        {
+          "layer": 5,
+          "kind": "gdn",
+          "field": "arr0",
+          "max_abs_delta": 1.0132789611816406e-06
+        },
+        {
+          "layer": 5,
+          "kind": "gdn",
+          "field": "arr1",
+          "max_abs_delta": 5.820766091346741e-09
+        },
+        {
+          "layer": 6,
+          "kind": "gdn",
+          "field": "arr0",
+          "max_abs_delta": 1.1920928955078125e-06
+        },
+        {
+          "layer": 6,
+          "kind": "gdn",
+          "field": "arr1",
+          "max_abs_delta": 4.423782229423523e-09
+        },
+        {
+          "layer": 7,
+          "kind": "attn",
+          "field": "keys",
+          "max_abs_delta": 5.602836608886719e-06
+        },
+        {
+          "layer": 7,
+          "kind": "attn",
+          "field": "values",
+          "max_abs_delta": 2.869870513677597e-06
+        }
+      ],
+      "n_differing": 16
+    },
+    "5": {
+      "prefill_step": 5,
+      "differing": [
+        {
+          "layer": 0,
+          "kind": "gdn",
+          "field": "arr0",
+          "max_abs_delta": 4.172325134277344e-07
+        },
+        {
+          "layer": 0,
+          "kind": "gdn",
+          "field": "arr1",
+          "max_abs_delta": 2.7939677238464355e-09
+        },
+        {
+          "layer": 1,
+          "kind": "gdn",
+          "field": "arr0",
+          "max_abs_delta": 7.152557373046875e-07
+        },
+        {
+          "layer": 1,
+          "kind": "gdn",
+          "field": "arr1",
+          "max_abs_delta": 4.6566128730773926e-09
+        },
+        {
+          "layer": 2,
+          "kind": "gdn",
+          "field": "arr0",
+          "max_abs_delta": 8.344650268554688e-07
+        },
+        {
+          "layer": 2,
+          "kind": "gdn",
+          "field": "arr1",
+          "max_abs_delta": 4.190951585769653e-09
+        },
+        {
+          "layer": 3,
+          "kind": "attn",
+          "field": "keys",
+          "max_abs_delta": 2.9802322387695312e-06
+        },
+        {
+          "layer": 3,
+          "kind": "attn",
+          "field": "values",
+          "max_abs_delta": 1.7583370208740234e-06
+        },
+        {
+          "layer": 4,
+          "kind": "gdn",
+          "field": "arr0",
+          "max_abs_delta": 1.0728836059570312e-06
+        },
+        {
+          "layer": 4,
+          "kind": "gdn",
+          "field": "arr1",
+          "max_abs_delta": 5.529727786779404e-09
+        },
+        {
+          "layer": 5,
+          "kind": "gdn",
+          "field": "arr0",
+          "max_abs_delta": 1.3113021850585938e-06
+        },
+        {
+          "layer": 5,
+          "kind": "gdn",
+          "field": "arr1",
+          "max_abs_delta": 5.3551048040390015e-09
+        },
+        {
+          "layer": 6,
+          "kind": "gdn",
+          "field": "arr0",
+          "max_abs_delta": 1.1324882507324219e-06
+        },
+        {
+          "layer": 6,
+          "kind": "gdn",
+          "field": "arr1",
+          "max_abs_delta": 4.889443516731262e-09
+        },
+        {
+          "layer": 7,
+          "kind": "attn",
+          "field": "keys",
+          "max_abs_delta": 4.708766937255859e-06
+        },
+        {
+          "layer": 7,
+          "kind": "attn",
+          "field": "values",
+          "max_abs_delta": 2.5513581931591034e-06
+        }
+      ],
+      "n_differing": 16
+    },
+    "4": {
+      "prefill_step": 4,
+      "differing": [
+        {
+          "layer": 0,
+          "kind": "gdn",
+          "field": "arr0",
+          "max_abs_delta": 4.172325134277344e-07
+        },
+        {
+          "layer": 0,
+          "kind": "gdn",
+          "field": "arr1",
+          "max_abs_delta": 1.862645149230957e-09
+        },
+        {
+          "layer": 1,
+          "kind": "gdn",
+          "field": "arr0",
+          "max_abs_delta": 5.960464477539062e-07
+        },
+        {
+          "layer": 1,
+          "kind": "gdn",
+          "field": "arr1",
+          "max_abs_delta": 5.587935447692871e-09
+        },
+        {
+          "layer": 2,
+          "kind": "gdn",
+          "field": "arr0",
+          "max_abs_delta": 5.960464477539062e-07
+        },
+        {
+          "layer": 2,
+          "kind": "gdn",
+          "field": "arr1",
+          "max_abs_delta": 3.958120942115784e-09
+        },
+        {
+          "layer": 3,
+          "kind": "attn",
+          "field": "keys",
+          "max_abs_delta": 2.5033950805664062e-06
+        },
+        {
+          "layer": 3,
+          "kind": "attn",
+          "field": "values",
+          "max_abs_delta": 1.5795230865478516e-06
+        },
+        {
+          "layer": 4,
+          "kind": "gdn",
+          "field": "arr0",
+          "max_abs_delta": 8.940696716308594e-07
+        },
+        {
+          "layer": 4,
+          "kind": "gdn",
+          "field": "arr1",
+          "max_abs_delta": 7.450580596923828e-09
+        },
+        {
+          "layer": 5,
+          "kind": "gdn",
+          "field": "arr0",
+          "max_abs_delta": 1.0132789611816406e-06
+        },
+        {
+          "layer": 5,
+          "kind": "gdn",
+          "field": "arr1",
+          "max_abs_delta": 6.05359673500061e-09
+        },
+        {
+          "layer": 6,
+          "kind": "gdn",
+          "field": "arr0",
+          "max_abs_delta": 1.1324882507324219e-06
+        },
+        {
+          "layer": 6,
+          "kind": "gdn",
+          "field": "arr1",
+          "max_abs_delta": 4.423782229423523e-09
+        },
+        {
+          "layer": 7,
+          "kind": "attn",
+          "field": "keys",
+          "max_abs_delta": 4.470348358154297e-06
+        },
+        {
+          "layer": 7,
+          "kind": "attn",
+          "field": "values",
+          "max_abs_delta": 3.266613930463791e-06
+        }
+      ],
+      "n_differing": 16
+    },
+    "3": {
+      "prefill_step": 3,
+      "differing": [
+        {
+          "layer": 0,
+          "kind": "gdn",
+          "field": "arr0",
+          "max_abs_delta": 4.172325134277344e-07
+        },
+        {
+          "layer": 0,
+          "kind": "gdn",
+          "field": "arr1",
+          "max_abs_delta": 2.7939677238464355e-09
+        },
+        {
+          "layer": 1,
+          "kind": "gdn",
+          "field": "arr0",
+          "max_abs_delta": 7.152557373046875e-07
+        },
+        {
+          "layer": 1,
+          "kind": "gdn",
+          "field": "arr1",
+          "max_abs_delta": 6.51925802230835e-09
+        },
+        {
+          "layer": 2,
+          "kind": "gdn",
+          "field": "arr0",
+          "max_abs_delta": 8.344650268554688e-07
+        },
+        {
+          "layer": 2,
+          "kind": "gdn",
+          "field": "arr1",
+          "max_abs_delta": 4.190951585769653e-09
+        },
+        {
+          "layer": 3,
+          "kind": "attn",
+          "field": "keys",
+          "max_abs_delta": 2.684071660041809e-06
+        },
+        {
+          "layer": 3,
+          "kind": "attn",
+          "field": "values",
+          "max_abs_delta": 1.8477439880371094e-06
+        },
+        {
+          "layer": 4,
+          "kind": "gdn",
+          "field": "arr0",
+          "max_abs_delta": 1.1324882507324219e-06
+        },
+        {
+          "layer": 4,
+          "kind": "gdn",
+          "field": "arr1",
+          "max_abs_delta": 8.381903171539307e-09
+        },
+        {
+          "layer": 5,
+          "kind": "gdn",
+          "field": "arr0",
+          "max_abs_delta": 1.2218952178955078e-06
+        },
+        {
+          "layer": 5,
+          "kind": "gdn",
+          "field": "arr1",
+          "max_abs_delta": 5.820766091346741e-09
+        },
+        {
+          "layer": 6,
+          "kind": "gdn",
+          "field": "arr0",
+          "max_abs_delta": 1.1920928955078125e-06
+        },
+        {
+          "layer": 6,
+          "kind": "gdn",
+          "field": "arr1",
+          "max_abs_delta": 4.889443516731262e-09
+        },
+        {
+          "layer": 7,
+          "kind": "attn",
+          "field": "keys",
+          "max_abs_delta": 5.9604644775390625e-06
+        },
+        {
+          "layer": 7,
+          "kind": "attn",
+          "field": "values",
+          "max_abs_delta": 2.9206275939941406e-06
+        }
+      ],
+      "n_differing": 16
+    },
+    "2": {
+      "prefill_step": 2,
+      "differing": [
+        {
+          "layer": 0,
+          "kind": "gdn",
+          "field": "arr0",
+          "max_abs_delta": 4.172325134277344e-07
+        },
+        {
+          "layer": 0,
+          "kind": "gdn",
+          "field": "arr1",
+          "max_abs_delta": 2.7939677238464355e-09
+        },
+        {
+          "layer": 1,
+          "kind": "gdn",
+          "field": "arr0",
+          "max_abs_delta": 7.152557373046875e-07
+        },
+        {
+          "layer": 1,
+          "kind": "gdn",
+          "field": "arr1",
+          "max_abs_delta": 6.51925802230835e-09
+        },
+        {
+          "layer": 2,
+          "kind": "gdn",
+          "field": "arr0",
+          "max_abs_delta": 8.344650268554688e-07
+        },
+        {
+          "layer": 2,
+          "kind": "gdn",
+          "field": "arr1",
+          "max_abs_delta": 4.190951585769653e-09
+        },
+        {
+          "layer": 3,
+          "kind": "attn",
+          "field": "keys",
+          "max_abs_delta": 2.8908252716064453e-06
+        },
+        {
+          "layer": 3,
+          "kind": "attn",
+          "field": "values",
+          "max_abs_delta": 1.7881393432617188e-06
+        },
+        {
+          "layer": 4,
+          "kind": "gdn",
+          "field": "arr0",
+          "max_abs_delta": 1.1920928955078125e-06
+        },
+        {
+          "layer": 4,
+          "kind": "gdn",
+          "field": "arr1",
+          "max_abs_delta": 5.296897143125534e-09
+        },
+        {
+          "layer": 5,
+          "kind": "gdn",
+          "field": "arr0",
+          "max_abs_delta": 1.0132789611816406e-06
+        },
+        {
+          "layer": 5,
+          "kind": "gdn",
+          "field": "arr1",
+          "max_abs_delta": 6.170012056827545e-09
+        },
+        {
+          "layer": 6,
+          "kind": "gdn",
+          "field": "arr0",
+          "max_abs_delta": 1.3113021850585938e-06
+        },
+        {
+          "layer": 6,
+          "kind": "gdn",
+          "field": "arr1",
+          "max_abs_delta": 5.238689482212067e-09
+        },
+        {
+          "layer": 7,
+          "kind": "attn",
+          "field": "keys",
+          "max_abs_delta": 5.4836273193359375e-06
+        },
+        {
+          "layer": 7,
+          "kind": "attn",
+          "field": "values",
+          "max_abs_delta": 2.682209014892578e-06
+        }
+      ],
+      "n_differing": 16
+    },
+    "1": {
+      "prefill_step": 1,
+      "differing": [
+        {
+          "layer": 0,
+          "kind": "gdn",
+          "field": "arr0",
+          "max_abs_delta": 4.76837158203125e-07
+        },
+        {
+          "layer": 0,
+          "kind": "gdn",
+          "field": "arr1",
+          "max_abs_delta": 2.7939677238464355e-09
+        },
+        {
+          "layer": 1,
+          "kind": "gdn",
+          "field": "arr0",
+          "max_abs_delta": 5.960464477539062e-07
+        },
+        {
+          "layer": 1,
+          "kind": "gdn",
+          "field": "arr1",
+          "max_abs_delta": 4.190951585769653e-09
+        },
+        {
+          "layer": 2,
+          "kind": "gdn",
+          "field": "arr0",
+          "max_abs_delta": 7.748603820800781e-07
+        },
+        {
+          "layer": 2,
+          "kind": "gdn",
+          "field": "arr1",
+          "max_abs_delta": 3.4924596548080444e-09
+        },
+        {
+          "layer": 3,
+          "kind": "attn",
+          "field": "keys",
+          "max_abs_delta": 3.0994415283203125e-06
+        },
+        {
+          "layer": 3,
+          "kind": "attn",
+          "field": "values",
+          "max_abs_delta": 1.8924474716186523e-06
+        },
+        {
+          "layer": 4,
+          "kind": "gdn",
+          "field": "arr0",
+          "max_abs_delta": 1.0728836059570312e-06
+        },
+        {
+          "layer": 4,
+          "kind": "gdn",
+          "field": "arr1",
+          "max_abs_delta": 5.9371814131736755e-09
+        },
+        {
+          "layer": 5,
+          "kind": "gdn",
+          "field": "arr0",
+          "max_abs_delta": 9.08970832824707e-07
+        },
+        {
+          "layer": 5,
+          "kind": "gdn",
+          "field": "arr1",
+          "max_abs_delta": 5.529727786779404e-09
+        },
+        {
+          "layer": 6,
+          "kind": "gdn",
+          "field": "arr0",
+          "max_abs_delta": 1.1324882507324219e-06
+        },
+        {
+          "layer": 6,
+          "kind": "gdn",
+          "field": "arr1",
+          "max_abs_delta": 4.525645636022091e-09
+        },
+        {
+          "layer": 7,
+          "kind": "attn",
+          "field": "keys",
+          "max_abs_delta": 5.543231964111328e-06
+        },
+        {
+          "layer": 7,
+          "kind": "attn",
+          "field": "values",
+          "max_abs_delta": 2.682209014892578e-06
+        }
+      ],
+      "n_differing": 16
+    }
+  }
+}

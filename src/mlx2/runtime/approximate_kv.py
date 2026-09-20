@@ -21,7 +21,9 @@ from typing import Any, Mapping
 
 from .approximate_state import ApproximateStateError
 
-_POLICY_KEYS = frozenset({"operation", "enabled", "start_tokens", "evidence"})
+_POLICY_KEYS = frozenset(
+    {"operation", "enabled", "start_tokens", "evidence", "compose_mtp"}
+)
 _SUPPORTED_BITS = (2, 3, 4, 5, 6, 8)
 _SUPPORTED_GROUPS = (32, 64, 128)
 
@@ -81,6 +83,10 @@ class ServingApproximateKVPolicy:
     operation: str | None = None
     start_tokens: int = 0
     evidence: tuple[str, ...] = ()
+    # Self-MTP composition: quantize the lane's *target* planes only and keep
+    # the MTP head's draft cache exact.  Default off; the MTP refusal stands
+    # unless this is set explicitly.
+    compose_mtp: bool = False
 
     @classmethod
     def from_value(cls, value) -> "ServingApproximateKVPolicy":
@@ -111,15 +117,23 @@ class ServingApproximateKVPolicy:
             isinstance(item, str) and item for item in evidence
         ):
             raise ValueError("approximate KV evidence must be a list of strings")
-        return cls(enabled, operation, start_tokens, tuple(evidence))
+        compose_mtp = value.get("compose_mtp", False)
+        if not isinstance(compose_mtp, bool):
+            raise ValueError("approximate KV compose_mtp must be a boolean")
+        return cls(enabled, operation, start_tokens, tuple(evidence), compose_mtp)
 
     def as_dict(self) -> dict:
-        return {
+        payload = {
             "enabled": self.enabled,
             "operation": self.operation,
             "start_tokens": self.start_tokens,
             "evidence": list(self.evidence),
         }
+        # Present only when selected, so existing qualification records (whose
+        # settings hash predates the key) keep matching the ordinary route.
+        if self.compose_mtp:
+            payload["compose_mtp"] = True
+        return payload
 
 
 def operation_revision(adapter_fingerprint, name, descriptor) -> str:

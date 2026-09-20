@@ -1,0 +1,254 @@
+{
+  "mode": "gpu",
+  "compat_mode": "auto",
+  "model": "Qwen3.8-27B-oQ4e-mtp",
+  "server": [
+    "~/Desktop/mlx2/.venv/bin/python",
+    "-m",
+    "mlx2.server",
+    "--model",
+    "~/mlx-models/Qwen3.8-27B-oQ4e-mtp",
+    "--port",
+    "8397",
+    "--agent-compat",
+    "auto",
+    "--custom-tool-grammar",
+    "validate",
+    "--execution-policy",
+    "/private/tmp/mlx2-rm08-responses-agent-conformance/qualification/policies/qwen38-27b-mtp2.json",
+    "--qualification-mode"
+  ],
+  "rows": [
+    {
+      "repeat": 0,
+      "client": "codex",
+      "task": "add_file",
+      "returncode": 0,
+      "passed": true,
+      "requests": 2,
+      "non_200": 0,
+      "cached_tokens": [
+        0,
+        9904
+      ],
+      "counter_delta": {
+        "agent_compat_source_detected": 2,
+        "agent_compat_detected_codex": 2,
+        "agent_compat_custom_tools_declared": 2,
+        "agent_compat_hosted_tools_dropped": 4,
+        "agent_compat_requests": 2,
+        "agent_compat_system_folded": 2,
+        "agent_compat_phase_outputs": 2,
+        "agent_compat_phase_inputs": 1
+      },
+      "seconds": 18.0
+    },
+    {
+      "repeat": 0,
+      "client": "codex",
+      "task": "fix_test",
+      "returncode": 0,
+      "passed": true,
+      "requests": 5,
+      "non_200": 0,
+      "cached_tokens": [
+        0,
+        9897,
+        10283,
+        10517,
+        10660
+      ],
+      "counter_delta": {
+        "agent_compat_source_detected": 5,
+        "agent_compat_detected_codex": 5,
+        "agent_compat_custom_tools_declared": 5,
+        "agent_compat_hosted_tools_dropped": 10,
+        "agent_compat_requests": 5,
+        "agent_compat_system_folded": 5,
+        "agent_compat_phase_outputs": 5,
+        "agent_compat_phase_inputs": 10,
+        "agent_compat_custom_tool_grammar_validated": 2,
+        "agent_compat_custom_tool_calls": 2,
+        "agent_compat_custom_tool_replays": 5
+      },
+      "seconds": 28.0
+    },
+    {
+      "repeat": 0,
+      "client": "claude",
+      "task": "add_file",
+      "returncode": 0,
+      "passed": true,
+      "requests": 2,
+      "non_200": 0,
+      "cached_tokens": [
+        0,
+        16006
+      ],
+      "counter_delta": {
+        "agent_compat_source_detected": 2,
+        "agent_compat_system_folded": 3,
+        "agent_compat_detected_claude_code": 2,
+        "agent_compat_adaptive_thinking": 2,
+        "agent_compat_thinking_omitted": 2,
+        "agent_compat_output_effort": 2,
+        "agent_compat_thinking_restored": 1
+      },
+      "seconds": 29.5
+    },
+    {
+      "repeat": 0,
+      "client": "claude",
+      "task": "fix_test",
+      "returncode": 0,
+      "passed": true,
+      "requests": 5,
+      "non_200": 0,
+      "cached_tokens": [
+        0,
+        16090,
+        16175,
+        16457,
+        16588
+      ],
+      "counter_delta": {
+        "agent_compat_source_detected": 5,
+        "agent_compat_system_folded": 15,
+        "agent_compat_detected_claude_code": 5,
+        "agent_compat_adaptive_thinking": 5,
+        "agent_compat_thinking_omitted": 5,
+        "agent_compat_output_effort": 5,
+        "agent_compat_thinking_restored": 10
+      },
+      "seconds": 39.7
+    },
+    {
+      "repeat": 1,
+      "client": "codex",
+      "task": "add_file",
+      "returncode": 0,
+      "passed": true,
+      "requests": 2,
+      "non_200": 0,
+      "cached_tokens": [
+        0,
+        9822
+      ],
+      "counter_delta": {
+        "agent_compat_source_detected": 2,
+        "agent_compat_detected_codex": 2,
+        "agent_compat_custom_tools_declared": 2,
+        "agent_compat_hosted_tools_dropped": 4,
+        "agent_compat_requests": 2,
+        "agent_compat_system_folded": 2,
+        "agent_compat_phase_outputs": 2,
+        "agent_compat_phase_inputs": 1
+      },
+      "seconds": 19.0
+    },
+    {
+      "repeat": 1,
+      "client": "codex",
+      "task": "fix_test",
+      "returncode": 0,
+      "passed": true,
+      "requests": 4,
+      "non_200": 0,
+      "cached_tokens": [
+        0,
+        9820,
+        10103,
+        10336
+      ],
+      "counter_delta": {
+        "agent_compat_source_detected": 4,
+        "agent_compat_detected_codex": 4,
+        "agent_compat_custom_tools_declared": 4,
+        "agent_compat_hosted_tools_dropped": 8,
+        "agent_compat_requests": 4,
+        "agent_compat_system_folded": 4,
+        "agent_compat_phase_outputs": 4,
+        "agent_compat_phase_inputs": 6,
+        "agent_compat_custom_tool_grammar_validated": 1,
+        "agent_compat_custom_tool_calls": 1,
+        "agent_compat_custom_tool_replays": 2
+      },
+      "seconds": 25.2
+    },
+    {
+      "repeat": 1,
+      "client": "claude",
+      "task": "add_file",
+      "returncode": 0,
+      "passed": true,
+      "requests": 2,
+      "non_200": 0,
+      "cached_tokens": [
+        0,
+        15870
+      ],
+      "counter_delta": {
+        "agent_compat_source_detected": 2,
+        "agent_compat_system_folded": 3,
+        "agent_compat_detected_claude_code": 2,
+        "agent_compat_adaptive_thinking": 2,
+        "agent_compat_thinking_omitted": 2,
+        "agent_compat_output_effort": 2,
+        "agent_compat_thinking_restored": 1
+      },
+      "seconds": 28.5
+    },
+    {
+      "repeat": 1,
+      "client": "claude",
+      "task": "fix_test",
+      "returncode": 0,
+      "passed": true,
+      "requests": 5,
+      "non_200": 0,
+      "cached_tokens": [
+        0,
+        15880,
+        16138,
+        16399,
+        16533
+      ],
+      "counter_delta": {
+        "agent_compat_source_detected": 5,
+        "agent_compat_system_folded": 15,
+        "agent_compat_detected_claude_code": 5,
+        "agent_compat_adaptive_thinking": 5,
+        "agent_compat_thinking_omitted": 5,
+        "agent_compat_output_effort": 5,
+        "agent_compat_thinking_restored": 10
+      },
+      "seconds": 38.6
+    }
+  ],
+  "agent_compat_counts": {
+    "agent_compat_source_detected": 27,
+    "agent_compat_detected_codex": 13,
+    "agent_compat_custom_tools_declared": 13,
+    "agent_compat_hosted_tools_dropped": 26,
+    "agent_compat_requests": 13,
+    "agent_compat_system_folded": 49,
+    "agent_compat_phase_outputs": 13,
+    "agent_compat_phase_inputs": 18,
+    "agent_compat_custom_tool_grammar_validated": 3,
+    "agent_compat_custom_tool_calls": 3,
+    "agent_compat_custom_tool_replays": 7,
+    "agent_compat_detected_claude_code": 14,
+    "agent_compat_adaptive_thinking": 14,
+    "agent_compat_thinking_omitted": 14,
+    "agent_compat_output_effort": 14,
+    "agent_compat_thinking_restored": 22
+  },
+  "pass_rate": {
+    "codex": "4/4",
+    "claude": "4/4"
+  },
+  "later_turn_cache_hits": "19/19",
+  "grammar_rejected_total": 0,
+  "failures": [],
+  "go": true
+}

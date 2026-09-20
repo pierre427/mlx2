@@ -1,0 +1,57 @@
+{
+  "mode": "streamed",
+  "model": "~/mlx-models/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-q4",
+  "prompt": "Write a Python function that merges two sorted lists in linear time.",
+  "tokens": [
+    271,
+    71093,
+    12305,
+    198,
+    727,
+    10562,
+    39914,
+    36053,
+    7080,
+    16,
+    11,
+    1103,
+    17,
+    1590,
+    198,
+    262
+  ],
+  "text": "\n\n```python\ndef merge_sorted_lists(list1, list2):\n   ",
+  "load_seconds": 5.873,
+  "decode_seconds_NOT_A_BENCHMARK": 4.23,
+  "active_bytes_after_load": 19684645128,
+  "active_bytes_after_install": 1565251848,
+  "peak_bytes": 19684654956,
+  "cache_gib": 1.0,
+  "counters": {
+    "stream_page_ins_total": 13185,
+    "stream_page_in_bytes_total": 7776829440,
+    "stream_expert_hits_total": 7812,
+    "stream_expert_misses_total": 13185,
+    "stream_evictions_total": 11385,
+    "stream_resident_bytes": 1061683200,
+    "stream_admission_refusals_total": 0,
+    "stream_working_set_overflows_total": 120,
+    "atlas_observations_total": 20997,
+    "atlas_trace_records_total": 20997,
+    "atlas_trace_dropped_total": 0
+  },
+  "plan": {
+    "layers": 120,
+    "experts_per_layer": 256,
+    "expert_bytes": 589824,
+    "table_bytes": 18119393280,
+    "capacity_experts": 15,
+    "ceiling_bytes": 1073741824,
+    "resident_ceiling_bytes": 1061683200,
+    "projections": [
+      "weight",
+      "scales",
+      "biases"
+    ]
+  }
+}

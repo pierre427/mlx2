@@ -1,0 +1,14 @@
+{
+ "agent_id": "job-rm07-top1-probe-35b-66116",
+ "complete_worker": {
+  "already_terminal": false,
+  "finished_at": 1789854679,
+  "status": "completed",
+  "worker_id": "f721676437c64d759ef6706de5db9100"
+ },
+ "register_worker": {
+  "worker_id": "f721676437c64d759ef6706de5db9100",
+  "workflow_id": "681fa6daa6844e90ad4a1b2509f41fc3"
+ },
+ "updated_at": "2026-09-19T21:51:19+00:00"
+}

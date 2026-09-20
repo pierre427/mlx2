@@ -163,6 +163,12 @@ class SelfMTPLane:
     share_qsa_indices: bool = False
     fly_verification: Optional[Any] = None
     relaxed_accepts: int = 0
+    # Default-off copy-draft state (runtime/copy_draft.py).  None keeps the
+    # historical MTP-head-only proposal.
+    copy_draft: Optional[Any] = None
+    # Optional mtp_confidence.DraftConfidenceProbe: per-position draft
+    # features (and greedy lookahead) for confidence-scheduled depth.
+    confidence_probe: Optional[Any] = None
 
 
 @dataclass
@@ -244,6 +250,15 @@ class SelfMTPCycleResult:
     zero_fast_path: bool = False
     true_batched: bool = False
     relaxed_accepts: Tuple[int, ...] = ()
+    # Per lane: copied-span length verified this round (0 = MTP-head lane)
+    # and the copy gate's decision ("off" when the lane has no copy state).
+    copy_spans: Tuple[int, ...] = ()
+    copy_decisions: Tuple[str, ...] = ()
+    # Host copies of per-draft-position confidence features, one tuple per
+    # lane (verified positions first, then unverified lookahead positions),
+    # and the matching drafted token ids.  Empty unless a probe was set.
+    draft_features: Tuple[Tuple[Tuple[float, ...], ...], ...] = ()
+    draft_feature_tokens: Tuple[Tuple[int, ...], ...] = ()
 
 
 def _mtp_backbone(model, tokens, cache):
@@ -1682,6 +1697,29 @@ def _propose_segmented_self_mtp(
             item.relaxed_accepts[0] if item.relaxed_accepts else 0
             for item in row_proposals
         ),
+        copy_spans=tuple(
+            item.copy_spans[0] if item.copy_spans else 0 for item in row_proposals
+        ),
+        copy_decisions=tuple(
+            item.copy_decisions[0] if item.copy_decisions else "off"
+            for item in row_proposals
+        ),
+        draft_features=(
+            tuple(
+                item.draft_features[0] if item.draft_features else ()
+                for item in row_proposals
+            )
+            if any(item.draft_features for item in row_proposals)
+            else ()
+        ),
+        draft_feature_tokens=(
+            tuple(
+                item.draft_feature_tokens[0] if item.draft_feature_tokens else ()
+                for item in row_proposals
+            )
+            if any(item.draft_feature_tokens for item in row_proposals)
+            else ()
+        ),
     )
     batch._row_states = row_states
     batch._row_proposals = row_proposals
@@ -1692,6 +1730,49 @@ def _propose_segmented_self_mtp(
     if timing:
         note_segmented_self_mtp("proposal_ns", time.perf_counter_ns() - started_ns)
     return aggregate
+
+
+def _plan_copy_drafts(
+    lanes: Sequence[SelfMTPLane], head_depths: Sequence[int]
+) -> Tuple[Tuple[Tuple[int, ...], ...], Tuple[str, ...]]:
+    """Choose, per lane, a copied span or the MTP head for this round.
+
+    Host-only (dict lookups over committed tokens); never touches caches.
+    Lanes without copy state keep the historical head proposal.
+    """
+    if not any(lane.copy_draft is not None for lane in lanes):
+        return (((),) * len(lanes), ("off",) * len(lanes))
+    from .copy_draft import cohort_copy_cap
+
+    rows = []
+    decisions = []
+    for lane, head_depth in zip(lanes, head_depths):
+        state = lane.copy_draft
+        if state is None:
+            rows.append(())
+            decisions.append("off")
+            continue
+        remaining = max(lane.max_tokens - lane.ntoks - 1, 0)
+        cap = min(
+            remaining,
+            cohort_copy_cap(state.policy, lanes=len(lanes), head_depths=head_depths),
+        )
+        (span, decision) = state.plan(head_depth=head_depth, cap=cap)
+        rows.append(tuple(int(token) for token in span))
+        decisions.append(decision)
+    return (tuple(rows), tuple(decisions))
+
+
+def copy_draft_candidate_pending(
+    batch: Union[BatchedSelfMTPState, SegmentedSelfMTPState],
+) -> bool:
+    """Whether any lane could propose a copy now (host-side peek)."""
+    return any(
+        lane.copy_draft is not None
+        and max(lane.max_tokens - lane.ntoks - 1, 0) > 0
+        and lane.copy_draft.has_candidate()
+        for lane in batch.lanes
+    )
 
 
 def _propose_batched_self_mtp_impl(
@@ -1819,6 +1900,14 @@ def advance_batched_self_mtp_zero(
             lane.stats.cycles += 1
             lane.stats.draft_cycles += 1
             lane.stats.bonus_tokens += 1
+            if lane.copy_draft is not None:
+                lane.copy_draft.record(
+                    copy_span=0,
+                    head_depth=0,
+                    accepted=0,
+                    emitted=1,
+                    committed=[int(bonus)],
+                )
             outputs.append((MTPToken(bonus, logprobs, False),))
 
         if segmented:
@@ -1861,6 +1950,64 @@ def advance_batched_self_mtp_zero(
     )
 
 
+def _draft_confidence_features(probe, logprobs, hidden):
+    from .mtp_confidence import draft_position_features
+
+    return draft_position_features(logprobs, hidden, probe.projection)
+
+
+def _stack_confidence_payload(draft_features, draft_tokens, probes):
+    """Device arrays ``(features[rows, D, F], tokens[rows, D])`` for one eval."""
+    widths = {
+        int(probe.width) for probe in probes if probe is not None
+    }
+    if len(widths) != 1:
+        raise ValueError("confidence probes in one cycle must share a feature width")
+    width = widths.pop()
+    depth = max((len(row) for row in draft_features), default=0)
+    if depth == 0:
+        return None
+    feature_rows = []
+    token_rows = []
+    for features, tokens in zip(draft_features, draft_tokens):
+        pad = depth - len(features)
+        if features:
+            stacked = mx.stack(features)
+        else:
+            stacked = mx.zeros((0, width), mx.float32)
+        feature_rows.append(mx.pad(stacked, [(0, pad), (0, 0)]))
+        ids = (
+            mx.stack(tokens[: len(features)]).astype(mx.uint32)
+            if features
+            else mx.zeros((0,), mx.uint32)
+        )
+        token_rows.append(mx.pad(ids, [(0, pad)]))
+    return (mx.stack(feature_rows), mx.stack(token_rows))
+
+
+def _host_confidence_payload(payload, d_vector, probes, *, evaluated):
+    if payload is None:
+        return ((), ())
+    if not evaluated:
+        # Sampled cycles already synchronise per position; this is the one
+        # extra read, and it happens only when a probe is attached.
+        record_verify_sync("hybrid.confidence.features")
+        mx.eval(*payload)
+    (features, tokens) = (payload[0].tolist(), payload[1].tolist())
+    host_features = []
+    host_tokens = []
+    for row, (depth, probe) in enumerate(zip(d_vector, probes)):
+        if probe is None or depth == 0:
+            host_features.append(())
+            host_tokens.append(())
+            continue
+        host_features.append(
+            tuple(tuple(float(v) for v in features[row][j]) for j in range(depth))
+        )
+        host_tokens.append(tuple(int(t) for t in tokens[row][:depth]))
+    return (tuple(host_features), tuple(host_tokens))
+
+
 def _propose_batched_self_mtp_round(
     model: nn.Module, batch: BatchedSelfMTPState
 ) -> SelfMTPCycleResult:
@@ -1872,12 +2019,18 @@ def _propose_batched_self_mtp_round(
     lane_uids = tuple((lane.uid for lane in batch.lanes))
     if len(set(lane_uids)) != n_lanes:
         raise ValueError("self-MTP batch contains duplicate lane uid values")
-    k_vector = tuple(
+    head_k_vector = tuple(
         (
             min(lane.num_draft, max(lane.max_tokens - lane.ntoks - 1, 0))
             for lane in batch.lanes
         )
     )
+    copy_rows, copy_decisions = _plan_copy_drafts(batch.lanes, head_k_vector)
+    if any(copy_rows):
+        head_k_vector = tuple(
+            0 if copy else k for (copy, k) in zip(copy_rows, head_k_vector)
+        )
+    k_vector = head_k_vector
     active_share_modes = {
         lane.share_qsa_indices for (lane, k) in zip(batch.lanes, k_vector) if k > 1
     }
@@ -1888,21 +2041,36 @@ def _propose_batched_self_mtp_round(
     draft_logprobs: List[List[mx.array]] = [[] for _ in batch.lanes]
     draft_h = [lane.seed_h for lane in batch.lanes]
     draft_steps = [0] * n_lanes
-    max_k = max(k_vector)
     greedy_cycle = all((lane.sampling_temp <= 0 for lane in batch.lanes))
+    probes = [getattr(lane, "confidence_probe", None) for lane in batch.lanes]
+    probe_active = any(probe is not None for probe in probes)
+    # Unverified lookahead drafts exist only to observe confidences past the
+    # verify depth.  They are greedy-only (no RNG draws) and the draft cache
+    # is trimmed of every draft step below, so outputs are unchanged.
+    d_vector = tuple(
+        k
+        + (
+            int(probe.lookahead)
+            if probe is not None and greedy_cycle and k > 0
+            else 0
+        )
+        for (k, probe) in zip(k_vector, probes)
+    )
+    draft_features: List[List[mx.array]] = [[] for _ in batch.lanes]
+    max_k = max(d_vector)
     if max_k > 0:
         start_cycle = getattr(model, "mtp_start_cycle", None)
         if start_cycle is not None:
             share_qsa_this_cycle = bool(
                 active_share_modes
                 and next(iter(active_share_modes))
-                and (len(set(k_vector)) == 1)
+                and (len(set(d_vector)) == 1)
             )
             start_cycle(batch.caches.draft, share_qsa_this_cycle)
         try:
             first_lengths = [
                 len(lane.pending_ts) + 1 if k > 0 else 0
-                for (lane, k) in zip(batch.lanes, k_vector)
+                for (lane, k) in zip(batch.lanes, d_vector)
             ]
             width = max(first_lengths)
             hidden_rows = []
@@ -1939,7 +2107,7 @@ def _propose_batched_self_mtp_round(
             finally:
                 _finalize_self_mtp_cache_group(batch.caches.draft)
             for row, (lane, k, valid) in enumerate(
-                zip(batch.lanes, k_vector, first_lengths)
+                zip(batch.lanes, d_vector, first_lengths)
             ):
                 if k == 0:
                     continue
@@ -1948,6 +2116,10 @@ def _propose_batched_self_mtp_round(
                 lp = _lane_mtp_draft_logprobs(
                     lane, d_logits[row, pos], draft_tokens[row]
                 )
+                if probes[row] is not None:
+                    draft_features[row].append(
+                        _draft_confidence_features(probes[row], lp, draft_h[row])
+                    )
                 if greedy_cycle:
                     token = mx.argmax(lp).astype(mx.uint32)
                 else:
@@ -1967,7 +2139,7 @@ def _propose_batched_self_mtp_round(
                     *(draft_h[row] for (row, k) in enumerate(k_vector) if k),
                 )
             for depth in range(1, max_k):
-                lengths = [1 if depth < k else 0 for k in k_vector]
+                lengths = [1 if depth < k else 0 for k in d_vector]
                 right_padding = [1 - length for length in lengths]
                 hidden = mx.concatenate(draft_h)
                 tokens = mx.concatenate(
@@ -1995,6 +2167,10 @@ def _propose_batched_self_mtp_round(
                     lp = _lane_mtp_draft_logprobs(
                         lane, d_logits[row, -1], draft_tokens[row]
                     )
+                    if probes[row] is not None:
+                        draft_features[row].append(
+                            _draft_confidence_features(probes[row], lp, draft_h[row])
+                        )
                     if greedy_cycle:
                         token = mx.argmax(lp).astype(mx.uint32)
                     else:
@@ -2027,10 +2203,32 @@ def _propose_batched_self_mtp_round(
             end_cycle = getattr(model, "mtp_end_cycle", None)
             if end_cycle is not None:
                 end_cycle(batch.caches.draft)
-        if tuple(draft_steps) != k_vector:
+        if tuple(draft_steps) != d_vector:
             raise RuntimeError(
-                f"draft head advanced {tuple(draft_steps)}, expected {k_vector}"
+                f"draft head advanced {tuple(draft_steps)}, expected {d_vector}"
             )
+    feature_payload = None
+    if probe_active:
+        feature_payload = _stack_confidence_payload(
+            draft_features, draft_tokens, probes
+        )
+    if d_vector != k_vector:
+        # Drop lookahead drafts before verification; the verify transaction
+        # sees exactly the depth the scheduler selected.
+        draft_tokens = [row[:k] for (row, k) in zip(draft_tokens, k_vector)]
+        draft_logprobs = [row[:k] for (row, k) in zip(draft_logprobs, k_vector)]
+        drafts = [row[:k] for (row, k) in zip(drafts, k_vector)]
+    if any(copy_rows):
+        # Copied spans are point-mass proposals: host tokens, no draft law.
+        # They join the same ragged verify rows as the head's drafts.
+        for row, copy in enumerate(copy_rows):
+            if copy:
+                drafts[row] = list(copy)
+                draft_tokens[row] = [mx.array(token, mx.uint32) for token in copy]
+                draft_logprobs[row] = []
+        k_vector = tuple(
+            len(copy) if copy else k for (copy, k) in zip(copy_rows, head_k_vector)
+        )
     valid_lengths = tuple((k + 1 for k in k_vector))
     width = max(valid_lengths)
     right_padding = tuple((width - valid for valid in valid_lengths))
@@ -2090,7 +2288,8 @@ def _propose_batched_self_mtp_round(
             drafted_rows.append(mx.pad(drafted, [(0, width - k)]))
         accept_payload = mx.stack([mx.stack(target_rows), mx.stack(drafted_rows)])
         record_verify_sync("hybrid.greedy.accept_boundary")
-        mx.eval(accept_payload)
+        # Confidence features ride on the existing accept boundary.
+        mx.eval(accept_payload, *(() if feature_payload is None else feature_payload))
         (greedy_targets, hosted_drafts) = accept_payload.tolist()
         drafts = [row[:k] for (row, k) in zip(hosted_drafts, k_vector)]
     accepted: List[int] = []
@@ -2109,6 +2308,19 @@ def _propose_batched_self_mtp_round(
                 bonus = _sample_from_logprobs(
                     logprobs[0], lane.sampling_temp, rng=lane.rng
                 )
+        elif copy_rows[row] and lane.sampling_temp > 0:
+            # Point-mass proposal: sample every verify row from the fully
+            # transformed target law and accept while it equals the copy.
+            # This is the exact speculative-sampling law for q = delta_d.
+            from .copy_draft import verify_point_mass_by_sampling
+
+            sampled = mx.random.categorical(logprobs, key=draw_key(lane.rng))
+            record_verify_sync("hybrid.copy.sampled_eval")
+            mx.eval(sampled)
+            record_verify_sync("hybrid.copy.sampled_tolist")
+            (n_accept, bonus) = verify_point_mass_by_sampling(
+                drafts[row], sampled.tolist()
+            )
         elif lane.sampling_temp > 0:
             if lane.logprob_transform is not None:
                 (n_accept, bonus) = _batched_residual_verify(
@@ -2168,6 +2380,7 @@ def _propose_batched_self_mtp_round(
                 and fly.enabled
                 and not lane.logits_processors
                 and k > 0
+                and not copy_rows[row]
             ):
                 from .speculative_sampling import apply_fly_relaxation
 
@@ -2202,13 +2415,16 @@ def _propose_batched_self_mtp_round(
         )
     target_drops = tuple((k - a for (k, a) in zip(k_vector, accepted)))
     _trim_self_mtp_cache_group(batch.caches.target, target_drops, validate=False)
+    (host_features, host_feature_tokens) = _host_confidence_payload(
+        feature_payload, d_vector, probes, evaluated=greedy_cycle
+    )
     proposal = SelfMTPCycleResult(
         membership_epoch=batch.membership_epoch,
         lane_uids=lane_uids,
         draft_depths=k_vector,
         accepted_lengths=tuple(accepted),
         target_drops=target_drops,
-        head_drops=k_vector,
+        head_drops=head_k_vector,
         outputs=tuple(output_rows),
         _old_curs=old_curs,
         _old_seed_hs=old_seed_hs,
@@ -2217,6 +2433,10 @@ def _propose_batched_self_mtp_round(
         _logprobs=tuple(lane_logprobs),
         _bonuses=tuple(bonuses),
         relaxed_accepts=tuple(relaxed_accepts),
+        copy_spans=tuple(len(copy) for copy in copy_rows),
+        copy_decisions=copy_decisions,
+        draft_features=host_features,
+        draft_feature_tokens=host_feature_tokens,
     )
     batch.proposal_open = True
     batch._open_proposal = proposal
@@ -2439,9 +2659,42 @@ def commit_batched_self_mtp(
                 )
             lane.ntoks += count
             lane.stats.cycles += 1
-            lane.stats.draft_cycles += 1
-            lane.stats.draft_proposed += proposal.draft_depths[row]
-            lane.stats.draft_accepted += consumed_accepted
+            copy_span = proposal.copy_spans[row] if proposal.copy_spans else 0
+            if copy_span:
+                lane.stats.retrieval_cycles += 1
+                lane.stats.retrieval_proposed += copy_span
+                lane.stats.retrieval_accepted += consumed_accepted
+            else:
+                lane.stats.draft_cycles += 1
+                lane.stats.draft_proposed += proposal.draft_depths[row]
+                lane.stats.draft_accepted += consumed_accepted
+            # Per-round distributions, recorded for every verify round the
+            # lane commits (copy rounds included). Both inputs are host ints
+            # already in hand -- ``draft_depths`` and ``accepted_lengths`` are
+            # plain tuples closed with the proposal -- so this is two dict
+            # bumps: no device work, no eval, no allocation per round beyond
+            # the at-most-(K+1) integer keys each histogram ever holds.
+            span = int(proposal.draft_depths[row]) + 1
+            lane.stats.verify_span_hist[span] = (
+                lane.stats.verify_span_hist.get(span, 0) + 1
+            )
+            lane.stats.verify_accept_hist[consumed_accepted] = (
+                lane.stats.verify_accept_hist.get(consumed_accepted, 0) + 1
+            )
+            if lane.copy_draft is not None:
+                # Index exactly what this round committed after the previous
+                # ``cur`` (already indexed): accepted proposal tokens, then
+                # the bonus unless a terminal lane stopped inside them.
+                committed = list(drafts[: min(count, accepted)])
+                if count > accepted:
+                    committed.append(proposal._bonuses[row])
+                lane.copy_draft.record(
+                    copy_span=copy_span,
+                    head_depth=0 if copy_span else proposal.draft_depths[row],
+                    accepted=accepted,
+                    emitted=count,
+                    committed=committed,
+                )
             lane.relaxed_accepts += (
                 proposal.relaxed_accepts[row] if proposal.relaxed_accepts else 0
             )

@@ -559,6 +559,152 @@ def test_logit_ordered_admissibility_matches_brute_force_where_mass_lives():
         assert out is None or out.shape == logits.shape
 
 
+def test_tied_logits_admit_the_same_tokens_as_distinct_logits(monkeypatch):
+    """Exact ties must not change the mask.
+
+    The walk grows its examined frontier geometrically: it rebuilds ``order``
+    as the top-``want`` ids but carries ``start`` over from the previous,
+    smaller array, so it only ever reads ``order[start:]``.  That is sound
+    only when the new prefix [0, start) is exactly the set already examined,
+    which needs a ranking whose top-``want`` prefix is stable as ``want``
+    grows.  Logit value alone is not one: ``np.argpartition`` picks an
+    arbitrary representative set among tied values, so on a rebuild ids that
+    were never examined can land in the skipped prefix and be dropped from the
+    mask for good -- while others get examined twice as the frontier
+    reshuffles.  The mask is then not the top-``start`` admissible set it is
+    documented to be.
+
+    Compared here against a row ranked identically but with no ties, and
+    carrying the same mass to within 1e-4, so the only thing that can move the
+    admitted set is the tie-break -- not a stopping rule reacting to a
+    different distribution.  Served bfloat16 rows tie all through the tail,
+    where this silently narrows the mask; an all-tied row makes it visible.
+    """
+    import random
+    import string
+
+    import numpy as np
+
+    from mlx2.structured_output import StructuredOutputProcessor, compile_constraint
+
+    chunk = 256  # the walk's first frontier, and the size of each step
+
+    # The walk itself is under test, not the pool that can finish its tail.
+    monkeypatch.setenv("MLX2_STRUCTURED_WORKERS", "0")
+    random.seed(11)
+    alphabet = string.ascii_letters + string.digits + ' {}[]":,.-\n'
+    # Far enough past that first frontier for the walk to hand ``start`` over
+    # to a rebuilt array and keep going for thousands of ids.
+    pieces = ["<eos>"] + [
+        "".join(random.choice(alphabet) for _ in range(random.choice([1, 1, 2, 3])))
+        for _ in range(20_000)
+    ]
+    tokenizer = _synthetic_tokenizer(pieces)
+    constraint = compile_constraint({"type": "json_object"})
+    vocab = len(pieces)
+    tied = np.zeros(vocab, dtype=np.float32)
+    untied = np.linspace(0.0, -1e-4, vocab).astype(np.float32)
+    assert len(set(untied.tolist())) == vocab  # no ties left to break
+
+    # Two counters keep the comparison below from passing vacuously: the walk
+    # has to take the partial-frontier path at all, and then go on past that
+    # first array -- the hand-off a rebuild has to get right.
+    counts = {"partitions": 0, "examined": 0}
+    partition, admissible = np.argpartition, StructuredOutputProcessor._admissible
+
+    def counted_partition(*args, **kwargs):
+        counts["partitions"] += 1
+        return partition(*args, **kwargs)
+
+    def counted_admissible(self, *args, **kwargs):
+        # ``decide`` memoizes, so one call per id the walk actually examined.
+        counts["examined"] += 1
+        return admissible(self, *args, **kwargs)
+
+    monkeypatch.setattr(np, "argpartition", counted_partition)
+    monkeypatch.setattr(StructuredOutputProcessor, "_admissible", counted_admissible)
+
+    for prefix in ('{"k": "some text', "{"):
+        exact = set(StructuredOutputProcessor(tokenizer, 0, constraint)._allowed(prefix))
+        walked = []
+        for row in (tied, untied):
+            counts.update(partitions=0, examined=0)
+            processor = StructuredOutputProcessor(tokenizer, 0, constraint)
+            allowed = set(processor._allowed_by_logit_order(prefix, row))
+            assert allowed <= exact
+            assert counts["partitions"] >= 1, (prefix, counts)
+            assert counts["examined"] > 4 * chunk, (prefix, counts)
+            walked.append(allowed)
+        assert walked[0] == walked[1], (
+            prefix,
+            len(walked[1] - walked[0]),
+            len(walked[0] - walked[1]),
+        )
+
+
+def test_flash_next_tied_row_keeps_both_tool_call_openings():
+    """The live case: the Qwen XML grammar against the real 248k vocabulary.
+
+    A small vocabulary hides this -- the first rebuild already asks for the
+    whole of it and takes the deterministic full-argsort path.
+    """
+    import glob
+    from pathlib import Path
+
+    import numpy as np
+
+    candidates = sorted(glob.glob(str(Path.home() / "mlx-models" / "Qwen3.8-Flash-Next-MLX-*")))
+    if not candidates:
+        pytest.skip("Flash-Next tokenizer artifact is not present")
+    from transformers import AutoTokenizer
+
+    from mlx2.runtime.tokenizer_utils import TokenizerWrapper
+    from mlx2.runtime.tool_parsers.qwen3_coder import constrained_tool_grammar
+    from mlx2.structured_output import StructuredOutputProcessor, compile_constraint
+
+    hf = AutoTokenizer.from_pretrained(candidates[0], trust_remote_code=True)
+    marker = hf.get_added_vocab().get("<tool_call>")
+    if marker is None:
+        pytest.skip("this artifact does not carry <tool_call> as an added token")
+    tokenizer = TokenizerWrapper(hf, eos_token_ids=[hf.eos_token_id])
+    grammar = constrained_tool_grammar(
+        [
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_weather",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"city": {"type": "string"}},
+                        "required": ["city"],
+                    },
+                },
+            }
+        ],
+        "required",
+    )
+    constraint = compile_constraint(grammar=grammar)
+    width = 248_320  # the head is padded above the tokenizer
+
+    def admitted(row):
+        # ``_allowed_by_logit_order`` is the scanner's walk; the automaton
+        # engine masks along a different path and never reaches it.
+        processor = StructuredOutputProcessor(
+            tokenizer, 0, constraint, generation_stop_token_ids=[hf.eos_token_id]
+        )
+        return set(processor._allowed_by_logit_order("", row))
+
+    tied = admitted(np.zeros(width, dtype=np.float32))
+    untied = admitted(np.linspace(0.0, -1e-4, width).astype(np.float32))
+    assert tied == untied, (len(untied - tied), len(tied - untied))
+    # "<" -- the ordinary token that starts spelling the marker out, and the
+    # first admissible id in the vocabulary -- is the one a reshuffled frontier
+    # buries: it sits in the very first chunk of the stable ranking and nowhere
+    # near the arbitrary 256 ids ``argpartition`` hands back for a tied row.
+    assert 27 in tied
+    assert marker >= hf.vocab_size  # the grammar's one-token opening, for the record
+
+
 def test_processor_accepts_bfloat16_logits():
     import mlx.core as mx
 

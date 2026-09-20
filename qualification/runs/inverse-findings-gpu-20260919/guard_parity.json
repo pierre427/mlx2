@@ -1,0 +1,12 @@
+{
+  "streams": 24,
+  "steps": 21600,
+  "mismatches": 0,
+  "trips": {
+    "run_on": 7,
+    "budget_soft": 13,
+    "None": 4
+  },
+  "forced": 14,
+  "rollbacks": 3247
+}

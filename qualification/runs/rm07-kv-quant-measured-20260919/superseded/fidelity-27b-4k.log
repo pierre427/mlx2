@@ -1,0 +1,30 @@
+[cpg_job 2026-09-19T20:57:38+00:00 pid=43447] label=rm07-fid-27b-4k agent_id=job-rm07-fid-27b-4k-43447 command=env PYTHONPATH=/private/tmp/mlx2-rm07-kv-quant-measured/src ~/Desktop/mlx2/.venv/bin/python /private/tmp/mlx2-rm07-kv-quant-measured/scripts/measure_kv_quant_fidelity.py --i-own-the-gpu --model ~/mlx-models/Qwen3.8-27B-oQ4e-mtp --operations kv_q8,kv_k8v4 --contexts 4096 --out /private/tmp/mlx2-rm07-kv-quant-measured/qualification/runs/rm07-kv-quant-measured-20260919/fidelity-27b-4k.json
+[cpg_job 2026-09-19T20:57:38+00:00 pid=43447] created workflow 9660619796634181aa7b7b4a5a6a5c39 (cpg-job drivers); record it as workflows.cpg-job-drivers in /Users/Shared/mlxuag/cpg-radio.json to reuse it
+[cpg_job 2026-09-19T20:57:38+00:00 pid=43447] registered worker 476d7293339f4bb8bf194698361bf2ef as job-rm07-fid-27b-4k-43447 in session 3c65a7827e83456a89fffdeefadec196
+[cpg_job 2026-09-19T20:57:38+00:00 pid=43447] took /Users/Shared/mlxuag/gpu.lock
+[cpg_job 2026-09-19T20:57:38+00:00 pid=43447] child pid 43464 started
+{"operation": "kv_q8", "context": 4096, "scored_tokens": 256, "kl_mean": 0.0009477595329427935, "kl_p99": 0.004277692385949194, "kl_max": 0.0065781534649431705, "top1_agreement": 0.98828125, "top5_overlap": 0.9796875012107193, "logprob_delta_mean": -0.0025319457054138184, "quantized_planes": 16, "exact_quantized_planes": 0, "kv_bytes_exact": 285212672, "kv_bytes_quant": 151519232, "kv_bytes_per_token_exact": 65536.0, "kv_bytes_per_token_quant": 34816.0, "kv_bytes_ratio": 0.53125, "wall_s": 179.50400912499754}
+{"operation": "kv_k8v4", "context": 4096, "scored_tokens": 256, "kl_mean": 0.0035637833786386075, "kl_p99": 0.013195472955703731, "kl_max": 0.014764406718313694, "top1_agreement": 0.984375, "top5_overlap": 0.9609375023283064, "logprob_delta_mean": -0.004648096859455109, "quantized_planes": 16, "exact_quantized_planes": 0, "kv_bytes_exact": 285212672, "kv_bytes_quant": 115867648, "kv_bytes_per_token_exact": 65536.0, "kv_bytes_per_token_quant": 26624.0, "kv_bytes_ratio": 0.40625, "wall_s": 184.80106783297379}
+{
+  "verdicts": {
+    "kv_q8": {
+      "passed": false,
+      "failures": [
+        "missing context 16384",
+        "missing context 32768",
+        "context 4096: top1_agreement 0.988281 not >= 0.99"
+      ]
+    },
+    "kv_k8v4": {
+      "passed": false,
+      "failures": [
+        "missing context 16384",
+        "missing context 32768"
+      ]
+    }
+  }
+}
+[cpg_job 2026-09-19T21:03:46+00:00 pid=43447] child exited rc=0
+[cpg_job 2026-09-19T21:03:46+00:00 pid=43447] worker 476d7293339f4bb8bf194698361bf2ef closed completed
+[cpg_job 2026-09-19T21:03:46+00:00 pid=43447] released /Users/Shared/mlxuag/gpu.lock
+[cpg_job 2026-09-19T21:03:46+00:00 pid=43447] wrote /private/tmp/mlx2-rm07-kv-quant-measured/qualification/runs/rm07-kv-quant-measured-20260919/fidelity-27b-4k.log.done

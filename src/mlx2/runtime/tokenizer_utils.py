@@ -432,6 +432,15 @@ class TokenizerWrapper:
         detokenizer.reset()
         return detokenizer
 
+    def __len__(self):
+        """The wrapped tokenizer's full id space (base plus added tokens).
+
+        ``len()`` reads the type, not ``__getattr__``, so without this the
+        wrapper reports only ``vocab_size`` to anything asking how many token
+        ids exist -- which excludes every added token.
+        """
+        return len(self._tokenizer)
+
     def __getattr__(self, attr):
         if attr == "detokenizer":
             return self._detokenizer

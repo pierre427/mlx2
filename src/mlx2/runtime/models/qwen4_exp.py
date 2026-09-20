@@ -53,6 +53,7 @@ from .qwen4_fused_gdn_verify import (
     qwen4_fused_gdn_reconstruct,
     qwen4_fused_gdn_replay_verify,
     qwen4_fused_gdn_verify,
+    validate_qwen4_gdn_replay_acceptance,
 )
 from .qwen4_gdn_outproj import admit_qwen4_gdn_outproj
 from .qwen4_qsa_nax import (
@@ -350,6 +351,7 @@ _FUSED_GDN_DECODE = _env_flag("MLX_QWEN4_FUSED_GDN_DECODE")
 _FUSED_GDN_DECODE_MODES = ("stock", "fused", "fused_outproj")
 _FUSED_GDN_VERIFY = _env_flag("MLX_QWEN4_FUSED_GDN_VERIFY")
 _FUSED_GDN_REPLAY_ROLLBACK = _env_flag("MLX_QWEN4_FUSED_GDN_REPLAY_ROLLBACK")
+_FUSED_GDN_DYNAMIC_ACCEPT = _env_flag("MLX_QWEN4_FUSED_GDN_DYNAMIC_ACCEPT")
 _FUSED_GDN_CATCHUP_DEFAULT = _env_flag("MLX_QWEN4_FUSED_GDN_CATCHUP")
 _FUSED_GDN_CATCHUP_SCOPE = ContextVar("qwen4_fused_gdn_catchup_scope", default=False)
 _FUSED_GDN_VERIFY_MODES = ("stock", "fused")
@@ -829,6 +831,8 @@ class GatedDeltaNet(Qwen35GatedDeltaNet):
         self.fused_gdn_replay_verify_calls = 0
         self.fused_gdn_replay_rollback_calls = 0
         self.fused_gdn_replay_rollback_tokens = 0
+        self.fused_gdn_dynamic_accept = _FUSED_GDN_DYNAMIC_ACCEPT
+        self.fused_gdn_replay_dynamic_rollback_calls = 0
         self.fused_gdn_replay_fallbacks = 0
         self.fused_gdn_catchup_calls = 0
         self.fused_gdn_catchup_fallbacks = 0
@@ -903,6 +907,12 @@ class GatedDeltaNet(Qwen35GatedDeltaNet):
                 f"expected one of {_FUSED_GDN_REPLAY_ROLLBACK_MODES}"
             )
         self.fused_gdn_replay_rollback_mode = mode
+
+    def set_fused_gdn_dynamic_accept(self, enabled: bool):
+        """Select device-count compact rollback; applies to later verifies."""
+        if type(enabled) is not bool:
+            raise ValueError("fused GDN dynamic accept must be a boolean")
+        self.fused_gdn_dynamic_accept = enabled
 
     def _fused_gdn_replay_fallback(self, reason: str):
         self.fused_gdn_replay_fallbacks += 1
@@ -985,7 +995,10 @@ class GatedDeltaNet(Qwen35GatedDeltaNet):
                     else probe_qwen4_fused_gdn_verify
                 )
             )
-            threadgroup_y = probe(qkv.dtype, steps)
+            if compact_replay and self.fused_gdn_dynamic_accept:
+                threadgroup_y = probe(qkv.dtype, steps, dynamic_accept=True)
+            else:
+                threadgroup_y = probe(qkv.dtype, steps)
             if threadgroup_y is None:
                 return fallback("Metal kernel probe declined")
             kernel = qwen4_fused_gdn_catchup if catchup else (
@@ -1016,6 +1029,7 @@ class GatedDeltaNet(Qwen35GatedDeltaNet):
         except Exception as exc:
             return fallback(f"Metal kernel dispatch failed: {type(exc).__name__}")
         if not catchup:
+            per_row_fn = None
             if compact_replay:
                 initial_conv = cache[0]
                 initial_state = cache[1]
@@ -1047,12 +1061,28 @@ class GatedDeltaNet(Qwen35GatedDeltaNet):
                     self.fused_gdn_replay_rollback_tokens += int(m)
                     return [restored_conv, restored_state]
 
+                if self.fused_gdn_dynamic_accept:
+                    _rollback, per_row_fn = self._dynamic_replay_rollback(
+                        initial_conv,
+                        initial_state,
+                        qkv,
+                        replay_keys,
+                        replay_corrections,
+                        replay_decay,
+                        threadgroup_y,
+                    )
+
             else:
 
                 def _rollback(m, conv=conv_snapshots, state=state_snapshots):
                     return [mx.contiguous(conv[:, m - 1]), state[:, m - 1]]
 
-            cache.record_rollback(steps, _rollback, [cache[0], cache[1]])
+            if per_row_fn is None:
+                cache.record_rollback(steps, _rollback, [cache[0], cache[1]])
+            else:
+                cache.record_rollback(
+                    steps, _rollback, [cache[0], cache[1]], per_row_fn=per_row_fn
+                )
         cache[0] = conv_state
         cache[1] = recurrent_state
         cache.advance(steps)
@@ -1065,6 +1095,47 @@ class GatedDeltaNet(Qwen35GatedDeltaNet):
             if compact_replay:
                 self.fused_gdn_replay_verify_calls += 1
         return self.out_proj(out)
+
+    def _dynamic_replay_rollback(
+        self, conv, state, raw_qkv, keys, corrections, decay, threadgroup_y
+    ):
+        """Rollback closures that take the accepted prefix as a device count.
+
+        ``rows(lengths)`` accepts a host list or an ``mx.array`` (one count per
+        row) and rebuilds every row in one reconstruct dispatch; the conv
+        window is a per-row gather, so an array count is never read back.
+        ``fn(m)`` keeps the host-int contract (``ExactRollbackBoundary`` and
+        fan-out replay it with an int) by routing through the same kernel.
+        """
+        keep = self.conv_kernel_size - 1
+        tape_steps = int(decay.shape[1])
+        combined = mx.concatenate([conv, raw_qkv], axis=1)
+
+        def rows(lengths):
+            if isinstance(lengths, mx.array):
+                ends = lengths.reshape(-1).astype(mx.int32)
+                tokens = None
+            else:
+                lengths = [int(value) for value in lengths]
+                ends = mx.array(lengths, dtype=mx.int32)
+                tokens = sum(lengths)
+            ends = mx.broadcast_to(ends, (combined.shape[0],))
+            restored_conv = mx.contiguous(_row_tail(combined, ends, keep))
+            restored_state = qwen4_fused_gdn_reconstruct(
+                state, keys, corrections, decay, ends, threadgroup_y=threadgroup_y
+            )
+            self.fused_gdn_replay_rollback_calls += 1
+            self.fused_gdn_replay_dynamic_rollback_calls += 1
+            if tokens is not None:
+                self.fused_gdn_replay_rollback_tokens += tokens
+            return [restored_conv, restored_state]
+
+        def fn(m):
+            if isinstance(m, mx.array):
+                return rows(m)
+            return rows([validate_qwen4_gdn_replay_acceptance(m, tape_steps)])
+
+        return fn, rows
 
     def _try_fused_decode(self, qkv, z, b, a, mask, cache):
         if cache is not None and qkv.shape[1] > 1:
@@ -1325,6 +1396,12 @@ def qwen4_fused_gdn_stats(
         stats["replay_verify_calls"] += module.fused_gdn_replay_verify_calls
         stats["replay_rollback_calls"] += module.fused_gdn_replay_rollback_calls
         stats["replay_rollback_tokens"] += module.fused_gdn_replay_rollback_tokens
+        if module.fused_gdn_dynamic_accept:
+            # Reported only when selected, so default diagnostics are unchanged.
+            stats["replay_dynamic_rollback_calls"] = (
+                stats.get("replay_dynamic_rollback_calls", 0)
+                + module.fused_gdn_replay_dynamic_rollback_calls
+            )
         stats["replay_fallbacks"] += module.fused_gdn_replay_fallbacks
         durable = stats["replay_fallback_reasons"]
         for reason, count in module.fused_gdn_replay_fallback_reasons.items():
@@ -1349,6 +1426,7 @@ def qwen4_fused_gdn_stats(
             module.fused_gdn_replay_verify_calls = 0
             module.fused_gdn_replay_rollback_calls = 0
             module.fused_gdn_replay_rollback_tokens = 0
+            module.fused_gdn_replay_dynamic_rollback_calls = 0
             module.fused_gdn_replay_fallbacks = 0
             module.fused_gdn_replay_fallback_reasons.clear()
             module.fused_gdn_catchup_calls = 0

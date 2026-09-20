@@ -60,7 +60,7 @@ import json
 import re
 import uuid
 
-from ..output import _safe_prefix
+from ..output import StopSequenceMatcher, _safe_prefix
 
 THINK_OPEN = "<think>"
 THINK_CLOSE = "</think>"
@@ -246,11 +246,15 @@ class XingOutputParser:
         self.chat = chat
         self.tools = list(tools or [])
         self.channel = "reasoning_content" if chat and thinking else "content"
-        self.stops = (stops,) if isinstance(stops, str) else tuple(stops or ())
-        self.buffer = self.stop_buffer = self.held = ""
+        self.stop_matcher = StopSequenceMatcher(stops or ())
+        self.buffer = self.held = ""
         self.stopped = False
         self.tool_count = 0
         self.turn_closed_tool_calls = 0
+
+    @property
+    def stop_sequence(self):
+        return self.stop_matcher.stop_sequence
 
     # -- visible text -----------------------------------------------------
 
@@ -258,14 +262,10 @@ class XingOutputParser:
         """Apply client stop strings to content; reasoning passes through."""
         if self.channel != "content":
             return [{self.channel: text}] if text else []
-        self.stop_buffer += text
-        hits = [self.stop_buffer.find(stop) for stop in self.stops if stop in self.stop_buffer]
-        if hits:
-            visible, self.stop_buffer = self.stop_buffer[: min(hits)], ""
+        visible, stop_hit = self.stop_matcher.push(text, final=final)
+        if stop_hit:
             self.stopped = True
             return [{"content": visible}] if visible else []
-        end = len(self.stop_buffer) if final else _safe_prefix(self.stop_buffer, self.stops)
-        visible, self.stop_buffer = self.stop_buffer[:end], self.stop_buffer[end:]
         return [{"content": visible}] if visible else []
 
     def _text(self, text: str) -> list[dict]:

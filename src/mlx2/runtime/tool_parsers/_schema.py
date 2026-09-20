@@ -354,3 +354,30 @@ def schema_value_matches(value: Any, schema: Any) -> bool:
         ):
             return False
     return True
+
+
+def required_parameter_names(function: dict) -> list[str]:
+    """Required argument names of a tool, declared-property order first.
+
+    Non-strict tool grammars leave argument values free but still have to
+    make every required argument appear; without that, greedy decoding can
+    close the call with no arguments at all (sglang #40051). Reference
+    resolution is best-effort, as for non-strict parsing.
+    """
+    schema = function.get("parameters")
+    if not isinstance(schema, dict):
+        return []
+    try:
+        schema = resolve_local_refs(schema)
+    except ValueError:
+        pass
+    required = schema.get("required")
+    if not isinstance(required, list):
+        return []
+    properties = schema.get("properties")
+    declared = list(properties) if isinstance(properties, dict) else []
+    names = [name for name in declared if name in required]
+    for name in required:
+        if name not in names:
+            names.append(name)
+    return names

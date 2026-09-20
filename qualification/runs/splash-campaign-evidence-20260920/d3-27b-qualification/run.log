@@ -1,0 +1,44 @@
+
+===== rep 1/3  arm order [2, 3] =====
+[server] pid 62443 depth=2 log=/private/tmp/claude-501/-Users-user-Desktop-mlx2/b569b1f6-d687-4876-a42a-e5fdf0abeabc/scratchpad/gpu-queue/d3-27b-20260920-035642/server-rep1-d2.log
+[ready] real completion 200 after 5.3s, 1 probe attempt(s)
+[arm] rep1 d2 status route=native_mtp
+  rep1 d2 w1: 43.61 tok/s  tau=2.1324  accept=0.5661764705882353
+  rep1 d2 w2: 71.00 tok/s  tau=2.4779  accept=0.7352941176470589
+  rep1 d2 w4: 74.70 tok/s  tau=2.5207  accept=0.7592592592592593
+[server] pid 62500 depth=3 log=/private/tmp/claude-501/-Users-user-Desktop-mlx2/b569b1f6-d687-4876-a42a-e5fdf0abeabc/scratchpad/gpu-queue/d3-27b-20260920-035642/server-rep1-d3.log
+[ready] real completion 200 after 5.3s, 1 probe attempt(s)
+[arm] rep1 d3 status route=native_mtp
+  rep1 d3 w1: 43.68 tok/s  tau=2.3387  accept=0.44086021505376344
+  rep1 d3 w2: 63.58 tok/s  tau=2.9823  accept=0.658753709198813
+  rep1 d3 w4: 77.76 tok/s  tau=2.9144  accept=0.6425992779783394
+
+===== rep 2/3  arm order [3, 2] =====
+[server] pid 62719 depth=3 log=/private/tmp/claude-501/-Users-user-Desktop-mlx2/b569b1f6-d687-4876-a42a-e5fdf0abeabc/scratchpad/gpu-queue/d3-27b-20260920-035642/server-rep2-d3.log
+[ready] real completion 200 after 5.3s, 1 probe attempt(s)
+[arm] rep2 d3 status route=native_mtp
+  rep2 d3 w1: 43.61 tok/s  tau=2.3387  accept=0.44086021505376344
+  rep2 d3 w2: 63.26 tok/s  tau=2.9823  accept=0.658753709198813
+  rep2 d3 w4: 75.82 tok/s  tau=2.9144  accept=0.6425992779783394
+[server] pid 62777 depth=2 log=/private/tmp/claude-501/-Users-user-Desktop-mlx2/b569b1f6-d687-4876-a42a-e5fdf0abeabc/scratchpad/gpu-queue/d3-27b-20260920-035642/server-rep2-d2.log
+[ready] real completion 200 after 5.3s, 1 probe attempt(s)
+[arm] rep2 d2 status route=native_mtp
+  rep2 d2 w1: 43.71 tok/s  tau=2.1324  accept=0.5661764705882353
+  rep2 d2 w2: 68.82 tok/s  tau=2.4779  accept=0.7352941176470589
+  rep2 d2 w4: 68.03 tok/s  tau=2.5207  accept=0.7592592592592593
+
+===== rep 3/3  arm order [2, 3] =====
+[server] pid 62885 depth=2 log=/private/tmp/claude-501/-Users-user-Desktop-mlx2/b569b1f6-d687-4876-a42a-e5fdf0abeabc/scratchpad/gpu-queue/d3-27b-20260920-035642/server-rep3-d2.log
+[ready] real completion 200 after 5.3s, 1 probe attempt(s)
+[arm] rep3 d2 status route=native_mtp
+  rep3 d2 w1: 43.99 tok/s  tau=2.1324  accept=0.5661764705882353
+  rep3 d2 w2: 68.37 tok/s  tau=2.4779  accept=0.7352941176470589
+  rep3 d2 w4: 66.87 tok/s  tau=2.5207  accept=0.7592592592592593
+[server] pid 63073 depth=3 log=/private/tmp/claude-501/-Users-user-Desktop-mlx2/b569b1f6-d687-4876-a42a-e5fdf0abeabc/scratchpad/gpu-queue/d3-27b-20260920-035642/server-rep3-d3.log
+[ready] real completion 200 after 5.3s, 1 probe attempt(s)
+[arm] rep3 d3 status route=native_mtp
+  rep3 d3 w1: 43.75 tok/s  tau=2.3387  accept=0.44086021505376344
+  rep3 d3 w2: 59.14 tok/s  tau=2.9823  accept=0.658753709198813
+  rep3 d3 w4: 68.02 tok/s  tau=2.9144  accept=0.6425992779783394
+
+wrote /private/tmp/claude-501/-Users-user-Desktop-mlx2/b569b1f6-d687-4876-a42a-e5fdf0abeabc/scratchpad/gpu-queue/d3-27b-20260920-035642/d3-qualification.json

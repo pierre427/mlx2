@@ -1,0 +1,356 @@
+{
+ "schema": "mlx2.multi-lora-e2e.v1",
+ "args": {
+  "model": "~/mlx-models/Qwen3.8-27B-MLX-4bit",
+  "adapters": "0,1,2,4",
+  "lanes": 8,
+  "rank": 16,
+  "targets": "self_attn.q_proj,self_attn.v_proj,self_attn.o_proj",
+  "max_tokens": 128,
+  "parity_tokens": 32,
+  "interleave": 3,
+  "out": "qualification/runs/multi-lora-20260919/e2e.json",
+  "i_own_the_gpu": true,
+  "dry_run": false,
+  "tiny_cpu_smoke": false
+ },
+ "arms": {
+  "base": {
+   "runs": [
+    {
+     "rows": [
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null
+     ],
+     "wall_s": 12.361225166008808,
+     "completion_tokens": 882,
+     "tok_s": 71.35215062867269,
+     "mixed_forwards": 0,
+     "delta_applications": 0
+    },
+    {
+     "rows": [
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null
+     ],
+     "wall_s": 9.994913125003222,
+     "completion_tokens": 882,
+     "tok_s": 88.24488907198136,
+     "mixed_forwards": 0,
+     "delta_applications": 0
+    },
+    {
+     "rows": [
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null
+     ],
+     "wall_s": 9.969441041990649,
+     "completion_tokens": 882,
+     "tok_s": 88.47035618998822,
+     "mixed_forwards": 0,
+     "delta_applications": 0
+    }
+   ],
+   "median_tok_s": 88.24488907198136
+  },
+  "mix1": {
+   "runs": [
+    {
+     "rows": [
+      "lora0",
+      "lora0",
+      "lora0",
+      "lora0",
+      "lora0",
+      "lora0",
+      "lora0",
+      "lora0"
+     ],
+     "wall_s": 12.275523499993142,
+     "completion_tokens": 969,
+     "tok_s": 78.93757036109632,
+     "mixed_forwards": 0,
+     "delta_applications": 6816
+    },
+    {
+     "rows": [
+      "lora0",
+      "lora0",
+      "lora0",
+      "lora0",
+      "lora0",
+      "lora0",
+      "lora0",
+      "lora0"
+     ],
+     "wall_s": 11.017548167030327,
+     "completion_tokens": 969,
+     "tok_s": 87.95060255780888,
+     "mixed_forwards": 0,
+     "delta_applications": 6960
+    },
+    {
+     "rows": [
+      "lora0",
+      "lora0",
+      "lora0",
+      "lora0",
+      "lora0",
+      "lora0",
+      "lora0",
+      "lora0"
+     ],
+     "wall_s": 10.984238083008677,
+     "completion_tokens": 969,
+     "tok_s": 88.21731581901243,
+     "mixed_forwards": 0,
+     "delta_applications": 6960
+    }
+   ],
+   "median_tok_s": 87.95060255780888
+  },
+  "mix2": {
+   "runs": [
+    {
+     "rows": [
+      "lora0",
+      "lora1",
+      "lora0",
+      "lora1",
+      "lora0",
+      "lora1",
+      "lora0",
+      "lora1"
+     ],
+     "wall_s": 11.971503292035777,
+     "completion_tokens": 983,
+     "tok_s": 82.11165933136864,
+     "mixed_forwards": 133,
+     "delta_applications": 7056
+    },
+    {
+     "rows": [
+      "lora0",
+      "lora1",
+      "lora0",
+      "lora1",
+      "lora0",
+      "lora1",
+      "lora0",
+      "lora1"
+     ],
+     "wall_s": 11.15242749999743,
+     "completion_tokens": 983,
+     "tok_s": 88.14224526456026,
+     "mixed_forwards": 133,
+     "delta_applications": 7056
+    },
+    {
+     "rows": [
+      "lora0",
+      "lora1",
+      "lora0",
+      "lora1",
+      "lora0",
+      "lora1",
+      "lora0",
+      "lora1"
+     ],
+     "wall_s": 11.318389541993383,
+     "completion_tokens": 983,
+     "tok_s": 86.84981165852992,
+     "mixed_forwards": 133,
+     "delta_applications": 7056
+    }
+   ],
+   "median_tok_s": 86.84981165852992
+  },
+  "mix4": {
+   "runs": [
+    {
+     "rows": [
+      "lora0",
+      "lora1",
+      "lora2",
+      "lora3",
+      "lora0",
+      "lora1",
+      "lora2",
+      "lora3"
+     ],
+     "wall_s": 11.576506291981786,
+     "completion_tokens": 983,
+     "tok_s": 84.91335599937032,
+     "mixed_forwards": 139,
+     "delta_applications": 6672
+    },
+    {
+     "rows": [
+      "lora0",
+      "lora1",
+      "lora2",
+      "lora3",
+      "lora0",
+      "lora1",
+      "lora2",
+      "lora3"
+     ],
+     "wall_s": 10.652053083991632,
+     "completion_tokens": 983,
+     "tok_s": 92.28267942799638,
+     "mixed_forwards": 139,
+     "delta_applications": 6672
+    },
+    {
+     "rows": [
+      "lora0",
+      "lora1",
+      "lora2",
+      "lora3",
+      "lora0",
+      "lora1",
+      "lora2",
+      "lora3"
+     ],
+     "wall_s": 10.920210500014946,
+     "completion_tokens": 983,
+     "tok_s": 90.0165798084803,
+     "mixed_forwards": 140,
+     "delta_applications": 6720
+    }
+   ],
+   "median_tok_s": 90.0165798084803
+  }
+ },
+ "parity": {
+  "lora0": {
+   "identical": true,
+   "first_divergence_char": null,
+   "mixed_prefix": "To list the ten most recent orders, you need to sort the orders by their date in descending order and limit the results ",
+   "alone_prefix": "To list the ten most recent orders, you need to sort the orders by their date in descending order and limit the results "
+  },
+  "lora1": {
+   "identical": false,
+   "first_divergence_char": 109,
+   "mixed_prefix": "A charismatic mastermind assembles a team of elite specialists to execute an impossible robbery, each member chosen for ",
+   "alone_prefix": "A charismatic mastermind assembles a team of elite specialists to execute an impossible robbery, each member hiding a pe"
+  },
+  "lora2": {
+   "identical": false,
+   "first_divergence_char": 145,
+   "mixed_prefix": "Hello! Welcome to the team. Let\u2019s break down what a **Radix Tree** (also known as a **Patricia Trie**) is, why it exists",
+   "alone_prefix": "Hello! Welcome to the team. Let\u2019s break down what a **Radix Tree** (also known as a **Patricia Trie**) is, why it exists"
+  },
+  "lora3": {
+   "identical": false,
+   "first_divergence_char": 151,
+   "mixed_prefix": "Here are three essential tips for writing clear and effective commit messages:\n\n1. **Use the Imperative Mood**\n   Write ",
+   "alone_prefix": "Here are three essential tips for writing clear and effective commit messages:\n\n1. **Use the Imperative Mood**\n   Write "
+  }
+ },
+ "registrations": [
+  {
+   "status": "loaded",
+   "mode": "concurrent",
+   "fingerprint": "82a5302fb88a5b8c4d0481fa428e1c1901e7333d4376fc6f916d50502ec7bc94",
+   "rank": 16,
+   "drained": true,
+   "model_revision": 0
+  },
+  {
+   "status": "loaded",
+   "mode": "concurrent",
+   "fingerprint": "bafa12016ae33dfbf06f9521cee399316efeae2b94d3b7f78f21b160b72b50a5",
+   "rank": 16,
+   "drained": false,
+   "model_revision": 0
+  },
+  {
+   "status": "loaded",
+   "mode": "concurrent",
+   "fingerprint": "920eb9f16ddf052e59044602b1ecef389349fca5b4864ebdc15ea5b500c1cc0f",
+   "rank": 16,
+   "drained": false,
+   "model_revision": 0
+  },
+  {
+   "status": "loaded",
+   "mode": "concurrent",
+   "fingerprint": "530ac5ef8c0411f00115699dd6044b2345005aeda733fee7c6d7ab973c227010",
+   "rank": 16,
+   "drained": false,
+   "model_revision": 0
+  }
+ ],
+ "keys": 48,
+ "verdict": {
+  "ratio_widest_over_base": 1.0200769784531518,
+  "throughput_go": true,
+  "throughput_nogo": false,
+  "parity_go": true
+ },
+ "multi_lora_status": {
+  "enabled": true,
+  "max_loras": 4,
+  "max_lora_rank": 16,
+  "schema": "mlx2.multi-lora.v1",
+  "registered": [
+   "lora0",
+   "lora1",
+   "lora2",
+   "lora3"
+  ],
+  "resident": {
+   "1": "lora0",
+   "2": "lora1",
+   "3": "lora2",
+   "4": "lora3"
+  },
+  "pinned_slots": 0,
+  "wrapped_modules": 48,
+  "reserved_bytes": 89128960,
+  "registered_bytes": 71303168,
+  "counts": {
+   "forwards": 2190,
+   "base_only_forwards": 426,
+   "mixed_forwards": 817,
+   "single_adapter_forwards": 947,
+   "rows_base": 2694,
+   "rows_adapter": 9394,
+   "slot_hits": 72,
+   "slot_loads": 4,
+   "slot_evictions": 0,
+   "slot_deferred": 0,
+   "registrations": 4,
+   "unregistrations": 0,
+   "structural_wraps": 48,
+   "materializations": 4,
+   "delta_applications": 84672,
+   "delta_skips": 20448
+  },
+  "rows_by_adapter": {
+   "lora0": 5402,
+   "lora1": 2174,
+   "lora2": 909,
+   "lora3": 909
+  }
+ }
+}

@@ -22,6 +22,19 @@ class AdapterResolution:
     descriptor: ModelDescriptor
     artifact: dict
 
+    @property
+    def default_route(self) -> str:
+        """Resolve the adapter preference against this artifact's capabilities."""
+        route = getattr(self.adapter_type, "default_route", None)
+        if route not in {"ordinary", "native_mtp"}:
+            raise ValueError(
+                f"{self.adapter_type.__name__} must declare default_route as "
+                "'ordinary' or 'native_mtp'"
+            )
+        if route == "native_mtp" and Capability.MTP not in self.descriptor.capabilities:
+            return "ordinary"
+        return route
+
 
 def _flash_next(path: Path, config: dict) -> AdapterResolution:
     if config.get("ngram_table") or not (path / "ple_rows.bin").is_file():

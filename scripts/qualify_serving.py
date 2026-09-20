@@ -572,7 +572,7 @@ def wait_for_quiescence(
         sleep(min(poll_interval_seconds, remaining))
 
 
-def feature_observations(final):
+def feature_observations(final, kv_fidelity=None):
     execution = final.get("execution", {})
     segmented = execution.get("segmented_mtp", {})
     indexed = execution.get("indexed_qsa", {}).get("counts", {})
@@ -651,11 +651,25 @@ def feature_observations(final):
         "prompt_lookup_batched_verify": scheduler.get("pld_batched_rounds", 0),
         "prompt_lookup_rotating_replay": scheduler.get("pld_rotating_replay_rounds", 0),
         "adaptive_mtp_depth": scheduler.get("adaptive_mtp_boundaries", 0),
+        "self_mtp_copy_draft": scheduler.get("self_mtp_copy_rounds", 0),
         "fly_verification": max(
             int(scheduler.get("fly_relaxed_accepts", 0)), fly_receipt_relaxed
         ),
         "spomin_surgery": final.get("spomin_live_surgery", {}).get("counts", {}).get("applied", 0),
         "approximate_kv": final.get("approximate_kv", {}).get("applied", 0),
+        # Int8 NAX prefill: engaged GEMMs.  required_feature_checks demands
+        # feature_int8_prefill whenever the policy is enabled, so the
+        # observation key must exist or the qualifier raises KeyError.
+        "int8_prefill": final.get("int8_prefill", {}).get("counts", {}).get("engaged_calls", 0),
+        "verify_bitexact": (
+            (final.get("verify_bitexact") or {}).get("dispatches", 0)
+            if (final.get("verify_bitexact") or {}).get("active") is True
+            else 0
+        ),
+        "approximate_kv_mtp": final.get("approximate_kv", {}).get("mtp_lanes", 0),
+        # Offline measurement (scripts/measure_kv_quant_fidelity.py) judged by
+        # runtime/kv_quant_fidelity.py; 1 only when that verdict passed.
+        "approximate_kv_fidelity": int(bool((kv_fidelity or {}).get("passed"))),
         "apc_interior_checkpoints": min(
             counts.get("apc_interior_checkpoints_captured", 0),
             counts.get("apc_interior_checkpoints_published", 0),
@@ -699,7 +713,12 @@ def main():
         help=("Defer only near-limit and shared-cohort context checks to the "
               "generated thermally controlled matrix manifest"),
     )
-    parser.add_argument("--require-feature", action="append", default=[], choices=["shared_qsa", "async_promotion", "indexed_qsa", "private_delta", "known_tail_prefetch", "indexed_fused_merge", "indexed_output_gate", "file_backed_ple", "compiled_ple", "pooled_qsa", "scatter_qsa", "fused_gdn_decode", "fused_gdn_verify", "fused_gdn_replay_rollback", "eager_dispatch", "fused_moe", "external_draft", "proposal_distribution", "paired_draft_cache", "segmented_transaction", "segmented_rollback", "prompt_lookup", "prompt_lookup_proposals", "prompt_lookup_rollback", "prompt_lookup_rotating_replay", "prompt_lookup_batched_verify", "adaptive_mtp_depth", "fly_verification", "spomin_surgery", "approximate_kv", "apc_interior_checkpoints", "apc_persistence", "apc_sessions"], help="Fail this candidate unless its mechanism actually executed")
+    parser.add_argument(
+        "--kv-fidelity-report", type=Path,
+        help=("Measured KV-quantization fidelity report "
+              "(scripts/measure_kv_quant_fidelity.py) for an approximate-KV route"),
+    )
+    parser.add_argument("--require-feature", action="append", default=[], choices=["shared_qsa", "async_promotion", "indexed_qsa", "private_delta", "known_tail_prefetch", "indexed_fused_merge", "indexed_output_gate", "file_backed_ple", "compiled_ple", "pooled_qsa", "scatter_qsa", "fused_gdn_decode", "fused_gdn_verify", "fused_gdn_replay_rollback", "eager_dispatch", "fused_moe", "external_draft", "proposal_distribution", "paired_draft_cache", "segmented_transaction", "segmented_rollback", "prompt_lookup", "prompt_lookup_proposals", "prompt_lookup_rollback", "prompt_lookup_rotating_replay", "prompt_lookup_batched_verify", "adaptive_mtp_depth", "fly_verification", "self_mtp_copy_draft", "spomin_surgery", "approximate_kv", "approximate_kv_mtp", "approximate_kv_fidelity", "apc_interior_checkpoints", "apc_persistence", "apc_sessions"], help="Fail this candidate unless its mechanism actually executed")
     args = parser.parse_args()
 
     if args.preflight_only:
@@ -1321,7 +1340,18 @@ def main():
                 final["execution"],
             )
         execution = final.get("execution", {})
-        observed = feature_observations(final)
+        kv_fidelity = None
+        approximate_settings = initial["settings"].get("approximate_kv") or {}
+        if args.kv_fidelity_report is not None:
+            from mlx2.runtime.kv_quant_fidelity import evaluate_fidelity_report
+
+            kv_fidelity = evaluate_fidelity_report(
+                json.loads(args.kv_fidelity_report.read_text()),
+                operation=approximate_settings.get("operation"),
+                adapter_fingerprint=initial["artifact"],
+            )
+            report["kv_fidelity"] = kv_fidelity
+        observed = feature_observations(final, kv_fidelity)
         report["feature_observations"] = observed
         from mlx2.qualification import required_feature_checks
         required_features = {name.removeprefix("feature_") for name in required_feature_checks(initial["settings"])}

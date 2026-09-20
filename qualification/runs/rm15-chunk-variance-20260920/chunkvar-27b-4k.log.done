@@ -1,0 +1,40 @@
+{
+ "agent_id": "job-rm15-chunkvar-27b-4k-69857",
+ "child_pid": 69863,
+ "command": [
+  "env",
+  "PYTHONPATH=/private/tmp/mlx2-rm15-chunkvar/src",
+  "~/Desktop/mlx2/.venv/bin/python",
+  "/private/tmp/mlx2-rm15-chunkvar/scripts/measure_prefill_chunk_variance.py",
+  "--model",
+  "~/mlx-models/Qwen3.8-27B-oQ4e-mtp",
+  "--contexts",
+  "4096",
+  "--arms",
+  "full,2048,2048r,4096,1024",
+  "--score-tokens",
+  "128",
+  "--out",
+  "/private/tmp/mlx2-rm15-chunkvar/qualification/runs/rm15-chunk-variance-20260920/chunkvar-27b-4k.json",
+  "--i-own-the-gpu"
+ ],
+ "ended_at": "2026-09-20T03:32:02+00:00",
+ "label": "rm15-chunkvar-27b-4k",
+ "out": "/private/tmp/mlx2-rm15-chunkvar/qualification/runs/rm15-chunk-variance-20260920/chunkvar-27b-4k.log",
+ "pid": 69857,
+ "radio": {
+  "error": null,
+  "heartbeat_failures": 0,
+  "heartbeats": 0,
+  "lease_generation": null,
+  "lease_task": null,
+  "lock_dir": "/Users/Shared/mlxuag/gpu.lock",
+  "status": "closed:completed"
+ },
+ "rc": 0,
+ "refusal": null,
+ "session_id": "3c65a7827e83456a89fffdeefadec196",
+ "signal": null,
+ "started_at": "2026-09-20T03:31:03+00:00",
+ "worker_id": "c6c00e3ed43045a7a36ca439eb1e78f3"
+}

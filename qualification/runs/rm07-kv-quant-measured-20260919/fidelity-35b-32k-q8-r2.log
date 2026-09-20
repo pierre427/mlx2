@@ -1,0 +1,23 @@
+[cpg_job 2026-09-20T02:51:05+00:00 pid=59630] label=rm07-fid-35b-32k-q8-r2 agent_id=job-rm07-fid-35b-32k-q8-r2-59630 command=env PYTHONPATH=/private/tmp/mlx2-rm07-kv-quant-measured/src ~/Desktop/mlx2/.venv/bin/python /private/tmp/mlx2-rm07-kv-quant-measured/scripts/measure_kv_quant_fidelity.py --i-own-the-gpu --model ~/mlx-models/Qwen3.6-35B-A3B-uncensored-heretic-Native-MTP-Preserved-oQ4e-mtp --operations kv_q8 --contexts 32768 --out /private/tmp/mlx2-rm07-kv-quant-measured/qualification/runs/rm07-kv-quant-measured-20260919/fidelity-35b-32k-q8.json
+[cpg_job 2026-09-20T02:51:05+00:00 pid=59630] created workflow 38dcf28daca543999b06f031d9f1a9e4 (cpg-job drivers); record it as workflows.cpg-job-drivers in /Users/Shared/mlxuag/cpg-radio.json to reuse it
+[cpg_job 2026-09-20T02:51:05+00:00 pid=59630] registered worker ea036cf4dca3469897c939c22f986824 as job-rm07-fid-35b-32k-q8-r2-59630 in session 3c65a7827e83456a89fffdeefadec196
+[cpg_job 2026-09-20T02:51:05+00:00 pid=59630] took /Users/Shared/mlxuag/gpu.lock
+[cpg_job 2026-09-20T02:51:05+00:00 pid=59630] child pid 59634 started
+{"operation": "kv_q8", "context": 32768, "scored_tokens": 256, "kl_mean": 0.005024947054045381, "kl_p99": 0.036633533611893615, "kl_max": 0.04445204883813858, "top1_agreement": 0.95703125, "top5_overlap": 0.9500000029802322, "logprob_delta_mean": 0.000624045729637146, "quantized_planes": 10, "exact_quantized_planes": 0, "kv_bytes_exact": 676331520, "kv_bytes_quant": 359301120, "kv_bytes_per_token_exact": 20480.0, "kv_bytes_per_token_quant": 10880.0, "kv_bytes_ratio": 0.53125, "wall_s": 239.23661650001304}
+{
+  "verdicts": {
+    "kv_q8": {
+      "passed": false,
+      "failures": [
+        "missing context 4096",
+        "missing context 16384",
+        "context 32768: kl_mean 0.00502495 not <= 0.005",
+        "context 32768: top1_agreement 0.957031 not >= 0.99"
+      ]
+    }
+  }
+}
+[cpg_job 2026-09-20T02:55:09+00:00 pid=59630] child exited rc=0
+[cpg_job 2026-09-20T02:55:10+00:00 pid=59630] worker ea036cf4dca3469897c939c22f986824 closed completed
+[cpg_job 2026-09-20T02:55:10+00:00 pid=59630] released /Users/Shared/mlxuag/gpu.lock
+[cpg_job 2026-09-20T02:55:10+00:00 pid=59630] wrote /private/tmp/mlx2-rm07-kv-quant-measured/qualification/runs/rm07-kv-quant-measured-20260919/fidelity-35b-32k-q8-r2.log.done

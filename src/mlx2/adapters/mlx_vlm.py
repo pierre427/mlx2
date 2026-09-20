@@ -219,6 +219,7 @@ def _load_model(load, model_path, *, expected, config):
 
 
 class _MLXVLMAdapter:
+    default_route = "ordinary"
     reasoning_effort_semantics = "boolean"
 
     @staticmethod
@@ -293,10 +294,17 @@ class _MLXVLMAdapter:
         prepared = request.get("_mlx2_prompt_tokens")
         if prepared is not None:
             return list(prepared)
+        return self.tokenizer.encode(
+            self.render_prompt(request), add_special_tokens=False
+        )
+
+    def render_prompt(self, request):
+        """Text-prompt rendering; media requests carry prepared token ids."""
+        if "_mlx2_prompt_tokens" in request:
+            raise ValueError("prepared multimodal prompts have no text rendering")
         if "messages" in request:
-            text = self._render(request["messages"])
-            return self.tokenizer.encode(text, add_special_tokens=False)
-        return self.tokenizer.encode(request["prompt"], add_special_tokens=False)
+            return self._render(request["messages"])
+        return request["prompt"]
 
     def output_parser(self, request):
         return OutputParser(

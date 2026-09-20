@@ -1,0 +1,151 @@
+{
+  "mode": "gpu",
+  "compat_mode": "on",
+  "model": "Qwen3.8-Flash-Next-MLX-4bit-MTP",
+  "server": [
+    "~/Desktop/mlx2/.venv/bin/python",
+    "-m",
+    "mlx2.server",
+    "--model",
+    "~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP",
+    "--port",
+    "8398",
+    "--agent-compat",
+    "on",
+    "--custom-tool-grammar",
+    "validate",
+    "--execution-policy",
+    "/private/tmp/mlx2-rm08-responses-agent-conformance/qualification/policies/flash-next-mtp2.json",
+    "--qualification-mode"
+  ],
+  "rows": [
+    {
+      "repeat": 0,
+      "client": "codex",
+      "task": "add_file",
+      "returncode": 0,
+      "passed": true,
+      "requests": 4,
+      "non_200": 0,
+      "cached_tokens": [
+        0,
+        10060,
+        10201,
+        10355
+      ],
+      "counter_delta": {
+        "agent_compat_source_server": 4,
+        "agent_compat_custom_tools_declared": 4,
+        "agent_compat_hosted_tools_dropped": 8,
+        "agent_compat_requests": 4,
+        "agent_compat_system_folded": 4,
+        "agent_compat_phase_outputs": 4,
+        "agent_compat_custom_tool_grammar_validated": 1,
+        "agent_compat_custom_tool_calls": 1,
+        "agent_compat_phase_inputs": 6,
+        "agent_compat_custom_tool_replays": 3
+      },
+      "seconds": 18.9
+    },
+    {
+      "repeat": 0,
+      "client": "codex",
+      "task": "fix_test",
+      "returncode": 0,
+      "passed": true,
+      "requests": 4,
+      "non_200": 0,
+      "cached_tokens": [
+        0,
+        9883,
+        10282,
+        10440
+      ],
+      "counter_delta": {
+        "agent_compat_source_server": 4,
+        "agent_compat_custom_tools_declared": 4,
+        "agent_compat_hosted_tools_dropped": 8,
+        "agent_compat_requests": 4,
+        "agent_compat_system_folded": 4,
+        "agent_compat_phase_outputs": 4,
+        "agent_compat_custom_tool_grammar_validated": 1,
+        "agent_compat_custom_tool_calls": 1,
+        "agent_compat_phase_inputs": 6,
+        "agent_compat_custom_tool_replays": 2
+      },
+      "seconds": 15.5
+    },
+    {
+      "repeat": 0,
+      "client": "claude",
+      "task": "add_file",
+      "returncode": 0,
+      "passed": true,
+      "requests": 2,
+      "non_200": 0,
+      "cached_tokens": [
+        0,
+        16580
+      ],
+      "counter_delta": {
+        "agent_compat_source_server": 2,
+        "agent_compat_system_folded": 3,
+        "agent_compat_adaptive_thinking": 2,
+        "agent_compat_thinking_omitted": 2,
+        "agent_compat_output_effort": 2,
+        "agent_compat_thinking_restored": 1
+      },
+      "seconds": 16.9
+    },
+    {
+      "repeat": 0,
+      "client": "claude",
+      "task": "fix_test",
+      "returncode": 0,
+      "passed": true,
+      "requests": 6,
+      "non_200": 0,
+      "cached_tokens": [
+        0,
+        16668,
+        16827,
+        17044,
+        17237,
+        17354
+      ],
+      "counter_delta": {
+        "agent_compat_source_server": 6,
+        "agent_compat_system_folded": 21,
+        "agent_compat_adaptive_thinking": 6,
+        "agent_compat_thinking_omitted": 6,
+        "agent_compat_output_effort": 6,
+        "agent_compat_thinking_restored": 15
+      },
+      "seconds": 24.3
+    }
+  ],
+  "agent_compat_counts": {
+    "agent_compat_source_server": 16,
+    "agent_compat_custom_tools_declared": 8,
+    "agent_compat_hosted_tools_dropped": 16,
+    "agent_compat_requests": 8,
+    "agent_compat_system_folded": 32,
+    "agent_compat_phase_outputs": 8,
+    "agent_compat_custom_tool_grammar_validated": 2,
+    "agent_compat_custom_tool_calls": 2,
+    "agent_compat_phase_inputs": 12,
+    "agent_compat_custom_tool_replays": 5,
+    "agent_compat_adaptive_thinking": 8,
+    "agent_compat_thinking_omitted": 8,
+    "agent_compat_output_effort": 8,
+    "agent_compat_thinking_restored": 16
+  },
+  "pass_rate": {
+    "codex": "2/2",
+    "claude": "2/2"
+  },
+  "later_turn_cache_hits": "12/12",
+  "grammar_rejected_total": 0,
+  "failures": [],
+  "go": true
+}

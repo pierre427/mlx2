@@ -1,0 +1,44 @@
+B=1 T=0.0 ordinary: 28.8 tok/s
+B=1 T=0.0 K= 2: 34.3 tok/s x1.19 tau=2.18 acc=0.590 full=437/941 exact 1/8
+B=1 T=0.0 K= 3: 35.1 tok/s x1.22 tau=2.48 acc=0.497 full=257/824 exact 1/8
+B=1 T=0.0 K= 4: 34.2 tok/s x1.19 tau=2.70 acc=0.428 full=164/758 exact 1/8
+B=1 T=0.0 K= 5: 31.7 tok/s x1.10 tau=2.80 acc=0.364 full=114/731 exact 1/8
+B=1 T=0.0 K= 6: 30.6 tok/s x1.06 tau=2.90 acc=0.320 full=84/707 exact 1/8
+B=1 T=0.0 K= 7: 28.8 tok/s x1.00 tau=3.00 acc=0.289 full=66/681 exact 0/8
+B=1 T=0.0 K= 8: 29.5 tok/s x1.02 tau=3.04 acc=0.257 full=49/674 exact 1/8
+B=1 T=0.0 K=10: 28.5 tok/s x0.99 tau=3.05 acc=0.208 full=23/671 exact 1/8
+B=1 T=0.0 K=12: 28.0 tok/s x0.97 tau=3.10 acc=0.178 full=14/660 exact 1/8
+B=1 T=0.0 K=15: 27.3 tok/s x0.95 tau=3.14 acc=0.146 full=3/651 exact 1/8
+B=1 T=1.0 ordinary: 28.2 tok/s
+B=1 T=1.0 K= 2: 32.3 tok/s x1.15 tau=2.10 acc=0.552 full=406/973
+B=1 T=1.0 K= 3: 33.6 tok/s x1.19 tau=2.47 acc=0.493 full=259/826
+B=1 T=1.0 K= 4: 32.1 tok/s x1.14 tau=2.62 acc=0.407 full=158/780
+B=1 T=1.0 K= 5: 29.5 tok/s x1.05 tau=2.67 acc=0.337 full=99/765
+B=1 T=1.0 K= 6: 29.1 tok/s x1.03 tau=2.86 acc=0.313 full=75/714
+B=1 T=1.0 K= 7: 27.5 tok/s x0.98 tau=3.00 acc=0.289 full=59/683
+B=1 T=1.0 K= 8: 27.8 tok/s x0.99 tau=3.02 acc=0.254 full=37/678
+B=1 T=1.0 K=10: 26.3 tok/s x0.93 tau=2.97 acc=0.199 full=22/690
+B=1 T=1.0 K=12: 25.4 tok/s x0.90 tau=2.97 acc=0.168 full=14/688
+B=1 T=1.0 K=15: 25.9 tok/s x0.92 tau=3.18 acc=0.149 full=6/644
+B=4 T=0.0 ordinary: 47.0 tok/s
+B=4 T=0.0 K= 2: 45.2 tok/s x0.96 tau=2.18 acc=0.589 full=453/940 exact 0/8
+B=4 T=0.0 K= 3: 45.7 tok/s x0.97 tau=2.51 acc=0.506 full=275/814 exact 1/8
+B=4 T=0.0 K= 4: 45.7 tok/s x0.97 tau=2.71 acc=0.429 full=173/755 exact 0/8
+B=4 T=0.0 K= 5: 41.9 tok/s x0.89 tau=2.84 acc=0.371 full=118/721 exact 1/8
+B=4 T=0.0 K= 6: 41.2 tok/s x0.88 tau=2.96 acc=0.329 full=88/691 exact 0/8
+B=4 T=0.0 K= 7: 39.1 tok/s x0.83 tau=2.92 acc=0.277 full=58/701 exact 0/8
+B=4 T=0.0 K= 8: 35.7 tok/s x0.76 tau=3.07 acc=0.262 full=48/667 exact 1/8
+B=4 T=0.0 K=10: 34.4 tok/s x0.73 tau=3.11 acc=0.215 full=26/658 exact 1/8
+B=4 T=0.0 K=12: 34.1 tok/s x0.73 tau=3.22 acc=0.189 full=12/636 exact 1/8
+B=4 T=0.0 K=15: 31.0 tok/s x0.66 tau=2.99 acc=0.136 full=1/683 exact 1/8
+B=4 T=1.0 ordinary: 46.5 tok/s
+B=4 T=1.0 K= 2: 43.8 tok/s x0.94 tau=2.16 acc=0.581 full=429/948
+B=4 T=1.0 K= 3: 43.1 tok/s x0.93 tau=2.49 acc=0.500 full=261/821
+B=4 T=1.0 K= 4: 41.8 tok/s x0.90 tau=2.63 acc=0.409 full=157/778
+B=4 T=1.0 K= 5: 39.6 tok/s x0.85 tau=2.80 acc=0.361 full=101/730
+B=4 T=1.0 K= 6: 38.8 tok/s x0.83 tau=2.97 acc=0.332 full=89/688
+B=4 T=1.0 K= 7: 37.4 tok/s x0.80 tau=3.00 acc=0.290 full=54/683
+B=4 T=1.0 K= 8: 33.4 tok/s x0.72 tau=2.98 acc=0.250 full=34/687
+B=4 T=1.0 K=10: 31.5 tok/s x0.68 tau=2.98 acc=0.201 full=21/686
+B=4 T=1.0 K=12: 30.5 tok/s x0.66 tau=3.05 acc=0.173 full=14/670
+B=4 T=1.0 K=15: 29.6 tok/s x0.64 tau=3.07 acc=0.141 full=5/667

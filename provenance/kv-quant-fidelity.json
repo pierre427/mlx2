@@ -1,0 +1,28 @@
+{
+  "component": "measured KV-quantization fidelity gate and self-MTP target-only composition",
+  "source_repository": "original mlx2 implementation; peer ideas from llama.cpp, vLLM and mlx-lm",
+  "source_revision": null,
+  "source_references": [
+    "ggml-org/llama.cpp common/arg.cpp --cache-type-k/--cache-type-v",
+    "vllm-project/vllm --kv-cache-dtype fp8; vllm-project/vllm#39445",
+    "ml-explore/mlx-lm#1832 (server KV quantization, merged 2026-09-09)"
+  ],
+  "license": "Apache-2.0",
+  "destination_paths": [
+    "src/mlx2/runtime/kv_quant_fidelity.py",
+    "src/mlx2/runtime/segmented_plain_kv.py",
+    "src/mlx2/runtime/approximate_kv.py",
+    "scripts/measure_kv_quant_fidelity.py",
+    "scripts/bench_kv_quant_mtp.py"
+  ],
+  "modifications": [
+    "No peer code copied; peers only establish that KV quantization ships and that its memory/speed effects must be measured.",
+    "Added a fail-closed fidelity gate (KL, top-1 agreement, needle losses, bytes ratio) bound to the adapter fingerprint and GPU device.",
+    "Composed quantized target KV with native self-MTP while keeping the draft cache exact, with a quantized segmented row view."
+  ],
+  "validation": [
+    "tests/test_approximate_kv_mtp.py",
+    "tests/test_kv_quant_fidelity.py",
+    "GPU fidelity and serving A/B not yet run (READY_FOR_GPU)."
+  ]
+}

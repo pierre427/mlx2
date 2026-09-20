@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 from collections import Counter, OrderedDict, deque
+from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field
+from functools import partial
 import hashlib
 import importlib.metadata
 from itertools import islice
@@ -13,6 +15,7 @@ import platform
 import logging
 from pathlib import Path
 import queue
+import re
 import secrets
 import threading
 import time
@@ -32,6 +35,37 @@ from .sampling_defaults import (
 from .batch_metrics import BatchFaultSpec, BatchRuntimeMetrics, HttpRuntimeMetrics
 
 log = logging.getLogger(__name__)
+
+
+def _preemption_receipt(job):
+    """The ``preemption`` receipt field, or None when nothing happened.
+
+    An injected ``memory_preempt`` fault that never fired is reported rather
+    than swallowed: the eligibility rule legitimately declines a lane that
+    could not replay exactly, but a harness that cannot tell "mechanism
+    observed" from "mechanism declined" writes a gate that passes vacuously.
+    """
+    if job.preemptions:
+        receipt = {
+            "schema": "mlx2.memory-preemption.v1",
+            "replays": job.preemptions,
+            "events": list(job.preemption_events),
+        }
+        if job.fault is not None and not job.fault_fired:
+            receipt["fault_unfired"] = job.fault_declined or "never_reached"
+        return receipt
+    if (
+        job.fault is not None
+        and job.fault.kind == "memory_preempt"
+        and not job.fault_fired
+    ):
+        return {
+            "schema": "mlx2.memory-preemption.v1",
+            "replays": 0,
+            "events": [],
+            "fault_unfired": job.fault_declined or "never_reached",
+        }
+    return None
 
 
 def generation_stop_token_ids(adapter) -> tuple[int, ...]:
@@ -120,31 +154,226 @@ def cache_capsule_policy(value) -> dict:
     return policy
 
 
+# The configuration that carried the 2026-09-19/20 GPU qualification
+# (`qualification/runs/interior-ckpt-20260919/flashnext-all-gated.json` and
+# `qwen38-27b-shared-rag.json`): TTFT 8.30s -> 0.52s on Flash-Next and
+# 23.75s -> 0.90s on Qwen3.8 27B, zero output differences, and -0.7% on the
+# linear no-harm control.  headroom_fraction 0.25 starved the RAG workload;
+# min_uncached_fraction 0.5 is what turns the linear control from +3.9%/+7.2%
+# into no harm.  This preset is what `"auto"` means, not what any route
+# serves: `apc_interior_checkpoints` stays opt-in per route profile until the
+# serving profiles are themselves re-qualified with it on.
+APC_INTERIOR_AUTO_POLICY = {
+    "count": 4,
+    "min_stride": 256,
+    "placement": "auto",
+    "headroom_fraction": 0.5,
+    "min_uncached_fraction": 0.5,
+}
+
+
 def apc_interior_checkpoint_policy(value) -> dict:
     """Validate the default-off APCv2 hybrid checkpoint budget.
 
     Design reference: omlx#3456.  A small hard count bound keeps request-owned
     descriptor snapshots and metric cardinality bounded independently of prompt
-    length.
+    length.  ``"auto"`` expands to the default-on candidate
+    (``APC_INTERIOR_AUTO_POLICY``; turn/tail placement, half of admission
+    headroom, and the deep-hit continuation skip).  The legacy ``pow2``
+    placement, full-headroom budget and always-capture behaviour are implicit
+    so existing settings (and their qualification identity) stay
+    byte-identical.
     """
+    from .runtime.interior_placement import PLACEMENTS
+
     defaults = {"count": 0, "min_stride": 1}
     if value is None:
         return defaults
+    if value == "auto":
+        value = dict(APC_INTERIOR_AUTO_POLICY)
     if not isinstance(value, dict):
-        raise ValueError("apc_interior_checkpoints must be an object")
-    unknown = set(value) - set(defaults)
+        raise ValueError("apc_interior_checkpoints must be an object or \"auto\"")
+    optional = {
+        "placement": "pow2",
+        "headroom_fraction": 1.0,
+        # Skip capture on a request that already resumed from a deep exact
+        # hit.  Such a prompt is a linear continuation: its own ``P-1``
+        # boundary already serves the next turn, so an interior checkpoint
+        # there is pure cost (measured: +3.9%/+7.2% TTFT and 6.5-7.3 GiB of
+        # never-reused entries on the linear control).  0.0 keeps the
+        # historical behaviour and the qualification identity of existing
+        # settings.
+        "min_uncached_fraction": 0.0,
+    }
+    unknown = set(value) - set(defaults) - set(optional)
     if unknown:
         raise ValueError(
             f"unknown APC interior checkpoint settings: {sorted(unknown)}"
         )
-    policy = {**defaults, **value}
+    policy = {**defaults, **optional, **value}
     count = policy["count"]
     stride = policy["min_stride"]
     if isinstance(count, bool) or not isinstance(count, int) or not 0 <= count <= 32:
         raise ValueError("APC interior checkpoint count must be an integer from 0 to 32")
     if isinstance(stride, bool) or not isinstance(stride, int) or stride < 1:
         raise ValueError("APC interior checkpoint min_stride must be a positive integer")
-    return {"count": count, "min_stride": stride}
+    if policy["placement"] not in PLACEMENTS:
+        raise ValueError(
+            f"APC interior checkpoint placement must be one of {list(PLACEMENTS)}"
+        )
+    fraction = policy["headroom_fraction"]
+    if (
+        isinstance(fraction, bool)
+        or not isinstance(fraction, (int, float))
+        or not math.isfinite(fraction)
+        or not 0 < fraction <= 1
+    ):
+        raise ValueError("APC interior checkpoint headroom_fraction must be in (0, 1]")
+    uncached = policy["min_uncached_fraction"]
+    if (
+        isinstance(uncached, bool)
+        or not isinstance(uncached, (int, float))
+        or not math.isfinite(uncached)
+        or not 0 <= uncached < 1
+    ):
+        raise ValueError(
+            "APC interior checkpoint min_uncached_fraction must be in [0, 1)"
+        )
+    result = {"count": count, "min_stride": stride}
+    if policy["placement"] != "pow2":
+        result["placement"] = policy["placement"]
+    if float(fraction) != 1.0:
+        result["headroom_fraction"] = float(fraction)
+    if float(uncached) != 0.0:
+        result["min_uncached_fraction"] = float(uncached)
+    return result
+
+
+def host_memory_signals_policy(value) -> dict:
+    """Validate the default-off host memory signal policy.
+
+    When enabled, admission headroom uses the Mach-statistics host estimate
+    and the kernel pressure level (with fall hysteresis) is exported.
+    """
+    defaults = {"enabled": False, "fall_after_seconds": 5.0}
+    if value is None:
+        return defaults
+    if not isinstance(value, dict):
+        raise ValueError("host_memory_signals must be an object")
+    unknown = set(value) - set(defaults)
+    if unknown:
+        raise ValueError(f"unknown host memory signal settings: {sorted(unknown)}")
+    policy = {**defaults, **value}
+    if type(policy["enabled"]) is not bool:
+        raise ValueError("host_memory_signals.enabled must be boolean")
+    fall = policy["fall_after_seconds"]
+    if (
+        isinstance(fall, bool)
+        or not isinstance(fall, (int, float))
+        or not math.isfinite(fall)
+        or not 0 <= fall <= 600
+    ):
+        raise ValueError(
+            "host_memory_signals.fall_after_seconds must be a number from 0 to 600"
+        )
+    return {"enabled": policy["enabled"], "fall_after_seconds": float(fall)}
+
+
+def moe_expert_streaming_policy(value) -> dict:
+    """Validate the default-off MoE expert disk-streaming policy.
+
+    When enabled, a routed MoE model's stacked expert tables leave the
+    parameter tree and are read back one expert at a time by byte range, held
+    in a bounded per-layer LRU whose ceiling (``cache_gib``) is an enforced
+    reservation admission subtracts before any lane is costed.
+
+    ``atlas`` only *collects* access counts and, with ``trace``, an access
+    trace for the offline counterfactual in
+    ``scripts/analyze_expert_atlas.py``.  It never influences residency.
+    """
+    defaults = {
+        "enabled": False,
+        "cache_gib": 0.0,
+        "read_workers": 16,
+        "atlas": False,
+        "atlas_path": None,
+        "trace_path": None,
+    }
+    if value is None:
+        return defaults
+    if not isinstance(value, dict):
+        raise ValueError("moe_expert_streaming must be an object")
+    unknown = set(value) - set(defaults)
+    if unknown:
+        raise ValueError(f"unknown MoE expert streaming settings: {sorted(unknown)}")
+    policy = {**defaults, **value}
+    for flag in ("enabled", "atlas"):
+        if type(policy[flag]) is not bool:
+            raise ValueError(f"moe_expert_streaming.{flag} must be boolean")
+    cache_gib = policy["cache_gib"]
+    if (
+        isinstance(cache_gib, bool)
+        or not isinstance(cache_gib, (int, float))
+        or not math.isfinite(cache_gib)
+        or not 0 <= cache_gib <= 1024
+    ):
+        raise ValueError(
+            "moe_expert_streaming.cache_gib must be a number from 0 to 1024"
+        )
+    workers = policy["read_workers"]
+    if isinstance(workers, bool) or not isinstance(workers, int) or not 1 <= workers <= 64:
+        raise ValueError(
+            "moe_expert_streaming.read_workers must be an integer from 1 to 64"
+        )
+    for key in ("atlas_path", "trace_path"):
+        if policy[key] is not None and not isinstance(policy[key], str):
+            raise ValueError(f"moe_expert_streaming.{key} must be a string or null")
+    if policy["enabled"] and cache_gib <= 0:
+        raise ValueError(
+            "moe_expert_streaming.cache_gib must be positive when enabled: the "
+            "cache ceiling is an enforced admission reservation, not an estimate"
+        )
+    if policy["trace_path"] and not policy["atlas"]:
+        raise ValueError("moe_expert_streaming.trace_path requires atlas collection")
+    return {
+        "enabled": policy["enabled"],
+        "cache_gib": float(cache_gib),
+        "read_workers": int(workers),
+        "atlas": policy["atlas"],
+        "atlas_path": policy["atlas_path"],
+        "trace_path": policy["trace_path"],
+    }
+
+
+def apc_rolling_checkpoint_policy(value) -> dict:
+    """Validate the default-off disposable rolling prefill checkpoint policy.
+
+    ``interval_tokens`` is the absolute spacing of rolling state boundaries;
+    absent or 0 disables them.  Design reference: Splash rolling checkpoints
+    every 4096 tokens (rev f58d36dd).
+    """
+    defaults = {"interval_tokens": 0}
+    if value is None:
+        return defaults
+    if not isinstance(value, dict):
+        raise ValueError("apc_rolling_checkpoints must be an object")
+    unknown = set(value) - set(defaults)
+    if unknown:
+        raise ValueError(
+            f"unknown APC rolling checkpoint settings: {sorted(unknown)}"
+        )
+    interval = {**defaults, **value}["interval_tokens"]
+    # Each boundary clamps a prefill chunk and costs one snapshot; a floor
+    # keeps a typo from turning prefill into single-token steps.
+    if (
+        isinstance(interval, bool)
+        or not isinstance(interval, int)
+        or not (interval == 0 or interval >= 16)
+    ):
+        raise ValueError(
+            "APC rolling checkpoint interval_tokens must be 0 or an integer >= 16"
+        )
+    return {"interval_tokens": interval}
 
 
 def budget_interior_checkpoint_positions(
@@ -229,7 +458,9 @@ class HostPromptCache:
             "batch_cohort",
             "mlx_fault",
             "skip_writing_prefix_cache",
+            "verify_bitexact",
             "session_id",
+            "return_progress",
             "_mlx2_prefill_inputs",
             "_mlx2_multimodal_stats",
             "_mlx2_media_token_end",
@@ -366,6 +597,8 @@ def minimum_tokens_processor(array_module, eos_token_ids, prompt_tokens, minimum
 
     # Stateless: speculative draft probes can safely call the same function.
     processor.probe = processor
+    processor.history_pure = True
+    processor.dormant = lambda tokens: int(tokens.shape[-1]) - prompt_tokens >= minimum
     return processor
 
 
@@ -420,6 +653,73 @@ def cache_semantic_fingerprint(tenant_scope):
     if tenant_scope is None:
         return "text-token-v1"
     return ("text-token-v1", "tenant", str(tenant_scope))
+
+
+def request_apc_scope(request):
+    """APCv2 per-request scope: media fingerprint plus LoRA adapter identity."""
+    from .runtime.multi_lora import lora_apc_scope
+
+    return lora_apc_scope(
+        request.get("_mlx2_media_fingerprint"),
+        request.get("_mlx2_lora_fingerprint"),
+    )
+
+
+def multi_lora_policy(
+    max_loras,
+    max_lora_rank,
+    *,
+    lora_root,
+    mtp,
+    prompt_lookup,
+    spomin,
+    int8_prefill,
+    approximate_kv,
+    cache_capsules,
+):
+    """Validate concurrent multi-LoRA settings; None when the lever is off.
+
+    v1 is ordinary-route only: the speculative batches have forward seams that
+    do not bind per-row adapters, so those combinations are refused rather
+    than silently serving base-model drafts/verifies for adapter rows.
+    """
+    for label, value, low, high in (
+        ("max_loras", max_loras, 0, 64),
+        ("max_lora_rank", max_lora_rank, 1, 1024),
+    ):
+        if isinstance(value, bool) or not isinstance(value, int) or not low <= value <= high:
+            raise ValueError(f"{label} must be an integer from {low} to {high}")
+    if not max_loras:
+        return None
+    if lora_root is None:
+        raise ValueError("concurrent multi-LoRA (max_loras > 0) requires --lora-dir")
+    for enabled, name in (
+        (mtp, "MTP"),
+        (prompt_lookup, "prompt lookup"),
+        (spomin, "live Spomin surgery"),
+        (int8_prefill, "int8 prefill"),
+        (approximate_kv, "approximate KV"),
+        (cache_capsules, "cache capsules"),
+    ):
+        if enabled:
+            raise ValueError(
+                f"concurrent multi-LoRA requires the ordinary route; it is "
+                f"incompatible with {name}"
+            )
+    return {"max_loras": max_loras, "max_lora_rank": max_lora_rank}
+def verify_bitexact_status(engine):
+    """Host-only bit-exact verify status (mode, route counter, request counts)."""
+    from .runtime.verify_bitexact import engine_status
+
+    return engine_status(engine)
+
+
+def verify_bitexact_receipt_fields(handle, start):
+    """Terminal receipt fields; ``verify_bitexact`` is false unless proven."""
+    if handle is None:
+        return {"verify_bitexact": False}
+    detail = handle.request_receipt(start)
+    return {"verify_bitexact": detail["verify_bitexact"], "verify_bitexact_detail": detail}
 
 
 def int8_prefill_status(engine):
@@ -511,6 +811,81 @@ def prompt_lookup_verification_gib(controller, num_draft):
     return controller.transient_gib_per_lane * num_draft / 3.0
 
 
+def lane_admission_required_gib(
+    controller, *, context_tokens, draft_depth, cache_gib, prompt_lookup_num_draft=None
+):
+    """Headroom one arriving request needs to start at ``draft_depth``.
+
+    Split out of the scheduler loop so the self-MTP depth floor below can be
+    costed with exactly the same arithmetic as the full-depth requirement.
+    """
+    required = controller.hard_reserve_gib + controller.lane_gib(
+        context_tokens, draft_depth, cache_gib=cache_gib
+    )
+    if prompt_lookup_num_draft is not None:
+        required += prompt_lookup_verification_gib(controller, prompt_lookup_num_draft)
+    return required
+
+
+def admit_lane_headroom(
+    controller,
+    *,
+    context_tokens,
+    draft_depth,
+    cache_gib,
+    prompt_lookup_num_draft=None,
+    headroom,
+    reclaim,
+    evict,
+    evictable=None,
+):
+    """Admit one arriving request, falling back to the depth floor.
+
+    Returns ``(admitted, used_depth_floor, required_gib)``, where
+    ``required_gib`` is the requirement of the rung actually tested last --
+    what the caller has effectively spent from measured headroom.
+
+    The full k=``draft_depth`` verify transient is not a precondition for
+    serving a self-MTP request: ``SelfMTPLaneAdmissionController.decide`` runs
+    at *every* decode cycle boundary against live headroom and walks the
+    frozen ladder k -> k-1 -> plain.  Refusing here at max depth short-circuits
+    that ladder and 429s a request that the plain rung on the same host serves.
+    On a 36 GiB M3 Pro (Metal advisory 28.08 GiB) holding a 20 GiB model, the
+    top rung alone -- a 5.625 GiB host-scaled reserve plus a 3.1 GiB k=2
+    transient -- overruns the 8.34 GiB ``execution_headroom`` before a single
+    context token is charged, so the self-MTP route admitted nothing at all
+    while the ordinary route on the same box served normally.
+
+    The fallback runs only on the branch that previously returned "refuse",
+    so every host that admitted at full depth is untouched.
+    """
+    def attempt(depth):
+        required = lane_admission_required_gib(
+            controller,
+            context_tokens=context_tokens,
+            draft_depth=depth,
+            cache_gib=cache_gib,
+            prompt_lookup_num_draft=prompt_lookup_num_draft,
+        )
+        fits = ensure_admission_headroom(
+            required * (1 << 30),
+            headroom=headroom,
+            reclaim=reclaim,
+            evict=evict,
+            evictable=evictable,
+        )
+        return (fits, required)
+
+    (fits, required) = attempt(draft_depth)
+    if fits:
+        return (True, False, required)
+    if draft_depth > 0:
+        (fits, floor) = attempt(0)
+        if fits:
+            return (True, True, floor)
+    return (False, False, required)
+
+
 def ensure_admission_headroom(
     required_bytes, *, headroom, reclaim, evict, evictable=None
 ):
@@ -562,6 +937,80 @@ class Overloaded(RuntimeError):
     pass
 
 
+class PromptTemplateError(ValueError):
+    """The request cannot be rendered by the loaded model's chat template.
+
+    A ``ValueError`` so every boundary that already shapes a bad request --
+    engine attachment, the Chat/Responses/Anthropic handler, buffered and
+    streamed alike -- answers 4xx.  Rendering only reads the request, so a
+    template that meets an undefined value is describing a field the caller
+    left out, not a server failure.
+    """
+
+
+class PromptTemplateFailure(RuntimeError):
+    """Chat-template rendering failed for a reason the request does not explain.
+
+    Kept distinct from an unhandled ``TypeError``: the caller is told the
+    template failed to render rather than reading a bare 500.
+    """
+
+
+_TEMPLATE_UNDEFINED_MARKERS = ("Undefined", "undefined")
+
+
+def render_prompt_tokens(adapter, request):
+    """Render one request to prompt tokens, shaping template failures.
+
+    Jinja reports a field the request omits as an ``Undefined`` value, which
+    surfaces as ``jinja2.UndefinedError`` or -- when the template pipes it
+    through ``tojson`` -- as ``TypeError: Object of type Undefined is not JSON
+    serializable``.  Either is a client-side omission; neither should reach a
+    caller as an unhandled 500.
+    """
+    try:
+        return adapter.prompt_tokens(request)
+    except (ValueError, Overloaded, MemoryError):
+        # ``ValueError`` (including ``PromptTemplateError``) is already the
+        # 4xx shape; the other two are not template failures at all.
+        raise
+    except Exception as exc:
+        import jinja2
+
+        detail = f"{type(exc).__name__}: {exc}"
+        undefined = isinstance(exc, jinja2.exceptions.UndefinedError) or (
+            isinstance(exc, TypeError)
+            and any(marker in str(exc) for marker in _TEMPLATE_UNDEFINED_MARKERS)
+        )
+        if undefined:
+            field = _undefined_template_field(exc, request)
+            named = f" ({field} is missing)" if field else ""
+            raise PromptTemplateError(
+                "this model's chat template requires a field the request does "
+                f"not provide{named}: {detail}"
+            ) from exc
+        raise PromptTemplateFailure(
+            f"chat template rendering failed: {detail}"
+        ) from exc
+
+
+def _undefined_template_field(exc, request):
+    """Name the omitted request field when the failure identifies one."""
+    message = str(exc)
+    attribute = re.search(r"has no attribute '([^']+)'", message)
+    name = attribute.group(1) if attribute else None
+    if name is None:
+        quoted = re.search(r"'([^']+)' is undefined", message)
+        name = quoted.group(1) if quoted else None
+    if name is None:
+        return None
+    for index, tool in enumerate(request.get("tools") or ()):
+        function = tool.get("function") if isinstance(tool, Mapping) else None
+        if isinstance(function, Mapping) and name not in function:
+            return f"tools[{index}].function.{name}"
+    return name
+
+
 class AdmissionClosed(RuntimeError):
     """A model-executing request reached a service whose admission gate is shut."""
 
@@ -609,6 +1058,7 @@ class Job:
     fanout_group: str | None = None
     fanout_role: str | None = None
     spomin_receipt: dict | None = None
+    prefill_chunk_receipt: dict | None = None
     cache_capsule: object = None
     cache_capsule_rows: int = 0
     cache_capsule_receipt: dict | None = None
@@ -623,13 +1073,57 @@ class Job:
     thinking_budget_resolved: bool = False
     thinking_tokens: list[int] = field(default_factory=list)
     tool_parse_fallbacks_seen: int = 0
+    tool_constraint_truncations_seen: int = 0
     tool_grammar_status: str = "disabled"
+    tool_grammar_receipt: dict | None = None
     approximate_kv_receipt: dict | None = None
     approximate_kv_applied: bool = False
+    verify_bitexact_start: dict | None = None
     admission_final_reclaim_done: bool = False
     apc_interior_positions: tuple[int, ...] = ()
+    # Budgeted P1 plan when rolling checkpoints are enabled (else empty), and
+    # the (key, tokens) of this lane's latest disposable rolling checkpoint.
+    state_boundaries: tuple = ()
+    rolling_checkpoint: tuple | None = None
+    state_boundaries_published: dict = field(default_factory=dict)
     effective_sampling: dict | None = None
     sampling_defaults: dict | None = None
+    parallel_sample: bool = False
+    # Memory preemption (``memory_preemption`` policy); untouched when off.
+    preemption_prompt: list | None = None
+    generated_token_ids: list | None = None
+    rng_seed: int | None = None
+    decode_replay_block: str | None = None
+    preempted: bool = False
+    replaying: bool = False
+    preemptions: int = 0
+    preempted_at: float = 0
+    preempt_blockers: tuple = ()
+    fault_declined: str | None = None
+    preemption_events: list = field(default_factory=list)
+    # return_progress: at most one queued prompt_progress event per job; the
+    # producer rewrites a still-queued event's payload instead of queueing more.
+    prompt_progress_lock: threading.Lock = field(default_factory=threading.Lock)
+    prompt_progress_event: dict | None = None
+    prompt_progress_processed: int = -1
+    prompt_progress_updates: int = 0
+    prompt_progress_dropped: int = 0
+    lora_name: str | None = None
+    lora_fingerprint: str | None = None
+    lora_slot: int | None = None
+    lora_residency: str | None = None
+
+
+def take_prompt_progress(job, event):
+    """Consume a dequeued ``prompt_progress`` event; return its newest payload.
+
+    Releases the job's single queued-progress slot so the next update queues
+    a fresh event instead of rewriting this one.
+    """
+    with job.prompt_progress_lock:
+        if job.prompt_progress_event is event:
+            job.prompt_progress_event = None
+        return event["prompt_progress"]
 
 
 @dataclass(frozen=True)
@@ -669,11 +1163,13 @@ class ServingEngine:
         batch_cohort_timeout_ms=1000.0,
         mtp=True,
         prompt_lookup=False,
+        route_selection_source="engine_argument",
         qualification_mode=False,
         qualification=None,
         execution_policy=None,
         tenant_scoped_cache=False,
         adaptive_mtp_depth=None,
+        mtp_acceptance_log=None,
         spomin_live_surgery=None,
         thinking_budget=None,
         thinking_steer_alpha=None,
@@ -683,6 +1179,8 @@ class ServingEngine:
         persistent_block_bytes=0,
         approximate_kv=None,
         lora_root=None,
+        max_loras=0,
+        max_lora_rank=16,
         reasoning_signing_key_file=None,
         reasoning_signing_key_env=None,
         apc_persist_dir=None,
@@ -697,6 +1195,7 @@ class ServingEngine:
         apc_quarantine_max_entries=128,
         apc_quarantine_max_bytes=1 << 30,
         int8_prefill=None,
+        verify_bitexact=None,
         _validate_only=False,
     ):
         self.default_max_tokens = validate_default_max_tokens(default_max_tokens)
@@ -711,18 +1210,73 @@ class ServingEngine:
             raise ValueError("limits must be positive")
         if max_lanes > max_inflight:
             raise ValueError("max_lanes must not exceed max_inflight")
+        if route_selection_source not in {
+            "adapter_default",
+            "explicit_flag",
+            "engine_argument",
+        }:
+            raise ValueError("invalid route selection source")
         self.started_at = time.monotonic()
         if execution_policy is not None and not isinstance(execution_policy, dict):
             raise ValueError("execution policy must be a JSON object")
         self.execution_policy = execution_policy
-        for policy_name in ("constrained_tool_grammar", "tolerant_tool_markers"):
+        for policy_name in (
+            "constrained_tool_grammar",
+            "tolerant_tool_markers",
+            "constrained_tool_grammar_auto",
+            "tool_grammar_streaming",
+        ):
             policy_value = (execution_policy or {}).get(policy_name, False)
             if type(policy_value) is not bool:
                 raise ValueError(f"{policy_name} must be boolean")
             setattr(self, policy_name, policy_value)
+        # Item 12 extensions build on the adapter tool grammar.
+        for policy_name in ("constrained_tool_grammar_auto", "tool_grammar_streaming"):
+            if getattr(self, policy_name) and not self.constrained_tool_grammar:
+                raise ValueError(f"{policy_name} requires constrained_tool_grammar")
         self.apc_interior_checkpoint_policy = apc_interior_checkpoint_policy(
             (execution_policy or {}).get("apc_interior_checkpoints")
         )
+        # Default-off: snapshot hybrid state where this prompt diverges from a
+        # stored longer path, so the next request branching there hits.
+        junction_policy = (execution_policy or {}).get(
+            "apc_junction_checkpoints", False
+        )
+        if type(junction_policy) is not bool:
+            raise ValueError("apc_junction_checkpoints must be boolean")
+        self.apc_junction_checkpoints = junction_policy
+        self.apc_rolling_checkpoint_policy = apc_rolling_checkpoint_policy(
+            (execution_policy or {}).get("apc_rolling_checkpoints")
+        )
+        # "hybrid": capture/publish during prefill; "kv": publish the partial
+        # trimmable cache when a prefill is cancelled; None: off.
+        self.apc_rolling_route = None
+        self.host_memory_signals_policy = host_memory_signals_policy(
+            (execution_policy or {}).get("host_memory_signals")
+        )
+        self.moe_expert_streaming_policy = moe_expert_streaming_policy(
+            (execution_policy or {}).get("moe_expert_streaming")
+        )
+        # A streamed configuration is single lane by construction: two lanes'
+        # expert working sets sum, and a shared cache thrashing between them
+        # makes page-in counts -- the only diagnostic this feature has --
+        # unreproducible.  Output would still be identical; the evidence
+        # would not be.
+        if self.moe_expert_streaming_policy["enabled"] and max_lanes != 1:
+            raise ValueError("MoE expert streaming requires max_lanes=1")
+        self.expert_stream = None
+        self.expert_stream_collector = None
+        # P4: consumers (preemption, rolling captures) read this callable.  It
+        # is a constant NORMAL unless the operator enables host signals.
+        from .runtime.os_memory import MemoryPressureMonitor, PressureLevel
+
+        self.host_memory_monitor = None
+        self.memory_pressure_level = lambda: PressureLevel.NORMAL
+        if self.host_memory_signals_policy["enabled"]:
+            self.host_memory_monitor = MemoryPressureMonitor(
+                self.host_memory_signals_policy["fall_after_seconds"]
+            )
+            self.memory_pressure_level = self.host_memory_monitor.level
         from .runtime.adaptive_policy import AdaptiveMTPDepthPolicy
         from .runtime.speculative_sampling import FLyVerificationPolicy
         from .runtime.spomin_live_surgery import ServingSpominPolicy
@@ -732,6 +1286,26 @@ class ServingEngine:
         )
         self.fly_verification_policy = FLyVerificationPolicy.from_value(
             (execution_policy or {}).get("fly_verification")
+        )
+        from .memory_preemption import memory_preemption_policy
+
+        self.memory_preemption_policy = memory_preemption_policy(
+            (execution_policy or {}).get("memory_preemption")
+        )
+        from .runtime.copy_draft import CopyDraftPolicy
+
+        self.copy_draft_policy = CopyDraftPolicy.from_value(
+            (execution_policy or {}).get("self_mtp_copy_draft")
+        )
+        from .runtime.adaptive_policy import PrefillOrder
+
+        # Validated once here; each BatchGenerator builds its own stateful
+        # order from this dict.  Absent (None) keeps main's scheduling.
+        prefill_order = PrefillOrder.from_value(
+            (execution_policy or {}).get("prefill_scheduling")
+        )
+        self.prefill_scheduling_policy = (
+            prefill_order.as_dict() if prefill_order.enabled else None
         )
         self.spomin_policy = ServingSpominPolicy.from_value(spomin_live_surgery)
         self.spomin_manager = None
@@ -818,6 +1392,18 @@ class ServingEngine:
             )
         if self.cache_capsule_policy["enabled"] and (mtp or prompt_lookup):
             raise ValueError("cache capsules are qualified only for ordinary decode")
+        self.mtp_acceptance_log = (
+            None if mtp_acceptance_log in (None, False, "") else mtp_acceptance_log
+        )
+        if self.mtp_acceptance_log is not None:
+            if not qualification_mode:
+                raise ValueError(
+                    "MTP acceptance logging is restricted to qualification mode"
+                )
+            if not mtp or prompt_lookup:
+                raise ValueError(
+                    "MTP acceptance logging requires the native self-MTP route"
+                )
         if self.adaptive_mtp_policy.enabled:
             if not qualification_mode:
                 raise ValueError(
@@ -842,6 +1428,13 @@ class ServingEngine:
         # The handle is bound in the worker once the adapter's model exists.
         self.int8_prefill_policy = Int8PrefillPolicy.from_value(int8_prefill)
         self.int8_prefill_handle = None
+        from .runtime.verify_bitexact import VerifyBitexactPolicy
+
+        # Bit-exact (batch-invariant) verify: default off.  The mode is
+        # process-global in mlx, so it is bound once in the worker before the
+        # first request is admitted, and never toggled per batch.
+        self.verify_bitexact_policy = VerifyBitexactPolicy.from_value(verify_bitexact)
+        self.verify_bitexact_handle = None
         from .runtime.approximate_kv import ServingApproximateKVPolicy
 
         self.approximate_kv_policy = ServingApproximateKVPolicy.from_value(
@@ -853,8 +1446,13 @@ class ServingEngine:
                     "approximate KV is restricted to qualification mode unless a "
                     "qualification record carries its evidence"
                 )
-            if mtp:
-                raise ValueError("approximate KV is incompatible with MTP")
+            if mtp and not self.approximate_kv_policy.compose_mtp:
+                raise ValueError(
+                    "approximate KV is incompatible with MTP unless compose_mtp "
+                    "is set (target-only quantization, exact draft cache)"
+                )
+            if self.approximate_kv_policy.compose_mtp and not mtp:
+                raise ValueError("approximate KV compose_mtp requires native MTP")
             if prompt_lookup:
                 raise ValueError("approximate KV is incompatible with prompt lookup")
             if self.spomin_policy.enabled:
@@ -873,6 +1471,18 @@ class ServingEngine:
             Path(lora_root).expanduser().resolve() if lora_root is not None else None
         )
         self.lora_session = None
+        self.multi_lora_policy = multi_lora_policy(
+            max_loras,
+            max_lora_rank,
+            lora_root=lora_root,
+            mtp=mtp,
+            prompt_lookup=prompt_lookup,
+            spomin=self.spomin_policy.enabled,
+            int8_prefill=self.int8_prefill_policy.enabled,
+            approximate_kv=self.approximate_kv_policy.enabled,
+            cache_capsules=self.cache_capsule_policy["enabled"],
+        )
+        self.multi_lora = None
         self.max_inflight, self.max_lanes = max_inflight, max_lanes
         self.max_context, self.max_request_bytes = max_context, max_request_bytes
         self.prefill_step = prefill_step
@@ -895,11 +1505,14 @@ class ServingEngine:
         self.batch_cohort_timeout_seconds = batch_cohort_timeout_ms / 1000.0
         self.mtp = mtp
         self.prompt_lookup = bool(prompt_lookup)
+        self.route_selection_source = route_selection_source
         self.qualification_mode, self.qualification = qualification_mode, qualification
         # Off by default: one prefix cache shared by every client is the point
         # of the single-user lab deployment.  On, the APCv2 namespace carries
-        # the (unauthenticated) X-Tenant-ID so a client cannot warm-hit, or
-        # probe through cached_tokens, another tenant's prompts.
+        # the request tenant so a client cannot warm-hit, or probe through
+        # cached_tokens, another tenant's prompts.  The tenant is verified only
+        # under server tenant auth (mlx2.tenant_auth); otherwise it is the
+        # client's X-Tenant-ID.
         self.tenant_scoped_cache = bool(tenant_scoped_cache)
         if _validate_only:
             return
@@ -949,10 +1562,13 @@ class ServingEngine:
                 "thinking_budget_forced_closes": 0,
                 "tool_call_parse_fallbacks": 0,
                 "tool_call_constraint_failures": 0,
+                "tool_call_constraint_truncations": 0,
                 "schema_ref_failures": 0,
                 "structured_output_dead_ends": 0,
                 "constrained_tool_grammar_engagements": 0,
                 "constrained_tool_grammar_skips": 0,
+                "constrained_tool_grammar_auto_engagements": 0,
+                "constrained_tool_grammar_streams": 0,
                 "tolerant_tool_marker_requests": 0,
                 "quiesce_requests": 0,
                 "drains_completed": 0,
@@ -965,6 +1581,30 @@ class ServingEngine:
                 "resumes": 0,
                 "prefetches_queued": 0,
                 "prefetches_cancelled": 0,
+                **(
+                    {
+                        "memory_preemptions": 0,
+                        "memory_preemptions_stall": 0,
+                        "memory_preemptions_pressure": 0,
+                        "memory_preemptions_fault": 0,
+                        "preempted_replays": 0,
+                        "memory_preemption_drain_cancellations": 0,
+                        "memory_preemption_fault_declined": 0,
+                        "memory_preemption_fault_unfired": 0,
+                    }
+                    if self.memory_preemption_policy["enabled"]
+                    else {}
+                ),
+                "apc_interior_positions_planned_turn": 0,
+                "apc_interior_positions_planned_tail": 0,
+                "apc_interior_positions_planned_lattice": 0,
+                "apc_interior_positions_skipped_media": 0,
+                "apc_interior_requests_skipped_continuation": 0,
+                "apc_interior_positions_headroom_capped": 0,
+                "apc_interior_hits": 0,
+                "apc_interior_hits_turn_boundary": 0,
+                "apc_interior_hit_tokens": 0,
+                "apc_interior_turn_marker_missing": 0,
                 **{
                     f"admissions_rejected_{endpoint}": 0
                     for endpoint in self._ADMISSION_CLASSES
@@ -974,6 +1614,7 @@ class ServingEngine:
         self._memory_reclaim_lock = threading.Lock()
         self._memory_reclaim_last = 0.0
         self.apc_interior_route_supported = not self.prompt_lookup
+        self.apc_interior_turn_markers = ()
         self.receipts = deque(maxlen=128)
         self.batch_metrics = BatchRuntimeMetrics()
         self.http_metrics = HttpRuntimeMetrics()
@@ -1288,18 +1929,46 @@ class ServingEngine:
 
     def count_tokens(self, request):
         """Render a chat request through the loaded adapter without generating."""
+        return len(self.render_prompt(request))
+
+    def render_prompt(self, request):
+        """Prompt token ids generation admission would use for ``request``.
+
+        Uses the same adapter ``prompt_tokens`` call as admission, so the
+        result is exactly the generated prompt for text requests.
+        """
         if not self.ready.is_set() or self.error or not self.thread.is_alive():
             raise RuntimeError(self.error or "model is not ready")
         with self.prompt_lock:
             adapter = self.adapter
             if adapter is None:
                 raise RuntimeError("model adapter is not ready")
-            return len(adapter.prompt_tokens(request))
+            return [int(token) for token in render_prompt_tokens(adapter, request)]
+
+    def apply_template(self, request):
+        """Rendered prompt text, or None when the adapter cannot render text.
+
+        Adapters opt in with ``render_prompt(request) -> str`` whose encoding
+        (without added special tokens) equals ``prompt_tokens(request)``.
+        """
+        if not self.ready.is_set() or self.error or not self.thread.is_alive():
+            raise RuntimeError(self.error or "model is not ready")
+        with self.prompt_lock:
+            adapter = self.adapter
+            if adapter is None:
+                raise RuntimeError("model adapter is not ready")
+            render = getattr(adapter, "render_prompt", None)
+            if not callable(render):
+                return None
+            return render(request)
 
     def _prepare_job(self, request, *, tenant_id):
         from .contracts import Capability
         from .output import constrained_tool_choice
+        from .runtime.verify_bitexact import check_request as check_verify_bitexact
 
+        handle = getattr(self, "verify_bitexact_handle", None)
+        check_verify_bitexact(request, handle)
         if (
             "grammar" in request or "response_format" in request
             or (
@@ -1369,9 +2038,30 @@ class ServingEngine:
             self, "apc_interior_route_supported", False
         ):
             self.counts["apc_interior_checkpoints_skipped_route"] += 1
-        return Job(
+        lora = None
+        manager = getattr(self, "multi_lora", None)
+        if manager is not None:
+            lora = manager.lookup(public_request.get("model"))
+            if lora is not None:
+                # The adapter identity joins the APCv2 namespace (content
+                # fingerprint, not name): no cross-adapter prefix reuse.
+                public_request = {
+                    **public_request,
+                    "_mlx2_lora_fingerprint": lora[1],
+                }
+                self.counts["multi_lora_requests"] += 1
+            else:
+                self.counts["multi_lora_base_requests"] += 1
+        job = Job(
             public_request, tenant_id=str(tenant_id or "default"), fault=fault
         )
+        if lora is not None:
+            job.lora_name, job.lora_fingerprint = lora
+        if handle is not None:
+            job.verify_bitexact_start = handle.begin_request(
+                explicit=bool(request.get("verify_bitexact", False))
+            )
+        return job
 
     def _clear_allocator_cache_before_reject(self, *, synchronize=False):
         """Rate-limited allocator reclaim shared by every admission seam."""
@@ -1522,6 +2212,8 @@ class ServingEngine:
             or write_suppressed
         )
         fanout_group = "fanout-" + uuid.uuid4().hex
+        for job in jobs:
+            job.parallel_sample = len(jobs) > 1
         for index, job in enumerate(jobs):
             if independent:
                 break
@@ -1567,6 +2259,67 @@ class ServingEngine:
                 raise
         return jobs
 
+    def expert_stream_reserve_gib(self) -> float:
+        """``B_stream``: the enforced expert-cache ceiling, in GiB.
+
+        A streamed model's admission charge is ``R_fixed + B_stream`` -- the
+        weights that stay resident plus this ceiling -- never the size of the
+        files on disk.  It is a configured constant the manager enforces, so
+        admission can subtract it exactly once instead of tracking a working
+        set that cannot be predicted.
+        """
+        if not self.moe_expert_streaming_policy["enabled"]:
+            return 0.0
+        return float(self.moe_expert_streaming_policy["cache_gib"])
+
+    def expert_stream_counters(self) -> dict:
+        stream = self.expert_stream
+        if stream is None:
+            return {}
+        try:
+            return stream.counters()
+        except Exception:  # noqa: BLE001 - telemetry must not break status
+            return {}
+
+    def _install_expert_streaming(self, adapter) -> None:
+        """Replace the adapter's stacked expert tables with streamed ones.
+
+        Installed after the adapter loads, so the load-time peak is unchanged;
+        what it bounds is the steady-state resident cost.  An adapter whose
+        expert tensors are fused or renamed during ``sanitize`` cannot be
+        addressed by byte range and is refused here rather than served with a
+        cache that silently addresses the wrong rows.
+        """
+        if not self.moe_expert_streaming_policy["enabled"]:
+            return
+        from .runtime.weight_stream import install_expert_streaming
+
+        policy = self.moe_expert_streaming_policy
+        model = getattr(adapter, "model", None)
+        if model is None:
+            raise ValueError("adapter exposes no model to stream experts from")
+        collector = None
+        if policy["atlas"]:
+            from .runtime.expert_atlas import AtlasCollector
+
+            collector = AtlasCollector(
+                self.model_path,
+                sink=policy["atlas_path"],
+                trace_path=policy["trace_path"],
+            )
+        top_k = int(
+            getattr(getattr(model, "args", None), "num_experts_per_tok", 0) or 1
+        )
+        self.expert_stream = install_expert_streaming(
+            model,
+            self.model_path,
+            ceiling_bytes=int(policy["cache_gib"] * (1 << 30)),
+            top_k=top_k,
+            read_workers=policy["read_workers"],
+            collector=collector,
+        )
+        self.expert_stream_collector = collector
+
     def status(self):
         with self.lock:
             quiesce = self._service_state_locked()
@@ -1579,7 +2332,7 @@ class ServingEngine:
                 "inflight": len(self.jobs),
                 "accepted_lifecycles": len(self._admission_leases),
                 "queue_depth": self.queued_jobs,
-                "counts": dict(self.counts),
+                "counts": {**dict(self.counts), **self.expert_stream_counters()},
                 "quiesce": quiesce,
                 "admissions_rejected": {
                     endpoint: self.counts[f"admissions_rejected_{endpoint}"]
@@ -1589,6 +2342,7 @@ class ServingEngine:
                     **(self.snapshot.get("approximate_kv") or {}),
                     "applied": self.counts["approximate_kv_applied"],
                     "declined": self.counts["approximate_kv_declined"],
+                    "mtp_lanes": self.counts["approximate_kv_mtp_lanes"],
                     "requantized_prefix_hits": self.counts[
                         "approximate_kv_requantized_prefix_hits"
                     ],
@@ -1597,6 +2351,7 @@ class ServingEngine:
                     ],
                 },
                 "int8_prefill": int8_prefill_status(self),
+                "verify_bitexact": verify_bitexact_status(self),
                 "recent_receipts": list(self.receipts),
                 "recent_operation_receipts": list(self.operation_receipts),
                 "model_revision": self.model_revision,
@@ -1606,6 +2361,11 @@ class ServingEngine:
                     if self.lora_session is not None
                     else None,
                 },
+                "multi_lora": (
+                    self.multi_lora.status()
+                    if getattr(self, "multi_lora", None) is not None
+                    else {"enabled": False}
+                ),
                 "host_prompt_cache": self.host_prompt_cache.status(),
                 "reasoning_signing": {
                     "key_id": self.reasoning_signer.key_id,
@@ -1816,6 +2576,54 @@ class ServingEngine:
         except ImportError:
             pass
 
+    def _multi_lora_receipt(self, job):
+        from .runtime.multi_lora import MULTI_LORA_RECEIPT_SCHEMA
+
+        return {
+            "schema": MULTI_LORA_RECEIPT_SCHEMA,
+            "name": job.lora_name,
+            "fingerprint": job.lora_fingerprint,
+            "slot": job.lora_slot if job.lora_name is not None else 0,
+            "residency": job.lora_residency,
+            "apc_namespace": "adapter" if job.lora_name is not None else "base",
+        }
+
+    def _load_multi_lora_adapter(self, name, candidate, *, lora_int_id=None):
+        manager = self.multi_lora
+        adapter, new_keys = manager.prepare(name, candidate, lora_int_id=lora_int_id)
+        if name in manager.registry:
+            raise ValueError(f"LoRA adapter {name!r} is already loaded")
+        if new_keys:
+            # Wrapping new module keys is a structural model edit: drain.
+            # Base rows stay bit-identical (slot 0 is zero and an all-base
+            # batch skips the delta), so APCv2 and the model revision stand.
+            def wrap(_adapter):
+                manager.wrap_keys(new_keys)
+                return manager.commit(adapter)
+
+            described = self._exclusive_adapter_operation("lora_wrap", wrap)
+        else:
+            described = manager.commit(adapter)
+            self.counts["lora_load_completed"] += 1
+        self.operation_receipts.append(
+            {
+                "operation": "multi_lora_register",
+                "status": "completed",
+                "name": name,
+                "fingerprint": described["fingerprint"],
+                "drained": bool(new_keys),
+                "model_revision": self.model_revision,
+            }
+        )
+        return {
+            "status": "loaded",
+            "mode": "concurrent",
+            "fingerprint": described["fingerprint"],
+            "rank": described["rank"],
+            "drained": bool(new_keys),
+            "model_revision": self.model_revision,
+        }
+
     def load_lora_adapter(self, name, path, *, base_model_name=None):
         candidate = self._resolve_lora_path(path)
         model_name = self.status().get("model")
@@ -1825,6 +2633,10 @@ class ServingEngine:
             Path(self.model_path).name,
         }:
             raise ValueError("base_model_name does not match the loaded model")
+        if self.multi_lora is not None:
+            if name == model_name:
+                raise ValueError("lora_name must differ from the base model name")
+            return self._load_multi_lora_adapter(name, candidate)
 
         def install(adapter):
             if self.lora_session is not None:
@@ -1848,6 +2660,10 @@ class ServingEngine:
             isinstance(lora_int_id, bool) or not isinstance(lora_int_id, int)
         ):
             raise ValueError("lora_int_id must be an integer")
+        if self.multi_lora is not None:
+            self.multi_lora.unregister(name)
+            self.counts["lora_unload_completed"] += 1
+            return {"status": "unloaded", "mode": "concurrent", "model_revision": self.model_revision}
 
         def remove(adapter):
             session = self.lora_session
@@ -1889,7 +2705,8 @@ class ServingEngine:
 
     def _session_scope(self, tenant_id):
         # Control ownership is always tenant-specific even when prompt state is
-        # intentionally shared. X-Tenant-ID is an ownership partition, not auth.
+        # intentionally shared.  The tenant is authenticated only under server
+        # tenant auth; otherwise it is an unverified ownership partition.
         return str(tenant_id or "default")
 
     def _session_apc(self):
@@ -1980,6 +2797,37 @@ class ServingEngine:
             log.warning("thinking steering disabled for this artifact: %s", "; ".join(reason))
             self.thinking_steer_alpha = 0.0
 
+    def _host_memory_status(self):
+        """Snapshot keys for enabled host memory signals; empty when off."""
+        if getattr(self, "host_memory_monitor", None) is None:
+            return {}
+        from .runtime.os_memory import host_memory_snapshot
+
+        status = {"host_memory_pressure_level": int(self.memory_pressure_level())}
+        host = host_memory_snapshot()
+        if host is not None:
+            status["host_memory_available_bytes"] = host.available_bytes
+        return status
+
+    @property
+    def hard_reserve_gib(self):
+        """The host-scaled service/driver reserve, probed once and cached.
+
+        Lane admission builds its own controller inside the serving loop; the
+        HTTP-thread guards below need the same figure before that exists, so
+        the rule is evaluated here from the same one-shot host reading.
+        """
+        cached = getattr(self, "_hard_reserve_gib", None)
+        if cached is None:
+            from .memory import host_memory_gib, metal_advisory_gib
+            from .runtime.memory_policy import SelfMTPLaneAdmissionController
+
+            (service, driver) = SelfMTPLaneAdmissionController.host_scaled_reserves(
+                host_memory_gib(), metal_advisory_gib()
+            )
+            cached = self._hard_reserve_gib = service + driver
+        return cached
+
     def admit_parallel_samples(self, count):
         """Guard opt-in fanout by lane count and measured physical headroom."""
         if type(count) is not int or count < 1:
@@ -1988,14 +2836,18 @@ class ServingEngine:
             raise Overloaded("parallel samples exceed configured lane capacity")
         from .memory import execution_headroom
 
-        # Preserve the same 20 GiB hard reserve used by lane admission.  Each
-        # sample is charged 2 GiB, the measured 1.76 GiB per-lane transient
-        # rounded up (the earlier 4 GiB refused 70% of n=2 requests on
-        # Flash-Next under a 20-lane load).  Headroom moves with every finished
-        # lane, so wait briefly the way single requests queue on admission
-        # instead of refusing on one unlucky reading.  This runs on the HTTP
-        # thread at the request boundary, never on the token hot path.
-        required = (20 + 2 * count) * (1 << 30)
+        if getattr(self, "host_memory_monitor", None) is not None:
+            execution_headroom = partial(execution_headroom, host_signals=True)
+        # Preserve the same hard reserve used by lane admission: 20 GiB on the
+        # 128 GiB calibration host, derived from that host's advisory and RAM
+        # below it (a flat 20 refused every request on a 36 GiB M3 Pro).  Each sample is charged 2 GiB, the
+        # measured 1.76 GiB per-lane transient rounded up (the earlier 4 GiB
+        # refused 70% of n=2 requests on Flash-Next under a 20-lane load).
+        # Headroom moves with every finished lane, so wait briefly the way
+        # single requests queue on admission instead of refusing on one unlucky
+        # reading.  This runs on the HTTP thread at the request boundary, never
+        # on the token hot path.
+        required = int((self.hard_reserve_gib + 2 * count) * (1 << 30))
         deadline = time.monotonic() + self.PARALLEL_SAMPLE_WAIT_SECONDS
         while execution_headroom() < required:
             if time.monotonic() >= deadline:
@@ -2028,7 +2880,69 @@ class ServingEngine:
             except (queue.Empty, queue.Full):
                 pass
 
+    def _emit_prompt_progress(self, job, progress, *, replay=False):
+        """Queue a coalesced ``prompt_progress`` update for a return_progress job.
+
+        ``progress`` is a batch generator's ``(done, span)`` pair.  Generators
+        disagree on its origin (suffix after the cache hit vs the whole
+        prompt), but ``span - done`` is always the prompt still to prefill, so
+        progress is reported in whole-prompt coordinates from that remainder.
+        Updates never regress except on ``replay``, never block the serving
+        loop, and never occupy more than one queue slot: a full queue drops
+        the update instead of tripping the consumer-too-slow 429.
+        """
+        if not isinstance(progress, tuple) or len(progress) != 2:
+            return
+        total = int(job.prompt_tokens)
+        cached = min(int(job.cached_tokens), total)
+        remaining = max(0, int(progress[1]) - int(progress[0]))
+        processed = min(total, max(cached, total - remaining))
+        with job.prompt_progress_lock:
+            if replay:
+                job.prompt_progress_processed = -1
+            if processed <= job.prompt_progress_processed:
+                return
+            job.prompt_progress_processed = processed
+            job.prompt_progress_updates += 1
+            payload = {
+                "processed": processed,
+                "total": total,
+                "cached": cached,
+                "replay": bool(replay),
+                "time_ms": int(
+                    (time.monotonic() - job.started) * 1000 if job.started else 0
+                ),
+            }
+            pending = job.prompt_progress_event
+            if pending is not None:
+                pending["prompt_progress"] = payload
+                return
+            event = {"prompt_progress": payload}
+            try:
+                job.events.put_nowait(event)
+            except queue.Full:
+                job.prompt_progress_dropped += 1
+                return
+            job.prompt_progress_event = event
+
     def _finish(self, job, event):
+        # Duck-typed jobs reach _finish from cohort/fanout rollback paths.
+        fault = getattr(job, "fault", None)
+        if (
+            fault is not None
+            and fault.kind == "memory_preempt"
+            and not getattr(job, "fault_fired", False)
+        ):
+            # Loud, not silent: a requested fault that never fired means the
+            # run observed nothing, and any exactness claim resting on it is
+            # vacuous rather than passed.
+            self.counts["memory_preemption_fault_unfired"] += 1
+            log.warning(
+                "qualification memory_preempt fault on request %s never fired "
+                "(after_tokens=%d, completion_tokens=%d): %s",
+                job.id, fault.after_tokens, job.completion_tokens,
+                getattr(job, "fault_declined", None) or "never_reached",
+            )
         # A terminal event is an ownership boundary: once a client can observe
         # completion, the request must no longer pin APCv2 state or occupy an
         # inflight slot.  Publishing first exposed a small but real window in
@@ -2038,6 +2952,19 @@ class ServingEngine:
         job.admission_hit = job.admission_tokens = None
         if branch is not None and hasattr(branch, "close"):
             branch.close()
+            if getattr(self, "apc_rolling_route", None) is not None:
+                # This lease may have been the last one deferring the
+                # retirement of a rolling checkpoint the lane resumed from.
+                sweep = getattr(getattr(self, "apc", None), "sweep_retirements", None)
+                if callable(sweep):
+                    sweep()
+        lora_slot = getattr(job, "lora_slot", None)
+        if lora_slot is not None:
+            job.lora_slot = None
+            manager = self.multi_lora
+            if job.uid is not None:
+                manager.unbind_uid(job.uid)
+            manager.release(lora_slot)
         waiting_siblings = ()
         with self.lock:
             fanout_role = getattr(job, "fanout_role", None)
@@ -2164,6 +3091,165 @@ class ServingEngine:
         for sibling in siblings:
             sibling.cache_capsule_receipt = dict(receipt)
         return False
+
+    def _select_rolling_route(self, adapter, *, external_draft, prompt_lookup, inspect):
+        """Choose how rolling prefill checkpoints work on this route, or fail closed."""
+        if external_draft or prompt_lookup or self.approximate_kv_policy.enabled:
+            route = (
+                "external draft"
+                if external_draft
+                else "prompt lookup"
+                if prompt_lookup
+                else "approximate KV"
+            )
+            raise ValueError(
+                f"APCv2 rolling checkpoints cannot capture on the selected {route} route"
+            )
+        from .runtime.models.cache import make_prompt_cache
+
+        capabilities = inspect(make_prompt_cache(adapter.model))
+        if capabilities.interior_checkpoint_target:
+            return "hybrid"
+        if (
+            capabilities.topology == "kv"
+            and capabilities.exact_prefix
+            and capabilities.arbitrary_branch
+            and not self.mtp
+        ):
+            # Trimmable KV state can resume from any published prefix, so
+            # periodic snapshots buy nothing; only a cancelled prefill's
+            # partial cache is worth publishing.
+            return "kv"
+        raise ValueError(
+            "APCv2 rolling checkpoints cannot capture on the selected adapter cache route"
+        )
+
+    def _publish_state_checkpoints(
+        self, batch, apc, active, cache_key_for, session_tag_for, sidecar_type
+    ):
+        """Publish rolling/junction snapshots as soon as prefill reaches them.
+
+        Immediate publication lets a concurrent same-prefix request (or a retry
+        of a cancelled one) resume from the newest point.  Each rolling
+        publication retires the lane's previous rolling checkpoint.
+        """
+        from .runtime.state_boundaries import RETENTION_ROLE, BoundaryPurpose
+
+        drain = getattr(batch, "drain_state_checkpoints", None)
+        if not callable(drain):
+            return
+        for uid, checkpoint in drain():
+            purpose = BoundaryPurpose(checkpoint["purpose"])
+            name = purpose.name.lower()
+            owner = active.get(uid)
+            if owner is None or owner.request.get("skip_writing_prefix_cache", False):
+                self.counts[f"apc_{name}_checkpoints_skipped_write_suppressed"] += 1
+                continue
+            sidecar = (
+                sidecar_type(
+                    checkpoint["mtp_state"],
+                    checkpoint["covered_tokens"],
+                    rng_key=checkpoint.get("rng_key"),
+                    rng_draws=checkpoint.get("rng_draws", 0),
+                )
+                if checkpoint.get("mtp_state")
+                else None
+            )
+            key = cache_key_for(
+                owner.tenant_id, owner.request.get("_mlx2_media_fingerprint")
+            )
+            tokens = tuple(checkpoint["tokens"])
+            stored = self._publish_checkpoint(
+                apc,
+                key,
+                list(tokens),
+                checkpoint["target_cache"],
+                sidecar=sidecar,
+                retention_role=RETENTION_ROLE[purpose],
+                approximate=owner.approximate_kv_applied,
+                session_tag=session_tag_for(owner),
+            )
+            self.counts[
+                f"apc_{name}_checkpoints_published"
+                if stored
+                else f"apc_{name}_checkpoints_skipped_publish_failed"
+            ] += 1
+            if stored:
+                owner.state_boundaries_published[name] = (
+                    owner.state_boundaries_published.get(name, 0) + 1
+                )
+            if stored and purpose == BoundaryPurpose.ROLLING:
+                self._retire_rolling_checkpoint(apc, active, owner)
+                owner.rolling_checkpoint = (key, tokens)
+
+    def _publish_cancelled_prefills(
+        self, caches, apc, active, cache_key_for, session_tag_for
+    ):
+        """KV-only phase: keep a cancelled prefill's exact partial cache.
+
+        A trimmable KV cache can resume from any published prefix, so there is
+        nothing to capture while prefill runs; the cancelled lane's own cache
+        is the checkpoint.  A later committed boundary on the same path
+        supersedes it (PrefixIndex drops trimmable prefixes on insert).
+        """
+        interval = self.apc_rolling_checkpoint_policy["interval_tokens"]
+        for uid, (prompt_cache, tokens) in caches.items():
+            job = active.get(uid)
+            tokens = tuple(int(token) for token in tokens or ())
+            if (
+                job is None
+                or job.request.get("skip_writing_prefix_cache", False)
+                or len(tokens) >= int(job.prompt_tokens or 0)
+                or len(tokens) - int(job.cached_tokens or 0) < interval
+                or len(tokens)
+                <= int(job.request.get("_mlx2_media_token_end", 0) or 0)
+            ):
+                continue
+            stored = self._publish_checkpoint(
+                apc,
+                cache_key_for(
+                    job.tenant_id, job.request.get("_mlx2_media_fingerprint")
+                ),
+                list(tokens),
+                prompt_cache,
+                retention_role="prefill_rolling",
+                approximate=job.approximate_kv_applied,
+                session_tag=session_tag_for(job),
+            )
+            self.counts[
+                "apc_rolling_checkpoints_cancel_published"
+                if stored
+                else "apc_rolling_checkpoints_skipped_publish_failed"
+            ] += 1
+
+    def _retire_rolling_checkpoint(self, apc, active, job):
+        """Retire ``job``'s latest rolling checkpoint unless a peer still needs it.
+
+        Splash rule: a lane's rolling replacement must not retire a peer's
+        recovery point.  Peers that resumed from the same checkpoint keep it
+        as their own latest; the last one out retires it.
+        """
+        point = job.rolling_checkpoint
+        job.rolling_checkpoint = None
+        if point is None:
+            return
+        if any(
+            peer is not job and peer.rolling_checkpoint == point
+            for peer in active.values()
+        ):
+            self.counts["apc_rolling_checkpoints_retire_shared"] += 1
+            return
+        key, tokens = point
+        try:
+            retired = apc.retire(key, tokens, role="prefill_rolling")
+        except Exception:  # noqa: BLE001 - a lost retirement only costs cache bytes
+            log.exception("APCv2 rolling checkpoint retirement failed")
+            retired = False
+        self.counts[
+            "apc_rolling_checkpoints_retired"
+            if retired
+            else "apc_rolling_checkpoints_retire_deferred"
+        ] += 1
 
     def _publish_checkpoint(
         self, apc, key, tokens, prompt_cache, *, approximate=False, **kwargs
@@ -2314,9 +3400,18 @@ class ServingEngine:
                     if key not in {
                         "prompt_lookup",
                         "fly_verification",
+                        "self_mtp_copy_draft",
                         "apc_interior_checkpoints",
+                        "memory_preemption",
+                        "apc_junction_checkpoints",
+                        "apc_rolling_checkpoints",
+                        "host_memory_signals",
+                        "moe_expert_streaming",
+                        "prefill_scheduling",
                         "constrained_tool_grammar",
                         "tolerant_tool_markers",
+                        "constrained_tool_grammar_auto",
+                        "tool_grammar_streaming",
                     }
                 }
                 if self.execution_policy is not None
@@ -2352,16 +3447,26 @@ class ServingEngine:
                 else "none"
             )
             self._resolve_commit_direction(adapter)
+            self._install_expert_streaming(adapter)
             import mlx.core as mx
             from .memory import execution_headroom
+            if self.host_memory_signals_policy["enabled"]:
+                execution_headroom = partial(execution_headroom, host_signals=True)
             from .runtime.apc_v2 import (
                 APCLookup,
                 APCv2,
                 MTPAPCSidecar,
                 inspect_apc_capabilities,
             )
-            from .runtime.generate import BatchGenerator, interior_checkpoint_positions
-            from .runtime.os_memory import physical_footprint_bytes
+            from .runtime.generate import BatchGenerator
+            from .runtime.interior_placement import plan_interior_positions
+            from .runtime.state_boundaries import (
+                RETENTION_ROLE,
+                BoundaryPurpose,
+                budget_state_boundaries,
+                plan_state_boundaries,
+            )
+            from .runtime.os_memory import PressureLevel, physical_footprint_bytes
             from .runtime.sample_utils import (
                 LaneRNG,
                 make_transformed_logprobs,
@@ -2369,6 +3474,12 @@ class ServingEngine:
                 draw_key,
             )
             from .runtime.segmented_self_mtp import segmented_self_mtp_stats
+            from .memory_preemption import (
+                choose_preemption_victim,
+                decode_replay_block,
+                preemption_block,
+                replay_lane_rng,
+            )
             from .runtime.memory_policy import (
                 SelfMTPLaneAdmissionController,
                 _make_self_mtp_admission_callback,
@@ -2404,7 +3515,13 @@ class ServingEngine:
                 "tenant_scoped_cache": self.tenant_scoped_cache,
                 "environment": adapter.environment,
                 "adaptive_mtp_depth": self.adaptive_mtp_policy.as_dict(),
+                "mtp_acceptance_log": (
+                    None
+                    if self.mtp_acceptance_log is None
+                    else {"enabled": True}
+                ),
                 "fly_verification": self.fly_verification_policy.as_dict(),
+                "self_mtp_copy_draft": self.copy_draft_policy.as_dict(),
                 "spomin_live_surgery": asdict(self.spomin_policy),
                 "thinking_budget": self.thinking_budget,
                 "thinking_steer": {
@@ -2421,6 +3538,35 @@ class ServingEngine:
                     self.apc_interior_checkpoint_policy
                 ),
             }
+            if self.memory_preemption_policy["enabled"]:
+                # Present only when enabled so default receipts stay unchanged.
+                settings["memory_preemption"] = dict(self.memory_preemption_policy)
+            if self.apc_junction_checkpoints:
+                # Present only when enabled so default receipts stay identical.
+                settings["apc_junction_checkpoints"] = True
+            if self.apc_rolling_checkpoint_policy["interval_tokens"]:
+                settings["apc_rolling_checkpoints"] = dict(
+                    self.apc_rolling_checkpoint_policy
+                )
+            if self.host_memory_signals_policy["enabled"]:
+                settings["host_memory_signals"] = dict(self.host_memory_signals_policy)
+            if self.moe_expert_streaming_policy["enabled"]:
+                settings["moe_expert_streaming"] = dict(
+                    self.moe_expert_streaming_policy,
+                    plan=(
+                        self.expert_stream.plan.as_dict()
+                        if self.expert_stream is not None
+                        else None
+                    ),
+                )
+            # Item 12 keys appear only when enabled: default receipts keep
+            # their exact settings.
+            for policy_name in (
+                "constrained_tool_grammar_auto",
+                "tool_grammar_streaming",
+            ):
+                if getattr(self, policy_name):
+                    settings[policy_name] = True
             # Bind the policy and the adapter-declared descriptor into the
             # settings a qualification receipt must match.  An adapter that
             # does not declare the selected operation fails closed here.
@@ -2461,14 +3607,40 @@ class ServingEngine:
                 raise ValueError("cache capsules are incompatible with external draft")
             if self.approximate_kv_policy.enabled and external_draft:
                 raise ValueError("approximate KV is incompatible with external draft")
+            if self.memory_preemption_policy["enabled"] and (
+                self.approximate_kv_policy.enabled or self.spomin_policy.enabled
+            ):
+                # A replay re-decides approximate state for a longer prompt;
+                # only exact lanes may be preempted, so refuse the combination.
+                raise ValueError(
+                    "memory preemption is incompatible with approximate KV and "
+                    "live Spomin surgery"
+                )
+            if self.multi_lora_policy is not None:
+                if external_draft:
+                    raise ValueError(
+                        "concurrent multi-LoRA requires the ordinary route; it is "
+                        "incompatible with external draft"
+                    )
+                from .runtime.multi_lora import MultiLoRAManager
+
+                self.multi_lora = MultiLoRAManager(
+                    adapter.model,
+                    max_loras=self.multi_lora_policy["max_loras"],
+                    max_lora_rank=self.multi_lora_policy["max_lora_rank"],
+                )
+                # Present only when enabled, so default-off qualification
+                # settings are byte-identical.
+                settings["multi_lora"] = self.multi_lora.settings()
             prompt_lookup = self.prompt_lookup
             self.apc_interior_route_supported = not (
                 external_draft or prompt_lookup or self.approximate_kv_policy.enabled
             )
-            if (
-                self.apc_interior_route_supported
-                and self.apc_interior_checkpoint_policy["count"]
-            ):
+            state_checkpoints_selected = bool(
+                self.apc_interior_checkpoint_policy["count"]
+                or self.apc_junction_checkpoints
+            )
+            if self.apc_interior_route_supported and state_checkpoints_selected:
                 from .runtime.models.cache import make_prompt_cache
 
                 probe_cache = make_prompt_cache(adapter.model)
@@ -2476,10 +3648,7 @@ class ServingEngine:
                     probe_cache
                 ).interior_checkpoint_target
                 probe_cache = None
-            if (
-                self.apc_interior_checkpoint_policy["count"]
-                and not self.apc_interior_route_supported
-            ):
+            if state_checkpoints_selected and not self.apc_interior_route_supported:
                 route = (
                     "external draft"
                     if external_draft
@@ -2490,15 +3659,62 @@ class ServingEngine:
                     else "adapter cache"
                 )
                 raise ValueError(
-                    "APCv2 interior checkpoints cannot capture on the selected "
+                    "APCv2 "
+                    + (
+                        "interior"
+                        if self.apc_interior_checkpoint_policy["count"]
+                        else "junction"
+                    )
+                    + " checkpoints cannot capture on the selected "
                     f"{route} route"
                 )
+            if self.apc_rolling_checkpoint_policy["interval_tokens"]:
+                self.apc_rolling_route = self._select_rolling_route(
+                    adapter,
+                    external_draft=external_draft,
+                    prompt_lookup=prompt_lookup,
+                    inspect=inspect_apc_capabilities,
+                )
+            self.apc_interior_turn_markers = ()
+            if self.apc_interior_checkpoint_policy.get("placement") in {
+                "turns",
+                "auto",
+            }:
+                # Adapter-owned override first; otherwise the tokenizer's chat
+                # template declares its own turn-start token.  No model-name
+                # branching: an undetectable marker degrades ``auto`` to the
+                # tail lattice and is counted.
+                declared = getattr(adapter, "apc_turn_marker_ids", None)
+                if callable(declared):
+                    markers = tuple(int(value) for value in (declared() or ()))
+                else:
+                    from .runtime.interior_placement import detect_turn_marker_ids
+
+                    markers = detect_turn_marker_ids(adapter.tokenizer)
+                self.apc_interior_turn_markers = markers
+                if not markers:
+                    self.counts["apc_interior_turn_marker_missing"] += 1
             if self.fly_verification_policy.enabled and (
                 prompt_lookup or not (self.mtp or external_draft)
             ):
                 raise ValueError(
                     "FLy verification requires native self-MTP or external draft"
                 )
+            if self.copy_draft_policy.enabled and (
+                prompt_lookup or external_draft or not self.mtp
+            ):
+                # Copy drafts ride inside the self-MTP transaction; the
+                # separate prompt-lookup route stays mutually exclusive.
+                raise ValueError(
+                    "self_mtp_copy_draft requires the native self-MTP route"
+                )
+            if self.prefill_scheduling_policy is not None:
+                if external_draft or prompt_lookup:
+                    raise ValueError(
+                        "prefill_scheduling requires the ordinary or native "
+                        "self-MTP route"
+                    )
+                settings["prefill_scheduling"] = dict(self.prefill_scheduling_policy)
             prompt_lookup_policy = {}
             if "prompt_lookup" in (self.execution_policy or {}):
                 # This block is carved out of the adapter's unknown-key check
@@ -2530,6 +3746,23 @@ class ServingEngine:
                 if self.mtp
                 else "ordinary"
             )
+            settings["route"] = (
+                "native_mtp"
+                if settings["speculation"] == "self_mtp"
+                else settings["speculation"]
+            )
+            settings["route_selection_source"] = self.route_selection_source
+            if self.verify_bitexact_policy.enabled:
+                # Fails closed on an mlx without the mode.  Recorded in
+                # settings only when enabled so default-off records match.
+                from .runtime.verify_bitexact import (
+                    bind_for_serving as bind_verify_bitexact,
+                )
+
+                (
+                    self.verify_bitexact_handle,
+                    settings["verify_bitexact"],
+                ) = bind_verify_bitexact(self.verify_bitexact_policy)
             if self.int8_prefill_policy.enabled:
                 # Fails closed (unsupported device, undeclared scope, or a
                 # decode/verify block that could reach the row threshold)
@@ -2552,6 +3785,11 @@ class ServingEngine:
                     + (
                         f"-int8-prefill-{self.int8_prefill_policy.scope}"
                         if self.int8_prefill_policy.enabled
+                        else ""
+                    )
+                    + (
+                        "-verify-bitexact"
+                        if self.verify_bitexact_policy.enabled
                         else ""
                     )
                     + (
@@ -2675,6 +3913,8 @@ class ServingEngine:
                     "descriptor": approximate_operation.descriptor.as_dict(),
                     "revision": approximate_operation.revision,
                     "start_tokens": self.approximate_kv_policy.start_tokens,
+                    "compose_mtp": self.approximate_kv_policy.compose_mtp,
+                    "draft_cache": "exact" if self.mtp else None,
                 }
             # APCv2 must be able to retain at least one committed prompt
             # boundary per execution lane.  Otherwise a configured B20 server
@@ -2761,7 +4001,15 @@ class ServingEngine:
                     enabled=True,
                     verify_raw_bits=self.cache_capsule_policy["verify_raw_bits"],
                 )
+            # Two cheap probes: installed RAM and Metal's advisory. The
+            # service reserve is the part of the host's non-lane quota the
+            # advisory has not already withheld, so it needs both; ``None``
+            # for either keeps the 128 GiB calibration's 16+4 GiB.
+            from .memory import host_memory_gib, metal_advisory_gib
+
             controller = SelfMTPLaneAdmissionController(
+                host_memory_gib=host_memory_gib(),
+                advisory_gib=metal_advisory_gib(),
                 saturation_lane_cap=self.max_lanes, verification_row_cap=self.max_lanes * (config["num_draft"] + 1),
                 cache_estimator=cache_budget.project if cache_budget else None,
                 transient_gib_per_lane=getattr(
@@ -2769,6 +4017,22 @@ class ServingEngine:
                     "transient_gib_per_lane",
                     SelfMTPLaneAdmissionController.K2_TRANSIENT_GIB_PER_LANE,
                 ),
+                # B_stream: the enforced expert-cache ceiling, reserved once
+                # before lanes are costed.  Zero unless a model is streamed.
+                stream_reserve_gib=self.expert_stream_reserve_gib(),
+            )
+            # One line, once per server, naming every term of the admission
+            # budget. The reserve is derived from two host readings now, and
+            # a wrong one is otherwise only visible as an unexplained 429.
+            log.info(
+                "lane admission budget: host=%s advisory=%s service_reserve=%.4g "
+                "driver_allowance=%.4g transient_per_lane=%.4g max_lanes=%d",
+                controller.host_memory_gib,
+                controller.advisory_gib,
+                controller.service_reserve_gib,
+                controller.driver_allowance_gib,
+                controller.transient_gib_per_lane,
+                self.max_lanes,
             )
             admission = {}
             spomin_manager = None
@@ -2923,9 +4187,87 @@ class ServingEngine:
                         branch.close()
                     self.counts["mtp_sidecar_missing_misses"] += 1
                     return APCLookup(
-                        None, list(tokens), 0, False, None, "mtp_sidecar_missing"
+                        None, list(tokens), 0, False, None, "mtp_sidecar_missing",
+                        branch_tokens=max(
+                            int(hit.cached_tokens),
+                            int(getattr(hit, "branch_tokens", 0) or 0),
+                        ),
                     )
                 return hit
+
+            def preempt_lane(uid, *, trigger, blockers=()):
+                """Park one lane for replay at the head of ``deferred``.
+
+                The replay prefix is leased *before* the lane's own branch is
+                released, so the warm state it will resume from (the committed
+                prompt boundary, or a rolling prefill checkpoint once those
+                exist) is never unpinned in between and pressure eviction
+                cannot take it while the job waits.
+                """
+                job = active.pop(uid)
+                batch.remove([uid])
+                phase = "decode" if job.completion_tokens else "prefill"
+                replay_tokens = list(job.preemption_prompt)
+                if job.completion_tokens:
+                    replay_tokens.extend(job.generated_token_ids)
+                hit = None
+                try:
+                    hit = route_usable_hit(
+                        apc.lookup(
+                            cache_key_for(
+                                job.tenant_id,
+                                job.request.get("_mlx2_media_fingerprint"),
+                            ),
+                            replay_tokens,
+                            allow_disk_restore=False,
+                            session_tag=session_tag_for(job),
+                        ),
+                        replay_tokens,
+                    )
+                except Exception:  # noqa: BLE001 - admission looks up again
+                    log.exception("APCv2 replay lease failed; replay will look up")
+                branch = job.cache_branch
+                job.cache_branch = hit.cache if hit is not None else None
+                if branch is not None and hasattr(branch, "close"):
+                    branch.close()
+                now = time.monotonic()
+                job.uid = None
+                job.admission_tokens = replay_tokens
+                job.admission_hit = hit
+                job.admission_retry_at = now
+                job.admission_deadline = now + self.MEMORY_ADMISSION_TIMEOUT
+                job.admission_final_reclaim_done = False
+                job.preempted = True
+                job.replaying = False
+                job.preemptions += 1
+                job.preempted_at = now
+                job.preempt_blockers = tuple(blockers)
+                job.preemption_events.append(
+                    {
+                        "trigger": trigger,
+                        "phase": phase,
+                        "committed_tokens": job.completion_tokens,
+                        "leased_prefix_tokens": (
+                            int(hit.cached_tokens) if hit is not None else 0
+                        ),
+                    }
+                )
+                deferred.appendleft(job)
+                self.counts["memory_preemptions"] += 1
+                self.counts["memory_preemptions_" + trigger] += 1
+
+            def replay_ready(job):
+                """Replay once pressure is below CRITICAL and every lane the
+                preemption was made for has progressed (or ended)."""
+                if self.memory_pressure_level() >= PressureLevel.CRITICAL:
+                    return False
+                if job.preempt_blockers:
+                    by_id = {lane.id: lane for lane in active.values()}
+                    for blocker in job.preempt_blockers:
+                        lane = by_id.get(blocker)
+                        if lane is not None and lane.last_progress <= job.preempted_at:
+                            return False
+                return True
 
             if external_draft:
                 batch = adapter.create_external_batch(
@@ -2966,11 +4308,27 @@ class ServingEngine:
                         else None
                     ),
                     fly_verification=self.fly_verification_policy,
+                    **(
+                        {"copy_draft": self.copy_draft_policy}
+                        if self.copy_draft_policy.enabled
+                        else {}
+                    ),
+                    **(
+                        {"mtp_acceptance_log": self.mtp_acceptance_log}
+                        if self.mtp_acceptance_log is not None
+                        else {}
+                    ),
                     apc_interior_checkpoints=(
                         self.apc_interior_checkpoint_policy
                         if self.apc_interior_route_supported
                         else {"count": 0, "min_stride": 1}
                     ),
+                    **(
+                        {"memory_pressure_level": self.memory_pressure_level}
+                        if self.apc_rolling_route == "hybrid"
+                        else {}
+                    ),
+                    prefill_scheduling=self.prefill_scheduling_policy,
                     self_mtp=config if self.mtp else None,
                     mtp_admission=_make_self_mtp_admission_callback(
                         controller,
@@ -3074,10 +4432,15 @@ class ServingEngine:
                     "admission": dict(admission),
                     "memory_waiting": 0,
                     "headroom_bytes": execution_headroom(),
+                    **self._host_memory_status(),
                 }
             self.ready.set()
             last_snapshot = 0
             last_reclaim = 0
+            preemption = self.memory_preemption_policy["enabled"]
+            stall_seconds = (
+                self.memory_preemption_policy["stall_seconds"] if preemption else 60
+            )
             while not self.stop_event.is_set():
                 quiesce_action = self._worker_quiesce_action()
                 if quiesce_action is not None:
@@ -3144,10 +4507,37 @@ class ServingEngine:
                         quiesce_action, suspend_report=suspend_report
                     )
                 self._expire_pending_cohorts()
+                # Memory preemption recovery: a preempted job waits for replay
+                # or a replay is re-prefilling.  Ordinary admission pauses
+                # until it is over (Splash ``admitQueued``).
+                recovering = preemption and (
+                    any(waiting.preempted for waiting in deferred)
+                    or any(lane.replaying for lane in active.values())
+                )
+                if recovering and getattr(self, "_service_state", "serving") == "draining":
+                    # A drain never waits on work it would have to re-prefill.
+                    for waiting in [w for w in deferred if w.preempted]:
+                        deferred.remove(waiting)
+                        self._finish(
+                            waiting,
+                            {
+                                "error": "server is draining; preempted request cannot replay",
+                                "status": 503,
+                            },
+                        )
+                        self.counts["memory_preemption_drain_cancellations"] += 1
+                    recovering = any(lane.replaying for lane in active.values())
                 # Pending requests own their warm leases, but no execution
                 # lane. Cancellation/deadlines must progress even at full width.
                 for _ in range(len(deferred)):
                     waiting = deferred.popleft()
+                    if recovering and not waiting.preempted:
+                        # Paused by recovery, not by memory: its wait restarts
+                        # once recovery ends (Splash freezes it the same way).
+                        waiting.admission_deadline = max(
+                            waiting.admission_deadline,
+                            time.monotonic() + self.MEMORY_ADMISSION_TIMEOUT,
+                        )
                     if waiting.cancelled.is_set():
                         self._cancel_pending_cache_capsule(
                             batch, waiting, "queued_member_cancelled"
@@ -3183,7 +4573,35 @@ class ServingEngine:
                             idle=not active,
                             deferred=bool(deferred),
                         )
-                        if held_cohort is not None:
+                        if recovering and not (
+                            attaching_cohort is not None and published
+                        ):
+                            # Only the preempted job may attach, one replay at
+                            # a time; everything else waits in its queue.
+                            replay = next(
+                                (w for w in deferred if w.preempted), None
+                            )
+                            if not (
+                                replay is not None
+                                and retry_budget
+                                and (
+                                    replay.cancelled.is_set()
+                                    or (
+                                        replay.admission_retry_at
+                                        <= time.monotonic()
+                                        and replay_ready(replay)
+                                    )
+                                )
+                            ):
+                                if not active:
+                                    # Nothing to step: wait here instead of
+                                    # spinning the worker loop.
+                                    self.stop_event.wait(0.01)
+                                break
+                            deferred.remove(replay)
+                            job = replay
+                            retry_budget -= 1
+                        elif held_cohort is not None:
                             # An explicit cohort never joins an in-flight
                             # physical batch.  Preserve queue order and wait
                             # until it can own all configured lanes.
@@ -3280,10 +4698,17 @@ class ServingEngine:
                             tokens = self.host_prompt_cache.get(job.request)
                             if tokens is None:
                                 with self.prompt_lock:
-                                    tokens = adapter.prompt_tokens(job.request)
+                                    tokens = render_prompt_tokens(adapter, job.request)
                                 self.host_prompt_cache.put(job.request, tokens)
                             job.admission_tokens = tokens
-                        job.prompt_tokens = len(tokens)
+                        # A decode-phase replay prefills prompt + delivered
+                        # tokens but is still the same request: processors,
+                        # receipts and the output cap keep the original prompt.
+                        resuming = job.preempted and job.completion_tokens > 0
+                        prompt_len = (
+                            len(job.preemption_prompt) if resuming else len(tokens)
+                        )
+                        job.prompt_tokens = prompt_len
                         context_limit = min(self.max_context, job.request.get("context_limit", self.max_context))
                         if not tokens:
                             raise ValueError(
@@ -3304,13 +4729,15 @@ class ServingEngine:
                             job.request["max_tokens"] = maximum
                         else:
                             maximum = job.effective_max_tokens
+                        if resuming:
+                            maximum -= job.completion_tokens
                         # Lease resident state before pressure eviction. Disk
                         # restoration remains behind the cold allocation gate.
                         hit = job.admission_hit
                         if hit is None:
                             key = cache_key_for(
                                 job.tenant_id,
-                                job.request.get("_mlx2_media_fingerprint"),
+                                request_apc_scope(job.request),
                             )
                             hit = route_usable_hit(
                                 apc.lookup(
@@ -3332,6 +4759,7 @@ class ServingEngine:
                                     False,
                                     None,
                                     "media_boundary_not_cached",
+                                    branch_tokens=getattr(hit, "branch_tokens", 0),
                                 )
                                 self.counts["multimodal_apcv2_boundary_misses"] += 1
                             job.admission_hit = hit
@@ -3340,26 +4768,29 @@ class ServingEngine:
                             hit, context_tokens=len(tokens) + maximum,
                             prefill_step=self.prefill_step, mtp=self.mtp,
                         )
-                        required = controller.hard_reserve_gib + controller.lane_gib(
-                            len(tokens) + maximum, config["num_draft"] if self.mtp else 0,
+                        # PLD verifies the anchor plus as many as
+                        # ``num_draft`` proposed tokens in one target
+                        # forward. Ordinary admission charged only one row
+                        # and could admit a verification step that did not
+                        # fit. Scale the calibrated width-3 transient to
+                        # the actual forward width; the ordinary one-row
+                        # share is already included by the lane cost.
+                        (admitted, depth_floor, required) = admit_lane_headroom(
+                            controller,
+                            context_tokens=len(tokens) + maximum,
+                            draft_depth=config["num_draft"] if self.mtp else 0,
                             cache_gib=cache_copy,
-                        )
-                        if prompt_lookup:
-                            # PLD verifies the anchor plus as many as
-                            # ``num_draft`` proposed tokens in one target
-                            # forward. Ordinary admission charged only one row
-                            # and could admit a verification step that did not
-                            # fit. Scale the calibrated width-3 transient to
-                            # the actual forward width; the ordinary one-row
-                            # share is already included above.
-                            required += prompt_lookup_verification_gib(
-                                controller, batch.num_draft
-                            )
-                        if not ensure_admission_headroom(
-                            required * (1 << 30), headroom=execution_headroom,
-                            reclaim=reclaim_allocator, evict=evict_unused_checkpoint,
+                            prompt_lookup_num_draft=(
+                                batch.num_draft if prompt_lookup else None
+                            ),
+                            headroom=execution_headroom,
+                            reclaim=reclaim_allocator,
+                            evict=evict_unused_checkpoint,
                             evictable=getattr(apc, "unleased_resident_nbytes", None),
-                        ):
+                        )
+                        if depth_floor:
+                            self.counts["memory_admission_depth_floor_admits"] += 1
+                        if not admitted:
                             if attaching_cohort is not None:
                                 raise Overloaded(
                                     "declared batch cohort could not atomically admit every member"
@@ -3367,12 +4798,57 @@ class ServingEngine:
                             if not job.admission_retry_at:
                                 self.counts["memory_admission_deferred"] += 1
                             job.admission_retry_at = time.monotonic() + self.MEMORY_ADMISSION_RETRY
-                            deferred.append(job)
+                            if job.preempted:
+                                deferred.appendleft(job)
+                            else:
+                                deferred.append(job)
                             continue
+                        if job.lora_name is not None and job.lora_slot is None:
+                            from .runtime.multi_lora import SlotUnavailable
+
+                            try:
+                                job.lora_slot, job.lora_residency = (
+                                    self.multi_lora.acquire(job.lora_name)
+                                )
+                            except SlotUnavailable:
+                                # Every resident adapter slot is pinned by a
+                                # live row: same deferral contract as memory
+                                # (deadline, warm lease kept, atomic cohorts
+                                # fail whole).
+                                if attaching_cohort is not None:
+                                    raise Overloaded(
+                                        "declared batch cohort could not pin every LoRA adapter slot"
+                                    ) from None
+                                if not job.admission_retry_at:
+                                    self.counts["multi_lora_slot_deferred"] += 1
+                                job.admission_retry_at = time.monotonic() + self.MEMORY_ADMISSION_RETRY
+                                deferred.append(job)
+                                continue
                         checkpoint_candidates = ()
-                        if (
+                        junction_candidate = None
+                        interior_uncached_floor = float(
+                            self.apc_interior_checkpoint_policy.get(
+                                "min_uncached_fraction", 0.0
+                            )
+                        )
+                        interior_continuation = bool(
+                            interior_uncached_floor > 0.0
+                            and len(tokens) > 0
+                            and (len(tokens) - int(hit.cached_tokens)) / len(tokens)
+                            < interior_uncached_floor
+                        )
+                        if interior_continuation:
+                            self.counts["apc_interior_requests_skipped_continuation"] += 1
+                        planning_target = (
                             self.apc_interior_route_supported
-                            and self.apc_interior_checkpoint_policy["count"] > 0
+                            and (
+                                (
+                                    self.apc_interior_checkpoint_policy["count"] > 0
+                                    and not interior_continuation
+                                )
+                                or self.apc_rolling_route == "hybrid"
+                                or self.apc_junction_checkpoints
+                            )
                             and not job.request.get("skip_writing_prefix_cache", False)
                             and (
                                 hit.cache is None
@@ -3380,66 +4856,265 @@ class ServingEngine:
                                     hit.cache
                                 ).interior_checkpoint_target
                             )
+                        )
+                        if (
+                            planning_target
+                            and self.apc_interior_checkpoint_policy["count"] > 0
+                            and not interior_continuation
                         ):
-                            checkpoint_candidates = tuple(
-                                position
-                                for position in interior_checkpoint_positions(
-                                    len(tokens),
-                                    count=self.apc_interior_checkpoint_policy["count"],
-                                    min_stride=self.apc_interior_checkpoint_policy[
-                                        "min_stride"
-                                    ],
-                                )
-                                if position > int(hit.cached_tokens)
+                            interior_policy = self.apc_interior_checkpoint_policy
+                            media_floor = int(
+                                job.request.get("_mlx2_media_token_end", 0) or 0
                             )
-                        job.apc_interior_positions, _checkpoint_bytes = (
-                            budget_interior_checkpoint_positions(
-                                checkpoint_candidates,
-                                available_bytes=max(
-                                    0,
-                                    int(execution_headroom())
-                                    - int(required * (1 << 30)),
-                                ),
-                                cache_projection=(
-                                    None if cache_budget is None else cache_budget.project
-                                ),
+                            checkpoint_candidates, planned_sources = (
+                                plan_interior_positions(
+                                    tokens,
+                                    count=interior_policy["count"],
+                                    min_stride=interior_policy["min_stride"],
+                                    placement=interior_policy.get("placement", "pow2"),
+                                    marker_ids=self.apc_interior_turn_markers,
+                                    cached_tokens=int(hit.cached_tokens),
+                                )
+                            )
+                            if media_floor:
+                                inside_media = sum(
+                                    1
+                                    for position in checkpoint_candidates
+                                    if position < media_floor
+                                )
+                                if inside_media:
+                                    # Admission rejects any hit short of the
+                                    # media end, so such a checkpoint is dead
+                                    # weight; never capture it.
+                                    self.counts[
+                                        "apc_interior_positions_skipped_media"
+                                    ] += inside_media
+                                    checkpoint_candidates, planned_sources = (
+                                        plan_interior_positions(
+                                            tokens,
+                                            count=interior_policy["count"],
+                                            min_stride=interior_policy["min_stride"],
+                                            placement=interior_policy.get(
+                                                "placement", "pow2"
+                                            ),
+                                            marker_ids=self.apc_interior_turn_markers,
+                                            cached_tokens=int(hit.cached_tokens),
+                                            floor_tokens=media_floor,
+                                        )
+                                    )
+                            for source, planned in planned_sources.items():
+                                self.counts[
+                                    "apc_interior_positions_planned_" + source
+                                ] += planned
+                        if planning_target and self.apc_junction_checkpoints:
+                            branch = int(getattr(hit, "branch_tokens", 0) or 0)
+                            # A lookup never resumes inside a media span, so a
+                            # junction there could never be hit.
+                            if branch and branch >= int(
+                                job.request.get("_mlx2_media_token_end", 0) or 0
+                            ):
+                                junction_candidate = branch
+                        available_checkpoint_bytes = max(
+                            0,
+                            int(execution_headroom()) - int(required * (1 << 30)),
+                        )
+                        checkpoint_projection = (
+                            None if cache_budget is None else cache_budget.project
+                        )
+                        headroom_fraction = float(
+                            self.apc_interior_checkpoint_policy.get(
+                                "headroom_fraction", 1.0
                             )
                         )
-                        self.counts["apc_interior_checkpoints_degraded"] += (
-                            len(checkpoint_candidates)
-                            - len(job.apc_interior_positions)
+                        # main's headroom fraction caps the whole P1 budget,
+                        # not just the interior lattice: rolling boundaries
+                        # are charged against the same cache projection.
+                        checkpoint_available = int(
+                            available_checkpoint_bytes * headroom_fraction
+                        )
+                        if planning_target and (
+                            self.apc_rolling_route == "hybrid"
+                            or junction_candidate is not None
+                        ):
+                            # One P1 plan: rolling + interior deduplicated,
+                            # clamped to prefill chunks, budgeted by priority.
+                            # A media boundary cannot be resumed from inside
+                            # the media span, so rolling starts after it.
+                            planned = plan_state_boundaries(
+                                prompt_tokens=len(tokens),
+                                cached_tokens=int(hit.cached_tokens),
+                                interior=checkpoint_candidates,
+                                junction=junction_candidate,
+                                rolling_interval=(
+                                    self.apc_rolling_checkpoint_policy[
+                                        "interval_tokens"
+                                    ]
+                                    if self.apc_rolling_route == "hybrid"
+                                    else 0
+                                ),
+                            )
+                            media_end = int(
+                                job.request.get("_mlx2_media_token_end", 0) or 0
+                            )
+                            planned = tuple(
+                                bound
+                                for bound in planned
+                                if bound.purpose != BoundaryPurpose.ROLLING
+                                or bound.position > media_end
+                            )
+                            job.state_boundaries, _checkpoint_bytes = (
+                                budget_state_boundaries(
+                                    planned,
+                                    available_bytes=checkpoint_available,
+                                    cache_projection=checkpoint_projection,
+                                )
+                            )
+                            job.apc_interior_positions = tuple(
+                                bound.position
+                                for bound in job.state_boundaries
+                                if bound.purpose == BoundaryPurpose.INTERIOR
+                            )
+                            self.counts["apc_rolling_checkpoints_planned"] += sum(
+                                bound.purpose == BoundaryPurpose.ROLLING
+                                for bound in job.state_boundaries
+                            )
+                            self.counts["apc_rolling_checkpoints_degraded"] += sum(
+                                bound.purpose == BoundaryPurpose.ROLLING
+                                for bound in planned
+                            ) - sum(
+                                bound.purpose == BoundaryPurpose.ROLLING
+                                for bound in job.state_boundaries
+                            )
+                            kept = {
+                                bound.position for bound in job.state_boundaries
+                            }
+                            for bound in planned:
+                                if bound.purpose != BoundaryPurpose.JUNCTION:
+                                    continue
+                                self.counts[
+                                    "apc_junction_checkpoints_planned"
+                                    if bound.position in kept
+                                    else "apc_junction_checkpoints_degraded"
+                                ] += 1
+                        else:
+                            job.apc_interior_positions, _checkpoint_bytes = (
+                                budget_interior_checkpoint_positions(
+                                    checkpoint_candidates,
+                                    available_bytes=checkpoint_available,
+                                    cache_projection=checkpoint_projection,
+                                )
+                            )
+                        if checkpoint_candidates:
+                            # Why a plan degraded is otherwise unreadable from
+                            # outside: host integers, no device sync.  Last
+                            # value wins (a gauge in MiB), cardinality fixed.
+                            self.counts["apc_interior_budget_mib_last"] = int(
+                                available_checkpoint_bytes
+                                * headroom_fraction
+                            ) >> 20
+                            if callable(checkpoint_projection):
+                                self.counts["apc_interior_deepest_mib_last"] = int(
+                                    checkpoint_projection(checkpoint_candidates[-1])
+                                ) >> 20
+                        if (
+                            checkpoint_candidates
+                            and headroom_fraction < 1.0
+                            and self.apc_rolling_route != "hybrid"
+                        ):
+                            uncapped, _ = budget_interior_checkpoint_positions(
+                                checkpoint_candidates,
+                                available_bytes=available_checkpoint_bytes,
+                                cache_projection=checkpoint_projection,
+                            )
+                            self.counts["apc_interior_positions_headroom_capped"] += (
+                                len(uncapped) - len(job.apc_interior_positions)
+                            )
+                        planned_positions = {
+                            bound.position for bound in job.state_boundaries
+                        } or set(job.apc_interior_positions)
+                        self.counts["apc_interior_checkpoints_degraded"] += sum(
+                            1
+                            for position in checkpoint_candidates
+                            if position not in planned_positions
                         )
                         if hit.miss_reason == "disk_restore_requires_admission":
                             hit = route_usable_hit(
                                 apc.lookup(
                                     cache_key_for(
                                         job.tenant_id,
-                                        job.request.get("_mlx2_media_fingerprint"),
+                                        request_apc_scope(job.request),
                                     ),
                                     tokens,
                                     session_tag=session_tag_for(job),
                                 ), tokens
                             )
                             job.cache_branch = hit.cache
-                        job.cached_tokens = hit.cached_tokens
-                        job.cache_retention_role = getattr(
-                            hit, "retention_role", None
-                        )
+                        if job.preempted:
+                            # Receipts keep the first admission's cache view.
+                            job.preemption_events[-1]["replay_cached_tokens"] = int(
+                                hit.cached_tokens
+                            )
+                        else:
+                            job.cached_tokens = hit.cached_tokens
+                            job.cache_retention_role = getattr(
+                                hit, "retention_role", None
+                            )
+                            if (
+                                job.cache_retention_role == "interior_checkpoint"
+                                and job.cached_tokens
+                            ):
+                                # Engine-side interior reuse evidence (APCv2 also
+                                # counts ``interior_hits``); host integers only.
+                                self.counts["apc_interior_hits"] += 1
+                                self.counts["apc_interior_hit_tokens"] += int(
+                                    job.cached_tokens
+                                )
+                                markers = self.apc_interior_turn_markers
+                                if (
+                                    markers
+                                    and int(job.cached_tokens) < len(tokens)
+                                    and int(tokens[int(job.cached_tokens)]) in markers
+                                ):
+                                    self.counts["apc_interior_hits_turn_boundary"] += 1
+                            if (
+                                self.apc_rolling_route is not None
+                                and job.cache_retention_role == "prefill_rolling"
+                                and hit.cached_tokens
+                            ):
+                                # A restored progress point keeps its rolling
+                                # lifetime: this lane now owns it as its latest.
+                                job.rolling_checkpoint = (
+                                    cache_key_for(
+                                        job.tenant_id,
+                                        job.request.get("_mlx2_media_fingerprint"),
+                                    ),
+                                    tuple(tokens[: hit.cached_tokens]),
+                                )
                         self.batch_metrics.prompt(
                             job.id, job.prompt_tokens, job.cached_tokens
                         )
-                        job.detokenizer = adapter.tokenizer.detokenizer
-                        job.detokenizer.reset()
-                        parser_request = job.request
-                        if self.tolerant_tool_markers:
-                            parser_request = {
-                                **job.request,
-                                "_tolerant_tool_markers": True,
-                            }
-                            if job.request.get("tools"):
-                                self.counts["tolerant_tool_marker_requests"] += 1
-                        job.output_parser = adapter.output_parser(parser_request)
-                        rng = LaneRNG(job.request.get("seed", secrets.randbits(32)))
+                        if not resuming:
+                            # A resumed stream keeps its detokenizer, parser and
+                            # stop state: the client already saw that text.
+                            job.detokenizer = adapter.tokenizer.detokenizer
+                            job.detokenizer.reset()
+                            parser_request = job.request
+                            if self.tolerant_tool_markers:
+                                parser_request = {
+                                    **job.request,
+                                    "_tolerant_tool_markers": True,
+                                }
+                                if job.request.get("tools"):
+                                    self.counts["tolerant_tool_marker_requests"] += 1
+                            job.output_parser = adapter.output_parser(parser_request)
+                        seed = (
+                            job.request.get("seed", secrets.randbits(32))
+                            if job.rng_seed is None
+                            else job.rng_seed
+                        )
+                        if preemption:
+                            job.rng_seed = seed
+                        rng = LaneRNG(seed)
                         # Vendor defaults fill only fields the request left
                         # unset; the selected profile follows the adapter's
                         # view of the thinking mode (unknown for raw
@@ -3457,6 +5132,11 @@ class ServingEngine:
                         )
                         job.effective_sampling = sampling
                         temp = sampling["temperature"]
+                        if resuming and temp:
+                            # Only ordinary-route lanes reach here sampled.
+                            rng = replay_lane_rng(
+                                LaneRNG, seed, job.completion_tokens
+                            )
                         top_p, top_k = sampling["top_p"], sampling["top_k"]
                         min_p = sampling["min_p"]
                         vocab_size = adapter.tokenizer.vocab_size
@@ -3491,12 +5171,22 @@ class ServingEngine:
                             presence_context_size=0,
                             frequency_penalty=sampling["frequency_penalty"],
                             frequency_context_size=0,
-                            penalty_generation_start=len(tokens),
+                            penalty_generation_start=prompt_len,
                         )
+                        adapter_processors = getattr(
+                            adapter, "request_logits_processors", None
+                        )
+                        if callable(adapter_processors):
+                            processors.extend(
+                                adapter_processors(
+                                    job.request, prompt_length=prompt_len
+                                )
+                                or ()
+                            )
                         minimum_processor = minimum_tokens_processor(
                             mx,
                             stop_token_ids,
-                            len(tokens),
+                            prompt_len,
                             job.request.get("min_tokens", 0),
                         )
                         if minimum_processor is not None:
@@ -3551,7 +5241,7 @@ class ServingEngine:
                             and (think_budget or direction is not None)
                         ):
                             job.thinking_guard = ThinkingGuard(
-                                len(tokens), close_ids,
+                                prompt_len, close_ids,
                                 budget=(
                                     think_budget
                                     if thinking_budget_mode == "state_aware"
@@ -3588,7 +5278,47 @@ class ServingEngine:
                                 for tool in job.request.get("tools", ())
                             )
                         )
-                        if self.constrained_tool_grammar and strict_auto:
+                        server_tool_grammar = None
+                        if self.constrained_tool_grammar_auto:
+                            from .contracts import Capability
+                            from .tool_grammar import plan_tool_grammar
+
+                            (
+                                server_tool_grammar,
+                                job.tool_grammar_status,
+                                job.tool_grammar_receipt,
+                            ) = plan_tool_grammar(
+                                job.request,
+                                getattr(adapter, "tool_constraint", None),
+                                open_marker=getattr(
+                                    adapter, "tool_call_open_marker", None
+                                ),
+                                leading_whitespace=bool(defer_until),
+                            )
+                            if server_tool_grammar is not None and (
+                                Capability.GRAMMAR not in self.route_capabilities
+                                or (
+                                    defer_until is None
+                                    and "messages" in job.request
+                                    and thinking_enabled(adapter, job.request)
+                                )
+                            ):
+                                # Forced calls were refused at admission on
+                                # such routes; the extended shapes degrade to
+                                # the unconstrained (terminal-checked) path.
+                                server_tool_grammar = job.tool_grammar_receipt = None
+                                job.tool_grammar_status = "skipped_route_unsupported"
+                            if server_tool_grammar is not None:
+                                self.counts[
+                                    "constrained_tool_grammar_engagements"
+                                ] += 1
+                                if job.tool_grammar_receipt["shape"] != "calls":
+                                    self.counts[
+                                        "constrained_tool_grammar_auto_engagements"
+                                    ] += 1
+                            elif job.tool_grammar_status != "disabled":
+                                self.counts["constrained_tool_grammar_skips"] += 1
+                        elif self.constrained_tool_grammar and strict_auto:
                             job.tool_grammar_status = "skipped_strict_auto"
                             self.counts["constrained_tool_grammar_skips"] += 1
                         elif (
@@ -3629,18 +5359,19 @@ class ServingEngine:
                                     "thinking_budget requires an adapter thinking-close marker"
                                 )
                             budget_processor = ThinkingBudgetProcessor(
-                                len(tokens), budget, defer_until
+                                prompt_len, budget, defer_until
                             )
                             processors.append(budget_processor)
                         job.thinking_budget = budget_processor
                         structured = make_structured_processor(
                             adapter.tokenizer,
-                            len(tokens),
+                            prompt_len,
                             response_format=job.request.get("response_format"),
                             grammar=tool_grammar or job.request.get("grammar"),
+                            server_grammar=server_tool_grammar,
                             constraint_kind=(
                                 "tool_grammar"
-                                if tool_grammar
+                                if tool_grammar or server_tool_grammar
                                 else (job.request.get("response_format") or {}).get(
                                     "type", "grammar"
                                 )
@@ -3738,16 +5469,33 @@ class ServingEngine:
                                         hit.cached_tokens if requantized else 0
                                     ),
                                     apcv2_publication="skipped",
+                                    # compose_mtp quantizes target planes only;
+                                    # the MTP head's draft cache stays exact.
+                                    route="mtp" if self.mtp else "ordinary",
+                                    draft_cache="exact" if self.mtp else None,
                                 )
                                 self.counts["approximate_kv_applied"] += 1
+                                self.counts["approximate_kv_mtp_lanes"] += int(
+                                    bool(self.mtp)
+                                )
                                 self.counts[
                                     "approximate_kv_requantized_prefix_hits"
                                 ] += int(requantized)
+                        if preemption:
+                            if job.preemption_prompt is None:
+                                job.preemption_prompt = list(tokens)
+                                job.generated_token_ids = []
+                            job.decode_replay_block = decode_replay_block()
                         job.uid = batch.insert(
                             [hit.remaining_tokens], max_tokens=[maximum],
                             caches=[lane_cache], all_tokens=[tokens[:hit.cached_tokens]],
                             samplers=[sampler], logits_processors=[processors], lane_rngs=[rng],
                             apc_interior_positions=[job.apc_interior_positions],
+                            **(
+                                {"state_boundaries": [job.state_boundaries]}
+                                if job.state_boundaries
+                                else {}
+                            ),
                             **state_options,
                             prefill_inputs=[
                                 job.request.get("_mlx2_prefill_inputs")
@@ -3755,6 +5503,8 @@ class ServingEngine:
                                 else None
                             ],
                         )[0]
+                        if job.lora_slot is not None:
+                            self.multi_lora.bind_uid(job.uid, job.lora_slot)
                         if job.cache_capsule is not None:
                             self._bind_pending_cache_capsule(batch, job)
                         active[job.uid] = job
@@ -3768,7 +5518,12 @@ class ServingEngine:
                             coalescer.note_attachment(now=time.monotonic())
                         job.last_progress = time.monotonic()
                         job.admission_hit = job.admission_tokens = None
-                        self.counts["admitted"] += 1
+                        if job.preempted:
+                            job.preempted = False
+                            job.replaying = True
+                            self.counts["preempted_replays"] += 1
+                        else:
+                            self.counts["admitted"] += 1
                         self.batch_metrics.lane_attached(
                             job.id,
                             len(active),
@@ -3800,6 +5555,11 @@ class ServingEngine:
                             event = {"error": str(exc), "status": 429}
                         elif isinstance(exc, ValueError):
                             event = {"error": str(exc), "status": 400}
+                        elif isinstance(exc, PromptTemplateFailure):
+                            # Not an unhandled TypeError: the caller reads a
+                            # 500 that says the chat template failed.
+                            log.exception("chat template rendering failed")
+                            event = {"error": str(exc), "status": 500}
                         else:
                             log.exception("request attachment failed")
                             event = {
@@ -3823,7 +5583,13 @@ class ServingEngine:
                     uid for uid, job in active.items() if job.cancelled.is_set()
                 ]
                 if cancelled:
-                    batch.remove(cancelled)
+                    if self.apc_rolling_route == "kv":
+                        self._publish_cancelled_prefills(
+                            batch.remove(cancelled, return_prompt_caches=True),
+                            apc, active, cache_key_for, session_tag_for,
+                        )
+                    else:
+                        batch.remove(cancelled)
                     for uid in cancelled:
                         self._finish(active.pop(uid), {"error": "cancelled"})
                         self.counts["cancelled"] += 1
@@ -3840,8 +5606,75 @@ class ServingEngine:
                 stalled = [
                     uid
                     for uid, job in active.items()
-                    if now - job.last_progress > 60
+                    if now - job.last_progress > stall_seconds
                 ]
+                if (
+                    preemption
+                    and not recovering
+                    and getattr(self, "_service_state", "serving") != "draining"
+                ):
+                    # Free memory by parking the youngest preemptible lane
+                    # instead of failing the lanes it starves.  With no
+                    # candidate, a replay already pending, or a lone lane
+                    # (nothing else to make room for) the stalled lanes fail
+                    # exactly as before.
+                    trigger = victim = None
+                    for uid, lane in active.items():
+                        if (
+                            lane.fault is None
+                            or lane.fault_fired
+                            or lane.fault.kind != "memory_preempt"
+                            or lane.completion_tokens < lane.fault.after_tokens
+                        ):
+                            continue
+                        blocked = preemption_block(lane)
+                        if blocked is not None:
+                            # The eligibility rule is doing its job -- this
+                            # lane could not replay exactly -- but an injected
+                            # fault that silently does nothing is how a
+                            # vacuous gate gets written.  Record the decline
+                            # the first time it is seen for this lane.
+                            if lane.fault_declined is None:
+                                lane.fault_declined = blocked
+                                self.counts[
+                                    "memory_preemption_fault_declined"
+                                ] += 1
+                                log.warning(
+                                    "qualification memory_preempt fault on request "
+                                    "%s declined at %d completion tokens: %s",
+                                    lane.id, lane.completion_tokens, blocked,
+                                )
+                            continue
+                        # Qualification-mode injection: how a harness
+                        # observes the mechanism without real pressure.
+                        trigger, victim = "fault", uid
+                        lane.fault_fired = True
+                        lane.fault_declined = None
+                        self.batch_metrics.fault(lane.id, "memory_preempt")
+                        break
+                    if trigger is None and len(active) > 1:
+                        if stalled:
+                            trigger = "stall"
+                        elif (
+                            self.memory_preemption_policy["on_pressure"]
+                            and self.memory_pressure_level()
+                            >= PressureLevel.CRITICAL
+                        ):
+                            trigger = "pressure"
+                        if trigger is not None:
+                            victim = choose_preemption_victim(active, stalled)
+                    if victim is not None:
+                        blockers = [uid for uid in stalled if uid != victim]
+                        for uid in blockers:
+                            # A fresh stall window; the replay waits for these
+                            # lanes to progress past this instant.
+                            active[uid].last_progress = now
+                        preempt_lane(
+                            victim,
+                            trigger=trigger,
+                            blockers=tuple(active[uid].id for uid in blockers),
+                        )
+                        stalled = []
                 if stalled:
                     batch.remove(stalled)
                     for uid in stalled:
@@ -3857,6 +5690,16 @@ class ServingEngine:
                     self.counts["multi_request_cycles"] += int(len(active) > 1)
                     self.batch_metrics.batch_cycle(len(active), len(deferred))
                     prompts, responses = batch.next()
+                    if (
+                        self.apc_rolling_route == "hybrid"
+                        or self.apc_junction_checkpoints
+                    ):
+                        # P1's generic publisher: rolling and junction
+                        # snapshots both go out as soon as they are captured.
+                        self._publish_state_checkpoints(
+                            batch, apc, active, cache_key_for, session_tag_for,
+                            MTPAPCSidecar,
+                        )
                     atomic_failures = getattr(
                         batch, "take_atomic_cohort_failures", lambda: ()
                     )()
@@ -3877,6 +5720,17 @@ class ServingEngine:
                                 failed_job,
                                 {"error": failure["reason"], "status": 429},
                             )
+                    for failure in getattr(
+                        batch, "take_mtp_prefill_failures", lambda: ()
+                    )():
+                        batch.remove([failure["uid"]])
+                        self.counts["mtp_prefill_bound_failures"] += 1
+                        failed_job = active.pop(failure["uid"], None)
+                        if failed_job is not None:
+                            self._finish(
+                                failed_job,
+                                {"error": failure["reason"], "status": 503},
+                            )
                     if not prompts and not responses:
                         # Reclaim idle scratch while memory admission is deferred.
                         now = time.monotonic()
@@ -3888,6 +5742,13 @@ class ServingEngine:
                     for response in prompts:
                         if response.uid in active:
                             active[response.uid].last_progress = time.monotonic()
+                            if response.end_of_prompt:
+                                active[response.uid].replaying = False
+                            if active[response.uid].request.get("return_progress"):
+                                self._emit_prompt_progress(
+                                    active[response.uid],
+                                    getattr(response, "progress", None),
+                                )
                         if response.end_of_prompt:
                             pop_surgery_receipt = getattr(
                                 batch, "pop_post_prefill_receipt", None
@@ -3903,6 +5764,18 @@ class ServingEngine:
                                 self.counts[
                                     "spomin_" + surgery_receipt.get("status", "unknown")
                                 ] += 1
+                            pop_chunk_trace = getattr(
+                                batch, "pop_prefill_chunk_trace", None
+                            )
+                            chunk_trace = (
+                                pop_chunk_trace(response.uid)
+                                if callable(pop_chunk_trace)
+                                else None
+                            )
+                            if owner is not None and chunk_trace is not None:
+                                owner.prefill_chunk_receipt = chunk_trace
+                                if chunk_trace.get("varied"):
+                                    self.counts["prefill_chunk_varied_requests"] += 1
                             pop_interiors = getattr(
                                 batch, "pop_interior_checkpoints", None
                             )
@@ -3911,15 +5784,35 @@ class ServingEngine:
                                 if callable(pop_interiors)
                                 else ()
                             )
-                            self.counts["apc_interior_checkpoints_captured"] += len(
-                                interiors
+                            junctions = sum(
+                                1
+                                for checkpoint in interiors
+                                if checkpoint.get("purpose")
+                                == BoundaryPurpose.JUNCTION
                             )
+                            self.counts["apc_interior_checkpoints_captured"] += (
+                                len(interiors) - junctions
+                            )
+                            if junctions:
+                                self.counts[
+                                    "apc_junction_checkpoints_captured"
+                                ] += junctions
                             for checkpoint in interiors:
+                                purpose = checkpoint.get(
+                                    "purpose", BoundaryPurpose.INTERIOR
+                                )
+                                # Junction snapshots share the interior
+                                # capture path; their counters are separate.
+                                counter = (
+                                    "apc_junction_checkpoints"
+                                    if purpose == BoundaryPurpose.JUNCTION
+                                    else "apc_interior_checkpoints"
+                                )
                                 if owner is not None and owner.request.get(
                                     "skip_writing_prefix_cache", False
                                 ):
                                     self.counts[
-                                        "apc_interior_checkpoints_skipped_write_suppressed"
+                                        counter + "_skipped_write_suppressed"
                                     ] += 1
                                     continue
                                 if (
@@ -3930,7 +5823,7 @@ class ServingEngine:
                                     and surgery_receipt.get("status") == "applied"
                                 ):
                                     self.counts[
-                                        "apc_interior_checkpoints_skipped_approximate"
+                                        counter + "_skipped_approximate"
                                     ] += 1
                                     continue
                                 checkpoint_sidecar = (
@@ -3946,7 +5839,7 @@ class ServingEngine:
                                 checkpoint_key = cache_key_for(
                                     owner.tenant_id if owner else None,
                                     (
-                                        owner.request.get("_mlx2_media_fingerprint")
+                                        request_apc_scope(owner.request)
                                         if owner is not None
                                         else None
                                     ),
@@ -3957,15 +5850,13 @@ class ServingEngine:
                                     checkpoint["tokens"],
                                     checkpoint["target_cache"],
                                     sidecar=checkpoint_sidecar,
-                                    retention_role="interior_checkpoint",
+                                    retention_role=RETENTION_ROLE[purpose],
                                     session_tag=session_tag_for(owner),
                                 ):
-                                    self.counts[
-                                        "apc_interior_checkpoints_published"
-                                    ] += 1
+                                    self.counts[counter + "_published"] += 1
                                 else:
                                     self.counts[
-                                        "apc_interior_checkpoints_skipped_publish_failed"
+                                        counter + "_skipped_publish_failed"
                                     ] += 1
                             boundary = batch.pop_prompt_boundary(response.uid)
                             if (
@@ -4004,7 +5895,7 @@ class ServingEngine:
                                 boundary_job = active.get(response.uid)
                                 key = cache_key_for(
                                     boundary_job.tenant_id if boundary_job else None,
-                                    boundary_job.request.get("_mlx2_media_fingerprint")
+                                    request_apc_scope(boundary_job.request)
                                     if boundary_job
                                     else None,
                                 )
@@ -4030,6 +5921,16 @@ class ServingEngine:
                                         if stored
                                         else "spomin_exact_boundary_store_failures"
                                     ] += 1
+                                if (
+                                    stored
+                                    and boundary_job is not None
+                                    and boundary_job.rolling_checkpoint is not None
+                                ):
+                                    # The committed prompt boundary supersedes
+                                    # the lane's disposable progress point.
+                                    self._retire_rolling_checkpoint(
+                                        apc, active, boundary_job
+                                    )
                                 leader = active.get(response.uid)
                                 if (
                                     leader is not None
@@ -4050,8 +5951,8 @@ class ServingEngine:
                                                 )
                                                 if sibling_tokens is None:
                                                     with self.prompt_lock:
-                                                        sibling_tokens = adapter.prompt_tokens(
-                                                            sibling.request
+                                                        sibling_tokens = render_prompt_tokens(
+                                                            adapter, sibling.request
                                                         )
                                                     self.host_prompt_cache.put(
                                                         sibling.request, sibling_tokens
@@ -4284,6 +6185,9 @@ class ServingEngine:
                         if job.first_token is None:
                             job.first_token = time.monotonic()
                         job.completion_tokens += 1
+                        job.replaying = False
+                        if job.generated_token_ids is not None:
+                            job.generated_token_ids.append(int(response.token))
                         self.batch_metrics.token(job.id)
                         if (
                             job.fault
@@ -4321,9 +6225,13 @@ class ServingEngine:
                             job.detokenizer.finalize()
                         text = job.detokenizer.last_segment
                         try:
-                            deltas = job.output_parser.push(
-                                text, final=bool(response.finish_reason)
-                            )
+                            finish_output = getattr(job.output_parser, "finish", None)
+                            if response.finish_reason and callable(finish_output):
+                                deltas = finish_output(text, response.finish_reason)
+                            else:
+                                deltas = job.output_parser.push(
+                                    text, final=bool(response.finish_reason)
+                                )
                         except Exception as exc:  # noqa: BLE001 - one lane, not the worker
                             batch.remove([response.uid])
                             if getattr(exc, "tool_call_constraint_error", False):
@@ -4345,6 +6253,18 @@ class ServingEngine:
                                 parse_fallbacks - job.tool_parse_fallbacks_seen
                             )
                             job.tool_parse_fallbacks_seen = parse_fallbacks
+                        truncations = int(
+                            getattr(
+                                job.output_parser,
+                                "tool_call_constraint_truncations",
+                                0,
+                            )
+                        )
+                        if truncations > job.tool_constraint_truncations_seen:
+                            self.counts["tool_call_constraint_truncations"] += (
+                                truncations - job.tool_constraint_truncations_seen
+                            )
+                            job.tool_constraint_truncations_seen = truncations
                         stopped = job.output_parser.stopped
                         if stopped and not response.finish_reason:
                             batch.remove([response.uid])
@@ -4375,7 +6295,7 @@ class ServingEngine:
                                     apc,
                                     cache_key_for(
                                         job.tenant_id,
-                                        job.request.get("_mlx2_media_fingerprint"),
+                                        request_apc_scope(job.request),
                                     ),
                                     response.all_tokens,
                                     response.prompt_cache,
@@ -4424,6 +6344,13 @@ class ServingEngine:
                                 "profile": self.snapshot["profile"],
                                 "qualification": self.snapshot["qualification"],
                                 "route_receipt": route_receipt,
+                                **(
+                                    {"lora": self._multi_lora_receipt(job)}
+                                    if self.multi_lora is not None
+                                    else {}
+                                ),
+                                "route": self.snapshot["settings"]["route"],
+                                "route_selection_source": self.route_selection_source,
                                 "request_controls": {
                                     "max_tokens": job.effective_max_tokens,
                                     "max_tokens_defaulted": job.max_tokens_defaulted,
@@ -4494,7 +6421,10 @@ class ServingEngine:
                                             ),
                                         }
                                         if (
-                                            constrained_tool_choice(job.request)
+                                            (
+                                                constrained_tool_choice(job.request)
+                                                or job.tool_grammar_status == "engaged"
+                                            )
                                             and job.structured is not None
                                         )
                                         else None
@@ -4529,6 +6459,11 @@ class ServingEngine:
                                                 job.request
                                             ),
                                             "decode_grammar": job.tool_grammar_status,
+                                            **(
+                                                {"grammar": job.tool_grammar_receipt}
+                                                if job.tool_grammar_receipt
+                                                else {}
+                                            ),
                                         }
                                         if "tools" in job.request
                                         else None
@@ -4538,11 +6473,51 @@ class ServingEngine:
                                 "mtp": response.mtp_receipt,
                                 "speculation": getattr(response, "speculative_receipt", None),
                                 "spomin_live_surgery": job.spomin_receipt,
+                                "prefill_chunk": job.prefill_chunk_receipt,
                                 "approximate_kv": job.approximate_kv_receipt,
                                 **(
                                     {"int8_prefill": self.int8_prefill_handle.receipt()}
                                     if self.int8_prefill_handle is not None
                                     else {}
+                                ),
+                                **(
+                                    {
+                                        "preemption": _preemption_receipt(job)
+                                    }
+                                    if preemption
+                                    else {}
+                                ),
+                                **(
+                                    {
+                                        "state_boundaries": {
+                                            "planned": {
+                                                purpose.name.lower(): sum(
+                                                    bound.purpose == purpose
+                                                    for bound in job.state_boundaries
+                                                )
+                                                for purpose in BoundaryPurpose
+                                            },
+                                            "published": dict(
+                                                job.state_boundaries_published
+                                            ),
+                                        }
+                                    }
+                                    if self.apc_rolling_route is not None
+                                    else {}
+                                ),
+                                **(
+                                    {
+                                        "prompt_progress": {
+                                            "updates": job.prompt_progress_updates,
+                                            "dropped": job.prompt_progress_dropped,
+                                        }
+                                    }
+                                    if job.request.get("return_progress")
+                                    else {}
+                                ),
+                                **verify_bitexact_receipt_fields(
+                                    self.verify_bitexact_handle,
+                                    job.verify_bitexact_start,
                                 ),
                                 "cache_capsule": (
                                     getattr(
@@ -4602,6 +6577,7 @@ class ServingEngine:
                                 "admission": dict(admission),
                                 "memory_waiting": len(deferred),
                                 "headroom_bytes": execution_headroom(),
+                                **self._host_memory_status(),
                                 "spomin_live_surgery": (
                                     spomin_manager.snapshot()
                                     if spomin_manager is not None
@@ -4637,6 +6613,8 @@ class ServingEngine:
                 else:
                     apc.clear()
                 self.apc = None
+            if self.verify_bitexact_handle is not None:
+                self.verify_bitexact_handle.remove()
             if self.int8_prefill_handle is not None:
                 from .runtime.int8_prefill import remove as remove_int8_prefill
 

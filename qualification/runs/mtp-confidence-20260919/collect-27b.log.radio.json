@@ -1,0 +1,14 @@
+{
+ "agent_id": "job-rm10-collect-27b-60000",
+ "complete_worker": {
+  "already_terminal": false,
+  "finished_at": 1789853684,
+  "status": "completed",
+  "worker_id": "ab0a56514654496c91a6ed64aca8a22d"
+ },
+ "register_worker": {
+  "worker_id": "ab0a56514654496c91a6ed64aca8a22d",
+  "workflow_id": "3c05142126b64da993d5935b5566f6fa"
+ },
+ "updated_at": "2026-09-19T21:34:44+00:00"
+}

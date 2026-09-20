@@ -36,7 +36,7 @@ REQUIRED_CHECKS = frozenset(
 APPROVED_QUALIFICATION_HARNESS = {
     "schema": "mlx2.qualification-harness.v1",
     "name": "scripts/qualify_serving.py",
-    "sha256": "3ec83a5d51d0150cab27e42ca9ce93f6185e5948bf8187fa5f2ef9aee0fa5cf9",
+    "sha256": "fd54e55c3f28f4732cf8ce7c278024e5373386b001bf4d0ee14a50cd50d13e9e",
 }
 
 
@@ -57,6 +57,25 @@ def required_feature_checks(settings):
     if (settings.get("int8_prefill") or {}).get("enabled") is True:
         # Any route: a selected int8 prefill policy must show engaged calls.
         features.add("feature_int8_prefill")
+    if (settings.get("host_memory_signals") or {}).get("enabled") is True:
+        # Any route: the selected host signal must be observed in telemetry.
+        features.add("feature_host_memory_signals")
+    if (settings.get("verify_bitexact") or {}).get("enabled") is True:
+        # Any route: the bit-exact matmul route counter must have advanced.
+        features.add("feature_verify_bitexact")
+    if (settings.get("moe_expert_streaming") or {}).get("enabled") is True:
+        # A streamed model must show real page-ins: a "streaming" run that
+        # never faulted an expert was fully resident and proves nothing.
+        features.add("feature_moe_expert_streaming")
+    if (settings.get("memory_preemption") or {}).get("enabled") is True:
+        # Any route: a selected preemption policy must show a lane that was
+        # preempted and replayed to completion.
+        features.add("feature_memory_preemption")
+    # Item 12 (any route): selected tool-grammar extensions must be observed.
+    if settings.get("constrained_tool_grammar_auto") is True:
+        features.add("feature_tool_grammar_auto")
+    if settings.get("tool_grammar_streaming") is True:
+        features.add("feature_tool_grammar_streaming")
     return features
 
 
@@ -65,6 +84,8 @@ def _route_feature_checks(settings):
         features = {"feature_external_draft", "feature_proposal_distribution", "feature_paired_draft_cache", "feature_segmented_transaction"}
         if (settings.get("fly_verification") or {}).get("enabled") is True:
             features.add("feature_fly_verification")
+        if (settings.get("execution_policy") or {}).get("pairwise_selection") == "batched":
+            features.add("feature_external_pairwise_selection")
         return features
     if settings.get("speculation") == "prompt_lookup":
         features = {
@@ -100,19 +121,39 @@ def _route_feature_checks(settings):
         # Approximate compaction is selectable only with an observed edit.
         features.add("spomin_surgery")
     if settings.get("approximate_kv", {}).get("enabled") is True:
-        # Ordinary-route only: a selected approximate operation must show at
-        # least one lane it was actually applied to.
+        # A selected approximate operation must show at least one lane it was
+        # actually applied to, and a measured fidelity report for the same
+        # operation and artifact that passes runtime/kv_quant_fidelity.py.
         features.add("approximate_kv")
+        features.add("approximate_kv_fidelity")
+        if settings["approximate_kv"].get("compose_mtp") is True:
+            # Target-only quantization under self-MTP: observed MTP lanes.
+            features.add("approximate_kv_mtp")
     if (settings.get("apc_interior_checkpoints") or {}).get("count", 0) > 0:
         # Selection is meaningful only when a request both captures and
         # publishes an exact interior checkpoint for later reuse.
         features.add("apc_interior_checkpoints")
+    if (settings.get("apc_rolling_checkpoints") or {}).get("interval_tokens", 0) > 0:
+        # A selected rolling policy must show a published progress point that
+        # a later request resumed from (hybrid) or a cancel publication (KV).
+        features.add("apc_rolling_checkpoints")
+    if settings.get("apc_junction_checkpoints") is True:
+        # A junction must be captured and published at an observed branch
+        # point, then serve a later request that diverges there.
+        features.add("apc_junction_checkpoints")
+    if settings.get("prefill_scheduling"):
+        # Present only when the server-owned policy is selected; the harness
+        # must observe an SRPT reorder or bypass-capped service to qualify it.
+        features.add("prefill_scheduling")
     if not settings.get("mtp"):
         return {"feature_" + name for name in features}
     if settings.get("adaptive_mtp_depth", {}).get("enabled") is True:
         features.add("adaptive_mtp_depth")
     if settings.get("fly_verification", {}).get("enabled") is True:
         features.add("fly_verification")
+    if (settings.get("self_mtp_copy_draft") or {}).get("enabled") is True:
+        # A selected copy-draft route must show verified copied spans.
+        features.add("self_mtp_copy_draft")
     if env.get("MLX_QWEN4_FUSED_GDN_VERIFY") == "1":
         features.add("fused_gdn_verify")
     if (env.get("MLX_QWEN4_FUSED_GDN_VERIFY") == "1"
@@ -120,6 +161,12 @@ def _route_feature_checks(settings):
         # Compact replay rollback is a distinct state path from verify; a
         # selected profile must show it actually rolled back at least once.
         features.add("fused_gdn_replay_rollback")
+    if (env.get("MLX_QWEN4_FUSED_GDN_VERIFY") == "1"
+            and env.get("MLX_QWEN4_FUSED_GDN_REPLAY_ROLLBACK") == "1"
+            and env.get("MLX_QWEN4_FUSED_GDN_DYNAMIC_ACCEPT") == "1"):
+        # Device-count reconstruction is a distinct kernel; a selected profile
+        # must show at least one dynamic rollback.
+        features.add("fused_gdn_dynamic_accept")
     if policy.get("segment_aware_async_qsa_promotion"):
         features.add("async_promotion")
     if policy.get("prefetch_known_tail_ple"):
@@ -170,7 +217,17 @@ def load_qualified_route(
         raise ValueError("qualification does not match approved harness")
     if record.get("runtime") != runtime or record.get("artifact") != artifact:
         raise ValueError("qualification does not match runtime and artifact")
-    if record.get("settings") != settings:
+    # How the operator selected a route is observational provenance, not route
+    # identity.  An explicit --ordinary qualification therefore authorizes the
+    # same resolved ordinary route when it comes from an adapter default.
+    qualified_settings = record.get("settings")
+    if not isinstance(qualified_settings, dict) or not isinstance(settings, dict):
+        raise ValueError("qualification does not match serving settings")
+    qualified_settings = dict(qualified_settings)
+    serving_settings = dict(settings)
+    qualified_settings.pop("route_selection_source", None)
+    serving_settings.pop("route_selection_source", None)
+    if qualified_settings != serving_settings:
         raise ValueError("qualification does not match serving settings")
     checks = record.get("checks", {})
     required = set(REQUIRED_CHECKS) | (

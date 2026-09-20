@@ -1,0 +1,257 @@
+{
+  "mode": "gpu",
+  "compat_mode": "auto",
+  "model": "Qwen3.8-Flash-Next-MLX-4bit-MTP",
+  "server": [
+    "~/Desktop/mlx2/.venv/bin/python",
+    "-m",
+    "mlx2.server",
+    "--model",
+    "~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP",
+    "--port",
+    "8397",
+    "--agent-compat",
+    "auto",
+    "--custom-tool-grammar",
+    "validate",
+    "--execution-policy",
+    "/private/tmp/mlx2-rm08-responses-agent-conformance/qualification/policies/flash-next-mtp2.json",
+    "--qualification-mode"
+  ],
+  "rows": [
+    {
+      "repeat": 0,
+      "client": "codex",
+      "task": "add_file",
+      "returncode": 1,
+      "passed": false,
+      "requests": 1,
+      "non_200": 0,
+      "cached_tokens": [
+        null
+      ],
+      "counter_delta": {
+        "agent_compat_source_detected": 1,
+        "agent_compat_detected_codex": 1,
+        "agent_compat_custom_tools_declared": 1,
+        "agent_compat_hosted_tools_dropped": 2,
+        "agent_compat_requests": 1,
+        "agent_compat_system_folded": 1,
+        "agent_compat_phase_outputs": 1,
+        "agent_compat_custom_tool_grammar_rejected": 1
+      },
+      "seconds": 10.0
+    },
+    {
+      "repeat": 0,
+      "client": "codex",
+      "task": "fix_test",
+      "returncode": 0,
+      "passed": true,
+      "requests": 4,
+      "non_200": 0,
+      "cached_tokens": [
+        0,
+        9894,
+        10253,
+        10540
+      ],
+      "counter_delta": {
+        "agent_compat_source_detected": 4,
+        "agent_compat_detected_codex": 4,
+        "agent_compat_custom_tools_declared": 4,
+        "agent_compat_hosted_tools_dropped": 8,
+        "agent_compat_requests": 4,
+        "agent_compat_system_folded": 4,
+        "agent_compat_phase_outputs": 4,
+        "agent_compat_phase_inputs": 6,
+        "agent_compat_custom_tool_grammar_validated": 1,
+        "agent_compat_custom_tool_calls": 1,
+        "agent_compat_custom_tool_replays": 2
+      },
+      "seconds": 19.7
+    },
+    {
+      "repeat": 0,
+      "client": "claude",
+      "task": "add_file",
+      "returncode": 0,
+      "passed": true,
+      "requests": 2,
+      "non_200": 0,
+      "cached_tokens": [
+        0,
+        16645
+      ],
+      "counter_delta": {
+        "agent_compat_source_detected": 2,
+        "agent_compat_system_folded": 3,
+        "agent_compat_detected_claude_code": 2,
+        "agent_compat_adaptive_thinking": 2,
+        "agent_compat_thinking_omitted": 2,
+        "agent_compat_output_effort": 2,
+        "agent_compat_thinking_restored": 1
+      },
+      "seconds": 18.3
+    },
+    {
+      "repeat": 0,
+      "client": "claude",
+      "task": "fix_test",
+      "returncode": 0,
+      "passed": true,
+      "requests": 5,
+      "non_200": 0,
+      "cached_tokens": [
+        0,
+        16654,
+        16879,
+        17120,
+        17315
+      ],
+      "counter_delta": {
+        "agent_compat_source_detected": 5,
+        "agent_compat_system_folded": 15,
+        "agent_compat_detected_claude_code": 5,
+        "agent_compat_adaptive_thinking": 5,
+        "agent_compat_thinking_omitted": 5,
+        "agent_compat_output_effort": 5,
+        "agent_compat_thinking_restored": 10
+      },
+      "seconds": 24.8
+    },
+    {
+      "repeat": 1,
+      "client": "codex",
+      "task": "add_file",
+      "returncode": 0,
+      "passed": true,
+      "requests": 3,
+      "non_200": 0,
+      "cached_tokens": [
+        0,
+        9957,
+        10060
+      ],
+      "counter_delta": {
+        "agent_compat_source_detected": 3,
+        "agent_compat_detected_codex": 3,
+        "agent_compat_custom_tools_declared": 3,
+        "agent_compat_hosted_tools_dropped": 6,
+        "agent_compat_requests": 3,
+        "agent_compat_system_folded": 3,
+        "agent_compat_phase_outputs": 3,
+        "agent_compat_phase_inputs": 3,
+        "agent_compat_custom_tool_grammar_validated": 1,
+        "agent_compat_custom_tool_calls": 1,
+        "agent_compat_custom_tool_replays": 2
+      },
+      "seconds": 12.9
+    },
+    {
+      "repeat": 1,
+      "client": "codex",
+      "task": "fix_test",
+      "returncode": 1,
+      "passed": false,
+      "requests": 2,
+      "non_200": 0,
+      "cached_tokens": [
+        0,
+        null
+      ],
+      "counter_delta": {
+        "agent_compat_source_detected": 2,
+        "agent_compat_detected_codex": 2,
+        "agent_compat_custom_tools_declared": 2,
+        "agent_compat_hosted_tools_dropped": 4,
+        "agent_compat_requests": 2,
+        "agent_compat_system_folded": 2,
+        "agent_compat_phase_outputs": 2,
+        "agent_compat_custom_tool_grammar_rejected": 1,
+        "agent_compat_phase_inputs": 1
+      },
+      "seconds": 11.7
+    },
+    {
+      "repeat": 1,
+      "client": "claude",
+      "task": "add_file",
+      "returncode": 0,
+      "passed": true,
+      "requests": 2,
+      "non_200": 0,
+      "cached_tokens": [
+        0,
+        16584
+      ],
+      "counter_delta": {
+        "agent_compat_source_detected": 2,
+        "agent_compat_system_folded": 3,
+        "agent_compat_detected_claude_code": 2,
+        "agent_compat_adaptive_thinking": 2,
+        "agent_compat_thinking_omitted": 2,
+        "agent_compat_output_effort": 2,
+        "agent_compat_thinking_restored": 1
+      },
+      "seconds": 16.0
+    },
+    {
+      "repeat": 1,
+      "client": "claude",
+      "task": "fix_test",
+      "returncode": 0,
+      "passed": true,
+      "requests": 6,
+      "non_200": 0,
+      "cached_tokens": [
+        0,
+        16591,
+        16798,
+        17015,
+        17125,
+        17310
+      ],
+      "counter_delta": {
+        "agent_compat_source_detected": 6,
+        "agent_compat_system_folded": 21,
+        "agent_compat_detected_claude_code": 6,
+        "agent_compat_adaptive_thinking": 6,
+        "agent_compat_thinking_omitted": 6,
+        "agent_compat_output_effort": 6,
+        "agent_compat_thinking_restored": 15
+      },
+      "seconds": 25.6
+    }
+  ],
+  "agent_compat_counts": {
+    "agent_compat_source_detected": 25,
+    "agent_compat_detected_codex": 10,
+    "agent_compat_custom_tools_declared": 10,
+    "agent_compat_hosted_tools_dropped": 20,
+    "agent_compat_requests": 10,
+    "agent_compat_system_folded": 52,
+    "agent_compat_phase_outputs": 10,
+    "agent_compat_custom_tool_grammar_rejected": 2,
+    "agent_compat_phase_inputs": 10,
+    "agent_compat_custom_tool_grammar_validated": 2,
+    "agent_compat_custom_tool_calls": 2,
+    "agent_compat_custom_tool_replays": 4,
+    "agent_compat_detected_claude_code": 15,
+    "agent_compat_adaptive_thinking": 15,
+    "agent_compat_thinking_omitted": 15,
+    "agent_compat_output_effort": 15,
+    "agent_compat_thinking_restored": 27
+  },
+  "pass_rate": {
+    "codex": "2/4",
+    "claude": "4/4"
+  },
+  "later_turn_cache_hits": "16/17",
+  "grammar_rejected_total": 2,
+  "failures": [
+    "codex pass rate 2/4 below 75%",
+    "later turns without cached tokens: ['codex/fix_test#1']"
+  ],
+  "go": false
+}

@@ -404,3 +404,58 @@ def test_signal_controller_default_and_second_signal_escape_hatch():
     controller()
     assert server.stopped.wait(1)
     engine.release.set()
+
+
+def test_signal_controller_coalesces_a_process_group_sigint_sigterm_pair():
+    # sglang #35202: a supervisor that signals the whole process group can
+    # deliver SIGINT and SIGTERM together; that is one request to stop, so
+    # the second kind must not escalate past the drain.
+    import signal
+
+    class Server:
+        def __init__(self):
+            self.stopped = threading.Event()
+
+        def shutdown(self):
+            self.stopped.set()
+
+    class Engine:
+        def __init__(self):
+            self.calls = []
+            self.release = threading.Event()
+
+        def quiesce(self, **kwargs):
+            self.calls.append(kwargs)
+
+        def wait_for_quiesce(self, _timeout):
+            self.release.wait(2)
+
+    now = [100.0]
+    server, engine = Server(), Engine()
+    controller = SignalShutdownController(
+        server, engine, 3.0, clock=lambda: now[0]
+    )
+    controller(signal.SIGTERM, None)
+    now[0] += 0.05
+    controller(signal.SIGINT, None)
+    deadline = time.monotonic() + 1
+    while not engine.calls and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert engine.calls == [{"drain_timeout_seconds": 3.0, "suspend": False}]
+    assert not server.stopped.wait(0.2)  # still draining
+    # A repeat of the same kind is an operator insisting: escalate at once.
+    controller(signal.SIGTERM, None)
+    assert server.stopped.wait(1)
+    engine.release.set()
+
+    # A different kind after the coalescing window also escalates.
+    now[0] = 200.0
+    late_server, late_engine = Server(), Engine()
+    late = SignalShutdownController(
+        late_server, late_engine, 3.0, clock=lambda: now[0]
+    )
+    late(signal.SIGTERM, None)
+    now[0] += 5.0
+    late(signal.SIGINT, None)
+    assert late_server.stopped.wait(1)
+    late_engine.release.set()

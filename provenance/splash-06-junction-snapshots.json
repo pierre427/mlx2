@@ -1,0 +1,27 @@
+{
+  "component": "APCv2 junction snapshots for checkpointed hybrid prefill",
+  "source_repository": "Splash",
+  "source_revision": "f58d36dd",
+  "source_paths": [
+    "runtime/engine/Cache.hpp",
+    "runtime/engine/Cache.cpp",
+    "runtime/engine/Engine.cpp"
+  ],
+  "license": "Apache-2.0",
+  "destination_paths": [
+    "src/mlx2/runtime/state_boundaries.py",
+    "src/mlx2/runtime/apc_v2.py",
+    "src/mlx2/runtime/generate.py",
+    "src/mlx2/serving.py"
+  ],
+  "modifications": [
+    "Idea only, no code copied: Splash's CacheLookup::junctionBoundary (KV match deeper than the resumable state) and configureDraftStatePlan (dedupe candidate boundaries keeping the strongest purpose) re-expressed over the APCv2 prompt trie.",
+    "The junction is the trie common_prefix with a longer stored path, reported as APCLookup.branch_tokens on hits and misses whenever it exceeds cached_tokens.",
+    "Capture reuses mlx2's exact interior-checkpoint path (descriptor COW snapshot, self-MTP sidecar) and publishes through ServingEngine._publish_checkpoint with retention role 'junction'.",
+    "Default-off server-owned policy apc_junction_checkpoints; junction takes budget priority over interior lattice checkpoints.",
+    "state_boundaries.py is a CONTRACT-STUB of primitive P1 owned by item 7."
+  ],
+  "validation": [
+    "tests/test_06_junction_snapshots.py"
+  ]
+}

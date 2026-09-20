@@ -1,0 +1,316 @@
+### job 08-suspend-replay
+### started 2026-09-20T05:49:32
+### worktree /private/tmp/mlx2-reb-08
+### branch   claude/splash-08-onmain @ cb016c2  (merge-base with main: 83a445c)
+### models ~/mlx-models/Qwen3.6-35B-A3B-uncensored-heretic-Native-MTP-Preserved-oQ4e-mtp
+### runner  repaired 2026-09-20 (real gate enforcement, per-spec lease)
+    ok   /private/tmp/mlx2-reb-08/scripts/bench_suspend_replay.py
+    ok   model ~/mlx-models/Qwen3.6-35B-A3B-uncensored-heretic-Native-MTP-Preserved-oQ4e-mtp
+[runner] waiter: REGISTERED mlx2-76.splash-08-suspend-replay.87048.1789897772 at 2026-09-20T05:49:32
+[runner] lease: ACQUIRED for splash-08-suspend-replay at 2026-09-20T05:49:32 after 0s -> /tmp/gpu.lock /Users/Shared/mlxuag/gpu.lock
+[runner] waiter: removed mlx2-76.splash-08-suspend-replay.87048.1789897772
+### lease wanted-at 2026-09-20T05:49:32 acquired-at 2026-09-20T05:49:32 queued-for 0s
+### tree under test: mlx2.__file__ = /private/tmp/mlx2-reb-08/src/mlx2/__init__.py
+GATE PASS  PYTHONPATH pin: mlx2 resolves inside /private/tmp/mlx2-reb-08
+[runner] arm ord-off (--ordinary)
+[runner] server pid 87229  log qualification/runs/suspend-replay-20260920/ord-off.server.log  PYTHONPATH=/private/tmp/mlx2-reb-08/src
+[runner] ready: http://127.0.0.1:8298 answered a real completion 200 after 6s, 1 probe attempt(s)
+### resolved route: ordinary (source: explicit_flag)
+### resolved route: ordinary (source: explicit_flag)
+GATE PASS  route is 'ordinary' as the arm claims ('ordinary', source explicit_flag)
+{
+  "accept": false,
+  "concurrent_peer_completed": true,
+  "concurrent_peer_not_preempted": true,
+  "concurrent_victim_completed": true,
+  "concurrent_victim_preempted": false,
+  "decode_replay_text_matches": true,
+  "every_injected_fault_fired": false,
+  "fault_preemptions": null,
+  "fault_unfired_reasons": {},
+  "faults_declined": 0,
+  "faults_unfired": 3,
+  "lane_evidence": {
+    "concurrent_peer": {
+      "execution_width": null,
+      "ordinary_compute_width": 2
+    },
+    "concurrent_victim": {
+      "execution_width": null,
+      "ordinary_compute_width": 2
+    },
+    "decode_replay": {
+      "execution_width": null,
+      "ordinary_compute_width": 1
+    },
+    "peer_reference": {
+      "execution_width": null,
+      "ordinary_compute_width": 1
+    },
+    "prefill_replay": {
+      "execution_width": null,
+      "ordinary_compute_width": 1
+    },
+    "reference": {
+      "execution_width": null,
+      "ordinary_compute_width": 1
+    },
+    "warm": {
+      "execution_width": null,
+      "ordinary_compute_width": 1
+    }
+  },
+  "preemptions": null,
+  "prefill_replay_text_matches": true,
+  "pressure_preemptions": 0,
+  "reference_has_no_preemption": true,
+  "replays": null,
+  "stall_preemptions": 0,
+  "store_failures": 0
+}
+[runner] server stopped
+[runner] arm ord-on (--ordinary)
+[runner] server pid 87300  log qualification/runs/suspend-replay-20260920/ord-on.server.log  PYTHONPATH=/private/tmp/mlx2-reb-08/src
+[runner] ready: http://127.0.0.1:8298 answered a real completion 200 after 5s, 1 probe attempt(s)
+### resolved route: ordinary (source: explicit_flag)
+### resolved route: ordinary (source: explicit_flag)
+GATE PASS  route is 'ordinary' as the arm claims ('ordinary', source explicit_flag)
+{
+  "accept": false,
+  "concurrent_peer_completed": true,
+  "concurrent_peer_not_preempted": true,
+  "concurrent_victim_completed": true,
+  "concurrent_victim_preempted": true,
+  "decode_replay_text_matches": false,
+  "every_injected_fault_fired": true,
+  "fault_preemptions": 3,
+  "fault_unfired_reasons": {},
+  "faults_declined": 0,
+  "faults_unfired": 0,
+  "lane_evidence": {
+    "concurrent_peer": {
+      "execution_width": null,
+      "ordinary_compute_width": 2
+    },
+    "concurrent_victim": {
+      "execution_width": null,
+      "ordinary_compute_width": 2
+    },
+    "decode_replay": {
+      "execution_width": null,
+      "ordinary_compute_width": 1
+    },
+    "peer_reference": {
+      "execution_width": null,
+      "ordinary_compute_width": 1
+    },
+    "prefill_replay": {
+      "execution_width": null,
+      "ordinary_compute_width": 1
+    },
+    "reference": {
+      "execution_width": null,
+      "ordinary_compute_width": 1
+    },
+    "warm": {
+      "execution_width": null,
+      "ordinary_compute_width": 1
+    }
+  },
+  "preemptions": 3,
+  "prefill_replay_text_matches": true,
+  "pressure_preemptions": 0,
+  "reference_has_no_preemption": true,
+  "replays": 3,
+  "stall_preemptions": 0,
+  "store_failures": 0
+}
+[runner] server stopped
+[runner] arm mtp-off (--native-mtp)
+[runner] server pid 87376  log qualification/runs/suspend-replay-20260920/mtp-off.server.log  PYTHONPATH=/private/tmp/mlx2-reb-08/src
+[runner] ready: http://127.0.0.1:8298 answered a real completion 200 after 5s, 1 probe attempt(s)
+### resolved route: native_mtp,segmented_self_mtp (source: explicit_flag)
+### resolved route: native_mtp,segmented_self_mtp (source: explicit_flag)
+GATE PASS  route is 'native_mtp,segmented_self_mtp' as the arm claims ('native_mtp', source explicit_flag)
+{
+  "accept": false,
+  "concurrent_peer_completed": true,
+  "concurrent_peer_not_preempted": true,
+  "concurrent_victim_completed": true,
+  "concurrent_victim_preempted": false,
+  "decode_replay_text_matches": true,
+  "every_injected_fault_fired": false,
+  "fault_preemptions": null,
+  "fault_unfired_reasons": {},
+  "faults_declined": 0,
+  "faults_unfired": 3,
+  "lane_evidence": {
+    "concurrent_peer": {
+      "execution_width": null,
+      "ordinary_compute_width": null
+    },
+    "concurrent_victim": {
+      "execution_width": null,
+      "ordinary_compute_width": null
+    },
+    "decode_replay": {
+      "execution_width": null,
+      "ordinary_compute_width": null
+    },
+    "peer_reference": {
+      "execution_width": null,
+      "ordinary_compute_width": null
+    },
+    "prefill_replay": {
+      "execution_width": null,
+      "ordinary_compute_width": null
+    },
+    "reference": {
+      "execution_width": null,
+      "ordinary_compute_width": null
+    },
+    "warm": {
+      "execution_width": null,
+      "ordinary_compute_width": null
+    }
+  },
+  "preemptions": null,
+  "prefill_replay_text_matches": true,
+  "pressure_preemptions": 0,
+  "reference_has_no_preemption": true,
+  "replays": null,
+  "stall_preemptions": 0,
+  "store_failures": 0
+}
+[runner] server stopped
+[runner] arm mtp-on (--native-mtp)
+[runner] server pid 87450  log qualification/runs/suspend-replay-20260920/mtp-on.server.log  PYTHONPATH=/private/tmp/mlx2-reb-08/src
+[runner] ready: http://127.0.0.1:8298 answered a real completion 200 after 5s, 1 probe attempt(s)
+### resolved route: native_mtp,segmented_self_mtp (source: explicit_flag)
+### resolved route: native_mtp,segmented_self_mtp (source: explicit_flag)
+GATE PASS  route is 'native_mtp,segmented_self_mtp' as the arm claims ('native_mtp', source explicit_flag)
+{
+  "accept": true,
+  "concurrent_peer_completed": true,
+  "concurrent_peer_not_preempted": true,
+  "concurrent_victim_completed": true,
+  "concurrent_victim_preempted": true,
+  "decode_replay_text_matches": true,
+  "every_injected_fault_fired": true,
+  "fault_preemptions": 3,
+  "fault_unfired_reasons": {},
+  "faults_declined": 0,
+  "faults_unfired": 0,
+  "lane_evidence": {
+    "concurrent_peer": {
+      "execution_width": null,
+      "ordinary_compute_width": null
+    },
+    "concurrent_victim": {
+      "execution_width": null,
+      "ordinary_compute_width": 1
+    },
+    "decode_replay": {
+      "execution_width": null,
+      "ordinary_compute_width": null
+    },
+    "peer_reference": {
+      "execution_width": null,
+      "ordinary_compute_width": null
+    },
+    "prefill_replay": {
+      "execution_width": null,
+      "ordinary_compute_width": null
+    },
+    "reference": {
+      "execution_width": null,
+      "ordinary_compute_width": null
+    },
+    "warm": {
+      "execution_width": null,
+      "ordinary_compute_width": null
+    }
+  },
+  "preemptions": 3,
+  "prefill_replay_text_matches": true,
+  "pressure_preemptions": 0,
+  "reference_has_no_preemption": true,
+  "replays": 3,
+  "stall_preemptions": 0,
+  "store_failures": 0
+}
+[runner] server stopped
+GATE FAIL  job 08 commands all exited 0 (rc=1)
+### spec-gate evaluation (gates.py 08)
+  --- spec gates for job 08 over qualification/runs/suspend-replay-20260920 ---
+  spec PASS  mtp-off g1 settings do NOT carry memory_preemption: got False want False
+  spec PASS  mtp-off route is native self-MTP (got 'native_mtp', source 'explicit_flag'): got True want True
+  spec PASS  mtp-off g1 smoke non-empty: got True want True
+  spec PASS  mtp-off g1 finish_reason in stop/length: got True want True
+  spec PASS  mtp-off g2 no tracebacks: got 0 want 0
+  spec ????  mtp-off apcv2_store_failures == 0: NOT EVALUATED (counter absent from /v1/status)
+  spec PASS  mtp-on g1 settings carry memory_preemption: got True want True
+  spec PASS  mtp-on route is native self-MTP (got 'native_mtp', source 'explicit_flag'): got True want True
+  spec PASS  mtp-on g1 smoke non-empty: got True want True
+  spec PASS  mtp-on g1 finish_reason in stop/length: got True want True
+  spec PASS  mtp-on g2 no tracebacks: got 0 want 0
+  spec ????  mtp-on apcv2_store_failures == 0: NOT EVALUATED (counter absent from /v1/status)
+  spec PASS  ord-off g1 settings do NOT carry memory_preemption: got False want False
+  spec PASS  ord-off route is ordinary (got 'ordinary', source 'explicit_flag'): got True want True
+  spec PASS  ord-off g1 smoke non-empty: got True want True
+  spec PASS  ord-off g1 finish_reason in stop/length: got True want True
+  spec PASS  ord-off g2 no tracebacks: got 0 want 0
+  spec ????  ord-off apcv2_store_failures == 0: NOT EVALUATED (counter absent from /v1/status)
+  spec PASS  ord-on g1 settings carry memory_preemption: got True want True
+  spec PASS  ord-on route is ordinary (got 'ordinary', source 'explicit_flag'): got True want True
+  spec PASS  ord-on g1 smoke non-empty: got True want True
+  spec PASS  ord-on g1 finish_reason in stop/length: got True want True
+  spec PASS  ord-on g2 no tracebacks: got 0 want 0
+  spec ????  ord-on apcv2_store_failures == 0: NOT EVALUATED (counter absent from /v1/status)
+  spec ????  08 greedy text equality on == off per route: NOT EVALUATED (requires per-prompt text from the bench JSONs; the bench schema is not pinned here -- compare by hand from the *.bench.json artifacts)
+  spec ????  08 perf accept/reject thresholds: NOT EVALUATED (spec thresholds are ratios over bench JSON fields; reported, not auto-gated)
+  spec FAIL  ord-on 08 decode_replay_text_matches: got False want True
+  spec PASS  ord-on 08 prefill_replay_text_matches: got True want True
+  spec PASS  ord-on 08 concurrent_peer_not_preempted [restated, width-safe]: got True want True
+  spec PASS  ord-on 08 concurrent_victim_completed [restated, width-safe]: got True want True
+  spec PASS  ord-on 08 concurrent_peer_completed [restated, width-safe]: got True want True
+  spec PASS  ord-on 08 independent predicate agrees with the bench's own check: got True want True
+  spec PASS  ord-on 08 concurrent_victim_preempted [restated, width-safe]: receipt shows replays>0 and no fault_unfired
+  spec PASS  ord-on 08 decode_replay actually fired -- its text match is a REAL assertion: replays>0, no fault_unfired
+       ord-on TRIGGER PROVENANCE: total=3 fault=3 pressure=0 stall=0
+  spec PASS  ord-on 08 fault_preemptions == preemptions (scripted arm): got 3 want 3
+  spec PASS  ord-on 08 no pressure-triggered preemption in a scripted arm: pressure=0
+  spec PASS  ord-on 08 no stall-triggered preemption in a scripted arm: stall=0
+       ord-on decode_replay: preempted=True fault_unfired=None
+       ord-on concurrent_victim: preempted=True fault_unfired=None
+       ord-on prefill_replay: preempted=True fault_unfired=None
+       ord-on memory_preemption_fault_unfired counter = 0
+       ord-on WIDTH: configured max_lanes=4, observed compute width (smoke receipt)=1
+  spec PASS  ord-on 08 lane ceiling recorded: max_lanes=4
+  spec ????  ord-on 08 peak observed batch width / active lanes at fault time: NOT EVALUATED (NOT AVAILABLE in this tree: /v1/status's scheduler block exposes no target_max_width, peak_observed_batch_width or active-lane field, and bench_suspend_replay.py does not retain the receipt's compute width per arm. Recorded from the smoke receipt instead; adding a peak-width counter to the scheduler block would close this)
+  spec PASS  mtp-on 08 decode_replay_text_matches: got True want True
+  spec PASS  mtp-on 08 prefill_replay_text_matches: got True want True
+  spec PASS  mtp-on 08 concurrent_peer_not_preempted [restated, width-safe]: got True want True
+  spec PASS  mtp-on 08 concurrent_victim_completed [restated, width-safe]: got True want True
+  spec PASS  mtp-on 08 concurrent_peer_completed [restated, width-safe]: got True want True
+  spec PASS  mtp-on 08 independent predicate agrees with the bench's own check: got True want True
+  spec PASS  mtp-on 08 concurrent_victim_preempted [restated, width-safe]: receipt shows replays>0 and no fault_unfired
+  spec PASS  mtp-on 08 decode_replay actually fired -- its text match is a REAL assertion: replays>0, no fault_unfired
+       mtp-on TRIGGER PROVENANCE: total=3 fault=3 pressure=0 stall=0
+  spec PASS  mtp-on 08 fault_preemptions == preemptions (scripted arm): got 3 want 3
+  spec PASS  mtp-on 08 no pressure-triggered preemption in a scripted arm: pressure=0
+  spec PASS  mtp-on 08 no stall-triggered preemption in a scripted arm: stall=0
+       mtp-on decode_replay: preempted=True fault_unfired=None
+       mtp-on concurrent_victim: preempted=True fault_unfired=None
+       mtp-on prefill_replay: preempted=True fault_unfired=None
+       mtp-on memory_preemption_fault_unfired counter = 0
+       mtp-on WIDTH: configured max_lanes=4, observed compute width (smoke receipt)=[1]
+  spec PASS  mtp-on 08 lane ceiling recorded: max_lanes=4
+  spec ????  mtp-on 08 peak observed batch width / active lanes at fault time: NOT EVALUATED (NOT AVAILABLE in this tree: /v1/status's scheduler block exposes no target_max_width, peak_observed_batch_width or active-lane field, and bench_suspend_replay.py does not retain the receipt's compute width per arm. Recorded from the smoke receipt instead; adding a peak-width counter to the scheduler block would close this)
+  --- 43 passed, 1 failed, 8 NOT EVALUATED ---
+GATE FAIL  spec gates for job 08 (gates.py rc=1)
+### GATE SUMMARY: 5/7 passed, 2 failed
+[runner] lease: RELEASED /tmp/gpu.lock for splash-08-suspend-replay at 2026-09-20T05:50:28
+[runner] lease: RELEASED /Users/Shared/mlxuag/gpu.lock for splash-08-suspend-replay at 2026-09-20T05:50:28
+### lease held 56s for 08-suspend-replay (wanted 05:49:32, acquired 05:49:32, released 05:50:28, queued 0s)
+### finished 2026-09-20T05:50:28 status=FAILED(rc=1) duration=56s

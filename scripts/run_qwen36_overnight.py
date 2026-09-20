@@ -232,7 +232,10 @@ def qwen36_manifest_template(root: Path, run_dir: Path, ordinary: Path,
         argv = [py, str(root / "scripts/activate_qualification_arm.py"),
                 "--state", str(activation_state),
                 "--log", str(run_dir / "logs/matrix" / f"{arm}-{suite}.log"),
-                "--cwd", str(root), "--", "/usr/bin/env", "PYTHONPATH=src", py, "-u",
+                # Absolute, not "src": a relative entry resolves against
+                # --cwd, so a run queued from a worktree would import mlx2
+                # from whichever checkout that happened to be.
+                "--cwd", str(root), "--", "/usr/bin/env", f"PYTHONPATH={root / 'src'}", py, "-u",
                 "-m", "mlx2.server", "--model", str(models[arm]), "--host", "127.0.0.1",
                 "--port", "8296", "--max-context", "262144", "--max-lanes", str(lanes),
                 "--max-inflight", str(inflight), "--cache-bytes", "12884901888",

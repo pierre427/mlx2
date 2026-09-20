@@ -211,6 +211,8 @@ class PrometheusBuilder:
         return "\n".join((*metadata, *sorted(self._samples))) + "\n"
 
 
+from .agent_compat import COUNTERS as _AGENT_COMPAT_COUNTERS
+
 _ENGINE_EVENTS = {
     "apcv2_fanout_groups": ("apcv2_fanout", "groups"),
     "apcv2_fanout_lanes": ("apcv2_fanout", "lanes"),
@@ -234,6 +236,45 @@ _ENGINE_EVENTS = {
     "apc_interior_checkpoints_skipped_publish_failed": (
         "apcv2_interior", "skipped_publish_failed"
     ),
+    "apc_junction_checkpoints_planned": ("apcv2_junction", "planned"),
+    "apc_junction_checkpoints_degraded": ("apcv2_junction", "degraded"),
+    "apc_junction_checkpoints_captured": ("apcv2_junction", "captured"),
+    "apc_rolling_checkpoints_planned": ("apcv2_rolling", "planned"),
+    "apc_rolling_checkpoints_degraded": ("apcv2_rolling", "degraded"),
+    "apc_rolling_checkpoints_published": ("apcv2_rolling", "published"),
+    "apc_rolling_checkpoints_cancel_published": ("apcv2_rolling", "cancel_published"),
+    "apc_rolling_checkpoints_retired": ("apcv2_rolling", "retired"),
+    "apc_rolling_checkpoints_retire_deferred": ("apcv2_rolling", "retire_deferred"),
+    "apc_rolling_checkpoints_retire_shared": ("apcv2_rolling", "retire_shared"),
+    "apc_rolling_checkpoints_skipped_write_suppressed": (
+        "apcv2_rolling", "skipped_write_suppressed"
+    ),
+    "apc_rolling_checkpoints_skipped_publish_failed": (
+        "apcv2_rolling", "skipped_publish_failed"
+    ),
+    "apc_junction_checkpoints_published": ("apcv2_junction", "published"),
+    "apc_junction_checkpoints_skipped_write_suppressed": (
+        "apcv2_junction", "skipped_write_suppressed"
+    ),
+    "apc_junction_checkpoints_skipped_approximate": (
+        "apcv2_junction", "skipped_approximate"
+    ),
+    "apc_junction_checkpoints_skipped_publish_failed": (
+        "apcv2_junction", "skipped_publish_failed"
+    ),
+    "apc_interior_positions_planned_turn": ("apcv2_interior", "planned_turn"),
+    "apc_interior_positions_planned_tail": ("apcv2_interior", "planned_tail"),
+    "apc_interior_positions_planned_lattice": (
+        "apcv2_interior", "planned_lattice"
+    ),
+    "apc_interior_positions_skipped_media": ("apcv2_interior", "skipped_media"),
+    "apc_interior_positions_headroom_capped": (
+        "apcv2_interior", "headroom_capped"
+    ),
+    "apc_interior_hits": ("apcv2_interior", "admitted_hit"),
+    "apc_interior_hits_turn_boundary": ("apcv2_interior", "turn_boundary_hit"),
+    "apc_interior_hit_tokens": ("apcv2_interior", "hit_token"),
+    "apc_interior_turn_marker_missing": ("apcv2_interior", "turn_marker_missing"),
     "approximate_kv_applied": ("approximate_kv", "applied"),
     "approximate_kv_declined": ("approximate_kv", "declined"),
     "approximate_kv_requantized_prefix_hits": (
@@ -266,9 +307,22 @@ _ENGINE_EVENTS = {
     "memory_admission_deferred": ("memory_admission", "deferred"),
     "memory_admission_retries": ("memory_admission", "retry"),
     "memory_admission_timeouts": ("memory_admission", "timeout"),
+    "memory_admission_depth_floor_admits": ("memory_admission", "depth_floor_admit"),
     "memory_pressure_evictions": ("memory_admission", "cache_eviction"),
     "memory_cache_reclaims_before_reject": (
         "memory_admission", "allocator_reclaim_before_reject"
+    ),
+    "memory_preemptions": ("memory_preemption", "preempted"),
+    "memory_preemptions_stall": ("memory_preemption", "preempted_stall"),
+    "memory_preemptions_pressure": ("memory_preemption", "preempted_pressure"),
+    "memory_preemptions_fault": ("memory_preemption", "preempted_fault"),
+    "preempted_replays": ("memory_preemption", "replayed"),
+    # Qualification-mode fault injection that produced no preemption: the
+    # eligibility rule declined the lane, or the threshold was never reached.
+    "memory_preemption_fault_declined": ("memory_preemption", "fault_declined"),
+    "memory_preemption_fault_unfired": ("memory_preemption", "fault_unfired"),
+    "memory_preemption_drain_cancellations": (
+        "memory_preemption", "drain_cancelled"
     ),
     "mtp_sidecar_missing_misses": ("mtp", "sidecar_missing_cache_miss"),
     "structured_output_failures": ("structured_output", "failed_closed"),
@@ -280,8 +334,14 @@ _ENGINE_EVENTS = {
     "thinking_budget_forced_closes": ("thinking_budget", "forced_close"),
     "tool_call_parse_fallbacks": ("tool_calls", "parse_fallback"),
     "tool_call_constraint_failures": ("tool_calls", "parallel_bound_failure"),
+    "tool_call_constraint_truncations": ("tool_calls", "parallel_bound_truncated"),
     "constrained_tool_grammar_engagements": ("tool_calls", "decode_grammar_engaged"),
     "constrained_tool_grammar_skips": ("tool_calls", "decode_grammar_skipped"),
+    "constrained_tool_grammar_auto_engagements": (
+        "tool_calls",
+        "decode_grammar_auto_engaged",
+    ),
+    "constrained_tool_grammar_streams": ("tool_calls", "decode_grammar_streamed"),
     "tolerant_tool_marker_requests": ("tool_calls", "tolerant_markers_requested"),
     "schema_ref_failures": ("json_schema", "reference_failure"),
     "reasoning_signature_rejections": ("reasoning_signature", "rejected"),
@@ -316,7 +376,38 @@ _ENGINE_EVENTS = {
     "output_audio_failed": ("output_audio", "failed"),
     "output_audio_requests": ("output_audio", "request"),
     "output_audio_bytes": ("output_audio", "byte"),
+    # MoE expert disk streaming (server-owned moe_expert_streaming policy).
+    "stream_page_ins_total": ("expert_stream", "page_in"),
+    "stream_page_in_bytes_total": ("expert_stream", "page_in_byte"),
+    "stream_expert_hits_total": ("expert_stream", "hit"),
+    "stream_expert_misses_total": ("expert_stream", "miss"),
+    "stream_evictions_total": ("expert_stream", "eviction"),
+    "stream_admission_refusals_total": ("expert_stream", "working_set_refusal"),
+    # Atlas collection only. These count observations, never pinned bytes:
+    # the atlas does not influence residency in this iteration.
+    "atlas_observations_total": ("expert_atlas", "observation"),
+    "atlas_trace_records_total": ("expert_atlas", "trace_record"),
+    "atlas_trace_dropped_total": ("expert_atlas", "trace_dropped"),
 }
+# Agent-client wire compatibility (``--agent-compat``) mechanism counters.
+_ENGINE_EVENTS.update(
+    {key: ("agent_compat", event) for key, event in _AGENT_COMPAT_COUNTERS.items()}
+)
+
+# Default-off mechanisms.  Their counters do not exist on a server that never
+# enabled the policy, and an unconditional zero series would make a default
+# /metrics scrape differ from main's byte for byte.  These are rendered only
+# once the engine actually holds the key.
+_OPTIONAL_COMPONENTS = frozenset(
+    {"apcv2_rolling", "apcv2_junction", "memory_preemption"}
+)
+_OPTIONAL_ENGINE_EVENTS = {
+    key: value
+    for key, value in _ENGINE_EVENTS.items()
+    if value[0] in _OPTIONAL_COMPONENTS
+}
+for _optional_key in _OPTIONAL_ENGINE_EVENTS:
+    del _ENGINE_EVENTS[_optional_key]
 
 _MEMORY_GAUGES = {
     "metal_active_bytes": "mlx2_memory_active_bytes",
@@ -324,6 +415,16 @@ _MEMORY_GAUGES = {
     "process_physical_footprint_bytes": "mlx2_process_physical_footprint_bytes",
     "headroom_bytes": "mlx2_memory_headroom_bytes",
     "memory_waiting": "mlx2_memory_waiting_requests",
+    # Present only when the server-owned host_memory_signals policy is on.
+    # Pressure level: 0 normal, 1 warn, 2 critical (after fall hysteresis).
+    "host_memory_pressure_level": "mlx2_host_memory_pressure_level",
+    "host_memory_available_bytes": "mlx2_host_memory_available_bytes",
+}
+
+_STREAM_GAUGES = {
+    # Bytes of expert weight currently held by the bounded per-layer LRU.
+    # Present only when the server-owned moe_expert_streaming policy is on.
+    "stream_resident_bytes": "mlx2_expert_stream_resident_bytes",
 }
 
 _SCHEDULER_GAUGES = frozenset(
@@ -366,9 +467,22 @@ _SCHEDULER_EVENTS = frozenset(
         "external_draft_context_skipped",
         "external_taps_skipped",
         "external_transactions_skipped",
+        "external_cow_snapshots",
+        "external_cow_fallbacks",
         "fly_relaxed_accepts",
+        "external_pairwise_selection_groups",
+        "external_pairwise_selection_lanes",
         "memory_deferred",
         "memory_pressure_evictions",
+        "stream_page_ins_total",
+        "stream_page_in_bytes_total",
+        "stream_expert_hits_total",
+        "stream_expert_misses_total",
+        "stream_evictions_total",
+        "stream_admission_refusals_total",
+        "atlas_observations_total",
+        "atlas_trace_records_total",
+        "atlas_trace_dropped_total",
         "pld_cycles",
         "pld_retrieval_cycles",
         "pld_plain_cycles",
@@ -382,20 +496,40 @@ _SCHEDULER_EVENTS = frozenset(
         "pld_rotating_replay_replayed_tokens",
         "pld_rotating_replay_refusals",
         "pld_rotating_replay_rebuilds",
+        "pld_cow_snapshots",
+        "pld_cow_fallbacks",
         "decode_fairness_prefill_chunks",
+        "prefill_chunk_rounds_recorded",
+        "prefill_chunk_varied_requests",
         "decode_fairness_debt_deferrals",
         "decode_fairness_debt_repayments",
         "decode_fairness_cap_clamps",
+        "prefill_scheduling_bypasses",
+        "prefill_scheduling_bypass_forced",
+        "prefill_scheduling_one_slice_clamps",
         "adaptive_mtp_boundaries",
         "adaptive_mtp_depth_changes",
         "adaptive_mtp_parks",
         "adaptive_mtp_reentries",
         "adaptive_mtp_probes",
+        "mtp_confidence_feature_cycles",
+        "mtp_acceptance_log_records",
         "self_mtp_zero_fast_rounds",
         "self_mtp_zero_draft_forwards_skipped",
         "self_mtp_zero_proposal_roundtrips_skipped",
+        "self_mtp_copy_rounds",
+        "self_mtp_copy_proposed_tokens",
+        "self_mtp_copy_accepted_tokens",
+        "self_mtp_copy_probe_rounds",
+        "self_mtp_copy_gate_declines",
+        "self_mtp_copy_lookup_misses",
         "apc_interior_checkpoints_skipped_trimmable",
         "apc_interior_checkpoints_skipped_inexact",
+        "apc_rolling_checkpoints_captured",
+        "apc_rolling_checkpoints_skipped_inexact",
+        "apc_rolling_checkpoints_skipped_pressure",
+        "apc_junction_checkpoints_captured",
+        "apc_junction_checkpoints_skipped_inexact",
     }
 )
 _PREFILL_CHUNK_LABELS = frozenset(
@@ -465,6 +599,16 @@ _SEGMENTED_MTP_EVENTS = frozenset(
         f"private_delta_width_{width}_{event}"
         for width in (*range(1, 10), "other")
         for event in ("requests", "engaged", "declined")
+    }
+)
+
+_MULTI_LORA_EVENTS = frozenset(
+    {
+        "forwards", "base_only_forwards", "mixed_forwards",
+        "single_adapter_forwards", "rows_base", "rows_adapter", "slot_hits",
+        "slot_loads", "slot_evictions", "slot_deferred", "registrations",
+        "unregistrations", "structural_wraps", "materializations",
+        "delta_applications", "delta_skips",
     }
 )
 
@@ -665,8 +809,16 @@ def _add_capabilities(builder: PrometheusBuilder, snapshot: Mapping[str, Any]) -
             )
 
 
-def _add_apcv2(builder: PrometheusBuilder, apc: Mapping[str, Any]) -> None:
-    lifetime = dict(apc.get("lifetime") or {})
+def _add_apcv2(
+    builder: PrometheusBuilder,
+    apc: Mapping[str, Any],
+    live_lifetime: Mapping[str, Any] | None = None,
+) -> None:
+    # Prefer the live counters: ``snapshot["apcv2"]`` is refreshed at most
+    # once a second and is seeded all-zero at readiness, so reading hits from
+    # it reports 0 for a run shorter than the cadence.
+    lifetime = dict(live_lifetime if live_lifetime is not None
+                    else (apc.get("lifetime") or {}))
     for key in ("lookups", "hits", "misses", "stores"):
         builder.counter(
             f"mlx2_prefix_cache_{key}_total",
@@ -687,6 +839,16 @@ def _add_apcv2(builder: PrometheusBuilder, apc: Mapping[str, Any]) -> None:
         "mlx2_prefix_cache_interior_hits_total",
         "APCv2 hits served from budgeted interior checkpoints.",
         int(lifetime.get("interior_hits", 0)),
+    )
+    builder.counter(
+        "mlx2_prefix_cache_rolling_hits_total",
+        "APCv2 hits served from disposable rolling prefill checkpoints.",
+        int(lifetime.get("rolling_hits", 0)),
+    )
+    builder.counter(
+        "mlx2_prefix_cache_junction_hits_total",
+        "APCv2 hits served from junction checkpoints.",
+        int(lifetime.get("junction_hits", 0)),
     )
     reuse = dict(apc.get("reuse_telemetry") or {})
     for key, metric, help_text in (
@@ -893,10 +1055,21 @@ def _scheduler_mechanism(key: str) -> str:
         return "prompt_lookup"
     if key.startswith("adaptive_mtp_"):
         return "adaptive_mtp"
+    if key.startswith("self_mtp_copy_"):
+        return "self_mtp_copy_draft"
+    if key.startswith(("mtp_confidence_", "mtp_acceptance_")):
+        # The draft-feature probe and the acceptance log ride the self-MTP
+        # round and are independent of the adaptive-depth controller; a run
+        # with only the log on must not look like adaptive depth ran.
+        return "self_mtp"
     if key.startswith("self_mtp_"):
         return "self_mtp"
+    if key.startswith("prefill_chunk_"):
+        return "prefill_chunk"
     if key.startswith("decode_fairness_"):
         return "decode_fairness"
+    if key.startswith("prefill_scheduling_"):
+        return "prefill_scheduling"
     if key.startswith("cache_capsule_"):
         return "cache_capsule"
     if key.startswith("adaptive_prefill_"):
@@ -912,6 +1085,10 @@ def _scheduler_mechanism(key: str) -> str:
         "external_draft_context_skipped",
         "external_taps_skipped",
         "external_transactions_skipped",
+        "external_cow_snapshots",
+        "external_cow_fallbacks",
+        "external_pairwise_selection_groups",
+        "external_pairwise_selection_lanes",
     }:
         return "external_speculative"
     if key == "fly_relaxed_accepts":
@@ -1141,6 +1318,14 @@ def _add_execution(builder: PrometheusBuilder, execution: Mapping[str, Any]) -> 
             "Tokens rolled back by fused GDN replay.",
             int(gdn.get("replay_rollback_tokens", 0)),
         )
+        if "replay_dynamic_rollback_calls" in gdn:
+            # Present only when device-count rollback is selected.
+            builder.counter(
+                "mlx2_fused_gdn_events_total",
+                "Fused GDN execution events.",
+                int(gdn.get("replay_dynamic_rollback_calls", 0)),
+                {"event": "replay_dynamic_rollback_calls"},
+            )
 
     amendment = execution.get("qsa_mtp_amendment")
     if isinstance(amendment, Mapping):
@@ -1227,6 +1412,35 @@ def _add_int8_prefill(builder: PrometheusBuilder, engine: Any) -> None:
         "Bytes held by cached int8 weight copies.",
         int(handle.weight_bytes()) if handle is not None else 0,
     )
+    builder.gauge(
+        "mlx2_int8_prefill_weight_copy_bytes",
+        "Int8 weight-copy bytes (resident plus worst per-call transient).",
+        int(handle.weight_copy_bytes()) if handle is not None else 0,
+    )
+
+
+def _add_verify_bitexact(builder: PrometheusBuilder, engine: Any) -> None:
+    """Bit-exact verify mode: host counters plus mlx's host-side route counter."""
+
+    handle = getattr(engine, "verify_bitexact_handle", None)
+    counts = dict(getattr(handle, "counts", None) or {})
+    builder.gauge(
+        "mlx2_verify_bitexact_enabled",
+        "Whether the batch-invariant quantized matmul mode is active.",
+        int(bool(getattr(handle, "active", False))),
+    )
+    builder.counter(
+        "mlx2_verify_bitexact_dispatches_total",
+        "Quantized matmul dispatches routed by mlx's bit-exact mode.",
+        int(handle.dispatches()) if handle is not None else 0,
+    )
+    for outcome in ("true", "false"):
+        builder.counter(
+            "mlx2_verify_bitexact_receipts_total",
+            "Terminal receipts by verify_bitexact claim.",
+            int(counts.get(f"receipts_{outcome}", 0)),
+            {"claim": outcome},
+        )
 
 
 def render_engine_metrics(engine: Any) -> str:
@@ -1413,6 +1627,10 @@ def render_engine_metrics(engine: Any) -> str:
         value = snapshot.get(key)
         if isinstance(value, (int, float)) and not isinstance(value, bool):
             builder.gauge(metric_name, f"Current mlx2 {key.replace('_', ' ')}.", value)
+    for key, metric_name in _STREAM_GAUGES.items():
+        value = counts.get(key)
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            builder.gauge(metric_name, f"Current mlx2 {key.replace('_', ' ')}.", value)
     for key, (component, event) in sorted(_ENGINE_EVENTS.items()):
         builder.counter(
             "mlx2_runtime_events_total",
@@ -1420,7 +1638,16 @@ def render_engine_metrics(engine: Any) -> str:
             int(counts.get(key, 0)),
             {"component": component, "event": event},
         )
+    for key, (component, event) in sorted(_OPTIONAL_ENGINE_EVENTS.items()):
+        if key in counts:
+            builder.counter(
+                "mlx2_runtime_events_total",
+                "Advanced runtime events from bounded mlx2 lifecycle enums.",
+                int(counts[key]),
+                {"component": component, "event": event},
+            )
     _add_int8_prefill(builder, engine)
+    _add_verify_bitexact(builder, engine)
     builder.gauge(
         "mlx2_peak_observed_batch_width",
         "Widest ordinary compute width any completed request has observed.",
@@ -1446,7 +1673,8 @@ def render_engine_metrics(engine: Any) -> str:
 
     apc = snapshot.get("apcv2")
     if isinstance(apc, Mapping):
-        _add_apcv2(builder, apc)
+        live = getattr(getattr(engine, "apc", None), "lifetime_stats", None)
+        _add_apcv2(builder, apc, live() if callable(live) else None)
     scheduler = snapshot.get("scheduler")
     if isinstance(scheduler, Mapping):
         _add_scheduler(builder, scheduler)
@@ -1473,4 +1701,29 @@ def render_engine_metrics(engine: Any) -> str:
                     value,
                     {"operation": event},
                 )
+    manager = getattr(engine, "multi_lora", None)
+    multi_lora = manager.status() if manager is not None else None
+    if isinstance(multi_lora, Mapping) and multi_lora.get("enabled"):
+        for event, value in sorted((multi_lora.get("counts") or {}).items()):
+            if (
+                event in _MULTI_LORA_EVENTS
+                and isinstance(value, int)
+                and not isinstance(value, bool)
+            ):
+                builder.counter(
+                    "mlx2_multi_lora_events_total",
+                    "Concurrent multi-LoRA mechanism events (forwards, rows, slots).",
+                    value,
+                    {"event": event},
+                )
+        builder.gauge(
+            "mlx2_multi_lora_resident_adapters",
+            "LoRA adapters resident in device slots.",
+            len(multi_lora.get("resident") or {}),
+        )
+        builder.gauge(
+            "mlx2_multi_lora_reserved_bytes",
+            "Bytes preallocated for multi-LoRA slot tensors.",
+            int(multi_lora.get("reserved_bytes") or 0),
+        )
     return builder.render()

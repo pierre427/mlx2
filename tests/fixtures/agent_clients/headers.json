@@ -1,0 +1,146 @@
+{
+ "note": "Observed on the wire 2026-09-19 by scripts/agent_client_conformance.py's recording proxy; ids replaced, host/length/connection dropped, auth never recorded.",
+ "requests": [
+  {
+   "name": "codex-cli 0.145.0 (codex exec)",
+   "path": "/v1/responses",
+   "expected_client": "codex",
+   "headers": {
+    "x-codex-beta-features": "remote_compaction_v2",
+    "x-codex-window-id": "<id>",
+    "x-codex-turn-metadata": "<json>",
+    "x-client-request-id": "<id>",
+    "session-id": "<id>",
+    "thread-id": "<id>",
+    "accept": "text/event-stream",
+    "content-type": "application/json",
+    "originator": "codex_exec",
+    "user-agent": "codex_exec/0.145.0 (Mac OS 26.7.0; arm64) unknown (codex_exec; 0.145.0)"
+   }
+  },
+  {
+   "name": "codex-cli 0.145.0 (codex exec, launched inside Claude desktop)",
+   "path": "/v1/responses",
+   "expected_client": "codex",
+   "headers": {
+    "x-codex-beta-features": "remote_compaction_v2",
+    "x-codex-window-id": "<id>",
+    "x-codex-turn-metadata": "<json>",
+    "x-client-request-id": "<id>",
+    "session-id": "<id>",
+    "thread-id": "<id>",
+    "accept": "text/event-stream",
+    "content-type": "application/json",
+    "originator": "codex_exec",
+    "user-agent": "codex_exec/0.145.0 (Mac OS 26.7.0; arm64) unknown (codex_exec; 0.145.0)"
+   }
+  },
+  {
+   "name": "Claude Code 2.1.269 (claude -p, clean environment)",
+   "path": "/v1/messages?beta=true",
+   "expected_client": "claude_code",
+   "headers": {
+    "accept": "application/json",
+    "content-type": "application/json",
+    "user-agent": "claude-cli/2.1.269 (external, sdk-cli)",
+    "x-claude-code-session-id": "<id>",
+    "x-stainless-arch": "arm64",
+    "x-stainless-lang": "js",
+    "x-stainless-os": "MacOS",
+    "x-stainless-package-version": "0.112.1",
+    "x-stainless-retry-count": "0",
+    "x-stainless-runtime": "node",
+    "x-stainless-runtime-version": "v26.3.0",
+    "x-stainless-timeout": "900",
+    "anthropic-beta": "claude-code-20250219,interleaved-thinking-2025-05-14,thinking-token-count-2026-05-13,context-management-2025-06-27,prompt-caching-scope-2026-01-05,mid-conversation-system-2026-04-07,mid-conversation-tool-changes-2026-07-01,effort-2025-11-24",
+    "anthropic-dangerous-direct-browser-access": "true",
+    "anthropic-version": "2023-06-01",
+    "x-app": "cli"
+   }
+  },
+  {
+   "name": "Claude Code 2.1.269 (claude -p inside Claude desktop)",
+   "path": "/v1/messages?beta=true",
+   "expected_client": "claude_code",
+   "headers": {
+    "accept": "application/json",
+    "content-type": "application/json",
+    "user-agent": "claude-cli/2.1.269 (external, claude-desktop, agent-sdk/0.3.271)",
+    "x-claude-code-session-id": "<id>",
+    "x-stainless-arch": "arm64",
+    "x-stainless-lang": "js",
+    "x-stainless-os": "MacOS",
+    "x-stainless-package-version": "0.112.1",
+    "x-stainless-retry-count": "0",
+    "x-stainless-runtime": "node",
+    "x-stainless-runtime-version": "v26.3.0",
+    "x-stainless-timeout": "900",
+    "anthropic-beta": "claude-code-20250219,interleaved-thinking-2025-05-14,thinking-token-count-2026-05-13,context-management-2025-06-27,prompt-caching-scope-2026-01-05,mid-conversation-system-2026-04-07,mid-conversation-tool-changes-2026-07-01,effort-2025-11-24",
+    "anthropic-client-platform": "desktop_app",
+    "anthropic-client-version": "2.110.0",
+    "anthropic-dangerous-direct-browser-access": "true",
+    "anthropic-version": "2023-06-01",
+    "x-app": "cli"
+   }
+  },
+  {
+   "name": "OpenAI Python SDK 2.33.0 responses.create",
+   "path": "/v1/responses",
+   "expected_client": null,
+   "headers": {
+    "accept": "application/json",
+    "content-type": "application/json",
+    "user-agent": "OpenAI/Python 2.33.0",
+    "x-stainless-lang": "python",
+    "x-stainless-package-version": "2.33.0",
+    "x-stainless-os": "MacOS",
+    "x-stainless-arch": "arm64",
+    "x-stainless-runtime": "CPython",
+    "x-stainless-runtime-version": "3.12.13",
+    "x-stainless-async": "false",
+    "x-stainless-retry-count": "0",
+    "x-stainless-read-timeout": "600"
+   }
+  },
+  {
+   "name": "OpenAI Python SDK 2.33.0 chat.completions.create",
+   "path": "/v1/chat/completions",
+   "expected_client": null,
+   "headers": {
+    "accept": "application/json",
+    "content-type": "application/json",
+    "user-agent": "OpenAI/Python 2.33.0",
+    "x-stainless-lang": "python",
+    "x-stainless-package-version": "2.33.0",
+    "x-stainless-os": "MacOS",
+    "x-stainless-arch": "arm64",
+    "x-stainless-runtime": "CPython",
+    "x-stainless-runtime-version": "3.12.13",
+    "x-stainless-async": "false",
+    "x-stainless-retry-count": "0",
+    "x-stainless-read-timeout": "600"
+   }
+  },
+  {
+   "name": "Anthropic Python SDK 0.116.0 messages.create",
+   "path": "/v1/messages",
+   "expected_client": null,
+   "headers": {
+    "x-stainless-timeout": "600",
+    "accept": "application/json",
+    "content-type": "application/json",
+    "user-agent": "Anthropic/Python 0.116.0",
+    "x-stainless-lang": "python",
+    "x-stainless-package-version": "0.116.0",
+    "x-stainless-os": "MacOS",
+    "x-stainless-arch": "arm64",
+    "x-stainless-runtime": "CPython",
+    "x-stainless-runtime-version": "3.12.13",
+    "x-stainless-async": "false",
+    "anthropic-version": "2023-06-01",
+    "x-stainless-retry-count": "0",
+    "x-stainless-read-timeout": "600"
+   }
+  }
+ ]
+}

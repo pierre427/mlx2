@@ -1,0 +1,32 @@
+{
+  "component": "Laguna XS 2.1 causal DFlash drafter (external draft route)",
+  "source_repository": "https://github.com/Blaizzy/mlx-vlm",
+  "source_revision": "main as fetched 2026-09-19 (raw.githubusercontent.com)",
+  "source_paths": [
+    "mlx_vlm/speculative/drafters/laguna_dflash/dflash.py",
+    "mlx_vlm/speculative/drafters/laguna_dflash/config.py"
+  ],
+  "related_prs": ["Blaizzy/mlx-vlm#2151 (Enable speculative decoding for Laguna, merged 2026-09-03)"],
+  "license": "MIT (mlx-vlm, Copyright (c) 2025 Prince Canuma); drafter weights poolside/Laguna-XS-2.1-DFlash OpenMDW-1.1 (local cache, not redistributed)",
+  "mined": [
+    "per-target-tap aux_hidden_norms -> fc -> hidden_norm context fusion",
+    "fused qkv_proj with q/k RMSNorm, NeoX RoPE, per-head softplus g_proj output gate",
+    "causal mask inside the proposal block, context attended unmasked, context window sliding_window - 1",
+    "config normalization: dflash_config fields, causal required, eagle aux ids = target_layer_ids + 1"
+  ],
+  "original_mlx2_work": [
+    "mlx2 external draft/verify contract: committed-only context KV (EagleWindowKVCache), exact per-position laws for verify_proposals, row batching",
+    "processor-aware sequential law masking for structured output",
+    "laguna.Model forward_with_taps/prefill_body (post-block taps, ordinary path unchanged)",
+    "header-only artifact inspection and fingerprint binding (adapters/laguna_dflash.py, adapters/draft_artifacts.py)"
+  ],
+  "modifications": [
+    "no draft_block sampler path; laws are exported for exact speculative sampling",
+    "context K/V is committed once per target feature instead of re-projected per block",
+    "DFlash2 closure left unchanged; this is a separate drafter class"
+  ],
+  "validation": [
+    "tests/test_laguna_dflash_cpu.py (tiny random target/drafter greedy parity, causal-block invariance, exact laws, real config/header schema)",
+    "scratchpad probe: strict CPU load of the published weights and one draft round"
+  ]
+}

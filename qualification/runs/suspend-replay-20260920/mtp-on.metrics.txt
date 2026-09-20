@@ -1,0 +1,1076 @@
+# HELP mlx2_active_lanes Execution lanes active in the most recent scheduler cycle.
+# TYPE mlx2_active_lanes gauge
+# HELP mlx2_admission_decisions_total Request admission decisions by bounded reason.
+# TYPE mlx2_admission_decisions_total counter
+# HELP mlx2_admissions_rejected_total Model-executing admissions rejected while the service is not serving.
+# TYPE mlx2_admissions_rejected_total counter
+# HELP mlx2_api_batch_requests_total Local Batch API row outcomes.
+# TYPE mlx2_api_batch_requests_total counter
+# HELP mlx2_api_batches Local Batch API jobs by bounded lifecycle state.
+# TYPE mlx2_api_batches gauge
+# HELP mlx2_api_resource_durable Whether an API resource is persisted across restart.
+# TYPE mlx2_api_resource_durable gauge
+# HELP mlx2_api_resource_events_total Bounded API resource lifecycle events.
+# TYPE mlx2_api_resource_events_total counter
+# HELP mlx2_api_resources Current bounded API resources.
+# TYPE mlx2_api_resources gauge
+# HELP mlx2_batch_size Active execution lanes observed per scheduler cycle.
+# TYPE mlx2_batch_size histogram
+# HELP mlx2_build_info mlx2 runtime build identity; the sample value is always one.
+# TYPE mlx2_build_info gauge
+# HELP mlx2_cache_capsule_capacity_events_total APCv2 cache-capsule capacity events.
+# TYPE mlx2_cache_capsule_capacity_events_total counter
+# HELP mlx2_cache_capsule_reserved_bytes Bytes currently reserved for APCv2 cache capsules.
+# TYPE mlx2_cache_capsule_reserved_bytes gauge
+# HELP mlx2_cached_prompt_tokens_total Prompt tokens reused from APCv2 over the process lifetime.
+# TYPE mlx2_cached_prompt_tokens_total counter
+# HELP mlx2_capability_engagements_total Requests attached to a selected generation mechanism.
+# TYPE mlx2_capability_engagements_total counter
+# HELP mlx2_capability_state Bounded lifecycle state for a declared route capability.
+# TYPE mlx2_capability_state gauge
+# HELP mlx2_drain_timeouts_total Drains that reached their deadline.
+# TYPE mlx2_drain_timeouts_total counter
+# HELP mlx2_drains_completed_total Drains completed without timeout.
+# TYPE mlx2_drains_completed_total counter
+# HELP mlx2_e2e_request_latency_seconds Time from request admission through terminal completion.
+# TYPE mlx2_e2e_request_latency_seconds histogram
+# HELP mlx2_fail_closed_total Requests or cohorts failed closed when a capability invariant was not met.
+# TYPE mlx2_fail_closed_total counter
+# HELP mlx2_generation_tokens_total Generated tokens delivered by the serving engine.
+# TYPE mlx2_generation_tokens_total counter
+# HELP mlx2_http_request_duration_seconds HTTP request duration by bounded route.
+# TYPE mlx2_http_request_duration_seconds histogram
+# HELP mlx2_http_requests_total HTTP requests by bounded method, route, and status class.
+# TYPE mlx2_http_requests_total counter
+# HELP mlx2_int8_prefill_calls_total Projection calls seen by int8 prefill, by outcome.
+# TYPE mlx2_int8_prefill_calls_total counter
+# HELP mlx2_int8_prefill_enabled Whether W8A8 int8 NAX prefill is installed on the served model.
+# TYPE mlx2_int8_prefill_enabled gauge
+# HELP mlx2_int8_prefill_rows_total Activation rows (tokens x lanes) computed by the int8 prefill GEMM.
+# TYPE mlx2_int8_prefill_rows_total counter
+# HELP mlx2_int8_prefill_weight_bytes Bytes held by cached int8 weight copies.
+# TYPE mlx2_int8_prefill_weight_bytes gauge
+# HELP mlx2_int8_prefill_weight_copy_bytes Int8 weight-copy bytes (resident plus worst per-call transient).
+# TYPE mlx2_int8_prefill_weight_copy_bytes gauge
+# HELP mlx2_inter_token_latency_seconds Time between consecutive delivered output tokens.
+# TYPE mlx2_inter_token_latency_seconds histogram
+# HELP mlx2_jain_tenant_token_rate Jain fairness index over the bounded completed-request window.
+# TYPE mlx2_jain_tenant_token_rate gauge
+# HELP mlx2_jobs_drained_total Accepted generation jobs completed during drain.
+# TYPE mlx2_jobs_drained_total counter
+# HELP mlx2_mcp_tool_events_total Allowlisted MCP tool backend lifecycle events.
+# TYPE mlx2_mcp_tool_events_total counter
+# HELP mlx2_memory_active_bytes Current mlx2 metal active bytes.
+# TYPE mlx2_memory_active_bytes gauge
+# HELP mlx2_memory_headroom_bytes Current mlx2 headroom bytes.
+# TYPE mlx2_memory_headroom_bytes gauge
+# HELP mlx2_memory_peak_bytes Current mlx2 metal peak bytes.
+# TYPE mlx2_memory_peak_bytes gauge
+# HELP mlx2_memory_waiting_requests Current mlx2 memory waiting.
+# TYPE mlx2_memory_waiting_requests gauge
+# HELP mlx2_model_info Loaded model route identity; the sample value is always one.
+# TYPE mlx2_model_info gauge
+# HELP mlx2_num_requests_running Requests currently owned by the serving engine.
+# TYPE mlx2_num_requests_running gauge
+# HELP mlx2_num_requests_waiting Requests waiting for an execution lane.
+# TYPE mlx2_num_requests_waiting gauge
+# HELP mlx2_peak_active_lanes Highest number of simultaneously active execution lanes.
+# TYPE mlx2_peak_active_lanes gauge
+# HELP mlx2_peak_observed_batch_width Widest ordinary compute width any completed request has observed.
+# TYPE mlx2_peak_observed_batch_width gauge
+# HELP mlx2_prefetches_cancelled_total Session prefetches cancelled while admission was closed.
+# TYPE mlx2_prefetches_cancelled_total counter
+# HELP mlx2_prefetches_queued_total Admin resume session prefetches queued.
+# TYPE mlx2_prefetches_queued_total counter
+# HELP mlx2_prefix_cache_capacity_bytes Configured APCv2 resident byte capacity.
+# TYPE mlx2_prefix_cache_capacity_bytes gauge
+# HELP mlx2_prefix_cache_cow_bytes_total APCv2 COW bytes by bounded operation.
+# TYPE mlx2_prefix_cache_cow_bytes_total counter
+# HELP mlx2_prefix_cache_cow_events_total APCv2 COW events by bounded operation.
+# TYPE mlx2_prefix_cache_cow_events_total counter
+# HELP mlx2_prefix_cache_cow_leases Current and peak APCv2 COW cache leases.
+# TYPE mlx2_prefix_cache_cow_leases gauge
+# HELP mlx2_prefix_cache_cow_time_seconds_total Cumulative APCv2 COW host timing when timing is enabled.
+# TYPE mlx2_prefix_cache_cow_time_seconds_total counter
+# HELP mlx2_prefix_cache_disk_bytes Current APCv2 disk bytes.
+# TYPE mlx2_prefix_cache_disk_bytes gauge
+# HELP mlx2_prefix_cache_disk_bytes_total Bytes transferred by the APCv2 disk tier.
+# TYPE mlx2_prefix_cache_disk_bytes_total counter
+# HELP mlx2_prefix_cache_disk_entries Current APCv2 disk entries.
+# TYPE mlx2_prefix_cache_disk_entries gauge
+# HELP mlx2_prefix_cache_disk_events_total APCv2 disk-tier events by bounded operation.
+# TYPE mlx2_prefix_cache_disk_events_total counter
+# HELP mlx2_prefix_cache_entries Resident APCv2 prefix-cache entries.
+# TYPE mlx2_prefix_cache_entries gauge
+# HELP mlx2_prefix_cache_eviction_age_seconds Age of an APCv2 entry when it is evicted or dropped.
+# TYPE mlx2_prefix_cache_eviction_age_seconds histogram
+# HELP mlx2_prefix_cache_eviction_hits Hit count of an APCv2 entry when it is evicted or dropped.
+# TYPE mlx2_prefix_cache_eviction_hits histogram
+# HELP mlx2_prefix_cache_eviction_idle_seconds Idle time since last access when an APCv2 entry is evicted or dropped.
+# TYPE mlx2_prefix_cache_eviction_idle_seconds histogram
+# HELP mlx2_prefix_cache_hit_age_seconds Age of an APCv2 entry when it serves a hit.
+# TYPE mlx2_prefix_cache_hit_age_seconds histogram
+# HELP mlx2_prefix_cache_hits_total Lifetime APCv2 prefix-cache hits.
+# TYPE mlx2_prefix_cache_hits_total counter
+# HELP mlx2_prefix_cache_interior_hits_total APCv2 hits served from budgeted interior checkpoints.
+# TYPE mlx2_prefix_cache_interior_hits_total counter
+# HELP mlx2_prefix_cache_junction_hits_total APCv2 hits served from junction checkpoints.
+# TYPE mlx2_prefix_cache_junction_hits_total counter
+# HELP mlx2_prefix_cache_logical_bytes Logical bytes represented by resident APCv2 segmented state.
+# TYPE mlx2_prefix_cache_logical_bytes gauge
+# HELP mlx2_prefix_cache_lookups_total Lifetime APCv2 prefix-cache lookups.
+# TYPE mlx2_prefix_cache_lookups_total counter
+# HELP mlx2_prefix_cache_misses_total Lifetime APCv2 prefix-cache misses.
+# TYPE mlx2_prefix_cache_misses_total counter
+# HELP mlx2_prefix_cache_quarantine_bytes Current APCv2 quarantine bytes.
+# TYPE mlx2_prefix_cache_quarantine_bytes gauge
+# HELP mlx2_prefix_cache_quarantine_entries Current APCv2 quarantine entries.
+# TYPE mlx2_prefix_cache_quarantine_entries gauge
+# HELP mlx2_prefix_cache_query_tokens_total Prompt tokens presented to APCv2 lookups.
+# TYPE mlx2_prefix_cache_query_tokens_total counter
+# HELP mlx2_prefix_cache_rescan_discarded_total Persisted APCv2 entries discarded at startup by bounded reason.
+# TYPE mlx2_prefix_cache_rescan_discarded_total counter
+# HELP mlx2_prefix_cache_rescan_registered_bytes Persisted APCv2 bytes registered by startup rescan.
+# TYPE mlx2_prefix_cache_rescan_registered_bytes gauge
+# HELP mlx2_prefix_cache_rescan_registered_total Persisted APCv2 entries registered by startup rescan.
+# TYPE mlx2_prefix_cache_rescan_registered_total counter
+# HELP mlx2_prefix_cache_rescan_seconds Duration of the APCv2 startup manifest rescan.
+# TYPE mlx2_prefix_cache_rescan_seconds gauge
+# HELP mlx2_prefix_cache_resident_bytes Current APCv2 resident bytes.
+# TYPE mlx2_prefix_cache_resident_bytes gauge
+# HELP mlx2_prefix_cache_rolling_hits_total APCv2 hits served from disposable rolling prefill checkpoints.
+# TYPE mlx2_prefix_cache_rolling_hits_total counter
+# HELP mlx2_prefix_cache_session_events_total APCv2 session and persistent-tier events by bounded operation.
+# TYPE mlx2_prefix_cache_session_events_total counter
+# HELP mlx2_prefix_cache_stores_total Lifetime APCv2 prefix-cache stores.
+# TYPE mlx2_prefix_cache_stores_total counter
+# HELP mlx2_prefix_cache_usage_ratio APCv2 resident bytes divided by configured resident capacity.
+# TYPE mlx2_prefix_cache_usage_ratio gauge
+# HELP mlx2_process_physical_footprint_bytes Current mlx2 process physical footprint bytes.
+# TYPE mlx2_process_physical_footprint_bytes gauge
+# HELP mlx2_process_uptime_seconds Monotonic seconds since the serving engine was constructed.
+# TYPE mlx2_process_uptime_seconds gauge
+# HELP mlx2_prompt_tokens_total Prompt tokens admitted by the serving engine.
+# TYPE mlx2_prompt_tokens_total counter
+# HELP mlx2_quiesce_requests_total Admin quiesce requests.
+# TYPE mlx2_quiesce_requests_total counter
+# HELP mlx2_ready Whether the serving engine has published a ready snapshot.
+# TYPE mlx2_ready gauge
+# HELP mlx2_request_cached_prompt_tokens_total Prompt tokens served from APCv2 for admitted requests.
+# TYPE mlx2_request_cached_prompt_tokens_total counter
+# HELP mlx2_request_decode_time_seconds Time from first generated token to terminal completion.
+# TYPE mlx2_request_decode_time_seconds histogram
+# HELP mlx2_request_generation_tokens Generated token count per terminal request.
+# TYPE mlx2_request_generation_tokens histogram
+# HELP mlx2_request_inference_time_seconds Time from scheduler dequeue to terminal completion.
+# TYPE mlx2_request_inference_time_seconds histogram
+# HELP mlx2_request_prefill_time_seconds Time from execution-lane attachment to first generated token.
+# TYPE mlx2_request_prefill_time_seconds histogram
+# HELP mlx2_request_prompt_tokens Prompt token count per admitted request.
+# TYPE mlx2_request_prompt_tokens histogram
+# HELP mlx2_request_queue_time_seconds Time from request admission to scheduler dequeue.
+# TYPE mlx2_request_queue_time_seconds histogram
+# HELP mlx2_request_time_per_output_token_seconds Per-request service time divided by delivered output tokens.
+# TYPE mlx2_request_time_per_output_token_seconds histogram
+# HELP mlx2_requests_total Terminal requests by bounded outcome.
+# TYPE mlx2_requests_total counter
+# HELP mlx2_resumes_total Transitions that reopened model admission.
+# TYPE mlx2_resumes_total counter
+# HELP mlx2_route_info Selected route identity; the sample value is always one.
+# TYPE mlx2_route_info gauge
+# HELP mlx2_runtime_events_total Advanced runtime events from bounded mlx2 lifecycle enums.
+# TYPE mlx2_runtime_events_total counter
+# HELP mlx2_scheduler_cycles_total Serving scheduler cycles by bounded condition.
+# TYPE mlx2_scheduler_cycles_total counter
+# HELP mlx2_scheduler_events_total Scheduler and speculative-path events by bounded mechanism and event.
+# TYPE mlx2_scheduler_events_total counter
+# HELP mlx2_scheduler_prefill_chunks_total Adaptive prefill chunks selected, grouped by bounded configured size.
+# TYPE mlx2_scheduler_prefill_chunks_total counter
+# HELP mlx2_segmented_mtp_bytes_total Segmented self-MTP bytes by bounded operation.
+# TYPE mlx2_segmented_mtp_bytes_total counter
+# HELP mlx2_segmented_mtp_events_total Segmented self-MTP engagement and lifecycle events.
+# TYPE mlx2_segmented_mtp_events_total counter
+# HELP mlx2_segmented_mtp_state Current or high-water segmented self-MTP state.
+# TYPE mlx2_segmented_mtp_state gauge
+# HELP mlx2_segmented_mtp_time_seconds_total Cumulative segmented self-MTP host timing when explicitly enabled.
+# TYPE mlx2_segmented_mtp_time_seconds_total counter
+# HELP mlx2_server_state Current quiesce lifecycle state; exactly one bounded state is one.
+# TYPE mlx2_server_state gauge
+# HELP mlx2_suspend_failures_total APCv2 entries or operations that failed suspension.
+# TYPE mlx2_suspend_failures_total counter
+# HELP mlx2_suspended_bytes_total APCv2 resident bytes suspended to disk.
+# TYPE mlx2_suspended_bytes_total counter
+# HELP mlx2_suspended_entries_total APCv2 resident entries suspended to disk.
+# TYPE mlx2_suspended_entries_total counter
+# HELP mlx2_suspends_total Completed cache suspension operations.
+# TYPE mlx2_suspends_total counter
+# HELP mlx2_telemetry_export_errors_total Prometheus exposition failures.
+# TYPE mlx2_telemetry_export_errors_total counter
+# HELP mlx2_telemetry_schema_info mlx2 Prometheus schema identity; the sample value is always one.
+# TYPE mlx2_telemetry_schema_info gauge
+# HELP mlx2_telemetry_source_available Whether the host-side telemetry snapshot was rendered successfully.
+# TYPE mlx2_telemetry_source_available gauge
+# HELP mlx2_time_to_first_token_seconds Time from request admission to first generated token.
+# TYPE mlx2_time_to_first_token_seconds histogram
+# HELP mlx2_trace_export_errors_total Optional OTLP tracing setup and asynchronous export errors.
+# TYPE mlx2_trace_export_errors_total counter
+# HELP mlx2_trace_spans_total Optional OTLP request spans by bounded lifecycle outcome.
+# TYPE mlx2_trace_spans_total counter
+# HELP mlx2_verify_bitexact_dispatches_total Quantized matmul dispatches routed by mlx's bit-exact mode.
+# TYPE mlx2_verify_bitexact_dispatches_total counter
+# HELP mlx2_verify_bitexact_enabled Whether the batch-invariant quantized matmul mode is active.
+# TYPE mlx2_verify_bitexact_enabled gauge
+# HELP mlx2_verify_bitexact_receipts_total Terminal receipts by verify_bitexact claim.
+# TYPE mlx2_verify_bitexact_receipts_total counter
+mlx2_active_lanes 0
+mlx2_admission_decisions_total{decision="admitted",reason="accepted"} 9
+mlx2_admissions_rejected_total{endpoint_class="audio"} 0
+mlx2_admissions_rejected_total{endpoint_class="batch"} 0
+mlx2_admissions_rejected_total{endpoint_class="embeddings"} 0
+mlx2_admissions_rejected_total{endpoint_class="generation"} 0
+mlx2_admissions_rejected_total{endpoint_class="rerank"} 0
+mlx2_admissions_rejected_total{endpoint_class="session_prefetch"} 0
+mlx2_api_batch_requests_total{outcome="completed"} 0
+mlx2_api_batch_requests_total{outcome="failed"} 0
+mlx2_api_batches{state="cancelled"} 0
+mlx2_api_batches{state="cancelling"} 0
+mlx2_api_batches{state="completed"} 0
+mlx2_api_batches{state="failed"} 0
+mlx2_api_batches{state="in_progress"} 0
+mlx2_api_batches{state="validating"} 0
+mlx2_api_resource_durable{resource="batches"} 0
+mlx2_api_resource_durable{resource="files"} 0
+mlx2_api_resource_durable{resource="responses"} 0
+mlx2_api_resource_events_total{event="continuation_misses",resource="responses"} 0
+mlx2_api_resource_events_total{event="continuations",resource="responses"} 0
+mlx2_api_resource_events_total{event="delete_misses",resource="files"} 0
+mlx2_api_resource_events_total{event="delete_misses",resource="responses"} 0
+mlx2_api_resource_events_total{event="deletes",resource="files"} 0
+mlx2_api_resource_events_total{event="deletes",resource="responses"} 0
+mlx2_api_resource_events_total{event="evictions",resource="files"} 0
+mlx2_api_resource_events_total{event="evictions",resource="responses"} 0
+mlx2_api_resource_events_total{event="lists",resource="files"} 0
+mlx2_api_resource_events_total{event="misses",resource="files"} 0
+mlx2_api_resource_events_total{event="misses",resource="responses"} 0
+mlx2_api_resource_events_total{event="restore_failures",resource="files"} 0
+mlx2_api_resource_events_total{event="restore_failures",resource="responses"} 0
+mlx2_api_resource_events_total{event="restored",resource="files"} 0
+mlx2_api_resource_events_total{event="restored",resource="responses"} 0
+mlx2_api_resource_events_total{event="retrievals",resource="files"} 0
+mlx2_api_resource_events_total{event="retrievals",resource="responses"} 0
+mlx2_api_resource_events_total{event="stores",resource="responses"} 0
+mlx2_api_resource_events_total{event="uploads",resource="files"} 0
+mlx2_api_resources{resource="batches"} 0
+mlx2_api_resources{resource="files"} 0
+mlx2_api_resources{resource="responses"} 0
+mlx2_batch_size_bucket{le="+Inf"} 135
+mlx2_batch_size_bucket{le="1"} 110
+mlx2_batch_size_bucket{le="16"} 135
+mlx2_batch_size_bucket{le="2"} 135
+mlx2_batch_size_bucket{le="32"} 135
+mlx2_batch_size_bucket{le="4"} 135
+mlx2_batch_size_bucket{le="64"} 135
+mlx2_batch_size_bucket{le="8"} 135
+mlx2_batch_size_count 135
+mlx2_batch_size_sum 160
+mlx2_build_info{revision="76847537e48328e953231bffca0b2382cafe5b618b714feef586756e77288ca9",version="0.1.0"} 1
+mlx2_cache_capsule_capacity_events_total{event="reservation_rejections"} 0
+mlx2_cache_capsule_capacity_events_total{event="reservations"} 0
+mlx2_cache_capsule_reserved_bytes 0
+mlx2_cached_prompt_tokens_total 80186
+mlx2_capability_engagements_total{capability="self_mtp",outcome="engaged"} 12
+mlx2_capability_state{capability="apc_v2",state="implemented"} 1
+mlx2_capability_state{capability="apc_v2",state="qualified"} 0
+mlx2_capability_state{capability="apc_v2",state="selected"} 1
+mlx2_capability_state{capability="continuous_batch",state="implemented"} 1
+mlx2_capability_state{capability="continuous_batch",state="qualified"} 0
+mlx2_capability_state{capability="continuous_batch",state="selected"} 1
+mlx2_capability_state{capability="grammar",state="implemented"} 1
+mlx2_capability_state{capability="grammar",state="qualified"} 0
+mlx2_capability_state{capability="grammar",state="selected"} 1
+mlx2_capability_state{capability="layered_cache",state="implemented"} 1
+mlx2_capability_state{capability="layered_cache",state="qualified"} 0
+mlx2_capability_state{capability="layered_cache",state="selected"} 1
+mlx2_capability_state{capability="mtp",state="implemented"} 1
+mlx2_capability_state{capability="mtp",state="qualified"} 0
+mlx2_capability_state{capability="mtp",state="selected"} 1
+mlx2_capability_state{capability="prefix_reuse",state="implemented"} 1
+mlx2_capability_state{capability="prefix_reuse",state="qualified"} 0
+mlx2_capability_state{capability="prefix_reuse",state="selected"} 1
+mlx2_capability_state{capability="prompt_lookup",state="implemented"} 1
+mlx2_capability_state{capability="prompt_lookup",state="qualified"} 0
+mlx2_capability_state{capability="prompt_lookup",state="selected"} 0
+mlx2_capability_state{capability="reasoning",state="implemented"} 1
+mlx2_capability_state{capability="reasoning",state="qualified"} 0
+mlx2_capability_state{capability="reasoning",state="selected"} 1
+mlx2_capability_state{capability="segmented_mtp",state="implemented"} 1
+mlx2_capability_state{capability="segmented_mtp",state="qualified"} 0
+mlx2_capability_state{capability="segmented_mtp",state="selected"} 1
+mlx2_capability_state{capability="streaming",state="implemented"} 1
+mlx2_capability_state{capability="streaming",state="qualified"} 0
+mlx2_capability_state{capability="streaming",state="selected"} 1
+mlx2_capability_state{capability="text",state="implemented"} 1
+mlx2_capability_state{capability="text",state="qualified"} 0
+mlx2_capability_state{capability="text",state="selected"} 1
+mlx2_capability_state{capability="tools",state="implemented"} 1
+mlx2_capability_state{capability="tools",state="qualified"} 0
+mlx2_capability_state{capability="tools",state="selected"} 1
+mlx2_drain_timeouts_total 0
+mlx2_drains_completed_total 0
+mlx2_e2e_request_latency_seconds_bucket{le="+Inf"} 9
+mlx2_e2e_request_latency_seconds_bucket{le="0.01"} 0
+mlx2_e2e_request_latency_seconds_bucket{le="0.02"} 0
+mlx2_e2e_request_latency_seconds_bucket{le="0.040000000000000001"} 0
+mlx2_e2e_request_latency_seconds_bucket{le="0.080000000000000002"} 0
+mlx2_e2e_request_latency_seconds_bucket{le="0.16"} 1
+mlx2_e2e_request_latency_seconds_bucket{le="0.32000000000000001"} 5
+mlx2_e2e_request_latency_seconds_bucket{le="0.64000000000000001"} 5
+mlx2_e2e_request_latency_seconds_bucket{le="1.28"} 7
+mlx2_e2e_request_latency_seconds_bucket{le="10.24"} 9
+mlx2_e2e_request_latency_seconds_bucket{le="2.5600000000000001"} 8
+mlx2_e2e_request_latency_seconds_bucket{le="20.48"} 9
+mlx2_e2e_request_latency_seconds_bucket{le="40.960000000000001"} 9
+mlx2_e2e_request_latency_seconds_bucket{le="5.1200000000000001"} 9
+mlx2_e2e_request_latency_seconds_bucket{le="81.920000000000002"} 9
+mlx2_e2e_request_latency_seconds_count 9
+mlx2_e2e_request_latency_seconds_sum 7.8839407489285804
+mlx2_fail_closed_total{capability="batch_cohort",reason="attachment"} 0
+mlx2_fail_closed_total{capability="batch_cohort",reason="scheduler"} 0
+mlx2_fail_closed_total{capability="structured_output",reason="constraint"} 0
+mlx2_fail_closed_total{capability="tool_calls",reason="parallel_bound"} 0
+mlx2_generation_tokens_total 262
+mlx2_http_request_duration_seconds_bucket{le="+Inf",route="batching_status"} 0
+mlx2_http_request_duration_seconds_bucket{le="+Inf",route="chat_completions"} 9
+mlx2_http_request_duration_seconds_bucket{le="+Inf",route="completions"} 0
+mlx2_http_request_duration_seconds_bucket{le="+Inf",route="health"} 1
+mlx2_http_request_duration_seconds_bucket{le="+Inf",route="metrics"} 0
+mlx2_http_request_duration_seconds_bucket{le="+Inf",route="models"} 1
+mlx2_http_request_duration_seconds_bucket{le="+Inf",route="other"} 0
+mlx2_http_request_duration_seconds_bucket{le="+Inf",route="status"} 6
+mlx2_http_request_duration_seconds_bucket{le="0.01",route="batching_status"} 0
+mlx2_http_request_duration_seconds_bucket{le="0.01",route="chat_completions"} 0
+mlx2_http_request_duration_seconds_bucket{le="0.01",route="completions"} 0
+mlx2_http_request_duration_seconds_bucket{le="0.01",route="health"} 1
+mlx2_http_request_duration_seconds_bucket{le="0.01",route="metrics"} 0
+mlx2_http_request_duration_seconds_bucket{le="0.01",route="models"} 1
+mlx2_http_request_duration_seconds_bucket{le="0.01",route="other"} 0
+mlx2_http_request_duration_seconds_bucket{le="0.01",route="status"} 6
+mlx2_http_request_duration_seconds_bucket{le="0.02",route="batching_status"} 0
+mlx2_http_request_duration_seconds_bucket{le="0.02",route="chat_completions"} 0
+mlx2_http_request_duration_seconds_bucket{le="0.02",route="completions"} 0
+mlx2_http_request_duration_seconds_bucket{le="0.02",route="health"} 1
+mlx2_http_request_duration_seconds_bucket{le="0.02",route="metrics"} 0
+mlx2_http_request_duration_seconds_bucket{le="0.02",route="models"} 1
+mlx2_http_request_duration_seconds_bucket{le="0.02",route="other"} 0
+mlx2_http_request_duration_seconds_bucket{le="0.02",route="status"} 6
+mlx2_http_request_duration_seconds_bucket{le="0.040000000000000001",route="batching_status"} 0
+mlx2_http_request_duration_seconds_bucket{le="0.040000000000000001",route="chat_completions"} 0
+mlx2_http_request_duration_seconds_bucket{le="0.040000000000000001",route="completions"} 0
+mlx2_http_request_duration_seconds_bucket{le="0.040000000000000001",route="health"} 1
+mlx2_http_request_duration_seconds_bucket{le="0.040000000000000001",route="metrics"} 0
+mlx2_http_request_duration_seconds_bucket{le="0.040000000000000001",route="models"} 1
+mlx2_http_request_duration_seconds_bucket{le="0.040000000000000001",route="other"} 0
+mlx2_http_request_duration_seconds_bucket{le="0.040000000000000001",route="status"} 6
+mlx2_http_request_duration_seconds_bucket{le="0.080000000000000002",route="batching_status"} 0
+mlx2_http_request_duration_seconds_bucket{le="0.080000000000000002",route="chat_completions"} 0
+mlx2_http_request_duration_seconds_bucket{le="0.080000000000000002",route="completions"} 0
+mlx2_http_request_duration_seconds_bucket{le="0.080000000000000002",route="health"} 1
+mlx2_http_request_duration_seconds_bucket{le="0.080000000000000002",route="metrics"} 0
+mlx2_http_request_duration_seconds_bucket{le="0.080000000000000002",route="models"} 1
+mlx2_http_request_duration_seconds_bucket{le="0.080000000000000002",route="other"} 0
+mlx2_http_request_duration_seconds_bucket{le="0.080000000000000002",route="status"} 6
+mlx2_http_request_duration_seconds_bucket{le="0.16",route="batching_status"} 0
+mlx2_http_request_duration_seconds_bucket{le="0.16",route="chat_completions"} 1
+mlx2_http_request_duration_seconds_bucket{le="0.16",route="completions"} 0
+mlx2_http_request_duration_seconds_bucket{le="0.16",route="health"} 1
+mlx2_http_request_duration_seconds_bucket{le="0.16",route="metrics"} 0
+mlx2_http_request_duration_seconds_bucket{le="0.16",route="models"} 1
+mlx2_http_request_duration_seconds_bucket{le="0.16",route="other"} 0
+mlx2_http_request_duration_seconds_bucket{le="0.16",route="status"} 6
+mlx2_http_request_duration_seconds_bucket{le="0.32000000000000001",route="batching_status"} 0
+mlx2_http_request_duration_seconds_bucket{le="0.32000000000000001",route="chat_completions"} 5
+mlx2_http_request_duration_seconds_bucket{le="0.32000000000000001",route="completions"} 0
+mlx2_http_request_duration_seconds_bucket{le="0.32000000000000001",route="health"} 1
+mlx2_http_request_duration_seconds_bucket{le="0.32000000000000001",route="metrics"} 0
+mlx2_http_request_duration_seconds_bucket{le="0.32000000000000001",route="models"} 1
+mlx2_http_request_duration_seconds_bucket{le="0.32000000000000001",route="other"} 0
+mlx2_http_request_duration_seconds_bucket{le="0.32000000000000001",route="status"} 6
+mlx2_http_request_duration_seconds_bucket{le="0.64000000000000001",route="batching_status"} 0
+mlx2_http_request_duration_seconds_bucket{le="0.64000000000000001",route="chat_completions"} 5
+mlx2_http_request_duration_seconds_bucket{le="0.64000000000000001",route="completions"} 0
+mlx2_http_request_duration_seconds_bucket{le="0.64000000000000001",route="health"} 1
+mlx2_http_request_duration_seconds_bucket{le="0.64000000000000001",route="metrics"} 0
+mlx2_http_request_duration_seconds_bucket{le="0.64000000000000001",route="models"} 1
+mlx2_http_request_duration_seconds_bucket{le="0.64000000000000001",route="other"} 0
+mlx2_http_request_duration_seconds_bucket{le="0.64000000000000001",route="status"} 6
+mlx2_http_request_duration_seconds_bucket{le="1.28",route="batching_status"} 0
+mlx2_http_request_duration_seconds_bucket{le="1.28",route="chat_completions"} 7
+mlx2_http_request_duration_seconds_bucket{le="1.28",route="completions"} 0
+mlx2_http_request_duration_seconds_bucket{le="1.28",route="health"} 1
+mlx2_http_request_duration_seconds_bucket{le="1.28",route="metrics"} 0
+mlx2_http_request_duration_seconds_bucket{le="1.28",route="models"} 1
+mlx2_http_request_duration_seconds_bucket{le="1.28",route="other"} 0
+mlx2_http_request_duration_seconds_bucket{le="1.28",route="status"} 6
+mlx2_http_request_duration_seconds_bucket{le="10.24",route="batching_status"} 0
+mlx2_http_request_duration_seconds_bucket{le="10.24",route="chat_completions"} 9
+mlx2_http_request_duration_seconds_bucket{le="10.24",route="completions"} 0
+mlx2_http_request_duration_seconds_bucket{le="10.24",route="health"} 1
+mlx2_http_request_duration_seconds_bucket{le="10.24",route="metrics"} 0
+mlx2_http_request_duration_seconds_bucket{le="10.24",route="models"} 1
+mlx2_http_request_duration_seconds_bucket{le="10.24",route="other"} 0
+mlx2_http_request_duration_seconds_bucket{le="10.24",route="status"} 6
+mlx2_http_request_duration_seconds_bucket{le="2.5600000000000001",route="batching_status"} 0
+mlx2_http_request_duration_seconds_bucket{le="2.5600000000000001",route="chat_completions"} 8
+mlx2_http_request_duration_seconds_bucket{le="2.5600000000000001",route="completions"} 0
+mlx2_http_request_duration_seconds_bucket{le="2.5600000000000001",route="health"} 1
+mlx2_http_request_duration_seconds_bucket{le="2.5600000000000001",route="metrics"} 0
+mlx2_http_request_duration_seconds_bucket{le="2.5600000000000001",route="models"} 1
+mlx2_http_request_duration_seconds_bucket{le="2.5600000000000001",route="other"} 0
+mlx2_http_request_duration_seconds_bucket{le="2.5600000000000001",route="status"} 6
+mlx2_http_request_duration_seconds_bucket{le="20.48",route="batching_status"} 0
+mlx2_http_request_duration_seconds_bucket{le="20.48",route="chat_completions"} 9
+mlx2_http_request_duration_seconds_bucket{le="20.48",route="completions"} 0
+mlx2_http_request_duration_seconds_bucket{le="20.48",route="health"} 1
+mlx2_http_request_duration_seconds_bucket{le="20.48",route="metrics"} 0
+mlx2_http_request_duration_seconds_bucket{le="20.48",route="models"} 1
+mlx2_http_request_duration_seconds_bucket{le="20.48",route="other"} 0
+mlx2_http_request_duration_seconds_bucket{le="20.48",route="status"} 6
+mlx2_http_request_duration_seconds_bucket{le="40.960000000000001",route="batching_status"} 0
+mlx2_http_request_duration_seconds_bucket{le="40.960000000000001",route="chat_completions"} 9
+mlx2_http_request_duration_seconds_bucket{le="40.960000000000001",route="completions"} 0
+mlx2_http_request_duration_seconds_bucket{le="40.960000000000001",route="health"} 1
+mlx2_http_request_duration_seconds_bucket{le="40.960000000000001",route="metrics"} 0
+mlx2_http_request_duration_seconds_bucket{le="40.960000000000001",route="models"} 1
+mlx2_http_request_duration_seconds_bucket{le="40.960000000000001",route="other"} 0
+mlx2_http_request_duration_seconds_bucket{le="40.960000000000001",route="status"} 6
+mlx2_http_request_duration_seconds_bucket{le="5.1200000000000001",route="batching_status"} 0
+mlx2_http_request_duration_seconds_bucket{le="5.1200000000000001",route="chat_completions"} 9
+mlx2_http_request_duration_seconds_bucket{le="5.1200000000000001",route="completions"} 0
+mlx2_http_request_duration_seconds_bucket{le="5.1200000000000001",route="health"} 1
+mlx2_http_request_duration_seconds_bucket{le="5.1200000000000001",route="metrics"} 0
+mlx2_http_request_duration_seconds_bucket{le="5.1200000000000001",route="models"} 1
+mlx2_http_request_duration_seconds_bucket{le="5.1200000000000001",route="other"} 0
+mlx2_http_request_duration_seconds_bucket{le="5.1200000000000001",route="status"} 6
+mlx2_http_request_duration_seconds_bucket{le="81.920000000000002",route="batching_status"} 0
+mlx2_http_request_duration_seconds_bucket{le="81.920000000000002",route="chat_completions"} 9
+mlx2_http_request_duration_seconds_bucket{le="81.920000000000002",route="completions"} 0
+mlx2_http_request_duration_seconds_bucket{le="81.920000000000002",route="health"} 1
+mlx2_http_request_duration_seconds_bucket{le="81.920000000000002",route="metrics"} 0
+mlx2_http_request_duration_seconds_bucket{le="81.920000000000002",route="models"} 1
+mlx2_http_request_duration_seconds_bucket{le="81.920000000000002",route="other"} 0
+mlx2_http_request_duration_seconds_bucket{le="81.920000000000002",route="status"} 6
+mlx2_http_request_duration_seconds_count{route="batching_status"} 0
+mlx2_http_request_duration_seconds_count{route="chat_completions"} 9
+mlx2_http_request_duration_seconds_count{route="completions"} 0
+mlx2_http_request_duration_seconds_count{route="health"} 1
+mlx2_http_request_duration_seconds_count{route="metrics"} 0
+mlx2_http_request_duration_seconds_count{route="models"} 1
+mlx2_http_request_duration_seconds_count{route="other"} 0
+mlx2_http_request_duration_seconds_count{route="status"} 6
+mlx2_http_request_duration_seconds_sum{route="batching_status"} 0
+mlx2_http_request_duration_seconds_sum{route="chat_completions"} 7.8911047079600394
+mlx2_http_request_duration_seconds_sum{route="completions"} 0
+mlx2_http_request_duration_seconds_sum{route="health"} 0.00032225000904873013
+mlx2_http_request_duration_seconds_sum{route="metrics"} 0
+mlx2_http_request_duration_seconds_sum{route="models"} 0.00029508303850889206
+mlx2_http_request_duration_seconds_sum{route="other"} 0
+mlx2_http_request_duration_seconds_sum{route="status"} 0.0036909590126015246
+mlx2_http_requests_total{method="GET",route="health",status_class="2xx"} 1
+mlx2_http_requests_total{method="GET",route="models",status_class="2xx"} 1
+mlx2_http_requests_total{method="GET",route="status",status_class="2xx"} 6
+mlx2_http_requests_total{method="POST",route="chat_completions",status_class="2xx"} 9
+mlx2_int8_prefill_calls_total{outcome="below_row_threshold"} 0
+mlx2_int8_prefill_calls_total{outcome="engaged"} 0
+mlx2_int8_prefill_calls_total{outcome="unbound_module"} 0
+mlx2_int8_prefill_calls_total{outcome="unsupported_dtype"} 0
+mlx2_int8_prefill_enabled{scope="off"} 0
+mlx2_int8_prefill_rows_total 0
+mlx2_int8_prefill_weight_bytes 0
+mlx2_int8_prefill_weight_copy_bytes 0
+mlx2_inter_token_latency_seconds_bucket{le="+Inf"} 253
+mlx2_inter_token_latency_seconds_bucket{le="0.0050000000000000001"} 124
+mlx2_inter_token_latency_seconds_bucket{le="0.01"} 124
+mlx2_inter_token_latency_seconds_bucket{le="0.025000000000000001"} 209
+mlx2_inter_token_latency_seconds_bucket{le="0.050000000000000003"} 251
+mlx2_inter_token_latency_seconds_bucket{le="0.074999999999999997"} 252
+mlx2_inter_token_latency_seconds_bucket{le="0.10000000000000001"} 252
+mlx2_inter_token_latency_seconds_bucket{le="0.14999999999999999"} 252
+mlx2_inter_token_latency_seconds_bucket{le="0.20000000000000001"} 253
+mlx2_inter_token_latency_seconds_bucket{le="0.29999999999999999"} 253
+mlx2_inter_token_latency_seconds_bucket{le="0.40000000000000002"} 253
+mlx2_inter_token_latency_seconds_bucket{le="0.5"} 253
+mlx2_inter_token_latency_seconds_bucket{le="0.75"} 253
+mlx2_inter_token_latency_seconds_bucket{le="1"} 253
+mlx2_inter_token_latency_seconds_bucket{le="2.5"} 253
+mlx2_inter_token_latency_seconds_count 253
+mlx2_inter_token_latency_seconds_sum 3.3736882919911295
+mlx2_jain_tenant_token_rate 1
+mlx2_jobs_drained_total 0
+mlx2_mcp_tool_events_total{event="execution_failures"} 0
+mlx2_mcp_tool_events_total{event="executions"} 0
+mlx2_mcp_tool_events_total{event="preparations"} 0
+mlx2_mcp_tool_events_total{event="tools_exposed"} 0
+mlx2_memory_active_bytes 24314664158
+mlx2_memory_headroom_bytes 94694571712
+mlx2_memory_peak_bytes 24577299494
+mlx2_memory_waiting_requests 0
+mlx2_model_info{model_name="Qwen3.6-35B-A3B-uncensored-heretic-Native-MTP-Preserved-oQ4e-mtp",profile="qwen36-35b-a3b-apcv2-mtp2",qualification="candidate"} 1
+mlx2_num_requests_running 0
+mlx2_num_requests_waiting 0
+mlx2_peak_active_lanes 2
+mlx2_peak_observed_batch_width 1
+mlx2_prefetches_cancelled_total 0
+mlx2_prefetches_queued_total 0
+mlx2_prefix_cache_capacity_bytes 12884901888
+mlx2_prefix_cache_cow_bytes_total{operation="avoided_copy"} 2360623104
+mlx2_prefix_cache_cow_bytes_total{operation="descriptor"} 7042527232
+mlx2_prefix_cache_cow_bytes_total{operation="fallback"} 0
+mlx2_prefix_cache_cow_bytes_total{operation="materialized"} 2065516544
+mlx2_prefix_cache_cow_bytes_total{operation="source"} 4681904128
+mlx2_prefix_cache_cow_events_total{operation="branch_failures"} 0
+mlx2_prefix_cache_cow_events_total{operation="branches"} 8
+mlx2_prefix_cache_cow_events_total{operation="descriptor_aliases"} 2238
+mlx2_prefix_cache_cow_events_total{operation="fallback_deepcopies"} 0
+mlx2_prefix_cache_cow_events_total{operation="freeze_failures"} 0
+mlx2_prefix_cache_cow_events_total{operation="invalidations"} 9
+mlx2_prefix_cache_cow_events_total{operation="materializations"} 287
+mlx2_prefix_cache_cow_events_total{operation="releases"} 7
+mlx2_prefix_cache_cow_events_total{operation="sources"} 19
+mlx2_prefix_cache_cow_events_total{operation="stale_rejections"} 0
+mlx2_prefix_cache_cow_leases{kind="active"} 1
+mlx2_prefix_cache_cow_leases{kind="peak"} 2
+mlx2_prefix_cache_cow_time_seconds_total{operation="branch"} 0.004398084
+mlx2_prefix_cache_cow_time_seconds_total{operation="fallback"} 0
+mlx2_prefix_cache_cow_time_seconds_total{operation="freeze"} 0.034546252999999999
+mlx2_prefix_cache_disk_bytes 0
+mlx2_prefix_cache_disk_bytes_total{direction="read"} 0
+mlx2_prefix_cache_disk_bytes_total{direction="written"} 0
+mlx2_prefix_cache_disk_entries 0
+mlx2_prefix_cache_disk_events_total{operation="disk_evictions"} 0
+mlx2_prefix_cache_disk_events_total{operation="idle_spills"} 0
+mlx2_prefix_cache_disk_events_total{operation="pressure_spills"} 0
+mlx2_prefix_cache_disk_events_total{operation="restore_budget_deferrals"} 0
+mlx2_prefix_cache_disk_events_total{operation="restore_digest_failures"} 0
+mlx2_prefix_cache_disk_events_total{operation="restore_failures"} 0
+mlx2_prefix_cache_disk_events_total{operation="restores"} 0
+mlx2_prefix_cache_disk_events_total{operation="spill_failures"} 0
+mlx2_prefix_cache_entries 10
+mlx2_prefix_cache_eviction_age_seconds_bucket{le="+Inf"} 0
+mlx2_prefix_cache_eviction_age_seconds_bucket{le="1"} 0
+mlx2_prefix_cache_eviction_age_seconds_bucket{le="120"} 0
+mlx2_prefix_cache_eviction_age_seconds_bucket{le="30"} 0
+mlx2_prefix_cache_eviction_age_seconds_bucket{le="3600"} 0
+mlx2_prefix_cache_eviction_age_seconds_bucket{le="5"} 0
+mlx2_prefix_cache_eviction_age_seconds_bucket{le="600"} 0
+mlx2_prefix_cache_eviction_age_seconds_count 0
+mlx2_prefix_cache_eviction_age_seconds_sum 0
+mlx2_prefix_cache_eviction_hits_bucket{le="+Inf"} 0
+mlx2_prefix_cache_eviction_hits_bucket{le="0"} 0
+mlx2_prefix_cache_eviction_hits_bucket{le="1"} 0
+mlx2_prefix_cache_eviction_hits_bucket{le="10"} 0
+mlx2_prefix_cache_eviction_hits_bucket{le="2"} 0
+mlx2_prefix_cache_eviction_hits_bucket{le="5"} 0
+mlx2_prefix_cache_eviction_hits_count 0
+mlx2_prefix_cache_eviction_hits_sum 0
+mlx2_prefix_cache_eviction_idle_seconds_bucket{le="+Inf"} 0
+mlx2_prefix_cache_eviction_idle_seconds_bucket{le="1"} 0
+mlx2_prefix_cache_eviction_idle_seconds_bucket{le="120"} 0
+mlx2_prefix_cache_eviction_idle_seconds_bucket{le="30"} 0
+mlx2_prefix_cache_eviction_idle_seconds_bucket{le="3600"} 0
+mlx2_prefix_cache_eviction_idle_seconds_bucket{le="5"} 0
+mlx2_prefix_cache_eviction_idle_seconds_bucket{le="600"} 0
+mlx2_prefix_cache_eviction_idle_seconds_count 0
+mlx2_prefix_cache_eviction_idle_seconds_sum 0
+mlx2_prefix_cache_hit_age_seconds_bucket{le="+Inf"} 8
+mlx2_prefix_cache_hit_age_seconds_bucket{le="1"} 6
+mlx2_prefix_cache_hit_age_seconds_bucket{le="120"} 8
+mlx2_prefix_cache_hit_age_seconds_bucket{le="30"} 8
+mlx2_prefix_cache_hit_age_seconds_bucket{le="3600"} 8
+mlx2_prefix_cache_hit_age_seconds_bucket{le="5"} 8
+mlx2_prefix_cache_hit_age_seconds_bucket{le="600"} 8
+mlx2_prefix_cache_hit_age_seconds_count 8
+mlx2_prefix_cache_hit_age_seconds_sum 10.814183083130047
+mlx2_prefix_cache_hits_total 8
+mlx2_prefix_cache_interior_hits_total 0
+mlx2_prefix_cache_junction_hits_total 0
+mlx2_prefix_cache_logical_bytes 2026166272
+mlx2_prefix_cache_lookups_total 12
+mlx2_prefix_cache_misses_total 4
+mlx2_prefix_cache_quarantine_bytes 0
+mlx2_prefix_cache_quarantine_entries 0
+mlx2_prefix_cache_query_tokens_total 100282
+mlx2_prefix_cache_rescan_discarded_total{reason="corruption"} 0
+mlx2_prefix_cache_rescan_discarded_total{reason="identity_mismatch"} 0
+mlx2_prefix_cache_rescan_discarded_total{reason="unknown_schema"} 0
+mlx2_prefix_cache_rescan_registered_bytes 0
+mlx2_prefix_cache_rescan_registered_total 0
+mlx2_prefix_cache_rescan_seconds 0
+mlx2_prefix_cache_resident_bytes 2026203136
+mlx2_prefix_cache_rolling_hits_total 0
+mlx2_prefix_cache_session_events_total{operation="parks"} 0
+mlx2_prefix_cache_session_events_total{operation="persisted_writes"} 0
+mlx2_prefix_cache_session_events_total{operation="persistence_io_failures"} 0
+mlx2_prefix_cache_session_events_total{operation="pin_cap_rejections"} 0
+mlx2_prefix_cache_session_events_total{operation="pin_expiries"} 0
+mlx2_prefix_cache_session_events_total{operation="prefetch_hits"} 0
+mlx2_prefix_cache_session_events_total{operation="prefetch_misses"} 0
+mlx2_prefix_cache_session_events_total{operation="prefetch_restores_abandoned"} 0
+mlx2_prefix_cache_session_events_total{operation="prefetch_restores_cancelled"} 0
+mlx2_prefix_cache_session_events_total{operation="prefetch_restores_failed"} 0
+mlx2_prefix_cache_session_events_total{operation="prefetch_restores_ok"} 0
+mlx2_prefix_cache_session_events_total{operation="publication_rejections"} 0
+mlx2_prefix_cache_session_events_total{operation="quarantine_evictions"} 0
+mlx2_prefix_cache_session_events_total{operation="quarantined"} 0
+mlx2_prefix_cache_session_events_total{operation="resumes"} 0
+mlx2_prefix_cache_session_events_total{operation="session_deletes"} 0
+mlx2_prefix_cache_stores_total 20
+mlx2_prefix_cache_usage_ratio 0.15725406010945639
+mlx2_process_physical_footprint_bytes 25579192640
+mlx2_process_uptime_seconds 12.23330724996049
+mlx2_prompt_tokens_total 70195
+mlx2_quiesce_requests_total 0
+mlx2_ready 1
+mlx2_request_cached_prompt_tokens_total 50111
+mlx2_request_decode_time_seconds_bucket{le="+Inf"} 9
+mlx2_request_decode_time_seconds_bucket{le="0.01"} 1
+mlx2_request_decode_time_seconds_bucket{le="0.02"} 1
+mlx2_request_decode_time_seconds_bucket{le="0.040000000000000001"} 1
+mlx2_request_decode_time_seconds_bucket{le="0.080000000000000002"} 1
+mlx2_request_decode_time_seconds_bucket{le="0.16"} 2
+mlx2_request_decode_time_seconds_bucket{le="0.32000000000000001"} 6
+mlx2_request_decode_time_seconds_bucket{le="0.64000000000000001"} 6
+mlx2_request_decode_time_seconds_bucket{le="1.28"} 9
+mlx2_request_decode_time_seconds_bucket{le="10.24"} 9
+mlx2_request_decode_time_seconds_bucket{le="2.5600000000000001"} 9
+mlx2_request_decode_time_seconds_bucket{le="20.48"} 9
+mlx2_request_decode_time_seconds_bucket{le="40.960000000000001"} 9
+mlx2_request_decode_time_seconds_bucket{le="5.1200000000000001"} 9
+mlx2_request_decode_time_seconds_bucket{le="81.920000000000002"} 9
+mlx2_request_decode_time_seconds_count 9
+mlx2_request_decode_time_seconds_sum 3.4261977068963461
+mlx2_request_generation_tokens_bucket{le="+Inf"} 9
+mlx2_request_generation_tokens_bucket{le="1"} 1
+mlx2_request_generation_tokens_bucket{le="1024"} 9
+mlx2_request_generation_tokens_bucket{le="128"} 9
+mlx2_request_generation_tokens_bucket{le="16"} 2
+mlx2_request_generation_tokens_bucket{le="2"} 1
+mlx2_request_generation_tokens_bucket{le="2048"} 9
+mlx2_request_generation_tokens_bucket{le="256"} 9
+mlx2_request_generation_tokens_bucket{le="32"} 7
+mlx2_request_generation_tokens_bucket{le="4"} 1
+mlx2_request_generation_tokens_bucket{le="4096"} 9
+mlx2_request_generation_tokens_bucket{le="512"} 9
+mlx2_request_generation_tokens_bucket{le="64"} 9
+mlx2_request_generation_tokens_bucket{le="8"} 2
+mlx2_request_generation_tokens_count 9
+mlx2_request_generation_tokens_sum 262
+mlx2_request_inference_time_seconds_bucket{le="+Inf"} 9
+mlx2_request_inference_time_seconds_bucket{le="0.01"} 0
+mlx2_request_inference_time_seconds_bucket{le="0.02"} 0
+mlx2_request_inference_time_seconds_bucket{le="0.040000000000000001"} 0
+mlx2_request_inference_time_seconds_bucket{le="0.080000000000000002"} 0
+mlx2_request_inference_time_seconds_bucket{le="0.16"} 1
+mlx2_request_inference_time_seconds_bucket{le="0.32000000000000001"} 5
+mlx2_request_inference_time_seconds_bucket{le="0.64000000000000001"} 5
+mlx2_request_inference_time_seconds_bucket{le="1.28"} 7
+mlx2_request_inference_time_seconds_bucket{le="10.24"} 9
+mlx2_request_inference_time_seconds_bucket{le="2.5600000000000001"} 8
+mlx2_request_inference_time_seconds_bucket{le="20.48"} 9
+mlx2_request_inference_time_seconds_bucket{le="40.960000000000001"} 9
+mlx2_request_inference_time_seconds_bucket{le="5.1200000000000001"} 9
+mlx2_request_inference_time_seconds_bucket{le="81.920000000000002"} 9
+mlx2_request_inference_time_seconds_count 9
+mlx2_request_inference_time_seconds_sum 7.8807212908868678
+mlx2_request_prefill_time_seconds_bucket{le="+Inf"} 9
+mlx2_request_prefill_time_seconds_bucket{le="0.01"} 0
+mlx2_request_prefill_time_seconds_bucket{le="0.02"} 0
+mlx2_request_prefill_time_seconds_bucket{le="0.040000000000000001"} 3
+mlx2_request_prefill_time_seconds_bucket{le="0.080000000000000002"} 7
+mlx2_request_prefill_time_seconds_bucket{le="0.16"} 7
+mlx2_request_prefill_time_seconds_bucket{le="0.32000000000000001"} 7
+mlx2_request_prefill_time_seconds_bucket{le="0.64000000000000001"} 7
+mlx2_request_prefill_time_seconds_bucket{le="1.28"} 7
+mlx2_request_prefill_time_seconds_bucket{le="10.24"} 9
+mlx2_request_prefill_time_seconds_bucket{le="2.5600000000000001"} 9
+mlx2_request_prefill_time_seconds_bucket{le="20.48"} 9
+mlx2_request_prefill_time_seconds_bucket{le="40.960000000000001"} 9
+mlx2_request_prefill_time_seconds_bucket{le="5.1200000000000001"} 9
+mlx2_request_prefill_time_seconds_bucket{le="81.920000000000002"} 9
+mlx2_request_prefill_time_seconds_count 9
+mlx2_request_prefill_time_seconds_sum 4.3108049180591479
+mlx2_request_prompt_tokens_bucket{le="+Inf"} 9
+mlx2_request_prompt_tokens_bucket{le="1"} 0
+mlx2_request_prompt_tokens_bucket{le="1024"} 2
+mlx2_request_prompt_tokens_bucket{le="128"} 2
+mlx2_request_prompt_tokens_bucket{le="16"} 1
+mlx2_request_prompt_tokens_bucket{le="2"} 0
+mlx2_request_prompt_tokens_bucket{le="2048"} 2
+mlx2_request_prompt_tokens_bucket{le="256"} 2
+mlx2_request_prompt_tokens_bucket{le="32"} 2
+mlx2_request_prompt_tokens_bucket{le="4"} 0
+mlx2_request_prompt_tokens_bucket{le="4096"} 2
+mlx2_request_prompt_tokens_bucket{le="512"} 2
+mlx2_request_prompt_tokens_bucket{le="64"} 2
+mlx2_request_prompt_tokens_bucket{le="8"} 0
+mlx2_request_prompt_tokens_count 9
+mlx2_request_prompt_tokens_sum 70195
+mlx2_request_queue_time_seconds_bucket{le="+Inf"} 9
+mlx2_request_queue_time_seconds_bucket{le="0.01"} 9
+mlx2_request_queue_time_seconds_bucket{le="0.02"} 9
+mlx2_request_queue_time_seconds_bucket{le="0.040000000000000001"} 9
+mlx2_request_queue_time_seconds_bucket{le="0.080000000000000002"} 9
+mlx2_request_queue_time_seconds_bucket{le="0.16"} 9
+mlx2_request_queue_time_seconds_bucket{le="0.32000000000000001"} 9
+mlx2_request_queue_time_seconds_bucket{le="0.64000000000000001"} 9
+mlx2_request_queue_time_seconds_bucket{le="1.28"} 9
+mlx2_request_queue_time_seconds_bucket{le="10.24"} 9
+mlx2_request_queue_time_seconds_bucket{le="2.5600000000000001"} 9
+mlx2_request_queue_time_seconds_bucket{le="20.48"} 9
+mlx2_request_queue_time_seconds_bucket{le="40.960000000000001"} 9
+mlx2_request_queue_time_seconds_bucket{le="5.1200000000000001"} 9
+mlx2_request_queue_time_seconds_bucket{le="81.920000000000002"} 9
+mlx2_request_queue_time_seconds_count 9
+mlx2_request_queue_time_seconds_sum 0.0032194580417126417
+mlx2_request_time_per_output_token_seconds_bucket{le="+Inf"} 9
+mlx2_request_time_per_output_token_seconds_bucket{le="0.0050000000000000001"} 0
+mlx2_request_time_per_output_token_seconds_bucket{le="0.01"} 0
+mlx2_request_time_per_output_token_seconds_bucket{le="0.025000000000000001"} 5
+mlx2_request_time_per_output_token_seconds_bucket{le="0.050000000000000003"} 7
+mlx2_request_time_per_output_token_seconds_bucket{le="0.074999999999999997"} 7
+mlx2_request_time_per_output_token_seconds_bucket{le="0.10000000000000001"} 8
+mlx2_request_time_per_output_token_seconds_bucket{le="0.14999999999999999"} 8
+mlx2_request_time_per_output_token_seconds_bucket{le="0.20000000000000001"} 9
+mlx2_request_time_per_output_token_seconds_bucket{le="0.29999999999999999"} 9
+mlx2_request_time_per_output_token_seconds_bucket{le="0.40000000000000002"} 9
+mlx2_request_time_per_output_token_seconds_bucket{le="0.5"} 9
+mlx2_request_time_per_output_token_seconds_bucket{le="0.75"} 9
+mlx2_request_time_per_output_token_seconds_bucket{le="1"} 9
+mlx2_request_time_per_output_token_seconds_bucket{le="2.5"} 9
+mlx2_request_time_per_output_token_seconds_count 9
+mlx2_request_time_per_output_token_seconds_sum 0.40698802508064541
+mlx2_requests_total{finished_reason="length",outcome="completed"} 3
+mlx2_requests_total{finished_reason="none",outcome="cancelled"} 0
+mlx2_requests_total{finished_reason="none",outcome="failed"} 0
+mlx2_requests_total{finished_reason="stop",outcome="completed"} 6
+mlx2_resumes_total 0
+mlx2_route_info{profile="qwen36-35b-a3b-apcv2-mtp2",qualification="candidate"} 1
+mlx2_runtime_events_total{component="agent_compat",event="adaptive_thinking"} 0
+mlx2_runtime_events_total{component="agent_compat",event="custom_tool_call"} 0
+mlx2_runtime_events_total{component="agent_compat",event="custom_tool_declared"} 0
+mlx2_runtime_events_total{component="agent_compat",event="custom_tool_grammar_rejected"} 0
+mlx2_runtime_events_total{component="agent_compat",event="custom_tool_grammar_validated"} 0
+mlx2_runtime_events_total{component="agent_compat",event="custom_tool_replay"} 0
+mlx2_runtime_events_total{component="agent_compat",event="detected_claude_code"} 0
+mlx2_runtime_events_total{component="agent_compat",event="detected_codex"} 0
+mlx2_runtime_events_total{component="agent_compat",event="hosted_tool_dropped"} 0
+mlx2_runtime_events_total{component="agent_compat",event="mode_conflict"} 0
+mlx2_runtime_events_total{component="agent_compat",event="namespace_call"} 0
+mlx2_runtime_events_total{component="agent_compat",event="namespace_tool_declared"} 0
+mlx2_runtime_events_total{component="agent_compat",event="output_effort"} 0
+mlx2_runtime_events_total{component="agent_compat",event="phase_input"} 0
+mlx2_runtime_events_total{component="agent_compat",event="phase_output"} 0
+mlx2_runtime_events_total{component="agent_compat",event="request"} 0
+mlx2_runtime_events_total{component="agent_compat",event="source_detected"} 0
+mlx2_runtime_events_total{component="agent_compat",event="source_header"} 0
+mlx2_runtime_events_total{component="agent_compat",event="source_server"} 0
+mlx2_runtime_events_total{component="agent_compat",event="source_tenant"} 0
+mlx2_runtime_events_total{component="agent_compat",event="system_folded"} 0
+mlx2_runtime_events_total{component="agent_compat",event="thinking_cleared"} 0
+mlx2_runtime_events_total{component="agent_compat",event="thinking_omitted"} 0
+mlx2_runtime_events_total{component="agent_compat",event="thinking_restored"} 0
+mlx2_runtime_events_total{component="apcv2",event="store_failure"} 0
+mlx2_runtime_events_total{component="apcv2",event="store_skipped_approximate"} 0
+mlx2_runtime_events_total{component="apcv2",event="write_suppressed_request"} 0
+mlx2_runtime_events_total{component="apcv2_fanout",event="boundary_miss"} 0
+mlx2_runtime_events_total{component="apcv2_fanout",event="boundary_reused"} 0
+mlx2_runtime_events_total{component="apcv2_fanout",event="groups"} 0
+mlx2_runtime_events_total{component="apcv2_fanout",event="lanes"} 0
+mlx2_runtime_events_total{component="apcv2_fanout",event="store_failure"} 0
+mlx2_runtime_events_total{component="apcv2_fanout",event="write_suppressed"} 0
+mlx2_runtime_events_total{component="apcv2_interior",event="admitted_hit"} 0
+mlx2_runtime_events_total{component="apcv2_interior",event="captured"} 0
+mlx2_runtime_events_total{component="apcv2_interior",event="degraded"} 0
+mlx2_runtime_events_total{component="apcv2_interior",event="headroom_capped"} 0
+mlx2_runtime_events_total{component="apcv2_interior",event="hit_token"} 0
+mlx2_runtime_events_total{component="apcv2_interior",event="planned_lattice"} 0
+mlx2_runtime_events_total{component="apcv2_interior",event="planned_tail"} 0
+mlx2_runtime_events_total{component="apcv2_interior",event="planned_turn"} 0
+mlx2_runtime_events_total{component="apcv2_interior",event="published"} 0
+mlx2_runtime_events_total{component="apcv2_interior",event="skipped_approximate"} 0
+mlx2_runtime_events_total{component="apcv2_interior",event="skipped_media"} 0
+mlx2_runtime_events_total{component="apcv2_interior",event="skipped_publish_failed"} 0
+mlx2_runtime_events_total{component="apcv2_interior",event="skipped_route"} 0
+mlx2_runtime_events_total{component="apcv2_interior",event="skipped_write_suppressed"} 0
+mlx2_runtime_events_total{component="apcv2_interior",event="turn_boundary_hit"} 0
+mlx2_runtime_events_total{component="apcv2_interior",event="turn_marker_missing"} 0
+mlx2_runtime_events_total{component="approximate_kv",event="applied"} 0
+mlx2_runtime_events_total{component="approximate_kv",event="declined"} 0
+mlx2_runtime_events_total{component="approximate_kv",event="fanout_bypassed"} 0
+mlx2_runtime_events_total{component="approximate_kv",event="requantized_prefix_hit"} 0
+mlx2_runtime_events_total{component="batch_cohort",event="attachment_failure"} 0
+mlx2_runtime_events_total{component="batch_cohort",event="job_failed_closed"} 0
+mlx2_runtime_events_total{component="batch_cohort",event="job_released"} 0
+mlx2_runtime_events_total{component="batch_cohort",event="job_staged"} 0
+mlx2_runtime_events_total{component="batch_cohort",event="job_timed_out"} 0
+mlx2_runtime_events_total{component="batch_cohort",event="release"} 0
+mlx2_runtime_events_total{component="batch_cohort",event="scheduler_failure"} 0
+mlx2_runtime_events_total{component="batch_cohort",event="timeout"} 0
+mlx2_runtime_events_total{component="cache_capsule",event="deadline_fallback"} 0
+mlx2_runtime_events_total{component="cache_capsule",event="incompatible_fallback"} 0
+mlx2_runtime_events_total{component="cache_capsule",event="prepare_fallback"} 0
+mlx2_runtime_events_total{component="cache_capsule",event="prepared"} 0
+mlx2_runtime_events_total{component="cache_capsule",event="width_fallback"} 0
+mlx2_runtime_events_total{component="expert_atlas",event="observation"} 0
+mlx2_runtime_events_total{component="expert_atlas",event="trace_dropped"} 0
+mlx2_runtime_events_total{component="expert_atlas",event="trace_record"} 0
+mlx2_runtime_events_total{component="expert_stream",event="eviction"} 0
+mlx2_runtime_events_total{component="expert_stream",event="hit"} 0
+mlx2_runtime_events_total{component="expert_stream",event="miss"} 0
+mlx2_runtime_events_total{component="expert_stream",event="page_in"} 0
+mlx2_runtime_events_total{component="expert_stream",event="page_in_byte"} 0
+mlx2_runtime_events_total{component="expert_stream",event="working_set_refusal"} 0
+mlx2_runtime_events_total{component="json_schema",event="reference_failure"} 0
+mlx2_runtime_events_total{component="lora",event="load_drain_timeout"} 0
+mlx2_runtime_events_total{component="lora",event="load_failed"} 0
+mlx2_runtime_events_total{component="lora",event="loaded"} 0
+mlx2_runtime_events_total{component="lora",event="unload_drain_timeout"} 0
+mlx2_runtime_events_total{component="lora",event="unload_failed"} 0
+mlx2_runtime_events_total{component="lora",event="unloaded"} 0
+mlx2_runtime_events_total{component="memory_admission",event="allocator_reclaim_before_reject"} 0
+mlx2_runtime_events_total{component="memory_admission",event="cache_eviction"} 0
+mlx2_runtime_events_total{component="memory_admission",event="deferred"} 0
+mlx2_runtime_events_total{component="memory_admission",event="depth_floor_admit"} 0
+mlx2_runtime_events_total{component="memory_admission",event="retry"} 0
+mlx2_runtime_events_total{component="memory_admission",event="timeout"} 0
+mlx2_runtime_events_total{component="memory_preemption",event="drain_cancelled"} 0
+mlx2_runtime_events_total{component="memory_preemption",event="fault_declined"} 0
+mlx2_runtime_events_total{component="memory_preemption",event="fault_unfired"} 0
+mlx2_runtime_events_total{component="memory_preemption",event="preempted"} 3
+mlx2_runtime_events_total{component="memory_preemption",event="preempted_fault"} 3
+mlx2_runtime_events_total{component="memory_preemption",event="preempted_pressure"} 0
+mlx2_runtime_events_total{component="memory_preemption",event="preempted_stall"} 0
+mlx2_runtime_events_total{component="memory_preemption",event="replayed"} 3
+mlx2_runtime_events_total{component="mtp",event="sidecar_missing_cache_miss"} 0
+mlx2_runtime_events_total{component="multimodal",event="apcv2_boundary_miss"} 0
+mlx2_runtime_events_total{component="multimodal",event="gemma3n_video_frame"} 0
+mlx2_runtime_events_total{component="multimodal",event="gemma3n_video_frame_batch"} 0
+mlx2_runtime_events_total{component="multimodal",event="gemma3n_video_request"} 0
+mlx2_runtime_events_total{component="multimodal",event="minicpmo_audio_chunk"} 0
+mlx2_runtime_events_total{component="multimodal",event="minicpmo_vision_batch"} 0
+mlx2_runtime_events_total{component="multimodal",event="minicpmo_vision_slice"} 0
+mlx2_runtime_events_total{component="multimodal",event="unsupported_adapter"} 0
+mlx2_runtime_events_total{component="output_audio",event="byte"} 0
+mlx2_runtime_events_total{component="output_audio",event="completed"} 0
+mlx2_runtime_events_total{component="output_audio",event="failed"} 0
+mlx2_runtime_events_total{component="output_audio",event="request"} 0
+mlx2_runtime_events_total{component="reasoning_signature",event="rejected"} 0
+mlx2_runtime_events_total{component="representation",event="embedding_completed"} 0
+mlx2_runtime_events_total{component="representation",event="embedding_failed"} 0
+mlx2_runtime_events_total{component="representation",event="embedding_prompt_token"} 0
+mlx2_runtime_events_total{component="representation",event="embedding_vector"} 0
+mlx2_runtime_events_total{component="representation",event="rerank_completed"} 0
+mlx2_runtime_events_total{component="representation",event="rerank_document"} 0
+mlx2_runtime_events_total{component="representation",event="rerank_failed"} 0
+mlx2_runtime_events_total{component="representation",event="rerank_prompt_token"} 0
+mlx2_runtime_events_total{component="request_finish",event="cancelled"} 0
+mlx2_runtime_events_total{component="request_finish",event="client_disconnect"} 0
+mlx2_runtime_events_total{component="request_finish",event="length"} 3
+mlx2_runtime_events_total{component="request_finish",event="stop"} 6
+mlx2_runtime_events_total{component="request_finish",event="unknown"} 0
+mlx2_runtime_events_total{component="spomin",event="exact_boundary_snapshot_failure"} 0
+mlx2_runtime_events_total{component="spomin",event="exact_boundary_store_failure"} 0
+mlx2_runtime_events_total{component="spomin",event="exact_boundary_stored"} 0
+mlx2_runtime_events_total{component="structured_output",event="completed"} 0
+mlx2_runtime_events_total{component="structured_output",event="dead_end"} 0
+mlx2_runtime_events_total{component="structured_output",event="deferred_past_thinking"} 0
+mlx2_runtime_events_total{component="structured_output",event="engine_automaton"} 0
+mlx2_runtime_events_total{component="structured_output",event="engine_scanner"} 0
+mlx2_runtime_events_total{component="structured_output",event="failed_closed"} 0
+mlx2_runtime_events_total{component="thinking_budget",event="forced_close"} 0
+mlx2_runtime_events_total{component="tool_calls",event="decode_grammar_auto_engaged"} 0
+mlx2_runtime_events_total{component="tool_calls",event="decode_grammar_engaged"} 0
+mlx2_runtime_events_total{component="tool_calls",event="decode_grammar_skipped"} 0
+mlx2_runtime_events_total{component="tool_calls",event="decode_grammar_streamed"} 0
+mlx2_runtime_events_total{component="tool_calls",event="parallel_bound_failure"} 0
+mlx2_runtime_events_total{component="tool_calls",event="parallel_bound_truncated"} 0
+mlx2_runtime_events_total{component="tool_calls",event="parse_fallback"} 0
+mlx2_runtime_events_total{component="tool_calls",event="tolerant_markers_requested"} 0
+mlx2_scheduler_cycles_total{condition="all"} 135
+mlx2_scheduler_cycles_total{condition="queued"} 1
+mlx2_scheduler_events_total{event="adaptive_prefill_apc_priority_admissions",mechanism="adaptive_prefill"} 0
+mlx2_scheduler_events_total{event="adaptive_prefill_deadline_forced_rounds",mechanism="adaptive_prefill"} 0
+mlx2_scheduler_events_total{event="adaptive_prefill_release_rounds",mechanism="adaptive_prefill"} 8
+mlx2_scheduler_events_total{event="adaptive_prefill_slack_deferred_rounds",mechanism="adaptive_prefill"} 0
+mlx2_scheduler_events_total{event="apc_interior_checkpoints_skipped_inexact",mechanism="scheduler"} 0
+mlx2_scheduler_events_total{event="apc_interior_checkpoints_skipped_trimmable",mechanism="scheduler"} 0
+mlx2_scheduler_events_total{event="decode_fairness_cap_clamps",mechanism="decode_fairness"} 0
+mlx2_scheduler_events_total{event="decode_fairness_debt_deferrals",mechanism="decode_fairness"} 0
+mlx2_scheduler_events_total{event="decode_fairness_debt_repayments",mechanism="decode_fairness"} 0
+mlx2_scheduler_events_total{event="decode_fairness_prefill_chunks",mechanism="decode_fairness"} 0
+mlx2_scheduler_events_total{event="decode_priority_deferred_rounds",mechanism="scheduler"} 0
+mlx2_scheduler_events_total{event="decode_priority_release_rounds",mechanism="scheduler"} 0
+mlx2_scheduler_events_total{event="mtp_short_prefill_interleaved",mechanism="scheduler"} 0
+mlx2_scheduler_events_total{event="prefill_chunk_rounds_recorded",mechanism="prefill_chunk"} 8
+mlx2_scheduler_events_total{event="prefill_chunk_varied_requests",mechanism="prefill_chunk"} 0
+mlx2_scheduler_events_total{event="prefill_only_rounds",mechanism="scheduler"} 0
+mlx2_scheduler_events_total{event="prefill_rounds",mechanism="scheduler"} 8
+mlx2_scheduler_events_total{event="self_mtp_zero_draft_forwards_skipped",mechanism="self_mtp"} 1
+mlx2_scheduler_events_total{event="self_mtp_zero_fast_rounds",mechanism="self_mtp"} 1
+mlx2_scheduler_events_total{event="self_mtp_zero_proposal_roundtrips_skipped",mechanism="self_mtp"} 1
+mlx2_scheduler_events_total{event="short_prefill_overflow_admissions",mechanism="scheduler"} 0
+mlx2_scheduler_prefill_chunks_total{tokens="2048"} 8
+mlx2_segmented_mtp_bytes_total{operation="async_qsa_promotion_patched"} 0
+mlx2_segmented_mtp_bytes_total{operation="full_prefix_materialized"} 0
+mlx2_segmented_mtp_bytes_total{operation="private_delta_duplicate_base_storage_bytes_not_formed"} 0
+mlx2_segmented_mtp_bytes_total{operation="recurrent_state_materialized"} 8048640000
+mlx2_segmented_mtp_bytes_total{operation="shared_qsa_base"} 0
+mlx2_segmented_mtp_bytes_total{operation="shared_qsa_materialized"} 0
+mlx2_segmented_mtp_bytes_total{operation="shared_qsa_private"} 0
+mlx2_segmented_mtp_events_total{event="accepted_all"} 49
+mlx2_segmented_mtp_events_total{event="accepted_partial"} 32
+mlx2_segmented_mtp_events_total{event="accepted_zero"} 30
+mlx2_segmented_mtp_events_total{event="async_qsa_admission_settled"} 0
+mlx2_segmented_mtp_events_total{event="async_qsa_budget_checks"} 0
+mlx2_segmented_mtp_events_total{event="async_qsa_budget_cutoff_tokens_cumulative"} 0
+mlx2_segmented_mtp_events_total{event="async_qsa_budget_promotions"} 0
+mlx2_segmented_mtp_events_total{event="async_qsa_budget_remaining_tokens_cumulative"} 0
+mlx2_segmented_mtp_events_total{event="async_qsa_budget_retained_segmented"} 0
+mlx2_segmented_mtp_events_total{event="async_qsa_prequeue_bound"} 0
+mlx2_segmented_mtp_events_total{event="async_qsa_prequeue_declined"} 0
+mlx2_segmented_mtp_events_total{event="async_qsa_prequeue_queued"} 0
+mlx2_segmented_mtp_events_total{event="async_qsa_prequeue_requests"} 0
+mlx2_segmented_mtp_events_total{event="async_qsa_promotion_declined"} 0
+mlx2_segmented_mtp_events_total{event="async_qsa_promotion_declined_memory"} 0
+mlx2_segmented_mtp_events_total{event="async_qsa_promotion_declined_shared_suffix"} 0
+mlx2_segmented_mtp_events_total{event="async_qsa_promotion_engaged"} 0
+mlx2_segmented_mtp_events_total{event="async_qsa_promotion_failures"} 0
+mlx2_segmented_mtp_events_total{event="async_qsa_promotion_queued"} 0
+mlx2_segmented_mtp_events_total{event="async_qsa_promotion_requests"} 0
+mlx2_segmented_mtp_events_total{event="async_qsa_shared_prefix_fused_layers"} 0
+mlx2_segmented_mtp_events_total{event="b1_draft_forwards"} 0
+mlx2_segmented_mtp_events_total{event="b1_target_forwards"} 0
+mlx2_segmented_mtp_events_total{event="batched_draft_forwards"} 212
+mlx2_segmented_mtp_events_total{event="batched_target_forwards"} 107
+mlx2_segmented_mtp_events_total{event="committed_cycles"} 107
+mlx2_segmented_mtp_events_total{event="declined"} 0
+mlx2_segmented_mtp_events_total{event="device_synchronizations"} 0
+mlx2_segmented_mtp_events_total{event="engaged"} 19
+mlx2_segmented_mtp_events_total{event="exact_set_fold_attention_calls"} 0
+mlx2_segmented_mtp_events_total{event="exact_set_fold_declines"} 0
+mlx2_segmented_mtp_events_total{event="exact_set_fold_device_proofs"} 0
+mlx2_segmented_mtp_events_total{event="exact_set_fold_preflight_declines"} 0
+mlx2_segmented_mtp_events_total{event="exact_set_fold_private_fallbacks"} 0
+mlx2_segmented_mtp_events_total{event="exact_set_fold_requests"} 0
+mlx2_segmented_mtp_events_total{event="exact_set_fold_rows"} 0
+mlx2_segmented_mtp_events_total{event="failures"} 0
+mlx2_segmented_mtp_events_total{event="fallback_physical_b2"} 0
+mlx2_segmented_mtp_events_total{event="full_prefix_materializations"} 0
+mlx2_segmented_mtp_events_total{event="independent_lineages_consumed"} 1330
+mlx2_segmented_mtp_events_total{event="layer_local_materializations"} 0
+mlx2_segmented_mtp_events_total{event="live_width_change_deferrals"} 4
+mlx2_segmented_mtp_events_total{event="physical_b2_formations"} 0
+mlx2_segmented_mtp_events_total{event="physical_join_flag_reconciled"} 0
+mlx2_segmented_mtp_events_total{event="private_delta_attention_calls"} 0
+mlx2_segmented_mtp_events_total{event="private_delta_base_tokens_cumulative"} 0
+mlx2_segmented_mtp_events_total{event="private_delta_declines"} 0
+mlx2_segmented_mtp_events_total{event="private_delta_late_gather_fallbacks"} 0
+mlx2_segmented_mtp_events_total{event="private_delta_preflight_declines"} 0
+mlx2_segmented_mtp_events_total{event="private_delta_requests"} 0
+mlx2_segmented_mtp_events_total{event="private_delta_rows"} 0
+mlx2_segmented_mtp_events_total{event="private_delta_width_1_declined"} 0
+mlx2_segmented_mtp_events_total{event="private_delta_width_1_engaged"} 0
+mlx2_segmented_mtp_events_total{event="private_delta_width_1_requests"} 0
+mlx2_segmented_mtp_events_total{event="private_delta_width_2_declined"} 0
+mlx2_segmented_mtp_events_total{event="private_delta_width_2_engaged"} 0
+mlx2_segmented_mtp_events_total{event="private_delta_width_2_requests"} 0
+mlx2_segmented_mtp_events_total{event="private_delta_width_3_declined"} 0
+mlx2_segmented_mtp_events_total{event="private_delta_width_3_engaged"} 0
+mlx2_segmented_mtp_events_total{event="private_delta_width_3_requests"} 0
+mlx2_segmented_mtp_events_total{event="private_delta_width_4_declined"} 0
+mlx2_segmented_mtp_events_total{event="private_delta_width_4_engaged"} 0
+mlx2_segmented_mtp_events_total{event="private_delta_width_4_requests"} 0
+mlx2_segmented_mtp_events_total{event="private_delta_width_5_declined"} 0
+mlx2_segmented_mtp_events_total{event="private_delta_width_5_engaged"} 0
+mlx2_segmented_mtp_events_total{event="private_delta_width_5_requests"} 0
+mlx2_segmented_mtp_events_total{event="private_delta_width_6_declined"} 0
+mlx2_segmented_mtp_events_total{event="private_delta_width_6_engaged"} 0
+mlx2_segmented_mtp_events_total{event="private_delta_width_6_requests"} 0
+mlx2_segmented_mtp_events_total{event="private_delta_width_7_declined"} 0
+mlx2_segmented_mtp_events_total{event="private_delta_width_7_engaged"} 0
+mlx2_segmented_mtp_events_total{event="private_delta_width_7_requests"} 0
+mlx2_segmented_mtp_events_total{event="private_delta_width_8_declined"} 0
+mlx2_segmented_mtp_events_total{event="private_delta_width_8_engaged"} 0
+mlx2_segmented_mtp_events_total{event="private_delta_width_8_requests"} 0
+mlx2_segmented_mtp_events_total{event="private_delta_width_9_declined"} 0
+mlx2_segmented_mtp_events_total{event="private_delta_width_9_engaged"} 0
+mlx2_segmented_mtp_events_total{event="private_delta_width_9_requests"} 0
+mlx2_segmented_mtp_events_total{event="private_delta_width_other_declined"} 0
+mlx2_segmented_mtp_events_total{event="private_delta_width_other_engaged"} 0
+mlx2_segmented_mtp_events_total{event="private_delta_width_other_requests"} 0
+mlx2_segmented_mtp_events_total{event="recurrent_state_materializations"} 7200
+mlx2_segmented_mtp_events_total{event="requests"} 19
+mlx2_segmented_mtp_events_total{event="row_state_splits"} 7990
+mlx2_segmented_mtp_events_total{event="segmented_attention_calls"} 1282
+mlx2_segmented_mtp_events_total{event="shared_qsa_batched_selections"} 0
+mlx2_segmented_mtp_events_total{event="shared_qsa_materializations"} 0
+mlx2_segmented_mtp_events_total{event="shared_qsa_policy_admitted"} 0
+mlx2_segmented_mtp_events_total{event="shared_qsa_policy_checks"} 0
+mlx2_segmented_mtp_events_total{event="shared_qsa_policy_context_tokens_cumulative"} 0
+mlx2_segmented_mtp_events_total{event="shared_qsa_policy_cutoff_tokens_cumulative"} 0
+mlx2_segmented_mtp_events_total{event="shared_qsa_policy_declined"} 0
+mlx2_segmented_mtp_events_total{event="shared_qsa_policy_remaining_tokens_cumulative"} 0
+mlx2_segmented_mtp_events_total{event="shared_qsa_rows"} 0
+mlx2_segmented_mtp_events_total{event="transaction_branches"} 111
+mlx2_segmented_mtp_events_total{event="transaction_canonicalizations"} 20
+mlx2_segmented_mtp_events_total{event="transaction_promotions"} 111
+mlx2_segmented_mtp_events_total{event="transaction_rejections"} 0
+mlx2_segmented_mtp_events_total{event="true_batched_declined"} 0
+mlx2_segmented_mtp_events_total{event="true_batched_engaged"} 107
+mlx2_segmented_mtp_events_total{event="true_batched_requests"} 107
+mlx2_segmented_mtp_events_total{event="width_lock_plain_fallbacks"} 1
+mlx2_segmented_mtp_events_total{event="zero_depth_fast_rounds"} 1
+mlx2_segmented_mtp_state{state="async_qsa_promotion_reserved_bytes"} 0
+mlx2_segmented_mtp_state{state="private_delta_base_tokens_last"} 0
+mlx2_segmented_mtp_state{state="private_delta_base_tokens_max"} 0
+mlx2_segmented_mtp_state{state="private_delta_base_tokens_min"} 0
+mlx2_segmented_mtp_time_seconds_total{operation="async_qsa_promotion_wait"} 0
+mlx2_segmented_mtp_time_seconds_total{operation="commit"} 0
+mlx2_segmented_mtp_time_seconds_total{operation="proposal"} 0
+mlx2_server_state{state="draining"} 0
+mlx2_server_state{state="quiesced"} 0
+mlx2_server_state{state="serving"} 1
+mlx2_server_state{state="suspended"} 0
+mlx2_suspend_failures_total 0
+mlx2_suspended_bytes_total 0
+mlx2_suspended_entries_total 0
+mlx2_suspends_total 0
+mlx2_telemetry_export_errors_total 0
+mlx2_telemetry_schema_info{version="2"} 1
+mlx2_telemetry_source_available 1
+mlx2_time_to_first_token_seconds_bucket{le="+Inf"} 9
+mlx2_time_to_first_token_seconds_bucket{le="0.01"} 0
+mlx2_time_to_first_token_seconds_bucket{le="0.02"} 0
+mlx2_time_to_first_token_seconds_bucket{le="0.040000000000000001"} 3
+mlx2_time_to_first_token_seconds_bucket{le="0.080000000000000002"} 6
+mlx2_time_to_first_token_seconds_bucket{le="0.16"} 6
+mlx2_time_to_first_token_seconds_bucket{le="0.32000000000000001"} 7
+mlx2_time_to_first_token_seconds_bucket{le="0.64000000000000001"} 7
+mlx2_time_to_first_token_seconds_bucket{le="1.28"} 7
+mlx2_time_to_first_token_seconds_bucket{le="10.24"} 9
+mlx2_time_to_first_token_seconds_bucket{le="2.5600000000000001"} 9
+mlx2_time_to_first_token_seconds_bucket{le="20.48"} 9
+mlx2_time_to_first_token_seconds_bucket{le="40.960000000000001"} 9
+mlx2_time_to_first_token_seconds_bucket{le="5.1200000000000001"} 9
+mlx2_time_to_first_token_seconds_bucket{le="81.920000000000002"} 9
+mlx2_time_to_first_token_seconds_count 9
+mlx2_time_to_first_token_seconds_sum 4.4577430420322344
+mlx2_trace_export_errors_total{stage="export"} 0
+mlx2_trace_export_errors_total{stage="setup"} 0
+mlx2_trace_spans_total{outcome="completed"} 0
+mlx2_trace_spans_total{outcome="exported"} 0
+mlx2_trace_spans_total{outcome="failed"} 0
+mlx2_trace_spans_total{outcome="started"} 0
+mlx2_verify_bitexact_dispatches_total 0
+mlx2_verify_bitexact_enabled 0
+mlx2_verify_bitexact_receipts_total{claim="false"} 0
+mlx2_verify_bitexact_receipts_total{claim="true"} 0

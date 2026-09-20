@@ -65,16 +65,23 @@ download revision.
   normalized without mutating incoming history. `<|eom|>` continues the turn;
   `<|eot|>` stops it.
 - Reasoning effort is mapped to native low/medium/high strength hints; minimal
-  maps to low and xhigh/max/ultra to high. Explicit thinking-off selects the
-  direct `to=user` generation header. These are prompt policies, not calibrated
-  compute budgets, and remain model-generation qualification candidates.
+  maps to low and xhigh/max/ultra to high. With thinking off, requests without
+  usable tools and `tool_choice:none` retain the exact direct `to=user` prompt;
+  a named choice opens that exact tool recipient in the prompt. `required`
+  constrains the generated recipient to a declared tool, while `auto` permits
+  `user` or a declared tool but excludes `self`. The request-scoped prefix-trie
+  processor is a pure function of token history, so speculative probes cannot
+  mutate it. These are prompt/decode policies, not calibrated compute budgets,
+  and remain model-generation qualification candidates.
 - `muse-glimmer-apcv2-ordinary` is the candidate ordinary profile. Asking for
-  native MTP fails explicitly. The descriptor has **no MTP/segmented-MTP claim**.
+  native MTP fails explicitly. With no route flag the adapter selects ordinary;
+  retaining `--ordinary` is an equivalent explicit selection. The descriptor
+  has **no MTP/segmented-MTP claim**.
 
 | Mechanism | Implemented in this candidate | GPU-qualified | Selected/deployed | Observed on Muse GPU |
 |---|---|---|---|---|
 | Ordinary target math/loading | Yes | No | No | No |
-| Streaming/reasoning/ATEM tools | CPU parser and tokenizer verified | No | No | No |
+| Streaming/reasoning/ATEM tools | CPU parser, recipient constraint and tokenizer verified | No | No | No |
 | Shared continuous batch/scheduler contract | Adapter/cache interfaces wired | No | No | No |
 | APCv2 layered COW/memory+disk reuse | Existing shared engine, Muse layout declared | No | No | No |
 | DFlash2 speculative execution | **No** | No | No | No |

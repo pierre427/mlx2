@@ -1,0 +1,226 @@
+{
+  "schema": "mlx2.kv-quant-fidelity-bundle.v1",
+  "harness": {
+    "name": "scripts/measure_kv_quant_fidelity.py",
+    "sha256": "393bd8b357017674f1c742dabb1d24cd511188b72824b96346d5d4e30d55c952"
+  },
+  "plan": {
+    "mode": "gpu",
+    "model": "~/mlx-models/Qwen3.6-35B-A3B-uncensored-heretic-Native-MTP-Preserved-oQ4e-mtp",
+    "operations": [
+      "kv_q8"
+    ],
+    "contexts": [
+      32768
+    ],
+    "score_tokens": 256,
+    "needles": 9,
+    "needle_contexts": "4096,32768",
+    "decode_tokens": 128,
+    "repeats": 3,
+    "prefill_step": 2048,
+    "out": "/private/tmp/mlx2-rm07-kv-quant-measured/qualification/runs/rm07-kv-quant-measured-20260919/fidelity-35b-32k-q8.json"
+  },
+  "platform": "macOS-26.7-arm64-arm-64bit",
+  "mlx_version": "0.32.2.dev20260919+39400a0d4",
+  "reports": {
+    "kv_q8": {
+      "schema": "mlx2.kv-quant-fidelity.v1",
+      "device": "gpu",
+      "adapter_fingerprint": "414a2fc7b4b3cb6451401032b9517ab91a73c1ffb95fe3c67323c685acf134fa",
+      "operation": "kv_q8",
+      "operation_revision": "1a40216bd363c2c66ec07c8a1e8a384cce9e342377cbfbfb1de6a4f7952f878a",
+      "descriptor": {
+        "key_bits": 8,
+        "value_bits": 8,
+        "group_size": 64,
+        "rotate": false,
+        "start": 0
+      },
+      "corpus_sha256": "4810934d0de0a9fd98d5120b65d44f2d23f16b7804b1c8294adcd52f8647f2bc",
+      "contexts": [
+        {
+          "context": 32768,
+          "scored_tokens": 256,
+          "kl_mean": 0.005024947054045381,
+          "kl_p99": 0.036633533611893615,
+          "kl_max": 0.04445204883813858,
+          "top1_agreement": 0.95703125,
+          "top5_overlap": 0.9500000029802322,
+          "logprob_delta_mean": 0.000624045729637146,
+          "quantized_planes": 10,
+          "exact_quantized_planes": 0,
+          "kv_bytes_exact": 676331520,
+          "kv_bytes_quant": 359301120,
+          "kv_bytes_per_token_exact": 20480.0,
+          "kv_bytes_per_token_quant": 10880.0,
+          "kv_bytes_ratio": 0.53125,
+          "needles": {
+            "total": 9,
+            "exact_hits": 9,
+            "quant_hits": 9,
+            "quant_losses": 0,
+            "answers_agree": 8,
+            "detail": [
+              {
+                "depth": 0.1,
+                "name": "Orion",
+                "exact": true,
+                "quant": true,
+                "answers_agree": true,
+                "expected": "885440",
+                "answers": {
+                  "exact": " 885440.<|im_end|>\n",
+                  "quant": " 885440.<|im_end|>\n"
+                }
+              },
+              {
+                "depth": 0.2,
+                "name": "Vega",
+                "exact": true,
+                "quant": true,
+                "answers_agree": true,
+                "expected": "403958",
+                "answers": {
+                  "exact": " 403958.<|im_end|>\n",
+                  "quant": " 403958.<|im_end|>\n"
+                }
+              },
+              {
+                "depth": 0.3,
+                "name": "Lyra",
+                "exact": true,
+                "quant": true,
+                "answers_agree": true,
+                "expected": "794772",
+                "answers": {
+                  "exact": " 794772.<|im_end|>\n",
+                  "quant": " 794772.<|im_end|>\n"
+                }
+              },
+              {
+                "depth": 0.4,
+                "name": "Draco",
+                "exact": true,
+                "quant": true,
+                "answers_agree": true,
+                "expected": "933488",
+                "answers": {
+                  "exact": " 933488.<|im_end|>\n",
+                  "quant": " 933488.<|im_end|>\n"
+                }
+              },
+              {
+                "depth": 0.5,
+                "name": "Cygnus",
+                "exact": true,
+                "quant": true,
+                "answers_agree": true,
+                "expected": "441001",
+                "answers": {
+                  "exact": " 441001.\n\n<think>",
+                  "quant": " 441001.\n\n<think>"
+                }
+              },
+              {
+                "depth": 0.6,
+                "name": "Perseus",
+                "exact": true,
+                "quant": true,
+                "answers_agree": true,
+                "expected": "042450",
+                "answers": {
+                  "exact": " 042450.<|im_end|>\n",
+                  "quant": " 042450.<|im_end|>\n"
+                }
+              },
+              {
+                "depth": 0.7,
+                "name": "Aquila",
+                "exact": true,
+                "quant": true,
+                "answers_agree": false,
+                "expected": "271493",
+                "answers": {
+                  "exact": " 271493.<|im_end|>\n",
+                  "quant": " 271493.\n\n<think>"
+                }
+              },
+              {
+                "depth": 0.8,
+                "name": "Hydra",
+                "exact": true,
+                "quant": true,
+                "answers_agree": true,
+                "expected": "536110",
+                "answers": {
+                  "exact": " 536110.<|im_end|>\n",
+                  "quant": " 536110.<|im_end|>\n"
+                }
+              },
+              {
+                "depth": 0.9,
+                "name": "Carina",
+                "exact": true,
+                "quant": true,
+                "answers_agree": true,
+                "expected": "509532",
+                "answers": {
+                  "exact": " 509532.<|im_end|>\n",
+                  "quant": " 509532.<|im_end|>\n"
+                }
+              }
+            ]
+          },
+          "decode": {
+            "decode_tokens": 128,
+            "repeats": 3,
+            "exact_tok_s": [
+              84.5625085230844,
+              85.63124443492653,
+              85.15876258153699
+            ],
+            "quant_tok_s": [
+              75.08279636829201,
+              75.47532133084482,
+              74.54921926171457
+            ],
+            "exact_tok_s_median": 85.15876258153699,
+            "quant_tok_s_median": 75.08279636829201,
+            "quant_over_exact": 0.8816802181267307
+          },
+          "wall_s": 239.23661650001304
+        }
+      ]
+    }
+  },
+  "verdicts": {
+    "kv_q8": {
+      "passed": false,
+      "failures": [
+        "missing context 4096",
+        "missing context 16384",
+        "context 32768: kl_mean 0.00502495 not <= 0.005",
+        "context 32768: top1_agreement 0.957031 not >= 0.99"
+      ],
+      "operation": "kv_q8",
+      "thresholds": {
+        "kl_mean_max": 0.005,
+        "kl_p99_max": 0.05,
+        "top1_agreement_min": 0.99,
+        "bytes_ratio_max": 0.55,
+        "needle_losses_max": 0,
+        "min_context": 4096,
+        "required_contexts": [
+          4096,
+          16384,
+          32768
+        ],
+        "min_scored_tokens": 128,
+        "devices": [
+          "gpu"
+        ]
+      }
+    }
+  }
+}

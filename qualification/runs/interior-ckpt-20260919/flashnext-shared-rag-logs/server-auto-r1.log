@@ -1,0 +1,72 @@
+2026-09-19 18:17:29,802 WARNING no reasoning signing key configured; using a random per-process reasoning signing key
+2026-09-19 18:17:31,702 INFO "GET /health HTTP/1.1" 503 -
+2026-09-19 18:17:33,711 INFO "GET /health HTTP/1.1" 503 -
+2026-09-19 18:17:35,720 INFO "GET /health HTTP/1.1" 503 -
+2026-09-19 18:17:37,486 INFO ubc_evict: evicted 5025.7 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00001-of-00020.safetensors
+2026-09-19 18:17:37,486 INFO ubc_evict: evicted 5006.8 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00002-of-00020.safetensors
+2026-09-19 18:17:37,486 INFO ubc_evict: evicted 5006.8 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00003-of-00020.safetensors
+2026-09-19 18:17:37,486 INFO ubc_evict: evicted 5006.8 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00004-of-00020.safetensors
+2026-09-19 18:17:37,486 INFO ubc_evict: evicted 5006.8 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00005-of-00020.safetensors
+2026-09-19 18:17:37,487 INFO ubc_evict: evicted 5006.8 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00006-of-00020.safetensors
+2026-09-19 18:17:37,497 INFO ubc_evict: evicted 5022.3 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00007-of-00020.safetensors
+2026-09-19 18:17:37,538 INFO ubc_evict: evicted 5076.7 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00008-of-00020.safetensors
+2026-09-19 18:17:37,573 INFO ubc_evict: evicted 5115.4 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00009-of-00020.safetensors
+2026-09-19 18:17:37,606 INFO ubc_evict: evicted 5115.4 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00010-of-00020.safetensors
+2026-09-19 18:17:37,635 INFO ubc_evict: evicted 5073.2 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00011-of-00020.safetensors
+2026-09-19 18:17:37,678 INFO ubc_evict: evicted 5115.4 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00012-of-00020.safetensors
+2026-09-19 18:17:37,710 INFO ubc_evict: evicted 5115.4 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00013-of-00020.safetensors
+2026-09-19 18:17:37,722 INFO ubc_evict: evicted 5073.2 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00014-of-00020.safetensors
+2026-09-19 18:17:37,726 INFO "GET /health HTTP/1.1" 503 -
+2026-09-19 18:17:37,727 INFO ubc_evict: evicted 5115.4 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00015-of-00020.safetensors
+2026-09-19 18:17:37,733 INFO ubc_evict: evicted 5115.4 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00016-of-00020.safetensors
+2026-09-19 18:17:37,738 INFO ubc_evict: evicted 5073.2 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00017-of-00020.safetensors
+2026-09-19 18:17:37,742 INFO ubc_evict: evicted 5115.4 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00018-of-00020.safetensors
+2026-09-19 18:17:37,746 INFO ubc_evict: evicted 5115.4 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00019-of-00020.safetensors
+2026-09-19 18:17:37,746 INFO ubc_evict: evicted 1704.3 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-00020-of-00020.safetensors
+2026-09-19 18:17:37,746 INFO ubc_evict: evicted 1399.3 MB from UBC for ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP/model-mtp-q4.safetensors
+2026-09-19 18:17:37,746 INFO ubc_evict: pass complete total_mb=99405.2 elapsed_s=0.29
+2026-09-19 18:17:39,737 INFO "GET /health HTTP/1.1" 200 -
+2026-09-19 18:17:39,739 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-19 18:17:39,741 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-19 18:17:49,432 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-19 18:17:49,667 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-19 18:17:49,668 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-19 18:17:50,257 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-19 18:17:50,795 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-19 18:17:50,796 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-19 18:17:51,413 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-19 18:17:51,963 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-19 18:17:51,964 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-19 18:17:52,587 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-19 18:17:52,826 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-19 18:17:52,827 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-19 18:17:53,436 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-19 18:17:53,956 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-19 18:17:53,957 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-19 18:17:54,585 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-19 18:17:54,823 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-19 18:17:54,824 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-19 18:17:55,438 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-19 18:17:56,057 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-19 18:17:56,058 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-19 18:17:56,716 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-19 18:17:57,402 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-19 18:17:57,403 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-19 18:18:23,134 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-19 18:18:23,658 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-19 18:18:23,659 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-19 18:18:48,883 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-19 18:18:49,466 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-19 18:18:49,467 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-19 18:19:14,913 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-19 18:19:15,455 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-19 18:19:15,457 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-19 18:19:41,023 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-19 18:19:41,572 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-19 18:19:41,574 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-19 18:19:42,004 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-19 18:19:42,556 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-19 18:19:42,558 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-19 18:19:42,929 INFO "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-09-19 18:19:43,526 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-19 18:19:43,527 INFO "GET /v1/status HTTP/1.1" 200 -

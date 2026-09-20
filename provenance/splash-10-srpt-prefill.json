@@ -1,0 +1,34 @@
+{
+  "implementation": "Default-off SRPT prefill order with a bypass cap and one-slice contention",
+  "destination_files": [
+    "src/mlx2/runtime/adaptive_policy.py",
+    "src/mlx2/runtime/generate.py",
+    "src/mlx2/serving.py",
+    "src/mlx2/qualification.py",
+    "src/mlx2/prometheus.py",
+    "tests/test_srpt_prefill.py"
+  ],
+  "sources": [
+    {
+      "repository": "splash",
+      "revision": "f58d36ddb046726adc8937ab67d07bdde015c0d6",
+      "license": "Apache-2.0",
+      "paths": [
+        "runtime/engine/Scheduler.hpp:Scheduler (Request::overtaken)",
+        "runtime/engine/Scheduler.cpp:kMaximumOvertakes",
+        "runtime/engine/Scheduler.cpp:Scheduler::nextPrefill",
+        "runtime/engine/Scheduler.cpp:Scheduler::prefillBudget",
+        "runtime/engine/Scheduler.cpp:Scheduler::commit"
+      ]
+    }
+  ],
+  "modifications": [
+    "Reimplemented as a host-only Python policy (PrefillOrder) beside DecodeTimeFairness; no Splash code was copied.",
+    "Splash packs several shortest prompts into one command; mlx2 keeps its admission shapes: the ordinary path moves SRPT picks to the queue head before the state-budget check, and the self-MTP path picks one lane per round.",
+    "Splash's overtake bound is a fixed batch width minus one; mlx2 makes it a server-owned max_bypass (default 3) and serves the oldest overdue request first.",
+    "Splash's contended 500 ms slice bound reuses DecodeTimeFairness.stall_bound (same measured-throughput grid formula) so one-slice contention and decode fairness share one measurement; decode debt is still accrued and repaid only for decode contention.",
+    "A candidate fits one slice only after mlx2 APC interior-checkpoint boundaries clamp its chunk; declared batch cohorts keep main's atomic path and never take the SRPT short-promotion branch.",
+    "Disabled, PrefillOrder.select reproduces main's self-MTP shortest-residual key exactly; the ordinary path stays FIFO."
+  ],
+  "validation": "CPU tests in tests/test_srpt_prefill.py cover parsing, the disabled key's equivalence to main, the bypass cap on both the policy and the real self-MTP and ordinary schedulers (both fail with the cap lifted), short-request TTFT behind a 64k-token prefill, one-slice clamping with and without the rule and with an interior-checkpoint boundary, cohort atomicity, route rejection and the qualification feature. GPU A/B pending (gpu-queue/10-srpt-prefill.md)."
+}

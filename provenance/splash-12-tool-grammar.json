@@ -1,0 +1,25 @@
+{
+  "component": "tool-call grammar during generation: auto alternation, call quantifiers, tools + JSON answer, engaged-grammar streaming",
+  "source_repository": "Splash (reference only)",
+  "source_revision": "f58d36dd",
+  "source_paths": [
+    "server/tool_schema.py",
+    "server/constraints.py"
+  ],
+  "license": "Apache-2.0",
+  "destination_paths": [
+    "src/mlx2/tool_grammar.py",
+    "src/mlx2/serving.py",
+    "src/mlx2/server.py",
+    "src/mlx2/structured_output.py"
+  ],
+  "modifications": [
+    "Ported the grammar shapes of Splash tool_grammar (required: calls+ / exactly one; auto: text with calls* / calls?; response_format: calls or answer) from llguidance Lark to mlx2's regex dialect, composed around each adapter's existing tool_constraint block instead of one hard-coded Qwen wire format.",
+    "Replaced Splash's TEXT & ~/.*<tool_call>.*/ complement with a lookaround-free block construction so mlx2's exact token automaton compiles it.",
+    "Kept thinking outside the grammar (mlx2 defers the grammar past the adapter thinking-close marker) rather than folding a think rule into it.",
+    "No llguidance dependency and no Splash code copied; matcher caching and native bitmask filling were not ported."
+  ],
+  "validation": [
+    "tests/test_tool_grammar.py"
+  ]
+}

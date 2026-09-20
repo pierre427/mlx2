@@ -1,0 +1,202 @@
+{
+ "item": "rm09",
+ "date": "2026-09-19",
+ "device": "M5 Max, 128 GB",
+ "tf32": "off",
+ "state": "GPU_PARTIAL",
+ "criterion": {
+  "fork_tests_green": true,
+  "e2e_identity_4of4_every_rep": true,
+  "m12_at_most_3x_m1": false
+ },
+ "fork_tests": {
+  "targeted": "7 passed",
+  "full_test_quantized_and_reduce": "74 passed",
+  "tiles_verified_bitexact": [
+   1,
+   3,
+   4,
+   8
+  ]
+ },
+ "bench_cache_cold_tile4": {
+  "1": {
+   "bitexact_rel_m1_median": 1.0,
+   "bitexact_rel_m1_max": 1.0,
+   "default_rel_m1_median": 1.0
+  },
+  "2": {
+   "bitexact_rel_m1_median": 1.06,
+   "bitexact_rel_m1_max": 1.14,
+   "default_rel_m1_median": 1.02
+  },
+  "3": {
+   "bitexact_rel_m1_median": 1.43,
+   "bitexact_rel_m1_max": 1.78,
+   "default_rel_m1_median": 1.11
+  },
+  "4": {
+   "bitexact_rel_m1_median": 1.91,
+   "bitexact_rel_m1_max": 2.67,
+   "default_rel_m1_median": 1.26
+  },
+  "6": {
+   "bitexact_rel_m1_median": 2.64,
+   "bitexact_rel_m1_max": 3.84,
+   "default_rel_m1_median": 1.72
+  },
+  "8": {
+   "bitexact_rel_m1_median": 3.74,
+   "bitexact_rel_m1_max": 5.06,
+   "default_rel_m1_median": 2.26
+  },
+  "12": {
+   "bitexact_rel_m1_median": 5.55,
+   "bitexact_rel_m1_max": 7.12,
+   "default_rel_m1_median": 2.33
+  },
+  "16": {
+   "bitexact_rel_m1_median": 7.54,
+   "bitexact_rel_m1_max": 8.95,
+   "default_rel_m1_median": 2.31
+  }
+ },
+ "bench_cache_cold_tile8_initial": {
+  "1": {
+   "bitexact_rel_m1_median": 1.0,
+   "bitexact_rel_m1_max": 1.0,
+   "default_rel_m1_median": 1.0
+  },
+  "2": {
+   "bitexact_rel_m1_median": 1.02,
+   "bitexact_rel_m1_max": 1.16,
+   "default_rel_m1_median": 1.01
+  },
+  "3": {
+   "bitexact_rel_m1_median": 1.33,
+   "bitexact_rel_m1_max": 1.83,
+   "default_rel_m1_median": 1.06
+  },
+  "4": {
+   "bitexact_rel_m1_median": 1.83,
+   "bitexact_rel_m1_max": 2.69,
+   "default_rel_m1_median": 1.19
+  },
+  "6": {
+   "bitexact_rel_m1_median": 10.98,
+   "bitexact_rel_m1_max": 13.57,
+   "default_rel_m1_median": 1.7
+  },
+  "8": {
+   "bitexact_rel_m1_median": 26.02,
+   "bitexact_rel_m1_max": 33.1,
+   "default_rel_m1_median": 2.36
+  },
+  "12": {
+   "bitexact_rel_m1_median": 18.56,
+   "bitexact_rel_m1_max": 20.98,
+   "default_rel_m1_median": 2.1
+  },
+  "16": {
+   "bitexact_rel_m1_median": 46.23,
+   "bitexact_rel_m1_max": 59.99,
+   "default_rel_m1_median": 2.15
+  }
+ },
+ "m1_achieved_bandwidth_gb_s": {
+  "27b_q_4bit": 518,
+  "27b_lm_head_4bit": 533,
+  "27b_down_5bit": 504
+ },
+ "e2e_27b": [
+  {
+   "arm": "bitexact",
+   "rep": 0,
+   "matches": [
+    true,
+    true,
+    true,
+    true
+   ],
+   "identical": 4,
+   "prompts": 4,
+   "tok_s_1lane": 35.57,
+   "tok_s_4lane": 47.0,
+   "bitexact_dispatch_delta": 175242,
+   "first_divergence": [
+    null,
+    null,
+    null,
+    null
+   ]
+  },
+  {
+   "arm": "control",
+   "rep": 0,
+   "matches": [
+    false,
+    true,
+    false,
+    true
+   ],
+   "identical": 2,
+   "prompts": 4,
+   "tok_s_1lane": 46.08,
+   "tok_s_4lane": 85.55,
+   "bitexact_dispatch_delta": 0,
+   "first_divergence": [
+    65,
+    null,
+    366,
+    null
+   ]
+  },
+  {
+   "arm": "bitexact",
+   "rep": 1,
+   "matches": [
+    true,
+    true,
+    true,
+    true
+   ],
+   "identical": 4,
+   "prompts": 4,
+   "tok_s_1lane": 35.8,
+   "tok_s_4lane": 47.29,
+   "bitexact_dispatch_delta": 175242,
+   "first_divergence": [
+    null,
+    null,
+    null,
+    null
+   ]
+  },
+  {
+   "arm": "control",
+   "rep": 1,
+   "matches": [
+    false,
+    true,
+    false,
+    true
+   ],
+   "identical": 2,
+   "prompts": 4,
+   "tok_s_1lane": 46.29,
+   "tok_s_4lane": 86.12,
+   "bitexact_dispatch_delta": 0,
+   "first_divergence": [
+    65,
+    null,
+    366,
+    null
+   ]
+  }
+ ],
+ "verdict": "mechanism GO (no row mismatch anywhere; 27B 1-lane == 4-lane 4/4 in both reps); cost criterion missed at M=12 (5.5x median vs 3x). Mode stays opt-in.",
+ "fork_commits": [
+  "2e2a55468",
+  "1bf726f57"
+ ]
+}

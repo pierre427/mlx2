@@ -1,0 +1,683 @@
+{
+  "schema": "mlx2.kv-quant-fidelity-bundle.v1",
+  "harness": {
+    "name": "scripts/measure_kv_quant_fidelity.py",
+    "sha256": "393bd8b357017674f1c742dabb1d24cd511188b72824b96346d5d4e30d55c952"
+  },
+  "merged_from": [
+    {
+      "source": "qualification/runs/rm07-kv-quant-measured-20260919/fidelity-35b-4k16k.json",
+      "plan": {
+        "mode": "gpu",
+        "model": "~/mlx-models/Qwen3.6-35B-A3B-uncensored-heretic-Native-MTP-Preserved-oQ4e-mtp",
+        "operations": [
+          "kv_q8",
+          "kv_k8v4"
+        ],
+        "contexts": [
+          4096,
+          16384
+        ],
+        "score_tokens": 256,
+        "needles": 9,
+        "needle_contexts": "4096,32768",
+        "decode_tokens": 128,
+        "repeats": 3,
+        "prefill_step": 2048,
+        "out": "/private/tmp/mlx2-rm07-kv-quant-measured/qualification/runs/rm07-kv-quant-measured-20260919/fidelity-35b-4k16k.json"
+      },
+      "platform": "macOS-26.7-arm64-arm-64bit",
+      "mlx_version": "0.32.2.dev20260919+39400a0d4"
+    },
+    {
+      "source": "qualification/runs/rm07-kv-quant-measured-20260919/fidelity-35b-32k-q8.json",
+      "plan": {
+        "mode": "gpu",
+        "model": "~/mlx-models/Qwen3.6-35B-A3B-uncensored-heretic-Native-MTP-Preserved-oQ4e-mtp",
+        "operations": [
+          "kv_q8"
+        ],
+        "contexts": [
+          32768
+        ],
+        "score_tokens": 256,
+        "needles": 9,
+        "needle_contexts": "4096,32768",
+        "decode_tokens": 128,
+        "repeats": 3,
+        "prefill_step": 2048,
+        "out": "/private/tmp/mlx2-rm07-kv-quant-measured/qualification/runs/rm07-kv-quant-measured-20260919/fidelity-35b-32k-q8.json"
+      },
+      "platform": "macOS-26.7-arm64-arm-64bit",
+      "mlx_version": "0.32.2.dev20260919+39400a0d4"
+    }
+  ],
+  "plan": {
+    "merged": true,
+    "contexts": [
+      4096,
+      16384,
+      32768
+    ]
+  },
+  "platform": "macOS-26.7-arm64-arm-64bit",
+  "mlx_version": "0.32.2.dev20260919+39400a0d4",
+  "reports": {
+    "kv_k8v4": {
+      "schema": "mlx2.kv-quant-fidelity.v1",
+      "device": "gpu",
+      "adapter_fingerprint": "414a2fc7b4b3cb6451401032b9517ab91a73c1ffb95fe3c67323c685acf134fa",
+      "operation": "kv_k8v4",
+      "operation_revision": "9e05e8868c18387811e6bc942c91287c96f9e2ada07ab4e2bf84b52743d9b949",
+      "descriptor": {
+        "key_bits": 8,
+        "value_bits": 4,
+        "group_size": 64,
+        "rotate": false,
+        "start": 0
+      },
+      "corpus_sha256": "4810934d0de0a9fd98d5120b65d44f2d23f16b7804b1c8294adcd52f8647f2bc",
+      "contexts": [
+        {
+          "context": 4096,
+          "scored_tokens": 256,
+          "kl_mean": 0.012040229572230388,
+          "kl_p99": 0.05005984548479308,
+          "kl_max": 0.1320580691099167,
+          "top1_agreement": 0.91796875,
+          "top5_overlap": 0.9265625043772161,
+          "logprob_delta_mean": -0.014793671667575836,
+          "quantized_planes": 10,
+          "exact_quantized_planes": 0,
+          "kv_bytes_exact": 89128960,
+          "kv_bytes_quant": 36208640,
+          "kv_bytes_per_token_exact": 20480.0,
+          "kv_bytes_per_token_quant": 8320.0,
+          "kv_bytes_ratio": 0.40625,
+          "needles": {
+            "total": 9,
+            "exact_hits": 9,
+            "quant_hits": 9,
+            "quant_losses": 0,
+            "answers_agree": 6,
+            "detail": [
+              {
+                "depth": 0.1,
+                "name": "Orion",
+                "exact": true,
+                "quant": true,
+                "answers_agree": true,
+                "expected": "424604",
+                "answers": {
+                  "exact": " 424604.\n\nQuestion",
+                  "quant": " 424604.\n\nQuestion"
+                }
+              },
+              {
+                "depth": 0.2,
+                "name": "Vega",
+                "exact": true,
+                "quant": true,
+                "answers_agree": true,
+                "expected": "962838",
+                "answers": {
+                  "exact": " 962838.<|im_end|>\n",
+                  "quant": " 962838.<|im_end|>\n"
+                }
+              },
+              {
+                "depth": 0.3,
+                "name": "Lyra",
+                "exact": true,
+                "quant": true,
+                "answers_agree": false,
+                "expected": "821872",
+                "answers": {
+                  "exact": " 821872.<|im_end|>\n",
+                  "quant": " 821872.\n\n<think>"
+                }
+              },
+              {
+                "depth": 0.4,
+                "name": "Draco",
+                "exact": true,
+                "quant": true,
+                "answers_agree": true,
+                "expected": "870163",
+                "answers": {
+                  "exact": " 870163.<|im_end|>\n",
+                  "quant": " 870163.<|im_end|>\n"
+                }
+              },
+              {
+                "depth": 0.5,
+                "name": "Cygnus",
+                "exact": true,
+                "quant": true,
+                "answers_agree": false,
+                "expected": "318046",
+                "answers": {
+                  "exact": " 318046.<|im_end|>\n",
+                  "quant": " 318046.\n\n<think>"
+                }
+              },
+              {
+                "depth": 0.6,
+                "name": "Perseus",
+                "exact": true,
+                "quant": true,
+                "answers_agree": true,
+                "expected": "499748",
+                "answers": {
+                  "exact": " 499748.\n\n<think>",
+                  "quant": " 499748.\n\n<think>"
+                }
+              },
+              {
+                "depth": 0.7,
+                "name": "Aquila",
+                "exact": true,
+                "quant": true,
+                "answers_agree": true,
+                "expected": "375441",
+                "answers": {
+                  "exact": " 375441.\n\n<think>",
+                  "quant": " 375441.\n\n<think>"
+                }
+              },
+              {
+                "depth": 0.8,
+                "name": "Hydra",
+                "exact": true,
+                "quant": true,
+                "answers_agree": false,
+                "expected": "611720",
+                "answers": {
+                  "exact": " 611720.<|im_end|>\n",
+                  "quant": " 611720.\n\n<think>"
+                }
+              },
+              {
+                "depth": 0.9,
+                "name": "Carina",
+                "exact": true,
+                "quant": true,
+                "answers_agree": true,
+                "expected": "934973",
+                "answers": {
+                  "exact": " 934973.\n\n<think>",
+                  "quant": " 934973.\n\n<think>"
+                }
+              }
+            ]
+          },
+          "decode": {
+            "decode_tokens": 128,
+            "repeats": 3,
+            "exact_tok_s": [
+              97.84023416042209,
+              95.85385282763134,
+              94.98403590871106
+            ],
+            "quant_tok_s": [
+              92.8419800253555,
+              90.14135024242326,
+              75.3640436409062
+            ],
+            "exact_tok_s_median": 95.85385282763134,
+            "quant_tok_s_median": 90.14135024242326,
+            "quant_over_exact": 0.9404040378483214
+          },
+          "wall_s": 39.047193000034895
+        },
+        {
+          "context": 16384,
+          "scored_tokens": 256,
+          "kl_mean": 0.00855668413863686,
+          "kl_p99": 0.042783500812947746,
+          "kl_max": 0.22950555384159088,
+          "top1_agreement": 0.86328125,
+          "top5_overlap": 0.8898437564494088,
+          "logprob_delta_mean": 0.007592037320137024,
+          "quantized_planes": 10,
+          "exact_quantized_planes": 0,
+          "kv_bytes_exact": 340787200,
+          "kv_bytes_quant": 138444800,
+          "kv_bytes_per_token_exact": 20480.0,
+          "kv_bytes_per_token_quant": 8320.0,
+          "kv_bytes_ratio": 0.40625,
+          "decode": {
+            "decode_tokens": 128,
+            "repeats": 3,
+            "exact_tok_s": [
+              90.42287791206611,
+              92.60015634410524,
+              91.66209698577963
+            ],
+            "quant_tok_s": [
+              85.23149828458357,
+              85.14312835434471,
+              85.22769837286431
+            ],
+            "exact_tok_s_median": 91.66209698577963,
+            "quant_tok_s_median": 85.22769837286431,
+            "quant_over_exact": 0.9298030611942738
+          },
+          "wall_s": 33.5149249159731
+        }
+      ]
+    },
+    "kv_q8": {
+      "schema": "mlx2.kv-quant-fidelity.v1",
+      "device": "gpu",
+      "adapter_fingerprint": "414a2fc7b4b3cb6451401032b9517ab91a73c1ffb95fe3c67323c685acf134fa",
+      "operation": "kv_q8",
+      "operation_revision": "1a40216bd363c2c66ec07c8a1e8a384cce9e342377cbfbfb1de6a4f7952f878a",
+      "descriptor": {
+        "key_bits": 8,
+        "value_bits": 8,
+        "group_size": 64,
+        "rotate": false,
+        "start": 0
+      },
+      "corpus_sha256": "4810934d0de0a9fd98d5120b65d44f2d23f16b7804b1c8294adcd52f8647f2bc",
+      "contexts": [
+        {
+          "context": 4096,
+          "scored_tokens": 256,
+          "kl_mean": 0.005464209592755953,
+          "kl_p99": 0.028644114453345484,
+          "kl_max": 0.04404807463288307,
+          "top1_agreement": 0.9375,
+          "top5_overlap": 0.9406250035390258,
+          "logprob_delta_mean": -0.002398185431957245,
+          "quantized_planes": 10,
+          "exact_quantized_planes": 0,
+          "kv_bytes_exact": 89128960,
+          "kv_bytes_quant": 47349760,
+          "kv_bytes_per_token_exact": 20480.0,
+          "kv_bytes_per_token_quant": 10880.0,
+          "kv_bytes_ratio": 0.53125,
+          "needles": {
+            "total": 9,
+            "exact_hits": 9,
+            "quant_hits": 9,
+            "quant_losses": 0,
+            "answers_agree": 5,
+            "detail": [
+              {
+                "depth": 0.1,
+                "name": "Orion",
+                "exact": true,
+                "quant": true,
+                "answers_agree": true,
+                "expected": "885440",
+                "answers": {
+                  "exact": " 885440.<|im_end|>\n",
+                  "quant": " 885440.<|im_end|>\n"
+                }
+              },
+              {
+                "depth": 0.2,
+                "name": "Vega",
+                "exact": true,
+                "quant": true,
+                "answers_agree": true,
+                "expected": "403958",
+                "answers": {
+                  "exact": " 403958.<|im_end|>\n",
+                  "quant": " 403958.<|im_end|>\n"
+                }
+              },
+              {
+                "depth": 0.3,
+                "name": "Lyra",
+                "exact": true,
+                "quant": true,
+                "answers_agree": false,
+                "expected": "794772",
+                "answers": {
+                  "exact": " 794772.\n\n<think>",
+                  "quant": " 794772.<|im_end|>\n"
+                }
+              },
+              {
+                "depth": 0.4,
+                "name": "Draco",
+                "exact": true,
+                "quant": true,
+                "answers_agree": false,
+                "expected": "933488",
+                "answers": {
+                  "exact": " 933488.<|im_end|>\n",
+                  "quant": " 933488.\n\nQuestion"
+                }
+              },
+              {
+                "depth": 0.5,
+                "name": "Cygnus",
+                "exact": true,
+                "quant": true,
+                "answers_agree": false,
+                "expected": "441001",
+                "answers": {
+                  "exact": " 441001.\n\n<think>",
+                  "quant": " 441001.<|im_end|>\n"
+                }
+              },
+              {
+                "depth": 0.6,
+                "name": "Perseus",
+                "exact": true,
+                "quant": true,
+                "answers_agree": true,
+                "expected": "042450",
+                "answers": {
+                  "exact": " 042450.\n\n<think>",
+                  "quant": " 042450.\n\n<think>"
+                }
+              },
+              {
+                "depth": 0.7,
+                "name": "Aquila",
+                "exact": true,
+                "quant": true,
+                "answers_agree": true,
+                "expected": "271493",
+                "answers": {
+                  "exact": " 271493.\n\n<think>",
+                  "quant": " 271493.\n\n<think>"
+                }
+              },
+              {
+                "depth": 0.8,
+                "name": "Hydra",
+                "exact": true,
+                "quant": true,
+                "answers_agree": true,
+                "expected": "536110",
+                "answers": {
+                  "exact": " 536110.\n\n<think>",
+                  "quant": " 536110.\n\n<think>"
+                }
+              },
+              {
+                "depth": 0.9,
+                "name": "Carina",
+                "exact": true,
+                "quant": true,
+                "answers_agree": false,
+                "expected": "509532",
+                "answers": {
+                  "exact": " 509532.\n\n<think>",
+                  "quant": " 509532.<|im_end|>\n"
+                }
+              }
+            ]
+          },
+          "decode": {
+            "decode_tokens": 128,
+            "repeats": 3,
+            "exact_tok_s": [
+              97.81505932488687,
+              98.23711071800228,
+              95.85048519897786
+            ],
+            "quant_tok_s": [
+              94.10177603613425,
+              92.02689136149512,
+              91.41956007401616
+            ],
+            "exact_tok_s_median": 97.81505932488687,
+            "quant_tok_s_median": 92.02689136149512,
+            "quant_over_exact": 0.9408253902482776
+          },
+          "wall_s": 37.00882541696774
+        },
+        {
+          "context": 16384,
+          "scored_tokens": 256,
+          "kl_mean": 0.0035411235424755994,
+          "kl_p99": 0.0252205585129559,
+          "kl_max": 0.038113947957754135,
+          "top1_agreement": 0.8671875,
+          "top5_overlap": 0.9257812544237822,
+          "logprob_delta_mean": 0.015023194253444672,
+          "quantized_planes": 10,
+          "exact_quantized_planes": 0,
+          "kv_bytes_exact": 340787200,
+          "kv_bytes_quant": 181043200,
+          "kv_bytes_per_token_exact": 20480.0,
+          "kv_bytes_per_token_quant": 10880.0,
+          "kv_bytes_ratio": 0.53125,
+          "decode": {
+            "decode_tokens": 128,
+            "repeats": 3,
+            "exact_tok_s": [
+              90.60666651390959,
+              92.52916734209579,
+              90.60324594748266
+            ],
+            "quant_tok_s": [
+              84.67639741508476,
+              85.07592901978913,
+              84.19384912136148
+            ],
+            "exact_tok_s_median": 90.60666651390959,
+            "quant_tok_s_median": 84.67639741508476,
+            "quant_over_exact": 0.9345493071647831
+          },
+          "wall_s": 33.112606874958146
+        },
+        {
+          "context": 32768,
+          "scored_tokens": 256,
+          "kl_mean": 0.005024947054045381,
+          "kl_p99": 0.036633533611893615,
+          "kl_max": 0.04445204883813858,
+          "top1_agreement": 0.95703125,
+          "top5_overlap": 0.9500000029802322,
+          "logprob_delta_mean": 0.000624045729637146,
+          "quantized_planes": 10,
+          "exact_quantized_planes": 0,
+          "kv_bytes_exact": 676331520,
+          "kv_bytes_quant": 359301120,
+          "kv_bytes_per_token_exact": 20480.0,
+          "kv_bytes_per_token_quant": 10880.0,
+          "kv_bytes_ratio": 0.53125,
+          "needles": {
+            "total": 9,
+            "exact_hits": 9,
+            "quant_hits": 9,
+            "quant_losses": 0,
+            "answers_agree": 8,
+            "detail": [
+              {
+                "depth": 0.1,
+                "name": "Orion",
+                "exact": true,
+                "quant": true,
+                "answers_agree": true,
+                "expected": "885440",
+                "answers": {
+                  "exact": " 885440.<|im_end|>\n",
+                  "quant": " 885440.<|im_end|>\n"
+                }
+              },
+              {
+                "depth": 0.2,
+                "name": "Vega",
+                "exact": true,
+                "quant": true,
+                "answers_agree": true,
+                "expected": "403958",
+                "answers": {
+                  "exact": " 403958.<|im_end|>\n",
+                  "quant": " 403958.<|im_end|>\n"
+                }
+              },
+              {
+                "depth": 0.3,
+                "name": "Lyra",
+                "exact": true,
+                "quant": true,
+                "answers_agree": true,
+                "expected": "794772",
+                "answers": {
+                  "exact": " 794772.<|im_end|>\n",
+                  "quant": " 794772.<|im_end|>\n"
+                }
+              },
+              {
+                "depth": 0.4,
+                "name": "Draco",
+                "exact": true,
+                "quant": true,
+                "answers_agree": true,
+                "expected": "933488",
+                "answers": {
+                  "exact": " 933488.<|im_end|>\n",
+                  "quant": " 933488.<|im_end|>\n"
+                }
+              },
+              {
+                "depth": 0.5,
+                "name": "Cygnus",
+                "exact": true,
+                "quant": true,
+                "answers_agree": true,
+                "expected": "441001",
+                "answers": {
+                  "exact": " 441001.\n\n<think>",
+                  "quant": " 441001.\n\n<think>"
+                }
+              },
+              {
+                "depth": 0.6,
+                "name": "Perseus",
+                "exact": true,
+                "quant": true,
+                "answers_agree": true,
+                "expected": "042450",
+                "answers": {
+                  "exact": " 042450.<|im_end|>\n",
+                  "quant": " 042450.<|im_end|>\n"
+                }
+              },
+              {
+                "depth": 0.7,
+                "name": "Aquila",
+                "exact": true,
+                "quant": true,
+                "answers_agree": false,
+                "expected": "271493",
+                "answers": {
+                  "exact": " 271493.<|im_end|>\n",
+                  "quant": " 271493.\n\n<think>"
+                }
+              },
+              {
+                "depth": 0.8,
+                "name": "Hydra",
+                "exact": true,
+                "quant": true,
+                "answers_agree": true,
+                "expected": "536110",
+                "answers": {
+                  "exact": " 536110.<|im_end|>\n",
+                  "quant": " 536110.<|im_end|>\n"
+                }
+              },
+              {
+                "depth": 0.9,
+                "name": "Carina",
+                "exact": true,
+                "quant": true,
+                "answers_agree": true,
+                "expected": "509532",
+                "answers": {
+                  "exact": " 509532.<|im_end|>\n",
+                  "quant": " 509532.<|im_end|>\n"
+                }
+              }
+            ]
+          },
+          "decode": {
+            "decode_tokens": 128,
+            "repeats": 3,
+            "exact_tok_s": [
+              84.5625085230844,
+              85.63124443492653,
+              85.15876258153699
+            ],
+            "quant_tok_s": [
+              75.08279636829201,
+              75.47532133084482,
+              74.54921926171457
+            ],
+            "exact_tok_s_median": 85.15876258153699,
+            "quant_tok_s_median": 75.08279636829201,
+            "quant_over_exact": 0.8816802181267307
+          },
+          "wall_s": 239.23661650001304
+        }
+      ]
+    }
+  },
+  "verdicts": {
+    "kv_k8v4": {
+      "passed": false,
+      "failures": [
+        "missing context 32768",
+        "context 4096: top1_agreement 0.917969 not >= 0.97",
+        "context 16384: top1_agreement 0.863281 not >= 0.97"
+      ],
+      "operation": "kv_k8v4",
+      "thresholds": {
+        "kl_mean_max": 0.02,
+        "kl_p99_max": 0.2,
+        "top1_agreement_min": 0.97,
+        "bytes_ratio_max": 0.42,
+        "needle_losses_max": 1,
+        "min_context": 4096,
+        "required_contexts": [
+          4096,
+          16384,
+          32768
+        ],
+        "min_scored_tokens": 128,
+        "devices": [
+          "gpu"
+        ]
+      }
+    },
+    "kv_q8": {
+      "passed": false,
+      "failures": [
+        "context 4096: kl_mean 0.00546421 not <= 0.005",
+        "context 4096: top1_agreement 0.9375 not >= 0.99",
+        "context 16384: top1_agreement 0.867188 not >= 0.99",
+        "context 32768: kl_mean 0.00502495 not <= 0.005",
+        "context 32768: top1_agreement 0.957031 not >= 0.99"
+      ],
+      "operation": "kv_q8",
+      "thresholds": {
+        "kl_mean_max": 0.005,
+        "kl_p99_max": 0.05,
+        "top1_agreement_min": 0.99,
+        "bytes_ratio_max": 0.55,
+        "needle_losses_max": 0,
+        "min_context": 4096,
+        "required_contexts": [
+          4096,
+          16384,
+          32768
+        ],
+        "min_scored_tokens": 128,
+        "devices": [
+          "gpu"
+        ]
+      }
+    }
+  }
+}

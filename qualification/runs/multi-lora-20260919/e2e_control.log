@@ -1,0 +1,15 @@
+[cpg_job 2026-09-19T23:05:45+00:00 pid=98209] label=rm05-lora-e2e-control agent_id=job-rm05-lora-e2e-control-98209 command=env PYTHONPATH=src ~/Desktop/mlx2/.venv/bin/python scripts/gpu_multi_lora_throughput.py --model ~/mlx-models/Qwen3.8-27B-MLX-4bit --adapters 0,4 --lanes 8 --rank 16 --interleave 2 --max-tokens 128 --out qualification/runs/multi-lora-20260919/e2e_control.json --i-own-the-gpu
+[cpg_job 2026-09-19T23:05:46+00:00 pid=98209] created workflow 63621d2a63ce4aefbfb86f9f2230b432 (cpg-job drivers); record it as workflows.cpg-job-drivers in /Users/Shared/mlxuag/cpg-radio.json to reuse it
+[cpg_job 2026-09-19T23:05:46+00:00 pid=98209] registered worker 4c49d66838c84330ba71d767dfbc4ad6 as job-rm05-lora-e2e-control-98209 in session 3c65a7827e83456a89fffdeefadec196
+[cpg_job 2026-09-19T23:05:46+00:00 pid=98209] took /Users/Shared/mlxuag/gpu.lock
+[cpg_job 2026-09-19T23:05:46+00:00 pid=98209] child pid 98222 started
+no reasoning signing key configured; using a random per-process reasoning signing key
+{"round": 0, "arm": "base", "tok_s": 89.5, "mixed_forwards": 0}
+{"round": 0, "arm": "mix4", "tok_s": 90.77, "mixed_forwards": 142}
+{"round": 1, "arm": "base", "tok_s": 95.87, "mixed_forwards": 0}
+{"round": 1, "arm": "mix4", "tok_s": 95.68, "mixed_forwards": 135}
+{"ratio_widest_over_base": 1.0058141899491981, "throughput_go": true, "throughput_nogo": false, "parity_go": true}
+[cpg_job 2026-09-19T23:06:48+00:00 pid=98209] child exited rc=0
+[cpg_job 2026-09-19T23:06:48+00:00 pid=98209] worker 4c49d66838c84330ba71d767dfbc4ad6 closed completed
+[cpg_job 2026-09-19T23:06:48+00:00 pid=98209] released /Users/Shared/mlxuag/gpu.lock
+[cpg_job 2026-09-19T23:06:48+00:00 pid=98209] wrote /private/tmp/claude-501/-Users-user-Desktop-mlx2/dcc2c62c-d339-4686-a019-625b816d27d9/scratchpad/roadmap/rm05/gpu/e2e_control.log.done

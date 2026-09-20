@@ -1,0 +1,312 @@
+{
+ "off": {
+  "arm": {
+   "name": "off"
+  },
+  "rows": {
+   "explain_9": {
+    "close_step": 351,
+    "answer": "Optimization 9 in a typical -O2 pipeline is usually **loop unrolling** (also called loop unrolling or loop unrolling). It works by replicating the bodies of loops multiple times so that several iterations are merged into a single loop body, which reduces the overhead of loop‑control instructions and improves instruction‑level parallelism. The transformation is applied after earlier optimizations such as induction‑variable simplification and strength reduction have already lowered the cost of the loop’s arithmetic. By unrolling, the compiler can schedule independent instructions more tightly, keep the CPU’s pipeline fuller, and often increase the effectiveness of subsequent register‑allocation passes. The result is a faster, more tightly‑packed loop that still produces exactly the same computational result as the original.",
+    "rep4": 0.124,
+    "kind": "run_on",
+    "correct": true,
+    "seconds": 4.3,
+    "think_tokens": 351
+   },
+   "explain_13": {
+    "close_step": 256,
+    "answer": "Compiler optimization 13 in a typical -O2 pipeline is usually the **strength‑reduction** pass, which replaces expensive operations such as multiplication or division with cheaper equivalents like shifts and adds. It examines each arithmetic expression in the function and attempts to rewrite it using a sequence of cheaper operations that produce the same result. When the pass identifies a pattern like `x * 8`, it transforms it into `x << 3` because a left shift by three bits is mathematically equivalent and far faster on most CPUs. The transformation is applied throughout the whole translation unit, allowing the later code‑generation stage to emit more efficient machine instructions. By reducing the computational cost of common arithmetic idioms, this optimization can noticeably improve the performance of tight loops and hot code paths.",
+    "rep4": 0.075,
+    "kind": "run_on",
+    "correct": true,
+    "seconds": 3.2,
+    "think_tokens": 256
+   },
+   "explain_15": {
+    "close_step": 933,
+    "answer": "Optimization #15 in a typical -O2 pipeline is usually the **loop‑unrolling** pass, which replicates the loop body several times to reduce branch‑prediction penalties and expose more instruction‑level parallelism. By expanding the loop into a larger straight‑line block, the scheduler has more freedom to reorder instructions and keep the execution units busy. This transformation can increase code size, but the trade‑off often yields faster execution on modern superscalar cores. The pass is applied after earlier loop‑specific optimizations such as invariant motion and unswitching, so the loop is already in a simplified form. Its name in GCC’s pipeline is commonly listed as `loop_unroll` or `loop_unrolling`.",
+    "rep4": 0.27,
+    "kind": "run_on",
+    "correct": true,
+    "seconds": 9.2,
+    "think_tokens": 933
+   },
+   "explain_18": {
+    "close_step": 326,
+    "answer": "Optimization 18 in a typical -O2 pipeline is usually the **loop‑unrolling (or loop‑unrolling) pass**. It works by duplicating the bodies of small, hot loops so that the loop‑control overhead (branching, counter updates, and loop‑exit checks) is reduced. By unrolling, the compiler can also expose more instruction‑level parallelism and give the downstream scheduler more freedom to reorder instructions. The transformation is applied selectively to loops whose trip count is known at compile time and whose body size is modest, ensuring that code‑size growth stays bounded. The net effect is faster execution on modern pipelines because the loop’s critical path is shortened and the processor can better hide latency.",
+    "rep4": 0.121,
+    "kind": "run_on",
+    "correct": true,
+    "seconds": 3.7,
+    "think_tokens": 326
+   },
+   "translate_house": {
+    "close_step": -1,
+    "answer": "",
+    "rep4": 0.916,
+    "kind": "run_on",
+    "correct": false,
+    "seconds": 20.5,
+    "think_tokens": 2400
+   },
+   "capital_hungary": {
+    "close_step": -1,
+    "answer": "",
+    "rep4": 0.957,
+    "kind": "run_on",
+    "correct": false,
+    "seconds": 20.9,
+    "think_tokens": 2400
+   },
+   "add_62_130": {
+    "close_step": 50,
+    "answer": "192",
+    "rep4": 0.043,
+    "kind": "control",
+    "correct": true,
+    "seconds": 0.5,
+    "think_tokens": 50
+   },
+   "add_44_88": {
+    "close_step": 49,
+    "answer": "132",
+    "rep4": 0.0,
+    "kind": "control",
+    "correct": true,
+    "seconds": 0.5,
+    "think_tokens": 49
+   },
+   "paris_coastal": {
+    "close_step": 56,
+    "answer": "No.",
+    "rep4": 0.0,
+    "kind": "control",
+    "correct": true,
+    "seconds": 0.6,
+    "think_tokens": 56
+   },
+   "primes_below_60": {
+    "close_step": 171,
+    "answer": "17",
+    "rep4": 0.0,
+    "kind": "hard",
+    "correct": true,
+    "seconds": 1.4,
+    "think_tokens": 171
+   },
+   "digit_sum": {
+    "close_step": 109,
+    "answer": "31",
+    "rep4": 0.085,
+    "kind": "hard",
+    "correct": true,
+    "seconds": 0.9,
+    "think_tokens": 109
+   },
+   "train_meet": {
+    "close_step": 67,
+    "answer": "2",
+    "rep4": 0.0,
+    "kind": "hard",
+    "correct": true,
+    "seconds": 0.6,
+    "think_tokens": 67
+   },
+   "sort_words": {
+    "close_step": 38,
+    "answer": "apple, banana, cherry, fig, mango, pear",
+    "rep4": 0.0,
+    "kind": "hard",
+    "correct": true,
+    "seconds": 0.5,
+    "think_tokens": 38
+   },
+   "mod_pow": {
+    "close_step": 290,
+    "answer": "11",
+    "rep4": 0.195,
+    "kind": "hard",
+    "correct": true,
+    "seconds": 2.3,
+    "think_tokens": 290
+   },
+   "count_r": {
+    "close_step": 89,
+    "answer": "3",
+    "rep4": 0.023,
+    "kind": "hard",
+    "correct": true,
+    "seconds": 0.8,
+    "think_tokens": 89
+   },
+   "bat_ball": {
+    "close_step": 98,
+    "answer": "5",
+    "rep4": 0.095,
+    "kind": "hard",
+    "correct": true,
+    "seconds": 0.9,
+    "think_tokens": 98
+   }
+  },
+  "closed": 14,
+  "correct": 14,
+  "think_tokens": 7683
+ },
+ "L32-a0.2": {
+  "arm": {
+   "name": "L32-a0.2",
+   "layer": 32,
+   "alpha": 0.2
+  },
+  "rows": {
+   "explain_9": {
+    "close_step": 347,
+    "answer": "Optimization 9 in a typical ‑O2 pipeline is often the **loop‑unrolling** (or loop‑unrolling) pass, which replicates the bodies of tight loops to reduce the overhead of branch instructions and improve instruction‑level parallelism. By unrolling, the compiler can expose more independent instructions that the CPU’s out‑of‑order scheduler can execute concurrently, thereby increasing throughput on superscalar cores. The transformation is applied selectively so that the unrolled code still fits into the available instruction cache and does not cause register pressure that would degrade performance. This optimization works hand‑in‑hand with other ‑O2 passes such as loop‑invariant code motion and strength reduction to further lower the computational cost of loop bodies. The net effect is a measurable speed‑up for compute‑bound kernels while keeping the generated code size reasonable.",
+    "rep4": 0.108,
+    "kind": "run_on",
+    "correct": true,
+    "seconds": 4.1,
+    "think_tokens": 347
+   },
+   "explain_13": {
+    "close_step": 433,
+    "answer": "Optimization 13 in a typical -O2 pipeline is usually the **strength‑reduction pass**, which replaces expensive operations (such as multiplication) with cheaper equivalents (like addition or bit‑shifts) wherever the mathematical relationship permits. It works after the earlier algebraic simplifications have identified patterns of repeated costly computations, and it propagates the cheaper forms throughout the function’s SSA form. By converting multiplications into sequences of shifts and adds, the optimizer can reduce the number of cycles needed on many pipelines and also lower the register pressure. The pass also cooperates with the later **instruction‑scheduling** and **register‑allocation** stages so that the newly introduced instructions fit efficiently into the target’s latency‑aware schedule. Overall, this optimization helps the generated code run faster and use fewer CPU cycles without changing the program’s observable behavior.",
+    "rep4": 0.205,
+    "kind": "run_on",
+    "correct": true,
+    "seconds": 4.9,
+    "think_tokens": 433
+   },
+   "explain_15": {
+    "close_step": 278,
+    "answer": "Optimization 15 of a typical -O2 pipeline is usually the **loop‑unrolling** pass, which replicates the bodies of small loops to reduce the overhead of loop‑control instructions. By unrolling, the compiler can expose more instruction‑level parallelism and enable other optimizations such as better register allocation and instruction scheduling. The pass decides how many times to replicate each iteration based on a cost model that balances code‑size growth against performance gains. After unrolling, the compiler often performs **dead‑code elimination** to remove any now‑unreachable instructions introduced by the replication. The result is a tighter, faster loop that can be executed with fewer branch mispredictions and higher throughput.",
+    "rep4": 0.131,
+    "kind": "run_on",
+    "correct": true,
+    "seconds": 3.3,
+    "think_tokens": 278
+   },
+   "explain_18": {
+    "close_step": 310,
+    "answer": "Optimization 18 is typically a **loop‑unrolling** pass that replicates the bodies of small loops to reduce branch overhead and improve instruction‑level parallelism. It works after earlier passes have identified hot loops and may decide how many times to repeat the loop body based on a cost model. The transformation can increase code size but often yields faster execution because the loop‑control logic is reduced and the pipeline stays fuller. To keep binary size in check, the pass may limit unrolling to a modest factor (e.g., 2‑4×) and will skip loops that are already large or have complex control flow. The result is a more predictable, tightly‑pipelined execution path that the hardware scheduler can fill more efficiently.",
+    "rep4": 0.088,
+    "kind": "run_on",
+    "correct": true,
+    "seconds": 3.6,
+    "think_tokens": 310
+   },
+   "translate_house": {
+    "close_step": 91,
+    "answer": "**Traduction :**\n- Anglais : house → Français : **maison**\n\n**Deux phrases courtes en français utilisant le mot « maison » :**\n\n1. La maison est située au bord de la rivière.\n2. Ils ont décoré la maison pour Halloween.",
+    "rep4": 0.011,
+    "kind": "run_on",
+    "correct": true,
+    "seconds": 1.2,
+    "think_tokens": 91
+   },
+   "capital_hungary": {
+    "close_step": 77,
+    "answer": "Budapest",
+    "rep4": 0.149,
+    "kind": "run_on",
+    "correct": true,
+    "seconds": 0.7,
+    "think_tokens": 77
+   },
+   "add_62_130": {
+    "close_step": 45,
+    "answer": "192",
+    "rep4": 0.048,
+    "kind": "control",
+    "correct": true,
+    "seconds": 0.4,
+    "think_tokens": 45
+   },
+   "add_44_88": {
+    "close_step": 45,
+    "answer": "132",
+    "rep4": 0.0,
+    "kind": "control",
+    "correct": true,
+    "seconds": 0.4,
+    "think_tokens": 45
+   },
+   "paris_coastal": {
+    "close_step": 55,
+    "answer": "No.",
+    "rep4": 0.0,
+    "kind": "control",
+    "correct": true,
+    "seconds": 0.5,
+    "think_tokens": 55
+   },
+   "primes_below_60": {
+    "close_step": 178,
+    "answer": "17",
+    "rep4": 0.006,
+    "kind": "hard",
+    "correct": true,
+    "seconds": 1.4,
+    "think_tokens": 178
+   },
+   "digit_sum": {
+    "close_step": 44,
+    "answer": "31",
+    "rep4": 0.0,
+    "kind": "hard",
+    "correct": true,
+    "seconds": 0.4,
+    "think_tokens": 44
+   },
+   "train_meet": {
+    "close_step": 55,
+    "answer": "2",
+    "rep4": 0.0,
+    "kind": "hard",
+    "correct": true,
+    "seconds": 0.5,
+    "think_tokens": 55
+   },
+   "sort_words": {
+    "close_step": 38,
+    "answer": "apple, banana, cherry, fig, mango, pear",
+    "rep4": 0.0,
+    "kind": "hard",
+    "correct": true,
+    "seconds": 0.5,
+    "think_tokens": 38
+   },
+   "mod_pow": {
+    "close_step": 192,
+    "answer": "11",
+    "rep4": 0.111,
+    "kind": "hard",
+    "correct": true,
+    "seconds": 1.5,
+    "think_tokens": 192
+   },
+   "count_r": {
+    "close_step": 117,
+    "answer": "3",
+    "rep4": 0.0,
+    "kind": "hard",
+    "correct": true,
+    "seconds": 1.0,
+    "think_tokens": 117
+   },
+   "bat_ball": {
+    "close_step": 99,
+    "answer": "5",
+    "rep4": 0.125,
+    "kind": "hard",
+    "correct": true,
+    "seconds": 0.8,
+    "think_tokens": 99
+   }
+  },
+  "closed": 16,
+  "correct": 16,
+  "think_tokens": 2404
+ }
+}

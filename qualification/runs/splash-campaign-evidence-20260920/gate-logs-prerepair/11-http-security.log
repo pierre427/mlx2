@@ -1,0 +1,30 @@
+### job 11-http-security
+### started 2026-09-20T00:05:40
+### worktree /private/tmp/mlx2-splash-11-http-security
+### models ~/mlx-models/North-Mini-Code-1.0-mlx-4bit
+    ok   /private/tmp/mlx2-splash-11-http-security/scripts/sdk_smoke.py
+    ok   /private/tmp/mlx2-splash-11-http-security/src/mlx2/server.py
+    ok   model ~/mlx-models/North-Mini-Code-1.0-mlx-4bit
+[runner] Run A: default flags (gate on: Host/Origin, no key)
+[runner] server pid 84537  log /private/tmp/claude-501/-Users-user-Desktop-mlx2/b569b1f6-d687-4876-a42a-e5fdf0abeabc/scratchpad/gpu-queue/11-out/a.log
+[runner] ready: http://127.0.0.1:8311/health after 5s
+A1 404
+A2 404
+A3 404
+A4 421
+A5 403
+sdk_smoke importable
+[runner] server stopped
+[runner] Run B: API key on
+[runner] server pid 84570  log /private/tmp/claude-501/-Users-user-Desktop-mlx2/b569b1f6-d687-4876-a42a-e5fdf0abeabc/scratchpad/gpu-queue/11-out/b.log
+[runner] ready: http://127.0.0.1:8311/health after 5s
+B1 401
+B2 404
+B3 404
+B4 200
+B5 401
+[runner] server stopped
+--- gate check: expect A1/A2/A3=200 A4=421 A5=403 B1=401 B2=200 B3=200 B4=200 B5=401
+/private/tmp/claude-501/-Users-user-Desktop-mlx2/b569b1f6-d687-4876-a42a-e5fdf0abeabc/scratchpad/gpu-queue/11-out/a.log:0
+/private/tmp/claude-501/-Users-user-Desktop-mlx2/b569b1f6-d687-4876-a42a-e5fdf0abeabc/scratchpad/gpu-queue/11-out/b.log:0
+### finished 2026-09-20T00:05:56 status=ok duration=15s

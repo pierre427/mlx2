@@ -1,0 +1,74 @@
+{
+  "stage": "muse-old",
+  "tree": "/private/tmp/claude-501/-Users-user-Desktop-mlx2--claude-worktrees-goofy-ramanujan-84601f/4cd2af91-a719-4fe9-86c2-2d3edf98f9d5/scratchpad/old",
+  "started": "2026-09-19 16:27:28",
+  "head": "ffc6ceb",
+  "command": "mlx2.server --model ~/mlx-models/Muse-Glimmer-30B-mlx-4bit --host 127.0.0.1 --port 8391 --cache-dir ~/Desktop/mlx2/.claude/worktrees/goofy-ramanujan-84601f/qualification/runs/inverse-findings-gpu-20260919/cache/muse-old --max-context 32768 --max-lanes 4 --max-inflight 8 --cache-bytes 8589934592 --qualification-mode --ordinary --execution-policy ~/Desktop/mlx2/.claude/worktrees/goofy-ramanujan-84601f/qualification/runs/inverse-findings-gpu-20260919/policies/constrained.json",
+  "named": {
+    "rows": [
+      {
+        "status": 200,
+        "content": "",
+        "reasoning": null,
+        "tool_calls": [
+          {
+            "name": "get_weather",
+            "arguments": "{\"city\": \"London\", \"unit\": \"celsius\"}"
+          }
+        ],
+        "finish": "tool_calls",
+        "completion_tokens": 50,
+        "thinking_guard": null,
+        "prompt": "Call the tool now.",
+        "has_required_city": true
+      },
+      {
+        "status": 200,
+        "content": "",
+        "reasoning": null,
+        "tool_calls": [
+          {
+            "name": "get_weather",
+            "arguments": "{\"city\": \"hello\"}"
+          }
+        ],
+        "finish": "tool_calls",
+        "completion_tokens": 36,
+        "thinking_guard": null,
+        "prompt": "hello",
+        "has_required_city": true
+      },
+      {
+        "status": 502,
+        "error": "{\"error\": {\"message\": \"Malformed or missing ATEM parameters\", \"type\": \"server_error\"}}",
+        "prompt": "What's the weather like?",
+        "has_required_city": false
+      },
+      {
+        "status": 502,
+        "error": "{\"error\": {\"message\": \"Malformed or missing ATEM parameters\", \"type\": \"server_error\"}}",
+        "prompt": "Use get_weather.",
+        "has_required_city": false
+      },
+      {
+        "status": 200,
+        "content": "",
+        "reasoning": null,
+        "tool_calls": [
+          {
+            "name": "get_weather",
+            "arguments": "{\"city\": \"Paris\", \"unit\": \"celsius\"}"
+          }
+        ],
+        "finish": "tool_calls",
+        "completion_tokens": 50,
+        "thinking_guard": null,
+        "prompt": "What's the weather in Paris, in celsius?",
+        "has_required_city": true
+      }
+    ],
+    "with_city": 3,
+    "of": 5
+  },
+  "finished": "2026-09-19 16:27:45"
+}

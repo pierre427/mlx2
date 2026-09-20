@@ -37,6 +37,7 @@ candidate profiles have passed**. The deployment receipt and final reports in
 | Layered COW state and revision-bound transactions | Yes | On | CPU branch/rollback/oracle tests; warm cohort serving required |
 | Bounded APC resident + idle disk tier | Yes | 12 GiB / 64 GiB, 180 s idle | Lifecycle spill/restore tests; status reports actual bounds |
 | Segmented true-batched MTP | Yes | MTP2 default; k1/k3 selectable | Forced-acceptance tests; real batched forwards required |
+| Adapter-default native MTP | Yes | No route flag on a complete MTP artifact | Pre-load metadata resolution; explicit `--native-mtp` is equivalent |
 | Ordinary decode reference | Yes | `--ordinary` separate qualified profile | Full same HTTP lifecycle; independent source-bound receipt |
 | Continuous batching, memory admission, adaptive prefill | Yes | On | Batch/mixed-warm/churn/cancellation; actual widths in receipt |
 | File-backed PLE + 2 GiB LRU + compiled PLE | Yes | On | Table lookup/hit counters and compile diagnostics |
@@ -60,7 +61,7 @@ candidate profiles have passed**. The deployment receipt and final reports in
 | Adaptive speculative rate/depth router | Not a selectable batch feature | Off | Unified batch API also explicitly rejects rate gating/windowed/per-lane adaptive depth |
 | FLy relaxed verification | External exact-rejection and self-MTP greedy seams implemented | Off; execution-policy only | Approximate and unqualified; sampled/block self-MTP and all structured-output lanes remain exact |
 | Quantized KV / approximate cache compaction | Components exist | Not selected | Fidelity-changing routes need independent quality, rollback and cache-publication qualification |
-| Budgeted APCv2 interior checkpoints | Exact self-MTP and ordinary hybrid capture implemented | Off; execution-policy only | CPU tiny-Qwen4 edited-prefix reuse and warm/cold equality; incompatible routes fail startup and selection requires captured/published qualification evidence |
+| Budgeted APCv2 interior checkpoints | Exact self-MTP and ordinary hybrid capture implemented; turn/tail/`auto` placement (rm04) | Off; execution-policy only (`"auto"` preset pending GPU go) | CPU tiny-Qwen4 edited-prefix reuse and warm/cold equality; incompatible routes fail startup and selection requires captured/published qualification evidence |
 | APCv2 session park/resume + restart persistence | Yes; exact committed state only | Disk-tier opt-in; persistent directory separately opt-in | CPU tiny-Qwen4 park/prefetch warm decode equals cold; restart/rescan/digest/identity/lock tests |
 | Additional QSA summaries serialized through APC | Present | Off | Separate derived-state persistence path needs a selected serving qualification |
 

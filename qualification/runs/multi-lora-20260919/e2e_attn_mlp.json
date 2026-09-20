@@ -1,0 +1,244 @@
+{
+ "schema": "mlx2.multi-lora-e2e.v1",
+ "args": {
+  "model": "~/mlx-models/Qwen3.8-27B-MLX-4bit",
+  "adapters": "0,4",
+  "lanes": 8,
+  "rank": 16,
+  "targets": "self_attn.q_proj,self_attn.v_proj,self_attn.o_proj,mlp.gate_proj,mlp.up_proj,mlp.down_proj",
+  "max_tokens": 128,
+  "parity_tokens": 32,
+  "interleave": 3,
+  "out": "qualification/runs/multi-lora-20260919/e2e_attn_mlp.json",
+  "i_own_the_gpu": true,
+  "dry_run": false,
+  "tiny_cpu_smoke": false
+ },
+ "arms": {
+  "base": {
+   "runs": [
+    {
+     "rows": [
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null
+     ],
+     "wall_s": 9.668221959029324,
+     "completion_tokens": 882,
+     "tok_s": 91.22670163527685,
+     "mixed_forwards": 0,
+     "delta_applications": 0
+    },
+    {
+     "rows": [
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null
+     ],
+     "wall_s": 9.134888124943245,
+     "completion_tokens": 881,
+     "tok_s": 96.44343619210701,
+     "mixed_forwards": 0,
+     "delta_applications": 0
+    },
+    {
+     "rows": [
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null
+     ],
+     "wall_s": 9.260666417016182,
+     "completion_tokens": 881,
+     "tok_s": 95.13354226659006,
+     "mixed_forwards": 0,
+     "delta_applications": 0
+    }
+   ],
+   "median_tok_s": 95.13354226659006
+  },
+  "mix4": {
+   "runs": [
+    {
+     "rows": [
+      "lora0",
+      "lora1",
+      "lora2",
+      "lora3",
+      "lora0",
+      "lora1",
+      "lora2",
+      "lora3"
+     ],
+     "wall_s": 13.126610707957298,
+     "completion_tokens": 966,
+     "tok_s": 73.59096887168405,
+     "mixed_forwards": 142,
+     "delta_applications": 34080
+    },
+    {
+     "rows": [
+      "lora0",
+      "lora1",
+      "lora2",
+      "lora3",
+      "lora0",
+      "lora1",
+      "lora2",
+      "lora3"
+     ],
+     "wall_s": 12.06293612497393,
+     "completion_tokens": 913,
+     "tok_s": 75.68638269664825,
+     "mixed_forwards": 135,
+     "delta_applications": 32400
+    },
+    {
+     "rows": [
+      "lora0",
+      "lora1",
+      "lora2",
+      "lora3",
+      "lora0",
+      "lora1",
+      "lora2",
+      "lora3"
+     ],
+     "wall_s": 12.117037750023883,
+     "completion_tokens": 913,
+     "tok_s": 75.3484489225265,
+     "mixed_forwards": 135,
+     "delta_applications": 32400
+    }
+   ],
+   "median_tok_s": 75.3484489225265
+  }
+ },
+ "parity": {
+  "lora0": {
+   "identical": true,
+   "first_divergence_char": null,
+   "mixed_prefix": "Assuming a typical orders table with columns like `order_id`, `customer_id`, and `order_date` (and that the \"most recent",
+   "alone_prefix": "Assuming a typical orders table with columns like `order_id`, `customer_id`, and `order_date` (and that the \"most recent"
+  },
+  "lora1": {
+   "identical": false,
+   "first_divergence_char": 76,
+   "mixed_prefix": "A group of skilled thieves is hired to pull off a seemingly impossible heist, and they meticulously plan every step of t",
+   "alone_prefix": "A group of skilled thieves is hired to pull off a seemingly impossible heist. They execute the plan with precision, but "
+  },
+  "lora2": {
+   "identical": false,
+   "first_divergence_char": 75,
+   "mixed_prefix": "**Radix Trees (also known as Prefix Trees, Trie Trees, or R-Trees)** are a type of data structure used in computer scien",
+   "alone_prefix": "**Radix Trees (also known as Prefix Trees, Trie Trees, or R-Trees)** are a data structure used in computer science and m"
+  },
+  "lora3": {
+   "identical": false,
+   "first_divergence_char": 102,
+   "mixed_prefix": "Here are three key tips for writing clear and effective commit messages:\n\n1. **Use the Imperative Mood to Describe the \"",
+   "alone_prefix": "Here are three key tips for writing clear and effective commit messages:\n\n1. **Use the Imperative Mood**\n   Phrase your "
+  }
+ },
+ "registrations": [
+  {
+   "status": "loaded",
+   "mode": "concurrent",
+   "fingerprint": "635a73a9586e30a21b6ca82212fdd407d5cd1f7128771e47294c86ce89472654",
+   "rank": 16,
+   "drained": true,
+   "model_revision": 0
+  },
+  {
+   "status": "loaded",
+   "mode": "concurrent",
+   "fingerprint": "7003151f90e4041c4be36d4827cfabfda1315864ac8153329b67e66b29365ff8",
+   "rank": 16,
+   "drained": false,
+   "model_revision": 0
+  },
+  {
+   "status": "loaded",
+   "mode": "concurrent",
+   "fingerprint": "73c6c5d787cacc40d1dabdcd7d238b57e5766faba5ecab8b636a8ffa113ea93f",
+   "rank": 16,
+   "drained": false,
+   "model_revision": 0
+  },
+  {
+   "status": "loaded",
+   "mode": "concurrent",
+   "fingerprint": "6f794878b8fc200b3f9e21654706afb5314c191744a4a30dc0a1bb8c36a56c91",
+   "rank": 16,
+   "drained": false,
+   "model_revision": 0
+  }
+ ],
+ "keys": 240,
+ "verdict": {
+  "ratio_widest_over_base": 0.7920282071635645,
+  "throughput_go": false,
+  "throughput_nogo": false,
+  "parity_go": false
+ },
+ "multi_lora_status": {
+  "enabled": true,
+  "max_loras": 4,
+  "max_lora_rank": 16,
+  "schema": "mlx2.multi-lora.v1",
+  "registered": [
+   "lora0",
+   "lora1",
+   "lora2",
+   "lora3"
+  ],
+  "resident": {
+   "1": "lora0",
+   "2": "lora1",
+   "3": "lora2",
+   "4": "lora3"
+  },
+  "pinned_slots": 0,
+  "wrapped_modules": 240,
+  "reserved_bytes": 781189120,
+  "registered_bytes": 624951296,
+  "counts": {
+   "forwards": 1265,
+   "base_only_forwards": 412,
+   "mixed_forwards": 412,
+   "single_adapter_forwards": 441,
+   "rows_base": 2676,
+   "rows_adapter": 3265,
+   "slot_hits": 24,
+   "slot_loads": 4,
+   "slot_evictions": 0,
+   "slot_deferred": 0,
+   "registrations": 4,
+   "unregistrations": 0,
+   "structural_wraps": 240,
+   "materializations": 4,
+   "delta_applications": 204720,
+   "delta_skips": 98880
+  },
+  "rows_by_adapter": {
+   "lora0": 833,
+   "lora1": 622,
+   "lora2": 905,
+   "lora3": 905
+  }
+ }
+}

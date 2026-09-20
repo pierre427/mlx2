@@ -1,0 +1,309 @@
+{
+ "schema": "mlx2.rm06-external-draft-acceptance.v1",
+ "plan": {
+  "schema": "mlx2.rm06-external-draft-acceptance.v1",
+  "kind": "execution_plan",
+  "family": "laguna",
+  "target": "~/.cache/huggingface/hub/models--AtomicChat--Laguna-XS-2.1-MLX-8bit/snapshots/ba635f7386219675b9b71acdc2812d12fa69aab2",
+  "draft": "~/.cache/huggingface/hub/models--poolside--Laguna-XS-2.1-DFlash/snapshots/2e783135b1590c16c392ad9613e427f1090daa48",
+  "will_execute": true,
+  "arms": 8,
+  "prompts": 8,
+  "max_tokens": 128,
+  "depths": [
+   3,
+   7
+  ],
+  "widths": [
+   1,
+   4
+  ],
+  "temperatures": [
+   0.7
+  ],
+  "interleaving": "ordinary/external alternating per (repeat, temp, width, depth)",
+  "go_criterion": {
+   "greedy_parity": "mean greedy common-prefix ratio vs ordinary >= 0.9 (exact count also reported)",
+   "b1_speedup_min": 1.25,
+   "b4_speedup_min": 1.0,
+   "arm_refused_if": "external_rounds == 0 or proposed_tokens == 0"
+  },
+  "order": [
+   [
+    "ordinary",
+    0,
+    1,
+    0.7,
+    0
+   ],
+   [
+    "external",
+    3,
+    1,
+    0.7,
+    0
+   ],
+   [
+    "ordinary",
+    0,
+    1,
+    0.7,
+    0
+   ],
+   [
+    "external",
+    7,
+    1,
+    0.7,
+    0
+   ],
+   [
+    "ordinary",
+    0,
+    4,
+    0.7,
+    0
+   ],
+   [
+    "external",
+    3,
+    4,
+    0.7,
+    0
+   ],
+   [
+    "ordinary",
+    0,
+    4,
+    0.7,
+    0
+   ],
+   [
+    "external",
+    7,
+    4,
+    0.7,
+    0
+   ]
+  ]
+ },
+ "arms": [
+  {
+   "kind": "ordinary",
+   "num_draft": 0,
+   "width": 1,
+   "temperature": 0.7,
+   "repeat": 0,
+   "decode_tok_s": 93.7542383555521,
+   "mechanism": {}
+  },
+  {
+   "kind": "external",
+   "num_draft": 3,
+   "width": 1,
+   "temperature": 0.7,
+   "repeat": 0,
+   "decode_tok_s": 92.29061929376887,
+   "mechanism": {
+    "external_rounds": 415,
+    "proposed_tokens": 1236,
+    "accepted_proposals": 561,
+    "mean_acceptance_length": 2.3518072289156624,
+    "draft_stats": {
+     "committed_positions": 1186,
+     "block_drafts": 415
+    },
+    "round_times_ms": {
+     "recovery_capture": 0.40925576545141007,
+     "draft": 5.17444435089086,
+     "transaction_begin": 0.2419614653854844,
+     "verify_forward": 17.378004825342984,
+     "verify_laws": 2.0346243548801684,
+     "transaction_commit": 0.4990929980335914,
+     "emit": 0.07803341659930456
+    }
+   }
+  },
+  {
+   "kind": "ordinary",
+   "num_draft": 0,
+   "width": 1,
+   "temperature": 0.7,
+   "repeat": 0,
+   "decode_tok_s": 97.99337197451871,
+   "mechanism": {}
+  },
+  {
+   "kind": "external",
+   "num_draft": 7,
+   "width": 1,
+   "temperature": 0.7,
+   "repeat": 0,
+   "decode_tok_s": 79.03971609404715,
+   "mechanism": {
+    "external_rounds": 363,
+    "proposed_tokens": 2495,
+    "accepted_proposals": 654,
+    "mean_acceptance_length": 2.8016528925619832,
+    "draft_stats": {
+     "committed_positions": 2409,
+     "block_drafts": 778
+    },
+    "round_times_ms": {
+     "recovery_capture": 0.41049839473347444,
+     "draft": 7.6037623758232815,
+     "transaction_begin": 0.2538648200831979,
+     "verify_forward": 23.571606120768134,
+     "verify_laws": 3.6382290148868974,
+     "transaction_commit": 0.48427814720378104,
+     "emit": 0.09262980123566202
+    }
+   }
+  },
+  {
+   "kind": "ordinary",
+   "num_draft": 0,
+   "width": 4,
+   "temperature": 0.7,
+   "repeat": 0,
+   "decode_tok_s": 231.90476563327874,
+   "mechanism": {}
+  },
+  {
+   "kind": "external",
+   "num_draft": 3,
+   "width": 4,
+   "temperature": 0.7,
+   "repeat": 0,
+   "decode_tok_s": 113.41096821805199,
+   "mechanism": {
+    "external_rounds": 224,
+    "proposed_tokens": 1194,
+    "accepted_proposals": 592,
+    "mean_acceptance_length": 3.642857142857143,
+    "draft_stats": {
+     "committed_positions": 3614,
+     "block_drafts": 1179
+    },
+    "round_times_ms": {
+     "recovery_capture": 0.6873554448247887,
+     "draft": 8.729910176823198,
+     "transaction_begin": 0.417054117860971,
+     "verify_forward": 23.692947354252933,
+     "verify_laws": 3.5517754703115707,
+     "transaction_commit": 0.7938069375086343,
+     "emit": 0.13516367471311241
+    }
+   }
+  },
+  {
+   "kind": "ordinary",
+   "num_draft": 0,
+   "width": 4,
+   "temperature": 0.7,
+   "repeat": 0,
+   "decode_tok_s": 230.32056339521685,
+   "mechanism": {}
+  },
+  {
+   "kind": "external",
+   "num_draft": 7,
+   "width": 4,
+   "temperature": 0.7,
+   "repeat": 0,
+   "decode_tok_s": 86.68902424009718,
+   "mechanism": {
+    "external_rounds": 218,
+    "proposed_tokens": 2501,
+    "accepted_proposals": 630,
+    "mean_acceptance_length": 3.889908256880734,
+    "draft_stats": {
+     "committed_positions": 4820,
+     "block_drafts": 1544
+    },
+    "round_times_ms": {
+     "recovery_capture": 0.6541844949749973,
+     "draft": 12.295016034991146,
+     "transaction_begin": 0.41527081646213154,
+     "verify_forward": 31.330343251492522,
+     "verify_laws": 6.125337001547183,
+     "transaction_commit": 0.7595187397524202,
+     "emit": 0.1428348483269983
+    }
+   }
+  }
+ ],
+ "refused": [],
+ "summary": [
+  {
+   "width": 1,
+   "temperature": 0.7,
+   "num_draft": 3,
+   "ordinary_tok_s": 95.8738051650354,
+   "external_tok_s": 92.29061929376887,
+   "speedup": 0.9626260179712435,
+   "mean_acceptance_length": 2.3518072289156624,
+   "greedy_parity": [
+    null
+   ],
+   "greedy_prefix_ratio": [
+    null
+   ],
+   "ordinary_spread": 0.044215764792786084
+  },
+  {
+   "width": 1,
+   "temperature": 0.7,
+   "num_draft": 7,
+   "ordinary_tok_s": 95.8738051650354,
+   "external_tok_s": 79.03971609404715,
+   "speedup": 0.824414092650121,
+   "mean_acceptance_length": 2.8016528925619832,
+   "greedy_parity": [
+    null
+   ],
+   "greedy_prefix_ratio": [
+    null
+   ],
+   "ordinary_spread": 0.044215764792786084
+  },
+  {
+   "width": 4,
+   "temperature": 0.7,
+   "num_draft": 3,
+   "ordinary_tok_s": 231.1126645142478,
+   "external_tok_s": 113.41096821805199,
+   "speedup": 0.4907172372246193,
+   "mean_acceptance_length": 3.642857142857143,
+   "greedy_parity": [
+    null
+   ],
+   "greedy_prefix_ratio": [
+    null
+   ],
+   "ordinary_spread": 0.006854675148986599
+  },
+  {
+   "width": 4,
+   "temperature": 0.7,
+   "num_draft": 7,
+   "ordinary_tok_s": 231.1126645142478,
+   "external_tok_s": 86.68902424009718,
+   "speedup": 0.3750942183211812,
+   "mean_acceptance_length": 3.889908256880734,
+   "greedy_parity": [
+    null
+   ],
+   "greedy_prefix_ratio": [
+    null
+   ],
+   "ordinary_spread": 0.006854675148986599
+  }
+ ],
+ "verdict": {
+  "greedy_parity": false,
+  "best_b1_speedup": 0,
+  "best_b4_speedup": 0,
+  "go": false
+ }
+}

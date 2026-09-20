@@ -1,0 +1,186 @@
+### job 01-gpu-accept-count
+### started 2026-09-20T00:28:37
+### worktree /private/tmp/mlx2-splash-01-gpu-accept-count
+### models ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP
+    ok   /private/tmp/mlx2-splash-01-gpu-accept-count/scripts/bench_gpu_accept_count.py
+    ok   /private/tmp/mlx2-splash-01-gpu-accept-count/scripts/qualify_qwen4_gdn_replay_model.py
+    ok   /private/tmp/mlx2-splash-01-gpu-accept-count/scripts/benchmark_serving.py
+    ok   model ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP
+[runner] step 1: kernel equality + micro A/B (no model load)
+{
+  "cpu_reference": {
+    "device": "cpu",
+    "results": [
+      {
+        "all_prefixes_bit_exact": true,
+        "width": 2
+      },
+      {
+        "all_prefixes_bit_exact": true,
+        "width": 3
+      },
+      {
+        "all_prefixes_bit_exact": true,
+        "width": 4
+      },
+      {
+        "all_prefixes_bit_exact": true,
+        "width": 5
+      },
+      {
+        "all_prefixes_bit_exact": true,
+        "width": 8
+      },
+      {
+        "all_prefixes_bit_exact": true,
+        "width": 17
+      }
+    ]
+  },
+  "generic_masked_ab": [
+    {
+      "bitwise_mismatch_prefixes": [],
+      "one_graph_masked_us": 774.8875,
+      "per_distinct_length_sliced_us": 871.225,
+      "rows": 4,
+      "width": 2
+    },
+    {
+      "bitwise_mismatch_prefixes": [],
+      "one_graph_masked_us": 577.62085,
+      "per_distinct_length_sliced_us": 748.0667,
+      "rows": 4,
+      "width": 3
+    },
+    {
+      "bitwise_mismatch_prefixes": [],
+      "one_graph_masked_us": 708.2083,
+      "per_distinct_length_sliced_us": 1005.9667,
+      "rows": 4,
+      "width": 4
+    },
+    {
+      "bitwise_mismatch_prefixes": [],
+      "one_graph_masked_us": 889.2895500000001,
+      "per_distinct_length_sliced_us": 1570.60415,
+      "rows": 4,
+      "width": 5
+    },
+    {
+      "bitwise_mismatch_prefixes": [],
+      "one_graph_masked_us": 1139.7896,
+      "per_distinct_length_sliced_us": 1481.15625,
+      "rows": 4,
+      "width": 8
+    },
+    {
+      "bitwise_mismatch_prefixes": [],
+      "one_graph_masked_us": 2031.45205,
+      "per_distinct_length_sliced_us": 1483.175,
+      "rows": 4,
+      "width": 17
+    }
+  ],
+  "pass": true,
+  "probe_compile": [
+    {
+      "dynamic_probe_s": 0.0980111249955371,
+      "template_probe_s": 0.009114583022892475,
+      "width": 2
+    },
+    {
+      "dynamic_probe_s": 0.03351324994582683,
+      "template_probe_s": 0.0015822920249775052,
+      "width": 3
+    },
+    {
+      "dynamic_probe_s": 0.03225074999500066,
+      "template_probe_s": 0.0018417079700157046,
+      "width": 4
+    },
+    {
+      "dynamic_probe_s": 0.03227066597901285,
+      "template_probe_s": 0.07788445899495855,
+      "width": 5
+    },
+    {
+      "dynamic_probe_s": 0.03206841700011864,
+      "template_probe_s": 0.10524225002154708,
+      "width": 8
+    },
+    {
+      "dynamic_probe_s": 0.03309237502980977,
+      "template_probe_s": 0.3223307079751976,
+      "width": 17
+    }
+  ],
+  "reconstruct_kernel_ab": [
+    {
+      "bitwise_mismatches": [],
+      "dynamic_us": 177.11395499999998,
+      "ragged_dynamic_us": 192.89458,
+      "ragged_template_loop_us": 197.63916500000002,
+      "ragged_vs_reference_max_abs": 9.5367431640625e-07,
+      "rows": 4,
+      "template_us": 213.76854,
+      "width": 2
+    },
+    {
+      "bitwise_mismatches": [],
+      "dynamic_us": 177.11771,
+      "ragged_dynamic_us": 185.57729500000002,
+      "ragged_template_loop_us": 193.69020999999998,
+      "ragged_vs_reference_max_abs": 9.5367431640625e-07,
+      "rows": 4,
+      "template_us": 174.60895499999998,
+      "width": 3
+    },
+    {
+      "bitwise_mismatches": [],
+      "dynamic_us": 175.745,
+      "ragged_dynamic_us": 240.5575,
+      "ragged_template_loop_us": 191.42041500000002,
+      "ragged_vs_reference_max_abs": 1.9073486328125e-06,
+      "rows": 4,
+      "template_us": 172.72457999999997,
+      "width": 4
+    },
+    {
+      "bitwise_mismatches": [],
+      "dynamic_us": 181.597085,
+      "ragged_dynamic_us": 254.86270499999998,
+      "ragged_template_loop_us": 197.50917,
+      "ragged_vs_reference_max_abs": 1.9073486328125e-06,
+      "rows": 4,
+      "template_us": 172.88895499999998,
+      "width": 5
+    },
+    {
+      "bitwise_mismatches": [],
+      "dynamic_us": 187.71229,
+      "ragged_dynamic_us": 260.59333,
+      "ragged_template_loop_us": 216.458125,
+      "ragged_vs_reference_max_abs": 1.9073486328125e-06,
+      "rows": 4,
+      "template_us": 173.288335,
+      "width": 8
+    },
+    {
+      "bitwise_mismatches": [],
+      "dynamic_us": 224.897085,
+      "ragged_dynamic_us": 319.423335,
+      "ragged_template_loop_us": 288.324375,
+      "ragged_vs_reference_max_abs": 1.9073486328125e-06,
+      "rows": 4,
+      "template_us": 196.19292000000002,
+      "width": 17
+    }
+  ],
+  "reference_pass": true
+}
+[runner] step 2: model-bound exactness (template then dynamic arm)
+{"output": "qualification/runs/splash-01-gpu-accept-count-20260920/replay_template.json", "qualified": true, "observed_used": true}
+{"output": "qualification/runs/splash-01-gpu-accept-count-20260920/replay_dynamic.json", "qualified": true, "observed_used": true}
+[runner] step 3: serving smoke + A/B (policy key on vs off)
+[runner] server pid 88433  log qualification/runs/splash-01-gpu-accept-count-20260920/server-off.log
+[runner] ready: http://127.0.0.1:8285/v1/status after 5s

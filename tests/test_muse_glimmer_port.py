@@ -4,6 +4,7 @@ import ast
 import copy
 import json
 from pathlib import Path
+import re
 import subprocess
 import sys
 
@@ -11,6 +12,7 @@ import pytest
 
 from mlx2.adapters.muse_glimmer import (
     MUSE_GLIMMER,
+    MuseRecipientProcessor,
     MuseGlimmerAdapter,
     inspect_artifact,
     normalize_messages,
@@ -185,10 +187,35 @@ def test_tool_history_is_normalized_without_mutation():
     assert messages == before
 
 
-def test_direct_answer_and_effort_mapping_are_native_prompt_policy():
+@pytest.mark.parametrize(
+    ("choice", "thinking", "with_tools", "suffix"),
+    [
+        ("none", False, True, " to=user<|message|>"),
+        ("none", True, True, ""),
+        ("auto", False, True, ""),
+        ("auto", True, True, ""),
+        ("required", False, True, ""),
+        ("required", True, True, ""),
+        (
+            {"type": "function", "function": {"name": "functions.echo"}},
+            False,
+            True,
+            " to=functions.echo<|message|>",
+        ),
+        (
+            {"type": "function", "function": {"name": "functions.echo"}},
+            True,
+            True,
+            "",
+        ),
+        ("auto", False, False, " to=user<|message|>"),
+    ],
+)
+def test_tool_choice_and_thinking_render_matrix(choice, thinking, with_tools, suffix):
     class Tokenizer:
         def apply_chat_template(self, messages, **kwargs):
             self.strength = kwargs["reasoning_strength"]
+            self.tools = kwargs["tools"]
             assert kwargs["tokenize"] is False
             return "<|start|>assistant"
 
@@ -198,18 +225,129 @@ def test_direct_answer_and_effort_mapping_are_native_prompt_policy():
 
     adapter = MuseGlimmerAdapter.__new__(MuseGlimmerAdapter)
     adapter.tokenizer = Tokenizer()
-    adapter.prompt_tokens({"messages": []})
-    assert adapter.tokenizer.strength == "low"
-    assert adapter.tokenizer.prompt.endswith(" to=user<|message|>")
+    request = {
+        "messages": [],
+        "tool_choice": choice,
+        "enable_thinking": thinking,
+    }
+    if with_tools:
+        request["tools"] = TOOLS
+    adapter.prompt_tokens(request)
+    assert adapter.tokenizer.strength == ("high" if thinking else "low")
+    assert adapter.tokenizer.prompt == "<|start|>assistant" + suffix
+    assert bool(adapter.tokenizer.tools) is (with_tools and choice != "none")
+
+
+def test_reasoning_effort_mapping_remains_native_prompt_policy():
+    class Tokenizer:
+        def apply_chat_template(self, messages, **kwargs):
+            self.strength = kwargs["reasoning_strength"]
+            return "<|start|>assistant"
+
+        def encode(self, prompt, **kwargs):
+            self.prompt = prompt
+            return [1, 2]
+
+    adapter = MuseGlimmerAdapter.__new__(MuseGlimmerAdapter)
+    adapter.tokenizer = Tokenizer()
     adapter.prompt_tokens({"messages": [], "reasoning_effort": "none"})
     assert adapter.tokenizer.strength == "low"
     assert adapter.tokenizer.prompt.endswith(" to=user<|message|>")
-    adapter.prompt_tokens({"messages": [], "enable_thinking": True})
-    assert adapter.tokenizer.strength == "high"
-    assert adapter.tokenizer.prompt == "<|start|>assistant"
     adapter.prompt_tokens({"messages": [], "reasoning_effort": "ultra"})
     assert adapter.tokenizer.strength == "high"
     assert adapter.tokenizer.prompt == "<|start|>assistant"
+
+
+def test_recipient_processor_is_history_pure_and_probe_safe():
+    import mlx.core as mx
+    import numpy as np
+
+    from mlx2.runtime.processor_probe import isolated_logits_processor
+
+    processor = MuseRecipientProcessor(
+        2,
+        [
+            (10, 20, 99),
+            (10, 21, 30, 99),
+            (10, 21, 31, 99),
+        ],
+    )
+    logits = mx.arange(128, dtype=mx.float32)[None, :]
+
+    def finite(history):
+        masked = processor(mx.array([1, 2, *history]), logits)
+        return set(np.flatnonzero(np.isfinite(np.asarray(masked[0]))).tolist())
+
+    assert finite([]) == {10}
+    assert finite([10]) == {20, 21}
+    assert finite([10, 21]) == {30, 31}
+    assert finite([10, 21, 30]) == {99}
+    assert finite([55]) == set()
+    completed = processor(mx.array([1, 2, 10, 20, 99]), logits)
+    assert mx.array_equal(completed, logits)
+    first = processor(mx.array([1, 2, 10]), logits)
+    second = processor(mx.array([1, 2, 10]), logits)
+    assert mx.array_equal(first, second)
+    assert (
+        isolated_logits_processor(processor)(mx.array([1, 2, 10]), logits).tolist()
+        == first.tolist()
+    )
+
+
+def test_adapter_recipient_processors_select_only_requested_channels():
+    class Tokenizer:
+        headers = {
+            " to=user<|message|>": [10, 20, 99],
+            " to=functions.echo<|message|>": [10, 21, 30, 99],
+        }
+
+        def encode(self, text, **kwargs):
+            return self.headers[text]
+
+    adapter = MuseGlimmerAdapter.__new__(MuseGlimmerAdapter)
+    adapter.tokenizer = Tokenizer()
+    base = {
+        "messages": [],
+        "tools": TOOLS,
+        "enable_thinking": False,
+    }
+    required = adapter.request_logits_processors(
+        {**base, "tool_choice": "required"}, prompt_length=7
+    )[0]
+    automatic = adapter.request_logits_processors(
+        {**base, "tool_choice": "auto"}, prompt_length=7
+    )[0]
+    assert required.prompt_length == automatic.prompt_length == 7
+    assert required.headers == ((10, 21, 30, 99),)
+    assert automatic.headers == ((10, 20, 99), (10, 21, 30, 99))
+    named = {"type": "function", "function": {"name": "functions.echo"}}
+    assert (
+        adapter.request_logits_processors(
+            {**base, "tool_choice": named}, prompt_length=7
+        )
+        == ()
+    )
+    assert (
+        adapter.request_logits_processors(
+            {**base, "tool_choice": "required", "enable_thinking": True},
+            prompt_length=7,
+        )
+        == ()
+    )
+
+
+def test_required_decode_grammar_composes_recipient_header_with_atem_body():
+    adapter = MuseGlimmerAdapter.__new__(MuseGlimmerAdapter)
+    request = {
+        "messages": [],
+        "tools": TOOLS,
+        "tool_choice": "required",
+        "enable_thinking": False,
+    }
+    grammar = adapter.tool_constraint(request)
+    body = "<atem:function_calls>" + ATEM.replace("a<b", "ab") + "</atem:function_calls>"
+    assert re.fullmatch(grammar, " to=functions.echo<|message|>" + body)
+    assert re.fullmatch(grammar, body) is None
 
 
 def test_multimodal_content_refused():
@@ -250,15 +388,17 @@ def test_atem_tools_chunked_and_string_whitespace_preserved():
     assert json.loads(tool["function"]["arguments"]) == {"text": "  a<b  ", "count": 2}
 
 
-def test_muse_auto_parallel_false_rejects_a_second_call():
+def test_muse_auto_parallel_false_drops_a_second_call():
     body = (
         "<atem:function_calls>"
         + ATEM
         + ATEM
         + "</atem:function_calls>"
     )
-    with pytest.raises(ValueError, match="at most one"):
-        collect(body, tools=TOOLS, parallel_tool_calls=False)
+    parser, events = collect(body, tools=TOOLS, parallel_tool_calls=False)
+    calls = [call for event in events for call in event.get("tool_calls", ())]
+    assert len(calls) == 1
+    assert parser.tool_call_constraint_truncations == 1
 
 
 @pytest.mark.parametrize(

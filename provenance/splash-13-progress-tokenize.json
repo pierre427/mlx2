@@ -1,0 +1,36 @@
+{
+  "component": "return_progress prompt_progress stream events, POST /tokenize, POST /apply-template",
+  "source_repository": "Splash (Apache-2.0), reference only",
+  "source_revision": "f58d36dd",
+  "source_paths": [
+    "DEVELOPMENT.md",
+    "server/runtime.py",
+    "server/server.py"
+  ],
+  "license": "Apache-2.0",
+  "destination_paths": [
+    "src/mlx2/serving.py",
+    "src/mlx2/server.py",
+    "src/mlx2/openai_compat.py",
+    "src/mlx2/anthropic_compat.py",
+    "src/mlx2/runtime/pld.py",
+    "src/mlx2/runtime/external_speculative.py",
+    "src/mlx2/adapters/flash_next.py",
+    "src/mlx2/adapters/north_mini_code.py",
+    "src/mlx2/adapters/muse_glimmer.py",
+    "src/mlx2/adapters/xing.py",
+    "src/mlx2/adapters/xing_tokenizer.py",
+    "src/mlx2/adapters/mlx_vlm.py"
+  ],
+  "modifications": [
+    "No Splash code copied; the wire semantics (per-protocol carrier events, strictly increasing processed, non-streaming rejection, prompt-only endpoints) follow Splash's documented behavior.",
+    "Progress is derived from mlx2's existing prompt responses in whole-prompt coordinates and coalesced to one queued event per job instead of Splash's per-request callback validation.",
+    "Payload keys are processed/total/cached/replay/time_ms (Splash: total/cache/processed/time_ms); replay is reserved for preempt-and-replay recovery.",
+    "/tokenize renders a Chat or Completions request through the adapter's admission prompt_tokens and returns {tokens, count, max_model_len}; Splash's raw {content, add_special} tokenization is not implemented.",
+    "/apply-template uses an optional adapter render_prompt(request) -> str with encode(text) == prompt_tokens; adapters without it return 501."
+  ],
+  "validation": [
+    "tests/test_progress_tokenize.py",
+    "CPU only; GPU serve smoke queued in the splash gpu-queue (13-progress-tokenize)."
+  ]
+}

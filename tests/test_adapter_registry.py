@@ -1,7 +1,6 @@
 """Metadata dispatch and capability rejection must happen before GPU loading."""
 
 import json
-from pathlib import Path
 import subprocess
 import sys
 
@@ -38,6 +37,7 @@ def test_muse_dispatch_is_metadata_based(tmp_path):
     path = artifact(tmp_path, {"model_type": "muse_glimmer"})
     result = inspect_model(path)
     assert result.adapter_type.__name__ == "MuseGlimmerAdapter"
+    assert result.default_route == "ordinary"
     assert result.descriptor.metadata["qualification"] == "pending"
     assert Capability.MTP not in result.descriptor.capabilities
     with pytest.raises(ValueError, match="native MTP"):
@@ -68,8 +68,10 @@ def test_empty_drafter_metadata_is_still_a_drafter(tmp_path):
 def test_flash_current_layout_and_actual_mtp_keys(tmp_path):
     path = artifact(tmp_path, {"model_type": "qwen4_exp"}, ["mtp.fc.weight"])
     (path / "ple_rows.bin").write_bytes(b"not loaded")
+    assert inspect_model(path).default_route == "native_mtp"
     assert resolve_adapter(path, mtp=True).__name__ == "FlashNextAdapter"
     artifact(tmp_path, {"model_type": "qwen4_exp"}, ["language_model.weight"])
+    assert inspect_model(path).default_route == "ordinary"
     with pytest.raises(ValueError, match="native MTP"):
         resolve_adapter(path, mtp=True)
 
@@ -110,6 +112,7 @@ def test_qwen_ordinary_dispatch_and_mtp_refusal(tmp_path):
         "linear_value_head_dim": 128,
     }
     path = artifact(tmp_path, config, ["model.embed_tokens.weight"])
+    assert inspect_model(path).default_route == "ordinary"
     assert resolve_adapter(path).__name__ == "Qwen3827BAdapter"
     with pytest.raises(ValueError, match="native MTP"):
         resolve_adapter(path, mtp=True)
@@ -134,6 +137,7 @@ def test_multimodal_registry_is_metadata_only_and_fail_closed_for_mtp(
     )
     result = inspect_model(path)
     assert result.adapter_type.__name__ == adapter_name
+    assert result.default_route == "ordinary"
     assert required_capabilities <= result.descriptor.capabilities
     assert result.descriptor.metadata["qualification"] == "pending"
     assert Capability.OUTPUT_AUDIO not in result.descriptor.capabilities

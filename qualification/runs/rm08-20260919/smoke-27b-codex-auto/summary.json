@@ -1,0 +1,100 @@
+{
+  "mode": "gpu",
+  "compat_mode": "auto",
+  "model": "Qwen3.8-27B-oQ4e-mtp",
+  "server": [
+    "~/Desktop/mlx2/.venv/bin/python",
+    "-m",
+    "mlx2.server",
+    "--model",
+    "~/mlx-models/Qwen3.8-27B-oQ4e-mtp",
+    "--port",
+    "8397",
+    "--agent-compat",
+    "auto",
+    "--custom-tool-grammar",
+    "validate",
+    "--execution-policy",
+    "/private/tmp/mlx2-rm08-responses-agent-conformance/qualification/policies/qwen38-27b-mtp2.json",
+    "--qualification-mode"
+  ],
+  "rows": [
+    {
+      "repeat": 0,
+      "client": "codex",
+      "task": "add_file",
+      "returncode": 0,
+      "passed": true,
+      "requests": 3,
+      "non_200": 0,
+      "cached_tokens": [
+        0,
+        10057,
+        10204
+      ],
+      "counter_delta": {
+        "agent_compat_source_detected": 3,
+        "agent_compat_detected_codex": 3,
+        "agent_compat_custom_tools_declared": 3,
+        "agent_compat_hosted_tools_dropped": 6,
+        "agent_compat_requests": 3,
+        "agent_compat_system_folded": 3,
+        "agent_compat_phase_outputs": 3,
+        "agent_compat_custom_tool_grammar_validated": 1,
+        "agent_compat_custom_tool_calls": 1,
+        "agent_compat_phase_inputs": 3,
+        "agent_compat_custom_tool_replays": 2
+      },
+      "seconds": 22.3
+    },
+    {
+      "repeat": 0,
+      "client": "codex",
+      "task": "fix_test",
+      "returncode": 0,
+      "passed": true,
+      "requests": 4,
+      "non_200": 0,
+      "cached_tokens": [
+        0,
+        9956,
+        10185,
+        10347
+      ],
+      "counter_delta": {
+        "agent_compat_source_detected": 4,
+        "agent_compat_detected_codex": 4,
+        "agent_compat_custom_tools_declared": 4,
+        "agent_compat_hosted_tools_dropped": 8,
+        "agent_compat_requests": 4,
+        "agent_compat_system_folded": 4,
+        "agent_compat_phase_outputs": 4,
+        "agent_compat_custom_tool_grammar_validated": 1,
+        "agent_compat_custom_tool_calls": 1,
+        "agent_compat_phase_inputs": 6,
+        "agent_compat_custom_tool_replays": 2
+      },
+      "seconds": 23.2
+    }
+  ],
+  "agent_compat_counts": {
+    "agent_compat_source_detected": 7,
+    "agent_compat_detected_codex": 7,
+    "agent_compat_custom_tools_declared": 7,
+    "agent_compat_hosted_tools_dropped": 14,
+    "agent_compat_requests": 7,
+    "agent_compat_system_folded": 7,
+    "agent_compat_phase_outputs": 7,
+    "agent_compat_custom_tool_grammar_validated": 2,
+    "agent_compat_custom_tool_calls": 2,
+    "agent_compat_phase_inputs": 9,
+    "agent_compat_custom_tool_replays": 4
+  },
+  "pass_rate": {
+    "codex": "2/2"
+  },
+  "later_turn_cache_hits": "5/5",
+  "grammar_rejected_total": 0,
+  "failures": [],
+  "go": true
+}

@@ -1,0 +1,4273 @@
+{
+  "schema": "mlx2.expert-atlas-counterfactual.v1",
+  "note": "Counterfactual replay only. The serving path runs plain LRU; the atlas is collect-only and never influenced residency. Wall-clock numbers from a streamed run are not benchmarks.",
+  "capacity_experts": 15,
+  "layers": 120,
+  "units_per_layer": 256,
+  "actual_policy": "lru",
+  "rows": [
+    {
+      "pin_fraction": 0.0,
+      "pinned_per_layer": 0,
+      "accesses": 20997,
+      "hits": 7356,
+      "hit_rate": 0.3503357622517502,
+      "page_ins": 13641,
+      "layers": [
+        {
+          "layer": 0,
+          "accesses": 180,
+          "hits": 54,
+          "hit_rate": 0.3,
+          "pinned_units": 0
+        },
+        {
+          "layer": 1,
+          "accesses": 180,
+          "hits": 54,
+          "hit_rate": 0.3,
+          "pinned_units": 0
+        },
+        {
+          "layer": 2,
+          "accesses": 180,
+          "hits": 54,
+          "hit_rate": 0.3,
+          "pinned_units": 0
+        },
+        {
+          "layer": 3,
+          "accesses": 172,
+          "hits": 63,
+          "hit_rate": 0.36627906976744184,
+          "pinned_units": 0
+        },
+        {
+          "layer": 4,
+          "accesses": 172,
+          "hits": 63,
+          "hit_rate": 0.36627906976744184,
+          "pinned_units": 0
+        },
+        {
+          "layer": 5,
+          "accesses": 172,
+          "hits": 63,
+          "hit_rate": 0.36627906976744184,
+          "pinned_units": 0
+        },
+        {
+          "layer": 6,
+          "accesses": 175,
+          "hits": 67,
+          "hit_rate": 0.38285714285714284,
+          "pinned_units": 0
+        },
+        {
+          "layer": 7,
+          "accesses": 175,
+          "hits": 67,
+          "hit_rate": 0.38285714285714284,
+          "pinned_units": 0
+        },
+        {
+          "layer": 8,
+          "accesses": 175,
+          "hits": 67,
+          "hit_rate": 0.38285714285714284,
+          "pinned_units": 0
+        },
+        {
+          "layer": 9,
+          "accesses": 174,
+          "hits": 55,
+          "hit_rate": 0.3160919540229885,
+          "pinned_units": 0
+        },
+        {
+          "layer": 10,
+          "accesses": 174,
+          "hits": 55,
+          "hit_rate": 0.3160919540229885,
+          "pinned_units": 0
+        },
+        {
+          "layer": 11,
+          "accesses": 174,
+          "hits": 55,
+          "hit_rate": 0.3160919540229885,
+          "pinned_units": 0
+        },
+        {
+          "layer": 12,
+          "accesses": 174,
+          "hits": 72,
+          "hit_rate": 0.41379310344827586,
+          "pinned_units": 0
+        },
+        {
+          "layer": 13,
+          "accesses": 174,
+          "hits": 72,
+          "hit_rate": 0.41379310344827586,
+          "pinned_units": 0
+        },
+        {
+          "layer": 14,
+          "accesses": 174,
+          "hits": 72,
+          "hit_rate": 0.41379310344827586,
+          "pinned_units": 0
+        },
+        {
+          "layer": 15,
+          "accesses": 180,
+          "hits": 62,
+          "hit_rate": 0.34444444444444444,
+          "pinned_units": 0
+        },
+        {
+          "layer": 16,
+          "accesses": 180,
+          "hits": 62,
+          "hit_rate": 0.34444444444444444,
+          "pinned_units": 0
+        },
+        {
+          "layer": 17,
+          "accesses": 180,
+          "hits": 62,
+          "hit_rate": 0.34444444444444444,
+          "pinned_units": 0
+        },
+        {
+          "layer": 18,
+          "accesses": 183,
+          "hits": 66,
+          "hit_rate": 0.36065573770491804,
+          "pinned_units": 0
+        },
+        {
+          "layer": 19,
+          "accesses": 183,
+          "hits": 66,
+          "hit_rate": 0.36065573770491804,
+          "pinned_units": 0
+        },
+        {
+          "layer": 20,
+          "accesses": 183,
+          "hits": 66,
+          "hit_rate": 0.36065573770491804,
+          "pinned_units": 0
+        },
+        {
+          "layer": 21,
+          "accesses": 179,
+          "hits": 67,
+          "hit_rate": 0.3743016759776536,
+          "pinned_units": 0
+        },
+        {
+          "layer": 22,
+          "accesses": 179,
+          "hits": 67,
+          "hit_rate": 0.3743016759776536,
+          "pinned_units": 0
+        },
+        {
+          "layer": 23,
+          "accesses": 179,
+          "hits": 67,
+          "hit_rate": 0.3743016759776536,
+          "pinned_units": 0
+        },
+        {
+          "layer": 24,
+          "accesses": 161,
+          "hits": 71,
+          "hit_rate": 0.4409937888198758,
+          "pinned_units": 0
+        },
+        {
+          "layer": 25,
+          "accesses": 161,
+          "hits": 71,
+          "hit_rate": 0.4409937888198758,
+          "pinned_units": 0
+        },
+        {
+          "layer": 26,
+          "accesses": 161,
+          "hits": 71,
+          "hit_rate": 0.4409937888198758,
+          "pinned_units": 0
+        },
+        {
+          "layer": 27,
+          "accesses": 170,
+          "hits": 75,
+          "hit_rate": 0.4411764705882353,
+          "pinned_units": 0
+        },
+        {
+          "layer": 28,
+          "accesses": 170,
+          "hits": 75,
+          "hit_rate": 0.4411764705882353,
+          "pinned_units": 0
+        },
+        {
+          "layer": 29,
+          "accesses": 170,
+          "hits": 75,
+          "hit_rate": 0.4411764705882353,
+          "pinned_units": 0
+        },
+        {
+          "layer": 30,
+          "accesses": 173,
+          "hits": 68,
+          "hit_rate": 0.3930635838150289,
+          "pinned_units": 0
+        },
+        {
+          "layer": 31,
+          "accesses": 173,
+          "hits": 68,
+          "hit_rate": 0.3930635838150289,
+          "pinned_units": 0
+        },
+        {
+          "layer": 32,
+          "accesses": 173,
+          "hits": 68,
+          "hit_rate": 0.3930635838150289,
+          "pinned_units": 0
+        },
+        {
+          "layer": 33,
+          "accesses": 174,
+          "hits": 73,
+          "hit_rate": 0.41954022988505746,
+          "pinned_units": 0
+        },
+        {
+          "layer": 34,
+          "accesses": 174,
+          "hits": 73,
+          "hit_rate": 0.41954022988505746,
+          "pinned_units": 0
+        },
+        {
+          "layer": 35,
+          "accesses": 174,
+          "hits": 73,
+          "hit_rate": 0.41954022988505746,
+          "pinned_units": 0
+        },
+        {
+          "layer": 36,
+          "accesses": 171,
+          "hits": 65,
+          "hit_rate": 0.38011695906432746,
+          "pinned_units": 0
+        },
+        {
+          "layer": 37,
+          "accesses": 171,
+          "hits": 65,
+          "hit_rate": 0.38011695906432746,
+          "pinned_units": 0
+        },
+        {
+          "layer": 38,
+          "accesses": 171,
+          "hits": 65,
+          "hit_rate": 0.38011695906432746,
+          "pinned_units": 0
+        },
+        {
+          "layer": 39,
+          "accesses": 172,
+          "hits": 65,
+          "hit_rate": 0.37790697674418605,
+          "pinned_units": 0
+        },
+        {
+          "layer": 40,
+          "accesses": 172,
+          "hits": 65,
+          "hit_rate": 0.37790697674418605,
+          "pinned_units": 0
+        },
+        {
+          "layer": 41,
+          "accesses": 172,
+          "hits": 65,
+          "hit_rate": 0.37790697674418605,
+          "pinned_units": 0
+        },
+        {
+          "layer": 42,
+          "accesses": 170,
+          "hits": 62,
+          "hit_rate": 0.36470588235294116,
+          "pinned_units": 0
+        },
+        {
+          "layer": 43,
+          "accesses": 170,
+          "hits": 62,
+          "hit_rate": 0.36470588235294116,
+          "pinned_units": 0
+        },
+        {
+          "layer": 44,
+          "accesses": 170,
+          "hits": 62,
+          "hit_rate": 0.36470588235294116,
+          "pinned_units": 0
+        },
+        {
+          "layer": 45,
+          "accesses": 172,
+          "hits": 46,
+          "hit_rate": 0.26744186046511625,
+          "pinned_units": 0
+        },
+        {
+          "layer": 46,
+          "accesses": 172,
+          "hits": 46,
+          "hit_rate": 0.26744186046511625,
+          "pinned_units": 0
+        },
+        {
+          "layer": 47,
+          "accesses": 172,
+          "hits": 46,
+          "hit_rate": 0.26744186046511625,
+          "pinned_units": 0
+        },
+        {
+          "layer": 48,
+          "accesses": 189,
+          "hits": 58,
+          "hit_rate": 0.30687830687830686,
+          "pinned_units": 0
+        },
+        {
+          "layer": 49,
+          "accesses": 189,
+          "hits": 58,
+          "hit_rate": 0.30687830687830686,
+          "pinned_units": 0
+        },
+        {
+          "layer": 50,
+          "accesses": 189,
+          "hits": 58,
+          "hit_rate": 0.30687830687830686,
+          "pinned_units": 0
+        },
+        {
+          "layer": 51,
+          "accesses": 183,
+          "hits": 50,
+          "hit_rate": 0.273224043715847,
+          "pinned_units": 0
+        },
+        {
+          "layer": 52,
+          "accesses": 183,
+          "hits": 50,
+          "hit_rate": 0.273224043715847,
+          "pinned_units": 0
+        },
+        {
+          "layer": 53,
+          "accesses": 183,
+          "hits": 50,
+          "hit_rate": 0.273224043715847,
+          "pinned_units": 0
+        },
+        {
+          "layer": 54,
+          "accesses": 169,
+          "hits": 75,
+          "hit_rate": 0.4437869822485207,
+          "pinned_units": 0
+        },
+        {
+          "layer": 55,
+          "accesses": 169,
+          "hits": 75,
+          "hit_rate": 0.4437869822485207,
+          "pinned_units": 0
+        },
+        {
+          "layer": 56,
+          "accesses": 169,
+          "hits": 75,
+          "hit_rate": 0.4437869822485207,
+          "pinned_units": 0
+        },
+        {
+          "layer": 57,
+          "accesses": 164,
+          "hits": 90,
+          "hit_rate": 0.5487804878048781,
+          "pinned_units": 0
+        },
+        {
+          "layer": 58,
+          "accesses": 164,
+          "hits": 90,
+          "hit_rate": 0.5487804878048781,
+          "pinned_units": 0
+        },
+        {
+          "layer": 59,
+          "accesses": 164,
+          "hits": 90,
+          "hit_rate": 0.5487804878048781,
+          "pinned_units": 0
+        },
+        {
+          "layer": 60,
+          "accesses": 163,
+          "hits": 64,
+          "hit_rate": 0.39263803680981596,
+          "pinned_units": 0
+        },
+        {
+          "layer": 61,
+          "accesses": 163,
+          "hits": 64,
+          "hit_rate": 0.39263803680981596,
+          "pinned_units": 0
+        },
+        {
+          "layer": 62,
+          "accesses": 163,
+          "hits": 64,
+          "hit_rate": 0.39263803680981596,
+          "pinned_units": 0
+        },
+        {
+          "layer": 63,
+          "accesses": 167,
+          "hits": 69,
+          "hit_rate": 0.41317365269461076,
+          "pinned_units": 0
+        },
+        {
+          "layer": 64,
+          "accesses": 167,
+          "hits": 69,
+          "hit_rate": 0.41317365269461076,
+          "pinned_units": 0
+        },
+        {
+          "layer": 65,
+          "accesses": 167,
+          "hits": 69,
+          "hit_rate": 0.41317365269461076,
+          "pinned_units": 0
+        },
+        {
+          "layer": 66,
+          "accesses": 169,
+          "hits": 55,
+          "hit_rate": 0.3254437869822485,
+          "pinned_units": 0
+        },
+        {
+          "layer": 67,
+          "accesses": 169,
+          "hits": 55,
+          "hit_rate": 0.3254437869822485,
+          "pinned_units": 0
+        },
+        {
+          "layer": 68,
+          "accesses": 169,
+          "hits": 55,
+          "hit_rate": 0.3254437869822485,
+          "pinned_units": 0
+        },
+        {
+          "layer": 69,
+          "accesses": 170,
+          "hits": 74,
+          "hit_rate": 0.43529411764705883,
+          "pinned_units": 0
+        },
+        {
+          "layer": 70,
+          "accesses": 170,
+          "hits": 74,
+          "hit_rate": 0.43529411764705883,
+          "pinned_units": 0
+        },
+        {
+          "layer": 71,
+          "accesses": 170,
+          "hits": 74,
+          "hit_rate": 0.43529411764705883,
+          "pinned_units": 0
+        },
+        {
+          "layer": 72,
+          "accesses": 166,
+          "hits": 65,
+          "hit_rate": 0.39156626506024095,
+          "pinned_units": 0
+        },
+        {
+          "layer": 73,
+          "accesses": 166,
+          "hits": 65,
+          "hit_rate": 0.39156626506024095,
+          "pinned_units": 0
+        },
+        {
+          "layer": 74,
+          "accesses": 166,
+          "hits": 65,
+          "hit_rate": 0.39156626506024095,
+          "pinned_units": 0
+        },
+        {
+          "layer": 75,
+          "accesses": 166,
+          "hits": 72,
+          "hit_rate": 0.43373493975903615,
+          "pinned_units": 0
+        },
+        {
+          "layer": 76,
+          "accesses": 166,
+          "hits": 72,
+          "hit_rate": 0.43373493975903615,
+          "pinned_units": 0
+        },
+        {
+          "layer": 77,
+          "accesses": 166,
+          "hits": 72,
+          "hit_rate": 0.43373493975903615,
+          "pinned_units": 0
+        },
+        {
+          "layer": 78,
+          "accesses": 166,
+          "hits": 61,
+          "hit_rate": 0.3674698795180723,
+          "pinned_units": 0
+        },
+        {
+          "layer": 79,
+          "accesses": 166,
+          "hits": 61,
+          "hit_rate": 0.3674698795180723,
+          "pinned_units": 0
+        },
+        {
+          "layer": 80,
+          "accesses": 166,
+          "hits": 61,
+          "hit_rate": 0.3674698795180723,
+          "pinned_units": 0
+        },
+        {
+          "layer": 81,
+          "accesses": 173,
+          "hits": 45,
+          "hit_rate": 0.26011560693641617,
+          "pinned_units": 0
+        },
+        {
+          "layer": 82,
+          "accesses": 173,
+          "hits": 45,
+          "hit_rate": 0.26011560693641617,
+          "pinned_units": 0
+        },
+        {
+          "layer": 83,
+          "accesses": 173,
+          "hits": 45,
+          "hit_rate": 0.26011560693641617,
+          "pinned_units": 0
+        },
+        {
+          "layer": 84,
+          "accesses": 185,
+          "hits": 49,
+          "hit_rate": 0.2648648648648649,
+          "pinned_units": 0
+        },
+        {
+          "layer": 85,
+          "accesses": 185,
+          "hits": 49,
+          "hit_rate": 0.2648648648648649,
+          "pinned_units": 0
+        },
+        {
+          "layer": 86,
+          "accesses": 185,
+          "hits": 49,
+          "hit_rate": 0.2648648648648649,
+          "pinned_units": 0
+        },
+        {
+          "layer": 87,
+          "accesses": 183,
+          "hits": 47,
+          "hit_rate": 0.2568306010928962,
+          "pinned_units": 0
+        },
+        {
+          "layer": 88,
+          "accesses": 183,
+          "hits": 47,
+          "hit_rate": 0.2568306010928962,
+          "pinned_units": 0
+        },
+        {
+          "layer": 89,
+          "accesses": 183,
+          "hits": 47,
+          "hit_rate": 0.2568306010928962,
+          "pinned_units": 0
+        },
+        {
+          "layer": 90,
+          "accesses": 169,
+          "hits": 79,
+          "hit_rate": 0.46745562130177515,
+          "pinned_units": 0
+        },
+        {
+          "layer": 91,
+          "accesses": 169,
+          "hits": 79,
+          "hit_rate": 0.46745562130177515,
+          "pinned_units": 0
+        },
+        {
+          "layer": 92,
+          "accesses": 169,
+          "hits": 79,
+          "hit_rate": 0.46745562130177515,
+          "pinned_units": 0
+        },
+        {
+          "layer": 93,
+          "accesses": 161,
+          "hits": 83,
+          "hit_rate": 0.515527950310559,
+          "pinned_units": 0
+        },
+        {
+          "layer": 94,
+          "accesses": 161,
+          "hits": 83,
+          "hit_rate": 0.515527950310559,
+          "pinned_units": 0
+        },
+        {
+          "layer": 95,
+          "accesses": 161,
+          "hits": 83,
+          "hit_rate": 0.515527950310559,
+          "pinned_units": 0
+        },
+        {
+          "layer": 96,
+          "accesses": 165,
+          "hits": 71,
+          "hit_rate": 0.4303030303030303,
+          "pinned_units": 0
+        },
+        {
+          "layer": 97,
+          "accesses": 165,
+          "hits": 71,
+          "hit_rate": 0.4303030303030303,
+          "pinned_units": 0
+        },
+        {
+          "layer": 98,
+          "accesses": 165,
+          "hits": 71,
+          "hit_rate": 0.4303030303030303,
+          "pinned_units": 0
+        },
+        {
+          "layer": 99,
+          "accesses": 176,
+          "hits": 72,
+          "hit_rate": 0.4090909090909091,
+          "pinned_units": 0
+        },
+        {
+          "layer": 100,
+          "accesses": 176,
+          "hits": 72,
+          "hit_rate": 0.4090909090909091,
+          "pinned_units": 0
+        },
+        {
+          "layer": 101,
+          "accesses": 176,
+          "hits": 72,
+          "hit_rate": 0.4090909090909091,
+          "pinned_units": 0
+        },
+        {
+          "layer": 102,
+          "accesses": 173,
+          "hits": 71,
+          "hit_rate": 0.41040462427745666,
+          "pinned_units": 0
+        },
+        {
+          "layer": 103,
+          "accesses": 173,
+          "hits": 71,
+          "hit_rate": 0.41040462427745666,
+          "pinned_units": 0
+        },
+        {
+          "layer": 104,
+          "accesses": 173,
+          "hits": 71,
+          "hit_rate": 0.41040462427745666,
+          "pinned_units": 0
+        },
+        {
+          "layer": 105,
+          "accesses": 173,
+          "hits": 55,
+          "hit_rate": 0.3179190751445087,
+          "pinned_units": 0
+        },
+        {
+          "layer": 106,
+          "accesses": 173,
+          "hits": 55,
+          "hit_rate": 0.3179190751445087,
+          "pinned_units": 0
+        },
+        {
+          "layer": 107,
+          "accesses": 173,
+          "hits": 55,
+          "hit_rate": 0.3179190751445087,
+          "pinned_units": 0
+        },
+        {
+          "layer": 108,
+          "accesses": 183,
+          "hits": 41,
+          "hit_rate": 0.22404371584699453,
+          "pinned_units": 0
+        },
+        {
+          "layer": 109,
+          "accesses": 183,
+          "hits": 41,
+          "hit_rate": 0.22404371584699453,
+          "pinned_units": 0
+        },
+        {
+          "layer": 110,
+          "accesses": 183,
+          "hits": 41,
+          "hit_rate": 0.22404371584699453,
+          "pinned_units": 0
+        },
+        {
+          "layer": 111,
+          "accesses": 197,
+          "hits": 31,
+          "hit_rate": 0.15736040609137056,
+          "pinned_units": 0
+        },
+        {
+          "layer": 112,
+          "accesses": 197,
+          "hits": 31,
+          "hit_rate": 0.15736040609137056,
+          "pinned_units": 0
+        },
+        {
+          "layer": 113,
+          "accesses": 197,
+          "hits": 31,
+          "hit_rate": 0.15736040609137056,
+          "pinned_units": 0
+        },
+        {
+          "layer": 114,
+          "accesses": 204,
+          "hits": 24,
+          "hit_rate": 0.11764705882352941,
+          "pinned_units": 0
+        },
+        {
+          "layer": 115,
+          "accesses": 204,
+          "hits": 24,
+          "hit_rate": 0.11764705882352941,
+          "pinned_units": 0
+        },
+        {
+          "layer": 116,
+          "accesses": 204,
+          "hits": 24,
+          "hit_rate": 0.11764705882352941,
+          "pinned_units": 0
+        },
+        {
+          "layer": 117,
+          "accesses": 205,
+          "hits": 20,
+          "hit_rate": 0.0975609756097561,
+          "pinned_units": 0
+        },
+        {
+          "layer": 118,
+          "accesses": 205,
+          "hits": 20,
+          "hit_rate": 0.0975609756097561,
+          "pinned_units": 0
+        },
+        {
+          "layer": 119,
+          "accesses": 205,
+          "hits": 20,
+          "hit_rate": 0.0975609756097561,
+          "pinned_units": 0
+        }
+      ],
+      "page_ins_vs_lru": 0,
+      "hit_rate_delta": 0.0
+    },
+    {
+      "pin_fraction": 0.1,
+      "pinned_per_layer": 1,
+      "accesses": 20997,
+      "hits": 7389,
+      "hit_rate": 0.35190741534504927,
+      "page_ins": 13608,
+      "layers": [
+        {
+          "layer": 0,
+          "accesses": 180,
+          "hits": 52,
+          "hit_rate": 0.28888888888888886,
+          "pinned_units": 1
+        },
+        {
+          "layer": 1,
+          "accesses": 180,
+          "hits": 52,
+          "hit_rate": 0.28888888888888886,
+          "pinned_units": 1
+        },
+        {
+          "layer": 2,
+          "accesses": 180,
+          "hits": 52,
+          "hit_rate": 0.28888888888888886,
+          "pinned_units": 1
+        },
+        {
+          "layer": 3,
+          "accesses": 172,
+          "hits": 63,
+          "hit_rate": 0.36627906976744184,
+          "pinned_units": 1
+        },
+        {
+          "layer": 4,
+          "accesses": 172,
+          "hits": 63,
+          "hit_rate": 0.36627906976744184,
+          "pinned_units": 1
+        },
+        {
+          "layer": 5,
+          "accesses": 172,
+          "hits": 63,
+          "hit_rate": 0.36627906976744184,
+          "pinned_units": 1
+        },
+        {
+          "layer": 6,
+          "accesses": 175,
+          "hits": 68,
+          "hit_rate": 0.38857142857142857,
+          "pinned_units": 1
+        },
+        {
+          "layer": 7,
+          "accesses": 175,
+          "hits": 68,
+          "hit_rate": 0.38857142857142857,
+          "pinned_units": 1
+        },
+        {
+          "layer": 8,
+          "accesses": 175,
+          "hits": 68,
+          "hit_rate": 0.38857142857142857,
+          "pinned_units": 1
+        },
+        {
+          "layer": 9,
+          "accesses": 174,
+          "hits": 57,
+          "hit_rate": 0.3275862068965517,
+          "pinned_units": 1
+        },
+        {
+          "layer": 10,
+          "accesses": 174,
+          "hits": 57,
+          "hit_rate": 0.3275862068965517,
+          "pinned_units": 1
+        },
+        {
+          "layer": 11,
+          "accesses": 174,
+          "hits": 57,
+          "hit_rate": 0.3275862068965517,
+          "pinned_units": 1
+        },
+        {
+          "layer": 12,
+          "accesses": 174,
+          "hits": 74,
+          "hit_rate": 0.42528735632183906,
+          "pinned_units": 1
+        },
+        {
+          "layer": 13,
+          "accesses": 174,
+          "hits": 74,
+          "hit_rate": 0.42528735632183906,
+          "pinned_units": 1
+        },
+        {
+          "layer": 14,
+          "accesses": 174,
+          "hits": 74,
+          "hit_rate": 0.42528735632183906,
+          "pinned_units": 1
+        },
+        {
+          "layer": 15,
+          "accesses": 180,
+          "hits": 63,
+          "hit_rate": 0.35,
+          "pinned_units": 1
+        },
+        {
+          "layer": 16,
+          "accesses": 180,
+          "hits": 63,
+          "hit_rate": 0.35,
+          "pinned_units": 1
+        },
+        {
+          "layer": 17,
+          "accesses": 180,
+          "hits": 63,
+          "hit_rate": 0.35,
+          "pinned_units": 1
+        },
+        {
+          "layer": 18,
+          "accesses": 183,
+          "hits": 68,
+          "hit_rate": 0.37158469945355194,
+          "pinned_units": 1
+        },
+        {
+          "layer": 19,
+          "accesses": 183,
+          "hits": 68,
+          "hit_rate": 0.37158469945355194,
+          "pinned_units": 1
+        },
+        {
+          "layer": 20,
+          "accesses": 183,
+          "hits": 68,
+          "hit_rate": 0.37158469945355194,
+          "pinned_units": 1
+        },
+        {
+          "layer": 21,
+          "accesses": 179,
+          "hits": 69,
+          "hit_rate": 0.3854748603351955,
+          "pinned_units": 1
+        },
+        {
+          "layer": 22,
+          "accesses": 179,
+          "hits": 69,
+          "hit_rate": 0.3854748603351955,
+          "pinned_units": 1
+        },
+        {
+          "layer": 23,
+          "accesses": 179,
+          "hits": 69,
+          "hit_rate": 0.3854748603351955,
+          "pinned_units": 1
+        },
+        {
+          "layer": 24,
+          "accesses": 161,
+          "hits": 74,
+          "hit_rate": 0.45962732919254656,
+          "pinned_units": 1
+        },
+        {
+          "layer": 25,
+          "accesses": 161,
+          "hits": 74,
+          "hit_rate": 0.45962732919254656,
+          "pinned_units": 1
+        },
+        {
+          "layer": 26,
+          "accesses": 161,
+          "hits": 74,
+          "hit_rate": 0.45962732919254656,
+          "pinned_units": 1
+        },
+        {
+          "layer": 27,
+          "accesses": 170,
+          "hits": 75,
+          "hit_rate": 0.4411764705882353,
+          "pinned_units": 1
+        },
+        {
+          "layer": 28,
+          "accesses": 170,
+          "hits": 75,
+          "hit_rate": 0.4411764705882353,
+          "pinned_units": 1
+        },
+        {
+          "layer": 29,
+          "accesses": 170,
+          "hits": 75,
+          "hit_rate": 0.4411764705882353,
+          "pinned_units": 1
+        },
+        {
+          "layer": 30,
+          "accesses": 173,
+          "hits": 63,
+          "hit_rate": 0.36416184971098264,
+          "pinned_units": 1
+        },
+        {
+          "layer": 31,
+          "accesses": 173,
+          "hits": 63,
+          "hit_rate": 0.36416184971098264,
+          "pinned_units": 1
+        },
+        {
+          "layer": 32,
+          "accesses": 173,
+          "hits": 63,
+          "hit_rate": 0.36416184971098264,
+          "pinned_units": 1
+        },
+        {
+          "layer": 33,
+          "accesses": 174,
+          "hits": 73,
+          "hit_rate": 0.41954022988505746,
+          "pinned_units": 1
+        },
+        {
+          "layer": 34,
+          "accesses": 174,
+          "hits": 73,
+          "hit_rate": 0.41954022988505746,
+          "pinned_units": 1
+        },
+        {
+          "layer": 35,
+          "accesses": 174,
+          "hits": 73,
+          "hit_rate": 0.41954022988505746,
+          "pinned_units": 1
+        },
+        {
+          "layer": 36,
+          "accesses": 171,
+          "hits": 66,
+          "hit_rate": 0.38596491228070173,
+          "pinned_units": 1
+        },
+        {
+          "layer": 37,
+          "accesses": 171,
+          "hits": 66,
+          "hit_rate": 0.38596491228070173,
+          "pinned_units": 1
+        },
+        {
+          "layer": 38,
+          "accesses": 171,
+          "hits": 66,
+          "hit_rate": 0.38596491228070173,
+          "pinned_units": 1
+        },
+        {
+          "layer": 39,
+          "accesses": 172,
+          "hits": 67,
+          "hit_rate": 0.38953488372093026,
+          "pinned_units": 1
+        },
+        {
+          "layer": 40,
+          "accesses": 172,
+          "hits": 67,
+          "hit_rate": 0.38953488372093026,
+          "pinned_units": 1
+        },
+        {
+          "layer": 41,
+          "accesses": 172,
+          "hits": 67,
+          "hit_rate": 0.38953488372093026,
+          "pinned_units": 1
+        },
+        {
+          "layer": 42,
+          "accesses": 170,
+          "hits": 62,
+          "hit_rate": 0.36470588235294116,
+          "pinned_units": 1
+        },
+        {
+          "layer": 43,
+          "accesses": 170,
+          "hits": 62,
+          "hit_rate": 0.36470588235294116,
+          "pinned_units": 1
+        },
+        {
+          "layer": 44,
+          "accesses": 170,
+          "hits": 62,
+          "hit_rate": 0.36470588235294116,
+          "pinned_units": 1
+        },
+        {
+          "layer": 45,
+          "accesses": 172,
+          "hits": 45,
+          "hit_rate": 0.2616279069767442,
+          "pinned_units": 1
+        },
+        {
+          "layer": 46,
+          "accesses": 172,
+          "hits": 45,
+          "hit_rate": 0.2616279069767442,
+          "pinned_units": 1
+        },
+        {
+          "layer": 47,
+          "accesses": 172,
+          "hits": 45,
+          "hit_rate": 0.2616279069767442,
+          "pinned_units": 1
+        },
+        {
+          "layer": 48,
+          "accesses": 189,
+          "hits": 59,
+          "hit_rate": 0.31216931216931215,
+          "pinned_units": 1
+        },
+        {
+          "layer": 49,
+          "accesses": 189,
+          "hits": 59,
+          "hit_rate": 0.31216931216931215,
+          "pinned_units": 1
+        },
+        {
+          "layer": 50,
+          "accesses": 189,
+          "hits": 59,
+          "hit_rate": 0.31216931216931215,
+          "pinned_units": 1
+        },
+        {
+          "layer": 51,
+          "accesses": 183,
+          "hits": 48,
+          "hit_rate": 0.26229508196721313,
+          "pinned_units": 1
+        },
+        {
+          "layer": 52,
+          "accesses": 183,
+          "hits": 48,
+          "hit_rate": 0.26229508196721313,
+          "pinned_units": 1
+        },
+        {
+          "layer": 53,
+          "accesses": 183,
+          "hits": 48,
+          "hit_rate": 0.26229508196721313,
+          "pinned_units": 1
+        },
+        {
+          "layer": 54,
+          "accesses": 169,
+          "hits": 78,
+          "hit_rate": 0.46153846153846156,
+          "pinned_units": 1
+        },
+        {
+          "layer": 55,
+          "accesses": 169,
+          "hits": 78,
+          "hit_rate": 0.46153846153846156,
+          "pinned_units": 1
+        },
+        {
+          "layer": 56,
+          "accesses": 169,
+          "hits": 78,
+          "hit_rate": 0.46153846153846156,
+          "pinned_units": 1
+        },
+        {
+          "layer": 57,
+          "accesses": 164,
+          "hits": 88,
+          "hit_rate": 0.5365853658536586,
+          "pinned_units": 1
+        },
+        {
+          "layer": 58,
+          "accesses": 164,
+          "hits": 88,
+          "hit_rate": 0.5365853658536586,
+          "pinned_units": 1
+        },
+        {
+          "layer": 59,
+          "accesses": 164,
+          "hits": 88,
+          "hit_rate": 0.5365853658536586,
+          "pinned_units": 1
+        },
+        {
+          "layer": 60,
+          "accesses": 163,
+          "hits": 63,
+          "hit_rate": 0.38650306748466257,
+          "pinned_units": 1
+        },
+        {
+          "layer": 61,
+          "accesses": 163,
+          "hits": 63,
+          "hit_rate": 0.38650306748466257,
+          "pinned_units": 1
+        },
+        {
+          "layer": 62,
+          "accesses": 163,
+          "hits": 63,
+          "hit_rate": 0.38650306748466257,
+          "pinned_units": 1
+        },
+        {
+          "layer": 63,
+          "accesses": 167,
+          "hits": 68,
+          "hit_rate": 0.40718562874251496,
+          "pinned_units": 1
+        },
+        {
+          "layer": 64,
+          "accesses": 167,
+          "hits": 68,
+          "hit_rate": 0.40718562874251496,
+          "pinned_units": 1
+        },
+        {
+          "layer": 65,
+          "accesses": 167,
+          "hits": 68,
+          "hit_rate": 0.40718562874251496,
+          "pinned_units": 1
+        },
+        {
+          "layer": 66,
+          "accesses": 169,
+          "hits": 54,
+          "hit_rate": 0.31952662721893493,
+          "pinned_units": 1
+        },
+        {
+          "layer": 67,
+          "accesses": 169,
+          "hits": 54,
+          "hit_rate": 0.31952662721893493,
+          "pinned_units": 1
+        },
+        {
+          "layer": 68,
+          "accesses": 169,
+          "hits": 54,
+          "hit_rate": 0.31952662721893493,
+          "pinned_units": 1
+        },
+        {
+          "layer": 69,
+          "accesses": 170,
+          "hits": 76,
+          "hit_rate": 0.4470588235294118,
+          "pinned_units": 1
+        },
+        {
+          "layer": 70,
+          "accesses": 170,
+          "hits": 76,
+          "hit_rate": 0.4470588235294118,
+          "pinned_units": 1
+        },
+        {
+          "layer": 71,
+          "accesses": 170,
+          "hits": 76,
+          "hit_rate": 0.4470588235294118,
+          "pinned_units": 1
+        },
+        {
+          "layer": 72,
+          "accesses": 166,
+          "hits": 67,
+          "hit_rate": 0.4036144578313253,
+          "pinned_units": 1
+        },
+        {
+          "layer": 73,
+          "accesses": 166,
+          "hits": 67,
+          "hit_rate": 0.4036144578313253,
+          "pinned_units": 1
+        },
+        {
+          "layer": 74,
+          "accesses": 166,
+          "hits": 67,
+          "hit_rate": 0.4036144578313253,
+          "pinned_units": 1
+        },
+        {
+          "layer": 75,
+          "accesses": 166,
+          "hits": 69,
+          "hit_rate": 0.41566265060240964,
+          "pinned_units": 1
+        },
+        {
+          "layer": 76,
+          "accesses": 166,
+          "hits": 69,
+          "hit_rate": 0.41566265060240964,
+          "pinned_units": 1
+        },
+        {
+          "layer": 77,
+          "accesses": 166,
+          "hits": 69,
+          "hit_rate": 0.41566265060240964,
+          "pinned_units": 1
+        },
+        {
+          "layer": 78,
+          "accesses": 166,
+          "hits": 60,
+          "hit_rate": 0.3614457831325301,
+          "pinned_units": 1
+        },
+        {
+          "layer": 79,
+          "accesses": 166,
+          "hits": 60,
+          "hit_rate": 0.3614457831325301,
+          "pinned_units": 1
+        },
+        {
+          "layer": 80,
+          "accesses": 166,
+          "hits": 60,
+          "hit_rate": 0.3614457831325301,
+          "pinned_units": 1
+        },
+        {
+          "layer": 81,
+          "accesses": 173,
+          "hits": 43,
+          "hit_rate": 0.24855491329479767,
+          "pinned_units": 1
+        },
+        {
+          "layer": 82,
+          "accesses": 173,
+          "hits": 43,
+          "hit_rate": 0.24855491329479767,
+          "pinned_units": 1
+        },
+        {
+          "layer": 83,
+          "accesses": 173,
+          "hits": 43,
+          "hit_rate": 0.24855491329479767,
+          "pinned_units": 1
+        },
+        {
+          "layer": 84,
+          "accesses": 185,
+          "hits": 47,
+          "hit_rate": 0.25405405405405407,
+          "pinned_units": 1
+        },
+        {
+          "layer": 85,
+          "accesses": 185,
+          "hits": 47,
+          "hit_rate": 0.25405405405405407,
+          "pinned_units": 1
+        },
+        {
+          "layer": 86,
+          "accesses": 185,
+          "hits": 47,
+          "hit_rate": 0.25405405405405407,
+          "pinned_units": 1
+        },
+        {
+          "layer": 87,
+          "accesses": 183,
+          "hits": 50,
+          "hit_rate": 0.273224043715847,
+          "pinned_units": 1
+        },
+        {
+          "layer": 88,
+          "accesses": 183,
+          "hits": 50,
+          "hit_rate": 0.273224043715847,
+          "pinned_units": 1
+        },
+        {
+          "layer": 89,
+          "accesses": 183,
+          "hits": 50,
+          "hit_rate": 0.273224043715847,
+          "pinned_units": 1
+        },
+        {
+          "layer": 90,
+          "accesses": 169,
+          "hits": 79,
+          "hit_rate": 0.46745562130177515,
+          "pinned_units": 1
+        },
+        {
+          "layer": 91,
+          "accesses": 169,
+          "hits": 79,
+          "hit_rate": 0.46745562130177515,
+          "pinned_units": 1
+        },
+        {
+          "layer": 92,
+          "accesses": 169,
+          "hits": 79,
+          "hit_rate": 0.46745562130177515,
+          "pinned_units": 1
+        },
+        {
+          "layer": 93,
+          "accesses": 161,
+          "hits": 82,
+          "hit_rate": 0.5093167701863354,
+          "pinned_units": 1
+        },
+        {
+          "layer": 94,
+          "accesses": 161,
+          "hits": 82,
+          "hit_rate": 0.5093167701863354,
+          "pinned_units": 1
+        },
+        {
+          "layer": 95,
+          "accesses": 161,
+          "hits": 82,
+          "hit_rate": 0.5093167701863354,
+          "pinned_units": 1
+        },
+        {
+          "layer": 96,
+          "accesses": 165,
+          "hits": 71,
+          "hit_rate": 0.4303030303030303,
+          "pinned_units": 1
+        },
+        {
+          "layer": 97,
+          "accesses": 165,
+          "hits": 71,
+          "hit_rate": 0.4303030303030303,
+          "pinned_units": 1
+        },
+        {
+          "layer": 98,
+          "accesses": 165,
+          "hits": 71,
+          "hit_rate": 0.4303030303030303,
+          "pinned_units": 1
+        },
+        {
+          "layer": 99,
+          "accesses": 176,
+          "hits": 74,
+          "hit_rate": 0.42045454545454547,
+          "pinned_units": 1
+        },
+        {
+          "layer": 100,
+          "accesses": 176,
+          "hits": 74,
+          "hit_rate": 0.42045454545454547,
+          "pinned_units": 1
+        },
+        {
+          "layer": 101,
+          "accesses": 176,
+          "hits": 74,
+          "hit_rate": 0.42045454545454547,
+          "pinned_units": 1
+        },
+        {
+          "layer": 102,
+          "accesses": 173,
+          "hits": 69,
+          "hit_rate": 0.3988439306358382,
+          "pinned_units": 1
+        },
+        {
+          "layer": 103,
+          "accesses": 173,
+          "hits": 69,
+          "hit_rate": 0.3988439306358382,
+          "pinned_units": 1
+        },
+        {
+          "layer": 104,
+          "accesses": 173,
+          "hits": 69,
+          "hit_rate": 0.3988439306358382,
+          "pinned_units": 1
+        },
+        {
+          "layer": 105,
+          "accesses": 173,
+          "hits": 56,
+          "hit_rate": 0.3236994219653179,
+          "pinned_units": 1
+        },
+        {
+          "layer": 106,
+          "accesses": 173,
+          "hits": 56,
+          "hit_rate": 0.3236994219653179,
+          "pinned_units": 1
+        },
+        {
+          "layer": 107,
+          "accesses": 173,
+          "hits": 56,
+          "hit_rate": 0.3236994219653179,
+          "pinned_units": 1
+        },
+        {
+          "layer": 108,
+          "accesses": 183,
+          "hits": 42,
+          "hit_rate": 0.22950819672131148,
+          "pinned_units": 1
+        },
+        {
+          "layer": 109,
+          "accesses": 183,
+          "hits": 42,
+          "hit_rate": 0.22950819672131148,
+          "pinned_units": 1
+        },
+        {
+          "layer": 110,
+          "accesses": 183,
+          "hits": 42,
+          "hit_rate": 0.22950819672131148,
+          "pinned_units": 1
+        },
+        {
+          "layer": 111,
+          "accesses": 197,
+          "hits": 34,
+          "hit_rate": 0.17258883248730963,
+          "pinned_units": 1
+        },
+        {
+          "layer": 112,
+          "accesses": 197,
+          "hits": 34,
+          "hit_rate": 0.17258883248730963,
+          "pinned_units": 1
+        },
+        {
+          "layer": 113,
+          "accesses": 197,
+          "hits": 34,
+          "hit_rate": 0.17258883248730963,
+          "pinned_units": 1
+        },
+        {
+          "layer": 114,
+          "accesses": 204,
+          "hits": 25,
+          "hit_rate": 0.12254901960784313,
+          "pinned_units": 1
+        },
+        {
+          "layer": 115,
+          "accesses": 204,
+          "hits": 25,
+          "hit_rate": 0.12254901960784313,
+          "pinned_units": 1
+        },
+        {
+          "layer": 116,
+          "accesses": 204,
+          "hits": 25,
+          "hit_rate": 0.12254901960784313,
+          "pinned_units": 1
+        },
+        {
+          "layer": 117,
+          "accesses": 205,
+          "hits": 22,
+          "hit_rate": 0.1073170731707317,
+          "pinned_units": 1
+        },
+        {
+          "layer": 118,
+          "accesses": 205,
+          "hits": 22,
+          "hit_rate": 0.1073170731707317,
+          "pinned_units": 1
+        },
+        {
+          "layer": 119,
+          "accesses": 205,
+          "hits": 22,
+          "hit_rate": 0.1073170731707317,
+          "pinned_units": 1
+        }
+      ],
+      "page_ins_vs_lru": -33,
+      "hit_rate_delta": 0.0015716530932990413
+    },
+    {
+      "pin_fraction": 0.2,
+      "pinned_per_layer": 3,
+      "accesses": 20997,
+      "hits": 7275,
+      "hit_rate": 0.3464780682954708,
+      "page_ins": 13722,
+      "layers": [
+        {
+          "layer": 0,
+          "accesses": 180,
+          "hits": 53,
+          "hit_rate": 0.29444444444444445,
+          "pinned_units": 3
+        },
+        {
+          "layer": 1,
+          "accesses": 180,
+          "hits": 53,
+          "hit_rate": 0.29444444444444445,
+          "pinned_units": 3
+        },
+        {
+          "layer": 2,
+          "accesses": 180,
+          "hits": 53,
+          "hit_rate": 0.29444444444444445,
+          "pinned_units": 3
+        },
+        {
+          "layer": 3,
+          "accesses": 172,
+          "hits": 60,
+          "hit_rate": 0.3488372093023256,
+          "pinned_units": 3
+        },
+        {
+          "layer": 4,
+          "accesses": 172,
+          "hits": 60,
+          "hit_rate": 0.3488372093023256,
+          "pinned_units": 3
+        },
+        {
+          "layer": 5,
+          "accesses": 172,
+          "hits": 60,
+          "hit_rate": 0.3488372093023256,
+          "pinned_units": 3
+        },
+        {
+          "layer": 6,
+          "accesses": 175,
+          "hits": 71,
+          "hit_rate": 0.4057142857142857,
+          "pinned_units": 3
+        },
+        {
+          "layer": 7,
+          "accesses": 175,
+          "hits": 71,
+          "hit_rate": 0.4057142857142857,
+          "pinned_units": 3
+        },
+        {
+          "layer": 8,
+          "accesses": 175,
+          "hits": 71,
+          "hit_rate": 0.4057142857142857,
+          "pinned_units": 3
+        },
+        {
+          "layer": 9,
+          "accesses": 174,
+          "hits": 56,
+          "hit_rate": 0.3218390804597701,
+          "pinned_units": 3
+        },
+        {
+          "layer": 10,
+          "accesses": 174,
+          "hits": 56,
+          "hit_rate": 0.3218390804597701,
+          "pinned_units": 3
+        },
+        {
+          "layer": 11,
+          "accesses": 174,
+          "hits": 56,
+          "hit_rate": 0.3218390804597701,
+          "pinned_units": 3
+        },
+        {
+          "layer": 12,
+          "accesses": 174,
+          "hits": 74,
+          "hit_rate": 0.42528735632183906,
+          "pinned_units": 3
+        },
+        {
+          "layer": 13,
+          "accesses": 174,
+          "hits": 74,
+          "hit_rate": 0.42528735632183906,
+          "pinned_units": 3
+        },
+        {
+          "layer": 14,
+          "accesses": 174,
+          "hits": 74,
+          "hit_rate": 0.42528735632183906,
+          "pinned_units": 3
+        },
+        {
+          "layer": 15,
+          "accesses": 180,
+          "hits": 62,
+          "hit_rate": 0.34444444444444444,
+          "pinned_units": 3
+        },
+        {
+          "layer": 16,
+          "accesses": 180,
+          "hits": 62,
+          "hit_rate": 0.34444444444444444,
+          "pinned_units": 3
+        },
+        {
+          "layer": 17,
+          "accesses": 180,
+          "hits": 62,
+          "hit_rate": 0.34444444444444444,
+          "pinned_units": 3
+        },
+        {
+          "layer": 18,
+          "accesses": 183,
+          "hits": 70,
+          "hit_rate": 0.3825136612021858,
+          "pinned_units": 3
+        },
+        {
+          "layer": 19,
+          "accesses": 183,
+          "hits": 70,
+          "hit_rate": 0.3825136612021858,
+          "pinned_units": 3
+        },
+        {
+          "layer": 20,
+          "accesses": 183,
+          "hits": 70,
+          "hit_rate": 0.3825136612021858,
+          "pinned_units": 3
+        },
+        {
+          "layer": 21,
+          "accesses": 179,
+          "hits": 73,
+          "hit_rate": 0.40782122905027934,
+          "pinned_units": 3
+        },
+        {
+          "layer": 22,
+          "accesses": 179,
+          "hits": 73,
+          "hit_rate": 0.40782122905027934,
+          "pinned_units": 3
+        },
+        {
+          "layer": 23,
+          "accesses": 179,
+          "hits": 73,
+          "hit_rate": 0.40782122905027934,
+          "pinned_units": 3
+        },
+        {
+          "layer": 24,
+          "accesses": 161,
+          "hits": 77,
+          "hit_rate": 0.4782608695652174,
+          "pinned_units": 3
+        },
+        {
+          "layer": 25,
+          "accesses": 161,
+          "hits": 77,
+          "hit_rate": 0.4782608695652174,
+          "pinned_units": 3
+        },
+        {
+          "layer": 26,
+          "accesses": 161,
+          "hits": 77,
+          "hit_rate": 0.4782608695652174,
+          "pinned_units": 3
+        },
+        {
+          "layer": 27,
+          "accesses": 170,
+          "hits": 78,
+          "hit_rate": 0.4588235294117647,
+          "pinned_units": 3
+        },
+        {
+          "layer": 28,
+          "accesses": 170,
+          "hits": 78,
+          "hit_rate": 0.4588235294117647,
+          "pinned_units": 3
+        },
+        {
+          "layer": 29,
+          "accesses": 170,
+          "hits": 78,
+          "hit_rate": 0.4588235294117647,
+          "pinned_units": 3
+        },
+        {
+          "layer": 30,
+          "accesses": 173,
+          "hits": 67,
+          "hit_rate": 0.3872832369942196,
+          "pinned_units": 3
+        },
+        {
+          "layer": 31,
+          "accesses": 173,
+          "hits": 67,
+          "hit_rate": 0.3872832369942196,
+          "pinned_units": 3
+        },
+        {
+          "layer": 32,
+          "accesses": 173,
+          "hits": 67,
+          "hit_rate": 0.3872832369942196,
+          "pinned_units": 3
+        },
+        {
+          "layer": 33,
+          "accesses": 174,
+          "hits": 72,
+          "hit_rate": 0.41379310344827586,
+          "pinned_units": 3
+        },
+        {
+          "layer": 34,
+          "accesses": 174,
+          "hits": 72,
+          "hit_rate": 0.41379310344827586,
+          "pinned_units": 3
+        },
+        {
+          "layer": 35,
+          "accesses": 174,
+          "hits": 72,
+          "hit_rate": 0.41379310344827586,
+          "pinned_units": 3
+        },
+        {
+          "layer": 36,
+          "accesses": 171,
+          "hits": 65,
+          "hit_rate": 0.38011695906432746,
+          "pinned_units": 3
+        },
+        {
+          "layer": 37,
+          "accesses": 171,
+          "hits": 65,
+          "hit_rate": 0.38011695906432746,
+          "pinned_units": 3
+        },
+        {
+          "layer": 38,
+          "accesses": 171,
+          "hits": 65,
+          "hit_rate": 0.38011695906432746,
+          "pinned_units": 3
+        },
+        {
+          "layer": 39,
+          "accesses": 172,
+          "hits": 59,
+          "hit_rate": 0.3430232558139535,
+          "pinned_units": 3
+        },
+        {
+          "layer": 40,
+          "accesses": 172,
+          "hits": 59,
+          "hit_rate": 0.3430232558139535,
+          "pinned_units": 3
+        },
+        {
+          "layer": 41,
+          "accesses": 172,
+          "hits": 59,
+          "hit_rate": 0.3430232558139535,
+          "pinned_units": 3
+        },
+        {
+          "layer": 42,
+          "accesses": 170,
+          "hits": 59,
+          "hit_rate": 0.34705882352941175,
+          "pinned_units": 3
+        },
+        {
+          "layer": 43,
+          "accesses": 170,
+          "hits": 59,
+          "hit_rate": 0.34705882352941175,
+          "pinned_units": 3
+        },
+        {
+          "layer": 44,
+          "accesses": 170,
+          "hits": 59,
+          "hit_rate": 0.34705882352941175,
+          "pinned_units": 3
+        },
+        {
+          "layer": 45,
+          "accesses": 172,
+          "hits": 45,
+          "hit_rate": 0.2616279069767442,
+          "pinned_units": 3
+        },
+        {
+          "layer": 46,
+          "accesses": 172,
+          "hits": 45,
+          "hit_rate": 0.2616279069767442,
+          "pinned_units": 3
+        },
+        {
+          "layer": 47,
+          "accesses": 172,
+          "hits": 45,
+          "hit_rate": 0.2616279069767442,
+          "pinned_units": 3
+        },
+        {
+          "layer": 48,
+          "accesses": 189,
+          "hits": 56,
+          "hit_rate": 0.2962962962962963,
+          "pinned_units": 3
+        },
+        {
+          "layer": 49,
+          "accesses": 189,
+          "hits": 56,
+          "hit_rate": 0.2962962962962963,
+          "pinned_units": 3
+        },
+        {
+          "layer": 50,
+          "accesses": 189,
+          "hits": 56,
+          "hit_rate": 0.2962962962962963,
+          "pinned_units": 3
+        },
+        {
+          "layer": 51,
+          "accesses": 183,
+          "hits": 54,
+          "hit_rate": 0.29508196721311475,
+          "pinned_units": 3
+        },
+        {
+          "layer": 52,
+          "accesses": 183,
+          "hits": 54,
+          "hit_rate": 0.29508196721311475,
+          "pinned_units": 3
+        },
+        {
+          "layer": 53,
+          "accesses": 183,
+          "hits": 54,
+          "hit_rate": 0.29508196721311475,
+          "pinned_units": 3
+        },
+        {
+          "layer": 54,
+          "accesses": 169,
+          "hits": 82,
+          "hit_rate": 0.48520710059171596,
+          "pinned_units": 3
+        },
+        {
+          "layer": 55,
+          "accesses": 169,
+          "hits": 82,
+          "hit_rate": 0.48520710059171596,
+          "pinned_units": 3
+        },
+        {
+          "layer": 56,
+          "accesses": 169,
+          "hits": 82,
+          "hit_rate": 0.48520710059171596,
+          "pinned_units": 3
+        },
+        {
+          "layer": 57,
+          "accesses": 164,
+          "hits": 90,
+          "hit_rate": 0.5487804878048781,
+          "pinned_units": 3
+        },
+        {
+          "layer": 58,
+          "accesses": 164,
+          "hits": 90,
+          "hit_rate": 0.5487804878048781,
+          "pinned_units": 3
+        },
+        {
+          "layer": 59,
+          "accesses": 164,
+          "hits": 90,
+          "hit_rate": 0.5487804878048781,
+          "pinned_units": 3
+        },
+        {
+          "layer": 60,
+          "accesses": 163,
+          "hits": 53,
+          "hit_rate": 0.32515337423312884,
+          "pinned_units": 3
+        },
+        {
+          "layer": 61,
+          "accesses": 163,
+          "hits": 53,
+          "hit_rate": 0.32515337423312884,
+          "pinned_units": 3
+        },
+        {
+          "layer": 62,
+          "accesses": 163,
+          "hits": 53,
+          "hit_rate": 0.32515337423312884,
+          "pinned_units": 3
+        },
+        {
+          "layer": 63,
+          "accesses": 167,
+          "hits": 69,
+          "hit_rate": 0.41317365269461076,
+          "pinned_units": 3
+        },
+        {
+          "layer": 64,
+          "accesses": 167,
+          "hits": 69,
+          "hit_rate": 0.41317365269461076,
+          "pinned_units": 3
+        },
+        {
+          "layer": 65,
+          "accesses": 167,
+          "hits": 69,
+          "hit_rate": 0.41317365269461076,
+          "pinned_units": 3
+        },
+        {
+          "layer": 66,
+          "accesses": 169,
+          "hits": 56,
+          "hit_rate": 0.33136094674556216,
+          "pinned_units": 3
+        },
+        {
+          "layer": 67,
+          "accesses": 169,
+          "hits": 56,
+          "hit_rate": 0.33136094674556216,
+          "pinned_units": 3
+        },
+        {
+          "layer": 68,
+          "accesses": 169,
+          "hits": 56,
+          "hit_rate": 0.33136094674556216,
+          "pinned_units": 3
+        },
+        {
+          "layer": 69,
+          "accesses": 170,
+          "hits": 73,
+          "hit_rate": 0.4294117647058823,
+          "pinned_units": 3
+        },
+        {
+          "layer": 70,
+          "accesses": 170,
+          "hits": 73,
+          "hit_rate": 0.4294117647058823,
+          "pinned_units": 3
+        },
+        {
+          "layer": 71,
+          "accesses": 170,
+          "hits": 73,
+          "hit_rate": 0.4294117647058823,
+          "pinned_units": 3
+        },
+        {
+          "layer": 72,
+          "accesses": 166,
+          "hits": 57,
+          "hit_rate": 0.3433734939759036,
+          "pinned_units": 3
+        },
+        {
+          "layer": 73,
+          "accesses": 166,
+          "hits": 57,
+          "hit_rate": 0.3433734939759036,
+          "pinned_units": 3
+        },
+        {
+          "layer": 74,
+          "accesses": 166,
+          "hits": 57,
+          "hit_rate": 0.3433734939759036,
+          "pinned_units": 3
+        },
+        {
+          "layer": 75,
+          "accesses": 166,
+          "hits": 67,
+          "hit_rate": 0.4036144578313253,
+          "pinned_units": 3
+        },
+        {
+          "layer": 76,
+          "accesses": 166,
+          "hits": 67,
+          "hit_rate": 0.4036144578313253,
+          "pinned_units": 3
+        },
+        {
+          "layer": 77,
+          "accesses": 166,
+          "hits": 67,
+          "hit_rate": 0.4036144578313253,
+          "pinned_units": 3
+        },
+        {
+          "layer": 78,
+          "accesses": 166,
+          "hits": 55,
+          "hit_rate": 0.3313253012048193,
+          "pinned_units": 3
+        },
+        {
+          "layer": 79,
+          "accesses": 166,
+          "hits": 55,
+          "hit_rate": 0.3313253012048193,
+          "pinned_units": 3
+        },
+        {
+          "layer": 80,
+          "accesses": 166,
+          "hits": 55,
+          "hit_rate": 0.3313253012048193,
+          "pinned_units": 3
+        },
+        {
+          "layer": 81,
+          "accesses": 173,
+          "hits": 37,
+          "hit_rate": 0.2138728323699422,
+          "pinned_units": 3
+        },
+        {
+          "layer": 82,
+          "accesses": 173,
+          "hits": 37,
+          "hit_rate": 0.2138728323699422,
+          "pinned_units": 3
+        },
+        {
+          "layer": 83,
+          "accesses": 173,
+          "hits": 37,
+          "hit_rate": 0.2138728323699422,
+          "pinned_units": 3
+        },
+        {
+          "layer": 84,
+          "accesses": 185,
+          "hits": 49,
+          "hit_rate": 0.2648648648648649,
+          "pinned_units": 3
+        },
+        {
+          "layer": 85,
+          "accesses": 185,
+          "hits": 49,
+          "hit_rate": 0.2648648648648649,
+          "pinned_units": 3
+        },
+        {
+          "layer": 86,
+          "accesses": 185,
+          "hits": 49,
+          "hit_rate": 0.2648648648648649,
+          "pinned_units": 3
+        },
+        {
+          "layer": 87,
+          "accesses": 183,
+          "hits": 48,
+          "hit_rate": 0.26229508196721313,
+          "pinned_units": 3
+        },
+        {
+          "layer": 88,
+          "accesses": 183,
+          "hits": 48,
+          "hit_rate": 0.26229508196721313,
+          "pinned_units": 3
+        },
+        {
+          "layer": 89,
+          "accesses": 183,
+          "hits": 48,
+          "hit_rate": 0.26229508196721313,
+          "pinned_units": 3
+        },
+        {
+          "layer": 90,
+          "accesses": 169,
+          "hits": 71,
+          "hit_rate": 0.42011834319526625,
+          "pinned_units": 3
+        },
+        {
+          "layer": 91,
+          "accesses": 169,
+          "hits": 71,
+          "hit_rate": 0.42011834319526625,
+          "pinned_units": 3
+        },
+        {
+          "layer": 92,
+          "accesses": 169,
+          "hits": 71,
+          "hit_rate": 0.42011834319526625,
+          "pinned_units": 3
+        },
+        {
+          "layer": 93,
+          "accesses": 161,
+          "hits": 77,
+          "hit_rate": 0.4782608695652174,
+          "pinned_units": 3
+        },
+        {
+          "layer": 94,
+          "accesses": 161,
+          "hits": 77,
+          "hit_rate": 0.4782608695652174,
+          "pinned_units": 3
+        },
+        {
+          "layer": 95,
+          "accesses": 161,
+          "hits": 77,
+          "hit_rate": 0.4782608695652174,
+          "pinned_units": 3
+        },
+        {
+          "layer": 96,
+          "accesses": 165,
+          "hits": 67,
+          "hit_rate": 0.40606060606060607,
+          "pinned_units": 3
+        },
+        {
+          "layer": 97,
+          "accesses": 165,
+          "hits": 67,
+          "hit_rate": 0.40606060606060607,
+          "pinned_units": 3
+        },
+        {
+          "layer": 98,
+          "accesses": 165,
+          "hits": 67,
+          "hit_rate": 0.40606060606060607,
+          "pinned_units": 3
+        },
+        {
+          "layer": 99,
+          "accesses": 176,
+          "hits": 68,
+          "hit_rate": 0.38636363636363635,
+          "pinned_units": 3
+        },
+        {
+          "layer": 100,
+          "accesses": 176,
+          "hits": 68,
+          "hit_rate": 0.38636363636363635,
+          "pinned_units": 3
+        },
+        {
+          "layer": 101,
+          "accesses": 176,
+          "hits": 68,
+          "hit_rate": 0.38636363636363635,
+          "pinned_units": 3
+        },
+        {
+          "layer": 102,
+          "accesses": 173,
+          "hits": 66,
+          "hit_rate": 0.3815028901734104,
+          "pinned_units": 3
+        },
+        {
+          "layer": 103,
+          "accesses": 173,
+          "hits": 66,
+          "hit_rate": 0.3815028901734104,
+          "pinned_units": 3
+        },
+        {
+          "layer": 104,
+          "accesses": 173,
+          "hits": 66,
+          "hit_rate": 0.3815028901734104,
+          "pinned_units": 3
+        },
+        {
+          "layer": 105,
+          "accesses": 173,
+          "hits": 52,
+          "hit_rate": 0.30057803468208094,
+          "pinned_units": 3
+        },
+        {
+          "layer": 106,
+          "accesses": 173,
+          "hits": 52,
+          "hit_rate": 0.30057803468208094,
+          "pinned_units": 3
+        },
+        {
+          "layer": 107,
+          "accesses": 173,
+          "hits": 52,
+          "hit_rate": 0.30057803468208094,
+          "pinned_units": 3
+        },
+        {
+          "layer": 108,
+          "accesses": 183,
+          "hits": 46,
+          "hit_rate": 0.25136612021857924,
+          "pinned_units": 3
+        },
+        {
+          "layer": 109,
+          "accesses": 183,
+          "hits": 46,
+          "hit_rate": 0.25136612021857924,
+          "pinned_units": 3
+        },
+        {
+          "layer": 110,
+          "accesses": 183,
+          "hits": 46,
+          "hit_rate": 0.25136612021857924,
+          "pinned_units": 3
+        },
+        {
+          "layer": 111,
+          "accesses": 197,
+          "hits": 36,
+          "hit_rate": 0.18274111675126903,
+          "pinned_units": 3
+        },
+        {
+          "layer": 112,
+          "accesses": 197,
+          "hits": 36,
+          "hit_rate": 0.18274111675126903,
+          "pinned_units": 3
+        },
+        {
+          "layer": 113,
+          "accesses": 197,
+          "hits": 36,
+          "hit_rate": 0.18274111675126903,
+          "pinned_units": 3
+        },
+        {
+          "layer": 114,
+          "accesses": 204,
+          "hits": 29,
+          "hit_rate": 0.14215686274509803,
+          "pinned_units": 3
+        },
+        {
+          "layer": 115,
+          "accesses": 204,
+          "hits": 29,
+          "hit_rate": 0.14215686274509803,
+          "pinned_units": 3
+        },
+        {
+          "layer": 116,
+          "accesses": 204,
+          "hits": 29,
+          "hit_rate": 0.14215686274509803,
+          "pinned_units": 3
+        },
+        {
+          "layer": 117,
+          "accesses": 205,
+          "hits": 26,
+          "hit_rate": 0.12682926829268293,
+          "pinned_units": 3
+        },
+        {
+          "layer": 118,
+          "accesses": 205,
+          "hits": 26,
+          "hit_rate": 0.12682926829268293,
+          "pinned_units": 3
+        },
+        {
+          "layer": 119,
+          "accesses": 205,
+          "hits": 26,
+          "hit_rate": 0.12682926829268293,
+          "pinned_units": 3
+        }
+      ],
+      "page_ins_vs_lru": 81,
+      "hit_rate_delta": -0.00385769395627944
+    },
+    {
+      "pin_fraction": 0.33,
+      "pinned_per_layer": 4,
+      "accesses": 20997,
+      "hits": 7266,
+      "hit_rate": 0.346049435633662,
+      "page_ins": 13731,
+      "layers": [
+        {
+          "layer": 0,
+          "accesses": 180,
+          "hits": 54,
+          "hit_rate": 0.3,
+          "pinned_units": 4
+        },
+        {
+          "layer": 1,
+          "accesses": 180,
+          "hits": 54,
+          "hit_rate": 0.3,
+          "pinned_units": 4
+        },
+        {
+          "layer": 2,
+          "accesses": 180,
+          "hits": 54,
+          "hit_rate": 0.3,
+          "pinned_units": 4
+        },
+        {
+          "layer": 3,
+          "accesses": 172,
+          "hits": 58,
+          "hit_rate": 0.3372093023255814,
+          "pinned_units": 4
+        },
+        {
+          "layer": 4,
+          "accesses": 172,
+          "hits": 58,
+          "hit_rate": 0.3372093023255814,
+          "pinned_units": 4
+        },
+        {
+          "layer": 5,
+          "accesses": 172,
+          "hits": 58,
+          "hit_rate": 0.3372093023255814,
+          "pinned_units": 4
+        },
+        {
+          "layer": 6,
+          "accesses": 175,
+          "hits": 69,
+          "hit_rate": 0.3942857142857143,
+          "pinned_units": 4
+        },
+        {
+          "layer": 7,
+          "accesses": 175,
+          "hits": 69,
+          "hit_rate": 0.3942857142857143,
+          "pinned_units": 4
+        },
+        {
+          "layer": 8,
+          "accesses": 175,
+          "hits": 69,
+          "hit_rate": 0.3942857142857143,
+          "pinned_units": 4
+        },
+        {
+          "layer": 9,
+          "accesses": 174,
+          "hits": 57,
+          "hit_rate": 0.3275862068965517,
+          "pinned_units": 4
+        },
+        {
+          "layer": 10,
+          "accesses": 174,
+          "hits": 57,
+          "hit_rate": 0.3275862068965517,
+          "pinned_units": 4
+        },
+        {
+          "layer": 11,
+          "accesses": 174,
+          "hits": 57,
+          "hit_rate": 0.3275862068965517,
+          "pinned_units": 4
+        },
+        {
+          "layer": 12,
+          "accesses": 174,
+          "hits": 74,
+          "hit_rate": 0.42528735632183906,
+          "pinned_units": 4
+        },
+        {
+          "layer": 13,
+          "accesses": 174,
+          "hits": 74,
+          "hit_rate": 0.42528735632183906,
+          "pinned_units": 4
+        },
+        {
+          "layer": 14,
+          "accesses": 174,
+          "hits": 74,
+          "hit_rate": 0.42528735632183906,
+          "pinned_units": 4
+        },
+        {
+          "layer": 15,
+          "accesses": 180,
+          "hits": 64,
+          "hit_rate": 0.35555555555555557,
+          "pinned_units": 4
+        },
+        {
+          "layer": 16,
+          "accesses": 180,
+          "hits": 64,
+          "hit_rate": 0.35555555555555557,
+          "pinned_units": 4
+        },
+        {
+          "layer": 17,
+          "accesses": 180,
+          "hits": 64,
+          "hit_rate": 0.35555555555555557,
+          "pinned_units": 4
+        },
+        {
+          "layer": 18,
+          "accesses": 183,
+          "hits": 69,
+          "hit_rate": 0.3770491803278688,
+          "pinned_units": 4
+        },
+        {
+          "layer": 19,
+          "accesses": 183,
+          "hits": 69,
+          "hit_rate": 0.3770491803278688,
+          "pinned_units": 4
+        },
+        {
+          "layer": 20,
+          "accesses": 183,
+          "hits": 69,
+          "hit_rate": 0.3770491803278688,
+          "pinned_units": 4
+        },
+        {
+          "layer": 21,
+          "accesses": 179,
+          "hits": 71,
+          "hit_rate": 0.39664804469273746,
+          "pinned_units": 4
+        },
+        {
+          "layer": 22,
+          "accesses": 179,
+          "hits": 71,
+          "hit_rate": 0.39664804469273746,
+          "pinned_units": 4
+        },
+        {
+          "layer": 23,
+          "accesses": 179,
+          "hits": 71,
+          "hit_rate": 0.39664804469273746,
+          "pinned_units": 4
+        },
+        {
+          "layer": 24,
+          "accesses": 161,
+          "hits": 75,
+          "hit_rate": 0.4658385093167702,
+          "pinned_units": 4
+        },
+        {
+          "layer": 25,
+          "accesses": 161,
+          "hits": 75,
+          "hit_rate": 0.4658385093167702,
+          "pinned_units": 4
+        },
+        {
+          "layer": 26,
+          "accesses": 161,
+          "hits": 75,
+          "hit_rate": 0.4658385093167702,
+          "pinned_units": 4
+        },
+        {
+          "layer": 27,
+          "accesses": 170,
+          "hits": 79,
+          "hit_rate": 0.4647058823529412,
+          "pinned_units": 4
+        },
+        {
+          "layer": 28,
+          "accesses": 170,
+          "hits": 79,
+          "hit_rate": 0.4647058823529412,
+          "pinned_units": 4
+        },
+        {
+          "layer": 29,
+          "accesses": 170,
+          "hits": 79,
+          "hit_rate": 0.4647058823529412,
+          "pinned_units": 4
+        },
+        {
+          "layer": 30,
+          "accesses": 173,
+          "hits": 70,
+          "hit_rate": 0.4046242774566474,
+          "pinned_units": 4
+        },
+        {
+          "layer": 31,
+          "accesses": 173,
+          "hits": 70,
+          "hit_rate": 0.4046242774566474,
+          "pinned_units": 4
+        },
+        {
+          "layer": 32,
+          "accesses": 173,
+          "hits": 70,
+          "hit_rate": 0.4046242774566474,
+          "pinned_units": 4
+        },
+        {
+          "layer": 33,
+          "accesses": 174,
+          "hits": 70,
+          "hit_rate": 0.40229885057471265,
+          "pinned_units": 4
+        },
+        {
+          "layer": 34,
+          "accesses": 174,
+          "hits": 70,
+          "hit_rate": 0.40229885057471265,
+          "pinned_units": 4
+        },
+        {
+          "layer": 35,
+          "accesses": 174,
+          "hits": 70,
+          "hit_rate": 0.40229885057471265,
+          "pinned_units": 4
+        },
+        {
+          "layer": 36,
+          "accesses": 171,
+          "hits": 61,
+          "hit_rate": 0.3567251461988304,
+          "pinned_units": 4
+        },
+        {
+          "layer": 37,
+          "accesses": 171,
+          "hits": 61,
+          "hit_rate": 0.3567251461988304,
+          "pinned_units": 4
+        },
+        {
+          "layer": 38,
+          "accesses": 171,
+          "hits": 61,
+          "hit_rate": 0.3567251461988304,
+          "pinned_units": 4
+        },
+        {
+          "layer": 39,
+          "accesses": 172,
+          "hits": 60,
+          "hit_rate": 0.3488372093023256,
+          "pinned_units": 4
+        },
+        {
+          "layer": 40,
+          "accesses": 172,
+          "hits": 60,
+          "hit_rate": 0.3488372093023256,
+          "pinned_units": 4
+        },
+        {
+          "layer": 41,
+          "accesses": 172,
+          "hits": 60,
+          "hit_rate": 0.3488372093023256,
+          "pinned_units": 4
+        },
+        {
+          "layer": 42,
+          "accesses": 170,
+          "hits": 60,
+          "hit_rate": 0.35294117647058826,
+          "pinned_units": 4
+        },
+        {
+          "layer": 43,
+          "accesses": 170,
+          "hits": 60,
+          "hit_rate": 0.35294117647058826,
+          "pinned_units": 4
+        },
+        {
+          "layer": 44,
+          "accesses": 170,
+          "hits": 60,
+          "hit_rate": 0.35294117647058826,
+          "pinned_units": 4
+        },
+        {
+          "layer": 45,
+          "accesses": 172,
+          "hits": 48,
+          "hit_rate": 0.27906976744186046,
+          "pinned_units": 4
+        },
+        {
+          "layer": 46,
+          "accesses": 172,
+          "hits": 48,
+          "hit_rate": 0.27906976744186046,
+          "pinned_units": 4
+        },
+        {
+          "layer": 47,
+          "accesses": 172,
+          "hits": 48,
+          "hit_rate": 0.27906976744186046,
+          "pinned_units": 4
+        },
+        {
+          "layer": 48,
+          "accesses": 189,
+          "hits": 59,
+          "hit_rate": 0.31216931216931215,
+          "pinned_units": 4
+        },
+        {
+          "layer": 49,
+          "accesses": 189,
+          "hits": 59,
+          "hit_rate": 0.31216931216931215,
+          "pinned_units": 4
+        },
+        {
+          "layer": 50,
+          "accesses": 189,
+          "hits": 59,
+          "hit_rate": 0.31216931216931215,
+          "pinned_units": 4
+        },
+        {
+          "layer": 51,
+          "accesses": 183,
+          "hits": 51,
+          "hit_rate": 0.2786885245901639,
+          "pinned_units": 4
+        },
+        {
+          "layer": 52,
+          "accesses": 183,
+          "hits": 51,
+          "hit_rate": 0.2786885245901639,
+          "pinned_units": 4
+        },
+        {
+          "layer": 53,
+          "accesses": 183,
+          "hits": 51,
+          "hit_rate": 0.2786885245901639,
+          "pinned_units": 4
+        },
+        {
+          "layer": 54,
+          "accesses": 169,
+          "hits": 83,
+          "hit_rate": 0.4911242603550296,
+          "pinned_units": 4
+        },
+        {
+          "layer": 55,
+          "accesses": 169,
+          "hits": 83,
+          "hit_rate": 0.4911242603550296,
+          "pinned_units": 4
+        },
+        {
+          "layer": 56,
+          "accesses": 169,
+          "hits": 83,
+          "hit_rate": 0.4911242603550296,
+          "pinned_units": 4
+        },
+        {
+          "layer": 57,
+          "accesses": 164,
+          "hits": 92,
+          "hit_rate": 0.5609756097560976,
+          "pinned_units": 4
+        },
+        {
+          "layer": 58,
+          "accesses": 164,
+          "hits": 92,
+          "hit_rate": 0.5609756097560976,
+          "pinned_units": 4
+        },
+        {
+          "layer": 59,
+          "accesses": 164,
+          "hits": 92,
+          "hit_rate": 0.5609756097560976,
+          "pinned_units": 4
+        },
+        {
+          "layer": 60,
+          "accesses": 163,
+          "hits": 51,
+          "hit_rate": 0.3128834355828221,
+          "pinned_units": 4
+        },
+        {
+          "layer": 61,
+          "accesses": 163,
+          "hits": 51,
+          "hit_rate": 0.3128834355828221,
+          "pinned_units": 4
+        },
+        {
+          "layer": 62,
+          "accesses": 163,
+          "hits": 51,
+          "hit_rate": 0.3128834355828221,
+          "pinned_units": 4
+        },
+        {
+          "layer": 63,
+          "accesses": 167,
+          "hits": 69,
+          "hit_rate": 0.41317365269461076,
+          "pinned_units": 4
+        },
+        {
+          "layer": 64,
+          "accesses": 167,
+          "hits": 69,
+          "hit_rate": 0.41317365269461076,
+          "pinned_units": 4
+        },
+        {
+          "layer": 65,
+          "accesses": 167,
+          "hits": 69,
+          "hit_rate": 0.41317365269461076,
+          "pinned_units": 4
+        },
+        {
+          "layer": 66,
+          "accesses": 169,
+          "hits": 58,
+          "hit_rate": 0.3431952662721893,
+          "pinned_units": 4
+        },
+        {
+          "layer": 67,
+          "accesses": 169,
+          "hits": 58,
+          "hit_rate": 0.3431952662721893,
+          "pinned_units": 4
+        },
+        {
+          "layer": 68,
+          "accesses": 169,
+          "hits": 58,
+          "hit_rate": 0.3431952662721893,
+          "pinned_units": 4
+        },
+        {
+          "layer": 69,
+          "accesses": 170,
+          "hits": 65,
+          "hit_rate": 0.38235294117647056,
+          "pinned_units": 4
+        },
+        {
+          "layer": 70,
+          "accesses": 170,
+          "hits": 65,
+          "hit_rate": 0.38235294117647056,
+          "pinned_units": 4
+        },
+        {
+          "layer": 71,
+          "accesses": 170,
+          "hits": 65,
+          "hit_rate": 0.38235294117647056,
+          "pinned_units": 4
+        },
+        {
+          "layer": 72,
+          "accesses": 166,
+          "hits": 56,
+          "hit_rate": 0.3373493975903614,
+          "pinned_units": 4
+        },
+        {
+          "layer": 73,
+          "accesses": 166,
+          "hits": 56,
+          "hit_rate": 0.3373493975903614,
+          "pinned_units": 4
+        },
+        {
+          "layer": 74,
+          "accesses": 166,
+          "hits": 56,
+          "hit_rate": 0.3373493975903614,
+          "pinned_units": 4
+        },
+        {
+          "layer": 75,
+          "accesses": 166,
+          "hits": 66,
+          "hit_rate": 0.39759036144578314,
+          "pinned_units": 4
+        },
+        {
+          "layer": 76,
+          "accesses": 166,
+          "hits": 66,
+          "hit_rate": 0.39759036144578314,
+          "pinned_units": 4
+        },
+        {
+          "layer": 77,
+          "accesses": 166,
+          "hits": 66,
+          "hit_rate": 0.39759036144578314,
+          "pinned_units": 4
+        },
+        {
+          "layer": 78,
+          "accesses": 166,
+          "hits": 53,
+          "hit_rate": 0.3192771084337349,
+          "pinned_units": 4
+        },
+        {
+          "layer": 79,
+          "accesses": 166,
+          "hits": 53,
+          "hit_rate": 0.3192771084337349,
+          "pinned_units": 4
+        },
+        {
+          "layer": 80,
+          "accesses": 166,
+          "hits": 53,
+          "hit_rate": 0.3192771084337349,
+          "pinned_units": 4
+        },
+        {
+          "layer": 81,
+          "accesses": 173,
+          "hits": 40,
+          "hit_rate": 0.23121387283236994,
+          "pinned_units": 4
+        },
+        {
+          "layer": 82,
+          "accesses": 173,
+          "hits": 40,
+          "hit_rate": 0.23121387283236994,
+          "pinned_units": 4
+        },
+        {
+          "layer": 83,
+          "accesses": 173,
+          "hits": 40,
+          "hit_rate": 0.23121387283236994,
+          "pinned_units": 4
+        },
+        {
+          "layer": 84,
+          "accesses": 185,
+          "hits": 52,
+          "hit_rate": 0.2810810810810811,
+          "pinned_units": 4
+        },
+        {
+          "layer": 85,
+          "accesses": 185,
+          "hits": 52,
+          "hit_rate": 0.2810810810810811,
+          "pinned_units": 4
+        },
+        {
+          "layer": 86,
+          "accesses": 185,
+          "hits": 52,
+          "hit_rate": 0.2810810810810811,
+          "pinned_units": 4
+        },
+        {
+          "layer": 87,
+          "accesses": 183,
+          "hits": 50,
+          "hit_rate": 0.273224043715847,
+          "pinned_units": 4
+        },
+        {
+          "layer": 88,
+          "accesses": 183,
+          "hits": 50,
+          "hit_rate": 0.273224043715847,
+          "pinned_units": 4
+        },
+        {
+          "layer": 89,
+          "accesses": 183,
+          "hits": 50,
+          "hit_rate": 0.273224043715847,
+          "pinned_units": 4
+        },
+        {
+          "layer": 90,
+          "accesses": 169,
+          "hits": 70,
+          "hit_rate": 0.41420118343195267,
+          "pinned_units": 4
+        },
+        {
+          "layer": 91,
+          "accesses": 169,
+          "hits": 70,
+          "hit_rate": 0.41420118343195267,
+          "pinned_units": 4
+        },
+        {
+          "layer": 92,
+          "accesses": 169,
+          "hits": 70,
+          "hit_rate": 0.41420118343195267,
+          "pinned_units": 4
+        },
+        {
+          "layer": 93,
+          "accesses": 161,
+          "hits": 76,
+          "hit_rate": 0.4720496894409938,
+          "pinned_units": 4
+        },
+        {
+          "layer": 94,
+          "accesses": 161,
+          "hits": 76,
+          "hit_rate": 0.4720496894409938,
+          "pinned_units": 4
+        },
+        {
+          "layer": 95,
+          "accesses": 161,
+          "hits": 76,
+          "hit_rate": 0.4720496894409938,
+          "pinned_units": 4
+        },
+        {
+          "layer": 96,
+          "accesses": 165,
+          "hits": 68,
+          "hit_rate": 0.4121212121212121,
+          "pinned_units": 4
+        },
+        {
+          "layer": 97,
+          "accesses": 165,
+          "hits": 68,
+          "hit_rate": 0.4121212121212121,
+          "pinned_units": 4
+        },
+        {
+          "layer": 98,
+          "accesses": 165,
+          "hits": 68,
+          "hit_rate": 0.4121212121212121,
+          "pinned_units": 4
+        },
+        {
+          "layer": 99,
+          "accesses": 176,
+          "hits": 69,
+          "hit_rate": 0.39204545454545453,
+          "pinned_units": 4
+        },
+        {
+          "layer": 100,
+          "accesses": 176,
+          "hits": 69,
+          "hit_rate": 0.39204545454545453,
+          "pinned_units": 4
+        },
+        {
+          "layer": 101,
+          "accesses": 176,
+          "hits": 69,
+          "hit_rate": 0.39204545454545453,
+          "pinned_units": 4
+        },
+        {
+          "layer": 102,
+          "accesses": 173,
+          "hits": 62,
+          "hit_rate": 0.3583815028901734,
+          "pinned_units": 4
+        },
+        {
+          "layer": 103,
+          "accesses": 173,
+          "hits": 62,
+          "hit_rate": 0.3583815028901734,
+          "pinned_units": 4
+        },
+        {
+          "layer": 104,
+          "accesses": 173,
+          "hits": 62,
+          "hit_rate": 0.3583815028901734,
+          "pinned_units": 4
+        },
+        {
+          "layer": 105,
+          "accesses": 173,
+          "hits": 55,
+          "hit_rate": 0.3179190751445087,
+          "pinned_units": 4
+        },
+        {
+          "layer": 106,
+          "accesses": 173,
+          "hits": 55,
+          "hit_rate": 0.3179190751445087,
+          "pinned_units": 4
+        },
+        {
+          "layer": 107,
+          "accesses": 173,
+          "hits": 55,
+          "hit_rate": 0.3179190751445087,
+          "pinned_units": 4
+        },
+        {
+          "layer": 108,
+          "accesses": 183,
+          "hits": 45,
+          "hit_rate": 0.2459016393442623,
+          "pinned_units": 4
+        },
+        {
+          "layer": 109,
+          "accesses": 183,
+          "hits": 45,
+          "hit_rate": 0.2459016393442623,
+          "pinned_units": 4
+        },
+        {
+          "layer": 110,
+          "accesses": 183,
+          "hits": 45,
+          "hit_rate": 0.2459016393442623,
+          "pinned_units": 4
+        },
+        {
+          "layer": 111,
+          "accesses": 197,
+          "hits": 39,
+          "hit_rate": 0.19796954314720813,
+          "pinned_units": 4
+        },
+        {
+          "layer": 112,
+          "accesses": 197,
+          "hits": 39,
+          "hit_rate": 0.19796954314720813,
+          "pinned_units": 4
+        },
+        {
+          "layer": 113,
+          "accesses": 197,
+          "hits": 39,
+          "hit_rate": 0.19796954314720813,
+          "pinned_units": 4
+        },
+        {
+          "layer": 114,
+          "accesses": 204,
+          "hits": 25,
+          "hit_rate": 0.12254901960784313,
+          "pinned_units": 4
+        },
+        {
+          "layer": 115,
+          "accesses": 204,
+          "hits": 25,
+          "hit_rate": 0.12254901960784313,
+          "pinned_units": 4
+        },
+        {
+          "layer": 116,
+          "accesses": 204,
+          "hits": 25,
+          "hit_rate": 0.12254901960784313,
+          "pinned_units": 4
+        },
+        {
+          "layer": 117,
+          "accesses": 205,
+          "hits": 29,
+          "hit_rate": 0.14146341463414633,
+          "pinned_units": 4
+        },
+        {
+          "layer": 118,
+          "accesses": 205,
+          "hits": 29,
+          "hit_rate": 0.14146341463414633,
+          "pinned_units": 4
+        },
+        {
+          "layer": 119,
+          "accesses": 205,
+          "hits": 29,
+          "hit_rate": 0.14146341463414633,
+          "pinned_units": 4
+        }
+      ],
+      "page_ins_vs_lru": 90,
+      "hit_rate_delta": -0.004286326618088254
+    },
+    {
+      "pin_fraction": 0.5,
+      "pinned_per_layer": 7,
+      "accesses": 20997,
+      "hits": 6615,
+      "hit_rate": 0.3150450064294899,
+      "page_ins": 14382,
+      "layers": [
+        {
+          "layer": 0,
+          "accesses": 180,
+          "hits": 42,
+          "hit_rate": 0.23333333333333334,
+          "pinned_units": 7
+        },
+        {
+          "layer": 1,
+          "accesses": 180,
+          "hits": 42,
+          "hit_rate": 0.23333333333333334,
+          "pinned_units": 7
+        },
+        {
+          "layer": 2,
+          "accesses": 180,
+          "hits": 42,
+          "hit_rate": 0.23333333333333334,
+          "pinned_units": 7
+        },
+        {
+          "layer": 3,
+          "accesses": 172,
+          "hits": 51,
+          "hit_rate": 0.29651162790697677,
+          "pinned_units": 7
+        },
+        {
+          "layer": 4,
+          "accesses": 172,
+          "hits": 51,
+          "hit_rate": 0.29651162790697677,
+          "pinned_units": 7
+        },
+        {
+          "layer": 5,
+          "accesses": 172,
+          "hits": 51,
+          "hit_rate": 0.29651162790697677,
+          "pinned_units": 7
+        },
+        {
+          "layer": 6,
+          "accesses": 175,
+          "hits": 71,
+          "hit_rate": 0.4057142857142857,
+          "pinned_units": 7
+        },
+        {
+          "layer": 7,
+          "accesses": 175,
+          "hits": 71,
+          "hit_rate": 0.4057142857142857,
+          "pinned_units": 7
+        },
+        {
+          "layer": 8,
+          "accesses": 175,
+          "hits": 71,
+          "hit_rate": 0.4057142857142857,
+          "pinned_units": 7
+        },
+        {
+          "layer": 9,
+          "accesses": 174,
+          "hits": 55,
+          "hit_rate": 0.3160919540229885,
+          "pinned_units": 7
+        },
+        {
+          "layer": 10,
+          "accesses": 174,
+          "hits": 55,
+          "hit_rate": 0.3160919540229885,
+          "pinned_units": 7
+        },
+        {
+          "layer": 11,
+          "accesses": 174,
+          "hits": 55,
+          "hit_rate": 0.3160919540229885,
+          "pinned_units": 7
+        },
+        {
+          "layer": 12,
+          "accesses": 174,
+          "hits": 68,
+          "hit_rate": 0.39080459770114945,
+          "pinned_units": 7
+        },
+        {
+          "layer": 13,
+          "accesses": 174,
+          "hits": 68,
+          "hit_rate": 0.39080459770114945,
+          "pinned_units": 7
+        },
+        {
+          "layer": 14,
+          "accesses": 174,
+          "hits": 68,
+          "hit_rate": 0.39080459770114945,
+          "pinned_units": 7
+        },
+        {
+          "layer": 15,
+          "accesses": 180,
+          "hits": 63,
+          "hit_rate": 0.35,
+          "pinned_units": 7
+        },
+        {
+          "layer": 16,
+          "accesses": 180,
+          "hits": 63,
+          "hit_rate": 0.35,
+          "pinned_units": 7
+        },
+        {
+          "layer": 17,
+          "accesses": 180,
+          "hits": 63,
+          "hit_rate": 0.35,
+          "pinned_units": 7
+        },
+        {
+          "layer": 18,
+          "accesses": 183,
+          "hits": 66,
+          "hit_rate": 0.36065573770491804,
+          "pinned_units": 7
+        },
+        {
+          "layer": 19,
+          "accesses": 183,
+          "hits": 66,
+          "hit_rate": 0.36065573770491804,
+          "pinned_units": 7
+        },
+        {
+          "layer": 20,
+          "accesses": 183,
+          "hits": 66,
+          "hit_rate": 0.36065573770491804,
+          "pinned_units": 7
+        },
+        {
+          "layer": 21,
+          "accesses": 179,
+          "hits": 56,
+          "hit_rate": 0.3128491620111732,
+          "pinned_units": 7
+        },
+        {
+          "layer": 22,
+          "accesses": 179,
+          "hits": 56,
+          "hit_rate": 0.3128491620111732,
+          "pinned_units": 7
+        },
+        {
+          "layer": 23,
+          "accesses": 179,
+          "hits": 56,
+          "hit_rate": 0.3128491620111732,
+          "pinned_units": 7
+        },
+        {
+          "layer": 24,
+          "accesses": 161,
+          "hits": 73,
+          "hit_rate": 0.453416149068323,
+          "pinned_units": 7
+        },
+        {
+          "layer": 25,
+          "accesses": 161,
+          "hits": 73,
+          "hit_rate": 0.453416149068323,
+          "pinned_units": 7
+        },
+        {
+          "layer": 26,
+          "accesses": 161,
+          "hits": 73,
+          "hit_rate": 0.453416149068323,
+          "pinned_units": 7
+        },
+        {
+          "layer": 27,
+          "accesses": 170,
+          "hits": 58,
+          "hit_rate": 0.3411764705882353,
+          "pinned_units": 7
+        },
+        {
+          "layer": 28,
+          "accesses": 170,
+          "hits": 58,
+          "hit_rate": 0.3411764705882353,
+          "pinned_units": 7
+        },
+        {
+          "layer": 29,
+          "accesses": 170,
+          "hits": 58,
+          "hit_rate": 0.3411764705882353,
+          "pinned_units": 7
+        },
+        {
+          "layer": 30,
+          "accesses": 173,
+          "hits": 63,
+          "hit_rate": 0.36416184971098264,
+          "pinned_units": 7
+        },
+        {
+          "layer": 31,
+          "accesses": 173,
+          "hits": 63,
+          "hit_rate": 0.36416184971098264,
+          "pinned_units": 7
+        },
+        {
+          "layer": 32,
+          "accesses": 173,
+          "hits": 63,
+          "hit_rate": 0.36416184971098264,
+          "pinned_units": 7
+        },
+        {
+          "layer": 33,
+          "accesses": 174,
+          "hits": 59,
+          "hit_rate": 0.3390804597701149,
+          "pinned_units": 7
+        },
+        {
+          "layer": 34,
+          "accesses": 174,
+          "hits": 59,
+          "hit_rate": 0.3390804597701149,
+          "pinned_units": 7
+        },
+        {
+          "layer": 35,
+          "accesses": 174,
+          "hits": 59,
+          "hit_rate": 0.3390804597701149,
+          "pinned_units": 7
+        },
+        {
+          "layer": 36,
+          "accesses": 171,
+          "hits": 51,
+          "hit_rate": 0.2982456140350877,
+          "pinned_units": 7
+        },
+        {
+          "layer": 37,
+          "accesses": 171,
+          "hits": 51,
+          "hit_rate": 0.2982456140350877,
+          "pinned_units": 7
+        },
+        {
+          "layer": 38,
+          "accesses": 171,
+          "hits": 51,
+          "hit_rate": 0.2982456140350877,
+          "pinned_units": 7
+        },
+        {
+          "layer": 39,
+          "accesses": 172,
+          "hits": 53,
+          "hit_rate": 0.3081395348837209,
+          "pinned_units": 7
+        },
+        {
+          "layer": 40,
+          "accesses": 172,
+          "hits": 53,
+          "hit_rate": 0.3081395348837209,
+          "pinned_units": 7
+        },
+        {
+          "layer": 41,
+          "accesses": 172,
+          "hits": 53,
+          "hit_rate": 0.3081395348837209,
+          "pinned_units": 7
+        },
+        {
+          "layer": 42,
+          "accesses": 170,
+          "hits": 51,
+          "hit_rate": 0.3,
+          "pinned_units": 7
+        },
+        {
+          "layer": 43,
+          "accesses": 170,
+          "hits": 51,
+          "hit_rate": 0.3,
+          "pinned_units": 7
+        },
+        {
+          "layer": 44,
+          "accesses": 170,
+          "hits": 51,
+          "hit_rate": 0.3,
+          "pinned_units": 7
+        },
+        {
+          "layer": 45,
+          "accesses": 172,
+          "hits": 45,
+          "hit_rate": 0.2616279069767442,
+          "pinned_units": 7
+        },
+        {
+          "layer": 46,
+          "accesses": 172,
+          "hits": 45,
+          "hit_rate": 0.2616279069767442,
+          "pinned_units": 7
+        },
+        {
+          "layer": 47,
+          "accesses": 172,
+          "hits": 45,
+          "hit_rate": 0.2616279069767442,
+          "pinned_units": 7
+        },
+        {
+          "layer": 48,
+          "accesses": 189,
+          "hits": 59,
+          "hit_rate": 0.31216931216931215,
+          "pinned_units": 7
+        },
+        {
+          "layer": 49,
+          "accesses": 189,
+          "hits": 59,
+          "hit_rate": 0.31216931216931215,
+          "pinned_units": 7
+        },
+        {
+          "layer": 50,
+          "accesses": 189,
+          "hits": 59,
+          "hit_rate": 0.31216931216931215,
+          "pinned_units": 7
+        },
+        {
+          "layer": 51,
+          "accesses": 183,
+          "hits": 51,
+          "hit_rate": 0.2786885245901639,
+          "pinned_units": 7
+        },
+        {
+          "layer": 52,
+          "accesses": 183,
+          "hits": 51,
+          "hit_rate": 0.2786885245901639,
+          "pinned_units": 7
+        },
+        {
+          "layer": 53,
+          "accesses": 183,
+          "hits": 51,
+          "hit_rate": 0.2786885245901639,
+          "pinned_units": 7
+        },
+        {
+          "layer": 54,
+          "accesses": 169,
+          "hits": 74,
+          "hit_rate": 0.4378698224852071,
+          "pinned_units": 7
+        },
+        {
+          "layer": 55,
+          "accesses": 169,
+          "hits": 74,
+          "hit_rate": 0.4378698224852071,
+          "pinned_units": 7
+        },
+        {
+          "layer": 56,
+          "accesses": 169,
+          "hits": 74,
+          "hit_rate": 0.4378698224852071,
+          "pinned_units": 7
+        },
+        {
+          "layer": 57,
+          "accesses": 164,
+          "hits": 86,
+          "hit_rate": 0.524390243902439,
+          "pinned_units": 7
+        },
+        {
+          "layer": 58,
+          "accesses": 164,
+          "hits": 86,
+          "hit_rate": 0.524390243902439,
+          "pinned_units": 7
+        },
+        {
+          "layer": 59,
+          "accesses": 164,
+          "hits": 86,
+          "hit_rate": 0.524390243902439,
+          "pinned_units": 7
+        },
+        {
+          "layer": 60,
+          "accesses": 163,
+          "hits": 38,
+          "hit_rate": 0.2331288343558282,
+          "pinned_units": 7
+        },
+        {
+          "layer": 61,
+          "accesses": 163,
+          "hits": 38,
+          "hit_rate": 0.2331288343558282,
+          "pinned_units": 7
+        },
+        {
+          "layer": 62,
+          "accesses": 163,
+          "hits": 38,
+          "hit_rate": 0.2331288343558282,
+          "pinned_units": 7
+        },
+        {
+          "layer": 63,
+          "accesses": 167,
+          "hits": 59,
+          "hit_rate": 0.3532934131736527,
+          "pinned_units": 7
+        },
+        {
+          "layer": 64,
+          "accesses": 167,
+          "hits": 59,
+          "hit_rate": 0.3532934131736527,
+          "pinned_units": 7
+        },
+        {
+          "layer": 65,
+          "accesses": 167,
+          "hits": 59,
+          "hit_rate": 0.3532934131736527,
+          "pinned_units": 7
+        },
+        {
+          "layer": 66,
+          "accesses": 169,
+          "hits": 57,
+          "hit_rate": 0.33727810650887574,
+          "pinned_units": 7
+        },
+        {
+          "layer": 67,
+          "accesses": 169,
+          "hits": 57,
+          "hit_rate": 0.33727810650887574,
+          "pinned_units": 7
+        },
+        {
+          "layer": 68,
+          "accesses": 169,
+          "hits": 57,
+          "hit_rate": 0.33727810650887574,
+          "pinned_units": 7
+        },
+        {
+          "layer": 69,
+          "accesses": 170,
+          "hits": 65,
+          "hit_rate": 0.38235294117647056,
+          "pinned_units": 7
+        },
+        {
+          "layer": 70,
+          "accesses": 170,
+          "hits": 65,
+          "hit_rate": 0.38235294117647056,
+          "pinned_units": 7
+        },
+        {
+          "layer": 71,
+          "accesses": 170,
+          "hits": 65,
+          "hit_rate": 0.38235294117647056,
+          "pinned_units": 7
+        },
+        {
+          "layer": 72,
+          "accesses": 166,
+          "hits": 47,
+          "hit_rate": 0.28313253012048195,
+          "pinned_units": 7
+        },
+        {
+          "layer": 73,
+          "accesses": 166,
+          "hits": 47,
+          "hit_rate": 0.28313253012048195,
+          "pinned_units": 7
+        },
+        {
+          "layer": 74,
+          "accesses": 166,
+          "hits": 47,
+          "hit_rate": 0.28313253012048195,
+          "pinned_units": 7
+        },
+        {
+          "layer": 75,
+          "accesses": 166,
+          "hits": 67,
+          "hit_rate": 0.4036144578313253,
+          "pinned_units": 7
+        },
+        {
+          "layer": 76,
+          "accesses": 166,
+          "hits": 67,
+          "hit_rate": 0.4036144578313253,
+          "pinned_units": 7
+        },
+        {
+          "layer": 77,
+          "accesses": 166,
+          "hits": 67,
+          "hit_rate": 0.4036144578313253,
+          "pinned_units": 7
+        },
+        {
+          "layer": 78,
+          "accesses": 166,
+          "hits": 47,
+          "hit_rate": 0.28313253012048195,
+          "pinned_units": 7
+        },
+        {
+          "layer": 79,
+          "accesses": 166,
+          "hits": 47,
+          "hit_rate": 0.28313253012048195,
+          "pinned_units": 7
+        },
+        {
+          "layer": 80,
+          "accesses": 166,
+          "hits": 47,
+          "hit_rate": 0.28313253012048195,
+          "pinned_units": 7
+        },
+        {
+          "layer": 81,
+          "accesses": 173,
+          "hits": 43,
+          "hit_rate": 0.24855491329479767,
+          "pinned_units": 7
+        },
+        {
+          "layer": 82,
+          "accesses": 173,
+          "hits": 43,
+          "hit_rate": 0.24855491329479767,
+          "pinned_units": 7
+        },
+        {
+          "layer": 83,
+          "accesses": 173,
+          "hits": 43,
+          "hit_rate": 0.24855491329479767,
+          "pinned_units": 7
+        },
+        {
+          "layer": 84,
+          "accesses": 185,
+          "hits": 60,
+          "hit_rate": 0.32432432432432434,
+          "pinned_units": 7
+        },
+        {
+          "layer": 85,
+          "accesses": 185,
+          "hits": 60,
+          "hit_rate": 0.32432432432432434,
+          "pinned_units": 7
+        },
+        {
+          "layer": 86,
+          "accesses": 185,
+          "hits": 60,
+          "hit_rate": 0.32432432432432434,
+          "pinned_units": 7
+        },
+        {
+          "layer": 87,
+          "accesses": 183,
+          "hits": 49,
+          "hit_rate": 0.2677595628415301,
+          "pinned_units": 7
+        },
+        {
+          "layer": 88,
+          "accesses": 183,
+          "hits": 49,
+          "hit_rate": 0.2677595628415301,
+          "pinned_units": 7
+        },
+        {
+          "layer": 89,
+          "accesses": 183,
+          "hits": 49,
+          "hit_rate": 0.2677595628415301,
+          "pinned_units": 7
+        },
+        {
+          "layer": 90,
+          "accesses": 169,
+          "hits": 68,
+          "hit_rate": 0.40236686390532544,
+          "pinned_units": 7
+        },
+        {
+          "layer": 91,
+          "accesses": 169,
+          "hits": 68,
+          "hit_rate": 0.40236686390532544,
+          "pinned_units": 7
+        },
+        {
+          "layer": 92,
+          "accesses": 169,
+          "hits": 68,
+          "hit_rate": 0.40236686390532544,
+          "pinned_units": 7
+        },
+        {
+          "layer": 93,
+          "accesses": 161,
+          "hits": 57,
+          "hit_rate": 0.35403726708074534,
+          "pinned_units": 7
+        },
+        {
+          "layer": 94,
+          "accesses": 161,
+          "hits": 57,
+          "hit_rate": 0.35403726708074534,
+          "pinned_units": 7
+        },
+        {
+          "layer": 95,
+          "accesses": 161,
+          "hits": 57,
+          "hit_rate": 0.35403726708074534,
+          "pinned_units": 7
+        },
+        {
+          "layer": 96,
+          "accesses": 165,
+          "hits": 54,
+          "hit_rate": 0.32727272727272727,
+          "pinned_units": 7
+        },
+        {
+          "layer": 97,
+          "accesses": 165,
+          "hits": 54,
+          "hit_rate": 0.32727272727272727,
+          "pinned_units": 7
+        },
+        {
+          "layer": 98,
+          "accesses": 165,
+          "hits": 54,
+          "hit_rate": 0.32727272727272727,
+          "pinned_units": 7
+        },
+        {
+          "layer": 99,
+          "accesses": 176,
+          "hits": 56,
+          "hit_rate": 0.3181818181818182,
+          "pinned_units": 7
+        },
+        {
+          "layer": 100,
+          "accesses": 176,
+          "hits": 56,
+          "hit_rate": 0.3181818181818182,
+          "pinned_units": 7
+        },
+        {
+          "layer": 101,
+          "accesses": 176,
+          "hits": 56,
+          "hit_rate": 0.3181818181818182,
+          "pinned_units": 7
+        },
+        {
+          "layer": 102,
+          "accesses": 173,
+          "hits": 54,
+          "hit_rate": 0.31213872832369943,
+          "pinned_units": 7
+        },
+        {
+          "layer": 103,
+          "accesses": 173,
+          "hits": 54,
+          "hit_rate": 0.31213872832369943,
+          "pinned_units": 7
+        },
+        {
+          "layer": 104,
+          "accesses": 173,
+          "hits": 54,
+          "hit_rate": 0.31213872832369943,
+          "pinned_units": 7
+        },
+        {
+          "layer": 105,
+          "accesses": 173,
+          "hits": 51,
+          "hit_rate": 0.2947976878612717,
+          "pinned_units": 7
+        },
+        {
+          "layer": 106,
+          "accesses": 173,
+          "hits": 51,
+          "hit_rate": 0.2947976878612717,
+          "pinned_units": 7
+        },
+        {
+          "layer": 107,
+          "accesses": 173,
+          "hits": 51,
+          "hit_rate": 0.2947976878612717,
+          "pinned_units": 7
+        },
+        {
+          "layer": 108,
+          "accesses": 183,
+          "hits": 39,
+          "hit_rate": 0.21311475409836064,
+          "pinned_units": 7
+        },
+        {
+          "layer": 109,
+          "accesses": 183,
+          "hits": 39,
+          "hit_rate": 0.21311475409836064,
+          "pinned_units": 7
+        },
+        {
+          "layer": 110,
+          "accesses": 183,
+          "hits": 39,
+          "hit_rate": 0.21311475409836064,
+          "pinned_units": 7
+        },
+        {
+          "layer": 111,
+          "accesses": 197,
+          "hits": 39,
+          "hit_rate": 0.19796954314720813,
+          "pinned_units": 7
+        },
+        {
+          "layer": 112,
+          "accesses": 197,
+          "hits": 39,
+          "hit_rate": 0.19796954314720813,
+          "pinned_units": 7
+        },
+        {
+          "layer": 113,
+          "accesses": 197,
+          "hits": 39,
+          "hit_rate": 0.19796954314720813,
+          "pinned_units": 7
+        },
+        {
+          "layer": 114,
+          "accesses": 204,
+          "hits": 32,
+          "hit_rate": 0.1568627450980392,
+          "pinned_units": 7
+        },
+        {
+          "layer": 115,
+          "accesses": 204,
+          "hits": 32,
+          "hit_rate": 0.1568627450980392,
+          "pinned_units": 7
+        },
+        {
+          "layer": 116,
+          "accesses": 204,
+          "hits": 32,
+          "hit_rate": 0.1568627450980392,
+          "pinned_units": 7
+        },
+        {
+          "layer": 117,
+          "accesses": 205,
+          "hits": 28,
+          "hit_rate": 0.13658536585365855,
+          "pinned_units": 7
+        },
+        {
+          "layer": 118,
+          "accesses": 205,
+          "hits": 28,
+          "hit_rate": 0.13658536585365855,
+          "pinned_units": 7
+        },
+        {
+          "layer": 119,
+          "accesses": 205,
+          "hits": 28,
+          "hit_rate": 0.13658536585365855,
+          "pinned_units": 7
+        }
+      ],
+      "page_ins_vs_lru": 741,
+      "hit_rate_delta": -0.03529075582226032
+    }
+  ],
+  "verdict": "pinning would have gained 0.16% hit rate at pin_fraction=0.10 -- inside the noise of a single trace. Not enough to justify building pinning.",
+  "trace": "runs/trace2.bin",
+  "atlas": "runs/weight_atlas.json"
+}

@@ -1,0 +1,770 @@
+[
+ {
+  "model": "<text>",
+  "messages": [
+   {
+    "role": "user",
+    "content": [
+     {
+      "type": "text",
+      "text": "<text>"
+     },
+     {
+      "type": "text",
+      "text": "<text>"
+     }
+    ]
+   },
+   {
+    "role": "system",
+    "content": [
+     {
+      "type": "text",
+      "text": "<text>",
+      "cache_control": {
+       "type": "ephemeral"
+      }
+     }
+    ]
+   }
+  ],
+  "system": [
+   {
+    "type": "text",
+    "text": "<text>"
+   },
+   {
+    "type": "text",
+    "text": "<text>",
+    "cache_control": {
+     "type": "ephemeral"
+    }
+   },
+   {
+    "type": "text",
+    "text": "<text>",
+    "cache_control": {
+     "type": "ephemeral"
+    }
+   }
+  ],
+  "tools": [
+   {
+    "name": "Agent",
+    "description": "<text>",
+    "input_schema": {
+     "type": "object",
+     "properties": {
+      "arg": {
+       "type": "string"
+      }
+     },
+     "required": [],
+     "additionalProperties": false
+    }
+   },
+   {
+    "name": "Bash",
+    "description": "<text>",
+    "input_schema": {
+     "type": "object",
+     "properties": {
+      "arg": {
+       "type": "string"
+      }
+     },
+     "required": [],
+     "additionalProperties": false
+    }
+   },
+   {
+    "name": "CronCreate",
+    "description": "<text>",
+    "input_schema": {
+     "type": "object",
+     "properties": {
+      "arg": {
+       "type": "string"
+      }
+     },
+     "required": [],
+     "additionalProperties": false
+    }
+   },
+   {
+    "name": "CronDelete",
+    "description": "<text>",
+    "input_schema": {
+     "type": "object",
+     "properties": {
+      "arg": {
+       "type": "string"
+      }
+     },
+     "required": [],
+     "additionalProperties": false
+    }
+   },
+   {
+    "name": "CronList",
+    "description": "<text>",
+    "input_schema": {
+     "type": "object",
+     "properties": {
+      "arg": {
+       "type": "string"
+      }
+     },
+     "required": [],
+     "additionalProperties": false
+    }
+   },
+   {
+    "name": "Edit",
+    "description": "<text>",
+    "input_schema": {
+     "type": "object",
+     "properties": {
+      "arg": {
+       "type": "string"
+      }
+     },
+     "required": [],
+     "additionalProperties": false
+    }
+   },
+   {
+    "name": "EnterWorktree",
+    "description": "<text>",
+    "input_schema": {
+     "type": "object",
+     "properties": {
+      "arg": {
+       "type": "string"
+      }
+     },
+     "required": [],
+     "additionalProperties": false
+    }
+   },
+   {
+    "name": "ExitWorktree",
+    "description": "<text>",
+    "input_schema": {
+     "type": "object",
+     "properties": {
+      "arg": {
+       "type": "string"
+      }
+     },
+     "required": [],
+     "additionalProperties": false
+    }
+   },
+   {
+    "name": "ListAgents",
+    "description": "<text>",
+    "input_schema": {
+     "type": "object",
+     "properties": {
+      "arg": {
+       "type": "string"
+      }
+     },
+     "required": [],
+     "additionalProperties": false
+    }
+   },
+   {
+    "name": "NotebookEdit",
+    "description": "<text>",
+    "input_schema": {
+     "type": "object",
+     "properties": {
+      "arg": {
+       "type": "string"
+      }
+     },
+     "required": [],
+     "additionalProperties": false
+    }
+   },
+   {
+    "name": "Read",
+    "description": "<text>",
+    "input_schema": {
+     "type": "object",
+     "properties": {
+      "arg": {
+       "type": "string"
+      }
+     },
+     "required": [],
+     "additionalProperties": false
+    }
+   },
+   {
+    "name": "ReportFindings",
+    "description": "<text>",
+    "input_schema": {
+     "type": "object",
+     "properties": {
+      "arg": {
+       "type": "string"
+      }
+     },
+     "required": [],
+     "additionalProperties": false
+    }
+   },
+   {
+    "name": "ScheduleWakeup",
+    "description": "<text>",
+    "input_schema": {
+     "type": "object",
+     "properties": {
+      "arg": {
+       "type": "string"
+      }
+     },
+     "required": [],
+     "additionalProperties": false
+    }
+   },
+   {
+    "name": "SendMessage",
+    "description": "<text>",
+    "input_schema": {
+     "type": "object",
+     "properties": {
+      "arg": {
+       "type": "string"
+      }
+     },
+     "required": [],
+     "additionalProperties": false
+    }
+   },
+   {
+    "name": "Skill",
+    "description": "<text>",
+    "input_schema": {
+     "type": "object",
+     "properties": {
+      "arg": {
+       "type": "string"
+      }
+     },
+     "required": [],
+     "additionalProperties": false
+    }
+   },
+   {
+    "name": "TaskOutput",
+    "description": "<text>",
+    "input_schema": {
+     "type": "object",
+     "properties": {
+      "arg": {
+       "type": "string"
+      }
+     },
+     "required": [],
+     "additionalProperties": false
+    }
+   },
+   {
+    "name": "TaskStop",
+    "description": "<text>",
+    "input_schema": {
+     "type": "object",
+     "properties": {
+      "arg": {
+       "type": "string"
+      }
+     },
+     "required": [],
+     "additionalProperties": false
+    }
+   },
+   {
+    "name": "WebFetch",
+    "description": "<text>",
+    "input_schema": {
+     "type": "object",
+     "properties": {
+      "arg": {
+       "type": "string"
+      }
+     },
+     "required": [],
+     "additionalProperties": false
+    }
+   },
+   {
+    "name": "WebSearch",
+    "description": "<text>",
+    "input_schema": {
+     "type": "object",
+     "properties": {
+      "arg": {
+       "type": "string"
+      }
+     },
+     "required": [],
+     "additionalProperties": false
+    }
+   },
+   {
+    "name": "Workflow",
+    "description": "<text>",
+    "input_schema": {
+     "type": "object",
+     "properties": {
+      "arg": {
+       "type": "string"
+      }
+     },
+     "required": [],
+     "additionalProperties": false
+    }
+   },
+   {
+    "name": "Write",
+    "description": "<text>",
+    "input_schema": {
+     "type": "object",
+     "properties": {
+      "arg": {
+       "type": "string"
+      }
+     },
+     "required": [],
+     "additionalProperties": false
+    }
+   }
+  ],
+  "metadata": {
+   "user_id": "<id>"
+  },
+  "max_tokens": 32000,
+  "thinking": {
+   "type": "adaptive",
+   "display": "omitted"
+  },
+  "context_management": {
+   "edits": [
+    {
+     "type": "clear_thinking_20251015",
+     "keep": "all"
+    }
+   ]
+  },
+  "output_config": {
+   "effort": "high"
+  },
+  "stream": true
+ },
+ {
+  "model": "<text>",
+  "messages": [
+   {
+    "role": "user",
+    "content": [
+     {
+      "type": "text",
+      "text": "<text>"
+     },
+     {
+      "type": "text",
+      "text": "<text>"
+     }
+    ]
+   },
+   {
+    "role": "system",
+    "content": "<text>"
+   },
+   {
+    "role": "assistant",
+    "content": [
+     {
+      "type": "thinking",
+      "thinking": "",
+      "signature": "mlx2.thinkingc.v1.081bdfd0d4aa6943.Y2FyZWZ1bCB0aG91Z2h0.hr4e894QkntSF85RN88JX_gL4VFxj8ICOOAiEQ0EQPM"
+     },
+     {
+      "type": "text",
+      "text": "<text>"
+     },
+     {
+      "type": "tool_use",
+      "id": "<id>",
+      "name": "Read",
+      "input": {
+       "file_path": "<text>"
+      }
+     }
+    ]
+   },
+   {
+    "role": "user",
+    "content": [
+     {
+      "tool_use_id": "<tool_use_id>",
+      "type": "tool_result",
+      "content": "<text>"
+     }
+    ]
+   },
+   {
+    "role": "system",
+    "content": [
+     {
+      "type": "text",
+      "text": "<text>",
+      "cache_control": {
+       "type": "ephemeral"
+      }
+     }
+    ]
+   }
+  ],
+  "system": [
+   {
+    "type": "text",
+    "text": "<text>"
+   },
+   {
+    "type": "text",
+    "text": "<text>",
+    "cache_control": {
+     "type": "ephemeral"
+    }
+   },
+   {
+    "type": "text",
+    "text": "<text>",
+    "cache_control": {
+     "type": "ephemeral"
+    }
+   }
+  ],
+  "tools": [
+   {
+    "name": "Agent",
+    "description": "<text>",
+    "input_schema": {
+     "type": "object",
+     "properties": {
+      "arg": {
+       "type": "string"
+      }
+     },
+     "required": [],
+     "additionalProperties": false
+    }
+   },
+   {
+    "name": "Bash",
+    "description": "<text>",
+    "input_schema": {
+     "type": "object",
+     "properties": {
+      "arg": {
+       "type": "string"
+      }
+     },
+     "required": [],
+     "additionalProperties": false
+    }
+   },
+   {
+    "name": "CronCreate",
+    "description": "<text>",
+    "input_schema": {
+     "type": "object",
+     "properties": {
+      "arg": {
+       "type": "string"
+      }
+     },
+     "required": [],
+     "additionalProperties": false
+    }
+   },
+   {
+    "name": "CronDelete",
+    "description": "<text>",
+    "input_schema": {
+     "type": "object",
+     "properties": {
+      "arg": {
+       "type": "string"
+      }
+     },
+     "required": [],
+     "additionalProperties": false
+    }
+   },
+   {
+    "name": "CronList",
+    "description": "<text>",
+    "input_schema": {
+     "type": "object",
+     "properties": {
+      "arg": {
+       "type": "string"
+      }
+     },
+     "required": [],
+     "additionalProperties": false
+    }
+   },
+   {
+    "name": "Edit",
+    "description": "<text>",
+    "input_schema": {
+     "type": "object",
+     "properties": {
+      "arg": {
+       "type": "string"
+      }
+     },
+     "required": [],
+     "additionalProperties": false
+    }
+   },
+   {
+    "name": "EnterWorktree",
+    "description": "<text>",
+    "input_schema": {
+     "type": "object",
+     "properties": {
+      "arg": {
+       "type": "string"
+      }
+     },
+     "required": [],
+     "additionalProperties": false
+    }
+   },
+   {
+    "name": "ExitWorktree",
+    "description": "<text>",
+    "input_schema": {
+     "type": "object",
+     "properties": {
+      "arg": {
+       "type": "string"
+      }
+     },
+     "required": [],
+     "additionalProperties": false
+    }
+   },
+   {
+    "name": "ListAgents",
+    "description": "<text>",
+    "input_schema": {
+     "type": "object",
+     "properties": {
+      "arg": {
+       "type": "string"
+      }
+     },
+     "required": [],
+     "additionalProperties": false
+    }
+   },
+   {
+    "name": "NotebookEdit",
+    "description": "<text>",
+    "input_schema": {
+     "type": "object",
+     "properties": {
+      "arg": {
+       "type": "string"
+      }
+     },
+     "required": [],
+     "additionalProperties": false
+    }
+   },
+   {
+    "name": "Read",
+    "description": "<text>",
+    "input_schema": {
+     "type": "object",
+     "properties": {
+      "arg": {
+       "type": "string"
+      }
+     },
+     "required": [],
+     "additionalProperties": false
+    }
+   },
+   {
+    "name": "ReportFindings",
+    "description": "<text>",
+    "input_schema": {
+     "type": "object",
+     "properties": {
+      "arg": {
+       "type": "string"
+      }
+     },
+     "required": [],
+     "additionalProperties": false
+    }
+   },
+   {
+    "name": "ScheduleWakeup",
+    "description": "<text>",
+    "input_schema": {
+     "type": "object",
+     "properties": {
+      "arg": {
+       "type": "string"
+      }
+     },
+     "required": [],
+     "additionalProperties": false
+    }
+   },
+   {
+    "name": "SendMessage",
+    "description": "<text>",
+    "input_schema": {
+     "type": "object",
+     "properties": {
+      "arg": {
+       "type": "string"
+      }
+     },
+     "required": [],
+     "additionalProperties": false
+    }
+   },
+   {
+    "name": "Skill",
+    "description": "<text>",
+    "input_schema": {
+     "type": "object",
+     "properties": {
+      "arg": {
+       "type": "string"
+      }
+     },
+     "required": [],
+     "additionalProperties": false
+    }
+   },
+   {
+    "name": "TaskOutput",
+    "description": "<text>",
+    "input_schema": {
+     "type": "object",
+     "properties": {
+      "arg": {
+       "type": "string"
+      }
+     },
+     "required": [],
+     "additionalProperties": false
+    }
+   },
+   {
+    "name": "TaskStop",
+    "description": "<text>",
+    "input_schema": {
+     "type": "object",
+     "properties": {
+      "arg": {
+       "type": "string"
+      }
+     },
+     "required": [],
+     "additionalProperties": false
+    }
+   },
+   {
+    "name": "WebFetch",
+    "description": "<text>",
+    "input_schema": {
+     "type": "object",
+     "properties": {
+      "arg": {
+       "type": "string"
+      }
+     },
+     "required": [],
+     "additionalProperties": false
+    }
+   },
+   {
+    "name": "WebSearch",
+    "description": "<text>",
+    "input_schema": {
+     "type": "object",
+     "properties": {
+      "arg": {
+       "type": "string"
+      }
+     },
+     "required": [],
+     "additionalProperties": false
+    }
+   },
+   {
+    "name": "Workflow",
+    "description": "<text>",
+    "input_schema": {
+     "type": "object",
+     "properties": {
+      "arg": {
+       "type": "string"
+      }
+     },
+     "required": [],
+     "additionalProperties": false
+    }
+   },
+   {
+    "name": "Write",
+    "description": "<text>",
+    "input_schema": {
+     "type": "object",
+     "properties": {
+      "arg": {
+       "type": "string"
+      }
+     },
+     "required": [],
+     "additionalProperties": false
+    }
+   }
+  ],
+  "metadata": {
+   "user_id": "<id>"
+  },
+  "max_tokens": 32000,
+  "thinking": {
+   "type": "adaptive",
+   "display": "omitted"
+  },
+  "context_management": {
+   "edits": [
+    {
+     "type": "clear_thinking_20251015",
+     "keep": "all"
+    }
+   ]
+  },
+  "output_config": {
+   "effort": "high"
+  },
+  "stream": true
+ }
+]

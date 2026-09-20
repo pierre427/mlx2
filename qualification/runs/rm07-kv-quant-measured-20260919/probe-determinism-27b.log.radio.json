@@ -1,0 +1,14 @@
+{
+ "agent_id": "job-rm07-determinism-27b-88964",
+ "complete_worker": {
+  "already_terminal": false,
+  "finished_at": 1789857649,
+  "status": "completed",
+  "worker_id": "91df1db32c0840f88d6d93420624e519"
+ },
+ "register_worker": {
+  "worker_id": "91df1db32c0840f88d6d93420624e519",
+  "workflow_id": "e59c0a90db68479ba437e1aeed6f3711"
+ },
+ "updated_at": "2026-09-19T22:40:49+00:00"
+}

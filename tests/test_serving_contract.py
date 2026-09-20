@@ -460,6 +460,7 @@ class FakeEngine:
         self.lock = threading.Lock()
         self.counts = Counter()
         self.max_request_bytes = MIN_REQUEST_BODY_BYTES
+        self.stop_sequence = None
 
     def status(self):
         return {
@@ -484,7 +485,10 @@ class FakeEngine:
                                                 "logprob": -0.5,
                                                 "top_logprobs": [{"id": token, "token": str(token), "logprob": -0.5}]}})
         self.job.events.put({"text": "hello"})
-        self.job.events.put({"finish_reason": "stop", "receipt": {"cache": "apcv2"}})
+        receipt = {"cache": "apcv2"}
+        if self.stop_sequence is not None:
+            receipt["stop_sequence"] = self.stop_sequence
+        self.job.events.put({"finish_reason": "stop", "receipt": receipt})
         return self.job
 
 
@@ -547,10 +551,12 @@ def upload_file(base, content, *, filename="input.jsonl", purpose="batch", conte
 
 def test_nonstreaming_receipt_and_usage(http_engine):
     engine, base = http_engine
+    engine.stop_sequence = "STOP"
     with post(base) as response:
         data = json.load(response)
     assert data["choices"][0]["message"]["content"] == "hello"
-    assert data["mlx2"] == {"cache": "apcv2"}
+    assert data["choices"][0]["finish_reason"] == "stop"
+    assert data["mlx2"] == {"cache": "apcv2", "stop_sequence": "STOP"}
     assert data["usage"]["total_tokens"] == 7
 
 
@@ -1759,3 +1765,125 @@ def test_nonstreaming_client_disconnect_cancels_the_job():
         server.shutdown()
         server.server_close()
         thread.join()
+
+
+class SingleToolCallEngine(FakeEngine):
+    """An engine whose parser honoured ``parallel_tool_calls:false``.
+
+    The over-calling model behaviour is absorbed by ``OutputParser`` (see
+    ``mlx2.output.within_parallel_bound``), so what reaches the wire is one
+    call.  This pins that every surface -- Chat, Responses and Anthropic
+    Messages, buffered and streamed -- answers it as an ordinary success, the
+    way it could not when the parser raised and the lane finished 502.
+    """
+
+    def submit(self, request, *, tenant_id="default"):
+        job = Job(request)
+        job.tenant_id = tenant_id
+        job.prompt_tokens, job.completion_tokens = 5, 2
+        job.events.put({
+            "delta": {
+                "content": "",
+                "tool_calls": [{
+                    "index": 0,
+                    "id": "call_weather",
+                    "type": "function",
+                    "function": {
+                        "name": "weather",
+                        "arguments": '{"city":"Toronto"}',
+                    },
+                }],
+            }
+        })
+        job.events.put({"finish_reason": "tool_calls", "receipt": {"cache": "apcv2"}})
+        return job
+
+
+@pytest.fixture
+def single_tool_call_endpoint():
+    engine = SingleToolCallEngine()
+    server = ThreadingHTTPServer(("127.0.0.1", 0), handler_for(engine))
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    yield engine, f"http://127.0.0.1:{server.server_port}"
+    server.shutdown()
+    server.server_close()
+    thread.join()
+
+
+def _json_post(base, path, body):
+    return urlopen(
+        Request(
+            base + path,
+            method="POST",
+            data=json.dumps(body).encode(),
+            headers={"Content-Type": "application/json"},
+        )
+    )
+
+
+def test_parallel_bound_answer_is_a_success_on_every_surface(single_tool_call_endpoint):
+    _, base = single_tool_call_endpoint
+
+    chat = {
+        "model": "fixture",
+        "messages": [{"role": "user", "content": "hi"}],
+        "tools": TOOLS,
+        "parallel_tool_calls": False,
+    }
+    with _json_post(base, "/v1/chat/completions", chat) as response:
+        payload = json.load(response)
+    assert payload["choices"][0]["finish_reason"] == "tool_calls"
+    assert len(payload["choices"][0]["message"]["tool_calls"]) == 1
+
+    with _json_post(base, "/v1/chat/completions", {**chat, "stream": True}) as response:
+        wire = response.read().decode()
+    assert '"error"' not in wire
+    assert wire.endswith("data: [DONE]\n\n")
+
+    responses_body = {
+        "model": "fixture",
+        "input": "hi",
+        "tools": [
+            {
+                "type": "function",
+                "name": tool["function"]["name"],
+                "parameters": tool["function"]["parameters"],
+                "strict": True,
+            }
+            for tool in TOOLS
+        ],
+        "parallel_tool_calls": False,
+    }
+    with _json_post(base, "/v1/responses", responses_body) as response:
+        payload = json.load(response)
+    assert payload["status"] == "completed"
+    assert [item["type"] for item in payload["output"]] == ["function_call"]
+
+    with _json_post(base, "/v1/responses", {**responses_body, "stream": True}) as response:
+        wire = response.read().decode()
+    assert "response.failed" not in wire
+    assert "response.completed" in wire
+
+    messages_body = {
+        "model": "fixture",
+        "max_tokens": 64,
+        "messages": [{"role": "user", "content": "hi"}],
+        "tools": [
+            {
+                "name": tool["function"]["name"],
+                "input_schema": tool["function"]["parameters"],
+            }
+            for tool in TOOLS
+        ],
+        "tool_choice": {"type": "auto", "disable_parallel_tool_use": True},
+    }
+    with _json_post(base, "/v1/messages", messages_body) as response:
+        payload = json.load(response)
+    assert payload["stop_reason"] == "tool_use"
+    assert [block["type"] for block in payload["content"]] == ["tool_use"]
+
+    with _json_post(base, "/v1/messages", {**messages_body, "stream": True}) as response:
+        wire = response.read().decode()
+    assert "event: error" not in wire
+    assert "event: message_stop" in wire

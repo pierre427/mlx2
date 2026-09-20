@@ -7,8 +7,13 @@ import mlx.core as mx
 
 
 def _probe_safe(function):
-    """Declare a stateless transform safe to reuse for provisional tokens."""
+    """Declare a stateless transform safe to reuse for provisional tokens.
+
+    Stateless also means ``history_pure`` (P5): the output is a function of
+    the token history alone, so a replay can rebuild it from the tokens.
+    """
     function.probe = function
+    function.history_pure = True
     return function
 
 
@@ -305,15 +310,13 @@ def make_transformed_logprobs(
     ``make_sampler``, which must compile per call to bind the calling
     thread's RNG state).
 
-    Mirrors the sampler exactly: normalization runs eagerly in the logits'
-    native dtype (as ``generate_step`` does before calling the sampler), and
-    the filter chain — top-p, then min-p, then top-k, in ``make_sampler``
-    order; XTC is not supported — plus the temperature scale runs inside
-    ``mx.compile``, so knife-edge filter ties resolve with the same fused
-    rounding as the compiled sampler. Filtered tokens are exactly ``-inf``.
-    Only the final renormalization is float32: it does not change the
-    represented distribution, it only makes the returned values accurate.
-    Requires ``temp > 0``; batched over leading axes.
+    Mirrors the sampler exactly: normalization first promotes the logits to
+    float32 so low-precision subtraction cannot collapse distinct logits into
+    artificial ties. The filter chain — top-p, then min-p, then top-k, in
+    ``make_sampler`` order; XTC is not supported — plus the temperature scale
+    runs inside ``mx.compile``, so knife-edge filter ties resolve with the same
+    fused rounding as the compiled sampler. Filtered tokens are exactly
+    ``-inf``. Requires ``temp > 0``; batched over leading axes.
     """
     if not temp or temp <= 0:
         raise ValueError(f"make_transformed_logprobs requires temp > 0, got {temp}")
@@ -333,8 +336,9 @@ def make_transformed_logprobs(
     compiled = mx.compile(chain)
 
     def transform(logits):
+        logits = logits.astype(mx.float32)
         logprobs = logits - mx.logsumexp(logits, axis=-1, keepdims=True)
-        scaled = compiled(logprobs).astype(mx.float32)
+        scaled = compiled(logprobs)
         return scaled - mx.logsumexp(scaled, axis=-1, keepdims=True)
 
     return _probe_safe(transform)

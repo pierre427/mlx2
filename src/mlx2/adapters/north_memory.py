@@ -9,6 +9,8 @@ Forward workspace and the common 20 GiB service/driver reserve remain separate.
 from dataclasses import asdict, dataclass
 import math
 
+from ..runtime.memory_policy import SelfMTPLaneAdmissionController
+
 
 @dataclass(frozen=True)
 class NorthCacheBudget:
@@ -21,8 +23,16 @@ class NorthCacheBudget:
     allocation_step: int = 256
     checkpoint_copies: int = 4
     transcript_bytes_per_token: int = 16
-    # Conservative static assumption pending live North workspace measurement.
-    transient_gib_per_lane: float = 3.1
+    # Measured on this model, 2026-09-19, M3 Pro: the k=2 verify transient is
+    # 0.044-0.071 GiB/lane across 1K/4K/16K x 1/2/4 lanes, and 0.144 GiB/lane
+    # at worst including the cold-allocator first forward.  The 3.1 that stood
+    # here was the dense Qwen3.8-27B figure carried over as a placeholder, not
+    # a North measurement; it exceeded the entire lane budget of a 36 GiB
+    # host.  ``MOE_TRANSIENT_GIB_PER_LANE`` is 0.35 -- 2.4x the worst North
+    # observation.  See provenance/lane-transient-moe.json.
+    transient_gib_per_lane: float = (
+        SelfMTPLaneAdmissionController.MOE_TRANSIENT_GIB_PER_LANE
+    )
 
     @classmethod
     def from_config(cls, config, *, mtp):

@@ -977,3 +977,19 @@ def test_unreachable_verify_rows_never_reach_logits_processors(monkeypatch):
     got,_final=drain(b)
     assert len(got[0])==6 and forbidden not in got[0]
     assert b.scheduler_stats['external_rounds']>0 and seen
+
+
+def test_external_verify_histograms_decompose_the_accepted_aggregate():
+    m,d=tiny()
+    b=generator(m,d)
+    b.insert([[1,2,3]],max_tokens=[8],sampling_configs=[{"sampling_temp":0}])
+    _got,final=drain(b)
+    receipt=final[0].speculative_receipt
+    accept={int(k):int(v) for k,v in receipt["verify_accept_hist"].items()}
+    span={int(k):int(v) for k,v in receipt["verify_span_hist"].items()}
+    # Recorded once per round that actually proposed, so the ordinary fast
+    # path does not dilute the distribution.
+    assert sum(accept.values())==sum(span.values())==receipt["external_rounds"]
+    assert sum(k*v for k,v in accept.items())==receipt["accepted"]
+    # Every span key is one more than the number of drafts it verified.
+    assert all(k>=2 for k in span)

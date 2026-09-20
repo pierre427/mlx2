@@ -1,0 +1,108 @@
+[cpg_job 2026-09-20T03:16:24+00:00 pid=65796] label=rm04-fn-gate agent_id=job-rm04-fn-gate-65796 command=env PYTHONPATH=/private/tmp/mlx2-rm04-interior-ckpt-qual/src ~/Desktop/mlx2/.venv/bin/python /private/tmp/mlx2-rm04-interior-ckpt-qual/scripts/qualify_interior_checkpoints.py --model ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP --route mtp --base-policy /private/tmp/mlx2-rm04-interior-ckpt-qual/qualification/runs/quality-campaign-20260919/policies/flash-next-mtp2.json --arms off,auto --workloads shared_system,rag,linear --rounds 2 --auto-headroom-fraction 0.5 --auto-min-uncached-fraction 0.5 --cache-gib 12 --out /private/tmp/mlx2-rm04-interior-ckpt-qual/qualification/runs/interior-ckpt-20260919/flashnext-all-gated.json --i-own-the-gpu
+[cpg_job 2026-09-20T03:16:24+00:00 pid=65796] created workflow 887affca572a4e88a35506208c0c1b9f (cpg-job drivers); record it as workflows.cpg-job-drivers in /Users/Shared/mlxuag/cpg-radio.json to reuse it
+[cpg_job 2026-09-20T03:16:24+00:00 pid=65796] registered worker e13ae27186a141aeaeb5c4b130e633c0 as job-rm04-fn-gate-65796 in session 3c65a7827e83456a89fffdeefadec196
+[cpg_job 2026-09-20T03:16:24+00:00 pid=65796] took /Users/Shared/mlxuag/gpu.lock
+[cpg_job 2026-09-20T03:16:24+00:00 pid=65796] child pid 65802 started
+[off r0] shared_system#0 P=11205 cached=0 ttft=8.312s interior_hits+=0 match=True
+[off r0] shared_system#1 P=11205 cached=0 ttft=8.134s interior_hits+=0 match=True
+[off r0] shared_system#2 P=11205 cached=0 ttft=8.111s interior_hits+=0 match=True
+[off r0] shared_system#3 P=11205 cached=0 ttft=8.176s interior_hits+=0 match=True
+[off r0] shared_system#4 P=11205 cached=0 ttft=8.296s interior_hits+=0 match=True
+[off r0] shared_system#5 P=11205 cached=0 ttft=8.212s interior_hits+=0 match=True
+[off r0] shared_system#6 P=11205 cached=0 ttft=8.338s interior_hits+=0 match=True
+[off r0] shared_system#7 P=11205 cached=0 ttft=8.352s interior_hits+=0 match=True
+[off r0] rag#0 P=30549 cached=0 ttft=23.763s interior_hits+=0 match=True
+[off r0] rag#1 P=30549 cached=0 ttft=23.302s interior_hits+=0 match=True
+[off r0] rag#2 P=30549 cached=0 ttft=23.684s interior_hits+=0 match=True
+[off r0] rag#3 P=30549 cached=0 ttft=23.174s interior_hits+=0 match=True
+[off r0] rag#4 P=30549 cached=0 ttft=23.266s interior_hits+=0 match=True
+[off r0] rag#5 P=30549 cached=0 ttft=23.824s interior_hits+=0 match=True
+[off r0] linear#0 P=15363 cached=0 ttft=11.716s interior_hits+=0 match=True
+[off r0] linear#1 P=20017 cached=15362 ttft=3.861s interior_hits+=0 match=True
+[off r0] linear#2 P=24671 cached=20023 ttft=3.857s interior_hits+=0 match=True
+[off r0] linear#3 P=29325 cached=24677 ttft=3.925s interior_hits+=0 match=True
+[off r0] linear#4 P=33979 cached=29356 ttft=3.965s interior_hits+=0 match=True
+[off r0] linear#5 P=38633 cached=34010 ttft=3.962s interior_hits+=0 match=True
+[off r0] linear#6 P=43287 cached=38664 ttft=4.219s interior_hits+=0 match=True
+[off r0] linear#7 P=47941 cached=43318 ttft=4.058s interior_hits+=0 match=True
+[auto r0] shared_system#0 P=11205 cached=0 ttft=8.823s interior_hits+=0 match=True
+[auto r0] shared_system#1 P=11205 cached=11017 ttft=0.502s interior_hits+=1 match=True
+[auto r0] shared_system#2 P=11205 cached=11017 ttft=0.520s interior_hits+=1 match=True
+[auto r0] shared_system#3 P=11205 cached=11017 ttft=0.512s interior_hits+=1 match=True
+[auto r0] shared_system#4 P=11205 cached=11017 ttft=0.527s interior_hits+=1 match=True
+[auto r0] shared_system#5 P=11205 cached=11017 ttft=0.518s interior_hits+=1 match=True
+[auto r0] shared_system#6 P=11205 cached=11017 ttft=0.506s interior_hits+=1 match=True
+[auto r0] shared_system#7 P=11205 cached=11017 ttft=0.545s interior_hits+=1 match=True
+[auto r0] rag#0 P=30549 cached=0 ttft=23.676s interior_hits+=0 match=True
+[auto r0] rag#1 P=30549 cached=0 ttft=23.885s interior_hits+=0 match=True
+[auto r0] rag#2 P=30549 cached=30464 ttft=0.352s interior_hits+=1 match=True
+[auto r0] rag#3 P=30549 cached=30464 ttft=1.415s interior_hits+=1 match=True
+[auto r0] rag#4 P=30549 cached=30464 ttft=0.378s interior_hits+=1 match=True
+[auto r0] rag#5 P=30549 cached=30464 ttft=0.345s interior_hits+=1 match=True
+[auto r0] linear#0 P=15363 cached=0 ttft=11.874s interior_hits+=0 match=True
+[auto r0] linear#1 P=20017 cached=15362 ttft=3.979s interior_hits+=0 match=True
+[auto r0] linear#2 P=24671 cached=20023 ttft=3.949s interior_hits+=0 match=True
+[auto r0] linear#3 P=29325 cached=24677 ttft=4.033s interior_hits+=0 match=True
+[auto r0] linear#4 P=33979 cached=29356 ttft=4.079s interior_hits+=0 match=True
+[auto r0] linear#5 P=38633 cached=34010 ttft=4.120s interior_hits+=0 match=True
+[auto r0] linear#6 P=43287 cached=38664 ttft=4.176s interior_hits+=0 match=True
+[auto r0] linear#7 P=47941 cached=43318 ttft=4.287s interior_hits+=0 match=True
+[auto r1] shared_system#0 P=11205 cached=0 ttft=8.923s interior_hits+=0 match=True
+[auto r1] shared_system#1 P=11205 cached=11017 ttft=0.509s interior_hits+=1 match=True
+[auto r1] shared_system#2 P=11205 cached=11017 ttft=0.506s interior_hits+=1 match=True
+[auto r1] shared_system#3 P=11205 cached=11017 ttft=0.534s interior_hits+=1 match=True
+[auto r1] shared_system#4 P=11205 cached=11017 ttft=0.525s interior_hits+=1 match=True
+[auto r1] shared_system#5 P=11205 cached=11017 ttft=0.522s interior_hits+=1 match=True
+[auto r1] shared_system#6 P=11205 cached=11017 ttft=0.537s interior_hits+=1 match=True
+[auto r1] shared_system#7 P=11205 cached=11017 ttft=0.535s interior_hits+=1 match=True
+[auto r1] rag#0 P=30549 cached=0 ttft=23.193s interior_hits+=0 match=True
+[auto r1] rag#1 P=30549 cached=0 ttft=23.557s interior_hits+=0 match=True
+[auto r1] rag#2 P=30549 cached=30464 ttft=0.352s interior_hits+=1 match=True
+[auto r1] rag#3 P=30549 cached=30464 ttft=1.443s interior_hits+=1 match=True
+[auto r1] rag#4 P=30549 cached=30464 ttft=0.349s interior_hits+=1 match=True
+[auto r1] rag#5 P=30549 cached=0 ttft=23.844s interior_hits+=0 match=True
+[auto r1] linear#0 P=15363 cached=0 ttft=12.548s interior_hits+=0 match=True
+[auto r1] linear#1 P=20017 cached=15362 ttft=3.804s interior_hits+=0 match=True
+[auto r1] linear#2 P=24671 cached=20023 ttft=3.866s interior_hits+=0 match=True
+[auto r1] linear#3 P=29325 cached=24677 ttft=3.890s interior_hits+=0 match=True
+[auto r1] linear#4 P=33979 cached=29356 ttft=3.986s interior_hits+=0 match=True
+[auto r1] linear#5 P=38633 cached=34010 ttft=4.180s interior_hits+=0 match=True
+[auto r1] linear#6 P=43287 cached=38664 ttft=4.006s interior_hits+=0 match=True
+[auto r1] linear#7 P=47941 cached=43318 ttft=4.059s interior_hits+=0 match=True
+[off r1] shared_system#0 P=11205 cached=0 ttft=8.446s interior_hits+=0 match=True
+[off r1] shared_system#1 P=11205 cached=0 ttft=8.243s interior_hits+=0 match=True
+[off r1] shared_system#2 P=11205 cached=0 ttft=8.746s interior_hits+=0 match=True
+[off r1] shared_system#3 P=11205 cached=0 ttft=8.277s interior_hits+=0 match=True
+[off r1] shared_system#4 P=11205 cached=0 ttft=8.343s interior_hits+=0 match=True
+[off r1] shared_system#5 P=11205 cached=0 ttft=8.336s interior_hits+=0 match=True
+[off r1] shared_system#6 P=11205 cached=0 ttft=8.315s interior_hits+=0 match=True
+[off r1] shared_system#7 P=11205 cached=0 ttft=8.299s interior_hits+=0 match=True
+[off r1] rag#0 P=30549 cached=0 ttft=23.405s interior_hits+=0 match=True
+[off r1] rag#1 P=30549 cached=0 ttft=23.478s interior_hits+=0 match=True
+[off r1] rag#2 P=30549 cached=0 ttft=24.139s interior_hits+=0 match=True
+[off r1] rag#3 P=30549 cached=0 ttft=23.984s interior_hits+=0 match=True
+[off r1] rag#4 P=30549 cached=0 ttft=23.883s interior_hits+=0 match=True
+[off r1] rag#5 P=30549 cached=0 ttft=24.838s interior_hits+=0 match=True
+[off r1] linear#0 P=15363 cached=0 ttft=12.275s interior_hits+=0 match=True
+[off r1] linear#1 P=20017 cached=15362 ttft=4.047s interior_hits+=0 match=True
+[off r1] linear#2 P=24671 cached=20023 ttft=4.046s interior_hits+=0 match=True
+[off r1] linear#3 P=29325 cached=24677 ttft=4.066s interior_hits+=0 match=True
+[off r1] linear#4 P=33979 cached=29356 ttft=3.994s interior_hits+=0 match=True
+[off r1] linear#5 P=38633 cached=34010 ttft=4.128s interior_hits+=0 match=True
+[off r1] linear#6 P=43287 cached=38664 ttft=4.166s interior_hits+=0 match=True
+[off r1] linear#7 P=47941 cached=43318 ttft=4.342s interior_hits+=0 match=True
+{
+  "refused_arms": [],
+  "correctness_diffs": 0,
+  "cold_replay_diffs": 0,
+  "ttft_cut": {
+    "auto/shared_system": 0.93719381061048,
+    "auto/rag": 0.962254871450807
+  },
+  "linear_ttft_regression": -0.006628997360324296,
+  "go": true
+}
+[cpg_job 2026-09-20T03:30:46+00:00 pid=65796] child exited rc=0
+[cpg_job 2026-09-20T03:30:47+00:00 pid=65796] worker e13ae27186a141aeaeb5c4b130e633c0 closed completed
+[cpg_job 2026-09-20T03:30:47+00:00 pid=65796] released /Users/Shared/mlxuag/gpu.lock
+[cpg_job 2026-09-20T03:30:47+00:00 pid=65796] wrote /private/tmp/claude-501/-Users-user-Desktop-mlx2/dcc2c62c-d339-4686-a019-625b816d27d9/scratchpad/roadmap/rm04/gpu/fn-gate.try1.log.done

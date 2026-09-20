@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 
 from ..contracts import Capability, ModelDescriptor, StatePlane
+from .mtp_depth_cap import validate_self_mtp_num_draft
 from .qwen38_27b import Qwen3827BAdapter
 
 CACHE_LAYOUT = "qwen36-35b-a3b-hybrid-layer-segments-v1"
@@ -175,6 +176,11 @@ def configure_environment() -> dict[str, str]:
 
 
 class Qwen3635BA3BAdapter(Qwen3827BAdapter):
+    # Ordinary even though the artifact carries an MTP head: on GPU (2026-09-19)
+    # native MTP matched ordinary single-stream (102.0 vs 102.7 tok/s) and lost
+    # 25-34% batched (B8 175 vs 235, B16 212 vs 283). ``--native-mtp`` still
+    # selects it explicitly.
+    default_route = "ordinary"
     descriptor = QWEN36_35B
     # Vendor sampling defaults: Qwen/Qwen3.6-35B-A3B model card and the
     # artifact's generation_config.json (see ``adapters/qwen.py``).
@@ -186,9 +192,7 @@ class Qwen3635BA3BAdapter(Qwen3827BAdapter):
         policy = {} if execution_policy is None else dict(execution_policy)
         if set(policy) - {"num_draft"}:
             raise ValueError("Qwen3.6 execution policy supports only num_draft")
-        self._num_draft = policy.get("num_draft", 2)
-        if type(self._num_draft) is not int or not 1 <= self._num_draft <= 3:
-            raise ValueError("num_draft must be 1, 2, or 3")
+        self._num_draft = validate_self_mtp_num_draft(policy.get("num_draft", 2))
         artifact = inspect_artifact(model_path)
         if require_mtp and not artifact["has_mtp"]:
             raise ValueError("requested MTP requires embedded head weights")
@@ -208,15 +212,14 @@ class Qwen3635BA3BAdapter(Qwen3827BAdapter):
         from transformers import AutoTokenizer
         from ..runtime.models.qwen36_35b import Model, ModelArgs
         from ..runtime.tokenizer_utils import BPEStreamingDetokenizer, TokenizerWrapper
-        from ..runtime.ubc_evict import ubc_evict_paths
+        from ..runtime.ubc_evict import load_shards_evicting
         from .norm_repair import norm_means, repair_unshifted_norms
 
         self.model = Model(ModelArgs.from_dict(config))
-        weights = {}
         files = [path / name for name in sorted(set(artifact["weight_map"].values()))]
-        for file in files:
-            weights.update(mx.load(str(file)))
-        weights = self.model.sanitize(weights)
+        weights = self.model.sanitize(
+            load_shards_evicting(files, sanitize=self.model.shard_prune)
+        )
         # Byte-exact repair of MTP norms a converter left unshifted (oQ's
         # mean<0.5 rule skips four of seven on this head; see norm_repair).
         self.mtp_norm_repairs = repair_unshifted_norms(weights)
@@ -238,7 +241,7 @@ class Qwen3635BA3BAdapter(Qwen3827BAdapter):
         self.model.eval()
         mx.eval(self.model.parameters())
         weights.clear()
-        ubc_evict_paths([str(file) for file in files])
+        mx.clear_cache()
         tokenizer = AutoTokenizer.from_pretrained(path, local_files_only=True, trust_remote_code=False)
         eos = config.get("eos_token_id", config["text_config"].get("eos_token_id"))
         if isinstance(eos, int):
@@ -252,6 +255,29 @@ class Qwen3635BA3BAdapter(Qwen3827BAdapter):
         if mtp and Capability.MTP not in self.descriptor.capabilities:
             raise ValueError("requested MTP requires embedded head weights")
         return f"qwen36-35b-a3b-apcv2-{'mtp' + str(self._num_draft) if mtp else 'ordinary'}"
+
+    def cache_budget(self, *, mtp):
+        """Dense-27B cache topology, but this model's own verify transient.
+
+        Qwen3.6-35B-A3B shares ``Qwen38CacheBudget``'s cache arithmetic with
+        the dense Qwen3.8-27B, and inherited its 3.1 GiB/lane forward
+        workspace with it.  3.1 is a dense-27B measurement: this model is a
+        3B-active MoE and measures 0.015-0.023 GiB/lane at k=2 across
+        1K/4K/16K x 1/2/4 lanes on an M3 Pro (2026-09-19; raw numbers in
+        provenance/lane-transient-moe.json).  Charging 3.1 on a 36 GiB host
+        exceeded the whole ~2.71 GiB lane budget, so every self-MTP request
+        fell to the k=0 depth floor and the route ran zero draft cycles.
+        """
+        from dataclasses import replace
+
+        from ..runtime.memory_policy import SelfMTPLaneAdmissionController
+
+        return replace(
+            super().cache_budget(mtp=mtp),
+            transient_gib_per_lane=(
+                SelfMTPLaneAdmissionController.MOE_TRANSIENT_GIB_PER_LANE
+            ),
+        )
 
     def diagnostics(self):
         result = super().diagnostics()

@@ -1,0 +1,31 @@
+{
+ "schema": "mlx2.rm06-external-draft-acceptance.v1",
+ "kind": "execution_plan",
+ "family": "north",
+ "target": "~/mlx-models/North-Mini-Code-1.0-mlx-4bit",
+ "draft": "~/.cache/huggingface/hub/models--CohereLabs--North-Mini-Code-1.0-eagle/snapshots/8c7fcb575f107e9968b61cc93a756e6fc2c86713",
+ "will_execute": false,
+ "arms": 48,
+ "prompts": 16,
+ "max_tokens": 256,
+ "depths": [
+  1,
+  2,
+  3,
+  4
+ ],
+ "widths": [
+  1,
+  4
+ ],
+ "temperatures": [
+  0.0
+ ],
+ "interleaving": "ordinary/external alternating per (repeat, temp, width, depth)",
+ "go_criterion": {
+  "greedy_parity": "mean greedy common-prefix ratio vs ordinary >= 0.9 (exact count also reported)",
+  "b1_speedup_min": 1.25,
+  "b4_speedup_min": 1.0,
+  "arm_refused_if": "external_rounds == 0 or proposed_tokens == 0"
+ }
+}

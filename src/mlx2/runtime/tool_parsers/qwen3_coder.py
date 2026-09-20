@@ -18,6 +18,7 @@ import regex as re
 from ._schema import (
     infer_type_from_json_schema,
     raw_string_pattern,
+    required_parameter_names,
     resolve_local_refs,
     schema_value_matches,
 )
@@ -215,14 +216,12 @@ def _parse_xml_function_call(function_call_str: str, tools: Optional[Any]):
     param_config, strict = _get_arguments_config(function_name, tools)
     parameters = function_call_str[name_match.end() :]
     param_dict = {}
-    cursor = 0
-    for match in _parameter_regex.finditer(parameters):
-        if parameters[cursor : match.start()].strip():
-            raise ValueError("Malformed parameter markup")
-        cursor = match.end()
-        match_text = match.group(1)
+
+    def add(match_text, *, implicit_close=False):
         param_match = _name_regex.match(match_text)
-        if param_match is None:
+        if param_match is None or (
+            implicit_close and not param_match.group(0).endswith(">")
+        ):
             raise ValueError("Malformed parameter name")
         param_name = param_match.group(1)
         if not param_name.strip() or "<" in param_name or param_name in param_dict:
@@ -236,8 +235,23 @@ def _parse_xml_function_call(function_call_str: str, tools: Optional[Any]):
         param_dict[param_name] = _convert_param_value(
             param_value, param_name, param_config, strict=strict
         )
-    if parameters[cursor:].strip():
-        raise ValueError("Incomplete or malformed parameter markup")
+
+    cursor = 0
+    for match in _parameter_regex.finditer(parameters):
+        if parameters[cursor : match.start()].strip():
+            raise ValueError("Malformed parameter markup")
+        cursor = match.end()
+        add(match.group(1))
+    rest = parameters[cursor:].lstrip()
+    if rest:
+        # vllm #57707: a model can close </function> without closing its last
+        # parameter.  The function end closes that one parameter implicitly;
+        # any other leftover markup is still malformed.
+        opener = "<parameter="
+        body = rest[len(opener) :]
+        if not rest.startswith(opener) or opener in body or "</parameter>" in body:
+            raise ValueError("Incomplete or malformed parameter markup")
+        add(body, implicit_close=True)
     return dict(name=function_name, arguments=param_dict)
 
 
@@ -332,9 +346,24 @@ def constrained_tool_grammar(tools, tool_choice, *, parallel_tool_calls=True):
         if function.get("strict", False):
             body = _strict_parameter_body(function)
         else:
-            body = (
+            # Values stay free text, but every required argument must appear
+            # before any optional one (sglang #40051: an all-optional body
+            # lets greedy decoding emit a call with no arguments).
+            free_value = r"(?:(?!</parameter>)[\s\S])*"
+            required = required_parameter_names(function)
+            for parameter in required:
+                if not isinstance(parameter, str) or not re.fullmatch(
+                    r"[^\s<>]+", parameter
+                ):
+                    raise ValueError(
+                        "tool parameter names are not representable in Qwen XML"
+                    )
+            body = "".join(
+                rf"\n<parameter={re.escape(parameter)}>\n{free_value}\n</parameter>"
+                for parameter in required
+            ) + (
                 r"(?:\n<parameter=[A-Za-z_][A-Za-z0-9_.-]{0,127}>\n"
-                r"(?:(?!</parameter>)[\s\S])*\n</parameter>){0,64}"
+                rf"{free_value}\n</parameter>){{0,{max(0, 64 - len(required))}}}"
             )
         calls.append(
             rf"<tool_call>\n<function={re.escape(name)}>{body}\n</function>\n</tool_call>"

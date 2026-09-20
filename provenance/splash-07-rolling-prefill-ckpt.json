@@ -1,0 +1,29 @@
+{
+  "component": "rolling disposable prefill checkpoints and the P1 state-boundary plan",
+  "source_repository": "Splash (reference only; no code copied)",
+  "source_revision": "f58d36ddb046726adc8937ab67d07bdde015c0d6",
+  "source_paths": [
+    "runtime/engine/Engine.hpp",
+    "runtime/engine/Engine.cpp",
+    "runtime/engine/StateCache.hpp",
+    "runtime/engine/Cache.hpp",
+    "DEVELOPMENT.md"
+  ],
+  "license": "Apache-2.0",
+  "destination_paths": [
+    "src/mlx2/runtime/state_boundaries.py",
+    "src/mlx2/runtime/generate.py",
+    "src/mlx2/runtime/apc_v2.py",
+    "src/mlx2/serving.py"
+  ],
+  "modifications": [
+    "Reimplemented Splash's StateBoundary purposes (checkpoint/replay/junction) as Python ROLLING/INTERIOR/JUNCTION with max-purpose dedup over one sorted plan.",
+    "Ported the rolling lifetime rules: publish each progress point immediately, retire the previous one on replacement and the last one at the committed prompt boundary, never retire a peer's recovery point, never downgrade an ordinary state, and defer retirement while a lease pins the entry.",
+    "Mapped Splash's disposable-first reclaim onto APCv2 retention ranks (prefill_rolling below interior_checkpoint) instead of a separate state cache.",
+    "Added an mlx2-specific KV-only phase that publishes a cancelled prefill's trimmable partial cache instead of periodic snapshots.",
+    "Kept the feature default-off behind the server-owned execution_policy.apc_rolling_checkpoints key."
+  ],
+  "validation": [
+    "tests/test_rolling_prefill_checkpoints.py"
+  ]
+}

@@ -1,0 +1,22 @@
+{
+  "counter_dtype": "u64",
+  "crc32": 981136396,
+  "data_offset": 4096,
+  "decay_half_life_observations": 2000000,
+  "format": "mlx2-weight-atlas",
+  "generations": [
+    {
+      "at": "2026-09-20T04:11:06Z",
+      "observations": 22263,
+      "source": "serving"
+    }
+  ],
+  "kind": "moe_expert",
+  "min_samples_for_trust": 20000,
+  "num_layers": 120,
+  "num_units_per_layer": 256,
+  "pinning": false,
+  "source_index_sha256": "4c0a99e7bc5b8916f61dda673883cf350eace67938c5c38efddc84e50c1554db",
+  "total_observations": 22263,
+  "version": 1
+}

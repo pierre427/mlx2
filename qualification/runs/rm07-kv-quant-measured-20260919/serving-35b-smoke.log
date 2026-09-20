@@ -1,0 +1,31 @@
+[cpg_job 2026-09-19T21:53:00+00:00 pid=66738] label=rm07-kvq-mtp-35b-smoke agent_id=job-rm07-kvq-mtp-35b-smoke-66738 command=env PYTHONPATH=/private/tmp/mlx2-rm07-kv-quant-measured/src ~/Desktop/mlx2/.venv/bin/python /private/tmp/mlx2-rm07-kv-quant-measured/scripts/bench_kv_quant_mtp.py --i-own-the-gpu --model ~/mlx-models/Qwen3.6-35B-A3B-uncensored-heretic-Native-MTP-Preserved-oQ4e-mtp --interleave 1 --lanes 1,2 --prompt-tokens 2048 --max-tokens 48 --out /private/tmp/mlx2-rm07-kv-quant-measured/qualification/runs/rm07-kv-quant-measured-20260919/serving-35b-smoke.json
+[cpg_job 2026-09-19T21:53:01+00:00 pid=66738] created workflow b53729f626454add8f21bfd2e22439a9 (cpg-job drivers); record it as workflows.cpg-job-drivers in /Users/Shared/mlxuag/cpg-radio.json to reuse it
+[cpg_job 2026-09-19T21:53:01+00:00 pid=66738] registered worker 349d90c019154daf8e7ab70ee39be965 as job-rm07-kvq-mtp-35b-smoke-66738 in session 3c65a7827e83456a89fffdeefadec196
+[cpg_job 2026-09-19T21:53:01+00:00 pid=66738] [cpg_job] /Users/Shared/mlxuag/gpu.lock is already held; owner.json: {
+ "agent": "cpg_job",
+ "agent_id": "job-rm12-metrics-overhead-rep2b-66741",
+ "command": [
+  "~/Desktop/mlx2/.venv/bin/python",
+  "/private/tmp/mlx2-rm12-metrics-traces/scripts/smoke_metrics_populate.py",
+  "--i-own-the-gpu",
+  "--model",
+  "~/mlx-models/Qwen3.8-27B-oQ4e-mtp",
+  "--arms",
+  "",
+  "--overhead-pairs",
+  "3",
+  "--out",
+  "/private/tmp/claude-501/-Users-user-Desktop-mlx2/dcc2c62c-d339-4686-a019-625b816d27d9/scratchpad/roadmap/rm12/gpu-smoke-overhead-rep2-detail.json"
+ ],
+ "cpg_agent": "job-rm12-metrics-overhead-rep2b-66741",
+ "cpg_generation": null,
+ "cpg_session": "3c65a7827e83456a89fffdeefadec196",
+ "cpg_task": "2362c6c845d244eea73b27334add9154",
+ "cpg_worker": "1e7a0dbc150243fd98e1792bed30067c",
+ "done_file": "/private/tmp/claude-501/-Users-user-Desktop-mlx2/dcc2c62c-d339-4686-a019-625b816d27d9/scratchpad/roadmap/rm12/gpu-smoke-overhead-rep2b.log.done",
+ "label": "rm12-metrics-overhead-rep2b",
+ "log": "/private/tmp/claude-501/-Users-user-Desktop-mlx2/dcc2c62c-d339-4686-a019-625b816d27d9/scratchpad/roadmap/rm12/gpu-smoke-overhead-rep2b.log",
+ "pid": 66741,
+ "started": "2026-09-19T21:53:00+00:00"
+}
+[cpg_job 2026-09-19T21:53:01+00:00 pid=66738] worker 349d90c019154daf8e7ab70ee39be965 closed failed

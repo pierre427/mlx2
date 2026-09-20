@@ -1,0 +1,37 @@
+{
+  "authenticated": [
+    200,
+    "api_key"
+  ],
+  "unauthenticated": 401,
+  "spoofed": 403,
+  "tenant_auth": {
+    "enabled": true,
+    "methods": [
+      "api_key"
+    ],
+    "header_policy": "must-match",
+    "cache_isolation": "tenant",
+    "token_max_ttl_seconds": 604800,
+    "configured_keys": 2,
+    "configured_key_tenants": 2,
+    "verified": {
+      "api_key": 3,
+      "token": 0
+    },
+    "failures": {
+      "missing": 1,
+      "malformed": 0,
+      "ambiguous": 0,
+      "unknown_key": 0,
+      "disabled": 0,
+      "bad_signature": 0,
+      "expired": 0,
+      "tenant_mismatch": 1,
+      "scope": 0
+    },
+    "tenant_header_matched": 0,
+    "tenant_header_ignored": 0
+  },
+  "go": true
+}

@@ -1,0 +1,269 @@
+[cpg_job 2026-09-20T04:55:53+00:00 pid=96047] label=rm10-ab-35b-p0 agent_id=job-rm10-ab-35b-p0-96047 command=env PYTHONPATH=/private/tmp/mlx2-rm10-dspark-confidence/src ~/Desktop/mlx2/.venv/bin/python /private/tmp/mlx2-rm10-dspark-confidence/scripts/mtp_confidence_gpu.py ab --i-own-the-gpu --model ~/mlx-models/Qwen3.6-35B-A3B-uncensored-heretic-Native-MTP-Preserved-oQ4e-mtp --execution-policy /private/tmp/mlx2-rm10-dspark-confidence/qualification/runs/mtp-confidence-20260919/nd3.json --arms ordinary,ewma,fixed,top1,trained --pairs 1 --pair-start 0 --top1-model /private/tmp/mlx2-rm10-dspark-confidence/qualification/runs/mtp-confidence-20260919/top1sts-35b.json --confidence-model /private/tmp/mlx2-rm10-dspark-confidence/qualification/runs/mtp-confidence-20260919/conf-35b.json --cost-profile /private/tmp/mlx2-rm10-dspark-confidence/qualification/runs/mtp-confidence-20260919/cost-35b-v2.json --lookahead 2 --port 8310 --out /private/tmp/mlx2-rm10-dspark-confidence/qualification/runs/mtp-confidence-20260919/ab-35b
+[cpg_job 2026-09-20T04:55:54+00:00 pid=96047] created workflow 8c49119029394c5ca0fc9d7ba262885f (cpg-job drivers); record it as workflows.cpg-job-drivers in /Users/Shared/mlxuag/cpg-radio.json to reuse it
+[cpg_job 2026-09-20T04:55:54+00:00 pid=96047] registered worker 57b3f8aaf77947988d27f4a2e70db4b0 as job-rm10-ab-35b-p0-96047 in session 3c65a7827e83456a89fffdeefadec196
+[cpg_job 2026-09-20T04:55:54+00:00 pid=96047] took /Users/Shared/mlxuag/gpu.lock
+[cpg_job 2026-09-20T04:55:54+00:00 pid=96047] child pid 96055 started
+round=0 width=1 aggregate=116.88 tokens/s
+round=0 width=2 aggregate=188.44 tokens/s
+round=0 width=4 aggregate=268.20 tokens/s
+round=1 width=4 aggregate=268.92 tokens/s
+round=1 width=2 aggregate=189.24 tokens/s
+round=1 width=1 aggregate=115.11 tokens/s
+round=2 width=1 aggregate=113.81 tokens/s
+round=2 width=2 aggregate=185.03 tokens/s
+round=2 width=4 aggregate=269.42 tokens/s
+round=0 width=1 aggregate=132.52 tokens/s
+round=0 width=2 aggregate=172.72 tokens/s
+round=0 width=4 aggregate=214.09 tokens/s
+round=1 width=4 aggregate=216.59 tokens/s
+round=1 width=2 aggregate=174.27 tokens/s
+round=1 width=1 aggregate=135.06 tokens/s
+round=2 width=1 aggregate=135.49 tokens/s
+round=2 width=2 aggregate=172.31 tokens/s
+round=2 width=4 aggregate=211.03 tokens/s
+round=0 width=1 aggregate=136.21 tokens/s
+round=0 width=2 aggregate=175.14 tokens/s
+round=0 width=4 aggregate=214.38 tokens/s
+round=1 width=4 aggregate=216.00 tokens/s
+round=1 width=2 aggregate=173.40 tokens/s
+round=1 width=1 aggregate=133.34 tokens/s
+round=2 width=1 aggregate=130.43 tokens/s
+round=2 width=2 aggregate=169.86 tokens/s
+round=2 width=4 aggregate=211.81 tokens/s
+round=0 width=1 aggregate=131.95 tokens/s
+round=0 width=2 aggregate=173.30 tokens/s
+round=0 width=4 aggregate=202.81 tokens/s
+round=1 width=4 aggregate=203.28 tokens/s
+round=1 width=2 aggregate=173.85 tokens/s
+round=1 width=1 aggregate=126.62 tokens/s
+round=2 width=1 aggregate=128.56 tokens/s
+round=2 width=2 aggregate=167.84 tokens/s
+round=2 width=4 aggregate=207.04 tokens/s
+round=0 width=1 aggregate=131.27 tokens/s
+round=0 width=2 aggregate=173.03 tokens/s
+round=0 width=4 aggregate=204.96 tokens/s
+round=1 width=4 aggregate=205.57 tokens/s
+round=1 width=2 aggregate=176.45 tokens/s
+round=1 width=1 aggregate=133.07 tokens/s
+round=2 width=1 aggregate=129.07 tokens/s
+round=2 width=2 aggregate=174.82 tokens/s
+round=2 width=4 aggregate=206.70 tokens/s
+{
+ "median_tps": {
+  "ordinary": {
+   "1": 115.10949801381287,
+   "2": 188.437294650118,
+   "4": 268.919383992664
+  },
+  "ewma": {
+   "1": 135.06436133504442,
+   "2": 172.7155464396494,
+   "4": 214.08573819505818
+  },
+  "fixed": {
+   "1": 133.34463447827386,
+   "2": 173.39874695732357,
+   "4": 214.37705434543153
+  },
+  "top1": {
+   "1": 128.56449102710206,
+   "2": 173.3011489871812,
+   "4": 203.28406556603957
+  },
+  "trained": {
+   "1": 131.26650492758802,
+   "2": 174.81813770320568,
+   "4": 205.5690498212833
+  }
+ },
+ "delta_vs": "ewma",
+ "deltas": {
+  "ordinary": {
+   "1": -0.14774336563685342,
+   "2": 0.0910268272576269,
+   "4": 0.25612937255841706
+  },
+  "fixed": {
+   "1": -0.012732647160005106,
+   "2": 0.003955639962688107,
+   "4": 0.0013607452454769131
+  },
+  "top1": {
+   "1": -0.04812424420249983,
+   "2": 0.0033905607202326937,
+   "4": -0.050454891204275265
+  },
+  "trained": {
+   "1": -0.028118863998737198,
+   "2": 0.012173723251317048,
+   "4": -0.03978167086503981
+  }
+ },
+ "deltas_vs_fixed": {
+  "ordinary": {
+   "1": -0.13675193258287488,
+   "2": 0.08672812206939229,
+   "4": 0.25442242321021413
+  },
+  "ewma": {
+   "1": 0.012896858306291836,
+   "2": -0.003940054525551573,
+   "4": -0.0013588961340235128
+  },
+  "top1": {
+   "1": -0.03584803745478515,
+   "2": -0.0005628527994288035,
+   "4": -0.051745224381698596
+  },
+  "trained": {
+   "1": -0.015584650697170965,
+   "2": 0.008185703592376248,
+   "4": -0.04108650784031975
+  }
+ },
+ "pairs": [
+  0
+ ],
+ "width1_greedy_identical": true,
+ "width1_matches_ordinary": false,
+ "width1_output_sets": {
+  "ordinary": [
+   "f6ee9daaa89f039f007430c3e77d319fc00718b2d2ba379d814bc98c5410a738"
+  ],
+  "ewma": [
+   "e7cb5f97d180b15c271198d6f6509d1de7f1cb1fef9eaf34f2c662ecf68e5dfb"
+  ],
+  "fixed": [
+   "e7cb5f97d180b15c271198d6f6509d1de7f1cb1fef9eaf34f2c662ecf68e5dfb"
+  ],
+  "top1": [
+   "e7cb5f97d180b15c271198d6f6509d1de7f1cb1fef9eaf34f2c662ecf68e5dfb"
+  ],
+  "trained": [
+   "e7cb5f97d180b15c271198d6f6509d1de7f1cb1fef9eaf34f2c662ecf68e5dfb"
+  ]
+ },
+ "counters": {
+  "ordinary": [
+   {
+    "routes": {
+     "ordinary": 25
+    }
+   }
+  ],
+  "ewma": [
+   {
+    "adaptive_mtp_boundaries": 72,
+    "adaptive_mtp_depth_changes": 0,
+    "adaptive_mtp_parks": 0,
+    "adaptive_mtp_reentries": 0,
+    "adaptive_mtp_probes": 0,
+    "routes": {
+     "segmented_self_mtp": 25
+    }
+   }
+  ],
+  "fixed": [
+   {
+    "routes": {
+     "segmented_self_mtp": 25
+    }
+   }
+  ],
+  "top1": [
+   {
+    "mtp_confidence_feature_cycles": 905,
+    "adaptive_mtp_boundaries": 76,
+    "adaptive_mtp_depth_changes": 18,
+    "adaptive_mtp_parks": 1,
+    "adaptive_mtp_reentries": 1,
+    "adaptive_mtp_probes": 1,
+    "adaptive_mtp_confidence_cycles": 76,
+    "adaptive_mtp_confidence_positions": 785,
+    "adaptive_mtp_confidence_lookahead_positions": 78,
+    "adaptive_mtp_confidence_fallbacks": 0,
+    "routes": {
+     "segmented_self_mtp": 25
+    }
+   }
+  ],
+  "trained": [
+   {
+    "mtp_confidence_feature_cycles": 910,
+    "adaptive_mtp_boundaries": 76,
+    "adaptive_mtp_depth_changes": 24,
+    "adaptive_mtp_parks": 1,
+    "adaptive_mtp_reentries": 1,
+    "adaptive_mtp_probes": 1,
+    "adaptive_mtp_confidence_cycles": 75,
+    "adaptive_mtp_confidence_positions": 785,
+    "adaptive_mtp_confidence_lookahead_positions": 78,
+    "adaptive_mtp_confidence_fallbacks": 0,
+    "routes": {
+     "segmented_self_mtp": 25
+    }
+   }
+  ]
+ },
+ "samples": {
+  "ordinary": {
+   "1": [
+    115.10949801381287
+   ],
+   "2": [
+    188.437294650118
+   ],
+   "4": [
+    268.919383992664
+   ]
+  },
+  "ewma": {
+   "1": [
+    135.06436133504442
+   ],
+   "2": [
+    172.7155464396494
+   ],
+   "4": [
+    214.08573819505818
+   ]
+  },
+  "fixed": {
+   "1": [
+    133.34463447827386
+   ],
+   "2": [
+    173.39874695732357
+   ],
+   "4": [
+    214.37705434543153
+   ]
+  },
+  "top1": {
+   "1": [
+    128.56449102710206
+   ],
+   "2": [
+    173.3011489871812
+   ],
+   "4": [
+    203.28406556603957
+   ]
+  },
+  "trained": {
+   "1": [
+    131.26650492758802
+   ],
+   "2": [
+    174.81813770320568
+   ],
+   "4": [
+    205.5690498212833
+   ]
+  }
+ }
+}
+[cpg_job 2026-09-20T04:59:02+00:00 pid=96047] child exited rc=0
+[cpg_job 2026-09-20T04:59:02+00:00 pid=96047] worker 57b3f8aaf77947988d27f4a2e70db4b0 closed completed
+[cpg_job 2026-09-20T04:59:02+00:00 pid=96047] released /Users/Shared/mlxuag/gpu.lock
+[cpg_job 2026-09-20T04:59:02+00:00 pid=96047] wrote /private/tmp/mlx2-rm10-dspark-confidence/qualification/runs/mtp-confidence-20260919/ab-35b-p0.log.done

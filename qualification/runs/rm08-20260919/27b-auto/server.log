@@ -1,0 +1,51 @@
+2026-09-19 20:21:05,016 WARNING no reasoning signing key configured; using a random per-process reasoning signing key
+2026-09-19 20:21:08,419 INFO ubc_evict: evicted 4784.0 MB from UBC for ~/mlx-models/Qwen3.8-27B-oQ4e-mtp/model-00001-of-00004.safetensors
+2026-09-19 20:21:08,459 INFO ubc_evict: evicted 4785.1 MB from UBC for ~/mlx-models/Qwen3.8-27B-oQ4e-mtp/model-00002-of-00004.safetensors
+2026-09-19 20:21:08,498 INFO ubc_evict: evicted 4769.9 MB from UBC for ~/mlx-models/Qwen3.8-27B-oQ4e-mtp/model-00003-of-00004.safetensors
+2026-09-19 20:21:08,514 INFO ubc_evict: evicted 1846.3 MB from UBC for ~/mlx-models/Qwen3.8-27B-oQ4e-mtp/model-00004-of-00004.safetensors
+2026-09-19 20:21:08,514 INFO ubc_evict: pass complete total_mb=16185.5 elapsed_s=0.13
+2026-09-19 20:21:09,921 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-19 20:21:10,019 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-19 20:21:24,007 INFO "POST /v1/responses HTTP/1.1" 200 -
+2026-09-19 20:21:26,099 INFO "POST /v1/responses HTTP/1.1" 200 -
+2026-09-19 20:21:28,045 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-19 20:21:28,047 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-19 20:21:42,009 INFO "POST /v1/responses HTTP/1.1" 200 -
+2026-09-19 20:21:43,911 INFO "POST /v1/responses HTTP/1.1" 200 -
+2026-09-19 20:21:47,716 INFO "POST /v1/responses HTTP/1.1" 200 -
+2026-09-19 20:21:51,431 INFO "POST /v1/responses HTTP/1.1" 200 -
+2026-09-19 20:21:52,826 INFO "POST /v1/responses HTTP/1.1" 200 -
+2026-09-19 20:21:56,095 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-19 20:21:56,111 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-19 20:22:18,915 INFO "POST /v1/messages?beta=true HTTP/1.1" 200 -
+2026-09-19 20:22:22,512 INFO "POST /v1/messages?beta=true HTTP/1.1" 200 -
+2026-09-19 20:22:25,654 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-19 20:22:25,656 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-19 20:22:48,495 INFO "POST /v1/messages?beta=true HTTP/1.1" 200 -
+2026-09-19 20:22:53,559 INFO "POST /v1/messages?beta=true HTTP/1.1" 200 -
+2026-09-19 20:22:58,344 INFO "POST /v1/messages?beta=true HTTP/1.1" 200 -
+2026-09-19 20:23:00,697 INFO "POST /v1/messages?beta=true HTTP/1.1" 200 -
+2026-09-19 20:23:02,981 INFO "POST /v1/messages?beta=true HTTP/1.1" 200 -
+2026-09-19 20:23:05,349 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-19 20:23:05,367 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-19 20:23:19,331 INFO "POST /v1/responses HTTP/1.1" 200 -
+2026-09-19 20:23:22,300 INFO "POST /v1/responses HTTP/1.1" 200 -
+2026-09-19 20:23:24,412 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-19 20:23:24,415 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-19 20:23:38,356 INFO "POST /v1/responses HTTP/1.1" 200 -
+2026-09-19 20:23:40,369 INFO "POST /v1/responses HTTP/1.1" 200 -
+2026-09-19 20:23:44,124 INFO "POST /v1/responses HTTP/1.1" 200 -
+2026-09-19 20:23:46,199 INFO "POST /v1/responses HTTP/1.1" 200 -
+2026-09-19 20:23:49,608 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-19 20:23:49,625 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-19 20:24:12,467 INFO "POST /v1/messages?beta=true HTTP/1.1" 200 -
+2026-09-19 20:24:17,460 INFO "POST /v1/messages?beta=true HTTP/1.1" 200 -
+2026-09-19 20:24:18,171 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-19 20:24:18,173 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-19 20:24:41,121 INFO "POST /v1/messages?beta=true HTTP/1.1" 200 -
+2026-09-19 20:24:45,742 INFO "POST /v1/messages?beta=true HTTP/1.1" 200 -
+2026-09-19 20:24:49,934 INFO "POST /v1/messages?beta=true HTTP/1.1" 200 -
+2026-09-19 20:24:52,231 INFO "POST /v1/messages?beta=true HTTP/1.1" 200 -
+2026-09-19 20:24:54,011 INFO "POST /v1/messages?beta=true HTTP/1.1" 200 -
+2026-09-19 20:24:56,812 INFO "GET /v1/status HTTP/1.1" 200 -
+2026-09-19 20:24:56,829 INFO "GET /v1/status HTTP/1.1" 200 -

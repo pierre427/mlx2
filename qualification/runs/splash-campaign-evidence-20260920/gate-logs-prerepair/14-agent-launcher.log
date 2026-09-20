@@ -1,0 +1,19 @@
+### job 14-agent-launcher
+### started 2026-09-20T00:26:10
+### worktree /private/tmp/mlx2-splash-14-agent-launcher
+### models ~/mlx-models/North-Mini-Code-1.0-mlx-4bit
+    ok   /private/tmp/mlx2-splash-14-agent-launcher/src/mlx2/clients.py
+    ok   /private/tmp/mlx2-splash-14-agent-launcher/src/mlx2/cli.py
+    ok   /private/tmp/mlx2-splash-14-agent-launcher/src/mlx2/server.py
+    ok   model ~/mlx-models/North-Mini-Code-1.0-mlx-4bit
+[runner] Run A: --api-state-dir, first start (key gets created)
+[runner] server pid 87827  log /private/tmp/claude-501/-Users-user-Desktop-mlx2/b569b1f6-d687-4876-a42a-e5fdf0abeabc/scratchpad/gpu-queue/14-out/a.log
+[runner] ready: http://127.0.0.1:8314/health after 5s
+-rw-------@ 1 user  wheel  64 Sep 20 00:26 /private/tmp/claude-501/-Users-user-Desktop-mlx2/b569b1f6-d687-4876-a42a-e5fdf0abeabc/scratchpad/gpu-queue/14-out/state/reasoning-signing.key
+{'key_id': '76c6b2c6a15ee1dd', 'ephemeral': False}
+[runner] server stopped
+Traceback (most recent call last):
+  File "<stdin>", line 4, in <module>
+KeyError: 'content'
+[runner] FAIL: run A produced no signed thinking block
+### finished 2026-09-20T00:26:20 status=FAILED(rc=1) duration=10s

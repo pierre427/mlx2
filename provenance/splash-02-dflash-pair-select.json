@@ -1,0 +1,18 @@
+{
+  "source_repository": "Splash engine (reference clone)",
+  "source_revision": "f58d36dd",
+  "license": "Apache-2.0",
+  "source_paths": [
+    "runtime/metal/kernels/decode/sampling.metal (draft_select_edges, draft_select_dflash)",
+    "runtime/model/DFlashDraft.cpp"
+  ],
+  "used": "Design only: precompute the DFlash selector pair-edge table [B,K,C,C] (anchor row at position 0) in one pass, then walk the block with pre-drawn uniforms and emit per-position top-C proposal laws.",
+  "modifications": [
+    "No Splash code copied; reimplemented as portable mlx ops (pairwise_score_table, pairwise_walk) with no Metal kernel",
+    "Edge table mirrors mlx2's sequential selector expression and dtype so each entry equals the host path's score",
+    "Inverse-CDF uses searchsorted(side='right') semantics and one uniform per position drawn from the lane RequestRNG in position order, matching mlx2's sequential sampler draw-for-draw; temperature 0 is argmax and still consumes its uniform",
+    "Compact law carrier DraftBlock (runtime/drafters/draft_block.py) with dense_laws() for mlx2's exact float64 host verifier",
+    "Opt-in via Muse execution policy pairwise_selection: 'batched'; processor rows stay on the sequential host path"
+  ],
+  "validation": "CPU only: tests/test_dflash_pair_select.py (batched vs host tokens identical, q within 1e-5, RNG snapshots equal, FP32 and BF16, numpy inverse-CDF oracle, executor output/receipt identity, processor rows untouched, one external.draft.block_eval sync per draft group). No GPU execution; unqualified."
+}

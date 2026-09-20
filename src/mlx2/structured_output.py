@@ -77,6 +77,46 @@ _FAILURE_TEXT_CHARS = 64
 _FAILURE_BYTES = 32
 
 
+def vocabulary_bound(tokenizer):
+    """One past the highest token id this tokenizer can produce.
+
+    ``tokenizer.vocab_size`` is the *base* vocabulary only: it excludes every
+    token added after training.  Those added ids are exactly the wire markers
+    the adapters' tool grammars are written against -- ``<tool_call>`` is id
+    248058 on Flash-Next against a base size of 248044, ``<|START_ACTION|>``
+    is 255014 against 255000 on North, ``<|message|>`` is 200023 against
+    200000 on Muse.  A piece table cut at the base size leaves those ids with
+    an empty piece, so no grammar can ever admit them and the model has to
+    spell the marker out one ordinary token at a time (or dead-end).
+
+    The bound used here is the tokenizer's whole id space: ``len(tokenizer)``
+    (base plus added), raised to cover any added id that sits past it.  It is
+    deliberately *not* the model's ``config.vocab_size`` / ``lm_head`` row
+    count, which is padded above the tokenizer on every model checked
+    (248320 vs 248077, 262144 vs 255032): those extra rows decode to nothing
+    and must stay inadmissible.  The logits row is the wider array of the two
+    on every model checked, so a mask built from this bound is padded with
+    ``False`` out to the row's width; a row narrower than the tokenizer cuts
+    the mask instead, since an id past the row cannot be sampled at all.
+    Either way the mask is exactly as wide as the row (see ``_mask``).
+    """
+    bound = int(getattr(tokenizer, "vocab_size", 0) or 0)
+    try:
+        bound = max(bound, len(tokenizer))
+    except TypeError:
+        # Fake tokenizers in tests, and any wrapper without ``__len__``.
+        pass
+    added = getattr(tokenizer, "get_added_vocab", None)
+    if callable(added):
+        try:
+            ids = list(added().values())
+        except Exception:  # noqa: BLE001 - an unusable index is not a failure
+            ids = []
+        if ids:
+            bound = max(bound, max(int(token) for token in ids) + 1)
+    return bound
+
+
 def token_pieces(tokenizer, vocab_size):
     """The text each token id adds when it follows other generated text.
 
@@ -839,6 +879,9 @@ class ThinkingBudgetProcessor:
     exact same decision.
     """
 
+    # P5: the mask is a pure function of the token history.
+    history_pure = True
+
     def __init__(self, prompt_length, budget, close_token_ids):
         self.prompt_length = int(prompt_length)
         self.budget = int(budget)
@@ -881,6 +924,18 @@ class ThinkingBudgetProcessor:
         position = self._close_position(generated)
         return position is not None and (
             position <= self.budget < position + len(self.close_token_ids)
+        )
+
+    def dormant(self, tokens):
+        """P5: whether ``tokens`` leave this processor masking nothing.
+
+        True before the budget boundary and once a close marker is present;
+        side-effect free (``fired`` is not touched).
+        """
+        generated = self._generated_values(tokens)
+        return (
+            self._close_position(generated) is not None
+            or len(generated) < self.budget
         )
 
     def probe(self, tokens, logits):
@@ -927,6 +982,10 @@ class ThinkingBudgetProcessor:
         return logits + mask
 
 class StructuredOutputProcessor:
+    # P5: every mask is re-derived from the token ids (the tracking state is a
+    # cache of them), so a replay rebuilds this processor from history alone.
+    history_pure = True
+
     def __init__(
         self,
         tokenizer,
@@ -978,7 +1037,10 @@ class StructuredOutputProcessor:
             else generation_stop_token_ids
         )
         self.eos_ids = frozenset(int(token) for token in stop_ids)
-        self.vocab_size = int(tokenizer.vocab_size)
+        # The whole tokenizer id space, not the base vocabulary: added tokens
+        # carry the tool-call markers every adapter grammar matches against
+        # (see ``vocabulary_bound``).
+        self.vocab_size = vocabulary_bound(tokenizer)
         pieces = getattr(tokenizer, _TOKEN_PIECES_ATTRIBUTE, None)
         if not isinstance(pieces, tuple) or len(pieces) != self.vocab_size:
             pieces = token_pieces(tokenizer, self.vocab_size)
@@ -1066,6 +1128,28 @@ class StructuredOutputProcessor:
         clone._partial_cache = OrderedDict(self._partial_cache)
         memo[id(self)] = clone
         return clone
+
+    def dormant(self, tokens):
+        """P5: whether the next row for ``tokens`` passes logits through.
+
+        True while the grammar is deferred before its marker (unless EOS is
+        blocked meanwhile) and after a latched failure.  Side-effect free:
+        unlike ``__call__`` it does not update ``constraining``.
+        """
+        if self.failure is not None:
+            return True
+        marker = self._defer_until
+        if marker is None or self.block_eos_while_deferred:
+            return False
+        generated = tokens[self.prompt_length :]
+        if hasattr(generated, "tolist"):
+            generated = generated.tolist()
+        generated = [int(item) for item in generated]
+        width = len(marker)
+        return not any(
+            tuple(generated[position : position + width]) == marker
+            for position in range(len(generated) - width + 1)
+        )
 
     def probe(self, tokens, logits):
         """Mask provisional draft logits without publishing processor state."""
@@ -1174,9 +1258,11 @@ class StructuredOutputProcessor:
         Inside a JSON string almost every vocabulary piece is admissible, so
         the prefix-tree walk cannot prune and a full pass costs seconds per
         token on the real vocabulary.  Examine pieces in descending logit
-        order instead; every unexamined token then has lower probability than
-        every admitted one, which makes these stopping rules exact for the
-        lane's sampler (top_p, then min_p, then top_k):
+        order instead -- by (-logit, id), so equal logits have a fixed order
+        and the frontier stays consistent as it grows; every unexamined token
+        then has no higher probability than every admitted one, which makes
+        these stopping rules exact for the lane's sampler (top_p, then min_p,
+        then top_k):
 
         * greedy: the first admissible token is the argmax of the fully
           masked row;
@@ -1227,6 +1313,10 @@ class StructuredOutputProcessor:
         probs = np.exp(shifted)
         total = float(probs.sum())
         vocab = row.shape[0]
+        # Ranking key for the walk.  Non-finite logits already carry zero mass
+        # (``shifted`` sends them to -inf), so ranking them last costs nothing
+        # and keeps NaN out of the tie-break comparisons below.
+        rank = np.where(finite, row, -np.inf)
         allowed = []
         admissible_mass = 0.0
         examined_mass = 0.0
@@ -1254,13 +1344,30 @@ class StructuredOutputProcessor:
         while start < vocab:
             if order is None or start >= order.shape[0]:
                 # Grow the examined frontier geometrically; a full argsort of
-                # the vocabulary is only paid for flat distributions.
+                # the vocabulary is only paid for flat distributions.  ``start``
+                # carries over from the previous, smaller array, so the walk
+                # only ever reads ``order[start:]`` -- which is correct exactly
+                # when the new prefix [0, start) is the set already examined.
+                # Every rebuild therefore orders by (-logit, id), a total order
+                # whose top-``want`` prefix is stable as ``want`` grows.  Under
+                # ties this is not automatic: ``argpartition`` picks an
+                # arbitrary representative set among equal values, so a naive
+                # rebuild can bury never-examined ids in the skipped prefix and
+                # drop them from the mask for good.
                 want = min(vocab, max(chunk, (order.shape[0] if order is not None else 0) * 8))
                 if want >= vocab:
-                    order = np.argsort(-row, kind="stable")
+                    # Stable argsort already breaks ties by ascending id.
+                    order = np.argsort(-rank, kind="stable")
                 else:
-                    top = np.argpartition(-row, want - 1)[:want]
-                    order = top[np.argsort(-row[top], kind="stable")]
+                    top = np.argpartition(-rank, want - 1)[:want]
+                    # Re-derive the cut deterministically: everything strictly
+                    # above it (all of which ``top`` holds, so at most want - 1
+                    # ids), then the lowest-numbered ids sitting on it.
+                    cut = float(rank[top].min())
+                    above = np.flatnonzero(rank > cut)
+                    tied = np.flatnonzero(rank == cut)
+                    chosen = np.concatenate((above, tied[: want - above.shape[0]]))
+                    order = chosen[np.argsort(-rank[chosen], kind="stable")]
             stop = min(order.shape[0], start + chunk)
             try:
                 for token in order[start:stop].tolist():
@@ -1306,7 +1413,7 @@ class StructuredOutputProcessor:
             if self._pool is not None and not pool_tried:
                 pool_tried = True
                 exact_tail = self._finish_exactly(
-                    prefix, order if order.shape[0] >= vocab else np.argsort(-row, kind="stable"),
+                    prefix, order if order.shape[0] >= vocab else np.argsort(-rank, kind="stable"),
                     start, probs, memo, deadline
                 )
                 if exact_tail is not None:
@@ -1321,7 +1428,7 @@ class StructuredOutputProcessor:
             # uses that estimate in place of the raw tail mass.
             if tail_fraction is None:
                 if order.shape[0] < vocab:
-                    order = np.argsort(-row, kind="stable")
+                    order = np.argsort(-rank, kind="stable")
                 try:
                     tail_fraction = self._estimate_tail_fraction(
                         order[start:], probs, decide, prefix
@@ -1791,8 +1898,24 @@ class StructuredOutputProcessor:
         except Exception as exc:  # noqa: BLE001 - this lane fails closed, never the batch
             self._latch_failure(exc, token_ids, logits, prefix=prefix)
             return logits
+        # The piece table spans the tokenizer id space, which a model whose
+        # head is narrower than its tokenizer would not cover; an id past the
+        # row cannot be sampled and must not be written into the mask either.
+        width = logits.shape[-1]
+        allowed = tuple(token for token in allowed if 0 <= token < width)
+        if not allowed:
+            self._latch_failure(
+                ValueError(
+                    "structured-output grammar admits no token inside the "
+                    "logits vocabulary"
+                ),
+                token_ids,
+                logits,
+                prefix=prefix,
+            )
+            return logits
         self.constrained_steps += 1
-        mask = mx.full(logits.shape[-1], -float("inf"), dtype=logits.dtype)
+        mask = mx.full(width, -float("inf"), dtype=logits.dtype)
         indexes = mx.array(allowed)
         mask = mx.put_along_axis(mask, indexes, mx.zeros(indexes.shape, dtype=logits.dtype), axis=-1)
         return logits + mask
@@ -1923,10 +2046,21 @@ def make_structured_processor(
     constraint_kind=None,
     capture_failure_context=False,
     generation_stop_token_ids=None,
+    server_grammar=None,
 ):
-    constraint = compile_constraint(
-        response_format, grammar, leading_whitespace=bool(defer_until)
-    )
+    if server_grammar is not None:
+        # A server-composed pattern (item 12 tool grammars): not client input,
+        # so the client grammar length cap does not apply; it is used verbatim.
+        try:
+            constraint = _Constraint(
+                regex.compile(rf"(?:{server_grammar})"), kind="tool_grammar"
+            )
+        except regex.error as exc:
+            raise ValueError(f"invalid server tool grammar: {exc}") from exc
+    else:
+        constraint = compile_constraint(
+            response_format, grammar, leading_whitespace=bool(defer_until)
+        )
     if constraint is None:
         return None
     return StructuredOutputProcessor(

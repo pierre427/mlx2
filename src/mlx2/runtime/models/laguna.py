@@ -339,7 +339,7 @@ class LagunaModel(nn.Module):
         self.full_index = args.layer_types.index("full_attention")
         self.sliding_index = args.layer_types.index("sliding_attention") if "sliding_attention" in args.layer_types else None
 
-    def __call__(self, inputs, cache=None, input_embeddings=None):
+    def __call__(self, inputs, cache=None, input_embeddings=None, capture=None):
         h = self.embed_tokens(inputs) if input_embeddings is None else input_embeddings
         cache = [None] * len(self.layers) if cache is None else cache
         if len(cache) != len(self.layers):
@@ -347,8 +347,15 @@ class LagunaModel(nn.Module):
         masks = {"full_attention": create_attention_mask(h, cache[self.full_index])}
         if self.sliding_index is not None:
             masks["sliding_attention"] = create_attention_mask(h, cache[self.sliding_index], window_size=self.args.sliding_window)
-        for layer, layer_cache in zip(self.layers, cache):
+        if capture is None:
+            for layer, layer_cache in zip(self.layers, cache):
+                h = layer(h, masks[layer.attention_type], layer_cache)
+            return self.norm(h)
+        # Post-block taps for external drafters (layer k = output of layer k).
+        for index, (layer, layer_cache) in enumerate(zip(self.layers, cache)):
             h = layer(h, masks[layer.attention_type], layer_cache)
+            if index in capture:
+                capture[index] = h
         return self.norm(h)
 
 
@@ -368,6 +375,28 @@ class Model(nn.Module):
     def __call__(self, inputs, cache=None, input_embeddings=None):
         hidden = self.model(inputs, cache, input_embeddings)
         return self.model.embed_tokens.as_linear(hidden) if self.args.tie_word_embeddings else self.lm_head(hidden)
+
+    def forward_with_taps(self, inputs, cache, capture_layers, *, body_only=False):
+        """Target features for the external DFlash drafter, paired with the
+        cache tokens consumed; ascending post-block taps, before final norm."""
+        capture_layers = tuple(int(i) for i in capture_layers)
+        if (
+            not capture_layers
+            or tuple(sorted(set(capture_layers))) != capture_layers
+            or capture_layers[0] < 0
+            or capture_layers[-1] >= len(self.model.layers)
+        ):
+            raise ValueError("Invalid target capture layers")
+        taps = {i: None for i in capture_layers}
+        hidden = self.model(inputs, cache, capture=taps)
+        features = mx.concatenate([taps[i] for i in capture_layers], axis=-1)
+        if body_only:
+            return None, features
+        logits = self.model.embed_tokens.as_linear(hidden) if self.args.tie_word_embeddings else self.lm_head(hidden)
+        return logits, features
+
+    def prefill_body(self, inputs, cache, capture_layers):
+        return self.forward_with_taps(inputs, cache, capture_layers, body_only=True)[1]
 
     def make_cache(self):
         return [

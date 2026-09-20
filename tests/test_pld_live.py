@@ -114,3 +114,26 @@ def test_cliff_aware_pld_extends_past_the_configured_plateau():
             assert max(map(int, receipt["verify_span_hist"])) == 16
             assert receipt["span_extend_cycles"] == 1
             break
+
+
+def test_pld_accept_histogram_decomposes_the_accepted_aggregate():
+    generator = PromptLookupBatchGenerator(
+        _PatternModel(),
+        prefill_step_size=32,
+        prompt_lookup={"num_draft": 8, "ngram_min": 2, "ngram_max": 2},
+    )
+    prompt = [1, 2] * 10
+    generator.insert([prompt], max_tokens=[18], caches=[[KVCache()]])
+    while True:
+        _prompts, responses = generator.next()
+        if responses:
+            receipt = responses[-1].speculative_receipt
+            hist = {int(k): int(v) for k, v in receipt["verify_accept_hist"].items()}
+            # One entry per verify round, including plain rounds at accept 0.
+            assert sum(hist.values()) == receipt["cycles"]
+            assert sum(hist.values()) == sum(
+                int(v) for v in receipt["verify_span_hist"].values()
+            )
+            # First moment is exactly the route's existing accepted aggregate.
+            assert sum(k * v for k, v in hist.items()) == receipt["accepted"]
+            break

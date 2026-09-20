@@ -15,7 +15,30 @@ from mlx2.anthropic_compat import (
 )
 from mlx2.reasoning_signatures import ReasoningSigner
 from mlx2.server import handler_for, validate_request
-from mlx2.serving import Job
+from mlx2.serving import HostPromptCache, Job
+
+
+def test_anthropic_omitted_disabled_and_enabled_thinking_translation():
+    base = {
+        "model": "fixture",
+        "messages": [{"role": "user", "content": "hello"}],
+        "max_tokens": 64,
+    }
+    omitted = anthropic_request_to_chat(base)
+    disabled = anthropic_request_to_chat(
+        {**base, "thinking": {"type": "disabled"}}
+    )
+    enabled = anthropic_request_to_chat(
+        {**base, "thinking": {"type": "enabled", "budget_tokens": 16}}
+    )
+
+    assert omitted["enable_thinking"] is False
+    assert omitted == disabled
+    assert HostPromptCache.key(omitted) == HostPromptCache.key(disabled)
+    assert HostPromptCache.key(omitted) != HostPromptCache.key(enabled)
+    assert enabled["enable_thinking"] is True
+    assert enabled["thinking_budget"] == 16
+    assert enabled["thinking_budget_mode"] == "history"
 
 
 def test_anthropic_translation_maps_thinking_tools_and_signed_history():
@@ -82,7 +105,7 @@ def test_anthropic_output_and_stream_sign_reasoning_and_fail_closed_tool_json():
         "model": "fixture",
         "choices": [{"finish_reason": "stop", "message": {"content": "answer", "reasoning_content": "thought"}}],
         "usage": {"prompt_tokens": 9, "completion_tokens": 3, "prompt_tokens_details": {"cached_tokens": 4}},
-        "mlx2": {},
+        "mlx2": {"stop_sequence": "STOP"},
     }
     payload = chat_result_to_anthropic(
         result, {}, signer=signer, tenant_id="tenant-a"
@@ -92,6 +115,8 @@ def test_anthropic_output_and_stream_sign_reasoning_and_fail_closed_tool_json():
         thinking["signature"], model="fixture", tenant="tenant-a", text="thought"
     )
     assert payload["usage"]["input_tokens"] == 5
+    assert payload["stop_reason"] == "stop_sequence"
+    assert payload["stop_sequence"] == "STOP"
 
     translator = AnthropicStreamTranslator(
         message_id="1", model="fixture", signer=signer, tenant_id="tenant-a"
@@ -99,7 +124,9 @@ def test_anthropic_output_and_stream_sign_reasoning_and_fail_closed_tool_json():
     events = translator.start()
     events += translator.delta({"reasoning_content": "thought"})
     events += translator.delta({"content": "answer"})
-    events += translator.finish("stop", {"completion_tokens": 2}, {})
+    events += translator.finish(
+        "stop", {"completion_tokens": 2}, {"stop_sequence": "STOP"}
+    )
     assert [event["type"] for event in events] == [
         "message_start",
         "content_block_start",
@@ -113,6 +140,10 @@ def test_anthropic_output_and_stream_sign_reasoning_and_fail_closed_tool_json():
         "message_stop",
     ]
     assert events[3]["delta"]["type"] == "signature_delta"
+    assert events[-2]["delta"] == {
+        "stop_reason": "stop_sequence",
+        "stop_sequence": "STOP",
+    }
 
     bad = {
         **result,
@@ -210,6 +241,8 @@ class AnthropicEngine:
         self.counts = Counter()
         self.reasoning_signer = ReasoningSigner(b"shared-secret")
         self.invalid_tool = False
+        self.last_request = None
+        self.thinking_enabled = None
 
     def status(self):
         return {"healthy": True, "error": None, "model": "fixture"}
@@ -222,6 +255,10 @@ class AnthropicEngine:
         return 7
 
     def submit(self, request, *, tenant_id="default"):
+        self.last_request = request
+        # Simulate North/Xing: the adapter defaults thinking on unless the
+        # translated request contains an explicit false control.
+        self.thinking_enabled = request.get("enable_thinking", True)
         job = Job(request)
         job.tenant_id = tenant_id
         job.prompt_tokens = 9
@@ -267,6 +304,7 @@ def test_anthropic_http_nonstream_count_stream_errors_and_invalid_tool(anthropic
         "model": "fixture",
         "messages": [{"role": "user", "content": "hello"}],
         "max_tokens": 64,
+        "thinking": {"type": "enabled", "budget_tokens": 16},
     }
     with _post(base, "/v1/messages/count_tokens", {k: v for k, v in body.items() if k != "max_tokens"}) as response:
         assert json.load(response) == {"input_tokens": 7}
@@ -328,6 +366,24 @@ def test_anthropic_http_nonstream_count_stream_errors_and_invalid_tool(anthropic
     assert '"type": "error"' in wire
     assert '"type": "api_error"' in wire
     assert 'chat.completion.chunk' not in wire
+
+
+def test_anthropic_http_omitted_thinking_disables_thinking_default(
+    anthropic_endpoint,
+):
+    engine, base = anthropic_endpoint
+    with _post(
+        base,
+        "/v1/messages",
+        {
+            "model": "fixture",
+            "messages": [{"role": "user", "content": "hello"}],
+            "max_tokens": 64,
+        },
+    ) as response:
+        assert response.status == 200
+    assert engine.last_request["enable_thinking"] is False
+    assert engine.thinking_enabled is False
 
 
 @pytest.mark.parametrize("path", ["/v1/messages", "/v1/messages/count_tokens"])
