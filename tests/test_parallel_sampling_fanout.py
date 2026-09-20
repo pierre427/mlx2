@@ -352,8 +352,7 @@ def test_fanout_failure_keeps_the_engine_status(monkeypatch):
     finally:
         engine.close()
     assert failure.value.status == 400
-    assert failure.value.code == "context_length_exceeded"
-    assert "maximum context length is 8 tokens" in str(failure.value)
+    assert "must fit" in str(failure.value)
 
 
 def test_top_k_equal_to_vocab_size_is_a_request_error_not_a_worker_death(monkeypatch):

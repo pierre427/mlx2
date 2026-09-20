@@ -184,22 +184,6 @@ def configure_environment() -> dict[str, str]:
     return profile
 
 
-def resolve_eos_token_ids(config: dict, tokenizer) -> list[int]:
-    """Combine artifact and tokenizer EOS ids without trusting either alone."""
-    text = config.get("text_config", config)
-    configured = config.get("eos_token_id", text.get("eos_token_id"))
-    values = configured if isinstance(configured, list) else [configured]
-    values.append(getattr(tokenizer, "eos_token_id", None))
-    result = []
-    for value in values:
-        if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
-            if value not in result:
-                result.append(value)
-    if not result:
-        raise ValueError("Qwen tokenizer and config declare no EOS token")
-    return result
-
-
 class Qwen3827BAdapter(FlashNextAdapter):
     default_route = "native_mtp"
     """Dense text adapter using shared chat parsing and modern runtime state."""
@@ -208,9 +192,6 @@ class Qwen3827BAdapter(FlashNextAdapter):
     # Vendor sampling defaults: Qwen/Qwen3.8-27B model card and the artifact's
     # generation_config.json (see ``adapters/qwen.py``).
     from .qwen import QWEN38_27B_SAMPLING as sampling_defaults
-    artifact_inspector = staticmethod(inspect_artifact)
-    descriptor_builder = staticmethod(descriptor_for)
-    environment_configurator = staticmethod(configure_environment)
 
     def __init__(
         self, model_path: str, *, require_mtp: bool = False, execution_policy=None
@@ -221,13 +202,13 @@ class Qwen3827BAdapter(FlashNextAdapter):
         if set(policy) - {"num_draft"}:
             raise ValueError("Qwen3.8 27B execution policy supports only num_draft")
         self._num_draft = validate_self_mtp_num_draft(policy.get("num_draft", 2))
-        artifact = self.artifact_inspector(model_path)
+        artifact = inspect_artifact(model_path)
         if require_mtp and not artifact["has_mtp"]:
             raise ValueError("requested MTP requires embedded head weights")
         self.identity = artifact["identity"]
-        self.descriptor = self.descriptor_builder(has_mtp=artifact["has_mtp"])
-        self.environment = self.environment_configurator()
-        self.layout = self.descriptor.cache_layout
+        self.descriptor = descriptor_for(has_mtp=artifact["has_mtp"])
+        self.environment = configure_environment()
+        self.layout = CACHE_LAYOUT
         self._tables = []
         path = Path(self.identity["path"])
         config = artifact["config"]
@@ -269,7 +250,9 @@ class Qwen3827BAdapter(FlashNextAdapter):
         tokenizer = AutoTokenizer.from_pretrained(
             path, local_files_only=True, trust_remote_code=False
         )
-        eos = resolve_eos_token_ids(config, tokenizer)
+        eos = config.get("eos_token_id", config["text_config"].get("eos_token_id"))
+        if isinstance(eos, int):
+            eos = [eos]
         self.tokenizer = TokenizerWrapper(
             tokenizer, detokenizer_class=BPEStreamingDetokenizer, eos_token_ids=eos
         )

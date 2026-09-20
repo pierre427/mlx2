@@ -9,21 +9,6 @@ MAX_OUTPUT_TOKENS = 2_097_152
 DEFAULT_OUTPUT_TOKENS = 65_536
 
 
-class ContextLengthExceeded(ValueError):
-    """The prompt and requested output cannot fit the effective context."""
-
-    code = "context_length_exceeded"
-
-    def __init__(self, *, prompt_tokens, max_output_tokens, context_limit):
-        total = int(prompt_tokens) + int(max_output_tokens)
-        super().__init__(
-            f"This model's maximum context length is {int(context_limit)} tokens. "
-            f"However, your request has {int(prompt_tokens)} input tokens and "
-            f"requested {int(max_output_tokens)} output tokens ({total} tokens total). "
-            "Please reduce the input or requested output length."
-        )
-
-
 def validate_default_max_tokens(value: object) -> int:
     """Validate the operator-configured omitted-request output default."""
     if (
@@ -62,19 +47,15 @@ def resolve_output_limit(
     remaining = effective_context - prompt_tokens
     if defaulted:
         if remaining < 1:
-            raise ContextLengthExceeded(
-                prompt_tokens=prompt_tokens,
-                max_output_tokens=1,
-                context_limit=effective_context,
+            raise ValueError(
+                f"prompt plus output must fit {effective_context} tokens"
             )
         maximum = min(default_max_tokens, remaining)
     else:
         maximum = request["max_tokens"]
         if prompt_tokens + maximum > effective_context:
-            raise ContextLengthExceeded(
-                prompt_tokens=prompt_tokens,
-                max_output_tokens=maximum,
-                context_limit=effective_context,
+            raise ValueError(
+                f"prompt plus output must fit {effective_context} tokens"
             )
 
     minimum = request.get("min_tokens", 0)

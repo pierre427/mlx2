@@ -116,29 +116,6 @@ QWEN38_FLASH_NEXT_SAMPLING = qwen38_vendor_sampling("Qwen/Qwen3.8-Flash-Next")
 # Qwen/Qwen3.8-27B model card.
 QWEN38_27B_SAMPLING = qwen38_vendor_sampling("Qwen/Qwen3.8-27B")
 
-# Qwen/Qwen3.5-9B model card, Best Practices. Unlike Qwen3.8, the
-# general-thinking profile uses presence_penalty=1.5 and also declares the
-# precise-coding profile used by the wider Qwen3.5 family.
-QWEN35_9B_SAMPLING = VendorSampling(
-    {
-        "thinking": _qwen_thinking("Qwen/Qwen3.5-9B", 1.5),
-        "coding": SamplingDefaults(
-            temperature=0.6,
-            top_p=0.95,
-            top_k=20,
-            min_p=0.0,
-            presence_penalty=0.0,
-            repetition_penalty=1.0,
-            source="model card (Qwen/Qwen3.5-9B): thinking mode, precise coding tasks",
-        ),
-        "instruct": _qwen_instruct("Qwen/Qwen3.5-9B"),
-    },
-    general="thinking",
-    thinking="thinking",
-    non_thinking="instruct",
-    model="Qwen/Qwen3.5-9B",
-)
-
 # Qwen/Qwen3.6-35B-A3B model card: thinking mode for general tasks uses
 # presence_penalty 1.5 (unlike Qwen3.8), and a separate thinking-mode profile
 # for precise coding tasks (e.g. WebDev): temperature 0.6, top_p 0.95,
