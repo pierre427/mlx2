@@ -830,10 +830,11 @@ def wait_event(events, *, connection=None, deadline_seconds=1800.0, poll_seconds
 class SampleFailed(RuntimeError):
     """A parallel sample ended with an error event; carries its HTTP status."""
 
-    def __init__(self, message, status, mlx2=None):
+    def __init__(self, message, status, mlx2=None, code=None):
         super().__init__(message)
         self.status = status
         self.mlx2 = mlx2
+        self.code = code
 
 
 def parse_multipart_form(content_type, raw):
@@ -1085,7 +1086,10 @@ def collect_nonstream_job(job, body, *, chat):
             raise TimeoutError("generation timed out") from exc
         if "error" in event:
             raise SampleFailed(
-                event["error"], event.get("status", 503), event.get("mlx2")
+                event["error"],
+                event.get("status", 503),
+                event.get("mlx2"),
+                event.get("code"),
             )
         if "logprob" in event:
             probabilities.append(event["logprob"])
@@ -1705,7 +1709,7 @@ def handler_for(
             finally:
                 self._record_http(status)
 
-        def error(self, status, message, *, mlx2=None):
+        def error(self, status, message, *, mlx2=None, code=None):
             payload = {
                 "error": {
                     "message": message,
@@ -1714,6 +1718,8 @@ def handler_for(
                     else "server_error",
                 }
             }
+            if code is not None:
+                payload["error"]["code"] = code
             if mlx2 is not None:
                 payload["mlx2"] = mlx2
             self.send_json(
@@ -1730,9 +1736,12 @@ def handler_for(
             anthropic=False,
             retry_after=False,
             mlx2=None,
+            code=None,
             headers=None,
         ):
             payload = translated_api_error(status, message, anthropic=anthropic)
+            if code is not None and not anthropic:
+                payload["error"]["code"] = code
             if mlx2 is not None:
                 payload["mlx2"] = mlx2
             extra = dict(headers or {})
@@ -2159,6 +2168,10 @@ def handler_for(
             response_options = None
             tenant_id = self._tenant_id
             response_message_started = False
+            response_message_output_index = None
+            response_reasoning_started = False
+            response_reasoning_output_index = None
+            response_output_order = []
             agent_compat = None
             # Item 12: tool calls streamed as they complete because the decode
             # grammar is engaged (tool_grammar_streaming); Responses ids and
@@ -2449,9 +2462,13 @@ def handler_for(
                                     "status": "failed",
                                     "error": {
                                         "message": event["error"],
-                                        "type": "server_error",
+                                        "type": "invalid_request_error"
+                                        if event.get("status") == 400
+                                        else "server_error",
                                     },
                                 }
+                                if event.get("code") is not None:
+                                    response["error"]["code"] = event["code"]
                                 if mlx2 is not None:
                                     response["mlx2"] = mlx2
                                 self._responses_sse(
@@ -2462,6 +2479,8 @@ def handler_for(
                                 )
                             else:
                                 failure = {"error": {"message": event["error"]}}
+                                if event.get("code") is not None:
+                                    failure["error"]["code"] = event["code"]
                                 if mlx2 is not None:
                                     failure["mlx2"] = mlx2
                                 self._sse(failure)
@@ -2472,6 +2491,7 @@ def handler_for(
                                 event.get("status", 503),
                                 event["error"],
                                 mlx2=mlx2,
+                                code=event.get("code"),
                             )
                         return
                     prompt_progress = None
@@ -2579,21 +2599,21 @@ def handler_for(
                         probabilities.append(event["logprob"])
                         if streaming:
                             if responses_api:
-                                response_message_index = int(
-                                    bool(reasoning)
-                                    and "reasoning.encrypted_content"
-                                    in response_options.get("include", ())
-                                )
+                                if response_message_output_index is None:
+                                    response_message_output_index = len(
+                                        response_output_order
+                                    ) + len(streamed_calls)
+                                    response_output_order.append("message")
                                 if not response_message_started:
                                     self._responses_message_start(
-                                        job, response_message_index
+                                        job, response_message_output_index
                                     )
                                     response_message_started = True
                                 self._responses_sse(
                                     {
                                         "type": "response.output_text.delta",
                                         "item_id": f"msg_{job.id}",
-                                        "output_index": response_message_index,
+                                        "output_index": response_message_output_index,
                                         "content_index": 0,
                                         "delta": "",
                                         "logprobs": [
@@ -2619,21 +2639,49 @@ def handler_for(
                                 for translated in anthropic_translator.delta(delta):
                                     self._anthropic_sse(translated)
                             elif responses_api:
+                                reasoning_delta = delta.get("reasoning_content", "")
+                                if reasoning_delta:
+                                    if response_reasoning_output_index is None:
+                                        response_reasoning_output_index = len(
+                                            response_output_order
+                                        ) + len(streamed_calls)
+                                        response_output_order.append("reasoning")
+                                    if not response_reasoning_started:
+                                        self._responses_reasoning_start(
+                                            job, response_reasoning_output_index
+                                        )
+                                        response_reasoning_started = True
+                                    for event_type, index_name in (
+                                        (
+                                            "response.reasoning_summary_text.delta",
+                                            "summary_index",
+                                        ),
+                                        (
+                                            "response.reasoning_text.delta",
+                                            "content_index",
+                                        ),
+                                    ):
+                                        self._responses_sse(
+                                            {
+                                                "type": event_type,
+                                                "item_id": f"rs_{response_id(job).removeprefix('resp_')}",
+                                                "output_index": response_reasoning_output_index,
+                                                index_name: 0,
+                                                "delta": reasoning_delta,
+                                            }
+                                        )
                                 content = delta.get("content", "")
                                 if content:
-                                    response_message_index = int(
-                                        bool(reasoning)
-                                        and "reasoning.encrypted_content"
-                                        in response_options.get("include", ())
-                                    )
+                                    if response_message_output_index is None:
+                                        response_message_output_index = len(
+                                            response_output_order
+                                        ) + len(streamed_calls)
+                                        response_output_order.append("message")
+                                    response_message_index = response_message_output_index
                                     if grammar_tool_stream:
                                         # Text after streamed calls follows them.
                                         if grammar_message_index is None:
-                                            grammar_message_index = int(
-                                                any(reasoning)
-                                                and "reasoning.encrypted_content"
-                                                in response_options.get("include", ())
-                                            ) + len(streamed_calls)
+                                            grammar_message_index = response_message_output_index
                                         response_message_index = grammar_message_index
                                     if not response_message_started:
                                         self._responses_message_start(
@@ -2656,11 +2704,8 @@ def handler_for(
                                             call,
                                             streamed_calls,
                                             offset=int(
-                                                any(reasoning)
-                                                and "reasoning.encrypted_content"
-                                                in response_options.get("include", ())
-                                            )
-                                            + int(response_message_started),
+                                                len(response_output_order)
+                                            ),
                                         )
                             else:
                                 choice = {"index": 0, "finish_reason": None}
@@ -2931,18 +2976,21 @@ def handler_for(
                                         "agent_compat"
                                     ),
                                     counts=getattr(engine, "counts", None),
+                                    output_order=response_output_order,
                                 )
-                                if streamed_calls:
-                                    # Keep the payload in the order streamed:
-                                    # a message begun after the calls follows.
+                                if response_output_order or streamed_calls:
+                                    streamed_output_indexes = dict(streamed_calls)
+                                    if response_reasoning_output_index is not None:
+                                        streamed_output_indexes[
+                                            f"rs_{response_id(job).removeprefix('resp_')}"
+                                        ] = response_reasoning_output_index
+                                    if response_message_output_index is not None:
+                                        streamed_output_indexes[
+                                            f"msg_{job.id}"
+                                        ] = response_message_output_index
                                     payload["output"].sort(
-                                        key=lambda item: (
-                                            streamed_calls[item["id"]]
-                                            if item["id"] in streamed_calls
-                                            else grammar_message_index
-                                            if item["type"] == "message"
-                                            and grammar_message_index is not None
-                                            else -1
+                                        key=lambda item: streamed_output_indexes.get(
+                                            item["id"], float("inf")
                                         )
                                     )
                                 store_response(
@@ -2973,6 +3021,50 @@ def handler_for(
                                                 "output_index": output_index,
                                                 "content_index": 0,
                                                 "part": item["content"][0],
+                                            }
+                                        )
+                                    elif item["type"] == "reasoning":
+                                        reasoning_text = item["content"][0]["text"]
+                                        if not response_reasoning_started:
+                                            self._responses_reasoning_start(
+                                                job, output_index
+                                            )
+                                            response_reasoning_started = True
+                                            for event_type, index_name in (
+                                                (
+                                                    "response.reasoning_summary_text.delta",
+                                                    "summary_index",
+                                                ),
+                                                (
+                                                    "response.reasoning_text.delta",
+                                                    "content_index",
+                                                ),
+                                            ):
+                                                self._responses_sse(
+                                                    {
+                                                        "type": event_type,
+                                                        "item_id": item["id"],
+                                                        "output_index": output_index,
+                                                        index_name: 0,
+                                                        "delta": reasoning_text,
+                                                    }
+                                                )
+                                        self._responses_sse(
+                                            {
+                                                "type": "response.reasoning_summary_text.done",
+                                                "item_id": item["id"],
+                                                "output_index": output_index,
+                                                "summary_index": 0,
+                                                "text": reasoning_text,
+                                            }
+                                        )
+                                        self._responses_sse(
+                                            {
+                                                "type": "response.reasoning_text.done",
+                                                "item_id": item["id"],
+                                                "output_index": output_index,
+                                                "content_index": 0,
+                                                "text": reasoning_text,
                                             }
                                         )
                                     elif item["type"] == "custom_tool_call":
@@ -3194,6 +3286,7 @@ def handler_for(
                 else:
                     self.api_error(502, str(exc), anthropic=anthropic)
             except (ValueError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+                error_code = getattr(exc, "code", None)
                 if getattr(exc, "schema_reference_error", False):
                     engine_counts = getattr(engine, "counts", None)
                     if engine_counts is not None:
@@ -3208,14 +3301,24 @@ def handler_for(
                         self._anthropic_sse(failure)
                     self._record_http(200)
                 elif streaming and responses_api:
-                    self._responses_failure(job, str(exc), "invalid_response")
+                    self._responses_failure(
+                        job, str(exc), "invalid_response", code=error_code
+                    )
                     self._record_http(200)
                 elif streaming:
-                    self._sse({"error": {"message": str(exc)}})
+                    error = {"message": str(exc)}
+                    if error_code is not None:
+                        error["code"] = error_code
+                    self._sse({"error": error})
                     self._sse("[DONE]")
                     self._record_http(200)
                 else:
-                    self.api_error(400, str(exc), anthropic=anthropic)
+                    self.api_error(
+                        400,
+                        str(exc),
+                        anthropic=anthropic,
+                        code=error_code,
+                    )
             except PromptTemplateFailure as exc:
                 # A template that fails for a reason the request does not
                 # explain is a server fault, but the caller is told which
@@ -3258,6 +3361,7 @@ def handler_for(
                     str(exc),
                     anthropic=anthropic,
                     mlx2=exc.mlx2,
+                    code=exc.code,
                 )
             except ClientGone:
                 engine_counts = getattr(engine, "counts", None)
@@ -3328,6 +3432,21 @@ def handler_for(
                 }
             )
 
+        def _responses_reasoning_start(self, job, output_index):
+            self._responses_sse(
+                {
+                    "type": "response.output_item.added",
+                    "output_index": output_index,
+                    "item": {
+                        "id": f"rs_{response_id(job).removeprefix('resp_')}",
+                        "type": "reasoning",
+                        "status": "in_progress",
+                        "summary": [],
+                        "content": [],
+                    },
+                }
+            )
+
         def _responses_message_start(self, job, output_index):
             self._responses_sse(
                 {
@@ -3356,7 +3475,10 @@ def handler_for(
                 }
             )
 
-        def _responses_failure(self, job, message, error_type):
+        def _responses_failure(self, job, message, error_type, *, code=None):
+            error = {"message": message, "type": error_type}
+            if code is not None:
+                error["code"] = code
             self._responses_sse(
                 {
                     "type": "response.failed",
@@ -3364,7 +3486,7 @@ def handler_for(
                         "id": response_id(job) if job is not None else None,
                         "object": "response",
                         "status": "failed",
-                        "error": {"message": message, "type": error_type},
+                        "error": error,
                     },
                 }
             )

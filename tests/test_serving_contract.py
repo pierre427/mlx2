@@ -25,6 +25,7 @@ from mlx2.adapters.base import AudioOutput
 from mlx2.openai_compat import enforce_tool_contract, responses_to_chat_request
 from mlx2.reasoning_signatures import ReasoningSigner
 from mlx2.request_limits import (
+    ContextLengthExceeded,
     DEFAULT_OUTPUT_TOKENS,
     MAX_OUTPUT_TOKENS,
     resolve_output_limit,
@@ -189,12 +190,13 @@ def test_prompt_aware_default_clamps_at_context_edge_but_explicit_overflow_fails
         effective_context=262_144,
         default_max_tokens=512,
     ) == (512, True)
-    with pytest.raises(ValueError, match="prompt plus output"):
+    with pytest.raises(ContextLengthExceeded) as failure:
         resolve_output_limit(
             {"max_tokens": 12_145},
             prompt_tokens=250_000,
             effective_context=262_144,
         )
+    assert failure.value.code == "context_length_exceeded"
 
 
 def test_every_openai_and_hermes_surface_preserves_output_limit_omission():
@@ -673,6 +675,110 @@ def test_streaming_responses_api_uses_typed_events(http_engine):
     )
     assert records[-1]["response"]["usage"]["total_tokens"] == 7
     assert "[DONE]" not in wire
+
+
+class ReasoningEngine(FakeEngine):
+    def submit(self, request, *, tenant_id="default"):
+        self.job = Job(request)
+        self.job.tenant_id = tenant_id
+        self.job.prompt_tokens = 5
+        self.job.completion_tokens = 4
+        self.job.reasoning_tokens = 2
+        self.job.events.put({"delta": {"reasoning_content": "plan"}})
+        self.job.events.put({"delta": {"content": "answer"}})
+        self.job.events.put(
+            {"finish_reason": "stop", "receipt": {"cache": "apcv2"}}
+        )
+        return self.job
+
+
+@pytest.fixture
+def reasoning_http_engine():
+    engine = ReasoningEngine()
+    server = ThreadingHTTPServer(("127.0.0.1", 0), handler_for(engine))
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    yield engine, f"http://127.0.0.1:{server.server_port}"
+    server.shutdown()
+    server.server_close()
+    thread.join()
+
+
+def test_nonstreaming_responses_api_preserves_reasoning(reasoning_http_engine):
+    _, base = reasoning_http_engine
+    with post_response(base) as response:
+        data = json.load(response)
+    assert [item["type"] for item in data["output"]] == ["reasoning", "message"]
+    reasoning = data["output"][0]
+    assert reasoning["summary"] == [{"type": "summary_text", "text": "plan"}]
+    assert reasoning["content"] == [{"type": "reasoning_text", "text": "plan"}]
+    assert data["output"][1]["content"][0]["text"] == "answer"
+    assert data["usage"]["output_tokens_details"] == {"reasoning_tokens": 2}
+
+
+def test_streaming_responses_api_preserves_reasoning(reasoning_http_engine):
+    _, base = reasoning_http_engine
+    with post_response(base, stream=True) as response:
+        wire = response.read().decode()
+    records = [
+        json.loads(line[6:])
+        for line in wire.splitlines()
+        if line.startswith("data: ")
+    ]
+    assert [record["type"] for record in records] == [
+        "response.created",
+        "response.output_item.added",
+        "response.reasoning_summary_text.delta",
+        "response.reasoning_text.delta",
+        "response.output_item.added",
+        "response.content_part.added",
+        "response.output_text.delta",
+        "response.reasoning_summary_text.done",
+        "response.reasoning_text.done",
+        "response.output_item.done",
+        "response.output_text.done",
+        "response.content_part.done",
+        "response.output_item.done",
+        "response.completed",
+    ]
+    assert records[2]["delta"] == records[3]["delta"] == "plan"
+    assert records[7]["text"] == records[8]["text"] == "plan"
+    assert [item["type"] for item in records[-1]["response"]["output"]] == [
+        "reasoning",
+        "message",
+    ]
+
+
+def test_context_length_error_has_machine_readable_code():
+    class ContextErrorEngine(FakeEngine):
+        def submit(self, request, *, tenant_id="default"):
+            self.job = Job(request)
+            error = ContextLengthExceeded(
+                prompt_tokens=15,
+                max_output_tokens=4,
+                context_limit=16,
+            )
+            self.job.events.put(
+                {"error": str(error), "status": 400, "code": error.code}
+            )
+            return self.job
+
+    engine = ContextErrorEngine()
+    server = ThreadingHTTPServer(("127.0.0.1", 0), handler_for(engine))
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base = f"http://127.0.0.1:{server.server_port}"
+    try:
+        with pytest.raises(HTTPError) as raised:
+            post_response(base)
+        assert raised.value.code == 400
+        payload = json.load(raised.value)
+        assert payload["error"]["type"] == "invalid_request_error"
+        assert payload["error"]["code"] == "context_length_exceeded"
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
 
 
 def test_responses_named_strict_function_call_is_rendered_as_output_item():

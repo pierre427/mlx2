@@ -948,27 +948,28 @@ def responses_payload(
     agent_compat=None,
     compat_tool_map=None,
     counts=None,
+    output_order=None,
 ):
     """Render a completed chat choice as a Responses API object."""
     message = choice["message"]
-    output = []
+    output_by_kind = {}
     response_identifier = response_id(job)
     reasoning = message.get("reasoning_content", "")
-    if reasoning and "reasoning.encrypted_content" in include:
+    if reasoning:
         reasoning_item = {
             "id": "rs_" + response_identifier.removeprefix("resp_"),
             "type": "reasoning",
             "status": "completed",
             "summary": [{"type": "summary_text", "text": reasoning}],
+            "content": [{"type": "reasoning_text", "text": reasoning}],
         }
-        if signer is not None:
+        if "reasoning.encrypted_content" in include and signer is not None:
             reasoning_item["encrypted_content"] = signer.sign_responses(
                 model=model, tenant=tenant_id, text=reasoning
             )
-        output.append(reasoning_item)
+        output_by_kind["reasoning"] = reasoning_item
     if message.get("content") or not message.get("tool_calls"):
-        output.append(
-            {
+        output_by_kind["message"] = {
                 "id": f"msg_{job.id}",
                 "type": "message",
                 "status": "completed",
@@ -993,7 +994,9 @@ def responses_payload(
                     }
                 ],
             }
-        )
+    order = list(output_order or ("reasoning", "message"))
+    output = [output_by_kind.pop(kind) for kind in order if kind in output_by_kind]
+    output.extend(output_by_kind.values())
     for index, call in enumerate(message.get("tool_calls", ())):
         function = call["function"]
         output.append(
@@ -1025,7 +1028,9 @@ def responses_payload(
             "input_tokens_details": {
                 "cached_tokens": getattr(job, "cached_tokens", 0)
             },
-            "output_tokens_details": {"reasoning_tokens": 0},
+            "output_tokens_details": {
+                "reasoning_tokens": int(getattr(job, "reasoning_tokens", 0))
+            },
         },
         "mlx2": receipt,
     }
