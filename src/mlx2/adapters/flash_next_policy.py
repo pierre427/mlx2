@@ -22,6 +22,9 @@ class FlashNextPolicy:
     shared_qsa_max_remaining: int = 64
     private_delta_min_context: int = 65536
     indexed_min_context: int = 16384
+    eager_dispatch: bool = True
+    eager_dispatch_max_rows: int = 64
+    eager_dispatch_stride: int = 1
     # Opt-in: compact GDN rollback reads the accepted prefix from a device
     # count (MLX_QWEN4_FUSED_GDN_DYNAMIC_ACCEPT). The adapter strips inherited
     # MLX_QWEN* variables, so the policy is the only way to select it.
@@ -32,13 +35,30 @@ class FlashNextPolicy:
         for name in ("shared_qsa_suffix", "indexed_qsa"):
             if getattr(self, name) not in {"auto", "on", "off"}:
                 raise ValueError(f"{name} must be auto, on, or off")
-        for name in ("async_qsa_promotion", "known_tail_ple_prefetch", "indexed_fused_merge", "indexed_output_gate", "allow_unverified_indexed", "fused_gdn_dynamic_accept"):
+        for name in (
+            "async_qsa_promotion",
+            "known_tail_ple_prefetch",
+            "indexed_fused_merge",
+            "indexed_output_gate",
+            "allow_unverified_indexed",
+            "eager_dispatch",
+            "fused_gdn_dynamic_accept",
+        ):
             if type(getattr(self, name)) is not bool:
                 raise ValueError(f"{name} must be boolean")
-        for name in ("shared_qsa_min_context", "shared_qsa_max_remaining", "private_delta_min_context", "indexed_min_context"):
+        for name in (
+            "shared_qsa_min_context",
+            "shared_qsa_max_remaining",
+            "private_delta_min_context",
+            "indexed_min_context",
+        ):
             value = getattr(self, name)
             if type(value) is not int or value < 0:
                 raise ValueError(f"{name} must be a nonnegative integer")
+        for name in ("eager_dispatch_max_rows", "eager_dispatch_stride"):
+            value = getattr(self, name)
+            if type(value) is not int or value < 1:
+                raise ValueError(f"{name} must be a positive integer")
 
     @classmethod
     def from_mapping(cls, value=None):
@@ -71,6 +91,9 @@ class FlashNextPolicy:
             "MLX_QWEN4_QSA_INDEXED_FUSED_MERGE": str(int(self.indexed_fused_merge)),
             "MLX_QWEN4_QSA_INDEXED_FUSED_GATE": str(int(self.indexed_output_gate)),
             "MLX_QWEN4_QSA_INDEXED_ALLOW_UNVERIFIED_MLX": str(int(self.allow_unverified_indexed)),
+            "MLX_QWEN4_EAGER_DISPATCH": str(int(self.eager_dispatch)),
+            "MLX_QWEN4_EAGER_DISPATCH_MAX_ROWS": str(self.eager_dispatch_max_rows),
+            "MLX_QWEN4_EAGER_DISPATCH_STRIDE": str(self.eager_dispatch_stride),
         }
         if self.fused_gdn_dynamic_accept:
             environment["MLX_QWEN4_FUSED_GDN_DYNAMIC_ACCEPT"] = "1"

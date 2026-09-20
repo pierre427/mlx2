@@ -55,7 +55,6 @@ def configure_environment(model_path: Path, policy=None) -> dict[str, str]:
         "MLX_QWEN4_FUSED_GDN_REPLAY_ROLLBACK": "1",
         "MLX_GDN_PACKED": "1",
         "MLX_GDN_CORE": "0",
-        "MLX_QWEN4_EAGER_DISPATCH": "1",
         "MLX_QWEN4_MOE_FUSED_GATE_UP": "1",
         "MLX_QWEN4_FUSED_EXPERT_KERNEL": "auto",
         "MLX_QWEN4_MEGAKERNEL": "0",
@@ -291,6 +290,7 @@ class FlashNextAdapter:
         from dataclasses import asdict
 
         from ..runtime.models.qwen4_exp import (
+            qwen4_eager_dispatch_status,
             qsa_mtp_amendment_status,
             qwen4_fused_gdn_stats,
             qwen4_ple_compile_status,
@@ -319,6 +319,7 @@ class FlashNextAdapter:
             "moe": moe,
             "policy": self.policy.as_dict(),
             "round_levers": lever_snapshot(),
+            "eager_dispatch": qwen4_eager_dispatch_status(),
             "ple_tables": [asdict(table.stats) for table in self._tables],
             "fused_gdn": qwen4_fused_gdn_stats(
                 self.model, modules=diagnostic_modules

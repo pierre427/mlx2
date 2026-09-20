@@ -1255,6 +1255,7 @@ def _add_execution(builder: PrometheusBuilder, execution: Mapping[str, Any]) -> 
             "ple_dq_hits", "ple_dq_misses", "device_sampled_drafts",
             "hedge_built", "hedge_hit", "hedge_miss", "hedge_consumed",
             "hedge_skipped", "hedge_discarded", "eager_async_evals",
+            "eager_dispatch_forwards", "eager_dispatch_row_declines",
             "qsa_pooled_key_cache_hits", "qsa_pooled_key_cache_misses",
             "qsa_scatter_chosen_calls",
         ):

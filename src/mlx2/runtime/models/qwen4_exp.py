@@ -377,6 +377,21 @@ _EAGER_DISPATCH_MAX_ROWS = max(
 _EAGER_DISPATCH_STRIDE = max(
     1, int(os.environ.get("MLX_QWEN4_EAGER_DISPATCH_STRIDE", "1"))
 )
+
+
+def qwen4_eager_dispatch_status() -> dict:
+    """Return the selected eager-dispatch policy and bounded engagement counts."""
+    counters = _lv.counters()
+    return {
+        "enabled": bool(_EAGER_DISPATCH),
+        "max_rows": int(_EAGER_DISPATCH_MAX_ROWS),
+        "stride": int(_EAGER_DISPATCH_STRIDE),
+        "forwards": int(counters["eager_dispatch_forwards"]),
+        "row_declines": int(counters["eager_dispatch_row_declines"]),
+        "async_evals": int(counters["eager_async_evals"]),
+    }
+
+
 _QSA_DENSE_SHORTCIRCUIT = _env_flag("MLX_QWEN4_QSA_DENSE_SHORTCIRCUIT")
 _QSA_FUSED_PROJ = _env_flag("MLX_QWEN4_QSA_FUSED_PROJ")
 
@@ -5296,10 +5311,12 @@ class Qwen4ExpTextModel(PipelineMixin, nn.Module):
             if self.ssm_idx is not None
             else None
         )
-        eager = (
-            _EAGER_DISPATCH
-            and hidden.shape[0] * hidden.shape[1] <= _EAGER_DISPATCH_MAX_ROWS
-        )
+        forward_rows = hidden.shape[0] * hidden.shape[1]
+        eager = _EAGER_DISPATCH and forward_rows <= _EAGER_DISPATCH_MAX_ROWS
+        if eager:
+            _lv.bump("eager_dispatch_forwards")
+        elif _EAGER_DISPATCH:
+            _lv.bump("eager_dispatch_row_declines")
         stride = _EAGER_DISPATCH_STRIDE
         last = len(self.layers) - 1
         for index, (layer, layer_cache) in enumerate(zip(self.layers, cache)):

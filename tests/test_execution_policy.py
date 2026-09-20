@@ -10,6 +10,21 @@ def test_policy_is_explicit_and_measured_thresholds_retained():
     assert policy.private_delta_min_context == 65536
     assert policy.batch_config(max_lanes=4, prefill_step=2048)["prefetch_known_tail_ple"]
     assert policy.environment()["MLX_LM_SEGMENTED_ASYNC_QSA_PROMOTION"] == "1"
+    assert policy.environment()["MLX_QWEN4_EAGER_DISPATCH"] == "1"
+    assert policy.environment()["MLX_QWEN4_EAGER_DISPATCH_MAX_ROWS"] == "64"
+    assert policy.environment()["MLX_QWEN4_EAGER_DISPATCH_STRIDE"] == "1"
+
+
+def test_eager_dispatch_policy_controls_all_runtime_inputs():
+    policy = FlashNextPolicy(
+        eager_dispatch=False,
+        eager_dispatch_max_rows=8,
+        eager_dispatch_stride=2,
+    )
+    environment = policy.environment()
+    assert environment["MLX_QWEN4_EAGER_DISPATCH"] == "0"
+    assert environment["MLX_QWEN4_EAGER_DISPATCH_MAX_ROWS"] == "8"
+    assert environment["MLX_QWEN4_EAGER_DISPATCH_STRIDE"] == "2"
 
 
 def test_flash_adapter_explicitly_selects_observable_parity_paths(tmp_path, monkeypatch):
@@ -29,7 +44,9 @@ def test_flash_adapter_explicitly_selects_observable_parity_paths(tmp_path, monk
 
 @pytest.mark.parametrize("settings", [{"num_draft": 0}, {"num_draft": True},
     {"shared_qsa_suffix": "yes"}, {"async_qsa_promotion": 1},
-    {"private_delta_min_context": -1}, {"bogus": True}])
+    {"private_delta_min_context": -1}, {"eager_dispatch": 1},
+    {"eager_dispatch_max_rows": 0}, {"eager_dispatch_stride": 0},
+    {"bogus": True}])
 def test_invalid_policy_rejected(settings):
     with pytest.raises(ValueError):
         FlashNextPolicy.from_mapping(settings)

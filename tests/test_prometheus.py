@@ -198,6 +198,8 @@ class FakeEngine:
                 "round_levers": {
                     "ple_dq_hits": 4,
                     "ple_prefetch_rows": 32,
+                    "eager_dispatch_forwards": 5,
+                    "eager_dispatch_row_declines": 1,
                     "secret-lever": 99,
                 },
                 "ple_compile": {
@@ -319,6 +321,11 @@ def test_engine_exposition_is_non_destructive_bounded_and_advanced():
     assert 'mlx2_capability_state{capability="segmented_mtp",state="qualified"} 0' in first
     assert 'mlx2_moe_dispatches_total{mode="tile4"} 3' in first
     assert 'mlx2_advanced_path_events_total{event="ple_dq_hits"} 4' in first
+    assert 'mlx2_advanced_path_events_total{event="eager_dispatch_forwards"} 5' in first
+    assert (
+        'mlx2_advanced_path_events_total{event="eager_dispatch_row_declines"} 1'
+        in first
+    )
     assert 'mlx2_media_feature_cache_events_total{event="hits"} 3' in first
     assert "mlx2_media_feature_cache_entries 2" in first
     assert "mlx2_media_feature_cache_bytes 4096" in first
