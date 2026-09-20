@@ -1043,6 +1043,7 @@ class Job:
     cached_tokens: int = 0
     cache_retention_role: str | None = None
     completion_tokens: int = 0
+    reasoning_tokens: int = 0
     cache_branch: object = None
     detokenizer: object = None
     output_parser: object = None
@@ -4711,9 +4712,7 @@ class ServingEngine:
                         job.prompt_tokens = prompt_len
                         context_limit = min(self.max_context, job.request.get("context_limit", self.max_context))
                         if not tokens:
-                            raise ValueError(
-                                f"prompt plus output must fit {context_limit} tokens"
-                            )
+                            raise ValueError("prompt must contain at least one token")
                         if job.effective_max_tokens is None:
                             maximum, defaulted = resolve_output_limit(
                                 job.request,
@@ -5566,6 +5565,9 @@ class ServingEngine:
                                 "error": "internal server error",
                                 "status": 500,
                             }
+                        code = getattr(exc, "code", None)
+                        if code is not None:
+                            event["code"] = code
                         if attaching_cohort is not None:
                             self._fail_attaching_cohort(
                                 batch, active, published, attaching_cohort, event
@@ -6239,6 +6241,8 @@ class ServingEngine:
                             self._finish(job, {"error": str(exc), "status": 502})
                             del active[response.uid]
                             continue
+                        if any(delta.get("reasoning_content") for delta in deltas):
+                            job.reasoning_tokens += 1
                         for delta in deltas:
                             self._emit(job, {"delta": delta})
                         parse_fallbacks = int(
