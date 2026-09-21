@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from pathlib import Path
 
 from ..contracts import Capability, ModelDescriptor, StatePlane
@@ -63,6 +64,27 @@ def descriptor_for(*, has_mtp: bool = False) -> ModelDescriptor:
 
 
 QWEN35_9B = descriptor_for()
+
+
+def configure_environment() -> dict[str, str]:
+    """Ordinary-only profile; disable inherited speculative toggles."""
+    profile = {
+        "HF_HUB_OFFLINE": "1",
+        "TRANSFORMERS_OFFLINE": "1",
+        "MLX_ENABLE_TF32": "0",
+        "MLX_GDN_PACKED": "1",
+        "MLX_GDN_CORE": "0",
+        "MLX_LM_COMPILED_DECODE": "0",
+        "MLX_LM_SEGMENTED_SELF_MTP": "0",
+        "MLX_LM_TRUE_BATCHED_SEGMENTED_MTP": "0",
+        "MLX_LM_SHARED_QSA_SUFFIX": "0",
+        "MLX_LM_MTP_BOUNDARY_COW": "0",
+    }
+    for name in tuple(os.environ):
+        if name.startswith(("MLX_QWEN", "MLX_LM_", "MLXUAG_", "MLX_GDN_")):
+            del os.environ[name]
+    os.environ.update(profile)
+    return profile
 
 
 def inspect_artifact(model_path: str | Path) -> dict:
@@ -150,6 +172,8 @@ class Qwen359BAdapter(Qwen3827BAdapter):
     descriptor = QWEN35_9B
     artifact_inspector = staticmethod(inspect_artifact)
     descriptor_builder = staticmethod(descriptor_for)
+    environment_configurator = staticmethod(configure_environment)
+    from .qwen import QWEN35_9B_SAMPLING as sampling_defaults
 
     def classifier_token_ids(self, labels):
         """Return one next-token id per label or fail closed.
@@ -178,6 +202,16 @@ class Qwen359BAdapter(Qwen3827BAdapter):
             raise ValueError("Qwen3.5 9B MTP is not implemented")
         return "qwen35-9b-apcv2-ordinary"
 
+    def cache_budget(self, *, mtp):
+        if mtp:
+            raise ValueError("Qwen3.5 9B MTP is not implemented")
+        from .qwen38_memory import Qwen38CacheBudget
+
+        budget = Qwen38CacheBudget.from_config(
+            self.model.args.text_config, mtp=False
+        )
+        return _Qwen359BCacheBudget(budget)
+
     def diagnostics(self):
         return {
             "architecture": "dense-hybrid-gdn-gqa",
@@ -185,3 +219,18 @@ class Qwen359BAdapter(Qwen3827BAdapter):
             "mtp_head_present": False,
             "scope": "text-only",
         }
+
+
+class _Qwen359BCacheBudget:
+    """Naming wrapper around the shared dense Qwen3.5 geometry."""
+
+    def __init__(self, budget):
+        self._budget = budget
+
+    def __getattr__(self, name):
+        return getattr(self._budget, name)
+
+    def as_dict(self):
+        value = self._budget.as_dict()
+        value["schema"] = "qwen35-9b-cache-geometry-v1"
+        return value

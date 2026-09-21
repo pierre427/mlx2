@@ -6,7 +6,12 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from mlx2.adapters.qwen35_9b import Qwen359BAdapter, descriptor_for, inspect_artifact
+from mlx2.adapters.qwen35_9b import (
+    Qwen359BAdapter,
+    configure_environment,
+    descriptor_for,
+    inspect_artifact,
+)
 from mlx2.adapters.registry import inspect_model
 from mlx2.contracts import Capability
 
@@ -110,6 +115,14 @@ class Qwen359BPortTests(unittest.TestCase):
         self.assertFalse(adapter.tokenizer.add_special_tokens)
         with self.assertRaisesRegex(ValueError, "not one token"):
             adapter.classifier_token_ids(("multi token",))
+
+    def test_sampling_and_environment_are_bound_to_9b_ordinary(self):
+        adapter = object.__new__(Qwen359BAdapter)
+        self.assertEqual(adapter.sampling_defaults.model, "Qwen/Qwen3.5-9B")
+        self.assertIn("coding", adapter.sampling_defaults.profiles)
+        profile = configure_environment()
+        self.assertEqual(profile["MLX_LM_SEGMENTED_SELF_MTP"], "0")
+        self.assertEqual(profile["MLX_LM_TRUE_BATCHED_SEGMENTED_MTP"], "0")
 
 
 if __name__ == "__main__":

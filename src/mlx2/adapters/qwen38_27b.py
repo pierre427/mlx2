@@ -194,6 +194,7 @@ class Qwen3827BAdapter(FlashNextAdapter):
     from .qwen import QWEN38_27B_SAMPLING as sampling_defaults
     artifact_inspector = staticmethod(inspect_artifact)
     descriptor_builder = staticmethod(descriptor_for)
+    environment_configurator = staticmethod(configure_environment)
 
     def __init__(
         self, model_path: str, *, require_mtp: bool = False, execution_policy=None
@@ -209,7 +210,7 @@ class Qwen3827BAdapter(FlashNextAdapter):
             raise ValueError("requested MTP requires embedded head weights")
         self.identity = artifact["identity"]
         self.descriptor = self.descriptor_builder(has_mtp=artifact["has_mtp"])
-        self.environment = configure_environment()
+        self.environment = self.environment_configurator()
         self.layout = self.descriptor.cache_layout
         self._tables = []
         path = Path(self.identity["path"])

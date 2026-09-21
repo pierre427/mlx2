@@ -1256,6 +1256,18 @@ def handler_for(
                 token_resolver(("store", "defer", "reject"))
             )
 
+    def ensure_semantic_classifier():
+        if (
+            semantic_middleware is None
+            or semantic_middleware.classifier_token_ids is not None
+        ):
+            return
+        token_resolver = getattr(engine.adapter, "classifier_token_ids", None)
+        if callable(token_resolver):
+            semantic_middleware.configure_classifier(
+                token_resolver(("store", "defer", "reject"))
+            )
+
     def tenant_file_text(tenant_id, part):
         unknown = set(part) - {"type", "file_id", "file_data", "filename"}
         if unknown:
@@ -2398,6 +2410,7 @@ def handler_for(
                     ),
                 )
                 if semantic_middleware is not None and chat:
+                    ensure_semantic_classifier()
                     body, semantic_state = semantic_middleware.prepare(
                         body,
                         tenant_id=tenant_id,
@@ -4382,12 +4395,14 @@ def main():
                 Path(args.api_state_dir or args.apc_persist_dir).expanduser().resolve()
                 / "semantic-memory"
             )
-        status = engine.status()
+        from .serving import runtime_identity
+
+        artifact_binding = adapter_resolution.artifact["identity"]["fingerprint"]
         semantic_middleware = SemanticServingMiddleware.create(
             root,
-            model_binding=status["artifact"],
-            tokenizer_binding=status["artifact"],
-            runtime_binding=status["runtime"]["source_sha256"],
+            model_binding=artifact_binding,
+            tokenizer_binding=artifact_binding,
+            runtime_binding=runtime_identity()["source_sha256"],
             retrieval_limit=args.semantic_retrieval_limit,
         )
     server.RequestHandlerClass = handler_for(
