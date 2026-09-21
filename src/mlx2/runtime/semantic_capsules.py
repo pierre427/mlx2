@@ -26,6 +26,8 @@ CAPSULE_KINDS = frozenset(
         "classifier",
         "semantic_base",
         "semantic_delta",
+        "neural_model",
+        "neural_state",
         "policy",
         "model_binding",
         "evaluation",
