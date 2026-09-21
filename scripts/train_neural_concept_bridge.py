@@ -248,7 +248,7 @@ def main():
         torch.nn.utils.clip_grad_norm_(model.tensors(), 1.0)
         optimizer.step()
         if step % 100 == 0 or step + 1 == args.steps:
-            print(f"step={step + 1} loss={float(loss):.6f}", flush=True)
+            print(f"step={step + 1} loss={float(loss.detach()):.6f}", flush=True)
 
     metrics = {name: evaluate(model, values) for name, values in datasets.items()}
     output = args.output.expanduser().resolve()
