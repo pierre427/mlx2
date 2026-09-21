@@ -24,7 +24,7 @@ class FlashNextPolicy:
     indexed_min_context: int = 16384
     eager_dispatch: bool = True
     eager_dispatch_max_rows: int = 64
-    eager_dispatch_stride: int = 1
+    eager_dispatch_stride: int = 2
     # Opt-in: compact GDN rollback reads the accepted prefix from a device
     # count (MLX_QWEN4_FUSED_GDN_DYNAMIC_ACCEPT). The adapter strips inherited
     # MLX_QWEN* variables, so the policy is the only way to select it.

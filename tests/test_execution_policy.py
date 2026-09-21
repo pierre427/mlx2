@@ -12,7 +12,7 @@ def test_policy_is_explicit_and_measured_thresholds_retained():
     assert policy.environment()["MLX_LM_SEGMENTED_ASYNC_QSA_PROMOTION"] == "1"
     assert policy.environment()["MLX_QWEN4_EAGER_DISPATCH"] == "1"
     assert policy.environment()["MLX_QWEN4_EAGER_DISPATCH_MAX_ROWS"] == "64"
-    assert policy.environment()["MLX_QWEN4_EAGER_DISPATCH_STRIDE"] == "1"
+    assert policy.environment()["MLX_QWEN4_EAGER_DISPATCH_STRIDE"] == "2"
 
 
 def test_eager_dispatch_policy_controls_all_runtime_inputs():

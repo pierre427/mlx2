@@ -375,7 +375,7 @@ _EAGER_DISPATCH_MAX_ROWS = max(
     1, int(os.environ.get("MLX_QWEN4_EAGER_DISPATCH_MAX_ROWS", "64"))
 )
 _EAGER_DISPATCH_STRIDE = max(
-    1, int(os.environ.get("MLX_QWEN4_EAGER_DISPATCH_STRIDE", "1"))
+    1, int(os.environ.get("MLX_QWEN4_EAGER_DISPATCH_STRIDE", "2"))
 )
 
 
