@@ -3,7 +3,9 @@
 import hashlib
 import json
 import tempfile
+import threading
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -26,6 +28,7 @@ from mlx2.runtime.semantic_memory import (
     concept_token,
 )
 from mlx2.semantic_sidecar import SemanticServingMiddleware
+from mlx2.serving import ServingEngine
 
 
 def write_artifact(root: Path, *, hidden_dim=16, state_dim=8, feature_dim=16):
@@ -217,3 +220,28 @@ def test_neural_middleware_rebuilds_after_delivery_then_injects_state(artifact, 
     assert prepared["_mlx2_neural_concepts"]["artifact_fingerprint"] == artifact.fingerprint
     assert prepared["messages"][0]["role"] == "user"
     assert middleware.receipt(recalled)["neural_observed_used"] is True
+
+
+def test_engine_binds_neural_bridge_only_after_adapter_is_ready():
+    configured = []
+
+    class Adapter:
+        def configure_neural_concept_bridge(self, artifact):
+            configured.append(artifact)
+
+        def diagnostics(self):
+            return {"neural_concept_bridge": {"state": "configured-unqualified"}}
+
+    engine = object.__new__(ServingEngine)
+    engine.ready = threading.Event()
+    engine.ready.set()
+    engine.prompt_lock = threading.Lock()
+    engine.lock = threading.Lock()
+    engine.adapter = Adapter()
+    engine.snapshot = {"state": "ready"}
+    artifact = SimpleNamespace(fingerprint="artifact")
+    engine.configure_neural_concept_bridge(artifact, timeout=0.1)
+    assert configured == [artifact]
+    assert engine.snapshot["execution"]["neural_concept_bridge"]["state"] == (
+        "configured-unqualified"
+    )

@@ -4436,14 +4436,16 @@ def main():
             bridge_mode=args.semantic_bridge,
         )
         if semantic_middleware.neural_memory is not None:
-            configure = getattr(
-                engine.adapter, "configure_neural_concept_bridge", None
-            )
-            if not callable(configure):
+            try:
+                engine.configure_neural_concept_bridge(
+                    semantic_middleware.neural_memory.artifact
+                )
+            except (RuntimeError, TimeoutError, ValueError) as error:
                 engine.close()
+                if request_tracer is not None:
+                    request_tracer.close()
                 server.server_close()
-                parser.error("loaded adapter has no neural concept bridge")
-            configure(semantic_middleware.neural_memory.artifact)
+                parser.error(str(error))
     server.RequestHandlerClass = handler_for(
         engine,
         max_request_bytes=max_request_bytes,

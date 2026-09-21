@@ -6668,3 +6668,21 @@ class ServingEngine:
         from .structured_output import shutdown_scanner_pools
 
         shutdown_scanner_pools()
+
+    def configure_neural_concept_bridge(self, artifact, *, timeout=300.0):
+        """Wait for model loading, then bind a neural bridge before admission."""
+        deadline = time.monotonic() + float(timeout)
+        while not self.ready.wait(timeout=min(0.1, max(0.0, deadline - time.monotonic()))):
+            if not self.thread.is_alive():
+                raise RuntimeError(self.error or "generation worker stopped during load")
+            if time.monotonic() >= deadline:
+                raise TimeoutError("timed out waiting for neural concept bridge binding")
+        with self.prompt_lock:
+            adapter = self.adapter
+            configure = getattr(adapter, "configure_neural_concept_bridge", None)
+            if not callable(configure):
+                raise ValueError("loaded adapter has no neural concept bridge")
+            configure(artifact)
+            diagnostics = adapter.diagnostics()
+        with self.lock:
+            self.snapshot = {**self.snapshot, "execution": diagnostics}
