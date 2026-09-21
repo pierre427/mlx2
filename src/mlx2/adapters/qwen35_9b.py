@@ -175,6 +175,72 @@ class Qwen359BAdapter(Qwen3827BAdapter):
     environment_configurator = staticmethod(configure_environment)
     from .qwen import QWEN35_9B_SAMPLING as sampling_defaults
 
+    def configure_neural_concept_bridge(self, artifact):
+        """Bind the learned bridge to this exact dense hidden geometry."""
+        if artifact.hidden_dim != int(self.model.args.text_config.hidden_size):
+            raise ValueError("neural concept bridge hidden dimension mismatch")
+        self._neural_concept_artifact = artifact
+        self._neural_concept_counts = {"prefills": 0, "concepts": 0, "tokens": 0}
+
+    def neural_concept_prefill(self, tokens, payload, *, prefill_step):
+        """Apply learned cross-attention to one request's prefill embeddings."""
+        artifact = getattr(self, "_neural_concept_artifact", None)
+        if artifact is None:
+            raise ValueError("Qwen3.5 9B neural concept bridge is not configured")
+        if payload.get("artifact_fingerprint") != artifact.fingerprint:
+            raise ValueError("neural concept request artifact mismatch")
+        concepts = payload.get("concepts")
+        if not isinstance(concepts, list) or not 1 <= len(concepts) <= 32:
+            raise ValueError("neural concept request requires 1..32 concepts")
+        if not tokens or len(tokens) > int(prefill_step):
+            raise ValueError(
+                "neural concept bridge currently requires one bounded prefill chunk"
+            )
+        import mlx.core as mx
+
+        key_state = mx.array(
+            [item["key_state"] for item in concepts], dtype=mx.float32
+        )
+        value_state = mx.array(
+            [item["value_state"] for item in concepts], dtype=mx.float32
+        )
+        if (
+            key_state.shape != (len(concepts), artifact.state_dim)
+            or value_state.shape != key_state.shape
+        ):
+            raise ValueError("neural concept request state geometry mismatch")
+        arrays = artifact.arrays
+        keys = key_state @ mx.array(arrays["key_projection"])
+        values = value_state @ mx.array(arrays["value_projection"])
+        keys = keys / mx.maximum(mx.linalg.norm(keys, axis=-1, keepdims=True), 1e-6)
+        ids = mx.array([tokens], dtype=mx.uint32)
+        embeddings = self.model.language_model.model.embed_tokens(ids)
+        queries = embeddings.astype(mx.float32)
+        queries = queries / mx.maximum(
+            mx.linalg.norm(queries, axis=-1, keepdims=True), 1e-6
+        )
+        logits = queries @ keys.T
+        weights = mx.softmax(
+            logits / float(artifact.manifest["attention_temperature"]), axis=-1
+        )
+        gate = mx.sigmoid(mx.array(arrays["output_gate"], dtype=mx.float32))[0]
+        enhanced = embeddings + (gate * (weights @ values)).astype(embeddings.dtype)
+        self._neural_concept_counts["prefills"] += 1
+        self._neural_concept_counts["concepts"] += len(concepts)
+        self._neural_concept_counts["tokens"] += len(tokens)
+        return {
+            "input_embeddings": enhanced,
+            "receipt": {
+                "schema": "mlx2-neural-concept-prefill-v1",
+                "engaged": True,
+                "artifact_fingerprint": artifact.fingerprint,
+                "concepts": len(concepts),
+                "tokens": len(tokens),
+                "bridge": "learned-recurrent-prefill-cross-attention",
+                "gate": float(mx.array(gate).item()),
+            },
+        }
+
     def classifier_token_ids(self, labels):
         """Return one next-token id per label or fail closed.
 
@@ -213,12 +279,20 @@ class Qwen359BAdapter(Qwen3827BAdapter):
         return _Qwen359BCacheBudget(budget)
 
     def diagnostics(self):
-        return {
+        result = {
             "architecture": "dense-hybrid-gdn-gqa",
             "layout": self.layout,
             "mtp_head_present": False,
             "scope": "text-only",
         }
+        artifact = getattr(self, "_neural_concept_artifact", None)
+        if artifact is not None:
+            result["neural_concept_bridge"] = {
+                "state": "configured-unqualified",
+                "artifact_fingerprint": artifact.fingerprint,
+                "counts": dict(self._neural_concept_counts),
+            }
+        return result
 
 
 class _Qwen359BCacheBudget:

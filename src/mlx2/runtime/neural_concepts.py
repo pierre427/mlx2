@@ -15,7 +15,8 @@ from pathlib import Path
 
 import numpy as np
 
-from .semantic_memory import RELATIONS
+from .hyper_directory import DirectoryContext, Scope
+from .semantic_memory import RELATIONS, SemanticMemory
 
 NEURAL_CONCEPT_SCHEMA = "mlx2-neural-concept-bridge-v1"
 NEURAL_STATE_SCHEMA = "mlx2-neural-concept-state-v1"
@@ -312,6 +313,70 @@ def validate_state_document(document: Mapping, artifact: NeuralConceptArtifact) 
     return tuple(result)
 
 
+class NeuralConceptMemory:
+    """Derived recurrent state bound to one authoritative semantic capsule."""
+
+    def __init__(self, semantic_memory: SemanticMemory, artifact: NeuralConceptArtifact):
+        self.semantic_memory = semantic_memory
+        self.capsules = semantic_memory.capsules
+        self.directory = semantic_memory.directory
+        self.artifact = artifact
+        self.encoder = RecurrentConceptEncoder(artifact)
+
+    def load(self, context: DirectoryContext) -> tuple[EncodedConcept, ...]:
+        resolved = self.directory.resolve(context)
+        semantic_digest = resolved.handles.get("semantic-memory")
+        neural_digest = resolved.handles.get("neural-concepts")
+        if semantic_digest is None or neural_digest is None:
+            return ()
+        capsule = self.capsules.get(neural_digest)
+        if capsule["kind"] != "neural_state":
+            raise ValueError("neural-concepts handle points to wrong capsule kind")
+        expected = {
+            "model": self.semantic_memory.bindings["model_binding"],
+            "tokenizer": self.semantic_memory.bindings["tokenizer_binding"],
+            "runtime": self.semantic_memory.bindings["runtime_binding"],
+        }
+        if capsule["bindings"] != expected:
+            raise ValueError("neural concept capsule runtime binding mismatch")
+        document = capsule["data"]
+        if document.get("semantic_capsule") != semantic_digest:
+            raise ValueError("neural concept state is stale for semantic graph")
+        return validate_state_document(document, self.artifact)
+
+    def rebuild(self, context: DirectoryContext) -> dict:
+        graph, semantic_digest, revision = self.semantic_memory.load(context)
+        if semantic_digest is None:
+            return {"committed": False, "reason": "no-semantic-memory"}
+        document = self.encoder.state_document(
+            graph, semantic_capsule=semantic_digest
+        )
+        capsule = self.capsules.put(
+            kind="neural_state",
+            data=document,
+            parents=(semantic_digest,),
+            provenance={
+                "operation": "recurrent-concept-encode",
+                "artifact_fingerprint": self.artifact.fingerprint,
+            },
+            **self.semantic_memory.bindings,
+        )
+        layer = self.directory.update(
+            Scope.SESSION,
+            context,
+            expected_revision=revision,
+            handles={"neural-concepts": capsule.digest},
+        )
+        return {
+            "committed": True,
+            "capsule": capsule.digest,
+            "semantic_capsule": semantic_digest,
+            "revision": layer["revision"],
+            "concepts": len(document["concepts"]),
+            "artifact_fingerprint": self.artifact.fingerprint,
+        }
+
+
 __all__ = [
     "MAX_ACTIVE_CONCEPTS",
     "NEURAL_CONCEPT_SCHEMA",
@@ -319,6 +384,7 @@ __all__ = [
     "ConceptCrossAttention",
     "EncodedConcept",
     "NeuralConceptArtifact",
+    "NeuralConceptMemory",
     "RecurrentConceptEncoder",
     "label_features",
     "validate_state_document",

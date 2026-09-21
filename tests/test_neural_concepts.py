@@ -8,15 +8,24 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+from mlx2.runtime.hyper_directory import DirectoryContext, HyperDirectory
 from mlx2.runtime.neural_concepts import (
     NEURAL_CONCEPT_SCHEMA,
     ConceptCrossAttention,
     NeuralConceptArtifact,
+    NeuralConceptMemory,
     RecurrentConceptEncoder,
     label_features,
     validate_state_document,
 )
-from mlx2.runtime.semantic_memory import RELATIONS, concept_token
+from mlx2.runtime.semantic_capsules import CapsuleStore
+from mlx2.runtime.semantic_memory import (
+    RELATIONS,
+    SemanticMemory,
+    SemanticProposal,
+    concept_token,
+)
+from mlx2.semantic_sidecar import SemanticServingMiddleware
 
 
 def write_artifact(root: Path, *, hidden_dim=16, state_dim=8, feature_dim=16):
@@ -130,3 +139,81 @@ def test_artifact_and_state_bindings_fail_closed(artifact):
     document["artifact_fingerprint"] = "wrong"
     with pytest.raises(ValueError, match="artifact mismatch"):
         validate_state_document(document, artifact)
+
+
+def test_neural_state_is_derived_from_and_bound_to_semantic_capsule(artifact, tmp_path):
+    capsules = CapsuleStore(tmp_path / "capsules")
+    directory = HyperDirectory(tmp_path / "directory", capsules)
+    semantic = SemanticMemory(
+        capsules=capsules,
+        directory=directory,
+        model_binding="model",
+        tokenizer_binding="tokenizer",
+        runtime_binding="runtime",
+    )
+    context = DirectoryContext(model="qwen9b", tenant="tenant", session="session")
+    semantic.commit_after_delivery(
+        context,
+        [SemanticProposal("forest walk", "has_property", "earthy scent", 0.99, 0.8, "turn")],
+        response_delivered=True,
+        authenticated_tenant=True,
+    )
+    memory = NeuralConceptMemory(semantic, artifact)
+    receipt = memory.rebuild(context)
+    assert receipt["committed"] and receipt["concepts"] == 2
+    assert len(memory.load(context)) == 2
+
+    semantic.commit_after_delivery(
+        context,
+        [SemanticProposal("forest walk", "related_to", "wet leaves", 0.99, 0.8, "turn-2")],
+        response_delivered=True,
+        authenticated_tenant=True,
+    )
+    with pytest.raises(ValueError, match="stale"):
+        memory.load(context)
+
+
+def test_neural_middleware_rebuilds_after_delivery_then_injects_state(artifact, tmp_path):
+    capsules = CapsuleStore(tmp_path / "capsules")
+    directory = HyperDirectory(tmp_path / "directory", capsules)
+    semantic = SemanticMemory(
+        capsules=capsules,
+        directory=directory,
+        model_binding="model",
+        tokenizer_binding="tokenizer",
+        runtime_binding="runtime",
+    )
+    middleware = SemanticServingMiddleware(
+        semantic,
+        model_scope="model",
+        neural_memory=NeuralConceptMemory(semantic, artifact),
+        bridge_mode="neural",
+    )
+    write, state = middleware.prepare(
+        {
+            "session_id": "walk",
+            "messages": [
+                {"role": "user", "content": "Remember that Cedar Loop is earthy scent."}
+            ],
+        },
+        tenant_id="alice",
+        authenticated_tenant=True,
+    )
+    assert "_mlx2_neural_concepts" not in write
+    committed = middleware.complete(state, "Noted.")
+    assert committed["neural_state"]["committed"]
+
+    prepared, recalled = middleware.prepare(
+        {
+            "session_id": "walk",
+            "messages": [
+                {"role": "user", "content": "What scent belongs to Cedar Loop?"}
+            ],
+        },
+        tenant_id="alice",
+        authenticated_tenant=True,
+    )
+    assert recalled.neural_concepts == 2
+    assert prepared["_mlx2_neural_concepts"]["artifact_fingerprint"] == artifact.fingerprint
+    assert prepared["messages"][0]["role"] == "user"
+    assert middleware.receipt(recalled)["neural_observed_used"] is True

@@ -3,10 +3,13 @@
 import copy
 import json
 import os
-from pathlib import Path
 import tempfile
+from pathlib import Path
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
+
+import numpy as np
 
 from mlx2.adapters.qwen35_9b import (
     Qwen359BAdapter,
@@ -128,6 +131,65 @@ class Qwen359BPortTests(unittest.TestCase):
             profile = configure_environment()
             self.assertEqual(profile["MLX_LM_SEGMENTED_SELF_MTP"], "0")
             self.assertEqual(profile["MLX_LM_TRUE_BATCHED_SEGMENTED_MTP"], "0")
+
+    def test_neural_concept_prefill_uses_learned_residual_and_counts_engagement(self):
+        import mlx.core as mx
+
+        class Embedding:
+            def __call__(self, token_ids):
+                return mx.ones((1, token_ids.shape[1], 4), dtype=mx.float32)
+
+        artifact = SimpleNamespace(
+            hidden_dim=4,
+            state_dim=2,
+            fingerprint="artifact-fingerprint",
+            manifest={"attention_temperature": 0.5},
+            arrays={
+                "key_projection": np.asarray(
+                    [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0]],
+                    dtype=np.float32,
+                ),
+                "value_projection": np.asarray(
+                    [[0.0, 0.0, 1.0, 0.0], [0.0, 0.0, 0.0, 1.0]],
+                    dtype=np.float32,
+                ),
+                "output_gate": np.asarray([0.0], dtype=np.float32),
+            },
+        )
+        adapter = object.__new__(Qwen359BAdapter)
+        adapter.layout = "test-layout"
+        adapter.model = SimpleNamespace(
+            args=SimpleNamespace(text_config=SimpleNamespace(hidden_size=4)),
+            language_model=SimpleNamespace(
+                model=SimpleNamespace(embed_tokens=Embedding())
+            ),
+        )
+        adapter.configure_neural_concept_bridge(artifact)
+        result = adapter.neural_concept_prefill(
+            [1, 2],
+            {
+                "artifact_fingerprint": artifact.fingerprint,
+                "concepts": [
+                    {
+                        "key_state": [1.0, 0.0],
+                        "value_state": [1.0, 0.0],
+                    },
+                    {
+                        "key_state": [0.0, 1.0],
+                        "value_state": [0.0, 1.0],
+                    },
+                ],
+            },
+            prefill_step=8,
+        )
+        mx.eval(result["input_embeddings"])
+        self.assertEqual(result["input_embeddings"].shape, (1, 2, 4))
+        self.assertTrue(result["receipt"]["engaged"])
+        self.assertEqual(adapter.diagnostics()["neural_concept_bridge"]["counts"], {
+            "prefills": 1,
+            "concepts": 2,
+            "tokens": 2,
+        })
 
     def test_tokenizer_chat_eos_augments_config_endoftext(self):
         tokenizer = type("Tokenizer", (), {"eos_token_id": 248046})()

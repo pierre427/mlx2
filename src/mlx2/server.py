@@ -3799,6 +3799,19 @@ def build_parser():
         help="maximum concept tokens injected per request (1..32)",
     )
     parser.add_argument(
+        "--semantic-bridge",
+        choices=("rendered", "neural", "hybrid"),
+        default="rendered",
+        help=(
+            "concept read bridge: rendered text baseline, learned neural prefill "
+            "cross-attention, or both (default: rendered)"
+        ),
+    )
+    parser.add_argument(
+        "--neural-concept-artifact",
+        help="trained, identity-bound recurrent concept bridge artifact directory",
+    )
+    parser.add_argument(
         "--lora-dir",
         help="allowlisted directory containing dynamically loadable LoRA adapters",
     )
@@ -4286,6 +4299,21 @@ def main():
             "--semantic-memory requires --semantic-memory-dir, --api-state-dir, "
             "or --apc-persist-dir"
         )
+    if args.semantic_bridge != "rendered":
+        if not args.semantic_memory or not args.neural_concept_artifact:
+            parser.error(
+                "a neural semantic bridge requires --semantic-memory and "
+                "--neural-concept-artifact"
+            )
+        if not args.qualification_mode and not args.qualification:
+            parser.error(
+                "a neural semantic bridge requires --qualification-mode or a "
+                "matching qualification receipt"
+            )
+    elif args.neural_concept_artifact:
+        parser.error(
+            "--neural-concept-artifact requires --semantic-bridge neural or hybrid"
+        )
     try:
         admin_token = (
             load_admin_token(args.admin_token_file)
@@ -4404,7 +4432,18 @@ def main():
             tokenizer_binding=artifact_binding,
             runtime_binding=runtime_identity()["source_sha256"],
             retrieval_limit=args.semantic_retrieval_limit,
+            neural_artifact_root=args.neural_concept_artifact,
+            bridge_mode=args.semantic_bridge,
         )
+        if semantic_middleware.neural_memory is not None:
+            configure = getattr(
+                engine.adapter, "configure_neural_concept_bridge", None
+            )
+            if not callable(configure):
+                engine.close()
+                server.server_close()
+                parser.error("loaded adapter has no neural concept bridge")
+            configure(semantic_middleware.neural_memory.artifact)
     server.RequestHandlerClass = handler_for(
         engine,
         max_request_bytes=max_request_bytes,

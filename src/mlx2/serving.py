@@ -1115,6 +1115,7 @@ class Job:
     lora_fingerprint: str | None = None
     lora_slot: int | None = None
     lora_residency: str | None = None
+    neural_concept_receipt: dict | None = None
 
 
 def take_prompt_progress(job, event):
@@ -5493,6 +5494,34 @@ class ServingEngine:
                                 job.preemption_prompt = list(tokens)
                                 job.generated_token_ids = []
                             job.decode_replay_block = decode_replay_block()
+                        prefill_input = (
+                            job.request.get("_mlx2_prefill_inputs")
+                            if not hit.cached_tokens
+                            else None
+                        )
+                        neural_payload = job.request.get("_mlx2_neural_concepts")
+                        if neural_payload is not None:
+                            if prefill_input is not None:
+                                raise ValueError(
+                                    "neural concept and multimodal prefill cannot be combined"
+                                )
+                            bridge = getattr(adapter, "neural_concept_prefill", None)
+                            if not callable(bridge):
+                                raise ValueError(
+                                    "loaded adapter has no neural concept bridge"
+                                )
+                            prepared = bridge(
+                                hit.remaining_tokens,
+                                neural_payload,
+                                prefill_step=self.prefill_step,
+                            )
+                            prefill_input = {
+                                key: value
+                                for key, value in prepared.items()
+                                if key != "receipt"
+                            }
+                            job.neural_concept_receipt = prepared["receipt"]
+                            self.counts["neural_concept_bridge_engagements"] += 1
                         job.uid = batch.insert(
                             [hit.remaining_tokens], max_tokens=[maximum],
                             caches=[lane_cache], all_tokens=[tokens[:hit.cached_tokens]],
@@ -5504,11 +5533,7 @@ class ServingEngine:
                                 else {}
                             ),
                             **state_options,
-                            prefill_inputs=[
-                                job.request.get("_mlx2_prefill_inputs")
-                                if not hit.cached_tokens
-                                else None
-                            ],
+                            prefill_inputs=[prefill_input],
                         )[0]
                         if job.lora_slot is not None:
                             self.multi_lora.bind_uid(job.uid, job.lora_slot)
@@ -6487,6 +6512,7 @@ class ServingEngine:
                                 "spomin_live_surgery": job.spomin_receipt,
                                 "prefill_chunk": job.prefill_chunk_receipt,
                                 "approximate_kv": job.approximate_kv_receipt,
+                                "neural_concept_bridge": job.neural_concept_receipt,
                                 **(
                                     {"int8_prefill": self.int8_prefill_handle.receipt()}
                                     if self.int8_prefill_handle is not None
