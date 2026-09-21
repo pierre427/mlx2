@@ -87,6 +87,33 @@ assert mtp_split_cache[0].offset == 3
 assert mx.allclose(ordinary_full, ordinary_split, rtol=1e-5, atol=1e-5).item()
 assert mx.allclose(mtp_full_logits, mtp_split_logits, rtol=1e-5, atol=1e-5).item()
 assert mx.allclose(mtp_full_hidden, mtp_split_hidden, rtol=1e-5, atol=1e-5).item()
+
+# A request-scoped deep-memory forward changes logits while keeping the same
+# token and cache geometry.  The next ordinary forward has no ambient state.
+deep_cache = model.make_cache()
+keys = mx.eye(32, dtype=mx.float32)[:2]
+values = mx.eye(32, dtype=mx.float32)[2:4]
+deep = model(
+    tokens,
+    cache=deep_cache,
+    deep_concept_memory={
+        "keys": keys,
+        "values": values,
+        "layer": 2,
+        "temperature": 0.1,
+        "gate": 0.25,
+    },
+)
+ordinary_again = model(tokens, cache=model.make_cache())
+mx.eval(deep, ordinary_again)
+assert deep.shape == ordinary_again.shape
+assert not mx.allclose(deep, ordinary_again, rtol=0, atol=0).item()
+assert [plane.offset for plane in deep_cache if hasattr(plane, "offset")] == [4]
+assert all(
+    any(state is not None for state in plane.cache)
+    for plane in deep_cache
+    if hasattr(plane, "cache")
+)
 '''
     environment = dict(os.environ)
     environment.update(

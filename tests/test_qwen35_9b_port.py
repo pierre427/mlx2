@@ -161,7 +161,7 @@ class Qwen359BPortTests(unittest.TestCase):
         adapter.model = SimpleNamespace(
             args=SimpleNamespace(text_config={"hidden_size": 4}),
             language_model=SimpleNamespace(
-                model=SimpleNamespace(embed_tokens=Embedding())
+                model=SimpleNamespace(embed_tokens=Embedding(), layers=[None] * 4)
             ),
         )
         adapter.configure_neural_concept_bridge(artifact)
@@ -182,9 +182,13 @@ class Qwen359BPortTests(unittest.TestCase):
             },
             prefill_step=8,
         )
-        mx.eval(result["input_embeddings"])
-        self.assertEqual(result["input_embeddings"].shape, (1, 2, 4))
+        memory = result["deep_concept_memory"]
+        mx.eval(memory["keys"], memory["values"])
+        self.assertEqual(memory["keys"].shape, (2, 4))
+        self.assertEqual(memory["values"].shape, (2, 4))
+        self.assertEqual(memory["layer"], 2)
         self.assertTrue(result["receipt"]["engaged"])
+        self.assertEqual(result["receipt"]["injection_layer"], 2)
         self.assertEqual(adapter.diagnostics()["neural_concept_bridge"]["counts"], {
             "prefills": 1,
             "concepts": 2,

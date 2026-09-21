@@ -186,7 +186,14 @@ class Qwen359BAdapter(Qwen3827BAdapter):
         )
         if artifact.hidden_dim != int(hidden_size):
             raise ValueError("neural concept bridge hidden dimension mismatch")
+        layer_count = len(self.model.language_model.model.layers)
+        injection_layer = int(
+            artifact.manifest.get("deep_injection_layer", (3 * layer_count) // 4 - 1)
+        )
+        if not 0 <= injection_layer < layer_count:
+            raise ValueError("neural concept bridge injection layer is out of bounds")
         self._neural_concept_artifact = artifact
+        self._neural_concept_injection_layer = injection_layer
         self._neural_concept_counts = {"prefills": 0, "concepts": 0, "tokens": 0}
 
     def neural_concept_prefill(self, tokens, payload, *, prefill_step):
@@ -223,36 +230,30 @@ class Qwen359BAdapter(Qwen3827BAdapter):
         values = values / mx.maximum(
             mx.linalg.norm(values, axis=-1, keepdims=True), 1e-6
         )
-        ids = mx.array([tokens], dtype=mx.uint32)
-        embeddings = self.model.language_model.model.embed_tokens(ids)
-        queries = embeddings.astype(mx.float32)
-        queries = queries / mx.maximum(
-            mx.linalg.norm(queries, axis=-1, keepdims=True), 1e-6
-        )
-        logits = mx.max(queries @ keys.T, axis=1, keepdims=True)
-        weights = mx.softmax(
-            logits / float(artifact.manifest["attention_temperature"]), axis=-1
-        )
         gate = mx.sigmoid(mx.array(arrays["output_gate"], dtype=mx.float32))[0]
-        residual = (gate * (weights @ values)).astype(embeddings.dtype)
-        enhanced = mx.concatenate(
-            [embeddings[:, :-1, :], embeddings[:, -1:, :] + residual], axis=1
-        )
+        gate_value = float(mx.array(gate).item())
         self._neural_concept_counts["prefills"] += 1
         self._neural_concept_counts["concepts"] += len(concepts)
         self._neural_concept_counts["tokens"] += len(tokens)
         return {
-            "input_embeddings": enhanced,
+            "deep_concept_memory": {
+                "keys": keys,
+                "values": values,
+                "layer": self._neural_concept_injection_layer,
+                "temperature": float(artifact.manifest["attention_temperature"]),
+                "gate": gate_value,
+            },
             "receipt": {
-                "schema": "mlx2-neural-concept-prefill-v1",
+                "schema": "mlx2-neural-concept-prefill-v2",
                 "engaged": True,
                 "artifact_fingerprint": artifact.fingerprint,
                 "concepts": len(concepts),
                 "tokens": len(tokens),
-                "bridge": "learned-recurrent-final-token-cross-attention",
+                "bridge": "learned-recurrent-deep-final-token-cross-attention",
+                "injection_layer": self._neural_concept_injection_layer,
                 "steered_tokens": 1,
                 "normalized_values": True,
-                "gate": float(mx.array(gate).item()),
+                "relative_gate": gate_value,
             },
         }
 
@@ -303,8 +304,9 @@ class Qwen359BAdapter(Qwen3827BAdapter):
         artifact = getattr(self, "_neural_concept_artifact", None)
         if artifact is not None:
             result["neural_concept_bridge"] = {
-                "state": "configured-unqualified",
+                "state": "deep-bridge-implemented-unqualified",
                 "artifact_fingerprint": artifact.fingerprint,
+                "injection_layer": self._neural_concept_injection_layer,
                 "counts": dict(self._neural_concept_counts),
             }
         return result
