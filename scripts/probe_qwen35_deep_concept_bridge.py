@@ -57,12 +57,32 @@ def _graph(rows):
     return {"concepts": concepts, "edges": edges}, subjects
 
 
-def _score(adapter, prompt_ids, answer, memory):
+def _step_memory(memory, step):
+    if memory is None:
+        return None
+    schedule = memory.get("decode_values")
+    if schedule is None:
+        return memory
+    if step >= schedule.shape[0]:
+        return None
+    stepped = dict(memory)
+    stepped.pop("decode_values")
+    gates = stepped.pop("decode_gates", None)
+    stepped["values"] = schedule[step : step + 1]
+    if gates is not None:
+        stepped["gate"] = float(gates[step])
+    return stepped
+
+
+def _score(adapter, prompt_ids, answer, memory, *, persistent=False):
     import mlx.core as mx
 
     answer_ids = list(adapter.tokenizer.encode(answer, add_special_tokens=False))
     cache = adapter.model.make_cache()
-    kwargs = {} if memory is None else {"deep_concept_memory": memory}
+    initial_memory = _step_memory(memory, 0)
+    kwargs = (
+        {} if initial_memory is None else {"deep_concept_memory": initial_memory}
+    )
     logits = adapter.model(mx.array([prompt_ids]), cache=cache, **kwargs)
     next_token = int(mx.argmax(logits[:, -1, :], axis=-1).item())
     total = 0.0
@@ -71,7 +91,16 @@ def _score(adapter, prompt_ids, answer, memory):
         logprob = row - mx.logsumexp(row, axis=-1, keepdims=True)
         total += float(logprob[0, token].item())
         if index + 1 < len(answer_ids):
-            logits = adapter.model(mx.array([[token]]), cache=cache)
+            step_memory = _step_memory(memory, index + 1) if persistent else None
+            logits = adapter.model(
+                mx.array([[token]]),
+                cache=cache,
+                **(
+                    {}
+                    if step_memory is None
+                    else {"deep_concept_memory": step_memory}
+                ),
+            )
     del cache
     mx.clear_cache()
     return {
@@ -83,20 +112,32 @@ def _score(adapter, prompt_ids, answer, memory):
     }
 
 
-def _greedy(adapter, prompt_ids, memory, max_tokens):
+def _greedy(adapter, prompt_ids, memory, max_tokens, *, persistent=False):
     import mlx.core as mx
 
     cache = adapter.model.make_cache()
-    kwargs = {} if memory is None else {"deep_concept_memory": memory}
+    initial_memory = _step_memory(memory, 0)
+    kwargs = (
+        {} if initial_memory is None else {"deep_concept_memory": initial_memory}
+    )
     logits = adapter.model(mx.array([prompt_ids]), cache=cache, **kwargs)
     output = []
     eos = set(adapter.tokenizer.eos_token_ids)
-    for _ in range(max_tokens):
+    for step in range(max_tokens):
         token = int(mx.argmax(logits[:, -1, :], axis=-1).item())
         if token in eos:
             break
         output.append(token)
-        logits = adapter.model(mx.array([[token]]), cache=cache)
+        step_memory = _step_memory(memory, step + 1) if persistent else None
+        logits = adapter.model(
+            mx.array([[token]]),
+            cache=cache,
+            **(
+                {}
+                if step_memory is None
+                else {"deep_concept_memory": step_memory}
+            ),
+        )
     text = adapter.tokenizer.decode(output)
     del cache
     mx.clear_cache()

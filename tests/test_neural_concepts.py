@@ -31,7 +31,9 @@ from mlx2.semantic_sidecar import SemanticServingMiddleware
 from mlx2.serving import ServingEngine
 
 
-def write_artifact(root: Path, *, hidden_dim=16, state_dim=8, feature_dim=16):
+def write_artifact(
+    root: Path, *, hidden_dim=16, state_dim=8, feature_dim=16, decode_steps=0
+):
     rng = np.random.default_rng(7)
     arrays = {
         "input_weight": rng.normal(0, 0.1, (feature_dim, state_dim)).astype("f4"),
@@ -51,6 +53,10 @@ def write_artifact(root: Path, *, hidden_dim=16, state_dim=8, feature_dim=16):
         "value_projection": rng.normal(0, 0.1, (state_dim, hidden_dim)).astype("f4"),
         "output_gate": np.asarray([0.0], dtype="f4"),
     }
+    if decode_steps:
+        arrays["decode_value_projections"] = rng.normal(
+            0, 0.1, (decode_steps, state_dim, hidden_dim)
+        ).astype("f4")
     weights = root / "weights.npz"
     np.savez(weights, **arrays)
     manifest = {
@@ -64,7 +70,10 @@ def write_artifact(root: Path, *, hidden_dim=16, state_dim=8, feature_dim=16):
         "max_graph_concepts": 64,
         "relations": sorted(RELATIONS),
         "weights_sha256": hashlib.sha256(weights.read_bytes()).hexdigest(),
-        "training": {"kind": "test-fixture"},
+        "training": {
+            "kind": "test-fixture",
+            **({"max_decode_steps": decode_steps} if decode_steps else {}),
+        },
     }
     encoded = json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode()
     manifest["fingerprint"] = hashlib.sha256(encoded + weights.read_bytes()).hexdigest()
@@ -144,6 +153,16 @@ def test_artifact_and_state_bindings_fail_closed(artifact):
     document["artifact_fingerprint"] = "wrong"
     with pytest.raises(ValueError, match="artifact mismatch"):
         validate_state_document(document, artifact)
+
+
+def test_artifact_accepts_declared_bounded_decode_capsule(tmp_path):
+    loaded = NeuralConceptArtifact.load(
+        write_artifact(tmp_path, decode_steps=4),
+        model_binding="model",
+        tokenizer_binding="tokenizer",
+        runtime_binding="runtime",
+    )
+    assert loaded.arrays["decode_value_projections"].shape == (4, 8, 16)
 
 
 def test_neural_state_is_derived_from_and_bound_to_semantic_capsule(artifact, tmp_path):

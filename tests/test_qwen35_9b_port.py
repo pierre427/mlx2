@@ -157,6 +157,13 @@ class Qwen359BPortTests(unittest.TestCase):
                     dtype=np.float32,
                 ),
                 "output_gate": np.asarray([0.0], dtype=np.float32),
+                "decode_value_projections": np.asarray(
+                    [
+                        [[0.0, 0.0, 1.0, 0.0], [0.0, 0.0, 0.0, 1.0]],
+                        [[0.0, 1.0, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0]],
+                    ],
+                    dtype=np.float32,
+                ),
             },
         )
         adapter = object.__new__(Qwen359BAdapter)
@@ -176,10 +183,12 @@ class Qwen359BPortTests(unittest.TestCase):
                     {
                         "key_state": [1.0, 0.0],
                         "value_state": [1.0, 0.0],
+                        "decode_length": 2,
                     },
                     {
                         "key_state": [0.0, 1.0],
                         "value_state": [0.0, 1.0],
+                        "decode_length": 2,
                     },
                 ],
             },
@@ -199,8 +208,10 @@ class Qwen359BPortTests(unittest.TestCase):
         self.assertEqual(result["receipt"]["candidate_concepts"], 2)
         self.assertEqual(result["receipt"]["selection"], "directory_top1")
         self.assertEqual(
-            result["receipt"]["decode_policy"], "persistent-isolated-b1"
+            result["receipt"]["decode_policy"],
+            "capsule-scheduled-isolated-b1",
         )
+        self.assertEqual(result["receipt"]["decode_steps"], 2)
         self.assertEqual(adapter.diagnostics()["neural_concept_bridge"]["counts"], {
             "prefills": 1,
             "concepts": 1,

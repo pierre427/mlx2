@@ -245,17 +245,40 @@ class Qwen359BAdapter(Qwen3827BAdapter):
             "temperature": float(artifact.manifest["attention_temperature"]),
             "gate": gate_value,
         }
+        decode_projection = arrays.get("decode_value_projections")
+        persistent = None
+        if decode_projection is not None:
+            if (
+                decode_projection.ndim != 3
+                or decode_projection.shape[1:]
+                != (artifact.state_dim, artifact.hidden_dim)
+            ):
+                raise ValueError("concept decode projection geometry mismatch")
+            decode_length = concepts[0].get("decode_length")
+            if (
+                isinstance(decode_length, bool)
+                or not isinstance(decode_length, int)
+                or not 1 <= decode_length <= decode_projection.shape[0]
+            ):
+                raise ValueError(
+                    "capsule concept requires a bounded decode_length"
+                )
+            decode_values = mx.stack(
+                [
+                    value_state[0] @ mx.array(projection)
+                    for projection in decode_projection[:decode_length]
+                ]
+            )
+            decode_values = decode_values / mx.maximum(
+                mx.linalg.norm(decode_values, axis=-1, keepdims=True), 1e-6
+            )
+            memory["decode_values"] = decode_values
+            persistent = {"deep_concept_memory": memory}
         self._neural_concept_counts["prefills"] += 1
         self._neural_concept_counts["concepts"] += len(concepts)
         self._neural_concept_counts["tokens"] += len(tokens)
-        return {
+        result = {
             "deep_concept_memory": memory,
-            # The runtime consumes this reserved key before calling the model.
-            # It keeps the same request-owned memory active for every ordinary
-            # decode step while fail-closing any attempt to merge the lane.
-            "_mlx2_persistent_decode_inputs": {
-                "deep_concept_memory": memory,
-            },
             "receipt": {
                 "schema": "mlx2-neural-concept-prefill-v2",
                 "engaged": True,
@@ -266,12 +289,29 @@ class Qwen359BAdapter(Qwen3827BAdapter):
                 "tokens": len(tokens),
                 "bridge": "learned-recurrent-deep-final-token-cross-attention",
                 "injection_layer": self._neural_concept_injection_layer,
-                "steered_tokens": "prefill-final-plus-every-decode-step",
-                "decode_policy": "persistent-isolated-b1",
+                "steered_tokens": (
+                    "prefill-final-plus-capsule-schedule"
+                    if persistent is not None
+                    else 1
+                ),
+                "decode_policy": (
+                    "capsule-scheduled-isolated-b1"
+                    if persistent is not None
+                    else "one-shot-prefill"
+                ),
+                "decode_steps": (
+                    int(memory["decode_values"].shape[0])
+                    if persistent is not None
+                    else 0
+                ),
                 "normalized_values": True,
                 "relative_gate": gate_value,
             },
         }
+        if persistent is not None:
+            # The runtime consumes this reserved key before calling the model.
+            result["_mlx2_persistent_decode_inputs"] = persistent
+        return result
 
     def classifier_token_ids(self, labels):
         """Return one next-token id per label or fail closed.

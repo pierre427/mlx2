@@ -2,7 +2,7 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from mlx2.runtime.classifier_bundle import ForcedChoiceClassifier
+from mlx2.runtime.classifier_bundle import AdaptiveBundleSelector, ForcedChoiceClassifier
 from mlx2.runtime.hyper_directory import DirectoryContext, HyperDirectory
 from mlx2.runtime.semantic_capsules import CapsuleStore
 from mlx2.runtime.semantic_memory import SemanticMemory, SemanticProposal, concept_token
@@ -113,6 +113,59 @@ class ClassifierBundleTests(unittest.TestCase):
         result = classifier.classify("ambiguous")
         self.assertTrue(result.abstained)
         self.assertIsNone(result.label)
+
+    def test_bundle_selector_tightens_gates_with_proposal_count(self):
+        def score(prompt, _token_ids):
+            proposal = prompt.split("Proposed bundle", 1)[1]
+            if "matching forest bundle" in proposal:
+                return {"store": 5.0, "defer": 0.0, "reject": -1.0}
+            return {"store": -1.0, "defer": 0.0, "reject": 4.0}
+
+        selector = AdaptiveBundleSelector(
+            label_token_ids={"store": 1, "defer": 2, "reject": 3},
+            score_tokens=score,
+        )
+        two = selector.select(
+            "Which forest bundle applies?",
+            ("unrelated city bundle", "matching forest bundle"),
+        )
+        eight = selector.select(
+            "Which forest bundle applies?",
+            tuple(["unrelated city bundle"] * 7 + ["matching forest bundle"]),
+        )
+        self.assertEqual(two.selected_index, 1)
+        self.assertEqual(eight.selected_index, 7)
+        self.assertGreater(eight.confidence_threshold, two.confidence_threshold)
+        self.assertGreater(eight.margin_threshold, two.margin_threshold)
+
+        rejected = selector.select(
+            "Which forest bundle applies?",
+            ("unrelated city bundle", "unrelated ocean bundle"),
+        )
+        self.assertTrue(rejected.abstained)
+        self.assertIsNone(rejected.selected_index)
+
+    def test_bundle_selector_combines_directory_prior_with_neural_reranker(self):
+        selector = AdaptiveBundleSelector(
+            label_token_ids={"relevant": 1, "unrelated": 2},
+            score_tokens=lambda _prompt, _tokens: {
+                "relevant": -0.8,
+                "unrelated": 0.0,
+            },
+        )
+        result = selector.select(
+            "What aroma belongs to the cedar route?",
+            ("cedar subject bundle", "unrelated subject bundle"),
+            priors=(1.0, 0.0),
+        )
+        self.assertEqual(result.selected_index, 0)
+        self.assertFalse(result.abstained)
+        self.assertLess(result.candidate_relevance[0], selector.base_confidence)
+        self.assertGreater(result.candidate_combined[0], result.confidence_threshold)
+        self.assertEqual(result.candidate_priors, (1.0, 0.0))
+
+        with self.assertRaisesRegex(ValueError, "match the proposal count"):
+            selector.select("query", ("one", "two"), priors=(1.0,))
 
 
 if __name__ == "__main__":

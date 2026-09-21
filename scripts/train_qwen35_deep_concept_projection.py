@@ -75,7 +75,7 @@ def _hidden_query(adapter, prompt_ids, layer_index):
     raise ValueError("requested layer is outside the Qwen trunk")
 
 
-def _output_direction(adapter, answer):
+def _output_directions(adapter, answer):
     import mlx.core as mx
 
     ids = list(adapter.tokenizer.encode(answer, add_special_tokens=False))
@@ -89,11 +89,7 @@ def _output_direction(adapter, answer):
         bits=head.bits,
         mode=head.mode,
     )
-    # The request-scoped bridge amends the final prompt state once.  Target
-    # the first answer token and let ordinary autoregressive decode produce
-    # the continuation; averaging every answer-token row made later words win
-    # the first-token competition.
-    result = np.asarray(dense[0].astype(mx.float32))
+    result = np.asarray(dense.astype(mx.float32))
     return result
 
 
@@ -115,6 +111,16 @@ def _metrics(key_state, value_state, query_target, output_target, key_projection
     }
 
 
+def _decode_metrics(value_state, targets, lengths, projections):
+    result = []
+    for step, projection in enumerate(projections):
+        keep = lengths > step
+        predicted = _normalize(value_state[keep] @ projection)
+        expected = _normalize(targets[keep, step])
+        result.append(float(np.mean(np.sum(predicted * expected, axis=-1))))
+    return result
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", type=Path, required=True)
@@ -123,6 +129,7 @@ def main():
     parser.add_argument("--layer", type=int, default=31)
     parser.add_argument("--ridge", type=float, default=1e-3)
     parser.add_argument("--relative-gate", type=float, default=0.2)
+    parser.add_argument("--max-decode-steps", type=int, default=4)
     args = parser.parse_args()
     if not 0 <= args.layer < 32:
         parser.error("--layer must be in 0..31")
@@ -130,6 +137,8 @@ def main():
         parser.error("--ridge must be positive and finite")
     if not 0 < args.relative_gate < 1:
         parser.error("--relative-gate must be inside (0, 1)")
+    if not 1 <= args.max_decode_steps <= 8:
+        parser.error("--max-decode-steps must be in 1..8")
 
     from mlx2.adapters.qwen35_9b import Qwen359BAdapter
     from mlx2.runtime.neural_concepts import NeuralConceptArtifact, RecurrentConceptEncoder
@@ -163,31 +172,59 @@ def main():
                     }
                 )
             )
+            directions = _output_directions(adapter, row["answer"])
+            if len(directions) > args.max_decode_steps:
+                raise ValueError(
+                    f"answer needs {len(directions)} decode steps; "
+                    f"increase --max-decode-steps"
+                )
+            padded_directions = np.zeros(
+                (args.max_decode_steps, directions.shape[-1]), dtype=np.float32
+            )
+            padded_directions[: len(directions)] = directions
             values.append(
                 (
                     encoded["subject"].key_state,
                     encoded["subject"].value_state,
                     _hidden_query(adapter, prompt_ids, args.layer),
-                    _output_direction(adapter, row["answer"]),
+                    directions[0],
+                    padded_directions,
+                    len(directions),
                 )
             )
             if (index + 1) % 20 == 0:
                 print(f"capture split={split} rows={index + 1}", flush=True)
         captured[split] = tuple(
             np.asarray([row[column] for row in values], dtype=np.float32)
-            for column in range(4)
+            for column in range(6)
         )
 
     train = captured["train"]
     key_projection = _ridge(train[0], _normalize(train[2]), args.ridge)
     value_projection = _ridge(train[1], _normalize(train[3]), args.ridge)
+    decode_value_projections = np.stack(
+        [
+            _ridge(
+                train[1][train[5] > step],
+                _normalize(train[4][train[5] > step, step]),
+                args.ridge,
+            )
+            for step in range(args.max_decode_steps)
+        ]
+    )
     metrics = {
-        split: _metrics(*values, key_projection, value_projection)
+        split: {
+            **_metrics(*values[:4], key_projection, value_projection),
+            "decode_value_cosine_by_step": _decode_metrics(
+                values[1], values[4], values[5], decode_value_projections
+            ),
+        }
         for split, values in captured.items()
     }
     arrays = {name: np.array(value, copy=True) for name, value in artifact.arrays.items()}
     arrays["key_projection"] = key_projection
     arrays["value_projection"] = value_projection
+    arrays["decode_value_projections"] = decode_value_projections
     arrays["output_gate"] = np.asarray(
         [math.log(args.relative_gate / (1.0 - args.relative_gate))], dtype=np.float32
     )
@@ -200,11 +237,12 @@ def main():
     manifest["deep_injection_layer"] = args.layer
     manifest["deep_selection"] = "directory_top1"
     manifest["training"] = {
-        "method": "frozen-qwen-residual-and-first-output-head-row-ridge",
+        "method": "frozen-qwen-residual-and-token-capsule-output-head-ridge",
         "source_artifact_fingerprint": artifact.fingerprint,
         "layer": args.layer,
         "ridge": args.ridge,
         "relative_gate": args.relative_gate,
+        "max_decode_steps": args.max_decode_steps,
         "split_sizes": {name: len(rows) for name, rows in world["splits"].items()},
         "metrics": metrics,
     }

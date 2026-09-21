@@ -150,6 +150,24 @@ class NeuralConceptArtifact:
             "value_projection": (state_dim, hidden_dim),
             "output_gate": (1,),
         }
+        training = manifest.get("training", {})
+        max_decode_steps = (
+            training.get("max_decode_steps", 0)
+            if isinstance(training, Mapping)
+            else 0
+        )
+        if isinstance(max_decode_steps, bool) or not isinstance(
+            max_decode_steps, int
+        ):
+            raise ValueError("neural concept capsule step bound must be an integer")
+        if max_decode_steps:
+            if not 1 <= max_decode_steps <= 8:
+                raise ValueError("neural concept capsule step bound is out of bounds")
+            required["decode_value_projections"] = (
+                max_decode_steps,
+                state_dim,
+                hidden_dim,
+            )
         with np.load(weights_path, allow_pickle=False) as stored:
             if set(stored.files) != set(required):
                 raise ValueError("neural concept artifact tensor set mismatch")
