@@ -198,6 +198,7 @@ def main():
     manifest.pop("fingerprint", None)
     manifest["weights_sha256"] = hashlib.sha256(weights_path.read_bytes()).hexdigest()
     manifest["deep_injection_layer"] = args.layer
+    manifest["deep_selection"] = "directory_top1"
     manifest["training"] = {
         "method": "frozen-qwen-residual-and-first-output-head-row-ridge",
         "source_artifact_fingerprint": artifact.fingerprint,

@@ -143,7 +143,10 @@ class Qwen359BPortTests(unittest.TestCase):
             hidden_dim=4,
             state_dim=2,
             fingerprint="artifact-fingerprint",
-            manifest={"attention_temperature": 0.5},
+            manifest={
+                "attention_temperature": 0.5,
+                "deep_selection": "directory_top1",
+            },
             arrays={
                 "key_projection": np.asarray(
                     [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0]],
@@ -184,14 +187,16 @@ class Qwen359BPortTests(unittest.TestCase):
         )
         memory = result["deep_concept_memory"]
         mx.eval(memory["keys"], memory["values"])
-        self.assertEqual(memory["keys"].shape, (2, 4))
-        self.assertEqual(memory["values"].shape, (2, 4))
+        self.assertEqual(memory["keys"].shape, (1, 4))
+        self.assertEqual(memory["values"].shape, (1, 4))
         self.assertEqual(memory["layer"], 2)
         self.assertTrue(result["receipt"]["engaged"])
         self.assertEqual(result["receipt"]["injection_layer"], 2)
+        self.assertEqual(result["receipt"]["candidate_concepts"], 2)
+        self.assertEqual(result["receipt"]["selection"], "directory_top1")
         self.assertEqual(adapter.diagnostics()["neural_concept_bridge"]["counts"], {
             "prefills": 1,
-            "concepts": 2,
+            "concepts": 1,
             "tokens": 2,
         })
 

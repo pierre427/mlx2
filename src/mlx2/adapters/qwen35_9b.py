@@ -206,6 +206,12 @@ class Qwen359BAdapter(Qwen3827BAdapter):
         concepts = payload.get("concepts")
         if not isinstance(concepts, list) or not 1 <= len(concepts) <= 32:
             raise ValueError("neural concept request requires 1..32 concepts")
+        candidate_concepts = len(concepts)
+        selection = artifact.manifest.get("deep_selection", "latent_attention")
+        if selection == "directory_top1":
+            concepts = concepts[:1]
+        elif selection != "latent_attention":
+            raise ValueError("unsupported neural concept selection policy")
         if not tokens or len(tokens) > int(prefill_step):
             raise ValueError(
                 "neural concept bridge currently requires one bounded prefill chunk"
@@ -248,6 +254,8 @@ class Qwen359BAdapter(Qwen3827BAdapter):
                 "engaged": True,
                 "artifact_fingerprint": artifact.fingerprint,
                 "concepts": len(concepts),
+                "candidate_concepts": candidate_concepts,
+                "selection": selection,
                 "tokens": len(tokens),
                 "bridge": "learned-recurrent-deep-final-token-cross-attention",
                 "injection_layer": self._neural_concept_injection_layer,
