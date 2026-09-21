@@ -9,6 +9,13 @@ import os
 from pathlib import Path
 
 
+# Default off: threshold-4 qualification found reproducible unsafe divergences
+# at prompt 0 tokens 38 and 142 (stable width-one margins 0.75/0.625 nats).
+# Re-enable only after their cause is resolved and a fresh exact-source
+# handoff receipt passes.
+DEFAULT_MTP_ORDINARY_HANDOFF_MAX_WIDTH = None
+
+
 def artifact_identity(path: Path) -> dict:
     """Bind local artifacts without reading 100 GB of weight data on startup."""
     path = path.expanduser().resolve()
@@ -105,6 +112,9 @@ def chat_template(tokenizer, request: dict, *, tokenize: bool):
 class FlashNextAdapter:
     from .qwen import QWEN4_FLASH_NEXT as descriptor
     default_route = "native_mtp"
+    default_mtp_ordinary_handoff_max_width = (
+        DEFAULT_MTP_ORDINARY_HANDOFF_MAX_WIDTH
+    )
     # Vendor sampling defaults: Qwen/Qwen3.8-Flash-Next model card and the
     # artifact's generation_config.json (see ``adapters/qwen.py``).
     from .qwen import QWEN38_FLASH_NEXT_SAMPLING as sampling_defaults

@@ -26,9 +26,31 @@ _SDPA_BLOCKS = 128
 _SPLIT_CANDIDATES = (128, 64, 32, 16, 8)
 _HPT_LADDER = (12, 6, 3, 1)
 _HPT_ALLOWED = (12, 6, 4, 3, 2, 1)
+# Builds whose indexed-QSA exactness has been MEASURED, not assumed.  The
+# version string is a proxy for two properties: the kernel reproduces
+# ``qwen4_qsa_indexed_reference`` bit-for-bit, and MLX's sdpa_vector.h -- whose
+# reduction tree the two-pass dispatch mirrors -- is unchanged.  Add a build
+# only after running, while holding the GPU lease:
+#
+#   PYTHONPATH=src MLX_QWEN4_QSA_INDEXED_TEST_METAL=1 MLX2_TEST_OPTIONAL_METAL=1 \
+#     MLX_QWEN4_QSA_INDEXED_ALLOW_UNVERIFIED_MLX=1 MLX2_RUN_GPU_TESTS=1 \
+#     pytest tests/test_qwen4_qsa_indexed.py tests/test_qwen4_qsa_indexed_merge.py \
+#            tests/test_qsa_optional_epilogues_metal.py tests/test_segmented_qsa_metal.py
+#
+# ALLOW_UNVERIFIED is required only to let the fixtures dispatch at all: without
+# it the kernel declines on an unlisted build, so the measurement that would
+# clear the build cannot run.  It is a measurement hatch, never a serving one.
+#
+# 0.32.2.dev20260919+39400a0d4 added 2026-09-21: 62 tests and 50 subtests pass,
+# including the five ``*_is_bit_exact_on_metal`` fixtures and the real-capture
+# fixture, and test_reviewed_sdpa_header_hash_matches_installed_mlx confirms the
+# header digest is unchanged.  Until then indexed QSA fail-closed on every
+# served request above indexed_min_context, which is correct behaviour but also
+# made Flash-Next unqualifiable at 131k: the receipt requires observed evidence
+# of a selected feature the runtime was declining to run.
 _EXACT_MLX_BUILDS = frozenset(
     {"0.32.2.dev20260829+334084ce9", "0.32.2.dev20260911+a0d69e543",
-     "0.32.2.dev20260915+2a817ad94"}
+     "0.32.2.dev20260915+2a817ad94", "0.32.2.dev20260919+39400a0d4"}
 )
 _SDPA_VECTOR_HEADER_SHA256 = (
     "2100a4d1eaa8a524c5147c82c771cad75197495c72daffa03e7ea4c259aebf10"

@@ -123,6 +123,27 @@ def test_tool_calls_typed_by_schema_back_to_back():
         assert isinstance(call["function"]["arguments"], str)
 
 
+def test_parallel_false_keeps_first_of_two_xing_calls():
+    from mlx2.openai_compat import enforce_tool_contract
+
+    parser = XingOutputParser(
+        chat=True, thinking=False, tools=TOOLS, parallel_tool_calls=False
+    )
+    events = parser.push(_call("get") + _call("get"), final=True)
+    calls = [call for event in events for call in event.get("tool_calls", ())]
+
+    assert len(calls) == 1
+    assert parser.tool_call_constraint_truncations == 1
+    enforce_tool_contract(
+        {
+            "tools": TOOLS,
+            "tool_choice": "required",
+            "parallel_tool_calls": False,
+        },
+        calls,
+    )
+
+
 def test_raw_string_values_keep_json_looking_text():
     out = run("</think>" + _call("get_weather", city='{"not": "decoded"}', note="[1, 2]"))
     assert calls(out) == [("get_weather", {"city": '{"not": "decoded"}', "note": "[1, 2]"})]

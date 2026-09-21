@@ -527,9 +527,9 @@ class SelfMTPLaneAdmissionController:
             pending_gib = tuple(pending_gib)
         if len(pending_gib) != len(contexts):
             raise ValueError("pending_gib must align with context_tokens")
-        if max_draft < 1 or max_draft not in self.TRANSIENT_SCALE:
+        if max_draft not in self.TRANSIENT_SCALE:
             raise ValueError(
-                f"max_draft must be a calibrated depth: {sorted((d for d in self.TRANSIENT_SCALE if d >= 1))}"
+                f"max_draft must be a calibrated depth: {sorted(self.TRANSIENT_SCALE)}"
             )
         modes: List[Literal["self_mtp", "plain", "queue"]] = [
             "plain" if not ok else "queue" for ok in eligible
@@ -558,6 +558,31 @@ class SelfMTPLaneAdmissionController:
         if not valid:
             return SelfMTPLaneAdmission(
                 tuple(modes), tuple(depths), "queue", 0.0, usable, len(contexts), 0
+            )
+        if max_draft == 0:
+            (chosen, used) = self._fit(
+                mtp_candidates,
+                contexts,
+                cache_gib,
+                resident_cache,
+                0,
+                usable,
+                pending_gib=pending_gib,
+            )
+            if atomic_cohort and len(chosen) != len(mtp_candidates):
+                chosen = ()
+                used = 0.0
+            for i in chosen:
+                modes[i] = "plain"
+                depths[i] = 0
+            return SelfMTPLaneAdmission(
+                tuple(modes),
+                tuple(depths),
+                "plain" if chosen else "queue",
+                used,
+                usable,
+                len(contexts),
+                0,
             )
         for depth in range(max_draft, 0, -1):
             lane_cap = self.saturation_lane_cap
@@ -910,10 +935,29 @@ def _make_self_mtp_admission_callback(
         bounded.fixed_depth = depth
         return bounded
 
+    def at_depth(depth):
+        depth = int(depth)
+
+        def bounded(rows):
+            return _admit(rows, max_draft_override=depth)
+
+        bounded.preview = lambda rows: preview(
+            rows, max_draft_override=depth
+        )
+        bounded.ceiling = lambda rows: preview(
+            rows, ceiling=True, max_draft_override=depth
+        )
+        bounded.reclaim = reclaim_memory
+        bounded.cache_projection_bytes = controller.cache_estimator
+        bounded.atomic_cohort = False
+        bounded.fixed_depth = depth
+        return bounded
+
     admit.preview = preview
     admit.ceiling = lambda rows: preview(rows, ceiling=True)
     admit.atomic = admit_atomic
     admit.atomic.atomic_cohort = True
+    admit.at_depth = at_depth
     admit.atomic_at_depth = atomic_at_depth
     admit.atomic.atomic_at_depth = atomic_at_depth
     admit.atomic.preview = lambda rows: preview(rows, atomic_cohort=True)

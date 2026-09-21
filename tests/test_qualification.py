@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 import pytest
 
 from mlx2.adapters.qwen import QWEN4_FLASH_NEXT
@@ -517,3 +518,109 @@ def test_selected_interior_checkpoints_without_observation_fail_qualification(tm
             descriptor=QWEN4_FLASH_NEXT,
             name="test",
         )
+
+
+def test_adaptive_mtp_requires_passing_bound_benchmark_observation(tmp_path):
+    path = tmp_path / "qualification.json"
+    settings = {
+        "mtp": True,
+        "max_context": 16384,
+        "speculation": "native_mtp",
+        "execution_policy": {"num_draft": 2},
+        "environment": {},
+        "adaptive_mtp_depth": {"enabled": True},
+    }
+    checks = {
+        name: {"passed": True}
+        for name in REQUIRED_CHECKS | {"structured_output", "mtp_execution"}
+    }
+    record = {
+        "passed": True,
+        "runtime": {"source": "abc"},
+        "artifact": "weights",
+        "settings": settings,
+        "qualification_harness": APPROVED_QUALIFICATION_HARNESS,
+        "checks": checks,
+    }
+    args = dict(
+        runtime=record["runtime"],
+        artifact="weights",
+        settings=settings,
+        descriptor=QWEN4_FLASH_NEXT,
+        name="adaptive",
+    )
+    path.write_text(json.dumps(record))
+    with pytest.raises(ValueError, match="mechanisms lack observed qualification"):
+        load_qualified_route(path, **args)
+    record["checks"]["feature_adaptive_mtp_depth"] = {
+        "passed": True,
+        "evidence": {
+            "benchmark_sha256": "abc",
+            "correctness": True,
+            "throughput": True,
+            "alternatives_measured": True,
+            "recovery_implication": True,
+        },
+    }
+    path.write_text(json.dumps(record))
+    assert "profile=adaptive" in load_qualified_route(path, **args).receipt
+
+
+def test_mtp_ordinary_handoff_requires_observed_feature_check(tmp_path):
+    path = tmp_path / "qualification.json"
+    settings = {
+        "mtp": True,
+        "max_context": 16384,
+        "speculation": "native_mtp",
+        "execution_policy": {"num_draft": 2},
+        "environment": {},
+        "mtp_ordinary_handoff": {"enabled": True, "max_mtp_width": 8},
+    }
+    checks = {
+        name: {"passed": True}
+        for name in REQUIRED_CHECKS | {"structured_output", "mtp_execution"}
+    }
+    record = {
+        "passed": True,
+        "runtime": {"source": "abc"},
+        "artifact": "weights",
+        "settings": settings,
+        "qualification_harness": APPROVED_QUALIFICATION_HARNESS,
+        "checks": checks,
+    }
+    args = dict(
+        runtime=record["runtime"],
+        artifact="weights",
+        settings=settings,
+        descriptor=QWEN4_FLASH_NEXT,
+        name="handoff",
+    )
+    path.write_text(json.dumps(record))
+    with pytest.raises(ValueError, match="feature_mtp_ordinary_handoff"):
+        load_qualified_route(path, **args)
+    record["checks"]["feature_mtp_ordinary_handoff"] = {
+        "passed": True,
+        "evidence": {
+            "events": 1,
+            "lanes": 16,
+            "comparison_count": 16,
+            "unsafe_divergences": [],
+        },
+    }
+    path.write_text(json.dumps(record))
+    assert "profile=handoff" in load_qualified_route(path, **args).receipt
+
+
+def test_disabled_adaptive_settings_match_a_real_committed_record():
+    from mlx2.runtime.adaptive_policy import AdaptiveMTPDepthPolicy
+
+    path = Path(
+        "qualification/runs/integration-gpu-20260918/"
+        "muse-ordinary-qualification.json"
+    )
+    record = json.loads(path.read_text())
+    current_settings = dict(record["settings"])
+    current_settings["adaptive_mtp_depth"] = (
+        AdaptiveMTPDepthPolicy.from_value(None).as_dict()
+    )
+    assert current_settings == record["settings"]

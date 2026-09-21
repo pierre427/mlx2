@@ -263,6 +263,7 @@ def _unwrap_recurrent(cache: SegmentedBatchArraysCache):
             "segmented recurrent rows changed concrete cache type"
         )
     result = row_types.pop()(len(cache.cache))
+    result._adopt_empty_fill(cache.rows)
     result.cache = list(cache.cache)
     result.left_padding = cache.left_padding
     result.lengths = cache.lengths

@@ -92,7 +92,6 @@ def _commit(state, advances):
     view = state._segmented_caches
     for index, (pair, count) in enumerate(zip(state.row_caches, advances)):
         qsa = pair.target[0]
-        base = qsa.offset
         qsa.update_and_fetch(
             mx.full((1, 1, count, 2), 50 + index, dtype=mx.float32),
             mx.full((1, 1, count, 3), 60 + index, dtype=mx.float32),
@@ -337,6 +336,22 @@ def test_recurrent_checkpoints_survive_promotion():
     assert [lane[0][0] for lane in checkpoints] == [3, 3]
     assert checkpoints[0][0][1][0].tolist() == [[90, 90]]
     assert checkpoints[1][0][1][0].tolist() == [[91, 91]]
+
+
+def test_qwen4_ple_history_fill_survives_physical_promotion():
+    state = _state()
+    for pair in state.row_caches:
+        pair.target[1].ple_history_fill = 63
+        pair.draft[1].ple_history_fill = 63
+    ticket = begin_segmented_physical_promotion(
+        state, reserve_tail=2, stream=mx.new_stream(mx.cpu)
+    )
+    _commit(state, [1, 1])
+
+    batch, _ = ticket.finish()
+
+    assert batch.caches.target[1].ple_history_fill == 63
+    assert batch.caches.draft[1].ple_history_fill == 63
 
 
 def test_cancel_and_drain_is_idempotent_and_prevents_publication():

@@ -16,6 +16,10 @@ from .flash_next import FlashNextAdapter
 from .mtp_depth_cap import validate_self_mtp_num_draft
 
 CACHE_LAYOUT = "qwen38-27b-hybrid-layer-segments-v1"
+# Adapter-owned rather than inherited from Flash-Next: threshold four passed
+# the Qwen3.8 131K/16-GiB handoff campaign and is the intended post-qualification
+# default.
+DEFAULT_MTP_ORDINARY_HANDOFF_MAX_WIDTH = 4
 
 
 def descriptor_for(*, has_mtp: bool) -> ModelDescriptor:
@@ -202,6 +206,10 @@ def resolve_eos_token_ids(config: dict, tokenizer) -> list[int]:
 
 class Qwen3827BAdapter(FlashNextAdapter):
     default_route = "native_mtp"
+    # Explicit because Flash-Next deliberately defaults its handoff off.
+    default_mtp_ordinary_handoff_max_width = (
+        DEFAULT_MTP_ORDINARY_HANDOFF_MAX_WIDTH
+    )
     """Dense text adapter using shared chat parsing and modern runtime state."""
 
     descriptor = QWEN38_27B

@@ -15,6 +15,7 @@ from mlx2.runtime.apc_v2 import APCv2, MTPAPCSidecar
 from mlx2.runtime.generate import BatchGenerator
 from mlx2.runtime.models.xing4_0 import Model, ModelArgs
 from mlx2.runtime.sample_utils import LaneRNG
+from mlx2.adapters.xing import XingAdapter
 
 FIXTURE = Path(__file__).parent / "fixtures" / "xing4_0_tiny"
 PROMPTS = [[3, 17, 5, 9, 22, 41, 7], [8, 8, 30, 2, 11], [19, 4, 4, 27, 13, 6, 25, 1, 33]]
@@ -196,3 +197,50 @@ def test_batched_prompt_lookup_verify_matches_per_lane_forward(model):
             assert mx.allclose(logits[row, : len(block)], expected, rtol=1e-4, atol=1e-4).item()
     finally:
         transaction.abort()
+
+
+def test_required_parallel_false_forces_tiny_xing_into_one_tool_call(model):
+    prompt = PROMPTS[0]
+    logits = model(mx.array([prompt], mx.uint32))[0, -1]
+    natural = int(mx.argmax(logits).item())
+    tool_open = (
+        (natural + 1) % int(logits.shape[-1]),
+        (natural + 2) % int(logits.shape[-1]),
+    )
+
+    class Tokenizer:
+        vocab_size = int(logits.shape[-1])
+
+        @staticmethod
+        def encode(text, **_kwargs):
+            assert text in {"<tool_call>", "</think>"}
+            return list(tool_open) if text == "<tool_call>" else [10]
+
+    adapter = object.__new__(XingAdapter)
+    adapter.tokenizer = Tokenizer()
+    request = {
+        "messages": [{"role": "user", "content": "Use a tool for Toronto and UTC."}],
+        "enable_thinking": False,
+        "tool_choice": "required",
+        "parallel_tool_calls": False,
+        "tools": [
+            {"type": "function", "function": {"name": "weather", "parameters": {}}},
+            {"type": "function", "function": {"name": "clock", "parameters": {}}},
+        ],
+    }
+    processor = adapter.request_logits_processors(
+        request, prompt_length=len(prompt)
+    )[0]
+    masked = processor(mx.array(prompt, mx.uint32), logits)
+
+    assert natural != tool_open[0]
+    assert int(mx.argmax(masked).item()) == tool_open[0]
+    assert int(mx.sum(mx.isfinite(masked)).item()) == 1
+    continued = processor(mx.array([*prompt, tool_open[0]], mx.uint32), logits)
+    assert int(mx.argmax(continued).item()) == tool_open[1]
+    assert int(mx.sum(mx.isfinite(continued)).item()) == 1
+    complete = processor(mx.array([*prompt, *tool_open], mx.uint32), logits)
+    assert mx.array_equal(complete, logits).item()
+    assert mx.array_equal(
+        processor.probe(mx.array(prompt, mx.uint32), logits), masked
+    ).item()

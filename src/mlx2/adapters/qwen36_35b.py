@@ -12,6 +12,9 @@ from .mtp_depth_cap import validate_self_mtp_num_draft
 from .qwen38_27b import Qwen3827BAdapter
 
 CACHE_LAYOUT = "qwen36-35b-a3b-hybrid-layer-segments-v1"
+# Explicit rather than inherited through Qwen3.8: threshold four passed the
+# Qwen3.6 131K/16-GiB handoff campaign for explicitly selected native MTP.
+DEFAULT_MTP_ORDINARY_HANDOFF_MAX_WIDTH = 4
 
 
 def descriptor_for(*, has_mtp: bool) -> ModelDescriptor:
@@ -176,11 +179,24 @@ def configure_environment() -> dict[str, str]:
 
 
 class Qwen3635BA3BAdapter(Qwen3827BAdapter):
-    # Ordinary even though the artifact carries an MTP head: on GPU (2026-09-19)
-    # native MTP matched ordinary single-stream (102.0 vs 102.7 tok/s) and lost
-    # 25-34% batched (B8 175 vs 235, B16 212 vs 283). ``--native-mtp`` still
-    # selects it explicitly.
-    default_route = "ordinary"
+    # Native MTP, restored 2026-09-20 once the wide-cohort ordinary handoff
+    # removed the reason it was demoted.  The 2026-09-19 demotion to ordinary
+    # was correct on its own evidence: native MTP matched ordinary
+    # single-stream (102.0 vs 102.7 tok/s) and lost 25-34% batched (B8 175 vs
+    # 235, B16 212 vs 283), because a cohort locks its compute width after the
+    # first true-batched cycle and defers late arrivals.  With the handoff at
+    # ``max_mtp_width`` 4 the cohort migrates to the ordinary batcher at a
+    # closed boundary and the batched loss inverts into a gain: on GPU at
+    # mlx2 994123b, ordinary / fixed MTP / MTP+handoff was 96.6 / 97.0 / 98.3
+    # single-stream, 234.5 / 163.0 / 243.8 at B8 and 282.6 / 212.1 / 305.0 at
+    # B16.  Fixed MTP without the handoff still loses, so this default is only
+    # sound while ``mtp_ordinary_handoff`` below stays enabled.
+    default_route = "native_mtp"
+    # Required by the route above, not merely available to it: see the note on
+    # ``default_route``.  Also applies when native MTP is selected explicitly.
+    default_mtp_ordinary_handoff_max_width = (
+        DEFAULT_MTP_ORDINARY_HANDOFF_MAX_WIDTH
+    )
     descriptor = QWEN36_35B
     # Vendor sampling defaults: Qwen/Qwen3.6-35B-A3B model card and the
     # artifact's generation_config.json (see ``adapters/qwen.py``).

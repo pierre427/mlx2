@@ -23,6 +23,10 @@ from ..sampling_defaults import XING4_SAMPLING
 
 CACHE_LAYOUT = "xing4-0-mla-latent-layer-segments-v1"
 CONVERSION_LAYOUT = "xing4_0-sanitized-v1"
+# Default off until the threshold-4 route is requalified after a7a8372 fixed
+# required + parallel_tool_calls:false output. Operators may still select the
+# handoff explicitly through the execution policy.
+DEFAULT_MTP_ORDINARY_HANDOFF_MAX_WIDTH = None
 THINK_END_ID = 10
 _REASONING_EFFORTS = {"none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"}
 
@@ -262,9 +266,82 @@ def _tools(request):
     return request.get("tools") if request.get("tool_choice") != "none" else None
 
 
+class XingToolCallProcessor:
+    """Force Xing's tool-call branch after its optional thinking block.
+
+    The mask is derived only from committed token history, so speculative and
+    prompt-lookup probes can replay it without request-local mutable state.
+    """
+
+    history_pure = True  # P5
+
+    def __init__(self, *, prompt_length, tool_open, thinking_close=None):
+        self.prompt_length = int(prompt_length)
+        self.tool_open = tuple(int(token) for token in tool_open)
+        self.thinking_close = (
+            tuple(int(token) for token in thinking_close)
+            if thinking_close is not None
+            else None
+        )
+        if self.prompt_length < 0 or not self.tool_open or self.thinking_close == ():
+            raise ValueError("Xing tool constraints require nonempty markers")
+
+    def __call__(self, tokens, logits):
+        import mlx.core as mx
+
+        generated = tokens[self.prompt_length :]
+        length = generated.shape[0]
+        vocabulary = mx.arange(logits.shape[-1])
+        if self.thinking_close is None:
+            compared = min(length, len(self.tool_open))
+            matches = (
+                mx.array(True)
+                if compared == 0
+                else mx.all(
+                    generated[:compared]
+                    == mx.array(self.tool_open[:compared], dtype=tokens.dtype)
+                )
+            )
+            if length >= len(self.tool_open):
+                allowed = matches
+            else:
+                allowed = mx.logical_and(
+                    matches, vocabulary == self.tool_open[length]
+                )
+        else:
+            active = mx.array(False)
+            constrained = mx.zeros((logits.shape[-1],), dtype=mx.bool_)
+            for offset in range(len(self.tool_open)):
+                suffix = (*self.thinking_close, *self.tool_open[:offset])
+                if length < len(suffix):
+                    continue
+                matches = mx.all(
+                    generated[-len(suffix) :]
+                    == mx.array(suffix, dtype=tokens.dtype)
+                )
+                active = mx.logical_or(active, matches)
+                constrained = mx.logical_or(
+                    constrained,
+                    mx.logical_and(
+                        matches, vocabulary == self.tool_open[offset]
+                    ),
+                )
+            allowed = mx.logical_or(constrained, ~active)
+        return mx.where(
+            allowed, logits, mx.array(float("-inf"), dtype=logits.dtype)
+        )
+
+    def probe(self, tokens, logits):
+        """Speculative probes use the same pure history-derived mask."""
+        return self(tokens, logits)
+
+
 class XingAdapter:
     descriptor = XING4_0
     default_route = "native_mtp"
+    default_mtp_ordinary_handoff_max_width = (
+        DEFAULT_MTP_ORDINARY_HANDOFF_MAX_WIDTH
+    )
     sampling_defaults = XING4_SAMPLING
     reasoning_effort_semantics = "thinking_toggle"
     # Xing reasons at length but not pathologically: with 8192 tokens and no
@@ -396,6 +473,33 @@ class XingAdapter:
             thinking=thinking,
             tools=_tools(request),
             stops=request.get("stop", ()),
+            parallel_tool_calls=request.get("parallel_tool_calls", True),
+        )
+
+    def request_logits_processors(self, request, *, prompt_length):
+        """Constrain required/named tool requests to Xing's tool-call branch."""
+        if "messages" not in request:
+            return ()
+        choice = request.get("tool_choice", "auto")
+        if choice != "required" and not isinstance(choice, dict):
+            return ()
+        if not request.get("tools"):
+            return ()
+        from .xing_output import THINK_CLOSE, TOOL_OPEN
+
+        _, thinking = reasoning_policy(request)
+        tool_open = self.tokenizer.encode(TOOL_OPEN, add_special_tokens=False)
+        thinking_close = (
+            self.tokenizer.encode(THINK_CLOSE, add_special_tokens=False)
+            if thinking
+            else None
+        )
+        return (
+            XingToolCallProcessor(
+                prompt_length=prompt_length,
+                tool_open=tool_open,
+                thinking_close=thinking_close,
+            ),
         )
 
     def profile_name(self, mtp):

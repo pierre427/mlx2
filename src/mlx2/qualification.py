@@ -36,7 +36,7 @@ REQUIRED_CHECKS = frozenset(
 APPROVED_QUALIFICATION_HARNESS = {
     "schema": "mlx2.qualification-harness.v1",
     "name": "scripts/qualify_serving.py",
-    "sha256": "fd54e55c3f28f4732cf8ce7c278024e5373386b001bf4d0ee14a50cd50d13e9e",
+    "sha256": "20c81cc2013ab4a51506713782b29141d2bd2348ccf0d4be56d20c129844bc5f",
 }
 
 
@@ -149,6 +149,8 @@ def _route_feature_checks(settings):
         return {"feature_" + name for name in features}
     if settings.get("adaptive_mtp_depth", {}).get("enabled") is True:
         features.add("adaptive_mtp_depth")
+    if settings.get("mtp_ordinary_handoff", {}).get("enabled") is True:
+        features.add("mtp_ordinary_handoff")
     if settings.get("fly_verification", {}).get("enabled") is True:
         features.add("fly_verification")
     if (settings.get("self_mtp_copy_draft") or {}).get("enabled") is True:
@@ -240,8 +242,16 @@ def load_qualified_route(
         checks.get(c, {}).get("passed") is not True for c in required
     ):
         raise ValueError("qualification checks are missing or failed")
-    if any(checks.get(name, {}).get("passed") is not True for name in required_feature_checks(settings)):
-        raise ValueError("selected execution mechanisms lack observed qualification")
+    missing_features = sorted(
+        name
+        for name in required_feature_checks(settings)
+        if checks.get(name, {}).get("passed") is not True
+    )
+    if missing_features:
+        raise ValueError(
+            "selected execution mechanisms lack observed qualification: "
+            + ", ".join(missing_features)
+        )
     capabilities = {
         Capability.TEXT,
         Capability.STREAMING,

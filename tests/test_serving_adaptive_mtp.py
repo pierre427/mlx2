@@ -64,7 +64,21 @@ def test_completed_adaptive_receipt_publishes_bounded_qualification_evidence():
         mtp_receipt={
             "adaptive_depth": {
                 "selected": True,
-                "counters": {"boundaries": 7, "depth_changes": 2},
+                "counters": {
+                    "boundaries": 7,
+                    "depth_changes": 2,
+                    "depth_decreases_concurrent": 1,
+                    "depth_recoveries_alone": 1,
+                },
+                "cost_model": {
+                    "active_bucket": "5-8",
+                    "buckets": {
+                        "5-8": {
+                            "chosen_depth": 0,
+                            "goodput_tokens_per_second": {"0": 107.35, "2": 98.72},
+                        }
+                    },
+                },
             }
         }
     )
@@ -73,14 +87,40 @@ def test_completed_adaptive_receipt_publishes_bounded_qualification_evidence():
     )
     assert batch.scheduler_stats["adaptive_mtp_boundaries"] == 7
     assert batch.scheduler_stats["adaptive_mtp_depth_changes"] == 2
+    assert batch.scheduler_stats["adaptive_mtp_depth_decreases_concurrent"] == 1
+    assert batch.scheduler_stats["adaptive_mtp_depth_recoveries_alone"] == 1
+    assert batch.scheduler_stats["adaptive_mtp_cost_model"]["buckets"]["5-8"][
+        "chosen_depth"
+    ] == 0
+    benchmark = {"adaptive_qualification": {
+        "passed": True,
+        "features": {
+            "adaptive_mtp_depth": {"selected": True, "passed": True},
+        },
+    }}
     assert feature_observations(
-        {"settings": {"mtp": True}, "scheduler": batch.scheduler_stats}
-    )["adaptive_mtp_depth"] == 7
+        {"settings": {"mtp": True}, "scheduler": batch.scheduler_stats},
+        adaptive_benchmark=benchmark,
+    )["adaptive_mtp_depth"] == 1
+    assert feature_observations(
+        {
+            "settings": {"mtp": True},
+            "scheduler": {
+                "adaptive_mtp_depth_decreases_concurrent": 3,
+                "adaptive_mtp_depth_recoveries_alone": 0,
+            },
+        }
+    )["adaptive_mtp_depth"] == 0
 
 
-def test_adaptive_mtp_serving_selection_is_qualification_only():
-    with pytest.raises(ValueError, match="qualification mode"):
+def test_adaptive_mtp_serving_selection_requires_candidate_or_receipt():
+    with pytest.raises(ValueError, match="matching qualification record"):
         ServingEngine("unused", adaptive_mtp_depth=True)
+    ServingEngine.validate_arguments(
+        "unused",
+        qualification="qualified.json",
+        adaptive_mtp_depth=True,
+    )
     with pytest.raises(ValueError, match="native self-MTP"):
         ServingEngine(
             "unused",
@@ -94,6 +134,96 @@ def test_adaptive_mtp_serving_selection_is_qualification_only():
             qualification_mode=True,
             adaptive_mtp_depth={"enabled": True, "mystery": 1},
         )
+
+
+def test_execution_policy_can_select_adaptive_mtp_and_is_fail_closed():
+    with pytest.raises(ValueError, match="matching qualification record"):
+        ServingEngine.validate_arguments(
+            "unused",
+            execution_policy={"adaptive_mtp_depth": {"enabled": True}},
+        )
+    ServingEngine.validate_arguments(
+        "unused",
+        qualification="qualified.json",
+        execution_policy={"adaptive_mtp_depth": {"enabled": True}},
+    )
+    with pytest.raises(ValueError, match="conflicts with disabled"):
+        ServingEngine.validate_arguments(
+            "unused",
+            qualification_mode=True,
+            adaptive_mtp_depth=True,
+            execution_policy={"adaptive_mtp_depth": {"enabled": False}},
+        )
+
+
+def test_mtp_ordinary_handoff_is_explicit_qualified_and_native_only():
+    selected = {
+        "mtp_ordinary_handoff": {
+            "enabled": True,
+            "max_mtp_width": 8,
+        }
+    }
+    assert "feature_mtp_ordinary_handoff" in required_feature_checks(
+        {
+            "mtp": True,
+            "mtp_ordinary_handoff": selected["mtp_ordinary_handoff"],
+            "execution_policy": {},
+            "environment": {},
+            "max_context": 1024,
+        }
+    )
+    with pytest.raises(ValueError, match="enabled.*true"):
+        ServingEngine.validate_arguments(
+            "unused",
+            qualification_mode=True,
+            execution_policy={"mtp_ordinary_handoff": {"max_mtp_width": 8}},
+        )
+    with pytest.raises(ValueError, match="observed handoff evidence"):
+        ServingEngine.validate_arguments("unused", execution_policy=selected)
+    ServingEngine.validate_arguments(
+        "unused", qualification="qualified.json", execution_policy=selected
+    )
+    with pytest.raises(ValueError, match="native self-MTP"):
+        ServingEngine.validate_arguments(
+            "unused",
+            qualification_mode=True,
+            mtp=False,
+            execution_policy=selected,
+        )
+
+
+def test_handoff_observation_requires_safe_live_benchmark_evidence():
+    from scripts.qualify_serving import feature_observations
+
+    evidence = {
+        "adaptive_qualification": {
+            "passed": True,
+            "features": {
+                "adaptive_mtp_depth": {"selected": False, "passed": True},
+                "mtp_ordinary_handoff": {"selected": True, "passed": True},
+            },
+            "handoff": {
+                "selected": True,
+                "passed": True,
+                "events": 1,
+                "comparison_count": 8,
+                "exact_match_fraction": 0.875,
+                "unsafe_divergences": [],
+            },
+        }
+    }
+    assert feature_observations(
+        {}, adaptive_benchmark=evidence
+    )["mtp_ordinary_handoff"] == 1
+    assert feature_observations(
+        {}, adaptive_benchmark=evidence
+    )["adaptive_mtp_depth"] == 0
+    evidence["adaptive_qualification"]["handoff"]["unsafe_divergences"] = [
+        {"divergence_phase": "post_handoff"}
+    ]
+    assert feature_observations(
+        {}, adaptive_benchmark=evidence
+    )["mtp_ordinary_handoff"] == 0
 
 
 def test_qualification_engine_propagates_adaptive_mtp_identity_and_policy(
@@ -173,6 +303,7 @@ def test_qualification_engine_propagates_adaptive_mtp_identity_and_policy(
         assert engine.snapshot["profile"] == "fake-mtp-adaptive-mtp-depth"
         selected = engine.snapshot["settings"]["adaptive_mtp_depth"]
         assert selected["enabled"] is True
+        assert "mtp_ordinary_handoff" not in engine.snapshot["settings"]
         assert selected["ewma_alpha"] == 0.5
         assert selected["loss_rounds"] == 2
         assert engine.snapshot["settings"]["decode_time_fairness"]["enabled"]
@@ -181,9 +312,15 @@ def test_qualification_engine_propagates_adaptive_mtp_identity_and_policy(
             "shrink_gate": 0.35,
             "grow_gate": 0.8,
             "loss_rounds": 2,
-            "gain_rounds": 3,
-            "park_rounds": 4,
-        }
+                "gain_rounds": 3,
+                "park_rounds": 4,
+                "goodput_alpha": 0.25,
+                "goodput_hysteresis": 0.05,
+                "min_samples_per_depth": 3,
+                "goodput_window": 8,
+                "probe_interval": 16,
+                "stale_rounds": 128,
+            }
         assert captured["decode_time_fairness"]["enabled"]
     finally:
         engine.close()

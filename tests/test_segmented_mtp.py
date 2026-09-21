@@ -837,9 +837,189 @@ def test_generation_batch_receipt_identifies_adaptive_depth_policy():
         "loss_rounds": 2,
         "gain_rounds": 4,
         "park_rounds": 3,
+        "goodput_alpha": 0.25,
+        "goodput_hysteresis": 0.05,
+        "min_samples_per_depth": 3,
+        "goodput_window": 8,
+        "probe_interval": 16,
+        "stale_rounds": 128,
     }
     assert adaptive["counters"]["boundaries"] == 1
     batch.close()
+
+
+def test_generation_boundary_accounts_cost_probe_to_live_cohort_width():
+    """Selection and observation must charge the same physical cohort bucket."""
+    from mlx2.runtime.adaptive_policy import CohortAdaptiveMTPDepth
+    from mlx2.runtime.generate import MTPGenerationBatch, StopSequenceMatcher
+
+    detached = [_detached(uid) for uid in range(8)]
+    for item in detached:
+        item.lane.max_tokens = 64
+    policy = CohortAdaptiveMTPDepth(max_depth=2)
+    batch = MTPGenerationBatch(
+        object(),
+        detached,
+        [None] * len(detached),
+        [StopSequenceMatcher() for _ in detached],
+        segmented_live_tip=True,
+        adaptive_depth_policy=policy,
+    )
+
+    def cycle(state, *, zero_fast_path=False):
+        depths = tuple(lane.num_draft for lane in state.lanes)
+        proposal = SelfMTPCycleResult(
+            membership_epoch=state.membership_epoch,
+            lane_uids=tuple(lane.uid for lane in state.lanes),
+            draft_depths=depths,
+            accepted_lengths=depths,
+            target_drops=depths,
+            head_drops=depths,
+            outputs=tuple(
+                (MTPToken(50 + lane.uid, mx.zeros((64,)), False),)
+                for lane in state.lanes
+            ),
+            zero_fast_path=zero_fast_path,
+            true_batched=True,
+        )
+        if not zero_fast_path:
+            state.proposal_open = True
+            state._open_proposal = proposal
+        return proposal
+
+    def propose(_model, state):
+        return cycle(state)
+
+    def advance_zero(_model, state):
+        return cycle(state, zero_fast_path=True)
+
+    def commit(state, proposal, **_kwargs):
+        assert proposal.lane_uids == tuple(lane.uid for lane in state.lanes)
+        state.proposal_open = False
+        state._open_proposal = None
+
+    with (
+        patch(
+            "mlx2.runtime.hybrid_speculative.propose_batched_self_mtp",
+            side_effect=propose,
+        ),
+        patch(
+            "mlx2.runtime.hybrid_speculative.advance_batched_self_mtp_zero",
+            side_effect=advance_zero,
+        ),
+        patch(
+            "mlx2.runtime.hybrid_speculative.commit_batched_self_mtp",
+            side_effect=commit,
+        ),
+    ):
+        for _ in range(policy.probe_interval + 1):
+            assert len(batch.next()) == 8
+
+    bucket = policy.diagnostics()["buckets"]["5-8"]
+    assert bucket["rounds"] == policy.probe_interval + 1
+    assert bucket["probes"] > 0
+    assert bucket["samples"]["0"] > 0
+    assert all(item["width_bucket"] == "5-8" for item in policy.trace)
+    assert all(item["cohort_width"] == 8 for item in policy.trace)
+    assert all(item["observed_compute_width"] == 8 for item in policy.trace)
+    batch.close()
+
+
+def test_generation_round_goodput_excludes_idle_and_policy_time(monkeypatch):
+    from mlx2.runtime import generate as generate_module
+    from mlx2.runtime.adaptive_policy import CohortAdaptiveMTPDepth
+    from mlx2.runtime.generate import MTPGenerationBatch, StopSequenceMatcher
+
+    class Clock:
+        now = 0.0
+
+        def __call__(self):
+            return self.now
+
+        def advance(self, seconds):
+            self.now += seconds
+
+    clock = Clock()
+    monkeypatch.setattr(generate_module.time, "perf_counter", clock)
+    detached = _detached(0)
+    detached.lane.max_tokens = 16
+    policy = CohortAdaptiveMTPDepth(max_depth=2)
+    original_select = policy.select
+
+    def delayed_select(**kwargs):
+        # Admission/policy work is outside the measured decode round.
+        clock.advance(10.0)
+        return original_select(**kwargs)
+
+    monkeypatch.setattr(policy, "select", delayed_select)
+    batch = MTPGenerationBatch(
+        object(),
+        [detached],
+        [None],
+        [StopSequenceMatcher()],
+        segmented_live_tip=True,
+        adaptive_depth_policy=policy,
+    )
+
+    def propose(_model, state):
+        clock.advance(0.25)
+        depths = tuple(lane.num_draft for lane in state.lanes)
+        proposal = SelfMTPCycleResult(
+            membership_epoch=state.membership_epoch,
+            lane_uids=tuple(lane.uid for lane in state.lanes),
+            draft_depths=depths,
+            accepted_lengths=depths,
+            target_drops=depths,
+            head_drops=depths,
+            outputs=((MTPToken(50, mx.zeros((64,)), False),),),
+        )
+        state.proposal_open = True
+        state._open_proposal = proposal
+        return proposal
+
+    def commit(state, _proposal, **_kwargs):
+        state.proposal_open = False
+        state._open_proposal = None
+
+    with (
+        patch(
+            "mlx2.runtime.hybrid_speculative.propose_batched_self_mtp",
+            side_effect=propose,
+        ),
+        patch(
+            "mlx2.runtime.hybrid_speculative.commit_batched_self_mtp",
+            side_effect=commit,
+        ),
+    ):
+        for _ in range(policy.min_samples_per_depth):
+            clock.advance(100.0)  # idle between requests/rounds
+            assert len(batch.next()) == 1
+
+    bucket = policy.diagnostics()["buckets"]["1"]
+    assert bucket["goodput_tokens_per_second"]["2"] == pytest.approx(4.0)
+    assert bucket["estimate_updates"]["2"] == 1
+    assert all(item["elapsed_seconds"] == pytest.approx(0.25) for item in policy.trace)
+    batch.close()
+
+
+def test_empty_cohort_retains_compatible_adaptive_controller_state():
+    from mlx2.runtime.adaptive_policy import CohortAdaptiveMTPDepth
+    from mlx2.runtime.generate import MTPGenerationBatch
+
+    retained = CohortAdaptiveMTPDepth(max_depth=2, current_depth=1)
+    active = MTPGenerationBatch.empty(
+        object(), segmented_live_tip=True, adaptive_depth_policy=retained
+    )
+    incoming = MTPGenerationBatch.empty(
+        object(),
+        segmented_live_tip=True,
+        adaptive_depth_policy=CohortAdaptiveMTPDepth(max_depth=2),
+    )
+    active.extend(incoming)
+    assert active.adaptive_depth_policy is retained
+    assert active.adaptive_depth_policy.current_depth == 1
+    active.close()
+    incoming.close()
 
 
 def test_live_true_batched_width_lock_defers_join_until_empty_cohort():
@@ -2387,6 +2567,205 @@ def test_width_lock_deferral_is_bounded_and_falls_back_to_plain_decode():
     assert active._segmented_compute_width_locked is True
     assert segmented_self_mtp_stats()["width_lock_plain_fallbacks"] == 1
     assert active.scheduler_waiting_uids() == []
+    active.close()
+
+
+def test_width_lock_handoff_moves_active_and_late_lanes_atomically():
+    from mlx2.runtime.adaptive_policy import MTPOrdinaryHandoffPolicy
+    from mlx2.runtime.generate import MTPGenerationBatch, StopSequenceMatcher
+
+    scheduler = {}
+    policy = MTPOrdinaryHandoffPolicy.from_value({"enabled": True, "max_mtp_width": 2})
+    active = MTPGenerationBatch(
+        object(),
+        [_detached(0), _detached(1)],
+        [None, None],
+        [StopSequenceMatcher(), StopSequenceMatcher()],
+        segmented_live_tip=True,
+        ordinary_handoff_policy=policy,
+        scheduler_stats=scheduler,
+    )
+    arriving = MTPGenerationBatch(
+        object(),
+        [_detached(2), _detached(3)],
+        [None, None],
+        [StopSequenceMatcher(), StopSequenceMatcher()],
+        segmented_live_tip=True,
+        ordinary_handoff_policy=policy,
+        scheduler_stats=scheduler,
+    )
+    active._segmented_compute_width_locked = True
+    active.extend(arriving)
+
+    assert active._ordinary_handoff_latched
+    assert not active.state.lanes
+    assert not active._paused
+    assert [p.detached.lane.uid for p in active._plain_ready] == [0, 1, 2, 3]
+    assert all(
+        p.handoff_receipt["reason"] == "segmented_width_lock"
+        and p.detached.segment_transaction is None
+        for p in active._plain_ready
+    )
+    assert scheduler["mtp_ordinary_handoff_events"] == 1
+    assert scheduler["mtp_ordinary_handoff_lanes"] == 4
+    assert scheduler["mtp_ordinary_handoff_segmented_width_lock"] == 1
+
+    # Another prepared lane joins the same one-way migration while latched.
+    next_arrival = MTPGenerationBatch(
+        object(),
+        [_detached(4)],
+        [None],
+        [StopSequenceMatcher()],
+        segmented_live_tip=True,
+        ordinary_handoff_policy=policy,
+    )
+    active.extend(next_arrival)
+    assert not active.state.lanes
+    assert [p.detached.lane.uid for p in active._plain_ready] == [0, 1, 2, 3, 4]
+    assert active._plain_ready[-1].handoff_receipt["reason"] == (
+        "cohort_already_handed_off"
+    )
+    active.close()
+
+
+def test_handoff_latch_release_never_raises_with_paused_lanes():
+    from mlx2.runtime.adaptive_policy import MTPOrdinaryHandoffPolicy
+    from mlx2.runtime.generate import MTPGenerationBatch, StopSequenceMatcher
+
+    policy = MTPOrdinaryHandoffPolicy.from_value(
+        {"enabled": True, "max_mtp_width": 1}
+    )
+    batch = MTPGenerationBatch(
+        object(),
+        [_detached(0), _detached(1)],
+        [None, None],
+        [StopSequenceMatcher(), StopSequenceMatcher()],
+        segmented_live_tip=True,
+        ordinary_handoff_policy=policy,
+    )
+    batch._maybe_handoff_active_cohort()
+    batch.take_plain_fallbacks()
+    later = MTPGenerationBatch(
+        object(),
+        [_detached(5)],
+        [None],
+        [StopSequenceMatcher()],
+        segmented_live_tip=True,
+        ordinary_handoff_policy=policy,
+    )
+    batch._paused[5] = later._detach_packages([0])[0]
+    assert batch.release_ordinary_handoff_latch() is False
+    assert batch._ordinary_handoff_latched
+    batch._paused.clear()
+    later.close()
+    batch.close()
+
+
+def test_handoff_keeps_memory_queued_lane_under_admission():
+    from mlx2.runtime.adaptive_policy import MTPOrdinaryHandoffPolicy
+    from mlx2.runtime.generate import MTPGenerationBatch, StopSequenceMatcher
+
+    class Admission:
+        atomic_cohort = False
+
+        def __init__(self):
+            self.release = False
+            self.ordinary_calls = []
+
+        def __call__(self, rows):
+            return {
+                uid: 1 if uid == 0 or self.release else "queue"
+                for (uid, *_rest) in rows
+            }
+
+        def preview(self, rows):
+            raise AssertionError("handed-off lanes must not use MTP preview costs")
+
+        def at_depth(self, depth):
+            assert depth == 0
+
+            def admit(rows):
+                self.ordinary_calls.append(tuple(uid for (uid, *_rest) in rows))
+                return {
+                    uid: "plain" if self.release else "queue"
+                    for (uid, *_rest) in rows
+                }
+
+            return admit
+
+    admission = Admission()
+    policy = MTPOrdinaryHandoffPolicy.from_value(
+        {"enabled": True, "max_mtp_width": 1}
+    )
+    batch = MTPGenerationBatch(
+        object(), [_detached(0), _detached(1)], [None, None],
+        [StopSequenceMatcher(), StopSequenceMatcher()],
+        segmented_live_tip=True, ordinary_handoff_policy=policy,
+        mtp_admission=admission,
+    )
+    assert batch._apply_admission()
+    assert list(batch._memory_queued) == [1]
+    assert batch._maybe_handoff_active_cohort()
+    assert [package.detached.lane.uid
+            for package in batch.take_plain_fallbacks()] == [0]
+    assert list(batch._paused) == [1]
+    assert batch._paused[1].handoff_receipt is not None
+
+    # The queued lane is reconsidered with ordinary, not MTP, memory costs on
+    # every closed boundary even while the migrated cohort is still running.
+    batch._optional_reclaim_deadline = float("inf")
+    assert batch._apply_admission()
+    assert batch._apply_admission()
+    assert admission.ordinary_calls == [(1,), (1,)]
+    admission.release = True
+    assert batch._apply_admission()
+    assert not batch._paused
+    assert [package.detached.lane.uid
+            for package in batch.take_plain_fallbacks()] == [1]
+    batch.close()
+
+
+def test_width_lock_handoff_admits_late_lane_before_plain_migration():
+    from mlx2.runtime.adaptive_policy import MTPOrdinaryHandoffPolicy
+    from mlx2.runtime.generate import MTPGenerationBatch, StopSequenceMatcher
+
+    class Admission:
+        atomic_cohort = False
+
+        def __init__(self):
+            self.release = False
+
+        def __call__(self, rows):
+            return {
+                uid: 1 if uid < 2 or self.release else "queue"
+                for (uid, *_rest) in rows
+            }
+
+    admission = Admission()
+    policy = MTPOrdinaryHandoffPolicy.from_value(
+        {"enabled": True, "max_mtp_width": 2}
+    )
+    active = MTPGenerationBatch(
+        object(), [_detached(0), _detached(1)], [None, None],
+        [StopSequenceMatcher(), StopSequenceMatcher()],
+        segmented_live_tip=True, ordinary_handoff_policy=policy,
+        mtp_admission=admission,
+    )
+    arriving = MTPGenerationBatch(
+        object(), [_detached(2)], [None], [StopSequenceMatcher()],
+        segmented_live_tip=True, ordinary_handoff_policy=policy,
+    )
+    active._segmented_compute_width_locked = True
+    active.extend(arriving)
+    assert not active._plain_ready
+    assert list(active._paused) == [2]
+    admission.release = True
+    assert active._apply_admission()
+    assert [package.detached.lane.uid
+            for package in active.take_plain_fallbacks()] == [0, 1, 2]
+    assert not active._paused
+    assert not active._memory_queued
+    arriving.close()
     active.close()
 
 

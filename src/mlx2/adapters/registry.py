@@ -35,6 +35,25 @@ class AdapterResolution:
             return "ordinary"
         return route
 
+    @property
+    def default_mtp_ordinary_handoff(self) -> dict | None:
+        """Return the adapter-declared native-MTP handoff policy, if any."""
+        if Capability.MTP not in self.descriptor.capabilities:
+            return None
+        width = getattr(
+            self.adapter_type,
+            "default_mtp_ordinary_handoff_max_width",
+            None,
+        )
+        if width is None:
+            return None
+        if isinstance(width, bool) or not isinstance(width, int) or width < 1:
+            raise ValueError(
+                f"{self.adapter_type.__name__} handoff width must be a "
+                "positive integer"
+            )
+        return {"enabled": True, "max_mtp_width": width}
+
 
 def _flash_next(path: Path, config: dict) -> AdapterResolution:
     if config.get("ngram_table") or not (path / "ple_rows.bin").is_file():

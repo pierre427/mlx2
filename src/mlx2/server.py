@@ -15,7 +15,6 @@ import logging
 import math
 import hmac
 import ipaddress
-import os
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlsplit
 import queue
@@ -63,7 +62,6 @@ from .api_resources import (
     ResponseStore,
 )
 from .agent_compat import (
-    AgentCompat,
     AgentCompatError,
     AgentCompatPolicy,
     load_tenant_policy,
@@ -3937,8 +3935,8 @@ def build_parser():
         "--adaptive-mtp-depth",
         action="store_true",
         help=(
-            "qualification-only cohort-wide adaptive native-MTP depth "
-            "(default: disabled)"
+            "cohort-wide adaptive native-MTP depth; outside qualification mode "
+            "requires a matching qualification receipt (default: disabled)"
         ),
     )
     parser.add_argument(
@@ -4137,6 +4135,20 @@ def resolve_route_selection(args, policy, adapter_resolution=None):
                 "no implemented native MTP route"
             )
     return RouteSelection(route, source)
+
+
+def resolve_execution_policy_defaults(policy, route_selection, adapter_resolution):
+    """Apply adapter defaults only after the serving route is known."""
+    resolved = {} if policy is None else dict(policy)
+    if (
+        route_selection.native_mtp
+        and "mtp_ordinary_handoff" not in resolved
+        and adapter_resolution is not None
+    ):
+        handoff = adapter_resolution.default_mtp_ordinary_handoff
+        if handoff is not None:
+            resolved["mtp_ordinary_handoff"] = handoff
+    return resolved or None
 
 
 def native_mtp_mode(args, policy, adapter_resolution=None):
@@ -4340,12 +4352,44 @@ def main():
         adapter_resolution = inspect_model(args.model)
         route_selection = resolve_route_selection(args, policy, adapter_resolution)
         native_mtp = route_selection.native_mtp
+        policy = resolve_execution_policy_defaults(
+            policy, route_selection, adapter_resolution
+        )
     except ValueError as error:
         parser.error(str(error))
-    if args.adaptive_mtp_depth and not args.qualification_mode:
-        parser.error("--adaptive-mtp-depth is restricted to --qualification-mode")
-    if args.adaptive_mtp_depth and not native_mtp:
+    from .runtime.adaptive_policy import (
+        AdaptiveMTPDepthPolicy,
+        MTPOrdinaryHandoffPolicy,
+    )
+
+    policy_adaptive = (policy or {}).get("adaptive_mtp_depth")
+    try:
+        adaptive_selected = args.adaptive_mtp_depth or (
+            policy_adaptive is not None
+            and AdaptiveMTPDepthPolicy.from_value(policy_adaptive).enabled
+        )
+    except ValueError as error:
+        parser.error(str(error))
+    if adaptive_selected and not args.qualification_mode and not args.qualification:
+        parser.error(
+            "adaptive MTP depth requires --qualification-mode or a matching "
+            "--qualification record with observed benchmark evidence"
+        )
+    if adaptive_selected and not native_mtp:
         parser.error("--adaptive-mtp-depth requires the native self-MTP route")
+    try:
+        handoff_selected = MTPOrdinaryHandoffPolicy.from_value(
+            (policy or {}).get("mtp_ordinary_handoff")
+        ).enabled
+    except ValueError as error:
+        parser.error(str(error))
+    if handoff_selected and not args.qualification_mode and not args.qualification:
+        parser.error(
+            "MTP ordinary handoff requires --qualification-mode or a matching "
+            "--qualification record with observed handoff evidence"
+        )
+    if handoff_selected and not native_mtp:
+        parser.error("MTP ordinary handoff requires the native self-MTP route")
     if args.spomin_live_surgery and not args.qualification_mode:
         parser.error("--spomin-live-surgery is restricted to --qualification-mode")
     if args.mtp_acceptance_log_lookahead and args.mtp_acceptance_log is None:

@@ -60,7 +60,7 @@ import json
 import re
 import uuid
 
-from ..output import StopSequenceMatcher, _safe_prefix
+from ..output import StopSequenceMatcher, _safe_prefix, within_parallel_bound
 
 THINK_OPEN = "<think>"
 THINK_CLOSE = "</think>"
@@ -242,9 +242,19 @@ def parse_tool_block(payload: str, tools: list[dict]) -> dict:
 class XingOutputParser:
     """Streaming Xing4.0 channel parser; ``push`` returns mlx2 delta events."""
 
-    def __init__(self, *, chat=False, thinking=True, tools=None, stops=()):
+    def __init__(
+        self,
+        *,
+        chat=False,
+        thinking=True,
+        tools=None,
+        stops=(),
+        parallel_tool_calls=True,
+    ):
         self.chat = chat
         self.tools = list(tools or [])
+        self.parallel_tool_calls = bool(parallel_tool_calls)
+        self.tool_call_constraint_truncations = 0
         self.channel = "reasoning_content" if chat and thinking else "content"
         self.stop_matcher = StopSequenceMatcher(stops or ())
         self.buffer = self.held = ""
@@ -301,22 +311,28 @@ class XingOutputParser:
 
     # -- tool calls -------------------------------------------------------
 
-    def _tool_event(self, call: dict) -> dict:
-        event = {
-            "tool_calls": [
+    def _tool_events(self, call: dict) -> list[dict]:
+        events = []
+        for bounded in within_parallel_bound(self, [call]):
+            events.append(
                 {
-                    "index": self.tool_count,
-                    "id": "call_" + uuid.uuid4().hex[:24],
-                    "type": "function",
-                    "function": {
-                        "name": call["name"],
-                        "arguments": json.dumps(call["arguments"], allow_nan=False),
-                    },
+                    "tool_calls": [
+                        {
+                            "index": self.tool_count,
+                            "id": "call_" + uuid.uuid4().hex[:24],
+                            "type": "function",
+                            "function": {
+                                "name": bounded["name"],
+                                "arguments": json.dumps(
+                                    bounded["arguments"], allow_nan=False
+                                ),
+                            },
+                        }
+                    ]
                 }
-            ]
-        }
-        self.tool_count += 1
-        return event
+            )
+            self.tool_count += 1
+        return events
 
     def _markers(self) -> dict:
         if self.channel == "reasoning_content":
@@ -353,7 +369,7 @@ class XingOutputParser:
                     payload = self.buffer[: min(turn)]
                     if not _complete_tool_payload(payload):
                         raise ValueError("Model produced an incomplete Xing tool call")
-                    events.append(self._tool_event(parse_tool_block(payload, self.tools)))
+                    events.extend(self._tool_events(parse_tool_block(payload, self.tools)))
                     self.turn_closed_tool_calls += 1
                     events.extend(self._finish_visible())
                     self.stopped, self.buffer = True, ""
@@ -364,12 +380,16 @@ class XingOutputParser:
                         # text: the same completeness rule as a turn marker.
                         if not _complete_tool_payload(self.buffer):
                             raise ValueError("Model produced an incomplete Xing tool call")
-                        events.append(self._tool_event(parse_tool_block(self.buffer, self.tools)))
+                        events.extend(
+                            self._tool_events(parse_tool_block(self.buffer, self.tools))
+                        )
                         self.turn_closed_tool_calls += 1
                         events.extend(self._finish_visible())
                         self.stopped, self.buffer = True, ""
                     return events
-                events.append(self._tool_event(parse_tool_block(self.buffer[:end], self.tools)))
+                events.extend(
+                    self._tool_events(parse_tool_block(self.buffer[:end], self.tools))
+                )
                 self.buffer = self.buffer[end + len(TOOL_CLOSE) :]
                 self.channel = "content"
                 continue

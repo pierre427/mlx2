@@ -1281,12 +1281,27 @@ class ServingEngine:
                 self.host_memory_signals_policy["fall_after_seconds"]
             )
             self.memory_pressure_level = self.host_memory_monitor.level
-        from .runtime.adaptive_policy import AdaptiveMTPDepthPolicy
+        from .runtime.adaptive_policy import (
+            AdaptiveMTPDepthPolicy,
+            MTPOrdinaryHandoffPolicy,
+        )
         from .runtime.speculative_sampling import FLyVerificationPolicy
         from .runtime.spomin_live_surgery import ServingSpominPolicy
 
-        self.adaptive_mtp_policy = AdaptiveMTPDepthPolicy.from_value(
-            adaptive_mtp_depth
+        policy_adaptive_mtp = (execution_policy or {}).get("adaptive_mtp_depth")
+        if adaptive_mtp_depth and policy_adaptive_mtp is not None:
+            selected = AdaptiveMTPDepthPolicy.from_value(policy_adaptive_mtp)
+            if not selected.enabled:
+                raise ValueError(
+                    "--adaptive-mtp-depth conflicts with disabled "
+                    "execution_policy.adaptive_mtp_depth"
+                )
+            adaptive_mtp_depth = policy_adaptive_mtp
+        elif not adaptive_mtp_depth and policy_adaptive_mtp is not None:
+            adaptive_mtp_depth = policy_adaptive_mtp
+        self.adaptive_mtp_policy = AdaptiveMTPDepthPolicy.from_value(adaptive_mtp_depth)
+        self.mtp_ordinary_handoff_policy = MTPOrdinaryHandoffPolicy.from_value(
+            (execution_policy or {}).get("mtp_ordinary_handoff")
         )
         self.fly_verification_policy = FLyVerificationPolicy.from_value(
             (execution_policy or {}).get("fly_verification")
@@ -1409,12 +1424,23 @@ class ServingEngine:
                     "MTP acceptance logging requires the native self-MTP route"
                 )
         if self.adaptive_mtp_policy.enabled:
-            if not qualification_mode:
+            if not qualification_mode and not qualification:
                 raise ValueError(
-                    "adaptive MTP depth is restricted to qualification mode"
+                    "adaptive MTP depth requires qualification mode or a matching "
+                    "qualification record with observed benchmark evidence"
                 )
             if not mtp or prompt_lookup:
                 raise ValueError("adaptive MTP depth requires the native self-MTP route")
+        if self.mtp_ordinary_handoff_policy.enabled:
+            if not qualification_mode and not qualification:
+                raise ValueError(
+                    "MTP ordinary handoff requires qualification mode or a matching "
+                    "qualification record with observed handoff evidence"
+                )
+            if not mtp or prompt_lookup:
+                raise ValueError(
+                    "MTP ordinary handoff requires the native self-MTP route"
+                )
         if self.spomin_policy.enabled:
             if not qualification_mode:
                 raise ValueError(
@@ -3406,6 +3432,8 @@ class ServingEngine:
                         "fly_verification",
                         "self_mtp_copy_draft",
                         "apc_interior_checkpoints",
+                        "adaptive_mtp_depth",
+                        "mtp_ordinary_handoff",
                         "memory_preemption",
                         "apc_junction_checkpoints",
                         "apc_rolling_checkpoints",
@@ -3562,6 +3590,10 @@ class ServingEngine:
                         if self.expert_stream is not None
                         else None
                     ),
+                )
+            if self.mtp_ordinary_handoff_policy.enabled:
+                settings["mtp_ordinary_handoff"] = (
+                    self.mtp_ordinary_handoff_policy.as_dict()
                 )
             # Item 12 keys appear only when enabled: default receipts keep
             # their exact settings.
@@ -4313,6 +4345,11 @@ class ServingEngine:
                     adaptive_mtp_depth=(
                         self.adaptive_mtp_policy.controller_kwargs()
                         if self.adaptive_mtp_policy.enabled
+                        else None
+                    ),
+                    mtp_ordinary_handoff=(
+                        self.mtp_ordinary_handoff_policy
+                        if self.mtp_ordinary_handoff_policy.enabled
                         else None
                     ),
                     fly_verification=self.fly_verification_policy,

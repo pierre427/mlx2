@@ -8,3 +8,11 @@ dist/
 
 # Runtime APC snapshots are multi-gigabyte cache payloads, not durable evidence.
 qualification/runs/**/*.safetensors
+
+# Benchmark and qualification run artifacts: server logs, raw smoke fixtures,
+# per-run admin tokens and multi-megabyte reports. A `git add -A` in a worktree
+# that has just run the qualifier otherwise sweeps all of it into the commit
+# (2026-09-21: 214 files, 2.3M lines, including a live admin token).
+qualification/mtp-handoff-*.json
+qualification/mtp-handoff-*.txt
+qualification/mtp-handoff-*-artifacts/

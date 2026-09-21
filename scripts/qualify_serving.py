@@ -16,6 +16,9 @@ from urllib.request import Request, urlopen
 
 
 QUALIFICATION_HARNESS_SCHEMA = "mlx2.qualification-harness.v1"
+APPROVED_ADAPTIVE_BENCHMARK_SHA256 = (
+    "3a371843134d75c9e3e09e8532f2a15a07284e98a68a731c846ae8ed2e9bef4b"
+)
 PREFLIGHT_SCHEMA = "mlx2.qualification-preflight.v1"
 QUALIFICATION_COVERAGE = {
     "response_format_json_object": False,
@@ -572,7 +575,7 @@ def wait_for_quiescence(
         sleep(min(poll_interval_seconds, remaining))
 
 
-def feature_observations(final, kv_fidelity=None):
+def feature_observations(final, kv_fidelity=None, adaptive_benchmark=None):
     execution = final.get("execution", {})
     segmented = execution.get("segmented_mtp", {})
     indexed = execution.get("indexed_qsa", {}).get("counts", {})
@@ -621,6 +624,30 @@ def feature_observations(final, kv_fidelity=None):
     apcv2 = final.get("apcv2", {})
     idle_disk = apcv2.get("idle_disk", {})
     rescan = apcv2.get("persistence", {}).get("rescan", {})
+    benchmark_evidence = (
+        (adaptive_benchmark or {}).get("adaptive_qualification", {})
+    )
+    benchmark_features = benchmark_evidence.get("features") or {}
+    adaptive_feature = benchmark_features.get("adaptive_mtp_depth") or {}
+    adaptive_observed = int(
+        bool(
+            adaptive_feature.get("selected")
+            and adaptive_feature.get("passed")
+        )
+    )
+    benchmark_handoff = benchmark_evidence.get("handoff", {})
+    handoff_feature = benchmark_features.get("mtp_ordinary_handoff") or {}
+    handoff_observed = int(
+        bool(
+            handoff_feature.get("selected")
+            and handoff_feature.get("passed")
+            and benchmark_handoff.get("selected")
+            and benchmark_handoff.get("passed")
+            and benchmark_handoff.get("events", 0) > 0
+            and benchmark_handoff.get("comparison_count", 0) > 0
+            and not benchmark_handoff.get("unsafe_divergences")
+        )
+    )
     return {
         "indexed_fused_merge": int(execution.get("indexed_qsa", {}).get("fused_merge", {}).get("engaged", False)),
         "indexed_output_gate": int(execution.get("indexed_qsa", {}).get("fused_merge", {}).get("gate_engaged", False)),
@@ -650,7 +677,12 @@ def feature_observations(final, kv_fidelity=None):
         "prompt_lookup_rollback": scheduler.get("pld_rollbacks", 0),
         "prompt_lookup_batched_verify": scheduler.get("pld_batched_rounds", 0),
         "prompt_lookup_rotating_replay": scheduler.get("pld_rotating_replay_rounds", 0),
-        "adaptive_mtp_depth": scheduler.get("adaptive_mtp_boundaries", 0),
+        # The bound policy benchmark proves only the features it selected.
+        # Adaptive depth still needs bounded exploration, complete sampling,
+        # and conditional recovery; handoff uses its independent fixed-depth
+        # event/correctness/throughput gate.
+        "adaptive_mtp_depth": adaptive_observed,
+        "mtp_ordinary_handoff": handoff_observed,
         "self_mtp_copy_draft": scheduler.get("self_mtp_copy_rounds", 0),
         "fly_verification": max(
             int(scheduler.get("fly_relaxed_accepts", 0)), fly_receipt_relaxed
@@ -691,6 +723,98 @@ def feature_observations(final, kv_fidelity=None):
     }
 
 
+def _adaptive_benchmark_evaluator():
+    """Load the sibling benchmark both as a script and as a package module."""
+    import importlib.util
+
+    source = Path(__file__).with_name("benchmark_adaptive_mtp.py")
+    spec = importlib.util.spec_from_file_location(
+        "_mlx2_benchmark_adaptive_mtp", source
+    )
+    if spec is None or spec.loader is None:
+        raise ValueError("adaptive benchmark evaluator could not be loaded")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        sys.modules.pop(spec.name, None)
+    return module.adaptive_qualification_evidence
+
+
+def validate_adaptive_benchmark(path, initial):
+    """Bind external MTP policy evidence to this exact candidate settings set."""
+    if path is None:
+        return None
+    path = Path(path)
+    raw = path.read_bytes()
+    benchmark = json.loads(raw)
+    if benchmark.get("schema") != "mlx2.adaptive-mtp-benchmark.v2":
+        raise ValueError("adaptive benchmark has an unsupported schema")
+    source = Path(__file__).with_name("benchmark_adaptive_mtp.py")
+    source_sha256 = hashlib.sha256(source.read_bytes()).hexdigest()
+    if source_sha256 != APPROVED_ADAPTIVE_BENCHMARK_SHA256:
+        raise ValueError("local adaptive benchmark harness is not approved")
+    harness = benchmark.get("benchmark_harness") or {}
+    if (
+        harness.get("name") != "scripts/benchmark_adaptive_mtp.py"
+        or harness.get("sha256") != source_sha256
+    ):
+        raise ValueError("adaptive benchmark harness is not the approved source")
+    adaptive_qualification_evidence = _adaptive_benchmark_evaluator()
+    recorded = benchmark.get("adaptive_qualification") or {}
+    throughput_tolerance = float(recorded.get("throughput_tolerance", 1.0))
+    max_probe_fraction = float(recorded.get("max_probe_fraction", 1.0))
+    min_bucket_rounds = int(recorded.get("min_bucket_rounds", 0))
+    handoff_margin_threshold = float(
+        (recorded.get("handoff") or {}).get(
+            "ordinary_margin_failure_threshold_nats", 1.0
+        )
+    )
+    # The batched handoff screen fails on a significant EXCESS over the control
+    # arm, so a SMALLER alpha is the permissive direction: it takes a larger
+    # excess to trip.  The bound is therefore a floor, unlike the others here.
+    differential_alpha = float(recorded.get("differential_alpha", 0.0))
+    if (
+        throughput_tolerance > 0.08
+        or max_probe_fraction > 0.075
+        or min_bucket_rounds < 64
+        or handoff_margin_threshold > 0.5
+        or differential_alpha < 0.05
+    ):
+        raise ValueError("adaptive benchmark used weaker qualification limits")
+    recomputed = adaptive_qualification_evidence(
+        benchmark,
+        throughput_tolerance=throughput_tolerance,
+        max_probe_fraction=max_probe_fraction,
+        min_bucket_rounds=min_bucket_rounds,
+        differential_alpha=differential_alpha,
+    )
+    if recomputed != recorded:
+        raise ValueError("adaptive benchmark qualification evidence was modified")
+    if not benchmark.get("passed") or not recomputed.get("passed"):
+        raise ValueError("adaptive benchmark did not pass its qualification gate")
+    qualification_arm = benchmark.get("qualification_arm", "adaptive")
+    if qualification_arm not in {"adaptive", "handoff"}:
+        raise ValueError("adaptive benchmark has an unsupported qualification arm")
+    candidate_status = (
+        benchmark.get("arms", {}).get(qualification_arm, {}).get("final_status")
+        or {}
+    )
+    for key in ("runtime", "artifact", "settings"):
+        if candidate_status.get(key) != initial.get(key):
+            raise ValueError(
+                f"benchmark {qualification_arm} arm {key} does not match "
+                "the candidate server"
+            )
+    return benchmark, {
+        "path": str(path),
+        "sha256": hashlib.sha256(raw).hexdigest(),
+        "schema": benchmark["schema"],
+        "adaptive_qualification": benchmark["adaptive_qualification"],
+    }
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--url", default="http://127.0.0.1:8285")
@@ -709,6 +833,14 @@ def main():
     parser.add_argument("--preflight-receipt", type=Path,
                         help="Use an exact passing preflight receipt instead of rerunning pytest")
     parser.add_argument(
+        "--adaptive-benchmark",
+        type=Path,
+        help=(
+            "Passing three-arm MTP policy benchmark bound to the candidate's "
+            "runtime, artifact and settings"
+        ),
+    )
+    parser.add_argument(
         "--defer-long-context-to-matrix", type=Path, metavar="MANIFEST",
         help=("Defer only near-limit and shared-cohort context checks to the "
               "generated thermally controlled matrix manifest"),
@@ -718,7 +850,7 @@ def main():
         help=("Measured KV-quantization fidelity report "
               "(scripts/measure_kv_quant_fidelity.py) for an approximate-KV route"),
     )
-    parser.add_argument("--require-feature", action="append", default=[], choices=["shared_qsa", "async_promotion", "indexed_qsa", "private_delta", "known_tail_prefetch", "indexed_fused_merge", "indexed_output_gate", "file_backed_ple", "compiled_ple", "pooled_qsa", "scatter_qsa", "fused_gdn_decode", "fused_gdn_verify", "fused_gdn_replay_rollback", "eager_dispatch", "fused_moe", "external_draft", "proposal_distribution", "paired_draft_cache", "segmented_transaction", "segmented_rollback", "prompt_lookup", "prompt_lookup_proposals", "prompt_lookup_rollback", "prompt_lookup_rotating_replay", "prompt_lookup_batched_verify", "adaptive_mtp_depth", "fly_verification", "self_mtp_copy_draft", "spomin_surgery", "approximate_kv", "approximate_kv_mtp", "approximate_kv_fidelity", "apc_interior_checkpoints", "apc_persistence", "apc_sessions"], help="Fail this candidate unless its mechanism actually executed")
+    parser.add_argument("--require-feature", action="append", default=[], choices=["shared_qsa", "async_promotion", "indexed_qsa", "private_delta", "known_tail_prefetch", "indexed_fused_merge", "indexed_output_gate", "file_backed_ple", "compiled_ple", "pooled_qsa", "scatter_qsa", "fused_gdn_decode", "fused_gdn_verify", "fused_gdn_replay_rollback", "eager_dispatch", "fused_moe", "external_draft", "proposal_distribution", "paired_draft_cache", "segmented_transaction", "segmented_rollback", "prompt_lookup", "prompt_lookup_proposals", "prompt_lookup_rollback", "prompt_lookup_rotating_replay", "prompt_lookup_batched_verify", "adaptive_mtp_depth", "mtp_ordinary_handoff", "fly_verification", "self_mtp_copy_draft", "spomin_surgery", "approximate_kv", "approximate_kv_mtp", "approximate_kv_fidelity", "apc_interior_checkpoints", "apc_persistence", "apc_sessions"], help="Fail this candidate unless its mechanism actually executed")
     args = parser.parse_args()
 
     if args.preflight_only:
@@ -783,6 +915,9 @@ def main():
 
     initial = get("/v1/status")
     assert initial["healthy"] and initial["inflight"] == 0
+    adaptive_benchmark = validate_adaptive_benchmark(
+        args.adaptive_benchmark, initial
+    )
     thinking["default"] = bool(initial.get("thinking_default"))
     # A model may declare a larger allowance for its reasoning (Xing4.0 does);
     # never less than the harness default.
@@ -803,6 +938,8 @@ def main():
         "thinking_budget": {"thinking_default": thinking["default"],
                             "extra_completion_tokens": thinking["allowance"] if thinking["default"] else 0},
     }
+    if adaptive_benchmark is not None:
+        report["adaptive_benchmark"] = adaptive_benchmark[1]
     context_delegation = (
         validate_context_matrix_delegation(
             args.defer_long_context_to_matrix, initial["max_context"]
@@ -1351,12 +1488,23 @@ def main():
                 adapter_fingerprint=initial["artifact"],
             )
             report["kv_fidelity"] = kv_fidelity
-        observed = feature_observations(final, kv_fidelity)
+        observed = feature_observations(
+            final,
+            kv_fidelity=kv_fidelity,
+            adaptive_benchmark=(
+                None if adaptive_benchmark is None else adaptive_benchmark[0]
+            ),
+        )
         report["feature_observations"] = observed
         from mlx2.qualification import required_feature_checks
         required_features = {name.removeprefix("feature_") for name in required_feature_checks(initial["settings"])}
         for feature in sorted(required_features | set(args.require_feature)):
-            check("feature_" + feature, observed[feature] > 0, execution)
+            evidence = (
+                report.get("adaptive_benchmark")
+                if feature in {"adaptive_mtp_depth", "mtp_ordinary_handoff"}
+                else execution
+            )
+            check("feature_" + feature, observed[feature] > 0, evidence)
         check(
             "cache_leases", final["apcv2"]["cow"]["active_leases"] == 0, final["apcv2"]
         )

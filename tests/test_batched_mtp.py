@@ -6,6 +6,7 @@ from unittest.mock import patch
 
 import mlx.core as mx
 import numpy as np
+import pytest
 
 from mlx2.runtime.hybrid_speculative import (
     advance_self_mtp_prefill,
@@ -466,7 +467,7 @@ def test_depth_zero_fast_path_matches_ordinary_and_reenters_exactly():
                 "segment_aware_live_tip": True,
                 "segment_aware_cohort_size": 1,
             },
-            adaptive_mtp_depth={"current_depth": 0},
+            adaptive_mtp_depth={},
         )
         ordinary.insert([prompt], max_tokens=[10])
         mtp.insert(
@@ -485,12 +486,23 @@ def test_depth_zero_fast_path_matches_ordinary_and_reenters_exactly():
             return real_mtp_step(*args, **kwargs)
 
         counting = switched = False
+        mtp_terminal = None
         for _ in range(100):
             for index, batch in enumerate((ordinary, mtp)):
                 _, responses = batch.next()
                 outputs[index].extend(response.token for response in responses)
+                if index == 1:
+                    mtp_terminal = next(
+                        (
+                            response
+                            for response in responses
+                            if response.finish_reason is not None
+                        ),
+                        mtp_terminal,
+                    )
             if not counting and len(outputs[1]) >= 1:
                 model.mtp_step = counted_mtp_step
+                mtp._generation_batch._adaptive_admitted_cap = 0
                 counting = True
             if not switched and len(outputs[1]) >= 4:
                 # Preparation has finished. K=0 itself must not execute the
@@ -501,15 +513,770 @@ def test_depth_zero_fast_path_matches_ordinary_and_reenters_exactly():
                     mtp.scheduler_stats["self_mtp_zero_draft_forwards_skipped"]
                     == mtp.scheduler_stats["self_mtp_zero_fast_rounds"]
                 )
-                mtp._generation_batch.adaptive_depth_policy.current_depth = 1
+                mtp._generation_batch._adaptive_admitted_cap = 2
                 switched = True
             if min(map(len, outputs)) >= 10:
                 break
         assert switched and draft_calls > 0
         assert outputs[1] == outputs[0]
+        assert mtp_terminal is not None
+        adaptive = mtp_terminal.mtp_receipt["adaptive_depth"]
+        assert adaptive["cost_model"]["buckets"]["1"][
+            "goodput_tokens_per_second"
+        ]
+        assert all(
+            row["elapsed_seconds"] > 0 and row["committed"] >= 0
+            for row in adaptive["trace"]
+        )
         ordinary.close()
         mtp.close()
     finally:
+        mx.set_default_device(previous_device)
+
+
+def test_wide_mtp_cohort_handoff_matches_ordinary_greedy_continuation():
+    from mlx2.runtime.adaptive_policy import MTPOrdinaryHandoffPolicy
+    from mlx2.runtime.generate import BatchGenerator
+
+    previous_device = mx.default_device()
+    mx.set_default_device(mx.cpu)
+    ordinary = handoff = None
+    try:
+        mx.random.seed(924)
+        model = _tiny_qwen4_model()
+        prompts = [[1, 7, 3, 9, 2], [4, 5, 6, 2, 8]]
+        ordinary = BatchGenerator(
+            model,
+            completion_batch_size=2,
+            prefill_batch_size=2,
+            prefill_step_size=32,
+        )
+        handoff = BatchGenerator(
+            model,
+            completion_batch_size=2,
+            prefill_batch_size=2,
+            prefill_step_size=32,
+            self_mtp={
+                "num_draft": 2,
+                "persistent": True,
+                "segment_aware_live_tip": True,
+                "segment_aware_cohort_size": 2,
+            },
+            mtp_ordinary_handoff=MTPOrdinaryHandoffPolicy.from_value(
+                {"enabled": True, "max_mtp_width": 1}
+            ),
+        )
+        ordinary_uids = ordinary.insert(prompts, max_tokens=[8, 8])
+        handoff_uids = handoff.insert(
+            prompts,
+            max_tokens=[8, 8],
+            lane_rngs=[LaneRNG(31), LaneRNG(32)],
+            self_mtp_configs=[{"sampling_temp": 0.0}] * 2,
+        )
+
+        def finish(generator, uids):
+            output = {uid: [] for uid in uids}
+            terminal = {}
+            for _ in range(100):
+                _, responses = generator.next()
+                for response in responses:
+                    output[response.uid].append(response.token)
+                    if response.finish_reason:
+                        terminal[response.uid] = response
+                if len(terminal) == len(uids):
+                    return output, terminal
+            raise AssertionError("generator did not terminate")
+
+        ordinary_output, _ = finish(ordinary, ordinary_uids)
+        handoff_output, terminal = finish(handoff, handoff_uids)
+        assert [ordinary_output[uid] for uid in ordinary_uids] == [
+            handoff_output[uid] for uid in handoff_uids
+        ]
+        assert handoff.scheduler_stats["mtp_ordinary_handoff_events"] == 1
+        assert handoff.scheduler_stats["mtp_ordinary_handoff_lanes"] == 2
+        assert all(
+            response.mtp_receipt["route"] == "ordinary_after_mtp_handoff"
+            and response.mtp_receipt["mtp_ordinary_handoff"]["engaged"]
+            and response.mtp_receipt["mtp_ordinary_handoff"]["one_way"]
+            for response in terminal.values()
+        )
+        assert not handoff._generation_batch._ordinary_handoff_latched
+        (later_uid,) = handoff.insert(
+            [prompts[0]],
+            max_tokens=[4],
+            lane_rngs=[LaneRNG(33)],
+            self_mtp_configs=[{"sampling_temp": 0.0}],
+        )
+        _, later_terminal = finish(handoff, [later_uid])
+        assert later_terminal[later_uid].mtp_receipt["route"] == ("segmented_self_mtp")
+    finally:
+        if ordinary is not None:
+            ordinary.close()
+        if handoff is not None:
+            handoff.close()
+        mx.set_default_device(previous_device)
+
+
+@pytest.mark.parametrize("temperature", [0.0, 0.8])
+def test_zero_commit_width_lock_handoff_preserves_target_state_and_rng(temperature):
+    from mlx2.runtime.adaptive_policy import MTPOrdinaryHandoffPolicy
+    from mlx2.runtime.generate import BatchGenerator
+    from mlx2.runtime.sample_utils import draw_key
+
+    previous_device = mx.default_device()
+    mx.set_default_device(mx.cpu)
+    ordinary = handoff = None
+    try:
+        mx.random.seed(934)
+        model = _tiny_qwen4_model()
+        late_prompt = [3, 4, 5, 6, 7]
+        seed = 93
+        reference_rng = LaneRNG(seed)
+
+        def reference_sampler(logprobs):
+            if temperature <= 0:
+                return mx.argmax(logprobs, axis=-1)
+            token = mx.random.categorical(
+                logprobs[0] / temperature, key=draw_key(reference_rng)
+            )
+            return token[None]
+
+        reference_sampler.batch_groupable = False
+        ordinary = BatchGenerator(
+            model, completion_batch_size=3, prefill_batch_size=3,
+            prefill_step_size=32,
+        )
+        (ordinary_uid,) = ordinary.insert(
+            [late_prompt], max_tokens=[16], samplers=[reference_sampler],
+            lane_rngs=[reference_rng],
+        )
+        handoff = BatchGenerator(
+            model, completion_batch_size=3, prefill_batch_size=3,
+            prefill_step_size=32,
+            self_mtp={
+                "num_draft": 2, "persistent": True,
+                "segment_aware_live_tip": True,
+                "segment_aware_cohort_size": 3,
+            },
+            mtp_ordinary_handoff=MTPOrdinaryHandoffPolicy.from_value(
+                {"enabled": True, "max_mtp_width": 2}
+            ),
+        )
+        handoff.insert(
+            [[1, 8, 12, 14, 2], [4, 5, 6, 2, 8]],
+            max_tokens=[32, 32],
+            lane_rngs=[LaneRNG(91), LaneRNG(92)],
+            self_mtp_configs=[{"sampling_temp": temperature}] * 2,
+        )
+        for _ in range(20):
+            handoff.next()
+            if handoff._generation_batch._segmented_compute_width_locked:
+                break
+        else:
+            raise AssertionError("initial segmented cohort never locked its width")
+
+        late_rng = LaneRNG(seed)
+        (late_uid,) = handoff.insert(
+            [late_prompt], max_tokens=[16], lane_rngs=[late_rng],
+            self_mtp_configs=[{
+                "sampling_temp": temperature,
+                "sampling_top_p": 1.0,
+                "sampling_top_k": 0,
+            }],
+        )
+        ordinary_tokens = []
+        handoff_tokens = []
+        handoff_from_draft = []
+        ordinary_terminal = handoff_terminal = None
+        for _ in range(100):
+            _, ordinary_responses = ordinary.next()
+            _, handoff_responses = handoff.next()
+            for response in ordinary_responses:
+                ordinary_tokens.append(response.token)
+                if response.finish_reason:
+                    ordinary_terminal = response
+            for response in handoff_responses:
+                if response.uid != late_uid:
+                    continue
+                handoff_tokens.append(response.token)
+                handoff_from_draft.append(response.from_draft)
+                if response.finish_reason:
+                    handoff_terminal = response
+            if ordinary_terminal is not None and handoff_terminal is not None:
+                break
+        assert ordinary_terminal is not None and handoff_terminal is not None
+        assert handoff_tokens[0] == ordinary_tokens[0]
+        if temperature <= 0:
+            assert handoff_tokens == ordinary_tokens
+        assert len(handoff_tokens) == 16
+        assert not any(handoff_from_draft)
+        assert handoff_terminal.rng_draws == reference_rng.draws
+        assert bool(mx.array_equal(handoff_terminal.lane_rng.key, reference_rng.key))
+        receipt = handoff_terminal.mtp_receipt
+        boundary = receipt["mtp_ordinary_handoff"]
+        assert boundary["committed_tokens_before_handoff"] == 0
+        assert boundary["prepared_initial_token_pending"] is True
+        assert boundary["prepared_initial_token_from_draft"] is False
+        assert boundary["mtp_observed_compute_widths_before_handoff"] == []
+        assert boundary["stats_before_handoff"]["draft_proposed"] == 0
+        assert receipt["stats"]["draft_proposed"] == 0
+        assert receipt["ordinary_compute_widths"]
+    finally:
+        if ordinary is not None:
+            ordinary.close()
+        if handoff is not None:
+            handoff.close()
+        mx.set_default_device(previous_device)
+
+
+
+
+@pytest.mark.parametrize("segmented", [False, True])
+def test_midstream_handoff_after_accepted_drafts_matches_greedy(segmented):
+    from mlx2.runtime.adaptive_policy import MTPOrdinaryHandoffPolicy
+    from mlx2.runtime.generate import BatchGenerator
+    previous_device = mx.default_device()
+    mx.set_default_device(mx.cpu)
+    ordinary = handoff = None
+    try:
+        mx.random.seed(924)
+        model = _tiny_qwen4_model()
+        prompts = [[1, 8, 12, 14, 2], [4, 5, 6, 2, 8]]
+        seeds = [31, 32]
+
+        def ordinary_sampler(seed):
+            del seed
+            def sample(logprobs):
+                return mx.argmax(logprobs, axis=-1)
+
+            sample.batch_groupable = False
+            return sample
+
+        ordinary = BatchGenerator(
+            model, completion_batch_size=2, prefill_batch_size=2,
+            prefill_step_size=32,
+        )
+        config = {"num_draft": 2, "persistent": True}
+        if segmented:
+            config.update(
+                {"segment_aware_live_tip": True, "segment_aware_cohort_size": 2}
+            )
+        handoff = BatchGenerator(
+            model, completion_batch_size=2, prefill_batch_size=2,
+            prefill_step_size=32, self_mtp=config,
+            mtp_ordinary_handoff=MTPOrdinaryHandoffPolicy.from_value(
+                {"enabled": True, "max_mtp_width": 1}
+            ),
+        )
+        (ordinary_uid0,) = ordinary.insert(
+            [prompts[0]], max_tokens=[32],
+            samplers=[ordinary_sampler(seeds[0])],
+        )
+        (handoff_uid0,) = handoff.insert(
+            [prompts[0]], max_tokens=[32], lane_rngs=[LaneRNG(seeds[0])],
+            self_mtp_configs=[{
+                "sampling_temp": 0.0, "sampling_top_p": 1.0,
+                "sampling_top_k": 8,
+            }],
+        )
+        ordinary_output = {ordinary_uid0: []}
+        handoff_output = {handoff_uid0: []}
+        for _ in range(40):
+            for generator, output in (
+                (ordinary, ordinary_output), (handoff, handoff_output)
+            ):
+                _, responses = generator.next()
+                for response in responses:
+                    output[response.uid].append(response.token)
+            lanes = handoff._generation_batch.state.lanes
+            if lanes and lanes[0].stats.draft_accepted > 0:
+                break
+        else:
+            raise AssertionError("self-MTP did not accept a draft before handoff")
+
+        (ordinary_uid1,) = ordinary.insert(
+            [prompts[1]], max_tokens=[16],
+            samplers=[ordinary_sampler(seeds[1])],
+        )
+        (handoff_uid1,) = handoff.insert(
+            [prompts[1]], max_tokens=[16], lane_rngs=[LaneRNG(seeds[1])],
+            self_mtp_configs=[{
+                "sampling_temp": 0.0, "sampling_top_p": 1.0,
+                "sampling_top_k": 8,
+            }],
+        )
+        ordinary_output[ordinary_uid1] = []
+        handoff_output[handoff_uid1] = []
+        ordinary_terminal = {}
+        handoff_terminal = {}
+        for _ in range(200):
+            for generator, output, terminal in (
+                (ordinary, ordinary_output, ordinary_terminal),
+                (handoff, handoff_output, handoff_terminal),
+            ):
+                _, responses = generator.next()
+                for response in responses:
+                    output[response.uid].append(response.token)
+                    if response.finish_reason:
+                        terminal[response.uid] = response
+            if len(ordinary_terminal) == len(handoff_terminal) == 2:
+                break
+        assert [ordinary_output[ordinary_uid0], ordinary_output[ordinary_uid1]] == [
+            handoff_output[handoff_uid0], handoff_output[handoff_uid1]
+        ]
+        receipt = handoff_terminal[handoff_uid0].mtp_receipt
+        assert receipt["stats"]["draft_accepted"] > 0
+        assert receipt["mtp_ordinary_handoff"][
+            "committed_tokens_before_handoff"
+        ] > 0
+        assert receipt["ordinary_compute_widths"]
+        assert receipt["observed_compute_widths"]
+    finally:
+        if ordinary is not None:
+            ordinary.close()
+        if handoff is not None:
+            handoff.close()
+        mx.set_default_device(previous_device)
+
+
+def test_promoted_qwen4_handoff_matches_plain_from_committed_prefix(monkeypatch):
+    from mlx2.runtime.adaptive_policy import MTPOrdinaryHandoffPolicy
+    from mlx2.runtime.generate import BatchGenerator
+
+    previous_device = mx.default_device()
+    mx.set_default_device(mx.cpu)
+    new_stream = mx.new_stream
+    monkeypatch.setattr(mx, "new_stream", lambda _device: new_stream(mx.cpu))
+    handoff = reference = None
+    try:
+        mx.random.seed(925)
+        model = _tiny_qwen4_model()
+        prompt = [1, 8, 12, 14, 2]
+        handoff = BatchGenerator(
+            model, completion_batch_size=3, prefill_batch_size=3,
+            prefill_step_size=32,
+            self_mtp={
+                "num_draft": 2, "persistent": True,
+                "segment_aware_live_tip": True,
+                "segment_aware_cohort_size": 3,
+                "segment_aware_async_qsa_promotion": True,
+            },
+            mtp_ordinary_handoff=MTPOrdinaryHandoffPolicy.from_value(
+                {"enabled": True, "max_mtp_width": 2}
+            ),
+        )
+        uids = handoff.insert(
+            [prompt, [4, 5, 6, 2, 8]], max_tokens=[20, 20],
+            lane_rngs=[LaneRNG(41), LaneRNG(42)],
+            self_mtp_configs=[{"sampling_temp": 0.0}] * 2,
+        )
+        emitted = {uid: [] for uid in uids}
+        for _ in range(20):
+            _, responses = handoff.next()
+            for response in responses:
+                emitted[response.uid].append(response.token)
+            batch = handoff._generation_batch
+            if not batch.segmented_live_tip and emitted[uids[0]]:
+                break
+        else:
+            raise AssertionError("segmented QSA state did not promote")
+
+        recurrent = next(
+            cache for cache in batch.state.caches.target
+            if isinstance(cache, Qwen4ArraysCache)
+        )
+        assert recurrent.ple_history_fill is not None
+        prefix = prompt + list(emitted[uids[0]])
+        before_handoff = len(emitted[uids[0]])
+
+        handoff.insert(
+            [[3, 4, 5, 6, 7]], max_tokens=[12],
+            lane_rngs=[LaneRNG(43)],
+            self_mtp_configs=[{"sampling_temp": 0.0}],
+        )
+        terminal = None
+        for _ in range(100):
+            _, responses = handoff.next()
+            for response in responses:
+                if response.uid != uids[0]:
+                    continue
+                emitted[uids[0]].append(response.token)
+                if response.finish_reason:
+                    terminal = response
+            if terminal is not None:
+                break
+        assert terminal is not None
+        assert terminal.mtp_receipt["mtp_ordinary_handoff"]["engaged"]
+
+        reference = BatchGenerator(
+            model, completion_batch_size=1, prefill_batch_size=1,
+            prefill_step_size=32,
+        )
+        (reference_uid,) = reference.insert(
+            [prefix], max_tokens=[20 - before_handoff]
+        )
+        expected = []
+        for _ in range(100):
+            _, responses = reference.next()
+            for response in responses:
+                expected.append(response.token)
+                if response.finish_reason:
+                    break
+            if responses and responses[-1].finish_reason:
+                break
+        assert emitted[uids[0]][before_handoff:] == expected
+    finally:
+        if handoff is not None:
+            handoff.close()
+        if reference is not None:
+            reference.close()
+        mx.set_default_device(previous_device)
+
+
+@pytest.mark.parametrize("segmented", [False, True])
+def test_seeded_sampling_state_survives_midstream_handoff(segmented):
+    from mlx2.runtime.adaptive_policy import MTPOrdinaryHandoffPolicy
+    from mlx2.runtime.generate import BatchGenerator
+
+    previous_device = mx.default_device()
+    mx.set_default_device(mx.cpu)
+    generators = []
+    try:
+        mx.random.seed(926)
+        model = _tiny_qwen4_model()
+
+        def run_once():
+            config = {"num_draft": 2, "persistent": True}
+            if segmented:
+                config.update({
+                    "segment_aware_live_tip": True,
+                    "segment_aware_cohort_size": 2,
+                })
+            generator = BatchGenerator(
+                model, completion_batch_size=2, prefill_batch_size=2,
+                prefill_step_size=32, self_mtp=config,
+                mtp_ordinary_handoff=MTPOrdinaryHandoffPolicy.from_value(
+                    {"enabled": True, "max_mtp_width": 1}
+                ),
+            )
+            generators.append(generator)
+            (first_uid,) = generator.insert(
+                [[1, 8, 12, 14, 2]], max_tokens=[20],
+                lane_rngs=[LaneRNG(51)],
+                self_mtp_configs=[{
+                    "sampling_temp": 0.8, "sampling_top_p": 1.0,
+                    "sampling_top_k": 8,
+                }],
+            )
+            output = {first_uid: []}
+            for _ in range(4):
+                _, responses = generator.next()
+                for response in responses:
+                    output[response.uid].append(response.token)
+            lane = generator._generation_batch.state.lanes[0]
+            draws_before = lane.rng.draws
+            assert draws_before > 0
+            (second_uid,) = generator.insert(
+                [[4, 5, 6, 2, 8]], max_tokens=[12],
+                lane_rngs=[LaneRNG(52)],
+                self_mtp_configs=[{
+                    "sampling_temp": 0.8, "sampling_top_p": 1.0,
+                    "sampling_top_k": 8,
+                }],
+            )
+            output[second_uid] = []
+            terminal = {}
+            for _ in range(100):
+                _, responses = generator.next()
+                for response in responses:
+                    output[response.uid].append(response.token)
+                    if response.finish_reason:
+                        terminal[response.uid] = response
+                if len(terminal) == 2:
+                    break
+            assert len(terminal) == 2
+            assert terminal[first_uid].lane_rng is not None
+            assert terminal[first_uid].rng_draws > draws_before
+            return (
+                output[first_uid], output[second_uid],
+                terminal[first_uid].rng_draws,
+                terminal[second_uid].rng_draws,
+            )
+
+        assert run_once() == run_once()
+    finally:
+        for generator in generators:
+            generator.close()
+        mx.set_default_device(previous_device)
+
+
+def test_handoff_latch_expires_below_threshold_while_plain_work_remains():
+    from mlx2.runtime.adaptive_policy import MTPOrdinaryHandoffPolicy
+    from mlx2.runtime.generate import BatchGenerator
+
+    previous_device = mx.default_device()
+    mx.set_default_device(mx.cpu)
+    generator = None
+    try:
+        mx.random.seed(927)
+        model = _tiny_qwen4_model()
+        generator = BatchGenerator(
+            model, completion_batch_size=3, prefill_batch_size=3,
+            prefill_step_size=32,
+            self_mtp={
+                "num_draft": 2, "persistent": True,
+                "segment_aware_live_tip": True,
+                "segment_aware_cohort_size": 3,
+            },
+            mtp_ordinary_handoff=MTPOrdinaryHandoffPolicy.from_value(
+                {"enabled": True, "max_mtp_width": 2}
+            ),
+        )
+        generator.insert(
+            [[1, 8, 12, 14, 2], [4, 5, 6, 2, 8], [3, 4, 5, 6, 7]],
+            max_tokens=[3, 3, 8],
+            lane_rngs=[LaneRNG(61), LaneRNG(62), LaneRNG(63)],
+            self_mtp_configs=[{"sampling_temp": 0.0}] * 3,
+        )
+        for _ in range(10):
+            generator.next()
+            if (len(generator._plain_fallback_batch) == 1
+                    and not generator._generation_batch._ordinary_handoff_latched):
+                break
+        else:
+            raise AssertionError("handoff latch did not expire below threshold")
+        assert len(generator._plain_fallback_batch) == 1
+
+        (later_uid,) = generator.insert(
+            [[9, 8, 7, 6, 5]], max_tokens=[4],
+            lane_rngs=[LaneRNG(64)],
+            self_mtp_configs=[{"sampling_temp": 0.0}],
+        )
+        terminal = None
+        for _ in range(30):
+            _, responses = generator.next()
+            terminal = next(
+                (response for response in responses
+                 if response.uid == later_uid and response.finish_reason),
+                terminal,
+            )
+            if terminal is not None:
+                break
+        assert terminal is not None
+        assert terminal.mtp_receipt["route"] == "segmented_self_mtp"
+    finally:
+        if generator is not None:
+            generator.close()
+        mx.set_default_device(previous_device)
+
+
+def test_handoff_batches_cache_migration_once(monkeypatch):
+    import mlx2.runtime.generate as generate_module
+    from mlx2.runtime.adaptive_policy import MTPOrdinaryHandoffPolicy
+    from mlx2.runtime.generate import BatchGenerator
+
+    previous_device = mx.default_device()
+    mx.set_default_device(mx.cpu)
+    generator = None
+    try:
+        mx.random.seed(928)
+        generator = BatchGenerator(
+            _tiny_qwen4_model(), completion_batch_size=2,
+            prefill_batch_size=2, prefill_step_size=32,
+            self_mtp={"num_draft": 2, "persistent": True},
+            mtp_ordinary_handoff=MTPOrdinaryHandoffPolicy.from_value(
+                {"enabled": True, "max_mtp_width": 1}
+            ),
+        )
+        generator.insert(
+            [[1, 8, 12, 14, 2], [4, 5, 6, 2, 8]],
+            max_tokens=[8, 8],
+            lane_rngs=[LaneRNG(71), LaneRNG(72)],
+            self_mtp_configs=[{"sampling_temp": 0.0}] * 2,
+        )
+        generator.next()
+        generator.next()
+
+        original_merge = generate_module._merge_caches
+        merge_widths = []
+
+        def observed_merge(caches):
+            merge_widths.append(len(caches))
+            return original_merge(caches)
+
+        monkeypatch.setattr(generate_module, "_merge_caches", observed_merge)
+        generator.next()
+        assert merge_widths == [2]
+    finally:
+        if generator is not None:
+            generator.close()
+        mx.set_default_device(previous_device)
+
+
+def test_width_lock_and_starved_fallbacks_migrate_in_one_plain_batch(
+    monkeypatch,
+):
+    import mlx2.runtime.generate as generate_module
+    from mlx2.runtime.generate import (
+        WIDTH_LOCK_DEFERRALS_BEFORE_PLAIN,
+        BatchGenerator,
+    )
+
+    previous_device = mx.default_device()
+    mx.set_default_device(mx.cpu)
+    generator = None
+    try:
+        mx.random.seed(929)
+        generator = BatchGenerator(
+            _tiny_qwen4_model(), completion_batch_size=2,
+            prefill_batch_size=2, prefill_step_size=32,
+            self_mtp={
+                "num_draft": 2, "persistent": True,
+                "segment_aware_live_tip": True,
+                "segment_aware_cohort_size": 2,
+            },
+        )
+        generator.insert(
+            [[1, 8, 12, 14, 2], [4, 5, 6, 2, 8]],
+            max_tokens=[8, 8],
+            lane_rngs=[LaneRNG(81), LaneRNG(82)],
+            self_mtp_configs=[{"sampling_temp": 0.0}] * 2,
+        )
+        generator.next()
+        generator.next()
+        batch = generator._generation_batch
+
+        late = batch._detach_packages([1])[0]
+        batch._segmented_compute_width_locked = True
+        for _ in range(WIDTH_LOCK_DEFERRALS_BEFORE_PLAIN + 1):
+            batch._attach_packages([late])
+            if batch._plain_ready:
+                break
+            late = batch._paused.pop(1)
+        assert [package.detached.lane.uid
+                for package in batch._plain_ready] == [1]
+
+        starved = batch._detach_packages([0])[0]
+        batch._paused[0] = starved
+        assert batch.demote_oldest_paused_to_plain() == 0
+        assert [package.detached.lane.uid
+                for package in batch._plain_ready] == [1, 0]
+
+        original_merge = generate_module._merge_caches
+        merge_widths = []
+
+        def observed_merge(caches):
+            merge_widths.append(len(caches))
+            return original_merge(caches)
+
+        monkeypatch.setattr(generate_module, "_merge_caches", observed_merge)
+        assert generator._migrate_plain_fallbacks() == []
+        assert merge_widths == [2]
+        assert len(generator._plain_fallback_batch) == 2
+
+        terminal = {}
+        for _ in range(20):
+            _, responses = generator.next()
+            for response in responses:
+                if response.finish_reason:
+                    terminal[response.uid] = response
+            if len(terminal) == 2:
+                break
+        assert len(terminal) == 2
+        assert all(response.lane_rng is not None
+                   for response in terminal.values())
+    finally:
+        if generator is not None:
+            generator.close()
+        mx.set_default_device(previous_device)
+
+
+def test_handoff_preserves_logits_processor_and_partial_stop_state():
+    from mlx2.runtime.adaptive_policy import MTPOrdinaryHandoffPolicy
+    from mlx2.runtime.generate import BatchGenerator, StopSequenceMatcher
+
+    previous_device = mx.default_device()
+    mx.set_default_device(mx.cpu)
+    ordinary = handoff = None
+    try:
+        mx.random.seed(925)
+        model = _tiny_qwen4_model()
+        prompt = [1, 7, 3, 9, 2]
+
+        def force_sequence(tokens, logits):
+            index = max(int(tokens.shape[-1]) - len(prompt), 0)
+            token = (11, 12, 13)[min(index, 2)]
+            return mx.where(
+                mx.arange(logits.shape[-1]) == token,
+                mx.zeros_like(logits),
+                -1e9,
+            )
+
+        ordinary = BatchGenerator(
+            model, completion_batch_size=2, prefill_batch_size=2,
+            prefill_step_size=32,
+        )
+        handoff = BatchGenerator(
+            model, completion_batch_size=2, prefill_batch_size=2,
+            prefill_step_size=32,
+            self_mtp={
+                "num_draft": 2, "persistent": True,
+                "segment_aware_live_tip": True,
+                "segment_aware_cohort_size": 2,
+            },
+            mtp_ordinary_handoff=MTPOrdinaryHandoffPolicy.from_value(
+                {"enabled": True, "max_mtp_width": 1}
+            ),
+        )
+        matcher = StopSequenceMatcher([[11, 12]])
+        (ordinary_uid,) = ordinary.insert(
+            [prompt], max_tokens=[8], logits_processors=[[force_sequence]],
+            stop_matchers=[matcher],
+        )
+        (handoff_uid,) = handoff.insert(
+            [prompt], max_tokens=[8], logits_processors=[[force_sequence]],
+            stop_matchers=[matcher], lane_rngs=[LaneRNG(41)],
+            self_mtp_configs=[{"sampling_temp": 0.0}],
+        )
+        ordinary_tokens = []
+        handoff_tokens = []
+        while not handoff_tokens:
+            _, ordinary_responses = ordinary.next()
+            _, handoff_responses = handoff.next()
+            ordinary_tokens.extend(r.token for r in ordinary_responses)
+            handoff_tokens.extend(r.token for r in handoff_responses)
+        handoff.insert(
+            [[4, 5, 6, 2, 8]], max_tokens=[8],
+            lane_rngs=[LaneRNG(42)],
+            self_mtp_configs=[{"sampling_temp": 0.0}],
+        )
+        ordinary_reason = handoff_reason = None
+        for _ in range(40):
+            _, ordinary_responses = ordinary.next()
+            _, handoff_responses = handoff.next()
+            ordinary_tokens.extend(r.token for r in ordinary_responses)
+            handoff_tokens.extend(
+                r.token for r in handoff_responses if r.uid == handoff_uid
+            )
+            ordinary_reason = next(
+                (r.finish_reason for r in ordinary_responses
+                 if r.uid == ordinary_uid and r.finish_reason),
+                ordinary_reason,
+            )
+            handoff_reason = next(
+                (r.finish_reason for r in handoff_responses
+                 if r.uid == handoff_uid and r.finish_reason),
+                handoff_reason,
+            )
+            if ordinary_reason and handoff_reason:
+                break
+        assert handoff_tokens == ordinary_tokens == [11, 12]
+        assert handoff_reason == ordinary_reason == "stop"
+    finally:
+        if ordinary is not None:
+            ordinary.close()
+        if handoff is not None:
+            handoff.close()
         mx.set_default_device(previous_device)
 
 

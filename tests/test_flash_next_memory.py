@@ -1,4 +1,3 @@
-from dataclasses import asdict
 import mlx.core as mx
 import pytest
 from mlx2.adapters.flash_next_memory import FlashNextCacheBudget
@@ -95,6 +94,24 @@ def test_reclaim_allocator_scratch_before_decode_route_demotion():
     blocked = _make_self_mtp_admission_callback(
         free_memory=lambda: 20.0, reclaim_memory=lambda: None)
     assert blocked([(1, 1024, 2, True, 1.0)]) == {1: "queue"}
+
+
+def test_depth_zero_admission_prices_all_ordinary_handoff_lanes():
+    from mlx2.runtime.memory_policy import _make_self_mtp_admission_callback
+
+    controller = SelfMTPLaneAdmissionController(
+        transient_gib_per_lane=3.0,
+        saturation_lane_cap=1,
+        verification_row_cap=3,
+    )
+    callback = _make_self_mtp_admission_callback(
+        controller,
+        free_memory=lambda: controller.hard_reserve_gib + 2.1,
+    )
+    rows = [(1, 0, 2, True, 0.0), (2, 0, 2, True, 0.0)]
+
+    assert callback(rows) == {1: "plain", 2: "queue"}
+    assert callback.at_depth(0)(rows) == {1: "plain", 2: "plain"}
 
 
 def test_atomic_cohort_lowers_uniform_depth_before_dropping_a_lane():

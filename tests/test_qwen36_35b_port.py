@@ -102,8 +102,9 @@ def test_embedded_mtp_requires_complete_sparse_head():
         assert inspect_artifact(root)["has_mtp"]
         resolved = inspect_model(root)
         assert Capability.MTP in resolved.descriptor.capabilities
-        # Measured default: ordinary even with a complete head (--native-mtp opts in).
-        assert resolved.default_route == "ordinary"
+        # Measured default: native MTP, sound only because the wide-cohort
+        # ordinary handoff recovers the batched loss (see the adapter note).
+        assert resolved.default_route == "native_mtp"
         index_path = root / "model.safetensors.index.json"
         index = json.loads(index_path.read_text())
         del index["weight_map"][

@@ -82,6 +82,25 @@ class FakeEngine:
                 "pld_proposed": 8,
                 "accepted_proposals": 9,
                 "fly_relaxed_accepts": 2,
+                "adaptive_mtp_depth_decreases_concurrent": 2,
+                "adaptive_mtp_depth_recoveries_alone": 1,
+                "adaptive_mtp_cost_probes": 4,
+                "adaptive_mtp_cost_depth_changes": 2,
+                "mtp_ordinary_handoff_events": 2,
+                "mtp_ordinary_handoff_lanes": 18,
+                "mtp_ordinary_handoff_segmented_width_lock": 2,
+                "adaptive_mtp_cost_model": {
+                    "active_bucket": "5-8",
+                    "buckets": {
+                        "5-8": {
+                            "chosen_depth": 0,
+                            "goodput_tokens_per_second": {
+                                "0": 107.35,
+                                "2": 98.72,
+                            },
+                        }
+                    },
+                },
                 "self_mtp_zero_fast_rounds": 3,
                 "apc_interior_checkpoints_captured": 5,
                 "target_max_width": 2,
@@ -311,6 +330,39 @@ def test_engine_exposition_is_non_destructive_bounded_and_advanced():
     assert 'component="structured_output",event="dead_end"} 1' in first
     assert 'mechanism="prompt_lookup"' in first
     assert 'event="fly_relaxed_accepts",mechanism="fly_verification"' in first
+    assert (
+        'event="adaptive_mtp_depth_decreases_concurrent",'
+        'mechanism="adaptive_mtp"} 2'
+    ) in first
+    assert (
+        'event="adaptive_mtp_depth_recoveries_alone",'
+        'mechanism="adaptive_mtp"} 1'
+    ) in first
+    assert (
+        'event="adaptive_mtp_cost_probes",mechanism="adaptive_mtp"} 4'
+    ) in first
+    assert (
+        'event="adaptive_mtp_cost_depth_changes",mechanism="adaptive_mtp"} 2'
+    ) in first
+    assert (
+        'event="mtp_ordinary_handoff_events",'
+        'mechanism="mtp_ordinary_handoff"} 2'
+    ) in first
+    assert (
+        'event="mtp_ordinary_handoff_lanes",'
+        'mechanism="mtp_ordinary_handoff"} 18'
+    ) in first
+    assert (
+        'event="mtp_ordinary_handoff_segmented_width_lock",'
+        'mechanism="mtp_ordinary_handoff"} 2'
+    ) in first
+    assert (
+        'mlx2_adaptive_mtp_chosen_depth{width_bucket="5-8"} 0'
+    ) in first
+    assert (
+        'mlx2_adaptive_mtp_goodput_tokens_per_second{depth="0",'
+        'width_bucket="5-8"} 107.34999999999999'
+    ) in first
     assert 'event="self_mtp_zero_fast_rounds",mechanism="self_mtp"' in first
     assert 'mlx2_segmented_mtp_events_total{event="engaged"} 1' in first
     assert 'mlx2_spomin_operations_total{operation="applied"} 1' in first

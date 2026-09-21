@@ -512,6 +512,14 @@ _SCHEDULER_EVENTS = frozenset(
         "adaptive_mtp_parks",
         "adaptive_mtp_reentries",
         "adaptive_mtp_probes",
+        "adaptive_mtp_cost_probes",
+        "adaptive_mtp_cost_depth_changes",
+        "adaptive_mtp_depth_decreases_concurrent",
+        "adaptive_mtp_depth_recoveries_alone",
+        "mtp_ordinary_handoff_events",
+        "mtp_ordinary_handoff_lanes",
+        "mtp_ordinary_handoff_static_width_threshold",
+        "mtp_ordinary_handoff_segmented_width_lock",
         "mtp_confidence_feature_cycles",
         "mtp_acceptance_log_records",
         "self_mtp_zero_fast_rounds",
@@ -535,6 +543,8 @@ _SCHEDULER_EVENTS = frozenset(
 _PREFILL_CHUNK_LABELS = frozenset(
     str(1 << exponent) for exponent in range(4, 14)
 )
+_ADAPTIVE_MTP_WIDTH_BUCKETS = frozenset({"1", "2", "3-4", "5-8", "9-16", "17+"})
+_ADAPTIVE_MTP_DEPTHS = frozenset(str(depth) for depth in range(9))
 
 _SEGMENTED_MTP_TIMERS = frozenset(
     {"proposal_ns", "commit_ns", "async_qsa_promotion_wait_ns"}
@@ -1053,6 +1063,8 @@ def _add_apcv2(
 def _scheduler_mechanism(key: str) -> str:
     if key.startswith("pld_"):
         return "prompt_lookup"
+    if key.startswith("mtp_ordinary_handoff_"):
+        return "mtp_ordinary_handoff"
     if key.startswith("adaptive_mtp_"):
         return "adaptive_mtp"
     if key.startswith("self_mtp_copy_"):
@@ -1098,6 +1110,41 @@ def _scheduler_mechanism(key: str) -> str:
 
 def _add_scheduler(builder: PrometheusBuilder, scheduler: Mapping[str, Any]) -> None:
     for key, raw in sorted(scheduler.items()):
+        if key == "adaptive_mtp_cost_model":
+            buckets = (raw or {}).get("buckets", {}) if isinstance(raw, Mapping) else {}
+            for width_bucket, state in sorted(buckets.items()):
+                if width_bucket not in _ADAPTIVE_MTP_WIDTH_BUCKETS or not isinstance(
+                    state, Mapping
+                ):
+                    continue
+                chosen_depth = state.get("chosen_depth")
+                if isinstance(chosen_depth, (int, float)) and not isinstance(
+                    chosen_depth, bool
+                ):
+                    builder.gauge(
+                        "mlx2_adaptive_mtp_chosen_depth",
+                        "Current cost-aware native-MTP depth by bounded compute-width bucket.",
+                        chosen_depth,
+                        {"width_bucket": width_bucket},
+                    )
+                estimates = state.get("goodput_tokens_per_second") or {}
+                if not isinstance(estimates, Mapping):
+                    continue
+                for depth, estimate in sorted(estimates.items()):
+                    depth_label = str(depth)
+                    if depth_label not in _ADAPTIVE_MTP_DEPTHS:
+                        continue
+                    if not isinstance(estimate, (int, float)) or isinstance(
+                        estimate, bool
+                    ):
+                        continue
+                    builder.gauge(
+                        "mlx2_adaptive_mtp_goodput_tokens_per_second",
+                        "EWMA committed-token goodput by bounded width bucket and depth.",
+                        estimate,
+                        {"depth": depth_label, "width_bucket": width_bucket},
+                    )
+            continue
         if key == "adaptive_prefill_chunk_histogram":
             bounded_chunks: dict[str, int] = {}
             for chunk, count in (raw or {}).items():

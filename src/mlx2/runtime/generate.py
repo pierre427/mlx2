@@ -614,7 +614,7 @@ class PromptProcessingBatch:
             self.logits_processors,
             self.stop_matchers,
             self.max_tokens,
-            self.persistent_inputs,
+            persistent_inputs=self.persistent_inputs,
         )
         self.uids = []
         self.prompt_cache = []
@@ -687,6 +687,8 @@ class GenerationBatch:
         stop_matchers: List[StopSequenceMatcher],
         max_tokens: List[int],
         persistent_inputs: Optional[List[Optional[dict]]] = None,
+        route_receipts: Optional[List[Optional[dict]]] = None,
+        lane_rngs: Optional[List[Optional[LaneRNG]]] = None,
     ):
         self.model = model
         self.uids = uids
@@ -697,6 +699,12 @@ class GenerationBatch:
         self.logits_processors = logits_processors
         self.stop_matchers = stop_matchers
         self.max_tokens = max_tokens
+        self.route_receipts = list(route_receipts or [None] * len(uids))
+        self.lane_rngs = list(lane_rngs or [None] * len(uids))
+        if len(self.route_receipts) != len(self.uids):
+            raise ValueError("route_receipts must match generation batch width")
+        if len(self.lane_rngs) != len(self.uids):
+            raise ValueError("lane_rngs must match generation batch width")
         self.persistent_inputs = (
             list(persistent_inputs)
             if persistent_inputs is not None
@@ -769,6 +777,8 @@ class GenerationBatch:
         self._token_context.extend(batch._token_context)
         self._num_tokens.extend(batch._num_tokens)
         self._matcher_states.extend(batch._matcher_states)
+        self.route_receipts.extend(batch.route_receipts)
+        self.lane_rngs.extend(batch.lane_rngs)
 
     def _residual_steer(self, inputs):
         """Assemble this step's per-lane residual steering, if any lane asks.
@@ -937,6 +947,8 @@ class GenerationBatch:
         self._token_context = [self._token_context[idx] for idx in keep]
         self._num_tokens = [self._num_tokens[idx] for idx in keep]
         self._matcher_states = [self._matcher_states[idx] for idx in keep]
+        self.route_receipts = [self.route_receipts[idx] for idx in keep]
+        self.lane_rngs = [self.lane_rngs[idx] for idx in keep]
 
     def next(self) -> List[Response]:
         """
@@ -948,9 +960,18 @@ class GenerationBatch:
         if not self.uids:
             return []
         (tokens, logprobs) = self._step()
+        width = len(self.uids)
         keep = []
         responses = []
         for i in range(len(self.uids)):
+            receipt = self.route_receipts[i]
+            if receipt is not None:
+                ordinary_widths = set(receipt.get("ordinary_compute_widths", ()))
+                ordinary_widths.add(width)
+                receipt["ordinary_compute_widths"] = sorted(ordinary_widths)
+                observed = set(receipt.get("observed_compute_widths", ()))
+                observed.add(width)
+                receipt["observed_compute_widths"] = sorted(observed)
             finish_reason = None
             self._num_tokens[i] += 1
             if self._num_tokens[i] >= self.max_tokens[i]:
@@ -969,6 +990,12 @@ class GenerationBatch:
                         finish_reason=finish_reason,
                         prompt_cache=self.extract_cache(i),
                         all_tokens=self.tokens[i],
+                        lane_rng=self.lane_rngs[i],
+                        rng_draws=(
+                            self.lane_rngs[i].draws
+                            if self.lane_rngs[i] is not None else 0
+                        ),
+                        mtp_receipt=receipt,
                     )
                 )
             else:
@@ -981,13 +1008,11 @@ class GenerationBatch:
                         finish_reason=None,
                         prompt_cache=None,
                         all_tokens=None,
+                        mtp_receipt=receipt,
                     )
                 )
         if len(keep) < len(self.uids):
-            width = len(self.uids)
             self.filter(keep)
-        else:
-            width = len(self.uids)
         for response in responses:
             response.execution_width = width
         return responses
@@ -1015,6 +1040,7 @@ class _PausedMTPGenerationLane:
     stop_matcher: StopSequenceMatcher
     matcher_state: Any
     num_tokens: int
+    handoff_receipt: Optional[dict] = None
 
 
 def _segment_aware_live_tip_enabled(config: Optional[Mapping[str, Any]]) -> bool:
@@ -1215,6 +1241,7 @@ class MTPGenerationBatch:
         arm_async_qsa_promotion: bool = True,
         async_qsa_prequeue: Optional[Any] = None,
         adaptive_depth_policy: Optional[Any] = None,
+        ordinary_handoff_policy: Optional[Any] = None,
         scheduler_stats: Optional[Dict[str, Any]] = None,
         acceptance_logger: Optional[Any] = None,
         mtp_admission: Optional[
@@ -1274,8 +1301,10 @@ class MTPGenerationBatch:
         self.mtp_admission = mtp_admission
         self._base_mtp_admission = mtp_admission
         self.adaptive_depth_policy = adaptive_depth_policy
+        self.ordinary_handoff_policy = ordinary_handoff_policy
         self.acceptance_logger = acceptance_logger
         self.scheduler_stats = scheduler_stats if scheduler_stats is not None else {}
+        self._ordinary_handoff_latched = False
         self._adaptive_admitted_cap = min(
             (int(lane.lane.num_draft) for lane in detached_lanes), default=0
         )
@@ -1594,6 +1623,25 @@ class MTPGenerationBatch:
             attach_self_mtp_lanes,
         )
 
+        already_handed_off = [
+            package for package in packages if package.handoff_receipt is not None
+        ]
+        if already_handed_off:
+            self._plain_ready.extend(already_handed_off)
+            packages = [
+                package for package in packages if package.handoff_receipt is None
+            ]
+            if not packages:
+                return
+        if self._ordinary_handoff_latched:
+            self._mark_plain_handoff(
+                packages,
+                decision={"reason": "cohort_already_handed_off"},
+                projected_width=len(packages),
+            )
+            self._plain_ready.extend(packages)
+            return
+
         if self.state.lanes:
             depths = {lane.num_draft for lane in self.state.lanes}
             if len(depths) != 1:
@@ -1606,6 +1654,22 @@ class MTPGenerationBatch:
             and self._segmented_compute_width_locked
             and self.state.lanes
         ):
+            if self.ordinary_handoff_policy is not None:
+                projected_width = (
+                    len(self.state.lanes) + len(self._paused) + len(packages)
+                )
+                decision = self.ordinary_handoff_policy.decision(
+                    width=projected_width,
+                    width_locked=True,
+                    adaptive=self.adaptive_depth_policy,
+                )
+                if decision is not None:
+                    self._handoff_all_to_plain(
+                        packages,
+                        decision=decision,
+                        projected_width=projected_width,
+                    )
+                    return
             from .segmented_self_mtp import note_segmented_self_mtp
 
             deferred = 0
@@ -1652,6 +1716,114 @@ class MTPGenerationBatch:
         self._initial_outputs.extend((package.initial_output for package in packages))
         self._arm_async_qsa_promotion()
 
+    def _mark_plain_handoff(self, packages, *, decision, projected_width):
+        receipt = {
+            "selected": True,
+            "engaged": True,
+            "one_way": True,
+            "reason": str(decision["reason"]),
+            "projected_width": int(projected_width),
+            "policy": self.ordinary_handoff_policy.as_dict(),
+            "decision": dict(decision),
+        }
+        for package in packages:
+            lane = package.detached.lane
+            stats = dict(vars(lane.stats))
+            stats["total_emitted"] = int(lane.stats.total_emitted)
+            stats["draft_acceptance"] = float(lane.stats.draft_accepted) / max(
+                int(lane.stats.draft_proposed), 1
+            )
+            lane_receipt = dict(receipt)
+            lane_receipt["mtp_observed_compute_widths_before_handoff"] = sorted(
+                self._observed_widths_by_uid.pop(lane.uid, set())
+            )
+            lane_receipt["num_draft_before_handoff"] = int(lane.num_draft)
+            lane_receipt["committed_tokens_before_handoff"] = int(
+                package.num_tokens
+            )
+            lane_receipt["prepared_initial_token_pending"] = (
+                package.initial_output is not None
+            )
+            lane_receipt["prepared_initial_token_from_draft"] = (
+                None
+                if package.initial_output is None
+                else bool(package.initial_output.from_draft)
+            )
+            lane_receipt["stats_before_handoff"] = stats
+            lane_receipt["async_qsa_promotion_before_handoff"] = (
+                self._async_qsa_receipts_by_uid.pop(lane.uid, None)
+            )
+            package.handoff_receipt = lane_receipt
+            # Draft and segmented transaction ownership end here. The target
+            # cache remains alive for exact ordinary continuation.
+            _close_segmented_detached(package.detached, release_cache=False)
+
+    def _handoff_all_to_plain(self, joining=(), *, decision, projected_width):
+        """Detach admitted lanes at one closed boundary.
+
+        Memory-queued lanes keep waiting for admission. They are marked for
+        plain continuation and can never re-enter MTP when later admitted.
+        """
+        if self.state.proposal_open:
+            raise RuntimeError("cannot hand off MTP while a proposal is open")
+        ready = self._detach_packages(range(len(self.state.lanes)))
+        waiting = []
+        for uid, package in list(self._paused.items()):
+            if uid in self._memory_queued:
+                waiting.append(package)
+            else:
+                ready.append(package)
+                self._paused.pop(uid)
+        # Joining packages reached this seam only after the current admission
+        # decision approved them. Do not charge or queue them a second time.
+        ready.extend(joining)
+        selected = [*ready, *waiting]
+        self._ordinary_handoff_latched = True
+        self._segmented_compute_width_locked = False
+        self._width_lock_deferrals.clear()
+        self._mark_plain_handoff(
+            selected, decision=decision, projected_width=projected_width
+        )
+        self._plain_ready.extend(ready)
+        _bump_bounded_counter(self.scheduler_stats, "mtp_ordinary_handoff_events")
+        _bump_bounded_counter(
+            self.scheduler_stats, "mtp_ordinary_handoff_lanes", len(selected)
+        )
+        reason = str(decision["reason"])
+        _bump_bounded_counter(
+            self.scheduler_stats, f"mtp_ordinary_handoff_{reason}"
+        )
+
+    def _maybe_handoff_active_cohort(self) -> bool:
+        if (
+            self._ordinary_handoff_latched
+            or self.ordinary_handoff_policy is None
+            or not self.state.lanes
+        ):
+            return False
+        width = len(self.state.lanes) + len(self._paused)
+        decision = self.ordinary_handoff_policy.decision(
+            width=width,
+            width_locked=False,
+            adaptive=self.adaptive_depth_policy,
+        )
+        if decision is None:
+            return False
+        self._handoff_all_to_plain(decision=decision, projected_width=width)
+        return True
+
+    def release_ordinary_handoff_latch(self) -> bool:
+        """Release safely once admitted migrated work is below the threshold."""
+        if self.state.lanes or self._plain_ready:
+            return False
+        if any(
+            package.handoff_receipt is None
+            for package in self._paused.values()
+        ):
+            return False
+        self._ordinary_handoff_latched = False
+        return True
+
     @property
     def has_deferred_lanes(self) -> bool:
         """Whether fixed-width segmented admission is holding arrivals."""
@@ -1661,15 +1833,28 @@ class MTPGenerationBatch:
         if self.mtp_admission is None:
             return True
         ticket = self._async_qsa_ticket
+        def partition_rows():
+            rows = tuple(self.mtp_cycle_state())
+            handed_off = {
+                uid
+                for uid, package in self._paused.items()
+                if package.handoff_receipt is not None
+            }
+            return (
+                tuple(row for row in rows if row[0] not in handed_off),
+                tuple(row for row in rows if row[0] in handed_off),
+            )
         preview = getattr(self.mtp_admission, "preview", None)
         def memory_constrained():
-            rows = tuple(self.mtp_cycle_state())
-            decision = preview(rows)
+            native_rows, _ = partition_rows()
+            if not native_rows:
+                return False
+            decision = preview(native_rows)
             if decision.stage == "full":
                 return False
             ceiling = getattr(self.mtp_admission, "ceiling", None)
             if callable(ceiling):
-                possible = ceiling(rows)
+                possible = ceiling(native_rows)
                 return (decision.modes, decision.draft_depths) != (possible.modes, possible.draft_depths)
             return True
         if ticket is not None and callable(preview):
@@ -1710,7 +1895,23 @@ class MTPGenerationBatch:
                 return False
             else:
                 self._optional_reclaim_deadline = 0.0
-        decisions = dict(self.mtp_admission(tuple(self.mtp_cycle_state())) or {})
+        native_rows, handoff_rows = partition_rows()
+        decisions = (
+            dict(self.mtp_admission(native_rows) or {})
+            if native_rows else {}
+        )
+        if handoff_rows:
+            at_depth = getattr(self.mtp_admission, "at_depth", None)
+            ordinary_admission = at_depth(0) if callable(at_depth) else (
+                self.mtp_admission
+            )
+            ordinary = dict(ordinary_admission(handoff_rows) or {})
+            decisions.update(
+                {
+                    uid: "queue" if value == "queue" else "plain"
+                    for uid, value in ordinary.items()
+                }
+            )
         if self.adaptive_depth_policy is not None:
             admitted_depths = [
                 int(value)
@@ -1721,8 +1922,8 @@ class MTPGenerationBatch:
             ]
             if admitted_depths:
                 self._adaptive_admitted_cap = min(admitted_depths)
-        if getattr(self.mtp_admission, "atomic_cohort", False):
-            cohort_uids = tuple(row[0] for row in self.mtp_cycle_state())
+        if getattr(self.mtp_admission, "atomic_cohort", False) and native_rows:
+            cohort_uids = tuple(row[0] for row in native_rows)
             depths = {
                 decisions.get(uid)
                 for uid in cohort_uids
@@ -1860,7 +2061,31 @@ class MTPGenerationBatch:
             # Otherwise this long-lived empty batch would immediately replace
             # an atomic lower-k decision with its generic fewer-lanes policy.
             self.mtp_admission = batch.mtp_admission
-            self.adaptive_depth_policy = batch.adaptive_depth_policy
+            incoming_adaptive = batch.adaptive_depth_policy
+            current_adaptive = self.adaptive_depth_policy
+            if (
+                current_adaptive is None
+                or incoming_adaptive is None
+                or current_adaptive.max_depth != incoming_adaptive.max_depth
+                or current_adaptive.ewma_alpha != incoming_adaptive.ewma_alpha
+                or current_adaptive.shrink_gate != incoming_adaptive.shrink_gate
+                or current_adaptive.grow_gate != incoming_adaptive.grow_gate
+                or current_adaptive.loss_rounds != incoming_adaptive.loss_rounds
+                or current_adaptive.gain_rounds != incoming_adaptive.gain_rounds
+                or current_adaptive.park_rounds != incoming_adaptive.park_rounds
+                or current_adaptive.goodput_alpha
+                != incoming_adaptive.goodput_alpha
+                or current_adaptive.goodput_hysteresis
+                != incoming_adaptive.goodput_hysteresis
+                or current_adaptive.min_samples_per_depth
+                != incoming_adaptive.min_samples_per_depth
+                or current_adaptive.goodput_window
+                != incoming_adaptive.goodput_window
+                or current_adaptive.probe_interval
+                != incoming_adaptive.probe_interval
+                or current_adaptive.stale_rounds != incoming_adaptive.stale_rounds
+            ):
+                self.adaptive_depth_policy = incoming_adaptive
             self._adaptive_admitted_cap = batch._adaptive_admitted_cap
         if getattr(self, "acceptance_logger", None) is None:
             self.acceptance_logger = getattr(batch, "acceptance_logger", None)
@@ -2083,8 +2308,28 @@ class MTPGenerationBatch:
                             "park_rounds": int(
                                 self.adaptive_depth_policy.park_rounds
                             ),
+                            "goodput_alpha": float(
+                                self.adaptive_depth_policy.goodput_alpha
+                            ),
+                            "goodput_hysteresis": float(
+                                self.adaptive_depth_policy.goodput_hysteresis
+                            ),
+                            "min_samples_per_depth": int(
+                                self.adaptive_depth_policy.min_samples_per_depth
+                            ),
+                            "goodput_window": int(
+                                self.adaptive_depth_policy.goodput_window
+                            ),
+                            "probe_interval": int(
+                                self.adaptive_depth_policy.probe_interval
+                            ),
+                            "stale_rounds": int(
+                                self.adaptive_depth_policy.stale_rounds
+                            ),
                         },
                         "counters": dict(self.adaptive_depth_policy.counters),
+                        "cost_model": self.adaptive_depth_policy.diagnostics(),
+                        "trace": list(self.adaptive_depth_policy.trace),
                     }
                 ),
             }
@@ -2160,6 +2405,8 @@ class MTPGenerationBatch:
             return []
         if any((output is not None for output in self._initial_outputs)):
             return self._emit_initial()
+        if self._maybe_handoff_active_cohort():
+            return []
         if not self.state.lanes:
             self._segmented_compute_width_locked = False
         if not self.state.lanes and self._paused and (self.mtp_admission is None):
@@ -2180,9 +2427,11 @@ class MTPGenerationBatch:
             propose_batched_self_mtp,
         )
 
+        cohort_width = len(self.state.lanes)
         if self.adaptive_depth_policy is not None:
             cohort_depth = self.adaptive_depth_policy.select(
-                admitted_cap=self._adaptive_admitted_cap
+                admitted_cap=self._adaptive_admitted_cap,
+                width=cohort_width,
             )
             # This boundary is closed: admission has completed and no proposal
             # owns cache state.  Apply one depth to the whole physical cohort.
@@ -2194,6 +2443,9 @@ class MTPGenerationBatch:
         zero_depth = all(
             min(lane.num_draft, max(lane.max_tokens - lane.ntoks - 1, 0)) == 0
             for lane in self.state.lanes
+        )
+        round_started = (
+            time.perf_counter() if self.adaptive_depth_policy is not None else None
         )
         if zero_depth:
             from .hybrid_speculative import copy_draft_candidate_pending
@@ -2215,13 +2467,15 @@ class MTPGenerationBatch:
                 and getattr(self.state, "_batched_state", None) is not None
             )
         )
-        width = (
+        compute_width = (
             len(self.state.lanes)
             if true_batched_segmented or not self.segmented_live_tip
             else 1
         )
         for lane in self.state.lanes:
-            self._observed_widths_by_uid.setdefault(lane.uid, set()).add(width)
+            self._observed_widths_by_uid.setdefault(lane.uid, set()).add(
+                compute_width
+            )
         try:
             emitted_counts = []
             terminal = []
@@ -2268,6 +2522,14 @@ class MTPGenerationBatch:
                 copy_spans = proposal.copy_spans or (0,) * len(
                     proposal.draft_depths
                 )
+                cost = {}
+                if not any(copy_spans):
+                    cost = {
+                        "committed": sum(emitted_counts),
+                        "elapsed_seconds": max(
+                            time.perf_counter() - round_started, 1e-12
+                        ),
+                    }
                 self.adaptive_depth_policy.observe(
                     sum(
                         depth
@@ -2281,6 +2543,9 @@ class MTPGenerationBatch:
                         )
                         if not copy
                     ),
+                    width=cohort_width,
+                    observed_compute_width=compute_width,
+                    **cost,
                 )
             if proposal.draft_features:
                 self._observe_draft_confidence(proposal)
@@ -2369,6 +2634,7 @@ class MTPGenerationBatch:
         segmented_live_tip: bool = False,
         async_qsa_promotion: bool = False,
         adaptive_depth_policy: Optional[Any] = None,
+        ordinary_handoff_policy: Optional[Any] = None,
         scheduler_stats: Optional[Dict[str, Any]] = None,
     ):
         return cls(
@@ -2380,6 +2646,7 @@ class MTPGenerationBatch:
             segmented_live_tip=segmented_live_tip,
             async_qsa_promotion=async_qsa_promotion,
             adaptive_depth_policy=adaptive_depth_policy,
+            ordinary_handoff_policy=ordinary_handoff_policy,
             scheduler_stats=scheduler_stats,
         )
 
@@ -2439,6 +2706,7 @@ class BatchGenerator:
         post_prefill_transform: Optional[Callable[..., Optional[dict]]] = None,
         decode_time_fairness: Optional[Mapping[str, Any]] = None,
         adaptive_mtp_depth: Optional[Mapping[str, Any]] = None,
+        mtp_ordinary_handoff: Optional[Any] = None,
         fly_verification=None,
         apc_interior_checkpoints: Optional[Mapping[str, int]] = None,
         prefill_scheduling: Optional[Mapping[str, Any]] = None,
@@ -2477,6 +2745,9 @@ class BatchGenerator:
         self.adaptive_mtp_depth = (
             None if adaptive_mtp_depth is None else dict(adaptive_mtp_depth)
         )
+        if mtp_ordinary_handoff is not None and self.self_mtp is None:
+            raise ValueError("MTP ordinary handoff requires a self-MTP route")
+        self.mtp_ordinary_handoff = mtp_ordinary_handoff
         if mtp_acceptance_log is not None and self.self_mtp is None:
             raise ValueError("MTP acceptance logging requires a self-MTP route")
         self.mtp_acceptance_logger = None
@@ -2704,6 +2975,9 @@ class BatchGenerator:
                 segmented_live_tip=_segment_aware_live_tip_enabled(self.self_mtp),
                 async_qsa_promotion=_segmented_async_qsa_promotion_enabled(
                     self.self_mtp
+                ),
+                ordinary_handoff_policy=getattr(
+                    self, "mtp_ordinary_handoff", None
                 ),
                 scheduler_stats=self.scheduler_stats,
             )
@@ -3641,6 +3915,9 @@ class BatchGenerator:
                         **self.adaptive_mtp_depth,
                     )
                 ),
+                ordinary_handoff_policy=getattr(
+                    self, "mtp_ordinary_handoff", None
+                ),
                 scheduler_stats=self.scheduler_stats,
                 acceptance_logger=getattr(self, "mtp_acceptance_logger", None),
             ),
@@ -3902,8 +4179,36 @@ class BatchGenerator:
         if self.self_mtp is None:
             return []
         responses = []
+        continuing = []
         for package in self._generation_batch.take_plain_fallbacks():
             lane = package.detached.lane
+            handoff = package.handoff_receipt
+            receipt = (
+                None
+                if handoff is None
+                else {
+                    "route": "ordinary_after_mtp_handoff",
+                    "observed_compute_widths": list(
+                        handoff["mtp_observed_compute_widths_before_handoff"]
+                    ),
+                    "ordinary_compute_widths": [],
+                    "num_draft": int(handoff["num_draft_before_handoff"]),
+                    "stats": dict(handoff["stats_before_handoff"]),
+                    "mtp_ordinary_handoff": dict(handoff),
+                }
+            )
+            if receipt is not None and (
+                self._generation_batch.adaptive_depth_policy is not None
+            ):
+                adaptive = self._generation_batch.adaptive_depth_policy
+                receipt["adaptive_depth"] = {
+                    "selected": True,
+                    "max_depth": int(adaptive.max_depth),
+                    "current": int(adaptive.current_depth),
+                    "counters": dict(adaptive.counters),
+                    "cost_model": adaptive.diagnostics(),
+                    "trace": list(adaptive.trace),
+                }
             matcher_state = package.matcher_state
             initial = package.initial_output
             if initial is not None:
@@ -3922,6 +4227,7 @@ class BatchGenerator:
                     prompt_cache=None,
                     all_tokens=None,
                     from_draft=initial.from_draft,
+                    mtp_receipt=receipt,
                 )
                 responses.append(response)
                 if reason is not None:
@@ -3936,21 +4242,49 @@ class BatchGenerator:
             if remaining <= 0:
                 _close_segmented_detached(package.detached, release_cache=True)
                 continue
+            continuing.append(
+                (package, lane, matcher_state, remaining, receipt)
+            )
+        if continuing:
             plain = GenerationBatch(
                 self.model,
-                [lane.uid],
-                mx.array([lane.cur], dtype=mx.uint32),
-                _merge_caches([package.detached.caches.target]),
-                [MTPGenerationBatch._prefix_tokens(lane)],
-                [self._plain_sampler_for_mtp_lane(lane)],
+                [lane.uid for (_, lane, _, _, _) in continuing],
+                mx.array(
+                    [lane.cur for (_, lane, _, _, _) in continuing],
+                    dtype=mx.uint32,
+                ),
+                _merge_caches(
+                    [
+                        package.detached.caches.target
+                        for (package, _, _, _, _) in continuing
+                    ]
+                ),
+                [
+                    MTPGenerationBatch._prefix_tokens(lane)
+                    for (_, lane, _, _, _) in continuing
+                ],
+                [
+                    self._plain_sampler_for_mtp_lane(lane)
+                    for (_, lane, _, _, _) in continuing
+                ],
                 self.sampler,
-                [lane.logits_processors],
-                [package.stop_matcher],
-                [remaining],
+                [lane.logits_processors for (_, lane, _, _, _) in continuing],
+                [
+                    package.stop_matcher
+                    for (package, _, _, _, _) in continuing
+                ],
+                [remaining for (_, _, _, remaining, _) in continuing],
+                route_receipts=[
+                    receipt for (_, _, _, _, receipt) in continuing
+                ],
+                lane_rngs=[lane.rng for (_, lane, _, _, _) in continuing],
             )
-            plain._matcher_states[0] = matcher_state
+            plain._matcher_states = [
+                matcher_state for (_, _, matcher_state, _, _) in continuing
+            ]
             self._plain_fallback_batch.extend(plain)
-            _close_segmented_detached(package.detached, release_cache=True)
+            for package, _, _, _, _ in continuing:
+                _close_segmented_detached(package.detached, release_cache=True)
         return responses
 
     def mtp_cycle_state(self):
@@ -4739,6 +5073,15 @@ class BatchGenerator:
         generation_responses.extend(self._migrate_plain_fallbacks())
         if len(self._plain_fallback_batch) > 0:
             generation_responses.extend(self._plain_fallback_batch.next())
+        handoff_policy = getattr(self, "mtp_ordinary_handoff", None)
+        if (
+            getattr(self._generation_batch, "_ordinary_handoff_latched", False)
+            and handoff_policy is not None
+            and len(self._plain_fallback_batch) < handoff_policy.max_mtp_width
+        ):
+            # Expire the cohort latch on width, not total service idleness.
+            # A steady prefill queue must not make ordinary mode permanent.
+            self._generation_batch.release_ordinary_handoff_latch()
         if decode_started is not None:
             decode_completed = time.perf_counter()
             self._last_decode_duration_ms = (decode_completed - decode_started) * 1000
@@ -5351,6 +5694,12 @@ class BatchGenerator:
                 self.scheduler_stats[key] = max(
                     int(self.scheduler_stats.get(key, 0)), int(value)
                 )
+            cost_model = adaptive.get("cost_model")
+            if isinstance(cost_model, Mapping):
+                # Six fixed width buckets and adapter-bounded native depths
+                # keep this status tree finite. Prometheus applies its own
+                # reviewed label bounds when exporting it.
+                self.scheduler_stats["adaptive_mtp_cost_model"] = dict(cost_model)
 
     def next_generated(self):
         """
