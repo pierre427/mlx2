@@ -151,6 +151,28 @@ class Qwen359BAdapter(Qwen3827BAdapter):
     artifact_inspector = staticmethod(inspect_artifact)
     descriptor_builder = staticmethod(descriptor_for)
 
+    def classifier_token_ids(self, labels):
+        """Return one next-token id per label or fail closed.
+
+        A leading-space token is preferred because classifier prompts end in a
+        colon. Multi-token labels cannot participate in the forced-choice head.
+        """
+        result = {}
+        for label in labels:
+            if not isinstance(label, str) or not label:
+                raise ValueError("classifier labels must be nonempty text")
+            candidates = (
+                list(self.tokenizer.encode(" " + label, add_special_tokens=False)),
+                list(self.tokenizer.encode(label, add_special_tokens=False)),
+            )
+            ids = next((items for items in candidates if len(items) == 1), None)
+            if ids is None:
+                raise ValueError(f"classifier label {label!r} is not one token")
+            result[label] = int(ids[0])
+        if len(set(result.values())) != len(result):
+            raise ValueError("classifier labels must map to distinct token ids")
+        return result
+
     def profile_name(self, mtp):
         if mtp:
             raise ValueError("Qwen3.5 9B MTP is not implemented")

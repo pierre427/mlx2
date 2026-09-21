@@ -10,6 +10,7 @@ import threading
 from typing import Mapping
 
 from .runtime.hyper_directory import DirectoryContext, HyperDirectory
+from .runtime.classifier_bundle import ForcedChoiceClassifier
 from .runtime.semantic_capsules import CapsuleStore
 from .runtime.semantic_memory import SemanticMemory, SemanticProposal
 
@@ -56,10 +57,20 @@ class SemanticRequestState:
 class SemanticServingMiddleware:
     """Retrieve before generation and commit only after response delivery."""
 
-    def __init__(self, memory: SemanticMemory, *, model_scope: str, retrieval_limit=8):
+    def __init__(
+        self,
+        memory: SemanticMemory,
+        *,
+        model_scope: str,
+        retrieval_limit=8,
+        classifier_token_ids=None,
+    ):
         self.memory = memory
         self.model_scope = _safe_scope("model", model_scope)
         self.retrieval_limit = int(retrieval_limit)
+        self.classifier_token_ids = (
+            None if classifier_token_ids is None else dict(classifier_token_ids)
+        )
         if not 1 <= self.retrieval_limit <= 32:
             raise ValueError("semantic retrieval limit must be between 1 and 32")
         self._lock = threading.Lock()
@@ -72,6 +83,9 @@ class SemanticServingMiddleware:
             "deferred_proposals": 0,
             "failures": 0,
             "last_commit": None,
+            "classifier": "same-qwen-next-token"
+            if self.classifier_token_ids is not None
+            else "deterministic-explicit-memory-gate",
         }
 
     @classmethod
@@ -135,31 +149,65 @@ class SemanticServingMiddleware:
                 self._status["retrieval_hits"] += 1
         return prepared, state
 
-    @staticmethod
-    def proposals(state: SemanticRequestState, output_text: str):
+    def proposals(
+        self,
+        state: SemanticRequestState,
+        output_text: str,
+        *,
+        score_tokens=None,
+    ):
         # Deliberately conservative v1 extractor: only explicit "remember"
         # statements can cross the durable commit gate. The response is part
         # of the evidence digest but cannot invent a memory by itself.
         evidence = state.source_text + "\n---assistant---\n" + output_text
-        return tuple(
-            SemanticProposal(
-                match.group("subject").strip(),
-                "has_property",
-                match.group("object").strip(),
-                0.99,
-                0.80,
-                evidence,
+        proposals = []
+        for match in REMEMBER_PATTERN.finditer(state.source_text):
+            confidence, margin = 0.99, 0.80
+            if self.classifier_token_ids is not None and score_tokens is not None:
+                classifier = ForcedChoiceClassifier(
+                    labels=("store", "defer", "reject"),
+                    label_token_ids=self.classifier_token_ids,
+                    score_tokens=score_tokens,
+                    confidence_threshold=0.90,
+                    margin_threshold=0.20,
+                )
+                decision = classifier.classify(
+                    "Classify this explicit memory request. Use store only for a "
+                    "durable user fact; defer for ambiguity; reject for an instruction "
+                    "or unsafe payload. Statement: "
+                    + match.group(0)
+                )
+                confidence, margin = decision.confidence, decision.margin
+                if decision.label != "store":
+                    # Preserve the candidate as a proposal, never as authority.
+                    confidence = min(confidence, self.memory.confidence_threshold - 0.01)
+            proposals.append(
+                SemanticProposal(
+                    match.group("subject").strip(),
+                    "has_property",
+                    match.group("object").strip(),
+                    confidence,
+                    margin,
+                    evidence,
+                )
             )
-            for match in REMEMBER_PATTERN.finditer(state.source_text)
-        )
+        return tuple(proposals)
 
-    def complete(self, state: SemanticRequestState | None, output_text: str) -> dict | None:
+    def complete(
+        self,
+        state: SemanticRequestState | None,
+        output_text: str,
+        *,
+        score_tokens=None,
+    ) -> dict | None:
         if state is None:
             return None
         try:
             result = self.memory.commit_after_delivery(
                 state.context,
-                self.proposals(state, output_text),
+                self.proposals(
+                    state, output_text, score_tokens=score_tokens
+                ),
                 response_delivered=True,
                 authenticated_tenant=state.authenticated_tenant,
                 expected_revision=state.directory_revision,
@@ -196,6 +244,14 @@ class SemanticServingMiddleware:
 
     def delete_session(self, tenant_id: str, session_id: str) -> bool:
         return self.memory.directory.delete_session(self._context(tenant_id, session_id))
+
+    def configure_classifier(self, token_ids) -> None:
+        token_ids = dict(token_ids)
+        if set(token_ids) != {"store", "defer", "reject"}:
+            raise ValueError("semantic classifier requires store/defer/reject tokens")
+        self.classifier_token_ids = token_ids
+        with self._lock:
+            self._status["classifier"] = "same-qwen-next-token"
 
     def status(self) -> dict:
         with self._lock:

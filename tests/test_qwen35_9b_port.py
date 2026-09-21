@@ -93,6 +93,24 @@ class Qwen359BPortTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "not implemented"):
             adapter.profile_name(True)
 
+    def test_classifier_labels_must_be_distinct_single_tokens(self):
+        class Tokenizer:
+            def encode(self, text, add_special_tokens=False):
+                self.add_special_tokens = add_special_tokens
+                return {" store": [10], " defer": [11], " reject": [12]}.get(
+                    text, [1, 2]
+                )
+
+        adapter = object.__new__(Qwen359BAdapter)
+        adapter.tokenizer = Tokenizer()
+        self.assertEqual(
+            adapter.classifier_token_ids(("store", "defer", "reject")),
+            {"store": 10, "defer": 11, "reject": 12},
+        )
+        self.assertFalse(adapter.tokenizer.add_special_tokens)
+        with self.assertRaisesRegex(ValueError, "not one token"):
+            adapter.classifier_token_ids(("multi token",))
+
 
 if __name__ == "__main__":
     unittest.main()

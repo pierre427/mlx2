@@ -1124,6 +1124,37 @@ def collect_nonstream_job(job, body, *, chat):
         }, event["receipt"]
 
 
+def score_choice_tokens_via_engine(engine, prompt, token_ids, *, tenant_id):
+    """Score a bounded choice set through the ordinary serving lifecycle."""
+    if not isinstance(token_ids, dict) or not 2 <= len(token_ids) <= MAX_TOP_LOGPROBS:
+        raise ValueError("classifier requires 2..11 labeled token ids")
+    request = {
+        "prompt": prompt,
+        "max_tokens": 1,
+        "temperature": 0,
+        "enable_thinking": False,
+        "logprobs": True,
+        "top_logprobs": len(token_ids),
+        "logit_bias": {str(token): 100 for token in token_ids.values()},
+        "skip_writing_prefix_cache": True,
+    }
+    job = engine.submit(request, tenant_id=tenant_id)
+    try:
+        choice, _usage, _receipt = collect_nonstream_job(job, request, chat=False)
+    finally:
+        job.cancelled.set()
+    content = choice.get("logprobs", {}).get("content", [])
+    if not content:
+        raise RuntimeError("classifier serving job returned no target logprobs")
+    row = content[0]
+    candidates = [row, *row.get("top_logprobs", ())]
+    by_id = {int(item["id"]): float(item["logprob"]) for item in candidates}
+    missing = set(token_ids.values()) - set(by_id)
+    if missing:
+        raise RuntimeError(f"classifier logprobs omitted choice tokens: {sorted(missing)}")
+    return {label: by_id[token] for label, token in token_ids.items()}
+
+
 def collect_parallel_samples(jobs, body, *, chat, connection=None):
     """Drain every sample's event queue concurrently.
 
@@ -1218,6 +1249,12 @@ def handler_for(
     engine.media_file_loader = lambda tenant_id, file_id: file_store.content(
         tenant_id, file_id
     )
+    if semantic_middleware is not None:
+        token_resolver = getattr(engine.adapter, "classifier_token_ids", None)
+        if callable(token_resolver):
+            semantic_middleware.configure_classifier(
+                token_resolver(("store", "defer", "reject"))
+            )
 
     def tenant_file_text(tenant_id, part):
         unknown = set(part) - {"type", "file_id", "file_data", "filename"}
@@ -2185,6 +2222,9 @@ def handler_for(
             response_output_order = []
             agent_compat = None
             semantic_state = None
+            semantic_score_tokens = lambda prompt, token_ids: score_choice_tokens_via_engine(
+                engine, prompt, token_ids, tenant_id=tenant_id
+            )
             # Item 12: tool calls streamed as they complete because the decode
             # grammar is engaged (tool_grammar_streaming); Responses ids and
             # output indexes already sent for function_call items.
@@ -2941,7 +2981,9 @@ def handler_for(
                             self._record_http(200)
                             if semantic_middleware is not None:
                                 semantic_middleware.complete(
-                                    semantic_state, message.get("content", "")
+                                    semantic_state,
+                                    message.get("content", ""),
+                                    score_tokens=semantic_score_tokens,
                                 )
                             return
                         if streaming:
@@ -3294,7 +3336,9 @@ def handler_for(
                                 )
                         if semantic_middleware is not None:
                             semantic_middleware.complete(
-                                semantic_state, "".join(parts)
+                                semantic_state,
+                                "".join(parts),
+                                score_tokens=semantic_score_tokens,
                             )
                         return
             except ToolContractError as exc:
