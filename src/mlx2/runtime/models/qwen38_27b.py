@@ -92,6 +92,47 @@ class Qwen3NextAttention(nn.Module):
 Attention = Qwen3NextAttention
 
 
+def _apply_deep_concept_memory(hidden_states: mx.array, memory: dict) -> mx.array:
+    """Attend from the final prompt state into request-scoped concept memory.
+
+    The operation changes no sequence or cache geometry.  It is intentionally
+    bounded to the final token of an isolated prefill; later decoder layers
+    consume the amended state and write ordinary Qwen cache planes.
+    """
+    keys = memory.get("keys")
+    values = memory.get("values")
+    temperature = memory.get("temperature")
+    gate = memory.get("gate")
+    hidden = hidden_states.shape[-1]
+    if not isinstance(keys, mx.array) or not isinstance(values, mx.array):
+        raise ValueError("deep concept memory requires device key/value arrays")
+    if keys.ndim != 2 or values.shape != keys.shape or keys.shape[1] != hidden:
+        raise ValueError("deep concept memory does not match Qwen hidden geometry")
+    if not 1 <= keys.shape[0] <= 32:
+        raise ValueError("deep concept memory requires 1..32 concepts")
+    if not isinstance(temperature, (int, float)) or not 0.001 <= float(temperature) <= 1.0:
+        raise ValueError("deep concept memory temperature is out of bounds")
+    if not isinstance(gate, (int, float)) or not 0.0 <= float(gate) <= 1.0:
+        raise ValueError("deep concept memory gate is out of bounds")
+    query = hidden_states[:, -1:, :].astype(mx.float32)
+    query_norm = mx.maximum(mx.linalg.norm(query, axis=-1, keepdims=True), 1e-6)
+    query = query / query_norm
+    keys = keys.astype(mx.float32)
+    values = values.astype(mx.float32)
+    keys = keys / mx.maximum(mx.linalg.norm(keys, axis=-1, keepdims=True), 1e-6)
+    values = values / mx.maximum(mx.linalg.norm(values, axis=-1, keepdims=True), 1e-6)
+    weights = mx.softmax((query @ keys.T) / float(temperature), axis=-1)
+    # ``gate`` is a relative hidden-state norm, not an absolute embedding
+    # delta.  This keeps the bridge meaningful at different depths while
+    # bounding it to at most one current-state norm.
+    residual = (float(gate) * query_norm * (weights @ values)).astype(
+        hidden_states.dtype
+    )
+    return mx.concatenate(
+        [hidden_states[:, :-1, :], hidden_states[:, -1:, :] + residual], axis=1
+    )
+
+
 class DecoderLayer(nn.Module):
     def __init__(self, args: TextModelArgs, layer_idx: int):
         super().__init__()
@@ -149,6 +190,7 @@ class Qwen3_5TextModel(PipelineMixin, nn.Module):
         inputs: mx.array,
         cache: Optional[Any] = None,
         input_embeddings: Optional[mx.array] = None,
+        deep_concept_memory: Optional[dict] = None,
     ) -> mx.array:
         if input_embeddings is not None:
             hidden_states = input_embeddings
@@ -166,9 +208,24 @@ class Qwen3_5TextModel(PipelineMixin, nn.Module):
             ssm_mask = create_ssm_mask(hidden_states, cache[self.ssm_idx])
         if pipeline_rank < pipeline_size - 1:
             hidden_states = mx.distributed.recv_like(hidden_states, pipeline_rank + 1)
-        for layer, c in zip(self.pipeline_layers, cache):
+        injection_layer = None
+        if deep_concept_memory is not None:
+            if pipeline_size != 1:
+                raise ValueError("deep concept memory is not qualified with pipeline parallelism")
+            if hidden_states.shape[0] != 1:
+                raise ValueError("deep concept memory requires an isolated B=1 prefill")
+            injection_layer = deep_concept_memory.get("layer")
+            if isinstance(injection_layer, bool) or not isinstance(injection_layer, int):
+                raise ValueError("deep concept memory layer must be an integer")
+            if not 0 <= injection_layer < len(self.pipeline_layers):
+                raise ValueError("deep concept memory layer is outside the Qwen trunk")
+        for layer_index, (layer, c) in enumerate(zip(self.pipeline_layers, cache)):
             mask = ssm_mask if layer.is_linear else fa_mask
             hidden_states = layer(hidden_states, mask=mask, cache=c)
+            if layer_index == injection_layer:
+                hidden_states = _apply_deep_concept_memory(
+                    hidden_states, deep_concept_memory
+                )
         if pipeline_rank != 0:
             hidden_states = mx.distributed.send(
                 hidden_states, (pipeline_rank - 1) % pipeline_size
@@ -220,8 +277,14 @@ class TextModel(nn.Module):
         inputs: mx.array,
         cache: Optional[Any] = None,
         input_embeddings: Optional[mx.array] = None,
+        deep_concept_memory: Optional[dict] = None,
     ) -> mx.array:
-        out = self.model(inputs, cache, input_embeddings=input_embeddings)
+        out = self.model(
+            inputs,
+            cache,
+            input_embeddings=input_embeddings,
+            deep_concept_memory=deep_concept_memory,
+        )
         if self.args.tie_word_embeddings:
             out = self.model.embed_tokens.as_linear(out)
         else:
@@ -340,10 +403,17 @@ class Model(nn.Module):
         self.language_model = TextModel(TextModelArgs.from_dict(args.text_config))
 
     def __call__(
-        self, inputs: mx.array, cache=None, input_embeddings: Optional[mx.array] = None
+        self,
+        inputs: mx.array,
+        cache=None,
+        input_embeddings: Optional[mx.array] = None,
+        deep_concept_memory: Optional[dict] = None,
     ):
         return self.language_model(
-            inputs, cache=cache, input_embeddings=input_embeddings
+            inputs,
+            cache=cache,
+            input_embeddings=input_embeddings,
+            deep_concept_memory=deep_concept_memory,
         )
 
     @property

@@ -66,7 +66,19 @@ def _flash_next(path: Path, config: dict) -> AdapterResolution:
     return AdapterResolution(module.FlashNextAdapter, descriptor, artifact)
 
 
-def _qwen38_27b(path: Path, config: dict) -> AdapterResolution:
+def _qwen3_5_dense(path: Path, config: dict) -> AdapterResolution:
+    text = config.get("text_config", config)
+    topology = (text.get("num_hidden_layers"), text.get("hidden_size"))
+    if topology == (32, 4096):
+        module = importlib.import_module(".qwen35_9b", __package__)
+        artifact = module.inspect_artifact(path)
+        return AdapterResolution(
+            module.Qwen359BAdapter,
+            module.descriptor_for(has_mtp=False),
+            artifact,
+        )
+    if topology != (64, 5120):
+        raise ValueError(f"No mlx2 dense qwen3_5 adapter for topology {topology!r}")
     module = importlib.import_module(".qwen38_27b", __package__)
     artifact = module.inspect_artifact(path)
     return AdapterResolution(
@@ -131,7 +143,7 @@ def _minicpmo(path: Path, config: dict) -> AdapterResolution:
 
 _RESOLVERS: dict[str, Callable[[Path, dict], AdapterResolution]] = {
     "qwen4_exp": _flash_next,
-    "qwen3_5": _qwen38_27b,
+    "qwen3_5": _qwen3_5_dense,
     "qwen3_5_moe": _qwen36_35b,
     "muse_glimmer": _muse_glimmer,
     "muse_glimmer_text": _muse_glimmer,

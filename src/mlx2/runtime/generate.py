@@ -43,6 +43,7 @@ ALLOCATOR_RECLAIM_STEP_INTERVAL = 512
 # Ollama v0.34.2.
 ALLOCATOR_RECLAIM_MTP_TOKEN_INTERVAL = 256
 _COUNTER_MAX = (1 << 63) - 1
+_PERSISTENT_DECODE_INPUTS = "_mlx2_persistent_decode_inputs"
 generation_stream = mx.new_thread_local_stream(mx.default_device())
 
 
@@ -373,15 +374,38 @@ class PromptProcessingBatch:
             else [DEFAULT_MAX_TOKENS] * len(self.uids)
         )
         self.prefill_inputs = (
-            list(prefill_inputs)
+            [dict(value) if value is not None else None for value in prefill_inputs]
             if prefill_inputs is not None
             else [None] * len(self.uids)
         )
         if len(self.prefill_inputs) != len(self.uids):
             raise ValueError("prefill_inputs must have one entry per sequence")
+        self.persistent_inputs = []
+        for value in self.prefill_inputs:
+            persistent = (
+                value.pop(_PERSISTENT_DECODE_INPUTS, None)
+                if value is not None
+                else None
+            )
+            if persistent is not None and (
+                not isinstance(persistent, dict)
+                or set(persistent) != {"deep_concept_memory"}
+            ):
+                raise ValueError(
+                    "persistent decode inputs must contain only deep_concept_memory"
+                )
+            self.persistent_inputs.append(persistent)
+        if any(value is not None for value in self.persistent_inputs) and len(self.uids) != 1:
+            raise RuntimeError(
+                "persistent concept decode must run at an isolated B=1 boundary"
+            )
 
     def __len__(self):
         return len(self.uids)
+
+    @property
+    def has_persistent_inputs(self):
+        return any(value is not None for value in self.persistent_inputs)
 
     def _restart_prompt_rollback(self):
         if self.prompt_trim_rollback_tokens > 0:
@@ -397,6 +421,18 @@ class PromptProcessingBatch:
         return [c.extract(idx) for c in self.prompt_cache]
 
     def extend(self, batch):
+        persistent = any(value is not None for value in self.persistent_inputs)
+        incoming_persistent = any(
+            value is not None for value in batch.persistent_inputs
+        )
+        if (persistent or incoming_persistent) and self.uids:
+            raise RuntimeError(
+                "persistent concept decode cannot share a prompt batch"
+            )
+        if incoming_persistent and len(batch.uids) != 1:
+            raise RuntimeError(
+                "persistent concept decode must run at an isolated B=1 boundary"
+            )
         if not any(self.samplers):
             self.samplers = [None] * len(self.uids)
         if not any(self.logits_processors):
@@ -420,6 +456,7 @@ class PromptProcessingBatch:
         self.max_tokens.extend(batch.max_tokens)
         self.stop_matchers.extend(batch.stop_matchers)
         self.prefill_inputs.extend(batch.prefill_inputs)
+        self.persistent_inputs.extend(batch.persistent_inputs)
 
     def _copy(self, deep: bool = True):
         new_batch = self.__class__.__new__(self.__class__)
@@ -437,6 +474,7 @@ class PromptProcessingBatch:
         new_batch.stop_matchers = list(self.stop_matchers)
         new_batch.max_tokens = list(self.max_tokens)
         new_batch.prefill_inputs = list(self.prefill_inputs)
+        new_batch.persistent_inputs = list(self.persistent_inputs)
         return new_batch
 
     def split(self, indices: List[int]):
@@ -471,6 +509,7 @@ class PromptProcessingBatch:
         self.max_tokens = [self.max_tokens[idx] for idx in keep]
         self.stop_matchers = [self.stop_matchers[idx] for idx in keep]
         self.prefill_inputs = [self.prefill_inputs[idx] for idx in keep]
+        self.persistent_inputs = [self.persistent_inputs[idx] for idx in keep]
         self._restart_prompt_rollback()
 
     def prompt(self, tokens: List[List[int]]):
@@ -575,6 +614,7 @@ class PromptProcessingBatch:
             self.logits_processors,
             self.stop_matchers,
             self.max_tokens,
+            self.persistent_inputs,
         )
         self.uids = []
         self.prompt_cache = []
@@ -583,6 +623,7 @@ class PromptProcessingBatch:
         self.logits_processors = []
         self.max_tokens = []
         self.prefill_inputs = []
+        self.persistent_inputs = []
         return generation
 
     @classmethod
@@ -645,6 +686,7 @@ class GenerationBatch:
         ],
         stop_matchers: List[StopSequenceMatcher],
         max_tokens: List[int],
+        persistent_inputs: Optional[List[Optional[dict]]] = None,
     ):
         self.model = model
         self.uids = uids
@@ -655,6 +697,17 @@ class GenerationBatch:
         self.logits_processors = logits_processors
         self.stop_matchers = stop_matchers
         self.max_tokens = max_tokens
+        self.persistent_inputs = (
+            list(persistent_inputs)
+            if persistent_inputs is not None
+            else [None] * len(self.uids)
+        )
+        if len(self.persistent_inputs) != len(self.uids):
+            raise ValueError("persistent_inputs must have one entry per sequence")
+        if any(value is not None for value in self.persistent_inputs) and len(self.uids) != 1:
+            raise RuntimeError(
+                "persistent concept decode must run at an isolated B=1 boundary"
+            )
         if self.samplers and len(self.samplers) != len(self.uids):
             raise ValueError("Insufficient number of samplers provided")
         if self.logits_processors and len(self.logits_processors) != len(self.uids):
@@ -673,8 +726,24 @@ class GenerationBatch:
     def __len__(self):
         return len(self.uids)
 
+    @property
+    def has_persistent_inputs(self):
+        return any(value is not None for value in self.persistent_inputs)
+
     def extend(self, batch):
         """Extend this batch with another generation batch."""
+        persistent = any(value is not None for value in self.persistent_inputs)
+        incoming_persistent = any(
+            value is not None for value in batch.persistent_inputs
+        )
+        if (persistent or incoming_persistent) and self.uids:
+            raise RuntimeError(
+                "persistent concept decode cannot share a generation batch"
+            )
+        if incoming_persistent and len(batch.uids) != 1:
+            raise RuntimeError(
+                "persistent concept decode must run at an isolated B=1 boundary"
+            )
         self.uids.extend(batch.uids)
         self.prompt_cache = _extend_cache(self.prompt_cache, batch.prompt_cache)
         self.tokens.extend(batch.tokens)
@@ -682,6 +751,7 @@ class GenerationBatch:
         self.logits_processors.extend(batch.logits_processors)
         self.max_tokens.extend(batch.max_tokens)
         self.stop_matchers.extend(batch.stop_matchers)
+        self.persistent_inputs.extend(batch.persistent_inputs)
         if self._current_tokens is None:
             self._current_tokens = batch._current_tokens
             self._current_logprobs = batch._current_logprobs
@@ -733,6 +803,35 @@ class GenerationBatch:
         stacked = mx.stack([rows.get(index, zero) for index in range(len(self.logits_processors))])
         return taps, (layer, stacked[:, None, :])
 
+    def _persistent_step_inputs(self):
+        if not self.persistent_inputs or self.persistent_inputs[0] is None:
+            return {}
+        persistent = self.persistent_inputs[0]
+        memory = persistent["deep_concept_memory"]
+        schedule = memory.get("decode_values")
+        if schedule is None:
+            return persistent
+        if not isinstance(schedule, mx.array) or schedule.ndim != 2:
+            raise ValueError("concept decode_values must be a rank-2 device array")
+        if self._decode_steps >= schedule.shape[0]:
+            return {}
+        stepped = dict(memory)
+        stepped.pop("decode_values")
+        gates = stepped.pop("decode_gates", None)
+        if gates is not None:
+            if (
+                not isinstance(gates, (list, tuple))
+                or len(gates) != schedule.shape[0]
+            ):
+                raise ValueError(
+                    "concept decode_gates must match the capsule schedule"
+                )
+            stepped["gate"] = float(gates[self._decode_steps])
+        stepped["values"] = schedule[
+            self._decode_steps : self._decode_steps + 1
+        ]
+        return {"deep_concept_memory": stepped}
+
     def _step(self) -> Tuple[List[int], List[mx.array]]:
         """
         Perform a single generation step.
@@ -750,7 +849,8 @@ class GenerationBatch:
             taps.steer = steer
         lora_rows = bind_lora_rows(self.model, self.uids)
         try:
-            logits = self.model(inputs[:, None], cache=self.prompt_cache)
+            kwargs = self._persistent_step_inputs()
+            logits = self.model(inputs[:, None], cache=self.prompt_cache, **kwargs)
         finally:
             clear_lora_rows(lora_rows)
             if steer is not None:
@@ -831,6 +931,7 @@ class GenerationBatch:
             self.logits_processors = [self.logits_processors[idx] for idx in keep]
         self.max_tokens = [self.max_tokens[idx] for idx in keep]
         self.stop_matchers = [self.stop_matchers[idx] for idx in keep]
+        self.persistent_inputs = [self.persistent_inputs[idx] for idx in keep]
         self._next_tokens = self._next_tokens[keep] if keep else None
         self._next_logprobs = [self._next_logprobs[idx] for idx in keep]
         self._token_context = [self._token_context[idx] for idx in keep]
@@ -5013,6 +5114,11 @@ class BatchGenerator:
                 mx.clear_cache()
         if len(self._generation_batch) >= self.completion_batch_size:
             return (prompt_responses, generation_responses)
+        # A persistent concept lane is deliberately a request-private B=1
+        # route.  Do not start prefill work beside it: that work would later
+        # have to merge into the persistent generation batch.
+        if getattr(self._generation_batch, "has_persistent_inputs", False):
+            return (prompt_responses, generation_responses)
         if self._should_defer_prefill():
             prompt_responses.extend(self._promote_ready_prompts())
             return (prompt_responses, generation_responses)
@@ -5027,8 +5133,33 @@ class BatchGenerator:
             self.completion_batch_size - len(self._generation_batch),
             len(self._unprocessed_sequences),
         )
+        persistent_head = False
+        if getattr(self._prompt_batch, "has_persistent_inputs", False):
+            n = 0
+        elif n > 0:
+            persistent_positions = [
+                index
+                for index, sequence in enumerate(list(self._unprocessed_sequences)[:n])
+                if len(sequence) > 9
+                and isinstance(sequence[9], dict)
+                and sequence[9].get(_PERSISTENT_DECODE_INPUTS) is not None
+            ]
+            if persistent_positions:
+                first = persistent_positions[0]
+                if first == 0:
+                    persistent_head = True
+                    # Wait for every ordinary lane to drain, then admit this
+                    # request alone.  The queue remains FIFO.
+                    n = (
+                        1
+                        if len(self._generation_batch) == 0
+                        and len(self._prompt_batch) == 0
+                        else 0
+                    )
+                else:
+                    n = min(n, first)
         ordered = None
-        if n > 0 and self._prefill_order().enabled:
+        if n > 0 and self._prefill_order().enabled and not persistent_head:
             (n, ordered) = self._order_prefill_queue(n)
         n = self._budget_admissible(n)
         if n > 0 and ordered is not None:
