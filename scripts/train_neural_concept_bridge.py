@@ -180,6 +180,7 @@ def main():
     parser.add_argument("--feature-dim", type=int, default=128)
     parser.add_argument("--state-dim", type=int, default=96)
     parser.add_argument("--learning-rate", type=float, default=2e-3)
+    parser.add_argument("--output-gate-logit", type=float, default=-1.4)
     args = parser.parse_args()
 
     import torch
@@ -258,7 +259,9 @@ def main():
         name: value.detach().cpu().numpy().astype(np.float32)
         for name, value in model.parameters.items()
     }
-    arrays["output_gate"] = np.asarray([-1.4], dtype=np.float32)
+    if not math.isfinite(args.output_gate_logit) or not -8 <= args.output_gate_logit <= 8:
+        parser.error("--output-gate-logit must be finite and in -8..8")
+    arrays["output_gate"] = np.asarray([args.output_gate_logit], dtype=np.float32)
     np.savez(weights_path, **arrays)
     manifest = {
         "schema": NEURAL_CONCEPT_SCHEMA,
@@ -281,6 +284,7 @@ def main():
             "steps": args.steps,
             "batch_size": args.batch_size,
             "learning_rate": args.learning_rate,
+            "output_gate_logit": args.output_gate_logit,
             "split_sizes": {name: len(rows) for name, rows in split.items()},
             "metrics": metrics,
             "objective": "frozen-qwen-embedding-key-value-alignment-plus-contrastive-key",
