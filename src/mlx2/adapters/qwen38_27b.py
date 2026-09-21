@@ -184,6 +184,22 @@ def configure_environment() -> dict[str, str]:
     return profile
 
 
+def resolve_eos_token_ids(config: dict, tokenizer) -> list[int]:
+    """Combine artifact and tokenizer EOS ids without trusting either alone."""
+    text = config.get("text_config", config)
+    configured = config.get("eos_token_id", text.get("eos_token_id"))
+    values = configured if isinstance(configured, list) else [configured]
+    values.append(getattr(tokenizer, "eos_token_id", None))
+    result = []
+    for value in values:
+        if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+            if value not in result:
+                result.append(value)
+    if not result:
+        raise ValueError("Qwen tokenizer and config declare no EOS token")
+    return result
+
+
 class Qwen3827BAdapter(FlashNextAdapter):
     default_route = "native_mtp"
     """Dense text adapter using shared chat parsing and modern runtime state."""
@@ -253,9 +269,7 @@ class Qwen3827BAdapter(FlashNextAdapter):
         tokenizer = AutoTokenizer.from_pretrained(
             path, local_files_only=True, trust_remote_code=False
         )
-        eos = config.get("eos_token_id", config["text_config"].get("eos_token_id"))
-        if isinstance(eos, int):
-            eos = [eos]
+        eos = resolve_eos_token_ids(config, tokenizer)
         self.tokenizer = TokenizerWrapper(
             tokenizer, detokenizer_class=BPEStreamingDetokenizer, eos_token_ids=eos
         )

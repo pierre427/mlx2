@@ -12,6 +12,7 @@ from mlx2.adapters.qwen35_9b import (
     descriptor_for,
     inspect_artifact,
 )
+from mlx2.adapters.qwen38_27b import resolve_eos_token_ids
 from mlx2.adapters.registry import inspect_model
 from mlx2.contracts import Capability
 
@@ -34,6 +35,7 @@ CONFIG = {
         "linear_conv_kernel_dim": 4,
         "mtp_num_hidden_layers": 1,
         "max_position_embeddings": 262144,
+        "eos_token_id": 248044,
     },
 }
 
@@ -123,6 +125,10 @@ class Qwen359BPortTests(unittest.TestCase):
         profile = configure_environment()
         self.assertEqual(profile["MLX_LM_SEGMENTED_SELF_MTP"], "0")
         self.assertEqual(profile["MLX_LM_TRUE_BATCHED_SEGMENTED_MTP"], "0")
+
+    def test_tokenizer_chat_eos_augments_config_endoftext(self):
+        tokenizer = type("Tokenizer", (), {"eos_token_id": 248046})()
+        self.assertEqual(resolve_eos_token_ids(CONFIG, tokenizer), [248044, 248046])
 
 
 if __name__ == "__main__":
