@@ -186,6 +186,10 @@ class Qwen359BPortTests(unittest.TestCase):
             prefill_step=8,
         )
         memory = result["deep_concept_memory"]
+        self.assertIs(
+            result["_mlx2_persistent_decode_inputs"]["deep_concept_memory"],
+            memory,
+        )
         mx.eval(memory["keys"], memory["values"])
         self.assertEqual(memory["keys"].shape, (1, 4))
         self.assertEqual(memory["values"].shape, (1, 4))
@@ -194,6 +198,9 @@ class Qwen359BPortTests(unittest.TestCase):
         self.assertEqual(result["receipt"]["injection_layer"], 2)
         self.assertEqual(result["receipt"]["candidate_concepts"], 2)
         self.assertEqual(result["receipt"]["selection"], "directory_top1")
+        self.assertEqual(
+            result["receipt"]["decode_policy"], "persistent-isolated-b1"
+        )
         self.assertEqual(adapter.diagnostics()["neural_concept_bridge"]["counts"], {
             "prefills": 1,
             "concepts": 1,

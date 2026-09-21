@@ -238,16 +238,23 @@ class Qwen359BAdapter(Qwen3827BAdapter):
         )
         gate = mx.sigmoid(mx.array(arrays["output_gate"], dtype=mx.float32))[0]
         gate_value = float(mx.array(gate).item())
+        memory = {
+            "keys": keys,
+            "values": values,
+            "layer": self._neural_concept_injection_layer,
+            "temperature": float(artifact.manifest["attention_temperature"]),
+            "gate": gate_value,
+        }
         self._neural_concept_counts["prefills"] += 1
         self._neural_concept_counts["concepts"] += len(concepts)
         self._neural_concept_counts["tokens"] += len(tokens)
         return {
-            "deep_concept_memory": {
-                "keys": keys,
-                "values": values,
-                "layer": self._neural_concept_injection_layer,
-                "temperature": float(artifact.manifest["attention_temperature"]),
-                "gate": gate_value,
+            "deep_concept_memory": memory,
+            # The runtime consumes this reserved key before calling the model.
+            # It keeps the same request-owned memory active for every ordinary
+            # decode step while fail-closing any attempt to merge the lane.
+            "_mlx2_persistent_decode_inputs": {
+                "deep_concept_memory": memory,
             },
             "receipt": {
                 "schema": "mlx2-neural-concept-prefill-v2",
@@ -259,7 +266,8 @@ class Qwen359BAdapter(Qwen3827BAdapter):
                 "tokens": len(tokens),
                 "bridge": "learned-recurrent-deep-final-token-cross-attention",
                 "injection_layer": self._neural_concept_injection_layer,
-                "steered_tokens": 1,
+                "steered_tokens": "prefill-final-plus-every-decode-step",
+                "decode_policy": "persistent-isolated-b1",
                 "normalized_values": True,
                 "relative_gate": gate_value,
             },
