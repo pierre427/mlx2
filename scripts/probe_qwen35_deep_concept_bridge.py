@@ -57,11 +57,10 @@ def _graph(rows):
     return {"concepts": concepts, "edges": edges}, subjects
 
 
-def _score(adapter, prompt, answer, memory):
+def _score(adapter, prompt_ids, answer, memory):
     import mlx.core as mx
 
-    prompt_ids = list(adapter.tokenizer.encode(prompt, add_special_tokens=False))
-    answer_ids = list(adapter.tokenizer.encode(" " + answer, add_special_tokens=False))
+    answer_ids = list(adapter.tokenizer.encode(answer, add_special_tokens=False))
     cache = adapter.model.make_cache()
     kwargs = {} if memory is None else {"deep_concept_memory": memory}
     logits = adapter.model(mx.array([prompt_ids]), cache=cache, **kwargs)
@@ -77,10 +76,9 @@ def _score(adapter, prompt, answer, memory):
     return {"tokens": len(answer_ids), "logprob": total, "mean_logprob": total / len(answer_ids)}
 
 
-def _greedy(adapter, prompt, memory, max_tokens):
+def _greedy(adapter, prompt_ids, memory, max_tokens):
     import mlx.core as mx
 
-    prompt_ids = list(adapter.tokenizer.encode(prompt, add_special_tokens=False))
     cache = adapter.model.make_cache()
     kwargs = {} if memory is None else {"deep_concept_memory": memory}
     logits = adapter.model(mx.array([prompt_ids]), cache=cache, **kwargs)
@@ -139,9 +137,19 @@ def main():
 
     adapter = Qwen359BAdapter(str(args.model))
     adapter.configure_neural_concept_bridge(artifact)
-    prompt = f"Question: {target['query']}\nAnswer with only the aroma:"
+    request = {
+        "messages": [
+            {
+                "role": "user",
+                "content": target["query"] + " Answer with only the aroma.",
+            }
+        ],
+        "enable_thinking": False,
+        "reasoning_effort": "none",
+    }
+    prompt_ids = list(adapter.prompt_tokens(request))
     prepared = adapter.neural_concept_prefill(
-        list(adapter.tokenizer.encode(prompt, add_special_tokens=False)),
+        prompt_ids,
         {"artifact_fingerprint": artifact.fingerprint, "concepts": concepts},
         prefill_step=2048,
     )["deep_concept_memory"]
@@ -153,18 +161,18 @@ def main():
         parser.error("gates must be finite values in 0..1")
 
     arms = []
-    baseline = _score(adapter, prompt, target["answer"], None)
+    baseline = _score(adapter, prompt_ids, target["answer"], None)
     arms.append(
         {
             "arm": "ordinary",
             **baseline,
-            "greedy": _greedy(adapter, prompt, None, args.max_tokens),
+            "greedy": _greedy(adapter, prompt_ids, None, args.max_tokens),
         }
     )
     for layer in layers:
         for gate in gates:
             memory = dict(prepared, layer=layer, gate=gate)
-            score = _score(adapter, prompt, target["answer"], memory)
+            score = _score(adapter, prompt_ids, target["answer"], memory)
             arms.append(
                 {
                     "arm": "deep_concept_memory",
@@ -172,7 +180,7 @@ def main():
                     "relative_gate": gate,
                     **score,
                     "delta_mean_logprob": score["mean_logprob"] - baseline["mean_logprob"],
-                    "greedy": _greedy(adapter, prompt, memory, args.max_tokens),
+                    "greedy": _greedy(adapter, prompt_ids, memory, args.max_tokens),
                 }
             )
             print(json.dumps(arms[-1]), flush=True)

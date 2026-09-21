@@ -57,14 +57,13 @@ def _normalize(rows):
     return rows / np.maximum(np.linalg.norm(rows, axis=-1, keepdims=True), 1e-6)
 
 
-def _hidden_query(adapter, prompt, layer_index):
+def _hidden_query(adapter, prompt_ids, layer_index):
     import mlx.core as mx
 
     from mlx2.runtime.models.base import create_attention_mask, create_ssm_mask
 
-    token_ids = list(adapter.tokenizer.encode(prompt, add_special_tokens=False))
     trunk = adapter.model.language_model.model
-    hidden = trunk.embed_tokens(mx.array([token_ids]))
+    hidden = trunk.embed_tokens(mx.array([prompt_ids]))
     fa_mask = create_attention_mask(hidden, None)
     ssm_mask = create_ssm_mask(hidden, None)
     for index, layer in enumerate(trunk.layers):
@@ -79,7 +78,7 @@ def _hidden_query(adapter, prompt, layer_index):
 def _output_direction(adapter, answer):
     import mlx.core as mx
 
-    ids = list(adapter.tokenizer.encode(" " + answer, add_special_tokens=False))
+    ids = list(adapter.tokenizer.encode(answer, add_special_tokens=False))
     head = adapter.model.language_model.lm_head
     rows = [head.weight[mx.array(ids)], head.scales[mx.array(ids)]]
     if head.biases is not None:
@@ -150,12 +149,25 @@ def main():
         values = []
         for index, row in enumerate(rows):
             encoded = {item.concept_id: item for item in encoder.encode_graph(_episode_graph(row))}
-            prompt = f"Question: {row['query']}\nAnswer with only the aroma:"
+            prompt_ids = list(
+                adapter.prompt_tokens(
+                    {
+                        "messages": [
+                            {
+                                "role": "user",
+                                "content": row["query"] + " Answer with only the aroma.",
+                            }
+                        ],
+                        "enable_thinking": False,
+                        "reasoning_effort": "none",
+                    }
+                )
+            )
             values.append(
                 (
                     encoded["subject"].key_state,
                     encoded["subject"].value_state,
-                    _hidden_query(adapter, prompt, args.layer),
+                    _hidden_query(adapter, prompt_ids, args.layer),
                     _output_direction(adapter, row["answer"]),
                 )
             )
