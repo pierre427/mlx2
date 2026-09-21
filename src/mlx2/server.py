@@ -1187,6 +1187,7 @@ def handler_for(
     http_security=None,
     tenant_authenticator=None,
     agent_compat=None,
+    semantic_middleware=None,
 ):
     compat_policy = AgentCompatPolicy.coerce(agent_compat)
     engine.agent_compat = compat_policy
@@ -2008,6 +2009,9 @@ def handler_for(
                         if tenant_authenticator is not None
                         else {"enabled": False},
                         "agent_compat": compat_policy.status(),
+                        "semantic_memory": semantic_middleware.status()
+                        if semantic_middleware is not None
+                        else {"enabled": False},
                     },
                 )
             elif self.path == "/v1/status/batching":
@@ -2049,6 +2053,13 @@ def handler_for(
                     value = engine.apc_session_delete(
                         self._tenant_id, session_id
                     )
+                    if semantic_middleware is not None:
+                        value = {
+                            **value,
+                            "semantic_memory_deleted": semantic_middleware.delete_session(
+                                self._tenant_id, session_id
+                            ),
+                        }
                     self.send_json(200, value)
                 except Exception as error:
                     self._session_failure(error)
@@ -2173,6 +2184,7 @@ def handler_for(
             response_reasoning_output_index = None
             response_output_order = []
             agent_compat = None
+            semantic_state = None
             # Item 12: tool calls streamed as they complete because the decode
             # grammar is engaged (tool_grammar_streaming); Responses ids and
             # output indexes already sent for function_call items.
@@ -2345,6 +2357,12 @@ def handler_for(
                         )
                     ),
                 )
+                if semantic_middleware is not None and chat:
+                    body, semantic_state = semantic_middleware.prepare(
+                        body,
+                        tenant_id=tenant_id,
+                        authenticated_tenant=tenant_authenticator is not None,
+                    )
                 if any(
                     isinstance(message.get("content"), list)
                     for message in body.get("messages", ())
@@ -2727,6 +2745,13 @@ def handler_for(
                                 )
                     if "finish_reason" in event:
                         receipt = event["receipt"]
+                        semantic_receipt = (
+                            semantic_middleware.receipt(semantic_state)
+                            if semantic_middleware is not None
+                            else None
+                        )
+                        if semantic_receipt is not None:
+                            receipt = {**(receipt or {}), "semantic_memory": semantic_receipt}
                         if agent_compat is not None and agent_compat.notable:
                             receipt = {
                                 **(receipt or {}),
@@ -2914,6 +2939,10 @@ def handler_for(
                             )
                             self._sse("[DONE]")
                             self._record_http(200)
+                            if semantic_middleware is not None:
+                                semantic_middleware.complete(
+                                    semantic_state, message.get("content", "")
+                                )
                             return
                         if streaming:
                             if anthropic:
@@ -3263,6 +3292,10 @@ def handler_for(
                                         "mlx2": receipt,
                                     },
                                 )
+                        if semantic_middleware is not None:
+                            semantic_middleware.complete(
+                                semantic_state, "".join(parts)
+                            )
                         return
             except ToolContractError as exc:
                 if streaming and responses_api:
@@ -3686,6 +3719,27 @@ def build_parser():
             "directory for durable tenant-scoped Responses, Files, and Batch "
             "state (default: process-local state)"
         ),
+    )
+    parser.add_argument(
+        "--semantic-memory",
+        action="store_true",
+        help=(
+            "enable automatic capsule-backed concept memory for session requests; "
+            "durable writes require configured tenant authentication"
+        ),
+    )
+    parser.add_argument(
+        "--semantic-memory-dir",
+        help=(
+            "owner-private semantic capsule root (default: semantic-memory below "
+            "--api-state-dir or --apc-persist-dir)"
+        ),
+    )
+    parser.add_argument(
+        "--semantic-retrieval-limit",
+        type=int,
+        default=8,
+        help="maximum concept tokens injected per request (1..32)",
     )
     parser.add_argument(
         "--lora-dir",
@@ -4166,6 +4220,15 @@ def main():
         or not 0.1 <= args.drain_on_sigterm <= 3600
     ):
         parser.error("--drain-on-sigterm must be between 0.1 and 3600 seconds")
+    if not 1 <= args.semantic_retrieval_limit <= 32:
+        parser.error("--semantic-retrieval-limit must be between 1 and 32")
+    if args.semantic_memory and not (
+        args.semantic_memory_dir or args.api_state_dir or args.apc_persist_dir
+    ):
+        parser.error(
+            "--semantic-memory requires --semantic-memory-dir, --api-state-dir, "
+            "or --apc-persist-dir"
+        )
     try:
         admin_token = (
             load_admin_token(args.admin_token_file)
@@ -4265,6 +4328,24 @@ def main():
         from .tool_backend import ConfiguredToolBackend
 
         tool_backend = ConfiguredToolBackend(args.tool_backend_config)
+    semantic_middleware = None
+    if args.semantic_memory:
+        from .semantic_sidecar import SemanticServingMiddleware
+
+        root = args.semantic_memory_dir
+        if root is None:
+            root = str(
+                Path(args.api_state_dir or args.apc_persist_dir).expanduser().resolve()
+                / "semantic-memory"
+            )
+        status = engine.status()
+        semantic_middleware = SemanticServingMiddleware.create(
+            root,
+            model_binding=status["artifact"],
+            tokenizer_binding=status["artifact"],
+            runtime_binding=status["runtime"]["source_sha256"],
+            retrieval_limit=args.semantic_retrieval_limit,
+        )
     server.RequestHandlerClass = handler_for(
         engine,
         max_request_bytes=max_request_bytes,
@@ -4281,6 +4362,7 @@ def main():
             if args.agent_compat_tenants
             else None,
         ),
+        semantic_middleware=semantic_middleware,
     )
 
     stop = SignalShutdownController(server, engine, args.drain_on_sigterm)

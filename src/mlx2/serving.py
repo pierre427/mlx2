@@ -659,10 +659,12 @@ def request_apc_scope(request):
     """APCv2 per-request scope: media fingerprint plus LoRA adapter identity."""
     from .runtime.multi_lora import lora_apc_scope
 
-    return lora_apc_scope(
+    physical = lora_apc_scope(
         request.get("_mlx2_media_fingerprint"),
         request.get("_mlx2_lora_fingerprint"),
     )
+    semantic = request.get("_mlx2_semantic_fingerprint")
+    return physical if semantic is None else (physical, "hyper-directory", semantic)
 
 
 def multi_lora_policy(
