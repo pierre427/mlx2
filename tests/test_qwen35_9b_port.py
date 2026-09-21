@@ -2,9 +2,11 @@
 
 import copy
 import json
+import os
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from mlx2.adapters.qwen35_9b import (
     Qwen359BAdapter,
@@ -122,9 +124,10 @@ class Qwen359BPortTests(unittest.TestCase):
         adapter = object.__new__(Qwen359BAdapter)
         self.assertEqual(adapter.sampling_defaults.model, "Qwen/Qwen3.5-9B")
         self.assertIn("coding", adapter.sampling_defaults.profiles)
-        profile = configure_environment()
-        self.assertEqual(profile["MLX_LM_SEGMENTED_SELF_MTP"], "0")
-        self.assertEqual(profile["MLX_LM_TRUE_BATCHED_SEGMENTED_MTP"], "0")
+        with patch.dict(os.environ, {}, clear=False):
+            profile = configure_environment()
+            self.assertEqual(profile["MLX_LM_SEGMENTED_SELF_MTP"], "0")
+            self.assertEqual(profile["MLX_LM_TRUE_BATCHED_SEGMENTED_MTP"], "0")
 
     def test_tokenizer_chat_eos_augments_config_endoftext(self):
         tokenizer = type("Tokenizer", (), {"eos_token_id": 248046})()
