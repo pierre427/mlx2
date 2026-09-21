@@ -23,10 +23,15 @@ from ..sampling_defaults import XING4_SAMPLING
 
 CACHE_LAYOUT = "xing4-0-mla-latent-layer-segments-v1"
 CONVERSION_LAYOUT = "xing4_0-sanitized-v1"
-# Default off until the threshold-4 route is requalified after a7a8372 fixed
-# required + parallel_tool_calls:false output. Operators may still select the
-# handoff explicitly through the execution policy.
-DEFAULT_MTP_ORDINARY_HANDOFF_MAX_WIDTH = None
+# Default on at width 4.  This was held off pending requalification of the
+# threshold-4 route after a7a8372 fixed required + parallel_tool_calls:false
+# output; that requalification has been run five times since, on trees
+# carrying a7a8372, and passed every time with the handoff token-identical to
+# fixed MTP at width one and 0/8 prompts diverging at batch width.
+#
+# Measured B16: ordinary 218.3, fixed MTP 157.9, handoff 225.4 tok/s, with the
+# single-stream MTP advantage intact (66.5 vs 58.2).
+DEFAULT_MTP_ORDINARY_HANDOFF_MAX_WIDTH = 4
 THINK_END_ID = 10
 _REASONING_EFFORTS = {"none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"}
 

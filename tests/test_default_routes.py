@@ -84,6 +84,8 @@ def test_qwen36_defaults_to_native_mtp_with_the_handoff():
     [
         (Qwen3827BAdapter, QWEN38_27B, QWEN38_HANDOFF_WIDTH),
         (Qwen3635BA3BAdapter, qwen36(has_mtp=True), QWEN36_HANDOFF_WIDTH),
+        (FlashNextAdapter, QWEN4_FLASH_NEXT, FLASH_NEXT_HANDOFF_WIDTH),
+        (XingAdapter, xing(has_mtp=True), XING_HANDOFF_WIDTH),
     ],
 )
 def test_qualified_mtp_adapters_declare_default_handoff_width_four(
@@ -97,21 +99,6 @@ def test_qualified_mtp_adapters_declare_default_handoff_width_four(
         "enabled": True,
         "max_mtp_width": constant,
     }
-
-
-@pytest.mark.parametrize(
-    ("adapter_type", "descriptor", "constant"),
-    [
-        (FlashNextAdapter, QWEN4_FLASH_NEXT, FLASH_NEXT_HANDOFF_WIDTH),
-        (XingAdapter, xing(has_mtp=True), XING_HANDOFF_WIDTH),
-    ],
-)
-def test_unqualified_mtp_adapters_declare_handoff_default_off(
-    adapter_type, descriptor, constant
-):
-    assert constant is None
-    assert "default_mtp_ordinary_handoff_max_width" in adapter_type.__dict__
-    assert _resolution(adapter_type, descriptor).default_mtp_ordinary_handoff is None
 
 
 def test_handoff_default_resolves_only_for_native_mtp_and_can_be_disabled():

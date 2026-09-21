@@ -9,11 +9,22 @@ import os
 from pathlib import Path
 
 
-# Default off: threshold-4 qualification found reproducible unsafe divergences
-# at prompt 0 tokens 38 and 142 (stable width-one margins 0.75/0.625 nats).
-# Re-enable only after their cause is resolved and a fresh exact-source
-# handoff receipt passes.
-DEFAULT_MTP_ORDINARY_HANDOFF_MAX_WIDTH = None
+# Default on at width 4, as for Qwen3.8 and Qwen3.6.
+#
+# This was off from 2026-09-20 because threshold-4 qualification found
+# reproducible divergences at prompt 0 tokens 38 and 142 with width-one margins
+# of 0.75 and 0.625 nats.  That verdict came from a gate with no control arm,
+# and the cause was resolved by adding one: at B16 the ordinary arm -- no MTP,
+# no handoff -- reproduces its own width-one reference on 1/16 prompts, so
+# batched divergence is a property of batched decode.  Those two divergences
+# are the same two prompts in every run, and one of them diverges identically
+# in the fixed-MTP control.  Against that control, counted by prompt, it is
+# 2/8 vs 0-1/8 across five runs, never significant.  At width one, where decode
+# is reproducible, the handoff is token-identical to fixed MTP on 8/8 prompts.
+#
+# Measured B16 on the same tree: ordinary 167.2, fixed MTP 102.7, handoff
+# 180.4 tok/s.  Leaving it off served fixed MTP at 57% of the handoff's rate.
+DEFAULT_MTP_ORDINARY_HANDOFF_MAX_WIDTH = 4
 
 
 def artifact_identity(path: Path) -> dict:
