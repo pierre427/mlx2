@@ -220,18 +220,24 @@ class Qwen359BAdapter(Qwen3827BAdapter):
         keys = key_state @ mx.array(arrays["key_projection"])
         values = value_state @ mx.array(arrays["value_projection"])
         keys = keys / mx.maximum(mx.linalg.norm(keys, axis=-1, keepdims=True), 1e-6)
+        values = values / mx.maximum(
+            mx.linalg.norm(values, axis=-1, keepdims=True), 1e-6
+        )
         ids = mx.array([tokens], dtype=mx.uint32)
         embeddings = self.model.language_model.model.embed_tokens(ids)
         queries = embeddings.astype(mx.float32)
         queries = queries / mx.maximum(
             mx.linalg.norm(queries, axis=-1, keepdims=True), 1e-6
         )
-        logits = queries @ keys.T
+        logits = mx.max(queries @ keys.T, axis=1, keepdims=True)
         weights = mx.softmax(
             logits / float(artifact.manifest["attention_temperature"]), axis=-1
         )
         gate = mx.sigmoid(mx.array(arrays["output_gate"], dtype=mx.float32))[0]
-        enhanced = embeddings + (gate * (weights @ values)).astype(embeddings.dtype)
+        residual = (gate * (weights @ values)).astype(embeddings.dtype)
+        enhanced = mx.concatenate(
+            [embeddings[:, :-1, :], embeddings[:, -1:, :] + residual], axis=1
+        )
         self._neural_concept_counts["prefills"] += 1
         self._neural_concept_counts["concepts"] += len(concepts)
         self._neural_concept_counts["tokens"] += len(tokens)
@@ -243,7 +249,9 @@ class Qwen359BAdapter(Qwen3827BAdapter):
                 "artifact_fingerprint": artifact.fingerprint,
                 "concepts": len(concepts),
                 "tokens": len(tokens),
-                "bridge": "learned-recurrent-prefill-cross-attention",
+                "bridge": "learned-recurrent-final-token-cross-attention",
+                "steered_tokens": 1,
+                "normalized_values": True,
                 "gate": float(mx.array(gate).item()),
             },
         }

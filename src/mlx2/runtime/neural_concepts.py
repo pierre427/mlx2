@@ -263,6 +263,8 @@ class ConceptCrossAttention:
         values = values @ self.artifact.arrays["value_projection"]
         key_norm = np.linalg.norm(keys, axis=-1, keepdims=True)
         keys = keys / np.maximum(key_norm, 1e-6)
+        value_norm = np.linalg.norm(values, axis=-1, keepdims=True)
+        values = values / np.maximum(value_norm, 1e-6)
         return keys, values
 
     def apply(self, query_embeddings: np.ndarray, concepts: Sequence[EncodedConcept]):
@@ -273,13 +275,15 @@ class ConceptCrossAttention:
         normalized = queries / np.maximum(
             np.linalg.norm(queries, axis=-1, keepdims=True), 1e-6
         )
-        logits = normalized @ keys.T
+        logits = np.max(normalized @ keys.T, axis=0, keepdims=True)
         weights = _softmax(
             logits / float(self.artifact.manifest["attention_temperature"]), axis=-1
         )
         gate = float(_sigmoid(self.artifact.arrays["output_gate"])[0])
         residual = gate * (weights @ values)
-        return queries + residual, weights
+        output = queries.copy()
+        output[-1:] += residual
+        return output, weights
 
 
 def validate_state_document(document: Mapping, artifact: NeuralConceptArtifact) -> tuple[EncodedConcept, ...]:

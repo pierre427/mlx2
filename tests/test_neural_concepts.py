@@ -123,9 +123,11 @@ def test_cross_attention_is_bounded_and_finite(artifact):
     queries = np.ones((5, artifact.hidden_dim), dtype=np.float32)
     output, weights = ConceptCrossAttention(artifact).apply(queries, concepts)
     assert output.shape == queries.shape
-    assert weights.shape == (5, 3)
+    assert weights.shape == (1, 3)
     assert np.isfinite(output).all()
     assert np.allclose(weights.sum(axis=-1), 1.0)
+    assert np.array_equal(output[:-1], queries[:-1])
+    assert 0 < np.linalg.norm(output[-1] - queries[-1]) < 1
 
 
 def test_artifact_and_state_bindings_fail_closed(artifact):
