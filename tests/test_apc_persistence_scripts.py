@@ -180,3 +180,15 @@ def test_benchmark_vm_stat_parser_and_small_rescan_cleanup(tmp_path, monkeypatch
     assert report["startup_rescan"]["metadata_only_confirmed"] is True
     assert report["spill"]["digest_computed_once_per_payload"] is True
     assert list(tmp_path.iterdir()) == []
+
+
+def test_provenance_degrades_outside_a_git_checkout(tmp_path, monkeypatch):
+    """A qualified deployment is a git-archive export with no .git.
+
+    The qualifier runs the snapshot's own unit tests from that directory, so a
+    provenance probe that requires git fails the whole deployment rather than
+    losing one optional field.
+    """
+    script = load_script("benchmark_apc_persistence")
+    monkeypatch.setattr(script, "repository_root", lambda: tmp_path)
+    assert script._git_head() is None

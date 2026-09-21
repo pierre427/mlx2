@@ -41,6 +41,21 @@ LAYOUT = "apcv2-persistence-benchmark-hybrid-v1"
 SCHEMA = "mlx2.apcv2-persistence-benchmark.v1"
 
 
+def _git_head():
+    """The checkout's HEAD, or None when running from a deployed snapshot."""
+
+    try:
+        return subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=repository_root(),
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+    except (OSError, subprocess.CalledProcessError):
+        return None
+
+
 def repository_root() -> Path:
     return Path(__file__).resolve().parents[1]
 
@@ -491,13 +506,10 @@ def run(args) -> dict:
             "schema": SCHEMA,
             "source": {
                 "requested_base_revision": "271b21e",
-                "git_head": subprocess.run(
-                    ["git", "rev-parse", "HEAD"],
-                    cwd=repository_root(),
-                    check=True,
-                    capture_output=True,
-                    text=True,
-                ).stdout.strip(),
+                # A qualified deployment is a `git archive` export with no
+                # .git, so provenance degrades to null rather than failing the
+                # run: the snapshot records its revision in SNAPSHOT_REVISION.
+                "git_head": _git_head(),
                 "script_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
             },
             "device": "cpu",
