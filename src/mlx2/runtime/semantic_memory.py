@@ -193,11 +193,6 @@ class SemanticMemory:
         for proposal in proposals:
             subject_id = concept_token(proposal.subject)
             object_id = concept_token(proposal.object)
-            for identifier, label in ((subject_id, proposal.subject), (object_id, proposal.object)):
-                graph["concepts"].setdefault(
-                    identifier,
-                    {"id": identifier, "label": normalize_label(label), "aliases": []},
-                )
             gate = (
                 proposal.confidence >= (self.alias_threshold if proposal.alias else self.confidence_threshold)
                 and proposal.margin >= self.margin_threshold
@@ -212,6 +207,18 @@ class SemanticMemory:
                 "authority": "committed" if gate else "proposal",
             }
             if gate:
+                for identifier, label in (
+                    (subject_id, proposal.subject),
+                    (object_id, proposal.object),
+                ):
+                    graph["concepts"].setdefault(
+                        identifier,
+                        {
+                            "id": identifier,
+                            "label": normalize_label(label),
+                            "aliases": [],
+                        },
+                    )
                 identity = (record["subject"], record["relation"], record["object"])
                 graph["edges"] = [
                     edge

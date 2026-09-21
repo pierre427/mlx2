@@ -86,6 +86,16 @@ class SemanticSidecarTests(unittest.TestCase):
         )
         self.assertEqual(result["accepted_edges"], 0)
         self.assertEqual(result["deferred_proposals"], 1)
+        prepared, next_state = self.sidecar.prepare(
+            {
+                "messages": [{"role": "user", "content": "What is the code?"}],
+                "session_id": "classified",
+            },
+            tenant_id="alice",
+            authenticated_tenant=True,
+        )
+        self.assertEqual(prepared["messages"][0]["role"], "user")
+        self.assertEqual(next_state.retrieved_concepts, 0)
 
     def test_directory_fingerprint_joins_request_scope_and_delete(self):
         body = {
