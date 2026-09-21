@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+from collections.abc import Mapping
 from pathlib import Path
 
 from ..contracts import Capability, ModelDescriptor, StatePlane
@@ -177,7 +178,13 @@ class Qwen359BAdapter(Qwen3827BAdapter):
 
     def configure_neural_concept_bridge(self, artifact):
         """Bind the learned bridge to this exact dense hidden geometry."""
-        if artifact.hidden_dim != int(self.model.args.text_config.hidden_size):
+        text_config = self.model.args.text_config
+        hidden_size = (
+            text_config["hidden_size"]
+            if isinstance(text_config, Mapping)
+            else text_config.hidden_size
+        )
+        if artifact.hidden_dim != int(hidden_size):
             raise ValueError("neural concept bridge hidden dimension mismatch")
         self._neural_concept_artifact = artifact
         self._neural_concept_counts = {"prefills": 0, "concepts": 0, "tokens": 0}

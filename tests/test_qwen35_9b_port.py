@@ -159,7 +159,7 @@ class Qwen359BPortTests(unittest.TestCase):
         adapter = object.__new__(Qwen359BAdapter)
         adapter.layout = "test-layout"
         adapter.model = SimpleNamespace(
-            args=SimpleNamespace(text_config=SimpleNamespace(hidden_size=4)),
+            args=SimpleNamespace(text_config={"hidden_size": 4}),
             language_model=SimpleNamespace(
                 model=SimpleNamespace(embed_tokens=Embedding())
             ),
