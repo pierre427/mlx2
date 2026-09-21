@@ -90,7 +90,11 @@ def _output_direction(adapter, answer):
         bits=head.bits,
         mode=head.mode,
     )
-    result = np.asarray(dense.astype(mx.float32)).mean(axis=0)
+    # The request-scoped bridge amends the final prompt state once.  Target
+    # the first answer token and let ordinary autoregressive decode produce
+    # the continuation; averaging every answer-token row made later words win
+    # the first-token competition.
+    result = np.asarray(dense[0].astype(mx.float32))
     return result
 
 
@@ -183,7 +187,7 @@ def main():
     manifest["weights_sha256"] = hashlib.sha256(weights_path.read_bytes()).hexdigest()
     manifest["deep_injection_layer"] = args.layer
     manifest["training"] = {
-        "method": "frozen-qwen-residual-and-output-head-ridge",
+        "method": "frozen-qwen-residual-and-first-output-head-row-ridge",
         "source_artifact_fingerprint": artifact.fingerprint,
         "layer": args.layer,
         "ridge": args.ridge,
