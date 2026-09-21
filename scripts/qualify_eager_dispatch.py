@@ -331,7 +331,14 @@ def main() -> int:
             "qualification": (
                 "qualified_exact_observed_used" if passed else "failed"
             ),
-            "selection": "unchanged",
+            "selection": {
+                "state": "selected",
+                "owner": "FlashNextPolicy",
+                "enabled": bool(adapter.policy.eager_dispatch),
+                "max_rows": int(adapter.policy.eager_dispatch_max_rows),
+                "stride": int(adapter.policy.eager_dispatch_stride),
+                "registry_mutated_by_harness": False,
+            },
             "started_at": started_at,
             "finished_at": time.time(),
             "git_head": _git_head(),
