@@ -64,6 +64,7 @@ def _score(adapter, prompt_ids, answer, memory):
     cache = adapter.model.make_cache()
     kwargs = {} if memory is None else {"deep_concept_memory": memory}
     logits = adapter.model(mx.array([prompt_ids]), cache=cache, **kwargs)
+    next_token = int(mx.argmax(logits[:, -1, :], axis=-1).item())
     total = 0.0
     for index, token in enumerate(answer_ids):
         row = logits[:, -1, :].astype(mx.float32)
@@ -73,7 +74,13 @@ def _score(adapter, prompt_ids, answer, memory):
             logits = adapter.model(mx.array([[token]]), cache=cache)
     del cache
     mx.clear_cache()
-    return {"tokens": len(answer_ids), "logprob": total, "mean_logprob": total / len(answer_ids)}
+    return {
+        "tokens": len(answer_ids),
+        "next_token": next_token,
+        "target_next_token": int(answer_ids[0]),
+        "logprob": total,
+        "mean_logprob": total / len(answer_ids),
+    }
 
 
 def _greedy(adapter, prompt_ids, memory, max_tokens):

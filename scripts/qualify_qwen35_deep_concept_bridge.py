@@ -95,6 +95,13 @@ def main():
             "bridge": bridge_text,
             "baseline_cue": cue in baseline_text.casefold(),
             "bridge_cue": cue in bridge_text.casefold(),
+            "target_next_token": bridge_score["target_next_token"],
+            "baseline_next_token": baseline_score["next_token"],
+            "bridge_next_token": bridge_score["next_token"],
+            "baseline_token_match": baseline_score["next_token"]
+            == bridge_score["target_next_token"],
+            "bridge_token_match": bridge_score["next_token"]
+            == bridge_score["target_next_token"],
             "delta_mean_logprob": bridge_score["mean_logprob"]
             - baseline_score["mean_logprob"],
             "receipt": prepared["receipt"],
@@ -104,23 +111,31 @@ def main():
 
     baseline_recall = sum(row["baseline_cue"] for row in rows) / len(rows)
     bridge_recall = sum(row["bridge_cue"] for row in rows) / len(rows)
+    baseline_token_accuracy = sum(row["baseline_token_match"] for row in rows) / len(rows)
+    bridge_token_accuracy = sum(row["bridge_token_match"] for row in rows) / len(rows)
     mean_delta = sum(row["delta_mean_logprob"] for row in rows) / len(rows)
-    passed = bridge_recall >= 0.8 and mean_delta >= 1.0 and bridge_recall > baseline_recall
+    passed = (
+        bridge_token_accuracy >= 0.8
+        and mean_delta >= 1.0
+        and bridge_token_accuracy > baseline_token_accuracy
+    )
     result = {
         "schema": "mlx2.qwen35-deep-concept-qualification.v1",
         "status": "qualified-concept-cue" if passed else "experimental-not-qualified",
-        "scope": "held-out first-concept cue; not full phrase generation",
+        "scope": "held-out exact first concept-token; not full phrase generation",
         "model": str(args.model.resolve()),
         "artifact_fingerprint": artifact.fingerprint,
         "episodes": len(rows),
         "candidates_per_request": args.candidates,
         "baseline_cue_recall": baseline_recall,
         "bridge_cue_recall": bridge_recall,
+        "baseline_first_token_accuracy": baseline_token_accuracy,
+        "bridge_first_token_accuracy": bridge_token_accuracy,
         "mean_answer_logprob_delta": mean_delta,
         "criteria": {
-            "bridge_cue_recall_min": 0.8,
+            "bridge_first_token_accuracy_min": 0.8,
             "mean_answer_logprob_delta_min": 1.0,
-            "must_improve_recall": True,
+            "must_improve_first_token_accuracy": True,
         },
         "rows": rows,
     }
@@ -130,6 +145,8 @@ def main():
         "status",
         "baseline_cue_recall",
         "bridge_cue_recall",
+        "baseline_first_token_accuracy",
+        "bridge_first_token_accuracy",
         "mean_answer_logprob_delta",
     )}, indent=2))
     if not passed:
