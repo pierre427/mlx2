@@ -432,6 +432,43 @@ def test_all_tools_dropped_runs_plain_generation(serve):
     assert json.loads(raw)["mlx2"]["agent_compat"]["dropped_tools"] == ["web_search"]
 
 
+@pytest.mark.parametrize("count", [64, 65, 128, 129])
+def test_codex_tool_count_survives_chat_validation(serve, count):
+    engine, url = serve()
+    body = {
+        "model": MODEL,
+        "input": "x",
+        "stream": False,
+        "tools": [
+            {"type": "function", "name": f"tool_{index}", "parameters": {}}
+            for index in range(count)
+        ],
+    }
+    status, raw = _post(url, body)
+    if count == 129:
+        assert status == 400
+        assert "1 to 128" in json.loads(raw)["error"]["message"]
+        assert not engine.requests
+    else:
+        assert status == 200, raw
+        assert len(engine.requests[0]["tools"]) == count
+
+
+def test_chat_tools_still_capped_at_64(serve):
+    engine, url = serve()
+    tools = [
+        {"type": "function", "function": {"name": f"tool_{index}", "parameters": {}}}
+        for index in range(65)
+    ]
+    status, raw = _post(
+        url, {"model": MODEL, "messages": [{"role": "user", "content": "x"}], "tools": tools},
+        path="/v1/chat/completions",
+    )
+    assert status == 400
+    assert "1 to 64" in json.loads(raw)["error"]["message"]
+    assert not engine.requests
+
+
 # ---------------------------------------------------------------------------
 # Claude Code over Messages.
 

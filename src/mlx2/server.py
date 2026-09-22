@@ -364,6 +364,7 @@ def validate_request(
     allow_buffered_tool_stream=False,
     allow_strict_auto=False,
     constrained_tool_grammar=False,
+    max_tools=64,
 ):
     """Validate one request body.
 
@@ -500,8 +501,8 @@ def validate_request(
         raise ValueError("top_logprobs must be an integer from 0 to 11")
     if "tools" in body:
         tools = body["tools"]
-        if not chat or not isinstance(tools, list) or not 1 <= len(tools) <= 64:
-            raise ValueError("tools must contain 1 to 64 function definitions")
+        if not chat or not isinstance(tools, list) or not 1 <= len(tools) <= max_tools:
+            raise ValueError(f"tools must contain 1 to {max_tools} function definitions")
         names = set()
         normalized_tools = []
         for tool in tools:
@@ -1418,6 +1419,7 @@ def handler_for(
             constrained_tool_grammar=bool(
                 (status.get("settings") or {}).get("constrained_tool_grammar")
             ),
+            max_tools=128 if responses_api and batch_compat.enabled else 64,
         )
         model = status.get("model")
         if body.get("model", model) != model:
@@ -2406,6 +2408,7 @@ def handler_for(
                             "constrained_tool_grammar"
                         )
                     ),
+                    max_tools=128 if responses_api and agent_compat.enabled else 64,
                 )
                 if semantic_middleware is not None and chat:
                     ensure_semantic_classifier()
