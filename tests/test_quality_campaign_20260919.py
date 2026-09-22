@@ -139,6 +139,44 @@ def test_feature_smoke_real_http_and_sse_check_logic():
         server.shutdown(); server.server_close(); thread.join()
 
 
+@pytest.mark.parametrize(
+    ("context_cap", "expected_budget"),
+    [(16_384, 16_128), (131_072, 32_000)],
+)
+def test_messages_large_output_smoke_respects_served_context(
+    context_cap, expected_budget
+):
+    feature = load("feature_smoke")
+
+    class FakeHTTP:
+        def __init__(self):
+            self.budget = None
+
+        def get(self, path):
+            assert path == "/v1/status"
+            return {"status": 200, "body": {"max_context": context_cap}}
+
+        def post(self, path, body, *, stream=False):
+            assert path == "/v1/messages" and not stream
+            self.budget = body["max_tokens"]
+            return {"status": 200 if self.budget <= context_cap - 256 else 400}
+
+    class OnlyLargeBudgetCheck:
+        def __init__(self):
+            self.http = FakeHTTP()
+            self.args = SimpleNamespace(capabilities=set())
+            self.result = None
+
+        def check(self, name, function=None, **_kwargs):
+            if name in {"messages_max_tokens_32000", "messages_max_tokens_within_context"}:
+                self.result = function()
+
+    matrix = OnlyLargeBudgetCheck()
+    feature.messages_checks(matrix, applies=True)
+    assert matrix.result is not None and matrix.result.passed
+    assert matrix.http.budget == expected_budget
+
+
 def test_constrained_tool_smoke_uses_a_finite_exact_argument_language():
     feature = load("feature_smoke")
     from mlx2.runtime.tool_parsers.qwen3_coder import constrained_tool_grammar
