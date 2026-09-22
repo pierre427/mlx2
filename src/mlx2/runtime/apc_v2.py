@@ -357,6 +357,7 @@ class APCv2(PrefixIndex):
         "restore_failures",
         "restore_budget_deferrals",
         "spill_failures",
+        "oversize_spills",
         "park_deferred_to_worker",
         "disk_evictions",
         "bytes_written",
@@ -1331,11 +1332,24 @@ class APCv2(PrefixIndex):
         current.nbytes = 0
         self._capsule_generation.advance()
 
-    def _spill_entry_locked(self, key, tokens, entry, *, reason: str) -> bool:
+    def _spill_entry_locked(
+        self, key, tokens, entry, *, reason: str, hard_cap: Optional[int] = None
+    ) -> bool:
         if self._idle_disk_dir is None or not entry.prompt_cache:
             return False
         if self._entry_pinned(entry):
             return False
+        resident_cap = int(self.max_bytes if hard_cap is None else hard_cap)
+        if int(entry.nbytes) > resident_cap:
+            # Disk-only checkpoints may become restorable after a cap change,
+            # but they cannot be used under the current resident budget.  This
+            # matters most for full-context snapshots whose spills are huge.
+            self._disk_stats["oversize_spills"] += 1
+            log.warning(
+                "APCv2 spilling %d-token checkpoint (%d bytes) above "
+                "current resident cap (%d bytes); reuse requires a larger cap",
+                len(tokens), int(entry.nbytes), resident_cap,
+            )
         disk = getattr(entry, "_apc_disk", None)
         if not disk:
             stem = f"apc-idle-{uuid.uuid4().hex}"
@@ -1485,7 +1499,7 @@ class APCv2(PrefixIndex):
         self.max_bytes = temporary_limit
         try:
             self._spill_resident_budget_locked(
-                exclude=entry, include_exclude=False
+                exclude=entry, include_exclude=False, hard_cap=original_limit
             )
         finally:
             self.max_bytes = original_limit
@@ -1608,6 +1622,10 @@ class APCv2(PrefixIndex):
             self._disk_stats["restore_failures"] += 1
             return False
         except Exception:
+            log.exception(
+                "APCv2 disk restore failed for %d-token checkpoint",
+                len(tokens),
+            )
             if isinstance(cache, COWFrozenPromptCache):
                 cache.close()
             self._disk_stats["restore_failures"] += 1
@@ -1635,7 +1653,8 @@ class APCv2(PrefixIndex):
             self._disk_stats["disk_evictions"] += 1
 
     def _spill_resident_budget_locked(
-        self, *, exclude=None, include_exclude: bool = True
+        self, *, exclude=None, include_exclude: bool = True,
+        hard_cap: Optional[int] = None,
     ) -> int:
         if self._idle_disk_dir is None or self._n_bytes <= self.max_bytes:
             return 0
@@ -1649,7 +1668,9 @@ class APCv2(PrefixIndex):
             (_rank, _last_access, key, tokens, entry) = records[0]
             if key is None or tokens is None:
                 break
-            if not self._spill_entry_locked(key, tokens, entry, reason="pressure"):
+            if not self._spill_entry_locked(
+                key, tokens, entry, reason="pressure", hard_cap=hard_cap
+            ):
                 break
             spilled += 1
         if spilled:

@@ -485,6 +485,48 @@ def test_apcv2_rejects_recorded_restore_larger_than_hard_cap_before_io(
     assert apc.apc_stats["cow"]["active_leases"] == 0
 
 
+def test_apcv2_reports_checkpoint_above_current_restore_budget(tmp_path, caplog):
+    apc = APCv2(
+        max_size=4,
+        max_bytes=1,
+        layout_name="test-kv-v1",
+        idle_disk_seconds=1,
+        idle_disk_dir=str(tmp_path),
+    )
+    key, tokens = APCKey("oversize-spill"), [1, 2, 3]
+    apc.store(key, tokens, [_state(KVCache(), len(tokens))])
+
+    disk = apc.apc_stats["idle_disk"]
+    assert disk["oversize_spills"] == 1
+    assert disk["disk_entries"] == 1
+    assert "reuse requires a larger cap" in caplog.text
+    assert apc.nbytes <= apc.max_bytes
+
+
+def test_apcv2_logs_unexpected_disk_restore_exception(tmp_path, monkeypatch, caplog):
+    apc = APCv2(
+        max_size=4,
+        max_bytes=1 << 20,
+        layout_name="test-kv-v1",
+        idle_disk_seconds=1,
+        idle_disk_dir=str(tmp_path),
+    )
+    key, tokens = APCKey("restore-error"), [1, 2, 3]
+    apc.store(key, tokens, [_state(KVCache(), len(tokens))])
+    entry = apc._trie.get(key, tokens)
+    with apc._apc_lock:
+        assert apc._spill_entry_locked(key, tokens, entry, reason="pressure")
+
+    def fail_load(_path):
+        raise RuntimeError("synthetic restore failure")
+
+    monkeypatch.setattr("mlx2.runtime.apc_v2.load_prompt_cache", fail_load)
+    assert not apc.lookup(key, tokens + [4]).hit
+    assert apc.apc_stats["idle_disk"]["restore_failures"] == 1
+    assert "synthetic restore failure" in caplog.text
+    assert "3-token checkpoint" in caplog.text
+
+
 def test_apcv2_rejects_actual_restore_larger_than_hard_cap_before_publication(
     tmp_path, monkeypatch
 ):
