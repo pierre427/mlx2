@@ -358,6 +358,7 @@ class APCv2(PrefixIndex):
         "restore_budget_deferrals",
         "spill_failures",
         "oversize_spills",
+        "spill_capacity_skips",
         "park_deferred_to_worker",
         "disk_evictions",
         "bytes_written",
@@ -1351,6 +1352,27 @@ class APCv2(PrefixIndex):
                 len(tokens), int(entry.nbytes), resident_cap,
             )
         disk = getattr(entry, "_apc_disk", None)
+        if (
+            not disk
+            and self._disk_bytes >= self._idle_disk_max_bytes
+            and not self._entry_disk_pinned_locked(key, tokens, entry)
+        ):
+            # With a full disk tier, a new checkpoint below every retained
+            # disk entry's role is guaranteed to be its own first eviction.
+            # Skip the expensive serialize/fsync/delete cycle; callers may
+            # still evict this unpinned resident entry to make progress.
+            disk_candidates = [
+                record
+                for record in self._retention_ordered_candidates_locked(
+                    resident_only=False, exclude=entry
+                )
+                if getattr(record[4], "_apc_disk", None)
+            ]
+            if not disk_candidates or self._entry_retention_rank(entry) < min(
+                record[0] for record in disk_candidates
+            ):
+                self._disk_stats["spill_capacity_skips"] += 1
+                return False
         if not disk:
             stem = f"apc-idle-{uuid.uuid4().hex}"
             target = self._idle_disk_dir / f"{stem}.target.safetensors"

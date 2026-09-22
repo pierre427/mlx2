@@ -1077,6 +1077,53 @@ def test_disk_budget_keeps_boundary_ahead_of_terminal_after_restore(tmp_path):
     apc.clear()
 
 
+def test_disk_full_does_not_write_disposable_checkpoint_then_evict_it(tmp_path):
+    apc = APCv2(
+        max_size=4,
+        max_bytes=1 << 20,
+        layout_name="test-kv-v1",
+        idle_disk_seconds=180,
+        idle_disk_dir=str(tmp_path),
+        idle_disk_max_bytes=1 << 20,
+    )
+    key = APCKey("disk-write-economics")
+    boundary = [1, 2, 3]
+    rolling = [8, 9, 10]
+    apc.store(
+        key, boundary, [_state(KVCache(), 3)],
+        retention_role="committed_prompt_boundary",
+    )
+    assert apc.evict_oldest_unleased()
+    boundary_disk_bytes = apc.apc_stats["idle_disk"]["disk_bytes"]
+    assert boundary_disk_bytes > 0
+    apc._idle_disk_max_bytes = boundary_disk_bytes
+
+    apc.store(
+        key, rolling, [_state(KVCache(), 3, seed=33)],
+        retention_role="prefill_rolling",
+    )
+    written_before = apc.apc_stats["idle_disk"]["bytes_written"]
+    assert apc.evict_oldest_unleased()
+    disk = apc.apc_stats["idle_disk"]
+    assert disk["bytes_written"] == written_before
+    assert disk["spill_capacity_skips"] == 1
+    assert disk["disk_evictions"] == 0
+    assert apc._trie.search(key, rolling).exact is None
+    assert apc._trie.search(key, boundary).exact is not None
+
+    # Same-rank newer boundaries are still allowed to replace an older one.
+    newer_boundary = [20, 21, 22]
+    apc.store(
+        key, newer_boundary, [_state(KVCache(), 3, seed=44)],
+        retention_role="committed_prompt_boundary",
+    )
+    assert apc.evict_oldest_unleased()
+    disk = apc.apc_stats["idle_disk"]
+    assert disk["bytes_written"] > written_before
+    assert disk["spill_capacity_skips"] == 1
+    assert apc._trie.search(key, newer_boundary).exact is not None
+
+
 def test_explicit_pressure_reclaims_sole_unleased_prompt_boundary():
     apc = APCv2(max_size=4, layout_name="test-hybrid-v1")
     key = APCKey("sole-boundary-pressure")
