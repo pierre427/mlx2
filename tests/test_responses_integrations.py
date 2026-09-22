@@ -78,6 +78,15 @@ def test_responses_signed_unicode_reasoning_and_logprobs_serialize_on_main_paylo
     assert payload["output"][1]["content"][0]["logprobs"][0]["bytes"] == list("▁hi".encode())
 
 
+@pytest.mark.parametrize("extra", [
+    {"include": [{}]},
+    {"service_tier": {}},
+])
+def test_responses_reject_unhashable_option_shapes_as_validation_errors(extra):
+    with pytest.raises(ValueError):
+        responses_to_chat_request({"input": "hi", **extra})
+
+
 class ContinuationEngine:
     model_path = "fixture"
 

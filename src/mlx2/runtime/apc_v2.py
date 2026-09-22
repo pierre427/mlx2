@@ -566,7 +566,11 @@ class APCv2(PrefixIndex):
             # Snapshots are process-local scratch.  Also sweep the dot-prefixed
             # temporaries ``_atomic_save_*`` leave behind if the process died
             # mid-spill; they sit outside the disk-tier accounting otherwise.
-            for pattern in ("apc-idle-*.safetensors", ".apc-idle-*.tmp.safetensors"):
+            for pattern in (
+                "apc-idle-*.safetensors",
+                ".apc-idle-*.tmp.safetensors",
+                ".apc-idle-*.restore.safetensors",
+            ):
                 for path in self._idle_disk_dir.glob(pattern):
                     try:
                         path.unlink()
@@ -880,6 +884,8 @@ class APCv2(PrefixIndex):
                     shutil.rmtree(temporary, ignore_errors=True)
                 else:
                     temporary.unlink(missing_ok=True)
+        for temporary in self._persist_dir.glob(".apc-idle-*.restore.safetensors"):
+            temporary.unlink(missing_ok=True)
         for directory in self._persist_dir.glob("apc-idle-*.safetensors.blocks"):
             if directory.is_dir() and directory.parent == self._persist_dir:
                 shutil.rmtree(directory, ignore_errors=True)
@@ -1534,7 +1540,9 @@ class APCv2(PrefixIndex):
             return False
         cache = None
         try:
-            self._verify_persisted_files(disk)
+            expected = int(disk.get("resident_nbytes", 0) or 0)
+            if expected < 0 or expected > int(self.max_bytes):
+                raise ValueError("APCv2 snapshot exceeds the resident byte cap")
             expected_signature = self._persistent_signature(
                 key, tokens, entry.cache_type, "target"
             )
@@ -1545,7 +1553,7 @@ class APCv2(PrefixIndex):
                 or int(disk.get("token_count", -1)) != len(tokens)
             ):
                 raise ValueError("APCv2 persistent identity or token count mismatch")
-            expected = int(disk.get("resident_nbytes", 0) or 0)
+            self._verify_persisted_files(disk)
             # The recorded size is the cold-allocation admission estimate.  An
             # impossible snapshot must fail before disk I/O; clamping the
             # temporary limit to zero used to let it publish over max_bytes.
@@ -2478,9 +2486,9 @@ class APCv2(PrefixIndex):
                     default=0,
                 )
                 if cache_offset == covered:
-                    sidecar_candidates.append((covered, entry, sidecar))
+                    sidecar_candidates.append((covered, path, entry, sidecar))
         if sidecar_candidates:
-            (covered, entry, sidecar) = max(
+            (covered, selected_tokens, entry, sidecar) = max(
                 sidecar_candidates, key=lambda item: item[0]
             )
             try:
@@ -2502,7 +2510,6 @@ class APCv2(PrefixIndex):
             self._apc_stats["hits"] += 1
             self._apc_stats["cached_tokens"] += covered
             self._record_entry_hit_locked(entry)
-            selected_tokens = tokens[:covered]
             if session_tag is not None and expected_prefetch:
                 self._disk_stats[
                     "prefetch_hits" if prefetched else "prefetch_misses"
@@ -2639,9 +2646,7 @@ class APCv2(PrefixIndex):
                         selected_entry, "_apc_resident_pin_expiries", {}
                     ).pop(session_tag, None)
                     if getattr(selected_entry, "_apc_disk", None):
-                        self._write_manifest_locked(
-                            key, tokens[:cached_tokens], selected_entry
-                        )
+                        self._write_manifest_locked(key, selected_path, selected_entry)
         if not hit:
             kind = None
             short_length = (
@@ -2821,14 +2826,30 @@ class APCv2(PrefixIndex):
         )
         resident_limit = self.max_bytes
         sequence_limit = self.max_size
-        # PrefixIndex cannot see APC retention roles.  Defer both of its hard
-        # limits until the inserted entry has its role, then enforce them as
-        # one role-aware operation below.
+        # PrefixIndex cannot see APC retention roles, session pins, or live
+        # leases.  Subsumption is safe only for disposable ordinary prefixes;
+        # APC still owns size/byte eviction after publication.
+        def can_prune_prefix(_length, entry):
+            return retention_role in (
+                self._RETENTION_DEFAULT,
+                self._RETENTION_JUNCTION,
+                self._RETENTION_PROMPT_BOUNDARY,
+            ) and not (
+                self._entry_pinned(entry)
+                or getattr(entry, "_apc_session_tags", None)
+                or getattr(entry, "_apc_disk_pin_expiries", None)
+                or getattr(entry, "_apc_resident_pin_expiries", None)
+                or getattr(entry, "_apc_prefetch_expected", None)
+                or getattr(entry, "_apc_retention_role", self._RETENTION_DEFAULT)
+                != self._RETENTION_DEFAULT
+            )
+
         self.max_bytes = 1 << 63
         self.max_size = 1 << 63
         try:
             super().insert_cache(
-                key, tokens, prompt_cache, cache_type=cache_type, sidecar=sidecar
+                key, tokens, prompt_cache, cache_type=cache_type, sidecar=sidecar,
+                prune_prefixes=can_prune_prefix,
             )
         finally:
             self.max_bytes = resident_limit

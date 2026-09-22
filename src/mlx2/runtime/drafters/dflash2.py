@@ -281,9 +281,15 @@ def _draft_distributions(
     tokens = [[] for _ in range(batch)]; laws = [[] for _ in range(batch)]
     for position in range(proposal_length):
         edges = mx.sum(selector.predecessor_codebook(predecessor)[:, None] * projected[:, position, None] * selector.successor_codebook(candidates[:, position]), axis=-1)
-        hosted_edges = np.asarray(edges.astype(mx.float32))
+        needs_processor_rows = any(
+            active[row] and logits_processors[row] for row in range(batch)
+        )
+        hosted_edges = np.asarray(edges.astype(mx.float32)) if needs_processor_rows else None
         scores = np.asarray((unary[:, position] + edges).astype(mx.float32))
-        dense_scores = np.asarray(logits[:, position].astype(mx.float32))
+        dense_scores = (
+            np.asarray(logits[:, position].astype(mx.float32))
+            if needs_processor_rows else None
+        )
         ids = np.asarray(candidates[:, position])
         selected = []
         for row in range(batch):

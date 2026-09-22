@@ -532,6 +532,84 @@ def post_response(base, **extra):
     )
 
 
+def test_http_accepts_advertised_lora_model_and_preserves_identity():
+    class LoRAEngine(FakeEngine):
+        def status(self):
+            return {**super().status(), "multi_lora": {"registered": ["sql"]}}
+
+    engine = LoRAEngine()
+    server = ThreadingHTTPServer(("127.0.0.1", 0), handler_for(engine))
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        base = f"http://127.0.0.1:{server.server_port}"
+        with urlopen(base + "/v1/models") as response:
+            assert "sql" in {entry["id"] for entry in json.load(response)["data"]}
+        with post(base, model="sql") as response:
+            assert json.load(response)["model"] == "sql"
+        assert engine.job.request["model"] == "sql"
+        with _json_post(base, "/v1/messages", {
+            "model": "sql",
+            "max_tokens": 8,
+            "messages": [{"role": "user", "content": "hi"}],
+        }) as response:
+            assert json.load(response)["model"] == "sql"
+        with post_response(base, model="sql") as response:
+            assert json.load(response)["model"] == "sql"
+        row = {
+            "custom_id": "lora-row", "method": "POST", "url": "/v1/responses",
+            "body": {"model": "sql", "input": "hi", "store": False},
+        }
+        with upload_file(base, (json.dumps(row) + "\n").encode()) as response:
+            file_id = json.load(response)["id"]
+        with _json_post(base, "/v1/batches", {
+            "input_file_id": file_id,
+            "endpoint": "/v1/responses",
+            "completion_window": "24h",
+        }) as response:
+            batch = json.load(response)
+        for _ in range(100):
+            with urlopen(base + "/v1/batches/" + batch["id"]) as response:
+                batch = json.load(response)
+            if batch["status"] in {"completed", "failed", "cancelled"}:
+                break
+            time.sleep(0.01)
+        assert batch["request_counts"] == {"total": 1, "completed": 1, "failed": 0}
+        with urlopen(base + f"/v1/files/{batch['output_file_id']}/content") as response:
+            assert json.loads(response.read())["response"]["body"]["model"] == "sql"
+        with pytest.raises(HTTPError) as error:
+            post(base, model="unknown")
+        assert error.value.code == 404
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
+
+
+def test_keepalive_counts_each_request():
+    from http.client import HTTPConnection
+    from mlx2.batch_metrics import HttpRuntimeMetrics
+
+    engine = FakeEngine()
+    engine.http_metrics = HttpRuntimeMetrics()
+    server = ThreadingHTTPServer(("127.0.0.1", 0), handler_for(engine))
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    client = HTTPConnection("127.0.0.1", server.server_port, timeout=5)
+    try:
+        for path in ("/health", "/v1/models", "/health"):
+            client.request("GET", path)
+            response = client.getresponse()
+            assert response.status == 200
+            response.read()
+        assert sum(engine.http_metrics.prometheus_snapshot()["requests"].values()) == 3
+    finally:
+        client.close()
+        server.shutdown()
+        server.server_close()
+        thread.join()
+
+
 def upload_file(base, content, *, filename="input.jsonl", purpose="batch", content_type="application/jsonl"):
     boundary = "mlx2-test-boundary"
     body = (
@@ -1008,6 +1086,18 @@ def test_responses_allowlisted_mcp_backend_executes_and_resumes_model():
             "content": '{"temperature":21}',
         }
         assert payload["mlx2"]["hosted_tools"]["rounds"] == 1
+        with post_response(
+            base,
+            input="What did the tool observe?",
+            previous_response_id=payload["id"],
+        ) as response:
+            assert response.status == 200
+        replay = engine.requests[2]["messages"]
+        assert [message["role"] for message in replay] == [
+            "user", "assistant", "tool", "assistant", "user"
+        ]
+        assert replay[2]["tool_call_id"] == "call_weather"
+        assert replay[2]["content"] == '{"temperature":21}'
     finally:
         server.shutdown()
         server.server_close()

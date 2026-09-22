@@ -3,6 +3,7 @@
 import copy
 import importlib
 import json
+import operator
 from functools import partial
 from json import JSONDecodeError
 from typing import Any, Dict, Optional
@@ -161,8 +162,13 @@ class BPEStreamingDetokenizer(StreamingDetokenizer):
     _byte_decoder = None
 
     def __init__(self, tokenizer):
-        self.tokenmap = [None] * len(tokenizer.vocab)
+        ids = [operator.index(tokenid) for tokenid in tokenizer.vocab.values()]
+        if any(tokenid < 0 for tokenid in ids):
+            raise ValueError("BPE vocabulary contains a negative token ID")
+        self.tokenmap = [None] * (max(ids, default=-1) + 1)
         for value, tokenid in tokenizer.vocab.items():
+            if self.tokenmap[tokenid] is not None:
+                raise ValueError(f"duplicate BPE token ID: {tokenid}")
             self.tokenmap[tokenid] = value
         self.reset()
         self.make_byte_decoder()
@@ -176,8 +182,8 @@ class BPEStreamingDetokenizer(StreamingDetokenizer):
     def _decode_bytes(self, seq):
         barr = bytearray()
         for c in seq:
-            res = self._byte_decoder.get(c, False)
-            if res:
+            res = self._byte_decoder.get(c)
+            if res is not None:
                 barr.append(res)
             else:
                 barr.extend(bytes(c, "utf-8"))
@@ -193,8 +199,10 @@ class BPEStreamingDetokenizer(StreamingDetokenizer):
         return current_text
 
     def add_token(self, token):
+        if token < 0 or token >= len(self.tokenmap) or self.tokenmap[token] is None:
+            raise ValueError(f"unknown BPE token ID: {token}")
         self.tokens.append(token)
-        v = self.tokenmap[token] if token < len(self.tokenmap) else "!"
+        v = self.tokenmap[token]
         self._unflushed += v
         text = self._decode_bytes(self._unflushed)
         if not text.endswith("�") and (

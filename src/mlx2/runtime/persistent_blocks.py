@@ -7,6 +7,7 @@ import hmac
 import secrets
 import json
 import os
+import shutil
 import uuid
 from contextlib import contextmanager
 from pathlib import Path
@@ -50,36 +51,43 @@ def encode_block_file(path: Path, *, block_bytes: int, signature: str) -> tuple[
     width = int(block_bytes)
     if width <= 0:
         return (path,)
-    raw = path.read_bytes()
     directory = path.with_suffix(path.suffix + ".blocks")
     temporary = directory.with_name(f".{directory.name}.{uuid.uuid4().hex}.tmp")
     temporary.mkdir(parents=True)
     blocks = []
+    manifest_tmp = path.with_name(f".{path.name}.{uuid.uuid4().hex}.manifest")
+    published_blocks = False
     try:
-        for index, start in enumerate(range(0, len(raw), width)):
-            payload = raw[start:start + width]
-            name = f"{index:08d}-{_digest(payload)}.block"
-            (temporary / name).write_bytes(payload)
-            blocks.append({"name": name, "size": len(payload), "sha256": _digest(payload)})
-        whole = _digest(raw)
+        whole_hash = hashlib.sha256()
+        size = 0
+        with path.open("rb") as source:
+            for index, payload in enumerate(iter(lambda: source.read(width), b"")):
+                whole_hash.update(payload)
+                size += len(payload)
+                digest = _digest(payload)
+                name = f"{index:08d}-{digest}.block"
+                (temporary / name).write_bytes(payload)
+                blocks.append({"name": name, "size": len(payload), "sha256": digest})
+        whole = whole_hash.hexdigest()
         manifest = {
             "format": _FORMAT,
             "signature": str(signature),
-            "size": len(raw),
+            "size": size,
             "sha256": whole,
-            "mac": _manifest_mac(str(signature), len(raw), whole),
+            "mac": _manifest_mac(str(signature), size, whole),
             "block_bytes": width,
             "blocks": blocks,
         }
-        manifest_tmp = path.with_name(f".{path.name}.{uuid.uuid4().hex}.manifest")
         manifest_tmp.write_text(json.dumps(manifest, sort_keys=True), encoding="utf-8")
         os.replace(temporary, directory)
+        published_blocks = True
         os.replace(manifest_tmp, path)
     except BaseException:
-        for item in temporary.glob("*") if temporary.exists() else ():
-            item.unlink(missing_ok=True)
-        if temporary.exists():
-            temporary.rmdir()
+        manifest_tmp.unlink(missing_ok=True)
+        if published_blocks:
+            shutil.rmtree(directory)
+        else:
+            shutil.rmtree(temporary, ignore_errors=True)
         raise
     return (path, *sorted(directory.glob("*.block")))
 
@@ -163,30 +171,38 @@ def materialize_block_file(path: Path, *, expected_signature: str):
     if not hmac.compare_digest(str(manifest.get("mac", "")), expected_mac):
         raise ValueError("APCv2 persistent block manifest authentication failed")
     directory = path.with_suffix(path.suffix + ".blocks")
-    chunks = []
     try:
         blocks = tuple(manifest["blocks"])
     except (KeyError, TypeError) as error:
         raise ValueError("APCv2 persistent block manifest is malformed") from error
-    for item in blocks:
-        try:
-            block_path = _contained_block_path(directory, item["name"])
-        except (KeyError, TypeError) as error:
-            raise ValueError("APCv2 persistent block manifest is malformed") from error
-        payload = block_path.read_bytes()
-        if len(payload) != int(item["size"]) or _digest(payload) != item["sha256"]:
-            raise ValueError("APCv2 persistent block checksum mismatch")
-        chunks.append(payload)
-    raw = b"".join(chunks)
-    if len(raw) != int(manifest["size"]) or _digest(raw) != manifest["sha256"]:
-        raise ValueError("APCv2 persistent snapshot checksum mismatch")
     # MLX dispatches by suffix, so the verified reconstruction must retain the
     # safetensors extension even though it is an ephemeral restore artifact.
     temporary = path.with_name(
         f".{path.stem}.{uuid.uuid4().hex}.restore{path.suffix}"
     )
-    temporary.write_bytes(raw)
     try:
+        whole_hash = hashlib.sha256()
+        size = 0
+        with temporary.open("xb") as target:
+            os.chmod(temporary, 0o600)
+            for item in blocks:
+                try:
+                    block_path = _contained_block_path(directory, item["name"])
+                except (KeyError, TypeError) as error:
+                    raise ValueError("APCv2 persistent block manifest is malformed") from error
+                with block_path.open("rb") as source:
+                    block_hash = hashlib.sha256()
+                    block_size = 0
+                    while payload := source.read(1 << 20):
+                        block_hash.update(payload)
+                        whole_hash.update(payload)
+                        block_size += len(payload)
+                        size += len(payload)
+                        target.write(payload)
+                if block_size != int(item["size"]) or block_hash.hexdigest() != item["sha256"]:
+                    raise ValueError("APCv2 persistent block checksum mismatch")
+        if size != int(manifest["size"]) or whole_hash.hexdigest() != manifest["sha256"]:
+            raise ValueError("APCv2 persistent snapshot checksum mismatch")
         yield temporary
     finally:
         temporary.unlink(missing_ok=True)

@@ -82,6 +82,33 @@ class SemanticBundleTests(unittest.TestCase):
                 expected_revision=0,
             )
 
+    def test_one_hop_retrieval_does_not_chain_by_edge_order(self):
+        chain = (("alpha", "beta"), ("beta", "gamma"), ("gamma", "delta"))
+        for index, links in enumerate((chain, tuple(reversed(chain)))):
+            context = DirectoryContext(model="qwen9b", tenant="alice", session=f"chain-{index}")
+            self.memory.commit_after_delivery(
+                context,
+                [SemanticProposal(a, "related_to", b, 0.99, 0.8, "e") for a, b in links],
+                response_delivered=True,
+                authenticated_tenant=True,
+            )
+            labels = {item["label"] for item in self.memory.retrieve(context, "alpha").concepts}
+            self.assertEqual(labels, {"alpha", "beta"})
+
+    def test_request_context_uses_session_revision_for_commit(self):
+        context = DirectoryContext(model="qwen9b", tenant="alice", session="walk", request="turn-1")
+        first = self.memory.commit_after_delivery(
+            context, [SemanticProposal("forest", "related_to", "leaves", 0.99, 0.8, "one")],
+            response_delivered=True, authenticated_tenant=True,
+        )
+        self.assertEqual(first["revision"], 1)
+        self.assertEqual(self.memory.load(context)[2], 1)
+        second = self.memory.commit_after_delivery(
+            context, [SemanticProposal("forest", "related_to", "walking", 0.99, 0.8, "two")],
+            response_delivered=True, authenticated_tenant=True, expected_revision=1,
+        )
+        self.assertEqual(second["revision"], 2)
+
 
 class ClassifierBundleTests(unittest.TestCase):
     def test_counterbalanced_calibrated_choice_and_abstention(self):

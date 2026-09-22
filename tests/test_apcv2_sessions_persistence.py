@@ -8,6 +8,8 @@ from pathlib import Path
 import mlx.core as mx
 import pytest
 
+mx.set_default_device(mx.cpu)
+
 from mlx2.runtime.apc_v2 import (
     APCKey,
     APCSessionCapacityError,
@@ -91,6 +93,83 @@ def test_session_park_resume_prefetch_and_delete(tmp_path):
     assert not list(tmp_path.glob("apc-idle-*"))
     with pytest.raises(APCSessionNotFound):
         apc.session_state(*tag)
+    apc.close()
+
+
+@pytest.mark.parametrize("query", ([10, 20, 30], [10, 20, 99]))
+def test_prefetch_hit_keeps_persisted_snapshot_path_on_restart(tmp_path, query):
+    key = _identity()
+    tokens = [10, 20, 30]
+    tag = ("tenant-a", "exact-resume")
+    first = _persistent(tmp_path)
+    first.store(key, tokens, [_state(len(tokens))], session_tag=tag)
+    first.park_session(*tag, ttl_seconds=60)
+    first.resume_session(*tag, ttl_seconds=60)
+    first.service_pending_prefetch()
+    deadline = time.monotonic() + 5
+    while first.session_state(*tag)["state"] != "resident":
+        assert time.monotonic() < deadline
+        time.sleep(0.01)
+    hit = first.lookup(key, query, session_tag=tag)
+    assert hit.hit and hit.cached_tokens == len(tokens) - 1
+    hit.cache.close()
+    manifest = json.loads(next(tmp_path.glob("apc-idle-*.manifest.json")).read_text())
+    assert manifest["tokens"] == tokens
+    first.close()
+
+    second = _persistent(tmp_path)
+    assert second.apc_stats["persistence"]["rescan"]["registered"] == 1
+    hit = second.lookup(key, tokens + [40])
+    assert hit.hit and hit.cached_tokens == len(tokens)
+    hit.cache.close()
+    second.close()
+
+
+def test_longer_store_preserves_parked_shorter_session(tmp_path):
+    key = _identity()
+    tag = ("tenant-a", "short-prefix")
+    apc = _persistent(tmp_path)
+    apc.store(key, [1, 2, 3], [_state(3)], session_tag=tag)
+    parked = apc.park_session(*tag, ttl_seconds=60)
+    assert parked["state"] == "disk"
+    apc.store(key, [1, 2, 3, 4], [_state(4)])
+    assert apc.session_state(*tag)["state"] == "disk"
+    assert apc._trie.get(key, [1, 2, 3]) is not None
+    assert next(tmp_path.glob("apc-idle-*.manifest.json")).exists()
+    apc.close()
+
+    restarted = _persistent(tmp_path)
+    assert restarted.session_state(*tag)["state"] == "disk"
+    restarted.close()
+
+
+def test_prefix_subsumption_preserves_committed_boundary_but_prunes_plain_cache(tmp_path):
+    apc = _persistent(tmp_path)
+    key = _identity()
+    apc.store(key, [1, 2], [_state(2)], retention_role="committed_prompt_boundary")
+    apc.store(key, [1, 2, 3], [_state(3)])
+    assert apc._trie.get(key, [1, 2]) is not None
+    apc.store(key, [5, 6], [_state(2)])
+    apc.store(key, [5, 6, 7], [_state(3)])
+    with pytest.raises(KeyError):
+        apc._trie.get(key, [5, 6])
+    apc.close()
+
+
+def test_oversized_restore_rejects_before_payload_hash(tmp_path, monkeypatch):
+    key = _identity()
+    tokens = [1, 2, 3]
+    apc = _persistent(tmp_path)
+    apc.store(key, tokens, [_state(3)])
+    apc.park_all(time_budget_seconds=5)
+    entry = apc._trie.get(key, tokens)
+    entry._apc_disk["resident_nbytes"] = apc.max_bytes + 1
+
+    def forbid_hash(_path):
+        raise AssertionError("oversized snapshot was hashed")
+
+    monkeypatch.setattr(apc, "_sha256_file", forbid_hash)
+    assert not apc.lookup(key, tokens + [4]).hit
     apc.close()
 
 

@@ -93,6 +93,32 @@ class HyperDirectoryTests(unittest.TestCase):
         self.assertTrue(self.directory.delete_session(a))
         self.assertNotIn("memory", self.directory.resolve(a).handles)
 
+    def test_scope_names_with_separator_do_not_collide(self):
+        a = DirectoryContext(model="m--t", tenant="u", session="s")
+        b = DirectoryContext(model="m", tenant="t--u", session="s")
+        capsule = self.capsule("a")
+        self.directory.update(Scope.SESSION, a, expected_revision=0, handles={"memory": capsule.digest})
+        self.assertNotEqual(self.directory._path(Scope.SESSION, a.key_for(Scope.SESSION)),
+                            self.directory._path(Scope.SESSION, b.key_for(Scope.SESSION)))
+        self.assertNotIn("memory", self.directory.resolve(b).handles)
+        self.directory.update(Scope.SESSION, b, expected_revision=0)
+        self.assertIn("memory", self.directory.resolve(a).handles)
+        self.assertEqual(self.directory.resolve(b).layers[-1]["revision"], 1)
+
+    def test_legacy_layer_is_read_and_migrated_on_update(self):
+        context = DirectoryContext(model="m", tenant="t", session="s")
+        key = context.key_for(Scope.SESSION)
+        legacy = self.directory._legacy_path(Scope.SESSION, key)
+        legacy.write_text(json.dumps({
+            "schema": "mlx2-hyper-directory-v1", "scope": "session", "key": list(key),
+            "revision": 1, "handles": {}, "policies": {}, "relationships": [],
+        }))
+        self.assertEqual(self.directory.resolve(context).layers[-1]["revision"], 1)
+        self.directory.update(Scope.SESSION, context, expected_revision=1)
+        self.assertEqual(self.directory.resolve(context).layers[-1]["revision"], 2)
+        self.assertTrue(self.directory.delete_session(context))
+        self.assertFalse(legacy.exists())
+
 
 if __name__ == "__main__":
     unittest.main()

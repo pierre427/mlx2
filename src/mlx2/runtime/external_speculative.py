@@ -37,6 +37,13 @@ def _bump(stats, key, amount=1):
     stats[key] = min(_COUNTER_MAX, int(stats.get(key, 0)) + int(amount))
 
 
+def _context_pairing(history, following, length):
+    """Return only the needed history suffix plus its following token."""
+    if not length:
+        return []
+    return history[-(length - 1):] + [int(following)] if length > 1 else [int(following)]
+
+
 class DraftUnavailable(RuntimeError):
     """A recoverable drafter-only failure; target ordinary path remains valid."""
 
@@ -103,6 +110,7 @@ class RoundSnapshot:
     slot: CommittedRecoverySlot
     boundary: int
     mode: str  # "descriptor_cow" or "deepcopy"
+    processors: tuple  # authoritative objects retained by serving
 
 
 @dataclass
@@ -206,7 +214,7 @@ class ExternalDraftBatchGenerator:
         if not self.pair_context_tokens:
             return self.draft.append_context(lane.tail, lane.draft_cache)
         length = int(lane.tail.shape[1])
-        tokens = (list(lane.history) + [int(following)])[-length:]
+        tokens = _context_pairing(lane.history, following, length)
         _bump(self.scheduler_stats, "external_context_token_pairings", length)
         return self.draft.append_context(lane.tail, lane.draft_cache, context_tokens=[tokens])
 
@@ -467,7 +475,7 @@ class ExternalDraftBatchGenerator:
                     self._thaw_lane if mode == "descriptor_cow" else copy.deepcopy
                 ),
             )
-            snapshots.append(RoundSnapshot(slot, boundary, mode))
+            snapshots.append(RoundSnapshot(slot, boundary, mode, tuple(lane.processors)))
         return snapshots
 
     def _restore_round(self, cohort, snapshots):
@@ -477,6 +485,20 @@ class ExternalDraftBatchGenerator:
                 revision=self.binding,
                 boundary=snapshot.boundary,
             )
+            # Serving and the lane share these processor objects.  Restore
+            # their mutable round state without replacing that ownership;
+            # otherwise a post-fallback grammar failure is invisible to the
+            # serving layer's original failure latch.
+            restored = state["processors"]
+            if len(restored) != len(snapshot.processors):
+                raise RuntimeError("processor count changed during external recovery")
+            for original, saved in zip(snapshot.processors, restored):
+                if original is not saved:
+                    if not hasattr(original, "__dict__") or not hasattr(saved, "__dict__"):
+                        raise TypeError("cannot restore processor identity in external recovery")
+                    original.__dict__.clear()
+                    original.__dict__.update(saved.__dict__)
+            state["processors"] = list(snapshot.processors)
             lane.__dict__.clear(); lane.__dict__.update(state)
 
     def _propose(self, cohort):
@@ -508,8 +530,7 @@ class ExternalDraftBatchGenerator:
             )
             if self.pair_context_tokens:
                 pairing = [
-                    (list(l.history) + [int(l.anchor)])[-int(l.tail.shape[1]):]
-                    if l.tail.shape[1] else []
+                    _context_pairing(l.history, l.anchor, int(l.tail.shape[1]))
                     for l in lanes
                 ]
                 _bump(
@@ -676,7 +697,11 @@ class ExternalDraftBatchGenerator:
                 lane.generated += 1
                 finish = "stop" if token in self.stops else "length" if lane.generated >= lane.maximum else None
                 final = j == len(emitted)-1
-                logp = None if decision.target_laws is None else self.mx.log(self.mx.array(decision.target_laws[j].astype(np.float32)))
+                logp = (
+                    self.mx.log(self.mx.array(decision.target_laws[j].astype(np.float32)))
+                    if lane.sampling.get("emit_logprobs", True) and decision.target_laws is not None
+                    else None
+                )
                 lane.ready.append(SimpleNamespace(uid=lane.uid, token=token, logprobs=logp, finish_reason=finish, execution_width=len(cohort), all_tokens=list(lane.history) if final else None, prompt_cache=self._freeze_cache(lane.cache) if finish else None, cache_sidecar=self._sidecar(lane) if finish else None, mtp_state=None, mtp_receipt=None, speculative_receipt={"kind":self.receipt_kind, "execution":"external_draft_verify" if lane.external_rounds else "ordinary_target", "current_execution":"ordinary_target" if count == 0 else "external_draft_verify", "ordinary_fallback":lane.ordinary, "external_rounds":lane.external_rounds, "accepted":lane.accepted,"proposed":lane.proposed,"round_accepted":round_accepted,"round_proposed":count,"target_width":lane.target_max_width,"draft_width":lane.draft_max_width,"qualification_authority":"serving_route", **self._verification_receipt(lane)}))
         if clock is not None:
             self._mark("emit", clock)
@@ -763,8 +788,6 @@ class ExternalDraftBatchGenerator:
                 # Preserve the authoritative row's allocation/capacity. A
                 # merge/extract round-trip compacts it and perturbs admission.
                 batched_cache = cohort[0].cache
-                logits = self.model(inputs, cache=batched_cache)
-                self.mx.eval(logits, [cache.state for cache in batched_cache])
             else:
                 batched_cache = []
                 for layer in range(len(cohort[0].cache)):
@@ -775,8 +798,17 @@ class ExternalDraftBatchGenerator:
                             f"{type(rows[0]).__name__} cannot batch ordinary external lanes"
                         )
                     batched_cache.append(merge(rows))
+            taps, steer = self._verify_steer(
+                cohort, [[lane.anchor] for lane in cohort], [0] * len(cohort)
+            )
+            if steer is not None:
+                taps.steer = steer
+            try:
                 logits = self.model(inputs, cache=batched_cache)
                 self.mx.eval(logits, [cache.state for cache in batched_cache])
+            finally:
+                if steer is not None:
+                    taps.steer = None
             for row,lane in enumerate(cohort):
                 if len(cohort) > 1:
                     lane.cache = [cache.extract(row) for cache in batched_cache]
@@ -798,8 +830,11 @@ class ExternalDraftBatchGenerator:
                     if lane.generated >= lane.maximum
                     else None
                 )
-                logp = self.mx.log(
-                    self.mx.array(result.target_probabilities[0].astype(np.float32))
+                logp = (
+                    self.mx.log(
+                        self.mx.array(result.target_probabilities[0].astype(np.float32))
+                    )
+                    if lane.sampling.get("emit_logprobs", True) else None
                 )
                 lane.ready.append(
                     SimpleNamespace(
@@ -840,7 +875,8 @@ class ExternalDraftBatchGenerator:
             _bump(self.scheduler_stats, "external_ordinary_fast_path_rounds")
             _bump(self.scheduler_stats, "external_ordinary_fast_path_lanes", count)
             _bump(self.scheduler_stats, "external_draft_context_skipped", count)
-            _bump(self.scheduler_stats, "external_taps_skipped", count)
+            if steer is None:
+                _bump(self.scheduler_stats, "external_taps_skipped", count)
             _bump(self.scheduler_stats, "external_transactions_skipped", count)
             self.scheduler_stats["target_max_width"] = max(
                 self.scheduler_stats["target_max_width"], len(cohort)

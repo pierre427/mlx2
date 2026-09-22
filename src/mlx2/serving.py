@@ -5451,6 +5451,8 @@ class ServingEngine:
                                 )
                             processors.append(structured)
                         sampling_config = {"sampling_temp": temp, "top_p": top_p, "top_k": top_k, "min_p": min_p, "shared_prefix_attestation": shared_prefix_attestation(hit)}
+                        if external_draft:
+                            sampling_config["emit_logprobs"] = wants_logprobs(job.request)
                         if getattr(hit, "target_only_plain_fallback", False):
                             sampling_config["target_only_plain_fallback"] = True
                         if job.request.get("batch_cohort") is not None:

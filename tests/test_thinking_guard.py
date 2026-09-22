@@ -52,6 +52,25 @@ def test_guard_is_a_pure_function_of_the_ids_across_rollbacks():
         ThinkingGuard(2, (1, 2), budget=10)
 
 
+def test_rejected_close_restores_steering_and_release_receipt():
+    direction = {"layer": 1, "vector": np.ones(4)}
+    guard = ThinkingGuard(2, (CLOSE,), budget=20, direction=direction, alpha=0.2)
+    _call(guard, [8, CLOSE])
+    assert guard.released_at == 1 and guard.residual_steer(8) is None
+    _call(guard, [8, 9])
+    assert guard.released_at is None
+    assert guard.receipt()["released_at"] is None
+    assert guard.residual_steer(9) is not None
+
+
+def test_rejected_hard_budget_clears_forced_receipt():
+    guard = ThinkingGuard(2, (CLOSE,), budget=3, soft_ratio=0.5)
+    _call(guard, [8, 9, 10])
+    assert guard.receipt()["forced_close"]
+    _call(guard, [8, 9])
+    assert not guard.receipt()["forced_close"]
+
+
 class _CountingTokens:
     """Token context that records how many ids the guard reads per step."""
 

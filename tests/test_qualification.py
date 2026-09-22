@@ -624,3 +624,19 @@ def test_disabled_adaptive_settings_match_a_real_committed_record():
         AdaptiveMTPDepthPolicy.from_value(None).as_dict()
     )
     assert current_settings == record["settings"]
+
+
+def test_prompt_lookup_keeps_common_environment_evidence_requirements():
+    from mlx2.qualification import required_feature_checks
+
+    settings = {
+        "speculation": "prompt_lookup",
+        "environment": {
+            "MLX_QWEN4_PLE_NVME": "/fixture/ple_rows.bin",
+            "MLX_QWEN4_PLE_COMPILE": "1",
+        },
+    }
+    checks = required_feature_checks(settings)
+    assert "feature_prompt_lookup" in checks
+    assert "feature_file_backed_ple" in checks
+    assert "feature_compiled_ple" in checks

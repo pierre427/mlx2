@@ -142,6 +142,26 @@ def test_restore_leaves_checkpoint_pristine_for_a_second_restore(monkeypatch):
     _assert_planes_equal(_planes(lane), before)
 
 
+@pytest.mark.parametrize("cow", [True, False])
+def test_restore_keeps_serving_owned_processor_identity_and_state(monkeypatch, cow):
+    _cow(monkeypatch, cow)
+    m, d = tiny()
+    b = generator(m, d)
+    processor = SimpleNamespace(failure=None, history=[])
+    uid = b.insert([[1, 2, 3]], max_tokens=[4], logits_processors=[[processor]])[0]
+    lane = b.lanes[uid]
+    snapshot, = b._snapshot_round([lane])
+    processor.failure = "provisional failure"
+    processor.history.append(99)
+    b._restore_round([lane], [snapshot])
+    assert lane.processors[0] is processor
+    assert processor.failure is None and processor.history == []
+    lane.processors[0].failure = "committed failure"
+    assert processor.failure == "committed failure"
+    b._restore_round([lane], [snapshot])
+    assert lane.processors[0] is processor and processor.failure is None
+
+
 @pytest.mark.parametrize("sampled", [False, True])
 def test_cow_and_deepcopy_modes_are_token_rng_and_cache_identical(monkeypatch, sampled):
     def run(cow):

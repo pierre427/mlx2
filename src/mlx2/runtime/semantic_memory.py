@@ -117,9 +117,13 @@ class SemanticMemory:
 
     def load(self, context: DirectoryContext) -> tuple[dict, str | None, int]:
         resolved = self.directory.resolve(context)
+        session_revision = next(
+            (layer["revision"] for layer in resolved.layers if layer["scope"] == Scope.SESSION.value),
+            0,
+        )
         digest = resolved.handles.get("semantic-memory")
         if digest is None:
-            return empty_graph(), None, resolved.layers[-1]["revision"] if resolved.layers else 0
+            return empty_graph(), None, session_revision
         capsule = self.capsules.get(digest)
         if capsule["kind"] not in {"semantic_base", "semantic_delta"}:
             raise ValueError("semantic-memory handle points to wrong capsule kind")
@@ -134,7 +138,7 @@ class SemanticMemory:
         graph = capsule["data"]
         if graph.get("schema") != SEMANTIC_SCHEMA:
             raise ValueError("unsupported semantic graph schema")
-        return graph, digest, resolved.layers[-1]["revision"] if resolved.layers else 0
+        return graph, digest, session_revision
 
     def retrieve(self, context: DirectoryContext, query: str, *, limit: int = 8) -> RetrievalResult:
         if type(limit) is not int or not 1 <= limit <= 32:
@@ -151,11 +155,13 @@ class SemanticMemory:
                 scores[concept_id] = overlap / max(1, len(set(query_terms) | haystack))
         # One typed edge hop makes "standard model" retrieve quarks without
         # flattening the graph into an unstructured similarity list.
+        direct_scores = scores.copy()
         for edge in graph["edges"]:
-            if edge["subject"] in scores and edge["object"] not in scores:
-                scores[edge["object"]] = scores[edge["subject"]] * 0.5
-            if edge["object"] in scores and edge["subject"] not in scores:
-                scores[edge["subject"]] = scores[edge["object"]] * 0.5
+            for source, destination in ((edge["subject"], edge["object"]), (edge["object"], edge["subject"])):
+                if source in direct_scores:
+                    scores[destination] = max(
+                        scores.get(destination, 0.0), direct_scores[source] * 0.5
+                    )
         selected = tuple(sorted(scores, key=lambda item: (-scores[item], item))[:limit])
         concepts = tuple(graph["concepts"][item] for item in selected)
         selected_set = set(selected)
@@ -179,7 +185,12 @@ class SemanticMemory:
             return {"committed": False, "reason": "response-not-delivered", "proposals": len(proposals)}
         if not authenticated_tenant or not context.tenant or not context.session:
             return {"committed": False, "reason": "request-local-only", "proposals": len(proposals)}
-        graph, parent, current_revision = self.load(context)
+        # Commits publish to SESSION; request-local overrides are retrieval
+        # context and must not be promoted into the durable session graph.
+        session_context = DirectoryContext(
+            model=context.model, tenant=context.tenant, session=context.session
+        )
+        graph, parent, current_revision = self.load(session_context)
         if expected_revision is not None and expected_revision != current_revision:
             raise ValueError("semantic memory revision changed during request")
         graph = {

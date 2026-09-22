@@ -220,6 +220,39 @@ def test_external_route_applies_residual_steering():
     assert list(steered.values())[0] == reference
 
 
+@pytest.mark.parametrize("width", [1, 2])
+def test_ordinary_fallback_binds_and_clears_residual_steering(width):
+    target, draft = tiny()
+    steer = _Steerer(mx.ones((16,)))
+    batch = generator(target, draft)
+    uids = batch.insert(
+        [[1, 2, 3]] * width, max_tokens=[3] * width,
+        logits_processors=[[steer] for _ in range(width)],
+    )
+    cohort = [batch.lanes[uid] for uid in uids]
+    for lane in cohort:
+        while lane.anchor is None:
+            batch._prefill(lane)
+        lane.ordinary = True
+
+    class ObservingTarget:
+        def __init__(self, wrapped):
+            self.wrapped = wrapped
+            self.model = wrapped.model
+            self.observed = []
+
+        def __call__(self, inputs, *, cache):
+            self.observed.append(self.model.residual_taps.steer)
+            return self.wrapped(inputs, cache=cache)
+
+    observer = ObservingTarget(target)
+    batch.model = observer
+    batch._ordinary_round(cohort)
+    assert len(observer.observed) == 1 and observer.observed[0] is not None
+    assert observer.observed[0][1].shape[0] == width
+    assert target.model.residual_taps.steer is None
+
+
 def test_dflash_family_never_receives_context_tokens():
     target, draft = tiny()
     draft.requires_context_tokens = False

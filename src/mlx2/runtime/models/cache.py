@@ -4719,11 +4719,13 @@ class PromptTrie:
             del parent[tok]
         return value
 
-    def pop_prefixes(self, model: Any, tokens: List[int]):
+    def pop_prefixes(self, model: Any, tokens: List[int], predicate=None):
         values = []
         current = self._trie[model]
         for i, tok in enumerate(tokens):
-            if "__value__" in current:
+            if "__value__" in current and (
+                predicate is None or predicate(i, current["__value__"])
+            ):
                 values.append((i, current.pop("__value__")))
             current = current[tok]
         return values
@@ -4941,6 +4943,7 @@ class PrefixIndex:
         *,
         cache_type: str = "assistant",
         sidecar: Any = None,
+        prune_prefixes=True,
     ):
         if self.max_tokens is not None and len(tokens) > self.max_tokens:
             self.overlength_rejections += 1
@@ -4960,8 +4963,11 @@ class PrefixIndex:
             self._n_bytes_by_type[prev.cache_type] -= prev.nbytes
             self._lru.remove(model, tokens)
         self._lru.push(model, tokens, cache_type)
-        if can_trim_prompt_cache(prompt_cache) and sidecar is None:
-            for prefix_len, entry in self._trie.pop_prefixes(model, tokens):
+        if prune_prefixes and can_trim_prompt_cache(prompt_cache) and sidecar is None:
+            for prefix_len, entry in self._trie.pop_prefixes(
+                model, tokens,
+                predicate=prune_prefixes if callable(prune_prefixes) else None,
+            ):
                 self._n_bytes -= entry.nbytes
                 self._n_bytes_by_type[entry.cache_type] -= entry.nbytes
                 self._lru.remove(model, tokens[:prefix_len])

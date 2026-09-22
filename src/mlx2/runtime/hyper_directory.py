@@ -91,8 +91,15 @@ class HyperDirectory:
         self._lock = threading.RLock()
 
     def _path(self, scope: Scope, key: Sequence[str]) -> Path:
-        encoded = "--".join((scope.value, *key))
-        return self.root / f"{encoded}.json"
+        identity = hashlib.sha256(canonical_json([scope.value, *key])).hexdigest()
+        return self.root / f"{scope.value}--{identity}.json"
+
+    def _legacy_path(self, scope: Scope, key: Sequence[str]) -> Path:
+        return self.root / f"{'--'.join((scope.value, *key))}.json"
+
+    def _read_path(self, scope: Scope, key: Sequence[str]) -> Path:
+        path = self._path(scope, key)
+        return path if path.exists() else self._legacy_path(scope, key)
 
     @staticmethod
     def _empty(scope: Scope, key: Sequence[str]) -> dict:
@@ -107,12 +114,20 @@ class HyperDirectory:
         }
 
     def _read(self, scope: Scope, key: Sequence[str]) -> dict:
-        path = self._path(scope, key)
+        path = self._read_path(scope, key)
         if not path.exists():
             return self._empty(scope, key)
         if path.is_symlink() or not path.is_file():
             raise ValueError("directory layer must be a regular file")
         value = json.loads(path.read_text())
+        if (
+            path == self._legacy_path(scope, key)
+            and value.get("schema") == DIRECTORY_SCHEMA
+            and value.get("scope") == scope.value
+            and value.get("key") != list(key)
+        ):
+            # Another valid tuple can occupy the old separator-based name.
+            return self._empty(scope, key)
         if (
             value.get("schema") != DIRECTORY_SCHEMA
             or value.get("scope") != scope.value
@@ -215,14 +230,29 @@ class HyperDirectory:
 
     def delete_session(self, context: DirectoryContext) -> bool:
         key = context.key_for(Scope.SESSION)
-        path = self._path(Scope.SESSION, key)
         with self._lock:
-            if not path.exists():
-                return False
-            if path.is_symlink() or not path.is_file():
-                raise ValueError("session directory layer must be a regular file")
-            path.unlink()
-            return True
+            # Validate the layer before unlinking either current or legacy path.
+            if self._read_path(Scope.SESSION, key).exists():
+                self._read(Scope.SESSION, key)
+            removed = False
+            for path in (self._path(Scope.SESSION, key), self._legacy_path(Scope.SESSION, key)):
+                if not path.exists():
+                    continue
+                if path.is_symlink() or not path.is_file():
+                    raise ValueError("session directory layer must be a regular file")
+                value = json.loads(path.read_text())
+                if (
+                    path == self._legacy_path(Scope.SESSION, key)
+                    and value.get("schema") == DIRECTORY_SCHEMA
+                    and value.get("scope") == Scope.SESSION.value
+                    and value.get("key") != list(key)
+                ):
+                    continue
+                if value.get("scope") != Scope.SESSION.value or value.get("key") != list(key):
+                    raise ValueError("invalid hyper directory layer")
+                path.unlink()
+                removed = True
+            return removed
 
 
 __all__ = [

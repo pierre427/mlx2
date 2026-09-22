@@ -417,11 +417,12 @@ def responses_to_chat_request(
         raise ValueError("prompt_cache_key must be nonempty text")
     if body.get("truncation", "disabled") != "disabled":
         raise ValueError("truncation only supports disabled")
-    if body.get("service_tier", "auto") not in {"auto", "default"}:
+    service_tier = body.get("service_tier", "auto")
+    if not isinstance(service_tier, str) or service_tier not in {"auto", "default"}:
         raise ValueError("service_tier must be auto or default")
     include = body.get("include", [])
     if not isinstance(include, list) or any(
-        item not in {
+        not isinstance(item, str) or item not in {
             "reasoning.encrypted_content",
             "message.output_text.logprobs",
         }

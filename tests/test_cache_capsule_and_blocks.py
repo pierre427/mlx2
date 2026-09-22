@@ -505,6 +505,24 @@ def test_block_file_roundtrip_identity_and_corruption_sidecars(tmp_path):
     assert remove_block_file(path) > 0
 
 
+def test_failed_reconstruction_cleans_partial_restore_and_startup_orphans(tmp_path):
+    path = tmp_path / "apc-idle-test.safetensors"
+    path.write_bytes(b"abcdefghijkl")
+    encode_block_file(path, block_bytes=4, signature="exact")
+    block = block_file_paths(path)[-1]
+    block.write_bytes(b"corrupt")
+    with pytest.raises(ValueError, match="checksum"):
+        with materialize_block_file(path, expected_signature="exact"):
+            pass
+    assert not list(tmp_path.glob(".apc-idle-*.restore.safetensors"))
+
+    orphan = tmp_path / ".apc-idle-abandoned.restore.safetensors"
+    orphan.write_bytes(b"partial")
+    APCv2(max_bytes=1 << 20, layout_name="layout", idle_disk_seconds=1,
+          idle_disk_dir=str(tmp_path))
+    assert not orphan.exists()
+
+
 def test_block_manifest_paths_fail_closed_for_materialize_and_remove(tmp_path):
     path = tmp_path / "cache.safetensors"
     path.write_bytes(b"payload")

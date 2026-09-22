@@ -58,6 +58,7 @@ class ThinkingGuard:
         self.trip_reason = None
         self.released_at = None
         self.forced = False
+        self._forced_at = None
         self.think_tokens = 0
         # alpha actuator: an adapter-calibrated commit direction
         # {"layer": L, "vector": rms_L * v_hat}.  While the reasoning channel is
@@ -133,6 +134,9 @@ class ThinkingGuard:
                 (index for index in range(common, len(known)) if known[index] == close),
                 None,
             )
+        if self._forced_at is not None and common < self._forced_at:
+            self._forced_at = None
+            self.forced = False
         self._truncate(min(len(self._ids), common))
         return length
 
@@ -141,11 +145,10 @@ class ThinkingGuard:
 
         length = self._sync(tokens)
         close = self.close_ids[0]
+        self._open = self._close_at is None
+        self.released_at = self._close_at
         if self._close_at is not None:
-            self._open = False
-            if self.released_at is None:
-                self.released_at = self._close_at
-                self.think_tokens = self.released_at
+            self.think_tokens = self._close_at
             return logits
         for token in self._generated[len(self._ids):]:
             self._advance(token)
@@ -154,6 +157,8 @@ class ThinkingGuard:
             return logits
         if self.budget is not None and length >= self.budget:
             self.forced = True
+            if self._forced_at is None:
+                self._forced_at = length
             keep = mx.arange(logits.shape[-1]) == close
             return mx.where(keep, logits, mx.array(-float("inf"), dtype=logits.dtype))
         bias = self.ramp_nats * (length - self._tripped_at + 1)

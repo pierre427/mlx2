@@ -1384,9 +1384,17 @@ def handler_for(
         context = (
             options["previous_context"]
             + options["context_messages"]
+            + options.get("hosted_messages", [])
             + [assistant]
         )
         response_store.put(tenant_id, payload, context)
+
+    def selectable_model(status, requested):
+        """Accept exactly the base model and the adapters advertised by /v1/models."""
+        base = status.get("model", Path(engine.model_path).name)
+        return requested == base or requested in (
+            (status.get("multi_lora") or {}).get("registered") or ()
+        )
 
     def _batch_execute(endpoint, raw_body, tenant_id):
         if not isinstance(raw_body, dict):
@@ -1421,8 +1429,8 @@ def handler_for(
             ),
             max_tools=128 if responses_api and batch_compat.enabled else 64,
         )
-        model = status.get("model")
-        if body.get("model", model) != model:
+        model = body.get("model", status.get("model"))
+        if not selectable_model(status, model):
             raise ResourceNotFound("unknown model")
         if body.get("n", 1) != 1:
             raise ValueError("batch rows currently require n=1")
@@ -1491,6 +1499,16 @@ def handler_for(
         def setup(self):
             super().setup()
             self.connection.settimeout(30)
+            self._http_started_at = None
+            self._http_recorded = False
+            self._request_trace = None
+            self._tenant_id = "default"
+            self._tenant_auth_method = None
+
+        def parse_request(self):
+            # BaseHTTPRequestHandler reuses this instance for every request on
+            # a keep-alive connection. Start after the request line arrives so
+            # idle time between requests is not charged to the next request.
             metrics = getattr(engine, "http_metrics", None)
             self._http_started_at = (
                 metrics.started() if metrics is not None else time.monotonic()
@@ -1499,6 +1517,7 @@ def handler_for(
             self._request_trace = None
             self._tenant_id = "default"
             self._tenant_auth_method = None
+            return super().parse_request()
 
         def end_headers(self):
             # Tenant-auth receipt on every response, streams included.  The
@@ -2358,7 +2377,7 @@ def handler_for(
                     anthropic_request = body
                     status = engine.status()
                     model = status.get("model")
-                    if body.get("model", model) != model:
+                    if not selectable_model(status, body.get("model", model)):
                         self.api_error(404, "unknown model", anthropic=True)
                         return
                     translation_metadata = {}
@@ -2456,8 +2475,8 @@ def handler_for(
                     and not buffered_hosted_stream
                     and (status.get("settings") or {}).get("tool_grammar_streaming")
                 )
-                model = status.get("model")
-                if body.get("model", model) != model:
+                model = body.get("model", status.get("model"))
+                if not selectable_model(status, model):
                     self.api_error(404, "unknown model", anthropic=anthropic)
                     return
                 sample_count = body.get("n", 1)
@@ -2874,6 +2893,9 @@ def handler_for(
                                 **body,
                                 "messages": [*body["messages"], message, *outputs],
                             }
+                            response_options.setdefault("hosted_messages", []).extend(
+                                (message, *outputs)
+                            )
                             hosted_rounds += 1
                             continuation_kwargs = {"tenant_id": tenant_id}
                             if admission_lease is not None:

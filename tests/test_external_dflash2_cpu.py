@@ -241,6 +241,52 @@ def test_selector_exports_actual_nonzero_proposal_law():
         assert np.count_nonzero(law)==4
 
 
+def test_unstructured_selector_skips_dense_host_rows_and_matches_noop_processor(monkeypatch):
+    m,d=tiny();cache=m.make_cache();h=m.prefill_body(mx.array([[1,2,3]]),cache,[0,3])
+    original=np.asarray; host_shapes=[]
+    def observe(value, *args, **kwargs):
+        result=original(value,*args,**kwargs)
+        host_shapes.append(result.shape)
+        return result
+    monkeypatch.setattr(np,"asarray",observe)
+    plain=d.draft_distributions([4],h,d.make_cache(),2,[RequestRNG(19)],[.8])
+    assert (1,d.config.vocab_size) not in host_shapes
+    host_shapes.clear()
+    guarded=d.draft_distributions(
+        [4],h,d.make_cache(),2,[RequestRNG(19)],[.8],
+        logits_processors=[[lambda tokens,value:value]],
+        processor_histories=[[1,2,3]],
+    )
+    assert (1,d.config.vocab_size) in host_shapes
+    assert plain[0]==guarded[0]
+    for a,b in zip(plain[1][0],guarded[1][0]):
+        np.testing.assert_allclose(a,b,rtol=1e-6,atol=1e-8)
+
+
+@pytest.mark.parametrize("ordinary",[False,True])
+def test_external_response_laws_are_materialized_only_when_requested(ordinary):
+    m,d=tiny()
+    def run(emit):
+        b=generator(m,d)
+        uid=b.insert([[1,2,3]],max_tokens=[4],
+                     sampling_configs=[{"emit_logprobs":emit}])[0]
+        if ordinary:b.disable_speculation(uid)
+        tokens=[]; laws=[]
+        for _ in range(20):
+            _,responses=b.next()
+            for response in responses:
+                tokens.append(response.token)
+                laws.append(response.logprobs)
+            if uid not in b.lanes:break
+        assert len(tokens)==4
+        return tokens,laws
+    with_laws=run(True)
+    without_laws=run(False)
+    assert with_laws[0]==without_laws[0]
+    assert all(row is not None for row in with_laws[1])
+    assert all(row is None for row in without_laws[1])
+
+
 def test_external_draft_processors_sample_and_verify_with_masked_q(monkeypatch):
     import mlx2.runtime.external_speculative as module
 
