@@ -2611,7 +2611,7 @@ class APCv2(PrefixIndex):
                 exact = list(path)
                 break
             if shared == len(path) < len(tokens):
-                if len(path) > len(shorter or ()) and len(path) > 1:
+                if len(path) > len(shorter or ()):
                     shorter = list(path)
                 continue
             if shared and shared < len(path) and (

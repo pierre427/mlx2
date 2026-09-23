@@ -1588,3 +1588,35 @@ def test_disk_restore_rejects_non_empty_placeholder_shapes(tmp_path):
     miss = apc.lookup(key, list(range(9)))
     assert not miss.hit
     assert apc.apc_stats["idle_disk"]["restore_failures"] == 1
+
+
+def test_one_token_stored_prefix_is_a_shorter_match_for_untrimmable_caches():
+    # The committed boundary of a two-token prompt is one token.  search
+    # never reported a one-token shorter prefix, only a "longer" path that
+    # an untrimmable (hybrid) cache cannot serve, so n>1 siblings on the
+    # prompt-lookup route could not lease the leader's boundary.
+    from mlx2.runtime.models.cache import PromptTrie
+
+    trie = PromptTrie()
+    trie.add("model", [3], "boundary")
+    assert trie.search("model", [3, 8]).shorter == [3]
+
+    index = PrefixIndex(max_size=8)
+    index.insert_cache("model", [3], [_recurrent(1), _state(KVCache(), 1)])
+    cache, remaining = index.fetch_nearest_cache("model", [3, 8])
+    assert cache is not None and remaining == [8] and cache[1].offset == 1
+
+    apc = APCv2(max_size=8, layout_name="test-hybrid-v1")
+    key = APCKey("hybrid-one-token")
+    apc.store(key, [3], [_recurrent(1), _state(KVCache(), 1)],
+              retention_role="committed_prompt_boundary")
+    hit = apc.lookup(key, [3, 8])
+    assert hit.hit and hit.cached_tokens == 1 and hit.remaining_tokens == [8]
+    hit.cache.close()
+    # An exact entry that cannot land inside its own prompt falls back to a
+    # one-token proper prefix as well.
+    apc.store(key, [3, 8], [_recurrent(2), _state(KVCache(), 2)])
+    hit = apc.lookup(key, [3, 8])
+    assert hit.hit and hit.cached_tokens == 1 and hit.hit_kind == "prefix"
+    hit.cache.close()
+    apc.clear()

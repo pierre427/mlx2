@@ -419,3 +419,46 @@ def test_parallel_sample_guard_waits_for_headroom_before_refusing(monkeypatch):
     assert len(rejected) == 1
     with pytest.raises(ValueError, match="lane capacity"):
         engine.admit_parallel_samples(5)
+
+
+@pytest.mark.parametrize("route", ["ordinary", "native_mtp", "prompt_lookup"])
+def test_short_prompt_fanout_siblings_complete_on_every_route(monkeypatch, route):
+    # A one-token prompt has no committed boundary to publish, so siblings
+    # waited for a fanout that never came and failed with 503 when the
+    # leader ended.  A two-token prompt's one-token boundary was stored but
+    # was not a "shorter" trie match, so on prompt lookup over hybrid caches
+    # the siblings could not lease it.
+    from route_harness import collect, make_engine, patch_host, tiny_qwen38_mtp
+
+    patch_host(monkeypatch)
+    model, vocab = tiny_qwen38_mtp()
+    options = {
+        "ordinary": {"mtp": False},
+        "native_mtp": {"mtp": True, "extra": {"segment_aware_live_tip": True,
+                                              "segment_aware_cohort_size": 3}},
+        "prompt_lookup": {"mtp": False, "prompt_lookup": True},
+    }[route]
+    engine = make_engine(model, vocab, max_lanes=3, **options)
+    try:
+        for length in (1, 2):
+            prompt = [(5 * i + 2) % 60 + 1 for i in range(length)]
+            for samples in (2, 3):
+                jobs = engine.submit_many([
+                    {"tokens": prompt, "max_tokens": 4, "temperature": 0.8, "seed": 10 + k}
+                    for k in range(samples)
+                ])
+                outputs = [collect(job, timeout=60) for job in jobs]
+                assert [output.get("error") for output in outputs] == [None] * samples, (length, samples)
+                assert all(len(output["tokens"]) == 4 for output in outputs)
+                fanout = [output["receipt"]["parallel_prefill"] for output in outputs]
+                if length == 1:
+                    # Nothing to share: every sample prefilled on its own.
+                    assert all(not item["one_prefill"] for item in fanout)
+                    assert {item["reason"] for item in fanout} == {"no_prompt_boundary"}
+                else:
+                    assert all(item["one_prefill"] for item in fanout)
+                    assert all(item["boundary_tokens"] == 1 for item in fanout)
+        alive, error = engine.thread.is_alive(), engine.error
+    finally:
+        engine.close()
+    assert alive and error is None

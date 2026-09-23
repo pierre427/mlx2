@@ -4955,7 +4955,10 @@ class PromptTrie:
         if last_index == len(tokens) - 1 >= 0:
             return PromptTrieResult(model, tokens, None, None, 0)
         shorter = None
-        if last_index > 0:
+        # A one-token stored prefix (the committed boundary of a two-token
+        # prompt) is a shorter match too.  Reporting it only as a "longer"
+        # path made untrimmable hybrid caches miss it.
+        if last_index >= 0:
             shorter = tokens[: last_index + 1]
         longer = None
         common_prefix = index
@@ -5118,8 +5121,8 @@ class PrefixIndex:
         """
         nearest = self._trie.search(model, tokens[:-1])
         shorter = nearest.exact if nearest.exact is not None else nearest.shorter
-        if shorter is not None and len(shorter) < 2:
-            # Match ``search``, which never reports a one-token shorter prefix.
+        if not shorter:
+            # Match ``search``, which never reports an empty shorter prefix.
             shorter = None
         return PromptTrieResult(model, None, shorter, None, 0)
 

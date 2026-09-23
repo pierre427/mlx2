@@ -3141,6 +3141,22 @@ class ServingEngine:
             for sibling in waiting_siblings:
                 self._finish(sibling, sibling_event)
 
+    def _release_fanout_siblings(self, leader, reason):
+        """Admit a fanout leader's waiting siblings as independent samples.
+
+        Like write-suppressed samples, each prefills its own prompt; the
+        receipt reports ``one_prefill`` false with ``reason``.
+        """
+        with self.lock:
+            siblings = self.fanout_waiting.pop(leader.fanout_group, ())
+        if not siblings:
+            return
+        leader.fanout_reason = reason
+        for sibling in siblings:
+            sibling.fanout_reason = reason
+        self.counts["apcv2_fanout_independent_prefills"] += 1
+        self._publish_jobs(siblings, already_registered=True, atomic=False)
+
     def _observe_thinking_budget(self, job, *, final=False):
         """Commit one history-derived budget outcome from emitted lane tokens."""
         processor = job.thinking_budget
@@ -6490,6 +6506,15 @@ class ServingEngine:
                         job = active.get(response.uid)
                         if job is None:
                             continue
+                        if (
+                            job.fanout_role == "prefill_leader"
+                            and job.fanout_group in self.fanout_waiting
+                        ):
+                            # The leader is decoding, so its prompt boundary
+                            # was already handled; siblings still waiting got
+                            # no boundary to lease (a one-token prompt has
+                            # none) and prefill on their own.
+                            self._release_fanout_siblings(job, "no_prompt_boundary")
                         if job.thinking_budget is not None:
                             job.thinking_tokens.append(int(response.token))
                             self._observe_thinking_budget(job)
