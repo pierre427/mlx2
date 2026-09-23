@@ -404,3 +404,37 @@ def test_anthropic_unknown_model_uses_anthropic_not_found_envelope(
         "type": "error",
         "error": {"type": "not_found_error", "message": "unknown model"},
     }
+
+
+@pytest.mark.parametrize(
+    "status, error_type",
+    [(400, "invalid_request_error"), (429, "overloaded_error"), (503, "api_error")],
+)
+@pytest.mark.parametrize("stream", [False, True])
+def test_anthropic_engine_error_before_first_token_uses_anthropic_envelope(
+    anthropic_endpoint, status, error_type, stream
+):
+    engine, base = anthropic_endpoint
+
+    def failing_submit(request, *, tenant_id="default"):
+        job = Job(request)
+        job.tenant_id = tenant_id
+        job.events.put(
+            {"error": "engine refused", "status": status, "mlx2": {"cache": "apcv2"}}
+        )
+        return job
+
+    engine.submit = failing_submit
+    body = {
+        "model": "fixture",
+        "messages": [{"role": "user", "content": "hello"}],
+        "max_tokens": 8,
+        "stream": stream,
+    }
+    with pytest.raises(HTTPError) as error:
+        _post(base, "/v1/messages", body)
+    assert error.value.code == status
+    payload = json.load(error.value)
+    assert payload["type"] == "error"
+    assert payload["error"] == {"type": error_type, "message": "engine refused"}
+    assert payload["mlx2"] == {"cache": "apcv2"}

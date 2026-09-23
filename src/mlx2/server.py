@@ -2641,6 +2641,13 @@ def handler_for(
                                 self._sse(failure)
                                 self._sse("[DONE]")
                             self._record_http(200)
+                        elif anthropic:
+                            self.api_error(
+                                event.get("status", 503),
+                                event["error"],
+                                anthropic=True,
+                                mlx2=mlx2,
+                            )
                         else:
                             self.error(
                                 event.get("status", 503),
