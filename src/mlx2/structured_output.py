@@ -1118,6 +1118,7 @@ class StructuredOutputProcessor:
         constraint_kind=None,
         capture_failure_context=False,
         generation_stop_token_ids=None,
+        structural_token_ids=None,
     ):
         self.tokenizer = tokenizer
         # Grammar deferral: while the generated ids do not yet contain the
@@ -1159,7 +1160,8 @@ class StructuredOutputProcessor:
         # has no bytes for them.  Admitting one by its text would let the
         # stream show markup the grammar never checked (a ``maxLength: 6``
         # string delivered as ``<pad><pad>``), so the mask never does.  Tool
-        # and envelope markers are ordinary added tokens and stay admissible.
+        # and envelope markers are ordinary added tokens and stay admissible;
+        # a special marker a grammar spells is declared structural (below).
         try:
             special = {int(token) for token in getattr(tokenizer, "all_special_ids", ())}
         except (TypeError, ValueError):
@@ -1178,6 +1180,20 @@ class StructuredOutputProcessor:
             except (AttributeError, TypeError):
                 pass
         self._pieces = pieces
+        # Structural special tokens: special ids an adapter's own grammars
+        # spell literally (Muse's recipient header ends in the special
+        # ``<|message|>``).  Each one reads as its literal in the tracked
+        # grammar text, so admitting it where that literal is grammatical
+        # keeps the stream and the grammar in step; every other special id
+        # stays excluded.  They are kept out of the shared vocabulary tables
+        # and added to the mask per position.
+        structural = {}
+        for token in structural_token_ids or ():
+            token = int(token)
+            literal = pieces[token] if 0 <= token < len(pieces) else ""
+            if token in self._special_ids and literal and "\ufffd" not in literal:
+                structural[token] = literal
+        self._structural = structural
         index = getattr(tokenizer, _TOKEN_INDEX_ATTRIBUTE, None)
         if not isinstance(index, tuple) or len(index) != 2 or len(index[0]) > len(pieces):
             index = _build_piece_index(pieces, unmaskable)
@@ -1296,6 +1312,45 @@ class StructuredOutputProcessor:
         if self.failure is None:
             self._constrained_ids([int(token) for token in generated])
 
+    def _grammar_text(self, token_ids):
+        """The text the grammar tracks for ``token_ids``.
+
+        The decode skips special tokens, except the structural ones, which
+        read as their literal.
+        """
+
+        def decode(ids):
+            return self.tokenizer.decode(
+                ids, skip_special_tokens=True, clean_up_tokenization_spaces=False
+            )
+
+        structural = self._structural
+        if not structural or not any(token in structural for token in token_ids):
+            return decode(token_ids)
+        parts = []
+        start = 0
+        for index, token in enumerate(token_ids):
+            if token in structural:
+                parts.append(decode(token_ids[start:index]))
+                parts.append(structural[token])
+                start = index + 1
+        parts.append(decode(token_ids[start:]))
+        return "".join(parts)
+
+    def _structural_admitted(self, admits):
+        """Structural special ids whose literal can come next.
+
+        ``admits(text)`` says whether the tracked text followed by ``text``
+        can still match (``None`` when undecided, which refuses).
+        """
+        if not self._structural:
+            return ()
+        return tuple(
+            token
+            for token, literal in self._structural.items()
+            if admits(literal) is True
+        )
+
     def _admissible(self, text, deadline):
         """Whether ``text`` can still be extended into (or is) a full match.
 
@@ -1374,6 +1429,11 @@ class StructuredOutputProcessor:
                     if first < stop:
                         stack.append((first, stop, depth + 1))
                 index = stop
+        allowed.update(
+            self._structural_admitted(
+                lambda text: self._admissible(prefix + text, deadline)
+            )
+        )
         if not allowed:
             raise ValueError("structured-output grammar has no valid token continuation")
         result = tuple(sorted(allowed))
@@ -1444,6 +1504,14 @@ class StructuredOutputProcessor:
         if complete is None:
             complete = memo[_COMPLETE_KEY] = self._complete(prefix)
         deadline = time.perf_counter() + _ALLOWED_BUDGET_SECONDS
+        if any(token not in memo for token in self._structural):
+            # Special ids are otherwise refused unexamined (``decide`` and the
+            # exact tail scan); settle the structural ones for this prefix.
+            admitted = self._structural_admitted(
+                lambda text: self._admissible(prefix + text, deadline)
+            )
+            for token in self._structural:
+                memo[token] = token in admitted
         row = np.asarray(logits_row, dtype=np.float32)
         finite = np.isfinite(row)
         if not finite.any():
@@ -1776,9 +1844,22 @@ class StructuredOutputProcessor:
             return self._track_configs[common]
         pending = b""
         if self._token_bytes is not None:
-            from .structured_automaton import decode_token_bytes
+            from .structured_automaton import _split_utf8, decode_token_bytes
 
-            split = decode_token_bytes(self._token_bytes, token_ids)
+            structural = self._structural
+            if structural and any(token in structural for token in token_ids):
+                # The shared byte table has no bytes for special ids; splice
+                # the structural literals in.
+                table = self._token_bytes
+                chunks = []
+                for token in token_ids:
+                    if token in structural:
+                        chunks.append(structural[token].encode("utf-8"))
+                    elif token < len(table) and table[token]:
+                        chunks.append(table[token])
+                split = _split_utf8(b"".join(chunks))
+            else:
+                split = decode_token_bytes(self._token_bytes, token_ids)
             if split is None:  # bytes that can never be UTF-8: dead text
                 split = ("", b"")
                 dead = True
@@ -1787,9 +1868,7 @@ class StructuredOutputProcessor:
             text, pending = split
         else:
             dead = False
-            text = self.tokenizer.decode(
-                token_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False
-            )
+            text = self._grammar_text(token_ids)
         # ``False`` marks positions skipped by a multi-token step; position 0
         # is always known, and the early return above means base < len(ids).
         base = common
@@ -1852,6 +1931,11 @@ class StructuredOutputProcessor:
             allowed = self._trie.allowed(self._automaton, config)
         if self._fragments is not None:
             allowed[self._fragments.allowed_ids(self._automaton, config, pending)] = True
+        if not pending:
+            for token in self._structural_admitted(
+                lambda text: self._automaton.advance(config, text) is not None
+            ):
+                allowed[token] = True
         if self.eos_ids and not pending and self._automaton.is_accepting(config):
             # Same EOS rule as the scanner: admissible iff the text is a
             # complete match.  EOS ids can sit past the tokenizer vocabulary.
@@ -2008,9 +2092,7 @@ class StructuredOutputProcessor:
         if self._automaton is not None:
             config = self._automaton_config(token_ids)
             return not getattr(self, "_pending", b"") and self._automaton.is_accepting(config)
-        prefix = self.tokenizer.decode(
-            token_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False
-        )
+        prefix = self._grammar_text(token_ids)
         compiled = self.constraint.pattern if isinstance(self.constraint, _Constraint) else self.constraint
         try:
             return compiled.fullmatch(prefix, timeout=_MATCH_TIMEOUT_SECONDS) is not None
@@ -2038,9 +2120,7 @@ class StructuredOutputProcessor:
             return mx.where(
                 mx.array(allowed), logits, mx.array(-float("inf"), dtype=logits.dtype)
             )
-        prefix = self.tokenizer.decode(
-            token_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False
-        )
+        prefix = self._grammar_text(token_ids)
         # Sliding window: the canonical prefix has the same grammar state, is
         # shorter for the regex, and is shared by every position inside the
         # same free string value, so their admissibility tables coincide.
@@ -2207,6 +2287,7 @@ def make_structured_processor(
     capture_failure_context=False,
     generation_stop_token_ids=None,
     server_grammar=None,
+    structural_token_ids=None,
 ):
     if server_grammar is not None:
         # A server-composed pattern (item 12 tool grammars): not client input,
@@ -2237,6 +2318,7 @@ def make_structured_processor(
         constraint_kind=constraint_kind,
         capture_failure_context=capture_failure_context,
         generation_stop_token_ids=generation_stop_token_ids,
+        structural_token_ids=structural_token_ids,
     )
 
 

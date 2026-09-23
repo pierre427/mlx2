@@ -165,3 +165,90 @@ def test_flash_next_tool_grammar_admits_its_own_tool_call_token():
     assert processor.failure is None
     assert out.shape[-1] == width
     assert int(np.argmax(out)) == marker
+
+
+# ---------------------------------------------------------------------------
+# Structural special tokens.  Masks never admit a special token by its text,
+# because the grammar tracker skips special tokens.  Muse's recipient header
+# `` to=<name><|message|>`` ends in a *special* token, though, and its tool
+# grammars spell that header: with the special refused, the header could only
+# be completed by spelling it out, which the adapter's recipient processor
+# forbids, so every forced Muse tool call failed closed.  An adapter declares
+# such ids; they then read as their literal and are admitted where it is.
+
+HEADER_GRAMMAR = r'\ to=f<\|message\|>\{"s":"[^"]{0,12}"\}'
+
+
+def header_tokenizer():
+    """A real fast tokenizer where the header marker and ``<pad>`` are special."""
+    tokenizers = pytest.importorskip("tokenizers")
+    from transformers import PreTrainedTokenizerFast
+
+    characters = sorted(set(' to=f<|>{}":sameg'))
+    base = tokenizers.Tokenizer(
+        tokenizers.models.WordLevel({c: i for i, c in enumerate(characters)}, unk_token=None)
+    )
+    base.pre_tokenizer = tokenizers.pre_tokenizers.Split("", behavior="isolated")
+    base.decoder = tokenizers.decoders.Fuse()
+    tokenizer = PreTrainedTokenizerFast(tokenizer_object=base)
+    tokenizer.add_special_tokens(
+        {
+            "eos_token": "<eos>",
+            "pad_token": "<pad>",
+            "additional_special_tokens": ["<|message|>"],
+        }
+    )
+    return tokenizer
+
+
+def admitted_after(processor, tokenizer, ids):
+    row = mx.zeros((1, len(tokenizer)))
+    out = np.array(processor(mx.array(ids, dtype=mx.int32), row))
+    assert processor.failure is None, processor.failure
+    return set(np.flatnonzero(np.isfinite(out[0])).tolist())
+
+
+@pytest.mark.parametrize("engine", ["automaton", "scanner"])
+def test_declared_structural_special_token_is_admitted_and_tracked(engine, monkeypatch):
+    monkeypatch.setenv("MLX2_STRUCTURED_AUTOMATON", "0" if engine == "scanner" else "1")
+    monkeypatch.setenv("MLX2_STRUCTURED_WORKERS", "0")
+    tokenizer = header_tokenizer()
+    message = tokenizer.convert_tokens_to_ids("<|message|>")
+    pad, eos = tokenizer.pad_token_id, tokenizer.eos_token_id
+    assert {message, pad, eos} <= set(tokenizer.all_special_ids)
+    encode = lambda text: tokenizer.encode(text, add_special_tokens=False)  # noqa: E731
+    header = encode(" to=f")
+    assert encode(" to=f<|message|>") == header + [message]
+
+    def processor(**kwargs):
+        made = make_structured_processor(
+            tokenizer, 0, grammar=HEADER_GRAMMAR, generation_stop_token_ids=[eos], **kwargs
+        )
+        assert made.engine == engine
+        return made
+
+    # Undeclared, the protection holds: the header cannot be closed by the
+    # special token (the defect when an upstream processor insists on it).
+    plain = processor()
+    assert message not in admitted_after(plain, tokenizer, header)
+
+    declared = processor(structural_token_ids=[message])
+    after_header = admitted_after(declared, tokenizer, header)
+    assert message in after_header and pad not in after_header
+    # The marker advanced the grammar by its literal: the header is not asked
+    # for a second time (it was, spelled out, before b044155a).
+    assert admitted_after(declared, tokenizer, header + [message]) == set(encode("{"))
+    opened = header + [message] + encode('{"s":"')
+    inside = admitted_after(declared, tokenizer, opened)
+    assert pad not in inside  # every undeclared special stays excluded
+    # Inside the string the marker counts its 11 characters against the
+    # 12-character bound, so the stream and the grammar agree.
+    assert message in inside
+    assert admitted_after(declared, tokenizer, opened + [message]) >= set(encode("a"))
+    assert admitted_after(
+        declared, tokenizer, opened + [message] + encode("a")
+    ) == set(encode('"'))
+    done = header + [message] + encode('{"s":"sa"}')
+    assert admitted_after(declared, tokenizer, done) == {eos}
+    # Declaring an ordinary id changes nothing: it was never excluded.
+    assert processor(structural_token_ids=[header[0]])._structural == {}

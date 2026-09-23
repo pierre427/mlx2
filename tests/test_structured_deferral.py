@@ -856,6 +856,94 @@ def test_forced_strict_tool_call_defers_past_budgeted_thinking(scripted_engine):
     }
 
 
+def test_forced_tool_grammar_admits_the_adapters_structural_special_token(
+    scripted_engine, monkeypatch
+):
+    """Muse's forced tool grammar opens with the recipient header
+    `` to=<name><|message|>``, whose last token is *special*.  Masks refuse
+    special tokens by their text, so the header could not be closed and every
+    forced call failed closed with 502.  The adapter now declares the id and
+    the engine hands it to the adapter's own grammars."""
+    import re
+    import sys
+
+    plain = _tokenizer
+    header_end = 1  # "<pad>": special here, standing in for <|message|>
+
+    def tokenizer_with_specials():
+        tokenizer = plain()
+        tokenizer.all_special_ids = [EOS, header_end]
+        tokenizer.decode = lambda ids, skip_special_tokens=False, **_kw: "".join(
+            PIECES[i] for i in ids
+            if not (skip_special_tokens and i in (EOS, header_end))
+        )
+        return tokenizer
+
+    monkeypatch.setattr(sys.modules[__name__], "_tokenizer", tokenizer_with_specials)
+    build, state = scripted_engine
+    engine = build(
+        declare_marker=True, execution_policy={"constrained_tool_grammar": True}
+    )
+    adapter = engine.adapter
+    block = adapter.tool_constraint
+    with engine.lock:
+        # Like Muse: the forced grammar starts with a header ending in it.
+        adapter.tool_constraint = lambda request: re.escape("yes<pad>") + block(request)
+    state["script"] = [18, header_end, TOOL_CALL, EOS]
+    request = {
+        "messages": [{"role": "user", "content": "add"}],
+        "tool_choice": "required",
+        "tools": [{
+            "type": "function",
+            "function": {
+                "name": "sum",
+                "strict": True,
+                "parameters": {
+                    "type": "object",
+                    "properties": {"x": {"type": "integer"}},
+                    "required": ["x"],
+                    "additionalProperties": False,
+                },
+            },
+        }],
+        "max_tokens": 8,
+        "temperature": 0,
+        "top_k": 5,
+    }
+
+    def run():
+        job = engine.submit(request)
+        calls = []
+        while True:
+            event = job.events.get(timeout=10)
+            if "delta" in event:
+                calls.extend(event["delta"].get("tool_calls", ()))
+            if "finish_reason" in event or "error" in event:
+                return calls, event
+
+    # Undeclared, every special id stays excluded: the header dead-ends.
+    _, final = run()
+    assert final.get("status") == 502, final
+    assert engine.counts["structured_output_dead_ends"] == 1
+    with engine.lock:
+        adapter.structured_special_token_ids = lambda: (header_end,)
+    calls, final = run()
+    assert "error" not in final, final
+    assert [call["function"]["name"] for call in calls] == ["sum"]
+    assert json.loads(calls[0]["function"]["arguments"]) == {"x": 1}
+    assert final["receipt"]["request_controls"]["tool_choice"]["decode_grammar"] == "engaged"
+    # A client grammar never gets the adapter's structural ids.
+    state["script"] = [18, header_end, 19, EOS]
+    _, _, final = _collect(engine.submit({
+        "messages": [{"role": "user", "content": "x"}],
+        "grammar": "yes<pad>no",
+        "max_tokens": 4,
+        "temperature": 0,
+        "top_k": 5,
+    }))
+    assert final.get("status") == 502, final
+
+
 def test_unconstrained_tool_parse_fallback_is_counted_in_serving(scripted_engine):
     build, state = scripted_engine
     engine = build(

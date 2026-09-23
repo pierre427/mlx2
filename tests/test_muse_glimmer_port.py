@@ -444,3 +444,103 @@ def test_tensor_source_is_standalone_and_ordinary_cache_topology():
     assert {"RotatingKVCache", "KVCache"} <= {
         node.id for node in ast.walk(tree) if isinstance(node, ast.Name)
     }
+
+
+MUSE_TOKENIZER = Path.home() / "mlx-models" / "Muse-Glimmer-30B-mlx-4bit"
+
+
+@pytest.mark.parametrize(
+    "engine, strict, choice, text",
+    [
+        # The forced grammar opens with `` to=<name><|message|>``.
+        ("automaton", False, "required", "call"),
+        # The auto grammar (strict tools): header in the call block, and the
+        # user header inside free text.
+        ("scanner", True, "auto", "call"),
+        ("scanner", True, "auto", "user"),
+    ],
+)
+def test_real_tokenizer_tool_grammars_take_the_special_message_header(
+    engine, strict, choice, text, monkeypatch
+):
+    """``<|message|>`` is a special token in the Muse tokenizer.  Refused by
+    the structured mask while the recipient processor insisted on it, every
+    forced call (and every ``auto`` grammar answer) failed closed; admitted
+    without advancing the grammar (before b044155a) the header was spelled a
+    second time and the parser delivered a stray ``<|message|>``."""
+    if not (MUSE_TOKENIZER / "tokenizer.json").exists():
+        pytest.skip("Muse tokenizer artifact is not present")
+    import mlx.core as mx
+    from transformers import AutoTokenizer
+
+    from mlx2.runtime.tokenizer_utils import BPEStreamingDetokenizer, TokenizerWrapper
+    from mlx2.structured_output import make_structured_processor
+    from mlx2.tool_grammar import plan_tool_grammar
+
+    monkeypatch.setenv("MLX2_STRUCTURED_AUTOMATON", "1" if engine == "automaton" else "0")
+    monkeypatch.setenv("MLX2_STRUCTURED_WORKERS", "0")
+    hf = AutoTokenizer.from_pretrained(MUSE_TOKENIZER, local_files_only=True)
+    eot = hf.convert_tokens_to_ids("<|eot|>")
+    tokenizer = TokenizerWrapper(
+        hf, detokenizer_class=BPEStreamingDetokenizer, eos_token_ids={eot}
+    )
+    adapter = MuseGlimmerAdapter.__new__(MuseGlimmerAdapter)
+    adapter.tokenizer = tokenizer
+    message = hf.convert_tokens_to_ids("<|message|>")
+    assert message in hf.all_special_ids
+    assert adapter.structured_special_token_ids() == (message,)
+    tools = [{"type": "function", "function": {
+        "name": "weather",
+        "strict": strict,
+        "parameters": {
+            "type": "object",
+            "properties": {"city": {"type": "string"}},
+            "required": ["city"],
+        },
+    }}]
+    request = {
+        "messages": [{"role": "user", "content": "hi"}],
+        "tools": tools,
+        "tool_choice": choice,
+    }
+    grammar, status, _ = plan_tool_grammar(
+        request, adapter.tool_constraint, open_marker=adapter.tool_call_open_marker
+    )
+    assert status == "engaged"
+    prompt = [1, 2, 3]
+    # The serving order: adapter processors, then the structured processor.
+    recipient = adapter.request_logits_processors(request, prompt_length=len(prompt))[0]
+    structured = make_structured_processor(
+        tokenizer, len(prompt), server_grammar=grammar, greedy=True,
+        generation_stop_token_ids=[eot],
+        structural_token_ids=adapter.structured_special_token_ids(),
+    )
+    assert structured.engine == engine
+    call = (
+        ' to=weather<|message|><atem:function_calls><atem:invoke name="weather">'
+        '<atem:parameter name="city">Paris</atem:parameter></atem:invoke>'
+        "</atem:function_calls>"
+    )
+    wanted = call if text == "call" else " to=user<|message|>Hello there."
+    target = hf.encode(wanted, add_special_tokens=False) + [eot]
+    assert target.count(message) == 1
+    generated = []
+    for token in target:
+        # The model wants exactly the target; only a mask can stop it.
+        logits = mx.full((1, len(hf)), -5.0)
+        logits[0, token] = 10.0
+        history = mx.array(prompt + generated)
+        row = structured(history, recipient(history, logits))[0]
+        assert structured.failure is None, (hf.decode(generated), structured.failure)
+        assert int(mx.argmax(row).item()) == token, hf.decode(generated)
+        generated.append(token)
+    decoded = hf.decode(generated[:-1], skip_special_tokens=False)
+    parser = MuseOutputParser(chat=True, tools=tools)
+    events = parser.push(decoded) + parser.push("", final=True)
+    if text == "call":
+        assert [event.get("content") for event in events if "content" in event] == []
+        (only,) = [event for event in events if "tool_calls" in event]
+        assert only["tool_calls"][0]["function"]["name"] == "weather"
+        assert json.loads(only["tool_calls"][0]["function"]["arguments"]) == {"city": "Paris"}
+    else:
+        assert events == [{"content": "Hello there."}]

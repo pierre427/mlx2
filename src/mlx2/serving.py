@@ -758,6 +758,13 @@ def structured_envelope_token_ids(adapter):
     return tuple(int(t) for t in opens), tuple(int(t) for t in closes)
 
 
+def structured_special_token_ids(adapter):
+    """Special ids the adapter's grammars spell literally (may be empty)."""
+    accessor = getattr(adapter, "structured_special_token_ids", None)
+    ids = accessor() if callable(accessor) else None
+    return tuple(int(token) for token in ids or ())
+
+
 def shared_prefix_attestation(hit):
     """Attest only sibling branches of one immutable APC generation plus one seed.
 
@@ -5798,6 +5805,14 @@ class ServingEngine:
                                 structured_envelope_token_ids(adapter)
                                 if "messages" in job.request
                                 else None
+                            ),
+                            # Only the adapter's own grammars spell its
+                            # structural special tokens; a client grammar
+                            # keeps every special id excluded.
+                            structural_token_ids=(
+                                structured_special_token_ids(adapter)
+                                if tool_grammar or server_tool_grammar
+                                else ()
                             ),
                         )
                         job.structured = structured

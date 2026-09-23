@@ -479,6 +479,19 @@ class MuseGlimmerAdapter:
             return headers + grammar
         return grammar
 
+    def structured_special_token_ids(self):
+        """The recipient header's ``<|message|>``, a special token here.
+
+        Structured masks never admit a special token by its text; this one is
+        the framing the tool grammars spell after `` to=<name>`` (and free
+        text holds `` to=user<|message|>`` under an ``auto`` grammar), so the
+        mask admits it, read as its literal, wherever these grammars do.
+        """
+        from .muse_glimmer_output import _MESSAGE
+
+        ids = list(self.tokenizer.encode(_MESSAGE, add_special_tokens=False))
+        return (int(ids[0]),) if len(ids) == 1 else ()
+
     def diagnostics(self):
         return {
             "architecture": "muse_glimmer",
