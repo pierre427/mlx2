@@ -417,7 +417,12 @@ def scripted_engine(monkeypatch):
         )
         assert engine.ready.wait(5)
         with engine.lock:
-            engine.route_capabilities = frozenset(engine.route_capabilities | {Capability.GRAMMAR})
+            # The scripted model thinks and calls tools; its route declares
+            # those capabilities as a qualified text route would.
+            engine.route_capabilities = frozenset(
+                engine.route_capabilities
+                | {Capability.GRAMMAR, Capability.REASONING, Capability.TOOLS}
+            )
         engines.append(engine)
         return engine
 
@@ -465,6 +470,46 @@ def test_null_constraint_fields_mean_absent_and_keep_the_worker_alive(scripted_e
     assert engine.thread.is_alive() and engine.error is None
     _, _, later = _collect(engine.submit(dict(base)))
     assert later.get("finish_reason") == "length", later
+
+
+def test_reasoning_and_tools_fail_closed_on_routes_that_do_not_declare_them(scripted_engine):
+    from mlx2.contracts import Capability
+
+    build, state = scripted_engine
+    engine = build(declare_marker=True)
+    with engine.lock:
+        engine.route_capabilities = frozenset(
+            engine.route_capabilities - {Capability.REASONING, Capability.TOOLS}
+        )
+    chat = {"messages": [{"role": "user", "content": "x"}], "temperature": 0, "top_k": 5, "max_tokens": 2}
+    tools = [{"type": "function", "function": {"name": "sum", "parameters": {}}}]
+    # Refused at submission (the HTTP layer maps ValueError to 400), before
+    # a slot or lane is taken.
+    with pytest.raises(ValueError, match="^reasoning is not available on this route$"):
+        engine.submit({**chat, "enable_thinking": True})
+    for choice in ("auto", "required", {"type": "function", "function": {"name": "sum"}}):
+        with pytest.raises(ValueError, match="^tool calling is not available on this route$"):
+            engine.submit({**chat, "tools": tools, "tool_choice": choice})
+    assert engine.status()["inflight"] == 0
+    # Nothing requested, nothing refused: thinking off, tools the model may
+    # not call, and raw completions, which never open a reasoning channel.
+    for body in (
+        {**chat, "enable_thinking": False},
+        {**chat, "tools": tools, "tool_choice": "none"},
+        {"prompt": "x", "enable_thinking": True, "temperature": 0, "top_k": 5, "max_tokens": 2},
+    ):
+        state["script"] = [HELLO, EOS]
+        reasoning, content, final = _collect(engine.submit(body))
+        assert final.get("finish_reason") == "stop", (body, final)
+        assert reasoning == "" and content == "hello"
+    with engine.lock:
+        engine.route_capabilities = frozenset(
+            engine.route_capabilities | {Capability.REASONING, Capability.TOOLS}
+        )
+    state["script"] = [2, THINK_CLOSE, HELLO, EOS]
+    reasoning, content, final = _collect(engine.submit({**chat, "enable_thinking": True, "max_tokens": 8}))
+    assert final.get("finish_reason") == "stop", final
+    assert reasoning == "Let" and content == "hello"
 
 
 def test_a_failing_terminal_receipt_fails_only_its_own_request(scripted_engine, monkeypatch):

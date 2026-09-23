@@ -2052,6 +2052,23 @@ class ServingEngine:
         ) and request.get("response_format") != {"type": "text"}:
             if Capability.GRAMMAR not in self.route_capabilities:
                 raise ValueError("structured output is not available on this route")
+        # Fail closed on the other requested chat capabilities too.  A route
+        # without REASONING has no think channel, so its parser would deliver
+        # the whole answer as reasoning; one without TOOLS never parses calls.
+        # Raw completions never open a reasoning channel, and tool_choice
+        # "none" asks for no call.
+        if (
+            "messages" in request
+            and request.get("enable_thinking") is True
+            and Capability.REASONING not in self.route_capabilities
+        ):
+            raise ValueError("reasoning is not available on this route")
+        if (
+            request.get("tools")
+            and request.get("tool_choice", "auto") != "none"
+            and Capability.TOOLS not in self.route_capabilities
+        ):
+            raise ValueError("tool calling is not available on this route")
         profile = request.get("sampling_profile")
         if profile is not None:
             # Fail an unknown profile before it reserves a lane; admission
