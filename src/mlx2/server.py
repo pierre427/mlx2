@@ -3017,18 +3017,9 @@ def handler_for(
                                     },
                                 }
                             )
-                            if parts:
-                                self._responses_message_start(job, 0)
-                                response_message_started = True
-                                self._responses_sse(
-                                    {
-                                        "type": "response.output_text.delta",
-                                        "item_id": f"msg_{job.id}",
-                                        "output_index": 0,
-                                        "content_index": 0,
-                                        "delta": "".join(parts),
-                                    }
-                                )
+                            # The buffered message is opened, with its whole
+                            # text as one delta, where the final payload
+                            # places it: a reasoning item may precede it.
                         choice = {"index": 0, "finish_reason": event["finish_reason"]}
                         if buffered_tool_stream:
                             message = {"role": "assistant", "content": "".join(parts)}
@@ -3193,6 +3184,16 @@ def handler_for(
                                                 job, output_index
                                             )
                                             response_message_started = True
+                                            if message["content"]:
+                                                self._responses_sse(
+                                                    {
+                                                        "type": "response.output_text.delta",
+                                                        "item_id": item["id"],
+                                                        "output_index": output_index,
+                                                        "content_index": 0,
+                                                        "delta": message["content"],
+                                                    }
+                                                )
                                         self._responses_sse(
                                             {
                                                 "type": "response.output_text.done",

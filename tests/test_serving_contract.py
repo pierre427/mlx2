@@ -1104,6 +1104,88 @@ def test_responses_allowlisted_mcp_backend_executes_and_resumes_model():
         thread.join()
 
 
+def test_hosted_tool_stream_gives_each_output_item_one_index():
+    class Backend:
+        def prepare(self, tools):
+            return TOOLS, {"weather": "binding"}
+
+        def execute(self, binding, arguments):
+            return {"temperature": 21}
+
+    class ToolEngine(FakeEngine):
+        rounds = 0
+
+        def submit(self, request, *, tenant_id="default"):
+            self.rounds += 1
+            self.job = Job(request)
+            if self.rounds == 1:
+                self.job.events.put({"delta": {"tool_calls": [{
+                    "index": 0,
+                    "id": "call_weather",
+                    "type": "function",
+                    "function": {"name": "weather", "arguments": '{"city":"T"}'},
+                }]}})
+                reason = "tool_calls"
+            else:
+                self.job.events.put({"delta": {"reasoning_content": "thinking"}})
+                self.job.events.put({"delta": {"content": "It is 21 C."}})
+                reason = "stop"
+            self.job.events.put({"finish_reason": reason, "receipt": {}})
+            return self.job
+
+    engine = ToolEngine()
+    server = ThreadingHTTPServer(
+        ("127.0.0.1", 0), handler_for(engine, tool_backend=Backend())
+    )
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        base = f"http://127.0.0.1:{server.server_port}"
+        with post_response(
+            base,
+            input="weather?",
+            stream=True,
+            tools=[{
+                "type": "mcp",
+                "server_label": "weather",
+                "server_url": "https://example.invalid/mcp",
+                "require_approval": "never",
+            }],
+        ) as response:
+            events = [
+                json.loads(line[len("data: "):])
+                for line in response.read().decode().splitlines()
+                if line.startswith("data: {")
+            ]
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
+    added = {
+        event["item"]["id"]: event["output_index"]
+        for event in events
+        if event["type"] == "response.output_item.added"
+    }
+    done = {
+        event["item"]["id"]: event["output_index"]
+        for event in events
+        if event["type"] == "response.output_item.done"
+    }
+    assert added == done
+    assert sorted(added.values()) == list(range(len(added)))
+    for event in events:
+        if "item_id" in event:
+            assert event["output_index"] == added[event["item_id"]], event["type"]
+    completed = next(e for e in events if e["type"] == "response.completed")
+    assert [item["id"] for item in completed["response"]["output"]] == sorted(
+        added, key=added.get
+    )
+    text = "".join(
+        e["delta"] for e in events if e["type"] == "response.output_text.delta"
+    )
+    assert text == "It is 21 C."
+
+
 def test_required_tool_model_violation_is_server_error(http_engine):
     _, base = http_engine
     with pytest.raises(HTTPError) as error:
