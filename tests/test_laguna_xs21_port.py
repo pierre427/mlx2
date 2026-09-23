@@ -201,3 +201,33 @@ def test_poolside_raw_values_that_spell_a_closer_fail_closed(value):
         assert not any("tool_calls" in e for e in events)
         assert "".join(e.get("content", "") for e in events) == text
         assert parser.tool_call_parse_fallbacks == 1
+
+
+@pytest.mark.parametrize("schema", [{"type": "object"}, {"description": "any value"}])
+@pytest.mark.parametrize(
+    ("value", "served"),
+    [
+        ("(1, 2)", "(1, 2)"),
+        ("{1: 2}", "{1: 2}"),
+        ("{'a': (1,)}", "{'a': (1,)}"),
+        ("NaN", "NaN"),
+        ("[Infinity]", "[Infinity]"),
+        ("{1, 2}", "{1, 2}"),
+        ("b'x'", "b'x'"),
+        ("{'a': [1, None, True, 2.5]}", {"a": [1, None, True, 2.5]}),
+    ],
+)
+def test_poolside_values_the_arguments_cannot_carry_stay_text(schema, value, served):
+    """A non-string argument is decoded best-effort, as JSON and then as a
+    Python literal.  A tuple or a key such as ``1`` decoded that way was
+    served as what JSON makes of it (``[1, 2]``, ``{"1": 2}``), a value the
+    model did not write, and a non-finite float, a set or bytes made the
+    arguments unserializable, so the call failed.  Such text now stays the
+    string the model wrote, however it is chunked; a literal made only of
+    JSON types still decodes."""
+    tools = _poolside_tools(schema)
+    text = _poolside_call(value)
+    for split in (len(text), 1, 7):
+        _, events = _poolside_events(tools, text, split)
+        calls = [c for e in events for c in e.get("tool_calls", ())]
+        assert [json.loads(c["function"]["arguments"]) for c in calls] == [{"x": served}]

@@ -6,6 +6,8 @@ import ast
 import json
 import re
 
+from ._schema import json_native
+
 _ARG_KEY_OPEN = "<arg_key>"
 _ARG_KEY_CLOSE = "</arg_key>"
 _ARG_VALUE_OPEN = "<arg_value>"
@@ -50,13 +52,19 @@ def _declared_types(tool_name, argument_name, tools):
 
 
 def _deserialize(value):
+    """JSON, then a Python literal, else the raw text.
+
+    A decoded value the arguments cannot carry as written (a tuple, a
+    non-string key, a non-finite float, a set) stays the raw text too.
+    """
     try:
-        return json.loads(value)
+        decoded = json.loads(value)
     except (TypeError, ValueError):
         try:
-            return ast.literal_eval(value)
+            decoded = ast.literal_eval(value)
         except (SyntaxError, ValueError):
             return value
+    return decoded if json_native(decoded) else value
 
 
 def _json_value_end(text, start):
