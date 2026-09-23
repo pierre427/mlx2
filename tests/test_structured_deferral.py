@@ -1174,6 +1174,59 @@ def test_envelope_markers_are_admitted_only_where_the_framing_allows(engine, mon
     assert processor.failure is None
 
 
+@pytest.mark.parametrize("engine", ["automaton", "scanner"])
+def test_envelope_markers_are_not_admitted_by_their_text_inside_a_string(
+    engine, monkeypatch
+):
+    """North's markers are ordinary added tokens, so their text is grammatical
+    inside any JSON string.  The closer used to be admitted there; once
+    sampled only end-of-turn was allowed and the lane failed closed (502)."""
+    if engine == "scanner":
+        monkeypatch.setenv("MLX2_STRUCTURED_AUTOMATON", "0")
+    pieces = ENVELOPE_PIECES + ['"', "Par"]
+    quote, word = len(ENVELOPE_PIECES), len(ENVELOPE_PIECES) + 1
+    tokenizer = NS(
+        vocab_size=len(pieces), eos_token_ids=[EOS],
+        decode=lambda ids, **_kw: "".join(pieces[i] for i in ids),
+        encode=lambda text, **_kw: [pieces.index(text)],
+    )
+    schema = {
+        "type": "object",
+        "properties": {"a": {"type": "string"}},
+        "required": ["a"],
+        "additionalProperties": False,
+    }
+    processor = make_structured_processor(
+        tokenizer, 2,
+        response_format={
+            "type": "json_schema",
+            "json_schema": {"strict": True, "schema": schema},
+        },
+        envelope=((TEXT_OPEN,), (TEXT_CLOSE,)),
+    )
+    assert processor.engine == engine
+
+    def admitted(generated):
+        import mlx.core as mx
+
+        out = processor(
+            mx.array([1, 1] + list(generated), dtype=mx.uint32),
+            mx.zeros((1, len(pieces))),
+        )
+        return set(np.flatnonzero(np.isfinite(np.array(out)[0])).tolist())
+
+    brace, key, colon, close = 7, 8, 9, 11
+    for framed in ([TEXT_OPEN], []):
+        inside = admitted(framed + [brace, key, colon, quote, word])
+        assert word in inside and quote in inside
+        assert not {TEXT_OPEN, TEXT_CLOSE, EOS} & inside
+    complete = [TEXT_OPEN, brace, key, colon, quote, word, quote, close]
+    assert {TEXT_CLOSE, EOS} <= admitted(complete)
+    assert admitted(complete + [TEXT_CLOSE]) == {EOS}
+    admitted(complete + [TEXT_CLOSE, EOS])
+    assert processor.failure is None
+
+
 def test_envelope_composes_with_thinking_deferral(monkeypatch):
     processor, admitted = _envelope_processor("automaton", monkeypatch, defer_until=(THINK_CLOSE,))
     everything = set(range(len(ENVELOPE_PIECES)))

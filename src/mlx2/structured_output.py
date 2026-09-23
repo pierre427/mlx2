@@ -1837,11 +1837,30 @@ class StructuredOutputProcessor:
         masked = self._mask(text_ids, logits)
         if self.failure is not None:
             return masked
-        if not text_ids and len(text_ids) == len(token_ids):
-            keep[[token for token in opens if token < width]] = True
+        # The grammar sees envelope-stripped text, so on its own it would admit
+        # a marker token wherever the marker's text is grammatical -- inside
+        # any JSON string, since North's markers are ordinary added tokens.  A
+        # closer sampled there leaves only end-of-turn, which the terminal
+        # check then rejects.  Block each marker wherever the framing does not
+        # allow it, whatever the grammar says about its text.
+        block = np.zeros(width, dtype=bool)
+        open_ids = [token for token in opens if token < width]
+        close_ids = [token for token in closes if token < width]
+        if not token_ids:
+            keep[open_ids] = True
+        else:
+            block[open_ids] = True
         if self._is_complete(text_ids):
-            keep[[token for token in closes if token < width]] = True
-        return mx.where(mx.array(keep), logits, masked) if keep.any() else masked
+            keep[close_ids] = True
+        else:
+            block[close_ids] = True
+        if keep.any():
+            masked = mx.where(mx.array(keep), logits, masked)
+        if block.any():
+            masked = mx.where(
+                mx.array(block), mx.array(-float("inf"), dtype=logits.dtype), masked
+            )
+        return masked
 
     def _is_complete(self, token_ids):
         """Whether the constrained text so far is a full match."""
