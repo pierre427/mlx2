@@ -311,6 +311,8 @@ class CacheDeltaLineage:
             "compacted_delta_nodes": 0,
             "compacted_source_bytes": 0,
             "compacted_replacement_bytes": 0,
+            "rebases": 0,
+            "rebased_delta_nodes": 0,
         }
 
     @property
@@ -452,6 +454,7 @@ class CacheDeltaLineage:
             new_counters["promotion_pointer_swaps"] += 1
             new_counters["abandoned_delta_nodes"] += abandoned_nodes
             new_counters["abandoned_bytes"] += abandoned_bytes
+            abandoned_tip = branch._tip
             self._tip = checkpoint
             self._generation = successor
             branch._status = BranchStatus.PROMOTED
@@ -459,6 +462,7 @@ class CacheDeltaLineage:
             branch._origin = None
             self._branches.discard(branch)
             self._counters = new_counters
+            self._retire_branch_nodes_locked(branch, abandoned_tip, checkpoint)
             return receipt
 
     def reject(self, branch: CacheDeltaBranch) -> RejectionReceipt:
@@ -485,12 +489,37 @@ class CacheDeltaLineage:
         new_counters["rejections"] += 1
         new_counters["abandoned_delta_nodes"] += nodes
         new_counters["abandoned_bytes"] += abandoned_bytes
+        abandoned_tip = branch._tip
+        origin = branch._origin
         branch._status = BranchStatus.REJECTED
         branch._tip = None
         branch._origin = None
         self._branches.discard(branch)
         self._counters = new_counters
+        self._retire_branch_nodes_locked(branch, abandoned_tip, origin)
         return receipt
+
+    def _retire_branch_nodes_locked(
+        self,
+        branch: CacheDeltaBranch,
+        tip: AlignedDeltaCheckpoint,
+        keep: AlignedDeltaCheckpoint,
+    ) -> None:
+        """Drop a finished branch's unreachable nodes from the arena and index.
+
+        Nodes after ``keep`` were appended by this branch alone, so once it is
+        promoted or rejected nothing can reach them; its index entries are only
+        consulted to promote this branch.
+        """
+        node = tip
+        while node is not None and node is not keep:
+            if self._arena.pop(node.checkpoint_id, None) is not None:
+                self._arena_delta_bytes -= sum(
+                    (delta.logical_bytes for delta in node.deltas)
+                )
+            node = node.previous
+        for key in [key for key in self._checkpoint_index if key[0] == branch.branch_id]:
+            del self._checkpoint_index[key]
 
     def _close_branch(self, branch: CacheDeltaBranch) -> RejectionReceipt | None:
         with self._lock:
@@ -506,6 +535,68 @@ class CacheDeltaLineage:
             return DeltaChainView(
                 self.lineage_id, self._generation, self._bases, self._tip
             )
+
+    def rebase(self, replacements: Mapping[CachePlaneKind, PlaneBase]) -> int:
+        """Replace the bases with caller-attested full state at the current tip.
+
+        For a lineage whose checkpoints each record every plane's complete state
+        (not an increment), the tip alone describes the state and the chain
+        behind it is dead weight. The generation is unchanged: this is a
+        representation change at one boundary, not a new state, so a promotion
+        still advances the generation exactly once. Returns the number of delta
+        nodes folded away.
+        """
+        with self._lock:
+            self._assert_open_locked()
+            if any(
+                (
+                    branch._status == BranchStatus.ACTIVE
+                    and branch._tip is not branch._origin
+                    for branch in tuple(self._branches)
+                )
+            ):
+                raise CacheBranchTransactionError(
+                    "rebase requires active branches to have no deltas"
+                )
+            if set(replacements) != set(self._layouts):
+                raise CacheBranchTransactionError(
+                    "rebase must replace every lineage plane"
+                )
+            ordered = []
+            for previous in self._bases:
+                replacement = replacements[previous.kind]
+                if (
+                    replacement.kind != previous.kind
+                    or replacement.start != 0
+                    or replacement.stop != self._tip.position
+                    or replacement.layout_id != previous.layout_id
+                    or replacement.generation != self._generation
+                    or replacement.ring_capacity != previous.ring_capacity
+                ):
+                    raise CacheBranchTransactionError(
+                        f"invalid rebased {previous.kind.value} plane"
+                    )
+                ordered.append(replacement)
+            folded = self._tip.depth
+            new_tip = AlignedDeltaCheckpoint(
+                uuid.uuid4().hex, self._tip.position, (), None, 0, 0
+            )
+            # A branch still open on the old tip holds no deltas; the new tip's
+            # identity makes it stale exactly as a promotion would.
+            if self._issued_compactions:
+                self._counters["compaction_cancellations"] += len(
+                    self._issued_compactions
+                )
+                self._issued_compactions.clear()
+            self._bases = tuple(ordered)
+            self._tip = new_tip
+            self._arena = {new_tip.checkpoint_id: new_tip}
+            self._checkpoint_index = {}
+            self._arena_delta_bytes = 0
+            self._arena_version += 1
+            self._counters["rebases"] += 1
+            self._counters["rebased_delta_nodes"] += folded
+            return folded
 
     def needs_compaction(self, *, max_delta_depth: int, max_delta_bytes: int) -> bool:
         if max_delta_depth < 0 or max_delta_bytes < 0:

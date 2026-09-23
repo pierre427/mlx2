@@ -665,6 +665,105 @@ def test_zero_delivery_rejects_transaction_and_restores_target_position():
     close_segmented_self_mtp_state(state)
 
 
+def test_segmented_lane_lineage_stays_bounded_over_many_rounds(monkeypatch):
+    from test_batched_mtp import _tiny_qwen4_model
+    from mlx2.runtime.generate import BatchGenerator
+    from mlx2.runtime.sample_utils import LaneRNG
+
+    monkeypatch.setenv("MLX_LM_SEGMENTED_SELF_MTP", "1")
+    monkeypatch.setenv("MLX_LM_TRUE_BATCHED_SEGMENTED_MTP", "1")
+    monkeypatch.setenv("MLX_LM_SHARED_QSA_SUFFIX", "off")
+    mx.random.seed(924)
+    generator = BatchGenerator(
+        _tiny_qwen4_model(),
+        completion_batch_size=2,
+        prefill_batch_size=2,
+        prefill_step_size=4,
+        self_mtp={
+            "num_draft": 2,
+            "persistent": True,
+            "segment_aware_live_tip": True,
+            "segment_aware_cohort_size": 2,
+        },
+    )
+    try:
+        generator.insert(
+            [[1, 2, 3, 4, 5], [6, 7, 8]],
+            max_tokens=[5000, 5000],
+            lane_rngs=[LaneRNG(1), LaneRNG(2)],
+            self_mtp_configs=[{"sampling_temp": 0.0}] * 2,
+        )
+        for _ in range(300):
+            generator.next()
+        stats = [
+            transaction.lineage.stats()
+            for transaction in generator._generation_batch.state.transactions
+        ]
+    finally:
+        generator.close()
+    for lane in stats:
+        # Hundreds of committed rounds, each advancing the generation once,
+        # while the ledger holds only the current boundary.
+        assert lane["promotions"] > 250
+        assert lane["generation"] == lane["promotions"]
+        assert lane["arena_nodes"] == 1 and lane["delta_depth"] == 0
+
+
+def test_cache_delta_lineage_retires_nodes_no_branch_can_reach():
+    from mlx2.runtime.cache_branch_transaction import (
+        CacheBranchTransactionError,
+        CacheDeltaLineage,
+        PlaneBase,
+        PlaneDelta,
+    )
+    from mlx2.runtime.cache_planes import CachePlaneKind
+
+    kind = CachePlaneKind.ATTENTION_KV
+
+    def delta(branch, start):
+        return PlaneDelta(
+            kind, ("stamp", start + 1), start, 1, "layout", branch.generation,
+            logical_bytes=10, payload_is_immutable=True,
+        )
+
+    lineage = CacheDeltaLineage(
+        [PlaneBase(kind, ("stamp", 4), 0, 4, "layout", 0, payload_is_immutable=True)]
+    )
+    rejected = lineage.fork(owner_id="rejected")
+    for start in (4, 5):
+        rejected.append_checkpoint([delta(rejected, start)])
+    rejected.reject()
+    assert lineage.stats()["arena_nodes"] == 1
+    assert lineage.stats()["arena_delta_bytes"] == 0
+
+    promoted = lineage.fork(owner_id="promoted")
+    for start in (4, 5, 6):
+        promoted.append_checkpoint([delta(promoted, start)])
+    promoted.promote(6)
+    stats = lineage.stats()
+    # The accepted chain stays until it is rebased; the abandoned tail goes.
+    assert (stats["arena_nodes"], stats["delta_depth"], stats["generation"]) == (3, 2, 1)
+    assert stats["arena_delta_bytes"] == 20
+
+    idle = lineage.fork(owner_id="idle")
+    view = lineage.current_view()
+    assert lineage.rebase(
+        {kind: PlaneBase(kind, ("stamp", 6), 0, 6, "layout", 1, payload_is_immutable=True)}
+    ) == 2
+    stats = lineage.stats()
+    assert (stats["arena_nodes"], stats["delta_depth"], stats["generation"]) == (1, 0, 1)
+    assert stats["position"] == 6 and stats["arena_delta_bytes"] == 0
+    assert lineage.current_view().bases[0].payload == view.tip.deltas[0].payload
+    with pytest.raises(CacheBranchTransactionError, match="stale"):
+        idle.append_checkpoint([delta(idle, 6)])
+    idle.close()
+    with pytest.raises(CacheBranchTransactionError, match="invalid rebased"):
+        lineage.rebase(
+            {kind: PlaneBase(kind, ("stamp", 6), 0, 5, "layout", 1, payload_is_immutable=True)}
+        )
+    lineage.dispose()
+
+
 def test_segmented_attach_rejects_shared_mutable_cache_objects():
     left = _detached(0)
     right = _detached(1)

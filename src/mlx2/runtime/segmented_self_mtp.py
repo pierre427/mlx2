@@ -5,7 +5,7 @@ import hashlib
 import os
 import threading
 from numbers import Integral
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Iterable
 import mlx.core as mx
 from .cache_branch_transaction import (
@@ -702,6 +702,21 @@ class SegmentedLaneTransaction:
             )
         branch.append_checkpoint(deltas)
         branch.promote(start + advance)
+        # Each stamp records the plane's whole state at its boundary, so the
+        # promoted stamps become the bases. Keeping the chain would retain one
+        # checkpoint per round for the lane's whole life.
+        generation = self.lineage.generation
+        self.lineage.rebase(
+            {
+                kind: replace(
+                    base,
+                    payload=deltas[kind].payload,
+                    length=stop,
+                    generation=generation,
+                )
+                for kind, base in bases.items()
+            }
+        )
         note_segmented_self_mtp("transaction_promotions")
         if accepted <= 0:
             note_segmented_self_mtp("accepted_zero")
