@@ -1,6 +1,7 @@
 from pathlib import Path
 import queue
 import tempfile
+import threading
 from types import SimpleNamespace
 import unittest
 
@@ -145,6 +146,78 @@ class SemanticSidecarTests(unittest.TestCase):
         self.assertNotIn("4242", labels)
         self.assertNotIn("blue", labels)
         self.assertIn("7", labels)
+
+    def _remember(self, session, text):
+        _, state = self.sidecar.prepare(
+            {"session_id": session, "messages": [{"role": "user", "content": text}]},
+            tenant_id="bob",
+            authenticated_tenant=True,
+        )
+        return self.sidecar.complete(state, "ok")
+
+    def _capsule_texts(self):
+        objects = Path(self.temporary.name) / "capsules" / "objects"
+        return [path.read_text() for path in objects.glob("*.json")]
+
+    def test_delete_removes_session_capsules_but_keeps_shared_ones(self):
+        # Both sessions commit the same first turn, so content addressing
+        # gives them one shared base capsule.
+        self.assertTrue(self._remember("s1", "Remember that the colour is blue.")["committed"])
+        self.assertTrue(self._remember("s2", "Remember that the colour is blue.")["committed"])
+        for index in range(3):
+            self.assertTrue(
+                self._remember("s1", f"Remember that secret{index} is value{index}.")[
+                    "committed"
+                ]
+            )
+        self.assertTrue(any("secret0" in text for text in self._capsule_texts()))
+        self.assertTrue(self.sidecar.delete_session("bob", "s1"))
+        texts = self._capsule_texts()
+        self.assertEqual(sum("secret" in text or "value" in text for text in texts), 0)
+        self.assertEqual(len(texts), 1)
+        survivor = self.sidecar.memory.retrieve(
+            self.sidecar._context("bob", "s2"), "the colour"
+        )
+        self.assertIn("blue", {concept["label"] for concept in survivor.concepts})
+        self.assertTrue(self._remember("s2", "Remember that the shape is round.")["committed"])
+
+    def test_delete_cannot_sweep_a_capsule_an_in_flight_commit_reuses(self):
+        self.assertTrue(self._remember("s1", "Remember that the colour is blue.")["committed"])
+        self.assertTrue(self._remember("s1", "Remember that the pin is 4242.")["committed"])
+        capsules = self.sidecar.memory.capsules
+        original_put = capsules.put
+        deleted = []
+        threads = []
+
+        def put_then_race_a_delete(**kwargs):
+            # s2's first commit reproduces s1's base capsule. Deleting s1
+            # while s2 has put but not yet published that capsule must not
+            # remove it out from under s2.
+            identity = original_put(**kwargs)
+            deleter = threading.Thread(
+                target=lambda: deleted.append(self.sidecar.delete_session("bob", "s1"))
+            )
+            threads.append(deleter)
+            deleter.start()
+            deleter.join(0.2)
+            return identity
+
+        capsules.put = put_then_race_a_delete
+        try:
+            result = self._remember("s2", "Remember that the colour is blue.")
+        finally:
+            capsules.put = original_put
+        for thread in threads:
+            thread.join(5)
+        self.assertTrue(result["committed"], result)
+        self.assertEqual(deleted, [True])
+        capsules.get(result["capsule"])
+        texts = self._capsule_texts()
+        self.assertEqual(sum("4242" in text for text in texts), 0)
+        survivor = self.sidecar.memory.retrieve(
+            self.sidecar._context("bob", "s2"), "the colour"
+        )
+        self.assertIn("blue", {concept["label"] for concept in survivor.concepts})
 
     def test_classifier_scores_travel_through_serving_job(self):
         events = queue.Queue()

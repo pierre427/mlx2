@@ -177,6 +177,17 @@ class CapsuleStore:
                 pass
             raise CapsuleIntegrityError(f"quarantined corrupt capsule {digest}") from error
 
+    def delete(self, digest: str) -> bool:
+        """Remove one capsule; callers decide that nothing references it."""
+        path = self._path(digest)
+        if path.is_symlink() or path.is_dir():
+            raise CapsuleIntegrityError("capsule must be a regular file")
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            return False
+        return True
+
 
 __all__ = [
     "CAPSULE_KINDS",

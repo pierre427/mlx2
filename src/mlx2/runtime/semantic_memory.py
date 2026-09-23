@@ -191,109 +191,114 @@ class SemanticMemory:
         session_context = DirectoryContext(
             model=context.model, tenant=context.tenant, session=context.session
         )
-        graph, parent, current_revision = self.load(session_context)
-        if expected_revision is not None and expected_revision != current_revision:
-            raise ValueError("semantic memory revision changed during request")
-        previous_graph = graph
-        graph = {
-            "schema": SEMANTIC_SCHEMA,
-            "concepts": {key: dict(value) for key, value in graph["concepts"].items()},
-            "edges": [dict(value) for value in graph["edges"]],
-            "proposals": [dict(value) for value in graph.get("proposals", [])],
-        }
-        committed = 0
-        deferred = 0
-        for proposal in proposals:
-            subject_id = concept_token(proposal.subject)
-            object_id = concept_token(proposal.object)
-            gate = (
-                proposal.confidence >= (self.alias_threshold if proposal.alias else self.confidence_threshold)
-                and proposal.margin >= self.margin_threshold
+        # Hold the directory lock from the revision check to the publish:
+        # delete_session sweeps unreferenced capsules under the same lock, so
+        # it can never remove the capsule (or a reused parent) this commit
+        # is about to publish, and the revision check cannot go stale.
+        with self.directory.transaction():
+            graph, parent, current_revision = self.load(session_context)
+            if expected_revision is not None and expected_revision != current_revision:
+                raise ValueError("semantic memory revision changed during request")
+            previous_graph = graph
+            graph = {
+                "schema": SEMANTIC_SCHEMA,
+                "concepts": {key: dict(value) for key, value in graph["concepts"].items()},
+                "edges": [dict(value) for value in graph["edges"]],
+                "proposals": [dict(value) for value in graph.get("proposals", [])],
+            }
+            committed = 0
+            deferred = 0
+            for proposal in proposals:
+                subject_id = concept_token(proposal.subject)
+                object_id = concept_token(proposal.object)
+                gate = (
+                    proposal.confidence >= (self.alias_threshold if proposal.alias else self.confidence_threshold)
+                    and proposal.margin >= self.margin_threshold
+                )
+                record = {
+                    "subject": subject_id,
+                    "relation": proposal.relation,
+                    "object": object_id,
+                    "confidence": proposal.confidence,
+                    "margin": proposal.margin,
+                    "evidence_digest": evidence_digest(proposal.evidence),
+                    "authority": "committed" if gate else "proposal",
+                }
+                if gate:
+                    for identifier, label in (
+                        (subject_id, proposal.subject),
+                        (object_id, proposal.object),
+                    ):
+                        graph["concepts"].setdefault(
+                            identifier,
+                            {
+                                "id": identifier,
+                                "label": normalize_label(label),
+                                "aliases": [],
+                            },
+                        )
+                    identity = (record["subject"], record["relation"], record["object"])
+                    if any(
+                        edge == record
+                        for edge in graph["edges"]
+                        if (edge["subject"], edge["relation"], edge["object"]) == identity
+                    ):
+                        continue
+                    graph["edges"] = [
+                        edge
+                        for edge in graph["edges"]
+                        if (edge["subject"], edge["relation"], edge["object"]) != identity
+                    ]
+                    graph["edges"].append(record)
+                    committed += 1
+                else:
+                    if record in graph["proposals"]:
+                        continue
+                    graph["proposals"].append(record)
+                    deferred += 1
+            if not proposals:
+                return {"committed": False, "reason": "no-proposals", "proposals": 0}
+            if graph == previous_graph:
+                return {
+                    "committed": False,
+                    "reason": "unchanged",
+                    "revision": current_revision,
+                    "accepted_edges": 0,
+                    "deferred_proposals": 0,
+                }
+            kind = "semantic_delta" if parent else "semantic_base"
+            capsule = self.capsules.put(
+                kind=kind,
+                data=graph,
+                parents=(parent,) if parent else (),
+                provenance={
+                    "operation": "post-delivery-semantic-commit",
+                    "graph_digest": hashlib.sha256(canonical_json(graph)).hexdigest(),
+                },
+                **self.bindings,
             )
-            record = {
-                "subject": subject_id,
-                "relation": proposal.relation,
-                "object": object_id,
-                "confidence": proposal.confidence,
-                "margin": proposal.margin,
-                "evidence_digest": evidence_digest(proposal.evidence),
-                "authority": "committed" if gate else "proposal",
-            }
-            if gate:
-                for identifier, label in (
-                    (subject_id, proposal.subject),
-                    (object_id, proposal.object),
-                ):
-                    graph["concepts"].setdefault(
-                        identifier,
-                        {
-                            "id": identifier,
-                            "label": normalize_label(label),
-                            "aliases": [],
-                        },
-                    )
-                identity = (record["subject"], record["relation"], record["object"])
-                if any(
-                    edge == record
-                    for edge in graph["edges"]
-                    if (edge["subject"], edge["relation"], edge["object"]) == identity
-                ):
-                    continue
-                graph["edges"] = [
-                    edge
-                    for edge in graph["edges"]
-                    if (edge["subject"], edge["relation"], edge["object"]) != identity
-                ]
-                graph["edges"].append(record)
-                committed += 1
-            else:
-                if record in graph["proposals"]:
-                    continue
-                graph["proposals"].append(record)
-                deferred += 1
-        if not proposals:
-            return {"committed": False, "reason": "no-proposals", "proposals": 0}
-        if graph == previous_graph:
+            handles = {"semantic-memory": capsule.digest}
+            if prepare_derived_handles is not None:
+                derived = dict(prepare_derived_handles(graph, capsule.digest))
+                if "semantic-memory" in derived:
+                    raise ValueError("derived handles cannot replace semantic memory")
+                handles.update(derived)
+            # Publish the semantic graph and any derived state in one session CAS.
+            # A failed derivation may leave an unreferenced immutable capsule, but
+            # cannot expose a new graph with stale derived handles.
+            layer = self.directory.update(
+                Scope.SESSION,
+                context,
+                expected_revision=current_revision,
+                handles=handles,
+            )
             return {
-                "committed": False,
-                "reason": "unchanged",
-                "revision": current_revision,
-                "accepted_edges": 0,
-                "deferred_proposals": 0,
+                "committed": True,
+                "capsule": capsule.digest,
+                "revision": layer["revision"],
+                "accepted_edges": committed,
+                "deferred_proposals": deferred,
             }
-        kind = "semantic_delta" if parent else "semantic_base"
-        capsule = self.capsules.put(
-            kind=kind,
-            data=graph,
-            parents=(parent,) if parent else (),
-            provenance={
-                "operation": "post-delivery-semantic-commit",
-                "graph_digest": hashlib.sha256(canonical_json(graph)).hexdigest(),
-            },
-            **self.bindings,
-        )
-        handles = {"semantic-memory": capsule.digest}
-        if prepare_derived_handles is not None:
-            derived = dict(prepare_derived_handles(graph, capsule.digest))
-            if "semantic-memory" in derived:
-                raise ValueError("derived handles cannot replace semantic memory")
-            handles.update(derived)
-        # Publish the semantic graph and any derived state in one session CAS.
-        # A failed derivation may leave an unreferenced immutable capsule, but
-        # cannot expose a new graph with stale derived handles.
-        layer = self.directory.update(
-            Scope.SESSION,
-            context,
-            expected_revision=current_revision,
-            handles=handles,
-        )
-        return {
-            "committed": True,
-            "capsule": capsule.digest,
-            "revision": layer["revision"],
-            "accepted_edges": committed,
-            "deferred_proposals": deferred,
-        }
 
 
 __all__ = [

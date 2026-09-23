@@ -90,6 +90,16 @@ class HyperDirectory:
         self.capsules = capsules
         self._lock = threading.RLock()
 
+    def transaction(self) -> threading.RLock:
+        """Lock to hold across a capsule put and the update that publishes it.
+
+        delete_session removes capsules that no layer references while
+        holding this lock. A writer that puts a capsule and publishes it
+        later must hold the lock across both steps, or the sweep could
+        remove a capsule (or a parent it reuses) before the handle lands.
+        """
+        return self._lock
+
     def _path(self, scope: Scope, key: Sequence[str]) -> Path:
         identity = hashlib.sha256(canonical_json([scope.value, *key])).hexdigest()
         return self.root / f"{scope.value}--{identity}.json"
@@ -257,6 +267,26 @@ class HyperDirectory:
                 owned.append(path)
             if not owned or current.get("deleted"):
                 return False
+            # Every commit writes a capsule holding the whole session graph,
+            # so the deleted handles' parent chains carry the session's
+            # plaintext facts. Remove the ones no remaining layer reaches;
+            # content addressing lets another session share a capsule.
+            # Liveness is computed before anything changes so an unreadable
+            # layer fails the delete instead of dropping a live capsule.
+            live_roots = []
+            for path in sorted(self.root.glob("*.json")):
+                if path in owned:
+                    continue
+                if path.is_symlink() or not path.is_file():
+                    raise ValueError("directory layer must be a regular file")
+                value = json.loads(path.read_text())
+                if value.get("schema") != DIRECTORY_SCHEMA or not isinstance(
+                    value.get("handles"), dict
+                ):
+                    raise ValueError("invalid hyper directory layer")
+                live_roots.extend(value["handles"].values())
+            doomed = self._capsule_closure(current["handles"].values())
+            doomed -= self._capsule_closure(live_roots)
             # Replace the layer with an empty tombstone one revision later
             # instead of unlinking it. Unlinking reset the revision to 0, so a
             # request prepared before the delete at an earlier revision could
@@ -269,7 +299,25 @@ class HyperDirectory:
             legacy = self._legacy_path(Scope.SESSION, key)
             if legacy in owned:
                 legacy.unlink()
+            for digest in sorted(doomed):
+                self.capsules.delete(digest)
             return True
+
+    def _capsule_closure(self, digests) -> set[str]:
+        """Capsules reachable from ``digests`` through their parents."""
+        reached: set[str] = set()
+        pending = list(digests)
+        while pending:
+            digest = pending.pop()
+            if digest in reached:
+                continue
+            try:
+                capsule = self.capsules.get(digest)
+            except FileNotFoundError:
+                continue
+            reached.add(digest)
+            pending.extend(capsule["parents"])
+        return reached
 
 
 __all__ = [
