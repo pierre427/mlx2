@@ -12,7 +12,13 @@ def _is_string_type(tool_name, argument_name, tools):
         function = tool.get("function", {})
         if function.get("name") != tool_name:
             continue
-        schema = (function.get("parameters") or {}).get("properties", {}).get(argument_name, {})
+        parameters = function.get("parameters") or {}
+        properties = parameters.get("properties") if isinstance(parameters, dict) else None
+        schema = properties.get(argument_name) if isinstance(properties, dict) else None
+        # A boolean subschema (``true`` admits anything, ``false`` nothing) is
+        # valid JSON Schema but declares no type, like a missing one.
+        if not isinstance(schema, dict):
+            return False
         kind = schema.get("type")
         return kind == "string" or (isinstance(kind, list) and "string" in kind)
     return False

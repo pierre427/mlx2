@@ -337,6 +337,42 @@ def test_generic_adapter_parsers_carry_the_request_tool_bounds(adapter_type, cal
         required.push(call.format("zzz"), final=True)
 
 
+def test_boolean_property_subschemas_parse_instead_of_crashing():
+    """``{"x": true}`` is valid JSON Schema and passes admission; Laguna and
+    Muse called ``.get`` on it, and the AttributeError escaped every
+    tolerant fallback as a 502."""
+    from mlx2.adapters.muse_glimmer_output import MuseOutputParser
+    from mlx2.runtime.tool_parsers.laguna import parse_tool_call as laguna_parse
+    from mlx2.server import validate_request
+
+    tools = validate_request({
+        "messages": [{"role": "user", "content": "x"}],
+        "tools": [{"type": "function", "function": {"name": "f", "parameters": {
+            "type": "object", "properties": {"x": True, "y": False},
+        }}}],
+    })["tools"]
+
+    def arguments(events):
+        (call,) = [c for e in events for c in e.get("tool_calls", ())]
+        return json.loads(call["function"]["arguments"])
+
+    laguna = OutputParser(chat=True, tools=tools, parse_tool=laguna_parse)
+    assert arguments(laguna.push(
+        "<tool_call>f<arg_key>x</arg_key><arg_value>[1]</arg_value></tool_call>",
+        final=True,
+    )) == {"x": [1]}
+    muse_call = (
+        '<|message|><atem:function_calls><atem:invoke name="f">'
+        '<atem:parameter name="{}">[1]</atem:parameter>'
+        "</atem:invoke></atem:function_calls>"
+    )
+    muse = MuseOutputParser(chat=True, tools=tools)
+    assert arguments(muse.push(muse_call.format("x"), final=True)) == {"x": [1]}
+    # ``false`` admits no value, so a call that supplies one is malformed.
+    with pytest.raises(ValueError, match="forbidden"):
+        MuseOutputParser(chat=True, tools=tools).push(muse_call.format("y"), final=True)
+
+
 def test_qwen_tool_argument_types_resolve_local_schema_refs():
     tools = [{
         "type": "function",

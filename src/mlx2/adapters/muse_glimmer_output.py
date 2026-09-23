@@ -54,6 +54,8 @@ def parse_atem(text: str, tools: list[dict]) -> list[dict]:
         if function.get("strict", False):
             schema = executable_schema(schema)
         properties, arguments, end = schema.get("properties", {}), {}, 0
+        if not isinstance(properties, dict):
+            properties = {}
         for parameter in _PARAMETER.finditer(body):
             if body[end : parameter.start()].strip():
                 raise ValueError("Malformed ATEM parameter")
@@ -63,6 +65,12 @@ def parse_atem(text: str, tools: list[dict]) -> list[dict]:
             if key not in properties and schema.get("additionalProperties") is False:
                 raise ValueError("Undeclared ATEM parameter")
             parameter_schema = properties.get(key, {})
+            # Boolean subschemas are valid JSON Schema: ``true`` admits any
+            # value (an untyped parameter), ``false`` admits none.
+            if parameter_schema is False:
+                raise ValueError("ATEM parameter is forbidden by its schema")
+            if not isinstance(parameter_schema, dict):
+                parameter_schema = {}
             expected = parameter_schema.get("type")
             if function.get("strict", False):
                 if raw_string_pattern(parameter_schema) is None:
