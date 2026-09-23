@@ -1104,7 +1104,15 @@ def test_responses_allowlisted_mcp_backend_executes_and_resumes_model():
         thread.join()
 
 
-def test_hosted_tool_stream_gives_each_output_item_one_index():
+def _logprob_event(token):
+    return {"logprob": {
+        "id": token, "token": str(token), "logprob": -0.5,
+        "top_logprobs": [{"id": token, "token": str(token), "logprob": -0.5}],
+    }}
+
+
+@pytest.mark.parametrize("logprobs", [False, True])
+def test_hosted_tool_stream_gives_each_output_item_one_index(logprobs):
     class Backend:
         def prepare(self, tools):
             return TOOLS, {"weather": "binding"}
@@ -1118,18 +1126,33 @@ def test_hosted_tool_stream_gives_each_output_item_one_index():
         def submit(self, request, *, tenant_id="default"):
             self.rounds += 1
             self.job = Job(request)
+            # Each token's logprob event precedes the delta it produced; the
+            # last one (the stop token) trails the text it ends.
             if self.rounds == 1:
-                self.job.events.put({"delta": {"tool_calls": [{
-                    "index": 0,
-                    "id": "call_weather",
-                    "type": "function",
-                    "function": {"name": "weather", "arguments": '{"city":"T"}'},
-                }]}})
+                script = [
+                    _logprob_event(1),
+                    {"delta": {"tool_calls": [{
+                        "index": 0,
+                        "id": "call_weather",
+                        "type": "function",
+                        "function": {"name": "weather", "arguments": '{"city":"T"}'},
+                    }]}},
+                ]
                 reason = "tool_calls"
             else:
-                self.job.events.put({"delta": {"reasoning_content": "thinking"}})
-                self.job.events.put({"delta": {"content": "It is 21 C."}})
+                script = [
+                    _logprob_event(2),
+                    {"delta": {"reasoning_content": "thinking"}},
+                    _logprob_event(3),
+                    {"delta": {"content": "It is "}},
+                    _logprob_event(4),
+                    {"delta": {"content": "21 C."}},
+                    _logprob_event(5),
+                ]
                 reason = "stop"
+            for event in script:
+                if "logprob" not in event or request.get("logprobs"):
+                    self.job.events.put(event)
             self.job.events.put({"finish_reason": reason, "receipt": {}})
             return self.job
 
@@ -1151,6 +1174,7 @@ def test_hosted_tool_stream_gives_each_output_item_one_index():
                 "server_url": "https://example.invalid/mcp",
                 "require_approval": "never",
             }],
+            **({"include": ["message.output_text.logprobs"]} if logprobs else {}),
         ) as response:
             events = [
                 json.loads(line[len("data: "):])
@@ -1184,6 +1208,18 @@ def test_hosted_tool_stream_gives_each_output_item_one_index():
         e["delta"] for e in events if e["type"] == "response.output_text.delta"
     )
     assert text == "It is 21 C."
+    # The buffered message's one delta must carry the logprobs the completed
+    # response reports for it, as an unbuffered stream's deltas do.
+    streamed = [
+        value["token"]
+        for e in events if e["type"] == "response.output_text.delta"
+        for value in e.get("logprobs", ())
+    ]
+    [message] = [
+        item for item in completed["response"]["output"] if item["type"] == "message"
+    ]
+    reported = [value["token"] for value in message["content"][0].get("logprobs", ())]
+    assert streamed == reported == (["3", "4", "5"] if logprobs else [])
 
 
 def test_required_tool_model_violation_is_server_error(http_engine):

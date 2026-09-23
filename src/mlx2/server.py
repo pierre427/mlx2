@@ -3338,6 +3338,9 @@ def handler_for(
                                             )
                                             response_message_started = True
                                             if message["content"]:
+                                                # The one delta carries the whole
+                                                # text, so it carries the whole
+                                                # logprob list the item reports.
                                                 self._responses_sse(
                                                     {
                                                         "type": "response.output_text.delta",
@@ -3345,6 +3348,15 @@ def handler_for(
                                                         "output_index": output_index,
                                                         "content_index": 0,
                                                         "delta": message["content"],
+                                                        **(
+                                                            {
+                                                                "logprobs": item["content"][0][
+                                                                    "logprobs"
+                                                                ]
+                                                            }
+                                                            if "logprobs" in item["content"][0]
+                                                            else {}
+                                                        ),
                                                     }
                                                 )
                                         self._responses_sse(
