@@ -20,10 +20,10 @@ from .committed_recovery import CommittedRecoverySlot
 from .processor_probe import copy_sharing, rollback_shared_memo
 from .cow_cache import (
     COWCacheUnsupported,
-    _carries_cow_bookkeeping,
-    external_round_cow_enabled,
+    restore_recovery_descriptors,
     snapshot_committed_cache,
     snapshot_prompt_cache_descriptors,
+    snapshot_recovery_descriptors,
 )
 from .speculative_sampling import (
     FLyVerificationPolicy,
@@ -475,51 +475,51 @@ class ExternalDraftBatchGenerator:
     def _freeze_lane(self, lane):
         """Freeze one lane at its committed boundary; returns (state, mode).
 
-        Both modes alias the immutable MLX buffers (``mx.array`` deep copies
-        share them), so the live round and the checkpoint already form a free
-        current/next double buffer.  Opt-in descriptor COW
-        (``MLX_LM_EXTERNAL_ROUND_COW=1``) additionally rejects cache graphs
-        with live transaction state.  Other host-side fields (RNG,
-        processors, ...) are deep-copied in both modes, except processors
-        that re-sync from their next call's history, which stay shared.
-        History is journaled separately because rounds only append to it.
+        The cache planes are captured as recovery descriptors: an
+        append-only KV plane (target or draft ``KVCache``) keeps only its fill
+        level and is borrowed back from the live cache on restore, and every
+        other buffer keeps a descriptor alias.  An alias of an append-only
+        buffer (a deep copy of an ``mx.array`` is one too) pinned it for the
+        round, so every append copied the whole buffer: O(context) bytes per
+        token on both the speculative and the ordinary path.  A graph the
+        descriptors refuse (live transaction state) falls back to the deep
+        copy.  Host-side fields (RNG, processors, ...) are deep-copied,
+        except processors that re-sync from their next call's history, which
+        stay shared.  History is journaled separately because rounds only
+        append to it.
         """
         fields = vars(lane)
         # Processors that re-sync from the next call's history stay shared.
         shared = rollback_shared_memo(fields.get("processors"))
         # A graph carrying COW bookkeeping (an APC branch's hooked objects)
-        # always takes the descriptor route: its segment tokens hold locks a
+        # takes the descriptor route too: its segment tokens hold locks a
         # deep copy cannot pickle, as in ``snapshot_committed_cache``.
-        if external_round_cow_enabled() or _carries_cow_bookkeeping(
-            fields["cache"], fields["draft_cache"]
-        ):
-            try:
-                cache, (draft_cache, tail), _receipt = (
-                    snapshot_prompt_cache_descriptors(
-                        fields["cache"], (fields["draft_cache"], fields["tail"])
-                    )
-                )
-            except COWCacheUnsupported:
-                _bump(self.scheduler_stats, "external_cow_fallbacks")
-            else:
-                host = copy_sharing(
-                    {
-                        k: v for k, v in fields.items()
-                        if k not in _LANE_PLANES | _LANE_JOURNAL
-                    },
-                    shared,
-                )
-                _bump(self.scheduler_stats, "external_cow_snapshots")
-                return (host, cache, draft_cache, tail), "descriptor_cow"
+        try:
+            cache, (draft_cache, tail), borrowed = snapshot_recovery_descriptors(
+                fields["cache"], (fields["draft_cache"], fields["tail"])
+            )
+        except COWCacheUnsupported:
+            _bump(self.scheduler_stats, "external_cow_fallbacks")
+        else:
+            host = copy_sharing(
+                {
+                    k: v for k, v in fields.items()
+                    if k not in _LANE_PLANES | _LANE_JOURNAL
+                },
+                shared,
+            )
+            _bump(self.scheduler_stats, "external_cow_snapshots")
+            return (host, cache, draft_cache, tail, borrowed), "descriptor_cow"
         host = {k: v for k, v in fields.items() if k not in _LANE_JOURNAL}
         return copy_sharing(host, shared), "deepcopy"
 
     @staticmethod
     def _thaw_lane(frozen):
-        # Re-clone so the checkpoint itself stays pristine after a restore.
-        host, cache, draft_cache, tail = frozen
-        cache, (draft_cache, tail), _receipt = snapshot_prompt_cache_descriptors(
-            cache, (draft_cache, tail)
+        # Re-clone so the checkpoint itself stays pristine after a restore;
+        # borrowed KV is re-read from the live caches at the captured level.
+        host, cache, draft_cache, tail, borrowed = frozen
+        cache, (draft_cache, tail) = restore_recovery_descriptors(
+            cache, (draft_cache, tail), borrowed
         )
         return {
             **copy.deepcopy(host),

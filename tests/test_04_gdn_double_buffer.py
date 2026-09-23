@@ -61,13 +61,18 @@ def test_knob_defaults_off_and_opts_in(monkeypatch):
     assert external_round_cow_enabled()
 
 
-def test_default_mode_adds_no_counters(monkeypatch):
+def test_default_mode_counts_only_round_descriptor_snapshots(monkeypatch):
+    # Round checkpoints are recovery descriptors in both modes (an alias of
+    # an append-only KV buffer made every append of the round copy it); the
+    # knob covers only boundary and finish caches, which stay deep copies.
     monkeypatch.delenv("MLX_LM_EXTERNAL_ROUND_COW", raising=False)
     m, d = tiny()
     b = generator(m, d)
     b.insert([[1, 2, 3]], max_tokens=[4])
     _drain(b)
-    assert not any("cow" in key for key in b.scheduler_stats)
+    rounds = b.scheduler_stats["external_rounds"] + b.scheduler_stats["ordinary_rounds"]
+    assert b.scheduler_stats["external_cow_snapshots"] == rounds > 0
+    assert "external_cow_fallbacks" not in b.scheduler_stats
 
 
 @pytest.mark.parametrize("cow", [True, False])
@@ -105,9 +110,7 @@ def test_failure_after_commit_restores_lane_and_caches_bit_equal(monkeypatch, co
         b._round(cohort)
     assert not b._open
     assert b.scheduler_stats["recovery_checkpoint_restores"] == restores + 2
-    assert b.scheduler_stats.get("external_cow_snapshots", 0) > 0 if cow else (
-        "external_cow_snapshots" not in b.scheduler_stats
-    )
+    assert b.scheduler_stats.get("external_cow_snapshots", 0) > 0
     for lane, old, h in zip(cohort, before, host):
         assert (list(lane.history), lane.anchor, lane.generated, lane.rng.snapshot(),
                 lane.proposed, lane.accepted, lane.external_rounds) == h
@@ -234,7 +237,7 @@ def test_neither_snapshot_mode_duplicates_cache_bytes(monkeypatch):
 
     cow_bytes, keep_cow = allocated(True)
     copy_bytes, keep_copy = allocated(False)
-    assert keep_cow[0].mode == "descriptor_cow" and keep_copy[0].mode == "deepcopy"
+    assert keep_cow[0].mode == keep_copy[0].mode == "descriptor_cow"
     assert cow_bytes < cache_bytes // 8
     assert copy_bytes < cache_bytes // 8
 
@@ -272,7 +275,7 @@ def test_unfreezable_graph_falls_back_to_deepcopy_and_still_restores(monkeypatch
         b._prefill(lane)
     before = _planes(lane)
     history = list(lane.history)
-    monkeypatch.setattr(module, "snapshot_prompt_cache_descriptors", refuse)
+    monkeypatch.setattr(module, "snapshot_recovery_descriptors", refuse)
     (snapshot,) = b._snapshot_round([lane])
     assert snapshot.mode == "deepcopy"
     assert b.scheduler_stats["external_cow_fallbacks"] == 1
@@ -417,7 +420,9 @@ def test_prometheus_maps_snapshot_counters():
     assert prometheus._scheduler_mechanism("pld_cow_fallbacks") == "prompt_lookup"
 
 
-def test_deepcopy_mode_round_snapshot_matches_historical_semantics(monkeypatch):
+def test_knob_off_round_snapshot_borrows_append_only_kv(monkeypatch):
+    from mlx2.runtime.models.cache import KVCache
+
     _cow(monkeypatch, False)
     m, d = tiny()
     b = generator(m, d)
@@ -426,12 +431,18 @@ def test_deepcopy_mode_round_snapshot_matches_historical_semantics(monkeypatch):
     while lane.anchor is None:
         b._prefill(lane)
     (snapshot,) = b._snapshot_round([lane])
-    state = snapshot.slot._checkpoint._state
-    assert set(state) == set(vars(lane)) - {"history"}
+    host, cache, _draft, _tail, borrowed = snapshot.slot._checkpoint._state
+    assert set(host) == set(vars(lane)) - {"history", "cache", "draft_cache", "tail"}
     assert snapshot.history is lane.history
     assert snapshot.boundary == len(lane.history)
-    assert state["cache"] is not lane.cache
-    assert copy.deepcopy is snapshot.slot._checkpoint._restore
+    assert cache is not lane.cache
+    # The checkpoint holds no alias of a live append-only KV buffer.
+    live = [c for c in lane.cache if type(c) is KVCache and c.offset]
+    assert live and {id(plane.live) for plane in borrowed} >= {id(c) for c in live}
+    for clone, original in zip(cache, lane.cache):
+        if type(original) is KVCache and original.offset:
+            assert clone.keys is None and clone.values is None
+    assert snapshot.slot._checkpoint._restore == b._thaw_lane
 
 
 @pytest.mark.parametrize("cow", [True, False])
@@ -446,7 +457,7 @@ def test_history_journal_copies_only_on_restore(monkeypatch, cow):
     snapshot, = b._snapshot_round([lane])
     assert snapshot.history is original
     frozen = snapshot.slot._checkpoint._state
-    host = frozen[0] if cow else frozen
+    host = frozen[0]
     assert "history" not in host
     original.extend([4096, 4097])
     b._restore_round([lane], [snapshot])

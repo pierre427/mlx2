@@ -197,6 +197,19 @@ def drain(b):
     raise AssertionError('scheduler stalled')
 
 
+def committed_state(cache):
+    """A cache's arrays, with an append-only KV plane read below its offset.
+
+    A round restore borrows the live KV buffer at the captured fill level, so
+    positions past the offset may hold the failed round's rejected appends,
+    exactly as after an ordinary rejected verify; they are never read.
+    """
+    from mlx2.runtime.models.cache import KVCache
+    if type(cache) is KVCache and cache.keys is not None:
+        return (cache.keys[..., :cache.offset, :], cache.values[..., :cache.offset, :])
+    return cache.state
+
+
 def test_body_taps_match_normal_forward():
     m,_d=tiny();x=mx.array([[1,2,3]])
     logits,taps=m.forward_with_taps(x,m.make_cache(),[0,3])
@@ -720,7 +733,7 @@ def test_atomic_failure_after_one_row_publication_restores_every_lane(monkeypatc
         assert not lane.ready and lane.rng.snapshot()==old['rng'].snapshot()
         for c,previous in zip(lane.cache,old['cache']):
             assert c.offset==previous.offset
-            for a,v in zip(c.state,previous.state):np.testing.assert_array_equal(np.asarray(a),np.asarray(v))
+            for a,v in zip(committed_state(c),committed_state(previous)):np.testing.assert_array_equal(np.asarray(a),np.asarray(v))
     monkeypatch.setattr(b,'_sidecar',real)
     output,_=drain(b);assert all(len(v)==1 for v in output.values())
 
@@ -862,7 +875,7 @@ def test_already_closed_commit_failure_restores_lane_and_original_error(monkeypa
     assert lane.history==before['history'] and lane.generated==0 and not lane.ready
     for now,old in zip(lane.cache,before['cache']):
         assert now.offset==old.offset
-        for a,v in zip(now.state,old.state):np.testing.assert_array_equal(np.asarray(a),np.asarray(v))
+        for a,v in zip(committed_state(now),committed_state(old)):np.testing.assert_array_equal(np.asarray(a),np.asarray(v))
 
 
 def test_snapshot_failure_does_not_leak_transaction_lock(monkeypatch):
@@ -1315,7 +1328,7 @@ def test_round_snapshot_shares_a_guard_that_resyncs_and_output_is_unchanged(monk
                  sampling_configs=[{"sampling_temp": 0}])
         lane = next(iter(b.lanes.values()))
         frozen, mode = b._freeze_lane(lane)
-        assert mode == "deepcopy" and frozen["processors"][0] is guard
+        assert mode == "descriptor_cow" and frozen[0]["processors"][0] is guard
         real, calls = ExternalDraftBatchGenerator._commit, [0]
 
         def flaky(self, *args, **kwargs):
@@ -1421,3 +1434,100 @@ def test_external_fanout_with_a_one_token_budget_shares_the_leader_boundary(monk
     assert len(results) == 2
     assert engine.counts['apcv2_fanout_boundaries'] == 1
     assert all(receipt['parallel_prefill']['one_prefill'] for _, _, receipt in results)
+
+
+def _kv_append_bytes(run):
+    """Allocator bytes of every ``KVCache`` append ``run`` makes, measured alone."""
+    from mlx2.runtime.models.cache import KVCache
+
+    real = KVCache.update_and_fetch
+    log = []
+
+    def measured(cache, keys, values):
+        if cache.keys is not None:
+            mx.eval(cache.keys, cache.values)
+        mx.eval(keys, values)
+        active = mx.get_active_memory()
+        mx.reset_peak_memory()
+        out = real(cache, keys, values)
+        mx.eval(cache.keys, cache.values)
+        log.append((max(0, mx.get_peak_memory() - active), int(cache.keys.nbytes + cache.values.nbytes)))
+        return out
+
+    KVCache.update_and_fetch = measured
+    try:
+        run()
+    finally:
+        KVCache.update_and_fetch = real
+    return log
+
+
+@pytest.mark.parametrize('ordinary', [False, True])
+def test_round_checkpoint_does_not_copy_target_kv_per_append(ordinary):
+    # 3C-4: the round checkpoint aliased every target KV buffer, so each
+    # append of the round (the verify, or the ordinary decode step) copied
+    # the whole buffer: O(context) bytes per token on both paths.
+    mx.random.seed(8)
+    m = Model(ModelArgs(hidden_size=64, intermediate_size=128, num_hidden_layers=4, num_attention_heads=4,
+                        num_key_value_heads=2, head_dim=16, vocab_size=64, sliding_window=8,
+                        max_position_embeddings=4096))
+    config = DFlash2Config(hidden_size=64, intermediate_size=128, num_hidden_layers=2, num_attention_heads=4,
+                           num_key_value_heads=2, head_dim=16, vocab_size=64, num_target_layers=4,
+                           target_layer_ids=[0, 3], conv_kernel_size=2, conv_group_size=2, selector_rank=4,
+                           selector_top_k=4, block_size=4, mask_token_id=63, max_position_embeddings=4096,
+                           sliding_window=8, layer_types=['sliding_attention'] * 2)
+    d = DFlash2DraftModel(config).bind(m)
+    mx.eval(m.parameters(), d.parameters())
+    mx.random.seed(11)
+    prompt = mx.random.randint(1, 60, (600,)).tolist()
+    b = ExternalDraftBatchGenerator(m, draft_model=d, binding='t', num_draft=2, prefill_step_size=512)
+    uid = b.insert([prompt], max_tokens=[40], sampling_configs=[{'sampling_temp': 0}])[0]
+    while b.lanes[uid].anchor is None:
+        b.next()
+    b.pop_prompt_boundary(uid)
+    if ordinary:
+        b.disable_speculation(uid)
+
+    def rounds():
+        for _ in range(8):
+            b.next()
+
+    log = _kv_append_bytes(rounds)
+    b.close()
+    assert len(log) >= 8
+    capacity = min(total for _copied, total in log)
+    assert max(copied for copied, _total in log) < capacity // 8, log
+
+
+def test_round_restore_with_an_empty_bfloat16_draft_kv_plane_is_exact():
+    # A draft KVCache still at fill level 0 holds a float32 placeholder that
+    # the first real append replaces with bfloat16; borrowing it for the
+    # round checkpoint made the restore refuse the changed dtype and leave
+    # the lane half-committed.
+    args = _tiny_dflash_args()
+    args.layer_types = ['full_attention'] * 2
+    m, _ = tiny()
+    d = DFlash2DraftModel(args).bind(m)
+    m.set_dtype(mx.bfloat16); d.set_dtype(mx.bfloat16)
+    b = generator(m, d)
+    b.insert([[1]], max_tokens=[6])
+    lane = b.lanes[0]
+    while lane.anchor is None:
+        b._prefill(lane)
+    b._round([lane]); lane.ready.clear()
+    assert [int(c.offset) for c in lane.draft_cache] == [0, 0] and lane.tail.shape[1] == 1
+    history, generated = list(lane.history), lane.generated
+    real = b._commit
+
+    def fail_after_commit(*args, **kwargs):
+        real(*args, **kwargs)
+        raise RuntimeError('injected post-commit failure')
+
+    b._commit = fail_after_commit
+    with pytest.raises(RuntimeError, match='injected post-commit'):
+        b._round([lane])
+    assert lane.history == history and lane.generated == generated and not lane.ready
+    assert [int(c.offset) for c in lane.draft_cache] == [0, 0] and lane.tail.shape[1] == 1
+    b._commit = real
+    _, final = drain(b)
+    assert final[0].finish_reason == 'length'

@@ -67,11 +67,12 @@ def mtp_boundary_cow_enabled(value: Optional[bool] = None) -> bool:
 def external_round_cow_enabled(value: Optional[bool] = None) -> bool:
     """Resolve descriptor snapshots for external/PLD boundaries. Default is off.
 
-    ``MLX_LM_EXTERNAL_ROUND_COW=1`` replaces the deep copies of the external
-    draft round checkpoint and the external/PLD prompt-boundary and finish
-    caches.  ``mx.array.__deepcopy__`` already shares the immutable buffer,
-    so the deep copy never duplicated KV bytes; descriptor COW adds
-    stable-source validation at a small host cost and stays opt-in.
+    ``MLX_LM_EXTERNAL_ROUND_COW=1`` replaces the deep copies of the
+    external/PLD prompt-boundary and finish caches.  ``mx.array.__deepcopy__``
+    already shares the immutable buffer, so the deep copy does not duplicate
+    KV bytes; descriptor COW adds stable-source validation at a small host
+    cost and stays opt-in.  The external round checkpoint no longer depends
+    on it: it is always a recovery-descriptor snapshot.
     """
     if value is not None:
         return bool(value)
@@ -1583,7 +1584,10 @@ def snapshot_recovery_descriptors(
         record = []
         for name, axis, level_name in fields:
             value = getattr(live, name, None)
-            if value is None:
+            if value is None or int(getattr(live, level_name)) == 0:
+                # Nothing below a zero fill level to borrow, and the next
+                # append may replace the buffer outright (an empty
+                # placeholder takes the first real dtype): keep the alias.
                 continue
             record.append(
                 (
