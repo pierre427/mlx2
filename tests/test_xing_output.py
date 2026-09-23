@@ -178,11 +178,41 @@ def test_non_finite_and_unserializable_values_stay_text():
          "<param_key>a</param_key><param_value>2</param_value></tool_call>", "Duplicate"),
         ("<tool_call>  </tool_call>", "Empty"),
         ("<tool_call>{bad json</tool_call>", "Malformed"),
+        # A raw or untyped value ends at the first closer, which cannot be
+        # told from one it quotes, and a JSON value quoting one must decode.
+        (_call("get_weather", city="a</param_value>b"), "Malformed"),
+        (_call("get_weather", city="a</tool_call>b"), "Malformed"),
+        (_call("get", a='{"s": "</param_value>"}'), "Malformed"),
+        (_call("get_weather", city="x", opts='{"s": "</param_value>" junk}'), "Malformed"),
     ],
 )
 def test_malformed_tool_calls_fail_closed(block, message):
     with pytest.raises(ValueError, match=message):
         run("</think>" + block)
+
+
+@pytest.mark.parametrize(
+    "opts, tags",
+    [
+        ('{"s": "a</param_value>b"}', '["a</tool_call>b"]'),
+        ('{"s": "</param_value></tool_call>", "t": "<tool_call>get</tool_call>"}', "[]"),
+        ("{}", '["say \\"</tool_call>\\"", "</param_value>\\\\"]'),
+    ],
+)
+def test_json_values_keep_quoted_closing_tags(opts, tags):
+    """The template writes non-string values with ``tojson``, which leaves
+    ``<`` raw, so a JSON string may quote ``</param_value>`` or
+    ``</tool_call>``.  The parser cut the value at the first
+    ``</param_value>`` and the block at the first ``</tool_call>``, quoted or
+    not, and the call failed with 502.  A JSON value now ends at the first
+    closer outside its strings, however the text is chunked."""
+    call = _call("get_weather", city="Oslo", opts=opts, tags=tags)
+    text = "</think>" + call + call + "done"
+    expected = {"city": "Oslo", "opts": json.loads(opts), "tags": json.loads(tags)}
+    for size in (len(text), 1, 7):
+        out = run(text, chunks=split_every(text, size))
+        assert calls(out) == [("get_weather", expected)] * 2
+        assert out["content"] == "done"
 
 
 def test_incomplete_tool_call_fails_at_final_or_turn_end():

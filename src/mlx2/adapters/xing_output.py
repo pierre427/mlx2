@@ -45,7 +45,10 @@ schema admits a string and is otherwise decoded with ``json.loads`` then
 schemas (``anyOf``/``oneOf``/list ``type``) that admit a string keep the raw
 text (vLLM only inspects a scalar ``type``), except that ``null`` decodes to
 ``None`` when the schema also admits null; and decoded values that are not
-finite JSON stay raw text.  A JSON body is accepted too:
+finite JSON stay raw text.  ``tojson`` leaves ``<`` raw, so a JSON value (a
+declared type without a string) ends at the first closer outside its
+strings; a raw or untyped value ends at the first closer.  A JSON body is
+accepted too:
 ``<tool_call>{"name": ..., "arguments": {...}}</tool_call>`` (SGLang) and
 ``<tool_call>NAME{...}</tool_call>`` (vLLM).  As in the other mlx2 parsers,
 an undeclared tool, a missing required or undeclared parameter
@@ -67,6 +70,7 @@ THINK_CLOSE = "</think>"
 TOOL_OPEN = "<tool_call>"
 TOOL_CLOSE = "</tool_call>"
 PARAM_KEY_OPEN = "<param_key>"
+PARAM_VALUE_CLOSE = "</param_value>"
 TURN_END_MARKERS = (
     "<_end>",
     "<_user>",
@@ -78,9 +82,14 @@ TURN_END_MARKERS = (
     "</tool_response>",
 )
 
-_PARAM = re.compile(
-    r"<param_key>(.*?)</param_key>\s*<param_value>(.*?)</param_value>", re.DOTALL
+# A parameter up to its value.  The key never runs past a block closer, so a
+# block the model cut short inside a key still ends at the first one.
+_PARAM_HEAD = re.compile(
+    r"\s*<param_key>((?:(?!</tool_call>)[\s\S])*?)</param_key>\s*<param_value>"
 )
+_JSON_OPEN = re.compile(r'\s*[\[{"]')
+_JSON_CLOSER = re.compile(r"</param_value>|</tool_call>")
+_JSON_STRING = re.compile(r'"[^"\\]*(?:\\.[^"\\]*)*"', re.DOTALL)
 
 
 def _schema_types(schema) -> set:
@@ -132,20 +141,99 @@ def _parameter_value(raw: str, schema):
     return _deserialize(raw)
 
 
+def _json_value_end(text: str, start: int):
+    """Where the closer after the JSON value that starts at ``start`` is.
+
+    The template writes non-string values with ``tojson``, which leaves ``<``
+    raw, so a JSON string may quote ``</param_value>`` or ``</tool_call>``.
+    Outside a string ``<`` is not JSON, so the value ends at the first closer
+    outside every string.  Returns -1 while none has arrived, including while
+    the text ends inside a string.
+    """
+    position = start
+    while True:
+        closer = _JSON_CLOSER.search(text, position)
+        close = closer.start() if closer is not None else -1
+        quote = text.find('"', position, close if close >= 0 else len(text))
+        if quote < 0:
+            return close
+        string = _JSON_STRING.match(text, quote)
+        if string is None:
+            return -1
+        position = string.end()
+
+
+def _walk_parameters(text: str, position: int, properties: dict):
+    """``(pairs, position, open_json)`` for the parameters from ``position``.
+
+    ``pairs`` holds ``(key, raw value, quoted)`` for every closed parameter
+    and ``position`` is where the walk stopped.  A raw value (string-typed or
+    untyped) ends at the first closer, as before: a closer the string itself
+    contains cannot be told from markup.  A value whose schema admits no
+    string and whose text opens a JSON object, array or string ends at the
+    first closer outside its strings; ``quoted`` says it contains one.
+    ``open_json`` says the text ends inside such a value before any closer
+    outside its strings, so every closer so far is quoted.
+    """
+    pairs = []
+    while True:
+        head = _PARAM_HEAD.match(text, position)
+        if head is None:
+            return pairs, position, False
+        start = head.end()
+        first = text.find(PARAM_VALUE_CLOSE, start)
+        types = _schema_types(properties.get(head.group(1).strip()))
+        if types and "string" not in types and _JSON_OPEN.match(text, start):
+            end = _json_value_end(text, start)
+            if end < 0:
+                return pairs, position, True
+        else:
+            block = text.find(TOOL_CLOSE, start)
+            end = -1 if 0 <= block < first else first
+        if end < 0 or not text.startswith(PARAM_VALUE_CLOSE, end):
+            return pairs, position, False
+        quoted = _JSON_CLOSER.search(text, start, end) is not None
+        pairs.append((head.group(1), text[start:end], quoted))
+        position = end + len(PARAM_VALUE_CLOSE)
+
+
+def _tool_close(text: str, tools: list[dict]) -> int:
+    """Where the ``</tool_call>`` closing the tool-call block in ``text`` is.
+
+    A JSON value may quote the closer (see ``_walk_parameters``), so the block
+    ends at the first one after its parameters.  Returns -1 while none has
+    arrived, including while every closer so far sits in a JSON value.  The
+    walk runs only once a closer has arrived.
+    """
+    close = text.find(TOOL_CLOSE)
+    position = text.find(PARAM_KEY_OPEN)
+    if close < 0 or position < 0 or close < position:
+        return close
+    definitions = {tool["function"]["name"]: tool["function"] for tool in tools or ()}
+    function = definitions.get(text[:position].strip()) or {}
+    properties = (function.get("parameters") or {}).get("properties") or {}
+    _, position, open_json = _walk_parameters(text, position, properties)
+    return -1 if open_json else text.find(TOOL_CLOSE, position)
+
+
 def _tag_arguments(text: str, properties: dict) -> dict:
-    arguments, cursor = {}, 0
-    for match in _PARAM.finditer(text):
-        if text[cursor : match.start()].strip():
-            raise ValueError("Malformed Xing tool-call parameters")
-        key, raw = match.group(1).strip(), match.group(2).strip()
+    arguments = {}
+    pairs, position, _ = _walk_parameters(text, 0, properties)
+    if text[position:].strip():
+        raise ValueError("Malformed Xing tool-call parameters")
+    for key, raw, quoted in pairs:
+        key, raw = key.strip(), raw.strip()
         if not key:
             raise ValueError("Xing tool-call parameter has an empty name")
         if key in arguments:
             raise ValueError("Duplicate Xing tool-call parameter")
+        if quoted:
+            # The value quotes a closer.  Only JSON puts one there.
+            try:
+                json.loads(raw)
+            except ValueError:
+                raise ValueError("Malformed Xing JSON parameter") from None
         arguments[key] = _parameter_value(raw, properties.get(key))
-        cursor = match.end()
-    if text[cursor:].strip():
-        raise ValueError("Malformed Xing tool-call parameters")
     return arguments
 
 
@@ -358,7 +446,7 @@ class XingOutputParser:
             return events
         while not self.stopped:
             if self.channel == "tool":
-                end = self.buffer.find(TOOL_CLOSE)
+                end = _tool_close(self.buffer, self.tools)
                 turn = [self.buffer.find(m) for m in TURN_END_MARKERS if m in self.buffer]
                 if turn and (end < 0 or min(turn) < end):
                     # The turn ended inside the block.  A payload that is
