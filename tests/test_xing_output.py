@@ -105,7 +105,7 @@ def test_tool_calls_typed_by_schema_back_to_back():
         + _call("get_weather", city="  Paris ", days="3", scale="1.5", live="true",
                 opts='{"a": [1, null]}', tags='["x", "y"]', unit="null", note="null")
         + "\n"
-        + _call("get_weather", city="123", days="'7'", extra="{'k': (1, 2)}")
+        + _call("get_weather", city="123", days="'7'", extra="{'k': [1, 2]}")
         + _call("get")
     )
     out = run(text)
@@ -165,6 +165,23 @@ def test_json_body_forms_are_accepted():
 def test_non_finite_and_unserializable_values_stay_text():
     out = run("</think>" + _call("get", a="NaN", b="{1, 2}", c="b'x'", d="-Infinity"))
     assert calls(out) == [("get", {"a": "NaN", "b": "{1, 2}", "c": "b'x'", "d": "-Infinity"})]
+
+
+@pytest.mark.parametrize("size", [None, 1, 7])
+def test_values_json_would_rewrite_stay_text(size):
+    """A Python literal decoded from a non-string value can be one that JSON
+    serializes as something else: a tuple becomes an array, and a key such
+    as ``1`` or ``True`` becomes ``"1"`` or ``"true"``.  Such a value was
+    served as what JSON makes of it, which the model did not write; it now
+    stays the model's text, and a literal made only of JSON types still
+    decodes."""
+    text = "</think>" + _call(
+        "get", a="(1, 2)", b="{1: 2}", c="{'k': (1,)}", d="{True: 1}", e="{'k': [1, None]}"
+    )
+    out = run(text, chunks=None if size is None else split_every(text, size))
+    assert calls(out) == [
+        ("get", {"a": "(1, 2)", "b": "{1: 2}", "c": "{'k': (1,)}", "d": "{True: 1}", "e": {"k": [1, None]}})
+    ]
 
 
 @pytest.mark.parametrize(

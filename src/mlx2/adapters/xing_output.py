@@ -44,11 +44,12 @@ schema admits a string and is otherwise decoded with ``json.loads`` then
 ``ast.literal_eval``, falling back to the raw text.  Two refinements: union
 schemas (``anyOf``/``oneOf``/list ``type``) that admit a string keep the raw
 text (vLLM only inspects a scalar ``type``), except that ``null`` decodes to
-``None`` when the schema also admits null; and decoded values that are not
-finite JSON stay raw text.  ``tojson`` leaves ``<`` raw, so a JSON value (a
-declared type without a string) ends at the first closer outside its
-strings; a raw or untyped value ends at the first closer.  A JSON body is
-accepted too:
+``None`` when the schema also admits null; and decoded values that JSON
+cannot carry as written (a non-finite float, a set, or a tuple or
+non-string key it would rewrite) stay raw text.  ``tojson`` leaves ``<``
+raw, so a JSON value (a declared type without a string) ends at the first
+closer outside its strings; a raw or untyped value ends at the first
+closer.  A JSON body is accepted too:
 ``<tool_call>{"name": ..., "arguments": {...}}</tool_call>`` (SGLang) and
 ``<tool_call>NAME{...}</tool_call>`` (vLLM).  As in the other mlx2 parsers,
 an undeclared tool, a missing required or undeclared parameter
@@ -64,6 +65,7 @@ import re
 import uuid
 
 from ..output import StopSequenceMatcher, _safe_prefix, within_parallel_bound
+from ..runtime.tool_parsers._schema import json_native
 
 THINK_OPEN = "<think>"
 THINK_CLOSE = "</think>"
@@ -108,19 +110,15 @@ def _schema_types(schema) -> set:
     return types
 
 
-def _finite_json(value) -> bool:
-    try:
-        json.dumps(value, allow_nan=False)
-    except (TypeError, ValueError):
-        return False
-    return True
-
-
 def _deserialize(text: str):
-    """vLLM/SGLang ``_deserialize``: JSON, then a Python literal, else raw text."""
+    """vLLM/SGLang ``_deserialize``: JSON, then a Python literal, else raw text.
+
+    A decoded value the arguments cannot carry as written (a tuple, a
+    non-string key, a non-finite float, a set) stays the raw text too.
+    """
     try:
         value = json.loads(text)
-        if _finite_json(value):
+        if json_native(value):
             return value
         return text
     except ValueError:
@@ -129,7 +127,7 @@ def _deserialize(text: str):
         value = ast.literal_eval(text)
     except Exception:  # noqa: BLE001 - any failure means "not a literal"
         return text
-    return value if _finite_json(value) else text
+    return value if json_native(value) else text
 
 
 def _parameter_value(raw: str, schema):
