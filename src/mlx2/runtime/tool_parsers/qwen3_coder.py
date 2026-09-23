@@ -8,7 +8,6 @@ https://huggingface.co/Qwen/Qwen3-Coder-30B-A3B-Instruct/blob/main/qwen3coder_to
 
 import ast
 import json
-import logging
 import math
 from decimal import Decimal, InvalidOperation
 from typing import Any, Optional
@@ -288,12 +287,14 @@ def parse_tool_call(
         raise ValueError("No function provided.")
     calls = []
     for match in matches:
+        # One malformed block makes the whole block malformed.  Dropping it
+        # and returning its siblings would bypass OutputParser's policy: a
+        # required tool choice would pass with a call missing, and a tolerant
+        # request would never count the fallback.
         try:
             calls.append(_parse_xml_function_call(match, tools))
         except ValueError as exc:
-            logging.warning("Dropping malformed Qwen function: %s", exc)
-    if not calls:
-        raise ValueError("No valid function provided.")
+            raise ValueError(f"Malformed Qwen function: {exc}") from exc
     return calls[0] if len(calls) == 1 else calls
 
 

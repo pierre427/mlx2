@@ -502,6 +502,32 @@ def test_real_tool_call_after_a_closed_fence_or_code_span_still_parses():
         assert len(calls) == 1, split
 
 
+def test_one_malformed_qwen_function_makes_the_whole_block_malformed():
+    """A bad ``<function>`` beside a good one used to be dropped with a log
+    line: ``tool_choice=required`` passed with a call missing and no counter
+    moved.  The parser's strict-or-tolerant policy now decides."""
+    text = (
+        "<tool_call>\n<function=sum>\n<parameter=x>\n1\n</parameter>\n</function>\n"
+        "<function=sum>\n<parameter=x>\nnot-a-number\n</parameter>\n</function>\n"
+        "</tool_call>"
+    )
+    with pytest.raises(ValueError, match="Invalid integer literal"):
+        parse_tool_call(text[len("<tool_call>"):-len("</tool_call>")], _SUM_TOOLS)
+    for constrained in (True, False):
+        parser = OutputParser(
+            chat=True, tools=_SUM_TOOLS, parse_tool=parse_tool_call,
+            constrained_tools=constrained,
+        )
+        with pytest.raises(ValueError, match="Malformed Qwen function"):
+            parser.push(text, final=True)
+    tolerant = OutputParser(
+        chat=True, tools=_SUM_TOOLS, parse_tool=parse_tool_call,
+        tolerant_tool_markers=True,
+    )
+    assert tolerant.push(text, final=True) == [{"content": text}]
+    assert tolerant.tool_call_parse_fallbacks == 1
+
+
 def test_qwen_unclosed_trailing_parameter_is_closed_by_the_function_end():
     # vllm #57707: the model closes </function> without </parameter>.
     tools = _SUM_TOOLS
