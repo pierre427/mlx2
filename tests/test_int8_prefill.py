@@ -163,6 +163,38 @@ def test_decode_row_bound_fails_closed():
     ip.validate_decode_row_bound(ip.Int8PrefillPolicy(), 10_000)  # disabled: no-op
 
 
+def test_decode_row_bound_counts_self_mtp_copy_draft_spans():
+    # A copy round verifies the copied span (up to max_span on a solo lane,
+    # the cohort cap in a batch) instead of num_draft head drafts; the bound
+    # used to ignore it, so a 1025-row copy verify ran the int8 GEMM.
+    from mlx2.runtime.copy_draft import CopyDraftPolicy
+
+    def bound(lanes, copy, num_draft=3):
+        return ip.max_decode_rows(
+            max_lanes=lanes,
+            config={"num_draft": num_draft},
+            speculation="self_mtp",
+            copy_draft_policy=copy,
+        )
+
+    assert bound(4, CopyDraftPolicy()) == 20  # disabled: unchanged
+    assert bound(4, CopyDraftPolicy(enabled=True, max_span=1024)) == 1026
+    # Default cohort policy refuses batched copies, so only the solo lane widens.
+    assert bound(1, CopyDraftPolicy(enabled=True)) == 10
+    assert bound(4, CopyDraftPolicy(enabled=True)) == 20
+    assert bound(4, CopyDraftPolicy(enabled=True, batched_max_span=None)) == 20
+    wide = CopyDraftPolicy(enabled=True, max_span=16, batched_max_span=16)
+    assert bound(4, wide) == 72
+    policy = ip.Int8PrefillPolicy(enabled=True, scope="mlp", row_threshold=512)
+    with pytest.raises(ip.Int8PrefillError, match="copy-draft"):
+        ip.validate_decode_row_bound(
+            policy, bound(4, CopyDraftPolicy(enabled=True, max_span=1024))
+        )
+    small = ip.Int8PrefillPolicy(enabled=True, scope="mlp", row_threshold=8)
+    with pytest.raises(ip.Int8PrefillError):
+        ip.validate_decode_row_bound(small, bound(1, CopyDraftPolicy(enabled=True)))
+
+
 # --------------------------------------------------------------------------
 # device gating
 # --------------------------------------------------------------------------
@@ -379,6 +411,37 @@ def test_bind_for_serving_records_settings_and_refuses_wide_verify(fake_device):
             config={"num_draft": 8},
             speculation="self_mtp",
         )
+
+
+def test_bind_for_serving_refuses_a_copy_draft_span_that_reaches_the_threshold(
+    fake_device,
+):
+    from mlx2.runtime.copy_draft import CopyDraftPolicy
+
+    adapter = _Adapter()
+    with pytest.raises(ip.Int8PrefillError, match="row_threshold"):
+        ip.bind_for_serving(
+            adapter,
+            "mlp",
+            max_lanes=4,
+            config={"num_draft": 3},
+            speculation="self_mtp",
+            copy_draft_policy=CopyDraftPolicy(enabled=True, max_span=1024),
+        )
+    # Refused before anything was installed on the model.
+    assert not any(ip._STATE_ATTR in m.__dict__ for _, m in adapter.model.named_modules())
+    handle, settings = ip.bind_for_serving(
+        _Adapter(),
+        "mlp",
+        max_lanes=1,
+        config={"num_draft": 3},
+        speculation="self_mtp",
+        copy_draft_policy=CopyDraftPolicy(enabled=True, max_span=64),
+    )
+    try:
+        assert settings["max_decode_rows"] == 66
+    finally:
+        ip.remove(handle)
 
 
 def test_qualification_demands_observed_int8_and_approximate_tier():

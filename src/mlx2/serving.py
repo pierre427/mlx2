@@ -3988,6 +3988,7 @@ class ServingEngine:
                     config=config,
                     speculation=settings["speculation"],
                     prompt_lookup_policy=prompt_lookup_policy,
+                    copy_draft_policy=self.copy_draft_policy,
                 )
             def selected_profile_name():
                 return (

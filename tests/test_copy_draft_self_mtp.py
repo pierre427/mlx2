@@ -691,6 +691,43 @@ def test_serving_propagates_copy_policy_and_refuses_non_mtp_routes(monkeypatch):
         default.close()
 
 
+def test_serving_refuses_int8_prefill_when_a_copy_verify_reaches_its_threshold(
+    monkeypatch,
+):
+    # int8 prefill promises every decode/verify block stays on stock kernels.
+    # A solo copy round verifies max_span + 1 rows, so the engine must count
+    # the copy span when it checks that promise, and refuse at startup.
+    from mlx2.serving import ServingEngine
+
+    adapter = _fake_serving(monkeypatch, {})
+
+    def engine(copy):
+        return ServingEngine(
+            "fake", adapter_factory=adapter, qualification_mode=True, mtp=True,
+            max_lanes=4, max_inflight=4, int8_prefill="mlp",
+            execution_policy={"self_mtp_copy_draft": copy},
+        )
+
+    refused = engine({"enabled": True, "max_span": 1024})
+    try:
+        refused.thread.join(10)
+        assert not refused.ready.is_set()
+        assert "row_threshold" in str(refused.error)
+        assert refused.int8_prefill_handle is None
+    finally:
+        refused.close()
+    # Within the threshold the bound passes and the next gate (this fake
+    # adapter declares no int8 scope) refuses instead, which shows the copy
+    # span alone decided the refusal above.
+    bounded = engine({"enabled": True, "max_span": 12})
+    try:
+        bounded.thread.join(10)
+        assert "row_threshold" not in str(bounded.error)
+        assert "does not declare int8 prefill scope" in str(bounded.error)
+    finally:
+        bounded.close()
+
+
 def test_selected_copy_draft_requires_observed_copies():
     from mlx2.qualification import required_feature_checks
     from scripts.qualify_serving import feature_observations

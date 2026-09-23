@@ -240,7 +240,7 @@ def validate_decode_row_bound(policy: Int8PrefillPolicy, max_decode_rows: int):
         raise Int8PrefillError(
             f"int8 prefill row_threshold {policy.row_threshold} does not exceed "
             f"the largest decode/verify block ({max_decode_rows} rows); raise the "
-            "threshold or reduce lanes/draft length"
+            "threshold or reduce lanes/draft length/self-MTP copy-draft span"
         )
 
 
@@ -1063,17 +1063,34 @@ def apply_for_adapter(adapter, policy) -> Int8PrefillHandle:
 
 
 
-def max_decode_rows(*, max_lanes, config, speculation, prompt_lookup_policy=None):
+def max_decode_rows(
+    *, max_lanes, config, speculation, prompt_lookup_policy=None,
+    copy_draft_policy=None,
+):
     """Upper bound on rows one decode / speculative-verify forward presents.
 
     Verify blocks carry at most ``num_draft + 1`` rows per lane; one extra row
-    of slack covers bonus/rollback tokens.  Ordinary decode is one row/lane."""
+    of slack covers bonus/rollback tokens.  Ordinary decode is one row/lane.
+
+    A self-MTP copy round verifies a copied span in place of the head drafts,
+    and its width depends on the cohort: ``max_span`` for a solo lane, the
+    cohort cap once lanes share the forward.  Every cohort size is checked
+    because the solo span can be far wider than a full batch of head drafts."""
     draft = 0
     if speculation in ("self_mtp", "external_draft"):
         draft = int((config or {}).get("num_draft", 0) or 0)
     elif speculation == "prompt_lookup":
         draft = int((prompt_lookup_policy or {}).get("num_draft", 8) or 8)
-    return int(max_lanes) * (draft + 2)
+    bound = int(max_lanes) * (draft + 2)
+    if copy_draft_policy is not None and copy_draft_policy.enabled:
+        from .copy_draft import cohort_copy_cap
+
+        for lanes in range(1, int(max_lanes) + 1):
+            span = cohort_copy_cap(
+                copy_draft_policy, lanes=lanes, head_depths=(draft,) * lanes
+            )
+            bound = max(bound, lanes * (max(draft, span) + 2))
+    return bound
 
 
 def bind_for_serving(
@@ -1084,6 +1101,7 @@ def bind_for_serving(
     config,
     speculation,
     prompt_lookup_policy=None,
+    copy_draft_policy=None,
 ):
     """Serving-engine entry: validate, install on ``adapter.model`` and return
     ``(handle, settings fragment)``.  Raises (fail closed) on any refusal."""
@@ -1095,6 +1113,7 @@ def bind_for_serving(
         config=config,
         speculation=speculation,
         prompt_lookup_policy=prompt_lookup_policy,
+        copy_draft_policy=copy_draft_policy,
     )
     validate_decode_row_bound(policy, bound)
     handle = apply_for_adapter(adapter, policy)
