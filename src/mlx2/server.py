@@ -3024,6 +3024,11 @@ def handler_for(
                                 **body,
                                 "messages": [*body["messages"], message, *outputs],
                             }
+                            if body.get("tool_choice") not in (None, "auto", "none"):
+                                # ``required`` and a named choice bind the
+                                # first round, whose executed calls met them
+                                # above; a continuation must be free to answer.
+                                body["tool_choice"] = "auto"
                             response_options.setdefault("hosted_messages", []).extend(
                                 (message, *outputs)
                             )

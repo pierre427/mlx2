@@ -2493,3 +2493,115 @@ def test_parallel_bound_answer_is_a_success_on_every_surface(single_tool_call_en
         wire = response.read().decode()
     assert "event: error" not in wire
     assert "event: message_stop" in wire
+
+
+class HostedBackend:
+    """A hosted (MCP) backend fake: ``weather`` runs server-side."""
+
+    def __init__(self, tools=None):
+        self.tools = tools or TOOLS
+        self.executed = []
+
+    def prepare(self, tools):
+        return self.tools, {"weather": "binding"}
+
+    def execute(self, binding, arguments):
+        self.executed.append(arguments)
+        return {"temperature": 21}
+
+
+def _hosted_call(call_id="call_weather", name="weather", index=0):
+    return {
+        "index": index,
+        "id": call_id,
+        "type": "function",
+        "function": {"name": name, "arguments": '{"city":"T"}'},
+    }
+
+
+class HostedEngine(FakeEngine):
+    """Round scripts keyed by round number; the last one repeats."""
+
+    def __init__(self, rounds):
+        super().__init__()
+        self.rounds = rounds
+        self.requests = []
+        self.jobs = []
+
+    def submit(self, request, *, tenant_id="default"):
+        self.requests.append(request)
+        self.job = Job(request)
+        self.jobs.append(self.job)
+        script = self.rounds[min(len(self.requests), len(self.rounds)) - 1]
+        for event in script(self.job):
+            self.job.events.put(event)
+        return self.job
+
+
+def _round_calls(*calls):
+    def script(_job):
+        return [
+            {"delta": {"tool_calls": list(calls)}},
+            {"finish_reason": "tool_calls", "receipt": {}},
+        ]
+    return script
+
+
+def _round_text(text):
+    def script(_job):
+        return [{"text": text}, {"finish_reason": "stop", "receipt": {}}]
+    return script
+
+
+MCP_TOOL = {
+    "type": "mcp",
+    "server_label": "weather",
+    "server_url": "https://example.invalid/mcp",
+    "require_approval": "never",
+}
+
+
+def _serve_hosted(engine, backend):
+    server = ThreadingHTTPServer(
+        ("127.0.0.1", 0), handler_for(engine, tool_backend=backend)
+    )
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+
+    def close():
+        server.shutdown()
+        server.server_close()
+        thread.join()
+
+    return f"http://127.0.0.1:{server.server_port}", close
+
+
+@pytest.mark.parametrize("choice", [
+    "required", {"type": "function", "name": "weather"},
+])
+def test_hosted_tool_choice_binds_only_the_first_round(choice):
+    # The executed call satisfies ``required``/a named choice; round two must
+    # be free to answer instead of 502ing on its text (or looping to the
+    # round limit under a forced tool grammar).
+    engine = HostedEngine([_round_calls(_hosted_call()), _round_text("It is 21 C.")])
+    base, close = _serve_hosted(engine, HostedBackend())
+    try:
+        with post_response(base, input="weather?", tools=[MCP_TOOL], tool_choice=choice) as response:
+            payload = json.load(response)
+    finally:
+        close()
+    assert payload["output"][0]["content"][0]["text"] == "It is 21 C."
+    assert payload["tool_choice"] == choice
+    assert engine.requests[0]["tool_choice"] != "auto"
+    assert engine.requests[1]["tool_choice"] == "auto"
+
+
+def test_hosted_required_tool_choice_still_fails_when_no_round_calls_a_tool():
+    engine = HostedEngine([_round_text("No tool needed.")])
+    base, close = _serve_hosted(engine, HostedBackend())
+    try:
+        with pytest.raises(HTTPError) as error:
+            post_response(base, input="weather?", tools=[MCP_TOOL], tool_choice="required")
+    finally:
+        close()
+    assert error.value.code == 502
