@@ -2569,11 +2569,17 @@ def handler_for(
                     choices, usages, receipts = zip(*results)
                     for index, choice in enumerate(choices):
                         choice["index"] = index
+                    # Every sample shares one prompt: count it once, as the
+                    # single-sample path and OpenAI's n > 1 usage do, and
+                    # report the leader's prefix-cache hit for it.
                     usage = {
-                        "prompt_tokens": sum(item["prompt_tokens"] for item in usages),
+                        "prompt_tokens": usages[0]["prompt_tokens"],
                         "completion_tokens": sum(item["completion_tokens"] for item in usages),
                     }
                     usage["total_tokens"] = usage["prompt_tokens"] + usage["completion_tokens"]
+                    usage["prompt_tokens_details"] = {
+                        "cached_tokens": int(getattr(jobs[0], "cached_tokens", 0) or 0)
+                    }
                     self.send_json(
                         200,
                         {

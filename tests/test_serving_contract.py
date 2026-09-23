@@ -1767,6 +1767,41 @@ def test_chat_stream_sends_role_and_honors_include_usage(http_engine, include_us
     assert wire.endswith("data: [DONE]\n\n")
 
 
+def test_parallel_sample_usage_counts_the_shared_prompt_once():
+    class ParallelEngine(FakeEngine):
+        def admit_parallel_samples(self, count):
+            return {"samples": count}
+
+        def submit_many(self, requests, *, tenant_id="default", **_kwargs):
+            jobs = []
+            for index, request in enumerate(requests):
+                job = self.submit(request, tenant_id=tenant_id)
+                job.prompt_tokens = 1000
+                job.completion_tokens = 10 + index
+                job.cached_tokens = 600 if index == 0 else 1000
+                jobs.append(job)
+            return jobs
+
+    engine = ParallelEngine()
+    server = ThreadingHTTPServer(("127.0.0.1", 0), handler_for(engine))
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        with post(f"http://127.0.0.1:{server.server_port}", n=4) as response:
+            data = json.load(response)
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
+    assert len(data["choices"]) == 4
+    assert data["usage"] == {
+        "prompt_tokens": 1000,
+        "completion_tokens": 10 + 11 + 12 + 13,
+        "total_tokens": 1046,
+        "prompt_tokens_details": {"cached_tokens": 600},
+    }
+
+
 def test_overload_is_http_429(http_engine):
     engine, base = http_engine
     engine.overloaded = True
