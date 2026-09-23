@@ -45,6 +45,7 @@ from .request_limits import (
 from .openai_compat import (
     ToolContractError,
     ResponsesInputItemsUnavailable,
+    ResponsesTextLogprobs,
     RESPONSES_INPUT_ITEM_INCLUDES,
     enforce_tool_contract,
     normalize_tool_choice,
@@ -1111,9 +1112,14 @@ def lora_control_payload(engine, body, *, load):
     return {"id": name, "object": "lora.adapter", **result}
 
 
-def collect_nonstream_job(job, body, *, chat):
-    """Collect one already-submitted sample without writing an HTTP response."""
+def collect_nonstream_job(job, body, *, chat, responses=False):
+    """Collect one already-submitted sample without writing an HTTP response.
+
+    ``responses`` keeps only the output-text tokens' logprobs, the ones a
+    Responses message carries (see ``ResponsesTextLogprobs``).
+    """
     parts, reasoning, calls, probabilities = [], [], [], []
+    text_logprobs = ResponsesTextLogprobs()
     while True:
         try:
             event = job.events.get(timeout=1800)
@@ -1128,16 +1134,21 @@ def collect_nonstream_job(job, body, *, chat):
             )
         if "logprob" in event:
             probabilities.append(event["logprob"])
+            text_logprobs.logprob(event["logprob"])
         if "text" in event or "delta" in event:
             delta = event.get("delta", {"content": event.get("text", "")})
+            text_logprobs.delta(delta)
             parts.append(delta.get("content", ""))
             reasoning.append(delta.get("reasoning_content", ""))
             calls.extend(delta.get("tool_calls", []))
         if "finish_reason" not in event:
             continue
+        text_logprobs.finish()
         choice = {"finish_reason": event["finish_reason"]}
         if wants_logprobs(body):
-            choice["logprobs"] = {"content": probabilities}
+            choice["logprobs"] = {
+                "content": text_logprobs.text if responses else probabilities
+            }
         message = {"role": "assistant", "content": "".join(parts)}
         if any(reasoning):
             message["reasoning_content"] = "".join(reasoning)
@@ -1491,7 +1502,9 @@ def handler_for(
             submit_kwargs.update(admission_class="batch", admitted=True)
         job = engine.submit(body, **submit_kwargs)
         try:
-            choice, usage, receipt = collect_nonstream_job(job, body, chat=chat)
+            choice, usage, receipt = collect_nonstream_job(
+                job, body, chat=chat, responses=responses_api
+            )
         finally:
             job.cancelled.set()
         if responses_api and batch_compat.notable:
@@ -2643,6 +2656,7 @@ def handler_for(
                     submit_kwargs["admitted"] = True
                 job = engine.submit(body, **submit_kwargs)
                 parts, reasoning, calls, probabilities = [], [], [], []
+                text_logprobs = ResponsesTextLogprobs()
                 hosted_rounds = 0
                 hosted_usage = {"prompt_tokens": 0, "completion_tokens": 0}
                 hosted_receipts = []
@@ -2811,40 +2825,22 @@ def handler_for(
                         continue
                     if "logprob" in event:
                         probabilities.append(event["logprob"])
-                        if streaming:
-                            if responses_api:
-                                if response_message_output_index is None:
-                                    response_message_output_index = len(
-                                        response_output_order
-                                    ) + len(streamed_calls)
-                                    response_output_order.append("message")
-                                if not response_message_started:
-                                    self._responses_message_start(
-                                        job, response_message_output_index
-                                    )
-                                    response_message_started = True
-                                self._responses_sse(
-                                    {
-                                        "type": "response.output_text.delta",
-                                        "item_id": f"msg_{job.id}",
-                                        "output_index": response_message_output_index,
-                                        "content_index": 0,
-                                        "delta": "",
-                                        "logprobs": [
-                                            responses_logprob(event["logprob"])
-                                        ],
-                                    }
-                                )
-                            else:
-                                choice = {"index": 0, "finish_reason": None,
-                                          "logprobs": {"content": [event["logprob"]]}}
-                                choice.update({"delta": {}} if chat else {"text": ""})
-                                self._sse({"id": job.id,
-                                           "object": "chat.completion.chunk" if chat else "text_completion",
-                                           "created": int(job.created), "model": model,
-                                           "choices": [choice]})
+                        if responses_api:
+                            # Held until the token's delta names its item.
+                            text_logprobs.logprob(event["logprob"])
+                        elif streaming:
+                            choice = {"index": 0, "finish_reason": None,
+                                      "logprobs": {"content": [event["logprob"]]}}
+                            choice.update({"delta": {}} if chat else {"text": ""})
+                            self._sse({"id": job.id,
+                                       "object": "chat.completion.chunk" if chat else "text_completion",
+                                       "created": int(job.created), "model": model,
+                                       "choices": [choice]})
                     if "text" in event or "delta" in event:
                         delta = event.get("delta", {"content": event.get("text", "")})
+                        text_logprobs_delta = (
+                            text_logprobs.delta(delta) if responses_api else []
+                        )
                         parts.append(delta.get("content", ""))
                         reasoning.append(delta.get("reasoning_content", ""))
                         calls.extend(delta.get("tool_calls", []))
@@ -2909,6 +2905,16 @@ def handler_for(
                                             "output_index": response_message_index,
                                             "content_index": 0,
                                             "delta": content,
+                                            **(
+                                                {
+                                                    "logprobs": [
+                                                        responses_logprob(value)
+                                                        for value in text_logprobs_delta
+                                                    ]
+                                                }
+                                                if wants_logprobs(body)
+                                                else {}
+                                            ),
                                         }
                                     )
                                 if grammar_tool_stream:
@@ -2941,6 +2947,7 @@ def handler_for(
                                 )
                     if "finish_reason" in event:
                         receipt = event["receipt"]
+                        text_logprobs_trailing = text_logprobs.finish()
                         semantic_receipt = (
                             semantic_middleware.receipt(semantic_state)
                             if semantic_middleware is not None
@@ -3025,6 +3032,7 @@ def handler_for(
                                 continuation_kwargs["admitted"] = True
                             job = engine.submit(body, **continuation_kwargs)
                             parts, reasoning, calls, probabilities = [], [], [], []
+                            text_logprobs = ResponsesTextLogprobs()
                             continue
                         if hosted_rounds:
                             usage = {
@@ -3180,7 +3188,28 @@ def handler_for(
                                 )
                                 choice["message"] = message
                                 if wants_logprobs(body):
-                                    choice["logprobs"] = {"content": probabilities}
+                                    choice["logprobs"] = {
+                                        "content": text_logprobs.text
+                                    }
+                                    if (
+                                        text_logprobs_trailing
+                                        and response_message_started
+                                    ):
+                                        # The stop token's logprob follows
+                                        # the text it ends.
+                                        self._responses_sse(
+                                            {
+                                                "type": "response.output_text.delta",
+                                                "item_id": f"msg_{job.id}",
+                                                "output_index": response_message_output_index,
+                                                "content_index": 0,
+                                                "delta": "",
+                                                "logprobs": [
+                                                    responses_logprob(value)
+                                                    for value in text_logprobs_trailing
+                                                ],
+                                            }
+                                        )
                                 payload = responses_payload(
                                     job=job,
                                     model=model,
@@ -3422,7 +3451,11 @@ def handler_for(
                             self._record_http(200)
                         else:
                             if wants_logprobs(body):
-                                choice["logprobs"] = {"content": probabilities}
+                                choice["logprobs"] = {
+                                    "content": text_logprobs.text
+                                    if responses_api
+                                    else probabilities
+                                }
                             message = {"role": "assistant", "content": "".join(parts)}
                             if any(reasoning):
                                 message["reasoning_content"] = "".join(reasoning)

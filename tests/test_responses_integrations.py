@@ -106,6 +106,20 @@ class ContinuationEngine:
         job = Job(request)
         job.prompt_tokens = 2
         job.completion_tokens = 2
+        # The engine emits each token's logprob before that token's deltas,
+        # reasoning tokens included.
+        if request.get("logprobs"):
+            job.events.put(
+                {
+                    "logprob": {
+                        "id": 6,
+                        "token": "trusted",
+                        "logprob": -0.5,
+                        "bytes": list(b"trusted"),
+                        "top_logprobs": [],
+                    }
+                }
+            )
         job.events.put({"delta": {"reasoning_content": "trusted thought"}})
         if request.get("logprobs"):
             job.events.put(
@@ -462,3 +476,151 @@ def test_responses_render_one_leading_system_message_without_agent_compat():
         "Now answer in German.", "more"
     ]
     assert engine.counts["agent_compat_system_folded"] == 0
+
+
+def _logprob(token):
+    return {
+        "logprob": {
+            "token": token,
+            "logprob": -0.1,
+            "bytes": list(token.encode()),
+            "top_logprobs": [],
+        }
+    }
+
+
+class ScriptedEngine(ContinuationEngine):
+    def __init__(self, events):
+        super().__init__()
+        self.events = events
+
+    def submit(self, request, *, tenant_id="default"):
+        self.requests.append(request)
+        job = Job(request)
+        job.prompt_tokens = 2
+        job.completion_tokens = 2
+        for event in self.events:
+            job.events.put(event)
+        return job
+
+
+_WEATHER_CALL = {"delta": {"tool_calls": [{
+    "index": 0,
+    "id": "call_1",
+    "type": "function",
+    "function": {"name": "weather", "arguments": "{}"},
+}]}}
+
+
+@pytest.mark.parametrize("events, expected_types, text_tokens", [
+    (
+        [
+            _logprob("p"), {"delta": {"reasoning_content": "plan"}},
+            _logprob("a"), {"delta": {"content": "answer"}},
+            _logprob("<eos>"),
+            {"finish_reason": "stop", "receipt": {}},
+        ],
+        ["reasoning", "message"],
+        ["a", "<eos>"],
+    ),
+    (
+        [
+            _logprob("<tc>"), _WEATHER_CALL, _logprob("<eos>"),
+            {"finish_reason": "tool_calls", "receipt": {}},
+        ],
+        ["function_call"],
+        None,
+    ),
+    (
+        [
+            _logprob("he"), {"delta": {"content": "he"}},
+            _logprob("<hold>"), _logprob("llo"), {"delta": {"content": "llo"}},
+            {"finish_reason": "stop", "receipt": {}},
+        ],
+        ["message"],
+        ["he", "<hold>", "llo"],
+    ),
+])
+def test_streamed_responses_items_match_nonstream_with_logprobs(
+    events, expected_types, text_tokens
+):
+    # Each token's logprob precedes its delta, so a logprob must wait for the
+    # delta that names its item: opening the message on it streamed
+    # [message, reasoning] and left a message item that never closed.
+    tools = [{"type": "function", "name": "weather", "parameters": {"type": "object"}}]
+    body = {
+        "model": "fixture",
+        "input": "hi",
+        "tools": tools,
+        "include": ["message.output_text.logprobs"],
+    }
+    engine = ScriptedEngine(events)
+    with _Served(engine) as base:
+        with _post(base, body) as response:
+            nonstream = json.load(response)
+        with _post(base, {**body, "stream": True}) as response:
+            wire = response.read().decode()
+    records = [
+        json.loads(line.removeprefix("data: "))
+        for line in wire.splitlines()
+        if line.startswith("data: {")
+    ]
+    completed = next(
+        record["response"] for record in records
+        if record["type"] == "response.completed"
+    )
+
+    def shape(output):
+        return [
+            {key: value for key, value in item.items() if key != "id"}
+            for item in output
+        ]
+
+    assert [item["type"] for item in nonstream["output"]] == expected_types
+    assert shape(completed["output"]) == shape(nonstream["output"])
+    added = [
+        (record["output_index"], record["item"]["type"])
+        for record in records if record["type"] == "response.output_item.added"
+    ]
+    done = [
+        (record["output_index"], record["item"]["type"])
+        for record in records if record["type"] == "response.output_item.done"
+    ]
+    assert added == done == list(enumerate(expected_types))
+    streamed = [
+        value["token"]
+        for record in records
+        if record["type"] == "response.output_text.delta"
+        for value in record.get("logprobs", ())
+    ]
+    if text_tokens is None:
+        assert streamed == []
+    else:
+        message = next(
+            item for item in nonstream["output"] if item["type"] == "message"
+        )
+        assert [
+            value["token"] for value in message["content"][0]["logprobs"]
+        ] == text_tokens
+        assert streamed == text_tokens
+
+
+def test_batch_collection_attributes_responses_logprobs_like_the_live_path():
+    from mlx2.server import collect_nonstream_job
+
+    def collect(responses):
+        job = Job({"messages": [{"role": "user", "content": "hi"}]})
+        for event in (
+            _logprob("p"), {"delta": {"reasoning_content": "plan"}},
+            _logprob("a"), {"delta": {"content": "answer"}},
+            {"finish_reason": "stop", "receipt": {}},
+        ):
+            job.events.put(event)
+        choice, _usage, _receipt = collect_nonstream_job(
+            job, {"logprobs": True}, chat=True, responses=responses
+        )
+        return [value["token"] for value in choice["logprobs"]["content"]]
+
+    assert collect(responses=True) == ["a"]
+    # Chat Completions keeps every generated token's logprob.
+    assert collect(responses=False) == ["p", "a"]

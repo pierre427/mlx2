@@ -933,6 +933,48 @@ def responses_logprob(value: Mapping) -> dict:
     }
 
 
+class ResponsesTextLogprobs:
+    """Attribute per-token logprobs to the Responses output text.
+
+    The engine emits a token's ``{"logprob"}`` event before the deltas that
+    token produced, and a token may produce none while the parser holds text
+    back.  A logprob therefore belongs to the item of the next delta, and
+    logprobs with no later delta (the stop token) to the item of the last one.
+    Only tokens that produced output text belong to ``output_text.logprobs``:
+    reasoning and tool-call items have no logprob slot on the wire, and
+    attributing their tokens to the message would open it out of order.
+    """
+
+    def __init__(self):
+        self.text = []
+        self._pending = []
+        self._last_was_text = False
+
+    def logprob(self, value) -> None:
+        self._pending.append(value)
+
+    def delta(self, delta: Mapping) -> list:
+        """Return the pending logprobs that ride on this delta's text."""
+        if not any(
+            delta.get(key) for key in ("content", "reasoning_content", "tool_calls")
+        ):
+            return []
+        attached, self._pending = self._pending, []
+        self._last_was_text = bool(delta.get("content"))
+        if not self._last_was_text:
+            return []
+        self.text.extend(attached)
+        return attached
+
+    def finish(self) -> list:
+        """Return trailing logprobs that belong to the output text."""
+        trailing, self._pending = self._pending, []
+        if not self._last_was_text:
+            return []
+        self.text.extend(trailing)
+        return trailing
+
+
 def responses_payload(
     *,
     job,
