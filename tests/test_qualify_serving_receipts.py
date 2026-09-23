@@ -590,3 +590,13 @@ def test_mixed_warm_per_lane_route_is_judged_by_overlap_not_speedup():
     batched = [{"speculation": {"target_width": 2}, "elapsed_seconds": 1.66}] * 2
     assert qualify.mixed_warm_timing_passes(1.675, 1.641, batched) is False
     assert qualify.mixed_warm_timing_passes(1.2, 1.641, batched) is True
+
+
+def test_near_limit_requests_hold_eos_until_the_full_budget():
+    # near_limit_usage_passes demands completion_tokens == budget; a model
+    # that ends its answer early must not decide whether the server passed.
+    source = (ROOT / "scripts" / "qualify_serving.py").read_text()
+    builder = source[source.index("def long_context_request("):]
+    builder = builder[: builder.index("if not context_delegation:")]
+    assert "min_tokens=completion_budget" in builder
+    assert "max_tokens=completion_budget" in builder

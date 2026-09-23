@@ -1500,10 +1500,15 @@ def main():
         ):
             # These checks measure near-limit context serving inside a bounded
             # output budget. A model that thinks by default (North) would spend
-            # the budget reasoning and return empty content.
+            # the budget reasoning and return empty content.  min_tokens holds
+            # EOS until the budget: near_limit_usage_passes requires the full
+            # completion, and whether a model ends its answer early is not what
+            # these checks measure (North, once its layer 0 was rotated, ended
+            # a warm B2 answer at 39 of 64 tokens).
             return prompt(
                 long_context_prompt(context_cap),
                 max_tokens=completion_budget,
+                min_tokens=completion_budget,
                 reasoning_effort="none", think=False,
             )
         if not context_delegation:
