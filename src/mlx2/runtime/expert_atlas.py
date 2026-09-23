@@ -90,6 +90,10 @@ class AtlasCollector:
         self.num_layers = 0
         self.num_units = 0
         self.counts = None
+        # Counts already merged into the sink. ``counts`` is cumulative for
+        # the collector's lifetime, so each flush merges only the difference;
+        # merging the whole array would re-add every earlier checkpoint.
+        self._persisted_counts = None
         self.observations = 0
         self.persisted_observations = 0
         self.checkpoint_every = int(checkpoint_every)
@@ -107,6 +111,7 @@ class AtlasCollector:
         self.num_layers = int(num_layers)
         self.num_units = int(num_units)
         self.counts = np.zeros((self.num_layers, self.num_units), dtype=np.uint64)
+        self._persisted_counts = np.zeros_like(self.counts)
         if self.trace_path is not None and self._trace is None:
             self.trace_path.parent.mkdir(parents=True, exist_ok=True)
             self._trace = open(self.trace_path, "wb")
@@ -157,9 +162,10 @@ class AtlasCollector:
         prior = load_atlas(
             self.sink, expect_digest=self._digest(), geometry=self.counts.shape
         )
+        snapshot = self.counts.copy()
         merged = merge_counts(
             prior.counts if prior is not None else None,
-            self.counts,
+            snapshot - self._persisted_counts,
             observations=self.observations - self.persisted_observations,
         )
         manifest = build_manifest(
@@ -181,6 +187,7 @@ class AtlasCollector:
             ],
         )
         write_atlas(self.sink, manifest, merged)
+        self._persisted_counts = snapshot
         self.persisted_observations = self.observations
         return self.sink
 

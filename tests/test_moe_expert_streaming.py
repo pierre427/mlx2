@@ -474,6 +474,30 @@ def test_atlas_merge_decays_old_generations():
     assert int(merged[0][1]) == 5
 
 
+def test_atlas_checkpoints_merge_each_observation_once(tmp_path):
+    sink = tmp_path / "weight_atlas.json"
+    collector = expert_atlas.AtlasCollector(None, sink=sink, checkpoint_every=10)
+    collector.bind(num_layers=1, num_units=4)
+    for _ in range(10):
+        collector.observe(0, [0])
+    first = expert_atlas.load_atlas(sink)
+    assert first.counts.tolist() == [[10, 0, 0, 0]]
+    for _ in range(10):
+        collector.observe(0, [1])
+    second = expert_atlas.load_atlas(sink)
+    # Expert 0 was persisted by the first checkpoint and may only decay; it
+    # must not be merged a second time (the pre-fix value was 19).
+    assert second.total_observations == 20
+    assert int(second.counts[0][0]) <= 10
+    assert int(second.counts[0][1]) == 10
+    assert int(second.counts.sum()) <= second.total_observations
+    # Closing with no new observations must leave the counts as they were.
+    collector.close()
+    closed = expert_atlas.load_atlas(sink)
+    assert closed.total_observations == 20
+    assert closed.counts.tolist() == second.counts.tolist()
+
+
 def test_counterfactual_reports_what_pinning_would_have_done(tmp_path):
     trace = tmp_path / "trace.bin"
     layers = 2
