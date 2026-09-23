@@ -72,14 +72,53 @@ class ThinkingGuard:
 
     def residual_steer(self, input_token):
         """``(layer, vector)`` for the next decode step of this lane, or None."""
+        request = self._steer_request(input_token)
+        if request is not None:
+            self.steered_steps += 1
+        return request
+
+    def _steer_request(self, input_token):
         if self._direction is None or not self._open:
             return None
         if int(input_token) == self.close_ids[0]:
             self._open = False
             return None
         strength = self.hammer if (self.hammer and self._tripped_at is not None) else self.alpha
-        self.steered_steps += 1
         return self._direction["layer"], self._direction["vector"] * strength
+
+    def residual_steer_block(self, context, inputs):
+        """``residual_steer`` for every position of a speculative verify block.
+
+        ``context`` holds the token ids before ``inputs[0]``.  Position ``j``
+        gets exactly what the ordinary decode step feeding ``inputs[j]`` gets:
+        the guard as that step's previous logits call left it (synced through
+        ``inputs[j - 1]``), then asked about ``inputs[j]`` itself.  So rows
+        before the first close token are steered (the anchor included), the
+        close and every later row are not, and a hammer switches in at the
+        position the alarm trips.  Nothing is counted here: a verify block can
+        be rejected, so the caller reports the positions it committed through
+        ``count_steered``.
+        """
+        if self._direction is None:
+            return [None] * len(inputs)
+        import numpy as np
+
+        tokens = np.concatenate(
+            [
+                np.asarray(context, dtype=np.int64).reshape(-1),
+                np.asarray(inputs, dtype=np.int64).reshape(-1),
+            ]
+        )
+        base = tokens.size - len(inputs)
+        requests = []
+        for index, token in enumerate(inputs):
+            self._observe(tokens[: base + index])
+            requests.append(self._steer_request(token))
+        return requests
+
+    def count_steered(self, count):
+        """Record ``count`` committed steered decode positions."""
+        self.steered_steps += int(count)
 
     def _advance(self, token):
         """CUSUM run-on alarm: +1 for a recurring n-gram, -0.25 for a novel one."""
@@ -140,19 +179,26 @@ class ThinkingGuard:
         self._truncate(min(len(self._ids), common))
         return length
 
-    def __call__(self, tokens, logits):
-        import mlx.core as mx
-
+    def _observe(self, tokens):
+        """Sync the guard state to ``tokens``; the state half of ``__call__``."""
         length = self._sync(tokens)
-        close = self.close_ids[0]
         self._open = self._close_at is None
         self.released_at = self._close_at
         if self._close_at is not None:
             self.think_tokens = self._close_at
-            return logits
+            return length
         for token in self._generated[len(self._ids):]:
             self._advance(token)
         self.think_tokens = length
+        return length
+
+    def __call__(self, tokens, logits):
+        import mlx.core as mx
+
+        length = self._observe(tokens)
+        close = self.close_ids[0]
+        if self._close_at is not None:
+            return logits
         if self._tripped_at is None or close >= logits.shape[-1]:
             return logits
         if self.budget is not None and length >= self.budget:
@@ -193,6 +239,77 @@ class ThinkingGuard:
                 if self._direction is not None else None
             ),
         }
+
+
+def verify_block_steer(processors, context, inputs):
+    """Per-position residual steering for one lane's speculative verify block.
+
+    Returns ``(requests, commit)``.  ``requests[j]`` is the ``(layer, vector)``
+    the ordinary route applies to the decode step that feeds ``inputs[j]``, or
+    None; ``context`` holds the token ids before ``inputs[0]``.  As in the
+    ordinary route, the last processor that asks wins a position.
+    ``commit(consumed)`` counts the steered positions among the ``consumed``
+    inputs the round committed.  A processor without ``residual_steer_block``
+    is asked position by position, as the ordinary route asks it every step.
+    """
+    requests = [None] * len(inputs)
+    counted = []
+    for processor in processors or ():
+        block = getattr(processor, "residual_steer_block", None)
+        if block is not None:
+            rows = block(context, inputs)
+            counted.append((processor, rows))
+        else:
+            ask = getattr(processor, "residual_steer", None)
+            if ask is None:
+                continue
+            rows = [ask(token) for token in inputs]
+        for index, request in enumerate(rows):
+            if request is not None:
+                requests[index] = request
+
+    def commit(consumed):
+        for processor, rows in counted:
+            processor.count_steered(
+                sum(request is not None for request in rows[: int(consumed)])
+            )
+
+    return requests, commit
+
+
+def stack_block_steer(lane_requests, width):
+    """``(layer, [B, width, D])`` from per-lane position requests, or None.
+
+    One steering layer per forward, as in the ordinary route: the first
+    request fixes it and a request for another layer is dropped.  Unsteered
+    positions and padding get zero rows, so one forward serves them all.
+    """
+    import mlx.core as mx
+
+    layer, sample, kept = None, None, []
+    for requests in lane_requests:
+        row = []
+        for request in requests:
+            if request is not None and (layer is None or request[0] == layer):
+                layer, sample = request[0], request[1]
+                row.append(request[1])
+            else:
+                row.append(None)
+        kept.append(row)
+    if layer is None:
+        return None
+    zero = mx.zeros(sample.shape, dtype=sample.dtype)
+    return layer, mx.stack(
+        [
+            mx.stack(
+                [
+                    row[index] if index < len(row) and row[index] is not None else zero
+                    for index in range(width)
+                ]
+            )
+            for row in kept
+        ]
+    )
 
 
 # JUICE: the reasoning budget scales with the requested effort around a

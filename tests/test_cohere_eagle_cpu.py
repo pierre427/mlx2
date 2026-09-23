@@ -220,6 +220,65 @@ def test_external_route_applies_residual_steering():
     assert list(steered.values())[0] == reference
 
 
+@pytest.mark.parametrize("close_in_proposal", [True, False])
+def test_external_steering_matches_ordinary_steered_greedy(close_in_proposal):
+    """Every verify row is steered as ordinary decode steers that step.
+
+    A draft block holding the close token used to be verified wholly
+    unsteered, so even the anchor row's law was the unsteered one.
+    """
+    from mlx2.runtime.generate import BatchGenerator
+    from mlx2.thinking_guard import ThinkingGuard
+
+    close = 39
+    target, draft = tiny()
+    mx.random.seed(11)
+    vector = mx.random.normal((16,)) * 8.0
+    prompt = [1, 2, 3]
+
+    def guard():
+        return ThinkingGuard(
+            len(prompt), (close,), budget=None,
+            direction={"layer": 1, "vector": vector}, alpha=1.0,
+        )
+
+    def ordinary(processors):
+        batch = BatchGenerator(target, completion_batch_size=1, prefill_batch_size=1, prefill_step_size=8)
+        batch.insert([prompt], max_tokens=[6], logits_processors=[processors])
+        tokens = []
+        for _ in range(40):
+            _, responses = batch.next()
+            tokens.extend(response.token for response in responses)
+            if any(response.finish_reason for response in responses):
+                break
+        batch.close()
+        return tokens
+
+    reference = ordinary([guard()])
+    assert reference[:1] != ordinary([])[:1]  # the steering is load-bearing
+    if close_in_proposal:
+        real = draft.draft_distributions
+
+        def propose_close(anchors, hidden, cache, count, rngs, temps, **kwargs):
+            real(anchors, hidden, cache, count, rngs, temps, **kwargs)
+            tokens = [close] + [5] * (count - 1)
+            laws = [np.eye(40)[token] for token in tokens]
+            return [tokens for _ in anchors], [list(laws) for _ in anchors]
+
+        draft.draft_distributions = propose_close
+    steer = guard()
+    batch = generator(target, draft)
+    batch.insert([prompt], max_tokens=[6], sampling_configs=[{"sampling_temp": 0}],
+                 logits_processors=[[steer]])
+    got, _ = drain(batch)
+    assert list(got.values())[0] == reference
+    assert batch.scheduler_stats["proposed_tokens"] > 0
+    assert batch.scheduler_stats["external_verify_steer_rounds"] > 0
+    fed = [prompt[-1]] + reference[:-1]
+    expected = fed.index(close) if close in fed else len(fed)
+    assert steer.steered_steps == expected
+
+
 @pytest.mark.parametrize("width", [1, 2])
 def test_ordinary_fallback_binds_and_clears_residual_steering(width):
     target, draft = tiny()

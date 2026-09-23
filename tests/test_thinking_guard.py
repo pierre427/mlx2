@@ -270,12 +270,103 @@ def test_prompt_lookup_batched_verify_steers_per_lane_and_skips_rounds_past_the_
     steered, stats = run([[steer], []])
     assert steer.calls > 0 and stats["pld_batched_rounds"] > 0
     assert steered[1] == plain[1] and len(steered[0]) == 10
-    # A proposal that already contains the close token is verified unsteered.
+    # Per position, as ordinary decode steers each step: the anchor and the
+    # rows before the close token are steered, the close and later rows not.
     generator = PromptLookupBatchGenerator(model, completion_batch_size=1, prefill_step_size=5, prompt_lookup={"num_draft": 4})
-    lane = type("Lane", (), {"processors": [Steer()]})()
-    assert generator._verify_steer([lane], [([5, 31, 6], [31, 6])]) == (None, None)
-    taps, request = generator._verify_steer([lane], [([5, 6, 7], [6, 7])])
-    assert request[0] == 1 and request[1].shape == (1, 1, 16)
+    guard = ThinkingGuard(2, (31,), budget=None, direction={"layer": 1, "vector": mx.ones((16,))}, alpha=0.5)
+    lane = type("Lane", (), {"processors": [guard], "history": [1, 2]})()
+    taps, (layer, rows), commits = generator._verify_steer([lane], [[5, 6, 31, 7]])
+    assert layer == 1 and rows.shape == (1, 4, 16)
+    assert rows[0, :, 0].tolist() == [0.5, 0.5, 0.0, 0.0]
+    assert guard.steered_steps == 0  # nothing counted until the round commits
+    commits[0](3)
+    assert guard.steered_steps == 2
+    # A generated close anchor closes the channel for the whole block.
+    assert generator._verify_steer([lane], [[31, 6]])[:2] == (None, None)
+
+
+_NORTH_CLOSE = 31
+
+
+def _north_steering_guard(prompt_length, **overrides):
+    config = {
+        "budget": None,
+        "direction": {"layer": 1, "vector": mx.arange(16, dtype=mx.float32) * 9.0 - 60.0},
+        "alpha": 1.0,
+    }
+    config.update(overrides)
+    return ThinkingGuard(prompt_length, (_NORTH_CLOSE,), **config)
+
+
+def _drain_one(generator):
+    tokens = []
+    for _ in range(200):
+        _prompts, responses = generator.next()
+        tokens.extend(response.token for response in responses)
+        if any(response.finish_reason for response in responses):
+            return tokens
+    raise AssertionError("generator stalled")
+
+
+@pytest.mark.parametrize("policy", [{}, {"batched_verify": False}, {"rotating_replay": True}])
+@pytest.mark.parametrize(
+    "prompt,overrides,close_in_proposal",
+    [
+        ([5, 6, _NORTH_CLOSE, 7, 5, 6], {}, True),
+        ([4, 18, 27] * 3, {}, False),
+        # The alarm trips mid-run: the hammer takes over, then the close lands.
+        ([4, 18, 27] * 3, {"budget": 12, "soft_ratio": 0.3, "hammer": 3.0, "alpha": 0.2}, True),
+    ],
+)
+def test_prompt_lookup_steering_matches_ordinary_steered_greedy(policy, prompt, overrides, close_in_proposal):
+    """Batched and per-lane PLD steer every verify row as ordinary decode does.
+
+    A block holding the close token used to go wholly unsteered (anchor
+    included), and the per-lane path never steered at all.
+    """
+    from mlx2.runtime.generate import BatchGenerator
+    from mlx2.runtime.pld import PromptLookupBatchGenerator
+
+    model = _tiny_north()
+
+    def ordinary(guard):
+        generator = BatchGenerator(model, completion_batch_size=1, prefill_batch_size=1, prefill_step_size=8)
+        generator.insert([prompt], max_tokens=[10], logits_processors=[[guard] if guard else []])
+        try:
+            return _drain_one(generator)
+        finally:
+            generator.close()
+
+    reference = ordinary(_north_steering_guard(len(prompt), **overrides))
+    assert reference != ordinary(None)  # the steering is load-bearing here
+    guard = _north_steering_guard(len(prompt), **overrides)
+    blocks = []
+    real_block = guard.residual_steer_block
+
+    def spy(context, inputs):
+        blocks.append(list(inputs))
+        return real_block(context, inputs)
+
+    guard.residual_steer_block = spy
+    generator = PromptLookupBatchGenerator(
+        model, completion_batch_size=1, prefill_step_size=5,
+        prompt_lookup={"num_draft": 4, "ngram_min": 2, "ngram_max": 3, "adaptive": False,
+                       "deferred_admission": False, **policy},
+    )
+    generator.insert([prompt], max_tokens=[10], logits_processors=[[guard]])
+    try:
+        tokens = _drain_one(generator)
+        stats = dict(generator.scheduler_stats)
+    finally:
+        generator.close()
+    assert tokens == reference
+    assert stats["pld_proposed"] > 0
+    assert any(_NORTH_CLOSE in block[1:] for block in blocks) is close_in_proposal
+    # The receipt counts committed steered steps: every fed input before the
+    # first close token (the last prompt token feeds the first step).
+    fed = [prompt[-1]] + tokens[:-1]
+    expected = fed.index(_NORTH_CLOSE) if _NORTH_CLOSE in fed else len(fed)
+    assert guard.steered_steps == expected
 
 
 def test_north_ships_guard_and_steering_defaults_and_an_identity_bound_asset():

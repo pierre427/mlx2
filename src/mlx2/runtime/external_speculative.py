@@ -30,6 +30,7 @@ from .speculative_sampling import (
     verify_compact_proposals,
     verify_proposals,
 )
+from ..thinking_guard import stack_block_steer, verify_block_steer
 
 _COUNTER_MAX = (1 << 63) - 1
 
@@ -243,35 +244,36 @@ class ExternalDraftBatchGenerator:
     def _verify_steer(self, cohort, inputs, proposal_counts):
         """Thinking-guard residual steering for one verify forward.
 
-        Mirrors the prompt-lookup route: one vector per lane over its verify
-        block, skipped when the block already carries the close token.  The
-        verified target law is then the steered law the ordinary route would
-        sample from, so speculative exactness is unchanged.
+        Mirrors the prompt-lookup route: per position, exactly what ordinary
+        decode applies to the step that feeds that input, so rows before the
+        first close token are steered (the anchor included) and the close
+        and later rows are not.  The verified target law is then the steered
+        law the ordinary route would sample from, so speculative exactness is
+        unchanged.  Returns ``(taps, steer, commits)``; ``commits[i](consumed)``
+        counts lane ``i``'s committed steered positions.
         """
         taps = getattr(getattr(self.model, "model", None), "residual_taps", None)
         if taps is None:
-            return None, None
-        rows, layer = {}, None
+            return None, None, []
+        requests, commits = [], []
         for index, lane in enumerate(cohort):
             block = inputs[index][: proposal_counts[index] + 1]
-            for processor in lane.processors:
-                ask = getattr(processor, "residual_steer", None)
-                if ask is None:
-                    continue
-                if any(token in getattr(processor, "close_ids", ()) for token in block[1:]):
-                    continue
-                request = ask(block[0])
-                if request is not None and (layer is None or request[0] == layer):
-                    layer, rows[index] = request[0], request[1]
-        if not rows:
-            return None, None
-        mx = self.mx
-        sample = next(iter(rows.values()))
-        zero = mx.zeros(sample.shape, dtype=sample.dtype)
-        stacked = mx.stack([rows.get(index, zero) for index in range(len(cohort))])
+            # ``history`` is every token before the anchor, the context the
+            # ordinary step feeding the anchor saw.
+            rows, commit = verify_block_steer(lane.processors, lane.history, block)
+            requests.append(rows)
+            commits.append(commit)
+        width = max((len(row) for row in inputs), default=1)
+        steer = stack_block_steer(requests, width)
+        if steer is None:
+            return None, None, commits
         _bump(self.scheduler_stats, "external_verify_steer_rounds")
-        _bump(self.scheduler_stats, "external_verify_steered_lanes", len(rows))
-        return taps, (layer, stacked[:, None, :])
+        _bump(
+            self.scheduler_stats,
+            "external_verify_steered_lanes",
+            sum(any(request is not None for request in rows) for rows in requests),
+        )
+        return taps, steer, commits
 
     @staticmethod
     def _snapshot_draft_state(draft_cache, tail):
@@ -810,7 +812,9 @@ class ExternalDraftBatchGenerator:
             ]
             if clock is not None:
                 clock = self._mark("transaction_begin", clock)
-            taps, steer = self._verify_steer(cohort, inputs, proposal_counts)
+            taps, steer, steer_commits = self._verify_steer(
+                cohort, inputs, proposal_counts
+            )
             if steer is not None:
                 taps.steer = steer
             try:
@@ -827,6 +831,8 @@ class ExternalDraftBatchGenerator:
             self._commit(
                 cohort, decisions, features, blocks=blocks, transaction=transaction
             )
+            for commit, decision in zip(steer_commits, decisions):
+                commit(min(decision.accepted + 1, len(decision.emitted)))
         except BaseException:
             if transaction is not None and not transaction.closed:
                 try: transaction.abort()
@@ -866,7 +872,7 @@ class ExternalDraftBatchGenerator:
                             f"{type(rows[0]).__name__} cannot batch ordinary external lanes"
                         )
                     batched_cache.append(merge(rows))
-            taps, steer = self._verify_steer(
+            taps, steer, steer_commits = self._verify_steer(
                 cohort, [[lane.anchor] for lane in cohort], [0] * len(cohort)
             )
             if steer is not None:
@@ -894,6 +900,8 @@ class ExternalDraftBatchGenerator:
                 ]
                 result = verify_proposals([], [], targets, lane.rng)
                 token = int(result.emitted[0])
+                if row < len(steer_commits):
+                    steer_commits[row](1)
                 lane.history.append(lane.anchor)
                 lane.anchor = token
                 lane.generated += 1

@@ -36,10 +36,21 @@ from .rotating_replay import (
     RotatingReplayPolicy,
     RotatingReplayTransaction,
 )
+from ..thinking_guard import stack_block_steer, verify_block_steer
 
 
 def _walk_state(caches):
     return [entry.state for entry in caches]
+
+
+def _steer_slice(steer, start, stop):
+    """``steer`` restricted to verify positions ``[start, stop)``, or None."""
+    if steer is None:
+        return None
+    start, stop = max(0, start), min(int(steer[1].shape[1]), stop)
+    if stop <= start:
+        return None
+    return steer[0], steer[1][:, start:stop]
 
 
 def _validate_cache(caches):
@@ -590,8 +601,12 @@ class PromptLookupBatchGenerator:
             if was_armed:
                 self._arm_lane_speculation(lane)
 
-    def _rebuild_lane_cache(self, lane, committed_inputs):
-        """Restore the last committed boundary, falling back to full re-prefill."""
+    def _rebuild_lane_cache(self, lane, committed_inputs, taps=None, steer=None):
+        """Restore the last committed boundary, falling back to full re-prefill.
+
+        ``steer`` covers ``committed_inputs`` position by position, so the
+        replay recomputes the steered K/V the verify forward produced.
+        """
         self.scheduler_stats["pld_rotating_replay_rebuilds"] = (
             self.scheduler_stats.get("pld_rotating_replay_rebuilds", 0) + 1
         )
@@ -610,13 +625,24 @@ class PromptLookupBatchGenerator:
             self.scheduler_stats["pld_recovery_full_rebuilds"] += 1
             lane.cache = cache_module.make_prompt_cache(self.model)
             tokens = list(lane.history) + list(committed_inputs)
+        # The committed inputs are the tail of ``tokens``.  A full re-prefill
+        # (no recovery checkpoint) replays earlier generated positions
+        # unsteered; it is the last-resort path after a failed transaction.
+        steer_from = len(tokens) - len(committed_inputs)
         with mx.stream(generation_stream):
             for start in range(0, len(tokens), self.prefill_step):
-                self.model(
-                    mx.array([tokens[start : start + self.prefill_step]], dtype=mx.uint32),
-                    cache=lane.cache,
+                chunk = tokens[start : start + self.prefill_step]
+                chunk_steer = _steer_slice(
+                    steer, start - steer_from, start + len(chunk) - steer_from
                 )
-                mx.eval(_walk_state(lane.cache))
+                if chunk_steer is not None:
+                    taps.steer = chunk_steer
+                try:
+                    self.model(mx.array([chunk], dtype=mx.uint32), cache=lane.cache)
+                    mx.eval(_walk_state(lane.cache))
+                finally:
+                    if chunk_steer is not None:
+                        taps.steer = None
         if not lane.speculation_started:
             self._arm_lane_speculation(lane)
 
@@ -656,12 +682,19 @@ class PromptLookupBatchGenerator:
             skip_rotating=transaction is not None
             or (bool(lane.rotating) and not proposal),
         )
+        taps, steer, commits = self._verify_steer([lane], [inputs])
         try:
-            with mx.stream(generation_stream):
-                logits = self.model(
-                    mx.array([inputs], dtype=mx.uint32), cache=lane.cache
-                )[0]
-                mx.eval(logits)
+            if steer is not None:
+                taps.steer = steer
+            try:
+                with mx.stream(generation_stream):
+                    logits = self.model(
+                        mx.array([inputs], dtype=mx.uint32), cache=lane.cache
+                    )[0]
+                    mx.eval(logits)
+            finally:
+                if steer is not None:
+                    taps.steer = None
         except BaseException:
             if transaction is not None:
                 with suppress(Exception):
@@ -677,13 +710,21 @@ class PromptLookupBatchGenerator:
 
             def replay(tokens):
                 # The one replay forward of the round: it advances every cache
-                # of the lane, rotating or not, over the committed inputs.
-                with mx.stream(generation_stream):
-                    self.model(
-                        mx.array([list(tokens)], dtype=mx.uint32),
-                        cache=lane.cache,
-                    )
-                    mx.eval(_walk_state(lane.cache))
+                # of the lane, rotating or not, over the committed inputs,
+                # steered exactly as the verify forward steered them.
+                replay_steer = _steer_slice(steer, 0, len(tokens))
+                if replay_steer is not None:
+                    taps.steer = replay_steer
+                try:
+                    with mx.stream(generation_stream):
+                        self.model(
+                            mx.array([list(tokens)], dtype=mx.uint32),
+                            cache=lane.cache,
+                        )
+                        mx.eval(_walk_state(lane.cache))
+                finally:
+                    if replay_steer is not None:
+                        taps.steer = None
 
             if transaction is not None:
                 # Restores the rotating rings, then shares ``replay`` with the
@@ -694,7 +735,7 @@ class PromptLookupBatchGenerator:
                     # No ring copy exists to return to, and a failed lane must
                     # not take the worker with it. The token history is exact,
                     # so rebuild this lane's cache from it.
-                    self._rebuild_lane_cache(lane, committed_inputs)
+                    self._rebuild_lane_cache(lane, committed_inputs, taps, steer)
                 else:
                     self.scheduler_stats[
                         "pld_rotating_replay_replayed_tokens"
@@ -705,39 +746,37 @@ class PromptLookupBatchGenerator:
             try:
                 transaction.commit_verified()
             except RotatingReplayError:
-                self._rebuild_lane_cache(lane, inputs)
+                self._rebuild_lane_cache(lane, inputs, taps, steer)
         if transaction is not None:
             self.scheduler_stats["pld_rotating_replay_rounds"] += 1
+        for commit in commits:
+            commit(consumed)
         with suppress(StopIteration):
             next(steps)
 
-    def _verify_steer(self, lanes, plans):
+    def _verify_steer(self, lanes, blocks):
         """Residual steering for a verify forward (thinking guard alpha actuator).
 
-        One vector per lane, broadcast over that lane's whole verify block.  A
-        round whose proposal already contains the thinking-close token is left
-        unsteered: positions after the close belong to the answer channel.
+        Per position, exactly what ordinary decode applies to the step that
+        feeds that input: rows before the first thinking-close token are
+        steered (the anchor included), the close and later rows are not.
+        Returns ``(taps, steer, commits)``; ``commits[i](consumed)`` counts
+        lane ``i``'s committed steered positions once the round commits.
         """
         taps = getattr(getattr(self.model, "model", None), "residual_taps", None)
         if taps is None:
-            return None, None
-        rows, layer = {}, None
-        for index, (lane, (inputs, _proposal)) in enumerate(zip(lanes, plans)):
-            for processor in lane.processors:
-                ask = getattr(processor, "residual_steer", None)
-                if ask is None:
-                    continue
-                if any(token in getattr(processor, "close_ids", ()) for token in inputs[1:]):
-                    continue
-                request = ask(inputs[0])
-                if request is not None and (layer is None or request[0] == layer):
-                    layer, rows[index] = request[0], request[1]
-        if not rows:
-            return None, None
-        sample = next(iter(rows.values()))
-        zero = mx.zeros(sample.shape, dtype=sample.dtype)
-        stacked = mx.stack([rows.get(index, zero) for index in range(len(lanes))])
-        return taps, (layer, stacked[:, None, :])
+            return None, None, []
+        requests, commits = [], []
+        for lane, inputs in zip(lanes, blocks):
+            # ``history`` is every token before the anchor, the context the
+            # ordinary step feeding the anchor saw.
+            rows, commit = verify_block_steer(lane.processors, lane.history, inputs)
+            requests.append(rows)
+            commits.append(commit)
+        steer = stack_block_steer(requests, max(len(inputs) for inputs in blocks))
+        if steer is None:
+            return None, None, commits
+        return taps, steer, commits
 
     @staticmethod
     def _batchable(cache):
@@ -767,7 +806,9 @@ class PromptLookupBatchGenerator:
         transaction = SegmentedKVRows([lane.cache for lane in lanes]).begin(lengths=lengths)
         try:
             padded = [inputs + [0] * (width - len(inputs)) for inputs, _proposal in plans]
-            taps, steer = self._verify_steer(lanes, plans)
+            taps, steer, commits = self._verify_steer(
+                lanes, [inputs for inputs, _proposal in plans]
+            )
             if steer is not None:
                 taps.steer = steer
             try:
@@ -782,6 +823,8 @@ class PromptLookupBatchGenerator:
             consumed = [step.send(logits[row]) for row, step in enumerate(steps)]
             transaction.commit(accepted_lengths=consumed)
             transaction = None
+            for commit, count in zip(commits, consumed):
+                commit(count)
         finally:
             if transaction is not None:
                 with suppress(Exception):
