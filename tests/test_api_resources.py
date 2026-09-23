@@ -562,6 +562,71 @@ def test_batch_error_file_is_bounded_while_rows_run():
     assert marker["error"]["message"].startswith(f"{10 - len(recorded)} ")
 
 
+def test_batch_error_file_keeps_errors_that_fit_when_its_marker_cannot():
+    # Room for the closing error_limit_exceeded row was priced into every
+    # error row even when that row could never fit the file.  Then no
+    # error was kept, not even one that fit on its own, the marker was
+    # omitted too, and a failing batch had no error file at all.
+    rows = [
+        {"custom_id": "", "method": "POST", "url": "/v1/embeddings", "body": {}}
+        for _ in range(2)
+    ]
+    one_error = len(json.dumps({
+        "id": "batch_req_" + "0" * 32,
+        "custom_id": "",
+        "response": None,
+        "error": {
+            "code": "invalid_request",
+            "message": "batch custom_id must be nonempty text",
+        },
+    })) + 1
+    marker = len(json.dumps({
+        "id": "batch_req_" + "0" * 32,
+        "custom_id": None,
+        "response": None,
+        "error": {
+            "code": "error_limit_exceeded",
+            "message": "1 further row errors were not recorded"
+            " (the batch error file is bounded at 999 bytes)",
+        },
+    })) + 1
+    # Room for one error row, not two, and never for the marker.
+    limit = one_error + 10
+    assert marker > limit
+    files = FileStore(max_file_bytes=limit)
+    source = files.create(
+        "tenant",
+        filename="requests.jsonl",
+        purpose="batch",
+        content_type="application/jsonl",
+        content=("\n".join(json.dumps(row) for row in rows) + "\n").encode(),
+    )
+    manager = BatchManager(files, lambda endpoint, body, tenant: (200, {}))
+    batch = manager.create(
+        "tenant",
+        {
+            "input_file_id": source["id"],
+            "endpoint": "/v1/embeddings",
+            "completion_window": "24h",
+        },
+    )
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        result = manager.get("tenant", batch["id"])
+        if result["status"] in {"completed", "failed"}:
+            break
+        time.sleep(0.01)
+    assert result["status"] == "completed", result["errors"]
+    assert result["request_counts"] == {"total": 2, "completed": 0, "failed": 2}
+    assert result["output_file_id"] is None
+    assert result["error_file_id"] is not None
+    content = files.content("tenant", result["error_file_id"])[0]
+    assert len(content) <= limit
+    errors = [json.loads(line) for line in content.splitlines()]
+    assert [line["custom_id"] for line in errors] == [""]
+    assert errors[0]["error"]["code"] == "invalid_request"
+
+
 def test_batch_error_file_never_evicts_the_batchs_own_output():
     # Eviction takes the largest tenant's oldest file first.  Right after a
     # batch wrote its output, that tenant is usually the largest, so writing

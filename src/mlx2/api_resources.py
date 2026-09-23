@@ -784,7 +784,8 @@ class BatchManager:
         # The error file is bounded the same way, or its rows (which repeat
         # each client-chosen custom_id) could outgrow the store and fail the
         # whole batch.  Room is kept for one closing row that counts the
-        # errors past the bound, sized for a count of every row.
+        # errors past the bound, sized for a count of every row, when that
+        # row fits the file at all.
         error_bytes = 0
         errors_dropped = 0
 
@@ -804,6 +805,11 @@ class BatchManager:
             ).encode()
 
         error_reserve = len(dropped_errors_row(len(lines))) + 1
+        if error_reserve > output_limit:
+            # Pricing a closing row that can never be written into every
+            # error kept none of them, not even one that fits on its own.
+            # Keep the errors that fit instead.
+            error_reserve = 0
         # Both files must also fit the store together: eviction takes the
         # largest tenant's oldest file first, which after the output is
         # written is usually this batch's own output.
@@ -949,10 +955,17 @@ class BatchManager:
                 with self._lock:
                     record["request_counts"]["failed"] += 1
                     self._persist(record)
-        if errors_dropped and error_reserve <= output_limit:
-            # A store too small for even this row gets no error file; the
-            # request counts still report every failed row.
-            errors.append(dropped_errors_row(errors_dropped))
+        if errors_dropped:
+            # The reserve left room for this row.  Without one it is written
+            # only if it fits what is left; the request counts still report
+            # every failed row either way.
+            marker = dropped_errors_row(errors_dropped)
+            size = len(marker) + 1
+            if (
+                error_bytes + size <= output_limit
+                and output_bytes + error_bytes + size <= pair_limit
+            ):
+                errors.append(marker)
         with self._lock:
             record = self._batches[key]
             cancelled = record["cancel"].is_set()
