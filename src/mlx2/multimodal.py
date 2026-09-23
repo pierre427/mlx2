@@ -11,6 +11,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import math
+import struct
 import tempfile
 import wave
 from dataclasses import dataclass
@@ -78,8 +79,11 @@ def decode_wav_audio(payload, mime_type, *, max_seconds=600):
             channels = stream.getnchannels()
             width = stream.getsampwidth()
             pcm = stream.readframes(frames)
-    except (wave.Error, EOFError) as error:
-        raise ValueError(f"failed to decode WAV audio: {error}") from error
+    except (wave.Error, EOFError, RuntimeError, struct.error) as error:
+        # The stdlib chunk reader raises a bare RuntimeError when a chunk
+        # size runs past the payload; that is malformed input, not a fault.
+        detail = str(error) or type(error).__name__
+        raise ValueError(f"failed to decode WAV audio: {detail}") from error
     duration = frames / rate if rate else math.inf
     if not rate or channels not in {1, 2} or width not in {1, 2, 3, 4}:
         raise ValueError("unsupported WAV channel or sample format")

@@ -19,6 +19,7 @@ from mlx2.multimodal import (
     decode_data_url,
     decode_wav_audio,
     pcm_to_float32,
+    resolve_media,
     uniform_frame_indices,
 )
 from mlx2.openai_compat import responses_to_chat_request
@@ -98,6 +99,18 @@ def test_media_data_bounds_wav_metadata_and_uniform_video_sampling():
     assert audio.metadata["sample_rate"] == 8_000
     assert audio.metadata["duration_seconds"] == pytest.approx(0.1)
     assert uniform_frame_indices(100, 25, fps=2, max_frames=6) == [0, 20, 40, 59, 79, 99]
+
+
+def test_malformed_wav_chunk_size_is_a_client_error():
+    # A chunk whose size runs past the payload makes stdlib wave raise a bare
+    # RuntimeError; the request must fail as invalid media, not as a 500.
+    payload = bytes.fromhex(
+        "52494646c40f000057415645666d74201000470001000200803e000000fa0000"
+        "4700100064617461a00f000001020102"
+    )
+    source = "data:audio/wav;base64," + base64.b64encode(payload).decode()
+    with pytest.raises(ValueError, match="failed to decode WAV audio"):
+        resolve_media(source, kind="audio")
 
 
 def test_gemma3n_native_video_keeps_order_timestamps_and_cache_identity():
