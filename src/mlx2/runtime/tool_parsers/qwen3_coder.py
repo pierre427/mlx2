@@ -98,9 +98,9 @@ def _convert_param_value(
     param = param_config.get(param_name)
     # An empty schema ``{}`` is falsy but present: it admits any JSON value,
     # so a non-strict value takes the untyped path below and an object or
-    # array the model wrote is decoded.  Only an undeclared parameter is
-    # unknown.  The strict path keeps reading ``{}`` as no schema.
-    if param is None or (strict and not param):
+    # array the model wrote is decoded, and a strict value decodes as JSON.
+    # Only an undeclared parameter is unknown.
+    if param is None:
         return None if param_value.lower() == "null" else param_value
 
     if strict:
@@ -283,7 +283,7 @@ def _raw_parameter_pattern(schema):
 
 def _decodes_as_json(param, strict):
     """Whether ``_convert_param_value`` decodes this parameter's text as JSON."""
-    if not strict or not param:
+    if not strict or param is None:
         return False
     try:
         return _raw_parameter_pattern(param) is None

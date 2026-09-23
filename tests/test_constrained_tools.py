@@ -931,6 +931,29 @@ def test_qwen_strict_json_values_keep_quoted_closing_tags(schema, value):
 
 
 @pytest.mark.parametrize(
+    "value",
+    ['"hi"', "123", "null", '{"a": [1, true]}', '"a</parameter>b"', '["</function>"]'],
+)
+def test_qwen_strict_empty_schema_values_decode_as_json(value):
+    """A strict ``{}`` parameter admits any JSON value, but the parser read
+    ``{}`` as no schema and served the source text: ``"hi"`` kept its quotes,
+    ``123`` stayed a string and a quoted ``</parameter>`` cut the value.  It
+    now decodes as JSON like other strict values.  The strict lowering has no
+    language for any JSON value, so a forced call refuses ``{}`` up front and
+    no admitted text reaches this parser path."""
+    import json
+
+    tools = _single_parameter_tool({}, strict=True)
+    with pytest.raises(ValueError, match="unsupported JSON schema"):
+        qwen_grammar(tools, "required", parallel_tool_calls=False)
+    text = _qwen_call(value)
+    for split in (len(text), 1, 7):
+        assert _qwen_served(tools, text, split) == [{"x": json.loads(value)}]
+    with pytest.raises(ValueError, match="valid JSON"):
+        parse_tool_call(_qwen_call("hi"), tools)
+
+
+@pytest.mark.parametrize(
     ("schema", "strict"),
     [
         ({"type": "string"}, True),
