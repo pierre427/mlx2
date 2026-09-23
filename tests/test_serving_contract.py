@@ -2605,3 +2605,56 @@ def test_hosted_required_tool_choice_still_fails_when_no_round_calls_a_tool():
     finally:
         close()
     assert error.value.code == 502
+
+
+def _run_batch(base, rows, endpoint="/v1/responses"):
+    content = "".join(json.dumps(row) + "\n" for row in rows).encode()
+    with upload_file(base, content) as response:
+        file_id = json.load(response)["id"]
+    with _json_post(base, "/v1/batches", {
+        "input_file_id": file_id,
+        "endpoint": endpoint,
+        "completion_window": "24h",
+    }) as response:
+        batch = json.load(response)
+    for _ in range(500):
+        with urlopen(base + "/v1/batches/" + batch["id"]) as response:
+            batch = json.load(response)
+        if batch["status"] in {"completed", "failed", "cancelled"}:
+            break
+        time.sleep(0.01)
+
+    def lines(file_id):
+        if file_id is None:
+            return []
+        with urlopen(base + f"/v1/files/{file_id}/content") as response:
+            return [json.loads(line) for line in response.read().splitlines()]
+
+    return batch, lines(batch.get("output_file_id")), lines(batch.get("error_file_id"))
+
+
+def test_batch_rows_with_hosted_tools_fail_closed():
+    # A batch row cannot run the hosted loop; it used to return the internal
+    # ``weather`` call unexecuted and count as completed.
+    engine = HostedEngine([
+        lambda job: (_round_calls(_hosted_call()) if job.request.get("tools")
+                     else _round_text("hello"))(job)
+    ])
+    backend = HostedBackend()
+    base, close = _serve_hosted(engine, backend)
+    try:
+        batch, outputs, errors = _run_batch(base, [
+            {"custom_id": "hosted", "method": "POST", "url": "/v1/responses",
+             "body": {"model": "fixture", "input": "weather?", "tools": [MCP_TOOL]}},
+            {"custom_id": "plain", "method": "POST", "url": "/v1/responses",
+             "body": {"model": "fixture", "input": "hi"}},
+        ])
+    finally:
+        close()
+    assert batch["status"] == "completed"
+    assert batch["request_counts"] == {"total": 2, "completed": 1, "failed": 1}
+    assert [row["custom_id"] for row in outputs] == ["plain"]
+    assert [row["custom_id"] for row in errors] == ["hosted"]
+    assert "hosted (MCP) tools" in errors[0]["error"]["message"]
+    assert backend.executed == []
+    assert len(engine.requests) == 1

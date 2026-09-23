@@ -1479,6 +1479,14 @@ def handler_for(
         )
         if responses_api:
             body, options = prepare_responses_request(raw_body, tenant_id, batch_compat)
+            if options.get("tool_executors"):
+                # The hosted tool loop lives in the interactive handler; a
+                # batch row would return the internal call unexecuted and
+                # count as completed, so refuse the row instead.
+                raise CapabilityUnavailable(
+                    "batch rows cannot run hosted (MCP) tools; send this "
+                    "request to /v1/responses directly"
+                )
         chat = endpoint != "/v1/completions"
         status = engine.status()
         body = validate_request(
