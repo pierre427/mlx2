@@ -804,6 +804,39 @@ def test_qwen_free_values_the_arguments_cannot_carry_stay_text(schema, value, se
     assert json.loads(call["function"]["arguments"])["x"] == served
 
 
+@pytest.mark.parametrize(
+    "schema", [{"type": "object"}, {"type": "array"}, {"type": "tuple"}]
+)
+@pytest.mark.parametrize(
+    ("value", "served"),
+    [
+        ("(1, 2)", "(1, 2)"),
+        ("[1, (2,)]", "[1, (2,)]"),
+        ("{'a': (1,)}", "{'a': (1,)}"),
+        ("{1: 2}", "{1: 2}"),
+        ("{True: 1}", "{True: 1}"),
+        ("{None: 1}", "{None: 1}"),
+        ("{'a': [1, None, True, 'b', 2.5]}", {"a": [1, None, True, "b", 2.5]}),
+    ],
+)
+def test_qwen_free_values_json_would_rewrite_stay_text(schema, value, served):
+    """A Python literal decoded from a free value can be one that JSON
+    serializes as something else: a tuple becomes an array, and a key such
+    as ``1`` or ``True`` becomes ``"1"`` or ``"true"``.  The grammar admits
+    ``(1, 2)`` for an object parameter and the call served ``[1, 2]``, a
+    value the model did not write.  Such text now stays the string the
+    model wrote, however it is chunked; a literal made only of JSON types
+    still decodes."""
+    tools = [{"type": "function", "function": {"name": "f", "parameters": {
+        "type": "object", "properties": {"x": schema}, "required": ["x"],
+    }}}]
+    grammar = qwen_grammar(tools, "required", parallel_tool_calls=False)
+    text = _qwen_call(value)
+    assert _server_admits(grammar, text)
+    for split in (len(text), 1, 7):
+        assert _qwen_served(tools, text, split) == [{"x": served}]
+
+
 def _qwen_call(value, name="f"):
     return (
         f"<tool_call>\n<function={name}>\n<parameter=x>\n{value}\n</parameter>"

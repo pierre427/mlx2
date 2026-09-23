@@ -15,6 +15,8 @@ value as a raw string rather than raising.
 """
 
 import copy
+import json
+import math
 from typing import Any, Optional
 
 _UNION_KEYS = ("anyOf", "oneOf", "allOf")
@@ -391,6 +393,39 @@ def schema_value_matches(value: Any, schema: Any) -> bool:
             for name, item in value.items()
         ):
             return False
+    return True
+
+
+def json_native(value: Any) -> bool:
+    """Whether tool-call arguments carry ``value`` as the model wrote it.
+
+    Parsers decode a free argument best-effort, as JSON and then as a Python
+    literal.  The arguments are serialized with ``allow_nan=False``, which
+    rejects a non-finite float, a set or bytes, and silently rewrites others:
+    a tuple becomes an array, and a key such as ``1``, ``True`` or ``None``
+    becomes ``"1"``, ``"true"`` or ``"null"``.  Only JSON's own types, nested
+    in lists and string-keyed dicts, serialize to what decodes back to them.
+    """
+    pending = [value]
+    while pending:
+        item = pending.pop()
+        kind = type(item)
+        if kind is dict:
+            if any(type(key) is not str for key in item):
+                return False
+            pending.extend(item.values())
+        elif kind is list:
+            pending.extend(item)
+        elif kind is float:
+            if not math.isfinite(item):
+                return False
+        elif item is not None and kind not in (str, int, bool):
+            return False
+    try:
+        # An integer past the interpreter's digit limit cannot be written.
+        json.dumps(value, allow_nan=False)
+    except (TypeError, ValueError):
+        return False
     return True
 
 

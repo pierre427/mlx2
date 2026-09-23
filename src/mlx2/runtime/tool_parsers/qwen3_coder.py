@@ -17,6 +17,7 @@ import regex as re
 from ._schema import (
     executable_schema,
     infer_type_from_json_schema,
+    json_native,
     raw_string_pattern,
     required_parameter_names,
     resolve_local_refs,
@@ -197,14 +198,12 @@ def _servable(value: Any, param_value: str) -> Any:
     Best-effort decoding of free text can yield a non-finite float (``NaN``,
     ``1e400``) or a Python-only literal (a set, bytes).  The arguments are
     serialized with ``allow_nan=False``, so such a value would turn a call the
-    grammar admitted into an error; like other undecodable text it stays the
-    string the model wrote.
+    grammar admitted into an error; a tuple or a non-string key would be
+    served as the array or string key JSON makes of it, which the model did
+    not write.  Like other undecodable text it stays the string the model
+    wrote.
     """
-    try:
-        json.dumps(value, allow_nan=False)
-    except (TypeError, ValueError):
-        return param_value
-    return value
+    return value if json_native(value) else param_value
 
 
 def _declares_null(schema):
