@@ -465,8 +465,17 @@ MIXED_WARM_MAX_RATIO = 1.0
 MIXED_WARM_PER_LANE_MAX_RATIO = 1.10
 
 
+# Share of each lane's streamed tokens that must arrive while the other lane
+# is also still producing.  A serialized pair scores 0, a lane given one
+# early token and then stalled until the other finished scores about 1 of
+# its 64, and lanes a per-lane driver interleaves score near 1.  A quarter
+# sits far from both ends, and still admits a lane that joined as late as
+# three quarters of the way through the other lane's decode.
+MIXED_WARM_MIN_OVERLAP_SHARE = 0.25
+
+
 def mixed_warm_timing_passes(
-    concurrent_seconds, sequential_seconds, receipts=(), lane_finish_seconds=None
+    concurrent_seconds, sequential_seconds, receipts=(), lane_token_seconds=None
 ):
     """Judge the concurrent warm pair against its own sequential warm-up.
 
@@ -477,7 +486,7 @@ def mixed_warm_timing_passes(
     Batching routes must beat the sequential pair.  A per-lane route, whose
     receipts all report width 1, shows concurrency the way the batch check
     accepts it: both lanes ran for most of the concurrent window, their
-    service intervals overlapped (see ``mixed_warm_lanes_overlapped``), and
+    tokens arrived interleaved (see ``mixed_warm_lanes_overlapped``), and
     the pair was not slower than sequential beyond noise.
     """
     widths = [width for receipt in receipts for width in observed_compute_widths(receipt)]
@@ -488,45 +497,99 @@ def mixed_warm_timing_passes(
         )
         return (
             ran_most_of_window
-            and mixed_warm_lanes_overlapped(receipts, lane_finish_seconds)
+            and mixed_warm_lanes_overlapped(lane_token_seconds)
             and concurrent_seconds <= sequential_seconds * MIXED_WARM_PER_LANE_MAX_RATIO
         )
     return concurrent_seconds < sequential_seconds * MIXED_WARM_MAX_RATIO
 
 
-def mixed_warm_lanes_overlapped(receipts, lane_finish_seconds):
-    """Whether every lane began service before any other lane finished.
+def mixed_warm_lane_overlap_shares(lane_token_seconds):
+    """Each lane's share of its tokens that arrived while every other produced.
 
-    A receipt times its lane from that lane's own attach (the scheduler's
-    first dequeue): ``ttft_seconds`` to its first token, ``elapsed_seconds``
-    to its end.  Elapsed time alone cannot show overlap: two lanes attached
-    together and then run one after the other (ending at 1.0 s and 1.9 s of
-    a 1.9 s window) both ran for most of it.  Each lane's interval is placed
-    on the pair's shared clock by its observed completion instant, so a lane
-    attached late is not credited with an early start: it served from
-    ``finish - (elapsed - ttft)`` to ``finish``.
+    ``lane_token_seconds`` holds, per lane, the client arrival instant of each
+    streamed token delta on the pair's shared clock.  Another lane is
+    producing from its first delta to its last, so a lane's share counts its
+    deltas inside every other lane's span.  Returns None without at least
+    two lanes of finite instants.
     """
-    if (
-        lane_finish_seconds is None
-        or len(receipts) < 2
-        or len(receipts) != len(lane_finish_seconds)
-    ):
-        return False
-    intervals = []
-    for receipt, finish in zip(receipts, lane_finish_seconds):
-        ttft, elapsed = receipt.get("ttft_seconds"), receipt.get("elapsed_seconds")
-        if not all(
-            isinstance(value, (int, float)) and not isinstance(value, bool)
-            for value in (ttft, elapsed, finish)
+    if lane_token_seconds is None or len(lane_token_seconds) < 2:
+        return None
+    lanes = []
+    for arrivals in lane_token_seconds:
+        if not arrivals or not all(
+            isinstance(value, (int, float))
+            and not isinstance(value, bool)
+            and math.isfinite(value)
+            for value in arrivals
         ):
-            return False
-        intervals.append((float(finish) - (float(elapsed) - float(ttft)), float(finish)))
-    return all(
-        start < end
-        for index, (start, _) in enumerate(intervals)
-        for other, (_, end) in enumerate(intervals)
-        if other != index
+            return None
+        lanes.append([float(value) for value in arrivals])
+    shares = []
+    for index, arrivals in enumerate(lanes):
+        spans = [
+            (min(other), max(other))
+            for position, other in enumerate(lanes)
+            if position != index
+        ]
+        inside = sum(
+            all(first <= instant <= last for first, last in spans)
+            for instant in arrivals
+        )
+        shares.append(inside / len(arrivals))
+    return shares
+
+
+def mixed_warm_lanes_overlapped(lane_token_seconds):
+    """Whether every lane got a material share of its tokens during the others.
+
+    Receipt times (``ttft_seconds`` to the first token, ``elapsed_seconds``
+    to the end) cannot show overlap: they imply continuous service from
+    first token to finish, so a lane given one early token, then stalled
+    while the other lane ran to completion, then run alone looked
+    overlapped.  Only the arrival instants of the tokens themselves show
+    whether both lanes were served over the same stretch of time.
+    """
+    shares = mixed_warm_lane_overlap_shares(lane_token_seconds)
+    return shares is not None and all(
+        share >= MIXED_WARM_MIN_OVERLAP_SHARE for share in shares
     )
+
+
+def read_streamed_chat(lines, clock):
+    """Rebuild a streamed chat response and stamp each token delta's arrival.
+
+    ``lines`` yields the SSE wire lines as they arrive and ``clock`` reads
+    the shared clock, so each stamp is the client arrival instant of one
+    delta: one engine emission, a token or, on a speculative route, several.
+    The finish chunk carries the usage and the ``mlx2`` receipt of the
+    non-streamed response.  A stream that ends without it raises.
+    """
+    arrivals, parts, final, last = [], [], None, None
+    for raw in lines:
+        line = raw.decode() if isinstance(raw, bytes) else raw
+        if not line.startswith("data: {"):
+            continue
+        instant = clock()
+        last = chunk = json.loads(line[6:])
+        for choice in chunk.get("choices") or ():
+            delta = choice.get("delta") or {}
+            if delta.get("content") or delta.get("reasoning_content"):
+                arrivals.append(instant)
+            parts.append(delta.get("content") or "")
+        if "mlx2" in chunk:
+            final = chunk
+    if final is None:
+        raise AssertionError(f"stream ended without its receipt chunk: {last!r}")
+    return {
+        "choices": [
+            {
+                "message": {"role": "assistant", "content": "".join(parts)},
+                "finish_reason": (final.get("choices") or [{}])[0].get("finish_reason"),
+            }
+        ],
+        "usage": final.get("usage"),
+        "mlx2": final["mlx2"],
+    }, arrivals
 
 
 def observed_compute_widths(receipt):
@@ -1519,23 +1582,27 @@ def main():
         # requests together must finish faster than the same pair one after
         # the other.  A fixed wall clock failed models that simply answer at
         # length (Xing4.0: ~2.2K tokens each, 45-48 s concurrent).
+        # Both pairs stream, so their client work is identical too, and each
+        # token delta of the concurrent pair is stamped on the pair's shared
+        # clock: a per-lane route shows its overlap by interleaved tokens.
+        def post_streamed(item, clock_start):
+            with post(item, stream=True) as response:
+                return read_streamed_chat(
+                    response, lambda: time.monotonic() - clock_start
+                )
+
         sequential_start = time.monotonic()
         for item in mixed_prompts:
-            post(item)
+            post_streamed(item, sequential_start)
         sequential = time.monotonic() - sequential_start
         start = time.monotonic()
-
-        def post_timed(item):
-            # Each lane's completion instant on the pair's shared clock: its
-            # receipt times it only from its own attach.
-            response = post(item)
-            return response, time.monotonic() - start
-
         with ThreadPoolExecutor(max_workers=2) as pool:
-            timed = list(pool.map(post_timed, mixed_prompts))
+            streamed = list(
+                pool.map(lambda item: post_streamed(item, start), mixed_prompts)
+            )
         concurrent = time.monotonic() - start
-        mixed = [response for response, _ in timed]
-        lane_finish_seconds = [finish for _, finish in timed]
+        mixed = [response for response, _ in streamed]
+        lane_token_seconds = [arrivals for _, arrivals in streamed]
         check(
             "mixed_warm",
             all(content(r) and r["mlx2"]["cached_tokens"] > 0
@@ -1544,12 +1611,15 @@ def main():
                 concurrent,
                 sequential,
                 [r["mlx2"] for r in mixed],
-                lane_finish_seconds=lane_finish_seconds,
+                lane_token_seconds=lane_token_seconds,
             ),
             {
                 "concurrent_seconds": concurrent,
                 "sequential_seconds": sequential,
-                "lane_finish_seconds": lane_finish_seconds,
+                "lane_token_seconds": lane_token_seconds,
+                "lane_overlap_shares": mixed_warm_lane_overlap_shares(
+                    lane_token_seconds
+                ),
                 "receipts": [r["mlx2"] for r in mixed],
             },
         )
