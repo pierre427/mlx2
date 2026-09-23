@@ -682,12 +682,17 @@ kwargs = dict(
     sliding_window=4, layer_types=["full_attention", "sliding_attention"],
 )
 mx.random.seed(9)
-# The mined source predates the reference's dense-prefix RoPE (force_rope), so
-# compare the math the two still share: a prefix pattern other than 1 leaves
-# the dense-prefix layer unrotated in both.
-port = Port(PortArgs(**kwargs, prefix_dense_sliding_window_pattern=2))
-assert port.model.layers[0].self_attn.rope is None
-ref = Ref(RefArgs(**kwargs))
+# A mined source that predates the reference's dense-prefix RoPE
+# (force_rope) has no prefix pattern field: compare the math the two still
+# share, where a pattern other than 1 leaves the dense-prefix layer unrotated.
+# A source that has the field is compared at the reference default, rotated.
+import dataclasses
+fields = set(f.name for f in dataclasses.fields(RefArgs))
+value = 1 if "prefix_dense_sliding_window_pattern" in fields else 2
+pattern = dict(prefix_dense_sliding_window_pattern=value)
+port = Port(PortArgs(**kwargs, **pattern))
+ref = Ref(RefArgs(**kwargs, **pattern))
+assert (port.model.layers[0].self_attn.rope is None) == (value != 1)
 ref.load_weights(tree_flatten(port.parameters()), strict=True)
 tokens = mx.array([[1, 2, 3, 4, 5, 6]])
 port_full = port(tokens, cache=port.make_cache())
