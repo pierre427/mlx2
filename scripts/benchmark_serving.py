@@ -4,11 +4,30 @@
 import argparse
 from concurrent.futures import ThreadPoolExecutor
 import hashlib
+import importlib.util
 import json
 from pathlib import Path
 import statistics
 import time
 from urllib.request import Request, urlopen
+
+
+def _load_width_reader():
+    """Use the qualifier's width reader so every route is read one way.
+
+    Speculative lanes (prompt lookup, external draft) report their width in
+    ``speculation.target_width``; ``ordinary_compute_width`` is None for them.
+    """
+    spec = importlib.util.spec_from_file_location(
+        "_mlx2_benchmark_qualify_serving",
+        Path(__file__).with_name("qualify_serving.py"),
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.observed_compute_widths
+
+
+observed_compute_widths = _load_width_reader()
 
 
 def main():
@@ -74,9 +93,10 @@ def main():
                 requests = list(pool.map(request, prompts[:width]))
             elapsed = time.monotonic() - start
             observed = sorted({value for row in requests
-                for value in (row["receipt"].get("mtp") or {}).get(
-                    "observed_compute_widths", [row["receipt"].get("ordinary_compute_width", 1)])})
-            assert max(observed) == width, f"requested B{width}, observed widths {observed}"
+                               for value in observed_compute_widths(row["receipt"])})
+            assert observed and max(observed) == width, (
+                f"requested B{width}, observed widths {observed}"
+            )
             assert all(row["receipt"]["cached_tokens"] > 0 for row in requests), "warm benchmark missed prefix cache"
             rows.append(
                 {
