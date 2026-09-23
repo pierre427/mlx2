@@ -834,6 +834,40 @@ def _qwen_served(tools, text, split):
     ]
 
 
+_STRING_ARRAY = {"type": "array", "items": {"type": "string"}}
+
+
+@pytest.mark.parametrize(
+    ("schema", "value"),
+    [
+        (_OBJECT, '{"s": "a</parameter>b"}'),
+        (_OBJECT, '{"s": "<parameter=y>\\n</function>"}'),
+        (_STRING_ARRAY, '["</tool_call>", "a</function>\\n</tool_call>b"]'),
+        (_STRING_ARRAY, '["say \\"</tool_call>\\"", "</parameter>\\\\"]'),
+    ],
+)
+def test_qwen_strict_json_values_keep_quoted_closing_tags(schema, value):
+    """Qwen writes JSON arguments with ``tojson``, which leaves ``<`` raw,
+    and the strict grammar admits any closing tag inside a JSON string.  The
+    parser cut the value at the first ``</parameter>``, the function at the
+    first ``</function>`` and the call at the first ``</tool_call>``, quoted
+    or not, so the admitted call failed with 502.  A strict JSON value now
+    ends at the first closer outside its strings, and a call whose text ends
+    inside one runs on to the next ``</tool_call>``, however it is chunked."""
+    import json
+
+    tools = _single_parameter_tool(schema, strict=True)
+    single = qwen_grammar(tools, "required", parallel_tool_calls=False)
+    text = _qwen_call(value)
+    assert _server_admits(single, text)
+    parallel = qwen_grammar(tools, "required", parallel_tool_calls=True)
+    both = text + "\n" + _qwen_call(value)
+    assert _server_admits(parallel, both)
+    for split in (len(both), 1, 7):
+        assert _qwen_served(tools, text, split) == [{"x": json.loads(value)}]
+        assert _qwen_served(tools, both, split) == [{"x": json.loads(value)}] * 2
+
+
 @pytest.mark.parametrize(
     ("schema", "strict"),
     [

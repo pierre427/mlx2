@@ -224,7 +224,26 @@ class OutputParser:
                     self._reasoning_open = True
                     continue
             if self.channel == "tool":
-                end = self.buffer.find("</tool_call>")
+                first = end = self.buffer.find("</tool_call>")
+                outcome = None
+                while end >= 0:
+                    try:
+                        outcome = self.parse_tool(self.buffer[:end], self.tools)
+                        break
+                    except (KeyError, TypeError, ValueError) as exc:
+                        if end == first:
+                            outcome = exc
+                        if not getattr(exc, "tool_call_close_quoted", False):
+                            end = first
+                            break
+                    # A parser that decodes JSON values says when the closer
+                    # it was cut at sits inside one of their strings (Qwen
+                    # writes JSON arguments with a raw ``<``): the call runs
+                    # on to a later closer, and fails at the first one unless
+                    # a later one parses.
+                    end = self.buffer.find("</tool_call>", end + 1)
+                if end < 0 and first >= 0 and final and not stop_hit:
+                    end = first  # no later closer: the call is malformed
                 if end < 0:
                     if final and stop_hit:
                         # The client's stop string cut the call short.  That is
@@ -242,7 +261,9 @@ class OutputParser:
                     break
                 raw = "<tool_call>" + self.buffer[:end] + "</tool_call>"
                 try:
-                    calls = self.parse_tool(self.buffer[:end], self.tools)
+                    if isinstance(outcome, BaseException):
+                        raise outcome
+                    calls = outcome
                     calls = calls if isinstance(calls, list) else [calls]
                     if not calls:
                         raise ValueError("model produced an empty tool call")

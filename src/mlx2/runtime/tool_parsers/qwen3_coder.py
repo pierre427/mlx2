@@ -23,17 +23,15 @@ from ._schema import (
     schema_value_matches,
 )
 
-# Match each <function=...>...</function> block individually (no trailing `$`
-# anchor, which would otherwise merge several blocks into one greedy match and
-# drop calls 2..n).
-_function_regex = re.compile(r"<function=(.*?)</function>", re.DOTALL)
-_parameter_regex = re.compile(r"<parameter=(.*?)</parameter>", re.DOTALL)
 _name_regex = re.compile(r"\s*([^\s<>]+)>?")
 
+_FUNCTION_OPEN = "<function="
 _FUNCTION_CLOSE = "</function>"
 _PARAMETER_OPEN = "<parameter="
 _PARAMETER_CLOSE = "</parameter>"
 _TOOL_CALL_CLOSE = "</tool_call>"
+_CLOSER = re.compile(r"</parameter>|</function>")
+_JSON_STRING = re.compile(r'"[^"\\]*(?:\\.[^"\\]*)*"', re.DOTALL)
 # Markup a raw value can never contain.  The parser ends a raw value at the
 # first parameter or function closer (a function closer also closes an open
 # last parameter, vllm #57707), reads an opener as an unclosed parameter, and
@@ -43,6 +41,18 @@ _TOOL_CALL_CLOSE = "</tool_call>"
 # reference parser truncates the value there too.
 _RAW_DELIMITERS = (_PARAMETER_CLOSE, _PARAMETER_OPEN, _FUNCTION_CLOSE, _TOOL_CALL_CLOSE)
 _RAW_VALUE_CHAR = r"(?:(?!</parameter>|<parameter=|</function>|</tool_call>)[\s\S])"
+
+
+class UnclosedJSONString(ValueError):
+    """The text ends inside a string of a strict parameter's JSON value.
+
+    Qwen writes JSON values with ``tojson``, which leaves ``<`` raw, and the
+    strict grammar admits a ``</tool_call>`` inside a JSON string.  The output
+    parser cut the call at that closer, so the call runs on to a later one.
+    """
+
+    tool_call_close_quoted = True
+
 
 _string_types = {"string", "str", "text", "varchar", "char", "enum"}
 _bool_types = {"boolean", "bool", "binary"}
@@ -260,18 +270,69 @@ def _raw_parameter_pattern(schema):
     return None
 
 
-def _parse_xml_function_call(function_call_str: str, tools: Optional[Any]):
-    name_match = _name_regex.match(function_call_str)
+def _decodes_as_json(param, strict):
+    """Whether ``_convert_param_value`` decodes this parameter's text as JSON."""
+    if not strict or not param:
+        return False
+    try:
+        return _raw_parameter_pattern(param) is None
+    except ValueError:
+        return False  # the conversion raises the same error
+
+
+def _json_value_end(text, start, name):
+    """Where the closer after a strict JSON value that starts at ``start`` is.
+
+    Qwen writes JSON values with ``tojson``, which leaves ``<`` raw, and the
+    strict grammar admits any closing tag inside a JSON string.  Outside a
+    string ``<`` is not JSON, so the value ends at the first parameter or
+    function closer outside every string.  Returns -1 when none follows.
+    """
+    position = start
+    while True:
+        closer = _CLOSER.search(text, position)
+        close = closer.start() if closer is not None else -1
+        quote = text.find('"', position, close if close >= 0 else len(text))
+        if quote < 0:
+            return close
+        string = _JSON_STRING.match(text, quote)
+        if string is None:
+            raise UnclosedJSONString(
+                f"Malformed Qwen function: parameter {name} ends inside a JSON string"
+            )
+        position = string.end()
+
+
+def _parse_function(text: str, start: int, tools: Optional[Any]):
+    """``(call, end)`` for the ``<function=`` block whose body starts at ``start``.
+
+    ``end`` is the index of the ``</function>`` that closes the block, found by
+    walking the parameters in order: a raw value ends at the first closer,
+    while a strict JSON value ends at the first closer outside its strings.
+    ``None`` means no closer follows, and the block is ignored like any
+    unclosed markup, unless the text ends inside a JSON string.
+    """
+    try:
+        return _walk_function(text, start, tools)
+    except UnclosedJSONString:
+        raise
+    except ValueError:
+        if text.find(_FUNCTION_CLOSE, start) >= 0:
+            raise
+        return None  # unclosed markup, malformed or not
+
+
+def _walk_function(text: str, start: int, tools: Optional[Any]):
+    name_match = _name_regex.match(text, start)
     if name_match is None:
         raise ValueError("Malformed function name")
     function_name = name_match.group(1)
     if not function_name.strip() or "<" in function_name:
         raise ValueError("Malformed function name")
     param_config, strict = _get_arguments_config(function_name, tools)
-    parameters = function_call_str[name_match.end() :]
     param_dict = {}
 
-    def add(match_text, *, implicit_close=False):
+    def add(match_text, *, implicit_close=False, json_value=False):
         param_match = _name_regex.match(match_text)
         if param_match is None or (
             implicit_close and not param_match.group(0).endswith(">")
@@ -281,10 +342,11 @@ def _parse_xml_function_call(function_call_str: str, tools: Optional[Any]):
         if not param_name.strip() or "<" in param_name or param_name in param_dict:
             raise ValueError("Malformed or duplicate parameter name")
         param_value = str(match_text[param_match.end() :])
-        if _PARAMETER_OPEN in param_value:
+        if not json_value and _PARAMETER_OPEN in param_value:
             # The previous parameter was never closed and swallowed the next
             # one, whose argument would silently disappear.  The reference
-            # parser never lets a value contain an opener either.
+            # parser never lets a value contain an opener either.  In a JSON
+            # value an opener outside a string fails the decode instead.
             raise ValueError("Unclosed parameter before the next parameter")
         if param_value.startswith("\n"):
             param_value = param_value[1:]
@@ -295,23 +357,38 @@ def _parse_xml_function_call(function_call_str: str, tools: Optional[Any]):
             param_value, param_name, param_config, strict=strict
         )
 
-    cursor = 0
-    for match in _parameter_regex.finditer(parameters):
-        if parameters[cursor : match.start()].strip():
+    position = name_match.end()
+    while True:
+        opener = text.find(_PARAMETER_OPEN, position)
+        close = text.find(_FUNCTION_CLOSE, position)
+        if opener < 0 or 0 <= close < opener:
+            if close < 0:
+                return None
+            if text[position:close].strip():
+                raise ValueError("Incomplete or malformed parameter markup")
+            return dict(name=function_name, arguments=param_dict), close
+        if text[position:opener].strip():
             raise ValueError("Malformed parameter markup")
-        cursor = match.end()
-        add(match.group(1))
-    rest = parameters[cursor:].lstrip()
-    if rest:
+        body = opener + len(_PARAMETER_OPEN)
+        param_match = _name_regex.match(text, body)
+        json_value = param_match is not None and _decodes_as_json(
+            param_config.get(param_match.group(1)), strict
+        )
+        if json_value:
+            end = _json_value_end(text, param_match.end(), param_match.group(1))
+        else:
+            closer = _CLOSER.search(text, body)
+            end = closer.start() if closer is not None else -1
+        if end < 0:
+            return None
         # vllm #57707: a model can close </function> without closing its last
         # parameter.  The function end closes that one parameter implicitly;
-        # any other leftover markup is still malformed.
-        opener = "<parameter="
-        body = rest[len(opener) :]
-        if not rest.startswith(opener) or opener in body or "</parameter>" in body:
-            raise ValueError("Incomplete or malformed parameter markup")
-        add(body, implicit_close=True)
-    return dict(name=function_name, arguments=param_dict)
+        # a later opener inside the value is still malformed.
+        implicit_close = text.startswith(_FUNCTION_CLOSE, end)
+        add(text[body:end], implicit_close=implicit_close, json_value=json_value)
+        if implicit_close:
+            return dict(name=function_name, arguments=param_dict), end
+        position = end + len(_PARAMETER_CLOSE)
 
 
 tool_call_start = "<tool_call>"
@@ -323,19 +400,32 @@ def parse_tool_call(
     model_output: str,
     tools: Optional[Any] = None,
 ):
-    matches = _function_regex.findall(model_output)
-    if not matches:
-        raise ValueError("No function provided.")
-    calls = []
-    for match in matches:
+    """Every closed ``<function=`` block of one tool-call block, in order.
+
+    Raises ``UnclosedJSONString`` when the text ends inside a strict JSON
+    string: the ``</tool_call>`` that ended it was quoted inside the value.
+    """
+    calls, cursor = [], 0
+    while (start := model_output.find(_FUNCTION_OPEN, cursor)) >= 0:
         # One malformed block makes the whole block malformed.  Dropping it
         # and returning its siblings would bypass OutputParser's policy: a
         # required tool choice would pass with a call missing, and a tolerant
         # request would never count the fallback.
         try:
-            calls.append(_parse_xml_function_call(match, tools))
+            parsed = _parse_function(
+                model_output, start + len(_FUNCTION_OPEN), tools
+            )
+        except UnclosedJSONString:
+            raise
         except ValueError as exc:
             raise ValueError(f"Malformed Qwen function: {exc}") from exc
+        if parsed is None:
+            break
+        call, end = parsed
+        calls.append(call)
+        cursor = end + len(_FUNCTION_CLOSE)
+    if not calls:
+        raise ValueError("No function provided.")
     return calls[0] if len(calls) == 1 else calls
 
 
