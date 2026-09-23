@@ -430,6 +430,62 @@ def test_copied_token_the_grammar_forbids_does_not_latch_a_failure(cpu, route):
         assert stats["self_mtp_copy_rounds"] > 0
 
 
+def test_copy_verify_under_a_processor_reads_back_once_per_round(cpu, monkeypatch):
+    """The copy-row processor guard read each copied token's legality back
+    with ``.item()``: a serial device-to-host sync per copied token in the
+    verify hot path, one of them forcing the verify forward mid-loop.
+    Legality now stays on the device until the acceptance boundary, so a
+    processor adds at most one host read per copy round."""
+    from mlx2.runtime.generate import BatchGenerator
+
+    def allow_all(tokens, logits):
+        return logits
+
+    def run(processors):
+        generator = BatchGenerator(
+            _copying_model(), completion_batch_size=1, prefill_batch_size=1,
+            prefill_step_size=32,
+            self_mtp={"num_draft": 2, "persistent": True,
+                      "segment_aware_live_tip": True, "segment_aware_cohort_size": 1},
+            copy_draft={"enabled": True, "max_span": 8},
+        )
+        generator.insert([PROMPT], max_tokens=[40], lane_rngs=[LaneRNG(5)],
+                         logits_processors=[processors],
+                         self_mtp_configs=[{"sampling_temp": 0.0}])
+        reads = [0]
+
+        def counted(real):
+            def read(*args):
+                reads[0] += 1
+                return real(*args)
+
+            return read
+
+        out = []
+        try:
+            with monkeypatch.context() as patched:
+                patched.setattr(mx.array, "item", counted(mx.array.item))
+                patched.setattr(mx.array, "tolist", counted(mx.array.tolist))
+                patched.setattr(mx, "eval", counted(mx.eval))
+                for _ in range(200):
+                    _, responses = generator.next()
+                    out.extend(response.token for response in responses)
+                    if len(out) >= 40:
+                        break
+            stats = dict(generator.scheduler_stats)
+        finally:
+            generator.close()
+        return out, reads[0], stats
+
+    plain, plain_reads, _ = run([])
+    guarded, guarded_reads, stats = run([allow_all])
+    assert guarded == plain
+    rounds = stats["self_mtp_copy_rounds"]
+    # Long copied spans, so per-token and per-round reads are distinguishable.
+    assert stats["self_mtp_copy_proposed_tokens"] >= 3 * rounds > 0
+    assert guarded_reads - plain_reads <= rounds
+
+
 def test_default_off_receipt_and_counters_unchanged(cpu):
     model = _copying_model()
     _, stats, receipts = _run(model, PROMPT, max_tokens=12)

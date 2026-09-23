@@ -2290,22 +2290,49 @@ def _propose_batched_self_mtp_round(
     old_seed_hs = tuple((lane.seed_h for lane in batch.lanes))
     lane_logprobs: List[mx.array] = []
     lane_hiddens: List[mx.array] = []
+    # Copy rows under logits processors: each row's reachability, evaluated
+    # at the acceptance boundary, and the inputs the real processors are
+    # then run on through the reachable prefix.
+    copy_guards: Dict[int, Tuple[mx.array, List[mx.array], List[mx.array]]] = {}
     for row, (lane, k, valid) in enumerate(zip(batch.lanes, k_vector, valid_lengths)):
-        if lane.logits_processors:
-            processed = []
+        if lane.logits_processors and copy_rows[row]:
             # Head drafts were drawn from the processed law, but copied spans
             # are host tokens no processor has seen.  A row that follows a
             # copied token the processors forbid is never used by
             # verification, and its history is already outside a structured
             # output grammar, so asking the real (latching) processors about
-            # it would fail a healthy lane.  Those rows keep the raw logits,
+            # it would fail a healthy lane.  Deciding that row by row took a
+            # host sync per copied token, so every row is scored through
+            # isolated probes instead, its legality stays on the device, and
+            # rows past the first forbidden copied token keep the raw logits,
             # as on the external route.
             copied = copy_rows[row]
-            reachable = valid
+            histories = [
+                mx.concatenate(
+                    [lane.token_prefix, mx.array([lane.cur], mx.uint32)]
+                    + [mx.reshape(token, (1,)) for token in draft_tokens[row][:pos]]
+                )
+                for pos in range(valid)
+            ]
+            raw = [batched_logits[row, pos] for pos in range(valid)]
+            probed = [
+                _probe_logits_processors(lane.logits_processors, history, value)
+                for (history, value) in zip(histories, raw)
+            ]
+            legal = mx.stack(
+                [
+                    mx.logical_not(mx.isneginf(probed[pos][int(copied[pos])]))
+                    for pos in range(k)
+                ]
+            )
+            reach = mx.concatenate(
+                [mx.array([True]), mx.cumprod(legal.astype(mx.int32)) > 0]
+            )
+            logits = mx.where(reach[:, None], mx.stack(probed), mx.stack(raw))
+            copy_guards[row] = (reach, histories, raw)
+        elif lane.logits_processors:
+            processed = []
             for pos in range(valid):
-                if pos >= reachable:
-                    processed.append(batched_logits[row, pos])
-                    continue
                 processor_tokens = mx.concatenate(
                     [lane.token_prefix, mx.array([lane.cur], mx.uint32)]
                     + [mx.reshape(token, (1,)) for token in draft_tokens[row][:pos]]
@@ -2317,10 +2344,6 @@ def _propose_batched_self_mtp_round(
                         batched_logits[row, pos],
                     )
                 )
-                if copied and pos < k:
-                    record_verify_sync("hybrid.copy.processor_guard")
-                    if bool(mx.isneginf(processed[-1][int(copied[pos])]).item()):
-                        reachable = pos + 1
             logits = mx.stack(processed)
         else:
             logits = batched_logits[row, :valid]
@@ -2339,8 +2362,13 @@ def _propose_batched_self_mtp_round(
             drafted_rows.append(mx.pad(drafted, [(0, width - k)]))
         accept_payload = mx.stack([mx.stack(target_rows), mx.stack(drafted_rows)])
         record_verify_sync("hybrid.greedy.accept_boundary")
-        # Confidence features ride on the existing accept boundary.
-        mx.eval(accept_payload, *(() if feature_payload is None else feature_payload))
+        # Confidence features and copy-row reachability ride on the existing
+        # accept boundary.
+        mx.eval(
+            accept_payload,
+            *(() if feature_payload is None else feature_payload),
+            *(guard[0] for guard in copy_guards.values()),
+        )
         (greedy_targets, hosted_drafts) = accept_payload.tolist()
         drafts = [row[:k] for (row, k) in zip(hosted_drafts, k_vector)]
     accepted: List[int] = []
@@ -2367,7 +2395,7 @@ def _propose_batched_self_mtp_round(
 
             sampled = mx.random.categorical(logprobs, key=draw_key(lane.rng))
             record_verify_sync("hybrid.copy.sampled_eval")
-            mx.eval(sampled)
+            mx.eval(sampled, *(copy_guards[row][:1] if row in copy_guards else ()))
             record_verify_sync("hybrid.copy.sampled_tolist")
             (n_accept, bonus) = verify_point_mass_by_sampling(
                 drafts[row], sampled.tolist()
@@ -2424,7 +2452,9 @@ def _propose_batched_self_mtp_round(
                 targets = greedy_targets[row]
             else:
                 record_verify_sync("hybrid.greedy.targets_tolist")
-                targets = mx.argmax(logprobs, axis=-1).tolist()
+                targets = mx.argmax(logprobs, axis=-1)
+                mx.eval(targets, *(copy_guards[row][:1] if row in copy_guards else ()))
+                targets = targets.tolist()
             fly = lane.fly_verification
             if (
                 fly is not None
@@ -2464,6 +2494,12 @@ def _propose_batched_self_mtp_round(
                 + [MTPToken(bonus, logprobs[n_accept], False)]
             )
         )
+    # The real processors see the copy rows they would have seen scored one
+    # at a time: the reachable prefix, known now without another sync.
+    for row, (reach, histories, raw) in copy_guards.items():
+        lane = batch.lanes[row]
+        for pos in range(sum(reach.tolist())):
+            _apply_logits_processors(lane.logits_processors, histories[pos], raw[pos])
     target_drops = tuple((k - a for (k, a) in zip(k_vector, accepted)))
     _trim_self_mtp_cache_group(batch.caches.target, target_drops, validate=False)
     (host_features, host_feature_tokens) = _host_confidence_payload(
