@@ -458,6 +458,54 @@ def test_shared_qsa_b2_to_b1_survivor_next_forward_matches_physical(monkeypatch)
     )
 
 
+def test_aborted_shared_qsa_proposal_restores_one_base_and_stays_batched(monkeypatch):
+    from test_batched_mtp import _prepare_lane, _tiny_qwen4_model
+
+    model = _tiny_qwen4_model()
+    indexer = model.language_model.model.layers[1].self_attn.indexer
+    indexer.compress_ratio = 4
+    indexer.summary_identity["block_size"] = 4
+    indexer.summary_identity["compress_ratio"] = 4
+    monkeypatch.setenv("MLX_LM_TRUE_BATCHED_SEGMENTED_MTP", "1")
+    monkeypatch.setenv("MLX_LM_SHARED_QSA_SUFFIX", "1")
+    rows = [_prepare_lane(model, uid, [1, 2, 3, 4]) for uid in range(2)]
+    for item in rows:
+        cache = item.caches.target[1]
+        blocks = cache.offset // indexer.compress_ratio
+        starts = mx.arange(blocks) * indexer.compress_ratio
+        cache._qsa_pooled_keys = indexer._pool_blocks(cache.index_keys, starts)
+        cache._qsa_pooled_ratio = indexer.compress_ratio
+        cache._qsa_summary_identity = dict(indexer.summary_identity)
+        cache._qsa_summary_identity["complete_blocks"] = blocks
+        mx.eval(cache._qsa_pooled_keys)
+        item.shared_qsa_prefix_id = "same-four-token-live-tip"
+    state = attach_segmented_self_mtp_lanes(model, None, rows)
+
+    def reject_all(logprobs, *_args, **_kwargs):
+        return 0, int(mx.argmax(logprobs[0]).item())
+
+    try:
+        with patch(
+            "mlx2.runtime.hybrid_speculative._batched_residual_verify",
+            side_effect=reject_all,
+        ):
+            abort_batched_self_mtp(state, propose_batched_self_mtp(model, state))
+            restored = [pair.target[1] for pair in state.row_caches]
+            segmented_self_mtp_stats(reset=True)
+            proposal = propose_batched_self_mtp(model, state)
+        counters = segmented_self_mtp_stats()
+        abort_batched_self_mtp(state, proposal)
+    finally:
+        close_segmented_self_mtp_state(state)
+    # The restored rows still share one immutable base, so the next round
+    # rebuilds the segmented view instead of falling back to serial B1.
+    assert all(isinstance(row, SharedSuffixQSAKVCache) for row in restored)
+    assert restored[0].base is restored[1].base
+    assert counters["true_batched_declined"] == 0
+    assert counters["b1_target_forwards"] == 0
+    assert counters["batched_target_forwards"] == 1
+
+
 def test_shared_qsa_prefix_attestation_rejects_mixed_host_identities():
     first = _detached(0, position=8)
     second = _detached(1, position=8)

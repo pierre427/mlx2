@@ -1462,13 +1462,18 @@ def freeze_prompt_cache(
 
 
 def snapshot_prompt_cache_descriptors(
-    prompt_cache: Iterable[Any], sidecar: Any = None
+    prompt_cache: Iterable[Any],
+    sidecar: Any = None,
+    *,
+    memo: Optional[dict[int, Any]] = None,
 ) -> tuple[list[Any], Any, dict[str, int]]:
     """Capture one committed boundary as independent plane descriptors.
 
     Python/cache objects are cloned, while immutable MLX buffers remain
     descriptor aliases. Subsequent live-cache updates rebind only the live
     graph, so target, MTP draft, hidden seed, and RNG remain exact at capture.
+    Callers snapshotting several rows pass one ``memo`` so objects the rows
+    share, such as an immutable QSA base, stay shared in the snapshot.
     """
     telemetry = COWCacheTelemetry()
     started = time.perf_counter_ns()
@@ -1479,7 +1484,7 @@ def snapshot_prompt_cache_descriptors(
         draft_cache = sidecar_state[0]
         if isinstance(draft_cache, (list, tuple)):
             _validate_stable_source(draft_cache)
-    memo: dict[int, Any] = {}
+    memo = {} if memo is None else memo
     snapshot = [
         _clone_graph(
             item,

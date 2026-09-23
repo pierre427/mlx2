@@ -1460,11 +1460,11 @@ def close_segmented_self_mtp_state(batch: SegmentedSelfMTPState) -> None:
 _MTP_LANE_ARRAY_FIELDS = frozenset({"seed_h", "pending_hs", "token_prefix"})
 
 
-def _snapshot_segmented_recovery_row(value):
+def _snapshot_segmented_recovery_row(value, memo=None):
     """Freeze one committed MTP row without rewinding its random stream."""
     lane, pair = value
     target, draft, _receipt = snapshot_prompt_cache_descriptors(
-        pair.target, pair.draft
+        pair.target, pair.draft, memo=memo
     )
     lane_fields = {}
     for name, current in vars(lane).items():
@@ -1476,10 +1476,15 @@ def _snapshot_segmented_recovery_row(value):
     return lane_fields, target, draft
 
 
-def _restore_segmented_recovery_row(snapshot):
+def _frozen_segmented_recovery_row(snapshot):
+    """Hand back the frozen row; the cohort restore clones every row at once."""
+    return snapshot
+
+
+def _restore_segmented_recovery_row(snapshot, memo=None):
     lane_fields, target, draft = snapshot
     restored_target, restored_draft, _receipt = snapshot_prompt_cache_descriptors(
-        target, draft
+        target, draft, memo=memo
     )
     restored_fields = {}
     for name, current in lane_fields.items():
@@ -1493,35 +1498,49 @@ def _capture_segmented_recovery(batch: SegmentedSelfMTPState) -> None:
     from .segmented_self_mtp import note_segmented_self_mtp
 
     checkpoints = []
+    # One clone memo for the whole cohort keeps what rows share, such as one
+    # immutable QSA base, shared in the checkpoint: the segmented view refuses
+    # rows whose bases are separate copies. The memo is keyed by live object
+    # ids, so no row restarts speculation, which may replace objects, until
+    # every row has been captured.
+    memo = {}
+    stopped = []
     try:
-        for lane, pair, transaction in zip(
-            batch.lanes, batch.row_caches, batch.transactions
-        ):
-            boundary = int(transaction.position)
-            transaction.validate(pair, lane, boundary)
-            revision = (
-                f"{transaction.lineage.lineage_id}:"
-                f"{batch.membership_epoch}:{lane.uid}"
-            )
-            slot = CommittedRecoverySlot()
-            _stop_all_speculation(pair.target)
-            try:
+        try:
+            for lane, pair, transaction in zip(
+                batch.lanes, batch.row_caches, batch.transactions
+            ):
+                boundary = int(transaction.position)
+                transaction.validate(pair, lane, boundary)
+                revision = (
+                    f"{transaction.lineage.lineage_id}:"
+                    f"{batch.membership_epoch}:{lane.uid}"
+                )
+                slot = CommittedRecoverySlot()
+                _stop_all_speculation(pair.target)
+                stopped.append(pair)
                 slot.capture(
                     route="self_mtp",
                     revision=revision,
                     boundary=boundary,
                     value=(lane, pair),
-                    snapshot=_snapshot_segmented_recovery_row,
-                    restore=_restore_segmented_recovery_row,
+                    snapshot=lambda value: _snapshot_segmented_recovery_row(
+                        value, memo=memo
+                    ),
+                    restore=_frozen_segmented_recovery_row,
                 )
-            finally:
+                checkpoints.append((slot, revision, boundary))
+        finally:
+            for pair in stopped:
                 _start_speculation_or_cleanup(
                     pair.target,
                     pair.target,
                     "segmented MTP recovery capture must restart rollback",
                 )
+        for lane, pair, transaction, (_slot, _revision, boundary) in zip(
+            batch.lanes, batch.row_caches, batch.transactions, checkpoints
+        ):
             transaction.validate(pair, lane, boundary)
-            checkpoints.append((slot, revision, boundary))
     except BaseException:
         batch._recovery_checkpoints.clear()
         note_segmented_self_mtp("recovery_checkpoint_failures")
@@ -1544,9 +1563,13 @@ def _restore_segmented_recovery(batch: SegmentedSelfMTPState) -> None:
         transaction.close()
     restored_pairs = []
     restored_fields = []
+    # Restore the cohort through one memo, as it was captured, so rows that
+    # shared an immutable base share its restored clone.
+    memo = {}
     for slot, revision, boundary in checkpoints:
-        fields, pair = slot.restore(
-            route="self_mtp", revision=revision, boundary=boundary
+        fields, pair = _restore_segmented_recovery_row(
+            slot.restore(route="self_mtp", revision=revision, boundary=boundary),
+            memo=memo,
         )
         restored_fields.append(fields)
         restored_pairs.append(pair)
