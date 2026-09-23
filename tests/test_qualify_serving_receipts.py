@@ -576,16 +576,47 @@ def test_mixed_warm_per_lane_route_is_judged_by_overlap_not_speedup():
     # Qwen3.6 prompt lookup keeps the per-lane driver (receipts report width
     # 1) and measured 1.675 s concurrent against 1.641 s sequential in the
     # sweep's GPU smoke: overlapped, not faster, as a per-lane route must be.
+    # Receipt times run from each lane's attach; the finish instants are the
+    # harness's, on the pair's shared clock.
     per_lane = [
-        {"speculation": {"target_width": 1}, "elapsed_seconds": 1.66},
-        {"speculation": {"target_width": 1}, "elapsed_seconds": 1.67},
+        {"speculation": {"target_width": 1}, "ttft_seconds": 0.12, "elapsed_seconds": 1.66},
+        {"speculation": {"target_width": 1}, "ttft_seconds": 0.15, "elapsed_seconds": 1.67},
     ]
-    assert qualify.mixed_warm_timing_passes(1.675, 1.641, per_lane) is True
-    # Serialized lanes (each ran for a fraction of the window) do not overlap.
-    serialized = [dict(r, elapsed_seconds=0.7) for r in per_lane]
-    assert qualify.mixed_warm_timing_passes(1.675, 1.641, serialized) is False
+    finishes = [1.665, 1.675]
+
+    def passes(concurrent, sequential, receipts, lane_finish_seconds=finishes):
+        return qualify.mixed_warm_timing_passes(
+            concurrent, sequential, receipts, lane_finish_seconds=lane_finish_seconds
+        )
+
+    assert passes(1.675, 1.641, per_lane) is True
+    # Attached together, then run one after the other: lane B's first token
+    # comes after lane A finished.  Both lanes still ran for over half the
+    # 1.9 s window from their shared attach, which is all the gate used to
+    # check, so this zero-overlap pair passed.
+    serialized = [
+        {"speculation": {"target_width": 1}, "ttft_seconds": 0.1, "elapsed_seconds": 1.0},
+        {"speculation": {"target_width": 1}, "ttft_seconds": 1.05, "elapsed_seconds": 1.9},
+    ]
+    assert passes(1.9, 2.0, serialized, [1.0, 1.9]) is False
+    # The same lane timings interleaved: both start before either ends.
+    interleaved = [
+        {"speculation": {"target_width": 1}, "ttft_seconds": 0.1, "elapsed_seconds": 1.8},
+        {"speculation": {"target_width": 1}, "ttft_seconds": 0.15, "elapsed_seconds": 1.9},
+    ]
+    assert passes(1.9, 2.0, interleaved, [1.8, 1.9]) is True
+    # Lane B attached 0.5 s late and still ran after lane A: on its own clock
+    # its first token (0.55 s) precedes A's end (1.0 s), but its finish
+    # instant places its service at 1.05-1.9 s on the shared clock.
+    late = [serialized[0], dict(serialized[1], ttft_seconds=0.55, elapsed_seconds=1.4)]
+    assert passes(1.9, 2.0, late, [1.0, 1.9]) is False
+    # Without the shared-clock finish instants or first-token times there is
+    # no evidence of overlap.
+    assert passes(1.675, 1.641, per_lane, None) is False
+    no_ttft = [{key: value for key, value in r.items() if key != "ttft_seconds"} for r in per_lane]
+    assert passes(1.675, 1.641, no_ttft) is False
     # Overlapped but clearly slower than sequential still fails.
-    assert qualify.mixed_warm_timing_passes(2.0, 1.641, per_lane) is False
+    assert passes(2.0, 1.641, per_lane) is False
     # A route that batched (width 2) must still beat its sequential pair.
     batched = [{"speculation": {"target_width": 2}, "elapsed_seconds": 1.66}] * 2
     assert qualify.mixed_warm_timing_passes(1.675, 1.641, batched) is False

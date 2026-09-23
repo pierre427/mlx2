@@ -465,7 +465,9 @@ MIXED_WARM_MAX_RATIO = 1.0
 MIXED_WARM_PER_LANE_MAX_RATIO = 1.10
 
 
-def mixed_warm_timing_passes(concurrent_seconds, sequential_seconds, receipts=()):
+def mixed_warm_timing_passes(
+    concurrent_seconds, sequential_seconds, receipts=(), lane_finish_seconds=None
+):
     """Judge the concurrent warm pair against its own sequential warm-up.
 
     The former ``max(30.0, sequential)`` floor let any pair under 30 s pass
@@ -474,19 +476,57 @@ def mixed_warm_timing_passes(concurrent_seconds, sequential_seconds, receipts=()
 
     Batching routes must beat the sequential pair.  A per-lane route, whose
     receipts all report width 1, shows concurrency the way the batch check
-    accepts it: both lanes ran for most of the concurrent window (they
-    overlapped) and the pair was not slower than sequential beyond noise.
+    accepts it: both lanes ran for most of the concurrent window, their
+    service intervals overlapped (see ``mixed_warm_lanes_overlapped``), and
+    the pair was not slower than sequential beyond noise.
     """
     widths = [width for receipt in receipts for width in observed_compute_widths(receipt)]
     if widths and max(widths) == 1:
-        overlapped = all(
+        ran_most_of_window = all(
             float(receipt.get("elapsed_seconds") or 0.0) > 0.5 * concurrent_seconds
             for receipt in receipts
         )
-        return overlapped and (
-            concurrent_seconds <= sequential_seconds * MIXED_WARM_PER_LANE_MAX_RATIO
+        return (
+            ran_most_of_window
+            and mixed_warm_lanes_overlapped(receipts, lane_finish_seconds)
+            and concurrent_seconds <= sequential_seconds * MIXED_WARM_PER_LANE_MAX_RATIO
         )
     return concurrent_seconds < sequential_seconds * MIXED_WARM_MAX_RATIO
+
+
+def mixed_warm_lanes_overlapped(receipts, lane_finish_seconds):
+    """Whether every lane began service before any other lane finished.
+
+    A receipt times its lane from that lane's own attach (the scheduler's
+    first dequeue): ``ttft_seconds`` to its first token, ``elapsed_seconds``
+    to its end.  Elapsed time alone cannot show overlap: two lanes attached
+    together and then run one after the other (ending at 1.0 s and 1.9 s of
+    a 1.9 s window) both ran for most of it.  Each lane's interval is placed
+    on the pair's shared clock by its observed completion instant, so a lane
+    attached late is not credited with an early start: it served from
+    ``finish - (elapsed - ttft)`` to ``finish``.
+    """
+    if (
+        lane_finish_seconds is None
+        or len(receipts) < 2
+        or len(receipts) != len(lane_finish_seconds)
+    ):
+        return False
+    intervals = []
+    for receipt, finish in zip(receipts, lane_finish_seconds):
+        ttft, elapsed = receipt.get("ttft_seconds"), receipt.get("elapsed_seconds")
+        if not all(
+            isinstance(value, (int, float)) and not isinstance(value, bool)
+            for value in (ttft, elapsed, finish)
+        ):
+            return False
+        intervals.append((float(finish) - (float(elapsed) - float(ttft)), float(finish)))
+    return all(
+        start < end
+        for index, (start, _) in enumerate(intervals)
+        for other, (_, end) in enumerate(intervals)
+        if other != index
+    )
 
 
 def observed_compute_widths(receipt):
@@ -1484,19 +1524,32 @@ def main():
             post(item)
         sequential = time.monotonic() - sequential_start
         start = time.monotonic()
+
+        def post_timed(item):
+            # Each lane's completion instant on the pair's shared clock: its
+            # receipt times it only from its own attach.
+            response = post(item)
+            return response, time.monotonic() - start
+
         with ThreadPoolExecutor(max_workers=2) as pool:
-            mixed = list(pool.map(post, mixed_prompts))
+            timed = list(pool.map(post_timed, mixed_prompts))
         concurrent = time.monotonic() - start
+        mixed = [response for response, _ in timed]
+        lane_finish_seconds = [finish for _, finish in timed]
         check(
             "mixed_warm",
             all(content(r) and r["mlx2"]["cached_tokens"] > 0
                 and r["usage"]["completion_tokens"] == 64 for r in mixed)
             and mixed_warm_timing_passes(
-                concurrent, sequential, [r["mlx2"] for r in mixed]
+                concurrent,
+                sequential,
+                [r["mlx2"] for r in mixed],
+                lane_finish_seconds=lane_finish_seconds,
             ),
             {
                 "concurrent_seconds": concurrent,
                 "sequential_seconds": sequential,
+                "lane_finish_seconds": lane_finish_seconds,
                 "receipts": [r["mlx2"] for r in mixed],
             },
         )
