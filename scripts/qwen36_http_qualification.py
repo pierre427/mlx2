@@ -48,6 +48,14 @@ COVERAGE_DEFINITION = {
 }
 
 
+# Minimum Jain index over the fairness gate's two equal-demand tenants.  For
+# two tenants J >= 0.8 means the slower one receives at least a third of the
+# faster one's token rate ((1 + r)^2 / (2 (1 + r^2)) = 0.8 at r = 1/3): loose
+# enough for scheduling jitter on four 64-token requests, tight enough to fail
+# a tenant that is effectively starved.
+JAIN_FAIRNESS_MIN = 0.8
+
+
 def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
@@ -436,15 +444,17 @@ def gate_batch_observability(
     )
     fairness = after.get("fairness") or {}
     rates = fairness.get("tenant_token_rates") or {}
-    jain = fairness.get("jain_tenant_token_rate")
-    fairness_passed = (
-        expected_tenants <= set(rates)
-        and all(isinstance(rates[name], (int, float)) and rates[name] > 0
-                for name in expected_tenants)
-        and isinstance(jain, (int, float))
-        and math.isfinite(jain)
-        and 0 < jain <= 1
+    # Jain's index over the gate's own two tenants.  The server's figure
+    # covers every tenant in its window, and 0 < jain <= 1 holds for any
+    # positive rates, so the former check could not fail.
+    own_rates = [rates.get(name) for name in sorted(expected_tenants)]
+    own_jain = (
+        sum(own_rates) ** 2 / (len(own_rates) * sum(rate * rate for rate in own_rates))
+        if all(isinstance(rate, (int, float)) and math.isfinite(rate) and rate > 0
+               for rate in own_rates)
+        else None
     )
+    fairness_passed = own_jain is not None and own_jain >= JAIN_FAIRNESS_MIN
     request_ids = {
         row.get("request_id")
         for row in after.get("completed_requests", [])
@@ -471,7 +481,10 @@ def gate_batch_observability(
         },
         "tenant_jain_fairness": {
             "status": "passed" if fairness_passed else "failed",
-            "evidence": {**common, "fairness": fairness},
+            "evidence": {
+                **common, "fairness": fairness,
+                "own_tenant_jain": own_jain, "jain_min": JAIN_FAIRNESS_MIN,
+            },
         },
         "progress_events": {
             "status": "passed" if progress_passed else "failed",

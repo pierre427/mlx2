@@ -349,3 +349,37 @@ def test_latency_gate_is_bound_to_its_own_requests():
 
     gates = probe.gate_batch_observability(FakeClient(), {})
     assert gates["latency_ttft_itl_percentiles"]["status"] == "passed"
+
+
+@pytest.mark.parametrize(
+    ("own_rates", "others", "passes"),
+    [
+        ((10.0, 10.0), {}, True),
+        ((10.0, 4.0), {}, True),         # Jain 0.84
+        ((100.0, 1.0), {}, False),       # Jain 0.51 was accepted as 0 < jain <= 1
+        ((30.0, 9.0), {}, False),        # slower tenant under a third of the faster
+        # Only the gate's own tenants are judged: unrelated earlier tenants
+        # neither rescue an unfair pair nor sink a fair one.
+        ((100.0, 1.0), {f"t{i}": 50.0 for i in range(8)}, False),
+        ((10.0, 10.0), {"slow": 0.1, "fast": 500.0}, True),
+    ],
+)
+def test_jain_fairness_gate_judges_its_own_tenants(own_rates, others, passes):
+    class Rated(FakeClient):
+        def get(self, path):
+            window = super().get(path)
+            if path == "/v1/status/batching":
+                own = sorted(t for t in self.tenants if t.startswith("qwen36-http-"))
+                rates = dict(others)
+                rates.update(zip(own, own_rates))
+                window["fairness"]["tenant_token_rates"] = rates
+                window["fairness"]["jain_tenant_token_rate"] = (
+                    sum(rates.values()) ** 2
+                    / (len(rates) * sum(value * value for value in rates.values()))
+                    if rates else None
+                )
+            return window
+
+    gates = probe.gate_batch_observability(Rated(), {})
+    status = gates["tenant_jain_fairness"]["status"]
+    assert status == ("passed" if passes else "failed")
