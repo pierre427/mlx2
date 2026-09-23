@@ -131,7 +131,11 @@ class PrometheusBuilder:
 
     def __init__(self) -> None:
         self._families: dict[str, tuple[str, str]] = {}
-        self._samples: list[str] = []
+        # Samples are kept per family so render() can emit each family as one
+        # contiguous group, as the text format requires. Each entry is a sort
+        # key and the lines it contributes; a histogram label set contributes
+        # its buckets, sum, and count as one unit so bucket order survives.
+        self._samples: dict[str, list[tuple[str, tuple[str, ...]]]] = {}
 
     def _family(self, name: str, kind: str, help_text: str) -> None:
         if not _METRIC_RE.fullmatch(name):
@@ -161,7 +165,8 @@ class PrometheusBuilder:
         labels: Mapping[str, Any] | None = None,
     ) -> None:
         self._family(name, kind, help_text)
-        self._samples.append(f"{name}{self._labels(labels)} {_number(value)}")
+        line = f"{name}{self._labels(labels)} {_number(value)}"
+        self._samples.setdefault(name, []).append((line, (line,)))
 
     def counter(
         self,
@@ -192,23 +197,31 @@ class PrometheusBuilder:
     ) -> None:
         self._family(name, "histogram", help_text)
         base_labels = dict(labels or {})
+        lines = []
         for boundary, count in zip(snapshot.buckets, snapshot.bucket_counts):
             bucket_labels = {**base_labels, "le": _number(boundary)}
-            self._samples.append(f"{name}_bucket{self._labels(bucket_labels)} {count}")
-        self._samples.append(
+            lines.append(f"{name}_bucket{self._labels(bucket_labels)} {count}")
+        lines.append(
             f"{name}_bucket{self._labels({**base_labels, 'le': '+Inf'})} {snapshot.count}"
         )
         suffix = self._labels(base_labels)
-        self._samples.append(f"{name}_sum{suffix} {_number(snapshot.total)}")
-        self._samples.append(f"{name}_count{suffix} {snapshot.count}")
+        lines.append(f"{name}_sum{suffix} {_number(snapshot.total)}")
+        lines.append(f"{name}_count{suffix} {snapshot.count}")
+        self._samples.setdefault(name, []).append((suffix, tuple(lines)))
 
     def render(self) -> str:
-        metadata = []
+        # Each family is one group: HELP, TYPE, then its samples. Parsers
+        # attach samples to the most recent TYPE line, so interleaving
+        # families, or string-sorting histogram buckets, leaves every sample
+        # untyped and buckets out of order.
+        lines = []
         for name, (kind, help_text) in sorted(self._families.items()):
-            metadata.extend(
+            lines.extend(
                 (f"# HELP {name} {_escape_help(help_text)}", f"# TYPE {name} {kind}")
             )
-        return "\n".join((*metadata, *sorted(self._samples))) + "\n"
+            for _key, group in sorted(self._samples.get(name, ())):
+                lines.extend(group)
+        return "\n".join(lines) + "\n"
 
 
 from .agent_compat import COUNTERS as _AGENT_COMPAT_COUNTERS

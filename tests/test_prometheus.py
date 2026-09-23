@@ -256,21 +256,54 @@ class FakeEngine:
 _SAMPLE_RE = re.compile(r"^[a-zA-Z_:][a-zA-Z0-9_:]*(?:\{.*\})? [-+0-9.eENaInf]+$")
 
 
+def _sample_family(sample_name, kinds):
+    for suffix in ("_bucket", "_sum", "_count"):
+        base = sample_name[: -len(suffix)]
+        if sample_name.endswith(suffix) and kinds.get(base) == "histogram":
+            return base
+    return sample_name
+
+
 def assert_valid_prometheus_text(text):
     assert text.endswith("\n")
     helps = set()
     types = set()
+    kinds = {}
     samples = 0
+    # The text format requires every line of a family in one contiguous group
+    # after its TYPE line, and histogram buckets in increasing "le" order with
+    # +Inf last; parsers otherwise treat the samples as untyped.
+    closed = set()
+    current = None
+    buckets = {}
     for line in text.splitlines():
         if line.startswith("# HELP "):
-            helps.add(line.split()[2])
+            family = line.split()[2]
+            helps.add(family)
         elif line.startswith("# TYPE "):
             fields = line.split()
             assert fields[3] in {"counter", "gauge", "histogram"}
-            types.add(fields[2])
+            family = fields[2]
+            types.add(family)
+            kinds[family] = fields[3]
         else:
             assert _SAMPLE_RE.fullmatch(line), line
             samples += 1
+            name = re.match(r"[a-zA-Z_:][a-zA-Z0-9_:]*", line).group(0)
+            family = _sample_family(name, kinds)
+            assert family in kinds, f"sample before its TYPE line: {line}"
+            if name.endswith("_bucket") and kinds[family] == "histogram":
+                label_set = re.sub(r',?le="[^"]*"', "", line.rsplit(" ", 1)[0])
+                le = re.search(r'le="([^"]*)"', line).group(1)
+                buckets.setdefault(label_set, []).append(float(le))
+        if family != current:
+            assert family not in closed, f"family {family} is not contiguous"
+            if current is not None:
+                closed.add(current)
+            current = family
+    for label_set, edges in buckets.items():
+        assert edges == sorted(edges), (label_set, edges)
+        assert edges[-1] == float("inf"), label_set
     assert helps == types
     assert samples > 0
 
@@ -518,6 +551,26 @@ def test_exposition_parses_with_official_prometheus_client_when_installed():
     families = list(parser.text_string_to_metric_families(render_engine_metrics(engine)))
     assert families
     assert any(family.name == "mlx2_requests" for family in families)
+    # Every family must parse with its declared type and its samples; an
+    # interleaved exposition parses as hundreds of untyped singletons.
+    untyped = [family.name for family in families if family.type == "unknown"]
+    assert not untyped, untyped[:5]
+    assert all(family.samples for family in families)
+    by_name = {family.name: family for family in families}
+    ttft = by_name["mlx2_time_to_first_token_seconds"]
+    assert ttft.type == "histogram"
+    edges = [
+        float(sample.labels["le"])
+        for sample in ttft.samples
+        if sample.name.endswith("_bucket")
+    ]
+    assert len(edges) == 15
+    assert edges == sorted(edges) and edges[-1] == float("inf")
+    assert {sample.name for sample in ttft.samples} == {
+        "mlx2_time_to_first_token_seconds_bucket",
+        "mlx2_time_to_first_token_seconds_sum",
+        "mlx2_time_to_first_token_seconds_count",
+    }
 
 
 def test_free_form_admission_and_mechanism_values_collapse_to_other():
