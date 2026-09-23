@@ -346,6 +346,134 @@ def test_engine_apc_namespace_isolates_adapters(host, adapters):
         engine.close()
 
 
+class _Budget:
+    """Linear cache projection so admission can budget rolling checkpoints."""
+
+    def project(self, tokens):
+        return int(tokens) * 1024
+
+    def as_dict(self):
+        return {"bytes_per_token": 1024}
+
+
+def _kv_only_model():
+    from mlx2.runtime.models.qwen3_5 import TextModelArgs
+    from mlx2.runtime.models.qwen38_27b import TextModel
+
+    args = TextModelArgs(
+        model_type="qwen3_5", hidden_size=64, intermediate_size=64,
+        num_hidden_layers=2, num_attention_heads=2, num_key_value_heads=1,
+        head_dim=32, vocab_size=128, linear_num_key_heads=2,
+        linear_num_value_heads=4, linear_key_head_dim=8, linear_value_head_dim=8,
+        linear_conv_kernel_dim=3, full_attention_interval=1,
+        partial_rotary_factor=0.5, rope_parameters=None, max_position_embeddings=512,
+    )
+    mx.random.seed(5)
+    model = TextModel(args)
+    model.eval()
+    mx.eval(model.parameters())
+    return model
+
+
+def _rolling_engine(model, root, **kwargs):
+    from test_approximate_kv_serving import make_adapter
+
+    class Adapter(make_adapter(model, operations=None)):
+        def cache_budget(self, mtp):
+            return _Budget()
+
+    engine = ServingEngine(
+        "tiny", adapter_factory=Adapter, qualification_mode=True, mtp=False,
+        max_lanes=1, prefill_step=16, lora_root=root, **kwargs,
+    )
+    assert engine.ready.wait(60), engine.error
+    return engine
+
+
+def _cancel_adapter_prefill(engine, body, should_block):
+    import threading
+
+    from mlx2.runtime.generate import BatchGenerator
+
+    reached, release = threading.Event(), threading.Event()
+    original = BatchGenerator.next
+    state = {"on": False, "calls": 0}
+
+    def gated(self, *args, **kwargs):
+        if state["on"] and not release.is_set():
+            state["calls"] += 1
+            if should_block(engine, state["calls"]):
+                reached.set()
+                release.wait(30)
+        return original(self, *args, **kwargs)
+
+    BatchGenerator.next = gated
+    try:
+        job = engine.submit(body)
+        state["on"] = True
+        assert reached.wait(60), "prefill never reached the gate"
+        job.cancelled.set()
+        release.set()
+        event = job.events.get(timeout=60)
+        while "error" not in event and "finish_reason" not in event:
+            event = job.events.get(timeout=60)
+    finally:
+        release.set()
+        BatchGenerator.next = original
+    assert event == {"error": "cancelled"}
+
+
+@pytest.mark.parametrize("topology", ["hybrid", "kv"])
+def test_engine_rolling_checkpoints_stay_in_the_adapter_namespace(host, tmp_path, topology):
+    build = tiny_model if topology == "hybrid" else _kv_only_model
+    keys = (
+        KEYS_A
+        if topology == "hybrid"
+        else ("model.layers.0.self_attn.q_proj", "model.layers.1.self_attn.v_proj")
+    )
+    root = tmp_path / "loras"
+    write_adapter(root / "sql", keys=keys, dims=dims_for(build(), keys), rank=4, scale=4.0, seed=1)
+    prompt = [(7 * i + 3) % 120 + 1 for i in range(120)]
+    engine = _rolling_engine(
+        build(), str(root), max_loras=1, max_lora_rank=8,
+        execution_policy={"apc_rolling_checkpoints": {"interval_tokens": 32}},
+    )
+    try:
+        assert engine.apc_rolling_route == topology
+        engine.load_lora_adapter("sql", "sql")
+        # A LoRA request is cancelled mid-prefill with a rolling (hybrid) or
+        # cancelled-prefill (KV) checkpoint already publishable.
+        _cancel_adapter_prefill(
+            engine,
+            request(prompt, "sql"),
+            (lambda engine, _calls: engine.counts["apc_rolling_checkpoints_published"] >= 1)
+            if topology == "hybrid"
+            else (lambda _engine, calls: calls == 6),
+        )
+        counter = (
+            "apc_rolling_checkpoints_published"
+            if topology == "hybrid"
+            else "apc_rolling_checkpoints_cancel_published"
+        )
+        assert engine.counts[counter] >= 1
+        # The base model must not resume from state the adapter computed.
+        base_tokens, base_receipt = collect(engine.submit(request(prompt)))
+        assert base_receipt["cached_tokens"] == 0, base_receipt["cache_checkpoint_role"]
+        # The checkpoint is in the adapter's own namespace: its retry hits it.
+        _, adapter_receipt = collect(engine.submit(request(prompt, "sql")))
+        assert adapter_receipt["cached_tokens"] >= 32
+        assert adapter_receipt["cache_checkpoint_role"] == "prefill_rolling"
+    finally:
+        engine.close()
+    cold = _rolling_engine(build(), None)
+    try:
+        cold_tokens, cold_receipt = collect(cold.submit(request(prompt)))
+    finally:
+        cold.close()
+    assert cold_receipt["cached_tokens"] == 0
+    assert base_tokens == cold_tokens
+
+
 def test_engine_slot_pressure_defers_then_evicts(host, adapters):
     root, _ = adapters
     engine = make_engine(root, max_loras=1, max_lora_rank=8, max_lanes=2)

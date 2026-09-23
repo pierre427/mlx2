@@ -3250,9 +3250,10 @@ class ServingEngine:
                 if checkpoint.get("mtp_state")
                 else None
             )
-            key = cache_key_for(
-                owner.tenant_id, owner.request.get("_mlx2_media_fingerprint")
-            )
+            # The same scope admission looks up under: media, LoRA adapter and
+            # semantic fingerprints, so adapter state never enters the base
+            # namespace.
+            key = cache_key_for(owner.tenant_id, request_apc_scope(owner.request))
             tokens = tuple(checkpoint["tokens"])
             stored = self._publish_checkpoint(
                 apc,
@@ -3302,9 +3303,7 @@ class ServingEngine:
                 continue
             stored = self._publish_checkpoint(
                 apc,
-                cache_key_for(
-                    job.tenant_id, job.request.get("_mlx2_media_fingerprint")
-                ),
+                cache_key_for(job.tenant_id, request_apc_scope(job.request)),
                 list(tokens),
                 prompt_cache,
                 retention_role="prefill_rolling",
@@ -4339,7 +4338,7 @@ class ServingEngine:
                         apc.lookup(
                             cache_key_for(
                                 job.tenant_id,
-                                job.request.get("_mlx2_media_fingerprint"),
+                                request_apc_scope(job.request),
                             ),
                             replay_tokens,
                             allow_disk_restore=False,
@@ -5212,7 +5211,7 @@ class ServingEngine:
                                 job.rolling_checkpoint = (
                                     cache_key_for(
                                         job.tenant_id,
-                                        job.request.get("_mlx2_media_fingerprint"),
+                                        request_apc_scope(job.request),
                                     ),
                                     tuple(tokens[: hit.cached_tokens]),
                                 )
