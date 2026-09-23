@@ -571,6 +571,36 @@ def test_block_manifest_paths_fail_closed_for_materialize_and_remove(tmp_path):
     assert not path.exists()
 
 
+def test_replacing_a_block_manifest_with_a_plain_payload_fails_closed(tmp_path):
+    import os
+    from pathlib import Path
+
+    from mlx2.runtime.models.cache import save_prompt_cache
+
+    clock = [0.0]
+    apc = APCv2(max_size=8, layout_name="layout", idle_disk_seconds=1,
+                idle_disk_dir=str(tmp_path), persistent_block_bytes=64,
+                now_fn=lambda: clock[0])
+    key, tokens = _key(), [1, 2, 3, 4]
+    apc.store(key, tokens, [_cache(4)])
+    clock[0] = 10.0
+    assert apc.spill_idle_entries() == 1
+    target = tmp_path / Path(apc._trie.get(key, tokens)._apc_disk["target"]).name
+    assert target.read_bytes()[:1] == b"{"
+    # A plain safetensors payload has no manifest, so no MAC to forge.
+    poison = KVCache()
+    values = mx.full((1, 1, 4, 2), 999.0, dtype=mx.bfloat16)
+    poison.update_and_fetch(values, values)
+    mx.eval(poison.state)
+    staged = tmp_path / "poison.safetensors"
+    save_prompt_cache(str(staged), [poison])
+    os.replace(staged, target)
+
+    miss = apc.lookup(key, tokens + [5])
+    assert not miss.hit and miss.cache is None
+    assert apc.apc_stats["idle_disk"]["restore_failures"] == 1
+
+
 def test_apcv2_startup_removes_orphaned_block_directories(tmp_path):
     orphan = tmp_path / "apc-idle-orphan.safetensors.blocks"
     orphan.mkdir()

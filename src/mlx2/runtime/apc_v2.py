@@ -1545,6 +1545,12 @@ class APCv2(PrefixIndex):
                         draft_signature if draft in created else None
                     ),
                     "files": file_records if self._persist_dir is not None else None,
+                    # Target and draft were replaced by MAC'd block manifests;
+                    # restore must refuse anything else at those paths.
+                    "block_encoded": (
+                        self._persist_dir is None
+                        and int(self._persistent_block_bytes) > 0
+                    ),
                 }
                 entry._apc_disk = disk
                 written = (
@@ -1668,6 +1674,7 @@ class APCv2(PrefixIndex):
                 target_path = stack.enter_context(materialize_block_file(
                     Path(target),
                     expected_signature=disk.get("target_signature", ""),
+                    require_manifest=bool(disk.get("block_encoded")),
                 ))
                 cache = load_prompt_cache(str(target_path))
                 sidecar = None
@@ -1676,6 +1683,7 @@ class APCv2(PrefixIndex):
                     draft_path = stack.enter_context(materialize_block_file(
                         Path(disk["draft"]),
                         expected_signature=disk.get("draft_signature", ""),
+                        require_manifest=bool(disk.get("block_encoded")),
                     ))
                     draft = load_prompt_cache(str(draft_path))
                     arrays = mx.load(disk["aux"]) if disk.get("aux") else {}

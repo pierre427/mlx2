@@ -156,11 +156,19 @@ def remove_block_file(path: Path) -> int:
 
 
 @contextmanager
-def materialize_block_file(path: Path, *, expected_signature: str):
-    """Verify every block and full digest before exposing a temporary file."""
+def materialize_block_file(
+    path: Path, *, expected_signature: str, require_manifest: bool = False
+):
+    """Verify every block and full digest before exposing a temporary file.
+
+    ``require_manifest`` is set for a path that was block encoded: replacing
+    its manifest with a plain payload must not bypass the MAC and checksums.
+    """
     path = Path(path)
     manifest = _read_block_manifest(path)
     if manifest is None:
+        if require_manifest:
+            raise ValueError("APCv2 persistent block manifest is missing")
         yield path
         return
     if manifest.get("signature") != str(expected_signature):
