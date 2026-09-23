@@ -611,3 +611,10 @@ def test_mixed_warm_pairs_do_identical_work():
     assert block.count("min_tokens=64") == 2
     assert block.count('reasoning_effort="none"') == 2
     assert 'r["usage"]["completion_tokens"] == 64 for r in mixed' in source
+
+
+def test_stop_check_runs_with_thinking_off():
+    source = (ROOT / "scripts" / "qualify_serving.py").read_text()
+    call = source[source.index('"Reply with exactly MLX2_READY", stop="_READY"'):]
+    call = call[: call.index("))")]
+    assert 'reasoning_effort="none"' in call and "think=False" in call

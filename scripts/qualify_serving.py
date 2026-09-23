@@ -1388,7 +1388,14 @@ def main():
             reasoning_response_passes(thought),
             {"attempts": thought_attempts},
         )
-        stopped = post(prompt("Reply with exactly MLX2_READY", stop="_READY"))
+        # Unrelated to reasoning, so thinking is off: a thinking-default model
+        # (Laguna) otherwise quotes MLX2_READY in its reasoning, the stop
+        # matches there, and the answer is empty (the pass-3 triage's
+        # "checks consume only reasoning" harness class).
+        stopped = post(prompt(
+            "Reply with exactly MLX2_READY", stop="_READY",
+            reasoning_effort="none", think=False,
+        ))
         check(
             "stop",
             content(stopped) == "MLX2"
