@@ -125,3 +125,79 @@ def test_poolside_tool_parser_preserves_declared_strings():
         "<arg_key>limit</arg_key><arg_value>2</arg_value></tool_call>", tools
     )
     assert parsed == {"name": "lookup", "arguments": {"code": "001", "limit": 2}}
+
+
+def _poolside_tools(schema):
+    return [{"type": "function", "function": {"name": "f", "parameters": {
+        "type": "object", "properties": {"x": schema},
+    }}}]
+
+
+def _poolside_call(value):
+    # The template's layout for one argument.
+    return f"<tool_call>f\n<arg_key>x</arg_key>\n<arg_value>{value}</arg_value>\n</tool_call>"
+
+
+def _poolside_events(tools, text, split, *, tolerant=False):
+    """Events the Laguna output parser emits for ``text``, pushed ``split``
+    characters at a time."""
+    from mlx2.output import OutputParser
+
+    parser = OutputParser(
+        chat=True, tools=tools, parse_tool=parse_tool_call,
+        tolerant_tool_markers=tolerant,
+    )
+    events = []
+    for start in range(0, len(text), split):
+        events += parser.push(text[start : start + split])
+    return parser, events + parser.push("", final=True)
+
+
+@pytest.mark.parametrize(
+    ("schema", "value"),
+    [
+        ({"type": "object"}, '{"s": "a</arg_value>b"}'),
+        ({"type": "object"}, '{"s": "a</tool_call>b", "t": "</arg_value></tool_call>"}'),
+        ({"type": "array"}, '["say \\"</tool_call>\\"", "</arg_value>\\\\"]'),
+        ({"type": "array"}, '["<tool_call>g</tool_call>"]'),
+    ],
+)
+def test_poolside_json_values_keep_quoted_closing_tags(schema, value):
+    """The template writes non-string arguments with ``tojson``, which leaves
+    ``<`` raw, so a JSON string may quote ``</arg_value>`` or
+    ``</tool_call>``.  The parser cut the value at the first
+    ``</arg_value>`` and served ``{"s": "a`` as a string, and a quoted
+    ``</tool_call>`` cut the call, which was served without the argument.  A
+    JSON value now ends at the first closer outside its strings, and a call
+    whose text ends inside one runs on to the next ``</tool_call>``, however
+    it is chunked."""
+    tools = _poolside_tools(schema)
+    text = _poolside_call(value)
+    both = text + "\n" + text
+    for split in (len(both), 1, 7):
+        for sample, count in ((text, 1), (both, 2)):
+            _, events = _poolside_events(tools, sample, split)
+            calls = [c for e in events for c in e.get("tool_calls", ())]
+            assert [json.loads(c["function"]["arguments"]) for c in calls] == [
+                {"x": json.loads(value)}
+            ] * count
+            assert "".join(e.get("content", "") for e in events) == "\n" * (count - 1)
+
+
+@pytest.mark.parametrize("value", ["a</arg_value>b", "a</tool_call>b"])
+def test_poolside_raw_values_that_spell_a_closer_fail_closed(value):
+    """The template writes a string argument raw, so a closer inside it cannot
+    be told from markup and the value still ends at the first one.  What
+    followed was dropped: ``a</arg_value>b`` was served as ``a``, and
+    ``a</tool_call>b`` as a call without arguments with the rest leaking into
+    content.  Such a call is now malformed: an error, or all content under
+    the tolerant fallback."""
+    tools = _poolside_tools({"type": "string"})
+    text = _poolside_call(value)
+    for split in (len(text), 1, 7):
+        with pytest.raises(ValueError):
+            _poolside_events(tools, text, split)
+        parser, events = _poolside_events(tools, text, split, tolerant=True)
+        assert not any("tool_calls" in e for e in events)
+        assert "".join(e.get("content", "") for e in events) == text
+        assert parser.tool_call_parse_fallbacks == 1
