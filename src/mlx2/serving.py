@@ -2873,7 +2873,12 @@ class ServingEngine:
         if type(count) is not int or count < 1:
             raise ValueError("parallel sample count must be positive")
         if count > self.max_lanes:
-            raise Overloaded("parallel samples exceed configured lane capacity")
+            # No amount of waiting admits more samples than lanes: a request
+            # error, not a retryable overload.
+            raise ValueError(
+                f"n={count} parallel samples exceed configured lane capacity "
+                f"(--max-lanes {self.max_lanes})"
+            )
         from .memory import execution_headroom
 
         if getattr(self, "host_memory_monitor", None) is not None:

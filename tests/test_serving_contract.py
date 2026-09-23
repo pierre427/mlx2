@@ -1884,6 +1884,29 @@ def test_parallel_sample_usage_counts_the_shared_prompt_once():
     }
 
 
+def test_parallel_samples_above_lane_capacity_are_a_client_error():
+    class LaneEngine(FakeEngine):
+        max_lanes = 4
+        admit_parallel_samples = ServingEngine.admit_parallel_samples
+
+    engine = LaneEngine()
+    server = ThreadingHTTPServer(("127.0.0.1", 0), handler_for(engine))
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        with pytest.raises(HTTPError) as error:
+            post(f"http://127.0.0.1:{server.server_port}", n=5)
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
+    # No retry can ever admit it: not a 429 with Retry-After.
+    assert error.value.code == 400
+    assert "Retry-After" not in error.value.headers
+    assert "lane capacity" in json.load(error.value)["error"]["message"]
+    assert engine.job is None
+
+
 def test_overload_is_http_429(http_engine):
     engine, base = http_engine
     engine.overloaded = True

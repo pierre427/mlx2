@@ -417,5 +417,5 @@ def test_parallel_sample_guard_waits_for_headroom_before_refusing(monkeypatch):
     assert state["reclaims"] == 2
     assert engine.counts["memory_cache_reclaims_before_reject"] == 2
     assert len(rejected) == 1
-    with pytest.raises(serving.Overloaded, match="lane capacity"):
+    with pytest.raises(ValueError, match="lane capacity"):
         engine.admit_parallel_samples(5)
