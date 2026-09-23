@@ -134,6 +134,20 @@ def test_streaming_random_sequences_match_full_decode():
         assert detok.text == xt.decode_ids(tables, ids)
 
 
+def test_streaming_rejects_a_padded_logits_id_with_a_value_error():
+    """The logits row is wider than the vocabulary; a padded id is a caller
+    error reported like the BPE detokenizer's, and leaves the stream intact."""
+    detok = xt.XingStreamingDetokenizer(_TablesOnly(_fixture_tables()))
+    hi = 13029  # "▁hi"
+    detok.add_token(hi)
+    for bad in (xt.VOCAB_SIZE, xt.VOCAB_SIZE + 7, -1):
+        with pytest.raises(ValueError, match="unknown Xing4.0 token ID"):
+            detok.add_token(bad)
+    detok.finalize()
+    assert detok.tokens == [hi]
+    assert detok.text == xt.decode_ids(_fixture_tables(), [hi])
+
+
 def test_tables_reject_a_foreign_vocabulary():
     pieces = [f"p{i}" for i in range(xt.VOCAB_SIZE)]
     with pytest.raises(xt.XingTokenizerError):

@@ -6497,11 +6497,6 @@ class ServingEngine:
                                 del active[response.uid]
                                 continue
                             self._emit(job, {"logprob": probability})
-                        if response.finish_reason != "stop":
-                            job.detokenizer.add_token(response.token)
-                        if response.finish_reason:
-                            job.detokenizer.finalize()
-                        text = job.detokenizer.last_segment
                         # Reasoning tokens are counted per generated token: one
                         # counts when the reasoning channel is open before or
                         # after it is parsed, so held-back marker prefixes and
@@ -6511,6 +6506,14 @@ class ServingEngine:
                             == "reasoning_content"
                         )
                         try:
+                            # Detokenizing is per-lane work too: a sampled id the
+                            # tokenizer cannot decode (logits rows are wider than
+                            # the vocabulary) fails this request, not the worker.
+                            if response.finish_reason != "stop":
+                                job.detokenizer.add_token(response.token)
+                            if response.finish_reason:
+                                job.detokenizer.finalize()
+                            text = job.detokenizer.last_segment
                             finish_output = getattr(job.output_parser, "finish", None)
                             if response.finish_reason and callable(finish_output):
                                 deltas = finish_output(text, response.finish_reason)

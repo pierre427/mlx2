@@ -290,7 +290,11 @@ class XingStreamingDetokenizer:
         return clone
 
     def add_token(self, token):
-        token = _check_id(token)
+        token = int(token)
+        if not 0 <= token < VOCAB_SIZE:
+            # The logits row is wider than the vocabulary; report a padded id
+            # the way the other streaming detokenizers do.
+            raise ValueError(f"unknown Xing4.0 token ID: {token}")
         self.tokens.append(token)
         if self._tables.kinds[token] == _SPECIAL:
             self.text += self._run.end() + self._tables.pieces[token]

@@ -142,6 +142,11 @@ class SPMStreamingDetokenizer(StreamingDetokenizer):
         self._unflushed = b""
 
     def add_token(self, token):
+        # A negative id would index from the end and a padded logits id past
+        # the vocabulary would raise IndexError; both are the same caller
+        # error, reported the way the BPE detokenizer reports it.
+        if token < 0 or token >= len(self.tokenmap):
+            raise ValueError(f"unknown SPM token ID: {token}")
         self.tokens.append(token)
         v = self.tokenmap[token]
         self._unflushed += v
