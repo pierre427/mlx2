@@ -1119,6 +1119,7 @@ class StructuredOutputProcessor:
         capture_failure_context=False,
         generation_stop_token_ids=None,
         structural_token_ids=None,
+        automata=None,
     ):
         self.tokenizer = tokenizer
         # Grammar deferral: while the generated ids do not yet contain the
@@ -1234,7 +1235,7 @@ class StructuredOutputProcessor:
             from .structured_automaton import AutomatonUnsupported, automaton_for, trie_for
 
             try:
-                self._automaton = automaton_for(constraint.pattern)
+                self._automaton = automaton_for(constraint.pattern, prepared=automata)
             except AutomatonUnsupported as exc:
                 self.automaton_refusal = str(exc)
             else:
@@ -2288,21 +2289,16 @@ def make_structured_processor(
     generation_stop_token_ids=None,
     server_grammar=None,
     structural_token_ids=None,
+    automata=None,
 ):
-    if server_grammar is not None:
-        # A server-composed pattern (item 12 tool grammars): not client input,
-        # so the client grammar length cap does not apply; it is used verbatim.
-        # It is still priced, because it embeds the client's tool schemas.
-        source = rf"(?:{server_grammar})"
-        try:
-            _price_pattern(source, "server tool grammar")
-            constraint = _Constraint(regex.compile(source), kind="tool_grammar")
-        except regex.error as exc:
-            raise ValueError(f"invalid server tool grammar: {exc}") from exc
-    else:
-        constraint = compile_constraint(
-            response_format, grammar, leading_whitespace=bool(defer_until)
-        )
+    """Build a request's processor, or None when it has no constraint.
+
+    ``automata`` is what ``prepare_structured_automata`` returned for the same
+    constraint arguments; the automaton it holds is then not compiled again.
+    """
+    constraint = _request_constraint(
+        response_format, grammar, server_grammar, defer_until
+    )
     if constraint is None:
         return None
     return StructuredOutputProcessor(
@@ -2319,7 +2315,54 @@ def make_structured_processor(
         capture_failure_context=capture_failure_context,
         generation_stop_token_ids=generation_stop_token_ids,
         structural_token_ids=structural_token_ids,
+        automata=automata,
     )
+
+
+def _request_constraint(response_format, grammar, server_grammar, defer_until):
+    if server_grammar is not None:
+        # A server-composed pattern (item 12 tool grammars): not client input,
+        # so the client grammar length cap does not apply; it is used verbatim.
+        # It is still priced, because it embeds the client's tool schemas.
+        source = rf"(?:{server_grammar})"
+        try:
+            _price_pattern(source, "server tool grammar")
+            return _Constraint(regex.compile(source), kind="tool_grammar")
+        except regex.error as exc:
+            raise ValueError(f"invalid server tool grammar: {exc}") from exc
+    return compile_constraint(
+        response_format, grammar, leading_whitespace=bool(defer_until)
+    )
+
+
+def prepare_structured_automata(
+    *, response_format=None, grammar=None, server_grammar=None, defer_until=None
+):
+    """Compile the token automaton ``make_structured_processor`` would build.
+
+    Returns ``{pattern source: automaton or its refusal}`` for that call's
+    ``automata`` argument, which must be given the same constraint arguments.
+    Compiling can take seconds (a string ``maxLength`` of a few thousand
+    unrolls into that many states), and serving builds processors on the
+    generation worker every lane shares, so it calls this on the submitting
+    request's thread first.  Invalid constraints raise what the processor
+    build would raise.
+    """
+    if __import__("os").environ.get("MLX2_STRUCTURED_AUTOMATON", "1") == "0":
+        return {}
+    constraint = _request_constraint(
+        response_format, grammar, server_grammar, defer_until
+    )
+    if constraint is None:
+        return {}
+    from .structured_automaton import AutomatonUnsupported, automaton_for
+
+    try:
+        automaton = automaton_for(constraint.pattern)
+    except AutomatonUnsupported as exc:
+        # A refusal can be as slow to reach as a compile; keep it too.
+        automaton = exc
+    return {constraint.pattern.pattern: automaton}
 
 
 def structured_receipt(processor, completion_tokens=0):

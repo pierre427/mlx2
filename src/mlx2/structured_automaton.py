@@ -883,29 +883,67 @@ def _assemble(root, rules, chosen, symbols_of, class_count, bounds, segment_clas
 _AUTOMATA = OrderedDict()
 _AUTOMATA_LOCK = threading.Lock()
 _DEFAULT_FLAGS = regex.compile("x").flags
+# Sources being compiled now, so concurrent callers share one compile.
+_COMPILING = {}
 
 
-def automaton_for(pattern):
-    """Cached automaton for a compiled ``regex`` pattern (raises when unsupported)."""
+class _PendingCompile:
+    __slots__ = ("done", "result")
+
+    def __init__(self):
+        self.done = threading.Event()
+        self.result = None
+
+
+def _compile_or_refusal(source):
+    try:
+        return compile_pattern(source)
+    except AutomatonUnsupported as exc:
+        return exc
+    except RecursionError:
+        return AutomatonUnsupported("pattern nests too deeply")
+
+
+def automaton_for(pattern, prepared=None):
+    """Cached automaton for a compiled ``regex`` pattern (raises when unsupported).
+
+    ``prepared`` maps pattern sources to what an earlier call returned or
+    raised for them.  An entry there is used as is: it was compiled before
+    the caller's hot path, and the shared cache may have evicted it since.
+    """
     source = getattr(pattern, "pattern", None)
     flags = getattr(pattern, "flags", None)
     if not isinstance(source, str) or flags != _DEFAULT_FLAGS:
         raise AutomatonUnsupported("pattern flags are not the defaults")
-    with _AUTOMATA_LOCK:
-        cached = _AUTOMATA.get(source)
-        if cached is not None:
-            _AUTOMATA.move_to_end(source)
-    if cached is None:
-        try:
-            cached = compile_pattern(source)
-        except AutomatonUnsupported as exc:
-            cached = exc
-        except RecursionError:
-            cached = AutomatonUnsupported("pattern nests too deeply")
+    cached = (prepared or {}).get(source)
+    while cached is None:
         with _AUTOMATA_LOCK:
-            _AUTOMATA[source] = cached
-            while len(_AUTOMATA) > _AUTOMATON_CACHE_ENTRIES:
-                _AUTOMATA.popitem(last=False)
+            cached = _AUTOMATA.get(source)
+            if cached is not None:
+                _AUTOMATA.move_to_end(source)
+                break
+            pending = _COMPILING.get(source)
+            owner = pending is None
+            if owner:
+                pending = _COMPILING[source] = _PendingCompile()
+        if owner:
+            try:
+                pending.result = _compile_or_refusal(source)
+            finally:
+                with _AUTOMATA_LOCK:
+                    del _COMPILING[source]
+                    if pending.result is not None:
+                        _AUTOMATA[source] = pending.result
+                        while len(_AUTOMATA) > _AUTOMATON_CACHE_ENTRIES:
+                            _AUTOMATA.popitem(last=False)
+                pending.done.set()
+        else:
+            # Requests are prepared on their own threads, so a burst sharing
+            # one new schema would otherwise compile it once per request, all
+            # contending for the interpreter lock with the generation worker.
+            pending.done.wait()
+        # None only when the compiling thread died unexpectedly: try again.
+        cached = pending.result
     if isinstance(cached, Exception):
         raise AutomatonUnsupported(str(cached))
     return cached

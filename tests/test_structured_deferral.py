@@ -2,6 +2,9 @@
 adapter's thinking-close marker."""
 
 import json
+import threading
+import time
+import uuid
 from types import SimpleNamespace as NS
 
 import numpy as np
@@ -278,6 +281,10 @@ def scripted_engine(monkeypatch):
 
         def next(self):
             responses = []
+            if self.lanes and state.get("step_delay"):
+                # A decode step's device time, spent without the GIL.
+                time.sleep(state["step_delay"])
+                state["step_times"].append(time.monotonic())
             for uid, lane in list(self.lanes.items()):
                 step = len(lane["generated"])
                 # The model wants "hello" most and the scripted token second;
@@ -942,6 +949,146 @@ def test_forced_tool_grammar_admits_the_adapters_structural_special_token(
         "top_k": 5,
     }))
     assert final.get("status") == 502, final
+
+
+def _record_automaton_compiles(monkeypatch, delay=0.0):
+    """Record (and optionally slow down) every grammar automaton compile."""
+    from mlx2 import structured_automaton
+
+    original = structured_automaton.compile_pattern
+    compiles = []
+
+    def compile_pattern(source):
+        started = time.monotonic()
+        time.sleep(delay)
+        try:
+            return original(source)
+        finally:
+            compiles.append(NS(
+                source=source,
+                thread=threading.current_thread(),
+                started=started,
+                ended=time.monotonic(),
+            ))
+
+    monkeypatch.setattr(structured_automaton, "compile_pattern", compile_pattern)
+    # Every entry is evicted as it is stored, so only an automaton the job
+    # itself carries can serve its admission without a second compile.
+    monkeypatch.setattr(structured_automaton, "_AUTOMATON_CACHE_ENTRIES", 0)
+    return compiles
+
+
+def test_compiling_a_new_grammar_does_not_stall_decoding_lanes(
+    scripted_engine, monkeypatch
+):
+    """Admission built the structured processor on the generation worker,
+    and building it compiles the grammar's automaton: a ``maxLength: 4096``
+    string takes ~10 s to compile, during which every lane on the server
+    stopped producing tokens.  The compile now runs on the submitting
+    thread, and the job hands the result to admission."""
+    compiles = _record_automaton_compiles(monkeypatch, delay=1.0)
+    build, state = scripted_engine
+    engine = build(declare_marker=False)
+    state["step_times"] = []
+    state["step_delay"] = 0.01
+    base = {"messages": [{"role": "user", "content": "hi"}], "temperature": 0}
+    decoding = engine.submit({**base, "max_tokens": 1500})
+    # Its client keeps reading, as a streaming client would.
+    drained = {}
+    reader = threading.Thread(target=lambda: drained.update(final=_collect(decoding)[2]))
+    reader.start()
+    deadline = time.monotonic() + 10
+    while len(state["step_times"]) < 5 and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert len(state["step_times"]) >= 5
+    grammar = f"yes|no|z{uuid.uuid4().hex}"  # never compiled before
+    _, content, final = _collect(
+        engine.submit({**base, "grammar": grammar, "max_tokens": 4})
+    )
+    assert "error" not in final, final
+    assert content == "yes"
+    assert final["receipt"]["request_controls"]["structured_output"]["engine"] == "automaton"
+    [compiled] = [entry for entry in compiles if grammar in entry.source]
+    # The already-decoding lane kept stepping through the whole compile.
+    during = [t for t in state["step_times"] if compiled.started <= t <= compiled.ended]
+    assert len(during) >= 20, len(during)
+    assert compiled.thread is not engine.thread
+    decoding.cancelled.set()
+    reader.join(10)
+    assert drained["final"].get("error") == "cancelled", drained
+    assert engine.thread.is_alive() and engine.error is None
+
+
+@pytest.mark.parametrize("policy", [
+    {"constrained_tool_grammar": True},
+    {"constrained_tool_grammar": True, "constrained_tool_grammar_auto": True},
+])
+def test_adapter_tool_grammar_is_compiled_before_admission(
+    scripted_engine, monkeypatch, policy
+):
+    """The adapter-built tool grammar (a Muse strict string parameter took
+    ~45 s to minimize) is derived and compiled on the submitting thread too,
+    with the same thinking deferral admission applies, so admission reuses
+    it instead of compiling on the worker."""
+    compiles = _record_automaton_compiles(monkeypatch)
+    build, state = scripted_engine
+    engine = build(declare_marker=True, execution_policy=policy)
+    state["script"] = [2, 3, 4, THINK_CLOSE, TOOL_CALL, EOS]
+    unique = f"f{uuid.uuid4().hex}"  # makes the grammar one never compiled
+    request = {
+        "messages": [{"role": "user", "content": "add"}],
+        "enable_thinking": True,
+        "tool_choice": "required",
+        "parallel_tool_calls": False,
+        "tools": [
+            {
+                "type": "function",
+                "function": {
+                    "name": "sum",
+                    "strict": True,
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"x": {"type": "integer"}},
+                        "required": ["x"],
+                        "additionalProperties": False,
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": unique,
+                    "strict": True,
+                    "parameters": {
+                        "type": "object",
+                        "properties": {},
+                        "additionalProperties": False,
+                    },
+                },
+            },
+        ],
+        "max_tokens": 8,
+        "temperature": 0,
+        "top_k": 5,
+    }
+    job = engine.submit(request)
+    calls = []
+    while True:
+        event = job.events.get(timeout=10)
+        if "delta" in event:
+            calls.extend(event["delta"].get("tool_calls", ()))
+        if "finish_reason" in event or "error" in event:
+            final = event
+            break
+    assert "error" not in final, final
+    assert [call["function"]["name"] for call in calls] == ["sum"]
+    controls = final["receipt"]["request_controls"]
+    assert controls["tool_choice"]["decode_grammar"] == "engaged"
+    assert controls["structured_output"]["deferred"] is True
+    assert controls["structured_output"]["engine"] == "automaton"
+    [compiled] = [entry for entry in compiles if unique in entry.source]
+    assert compiled.thread is not engine.thread
+    assert engine.counts["constrained_tool_grammar_engagements"] == 1
 
 
 def test_unconstrained_tool_parse_fallback_is_counted_in_serving(scripted_engine):

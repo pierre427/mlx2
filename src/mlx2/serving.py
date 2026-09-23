@@ -1089,6 +1089,8 @@ class Job:
     tool_constraint_truncations_seen: int = 0
     tool_grammar_status: str = "disabled"
     tool_grammar_receipt: dict | None = None
+    # Automata of the request's grammar, compiled before publication.
+    structured_automata: dict | None = None
     approximate_kv_receipt: dict | None = None
     approximate_kv_applied: bool = False
     verify_bitexact_start: dict | None = None
@@ -2179,7 +2181,112 @@ class ServingEngine:
             job.verify_bitexact_start = handle.begin_request(
                 explicit=bool(request.get("verify_bitexact", False))
             )
+        job.structured_automata = self._prepare_structured_automata(job.request)
         return job
+
+    def _prepare_structured_automata(self, request):
+        """Compile the automaton of ``request``'s grammar before it is published.
+
+        Admission builds the structured-output processor on the generation
+        worker, which every lane shares, and compiling a new grammar there (a
+        string ``maxLength`` of a few thousand takes seconds) stopped every
+        decoding lane for that long.  This derives the constraint admission
+        will derive, from the same adapter hooks and deferral, on the
+        submitting thread.  The job carries the result, so admission neither
+        compiles nor depends on the shared cache still holding the entry.  A
+        failure is left for admission to raise, with the error and status it
+        has always given.
+        """
+        if not (
+            "grammar" in request
+            or "response_format" in request
+            # The auto tool grammar policy requires this one.
+            or (request.get("tools") and getattr(self, "constrained_tool_grammar", False))
+        ):
+            return None
+        from .structured_output import prepare_structured_automata
+
+        try:
+            # Admission renders prompts under this lock; the thinking-close
+            # lookup encodes with the same tokenizer.
+            with self.prompt_lock:
+                adapter = self.adapter
+                if adapter is None:
+                    return None
+                defer_until = (
+                    thinking_close_token_ids(adapter)
+                    if "messages" in request and thinking_enabled(adapter, request)
+                    else None
+                )
+            server_tool_grammar, tool_grammar, _, _ = self._tool_grammar_plan(
+                adapter, request, defer_until
+            )
+            return prepare_structured_automata(
+                response_format=request.get("response_format"),
+                grammar=request.get("grammar"),
+                server_grammar=server_tool_grammar or tool_grammar,
+                defer_until=defer_until,
+            )
+        except Exception:  # noqa: BLE001 - admission raises it again
+            return None
+
+    def _tool_grammar_plan(self, adapter, request, defer_until):
+        """The adapter tool grammar ``request`` decodes under, without effects.
+
+        Returns ``(server_tool_grammar, tool_grammar, status, receipt)``:
+        the extended (auto) grammar or the forced-call grammar, at most one
+        of them set.  Admission records the outcome; request preparation asks
+        for the same grammar to compile it early.
+        """
+        from .output import constrained_tool_choice
+
+        strict_auto = (
+            request.get("tool_choice", "auto") == "auto"
+            and any(
+                tool["function"].get("strict", False)
+                for tool in request.get("tools", ())
+            )
+        )
+        if self.constrained_tool_grammar_auto:
+            from .contracts import Capability
+            from .tool_grammar import plan_tool_grammar
+
+            grammar, status, receipt = plan_tool_grammar(
+                request,
+                getattr(adapter, "tool_constraint", None),
+                open_marker=getattr(adapter, "tool_call_open_marker", None),
+                leading_whitespace=bool(defer_until),
+            )
+            if grammar is not None and (
+                Capability.GRAMMAR not in self.route_capabilities
+                or (
+                    defer_until is None
+                    and "messages" in request
+                    and thinking_enabled(adapter, request)
+                )
+            ):
+                # Forced calls were refused at admission on such routes; the
+                # extended shapes degrade to the unconstrained
+                # (terminal-checked) path.
+                return None, None, "skipped_route_unsupported", None
+            return grammar, None, status, receipt
+        if self.constrained_tool_grammar and strict_auto:
+            return None, None, "skipped_strict_auto", None
+        if self.constrained_tool_grammar and constrained_tool_choice(request):
+            if (
+                "response_format" in request
+                or "grammar" in request
+                or bool(request.get("min_tokens", 0))
+            ):
+                return None, None, "skipped_request_combination", None
+            accessor = getattr(adapter, "tool_constraint", None)
+            if not callable(accessor):
+                return None, None, "skipped_adapter_unsupported", None
+            grammar = accessor(request)
+            if not grammar:
+                return None, None, "skipped_adapter_unsupported", None
+            return None, grammar, "engaged", None
+        return None, None, "disabled", None
 
     def _clear_allocator_cache_before_reject(self, *, synchronize=False):
         """Rate-limited allocator reclaim shared by every admission seam."""
@@ -5684,85 +5791,26 @@ class ServingEngine:
                             and thinking_enabled(adapter, job.request)
                             else None
                         )
-                        tool_grammar = None
+                        # The terminal receipt below reads this name.
                         from .output import constrained_tool_choice
 
-                        strict_auto = (
-                            job.request.get("tool_choice", "auto") == "auto"
-                            and any(
-                                tool["function"].get("strict", False)
-                                for tool in job.request.get("tools", ())
-                            )
-                        )
-                        server_tool_grammar = None
-                        if self.constrained_tool_grammar_auto:
-                            from .contracts import Capability
-                            from .tool_grammar import plan_tool_grammar
-
-                            (
-                                server_tool_grammar,
-                                job.tool_grammar_status,
-                                job.tool_grammar_receipt,
-                            ) = plan_tool_grammar(
-                                job.request,
-                                getattr(adapter, "tool_constraint", None),
-                                open_marker=getattr(
-                                    adapter, "tool_call_open_marker", None
-                                ),
-                                leading_whitespace=bool(defer_until),
-                            )
-                            if server_tool_grammar is not None and (
-                                Capability.GRAMMAR not in self.route_capabilities
-                                or (
-                                    defer_until is None
-                                    and "messages" in job.request
-                                    and thinking_enabled(adapter, job.request)
-                                )
+                        (
+                            server_tool_grammar,
+                            tool_grammar,
+                            job.tool_grammar_status,
+                            job.tool_grammar_receipt,
+                        ) = self._tool_grammar_plan(adapter, job.request, defer_until)
+                        if job.tool_grammar_status == "engaged":
+                            self.counts["constrained_tool_grammar_engagements"] += 1
+                            if (
+                                server_tool_grammar is not None
+                                and job.tool_grammar_receipt["shape"] != "calls"
                             ):
-                                # Forced calls were refused at admission on
-                                # such routes; the extended shapes degrade to
-                                # the unconstrained (terminal-checked) path.
-                                server_tool_grammar = job.tool_grammar_receipt = None
-                                job.tool_grammar_status = "skipped_route_unsupported"
-                            if server_tool_grammar is not None:
                                 self.counts[
-                                    "constrained_tool_grammar_engagements"
+                                    "constrained_tool_grammar_auto_engagements"
                                 ] += 1
-                                if job.tool_grammar_receipt["shape"] != "calls":
-                                    self.counts[
-                                        "constrained_tool_grammar_auto_engagements"
-                                    ] += 1
-                            elif job.tool_grammar_status != "disabled":
-                                self.counts["constrained_tool_grammar_skips"] += 1
-                        elif self.constrained_tool_grammar and strict_auto:
-                            job.tool_grammar_status = "skipped_strict_auto"
+                        elif job.tool_grammar_status != "disabled":
                             self.counts["constrained_tool_grammar_skips"] += 1
-                        elif (
-                            self.constrained_tool_grammar
-                            and constrained_tool_choice(job.request)
-                        ):
-                            incompatible = (
-                                "response_format" in job.request
-                                or "grammar" in job.request
-                                or bool(job.request.get("min_tokens", 0))
-                            )
-                            accessor = getattr(adapter, "tool_constraint", None)
-                            if incompatible:
-                                job.tool_grammar_status = "skipped_request_combination"
-                                self.counts["constrained_tool_grammar_skips"] += 1
-                            elif not callable(accessor):
-                                job.tool_grammar_status = "skipped_adapter_unsupported"
-                                self.counts["constrained_tool_grammar_skips"] += 1
-                            else:
-                                tool_grammar = accessor(job.request)
-                                if tool_grammar:
-                                    job.tool_grammar_status = "engaged"
-                                    self.counts[
-                                        "constrained_tool_grammar_engagements"
-                                    ] += 1
-                                else:
-                                    job.tool_grammar_status = "skipped_adapter_unsupported"
-                                    self.counts["constrained_tool_grammar_skips"] += 1
                         budget = think_budget
                         budget_processor = None
                         if (
@@ -5815,6 +5863,9 @@ class ServingEngine:
                                 if tool_grammar or server_tool_grammar
                                 else ()
                             ),
+                            # Compiled by ``_prepare_structured_automata`` on
+                            # the submitting thread, not on this shared one.
+                            automata=job.structured_automata,
                         )
                         job.structured = structured
                         if job.receipt_token_ids is None and (

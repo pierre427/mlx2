@@ -504,3 +504,51 @@ def test_processor_survives_a_scheduler_deepcopy_snapshot():
     scanner = StructuredOutputProcessor(tokenizer, 0, compile_constraint(None, r"(?=a)ab"))
     assert scanner.engine == "scanner"
     assert copy.deepcopy(scanner).engine == "scanner"
+
+
+def test_concurrent_requests_for_a_new_pattern_share_one_compile(monkeypatch):
+    """Serving compiles each request's grammar on the request's own thread,
+    so a burst of requests carrying one new schema asked for it at once.
+    Each compiled it (seconds apiece for a large ``maxLength``, all fighting
+    the generation worker for the interpreter lock); one compile serves all."""
+    import threading
+    import uuid
+
+    import regex
+
+    calls = []
+    original = sa.compile_pattern
+
+    def slow_compile(source):
+        calls.append(source)
+        time.sleep(0.3)
+        return original(source)
+
+    monkeypatch.setattr(sa, "compile_pattern", slow_compile)
+    pattern = regex.compile(f"(?:yes|no|z{uuid.uuid4().hex})")
+    unsupported = regex.compile(f"(?:(?=a)a{uuid.uuid4().hex})")
+    results = []
+    lock = threading.Lock()
+
+    def request(compiled):
+        try:
+            outcome = sa.automaton_for(compiled)
+        except AutomatonUnsupported as exc:
+            outcome = str(exc)
+        with lock:
+            results.append((compiled.pattern, outcome))
+
+    threads = [
+        threading.Thread(target=request, args=(compiled,))
+        for compiled in [pattern] * 4 + [unsupported] * 3
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(10)
+    assert sorted(calls) == sorted([pattern.pattern, unsupported.pattern])
+    automata = {id(outcome) for source, outcome in results if source == pattern.pattern}
+    assert len(automata) == 1
+    refusals = {outcome for source, outcome in results if source == unsupported.pattern}
+    assert len(refusals) == 1 and isinstance(next(iter(refusals)), str)
+    assert len(results) == 7 and not sa._COMPILING
