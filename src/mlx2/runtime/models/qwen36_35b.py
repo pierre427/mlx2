@@ -57,6 +57,9 @@ class GatedDeltaNet(ReferenceGatedDeltaNet):
     def _try_fused_decode(self, qkv, z, b, a, mask, cache):
         if self.fused_gdn_decode_mode == "stock":
             return None
+        if qkv.shape[1] > 1 and not bool(getattr(cache, "speculating", False)):
+            # A prefill chunk is not a decode candidate; see Qwen4's gate.
+            return None
         if cache is None or cache[0] is None or cache[1] is None:
             return self._fallback("uninitialized cache")
         describe = getattr(cache, "rollback_spans", None)

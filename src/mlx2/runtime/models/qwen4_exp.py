@@ -1161,6 +1161,11 @@ class GatedDeltaNet(Qwen35GatedDeltaNet):
                 )
         if self.fused_gdn_decode_mode == "stock":
             return None
+        if qkv.shape[1] > 1:
+            # A non-speculative multi-token forward is a prefill chunk, never
+            # a single-token decode candidate. Booking it as a decode
+            # fallback buried the real decode refusals in the receipts.
+            return None
         if cache is None or cache[0] is None or cache[1] is None:
             return self._fused_gdn_fallback("uninitialized cache")
         describe = getattr(cache, "rollback_spans", None)

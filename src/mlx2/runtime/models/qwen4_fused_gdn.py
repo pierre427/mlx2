@@ -62,7 +62,11 @@ def admit_rollback_span(
         if mask is not None:
             return FusedGdnAdmission(False, masked_reason)
         return None
-    if len(spans) != 1 or int(spans[0]) != int(width):
+    if len(spans) != 1:
+        # Name the batch: an unpadded B>1 slab is not padding, and calling it
+        # that sends a reader of the receipts after the wrong cause.
+        return FusedGdnAdmission(False, f"batch of {len(spans)} rows")
+    if int(spans[0]) != int(width):
         return FusedGdnAdmission(False, "padded rollback geometry")
     return None
 
