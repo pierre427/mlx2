@@ -123,6 +123,56 @@ def test_incomplete_batch_cohort_fails_closed_at_deadline():
     assert not engine.jobs
 
 
+def test_unpublished_cohort_member_failure_reaches_requests_total():
+    from mlx2 import serving
+    from mlx2.batch_metrics import BatchRuntimeMetrics
+
+    engine = serving.ServingEngine.__new__(serving.ServingEngine)
+    engine.lock = threading.Lock()
+    engine.submission_lock = threading.Lock()
+    engine.jobs = {}
+    engine.slots = threading.Semaphore(8)
+    engine.counts = Counter()
+    engine.batch_metrics = BatchRuntimeMetrics()
+    engine.pending_cohorts = {}
+    engine.batch_cohort_timeout_seconds = 0.0
+    engine.max_lanes = 4
+    engine.fanout_waiting = {}
+    engine.incoming = queue.Queue()
+    engine.queued_jobs = 0
+
+    def job(name, request):
+        return NS(id=name, tenant_id="t", request=request, fault=None,
+                  cache_branch=None, admission_hit=None, admission_tokens=None,
+                  lora_slot=None, events=queue.Queue(), uid=None,
+                  completion_tokens=0)
+
+    def failed_requests():
+        counters = engine.batch_metrics.prometheus_snapshot()["counters"]
+        return sum(
+            value
+            for (name, labels), value in counters.items()
+            if name == "mlx2_requests_total" and dict(labels)["outcome"] == "failed"
+        )
+
+    published = job("published", {"messages": []})
+    engine.slots.acquire()
+    engine._publish_job(published)
+    engine._finish(published, {"error": "boom", "status": 500})
+    assert failed_requests() == 1
+
+    staged = job("staged", {"messages": [], "batch_cohort": {"id": "c1", "size": 2}})
+    engine.slots.acquire()
+    engine._publish_job(staged)
+    engine._expire_pending_cohorts()
+    assert staged.events.get_nowait()["status"] == 429
+    # The cohort member never reached publication but its client received a
+    # 429; it must be counted exactly once, and it is no longer running.
+    assert failed_requests() == 2
+    gauges = engine.batch_metrics.prometheus_snapshot()["gauges"]
+    assert gauges["mlx2_num_requests_running"] == 0
+
+
 def test_terminal_event_is_published_after_branch_and_inflight_release():
     from mlx2 import serving
 

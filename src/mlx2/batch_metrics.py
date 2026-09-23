@@ -308,6 +308,14 @@ class BatchRuntimeMetrics:
         with self._lock:
             state = self._active.pop(request_id, None)
             if state is None:
+                # The engine registers some jobs before it publishes them: a
+                # batch-cohort member can expire (429) before its cohort
+                # fills, and an APCv2 fan-out sibling can fail (503) with its
+                # leader. The client still received a terminal response, so
+                # count the outcome; without admission timestamps the job
+                # contributes to no latency histogram.
+                self._count_terminal(status, finish_reason)
+                self._event("terminal", request_id, status=status, tokens=0)
                 return
             queue_ms = ((state.dequeued_at or now) - state.enqueued_at) * 1000.0
             ttft_ms = (
@@ -350,16 +358,18 @@ class BatchRuntimeMetrics:
                     "mechanism": state.mechanism,
                 }
             )
-            self._counters[f"terminal_{status}"] += 1
-            candidate_reason = finish_reason or state.finish_reason
-            bounded_reason = (
-                candidate_reason
-                if candidate_reason in {"stop", "length", "tool_calls", "eos"}
-                else "none"
-            )
-            self._terminal_reasons[(status, bounded_reason)] += 1
+            self._count_terminal(status, finish_reason or state.finish_reason)
             self._active_lanes = min(self._active_lanes, len(self._active))
             self._event("terminal", request_id, status=status, tokens=state.tokens)
+
+    def _count_terminal(self, status: str, finish_reason: str | None) -> None:
+        self._counters[f"terminal_{status}"] += 1
+        bounded_reason = (
+            finish_reason
+            if finish_reason in {"stop", "length", "tool_calls", "eos"}
+            else "none"
+        )
+        self._terminal_reasons[(status, bounded_reason)] += 1
 
     def prometheus_snapshot(self, *, queue_depth: int = 0) -> dict[str, Any]:
         """Return cumulative aggregate telemetry without request identifiers."""
