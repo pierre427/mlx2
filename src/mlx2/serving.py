@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections import Counter, OrderedDict, deque
 from collections.abc import Mapping
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
 from functools import partial
 import hashlib
@@ -1147,6 +1148,11 @@ class PublishedCohort:
 class ServingEngine:
     MEMORY_ADMISSION_TIMEOUT = 60.0
     MEMORY_ADMISSION_RETRY = 0.25
+    # Admission state shared through submission_lock.  Class defaults keep the
+    # narrow unit fixtures that build the engine with __new__ on the ordinary
+    # path: no exclusive operation and no admission preparing outside the lock.
+    _exclusive_operation_active = False
+    _admissions_preparing = 0
 
     def __init__(
         self,
@@ -1582,6 +1588,7 @@ class ServingEngine:
         self.adapter = None
         self.apc = None
         self.submission_lock = threading.Lock()
+        self._exclusive_operation_done = threading.Condition(self.submission_lock)
         self.jobs = {}
         self.pending_cohorts = {}
         self.fanout_waiting = {}
@@ -1719,6 +1726,20 @@ class ServingEngine:
         with self.lock:
             return self._service_state_locked()
 
+    @contextmanager
+    def _admission_section(self):
+        """Hold submission_lock for one external admission step.
+
+        An exclusive adapter operation closes admission and then waits for
+        inflight generation to drain without holding submission_lock, which
+        the worker takes every loop.  External callers wait here until the
+        operation has finished, as they used to wait on the lock itself.
+        """
+        with self.submission_lock:
+            while self._exclusive_operation_active:
+                self._exclusive_operation_done.wait()
+            yield
+
     def _ensure_admission(self, endpoint_class="generation", *, admitted=False):
         endpoint_class = str(endpoint_class)
         if endpoint_class not in self._ADMISSION_CLASSES:
@@ -1747,7 +1768,7 @@ class ServingEngine:
             )
         if not isinstance(suspend, bool):
             raise ValueError("suspend must be boolean")
-        with self.submission_lock:
+        with self._admission_section():
             with self.lock:
                 self.counts["quiesce_requests"] += 1
                 if self._service_state != "serving":
@@ -1784,7 +1805,7 @@ class ServingEngine:
         # release both locks and wait until cache ownership is stable.
         while True:
             wait_for_worker = False
-            with self.submission_lock:
+            with self._admission_section():
                 with self.lock:
                     if (
                         len(self._admin_prefetch_queue) + len(prefetch_sessions)
@@ -1825,7 +1846,7 @@ class ServingEngine:
 
     def acquire_admission(self, endpoint_class="generation"):
         """Own one accepted multi-round HTTP lifecycle until its final reply."""
-        with self.submission_lock:
+        with self._admission_section():
             self._ensure_admission(endpoint_class)
             token = object()
             with self.lock:
@@ -1840,7 +1861,7 @@ class ServingEngine:
 
     def admit_batch_submission(self, callback):
         """Atomically admit one Batch API resource before its worker starts."""
-        with self.submission_lock:
+        with self._admission_section():
             self._ensure_admission("batch")
             return callback()
 
@@ -1893,6 +1914,7 @@ class ServingEngine:
                 )
                 if not timed_out and (
                     self.jobs
+                    or self._admissions_preparing
                     or active_batches
                     or self._admission_leases
                     or self._admin_prefetch_queue
@@ -1946,18 +1968,30 @@ class ServingEngine:
     ):
         if not self.ready.is_set() or self.error or not self.thread.is_alive():
             raise RuntimeError(self.error or "model is not ready")
-        with self.submission_lock:
+        with self._admission_section():
             self._ensure_admission(admission_class, admitted=admitted)
             if not self.slots.acquire(blocking=False):
                 self.batch_metrics.rejected("maximum_inflight", self.queued_jobs)
                 raise Overloaded("maximum inflight requests reached")
-            try:
-                job = self._prepare_job(request, tenant_id=tenant_id)
+            # Preparation (media decoding, file loads) runs outside
+            # submission_lock, which the worker takes every loop.  The count
+            # keeps a drain or an exclusive operation from passing this
+            # admitted request before it is published.
+            self._admissions_preparing += 1
+        try:
+            job = self._prepare_job(request, tenant_id=tenant_id)
+            with self.submission_lock:
+                # Admitted above: publish unless a drain timeout has since
+                # claimed the idle boundary.
+                self._ensure_admission(admission_class, admitted=True)
                 self._publish_job(job)
-                return job
-            except BaseException:
-                self.slots.release()
-                raise
+            return job
+        except BaseException:
+            self.slots.release()
+            raise
+        finally:
+            with self.submission_lock:
+                self._admissions_preparing -= 1
 
     def recent_receipts(self, tenant_id=None):
         """Recent request receipts, only ``tenant_id``'s when one is given."""
@@ -2188,6 +2222,10 @@ class ServingEngine:
             )
 
     def _expire_pending_cohorts(self):
+        if not self.pending_cohorts:
+            # The worker calls this every loop; do not contend for
+            # submission_lock when there is nothing to expire.
+            return
         now = time.monotonic()
         expired = []
         with self.submission_lock:
@@ -2260,7 +2298,7 @@ class ServingEngine:
             job.fanout_group = fanout_group
             job.fanout_role = "prefill_leader" if index == 0 else "apcv2_sibling"
         reserved = 0
-        with self.submission_lock:
+        with self._admission_section():
             self._ensure_admission(admission_class, admitted=admitted)
             for _ in jobs:
                 if not self.slots.acquire(blocking=False):
@@ -2431,11 +2469,16 @@ class ServingEngine:
         if not self.ready.is_set() or self.error or not self.thread.is_alive():
             raise RuntimeError(self.error or "model is not ready")
         started = time.monotonic()
-        with self.submission_lock:
+        with self._admission_section():
             self._ensure_admission(admission_class, admitted=admitted)
+            # Close admission for the whole operation, then wait for the drain
+            # without submission_lock: the worker takes that lock every loop,
+            # so holding it here froze the lanes this operation waits for.
+            self._exclusive_operation_active = True
+        try:
             while True:
                 with self.lock:
-                    inflight = len(self.jobs)
+                    inflight = len(self.jobs) + self._admissions_preparing
                 if not inflight:
                     break
                 if time.monotonic() - started >= timeout:
@@ -2452,31 +2495,38 @@ class ServingEngine:
                         f"{operation} could not drain inflight generation in time"
                     )
                 time.sleep(0.01)
-            adapter = self.adapter
-            if adapter is None:
-                raise RuntimeError("model adapter is not ready")
-            try:
-                result = callback(adapter)
-            except BaseException:
-                self.counts[f"{operation}_failed"] += 1
-                self.operation_receipts.append(
-                    {
-                        "operation": operation,
-                        "status": "failed",
-                        "drain_seconds": time.monotonic() - started,
-                        "model_revision": self.model_revision,
-                    }
-                )
-                raise
-            receipt = {
-                "operation": operation,
-                "status": "completed",
-                "drain_seconds": time.monotonic() - started,
-                "model_revision": getattr(self, "model_revision", 0),
-            }
-            self.operation_receipts.append(receipt)
-            self.counts[f"{operation}_completed"] += 1
-            return result
+            # The callback itself still runs under submission_lock, which keeps
+            # the idle worker's prefetch and cohort work out of its way.
+            with self.submission_lock:
+                adapter = self.adapter
+                if adapter is None:
+                    raise RuntimeError("model adapter is not ready")
+                try:
+                    result = callback(adapter)
+                except BaseException:
+                    self.counts[f"{operation}_failed"] += 1
+                    self.operation_receipts.append(
+                        {
+                            "operation": operation,
+                            "status": "failed",
+                            "drain_seconds": time.monotonic() - started,
+                            "model_revision": self.model_revision,
+                        }
+                    )
+                    raise
+                receipt = {
+                    "operation": operation,
+                    "status": "completed",
+                    "drain_seconds": time.monotonic() - started,
+                    "model_revision": getattr(self, "model_revision", 0),
+                }
+                self.operation_receipts.append(receipt)
+                self.counts[f"{operation}_completed"] += 1
+                return result
+        finally:
+            with self.submission_lock:
+                self._exclusive_operation_active = False
+                self._exclusive_operation_done.notify_all()
 
     def embed(
         self,
@@ -2779,7 +2829,7 @@ class ServingEngine:
     ):
         # Publish the worker-owned prefetch before quiesce can close admission,
         # so an accepted resume is visible to the drain's idle predicate.
-        with self.submission_lock:
+        with self._admission_section():
             self._ensure_admission("session_prefetch", admitted=admitted)
             return self._session_apc().resume_session(
                 self._session_scope(tenant_id), session_id, ttl_seconds=ttl_seconds

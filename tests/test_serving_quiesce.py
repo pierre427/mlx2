@@ -7,6 +7,7 @@ import time
 import pytest
 
 from mlx2.serving import AdmissionClosed, Job, ServingEngine, SuspendUnavailable
+from test_structured_deferral import _collect, scripted_engine  # noqa: F401 - shared fixture
 
 
 def _engine(*, disk=True):
@@ -261,3 +262,125 @@ def test_drain_timeout_fails_active_queued_and_deferred_jobs_with_503():
     assert not engine.jobs and engine.queued_jobs == 0
     for job in jobs:
         assert job.events.get_nowait() == {"error": "drain timeout", "status": 503}
+
+
+def _slow_scripted_decode(monkeypatch):
+    """Make each scripted decode step take a few milliseconds of wall time."""
+    from mlx2.runtime import generate
+
+    original_next = generate.BatchGenerator.next
+
+    def slow_next(self):
+        time.sleep(0.005)
+        return original_next(self)
+
+    monkeypatch.setattr(generate.BatchGenerator, "next", slow_next)
+
+
+def _wait_for_tokens(job, count=1, timeout=5.0):
+    deadline = time.monotonic() + timeout
+    while job.completion_tokens < count:
+        assert time.monotonic() < deadline, "generation never started"
+        time.sleep(0.01)
+
+
+def test_exclusive_operation_lets_inflight_generation_drain(scripted_engine, monkeypatch):
+    build, state = scripted_engine
+    engine = build(declare_marker=True)
+    _slow_scripted_decode(monkeypatch)
+    state["script"] = []  # never EOS: the lane runs to max_tokens
+    request = {"messages": [{"role": "user", "content": "x"}], "temperature": 0}
+    job = engine.submit({**request, "max_tokens": 120})
+    _wait_for_tokens(job)
+    order, result = [], {}
+
+    def callback(adapter):
+        with engine.lock:
+            order.append(("callback", len(engine.jobs)))
+        return "ran"
+
+    def operation():
+        try:
+            result["outcome"] = engine._exclusive_adapter_operation(
+                "probe", callback, timeout=5.0
+            )
+        except Exception as exc:  # noqa: BLE001 - reported through the assertion
+            result["outcome"] = f"{type(exc).__name__}: {exc}"
+
+    def late_submit():
+        late = engine.submit({**request, "max_tokens": 2})
+        order.append(("late_submitted", None))
+        result["late"] = _collect(late)[2]
+
+    operation_thread = threading.Thread(target=operation)
+    operation_thread.start()
+    time.sleep(0.05)
+    late_thread = threading.Thread(target=late_submit)
+    late_thread.start()
+    samples = []
+    for _ in range(5):
+        time.sleep(0.05)
+        samples.append(job.completion_tokens)
+    operation_thread.join(10)
+    late_thread.join(10)
+    # The lane kept decoding while the operation waited for it to drain.
+    assert samples == sorted(samples) and samples[-1] > samples[0], samples
+    assert result["outcome"] == "ran", result
+    assert _collect(job)[2]["finish_reason"] == "length"
+    assert job.completion_tokens == 120
+    # The operation ran on an idle engine, and a submission that arrived while
+    # it was draining waited for it instead of being rejected or overtaking it.
+    assert order == [("callback", 0), ("late_submitted", None)]
+    assert result["late"]["finish_reason"] == "length"
+    assert engine.counts["probe_completed"] == 1
+    assert engine.counts["probe_drain_timeouts"] == 0
+
+
+def test_slow_media_preparation_does_not_stall_an_unrelated_lane(scripted_engine, monkeypatch):
+    build, state = scripted_engine
+    engine = build(declare_marker=True)
+    _slow_scripted_decode(monkeypatch)
+
+    def slow_prepare(request, file_loader=None):
+        time.sleep(1.0)  # stands in for image/video/audio decode and file loads
+        raise ValueError("media rejected after preprocessing")
+
+    engine.adapter.prepare_multimodal_request = slow_prepare
+    state["script"] = []
+    job = engine.submit(
+        {"messages": [{"role": "user", "content": "x"}], "temperature": 0, "max_tokens": 400}
+    )
+    _wait_for_tokens(job)
+    failures = []
+
+    def media():
+        try:
+            engine.submit(
+                {"messages": [{"role": "user", "content": [{"type": "text", "text": "hi"}]}]}
+            )
+        except ValueError as exc:
+            failures.append(str(exc))
+
+    thread = threading.Thread(target=media)
+    thread.start()
+    samples = []
+    for _ in range(8):
+        time.sleep(0.1)
+        samples.append(job.completion_tokens)
+    thread.join(5)
+    assert len(set(samples)) >= 6, samples
+    assert failures == ["media rejected after preprocessing"]
+    job.cancelled.set()
+    _collect(job)
+    # The failed preparation returned its inflight slot.
+    deadline = time.monotonic() + 5
+    while True:
+        with engine.lock:
+            if not engine.jobs:
+                break
+        assert time.monotonic() < deadline
+        time.sleep(0.01)
+    for _ in range(engine.max_inflight):
+        assert engine.slots.acquire(blocking=False)
+    for _ in range(engine.max_inflight):
+        engine.slots.release()
