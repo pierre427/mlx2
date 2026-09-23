@@ -39,7 +39,50 @@ _STRING = r'"(?:[^"\\\x00-\x1f]|\\["\\/bfnrt]|\\u[0-9a-fA-F]{4})*"'
 # range.
 _INTEGER = r"-?(?:0|[1-9][0-9]{0,18})"
 _NUMBER = _INTEGER + r"(?:\.[0-9]{1,18})?(?:[eE][+-]?[0-9]{1,3})?"
-_FINITE_NUMBER = _INTEGER + r"(?:\.[0-9]{1,18})?(?:[eE][+-]?[0-9]{1,2})?"
+
+
+def _exponent(largest):
+    """Optional exponent: any negative one, any positive one below 200, and
+    the three-digit ones from 200 that ``largest`` spells."""
+    return rf"(?:[eE](?:-[0-9]{{1,3}}|\+?(?:[0-9]{{1,2}}|[01][0-9]{{2}}|{largest})))?"
+
+
+def _digits_past(digits, below):
+    """A prefix of ``digits``, then one digit below (or above) the next of them."""
+    head, rest = int(digits[0]), digits[1:]
+    low, high = (0, head - 1) if below else (head + 1, 9)
+    choices = [f"[{low}-{high}]"] if low <= high else []
+    if rest:
+        choices.append(f"{head}{_digits_past(rest, below)}")
+    return "(?:" + "|".join(choices) + ")"
+
+
+def _digit_prefixes(digits):
+    """The nonempty prefixes of ``digits``."""
+    rest = digits[1:]
+    return digits[0] + (f"(?:{_digit_prefixes(rest)})?" if rest else "")
+
+
+# ``_NUMBER`` also spells values past float64's range (``1e400``, ``9e308``).
+# They decode to infinity, which a tool call's arguments cannot carry (every
+# serializer here runs with ``allow_nan=False``), so tool grammars use this
+# finite subset.  It keeps a spelling for every finite value: any mantissa up
+# to exponent 289 (19 integer digits stay below 1e308), a one-digit mantissa up
+# to 307, and at 308 a ``1.`` mantissa that does not exceed the leading digits
+# of 2**1024 - 2**970, the halfway point at which a literal rounds to
+# infinity.  Only unnormalized spellings past exponent 289 (``12e300`` rather
+# than ``1.2e301``) and overflows are left out.  Once a ``1.`` fraction departs
+# from the threshold's digits it may run 17 more, past the usual 18 in total:
+# one run shared by every departure point keeps the automaton small.
+_OVERFLOW_FRACTION = str(2**1024 - 2**970)[1:19]
+_FINITE_NUMBER = (
+    r"-?(?:(?:0|[1-9][0-9]{1,18})(?:\.[0-9]{1,18})?" + _exponent("2[0-8][0-9]")
+    + rf"|(?:(?:[2-9]\.[0-9]|1\.{_digits_past(_OVERFLOW_FRACTION, False)})"
+    + r"[0-9]{0,17}|[2-9])" + _exponent("2[0-9]{2}|30[0-7]")
+    + rf"|1(?:\.(?:{_digits_past(_OVERFLOW_FRACTION, True)}[0-9]{{0,17}}"
+    + rf"|{_digit_prefixes(_OVERFLOW_FRACTION)}))?" + _exponent("2[0-9]{2}|30[0-8]")
+    + ")"
+)
 _MATCH_TIMEOUT_SECONDS = 0.01
 # Wall-clock budget for computing one token's admissible set.  The walk below
 # runs on the generation thread, so an overrun stalls every lane; past this
@@ -175,10 +218,15 @@ def token_pieces(tokenizer, vocab_size):
     return tuple(pieces)
 
 
-def recursive_json_object_pattern():
-    """Embeddable recursive JSON-object reference plus its regex definitions."""
+def recursive_json_object_pattern(*, finite_numbers=False):
+    """Embeddable recursive JSON-object reference plus its regex definitions.
+
+    ``finite_numbers`` is for tool-call grammars, whose parsers reject a
+    number that decodes to infinity.
+    """
+    number = _FINITE_NUMBER if finite_numbers else _NUMBER
     definitions = (
-        rf"(?(DEFINE)(?P<value>{_WS}(?:{_STRING}|{_NUMBER}|true|false|null|"
+        rf"(?(DEFINE)(?P<value>{_WS}(?:{_STRING}|{number}|true|false|null|"
         rf"(?&object)|(?&array)){_WS})(?P<object>\{{{_WS}(?:{_STRING}{_WS}:"
         rf"{_WS}(?&value)(?:,{_WS}{_STRING}{_WS}:{_WS}(?&value))*)?{_WS}\}})"
         rf"(?P<array>\[{_WS}(?:(?&value)(?:,{_WS}(?&value))*)?{_WS}\]))"

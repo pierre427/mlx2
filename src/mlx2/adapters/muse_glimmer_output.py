@@ -132,9 +132,8 @@ def _non_strict_value(schema):
     (a non-finite one fails serialization), and a string alternative leaves
     ``<`` to its ``\\u003c`` escape so it cannot spell the closing tag.
     Objects, arrays and types the parser does not check use the shared
-    recursive JSON rules, which ``constrained_tool_grammar`` then defines;
-    those rules still admit a three-digit exponent, as the strict lowering
-    does.
+    recursive JSON rules, which ``constrained_tool_grammar`` then defines
+    with the same finite numbers.
     """
     from ..structured_output import _FINITE_NUMBER, _INTEGER
 
@@ -232,7 +231,8 @@ def constrained_tool_grammar(tools, tool_choice, *, parallel_tool_calls=True):
                 subschema = properties[key]
                 value = raw_string_pattern(subschema)
                 if value is None:
-                    value = _schema_pattern(subschema)
+                    # ``parse_atem`` decodes the value and rejects infinity.
+                    value = _schema_pattern(subschema, finite_numbers=True)
                 block = (
                     rf'<atem:parameter name="{re.escape(key)}">'
                     rf"{value}</atem:parameter>"
@@ -250,7 +250,7 @@ def constrained_tool_grammar(tools, tool_choice, *, parallel_tool_calls=True):
     # Only a non-strict value lowered to JSON rules calls them; names are
     # escaped and cannot spell a call.
     if "(?&" in body:
-        pattern += recursive_json_object_pattern()[1]
+        pattern += recursive_json_object_pattern(finite_numbers=True)[1]
     return pattern
 
 

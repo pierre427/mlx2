@@ -67,9 +67,13 @@ def _split_definitions(pattern):
     """``(body, definitions)``: strip the shared recursive-JSON DEFINE block."""
     from .structured_output import recursive_json_object_pattern
 
-    definitions = recursive_json_object_pattern()[1]
-    if pattern.endswith(definitions):
-        return pattern[: -len(definitions)], definitions
+    # Tool blocks carry the finite-number rules; a JSON answer the plain ones.
+    # The merged pattern keeps one block, so a tool block's finite rules also
+    # bound the numbers of a JSON answer composed with it.
+    for finite_numbers in (True, False):
+        definitions = recursive_json_object_pattern(finite_numbers=finite_numbers)[1]
+        if pattern.endswith(definitions):
+            return pattern[: -len(definitions)], definitions
     if "(?(DEFINE)" in pattern:
         raise ValueError("tool grammar carries definitions that cannot be merged")
     return pattern, ""

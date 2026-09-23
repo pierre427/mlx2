@@ -478,6 +478,158 @@ def test_muse_non_strict_grammar_admits_only_values_parse_atem_decodes(
             parse(call(value))
 
 
+def _server_admits(grammar, text):
+    """Whether serving admits ``text``: the scanner compiles a server tool
+    grammar without the client cap, and the exact automaton must agree."""
+    from mlx2.structured_automaton import automaton_for
+    from mlx2.structured_output import _request_constraint
+
+    pattern = _request_constraint(None, None, grammar, None).pattern
+    admitted = pattern.fullmatch(text) is not None
+    assert automaton_for(pattern).fullmatch(text) == admitted, text
+    return admitted
+
+
+def _muse_tool(schema, *, strict):
+    return [{"type": "function", "function": {
+        "name": "f",
+        "strict": strict,
+        "parameters": {
+            "type": "object",
+            "properties": {"x": schema},
+            "required": ["x"],
+            "additionalProperties": False,
+        },
+    }}]
+
+
+def _muse_call(value):
+    return (
+        '<atem:function_calls><atem:invoke name="f">'
+        f'<atem:parameter name="x">{value}</atem:parameter>'
+        "</atem:invoke></atem:function_calls>"
+    )
+
+
+def _muse_value(text, tools):
+    """The argument the streaming parser serves for one forced call."""
+    import json
+
+    from mlx2.adapters.muse_glimmer_output import MuseOutputParser
+
+    parser = MuseOutputParser(chat=True, tools=tools)
+    events = parser.push(" to=f<|message|>" + text) + parser.push("", final=True)
+    (call,) = [event["tool_calls"][0] for event in events if "tool_calls" in event]
+    return json.loads(call["function"]["arguments"])["x"]
+
+
+@pytest.mark.parametrize(
+    ("schema", "strict", "finite", "overflowing"),
+    [
+        (
+            {"type": "number"}, True,
+            ["1e300", "-1.7976931348623157e308", "2.5e-400", "1E+289"],
+            ["1e400", "9e308", "-1.8e308", "1.797693134862315808e308"],
+        ),
+        (
+            {"type": "array", "items": {"type": "number"}}, True,
+            ["[1e300, 1.797693134862315807e308]"], ["[1, 1e400]"],
+        ),
+        ({"type": "object"}, False, ['{"a": [1e300]}'], ['{"a": [1e400]}']),
+        (["number", "null"], False, ["1e300"], ["1e400", "9e308"]),
+    ],
+)
+def test_muse_grammars_admit_only_numbers_the_parser_can_serve(
+    schema, strict, finite, overflowing
+):
+    """A number past float64's range (``1e400``, ``9e308``) is valid JSON
+    text, but it decodes to infinity and ``parse_atem`` refuses to serialize
+    it: the strict lowering and the shared recursive JSON rules admitted it,
+    and the forced call failed with 502.  Finite values keep every exponent
+    up to 308."""
+    if isinstance(schema, list):
+        schema = {"type": schema}
+    tools = _muse_tool(schema, strict=strict)
+    grammar = muse_grammar(tools, "required", parallel_tool_calls=False)
+    for value in finite:
+        assert _server_admits(grammar, _muse_call(value)), value
+        _muse_value(_muse_call(value), tools)
+    for value in overflowing:
+        assert not _server_admits(grammar, _muse_call(value)), value
+        with pytest.raises(ValueError):
+            _muse_value(_muse_call(value), tools)
+
+
+def test_finite_number_language_keeps_a_spelling_for_every_finite_value():
+    """``_FINITE_NUMBER`` admits no literal that decodes to infinity, and
+    every finite value ``_NUMBER`` can spell keeps an admitted spelling."""
+    import math
+    import random
+
+    import regex
+
+    from mlx2.structured_output import _FINITE_NUMBER, _NUMBER
+
+    number, finite = regex.compile(_NUMBER), regex.compile(_FINITE_NUMBER)
+    digits = "7976931348623158079"
+    rng = random.Random(0)
+
+    def draw(count):
+        return "".join(rng.choice("0123456789") for _ in range(count))
+
+    checked = 0
+    for _ in range(20000):
+        integer = rng.choice(["0", "1", str(rng.randint(2, 9)), "1" + draw(rng.randint(1, 18))])
+        fraction = ""
+        if rng.random() < 0.8:
+            # Near the overflow threshold's digits, where the boundary is.
+            size = rng.randint(1, 18)
+            keep = rng.randint(0, size)
+            fraction = "." + (digits[:keep] + draw(size - keep))[:size]
+        exponent = ""
+        if rng.random() < 0.9:
+            power = rng.choice([rng.randint(0, 999), rng.randint(280, 320)])
+            exponent = rng.choice(["e", "E+", "e-"]) + rng.choice(
+                [str(power), f"{power:03d}"]
+            )
+        literal = rng.choice(["", "-"]) + integer + fraction + exponent
+        if not number.fullmatch(literal):
+            continue
+        checked += 1
+        value = float(literal)
+        if finite.fullmatch(literal):
+            assert math.isfinite(value), literal
+        elif math.isfinite(value):
+            mantissa, _, power = f"{abs(value):.17e}".partition("e")
+            spelling = ("-" if value < 0 else "") + mantissa + "e" + str(int(power))
+            assert finite.fullmatch(spelling) and float(spelling) == value, literal
+    assert checked > 10000
+
+
+def test_non_strict_tool_blocks_compose_with_a_json_answer():
+    """Tool blocks carry the finite-number JSON rules; composing one with a
+    JSON answer must still merge the two rule sets into one."""
+    import regex
+
+    from mlx2.structured_automaton import automaton_for
+    from mlx2.tool_grammar import plan_tool_grammar
+
+    tools = _muse_tool({"type": "object"}, strict=False)
+    for builder, marker in ((muse_grammar, "<atem:function_calls>"),):
+        pattern, status, _ = plan_tool_grammar(
+            {"tools": tools, "response_format": {"type": "json_object"}},
+            lambda request, builder=builder: builder(
+                request["tools"], request["tool_choice"]
+            ),
+            open_marker=marker,
+        )
+        assert status == "engaged"
+        language = regex.compile(rf"(?:{pattern})")
+        automaton_for(language)
+        assert language.fullmatch('{"a": 1e300}')
+        assert not language.fullmatch('{"a": 1e400}')
+
+
 def test_non_strict_named_tool_grammars_enforce_required_parameters():
     # sglang #40051: a non-strict tool body of optional-only parameters let
     # greedy decoding close a forced call with no arguments.
