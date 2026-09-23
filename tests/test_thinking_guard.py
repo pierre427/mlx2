@@ -553,6 +553,89 @@ def test_forced_close_receipt_ignores_rows_drafted_past_the_stop(monkeypatch):
     assert guard["forced_close"] is False and guard["think_tokens"] == 6
 
 
+def test_settle_reports_a_forced_close_only_when_one_was_committed():
+    # Ordinary decode's last guard call is a lookahead: it evaluates the row
+    # after the final committed token, which is never sampled.  Settling on
+    # that call latched forced_close for a stream that ended exactly at the
+    # budget (max_tokens == thinking_budget, or a stop on that token).
+    budget, reasoning = 4, [8, 9, 10, 11]
+    guard = ThinkingGuard(2, (CLOSE,), budget=budget, soft_ratio=0.5)
+    for length in range(budget + 1):  # every ordinary step, lookahead included
+        _call(guard, reasoning[:length])
+    guard.settle(reasoning)
+    receipt = guard.receipt()
+    assert receipt["forced_close"] is False
+    assert receipt["tripped"] == "budget_soft" and receipt["released_at"] is None
+    assert receipt["think_tokens"] == budget
+    # The forcing row admits only the close, which lands at the budget.
+    forced = reasoning + [CLOSE]
+    assert np.isinf(_call(guard, reasoning)[np.arange(VOCAB) != CLOSE]).all()
+    guard.settle(forced)
+    receipt = guard.receipt()
+    assert receipt["forced_close"] is True and receipt["released_at"] == budget
+    # A route that never showed the guard some committed ids settles alike.
+    fresh = ThinkingGuard(2, (CLOSE,), budget=budget, soft_ratio=0.5)
+    fresh.settle(forced)
+    assert fresh.receipt() == receipt
+    # A close the model chose before the budget was not forced.
+    guard.settle(reasoning[:3] + [CLOSE])
+    assert guard.receipt()["forced_close"] is False
+    assert guard.receipt()["released_at"] == 3
+
+
+def test_forced_close_receipt_is_exact_and_identical_on_every_route(monkeypatch):
+    # The model never closes the channel on its own.  Ending exactly at the
+    # budget forces nothing; running past it forces the close at the budget.
+    # Every route reported the lookahead row ordinary decode evaluates after
+    # the last token (forced_close true at the budget), or before 7032610e
+    # prompt lookup and native MTP reported the stream one token short.
+    from route_harness import make_engine, patch_host, run, tiny_qwen38_mtp
+
+    patch_host(monkeypatch)
+    model, vocab = tiny_qwen38_mtp()
+    close = 99
+    penalty = mx.where(mx.arange(vocab) == close, -1e4, 0.0).astype(mx.float32)
+    mx.eval(penalty)  # the engine thread cannot evaluate this thread's graph
+    base = type(model)
+
+    class NeverCloses(base):
+        def __call__(self, *args, **kwargs):
+            return super().__call__(*args, **kwargs) + penalty
+
+        def logits(self, hidden):
+            return super().logits(hidden) + penalty
+
+    model.__class__ = NeverCloses
+    prompt = [(7 * i + 3) % (vocab - 2) + 1 for i in range(40)]
+    budget = 8
+    requests = [
+        {"messages": [{"role": "user", "content": "x"}], "tokens": prompt,
+         "max_tokens": max_tokens, "temperature": 0, "thinking_budget": budget}
+        for max_tokens in (budget, budget + 3)
+    ]
+    outputs = {}
+    for route, options in _guard_routes().items():
+        engine = make_engine(model, vocab, close_id=close, **options)
+        try:
+            outputs[route] = [run(engine, request) for request in requests]
+        finally:
+            engine.close()
+    for route, (at_budget, past_budget) in outputs.items():
+        assert close not in at_budget["tokens"] and len(at_budget["tokens"]) == budget
+        guard = at_budget["receipt"]["request_controls"]["thinking_guard"]
+        assert guard["forced_close"] is False, route
+        assert guard["think_tokens"] == budget and guard["released_at"] is None, route
+        assert past_budget["tokens"].index(close) == budget, route
+        guard = past_budget["receipt"]["request_controls"]["thinking_guard"]
+        assert guard["forced_close"] is True and guard["released_at"] == budget, route
+        for result, reference in zip((at_budget, past_budget), outputs["ordinary"]):
+            assert result["tokens"] == reference["tokens"], route
+            assert (
+                result["receipt"]["request_controls"]["thinking_guard"]
+                == reference["receipt"]["request_controls"]["thinking_guard"]
+            ), route
+
+
 def _guard_state(guard):
     import copy
 

@@ -275,6 +275,11 @@ class ThinkingGuard:
         lookup never calls it for the final token.  Ordinary decode's last
         call sees exactly the committed ids, so settling to them makes every
         route's receipt describe the committed stream.
+
+        That last call is a lookahead, though: it evaluates the row after the
+        final committed token, which is never sampled.  So whether a close
+        was forced is read from the committed ids themselves, not from the
+        rows the guard evaluated.
         """
         import numpy as np
 
@@ -284,7 +289,23 @@ class ThinkingGuard:
                 np.asarray(list(generated), dtype=np.int64),
             ]
         )
-        self._forces(self._observe(tokens))
+        self._observe(tokens)
+        close_at = self._close_at
+        if close_at is not None:
+            # Ordinary decode observed every id before the close, one step at
+            # a time; a speculative route may have skipped some of them.
+            for token in self._generated[len(self._ids) : close_at]:
+                self._advance(token)
+        # A forcing row admits only the close token, so a step that forced
+        # committed the close at its own position: a close at or past the
+        # budget, with the alarm tripped by then, is exactly a forced one.
+        self.forced = (
+            self.budget is not None
+            and close_at is not None
+            and close_at >= self.budget
+            and self._tripped_at is not None
+        )
+        self._forced_at = close_at if self.forced else None
 
     def dormant(self, tokens):
         """P5: True once the close marker is generated (logits pass through).
