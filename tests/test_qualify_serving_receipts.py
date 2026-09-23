@@ -553,3 +553,20 @@ def test_fused_gdn_decode_is_not_observed_while_decode_is_refused_on_geometry():
         }}}
     )
     assert observed["fused_gdn_decode"] == 0
+
+
+def test_a_refused_request_becomes_check_evidence_not_an_exception():
+    import io
+    from urllib.error import HTTPError
+
+    body = b'{"error": {"message": "declared batch cohort could not atomically admit every member"}}'
+    error = HTTPError("http://x/v1/chat/completions", 429, "Too Many Requests", {}, io.BytesIO(body))
+    assert qualify.http_refusal(error) == {
+        "status": 429,
+        "error": {"message": "declared batch cohort could not atomically admit every member"},
+    }
+    garbled = HTTPError("http://x", 503, "Unavailable", {}, io.BytesIO(b"not json"))
+    assert qualify.http_refusal(garbled) == {"status": 503, "error": {}}
+    source = (ROOT / "scripts" / "qualify_serving.py").read_text()
+    # The shared-cohort pair is posted through the refusal-tolerant helper.
+    assert "shared = list(pool.map(post_or_refusal, shared_pair))" in source

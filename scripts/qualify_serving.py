@@ -208,6 +208,15 @@ def near_limit_usage_passes(
     )
 
 
+def http_refusal(error):
+    """Status and error body of a refused request, for check evidence."""
+    try:
+        body = json.loads(error.read() or b"{}")
+    except (OSError, ValueError):
+        body = {}
+    return {"status": error.code, "error": body.get("error", body)}
+
+
 def shared_qsa_completion_budget(settings, context_cap):
     """Choose a cohort budget eligible for the selected shared-QSA policy.
 
@@ -1015,6 +1024,15 @@ def main():
         with response:
             return json.load(response)
 
+    def post_or_refusal(body):
+        # An atomic cohort refused under memory pressure answers 429 by
+        # design.  That is evidence for a failed check; raising discarded
+        # every other check of the run.
+        try:
+            return post(body)
+        except HTTPError as error:
+            return {"refused": http_refusal(error)}
+
     def post_json(path, body):
         with urlopen(
             Request(
@@ -1499,10 +1517,11 @@ def main():
                 for _ in range(2)
             ]
             with ThreadPoolExecutor(max_workers=2) as pool:
-                shared = list(pool.map(post, shared_pair))
+                shared = list(pool.map(post_or_refusal, shared_pair))
             check(
                 "shared_warm_requests",
-                all(long_context_answer_passes(content(r))
+                all("refused" not in r
+                    and long_context_answer_passes(content(r))
                     and near_limit_usage_passes(
                         r["usage"], shared_context, shared_completion_budget
                     )
@@ -1511,7 +1530,7 @@ def main():
                     and r["mlx2"]["request_controls"].get("batch_cohort")
                         == shared_cohort
                     for r in shared),
-                [r["mlx2"] for r in shared],
+                [r.get("mlx2", r) for r in shared],
             )
             long_request = long_context_request(initial["max_context"])
             long = post(long_request)
