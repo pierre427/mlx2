@@ -577,7 +577,9 @@ def test_pending_park_bytes_and_global_pin_cap_are_enforced(tmp_path):
         idle_disk_seconds=180,
         idle_disk_dir=str(tmp_path),
         pinned_disk_bytes_per_tenant=1 << 20,
-        pinned_disk_bytes_global=projected,
+        # Room for one real snapshot (its projection plus the file header),
+        # not for two.
+        pinned_disk_bytes_global=int(projected * 1.5),
     )
     for tenant, seed in (("tenant-a", 1), ("tenant-b", 2)):
         tokens = [seed, *range(16)]
@@ -588,6 +590,88 @@ def test_pending_park_bytes_and_global_pin_cap_are_enforced(tmp_path):
     with pytest.raises(APCSessionCapacityError, match="global"):
         global_cap.park_session("tenant-b", "session", ttl_seconds=60)
     global_cap.close()
+
+
+def _projected_park_apc(tmp_path, clock, cap):
+    return APCv2(
+        max_size=16,
+        max_bytes=1 << 20,
+        layout_name="layout-a",
+        idle_disk_seconds=180,
+        idle_disk_dir=str(tmp_path),
+        pinned_disk_bytes_per_tenant=cap,
+        now_fn=lambda: clock[0],
+    )
+
+
+def test_park_fails_closed_when_the_real_snapshot_outgrows_its_projection(tmp_path):
+    """The precheck projects a resident entry at its nbytes; the written file
+    carries a safetensors header on top.  A cap between the two must fail the
+    park, not report success and rewrite the snapshot on every idle scan."""
+    clock = [0.0]
+    key = _identity()
+    tag = ("tenant-a", "tight")
+    apc = _projected_park_apc(tmp_path, clock, _state(32).nbytes)
+    apc.store(key, list(range(32)), [_state(32)], session_tag=tag)
+    with pytest.raises(APCSessionCapacityError, match="per-tenant"):
+        apc.park_session(*tag, ttl_seconds=600)
+    state = apc.session_state(*tag)
+    assert state["state"] == "resident"
+    assert state["disk_pin_expires_at"] is None and state["park_pending"] == 0
+    for _ in range(3):
+        clock[0] += 2.0
+        apc.spill_idle_entries(now=clock[0])
+    disk = apc.apc_stats["idle_disk"]
+    assert disk["spill_failures"] == 1
+    assert disk["bytes_written"] == 0
+    assert not list(tmp_path.glob("apc-idle-*"))
+    apc.close()
+
+
+def test_failed_repark_restores_the_pins_it_replaced(tmp_path):
+    clock = [0.0]
+    key = _identity()
+    tag = ("tenant-a", "grown")
+    probe = _projected_park_apc(tmp_path / "probe", clock, 1 << 30)
+    probe.store(key, list(range(16)), [_state(16)], session_tag=tag)
+    probe.park_session(*tag, ttl_seconds=60)
+    parked_file_bytes = probe.session_state(*tag)["disk_bytes"]
+    probe.close()
+
+    apc = _projected_park_apc(
+        tmp_path, clock, parked_file_bytes + _state(32).nbytes
+    )
+    apc.store(key, list(range(16)), [_state(16)], session_tag=tag)
+    first_expiry = apc.park_session(*tag, ttl_seconds=60)["disk_pin_expires_at"]
+    apc.store(key, list(range(32)), [_state(32)], session_tag=tag)
+    with pytest.raises(APCSessionCapacityError):
+        apc.park_session(*tag, ttl_seconds=600)
+    parked = apc._trie.get(key, list(range(16)))
+    assert parked._apc_disk_pin_expiries == {tag: first_expiry}
+    grown = apc._trie.get(key, list(range(32)))
+    assert grown.prompt_cache and not grown._apc_disk_pin_expiries
+    apc.close()
+
+
+def test_deferred_park_that_cannot_fit_is_not_rewritten_every_scan(tmp_path):
+    clock = [0.0]
+    key = _identity()
+    tag = ("tenant-a", "leased")
+    tokens = list(range(32))
+    apc = _projected_park_apc(tmp_path, clock, _state(32).nbytes)
+    apc.store(key, tokens, [_state(32)], session_tag=tag)
+    lease = apc.lookup(key, tokens + [99])
+    assert apc.park_session(*tag, ttl_seconds=600)["park_pending"] == 1
+    lease.cache.close()
+    for _ in range(3):
+        clock[0] += 2.0
+        apc.spill_idle_entries(now=clock[0])
+    state = apc.session_state(*tag)
+    assert state["disk_pin_expires_at"] is None and state["park_pending"] == 0
+    disk = apc.apc_stats["idle_disk"]
+    assert disk["spill_failures"] == 1 and disk["bytes_written"] == 0
+    assert disk["pin_cap_rejections"] == 1
+    apc.close()
 
 
 def test_store_rejects_its_own_publication_when_only_pinned_state_remains(

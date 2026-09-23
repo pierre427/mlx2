@@ -603,6 +603,9 @@ class APCv2(PrefixIndex):
         self._persist_lock_file = None
         self._prefetch_slot = threading.BoundedSemaphore(1)
         self._pending_prefetch = None
+        # Pin-cap message of the most recent spill that wrote a snapshot and
+        # then had to discard it; read by callers right after a failed spill.
+        self._spill_capacity_violation = None
         # (key, tokens) -> role of retirements a live lease deferred.
         self._pending_retirements = {}
         self._closed = False
@@ -1405,6 +1408,7 @@ class APCv2(PrefixIndex):
         self, key, tokens, entry, *, reason: str, hard_cap: Optional[int] = None,
         keep_resident: bool = False,
     ) -> bool:
+        self._spill_capacity_violation = None
         if self._idle_disk_dir is None or not entry.prompt_cache:
             return False
         if self._entry_pinned(entry):
@@ -1527,14 +1531,18 @@ class APCv2(PrefixIndex):
                     )
                 )
                 self._disk_bytes += int(written)
-                self._disk_stats["bytes_written"] += int(written)
                 if self._persist_dir is not None:
                     if not self._write_manifest_locked(key, tokens, entry):
                         raise OSError("APCv2 manifest publication failed")
                 violation = self._pin_limit_violation_locked()
                 if violation is not None:
                     raise APCSessionCapacityError(violation)
+                # Count only snapshots that stay published, never the ones a
+                # failed publication step discards below.
+                self._disk_stats["bytes_written"] += int(written)
             except Exception as exc:
+                if isinstance(exc, APCSessionCapacityError):
+                    self._spill_capacity_violation = str(exc)
                 if reason == "park" and _foreign_stream_error(exc):
                     # MLX streams are thread-local: a park arriving on an HTTP
                     # thread cannot save arrays the generation worker's
@@ -2073,9 +2081,19 @@ class APCv2(PrefixIndex):
                 )
             expiry = self._wall_time() + ttl
             spilled = 0
+            spill_violation = None
+            previous = []
             for key, tokens, entry in records:
-                getattr(entry, "_apc_resident_pin_expiries", {}).pop(tag, None)
+                resident_pins = getattr(entry, "_apc_resident_pin_expiries", {})
                 pins = getattr(entry, "_apc_disk_pin_expiries", {})
+                previous.append(
+                    (
+                        pins.get(tag),
+                        resident_pins.get(tag),
+                        getattr(entry, "_apc_park_pending", False),
+                    )
+                )
+                resident_pins.pop(tag, None)
                 pins[tag] = expiry
                 entry._apc_disk_pin_expiries = pins
                 if entry.prompt_cache:
@@ -2083,6 +2101,11 @@ class APCv2(PrefixIndex):
                         entry._apc_park_pending = True
                     elif self._spill_entry_locked(key, tokens, entry, reason="park"):
                         spilled += 1
+                    elif self._spill_capacity_violation is not None:
+                        # The written snapshot outgrew the projected cost the
+                        # pin was admitted with; no later retry can fit it.
+                        spill_violation = self._spill_capacity_violation
+                        break
                     else:
                         entry._apc_park_pending = True
                 if getattr(entry, "_apc_disk", None):
@@ -2092,11 +2115,20 @@ class APCv2(PrefixIndex):
             if any(getattr(entry, "_apc_park_pending", False) for _k, _t, entry in records):
                 # Let the worker's next idle scan complete the park at once.
                 self._last_idle_scan = float("-inf")
-            violation = self._pin_limit_violation_locked()
+            violation = spill_violation or self._pin_limit_violation_locked()
             if violation is not None:
-                for key, tokens, entry in records:
-                    getattr(entry, "_apc_disk_pin_expiries", {}).pop(tag, None)
-                    entry._apc_park_pending = False
+                # Fail closed and restore exactly what this park changed.
+                for (key, tokens, entry), (disk_pin, resident_pin, pending) in zip(
+                    records, previous
+                ):
+                    pins = getattr(entry, "_apc_disk_pin_expiries", {})
+                    if disk_pin is None:
+                        pins.pop(tag, None)
+                    else:
+                        pins[tag] = disk_pin
+                    if resident_pin is not None:
+                        entry._apc_resident_pin_expiries[tag] = resident_pin
+                    entry._apc_park_pending = pending
                     if getattr(entry, "_apc_disk", None):
                         self._write_manifest_locked(key, tokens, entry)
                 self._disk_stats["pin_cap_rejections"] += 1
@@ -2366,12 +2398,22 @@ class APCv2(PrefixIndex):
                     entry.prompt_cache
                     and not self._entry_resident_pinned_locked(key, tokens, entry)
                     and (parked or now - last_access >= self._idle_disk_seconds)
-                    and self._spill_entry_locked(
-                        key, tokens, entry, reason="park" if parked else "idle"
-                    )
                 ):
-                    entry._apc_park_pending = False
-                    spilled += 1
+                    if self._spill_entry_locked(
+                        key, tokens, entry, reason="park" if parked else "idle"
+                    ):
+                        entry._apc_park_pending = False
+                        spilled += 1
+                    elif self._spill_capacity_violation is not None and getattr(
+                        entry, "_apc_disk_pin_expiries", {}
+                    ):
+                        # This entry was never on disk, so none of its pins was
+                        # ever honored, and its real snapshot does not fit
+                        # them.  Fail those parks closed instead of rewriting
+                        # and discarding the snapshot on every scan.
+                        entry._apc_disk_pin_expiries = {}
+                        entry._apc_park_pending = False
+                        self._disk_stats["pin_cap_rejections"] += 1
             if spilled:
                 mx.clear_cache()
                 self._enforce_disk_limit_locked()
