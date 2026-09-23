@@ -566,3 +566,65 @@ def test_atomic_publication_forms_one_segmented_mtp_b20_cohort(monkeypatch):
         assert not engine.error
     finally:
         engine.close()
+
+
+@pytest.mark.parametrize("route", ["native_mtp", "segmented_mtp"])
+def test_cancelled_prefilling_cohort_member_spares_queued_ungrouped_work(
+    monkeypatch, route
+):
+    """Cancelling one member of a prefilling cohort failed unrelated work.
+
+    The cancel sweep removed only that member, so the next admission pass
+    saw the survivor at the queue head and failed every uid in the first
+    ``size`` queue slots, including an ungrouped request queued behind it
+    (429 "could not fit one scheduler admission boundary").  The survivor
+    now fails as soon as its sibling is removed and the ungrouped request
+    completes.
+    """
+    from route_harness import collect, make_engine, patch_host, tiny_qwen38_mtp
+
+    patch_host(monkeypatch)
+    model, vocab = tiny_qwen38_mtp()
+    call = type(model).__call__
+
+    def slow_call(self, *args, **kwargs):
+        # Keep the 15-chunk cohort prefill in flight across the cancel sweep.
+        time.sleep(0.01)
+        return call(self, *args, **kwargs)
+
+    monkeypatch.setattr(type(model), "__call__", slow_call)
+    extra = (
+        {"segment_aware_live_tip": True, "segment_aware_cohort_size": 3}
+        if route == "segmented_mtp"
+        else None
+    )
+    engine = make_engine(model, vocab, max_lanes=3, extra=extra)
+    try:
+        cohort = {"id": "c1", "size": 2}
+
+        def prompt(seed):
+            return [(seed * 7 + 3 * i) % 120 + 1 for i in range(240)]
+
+        first = engine.submit({
+            "tokens": prompt(1), "max_tokens": 4, "temperature": 0,
+            "batch_cohort": dict(cohort), "return_progress": True,
+        })
+        second = engine.submit({
+            "tokens": prompt(2), "max_tokens": 4, "temperature": 0,
+            "batch_cohort": dict(cohort),
+        })
+        ungrouped = engine.submit(
+            {"tokens": [9, 8, 7, 6, 5, 4], "max_tokens": 4, "temperature": 0}
+        )
+        assert "prompt_progress" in first.events.get(timeout=60)
+        first.cancelled.set()
+        results = [collect(job, timeout=60) for job in (first, second, ungrouped)]
+        alive, error = engine.thread.is_alive(), engine.error
+    finally:
+        engine.close()
+    assert results[0]["error"] == "cancelled"
+    assert results[1]["status"] == 429
+    assert "lost a member" in results[1]["error"]
+    assert results[2].get("error") is None
+    assert results[2]["finish"] == "length" and len(results[2]["tokens"]) == 4
+    assert alive and error is None

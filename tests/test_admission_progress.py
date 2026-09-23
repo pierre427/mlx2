@@ -774,6 +774,51 @@ def test_ungrouped_head_never_admits_a_cohort_prefix():
     assert batch._admit_mtp_joining(3) == 1
 
 
+def test_short_cohort_head_fails_only_its_own_members():
+    # A cohort that lost a member used to fail every uid in the first
+    # ``size`` queue slots, including the ungrouped request behind it.
+    batch = BatchGenerator.__new__(BatchGenerator)
+    batch._unprocessed_sequences = deque(
+        (uid, [[1, 2]], 4, [], [], None, [], None, 0.0) for uid in (7, 9)
+    )
+    cohort = {"tenant_id": "t", "id": "c", "size": 2}
+    batch._mtp_configs = {7: {"batch_cohort": cohort}, 9: {}}
+    batch.mtp_admission = None
+    batch.scheduler_stats = {}
+    assert batch._admit_mtp_joining(2) == 0
+    assert [f["uids"] for f in batch.take_atomic_cohort_failures()] == [(7,)]
+
+
+def test_removing_a_queued_cohort_member_fails_its_siblings_only():
+    batch = BatchGenerator.__new__(BatchGenerator)
+    batch.__dict__.update(
+        _unprocessed_sequences=deque(
+            (uid, [[1, 2]], 4, [], [], None, [], None, 0.0) for uid in (7, 8, 9)
+        ),
+        _prompt_batch=_EmptyMTPBatch(),
+        _generation_batch=_EmptyMTPBatch(),
+        _plain_fallback_batch=_EmptyMTPBatch(),
+        self_mtp=None,
+        _prompt_boundaries={},
+        _mtp_states={},
+        _mtp_lane_rngs={},
+        _mtp_prefill_resident=set(),
+        _mtp_prefill_projection_bytes={},
+        scheduler_stats={},
+    )
+    cohort = {"tenant_id": "t", "id": "c", "size": 2}
+    batch._mtp_configs = {7: {"batch_cohort": cohort}, 8: {"batch_cohort": cohort}, 9: {}}
+    batch._release_cache_capsule_uid = lambda _uid: None
+    batch.remove([7])
+    assert [sequence[0] for sequence in batch._unprocessed_sequences] == [8, 9]
+    failures = batch.take_atomic_cohort_failures()
+    assert [(f["uids"], f["cohort"]) for f in failures] == [((8,), cohort)]
+    assert "lost a member" in failures[0]["reason"]
+    # Removing the whole cohort leaves no survivor to fail.
+    batch.remove([8])
+    assert batch.take_atomic_cohort_failures() == []
+
+
 def test_mtp_short_interleave_never_splits_a_declared_cohort():
     batch = _scheduler_only_mtp_batch(5, step=4)
     batch._unprocessed_sequences.append(

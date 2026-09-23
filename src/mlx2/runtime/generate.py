@@ -3489,8 +3489,15 @@ class BatchGenerator:
                 if belongs_to_cohort(sequence)
             )
             if len(cohort_uids) != size or n < size:
+                # Fail only this cohort's members.  After a member was
+                # removed, ``queued[:size]`` reaches past the cohort into
+                # unrelated work queued behind it, which must keep waiting.
                 self._record_atomic_cohort_failure(
-                    tuple(sequence[0] for sequence in queued[:size]),
+                    tuple(
+                        sequence[0]
+                        for sequence in queued
+                        if belongs_to_cohort(sequence)
+                    ),
                     cohort,
                     "declared batch cohort could not fit one scheduler admission boundary",
                 )
@@ -4526,6 +4533,7 @@ class BatchGenerator:
             set(range(len(self._plain_fallback_batch))),
         )
         found = self._find_uids(uids)
+        orphaned_cohorts = self._queued_cohorts_losing_members(uids)
         memory_queued = getattr(self, "_memory_queued_prefill", None)
         if getattr(self, "_state_checkpoints", None):
             # An undrained snapshot has lost its owner (and with it the tenant
@@ -4572,7 +4580,45 @@ class BatchGenerator:
             self._plain_fallback_batch.filter(sorted(keep[3]))
         for uid in uids:
             self._release_cache_capsule_uid(uid)
+        for key, cohort in orphaned_cohorts.items():
+            # A declared cohort that is still queued is admitted whole or not
+            # at all, so members left behind by a removal (a cancel, a stall)
+            # can never form their boundary.  Fail them now instead of letting
+            # the next admission pass fail whatever is queued behind them.
+            survivors = tuple(
+                sequence[0]
+                for sequence in self._unprocessed_sequences
+                if self._queued_cohort_key(sequence[0]) == key
+            )
+            if survivors:
+                self._record_atomic_cohort_failure(
+                    survivors,
+                    cohort,
+                    "declared batch cohort lost a member before atomic admission",
+                )
         return caches
+
+    def _queued_cohort_key(self, uid):
+        cohort = getattr(self, "_mtp_configs", {}).get(uid, {}).get("batch_cohort")
+        if not isinstance(cohort, dict):
+            return None
+        return (
+            str(cohort.get("tenant_id")),
+            str(cohort.get("id")),
+            int(cohort.get("size") or 0),
+        )
+
+    def _queued_cohorts_losing_members(self, uids):
+        """Declared cohorts with a still-queued member among ``uids``."""
+        removed = set(uids)
+        cohorts = {}
+        for sequence in getattr(self, "_unprocessed_sequences", ()):
+            if sequence[0] not in removed:
+                continue
+            key = self._queued_cohort_key(sequence[0])
+            if key is not None:
+                cohorts[key] = self._mtp_configs[sequence[0]]["batch_cohort"]
+        return cohorts
 
     @property
     def prompt_cache_nbytes(self):
