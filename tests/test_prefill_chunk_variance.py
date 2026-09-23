@@ -282,6 +282,19 @@ class PrefillChunkReceiptTest(unittest.TestCase):
         self.assertFalse(trace["varied"], trace)
         self.assertEqual(0, gen.scheduler_stats["prefill_chunk_varied_requests"])
 
+    def test_removing_a_lane_mid_prefill_drops_its_trace(self):
+        """Serving pops the trace only at end_of_prompt, so a lane cancelled
+        mid-prefill used to leave one entry for the worker's lifetime."""
+        gen = self._generator(adaptive_prefill=False)
+        for _ in range(3):
+            uid = gen.insert([LONG_PROMPT], max_tokens=[2])[0]
+            gen.next()
+            gen._post_prefill_receipts[uid] = {"status": "applied"}
+            gen.remove([uid])
+        self.assertEqual({}, gen._prefill_chunk_trace)
+        self.assertEqual({}, gen._post_prefill_receipts)
+        self.assertGreater(gen.scheduler_stats["prefill_chunk_rounds_recorded"], 0)
+
 if __name__ == "__main__":
     unittest.main()
 

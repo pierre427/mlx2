@@ -4535,6 +4535,11 @@ class BatchGenerator:
             getattr(self, "_interior_checkpoint_positions", {}).pop(uid, None)
             getattr(self, "_interior_checkpoints", {}).pop(uid, None)
             getattr(self, "_state_boundary_purposes", {}).pop(uid, None)
+            # Serving pops these at end_of_prompt; a lane removed before then
+            # (cancelled, stalled or failed mid-prefill) would leave its
+            # entry behind for the worker's lifetime.
+            getattr(self, "_prefill_chunk_trace", {}).pop(uid, None)
+            getattr(self, "_post_prefill_receipts", {}).pop(uid, None)
             if memory_queued is not None:
                 memory_queued.discard(uid)
         for stage, idx in found.values():
