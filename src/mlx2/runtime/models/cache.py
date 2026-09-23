@@ -753,11 +753,15 @@ class _BaseCache:
 def _empty_quantized(B, n_kv_heads, n_steps, head_dim, group_size, bits, dtype):
     """Allocate a zero-filled quantized (packed, scales, biases) triple, matching
     the layout `mx.quantize` produces — used to grow quantized cache buffers in
-    fixed-size chunks (mirrors QuantizedKVCache.update_and_fetch's init_quant)."""
-    el_per_int = 8 * mx.uint32.size // bits
+    fixed-size chunks (mirrors QuantizedKVCache.update_and_fetch's init_quant).
+
+    The packed width is ``head_dim * bits / 32``, not ``head_dim // (32 // bits)``:
+    3-, 5- and 6-bit values straddle uint32 words, so the element-per-word
+    division rounds the wrong way and the buffer no longer matches the
+    triples `mx.quantize` writes into it."""
     shape = (B, n_kv_heads, n_steps)
     return (
-        mx.zeros((*shape, head_dim // el_per_int), dtype=mx.uint32),
+        mx.zeros((*shape, head_dim * bits // (8 * mx.uint32.size)), dtype=mx.uint32),
         mx.zeros((*shape, head_dim // group_size), dtype=dtype),
         mx.zeros((*shape, head_dim // group_size), dtype=dtype),
     )
