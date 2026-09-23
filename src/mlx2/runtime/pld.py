@@ -202,6 +202,8 @@ class _Lane:
     acceptance_window: deque = field(default_factory=deque)
     rotating: list = field(default_factory=list)
     recovery: CommittedRecoverySlot = field(default_factory=CommittedRecoverySlot)
+    # Widest committed verify forward; the receipt's ``target_width``.
+    target_max_width: int = 1
 
 
 class PromptLookupBatchGenerator:
@@ -1029,6 +1031,9 @@ class PromptLookupBatchGenerator:
         self.scheduler_stats["pld_proposed"] += len(proposal)
         self.scheduler_stats["pld_accepted"] += sum(item[2] for item in delivered)
         self.scheduler_stats["pld_bonus"] += sum(not item[2] for item in delivered)
+        # Qualification reads ``target_width`` as the width the lane ran at,
+        # as the external route reports it, not this round's width.
+        lane.target_max_width = max(lane.target_max_width, getattr(lane, "round_width", 1))
         receipt = {
             "schema": "mlx2.prompt-lookup-live.v1",
             "execution": "prompt_lookup_verify" if lane.stats.retrieval_cycles else "ordinary_target",
@@ -1050,7 +1055,7 @@ class PromptLookupBatchGenerator:
             "verify_accept_hist": dict(lane.stats.verify_accept_hist),
             "span_snap_cycles": lane.stats.span_snap_cycles,
             "span_extend_cycles": lane.stats.span_extend_cycles,
-            "target_width": getattr(lane, "round_width", 1),
+            "target_width": lane.target_max_width,
             "qualification_authority": "serving_route",
         }
         if finish_reason and lane.speculation_started:

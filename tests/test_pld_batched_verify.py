@@ -188,3 +188,27 @@ def test_transaction_snapshots_survive_uncopyable_cow_state_and_skip_the_payload
     assert mx.array_equal(plain.keys[..., :6, :], before[1][0]).item()
     assert mx.array_equal(ring._temporal_order(ring.keys), before[1][1]).item()
     assert float(rows[0][0].keys[0, 0, 9, 0]) == 99.0
+
+
+def test_receipt_target_width_is_the_lanes_widest_verify():
+    # The receipt reported the final round's width; qualification reads it
+    # as the width the lane ran at, so a lane that verified at B2 and then
+    # finished alone looked like a B1 lane.
+    generator = PromptLookupBatchGenerator(
+        _north(), completion_batch_size=2, prefill_step_size=5,
+        prompt_lookup={"num_draft": 4, "ngram_min": 2, "ngram_max": 3, "adaptive": False,
+                       "deferred_admission": False, "batched_verify": True},
+    )
+    long_lane, short_lane = generator.insert(PROMPTS[:2], max_tokens=[24, 4])
+    widths, finals = {long_lane: set(), short_lane: set()}, {}
+    for _ in range(2000):
+        _prompts, responses = generator.next()
+        for response in responses:
+            widths[response.uid].add(response.execution_width)
+            if response.finish_reason:
+                finals[response.uid] = response
+        if len(finals) == 2:
+            break
+    assert widths[long_lane] == {1, 2}
+    for uid in (long_lane, short_lane):
+        assert finals[uid].speculative_receipt["target_width"] == max(widths[uid])
