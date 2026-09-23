@@ -496,6 +496,33 @@ def test_qwen_untyped_parameter_decodes_objects_and_arrays_only():
     }
 
 
+def test_qwen_empty_schema_parameter_decodes_objects_and_arrays_only():
+    # ``{}`` is a present schema that admits any JSON value, but it is falsy;
+    # reading it as an undeclared parameter served objects as source text.
+    tools = [{
+        "type": "function",
+        "function": {
+            "name": "configure",
+            "parameters": {
+                "type": "object",
+                "properties": {"config": {}, "ids": {}, "count": {}},
+            },
+        },
+    }]
+    call = parse_tool_call(
+        "<function=configure>"
+        '<parameter=config>{"depth": 2}</parameter>'
+        "<parameter=ids>[1, 2]</parameter>"
+        "<parameter=count>123</parameter>"
+        "</function>",
+        tools,
+    )
+    assert call == {
+        "name": "configure",
+        "arguments": {"config": {"depth": 2}, "ids": [1, 2], "count": "123"},
+    }
+
+
 _SUM_TOOLS = [{
     "type": "function",
     "function": {

@@ -95,7 +95,12 @@ def _convert_param_value(
     param_value: str, param_name: str, param_config: dict, *, strict: bool = False
 ) -> Any:
     """Convert parameter value based on its type in the schema."""
-    if not (param := param_config.get(param_name, False)):
+    param = param_config.get(param_name)
+    # An empty schema ``{}`` is falsy but present: it admits any JSON value,
+    # so a non-strict value takes the untyped path below and an object or
+    # array the model wrote is decoded.  Only an undeclared parameter is
+    # unknown.  The strict path keeps reading ``{}`` as no schema.
+    if param is None or (strict and not param):
         return None if param_value.lower() == "null" else param_value
 
     if strict:
