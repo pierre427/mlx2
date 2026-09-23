@@ -354,6 +354,82 @@ def test_stop_inside_a_copied_span_after_copy_rounds_matches_ordinary(cpu, segme
     assert multi_round_stops >= 5
 
 
+class _LetterTokenizer:
+    eos_token_ids = [0]
+    vocab_size = 64
+
+    def decode(self, tokens, **_kwargs):
+        return "".join(chr(65 + int(token)) for token in tokens if int(token) != 0)
+
+
+class _RunOfBs:
+    """Grammar: one or more ``B`` (token 1), complete at two or more."""
+
+    pattern = None
+
+    @staticmethod
+    def canonicalize(value):
+        return value
+
+    @staticmethod
+    def fullmatch(value, *, partial=False, timeout=None):
+        legal = all(char == "B" for char in value)
+        return object() if legal and (partial or len(value) >= 2) else None
+
+
+@pytest.mark.parametrize("route", ["ordinary", "mtp", "mtp-copy", "segmented-copy"])
+def test_copied_token_the_grammar_forbids_does_not_latch_a_failure(cpu, route):
+    """A rejected copied token must not reach the real structured processor.
+
+    The prompt repeats ``1 1`` followed by ``1`` (the copy source), but the
+    cycle bias makes the copied continuation illegal.  Verification rejects
+    it; the processor used to see the rows after it, latch NO_CONTINUATION,
+    and the serving layer returned 502.
+    """
+    from mlx2.runtime.generate import BatchGenerator
+    from mlx2.structured_output import StructuredOutputProcessor
+
+    prompt = [2, 1, 1, 1, 9, 9, 3, 7, 1, 1]
+    processor = StructuredOutputProcessor(_LetterTokenizer(), len(prompt), _RunOfBs())
+    kwargs = {}
+    insert = {"max_tokens": [12], "logits_processors": [[processor]]}
+    if route == "ordinary":
+        model = _ordinary_copying_model()
+    else:
+        model = _copying_model()
+        kwargs["self_mtp"] = {"num_draft": 2, "persistent": True}
+        insert.update(
+            lane_rngs=[LaneRNG(3)], self_mtp_configs=[{"sampling_temp": 0.0}]
+        )
+        if route == "segmented-copy":
+            kwargs["self_mtp"].update(
+                {"segment_aware_live_tip": True, "segment_aware_cohort_size": 1}
+            )
+        if route.endswith("copy"):
+            kwargs["copy_draft"] = {"enabled": True, "ngram_min": 2, "ngram_max": 3}
+    generator = BatchGenerator(
+        model, completion_batch_size=1, prefill_batch_size=1, prefill_step_size=32,
+        stop_tokens=[[0]], **kwargs,
+    )
+    tokens, finish = [], None
+    try:
+        generator.insert([prompt], **insert)
+        for _ in range(60):
+            _, responses = generator.next()
+            for response in responses:
+                tokens.append(response.token)
+                finish = response.finish_reason or finish
+            if finish:
+                break
+        stats = dict(generator.scheduler_stats)
+    finally:
+        generator.close()
+    assert processor.failure is None
+    assert (tokens, finish) == ([1, 1, 0], "stop")
+    if route.endswith("copy"):
+        assert stats["self_mtp_copy_rounds"] > 0
+
+
 def test_default_off_receipt_and_counters_unchanged(cpu):
     model = _copying_model()
     _, stats, receipts = _run(model, PROMPT, max_tokens=12)

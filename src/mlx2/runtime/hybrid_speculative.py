@@ -2258,7 +2258,19 @@ def _propose_batched_self_mtp_round(
     for row, (lane, k, valid) in enumerate(zip(batch.lanes, k_vector, valid_lengths)):
         if lane.logits_processors:
             processed = []
+            # Head drafts were drawn from the processed law, but copied spans
+            # are host tokens no processor has seen.  A row that follows a
+            # copied token the processors forbid is never used by
+            # verification, and its history is already outside a structured
+            # output grammar, so asking the real (latching) processors about
+            # it would fail a healthy lane.  Those rows keep the raw logits,
+            # as on the external route.
+            copied = copy_rows[row]
+            reachable = valid
             for pos in range(valid):
+                if pos >= reachable:
+                    processed.append(batched_logits[row, pos])
+                    continue
                 processor_tokens = mx.concatenate(
                     [lane.token_prefix, mx.array([lane.cur], mx.uint32)]
                     + [mx.reshape(token, (1,)) for token in draft_tokens[row][:pos]]
@@ -2270,6 +2282,10 @@ def _propose_batched_self_mtp_round(
                         batched_logits[row, pos],
                     )
                 )
+                if copied and pos < k:
+                    record_verify_sync("hybrid.copy.processor_guard")
+                    if bool(mx.isneginf(processed[-1][int(copied[pos])]).item()):
+                        reachable = pos + 1
             logits = mx.stack(processed)
         else:
             logits = batched_logits[row, :valid]
