@@ -147,14 +147,28 @@ def quantized_scaled_dot_product_attention(
         return mx.fast.scaled_dot_product_attention(
             queries, keys, values, scale=scale, mask=mask
         )
-    queries *= scale
+    # Not `queries *= scale`: that mutates the caller's array in place.
+    queries = queries * scale
     if n_repeats > 1:
-        queries = mx.reshape(queries, (B, n_kv_heads, n_repeats, L, D))
-        q_keys = tree_map(lambda x: mx.expand_dims(x, axis=-3), q_keys)
+        # Fold each KV head's query group into the row axis for Q.K^T so its
+        # quantized keys are read once. As a broadcast batch axis (the V
+        # product's form below) the kernel re-read K once per query head:
+        # 2.2-2.4x slower scores at 128K on Qwen 3.5/3.6/3.8 (2026-09-23,
+        # qualification/runs/kvq-decode-20260923). The V product stays
+        # broadcast, which measured as fast as or faster than rows there.
+        scores = mx.quantized_matmul(
+            mx.reshape(queries, (B, n_kv_heads, n_repeats * L, D)),
+            *q_keys,
+            transpose=True,
+            group_size=group_size,
+            bits=key_bits,
+        )
+        scores = mx.reshape(scores, (B, n_kv_heads, n_repeats, L, scores.shape[-1]))
         q_values = tree_map(lambda x: mx.expand_dims(x, axis=-3), q_values)
-    scores = mx.quantized_matmul(
-        queries, *q_keys, transpose=True, group_size=group_size, bits=key_bits
-    )
+    else:
+        scores = mx.quantized_matmul(
+            queries, *q_keys, transpose=True, group_size=group_size, bits=key_bits
+        )
     if mask is not None:
         if isinstance(mask, str):
             (qL, kL) = scores.shape[-2:]
