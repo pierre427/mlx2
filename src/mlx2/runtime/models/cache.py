@@ -3734,6 +3734,10 @@ class BatchKVCache(_BaseCache):
 
     def extract(self, idx):
         cache = KVCache()
+        # A one-token prompt feeds its only token to the first decode step, so
+        # the prompt boundary is captured before anything was written here.
+        if self.keys is None:
+            return cache
         padding = self.left_padding[idx].item()
         end = self._idx
         if self._right_padding is not None:
@@ -4535,6 +4539,8 @@ class BatchRotatingQuantizedKVCache(_BaseCache):
         cache = RotatingQuantizedKVCache(
             self.max_size, group_size=self.group_size, bits=self.bits
         )
+        if self.keys is None:
+            return cache
         padding = max(0, self.left_padding.tolist()[idx])
         offset = self.offset.tolist()[idx]
         cache.keys = tree_map(lambda a: a[idx : idx + 1], self.keys)
