@@ -436,6 +436,70 @@ def _collect(job):
             return "".join(reasoning), "".join(content), event
 
 
+def test_null_constraint_fields_mean_absent_and_keep_the_worker_alive(scripted_engine):
+    from mlx2.server import validate_request
+
+    build, state = scripted_engine
+    engine = build(declare_marker=True)
+    base = {"messages": [{"role": "user", "content": "hi"}], "temperature": 0, "max_tokens": 2}
+    for field in ("response_format", "grammar"):
+        assert field not in validate_request({**base, field: None})
+    both = validate_request({**base, "response_format": None, "grammar": None})
+    assert "response_format" not in both and "grammar" not in both
+    assert validate_request({**base, "response_format": None, "grammar": "yes|no"})["grammar"] == "yes|no"
+    # A concurrent unconstrained lane that is still decoding when the null
+    # requests finish: it must not be taken down with them.
+    state["script"] = [3] * 40
+    other = engine.submit({**base, "messages": [{"role": "user", "content": "x"}], "max_tokens": 50})
+    for field in ("response_format", "grammar"):
+        # The engine is also reachable without the HTTP validator; a null
+        # constraint there is no constraint and the receipt must say so.
+        for body in (validate_request({**base, field: None}), {**base, field: None}):
+            _, _, final = _collect(engine.submit(body))
+            assert final.get("finish_reason") == "length", final
+            assert final["receipt"]["request_controls"]["structured_output"] is None
+    _, _, other_final = _collect(other)
+    assert other_final.get("finish_reason") == "length", other_final
+    assert engine.thread.is_alive() and engine.error is None
+    _, _, later = _collect(engine.submit(dict(base)))
+    assert later.get("finish_reason") == "length", later
+
+
+def test_a_failing_terminal_receipt_fails_only_its_own_request(scripted_engine, monkeypatch):
+    from mlx2 import structured_output
+
+    build, state = scripted_engine
+    engine = build(declare_marker=True)
+
+    def broken_receipt(*_args, **_kwargs):
+        raise RuntimeError("injected receipt fault")
+
+    monkeypatch.setattr(structured_output, "structured_receipt", broken_receipt)
+    state["script"] = [7, 8, 9, 10, 11] + [3] * 40
+    other = engine.submit(
+        {"messages": [{"role": "user", "content": "x"}], "temperature": 0, "max_tokens": 30}
+    )
+    _, _, final = _collect(
+        engine.submit(
+            {
+                "messages": [{"role": "user", "content": "hi"}],
+                "response_format": {"type": "json_object"},
+                "temperature": 0,
+                "max_tokens": 8,
+            }
+        )
+    )
+    assert final["status"] == 500 and "finish_reason" not in final, final
+    _, _, other_final = _collect(other)
+    assert other_final.get("finish_reason") == "length", other_final
+    assert engine.thread.is_alive() and engine.error is None
+    assert engine.counts["terminal_receipt_failures"] == 1
+    with engine.lock:
+        assert not engine.jobs
+    assert engine.slots.acquire(blocking=False)
+    engine.slots.release()
+
+
 def test_serving_receipt_records_effective_output_limit_and_defaulting(scripted_engine):
     build, state = scripted_engine
     engine = build(declare_marker=True)

@@ -484,6 +484,14 @@ def validate_request(
                     raise ValueError("invalid tool call history")
     elif not isinstance(body.get("prompt"), str) or not body["prompt"]:
         raise ValueError("prompt must be a non-empty string")
+    # OpenAI clients serialize an unset constraint as an explicit null.  Treat
+    # it exactly as an absent field so the engine never sees a constraint key
+    # that carries no constraint.
+    body = {
+        key: value
+        for key, value in body.items()
+        if key not in {"response_format", "grammar"} or value is not None
+    }
     if "response_format" in body or "grammar" in body:
         if "response_format" in body and "grammar" in body:
             raise ValueError("response_format and grammar are mutually exclusive")

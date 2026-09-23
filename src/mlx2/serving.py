@@ -6430,218 +6430,241 @@ class ServingEngine:
                                 if getattr(job.structured, "deferred", False):
                                     self.counts["structured_deferred"] += 1
                             budget_fired = bool(job.thinking_budget_fired)
-                            receipt = {
-                                "request_id": job.id,
-                                "cache": "apcv2",
-                                "cached_tokens": job.cached_tokens,
-                                "cache_checkpoint_role": job.cache_retention_role,
-                                "stop_sequence": getattr(
-                                    job.output_parser, "stop_sequence", None
-                                ),
-                                "parallel_prefill": (
-                                    {
-                                        "schema": "mlx2.apcv2-fanout.v1",
-                                        "group": job.fanout_group,
-                                        "role": job.fanout_role,
-                                        "one_prefill": job.fanout_one_prefill,
-                                        "boundary_tokens": job.fanout_boundary_tokens,
-                                        "reason": job.fanout_reason,
-                                    }
-                                    if job.fanout_group
-                                    else None
-                                ),
-                                "profile": self.snapshot["profile"],
-                                "qualification": self.snapshot["qualification"],
-                                "route_receipt": route_receipt,
-                                **(
-                                    {"lora": self._multi_lora_receipt(job)}
-                                    if self.multi_lora is not None
-                                    else {}
-                                ),
-                                "route": self.snapshot["settings"]["route"],
-                                "route_selection_source": self.route_selection_source,
-                                "request_controls": {
-                                    "max_tokens": job.effective_max_tokens,
-                                    "max_tokens_defaulted": job.max_tokens_defaulted,
-                                    "default_max_tokens": self.default_max_tokens,
-                                    "logprobs": wants_logprobs(job.request),
-                                    "top_logprobs": job.request.get("top_logprobs", 0),
-                                    "logprob_semantics": (
-                                        ("execution_target: external=transformed_target_verifier" if external_draft else "execution_target: ordinary=post_processor_pre_sampler; mtp=transformed_target_verifier")
-                                        if wants_logprobs(job.request) else None
+                            try:
+                                receipt = {
+                                    "request_id": job.id,
+                                    "cache": "apcv2",
+                                    "cached_tokens": job.cached_tokens,
+                                    "cache_checkpoint_role": job.cache_retention_role,
+                                    "stop_sequence": getattr(
+                                        job.output_parser, "stop_sequence", None
                                     ),
-                                    "thinking": thinking_enabled(adapter, job.request),
-                                    "thinking_budget": job.request.get("thinking_budget"),
-                                    "thinking_budget_mode": job.request.get(
-                                        "thinking_budget_mode", "state_aware"
+                                    "parallel_prefill": (
+                                        {
+                                            "schema": "mlx2.apcv2-fanout.v1",
+                                            "group": job.fanout_group,
+                                            "role": job.fanout_role,
+                                            "one_prefill": job.fanout_one_prefill,
+                                            "boundary_tokens": job.fanout_boundary_tokens,
+                                            "reason": job.fanout_reason,
+                                        }
+                                        if job.fanout_group
+                                        else None
                                     ),
-                                    "thinking_budget_fired": budget_fired,
-                                    "thinking_mechanisms": {
-                                        "state_aware_guard": job.thinking_guard is not None,
-                                        "history_budget": job.thinking_budget is not None,
-                                        "steering": bool(
-                                            job.thinking_guard is not None
-                                            and getattr(
-                                                job.thinking_guard,
-                                                "_direction",
-                                                None,
+                                    "profile": self.snapshot["profile"],
+                                    "qualification": self.snapshot["qualification"],
+                                    "route_receipt": route_receipt,
+                                    **(
+                                        {"lora": self._multi_lora_receipt(job)}
+                                        if self.multi_lora is not None
+                                        else {}
+                                    ),
+                                    "route": self.snapshot["settings"]["route"],
+                                    "route_selection_source": self.route_selection_source,
+                                    "request_controls": {
+                                        "max_tokens": job.effective_max_tokens,
+                                        "max_tokens_defaulted": job.max_tokens_defaulted,
+                                        "default_max_tokens": self.default_max_tokens,
+                                        "logprobs": wants_logprobs(job.request),
+                                        "top_logprobs": job.request.get("top_logprobs", 0),
+                                        "logprob_semantics": (
+                                            ("execution_target: external=transformed_target_verifier" if external_draft else "execution_target: ordinary=post_processor_pre_sampler; mtp=transformed_target_verifier")
+                                            if wants_logprobs(job.request) else None
+                                        ),
+                                        "thinking": thinking_enabled(adapter, job.request),
+                                        "thinking_budget": job.request.get("thinking_budget"),
+                                        "thinking_budget_mode": job.request.get(
+                                            "thinking_budget_mode", "state_aware"
+                                        ),
+                                        "thinking_budget_fired": budget_fired,
+                                        "thinking_mechanisms": {
+                                            "state_aware_guard": job.thinking_guard is not None,
+                                            "history_budget": job.thinking_budget is not None,
+                                            "steering": bool(
+                                                job.thinking_guard is not None
+                                                and getattr(
+                                                    job.thinking_guard,
+                                                    "_direction",
+                                                    None,
+                                                )
+                                                is not None
+                                            ),
+                                        },
+                                        "sampling": {name: job.request[name] for name in ("temperature", "top_p", "top_k", "min_p", "repetition_penalty", "presence_penalty", "frequency_penalty", "logit_bias", "seed") if name in job.request},
+                                        # What the samplers actually used, and
+                                        # which vendor defaults filled it in.
+                                        "effective_sampling": job.effective_sampling,
+                                        "sampling_defaults": job.sampling_defaults,
+                                        "min_tokens": job.request.get("min_tokens", 0),
+                                        "thinking_guard": (
+                                            job.thinking_guard.receipt()
+                                            if job.thinking_guard is not None
+                                            else None
+                                        ),
+                                        "batch_cohort": job.request.get("batch_cohort"),
+                                        "skip_writing_prefix_cache": job.request.get(
+                                            "skip_writing_prefix_cache", False
+                                        ),
+                                        "session_id": job.request.get("session_id"),
+                                        "reasoning_effort": job.request.get("reasoning_effort"),
+                                        "effort_semantics": getattr(adapter, "reasoning_effort_semantics", "thinking_toggle"),
+                                        "context_limit": min(self.max_context, job.request.get("context_limit", self.max_context)),
+                                        # A constraint is reported as enforced only
+                                        # when a processor was actually built; a
+                                        # null field constrains nothing.
+                                        "structured_output": (
+                                            {
+                                                "kind": "grammar",
+                                                "enforced": True,
+                                                **structured_receipt(job.structured, job.completion_tokens),
+                                            }
+                                            if job.request.get("grammar") is not None
+                                            and job.structured is not None
+                                            else {
+                                                "kind": (job.request.get("response_format") or {}).get("type"),
+                                                "enforced": True,
+                                                **structured_receipt(job.structured, job.completion_tokens),
+                                            }
+                                            if job.request.get("response_format") is not None
+                                            and job.structured is not None
+                                            else {
+                                                "kind": "tool_choice",
+                                                "enforced": True,
+                                                **structured_receipt(
+                                                    job.structured,
+                                                    job.completion_tokens,
+                                                ),
+                                            }
+                                            if (
+                                                (
+                                                    constrained_tool_choice(job.request)
+                                                    or job.tool_grammar_status == "engaged"
+                                                )
+                                                and job.structured is not None
                                             )
-                                            is not None
+                                            else None
+                                        ),
+                                        "tool_choice": (
+                                            {
+                                                "mode": (
+                                                    "named"
+                                                    if isinstance(
+                                                        job.request.get("tool_choice"),
+                                                        dict,
+                                                    )
+                                                    else job.request.get(
+                                                        "tool_choice", "auto"
+                                                    )
+                                                ),
+                                                "name": (
+                                                    job.request["tool_choice"]["function"]["name"]
+                                                    if isinstance(
+                                                        job.request.get("tool_choice"), dict
+                                                    )
+                                                    else None
+                                                ),
+                                                "strict": any(
+                                                    tool["function"].get("strict", False)
+                                                    for tool in job.request.get("tools", ())
+                                                ),
+                                                "parallel": job.request.get(
+                                                    "parallel_tool_calls", True
+                                                ),
+                                                "enforced": constrained_tool_choice(
+                                                    job.request
+                                                ),
+                                                "decode_grammar": job.tool_grammar_status,
+                                                **(
+                                                    {"grammar": job.tool_grammar_receipt}
+                                                    if job.tool_grammar_receipt
+                                                    else {}
+                                                ),
+                                            }
+                                            if "tools" in job.request
+                                            else None
                                         ),
                                     },
-                                    "sampling": {name: job.request[name] for name in ("temperature", "top_p", "top_k", "min_p", "repetition_penalty", "presence_penalty", "frequency_penalty", "logit_bias", "seed") if name in job.request},
-                                    # What the samplers actually used, and
-                                    # which vendor defaults filled it in.
-                                    "effective_sampling": job.effective_sampling,
-                                    "sampling_defaults": job.sampling_defaults,
-                                    "min_tokens": job.request.get("min_tokens", 0),
-                                    "thinking_guard": (
-                                        job.thinking_guard.receipt()
-                                        if job.thinking_guard is not None
-                                        else None
+                                    "ordinary_compute_width": ordinary_compute_width(response, job.observed_width, mtp=self.mtp, external_draft=external_draft, prompt_lookup=prompt_lookup),
+                                    "mtp": response.mtp_receipt,
+                                    "speculation": getattr(response, "speculative_receipt", None),
+                                    "spomin_live_surgery": job.spomin_receipt,
+                                    "prefill_chunk": job.prefill_chunk_receipt,
+                                    "approximate_kv": job.approximate_kv_receipt,
+                                    "neural_concept_bridge": job.neural_concept_receipt,
+                                    **(
+                                        {"int8_prefill": self.int8_prefill_handle.receipt()}
+                                        if self.int8_prefill_handle is not None
+                                        else {}
                                     ),
-                                    "batch_cohort": job.request.get("batch_cohort"),
-                                    "skip_writing_prefix_cache": job.request.get(
-                                        "skip_writing_prefix_cache", False
-                                    ),
-                                    "session_id": job.request.get("session_id"),
-                                    "reasoning_effort": job.request.get("reasoning_effort"),
-                                    "effort_semantics": getattr(adapter, "reasoning_effort_semantics", "thinking_toggle"),
-                                    "context_limit": min(self.max_context, job.request.get("context_limit", self.max_context)),
-                                    "structured_output": (
+                                    **(
                                         {
-                                            "kind": "grammar",
-                                            "enforced": True,
-                                            **structured_receipt(job.structured, job.completion_tokens),
+                                            "preemption": _preemption_receipt(job)
                                         }
-                                        if "grammar" in job.request
-                                        else {
-                                            "kind": job.request["response_format"]["type"],
-                                            "enforced": True,
-                                            **structured_receipt(job.structured, job.completion_tokens),
-                                        }
-                                        if "response_format" in job.request
-                                        else {
-                                            "kind": "tool_choice",
-                                            "enforced": True,
-                                            **structured_receipt(
-                                                job.structured,
-                                                job.completion_tokens,
-                                            ),
-                                        }
-                                        if (
-                                            (
-                                                constrained_tool_choice(job.request)
-                                                or job.tool_grammar_status == "engaged"
-                                            )
-                                            and job.structured is not None
-                                        )
-                                        else None
+                                        if preemption
+                                        else {}
                                     ),
-                                    "tool_choice": (
+                                    **(
                                         {
-                                            "mode": (
-                                                "named"
-                                                if isinstance(
-                                                    job.request.get("tool_choice"),
-                                                    dict,
-                                                )
-                                                else job.request.get(
-                                                    "tool_choice", "auto"
-                                                )
-                                            ),
-                                            "name": (
-                                                job.request["tool_choice"]["function"]["name"]
-                                                if isinstance(
-                                                    job.request.get("tool_choice"), dict
-                                                )
-                                                else None
-                                            ),
-                                            "strict": any(
-                                                tool["function"].get("strict", False)
-                                                for tool in job.request.get("tools", ())
-                                            ),
-                                            "parallel": job.request.get(
-                                                "parallel_tool_calls", True
-                                            ),
-                                            "enforced": constrained_tool_choice(
-                                                job.request
-                                            ),
-                                            "decode_grammar": job.tool_grammar_status,
-                                            **(
-                                                {"grammar": job.tool_grammar_receipt}
-                                                if job.tool_grammar_receipt
-                                                else {}
-                                            ),
+                                            "state_boundaries": {
+                                                "planned": {
+                                                    purpose.name.lower(): sum(
+                                                        bound.purpose == purpose
+                                                        for bound in job.state_boundaries
+                                                    )
+                                                    for purpose in BoundaryPurpose
+                                                },
+                                                "published": dict(
+                                                    job.state_boundaries_published
+                                                ),
+                                            }
                                         }
-                                        if "tools" in job.request
-                                        else None
+                                        if self.apc_rolling_route is not None
+                                        else {}
                                     ),
-                                },
-                                "ordinary_compute_width": ordinary_compute_width(response, job.observed_width, mtp=self.mtp, external_draft=external_draft, prompt_lookup=prompt_lookup),
-                                "mtp": response.mtp_receipt,
-                                "speculation": getattr(response, "speculative_receipt", None),
-                                "spomin_live_surgery": job.spomin_receipt,
-                                "prefill_chunk": job.prefill_chunk_receipt,
-                                "approximate_kv": job.approximate_kv_receipt,
-                                "neural_concept_bridge": job.neural_concept_receipt,
-                                **(
-                                    {"int8_prefill": self.int8_prefill_handle.receipt()}
-                                    if self.int8_prefill_handle is not None
-                                    else {}
-                                ),
-                                **(
-                                    {
-                                        "preemption": _preemption_receipt(job)
-                                    }
-                                    if preemption
-                                    else {}
-                                ),
-                                **(
-                                    {
-                                        "state_boundaries": {
-                                            "planned": {
-                                                purpose.name.lower(): sum(
-                                                    bound.purpose == purpose
-                                                    for bound in job.state_boundaries
-                                                )
-                                                for purpose in BoundaryPurpose
-                                            },
-                                            "published": dict(
-                                                job.state_boundaries_published
-                                            ),
+                                    **(
+                                        {
+                                            "prompt_progress": {
+                                                "updates": job.prompt_progress_updates,
+                                                "dropped": job.prompt_progress_dropped,
+                                            }
                                         }
-                                    }
-                                    if self.apc_rolling_route is not None
-                                    else {}
-                                ),
-                                **(
+                                        if job.request.get("return_progress")
+                                        else {}
+                                    ),
+                                    **verify_bitexact_receipt_fields(
+                                        self.verify_bitexact_handle,
+                                        job.verify_bitexact_start,
+                                    ),
+                                    "cache_capsule": (
+                                        getattr(
+                                            batch,
+                                            "pop_cache_capsule_receipt",
+                                            lambda _uid: None,
+                                        )(response.uid)
+                                        or job.cache_capsule_receipt
+                                    ),
+                                    "prompt_tokens": job.prompt_tokens,
+                                    "completion_tokens": job.completion_tokens,
+                                    "ttft_seconds": job.first_token - job.started,
+                                    "elapsed_seconds": time.monotonic() - job.started,
+                                }
+                            except Exception:  # noqa: BLE001 - one lane, not the worker
+                                # A defect in receipt assembly must fail only
+                                # this request: letting it escape would stop the
+                                # worker and fail every other inflight lane.
+                                log.exception(
+                                    "terminal receipt failed for request %s", job.id
+                                )
+                                self.counts["terminal_receipt_failures"] += 1
+                                self._finish(
+                                    job,
                                     {
-                                        "prompt_progress": {
-                                            "updates": job.prompt_progress_updates,
-                                            "dropped": job.prompt_progress_dropped,
-                                        }
-                                    }
-                                    if job.request.get("return_progress")
-                                    else {}
-                                ),
-                                **verify_bitexact_receipt_fields(
-                                    self.verify_bitexact_handle,
-                                    job.verify_bitexact_start,
-                                ),
-                                "cache_capsule": (
-                                    getattr(
-                                        batch,
-                                        "pop_cache_capsule_receipt",
-                                        lambda _uid: None,
-                                    )(response.uid)
-                                    or job.cache_capsule_receipt
-                                ),
-                                "prompt_tokens": job.prompt_tokens,
-                                "completion_tokens": job.completion_tokens,
-                                "ttft_seconds": job.first_token - job.started,
-                                "elapsed_seconds": time.monotonic() - job.started,
-                            }
+                                        "error": "internal error while finishing the request",
+                                        "status": 500,
+                                    },
+                                )
+                                del active[response.uid]
+                                continue
                             self.receipt_log.append(
                                 (str(job.tenant_id or "default"), receipt)
                             )
