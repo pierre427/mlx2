@@ -1473,12 +1473,17 @@ def _snapshot_segmented_recovery_row(value, memo=None):
     target, draft, borrowed = snapshot_recovery_descriptors(
         pair.target, pair.draft, memo=memo
     )
+    from .processor_probe import copy_sharing, rollback_shared_memo
+
+    shared = rollback_shared_memo(getattr(lane, "logits_processors", ()))
     lane_fields = {}
     for name, current in vars(lane).items():
         if name == "rng":
             continue
         lane_fields[name] = (
-            current if name in _MTP_LANE_ARRAY_FIELDS else copy.deepcopy(current)
+            current
+            if name in _MTP_LANE_ARRAY_FIELDS
+            else copy_sharing(current, shared)
         )
     return lane_fields, target, draft, borrowed
 

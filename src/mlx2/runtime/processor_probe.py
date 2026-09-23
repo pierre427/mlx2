@@ -116,4 +116,29 @@ def probe_logits_processors(processors, tokens, logits):
     return value
 
 
-__all__ = ["isolated_logits_processor", "probe_logits_processors"]
+def rollback_shared_memo(processors):
+    """``copy.deepcopy`` memo that keeps rollback-resyncing processors shared.
+
+    A processor whose ``resyncs_after_rollback`` is true derives its state
+    from the token history of its next call, so a recovery snapshot can keep
+    the live object instead of copying state that grows with the generation.
+    Pass a fresh memo to every ``deepcopy`` call.
+    """
+    return {
+        id(processor): processor
+        for processor in processors or ()
+        if getattr(processor, "resyncs_after_rollback", False)
+    }
+
+
+def copy_sharing(value, shared):
+    """``copy.deepcopy(value)`` that keeps the ``shared`` memo's objects."""
+    return copy.deepcopy(value, dict(shared)) if shared else copy.deepcopy(value)
+
+
+__all__ = [
+    "isolated_logits_processor",
+    "probe_logits_processors",
+    "copy_sharing",
+    "rollback_shared_memo",
+]

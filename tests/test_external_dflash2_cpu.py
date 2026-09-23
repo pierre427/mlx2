@@ -1298,3 +1298,46 @@ def test_invalid_target_law_is_a_request_error_not_a_worker_death(monkeypatch):
     assert "probability distribution" in failed.get("error", "")
     assert alive and error is None
     assert after["tokens"] == _greedy_reference(m, [1, 2, 3], 4)
+
+
+def test_round_snapshot_shares_a_guard_that_resyncs_and_output_is_unchanged(monkeypatch):
+    # Every round deep-copied the lane's processors; a thinking guard's
+    # history grows with the generation, so each round cost O(generated).
+    from mlx2.thinking_guard import ThinkingGuard
+
+    m, d = tiny()
+    prompt = [1, 2, 3, 4, 5]
+
+    def run(fail_every):
+        b = generator(m, d)
+        guard = ThinkingGuard(len(prompt), (31,), budget=6)
+        b.insert([prompt], max_tokens=[10], logits_processors=[[guard]],
+                 sampling_configs=[{"sampling_temp": 0}])
+        lane = next(iter(b.lanes.values()))
+        frozen, mode = b._freeze_lane(lane)
+        assert mode == "deepcopy" and frozen["processors"][0] is guard
+        real, calls = ExternalDraftBatchGenerator._commit, [0]
+
+        def flaky(self, *args, **kwargs):
+            calls[0] += 1
+            if fail_every and calls[0] % fail_every == 0:
+                raise RuntimeError("injected commit failure")
+            return real(self, *args, **kwargs)
+
+        monkeypatch.setattr(ExternalDraftBatchGenerator, "_commit", flaky)
+        output = []
+        for _ in range(200):
+            try:
+                _, responses = b.next()
+            except RuntimeError:
+                continue  # every lane was restored to its committed boundary
+            output += [r.token for r in responses]
+            if not b.lanes:
+                break
+        monkeypatch.setattr(ExternalDraftBatchGenerator, "_commit", real)
+        guard.settle(output)
+        return output, guard.receipt()
+
+    clean, receipt = run(0)
+    assert run(3) == (clean, receipt)
+    assert receipt["tripped"] == "budget_soft"

@@ -220,6 +220,53 @@ class ThinkingGuard:
                          mx.array(bias, dtype=logits.dtype), mx.array(0.0, dtype=logits.dtype))
         return logits + boost
 
+    def probe(self, tokens, logits):
+        """``__call__`` for a provisional draft row, leaving the guard as it was.
+
+        Draft probing otherwise deep-copies the guard, whose history, n-gram
+        table and undo log grow with the generation: O(generated) per drafted
+        position.  The call below changes the ids only from the sync window
+        on, so the guard restores that tail, undoes the alarm back to the
+        first position the call changed and replays the ids that were there.
+        """
+        generated, ids = self._generated, self._ids
+        ids_length = len(ids)
+        length = max(0, int(tokens.size) - self.prompt_length)
+        start = max(0, min(len(generated), length) - self.rewrite_window)
+        tail = generated[start:]
+        scalars = (
+            self._close_at, self.released_at, self.forced, self._forced_at,
+            self.think_tokens, self._open,
+        )
+        try:
+            return self(tokens, logits)
+        finally:
+            del generated[start:]
+            generated.extend(tail)
+            (
+                self._close_at, self.released_at, self.forced, self._forced_at,
+                self.think_tokens, self._open,
+            ) = scalars
+            # Alarm positions before ``start`` were never truncated.
+            index = min(start, ids_length)
+            limit = min(len(ids), ids_length)
+            while index < limit and ids[index] == generated[index]:
+                index += 1
+            self._truncate(index)
+            for token in generated[index:ids_length]:
+                self._advance(token)
+
+    @property
+    def resyncs_after_rollback(self):
+        """Whether a rollback needs no snapshot of this guard.
+
+        Everything but the steering count is a function of the ids the next
+        call passes, so a recovery snapshot can share the live guard.  A
+        steering guard counts committed positions, which the ids do not
+        determine, and is still copied.
+        """
+        return self._direction is None
+
     def settle(self, generated):
         """Re-sync the receipt state to the committed generated ids.
 

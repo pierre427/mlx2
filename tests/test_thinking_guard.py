@@ -551,3 +551,86 @@ def test_forced_close_receipt_ignores_rows_drafted_past_the_stop(monkeypatch):
     guard = speculative["receipt"]["request_controls"]["thinking_guard"]
     assert guard == ordinary["receipt"]["request_controls"]["thinking_guard"]
     assert guard["forced_close"] is False and guard["think_tokens"] == 6
+
+
+def _guard_state(guard):
+    import copy
+
+    return copy.deepcopy({key: value for key, value in vars(guard).items() if key != "_direction"})
+
+
+def test_probe_matches_a_copied_call_and_leaves_the_guard_untouched():
+    # Draft probing deep-copied the guard (history, n-gram table, undo log)
+    # for every drafted position; probe answers on the live guard and
+    # rewinds it instead.
+    import copy
+
+    rng = np.random.default_rng(3)
+
+    def make():
+        return ThinkingGuard(2, (CLOSE,), budget=120, soft_ratio=0.5, tau=2.5,
+                             ngram=4, rewrite_window=32)
+
+    guard, ids = make(), []
+    for _ in range(400):
+        if ids and rng.random() < 0.2:
+            del ids[len(ids) - int(rng.integers(1, min(len(ids), 6) + 1)):]
+        ids += [int(token) for token in rng.integers(8, 12, size=int(rng.integers(1, 3)))]
+        if rng.random() < 0.01:
+            ids.append(CLOSE)
+        _call(guard, ids)
+        for depth in range(4):
+            back = int(rng.integers(0, min(len(ids), 3) + 1))
+            drafted = ids[: len(ids) - back] + [
+                int(token) for token in rng.integers(7, 12, size=depth)
+            ]
+            tokens = mx.array([1, 2] + drafted, dtype=mx.uint32)
+            logits = mx.array(rng.normal(size=(1, VOCAB)).astype(np.float32))
+            before = _guard_state(guard)
+            expected = copy.deepcopy(guard)(tokens, logits)
+            np.testing.assert_array_equal(np.array(guard.probe(tokens, logits)), np.array(expected))
+            after = _guard_state(guard)
+            assert after.keys() == before.keys()
+            for key in before:
+                assert after[key] == before[key], key
+
+
+def test_probing_a_long_reasoning_channel_does_not_copy_its_history():
+    import tracemalloc
+
+    from mlx2.runtime.processor_probe import probe_logits_processors
+
+    peaks = []
+    for length in (2000, 20000):
+        guard = ThinkingGuard(2, (CLOSE,), budget=None)
+        ids = [8 + (i * 5 + i // 9) % 8 for i in range(length)]
+        _call(guard, ids)
+        tokens = mx.array([1, 2] + ids + [9, 10], dtype=mx.uint32)
+        logits = mx.zeros((1, VOCAB))
+        tracemalloc.start()
+        probe_logits_processors([guard], tokens, logits)
+        peaks.append(tracemalloc.get_traced_memory()[1])
+        tracemalloc.stop()
+    # A copy of the guard's history, n-gram table and undo log at 20000
+    # generated ids is several megabytes; the probe stays bounded.
+    assert max(peaks) < 256 << 10, peaks
+
+
+def test_recovery_snapshots_share_a_guard_that_resyncs_after_rollback():
+    from types import SimpleNamespace
+
+    from mlx2.runtime.hybrid_speculative import _snapshot_segmented_recovery_row
+    from mlx2.runtime.models.cache import KVCache
+
+    plain = ThinkingGuard(2, (CLOSE,), budget=100)
+    steering = ThinkingGuard(
+        2, (CLOSE,), budget=100, direction={"layer": 1, "vector": np.ones(4)}, alpha=0.2
+    )
+    _call(plain, [8, 9, 10])
+    lane = SimpleNamespace(logits_processors=[plain, steering], generated=3)
+    pair = SimpleNamespace(target=[KVCache()], draft=[KVCache()])
+    fields, _target, _draft = _snapshot_segmented_recovery_row((lane, pair))
+    shared, copied = fields["logits_processors"]
+    assert shared is plain
+    # Steering counts committed positions, which the ids do not determine.
+    assert copied is not steering and copied.steered_steps == steering.steered_steps

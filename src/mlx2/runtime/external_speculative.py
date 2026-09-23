@@ -17,6 +17,7 @@ from types import SimpleNamespace
 import numpy as np
 
 from .committed_recovery import CommittedRecoverySlot
+from .processor_probe import copy_sharing, rollback_shared_memo
 from .cow_cache import (
     COWCacheUnsupported,
     _carries_cow_bookkeeping,
@@ -479,10 +480,13 @@ class ExternalDraftBatchGenerator:
         current/next double buffer.  Opt-in descriptor COW
         (``MLX_LM_EXTERNAL_ROUND_COW=1``) additionally rejects cache graphs
         with live transaction state.  Other host-side fields (RNG,
-        processors, ...) are deep-copied in both modes.  History is journaled
-        separately because rounds only append to it.
+        processors, ...) are deep-copied in both modes, except processors
+        that re-sync from their next call's history, which stay shared.
+        History is journaled separately because rounds only append to it.
         """
         fields = vars(lane)
+        # Processors that re-sync from the next call's history stay shared.
+        shared = rollback_shared_memo(fields.get("processors"))
         # A graph carrying COW bookkeeping (an APC branch's hooked objects)
         # always takes the descriptor route: its segment tokens hold locks a
         # deep copy cannot pickle, as in ``snapshot_committed_cache``.
@@ -498,16 +502,17 @@ class ExternalDraftBatchGenerator:
             except COWCacheUnsupported:
                 _bump(self.scheduler_stats, "external_cow_fallbacks")
             else:
-                host = copy.deepcopy(
+                host = copy_sharing(
                     {
                         k: v for k, v in fields.items()
                         if k not in _LANE_PLANES | _LANE_JOURNAL
-                    }
+                    },
+                    shared,
                 )
                 _bump(self.scheduler_stats, "external_cow_snapshots")
                 return (host, cache, draft_cache, tail), "descriptor_cow"
         host = {k: v for k, v in fields.items() if k not in _LANE_JOURNAL}
-        return copy.deepcopy(host), "deepcopy"
+        return copy_sharing(host, shared), "deepcopy"
 
     @staticmethod
     def _thaw_lane(frozen):
