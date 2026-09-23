@@ -293,8 +293,39 @@ def test_live_manager_apply_replays_terminal_receipt_without_double_counting(
     snapshot = manager.snapshot()
     assert snapshot["active_epochs"] == 0
     assert snapshot["counts"]["applied"] == 1
+    assert snapshot["counts"]["prepared"] == 1
     assert snapshot["counts"].get("reason:stale_epoch", 0) == 0
     assert snapshot["recent"] == [first]
+
+
+def test_prepared_transactions_reach_the_metrics_scrape():
+    from mlx2.prometheus import render_engine_metrics
+    from test_prometheus import FakeEngine
+
+    manager = SpominLiveSurgeryManager(enabled=True)
+    transcript = transcript_fixture()
+    for request_id in ("req-a", "req-b"):
+        transaction = manager.prepare(
+            request_id=request_id,
+            prompt_token_ids=transcript.token_ids,
+            transcript=transcript,
+            capacity_tokens=16,
+            strategy="largest_first",
+            has_mtp_state=False,
+            has_recurrent_state=False,
+            cache_is_request_private=True,
+        )
+        assert transaction.receipt["status"] == "prepared"
+    transaction.close()
+    snapshot = manager.snapshot()
+    assert snapshot["counts"]["prepared"] == 2
+    assert [receipt["reason"] for receipt in snapshot["recent"]] == [
+        "closed_without_apply"
+    ]
+    engine = FakeEngine()
+    engine.snapshot["spomin_live_surgery"] = {"enabled": True, **snapshot}
+    rendered = render_engine_metrics(engine)
+    assert 'mlx2_spomin_operations_total{operation="prepared"} 2' in rendered
 
 
 def test_live_manager_declines_stale_revision_without_escaping():

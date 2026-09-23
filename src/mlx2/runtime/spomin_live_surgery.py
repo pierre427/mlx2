@@ -151,12 +151,13 @@ class SpominLiveSurgeryManager:
             self._record_unlocked(result)
         return result
 
-    def _record_unlocked(self, receipt):
+    def _record_unlocked(self, receipt, *, history=True):
         status = str(receipt.get("status", "unknown"))
         reason = str(receipt.get("reason", status))
         self._counts[status] += 1
         self._counts[f"reason:{reason}"] += 1
-        self._recent.append(dict(receipt))
+        if history:
+            self._recent.append(dict(receipt))
 
     def decline(self, request_id, reason, *, detail=None):
         receipt = {"request_id": request_id, "status": "declined", "reason": reason}
@@ -219,18 +220,22 @@ class SpominLiveSurgeryManager:
             self._next_generation += 1
             epoch = LiveSurgeryEpoch(request_id, self._next_generation)
             self._epochs[request_id] = epoch.generation
-        receipt = {
-            "schema": "mlx2.spomin-live-surgery.v1",
-            "request_id": request_id,
-            "status": "prepared",
-            "reason": "pressure",
-            "source_tokens": len(prompt),
-            "target_tokens": plan.projected_target_tokens,
-            "strategy": strategy,
-            "epoch": epoch.generation,
-            "selected": False,
-            "source_transcript_digest": transcript.fingerprint.digest,
-        }
+            receipt = {
+                "schema": "mlx2.spomin-live-surgery.v1",
+                "request_id": request_id,
+                "status": "prepared",
+                "reason": "pressure",
+                "source_tokens": len(prompt),
+                "target_tokens": plan.projected_target_tokens,
+                "strategy": strategy,
+                "epoch": epoch.generation,
+                "selected": False,
+                "source_transcript_digest": transcript.fingerprint.digest,
+            }
+            # Count the preparation so the exported "prepared" operation is
+            # observable. The recent history keeps one terminal receipt per
+            # transaction; serving reads its tail as the decline receipt.
+            self._record_unlocked(receipt, history=False)
         return LiveSurgeryTransaction(self, epoch, state, plan, prompt, receipt)
 
     def apply(
