@@ -446,7 +446,11 @@ def test_real_qwen_vocabulary_mask_equals_untimed_scanner(monkeypatch):
             started = time.perf_counter()
             got = _automaton_allowed(processor, ids[:position])
             first_visit = time.perf_counter() - started
-            assert first_visit < 0.15, first_visit  # first-visit budget on the 248K vocabulary
+            # First visits take 2-7 ms on an idle host; the regression this
+            # guards against (a per-call scan of the 248K vocabulary) costs
+            # seconds.  0.15 s failed at 0.355 s on a host busy with parallel
+            # test suites, so the bound keeps a wide margin for contention.
+            assert first_visit < 1.0, first_visit
             expected = _scanner_allowed(processor, constraint, hf.decode(ids[:position]))
             assert got == expected, (text[:20], position, len(got), len(expected))
         assert hf.eos_token_id in _automaton_allowed(processor, ids)
