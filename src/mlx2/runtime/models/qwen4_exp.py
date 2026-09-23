@@ -1271,6 +1271,13 @@ class GatedDeltaNet(Qwen35GatedDeltaNet):
             modules = [getattr(self, name) for name in _GDN_INPROJ_MODULES]
         except AttributeError:
             return None
+        signatures = [_proj_signature(m) for m in modules]
+        if any((s is None for s in signatures)):
+            # A wrapped projection (a LoRA adapter, say) has no resident
+            # weight to key on or concatenate. Drop any table built before
+            # it was wrapped: the wrapper must run, and the table is dead.
+            object.__setattr__(self, "_gdn_inproj_fused_cache", None)
+            return None
         key = tuple((part for m in modules for part in _proj_identity(m)))
         cached = self._gdn_inproj_fused_cache
         if cached is not None and all(
@@ -1278,7 +1285,6 @@ class GatedDeltaNet(Qwen35GatedDeltaNet):
         ):
             return cached[1]
         entry = None
-        signatures = [_proj_signature(m) for m in modules]
         base = signatures[0]
         if (
             base is not None
@@ -4931,13 +4937,18 @@ class Attention(nn.Module):
 
     def _fused_projection_table(self):
         modules = (self.q_proj, self.k_proj, self.v_proj, self.indexer.index_qk_proj)
+        signatures = [_proj_signature(m) for m in modules]
+        if any((s is None for s in signatures)):
+            # A wrapped projection has no resident weight to key on or
+            # concatenate; see ``GatedDeltaNet._fused_inproj_table``.
+            object.__setattr__(self, "_qsa_fused_cache", None)
+            return None
         key = tuple((part for m in modules for part in _proj_identity(m)))
         cached = self._qsa_fused_cache
         if cached is not None and all(
             (new is old for (new, old) in zip(key, cached[0]))
         ):
             return cached[1]
-        signatures = [_proj_signature(m) for m in modules]
         table = None
         if signatures[0] is not None and all((s == signatures[0] for s in signatures)):
             parts = [_proj_table(m) for m in modules]

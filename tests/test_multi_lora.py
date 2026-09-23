@@ -454,3 +454,68 @@ def test_e2e_harness_collect_includes_reasoning_channel():
     pieces, final = module.collect(SimpleNamespace(events=events))
     assert "".join(pieces) == "think answer"
     assert final["finish_reason"] == "length"
+
+
+# --------------------------------------------------------------------------
+# Qwen4 fused projection tables must decline a LoRA-wrapped projection
+# --------------------------------------------------------------------------
+
+
+def test_qwen4_fused_projection_tables_decline_lora_wrapped_projections(
+    tmp_path, monkeypatch
+):
+    """The fused GDN in-proj and QSA projection tables read resident weights.
+
+    A LoRA wrapper has none: both tables must decline (so the wrapper runs
+    and its delta is applied) instead of raising ``KeyError('weight')``.
+    """
+    from test_batched_mtp import _tiny_qwen4_model
+
+    from mlx2.runtime.models import qwen4_exp
+
+    def build():
+        mx.random.seed(5)
+        model = _tiny_qwen4_model()
+        nn.quantize(
+            model,
+            group_size=32,
+            bits=4,
+            class_predicate=lambda p, m: isinstance(m, nn.Linear)
+            and "linear_attn.in_proj" in p,
+        )
+        model.eval()
+        return model
+
+    model = build()
+    modules = dict(model.named_modules())
+    gdn_path = next(
+        p for (p, m) in modules.items() if isinstance(m, qwen4_exp.GatedDeltaNet)
+    )
+    attn_path = next(
+        p for (p, m) in modules.items() if hasattr(m, "_fused_projection_table")
+    )
+    keys = (f"{gdn_path}.in_proj_z", f"{attn_path}.q_proj")
+    dims = {}
+    for key in keys:
+        (out_dims, packed) = modules[key].weight.shape
+        bits = getattr(modules[key], "bits", None)
+        dims[key] = (packed * 32 // bits if bits else packed, out_dims)
+    adapter = write_adapter(tmp_path / "lora", keys=keys, dims=dims, rank=2, seed=3)
+    tokens = mx.array([[5, 9, 17, 33, 2, 8]])
+
+    reference = build()
+    install_lora(reference, name="ref", path=adapter)
+    expected = reference(tokens)
+
+    install_lora(model, name="t", path=adapter)
+    gdn = dict(model.named_modules())[gdn_path]
+    gdn.set_gdn_fused_inproj(True)
+    got = model(tokens)
+    mx.eval(expected, got)
+    assert mx.array_equal(got, expected).item()
+
+    monkeypatch.setattr(qwen4_exp, "_QSA_FUSED_PROJ", True)
+    attn = dict(model.named_modules())[attn_path]
+    x = mx.random.normal((1, 3, 32), key=mx.random.key(1))
+    projected = attn._project_segmented_qsa(x)
+    assert mx.array_equal(projected[0], attn.q_proj(x)).item()
