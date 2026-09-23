@@ -2812,17 +2812,87 @@ class BatchQSAKVCache(_StepGrownIndexLedger, BatchKVCache):
     def max_left_padding(self) -> int:
         """Host copy of ``left_padding.max()``, keyed by array identity.
 
-        ``left_padding`` is rebound only at membership boundaries (merge,
-        filter, extend, finalize) and mx arrays are immutable, so an identity
-        miss is exactly the set of events that can change the maximum.  The
-        pooled-key bound below needs this every forward and must not sync.
+        The mirror is ``(array, max, per-row values)``. A rebinding of
+        ``left_padding`` (merge, filter, extend, a ragged trim, a ``state``
+        restore) is an identity miss and costs one recorded read. Identity
+        alone does not prove the mirror current, though: ``prepare`` and
+        ``finalize`` grow the array IN PLACE (``a += b`` rewrites the same
+        object, so the identity survives the new value). Both re-key the
+        mirror from the host padding they applied, or drop it when that
+        padding is not known on the host. The pooled-key bound below needs
+        this every forward and must not sync.
         """
         padding = self.left_padding
         cached = self._max_left_pad
         if cached is None or cached[0] is not padding:
             record_verify_sync("qwen4.qsa.max_left_padding_item")
-            self._max_left_pad = (padding, int(padding.max().item()))
+            rows = [int(v) for v in padding.tolist()]
+            self._max_left_pad = (padding, max(rows, default=0), rows)
         return self._max_left_pad[1]
+
+    def _left_padding_rows(self):
+        """The mirrored per-row padding while it still describes the array."""
+        cached = self._max_left_pad
+        if cached is None or cached[0] is not self.left_padding:
+            return None
+        return cached[2]
+
+    def _shift_left_padding_mirror(self, rows, shifts):
+        """Re-key the mirror after each row's padding grew by ``shifts``.
+
+        ``rows`` is the mirror read before the update. When either side is
+        unknown on the host the mirror is dropped, so the next read pays one
+        recorded sync instead of returning a stale (too small) maximum.
+        """
+        if (
+            rows is None
+            or not isinstance(shifts, (list, tuple))
+            or len(shifts) != len(rows)
+        ):
+            self._max_left_pad = None
+            return
+        rows = [int(p) + int(s) for (p, s) in zip(rows, shifts)]
+        self._max_left_pad = (self.left_padding, max(rows, default=0), rows)
+
+    def _prepare_padding(self, prepare, kwargs):
+        """Run a base ``prepare()`` thunk and keep the host padding mirrors exact.
+
+        ``prepare(left_padding=...)`` adds to ``left_padding`` in place, and
+        the right padding it stages is what ``finalize`` will move there.
+        """
+        rows = self._left_padding_rows()
+        staged = self._right_padding
+        prepare()
+        added = kwargs.get("left_padding")
+        if added is not None:
+            self._shift_left_padding_mirror(rows, added)
+        if self._right_padding is not staged:
+            # ``BatchQuantizedKVCache`` keeps no host copy of its own.
+            right = kwargs.get("right_padding")
+            self._host_right_padding = (
+                (self._right_padding, [int(v) for v in right])
+                if isinstance(right, (list, tuple))
+                else None
+            )
+
+    def _finalize_padding(self, finalize):
+        """Run a base ``finalize`` and re-key the mirror to its result.
+
+        Row ``b`` gains its right padding less the columns a reclaim dropped
+        from the shared cursor, whether the base adds in place or rebinds.
+        """
+        padding = self._right_padding
+        if padding is None:
+            return finalize()
+        rows = self._left_padding_rows()
+        host = getattr(self, "_host_right_padding", None)
+        right = host[1] if host is not None and host[0] is padding else None
+        cursor = self._idx
+        finalize()
+        reclaimed = cursor - self._idx
+        self._shift_left_padding_mirror(
+            rows, None if right is None else [r - reclaimed for r in right]
+        )
 
     def release_qsa_cycle(
         self,
@@ -2932,13 +3002,15 @@ class BatchQSAKVCache(_StepGrownIndexLedger, BatchKVCache):
         return drops
 
     def prepare(self, *args, **kwargs):
-        super().prepare(*args, **kwargs)
+        prepare = super().prepare
+        self._prepare_padding(lambda: prepare(*args, **kwargs), kwargs)
         self.release_qsa_cycle("BatchQSAKVCache.prepare")
 
     def prepare_self_mtp_step(self, *args, **kwargs):
         if not self._mtp_share_topk:
             return self.prepare(*args, **kwargs)
-        super().prepare(*args, **kwargs)
+        prepare = super().prepare
+        self._prepare_padding(lambda: prepare(*args, **kwargs), kwargs)
         self.release_qsa_cycle(
             "BatchQSAKVCache.prepare_self_mtp_step",
             cursor_final=False,
@@ -3007,7 +3079,8 @@ class BatchQSAKVCache(_StepGrownIndexLedger, BatchKVCache):
             self.index_keys = dynamic_roll(self.index_keys, padding, axis=1)
         # A live shared top-k holds block ids on the physical grid, so a
         # finalize that keeps it must not shift that grid.
-        super().finalize(reclaim=not keep_shared)
+        finalize = super().finalize
+        self._finalize_padding(lambda: finalize(reclaim=not keep_shared))
         self.release_qsa_cycle(
             "BatchQSAKVCache.finalize",
             cursor_final=not keep_shared,
@@ -3522,13 +3595,17 @@ class BatchQSAQuantizedKVCache(BatchQSAKVCache):
         return plan
 
     def prepare(self, *args, **kwargs):
-        BatchQuantizedKVCache.prepare(self, *args, **kwargs)
+        self._prepare_padding(
+            lambda: BatchQuantizedKVCache.prepare(self, *args, **kwargs), kwargs
+        )
         self.release_qsa_cycle("BatchQSAQuantizedKVCache.prepare")
 
     def prepare_self_mtp_step(self, *args, **kwargs):
         if not self._mtp_share_topk:
             return self.prepare(*args, **kwargs)
-        BatchQuantizedKVCache.prepare(self, *args, **kwargs)
+        self._prepare_padding(
+            lambda: BatchQuantizedKVCache.prepare(self, *args, **kwargs), kwargs
+        )
         self.release_qsa_cycle(
             "BatchQSAQuantizedKVCache.prepare_self_mtp_step",
             cursor_final=False,
@@ -3539,7 +3616,7 @@ class BatchQSAQuantizedKVCache(BatchQSAKVCache):
         padding = self._right_padding
         if padding is not None and self.index_keys is not None:
             self.index_keys = dynamic_roll(self.index_keys, padding, axis=1)
-        BatchQuantizedKVCache.finalize(self)
+        self._finalize_padding(lambda: BatchQuantizedKVCache.finalize(self))
         self.release_qsa_cycle(
             "BatchQSAQuantizedKVCache.finalize",
             cursor_final=not keep_shared,

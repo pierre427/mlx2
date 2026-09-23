@@ -1766,3 +1766,206 @@ def test_qsa_cache_nbytes_counts_the_grown_ledger_buffer():
         assert ledger_bytes(cache) == 256 * position, name
         append(cache, rows, 1)
         assert ledger_bytes(cache) == 512 * position, name
+
+
+def _qsa_left_padding_syncs(monkeypatch):
+    """Count the QSA left-padding host reads in each traced round."""
+    from mlx2.runtime import verify_sync
+
+    monkeypatch.setenv("MLX_LM_SYNC_TRACE", "1")
+    state = verify_sync._state()
+    start = len(state["rounds"])
+
+    def counted():
+        return [
+            item["sites"].get("qwen4.qsa.max_left_padding_item", 0)
+            for item in state["rounds"][start:]
+        ]
+
+    return verify_sync.verify_sync_round, counted
+
+
+def _grown_batch_qsa(quantized=False, width=6):
+    from mlx2.runtime.models.qwen4_exp import BatchQSAQuantizedKVCache
+
+    if quantized:
+        cache = BatchQSAQuantizedKVCache([0, 0], group_size=64, bits=8)
+        kv = mx.zeros((2, 1, width, 64))
+    else:
+        cache = BatchQSAKVCache([0, 0])
+        kv = mx.zeros((2, 1, width, 4))
+    cache.update_and_fetch(kv, kv)
+    return cache
+
+
+@pytest.mark.parametrize(
+    "case",
+    (
+        # BatchKVCache.finalize adds in place when no padding is shared.
+        "finalize_in_place",
+        # A shared-top-k self-MTP step never reclaims: always in place.
+        "finalize_self_mtp_step",
+        # A reclaim rebinds; it was exact before and must stay sync-free.
+        "finalize_reclaim",
+        # BatchQuantizedKVCache.finalize always adds in place.
+        "quantized_finalize",
+        # prepare(left_padding=...) adds in place on an empty cache.
+        "prepare_left_padding",
+    ),
+)
+def test_qsa_max_left_padding_tracks_in_place_padding_updates(monkeypatch, case):
+    """``a += b`` rewrites an mx array in place and keeps its identity.
+
+    ``max_left_padding()`` keyed its host copy on ``left_padding``'s identity,
+    so after an in-place ``prepare``/``finalize`` it went on returning the
+    old, smaller maximum, and the pooled-key bound kept blocks the most
+    padded row had not closed. The mirror must be exact after every such
+    update, and following a host-known update must not read the device.
+    """
+    round_, syncs = _qsa_left_padding_syncs(monkeypatch)
+    if case == "prepare_left_padding":
+        cache = BatchQSAKVCache([0, 0])
+    else:
+        cache = _grown_batch_qsa(quantized=case == "quantized_finalize")
+    with round_():
+        assert cache.max_left_padding() == 0
+    padding = cache.left_padding
+    with round_():
+        if case == "prepare_left_padding":
+            cache.prepare(left_padding=[1, 3])
+        elif case == "finalize_self_mtp_step":
+            cache._mtp_share_topk = True
+            cache.prepare_self_mtp_step(lengths=[4, 5], right_padding=[1, 0])
+            cache.finalize_self_mtp_step()
+        elif case == "finalize_reclaim":
+            cache.prepare(lengths=[4, 5], right_padding=[2, 1])
+            cache.finalize()
+        else:
+            cache.prepare(lengths=[4, 6], right_padding=[2, 0])
+            cache.finalize()
+        got = cache.max_left_padding()
+    true_max = int(cache.left_padding.max().item())
+    assert got == true_max
+    assert true_max > 0
+    if case != "finalize_reclaim":
+        assert cache.left_padding is padding  # the update really was in place
+    assert syncs() == [1, 0]
+
+
+def test_qsa_max_left_padding_without_host_padding_resyncs_once(monkeypatch):
+    """A right padding given as a device array is not known on the host.
+
+    The mirror cannot follow that finalize, so it must fall back to one
+    recorded read rather than keep the stale maximum.
+    """
+    round_, syncs = _qsa_left_padding_syncs(monkeypatch)
+    cache = _grown_batch_qsa()
+    with round_():
+        assert cache.max_left_padding() == 0
+    with round_():
+        cache.prepare(lengths=[4, 6], right_padding=mx.array([2, 0]))
+        cache.finalize()
+        assert cache.max_left_padding() == 2
+    assert syncs() == [1, 1]
+
+
+def test_qsa_max_left_padding_costs_no_sync_across_ragged_mtp_cycles(monkeypatch):
+    """Every self-MTP cycle stages right padding and finalizes it in place.
+
+    The bound is read on every forward; after the first read, no cycle may
+    add a host sync, and every read must match the device value.
+    """
+    round_, syncs = _qsa_left_padding_syncs(monkeypatch)
+    cache = _grown_batch_qsa(width=4)
+    with round_():
+        cache.max_left_padding()
+    spans = ([2, 1], [1, 2], [2, 2], [1, 1], [2, 1])
+    for accepted in spans:
+        with round_():
+            width = max(accepted)
+            cache._mtp_share_topk = True
+            cache.prepare_self_mtp_step(
+                lengths=accepted, right_padding=[width - n for n in accepted]
+            )
+            kv = mx.zeros((2, 1, width, 4))
+            cache.update_and_fetch(kv, kv)
+            cache.finalize_self_mtp_step()
+            got = cache.max_left_padding()
+        assert got == int(cache.left_padding.max().item())
+    assert syncs() == [1] + [0] * len(spans)
+
+
+@pytest.mark.parametrize("mtp", (False, True))
+def test_ragged_finalize_keeps_no_pooled_qsa_block_the_padded_row_left_open(
+    monkeypatch, mtp
+):
+    """The observable cost of the stale maximum: wrong pooled QSA keys.
+
+    A ragged step pools blocks over the physical width, so the short row's
+    last block holds its right-padding garbage. ``finalize`` must then cut
+    the pooled keys back to the blocks every row has closed. With the stale
+    maximum it kept that block, and once the row's real tokens filled it the
+    next forward scored every query against the garbage summary: the pooled
+    keys, and with them the attended blocks, differed from a recompute.
+    """
+    from qsa_oracle import tiny_args
+
+    from mlx2.runtime.models import qwen4_exp
+
+    monkeypatch.setattr(qwen4_exp, "_QSA_APC_SUMMARIES", False)
+
+    def run(pooled_key_cache):
+        monkeypatch.setattr(qwen4_exp, "_QSA_POOLED_KEY_CACHE", pooled_key_cache)
+        mx.random.seed(1)
+        args = tiny_args()
+        indexer = qwen4_exp.QSAIndexer(args)
+        mx.eval(indexer.parameters())
+        cache = BatchQSAKVCache([0, 0])
+        used = []
+        pooled_keys = indexer._pooled_keys
+
+        def spy(*a, **k):
+            used.append(pooled_keys(*a, **k))
+            return used[-1]
+
+        indexer._pooled_keys = spy
+
+        def step(width, right):
+            hidden = mx.random.normal((2, width, args.hidden_size))
+            if any(right):
+                cache.prepare(
+                    lengths=[width - r for r in right], right_padding=list(right)
+                )
+                cache._mtp_share_topk = mtp
+            mask = cache.make_mask(width, return_array=True, window_size=None)
+            selection = indexer(hidden, mask, cache)
+            kv = mx.zeros((2, 1, width, args.head_dim))
+            cache.update_and_fetch(kv, kv)
+            if any(right) and mtp:
+                cache.finalize_self_mtp_step()
+            elif any(right):
+                cache.finalize()
+            return selection
+
+        # Row 0 is two tokens short, so its third block holds two pad keys.
+        step(12, (2, 0))
+        ratio = indexer.compress_ratio
+        assert cache.left_padding.tolist() == [2, 0]
+        if pooled_key_cache:
+            closed = (cache._idx - 2) // ratio
+            assert cache._qsa_pooled_keys.shape[1] == closed
+        if mtp:
+            return None
+        selection = step(2, (0, 0))
+        n_blocks = cache.index_keys.shape[1] // ratio
+        fresh = indexer._pool_blocks_left_padded(
+            cache.index_keys,
+            mx.arange(n_blocks) * ratio,
+            cache.left_padding.astype(cache.offset.dtype),
+        )
+        np.testing.assert_array_equal(np.asarray(used[-1]), np.asarray(fresh))
+        return selection.dense_mask()
+
+    cached = run(True)
+    if not mtp:
+        assert mx.array_equal(cached, run(False)).item()
