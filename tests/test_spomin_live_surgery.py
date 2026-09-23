@@ -527,3 +527,55 @@ def test_batch_generator_runs_surgery_at_isolated_post_prefill_boundary():
     assert receipt["source_tokens"] == 12
     assert receipt["retained_tokens"] == 9
     assert manager.snapshot()["active_epochs"] == 0
+
+
+def test_short_overflow_lane_never_reaches_the_transform_beside_another():
+    """Serving runs prefill at B=1 while surgery is installed.
+
+    The one-chunk overflow path used to admit a second prompt lane anyway.
+    With the long lane's residual exactly one chunk plus its final token,
+    both lanes became ready in one round and ``_promote_ready_prompts``
+    raised "post-prefill state transforms require an isolated B=1
+    boundary" inside ``next()``, killing the serving worker.
+    """
+    from test_short_request_prefill_starvation import tiny_model
+
+    model = tiny_model()
+    step = 8
+    long_prompt = [(7 * i + 3) % 120 + 2 for i in range(2 * step + 1)]
+    short_prompt = [3, 4, 5]
+
+    def run(prompts, gap):
+        seen = []
+
+        def transform(*, uid, model, prompt_cache, cached_token_ids):
+            seen.append((uid, len(cached_token_ids)))
+            return None  # declined surgery keeps the cache unchanged
+
+        batch = BatchGenerator(
+            model,
+            completion_batch_size=4,
+            prefill_batch_size=1,
+            prefill_step_size=step,
+            prefill_batch_window=1,
+            adaptive_prefill=True,
+            post_prefill_transform=transform,
+        )
+        uids, tokens = [], {}
+        for index, prompt in enumerate(prompts):
+            uids.append(batch.insert([prompt], max_tokens=[3])[0])
+            if index < len(prompts) - 1:
+                for _ in range(gap):
+                    batch.next()
+        for _ in range(40):
+            _, responses = batch.next()
+            for response in responses:
+                tokens.setdefault(response.uid, []).append(int(response.token))
+            if all(len(tokens.get(uid, ())) == 3 for uid in uids):
+                break
+        batch.close()
+        return [tokens[uid] for uid in uids], sorted(seen)
+
+    together, seen = run([long_prompt, short_prompt], gap=1)
+    assert together == [run([long_prompt], 0)[0][0], run([short_prompt], 0)[0][0]]
+    assert seen == [(0, len(long_prompt) - 1), (1, len(short_prompt) - 1)]

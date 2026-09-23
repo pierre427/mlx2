@@ -4706,7 +4706,14 @@ class BatchGenerator:
         With every prefill slot held by a multi-chunk prompt, a request that
         fits in a single chunk waited for a whole long prefill (omlx#3726).
         Admit it as one overflow lane; it finishes prefill in this round.
+
+        Not while a post-prefill transform is installed: serving then runs
+        prefill at B=1 so the transform sees one ready lane per boundary,
+        and an overflow lane can become ready in the same round as the lane
+        it overflowed.
         """
+        if getattr(self, "post_prefill_transform", None) is not None:
+            return False
         if len(self._prompt_batch) != self.prefill_batch_size:
             return False
         if (
