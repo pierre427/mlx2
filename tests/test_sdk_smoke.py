@@ -123,3 +123,46 @@ def test_real_server_feature_gates_require_declared_capabilities():
         "capabilities": ["text", "reasoning", "tools"],
         "structured_output": {"thinking_deferral": True},
     }) == {"thinking_deferral": True, "tools": True}
+
+
+@pytest.mark.parametrize(
+    ("parallel_names", "passes"),
+    [(["weather", "clock"], True), (["weather"], False), (["clock", "clock"], False)],
+)
+def test_parallel_tool_case_requires_both_requested_tools(
+    monkeypatch, capsys, parallel_names, passes
+):
+    # Regression: the case accepted any nonempty subset of {weather, clock},
+    # so a server that dropped every call after the first still passed.
+    import types
+
+    def call(name):
+        return SimpleNamespace(function=SimpleNamespace(name=name, arguments="{}"),
+                               id="c", type="function")
+
+    class Completions:
+        def create(self, **kwargs):
+            names = parallel_names if kwargs.get("parallel_tool_calls") else ["weather"]
+            if not kwargs.get("tools"):
+                raise RuntimeError("not exercised")
+            message = SimpleNamespace(tool_calls=[call(name) for name in names])
+            return SimpleNamespace(choices=[SimpleNamespace(message=message)])
+
+    # Minimal stand-ins: only the chat tool case reaches a real assertion.
+    openai = types.ModuleType("openai")
+    openai.OpenAI = lambda **kwargs: SimpleNamespace(
+        chat=SimpleNamespace(completions=Completions()), responses=SimpleNamespace()
+    )
+    openai.NotFoundError = type("NotFoundError", (Exception,), {})
+    anthropic = types.ModuleType("anthropic")
+    anthropic.Anthropic = lambda **kwargs: SimpleNamespace(messages=SimpleNamespace())
+    anthropic.NotFoundError = type("NotFoundError", (Exception,), {})
+    anthropic.BadRequestError = type("BadRequestError", (Exception,), {})
+    monkeypatch.setitem(sys.modules, "openai", openai)
+    monkeypatch.setitem(sys.modules, "anthropic", anthropic)
+
+    smoke = _load_sdk_smoke()
+    smoke.run_client("http://127.0.0.1:9", scripted=True)
+    output = capsys.readouterr().out
+    verdict = "PASS" if passes else "FAIL"
+    assert f"{verdict} openai.chat.tools_required_named_parallel" in output

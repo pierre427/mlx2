@@ -268,10 +268,10 @@ def run_client(base_url, *, scripted=True):
             parallel_tool_calls=True,
             max_completion_tokens=256,
         )
-        calls = parallel.choices[0].message.tool_calls
-        assert calls and all(
-            call.function.name in {"weather", "clock"} for call in calls
-        )
+        calls = parallel.choices[0].message.tool_calls or []
+        # The request asks for both tools with parallel calls enabled; a
+        # subset means the server dropped a call, so both names must appear.
+        assert {call.function.name for call in calls} == {"weather", "clock"}
         named = openai_client.chat.completions.create(
             temperature=0,
             model=MODEL,
