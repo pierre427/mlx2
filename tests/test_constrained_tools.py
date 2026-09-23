@@ -804,6 +804,93 @@ def test_qwen_free_values_the_arguments_cannot_carry_stay_text(schema, value, se
     assert json.loads(call["function"]["arguments"])["x"] == served
 
 
+def _qwen_call(value, name="f"):
+    return (
+        f"<tool_call>\n<function={name}>\n<parameter=x>\n{value}\n</parameter>"
+        "\n</function>\n</tool_call>"
+    )
+
+
+def _qwen_served(tools, text, split):
+    """Arguments of every call the forced-call parser serves for ``text``,
+    pushed ``split`` characters at a time."""
+    import json
+
+    from mlx2.output import OutputParser
+
+    parser = OutputParser(
+        chat=True, tools=tools, parse_tool=parse_tool_call, constrained_tools=True
+    )
+    events = []
+    for start in range(0, len(text), split):
+        events += parser.push(text[start : start + split])
+    events += parser.push("", final=True)
+    # Only the separator between parallel calls is content.
+    assert not "".join(event.get("content", "") for event in events).strip()
+    return [
+        json.loads(event["tool_calls"][0]["function"]["arguments"])
+        for event in events
+        if "tool_calls" in event
+    ]
+
+
+@pytest.mark.parametrize(
+    ("schema", "strict"),
+    [
+        ({"type": "string"}, True),
+        ({"type": ["string", "null"]}, True),
+        ({"type": "string", "maxLength": 64}, True),
+        ({"type": "string"}, False),
+        ({"type": "object"}, False),
+        ({"description": "any value"}, False),
+        (None, False),  # no declared properties: argument names are free
+    ],
+)
+def test_qwen_raw_values_cannot_spell_the_closers_the_parser_ends_them_at(
+    schema, strict
+):
+    """A raw Qwen value ends at the first ``</parameter>`` or ``</function>``
+    (which also closes an open last parameter, vllm #57707) and the call at
+    the first ``</tool_call>``.  The grammar excluded only the parameter
+    markup, so ``a</function>b`` was admitted and silently served as ``a``,
+    and ``a</tool_call>b`` failed with 502.  The template writes a string
+    argument raw, so no reader of the wire can tell such text from markup;
+    the grammar now keeps it out of raw values, while every near miss is
+    still admitted and served exactly."""
+    if schema is None:
+        tools = [{"type": "function", "function": {"name": "f", "parameters": {
+            "type": "object", "required": ["x"],
+        }}}]
+    else:
+        tools = _single_parameter_tool(schema, strict=strict)
+    grammar = qwen_grammar(tools, "required", parallel_tool_calls=False)
+    for value in ("a</function>b", "a</tool_call>b", "</function>", "x\n</tool_call>"):
+        assert not _server_admits(grammar, _qwen_call(value)), value
+    for value in ("x</function", "</tool_call y", "a</functionb>", "<function=g>"):
+        text = _qwen_call(value)
+        assert _server_admits(grammar, text), value
+        for split in (len(text), 1, 7):
+            assert _qwen_served(tools, text, split) == [{"x": value}], value
+
+
+@pytest.mark.parametrize(
+    "schema",
+    [
+        {"type": "string", "enum": ["a", "b</function>"]},
+        {"enum": ["</tool_call>"]},
+        {"type": "string", "const": "a</function>b"},
+        {"const": "</tool_call>"},
+    ],
+)
+def test_qwen_raw_enums_that_spell_a_closer_fail_closed(schema):
+    """An enum or const value is a raw value too: one that spells a closer
+    would be admitted and then cut, so the grammar refuses it up front, as
+    it already refused ``</parameter>``."""
+    tools = _single_parameter_tool(schema, strict=True)
+    with pytest.raises(ValueError, match="tool-wire delimiter"):
+        qwen_grammar(tools, "required", parallel_tool_calls=False)
+
+
 def test_non_strict_named_tool_grammars_enforce_required_parameters():
     # sglang #40051: a non-strict tool body of optional-only parameters let
     # greedy decoding close a forced call with no arguments.

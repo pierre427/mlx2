@@ -30,10 +30,19 @@ _function_regex = re.compile(r"<function=(.*?)</function>", re.DOTALL)
 _parameter_regex = re.compile(r"<parameter=(.*?)</parameter>", re.DOTALL)
 _name_regex = re.compile(r"\s*([^\s<>]+)>?")
 
+_FUNCTION_CLOSE = "</function>"
 _PARAMETER_OPEN = "<parameter="
-# A raw value never contains a parameter delimiter: the parser reads a closer
-# as the end of the value and an opener as an unclosed parameter.
-_RAW_VALUE_CHAR = r"(?:(?!</parameter>|<parameter=)[\s\S])"
+_PARAMETER_CLOSE = "</parameter>"
+_TOOL_CALL_CLOSE = "</tool_call>"
+# Markup a raw value can never contain.  The parser ends a raw value at the
+# first parameter or function closer (a function closer also closes an open
+# last parameter, vllm #57707), reads an opener as an unclosed parameter, and
+# the output parser ends the call at the first tool-call closer.  The chat
+# template writes a string argument raw, so a model could spell any of them
+# inside one; no reader of this wire can tell it from markup, and the
+# reference parser truncates the value there too.
+_RAW_DELIMITERS = (_PARAMETER_CLOSE, _PARAMETER_OPEN, _FUNCTION_CLOSE, _TOOL_CALL_CLOSE)
+_RAW_VALUE_CHAR = r"(?:(?!</parameter>|<parameter=|</function>|</tool_call>)[\s\S])"
 
 _string_types = {"string", "str", "text", "varchar", "char", "enum"}
 _bool_types = {"boolean", "bool", "binary"}
@@ -233,14 +242,15 @@ def _raw_parameter_pattern(schema):
         values = schema["enum"]
         if values and all(isinstance(value, str) for value in values):
             if any(
-                "</parameter>" in value or _PARAMETER_OPEN in value
+                delimiter in value
                 for value in values
+                for delimiter in _RAW_DELIMITERS
             ):
                 raise ValueError("string enum contains a tool-wire delimiter")
             return "(?:" + "|".join(re.escape(value) for value in values) + ")"
     if set(schema) <= {"type", "const"} and isinstance(schema.get("const"), str):
         value = schema["const"]
-        if "</parameter>" in value or _PARAMETER_OPEN in value:
+        if any(delimiter in value for delimiter in _RAW_DELIMITERS):
             raise ValueError("string const contains a tool-wire delimiter")
         return re.escape(value)
     if declared == "string":
