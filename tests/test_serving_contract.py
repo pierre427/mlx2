@@ -2688,3 +2688,76 @@ def test_mixed_hosted_and_client_calls_fail_closed(stream):
     finally:
         close()
     assert backend.executed == []
+
+
+@pytest.mark.parametrize("fault", [
+    "call_bad_json", "call_http_500", "call_rpc_error", "list_bad_json",
+    "list_not_a_list",
+])
+def test_mcp_transport_and_protocol_failures_are_bad_gateway(fault):
+    # A malformed MCP reply is the upstream's fault, not the caller's: it
+    # used to surface as 400 (JSONDecodeError is a ValueError) or 500.
+    from http.server import BaseHTTPRequestHandler
+
+    from mlx2.tool_backend import ConfiguredToolBackend
+
+    class MCP(BaseHTTPRequestHandler):
+        def log_message(self, *_args):
+            pass
+
+        def reply(self, status, data):
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+
+        def do_POST(self):
+            message = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+            if "id" not in message:
+                return self.reply(202, b"")
+            method = message["method"]
+            result = {}
+            if method == "tools/list":
+                if fault == "list_bad_json":
+                    return self.reply(200, b"{truncated")
+                result = {"tools": "weather" if fault == "list_not_a_list" else [
+                    {"name": "weather", "inputSchema": {"type": "object"}}
+                ]}
+            elif method == "tools/call":
+                if fault == "call_bad_json":
+                    return self.reply(200, b"{truncated")
+                if fault == "call_http_500":
+                    return self.reply(500, b"")
+                if fault == "call_rpc_error":
+                    return self.reply(200, json.dumps({
+                        "jsonrpc": "2.0", "id": message["id"],
+                        "error": {"code": -32000, "message": "boom"},
+                    }).encode())
+            self.reply(200, json.dumps(
+                {"jsonrpc": "2.0", "id": message["id"], "result": result}
+            ).encode())
+
+    mcp = ThreadingHTTPServer(("127.0.0.1", 0), MCP)
+    mcp_thread = threading.Thread(target=mcp.serve_forever, daemon=True)
+    mcp_thread.start()
+    url = f"http://127.0.0.1:{mcp.server_port}/mcp"
+    engine = HostedEngine([_round_calls(_hosted_call(name="mcp__w__weather"))])
+    base, close = _serve_hosted(
+        engine, ConfiguredToolBackend({"servers": {"w": {"server_url": url}}})
+    )
+    try:
+        with pytest.raises(HTTPError) as error:
+            post_response(base, input="weather?", tools=[{
+                "type": "mcp",
+                "server_label": "w",
+                "server_url": url,
+                "require_approval": "never",
+            }])
+        assert error.value.code == 502
+        assert "MCP" in json.load(error.value)["error"]["message"]
+    finally:
+        close()
+        mcp.shutdown()
+        mcp.server_close()
+        mcp_thread.join()

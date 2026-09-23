@@ -63,6 +63,7 @@ from .api_resources import (
     ResourceNotFound,
     ResponseStore,
 )
+from .tool_backend import HostedToolError
 from .agent_compat import (
     AgentCompatError,
     AgentCompatPolicy,
@@ -3589,6 +3590,13 @@ def handler_for(
                 if streaming and anthropic and anthropic_translator is not None:
                     for failure in anthropic_translator.failure(str(exc), 502):
                         self._anthropic_sse(failure)
+                    self._record_http(200)
+                else:
+                    self.api_error(502, str(exc), anthropic=anthropic)
+            except HostedToolError as exc:
+                # The MCP server failed, not the request: a bad gateway.
+                if streaming and responses_api:
+                    self._responses_failure(job, str(exc), "server_error")
                     self._record_http(200)
                 else:
                     self.api_error(502, str(exc), anthropic=anthropic)

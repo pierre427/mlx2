@@ -6,10 +6,23 @@ import json
 import re
 import threading
 from collections import Counter
+from http.client import HTTPException
 from pathlib import Path
 from urllib.request import Request, urlopen
 
 from .api_resources import CapabilityUnavailable
+
+
+class HostedToolError(RuntimeError):
+    """An MCP server failed or broke protocol: a bad gateway, not a bad request.
+
+    Every transport and protocol failure of a hosted tool call surfaces as
+    this one type, so the API answers 502 instead of mapping a malformed
+    reply to 400 or a server fault to 500.
+    """
+
+    status = 502
+    code = "hosted_tool_error"
 
 
 def _rpc_payload(raw):
@@ -18,7 +31,7 @@ def _rpc_payload(raw):
         return json.loads(text)
     events = [line[6:] for line in text.splitlines() if line.startswith("data: ")]
     if not events:
-        raise RuntimeError("MCP server returned neither JSON nor SSE data")
+        raise HostedToolError("MCP server returned neither JSON nor SSE data")
     return json.loads(events[-1])
 
 
@@ -47,18 +60,27 @@ class _HTTPMCPClient:
         }
         if self.session_id:
             headers["Mcp-Session-Id"] = self.session_id
-        with urlopen(
-            Request(self.url, data=json.dumps(message).encode(), headers=headers),
-            timeout=self.timeout,
-        ) as response:
-            session = response.headers.get("Mcp-Session-Id")
-            if session:
-                self.session_id = session
-            if notification:
-                return None
-            result = _rpc_payload(response.read())
+        try:
+            with urlopen(
+                Request(self.url, data=json.dumps(message).encode(), headers=headers),
+                timeout=self.timeout,
+            ) as response:
+                session = response.headers.get("Mcp-Session-Id")
+                if session:
+                    self.session_id = session
+                if notification:
+                    return None
+                result = _rpc_payload(response.read())
+        except HostedToolError:
+            raise
+        except (OSError, ValueError, HTTPException) as error:
+            # OSError covers URLError, HTTPError and timeouts; ValueError
+            # covers undecodable or malformed JSON replies.
+            raise HostedToolError(f"MCP {method} failed: {error}") from error
+        if not isinstance(result, dict):
+            raise HostedToolError(f"MCP {method} reply is not a JSON-RPC object")
         if "error" in result:
-            raise RuntimeError(f"MCP error: {result['error']}")
+            raise HostedToolError(f"MCP error: {result['error']}")
         return result.get("result")
 
     def _initialize(self):
@@ -79,7 +101,12 @@ class _HTTPMCPClient:
         with self.lock:
             self._initialize()
             result = self._call("tools/list") or {}
-            return result.get("tools", [])
+            tools = result.get("tools", []) if isinstance(result, dict) else None
+            if not isinstance(tools, list) or any(
+                not isinstance(tool, dict) for tool in tools
+            ):
+                raise HostedToolError("MCP tools/list reply has no list of tool objects")
+            return tools
 
     def call_tool(self, name, arguments):
         with self.lock:
