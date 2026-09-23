@@ -3403,6 +3403,82 @@ class ServingEngine:
         for member in cohort.jobs:
             self._finish(member, dict(event))
 
+    def _finish_cancelled_queued(self, batch, published, held_cohort, attaching_cohort):
+        """Finish cancelled requests that are still waiting for a lane.
+
+        Active and memory-deferred lanes are swept every loop, but a request
+        in the publication queue, the local publication deque or a held
+        cohort was only noticed when it was dequeued, which needs a free
+        lane.  On a saturated server disconnected clients kept their inflight
+        slots and new requests were refused.  A declared cohort with a
+        cancelled member fails whole, as it would at attachment.  Members of
+        the cohort being attached are left to the attachment path.  Returns
+        the held cohort, or None when it failed.
+        """
+        cancelled, failed_cohorts = [], []
+        with self.incoming.mutex:
+            pending = self.incoming.queue
+            if any(
+                any(member.cancelled.is_set() for member in item.jobs)
+                if isinstance(item, PublishedCohort)
+                else item.cancelled.is_set()
+                for item in pending
+            ):
+                kept = []
+                for item in pending:
+                    if not isinstance(item, PublishedCohort):
+                        (cancelled if item.cancelled.is_set() else kept).append(item)
+                    elif item.atomic:
+                        if any(member.cancelled.is_set() for member in item.jobs):
+                            failed_cohorts.append(item)
+                        else:
+                            kept.append(item)
+                    else:
+                        live = tuple(m for m in item.jobs if not m.cancelled.is_set())
+                        cancelled.extend(m for m in item.jobs if m.cancelled.is_set())
+                        if len(live) == len(item.jobs):
+                            kept.append(item)
+                        elif live:
+                            kept.append(PublishedCohort(live, atomic=False))
+                pending.clear()
+                pending.extend(kept)
+                self.incoming.not_full.notify_all()
+        attaching = {m.id for m in attaching_cohort.jobs} if attaching_cohort else set()
+        for job in [
+            job for job in published
+            if job.cancelled.is_set() and job.id not in attaching
+        ]:
+            published.remove(job)
+            cancelled.append(job)
+        if held_cohort is not None and any(
+            member.cancelled.is_set() for member in held_cohort.jobs
+        ):
+            failed_cohorts.append(held_cohort)
+            held_cohort = None
+        removed = len(cancelled) + sum(len(cohort.jobs) for cohort in failed_cohorts)
+        if not removed:
+            return held_cohort
+        with self.lock:
+            self.queued_jobs -= removed
+            queue_depth = self.queued_jobs
+        for job in cancelled:
+            self.batch_metrics.dequeued(job.id, queue_depth)
+            self._cancel_pending_cache_capsule(batch, job, "queued_member_cancelled")
+            self._finish(job, {"error": "cancelled"})
+        for cohort in failed_cohorts:
+            self.counts["batch_cohort_attachment_failures"] += 1
+            self.counts["batch_cohort_jobs_failed_closed"] += len(cohort.jobs)
+            for member in cohort.jobs:
+                self.batch_metrics.dequeued(member.id, queue_depth)
+                self._finish(
+                    member,
+                    {
+                        "error": "declared batch cohort member cancelled before atomic attachment",
+                        "status": 429,
+                    },
+                )
+        return held_cohort
+
     def _fail_drain_timeout(
         self, batch, active, deferred, published, held_cohort, attaching_cohort
     ):
@@ -4687,6 +4763,9 @@ class ServingEngine:
                     else:
                         deferred.append(waiting)
                 waiting = None
+                held_cohort = self._finish_cancelled_queued(
+                    batch, published, held_cohort, attaching_cohort
+                )
                 # Admission is bounded before prompt caches are allocated.
                 coalescer = IdleAdmissionCoalescer(
                     self.coalesce_window_seconds,

@@ -402,6 +402,7 @@ def scripted_engine(monkeypatch):
         *, declare_marker, declare_tool_constraint=True, execution_policy=None,
         thinking_direction=None, thinking_steer_alpha=None,
         default_max_tokens=65_536, qualification_mode=True, prompt_lookup=False,
+        **engine_kwargs,
     ):
         state["declare_marker"] = declare_marker
         state["declare_tool_constraint"] = declare_tool_constraint
@@ -412,6 +413,7 @@ def scripted_engine(monkeypatch):
             thinking_steer_alpha=thinking_steer_alpha,
             default_max_tokens=default_max_tokens,
             prompt_lookup=prompt_lookup,
+            **engine_kwargs,
         )
         assert engine.ready.wait(5)
         with engine.lock:

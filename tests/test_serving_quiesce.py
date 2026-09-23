@@ -384,3 +384,61 @@ def test_slow_media_preparation_does_not_stall_an_unrelated_lane(scripted_engine
         assert engine.slots.acquire(blocking=False)
     for _ in range(engine.max_inflight):
         engine.slots.release()
+
+
+def _wait_for_terminal(job, timeout):
+    deadline = time.monotonic() + timeout
+    while True:
+        remaining = deadline - time.monotonic()
+        assert remaining > 0, "no terminal event in time"
+        event = job.events.get(timeout=remaining)
+        if "finish_reason" in event or "error" in event:
+            return event
+
+
+def test_cancelled_queued_job_releases_its_slot_without_a_free_lane(scripted_engine, monkeypatch):
+    build, state = scripted_engine
+    engine = build(declare_marker=True, max_lanes=1, max_inflight=2)
+    _slow_scripted_decode(monkeypatch)
+    state["script"] = []
+    request = {"messages": [{"role": "user", "content": "a"}], "temperature": 0}
+    running = engine.submit({**request, "max_tokens": 400})
+    _wait_for_tokens(running)
+    queued = engine.submit({**request, "max_tokens": 5})
+    time.sleep(0.05)
+    queued.cancelled.set()  # the client disconnected while waiting for a lane
+    assert _wait_for_terminal(queued, 1.0) == {"error": "cancelled"}
+    # The slot came back while the only lane was still busy.
+    replacement = engine.submit({**request, "max_tokens": 5})
+    assert running.completion_tokens < 400
+    status = engine.status()
+    assert status["inflight"] == 2 and status["queue_depth"] == 1
+    running.cancelled.set()
+    assert _wait_for_terminal(running, 5.0) == {"error": "cancelled"}
+    assert _wait_for_terminal(replacement, 5.0)["finish_reason"] == "length"
+
+
+def test_cancelled_member_fails_a_held_cohort_without_a_free_lane(scripted_engine, monkeypatch):
+    build, state = scripted_engine
+    engine = build(declare_marker=True, max_lanes=2, max_inflight=3)
+    _slow_scripted_decode(monkeypatch)
+    state["script"] = []
+    request = {"messages": [{"role": "user", "content": "a"}], "temperature": 0}
+    running = engine.submit({**request, "max_tokens": 400})
+    _wait_for_tokens(running)
+    # A declared cohort never joins a live batch: it is held until the
+    # running lane finishes.
+    members = [
+        engine.submit({**request, "max_tokens": 5, "batch_cohort": {"id": "c", "size": 2}})
+        for _ in range(2)
+    ]
+    time.sleep(0.05)
+    members[0].cancelled.set()
+    for member in members:
+        event = _wait_for_terminal(member, 1.0)
+        assert event["status"] == 429 and "cancelled" in event["error"], event
+    assert running.completion_tokens < 400
+    status = engine.status()
+    assert status["inflight"] == 1 and status["queue_depth"] == 0
+    running.cancelled.set()
+    assert _wait_for_terminal(running, 5.0) == {"error": "cancelled"}
