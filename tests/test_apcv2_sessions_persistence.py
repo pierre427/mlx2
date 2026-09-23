@@ -20,6 +20,13 @@ from mlx2.runtime.apc_v2 import (
 )
 from mlx2.runtime.models.cache import KVCache
 
+from test_apc_hits_hybrid_gdn_self_mtp import (  # noqa: F401 - fixture
+    host,
+    make_adapter,
+    tiny_qwen38_mtp,
+)
+from test_apc_interior_placement import _ChatTemplateTokenizer, _words
+
 
 def _state(tokens, seed=0):
     cache = KVCache()
@@ -895,3 +902,199 @@ def test_corrupt_manifest_is_quarantined(tmp_path):
     # corruption and use the configured quarantine policy.
     assert not manifest.exists()
     apc.close()
+
+
+# ------------------------------------ serving: a resume prefetches what serves
+
+
+def _session_engine(adapter, *, mtp, cache_dir=None):
+    from mlx2 import serving
+
+    engine = serving.ServingEngine(
+        "tiny",
+        adapter_factory=adapter,
+        qualification_mode=True,
+        mtp=mtp,
+        max_lanes=1,
+        prefill_step=16,
+        cache_dir=None if cache_dir is None else str(cache_dir),
+    )
+    assert engine.ready.wait(60), engine.error
+    return engine
+
+
+def _park_and_resume(engine, session_id):
+    state = engine.apc_session_park("default", session_id, ttl_seconds=60)
+    deadline = time.monotonic() + 10
+    while state["state"] != "disk":
+        assert time.monotonic() < deadline, state
+        time.sleep(0.02)
+        state = engine.apc_session_state("default", session_id)
+    engine.apc_session_resume("default", session_id)
+    # The whole prefetch runs under one APC lock hold on the model worker, so
+    # the deepest entry reading resident means every restore it made landed.
+    while state["state"] != "resident":
+        assert time.monotonic() < deadline, state
+        time.sleep(0.02)
+        state = engine.apc_session_state("default", session_id)
+
+
+def _resumed_turn(engine, session_id, seed, request):
+    """Seed a session, park and resume it, then send ``request(output)``."""
+    first, _receipt, _job = _run_request_body(engine, seed(session_id))
+    _park_and_resume(engine, session_id)
+    disk = engine.apc.apc_stats["idle_disk"]
+    restores_before = disk["restores"]
+    body = request(first)
+    out, receipt, job = _run_request_body(engine, dict(body, session_id=session_id))
+    disk = engine.apc.apc_stats["idle_disk"]
+    return body, out, receipt, job, dict(disk), disk["restores"] - restores_before
+
+
+def _run_request_body(engine, body):
+    job = engine.submit(dict(body))
+    text = ""
+    while True:
+        event = job.events.get(timeout=120)
+        if "error" in event:
+            raise AssertionError(event)
+        if "delta" in event:
+            text += event["delta"].get("content", "")
+        if "finish_reason" in event:
+            return [int(t) for t in text.split()], event.get("receipt") or {}, job
+
+
+@pytest.mark.parametrize("mtp", [False, True], ids=["ordinary", "mtp"])
+@pytest.mark.parametrize("followup", ["resend", "continuation"])
+def test_resumed_session_request_is_served_from_the_prefetch(
+    host, tmp_path, mtp, followup
+):
+    """PF: on the MTP route a resume prefetched only the deepest entry.
+
+    That finished lane's draft sidecar is state at its own end, so a re-send
+    of the parked prompt cannot use it: the ``P-1`` boundary served it after
+    a second, on-path disk restore, and the prefetch was a wasted restore
+    and a miss.  The resume now also prefetches the boundary, so either
+    follow-up is served from resident state with nothing restored on its
+    own path, the prefetch is credited once, and output equals a cold run.
+    """
+    model, vocab = tiny_qwen38_mtp()
+    adapter = make_adapter(model, vocab)
+    prompt = [(7 * i + 3) % (vocab - 2) + 1 for i in range(18)]
+    seed = lambda session: {  # noqa: E731
+        "tokens": prompt, "max_tokens": 5, "temperature": 0, "session_id": session,
+    }
+
+    def request(first):
+        tokens = prompt if followup == "resend" else prompt + first + [9, 8, 7, 6]
+        return {"tokens": tokens, "max_tokens": 5, "temperature": 0}
+
+    engine = _session_engine(adapter, mtp=mtp, cache_dir=tmp_path)
+    try:
+        body, out, receipt, job, disk, restored_on_path = _resumed_turn(
+            engine, "pf", seed, request
+        )
+    finally:
+        engine.close()
+    assert restored_on_path == 0, disk
+    assert (disk["parks"], disk["resumes"]) == (1, 1)
+    assert disk["prefetch_restores_ok"] >= 1
+    assert (disk["prefetch_hits"], disk["prefetch_misses"]) == (1, 0), disk
+    cached = int(job.cached_tokens)
+    if followup == "resend":
+        assert cached == len(prompt) - 1
+        if mtp:
+            assert receipt["cache_checkpoint_role"] == "committed_prompt_boundary"
+    else:
+        assert cached >= len(prompt) + 5 - 1
+    cold = _session_engine(adapter, mtp=mtp)
+    try:
+        cold_out, _receipt, cold_job = _run_request_body(cold, body)
+    finally:
+        cold.close()
+    assert int(cold_job.cached_tokens or 0) == 0
+    assert out == cold_out
+
+
+@pytest.mark.parametrize("mtp", [False, True], ids=["ordinary", "mtp"])
+def test_resumed_next_turn_uses_the_prefetched_generation_prompt_boundary(
+    host, tmp_path, mtp
+):
+    """PF: a template that drops the generation prompt (Qwen3.6) from history.
+
+    Its next turn resumes at the boundary before that suffix, which the
+    finished lane cannot land on: on the MTP route it was restored from disk
+    on the next turn's own path (a prefetch miss), and on the ordinary route
+    the prefetched lane landed short of it.  The resume now prefetches it,
+    so the next turn resumes exactly where an unparked session would.
+    """
+    model, vocab = tiny_qwen38_mtp()
+    base = make_adapter(model, vocab)
+    template = _ChatTemplateTokenizer(vocab, keeps_think_block=False)
+
+    class Adapter(base):
+        def __init__(self, path):
+            super().__init__(path)
+            detokenizer = type(self).tokenizer
+
+            class Tokenizer:
+                vocab_size = vocab
+                eos_token_ids = []
+                all_special_ids = template.all_special_ids
+                apply_chat_template = staticmethod(template.apply_chat_template)
+
+                @property
+                def detokenizer(self):
+                    return detokenizer.detokenizer
+
+            self.tokenizer = Tokenizer()
+
+        def prompt_tokens(self, request):
+            return template.apply_chat_template(
+                request["messages"], add_generation_prompt=True
+            )
+
+        def cache_budget(self, *, mtp):
+            from mlx2.adapters.qwen38_memory import Qwen38CacheBudget
+
+            return Qwen38CacheBudget.from_config(dict(vars(model.args)), mtp=mtp)
+
+    messages = [
+        {"role": "system", "content": _words(vocab, 1, 60)},
+        {"role": "user", "content": _words(vocab, 2, 20)},
+    ]
+    seed = lambda session: {  # noqa: E731
+        "messages": messages, "max_tokens": 6, "temperature": 0,
+        "session_id": session,
+    }
+
+    def request(first):
+        return {
+            "messages": messages + [
+                {"role": "assistant", "content": " ".join(map(str, first))},
+                {"role": "user", "content": _words(vocab, 3, 20)},
+            ],
+            "max_tokens": 6,
+            "temperature": 0,
+        }
+
+    engine = _session_engine(Adapter, mtp=mtp, cache_dir=tmp_path)
+    try:
+        body, out, receipt, job, disk, restored_on_path = _resumed_turn(
+            engine, "pf-chat", seed, request
+        )
+    finally:
+        engine.close()
+    first_prompt = template.apply_chat_template(messages, add_generation_prompt=True)
+    suffix = 7  # thinking off: <start> assistant \n <think> \n\n </think> \n\n
+    assert int(job.cached_tokens) == len(first_prompt) - suffix
+    assert receipt["cache_checkpoint_role"] == "interior_checkpoint"
+    assert restored_on_path == 0, disk
+    assert (disk["prefetch_hits"], disk["prefetch_misses"]) == (1, 0), disk
+    cold = _session_engine(Adapter, mtp=mtp)
+    try:
+        cold_out, _receipt, cold_job = _run_request_body(cold, body)
+    finally:
+        cold.close()
+    assert int(cold_job.cached_tokens or 0) == 0
+    assert out == cold_out

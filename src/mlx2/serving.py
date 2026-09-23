@@ -4241,6 +4241,7 @@ class ServingEngine:
                 prefetch_ttl_seconds=self.apc_session_prefetch_ttl_seconds,
                 quarantine_max_entries=self.apc_quarantine_max_entries,
                 quarantine_max_bytes=self.apc_quarantine_max_bytes,
+                generation_prompt_suffixes=self.apc_generation_prompt_suffixes,
             )
             self.apc = apc
             cache_keys = {}

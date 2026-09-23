@@ -522,6 +522,7 @@ class APCv2(PrefixIndex):
         quarantine_max_entries: int = 128,
         quarantine_max_bytes: int = 1 << 30,
         max_interior_entries: Optional[int] = None,
+        generation_prompt_suffixes: Iterable[Iterable[int]] = (),
     ):
         if not layout_name:
             raise ValueError("APCv2 requires a model cache-layout declaration")
@@ -541,6 +542,13 @@ class APCv2(PrefixIndex):
         ):
             raise ValueError("max_interior_entries must be a non-negative integer")
         self.max_interior_entries = int(max_interior_entries)
+        # Serving's detected generation-prompt suffixes (see
+        # interior_placement).  A session resume uses them to find the
+        # boundary a template that drops the suffix from history resumes at.
+        self._generation_prompt_suffixes = tuple(
+            tuple(int(token) for token in suffix)
+            for suffix in generation_prompt_suffixes
+        )
         self._apc_lock = threading.RLock()
         self._cow_branching = True
         self._cow_telemetry = COWCacheTelemetry()
@@ -2236,6 +2244,105 @@ class APCv2(PrefixIndex):
             self._enforce_disk_limit_locked()
             return self._session_state_locked(tag)
 
+    def _prefetch_entry_locked(self, tag, key, tokens, entry, expiry) -> bool:
+        """Make one session entry resident and pin it until ``expiry``."""
+        if entry.prompt_cache:
+            restored = True
+        else:
+            # This method is serviced only by the generation worker at
+            # its idle boundary. MLX documents cross-thread streams as
+            # caller-serialized; APC locking alone cannot serialize
+            # their graph evaluation against decode on another thread.
+            restored = self._restore_entry_locked(key, tokens, entry)
+        if restored is None:
+            self._disk_stats["prefetch_restores_abandoned"] += 1
+            return False
+        if not restored:
+            self._disk_stats["prefetch_restores_failed"] += 1
+            self._drop_entry_locked(key, tokens, entry)
+            return False
+        current = self._tenant_pin_bytes_locked(tag[0], resident=True)
+        if (
+            not any(
+                pin_tag[0] == tag[0]
+                for pin_tag in getattr(entry, "_apc_resident_pin_expiries", {})
+            )
+            and current + int(entry.nbytes) > self._pinned_resident_bytes_per_tenant
+        ):
+            self._disk_stats["pin_cap_rejections"] += 1
+            self._disk_stats["prefetch_restores_abandoned"] += 1
+            return False
+        pins = getattr(entry, "_apc_resident_pin_expiries", {})
+        pins[tag] = expiry
+        entry._apc_resident_pin_expiries = pins
+        self._disk_stats["prefetch_restores_ok"] += 1
+        if getattr(entry, "_apc_disk", None):
+            self._write_manifest_locked(key, tokens, entry)
+        return True
+
+    def _session_turn_boundaries_locked(self, tag, key, tokens, tip):
+        """Exact boundaries the session's latest turn published below its tip.
+
+        ``tokens`` is the tip's path.  The deepest committed prompt boundary
+        on it is that turn's ``P-1`` boundary, which serves a re-send of the
+        prompt.  For each generation-prompt suffix the prompt ends with, the
+        entry at ``P - len(suffix)`` is where the next turn resumes when the
+        template re-renders the finished turn without that suffix.
+        """
+        on_path = {}
+        for record_key, path, entry in self._session_entries_locked(tag):
+            if (
+                record_key == key
+                and len(path) < len(tokens)
+                and path == tokens[: len(path)]
+            ):
+                on_path[len(path)] = (record_key, path, entry)
+        anchors = [
+            depth
+            for depth, (_key, _path, entry) in on_path.items()
+            if getattr(entry, "_apc_retention_role", self._RETENTION_DEFAULT)
+            == self._RETENTION_PROMPT_BOUNDARY
+        ]
+        if (
+            getattr(tip, "_apc_retention_role", self._RETENTION_DEFAULT)
+            == self._RETENTION_PROMPT_BOUNDARY
+        ):
+            anchors.append(len(tokens))
+        if not anchors:
+            return []
+        boundary = max(anchors)
+        prompt_end = boundary + 1
+        depths = [boundary]
+        for suffix in self._generation_prompt_suffixes:
+            start = prompt_end - len(suffix)
+            # A ``P-1`` tip lacks the prompt's last token; match what it has.
+            window = tokens[start:prompt_end]
+            if start > 0 and window == list(suffix[: len(window)]):
+                depths.append(start)
+        return [on_path[depth] for depth in depths if depth in on_path]
+
+    @staticmethod
+    def _tip_serves_depth(tip, tip_tokens, entry, depth) -> bool:
+        """Whether a resident tip already serves what ``entry`` would.
+
+        True only when the tip can land exactly at ``depth``.  A draft
+        sidecar is state at its own entry's end: a sidecar-bearing tip cannot
+        carry it back to ``depth``, and a sidecar-bearing boundary is what a
+        speculative route selects over a trimmed target-only tip.
+        """
+        if (
+            getattr(tip, "sidecar", None) is not None
+            or getattr(entry, "sidecar", None) is not None
+            or (getattr(entry, "_apc_disk", None) or {}).get("sidecar") is not None
+        ):
+            return False
+        if can_trim_prompt_cache(tip.prompt_cache):
+            return True
+        if achievable_trim is None:
+            return False
+        landing = achievable_trim(tip.prompt_cache, len(tip_tokens) - depth)
+        return landing is not None and landing[0] == depth
+
     def _prefetch_session(self, tag, key, tokens, entry, expiry) -> None:
         try:
             with self._apc_lock:
@@ -2245,41 +2352,38 @@ class APCv2(PrefixIndex):
                 ):
                     self._disk_stats["prefetch_restores_abandoned"] += 1
                     return
-                if entry.prompt_cache:
-                    restored = True
-                else:
-                    # This method is serviced only by the generation worker at
-                    # its idle boundary. MLX documents cross-thread streams as
-                    # caller-serialized; APC locking alone cannot serialize
-                    # their graph evaluation against decode on another thread.
-                    restored = self._restore_entry_locked(key, tokens, entry)
-                if restored is None:
-                    self._disk_stats["prefetch_restores_abandoned"] += 1
+                if not self._prefetch_entry_locked(tag, key, tokens, entry, expiry):
                     return
-                if not restored:
-                    self._disk_stats["prefetch_restores_failed"] += 1
-                    self._drop_entry_locked(key, tokens, entry)
-                    return
-                current = self._tenant_pin_bytes_locked(tag[0], resident=True)
-                if (
-                    not any(
-                        pin_tag[0] == tag[0]
-                        for pin_tag in getattr(
-                            entry, "_apc_resident_pin_expiries", {}
-                        )
-                    )
-                    and current + int(entry.nbytes)
-                    > self._pinned_resident_bytes_per_tenant
-                ):
-                    self._disk_stats["pin_cap_rejections"] += 1
-                    self._disk_stats["prefetch_restores_abandoned"] += 1
-                    return
-                pins = getattr(entry, "_apc_resident_pin_expiries", {})
-                pins[tag] = expiry
-                entry._apc_resident_pin_expiries = pins
-                self._disk_stats["prefetch_restores_ok"] += 1
-                if getattr(entry, "_apc_disk", None):
-                    self._write_manifest_locked(key, tokens, entry)
+                # The deepest entry serves the next turn only when that turn
+                # extends it.  A re-send of the prompt, or a next turn whose
+                # template drops the generation prompt from history, resumes
+                # at a boundary below it that the tip cannot land on (on a
+                # speculative route, never: its draft sidecar is state at the
+                # tip's own end).  Prefetch those too, so the resumed request
+                # is served from resident state instead of restoring its
+                # boundary from disk on its own critical path.
+                for (
+                    boundary_key,
+                    boundary_tokens,
+                    boundary,
+                ) in self._session_turn_boundaries_locked(tag, key, tokens, entry):
+                    try:
+                        # An earlier restore may have reclaimed this path
+                        # while reserving its own footprint.
+                        live = self._trie.get(boundary_key, boundary_tokens)
+                    except KeyError:
+                        live = None
+                    if live is not boundary or self._tip_serves_depth(
+                        entry, tokens, boundary, len(boundary_tokens)
+                    ):
+                        continue
+                    expected = getattr(boundary, "_apc_prefetch_expected", set())
+                    expected.add(tag)
+                    boundary._apc_prefetch_expected = expected
+                    if not self._prefetch_entry_locked(
+                        tag, boundary_key, boundary_tokens, boundary, expiry
+                    ):
+                        expected.discard(tag)
         except Exception:
             with self._apc_lock:
                 self._disk_stats["prefetch_restores_failed"] += 1
