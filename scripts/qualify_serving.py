@@ -1734,6 +1734,20 @@ def main():
                 adapter_fingerprint=initial["artifact"],
             )
             report["kv_fidelity"] = kv_fidelity
+        # Lease and runtime checks come before the required-feature checks: a
+        # feature whose evidence this run cannot produce (the adaptive MTP
+        # benchmark in a smoke run) fails the run there, and must not hide
+        # these two from its evidence.
+        check(
+            "cache_leases", final["apcv2"]["cow"]["active_leases"] == 0, final["apcv2"]
+        )
+        from mlx2.serving import runtime_identity
+
+        check(
+            "runtime_stable",
+            initial["runtime"] == final["runtime"] == runtime_identity(),
+            initial["runtime"],
+        )
         observed = feature_observations(
             final,
             kv_fidelity=kv_fidelity,
@@ -1751,16 +1765,6 @@ def main():
             # A feature without an observation is a failed check, never a
             # KeyError that discards the whole run's evidence.
             check("feature_" + feature, observed.get(feature, 0) > 0, evidence)
-        check(
-            "cache_leases", final["apcv2"]["cow"]["active_leases"] == 0, final["apcv2"]
-        )
-        from mlx2.serving import runtime_identity
-
-        check(
-            "runtime_stable",
-            initial["runtime"] == final["runtime"] == runtime_identity(),
-            initial["runtime"],
-        )
         report["passed"] = True
     finally:
         if "final_status" not in report:
