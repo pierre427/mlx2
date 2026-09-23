@@ -2668,7 +2668,12 @@ def handler_for(
                 parts, reasoning, calls, probabilities = [], [], [], []
                 text_logprobs = ResponsesTextLogprobs()
                 hosted_rounds = 0
-                hosted_usage = {"prompt_tokens": 0, "completion_tokens": 0}
+                hosted_usage = {
+                    "prompt_tokens": 0,
+                    "completion_tokens": 0,
+                    "cached_tokens": 0,
+                    "reasoning_tokens": 0,
+                }
                 hosted_receipts = []
                 while True:
                     # Streaming detects a gone client on write; non-streaming
@@ -2980,6 +2985,10 @@ def handler_for(
                         }
                         hosted_usage["prompt_tokens"] += usage["prompt_tokens"]
                         hosted_usage["completion_tokens"] += usage["completion_tokens"]
+                        hosted_usage["cached_tokens"] += int(job.cached_tokens or 0)
+                        hosted_usage["reasoning_tokens"] += int(
+                            getattr(job, "reasoning_tokens", 0) or 0
+                        )
                         hosted_receipts.append(receipt)
                         executors = (
                             response_options.get("tool_executors", {})
@@ -3061,12 +3070,20 @@ def handler_for(
                             text_logprobs = ResponsesTextLogprobs()
                             continue
                         if hosted_rounds:
+                            # Every round's tokens, including its prefix-cache
+                            # hits and reasoning, count toward the response.
                             usage = {
                                 **usage,
                                 "prompt_tokens": hosted_usage["prompt_tokens"],
                                 "completion_tokens": hosted_usage["completion_tokens"],
                                 "total_tokens": hosted_usage["prompt_tokens"]
                                 + hosted_usage["completion_tokens"],
+                                "prompt_tokens_details": {
+                                    "cached_tokens": hosted_usage["cached_tokens"]
+                                },
+                                "completion_tokens_details": {
+                                    "reasoning_tokens": hosted_usage["reasoning_tokens"]
+                                },
                             }
                             receipt = {
                                 **receipt,

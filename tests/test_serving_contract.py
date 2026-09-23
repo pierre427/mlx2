@@ -2761,3 +2761,38 @@ def test_mcp_transport_and_protocol_failures_are_bad_gateway(fault):
         mcp.shutdown()
         mcp.server_close()
         mcp_thread.join()
+
+
+@pytest.mark.parametrize("stream", [False, True])
+def test_hosted_usage_sums_cached_and_reasoning_tokens_over_rounds(stream):
+    def counted(script, prompt, cached, reasoning):
+        def run(job):
+            job.prompt_tokens, job.completion_tokens = prompt, 10
+            job.cached_tokens, job.reasoning_tokens = cached, reasoning
+            return script(job)
+        return run
+
+    engine = HostedEngine([
+        counted(_round_calls(_hosted_call()), 100, 50, 7),
+        counted(_round_text("It is 21 C."), 200, 90, 0),
+    ])
+    base, close = _serve_hosted(engine, HostedBackend())
+    try:
+        with post_response(base, input="weather?", tools=[MCP_TOOL], stream=stream) as response:
+            if stream:
+                usage = next(
+                    json.loads(line[len("data: "):])["response"]["usage"]
+                    for line in response.read().decode().splitlines()
+                    if line.startswith("data: {") and '"response.completed"' in line
+                )
+            else:
+                usage = json.load(response)["usage"]
+    finally:
+        close()
+    assert usage == {
+        "input_tokens": 300,
+        "output_tokens": 20,
+        "total_tokens": 320,
+        "input_tokens_details": {"cached_tokens": 140},
+        "output_tokens_details": {"reasoning_tokens": 7},
+    }

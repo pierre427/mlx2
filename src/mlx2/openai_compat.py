@@ -1079,11 +1079,19 @@ def responses_payload(
             "input_tokens": usage["prompt_tokens"],
             "output_tokens": usage["completion_tokens"],
             "total_tokens": usage["total_tokens"],
+            # Usage details, when given, cover every round of a hosted tool
+            # loop; the job's own counters cover only its last round.
             "input_tokens_details": {
-                "cached_tokens": getattr(job, "cached_tokens", 0)
+                "cached_tokens": (usage.get("prompt_tokens_details") or {}).get(
+                    "cached_tokens", getattr(job, "cached_tokens", 0)
+                )
             },
             "output_tokens_details": {
-                "reasoning_tokens": int(getattr(job, "reasoning_tokens", 0))
+                "reasoning_tokens": int(
+                    (usage.get("completion_tokens_details") or {}).get(
+                        "reasoning_tokens", getattr(job, "reasoning_tokens", 0)
+                    )
+                )
             },
         },
         "mlx2": receipt,
