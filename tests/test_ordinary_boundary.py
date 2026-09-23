@@ -199,3 +199,40 @@ def test_state_checkpoint_does_not_pin_the_batched_state():
     held = held_with_survivor - mx.get_active_memory()
     assert accounted == 2 * 64 * 1024 * 4
     assert held <= 1.25 * accounted, (held, accounted)
+
+
+def test_empty_caches_of_every_kind_report_empty_state():
+    # _promote_ready_prompts evaluates the state of every extracted boundary
+    # row; a one-token prompt prefills nothing, so each row is still empty.
+    from mlx2.runtime.models.cache import (
+        KVCache,
+        QuantizedKVCache,
+        RotatingKVCache,
+        RotatingQuantizedKVCache,
+    )
+
+    for cache in (
+        KVCache(),
+        RotatingKVCache(max_size=8),
+        QuantizedKVCache(),
+        RotatingQuantizedKVCache(max_size=8),
+    ):
+        assert cache.state == (None, None), type(cache).__name__
+        mx.async_eval([cache.state])
+
+
+def test_one_token_prompt_on_a_sliding_window_model_keeps_the_generator_alive():
+    # Sliding-window models (North, Muse) keep RotatingKVCache layers; the
+    # plain-KV fix above did not cover them and the boundary capture raised.
+    from test_pld_batched_verify import _north, _greedy
+
+    model = _north()
+    generator = BatchGenerator(model, max_tokens=4, completion_batch_size=2)
+    (uid,) = generator.insert([[5]], max_tokens=[4])
+    produced = []
+    for _ in range(50):
+        _prompts, responses = generator.next()
+        produced += [r.token for r in responses if r.uid == uid]
+        if any(r.finish_reason for r in responses if r.uid == uid):
+            break
+    assert produced == _greedy(model, [5], 4)

@@ -875,6 +875,10 @@ class QuantizedKVCache(_BaseCache):
 
     @property
     def state(self):
+        # An empty cache (a one-token prompt prefills nothing) has no state
+        # yet; report it the way KVCache does rather than raise.
+        if self.keys is None:
+            return (self.keys, self.values)
         return self.keys_and_values()
 
     @state.setter
@@ -1562,6 +1566,10 @@ class RotatingKVCache(_BaseCache):
 
     @property
     def state(self):
+        # An empty cache (a one-token prompt prefills nothing) has no state
+        # yet; report it the way KVCache does rather than raise.
+        if self.keys is None:
+            return (self.keys, self.values)
         if self.offset < self.keys.shape[2]:
             live = [
                 self.keys[..., : self.offset, :],
@@ -1843,6 +1851,10 @@ class RotatingQuantizedKVCache(_BaseCache):
 
     @property
     def state(self):
+        # An empty cache (a one-token prompt prefills nothing) has no state
+        # yet; report it the way KVCache does rather than raise.
+        if self.keys is None:
+            return (self.keys, self.values)
         if self.offset < self.keys[0].shape[2]:
             return (
                 tree_map(lambda a: a[..., : self.offset, :], self.keys),
