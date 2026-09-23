@@ -444,6 +444,30 @@ def test_cancelled_member_fails_a_held_cohort_without_a_free_lane(scripted_engin
     assert _wait_for_terminal(running, 5.0) == {"error": "cancelled"}
 
 
+def test_cancelled_member_fails_a_staged_cohort_before_its_deadline(scripted_engine):
+    build, state = scripted_engine
+    engine = build(declare_marker=True, max_lanes=3, max_inflight=3,
+                   batch_cohort_timeout_ms=30_000)
+    request = {"messages": [{"role": "user", "content": "a"}], "temperature": 0,
+               "max_tokens": 5, "batch_cohort": {"id": "c", "size": 3}}
+    members = [engine.submit(dict(request)) for _ in range(2)]
+    time.sleep(0.05)
+    assert engine.status()["inflight"] == 2
+    # The cohort is still staged (2/3).  A disconnected member used to keep
+    # its slot, and doom the cohort, until the 30 s publication deadline.
+    members[0].cancelled.set()
+    for member in members:
+        event = _wait_for_terminal(member, 1.0)
+        assert event["status"] == 429 and "cancelled" in event["error"], event
+    assert engine.status()["inflight"] == 0
+    assert not engine.pending_cohorts
+    assert engine.counts["batch_cohort_staged_cancellations"] == 1
+    assert engine.counts["batch_cohort_timeouts"] == 0
+    # The freed slots admit new work at once.
+    job = engine.submit({k: v for k, v in request.items() if k != "batch_cohort"})
+    assert _wait_for_terminal(job, 5.0)["finish_reason"] == "length"
+
+
 def test_submission_racing_worker_exit_gets_a_terminal_event(scripted_engine):
     from types import SimpleNamespace
 

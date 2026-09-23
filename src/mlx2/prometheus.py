@@ -311,6 +311,7 @@ _ENGINE_EVENTS = {
     "batch_cohort_jobs_timed_out": ("batch_cohort", "job_timed_out"),
     "batch_cohort_releases": ("batch_cohort", "release"),
     "batch_cohort_scheduler_failures": ("batch_cohort", "scheduler_failure"),
+    "batch_cohort_staged_cancellations": ("batch_cohort", "staged_cancellation"),
     "batch_cohort_timeouts": ("batch_cohort", "timeout"),
     "cache_capsule_width_fallbacks": ("cache_capsule", "width_fallback"),
     "cache_capsule_deadline_fallbacks": ("cache_capsule", "deadline_fallback"),

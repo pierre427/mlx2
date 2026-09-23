@@ -2263,12 +2263,36 @@ class ServingEngine:
             # submission_lock when there is nothing to expire.
             return
         now = time.monotonic()
-        expired = []
+        expired, abandoned = [], []
         with self.submission_lock:
             for cohort_key, pending in list(self.pending_cohorts.items()):
-                if now - pending["created"] >= self.batch_cohort_timeout_seconds:
+                if any(
+                    getattr(job, "cancelled", None) is not None
+                    and job.cancelled.is_set()
+                    for job in pending["jobs"]
+                ):
+                    # A staged member's client went away, so the cohort can
+                    # never publish whole.  Fail it now rather than hold every
+                    # member's inflight slot until the deadline.
+                    abandoned.append((cohort_key, pending))
+                    del self.pending_cohorts[cohort_key]
+                elif now - pending["created"] >= self.batch_cohort_timeout_seconds:
                     expired.append((cohort_key, pending))
                     del self.pending_cohorts[cohort_key]
+        for (_, cohort_id), pending in abandoned:
+            self.counts["batch_cohort_staged_cancellations"] += 1
+            self.counts["batch_cohort_jobs_failed_closed"] += len(pending["jobs"])
+            for job in pending["jobs"]:
+                self._finish(
+                    job,
+                    {
+                        "error": (
+                            f"batch cohort {cohort_id!r} member cancelled "
+                            "before publication"
+                        ),
+                        "status": 429,
+                    },
+                )
         for (_, cohort_id), pending in expired:
             self.counts["batch_cohort_timeouts"] += 1
             self.counts["batch_cohort_jobs_timed_out"] += len(pending["jobs"])
