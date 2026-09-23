@@ -456,6 +456,11 @@ def test_final_quiescence_requires_finite_bounded_timing(timeout, interval):
 def test_long_context_answer_accepts_marker_or_topic_only():
     assert qualify.long_context_answer_passes("LONG_READY\n1. Inlining")
     assert qualify.long_context_answer_passes("The user wants a guide to compiler optimization.")
+    # North's warm B2 answer in Arabic quotes the marker from the far-end
+    # instruction without naming the English topic.
+    assert qualify.long_context_answer_passes(
+        "\u0628\u062f\u0627\u064a\u0629\u064b\u060c LONG_READY \u062b\u0645 \u0627\u0643\u062a\u0628"
+    )
     assert not qualify.long_context_answer_passes("")
     assert not qualify.long_context_answer_passes("river stone garden market")
 

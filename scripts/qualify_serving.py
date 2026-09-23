@@ -187,10 +187,14 @@ def long_context_answer_passes(text):
     Obedient models open with the marker.  A model that prefaces its answer
     (North restates the request first) cannot reach the marker inside the
     64-token budget; naming the requested topic is the same evidence that the
-    tail of the near-limit prompt was attended.
+    tail of the near-limit prompt was attended.  So is the marker anywhere in
+    the reply: it occurs only in that instruction.  North's first answer token
+    on this prompt is a near tie (Arabic, "Here" and "data" within 0.13 nats),
+    and a warm B2 cohort answers with an Arabic rendering of the instruction
+    that quotes LONG_READY but names no English topic (GPU, 2026-09-23).
     """
     text = text.strip()
-    return text.startswith("LONG_READY") or "compiler" in text.lower()
+    return "LONG_READY" in text or "compiler" in text.lower()
 
 
 def near_limit_usage_passes(
