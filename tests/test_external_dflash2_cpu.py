@@ -287,6 +287,45 @@ def test_external_response_laws_are_materialized_only_when_requested(ordinary):
     assert all(row is None for row in without_laws[1])
 
 
+@pytest.mark.parametrize("processed",[False,True])
+@pytest.mark.parametrize("ordinary",[False,True])
+def test_external_greedy_logprobs_are_the_processed_log_softmax(ordinary,processed):
+    """Greedy verification uses a one-hot law; responses must not publish it.
+
+    The ordinary route reports the processed log-softmax at temperature 0,
+    so the logprobs API must not see 0.0 for the chosen token and -9999 for
+    every alternative on the external route.
+    """
+    from mlx2.runtime.generate import BatchGenerator
+
+    bias=mx.zeros((32,)).at[7].add(0.5)
+    processors=[[lambda _tokens,value:value+bias]] if processed else None
+    m,d=tiny()
+    b=generator(m,d)
+    uid=b.insert([[1,2,3]],max_tokens=[5],logits_processors=processors,
+                 sampling_configs=[{"sampling_temp":0,"emit_logprobs":True}])[0]
+    if ordinary:b.disable_speculation(uid)
+    external=[]
+    for _ in range(20):
+        _,responses=b.next();external.extend(responses)
+        if uid not in b.lanes:break
+    g=BatchGenerator(m,completion_batch_size=1,prefill_batch_size=1,prefill_step_size=8)
+    g.insert([[1,2,3]],max_tokens=[5],logits_processors=processors)
+    reference=[]
+    for _ in range(20):
+        _,responses=g.next();reference.extend(responses)
+        if len(reference)>=5:break
+    g.close()
+    assert [r.token for r in external]==[r.token for r in reference]
+    if not ordinary:
+        assert external[-1].speculative_receipt["external_rounds"]>0
+    for got,expected in zip(external,reference):
+        got_row=np.asarray(got.logprobs,dtype=np.float32).reshape(-1)
+        expected_row=np.asarray(expected.logprobs,dtype=np.float32).reshape(-1)
+        np.testing.assert_allclose(got_row,expected_row,rtol=1e-4,atol=1e-4)
+        assert got_row[got.token]<0
+
+
 def test_external_draft_processors_sample_and_verify_with_masked_q(monkeypatch):
     import mlx2.runtime.external_speculative as module
 

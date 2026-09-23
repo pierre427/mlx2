@@ -155,12 +155,15 @@ class RoundDecision:
 
     ``emitted`` is already stop-truncated; ``target_laws`` holds the dense
     target law per emitted token (``None`` when the verifier kept no dense
-    law); ``relaxed`` counts FLy relaxed accepts.
+    law); ``relaxed`` counts FLy relaxed accepts.  ``response_logprobs``
+    holds, per verify row, the log-probability row to publish instead of the
+    law (``None`` entries fall back to the law).
     """
     accepted: int
     emitted: list
     target_laws: object
     relaxed: int = 0
+    response_logprobs: object = None
 
 
 def _block_row(block, vocab):
@@ -368,7 +371,12 @@ class ExternalDraftBatchGenerator:
                 self.boundaries[lane.uid] = {"committed_only": True, "tokens": list(lane.history), "target_cache": self._freeze_cache(lane.cache), "covered_tokens": len(lane.history), "cache_sidecar": self._sidecar(lane)}
         return SimpleNamespace(uid=lane.uid, progress=progress, end_of_prompt=done)
 
-    def _target_law(self, lane, logits, history, reachable=True):
+    def _target_law(self, lane, logits, history, reachable=True, response_rows=None):
+        """Return the verification law of one target row.
+
+        When ``response_rows`` is a list, also append the log-probability row
+        to publish for this position, or ``None`` to publish the law itself.
+        """
         from .sample_utils import make_transformed_logprobs
         value = logits[None]
         tokens = self.mx.array(history, dtype=self.mx.int32)
@@ -381,7 +389,14 @@ class ExternalDraftBatchGenerator:
             value = processor(tokens, value)
         temp = float(lane.sampling.get("sampling_temp", 0))
         if temp == 0:
+            # Greedy verification uses the one-hot law, but the logprobs API
+            # reports the processed log-softmax, as ordinary decode does.
+            if response_rows is not None:
+                row = value[0].astype(self.mx.float32)
+                response_rows.append(row - self.mx.logsumexp(row))
             p = np.zeros(value.shape[-1]); p[int(self.mx.argmax(value).item())] = 1; return p
+        if response_rows is not None:
+            response_rows.append(None)
         transform = make_transformed_logprobs(temp, top_p=lane.sampling.get("top_p", 0), top_k=lane.sampling.get("top_k", 0), min_p=lane.sampling.get("min_p", 0))
         return probability(np.asarray(self.mx.exp(transform(value)[0])))
 
@@ -648,9 +663,10 @@ class ExternalDraftBatchGenerator:
             drafts, laws = _block_row(blocks[row], vocab)
             inputs = [lane.anchor] + drafts
             targets, reachable = [], True
+            response_rows = [] if lane.sampling.get("emit_logprobs", True) else None
             count = len(drafts)
             for j in range(count+1):
-                targets.append(self._target_law(lane, logits[row,j], lane.history + inputs[:j+1], reachable))
+                targets.append(self._target_law(lane, logits[row,j], lane.history + inputs[:j+1], reachable, response_rows))
                 if reachable and j < count and lane.processors and targets[-1][int(drafts[j])] <= 0:
                     reachable = False
             if isinstance(laws, CompactDraftRow):
@@ -688,6 +704,7 @@ class ExternalDraftBatchGenerator:
                     emitted,
                     result.target_probabilities,
                     result.relaxed_accepts,
+                    response_rows,
                 )
             )
         return decisions
@@ -750,6 +767,9 @@ class ExternalDraftBatchGenerator:
                     if lane.sampling.get("emit_logprobs", True) and decision.target_laws is not None
                     else None
                 )
+                if logp is not None and decision.response_logprobs:
+                    if j < len(decision.response_logprobs) and decision.response_logprobs[j] is not None:
+                        logp = decision.response_logprobs[j]
                 lane.ready.append(SimpleNamespace(uid=lane.uid, token=token, logprobs=logp, finish_reason=finish, execution_width=len(cohort), all_tokens=list(lane.history) if final else None, prompt_cache=self._freeze_cache(lane.cache) if finish else None, cache_sidecar=self._sidecar(lane) if finish else None, mtp_state=None, mtp_receipt=None, speculative_receipt={"kind":self.receipt_kind, "execution":"external_draft_verify" if lane.external_rounds else "ordinary_target", "current_execution":"ordinary_target" if count == 0 else "external_draft_verify", "ordinary_fallback":lane.ordinary, "external_rounds":lane.external_rounds, "accepted":lane.accepted,"proposed":lane.proposed,"round_accepted":round_accepted,"round_proposed":count,"target_width":lane.target_max_width,"draft_width":lane.draft_max_width,"qualification_authority":"serving_route", **self._verification_receipt(lane)}))
         if clock is not None:
             self._mark("emit", clock)
@@ -860,9 +880,16 @@ class ExternalDraftBatchGenerator:
             for row,lane in enumerate(cohort):
                 if len(cohort) > 1:
                     lane.cache = [cache.extract(row) for cache in batched_cache]
+                response_rows = (
+                    [] if lane.sampling.get("emit_logprobs", True) else None
+                )
                 targets = [
                     self._target_law(
-                        lane, logits[row, 0], lane.history + [lane.anchor], True
+                        lane,
+                        logits[row, 0],
+                        lane.history + [lane.anchor],
+                        True,
+                        response_rows,
                     )
                 ]
                 result = verify_proposals([], [], targets, lane.rng)
@@ -884,6 +911,8 @@ class ExternalDraftBatchGenerator:
                     )
                     if lane.sampling.get("emit_logprobs", True) else None
                 )
+                if logp is not None and response_rows and response_rows[0] is not None:
+                    logp = response_rows[0]
                 lane.ready.append(
                     SimpleNamespace(
                         uid=lane.uid,
