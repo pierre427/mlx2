@@ -699,7 +699,7 @@ def feature_observations(final, kv_fidelity=None, adaptive_benchmark=None):
         "compiled_ple": ple_compile_counts.get("hits", 0) if compiled_ple_healthy else 0,
         "pooled_qsa": levers.get("qsa_pooled_key_cache_hits", 0),
         "scatter_qsa": levers.get("qsa_scatter_chosen_calls", 0),
-        "fused_gdn_decode": fused_gdn.get("fused_calls", 0),
+        "fused_gdn_decode": fused_gdn_decode_observation(fused_gdn),
         "fused_gdn_verify": fused_gdn.get("verify_calls", 0),
         "fused_gdn_replay_rollback": fused_gdn.get("replay_rollback_calls", 0),
         "eager_dispatch": levers.get("eager_async_evals", 0),
@@ -804,6 +804,31 @@ def feature_observations(final, kv_fidelity=None, adaptive_benchmark=None):
             "replay_dynamic_rollback_calls", 0
         ),
     }
+
+
+# Declines that mean the single-token decode the kernel exists for was refused
+# on geometry it should have admitted.  "batch of N rows" is a legitimate B>1
+# refusal and does not count.
+FUSED_GDN_DECODE_GEOMETRY_REFUSALS = (
+    "rollback geometry not describable",
+    "masked decode",
+    "padded rollback geometry",
+)
+
+
+def fused_gdn_decode_observation(fused_gdn):
+    """Fused B1/T1 GDN decode calls, or 0 when any decode was refused on geometry.
+
+    ``fused_calls > 0`` alone passed a route whose decode was refused on 70%
+    of its B=1 layer-calls (10,224 fused against 24,012 "rollback geometry not
+    describable"): an all-True GDN mask hid a fully valid slab.  The mechanism
+    is engaged only if it ran and no single-token decode was declined for
+    geometry.
+    """
+    reasons = fused_gdn.get("decode_fallback_reasons") or {}
+    if any(reasons.get(reason, 0) for reason in FUSED_GDN_DECODE_GEOMETRY_REFUSALS):
+        return 0
+    return fused_gdn.get("fused_calls", 0)
 
 
 def unobservable_features(features):

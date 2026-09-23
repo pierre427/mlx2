@@ -534,3 +534,22 @@ def test_mixed_warm_concurrent_pair_must_beat_its_sequential_reference(
     sequential, concurrent, passes
 ):
     assert qualify.mixed_warm_timing_passes(concurrent, sequential) is passes
+
+
+def test_fused_gdn_decode_is_not_observed_while_decode_is_refused_on_geometry():
+    # 2026-09-23: a Flash-Next ordinary receipt held 10,224 fused decode calls
+    # beside 24,012 "rollback geometry not describable" refusals and passed on
+    # fused_calls > 0.  Engagement now also requires no geometry refusal.
+    healthy = {"fused_calls": 120, "decode_fallback_reasons": {"batch of 2 rows": 40}}
+    assert qualify.fused_gdn_decode_observation(healthy) == 120
+    for reason in qualify.FUSED_GDN_DECODE_GEOMETRY_REFUSALS:
+        refused = {"fused_calls": 10224, "decode_fallback_reasons": {reason: 1}}
+        assert qualify.fused_gdn_decode_observation(refused) == 0
+    assert qualify.fused_gdn_decode_observation({}) == 0
+    observed = qualify.feature_observations(
+        {"execution": {"fused_gdn": {
+            "fused_calls": 10224,
+            "decode_fallback_reasons": {"rollback geometry not describable": 24012},
+        }}}
+    )
+    assert observed["fused_gdn_decode"] == 0
