@@ -2436,6 +2436,32 @@ class APCv2(PrefixIndex):
                 session_tag=session_tag,
             )
 
+    def _resolve_prefetch_locked(
+        self, session_tag, expected, prefetched_ids, key, path, used_entry
+    ) -> None:
+        """Settle a resumed session's prefetch on its first tagged lookup.
+
+        It is a hit only when this lookup served an entry the prefetch made
+        resident.  Either way the expectation is cleared on every entry that
+        carried it, so later lookups are not counted again and the entries
+        rejoin ordinary prefix subsumption.
+        """
+        if session_tag is None or not expected:
+            return
+        self._disk_stats[
+            "prefetch_hits"
+            if used_entry is not None and id(used_entry) in prefetched_ids
+            else "prefetch_misses"
+        ] += 1
+        for entry in expected:
+            getattr(entry, "_apc_prefetch_expected", set()).discard(session_tag)
+        if used_entry is not None:
+            getattr(used_entry, "_apc_resident_pin_expiries", {}).pop(
+                session_tag, None
+            )
+            if getattr(used_entry, "_apc_disk", None):
+                self._write_manifest_locked(key, path, used_entry)
+
     def _fetch_view_locked(self, key, tokens, trie_result=None):
         """The trie result ``fetch_nearest_cache`` acts on for ``tokens``.
 
@@ -2517,8 +2543,10 @@ class APCv2(PrefixIndex):
     ) -> APCLookup:
         tokens = [int(token) for token in tokens]
         self._apc_stats["queried_tokens"] += len(tokens)
-        prefetched = False
-        expected_prefetch = False
+        # Entries a resume of this session asked to prefetch, and those the
+        # prefetch actually made resident before this lookup.
+        prefetch_expected = []
+        prefetched_ids = set()
         if session_tag is not None:
             for _candidate_key, _candidate_tokens, candidate in self._entry_records_locked():
                 if session_tag not in getattr(candidate, "_apc_session_tags", set()):
@@ -2526,14 +2554,15 @@ class APCv2(PrefixIndex):
                 self._expire_entry_pins_locked(
                     _candidate_key, _candidate_tokens, candidate
                 )
-                prefetched = prefetched or (
-                    bool(candidate.prompt_cache)
-                    and session_tag
-                    in getattr(candidate, "_apc_resident_pin_expiries", {})
-                )
-                expected_prefetch = expected_prefetch or (
-                    session_tag in getattr(candidate, "_apc_prefetch_expected", set())
-                )
+                if session_tag not in getattr(
+                    candidate, "_apc_prefetch_expected", set()
+                ):
+                    continue
+                prefetch_expected.append(candidate)
+                if candidate.prompt_cache and session_tag in getattr(
+                    candidate, "_apc_resident_pin_expiries", {}
+                ):
+                    prefetched_ids.add(id(candidate))
         restore_deferred = False
         restore_requires_admission = False
         deferred_entries = []
@@ -2651,6 +2680,9 @@ class APCv2(PrefixIndex):
             except COWCacheStale:
                 self._apc_stats["lookups"] += 1
                 self._apc_stats["misses"] += 1
+                self._resolve_prefetch_locked(
+                    session_tag, prefetch_expected, prefetched_ids, None, None, None
+                )
                 return APCLookup(
                     None,
                     tokens,
@@ -2665,16 +2697,11 @@ class APCv2(PrefixIndex):
             self._apc_stats["hits"] += 1
             self._apc_stats["cached_tokens"] += covered
             self._record_entry_hit_locked(entry)
-            if session_tag is not None and expected_prefetch:
-                self._disk_stats[
-                    "prefetch_hits" if prefetched else "prefetch_misses"
-                ] += 1
-                getattr(entry, "_apc_prefetch_expected", set()).discard(session_tag)
-                getattr(entry, "_apc_resident_pin_expiries", {}).pop(
-                    session_tag, None
-                )
-                if getattr(entry, "_apc_disk", None):
-                    self._write_manifest_locked(key, selected_tokens, entry)
+            self._resolve_prefetch_locked(
+                session_tag, prefetch_expected, prefetched_ids,
+                key, selected_tokens, entry,
+            )
+            prefetch_expected = []
             # Sidecar hits bypass PrefixIndex.fetch_nearest_cache; refresh the
             # selected checkpoint's recency so repeated reuse is not FIFO.
             self._lru.remove(key, selected_tokens)
@@ -2805,18 +2832,11 @@ class APCv2(PrefixIndex):
                 selected_entry = None
             if selected_entry is not None:
                 self._record_entry_hit_locked(selected_entry)
-                if session_tag is not None and expected_prefetch:
-                    self._disk_stats[
-                        "prefetch_hits" if prefetched else "prefetch_misses"
-                    ] += 1
-                    getattr(selected_entry, "_apc_prefetch_expected", set()).discard(
-                        session_tag
-                    )
-                    getattr(
-                        selected_entry, "_apc_resident_pin_expiries", {}
-                    ).pop(session_tag, None)
-                    if getattr(selected_entry, "_apc_disk", None):
-                        self._write_manifest_locked(key, selected_path, selected_entry)
+        self._resolve_prefetch_locked(
+            session_tag, prefetch_expected, prefetched_ids,
+            key, selected_path if selected_entry is not None else None,
+            selected_entry,
+        )
         if not hit:
             kind = None
             short_length = (

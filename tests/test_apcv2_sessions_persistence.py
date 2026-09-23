@@ -97,6 +97,51 @@ def test_session_park_resume_prefetch_and_delete(tmp_path):
     apc.close()
 
 
+def _resumed_two_turn_session(tmp_path):
+    apc = APCv2(
+        max_size=8,
+        max_bytes=1 << 20,
+        layout_name="layout-a",
+        idle_disk_seconds=180,
+        idle_disk_dir=str(tmp_path),
+    )
+    key = _identity()
+    tag = ("tenant-a", "branched")
+    base = list(range(1, 9))
+    apc.store(key, base, [_state(8)], session_tag=tag)
+    apc.store(key, base + list(range(20, 28)), [_state(16)], session_tag=tag)
+    apc.park_session(*tag, ttl_seconds=60)
+    apc.resume_session(*tag, ttl_seconds=30)  # prefetches the deepest entry
+    apc.service_pending_prefetch()
+    assert apc.apc_stats["idle_disk"]["prefetch_restores_ok"] == 1
+    return apc, key, tag, base
+
+
+def test_prefetch_is_settled_once_when_another_entry_serves_the_lookup(tmp_path):
+    apc, key, tag, base = _resumed_two_turn_session(tmp_path)
+    for index in range(4):
+        # The conversation was edited after turn one: the 8-token entry,
+        # restored from disk by the lookup itself, serves every request.
+        hit = apc.lookup(key, base + [99, index], session_tag=tag)
+        assert hit.hit and hit.cached_tokens == 8
+        hit.cache.close()
+    disk = apc.apc_stats["idle_disk"]
+    assert (disk["prefetch_hits"], disk["prefetch_misses"]) == (0, 1)
+    apc.close()
+
+
+def test_prefetch_miss_on_a_cold_lookup_is_not_counted_again(tmp_path):
+    apc, key, tag, base = _resumed_two_turn_session(tmp_path)
+    miss = apc.lookup(key, [500, 501, 502], session_tag=tag)
+    assert not miss.hit
+    hit = apc.lookup(key, base + list(range(20, 28)) + [99], session_tag=tag)
+    assert hit.hit and hit.cached_tokens == 16
+    hit.cache.close()
+    disk = apc.apc_stats["idle_disk"]
+    assert (disk["prefetch_hits"], disk["prefetch_misses"]) == (0, 1)
+    apc.close()
+
+
 @pytest.mark.parametrize("query", ([10, 20, 30], [10, 20, 99]))
 def test_prefetch_hit_keeps_persisted_snapshot_path_on_restart(tmp_path, query):
     key = _identity()
