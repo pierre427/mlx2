@@ -665,6 +665,38 @@ def test_lark_subset_features_and_rejections():
             lark_to_regex(bad)
 
 
+def test_lark_rule_doubling_stops_at_the_regex_cap_while_lowering():
+    import tracemalloc
+
+    def doubling(depth):
+        lines = ["start: r0"]
+        lines += [f"r{level}: r{level + 1} r{level + 1}" for level in range(depth)]
+        return "\n".join([*lines, f'r{depth}: "a"'])
+
+    # Each level inlines its rule twice; depth 18 lowers to ~1.5M characters
+    # when the cap is checked only at the end (depth 32, a 406-character
+    # grammar, would need ~116 GB).
+    tracemalloc.start()
+    try:
+        with pytest.raises(LarkGrammarError, match="lowers to more than 4096"):
+            lark_to_regex(doubling(18))
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert peak < 256 * 1024, peak
+    # Shallow doubling within the cap still lowers exactly.
+    pattern = compile_constraint(grammar=lark_to_regex(doubling(4)))
+    assert pattern.fullmatch("a" * 16)
+    assert not pattern.fullmatch("a" * 15)
+    # A long single-reference chain fits the grammar size cap but not the
+    # lowering's recursion: it is a grammar error, not an internal one.
+    chain = "\n".join(
+        ["start: r0", *(f"r{level}: r{level + 1}" for level in range(1000)), 'r1000: "a"']
+    )
+    with pytest.raises(LarkGrammarError, match="nests too deeply"):
+        lark_to_regex(chain)
+
+
 def test_every_agent_compat_counter_is_exported_to_prometheus():
     from mlx2.agent_compat import COUNTERS
     from mlx2.prometheus import _ENGINE_EVENTS

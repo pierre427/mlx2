@@ -167,6 +167,21 @@ def _regex_terminal(token: str) -> str:
     return f"(?{flags}:{body})" if flags else f"(?:{body})"
 
 
+def _bounded(size: int) -> int:
+    """Refuse a lowering as soon as it passes the regex size cap.
+
+    Every rule reference is inlined, so ``r0: r1 r1`` / ``r1: r2 r2`` / ...
+    doubles the pattern per level: a 406-character grammar 32 levels deep
+    would lower to ~2**32 copies.  Checking each sequence and alternation as
+    it grows keeps what is built within about twice the cap.
+    """
+    if size > MAX_REGEX_CHARS:
+        raise LarkGrammarError(
+            f"lark grammar lowers to more than {MAX_REGEX_CHARS} regex characters"
+        )
+    return size
+
+
 class _Compiler:
     def __init__(self, rules):
         self.rules = rules
@@ -194,10 +209,11 @@ class _Compiler:
         return pattern
 
     def alternatives(self, tokens, position):
-        options = []
+        options, size = [], 0
         while True:
             sequence, position = self.sequence(tokens, position)
             options.append(sequence)
+            size = _bounded(size + len(sequence))
             if position < len(tokens) and tokens[position] == ("op", "|"):
                 position += 1
                 continue
@@ -206,7 +222,7 @@ class _Compiler:
         return pattern, position
 
     def sequence(self, tokens, position):
-        items = []
+        items, size = [], 0
         while position < len(tokens):
             kind, value = tokens[position]
             if kind == "op" and value in {"|", ")", "]"}:
@@ -220,6 +236,7 @@ class _Compiler:
             atom, position = self.atom(tokens, position)
             atom, position = self.suffix(atom, tokens, position)
             items.append(atom)
+            size = _bounded(size + len(atom))
         return "".join(items), position
 
     def atom(self, tokens, position):
@@ -259,7 +276,12 @@ class _Compiler:
 
 def lark_to_regex(source: str) -> str:
     """Lower a non-recursive Lark grammar to one anchored-free regex."""
-    pattern = _Compiler(_parse_definitions(source)).rule("start")
+    try:
+        pattern = _Compiler(_parse_definitions(source)).rule("start")
+    except RecursionError as error:
+        # A long rule chain or deep parentheses fit the grammar size cap but
+        # not the lowering's recursion; the client gets a grammar error.
+        raise LarkGrammarError("lark grammar nests too deeply") from error
     if len(pattern) > MAX_REGEX_CHARS:
         raise LarkGrammarError(
             f"lark grammar lowers to more than {MAX_REGEX_CHARS} regex characters"
