@@ -389,6 +389,10 @@ class Gemma3nAdapter(_MLXVLMAdapter):
     def prepare_multimodal_request(self, request, *, file_loader=None):
         media, replacements, images, audios = [], [], [], []
         video_requests = video_frames = video_frame_batches = 0
+        # pcm_to_float32 never resamples, so a WAV at any other rate than the
+        # feature extractor's would be encoded as a time-stretched clip.
+        extractor = getattr(self.processor, "feature_extractor", None)
+        audio_sample_rate = int(getattr(extractor, "sampling_rate", None) or 16_000)
         for message in request["messages"]:
             for part in message.get("content", ()) if isinstance(message.get("content"), list) else ():
                 kind = {"image_url": "image", "input_image": "image", "input_audio": "audio", "input_video": "video"}.get(part["type"])
@@ -402,6 +406,10 @@ class Gemma3nAdapter(_MLXVLMAdapter):
                     images.append(value.value); replacements.append(self.processor.tokenizer.image_token)
                 elif kind == "audio":
                     from ..multimodal import pcm_to_float32
+                    if int(value.metadata["sample_rate"]) != audio_sample_rate:
+                        raise ValueError(
+                            f"Gemma 3n requires {audio_sample_rate} Hz WAV audio; explicit resampling is required"
+                        )
                     audios.append(pcm_to_float32(value)); replacements.append(self.processor.tokenizer.audio_token)
                 else:
                     native = NativeVideoInput.from_media(value, self.video_policy)
@@ -414,7 +422,7 @@ class Gemma3nAdapter(_MLXVLMAdapter):
                     )
         messages = _plain_messages(request["messages"], replacements)
         prompt = self._render(messages)
-        processed = self.processor(text=prompt, images=images or None, audio=audios or None, sampling_rate=16_000)
+        processed = self.processor(text=prompt, images=images or None, audio=audios or None, sampling_rate=audio_sample_rate)
         media_token_end = _media_token_end(processed)
         ids, kwargs = _ids_and_kwargs(processed)
         if images:

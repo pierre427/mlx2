@@ -195,6 +195,64 @@ def test_gemma3n_adapter_reports_real_frame_batches(monkeypatch):
     }
 
 
+def test_gemma3n_refuses_wav_audio_at_a_rate_its_extractor_does_not_use():
+    # pcm_to_float32 does not resample, so a 44.1 kHz WAV labeled as 16 kHz
+    # would reach the encoder as a slowed-down clip with wrong features.
+    def wav(rate):
+        payload = BytesIO()
+        with wave.open(payload, "wb") as stream:
+            stream.setnchannels(1)
+            stream.setsampwidth(2)
+            stream.setframerate(rate)
+            stream.writeframes(b"\0\0" * rate)
+        return base64.b64encode(payload.getvalue()).decode()
+
+    processed = []
+
+    class Processor:
+        tokenizer = type(
+            "Tokenizer", (), {"image_token": "<image>", "audio_token": "<audio>"}
+        )()
+        feature_extractor = type("FeatureExtractor", (), {"sampling_rate": 16_000})()
+
+        def apply_chat_template(self, messages, **kwargs):
+            return messages[0]["content"]
+
+        def __call__(self, **kwargs):
+            processed.append(kwargs)
+            return {"input_ids": np.array([[1, 2, 3]])}
+
+    adapter = object.__new__(Gemma3nAdapter)
+    adapter.processor = Processor()
+    adapter.identity = {"fingerprint": "artifact"}
+    adapter.video_policy = Gemma3nVideoPolicy()
+
+    def request(rate):
+        return {
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_audio",
+                            "input_audio": {"data": wav(rate), "format": "wav"},
+                        },
+                        {"type": "text", "text": "transcribe"},
+                    ],
+                }
+            ]
+        }
+
+    for rate in (44_100, 8_000):
+        with pytest.raises(ValueError, match="16000 Hz"):
+            adapter.prepare_multimodal_request(request(rate))
+    assert processed == []
+
+    adapter.prepare_multimodal_request(request(16_000))
+    assert processed[0]["sampling_rate"] == 16_000
+    assert processed[0]["audio"][0].shape == (16_000,)
+
+
 def test_minicpmo_refuses_video_parts_instead_of_misaligning_media():
     # MiniCPM-o has no video path.  Skipping the part left the prompt
     # builder one replacement short, so the request died with StopIteration
