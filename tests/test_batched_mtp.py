@@ -1524,3 +1524,136 @@ def test_depth_zero_fast_path_honours_true_batched_off(monkeypatch):
         generator.close()
     finally:
         mx.set_default_device(previous_device)
+
+
+def _concat_ledger_update(cursor):
+    """The pre-fix ledger append: a full copy of the ledger per call."""
+
+    def update_index_keys(self, keys):
+        ledger = self.index_keys
+        self.index_keys = (
+            keys
+            if ledger is None
+            else mx.concatenate([ledger[:, : int(getattr(self, cursor))], keys], 1)
+        )
+        return self.index_keys
+
+    return update_index_keys
+
+
+def _greedy_qwen4_decode(prompt_len, max_tokens):
+    from mlx2.runtime.generate import BatchGenerator
+
+    mx.random.seed(41)
+    model = _tiny_qwen4_model()
+    mx.random.seed(1)
+    prompt = mx.random.randint(1, 63, (prompt_len,)).tolist()
+    gen = BatchGenerator(model, completion_batch_size=1, prefill_batch_size=1)
+    tokens = []
+    try:
+        gen.insert([prompt], max_tokens=[max_tokens])
+        while True:
+            _prompts, responses = gen.next()
+            tokens.extend(r.token for r in responses)
+            if any(r.finish_reason for r in responses):
+                break
+    finally:
+        gen.close()
+    return tokens
+
+
+def test_qsa_raw_key_ledger_append_copies_nothing_per_decode_step():
+    """X3-3: the raw indexer-key ledger grew by ``mx.concatenate`` per token.
+
+    Every decode step copied the whole ledger (bytes growing with context on
+    every QSA layer). It now grows in 256-position steps and writes each token
+    in place, so a decode step's append allocates nothing between growths,
+    and greedy decode is token-identical to the concatenating ledger.
+    """
+    from mlx2.runtime.models.qwen4_exp import BatchQSAKVCache, QSAKVCache
+
+    appended = []
+
+    def measured(real):
+        def update_index_keys(self, keys):
+            if self.index_keys is not None:
+                mx.eval(self.index_keys)
+            mx.eval(keys)
+            active = mx.get_active_memory()
+            mx.reset_peak_memory()
+            out = real(self, keys)
+            mx.eval(out)
+            if keys.shape[1] == 1:
+                appended.append(mx.get_peak_memory() - active)
+            return out
+
+        return update_index_keys
+
+    with patch.object(
+        QSAKVCache, "update_index_keys", measured(QSAKVCache.update_index_keys)
+    ), patch.object(
+        BatchQSAKVCache,
+        "update_index_keys",
+        measured(BatchQSAKVCache.update_index_keys),
+    ):
+        tokens = _greedy_qwen4_decode(1500, 40)
+    ledger_bytes = 1500 * 8 * 4  # one float32 raw key of width 8 per position
+    per_step = sorted(appended)
+    assert len(per_step) >= 30
+    # The median step lands between growths: well under one ledger copy.
+    assert per_step[len(per_step) // 2] < ledger_bytes // 16, per_step
+    with patch.object(
+        QSAKVCache, "update_index_keys", _concat_ledger_update("offset")
+    ), patch.object(
+        BatchQSAKVCache, "update_index_keys", _concat_ledger_update("_idx")
+    ):
+        assert tokens == _greedy_qwen4_decode(1500, 40)
+
+
+def test_qsa_ledger_rewind_and_restore_keep_exact_contents():
+    """The in-place ledger must never write through to an array it handed out.
+
+    A snapshot taken through ``state`` and a ledger installed by a restore are
+    both held elsewhere; a rewind followed by an append must copy rather than
+    overwrite them, and every read must equal the concatenating reference.
+    """
+    from mlx2.runtime.models.qwen4_exp import BatchQSAKVCache, QSAKVCache
+
+    def keys(start, n, rows):
+        base = mx.arange(start, start + n, dtype=mx.float32)
+        return mx.broadcast_to(base[None, :, None], (rows, n, 2)) + mx.arange(
+            rows, dtype=mx.float32
+        )[:, None, None] * 1000
+
+    for cls in (QSAKVCache, BatchQSAKVCache):
+        rows = 2 if cls is BatchQSAKVCache else 1
+        cache = cls([0] * rows) if cls is BatchQSAKVCache else cls()
+        cursor = "_idx" if cls is BatchQSAKVCache else "offset"
+        expected = None
+        counter = 0
+        snapshots = []
+        for step in range(300):
+            n = 5 if step == 0 else 1
+            new = keys(counter, n, rows)
+            counter += n
+            cache.update_index_keys(new)
+            kv = mx.zeros((rows, 1, n, 2))
+            cache.update_and_fetch(kv, kv)
+            expected = new if expected is None else mx.concatenate([expected, new], 1)
+            view = cache.index_keys
+            assert view is cache.index_keys  # one identity while unchanged
+            assert mx.array_equal(view, expected).item(), (cls.__name__, step)
+            if step % 50 == 7:
+                snapshots.append((cache.index_keys, mx.array(expected)))
+            if step % 9 == 8:
+                cache.trim(2)
+                expected = expected[:, :-2]
+            if step == 150:
+                # A restore installs an array the caller still holds.
+                held = mx.array(cache.index_keys)
+                cache.index_keys = held
+                kept = mx.array(held)
+        for snapshot, value in snapshots:
+            assert mx.array_equal(snapshot, value).item()
+        assert mx.array_equal(held, kept).item()
+        assert getattr(cache, cursor) == expected.shape[1]

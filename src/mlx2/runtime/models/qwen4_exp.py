@@ -2580,6 +2580,91 @@ def _init_qsa_summary_state(cache, identity=None) -> None:
     cache._qsa_pending_pooled = None
 
 
+class _StepGrownIndexLedger:
+    """``index_keys`` as the valid prefix of a buffer grown in whole steps.
+
+    The raw indexer keys gain one position per decode token. Appending them
+    with ``mx.concatenate`` copied the whole ledger every step, bytes that
+    grow with the context on every QSA layer. Like ``KVCache`` this keeps a
+    capacity buffer, writes each append into it and grows it 256 positions
+    at a time; a rewind only moves the width. Every reader still sees just
+    the valid prefix, and assigning ``index_keys`` installs that array.
+
+    An assignment of ``x[a:b] = v`` rebinds the Python array object ``x``
+    itself, so the buffer written in place is one this class allocated and
+    never hands out: readers get a slice of it. An installed array may be
+    held elsewhere (a snapshot, another cache), so the first append after an
+    install copies it into a fresh buffer instead of writing into it. The
+    slice is built once per change, so ``index_keys`` keeps one identity
+    while the ledger is unchanged (plane stamps compare it by ``id``), and
+    it is dropped before the next write so it never pins the old buffer.
+    """
+
+    _INDEX_STEP = 256
+
+    @property
+    def index_keys(self):
+        view = getattr(self, "_index_view", None)
+        if view is not None:
+            return view
+        buffer = getattr(self, "_index_buffer", None)
+        if buffer is None:
+            return None
+        width = self._index_width
+        if width == buffer.shape[1] and not self._index_owned:
+            view = buffer
+        else:
+            view = buffer[:, :width]
+        self._index_view = view
+        return view
+
+    @index_keys.setter
+    def index_keys(self, value):
+        self._index_buffer = value
+        self._index_view = value
+        self._index_width = 0 if value is None else int(value.shape[1])
+        self._index_owned = False
+
+    def _append_index_keys(self, keys: mx.array, cursor: int) -> mx.array:
+        """Write ``keys`` after ``min(ledger width, cursor)``, like the join did."""
+        buffer = getattr(self, "_index_buffer", None)
+        if buffer is None:
+            self.index_keys = keys
+            return keys
+        start = min(self._index_width, int(cursor))
+        if (
+            buffer.shape[0] != keys.shape[0]
+            or buffer.shape[2:] != keys.shape[2:]
+            or buffer.dtype != keys.dtype
+        ):
+            # Not a plain append: keep the join's semantics, and its errors.
+            self.index_keys = mx.concatenate([buffer[:, :start], keys], axis=1)
+            return self.index_keys
+        stop = start + int(keys.shape[1])
+        self._index_view = None
+        if stop > buffer.shape[1] or not self._index_owned:
+            step = self._INDEX_STEP
+            grown = mx.zeros(
+                (keys.shape[0], (stop + step - 1) // step * step, *keys.shape[2:]),
+                keys.dtype,
+            )
+            if start:
+                grown[:, :start] = buffer[:, :start]
+            buffer = grown
+        buffer[:, start:stop] = keys
+        self._index_buffer = buffer
+        self._index_width = stop
+        self._index_owned = True
+        return self.index_keys
+
+    def _truncate_index_keys(self, width: int) -> None:
+        """Rewind the ledger to ``width`` positions without copying it."""
+        if getattr(self, "_index_buffer", None) is not None:
+            if int(width) < self._index_width:
+                self._index_width = int(width)
+                self._index_view = None
+
+
 def _qsa_join_ledger_width(index_keys, cursor: int, who: str) -> int:
     """Width of a lane's raw-key ledger for a join, refused if it runs short.
 
@@ -2689,7 +2774,7 @@ def _qsa_to_quantized(
     return QSAQuantizedKVCache.from_unquantized(self, normalize=normalize, **kwargs)
 
 
-class BatchQSAKVCache(BatchKVCache):
+class BatchQSAKVCache(_StepGrownIndexLedger, BatchKVCache):
     """Batched QSA cache retaining raw indexer keys beside attention KV."""
 
     to_quantized = _qsa_to_quantized
@@ -2817,7 +2902,7 @@ class BatchQSAKVCache(BatchKVCache):
             return
         width = self.index_keys.shape[1]
         if width > self._idx:
-            self.index_keys = mx.contiguous(self.index_keys[:, : self._idx])
+            self._truncate_index_keys(self._idx)
         elif width < self._idx:
             raise RuntimeError(
                 f"{who}: the QSA raw-key ledger holds {width} positions but the cursor is at {self._idx}. A shared-top-k draft cycle left un-ledgered KV behind and was ended without rewinding the drafted span."
@@ -2865,12 +2950,7 @@ class BatchQSAKVCache(BatchKVCache):
         return values[rows, positions]
 
     def update_index_keys(self, keys: mx.array):
-        self.index_keys = (
-            keys
-            if self.index_keys is None
-            else mx.concatenate([self.index_keys[:, : self._idx], keys], axis=1)
-        )
-        return self.index_keys
+        return self._append_index_keys(keys, self._idx)
 
     @property
     def state(self):
@@ -3044,7 +3124,7 @@ class BatchQSAKVCache(BatchKVCache):
         return batch
 
 
-class QSAKVCache(KVCache):
+class QSAKVCache(_StepGrownIndexLedger, KVCache):
     """KV cache with the raw, pre-pooling indexer keys QSA also requires."""
 
     _QSA_CYCLE_FIELDS = _QSA_CYCLE_STATE
@@ -3063,12 +3143,7 @@ class QSAKVCache(KVCache):
         _init_qsa_summary_state(self, summary_identity)
 
     def update_index_keys(self, keys: mx.array):
-        self.index_keys = (
-            keys
-            if self.index_keys is None
-            else mx.concatenate([self.index_keys[:, : self.offset], keys], axis=1)
-        )
-        return self.index_keys
+        return self._append_index_keys(keys, self.offset)
 
     def release_qsa_cycle(self, who: str, *, keep_pooled: bool = True):
         """Single-sequence twin of ``BatchQSAKVCache.release_qsa_cycle``.
@@ -3089,7 +3164,7 @@ class QSAKVCache(KVCache):
                     f"{who}: the QSA raw-key ledger holds {width} positions but the offset is {self.offset}. A shared-top-k draft cycle left un-ledgered KV behind and was ended without rewinding the drafted span."
                 )
             if width > self.offset:
-                self.index_keys = mx.contiguous(self.index_keys[:, : self.offset])
+                self._truncate_index_keys(self.offset)
         if self._qsa_pooled_keys is not None:
             keep = 0 if not keep_pooled else self.offset // self._qsa_pooled_ratio
             _qsa_summary_rebound(self, keep, who)

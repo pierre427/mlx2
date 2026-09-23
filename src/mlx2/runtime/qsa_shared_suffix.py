@@ -6,7 +6,7 @@ from typing import Any, Callable
 import mlx.core as mx
 from .models.cache import KVCache
 from .models.base import create_causal_mask
-from .models.qwen4_exp import QSAKVCache
+from .models.qwen4_exp import QSAKVCache, _StepGrownIndexLedger
 
 
 class SharedSuffixQSAError(RuntimeError):
@@ -129,7 +129,7 @@ class QSAMaterializationReceipt:
     explicit: bool = True
 
 
-class SharedSuffixQSAKVCache:
+class SharedSuffixQSAKVCache(_StepGrownIndexLedger):
     """One row-local, physically allocated suffix over an immutable QSA base."""
 
     supports_shared_qsa_suffix = True
@@ -215,7 +215,7 @@ class SharedSuffixQSAKVCache:
                 f"{who}: the suffix raw-key ledger holds {ledger} positions but suffix K/V holds {self._kv.offset}"
             )
         if ledger > self._kv.offset:
-            self.index_keys = mx.contiguous(self.index_keys[:, : self._kv.offset])
+            self._truncate_index_keys(self._kv.offset)
 
     def append_index_keys(self, keys: mx.array) -> mx.array:
         """Append only to the private ledger; never form ``[base, suffix]``."""
@@ -223,12 +223,7 @@ class SharedSuffixQSAKVCache:
             raise ValueError("QSA suffix raw keys must have shape [1, M, D]")
         if int(keys.shape[2]) != int(self.base.index_keys.shape[2]):
             raise ValueError("QSA suffix raw-key layout differs from the base")
-        self.index_keys = (
-            keys
-            if self.index_keys is None
-            else mx.concatenate([self.index_keys[:, : self._kv.offset], keys], axis=1)
-        )
-        return self.index_keys
+        return self._append_index_keys(keys, self._kv.offset)
 
     def append_kv(
         self, keys: mx.array, values: mx.array, *, allow_unledgered: bool = False
@@ -300,8 +295,7 @@ class SharedSuffixQSAKVCache:
         if count > self._kv.offset:
             raise SharedSuffixQSAError("QSA suffix trim would cross the shared base")
         self._kv.trim(count)
-        if self.index_keys is not None:
-            self.index_keys = mx.contiguous(self.index_keys[:, : self._kv.offset])
+        self._truncate_index_keys(self._kv.offset)
         if self._suffix_pooled_keys is not None:
             ratio = int(self.base.pooled_ratio)
             keep_total = self.offset // ratio
