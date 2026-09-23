@@ -528,6 +528,46 @@ def test_one_malformed_qwen_function_makes_the_whole_block_malformed():
     assert tolerant.tool_call_parse_fallbacks == 1
 
 
+def test_qwen_unclosed_middle_string_parameter_is_malformed_not_swallowed():
+    """A string parameter left open before the next ``<parameter=`` used to
+    swallow it: ``path`` became ``"a.txt\\n<parameter=content>\\nhello"`` and
+    the required ``content`` argument silently disappeared."""
+    tools = [{"type": "function", "function": {"name": "write", "parameters": {
+        "type": "object",
+        "properties": {"path": {"type": "string"}, "content": {"type": "string"}},
+        "required": ["path", "content"],
+    }}}]
+    text = (
+        "<tool_call>\n<function=write>\n<parameter=path>\na.txt\n"
+        "<parameter=content>\nhello\n</parameter>\n</function>\n</tool_call>"
+    )
+    parser = OutputParser(
+        chat=True, tools=tools, parse_tool=parse_tool_call, constrained_tools=True,
+    )
+    with pytest.raises(ValueError, match="Unclosed parameter"):
+        parser.push(text, final=True)
+    # The forced grammar never admits the opener inside a raw value either, so
+    # grammar and parser agree.
+    from mlx2.runtime.tool_parsers.qwen3_coder import constrained_tool_grammar
+    from mlx2.structured_output import compile_constraint
+
+    for strict in (False, True):
+        strict_tools = [{"type": "function", "function": {
+            **tools[0]["function"], "strict": strict,
+            "parameters": {**tools[0]["function"]["parameters"], "additionalProperties": False},
+        }}]
+        grammar = compile_constraint(
+            grammar=constrained_tool_grammar(strict_tools, "required")
+        )
+        closed = text.replace("a.txt\n", "a.txt\n</parameter>\n")
+        assert grammar.fullmatch(closed) is not None
+        assert grammar.fullmatch(text) is None
+        quoted = closed.replace("a.txt", "a<parameter=b.txt")
+        assert grammar.fullmatch(quoted) is None
+        with pytest.raises(ValueError, match="Unclosed parameter"):
+            parse_tool_call(quoted[len("<tool_call>"):-len("</tool_call>")], strict_tools)
+
+
 def test_qwen_unclosed_trailing_parameter_is_closed_by_the_function_end():
     # vllm #57707: the model closes </function> without </parameter>.
     tools = _SUM_TOOLS

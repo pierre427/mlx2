@@ -30,6 +30,11 @@ _function_regex = re.compile(r"<function=(.*?)</function>", re.DOTALL)
 _parameter_regex = re.compile(r"<parameter=(.*?)</parameter>", re.DOTALL)
 _name_regex = re.compile(r"\s*([^\s<>]+)>?")
 
+_PARAMETER_OPEN = "<parameter="
+# A raw value never contains a parameter delimiter: the parser reads a closer
+# as the end of the value and an opener as an unclosed parameter.
+_RAW_VALUE_CHAR = r"(?:(?!</parameter>|<parameter=)[\s\S])"
+
 _string_types = {"string", "str", "text", "varchar", "char", "enum"}
 _bool_types = {"boolean", "bool", "binary"}
 _obj_types = {"object", "array", "arr"}
@@ -190,7 +195,7 @@ def _raw_parameter_pattern(schema):
         and set(schema) == {"type"}
     )
     if (declared == "string" and set(schema) == {"type"}) or nullable_string:
-        return r"(?:(?!</parameter>)[\s\S])*"
+        return _RAW_VALUE_CHAR + "*"
     if declared == "string" and set(schema) <= {"type", "minLength", "maxLength"}:
         minimum = schema.get("minLength", 0)
         maximum = schema.get("maxLength")
@@ -205,16 +210,19 @@ def _raw_parameter_pattern(schema):
             if maximum is None
             else f"{{{minimum},{maximum}}}"
         )
-        return rf"(?:(?!</parameter>)[\s\S]){quantifier}"
+        return _RAW_VALUE_CHAR + quantifier
     if set(schema) <= {"type", "enum"} and isinstance(schema.get("enum"), list):
         values = schema["enum"]
         if values and all(isinstance(value, str) for value in values):
-            if any("</parameter>" in value for value in values):
+            if any(
+                "</parameter>" in value or _PARAMETER_OPEN in value
+                for value in values
+            ):
                 raise ValueError("string enum contains a tool-wire delimiter")
             return "(?:" + "|".join(re.escape(value) for value in values) + ")"
     if set(schema) <= {"type", "const"} and isinstance(schema.get("const"), str):
         value = schema["const"]
-        if "</parameter>" in value:
+        if "</parameter>" in value or _PARAMETER_OPEN in value:
             raise ValueError("string const contains a tool-wire delimiter")
         return re.escape(value)
     if declared == "string":
@@ -245,6 +253,11 @@ def _parse_xml_function_call(function_call_str: str, tools: Optional[Any]):
         if not param_name.strip() or "<" in param_name or param_name in param_dict:
             raise ValueError("Malformed or duplicate parameter name")
         param_value = str(match_text[param_match.end() :])
+        if _PARAMETER_OPEN in param_value:
+            # The previous parameter was never closed and swallowed the next
+            # one, whose argument would silently disappear.  The reference
+            # parser never lets a value contain an opener either.
+            raise ValueError("Unclosed parameter before the next parameter")
         if param_value.startswith("\n"):
             param_value = param_value[1:]
         if param_value.endswith("\n"):
@@ -369,7 +382,7 @@ def constrained_tool_grammar(tools, tool_choice, *, parallel_tool_calls=True):
             # Values stay free text, but every required argument must appear
             # before any optional one (sglang #40051: an all-optional body
             # lets greedy decoding emit a call with no arguments).
-            free_value = r"(?:(?!</parameter>)[\s\S])*"
+            free_value = _RAW_VALUE_CHAR + "*"
             required = required_parameter_names(function)
             for parameter in required:
                 if not isinstance(parameter, str) or not re.fullmatch(
