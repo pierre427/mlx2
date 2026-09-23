@@ -428,6 +428,56 @@ def test_non_strict_forced_grammars_only_admit_calls_their_parser_accepts(wire):
         assert len(compile_pattern(grammar).rows) < 1000
 
 
+@pytest.mark.parametrize(
+    ("declared", "good", "bad"),
+    [
+        (["string", "null"], [('"Paris"', "Paris"), ("null", None)], ["Paris"]),
+        (["integer", "null"], [("3", 3), ("null", None)], ["ten", "None"]),
+        (["number", "null"], [("1.5", 1.5), ("null", None)], ["ten", "1e400", "NaN"]),
+        (["boolean", "null"], [("true", True), ("null", None)], ["yes", "True"]),
+        ("object", [('{"a": [1, null]}', {"a": [1, None]})], ["ten", "[1]"]),
+        ("array", [('[1, "b"]', [1, "b"])], ["ten", "{}"]),
+    ],
+)
+def test_muse_non_strict_grammar_admits_only_values_parse_atem_decodes(
+    declared, good, bad
+):
+    """A list-form type (``["integer", "null"]``) or an object/array type
+    left the Muse value free text, but ``parse_atem`` decodes every declared
+    type other than a lone ``"string"`` as JSON: the grammar admitted
+    ``ten``, the parser raised, and the forced call failed with 502."""
+    from mlx2.structured_automaton import compile_pattern
+
+    tools = [{"type": "function", "function": {"name": "f", "parameters": {
+        "type": "object",
+        "properties": {"x": {"type": declared}},
+        "required": ["x"],
+    }}}]
+    grammar = muse_grammar(tools, "required", parallel_tool_calls=False)
+    compile_pattern(grammar)
+
+    def call(value):
+        return (
+            '<atem:function_calls><atem:invoke name="f">'
+            f'<atem:parameter name="x">{value}</atem:parameter>'
+            "</atem:invoke></atem:function_calls>"
+        )
+
+    def parse(text):
+        (parsed,) = parse_atem(
+            text[len("<atem:function_calls>"):-len("</atem:function_calls>")], tools
+        )
+        return parsed["arguments"]["x"]
+
+    for value, expected in good:
+        assert _matches(grammar, call(value)), value
+        assert parse(call(value)) == expected
+    for value in bad:
+        assert not _matches(grammar, call(value)), value
+        with pytest.raises(ValueError):
+            parse(call(value))
+
+
 def test_non_strict_named_tool_grammars_enforce_required_parameters():
     # sglang #40051: a non-strict tool body of optional-only parameters let
     # greedy decoding close a forced call with no arguments.

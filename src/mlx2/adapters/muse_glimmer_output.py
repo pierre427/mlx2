@@ -121,23 +121,47 @@ def parse_atem(text: str, tools: list[dict]) -> list[dict]:
 def _non_strict_value(schema):
     """Value language ``parse_atem`` accepts for a non-strict parameter.
 
-    It reads the schema's own ``type``: scalar-typed values must be JSON of
-    that type (a non-finite number fails serialization), so free text for
-    them is admitted by the grammar and then rejected.  Other values stay
-    free text, unbounded like Qwen's: a ``{0,4096}`` run costs the exact
-    automaton thousands of states per parameter (tens of seconds to compile
-    one call), and the parser has no length bound to agree with.
+    It reads the schema's own ``type``. A ``"string"`` value is kept as raw
+    text and an untyped one is decoded best-effort, so both stay free text,
+    unbounded like Qwen's: a ``{0,4096}`` run costs the exact automaton
+    thousands of states per parameter (tens of seconds to compile one call),
+    and the parser has no length bound to agree with. Every other type,
+    a list of types included (``["integer", "null"]``), must decode as JSON,
+    so the value is the union of the declared alternatives' JSON: free text
+    there is admitted by the grammar and then rejected. Numbers are finite
+    (a non-finite one fails serialization), and a string alternative leaves
+    ``<`` to its ``\\u003c`` escape so it cannot spell the closing tag.
+    Objects, arrays and types the parser does not check use the shared
+    recursive JSON rules, which ``constrained_tool_grammar`` then defines;
+    those rules still admit a three-digit exponent, as the strict lowering
+    does.
     """
     from ..structured_output import _FINITE_NUMBER, _INTEGER
 
     expected = schema.get("type") if isinstance(schema, dict) else None
-    pattern = {
+    if expected is None or expected == "string":
+        return "[^<]*"
+    patterns = {
         "integer": _INTEGER,
         "number": _FINITE_NUMBER,
         "boolean": "(?:true|false)",
         "null": "null",
-    }.get(expected) if isinstance(expected, str) else None
-    return pattern if pattern is not None else "[^<]*"
+        "string": r'"(?:[^"\\\x00-\x1f<]|\\["\\/bfnrt]|\\u[0-9a-fA-F]{4})*"',
+        "object": "(?&object)",
+        "array": "(?&array)",
+    }
+    kinds = expected if isinstance(expected, list) else [expected]
+    alternatives = []
+    for kind in kinds:
+        pattern = patterns.get(kind) if isinstance(kind, str) else None
+        if pattern is None:
+            # The parser decodes any JSON for a type it does not check.
+            return "(?&value)"
+        if pattern not in alternatives:
+            alternatives.append(pattern)
+    if not alternatives:
+        return "(?&value)"
+    return "(?:" + "|".join(alternatives) + ")"
 
 
 def _non_strict_parameter_body(function):
@@ -181,7 +205,7 @@ def _non_strict_parameter_body(function):
 
 def constrained_tool_grammar(tools, tool_choice, *, parallel_tool_calls=True):
     """Regex for Muse's ATEM tool-call wire format."""
-    from ..structured_output import _schema_pattern
+    from ..structured_output import _schema_pattern, recursive_json_object_pattern
 
     functions = [tool["function"] for tool in tools]
     if isinstance(tool_choice, dict):
@@ -222,7 +246,12 @@ def constrained_tool_grammar(tools, tool_choice, *, parallel_tool_calls=True):
         )
     invoke = "(?:" + "|".join(invocations) + ")"
     body = invoke if parallel_tool_calls is False else invoke + f"(?:{invoke})*"
-    return re.escape(_TOOL_OPEN) + body + re.escape(_TOOL_CLOSE)
+    pattern = re.escape(_TOOL_OPEN) + body + re.escape(_TOOL_CLOSE)
+    # Only a non-strict value lowered to JSON rules calls them; names are
+    # escaped and cannot spell a call.
+    if "(?&" in body:
+        pattern += recursive_json_object_pattern()[1]
+    return pattern
 
 
 class MuseOutputParser:

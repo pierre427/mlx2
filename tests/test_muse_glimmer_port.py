@@ -346,8 +346,12 @@ def test_required_decode_grammar_composes_recipient_header_with_atem_body():
     }
     grammar = adapter.tool_constraint(request)
     body = "<atem:function_calls>" + ATEM.replace("a<b", "ab") + "</atem:function_calls>"
-    assert re.fullmatch(grammar, " to=functions.echo<|message|>" + body)
-    assert re.fullmatch(grammar, body) is None
+    # The object parameter's value calls the shared recursive JSON rules,
+    # which only the ``regex`` engine the server compiles with can read.
+    import regex
+
+    assert regex.fullmatch(grammar, " to=functions.echo<|message|>" + body)
+    assert regex.fullmatch(grammar, body) is None
 
 
 def test_multimodal_content_refused():
