@@ -2872,6 +2872,40 @@ def test_handoff_keeps_memory_queued_lane_under_admission():
     batch.close()
 
 
+def test_handoff_rows_do_not_erase_native_readmit_holds():
+    """``_apply_admission`` admits native rows, then handed-off rows through
+    ``at_depth(0)``, at one boundary.  Both shared one READMIT hysteresis
+    dict, and the handoff call replaced it, so a native lane queued at this
+    boundary re-entered at the next one without the READMIT margin."""
+    from mlx2.runtime.memory_policy import (
+        SelfMTPLaneAdmissionController,
+        _make_self_mtp_admission_callback,
+    )
+
+    controller = SelfMTPLaneAdmissionController(
+        host_memory_gib=16, advisory_gib=12, transient_gib_per_lane=1.0
+    )
+    native = [(0, 100, 2, True, 0.0001), (1, 100, 2, True, 0.0001)]
+    handoff = [(9, 100, 0, True, 0.0001)]
+    lane = controller.lane_gib(100, 2, 0.0001, resident_cache=True)
+    free = [0.0]
+
+    def boundaries(with_handoff):
+        admit = _make_self_mtp_admission_callback(
+            controller, free_memory=lambda: free[0], max_draft=2
+        )
+        free[0] = controller.hard_reserve_gib + 1.5 * lane  # one lane fits
+        first = admit(native)
+        if with_handoff:
+            admit.at_depth(0)(handoff)
+        # Both lanes fit now, but not with the readmit margin on top.
+        free[0] = controller.hard_reserve_gib + 2.2 * lane
+        return first, admit(native)
+
+    assert boundaries(False) == ({0: 2, 1: "queue"}, {0: 2, 1: "queue"})
+    assert boundaries(True) == boundaries(False)
+
+
 def test_width_lock_handoff_admits_late_lane_before_plain_migration():
     from mlx2.runtime.adaptive_policy import MTPOrdinaryHandoffPolicy
     from mlx2.runtime.generate import MTPGenerationBatch, StopSequenceMatcher

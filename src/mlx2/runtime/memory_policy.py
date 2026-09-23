@@ -720,7 +720,12 @@ def _make_self_mtp_admission_callback(
     Fresh and APC joining rows pay their cache in full.
     """
     controller = controller or SelfMTPLaneAdmissionController()
-    demoted: Dict[int, int] = {}
+    native_demoted: Dict[int, int] = {}
+    # Handed-off (ordinary) rows are admitted by ``at_depth(0)`` at the same
+    # boundary as the native rows, over a disjoint row set.  Each owns its
+    # READMIT hysteresis, because every cycle boundary replaces the state of
+    # the rows it was given and would otherwise erase the other set's holds.
+    ordinary_demoted: Dict[int, int] = {}
 
     def preview(
         rows,
@@ -765,7 +770,9 @@ def _make_self_mtp_admission_callback(
         atomic_cohort=False,
         max_draft_override=None,
         observer_stage_override=None,
+        hysteresis=None,
     ):
+        demoted = hysteresis if hysteresis is not None else native_demoted
         rows = tuple(rows)
         if not rows:
             demoted.clear()
@@ -939,7 +946,9 @@ def _make_self_mtp_admission_callback(
         depth = int(depth)
 
         def bounded(rows):
-            return _admit(rows, max_draft_override=depth)
+            return _admit(
+                rows, max_draft_override=depth, hysteresis=ordinary_demoted
+            )
 
         bounded.preview = lambda rows: preview(
             rows, max_draft_override=depth
