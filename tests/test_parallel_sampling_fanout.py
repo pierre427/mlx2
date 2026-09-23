@@ -462,3 +462,56 @@ def test_short_prompt_fanout_siblings_complete_on_every_route(monkeypatch, route
     finally:
         engine.close()
     assert alive and error is None
+
+
+@pytest.mark.parametrize("route", ["ordinary", "native_mtp"])
+def test_fanout_leases_a_boundary_republished_over_its_spilled_copy(
+    monkeypatch, tmp_path, route
+):
+    # The leader re-stores a boundary whose earlier copy was spilled to disk.
+    # The fresh copy inherited the spilled copy's access time, so with the
+    # resident count pool full it was spilled again inside the same store and
+    # the siblings (which never restore from disk) failed with 503.
+    from route_harness import collect, make_engine, patch_host, tiny_qwen38_mtp
+
+    patch_host(monkeypatch)
+    model, vocab = tiny_qwen38_mtp()
+    engine = make_engine(
+        model, vocab, mtp=route == "native_mtp", max_lanes=3,
+        cache_dir=str(tmp_path),
+    )
+    try:
+        apc = engine.apc
+        prompt = [(5 * i + 2) % 120 + 1 for i in range(10)]
+
+        def run(tokens):
+            result = collect(engine.submit(
+                {"tokens": tokens, "max_tokens": 2, "temperature": 0}
+            ), timeout=60)
+            assert result.get("error") is None
+
+        def boundary_resident():
+            return [
+                bool(entry.prompt_cache)
+                for _key, tokens, entry in apc._entry_records_locked()
+                if list(tokens) == prompt[:9]
+            ]
+
+        run(prompt)
+        run(prompt[:8] + [111])
+        for k in range(apc.max_size - 1):
+            run([(k * 13 + 7 * i) % 120 + 1 for i in range(12)])
+        assert boundary_resident() == [False]
+
+        jobs = engine.submit_many(
+            [{"tokens": prompt, "max_tokens": 4, "temperature": 0}] * 2
+        )
+        outputs = [collect(job, timeout=60) for job in jobs]
+        assert [output.get("error") for output in outputs] == [None, None]
+        assert all(o["receipt"]["parallel_prefill"]["one_prefill"] for o in outputs)
+        assert boundary_resident() == [True]
+        assert engine.counts.get("apcv2_fanout_boundary_misses", 0) == 0
+        alive, error = engine.thread.is_alive(), engine.error
+    finally:
+        engine.close()
+    assert alive and error is None

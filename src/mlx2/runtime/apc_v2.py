@@ -3285,9 +3285,10 @@ class APCv2(PrefixIndex):
             stored_entry._apc_inserted_at = getattr(
                 replaced_entry, "_apc_inserted_at", now
             )
-            stored_entry._apc_last_access_at = getattr(
-                replaced_entry, "_apc_last_access_at", now
-            )
+            # A republish is a use: inheriting a spilled copy's old access
+            # time made the fresh resident copy the LRU victim of this very
+            # store, so it was spilled again before any reader could lease it.
+            stored_entry._apc_last_access_at = now
             stored_entry._apc_hit_count = getattr(
                 replaced_entry, "_apc_hit_count", existing_hit_count
             )

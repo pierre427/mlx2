@@ -194,10 +194,50 @@ def test_apcv2_republish_preserves_retention_age_and_hits_without_eviction():
     apc.store(key, tokens, [_state(KVCache(), 4, seed=10)])
     entry = apc._trie.get(key, tokens)
     assert entry._apc_inserted_at == 0.0
-    assert entry._apc_last_access_at == 6.0
+    # The republish itself is an access (see the spilled-republish test).
+    assert entry._apc_last_access_at == 10.0
     assert entry._apc_hit_count == 1
     reuse = apc.apc_stats["reuse_telemetry"]
     assert reuse["eviction_age_seconds"]["count"] == 0
+    apc.clear(release_memory=False)
+
+
+def test_apcv2_republish_of_a_spilled_entry_stays_resident(tmp_path):
+    """A re-store used to inherit its spilled copy's old access time.
+
+    With the resident count pool full, the fresh copy was then the least
+    recently used entry and was spilled again inside the same ``store``, so
+    a lookup that does not restore from disk (a fanout sibling) found only
+    a shorter prefix.
+    """
+    now = [0.0]
+    apc = APCv2(
+        max_size=2,
+        layout_name="spilled-republish-v1",
+        idle_disk_seconds=180,
+        idle_disk_dir=str(tmp_path),
+        now_fn=lambda: now[0],
+    )
+    key = APCKey("republish")
+    tokens = [1, 2, 3, 4]
+    apc.store(key, tokens, [_state(KVCache(), 4)])
+    entry = apc._trie.get(key, tokens)
+    with apc._apc_lock:
+        assert apc._spill_entry_locked(key, tokens, entry, reason="pressure")
+    for offset, filler in ((1.0, [7, 8]), (2.0, [9, 10])):
+        now[0] = offset
+        apc.store(key, filler, [_state(KVCache(), 2)])
+    spills = apc.apc_stats["idle_disk"]["pressure_spills"]
+
+    now[0] = 3.0
+    assert apc.store(key, tokens, [_state(KVCache(), 4, seed=10)]).stored
+    assert apc._trie.get(key, tokens).prompt_cache
+    hit = apc.lookup(key, tokens + [5], allow_disk_restore=False)
+    assert hit.hit and hit.cached_tokens == 4
+    hit.cache.close()
+    # The older filler made room, not the entry just published.
+    assert not apc._trie.get(key, [7, 8]).prompt_cache
+    assert apc.apc_stats["idle_disk"]["pressure_spills"] == spills + 1
     apc.clear(release_memory=False)
 
 
