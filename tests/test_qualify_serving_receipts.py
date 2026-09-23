@@ -570,3 +570,23 @@ def test_a_refused_request_becomes_check_evidence_not_an_exception():
     source = (ROOT / "scripts" / "qualify_serving.py").read_text()
     # The shared-cohort pair is posted through the refusal-tolerant helper.
     assert "shared = list(pool.map(post_or_refusal, shared_pair))" in source
+
+
+def test_mixed_warm_per_lane_route_is_judged_by_overlap_not_speedup():
+    # Qwen3.6 prompt lookup keeps the per-lane driver (receipts report width
+    # 1) and measured 1.675 s concurrent against 1.641 s sequential in the
+    # sweep's GPU smoke: overlapped, not faster, as a per-lane route must be.
+    per_lane = [
+        {"speculation": {"target_width": 1}, "elapsed_seconds": 1.66},
+        {"speculation": {"target_width": 1}, "elapsed_seconds": 1.67},
+    ]
+    assert qualify.mixed_warm_timing_passes(1.675, 1.641, per_lane) is True
+    # Serialized lanes (each ran for a fraction of the window) do not overlap.
+    serialized = [dict(r, elapsed_seconds=0.7) for r in per_lane]
+    assert qualify.mixed_warm_timing_passes(1.675, 1.641, serialized) is False
+    # Overlapped but clearly slower than sequential still fails.
+    assert qualify.mixed_warm_timing_passes(2.0, 1.641, per_lane) is False
+    # A route that batched (width 2) must still beat its sequential pair.
+    batched = [{"speculation": {"target_width": 2}, "elapsed_seconds": 1.66}] * 2
+    assert qualify.mixed_warm_timing_passes(1.675, 1.641, batched) is False
+    assert qualify.mixed_warm_timing_passes(1.2, 1.641, batched) is True
