@@ -294,6 +294,49 @@ def test_parallel_tool_calls_false_keeps_the_first_of_a_batched_pair():
     assert parser.tool_call_constraint_truncations == 1
 
 
+@pytest.mark.parametrize(
+    "adapter_type, call",
+    [
+        pytest.param(
+            FlashNextAdapter, "<tool_call><function={}></function></tool_call>",
+            id="flash-next",
+        ),
+        pytest.param(LagunaXS21Adapter, "<tool_call>{}</tool_call>", id="laguna"),
+    ],
+)
+def test_generic_adapter_parsers_carry_the_request_tool_bounds(adapter_type, call):
+    """Laguna did not hand ``parallel_tool_calls`` or ``constrained_tools``
+    to its parser, so a second call under ``parallel_tool_calls:false`` left
+    the parser and the terminal contract check turned the request into a 502,
+    and a malformed call under ``tool_choice:required`` became content."""
+    from mlx2.openai_compat import enforce_tool_contract
+
+    tools = [
+        {"type": "function", "function": {"name": name, "parameters": {}}}
+        for name in ("a", "b")
+    ]
+    request = {
+        "messages": [{"role": "user", "content": "x"}],
+        "tools": tools,
+        "parallel_tool_calls": False,
+        "enable_thinking": False,
+    }
+    adapter = adapter_type.__new__(adapter_type)
+    parser = adapter.output_parser(request)
+    events = parser.push(call.format("a") + call.format("b"), final=True)
+    calls = [call for event in events for call in event.get("tool_calls", ())]
+    assert [c["function"]["name"] for c in calls] == ["a"]
+    assert parser.tool_call_constraint_truncations == 1
+    enforce_tool_contract(request, calls, finish_reason="tool_calls")
+
+    required = adapter.output_parser({
+        **request, "tool_choice": "required", "parallel_tool_calls": True,
+        "_tolerant_tool_markers": True,
+    })
+    with pytest.raises(ValueError, match="undeclared"):
+        required.push(call.format("zzz"), final=True)
+
+
 def test_qwen_tool_argument_types_resolve_local_schema_refs():
     tools = [{
         "type": "function",

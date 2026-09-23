@@ -336,7 +336,7 @@ class LagunaXS21Adapter(ExternalDraftAdapterMixin):
         )
 
     def output_parser(self, request):
-        from ..output import OutputParser
+        from ..output import OutputParser, constrained_tool_choice
         from ..runtime.tool_parsers.laguna import parse_tool_call
 
         return OutputParser(
@@ -345,6 +345,8 @@ class LagunaXS21Adapter(ExternalDraftAdapterMixin):
             tools=request.get("tools") if request.get("tool_choice") != "none" else None,
             parse_tool=parse_tool_call,
             stops=request.get("stop", ()),
+            constrained_tools=constrained_tool_choice(request),
+            parallel_tool_calls=request.get("parallel_tool_calls", True),
             tolerant_tool_markers=request.get("_tolerant_tool_markers", False),
         )
 
