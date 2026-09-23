@@ -4892,6 +4892,28 @@ class PrefixIndex:
             default=0,
         )
 
+    @staticmethod
+    def _exact_entry_serves(cache_entry, tokens: List[int]) -> bool:
+        """Whether an exact entry can land strictly inside its own prompt."""
+        if can_trim_prompt_cache(cache_entry.prompt_cache):
+            return True
+        landing = achievable_trim(cache_entry.prompt_cache, 1)
+        return landing is not None and landing[1] < len(tokens)
+
+    def _proper_prefix_result(self, model: Any, tokens: List[int]):
+        """The deepest stored proper prefix of ``tokens``, as a shorter match.
+
+        ``PromptTrie.search`` reports no shorter prefix alongside an exact
+        match, so an exact entry that cannot serve its own prompt (an
+        untrimmable hybrid cache) would otherwise hide every shorter one.
+        """
+        nearest = self._trie.search(model, tokens[:-1])
+        shorter = nearest.exact if nearest.exact is not None else nearest.shorter
+        if shorter is not None and len(shorter) < 2:
+            # Match ``search``, which never reports a one-token shorter prefix.
+            shorter = None
+        return PromptTrieResult(model, None, shorter, None, 0)
+
     def fetch_nearest_cache(self, model: Any, tokens: List[int]):
         result = self._trie.search(model, tokens)
         if result.exact is not None and len(tokens) == 0:
@@ -4910,6 +4932,7 @@ class PrefixIndex:
                 landed = len(tokens) - trimmed
                 if 0 < landed <= len(tokens) - 1:
                     return (cache, tokens[landed:])
+            result = self._proper_prefix_result(model, tokens)
         short_length = len(result.shorter) if result.shorter is not None else 0
         if result.longer is not None and result.common_prefix > short_length:
             cache_entry = self._trie.get(result.model, result.longer)

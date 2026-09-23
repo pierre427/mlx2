@@ -2389,6 +2389,25 @@ class APCv2(PrefixIndex):
                 session_tag=session_tag,
             )
 
+    def _fetch_view_locked(self, key, tokens, trie_result=None):
+        """The trie result ``fetch_nearest_cache`` acts on for ``tokens``.
+
+        A resident exact entry that cannot land inside its own prompt defers
+        to the deepest shorter stored prefix.  A disk-only exact entry is
+        reported as is, so callers restore or hide it first.
+        """
+        if trie_result is None:
+            trie_result = self._trie.search(key, tokens)
+        if trie_result.exact is None or not tokens:
+            return trie_result
+        try:
+            entry = self._trie.get(trie_result.model, trie_result.exact)
+        except KeyError:
+            return trie_result
+        if not entry.prompt_cache or self._exact_entry_serves(entry, tokens):
+            return trie_result
+        return self._proper_prefix_result(key, tokens)
+
     def _trie_result_placeholders_locked(self, trie_result):
         """Distinct non-resident entries a trie search result would select."""
         placeholders = []
@@ -2471,11 +2490,22 @@ class APCv2(PrefixIndex):
         restore_deferred = False
         restore_requires_admission = False
         deferred_entries = []
+
+        def restore_candidates(trie_result):
+            yield from (trie_result.exact, trie_result.longer, trie_result.shorter)
+            if trie_result.exact is not None:
+                # Evaluated after the exact entry was restored: if it cannot
+                # serve its own prompt, fetch falls back to the deepest
+                # shorter prefix, which must be resident as well.
+                fallback = self._fetch_view_locked(key, tokens)
+                if fallback.exact is None:
+                    yield fallback.shorter
+
         while True:
             trie_result = self._trie.search(key, tokens)
             retry = False
             seen = set()
-            for path in (trie_result.exact, trie_result.longer, trie_result.shorter):
+            for path in restore_candidates(trie_result):
                 if path is None or tuple(path) in seen:
                     continue
                 seen.add(tuple(path))
@@ -2639,6 +2669,8 @@ class APCv2(PrefixIndex):
                     branch_tokens=branch_beyond(covered),
                 )
         hidden = []
+        # Hit accounting must credit the entry fetch actually served.
+        fetch_view = self._fetch_view_locked(key, tokens, trie_result)
         if restore_deferred or restore_requires_admission:
             for deferred_key, path, entry in deferred_entries:
                 try:
@@ -2660,9 +2692,8 @@ class APCv2(PrefixIndex):
                 # then match as the "shorter" prefix, hand back its empty cache
                 # and turn the lookup into a malformed-topology miss that hides
                 # both the resident prefix and the admission/budget reason.
-                placeholders = self._trie_result_placeholders_locked(
-                    self._trie.search(key, tokens)
-                )
+                fetch_view = self._fetch_view_locked(key, tokens)
+                placeholders = self._trie_result_placeholders_locked(fetch_view)
                 if not placeholders:
                     break
                 for path, _entry in placeholders:
@@ -2708,18 +2739,18 @@ class APCv2(PrefixIndex):
         selected_entry = None
         if hit:
             short_length = (
-                len(trie_result.shorter) if trie_result.shorter is not None else 0
+                len(fetch_view.shorter) if fetch_view.shorter is not None else 0
             )
             selected_path = None
-            if trie_result.exact is not None:
-                selected_path = trie_result.exact
+            if fetch_view.exact is not None:
+                selected_path = fetch_view.exact
             elif (
-                trie_result.longer is not None
+                fetch_view.longer is not None
                 and cached_tokens > short_length
             ):
-                selected_path = trie_result.longer
-            elif trie_result.shorter is not None:
-                selected_path = trie_result.shorter
+                selected_path = fetch_view.longer
+            elif fetch_view.shorter is not None:
+                selected_path = fetch_view.shorter
             try:
                 if selected_path is not None:
                     selected_entry = self._trie.get(key, selected_path)
@@ -2762,7 +2793,7 @@ class APCv2(PrefixIndex):
                     if has_unusable_branch
                     else "no_compatible_prefix"
                 )
-        elif trie_result.exact is not None:
+        elif fetch_view.exact is not None:
             kind = "exact"
             reason = None
         else:

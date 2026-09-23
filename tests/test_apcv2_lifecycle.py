@@ -1399,6 +1399,46 @@ def test_idle_spilled_hybrid_chain_keeps_the_admission_reason(tmp_path):
     apc.clear()
 
 
+def test_untrimmable_exact_entry_falls_back_to_the_deepest_shorter_prefix():
+    index = PrefixIndex(max_size=8)
+    prompt = list(range(1, 11))
+    index.insert_cache("model", prompt[:8], [_recurrent(8), _state(KVCache(), 8)])
+    index.insert_cache("model", prompt, [_recurrent(10), _state(KVCache(), 10)])
+    cache, remaining = index.fetch_nearest_cache("model", prompt)
+    assert cache is not None and remaining == prompt[8:]
+    assert cache[1].offset == 8
+
+
+def test_apc_untrimmable_exact_entry_serves_and_credits_the_shorter_prefix(tmp_path):
+    clock = [0.0]
+    apc = APCv2(max_size=16, layout_name="test-hybrid-v1", idle_disk_seconds=1.0,
+                idle_disk_dir=str(tmp_path), now_fn=lambda: clock[0])
+    key = APCKey("hybrid-exact")
+    prompt = list(range(1, 11))
+    apc.store(key, prompt[:8], [_recurrent(8), _state(KVCache(), 8)],
+              retention_role="committed_prompt_boundary")
+    apc.store(key, prompt, [_recurrent(10), _state(KVCache(), 10)])
+    hit = apc.lookup(key, prompt)
+    assert hit.hit and hit.cached_tokens == 8 and hit.hit_kind == "prefix"
+    assert hit.retention_role == "committed_prompt_boundary"
+    hit.cache.close()
+
+    # The fallback prefix is a restore candidate like any other: admission
+    # defers it with the retryable reason, and the retry restores it.
+    clock[0] += 100.0
+    assert apc.spill_idle_entries() == 2
+    apc.lookup(key, prompt + [11]).cache.close()  # restore the exact entry only
+    assert apc._trie.get(key, prompt).prompt_cache
+    assert not apc._trie.get(key, prompt[:8]).prompt_cache
+    cold = apc.lookup(key, prompt, allow_disk_restore=False)
+    assert not cold.hit and cold.miss_reason == "disk_restore_requires_admission"
+    warm = apc.lookup(key, prompt)
+    assert warm.hit and warm.cached_tokens == 8
+    assert apc.apc_stats["idle_disk"]["restores"] == 2
+    warm.cache.close()
+    apc.clear()
+
+
 def test_disk_placeholders_do_not_hide_a_resident_shorter_prefix(tmp_path):
     clock = [0.0]
     apc, key = _idle_spilled_hybrid_apc(
