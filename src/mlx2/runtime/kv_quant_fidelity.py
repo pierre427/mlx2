@@ -222,6 +222,16 @@ DEFAULT_THRESHOLDS = {
 }
 
 
+def _token_count(value) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float) and math.isfinite(value) and value.is_integer():
+        return int(value)
+    return None
+
+
 def evaluate_fidelity_report(
     report: Mapping,
     *,
@@ -236,7 +246,8 @@ def evaluate_fidelity_report(
         return {"passed": False, "failures": [f"no thresholds for {operation!r}"]}
     if isinstance(report, Mapping) and report.get("schema") == BUNDLE_SCHEMA:
         # One harness run measures several operations; judge the selected one.
-        report = (report.get("reports") or {}).get(operation)
+        reports = report.get("reports")
+        report = reports.get(operation) if isinstance(reports, Mapping) else None
     if not isinstance(report, Mapping) or report.get("schema") != REPORT_SCHEMA:
         return {"passed": False, "failures": ["not a kv-quant fidelity report"]}
     if report.get("operation") != operation:
@@ -249,12 +260,26 @@ def evaluate_fidelity_report(
         failures.append("report is bound to another adapter artifact")
     if report.get("device") not in limits.devices:
         failures.append(f"report device {report.get('device')!r} not accepted")
-    contexts = [c for c in report.get("contexts") or () if isinstance(c, Mapping)]
-    measured = {int(c.get("context", 0)) for c in contexts}
+    # The report is a user-supplied file: a malformed field fails its check
+    # instead of raising out of qualification.
+    raw_contexts = report.get("contexts") or ()
+    if not isinstance(raw_contexts, (list, tuple)):
+        failures.append("contexts is not a list")
+        raw_contexts = ()
+    sized = []
+    for entry in raw_contexts:
+        if not isinstance(entry, Mapping):
+            continue
+        size = _token_count(entry.get("context", 0))
+        if size is None:
+            failures.append(f"context {entry.get('context')!r} is not a token count")
+            continue
+        sized.append((size, entry))
+    measured = {size for size, _ in sized}
     for needed in limits.required_contexts:
         if needed not in measured:
             failures.append(f"missing context {needed}")
-    gated = [c for c in contexts if int(c.get("context", 0)) >= limits.min_context]
+    gated = [entry for size, entry in sized if size >= limits.min_context]
     if not gated:
         failures.append(f"no measured context >= {limits.min_context}")
 
@@ -262,7 +287,11 @@ def evaluate_fidelity_report(
         value = entry.get(key)
         if isinstance(value, bool) or not isinstance(value, (int, float)):
             return None
-        return None if math.isnan(value) else float(value)
+        try:
+            value = float(value)
+        except OverflowError:
+            return None
+        return None if math.isnan(value) else value
 
     for entry in gated:
         where = f"context {entry.get('context')}"
@@ -286,13 +315,15 @@ def evaluate_fidelity_report(
             elif (op == "<=" and value > bound) or (op == ">=" and value < bound):
                 failures.append(f"{where}: {key} {value:.6g} not {op} {bound}")
         needles = entry.get("needles")
-        if needles is not None:
+        if needles is not None and not isinstance(needles, Mapping):
+            failures.append(f"{where}: needles is not a mapping")
+        elif needles is not None:
             losses = number(needles, "quant_losses")
             if losses is None:
                 failures.append(f"{where}: needle losses missing")
             elif losses > limits.needle_losses_max:
                 failures.append(
-                    f"{where}: {int(losses)} needle losses > {limits.needle_losses_max}"
+                    f"{where}: {losses:g} needle losses > {limits.needle_losses_max}"
                 )
             # Losses count needles the exact arm found and the quantized arm
             # missed; if the exact arm found none, 0 losses proves nothing.

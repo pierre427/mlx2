@@ -150,6 +150,13 @@ def mutate(path, value):
         (mutate(("contexts", 0, "needles", "quant_losses"), 1), "needle losses"),
         (mutate(("contexts",), []), "missing context 4096"),
         ({"schema": "something-else"}, "not a kv-quant"),
+        # A malformed user-supplied file fails its check instead of raising.
+        (mutate(("contexts", 0, "context"), "4k"), "not a token count"),
+        (mutate(("contexts",), 5), "contexts is not a list"),
+        (mutate(("contexts", 0, "needles"), [1]), "needles is not a mapping"),
+        (mutate(("contexts", 0, "needles", "quant_losses"), float("inf")), "needle losses"),
+        (mutate(("contexts", 0, "kl_mean"), 10**400), "kl_mean missing"),
+        ({"schema": BUNDLE_SCHEMA, "reports": [1]}, "not a kv-quant"),
     ],
 )
 def test_gate_fails_closed(report, reason):
