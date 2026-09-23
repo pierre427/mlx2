@@ -4657,6 +4657,17 @@ class BatchGenerator:
         self._prompt_batch.extend(self._make_batch(1, indices=[index]))
         return True
 
+    def _isolated_prefill_must_wait(self, sequence) -> bool:
+        """Whether a request-private prefill row cannot be admitted now.
+
+        A row carrying ``prefill_inputs`` must run its first prefill at an
+        isolated B=1 boundary, so it waits while the prompt batch holds any
+        other lane.
+        """
+        if len(sequence) <= 9 or sequence[9] is None:
+            return False
+        return len(self._prompt_batch) > 0
+
     def _select_prefill_indices(self, n: int):
         """Select a padding-efficient, starvation-bounded admission cohort."""
         if n <= 0:
@@ -4673,7 +4684,13 @@ class BatchGenerator:
         if media:
             # Processor outputs carry per-request encoder inputs.  Keep their
             # first prefill isolated while ordinary text lanes continue to
-            # batch normally before and after the boundary.
+            # batch normally before and after the boundary.  A row admitted
+            # beside a prompt batch that still holds another lane's prefill
+            # would not be isolated, so admission holds until that batch
+            # drains; admitting text rows meanwhile could keep it busy and
+            # starve the media row.
+            if self._isolated_prefill_must_wait(candidates[media[0]]):
+                return []
             return [media[0]]
         if window == n:
             return list(range(n))
@@ -5589,7 +5606,11 @@ class BatchGenerator:
             self._prompt_batch.extend(self._make_batch(n, indices=list(range(n))))
             self._commit_prefill_order(served, ordered)
         elif n > 0:
-            self._prompt_batch.extend(self._make_batch(n))
+            indices = self._select_prefill_indices(n)
+            if indices:
+                self._prompt_batch.extend(
+                    self._make_batch(len(indices), indices=indices)
+                )
         elif self._admit_one_chunk_overflow(adaptive_chunk):
             self.scheduler_stats["short_prefill_overflow_admissions"] = (
                 self.scheduler_stats.get("short_prefill_overflow_admissions", 0) + 1
