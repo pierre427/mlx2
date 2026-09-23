@@ -297,6 +297,34 @@ def test_live_speculation_transaction_is_never_frozen_by_descriptor():
     assert mode == "deepcopy_disabled"
 
 
+def test_apc_branch_snapshot_is_independent_with_descriptor_cow_off(monkeypatch):
+    """A warm APC branch snapshots even with the external-round knob off.
+
+    Its cache objects carry lock-holding segment tokens and mutation hooks
+    bound to the branch, so a plain deep copy either raises or writes through.
+    """
+    from mlx2.runtime.cow_cache import freeze_prompt_cache
+    from mlx2.runtime.models.cache import RotatingKVCache
+
+    _cow(monkeypatch, False)
+    step = lambda value: mx.full((1, 2, 1, 4), value)
+    source = [RotatingKVCache(8)]
+    source[0].update_and_fetch(mx.ones((1, 2, 5, 4)), mx.ones((1, 2, 5, 4)))
+    frozen, _ = freeze_prompt_cache(source, key="k", tokens=range(5), cache_type="kv")
+    for speculating, expected in ((False, "descriptor_cow"), (True, "deepcopy_fallback")):
+        branch = frozen.branch()
+        if speculating:
+            branch[0].start_speculation(4)
+            branch[0].update_and_fetch(step(2.0), step(2.0))
+        before = np.asarray(branch[0].keys)
+        snapshot, _sidecar, mode = snapshot_committed_cache(branch)
+        assert mode == expected
+        snapshot[0].update_and_fetch(step(9.0), step(9.0))
+        assert snapshot[0].offset == branch[0].offset + 1
+        np.testing.assert_array_equal(np.asarray(branch[0].keys), before)
+        branch.close()
+
+
 def test_propose_verify_phase_seam_accepts_one_row_compact_blocks(monkeypatch):
     """A P3-shaped one-row block (mx tokens + dense_laws) verifies like the host row."""
     _cow(monkeypatch, True)

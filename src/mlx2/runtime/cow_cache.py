@@ -1512,8 +1512,16 @@ def snapshot_committed_cache(
     a graph that cannot be frozen, e.g. one inside a speculation transaction,
     falls back to the historical deep copy.  The mode is ``descriptor_cow``,
     ``deepcopy_fallback`` or ``deepcopy_disabled``.
+
+    A graph restored from an APC branch always takes the descriptor route.
+    Its cache objects carry segment tokens holding locks, which a deep copy
+    cannot pickle, and mutation hooks bound to the branch's own objects,
+    which a deep copy would share, so the copy's writes would land in the
+    branch.
     """
-    if external_round_cow_enabled(enabled):
+    prompt_cache = list(prompt_cache)
+    cow_graph = _carries_cow_bookkeeping(prompt_cache, sidecar)
+    if cow_graph or external_round_cow_enabled(enabled):
         try:
             cache, frozen_sidecar, _receipt = snapshot_prompt_cache_descriptors(
                 prompt_cache, sidecar
@@ -1523,8 +1531,35 @@ def snapshot_committed_cache(
             mode = "deepcopy_fallback"
     else:
         mode = "deepcopy_disabled"
-    cache, frozen_sidecar = copy.deepcopy((list(prompt_cache), sidecar))
+    if cow_graph:
+        # Strip the bookkeeping so the deep copy sees only the cache state.
+        memo: dict[int, Any] = {}
+        telemetry = COWCacheTelemetry()
+        prompt_cache = _clone_graph(
+            prompt_cache,
+            telemetry=telemetry,
+            plane="attention_kv",
+            attach_tokens=False,
+            memo=memo,
+        )
+        sidecar = _clone_graph(
+            sidecar,
+            telemetry=telemetry,
+            plane="draft_mtp",
+            attach_tokens=False,
+            memo=memo,
+        )
+    cache, frozen_sidecar = copy.deepcopy((prompt_cache, sidecar))
     return cache, frozen_sidecar, mode
+
+
+def _carries_cow_bookkeeping(prompt_cache: Any, sidecar: Any = None) -> bool:
+    """Whether any cache object was cloned with COW segment tokens or hooks."""
+    sidecar_state = getattr(sidecar, "state", None)
+    return any(
+        hasattr(cache, "_cow_segment_tokens") or hasattr(cache, "_cow_hooked_methods")
+        for cache in _iter_cache_objects([prompt_cache, sidecar, sidecar_state])
+    )
 
 
 def restore_prompt_cache(prompt_cache: Any) -> COWPromptCacheBranch:

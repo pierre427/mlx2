@@ -137,3 +137,64 @@ def test_pld_accept_histogram_decomposes_the_accepted_aggregate():
             # First moment is exactly the route's existing accepted aggregate.
             assert sum(k * v for k, v in hist.items()) == receipt["accepted"]
             break
+
+
+def test_warm_apc_continuation_on_prompt_lookup_server_matches_cold(monkeypatch):
+    # A warm APCv2 hit hands the lane a COW branch whose cache objects carry
+    # lock-holding segment tokens; the prompt boundary snapshot deep-copied
+    # them and killed the generation worker on the first continuation.
+    from types import SimpleNamespace
+
+    from mlx2 import memory, serving
+    from mlx2.contracts import Capability
+    from mlx2.runtime import os_memory
+    from mlx2.runtime.models.cohere2_moe import Model, ModelArgs
+    from mlx2.serving import ServingEngine
+    from test_approximate_kv_serving import make_adapter, run
+
+    monkeypatch.delenv("MLX_LM_EXTERNAL_ROUND_COW", raising=False)
+    monkeypatch.setattr(serving, "runtime_identity", lambda: {"source_sha256": "src"})
+    monkeypatch.setattr(memory, "execution_headroom", lambda: 100 * 2**30)
+    monkeypatch.setattr(os_memory, "physical_footprint_bytes", lambda: 0)
+    mx.random.seed(11)
+    model = Model(
+        ModelArgs(
+            hidden_size=16, head_dim=4, num_hidden_layers=4, intermediate_size=8,
+            prefix_dense_intermediate_size=24, num_attention_heads=4,
+            num_key_value_heads=2, vocab_size=128, num_experts=4,
+            num_experts_per_tok=2, first_k_dense_replace=1, sliding_window=6,
+            layer_types=["full_attention"] + ["sliding_attention"] * 3,
+        )
+    )
+    model.eval()
+    mx.eval(model.parameters())
+    adapter = make_adapter(model, operations=None)
+    adapter.descriptor = SimpleNamespace(
+        capabilities=frozenset({Capability.PROMPT_LOOKUP})
+    )
+    first = list(range(1, 40)) + [50, 51]
+    second = first + [60, 61]
+
+    def engine():
+        instance = ServingEngine(
+            "tiny", adapter_factory=adapter, qualification_mode=True,
+            mtp=False, prompt_lookup=True,
+        )
+        assert instance.ready.wait(30), instance.error
+        return instance
+
+    cold_engine = engine()
+    try:
+        cold, cold_receipt = run(cold_engine, second, max_tokens=4)
+    finally:
+        cold_engine.close()
+    warm_engine = engine()
+    try:
+        run(warm_engine, first, max_tokens=4)
+        warm, warm_receipt = run(warm_engine, second, max_tokens=4)
+        alive, error = warm_engine.thread.is_alive(), warm_engine.error
+    finally:
+        warm_engine.close()
+    assert alive and error is None
+    assert cold_receipt["cached_tokens"] == 0 and warm_receipt["cached_tokens"] > 0
+    assert warm == cold
