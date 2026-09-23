@@ -9,7 +9,7 @@ from pathlib import Path
 
 from ..contracts import Capability, ModelDescriptor, StatePlane
 from .mtp_depth_cap import validate_self_mtp_num_draft
-from .qwen38_27b import Qwen3827BAdapter
+from .qwen38_27b import Qwen3827BAdapter, resolve_eos_token_ids
 
 CACHE_LAYOUT = "qwen36-35b-a3b-hybrid-layer-segments-v1"
 # Explicit rather than inherited through Qwen3.8: threshold four passed the
@@ -259,9 +259,9 @@ class Qwen3635BA3BAdapter(Qwen3827BAdapter):
         weights.clear()
         mx.clear_cache()
         tokenizer = AutoTokenizer.from_pretrained(path, local_files_only=True, trust_remote_code=False)
-        eos = config.get("eos_token_id", config["text_config"].get("eos_token_id"))
-        if isinstance(eos, int):
-            eos = [eos]
+        # The official config names only <|endoftext|>; the tokenizer's chat
+        # EOS <|im_end|> ends an assistant turn and must stop generation too.
+        eos = resolve_eos_token_ids(config, tokenizer)
         self.tokenizer = TokenizerWrapper(
             tokenizer, detokenizer_class=BPEStreamingDetokenizer, eos_token_ids=eos
         )

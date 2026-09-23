@@ -210,3 +210,112 @@ def test_fused_gdn_geometry_is_qwen36_specific_and_opt_in():
     )
     assert not wrong_architecture.accepted
     assert "geometry" in wrong_architecture.reason
+
+
+def _chat_tokenizer(root: Path) -> tuple[int, int]:
+    """Save a real fast tokenizer whose chat EOS is <|im_end|>, as Qwen ships."""
+    tokenizers = pytest.importorskip("tokenizers")
+    from transformers import PreTrainedTokenizerFast
+
+    base = tokenizers.Tokenizer(
+        tokenizers.models.WordLevel({"a": 0, "b": 1, "c": 2}, unk_token=None)
+    )
+    tokenizer = PreTrainedTokenizerFast(tokenizer_object=base)
+    tokenizer.add_tokens(
+        [
+            tokenizers.AddedToken("<|endoftext|>", special=True, normalized=False),
+            tokenizers.AddedToken("<|im_end|>", special=True, normalized=False),
+        ]
+    )
+    tokenizer.eos_token = "<|im_end|>"
+    tokenizer.save_pretrained(root)
+    return (
+        tokenizer.convert_tokens_to_ids("<|endoftext|>"),
+        tokenizer.convert_tokens_to_ids("<|im_end|>"),
+    )
+
+
+class _LoadedModel:
+    """Stands in for the tensor module: these tests exercise tokenizer setup."""
+
+    apc_v2_layout = "stub-layout"
+
+    def __init__(self, *_args, **_kwargs):
+        pass
+
+    def sanitize(self, weights):
+        return weights
+
+    def shard_prune(self, *_args, **_kwargs):
+        return True
+
+    def load_weights(self, *_args, **_kwargs):
+        pass
+
+    def eval(self):
+        pass
+
+    def parameters(self):
+        return {}
+
+    def named_modules(self):
+        return []
+
+
+@pytest.mark.parametrize("converted", [False, True], ids=["official_config", "converted_config"])
+def test_qwen36_stops_on_the_tokenizer_chat_eos(tmp_path, monkeypatch, converted):
+    from mlx2.adapters import qwen36_35b
+    from mlx2.runtime import ubc_evict
+    from mlx2.runtime.models import qwen36_35b as tensors
+    from mlx2.serving import generation_stop_token_ids
+
+    endoftext, im_end = _chat_tokenizer(tmp_path)
+    make_artifact(tmp_path)
+    config = json.loads((tmp_path / "config.json").read_text())
+    # The official Qwen/Qwen3.6-35B-A3B config names only <|endoftext|>; some
+    # converted artifacts list both terminators at the top level.
+    config["text_config"]["eos_token_id"] = endoftext
+    if converted:
+        config["eos_token_id"] = [endoftext, im_end]
+    (tmp_path / "config.json").write_text(json.dumps(config))
+    monkeypatch.setattr(qwen36_35b, "configure_environment", lambda: {})
+    monkeypatch.setattr(tensors, "Model", _LoadedModel)
+    monkeypatch.setattr(ubc_evict, "load_shards_evicting", lambda *_a, **_k: {})
+    adapter = Qwen3635BA3BAdapter(str(tmp_path))
+    assert generation_stop_token_ids(adapter) == (endoftext, im_end)
+
+
+def test_flash_next_stops_on_the_tokenizer_chat_eos(tmp_path, monkeypatch):
+    import mlx.nn as nn
+
+    from mlx2.adapters import flash_next
+    from mlx2.runtime import ubc_evict
+    from mlx2.runtime.models import qwen4_exp, qwen4_ple_nvme
+    from mlx2.serving import generation_stop_token_ids
+
+    endoftext, im_end = _chat_tokenizer(tmp_path)
+    (tmp_path / "config.json").write_text(
+        json.dumps(
+            {
+                "model_type": "qwen4_exp",
+                "quantization": {"group_size": 64, "bits": 4},
+                "text_config": {"eos_token_id": endoftext, "max_position_embeddings": 4096},
+            }
+        )
+    )
+    (tmp_path / "model.safetensors.index.json").write_text(
+        json.dumps({"weight_map": {"model.embed_tokens.weight": "model.safetensors"}})
+    )
+    (tmp_path / "model.safetensors").write_bytes(b"metadata-only")
+    monkeypatch.setattr(flash_next, "configure_environment", lambda *_a, **_k: {})
+    monkeypatch.setattr(flash_next, "artifact_identity", lambda path: {"path": str(path)})
+    monkeypatch.setattr(qwen4_exp, "Model", _LoadedModel)
+    monkeypatch.setattr(qwen4_exp.ModelArgs, "from_dict", classmethod(lambda cls, config: config))
+    monkeypatch.setattr(ubc_evict, "load_shards_evicting", lambda *_a, **_k: {})
+    monkeypatch.setattr(ubc_evict, "ubc_evict_paths", lambda *_a, **_k: None)
+    monkeypatch.setattr(
+        qwen4_ple_nvme, "install_file_backed_ple", lambda _model, weights, *_a, **_k: weights
+    )
+    monkeypatch.setattr(nn, "quantize", lambda *_a, **_k: None)
+    adapter = flash_next.FlashNextAdapter(str(tmp_path))
+    assert generation_stop_token_ids(adapter) == (endoftext, im_end)

@@ -228,11 +228,11 @@ class FlashNextAdapter:
             tokenizer = AutoTokenizer.from_pretrained(
                 path, local_files_only=True, trust_remote_code=False
             )
-            eos = config.get(
-                "eos_token_id", config.get("text_config", {}).get("eos_token_id")
-            )
-            if isinstance(eos, int):
-                eos = [eos]
+            # Deferred: qwen38_27b subclasses this adapter.  The tokenizer's
+            # chat EOS joins the config's <|endoftext|>, as for Qwen3.8.
+            from .qwen38_27b import resolve_eos_token_ids
+
+            eos = resolve_eos_token_ids(config, tokenizer)
             self.tokenizer = TokenizerWrapper(
                 tokenizer, detokenizer_class=BPEStreamingDetokenizer, eos_token_ids=eos
             )
