@@ -3,12 +3,18 @@
 
 A hybrid (GDN + attention) prompt cache cannot be trimmed, so a later request
 reuses prefill only at a position where the recurrent state was captured.
-Every request already publishes its ``P-1`` prompt boundary and its finished
-lane, and both end on chat-message boundaries, so linear multi-turn chat,
-edits and regenerations already resume from a previous turn's own entry.
-Interior checkpoints pay off only where a divergence falls *inside* one
-request's prompt at a position no earlier request ended on: a long system
-prompt/tool preamble shared across sessions, or a shared document (RAG).
+Every request publishes its ``P-1`` prompt boundary and its finished lane.
+Those serve the next turn only when the chat template re-renders the finished
+turn starting with the whole generation prompt. Many templates do not: the
+Qwen3.6 template renders a past assistant turn without the
+``<think>\n\n</think>\n\n`` its generation prompt ends with, so both entries
+diverge a few tokens before their end and the next turn reuses nothing.
+Serving therefore plans one exact boundary just before the generation-prompt
+suffix whenever :func:`detect_generation_prompt_suffixes` finds a template
+that drops it (see ``generation_prompt_boundary``). Beyond that, interior
+checkpoints pay off where a divergence falls *inside* one request's prompt:
+a long system prompt/tool preamble shared across sessions, or a shared
+document (RAG).
 
 Placements (all content-independent except the adapter/tokenizer turn marker):
 
@@ -184,3 +190,69 @@ def detect_turn_marker_ids(tokenizer) -> Tuple[int, ...]:
     if special and marker not in special:
         return ()
     return (int(marker),)
+
+
+# Chat-template flags probed for the generation prompt. Templates ignore
+# variables they do not read, so probing a flag a template lacks is harmless;
+# probing both values covers adapters that pass either one per request.
+_GENERATION_PROMPT_PROBES = ({}, {"enable_thinking": False}, {"enable_thinking": True})
+
+
+def detect_generation_prompt_suffixes(tokenizer) -> Tuple[Tuple[int, ...], ...]:
+    """Generation-prompt suffixes a finished turn does not re-render.
+
+    For each probed template mode this renders one user message with and
+    without ``add_generation_prompt`` (the suffix is the difference, as in
+    :func:`detect_turn_marker_ids`) and the next turn's conversation (that
+    message, an assistant reply, a new user message). When the next prompt
+    extends the whole first prompt, its ``P-1`` boundary already serves the
+    next turn and nothing is returned for that mode. When it diverges inside
+    the suffix, the suffix is returned: a boundary at ``P - len(suffix)`` is
+    the deepest position the next turn shares. Longest first, no model-name
+    rules; ``()`` when no mode needs one or the template cannot be probed.
+    """
+    apply = getattr(tokenizer, "apply_chat_template", None)
+    if not callable(apply):
+        return ()
+    first = [{"role": "user", "content": "x"}]
+    turn = first + [
+        {"role": "assistant", "content": "y"},
+        {"role": "user", "content": "z"},
+    ]
+    suffixes = set()
+    for flags in _GENERATION_PROMPT_PROBES:
+        try:
+            plain = _ids(apply(first, add_generation_prompt=False, tokenize=True, **flags))
+            prompt = _ids(apply(first, add_generation_prompt=True, tokenize=True, **flags))
+            following = _ids(apply(turn, add_generation_prompt=True, tokenize=True, **flags))
+        except Exception:  # noqa: BLE001 - templates vary; no boundary is safe
+            continue
+        if len(prompt) <= len(plain) or prompt[: len(plain)] != plain:
+            continue
+        shared = 0
+        for left, right in zip(prompt, following):
+            if left != right:
+                break
+            shared += 1
+        if len(plain) <= shared < len(prompt) - 1:
+            suffixes.add(tuple(prompt[len(plain) :]))
+    return tuple(sorted(suffixes, key=lambda suffix: (-len(suffix), suffix)))
+
+
+def generation_prompt_boundary(
+    tokens: Sequence[int], suffixes: Iterable[Sequence[int]]
+) -> Optional[int]:
+    """Position just before the generation-prompt suffix the prompt ends with.
+
+    ``None`` when the prompt ends with none of ``suffixes`` (a raw completion
+    or a template mode that was not detected) or the boundary would not be an
+    interior position ``0 < p < P-1``.
+    """
+    total = len(tokens)
+    for suffix in suffixes:
+        width = len(suffix)
+        if 1 < width < total and [int(t) for t in tokens[total - width :]] == [
+            int(t) for t in suffix
+        ]:
+            return total - width
+    return None

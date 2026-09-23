@@ -440,3 +440,226 @@ def test_min_uncached_fraction_policy_round_trip():
             apc_interior_checkpoint_policy(
                 {"count": 4, "min_stride": 256, "min_uncached_fraction": bad}
             )
+
+
+# ------------------------------------------ generation-prompt turn boundary
+
+
+class _ChatTemplateTokenizer:
+    """A Qwen-style chat template over tiny-model token ids.
+
+    ``keeps_think_block=False`` is the Qwen3.6 shape: a finished assistant
+    turn re-renders without the ``<think>`` block its generation prompt
+    ended with. ``True`` is the Qwen3.8 shape, which keeps it.
+    """
+
+    def __init__(self, vocab, *, keeps_think_block):
+        (self.start, self.end, self.think, self.unthink, self.nl, self.nn) = range(
+            vocab - 8, vocab - 2
+        )
+        self.roles = {"system": 1, "user": 2, "assistant": 3}
+        self.keeps_think_block = keeps_think_block
+        self.all_special_ids = [self.start, self.end, self.think, self.unthink]
+
+    def _think(self, thinking):
+        if thinking:
+            return [self.think, self.nl]
+        return [self.think, self.nn, self.unthink, self.nn]
+
+    def apply_chat_template(
+        self, messages, *, add_generation_prompt, tokenize=True, **flags
+    ):
+        thinking = flags.get("enable_thinking", False)
+        out = []
+        for message in messages:
+            body = [
+                int(word) if word.isdigit() else 1 + ord(word[0]) % 50
+                for word in str(message["content"]).split()
+            ]
+            out += [self.start, self.roles[message["role"]], self.nl]
+            if message["role"] == "assistant" and self.keeps_think_block:
+                out += self._think(False)
+            out += body + [self.end, self.nl]
+        if add_generation_prompt:
+            out += [self.start, self.roles["assistant"], self.nl]
+            out += self._think(thinking)
+        return out
+
+
+def test_generation_prompt_suffix_is_detected_only_where_history_drops_it():
+    from mlx2.runtime.interior_placement import (
+        detect_generation_prompt_suffixes,
+        generation_prompt_boundary,
+    )
+
+    dropping = _ChatTemplateTokenizer(128, keeps_think_block=False)
+    suffixes = detect_generation_prompt_suffixes(dropping)
+    t = dropping
+    # Thinking off and thinking on each drop their own suffix.
+    assert suffixes == (
+        (t.start, 3, t.nl, t.think, t.nn, t.unthink, t.nn),
+        (t.start, 3, t.nl, t.think, t.nl),
+    )
+    prompt = t.apply_chat_template(
+        [{"role": "user", "content": "5 6 7"}], add_generation_prompt=True
+    )
+    assert generation_prompt_boundary(prompt, suffixes) == len(prompt) - 7
+    assert generation_prompt_boundary(prompt[:-1], suffixes) is None
+    # The Qwen3.8 shape re-renders the whole generation prompt: the ``P-1``
+    # boundary already serves the next turn, so nothing is added.
+    keeping = _ChatTemplateTokenizer(128, keeps_think_block=True)
+    assert detect_generation_prompt_suffixes(keeping) == ()
+    assert detect_generation_prompt_suffixes(object()) == ()
+
+
+def _chat_engine(model, vocab, *, keeps_think_block, mtp, policy=None):
+    base = make_adapter(model, vocab)
+    template = _ChatTemplateTokenizer(vocab, keeps_think_block=keeps_think_block)
+
+    class Adapter(base):
+        def __init__(self, path):
+            super().__init__(path)
+            detokenizer = type(self).tokenizer
+
+            class Tokenizer:
+                vocab_size = vocab
+                eos_token_ids = []
+                all_special_ids = template.all_special_ids
+                apply_chat_template = staticmethod(template.apply_chat_template)
+
+                @property
+                def detokenizer(self):
+                    return detokenizer.detokenizer
+
+            self.tokenizer = Tokenizer()
+
+        def prompt_tokens(self, request):
+            return template.apply_chat_template(
+                request["messages"],
+                add_generation_prompt=True,
+                enable_thinking=request.get("enable_thinking", False),
+            )
+
+        def cache_budget(self, *, mtp):
+            args = getattr(model, "args", None)
+            if getattr(args, "model_type", None) == "qwen3_5":
+                from mlx2.adapters.qwen38_memory import Qwen38CacheBudget
+
+                return Qwen38CacheBudget.from_config(dict(vars(args)), mtp=mtp)
+            return _TinyCacheBudget()
+
+    engine = serving.ServingEngine(
+        "tiny",
+        adapter_factory=Adapter,
+        qualification_mode=True,
+        mtp=mtp,
+        max_lanes=1,
+        prefill_step=16,
+        **({} if policy is None else {"execution_policy": policy}),
+    )
+    assert engine.ready.wait(60), engine.error
+    return engine
+
+
+def _chat(engine, messages, max_tokens=6):
+    job = engine.submit(
+        {"messages": messages, "max_tokens": max_tokens, "temperature": 0}
+    )
+    text = ""
+    while True:
+        event = job.events.get(timeout=120)
+        if "error" in event:
+            raise AssertionError(event)
+        if "delta" in event:
+            text += event["delta"].get("content", "")
+        if "finish_reason" in event:
+            return [int(t) for t in text.split()], event.get("receipt") or {}, job
+
+
+def _words(vocab, seed, count):
+    return " ".join(str((seed * 7 + 11 * i) % (vocab - 10) + 1) for i in range(count))
+
+
+@pytest.mark.parametrize(("factory", "mtp"), CASES)
+@pytest.mark.parametrize("policy", [None, "auto"], ids=["default", "auto"])
+def test_multiturn_chat_resumes_before_the_dropped_generation_prompt(
+    host, factory, mtp, policy
+):
+    """X3-2: a template that drops the generation prompt from history.
+
+    The Qwen3.6 template re-renders a finished assistant turn without the
+    ``<think></think>`` its generation prompt ended with, so the stored
+    ``P-1`` boundary and finished lane both diverge a few tokens before
+    their end and the next turn re-prefilled everything. Serving now plans
+    one exact boundary just before that suffix, by default and past the
+    ``auto`` preset's continuation skip, on the MTP route too: the next turn
+    re-prefills only its own turn plus the suffix region, with greedy output
+    identical to a cold engine.
+    """
+    model, vocab = factory()
+    suffix = 7
+    messages = [
+        {"role": "system", "content": _words(vocab, 1, 60)},
+        {"role": "user", "content": _words(vocab, 2, 20)},
+    ]
+    template = _ChatTemplateTokenizer(vocab, keeps_think_block=False)
+    engine = _chat_engine(
+        model,
+        vocab,
+        keeps_think_block=False,
+        mtp=mtp,
+        policy=None if policy is None else {"apc_interior_checkpoints": policy},
+    )
+    try:
+        previous = None
+        for turn in range(3):
+            prompt = template.apply_chat_template(messages, add_generation_prompt=True)
+            out, receipt, job = _chat(engine, messages)
+            if previous is not None:
+                cached = int(job.cached_tokens or 0)
+                assert cached == len(previous) - suffix, (turn, cached)
+                assert prompt[:cached] == previous[:cached]
+                assert receipt.get("cache_checkpoint_role") == "interior_checkpoint"
+            previous = prompt
+            messages = messages + [
+                {"role": "assistant", "content": " ".join(map(str, out))},
+                {"role": "user", "content": _words(vocab, 3 + turn, 20)},
+            ]
+        last_out = out
+        counts = dict(engine.counts)
+    finally:
+        engine.close()
+    assert counts["apc_interior_positions_planned_generation_prompt"] >= 2
+    assert counts["apc_interior_hits"] >= 2
+    cold = _chat_engine(model, vocab, keeps_think_block=False, mtp=mtp)
+    try:
+        cold_out, _receipt, cold_job = _chat(cold, messages[:-2])
+        assert int(cold_job.cached_tokens or 0) == 0
+    finally:
+        cold.close()
+    assert cold_out == last_out
+
+
+def test_template_that_keeps_the_generation_prompt_adds_no_boundary(host):
+    """The Qwen3.8 shape already resumes from ``P-1``: nothing new is stored."""
+    model, vocab = tiny_qwen38_mtp()
+    messages = [
+        {"role": "system", "content": _words(vocab, 1, 60)},
+        {"role": "user", "content": _words(vocab, 2, 20)},
+    ]
+    template = _ChatTemplateTokenizer(vocab, keeps_think_block=True)
+    engine = _chat_engine(model, vocab, keeps_think_block=True, mtp=True)
+    try:
+        first = template.apply_chat_template(messages, add_generation_prompt=True)
+        out, _receipt, _job = _chat(engine, messages)
+        messages += [
+            {"role": "assistant", "content": " ".join(map(str, out))},
+            {"role": "user", "content": _words(vocab, 3, 20)},
+        ]
+        _out, _receipt, job = _chat(engine, messages)
+        counts = dict(engine.counts)
+    finally:
+        engine.close()
+    assert int(job.cached_tokens) >= len(first) - 1
+    assert counts.get("apc_interior_positions_planned_generation_prompt", 0) == 0
+    assert counts.get("apc_interior_checkpoints_published", 0) == 0

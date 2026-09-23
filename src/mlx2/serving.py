@@ -198,10 +198,12 @@ def apc_interior_checkpoint_policy(value) -> dict:
         "placement": "pow2",
         "headroom_fraction": 1.0,
         # Skip capture on a request that already resumed from a deep exact
-        # hit.  Such a prompt is a linear continuation: its own ``P-1``
-        # boundary already serves the next turn, so an interior checkpoint
-        # there is pure cost (measured: +3.9%/+7.2% TTFT and 6.5-7.3 GiB of
-        # never-reused entries on the linear control).  0.0 keeps the
+        # hit.  Such a prompt is a linear continuation, so a lattice/turn
+        # checkpoint there is pure cost (measured: +3.9%/+7.2% TTFT and
+        # 6.5-7.3 GiB of never-reused entries on the linear control).  Its
+        # ``P-1`` boundary serves the next turn only when the template keeps
+        # the generation prompt in history; the generation-prompt boundary
+        # that covers the other templates is never skipped.  0.0 keeps the
         # historical behaviour and the qualification identity of existing
         # settings.
         "min_uncached_fraction": 0.0,
@@ -3655,7 +3657,10 @@ class ServingEngine:
                 inspect_apc_capabilities,
             )
             from .runtime.generate import BatchGenerator
-            from .runtime.interior_placement import plan_interior_positions
+            from .runtime.interior_placement import (
+                generation_prompt_boundary,
+                plan_interior_positions,
+            )
             from .runtime.state_boundaries import (
                 RETENTION_ROLE,
                 BoundaryPurpose,
@@ -3905,6 +3910,27 @@ class ServingEngine:
                 self.apc_interior_turn_markers = markers
                 if not markers:
                     self.counts["apc_interior_turn_marker_missing"] += 1
+            # A template that re-renders a finished turn without its
+            # generation-prompt suffix leaves the next turn no reusable entry
+            # on a hybrid cache; every such chat request then gets one exact
+            # boundary just before that suffix (see interior_placement).
+            self.apc_generation_prompt_suffixes = ()
+            if self.apc_interior_route_supported:
+                from .runtime.interior_placement import (
+                    detect_generation_prompt_suffixes,
+                )
+                from .runtime.models.cache import make_prompt_cache
+
+                try:
+                    hybrid = inspect_apc_capabilities(
+                        make_prompt_cache(adapter.model)
+                    ).interior_checkpoint_target
+                except Exception:  # noqa: BLE001 - no probe cache, no boundary
+                    hybrid = False
+                if hybrid:
+                    self.apc_generation_prompt_suffixes = (
+                        detect_generation_prompt_suffixes(adapter.tokenizer)
+                    )
             if self.fly_verification_policy.enabled and (
                 prompt_lookup or not (self.mtp or external_draft)
             ):
@@ -5079,6 +5105,20 @@ class ServingEngine:
                         )
                         if interior_continuation:
                             self.counts["apc_interior_requests_skipped_continuation"] += 1
+                        # The next turn's only exact reuse point when the
+                        # template drops the generation prompt from history,
+                        # so it is exempt from the continuation skip.
+                        turn_end_boundary = None
+                        if "messages" in job.request:
+                            turn_end_boundary = generation_prompt_boundary(
+                                tokens,
+                                getattr(self, "apc_generation_prompt_suffixes", ()),
+                            )
+                        if turn_end_boundary is not None and turn_end_boundary <= max(
+                            int(hit.cached_tokens),
+                            int(job.request.get("_mlx2_media_token_end", 0) or 0),
+                        ):
+                            turn_end_boundary = None
                         planning_target = (
                             self.apc_interior_route_supported
                             and (
@@ -5088,6 +5128,7 @@ class ServingEngine:
                                 )
                                 or self.apc_rolling_route == "hybrid"
                                 or self.apc_junction_checkpoints
+                                or turn_end_boundary is not None
                             )
                             and not job.request.get("skip_writing_prefix_cache", False)
                             and (
@@ -5146,6 +5187,17 @@ class ServingEngine:
                                 self.counts[
                                     "apc_interior_positions_planned_" + source
                                 ] += planned
+                        if (
+                            planning_target
+                            and turn_end_boundary is not None
+                            and turn_end_boundary not in checkpoint_candidates
+                        ):
+                            checkpoint_candidates = tuple(
+                                sorted((*checkpoint_candidates, turn_end_boundary))
+                            )
+                            self.counts[
+                                "apc_interior_positions_planned_generation_prompt"
+                            ] += 1
                         if planning_target and self.apc_junction_checkpoints:
                             branch = int(getattr(hit, "branch_tokens", 0) or 0)
                             # A lookup never resumes inside a media span, so a
