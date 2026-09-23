@@ -2912,7 +2912,9 @@ class BatchQSAKVCache(BatchKVCache):
         padding = self._right_padding
         if padding is not None and self.index_keys is not None:
             self.index_keys = dynamic_roll(self.index_keys, padding, axis=1)
-        super().finalize()
+        # A live shared top-k holds block ids on the physical grid, so a
+        # finalize that keeps it must not shift that grid.
+        super().finalize(reclaim=not keep_shared)
         self.release_qsa_cycle(
             "BatchQSAKVCache.finalize",
             cursor_final=not keep_shared,
@@ -3014,6 +3016,7 @@ class BatchQSAKVCache(BatchKVCache):
         batch.values = base.values
         batch.offset = base.offset
         batch.left_padding = base.left_padding
+        batch._host_padding_floor = base._host_padding_floor
         batch._idx = base._idx
         populated = next(
             (cache.index_keys for cache in caches if cache.index_keys is not None), None

@@ -519,18 +519,32 @@ def _ragged_slab_plan(cache, n, who: str, validate: bool):
     return (drops, uniform, [d - uniform for d in drops])
 
 
-def _roll_rows_right(x, shifts, axis: int, lo: int, hi: int):
+def _roll_rows_right(x, shifts, axis: int, lo: int, hi: int, reclaim: int = 0):
     """Right-roll each row's ``[lo, hi)`` window along ``axis`` by its shift.
 
     The rolled-out tail cells wrap to the bottom of the window, which is
     inside every row's (now larger) left-padding region, so the valid prefix
     of each row stays contiguous and still ends at the shared cursor ``hi``.
+
+    ``reclaim`` drops that many leading columns of the rolled window in the
+    same gather, landing the result at ``[lo, hi - reclaim)``. The caller
+    passes the padding every row shares after the roll, so no row loses a
+    valid cell and the batch costs no second pass over K/V to shrink.
     """
     if hi <= lo:
         return x
     window = (slice(None),) * axis + (slice(lo, hi),)
     shaped = shifts.reshape((-1,) + (1,) * (axis - 1))
-    x[window] = dynamic_roll(x[window], shaped, axis)
+    if not reclaim:
+        x[window] = dynamic_roll(x[window], shaped, axis)
+        return x
+    width = hi - lo
+    expand_shifts = (...,) + (None,) * (x.ndim - axis)
+    expand_indices = expand_shifts[:-1]
+    positions = mx.arange(reclaim, width)[expand_indices]
+    idx = (positions - shaped[expand_shifts]) % width
+    kept = (slice(None),) * axis + (slice(lo, hi - reclaim),)
+    x[kept] = mx.take_along_axis(x[window], idx, axis=axis)
     return x
 
 
@@ -3340,6 +3354,12 @@ class BatchKVCache(_BaseCache):
         self.keys = None
         self.values = None
         self.left_padding = mx.array(left_padding)
+        # A host list seeds the exact floor ``trim_ragged`` reclaims against.
+        self._host_padding_floor = (
+            (self.left_padding, [int(l) for l in left_padding])
+            if isinstance(left_padding, (list, tuple))
+            else None
+        )
         self.offset = mx.array([-l for l in left_padding])
         self._idx = 0
         self._right_padding = None
@@ -3591,17 +3611,69 @@ class BatchKVCache(_BaseCache):
             self.offset -= left_padding
         if right_padding is not None and max(right_padding) > 0:
             self._right_padding = mx.array(right_padding)
+            self._host_right_padding = (
+                (self._right_padding, [int(v) for v in right_padding])
+                if isinstance(right_padding, (list, tuple))
+                else None
+            )
 
-    def finalize(self):
+    def finalize(self, *, reclaim: bool = True):
+        """Turn pending right padding into left padding.
+
+        Like ``trim_ragged``, the roll also drops the left padding every row
+        then shares (``reclaim=False`` keeps the physical grid, for a caller
+        holding state indexed by it): a self-MTP draft head appends unequal
+        accepted spans with right padding every cycle and would otherwise
+        widen by the smallest of them each time.
+        """
         self._invalidate_attention_groups()
         if self._right_padding is not None:
             padding = self._right_padding
-            self.keys = dynamic_roll(self.keys, padding[:, None], axis=2)
-            self.values = dynamic_roll(self.values, padding[:, None], axis=2)
+            host = getattr(self, "_host_right_padding", None)
+            floor = None
+            if host is not None and host[0] is padding:
+                floor = [f + r for (f, r) in zip(self._padding_floor(), host[1])]
+            shared = min(floor) if reclaim and floor else 0
+            spec = self._finalize_reclaim_spec() if shared else None
+            if spec is None or shared >= self._idx:
+                shared = 0
+            if shared:
+                self.keys = _roll_rows_right(
+                    self.keys, padding, 2, 0, self._idx, shared
+                )
+                self.values = _roll_rows_right(
+                    self.values, padding, 2, 0, self._idx, shared
+                )
+                # Subclass ledgers were already rolled by their own finalize.
+                for name, axis in spec:
+                    ledger = getattr(self, name, None)
+                    if ledger is not None:
+                        cut = (slice(None),) * axis + (slice(shared, None),)
+                        setattr(self, name, ledger[cut])
+                self._idx -= shared
+                self.left_padding = self.left_padding + mx.array(
+                    [r - shared for r in host[1]]
+                )
+            else:
+                self.keys = dynamic_roll(self.keys, padding[:, None], axis=2)
+                self.values = dynamic_roll(self.values, padding[:, None], axis=2)
+                self.left_padding += padding
             self.offset -= padding
-            self.left_padding += padding
+            if floor is not None:
+                self._host_padding_floor = (
+                    self.left_padding,
+                    [f - shared for f in floor],
+                )
             self._right_padding = None
+            self._host_right_padding = None
             self._tie_row_metadata()
+
+    def _finalize_reclaim_spec(self):
+        """The ledgers to shift with a reclaim, or ``None`` to skip it."""
+        try:
+            return self._ragged_trim_aux_spec()
+        except RaggedTrimUnsupported:
+            return None
 
     def _tie_row_metadata(self):
         """Make evaluating K/V also evaluate the rebound per-row metadata.
@@ -3684,13 +3756,15 @@ class BatchKVCache(_BaseCache):
                     f"{type(self).__name__}.{name} holds {ledger.shape[axis]} positions but the cursor is at {hi}: the ledger is already out of step with the KV"
                 )
 
-    def _trim_ragged_aux(self, shifts, lo: int, hi: int, spec):
+    def _trim_ragged_aux(self, shifts, lo: int, hi: int, spec, reclaim: int = 0):
         """Roll the declared auxiliary ledgers with the same per-row shifts."""
         for name, axis in spec or ():
             ledger = getattr(self, name, None)
             if ledger is None:
                 continue
-            setattr(self, name, _roll_rows_right(ledger, shifts, axis, lo, hi))
+            setattr(
+                self, name, _roll_rows_right(ledger, shifts, axis, lo, hi, reclaim)
+            )
 
     def preflight_ragged_trim(self, n, *, validate: bool = True):
         """Run every entry-local check without mutating anything.
@@ -3717,8 +3791,11 @@ class BatchKVCache(_BaseCache):
         taken as a plain cursor move first, so an all-equal rewind is exactly
         as cheap as ``trim()`` and costs no padding.
 
-        The added left padding is reclaimed by the next ``filter()``, which
-        already shifts the batch left by the shared minimum.
+        The same gather also drops the left padding every row now shares.
+        The self-MTP cohort never calls ``filter()`` while its membership is
+        stable, so padding left in place would grow by the rejection spread
+        every cycle, widening the attention span and every later roll with
+        columns no row reads.
         """
         (drops, uniform, residual, spec) = self.preflight_ragged_trim(
             n, validate=validate
@@ -3731,14 +3808,52 @@ class BatchKVCache(_BaseCache):
             self.offset -= uniform
         if max(residual) > 0:
             shifts = mx.array(residual)
+            floor = [p + r for (p, r) in zip(self._padding_floor(), residual)]
+            # Only processed columns are removable, and a window with no valid
+            # cell left keeps the plain roll.
+            reclaim = min(floor)
+            if reclaim >= self._idx:
+                reclaim = 0
             if self.keys is not None:
-                self.keys = _roll_rows_right(self.keys, shifts, 2, 0, self._idx)
-                self.values = _roll_rows_right(self.values, shifts, 2, 0, self._idx)
-            self._trim_ragged_aux(shifts, 0, self._idx, spec)
-            self.left_padding = self.left_padding + shifts
+                self.keys = _roll_rows_right(
+                    self.keys, shifts, 2, 0, self._idx, reclaim
+                )
+                self.values = _roll_rows_right(
+                    self.values, shifts, 2, 0, self._idx, reclaim
+                )
+            self._trim_ragged_aux(shifts, 0, self._idx, spec, reclaim)
+            self._idx -= reclaim
+            self.left_padding = self.left_padding + (
+                mx.array([r - reclaim for r in residual]) if reclaim else shifts
+            )
+            self._host_padding_floor = (
+                self.left_padding,
+                [p - reclaim for p in floor],
+            )
             self.offset = self.offset - shifts
             self._tie_row_metadata()
         return drops
+
+    def _padding_floor(self) -> List[int]:
+        """A host lower bound on each row's left padding, with no device read.
+
+        The bound is keyed by the identity of the ``left_padding`` array it
+        describes. Every in-place update of that array only adds padding
+        (``prepare`` and ``finalize``) and every other change rebinds it, so
+        a matching identity means the bound still holds, and a mismatch
+        (``filter``, ``extend``, a ``state`` restore, an external rebinding)
+        falls back to zero, which is always safe. The floor then only ever
+        underestimates what can be reclaimed.
+        """
+        rows = int(self.left_padding.shape[0])
+        cached = getattr(self, "_host_padding_floor", None)
+        if (
+            cached is not None
+            and cached[0] is self.left_padding
+            and len(cached[1]) == rows
+        ):
+            return list(cached[1])
+        return [0] * rows
 
     def make_mask(self, N: int, return_array: bool = False, **kwargs):
         return create_causal_mask(
@@ -3757,13 +3872,18 @@ class BatchKVCache(_BaseCache):
         self.left_padding = self.left_padding[batch_indices]
         # A surviving row can still have padding in future prefill chunks.
         # Only columns already processed by the shared cursor are removable.
-        min_left_pad = min(int(self.left_padding.min().item()), self._idx)
+        padding = [int(v) for v in self.left_padding.tolist()]
+        min_left_pad = min(min(padding), self._idx)
         if min_left_pad > 0:
             if self.keys is not None:
                 self.keys = self.keys[..., min_left_pad:, :]
                 self.values = self.values[..., min_left_pad:, :]
             self._idx -= min_left_pad
             self.left_padding -= min_left_pad
+        self._host_padding_floor = (
+            self.left_padding,
+            [p - min_left_pad for p in padding],
+        )
 
     def extend(self, other):
         """

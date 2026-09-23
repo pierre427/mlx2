@@ -148,13 +148,19 @@ def test_ragged_verify_rounds_do_not_chain_row_metadata():
         expected_padding = [
             pad + drop - uniform for (pad, drop) in zip(expected_padding, drops)
         ]
-    for cache in (BatchKVCache([0] * rows), BatchQuantizedKVCache([0] * rows)):
+    # BatchKVCache also drops the padding every row shares after each trim.
+    shared = min(expected_padding)
+    reclaimed = [pad - shared for pad in expected_padding]
+    for cache, padding in (
+        (BatchKVCache([0] * rows), reclaimed),
+        (BatchQuantizedKVCache([0] * rows), expected_padding),
+    ):
         _ragged_rounds(cache, rounds, width, dim=64)
         # One pending rebinding from the last trim is expected; one node per
         # round is the leak (mlx-lm#1911: live buffers until malloc refuses).
         assert _lazy_nodes(cache.left_padding) <= 2, type(cache).__name__
         assert _lazy_nodes(cache.offset) <= 2, type(cache).__name__
-        assert cache.left_padding.tolist() == expected_padding
+        assert cache.left_padding.tolist() == padding
 
 
 def _self_mtp_left_padding_run(monkeypatch, rounds, tie):
@@ -212,3 +218,94 @@ def test_batched_self_mtp_keeps_unmasked_layer_metadata_evaluated(monkeypatch):
     assert max(chains) <= 2
     assert tokens == leaky_tokens
     assert sum(map(len, tokens)) > 120
+
+
+def _ragged_reference_run(cache, rounds, pattern, *, qsa):
+    """Drive ragged verify rounds and check every row against a host oracle.
+
+    Each round appends three tokens per row (every fourth round with right
+    padding, as a ragged self-MTP verify of unequal draft depth does) and
+    then rewinds the rows by different amounts. The oracle is the list of
+    token ids each row must still hold; row ``i`` of the batch cache must
+    extract exactly that sequence, keys, values and (for QSA) raw index keys.
+    Returns the shared left padding (``min(left_padding)``) after each round.
+    """
+    rows = cache.left_padding.shape[0]
+    initial = cache.left_padding.tolist()
+    oracle = [list(range(1000 * row, 1000 * row + 6 - pad)) for row, pad in
+              enumerate(initial)]
+    shared = []
+
+    def append(tokens, right):
+        width = max(len(t) + r for t, r in zip(tokens, right))
+        grid = [[0.0] * (width - len(t) - r) + [float(v) for v in t] + [-1.0] * r
+                for t, r in zip(tokens, right)]
+        keys = mx.broadcast_to(mx.array(grid)[:, None, :, None], (rows, 1, width, 2))
+        if qsa:
+            cache.update_index_keys(mx.array(grid)[:, :, None] + 0.25)
+        cache.update_and_fetch(keys, keys + 0.5)
+
+    append([row[:] for row in oracle], [0] * rows)
+    counter = 5000
+    for step in range(rounds):
+        right = [(row + step) % 3 for row in range(rows)] if step % 4 == 3 else [0] * rows
+        fresh = []
+        for row in range(rows):
+            fresh.append(list(range(counter, counter + 3 - right[row])))
+            counter += 3
+        if max(right):
+            cache.prepare(lengths=[3 - r for r in right], right_padding=right)
+        append(fresh, right)
+        if max(right):
+            cache.finalize()
+        for row in range(rows):
+            oracle[row].extend(fresh[row])
+        drops = pattern(step, [len(t) for t in oracle])
+        cache.trim_ragged(drops)
+        for row in range(rows):
+            del oracle[row][len(oracle[row]) - drops[row]:]
+            got = cache.extract(row)
+            want = mx.array([float(v) for v in oracle[row]])
+            assert got.offset == len(oracle[row])
+            assert mx.array_equal(got.keys[0, 0, :, 0], want).item(), (step, row)
+            assert mx.array_equal(got.values[0, 0, :, 0], want + 0.5).item()
+            if qsa:
+                assert mx.array_equal(got.index_keys[0, :, 0], want + 0.25).item()
+        shared.append(min(cache.left_padding.tolist()))
+    return shared
+
+
+def test_ragged_trim_reclaims_shared_padding_and_keeps_every_row():
+    """X3-4: the physical self-MTP cohort never calls ``filter()``.
+
+    A ragged trim rolled each row right and left the added padding in place,
+    so under alternating rejections every row gained padding each cycle and
+    the shared width, the attention span and every later roll kept growing
+    with columns no row reads. The trim now drops the padding all rows share
+    in the same gather; every row's content must still match the oracle.
+    """
+    import random
+
+    from mlx2.runtime.models.cache import BatchKVCache
+    from mlx2.runtime.models.qwen4_exp import BatchQSAKVCache
+
+    rng = random.Random(5)
+    patterns = {
+        "alternating": lambda step, _lengths: [2, 0, 1] if step % 2 else [0, 2, 1],
+        "random": lambda _step, lengths: [rng.randint(0, 2) for _ in lengths],
+    }
+    for qsa in (False, True):
+        for name, pattern in patterns.items():
+            cls = BatchQSAKVCache if qsa else BatchKVCache
+            cache = cls([0, 3, 1])
+            shared = _ragged_reference_run(cache, 60, pattern, qsa=qsa)
+            # Without the reclaim the shared padding grows by about one
+            # column per cycle (about 60 here). With it only the right
+            # padding of a verify that a uniform rewind followed is still
+            # shared, and the next ragged trim takes it.
+            assert max(shared) <= 2, (cls.__name__, name, shared[-5:])
+    # A restore to an unknown geometry forgets the host floor: the trim must
+    # then reclaim nothing it cannot prove is padding, and stay exact.
+    cache = BatchKVCache([0, 3, 1])
+    cache._host_padding_floor = None
+    _ragged_reference_run(cache, 12, patterns["alternating"], qsa=False)

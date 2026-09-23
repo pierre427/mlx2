@@ -94,12 +94,12 @@ def _cache_offsets(caches):
     return offsets
 
 
-def _prepare_lane(model, uid, prompt, *, share_qsa_indices=False):
+def _prepare_lane(model, uid, prompt, *, share_qsa_indices=False, max_tokens=8):
     return prepare_self_mtp_lane(
         mx.array(prompt, mx.uint32),
         model,
         uid=uid,
-        max_tokens=8,
+        max_tokens=max_tokens,
         prompt_cache=None,
         mtp_state=None,
         lane_rng=LaneRNG(700 + uid),
@@ -399,6 +399,69 @@ class TestQwen4ForcedAcceptanceCacheEquality(unittest.TestCase):
                     ]
                     self.assertTrue(qsa)
                     self.assertTrue(all(cache.index_keys is not None for cache in qsa))
+
+
+def _forced_cycles(model, prompts, accepts_per_cycle, uids):
+    """Run several forced-acceptance self-MTP cycles; return tokens and batch."""
+    lanes = [
+        _prepare_lane(model, uid, prompt, max_tokens=1000)
+        for uid, prompt in zip(uids, prompts)
+    ]
+    batch = attach_self_mtp_lanes(model, None, lanes)
+    tokens = [[] for _ in prompts]
+    for accepts in accepts_per_cycle:
+        pending = iter(accepts)
+
+        def force(logprobs, _draft_lps, _drafts, _temperature, *, rng=None):
+            accepted = next(pending)
+            return accepted, int(mx.argmax(logprobs[accepted]).item())
+
+        with patch(
+            "mlx2.runtime.hybrid_speculative._batched_residual_verify",
+            side_effect=force,
+        ):
+            proposal = propose_batched_self_mtp(model, batch)
+        commit_batched_self_mtp(
+            batch,
+            proposal,
+            emitted_counts=[len(row) for row in proposal.outputs],
+            terminal=[False] * len(prompts),
+        )
+        for row, output in enumerate(proposal.outputs):
+            tokens[row].extend(item.token for item in output)
+    return tokens, batch
+
+
+def test_physical_ragged_cycles_keep_padding_bounded_and_tokens_exact():
+    """X3-4: rows that keep rejecting different amounts on the physical route.
+
+    The cohort never runs ``filter()`` while its membership is stable, so the
+    padding a ragged trim adds used to stay: under alternating rejections the
+    shared width grew by a column per cycle while the rows did not. Every
+    lane's tokens must still equal the same lane run alone.
+    """
+    mx.random.seed(41)
+    model = _tiny_qwen4_model()
+    prompts = ([1, 2, 3, 4, 5], [7, 8, 9, 10, 11, 12])
+    cycles = 16
+    accepts = [(2, 0) if cycle % 2 == 0 else (0, 2) for cycle in range(cycles)]
+    tokens, batch = _forced_cycles(model, prompts, accepts, uids=[0, 1])
+    physical = [
+        cache
+        for cache in batch.caches.target + batch.caches.draft
+        if isinstance(cache, BatchQSAKVCache)
+    ]
+    assert physical
+    for cache in physical:
+        offsets = cache.offset.tolist()
+        # Only the length difference between the rows remains as padding.
+        assert cache._idx == max(offsets), (cache._idx, offsets)
+        assert min(cache.left_padding.tolist()) == 0
+    for row, prompt in enumerate(prompts):
+        alone, _ = _forced_cycles(
+            model, [prompt], [(pair[row],) for pair in accepts], uids=[row]
+        )
+        assert tokens[row] == alone[0]
 
 
 def test_mtp_warm_prefix_without_draft_state_is_refused_at_insert():
