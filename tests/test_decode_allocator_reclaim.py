@@ -112,3 +112,103 @@ def test_self_mtp_reclaim_follows_emitted_tokens(monkeypatch):
         gen.close()
     assert emitted >= 32
     assert calls["n"] >= emitted // 16 - 1
+
+
+def _lazy_nodes(array):
+    """Unevaluated primitive nodes hanging off ``array`` (0 when evaluated)."""
+    import io
+    import re
+
+    buffer = io.StringIO()
+    mx.export_to_dot(buffer, array)
+    return len(re.findall(r"shape=rectangle", buffer.getvalue()))
+
+
+def _ragged_rounds(cache, rounds, width, dim):
+    """Append ``width`` tokens, evaluate the returned K/V, then trim raggedly.
+
+    This is what a verify round does on a full-attention layer whose mask the
+    forward never builds: its K/V are consumed, its ``left_padding`` is not.
+    """
+    rows = cache.left_padding.shape[0]
+    for step in range(rounds):
+        keys = mx.full((rows, 1, width, dim), float(step))
+        mx.eval(cache.update_and_fetch(keys, keys + 1))
+        cache.trim_ragged([(row + step) % width for row in range(rows)])
+
+
+def test_ragged_verify_rounds_do_not_chain_row_metadata():
+    from mlx2.runtime.models.cache import BatchKVCache, BatchQuantizedKVCache
+
+    rounds, width, rows = 200, 3, 3
+    expected_padding = [0] * rows
+    for step in range(rounds):
+        drops = [(row + step) % width for row in range(rows)]
+        uniform = min(drops)
+        expected_padding = [
+            pad + drop - uniform for (pad, drop) in zip(expected_padding, drops)
+        ]
+    for cache in (BatchKVCache([0] * rows), BatchQuantizedKVCache([0] * rows)):
+        _ragged_rounds(cache, rounds, width, dim=64)
+        # One pending rebinding from the last trim is expected; one node per
+        # round is the leak (mlx-lm#1911: live buffers until malloc refuses).
+        assert _lazy_nodes(cache.left_padding) <= 2, type(cache).__name__
+        assert _lazy_nodes(cache.offset) <= 2, type(cache).__name__
+        assert cache.left_padding.tolist() == expected_padding
+
+
+def _self_mtp_left_padding_run(monkeypatch, rounds, tie):
+    from mlx2.runtime.models import cache as C
+
+    if not tie:
+        monkeypatch.setattr(
+            C.BatchKVCache, "_tie_row_metadata", lambda self: None, raising=False
+        )
+    model = tiny_model()
+    lanes = 3
+    gen = G.BatchGenerator(model, completion_batch_size=lanes,
+                           prefill_batch_size=lanes, prefill_step_size=64,
+                           self_mtp={"num_draft": 2, "persistent": True})
+    tokens = [[] for _ in range(lanes)]
+    try:
+        gen.insert(
+            [[(i * (k + 3)) % 97 + 2 for i in range(20 + 13 * k)] for k in range(lanes)],
+            max_tokens=[rounds * 4 + 50] * lanes,
+            lane_rngs=[LaneRNG(11 + k) for k in range(lanes)],
+            # Sampling makes lanes accept different draft counts, so every
+            # verify round takes the ragged trim.
+            self_mtp_configs=[{"sampling_temp": 1.0}] * lanes,
+        )
+        for _ in range(rounds):
+            _p, responses = gen.next()
+            for response in responses:
+                tokens[response.uid].append(response.token)
+        caches = gen._generation_batch.state.caches.target
+        chains = [
+            _lazy_nodes(c.left_padding)
+            for c in caches
+            if isinstance(c, C.BatchKVCache)
+        ]
+    finally:
+        gen.close()
+    monkeypatch.undo()
+    return (tokens, chains)
+
+
+def test_batched_self_mtp_keeps_unmasked_layer_metadata_evaluated(monkeypatch):
+    """Only one full-attention layer's mask reads ``left_padding``.
+
+    The tiny model has two full-attention layers; the one the forward does not
+    build a mask for used to gain a lazy node and a live buffer per verify
+    round until a membership change happened to evaluate it.
+    """
+    (leaky_tokens, leaky_chains) = _self_mtp_left_padding_run(
+        monkeypatch, 120, tie=False
+    )
+    (tokens, chains) = _self_mtp_left_padding_run(monkeypatch, 120, tie=True)
+    assert len(leaky_chains) == 2
+    # The falsifier: without the tie the unmasked layer does chain.
+    assert max(leaky_chains) > 50
+    assert max(chains) <= 2
+    assert tokens == leaky_tokens
+    assert sum(map(len, tokens)) > 120

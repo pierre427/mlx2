@@ -2976,6 +2976,18 @@ class BatchQuantizedKVCache(_BaseCache):
         self.offset -= padding
         self.left_padding += padding
         self._right_padding = None
+        self._tie_row_metadata()
+
+    def _tie_row_metadata(self):
+        """Make evaluating K/V also evaluate the rebound per-row metadata.
+
+        See ``BatchKVCache._tie_row_metadata``: layers whose mask is never
+        built would otherwise chain one lazy node per verify round.
+        """
+        if self.keys is not None:
+            self.keys = tree_map(
+                lambda a: mx.depends(a, (self.left_padding, self.offset)), self.keys
+            )
 
     @property
     def state(self):
@@ -3068,6 +3080,7 @@ class BatchQuantizedKVCache(_BaseCache):
                 self.values = tree_map(roll, self.values)
             self.left_padding = self.left_padding + shifts
             self.offset = self.offset - shifts
+            self._tie_row_metadata()
         return drops
 
     def make_mask(self, N: int, return_array: bool = False, **kwargs):
@@ -3539,6 +3552,20 @@ class BatchKVCache(_BaseCache):
             self.offset -= padding
             self.left_padding += padding
             self._right_padding = None
+            self._tie_row_metadata()
+
+    def _tie_row_metadata(self):
+        """Make evaluating K/V also evaluate the rebound per-row metadata.
+
+        Only the layer whose mask the forward builds ever reads
+        ``left_padding``. On every other full-attention layer a rebinding
+        with a fresh ``shifts`` buffer each verify round would otherwise
+        grow an unevaluated chain (one node and one live buffer per round)
+        until the next membership change, the same live-buffer exhaustion
+        ``BatchRotatingKVCache`` avoids with ``mx.depends``.
+        """
+        if self.keys is not None:
+            self.keys = mx.depends(self.keys, (self.left_padding, self.offset))
 
     @property
     def state(self):
@@ -3661,6 +3688,7 @@ class BatchKVCache(_BaseCache):
             self._trim_ragged_aux(shifts, 0, self._idx, spec)
             self.left_padding = self.left_padding + shifts
             self.offset = self.offset - shifts
+            self._tie_row_metadata()
         return drops
 
     def make_mask(self, N: int, return_array: bool = False, **kwargs):
