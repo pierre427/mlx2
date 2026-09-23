@@ -48,6 +48,26 @@ def _message_text(messages) -> str:
     return "\n".join(values)
 
 
+def _with_preamble(messages, preamble: str) -> list:
+    """Put the retrieval preamble first in the one leading system message.
+
+    Templates such as Qwen3.5/3.6 reject a system message anywhere but first,
+    so a caller's own system prompt must not become a second one.  The
+    preamble leads, then a blank line, then the caller's system content.
+    """
+    first = messages[0] if messages else None
+    if not isinstance(first, Mapping) or first.get("role") != "system":
+        return [{"role": "system", "content": preamble}, *messages]
+    content = first.get("content")
+    if isinstance(content, list):
+        merged = [{"type": "text", "text": preamble + "\n\n"}, *content]
+    elif isinstance(content, str) and content:
+        merged = preamble + "\n\n" + content
+    else:
+        merged = preamble
+    return [{**first, "content": merged}, *messages[1:]]
+
+
 @dataclass(frozen=True, slots=True)
 class SemanticRequestState:
     context: DirectoryContext
@@ -169,10 +189,7 @@ class SemanticServingMiddleware:
         preamble = result.preamble()
         prepared = dict(body)
         if preamble and self.bridge_mode in {"rendered", "hybrid"}:
-            prepared["messages"] = [
-                {"role": "system", "content": preamble},
-                *messages,
-            ]
+            prepared["messages"] = _with_preamble(messages, preamble)
         selected_neural = ()
         neural_artifact = None
         fingerprint_parts = [resolved.fingerprint]

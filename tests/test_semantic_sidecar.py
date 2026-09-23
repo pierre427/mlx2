@@ -52,6 +52,52 @@ class SemanticSidecarTests(unittest.TestCase):
         self.assertIn("my favorite trail has_property cedar loop", prepared["messages"][0]["content"])
         self.assertGreater(state.retrieved_concepts, 0)
 
+    def test_preamble_joins_the_callers_leading_system_message(self):
+        # Qwen3.5/3.6 templates reject a second system message, so a stored
+        # fact must not turn the caller's system prompt into one.
+        _, state = self.sidecar.prepare(
+            {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "Remember that my favorite trail is Cedar Loop.",
+                    }
+                ],
+                "session_id": "walk",
+            },
+            tenant_id="alice@example",
+            authenticated_tenant=True,
+        )
+        self.assertTrue(self.sidecar.complete(state, "Okay.")["committed"])
+        question = {"role": "user", "content": "What is my favorite trail?"}
+        for system_content in (
+            "You are terse.",
+            [{"type": "text", "text": "You are terse."}],
+        ):
+            body = {
+                "messages": [
+                    {"role": "system", "content": system_content},
+                    question,
+                ],
+                "session_id": "walk",
+            }
+            prepared, _ = self.sidecar.prepare(
+                body, tenant_id="alice@example", authenticated_tenant=True
+            )
+            messages = prepared["messages"]
+            self.assertEqual([m["role"] for m in messages], ["system", "user"])
+            self.assertEqual(messages[1], question)
+            self.assertEqual(body["messages"][0]["content"], system_content)
+            content = messages[0]["content"]
+            if isinstance(system_content, list):
+                self.assertEqual(content[1:], system_content)
+                content = content[0]["text"] + system_content[0]["text"]
+            preamble, original = content.split("\n\n", 1)[0], content.rsplit(
+                "\n\n", 1
+            )[1]
+            self.assertIn("my favorite trail has_property cedar loop", preamble)
+            self.assertEqual(original, "You are terse.")
+
     def test_no_durable_write_without_authenticated_tenant(self):
         body = {
             "messages": [{"role": "user", "content": "Remember that the code is amber."}],
