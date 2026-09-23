@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: MIT
 # Standalone APCv2; provenance and retained notices in provenance/.
 from __future__ import annotations
+import ast
 import copy
 from bisect import bisect_left
 from contextlib import ExitStack
@@ -229,6 +230,62 @@ def _key_from_manifest(value: dict) -> APCKey:
         return item
 
     return APCKey(**{name: freeze(value[name]) for name in fields})
+
+
+# Serving's base semantic namespaces (``serving.cache_semantic_fingerprint``)
+# and the per-request scope suffix ``cache_key_for`` appends for media, LoRA and
+# hyper-directory requests.
+_SEMANTIC_TEXT_NAMESPACE = "text-token-v1"
+_SEMANTIC_SCOPE_SEPARATOR = ":media:"
+
+
+def _is_int8_semantic_wrapper(semantic) -> bool:
+    """Whether ``semantic`` is ``int8_prefill.apc_semantic_fingerprint``'s wrapper."""
+    return (
+        isinstance(semantic, tuple)
+        and len(semantic) == 3
+        and semantic[1] == "int8-prefill"
+    )
+
+
+def _is_tenant_semantic(semantic) -> bool:
+    return (
+        isinstance(semantic, tuple)
+        and len(semantic) == 3
+        and semantic[:2] == (_SEMANTIC_TEXT_NAMESPACE, "tenant")
+        and isinstance(semantic[2], str)
+    )
+
+
+def _serving_semantic_mode(semantic) -> Optional[str]:
+    """Classify a serving semantic namespace as ``shared``, ``tenant`` or None.
+
+    Scoped keys are ``f"{base}:media:{scope}"``.  A tenant base formats as the
+    tuple's repr, and the tenant id itself may contain the separator, so every
+    split point is tried until the head parses back to a tenant tuple.
+    """
+    if semantic == _SEMANTIC_TEXT_NAMESPACE:
+        return "shared"
+    if _is_tenant_semantic(semantic):
+        return "tenant"
+    if not isinstance(semantic, str):
+        return None
+    head, separator, scope = semantic.partition(_SEMANTIC_SCOPE_SEPARATOR)
+    if separator and scope and head == _SEMANTIC_TEXT_NAMESPACE:
+        return "shared"
+    if not semantic.startswith(repr((_SEMANTIC_TEXT_NAMESPACE, "tenant"))[:-1]):
+        return None
+    start = 0
+    while (index := semantic.find(_SEMANTIC_SCOPE_SEPARATOR, start)) >= 0:
+        if index + len(_SEMANTIC_SCOPE_SEPARATOR) < len(semantic):
+            try:
+                value = ast.literal_eval(semantic[:index])
+            except (SyntaxError, ValueError, MemoryError, RecursionError):
+                value = None
+            if _is_tenant_semantic(value):
+                return "tenant"
+        start = index + 1
+    return None
 
 
 class _FixedHistogram:
@@ -669,15 +726,20 @@ class APCv2(PrefixIndex):
             if getattr(key, field) != getattr(expected, field):
                 return False
         semantic = key.semantic_fingerprint
-        if self._persist_semantic_namespace == "tenant":
-            return (
-                isinstance(semantic, tuple)
-                and len(semantic) == 3
-                and semantic[:2] == ("text-token-v1", "tenant")
-            )
-        if self._persist_semantic_namespace == "shared":
-            return semantic == "text-token-v1"
-        return semantic == expected.semantic_fingerprint
+        namespace = self._persist_semantic_namespace
+        if namespace not in {"tenant", "shared"}:
+            return semantic == expected.semantic_fingerprint
+        # Int8 prefill wraps every serving namespace in the same numerics
+        # revision, so the wrapper must match the template exactly: exact and
+        # int8 state, or two int8 revisions, never adopt each other's entries.
+        template = expected.semantic_fingerprint
+        if _is_int8_semantic_wrapper(template):
+            if not _is_int8_semantic_wrapper(semantic) or semantic[1:] != template[1:]:
+                return False
+            semantic = semantic[0]
+        elif _is_int8_semantic_wrapper(semantic):
+            return False
+        return _serving_semantic_mode(semantic) == namespace
 
     @staticmethod
     def _strict_child(directory: Path, name: object) -> Path:

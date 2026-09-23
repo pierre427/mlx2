@@ -3,6 +3,7 @@
 import json
 import os
 import time
+from dataclasses import replace
 from pathlib import Path
 
 import mlx.core as mx
@@ -314,6 +315,111 @@ def test_rescan_discards_identity_mismatch_and_counts_it(tmp_path):
     assert rescan["discarded"]["identity_mismatch"] == 1
     assert not list(tmp_path.glob("apc-idle-*.manifest.json"))
     second.close()
+
+
+class _Int8Policy:
+    """Stand-in for an enabled ``Int8PrefillPolicy`` (only the fields used)."""
+
+    enabled = True
+
+    def __init__(self, revision):
+        self.revision = revision
+
+
+def _serving_semantic(tenant, *, scope=None, int8_revision=None):
+    """Build a semantic fingerprint exactly as serving's ``cache_key_for`` does."""
+    from mlx2.runtime.int8_prefill import apc_semantic_fingerprint
+    from mlx2.serving import cache_semantic_fingerprint
+
+    semantic = cache_semantic_fingerprint(tenant)
+    if scope:
+        semantic = f"{semantic}:media:{scope}"
+    policy = _Int8Policy(int8_revision) if int8_revision else None
+    return apc_semantic_fingerprint(semantic, policy)
+
+
+def _namespace_server(directory, namespace, *, int8_revision=None):
+    template = _serving_semantic(
+        "__tenant_template__" if namespace == "tenant" else None,
+        int8_revision=int8_revision,
+    )
+    return APCv2(
+        max_size=16,
+        max_bytes=1 << 20,
+        layout_name="layout-a",
+        idle_disk_seconds=180,
+        idle_disk_dir=str(directory),
+        persist_dir=str(directory),
+        persist_identity=replace(_identity(), semantic_fingerprint=template),
+        persist_semantic_namespace=namespace,
+    )
+
+
+def _park_under(directory, namespace, semantic, *, int8_revision=None):
+    apc = _namespace_server(directory, namespace, int8_revision=int8_revision)
+    key = replace(_identity(), semantic_fingerprint=semantic)
+    tag = ("tenant-a", "parked")
+    apc.store(key, list(range(8)), [_state(8)], session_tag=tag)
+    assert apc.park_session(*tag, ttl_seconds=600)["state"] == "disk"
+    apc.close()
+    return key, tag
+
+
+@pytest.mark.parametrize("namespace", ("shared", "tenant"))
+@pytest.mark.parametrize(
+    "scope, int8_revision",
+    (
+        (None, "int8-rev-1"),
+        ("image-sha", None),
+        ("image-sha|lora:adapter-sha", "int8-rev-1"),
+        ("|lora:adapter-sha", None),
+        (("image-sha", "hyper-directory", "memory-sha"), None),
+    ),
+)
+def test_restart_keeps_int8_and_scoped_parked_sessions(
+    tmp_path, namespace, scope, int8_revision
+):
+    tenant = "tenant-a" if namespace == "tenant" else None
+    semantic = _serving_semantic(tenant, scope=scope, int8_revision=int8_revision)
+    key, tag = _park_under(tmp_path, namespace, semantic, int8_revision=int8_revision)
+
+    restarted = _namespace_server(tmp_path, namespace, int8_revision=int8_revision)
+    rescan = restarted.apc_stats["persistence"]["rescan"]
+    assert rescan["registered"] == 1 and rescan["discarded"] == {}
+    assert restarted.session_state(*tag)["state"] == "disk"
+    hit = restarted.lookup(key, list(range(8)) + [99], session_tag=tag)
+    assert hit.hit and hit.cached_tokens == 8
+    hit.cache.close()
+    restarted.close()
+
+
+@pytest.mark.parametrize(
+    "stored_namespace, restart_namespace, stored_revision, restart_revision",
+    (
+        ("shared", "tenant", None, None),
+        ("tenant", "shared", None, None),
+        ("shared", "shared", "int8-rev-1", "int8-rev-2"),
+        ("tenant", "tenant", "int8-rev-1", None),
+        ("shared", "shared", None, "int8-rev-1"),
+    ),
+)
+def test_restart_discards_other_namespace_mode_or_int8_revision(
+    tmp_path, stored_namespace, restart_namespace, stored_revision, restart_revision
+):
+    tenant = "tenant-a" if stored_namespace == "tenant" else None
+    semantic = _serving_semantic(
+        tenant, scope="image-sha", int8_revision=stored_revision
+    )
+    _park_under(tmp_path, stored_namespace, semantic, int8_revision=stored_revision)
+
+    restarted = _namespace_server(
+        tmp_path, restart_namespace, int8_revision=restart_revision
+    )
+    rescan = restarted.apc_stats["persistence"]["rescan"]
+    assert rescan["registered"] == 0
+    assert rescan["discarded"] == {"identity_mismatch": 1}
+    assert not list(tmp_path.glob("apc-idle-*.manifest.json"))
+    restarted.close()
 
 
 def test_corrupt_payload_registers_fast_then_fails_digest_at_restore(tmp_path):
