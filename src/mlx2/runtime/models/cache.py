@@ -2657,7 +2657,32 @@ class ArraysCache(_BaseCache):
                     self.cache[index] = mx.depends(value, metadata)
                     break
 
+    def _host_all_valid(self, N: int) -> bool:
+        """Whether every row is valid across an ``N``-token slab, host-side.
+
+        An unpadded prompt merged into a batch keeps ``left_padding`` at 0 and
+        ``advance`` drives it negative; a verify block sets ``lengths`` to its
+        own width. Both describe an all-True mask, and handing a GDN layer that
+        array instead of ``None`` refuses the fused decode kernel and the
+        packed kernel for no reason. Only mirrors that still describe the live
+        arrays are trusted, so this never reads the device: an unmirrored
+        field keeps the explicit mask.
+        """
+        for (value, cached, valid) in (
+            (self.left_padding, self._host_left_padding, lambda v: v <= 0),
+            (self.lengths, self._host_lengths, lambda v: v >= N),
+        ):
+            if value is None:
+                continue
+            if cached is None or cached[0] is not value:
+                return False
+            if not all((valid(v) for v in cached[1])):
+                return False
+        return True
+
     def make_mask(self, N: int):
+        if self._host_all_valid(N):
+            return None
         pos = mx.arange(N)
         mask = None
         if self.left_padding is not None:
