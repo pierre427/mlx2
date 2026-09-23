@@ -19,8 +19,10 @@ Workloads (all greedy, fixed max_tokens):
                  hits may be 0; TTFT/memory must not regress).
 
 Correctness: each measured request is replayed once per arm under a unique
-``X-Tenant-ID`` (no cache sharing: a cold prefill) and the greedy token text
-must match exactly.
+``X-Tenant-ID`` and the greedy token text must match exactly.  The server runs
+with ``--tenant-scoped-cache`` so that replay is a cold prefill, and a replay
+that reports any cached tokens fails the run: a reference that warm-hit the
+mechanism under test cannot judge it.
 
 Mechanism gate: an arm other than ``off`` whose shared_system/rag workload
 records zero interior hits is REFUSED (exit 3): a null arm is not evidence.
@@ -273,6 +275,10 @@ def server_command(args, policy_file: Path) -> list[str]:
         "--max-context", str(args.max_context), "--max-lanes", "1",
         "--max-inflight", "4", "--cache-bytes", str(args.cache_gib << 30),
         "--qualification-mode", "--execution-policy", str(policy_file),
+        # The cold reference replays under a fresh X-Tenant-ID; only a
+        # tenant-scoped APCv2 namespace keeps it from warm-hitting the
+        # entries the measured request just stored.
+        "--tenant-scoped-cache",
     ]
     if args.route == "ordinary":
         command.append("--ordinary")
@@ -357,6 +363,9 @@ def run_arm(args, arm: str, round_index: int, workloads: dict, reference: dict, 
                     )
                     reference[key] = cold["text"]
                     row["cold_ttft_s"] = cold["ttft_s"]
+                    # Asserted, not assumed: summarize() fails a row whose
+                    # reference reused any cached prefix.
+                    row["cold_cached_tokens"] = cold["cached_tokens"]
                     if index == 0:
                         # Determinism control: a second cold-tenant replay of
                         # the same prompt.  A warm-vs-cold diff is evidence
@@ -367,6 +376,7 @@ def run_arm(args, arm: str, round_index: int, workloads: dict, reference: dict, 
                             max_tokens=args.max_tokens, model=served_model,
                         )
                         row["cold_matches_cold"] = repeat["text"] == cold["text"]
+                        row["cold_repeat_cached_tokens"] = repeat["cached_tokens"]
                 row["matches_cold"] = warm["text"] == reference[key]
                 rows.append(row)
                 print(
@@ -387,6 +397,17 @@ def run_arm(args, arm: str, round_index: int, workloads: dict, reference: dict, 
         except Exception:  # noqa: BLE001
             os.killpg(server.pid, signal.SIGKILL)
         policy_file.unlink(missing_ok=True)
+
+
+def _reference_was_cold(row: dict) -> bool:
+    """Whether the row's cold replays really prefilled from nothing.
+
+    A missing count fails too: without it the exactness comparison has no
+    evidence that the reference is independent of the checkpoint under test.
+    """
+    return row.get("cold_cached_tokens") == 0 and row.get(
+        "cold_repeat_cached_tokens", 0
+    ) == 0
 
 
 def summarize(runs: list, workloads) -> dict:
@@ -419,6 +440,7 @@ def summarize(runs: list, workloads) -> dict:
                 "cold_replay_diffs": sum(
                     1 for row in rows if row.get("cold_matches_cold") is False
                 ),
+                "warm_references": sum(1 for row in rows if not _reference_was_cold(row)),
             }
         summary["arms"][arm] = entry
     refused = []
@@ -435,6 +457,9 @@ def summarize(runs: list, workloads) -> dict:
         wl.get("cold_replay_diffs", 0)
         for entry in summary["arms"].values()
         for wl in entry.values()
+    )
+    warm_references = sum(
+        wl["warm_references"] for entry in summary["arms"].values() for wl in entry.values()
     )
     ttft_cut = {}
     off = summary["arms"].get("off", {})
@@ -458,6 +483,7 @@ def summarize(runs: list, workloads) -> dict:
     go = (
         not refused
         and diffs == 0
+        and warm_references == 0
         and all(ttft_cut.get(f"auto/{name}", 0.0) >= 0.30 for name in MUST_HIT if name in off)
         and (linear_regression is None or linear_regression <= 0.03)
     )
@@ -465,6 +491,7 @@ def summarize(runs: list, workloads) -> dict:
         "refused_arms": refused,
         "correctness_diffs": diffs,
         "cold_replay_diffs": cold_diffs,
+        "warm_references": warm_references,
         "ttft_cut": ttft_cut,
         "linear_ttft_regression": linear_regression,
         "go": go,
@@ -546,6 +573,7 @@ def main() -> int:
             "ttft_cut_min": 0.30,
             "linear_regression_max": 0.03,
             "correctness_diffs": 0,
+            "cold_reference_cached_tokens": 0,
         },
     }
     if args.dry_run:

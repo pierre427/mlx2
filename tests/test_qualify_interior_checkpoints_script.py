@@ -6,6 +6,7 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "qualify_interior_checkpoints.py"
 
@@ -17,10 +18,11 @@ def _module():
     return module
 
 
-def _row(index, *, hits, ttft, match=True, prompt=1000, cached=0):
+def _row(index, *, hits, ttft, match=True, prompt=1000, cached=0, cold_cached=0):
     return {
         "index": index, "ttft_s": ttft, "prompt_tokens": prompt,
         "cached_tokens": cached, "matches_cold": match,
+        "cold_cached_tokens": cold_cached,
         "mechanism": {
             "interior_hits": hits, "turn_boundary_hits": hits,
             "interior_resident_bytes": 10, "memory_admission_deferred": 0,
@@ -136,3 +138,88 @@ def test_server_subprocess_is_pinned_to_this_checkout(tmp_path, monkeypatch):
     first = module.server_env()["PYTHONPATH"].split(os.pathsep)
     assert first[0] == str(SCRIPT.resolve().parents[1] / "src")
     assert "/somewhere/else/src" in first
+
+
+def test_cold_reference_runs_with_a_tenant_scoped_cache():
+    # Regression: without --tenant-scoped-cache every X-Tenant-ID shares one
+    # APCv2 namespace, so the "cold" reference warm-hit the entry the measured
+    # request had just stored (cached_tokens 83 of 84) and exactness was
+    # compared against the mechanism under test.
+    from types import SimpleNamespace
+
+    from mlx2.server import build_parser
+
+    module = _module()
+    args = SimpleNamespace(model="/nonexistent", port=0, max_context=65536,
+                           cache_gib=24, route="ordinary")
+    command = module.server_command(args, Path("/tmp/policy.json"))
+    parsed = build_parser().parse_args(command[command.index("mlx2.server") + 1:])
+    assert parsed.tenant_scoped_cache is True
+
+
+class _FakeServer:
+    pid = 0
+
+    def poll(self):
+        return None
+
+    def wait(self, timeout=None):
+        return 0
+
+
+def _fake_client(cold_cached):
+    """A server whose measured request warm-hits; the cold replay hits ``cold_cached``."""
+
+    class Client:
+        throttled = 0
+
+        def __init__(self, base, timeout):
+            pass
+
+        def healthy(self):
+            return True
+
+        def status(self):
+            return {"model": "served", "counts": {},
+                    "settings": {"apc_interior_checkpoints": {"count": 4}}}
+
+        def chat(self, messages, *, tenant, max_tokens, model):
+            cold = tenant.startswith("cold-")
+            return {"ttft_s": 0.5 if cold else 0.1, "total_s": 1.0, "text": "same",
+                    "prompt_tokens": 84,
+                    "cached_tokens": cold_cached if cold else 83}
+
+    return Client
+
+
+def test_warm_hit_cold_reference_fails_the_run(tmp_path, monkeypatch):
+    module = _module()
+    monkeypatch.setattr(module.subprocess, "Popen", lambda *a, **k: _FakeServer())
+    monkeypatch.setattr(module.os, "killpg", lambda *a: None)
+    args = SimpleNamespace(
+        model="m", port=0, max_context=65536, cache_gib=1, route="ordinary",
+        base_policy=None, timeout=5, startup_timeout=5, max_tokens=8,
+    )
+    workloads = {name: [[{"role": "user", "content": "a"}],
+                        [{"role": "user", "content": "b"}]]
+                 for name in ("shared_system", "rag")}
+
+    def summarize(cold_cached):
+        monkeypatch.setattr(module, "Client", _fake_client(cold_cached))
+        runs = [module.run_arm(args, arm, 0, workloads, {}, tmp_path)
+                for arm in ("off", "auto")]
+        # The fake reports no interior hits; credit them so only the
+        # reference's coldness decides the verdict.
+        for run in runs:
+            for rows in run["workloads"].values():
+                for row in rows:
+                    row["mechanism"]["interior_hits"] = int(row["index"] > 0)
+                    row["ttft_s"] = 1.0 if run["arm"] == "off" else 0.2
+        return module.summarize(runs, list(workloads))["gates"]
+
+    # Warm text equals the "reference" text: matches_cold alone would pass.
+    warm_reference = summarize(83)
+    assert warm_reference["correctness_diffs"] == 0
+    assert warm_reference["warm_references"] > 0 and not warm_reference["go"]
+    cold_reference = summarize(0)
+    assert cold_reference["warm_references"] == 0 and cold_reference["go"]
