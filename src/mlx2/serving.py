@@ -1121,6 +1121,15 @@ class Job:
     lora_slot: int | None = None
     lora_residency: str | None = None
     neural_concept_receipt: dict | None = None
+    # The bounded event queue overflowed: None, "pending" (decided at finish,
+    # the 429 not yet queued) or "delivered".  The 429 is the only terminal.
+    output_overflow: str | None = None
+
+
+OUTPUT_OVERFLOW_EVENT = {
+    "error": "client did not consume output fast enough",
+    "status": 429,
+}
 
 
 def take_prompt_progress(job, event):
@@ -3032,20 +3041,47 @@ class ServingEngine:
         }
 
     def _emit(self, job, event):
+        if getattr(job, "output_overflow", None) is not None:
+            # The client's stream already ended with the overflow 429; later
+            # events (including this job's own finish) must not add terminals.
+            return
         try:
             job.events.put_nowait(event)
         except queue.Full:
-            job.cancelled.set()
-            try:
-                job.events.get_nowait()
-                job.events.put_nowait(
-                    {
-                        "error": "client did not consume output fast enough",
-                        "status": 429,
-                    }
-                )
-            except (queue.Empty, queue.Full):
-                pass
+            job.output_overflow = "pending"
+            self._deliver_output_overflow(job)
+
+    @staticmethod
+    def _deliver_output_overflow(job):
+        """Queue the one overflow 429, dropping the oldest undelivered event."""
+        job.output_overflow = "delivered"
+        job.cancelled.set()
+        try:
+            job.events.get_nowait()
+        except queue.Empty:
+            pass
+        try:
+            job.events.put_nowait(dict(OUTPUT_OVERFLOW_EVENT))
+        except queue.Full:
+            pass
+
+    @staticmethod
+    def _claim_output_overflow(job, event=None):
+        """Whether ``job``'s stream has failed or has no room for ``event``.
+
+        Decided once, before a terminal is counted, so a finish that would
+        overflow is recorded as the 429 the client receives, not completed.
+        A client's own cancellation stays a cancellation: nobody reads it.
+        """
+        events = getattr(job, "events", None)
+        if (
+            getattr(job, "output_overflow", None) is None
+            and events is not None
+            and events.full()
+            and (event or {}).get("error") != "cancelled"
+        ):
+            job.output_overflow = "pending"
+        return getattr(job, "output_overflow", None) is not None
 
     def _emit_prompt_progress(self, job, progress, *, replay=False):
         """Queue a coalesced ``prompt_progress`` update for a return_progress job.
@@ -3132,6 +3168,7 @@ class ServingEngine:
             if job.uid is not None:
                 manager.unbind_uid(job.uid)
             manager.release(lora_slot)
+        overflowed = self._claim_output_overflow(job, event)
         waiting_siblings = ()
         with self.lock:
             fanout_role = getattr(job, "fanout_role", None)
@@ -3155,7 +3192,9 @@ class ServingEngine:
                     self.counts["jobs_drained"] += 1
                 self.slots.release()
                 status = (
-                    "completed"
+                    "failed"
+                    if overflowed
+                    else "completed"
                     if "finish_reason" in event
                     else "cancelled"
                     if event.get("error") == "cancelled"
@@ -3167,7 +3206,10 @@ class ServingEngine:
                     if callable(finishing):
                         finishing(job.id, event.get("finish_reason"))
                     metrics.terminal(job.id, status)
-        self._emit(job, event)
+        if getattr(job, "output_overflow", None) == "pending":
+            self._deliver_output_overflow(job)
+        else:
+            self._emit(job, event)
         if waiting_siblings:
             prepared = self.fanout_capsules.pop(fanout_group, None)
             if prepared is not None:
@@ -7014,6 +7056,13 @@ class ServingEngine:
                                         "status": 500,
                                     },
                                 )
+                                del active[response.uid]
+                                continue
+                            if self._claim_output_overflow(job):
+                                # The client cannot receive this completion:
+                                # it gets the overflow 429, so neither the
+                                # receipt nor a completion is recorded.
+                                self._finish(job, dict(OUTPUT_OVERFLOW_EVENT))
                                 del active[response.uid]
                                 continue
                             self.receipt_log.append(

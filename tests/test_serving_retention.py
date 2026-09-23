@@ -628,3 +628,60 @@ def test_cancelled_prefilling_cohort_member_spares_queued_ungrouped_work(
     assert results[2].get("error") is None
     assert results[2]["finish"] == "length" and len(results[2]["tokens"]) == 4
     assert alive and error is None
+
+
+@pytest.mark.parametrize(
+    "max_tokens, logprobs",
+    [(256, False), (300, True)],
+    ids=["overflow_on_finish", "overflow_mid_decode"],
+)
+def test_output_overflow_is_one_429_terminal_counted_failed(
+    monkeypatch, max_tokens, logprobs
+):
+    """A slow reader overflowing its 256-event queue gets exactly one 429.
+
+    Every later emission used to queue another 429 terminal, and the request
+    was counted as a client cancellation; an overflow landing on the finish
+    event itself was counted completed with a logged receipt while the
+    client got the 429.
+    """
+    from route_harness import make_engine, patch_host, tiny_qwen38_mtp
+
+    patch_host(monkeypatch)
+    model, vocab = tiny_qwen38_mtp()
+    engine = make_engine(model, vocab, mtp=False, max_lanes=2)
+
+    def outcomes():
+        counters = engine.batch_metrics.prometheus_snapshot()["counters"]
+        return {
+            dict(labels)["outcome"]: value
+            for (name, labels), value in counters.items()
+            if name == "mlx2_requests_total"
+        }
+
+    try:
+        job = engine.submit({
+            "tokens": list(range(1, 20)), "max_tokens": max_tokens,
+            "temperature": 0, "logprobs": logprobs,
+        })
+        deadline = time.monotonic() + 60
+        while engine.jobs and time.monotonic() < deadline:
+            time.sleep(0.05)
+        time.sleep(0.2)
+        events = []
+        while not job.events.empty():
+            events.append(job.events.get_nowait())
+        terminals = [e for e in events if "error" in e or "finish_reason" in e]
+        assert terminals == [
+            {"error": "client did not consume output fast enough", "status": 429}
+        ]
+        assert events[-1] is terminals[0]
+        assert outcomes().get("failed") == 1
+        assert not outcomes().get("completed") and not outcomes().get("cancelled")
+        assert engine.recent_receipts() == []
+        assert engine.counts["completed"] == 0
+        assert engine.slots._value == engine.max_inflight
+        alive, error = engine.thread.is_alive(), engine.error
+    finally:
+        engine.close()
+    assert alive and error is None
