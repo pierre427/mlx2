@@ -6,7 +6,7 @@ import pytest
 
 from mlx2.api_resources import BatchManager, FileStore, ResourceNotFound, ResponseStore
 from mlx2.openai_compat import responses_input_items
-from mlx2.serving import AdmissionClosed
+from mlx2.serving import AdmissionClosed, Overloaded
 
 
 def test_response_store_round_trips_across_restart_and_is_tenant_scoped(tmp_path):
@@ -233,3 +233,100 @@ def test_batch_drain_rejection_is_a_503_response_not_invalid_request():
     assert row["error"] is None
     assert row["response"]["status_code"] == 503
     assert row["response"]["body"]["error"]["code"] == "server_unavailable"
+
+
+def _one_row_batch(files, tenant="tenant"):
+    return files.create(
+        tenant,
+        filename="requests.jsonl",
+        purpose="batch",
+        content_type="application/jsonl",
+        content=(
+            json.dumps(
+                {
+                    "custom_id": "row",
+                    "method": "POST",
+                    "url": "/v1/embeddings",
+                    "body": {"input": "hello"},
+                }
+            ).encode()
+            + b"\n"
+        ),
+    )
+
+
+def _wait_for_batch(manager, batch_id, terminal=("completed", "failed", "cancelled")):
+    deadline = time.monotonic() + 3
+    while time.monotonic() < deadline:
+        result = manager.get("tenant", batch_id)
+        if result["status"] in terminal:
+            return result
+        time.sleep(0.005)
+    raise AssertionError(f"batch still {result['status']}")
+
+
+def test_batch_row_that_stays_overloaded_is_a_429_not_invalid_request():
+    files = FileStore()
+    source = _one_row_batch(files)
+    attempts = []
+
+    def always_full(*_args):
+        attempts.append(time.monotonic())
+        raise Overloaded("maximum inflight requests reached")
+
+    manager = BatchManager(
+        files,
+        always_full,
+        overload_errors=(Overloaded,),
+        overload_backoff=(0.001, 0.001, 0.001),
+    )
+    batch = manager.create(
+        "tenant",
+        {
+            "input_file_id": source["id"],
+            "endpoint": "/v1/embeddings",
+            "completion_window": "24h",
+        },
+    )
+    result = _wait_for_batch(manager, batch["id"])
+    assert len(attempts) == 4
+    assert result["status"] == "completed"
+    assert result["request_counts"] == {"total": 1, "completed": 0, "failed": 1}
+    assert result["error_file_id"] is None
+    output, _content_type, _name = files.content("tenant", result["output_file_id"])
+    row = json.loads(output)
+    assert row["error"] is None
+    assert row["response"]["status_code"] == 429
+    assert row["response"]["body"]["error"]["code"] == "overloaded"
+
+
+def test_batch_cancel_interrupts_an_overload_backoff():
+    files = FileStore()
+    source = _one_row_batch(files)
+    waiting = threading.Event()
+
+    def always_full(*_args):
+        waiting.set()
+        raise Overloaded("maximum inflight requests reached")
+
+    manager = BatchManager(
+        files,
+        always_full,
+        overload_errors=(Overloaded,),
+        overload_backoff=(30.0,),
+    )
+    batch = manager.create(
+        "tenant",
+        {
+            "input_file_id": source["id"],
+            "endpoint": "/v1/embeddings",
+            "completion_window": "24h",
+        },
+    )
+    assert waiting.wait(1)
+    started = time.monotonic()
+    manager.cancel("tenant", batch["id"])
+    result = _wait_for_batch(manager, batch["id"])
+    assert time.monotonic() - started < 2
+    assert result["status"] == "cancelled"
+    assert result["request_counts"] == {"total": 1, "completed": 0, "failed": 0}

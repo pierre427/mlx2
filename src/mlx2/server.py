@@ -1502,6 +1502,7 @@ def handler_for(
         file_store,
         _batch_execute,
         root=state_root / "batches" if state_root is not None else None,
+        overload_errors=(Overloaded,),
     )
     engine.api_resources = {
         "responses": response_store,

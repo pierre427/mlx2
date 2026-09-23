@@ -528,6 +528,9 @@ class BatchManager:
     ENDPOINTS = frozenset(
         {"/v1/chat/completions", "/v1/completions", "/v1/responses", "/v1/embeddings"}
     )
+    # Waits between attempts of a row the engine turned away as momentarily
+    # full: doubling from 50 ms, capped at 2 s, about two minutes in total.
+    OVERLOAD_BACKOFF_SECONDS = (0.05, 0.1, 0.2, 0.4, 0.8, 1.6) + (2.0,) * 58
 
     def __init__(
         self,
@@ -537,9 +540,19 @@ class BatchManager:
         max_batches=32,
         max_lines=1000,
         root=None,
+        overload_errors=(),
+        overload_backoff=None,
     ):
         self.file_store = file_store
         self.executor = executor
+        # Exception types meaning "every slot is busy right now"; a batch row
+        # is background work, so it waits for a slot instead of failing.
+        self.overload_errors = tuple(overload_errors)
+        self.overload_backoff = tuple(
+            self.OVERLOAD_BACKOFF_SECONDS
+            if overload_backoff is None
+            else overload_backoff
+        )
         self.max_batches = int(max_batches)
         self.max_lines = int(max_lines)
         if min(self.max_batches, self.max_lines) < 1:
@@ -702,9 +715,10 @@ class BatchManager:
                     raise ValueError("batch custom_id must be nonempty text")
                 if row["method"] != "POST" or row["url"] != record["endpoint"]:
                     raise ValueError("batch row method/url must match POST and the batch endpoint")
-                status, response = self.executor(
-                    row["url"], row["body"], record["tenant_id"]
-                )
+                executed = self._execute_row(record, row)
+                if executed is None:
+                    break
+                status, response = executed
                 result = {
                     "id": "batch_req_" + uuid.uuid4().hex,
                     "custom_id": custom_id,
@@ -721,6 +735,11 @@ class BatchManager:
                     self._persist(record)
             except Exception as error:  # one malformed row must not abort siblings
                 status = getattr(error, "status", None)
+                code = getattr(error, "code", "server_error")
+                if isinstance(error, self.overload_errors):
+                    # Still full after the whole backoff: report it as the
+                    # interactive API would, not as a malformed row.
+                    status, code = 429, "overloaded"
                 if (
                     isinstance(status, int)
                     and not isinstance(status, bool)
@@ -734,7 +753,7 @@ class BatchManager:
                             "request_id": "req_" + uuid.uuid4().hex,
                             "body": {
                                 "error": {
-                                    "code": getattr(error, "code", "server_error"),
+                                    "code": code,
                                     "message": str(error),
                                     "type": "server_error",
                                 }
@@ -815,6 +834,23 @@ class BatchManager:
                 record["failed_at"] = int(time.time())
                 record["errors"] = {"data": [{"code": "storage_error", "message": str(error)}]}
                 self._persist(record)
+
+    def _execute_row(self, record, row):
+        """Execute one row, waiting out an engine that is momentarily full.
+
+        Returns None when the batch is cancelled or aborted for drain while
+        the row waits; the row then counts as never started.
+        """
+        delays = iter(self.overload_backoff)
+        while True:
+            try:
+                return self.executor(row["url"], row["body"], record["tenant_id"])
+            except self.overload_errors:
+                delay = next(delays, None)
+                if delay is None:
+                    raise
+            if record["cancel"].wait(delay):
+                return None
 
     @staticmethod
     def _public(record):

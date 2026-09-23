@@ -1548,6 +1548,52 @@ def test_files_backed_batch_lifecycle_executes_jsonl_requests(http_engine):
     assert result["response"]["body"]["object"] == "response"
 
 
+def test_batch_row_waits_out_a_momentarily_full_engine():
+    class BusyOnceEngine(FakeEngine):
+        busy = 1
+
+        def submit(self, request, *, tenant_id="default"):
+            if self.busy:
+                self.busy -= 1
+                raise Overloaded("maximum inflight requests reached")
+            return super().submit(request, tenant_id=tenant_id)
+
+    engine = BusyOnceEngine()
+    server = ThreadingHTTPServer(("127.0.0.1", 0), handler_for(engine))
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        base = f"http://127.0.0.1:{server.server_port}"
+        row = {
+            "custom_id": "busy-row",
+            "method": "POST",
+            "url": "/v1/chat/completions",
+            "body": {"model": "fixture", "messages": [{"role": "user", "content": "hi"}]},
+        }
+        with upload_file(base, json.dumps(row).encode() + b"\n") as response:
+            file_id = json.load(response)["id"]
+        with _json_post(base, "/v1/batches", {
+            "input_file_id": file_id,
+            "endpoint": "/v1/chat/completions",
+            "completion_window": "24h",
+        }) as response:
+            batch = json.load(response)
+        for _ in range(200):
+            with urlopen(base + "/v1/batches/" + batch["id"]) as response:
+                batch = json.load(response)
+            if batch["status"] in {"completed", "failed", "cancelled"}:
+                break
+            time.sleep(0.01)
+        assert batch["request_counts"] == {"total": 1, "completed": 1, "failed": 0}
+        assert batch["error_file_id"] is None
+        with urlopen(base + f"/v1/files/{batch['output_file_id']}/content") as response:
+            assert json.loads(response.read())["response"]["status_code"] == 200
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
+
+
 def test_vllm_lora_lifecycle_contract_is_engine_owned_and_fail_closed():
     class LoRAEngine(FakeEngine):
         def load_lora_adapter(self, name, path, *, base_model_name=None):
