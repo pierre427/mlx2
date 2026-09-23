@@ -110,6 +110,37 @@ def test_apcv2_capsule_capacity_is_hard_reserved_and_released():
     assert apc.apc_stats["cache_capsules"]["reserved_bytes"] == 0
 
 
+def test_capsule_reservation_bounds_store_and_restore(tmp_path):
+    one = _cache(4).nbytes
+    clock = [0.0]
+    apc = APCv2(max_bytes=4 * one, layout_name="layout", idle_disk_seconds=1,
+                idle_disk_dir=str(tmp_path), now_fn=lambda: clock[0])
+    key = _key()
+    apc.store(key, [1, 2, 3, 4], [_cache(4)])
+    clock[0] = 10.0
+    assert apc.spill_idle_entries() == 1
+    reservation = apc.reserve_capsule_bytes(3 * one)
+    assert reservation is not None
+
+    apc.store(key, [5, 6, 7, 8], [_cache(4)])
+    apc.store(key, [9, 9, 9, 9], [_cache(4)])
+    reserved = apc.capsule_capacity_stats["reserved_bytes"]
+    assert apc.nbytes + reserved <= apc.max_bytes
+    # The one resident entry that fits is leased, so nothing can make room.
+    lease = apc.lookup(key, [9, 9, 9, 9, 1])
+    assert lease.hit
+    blocked = apc.lookup(key, [1, 2, 3, 4, 5])
+    assert not blocked.hit
+    assert blocked.miss_reason == "disk_restore_budget_unavailable"
+    assert apc.nbytes + reserved <= apc.max_bytes
+
+    reservation.release()
+    restored = apc.lookup(key, [1, 2, 3, 4, 5])
+    lease.cache.close()
+    assert restored.hit and restored.cached_tokens == 4
+    restored.cache.close()
+
+
 def test_raw_safetensors_detection_never_reads_the_whole_payload(tmp_path, monkeypatch):
     """Persistent raw payloads are not JSON block manifests.
 

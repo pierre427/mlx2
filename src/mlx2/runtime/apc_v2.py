@@ -1624,7 +1624,11 @@ class APCv2(PrefixIndex):
             # Impossible under any occupancy: the snapshot itself exceeds the
             # cap.  Callers drop it; a transient shortage returns False below.
             raise ValueError("APCv2 snapshot exceeds the resident byte cap")
-        temporary_limit = original_limit - required
+        # Capsule reservations are hard-reserved against the same cap.  They
+        # are transient, so a restore they crowd out is deferred, not dropped.
+        temporary_limit = original_limit - self._capsule_reserved_bytes - required
+        if temporary_limit < 0:
+            return False
         self.max_bytes = temporary_limit
         try:
             self._spill_resident_budget_locked(
@@ -1871,13 +1875,20 @@ class APCv2(PrefixIndex):
         self._enforce_count_pool_locked(
             interior=True, limit=self.max_interior_entries
         )
+        # Capsule reservations are hard-reserved against the same cap.
+        original_limit = int(self.max_bytes)
+        resident_limit = original_limit - self._capsule_reserved_bytes
         if self._idle_disk_dir is not None:
-            self._spill_resident_budget_locked(
-                exclude=None, include_exclude=True
-            )
+            self.max_bytes = resident_limit
+            try:
+                self._spill_resident_budget_locked(
+                    exclude=None, include_exclude=True, hard_cap=original_limit
+                )
+            finally:
+                self.max_bytes = original_limit
         # A failed/unavailable spill must not turn a retention preference into
         # permission to exceed the hard resident cap.
-        while self._n_bytes > self.max_bytes:
+        while self._n_bytes > resident_limit:
             records = self._pressure_candidates_locked(
                 exclude=None, include_exclude=True
             )
@@ -1897,7 +1908,7 @@ class APCv2(PrefixIndex):
                 break
             _rank, _last_access, key, tokens, entry = victim
             self._drop_entry_locked(key, tokens, entry)
-        fits = self._count_pools_fit_locked() and self._n_bytes <= self.max_bytes
+        fits = self._count_pools_fit_locked() and self._n_bytes <= resident_limit
         if not fits and publication is not None:
             key, tokens, entry = publication
             try:
@@ -1908,7 +1919,7 @@ class APCv2(PrefixIndex):
                 self._drop_entry_locked(key, tokens, entry)
                 self._disk_stats["publication_rejections"] += 1
                 publication_rejected = True
-            fits = self._count_pools_fit_locked() and self._n_bytes <= self.max_bytes
+            fits = self._count_pools_fit_locked() and self._n_bytes <= resident_limit
         self._enforce_disk_limit_locked()
         if publication is not None and not publication_rejected:
             key, tokens, entry = publication
