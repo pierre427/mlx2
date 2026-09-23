@@ -28,6 +28,10 @@ class CapabilityUnavailable(RuntimeError):
     """The loaded route does not implement the requested capability."""
 
 
+class StoreCapacityExceeded(RuntimeError):
+    """A new entry does not fit beside the entries it must not evict."""
+
+
 def _tenant_name(tenant_id):
     value = str(tenant_id or "default")
     return hashlib.sha256(value.encode()).hexdigest()
@@ -127,7 +131,8 @@ def _eviction_key(entries, *, size=None, keep=None, protect=()):
     global bound, but a tenant is only displaced by its own writes once it
     is the largest.  Size is entry count, or bytes when ``size`` is given;
     ties go to the tenant whose entry is least recent.  ``keep`` (the entry
-    just written) and the ``protect`` entries are never chosen.
+    just written) and the ``protect`` entries are never chosen; None means
+    every entry is one of them.
     """
     totals = Counter()
     oldest = {}
@@ -139,7 +144,7 @@ def _eviction_key(entries, *, size=None, keep=None, protect=()):
     for tenant, _total in sorted(totals.items(), key=lambda item: -item[1]):
         if tenant in oldest:
             return oldest[tenant]
-    return next(iter(entries))
+    return None
 
 
 def _page(records, *, limit=20, after=None):
@@ -471,6 +476,8 @@ class FileStore:
 
         ``protect`` names ``(tenant_id, file_id)`` keys the eviction must not
         choose, such as a batch's output file while its error file is written.
+        Raises StoreCapacityExceeded, having written and evicted nothing, when
+        the file does not fit beside the protected files.
         """
         if purpose not in self.PURPOSES:
             raise ValueError("file purpose must be batch or user_data")
@@ -492,6 +499,21 @@ class FileStore:
         )
         key = (item.tenant_id, item.id)
         with self._lock:
+            # Eviction can make room from every file but the protected ones.
+            # Check that the new file fits beside them before writing or
+            # evicting anything; otherwise the last victim left would be a
+            # protected file, the one its caller is about to point at.
+            kept = [self._files[entry] for entry in set(protect) if entry in self._files]
+            if (
+                len(kept) + 1 > self.max_files
+                or sum(len(entry.content) for entry in kept) + len(content)
+                > self.max_bytes
+            ):
+                self._counts["capacity_rejections"] += 1
+                raise StoreCapacityExceeded(
+                    "file does not fit in the local file store beside the files"
+                    " it must keep"
+                )
             metadata_path, content_path = self._paths(*key)
             if metadata_path is not None:
                 _atomic_write(content_path, content)
@@ -947,24 +969,29 @@ class BatchManager:
                 output_file_id = object_["id"]
             else:
                 output_file_id = None
+            error_file_id = None
             if errors:
-                object_ = self.file_store.create(
-                    record["tenant_id"],
-                    filename=f"{record['id']}-errors.jsonl",
-                    purpose="batch",
-                    content_type="application/jsonl",
-                    content=b"\n".join(errors) + b"\n",
-                    # Writing the error file must not evict this batch's
-                    # output: the record is about to point at it.
-                    protect=(
-                        ((str(record["tenant_id"] or "default"), output_file_id),)
-                        if output_file_id
-                        else ()
-                    ),
-                )
-                error_file_id = object_["id"]
-            else:
-                error_file_id = None
+                try:
+                    object_ = self.file_store.create(
+                        record["tenant_id"],
+                        filename=f"{record['id']}-errors.jsonl",
+                        purpose="batch",
+                        content_type="application/jsonl",
+                        content=b"\n".join(errors) + b"\n",
+                        # Writing the error file must not evict this batch's
+                        # output: the record is about to point at it.
+                        protect=(
+                            ((str(record["tenant_id"] or "default"), output_file_id),)
+                            if output_file_id
+                            else ()
+                        ),
+                    )
+                    error_file_id = object_["id"]
+                except StoreCapacityExceeded:
+                    # A store that holds one file (max_files=1) cannot keep
+                    # both.  The results matter more; the request counts
+                    # still report every failed row.
+                    pass
             with self._lock:
                 record["output_file_id"] = output_file_id
                 record["error_file_id"] = error_file_id

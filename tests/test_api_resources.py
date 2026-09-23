@@ -4,7 +4,13 @@ import time
 
 import pytest
 
-from mlx2.api_resources import BatchManager, FileStore, ResourceNotFound, ResponseStore
+from mlx2.api_resources import (
+    BatchManager,
+    FileStore,
+    ResourceNotFound,
+    ResponseStore,
+    StoreCapacityExceeded,
+)
 from mlx2.openai_compat import responses_input_items
 from mlx2.serving import AdmissionClosed, Overloaded
 
@@ -127,6 +133,46 @@ def test_file_store_evicts_the_largest_tenant_not_the_oldest_file():
         )
     assert files.get("alice", kept["id"])["id"] == kept["id"]
     assert files.status()["files"] == 3
+
+
+def test_file_store_never_evicts_a_protected_file_to_make_room(tmp_path):
+    # With every other file protected, eviction fell back to the first
+    # entry, which was the protected one, so the caller's file vanished.
+    # Nothing may be written or evicted when the new file cannot fit.
+    files = FileStore(max_files=3, max_bytes=10, root=tmp_path)
+    spare = files.create(
+        "other", filename="spare.txt", purpose="user_data",
+        content_type="text/plain", content=b"ss",
+    )
+    kept = files.create(
+        "tenant", filename="out.jsonl", purpose="batch",
+        content_type="application/jsonl", content=b"o" * 6,
+    )
+    before = sorted(path.name for path in tmp_path.rglob("*"))
+    with pytest.raises(StoreCapacityExceeded):
+        files.create(
+            "tenant", filename="errors.jsonl", purpose="batch",
+            content_type="application/jsonl", content=b"e" * 6,
+            protect=(("tenant", kept["id"]),),
+        )
+    assert files.content("tenant", kept["id"])[0] == b"o" * 6
+    assert files.content("other", spare["id"])[0] == b"ss"
+    assert files.status()["files"] == 2
+    assert files.status()["bytes"] == 8
+    assert sorted(path.name for path in tmp_path.rglob("*")) == before
+    single = FileStore(max_files=1)
+    only = single.create(
+        "tenant", filename="out.jsonl", purpose="batch",
+        content_type="application/jsonl", content=b"{}\n",
+    )
+    with pytest.raises(StoreCapacityExceeded):
+        single.create(
+            "tenant", filename="errors.jsonl", purpose="batch",
+            content_type="application/jsonl", content=b"{}\n",
+            protect=(("tenant", only["id"]),),
+        )
+    assert single.content("tenant", only["id"])[0] == b"{}\n"
+    assert single.list("tenant")["data"] == [single.get("tenant", only["id"])]
 
 
 def test_batch_restart_marks_interrupted_work_failed(tmp_path):
@@ -580,3 +626,41 @@ def test_batch_error_file_never_evicts_the_batchs_own_output():
     # The room came from another tenant's file, not from the batch's result.
     with pytest.raises(ResourceNotFound):
         files.content("other", other["id"])
+
+
+def test_batch_keeps_its_output_when_the_store_holds_one_file():
+    # A one-file store cannot hold both the output and the error file.
+    # Writing the error file evicted the protected output anyway, so the
+    # batch completed pointing at a missing output_file_id.
+    rows = [
+        {"custom_id": "ok", "method": "POST", "url": "/v1/embeddings", "body": {}},
+        {"custom_id": "bad", "method": "GET", "url": "/v1/embeddings", "body": {}},
+    ]
+    files = FileStore(max_files=1)
+    source = files.create(
+        "tenant",
+        filename="requests.jsonl",
+        purpose="batch",
+        content_type="application/jsonl",
+        content=("\n".join(json.dumps(row) for row in rows) + "\n").encode(),
+    )
+    manager = BatchManager(files, lambda endpoint, body, tenant: (200, {"ok": True}))
+    batch = manager.create(
+        "tenant",
+        {
+            "input_file_id": source["id"],
+            "endpoint": "/v1/embeddings",
+            "completion_window": "24h",
+        },
+    )
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        result = manager.get("tenant", batch["id"])
+        if result["status"] in {"completed", "failed"}:
+            break
+        time.sleep(0.01)
+    assert result["status"] == "completed", result["errors"]
+    assert result["request_counts"] == {"total": 2, "completed": 1, "failed": 1}
+    outputs = files.content("tenant", result["output_file_id"])[0].splitlines()
+    assert [json.loads(line)["custom_id"] for line in outputs] == ["ok"]
+    assert result["error_file_id"] is None
