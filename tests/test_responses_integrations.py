@@ -409,3 +409,56 @@ def test_stateless_replay_renders_the_same_history_as_previous_response_id():
         "call_a", "call_b"
     ]
     assert engine.counts["reasoning_signature_rejections"] == 0
+
+
+def test_responses_render_one_leading_system_message_without_agent_compat():
+    # ``instructions`` plus a developer item (directly or held through
+    # ``previous_response_id``) used to reach the template as two system
+    # messages, which Qwen3.5/3.6 templates reject with a 500.
+    engine = ContinuationEngine()
+    with _Served(engine, response_store=ResponseStore()) as base:
+        with _post(base, {
+            "model": "fixture",
+            "instructions": "You are terse.",
+            "input": [
+                {"role": "developer", "content": "Answer in French."},
+                {"role": "system", "content": "No emoji."},
+                {"role": "user", "content": "hi"},
+            ],
+        }) as response:
+            assert response.status == 200
+        direct = engine.requests[-1]["messages"]
+        with _post(base, {
+            "model": "fixture",
+            "input": [
+                {"role": "developer", "content": "Answer in French."},
+                {"role": "user", "content": "hi"},
+            ],
+        }) as response:
+            first = json.load(response)
+        with _post(base, {
+            "model": "fixture",
+            "instructions": "You are terse.",
+            "previous_response_id": first["id"],
+            "input": [
+                {"role": "developer", "content": "Now answer in German."},
+                {"role": "user", "content": "more"},
+            ],
+        }) as response:
+            assert response.status == 200
+        held = engine.requests[-1]["messages"]
+    assert [message["role"] for message in direct] == ["system", "user"]
+    assert direct[0]["content"] == (
+        "You are terse.\n\nAnswer in French.\n\nNo emoji."
+    )
+    assert held[0] == {
+        "role": "system", "content": "You are terse.\n\nAnswer in French."
+    }
+    # A mid-conversation developer item keeps its position as user text.
+    assert [message["role"] for message in held[1:]] == [
+        "user", "assistant", "user", "user"
+    ]
+    assert [message["content"] for message in held[-2:]] == [
+        "Now answer in German.", "more"
+    ]
+    assert engine.counts["agent_compat_system_folded"] == 0

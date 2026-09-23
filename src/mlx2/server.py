@@ -1404,10 +1404,15 @@ def handler_for(
             check_compat_chain(
                 tenant_id, options["previous_response_id"], agent_compat
             )
-        if agent_compat.enabled:
-            request["messages"] = fold_system_messages(
-                request["messages"], getattr(engine, "counts", None)
-            )
+        # Every Responses request renders one leading system message:
+        # ``instructions`` first, then the leading developer/system items in
+        # order.  Templates such as Qwen3.5/3.6 reject a system message
+        # anywhere but first, so a later developer/system item folds into the
+        # adjacent user turn.  Only compat-mode folds feed the compat counter.
+        request["messages"] = fold_system_messages(
+            request["messages"],
+            getattr(engine, "counts", None) if agent_compat.enabled else None,
+        )
         options["previous_context"] = previous_context
         return request, options
 
