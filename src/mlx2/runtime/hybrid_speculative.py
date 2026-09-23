@@ -2632,14 +2632,25 @@ def commit_batched_self_mtp(
             consumed_accepted = min(count, accepted)
             if terminal[row] and count <= accepted:
                 if count > 0:
-                    lane.pending_hs = mx.concatenate(
+                    # Copy-draft rounds run the head at depth 0 and leave
+                    # their pairs pending, so pending can span several rounds.
+                    # Extend it exactly as the nonterminal branch does; the
+                    # detach replay must cover every undrafted position.
+                    new_hs = mx.concatenate(
                         [old_seed_h, hidden[:, : count - 1, :]], axis=1
                     )
-                    lane.pending_ts = [old_cur] + drafts[: count - 1]
+                    new_ts = [old_cur] + drafts[: count - 1]
+                    if lane.pending_ts:
+                        new_hs = mx.concatenate([lane.pending_hs, new_hs], axis=1)
+                    lane.pending_hs = new_hs
+                    lane.pending_ts = lane.pending_ts + new_ts
                     lane.seed_h = hidden[:, count - 1 : count, :]
                     lane.cur = proposal.outputs[row][count - 1].token
                     lane.token_prefix = mx.concatenate(
-                        [lane.token_prefix, mx.array(lane.pending_ts, mx.uint32)]
+                        [
+                            lane.token_prefix,
+                            mx.array([old_cur] + drafts[: count - 1], mx.uint32),
+                        ]
                     )
             else:
                 new_hs = mx.concatenate([old_seed_h, hidden[:, :accepted, :]], axis=1)

@@ -276,6 +276,84 @@ def test_greedy_copy_mtp_is_exact_and_copies_beyond_head_depth(cpu, segmented):
     )
 
 
+def _ordinary_copying_model():
+    """The copying model with the same cycle bias on the ordinary path."""
+    model = _copying_model()
+    table = np.full(64, CYCLE[0], dtype=np.int64)
+    for token, successor in _NEXT.items():
+        table[token] = successor
+    table_mx = mx.array(table)
+    base = type(model)
+
+    class OrdinaryCopying(base):
+        def __call__(self, inputs, cache=None, input_embeddings=None):
+            logits = base.__call__(self, inputs, cache, input_embeddings)
+            bias = mx.eye(64)[table_mx[inputs]] * 30.0
+            return logits + bias.astype(logits.dtype)
+
+    model.__class__ = OrdinaryCopying
+    return model
+
+
+def _run_until_stop(model, *, stop, copy=None, segmented=True, max_tokens=60):
+    from mlx2.runtime.generate import BatchGenerator
+
+    kwargs = {}
+    if copy is not None:
+        self_mtp = {"num_draft": 2, "persistent": True}
+        if segmented:
+            self_mtp.update(
+                {"segment_aware_live_tip": True, "segment_aware_cohort_size": 1}
+            )
+        kwargs.update(self_mtp=self_mtp, copy_draft=copy)
+    generator = BatchGenerator(
+        model, completion_batch_size=1, prefill_batch_size=1, prefill_step_size=32,
+        stop_tokens=[[stop]], **kwargs,
+    )
+    insert = {"max_tokens": [max_tokens]}
+    if copy is not None:
+        insert.update(
+            lane_rngs=[LaneRNG(17)], self_mtp_configs=[{"sampling_temp": 0.0}]
+        )
+    generator.insert([PROMPT], **insert)
+    tokens, finish = [], None
+    try:
+        for _ in range(400):
+            _, responses = generator.next()
+            for response in responses:
+                tokens.append(response.token)
+                finish = response.finish_reason or finish
+            if finish:
+                break
+        stats = dict(generator.scheduler_stats)
+    finally:
+        generator.close()
+    return tokens, finish, stats
+
+
+@pytest.mark.parametrize("segmented", [True, False])
+def test_stop_inside_a_copied_span_after_copy_rounds_matches_ordinary(cpu, segmented):
+    """A stop inside a copied span keeps every pending MTP pair.
+
+    Copy rows run the head at depth 0, so undrafted pairs pile up across
+    consecutive copy rounds.  The terminal commit used to replace them with
+    this round's pairs only, and the detach replay then failed validation.
+    """
+    model = _copying_model()
+    ordinary = _ordinary_copying_model()
+    multi_round_stops = 0
+    for stop in CYCLE:
+        expected = _run_until_stop(ordinary, stop=stop)
+        got = _run_until_stop(
+            model, stop=stop, segmented=segmented,
+            copy={"enabled": True, "max_span": 8},
+        )
+        assert got[:2] == expected[:2], stop
+        assert got[1] == "stop"
+        multi_round_stops += got[2].get("self_mtp_copy_rounds", 0) >= 2
+    assert multi_round_stops >= 5
+
+
 def test_default_off_receipt_and_counters_unchanged(cpu):
     model = _copying_model()
     _, stats, receipts = _run(model, PROMPT, max_tokens=12)
