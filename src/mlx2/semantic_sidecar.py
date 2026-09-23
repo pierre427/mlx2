@@ -286,6 +286,15 @@ class SemanticServingMiddleware:
         if state is None:
             return None
         try:
+            neural_prepared = {}
+
+            def prepare_neural(graph, semantic_digest):
+                digest, concepts = self.neural_memory.prepare(graph, semantic_digest)
+                neural_prepared.update(
+                    capsule=digest, concepts=concepts, semantic_capsule=semantic_digest
+                )
+                return {"neural-concepts": digest}
+
             result = self.memory.commit_after_delivery(
                 state.context,
                 self.proposals(
@@ -294,10 +303,18 @@ class SemanticServingMiddleware:
                 response_delivered=True,
                 authenticated_tenant=state.authenticated_tenant,
                 expected_revision=state.directory_revision,
+                prepare_derived_handles=(
+                    prepare_neural if self.neural_memory is not None else None
+                ),
             )
             neural_result = None
             if result.get("committed") and self.neural_memory is not None:
-                neural_result = self.neural_memory.rebuild(state.context)
+                neural_result = {
+                    "committed": True,
+                    **neural_prepared,
+                    "revision": result["revision"],
+                    "artifact_fingerprint": self.neural_memory.artifact.fingerprint,
+                }
                 result = {**result, "neural_state": neural_result}
             with self._lock:
                 if result.get("committed"):

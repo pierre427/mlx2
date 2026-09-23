@@ -399,6 +399,31 @@ def test_deepcopy_mode_round_snapshot_matches_historical_semantics(monkeypatch):
         b._prefill(lane)
     (snapshot,) = b._snapshot_round([lane])
     state = snapshot.slot._checkpoint._state
-    assert set(state) == set(vars(lane))
+    assert set(state) == set(vars(lane)) - {"history"}
+    assert snapshot.history is lane.history
+    assert snapshot.boundary == len(lane.history)
     assert state["cache"] is not lane.cache
     assert copy.deepcopy is snapshot.slot._checkpoint._restore
+
+
+@pytest.mark.parametrize("cow", [True, False])
+def test_history_journal_copies_only_on_restore(monkeypatch, cow):
+    _cow(monkeypatch, cow)
+    m, d = tiny()
+    b = generator(m, d)
+    uid = b.insert([[1, 2, 3]], max_tokens=[3])[0]
+    lane = b.lanes[uid]
+    lane.history = list(range(4096))
+    original = lane.history
+    snapshot, = b._snapshot_round([lane])
+    assert snapshot.history is original
+    frozen = snapshot.slot._checkpoint._state
+    host = frozen[0] if cow else frozen
+    assert "history" not in host
+    original.extend([4096, 4097])
+    b._restore_round([lane], [snapshot])
+    assert lane.history == list(range(4096))
+    assert lane.history is not original
+    lane.history.append(9999)
+    b._restore_round([lane], [snapshot])
+    assert lane.history == list(range(4096))

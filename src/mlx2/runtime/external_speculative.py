@@ -27,6 +27,7 @@ from .speculative_sampling import (
     FLyVerificationPolicy,
     RequestRNG,
     probability,
+    verify_compact_proposals,
     verify_proposals,
 )
 
@@ -100,8 +101,10 @@ class Lane:
     verify_accept_hist: dict = field(default_factory=dict)
 
 
-# Lane fields frozen as cache planes; every other field is host state.
+# History changes only by append inside a decode round.  Keep its committed
+# list and length as a journal, copying the prefix only if recovery is needed.
 _LANE_PLANES = frozenset({"cache", "draft_cache", "tail"})
+_LANE_JOURNAL = frozenset({"history"})
 
 
 @dataclass(frozen=True)
@@ -111,6 +114,7 @@ class RoundSnapshot:
     boundary: int
     mode: str  # "descriptor_cow" or "deepcopy"
     processors: tuple  # authoritative objects retained by serving
+    history: list  # committed prefix, append-only while this snapshot is live
 
 
 @dataclass
@@ -133,6 +137,19 @@ class HostDraftRow:
 
 
 @dataclass
+class CompactDraftRow:
+    """One pairwise row with candidate support kept sparse until rejection."""
+    tokens: list
+    candidate_ids: np.ndarray
+    candidate_probs: np.ndarray
+    width: int
+
+    @property
+    def lengths(self):
+        return (len(self.tokens),)
+
+
+@dataclass
 class RoundDecision:
     """Verify outcome for one row, before commit.
 
@@ -152,6 +169,8 @@ def _block_row(block, vocab):
         return [], []
     if isinstance(block, HostDraftRow):
         return list(block.tokens), list(block.laws)
+    if isinstance(block, CompactDraftRow):
+        return list(block.tokens), block
     length = int(block.lengths[0])
     tokens = [int(t) for t in np.asarray(block.tokens)[0, :length].tolist()]
     return tokens, (None if vocab is None else block.dense_laws(vocab)[0])
@@ -401,7 +420,13 @@ class ExternalDraftBatchGenerator:
         )
         _bump(self.scheduler_stats, "external_pairwise_selection_groups")
         _bump(self.scheduler_stats, "external_pairwise_selection_lanes", len(lanes))
-        return block.token_lists(), block.dense_laws(self.draft.config.vocab_size)
+        tokens = block.token_lists()
+        ids = np.asarray(block.cand_ids)
+        q = np.asarray(block.cand_q.astype(self.mx.float32)).astype(np.float64)
+        return tokens, [
+            CompactDraftRow(tokens[row], ids[row, :length], q[row, :length], len(lanes))
+            for row, length in enumerate(block.lengths)
+        ]
 
     def _freeze_lane(self, lane):
         """Freeze one lane at its committed boundary; returns (state, mode).
@@ -410,8 +435,9 @@ class ExternalDraftBatchGenerator:
         share them), so the live round and the checkpoint already form a free
         current/next double buffer.  Opt-in descriptor COW
         (``MLX_LM_EXTERNAL_ROUND_COW=1``) additionally rejects cache graphs
-        with live transaction state.  Host-side fields (history, RNG,
-        processors, ...) are deep-copied in both modes.
+        with live transaction state.  Other host-side fields (RNG,
+        processors, ...) are deep-copied in both modes.  History is journaled
+        separately because rounds only append to it.
         """
         fields = vars(lane)
         if external_round_cow_enabled():
@@ -425,11 +451,15 @@ class ExternalDraftBatchGenerator:
                 _bump(self.scheduler_stats, "external_cow_fallbacks")
             else:
                 host = copy.deepcopy(
-                    {k: v for k, v in fields.items() if k not in _LANE_PLANES}
+                    {
+                        k: v for k, v in fields.items()
+                        if k not in _LANE_PLANES | _LANE_JOURNAL
+                    }
                 )
                 _bump(self.scheduler_stats, "external_cow_snapshots")
                 return (host, cache, draft_cache, tail), "descriptor_cow"
-        return copy.deepcopy(fields), "deepcopy"
+        host = {k: v for k, v in fields.items() if k not in _LANE_JOURNAL}
+        return copy.deepcopy(host), "deepcopy"
 
     @staticmethod
     def _thaw_lane(frozen):
@@ -475,7 +505,9 @@ class ExternalDraftBatchGenerator:
                     self._thaw_lane if mode == "descriptor_cow" else copy.deepcopy
                 ),
             )
-            snapshots.append(RoundSnapshot(slot, boundary, mode, tuple(lane.processors)))
+            snapshots.append(
+                RoundSnapshot(slot, boundary, mode, tuple(lane.processors), lane.history)
+            )
         return snapshots
 
     def _restore_round(self, cohort, snapshots):
@@ -485,6 +517,9 @@ class ExternalDraftBatchGenerator:
                 revision=self.binding,
                 boundary=snapshot.boundary,
             )
+            if len(snapshot.history) < snapshot.boundary:
+                raise RuntimeError("committed history was truncated during external recovery")
+            state["history"] = snapshot.history[:snapshot.boundary]
             # Serving and the lane share these processor objects.  Restore
             # their mutable round state without replacing that ownership;
             # otherwise a post-fallback grammar failure is invisible to the
@@ -599,7 +634,10 @@ class ExternalDraftBatchGenerator:
             )
             self.scheduler_stats["draft_max_width"] = max(self.scheduler_stats["draft_max_width"],len(lanes))
             for j,row in enumerate(indices):
-                blocks[row] = HostDraftRow(tokens[j], q[j], len(lanes))
+                blocks[row] = (
+                    q[j] if isinstance(q[j], CompactDraftRow)
+                    else HostDraftRow(tokens[j], q[j], len(lanes))
+                )
         return blocks
 
     def _verify(self, cohort, blocks, logits):
@@ -615,7 +653,17 @@ class ExternalDraftBatchGenerator:
                 targets.append(self._target_law(lane, logits[row,j], lane.history + inputs[:j+1], reachable))
                 if reachable and j < count and lane.processors and targets[-1][int(drafts[j])] <= 0:
                     reachable = False
-            if self.fly_verification.enabled and not lane.processors:
+            if isinstance(laws, CompactDraftRow):
+                result = verify_compact_proposals(
+                    drafts, laws.candidate_ids, laws.candidate_probs, targets,
+                    lane.rng,
+                    fly_verification=(
+                        self.fly_verification
+                        if self.fly_verification.enabled and not lane.processors
+                        else None
+                    ),
+                )
+            elif self.fly_verification.enabled and not lane.processors:
                 result = verify_proposals(
                     drafts,
                     laws,

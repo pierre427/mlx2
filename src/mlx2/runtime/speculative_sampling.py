@@ -213,3 +213,71 @@ def verify_proposals(tokens, proposals, targets, rng, *, fly_verification=None):
         return VerifiedBlock(i, tuple(emitted), tuple(laws), True)
     emitted.append(rng.sample(p[-1])); laws.append(p[-1])
     return VerifiedBlock(len(tokens), tuple(emitted), tuple(laws), False)
+
+
+def verify_compact_proposals(
+    tokens, candidate_ids, candidate_probs, targets, rng, *, fly_verification=None
+):
+    """Verify pairwise DFlash proposals without expanding sparse q to vocabulary size.
+
+    Keep the dense verifier as the oracle for host and processor routes.  The
+    proposal rows contain unique vocabulary IDs; target laws remain dense.
+    Validation finishes before the first RNG draw, as in ``verify_proposals``.
+    """
+    tokens = tuple(int(token) for token in tokens)
+    ids = tuple(np.asarray(row) for row in candidate_ids)
+    q = tuple(probability(row) for row in candidate_probs)
+    p = tuple(probability(row) for row in targets)
+    if len(q) != len(tokens) or len(ids) != len(tokens) or len(p) != len(tokens) + 1:
+        raise ValueError("Proposal/target count mismatch")
+    vocab = len(p[0])
+    if any(row.shape != p[0].shape for row in p):
+        raise ValueError("Vocabulary mismatch")
+    selected_q = []
+    for token, row_ids, row_q in zip(tokens, ids, q):
+        if (
+            row_ids.ndim != 1 or not np.issubdtype(row_ids.dtype, np.integer)
+            or row_ids.shape != row_q.shape
+            or np.any(row_ids < 0) or np.any(row_ids >= vocab)
+            or len(np.unique(row_ids)) != len(row_ids)
+        ):
+            raise ValueError("Vocabulary mismatch")
+        matches = np.flatnonzero(row_ids == token)
+        selected = float(row_q[matches[0]]) if len(matches) else 0.0
+        if not 0 <= token < vocab or selected <= 0:
+            raise ValueError("Proposed token has zero proposal probability")
+        selected_q.append(selected)
+
+    def residual_at(index):
+        residual = p[index].copy()
+        residual[ids[index]] -= q[index]
+        np.maximum(residual, 0, out=residual)
+        if residual.sum() <= 0:
+            raise ArithmeticError("Rejected proposal has no residual mass")
+        return residual
+
+    fly = FLyVerificationPolicy.from_value(fly_verification)
+    if fly.enabled:
+        ordinary_accepts = [
+            rng.uniform() < min(1.0, p[i][token] / selected_q[i])
+            for i, token in enumerate(tokens)
+        ]
+        accepted, relaxed = apply_fly_relaxation(
+            tokens, p[: len(tokens)], ordinary_accepts, fly
+        )
+        emitted = list(tokens[:accepted])
+        laws = list(p[:accepted])
+        if accepted < len(tokens):
+            emitted.append(rng.sample(residual_at(accepted)))
+            laws.append(p[accepted])
+            return VerifiedBlock(accepted, tuple(emitted), tuple(laws), True, relaxed)
+        emitted.append(rng.sample(p[-1])); laws.append(p[-1])
+        return VerifiedBlock(len(tokens), tuple(emitted), tuple(laws), False, relaxed)
+    emitted, laws = [], []
+    for i, token in enumerate(tokens):
+        if rng.uniform() < min(1.0, p[i][token] / selected_q[i]):
+            emitted.append(token); laws.append(p[i]); continue
+        emitted.append(rng.sample(residual_at(i))); laws.append(p[i])
+        return VerifiedBlock(i, tuple(emitted), tuple(laws), True)
+    emitted.append(rng.sample(p[-1])); laws.append(p[-1])
+    return VerifiedBlock(len(tokens), tuple(emitted), tuple(laws), False)

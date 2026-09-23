@@ -226,6 +226,7 @@ def test_neural_middleware_rebuilds_after_delivery_then_injects_state(artifact, 
     assert "_mlx2_neural_concepts" not in write
     committed = middleware.complete(state, "Noted.")
     assert committed["neural_state"]["committed"]
+    assert committed["revision"] == committed["neural_state"]["revision"] == 1
 
     prepared, recalled = middleware.prepare(
         {
@@ -241,6 +242,34 @@ def test_neural_middleware_rebuilds_after_delivery_then_injects_state(artifact, 
     assert prepared["_mlx2_neural_concepts"]["artifact_fingerprint"] == artifact.fingerprint
     assert prepared["messages"][0]["role"] == "user"
     assert middleware.receipt(recalled)["neural_observed_used"] is True
+
+
+def test_neural_prepare_failure_does_not_publish_semantic_state(artifact, tmp_path, monkeypatch):
+    capsules = CapsuleStore(tmp_path / "capsules")
+    directory = HyperDirectory(tmp_path / "directory", capsules)
+    semantic = SemanticMemory(
+        capsules=capsules, directory=directory,
+        model_binding="model", tokenizer_binding="tokenizer", runtime_binding="runtime",
+    )
+    neural = NeuralConceptMemory(semantic, artifact)
+    middleware = SemanticServingMiddleware(
+        semantic, model_scope="model", neural_memory=neural, bridge_mode="neural"
+    )
+    _, state = middleware.prepare(
+        {"session_id": "walk", "messages": [
+            {"role": "user", "content": "Remember that Cedar Loop is earthy scent."}
+        ]},
+        tenant_id="alice", authenticated_tenant=True,
+    )
+
+    def fail_prepare(_graph, _digest):
+        raise RuntimeError("injected neural preparation failure")
+
+    monkeypatch.setattr(neural, "prepare", fail_prepare)
+    result = middleware.complete(state, "Noted.")
+    assert result == {"committed": False, "reason": "post-delivery-commit-failed"}
+    graph, digest, revision = semantic.load(state.context)
+    assert not graph["concepts"] and digest is None and revision == 0
 
 
 def test_engine_binds_neural_bridge_only_after_adapter_is_ready():

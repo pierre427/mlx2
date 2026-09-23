@@ -38,6 +38,51 @@ def _recurrent(length):
     return cache
 
 
+def test_prefix_index_removal_delta_matches_full_trie_scan():
+    from mlx2.runtime.apc_v2 import _iter_trie_entries
+
+    def insert(index, tokens, *, expected_reason):
+        before = {id(entry) for entry in _iter_trie_entries(index._trie)}
+        removed = []
+        assert index.insert_cache(
+            "model", tokens, [_state(KVCache(), len(tokens))],
+            removed_entries=removed,
+        )
+        after = {id(entry) for entry in _iter_trie_entries(index._trie)}
+        assert {id(entry) for _, _, _, entry in removed} == before - after
+        assert len(removed) == len(before - after)
+        assert [reason for reason, _, _, _ in removed] == expected_reason
+
+    index = PrefixIndex(max_size=2)
+    insert(index, [1, 2], expected_reason=[])
+    insert(index, [1, 2, 3], expected_reason=["subsumed"])
+    insert(index, [1, 2, 3], expected_reason=["replaced"])
+    insert(index, [8, 9], expected_reason=[])
+    insert(index, [10, 11], expected_reason=["size_limit"])
+
+    byte_limited = PrefixIndex(
+        max_size=10, max_bytes=_state(KVCache(), 1).nbytes
+    )
+    insert(byte_limited, [1], expected_reason=[])
+    insert(byte_limited, [2], expected_reason=["byte_limit"])
+
+
+def test_apcv2_store_cleanup_needs_no_full_trie_scan(monkeypatch):
+    import mlx2.runtime.apc_v2 as module
+
+    apc = APCv2(max_size=8, layout_name="no-store-scan")
+    key = APCKey("model")
+    apc.store(key, [1, 2], [_state(KVCache(), 2)])
+
+    def forbid_scan(_trie):
+        raise AssertionError("store traversed the whole trie")
+
+    monkeypatch.setattr(module, "_iter_trie_entries", forbid_scan)
+    apc.store(key, [1, 2, 3], [_state(KVCache(), 3)])
+    apc.store(key, [1, 2, 3], [_state(KVCache(), 3, seed=10)])
+    assert apc._trie.get(key, [1, 2, 3]) is not None
+
+
 def test_third_party_cache_without_checkpoint_api_fails_closed():
     class ExternalRotatingCache:
         offset = 600

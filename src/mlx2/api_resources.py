@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import stat
 import threading
 import time
 import uuid
@@ -53,6 +54,68 @@ def _json_bytes(value):
     return json.dumps(
         value, allow_nan=False, sort_keys=True, separators=(",", ":")
     ).encode()
+
+
+def _restore_candidates(root, counts):
+    """Sort only file metadata; payloads are admitted and evicted one at a time."""
+    candidates = []
+    for path in root.glob("*/*.json"):
+        try:
+            info = path.lstat()
+            if path.parent.is_symlink() or not stat.S_ISREG(info.st_mode):
+                raise ValueError("stored metadata must be a regular tenant-local file")
+            candidates.append((info.st_mtime_ns, str(path), path))
+        except (OSError, ValueError):
+            counts["restore_failures"] += 1
+    return (path for _, _, path in sorted(candidates))
+
+
+def _read_restore_file(path, limit):
+    """Reject oversized files before allocation, including growth after stat."""
+    if path.parent.is_symlink():
+        raise ValueError("stored files must stay in their tenant directory")
+    descriptor = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
+    with os.fdopen(descriptor, "rb") as stream:
+        info = os.fstat(stream.fileno())
+        if not stat.S_ISREG(info.st_mode) or info.st_size > limit:
+            raise ValueError("stored file exceeds its restore bound")
+        raw = stream.read(info.st_size + 1)
+    if len(raw) > info.st_size:
+        raise ValueError("stored file grew during restore")
+    return raw
+
+
+def _restore_identity(path, tenant_id, identifier):
+    if (
+        not isinstance(tenant_id, str)
+        or not tenant_id
+        or not isinstance(identifier, str)
+        or not identifier
+        or identifier in {".", ".."}
+        or any(character in identifier for character in ("/", "\\", "\x00"))
+        or path.parent.name != _tenant_name(tenant_id)
+        or path.name != f"{identifier}.json"
+    ):
+        raise ValueError("stored resource identity does not match its path")
+
+
+def _invalid_json_constant(value):
+    raise ValueError(f"invalid JSON constant: {value}")
+
+
+def _restore_json(raw):
+    value = json.loads(raw, parse_constant=_invalid_json_constant)
+    if not isinstance(value, dict):
+        raise TypeError("stored resource must be an object")
+    return value
+
+
+def _unlink_restored(path, counts):
+    try:
+        path.unlink(missing_ok=True)
+    except OSError:
+        # Disk cleanup failure must not defeat the resident-memory bound.
+        counts["restore_cleanup_failures"] += 1
 
 
 def _page(records, *, limit=20, after=None):
@@ -102,27 +165,47 @@ class ResponseStore:
     def _restore(self):
         if self.root is None or not self.root.exists():
             return
-        candidates = sorted(
-            self.root.glob("*/*.json"), key=lambda path: path.stat().st_mtime_ns
-        )
-        for path in candidates:
+        for path in _restore_candidates(self.root, self._counts):
             try:
-                raw = path.read_bytes()
-                record = json.loads(raw)
+                raw = _read_restore_file(path, self.max_bytes)
+                record = _restore_json(raw)
                 tenant_id = record.pop("tenant_id")
+                if not isinstance(record.get("payload"), dict):
+                    raise TypeError("stored response payload must be an object")
                 response_id = record["payload"]["id"]
+                _restore_identity(path, tenant_id, response_id)
+                context = record.get("context_messages")
+                if not isinstance(context, list) or any(
+                    not isinstance(message, dict)
+                    or not isinstance(message.get("role"), str)
+                    for message in context
+                ):
+                    raise ValueError("stored response context must contain messages")
+                payload = record["payload"]
+                if payload.get("model") is not None and not isinstance(payload["model"], str):
+                    raise ValueError("stored response model must be text")
+                receipt = payload.get("mlx2")
+                if receipt is not None and (
+                    not isinstance(receipt, dict)
+                    or (
+                        receipt.get("agent_compat") is not None
+                        and not isinstance(receipt["agent_compat"], dict)
+                    )
+                ):
+                    raise ValueError("stored response receipt must be an object")
                 key = self._key(tenant_id, response_id)
+                if key in self._entries:
+                    raise ValueError("duplicate stored response identity")
                 self._entries[key] = (len(raw), record)
                 self._bytes += len(raw)
-            except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError):
+            except (OSError, ValueError, KeyError, TypeError, RecursionError):
                 self._counts["restore_failures"] += 1
-        while len(self._entries) > self.max_entries or self._bytes > self.max_bytes:
-            key, (size, _) = self._entries.popitem(last=False)
-            self._bytes -= size
-            path = self._path(*key)
-            if path is not None:
-                path.unlink(missing_ok=True)
-            self._counts["evictions"] += 1
+                continue
+            while len(self._entries) > self.max_entries or self._bytes > self.max_bytes:
+                key, (size, _) = self._entries.popitem(last=False)
+                self._bytes -= size
+                _unlink_restored(self._path(*key), self._counts)
+                self._counts["evictions"] += 1
         self._counts["restored"] += len(self._entries)
 
     def put(self, tenant_id, payload, context_messages):
@@ -193,7 +276,7 @@ class ResponseStore:
             return deepcopy(entry[1]["context_messages"])
 
     def input_record(self, tenant_id, response_id):
-        """Return the already-stored payload/context used by input-item views."""
+        """Snapshot input-item context and model without copying output payloads."""
         key = self._key(tenant_id, response_id)
         with self._lock:
             entry = self._entries.get(key)
@@ -201,7 +284,10 @@ class ResponseStore:
                 self._counts["input_item_misses"] += 1
                 raise ResourceNotFound(response_id)
             self._counts["input_item_lists"] += 1
-            return deepcopy(entry[1])
+            return {
+                "payload": {"model": deepcopy(entry[1]["payload"].get("model"))},
+                "context_messages": deepcopy(entry[1]["context_messages"]),
+            }
 
     def delete(self, tenant_id, response_id):
         key = self._key(tenant_id, response_id)
@@ -285,14 +371,26 @@ class FileStore:
     def _restore(self):
         if self.root is None or not self.root.exists():
             return
-        candidates = sorted(
-            self.root.glob("*/*.json"), key=lambda path: path.stat().st_mtime_ns
-        )
-        for metadata_path in candidates:
+        for metadata_path in _restore_candidates(self.root, self._counts):
             try:
-                metadata = json.loads(metadata_path.read_bytes())
+                # Filename/type fields are small; do not let corrupt metadata
+                # consume the content budget before its size is checked.
+                metadata = _restore_json(_read_restore_file(metadata_path, 64 << 10))
+                _restore_identity(metadata_path, metadata["tenant_id"], metadata["id"])
+                if (
+                    type(metadata.get("bytes")) is not int
+                    or not 0 < metadata["bytes"] <= min(self.max_file_bytes, self.max_bytes)
+                    or type(metadata.get("created_at")) is not int
+                    or metadata["created_at"] < 0
+                    or not isinstance(metadata.get("filename"), str)
+                    or not 1 <= len(metadata["filename"]) <= 255
+                    or not isinstance(metadata.get("content_type"), str)
+                    or len(metadata["content_type"]) > 128
+                    or metadata.get("purpose") not in self.PURPOSES
+                ):
+                    raise ValueError("invalid stored file metadata")
                 content_path = metadata_path.with_suffix(".bin")
-                content = content_path.read_bytes()
+                content = _read_restore_file(content_path, metadata["bytes"])
                 if len(content) != metadata["bytes"]:
                     raise ValueError("file byte count mismatch")
                 item = StoredFile(
@@ -302,19 +400,22 @@ class FileStore:
                     purpose=metadata["purpose"],
                     content_type=metadata["content_type"],
                     content=content,
-                    created_at=int(metadata["created_at"]),
+                    created_at=metadata["created_at"],
                 )
-                self._files[(item.tenant_id, item.id)] = item
+                key = (item.tenant_id, item.id)
+                if key in self._files:
+                    raise ValueError("duplicate stored file identity")
+                self._files[key] = item
                 self._bytes += len(content)
-            except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError):
+            except (OSError, ValueError, KeyError, TypeError, RecursionError):
                 self._counts["restore_failures"] += 1
-        while len(self._files) > self.max_files or self._bytes > self.max_bytes:
-            key, removed = self._files.popitem(last=False)
-            self._bytes -= len(removed.content)
-            for path in self._paths(*key):
-                if path is not None:
-                    path.unlink(missing_ok=True)
-            self._counts["evictions"] += 1
+                continue
+            while len(self._files) > self.max_files or self._bytes > self.max_bytes:
+                key, removed = self._files.popitem(last=False)
+                self._bytes -= len(removed.content)
+                for path in self._paths(*key):
+                    _unlink_restored(path, self._counts)
+                self._counts["evictions"] += 1
         self._counts["restored"] += len(self._files)
 
     def create(self, tenant_id, *, filename, purpose, content_type, content):

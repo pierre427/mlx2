@@ -4944,7 +4944,14 @@ class PrefixIndex:
         cache_type: str = "assistant",
         sidecar: Any = None,
         prune_prefixes=True,
+        removed_entries=None,
     ):
+        """Insert a cache and optionally report every entry removed by it.
+
+        ``removed_entries`` receives ``(reason, model, tokens, entry)`` after
+        each trie removal.  APCv2 uses these exact mutations to release owners
+        without scanning the whole trie before and after publication.
+        """
         if self.max_tokens is not None and len(tokens) > self.max_tokens:
             self.overlength_rejections += 1
             return False
@@ -4962,6 +4969,8 @@ class PrefixIndex:
             self._n_bytes -= prev.nbytes
             self._n_bytes_by_type[prev.cache_type] -= prev.nbytes
             self._lru.remove(model, tokens)
+            if removed_entries is not None:
+                removed_entries.append(("replaced", model, tokens, prev))
         self._lru.push(model, tokens, cache_type)
         if prune_prefixes and can_trim_prompt_cache(prompt_cache) and sidecar is None:
             for prefix_len, entry in self._trie.pop_prefixes(
@@ -4971,16 +4980,22 @@ class PrefixIndex:
                 self._n_bytes -= entry.nbytes
                 self._n_bytes_by_type[entry.cache_type] -= entry.nbytes
                 self._lru.remove(model, tokens[:prefix_len])
+                if removed_entries is not None:
+                    removed_entries.append(("subsumed", model, tokens[:prefix_len], entry))
         if len(self._lru) > self.max_size:
             (model, tokens) = self._lru.pop()
             entry = self._trie.pop(model, tokens)
             self._n_bytes -= entry.nbytes
             self._n_bytes_by_type[entry.cache_type] -= entry.nbytes
+            if removed_entries is not None:
+                removed_entries.append(("size_limit", model, tokens, entry))
         while self._n_bytes > self.max_bytes:
             (model, tokens) = self._lru.pop()
             entry = self._trie.pop(model, tokens)
             self._n_bytes -= entry.nbytes
             self._n_bytes_by_type[entry.cache_type] -= entry.nbytes
+            if removed_entries is not None:
+                removed_entries.append(("byte_limit", model, tokens, entry))
         return True
 
     def trim_to(

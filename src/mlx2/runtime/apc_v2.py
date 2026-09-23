@@ -2819,11 +2819,7 @@ class APCv2(PrefixIndex):
                 raise ValueError("invalid APCv2 session tag")
             if len(existing_tags) < self._SESSION_TAG_LIMIT or session_tag in existing_tags:
                 existing_tags.add(session_tag)
-        before = (
-            {id(entry): entry for entry in _iter_trie_entries(self._trie)}
-            if self._cow_branching or self._idle_disk_dir is not None
-            else {}
-        )
+        removed_entries = []
         resident_limit = self.max_bytes
         sequence_limit = self.max_size
         # PrefixIndex cannot see APC retention roles, session pins, or live
@@ -2847,28 +2843,25 @@ class APCv2(PrefixIndex):
         self.max_bytes = 1 << 63
         self.max_size = 1 << 63
         try:
-            super().insert_cache(
+            inserted = super().insert_cache(
                 key, tokens, prompt_cache, cache_type=cache_type, sidecar=sidecar,
                 prune_prefixes=can_prune_prefix,
+                removed_entries=removed_entries,
             )
         finally:
             self.max_bytes = resident_limit
             self.max_size = sequence_limit
-        self._capsule_generation.advance()
-        if before or cow_source is not None:
-            live_entries = list(_iter_trie_entries(self._trie))
-            live = {id(entry) for entry in live_entries}
-            for ident, entry in before.items():
-                if ident not in live:
-                    if entry is not replaced_entry:
-                        self._record_entry_eviction_locked(entry)
-                    if isinstance(entry.prompt_cache, COWFrozenPromptCache):
-                        entry.prompt_cache.close()
-                    self._remove_disk_files_locked(entry)
-            if cow_source is not None and (
-                not any((entry.prompt_cache is cow_source for entry in live_entries))
-            ):
+        if not inserted:
+            if cow_source is not None:
                 cow_source.close()
+            return replace(capabilities, stored=False)
+        self._capsule_generation.advance()
+        for reason, _removed_key, _removed_tokens, entry in removed_entries:
+            if reason != "replaced":
+                self._record_entry_eviction_locked(entry)
+            if isinstance(entry.prompt_cache, COWFrozenPromptCache):
+                entry.prompt_cache.close()
+            self._remove_disk_files_locked(entry)
         survivor = self._trie.search(key, tokens)
         if survivor.exact is not None:
             stored_entry = self._trie.get(key, survivor.exact)

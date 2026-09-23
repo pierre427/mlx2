@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import hashlib
 import re
-from typing import Any, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 from .hyper_directory import DirectoryContext, HyperDirectory, Scope
 from .semantic_capsules import CapsuleStore, canonical_json
@@ -180,6 +180,7 @@ class SemanticMemory:
         response_delivered: bool,
         authenticated_tenant: bool,
         expected_revision: int | None = None,
+        prepare_derived_handles: Callable[[dict, str], Mapping[str, str]] | None = None,
     ) -> dict:
         if not response_delivered:
             return {"committed": False, "reason": "response-not-delivered", "proposals": len(proposals)}
@@ -193,6 +194,7 @@ class SemanticMemory:
         graph, parent, current_revision = self.load(session_context)
         if expected_revision is not None and expected_revision != current_revision:
             raise ValueError("semantic memory revision changed during request")
+        previous_graph = graph
         graph = {
             "schema": SEMANTIC_SCHEMA,
             "concepts": {key: dict(value) for key, value in graph["concepts"].items()},
@@ -231,6 +233,12 @@ class SemanticMemory:
                         },
                     )
                 identity = (record["subject"], record["relation"], record["object"])
+                if any(
+                    edge == record
+                    for edge in graph["edges"]
+                    if (edge["subject"], edge["relation"], edge["object"]) == identity
+                ):
+                    continue
                 graph["edges"] = [
                     edge
                     for edge in graph["edges"]
@@ -239,10 +247,20 @@ class SemanticMemory:
                 graph["edges"].append(record)
                 committed += 1
             else:
+                if record in graph["proposals"]:
+                    continue
                 graph["proposals"].append(record)
                 deferred += 1
         if not proposals:
             return {"committed": False, "reason": "no-proposals", "proposals": 0}
+        if graph == previous_graph:
+            return {
+                "committed": False,
+                "reason": "unchanged",
+                "revision": current_revision,
+                "accepted_edges": 0,
+                "deferred_proposals": 0,
+            }
         kind = "semantic_delta" if parent else "semantic_base"
         capsule = self.capsules.put(
             kind=kind,
@@ -254,11 +272,20 @@ class SemanticMemory:
             },
             **self.bindings,
         )
+        handles = {"semantic-memory": capsule.digest}
+        if prepare_derived_handles is not None:
+            derived = dict(prepare_derived_handles(graph, capsule.digest))
+            if "semantic-memory" in derived:
+                raise ValueError("derived handles cannot replace semantic memory")
+            handles.update(derived)
+        # Publish the semantic graph and any derived state in one session CAS.
+        # A failed derivation may leave an unreferenced immutable capsule, but
+        # cannot expose a new graph with stale derived handles.
         layer = self.directory.update(
             Scope.SESSION,
             context,
             expected_revision=current_revision,
-            handles={"semantic-memory": capsule.digest},
+            handles=handles,
         )
         return {
             "committed": True,

@@ -370,6 +370,24 @@ class NeuralConceptMemory:
         graph, semantic_digest, revision = self.semantic_memory.load(context)
         if semantic_digest is None:
             return {"committed": False, "reason": "no-semantic-memory"}
+        capsule_digest, concepts = self.prepare(graph, semantic_digest)
+        layer = self.directory.update(
+            Scope.SESSION,
+            context,
+            expected_revision=revision,
+            handles={"neural-concepts": capsule_digest},
+        )
+        return {
+            "committed": True,
+            "capsule": capsule_digest,
+            "semantic_capsule": semantic_digest,
+            "revision": layer["revision"],
+            "concepts": concepts,
+            "artifact_fingerprint": self.artifact.fingerprint,
+        }
+
+    def prepare(self, graph: dict, semantic_digest: str) -> tuple[str, int]:
+        """Store immutable derived state without publishing a directory handle."""
         document = self.encoder.state_document(
             graph, semantic_capsule=semantic_digest
         )
@@ -383,20 +401,7 @@ class NeuralConceptMemory:
             },
             **self.semantic_memory.bindings,
         )
-        layer = self.directory.update(
-            Scope.SESSION,
-            context,
-            expected_revision=revision,
-            handles={"neural-concepts": capsule.digest},
-        )
-        return {
-            "committed": True,
-            "capsule": capsule.digest,
-            "semantic_capsule": semantic_digest,
-            "revision": layer["revision"],
-            "concepts": len(document["concepts"]),
-            "artifact_fingerprint": self.artifact.fingerprint,
-        }
+        return capsule.digest, len(document["concepts"])
 
 
 __all__ = [

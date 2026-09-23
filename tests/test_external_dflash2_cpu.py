@@ -494,6 +494,30 @@ def test_external_fly_receipt_counter_and_structured_disable(monkeypatch):
     assert structured.scheduler_stats['fly_relaxed_accepts']==0
 
 
+def test_compact_verifier_disables_fly_for_processor_lane(monkeypatch):
+    import mlx2.runtime.external_speculative as module
+
+    m,d=tiny()
+    b=generator(m,d,fly_verification=True)
+    uid=b.insert([[1,2,3]],max_tokens=[3],
+                 logits_processors=[[lambda _tokens,value:value]])[0]
+    lane=b.lanes[uid]
+    while lane.anchor is None:b._prefill(lane)
+    block=module.CompactDraftRow(
+        [4],np.array([[4,5]],dtype=np.int32),
+        np.array([[0.75,0.25]],dtype=np.float64),1,
+    )
+    monkeypatch.setattr(b,"_target_law",lambda *_args:np.full(32,1/32))
+    observed=[]
+    original=module.verify_compact_proposals
+    def inspect(*args,**kwargs):
+        observed.append(kwargs.get("fly_verification"))
+        return original(*args,**kwargs)
+    monkeypatch.setattr(module,"verify_compact_proposals",inspect)
+    b._verify([lane],[block],mx.zeros((1,2,32)))
+    assert observed==[None]
+
+
 def test_apcv2_disk_pairs_external_revision_and_tail(tmp_path, monkeypatch):
     from mlx2.runtime.apc_v2 import APCKey, APCv2
     monkeypatch.setattr(mx,'clear_cache',lambda:None)

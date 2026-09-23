@@ -55,6 +55,11 @@ def test_batched_matches_host_tokens_laws_and_rng(config, seed):
     assert block.tokens.shape == (4, count)
     assert block.cand_ids.shape == block.cand_q.shape == (4, count, d.config.selector_top_k)
     assert block.lengths == (count,) * 4
+    candidate_ids = np.asarray(block.cand_ids)
+    assert all(
+        len(np.unique(candidate_ids[row, position])) == d.config.selector_top_k
+        for row in range(4) for position in range(count)
+    )
     assert block.token_lists() == tokens
     dense = block.dense_laws(d.config.vocab_size)
     for row in range(4):
@@ -153,6 +158,18 @@ def test_executor_batched_is_output_identical_to_host(temp):
     assert batched[3]["external_pairwise_selection_groups"] > 0
     assert batched[3]["external_pairwise_selection_lanes"] >= batched[3]["external_pairwise_selection_groups"]
     assert {k: v for k, v in batched[3].items() if k not in extra} == host[3]
+
+
+def test_pairwise_executor_never_expands_draft_laws(monkeypatch):
+    m, d = tiny()
+    def forbidden(*_args):
+        raise AssertionError("pairwise verifier must keep q compact")
+    monkeypatch.setattr(DraftBlock, "dense_laws", forbidden)
+    b = generator(m, d, pairwise_selection="batched")
+    b.insert([[1, 2, 3]], max_tokens=[4])
+    output, _ = drain(b)
+    assert len(output[0]) == 4
+    assert b.scheduler_stats["external_pairwise_selection_groups"] > 0
 
 
 def test_processor_rows_stay_on_host_path(monkeypatch):

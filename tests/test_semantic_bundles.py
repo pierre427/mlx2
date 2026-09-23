@@ -82,6 +82,25 @@ class SemanticBundleTests(unittest.TestCase):
                 expected_revision=0,
             )
 
+    def test_repeated_identical_evidence_does_not_publish_another_revision(self):
+        proposal = SemanticProposal("forest", "related_to", "leaves", 0.99, 0.8, "turn-1")
+        first = self.memory.commit_after_delivery(
+            self.context, [proposal], response_delivered=True, authenticated_tenant=True
+        )
+        prepared = []
+        second = self.memory.commit_after_delivery(
+            self.context, [proposal], response_delivered=True, authenticated_tenant=True,
+            expected_revision=first["revision"],
+            prepare_derived_handles=lambda *_args: prepared.append(True) or {},
+        )
+        self.assertEqual(second["reason"], "unchanged")
+        self.assertEqual(second["revision"], first["revision"])
+        self.assertEqual(prepared, [])
+        graph, digest, revision = self.memory.load(self.context)
+        self.assertEqual(revision, first["revision"])
+        self.assertEqual(digest, first["capsule"])
+        self.assertEqual(len(graph["edges"]), 1)
+
     def test_one_hop_retrieval_does_not_chain_by_edge_order(self):
         chain = (("alpha", "beta"), ("beta", "gamma"), ("gamma", "delta"))
         for index, links in enumerate((chain, tuple(reversed(chain)))):
