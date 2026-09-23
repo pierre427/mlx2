@@ -552,3 +552,202 @@ def test_concurrent_requests_for_a_new_pattern_share_one_compile(monkeypatch):
     refusals = {outcome for source, outcome in results if source == unsupported.pattern}
     assert len(refusals) == 1 and isinstance(next(iter(refusals)), str)
     assert len(results) == 7 and not sa._COMPILING
+
+
+def _reference_minimize(table, accepting):
+    """Textbook Moore refinement, kept naive on purpose as the oracle.
+
+    States stay together while they agree on acceptance and on the block (or
+    the dead state, -1) every symbol leads to.  Blocks are numbered in order
+    of first appearance, the canonical numbering ``_minimize`` produces, so
+    the two results must be equal array for array, not merely isomorphic.
+    """
+    rows = table.tolist()
+    block = [int(flag) for flag in accepting.tolist()]
+    count = len(set(block))
+    while True:
+        signatures = {}
+        block = [
+            signatures.setdefault(
+                (block[state], tuple(block[t] if t >= 0 else -1 for t in row)),
+                len(signatures),
+            )
+            for state, row in enumerate(rows)
+        ]
+        if len(signatures) == count:
+            break
+        count = len(signatures)
+    first = {}
+    for state, number in enumerate(block):
+        first.setdefault(number, state)
+    representatives = [first[number] for number in range(count)]
+    reduced = [[block[t] if t >= 0 else -1 for t in rows[state]] for state in representatives]
+    return (
+        np.array(reduced, dtype=np.int32).reshape(count, table.shape[1]),
+        accepting[representatives],
+    )
+
+
+def _bounded_string_schema(maximum):
+    return _schema_format({
+        "type": "object",
+        "properties": {"note": {"type": "string", "maxLength": maximum}},
+        "required": ["note"],
+        "additionalProperties": False,
+    })
+
+
+def _tool_grammar_tools(maximum=None):
+    """A strict and a non-strict tool; ``maximum`` adds a bounded string
+    parameter.  Qwen's XML string values need a lookahead the automaton
+    refuses, so its grammars here use the strict tool without one."""
+    properties = {
+        "mode": {"enum": ["append", "replace", "create"]},
+        "lines": {"type": "integer"},
+        "meta": {"type": "object", "properties": {"ok": {"type": "boolean"}},
+                 "required": ["ok"], "additionalProperties": False},
+    }
+    if maximum is not None:
+        properties = {"path": {"type": "string", "maxLength": maximum}, **properties}
+    return [
+        {"type": "function", "function": {"name": "write", "strict": True, "parameters": {
+            "type": "object",
+            "properties": properties,
+            "required": [name for name in ("path", "mode") if name in properties],
+            "additionalProperties": False,
+        }}},
+        {"type": "function", "function": {"name": "search", "parameters": {
+            "type": "object", "properties": {"query": {"type": "string"}, "limit": {"type": "integer"}},
+            "required": ["query"],
+        }}},
+    ]
+
+
+def _minimization_corpus():
+    from mlx2.adapters.muse_glimmer_output import constrained_tool_grammar as muse_grammar
+    from mlx2.runtime.tool_parsers.qwen3_coder import constrained_tool_grammar as qwen_grammar
+
+    tools = _tool_grammar_tools(24)
+    return {
+        **{f"json maxLength={n}": compile_constraint(_bounded_string_schema(n)).pattern.pattern
+           for n in (1, 8, 40)},
+        **{name: _compile(name).pattern.pattern for name in sorted(CONSTRAINTS)},
+        "json enum": compile_constraint(_schema_format({"enum": ["red", "read", "reed", 12, 125, None]})).pattern.pattern,
+        "muse tools": muse_grammar(tools, "required"),
+        "muse strict single": muse_grammar(tools[:1], "required", parallel_tool_calls=False),
+        "qwen strict parallel": qwen_grammar(_tool_grammar_tools()[:1], "required"),
+        "qwen strict single": qwen_grammar(_tool_grammar_tools()[:1], "required", parallel_tool_calls=False),
+        # Subset constructions of these are not minimal.
+        "suffix window": r"(?:a|b)*a(?:a|b){3}",
+        "shared suffix": r"ac|bc|dc?",
+        "shared middle": r"x(?:ab|cb)*y",
+        "overlapping splits": r"(?:ab|a)(?:bc|c)",
+        "numbers": r"-?(?:\d+|\d+\.\d*|\.\d+)(?:[eE][+-]?\d+)?",
+    }
+
+
+def test_minimization_equals_textbook_refinement_on_grammars(monkeypatch):
+    """``_minimize`` refines partitions Hopcroft's way instead of one Moore
+    round (a sort of the whole table) per distinguishing step.  Every grammar
+    here, JSON schemas with ``maxLength``, enums, nested objects, the
+    recursive ``json_object`` rules and the Muse and Qwen tool-call wires,
+    must compile to exactly the automaton the textbook refinement gives, and
+    so to the same token masks."""
+    corpus = _minimization_corpus()
+    merged = []
+
+    def reference(table, accepting):
+        result = _reference_minimize(table, accepting)
+        merged.append(result[0].shape[0] < table.shape[0])
+        return result
+
+    pieces = _synthetic_pieces()
+    trie = sa.TokenTrie(pieces, [0])
+    for name, source in corpus.items():
+        fast = compile_pattern(source)
+        with monkeypatch.context() as patch:
+            patch.setattr(sa, "_minimize", reference)
+            oracle = compile_pattern(source)
+        assert fast.table.dtype == oracle.table.dtype == np.int32, name
+        np.testing.assert_array_equal(fast.table, oracle.table, err_msg=name)
+        assert fast.accepting == oracle.accepting, name
+        assert fast.final == oracle.final, name
+        assert fast.calls == oracle.calls, name
+        assert fast.first == oracle.first and fast.rule_start == oracle.rule_start, name
+        for document in DOCUMENTS.get(name, ()):
+            for cut in range(len(document) + 1):
+                config = fast.advance(fast.start, document[:cut])
+                assert config == oracle.advance(oracle.start, document[:cut])
+                if config is not None:
+                    np.testing.assert_array_equal(
+                        trie.allowed(fast, config), trie.allowed(oracle, config)
+                    )
+    # The corpus has to exercise merging, not only already-minimal tables.
+    assert len(merged) > len(corpus) and sum(merged) >= 8, merged
+
+
+def test_minimization_equals_textbook_refinement_on_random_tables():
+    """Random partial tables add what grammars rarely produce: unreachable
+    states, real dead-end states (which stay distinct from the implicit dead
+    state -1), all-accepting and all-rejecting automata."""
+    rng = np.random.default_rng(20260923)
+    cases = [
+        (np.full((1, 1), -1, dtype=np.int32), np.array([False])),
+        (np.full((1, 3), -1, dtype=np.int32), np.array([True])),
+        (np.zeros((3, 2), dtype=np.int32), np.ones(3, dtype=bool)),
+        (np.full((4, 2), -1, dtype=np.int32), np.array([False, True, False, True])),
+    ]
+    for _ in range(1500):
+        count = int(rng.integers(1, 48))
+        symbols = int(rng.integers(1, 6))
+        table = rng.integers(0, int(rng.integers(1, count + 1)), size=(count, symbols)).astype(np.int32)
+        table[rng.random((count, symbols)) < rng.random()] = -1
+        cases.append((table, rng.random(count) < rng.random()))
+    # A long chain and an equivalent copy of it reached from the start state:
+    # the copy merges into the original only after ~length rounds of Moore.
+    length = 300
+    chain = np.full((length, 3), -1, dtype=np.int32)
+    chain[:-1, 0] = np.arange(1, length)
+    chain[::7, 1] = 1
+    copy = np.where(chain >= 0, chain + length, -1)
+    table = np.vstack((chain, copy)).astype(np.int32)
+    table[0, 2] = length
+    accepting = np.zeros(2 * length, dtype=bool)
+    accepting[[length - 1, 2 * length - 1]] = True
+    cases.append((table, accepting))
+    for table, accepting in cases:
+        got_table, got_accepting = sa._minimize(table, accepting)
+        want_table, want_accepting = _reference_minimize(table, accepting)
+        assert got_table.dtype == np.int32
+        np.testing.assert_array_equal(got_table, want_table)
+        np.testing.assert_array_equal(got_accepting, want_accepting)
+    assert sa._minimize(table, accepting)[0].shape[0] == length + 1
+
+
+def test_long_bounded_strings_compile_fast():
+    """A string ``maxLength`` of n unrolls into a chain n states deep, and
+    Moore refinement took one whole-table sort per chain step: a
+    ``maxLength: 4096`` JSON schema compiled in 9.2 s (8.3 s minimizing) and
+    a Muse strict tool with two string parameters in 34 s, all spent by the
+    requesting client before its first token.  Both now compile in 0.05 s and
+    0.25 s on the same host.  Each bound sits ~6x under the old time and
+    20-30x over the new one, room for a host busy with parallel suites."""
+    from mlx2.adapters.muse_glimmer_output import constrained_tool_grammar as muse_grammar
+
+    tools = [{"type": "function", "function": {"name": "write", "strict": True, "parameters": {
+        "type": "object",
+        "properties": {"path": {"type": "string"}, "content": {"type": "string"}},
+        "required": ["path", "content"],
+        "additionalProperties": False,
+    }}}]
+    cases = [
+        (compile_constraint(_bounded_string_schema(4096)).pattern.pattern, 4096, 1.5),
+        (muse_grammar(tools, "required", parallel_tool_calls=False), 2 * 4096, 5.0),
+    ]
+    for source, depth, bound in cases:
+        started = time.perf_counter()
+        automaton = compile_pattern(source)
+        elapsed = time.perf_counter() - started
+        assert automaton.state_count > depth  # the unrolled chain is there
+        assert automaton.fullmatch(source[:0], partial=True)
+        assert elapsed < bound, (source[:40], elapsed)

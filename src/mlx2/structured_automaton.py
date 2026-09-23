@@ -510,21 +510,141 @@ def _determinize(nfa, start, accept, symbol_count, state_budget):
     return table, accepting
 
 
+def _refinable_partition(order, sizes):
+    """Partition of ``range(len(order))`` whose sets can be split in place.
+
+    ``order`` lists the elements set by set and ``sizes`` gives each set's
+    length.  Returns the lists ``(elements, location, set_of, first, past,
+    marked)``: a set's members are ``elements[first[s]:past[s]]`` and the
+    marked ones sit at the front of that slice.
+    """
+    size = len(order)
+    sizes = np.asarray(sizes, dtype=np.int64)
+    location = np.empty(size, dtype=np.int64)
+    location[order] = np.arange(size)
+    set_of = np.empty(size, dtype=np.int64)
+    set_of[order] = np.repeat(np.arange(len(sizes)), sizes)
+    past = np.cumsum(sizes)
+    first = past - sizes
+    return (
+        order.tolist(),
+        location.tolist(),
+        set_of.tolist(),
+        first.tolist(),
+        past.tolist(),
+        [0] * len(sizes),
+    )
+
+
+def _split_marked(elements, set_of, first, past, marked, touched):
+    """Split every touched set into its marked and unmarked members.
+
+    The smaller part becomes the new set, so a set that was already used as a
+    splitter only has to be followed by that smaller part (Hopcroft's
+    "process the smaller half").
+    """
+    for split in touched:
+        middle = first[split] + marked[split]
+        marked[split] = 0
+        if middle == past[split]:
+            continue  # every member was marked: nothing to separate
+        new = len(first)
+        if middle - first[split] <= past[split] - middle:
+            first.append(first[split])
+            past.append(middle)
+            first[split] = middle
+        else:
+            first.append(middle)
+            past.append(past[split])
+            past[split] = middle
+        marked.append(0)
+        for position in range(first[new], past[new]):
+            set_of[elements[position]] = new
+    touched.clear()
+
+
 def _minimize(table, accepting):
-    """Moore partition refinement; state 0 stays the start state."""
-    count = table.shape[0]
-    block = accepting.astype(np.int64)
-    blocks = len(np.unique(block))
-    while True:
-        extended = np.concatenate((block, [-1]))
-        signature = np.column_stack((block, extended[table]))
-        _, new_block = np.unique(signature, axis=0, return_inverse=True)
-        new_block = new_block.reshape(-1)
-        new_blocks = int(new_block.max()) + 1
-        block = new_block
-        if new_blocks == blocks:
-            break
-        blocks = new_blocks
+    """Coarsest stable partition of the states; state 0 stays the start state.
+
+    Two states merge when they agree on acceptance and every symbol takes both
+    to merged states or both to the dead state.  This is Hopcroft's algorithm
+    in the form Valmari and Lehtinen give for partial transition functions
+    ("Efficient Minimization of DFAs with Partial Transition Functions",
+    STACS 2008), O(m log n) over the m defined transitions.  Moore refinement
+    reached the same partition one distinguishing step per round, sorting the
+    whole table each round, and a string ``maxLength`` of n is n steps deep:
+    it spent 8 s of a request's compile at n=4096.
+    """
+    count, symbol_count = table.shape
+    sources, symbols = np.nonzero(table >= 0)
+    targets = table[sources, symbols]
+    # States start as the rejecting and the accepting block.  Block 0 is the
+    # one block never used as a splitter (its effect follows from the others),
+    # so it is the larger.
+    accept_states = np.flatnonzero(accepting)
+    reject_states = np.flatnonzero(~accepting)
+    larger, smaller = sorted((reject_states, accept_states), key=len, reverse=True)
+    sizes = [size for size in (len(larger), len(smaller)) if size]
+    states = _refinable_partition(np.concatenate((larger, smaller)), sizes)
+    block_members, block_location, block_of, block_first, block_past, block_marked = states
+    # Transitions are grouped into "cords" that share a symbol and a target
+    # block.  They start as one cord per symbol; using those as splitters
+    # separates states that define different symbols, which is what keeps a
+    # transition to the dead state distinct from one to a real state.
+    by_symbol = np.argsort(symbols, kind="stable")
+    cords = _refinable_partition(
+        by_symbol, [size for size in np.bincount(symbols, minlength=symbol_count) if size]
+    )
+    cord_members, cord_location, cord_of, cord_first, cord_past, cord_marked = cords
+    incoming = np.argsort(targets, kind="stable").tolist()
+    incoming_start = np.concatenate(
+        ([0], np.cumsum(np.bincount(targets, minlength=count)))
+    ).tolist()
+    tail = sources.tolist()
+    touched_blocks, touched_cords = [], []
+    block_cursor, cord_cursor = 1, 0
+    while cord_cursor < len(cord_first):
+        # Split the blocks by which of their states have a transition in this
+        # cord.  A cord holds one symbol, so it names each source at most once.
+        for position in range(cord_first[cord_cursor], cord_past[cord_cursor]):
+            state = tail[cord_members[position]]
+            block = block_of[state]
+            front = block_first[block] + block_marked[block]
+            at = block_location[state]
+            block_members[at] = displaced = block_members[front]
+            block_location[displaced] = at
+            block_members[front] = state
+            block_location[state] = front
+            if not block_marked[block]:
+                touched_blocks.append(block)
+            block_marked[block] += 1
+        _split_marked(
+            block_members, block_of, block_first, block_past, block_marked, touched_blocks
+        )
+        cord_cursor += 1
+        # Split the cords by which of their transitions enter each block not
+        # yet used as a splitter.
+        while block_cursor < len(block_first):
+            for member in range(block_first[block_cursor], block_past[block_cursor]):
+                state = block_members[member]
+                for edge in range(incoming_start[state], incoming_start[state + 1]):
+                    transition = incoming[edge]
+                    cord = cord_of[transition]
+                    front = cord_first[cord] + cord_marked[cord]
+                    at = cord_location[transition]
+                    cord_members[at] = displaced = cord_members[front]
+                    cord_location[displaced] = at
+                    cord_members[front] = transition
+                    cord_location[transition] = front
+                    if not cord_marked[cord]:
+                        touched_cords.append(cord)
+                    cord_marked[cord] += 1
+            _split_marked(
+                cord_members, cord_of, cord_first, cord_past, cord_marked, touched_cords
+            )
+            block_cursor += 1
+    block = np.array(block_of, dtype=np.int64)
+    blocks = len(block_first)
     # Renumber blocks in order of first appearance so the start stays 0.
     _, first_index = np.unique(block, return_index=True)
     rank = np.empty(blocks, dtype=np.int64)
