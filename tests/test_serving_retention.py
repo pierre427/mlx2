@@ -173,6 +173,59 @@ def test_unpublished_cohort_member_failure_reaches_requests_total():
     assert gauges["mlx2_num_requests_running"] == 0
 
 
+def test_publication_records_admission_before_the_worker_can_finish_it():
+    from mlx2 import serving
+    from mlx2.batch_metrics import BatchRuntimeMetrics
+
+    engine = serving.ServingEngine.__new__(serving.ServingEngine)
+    engine.lock = threading.Lock()
+    engine.submission_lock = threading.Lock()
+    engine.jobs = {}
+    engine.slots = threading.Semaphore(8)
+    engine.counts = Counter()
+    engine.batch_metrics = BatchRuntimeMetrics()
+    engine.pending_cohorts = {}
+    engine.max_lanes = 4
+    engine.fanout_waiting = {}
+    engine.queued_jobs = 0
+
+    class WorkerWinsTheRace(queue.Queue):
+        """The worker dequeues and fails the job before put_nowait returns."""
+
+        def put_nowait(self, item):
+            super().put_nowait(item)
+            engine._finish(self.get_nowait(), {"error": "bad sampling", "status": 400})
+
+    engine.incoming = WorkerWinsTheRace()
+    job = NS(id="fast", tenant_id="t", request={"messages": []}, fault=None,
+             cache_branch=None, admission_hit=None, admission_tokens=None,
+             lora_slot=None, events=queue.Queue(), uid=None, completion_tokens=0)
+    engine.slots.acquire()
+    engine._publish_job(job)
+
+    assert job.events.get_nowait()["status"] == 400
+    snapshot = engine.batch_metrics.prometheus_snapshot()
+    # It used to stay "running" forever: admitted() ran after terminal().
+    assert snapshot["gauges"]["mlx2_num_requests_running"] == 0
+    failed = sum(
+        value
+        for (name, labels), value in snapshot["counters"].items()
+        if name == "mlx2_requests_total" and dict(labels)["outcome"] == "failed"
+    )
+    assert failed == 1
+
+    class Full(queue.Queue):
+        def put_nowait(self, item):
+            raise queue.Full
+
+    engine.incoming = Full()
+    refused = NS(**{**vars(job), "id": "refused", "events": queue.Queue()})
+    with pytest.raises(queue.Full):
+        engine._publish_job(refused)
+    gauges = engine.batch_metrics.prometheus_snapshot()["gauges"]
+    assert gauges["mlx2_num_requests_running"] == 0
+
+
 def test_terminal_event_is_published_after_branch_and_inflight_release():
     from mlx2 import serving
 

@@ -2241,11 +2241,19 @@ class ServingEngine:
             initial_depth = self.queued_jobs
             self.queued_jobs += len(jobs)
         item = jobs[0] if len(jobs) == 1 else PublishedCohort(jobs, atomic=atomic)
-        self.incoming.put_nowait(item)
+        # Record admission before the worker can see the job: a job that
+        # fails fast is finished (and its metrics state popped) by the worker,
+        # and an admission recorded after that would stay running forever.
         for offset, job in enumerate(jobs, 1):
             self.batch_metrics.admitted(
                 job.id, job.tenant_id, initial_depth + offset
             )
+        try:
+            self.incoming.put_nowait(item)
+        except BaseException:
+            for job in jobs:
+                self.batch_metrics.terminal(job.id, "failed")
+            raise
 
     def _expire_pending_cohorts(self):
         if not self.pending_cohorts:
