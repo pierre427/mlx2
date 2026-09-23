@@ -152,6 +152,16 @@ TENANT_AUTH_LOOPBACK_OPEN_PATHS = frozenset({"/metrics"})
 TENANT_AUTH_ADAPTER_PATHS = frozenset(
     {"/v1/load_lora_adapter", "/v1/unload_lora_adapter"}
 )
+# The gate API key and tenant credentials are both read from Authorization
+# and x-api-key, and tenant auth refuses the two headers when they differ, so
+# together they refuse every request that does not present one value that is
+# both the gate key and a tenant key.  Tenant auth already guards every route.
+TENANT_AUTH_GATE_KEY_CONFLICT = (
+    "--api-key-file/--api-key-env cannot be combined with tenant auth: both "
+    "read Authorization and x-api-key, so every request would be refused; "
+    "tenant credentials already guard every route except /health and "
+    "loopback /metrics"
+)
 
 
 def authorize_admin(client_address, authorization, token=None):
@@ -1237,6 +1247,11 @@ def handler_for(
     agent_compat=None,
     semantic_middleware=None,
 ):
+    if (
+        tenant_authenticator is not None
+        and getattr(http_security, "api_key", None) is not None
+    ):
+        raise ValueError(TENANT_AUTH_GATE_KEY_CONFLICT)
     compat_policy = AgentCompatPolicy.coerce(agent_compat)
     engine.agent_compat = compat_policy
     if tenant_authenticator is not None:
@@ -3794,6 +3809,8 @@ def build_tenant_authenticator(args):
             "tenant auth requires --tenant-scoped-cache (or explicitly "
             "--tenant-auth-allow-shared-cache)"
         )
+    if args.api_key_file or args.api_key_env:
+        raise ValueError(TENANT_AUTH_GATE_KEY_CONFLICT)
     return configured(
         keys_file=args.tenant_auth_keys_file,
         token_secret_file=args.tenant_auth_token_secret_file,

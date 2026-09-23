@@ -669,3 +669,29 @@ def test_serving_engine_recent_receipts_filter_by_owner():
     assert engine.recent_receipts() == [{"request_id": 1}, {"request_id": 2}]
     assert engine.recent_receipts(tenant_id="tenant-b") == [{"request_id": 2}]
     assert engine.recent_receipts(tenant_id="tenant-c") == []
+
+
+def test_gate_api_key_and_tenant_auth_are_refused_together(tmp_path):
+    from mlx2.http_security import policy_for_bind
+
+    keys = str(_write_keys(tmp_path))
+    # Both read Authorization/x-api-key, so together they refuse every
+    # request that is not both the gate key and a tenant key at once.
+    for gate in (["--api-key-env", "MLX2_API_KEY"], ["--api-key-file", "k"]):
+        with pytest.raises(ValueError, match="cannot be combined"):
+            build_tenant_authenticator(
+                _args("--tenant-auth-keys-file", keys, "--tenant-scoped-cache", *gate)
+            )
+    with pytest.raises(ValueError, match="cannot be combined"):
+        handler_for(
+            TenantEngine(),
+            http_security=policy_for_bind("127.0.0.1", api_key="gate-key-123"),
+            tenant_authenticator=_auth(tmp_path),
+        )
+    # Each alone is still accepted.
+    handler_for(
+        TenantEngine(),
+        http_security=policy_for_bind("127.0.0.1"),
+        tenant_authenticator=_auth(tmp_path),
+    )
+    assert build_tenant_authenticator(_args("--api-key-env", "MLX2_API_KEY")) is None
