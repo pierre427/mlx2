@@ -646,3 +646,87 @@ def test_responses_stream_function_calls_on_arrival(text_first):
     assert all(last_text < records.index(r) for r in done
                if r["item"]["type"] == "function_call")
     assert sum(t == "response.function_call_arguments.delta" for t in types) == 2
+
+
+COMPAT_CUSTOM_TOOL = {"type": "custom", "name": "apply_patch", "description": "patch"}
+COMPAT_NAMESPACE_TOOL = {
+    "type": "namespace",
+    "name": "multi_agent_v1",
+    "tools": [
+        {
+            "type": "function",
+            "name": "spawn_agent",
+            "strict": False,
+            "parameters": {"type": "object", "properties": {}},
+        }
+    ],
+}
+
+
+@pytest.mark.parametrize(
+    "tool, shim_name, arguments, final_type, final_name",
+    [
+        (
+            COMPAT_CUSTOM_TOOL,
+            "apply_patch",
+            {"input": "*** Begin Patch"},
+            "custom_tool_call",
+            "apply_patch",
+        ),
+        (
+            COMPAT_NAMESPACE_TOOL,
+            "multi_agent_v1.spawn_agent",
+            {},
+            "function_call",
+            "spawn_agent",
+        ),
+    ],
+)
+def test_responses_grammar_stream_items_match_agent_compat_rewrites(
+    tool, shim_name, arguments, final_type, final_name
+):
+    from mlx2.agent_compat import AgentCompat
+
+    call = {
+        "index": 0,
+        "id": "call_abc",
+        "type": "function",
+        "function": {"name": shim_name, "arguments": json.dumps(arguments)},
+    }
+    engine = GrammarEngine(events=[{"delta": {"tool_calls": [call]}}, FINISH])
+    server = ThreadingHTTPServer(
+        ("127.0.0.1", 0), handler_for(engine, agent_compat=AgentCompat(enabled=True))
+    )
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        with post_response(
+            f"http://127.0.0.1:{server.server_port}",
+            stream=True,
+            store=False,
+            tools=[tool],
+            input="go",
+        ) as response:
+            records = _records(response)
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
+    output = records[-1]["response"]["output"]
+    assert [(item["type"], item["name"]) for item in output] == [
+        (final_type, final_name)
+    ]
+    added = [r for r in records if r["type"] == "response.output_item.added"]
+    done = [r for r in records if r["type"] == "response.output_item.done"]
+    # Every item streamed is the item the payload completes, at its index:
+    # no raw shim item left open, no second item at the same index.
+    assert [(r["output_index"], r["item"]["id"]) for r in added] == [
+        (0, output[0]["id"])
+    ]
+    assert [(r["output_index"], r["item"]["id"]) for r in done] == [
+        (0, output[0]["id"])
+    ]
+    assert all(r["item"].get("name") in {None, final_name} for r in added + done)
+    for record in records:
+        if "item_id" in record:
+            assert record["item_id"] == output[0]["id"]

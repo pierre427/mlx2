@@ -2560,10 +2560,16 @@ def handler_for(
                     and body.get("stream")
                     and response_options.get("tool_executors")
                 )
+                # Agent-compat rewrites custom and namespace shim calls into
+                # other item types and names only in the final payload, so an
+                # item streamed early would not be the item completed.
+                compat_tool_map = (response_options or {}).get("agent_compat") or {}
                 grammar_stream_ready = bool(
                     body.get("stream")
                     and body.get("tools")
                     and not buffered_hosted_stream
+                    and not compat_tool_map.get("custom")
+                    and not compat_tool_map.get("namespaces")
                     and (status.get("settings") or {}).get("tool_grammar_streaming")
                 )
                 model = body.get("model", status.get("model"))
