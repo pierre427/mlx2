@@ -517,3 +517,20 @@ def test_xing_declares_a_larger_thinking_allowance():
     from mlx2.adapters.xing import XingAdapter
 
     assert XingAdapter.thinking_allowance_tokens == 4096 > qualify.THINKING_BUDGET_TOKENS
+
+
+@pytest.mark.parametrize(
+    ("sequential", "concurrent", "passes"),
+    [
+        (3.73, 2.31, True),     # qwen35-9b receipt
+        (59.22, 45.07, True),   # Xing receipt, the case the 30 s clock failed
+        (2.0, 5.0, False),      # slower than the pair run one after the other
+        (2.0, 29.0, False),
+        (20.66, 22.0, False),
+        (2.0, 2.0, False),      # serialized: no faster than sequential
+    ],
+)
+def test_mixed_warm_concurrent_pair_must_beat_its_sequential_reference(
+    sequential, concurrent, passes
+):
+    assert qualify.mixed_warm_timing_passes(concurrent, sequential) is passes

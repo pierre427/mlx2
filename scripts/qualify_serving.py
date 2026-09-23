@@ -441,6 +441,25 @@ def validate_preflight_receipt(path, active_runtime, *, identity_fn=preflight_id
             "identity": expected, "test_command": command, "passed": True}
 
 
+# The concurrent warm pair must finish in less than this fraction of the same
+# pair run one after the other.  No noise allowance above 1.0: across the 25
+# committed receipts (qualification/, 2026-09-18..20) the worst ratio was
+# 0.81 (Xing x6 PLD) and the rest 0.61-0.77, and the sequential reference is
+# the pair's first serve, so noise already favours the concurrent pair.  A
+# pair that is merely serialized (ratio ~1.0) fails.
+MIXED_WARM_MAX_RATIO = 1.0
+
+
+def mixed_warm_timing_passes(concurrent_seconds, sequential_seconds):
+    """Judge the concurrent warm pair against its own sequential warm-up.
+
+    The former ``max(30.0, sequential)`` floor let any pair under 30 s pass
+    regardless of the reference, and every non-Xing model finishes its
+    sequential pair in 1-21 s, so the comparison never applied to them.
+    """
+    return concurrent_seconds < sequential_seconds * MIXED_WARM_MAX_RATIO
+
+
 def observed_compute_widths(receipt):
     """Return actual execution widths across ordinary and speculative routes."""
     mtp = receipt.get("mtp") or {}
@@ -1394,7 +1413,7 @@ def main():
         check(
             "mixed_warm",
             all(content(r) and r["mlx2"]["cached_tokens"] > 0 for r in mixed)
-            and concurrent < max(30.0, sequential),
+            and mixed_warm_timing_passes(concurrent, sequential),
             {
                 "concurrent_seconds": concurrent,
                 "sequential_seconds": sequential,
