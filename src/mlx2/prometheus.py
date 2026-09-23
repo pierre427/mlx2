@@ -675,6 +675,12 @@ def _copy_engine_state(engine: Any) -> tuple[dict[str, Any], dict[str, int], int
                 getattr(engine, "_service_state", "serving")
             )
             counts = dict(getattr(engine, "counts", {}))
+            # Expert-stream and atlas counters live on the stream handle, not
+            # in engine.counts; merge them the way status() does, or /metrics
+            # reports them as zero while streaming is active.
+            stream_counters = getattr(engine, "expert_stream_counters", None)
+            if callable(stream_counters):
+                counts.update(stream_counters())
             queue_depth = int(getattr(engine, "queued_jobs", 0))
         return snapshot, counts, queue_depth
     status = dict(engine.status())

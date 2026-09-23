@@ -643,3 +643,46 @@ def test_streaming_counters_are_exported():
     ):
         assert key in _ENGINE_EVENTS
     assert "stream_resident_bytes" in _STREAM_GAUGES
+
+
+def test_streaming_counters_reach_the_metrics_scrape():
+    import threading
+    from collections import Counter
+
+    from mlx2.batch_metrics import BatchRuntimeMetrics
+    from mlx2.serving import ServingEngine
+
+    class Stream:
+        def counters(self):
+            return {
+                "stream_page_ins_total": 37,
+                "stream_expert_hits_total": 900,
+                "stream_expert_misses_total": 37,
+                "stream_evictions_total": 5,
+                "stream_resident_bytes": 8 << 30,
+                "atlas_observations_total": 937,
+            }
+
+    engine = ServingEngine.__new__(ServingEngine)
+    engine.lock = threading.Lock()
+    engine.counts = Counter()
+    engine.queued_jobs = 0
+    engine.snapshot = {"state": "ready", "model": "m", "qualification": "qualified"}
+    engine.batch_metrics = BatchRuntimeMetrics()
+    engine.expert_stream = Stream()
+    text = engine.prometheus_metrics()
+    for event, value in (
+        ("page_in", 37),
+        ("hit", 900),
+        ("miss", 37),
+        ("eviction", 5),
+    ):
+        assert (
+            f'mlx2_runtime_events_total{{component="expert_stream",event="{event}"}} {value}'
+            in text
+        )
+    assert (
+        'mlx2_runtime_events_total{component="expert_atlas",event="observation"} 937'
+        in text
+    )
+    assert f"mlx2_expert_stream_resident_bytes {8 << 30}" in text
