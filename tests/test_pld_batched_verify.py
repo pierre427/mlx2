@@ -60,7 +60,11 @@ def _greedy(model, prompt, tokens):
 
 
 def test_batched_verify_is_exact_against_per_lane_and_plain_greedy():
-    model = _north()
+    # The width assertion below needs every lane to propose at some point,
+    # which depends on the tiny model's greedy continuations.  Seed 5 keeps all
+    # four lanes proposing on the corrected (layer-0 RoPE) North body, where
+    # seed 11's third lane never finds an n-gram to look up.
+    model = _north(seed=5)
     batched, batched_finals, stats = _run(model, batched=True)
     per_lane, per_lane_finals, legacy = _run(model, batched=False)
     assert batched == per_lane
