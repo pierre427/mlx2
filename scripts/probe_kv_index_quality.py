@@ -126,20 +126,35 @@ def build_workload(encode, filler, context, n_needles, n_twohop, tf_tokens, rng)
                   "prompt": f"\n\nQuestion: What is the access code for {n}?\n"
                             f"Answer: The access code for {n} is"}
                  for n, c in needles.items()]
+    # Two-hop is a two-turn chain: ask for the partner, then for the code of
+    # whichever name the model gave. Correct only if both hops are right. (A
+    # one-step "code of X's partner" question was unanswerable even for dense
+    # 9B, 0/3 in the 2026-09-23 validity round, so it measured nothing.)
     questions += [{"kind": "twohop", "name": a, "partner": b, "code": needles[b],
-                   "prompt": f"\n\nQuestion: What is the access code of {a}'s partner?\n"
-                             f"Answer: {a}'s partner is"}
+                   "prompt": f"\n\nQuestion: Who is {a}'s partner?\nAnswer: {a}'s partner is"}
                   for a, b in partners.items()]
     rng.shuffle(questions)
     return body, text, questions
 
 
-def score_answer(question, text):
+def named_partner(text):
+    """First word of a "X's partner is ..." answer, punctuation stripped."""
+    words = re.findall(r"[A-Za-z]+", text.split("\n", 1)[0])
+    return words[0] if words else ""
+
+
+def follow_up_prompt(name):
+    return (f"\n\nQuestion: What is the access code for {name}?\n"
+            f"Answer: The access code for {name} is")
+
+
+def score_answer(question, text, hop1=None):
     first_line = text.split("\n", 1)[0]
     codes = re.findall(r"\d{6}", first_line.replace(" ", ""))
+    code_ok = bool(codes) and codes[0] == question["code"]
     if question["kind"] == "single":
-        return bool(codes) and codes[0] == question["code"]
-    return question["code"] in codes and question["partner"] in first_line
+        return code_ok
+    return code_ok and named_partner(hop1 or "") == question["partner"]
 
 
 # ---------------------------------------------------------------------- arms
@@ -180,9 +195,8 @@ def run_arm(model, arm, prompt, text, questions, *, encode, decode, eos, args):
         rows.append(out)
     timed = step_ms[args.warmup_steps:]
 
-    answers = []
-    for q in questions:
-        out = model(mx.array([list(encode(q["prompt"]))], dtype=mx.uint32), cache=cache)
+    def generate(prompt_text):
+        out = model(mx.array([list(encode(prompt_text))], dtype=mx.uint32), cache=cache)
         token = int(mx.argmax(out[0, -1]).item())
         generated = []
         for _ in range(args.answer_tokens):
@@ -193,9 +207,20 @@ def run_arm(model, arm, prompt, text, questions, *, encode, decode, eos, args):
                 break
             out = model(mx.array([[token]], dtype=mx.uint32), cache=cache)
             token = int(mx.argmax(out[0, -1]).item())
-        answer = decode(generated)
-        answers.append({"name": q["name"], "kind": q["kind"], "answer": answer,
-                        "correct": score_answer(q, answer)})
+        return decode(generated)
+
+    answers = []
+    for q in questions:
+        if q["kind"] == "single":
+            answer = generate(q["prompt"])
+            answers.append({"name": q["name"], "kind": "single", "answer": answer,
+                            "correct": score_answer(q, answer)})
+        else:
+            hop1 = generate(q["prompt"])
+            answer = generate(follow_up_prompt(named_partner(hop1) or "them"))
+            answers.append({"name": q["name"], "kind": "twohop", "hop1": hop1,
+                            "answer": answer, "hop1_correct": named_partner(hop1) == q["partner"],
+                            "correct": score_answer(q, answer, hop1)})
 
     record = {
         "arm": arm,

@@ -36,6 +36,7 @@ def test_workload_is_exact_length_and_plants_every_fact():
         assert f"The access code for {q['name']} is {q['code']}." in body
     for q in hops:
         assert f"{q['name']}'s partner is {q['partner']}." in body
+        assert q["prompt"].endswith(f"{q['name']}'s partner is")
         assert q["code"] == next(s["code"] for s in singles if s["name"] == q["partner"])
 
 
@@ -47,13 +48,20 @@ def test_single_scoring(answer, ok):
     assert probe.score_answer(q, answer) is ok
 
 
-@pytest.mark.parametrize("answer,ok", [
-    (" Vega. The access code for Vega is 123456.", True),
-    (" Lyra. The access code for Lyra is 123456.", False),
-    (" Vega. The code is 654321.", False)])
-def test_twohop_scoring(answer, ok):
+@pytest.mark.parametrize("hop1,answer,ok", [
+    (" Vega.\n", " 123456.", True),
+    (" Lyra.\n", " 123456.", False),  # right code by luck, wrong partner
+    (" Vega.\n", " 654321.", False),
+    ("", " 123456.", False)])
+def test_twohop_needs_both_hops(hop1, answer, ok):
     q = {"kind": "twohop", "partner": "Vega", "code": "123456"}
-    assert probe.score_answer(q, answer) is ok
+    assert probe.score_answer(q, answer, hop1) is ok
+
+
+def test_named_partner_and_follow_up():
+    assert probe.named_partner(" Vega.\n\nmore") == "Vega"
+    assert probe.named_partner("") == ""
+    assert "access code for Vega is" in probe.follow_up_prompt("Vega")
 
 
 def test_answer_loop_runs_every_question_on_every_arm_kind():
