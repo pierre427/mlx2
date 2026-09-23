@@ -179,3 +179,50 @@ def test_commit_time_replay_error_rebuilds_the_lane_instead_of_escaping(monkeypa
     assert candidate.scheduler_stats["pld_rotating_replay_rebuilds"] == 1
     assert candidate.scheduler_stats["pld_recovery_checkpoint_restores"] == 1
     assert candidate.scheduler_stats["pld_recovery_full_rebuilds"] == 0
+
+
+def test_finished_replay_lane_frees_its_ring_without_cyclic_gc():
+    """A finished lane's rings must go with their last reference.
+
+    With ``rotating_replay`` the lane keeps its list of rotating leaves for its
+    whole life. Building that list through a self-recursive closure made a
+    reference cycle holding it, so the ring and its K/V outlived the lane
+    until a full cyclic collection (the mlx-vlm#2328 pattern).
+    """
+    import gc
+    import weakref
+
+    from mlx2.runtime.models.cache import CacheList
+    from mlx2.runtime.pld import _rotating_leaves
+
+    (inner, outer, last) = (RotatingKVCache(max_size=WINDOW) for _ in range(3))
+    nested = [KVCache(), CacheList(inner, CacheList(KVCache(), outer)), last]
+    assert _rotating_leaves(nested) == [inner, outer, last]
+
+    gc.collect()
+    gc.disable()
+    try:
+        ring = RotatingKVCache(max_size=WINDOW)
+        ring_ref = weakref.ref(ring)
+        generator = PromptLookupBatchGenerator(
+            _MixedCacheModel(),
+            prefill_step_size=4,
+            prompt_lookup={
+                "num_draft": 4, "ngram_min": 2, "ngram_max": 3,
+                "adaptive": False, "batched_verify": False,
+                "rotating_replay": True,
+            },
+        )
+        generator.insert([PROMPT], max_tokens=[40], caches=[[KVCache(), ring]])
+        del ring
+        finished = False
+        while not finished:
+            (_prompts, responses) = generator.next()
+            finished = any(response.finish_reason for response in responses)
+        assert generator.scheduler_stats["pld_rotating_replay_rounds"] > 0
+        del responses
+        generator.close()
+        del generator
+        assert ring_ref() is None
+    finally:
+        gc.enable()

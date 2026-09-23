@@ -71,17 +71,20 @@ def _validate_cache(caches):
 
 
 def _rotating_leaves(caches):
-    leaves = []
+    """Every ``RotatingKVCache`` under ``caches``, in depth-first order.
 
-    def visit(entry):
+    An explicit stack, not a self-recursive closure: a nested ``visit`` that
+    refers to itself is a reference cycle holding its ``leaves`` cell, so a
+    finished lane's rings (and their K/V) would stay alive until a cyclic GC.
+    """
+    leaves = []
+    stack = list(reversed(list(caches)))
+    while stack:
+        entry = stack.pop()
         if isinstance(entry, CacheList):
-            for child in entry.caches:
-                visit(child)
+            stack.extend(reversed(entry.caches))
         elif isinstance(entry, RotatingKVCache):
             leaves.append(entry)
-
-    for entry in caches:
-        visit(entry)
     return leaves
 
 
