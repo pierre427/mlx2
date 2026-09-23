@@ -1,0 +1,28 @@
+[
+  {
+    "dtype": "float32",
+    "tokens": 32768,
+    "serving_loop_top2_margin": 0.11498284339904785,
+    "paper_exit": {
+      "max_abs_diff": 1.4156103134155273e-05,
+      "argmax_agrees": true
+    },
+    "suffix_bound": {
+      "max_abs_diff": 1.5020370483398438e-05,
+      "argmax_agrees": true
+    }
+  },
+  {
+    "dtype": "bfloat16",
+    "tokens": 131072,
+    "serving_loop_top2_margin": 0.078125,
+    "paper_exit": {
+      "max_abs_diff": 0.07421875,
+      "argmax_agrees": true
+    },
+    "suffix_bound": {
+      "max_abs_diff": 0.09375,
+      "argmax_agrees": true
+    }
+  }
+]

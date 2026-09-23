@@ -1,0 +1,32 @@
+{
+  "implementation": "HySparse2 reference model (KV Bridging, token-level KV Reuse with forced local window, early-exit prefill) plus an original suffix-bounded self-decoder prefill; analytic cost model reproducing the paper's Figure 4",
+  "files": [
+    "src/mlx2/runtime/models/hysparse2.py",
+    "src/mlx2/runtime/models/hysparse2_cost.py",
+    "scripts/bench_hysparse2_prefill.py",
+    "scripts/check_hysparse2_gpu_exactness.py",
+    "tests/test_hysparse2_model.py"
+  ],
+  "source_repository": null,
+  "source_revision": null,
+  "source_license": null,
+  "source_paths": [],
+  "reference_sources": [
+    "arXiv:2609.26368v1 (HySparse2: Hybrid Sparse Attention with Two-Level KV Sharing, Xiaomi LLM-Core, 2026-09-22): Sections 3.2-3.5, Table 1, Figures 2 and 4",
+    "YOCO reference code microsoft/unilm YOCO/yoco/models/decoder/yoco.py (skip_cross_decoder prefill split); read for the prefill split only, no code copied",
+    "Peer PRs read for failure modes only, no code copied: sgl-project/sglang#27183, #38755, #40352, #32771; Blaizzy/mlx-vlm#2157, #901; vllm-project/vllm#56749, #40108, #48365, #55559; NVIDIA/TensorRT-LLM#19138; huggingface/transformers#47290"
+  ],
+  "reuse": "Original project code written from the paper. Uses mlx2's existing KVCache, RotatingKVCache and scaled_dot_product_attention (sinks) unchanged. No legacy APC/server import, no model-name branch outside the model module.",
+  "modifications": [
+    "No checkpoint or reference implementation exists; open details are ModelArgs fields: head-score aggregation for MQA selection (selection_score), bridge input normalisation (own RMSNorm per cross FA layer), SWA head shape (defaults to FA's), simplified mHC with static pre/post stream weights, dense SwiGLU in place of MoE",
+    "Suffix-bounded prefill (not in the paper): the self-decoder layers after its last FA layer are sliding-window, so only the last window + (n_tail - 1) * (window - 1) rows of that FA layer's output are needed; the FA layer queries only those rows and the tail runs on them alone. Exact, not approximate."
+  ],
+  "validation": {
+    "stage": "CPU oracle tests on tiny random-weight models; GPU wall-clock on a paper-scale random-weight model",
+    "tests": "tests/test_hysparse2_model.py: NumPy stable-sort oracle for selection (ties, forced window, adversarial argpartition), explicit masked dense attention for sparse layers, hand-built Eq. (1) bridge, every-layer reference path vs early-exit prefill across lengths/chunks/hc_streams (logits, every cache, 12 greedy decode steps, row counters), APC-style resume, multi-row verify vs sequential decode, cost model vs paper KV sizes (exact to 0.01 GB) and prefill ratios (5%)",
+    "mutation_check": "Eight code mutations (suffix RoPE offset, rows dropped, suffix one short, no forced window, argpartition tie set, additive bridge perturbation, bridge from FA output, cache seeded with window-1) each fail at least one test",
+    "gpu": "qualification/runs/hysparse2-prefill-20260923/ (bench: suffix bound 1.66x/2.00x/2.46x/3.05x over the paper exit at 4K/16K/64K/128K; fp32 32K exits match the serving loop within 1.5e-5)",
+    "native_gaps": "No real weights: quality, MoE routing and the open ModelArgs choices are unqualified. Batched (left-padded) caches, APCv2 layout identity, speculative rollback of the bridged caches, quantized KV and a fused token-sparse Metal kernel are not implemented."
+  },
+  "qualification": "implemented and CPU-oracle verified; no adapter, registry entry or production route (unknown model_type 'hysparse2' still fails closed in the registry)"
+}

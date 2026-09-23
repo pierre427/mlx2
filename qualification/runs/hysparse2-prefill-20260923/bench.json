@@ -1,0 +1,187 @@
+{
+  "device": "Device(gpu, 0)",
+  "mlx": "0.32.2.dev20260919+39400a0d4",
+  "params": 6159549184,
+  "config": {
+    "hidden": 2048,
+    "layers": 49,
+    "heads": "64q/1kv x 256",
+    "intermediate": 4096,
+    "dtype": "bfloat16",
+    "chunk": 2048
+  },
+  "rows": [
+    {
+      "tokens": 4096,
+      "serving_loop": {
+        "seconds": [
+          0.875,
+          0.909
+        ],
+        "best_s": 0.875,
+        "tok_per_s": 4678.7,
+        "peak_gib": 12.39,
+        "max_abs_logit_diff_vs_serving_loop": 0.0,
+        "argmax_agrees": true
+      },
+      "paper_exit": {
+        "seconds": [
+          0.883,
+          0.952
+        ],
+        "best_s": 0.883,
+        "tok_per_s": 4640.3,
+        "peak_gib": 12.39,
+        "max_abs_logit_diff_vs_serving_loop": 0.08203125,
+        "argmax_agrees": true
+      },
+      "suffix_bound": {
+        "seconds": [
+          0.531,
+          0.559
+        ],
+        "best_s": 0.531,
+        "tok_per_s": 7716.8,
+        "peak_gib": 12.44,
+        "max_abs_logit_diff_vs_serving_loop": 0.080078125,
+        "argmax_agrees": true
+      },
+      "no_exit": {
+        "seconds": [
+          4.288,
+          4.275
+        ],
+        "best_s": 4.275,
+        "tok_per_s": 958.0,
+        "peak_gib": 12.68,
+        "max_abs_logit_diff_vs_serving_loop": 0.08203125,
+        "argmax_agrees": true
+      },
+      "speedup_suffix_vs_paper_exit": 1.66,
+      "speedup_paper_exit_vs_no_exit": 4.84
+    },
+    {
+      "tokens": 16384,
+      "serving_loop": {
+        "seconds": [
+          3.95,
+          4.433
+        ],
+        "best_s": 3.95,
+        "tok_per_s": 4148.4,
+        "peak_gib": 12.44,
+        "max_abs_logit_diff_vs_serving_loop": 0.0,
+        "argmax_agrees": true
+      },
+      "paper_exit": {
+        "seconds": [
+          4.058,
+          4.639
+        ],
+        "best_s": 4.058,
+        "tok_per_s": 4037.6,
+        "peak_gib": 12.52,
+        "max_abs_logit_diff_vs_serving_loop": 0.08203125,
+        "argmax_agrees": true
+      },
+      "suffix_bound": {
+        "seconds": [
+          2.032,
+          2.31
+        ],
+        "best_s": 2.032,
+        "tok_per_s": 8063.1,
+        "peak_gib": 12.5,
+        "max_abs_logit_diff_vs_serving_loop": 0.08984375,
+        "argmax_agrees": true
+      },
+      "no_exit": {
+        "seconds": [
+          22.361,
+          23.262
+        ],
+        "best_s": 22.361,
+        "tok_per_s": 732.7,
+        "peak_gib": 13.87,
+        "max_abs_logit_diff_vs_serving_loop": 0.10205078125,
+        "argmax_agrees": true
+      },
+      "speedup_suffix_vs_paper_exit": 2.0,
+      "speedup_paper_exit_vs_no_exit": 5.51
+    },
+    {
+      "tokens": 65536,
+      "serving_loop": {
+        "seconds": [
+          21.288,
+          21.403
+        ],
+        "best_s": 21.288,
+        "tok_per_s": 3078.6,
+        "peak_gib": 13.18,
+        "max_abs_logit_diff_vs_serving_loop": 0.0,
+        "argmax_agrees": true
+      },
+      "paper_exit": {
+        "seconds": [
+          22.245,
+          22.38
+        ],
+        "best_s": 22.245,
+        "tok_per_s": 2946.1,
+        "peak_gib": 13.44,
+        "max_abs_logit_diff_vs_serving_loop": 0.076171875,
+        "argmax_agrees": true
+      },
+      "suffix_bound": {
+        "seconds": [
+          9.147,
+          9.057
+        ],
+        "best_s": 9.057,
+        "tok_per_s": 7235.7,
+        "peak_gib": 12.89,
+        "max_abs_logit_diff_vs_serving_loop": 0.08203125,
+        "argmax_agrees": true
+      },
+      "speedup_suffix_vs_paper_exit": 2.46
+    },
+    {
+      "tokens": 131072,
+      "serving_loop": {
+        "seconds": [
+          52.989,
+          53.715
+        ],
+        "best_s": 52.989,
+        "tok_per_s": 2473.6,
+        "peak_gib": 14.2,
+        "max_abs_logit_diff_vs_serving_loop": 0.0,
+        "argmax_agrees": true
+      },
+      "paper_exit": {
+        "seconds": [
+          57.309,
+          55.689
+        ],
+        "best_s": 55.689,
+        "tok_per_s": 2353.6,
+        "peak_gib": 14.69,
+        "max_abs_logit_diff_vs_serving_loop": 0.078125,
+        "argmax_agrees": true
+      },
+      "suffix_bound": {
+        "seconds": [
+          18.423,
+          18.232
+        ],
+        "best_s": 18.232,
+        "tok_per_s": 7189.3,
+        "peak_gib": 13.73,
+        "max_abs_logit_diff_vs_serving_loop": 0.078125,
+        "argmax_agrees": false
+      },
+      "speedup_suffix_vs_paper_exit": 3.05
+    }
+  ]
+}
