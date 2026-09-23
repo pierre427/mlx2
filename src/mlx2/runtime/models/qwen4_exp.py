@@ -2657,6 +2657,19 @@ class _StepGrownIndexLedger:
         self._index_owned = True
         return self.index_keys
 
+    @property
+    def _index_nbytes(self) -> int:
+        """Bytes the ledger holds: its whole buffer, not the valid prefix.
+
+        After a growth the buffer holds up to 255 positions beyond the width,
+        and a rewind only moves the width, so ``index_keys.nbytes`` can be a
+        small fraction of what this cache keeps alive. Admission and the
+        live-byte floors read ``nbytes`` as memory held, so count the buffer,
+        as ``KVCache`` counts its K/V buffers rather than ``offset``.
+        """
+        buffer = getattr(self, "_index_buffer", None)
+        return 0 if buffer is None else int(buffer.nbytes)
+
     def _truncate_index_keys(self, width: int) -> None:
         """Rewind the ledger to ``width`` positions without copying it."""
         if getattr(self, "_index_buffer", None) is not None:
@@ -2984,7 +2997,7 @@ class BatchQSAKVCache(_StepGrownIndexLedger, BatchKVCache):
         summary = 0 if self._qsa_pooled_keys is None else self._qsa_pooled_keys.nbytes
         return (
             super().nbytes
-            + (0 if self.index_keys is None else self.index_keys.nbytes)
+            + self._index_nbytes
             + summary
         )
 
@@ -3215,7 +3228,7 @@ class QSAKVCache(_StepGrownIndexLedger, KVCache):
         summary = 0 if self._qsa_pooled_keys is None else self._qsa_pooled_keys.nbytes
         return (
             super().nbytes
-            + (0 if self.index_keys is None else self.index_keys.nbytes)
+            + self._index_nbytes
             + summary
         )
 
@@ -3397,7 +3410,7 @@ class QSAQuantizedKVCache(QSAKVCache):
         summary = 0 if self._qsa_pooled_keys is None else self._qsa_pooled_keys.nbytes
         return (
             packed
-            + (0 if self.index_keys is None else self.index_keys.nbytes)
+            + self._index_nbytes
             + summary
         )
 
@@ -3726,7 +3739,7 @@ class BatchQSAQuantizedKVCache(BatchQSAKVCache):
         summary = 0 if self._qsa_pooled_keys is None else self._qsa_pooled_keys.nbytes
         return (
             packed
-            + (0 if self.index_keys is None else self.index_keys.nbytes)
+            + self._index_nbytes
             + summary
         )
 

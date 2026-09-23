@@ -370,9 +370,7 @@ class SharedSuffixQSAKVCache(_StepGrownIndexLedger):
 
     @property
     def private_nbytes(self) -> int:
-        total = int(self._kv.nbytes)
-        if self.index_keys is not None:
-            total += int(self.index_keys.nbytes)
+        total = int(self._kv.nbytes) + self._index_nbytes
         if self._suffix_pooled_keys is not None:
             total += int(self._suffix_pooled_keys.nbytes)
         return total

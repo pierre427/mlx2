@@ -1699,3 +1699,70 @@ def test_qsa_ledger_rewind_and_restore_keep_exact_contents():
             assert mx.array_equal(snapshot, value).item()
         assert mx.array_equal(held, kept).item()
         assert getattr(cache, cursor) == expected.shape[1]
+
+
+def test_qsa_cache_nbytes_counts_the_grown_ledger_buffer():
+    """``nbytes`` must count the ledger buffer the cache holds, not its prefix.
+
+    The second append grows the raw-key ledger to 256 positions while
+    ``index_keys`` shows two. Admission and the live-byte floors read
+    ``nbytes`` as memory held, and they counted only the two-position view,
+    on every QSA cache kind. A rewind keeps the buffer, and crossing a step
+    doubles it.
+    """
+    from mlx.utils import tree_flatten
+
+    from mlx2.runtime.models.qwen4_exp import (
+        BatchQSAKVCache,
+        BatchQSAQuantizedKVCache,
+        QSAKVCache,
+        QSAQuantizedKVCache,
+    )
+    from mlx2.runtime.qsa_shared_suffix import QSAImmutableBase, SharedSuffixQSAKVCache
+
+    width = 8
+
+    def ledger_bytes(cache):
+        if isinstance(cache, SharedSuffixQSAKVCache):
+            return cache.private_nbytes - cache._kv.nbytes
+        packed = sum(x.nbytes for _, x in tree_flatten((cache.keys, cache.values)))
+        return cache.nbytes - packed
+
+    def append(cache, rows, n):
+        if isinstance(cache, SharedSuffixQSAKVCache):
+            cache.append_index_keys(mx.ones((1, n, width)))
+            cache.append_kv(mx.ones((1, 2, n, 3)), mx.ones((1, 2, n, 3)))
+            return
+        cache.update_index_keys(mx.ones((rows, n, width)))
+        kv = mx.ones((rows, 1, n, 64))
+        cache.update_and_fetch(kv, kv)
+
+    source = QSAKVCache()
+    source.keys = mx.zeros((1, 2, 8, 3))
+    source.values = mx.zeros((1, 2, 8, 3))
+    source.index_keys = mx.zeros((1, 8, width))
+    source.offset = 8
+    base = QSAImmutableBase.from_cache(source, layout_id="qsa-f32-d3")
+    makers = {
+        "QSAKVCache": (1, QSAKVCache),
+        "QSAQuantizedKVCache": (1, QSAQuantizedKVCache),
+        "BatchQSAKVCache": (2, lambda: BatchQSAKVCache([0, 0])),
+        "BatchQSAQuantizedKVCache": (2, lambda: BatchQSAQuantizedKVCache([0, 0])),
+        "SharedSuffixQSAKVCache": (1, lambda: SharedSuffixQSAKVCache(base)),
+    }
+    for name, (rows, make) in makers.items():
+        cache = make()
+        position = rows * width * 4  # one float32 raw key per row
+        append(cache, rows, 1)
+        assert ledger_bytes(cache) == position, name
+        append(cache, rows, 1)
+        assert cache.index_keys.shape[1] == 2
+        assert ledger_bytes(cache) == 256 * position, name
+        cache.trim(1)
+        assert cache.index_keys.shape[1] == 1
+        assert ledger_bytes(cache) == 256 * position, name
+        append(cache, rows, 255)
+        assert cache.index_keys.shape[1] == 256
+        assert ledger_bytes(cache) == 256 * position, name
+        append(cache, rows, 1)
+        assert ledger_bytes(cache) == 512 * position, name
