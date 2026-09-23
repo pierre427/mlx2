@@ -629,7 +629,7 @@ def test_recovery_snapshots_share_a_guard_that_resyncs_after_rollback():
     _call(plain, [8, 9, 10])
     lane = SimpleNamespace(logits_processors=[plain, steering], generated=3)
     pair = SimpleNamespace(target=[KVCache()], draft=[KVCache()])
-    fields, _target, _draft = _snapshot_segmented_recovery_row((lane, pair))
+    fields, _target, _draft, _borrowed = _snapshot_segmented_recovery_row((lane, pair))
     shared, copied = fields["logits_processors"]
     assert shared is plain
     # Steering counts committed positions, which the ids do not determine.
