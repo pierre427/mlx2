@@ -1629,9 +1629,11 @@ class RotatingKVCache(_BaseCache):
             (num_tokens, snap, keys, values) = self._rollbacks.pop()
             take = min(n - trimmed, num_tokens)
             m = num_tokens - take
+            # Restore from copies: the single-token replay below writes the
+            # live buffer in place, and the record is kept for a later trim.
             (self.keys, self.values, self._idx, self.offset) = (
-                snap[0],
-                snap[1],
+                None if snap[0] is None else mx.array(snap[0]),
+                None if snap[1] is None else mx.array(snap[1]),
                 snap[2],
                 snap[3],
             )

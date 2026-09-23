@@ -187,3 +187,19 @@ def test_commit_verified_refuses_a_mismatched_verify_advance():
     append(cache, [7])
     with pytest.raises(RotatingReplayError, match="verify advance"):
         tx.commit_verified()
+
+
+def test_speculative_trim_in_steps_restores_the_preverify_ring():
+    # A partial trim that replays one token must not write into the rollback
+    # record it keeps, or a later trim restores a corrupted window.
+    cache = seeded()
+    for token in (7, 8):
+        append(cache, [token])
+    before = temporal(cache).copy()
+    cache.start_speculation(rollback_window=64)
+    append(cache, [100, 101, 102])
+    cache.trim(2)
+    np.testing.assert_array_equal(temporal(cache)[0, 0, :, 0], [6, 7, 8, 100])
+    cache.trim(1)
+    np.testing.assert_array_equal(temporal(cache), before)
+    assert cache.offset == 8
