@@ -2113,6 +2113,17 @@ def handler_for(
                     },
                 )
             elif self.path == "/v1/status":
+                if tenant_authenticator is not None and "recent_receipts" in status:
+                    # Receipts carry request and session ids, seeds and
+                    # logit_bias: show a tenant only its own.  An engine that
+                    # cannot scope them shows none.
+                    scoped = getattr(engine, "recent_receipts", None)
+                    status = {
+                        **status,
+                        "recent_receipts": scoped(tenant_id=self._tenant_id)
+                        if callable(scoped)
+                        else [],
+                    }
                 self.send_json(
                     200,
                     {

@@ -301,8 +301,8 @@ class TenantEngine:
 def served(tmp_path):
     servers = []
 
-    def start(authenticator, **kwargs):
-        engine = TenantEngine()
+    def start(authenticator, engine=None, **kwargs):
+        engine = engine or TenantEngine()
         response_store = ResponseStore()
         file_store = FileStore()
         server = ThreadingHTTPServer(
@@ -605,3 +605,67 @@ def test_auth_off_preserves_header_routing(served):
     assert app.engine.submitted == ["tenant-z", "default"]
     status, _, raw = _call(app.base, "GET", "/v1/status")
     assert _json(raw)["tenant_auth"] == {"enabled": False}
+
+
+def test_status_receipts_are_scoped_to_the_authenticated_tenant(served, tmp_path):
+    from mlx2.serving import ServingEngine
+
+    class ReceiptEngine(TenantEngine):
+        # The real engine's receipt log and filter, fed by submissions.
+        recent_receipts = ServingEngine.recent_receipts
+
+        def __init__(self):
+            super().__init__()
+            self.receipt_log = []
+
+        def submit(self, request, *, tenant_id="default", **kwargs):
+            job = super().submit(request, tenant_id=tenant_id, **kwargs)
+            self.receipt_log.append(
+                (tenant_id, {"request_id": job.id, "session_id": request.get("session_id")})
+            )
+            return job
+
+        def status(self):
+            return {**super().status(), "recent_receipts": self.recent_receipts()}
+
+    app = served(_auth(tmp_path, header_policy="ignore"), engine=ReceiptEngine())
+    a = {"Authorization": f"Bearer {KEY_A}"}
+    b = {"Authorization": f"Bearer {KEY_B}"}
+    private = {**CHAT, "session_id": "alice-private-thread"}
+    assert _call(app.base, "POST", "/v1/chat/completions", private, a)[0] == 200
+    assert _call(app.base, "POST", "/v1/chat/completions", CHAT, b)[0] == 200
+
+    status, _, raw = _call(app.base, "GET", "/v1/status", headers=b)
+    assert status == 200
+    receipts = _json(raw)["recent_receipts"]
+    assert [receipt["session_id"] for receipt in receipts] == [None]
+    status, _, raw = _call(app.base, "GET", "/v1/status", headers=a)
+    assert [r["session_id"] for r in _json(raw)["recent_receipts"]] == [
+        "alice-private-thread"
+    ]
+
+
+def test_status_without_a_tenant_receipt_filter_fails_closed(served, tmp_path):
+    class LeakyEngine(TenantEngine):
+        def status(self):
+            return {**super().status(), "recent_receipts": [{"session_id": "x"}]}
+
+    app = served(_auth(tmp_path, header_policy="ignore"), engine=LeakyEngine())
+    status, _, raw = _call(
+        app.base, "GET", "/v1/status", headers={"Authorization": f"Bearer {KEY_B}"}
+    )
+    assert status == 200 and _json(raw)["recent_receipts"] == []
+    # Without tenant auth there is no tenant boundary to enforce.
+    open_app = served(None, engine=LeakyEngine())
+    status, _, raw = _call(open_app.base, "GET", "/v1/status")
+    assert _json(raw)["recent_receipts"] == [{"session_id": "x"}]
+
+
+def test_serving_engine_recent_receipts_filter_by_owner():
+    from mlx2.serving import ServingEngine
+
+    engine = object.__new__(ServingEngine)
+    engine.receipt_log = [("tenant-a", {"request_id": 1}), ("tenant-b", {"request_id": 2})]
+    assert engine.recent_receipts() == [{"request_id": 1}, {"request_id": 2}]
+    assert engine.recent_receipts(tenant_id="tenant-b") == [{"request_id": 2}]
+    assert engine.recent_receipts(tenant_id="tenant-c") == []

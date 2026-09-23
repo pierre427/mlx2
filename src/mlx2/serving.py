@@ -1645,7 +1645,9 @@ class ServingEngine:
         self._memory_reclaim_last = 0.0
         self.apc_interior_route_supported = not self.prompt_lookup
         self.apc_interior_turn_markers = ()
-        self.receipts = deque(maxlen=128)
+        # (tenant_id, receipt) pairs: receipts carry request and session ids
+        # and sampling controls, so views must be able to scope them.
+        self.receipt_log = deque(maxlen=128)
         self.batch_metrics = BatchRuntimeMetrics()
         self.http_metrics = HttpRuntimeMetrics()
         self.snapshot = {"state": "loading"}
@@ -1956,6 +1958,14 @@ class ServingEngine:
             except BaseException:
                 self.slots.release()
                 raise
+
+    def recent_receipts(self, tenant_id=None):
+        """Recent request receipts, only ``tenant_id``'s when one is given."""
+        return [
+            receipt
+            for owner, receipt in list(self.receipt_log)
+            if tenant_id is None or owner == str(tenant_id)
+        ]
 
     def count_tokens(self, request):
         """Render a chat request through the loaded adapter without generating."""
@@ -2382,7 +2392,7 @@ class ServingEngine:
                 },
                 "int8_prefill": int8_prefill_status(self),
                 "verify_bitexact": verify_bitexact_status(self),
-                "recent_receipts": list(self.receipts),
+                "recent_receipts": self.recent_receipts(),
                 "recent_operation_receipts": list(self.operation_receipts),
                 "model_revision": self.model_revision,
                 "lora": {
@@ -6627,7 +6637,9 @@ class ServingEngine:
                                 "ttft_seconds": job.first_token - job.started,
                                 "elapsed_seconds": time.monotonic() - job.started,
                             }
-                            self.receipts.append(receipt)
+                            self.receipt_log.append(
+                                (str(job.tenant_id or "default"), receipt)
+                            )
                             self.counts["completed"] += 1
                             if job.structured is not None:
                                 self.counts["structured_output_completed"] += 1
