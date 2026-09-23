@@ -669,13 +669,17 @@ def compile_constraint(response_format=None, grammar=None, *, leading_whitespace
     raise ValueError("response_format supports text, json_object, or strict json_schema")
 
 
-def _build_piece_index(pieces, eos_ids):
-    """Sort the usable vocabulary pieces so shared prefixes are contiguous."""
+def _build_piece_index(pieces, excluded):
+    """Sort the usable vocabulary pieces so shared prefixes are contiguous.
+
+    ``excluded`` holds the ids never admitted by their text: the terminals
+    (admitted by id) and the other special tokens.
+    """
     order = sorted(
         (
             token
             for token, piece in enumerate(pieces)
-            if token not in eos_ids and piece and "\ufffd" not in piece
+            if token not in excluded and piece and "\ufffd" not in piece
         ),
         key=lambda token: pieces[token],
     )
@@ -1037,6 +1041,18 @@ class StructuredOutputProcessor:
             else generation_stop_token_ids
         )
         self.eos_ids = frozenset(int(token) for token in stop_ids)
+        # Special tokens other than the terminals add no text to the tracked
+        # grammar prefix: the decode it mirrors skips them, and the byte table
+        # has no bytes for them.  Admitting one by its text would let the
+        # stream show markup the grammar never checked (a ``maxLength: 6``
+        # string delivered as ``<pad><pad>``), so the mask never does.  Tool
+        # and envelope markers are ordinary added tokens and stay admissible.
+        try:
+            special = {int(token) for token in getattr(tokenizer, "all_special_ids", ())}
+        except (TypeError, ValueError):
+            special = set()
+        self._special_ids = frozenset(special) - self.eos_ids
+        unmaskable = self.eos_ids | self._special_ids
         # The whole tokenizer id space, not the base vocabulary: added tokens
         # carry the tool-call markers every adapter grammar matches against
         # (see ``vocabulary_bound``).
@@ -1051,7 +1067,7 @@ class StructuredOutputProcessor:
         self._pieces = pieces
         index = getattr(tokenizer, _TOKEN_INDEX_ATTRIBUTE, None)
         if not isinstance(index, tuple) or len(index) != 2 or len(index[0]) > len(pieces):
-            index = _build_piece_index(pieces, self.eos_ids)
+            index = _build_piece_index(pieces, unmaskable)
             try:
                 setattr(tokenizer, _TOKEN_INDEX_ATTRIBUTE, index)
             except (AttributeError, TypeError):
@@ -1093,14 +1109,14 @@ class StructuredOutputProcessor:
             except AutomatonUnsupported as exc:
                 self.automaton_refusal = str(exc)
             else:
-                self._trie = trie_for(tokenizer, pieces, self.eos_ids)
+                self._trie = trie_for(tokenizer, pieces, unmaskable)
                 self._track_configs = [self._automaton.start]
                 self._track_lengths = [0]
                 self._track_pending = [b""]
                 from .structured_automaton import fragments_for
 
                 self._token_bytes, self._fragments = fragments_for(
-                    tokenizer, pieces, self.eos_ids
+                    tokenizer, pieces, unmaskable
                 )
                 self.engine = "automaton"
         # Set when the constraint cannot be honoured (dead end or budget
@@ -1332,6 +1348,8 @@ class StructuredOutputProcessor:
             if decision is None:
                 if token in self.eos_ids:
                     decision = complete
+                elif token in self._special_ids:
+                    decision = False
                 else:
                     piece = self._pieces[token] if token < len(self._pieces) else ""
                     if not piece or "\ufffd" in piece:
@@ -1526,8 +1544,8 @@ class StructuredOutputProcessor:
         for token in unexamined.tolist():
             if token in memo:
                 continue
-            if token >= limit:
-                memo[token] = False  # padding beyond the vocabulary
+            if token >= limit or token in self._special_ids:
+                memo[token] = False  # padding beyond the vocabulary, or special
                 continue
             pending.append(int(token))
         if len(pending) < _POOL_MIN_TOKENS:

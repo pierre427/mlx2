@@ -183,6 +183,50 @@ def test_constraining_keywords_beside_annotations_still_fail_closed():
         })
 
 
+@pytest.mark.parametrize("engine", ["automaton", "scanner"])
+def test_special_tokens_are_never_admitted_by_their_text(engine, monkeypatch):
+    """The grammar tracker skips special tokens, so admitting ``<pad>`` by its
+    text advanced nothing: a ``maxLength: 6`` string was streamed as
+    ``<pad><pad>`` while the processor reported a complete match."""
+    import mlx.core as mx
+    import numpy as np
+    from types import SimpleNamespace as NS
+
+    monkeypatch.setenv("MLX2_STRUCTURED_AUTOMATON", "0" if engine == "scanner" else "1")
+    monkeypatch.setenv("MLX2_STRUCTURED_WORKERS", "0")
+    pieces = ["<eos>", "<pad>", '{"s":"', "a", '"}', "<tool>"]
+    eos, pad, head, letter, tail, added = range(len(pieces))
+    specials = {eos, pad}
+    tokenizer = NS(
+        vocab_size=len(pieces), eos_token_ids=[eos], all_special_ids=[eos, pad],
+        decode=lambda ids, skip_special_tokens=False, **_kw: "".join(
+            pieces[i] for i in ids if not (skip_special_tokens and i in specials)
+        ),
+    )
+    schema = {
+        "type": "object",
+        "properties": {"s": {"type": "string", "maxLength": 6}},
+        "required": ["s"],
+        "additionalProperties": False,
+    }
+    processor = StructuredOutputProcessor(tokenizer, 0, compile_constraint({
+        "type": "json_schema", "json_schema": {"strict": True, "schema": schema},
+    }))
+    assert processor.engine == engine
+
+    def admitted(ids):
+        out = processor(mx.array(ids, dtype=mx.int32), mx.zeros((len(pieces),)))
+        return set(np.flatnonzero(np.isfinite(np.array(out))).tolist())
+
+    inside = admitted([head])
+    assert letter in inside and tail in inside
+    assert pad not in inside and eos not in inside
+    # An ordinary added token whose text is grammatical stays admissible.
+    assert added in inside
+    assert admitted([head, letter, tail]) == {eos}
+    assert processor.failure is None
+
+
 def test_regex_grammar_and_fail_closed_validation():
     constraint = compile_constraint(grammar=r"(?:yes|no)")
     assert accepts(constraint, "yes")
