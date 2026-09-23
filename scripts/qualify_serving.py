@@ -385,9 +385,12 @@ def preflight_identity(runtime_identity_fn=None):
     }
 
 
+FULL_SUITE_PYTEST_ARGS = ("-m", "pytest")
+
+
 def write_preflight_receipt(path, *, pytest_args=None, run=subprocess.run,
                             identity_fn=preflight_identity):
-    command = [sys.executable, "-m", "pytest", *(pytest_args or [])]
+    command = [sys.executable, *FULL_SUITE_PYTEST_ARGS, *(pytest_args or [])]
     completed = run(command, capture_output=True, text=True)
     output = completed.stdout + completed.stderr
     receipt = {
@@ -418,9 +421,24 @@ def validate_preflight_receipt(path, active_runtime, *, identity_fn=preflight_id
         raise AssertionError("preflight receipt does not match current git/runtime source/harness identity")
     if receipt["identity"].get("runtime") != active_runtime:
         raise AssertionError("preflight receipt runtime does not match active server")
+    command = receipt.get("test_command")
+    # --preflight-pytest-arg exists for scoped historical/control receipts.
+    # Any extra argument can scope the run (--collect-only, -k, a test path,
+    # --lf, --deselect, --ignore) and still exit 0 with passed=True, so only
+    # the unscoped default command stands in for the unit_tests check.
+    if (
+        not isinstance(command, list)
+        or len(command) != 1 + len(FULL_SUITE_PYTEST_ARGS)
+        or not isinstance(command[0], str)
+        or tuple(command[1:]) != FULL_SUITE_PYTEST_ARGS
+    ):
+        raise AssertionError(
+            "preflight receipt did not run the full unit suite: "
+            f"{command!r}: {path}"
+        )
     return {"path": str(path.resolve()),
             "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
-            "identity": expected, "passed": True}
+            "identity": expected, "test_command": command, "passed": True}
 
 
 def observed_compute_widths(receipt):
@@ -885,7 +903,8 @@ def main():
         action="append",
         default=[],
         help=("Additional pytest argument recorded in a preflight-only receipt. "
-              "Use only for an explicitly scoped historical/control source."),
+              "Use only for an explicitly scoped historical/control source; "
+              "--preflight-receipt refuses such a receipt as unit_tests evidence."),
     )
     parser.add_argument("--preflight-receipt", type=Path,
                         help="Use an exact passing preflight receipt instead of rerunning pytest")

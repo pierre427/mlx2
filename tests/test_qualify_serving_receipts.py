@@ -64,7 +64,8 @@ def test_preflight_receipt_rejects_failed_or_mismatched_evidence(tmp_path, mutat
         "git": {"revision": "abc"}, "runtime": {"source_sha256": "runtime"},
         "qualification_harness": {"sha256": "harness"}, "test_source_sha256": "tests",
     }
-    receipt = {"schema": qualify.PREFLIGHT_SCHEMA, "passed": True, "identity": identity}
+    receipt = {"schema": qualify.PREFLIGHT_SCHEMA, "passed": True, "identity": identity,
+               "test_command": ["python", "-m", "pytest"]}
     if mutation == "failed":
         receipt["passed"] = False
     path = tmp_path / "preflight.json"
@@ -73,6 +74,49 @@ def test_preflight_receipt_rejects_failed_or_mismatched_evidence(tmp_path, mutat
     active = identity["runtime"] if mutation != "active_runtime" else {"source_sha256": "other"}
     with pytest.raises(AssertionError, match="preflight receipt"):
         qualify.validate_preflight_receipt(path, active, identity_fn=lambda: current)
+
+
+@pytest.mark.parametrize(
+    "pytest_args",
+    [
+        ["--collect-only"],
+        ["--co", "-q"],
+        ["-k", "sdk_smoke"],
+        ["tests/test_sdk_smoke.py"],
+        ["--lf"],
+        ["--deselect", "tests/test_serving_contract.py"],
+        ["--ignore=tests/test_peer_pr_regressions.py"],
+    ],
+)
+def test_preflight_receipt_must_have_run_the_full_unit_suite(tmp_path, pytest_args):
+    identity = {
+        "git": {"revision": "abc"}, "runtime": {"source_sha256": "runtime"},
+        "qualification_harness": {"sha256": "harness"}, "test_source_sha256": "tests",
+    }
+    # A collect-only or scoped run exits 0 and writes passed=True: the
+    # receipt looks exactly like a full-suite pass unless its command is read.
+    ran = []
+
+    def run(command, **kwargs):
+        ran.append(command)
+        return SimpleNamespace(returncode=0, stdout="no tests ran", stderr="")
+
+    scoped = tmp_path / "scoped.json"
+    qualify.write_preflight_receipt(
+        scoped, pytest_args=pytest_args, run=run, identity_fn=lambda: identity
+    )
+    with pytest.raises(AssertionError, match="full unit suite"):
+        qualify.validate_preflight_receipt(
+            scoped, identity["runtime"], identity_fn=lambda: identity
+        )
+    full = tmp_path / "full.json"
+    qualify.write_preflight_receipt(full, run=run, identity_fn=lambda: identity)
+    evidence = qualify.validate_preflight_receipt(
+        full, identity["runtime"], identity_fn=lambda: identity
+    )
+    # The serving receipt's unit_tests evidence names the command it trusts.
+    assert evidence["passed"] and evidence["test_command"] == ran[-1]
+    assert ran[-1][1:] == ["-m", "pytest"]
 
 
 def test_long_context_probe_uses_one_consistent_safe_headroom():

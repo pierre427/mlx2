@@ -36,7 +36,7 @@ REQUIRED_CHECKS = frozenset(
 APPROVED_QUALIFICATION_HARNESS = {
     "schema": "mlx2.qualification-harness.v1",
     "name": "scripts/qualify_serving.py",
-    "sha256": "33aad75837060a6b70c6b8e4c99c8ce1c94e9b94fd1f89c39d5a22a489e12e8b",
+    "sha256": "38910a3ffd98e397ad3e9494720f2093e798e3504fad8f5db4bd62b5ec1ba6b5",
 }
 
 
