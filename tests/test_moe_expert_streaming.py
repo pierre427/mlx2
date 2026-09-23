@@ -563,7 +563,10 @@ def test_atlas_checkpoint_after_sink_loss_rewrites_every_observation(tmp_path):
         collector.observe(0, [1])
     recreated = expert_atlas.load_atlas(sink)
     assert recreated.total_observations == 20
-    assert recreated.counts.tolist() == [[10, 10, 0, 0]]
+    # Expert 0 decays by one interval, as it would in an unbroken sink, but
+    # is not dropped.
+    assert 0 < int(recreated.counts[0][0]) <= 10
+    assert int(recreated.counts[0][1]) == 10
     # With the sink back, the next checkpoint merges only the new interval.
     for _ in range(10):
         collector.observe(0, [2])
@@ -571,6 +574,46 @@ def test_atlas_checkpoint_after_sink_loss_rewrites_every_observation(tmp_path):
     assert third.total_observations == 30
     assert int(third.counts[0][2]) == 10
     assert int(third.counts[0][1]) <= 10
+
+
+def test_atlas_checkpoint_after_sink_loss_matches_an_unbroken_sink(tmp_path):
+    # Recreating a lost sink from the collector's lifetime counts undid the
+    # decay earlier checkpoints had applied: at the default half-life, a
+    # half-life of observations on expert 0 and then one on expert 1 persist
+    # as [n/2, n], but a sink lost in between came back as [n, n]. The
+    # counts and generations of earlier runs, which only the sink carried,
+    # were dropped as well.
+    n = expert_atlas.DEFAULT_HALF_LIFE
+
+    def run(sink, *, lose_sink):
+        expert_atlas.write_atlas(
+            sink,
+            expert_atlas.build_manifest(
+                digest="0" * 64,
+                num_layers=1,
+                num_units=4,
+                total_observations=4 * n,
+                generations=[{"source": "earlier-run", "observations": 4 * n}],
+            ),
+            np.array([[0, 0, 0, 4 * n]], dtype=np.uint64),
+        )
+        collector = expert_atlas.AtlasCollector(None, sink=sink, checkpoint_every=n)
+        collector.bind(num_layers=1, num_units=4)
+        collector.observe(0, np.zeros(n, dtype=np.int64))
+        if lose_sink:
+            for path in expert_atlas._paths(sink):
+                path.unlink()
+        collector.observe(0, np.ones(n, dtype=np.int64))
+        return expert_atlas.load_atlas(sink)
+
+    kept = run(tmp_path / "kept.json", lose_sink=False)
+    lost = run(tmp_path / "lost.json", lose_sink=True)
+    assert kept.counts.tolist() == [[n // 2, n, 0, n]]
+    assert lost.counts.tolist() == kept.counts.tolist()
+    assert lost.total_observations == kept.total_observations == 6 * n
+    history = [generation["observations"] for generation in kept.generations]
+    assert history == [4 * n, n, n]
+    assert [generation["observations"] for generation in lost.generations] == history
 
 
 def test_counterfactual_reports_what_pinning_would_have_done(tmp_path):

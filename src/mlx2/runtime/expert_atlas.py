@@ -94,6 +94,10 @@ class AtlasCollector:
         # the collector's lifetime, so each flush merges only the difference;
         # merging the whole array would re-add every earlier checkpoint.
         self._persisted_counts = None
+        # The atlas the last flush wrote: decayed counts, total and history.
+        # A sink that has since gone missing is rebuilt from this rather than
+        # from ``counts``, whose lifetime totals never decay.
+        self._persisted_atlas = None
         self.observations = 0
         self.persisted_observations = 0
         self.checkpoint_every = int(checkpoint_every)
@@ -159,24 +163,24 @@ class AtlasCollector:
         """Merge into the persisted atlas and rewrite it atomically."""
         if self.sink is None or self.counts is None:
             return None
-        import numpy as np
-
         prior = load_atlas(
             self.sink, expect_digest=self._digest(), geometry=self.counts.shape
         )
-        snapshot = self.counts.copy()
-        persisted_counts = self._persisted_counts
-        new_observations = self.observations - self.persisted_observations
         if prior is None:
             # Merging only the difference assumes the sink still holds what
             # was persisted before. A sink removed, rotated or replaced by an
-            # incompatible one holds none of it, so write everything this
-            # collector has observed rather than just the latest interval.
-            persisted_counts = np.zeros_like(snapshot)
-            new_observations = self.observations
+            # incompatible one holds none of it, so merge onto the atlas the
+            # last flush wrote. Rewriting the lifetime counts instead would
+            # undo the decay earlier checkpoints applied, and drop the counts
+            # and generations of earlier runs that only the sink carried.
+            # Before any flush has succeeded nothing is persisted, and the
+            # difference is every observation.
+            prior = self._persisted_atlas
+        snapshot = self.counts.copy()
+        new_observations = self.observations - self.persisted_observations
         merged = merge_counts(
             prior.counts if prior is not None else None,
-            snapshot - persisted_counts,
+            snapshot - self._persisted_counts,
             observations=new_observations,
         )
         manifest = build_manifest(
@@ -197,6 +201,12 @@ class AtlasCollector:
             ],
         )
         write_atlas(self.sink, manifest, merged)
+        self._persisted_atlas = Atlas(
+            counts=merged,
+            total_observations=manifest["total_observations"],
+            generations=manifest["generations"],
+            manifest=manifest,
+        )
         self._persisted_counts = snapshot
         self.persisted_observations = self.observations
         return self.sink
