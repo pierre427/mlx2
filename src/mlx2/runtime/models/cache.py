@@ -3724,7 +3724,10 @@ class BatchKVCache(_BaseCache):
         same_storage = getattr(self, "keys", None) is v[0]
         previous_idx = getattr(self, "_idx", None) if same_storage else None
         (self.keys, self.values, self.offset, self.left_padding) = v
-        self._idx = self.keys.shape[2] if previous_idx is None else previous_idx
+        if previous_idx is None:
+            # An empty cache (nothing written yet) has no keys.
+            previous_idx = 0 if self.keys is None else self.keys.shape[2]
+        self._idx = previous_idx
         self._right_padding = None
         self._configure_attention_backend(backend)
 
@@ -4021,6 +4024,9 @@ class BatchRotatingKVCache(_BaseCache):
         instance.speculating = False
         instance._rollbacks = deque()
         instance._rollback_window = RotatingKVCache._ROLLBACK_WINDOW
+        # ``from_state`` skips ``__init__``; a loaded cache has no pending
+        # right padding either.
+        instance._lengths = None
         return instance
 
     def __init__(self, max_size, left_padding: List[int]):
@@ -4192,7 +4198,8 @@ class BatchRotatingKVCache(_BaseCache):
     @property
     def state(self):
         (k, v) = (self.keys, self.values)
-        if self._offset < k.shape[2]:
+        # An empty cache reports ``None`` keys and values, as KVCache does.
+        if k is not None and self._offset < k.shape[2]:
             (k, v) = (k[..., : self._offset, :], v[..., : self._offset, :])
         return (k, v, self.offset, self.left_padding)
 

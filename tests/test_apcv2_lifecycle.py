@@ -14,6 +14,8 @@ from mlx2.runtime.cache_planes import (
 )
 from mlx2.runtime.models.cache import (
     ArraysCache,
+    BatchKVCache,
+    BatchRotatingKVCache,
     KVCache,
     PrefixIndex,
     QuantizedKVCache,
@@ -411,6 +413,28 @@ def test_prompt_cache_round_trips_layers_with_nothing_written(tmp_path, make_emp
         assert layer.nbytes == 0
         if hasattr(layer, "offset"):
             assert layer.offset == 0
+
+
+@pytest.mark.parametrize(
+    "make_empty",
+    [lambda: BatchKVCache([1, 0]), lambda: BatchRotatingKVCache(8, [1, 0])],
+    ids=["batch_kv", "batch_rotating"],
+)
+def test_prompt_cache_round_trips_batch_caches_with_nothing_written(
+    tmp_path, make_empty
+):
+    # An empty batch cache has no keys: the rotating getter and the plain
+    # setter read ``keys.shape`` and raised ``AttributeError``.
+    path = str(tmp_path / "empty-batch.safetensors")
+    save_prompt_cache(path, [make_empty()])
+    (restored,) = load_prompt_cache(path)
+    assert restored.empty() and restored.nbytes == 0
+    assert restored.offset.tolist() == [-1, 0]
+    assert restored.left_padding.tolist() == [1, 0]
+    # The loaded cache takes the next tokens like a fresh one.
+    step = mx.ones((2, 1, 2, 4))
+    keys, _ = restored.update_and_fetch(step, step)
+    assert keys.shape[2] == 2 and restored.offset.tolist() == [1, 2]
 
 
 def test_apcv2_spills_and_restores_a_one_token_mtp_checkpoint(tmp_path):
