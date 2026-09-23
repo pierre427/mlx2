@@ -288,10 +288,100 @@ def test_engine_binds_neural_bridge_only_after_adapter_is_ready():
     engine.prompt_lock = threading.Lock()
     engine.lock = threading.Lock()
     engine.adapter = Adapter()
-    engine.snapshot = {"state": "ready"}
+    engine.snapshot = {"state": "ready", "settings": {"route": "ordinary"}}
     artifact = SimpleNamespace(fingerprint="artifact")
     engine.configure_neural_concept_bridge(artifact, timeout=0.1)
     assert configured == [artifact]
     assert engine.snapshot["execution"]["neural_concept_bridge"]["state"] == (
         "configured-unqualified"
     )
+
+
+@pytest.mark.parametrize("route", ["prompt_lookup", "native_mtp", "external_draft"])
+def test_engine_refuses_a_neural_bridge_its_route_cannot_apply(route):
+    # Only ordinary decode applies concept prefill and decode inputs; the
+    # server turns this ValueError into a startup refusal.
+    configured = []
+
+    class Adapter:
+        def configure_neural_concept_bridge(self, artifact):
+            configured.append(artifact)
+
+        def diagnostics(self):
+            return {}
+
+    engine = object.__new__(ServingEngine)
+    engine.ready = threading.Event()
+    engine.ready.set()
+    engine.prompt_lock = threading.Lock()
+    engine.lock = threading.Lock()
+    engine.adapter = Adapter()
+    engine.snapshot = {"state": "ready", "settings": {"route": route}}
+    with pytest.raises(ValueError, match=f"{route} route cannot apply"):
+        engine.configure_neural_concept_bridge(SimpleNamespace(fingerprint="a"), timeout=0.1)
+    assert configured == []
+
+
+def test_neural_concept_request_is_refused_where_the_route_would_drop_it(monkeypatch):
+    # Prompt lookup swallowed the concept prefill inputs while the receipt
+    # said "applied" and the engagement counter moved.
+    from route_harness import (
+        make_engine, make_external_engine, patch_host, run, tiny_muse_dflash,
+        tiny_qwen38_mtp,
+    )
+
+    patch_host(monkeypatch)
+    inner, vocab = tiny_qwen38_mtp()
+    seen = []
+
+    class ConceptModel:
+        def __init__(self, model):
+            self.model_ = model
+
+        def __call__(self, inputs, cache=None, deep_concept_memory=None, **kwargs):
+            if deep_concept_memory is not None:
+                seen.append(True)
+            return self.model_(inputs, cache=cache, **kwargs)
+
+        def __getattr__(self, name):
+            return getattr(self.model_, name)
+
+    class Bridge:
+        def neural_concept_prefill(self, tokens, payload, *, prefill_step):
+            return {
+                "deep_concept_memory": {"keys": 1},
+                "receipt": {"schema": "tiny.neural-concept.v1", "status": "applied"},
+            }
+
+    muse, draft, muse_vocab = tiny_muse_dflash()
+    model = ConceptModel(inner)
+    engines = {
+        "ordinary": lambda: make_engine(model, vocab, mtp=False, adapter_mixin=Bridge),
+        "prompt_lookup": lambda: make_engine(
+            model, vocab, mtp=False, prompt_lookup=True, adapter_mixin=Bridge
+        ),
+        "native_mtp": lambda: make_engine(model, vocab, mtp=True, adapter_mixin=Bridge),
+        "external_draft": lambda: make_external_engine(muse, draft, muse_vocab),
+    }
+    prompt = [(7 * i + 3) % (vocab - 2) + 1 for i in range(12)]
+    request = {"tokens": prompt, "max_tokens": 4, "temperature": 0,
+               "_mlx2_neural_concepts": {"concepts": [{"id": "c"}]}}
+    for route, factory in engines.items():
+        seen.clear()
+        engine = factory()
+        if route == "external_draft":
+            type(engine.adapter).neural_concept_prefill = Bridge.neural_concept_prefill
+        try:
+            output = run(engine, request)
+            engagements = engine.counts.get("neural_concept_bridge_engagements", 0)
+            alive = engine.thread.is_alive()
+        finally:
+            engine.close()
+        assert alive, route
+        if route == "ordinary":
+            assert output["receipt"]["neural_concept_bridge"]["status"] == "applied"
+            assert engagements == 1 and seen
+        else:
+            assert output.get("status") == 400, (route, output)
+            assert f"{route} route cannot apply" in output["error"]
+            assert engagements == 0 and not seen

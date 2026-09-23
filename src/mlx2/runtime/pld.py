@@ -425,8 +425,24 @@ class PromptLookupBatchGenerator:
         logits_processors=None,
         stop_matchers=None,
         prompt_lookup_configs=None,
-        **_kwargs,
+        lane_rngs=None,
+        apc_interior_positions=None,
+        state_boundaries=None,
+        prefill_inputs=None,
     ):
+        # The serving seam passes these to every route.  ``lane_rngs`` is
+        # unused here because each sampler already carries its lane's RNG;
+        # the others would be dropped, so a non-neutral value is refused
+        # rather than reported as applied.
+        del lane_rngs
+        if any(value is not None for value in prefill_inputs or ()):
+            raise ValueError(
+                "multimodal and neural-concept prefill are unavailable on prompt lookup"
+            )
+        if any(positions for positions in apc_interior_positions or ()):
+            raise ValueError("APCv2 interior checkpoints are unavailable on prompt lookup")
+        if any(bounds for bounds in state_boundaries or ()):
+            raise ValueError("state checkpoints are unavailable on prompt lookup")
         if len(self.lanes) + len(prompts) > self.capacity:
             raise ValueError("prompt-lookup lane capacity exceeded")
         count = len(prompts)

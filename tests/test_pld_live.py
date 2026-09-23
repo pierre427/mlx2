@@ -198,3 +198,32 @@ def test_warm_apc_continuation_on_prompt_lookup_server_matches_cold(monkeypatch)
     assert alive and error is None
     assert cold_receipt["cached_tokens"] == 0 and warm_receipt["cached_tokens"] > 0
     assert warm == cold
+
+
+def test_prompt_lookup_insert_refuses_inputs_it_cannot_apply():
+    # insert swallowed arbitrary keyword arguments, so neural-concept (or
+    # multimodal) prefill inputs were silently dropped while serving still
+    # reported the bridge as applied.
+    import pytest
+
+    generator = PromptLookupBatchGenerator(
+        _PatternModel(),
+        prefill_step_size=16,
+        prompt_lookup={"num_draft": 2, "ngram_min": 2, "ngram_max": 2},
+    )
+    for refused in (
+        {"prefill_inputs": [{"deep_concept_memory": {"keys": 1}}]},
+        {"apc_interior_positions": [(2,)]},
+        {"state_boundaries": [("rolling", 2)]},
+    ):
+        with pytest.raises(ValueError, match="prompt lookup"):
+            generator.insert([[1, 2, 1, 2]], max_tokens=[4], caches=[[KVCache()]], **refused)
+    with pytest.raises(TypeError):
+        generator.insert([[1, 2, 1, 2]], max_tokens=[4], caches=[[KVCache()]], mtp_states=[None])
+    assert not generator.lanes
+    # The serving seam's neutral values are still accepted.
+    (uid,) = generator.insert(
+        [[1, 2, 1, 2]], max_tokens=[4], caches=[[KVCache()]], lane_rngs=[None],
+        prefill_inputs=[None], apc_interior_positions=[()],
+    )
+    assert uid in generator.lanes

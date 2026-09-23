@@ -5821,6 +5821,14 @@ class ServingEngine:
                         )
                         neural_payload = job.request.get("_mlx2_neural_concepts")
                         if neural_payload is not None:
+                            route = self.snapshot["settings"]["route"]
+                            if route != "ordinary":
+                                # Refuse before the bridge runs, so neither
+                                # the receipt nor the engagement counter
+                                # claims concepts this route would drop.
+                                raise ValueError(
+                                    f"the {route} route cannot apply concept inputs"
+                                )
                             if prefill_input is not None:
                                 raise ValueError(
                                     "neural concept and multimodal prefill cannot be combined"
@@ -7063,6 +7071,14 @@ class ServingEngine:
                 raise RuntimeError(self.error or "generation worker stopped during load")
             if time.monotonic() >= deadline:
                 raise TimeoutError("timed out waiting for neural concept bridge binding")
+        route = (self.snapshot.get("settings") or {}).get("route")
+        if route != "ordinary":
+            # Concept memory enters through ordinary prefill and decode
+            # inputs; any other route would drop it while reporting it.
+            raise ValueError(
+                f"the neural concept bridge needs the ordinary route; the {route} "
+                "route cannot apply concept inputs"
+            )
         with self.prompt_lock:
             adapter = self.adapter
             configure = getattr(adapter, "configure_neural_concept_bridge", None)
