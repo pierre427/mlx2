@@ -371,6 +371,8 @@ class PromptLookupBatchGenerator:
         # Decode rounds that delivered tokens; drives the same allocator
         # reclaim cadence as BatchGenerator (the PLD route had none).
         self._steps_counter = 0
+        # Round-robin position over the lanes still prefilling.
+        self._prefill_cursor = 0
         self.scheduler_stats = {
             "pld_cycles": 0,
             "pld_retrieval_cycles": 0,
@@ -1047,12 +1049,22 @@ class PromptLookupBatchGenerator:
 
     def next(self):
         prompts = []
-        for lane in list(self.lanes.values()):
-            if lane.anchor is None:
-                prompts.append(self._prefill(lane))
-        if prompts:
-            return prompts, []
-        pending = [lane for lane in self.lanes.values() if not lane.ready]
+        # At most one bounded prefill slice per poll, round-robin over the
+        # lanes still prefilling, and lanes that already held an anchor
+        # decode in the same poll, as on the ordinary and external routes.
+        # Returning right after the prefills starved every decoding lane
+        # until each waiting prompt had finished.  A lane whose prefill ends
+        # in this poll starts decoding in the next one, as before.
+        pending = [
+            lane
+            for lane in self.lanes.values()
+            if lane.anchor is not None and not lane.ready
+        ]
+        waiting = [lane for lane in self.lanes.values() if lane.anchor is None]
+        if waiting:
+            lane = waiting[self._prefill_cursor % len(waiting)]
+            self._prefill_cursor += 1
+            prompts.append(self._prefill(lane))
         together = [lane for lane in pending if getattr(lane, "batched", False)]
         if together:
             # A lone batchable lane takes the same transactional path: it is
@@ -1076,7 +1088,12 @@ class PromptLookupBatchGenerator:
                 previous_steps, self._steps_counter, ALLOCATOR_RECLAIM_STEP_INTERVAL
             ):
                 mx.clear_cache()
-        return [], responses
+        return prompts, responses
+
+    def scheduler_waiting_uids(self):
+        """Lanes still prefilling: they wait on the prefill round-robin, not
+        on memory, so the serving stall watchdog must not fail them."""
+        return [uid for uid, lane in self.lanes.items() if lane.anchor is None]
 
     def pop_prompt_boundary(self, uid):
         return self.boundaries.pop(int(uid), None)

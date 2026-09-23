@@ -91,6 +91,51 @@ def test_batched_verify_continues_from_a_published_cache():
     assert int(mx.argmax(logits[0, -1]).item()) == int(mx.argmax(reference[0, -1]).item())
 
 
+@pytest.mark.parametrize("batched", [True, False])
+def test_decoding_lane_keeps_producing_while_another_prompt_prefills(batched):
+    """A long prefill must not starve a lane that is already decoding.
+
+    ``next`` used to return right after the prefill slices, so a decoding
+    lane got no token until every waiting prompt had finished; with no
+    ``scheduler_waiting_uids`` either, the serving stall watchdog then failed
+    the starved lane with 429.
+    """
+    model = _north()
+    generator = PromptLookupBatchGenerator(
+        model, completion_batch_size=2, prefill_step_size=16,
+        prompt_lookup={"num_draft": 2, "adaptive": False, "deferred_admission": False,
+                       "batched_verify": batched},
+    )
+    short = [1, 2, 3, 4]
+    long_prompt = [((i * 7) % 29) + 1 for i in range(16 * 20 + 1)]
+    (decoding,) = generator.insert([short], max_tokens=[400])
+    out = {decoding: []}
+    for _ in range(10):
+        _prompts, responses = generator.next()
+        for response in responses:
+            out[response.uid].append(response.token)
+        if out[decoding]:
+            break
+    (late,) = generator.insert([long_prompt], max_tokens=[4])
+    out[late] = []
+    assert generator.scheduler_waiting_uids() == [late]
+    gap = worst = prefill_polls = 0
+    for _ in range(200):
+        prompts, responses = generator.next()
+        prefill_polls += bool(prompts)
+        for response in responses:
+            out[response.uid].append(response.token)
+        gap = 0 if any(r.uid == decoding for r in responses) else gap + 1
+        worst = max(worst, gap)
+        if any(r.uid == late and r.finish_reason for r in responses):
+            break
+    generator.close()
+    assert prefill_polls >= 20  # the late prompt took twenty bounded slices
+    assert worst == 0
+    assert out[late] == _greedy(model, long_prompt, 4)
+    assert out[decoding] == _greedy(model, short, len(out[decoding]))
+
+
 def test_batched_verify_policy_is_validated_and_yields_to_rotating_replay():
     with pytest.raises(ValueError, match="batched_verify must be a boolean"):
         PromptLookupBatchGenerator.validate_policy({"batched_verify": "yes"})
