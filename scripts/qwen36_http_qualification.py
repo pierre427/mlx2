@@ -406,12 +406,33 @@ def gate_batch_observability(
     )
     latency = after.get("latency_ms") or {}
     distributions = [latency.get(name) or {} for name in ("ttft", "itl")]
-    latency_passed = all(
-        distribution.get("count", 0) > 0
-        and all(isinstance(distribution.get(name), (int, float))
-                and math.isfinite(distribution[name])
-                for name in ("p50", "p95", "p99"))
-        for distribution in distributions
+    # The percentiles cover the server's bounded window, so a nonempty
+    # distribution alone passed on earlier traffic even when every request
+    # here failed.  Bind the gate to its own requests: all four succeeded and
+    # each is in the window with a first token and at least one inter-token
+    # gap.  (A window count delta is not usable: the window is bounded.)
+    own_rows = [
+        row for row in after.get("completed_requests", [])
+        if row.get("tenant_id") in expected_tenants
+    ]
+    latency_passed = (
+        len(responses) == len(requests)
+        and not errors
+        and len(own_rows) >= len(requests)
+        and all(
+            isinstance(row.get("ttft_ms"), (int, float))
+            and math.isfinite(row["ttft_ms"])
+            and isinstance(row.get("tokens"), int)
+            and row["tokens"] >= 2
+            for row in own_rows
+        )
+        and all(
+            distribution.get("count", 0) > 0
+            and all(isinstance(distribution.get(name), (int, float))
+                    and math.isfinite(distribution[name])
+                    for name in ("p50", "p95", "p99"))
+            for distribution in distributions
+        )
     )
     fairness = after.get("fairness") or {}
     rates = fairness.get("tenant_token_rates") or {}

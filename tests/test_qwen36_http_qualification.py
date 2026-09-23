@@ -54,16 +54,16 @@ class FakeClient:
         }
         self.sequence = 0
         self.tenants = set()
+        self.completed = []
 
     def get(self, path):
         if path == "/v1/status":
             return self.status
         assert path == "/v1/status/batching"
         rates = {tenant: 10.0 for tenant in self.tenants}
-        completed = [
-            {"request_id": f"r{index}", "tenant_id": tenant}
-            for index, tenant in enumerate(sorted(self.tenants))
-        ]
+        # One bounded-window row per served request, as batch_metrics
+        # publishes it (itl_ms is dropped from completed_requests).
+        completed = list(self.completed)
         events = [
             {"kind": kind, "request_id": row["request_id"]}
             for row in completed
@@ -85,6 +85,11 @@ class FakeClient:
     def post(self, body, *, tenant="qwen36-qualification"):
         self.sequence += 1
         self.tenants.add(tenant)
+        self.completed.append({
+            "request_id": f"r{self.sequence}", "tenant_id": tenant,
+            "status": "completed", "ttft_ms": 12.0,
+            "tokens": body.get("max_tokens", 1),
+        })
         if body.get("n", 1) > self.status["max_lanes"]:
             payload = BytesIO(json.dumps({"error": {"message": "capacity"}}).encode())
             raise HTTPError("http://fixture", 429, "full", {"Retry-After": "1"}, payload)
@@ -302,3 +307,45 @@ def test_structured_gates_accept_the_live_receipt_and_refuse_unenforced(gate):
 
     client = Missing()
     assert gates[gate](client, client.status)["status"] == "failed"
+
+
+def test_latency_gate_is_bound_to_its_own_requests():
+    class Outage(FakeClient):
+        """Every gate request fails; the window still holds earlier traffic."""
+
+        def __init__(self):
+            super().__init__()
+            self.completed = [{"request_id": "old", "tenant_id": "earlier",
+                               "status": "completed", "ttft_ms": 5.0, "tokens": 64}]
+            self.tenants = {"earlier"}
+
+        def post(self, body, *, tenant="qwen36-qualification"):
+            raise HTTPError("http://fixture", 500, "worker died", {}, BytesIO(b"{}"))
+
+    gates = probe.gate_batch_observability(Outage(), {})
+    assert gates["latency_ttft_itl_percentiles"]["status"] == "failed"
+
+    class Unrecorded(FakeClient):
+        """The requests succeed but never reach the batching window."""
+
+        def post(self, body, *, tenant="qwen36-qualification"):
+            response = super().post(body, tenant=tenant)
+            self.completed.pop()
+            self.completed.append({"request_id": f"x{self.sequence}", "tenant_id": "other",
+                                   "status": "completed", "ttft_ms": 1.0, "tokens": 64})
+            return response
+
+    gates = probe.gate_batch_observability(Unrecorded(), {})
+    assert gates["latency_ttft_itl_percentiles"]["status"] == "failed"
+
+    class NoFirstToken(FakeClient):
+        def post(self, body, *, tenant="qwen36-qualification"):
+            response = super().post(body, tenant=tenant)
+            self.completed[-1]["ttft_ms"] = None
+            return response
+
+    gates = probe.gate_batch_observability(NoFirstToken(), {})
+    assert gates["latency_ttft_itl_percentiles"]["status"] == "failed"
+
+    gates = probe.gate_batch_observability(FakeClient(), {})
+    assert gates["latency_ttft_itl_percentiles"]["status"] == "passed"
