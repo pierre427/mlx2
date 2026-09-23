@@ -1130,10 +1130,19 @@ class ExternalDraftBatchGenerator:
                     retry = [lane for lane in group if lane.uid != error.uid]
                     if retry:
                         pending.append(retry)
+        # A lane can finish in the poll that completes its prefill
+        # (max_tokens=1, or a stop as the first token).  Its end_of_prompt
+        # response is in this same return, so its committed boundary stays
+        # for serving to pop, as the ordinary and PLD routes keep it.
+        # Dropping it with the lane lost the boundary and failed n>1 fanout
+        # siblings.  A boundary returned by an earlier poll was already
+        # offered, so it still goes with its lane.
+        prompt_ended = {prompt.uid for prompt in prompts if prompt.end_of_prompt}
         for lane in list(self.lanes.values()):
             if lane.ready:
                 response = lane.ready.popleft(); responses.append(response)
-                if response.finish_reason: self.remove([lane.uid], cancelled=False)
+                if response.finish_reason:
+                    self.remove([lane.uid], cancelled=False, keep_boundary=lane.uid in prompt_ended)
         return prompts, responses
 
     def pop_prompt_boundary(self, uid): return self.boundaries.pop(uid, None)
@@ -1143,11 +1152,12 @@ class ExternalDraftBatchGenerator:
         failures, self._lane_failures = self._lane_failures, []
         return failures
 
-    def remove(self, uids, return_prompt_caches=False, *, cancelled=True):
+    def remove(self, uids, return_prompt_caches=False, *, cancelled=True, keep_boundary=False):
         if self._open: raise RuntimeError("Cannot remove during external transaction")
         result = {}
         for uid in uids:
-            lane = self.lanes.pop(uid,None); self.boundaries.pop(uid,None)
+            lane = self.lanes.pop(uid,None)
+            if not keep_boundary: self.boundaries.pop(uid,None)
             if lane is not None:
                 lane.cancelled = bool(cancelled); self.scheduler_stats["cancelled"] += int(cancelled)
                 if return_prompt_caches: result[uid] = self._freeze_cache(lane.cache)

@@ -1341,3 +1341,83 @@ def test_round_snapshot_shares_a_guard_that_resyncs_and_output_is_unchanged(monk
     clean, receipt = run(0)
     assert run(3) == (clean, receipt)
     assert receipt["tripped"] == "budget_soft"
+
+
+def _drain_like_serving(b):
+    """Drain ``b``, popping each prompt boundary right after the poll that
+    reports ``end_of_prompt``, as serving does."""
+    boundaries, finishes = {}, {}
+    for _ in range(100):
+        prompts, responses = b.next()
+        for prompt in prompts:
+            if prompt.end_of_prompt:
+                boundaries[prompt.uid] = b.pop_prompt_boundary(prompt.uid)
+        for response in responses:
+            if response.finish_reason:
+                finishes[response.uid] = response.finish_reason
+        if not b.lanes:
+            return boundaries, finishes
+    raise AssertionError('scheduler stalled')
+
+
+@pytest.mark.parametrize('stop_first', [False, True])
+def test_one_round_finish_keeps_the_committed_prompt_boundary(stop_first):
+    # A lane decoded in the poll that completed its prefill; when that first
+    # round finished it (max_tokens=1, or a stop as the first token), remove()
+    # dropped the boundary before serving could pop it.
+    prompt = [1, 2, 3, 4]
+    m, d = tiny()
+    kwargs, budget = {}, 1
+    if stop_first:
+        first = int(mx.argmax(m(mx.array([prompt]), cache=m.make_cache())[0, -1]).item())
+        m, d = tiny()
+        kwargs, budget = {'stop_tokens': [[first]]}, 64
+    b = generator(m, d, **kwargs)
+    uid = b.insert([prompt], max_tokens=[budget], sampling_configs=[{'sampling_temp': 0}])[0]
+    boundaries, finishes = _drain_like_serving(b)
+    assert finishes == {uid: 'stop' if stop_first else 'length'}
+    assert boundaries[uid] is not None
+    assert boundaries[uid]['tokens'] == prompt[:-1]
+    assert b.boundaries == {}
+
+
+def test_external_fanout_with_a_one_token_budget_shares_the_leader_boundary(monkeypatch):
+    import test_parallel_sampling_fanout as harness
+    from mlx2.runtime import generate
+    from mlx2.server import collect_parallel_samples
+
+    class ExternalBatch:
+        """The harness's serving seam backed by the real external generator."""
+
+        def __init__(self, *_a, **_kw):
+            self.inner = generator(*tiny())
+            self.scheduler_stats = self.inner.scheduler_stats
+
+        def insert(self, prompts, max_tokens, caches=None, all_tokens=None, **_kw):
+            return self.inner.insert(
+                prompts, max_tokens=max_tokens, all_tokens=all_tokens,
+                sampling_configs=[{'sampling_temp': 0}] * len(prompts),
+            )
+
+        def __getattr__(self, name):
+            return getattr(self.inner, name)
+
+    class SwapBatch:
+        def __init__(self, inner):
+            self.inner = inner
+
+        def setattr(self, target, name, value, *args, **kwargs):
+            if target is generate and name == 'BatchGenerator':
+                value = ExternalBatch
+            return self.inner.setattr(target, name, value, *args, **kwargs)
+
+    engine = harness._engine(SwapBatch(monkeypatch), [], tokens=1)
+    try:
+        body = {'max_tokens': 1, 'n': 1}
+        jobs = engine.submit_many([dict(body, seed=index) for index in range(2)])
+        results = collect_parallel_samples(jobs, body, chat=True)
+    finally:
+        engine.close()
+    assert len(results) == 2
+    assert engine.counts['apcv2_fanout_boundaries'] == 1
+    assert all(receipt['parallel_prefill']['one_prefill'] for _, _, receipt in results)
