@@ -2312,6 +2312,7 @@ def handler_for(
             grammar_message_index = None
             streamed_calls = {}
             self._responses_sequence = 0
+            self._chat_role_pending = True
             try:
                 size = self._content_length()
                 if not 0 < size <= body_limit:
@@ -2872,7 +2873,7 @@ def handler_for(
                             else:
                                 choice = {"index": 0, "finish_reason": None}
                                 choice.update(
-                                    {"delta": delta}
+                                    {"delta": self._chat_delta(delta)}
                                     if chat
                                     else {"text": delta.get("content", "")}
                                 )
@@ -3083,6 +3084,9 @@ def handler_for(
                                     "usage": usage,
                                     "mlx2": receipt,
                                 }
+                            )
+                            self._sse_usage_chunk(
+                                job, body, model=model, usage=usage, chat=True
                             )
                             self._sse("[DONE]")
                             self._record_http(200)
@@ -3341,7 +3345,11 @@ def handler_for(
                                         ],
                                         finish_reason=event["finish_reason"],
                                     )
-                                choice.update({"delta": {}} if chat else {"text": ""})
+                                choice.update(
+                                    {"delta": self._chat_delta({})}
+                                    if chat
+                                    else {"text": ""}
+                                )
                                 self._sse(
                                     {
                                         "id": job.id,
@@ -3354,6 +3362,9 @@ def handler_for(
                                         "usage": usage,
                                         "mlx2": receipt,
                                     }
+                                )
+                                self._sse_usage_chunk(
+                                    job, body, model=model, usage=usage, chat=chat
                                 )
                                 self._sse("[DONE]")
                             self._record_http(200)
@@ -3595,6 +3606,35 @@ def handler_for(
             )
             self.wfile.write(f"data: {data}\n\n".encode())
             self.wfile.flush()
+
+        def _chat_delta(self, delta):
+            """Name the assistant role on the first content (or final) delta.
+
+            Progress and logprob-only chunks keep their empty delta.
+            """
+            if not self._chat_role_pending:
+                return delta
+            self._chat_role_pending = False
+            return {"role": "assistant", **delta}
+
+        def _sse_usage_chunk(self, job, body, *, model, usage, chat):
+            """OpenAI ``stream_options.include_usage``: a choice-less usage chunk.
+
+            Usage also stays on the finish chunk, where earlier mlx2 clients
+            read it; this chunk is the standard place for OpenAI clients.
+            """
+            if not (body.get("stream_options") or {}).get("include_usage"):
+                return
+            self._sse(
+                {
+                    "id": job.id,
+                    "object": "chat.completion.chunk" if chat else "text_completion",
+                    "created": int(job.created),
+                    "model": model,
+                    "choices": [],
+                    "usage": usage,
+                }
+            )
 
         def _responses_call_stream(self, job, call, streamed, *, offset):
             """Item 12: open one grammar-engaged function_call item early.

@@ -1735,6 +1735,38 @@ def test_streaming_has_terminal_and_receipt(http_engine):
     assert data.endswith("data: [DONE]\n\n")
 
 
+@pytest.mark.parametrize("include_usage", [None, False, True])
+def test_chat_stream_sends_role_and_honors_include_usage(http_engine, include_usage):
+    _engine, base = http_engine
+    extra = {"stream": True}
+    if include_usage is not None:
+        extra["stream_options"] = {"include_usage": include_usage}
+    with post(base, **extra) as response:
+        wire = response.read().decode()
+    chunks = [
+        json.loads(line[len("data: "):])
+        for line in wire.split("\n\n")
+        if line.startswith("data: {")
+    ]
+    assert chunks[0]["choices"][0]["delta"] == {"role": "assistant", "content": "hello"}
+    assert all(
+        "role" not in chunk["choices"][0]["delta"]
+        for chunk in chunks[1:]
+        if chunk["choices"]
+    )
+    # Usage keeps riding on the finish chunk for existing readers.
+    finish = next(c for c in chunks if c["choices"] and c["choices"][0]["finish_reason"])
+    assert finish["usage"]["total_tokens"] == 7
+    usage_only = [chunk for chunk in chunks if not chunk["choices"]]
+    if include_usage:
+        assert chunks[-1] is usage_only[0] and len(usage_only) == 1
+        assert usage_only[0]["object"] == "chat.completion.chunk"
+        assert usage_only[0]["usage"]["total_tokens"] == 7
+    else:
+        assert usage_only == []
+    assert wire.endswith("data: [DONE]\n\n")
+
+
 def test_overload_is_http_429(http_engine):
     engine, base = http_engine
     engine.overloaded = True
