@@ -269,9 +269,15 @@ def run_client(base_url, *, scripted=True):
             max_completion_tokens=256,
         )
         calls = parallel.choices[0].message.tool_calls or []
-        # The request asks for both tools with parallel calls enabled; a
-        # subset means the server dropped a call, so both names must appear.
-        assert {call.function.name for call in calls} == {"weather", "clock"}
+        # The request asks for both tools with parallel calls enabled.  The
+        # scripted engine always emits both, so a subset there means the
+        # server dropped a call; a real model can also stop after one call,
+        # so the message carries what came back for triage.
+        names = {call.function.name for call in calls}
+        assert names == {"weather", "clock"}, (
+            f"tool calls {[(c.function.name, c.function.arguments) for c in calls]}, "
+            f"finish_reason {parallel.choices[0].finish_reason}"
+        )
         named = openai_client.chat.completions.create(
             temperature=0,
             model=MODEL,
@@ -286,8 +292,10 @@ def run_client(base_url, *, scripted=True):
             tool_choice={"type": "function", "function": {"name": "weather"}},
             max_completion_tokens=256,
         )
-        calls = named.choices[0].message.tool_calls
-        assert len(calls) == 1 and calls[0].function.name == "weather"
+        calls = named.choices[0].message.tool_calls or []
+        assert len(calls) == 1 and calls[0].function.name == "weather", (
+            f"tool calls {[(c.function.name, c.function.arguments) for c in calls]}"
+        )
 
     if supports_thinking_deferral:
         _case("openai.chat.nonstream", chat_nonstream, failures)
