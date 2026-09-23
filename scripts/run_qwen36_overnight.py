@@ -741,6 +741,15 @@ class Campaign:
                          argv: tuple[str, ...] | list[str], role: str,
                          server_url: str | None = None) -> None:
         identity = self.process_identity(process.pid)
+        if (not identity or "pid" not in identity) and process.poll() is not None:
+            # A short command can exit (a zombie ps reports as gone) before
+            # its identity is read, most often on a loaded host.  There is
+            # nothing left to own or reconcile; its exit code decides the
+            # step, not a registration failure.
+            self.event("process_exited_before_registration", step_id=step.step_id,
+                       attempt=attempt, role=role, pid=process.pid,
+                       returncode=process.returncode)
+            return
         if not identity or "pid" not in identity:
             self.stop_process(process, self.config.terminate_grace, unregister=False)
             raise RuntimeError(f"could not capture process start identity for PID {process.pid}: {identity}")

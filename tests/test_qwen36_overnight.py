@@ -495,3 +495,24 @@ def test_campaign_fixture_is_isolated_from_host_swap_and_thermal(tmp_path, monke
     state = json.loads(run.state_path.read_text())
     assert state["steps"]["independent"]["status"] == "passed"
     assert marker.read_text() == "yes"
+
+
+@pytest.mark.parametrize("code, expected", [("pass", "passed"), ("raise SystemExit(3)", "failed")])
+def test_command_that_exits_before_its_identity_is_read_keeps_its_own_outcome(tmp_path, code, expected):
+    # On a loaded host the identity probe can run after a short command has
+    # already exited; ps then reports the zombie as gone.  The step used to
+    # fail with "could not capture process start identity" whatever the
+    # command's exit code was.
+    steps = [module.Step("quick", "test", "quick", (command("quick", code),))]
+    run = campaign(tmp_path, steps)
+    probe = run.process_identity
+
+    def late_probe(pid):
+        time.sleep(0.5)
+        return probe(pid)
+
+    run.process_identity = late_probe
+    run.run(resume=False)
+    state = json.loads(run.state_path.read_text())
+    assert state["steps"]["quick"]["status"] == expected
+    assert state["active_processes"] == {}
