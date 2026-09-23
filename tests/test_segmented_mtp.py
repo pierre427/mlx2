@@ -2916,6 +2916,46 @@ def test_width_lock_handoff_admits_late_lane_before_plain_migration():
     active.close()
 
 
+def test_lane_queued_at_its_merge_boundary_is_a_memory_wait():
+    """Serving refreshes progress for every scheduler wait each loop.
+
+    A newly prepared lane that merge-boundary admission queued for memory was
+    paused without joining ``_memory_queued``, so it was reported as a
+    scheduler wait and the memory watchdog and stall preemption never saw
+    it, while an active lane queued by the same controller was reported
+    correctly.
+    """
+    from mlx2.runtime.generate import MTPGenerationBatch, StopSequenceMatcher
+
+    class Admission:
+        atomic_cohort = False
+        refuse = {1}
+
+        def __call__(self, rows):
+            return {
+                uid: "queue" if uid in self.refuse else 1
+                for (uid, *_rest) in rows
+            }
+
+    admission = Admission()
+    active = MTPGenerationBatch(
+        object(), [_detached(0)], [None], [StopSequenceMatcher()],
+        segmented_live_tip=True, mtp_admission=admission,
+    )
+    arriving = MTPGenerationBatch(
+        object(), [_detached(1)], [None], [StopSequenceMatcher()],
+        segmented_live_tip=True,
+    )
+    active.extend(arriving)
+    assert list(active._paused) == [1]
+    assert active.scheduler_waiting_uids() == []
+    admission.refuse = set()
+    assert active._apply_admission()
+    assert not active._paused and not active._memory_queued
+    arriving.close()
+    active.close()
+
+
 # --- per-round verification histograms -------------------------------------
 
 

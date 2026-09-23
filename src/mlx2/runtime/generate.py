@@ -1980,6 +1980,10 @@ class MTPGenerationBatch:
             elif value == "plain" and uid in self._paused:
                 self._plain_ready.append(self._paused.pop(uid))
                 self._memory_queued.discard(uid)
+            elif value == "queue" and uid in self._paused:
+                # A newly prepared lane refused at its merge boundary waits on
+                # memory, exactly like an active lane detached above.
+                self._memory_queued.add(uid)
         self._attach_packages(joining)
         return True
 
