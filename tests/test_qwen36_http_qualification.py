@@ -24,9 +24,16 @@ def receipt(width=2, structured=None):
         "request_controls": {},
     }
     if structured:
+        # The live shape: serving merges structured_receipt() fields into
+        # every structured-output receipt (qwen36-pld-qualification.json).
         value["request_controls"]["structured_output"] = {
             "kind": structured,
             "enforced": True,
+            "engine": "automaton",
+            "tail_mass_bound": 0.0,
+            "parallel_scans": 0,
+            "deferred": False,
+            "deferred_tokens": 0,
         }
     return value
 
@@ -263,3 +270,35 @@ def test_wide_b20_overload_uses_barrier_cohorts_and_quiesces():
     assert evidence["reserved_capacity"] == 48
     assert any(row.get("http_status") == 429 for row in evidence["outcomes"])
     assert evidence["quiescence"]["passed"]
+
+
+@pytest.mark.parametrize(
+    "gate", ["response_format_json_object", "strict_json_schema", "explicit_grammar"]
+)
+def test_structured_gates_accept_the_live_receipt_and_refuse_unenforced(gate):
+    gates = dict(probe.SINGLE_GATES)
+    client = FakeClient()
+    assert gates[gate](client, client.status)["status"] == "passed"
+
+    for mutate in (
+        lambda control: control.update(enforced=False),
+        lambda control: control.update(kind="tool_choice"),
+        lambda control: control.pop("enforced"),
+    ):
+        class Unenforced(FakeClient):
+            def post(self, body, *, tenant="qwen36-qualification"):
+                response = super().post(body, tenant=tenant)
+                mutate(response["mlx2"]["request_controls"]["structured_output"])
+                return response
+
+        client = Unenforced()
+        assert gates[gate](client, client.status)["status"] == "failed"
+
+    class Missing(FakeClient):
+        def post(self, body, *, tenant="qwen36-qualification"):
+            response = super().post(body, tenant=tenant)
+            response["mlx2"]["request_controls"]["structured_output"] = None
+            return response
+
+    client = Missing()
+    assert gates[gate](client, client.status)["status"] == "failed"

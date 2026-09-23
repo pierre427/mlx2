@@ -123,11 +123,17 @@ def _content(response: dict[str, Any]) -> str:
 
 
 def _structured_receipt(response: dict[str, Any], kind: str) -> bool:
-    return (
+    # Serving adds engine/deferral fields to every structured receipt, so an
+    # exact {"kind", "enforced"} match failed every correct response.
+    receipt = (
         response.get("mlx2", {})
         .get("request_controls", {})
         .get("structured_output")
-        == {"kind": kind, "enforced": True}
+    )
+    return (
+        isinstance(receipt, dict)
+        and receipt.get("kind") == kind
+        and receipt.get("enforced") is True
     )
 
 
