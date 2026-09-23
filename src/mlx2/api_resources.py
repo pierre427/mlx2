@@ -745,6 +745,42 @@ class BatchManager:
             record["in_progress_at"] = int(time.time())
             self._persist(record)
         outputs, errors = [], []
+        # The output is one file under the store's per-file bound.  Bound it
+        # while rows run: once a result would not fit, later rows fail
+        # without running and the results that fit are still written.
+        output_limit = min(self.file_store.max_file_bytes, self.file_store.max_bytes)
+        output_bytes = 0
+        output_full = False
+
+        def keep_output(encoded):
+            nonlocal output_bytes, output_full
+            if output_full or output_bytes + len(encoded) + 1 > output_limit:
+                output_full = True
+                return False
+            output_bytes += len(encoded) + 1
+            outputs.append(encoded)
+            return True
+
+        def output_limit_error(custom_id, message):
+            errors.append(
+                json.dumps(
+                    {
+                        "id": "batch_req_" + uuid.uuid4().hex,
+                        "custom_id": custom_id,
+                        "response": None,
+                        "error": {
+                            "code": "output_limit_exceeded",
+                            "message": message
+                            + f" (the batch output file is bounded at {output_limit} bytes)",
+                        },
+                    },
+                    allow_nan=False,
+                ).encode()
+            )
+            with self._lock:
+                record["request_counts"]["failed"] += 1
+                self._persist(record)
+
         for raw in lines:
             with self._lock:
                 record = self._batches[key]
@@ -752,6 +788,16 @@ class BatchManager:
             if cancelled:
                 break
             custom_id = None
+            if output_full:
+                try:
+                    custom_id = json.loads(raw).get("custom_id")
+                except (ValueError, AttributeError):
+                    pass
+                output_limit_error(
+                    custom_id if isinstance(custom_id, str) else None,
+                    "row not run: the batch output is full",
+                )
+                continue
             try:
                 row = json.loads(raw)
                 if not isinstance(row, dict) or set(row) != {"custom_id", "method", "url", "body"}:
@@ -775,7 +821,11 @@ class BatchManager:
                     },
                     "error": None,
                 }
-                outputs.append(json.dumps(result, allow_nan=False).encode())
+                if not keep_output(json.dumps(result, allow_nan=False).encode()):
+                    output_limit_error(
+                        custom_id, "row result dropped: it would overflow the batch output"
+                    )
+                    continue
                 with self._lock:
                     record["request_counts"]["completed"] += 1
                     self._persist(record)
@@ -807,7 +857,12 @@ class BatchManager:
                         },
                         "error": None,
                     }
-                    outputs.append(json.dumps(result, allow_nan=False).encode())
+                    if not keep_output(json.dumps(result, allow_nan=False).encode()):
+                        output_limit_error(
+                            custom_id,
+                            "row result dropped: it would overflow the batch output",
+                        )
+                        continue
                 else:
                     result = {
                         "id": "batch_req_" + uuid.uuid4().hex,

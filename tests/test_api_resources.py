@@ -375,3 +375,72 @@ def test_batch_cancel_interrupts_an_overload_backoff():
     assert time.monotonic() - started < 2
     assert result["status"] == "cancelled"
     assert result["request_counts"] == {"total": 1, "completed": 0, "failed": 0}
+
+
+
+def test_batch_output_is_bounded_while_rows_run():
+    # A batch used to run every row and then lose all results to a
+    # storage_error when its one output file exceeded the per-file bound.
+    rows = [
+        {
+            "custom_id": f"row-{index}",
+            "method": "POST",
+            "url": "/v1/embeddings",
+            "body": {"input": str(index)},
+        }
+        for index in range(5)
+    ]
+    text = "x" * 2000
+    one_row = len(json.dumps({
+        "id": "batch_req_" + "0" * 32,
+        "custom_id": "row-0",
+        "response": {
+            "status_code": 200,
+            "request_id": "req_" + "0" * 32,
+            "body": {"text": text},
+        },
+        "error": None,
+    })) + 1
+    # Room for two results, not three.
+    files = FileStore(max_file_bytes=2 * one_row + one_row // 2)
+    source = files.create(
+        "tenant",
+        filename="requests.jsonl",
+        purpose="batch",
+        content_type="application/jsonl",
+        content=("\n".join(json.dumps(row) for row in rows) + "\n").encode(),
+    )
+    calls = []
+
+    def executor(endpoint, body, tenant):
+        calls.append(body["input"])
+        return 200, {"text": text}
+
+    manager = BatchManager(files, executor)
+    batch = manager.create(
+        "tenant",
+        {
+            "input_file_id": source["id"],
+            "endpoint": "/v1/embeddings",
+            "completion_window": "24h",
+        },
+    )
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        result = manager.get("tenant", batch["id"])
+        if result["status"] in {"completed", "failed"}:
+            break
+        time.sleep(0.01)
+    assert result["status"] == "completed"
+    assert result["errors"] is None
+    assert result["request_counts"] == {"total": 5, "completed": 2, "failed": 3}
+    # Only the row whose result overflowed ran past the bound.
+    assert calls == ["0", "1", "2"]
+    outputs = files.content("tenant", result["output_file_id"])[0].splitlines()
+    assert [json.loads(line)["custom_id"] for line in outputs] == ["row-0", "row-1"]
+    errors = [
+        json.loads(line)
+        for line in files.content("tenant", result["error_file_id"])[0].splitlines()
+    ]
+    assert [line["custom_id"] for line in errors] == ["row-2", "row-3", "row-4"]
+    assert {line["error"]["code"] for line in errors} == {"output_limit_exceeded"}
