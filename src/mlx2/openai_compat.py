@@ -147,13 +147,13 @@ def _responses_messages(
                 + (" with phase" if item_type == "message" else ""),
             )
         if item_type == "reasoning":
+            # ``content`` (null or reasoning_text parts) is accepted because
+            # this server's own reasoning output items carry it, so a plain
+            # ``input += response.output`` loop echoes it back.  It is never
+            # trusted: replay still requires the signed ``encrypted_content``.
             unknown = set(item) - {
-                "type", "id", "status", "summary", "encrypted_content"
+                "type", "id", "status", "summary", "encrypted_content", "content"
             }
-            if compat_on:
-                # Codex sends ``content`` (null or reasoning_text parts).  It is
-                # never trusted: replay still requires the signed payload.
-                unknown -= {"content"}
             if unknown:
                 raise ValueError("unsupported reasoning item fields")
             summary = item.get("summary", [])

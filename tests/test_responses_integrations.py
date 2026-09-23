@@ -261,3 +261,68 @@ def test_streaming_responses_preserve_requested_reasoning_logprobs_and_store_con
         server.shutdown()
         server.server_close()
         thread.join()
+
+
+class _Served:
+    """Serve one engine on an ephemeral port for the duration of a test."""
+
+    def __init__(self, engine, **kwargs):
+        self.engine = engine
+        self.kwargs = kwargs
+
+    def __enter__(self):
+        self.server = ThreadingHTTPServer(
+            ("127.0.0.1", 0), handler_for(self.engine, **self.kwargs)
+        )
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+        return f"http://127.0.0.1:{self.server.server_port}"
+
+    def __exit__(self, *_exc):
+        self.server.shutdown()
+        self.server.server_close()
+        self.thread.join()
+
+
+def test_reasoning_output_item_round_trips_and_its_content_is_never_trusted():
+    # The standard SDK loop is ``input += response.output``; this server's own
+    # reasoning items carry ``content``, so turn two must accept it.  Only the
+    # signed ``encrypted_content`` may reach the prompt: client-edited
+    # ``content`` must change nothing.
+    engine = ContinuationEngine()
+    with _Served(engine, response_store=ResponseStore()) as base:
+        with _post(base, {
+            "model": "fixture",
+            "input": "first",
+            "include": ["reasoning.encrypted_content"],
+        }) as response:
+            first = json.load(response)
+        reasoning = first["output"][0]
+        assert reasoning["type"] == "reasoning" and "content" in reasoning
+
+        def turn_two(output):
+            with _post(base, {
+                "model": "fixture",
+                "input": [
+                    {"role": "user", "content": "first"},
+                    *output,
+                    {"role": "user", "content": "second"},
+                ],
+            }) as response:
+                assert response.status == 200
+            return engine.requests[-1]["messages"]
+
+        echoed = turn_two(first["output"])
+        tampered_item = {
+            **reasoning,
+            "content": [{"type": "reasoning_text", "text": "INJECTED"}],
+        }
+        tampered = turn_two([tampered_item, *first["output"][1:]])
+        unsigned = turn_two(
+            [{k: v for k, v in tampered_item.items() if k != "encrypted_content"},
+             *first["output"][1:]]
+        )
+    assert echoed == tampered
+    assert echoed[1]["reasoning_content"] == "trusted thought"
+    assert "INJECTED" not in json.dumps(tampered + unsigned)
+    assert not any("reasoning_content" in message for message in unsigned)
