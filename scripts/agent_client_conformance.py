@@ -35,6 +35,7 @@ import json
 import os
 import re
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
@@ -488,6 +489,12 @@ def gpu_verdict(rows, agent_counts, clients, compat_mode, min_pass_rate=0.75):
             "failures": failures, "go": not failures}
 
 
+def port_in_use(port: int, host: str = "127.0.0.1") -> bool:
+    with socket.socket() as probe:
+        probe.settimeout(0.2)
+        return probe.connect_ex((host, int(port))) == 0
+
+
 def gpu(args) -> int:
     out = Path(args.out).resolve()
     port = args.port
@@ -509,6 +516,12 @@ def gpu(args) -> int:
             print("refusing to launch a model server without --i-own-the-gpu", file=sys.stderr)
             return 2
         return 0
+    # mlx2.server binds its port before loading the model, so on a collision
+    # the launched server exits at once while another session's server keeps
+    # answering on that port.  Refuse rather than measure a neighbour.
+    if port_in_use(port):
+        print(f"refusing launch: port {port} is already in use", file=sys.stderr)
+        return 2
     out.mkdir(parents=True, exist_ok=True)
     log = out / "requests.jsonl"
     env = {**os.environ, "PYTHONPATH": str(ROOT / "src")}
@@ -519,6 +532,10 @@ def gpu(args) -> int:
         deadline = time.time() + args.startup_timeout
         status = None
         while time.time() < deadline:
+            if server.poll() is not None:
+                print(f"server exited with {server.returncode} before readiness; "
+                      f"see {out / 'server.log'}", file=sys.stderr)
+                return 2
             try:
                 with urllib.request.urlopen(upstream + "/v1/status", timeout=5) as response:
                     status = json.load(response)
@@ -529,6 +546,12 @@ def gpu(args) -> int:
             time.sleep(5)
         if not status or not status.get("healthy"):
             print("server did not become healthy", file=sys.stderr)
+            return 2
+        expected_model = Path(args.model).name
+        if server.poll() is not None or status.get("model") != expected_model:
+            print(f"port {port} serves {status.get('model')!r}, not the launched "
+                  f"{expected_model!r} (launched server returncode "
+                  f"{server.poll()})", file=sys.stderr)
             return 2
         served = status["model"]
         catalog = codex_binary_catalog(served, out)
@@ -578,6 +601,11 @@ def gpu(args) -> int:
         verdict = {"mode": "gpu", "compat_mode": args.compat_mode, "model": served,
                    "server": server_cmd, "rows": rows, "agent_compat_counts": agent_counts,
                    **gpu_verdict(rows, agent_counts, args.clients, args.compat_mode)}
+        if server.poll() is not None:
+            verdict["failures"].append(
+                f"launched server exited with {server.returncode} during measurement"
+            )
+            verdict["go"] = False
         failures = verdict["failures"]
         (out / "summary.json").write_text(json.dumps(verdict, indent=2))
         print(json.dumps(verdict, indent=2))

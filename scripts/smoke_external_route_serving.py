@@ -23,6 +23,7 @@ import concurrent.futures
 import json
 import os
 import signal
+import socket
 import subprocess
 import sys
 import tempfile
@@ -156,6 +157,14 @@ def main(argv=None):
             print("refusing: Metal execution requires --i-own-the-gpu", file=sys.stderr)
             return 2
         return 0
+    # mlx2.server binds its port before loading, so a /health answer can come
+    # from another session's server while ours is still loading or dying on
+    # EADDRINUSE.  Refuse a busy port, and check identity once ready.
+    with socket.socket() as probe:
+        probe.settimeout(0.2)
+        if probe.connect_ex(("127.0.0.1", args.port)) == 0:
+            print(f"refusing launch: port {args.port} is already in use", file=sys.stderr)
+            return 2
     (workdir / "policy.json").write_text(json.dumps(policy))
     base = f"http://127.0.0.1:{args.port}"
     log = open(workdir / "server.log", "w")  # noqa: SIM115 - outlives the server process
@@ -179,6 +188,11 @@ def main(argv=None):
         result["startup_s"] = args.startup_timeout - (deadline - time.time())
         result["models"] = json.loads(_request(base + "/v1/models")[1])
         MODEL["id"] = result["models"]["data"][0]["id"]
+        if server.poll() is not None or MODEL["id"] != Path(args.model).name:
+            raise RuntimeError(
+                f"port {args.port} serves {MODEL['id']!r}, not the launched "
+                f"{Path(args.model).name!r} (launched server returncode {server.poll()})"
+            )
         steps = result["steps"]
         t0 = time.perf_counter()
         steps["nonstream"] = _chat(base, PROMPTS[0], args.max_tokens)

@@ -108,3 +108,152 @@ def test_gpu_verdict_applies_preregistered_criterion():
     assert not h.gpu_verdict(rows, no_claude, clients, "auto")["go"]
     # Detection is not required for the forced-on comparison arm.
     assert h.gpu_verdict(rows, no_claude, clients, "on")["go"]
+
+
+# --------------------------------------------------------------------------
+# GPU mode must measure the server it launched, never a neighbour's.
+# --------------------------------------------------------------------------
+
+import socket  # noqa: E402
+import threading  # noqa: E402
+import time  # noqa: E402
+import urllib.request  # noqa: E402
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer  # noqa: E402
+from types import SimpleNamespace  # noqa: E402
+
+
+def _fake_server(model, port=0):
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
+
+        def _send(self, payload):
+            data = json.dumps(payload).encode()
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+
+        def do_GET(self):
+            self._send({"healthy": True, "model": model,
+                        "counts": {"agent_compat_detected_codex": 1}})
+
+        def do_POST(self):
+            self.rfile.read(int(self.headers.get("content-length") or 0))
+            self._send({"usage": {"input_tokens_details": {"cached_tokens": 5}}})
+
+    server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server
+
+
+class _Launched:
+    """Stand-in for the launched ``mlx2.server`` process."""
+
+    def __init__(self, returncode=None, server=None):
+        self.returncode, self.server = returncode, server
+
+    def poll(self):
+        return self.returncode
+
+    def terminate(self):
+        if self.server is not None:
+            self.server.shutdown()
+            self.server.server_close()
+            self.server = None
+
+    def wait(self, timeout=None):
+        return 0
+
+    def kill(self):
+        self.terminate()
+
+
+def _patch_server_launch(h, monkeypatch, launch):
+    """Intercept only the ``mlx2.server`` launch; other subprocesses run."""
+    real = h.subprocess.Popen
+
+    def popen(command, *args, **kwargs):
+        if "mlx2.server" in command:
+            return launch(command)
+        return real(command, *args, **kwargs)
+
+    monkeypatch.setattr(h.subprocess, "Popen", popen)
+
+
+def _free_port():
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        return probe.getsockname()[1]
+
+
+def _gpu_args(tmp_path, port, startup_timeout=30):
+    return SimpleNamespace(
+        model="/models/INTENDED-MODEL", port=port, compat_mode="auto",
+        custom_tool_grammar="validate", server_arg=[], dry_run=False,
+        i_own_the_gpu=True, out=str(tmp_path / "out"), startup_timeout=startup_timeout,
+        clients=["codex"], repeats=1, timeout=5,
+    )
+
+
+def _stub_clients(h, monkeypatch):
+    def fake_codex(base_url, model, workspace, home, prompt, timeout, catalog):
+        for _ in range(2):
+            urllib.request.urlopen(urllib.request.Request(
+                base_url + "/v1/responses", data=b"{}", method="POST",
+                headers={"Content-Type": "application/json"}), timeout=5).read()
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(h, "codex_binary_catalog", lambda served, out: None)
+    monkeypatch.setattr(h, "run_codex", fake_codex)
+    monkeypatch.setattr(h, "run_claude", fake_codex)
+
+
+def test_gpu_mode_refuses_a_port_another_server_already_holds(tmp_path, monkeypatch):
+    # Regression: mlx2.server binds before loading, so on a collision the
+    # launched server died and the harness measured the other session's.
+    h = _harness()
+    _stub_clients(h, monkeypatch)
+    foreign = _fake_server("SOME-OTHER-SESSIONS-MODEL")
+    launched = []
+
+    def launch(command):
+        launched.append(command)
+        return _Launched(returncode=1)  # what EADDRINUSE does to mlx2.server
+
+    _patch_server_launch(h, monkeypatch, launch)
+    try:
+        rc = h.gpu(_gpu_args(tmp_path, foreign.server_port))
+    finally:
+        foreign.shutdown()
+        foreign.server_close()
+    assert rc == 2
+    assert launched == []
+    assert not (tmp_path / "out" / "summary.json").exists()
+
+
+def test_gpu_mode_stops_when_its_server_exits_before_readiness(tmp_path, monkeypatch):
+    h = _harness()
+    _patch_server_launch(h, monkeypatch, lambda command: _Launched(returncode=1))
+    started = time.monotonic()
+    assert h.gpu(_gpu_args(tmp_path, _free_port(), startup_timeout=30)) == 2
+    # It notices the exit instead of polling the port until the deadline.
+    assert time.monotonic() - started < 10
+
+
+@pytest.mark.parametrize("served", ["SOME-OTHER-MODEL", "INTENDED-MODEL"])
+def test_gpu_mode_measures_only_the_model_it_launched(tmp_path, monkeypatch, served):
+    h = _harness()
+    _stub_clients(h, monkeypatch)
+    port = _free_port()
+    _patch_server_launch(
+        h, monkeypatch, lambda command: _Launched(server=_fake_server(served, port))
+    )
+    rc = h.gpu(_gpu_args(tmp_path, port))
+    summary = tmp_path / "out" / "summary.json"
+    if served == "INTENDED-MODEL":
+        verdict = json.loads(summary.read_text())
+        assert verdict["model"] == "INTENDED-MODEL"
+        assert len(verdict["rows"]) == 2
+    else:
+        assert rc == 2 and not summary.exists()
