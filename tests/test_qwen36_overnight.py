@@ -24,10 +24,17 @@ def identity():
 def campaign(tmp_path, steps, **kwargs):
     root = tmp_path / "root"
     root.mkdir(exist_ok=True)
-    return module.Campaign(
+    run = module.Campaign(
         module.Config(root=root, run_dir=tmp_path / "run", heartbeat_seconds=0.02,
                       terminate_grace=0.2, **kwargs), steps, identity()
     )
+    # The health monitor latches a global stop on host swap growth over 2 GiB
+    # or non-nominal thermal state.  Read from the real machine, those made
+    # these tests fail whenever the host was busy; tests that exercise the
+    # latches set their own samples.
+    run.sample_swap_bytes = lambda: 0
+    run.sample_thermal = lambda: {"available": False}
+    return run
 
 
 def command(name, code, timeout=2):
@@ -471,3 +478,20 @@ def test_stop_cleans_proven_process_even_when_source_identity_drifted(tmp_path):
     assert result["stopped"] is True
     assert result["identity_drift"] is True
     assert process.returncode != 0
+
+
+def test_campaign_fixture_is_isolated_from_host_swap_and_thermal(tmp_path, monkeypatch):
+    # A busy host grew swap by more than 2 GiB during a preflight run and
+    # latched the monitor's global stop inside unrelated tests.
+    growth = iter(range(0, 1 << 40, 3 << 30))
+    monkeypatch.setattr(module.Campaign, "sample_swap_bytes", staticmethod(lambda: next(growth)))
+    monkeypatch.setattr(module.Campaign, "sample_thermal",
+                        lambda self: {"thermal_state": 2, "available": True})
+    marker = tmp_path / "survived"
+    steps = [module.Step("independent", "test", "independent",
+                         (command("write", f"import time; time.sleep(0.2); open({str(marker)!r}, 'w').write('yes')"),))]
+    run = campaign(tmp_path, steps)
+    run.run(resume=False)
+    state = json.loads(run.state_path.read_text())
+    assert state["steps"]["independent"]["status"] == "passed"
+    assert marker.read_text() == "yes"
