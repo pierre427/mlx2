@@ -3792,6 +3792,17 @@ class ServingEngine:
             )
             settings["execution_policy"] = dict(config)
             external_draft = config.get("backend") == "external_draft"
+            calibrated_depths = SelfMTPLaneAdmissionController.TRANSIENT_SCALE
+            if self.mtp and config.get("num_draft") not in calibrated_depths:
+                # Lane admission costs every self-MTP lane with the verify
+                # transient calibrated for its depth.  MLX2_MTP_DEPTH_CAP
+                # admits deeper drafts than were calibrated; serving one
+                # would refuse every request, so refuse the route instead.
+                raise ValueError(
+                    f"self-MTP num_draft {config.get('num_draft')} has no calibrated "
+                    "lane-admission verify transient; calibrated depths are 1 to "
+                    f"{max(calibrated_depths)}"
+                )
             if self.spomin_policy.enabled and external_draft:
                 raise ValueError(
                     "live Spomin surgery is incompatible with external draft"

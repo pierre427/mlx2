@@ -86,3 +86,48 @@ def test_no_adapter_keeps_a_private_copy_of_the_cap(module):
     assert "validate_self_mtp_num_draft" in source
     assert "num_draft must be 1, 2, or 3" not in source
     assert "num_draft <= 3" not in source
+
+
+@pytest.mark.parametrize("num_draft", [4, 5])
+def test_serving_refuses_at_startup_a_depth_lane_admission_cannot_cost(monkeypatch, num_draft):
+    """An opted-in depth past the calibrated verify transients fails the load.
+
+    Lane admission costs a self-MTP lane with ``TRANSIENT_SCALE[num_draft]``;
+    a depth it has no calibration for used to start the server and then
+    refuse every request with 400.
+    """
+    from mlx2 import memory, serving
+    from mlx2.runtime import os_memory
+    from mlx2.runtime.memory_policy import SelfMTPLaneAdmissionController
+    from test_apc_hits_hybrid_gdn_self_mtp import make_adapter, run, tiny_qwen38_mtp
+
+    monkeypatch.setattr(serving, "runtime_identity", lambda: {"source_sha256": "src"})
+    monkeypatch.setattr(memory, "execution_headroom", lambda: 100 * 2**30)
+    monkeypatch.setattr(os_memory, "physical_footprint_bytes", lambda: 0)
+    assert max(SelfMTPLaneAdmissionController.TRANSIENT_SCALE) == 4
+    depth = validate_self_mtp_num_draft(num_draft, environ={"MLX2_MTP_DEPTH_CAP": "8"})
+    model, vocab = tiny_qwen38_mtp()
+
+    class Adapter(make_adapter(model, vocab)):
+        def execution_config(self, *, max_lanes, prefill_step):
+            config = super().execution_config(max_lanes=max_lanes, prefill_step=prefill_step)
+            return {**config, "num_draft": depth}
+
+    engine = serving.ServingEngine(
+        "tiny", adapter_factory=Adapter, qualification_mode=True, mtp=True,
+        max_lanes=1, prefill_step=16,
+    )
+    try:
+        if num_draft == 4:
+            assert engine.ready.wait(60), engine.error
+            tokens, _receipt, _job = run(engine, range(1, 20), max_tokens=4)
+            assert len(tokens) == 4
+        else:
+            engine.thread.join(60)
+            assert not engine.ready.is_set()
+            assert engine.error == (
+                "ValueError: self-MTP num_draft 5 has no calibrated lane-admission "
+                "verify transient; calibrated depths are 1 to 4"
+            )
+    finally:
+        engine.close()
