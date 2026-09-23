@@ -17,7 +17,7 @@ from collections import OrderedDict
 import regex
 
 from .runtime.tool_parsers._schema import (
-    resolve_local_refs,
+    executable_schema,
     schema_value_matches,
     string_length_bounds,
 )
@@ -659,7 +659,7 @@ def compile_constraint(response_format=None, grammar=None, *, leading_whitespace
             raise ValueError("json_schema wrapper is invalid")
         if wrapper.get("strict", True) is not True or not isinstance(wrapper.get("schema"), dict):
             raise ValueError("json_schema requires strict:true and a schema object")
-        schema = resolve_local_refs(wrapper["schema"])
+        schema = executable_schema(wrapper["schema"])
         return _Constraint(
             regex.compile(lead + _schema_pattern(schema)),
             schema,

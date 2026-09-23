@@ -6,9 +6,9 @@ import uuid
 
 from ..output import StopSequenceMatcher, _safe_prefix, within_parallel_bound
 from ..runtime.tool_parsers._schema import (
+    executable_schema,
     raw_string_pattern,
     required_parameter_names,
-    resolve_local_refs,
     schema_value_matches,
 )
 
@@ -52,7 +52,7 @@ def parse_atem(text: str, tools: list[dict]) -> list[dict]:
         function = definitions[name]
         schema = function.get("parameters", {})
         if function.get("strict", False):
-            schema = resolve_local_refs(schema)
+            schema = executable_schema(schema)
         properties, arguments, end = schema.get("properties", {}), {}, 0
         for parameter in _PARAMETER.finditer(body):
             if body[end : parameter.start()].strip():
@@ -126,7 +126,7 @@ def constrained_tool_grammar(tools, tool_choice, *, parallel_tool_calls=True):
         if not re.fullmatch(r"[\w.-]+", name, re.ASCII):
             raise ValueError("tool name is not representable in ATEM")
         if function.get("strict", False):
-            schema = resolve_local_refs(function.get("parameters", {}))
+            schema = executable_schema(function.get("parameters", {}))
             properties = schema.get("properties", {})
             required = schema.get("required", [])
             ordered = [key for key in properties if key in required] + [

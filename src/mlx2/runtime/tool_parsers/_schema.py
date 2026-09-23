@@ -184,6 +184,44 @@ def resolve_local_refs(schema: Any) -> dict:
     return resolved
 
 
+def strip_annotations(schema: Any) -> Any:
+    """Copy ``schema`` without its annotation keywords.
+
+    ``title``, ``description``, ``examples``, ``default`` and the rest of
+    ``_ANNOTATION_KEYS`` never change which instances a schema accepts, but
+    Pydantic (and so the OpenAI SDK's ``.parse()``) puts ``title`` on the root
+    and on every property.  The bounded compilers reject every keyword they do
+    not implement, so they are handed the executable schema only; constraining
+    keywords they do not implement still fail closed.  The request keeps the
+    annotated schema for prompt rendering.
+
+    Traversal is schema-position aware, as in :func:`resolve_local_refs`: the
+    keys of ``properties`` and definition maps are user names, so a property
+    literally named ``title`` or ``description`` is kept, and ``enum``,
+    ``const`` and ``required`` values are copied verbatim.
+    """
+    if not isinstance(schema, dict):
+        return copy.deepcopy(schema)
+    result = {}
+    for key, item in schema.items():
+        if key in _ANNOTATION_KEYS:
+            continue
+        if key in _SCHEMA_MAP_KEYS and isinstance(item, dict):
+            result[key] = {name: strip_annotations(child) for name, child in item.items()}
+        elif key in _SCHEMA_LIST_KEYS and isinstance(item, list):
+            result[key] = [strip_annotations(child) for child in item]
+        elif key in _SCHEMA_VALUE_KEYS and isinstance(item, dict):
+            result[key] = strip_annotations(item)
+        else:
+            result[key] = copy.deepcopy(item)
+    return result
+
+
+def executable_schema(schema: Any) -> dict:
+    """The strict compilers' schema: local references inlined, annotations dropped."""
+    return strip_annotations(resolve_local_refs(schema))
+
+
 def infer_type_from_json_schema(schema: Any) -> Optional[str]:
     """Resolve a JSON-schema fragment to one concrete, non-null type name.
 

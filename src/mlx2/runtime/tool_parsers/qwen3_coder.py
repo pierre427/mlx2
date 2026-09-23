@@ -16,6 +16,7 @@ from typing import Any, Optional
 import regex as re
 
 from ._schema import (
+    executable_schema,
     infer_type_from_json_schema,
     raw_string_pattern,
     required_parameter_names,
@@ -46,7 +47,14 @@ def _get_arguments_config(func_name: str, tools: Optional[Any]) -> tuple[dict, b
             if not (params := function.get("parameters", False)):
                 return {}, bool(function.get("strict", False))
             try:
-                params = resolve_local_refs(params)
+                # Strict values are checked against the executable schema,
+                # which carries no annotation keywords; non-strict parsing
+                # reads only types and keeps the declared shape.
+                params = (
+                    executable_schema(params)
+                    if function.get("strict", False)
+                    else resolve_local_refs(params)
+                )
             except ValueError:
                 if function.get("strict", False):
                     raise
@@ -301,7 +309,7 @@ def _strict_parameter_body(function):
     """Canonical Qwen XML parameters constrained by a strict JSON schema."""
     from ...structured_output import _schema_pattern
 
-    schema = resolve_local_refs(function.get("parameters", {}))
+    schema = executable_schema(function.get("parameters", {}))
     def require_postcheck_schema(node):
         if not isinstance(node, dict):
             return

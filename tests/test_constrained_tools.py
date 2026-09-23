@@ -225,6 +225,55 @@ def test_raw_string_patterns_fail_closed_for_strict_tool_adapters():
         muse_grammar(tools, "required")
 
 
+def test_strict_tool_schemas_with_annotations_parse_and_constrain():
+    """Pydantic-style ``title``/``description`` annotations on a strict tool
+    used to make every well-formed call fail to parse and the forced grammar
+    raise; a property may itself be named ``title`` or ``description``."""
+    parameters = {
+        "title": "Args",
+        "type": "object",
+        "properties": {
+            "title": {"title": "Title", "type": "string", "description": "a name"},
+            "description": {"title": "Description", "type": "integer"},
+        },
+        "required": ["title", "description"],
+        "additionalProperties": False,
+    }
+    tools = [{"type": "function", "function": {
+        "name": "f", "strict": True, "parameters": parameters,
+    }}]
+    validate_request({
+        "messages": [{"role": "user", "content": "call"}],
+        "tools": tools,
+        "tool_choice": "required",
+    })
+    qwen_body = (
+        "<function=f>\n<parameter=title>\nParis\n</parameter>"
+        "\n<parameter=description>\n3\n</parameter>\n</function>"
+    )
+    assert parse_tool_call(qwen_body, tools)["arguments"] == {
+        "title": "Paris", "description": 3,
+    }
+    qwen = qwen_grammar(tools, "required", parallel_tool_calls=False)
+    assert _matches(qwen, f"<tool_call>\n{qwen_body}\n</tool_call>")
+    assert not _matches(qwen, f"<tool_call>\n{qwen_body.replace('3', 'x')}\n</tool_call>")
+    muse_body = (
+        '<atem:invoke name="f"><atem:parameter name="title">Paris</atem:parameter>'
+        '<atem:parameter name="description">3</atem:parameter></atem:invoke>'
+    )
+    assert parse_atem(muse_body, tools)[0]["arguments"] == {
+        "title": "Paris", "description": 3,
+    }
+    muse = muse_grammar(tools, "required", parallel_tool_calls=False)
+    assert _matches(muse, f"<atem:function_calls>{muse_body}</atem:function_calls>")
+    north = north_grammar(tools, "required", parallel_tool_calls=False)
+    assert _matches(
+        north,
+        '<|START_ACTION|>[{"tool_name":"f","parameters":'
+        '{"title":"Paris","description":3}}]<|END_ACTION|>',
+    )
+
+
 def test_qwen_strict_number_grammar_excludes_nonfinite_float_literals():
     tools = [{
         "type": "function",

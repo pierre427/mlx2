@@ -102,6 +102,87 @@ def test_ref_annotation_siblings_are_ignored_without_widening_constraints():
         resolve_local_refs({**schema, "maxLength": 3})
 
 
+def _annotated_city_schema():
+    """What Pydantic's ``model_json_schema()`` (the OpenAI SDK ``.parse()``)
+    sends: ``title`` on the root and every property, plus the other
+    annotation keywords.  Two properties are literally *named* ``title`` and
+    ``description``; those names are data, not keywords."""
+    return {
+        "title": "City",
+        "description": "a city",
+        "$comment": "generated",
+        "type": "object",
+        "properties": {
+            "title": {"title": "Title", "type": "string", "examples": ["Paris"]},
+            "description": {
+                "title": "Description",
+                "type": "integer",
+                "default": 3,
+                "deprecated": False,
+            },
+            "tags": {
+                "title": "Tags",
+                "type": "array",
+                "items": {"title": "Tag", "type": "string", "readOnly": True},
+                "writeOnly": False,
+            },
+        },
+        "required": ["title", "description"],
+        "additionalProperties": False,
+    }
+
+
+def test_annotation_keywords_are_accepted_and_do_not_change_the_language():
+    """Annotations never change which instances a schema accepts, yet every
+    one used to be refused with 400, so every Pydantic schema was."""
+    from mlx2.runtime.tool_parsers._schema import strip_annotations
+
+    schema = _annotated_city_schema()
+    response_format = {
+        "type": "json_schema",
+        "json_schema": {"name": "City", "strict": True, "schema": schema},
+    }
+    messages = [{"role": "user", "content": "x"}]
+    validate_request({"messages": messages, "response_format": response_format})
+    request = validate_request({
+        "messages": messages,
+        "tools": [{"type": "function", "function": {
+            "name": "f", "strict": True, "parameters": schema,
+        }}],
+    })
+    # The prompt still renders the annotated schema.
+    rendered = request["tools"][0]["function"]["parameters"]
+    assert rendered["properties"]["title"]["examples"] == ["Paris"]
+
+    stripped = strip_annotations(schema)
+    assert set(stripped["properties"]) == {"title", "description", "tags"}
+    assert stripped["required"] == ["title", "description"]
+    assert stripped["properties"]["description"] == {"type": "integer"}
+    constraint = compile_constraint(response_format)
+    assert constraint.pattern.pattern == compile_constraint({
+        "type": "json_schema",
+        "json_schema": {"strict": True, "schema": stripped},
+    }).pattern.pattern
+    assert accepts(constraint, '{"title":"Paris","description":3,"tags":["a"]}')
+    assert not accepts(constraint, '{"title":"Paris"}')
+    assert not accepts(constraint, '{"title":"Paris","description":"x"}')
+
+
+def test_constraining_keywords_beside_annotations_still_fail_closed():
+    schema = {
+        "title": "T",
+        "type": "object",
+        "properties": {"v": {"title": "V", "type": "string", "pattern": "^a$"}},
+        "required": ["v"],
+        "additionalProperties": False,
+    }
+    with pytest.raises(ValueError, match="unsupported JSON schema keywords: pattern"):
+        compile_constraint({
+            "type": "json_schema",
+            "json_schema": {"strict": True, "schema": schema},
+        })
+
+
 def test_regex_grammar_and_fail_closed_validation():
     constraint = compile_constraint(grammar=r"(?:yes|no)")
     assert accepts(constraint, "yes")

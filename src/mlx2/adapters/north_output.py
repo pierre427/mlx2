@@ -59,8 +59,8 @@ def constrained_tool_grammar(tools, tool_choice, *, parallel_tool_calls=True):
     import regex
 
     from ..runtime.tool_parsers._schema import (
+        executable_schema,
         required_parameter_names,
-        resolve_local_refs,
     )
     from ..structured_output import (
         _STRING,
@@ -81,7 +81,7 @@ def constrained_tool_grammar(tools, tool_choice, *, parallel_tool_calls=True):
     for function in functions:
         if function.get("strict", False):
             parameters = _schema_pattern(
-                resolve_local_refs(function.get("parameters", {}))
+                executable_schema(function.get("parameters", {}))
             )
         else:
             # Free values, but required keys must appear (sglang #40051).
