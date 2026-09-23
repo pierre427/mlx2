@@ -1,7 +1,9 @@
 import base64
 import inspect
 import json
+import struct
 import wave
+import zlib
 from io import BytesIO
 
 import numpy as np
@@ -183,6 +185,44 @@ def test_video_frame_bounds_hold_when_the_container_declares_no_size(
             source, kind="video", max_frames=8, max_frame_bytes=8 * 64 * 48 * 3 - 1
         )
     assert len(resolve_media(source, kind="video", max_frames=8).value) == 8
+
+
+def _png_header_only(width, height):
+    """A PNG whose header declares ``width`` x ``height`` but holds no pixels."""
+
+    def chunk(kind, data):
+        return (
+            struct.pack(">I", len(data))
+            + kind
+            + data
+            + struct.pack(">I", zlib.crc32(kind + data))
+        )
+
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 0, 0, 0, 0))
+        + chunk(b"IDAT", zlib.compress(b"\0" * 16))
+        + chunk(b"IEND", b"")
+    )
+
+
+def test_image_pixel_bound_is_enforced_from_the_header_before_decoding():
+    from PIL import Image
+
+    buffer = BytesIO()
+    Image.new("L", (4, 3), 0).save(buffer, "PNG")
+    image = decode_image(buffer.getvalue(), "image/png")
+    assert image.metadata == {"width": 4, "height": 3}
+    # The pixel data is missing, so only a header-time bound can answer
+    # "pixel bound"; decoding first would fail on the truncated stream.
+    with pytest.raises(ValueError, match="pixel bound"):
+        decode_image(_png_header_only(5000, 5000), "image/png")
+    # Past PIL's own decompression-bomb limit Image.open raises an Exception
+    # subclass that is neither OSError nor ValueError.
+    with pytest.raises(ValueError, match="pixel bound"):
+        decode_image(_png_header_only(14000, 14000), "image/png")
+    with pytest.raises(ValueError, match="minimum dimension"):
+        decode_image(_png_header_only(2, 2000), "image/png")
 
 
 def test_gemma3n_native_video_keeps_order_timestamps_and_cache_identity():

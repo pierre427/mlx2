@@ -52,15 +52,27 @@ def decode_image(payload, mime_type, *, max_pixels=16_000_000):
 
     try:
         image = Image.open(BytesIO(payload))
-        image.load()
+    except (Image.DecompressionBombError, Image.DecompressionBombWarning) as error:
+        # PIL's own bomb guard (past about 179M pixels) raises from
+        # Image.open as neither OSError nor ValueError; the warning is an
+        # exception only when warnings are promoted to errors.
+        raise ValueError("image exceeds the pixel bound") from error
     except (OSError, ValueError) as error:
         raise ValueError(f"failed to decode image: {error}") from error
-    image = ImageOps.exif_transpose(image).convert("RGB")
+    # Image.open reads only the header.  Check the declared size before
+    # load() and convert() allocate it: a ~100 KB PNG can declare 12000 x
+    # 12000 pixels and cost hundreds of MiB per request to reject.
     width, height = image.size
     if min(width, height) < 3:
         raise ValueError("image minimum dimension is 3 pixels")
     if width * height > max_pixels:
         raise ValueError("image exceeds the pixel bound")
+    try:
+        image.load()
+    except (OSError, ValueError) as error:
+        raise ValueError(f"failed to decode image: {error}") from error
+    image = ImageOps.exif_transpose(image).convert("RGB")
+    width, height = image.size
     return MediaValue(
         "image",
         mime_type,
