@@ -15,7 +15,11 @@ from typing import Any
 import mlx.core as mx
 
 from .committed_recovery import CommittedRecoverySlot
-from .cow_cache import snapshot_committed_cache, snapshot_prompt_cache_descriptors
+from .cow_cache import (
+    restore_recovery_descriptors,
+    snapshot_committed_cache,
+    snapshot_recovery_descriptors,
+)
 from .generate import (
     ALLOCATOR_RECLAIM_STEP_INTERVAL,
     GenerationBatch,
@@ -548,12 +552,15 @@ class PromptLookupBatchGenerator:
 
     @staticmethod
     def _snapshot_recovery_cache(cache):
-        snapshot, _sidecar, _receipt = snapshot_prompt_cache_descriptors(cache)
-        return snapshot
+        # Append-only KV planes keep only their fill level; an alias would
+        # make every append of the next round copy the whole buffer.
+        snapshot, _sidecar, borrowed = snapshot_recovery_descriptors(cache)
+        return snapshot, borrowed
 
     @staticmethod
-    def _restore_recovery_cache(snapshot):
-        restored, _sidecar, _receipt = snapshot_prompt_cache_descriptors(snapshot)
+    def _restore_recovery_cache(frozen):
+        snapshot, borrowed = frozen
+        restored, _sidecar = restore_recovery_descriptors(snapshot, None, borrowed)
         return restored
 
     def _arm_lane_speculation(self, lane):

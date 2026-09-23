@@ -3127,6 +3127,11 @@ class BatchQSAKVCache(_StepGrownIndexLedger, BatchKVCache):
 class QSAKVCache(_StepGrownIndexLedger, KVCache):
     """KV cache with the raw, pre-pooling indexer keys QSA also requires."""
 
+    _RECOVERY_APPEND_ONLY_FIELDS = KVCache._RECOVERY_APPEND_ONLY_FIELDS + (
+        ("_index_buffer", 1, "_index_width"),
+    )
+    _RECOVERY_DERIVED_FIELDS = ("_index_view",)
+
     _QSA_CYCLE_FIELDS = _QSA_CYCLE_STATE
     to_quantized = _qsa_to_quantized
 
@@ -3241,6 +3246,9 @@ def _check_qsa_quantization_boundary(cache, cursor: int):
 
 class QSAQuantizedKVCache(QSAKVCache):
     """Quantized attention K/V plus QSA's native raw index-key ledger."""
+
+    _RECOVERY_APPEND_ONLY_FIELDS = QSAKVCache._RECOVERY_APPEND_ONLY_FIELDS
+    _RECOVERY_DERIVED_FIELDS = QSAKVCache._RECOVERY_DERIVED_FIELDS
 
     _validate_config = QuantizedKVCache._validate_config
     _validate_state_geometry = QuantizedKVCache._validate_state_geometry

@@ -3029,3 +3029,317 @@ def test_tau_truncated_from_one_deep_run_matches_a_measured_shallow_run():
     assert _tau_from_hist(deep.verify_accept_hist, deepest) == (
         deep.draft_accepted + deep.cycles
     ) / deep.cycles
+
+
+def _tiny_hybrid_mtp_model():
+    from mlx2.runtime.models.qwen38_27b import Model, ModelArgs
+
+    text = dict(
+        model_type="qwen3_5", hidden_size=64, intermediate_size=64,
+        num_hidden_layers=4, num_attention_heads=4, num_key_value_heads=4,
+        head_dim=16, vocab_size=128, linear_num_key_heads=2,
+        linear_num_value_heads=4, linear_key_head_dim=8,
+        linear_value_head_dim=8, linear_conv_kernel_dim=3,
+        full_attention_interval=2, mtp_num_hidden_layers=1,
+        partial_rotary_factor=0.5, rope_parameters=None,
+        max_position_embeddings=8192,
+    )
+    mx.random.seed(7)
+    model = Model(ModelArgs(model_type="qwen3_5", text_config=text))
+    model.eval()
+    mx.eval(model.parameters())
+    return model
+
+
+def _greedy_segmented_lane(model, uid, prompt, max_tokens=4096):
+    from mlx2.runtime.hybrid_speculative import prepare_self_mtp_lane
+    from mlx2.runtime.sample_utils import LaneRNG
+
+    return prepare_self_mtp_lane(
+        mx.array(prompt, mx.uint32), model, uid=uid, max_tokens=max_tokens,
+        prompt_cache=None, mtp_state=None, lane_rng=LaneRNG(40 + uid),
+        num_draft=2, sampling_temp=0.0, sampling_top_p=1.0, sampling_top_k=0,
+        sampling_min_p=0.0, accept_rule="residual", logits_processors=[],
+        prefill_step_size=256, share_qsa_indices=False,
+    )
+
+
+def _segmented_cycle(model, state):
+    proposal = propose_batched_self_mtp(model, state)
+    commit_batched_self_mtp(
+        state,
+        proposal,
+        emitted_counts=[len(row) for row in proposal.outputs],
+        terminal=[False] * len(proposal.outputs),
+    )
+    return [[item.token for item in row] for row in proposal.outputs]
+
+
+class _AppendBytes:
+    """Allocator bytes each ``KVCache`` append needs, measured in isolation."""
+
+    def __init__(self):
+        from mlx2.runtime.models.cache import KVCache
+
+        self.cls = KVCache
+        self.real = KVCache.update_and_fetch
+        self.log = []
+
+    def __enter__(self):
+        real, log = self.real, self.log
+
+        def measured(cache, keys, values):
+            if cache.keys is not None:
+                mx.eval(cache.keys, cache.values)
+            mx.eval(keys, values)
+            active = mx.get_active_memory()
+            mx.reset_peak_memory()
+            out = real(cache, keys, values)
+            mx.eval(cache.keys, cache.values)
+            log.append(
+                (
+                    max(0, mx.get_peak_memory() - active),
+                    int(cache.keys.nbytes + cache.values.nbytes),
+                )
+            )
+            return out
+
+        self.cls.update_and_fetch = measured
+        return self
+
+    def __exit__(self, *exc):
+        self.cls.update_and_fetch = self.real
+
+
+def test_segmented_mtp_cycle_does_not_copy_kv_buffers(monkeypatch):
+    """X3-1: the per-cycle recovery checkpoint pinned every KV buffer.
+
+    ``_capture_segmented_recovery`` aliased each row's KV buffers for the
+    whole cycle, so MLX could not append in place and every verify and draft
+    append copied the full buffer of every attention layer: bytes per token
+    that grow with the context, on the default native-MTP route. The
+    checkpoint now keeps only the fill level of append-only KV planes.
+    """
+    model = _tiny_hybrid_mtp_model()
+    mx.random.seed(3)
+    prompt = mx.random.randint(1, 127, (1200,)).tolist()
+    detached, _first = _greedy_segmented_lane(model, 0, prompt)
+    state = attach_segmented_self_mtp_lanes(model, None, [detached])
+    _segmented_cycle(model, state)
+    with _AppendBytes() as appends:
+        for _ in range(6):
+            _segmented_cycle(model, state)
+    close_segmented_self_mtp_state(state)
+    copied = sorted(nbytes for (nbytes, _capacity) in appends.log)
+    capacity = min(capacity for (_nbytes, capacity) in appends.log)
+    assert len(copied) >= 12
+    # Growth by one 256-position step is the only copy an append may make.
+    assert copied[len(copied) // 2] < capacity // 8, (copied, capacity)
+
+
+def test_prompt_lookup_round_does_not_copy_kv_buffers():
+    """X3-1: the prompt-lookup route captures the same checkpoint per round."""
+    from mlx2.runtime import pld
+
+    model = _tiny_hybrid_mtp_model()
+    generator = pld.PromptLookupBatchGenerator(
+        model, prefill_step_size=512,
+        prompt_lookup={"num_draft": 2, "ngram_min": 2, "ngram_max": 2},
+    )
+    mx.random.seed(11)
+    prompt = mx.random.randint(1, 127, (1200,)).tolist()
+    generator.insert([prompt], max_tokens=[40], caches=[model.make_cache()])
+    try:
+        while generator.next()[0]:
+            pass  # prefill rounds
+        with _AppendBytes() as appends:
+            for _ in range(20):
+                _prompts, responses = generator.next()
+                if any(r.finish_reason for r in responses):
+                    break
+        captures = generator.scheduler_stats["pld_recovery_checkpoint_captures"]
+    finally:
+        generator.close()
+    assert captures > 10
+    copied = sorted(nbytes for (nbytes, _capacity) in appends.log)
+    capacity = min(capacity for (_nbytes, capacity) in appends.log)
+    assert len(copied) >= 10
+    assert copied[len(copied) // 2] < capacity // 8, (copied, capacity)
+
+
+def _greedy_reference(model, prompt, count):
+    cache = model.make_cache()
+    logits = model(mx.array([prompt]), cache=cache)
+    tokens = []
+    for _ in range(count):
+        token = int(mx.argmax(logits[0, -1]).item())
+        tokens.append(token)
+        logits = model(mx.array([[token]]), cache=cache)
+    return tokens
+
+
+def _row_state(pair):
+    """Every committed value of one row, with KV read only below its offset."""
+    from mlx2.runtime.models.cache import KVCache
+
+    values = []
+    for cache in list(pair.target) + list(pair.draft):
+        if type(cache) is KVCache:
+            values.append(("kv", cache.offset))
+            if cache.keys is not None:
+                values.append(mx.array(cache.keys[..., : cache.offset, :]))
+                values.append(mx.array(cache.values[..., : cache.offset, :]))
+        else:
+            values.append(("other", type(cache).__name__))
+            values.extend(mx.array(x) for x in _tree_arrays(cache.state))
+    mx.eval([v for v in values if isinstance(v, mx.array)])
+    return values
+
+
+def _assert_same_row_state(got, want):
+    assert len(got) == len(want)
+    for left, right in zip(got, want):
+        if isinstance(right, mx.array):
+            assert left.shape == right.shape and mx.array_equal(left, right).item()
+        else:
+            assert left == right
+
+
+@pytest.mark.parametrize("where", ["abort", "draft_failure"])
+def test_segmented_recovery_restores_exact_row_and_greedy_continues(where):
+    """X3-1: restoring a checkpoint that borrowed the live KV buffers.
+
+    The checkpoint no longer holds the KV buffers, so a restore takes them
+    back from the live caches at the captured fill level. After an aborted
+    proposal, and after a failure midway through one (the verify appended,
+    the draft did not finish), the row must equal its pre-cycle state and
+    the lane must go on to emit exactly ordinary greedy decode.
+    """
+    model = _tiny_hybrid_mtp_model()
+    mx.random.seed(5)
+    prompt = mx.random.randint(1, 127, (40,)).tolist()
+    detached, first = _greedy_segmented_lane(model, 0, prompt)
+    state = attach_segmented_self_mtp_lanes(model, None, [detached])
+    tokens = [first.token]
+    for _ in range(3):
+        tokens.extend(_segmented_cycle(model, state)[0])
+    before = _row_state(state.row_caches[0])
+    cur = state.lanes[0].cur
+    if where == "abort":
+        proposal = propose_batched_self_mtp(model, state)
+        abort_batched_self_mtp(state, proposal, cause=RuntimeError("client gone"))
+    else:
+        from mlx2.runtime import hybrid_speculative as hs
+
+        real = hs._trim_self_mtp_cache_group
+        calls = []
+
+        def fail_after_verify(caches, counts, *, validate):
+            calls.append(list(counts))
+            raise RuntimeError("synthetic failure after the verify appended")
+
+        with patch.object(hs, "_trim_self_mtp_cache_group", fail_after_verify):
+            with pytest.raises(RuntimeError, match="synthetic failure"):
+                propose_batched_self_mtp(model, state)
+        assert calls, "the failure must land after the verify forward"
+        assert real is hs._trim_self_mtp_cache_group
+    assert state.poisoned is False
+    _assert_same_row_state(_row_state(state.row_caches[0]), before)
+    assert state.lanes[0].cur == cur
+    while len(tokens) < 30:
+        tokens.extend(_segmented_cycle(model, state)[0])
+    close_segmented_self_mtp_state(state)
+    assert tokens[:30] == _greedy_reference(model, prompt, 30)
+
+
+def test_recovery_restore_refuses_a_live_cache_left_below_its_level():
+    """A live KV cache holding fewer positions than captured fails closed."""
+    from mlx2.runtime.cow_cache import (
+        COWCacheError,
+        restore_recovery_descriptors,
+        snapshot_recovery_descriptors,
+    )
+    from mlx2.runtime.models.cache import KVCache
+
+    live = KVCache()
+    live.update_and_fetch(mx.ones((1, 2, 6, 4)), mx.ones((1, 2, 6, 4)))
+    snapshot, _sidecar, borrowed = snapshot_recovery_descriptors([live])
+    assert snapshot[0].keys is None and snapshot[0].offset == 6
+    live.update_and_fetch(mx.zeros((1, 2, 3, 4)), mx.zeros((1, 2, 3, 4)))
+    (restored,), _ = restore_recovery_descriptors(snapshot, None, borrowed)
+    assert restored.offset == 6
+    assert mx.array_equal(restored.keys_and_values()[0], mx.ones((1, 2, 6, 4))).item()
+    live.trim(5)
+    live.update_and_fetch(mx.zeros((1, 2, 1, 4)), mx.zeros((1, 2, 1, 4)))
+    with pytest.raises(COWCacheError, match="captured 6 positions"):
+        restore_recovery_descriptors(snapshot, None, borrowed)
+
+
+def test_segmented_cycles_never_rewind_a_borrowed_plane_below_its_level(
+    monkeypatch,
+):
+    """The invariant a borrowed recovery plane rests on, on real cycles.
+
+    A restore reads the live KV buffers below the captured fill level, so
+    nothing between the capture and the commit may rewind a row's KV below
+    its committed boundary and write there. Ragged sampled acceptance over
+    two rows exercises every trim a cycle makes.
+    """
+    from mlx2.runtime import hybrid_speculative as hs
+    from mlx2.runtime.hybrid_speculative import prepare_self_mtp_lane
+    from mlx2.runtime.models.cache import KVCache
+    from mlx2.runtime.sample_utils import LaneRNG
+
+    armed = {}
+    breaches = []
+    checked = []
+    real_capture = hs._capture_segmented_recovery
+    real_trim = KVCache.trim
+
+    def capture(batch):
+        real_capture(batch)
+        armed.clear()
+        for pair in batch.row_caches:
+            for cache in list(pair.target) + list(pair.draft):
+                if type(cache) is KVCache:
+                    armed[id(cache)] = cache.offset
+
+    def trim(cache, n):
+        applied = real_trim(cache, n)
+        level = armed.get(id(cache))
+        if level is not None:
+            checked.append(level)
+            if cache.offset < level:
+                breaches.append((cache.offset, level))
+        return applied
+
+    monkeypatch.setattr(hs, "_capture_segmented_recovery", capture)
+    monkeypatch.setattr(KVCache, "trim", trim)
+    model = _tiny_hybrid_mtp_model()
+    lanes = [
+        prepare_self_mtp_lane(
+            mx.array(prompt, mx.uint32), model, uid=uid, max_tokens=4096,
+            prompt_cache=None, mtp_state=None, lane_rng=LaneRNG(60 + uid),
+            num_draft=3, sampling_temp=1.0, sampling_top_p=1.0,
+            sampling_top_k=0, sampling_min_p=0.0, accept_rule="residual",
+            logits_processors=[], prefill_step_size=64,
+            share_qsa_indices=False,
+        )[0]
+        for uid, prompt in enumerate(([3, 9, 27, 81, 5], [7, 1, 4, 1, 5, 9, 2]))
+    ]
+    state = attach_segmented_self_mtp_lanes(model, None, lanes)
+    rejected = 0
+    for _ in range(25):
+        proposal = propose_batched_self_mtp(model, state)
+        rejected += sum(1 for drop in proposal.target_drops if drop)
+        commit_batched_self_mtp(
+            state,
+            proposal,
+            emitted_counts=[len(row) for row in proposal.outputs],
+            terminal=[False] * len(proposal.outputs),
+        )
+        armed.clear()
+    close_segmented_self_mtp_state(state)
+    assert rejected > 0, "the cycles must exercise rejected-draft trims"
+    assert checked, "trims must run while a checkpoint is armed"
+    assert breaches == []

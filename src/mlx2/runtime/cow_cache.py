@@ -1508,6 +1508,160 @@ def snapshot_prompt_cache_descriptors(
     )
 
 
+def _append_only_fields(cache: Any) -> tuple:
+    """The in-place-appended buffers the cache's exact type declares.
+
+    Only a class that names them in its own body qualifies, so a subclass
+    that writes its buffers some other way is never treated as append-only
+    by inheritance.
+    """
+    return type(cache).__dict__.get("_RECOVERY_APPEND_ONLY_FIELDS", ())
+
+
+def _buffer_leaves(value: Any) -> tuple:
+    return tuple(value) if isinstance(value, (tuple, list)) else (value,)
+
+
+def _buffer_geometry(value: Any, axis: int) -> tuple:
+    """Each leaf's shape without the sequence axis, and its dtype."""
+    return tuple(
+        (
+            tuple(size for i, size in enumerate(leaf.shape) if i != axis % leaf.ndim),
+            str(leaf.dtype),
+        )
+        for leaf in _buffer_leaves(value)
+    )
+
+
+@dataclass(frozen=True)
+class _BorrowedRecoveryPlane:
+    """A live append-only cache whose buffers a recovery restore borrows."""
+
+    live: Any
+    clone: Any
+    # (field, sequence axis, fill-level attribute, fill level, geometry)
+    fields: tuple
+    derived: tuple
+
+
+def snapshot_recovery_descriptors(
+    prompt_cache: Iterable[Any],
+    sidecar: Any = None,
+    *,
+    memo: Optional[dict[int, Any]] = None,
+) -> tuple[list[Any], Any, tuple]:
+    """Capture a request-private recovery point without pinning KV buffers.
+
+    ``snapshot_prompt_cache_descriptors`` aliases every MLX buffer. A live
+    KV cache then appends into a buffer the alias still reads, which MLX
+    cannot do in place, so every append until the checkpoint is dropped
+    copies the whole buffer: bytes per token that grow with the context, on
+    every decode cycle that captures a checkpoint first. A cache whose type
+    declares ``_RECOVERY_APPEND_ONLY_FIELDS`` only ever writes those buffers
+    at or past its fill level, so this snapshot keeps just the fill level
+    for them and returns the live objects to borrow from on restore; the
+    prefix below the level is still exactly the captured one then. Any
+    other buffer (recurrent state replaced wholesale, a rotating window that
+    overwrites old positions) keeps its descriptor alias.
+    """
+    memo = {} if memo is None else memo
+    prompt_cache = list(prompt_cache)
+    snapshot, snapshot_sidecar, _receipt = snapshot_prompt_cache_descriptors(
+        prompt_cache, sidecar, memo=memo
+    )
+    roots = [prompt_cache]
+    if isinstance(sidecar, (list, tuple)):
+        roots.append(sidecar)
+    borrowed = []
+    seen = set()
+    for live in _iter_cache_objects(roots):
+        fields = _append_only_fields(live)
+        clone = memo.get(id(live))
+        if not fields or clone is None or clone is live or id(live) in seen:
+            continue
+        seen.add(id(live))
+        record = []
+        for name, axis, level_name in fields:
+            value = getattr(live, name, None)
+            if value is None:
+                continue
+            record.append(
+                (
+                    name,
+                    axis,
+                    level_name,
+                    int(getattr(live, level_name)),
+                    _buffer_geometry(value, axis),
+                )
+            )
+            setattr(clone, name, None)
+        derived = type(live).__dict__.get("_RECOVERY_DERIVED_FIELDS", ())
+        for name in derived:
+            setattr(clone, name, None)
+        if record:
+            borrowed.append(
+                _BorrowedRecoveryPlane(live, clone, tuple(record), tuple(derived))
+            )
+    return snapshot, snapshot_sidecar, tuple(borrowed)
+
+
+def restore_recovery_descriptors(
+    snapshot: Iterable[Any],
+    sidecar: Any,
+    borrowed: tuple,
+    *,
+    memo: Optional[dict[int, Any]] = None,
+) -> tuple[list[Any], Any]:
+    """Rebuild a recovery point captured by ``snapshot_recovery_descriptors``.
+
+    Borrowed buffers are re-read from the live caches the checkpoint named,
+    as fresh descriptor aliases, after checking that each live cache still
+    holds at least the captured fill level in the captured geometry. Anything
+    else means the live prefix can no longer be proven to be the captured
+    one, and the restore is refused rather than served.
+    """
+    memo = {} if memo is None else memo
+    restored, restored_sidecar, _receipt = snapshot_prompt_cache_descriptors(
+        snapshot, sidecar, memo=memo
+    )
+    pending = []
+    for plane in borrowed:
+        target = memo.get(id(plane.clone))
+        if target is None:
+            raise COWCacheError("a recovery restore lost a borrowed cache plane")
+        who = type(plane.live).__name__
+        for name, axis, level_name, level, geometry in plane.fields:
+            value = getattr(plane.live, name, None)
+            current = getattr(plane.live, level_name, None)
+            if (
+                value is None
+                or not isinstance(current, int)
+                or current < level
+                or _buffer_geometry(value, axis) != geometry
+                or any(leaf.shape[axis] < level for leaf in _buffer_leaves(value))
+            ):
+                raise COWCacheError(
+                    f"{who}.{name} no longer holds its captured {level} positions; the recovery point cannot be restored exactly"
+                )
+            alias = tuple(mx.stop_gradient(leaf) for leaf in _buffer_leaves(value))
+            pending.extend(alias)
+            setattr(
+                target, name, alias if isinstance(value, (tuple, list)) else alias[0]
+            )
+        for name in plane.derived:
+            setattr(target, name, None)
+    if pending:
+        # Surface a live buffer whose graph cannot be evaluated here, where
+        # the caller can still fail closed, not at the next forward.
+        try:
+            mx.eval(pending)
+        except Exception as error:
+            raise COWCacheError(
+                "a borrowed recovery buffer could not be evaluated"
+            ) from error
+    return restored, restored_sidecar
+
+
 def snapshot_committed_cache(
     prompt_cache: Iterable[Any], sidecar: Any = None, *, enabled: Optional[bool] = None
 ) -> tuple[list[Any], Any, str]:

@@ -9,7 +9,12 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, Union
 import mlx.core as mx
 import mlx.nn as nn
 from .committed_recovery import CommittedRecoverySlot
-from .cow_cache import mtp_boundary_cow_enabled, snapshot_prompt_cache_descriptors
+from .cow_cache import (
+    mtp_boundary_cow_enabled,
+    restore_recovery_descriptors,
+    snapshot_prompt_cache_descriptors,
+    snapshot_recovery_descriptors,
+)
 import numpy as np
 from .generate import generation_stream
 from .models.cache import (
@@ -1463,7 +1468,9 @@ _MTP_LANE_ARRAY_FIELDS = frozenset({"seed_h", "pending_hs", "token_prefix"})
 def _snapshot_segmented_recovery_row(value, memo=None):
     """Freeze one committed MTP row without rewinding its random stream."""
     lane, pair = value
-    target, draft, _receipt = snapshot_prompt_cache_descriptors(
+    # Append-only KV planes keep only their fill level: an alias of a buffer
+    # the cycle then appends to would copy that whole buffer every append.
+    target, draft, borrowed = snapshot_recovery_descriptors(
         pair.target, pair.draft, memo=memo
     )
     lane_fields = {}
@@ -1473,7 +1480,7 @@ def _snapshot_segmented_recovery_row(value, memo=None):
         lane_fields[name] = (
             current if name in _MTP_LANE_ARRAY_FIELDS else copy.deepcopy(current)
         )
-    return lane_fields, target, draft
+    return lane_fields, target, draft, borrowed
 
 
 def _frozen_segmented_recovery_row(snapshot):
@@ -1482,9 +1489,9 @@ def _frozen_segmented_recovery_row(snapshot):
 
 
 def _restore_segmented_recovery_row(snapshot, memo=None):
-    lane_fields, target, draft = snapshot
-    restored_target, restored_draft, _receipt = snapshot_prompt_cache_descriptors(
-        target, draft, memo=memo
+    lane_fields, target, draft, borrowed = snapshot
+    restored_target, restored_draft = restore_recovery_descriptors(
+        target, draft, borrowed, memo=memo
     )
     restored_fields = {}
     for name, current in lane_fields.items():

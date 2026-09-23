@@ -783,6 +783,7 @@ def _empty_quantized(B, n_kv_heads, n_steps, head_dim, group_size, bits, dtype):
 
 class QuantizedKVCache(_BaseCache):
     step = 256
+    _RECOVERY_APPEND_ONLY_FIELDS = (("keys", -2, "offset"), ("values", -2, "offset"))
     _supported_bits = {2, 3, 4, 5, 6, 8}
     _supported_group_sizes = {32, 64, 128}
 
@@ -1002,6 +1003,9 @@ class QuantizedKVCache(_BaseCache):
 
 class KVCache(_BaseCache):
     step = 256
+    # Buffers written only at or past ``offset``: a recovery checkpoint keeps
+    # the fill level instead of an alias that would force a copy per append.
+    _RECOVERY_APPEND_ONLY_FIELDS = (("keys", -2, "offset"), ("values", -2, "offset"))
 
     def __init__(self):
         self.keys = None
