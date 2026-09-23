@@ -93,6 +93,26 @@ class HyperDirectoryTests(unittest.TestCase):
         self.assertTrue(self.directory.delete_session(a))
         self.assertNotIn("memory", self.directory.resolve(a).handles)
 
+    def test_delete_keeps_session_revisions_monotonic(self):
+        capsule = self.capsule("session-payload")
+        context = DirectoryContext(model="qwen", tenant="a", session="s")
+        self.directory.update(
+            Scope.SESSION, context, expected_revision=0, handles={"memory": capsule.digest}
+        )
+        self.assertTrue(self.directory.delete_session(context))
+        resolved = self.directory.resolve(context)
+        self.assertEqual(resolved.layers[-1]["revision"], 2)
+        self.assertEqual(resolved.handles, {})
+        # A writer that last saw the empty session at revision 0 is stale.
+        with self.assertRaisesRegex(ValueError, "revision conflict"):
+            self.directory.update(
+                Scope.SESSION, context, expected_revision=0, handles={"memory": capsule.digest}
+            )
+        self.assertFalse(self.directory.delete_session(context))
+        layer = self.directory.update(Scope.SESSION, context, expected_revision=2)
+        self.assertEqual(layer["revision"], 3)
+        self.assertNotIn("deleted", layer)
+
     def test_scope_names_with_separator_do_not_collide(self):
         a = DirectoryContext(model="m--t", tenant="u", session="s")
         b = DirectoryContext(model="m", tenant="t--u", session="s")

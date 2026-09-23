@@ -158,6 +158,9 @@ class HyperDirectory:
                     f"found {current['revision']}"
                 )
             next_value = json.loads(json.dumps(current))
+            # Publishing into a deleted session starts it afresh; the
+            # revision keeps counting from the tombstone.
+            next_value.pop("deleted", None)
             for name, digest in (handles or {}).items():
                 name = _validate_name(name)
                 self.capsules.get(digest)
@@ -175,20 +178,22 @@ class HyperDirectory:
                     validated.append(item)
                 next_value["relationships"] = validated
             next_value["revision"] += 1
-            path = self._path(scope, key)
-            fd, temporary = tempfile.mkstemp(prefix=".directory-", suffix=".tmp", dir=self.root)
-            try:
-                os.fchmod(fd, 0o600)
-                with os.fdopen(fd, "wb") as stream:
-                    stream.write(canonical_json(next_value) + b"\n")
-                    stream.flush()
-                    os.fsync(stream.fileno())
-                os.replace(temporary, path)
-                os.chmod(path, 0o600)
-            finally:
-                if os.path.exists(temporary):
-                    os.unlink(temporary)
+            self._write(self._path(scope, key), next_value)
             return next_value
+
+    def _write(self, path: Path, value: Mapping[str, Any]) -> None:
+        fd, temporary = tempfile.mkstemp(prefix=".directory-", suffix=".tmp", dir=self.root)
+        try:
+            os.fchmod(fd, 0o600)
+            with os.fdopen(fd, "wb") as stream:
+                stream.write(canonical_json(value) + b"\n")
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, path)
+            os.chmod(path, 0o600)
+        finally:
+            if os.path.exists(temporary):
+                os.unlink(temporary)
 
     def resolve(self, context: DirectoryContext) -> ResolvedDirectory:
         layers = []
@@ -231,10 +236,9 @@ class HyperDirectory:
     def delete_session(self, context: DirectoryContext) -> bool:
         key = context.key_for(Scope.SESSION)
         with self._lock:
-            # Validate the layer before unlinking either current or legacy path.
-            if self._read_path(Scope.SESSION, key).exists():
-                self._read(Scope.SESSION, key)
-            removed = False
+            # Validate the layer before touching either current or legacy path.
+            current = self._read(Scope.SESSION, key)
+            owned = []
             for path in (self._path(Scope.SESSION, key), self._legacy_path(Scope.SESSION, key)):
                 if not path.exists():
                     continue
@@ -250,9 +254,22 @@ class HyperDirectory:
                     continue
                 if value.get("scope") != Scope.SESSION.value or value.get("key") != list(key):
                     raise ValueError("invalid hyper directory layer")
-                path.unlink()
-                removed = True
-            return removed
+                owned.append(path)
+            if not owned or current.get("deleted"):
+                return False
+            # Replace the layer with an empty tombstone one revision later
+            # instead of unlinking it. Unlinking reset the revision to 0, so a
+            # request prepared before the delete at an earlier revision could
+            # pass the commit CAS again and write memory into the deleted
+            # session.
+            tombstone = self._empty(Scope.SESSION, key)
+            tombstone["revision"] = current["revision"] + 1
+            tombstone["deleted"] = True
+            self._write(self._path(Scope.SESSION, key), tombstone)
+            legacy = self._legacy_path(Scope.SESSION, key)
+            if legacy in owned:
+                legacy.unlink()
+            return True
 
 
 __all__ = [

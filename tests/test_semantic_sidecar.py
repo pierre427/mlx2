@@ -108,6 +108,44 @@ class SemanticSidecarTests(unittest.TestCase):
         self.assertRegex(prepared["_mlx2_semantic_fingerprint"], r"^[0-9a-f]{64}$")
         self.assertFalse(self.sidecar.delete_session("alice", "s"))
 
+    def test_request_prepared_before_delete_cannot_commit_after_it(self):
+        def body(text):
+            return {"session_id": "s1", "messages": [{"role": "user", "content": text}]}
+
+        _, in_flight = self.sidecar.prepare(
+            body("Remember that my pin is 4242."),
+            tenant_id="alice",
+            authenticated_tenant=True,
+        )
+        _, other = self.sidecar.prepare(
+            body("Remember that the colour is blue."),
+            tenant_id="alice",
+            authenticated_tenant=True,
+        )
+        self.assertTrue(self.sidecar.complete(other, "ok")["committed"])
+        self.assertTrue(self.sidecar.delete_session("alice", "s1"))
+        self.assertFalse(self.sidecar.delete_session("alice", "s1"))
+        # The in-flight request was prepared at the pre-delete revision; the
+        # delete must invalidate it rather than let it resurrect the session.
+        stale = self.sidecar.complete(in_flight, "ok")
+        self.assertFalse(stale["committed"])
+        prepared, state = self.sidecar.prepare(
+            body("Remember that my colour pin is 7."),
+            tenant_id="alice",
+            authenticated_tenant=True,
+        )
+        self.assertEqual(prepared["messages"][0]["role"], "user")
+        self.assertEqual(state.retrieved_concepts, 0)
+        fresh = self.sidecar.complete(state, "ok")
+        self.assertTrue(fresh["committed"])
+        self.assertGreater(fresh["revision"], state.directory_revision)
+        context = self.sidecar._context("alice", "s1")
+        recalled = self.sidecar.memory.retrieve(context, "my pin 4242 colour blue")
+        labels = {concept["label"] for concept in recalled.concepts}
+        self.assertNotIn("4242", labels)
+        self.assertNotIn("blue", labels)
+        self.assertIn("7", labels)
+
     def test_classifier_scores_travel_through_serving_job(self):
         events = queue.Queue()
         events.put(
