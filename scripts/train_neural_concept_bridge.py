@@ -13,7 +13,12 @@ from pathlib import Path
 import numpy as np
 
 from mlx2.adapters.qwen35_9b import inspect_artifact
-from mlx2.runtime.concept_micro_world import generate_micro_world, split_micro_world
+from mlx2.runtime.concept_micro_world import (
+    MAX_EPISODES,
+    MIN_EPISODES,
+    generate_micro_world,
+    split_micro_world,
+)
 from mlx2.runtime.neural_concepts import NEURAL_CONCEPT_SCHEMA, label_features
 from mlx2.runtime.semantic_memory import RELATIONS
 
@@ -182,6 +187,9 @@ def main():
     parser.add_argument("--learning-rate", type=float, default=2e-3)
     parser.add_argument("--output-gate-logit", type=float, default=-1.4)
     args = parser.parse_args()
+    # Reject a count the micro-world cannot supply before loading the model.
+    if not MIN_EPISODES <= args.episodes <= MAX_EPISODES:
+        parser.error(f"--episodes must be in {MIN_EPISODES}..{MAX_EPISODES}")
 
     import torch
     from torch.nn import functional

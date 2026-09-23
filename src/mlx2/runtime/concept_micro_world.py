@@ -50,14 +50,29 @@ MARKERS = (
 )
 
 
+MIN_EPISODES = 12
+# Every episode field is a function of the subject (index modulo the subject
+# count) and of index modulo small periods that divide it, so episode
+# i + len(subjects) repeats episode i. Past this many episodes a held-out
+# split would contain copies of training rows.
+MAX_EPISODES = len(PREFIXES) * len(SUFFIXES)
+
+
 def _identifier(seed: int, index: int, subject: str, object_: str) -> str:
     payload = f"{seed}:{index}:{subject}:{object_}".encode()
     return hashlib.sha256(payload).hexdigest()[:16]
 
 
 def generate_micro_world(*, seed: int, count: int = 200) -> tuple[ConceptEpisode, ...]:
-    if type(seed) is not int or type(count) is not int or not 12 <= count <= 2000:
-        raise ValueError("micro-world requires an integer seed and 12..2000 episodes")
+    if (
+        type(seed) is not int
+        or type(count) is not int
+        or not MIN_EPISODES <= count <= MAX_EPISODES
+    ):
+        raise ValueError(
+            "micro-world requires an integer seed and "
+            f"{MIN_EPISODES}..{MAX_EPISODES} distinct episodes"
+        )
     rng = random.Random(seed)
     subjects = [f"{prefix} {suffix}" for prefix in PREFIXES for suffix in SUFFIXES]
     rng.shuffle(subjects)
@@ -115,7 +130,9 @@ def split_micro_world(
 
 
 __all__ = [
+    "MAX_EPISODES",
     "MICRO_WORLD_SCHEMA",
+    "MIN_EPISODES",
     "ConceptEpisode",
     "generate_micro_world",
     "split_micro_world",
