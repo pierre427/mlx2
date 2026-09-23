@@ -546,6 +546,33 @@ def test_atlas_checkpoints_merge_each_observation_once(tmp_path):
     assert closed.counts.tolist() == second.counts.tolist()
 
 
+def test_atlas_checkpoint_after_sink_loss_rewrites_every_observation(tmp_path):
+    # A checkpoint merges only what is new since the last one, which is
+    # right only while the sink still holds the earlier ones. After the sink
+    # is removed or rotated away, the next checkpoint recreated it from the
+    # last interval alone although the collector still held all 20.
+    sink = tmp_path / "weight_atlas.json"
+    collector = expert_atlas.AtlasCollector(None, sink=sink, checkpoint_every=10)
+    collector.bind(num_layers=1, num_units=4)
+    for _ in range(10):
+        collector.observe(0, [0])
+    assert expert_atlas.load_atlas(sink).counts.tolist() == [[10, 0, 0, 0]]
+    for path in expert_atlas._paths(sink):
+        path.unlink()
+    for _ in range(10):
+        collector.observe(0, [1])
+    recreated = expert_atlas.load_atlas(sink)
+    assert recreated.total_observations == 20
+    assert recreated.counts.tolist() == [[10, 10, 0, 0]]
+    # With the sink back, the next checkpoint merges only the new interval.
+    for _ in range(10):
+        collector.observe(0, [2])
+    third = expert_atlas.load_atlas(sink)
+    assert third.total_observations == 30
+    assert int(third.counts[0][2]) == 10
+    assert int(third.counts[0][1]) <= 10
+
+
 def test_counterfactual_reports_what_pinning_would_have_done(tmp_path):
     trace = tmp_path / "trace.bin"
     layers = 2

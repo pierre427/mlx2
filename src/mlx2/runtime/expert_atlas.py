@@ -159,14 +159,25 @@ class AtlasCollector:
         """Merge into the persisted atlas and rewrite it atomically."""
         if self.sink is None or self.counts is None:
             return None
+        import numpy as np
+
         prior = load_atlas(
             self.sink, expect_digest=self._digest(), geometry=self.counts.shape
         )
         snapshot = self.counts.copy()
+        persisted_counts = self._persisted_counts
+        new_observations = self.observations - self.persisted_observations
+        if prior is None:
+            # Merging only the difference assumes the sink still holds what
+            # was persisted before. A sink removed, rotated or replaced by an
+            # incompatible one holds none of it, so write everything this
+            # collector has observed rather than just the latest interval.
+            persisted_counts = np.zeros_like(snapshot)
+            new_observations = self.observations
         merged = merge_counts(
             prior.counts if prior is not None else None,
-            snapshot - self._persisted_counts,
-            observations=self.observations - self.persisted_observations,
+            snapshot - persisted_counts,
+            observations=new_observations,
         )
         manifest = build_manifest(
             digest=self._digest(),
@@ -174,15 +185,14 @@ class AtlasCollector:
             num_units=self.num_units,
             total_observations=(
                 (prior.total_observations if prior is not None else 0)
-                + self.observations
-                - self.persisted_observations
+                + new_observations
             ),
             generations=(prior.generations if prior is not None else [])
             + [
                 {
                     "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                     "source": "serving",
-                    "observations": self.observations - self.persisted_observations,
+                    "observations": new_observations,
                 }
             ],
         )
