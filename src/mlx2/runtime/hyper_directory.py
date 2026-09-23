@@ -13,7 +13,7 @@ import tempfile
 import threading
 from typing import Any, Mapping, Sequence
 
-from .semantic_capsules import CapsuleStore, canonical_json
+from .semantic_capsules import DIGEST_PATTERN, CapsuleStore, canonical_json
 
 
 DIRECTORY_SCHEMA = "mlx2-hyper-directory-v1"
@@ -78,6 +78,51 @@ def _validate_name(value: str) -> str:
     return value
 
 
+def _is_name(value: object) -> bool:
+    return isinstance(value, str) and NAME_PATTERN.fullmatch(value) is not None
+
+
+def _validate_layer(value: object, scope: Scope, key: Sequence[str]) -> dict:
+    """Check a stored layer has the shape ``update`` writes, or raise.
+
+    Resolving and deleting both consume a layer's handles, and a delete
+    removes the capsules they reach, so both accept exactly this shape.
+    """
+    if (
+        not isinstance(value, dict)
+        or value.get("schema") != DIRECTORY_SCHEMA
+        or value.get("scope") != scope.value
+        or value.get("key") != list(key)
+        or type(value.get("revision")) is not int
+        or value["revision"] < 0
+    ):
+        raise ValueError("invalid hyper directory layer")
+    handles = value.get("handles")
+    policies = value.get("policies")
+    relationships = value.get("relationships")
+    if (
+        not isinstance(handles, dict)
+        or not all(
+            _is_name(name)
+            and isinstance(digest, str)
+            and DIGEST_PATTERN.fullmatch(digest) is not None
+            for name, digest in handles.items()
+        )
+        or not isinstance(policies, dict)
+        or not all(_is_name(name) for name in policies)
+        or not isinstance(relationships, list)
+        or not all(
+            isinstance(item, dict)
+            and set(item) == {"source", "type", "target"}
+            and all(_is_name(part) for part in item.values())
+            and item["type"] in RELATION_TYPES
+            for item in relationships
+        )
+    ):
+        raise ValueError("invalid hyper directory layer")
+    return value
+
+
 class HyperDirectory:
     """Layered directory with monotonic revisions and CAS updates."""
 
@@ -123,29 +168,28 @@ class HyperDirectory:
             "relationships": [],
         }
 
-    def _read(self, scope: Scope, key: Sequence[str]) -> dict:
-        path = self._read_path(scope, key)
-        if not path.exists():
-            return self._empty(scope, key)
+    def _load(self, path: Path, scope: Scope, key: Sequence[str]) -> dict | None:
+        """Read and validate the layer at ``path``; None if another tuple's."""
         if path.is_symlink() or not path.is_file():
             raise ValueError("directory layer must be a regular file")
         value = json.loads(path.read_text())
         if (
             path == self._legacy_path(scope, key)
+            and isinstance(value, dict)
             and value.get("schema") == DIRECTORY_SCHEMA
             and value.get("scope") == scope.value
             and value.get("key") != list(key)
         ):
             # Another valid tuple can occupy the old separator-based name.
+            return None
+        return _validate_layer(value, scope, key)
+
+    def _read(self, scope: Scope, key: Sequence[str]) -> dict:
+        path = self._read_path(scope, key)
+        if not path.exists():
             return self._empty(scope, key)
-        if (
-            value.get("schema") != DIRECTORY_SCHEMA
-            or value.get("scope") != scope.value
-            or value.get("key") != list(key)
-            or type(value.get("revision")) is not int
-        ):
-            raise ValueError("invalid hyper directory layer")
-        return value
+        value = self._load(path, scope, key)
+        return self._empty(scope, key) if value is None else value
 
     def update(
         self,
@@ -253,27 +297,18 @@ class HyperDirectory:
             # one until this delete unlinks it, and a handle replaced after
             # the migration (a rebuilt neural capsule) is named only there.
             # Doom what every owned layer reaches, not just the one resolved.
+            # The canonical layer shadows the legacy one on every read, so
+            # validate each here exactly as a read would: the handles of an
+            # unchecked legacy file could name any unreferenced capsule.
             owned_roots = []
             for path in (self._path(Scope.SESSION, key), self._legacy_path(Scope.SESSION, key)):
                 if not path.exists():
                     continue
-                if path.is_symlink() or not path.is_file():
-                    raise ValueError("session directory layer must be a regular file")
-                value = json.loads(path.read_text())
-                if (
-                    path == self._legacy_path(Scope.SESSION, key)
-                    and value.get("schema") == DIRECTORY_SCHEMA
-                    and value.get("scope") == Scope.SESSION.value
-                    and value.get("key") != list(key)
-                ):
+                value = self._load(path, Scope.SESSION, key)
+                if value is None:
                     continue
-                if value.get("scope") != Scope.SESSION.value or value.get("key") != list(key):
-                    raise ValueError("invalid hyper directory layer")
-                handles = value.get("handles", {})
-                if not isinstance(handles, dict):
-                    raise ValueError("invalid hyper directory layer")
                 owned.append(path)
-                owned_roots.extend(handles.values())
+                owned_roots.extend(value["handles"].values())
             if not owned or current.get("deleted"):
                 return False
             # Every commit writes a capsule holding the whole session graph,

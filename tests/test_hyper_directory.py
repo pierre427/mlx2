@@ -183,6 +183,56 @@ class HyperDirectoryTests(unittest.TestCase):
         remaining = {path.stem for path in self.capsules.objects.glob("*.json")}
         self.assertEqual(remaining, {shared.digest})
 
+    def test_delete_refuses_a_malformed_legacy_layer_beside_a_valid_one(self):
+        # The canonical layer shadows the legacy file on every read, so a
+        # corrupted or crafted legacy file is never validated by resolving.
+        # Its handles must not reach the doomed closure: they could name any
+        # capsule no layer references, such as one a commit has put but not
+        # yet published.
+        context = DirectoryContext(model="m", tenant="t", session="s")
+        other = DirectoryContext(model="m", tenant="t", session="other")
+        key = context.key_for(Scope.SESSION)
+        own = self.capsule("own secret")
+        shared = self.capsule("shared")
+        victim = self.capsule("unpublished")
+        self.directory.update(Scope.SESSION, other, expected_revision=0,
+                              handles={"memory": shared.digest})
+        self.directory.update(Scope.SESSION, context, expected_revision=0,
+                              handles={"memory": own.digest, "base": shared.digest})
+        legacy = self.directory._legacy_path(Scope.SESSION, key)
+        valid = {
+            "schema": "mlx2-hyper-directory-v1", "scope": "session", "key": list(key),
+            "revision": 1, "handles": {"memory": victim.digest},
+            "policies": {}, "relationships": [],
+        }
+        malformed = {
+            "missing schema": {k: v for k, v in valid.items() if k != "schema"},
+            "wrong schema": {**valid, "schema": "mlx2-hyper-directory-v0"},
+            "string revision": {**valid, "revision": "1"},
+            "negative revision": {**valid, "revision": -1},
+            "handle name": {**valid, "handles": {"../memory": victim.digest}},
+            "policies": {**valid, "policies": ["retrieval_limit"]},
+            "relationships": {**valid, "relationships": [{"source": "memory"}]},
+        }
+        objects = {own.digest, shared.digest, victim.digest}
+        for label, value in malformed.items():
+            with self.subTest(label):
+                legacy.write_text(json.dumps(value))
+                with self.assertRaisesRegex(ValueError, "invalid hyper directory layer"):
+                    self.directory.delete_session(context)
+                remaining = {path.stem for path in self.capsules.objects.glob("*.json")}
+                self.assertEqual(remaining, objects)
+                self.assertTrue(legacy.exists())
+                # No tombstone either: the session still resolves as it was.
+                resolved = self.directory.resolve(context)
+                self.assertEqual(resolved.layers[-1]["revision"], 1)
+                self.assertEqual(resolved.handles["memory"], own.digest)
+
+        legacy.unlink()
+        self.assertTrue(self.directory.delete_session(context))
+        remaining = {path.stem for path in self.capsules.objects.glob("*.json")}
+        self.assertEqual(remaining, {shared.digest, victim.digest})
+
 
 if __name__ == "__main__":
     unittest.main()
