@@ -1923,6 +1923,80 @@ def test_missing_or_malformed_content_length_behavior_is_preserved(
     connection.close()
 
 
+_SMUGGLED = b"GET /v1/models HTTP/1.1\r\nHost: 127.0.0.1\r\nX-Smuggled: 1\r\n\r\n"
+
+
+@pytest.mark.parametrize(
+    "head",
+    [
+        # Unknown route: rejected before the body is read.
+        b"POST /v1/unknown HTTP/1.1\r\nHost: 127.0.0.1\r\n"
+        b"Content-Length: %d\r\n\r\n" % len(_SMUGGLED),
+        # APCv2 session route on an engine without sessions.
+        b"POST /v1/apc/sessions/s1/park HTTP/1.1\r\nHost: 127.0.0.1\r\n"
+        b"Content-Length: %d\r\n\r\n" % len(_SMUGGLED),
+        # Admin control body over its 64 KiB cap.
+        b"POST /v1/admin/quiesce HTTP/1.1\r\nHost: 127.0.0.1\r\n"
+        b"Content-Length: 70000\r\n\r\n",
+        # Content-Length that is not a decimal byte count.
+        b"POST /v1/chat/completions HTTP/1.1\r\nHost: 127.0.0.1\r\n"
+        b"Content-Length: 12abc\r\n\r\n",
+        # int() accepts a sign and underscores; HTTP does not.
+        b"POST /v1/chat/completions HTTP/1.1\r\nHost: 127.0.0.1\r\n"
+        b"Content-Length: +2\r\n\r\n{}",
+        b"POST /v1/chat/completions HTTP/1.1\r\nHost: 127.0.0.1\r\n"
+        b"Content-Length: 0_2\r\n\r\n{}",
+    ],
+)
+def test_reply_before_reading_the_body_closes_the_connection(http_engine, head):
+    import re
+    import socket
+
+    _, base = http_engine
+    host, port = base.removeprefix("http://").split(":")
+    with socket.create_connection((host, int(port)), timeout=5) as client:
+        client.sendall(head + _SMUGGLED)
+        received = b""
+        while True:
+            chunk = client.recv(65536)
+            if not chunk:
+                break
+            received += chunk
+    statuses = re.findall(rb"HTTP/1\.[01] (\d{3})", received)
+    assert len(statuses) == 1 and statuses[0].startswith(b"4")
+    assert b"Connection: close" in received
+    assert b'"object": "list"' not in received
+
+
+def test_expect_100_continue_keeps_the_connection_alive(http_engine):
+    import socket
+
+    _, base = http_engine
+    host, port = base.removeprefix("http://").split(":")
+    body = json.dumps({"model": "fixture", "messages": [{"role": "user", "content": "hi"}]})
+    head = (
+        "POST /v1/chat/completions HTTP/1.1\r\nHost: 127.0.0.1\r\n"
+        "Content-Type: application/json\r\nExpect: 100-continue\r\n"
+        f"Content-Length: {len(body)}\r\n\r\n"
+    ).encode()
+    with socket.create_connection((host, int(port)), timeout=5) as client:
+        client.sendall(head)
+        interim = client.recv(65536)
+        # The interim 100 promises the body will be read; it closes nothing.
+        assert interim.startswith(b"HTTP/1.1 100")
+        assert b"Connection: close" not in interim
+        client.sendall(body.encode())
+        client.sendall(b"GET /v1/models HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
+        received = b""
+        while b'"object": "list"' not in received:
+            chunk = client.recv(65536)
+            if not chunk:
+                break
+            received += chunk
+    assert b"Connection: close" not in received
+    assert b'"object": "list"' in received
+
+
 def test_runtime_has_no_legacy_apc_or_unified_import():
     import ast
     from pathlib import Path

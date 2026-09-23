@@ -1528,6 +1528,9 @@ def handler_for(
             self._request_trace = None
             self._tenant_id = "default"
             self._tenant_auth_method = None
+            self._body_consumed = False
+            self._connection_header_sent = False
+            self._interim_response = False
 
         def parse_request(self):
             # BaseHTTPRequestHandler reuses this instance for every request on
@@ -1541,13 +1544,64 @@ def handler_for(
             self._request_trace = None
             self._tenant_id = "default"
             self._tenant_auth_method = None
+            self._body_consumed = False
+            self._connection_header_sent = False
             return super().parse_request()
+
+        def send_header(self, keyword, value):
+            if keyword.lower() == "connection":
+                self._connection_header_sent = True
+            super().send_header(keyword, value)
+
+        def handle_expect_100(self):
+            # An interim 100 Continue invites the body; it is not a reply
+            # sent in place of reading it.
+            self._interim_response = True
+            try:
+                return super().handle_expect_100()
+            finally:
+                self._interim_response = False
+
+        def _request_body_unread(self):
+            if self._body_consumed:
+                return False
+            headers = getattr(self, "headers", None)
+            if headers is None:
+                return False
+            if headers.get("Transfer-Encoding") is not None:
+                return True
+            return any(
+                value.strip() != "0" for value in headers.get_all("Content-Length", ())
+            )
+
+        def _content_length(self):
+            """The declared body size, parsed as strictly as HTTP defines it.
+
+            ``int()`` also accepts a sign, underscores, surrounding spaces
+            and non-ASCII digits, and a proxy may frame the same bytes
+            differently; refuse anything but one decimal byte count.
+            """
+            values = {
+                value.strip(" \t")
+                for value in self.headers.get_all("Content-Length", ("0",))
+            }
+            value = values.pop() if len(values) == 1 else ""
+            if not (value.isascii() and value.isdigit()):
+                raise ValueError("Content-Length must be one decimal byte count")
+            return int(value)
 
         def end_headers(self):
             # Tenant-auth receipt on every response, streams included.  The
             # method only: never the tenant, key id or credential.
             if self._tenant_auth_method is not None:
                 self.send_header("X-MLX2-Tenant-Auth", self._tenant_auth_method)
+            if not self._interim_response and self._request_body_unread():
+                # Answered before the declared body was read: its bytes would
+                # be parsed as the next request on this connection, which a
+                # connection-reusing proxy turns into request smuggling.
+                if not self._connection_header_sent:
+                    self.send_header("Connection", "close")
+                self.close_connection = True
             super().end_headers()
 
         def _authenticate_tenant(self, path):
@@ -1673,7 +1727,7 @@ def handler_for(
             return False
 
         def _read_json_body(self, *, allow_empty=False, max_bytes=None):
-            size = int(self.headers.get("Content-Length", "0"))
+            size = self._content_length()
             if size == 0 and allow_empty:
                 return {}
             limit = body_limit if max_bytes is None else min(body_limit, max_bytes)
@@ -1741,6 +1795,7 @@ def handler_for(
                 chunks.append(chunk)
                 remaining -= len(chunk)
             self.connection.settimeout(30)
+            self._body_consumed = True
             return b"".join(chunks)
 
         def log_message(self, fmt, *args):
@@ -2257,7 +2312,7 @@ def handler_for(
             streamed_calls = {}
             self._responses_sequence = 0
             try:
-                size = int(self.headers.get("Content-Length", "0"))
+                size = self._content_length()
                 if not 0 < size <= body_limit:
                     self.close_connection = True
                     self.api_error(
