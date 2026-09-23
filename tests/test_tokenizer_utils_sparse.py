@@ -45,6 +45,20 @@ def test_spm_padded_or_negative_id_is_a_value_error_not_an_index():
     assert stream.text == "a"
 
 
+def test_spm_sparse_hole_is_a_value_error_before_any_state_changes():
+    # Id 1 lies inside the id range but is absent from the vocabulary.  The
+    # hole held "" and passed the range check, so the id was appended and
+    # then ``bytes += str`` raised TypeError instead of the unknown-id error.
+    stream = SPMStreamingDetokenizer(SimpleNamespace(vocab={"\u2581a": 0, "b": 2}))
+    stream.add_token(0)
+    with pytest.raises(ValueError, match="unknown SPM token ID: 1"):
+        stream.add_token(1)
+    stream.add_token(2)
+    stream.finalize()
+    assert stream.tokens == [0, 2]
+    assert stream.text == "ab"
+
+
 def test_undecodable_sampled_id_fails_its_request_not_the_worker(host):
     """Logits rows are wider than the tokenizer (248320 vs 248077 on the
     served Qwen checkpoints) and the unconstrained sampler does not mask the

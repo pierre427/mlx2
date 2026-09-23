@@ -118,7 +118,9 @@ class SPMStreamingDetokenizer(StreamingDetokenizer):
     def __init__(self, tokenizer, trim_space=True):
         self.trim_space = trim_space
         self._sep = "▁".encode()
-        self.tokenmap = [""] * (max(tokenizer.vocab.values()) + 1)
+        # A sparse vocabulary leaves holes; ``None`` marks them so add_token
+        # can refuse such an id instead of concatenating a placeholder.
+        self.tokenmap = [None] * (max(tokenizer.vocab.values()) + 1)
         for value, tokenid in tokenizer.vocab.items():
             if value.startswith("<0x"):
                 self.tokenmap[tokenid] = bytes([int(value[3:5], 16)])
@@ -142,10 +144,12 @@ class SPMStreamingDetokenizer(StreamingDetokenizer):
         self._unflushed = b""
 
     def add_token(self, token):
-        # A negative id would index from the end and a padded logits id past
-        # the vocabulary would raise IndexError; both are the same caller
-        # error, reported the way the BPE detokenizer reports it.
-        if token < 0 or token >= len(self.tokenmap):
+        # A negative id would index from the end, a padded logits id past
+        # the vocabulary would raise IndexError, and a hole in a sparse
+        # vocabulary would raise TypeError; all are the same caller error,
+        # reported the way the BPE detokenizer reports it and checked before
+        # any state changes, so the stream is still usable afterwards.
+        if token < 0 or token >= len(self.tokenmap) or self.tokenmap[token] is None:
             raise ValueError(f"unknown SPM token ID: {token}")
         self.tokens.append(token)
         v = self.tokenmap[token]
