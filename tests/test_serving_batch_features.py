@@ -423,3 +423,81 @@ def test_make_mtp_batch_refuses_draftless_rows_before_popping():
         assert [f["uid"] for f in batch.take_mtp_prefill_failures()] == [lone]
     finally:
         batch.close()
+
+
+def test_ungrouped_arrival_does_not_join_or_fail_a_decoding_cohort():
+    """An ungrouped request used to merge into a live cohort's MTP batch.
+
+    The batch keeps the cohort's all-or-nothing admission, so the newcomer
+    was counted as a member; once the three rows no longer fit at one depth
+    the cohort and the unrelated request all failed 429, although the cohort
+    alone fits.  The newcomer now waits for the cohort to drain.
+    """
+    from mlx2.runtime.memory_policy import (
+        SelfMTPLaneAdmissionController,
+        _make_self_mtp_admission_callback,
+    )
+
+    model = _tiny_qwen4_model()
+    controller = SelfMTPLaneAdmissionController(
+        host_memory_gib=16, advisory_gib=12, transient_gib_per_lane=1.0
+    )
+    free = controller.hard_reserve_gib + 2.6  # two lanes fit, three do not
+    cohort = {"tenant_id": "t", "id": "c1", "size": 2}
+
+    def run(cohort_prompts, joiner_prompt):
+        admit = _make_self_mtp_admission_callback(
+            controller, free_memory=lambda: free, max_draft=2
+        )
+        batch = BatchGenerator(
+            model,
+            completion_batch_size=4,
+            prefill_batch_size=2,
+            prefill_step_size=32,
+            self_mtp={"num_draft": 2, "persistent": True},
+            mtp_admission=admit,
+        )
+        uids = []
+        if cohort_prompts:
+            uids += batch.insert(
+                cohort_prompts,
+                max_tokens=[12, 12],
+                lane_rngs=[LaneRNG(1), LaneRNG(2)],
+                self_mtp_configs=[
+                    {"sampling_temp": 0.0, "batch_cohort": dict(cohort)}
+                ]
+                * 2,
+            )
+        tokens, failures, joiner = {}, [], None
+        try:
+            for rnd in range(80):
+                if joiner_prompt and joiner is None and (rnd == 3 or not uids):
+                    joiner = batch.insert(
+                        [joiner_prompt],
+                        max_tokens=[6],
+                        lane_rngs=[LaneRNG(3)],
+                        self_mtp_configs=[{"sampling_temp": 0.0}],
+                    )[0]
+                    uids.append(joiner)
+                _, step = batch.next()
+                for r in step:
+                    tokens.setdefault(r.uid, []).append(int(r.token))
+                failures.extend(batch.take_atomic_cohort_failures())
+                if failures:
+                    break
+                if all(len(tokens.get(uid, ())) >= (6 if uid == joiner else 12) for uid in uids):
+                    break
+        finally:
+            batch.close()
+        return uids, tokens, failures
+
+    cohort_prompts = [[1, 7, 3, 9, 2], [4, 5, 6, 2, 8]]
+    joiner_prompt = [9, 9, 3, 1, 2]
+    alone_uids, alone, alone_failures = run(cohort_prompts, None)
+    assert alone_failures == []
+    _, joiner_alone, _ = run(None, joiner_prompt)
+
+    uids, tokens, failures = run(cohort_prompts, joiner_prompt)
+    assert failures == []
+    assert [tokens[uid] for uid in uids[:2]] == [alone[uid] for uid in alone_uids]
+    assert tokens[uids[2]] == next(iter(joiner_alone.values()))

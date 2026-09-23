@@ -3519,6 +3519,13 @@ class BatchGenerator:
                 if self._mtp_configs.get(sequence[0], {}).get("batch_cohort"):
                     n = index
                     break
+            if n > 0 and self._generation_batch_holds_cohort():
+                # A declared cohort is an indivisible exact-width batch whose
+                # admission stays all-or-nothing for its lifetime.  Ungrouped
+                # work merged into it would be counted as a member and could
+                # fail the cohort with it, so that work waits in the queue (a
+                # scheduler wait) until the cohort drains.
+                return 0
 
         if self.mtp_admission is None:
             return n
@@ -3753,6 +3760,17 @@ class BatchGenerator:
         )
         self.scheduler_stats["mtp_prefill_bound_violations"] = (
             self.scheduler_stats.get("mtp_prefill_bound_violations", 0) + 1
+        )
+
+    def _generation_batch_holds_cohort(self) -> bool:
+        """Whether a declared batch cohort owns the live self-MTP batch."""
+        batch = getattr(self, "_generation_batch", None)
+        lanes = list(getattr(getattr(batch, "state", None), "lanes", ())) + [
+            package.detached.lane
+            for package in getattr(batch, "_paused", {}).values()
+        ]
+        return any(
+            getattr(lane, "_batch_cohort", None) is not None for lane in lanes
         )
 
     def _mtp_row_lacks_draft_state(self, sequence) -> bool:
