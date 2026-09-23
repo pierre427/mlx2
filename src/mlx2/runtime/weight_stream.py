@@ -157,31 +157,48 @@ class SafetensorsIndex:
 
 
 class _FileHandles:
-    """Per-thread read-only descriptors, re-opened after a fork.
+    """One shared read-only descriptor per shard, re-opened after a fork.
 
-    A forked child inherits the dict and the descriptors; keying on the owning
-    pid makes the child open its own rather than share a file offset (``pread``
-    is positional, but a shared fd across a fork is still a footgun worth
-    removing).
+    Reads are positional (``os.pread``), so the read pool and the model
+    thread share one descriptor per file.  Per-thread tables opened one per
+    shard for every read worker plus the model thread (17 x shards by
+    default) and never closed them; a many-shard checkpoint then crossed
+    macOS's default soft limit of 256 and EMFILE inside a page-in killed the
+    worker.  A forked child inherits the table and the descriptors; keying on
+    the owning pid makes the child open its own rather than share them.
+
+    :meth:`close` must run after every reader has stopped: a closed number
+    is reused by the next ``open`` and a late ``pread`` would read that file.
     """
 
     def __init__(self):
-        self._local = threading.local()
+        self._lock = threading.Lock()
+        self._table: Dict[Path, int] = {}
         self._owner = os.getpid()
+        self._closed = False
 
     def get(self, path: Path) -> int:
         if os.getpid() != self._owner:
-            self._local = threading.local()
+            self._lock = threading.Lock()
+            self._table = {}
             self._owner = os.getpid()
-        table = getattr(self._local, "table", None)
-        if table is None:
-            table = {}
-            self._local.table = table
-        fd = table.get(path)
+        fd = self._table.get(path)
         if fd is None:
-            fd = os.open(str(path), os.O_RDONLY)
-            table[path] = fd
+            with self._lock:
+                if self._closed:
+                    raise StreamingUnavailable("expert weight files are closed")
+                fd = self._table.get(path)
+                if fd is None:
+                    fd = os.open(str(path), os.O_RDONLY)
+                    self._table[path] = fd
         return fd
+
+    def close(self) -> None:
+        with self._lock:
+            table, self._table = self._table, {}
+            self._closed = True
+        for fd in table.values():
+            os.close(fd)
 
     def pread(self, path: Path, offset: int, length: int) -> bytes:
         fd = self.get(path)
@@ -683,12 +700,14 @@ class ExpertStreamManager:
         pool: Optional[ThreadPoolExecutor],
         caches: Dict[str, ExpertLRU],
         collector=None,
+        handles: Optional[_FileHandles] = None,
     ):
         self.plan = plan
         self.stats = stats
         self.caches = caches
         self.collector = collector
         self._pool = pool
+        self._handles = handles
 
     def counters(self) -> Dict[str, int]:
         self.stats.resident_bytes = sum(
@@ -701,8 +720,13 @@ class ExpertStreamManager:
 
     def close(self) -> None:
         if self._pool is not None:
-            self._pool.shutdown(wait=False)
+            # Running page-ins finish before their descriptors close (see
+            # ``_FileHandles.close``); queued ones are dropped.
+            self._pool.shutdown(wait=True, cancel_futures=True)
             self._pool = None
+        if self._handles is not None:
+            self._handles.close()
+            self._handles = None
 
 
 # Load-time fusions this addressing layer can reassemble from checkpoint
@@ -857,5 +881,10 @@ def install_expert_streaming(
     if collector is not None:
         collector.bind(num_layers=plan.layers, num_units=plan.experts_per_layer)
     return ExpertStreamManager(
-        plan=plan, stats=stats, pool=pool, caches=caches, collector=collector
+        plan=plan,
+        stats=stats,
+        pool=pool,
+        caches=caches,
+        collector=collector,
+        handles=handles,
     )

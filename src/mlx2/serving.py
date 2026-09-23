@@ -7069,6 +7069,10 @@ class ServingEngine:
                 from .runtime.int8_prefill import remove as remove_int8_prefill
 
                 remove_int8_prefill(self.int8_prefill_handle)
+            if self.expert_stream is not None:
+                # The model thread is done with the streamed experts: release
+                # the read pool and the shard descriptors with it.
+                self.expert_stream.close()
             if adapter is not None:
                 with self.prompt_lock:
                     self.adapter = None

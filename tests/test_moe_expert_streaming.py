@@ -197,6 +197,54 @@ def test_streamed_output_is_bit_identical_to_resident(checkpoint, capacity):
         manager.close()
 
 
+def _descriptors_open_on(paths):
+    import os
+    import resource
+
+    wanted = {(os.stat(p).st_dev, os.stat(p).st_ino) for p in paths}
+    limit = min(resource.getrlimit(resource.RLIMIT_NOFILE)[0], 65536)
+    found = 0
+    for fd in range(limit):
+        try:
+            info = os.fstat(fd)
+        except OSError:
+            continue
+        found += (info.st_dev, info.st_ino) in wanted
+    return found
+
+
+def test_each_shard_is_read_through_one_descriptor_closed_with_the_manager(tmp_path):
+    """Per-thread tables opened a descriptor per shard for every read worker
+    plus the model thread (17 x shards by default) and never closed them; a
+    many-shard checkpoint crossed macOS's default limit of 256 and EMFILE in
+    a page-in killed the worker."""
+    weights = _flatten(_build_model())
+    path = tmp_path / "sharded"
+    path.mkdir()
+    for layer in range(LAYERS):
+        mx.save_safetensors(
+            str(path / f"model-{layer + 1:05d}-of-{LAYERS:05d}.safetensors"),
+            {k: v for (k, v) in weights.items() if k.startswith(f"layers.{layer}.")},
+        )
+    shards = sorted(path.glob("*.safetensors"))
+    streamed = _reference(weights)
+    manager = install_expert_streaming(
+        streamed,
+        path,
+        ceiling_bytes=_ceiling_for(path, TOP_K),
+        top_k=TOP_K,
+        read_workers=8,
+    )
+    try:
+        for seed in range(6):
+            _run(streamed, *_inputs(tokens=8, seed=seed))
+        assert manager.stats.page_ins > 0
+        assert _descriptors_open_on(shards) == len(shards)
+    finally:
+        manager.close()
+    assert _descriptors_open_on(shards) == 0
+
+
 def test_page_in_counts_differ_with_capacity(checkpoint):
     """If the cache never evicts, the identity test proved nothing."""
     (path, weights) = checkpoint
