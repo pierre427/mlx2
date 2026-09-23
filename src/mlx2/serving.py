@@ -2854,7 +2854,8 @@ class ServingEngine:
 
         return self._exclusive_adapter_operation("lora_unload", remove)
 
-    def batching_status(self):
+    def batching_status(self, tenant_id=None):
+        """The batch runtime snapshot; only ``tenant_id``'s requests if given."""
         with self.lock:
             memory = {
                 key: self.snapshot.get(key)
@@ -2867,7 +2868,7 @@ class ServingEngine:
                 )
             }
             return self.batch_metrics.snapshot(
-                queue_depth=self.queued_jobs, memory=memory
+                queue_depth=self.queued_jobs, memory=memory, tenant_id=tenant_id
             )
 
     def prometheus_metrics(self):

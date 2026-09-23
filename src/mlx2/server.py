@@ -1254,6 +1254,32 @@ def collect_parallel_samples(jobs, body, *, chat, connection=None):
     return results
 
 
+def tenant_batching_status(engine, tenant_id):
+    """``/v1/status/batching`` for one authenticated tenant.
+
+    The snapshot lists requests, their tenants and events, so a tenant sees
+    only its own; the aggregates stay.  An engine that cannot scope its
+    snapshot shows none of the per-request rows.
+    """
+    import inspect
+
+    method = engine.batching_status
+    try:
+        scoped = "tenant_id" in inspect.signature(method).parameters
+    except (TypeError, ValueError):
+        scoped = False
+    if scoped:
+        return method(tenant_id=tenant_id)
+    status = dict(method())
+    for key in ("active_requests", "completed_requests", "events"):
+        if key in status:
+            status[key] = []
+    fairness = status.get("fairness")
+    if isinstance(fairness, dict) and "tenant_token_rates" in fairness:
+        status["fairness"] = {**fairness, "tenant_token_rates": {}}
+    return status
+
+
 def handler_for(
     engine,
     *,
@@ -2196,7 +2222,12 @@ def handler_for(
                     },
                 )
             elif self.path == "/v1/status/batching":
-                self.send_json(200, engine.batching_status())
+                self.send_json(
+                    200,
+                    engine.batching_status()
+                    if tenant_authenticator is None
+                    else tenant_batching_status(engine, self._tenant_id),
+                )
             else:
                 self.error(404, "unknown endpoint")
 

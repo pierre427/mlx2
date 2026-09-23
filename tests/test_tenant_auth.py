@@ -661,6 +661,88 @@ def test_status_without_a_tenant_receipt_filter_fails_closed(served, tmp_path):
     assert _json(raw)["recent_receipts"] == [{"session_id": "x"}]
 
 
+def test_batching_status_is_scoped_to_the_authenticated_tenant(served, tmp_path):
+    # /v1/status/batching listed every tenant's request ids, tenant ids,
+    # events and per-tenant token rates to any authenticated tenant.
+    from mlx2.batch_metrics import BatchRuntimeMetrics
+    from mlx2.serving import ServingEngine
+
+    class BatchingEngine(TenantEngine):
+        # The real engine's batching view over real runtime metrics.
+        batching_status = ServingEngine.batching_status
+
+        def __init__(self):
+            super().__init__()
+            ticks = iter(range(10_000))
+            self.batch_metrics = BatchRuntimeMetrics(clock=lambda: float(next(ticks)))
+            self.lock = threading.Lock()
+            self.snapshot = {}
+            self.queued_jobs = 0
+
+        def submit(self, request, *, tenant_id="default", **kwargs):
+            job = super().submit(request, tenant_id=tenant_id, **kwargs)
+            self.batch_metrics.admitted(job.id, tenant_id, 0)
+            self.batch_metrics.dequeued(job.id, 0)
+            self.batch_metrics.token(job.id)
+            self.batch_metrics.terminal(job.id, "completed", "stop")
+            return job
+
+    a = {"Authorization": f"Bearer {KEY_A}"}
+    b = {"Authorization": f"Bearer {KEY_B}"}
+
+    def batching(app, headers=None):
+        status, _, raw = _call(app.base, "GET", "/v1/status/batching", headers=headers)
+        assert status == 200
+        return _json(raw), raw.decode()
+
+    app = served(_auth(tmp_path, header_policy="ignore"), engine=BatchingEngine())
+    assert _call(app.base, "POST", "/v1/chat/completions", CHAT, a)[0] == 200
+    assert _call(app.base, "POST", "/v1/chat/completions", CHAT, b)[0] == 200
+    app.engine.batch_metrics.admitted("alice-inflight", "tenant-a", 0)
+    alice_done, bob_done = (
+        row["request_id"]
+        for row in app.engine.batching_status()["completed_requests"]
+    )
+
+    view, raw = batching(app, b)
+    assert [row["request_id"] for row in view["completed_requests"]] == [bob_done]
+    assert view["active_requests"] == []
+    assert view["events"] and {e["request_id"] for e in view["events"]} == {bob_done}
+    assert list(view["fairness"]["tenant_token_rates"]) == ["tenant-b"]
+    for private in ("tenant-a", alice_done, "alice-inflight"):
+        assert private not in raw
+    # Aggregates stay whole: two tenants' rates, two requests in flight or not.
+    assert view["fairness"]["jain_tenant_token_rate"] is not None
+    assert view["gauges"]["inflight_requests"] == 1
+    assert view["counters"]["admitted"] == 3
+
+    view, _ = batching(app, a)
+    assert [row["request_id"] for row in view["completed_requests"]] == [alice_done]
+    assert view["active_requests"] == ["alice-inflight"]
+    assert list(view["fairness"]["tenant_token_rates"]) == ["tenant-a"]
+
+    # An engine that cannot scope its snapshot shows no per-request rows.
+    class LeakyEngine(TenantEngine):
+        def batching_status(self):
+            return {
+                "active_requests": ["x"],
+                "completed_requests": [{"request_id": "x", "tenant_id": "tenant-a"}],
+                "events": [{"kind": "admitted", "request_id": "x"}],
+                "fairness": {"jain_tenant_token_rate": 1.0, "tenant_token_rates": {"tenant-a": 1.0}},
+                "counters": {"admitted": 1},
+            }
+
+    app = served(_auth(tmp_path, header_policy="ignore"), engine=LeakyEngine())
+    view, _ = batching(app, b)
+    assert view["active_requests"] == view["completed_requests"] == view["events"] == []
+    assert view["fairness"] == {"jain_tenant_token_rate": 1.0, "tenant_token_rates": {}}
+    assert view["counters"] == {"admitted": 1}
+    # Without tenant auth there is no tenant boundary: the view is unchanged.
+    open_app = served(None, engine=LeakyEngine())
+    view, _ = batching(open_app)
+    assert view == LeakyEngine().batching_status()
+
+
 def test_serving_engine_recent_receipts_filter_by_owner():
     from mlx2.serving import ServingEngine
 

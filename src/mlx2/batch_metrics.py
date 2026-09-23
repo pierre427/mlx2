@@ -502,7 +502,15 @@ class BatchRuntimeMetrics:
         *,
         queue_depth: int = 0,
         memory: Mapping[str, Any] | None = None,
+        tenant_id: str | None = None,
     ) -> dict[str, Any]:
+        """The bounded history; only ``tenant_id``'s requests when one is given.
+
+        A tenant-scoped view keeps the aggregates (counters, gauges, latency
+        distributions, the Jain index) but lists only that tenant's own
+        requests, events and token rate: request ids and other tenants' ids
+        stay private.
+        """
         with self._lock:
             completed = list(self._completed)
             active = list(self._active.values())
@@ -526,12 +534,27 @@ class BatchRuntimeMetrics:
             for tenant, seconds in tenant_service.items()
             if seconds > 0
         }
+        fairness = _jain(list(tenant_rates.values()))
+        inflight = len(active)
+        if tenant_id is not None:
+            owner = str(tenant_id or "default")
+            active = [state for state in active if state.tenant_id == owner]
+            completed = [row for row in completed if row["tenant_id"] == owner]
+            owned = {state.request_id for state in active} | {
+                row["request_id"] for row in completed
+            }
+            # Events without a request of this tenant (rejections carry no
+            # request at all) cannot be attributed, so they are left out.
+            events = [event for event in events if event.get("request_id") in owned]
+            tenant_rates = {
+                tenant: rate for tenant, rate in tenant_rates.items() if tenant == owner
+            }
         return {
             "schema": "mlx2.batch-runtime.v1",
             "counters": counters,
             "admission_decisions": admission,
             "gauges": {
-                "inflight_requests": len(active),
+                "inflight_requests": inflight,
                 "queue_depth": max(0, queue_depth),
                 "active_lanes": active_lanes,
                 "peak_active_lanes": peak_active_lanes,
@@ -542,7 +565,7 @@ class BatchRuntimeMetrics:
                 "itl": _distribution(itl_values),
             },
             "fairness": {
-                "jain_tenant_token_rate": _jain(list(tenant_rates.values())),
+                "jain_tenant_token_rate": fairness,
                 "tenant_token_rates": tenant_rates,
             },
             "batch_composition": batch_sizes,
