@@ -567,7 +567,6 @@ _SEGMENTED_MTP_GAUGES = frozenset(
         "private_delta_base_tokens_last",
         "private_delta_base_tokens_min",
         "private_delta_base_tokens_max",
-        "async_qsa_promotion_reserved_bytes",
     }
 )
 _SEGMENTED_MTP_BYTES = frozenset(
@@ -579,6 +578,9 @@ _SEGMENTED_MTP_BYTES = frozenset(
         "shared_qsa_materialized_bytes",
         "full_prefix_materialized_bytes",
         "async_qsa_promotion_patched_bytes",
+        # Accumulated once per promotion, so it is a lifetime byte total, not
+        # a current or high-water reservation.
+        "async_qsa_promotion_reserved_bytes",
     }
 )
 _SEGMENTED_MTP_EVENTS = frozenset(

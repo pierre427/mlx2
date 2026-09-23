@@ -573,6 +573,28 @@ def test_exposition_parses_with_official_prometheus_client_when_installed():
     }
 
 
+def test_accumulated_promotion_reservation_is_a_byte_counter():
+    engine = FakeEngine()
+    engine.snapshot["segmented_self_mtp"] = {
+        **engine.snapshot["segmented_self_mtp"],
+        "async_qsa_promotion_reserved_bytes": 3 * (512 << 20),
+        "private_delta_base_tokens_max": 7,
+    }
+    rendered = render_engine_metrics(engine)
+    # Three 512 MiB promotions sum to 1.5 GiB; that is a lifetime total and
+    # must not be exported as a current or high-water gauge.
+    assert (
+        'mlx2_segmented_mtp_bytes_total{operation="async_qsa_promotion_reserved"} '
+        f"{3 * (512 << 20)}"
+    ) in rendered
+    assert "async_qsa_promotion_reserved_bytes" not in rendered
+    assert (
+        'mlx2_segmented_mtp_state{state="private_delta_base_tokens_max"} 7'
+        in rendered
+    )
+    assert_valid_prometheus_text(rendered)
+
+
 def test_free_form_admission_and_mechanism_values_collapse_to_other():
     metrics = BatchRuntimeMetrics(clock=Clock())
     metrics.rejected("secret-reason", 0)
