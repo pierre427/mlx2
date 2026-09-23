@@ -2989,6 +2989,17 @@ def handler_for(
                             call.get("function", {}).get("name") in executors
                             for call in calls
                         )
+                        if not executable and any(
+                            call.get("function", {}).get("name") in executors
+                            for call in calls
+                        ):
+                            # Running only the hosted subset would leave a
+                            # turn no transcript can replay: the client never
+                            # sees the internal call or its output.
+                            raise ToolContractError(
+                                "the model mixed server-executed (hosted) and "
+                                "client tool calls in one turn"
+                            )
                         if executable:
                             if hosted_rounds >= 8:
                                 raise ToolContractError(

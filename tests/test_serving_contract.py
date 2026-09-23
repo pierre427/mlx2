@@ -2658,3 +2658,33 @@ def test_batch_rows_with_hosted_tools_fail_closed():
     assert "hosted (MCP) tools" in errors[0]["error"]["message"]
     assert backend.executed == []
     assert len(engine.requests) == 1
+
+
+@pytest.mark.parametrize("stream", [False, True])
+def test_mixed_hosted_and_client_calls_fail_closed(stream):
+    # Executing only the hosted call has no replayable transcript, and
+    # returning it hands the client an internal call it never declared.
+    notify = {
+        "type": "function",
+        "function": {"name": "notify", "parameters": {"type": "object"}},
+    }
+    engine = HostedEngine([_round_calls(
+        _hosted_call(),
+        _hosted_call(call_id="call_notify", name="notify", index=1),
+    )])
+    backend = HostedBackend(tools=[*TOOLS, notify])
+    base, close = _serve_hosted(engine, backend)
+    tools = [
+        MCP_TOOL,
+        {"type": "function", "name": "notify", "parameters": {"type": "object"}},
+    ]
+    try:
+        # A hosted stream is buffered until its last round, so it fails
+        # before committing any bytes, like the non-stream request.
+        with pytest.raises(HTTPError) as error:
+            post_response(base, input="go", tools=tools, stream=stream)
+        assert error.value.code == 502
+        assert "mixed" in json.load(error.value)["error"]["message"]
+    finally:
+        close()
+    assert backend.executed == []
