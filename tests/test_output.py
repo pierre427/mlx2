@@ -53,6 +53,63 @@ def test_reasoning_markers_at_every_chunk_boundary():
         assert "".join(e.get("content", "") for e in events) == "answer"
 
 
+def _channels_at_every_split(text, **kwargs):
+    """Parse ``text`` whole, at every two-chunk split and char by char; all
+    ways must agree.  Returns the (reasoning, content) pair."""
+
+    def run(chunks):
+        parser = OutputParser(chat=True, **kwargs)
+        events = []
+        for chunk in chunks:
+            events += parser.push(chunk)
+        events += parser.push("", final=True)
+        return (
+            "".join(e.get("reasoning_content", "") for e in events),
+            "".join(e.get("content", "") for e in events),
+        )
+
+    whole = run([text])
+    for split in range(1, len(text)):
+        assert run([text[:split], text[split:]]) == whole, split
+    assert run(list(text)) == whole
+    return whole
+
+
+@pytest.mark.parametrize("thinking", [False, True])
+def test_reasoning_markers_inside_a_json_answer_are_literal(thinking):
+    """Qwen tokenizers encode ``<think>``/``</think>`` as single ordinary
+    added tokens, so a JSON grammar admits them inside a string.  They used to
+    switch channels: the rest of the answer went to reasoning, or the closing
+    tag vanished, and the delivered JSON no longer parsed."""
+    for answer in ('{"tag":"<think>"}', '{"tag":"</think>"}', '{"a":"<think>x</think>y"}'):
+        prefix = "plan</think>" if thinking else ""
+        reasoning, content = _channels_at_every_split(prefix + answer, thinking=thinking)
+        assert content == answer
+        assert json.loads(content)
+        assert reasoning == ("plan" if thinking else "")
+
+
+def test_only_the_first_close_ends_reasoning_and_later_markers_are_content():
+    text = "<think>weigh <think> it</think>answer <think>x</think> `</think>` y"
+    assert _channels_at_every_split(text, thinking=True) == (
+        "weigh <think> it",
+        "answer <think>x</think> `</think>` y",
+    )
+    # Implied open (the template opened the block): the same without the
+    # leading marker.
+    assert _channels_at_every_split(text[len("<think>"):], thinking=True) == (
+        "weigh <think> it",
+        "answer <think>x</think> `</think>` y",
+    )
+
+
+def test_with_thinking_off_only_a_leading_open_marker_is_reasoning():
+    assert _channels_at_every_split("<think>r</think>a</think>") == ("r", "a</think>")
+    assert _channels_at_every_split("a <think>r</think>b") == ("", "a <think>r</think>b")
+    assert _channels_at_every_split("r</think>a") == ("", "r</think>a")
+    assert _channels_at_every_split("<thin") == ("", "<thin")
+
+
 def test_stop_at_every_chunk_boundary():
     text = "hello STOP hidden"
     for split in range(len(text) + 1):

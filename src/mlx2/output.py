@@ -155,6 +155,15 @@ class OutputParser:
         self.parallel_tool_calls = bool(parallel_tool_calls)
         self.tolerant_tool_markers = bool(tolerant_tool_markers)
         self.channel = "reasoning_content" if chat and thinking else "content"
+        # Reasoning markers follow the vLLM Qwen3 reasoning parser: only a
+        # ``<think>`` at the very start of the output opens reasoning (with
+        # thinking on the template has already opened it, so a leading marker
+        # is just consumed), and only the first ``</think>`` closes it.  After
+        # that both are literal text: Qwen tokenizers encode them as single
+        # ordinary added tokens, so a JSON grammar admits them inside strings
+        # and an answer may quote them.
+        self._leading = bool(chat)
+        self._reasoning_open = self.channel == "reasoning_content"
         self.buffer = ""
         self.stop_matcher = StopSequenceMatcher(stops)
         self.stopped = False
@@ -190,6 +199,19 @@ class OutputParser:
                 events.append({"content": self.buffer})
                 self.buffer = ""
                 break
+            if self._leading:
+                if (
+                    not final
+                    and len(self.buffer) < len(THINKING_OPEN_MARKER)
+                    and THINKING_OPEN_MARKER.startswith(self.buffer)
+                ):
+                    break  # may still become the leading open marker
+                self._leading = False
+                if self.buffer.startswith(THINKING_OPEN_MARKER):
+                    self.buffer = self.buffer[len(THINKING_OPEN_MARKER) :]
+                    self.channel = "reasoning_content"
+                    self._reasoning_open = True
+                    continue
             if self.channel == "tool":
                 end = self.buffer.find("</tool_call>")
                 if end < 0:
@@ -257,10 +279,9 @@ class OutputParser:
                 self.buffer = self.buffer[end + len("</tool_call>") :]
                 self.channel = "content"
                 continue
-            markers = {
-                THINKING_OPEN_MARKER: "reasoning_content",
-                THINKING_CLOSE_MARKER: "content",
-            }
+            markers = {}
+            if self._reasoning_open:
+                markers[THINKING_CLOSE_MARKER] = "content"
             if self.tools and (
                 not self.tolerant_tool_markers
                 or self.channel != "reasoning_content"
@@ -279,6 +300,8 @@ class OutputParser:
                     self._content(events, marker)  # a quoted example
                 else:
                     self.channel = markers[marker]
+                    if marker == THINKING_CLOSE_MARKER:
+                        self._reasoning_open = False
                 self.buffer = self.buffer[end + len(marker) :]
             else:
                 end = len(self.buffer) if final else _safe_prefix(self.buffer, markers)
