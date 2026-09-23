@@ -118,6 +118,67 @@ def parse_atem(text: str, tools: list[dict]) -> list[dict]:
     return calls
 
 
+def _non_strict_value(schema):
+    """Value language ``parse_atem`` accepts for a non-strict parameter.
+
+    It reads the schema's own ``type``: scalar-typed values must be JSON of
+    that type (a non-finite number fails serialization), so free text for
+    them is admitted by the grammar and then rejected.  Other values stay
+    free text, unbounded like Qwen's: a ``{0,4096}`` run costs the exact
+    automaton thousands of states per parameter (tens of seconds to compile
+    one call), and the parser has no length bound to agree with.
+    """
+    from ..structured_output import _FINITE_NUMBER, _INTEGER
+
+    expected = schema.get("type") if isinstance(schema, dict) else None
+    pattern = {
+        "integer": _INTEGER,
+        "number": _FINITE_NUMBER,
+        "boolean": "(?:true|false)",
+        "null": "null",
+    }.get(expected) if isinstance(expected, str) else None
+    return pattern if pattern is not None else "[^<]*"
+
+
+def _non_strict_parameter_body(function):
+    """ATEM parameters of a non-strict tool, as ``parse_atem`` accepts them.
+
+    Required arguments must appear (sglang #40051).  Optional arguments are
+    the declared ones, each at most once in declared order, since the parser
+    rejects a repeated name.  Only a schema that declares no properties keeps
+    free argument names.
+    """
+    schema = function.get("parameters", {})
+    schema = schema if isinstance(schema, dict) else {}
+    properties = schema.get("properties", {})
+    properties = properties if isinstance(properties, dict) else {}
+    required = required_parameter_names(function)
+    for key in required:
+        if not isinstance(key, str) or not re.fullmatch(r"[\w.-]+", key, re.ASCII):
+            raise ValueError("tool parameter name is not representable in ATEM")
+
+    def block(key):
+        value = _non_strict_value(properties.get(key))
+        return rf'<atem:parameter name="{re.escape(key)}">{value}</atem:parameter>'
+
+    body = "".join(block(key) for key in required)
+    if properties:
+        # An optional name the wire cannot spell is simply never emitted.
+        body += "".join(
+            f"(?:{block(key)})?"
+            for key in properties
+            if key not in required
+            and isinstance(key, str)
+            and re.fullmatch(r"[\w.-]+", key, re.ASCII)
+        )
+    elif schema.get("additionalProperties") is not False:
+        body += (
+            r'(?:<atem:parameter name="[\w.-]{1,128}">'
+            rf"[^<]{{0,4096}}</atem:parameter>){{0,{max(0, 64 - len(required))}}}"
+        )
+    return body
+
+
 def constrained_tool_grammar(tools, tool_choice, *, parallel_tool_calls=True):
     """Regex for Muse's ATEM tool-call wire format."""
     from ..structured_output import _schema_pattern
@@ -155,18 +216,7 @@ def constrained_tool_grammar(tools, tool_choice, *, parallel_tool_calls=True):
                 blocks.append(block if key in required else f"(?:{block})?")
             body = "".join(blocks)
         else:
-            # Free values, but required arguments must appear (sglang #40051).
-            required = required_parameter_names(function)
-            for key in required:
-                if not isinstance(key, str) or not re.fullmatch(r"[\w.-]+", key, re.ASCII):
-                    raise ValueError("tool parameter name is not representable in ATEM")
-            body = "".join(
-                rf'<atem:parameter name="{re.escape(key)}">[^<]{{0,4096}}</atem:parameter>'
-                for key in required
-            ) + (
-                r'(?:<atem:parameter name="[\w.-]{1,128}">'
-                rf"[^<]{{0,4096}}</atem:parameter>){{0,{max(0, 64 - len(required))}}}"
-            )
+            body = _non_strict_parameter_body(function)
         invocations.append(
             rf'<atem:invoke name="{re.escape(name)}">{body}</atem:invoke>'
         )

@@ -354,6 +354,80 @@ def test_non_strict_north_required_grammar_keeps_recursive_json_arguments():
     assert _matches(grammar, text)
 
 
+@pytest.mark.parametrize("wire", ["qwen", "muse"])
+def test_non_strict_forced_grammars_only_admit_calls_their_parser_accepts(wire):
+    """The optional-parameter block admitted any name, a repeated one
+    included, and typed values were free text; the parser rejects both, so a
+    call the grammar forced still failed with 502."""
+    tools = [{"type": "function", "function": {"name": "f", "parameters": {
+        "type": "object",
+        "properties": {
+            "city": {"type": "string"},
+            "days": {"type": "integer"},
+            "scale": {"type": ["number", "null"]} if wire == "qwen" else {"type": "number"},
+            "metric": {"type": "boolean"},
+            "note": {"type": "string"},
+        },
+        "required": ["city", "days"],
+    }}}]
+    if wire == "qwen":
+        grammar = qwen_grammar(tools, "required", parallel_tool_calls=False)
+
+        def call(*params):
+            body = "".join(
+                f"\n<parameter={name}>\n{value}\n</parameter>" for name, value in params
+            )
+            return f"<tool_call>\n<function=f>{body}\n</function>\n</tool_call>"
+
+        def parse(text):
+            return parse_tool_call(text[len("<tool_call>"):-len("</tool_call>")], tools)
+    else:
+        grammar = muse_grammar(tools, "required", parallel_tool_calls=False)
+
+        def call(*params):
+            body = "".join(
+                f'<atem:parameter name="{name}">{value}</atem:parameter>'
+                for name, value in params
+            )
+            return (
+                f'<atem:function_calls><atem:invoke name="f">{body}'
+                "</atem:invoke></atem:function_calls>"
+            )
+
+        def parse(text):
+            (parsed,) = parse_atem(
+                text[len("<atem:function_calls>"):-len("</atem:function_calls>")], tools
+            )
+            return parsed
+
+    good = call(("city", "Paris"), ("days", "3"), ("scale", "1.5"), ("metric", "true"))
+    assert _matches(grammar, good)
+    assert parse(good)["arguments"] == {
+        "city": "Paris", "days": 3, "scale": 1.5, "metric": True,
+    }
+    rejected = [
+        call(("city", "Paris"), ("city", "Lyon"), ("days", "3")),
+        call(("city", "Paris"), ("days", "3"), ("note", "a"), ("note", "b")),
+        call(("city", "Paris"), ("days", "ten")),
+        call(("city", "Paris"), ("days", "3"), ("metric", "yes")),
+        call(("city", "Paris"), ("days", "3"), ("scale", "1e400")),
+    ]
+    for text in rejected:
+        assert not _matches(grammar, text), text
+        with pytest.raises(ValueError):
+            parse(text)
+    if wire == "qwen":
+        nullable = call(("city", "Paris"), ("days", "3"), ("scale", "null"))
+        assert _matches(grammar, nullable)
+        assert parse(nullable)["arguments"]["scale"] is None
+    else:
+        # Free values are unbounded runs: a ``{0,4096}`` run per parameter made
+        # the exact automaton take tens of seconds to compile one call.
+        from mlx2.structured_automaton import compile_pattern
+
+        assert len(compile_pattern(grammar).rows) < 1000
+
+
 def test_non_strict_named_tool_grammars_enforce_required_parameters():
     # sglang #40051: a non-strict tool body of optional-only parameters let
     # greedy decoding close a forced call with no arguments.
@@ -367,12 +441,14 @@ def test_non_strict_named_tool_grammars_enforce_required_parameters():
     )
     with_x = (
         "<tool_call>\n<function=sum>\n<parameter=x>\n3\n</parameter>"
-        "\n<parameter=extra>\nok\n</parameter>\n</function>\n</tool_call>"
+        "\n<parameter=label>\nok\n</parameter>\n</function>\n</tool_call>"
     )
     assert not _matches(qwen, empty)
     assert not _matches(qwen, label_only)
     assert _matches(qwen, with_x)
     assert parse_tool_call(with_x, tools)["arguments"]["x"] == 3
+    # Optional arguments are the declared ones (the schema forbids others).
+    assert not _matches(qwen, with_x.replace("=label>", "=extra>"))
 
     muse = muse_grammar(tools, choice, parallel_tool_calls=False)
     wrap = '<atem:function_calls><atem:invoke name="sum">{}</atem:invoke></atem:function_calls>'

@@ -361,6 +361,72 @@ def _strict_parameter_body(function):
     return "".join(block if needed else f"(?:{block})?" for block, needed in blocks)
 
 
+def _non_strict_value(schema):
+    """Value language the non-strict parser converts without raising.
+
+    Scalar-typed values are converted (``_convert_param_value``), so free text
+    for them is admitted by the grammar and then rejected by the parser; every
+    other value is kept or decoded best-effort and stays free text.
+    """
+    from ...structured_output import _FINITE_NUMBER, _INTEGER
+
+    kind = infer_type_from_json_schema(schema)
+    kind = kind.strip().lower() if isinstance(kind, str) else None
+    pattern = {
+        "integer": _INTEGER,
+        "number": _FINITE_NUMBER,
+        "boolean": "(?:true|false)",
+    }.get(kind)
+    if pattern is None:
+        return _RAW_VALUE_CHAR + "*"
+    return f"(?:{pattern}|null)" if _declares_null(schema) else pattern
+
+
+def _non_strict_parameter_body(function):
+    """Qwen XML parameters of a non-strict tool, as its parser accepts them.
+
+    Every required argument appears, before any optional one (sglang #40051:
+    an all-optional body lets greedy decoding emit a call with no arguments).
+    Optional arguments are the declared ones, each at most once in declared
+    order, since the parser rejects a repeated name.  Only a schema that
+    declares no properties keeps free argument names.
+    """
+    schema = function.get("parameters")
+    if not isinstance(schema, dict):
+        schema = {}
+    try:
+        schema = resolve_local_refs(schema)
+    except ValueError:
+        pass  # best-effort, as for non-strict parsing
+    properties = schema.get("properties")
+    properties = properties if isinstance(properties, dict) else {}
+    required = required_parameter_names(function)
+    for parameter in required:
+        if not isinstance(parameter, str) or not re.fullmatch(r"[^\s<>]+", parameter):
+            raise ValueError("tool parameter names are not representable in Qwen XML")
+
+    def block(name):
+        value = _non_strict_value(properties.get(name))
+        return rf"\n<parameter={re.escape(name)}>\n{value}\n</parameter>"
+
+    body = "".join(block(name) for name in required)
+    if properties:
+        # An optional name the wire cannot spell is simply never emitted.
+        body += "".join(
+            f"(?:{block(name)})?"
+            for name in properties
+            if name not in required
+            and isinstance(name, str)
+            and re.fullmatch(r"[^\s<>]+", name)
+        )
+    elif schema.get("additionalProperties") is not False:
+        body += (
+            r"(?:\n<parameter=[A-Za-z_][A-Za-z0-9_.-]{0,127}>\n"
+            rf"{_RAW_VALUE_CHAR}*\n</parameter>){{0,{max(0, 64 - len(required))}}}"
+        )
+    return body
+
+
 def constrained_tool_grammar(tools, tool_choice, *, parallel_tool_calls=True):
     """Regex for Qwen3-Coder's XML tool-call wire format.
 
@@ -379,25 +445,7 @@ def constrained_tool_grammar(tools, tool_choice, *, parallel_tool_calls=True):
         if function.get("strict", False):
             body = _strict_parameter_body(function)
         else:
-            # Values stay free text, but every required argument must appear
-            # before any optional one (sglang #40051: an all-optional body
-            # lets greedy decoding emit a call with no arguments).
-            free_value = _RAW_VALUE_CHAR + "*"
-            required = required_parameter_names(function)
-            for parameter in required:
-                if not isinstance(parameter, str) or not re.fullmatch(
-                    r"[^\s<>]+", parameter
-                ):
-                    raise ValueError(
-                        "tool parameter names are not representable in Qwen XML"
-                    )
-            body = "".join(
-                rf"\n<parameter={re.escape(parameter)}>\n{free_value}\n</parameter>"
-                for parameter in required
-            ) + (
-                r"(?:\n<parameter=[A-Za-z_][A-Za-z0-9_.-]{0,127}>\n"
-                rf"{free_value}\n</parameter>){{0,{max(0, 64 - len(required))}}}"
-            )
+            body = _non_strict_parameter_body(function)
         calls.append(
             rf"<tool_call>\n<function={re.escape(name)}>{body}\n</function>\n</tool_call>"
         )
