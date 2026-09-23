@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import uuid
 
 from ..output import StopSequenceMatcher, _safe_prefix, within_parallel_bound
@@ -14,6 +15,30 @@ TEXT_CLOSE = "<|END_TEXT|>"
 ACTION_OPEN = "<|START_ACTION|>"
 ACTION_CLOSE = "<|END_ACTION|>"
 TURN_END = "<|END_OF_TURN_TOKEN|>"
+_JSON_STRING = re.compile(r'"[^"\\]*(?:\\.[^"\\]*)*"', re.DOTALL)
+
+
+def _action_end(text: str) -> int:
+    """Where the ``<|END_ACTION|>`` closing the action JSON in ``text`` is.
+
+    North writes arguments with ``tojson``, which leaves ``<`` raw, and the
+    action grammar admits ``<|END_ACTION|>`` (an ordinary added token) inside
+    a JSON string.  Outside a string ``<`` is not JSON, so the block ends at
+    the first closer outside every string.  Returns -1 while none has arrived,
+    including while the text ends inside a string.
+    """
+    position = 0
+    while True:
+        close = text.find(ACTION_CLOSE, position)
+        if close < 0:
+            return -1
+        quote = text.find('"', position, close)
+        if quote < 0:
+            return close
+        string = _JSON_STRING.match(text, quote)
+        if string is None:
+            return -1
+        position = string.end()
 
 
 def parse_actions(text: str, tools: list[dict]) -> list[dict]:
@@ -167,7 +192,7 @@ class NorthOutputParser:
                 self.buffer = ""
                 break
             if self.channel == "tool":
-                end = self.buffer.find(ACTION_CLOSE)
+                end = _action_end(self.buffer)
                 if end < 0:
                     if final:
                         if allow_incomplete_action:

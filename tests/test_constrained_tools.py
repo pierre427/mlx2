@@ -925,6 +925,47 @@ def test_qwen_raw_enums_that_spell_a_closer_fail_closed(schema):
         qwen_grammar(tools, "required", parallel_tool_calls=False)
 
 
+@pytest.mark.parametrize(
+    ("schema", "strict", "value"),
+    [
+        (_OBJECT, True, '{"s": "a<|END_ACTION|>b"}'),
+        (_STRING_ARRAY, True, '["q\\"<|END_ACTION|>\\\\", "<|END_ACTION|>]"]'),
+        ({"type": "object"}, False, '{"s": "}]<|END_ACTION|>"}'),
+        ({}, False, '"<|START_ACTION|><|END_ACTION|>"'),
+    ],
+)
+def test_north_json_strings_keep_a_quoted_action_close(schema, strict, value):
+    """North writes arguments with ``tojson``, which leaves ``<`` raw, and
+    ``<|END_ACTION|>`` is an ordinary added token (not special, so masks
+    admit it) that the action grammar admits inside a JSON string.  The
+    parser ended the block at the first one, quoted or not, and the admitted
+    call failed with 502.  The block now ends at the first closer outside
+    its strings, however the text is chunked."""
+    import json
+
+    from mlx2.adapters.north_output import NorthOutputParser
+
+    tools = _single_parameter_tool(schema, strict=strict)
+    call = '{"tool_name":"f","parameters":{"x":' + value + "}}"
+    for parallel, calls in ((False, 1), (True, 2)):
+        grammar = north_grammar(tools, "required", parallel_tool_calls=parallel)
+        text = "<|START_ACTION|>[" + ",".join([call] * calls) + "]<|END_ACTION|>"
+        assert _server_admits(grammar, text)
+        for split in (len(text), 1, 7):
+            parser = NorthOutputParser(chat=True, thinking=False, tools=tools)
+            events = []
+            for start in range(0, len(text), split):
+                events += parser.push(text[start : start + split])
+            events += parser.push("", final=True)
+            served = [
+                json.loads(event["tool_calls"][0]["function"]["arguments"])
+                for event in events
+                if "tool_calls" in event
+            ]
+            assert served == [{"x": json.loads(value)}] * calls
+            assert not [event for event in events if event.get("content")]
+
+
 def test_non_strict_named_tool_grammars_enforce_required_parameters():
     # sglang #40051: a non-strict tool body of optional-only parameters let
     # greedy decoding close a forced call with no arguments.
