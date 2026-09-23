@@ -922,6 +922,77 @@ def test_canonical_prefix_preserves_grammar_state():
     assert checked > 10000 and changed > 100
 
 
+def test_json_object_canonical_prefix_keeps_the_open_whitespace_run(monkeypatch):
+    """Whitespace runs are bounded at 32, but the scanner's ``json_object``
+    canonical form dropped all whitespace: the mask admitted spaces forever
+    and admitted the terminal on text the terminal check then rejected."""
+    import mlx.core as mx
+    import numpy as np
+    from types import SimpleNamespace as NS
+
+    pieces = [" ", "  ", "\n", '"', '"k"', "}", "]", "1", ",", ":", "{", "[", "x"]
+    # One long run per document: several adjacent bounded runs make the
+    # ``regex`` backtracker itself exponential, whatever the canonical form.
+    run = " " * 40
+    short = " " * 3
+    docs = [
+        run + '{"k": 1}',
+        "{" + run + '"k": 1}',
+        "{" + run + "}",
+        '{"k":' + run + "1}",
+        '{"k": [' + run + "1]}",
+        '{"k": 1' + run + "}",
+        '{"k": "in a string' + run + 'still"}',
+        "{" + short + '"k"' + short + ":" + short + "[" + short + "1" + short + ","
+        + short + "2" + short + "]" + short + "}",
+    ]
+    checked = 0
+    for lead in (False, True):
+        constraint = compile_constraint({"type": "json_object"}, leading_whitespace=lead)
+        for doc in docs:
+            for cut in range(len(doc) + 1):
+                prefix = doc[:cut]
+                if constraint.fullmatch(prefix, partial=True) is None:
+                    continue  # the mask never builds on a dead prefix
+                checked += 1
+                canonical = constraint.canonicalize(prefix)
+                assert len(canonical) <= len(prefix)
+                for piece in pieces:
+                    original = constraint.fullmatch(prefix + piece, partial=True) is not None
+                    shortcut = constraint.fullmatch(canonical + piece, partial=True) is not None
+                    assert original == shortcut, (lead, prefix, canonical, piece)
+                assert (constraint.fullmatch(prefix) is not None) == (
+                    constraint.fullmatch(canonical) is not None
+                )
+    assert checked > 150
+
+    # The observable consequence on the scanner: greedy decoding that always
+    # prefers a space is stopped by the bound and still ends in valid JSON.
+    monkeypatch.setenv("MLX2_STRUCTURED_AUTOMATON", "0")
+    monkeypatch.setenv("MLX2_STRUCTURED_WORKERS", "0")
+    vocab = ["<eos>", " ", "{", "}", '"a"', ":", "1"]
+    tokenizer = NS(
+        vocab_size=len(vocab), eos_token_ids=[0],
+        decode=lambda ids, **_kw: "".join(vocab[i] for i in ids if i),
+    )
+    processor = StructuredOutputProcessor(
+        tokenizer, 0, compile_constraint({"type": "json_object"}), greedy=True,
+    )
+    assert processor.engine == "scanner"
+    preference = np.array([0.0, 9.0, 1.0, 2.0, 3.0, 4.0, 5.0], dtype=np.float32)
+    ids = [2]
+    while len(ids) < 200:
+        out = np.array(processor(mx.array(ids, dtype=mx.int32), mx.array(preference)))
+        token = int(np.argmax(out))
+        ids.append(token)
+        if token == 0:
+            break
+    assert processor.failure is None
+    text = tokenizer.decode(ids)
+    assert ids[-1] == 0 and constraint.fullmatch(text) is not None
+    assert text.count(" ") <= 64  # a bound of 32 on each of two adjacent runs
+
+
 def test_scanner_pool_finishes_the_tail_exactly(monkeypatch):
     """With parallel heads the sampled mask becomes exact (bound 0) and equals
     the brute-force admissible set restricted to tokens with mass."""

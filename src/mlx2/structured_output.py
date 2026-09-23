@@ -536,9 +536,18 @@ def _canonical_json_object_prefix(prefix):
             scalar = char
         index += 1
 
+    # Every whitespace run is bounded (``_WS``), so the run the prefix ends in
+    # is state: dropping it let the mask admit whitespace forever and admit
+    # the terminal on text the grammar rejects.  Earlier runs are closed and
+    # are not state.  Inside an open string trailing spaces are content.
+    trailing = ""
+    if string is None:
+        trailing = prefix[len(prefix.rstrip(" \t\n\r")) :]
     if root_closed:
         # A complete root object admits nothing further, whatever it held.
-        return "{}" if len(prefix) >= 2 and not stack and scalar is None and string is None else prefix
+        if len(prefix) >= 2 and not stack and scalar is None and string is None:
+            return "{}" + trailing
+        return prefix
     if not stack and (scalar is not None or string is not None):
         return prefix  # a bare scalar at the root is not an object
     out = []
@@ -567,7 +576,7 @@ def _canonical_json_object_prefix(prefix):
     if string is not None:
         escaped, hex_left, tail = string
         out.append('"' + tail)
-    canonical = "".join(out)
+    canonical = "".join(out) + trailing
     return canonical if len(canonical) <= len(prefix) else prefix
 
 
