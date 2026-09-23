@@ -2371,6 +2371,18 @@ class ServingEngine:
                 for _ in range(reserved):
                     self.slots.release()
                 raise
+        with self.lock:
+            # As in ``submit``: the worker may have exited after the liveness
+            # check above, and its final sweep may have missed these jobs.
+            orphaned = [
+                job
+                for job in jobs
+                if self._worker_stopped and self.jobs.get(job.id) is job
+            ]
+        # Siblings first, so each gets the sweep's 503 instead of the
+        # leader-ended fanout failure.
+        for job in reversed(orphaned):
+            self._finish(job, {"error": self.error or "server stopped", "status": 503})
         return jobs
 
     def expert_stream_reserve_gib(self) -> float:

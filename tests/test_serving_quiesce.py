@@ -462,6 +462,31 @@ def test_submission_racing_worker_exit_gets_a_terminal_event(scripted_engine):
         assert not engine.jobs
 
 
+@pytest.mark.parametrize("samples", [1, 3])
+def test_parallel_submission_racing_worker_exit_gets_terminal_events(
+    scripted_engine, samples
+):
+    from types import SimpleNamespace
+
+    build, state = scripted_engine
+    engine = build(declare_marker=True)
+    worker = engine.thread
+    engine.stop_event.set()
+    worker.join(10)
+    assert not worker.is_alive()
+    # submit_many lacked submit's orphan check: an n>1 submission that passed
+    # its liveness check before the final sweep never got a terminal event
+    # and kept its inflight slots.
+    engine.thread = SimpleNamespace(is_alive=lambda: True, join=lambda timeout=None: None)
+    request = {"messages": [{"role": "user", "content": "x"}], "max_tokens": 2}
+    jobs = engine.submit_many([dict(request) for _ in range(samples)])
+    for job in jobs:
+        assert _wait_for_terminal(job, 1.0) == {"error": "server stopped", "status": 503}
+    with engine.lock:
+        assert not engine.jobs and not engine.fanout_waiting
+    assert engine.slots._value == engine.max_inflight
+
+
 def test_short_self_mtp_checkpoints_suspend_park_and_restore(monkeypatch, tmp_path):
     # A two-token prompt commits a one-token boundary whose draft plane has
     # nothing written.  Saving it raised std::bad_cast: suspend dropped the
