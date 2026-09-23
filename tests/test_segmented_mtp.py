@@ -3211,6 +3211,47 @@ def test_segmented_mtp_cycle_does_not_copy_kv_buffers(monkeypatch):
     assert copied[len(copied) // 2] < capacity // 8, (copied, capacity)
 
 
+def test_partially_accepted_segmented_commit_replays_without_copying_kv():
+    """3C-5: the views' verify-time slices pinned every row buffer.
+
+    ``SegmentedKVTransaction.commit`` restores a partially accepted lane's
+    offset and replays the accepted prefix while each view still held the
+    verify-time slice of that row, so the replay could not write in place
+    and copied the whole buffer: every partially rejected round on the PLD
+    batched verify and the external-draft route. The slices are released
+    before the replay.
+    """
+    from mlx2.runtime.models.cache import KVCache
+    from mlx2.runtime.segmented_rotating_kv import SegmentedKVRows
+
+    row = [KVCache() for _ in range(2)]
+    for cache in row:
+        cache.update_and_fetch(mx.ones((1, 2, 1200, 16)), mx.ones((1, 2, 1200, 16)))
+    mx.eval([cache.keys for cache in row], [cache.values for cache in row])
+    owner = SegmentedKVRows([row])
+    replays = []
+    with _AppendBytes() as appends:
+        for index in range(4):
+            tx = owner.begin([4])
+            for view in tx.caches:
+                mask = view.make_mask(4)
+                view.update_and_fetch(
+                    mx.full((1, 2, 4, 16), index + 2.0), mx.full((1, 2, 4, 16), index + 2.0)
+                )
+                mx.eval(view.bucketed_attention(mx.zeros((1, 4, 4, 16)), 0.25, mask))
+            start = len(appends.log)
+            tx.commit([2])
+            replays.extend(appends.log[start:])
+    assert len(replays) == 8  # two layers per round
+    capacity = min(capacity for (_nbytes, capacity) in replays)
+    assert max(nbytes for (nbytes, _capacity) in replays) < capacity // 8, replays
+    # The replay kept exactly the accepted prefix of every round.
+    keys, _values = row[0].keys_and_values()
+    assert row[0].offset == 1208
+    expected = [1.0] * 1200 + [2.0, 2.0, 3.0, 3.0, 4.0, 4.0, 5.0, 5.0]
+    assert keys[0, 0, :, 0].tolist() == expected
+
+
 def test_prompt_lookup_round_does_not_copy_kv_buffers():
     """X3-1: the prompt-lookup route captures the same checkpoint per round."""
     from mlx2.runtime import pld

@@ -248,6 +248,17 @@ class SegmentedKVTransaction:
         self._rows = []
         self.owner = None
 
+    def _drop_fetched(self):
+        """Release the views' verify-time slices of the row buffers.
+
+        Each slice pins its row's buffer, so the replay append of a partially
+        accepted lane could not write in place and copied the whole buffer
+        (O(context) bytes per rejected round).  Attention is over once the
+        round is committed or aborted; nothing reads them again.
+        """
+        for view in self.caches:
+            view._fetched = [None] * len(view._fetched)
+
     def commit(self, accepted_lengths):
         """Publish exact verified-input prefix counts, independently per lane."""
         self._check_full()
@@ -256,6 +267,7 @@ class SegmentedKVTransaction:
             raise ValueError("accepted prefix exceeds verified input length")
         if any(not cache._updated for cache in self.caches):
             raise RuntimeError("every target layer must finish verification before commit")
+        self._drop_fetched()
         try:
             for lane, count in enumerate(accepted):
                 if count == self.lengths[lane]:
@@ -283,6 +295,7 @@ class SegmentedKVTransaction:
     def abort(self):
         """Cancel a partial or complete forward and restore pre-round state."""
         self._check_full()
+        self._drop_fetched()
         for lane in range(len(self._rows)):
             for layer in range(len(self.caches)):
                 self._restore(lane, layer)
