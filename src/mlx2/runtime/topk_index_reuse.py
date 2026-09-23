@@ -38,17 +38,28 @@ Granularity = Literal["token", "block"]
 # --- Selection -------------------------------------------------------------
 
 
-def attention_probs(q: mx.array, k: mx.array, scale: float) -> mx.array:
+def attention_probs(
+    q: mx.array, k: mx.array, scale: float, chunk: int = 8192
+) -> mx.array:
     """Exact float32 attention probabilities ``(B, Hq, L, T)`` for the last L rows.
 
     Query heads are grouped onto their KV head by reshaping, so K is never
-    repeated per query head (a repeat costs Hq/Hkv copies at long context).
+    repeated per query head. K is upcast ``chunk`` rows at a time: a whole
+    float32 copy is ~1 GB per layer at 128K, and because the context grows
+    every step, each copy has a new size that MLX's buffer cache keeps but
+    rarely reuses (it swapped the host on 2026-09-23).
     """
     B, Hq, L, D = q.shape
     Hkv, T = k.shape[1], k.shape[2]
     groups = Hq // Hkv
     qg = q.astype(mx.float32).reshape(B, Hkv, groups * L, D) * scale
-    logits = (qg @ k.astype(mx.float32).swapaxes(-1, -2)).reshape(B, Hq, L, T)
+    parts = [
+        qg @ k[:, :, start : start + chunk].astype(mx.float32).swapaxes(-1, -2)
+        for start in range(0, T, chunk)
+    ]
+    logits = (parts[0] if len(parts) == 1 else mx.concatenate(parts, axis=-1)).reshape(
+        B, Hq, L, T
+    )
     if L > 1:
         rows = mx.arange(T - L, T)[:, None]
         logits = mx.where(mx.arange(T)[None, :] <= rows, logits, -mx.inf)

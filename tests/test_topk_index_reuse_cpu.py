@@ -99,6 +99,12 @@ def test_attention_probs_match_repeat_reference(L):
     assert mx.allclose(probs, mx.softmax(logits, axis=-1), atol=1e-6).item()
 
 
+def test_chunked_attention_probs_match_unchunked():
+    q, k, _ = _qkv(Hq=4, Hkv=2, L=2, T=37)
+    whole = attention_probs(q, k, 0.25, chunk=1 << 20)
+    assert mx.allclose(attention_probs(q, k, 0.25, chunk=8), whole, atol=1e-6).item()
+
+
 def test_all_true_mask_is_dense_attention():
     q, k, v = _qkv()
     dense = mx.fast.scaled_dot_product_attention(q, k, v, scale=0.25)

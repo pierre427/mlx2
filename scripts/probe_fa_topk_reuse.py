@@ -251,6 +251,19 @@ def build_case(encode, filler, context, n_needles, score_tokens, rng):
 # ------------------------------------------------------------------- phases
 
 
+TRACE_MEMORY = False
+
+
+def _trace(tag):
+    if TRACE_MEMORY:
+        import mlx.core as mx
+
+        print(json.dumps({"mem": tag, "active_gb": round(mx.get_active_memory() / 1e9, 2),
+                          "cache_gb": round(mx.get_cache_memory() / 1e9, 2),
+                          "peak_gb": round(mx.get_peak_memory() / 1e9, 2),
+                          "t": round(time.time(), 1)}), flush=True)
+
+
 def _prefill(model, cache, ids, step):
     import mlx.core as mx
 
@@ -258,6 +271,7 @@ def _prefill(model, cache, ids, step):
     for start in range(0, len(ids), step):
         logits = model(mx.array([ids[start : start + step]], dtype=mx.uint32), cache=cache)
         mx.eval(logits)
+        _trace(f"prefill {start + step}/{len(ids)}")
     return logits[0, -1]
 
 
@@ -408,6 +422,12 @@ def cmd_run(args) -> int:
     from mlx2.runtime.models.cache import make_prompt_cache
     from mlx2.runtime.topk_index_reuse import ReuseProbe, Variant, install_probe
 
+    # Bound MLX's buffer cache: the default keeps freed buffers up to the
+    # memory limit, and per-step buffers of new sizes pushed the host into
+    # swap on 2026-09-23.
+    mx.set_cache_limit(int(args.cache_limit_gb * 1e9))
+    global TRACE_MEMORY
+    TRACE_MEMORY = args.trace_memory
     rng = random.Random(args.seed)
     contexts = [int(x) for x in args.contexts.split(",")]
     phases = set(args.phases.split(","))
@@ -462,12 +482,26 @@ def cmd_run(args) -> int:
         "contexts": [],
     }
 
-    base_ms = None
-    if "cost" in phases:
+    def stock_decode_ms(context):
+        # A fresh stock cache and an emptied buffer cache for every timing:
+        # timing right after the shadow phase in the same cache read ~5 ms
+        # high on Qwen3.6-35B-A3B (2026-09-23 run), which is state left behind
+        # by the float32 probability work, not attention.
+        mx.clear_cache()
         cache = make_prompt_cache(model)
-        _prefill(model, cache, filler[: args.base_context], args.prefill_step)
-        base_ms = _decode_ms(model, cache, filler[args.base_context], args.decode_tokens)
-        report["base_context"] = {"context": args.base_context, "decode_ms": base_ms}
+        _prefill(model, cache, filler[:context], args.prefill_step)
+        ms = _decode_ms(model, cache, filler[context], args.decode_tokens, warmup=4)
+        del cache
+        mx.clear_cache()
+        return ms
+
+    base_start = None
+    if "cost" in phases:
+        # The first timings in a fresh process read slow (GPU warm-up: 9B
+        # base 16.8 ms, then 12.9 ms at 32K, 2026-09-23). Discard one, and
+        # take the base at start and end, keeping the lower.
+        stock_decode_ms(args.base_context)
+        base_start = stock_decode_ms(args.base_context)
 
     for context in contexts:
         n_needles = 0 if args.cpu_tiny else args.needles
@@ -479,28 +513,23 @@ def cmd_run(args) -> int:
         entry = {"context": context, "scored_tokens": len(scored), "needles": sorted(needles)}
         started = time.perf_counter()
 
-        cache, probe = probed_cache("shadow")
-        first = _prefill(model, cache, prefix, args.prefill_step)
-        dense_rows = _teacher_forced(model, cache, first, scored,
-                                     probe if "shadow" in phases else None)
-        if "shadow" in phases:
-            expected = probe.n_layers * (len(scored) - 1)
-            if probe.counts["shadowed"] != expected:
-                raise SystemExit(f"shadow fired {probe.counts['shadowed']} times, expected "
-                                 f"{expected}; refusing to report")
-            entry["shadow"] = summarize_shadow(probe.rows, tags)
-            entry["probe_counts"] = dict(probe.counts)
         if "cost" in phases:
-            ms = _decode_ms(model, cache, scored[-1], args.decode_tokens)
-            attn = max(0.0, ms - base_ms)
-            n = probe.n_layers
-            kept = min(context, args.budget + args.window)
-            n_src = len(set(int(s) for s in args.sources.split(",")))
-            reused_attn = attn * (n_src * (1 + args.score_pass) + (n - n_src) * kept / context) / n
-            entry["cost"] = {"decode_ms": ms, "attention_ms_est": attn,
-                             "attention_share": attn / ms if ms else None,
-                             "realized_ceiling": ms / (ms - attn + reused_attn)}
-        del cache
+            entry["cost"] = {"decode_ms": stock_decode_ms(context)}
+
+        if "shadow" in phases or "substitute" in phases:
+            cache, probe = probed_cache("shadow")
+            first = _prefill(model, cache, prefix, args.prefill_step)
+            dense_rows = _teacher_forced(model, cache, first, scored,
+                                         probe if "shadow" in phases else None)
+            if "shadow" in phases:
+                expected = probe.n_layers * (len(scored) - 1)
+                if probe.counts["shadowed"] != expected:
+                    raise SystemExit(f"shadow fired {probe.counts['shadowed']} times, "
+                                     f"expected {expected}; refusing to report")
+                entry["shadow"] = summarize_shadow(probe.rows, tags)
+                entry["probe_counts"] = dict(probe.counts)
+            del cache
+            mx.clear_cache()
 
         if "substitute" in phases:
             cache, probe = probed_cache("substitute")
@@ -514,17 +543,40 @@ def cmd_run(args) -> int:
             entry["substitute"]["probe_counts"] = dict(probe.counts)
             del cache
         entry["wall_s"] = time.perf_counter() - started
+        mx.clear_cache()
+        entry["memory_gb"] = {"peak": mx.get_peak_memory() / 1e9,
+                              "active_after": mx.get_active_memory() / 1e9}
+        mx.reset_peak_memory()
         report["contexts"].append(entry)
-        brief = {"context": context, "wall_s": round(entry["wall_s"], 1)}
+        brief = {"context": context, "wall_s": round(entry["wall_s"], 1), "peak_gb": round(entry["memory_gb"]["peak"], 1)}
         if "shadow" in entry:
             brief["recall_median"] = entry["shadow"]["all"].get("recall/token/shared", {}).get("median")
         if "substitute" in entry:
             brief["kl_mean"] = entry["substitute"]["kl_mean"]
             brief["top1"] = entry["substitute"]["top1_agreement"]
         if "cost" in entry:
-            brief["realized_ceiling"] = entry["cost"]["realized_ceiling"]
+            brief["decode_ms"] = round(entry["cost"]["decode_ms"], 2)
         print(json.dumps(brief), flush=True)
 
+    if "cost" in phases:
+        base_end = stock_decode_ms(args.base_context)
+        base_ms = min(base_start, base_end)
+        report["base_context"] = {"context": args.base_context, "decode_ms": base_ms,
+                                  "start_ms": base_start, "end_ms": base_end}
+        n = sum(1 for c in make_prompt_cache(model) if type(c).__name__ == "KVCache")
+        n_src = len(set(int(s) for s in args.sources.split(",")))
+        for entry in report["contexts"]:
+            ms, context = entry["cost"]["decode_ms"], entry["context"]
+            attn = max(0.0, ms - base_ms)
+            kept = min(context, args.budget + args.window)
+            reused_attn = attn * (n_src * (1 + args.score_pass) + (n - n_src) * kept / context) / n
+            entry["cost"].update({"attention_ms_est": attn,
+                                  "attention_share": attn / ms if ms else None,
+                                  "realized_ceiling": ms / (ms - attn + reused_attn)})
+            print(json.dumps({"context": context, "decode_ms": round(ms, 2),
+                              "base_ms": round(base_ms, 2),
+                              "realized_ceiling": round(entry["cost"]["realized_ceiling"], 3)}),
+                  flush=True)
     report["verdict"] = evaluate_gates(report)
     text = json.dumps(report, indent=2, default=str)
     if args.out:
@@ -574,6 +626,10 @@ def parse_args(argv=None):
     r.add_argument("--prefill-step", type=int, default=2048)
     r.add_argument("--corpus", type=Path)
     r.add_argument("--seed", type=int, default=0)
+    r.add_argument("--trace-memory", action="store_true",
+                   help="print MLX memory after each prefill chunk")
+    r.add_argument("--cache-limit-gb", type=float, default=4.0,
+                   help="MLX buffer-cache cap (freed buffers kept for reuse)")
     r.add_argument("--out", type=Path)
     r.set_defaults(func=cmd_run)
     args = p.parse_args(argv)
