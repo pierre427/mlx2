@@ -5694,8 +5694,11 @@ class ServingEngine:
                             adapter.tokenizer,
                             prompt_len,
                             response_format=job.request.get("response_format"),
-                            grammar=tool_grammar or job.request.get("grammar"),
-                            server_grammar=server_tool_grammar,
+                            grammar=job.request.get("grammar"),
+                            # The forced-call grammar is adapter-built like
+                            # the auto one: the 4096-character client grammar
+                            # cap refused realistic tool sets on this path.
+                            server_grammar=server_tool_grammar or tool_grammar,
                             constraint_kind=(
                                 "tool_grammar"
                                 if tool_grammar or server_tool_grammar

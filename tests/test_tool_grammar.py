@@ -443,6 +443,41 @@ def test_thinking_then_strict_auto_call(scripted_engine):
     assert structured["deferred"] is True
 
 
+def test_forced_call_grammar_is_not_held_to_the_client_grammar_cap(scripted_engine):
+    # With the auto extension off, a required/named call passed the adapter
+    # grammar as a client ``grammar`` and its 4096-character cap: six tools
+    # of five parameters (a 4.3K-character Qwen grammar) failed with 400
+    # although the client sent no grammar.
+    build, state = scripted_engine
+    engine = build(declare_marker=True, execution_policy={"constrained_tool_grammar": True})
+    fillers = [
+        {
+            "type": "function",
+            "function": {
+                "name": f"tool_{index}",
+                "strict": True,
+                "parameters": {
+                    "type": "object",
+                    "properties": {f"p{k}": {"type": "string"} for k in range(5)},
+                    "required": [f"p{k}" for k in range(5)],
+                    "additionalProperties": False,
+                },
+            },
+        }
+        for index in range(5)
+    ]
+    request = _request(tools=[SUM, *fillers], tool_choice="required")
+    from mlx2.runtime.tool_parsers.qwen3_coder import constrained_tool_grammar
+
+    assert len(constrained_tool_grammar(request["tools"], "required")) > 4096
+    state["script"] = [TOOL_CALL, EOS]
+    _, _, calls, final = _run_request(engine, request)
+    assert "error" not in final, final
+    assert [call["function"]["name"] for call in calls] == ["sum"]
+    assert final["receipt"]["request_controls"]["tool_choice"]["decode_grammar"] == "engaged"
+    assert engine.counts["constrained_tool_grammar_engagements"] == 1
+
+
 def test_default_policy_is_unchanged_and_skips_are_counted(scripted_engine):
     build, state = scripted_engine
     engine = build(declare_marker=True, execution_policy={"constrained_tool_grammar": True})
