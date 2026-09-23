@@ -622,8 +622,10 @@ def feature_observations(final, kv_fidelity=None, adaptive_benchmark=None):
         segmented_rollbacks = scheduler.get("segmented_rollbacks", 0)
     counts = final.get("counts", {})
     apcv2 = final.get("apcv2", {})
+    apc_lifetime = apcv2.get("lifetime", {})
     idle_disk = apcv2.get("idle_disk", {})
     rescan = apcv2.get("persistence", {}).get("rescan", {})
+    host_available = final.get("host_memory_available_bytes")
     benchmark_evidence = (
         (adaptive_benchmark or {}).get("adaptive_qualification", {})
     )
@@ -720,7 +722,62 @@ def feature_observations(final, kv_fidelity=None, adaptive_benchmark=None):
             idle_disk.get("prefetch_restores_ok", 0),
             idle_disk.get("prefetch_hits", 0),
         ),
+        # Each observation below counts the mechanism engaging, never the
+        # policy being selected.  A hybrid rolling checkpoint must have been
+        # published and later resumed from; the KV route's only publication
+        # is a cancelled prefill's partial cache, which is its evidence.
+        "apc_rolling_checkpoints": max(
+            min(
+                counts.get("apc_rolling_checkpoints_published", 0),
+                apc_lifetime.get("rolling_hits", 0),
+            ),
+            counts.get("apc_rolling_checkpoints_cancel_published", 0),
+        ),
+        # A junction is useful only when a later diverging request hit it.
+        "apc_junction_checkpoints": min(
+            counts.get("apc_junction_checkpoints_published", 0),
+            apc_lifetime.get("junction_hits", 0),
+        ),
+        # A bypass is an SRPT reorder (an older prompt was overtaken); a
+        # forced bypass is bypass-capped service.  Slice clamps are neither.
+        "prefill_scheduling": (
+            scheduler.get("prefill_scheduling_bypasses", 0)
+            + scheduler.get("prefill_scheduling_bypass_forced", 0)
+        ),
+        # The status snapshot carries a host reading only when the policy is
+        # on and the Mach probe answered; psutil fallback leaves it absent.
+        "host_memory_signals": int(
+            type(host_available) is int and host_available > 0
+        ),
+        # A streamed model that never paged an expert in was fully resident.
+        "moe_expert_streaming": counts.get("stream_page_ins_total", 0),
+        # Preemption proves nothing unless the parked lane was replayed.
+        "memory_preemption": min(
+            counts.get("memory_preemptions", 0),
+            counts.get("preempted_replays", 0),
+        ),
+        "tool_grammar_auto": counts.get(
+            "constrained_tool_grammar_auto_engagements", 0
+        ),
+        "tool_grammar_streaming": counts.get("constrained_tool_grammar_streams", 0),
+        "external_pairwise_selection": scheduler.get(
+            "external_pairwise_selection_groups", 0
+        ),
+        "fused_gdn_dynamic_accept": fused_gdn.get(
+            "replay_dynamic_rollback_calls", 0
+        ),
     }
+
+
+def unobservable_features(features):
+    """Return required features this harness has no observation for.
+
+    Checked before any request is sent: a selected mechanism the harness
+    cannot observe can never be qualified, so the run must stop before it
+    spends GPU time rather than fail on a missing key at the very end.
+    """
+    observable = set(feature_observations({}))
+    return sorted(set(features) - observable)
 
 
 def _adaptive_benchmark_evaluator():
@@ -960,7 +1017,19 @@ def main():
         print(f"{name}: {'PASS' if condition else 'FAIL'}", flush=True)
         assert condition, name
 
+    from mlx2.qualification import required_feature_checks
+
+    required_features = {
+        name.removeprefix("feature_")
+        for name in required_feature_checks(initial["settings"])
+    } | set(args.require_feature)
     try:
+        unobservable = unobservable_features(required_features)
+        check(
+            "feature_observability",
+            not unobservable,
+            {"required": sorted(required_features), "unobservable": unobservable},
+        )
         if trusted_preflight:
             check("unit_tests", True, trusted_preflight)
         else:
@@ -1496,15 +1565,15 @@ def main():
             ),
         )
         report["feature_observations"] = observed
-        from mlx2.qualification import required_feature_checks
-        required_features = {name.removeprefix("feature_") for name in required_feature_checks(initial["settings"])}
-        for feature in sorted(required_features | set(args.require_feature)):
+        for feature in sorted(required_features):
             evidence = (
                 report.get("adaptive_benchmark")
                 if feature in {"adaptive_mtp_depth", "mtp_ordinary_handoff"}
                 else execution
             )
-            check("feature_" + feature, observed[feature] > 0, evidence)
+            # A feature without an observation is a failed check, never a
+            # KeyError that discards the whole run's evidence.
+            check("feature_" + feature, observed.get(feature, 0) > 0, evidence)
         check(
             "cache_leases", final["apcv2"]["cow"]["active_leases"] == 0, final["apcv2"]
         )

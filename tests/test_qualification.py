@@ -640,3 +640,156 @@ def test_prompt_lookup_keeps_common_environment_evidence_requirements():
     assert "feature_prompt_lookup" in checks
     assert "feature_file_backed_ple" in checks
     assert "feature_compiled_ple" in checks
+
+
+def _selectable_feature_names():
+    """Every feature ``required_feature_checks`` can demand, read from source.
+
+    Reading the source rather than a hand-built settings matrix means a newly
+    added selectable mechanism is covered the moment it is added, whatever
+    settings shape selects it.
+    """
+    import ast
+    import inspect
+
+    import mlx2.qualification as qualification
+
+    tree = ast.parse(inspect.getsource(qualification))
+    names = set()
+    for function in tree.body:
+        if not isinstance(function, ast.FunctionDef) or function.name not in {
+            "required_feature_checks",
+            "_route_feature_checks",
+        }:
+            continue
+        for node in ast.walk(function):
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "add"
+                and isinstance(node.func.value, ast.Name)
+                and node.func.value.id in {"features", "common"}
+            ):
+                names.update(
+                    arg.value for arg in node.args
+                    if isinstance(arg, ast.Constant) and isinstance(arg.value, str)
+                )
+            elif isinstance(node, ast.Set):
+                names.update(
+                    element.value for element in node.elts
+                    if isinstance(element, ast.Constant)
+                    and isinstance(element.value, str)
+                    and element.value.startswith("feature_")
+                )
+    return {name.removeprefix("feature_") for name in names}
+
+
+def test_every_selectable_feature_has_a_harness_observation():
+    from scripts.qualify_serving import feature_observations, unobservable_features
+
+    selectable = _selectable_feature_names()
+    # The source scan must itself see the whole family, or it proves nothing.
+    assert {
+        "apc_junction_checkpoints", "apc_rolling_checkpoints",
+        "external_pairwise_selection", "fused_gdn_dynamic_accept",
+        "host_memory_signals", "memory_preemption", "moe_expert_streaming",
+        "prefill_scheduling", "tool_grammar_auto", "tool_grammar_streaming",
+        "external_draft", "apc_sessions", "int8_prefill",
+    } <= selectable
+    assert sorted(selectable - set(feature_observations({}))) == []
+    assert unobservable_features(selectable) == []
+    # The startup guard names what the approved harness cannot observe.
+    assert unobservable_features(selectable | {"not_a_mechanism"}) == [
+        "not_a_mechanism"
+    ]
+
+
+@pytest.mark.parametrize(
+    ("feature", "engaged", "idle"),
+    [
+        (
+            "apc_rolling_checkpoints",
+            {"counts": {"apc_rolling_checkpoints_published": 2},
+             "apcv2": {"lifetime": {"rolling_hits": 1}}},
+            # Published but never resumed from: the hybrid route proved nothing.
+            {"counts": {"apc_rolling_checkpoints_published": 2},
+             "apcv2": {"lifetime": {"rolling_hits": 0}}},
+        ),
+        (
+            "apc_rolling_checkpoints",
+            {"counts": {"apc_rolling_checkpoints_cancel_published": 1}},
+            {"counts": {"apc_rolling_checkpoints_planned": 4}},
+        ),
+        (
+            "apc_junction_checkpoints",
+            {"counts": {"apc_junction_checkpoints_published": 1},
+             "apcv2": {"lifetime": {"junction_hits": 1}}},
+            {"counts": {"apc_junction_checkpoints_planned": 3,
+                        "apc_junction_checkpoints_published": 1},
+             "apcv2": {"lifetime": {"junction_hits": 0}}},
+        ),
+        (
+            "external_pairwise_selection",
+            {"scheduler": {"external_pairwise_selection_groups": 2}},
+            {"scheduler": {"external_pairwise_selection_groups": 0}},
+        ),
+        (
+            "fused_gdn_dynamic_accept",
+            {"execution": {"fused_gdn": {"replay_dynamic_rollback_calls": 3}}},
+            {"execution": {"fused_gdn": {"replay_rollback_calls": 3,
+                                         "replay_dynamic_rollback_calls": 0}}},
+        ),
+        (
+            "host_memory_signals",
+            {"host_memory_pressure_level": 0,
+             "host_memory_available_bytes": 64 << 30},
+            # The policy is on but the host reading was never produced.
+            {"settings": {"host_memory_signals": {"enabled": True}},
+             "host_memory_pressure_level": 0},
+        ),
+        (
+            "memory_preemption",
+            {"counts": {"memory_preemptions": 1, "preempted_replays": 1}},
+            {"counts": {"memory_preemptions": 1, "preempted_replays": 0}},
+        ),
+        (
+            "moe_expert_streaming",
+            {"counts": {"stream_page_ins_total": 12}},
+            {"counts": {"stream_page_ins_total": 0,
+                        "stream_expert_hits_total": 40}},
+        ),
+        (
+            "prefill_scheduling",
+            {"scheduler": {"prefill_scheduling_bypasses": 2}},
+            {"scheduler": {"prefill_scheduling_bypasses": 0,
+                           "prefill_scheduling_bypass_forced": 0,
+                           "prefill_scheduling_one_slice_clamps": 5}},
+        ),
+        (
+            "prefill_scheduling",
+            {"scheduler": {"prefill_scheduling_bypass_forced": 1}},
+            {"settings": {"prefill_scheduling": {"order": "srpt"}}},
+        ),
+        (
+            "tool_grammar_auto",
+            {"counts": {"constrained_tool_grammar_auto_engagements": 1}},
+            {"counts": {"constrained_tool_grammar_engagements": 4,
+                        "constrained_tool_grammar_auto_engagements": 0}},
+        ),
+        (
+            "tool_grammar_streaming",
+            {"counts": {"constrained_tool_grammar_streams": 1}},
+            {"counts": {"constrained_tool_grammar_engagements": 4,
+                        "constrained_tool_grammar_streams": 0}},
+        ),
+    ],
+)
+def test_selectable_feature_observations_need_the_mechanism_to_engage(
+    feature, engaged, idle
+):
+    from scripts.qualify_serving import feature_observations
+
+    assert feature_observations(engaged)[feature] > 0
+    # A selected policy (or any counter short of engagement) is not evidence.
+    assert feature_observations(idle)[feature] == 0
+    assert feature_observations({})[feature] == 0
