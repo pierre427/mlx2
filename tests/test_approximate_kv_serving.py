@@ -502,6 +502,92 @@ def test_exact_lane_after_approximate_traffic_is_bit_identical(host):
     assert status["counts"]["apcv2_store_skipped_approximate"] == 4
 
 
+def test_operation_refuses_planes_from_another_producer():
+    from mlx2.runtime.apc_v2 import APCv2
+    from mlx2.runtime.approximate_kv import (
+        SourceBoundKVQuantization,
+        lane_source_revision,
+        source_state_revision,
+        stage_lane_state,
+    )
+    from mlx2.runtime.cow_cache import freeze_prompt_cache
+
+    operation = KVQuantizationOperation("kv_q8", OPS32["kv_q8"], adapter_fingerprint="model-a")
+    own = source_state_revision("model-a", "layout-a")
+    bound = {"kv_q8": SourceBoundKVQuantization(operation, own)}
+    controller = ApproximateKVController(
+        ApproximateKVPolicy("kv_q8", enabled=True, qualified=True, evidence=("r",))
+    )
+
+    def branch(adapter, layout):
+        cache = KVCache()
+        cache.update_and_fetch(mx.zeros((1, 1, 4, 32)), mx.zeros((1, 1, 4, 32)))
+        key = APCv2.key(adapter, adapter=adapter, cache_layout_fingerprint=layout)
+        frozen, _ = freeze_prompt_cache([cache], key=key, tokens=range(4), cache_type="kv")
+        return frozen.branch()
+
+    def apply(planes, *, warm=True):
+        revision = lane_source_revision(planes, fresh_revision=own, warm=warm)
+        return controller.apply(
+            request_id="r", state_revision=revision,
+            state=LaneKVState(revision, tuple(planes)), adapters=bound,
+            stage=stage_lane_state,
+        )
+
+    _, receipt = apply(branch("model-a", "layout-a"))
+    assert receipt["status"] == "applied" and receipt["source_revision"] == own
+    assert receipt["source_revision"] != operation.revision
+    for adapter, layout in (("model-b", "layout-a"), ("model-a", "layout-b")):
+        with pytest.raises(ApproximateStateError, match="revision mismatch"):
+            apply(branch(adapter, layout))
+    with pytest.raises(ApproximateStateError, match="no provenance"):
+        apply([KVCache()])
+    assert apply([KVCache()], warm=False)[1]["source_revision"] == own
+
+
+def test_warm_prefix_from_another_producer_fails_closed(host, monkeypatch):
+    import dataclasses
+
+    from mlx2.runtime import apc_v2
+    from mlx2.runtime.approximate_kv import source_state_revision
+
+    forge = []
+    original = apc_v2.APCv2.lookup
+
+    def lookup(self, key, tokens, **kwargs):
+        hit = original(self, key, tokens, **kwargs)
+        metadata = getattr(hit.cache, "cow_metadata", None)
+        if forge and metadata is not None and hit.cached_tokens:
+            # The restored planes claim another artifact produced them.
+            hit.cache.cow_metadata = dataclasses.replace(
+                metadata, key=dataclasses.replace(metadata.key, adapter="other")
+            )
+        return hit
+
+    monkeypatch.setattr(apc_v2.APCv2, "lookup", lookup)
+    engine = engine_for(
+        tiny_model(), operations=OPS32, max_lanes=1,
+        approximate_kv=dict(POLICY, start_tokens=20),
+    )
+    assert engine.ready.wait(30), engine.error
+    try:
+        short_tokens, _ = run(engine, SHORT)
+        prefix = SHORT + short_tokens[:4] + list(range(80, 100))
+        forge.append(True)
+        job = engine.submit({"tokens": prefix, "max_tokens": 6, "temperature": 0})
+        refused = job.events.get(timeout=60)
+        forge.clear()
+        _, warm = run(engine, prefix)
+        alive = engine.thread.is_alive()
+    finally:
+        engine.close()
+    assert refused.get("status") == 500 and "finish_reason" not in refused
+    assert alive
+    block = warm["approximate_kv"]
+    assert block["status"] == "applied" and warm["cached_tokens"] > 0
+    assert block["source_revision"] == source_state_revision("tiny-hybrid", "tiny-layout")
+
+
 def test_structurally_approximate_cache_is_never_stored_even_if_unflagged():
     engine = ServingEngine.__new__(ServingEngine)
     from collections import Counter

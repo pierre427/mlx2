@@ -152,6 +152,38 @@ def operation_revision(adapter_fingerprint, name, descriptor) -> str:
     return hashlib.sha256(payload.encode()).hexdigest()
 
 
+def source_state_revision(adapter_fingerprint, cache_layout) -> str:
+    """Bind the exact state an operation reads to the adapter and layout."""
+    payload = json.dumps(
+        {
+            "schema": "mlx2.approximate-kv-source.v1",
+            "adapter": adapter_fingerprint,
+            "cache_layout": cache_layout,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
+    return hashlib.sha256(payload.encode()).hexdigest()
+
+
+def lane_source_revision(planes, *, fresh_revision: str, warm: bool) -> str:
+    """Source revision named by the planes' own provenance.
+
+    A warm APCv2 branch records the key it was stored under, which names the
+    adapter and cache layout that produced it; warm planes without one fail
+    closed.  Fresh planes are the serving adapter's own empty state.
+    """
+    key = getattr(getattr(planes, "cow_metadata", None), "key", None)
+    if key is None:
+        if warm:
+            raise ApproximateStateError("approximate KV source state has no provenance")
+        return fresh_revision
+    return source_state_revision(
+        getattr(key, "adapter", None), getattr(key, "cache_layout_fingerprint", None)
+    )
+
+
 def _leaves(planes):
     if not isinstance(planes, (list, tuple)):
         # An opaque cache object is its own (single) leaf.
@@ -242,6 +274,24 @@ class KVQuantizationOperation:
                     f"{type(leaf).__name__} cannot join a continuous batch"
                 )
         return LaneKVState(f"{state.revision}:{self.name}", tuple(planes), quantized)
+
+
+class SourceBoundKVQuantization:
+    """One operation bound to the exact source state it may read.
+
+    ``ApproximateKVController`` requires the operation's revision to equal the
+    revision of the state it transforms, so binding it to the serving
+    adapter's source revision refuses planes produced by anything else.
+    """
+
+    def __init__(self, operation: KVQuantizationOperation, source_revision: str):
+        self.operation = operation
+        self.name = operation.name
+        self.descriptor = operation.descriptor
+        self.revision = str(source_revision)
+
+    def apply(self, state: LaneKVState) -> LaneKVState:
+        return self.operation.apply(state)
 
 
 def declared_operations(adapter, *, adapter_fingerprint) -> dict:

@@ -3898,7 +3898,13 @@ class ServingEngine:
                 "fidelity": "exact",
             }
             if approximate_operation is not None:
-                from .runtime.approximate_kv import LaneKVState, stage_lane_state
+                from .runtime.approximate_kv import (
+                    LaneKVState,
+                    SourceBoundKVQuantization,
+                    lane_source_revision,
+                    source_state_revision,
+                    stage_lane_state,
+                )
                 from .runtime.approximate_state import (
                     ApproximateKVController,
                     ApproximateKVPolicy,
@@ -3923,14 +3929,26 @@ class ServingEngine:
                     )
                 )
 
-                def apply_approximate_kv(request_id, planes):
+                # The operation is bound to this adapter's exact state; the
+                # planes' own provenance names theirs, so the controller's
+                # revision gate refuses planes any other producer made.
+                approximate_source = source_state_revision(
+                    adapter.identity["fingerprint"], adapter.layout
+                )
+                approximate_bound = {
+                    name: SourceBoundKVQuantization(operation, approximate_source)
+                    for name, operation in approximate_operations.items()
+                }
+
+                def apply_approximate_kv(request_id, planes, *, warm=False):
+                    revision = lane_source_revision(
+                        planes, fresh_revision=approximate_source, warm=warm
+                    )
                     return approximate_controller.apply(
                         request_id=request_id,
-                        state_revision=approximate_operation.revision,
-                        state=LaneKVState(
-                            approximate_operation.revision, tuple(planes)
-                        ),
-                        adapters=approximate_operations,
+                        state_revision=revision,
+                        state=LaneKVState(revision, tuple(planes)),
+                        adapters=approximate_bound,
                         candidate=self.qualification_mode,
                         stage=stage_lane_state,
                     )
@@ -5502,7 +5520,7 @@ class ServingEngine:
                                         )
                                     source = make_prompt_cache(adapter.model)
                                 updated, approximate_receipt = apply_approximate_kv(
-                                    job.id, source
+                                    job.id, source, warm=requantized
                                 )
                                 lane_cache = list(updated.planes)
                                 job.approximate_kv_applied = True
