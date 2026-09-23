@@ -295,13 +295,21 @@ def main(argv=None):
     p.add_argument("--corpus", type=Path)
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--out", type=Path)
+    p.add_argument("--save-reference", type=Path,
+                   help="dense arm only: save its logits and answers for later arm processes")
+    p.add_argument("--reference", type=Path,
+                   help="compare against a saved dense reference instead of an in-process dense arm")
     args = p.parse_args(argv)
     if not args.cpu_tiny and not args.model:
         raise SystemExit("--model is required unless --cpu-tiny")
     arms = args.arms.split(",")
     unknown = [a for a in arms if a not in ARMS]
-    if unknown or arms[0] != "dense":
-        raise SystemExit(f"unknown arms {unknown}" if unknown else "the first arm must be dense")
+    if unknown:
+        raise SystemExit(f"unknown arms {unknown}")
+    if args.reference is None and arms[0] != "dense":
+        raise SystemExit("the first arm must be dense unless --reference is given")
+    if args.save_reference is not None and arms != ["dense"]:
+        raise SystemExit("--save-reference runs the dense arm alone")
     if args.cpu_tiny:
         args.context = args.context or 192
         args.window, args.tf_tokens, args.warmup_steps = 8, 24, 2
@@ -368,7 +376,20 @@ def main(argv=None):
             {"partner": q["partner"]} if "partner" in q else {}) for q in questions],
         "gates": GATES, "arms": [],
     }
+    # One arm per process keeps long-lived allocate/free cycles (which made
+    # macOS write other apps' compressed memory to swap, 2026-09-23) out of
+    # the run; the dense reference then travels between processes on disk.
+    workload_sha = hashlib.sha256(json.dumps([prompt, text, [q["prompt"] for q in questions]]
+                                             ).encode()).hexdigest()
+    report["workload_sha256"] = workload_sha
     dense_rows = dense_record = None
+    if args.reference is not None:
+        meta = json.loads(args.reference.with_suffix(".json").read_text())
+        if meta["workload_sha256"] != workload_sha:
+            raise SystemExit("reference was made on a different prompt/text/questions; refusing")
+        dense_rows = mx.load(str(args.reference.with_suffix(".npz")))["rows"]
+        dense_record = meta["record"]
+        report["reference"] = {"path": str(args.reference), "decode_ms": dense_record["decode_ms"]}
     for i, arm in enumerate(arms):
         started = time.perf_counter()
         record, rows = run_arm(model, arm, prompt, text, questions, encode=encode,
@@ -378,7 +399,7 @@ def main(argv=None):
             dense_rows, dense_record = rows, record
         else:
             record["vs_dense"] = compare(dense_rows, rows, text, dense_record, record)
-        record["label"] = arm if arm != "dense" or i == 0 else "dense_end"
+        record["label"] = arm if arm != "dense" or (i == 0 and args.reference is None) else "dense_end"
         report["arms"].append(record)
         brief = {"arm": record["label"], "ms": round(record["decode_ms"], 2),
                  "peak_gb": round(record["peak_memory_gb"], 1), "wall_s": round(record["wall_s"], 1)}
@@ -391,6 +412,11 @@ def main(argv=None):
             brief["acc"] = sum(a["correct"] for a in record["answers"]) / len(record["answers"])
         print(json.dumps(brief), flush=True)
 
+    if args.save_reference is not None:
+        args.save_reference.parent.mkdir(parents=True, exist_ok=True)
+        mx.savez(str(args.save_reference.with_suffix(".npz")), rows=dense_rows)
+        args.save_reference.with_suffix(".json").write_text(json.dumps(
+            {"workload_sha256": workload_sha, "record": dense_record}, default=str))
     dense_ms = dense_record["decode_ms"]
     q8 = next((r for r in report["arms"] if r["arm"] == "kv_q8"), None)
     for r in report["arms"]:
