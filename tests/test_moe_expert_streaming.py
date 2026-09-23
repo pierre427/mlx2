@@ -616,6 +616,44 @@ def test_atlas_checkpoint_after_sink_loss_matches_an_unbroken_sink(tmp_path):
     assert [generation["observations"] for generation in lost.generations] == history
 
 
+def test_atlas_sink_lost_before_the_first_checkpoint_keeps_the_earlier_atlas(tmp_path):
+    # A lost sink was rebuilt from the atlas this collector last wrote, which
+    # does not exist before its first checkpoint. An atlas of earlier runs
+    # that the sink held at bind and lost before then was dropped: the
+    # checkpoint wrote only the new interval, with none of the earlier
+    # counts, total or generations.
+    n = expert_atlas.DEFAULT_HALF_LIFE
+
+    def run(sink, *, lose_sink):
+        expert_atlas.write_atlas(
+            sink,
+            expert_atlas.build_manifest(
+                digest="0" * 64,
+                num_layers=1,
+                num_units=4,
+                total_observations=4 * n,
+                generations=[{"source": "earlier-run", "observations": 4 * n}],
+            ),
+            np.array([[0, 0, 0, 4 * n]], dtype=np.uint64),
+        )
+        collector = expert_atlas.AtlasCollector(None, sink=sink, checkpoint_every=n)
+        collector.bind(num_layers=1, num_units=4)
+        if lose_sink:
+            for path in expert_atlas._paths(sink):
+                path.unlink()
+        collector.observe(0, np.zeros(n, dtype=np.int64))
+        return expert_atlas.load_atlas(sink)
+
+    kept = run(tmp_path / "kept.json", lose_sink=False)
+    lost = run(tmp_path / "lost.json", lose_sink=True)
+    assert kept.counts.tolist() == [[n, 0, 0, 2 * n]]
+    assert lost.counts.tolist() == kept.counts.tolist()
+    assert lost.total_observations == kept.total_observations == 5 * n
+    history = [generation["observations"] for generation in kept.generations]
+    assert history == [4 * n, n]
+    assert [generation["observations"] for generation in lost.generations] == history
+
+
 def test_counterfactual_reports_what_pinning_would_have_done(tmp_path):
     trace = tmp_path / "trace.bin"
     layers = 2

@@ -94,9 +94,10 @@ class AtlasCollector:
         # the collector's lifetime, so each flush merges only the difference;
         # merging the whole array would re-add every earlier checkpoint.
         self._persisted_counts = None
-        # The atlas the last flush wrote: decayed counts, total and history.
-        # A sink that has since gone missing is rebuilt from this rather than
-        # from ``counts``, whose lifetime totals never decay.
+        # The atlas the last flush wrote, or before the first flush the one
+        # the sink held at bind: decayed counts, total and history. A sink
+        # that has since gone missing is rebuilt from this rather than from
+        # ``counts``, whose lifetime totals never decay.
         self._persisted_atlas = None
         self.observations = 0
         self.persisted_observations = 0
@@ -116,6 +117,13 @@ class AtlasCollector:
         self.num_units = int(num_units)
         self.counts = np.zeros((self.num_layers, self.num_units), dtype=np.uint64)
         self._persisted_counts = np.zeros_like(self.counts)
+        if self.sink is not None:
+            # The first flush merges onto the sink as it then stands. Keep
+            # the atlas it holds now, validated as that flush validates it,
+            # so a sink lost before the first flush is rebuilt from it too.
+            self._persisted_atlas = load_atlas(
+                self.sink, expect_digest=self._digest(), geometry=self.counts.shape
+            )
         if self.trace_path is not None and self._trace is None:
             self.trace_path.parent.mkdir(parents=True, exist_ok=True)
             self._trace = open(self.trace_path, "wb")
@@ -173,8 +181,9 @@ class AtlasCollector:
             # last flush wrote. Rewriting the lifetime counts instead would
             # undo the decay earlier checkpoints applied, and drop the counts
             # and generations of earlier runs that only the sink carried.
-            # Before any flush has succeeded nothing is persisted, and the
-            # difference is every observation.
+            # Before the first flush that is the atlas the sink held at bind;
+            # with none, nothing is persisted and the difference is every
+            # observation.
             prior = self._persisted_atlas
         snapshot = self.counts.copy()
         new_observations = self.observations - self.persisted_observations
