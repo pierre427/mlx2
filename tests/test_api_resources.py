@@ -84,6 +84,51 @@ def test_file_store_durable_listing_filter_and_cursor(tmp_path):
     assert restored.content("tenant-a", first["id"])[0] == b'{"one":1}\n'
 
 
+def test_response_store_evicts_the_largest_tenant_not_the_oldest_entry():
+    store = ResponseStore(max_entries=4)
+    store.put("alice", {"id": "resp_alice"}, [{"role": "user", "content": "a"}])
+    for index in range(10):
+        store.put("mallory", {"id": f"resp_m{index}"}, [{"role": "user", "content": "m"}])
+    # One tenant writing past the global bound displaces only its own entries.
+    assert store.context("alice", "resp_alice") == [{"role": "user", "content": "a"}]
+    assert store.status()["entries"] == 4
+    assert [key for key in store._entries if key[0] == "mallory"] == [
+        ("mallory", f"resp_m{index}") for index in (7, 8, 9)
+    ]
+    # Once alice is the larger tenant, her own least recent entry goes first.
+    for index in range(3):
+        store.put("alice", {"id": f"resp_a{index}"}, [{"role": "user", "content": "a"}])
+    assert store.status()["entries"] == 4
+    assert {key[0] for key in store._entries} == {"alice", "mallory"}
+    with pytest.raises(ResourceNotFound):
+        store.get("alice", "resp_alice")
+    assert store.get("alice", "resp_a2")["id"] == "resp_a2"
+
+
+def test_response_store_byte_bound_never_drops_the_entry_just_written():
+    store = ResponseStore(max_entries=100, max_bytes=3000)
+    for index in range(3):
+        store.put("small", {"id": f"resp_s{index}"}, [{"role": "user", "content": "s" * 400}])
+    store.put("big", {"id": "resp_big"}, [{"role": "user", "content": "b" * 1800}])
+    assert store.get("big", "resp_big")["id"] == "resp_big"
+    assert store.status()["bytes"] <= 3000
+
+
+def test_file_store_evicts_the_largest_tenant_not_the_oldest_file():
+    files = FileStore(max_files=3)
+    kept = files.create(
+        "alice", filename="out.jsonl", purpose="batch",
+        content_type="application/jsonl", content=b"{}\n",
+    )
+    for index in range(5):
+        files.create(
+            "mallory", filename=f"{index}.txt", purpose="user_data",
+            content_type="text/plain", content=b"x",
+        )
+    assert files.get("alice", kept["id"])["id"] == kept["id"]
+    assert files.status()["files"] == 3
+
+
 def test_batch_restart_marks_interrupted_work_failed(tmp_path):
     files = FileStore(root=tmp_path / "files")
     source = files.create(

@@ -118,6 +118,30 @@ def _unlink_restored(path, counts):
         counts["restore_cleanup_failures"] += 1
 
 
+def _eviction_key(entries, *, size=None, keep=None):
+    """The least recently used entry of the tenant holding the most.
+
+    ``entries`` maps ``(tenant_id, id)`` to a value, least recent first.  One
+    global LRU let any tenant evict every other tenant's responses and files
+    by writing enough of its own.  Evicting from the largest tenant keeps the
+    global bound, but a tenant is only displaced by its own writes once it
+    is the largest.  Size is entry count, or bytes when ``size`` is given;
+    ties go to the tenant whose entry is least recent.  ``keep`` (the entry
+    just written) is never chosen.
+    """
+    totals = Counter()
+    oldest = {}
+    for key, value in entries.items():
+        totals[key[0]] += 1 if size is None else size(value)
+        if key != keep:
+            oldest.setdefault(key[0], key)
+    # sorted() is stable: tied tenants stay in least-recent-entry order.
+    for tenant, _total in sorted(totals.items(), key=lambda item: -item[1]):
+        if tenant in oldest:
+            return oldest[tenant]
+    return next(iter(entries))
+
+
 def _page(records, *, limit=20, after=None):
     if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 100:
         raise ValueError("limit must be an integer from 1 to 100")
@@ -202,11 +226,21 @@ class ResponseStore:
                 self._counts["restore_failures"] += 1
                 continue
             while len(self._entries) > self.max_entries or self._bytes > self.max_bytes:
-                key, (size, _) = self._entries.popitem(last=False)
+                victim = self._eviction_key(key)
+                size, _ = self._entries.pop(victim)
                 self._bytes -= size
-                _unlink_restored(self._path(*key), self._counts)
+                _unlink_restored(self._path(*victim), self._counts)
                 self._counts["evictions"] += 1
         self._counts["restored"] += len(self._entries)
+
+    def _eviction_key(self, keep):
+        return _eviction_key(
+            self._entries,
+            size=None
+            if len(self._entries) > self.max_entries
+            else (lambda entry: entry[0]),
+            keep=keep,
+        )
 
     def put(self, tenant_id, payload, context_messages):
         tenant_id = str(tenant_id or "default")
@@ -231,7 +265,8 @@ class ResponseStore:
             while (
                 len(self._entries) > self.max_entries or self._bytes > self.max_bytes
             ):
-                removed_key, (removed_size, _) = self._entries.popitem(last=False)
+                removed_key = self._eviction_key(key)
+                removed_size, _ = self._entries.pop(removed_key)
                 self._bytes -= removed_size
                 removed_path = self._path(*removed_key)
                 if removed_path is not None:
@@ -411,12 +446,22 @@ class FileStore:
                 self._counts["restore_failures"] += 1
                 continue
             while len(self._files) > self.max_files or self._bytes > self.max_bytes:
-                key, removed = self._files.popitem(last=False)
+                victim = self._eviction_key(key)
+                removed = self._files.pop(victim)
                 self._bytes -= len(removed.content)
-                for path in self._paths(*key):
+                for path in self._paths(*victim):
                     _unlink_restored(path, self._counts)
                 self._counts["evictions"] += 1
         self._counts["restored"] += len(self._files)
+
+    def _eviction_key(self, keep):
+        return _eviction_key(
+            self._files,
+            size=None
+            if len(self._files) > self.max_files
+            else (lambda item: len(item.content)),
+            keep=keep,
+        )
 
     def create(self, tenant_id, *, filename, purpose, content_type, content):
         if purpose not in self.PURPOSES:
@@ -455,7 +500,8 @@ class FileStore:
             self._files[key] = item
             self._bytes += len(content)
             while len(self._files) > self.max_files or self._bytes > self.max_bytes:
-                removed_key, removed = self._files.popitem(last=False)
+                removed_key = self._eviction_key(key)
+                removed = self._files.pop(removed_key)
                 self._bytes -= len(removed.content)
                 for path in self._paths(*removed_key):
                     if path is not None:
