@@ -7,6 +7,12 @@ import uuid
 
 from . import agent_compat as _agent
 
+# Chat Completions caps ``stop`` at 4 strings.  The Messages API has no such
+# cap and the engine's stop matcher has no fixed limit, but its per-token work
+# grows with every sequence, so Anthropic requests keep a documented bound.
+MAX_STOP_SEQUENCES = 16
+
+
 class ModelOutputError(RuntimeError):
     """The model emitted a wire value that cannot be represented safely."""
 
@@ -42,7 +48,12 @@ def _cache_control(value):
 def _chat_tool(tool, *, anthropic=False, default_strict=None):
     tool = _object(tool, "tool")
     if anthropic:
-        _only(tool, {"name", "description", "input_schema", "cache_control"}, "tool")
+        allowed = {"name", "description", "input_schema", "cache_control"}
+        if tool.get("type") == "custom":
+            # The explicit form of a client tool; server tool types stay
+            # unsupported.
+            allowed.add("type")
+        _only(tool, allowed, "tool")
         if "cache_control" in tool:
             _cache_control(tool["cache_control"])
         name = _text(tool.get("name"), "tool name", empty=False)
@@ -412,6 +423,8 @@ def anthropic_request_to_chat(
         ("stream", "stream"),
         ("return_progress", "return_progress"),
     ):
+        if source == "stop_sequences" and body.get(source) == []:
+            continue  # An empty list asks for no stop sequences.
         if source in body:
             result[target] = body[source]
     if count_tokens and result.get("stream"):

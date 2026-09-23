@@ -78,6 +78,7 @@ from .http_security import (
     policy_for_bind,
 )
 from .anthropic_compat import (
+    MAX_STOP_SEQUENCES as ANTHROPIC_MAX_STOP_SEQUENCES,
     AnthropicStreamTranslator,
     ModelOutputError,
     anthropic_request_to_chat,
@@ -378,6 +379,7 @@ def validate_request(
     allow_strict_auto=False,
     constrained_tool_grammar=False,
     max_tools=64,
+    max_stops=4,
 ):
     """Validate one request body.
 
@@ -614,11 +616,12 @@ def validate_request(
         stops = [body["stop"]] if isinstance(body["stop"], str) else body["stop"]
         if (
             not isinstance(stops, list)
-            or not 1 <= len(stops) <= 4
+            or not 1 <= len(stops) <= max_stops
             or any(not isinstance(s, str) or not 1 <= len(s) <= 256 for s in stops)
         ):
             raise ValueError(
-                "stop must contain 1 to 4 nonempty strings of at most 256 characters"
+                f"stop must contain 1 to {max_stops} nonempty strings of at most "
+                "256 characters"
             )
     samples = body.get("n", 1)
     if isinstance(samples, bool) or not isinstance(samples, int) or not 1 <= samples <= 8:
@@ -2555,6 +2558,7 @@ def handler_for(
                         max_tools=128
                         if responses_api and agent_compat.enabled
                         else 64,
+                        max_stops=ANTHROPIC_MAX_STOP_SEQUENCES if anthropic else 4,
                     )
                 if semantic_middleware is not None and chat:
                     ensure_semantic_classifier()

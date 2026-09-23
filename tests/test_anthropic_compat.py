@@ -438,3 +438,39 @@ def test_anthropic_engine_error_before_first_token_uses_anthropic_envelope(
     assert payload["type"] == "error"
     assert payload["error"] == {"type": error_type, "message": "engine refused"}
     assert payload["mlx2"] == {"cache": "apcv2"}
+
+
+def test_anthropic_accepts_legal_stop_sequence_and_custom_tool_shapes(
+    anthropic_endpoint,
+):
+    engine, base = anthropic_endpoint
+    request = {
+        "model": "fixture",
+        "max_tokens": 32,
+        "messages": [{"role": "user", "content": "hi"}],
+    }
+
+    def status(body, path="/v1/messages"):
+        try:
+            with _post(base, path, body) as response:
+                return response.status
+        except HTTPError as error:
+            return error.code
+
+    # An empty list is the same as omitting stop_sequences.
+    assert status({**request, "stop_sequences": []}) == 200
+    assert "stop" not in engine.last_request
+    # The Messages API has no 4-string cap; the engine's matcher has none.
+    five = ["a", "b", "c", "d", "e"]
+    assert status({**request, "stop_sequences": five}) == 200
+    assert engine.last_request["stop"] == five
+    assert status({**request, "stop_sequences": [str(i) for i in range(17)]}) == 400
+    # Chat Completions keeps its own 4-string contract.
+    assert status({"model": "fixture", "messages": request["messages"], "stop": five},
+                  path="/v1/chat/completions") == 400
+    # ``type: "custom"`` is the explicit form of a client tool.
+    custom = {"type": "custom", "name": "t", "input_schema": {"type": "object"}}
+    assert status({**request, "tools": [custom]}) == 200
+    assert engine.last_request["tools"][0]["function"]["name"] == "t"
+    server_tool = {**custom, "type": "web_search_20250305"}
+    assert status({**request, "tools": [server_tool]}) == 400
