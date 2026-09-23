@@ -139,6 +139,50 @@ class HyperDirectoryTests(unittest.TestCase):
         self.assertTrue(self.directory.delete_session(context))
         self.assertFalse(legacy.exists())
 
+    def test_delete_removes_capsules_only_the_legacy_layer_still_names(self):
+        # A session migrated from its legacy layer keeps that file until the
+        # delete, and a derived capsule rebuilt after the migration leaves
+        # the old one named only there: it holds the session's facts too.
+        context = DirectoryContext(model="m", tenant="t", session="s")
+        other = DirectoryContext(model="m", tenant="t", session="other")
+        key = context.key_for(Scope.SESSION)
+        shared = self.capsule("shared")
+        base = self.capsule("secret v0", parents=(shared.digest,))
+        neural = self.capsules.put(
+            kind="neural_state",
+            data={"label": "derived from v0"},
+            parents=(base.digest,),
+            provenance={"source": "unit-test"},
+        )
+        legacy = self.directory._legacy_path(Scope.SESSION, key)
+        legacy.write_text(json.dumps({
+            "schema": "mlx2-hyper-directory-v1", "scope": "session", "key": list(key),
+            "revision": 1,
+            "handles": {"semantic": base.digest, "neural": neural.digest},
+            "policies": {}, "relationships": [],
+        }))
+        self.directory.update(Scope.SESSION, other, expected_revision=0,
+                              handles={"memory": shared.digest})
+        self.directory.update(Scope.SESSION, context, expected_revision=1)
+        current = self.capsule("secret v1", parents=(base.digest,))
+        rebuilt = self.capsules.put(
+            kind="neural_state",
+            data={"label": "derived from v1"},
+            parents=(current.digest,),
+            provenance={"source": "unit-test"},
+        )
+        self.directory.update(
+            Scope.SESSION, context, expected_revision=2,
+            handles={"semantic": current.digest, "neural": rebuilt.digest},
+        )
+        self.assertTrue(legacy.exists())
+
+        self.assertTrue(self.directory.delete_session(context))
+
+        self.assertFalse(legacy.exists())
+        remaining = {path.stem for path in self.capsules.objects.glob("*.json")}
+        self.assertEqual(remaining, {shared.digest})
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -249,6 +249,11 @@ class HyperDirectory:
             # Validate the layer before touching either current or legacy path.
             current = self._read(Scope.SESSION, key)
             owned = []
+            # A migrated session keeps its legacy layer beside the canonical
+            # one until this delete unlinks it, and a handle replaced after
+            # the migration (a rebuilt neural capsule) is named only there.
+            # Doom what every owned layer reaches, not just the one resolved.
+            owned_roots = []
             for path in (self._path(Scope.SESSION, key), self._legacy_path(Scope.SESSION, key)):
                 if not path.exists():
                     continue
@@ -264,7 +269,11 @@ class HyperDirectory:
                     continue
                 if value.get("scope") != Scope.SESSION.value or value.get("key") != list(key):
                     raise ValueError("invalid hyper directory layer")
+                handles = value.get("handles", {})
+                if not isinstance(handles, dict):
+                    raise ValueError("invalid hyper directory layer")
                 owned.append(path)
+                owned_roots.extend(handles.values())
             if not owned or current.get("deleted"):
                 return False
             # Every commit writes a capsule holding the whole session graph,
@@ -285,7 +294,7 @@ class HyperDirectory:
                 ):
                     raise ValueError("invalid hyper directory layer")
                 live_roots.extend(value["handles"].values())
-            doomed = self._capsule_closure(current["handles"].values())
+            doomed = self._capsule_closure(owned_roots)
             doomed -= self._capsule_closure(live_roots)
             # Replace the layer with an empty tombstone one revision later
             # instead of unlinking it. Unlinking reset the revision to 0, so a
