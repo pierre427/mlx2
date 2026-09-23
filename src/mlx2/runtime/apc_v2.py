@@ -10,6 +10,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import shutil
 import stat
 import threading
@@ -230,6 +231,18 @@ def _key_from_manifest(value: dict) -> APCKey:
         return item
 
     return APCKey(**{name: freeze(value[name]) for name in fields})
+
+
+# ``persistent_blocks.encode_block_file`` staging names for an APCv2 payload
+# ``apc-idle-<uuid>.<plane>.safetensors``.
+_BLOCK_STAGING_DIRECTORY = re.compile(
+    r"\.apc-idle-[0-9a-f]{32}\.(?:target|draft|aux)\.safetensors\.blocks"
+    r"\.[0-9a-f]{32}\.tmp"
+)
+_BLOCK_STAGING_MANIFEST = re.compile(
+    r"\.apc-idle-[0-9a-f]{32}\.(?:target|draft|aux)\.safetensors"
+    r"\.[0-9a-f]{32}\.manifest"
+)
 
 
 # Serving's base semantic namespaces (``serving.cache_semantic_fingerprint``)
@@ -641,6 +654,19 @@ class APCv2(PrefixIndex):
             ):
                 if directory.is_dir() and directory.parent == self._idle_disk_dir:
                     shutil.rmtree(directory, ignore_errors=True)
+            # ``encode_block_file`` stages its block directory and manifest
+            # under generated names; a kill mid-encode leaves both behind.
+            # Match only those exact names, never a foreign file.
+            for path in self._idle_disk_dir.glob(".apc-idle-*"):
+                if path.is_symlink():
+                    continue
+                if path.is_dir() and _BLOCK_STAGING_DIRECTORY.fullmatch(path.name):
+                    shutil.rmtree(path, ignore_errors=True)
+                elif path.is_file() and _BLOCK_STAGING_MANIFEST.fullmatch(path.name):
+                    try:
+                        path.unlink()
+                    except OSError:
+                        pass
 
     @staticmethod
     def _sha256_file(path: Path) -> str:

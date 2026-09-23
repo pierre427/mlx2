@@ -555,6 +555,46 @@ def test_apcv2_startup_removes_orphaned_block_directories(tmp_path):
     assert (unrelated / "keep.block").read_bytes() == b"owned elsewhere"
 
 
+def test_apcv2_startup_removes_block_staging_left_by_a_killed_encode(
+    tmp_path, monkeypatch
+):
+    import mlx2.runtime.persistent_blocks as blocks
+
+    payload = tmp_path / f"apc-idle-{'a' * 32}.target.safetensors"
+    payload.write_bytes(b"payload-bytes")
+
+    class Killed(BaseException):
+        pass
+
+    def killed(*_args, **_kwargs):
+        raise Killed()
+
+    with monkeypatch.context() as patch:
+        # SIGKILL runs no cleanup: freeze the staging exactly as encode left it.
+        patch.setattr(blocks.os, "replace", killed)
+        patch.setattr(blocks.shutil, "rmtree", lambda *args, **kwargs: None)
+        patch.setattr(blocks.Path, "unlink", lambda self, missing_ok=False: None)
+        with pytest.raises(Killed):
+            encode_block_file(payload, block_bytes=4, signature="exact")
+    staged = list(tmp_path.glob(".apc-idle-*"))
+    assert {path.is_dir() for path in staged} == {True, False}
+    foreign = [
+        tmp_path / ".apc-idle-notes.manifest",
+        tmp_path / f".apc-idle-{'b' * 32}.target.safetensors.manifest",
+    ]
+    for path in foreign:
+        path.write_text("owned elsewhere")
+    foreign_directory = tmp_path / f".other.safetensors.blocks.{'c' * 32}.tmp"
+    foreign_directory.mkdir()
+    APCv2(
+        max_bytes=1 << 20, layout_name="layout", idle_disk_seconds=1,
+        idle_disk_dir=str(tmp_path), persistent_block_bytes=4,
+    )
+    assert not any(path.exists() for path in staged)
+    assert all(path.read_text() == "owned elsewhere" for path in foreign)
+    assert foreign_directory.is_dir()
+
+
 def test_pending_capsule_member_removal_releases_whole_group():
     apc = APCv2(max_bytes=1 << 20, layout_name="layout")
     pool = CacheCapsulePool(apc.capsule_generation, enabled=True)
