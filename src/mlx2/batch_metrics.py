@@ -242,7 +242,11 @@ class BatchRuntimeMetrics:
                 state.mechanism = mechanism
             self._active_lanes = max(0, active_lanes)
             self._peak_active_lanes = max(self._peak_active_lanes, self._active_lanes)
-            self._mechanisms[mechanism] += 1
+            # A memory-preempted request is attached again when it replays;
+            # the engagement counter counts requests, so only the first
+            # attachment of a tracked request counts.
+            if state is None or state.attached_at is None:
+                self._mechanisms[mechanism] += 1
             attached_at = self._event(
                 "lane_attached",
                 request_id,

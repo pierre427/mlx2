@@ -22,6 +22,25 @@ def test_bounded_metrics_report_latency_fairness_and_mechanism():
     assert snapshot["memory"] == {"headroom_bytes": 10}
 
 
+def test_replayed_attachment_counts_one_engagement():
+    metrics = BatchRuntimeMetrics(clock=lambda: 1.0)
+    metrics.admitted("r1", "t", 0)
+    metrics.dequeued("r1", 0)
+    metrics.lane_attached("r1", 1, "ordinary")
+    # Memory preemption evicts the lane and the request replays on a new one.
+    metrics.lane_attached("r1", 1, "ordinary")
+    metrics.token("r1")
+    metrics.terminal("r1", "completed", "stop")
+    counters = metrics.prometheus_snapshot()["counters"]
+    engagements = {
+        dict(labels)["capability"]: value
+        for (name, labels), value in counters.items()
+        if name == "mlx2_capability_engagements_total"
+    }
+    assert engagements == {"ordinary": 1}
+    assert metrics.snapshot()["mechanism_receipts"] == {"ordinary": 1}
+
+
 def test_fault_spec_is_qualification_only_and_bounded():
     assert BatchFaultSpec.parse(None, enabled=False) is None
     spec = BatchFaultSpec.parse(
