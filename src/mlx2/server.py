@@ -35,6 +35,7 @@ from .serving import (
     SuspendUnavailable,
     take_prompt_progress,
 )
+from .batch_metrics import http_metric_route
 from .logprobs import MAX_TOP_LOGPROBS, wants_logprobs
 from .request_limits import (
     DEFAULT_OUTPUT_TOKENS,
@@ -1584,39 +1585,7 @@ def handler_for(
             )
 
         def _metric_route(self):
-            path = self.path.split("?", 1)[0]
-            if path.startswith("/v1/apc/sessions"):
-                return "apc_sessions"
-            if path.startswith("/v1/admin/"):
-                return "admin"
-            if path.startswith("/v1/responses/") and path.endswith("/input_items"):
-                return "response_input_items"
-            if path.startswith("/v1/responses/"):
-                return "responses_resource"
-            if path.startswith("/v1/files/"):
-                return "files_resource"
-            if path.startswith("/v1/batches/"):
-                return "batches_resource"
-            return {
-                "/metrics": "metrics",
-                "/health": "health",
-                "/v1/models": "models",
-                "/v1/status": "status",
-                "/v1/status/batching": "batching_status",
-                "/v1/completions": "completions",
-                "/v1/chat/completions": "chat_completions",
-                "/v1/responses": "responses",
-                "/v1/files": "files",
-                "/v1/batches": "batches",
-                "/v1/embeddings": "embeddings",
-                "/v1/rerank": "rerank",
-                "/v1/messages": "anthropic_messages",
-                "/v1/messages/count_tokens": "anthropic_count_tokens",
-                "/tokenize": "tokenize",
-                "/apply-template": "apply_template",
-                "/v1/load_lora_adapter": "load_lora_adapter",
-                "/v1/unload_lora_adapter": "unload_lora_adapter",
-            }.get(path, "other")
+            return http_metric_route(self.path)
 
         def _session_route(self):
             parsed = urlsplit(self.path)

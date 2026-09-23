@@ -3,7 +3,7 @@ import re
 import threading
 from http.server import ThreadingHTTPServer
 from urllib.error import HTTPError
-from urllib.request import urlopen
+from urllib.request import Request, urlopen
 
 import pytest
 
@@ -608,6 +608,39 @@ def test_http_metrics_endpoint_uses_prometheus_content_type():
         server.shutdown()
         server.server_close()
         thread.join()
+
+
+def test_http_metrics_keep_the_route_label_the_server_names():
+    engine = FakeEngine()
+    engine.http_metrics = HttpRuntimeMetrics()
+    server = ThreadingHTTPServer(("127.0.0.1", 0), handler_for(engine))
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base = f"http://127.0.0.1:{server.server_port}"
+    try:
+        for path in ("/v1/messages", "/v1/responses", "/v1/embeddings", "/tokenize"):
+            request = Request(
+                base + path,
+                data=b"{not json",
+                method="POST",
+                headers={"Content-Type": "application/json"},
+            )
+            with pytest.raises(HTTPError):
+                urlopen(request, timeout=10)
+        with urlopen(base + "/metrics", timeout=10) as response:
+            payload = response.read().decode()
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
+    for route in ("anthropic_messages", "responses", "embeddings", "tokenize"):
+        assert (
+            f'mlx2_http_requests_total{{method="POST",route="{route}",status_class="4xx"}} 1'
+            in payload
+        ), route
+    assert 'route="other"' not in "\n".join(
+        line for line in payload.splitlines() if line.startswith("mlx2_http_requests_total")
+    )
 
 
 def test_http_metrics_endpoint_returns_503_when_export_fails():

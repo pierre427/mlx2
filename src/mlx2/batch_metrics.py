@@ -26,18 +26,61 @@ from .prometheus import (
 _ADMISSION_REASONS = frozenset({"maximum_inflight", "parallel_sample_footprint"})
 _MECHANISMS = frozenset({"ordinary", "self_mtp", "external_draft", "prompt_lookup"})
 _HTTP_METHODS = frozenset({"GET", "POST"})
-_HTTP_ROUTES = frozenset(
+# One bounded route vocabulary for both the server, which names each
+# request's route, and HttpRuntimeMetrics, which admits only these names as
+# label values. Keeping them in one place stops a server route from silently
+# collapsing into route="other".
+_HTTP_EXACT_ROUTES = {
+    "/metrics": "metrics",
+    "/health": "health",
+    "/v1/models": "models",
+    "/v1/status": "status",
+    "/v1/status/batching": "batching_status",
+    "/v1/completions": "completions",
+    "/v1/chat/completions": "chat_completions",
+    "/v1/responses": "responses",
+    "/v1/files": "files",
+    "/v1/batches": "batches",
+    "/v1/embeddings": "embeddings",
+    "/v1/rerank": "rerank",
+    "/v1/messages": "anthropic_messages",
+    "/v1/messages/count_tokens": "anthropic_count_tokens",
+    "/tokenize": "tokenize",
+    "/apply-template": "apply_template",
+    "/v1/load_lora_adapter": "load_lora_adapter",
+    "/v1/unload_lora_adapter": "unload_lora_adapter",
+}
+_HTTP_PREFIX_ROUTES = frozenset(
     {
-        "metrics",
-        "health",
-        "models",
-        "status",
-        "batching_status",
-        "completions",
-        "chat_completions",
-        "other",
+        "apc_sessions",
+        "admin",
+        "response_input_items",
+        "responses_resource",
+        "files_resource",
+        "batches_resource",
     }
 )
+_HTTP_ROUTES = frozenset(
+    {*_HTTP_EXACT_ROUTES.values(), *_HTTP_PREFIX_ROUTES, "other"}
+)
+
+
+def http_metric_route(path: str) -> str:
+    """Map a request path to its bounded route label."""
+    path = path.split("?", 1)[0]
+    if path.startswith("/v1/apc/sessions"):
+        return "apc_sessions"
+    if path.startswith("/v1/admin/"):
+        return "admin"
+    if path.startswith("/v1/responses/") and path.endswith("/input_items"):
+        return "response_input_items"
+    if path.startswith("/v1/responses/"):
+        return "responses_resource"
+    if path.startswith("/v1/files/"):
+        return "files_resource"
+    if path.startswith("/v1/batches/"):
+        return "batches_resource"
+    return _HTTP_EXACT_ROUTES.get(path, "other")
 
 
 def _percentile(values: list[float], fraction: float) -> float | None:

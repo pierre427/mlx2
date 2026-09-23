@@ -63,6 +63,31 @@ def test_http_metrics_use_bounded_route_method_and_status_labels():
     assert snapshot["durations"]["other"].count == 1
 
 
+def test_every_server_route_label_is_admitted_by_http_metrics():
+    from mlx2.batch_metrics import http_metric_route
+
+    paths = (
+        "/metrics", "/health", "/v1/models", "/v1/status", "/v1/status/batching",
+        "/v1/completions", "/v1/chat/completions", "/v1/responses", "/v1/files",
+        "/v1/batches", "/v1/embeddings", "/v1/rerank", "/v1/messages",
+        "/v1/messages/count_tokens", "/tokenize", "/apply-template",
+        "/v1/load_lora_adapter", "/v1/unload_lora_adapter", "/v1/apc/sessions/s",
+        "/v1/admin/quiesce", "/v1/responses/r/input_items", "/v1/responses/r",
+        "/v1/files/f", "/v1/batches/b",
+    )
+    metrics = HttpRuntimeMetrics(clock=lambda: 0.0)
+    labels = set()
+    for path in paths:
+        label = http_metric_route(path + "?x=1")
+        assert label != "other", path
+        labels.add(label)
+        metrics.completed("POST", label, 200, 0.0)
+    snapshot = metrics.prometheus_snapshot()
+    assert {route for _method, route, _status in snapshot["requests"]} == labels
+    assert len(labels) == len(paths)
+    assert http_metric_route("/v1/unknown") == "other"
+
+
 def test_disabled_optional_tracer_imports_no_opentelemetry_and_is_inert():
     tracer = OptionalRequestTracer()
     assert tracer.enabled is False
