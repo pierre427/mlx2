@@ -1098,6 +1098,8 @@ class Job:
     # Memory preemption (``memory_preemption`` policy); untouched when off.
     preemption_prompt: list | None = None
     generated_token_ids: list | None = None
+    # Committed ids for processors whose receipts settle at finish.
+    receipt_token_ids: list | None = None
     rng_seed: int | None = None
     decode_replay_block: str | None = None
     preempted: bool = False
@@ -5714,6 +5716,11 @@ class ServingEngine:
                             ),
                         )
                         job.structured = structured
+                        if job.receipt_token_ids is None and (
+                            job.thinking_guard is not None or structured is not None
+                        ):
+                            # A replay keeps the ids delivered before it.
+                            job.receipt_token_ids = []
                         if structured is not None:
                             if (
                                 defer_until is None
@@ -6573,6 +6580,8 @@ class ServingEngine:
                         job.replaying = False
                         if job.generated_token_ids is not None:
                             job.generated_token_ids.append(int(response.token))
+                        if job.receipt_token_ids is not None:
+                            job.receipt_token_ids.append(int(response.token))
                         self.batch_metrics.token(job.id)
                         if (
                             job.fault
@@ -6673,6 +6682,14 @@ class ServingEngine:
                             batch.remove([response.uid])
                         if response.finish_reason or stopped:
                             self._observe_thinking_budget(job, final=True)
+                            if job.receipt_token_ids is not None:
+                                # Speculative routes leave these processors at
+                                # their last verify row; the receipts describe
+                                # the committed stream, as ordinary decode's do.
+                                for processor in (job.thinking_guard, job.structured):
+                                    settle = getattr(processor, "settle", None)
+                                    if callable(settle):
+                                        settle(job.receipt_token_ids)
                             sidecar = getattr(response, "cache_sidecar", None) or (
                                 MTPAPCSidecar(
                                     response.mtp_state, len(response.all_tokens)

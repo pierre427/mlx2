@@ -1236,3 +1236,45 @@ def test_envelope_composes_with_thinking_deferral(monkeypatch):
     assert 7 in admitted([2, 3, 4, THINK_CLOSE, TEXT_OPEN]) and HELLO not in admitted([2, 3, 4, THINK_CLOSE, TEXT_OPEN])
     receipt = structured_receipt(processor, 5)
     assert receipt["deferred"] is True and receipt["deferred_tokens"] == 4
+
+
+@pytest.mark.parametrize("route", ["native_mtp", "prompt_lookup"])
+def test_deferral_and_guard_receipts_describe_the_committed_stream(monkeypatch, route):
+    # A thinking-close marker drafted after the stop token, in the same
+    # verify block, never reaches the committed stream, but the receipts
+    # reported the grammar as activated there (deferred_tokens off by one,
+    # released_at set).
+    from route_harness import (
+        install_mtp_oracle, make_engine, patch_host, run, tiny_qwen38_mtp,
+    )
+
+    patch_host(monkeypatch)
+    model, vocab = tiny_qwen38_mtp()
+    eos, close = 24, 127
+    request = {"messages": [{"role": "user", "content": "x"}],
+               "tokens": [(4 * i + 5) % (vocab - 2) + 1 for i in range(30)],
+               "max_tokens": 40, "temperature": 0,
+               "response_format": {"type": "json_object"}, "thinking_budget": 64}
+    engine = make_engine(model, vocab, mtp=False, eos=(eos,), close_id=close)
+    try:
+        ordinary = run(engine, request)
+    finally:
+        engine.close()
+    assert ordinary["finish"] == "stop" and close not in ordinary["tokens"]
+    install_mtp_oracle(
+        monkeypatch, {tuple(request["tokens"]): ordinary["tokens"] + [eos, close, close, close]}
+    )
+    options = {"mtp": True, "num_draft": 3} if route == "native_mtp" else {"mtp": False, "prompt_lookup": True}
+    engine = make_engine(model, vocab, eos=(eos,), close_id=close, **options)
+    try:
+        other = run(engine, request)
+    finally:
+        engine.close()
+    assert other["tokens"] == ordinary["tokens"]
+    for name in ("structured_output", "thinking_guard"):
+        assert (
+            other["receipt"]["request_controls"][name]
+            == ordinary["receipt"]["request_controls"][name]
+        ), name
+    structured = ordinary["receipt"]["request_controls"]["structured_output"]
+    assert structured["deferred"] and structured["deferred_tokens"] == len(ordinary["tokens"]) + 1

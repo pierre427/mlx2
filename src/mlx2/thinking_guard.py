@@ -192,6 +192,17 @@ class ThinkingGuard:
         self.think_tokens = length
         return length
 
+    def _forces(self, length):
+        """Whether the step after ``length`` ids forces the close; latches it."""
+        if self._close_at is not None or self._tripped_at is None:
+            return False
+        if self.budget is None or length < self.budget:
+            return False
+        self.forced = True
+        if self._forced_at is None:
+            self._forced_at = length
+        return True
+
     def __call__(self, tokens, logits):
         import mlx.core as mx
 
@@ -201,16 +212,32 @@ class ThinkingGuard:
             return logits
         if self._tripped_at is None or close >= logits.shape[-1]:
             return logits
-        if self.budget is not None and length >= self.budget:
-            self.forced = True
-            if self._forced_at is None:
-                self._forced_at = length
+        if self._forces(length):
             keep = mx.arange(logits.shape[-1]) == close
             return mx.where(keep, logits, mx.array(-float("inf"), dtype=logits.dtype))
         bias = self.ramp_nats * (length - self._tripped_at + 1)
         boost = mx.where(mx.arange(logits.shape[-1]) == close,
                          mx.array(bias, dtype=logits.dtype), mx.array(0.0, dtype=logits.dtype))
         return logits + boost
+
+    def settle(self, generated):
+        """Re-sync the receipt state to the committed generated ids.
+
+        Speculative routes call the guard on verify rows that are never
+        committed (drafts past a stop token, rejected rows) and prompt
+        lookup never calls it for the final token.  Ordinary decode's last
+        call sees exactly the committed ids, so settling to them makes every
+        route's receipt describe the committed stream.
+        """
+        import numpy as np
+
+        tokens = np.concatenate(
+            [
+                np.zeros(self.prompt_length, dtype=np.int64),
+                np.asarray(list(generated), dtype=np.int64),
+            ]
+        )
+        self._forces(self._observe(tokens))
 
     def dormant(self, tokens):
         """P5: True once the close marker is generated (logits pass through).

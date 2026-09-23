@@ -478,3 +478,76 @@ def test_engine_takes_adapter_defaults_unless_the_operator_sets_a_lever(monkeypa
     assert settings["thinking_budget"] == expected[0] and settings["thinking_steer"]["alpha"] == expected[1]
     assert settings["thinking_steer"]["calibration"]["state"] == "unsupported"
     assert settings["thinking_defaults_source"] == source
+
+
+def _guard_routes():
+    segmented = {"segment_aware_live_tip": True, "segment_aware_cohort_size": 1}
+    return {
+        "ordinary": {"mtp": False},
+        "native_mtp": {"mtp": True, "extra": segmented},
+        "native_mtp_physical": {"mtp": True},
+        "prompt_lookup": {"mtp": False, "prompt_lookup": True},
+    }
+
+
+def test_guard_receipt_describes_the_committed_stream_on_every_route(monkeypatch):
+    # Native MTP reported the guard as the last verify row left it (a row
+    # drafted past the stop token: one think token too many, a soft trip the
+    # committed stream never reached); prompt lookup never showed the guard
+    # the final committed token (one too few).
+    from route_harness import make_engine, patch_host, run, tiny_qwen38_mtp
+
+    patch_host(monkeypatch)
+    model, vocab = tiny_qwen38_mtp()
+    prompt = [(7 * i + 3) % (vocab - 2) + 1 for i in range(40)]
+    requests = [
+        {"messages": [{"role": "user", "content": "x"}], "tokens": prompt,
+         "max_tokens": 30, "temperature": 0, "thinking_budget": budget}
+        for budget in (8, 9)
+    ]
+    outputs = {}
+    for route, options in _guard_routes().items():
+        engine = make_engine(model, vocab, eos=(24,), close_id=99, **options)
+        try:
+            outputs[route] = [run(engine, request) for request in requests]
+        finally:
+            engine.close()
+    for route, results in outputs.items():
+        for result, reference in zip(results, outputs["ordinary"]):
+            assert result["tokens"] == reference["tokens"], route
+            guard = result["receipt"]["request_controls"]["thinking_guard"]
+            expected = reference["receipt"]["request_controls"]["thinking_guard"]
+            assert guard == expected, route
+    first = outputs["ordinary"][0]["receipt"]["request_controls"]["thinking_guard"]
+    assert first["tripped"] == "budget_soft"  # the case exercises a trip
+
+
+def test_forced_close_receipt_ignores_rows_drafted_past_the_stop(monkeypatch):
+    # The lane stops on EOS two tokens before the budget; only verify rows
+    # drafted past EOS reach it, so no close was ever forced.
+    from route_harness import (
+        install_mtp_oracle, make_engine, patch_host, run, tiny_qwen38_mtp,
+    )
+
+    patch_host(monkeypatch)
+    model, vocab = tiny_qwen38_mtp()
+    eos, close = 24, 127
+    request = {"messages": [{"role": "user", "content": "x"}],
+               "tokens": [(25 * i + 5) % (vocab - 2) + 1 for i in range(30)],
+               "max_tokens": 40, "temperature": 0, "thinking_budget": 8}
+    engine = make_engine(model, vocab, mtp=False, eos=(eos,), close_id=close)
+    try:
+        ordinary = run(engine, request)
+    finally:
+        engine.close()
+    assert ordinary["finish"] == "stop" and len(ordinary["tokens"]) == 5
+    install_mtp_oracle(monkeypatch, {tuple(request["tokens"]): ordinary["tokens"] + [eos, 5, 6, 7]})
+    engine = make_engine(model, vocab, mtp=True, eos=(eos,), close_id=close, num_draft=3)
+    try:
+        speculative = run(engine, request)
+    finally:
+        engine.close()
+    assert speculative["tokens"] == ordinary["tokens"]
+    guard = speculative["receipt"]["request_controls"]["thinking_guard"]
+    assert guard == ordinary["receipt"]["request_controls"]["thinking_guard"]
+    assert guard["forced_close"] is False and guard["think_tokens"] == 6

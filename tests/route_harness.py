@@ -246,3 +246,36 @@ def collect(job, timeout=120):
 
 def run(engine, request, timeout=120):
     return collect(engine.submit(dict(request)), timeout)
+
+
+def install_mtp_oracle(monkeypatch, oracle):
+    """Make native MTP draft a known continuation.
+
+    ``oracle`` maps a prompt tuple to the tokens the draft head should
+    propose after it.  Drafts beyond the reference fall back to the head's
+    own law, so verify rows can run past a stop token the reference ends on.
+    """
+    from mlx2.runtime import hybrid_speculative
+
+    original = hybrid_speculative._lane_mtp_draft_logprobs
+
+    def drafted_from_oracle(lane, logits, drafted):
+        logprobs = original(lane, logits, drafted)
+        full = (
+            [int(t) for t in lane.token_prefix.tolist()]
+            + [int(lane.cur)]
+            + [int(t.item()) for t in drafted]
+        )
+        reference, base = None, -1
+        for prompt, continuation in oracle.items():
+            if len(prompt) > base and tuple(full[: len(prompt)]) == prompt:
+                reference, base = continuation, len(prompt)
+        if reference is None or len(full) - base >= len(reference):
+            return logprobs
+        token = int(reference[len(full) - base])
+        if not bool(mx.isfinite(logprobs[token]).item()):
+            token = int(mx.argmax(logprobs).item())
+        width = logprobs.shape[-1]
+        return mx.where(mx.arange(width) == token, 0.0, -1e9).astype(logprobs.dtype)
+
+    monkeypatch.setattr(hybrid_speculative, "_lane_mtp_draft_logprobs", drafted_from_oracle)

@@ -1182,6 +1182,16 @@ class StructuredOutputProcessor:
 
         return copy.deepcopy(self)(tokens, logits)
 
+    def settle(self, generated):
+        """Re-derive the deferral receipt from the committed generated ids.
+
+        A speculative verify row can carry the deferral marker past a stop
+        token without committing it; the receipt must follow the committed
+        stream, which ordinary decode's last call sees.
+        """
+        if self.failure is None:
+            self._constrained_ids([int(token) for token in generated])
+
     def _admissible(self, text, deadline):
         """Whether ``text`` can still be extended into (or is) a full match.
 
