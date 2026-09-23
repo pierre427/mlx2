@@ -2389,6 +2389,22 @@ class APCv2(PrefixIndex):
                 session_tag=session_tag,
             )
 
+    def _trie_result_placeholders_locked(self, trie_result):
+        """Distinct non-resident entries a trie search result would select."""
+        placeholders = []
+        seen = set()
+        for path in (trie_result.exact, trie_result.longer, trie_result.shorter):
+            if path is None or tuple(path) in seen:
+                continue
+            seen.add(tuple(path))
+            try:
+                entry = self._trie.get(trie_result.model, path)
+            except KeyError:
+                continue
+            if entry is not None and not entry.prompt_cache:
+                placeholders.append((list(path), entry))
+        return placeholders
+
     def _resident_trie_result_locked(self, key, tokens):
         """Select the best resident path while deferred disk entries stay indexed."""
         exact = shorter = longer = None
@@ -2637,6 +2653,20 @@ class APCv2(PrefixIndex):
                 except KeyError:
                     pass
         try:
+            while restore_deferred or restore_requires_admission:
+                # Selection above saw resident entries only, so the fetch must
+                # too.  Hiding the deferred candidates is not enough: a
+                # shallower disk-only snapshot that was never a candidate would
+                # then match as the "shorter" prefix, hand back its empty cache
+                # and turn the lookup into a malformed-topology miss that hides
+                # both the resident prefix and the admission/budget reason.
+                placeholders = self._trie_result_placeholders_locked(
+                    self._trie.search(key, tokens)
+                )
+                if not placeholders:
+                    break
+                for path, _entry in placeholders:
+                    hidden.append((key, path, self._trie.pop(key, path)))
             try:
                 (cache, remaining) = super().fetch_nearest_cache(key, tokens)
             except COWCacheStale:

@@ -1366,6 +1366,55 @@ def test_resident_lookup_cannot_restore_disk_before_admission(tmp_path, monkeypa
     apc.clear()
 
 
+def _idle_spilled_hybrid_apc(tmp_path, clock, paths):
+    apc = APCv2(max_size=16, layout_name="test-hybrid-v1", idle_disk_seconds=1.0,
+                idle_disk_dir=str(tmp_path), now_fn=lambda: clock[0])
+    key = APCKey("hybrid-chain")
+    for path in paths:
+        apc.store(key, path, [_recurrent(len(path)), _state(KVCache(), len(path))])
+    clock[0] += 100.0
+    assert apc.spill_idle_entries() == len(paths)
+    return apc, key
+
+
+def test_idle_spilled_hybrid_chain_keeps_the_admission_reason(tmp_path):
+    """Hybrid turns are never subsumed, so the idle spill leaves nested disk
+    placeholders.  Deferring the deepest one at admission must not surface a
+    shallower placeholder's empty cache as a malformed-topology miss: serving
+    only retries with disk restore on ``disk_restore_requires_admission``."""
+    clock = [0.0]
+    turn = list(range(1, 9))
+    apc, key = _idle_spilled_hybrid_apc(
+        tmp_path, clock, (turn[:3], turn[:5], turn[:7])
+    )
+    prompt = turn + [9, 10]
+    cold = apc.lookup(key, prompt, allow_disk_restore=False)
+    assert not cold.hit and cold.cache is None
+    assert cold.miss_reason == "disk_restore_requires_admission"
+    # Serving's admission retry (serving.py, ``disk_restore_requires_admission``).
+    warm = apc.lookup(key, prompt)
+    assert warm.hit and warm.cached_tokens == 7
+    assert apc.apc_stats["idle_disk"]["restores"] == 1
+    warm.cache.close()
+    apc.clear()
+
+
+def test_disk_placeholders_do_not_hide_a_resident_shorter_prefix(tmp_path):
+    clock = [0.0]
+    apc, key = _idle_spilled_hybrid_apc(
+        tmp_path, clock, ([1, 2, 3, 4], [1, 2, 3, 4, 5, 6])
+    )
+    apc.store(key, [1, 2], [_recurrent(2), _state(KVCache(), 2)])
+    hit = apc.lookup(key, list(range(1, 9)), allow_disk_restore=False)
+    assert hit.hit and hit.cached_tokens == 2
+    assert hit.remaining_tokens == list(range(3, 9))
+    hit.cache.close()
+    # The hidden placeholders are back in the index afterwards.
+    assert not apc._trie.get(key, [1, 2, 3, 4]).prompt_cache
+    assert not apc._trie.get(key, [1, 2, 3, 4, 5, 6]).prompt_cache
+    apc.clear()
+
+
 def test_budget_blocked_disk_restore_keeps_the_snapshot(tmp_path):
     """Leased residents can pin the byte cap so a healthy disk snapshot has no
     room; that is a transient miss, not corruption, and must not delete it."""
