@@ -480,13 +480,18 @@ def test_muse_non_strict_grammar_admits_only_values_parse_atem_decodes(
 
 def _server_admits(grammar, text):
     """Whether serving admits ``text``: the scanner compiles a server tool
-    grammar without the client cap, and the exact automaton must agree."""
-    from mlx2.structured_automaton import automaton_for
+    grammar without the client cap, and the exact automaton, when the
+    pattern compiles to one, must agree."""
+    from mlx2.structured_automaton import AutomatonUnsupported, automaton_for
     from mlx2.structured_output import _request_constraint
 
     pattern = _request_constraint(None, None, grammar, None).pattern
     admitted = pattern.fullmatch(text) is not None
-    assert automaton_for(pattern).fullmatch(text) == admitted, text
+    try:
+        automaton = automaton_for(pattern)
+    except AutomatonUnsupported:
+        return admitted  # serving falls back to the scanner alone
+    assert automaton.fullmatch(text) == admitted, text
     return admitted
 
 
@@ -723,6 +728,39 @@ def test_muse_json_values_keep_raw_angle_brackets_and_quoted_tags(
         (call,) = [event["tool_calls"][0] for event in events if "tool_calls" in event]
         assert json.loads(call["function"]["arguments"]) == {"x": json.loads(value)}
         assert not [event for event in events if event.get("content")]
+
+
+@pytest.mark.parametrize("properties", [True, False])
+@pytest.mark.parametrize(
+    ("value", "served"),
+    [
+        ("NaN", "NaN"),
+        ("Infinity", "Infinity"),
+        ("-Infinity", "-Infinity"),
+        ("1e400", "1e400"),
+        ("[1, NaN]", "[1, NaN]"),
+        ('{"a": -1e400}', '{"a": -1e400}'),
+        ("hello", "hello"),
+        ("[1, 2.5]", [1, 2.5]),
+        ("1e300", 1e300),
+    ],
+)
+def test_muse_untyped_values_serve_non_finite_json_as_text(properties, value, served):
+    """An untyped non-strict value is free text decoded best-effort, and
+    Python's decoder takes ``NaN``, ``Infinity`` and ``1e400`` to non-finite
+    floats that the arguments cannot carry: the grammar admitted them and the
+    call failed with 502.  Like other text that is not JSON they stay the
+    raw string; finite JSON still decodes."""
+    parameters = (
+        {"type": "object", "properties": {"x": {}}, "required": ["x"]}
+        if properties
+        # No declared properties: argument names are free.
+        else {"type": "object", "required": ["x"]}
+    )
+    tools = [{"type": "function", "function": {"name": "f", "parameters": parameters}}]
+    grammar = muse_grammar(tools, "required", parallel_tool_calls=False)
+    assert _server_admits(grammar, _muse_call(value))
+    assert _muse_value(_muse_call(value), tools) == served
 
 
 def test_non_strict_named_tool_grammars_enforce_required_parameters():

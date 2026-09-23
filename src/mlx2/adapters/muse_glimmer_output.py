@@ -130,14 +130,23 @@ def parse_atem(text: str, tools: list[dict]) -> list[dict]:
                         ) from None
                 if not schema_value_matches(value, parameter_schema):
                     raise ValueError("ATEM parameter violates its strict schema")
+            elif expected is None:
+                # Best effort: like any other text that is not JSON, text
+                # that decodes only to a non-finite number (``NaN``,
+                # ``1e400``, ``[Infinity]``) stays the raw string, which the
+                # arguments can carry.
+                try:
+                    decoded = json.loads(value)
+                    json.dumps(decoded, allow_nan=False)
+                except ValueError:
+                    pass
+                else:
+                    value = decoded
             elif expected != "string":
                 try:
                     value = json.loads(value)
                 except json.JSONDecodeError:
-                    if expected is not None:
-                        raise ValueError(
-                            "ATEM parameter must contain valid JSON"
-                        ) from None
+                    raise ValueError("ATEM parameter must contain valid JSON") from None
             types = {
                 "integer": lambda x: type(x) is int,
                 "number": lambda x: type(x) in {int, float},
