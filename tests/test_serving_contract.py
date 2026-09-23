@@ -2751,13 +2751,40 @@ def test_mixed_hosted_and_client_calls_fail_closed(stream):
     assert backend.executed == []
 
 
+# A tools/call reply envelope that breaks JSON-RPC 2.0: none may be read as
+# a result, and a reply to another request id is not this call's result.
+_BROKEN_CALL_ENVELOPES = {
+    "call_empty_object": lambda _id: {},
+    "call_no_version": lambda id_: {"id": id_, "result": {"content": []}},
+    "call_wrong_version": lambda id_: {
+        "jsonrpc": "1.0", "id": id_, "result": {"content": []},
+    },
+    "call_wrong_id": lambda id_: {
+        "jsonrpc": "2.0", "id": id_ + 1, "result": {"content": []},
+    },
+    "call_string_id": lambda id_: {
+        "jsonrpc": "2.0", "id": str(id_), "result": {"content": []},
+    },
+    "call_no_id": lambda _id: {"jsonrpc": "2.0", "result": {"content": []}},
+    "call_no_result": lambda id_: {"jsonrpc": "2.0", "id": id_},
+    "call_null_result": lambda id_: {"jsonrpc": "2.0", "id": id_, "result": None},
+    "call_result_and_error": lambda id_: {
+        "jsonrpc": "2.0", "id": id_, "result": {"content": []},
+        "error": {"code": -32000, "message": "boom"},
+    },
+    "call_malformed_error": lambda id_: {"jsonrpc": "2.0", "id": id_, "error": "boom"},
+}
+
+
 @pytest.mark.parametrize("fault", [
     "call_bad_json", "call_http_500", "call_rpc_error", "list_bad_json",
-    "list_not_a_list",
+    "list_not_a_list", "list_wrong_id", *_BROKEN_CALL_ENVELOPES,
 ])
 def test_mcp_transport_and_protocol_failures_are_bad_gateway(fault):
     # A malformed MCP reply is the upstream's fault, not the caller's: it
-    # used to surface as 400 (JSONDecodeError is a ValueError) or 500.
+    # used to surface as 400 (JSONDecodeError is a ValueError) or 500, and a
+    # broken JSON-RPC envelope (wrong id or version, no result) was read as
+    # a successful call whose output fed the next model round.
     from http.server import BaseHTTPRequestHandler
 
     from mlx2.tool_backend import ConfiguredToolBackend
@@ -2782,6 +2809,11 @@ def test_mcp_transport_and_protocol_failures_are_bad_gateway(fault):
             if method == "tools/list":
                 if fault == "list_bad_json":
                     return self.reply(200, b"{truncated")
+                if fault == "list_wrong_id":
+                    return self.reply(200, json.dumps({
+                        "jsonrpc": "2.0", "id": message["id"] + 1,
+                        "result": {"tools": []},
+                    }).encode())
                 result = {"tools": "weather" if fault == "list_not_a_list" else [
                     {"name": "weather", "inputSchema": {"type": "object"}}
                 ]}
@@ -2795,6 +2827,10 @@ def test_mcp_transport_and_protocol_failures_are_bad_gateway(fault):
                         "jsonrpc": "2.0", "id": message["id"],
                         "error": {"code": -32000, "message": "boom"},
                     }).encode())
+                if fault in _BROKEN_CALL_ENVELOPES:
+                    return self.reply(200, json.dumps(
+                        _BROKEN_CALL_ENVELOPES[fault](message["id"])
+                    ).encode())
             self.reply(200, json.dumps(
                 {"jsonrpc": "2.0", "id": message["id"], "result": result}
             ).encode())
@@ -2803,10 +2839,13 @@ def test_mcp_transport_and_protocol_failures_are_bad_gateway(fault):
     mcp_thread = threading.Thread(target=mcp.serve_forever, daemon=True)
     mcp_thread.start()
     url = f"http://127.0.0.1:{mcp.server_port}/mcp"
-    engine = HostedEngine([_round_calls(_hosted_call(name="mcp__w__weather"))])
-    base, close = _serve_hosted(
-        engine, ConfiguredToolBackend({"servers": {"w": {"server_url": url}}})
-    )
+    # A second round that answers lets a wrongly accepted call finish as 200
+    # rather than loop into the hosted round limit.
+    engine = HostedEngine([
+        _round_calls(_hosted_call(name="mcp__w__weather")), _round_text("21 C."),
+    ])
+    backend = ConfiguredToolBackend({"servers": {"w": {"server_url": url}}})
+    base, close = _serve_hosted(engine, backend)
     try:
         with pytest.raises(HTTPError) as error:
             post_response(base, input="weather?", tools=[{
@@ -2817,6 +2856,7 @@ def test_mcp_transport_and_protocol_failures_are_bad_gateway(fault):
             }])
         assert error.value.code == 502
         assert "MCP" in json.load(error.value)["error"]["message"]
+        assert backend.counts["executions"] == 0
     finally:
         close()
         mcp.shutdown()

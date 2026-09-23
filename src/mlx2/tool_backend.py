@@ -77,11 +77,23 @@ class _HTTPMCPClient:
             # OSError covers URLError, HTTPError and timeouts; ValueError
             # covers undecodable or malformed JSON replies.
             raise HostedToolError(f"MCP {method} failed: {error}") from error
-        if not isinstance(result, dict):
-            raise HostedToolError(f"MCP {method} reply is not a JSON-RPC object")
+        if not isinstance(result, dict) or result.get("jsonrpc") != "2.0":
+            raise HostedToolError(f"MCP {method} reply is not a JSON-RPC 2.0 object")
         if "error" in result:
+            # A response carries exactly one of result or error, so any error
+            # member fails the call, whatever else the reply holds.
             raise HostedToolError(f"MCP error: {result['error']}")
-        return result.get("result")
+        # The id must be this request's integer id: bool and float compare
+        # equal to ints in Python, and a reply to another request is not
+        # this call's result.
+        reply_id = result.get("id")
+        if type(reply_id) is not int or reply_id != message["id"]:
+            raise HostedToolError(f"MCP {method} reply answers another request id")
+        # MCP defines every request's result as an object; a missing or
+        # null result must not reach the model as a tool output.
+        if not isinstance(result.get("result"), dict):
+            raise HostedToolError(f"MCP {method} reply has no result object")
+        return result["result"]
 
     def _initialize(self):
         if self.initialized:
