@@ -601,6 +601,69 @@ def test_replacing_a_block_manifest_with_a_plain_payload_fails_closed(tmp_path):
     assert apc.apc_stats["idle_disk"]["restore_failures"] == 1
 
 
+def _spilled_mtp_entry(tmp_path, clock):
+    from mlx2.runtime.apc_v2 import MTPAPCSidecar
+
+    apc = APCv2(max_size=8, layout_name="layout", idle_disk_seconds=1,
+                idle_disk_dir=str(tmp_path), persistent_block_bytes=64,
+                now_fn=lambda: clock[0])
+    key, tokens = _key(), [1, 2, 3]
+    sidecar = MTPAPCSidecar(
+        ([_cache(2)], mx.ones((1, 1, 4), dtype=mx.float32)),
+        covered_tokens=3,
+        rng_key=mx.array([7, 11], dtype=mx.uint32),
+        rng_draws=5,
+    )
+    apc.store(key, tokens, [_cache(3)], sidecar=sidecar)
+    clock[0] = 10.0
+    assert apc.spill_idle_entries() == 1
+    return apc, key, tokens, apc._trie.get(key, tokens)._apc_disk
+
+
+def test_block_mode_restores_the_authenticated_mtp_aux_sidecar(tmp_path):
+    from pathlib import Path
+
+    apc, key, tokens, disk = _spilled_mtp_entry(tmp_path, [0.0])
+    assert Path(disk["aux"]).read_bytes()[:1] == b"{"
+
+    hit = apc.lookup(key, tokens + [4])
+    assert hit.hit and hit.hit_kind == "mtp_sidecar"
+    assert hit.sidecar.rng_key.tolist() == [7, 11]
+    assert hit.sidecar.state[1].tolist() == [[[1.0, 1.0, 1.0, 1.0]]]
+    assert apc.apc_stats["idle_disk"]["restore_failures"] == 0
+    hit.cache.close()
+
+
+def test_swapped_mtp_aux_sidecar_fails_the_block_restore_closed(tmp_path):
+    # Target and draft were MAC'd block manifests, but the aux file holding the
+    # tail hidden state and the seeded lane's RNG key was written plain and
+    # restored with a bare load, so a swapped file changed the sampling stream.
+    import os
+
+    apc, key, tokens, disk = _spilled_mtp_entry(tmp_path, [0.0])
+    staged = tmp_path / "poison.safetensors"
+    mx.save_safetensors(str(staged), {
+        "tail_hidden": mx.full((1, 1, 4), 1e30, dtype=mx.float32),
+        "rng_key": mx.array([0xDEAD, 0xBEEF], dtype=mx.uint32),
+    })
+    os.replace(staged, disk["aux"])
+
+    miss = apc.lookup(key, tokens + [4])
+    assert not miss.hit and miss.cache is None and miss.sidecar is None
+    assert apc.apc_stats["idle_disk"]["restores"] == 0
+    assert apc.apc_stats["idle_disk"]["restore_failures"] == 1
+
+
+def test_mtp_aux_sidecar_with_an_unexpected_layout_fails_the_restore(tmp_path):
+    apc, key, tokens, disk = _spilled_mtp_entry(tmp_path, [0.0])
+    assert disk["sidecar"]["aux_arrays"]["rng_key"] == [[2], str(mx.uint32)]
+    disk["sidecar"]["aux_arrays"]["rng_key"] = [[4], str(mx.uint32)]
+
+    miss = apc.lookup(key, tokens + [4])
+    assert not miss.hit and miss.sidecar is None
+    assert apc.apc_stats["idle_disk"]["restore_failures"] == 1
+
+
 def test_apcv2_startup_removes_orphaned_block_directories(tmp_path):
     orphan = tmp_path / "apc-idle-orphan.safetensors.blocks"
     orphan.mkdir()

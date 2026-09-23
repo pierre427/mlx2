@@ -413,6 +413,33 @@ def _foreign_stream_error(exc: BaseException) -> bool:
     return isinstance(exc, RuntimeError) and "in current thread" in str(exc)
 
 
+_AUX_ARRAY_NAMES = frozenset({"tail_hidden", "rng_key"})
+
+
+def _aux_array_layout(arrays) -> dict:
+    """JSON-safe ``name -> [shape, dtype]`` of a spilled speculative aux file."""
+    return {
+        name: [[int(n) for n in array.shape], str(array.dtype)]
+        for name, array in arrays.items()
+    }
+
+
+def _check_aux_array_layout(arrays, recorded, *, required: bool) -> None:
+    """Refuse restored aux arrays that differ from what the spill wrote.
+
+    Persisted manifests written before the layout was recorded carry none;
+    those are still limited to the two array names a spill ever writes.
+    """
+    if set(arrays) - _AUX_ARRAY_NAMES:
+        raise ValueError("APCv2 aux sidecar holds unexpected arrays")
+    if recorded is None:
+        if required:
+            raise ValueError("APCv2 aux sidecar layout was not recorded")
+        return
+    if _aux_array_layout(arrays) != recorded:
+        raise ValueError("APCv2 aux sidecar shape or dtype mismatch")
+
+
 class APCv2(PrefixIndex):
     """APCv2: atomic segmented state ownership, prefix indexing and bounded residency."""
 
@@ -1520,11 +1547,23 @@ class APCv2(PrefixIndex):
                         created.append(aux)
                         if self._persist_dir is not None:
                             file_records["aux"] = self._payload_file_record(aux)
+                        else:
+                            # The aux file carries the seeded lane's RNG key,
+                            # so it gets the same MAC'd manifest as target and
+                            # draft; a plain file here could be swapped freely.
+                            encode_block_file(
+                                aux,
+                                block_bytes=self._persistent_block_bytes,
+                                signature=self._persistent_signature(
+                                    key, tokens, entry.cache_type, "aux"
+                                ),
+                            )
                     sidecar_info = {
                         "covered_tokens": int(sidecar.covered_tokens),
                         "rng_draws": int(sidecar.rng_draws),
                         "kind": getattr(sidecar, "kind", "self_mtp"),
                         "binding": getattr(sidecar, "binding", ""),
+                        "aux_arrays": _aux_array_layout(arrays),
                     }
                 metadata = getattr(
                     getattr(entry.prompt_cache, "cow_owner", None), "metadata", None
@@ -1545,8 +1584,8 @@ class APCv2(PrefixIndex):
                         draft_signature if draft in created else None
                     ),
                     "files": file_records if self._persist_dir is not None else None,
-                    # Target and draft were replaced by MAC'd block manifests;
-                    # restore must refuse anything else at those paths.
+                    # Target, draft and aux were replaced by MAC'd block
+                    # manifests; restore must refuse anything else there.
                     "block_encoded": (
                         self._persist_dir is None
                         and int(self._persistent_block_bytes) > 0
@@ -1686,7 +1725,21 @@ class APCv2(PrefixIndex):
                         require_manifest=bool(disk.get("block_encoded")),
                     ))
                     draft = load_prompt_cache(str(draft_path))
-                    arrays = mx.load(disk["aux"]) if disk.get("aux") else {}
+                    arrays = {}
+                    if disk.get("aux"):
+                        aux_path = stack.enter_context(materialize_block_file(
+                            Path(disk["aux"]),
+                            expected_signature=self._persistent_signature(
+                                key, tokens, entry.cache_type, "aux"
+                            ),
+                            require_manifest=bool(disk.get("block_encoded")),
+                        ))
+                        arrays = mx.load(str(aux_path))
+                    _check_aux_array_layout(
+                        arrays,
+                        sidecar_info.get("aux_arrays"),
+                        required=bool(disk.get("block_encoded")),
+                    )
                     sidecar_type = MTPAPCSidecar
                     sidecar_extra = {}
                     if sidecar_info.get("kind") == "external_draft_v1":
