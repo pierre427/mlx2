@@ -17,10 +17,35 @@ _START = "<|start|>assistant"
 _TOOL_OPEN = "<atem:function_calls>"
 _TOOL_CLOSE = "</atem:function_calls>"
 _HEADER = re.compile(r"(?:<\|start\|>assistant)?(?:\s*to=([\w.-]+))?\s*", re.ASCII)
-_INVOKE = re.compile(r'<atem:invoke name="([\w.-]+)">(.*?)</atem:invoke>', re.DOTALL)
-_PARAMETER = re.compile(
-    r'<atem:parameter name="([\w.-]+)">(.*?)</atem:parameter>', re.DOTALL
-)
+_INVOKE = re.compile(r'<atem:invoke name="([\w.-]+)">')
+_INVOKE_CLOSE = "</atem:invoke>"
+_PARAMETER = re.compile(r'<atem:parameter name="([\w.-]+)">')
+_PARAMETER_CLOSE = "</atem:parameter>"
+_JSON_STRING = re.compile(r'"[^"\\]*(?:\\.[^"\\]*)*"', re.DOTALL)
+
+
+class _UnclosedJSONString(ValueError):
+    """The text ends inside a string of an ATEM value decoded as JSON."""
+
+
+def _json_value_end(text, start):
+    """Where the ``</atem:parameter>`` closing a JSON value at ``start`` is.
+
+    Muse writes JSON values with raw ``<`` (the template's ``tojson`` does not
+    escape it), and a JSON string may even spell a closing tag.  Outside a
+    string ``<`` is not JSON, so the value ends at the first closer outside
+    every string.  Returns -1 when no closer follows the value.
+    """
+    position = start
+    while True:
+        close = text.find(_PARAMETER_CLOSE, position)
+        quote = text.find('"', position, close if close >= 0 else len(text))
+        if quote < 0:
+            return close
+        string = _JSON_STRING.match(text, quote)
+        if string is None:
+            raise _UnclosedJSONString("ATEM value ends inside a JSON string")
+        position = string.end()
 
 
 def _partial_header(text):
@@ -40,26 +65,34 @@ def _partial_header(text):
 
 
 def parse_atem(text: str, tools: list[dict]) -> list[dict]:
-    """ATEM values are raw text, with JSON for non-string schema types."""
+    """ATEM values are raw text, with JSON for non-string schema types.
+
+    A raw value ends at the first ``</atem:parameter>`` and may not contain
+    ``</atem:invoke>``; a JSON value ends at the first closer outside its
+    strings, so a quoted tag does not cut it short.
+    """
     definitions = {tool["function"]["name"]: tool["function"] for tool in tools}
     calls, cursor = [], 0
-    for match in _INVOKE.finditer(text):
+    while (match := _INVOKE.search(text, cursor)) is not None:
         if text[cursor : match.start()].strip():
             raise ValueError("Malformed ATEM tool call")
-        name, body = match.groups()
+        name = match.group(1)
         if name not in definitions:
             raise ValueError("Model called an undeclared tool")
         function = definitions[name]
         schema = function.get("parameters", {})
         if function.get("strict", False):
             schema = executable_schema(schema)
-        properties, arguments, end = schema.get("properties", {}), {}, 0
+        properties, arguments, end = schema.get("properties", {}), {}, match.end()
         if not isinstance(properties, dict):
             properties = {}
-        for parameter in _PARAMETER.finditer(body):
-            if body[end : parameter.start()].strip():
+        while (parameter := _PARAMETER.search(text, end)) is not None:
+            closing = text.find(_INVOKE_CLOSE, end)
+            if 0 <= closing < parameter.start():
+                break
+            if text[end : parameter.start()].strip():
                 raise ValueError("Malformed ATEM parameter")
-            key, value = parameter.groups()
+            key = parameter.group(1)
             if key in arguments:
                 raise ValueError("Duplicate ATEM parameter")
             if key not in properties and schema.get("additionalProperties") is False:
@@ -73,7 +106,22 @@ def parse_atem(text: str, tools: list[dict]) -> list[dict]:
                 parameter_schema = {}
             expected = parameter_schema.get("type")
             if function.get("strict", False):
-                if raw_string_pattern(parameter_schema) is None:
+                decode = raw_string_pattern(parameter_schema) is None
+            else:
+                # An untyped value is decoded best-effort, so it stays raw
+                # text up to the first closer.
+                decode = expected not in ("string", None)
+            if decode:
+                value_end = _json_value_end(text, parameter.end())
+            else:
+                value_end = text.find(_PARAMETER_CLOSE, parameter.end())
+            if value_end < 0:
+                raise ValueError("Unclosed ATEM parameter")
+            value = text[parameter.end() : value_end]
+            if not decode and _INVOKE_CLOSE in value:
+                raise ValueError("Unclosed ATEM parameter")
+            if function.get("strict", False):
+                if decode:
                     try:
                         value = json.loads(value)
                     except json.JSONDecodeError:
@@ -104,15 +152,18 @@ def parse_atem(text: str, tools: list[dict]) -> list[dict]:
                 and not types[expected](value)
             ):
                 raise ValueError("ATEM parameter type mismatch")
-            arguments[key], end = value, parameter.end()
-        if body[end:].strip() or any(
-            key not in arguments for key in schema.get("required", [])
+            arguments[key], end = value, value_end + len(_PARAMETER_CLOSE)
+        closing = text.find(_INVOKE_CLOSE, end)
+        if (
+            closing < 0
+            or text[end:closing].strip()
+            or any(key not in arguments for key in schema.get("required", []))
         ):
             raise ValueError("Malformed or missing ATEM parameters")
         # Reject non-finite JSON numbers before an API response can contain them.
         json.dumps(arguments, allow_nan=False)
         calls.append({"name": name, "arguments": arguments})
-        cursor = match.end()
+        cursor = closing + len(_INVOKE_CLOSE)
     if text[cursor:].strip() or not calls:
         raise ValueError("Malformed or empty ATEM block")
     return calls
@@ -129,13 +180,13 @@ def _non_strict_value(schema):
     a list of types included (``["integer", "null"]``), must decode as JSON,
     so the value is the union of the declared alternatives' JSON: free text
     there is admitted by the grammar and then rejected. Numbers are finite
-    (a non-finite one fails serialization), and a string alternative leaves
-    ``<`` to its ``\\u003c`` escape so it cannot spell the closing tag.
-    Objects, arrays and types the parser does not check use the shared
-    recursive JSON rules, which ``constrained_tool_grammar`` then defines
-    with the same finite numbers.
+    (a non-finite one fails serialization), and a string alternative keeps
+    a raw ``<`` as the template writes JSON: the parser ends a JSON value
+    outside its strings. Objects, arrays and types the parser does not check
+    use the shared recursive JSON rules, which ``constrained_tool_grammar``
+    then defines with the same finite numbers.
     """
-    from ..structured_output import _FINITE_NUMBER, _INTEGER
+    from ..structured_output import _FINITE_NUMBER, _INTEGER, _STRING
 
     expected = schema.get("type") if isinstance(schema, dict) else None
     if expected is None or expected == "string":
@@ -145,7 +196,7 @@ def _non_strict_value(schema):
         "number": _FINITE_NUMBER,
         "boolean": "(?:true|false)",
         "null": "null",
-        "string": r'"(?:[^"\\\x00-\x1f<]|\\["\\/bfnrt]|\\u[0-9a-fA-F]{4})*"',
+        "string": _STRING,
         "object": "(?&object)",
         "array": "(?&array)",
     }
@@ -306,12 +357,18 @@ class MuseOutputParser:
                 self.state = "body"
                 continue
             if self.state == "tool":
-                end = self.buffer.find(_TOOL_CLOSE)
-                if end < 0:
+                calls, end = None, self.buffer.find(_TOOL_CLOSE)
+                while end >= 0:
+                    try:
+                        calls = parse_atem(self.buffer[:end], self.tools)
+                        break
+                    except _UnclosedJSONString:
+                        # That closer is quoted inside a JSON value.
+                        end = self.buffer.find(_TOOL_CLOSE, end + 1)
+                if calls is None:
                     if final:
                         raise ValueError("Model produced an incomplete ATEM tool call")
                     break
-                calls = parse_atem(self.buffer[:end], self.tools)
                 calls = within_parallel_bound(self, calls)
                 for call in calls:
                     events.append(

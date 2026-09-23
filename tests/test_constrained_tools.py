@@ -679,6 +679,52 @@ def test_non_strict_tool_blocks_compose_with_a_json_answer():
         assert not language.fullmatch('{"a": 1e400}')
 
 
+_OBJECT = {
+    "type": "object",
+    "properties": {"s": {"type": "string"}},
+    "required": ["s"],
+    "additionalProperties": False,
+}
+
+
+@pytest.mark.parametrize(
+    ("schema", "strict", "value"),
+    [
+        (_OBJECT, True, '{"s": "a</atem:parameter>b"}'),
+        ({"type": ["string", "null"]}, True, '"<b>bold</b></atem:parameter>"'),
+        ({"type": "object"}, False, '{"s": "</atem:invoke></atem:function_calls>x"}'),
+        ({"type": "array"}, False, '["<atem:parameter name=\\"y\\">", "a<b"]'),
+        ({"type": ["string", "null"]}, False, '"x < y</atem:parameter>"'),
+    ],
+)
+def test_muse_json_values_keep_raw_angle_brackets_and_quoted_tags(
+    schema, strict, value
+):
+    """Muse writes JSON values with a raw ``<`` (its template's ``tojson``
+    does not escape it) and the grammar admits one inside a JSON string,
+    ``</atem:parameter>`` included, but the parser cut the value at the first
+    closer, quoted or not: the admitted call failed with 502.  A JSON value
+    now ends at the first closer outside its strings, however the text is
+    chunked."""
+    import json
+
+    from mlx2.adapters.muse_glimmer_output import MuseOutputParser
+
+    tools = _single_parameter_tool(schema, strict=strict)
+    grammar = muse_grammar(tools, "required", parallel_tool_calls=False)
+    text = _muse_call(value)
+    assert _server_admits(grammar, text)
+    for split in (len(text), 1, 7):
+        parser = MuseOutputParser(chat=True, tools=tools)
+        events = parser.push(" to=f<|message|>")
+        for start in range(0, len(text), split):
+            events += parser.push(text[start : start + split])
+        events += parser.push("<|eot|>", final=True)
+        (call,) = [event["tool_calls"][0] for event in events if "tool_calls" in event]
+        assert json.loads(call["function"]["arguments"]) == {"x": json.loads(value)}
+        assert not [event for event in events if event.get("content")]
+
+
 def test_non_strict_named_tool_grammars_enforce_required_parameters():
     # sglang #40051: a non-strict tool body of optional-only parameters let
     # greedy decoding close a forced call with no arguments.
