@@ -109,7 +109,9 @@ def _convert_param_value(
             value = json.loads(param_value, strict=False)
         except json.JSONDecodeError:
             return param_value
-        return value if isinstance(value, (dict, list)) else param_value
+        if isinstance(value, (dict, list)):
+            return _servable(value, param_value)
+        return param_value
     param_type = inferred.strip().lower()
     if param_value.lower() == "null":
         if _declares_null(param):
@@ -153,7 +155,7 @@ def _convert_param_value(
             or param_type.startswith("list")
         ):
             try:
-                return json.loads(param_value, strict=False)
+                return _servable(json.loads(param_value, strict=False), param_value)
             except json.JSONDecodeError:
                 return _safe_literal_eval(param_value)
 
@@ -165,9 +167,25 @@ def _convert_param_value(
 def _safe_literal_eval(param_value: str) -> Any:
     """ast.literal_eval that returns the raw string instead of raising."""
     try:
-        return ast.literal_eval(param_value)
+        return _servable(ast.literal_eval(param_value), param_value)
     except (ValueError, SyntaxError):
         return param_value
+
+
+def _servable(value: Any, param_value: str) -> Any:
+    """``value``, or the raw text when a tool call's arguments cannot carry it.
+
+    Best-effort decoding of free text can yield a non-finite float (``NaN``,
+    ``1e400``) or a Python-only literal (a set, bytes).  The arguments are
+    serialized with ``allow_nan=False``, so such a value would turn a call the
+    grammar admitted into an error; like other undecodable text it stays the
+    string the model wrote.
+    """
+    try:
+        json.dumps(value, allow_nan=False)
+    except (TypeError, ValueError):
+        return param_value
+    return value
 
 
 def _declares_null(schema):

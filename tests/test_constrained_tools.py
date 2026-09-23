@@ -763,6 +763,47 @@ def test_muse_untyped_values_serve_non_finite_json_as_text(properties, value, se
     assert _muse_value(_muse_call(value), tools) == served
 
 
+@pytest.mark.parametrize(
+    "schema", [{"type": "object"}, {"description": "any value"}, {"type": "tuple"}]
+)
+@pytest.mark.parametrize(
+    ("value", "served"),
+    [
+        ('{"a": NaN}', '{"a": NaN}'),
+        ('{"a": -1e400}', '{"a": -1e400}'),
+        ("[Infinity]", "[Infinity]"),
+        ("{1, 2}", "{1, 2}"),
+        ('{"a": [1e300]}', {"a": [1e300]}),
+    ],
+)
+def test_qwen_free_values_the_arguments_cannot_carry_stay_text(schema, value, served):
+    """Qwen's non-strict object, untyped and unknown-type values are free
+    text decoded best-effort (JSON, then a Python literal), which can yield a
+    non-finite float or a set.  The arguments serialize with
+    ``allow_nan=False``, so the grammar admitted the call and serving it
+    failed with 502; such text now stays the string the model wrote, and
+    finite JSON still decodes."""
+    import json
+
+    from mlx2.output import OutputParser
+
+    tools = [{"type": "function", "function": {"name": "f", "parameters": {
+        "type": "object", "properties": {"x": schema}, "required": ["x"],
+    }}}]
+    grammar = qwen_grammar(tools, "required", parallel_tool_calls=False)
+    text = (
+        f"<tool_call>\n<function=f>\n<parameter=x>\n{value}\n</parameter>"
+        "\n</function>\n</tool_call>"
+    )
+    assert _server_admits(grammar, text)
+    parser = OutputParser(
+        chat=True, tools=tools, parse_tool=parse_tool_call, constrained_tools=True
+    )
+    events = parser.push(text) + parser.push("", final=True)
+    (call,) = [event["tool_calls"][0] for event in events if "tool_calls" in event]
+    assert json.loads(call["function"]["arguments"])["x"] == served
+
+
 def test_non_strict_named_tool_grammars_enforce_required_parameters():
     # sglang #40051: a non-strict tool body of optional-only parameters let
     # greedy decoding close a forced call with no arguments.
