@@ -538,6 +538,10 @@ def responses_to_chat_request(
         "context_messages": context_messages,
         "tool_executors": tool_executors,
     }
+    if "tool_choice" in body:
+        # The response object echoes the caller's value, not the internal
+        # chat shape it was translated to.
+        options["tool_choice"] = deepcopy(body["tool_choice"])
     if include:
         options["include"] = include
     if rejection_counter[0]:
@@ -992,8 +996,13 @@ def responses_payload(
     compat_tool_map=None,
     counts=None,
     output_order=None,
+    tool_choice=None,
 ):
-    """Render a completed chat choice as a Responses API object."""
+    """Render a completed chat choice as a Responses API object.
+
+    ``tool_choice`` is the caller's original value; without it the chat
+    request's value is echoed.
+    """
     message = choice["message"]
     output_by_kind = {}
     response_identifier = response_id(job)
@@ -1060,7 +1069,9 @@ def responses_payload(
         "model": model,
         "output": output,
         "parallel_tool_calls": bool(job.request.get("parallel_tool_calls", True)),
-        "tool_choice": job.request.get("tool_choice", "auto"),
+        "tool_choice": tool_choice
+        if tool_choice is not None
+        else job.request.get("tool_choice", "auto"),
         "metadata": metadata,
         "previous_response_id": previous_response_id,
         "store": bool(store),

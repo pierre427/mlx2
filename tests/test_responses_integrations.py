@@ -624,3 +624,28 @@ def test_batch_collection_attributes_responses_logprobs_like_the_live_path():
     assert collect(responses=True) == ["a"]
     # Chat Completions keeps every generated token's logprob.
     assert collect(responses=False) == ["p", "a"]
+
+
+def test_responses_echo_the_callers_named_tool_choice():
+    tools = [{"type": "function", "name": "weather", "parameters": {"type": "object"}}]
+    sent = {"type": "function", "name": "weather"}
+    engine = ScriptedEngine([
+        _WEATHER_CALL, {"finish_reason": "tool_calls", "receipt": {}},
+    ])
+    body = {"model": "fixture", "input": "hi", "tools": tools, "tool_choice": sent}
+    with _Served(engine, response_store=ResponseStore()) as base:
+        with _post(base, body) as response:
+            nonstream = json.load(response)
+        with _post(base, {**body, "stream": True}) as response:
+            wire = response.read().decode()
+    completed = next(
+        json.loads(line.removeprefix("data: "))["response"]
+        for line in wire.splitlines()
+        if line.startswith("data: {") and '"response.completed"' in line
+    )
+    assert nonstream["tool_choice"] == sent
+    assert completed["tool_choice"] == sent
+    # The engine still received the translated chat shape.
+    assert engine.requests[-1]["tool_choice"] == {
+        "type": "function", "function": {"name": "weather"}
+    }

@@ -1523,6 +1523,7 @@ def handler_for(
                 signer=getattr(engine, "reasoning_signer", None),
                 tenant_id=tenant_id,
                 include=options.get("include", ()),
+                tool_choice=options.get("tool_choice"),
                 agent_compat=batch_compat,
                 compat_tool_map=options.get("agent_compat"),
                 counts=getattr(engine, "counts", None),
@@ -3224,6 +3225,7 @@ def handler_for(
                                     signer=getattr(engine, "reasoning_signer", None),
                                     tenant_id=tenant_id,
                                     include=response_options.get("include", ()),
+                                    tool_choice=response_options.get("tool_choice"),
                                     agent_compat=agent_compat,
                                     compat_tool_map=response_options.get(
                                         "agent_compat"
@@ -3509,6 +3511,7 @@ def handler_for(
                                     signer=getattr(engine, "reasoning_signer", None),
                                     tenant_id=tenant_id,
                                     include=response_options.get("include", ()),
+                                    tool_choice=response_options.get("tool_choice"),
                                     agent_compat=agent_compat,
                                     compat_tool_map=response_options.get(
                                         "agent_compat"
