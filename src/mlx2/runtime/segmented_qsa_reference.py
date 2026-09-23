@@ -118,11 +118,18 @@ def _group_mask(
         mask = mx.broadcast_to(mask, (mask_batch, query_heads, query_length, key_length))
     if mask_batch == 1 and batch != 1:
         mask = mx.broadcast_to(mask, (batch, query_heads, query_length, key_length))
-    if mask.dtype == mx.bool_:
-        mask = mx.where(mask, mx.array(0.0), mx.array(-mx.inf))
-    return mask.astype(mx.float32).reshape(
+    return _additive_mask(mask).reshape(
         batch, kv_heads, groups, query_length, key_length
     )
+
+
+def _additive_mask(mask: mx.array | None) -> mx.array | None:
+    """Return ``mask`` as a float32 additive mask (boolean True keeps a key)."""
+    if mask is None:
+        return None
+    if mask.dtype == mx.bool_:
+        mask = mx.where(mask, mx.array(0.0), mx.array(-mx.inf))
+    return mask.astype(mx.float32)
 
 
 def _segment_state(
@@ -355,6 +362,12 @@ def materialized_row_attention_reference(
         if row_base_mask is None and suffix_mask is None:
             full_mask = None
         else:
+            # Put both sides in additive form before joining them. Concatenating
+            # a boolean side with a float side (the zero fill below, or an
+            # additive caller mask) promotes True/False to 1.0/0.0, which the
+            # additive path then adds to the scores, so masked tokens are kept.
+            row_base_mask = _additive_mask(row_base_mask)
+            suffix_mask = _additive_mask(suffix_mask)
             if row_base_mask is None:
                 row_base_mask = mx.zeros(
                     (1, 1, query_length, int(base_keys.shape[2])),

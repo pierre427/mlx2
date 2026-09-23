@@ -106,6 +106,65 @@ def test_boolean_broadcast_mask_matches_independent_numpy_oracle():
     )
 
 
+def _explicit_masked_attention(arrays, base_allowed, suffix_allowed):
+    q, bk, bv, sk, sv = (
+        np.asarray(a) if not isinstance(a, list) else [np.asarray(x) for x in a]
+        for a in arrays
+    )
+    rows = []
+    for row in range(q.shape[0]):
+        keys = np.concatenate((bk, sk[row]), axis=2)
+        values = np.concatenate((bv, sv[row]), axis=2)
+        repeat = q.shape[1] // keys.shape[1]
+        keys = np.repeat(keys, repeat, axis=1)
+        values = np.repeat(values, repeat, axis=1)
+        scores = q[row : row + 1] @ keys.swapaxes(-1, -2) / math.sqrt(q.shape[-1])
+        allowed = np.concatenate(
+            (
+                np.broadcast_to(base_allowed, scores.shape[:-1] + (bk.shape[2],)),
+                np.broadcast_to(suffix_allowed[row], scores.shape[:-1] + (sk[row].shape[2],)),
+            ),
+            axis=-1,
+        )
+        scores = np.where(allowed, scores, -np.inf)
+        weights = np.exp(scores - scores.max(axis=-1, keepdims=True))
+        rows.append(weights / weights.sum(axis=-1, keepdims=True) @ values)
+    return np.concatenate(rows, axis=0)
+
+
+@pytest.mark.parametrize("case", ["bool_base_only", "bool_suffix_only", "bool_base_additive_suffix"])
+def test_oracle_keeps_boolean_masks_boolean_when_the_other_side_differs(case):
+    # The materialized oracle concatenates the base and suffix masks. A boolean
+    # side paired with a missing or additive side used to be promoted to a 0/1
+    # float and then added to the scores, so masked tokens were attended.
+    arrays = _arrays(batch=2, query=1, base=6, suffixes=(3, 3), seed=5)
+    hidden = np.array([[[[False] * 4 + [True] * 2]]])
+    suffix_hidden = np.array([[[[True, False, True]]]])
+    everything = np.ones((1, 1, 1, 3), dtype=bool)
+    if case == "bool_base_only":
+        kwargs = {"base_mask": mx.array(hidden)}
+        base_allowed, suffix_allowed = hidden, [everything, everything]
+    elif case == "bool_suffix_only":
+        kwargs = {"suffix_masks": [mx.array(suffix_hidden), None]}
+        base_allowed = np.ones((1, 1, 1, 6), dtype=bool)
+        suffix_allowed = [suffix_hidden, everything]
+    else:
+        additive = mx.array([[[[0.0, -mx.inf, 0.0]]]])
+        kwargs = {"base_mask": mx.array(hidden), "suffix_masks": [additive, None]}
+        base_allowed, suffix_allowed = hidden, [suffix_hidden, everything]
+    q, bk, bv, sk, sv = arrays
+    oracle, _ = materialized_row_attention_reference(
+        q, bk, bv, sk, sv, scale=1.0 / math.sqrt(q.shape[-1]), **kwargs
+    )
+    np.testing.assert_allclose(
+        np.asarray(oracle),
+        _explicit_masked_attention(arrays, base_allowed, suffix_allowed),
+        atol=2.0e-6,
+        rtol=2.0e-5,
+    )
+    _run(arrays, **kwargs)
+
+
 def test_adversarial_logits_are_stable():
     q, bk, bv, sk, sv = _arrays(batch=2, query=2, base=5, suffixes=(2, 4))
     q = q * 900.0
