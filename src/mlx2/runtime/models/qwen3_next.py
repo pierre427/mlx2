@@ -478,13 +478,21 @@ def _fused_outcome(variant: str, indices) -> str:
 def _try_qwen4_fused_down(
     hidden, indices, scores, down_proj, sorted_indices, variant="scalar"
 ):
-    """Return the fused routed result, or None before dispatch when ineligible."""
+    """Return the fused routed result, or None before dispatch when ineligible.
+
+    A streamed expert table (``StreamedQuantizedSwitchLinear``) is a
+    ``QuantizedSwitchLinear`` with no resident ``weight``/``scales``: its rows
+    are gathered per step from disk, so the fused kernel has nothing to read
+    and the stock path must run.
+    """
     if (
         scores is None
         or sorted_indices
         or down_proj.training
         or (not isinstance(down_proj, QuantizedSwitchLinear))
         or ("bias" in down_proj)
+        or ("weight" not in down_proj)
+        or ("scales" not in down_proj)
     ):
         return None
     from .qwen4_fused_moe import admit_qwen4_fused_down, auto_variant, qwen4_fused_down

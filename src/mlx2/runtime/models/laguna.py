@@ -219,7 +219,14 @@ class LagunaSparseMoeBlock(nn.Module):
             from .switch_layers import QuantizedSwitchLinear
 
             down = self.switch_mlp.down_proj
-            if isinstance(down, QuantizedSwitchLinear) and not down.training:
+            # A streamed expert table is a QuantizedSwitchLinear without
+            # resident weight/scales, so the fused kernel cannot read it.
+            if (
+                isinstance(down, QuantizedSwitchLinear)
+                and not down.training
+                and "weight" in down
+                and "scales" in down
+            ):
                 expanded = mx.expand_dims(x, (-2, -3))
                 hidden = self.switch_mlp.activation(
                     self.switch_mlp.up_proj(expanded, inds, sorted_indices=False),

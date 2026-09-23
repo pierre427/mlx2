@@ -686,3 +686,115 @@ def test_streaming_counters_reach_the_metrics_scrape():
         in text
     )
     assert f"mlx2_expert_stream_resident_bytes {8 << 30}" in text
+
+
+# ---------------------------------------------------------------------------
+# fused expert kernels must decline a streamed table, not crash on it
+# ---------------------------------------------------------------------------
+
+
+def _quantized_moe_block(build, tmp_path, seed=3):
+    """A quantized MoE block, its checkpoint, and an independent twin."""
+    from mlx.utils import tree_flatten
+
+    from mlx2.runtime.models.switch_layers import SwitchLinear
+
+    def make():
+        mx.random.seed(seed)
+        block = build()
+        nn.quantize(
+            block,
+            group_size=32,
+            bits=4,
+            class_predicate=lambda _p, m: isinstance(m, SwitchLinear),
+        )
+        mx.eval(block.parameters())
+        return block
+
+    resident = make()
+    path = tmp_path / "moe"
+    path.mkdir()
+    weights = dict(tree_flatten(resident.parameters()))
+    mx.save_safetensors(str(path / "model.safetensors"), weights)
+    streamed = make()
+    streamed.load_weights(list(weights.items()))
+    return (resident, streamed, path)
+
+
+def test_qwen3_next_fused_down_declines_a_streamed_expert_table(tmp_path):
+    """Flash-Next's default fused-down gate must not read a streamed table.
+
+    ``MLX_QWEN4_FUSED_EXPERT_KERNEL=auto`` is the code default, and streaming
+    forces max_lanes=1, so every decode step is a B=1/M=1 call that reaches
+    the fused-down admission.  A streamed ``down_proj`` has no resident
+    ``weight``: the block must take the stock path and match the resident one.
+    """
+    from mlx2.runtime.models import qwen3_next
+
+    args = qwen3_next.ModelArgs(
+        model_type="qwen3_next", hidden_size=64, num_hidden_layers=1,
+        intermediate_size=128, num_attention_heads=2, linear_num_value_heads=2,
+        linear_num_key_heads=2, linear_key_head_dim=8, linear_value_head_dim=8,
+        linear_conv_kernel_dim=4, num_experts=16, num_experts_per_tok=4,
+        decoder_sparse_step=1, shared_expert_intermediate_size=64,
+        mlp_only_layers=[], moe_intermediate_size=64, rms_norm_eps=1e-6,
+        vocab_size=32, num_key_value_heads=1, rope_theta=1e4,
+        partial_rotary_factor=0.5, max_position_embeddings=64, head_dim=16,
+        norm_topk_prob=True,
+    )
+
+    class Holder(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.layers = [nn.Module()]
+            self.layers[0].mlp = qwen3_next.Qwen3NextSparseMoeBlock(args)
+
+    (resident, streamed, path) = _quantized_moe_block(Holder, tmp_path)
+    mlp = streamed.layers[0].mlp
+    assert mlp.fused_expert_kernel_mode == "auto"
+    manager = install_expert_streaming(
+        streamed, path, ceiling_bytes=1 << 30, top_k=4, read_workers=2
+    )
+    try:
+        x = mx.random.normal((1, 1, 64), key=mx.random.key(5))
+        expected = resident.layers[0].mlp(x)
+        got = mlp(x)
+        mx.eval(expected, got)
+        assert np.array_equal(np.array(got), np.array(expected))
+    finally:
+        manager.close()
+
+
+def test_laguna_fused_down_declines_a_streamed_expert_table(tmp_path, monkeypatch):
+    """The Laguna fused-down lever has the same resident-table assumption."""
+    from mlx2.runtime.models import laguna
+
+    monkeypatch.setenv("MLX_LAGUNA_FUSED_DOWN", "on")
+    args = laguna.ModelArgs(
+        hidden_size=64, num_hidden_layers=1, num_attention_heads=2,
+        num_key_value_heads=1, head_dim=16, num_experts=16,
+        num_experts_per_tok=4, moe_intermediate_size=64,
+        shared_expert_intermediate_size=64, vocab_size=32,
+    )
+
+    class Holder(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.layers = [nn.Module()]
+            self.layers[0].mlp = laguna.LagunaSparseMoeBlock(args)
+
+    (resident, streamed, path) = _quantized_moe_block(Holder, tmp_path)
+    mlp = streamed.layers[0].mlp
+    assert mlp.fused_down_mode
+    manager = install_expert_streaming(
+        streamed, path, ceiling_bytes=1 << 30, top_k=4, read_workers=2
+    )
+    try:
+        x = mx.random.normal((1, 1, 64), key=mx.random.key(5))
+        expected = resident.layers[0].mlp(x)
+        got = mlp(x)
+        mx.eval(expected, got)
+        assert np.array_equal(np.array(got), np.array(expected))
+        assert mlp.fused_down_calls == 0
+    finally:
+        manager.close()
