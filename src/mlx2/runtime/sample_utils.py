@@ -237,18 +237,30 @@ def apply_top_p(logprobs: mx.array, top_p: float) -> mx.array:
     # rows keep nothing and sample NaN).  The GPU backend happens to
     # accumulate wider.  Do the mass arithmetic in float32 on every device and
     # apply the resulting mask to the caller's dtype.
+    #
+    # The threshold is a fraction of the row's own accumulated mass, not of
+    # 1.0: rounded (bf16/fp16) logprobs sum to slightly less than one, and a
+    # tiny top_p rounds ``1 - top_p`` to 1.0 in float32, so an absolute
+    # threshold masked every token and the sampler drew uniform noise
+    # (mlx-lm#1912).  The most likely token always survives, which is the
+    # correct nucleus as top_p approaches zero.
     probs = mx.exp(logprobs.astype(mx.float32))
     sorted_indices = mx.argsort(logprobs, axis=-1)
     sorted_probs = mx.take_along_axis(probs, sorted_indices, axis=-1)
     cumulative_probs = mx.cumsum(sorted_probs, axis=-1)
+    total = cumulative_probs[..., -1:]
+    width = sorted_indices.shape[-1]
+    keep_sorted = (cumulative_probs > (1 - top_p) * total) | (
+        mx.arange(width) == width - 1
+    )
     inverse_indices = mx.put_along_axis(
         mx.zeros_like(sorted_indices),
         sorted_indices,
-        mx.arange(sorted_indices.shape[-1], dtype=sorted_indices.dtype),
+        mx.arange(width, dtype=sorted_indices.dtype),
         axis=-1,
     )
-    cumulative_probs = mx.take_along_axis(cumulative_probs, inverse_indices, axis=-1)
-    return mx.where(cumulative_probs > 1 - top_p, logprobs, -float("inf"))
+    keep = mx.take_along_axis(keep_sorted, inverse_indices, axis=-1)
+    return mx.where(keep, logprobs, -float("inf"))
 
 
 def apply_xtc(

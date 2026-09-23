@@ -66,3 +66,26 @@ def test_top_p_nucleus_is_dtype_independent_on_wide_vocabularies():
         # boundary difference, but the nucleus must have the same size class.
         assert abs(int(kept16.sum()) - int(kept32.sum())) < 0.02 * kept32.sum(), (kind, kept16.sum(), kept32.sum())
         assert apply_top_p(lp16, 0.8).dtype == mx.bfloat16
+
+
+def test_tiny_top_p_keeps_the_most_likely_token_in_every_dtype():
+    """mlx-lm#1912: once ``1 - top_p`` rounds to the accumulated mass, the
+    absolute threshold masked every token and sampling drew uniform noise.
+    bf16 logprobs failed from top_p <= 1e-4, inside the range clients send."""
+    from mlx2.runtime.sample_utils import apply_top_p, make_sampler
+
+    rng = np.random.default_rng(0)
+    row = mx.array(rng.normal(0, 3, 4096).astype(np.float32))
+    row = row - mx.logsumexp(row)
+    best = int(mx.argmax(row))
+    for dtype in (mx.float32, mx.float16, mx.bfloat16):
+        for top_p in (1e-8, 1e-6, 1e-4, 1e-3):
+            kept = np.array(mx.isfinite(apply_top_p(row.astype(dtype), top_p)))
+            assert kept.sum() >= 1, (dtype, top_p)
+            assert kept[best], (dtype, top_p)
+    sampler = make_sampler(temp=0.8, top_p=1e-8)
+    assert {int(sampler(row[None])[0]) for _ in range(8)} == {best}
+    batch = mx.stack([row, row[::-1]]).astype(mx.bfloat16)
+    kept = np.array(mx.isfinite(apply_top_p(batch, 1e-6)))
+    assert kept.sum(axis=-1).tolist() == [1, 1]
+    assert kept[0, best] and kept[1, 4095 - best]
