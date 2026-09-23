@@ -394,6 +394,65 @@ def test_srpt_keeps_declared_cohort_atomic(model, enabled):
         gen.close()
 
 
+def _persistent_inputs():
+    memory = {
+        "keys": mx.ones((1, 64), dtype=mx.float32),
+        "values": mx.eye(64, dtype=mx.float32)[:1],
+        "layer": 2,
+        "temperature": 0.1,
+        "gate": 0.1,
+    }
+    return {
+        "deep_concept_memory": memory,
+        "_mlx2_persistent_decode_inputs": {"deep_concept_memory": memory},
+    }
+
+
+def test_srpt_holds_a_persistent_row_until_both_batches_drain(model):
+    """SRPT can pick a request-private row from anywhere in the queue.
+
+    The shortest row here is a persistent concept request queued behind a
+    text row while another text lane is mid-prefill.  It used to be picked
+    straight into that prompt batch, and ``batch.next()`` raised "persistent
+    concept decode cannot share a prompt batch".
+    """
+    step = 8
+
+    def run(with_others):
+        gen = _make(model, False, step=step, prefill_scheduling=SRPT)
+        tokens = {}
+        widths = {}
+        try:
+            uids = []
+            if with_others:
+                uids.append(_insert(gen, _prompt(4 * step, 3), False, 1))
+                gen.next()
+                uids.append(_insert(gen, _prompt(5 * step, 4), False, 2))
+            persistent = gen.insert(
+                [_prompt(3, 5)], max_tokens=[4], prefill_inputs=[_persistent_inputs()]
+            )[0]
+            uids.append(persistent)
+            done = set()
+            for _ in range(200):
+                _, generated = gen.next()
+                for r in generated:
+                    tokens.setdefault(r.uid, []).append(int(r.token))
+                    widths.setdefault(r.uid, set()).add(r.execution_width)
+                    if r.finish_reason:
+                        done.add(r.uid)
+                if done >= set(uids):
+                    break
+            assert done == set(uids)
+        finally:
+            gen.close()
+        return tokens[persistent], widths[persistent]
+
+    alone = run(False)
+    together = run(True)
+    assert together == alone
+    assert together[1] == {1}
+
+
 # -- server-owned policy --------------------------------------------------------
 
 

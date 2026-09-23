@@ -4662,11 +4662,20 @@ class BatchGenerator:
 
         A row carrying ``prefill_inputs`` must run its first prefill at an
         isolated B=1 boundary, so it waits while the prompt batch holds any
-        other lane.
+        other lane.  A persistent concept row also waits for the generation
+        batch to drain, as the FIFO drain rule in ``_next`` does, because it
+        may never share decode either.
         """
         if len(sequence) <= 9 or sequence[9] is None:
             return False
-        return len(self._prompt_batch) > 0
+        if len(self._prompt_batch) > 0:
+            return True
+        payload = sequence[9]
+        return (
+            isinstance(payload, dict)
+            and payload.get(_PERSISTENT_DECODE_INPUTS) is not None
+            and len(self._generation_batch) > 0
+        )
 
     def _select_prefill_indices(self, n: int):
         """Select a padding-efficient, starvation-bounded admission cohort."""
@@ -4751,7 +4760,8 @@ class BatchGenerator:
         Returns ``(count, candidates)``; ``candidates`` describes the whole
         queue before the move so the caller can commit bypass counts for the
         rows it actually admits.  A media row keeps the isolation of
-        ``_select_prefill_indices``: it is admitted only as the sole pick.
+        ``_select_prefill_indices``: it is admitted only as the sole pick,
+        and only once the batches it may not share have drained.
         """
         queued = list(self._unprocessed_sequences)
         candidates = [self._queued_prefill_candidate(seq) for seq in queued]
@@ -4764,7 +4774,11 @@ class BatchGenerator:
             if len(queued[pick]) > 9 and queued[pick][9] is not None:
                 if picks:
                     continue
-                picks.append(pick)
+                # When the row cannot run alone yet, admission holds this
+                # round so the busy batch drains before its turn; picking
+                # other rows instead could keep that batch busy forever.
+                if not self._isolated_prefill_must_wait(queued[pick]):
+                    picks.append(pick)
                 break
             picks.append(pick)
         chosen = set(picks)
