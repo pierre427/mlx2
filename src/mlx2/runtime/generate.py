@@ -5475,15 +5475,20 @@ class BatchGenerator:
                         )
                     self._post_prefill_receipts[uid] = receipt
             for i, uid in enumerate(ready.uids):
-                self._prompt_boundaries[uid] = (
-                    exact_prompt_boundary
-                    if exact_prompt_boundary is not None
-                    else {
-                        "tokens": list(ready.tokens[i]),
-                        "target_cache": ready.extract_cache(i),
-                        "committed_only": True,
-                    }
-                )
+                if exact_prompt_boundary is not None:
+                    self._prompt_boundaries[uid] = exact_prompt_boundary
+                    continue
+                target_cache = ready.extract_cache(i)
+                # The extracted rows are lazy slices of the whole ready batch.
+                # Unevaluated, each published boundary would pin every row's
+                # K/V while APCv2 accounts it as one row; scheduling the copy
+                # now detaches the graph without a host sync.
+                mx.async_eval([cache.state for cache in target_cache])
+                self._prompt_boundaries[uid] = {
+                    "tokens": list(ready.tokens[i]),
+                    "target_cache": target_cache,
+                    "committed_only": True,
+                }
             gen_batch = ready.generate(last_inputs)
             for i, p in enumerate(progress):
                 prompt_responses.append(

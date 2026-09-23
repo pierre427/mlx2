@@ -2368,6 +2368,9 @@ class ArraysCache(_BaseCache):
             snapshot = [
                 None if c is None else mx.array(c[i : i + 1]) for c in self.cache
             ]
+            # An unevaluated row slice keeps the whole batched state alive;
+            # scheduling the copy detaches it without a host sync.
+            mx.async_eval(snapshot)
             lane.append((position, snapshot))
             _thin_checkpoints(lane, max_checkpoints)
 

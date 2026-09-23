@@ -95,3 +95,107 @@ def test_empty_batch_caches_extract_as_empty_single_caches():
     for batch in (BatchKVCache([0, 0]), BatchRotatingQuantizedKVCache(8, [0, 0])):
         extracted = batch.extract(1)
         assert extracted.keys is None and extracted.offset == 0
+
+
+def _tiny_kv_heavy_qwen38():
+    """Hybrid model whose full-attention K/V dominates its per-row state."""
+    from mlx2.runtime.models.qwen3_5 import TextModelArgs
+    from mlx2.runtime.models.qwen38_27b import TextModel
+
+    args = TextModelArgs(
+        model_type="qwen3_5", hidden_size=64, intermediate_size=64,
+        num_hidden_layers=4, num_attention_heads=4, num_key_value_heads=4,
+        head_dim=128, vocab_size=128, linear_num_key_heads=2,
+        linear_num_value_heads=4, linear_key_head_dim=8, linear_value_head_dim=8,
+        linear_conv_kernel_dim=3, full_attention_interval=2,
+        mtp_num_hidden_layers=1, partial_rotary_factor=0.5,
+        rope_parameters=None, max_position_embeddings=1 << 16,
+    )
+    mx.random.seed(7)
+    model = TextModel(args)
+    model.eval()
+    mx.eval(model.parameters())
+    return model
+
+
+def test_published_prompt_boundary_holds_only_its_own_row():
+    """A boundary must not pin the whole ready batch it was extracted from.
+
+    A short and a long prompt prefill together; the short one's boundary is
+    published and everything else is dropped. The APC entry is accounted as
+    one short row, so that is all it may keep alive (it used to hold the
+    long row's padded K/V as well, ~36x its accounted bytes).
+    """
+    import gc
+
+    from mlx2.runtime.apc_v2 import APCKey
+
+    model = _tiny_kv_heavy_qwen38()
+    lengths = (120, 1900)
+    batch = BatchGenerator(
+        model, completion_batch_size=4, prefill_batch_size=2,
+        prefill_step_size=2048, prefill_batch_window=1,
+    )
+    uids = batch.insert(
+        [[(i * (k + 3)) % 97 + 2 for i in range(n)] for k, n in enumerate(lengths)],
+        max_tokens=[8] * len(lengths),
+    )
+    ended = 0
+    while ended < len(lengths):
+        (prompts, _responses) = batch.next()
+        ended += sum(1 for p in prompts if p.end_of_prompt)
+    boundaries = [batch.pop_prompt_boundary(uid) for uid in uids]
+    batch.close()
+    del batch
+    short = boundaries[0]
+    del boundaries
+    accounted = sum(cache.nbytes for cache in short["target_cache"])
+    apc = APCv2(
+        max_size=1, layout_name=getattr(model, "apc_v2_layout", "qwen38-tiny")
+    )
+    apc.store(
+        APCKey("model"), short["tokens"], short["target_cache"],
+        retention_role="committed_prompt_boundary",
+    )
+    del short
+    gc.collect()
+    held_with_entry = mx.get_active_memory()
+    apc.clear()
+    del apc
+    gc.collect()
+    held = held_with_entry - mx.get_active_memory()
+    assert accounted > 0
+    assert held <= 1.25 * accounted, (held, accounted)
+
+
+def test_state_checkpoint_does_not_pin_the_batched_state():
+    """A surviving lane's checkpoint must keep only its own row alive.
+
+    Checkpoints are cut per row from the batched recurrent state at a chunk
+    boundary. Once the other lanes are gone, the survivor's snapshot is
+    accounted as one row and must not still hold every row's state.
+    """
+    import gc
+
+    from mlx2.runtime.models.cache import ArraysCache
+
+    rows = 4
+    cache = ArraysCache(2)
+    cache.cache = [
+        mx.random.normal((rows, 64, 1024), key=mx.random.key(k)) for k in range(2)
+    ]
+    mx.eval(cache.cache)
+    cache.state_checkpoint([256] * rows, force=True)
+    survivor = cache._checkpoints[0]
+    accounted = sum(
+        array.nbytes for (_position, snapshot) in survivor for array in snapshot
+    )
+    del cache
+    gc.collect()
+    mx.synchronize()
+    held_with_survivor = mx.get_active_memory()
+    del survivor
+    gc.collect()
+    held = held_with_survivor - mx.get_active_memory()
+    assert accounted == 2 * 64 * 1024 * 4
+    assert held <= 1.25 * accounted, (held, accounted)
