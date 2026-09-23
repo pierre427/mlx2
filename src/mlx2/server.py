@@ -3706,6 +3706,11 @@ def handler_for(
                 self.close_connection = True
                 self._record_http(499)
             except (BrokenPipeError, ConnectionResetError):
+                # A streaming client that goes away mid-stream is the same
+                # disconnect as ClientGone and is counted like it.
+                engine_counts = getattr(engine, "counts", None)
+                if engine_counts is not None:
+                    engine_counts["client_disconnects"] += 1
                 self._record_http(499)
             except (RuntimeError, TimeoutError) as exc:
                 if not streaming:

@@ -3200,6 +3200,10 @@ class ServingEngine:
                     if event.get("error") == "cancelled"
                     else "failed"
                 )
+                if status == "cancelled":
+                    # Every terminal passes here once, wherever the request
+                    # was waiting (active, deferred, queued, or dequeued).
+                    self.counts["cancelled"] += 1
                 metrics = getattr(self, "batch_metrics", None)
                 if metrics is not None:
                     finishing = getattr(metrics, "finishing", None)
@@ -4913,7 +4917,6 @@ class ServingEngine:
                             batch, waiting, "queued_member_cancelled"
                         )
                         self._finish(waiting, {"error": "cancelled"})
-                        self.counts["cancelled"] += 1
                     elif time.monotonic() >= waiting.admission_deadline:
                         if not waiting.admission_final_reclaim_done:
                             self._clear_allocator_cache_before_reject(
@@ -6044,7 +6047,6 @@ class ServingEngine:
                         batch.remove(cancelled)
                     for uid in cancelled:
                         self._finish(active.pop(uid), {"error": "cancelled"})
-                        self.counts["cancelled"] += 1
                 # The watchdog below exists for lanes the memory controller
                 # queued and that never recovered.  A lane the *scheduler* has
                 # not reached yet (behind long prefills, or deferred by a live

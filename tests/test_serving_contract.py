@@ -2373,6 +2373,67 @@ def test_nonstreaming_client_disconnect_cancels_the_job():
         thread.join()
 
 
+def test_streaming_client_disconnect_is_counted_like_a_nonstreaming_one():
+    """A streaming client that goes away mid-stream ends in the write's
+    BrokenPipe/ConnectionReset branch.  It recorded the 499 but not the
+    request_finish client_disconnect counter the ClientGone branch keeps."""
+    import socket
+    import struct
+
+    from mlx2.batch_metrics import HttpRuntimeMetrics
+
+    class EndlessEngine(FakeEngine):
+        def __init__(self):
+            super().__init__()
+            self.http_metrics = HttpRuntimeMetrics()
+
+        def submit(self, request, *, tenant_id="default"):
+            self.job = job = Job(request)
+            job.prompt_tokens = 5
+
+            def produce():
+                while not job.cancelled.is_set():
+                    try:
+                        job.events.put({"delta": {"content": "x" * 512}}, timeout=0.05)
+                    except Exception:  # noqa: BLE001 - a full queue just retries
+                        pass
+
+            threading.Thread(target=produce, daemon=True).start()
+            return job
+
+    engine = EndlessEngine()
+    server = ThreadingHTTPServer(("127.0.0.1", 0), handler_for(engine))
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        body = json.dumps({"model": "fixture", "stream": True,
+                           "messages": [{"role": "user", "content": "hi"}]}).encode()
+        client = socket.create_connection(("127.0.0.1", server.server_port))
+        client.settimeout(5)
+        client.sendall(
+            b"POST /v1/chat/completions HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\n"
+            + f"Content-Length: {len(body)}\r\n\r\n".encode() + body
+        )
+        assert client.recv(64).startswith(b"HTTP/1.")
+        # Abort with a reset, as a crashed or killed client would.
+        client.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+        client.close()
+        assert engine.job.cancelled.wait(5)
+        deadline = time.monotonic() + 5
+        while (
+            not engine.http_metrics.prometheus_snapshot()["requests"]
+            and time.monotonic() < deadline
+        ):
+            time.sleep(0.05)
+        requests = engine.http_metrics.prometheus_snapshot()["requests"]
+        assert list(requests.items()) == [(("POST", "chat_completions", "4xx"), 1)]
+        assert engine.counts["client_disconnects"] == 1
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
+
+
 class SingleToolCallEngine(FakeEngine):
     """An engine whose parser honoured ``parallel_tool_calls:false``.
 

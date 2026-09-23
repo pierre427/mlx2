@@ -418,6 +418,42 @@ def test_cancelled_queued_job_releases_its_slot_without_a_free_lane(scripted_eng
     assert _wait_for_terminal(replacement, 5.0)["finish_reason"] == "length"
 
 
+def test_every_cancellation_reaches_the_request_finish_counter(scripted_engine, monkeypatch):
+    # The request_finish sanity counter counted only active and
+    # memory-deferred cancellations, so it disagreed with
+    # mlx2_requests_total{outcome="cancelled"} for requests cancelled while
+    # queued for a lane.
+    from mlx2.prometheus import render_engine_metrics
+
+    build, state = scripted_engine
+    engine = build(declare_marker=True, max_lanes=1, max_inflight=4)
+    _slow_scripted_decode(monkeypatch)
+    state["script"] = []
+    request = {"messages": [{"role": "user", "content": "a"}], "temperature": 0}
+    running = engine.submit({**request, "max_tokens": 400})
+    _wait_for_tokens(running)
+    queued = [engine.submit({**request, "max_tokens": 5}) for _ in range(2)]
+    time.sleep(0.05)
+    for job in queued:
+        job.cancelled.set()
+    for job in queued:
+        assert _wait_for_terminal(job, 1.0) == {"error": "cancelled"}
+    running.cancelled.set()
+    assert _wait_for_terminal(running, 5.0) == {"error": "cancelled"}
+
+    def metric(prefix, *labels):
+        for line in render_engine_metrics(engine).splitlines():
+            if line.startswith(prefix) and all(label in line for label in labels):
+                return float(line.rsplit(" ", 1)[1])
+        return 0.0
+
+    finished = metric("mlx2_runtime_events_total", 'component="request_finish"',
+                      'event="cancelled"')
+    outcome = metric("mlx2_requests_total", 'outcome="cancelled"')
+    assert finished == outcome == 3
+    assert engine.counts["cancelled"] == 3
+
+
 def test_cancelled_member_fails_a_held_cohort_without_a_free_lane(scripted_engine, monkeypatch):
     build, state = scripted_engine
     engine = build(declare_marker=True, max_lanes=2, max_inflight=3)
