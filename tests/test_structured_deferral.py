@@ -512,6 +512,27 @@ def test_reasoning_and_tools_fail_closed_on_routes_that_do_not_declare_them(scri
     assert reasoning == "Let" and content == "hello"
 
 
+def test_reasoning_tokens_count_every_token_until_the_channel_closes(scripted_engine):
+    build, state = scripted_engine
+    engine = build(declare_marker=True)
+    chat = {"messages": [{"role": "user", "content": "x"}], "temperature": 0, "top_k": 5, "max_tokens": 10}
+    # "Let" "</" " me" think; "</" is held back as a possible marker prefix
+    # and released together with " me".  </think> closes the channel.
+    state["script"] = [2, 14, 3, THINK_CLOSE, HELLO, EOS]
+    job = engine.submit({**chat, "enable_thinking": True})
+    reasoning, content, final = _collect(job)
+    assert final["finish_reason"] == "stop"
+    assert reasoning == "Let</ me" and content == "hello"
+    # Every token generated before the channel closed, the closing marker
+    # included; the answer and its EOS are not reasoning.
+    assert job.completion_tokens == 6
+    assert job.reasoning_tokens == 4
+    state["script"] = [HELLO, EOS]
+    job = engine.submit({**chat, "enable_thinking": False})
+    _collect(job)
+    assert job.completion_tokens == 2 and job.reasoning_tokens == 0
+
+
 def test_a_failing_terminal_receipt_fails_only_its_own_request(scripted_engine, monkeypatch):
     from mlx2 import structured_output
 

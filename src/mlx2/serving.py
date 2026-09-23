@@ -6484,6 +6484,14 @@ class ServingEngine:
                         if response.finish_reason:
                             job.detokenizer.finalize()
                         text = job.detokenizer.last_segment
+                        # Reasoning tokens are counted per generated token: one
+                        # counts when the reasoning channel is open before or
+                        # after it is parsed, so held-back marker prefixes and
+                        # the tokens that open or close the channel count.
+                        reasoning_before = (
+                            getattr(job.output_parser, "channel", None)
+                            == "reasoning_content"
+                        )
                         try:
                             finish_output = getattr(job.output_parser, "finish", None)
                             if response.finish_reason and callable(finish_output):
@@ -6499,7 +6507,12 @@ class ServingEngine:
                             self._finish(job, {"error": str(exc), "status": 502})
                             del active[response.uid]
                             continue
-                        if any(delta.get("reasoning_content") for delta in deltas):
+                        if (
+                            reasoning_before
+                            or getattr(job.output_parser, "channel", None)
+                            == "reasoning_content"
+                            or any(delta.get("reasoning_content") for delta in deltas)
+                        ):
                             job.reasoning_tokens += 1
                         for delta in deltas:
                             self._emit(job, {"delta": delta})
