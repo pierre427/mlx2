@@ -2944,8 +2944,13 @@ class BatchQuantizedKVCache(_BaseCache):
         self.key_scale = self.value_scale = None
         self._right_padding = None
 
-    def _quantize(self, x, bits):
-        if self.rotate and hadamard_size_ok(x.shape[-1]):
+    def _quantize(self, x, bits, *, keys: bool):
+        # Rotation is compensated by rotating the queries, which leaves Q.K
+        # unchanged; nothing un-rotates the attention output, so values must
+        # be stored as-is, exactly like QuantizedKVCache and to_quantized.
+        # ``keys`` is keyword-only and required so no caller can rotate values
+        # by default.
+        if keys and self.rotate and hadamard_size_ok(x.shape[-1]):
             x = rotate_last(x)
         return mx.quantize(x, group_size=self.group_size, bits=bits)
 
@@ -2973,8 +2978,8 @@ class BatchQuantizedKVCache(_BaseCache):
                 self.values = tree_map(
                     lambda a, b: mx.concatenate([a, b], axis=2), self.values, new_v
                 )
-        qk = self._quantize(keys, self.key_bits)
-        qv = self._quantize(values, self.value_bits)
+        qk = self._quantize(keys, self.key_bits, keys=True)
+        qv = self._quantize(values, self.value_bits, keys=False)
         self._idx += steps
         self.offset += steps
         for i in range(3):

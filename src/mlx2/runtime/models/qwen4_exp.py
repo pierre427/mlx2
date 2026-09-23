@@ -3372,8 +3372,8 @@ class BatchQSAQuantizedKVCache(BatchQSAKVCache):
         if source.keys is not None:
             keys = mx.contiguous(source.keys[..., : source._idx, :])
             values = mx.contiguous(source.values[..., : source._idx, :])
-            cache.keys = cache._quantize(keys, cache.key_bits)
-            cache.values = cache._quantize(values, cache.value_bits)
+            cache.keys = cache._quantize(keys, cache.key_bits, keys=True)
+            cache.values = cache._quantize(values, cache.value_bits, keys=False)
         _copy_qsa_auxiliary_state(source, cache)
         if cache.index_keys is not None:
             cache.index_keys = mx.contiguous(cache.index_keys[:, : cache._idx])

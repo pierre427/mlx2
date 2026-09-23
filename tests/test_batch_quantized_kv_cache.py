@@ -5,9 +5,11 @@ import pytest
 
 mx.set_default_device(mx.cpu)
 
+from mlx2.runtime.models.base import rotate_last, scaled_dot_product_attention
 from mlx2.runtime.models.cache import (
     BatchQuantizedKVCache,
     BatchRotatingQuantizedKVCache,
+    KVCache,
     QuantizedKVCache,
     RotatingQuantizedKVCache,
     _empty_quantized,
@@ -63,3 +65,74 @@ def test_rotating_quantized_caches_grow_at_every_supported_width(bits):
             )
             mx.eval(keys, values)
         assert keys[0].shape[-1] == 128 * bits // 32
+
+
+def _rotated_lane(keys, values, *, rotate):
+    cache = KVCache()
+    cache.update_and_fetch(keys, values)
+    return cache.to_quantized(
+        group_size=64, bits=8, key_bits=8, value_bits=8, rotate=rotate
+    )
+
+
+def test_rotated_batch_cache_rotates_keys_only_like_the_b1_cache():
+    # Hadamard rotation is compensated on the query side only, so only keys may
+    # be stored rotated. The batch cache used to rotate every appended value
+    # too, and nothing ever un-rotated the attention output.
+    mx.random.seed(0)
+    heads, dim, history = 2, 64, 12
+    k0, v0 = mx.random.normal((1, heads, history, dim)), mx.random.normal(
+        (1, heads, history, dim)
+    )
+    k1, v1 = mx.random.normal((1, heads, 1, dim)), mx.random.normal((1, heads, 1, dim))
+    query = mx.random.normal((1, heads, 1, dim))
+    scale = dim**-0.5
+    dense = mx.fast.scaled_dot_product_attention(
+        query,
+        mx.concatenate([k0, k1], axis=2),
+        mx.concatenate([v0, v1], axis=2),
+        scale=scale,
+    )
+
+    single = _rotated_lane(k0, v0, rotate=True)
+    keys, values = single.update_and_fetch(k1, v1)
+    b1 = scaled_dot_product_attention(
+        query, keys, values, cache=single, scale=scale, mask=None
+    )
+    batch = BatchQuantizedKVCache.merge([_rotated_lane(k0, v0, rotate=True)])
+    keys, values = batch.update_and_fetch(k1, v1)
+    batched = scaled_dot_product_attention(
+        query, keys, values, cache=batch, scale=scale, mask=None
+    )
+    stored_value = mx.dequantize(
+        *[x[..., history : history + 1, :] for x in batch.values],
+        group_size=64,
+        bits=8,
+    )
+
+    assert mx.abs(stored_value - v1).max().item() < 0.05
+    assert mx.abs(batched - dense).max().item() < 0.05
+    assert mx.allclose(batched, b1, atol=1e-5).item()
+    extracted = batch.extract(0)
+    for got, want in zip(extracted.values, single.values):
+        assert mx.array_equal(got, want[..., : history + 1, :]).item()
+
+
+def test_rotated_batch_qsa_conversion_rotates_keys_only():
+    from mlx2.runtime.models.qwen4_exp import BatchQSAKVCache, QSAKVCache
+
+    mx.random.seed(1)
+    keys, values = mx.random.normal((2, 2, 7, 64)), mx.random.normal((2, 2, 7, 64))
+    source = BatchQSAKVCache([0, 0])
+    source.update_and_fetch(keys, values)
+    packed = source.to_quantized(group_size=64, bits=8, rotate=True)
+    stored_values = mx.dequantize(*packed.values, group_size=64, bits=8)
+    stored_keys = mx.dequantize(*packed.keys, group_size=64, bits=8)
+
+    assert mx.abs(stored_values[..., :7, :] - values).max().item() < 0.05
+    assert mx.abs(stored_keys[..., :7, :] - rotate_last(keys)).max().item() < 0.05
+    single = QSAKVCache()
+    single.update_and_fetch(keys[:1], values[:1])
+    reference = single.to_quantized(group_size=64, bits=8, rotate=True)
+    for got, want in zip(packed.values, reference.values):
+        assert mx.array_equal(got[:1, :, :7], want).item()
