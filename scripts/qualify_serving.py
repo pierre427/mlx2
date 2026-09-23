@@ -1452,13 +1452,20 @@ def main():
                 "request_receipts": [r["mlx2"] for r in batch],
             },
         )
+        # Both pairs must do identical work for their wall times to compare:
+        # thinking off (a thinking-default model otherwise gets the reasoning
+        # allowance and answered 906 and 1,490 tokens on North) and EOS held
+        # until the 64-token budget, as the batch check above does.
         mixed_prompts = [
             prompt(
-                "Explain how a compiler works, in numbered sections.", max_tokens=64
+                "Explain how a compiler works, in numbered sections.",
+                max_tokens=64, min_tokens=64,
+                reasoning_effort="none", think=False,
             ),
             prompt(
                 "Explain how a database transaction works, in numbered sections.",
-                max_tokens=64,
+                max_tokens=64, min_tokens=64,
+                reasoning_effort="none", think=False,
             ),
         ]
         # The sequential warm-up is also the timing reference: two warm
@@ -1475,7 +1482,8 @@ def main():
         concurrent = time.monotonic() - start
         check(
             "mixed_warm",
-            all(content(r) and r["mlx2"]["cached_tokens"] > 0 for r in mixed)
+            all(content(r) and r["mlx2"]["cached_tokens"] > 0
+                and r["usage"]["completion_tokens"] == 64 for r in mixed)
             and mixed_warm_timing_passes(
                 concurrent, sequential, [r["mlx2"] for r in mixed]
             ),

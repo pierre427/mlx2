@@ -600,3 +600,14 @@ def test_near_limit_requests_hold_eos_until_the_full_budget():
     builder = builder[: builder.index("if not context_delegation:")]
     assert "min_tokens=completion_budget" in builder
     assert "max_tokens=completion_budget" in builder
+
+
+def test_mixed_warm_pairs_do_identical_work():
+    # The timing comparison is only meaningful when both pairs generate the
+    # same tokens: thinking off and EOS held to the budget.
+    source = (ROOT / "scripts" / "qualify_serving.py").read_text()
+    block = source[source.index("mixed_prompts = ["):]
+    block = block[: block.index("]\n")]
+    assert block.count("min_tokens=64") == 2
+    assert block.count('reasoning_effort="none"') == 2
+    assert 'r["usage"]["completion_tokens"] == 64 for r in mixed' in source
