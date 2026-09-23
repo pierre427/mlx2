@@ -195,6 +195,51 @@ def test_gemma3n_adapter_reports_real_frame_batches(monkeypatch):
     }
 
 
+def test_minicpmo_refuses_video_parts_instead_of_misaligning_media():
+    # MiniCPM-o has no video path.  Skipping the part left the prompt
+    # builder one replacement short, so the request died with StopIteration
+    # (or, with a later image, put the image marker at the video's slot).
+    Image = pytest.importorskip("PIL.Image")
+    from mlx2.adapters.mlx_vlm import MiniCPMOAdapter
+    from mlx2.api_resources import CapabilityUnavailable
+
+    buffer = BytesIO()
+    Image.new("RGB", (32, 32), "red").save(buffer, format="PNG")
+    image_url = "data:image/png;base64," + base64.b64encode(buffer.getvalue()).decode()
+    processed = []
+
+    class Processor:
+        tokenizer = None
+        chat_template = "x"
+
+        def apply_chat_template(self, messages, **kwargs):
+            return messages[0]["content"]
+
+        def __call__(self, **kwargs):
+            processed.append(kwargs)
+            return {"input_ids": np.array([[1, 2, 3]])}
+
+    adapter = object.__new__(MiniCPMOAdapter)
+    adapter.processor = Processor()
+    adapter.identity = {"fingerprint": "artifact"}
+    adapter.media_policy = MiniCPMOExecutionPolicy(slice_mode=False)
+    video = {"type": "input_video", "video_url": "data:video/mp4;base64,AAAA"}
+    image = {"type": "image_url", "image_url": {"url": image_url}}
+    text = {"type": "text", "text": "describe"}
+    for parts in ([video, text], [video, image, text]):
+        with pytest.raises(CapabilityUnavailable, match="video"):
+            adapter.prepare_multimodal_request(
+                {"messages": [{"role": "user", "content": parts}]}
+            )
+    assert processed == []
+
+    prepared = adapter.prepare_multimodal_request(
+        {"messages": [{"role": "user", "content": [image, text]}]}
+    )
+    assert prepared["messages"][0]["content"] == "<image>\ndescribe"
+    assert len(processed[0]["images"]) == 1
+
+
 def test_minicpmo_policy_uses_slicing_batching_and_audio_chunk_controls():
     Image = pytest.importorskip("PIL.Image")
 

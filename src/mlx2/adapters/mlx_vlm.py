@@ -90,9 +90,23 @@ def _source(part, kind):
     return value
 
 
+def _unmapped_part(family, part_type):
+    """Refuse a media part the adapter has no encoder for.
+
+    Skipping the part would leave the prompt one media replacement short, so
+    every later marker would land at the wrong part.
+    """
+    if part_type == "input_video":
+        from ..api_resources import CapabilityUnavailable
+
+        return CapabilityUnavailable(f"{family} has no qualified video input")
+    return ValueError(f"{family} does not accept {part_type!r} content parts")
+
+
 def _plain_messages(messages, replacements):
     converted = []
     cursor = iter(replacements)
+    missing = object()
     for message in messages:
         content = message.get("content")
         if isinstance(content, list):
@@ -101,9 +115,16 @@ def _plain_messages(messages, replacements):
                 if part["type"] == "text":
                     text.append(part.get("text", ""))
                 else:
-                    text.append(next(cursor))
+                    replacement = next(cursor, missing)
+                    if replacement is missing:
+                        raise RuntimeError(
+                            "multimodal replacements are fewer than media parts"
+                        )
+                    text.append(replacement)
             content = "\n".join(value for value in text if value)
         converted.append({**message, "content": content})
+    if next(cursor, missing) is not missing:
+        raise RuntimeError("multimodal replacements outnumber media parts")
     return converted
 
 
@@ -371,8 +392,10 @@ class Gemma3nAdapter(_MLXVLMAdapter):
         for message in request["messages"]:
             for part in message.get("content", ()) if isinstance(message.get("content"), list) else ():
                 kind = {"image_url": "image", "input_image": "image", "input_audio": "audio", "input_video": "video"}.get(part["type"])
-                if kind is None or part["type"] == "text":
+                if part["type"] == "text":
                     continue
+                if kind is None:
+                    raise _unmapped_part("Gemma 3n", part["type"])
                 value = resolve_media(_source(part, kind), kind=kind, file_loader=file_loader, fps=self.video_policy.fps, max_frames=self.video_policy.max_frames) if kind == "video" else resolve_media(_source(part, kind), kind=kind, file_loader=file_loader)
                 media.append(value)
                 if kind == "image":
@@ -437,8 +460,10 @@ class MiniCPMOAdapter(_MLXVLMAdapter):
         for message in request["messages"]:
             for part in message.get("content", ()) if isinstance(message.get("content"), list) else ():
                 kind = {"image_url": "image", "input_image": "image", "input_audio": "audio"}.get(part["type"])
-                if kind is None or part["type"] == "text":
+                if part["type"] == "text":
                     continue
+                if kind is None:
+                    raise _unmapped_part("MiniCPM-o", part["type"])
                 value = resolve_media(_source(part, kind), kind=kind, file_loader=file_loader)
                 media.append(value)
                 if kind == "image":
