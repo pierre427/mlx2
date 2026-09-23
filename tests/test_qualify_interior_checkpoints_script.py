@@ -202,7 +202,7 @@ def test_warm_hit_cold_reference_fails_the_run(tmp_path, monkeypatch):
     )
     workloads = {name: [[{"role": "user", "content": "a"}],
                         [{"role": "user", "content": "b"}]]
-                 for name in ("shared_system", "rag")}
+                 for name in ("shared_system", "rag", "linear")}
 
     def summarize(cold_cached):
         monkeypatch.setattr(module, "Client", _fake_client(cold_cached))
@@ -223,3 +223,33 @@ def test_warm_hit_cold_reference_fails_the_run(tmp_path, monkeypatch):
     assert warm_reference["warm_references"] > 0 and not warm_reference["go"]
     cold_reference = summarize(0)
     assert cold_reference["warm_references"] == 0 and cold_reference["go"]
+
+
+def test_partial_runs_do_not_report_go():
+    # Regression: without the off control arm the TTFT gate was all([]), and
+    # without a MUST_HIT workload the mechanism refusal never looked at
+    # anything, so a partial run reported go=True (exit 0) on no evidence.
+    module = _module()
+    names = ["shared_system", "rag", "linear"]
+    complete = module.summarize([_run("off", 0, 1.0), _run("auto", 1, 0.2)], names)
+    assert complete["gates"]["go"] and complete["gates"]["missing_evidence"] == []
+
+    no_control = module.summarize([_run("auto", 1, 0.2)], names)
+    assert not no_control["gates"]["go"]
+    assert "arm off" in no_control["gates"]["missing_evidence"]
+
+    no_auto = module.summarize([_run("off", 0, 1.0), _run("pow2", 1, 0.2)], names)
+    assert not no_auto["gates"]["go"]
+
+    def without(run, dropped):
+        return {**run, "workloads": {name: rows for name, rows in run["workloads"].items()
+                                     if name not in dropped}}
+
+    for dropped in (["rag"], ["shared_system", "rag"], ["linear"]):
+        kept = [name for name in names if name not in dropped]
+        partial = module.summarize(
+            [without(_run("off", 0, 1.0), dropped), without(_run("auto", 1, 0.2), dropped)],
+            kept,
+        )
+        assert not partial["gates"]["go"], dropped
+        assert partial["gates"]["missing_evidence"], dropped

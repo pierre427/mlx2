@@ -26,6 +26,8 @@ mechanism under test cannot judge it.
 
 Mechanism gate: an arm other than ``off`` whose shared_system/rag workload
 records zero interior hits is REFUSED (exit 3): a null arm is not evidence.
+A run without the ``off`` and ``auto`` arms or without the shared_system, rag
+and linear workloads cannot report go: its gates would have nothing to compare.
 
 Refuses to run without ``--i-own-the-gpu``; ``--dry-run`` prints the plan.
 Run under the lab GPU lock wrapper (cpg_job.py ... --lock).
@@ -60,6 +62,11 @@ AUTO_POLICY = {
 }
 WORKLOADS = ("shared_system", "rag", "branch", "linear")
 MUST_HIT = ("shared_system", "rag")
+# A go verdict compares the auto arm with the off control on every MUST_HIT
+# workload and on the linear no-harm control; a run missing any of them has
+# no evidence for the gate it would otherwise pass vacuously.
+REQUIRED_ARMS = ("off", "auto")
+REQUIRED_WORKLOADS = (*MUST_HIT, "linear")
 
 
 def _words(n: int, tag: str) -> str:
@@ -421,6 +428,7 @@ def summarize(runs: list, workloads) -> dict:
             rows = [row for run in arm_runs for row in run["workloads"].get(name, ())]
             later = [row for row in rows if row["index"] > 0]
             entry[name] = {
+                "requests": len(rows),
                 "median_ttft_s_after_first": statistics.median(
                     [row["ttft_s"] for row in later if row["ttft_s"] is not None]
                 ) if later else None,
@@ -471,6 +479,14 @@ def summarize(runs: list, workloads) -> dict:
             value = (entry.get(name) or {}).get("median_ttft_s_after_first")
             if base and value:
                 ttft_cut[f"{arm}/{name}"] = 1.0 - value / base
+    missing = [f"arm {arm}" for arm in REQUIRED_ARMS if arm not in summary["arms"]]
+    missing += [
+        f"{arm}/{name}"
+        for arm in REQUIRED_ARMS
+        if arm in summary["arms"]
+        for name in REQUIRED_WORKLOADS
+        if not (summary["arms"][arm].get(name) or {}).get("requests")
+    ]
     linear_regression = None
     if "linear" in off and "auto" in summary["arms"]:
         base = off["linear"]["median_ttft_s_after_first"]
@@ -481,13 +497,16 @@ def summarize(runs: list, workloads) -> dict:
     # the exactness gate unmeasurable: report it rather than crediting or
     # blaming the checkpoint.
     go = (
-        not refused
+        not missing
+        and not refused
         and diffs == 0
         and warm_references == 0
-        and all(ttft_cut.get(f"auto/{name}", 0.0) >= 0.30 for name in MUST_HIT if name in off)
-        and (linear_regression is None or linear_regression <= 0.03)
+        and all(ttft_cut.get(f"auto/{name}", 0.0) >= 0.30 for name in MUST_HIT)
+        and linear_regression is not None
+        and linear_regression <= 0.03
     )
     summary["gates"] = {
+        "missing_evidence": missing,
         "refused_arms": refused,
         "correctness_diffs": diffs,
         "cold_replay_diffs": cold_diffs,
