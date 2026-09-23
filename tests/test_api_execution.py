@@ -1,4 +1,5 @@
 import base64
+import inspect
 import json
 import wave
 from io import BytesIO
@@ -17,6 +18,8 @@ from mlx2.adapters.multimodal import (
 from mlx2.multimodal import (
     MediaValue,
     decode_data_url,
+    decode_image,
+    decode_video,
     decode_wav_audio,
     pcm_to_float32,
     resolve_media,
@@ -111,6 +114,75 @@ def test_malformed_wav_chunk_size_is_a_client_error():
     source = "data:audio/wav;base64," + base64.b64encode(payload).decode()
     with pytest.raises(ValueError, match="failed to decode WAV audio"):
         resolve_media(source, kind="audio")
+
+
+def _mp4_data_url(tmp_path, width, height, frames):
+    cv2 = pytest.importorskip("cv2")
+    path = tmp_path / "clip.mp4"
+    writer = cv2.VideoWriter(
+        str(path), cv2.VideoWriter_fourcc(*"mp4v"), 2.0, (width, height)
+    )
+    if not writer.isOpened():
+        pytest.skip("opencv has no mp4v writer")
+    for index in range(frames):
+        writer.write(np.full((height, width, 3), index * 20, dtype=np.uint8))
+    writer.release()
+    return "data:video/mp4;base64," + base64.b64encode(path.read_bytes()).decode()
+
+
+def test_video_frames_are_bounded_like_images_before_they_are_retained(tmp_path):
+    # A small, highly compressible clip can decode to frames far larger than
+    # any accepted image; every sampled frame is held on the request thread.
+    oversized = _mp4_data_url(tmp_path, 4096, 4096 + 16, 1)
+    with pytest.raises(ValueError, match="pixel bound"):
+        resolve_media(oversized, kind="video")
+
+    source = _mp4_data_url(tmp_path, 64, 48, 8)
+    video = resolve_media(source, kind="video", fps=2.0, max_frames=8)
+    assert len(video.value) == 8
+    assert video.value[0].shape == (48, 64, 3)
+
+    with pytest.raises(ValueError, match="pixel bound"):
+        resolve_media(source, kind="video", max_frame_pixels=64 * 48 - 1)
+    with pytest.raises(ValueError, match="byte bound"):
+        resolve_media(
+            source, kind="video", max_frames=8, max_frame_bytes=8 * 64 * 48 * 3 - 1
+        )
+    assert (
+        inspect.signature(decode_video).parameters["max_frame_pixels"].default
+        == inspect.signature(decode_image).parameters["max_pixels"].default
+    )
+
+
+def test_video_frame_bounds_hold_when_the_container_declares_no_size(
+    tmp_path, monkeypatch
+):
+    # The decoded frame, not the container header, is the authority.
+    cv2 = pytest.importorskip("cv2")
+    source = _mp4_data_url(tmp_path, 64, 48, 8)
+
+    real_capture = cv2.VideoCapture
+
+    class SizelessCapture:
+        def __init__(self, *args):
+            self._capture = real_capture(*args)
+
+        def get(self, prop):
+            if prop in (cv2.CAP_PROP_FRAME_WIDTH, cv2.CAP_PROP_FRAME_HEIGHT):
+                return 0.0
+            return self._capture.get(prop)
+
+        def __getattr__(self, name):
+            return getattr(self._capture, name)
+
+    monkeypatch.setattr(cv2, "VideoCapture", SizelessCapture)
+    with pytest.raises(ValueError, match="pixel bound"):
+        resolve_media(source, kind="video", max_frame_pixels=64 * 48 - 1)
+    with pytest.raises(ValueError, match="byte bound"):
+        resolve_media(
+            source, kind="video", max_frames=8, max_frame_bytes=8 * 64 * 48 * 3 - 1
+        )
+    assert len(resolve_media(source, kind="video", max_frames=8).value) == 8
 
 
 def test_gemma3n_native_video_keeps_order_timestamps_and_cache_identity():

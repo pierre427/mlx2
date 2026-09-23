@@ -166,7 +166,22 @@ def uniform_frame_indices(total_frames, source_fps, *, fps=2.0, max_frames=64):
     ]
 
 
-def decode_video(payload, mime_type, *, fps=2.0, max_frames=64):
+def decode_video(
+    payload,
+    mime_type,
+    *,
+    fps=2.0,
+    max_frames=64,
+    max_frame_pixels=16_000_000,
+    max_frame_bytes=1 << 30,
+):
+    """Decode uniformly sampled RGB frames within per-frame and total bounds.
+
+    ``max_frame_pixels`` is the per-picture bound ``decode_image`` applies.
+    Every sampled frame is retained at source resolution until the encoder
+    resizes it, so a compressible high-resolution clip is also bounded by the
+    total bytes its sampled frames hold.
+    """
     try:
         import cv2
     except ImportError as error:
@@ -184,12 +199,27 @@ def decode_video(payload, mime_type, *, fps=2.0, max_frames=64):
             indices = uniform_frame_indices(
                 total, source_fps, fps=fps, max_frames=max_frames
             )
+            # Refuse from the container's declared size before decoding any
+            # frame; the decoded shape below remains the authority.
+            declared = int(capture.get(cv2.CAP_PROP_FRAME_WIDTH) or 0) * int(
+                capture.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0
+            )
+            if declared > max_frame_pixels:
+                raise ValueError("video frame exceeds the pixel bound")
+            if declared * 3 * len(indices) > max_frame_bytes:
+                raise ValueError("sampled video frames exceed the byte bound")
             frames = []
+            retained = 0
             for index in indices:
                 capture.set(cv2.CAP_PROP_POS_FRAMES, index)
                 ok, frame = capture.read()
                 if not ok:
                     raise ValueError(f"failed to decode video frame {index}")
+                if frame.shape[0] * frame.shape[1] > max_frame_pixels:
+                    raise ValueError("video frame exceeds the pixel bound")
+                retained += frame.nbytes
+                if retained > max_frame_bytes:
+                    raise ValueError("sampled video frames exceed the byte bound")
                 frames.append(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
         finally:
             capture.release()
