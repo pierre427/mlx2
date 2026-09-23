@@ -502,6 +502,44 @@ def test_a_failing_terminal_receipt_fails_only_its_own_request(scripted_engine, 
     engine.slots.release()
 
 
+def test_logit_bias_reaches_added_special_tokens(scripted_engine, monkeypatch):
+    import sys
+
+    base = len(PIECES) - 2  # the last two pieces are added tokens
+    plain = _tokenizer
+
+    def tokenizer_with_added_tokens():
+        tokenizer = plain()
+        # HF semantics: vocab_size counts the base vocabulary only.
+        tokenizer.vocab_size = base
+        tokenizer.get_added_vocab = lambda: {PIECES[i]: i for i in range(base, len(PIECES))}
+        return tokenizer
+
+    monkeypatch.setattr(sys.modules[__name__], "_tokenizer", tokenizer_with_added_tokens)
+    build, state = scripted_engine
+    engine = build(declare_marker=True)
+    added = len(PIECES) - 1
+    request = {
+        "messages": [{"role": "user", "content": "x"}],
+        "temperature": 0,
+        "top_k": 5,  # below the tiny base vocabulary; the engine fallback is 20
+        "max_tokens": 1,
+    }
+    # The model wants the added token most; a bias on its id suppresses it.
+    state["script"] = [added]
+    _, content, final = _collect(engine.submit({**request, "logit_bias": {str(added): -100}}))
+    assert final.get("finish_reason") == "length", final
+    assert content == "hello"
+    # Past the tokenizer's whole id space is still out of the vocabulary.
+    _, _, final = _collect(engine.submit({**request, "logit_bias": {str(len(PIECES)): 1}}))
+    assert final["status"] == 400
+    # top_k keeps the base bound, which the logits row always exceeds.
+    _, _, final = _collect(engine.submit({**request, "temperature": 1, "top_k": base}))
+    assert final["status"] == 400
+    _, _, final = _collect(engine.submit({**request, "temperature": 1, "top_k": base - 1}))
+    assert final.get("finish_reason") == "length", final
+
+
 def test_serving_receipt_records_effective_output_limit_and_defaulting(scripted_engine):
     build, state = scripted_engine
     engine = build(declare_marker=True)

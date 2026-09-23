@@ -5344,9 +5344,17 @@ class ServingEngine:
                         top_p, top_k = sampling["top_p"], sampling["top_k"]
                         min_p = sampling["min_p"]
                         vocab_size = adapter.tokenizer.vocab_size
-                        # apply_top_k requires 0 < top_k < vocab_size; equality slipped
-                        # through here and raised inside the batched decode step.
-                        if top_k >= vocab_size or any(int(token) >= vocab_size for token in job.request.get("logit_bias", {})):
+                        # apply_top_k requires 0 < top_k < the logits width;
+                        # equality slipped through here and raised inside the
+                        # batched decode step.  The base vocabulary size stays
+                        # the top_k bound: every logits row is at least that wide.
+                        # A logit_bias id may name any token the tokenizer can
+                        # produce, added specials such as <|im_end|> and
+                        # </think> included, which the base size leaves out.
+                        from .structured_output import vocabulary_bound
+
+                        token_bound = vocabulary_bound(adapter.tokenizer)
+                        if top_k >= vocab_size or any(int(token) >= token_bound for token in job.request.get("logit_bias", {})):
                             raise ValueError("sampling token IDs and top_k must fit the model vocabulary")
                         transform = (
                             make_transformed_logprobs(
