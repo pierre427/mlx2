@@ -47,9 +47,9 @@ def _tiny_dflash_args():
     return DFlash2Config(hidden_size=8,intermediate_size=16,num_hidden_layers=2,num_attention_heads=2,num_key_value_heads=1,head_dim=4,vocab_size=32,num_target_layers=4,target_layer_ids=[0,3],conv_kernel_size=2,conv_group_size=2,selector_rank=4,selector_top_k=4,block_size=4,mask_token_id=31,max_position_embeddings=128,sliding_window=3,layer_types=['sliding_attention']*2)
 
 
-def tiny():
+def tiny(sliding_window=3):
     mx.random.seed(8)
-    m=Model(ModelArgs(hidden_size=8,intermediate_size=16,num_hidden_layers=4,num_attention_heads=2,num_key_value_heads=1,head_dim=4,vocab_size=32,sliding_window=3,max_position_embeddings=128))
+    m=Model(ModelArgs(hidden_size=8,intermediate_size=16,num_hidden_layers=4,num_attention_heads=2,num_key_value_heads=1,head_dim=4,vocab_size=32,sliding_window=sliding_window,max_position_embeddings=128))
     d=DFlash2DraftModel(_tiny_dflash_args()).bind(m)
     return m,d
 
@@ -1102,3 +1102,149 @@ def test_external_verify_histograms_decompose_the_accepted_aggregate():
     assert sum(k*v for k,v in accept.items())==receipt["accepted"]
     # Every span key is one more than the number of drafts it verified.
     assert all(k>=2 for k in span)
+
+
+def _external_engine(monkeypatch, m, d):
+    """A real ServingEngine on the external draft route over ``tiny()``."""
+    from mlx2 import memory, serving
+    from mlx2.contracts import Capability, ModelDescriptor, StatePlane
+    from mlx2.runtime import os_memory
+    from test_approximate_kv_serving import Detok, Parser
+
+    monkeypatch.setattr(serving, "runtime_identity", lambda: {"source_sha256": "src"})
+    monkeypatch.setattr(memory, "execution_headroom", lambda: 100 * 2**30)
+    monkeypatch.setattr(os_memory, "physical_footprint_bytes", lambda: 0)
+    # The worker thread cannot evaluate arrays still pending on this
+    # thread's stream.
+    mx.eval(m.parameters(), d.parameters())
+
+    class Tokenizer:
+        vocab_size = 32
+        eos_token_ids: ClassVar[list] = []
+
+        @property
+        def detokenizer(self):
+            return Detok()
+
+    class Adapter:
+        max_context = 128
+        identity: ClassVar[dict] = {"fingerprint": "tiny-external"}
+        environment: ClassVar[dict] = {}
+        layout = "tiny-external-layout"
+        tokenizer = Tokenizer()
+        descriptor = ModelDescriptor(
+            model_type="tiny", family="tiny", variant="v",
+            state_planes=frozenset({StatePlane.ATTENTION_KV, StatePlane.DRAFT}),
+            capabilities=frozenset({
+                Capability.TEXT, Capability.CONTINUOUS_BATCH, Capability.PREFIX_REUSE,
+                Capability.APC_V2, Capability.EXTERNAL_DRAFT, Capability.STREAMING,
+            }),
+            cache_layout="tiny-external-layout",
+        )
+
+        def __init__(self, _path):
+            self.model = m
+
+        def profile_name(self, _mtp):
+            return "tiny-external"
+
+        def execution_config(self, *, max_lanes, prefill_step):
+            return {"persistent": True, "num_draft": 2, "backend": "external_draft",
+                    "rate_gate": False, "prefill_step_size": prefill_step}
+
+        def create_external_batch(self, **kwargs):
+            return ExternalDraftBatchGenerator(m, draft_model=d, binding="tiny", num_draft=2, **kwargs)
+
+        def prompt_tokens(self, request):
+            return list(request["tokens"])
+
+        def output_parser(self, _request):
+            return Parser()
+
+        def diagnostics(self):
+            return {}
+
+        def close(self):
+            pass
+
+    engine = serving.ServingEngine(
+        "tiny", adapter_factory=Adapter, qualification_mode=True, mtp=False,
+        max_lanes=1, prefill_step=16,
+    )
+    assert engine.ready.wait(60), engine.error
+    return engine
+
+
+def _serve(engine, request):
+    job = engine.submit(dict(request))
+    text = ""
+    while True:
+        event = job.events.get(timeout=60)
+        if "error" in event:
+            return {"error": event["error"]}
+        if "delta" in event:
+            text += event["delta"].get("content", "")
+        if "finish_reason" in event:
+            return {"tokens": [int(t) for t in text.split()], "receipt": event["receipt"]}
+
+
+def _greedy_reference(m, prompt, count):
+    cache = m.make_cache(); tokens = list(prompt); reference = []
+    for i in range(count):
+        logits = m(mx.array([tokens if i == 0 else [tokens[-1]]]), cache=cache)
+        token = int(mx.argmax(logits[0, -1]).item()); tokens.append(token); reference.append(token)
+    return reference
+
+
+def test_repeated_one_token_prompt_on_the_external_route_keeps_the_worker(monkeypatch):
+    # The second request gets a zero-length APCv2 hit: a COW branch with no
+    # draft sidecar.  The lane adopted its hooked cache objects raw, and the
+    # round snapshot deep-copied their lock-holding segment tokens, killing
+    # the generation worker with "cannot pickle '_thread.lock'".
+    monkeypatch.delenv("MLX_LM_EXTERNAL_ROUND_COW", raising=False)
+    # A window wider than the transcript keeps the finished cache trimmable,
+    # so APCv2 stores it and the repeat request hits.
+    m, d = tiny(sliding_window=16)
+    engine = _external_engine(monkeypatch, m, d)
+    try:
+        request = {"tokens": [4], "max_tokens": 6, "temperature": 0}
+        first = _serve(engine, request)
+        second = _serve(engine, request)
+        alive, error = engine.thread.is_alive(), engine.error
+    finally:
+        engine.close()
+    assert alive and error is None
+    expected = _greedy_reference(m, [4], 6)
+    assert first == {"tokens": expected, "receipt": first["receipt"]}
+    assert second == {"tokens": expected, "receipt": second["receipt"]}
+
+
+def test_round_snapshot_of_hooked_apc_planes_takes_the_descriptor_route(monkeypatch):
+    # With descriptor COW off, a lane whose target planes came from an APC
+    # branch was frozen by deep copy, which cannot pickle the branch's
+    # lock-holding segment tokens.
+    from mlx2.runtime.apc_v2 import APCKey, APCv2
+
+    monkeypatch.delenv("MLX_LM_EXTERNAL_ROUND_COW", raising=False)
+    m, d = tiny(sliding_window=16)
+    first = generator(m, d)
+    first.insert([[1, 2, 3]], max_tokens=[3])
+    _, final = drain(first)
+    end = final[0]
+    apc = APCv2(max_size=2, layout_name="test-external-freeze")
+    key = APCKey("target", revision="r", cache_layout_fingerprint="test-external-freeze")
+    apc.store(key, end.all_tokens, end.prompt_cache)
+    hit = apc.lookup(key, end.all_tokens + [end.token])
+    assert hit.hit and hit.cached_tokens == len(end.all_tokens)
+
+    b = generator(m, d)
+    uid = b.insert([[end.token]], max_tokens=[2])[0]
+    lane = b.lanes[uid]
+    lane.cache = list(hit.cache)
+    frozen, mode = b._freeze_lane(lane)
+    assert mode == "descriptor_cow"
+    thawed = b._thaw_lane(frozen)
+    assert [c.offset for c in thawed["cache"]] == [c.offset for c in hit.cache]
+    assert all(not hasattr(c, "_cow_segment_tokens") for c in thawed["cache"])
+    hit.cache.close()
+    apc.clear(release_memory=False)

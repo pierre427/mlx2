@@ -19,6 +19,7 @@ import numpy as np
 from .committed_recovery import CommittedRecoverySlot
 from .cow_cache import (
     COWCacheUnsupported,
+    _carries_cow_bookkeeping,
     external_round_cow_enabled,
     snapshot_committed_cache,
     snapshot_prompt_cache_descriptors,
@@ -331,9 +332,11 @@ class ExternalDraftBatchGenerator:
                 self.scheduler_stats["paired_cache_resumes"] += 1
                 if resume_rng and state.rng_key is not None:
                     rng = RequestRNG(state=json.loads(bytes(np.asarray(state.rng_key, dtype=np.uint8)).decode()))
-            elif prefix:
+            else:
                 # An ordinary APC hit cannot fabricate draft context. Rebuild
                 # both planes from transcript instead of pairing stale caches.
+                # This includes a zero-length hit: its branch still holds the
+                # APC's hooked cache objects, which the lane must not adopt.
                 todo = prefix + todo; prefix = []; target = None
             uid = self.next_uid; self.next_uid += 1
             lane = Lane(uid, prefix, deque(todo), list(target) if target is not None else self.model.make_cache(), draft_cache, tail, rng, int(max_tokens[i]), (logits_processors or [[]]*len(prompts))[i] or [], dict((sampling_configs or [{}]*len(prompts))[i]))
@@ -457,7 +460,12 @@ class ExternalDraftBatchGenerator:
         separately because rounds only append to it.
         """
         fields = vars(lane)
-        if external_round_cow_enabled():
+        # A graph carrying COW bookkeeping (an APC branch's hooked objects)
+        # always takes the descriptor route: its segment tokens hold locks a
+        # deep copy cannot pickle, as in ``snapshot_committed_cache``.
+        if external_round_cow_enabled() or _carries_cow_bookkeeping(
+            fields["cache"], fields["draft_cache"]
+        ):
             try:
                 cache, (draft_cache, tail), _receipt = (
                     snapshot_prompt_cache_descriptors(
