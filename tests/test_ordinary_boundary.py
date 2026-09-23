@@ -201,6 +201,51 @@ def test_state_checkpoint_does_not_pin_the_batched_state():
     assert held <= 1.25 * accounted, (held, accounted)
 
 
+def test_extracted_rotating_row_rollbacks_hold_only_its_own_row():
+    """A rotating row cut while prompt rollback records is copied and counted.
+
+    ``BatchRotatingKVCache.extract`` hands the row its rollback history, so
+    the row stays trimmable within the recorded window.  The history is built
+    from lazy slices of whole-batch snapshots, and the boundary path schedules
+    only the row's ``state``; unevaluated, the history pinned every row of
+    the batch while ``nbytes`` did not count it at all.
+    """
+    import gc
+
+    from mlx2.runtime.models.cache import BatchRotatingKVCache
+
+    rows = 8
+    batch = BatchRotatingKVCache(64, [0] * rows)
+    batch.start_speculation(16)
+    first = mx.random.normal((rows, 4, 48, 128), key=mx.random.key(1))
+    second = mx.random.normal((rows, 4, 4, 128), key=mx.random.key(2))
+    for kv in (first, second):
+        mx.eval(batch.update_and_fetch(kv, kv))
+
+    # The copied history still rolls the extracted row back exactly.
+    row = batch.extract(0)
+    assert row.trim(4) == 4
+    assert row.offset == 48
+    assert mx.array_equal(row.keys, first[0:1]).item()
+    del row
+
+    # The boundary path: extract, then schedule the row's state.
+    survivor = batch.extract(0)
+    mx.async_eval([survivor.state])
+    assert len(survivor._rollbacks) == 2
+    accounted = survivor.nbytes
+    del batch, first, second, kv
+    gc.collect()
+    mx.synchronize()
+    held_with_survivor = mx.get_active_memory()
+    del survivor
+    gc.collect()
+    mx.synchronize()
+    held = held_with_survivor - mx.get_active_memory()
+    assert accounted > 0
+    assert held <= 1.25 * accounted, (held, accounted)
+
+
 def test_empty_caches_of_every_kind_report_empty_state():
     # _promote_ready_prompts evaluates the state of every extracted boundary
     # row; a one-token prompt prefills nothing, so each row is still empty.

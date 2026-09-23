@@ -1750,6 +1750,12 @@ class RotatingKVCache(_BaseCache):
         total = self.keys.nbytes + self.values.nbytes
         for _, keys, values in self._checkpoints:
             total += keys.nbytes + values.nbytes
+        # Retained rollback records are live buffers too (a row extracted
+        # while its batch records rollback keeps them), so count them.
+        for _, snapshot, keys, values in self._rollbacks:
+            total += keys.nbytes + values.nbytes
+            if snapshot[0] is not None:
+                total += snapshot[0].nbytes + snapshot[1].nbytes
         return total
 
 
@@ -4380,6 +4386,11 @@ class BatchRotatingKVCache(_BaseCache):
                         mx.contiguous(values[idx : idx + 1]),
                     )
                 )
+            # The row keeps its history so it stays trimmable, but each record
+            # is a lazy slice of a whole-batch snapshot.  Callers schedule only
+            # the row's ``state``, so schedule the history copies here, where
+            # they are cut; otherwise the row pins every batch row.
+            mx.async_eval(list(cache._rollbacks))
         return cache
 
     @classmethod
