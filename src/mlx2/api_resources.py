@@ -118,7 +118,7 @@ def _unlink_restored(path, counts):
         counts["restore_cleanup_failures"] += 1
 
 
-def _eviction_key(entries, *, size=None, keep=None):
+def _eviction_key(entries, *, size=None, keep=None, protect=()):
     """The least recently used entry of the tenant holding the most.
 
     ``entries`` maps ``(tenant_id, id)`` to a value, least recent first.  One
@@ -127,13 +127,13 @@ def _eviction_key(entries, *, size=None, keep=None):
     global bound, but a tenant is only displaced by its own writes once it
     is the largest.  Size is entry count, or bytes when ``size`` is given;
     ties go to the tenant whose entry is least recent.  ``keep`` (the entry
-    just written) is never chosen.
+    just written) and the ``protect`` entries are never chosen.
     """
     totals = Counter()
     oldest = {}
     for key, value in entries.items():
         totals[key[0]] += 1 if size is None else size(value)
-        if key != keep:
+        if key != keep and key not in protect:
             oldest.setdefault(key[0], key)
     # sorted() is stable: tied tenants stay in least-recent-entry order.
     for tenant, _total in sorted(totals.items(), key=lambda item: -item[1]):
@@ -454,16 +454,24 @@ class FileStore:
                 self._counts["evictions"] += 1
         self._counts["restored"] += len(self._files)
 
-    def _eviction_key(self, keep):
+    def _eviction_key(self, keep, protect=()):
         return _eviction_key(
             self._files,
             size=None
             if len(self._files) > self.max_files
             else (lambda item: len(item.content)),
             keep=keep,
+            protect=protect,
         )
 
-    def create(self, tenant_id, *, filename, purpose, content_type, content):
+    def create(
+        self, tenant_id, *, filename, purpose, content_type, content, protect=()
+    ):
+        """Store a file, evicting others to stay in bounds.
+
+        ``protect`` names ``(tenant_id, file_id)`` keys the eviction must not
+        choose, such as a batch's output file while its error file is written.
+        """
         if purpose not in self.PURPOSES:
             raise ValueError("file purpose must be batch or user_data")
         if not isinstance(filename, str) or not filename or len(filename) > 255:
@@ -500,7 +508,7 @@ class FileStore:
             self._files[key] = item
             self._bytes += len(content)
             while len(self._files) > self.max_files or self._bytes > self.max_bytes:
-                removed_key = self._eviction_key(key)
+                removed_key = self._eviction_key(key, protect)
                 removed = self._files.pop(removed_key)
                 self._bytes -= len(removed.content)
                 for path in self._paths(*removed_key):
@@ -774,10 +782,19 @@ class BatchManager:
             ).encode()
 
         error_reserve = len(dropped_errors_row(len(lines))) + 1
+        # Both files must also fit the store together: eviction takes the
+        # largest tenant's oldest file first, which after the output is
+        # written is usually this batch's own output.
+        pair_limit = self.file_store.max_bytes
 
         def keep_output(encoded):
             nonlocal output_bytes, output_full
-            if output_full or output_bytes + len(encoded) + 1 > output_limit:
+            if (
+                output_full
+                or output_bytes + len(encoded) + 1 > output_limit
+                or output_bytes + len(encoded) + 1 + error_bytes + error_reserve
+                > pair_limit
+            ):
                 output_full = True
                 return False
             output_bytes += len(encoded) + 1
@@ -786,10 +803,15 @@ class BatchManager:
 
         def keep_error(encoded):
             nonlocal error_bytes, errors_dropped
-            if errors_dropped or error_bytes + len(encoded) + 1 + error_reserve > output_limit:
+            size = len(encoded) + 1
+            if (
+                errors_dropped
+                or error_bytes + size + error_reserve > output_limit
+                or output_bytes + error_bytes + size + error_reserve > pair_limit
+            ):
                 errors_dropped += 1
                 return
-            error_bytes += len(encoded) + 1
+            error_bytes += size
             errors.append(encoded)
 
         def output_limit_error(custom_id, message):
@@ -932,6 +954,13 @@ class BatchManager:
                     purpose="batch",
                     content_type="application/jsonl",
                     content=b"\n".join(errors) + b"\n",
+                    # Writing the error file must not evict this batch's
+                    # output: the record is about to point at it.
+                    protect=(
+                        ((str(record["tenant_id"] or "default"), output_file_id),)
+                        if output_file_id
+                        else ()
+                    ),
                 )
                 error_file_id = object_["id"]
             else:
