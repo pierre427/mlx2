@@ -339,6 +339,48 @@ class TestBatchedSelfMTPQSA(unittest.TestCase):
         self.assertEqual(second.offset, 5)
         self.assertEqual(second.index_keys.shape[1], second.offset)
 
+    def test_quantized_qsa_ragged_trim_rolls_the_raw_key_ledger_with_kv(self):
+        # BatchQSAQuantizedKVCache delegated to BatchQuantizedKVCache, which
+        # rolls only the packed K/V: after a ragged rewind the raw-key ledger
+        # kept the rejected tokens, lost valid ones, and QSA block selection
+        # read keys the attention K/V no longer held.
+        from mlx2.runtime.models.qwen4_exp import QSAKVCache
+
+        def row(tag):
+            cache = QSAKVCache()
+            positions = mx.arange(8, dtype=mx.float32) + 100 * tag
+            kv = mx.broadcast_to(positions[None, None, :, None], (1, 1, 8, 64))
+            cache.update_and_fetch(kv, kv)
+            cache.update_index_keys(mx.broadcast_to(positions[None, :, None], (1, 8, 8)))
+            return cache
+
+        for quantized in (False, True):
+            # A pure residual rewind, and one with a uniform part as well.
+            for drops in ([0, 2], [1, 3]):
+                cache = BatchQSAKVCache.merge([row(0), row(1)])
+                if quantized:
+                    cache = cache.to_quantized(group_size=64, bits=8)
+                self.assertEqual(cache.trim_ragged(drops), drops)
+                keys = (
+                    mx.dequantize(*cache.keys, group_size=64, bits=8)
+                    if quantized
+                    else cache.keys
+                )
+                padding = cache.left_padding.tolist()
+                self.assertEqual(cache.index_keys.shape[1], cache._idx)
+                for index, base in ((0, 0), (1, 100)):
+                    start = padding[index]
+                    held = [
+                        round(x) for x in keys[index, 0, start : cache._idx, 0].tolist()
+                    ]
+                    ledger = [
+                        round(x)
+                        for x in cache.index_keys[index, start : cache._idx, 0].tolist()
+                    ]
+                    expected = list(range(base, base + 8 - drops[index]))
+                    self.assertEqual(held, expected, (quantized, drops))
+                    self.assertEqual(ledger, held, (quantized, drops))
+
 
 class TestQwen4ForcedAcceptanceCacheEquality(unittest.TestCase):
     @classmethod

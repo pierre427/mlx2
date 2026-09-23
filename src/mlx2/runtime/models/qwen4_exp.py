@@ -3484,12 +3484,29 @@ class BatchQSAQuantizedKVCache(BatchQSAKVCache):
         return n
 
     def trim_ragged(self, n, *, validate: bool = True):
-        drops = BatchQuantizedKVCache.trim_ragged(self, n, validate=validate)
+        # BatchQuantizedKVCache rolls only the packed K/V. The raw-key ledger
+        # takes the same per-row roll over the same window, as the declared
+        # ``_RAGGED_TRIM_AUX_ARRAYS`` of BatchQSAKVCache does; otherwise it
+        # keeps the rejected tokens, loses valid ones, and QSA block
+        # selection reads keys the attention K/V no longer holds.
+        (drops, _uniform, residual) = self.preflight_ragged_trim(n, validate=validate)
+        BatchQuantizedKVCache.trim_ragged(self, drops, validate=False)
+        if residual is not None and max(residual) > 0:
+            self._trim_ragged_aux(
+                mx.array(residual), 0, self._idx, self._RAGGED_TRIM_AUX_ARRAYS
+            )
         self.release_qsa_cycle("BatchQSAQuantizedKVCache.trim_ragged")
         return drops
 
     def preflight_ragged_trim(self, n, *, validate: bool = True):
-        return BatchQuantizedKVCache.preflight_ragged_trim(self, n, validate=validate)
+        plan = BatchQuantizedKVCache.preflight_ragged_trim(self, n, validate=validate)
+        (_drops, uniform, residual) = plan
+        if residual is not None and max(residual) > 0:
+            # The ledger must reach the cursor before anything moves.
+            self._check_ragged_trim_aux(
+                self._idx - uniform, self._RAGGED_TRIM_AUX_ARRAYS
+            )
+        return plan
 
     def prepare(self, *args, **kwargs):
         BatchQuantizedKVCache.prepare(self, *args, **kwargs)
