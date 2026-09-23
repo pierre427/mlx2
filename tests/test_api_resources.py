@@ -444,3 +444,73 @@ def test_batch_output_is_bounded_while_rows_run():
     ]
     assert [line["custom_id"] for line in errors] == ["row-2", "row-3", "row-4"]
     assert {line["error"]["code"] for line in errors} == {"output_limit_exceeded"}
+
+
+def test_batch_error_file_is_bounded_while_rows_run():
+    # Bounding only the output let the error rows grow without limit: once
+    # the output was full, every later row still added an error row (with
+    # its client-chosen custom_id), the error file outgrew the per-file
+    # bound, and the batch failed with storage_error, losing the output too.
+    rows = [
+        {
+            "custom_id": f"row-{index}",
+            "method": "POST",
+            "url": "/v1/embeddings",
+            "body": {"input": str(index)},
+        }
+        for index in range(12)
+    ]
+    text = "x" * 400
+    one_row = len(json.dumps({
+        "id": "batch_req_" + "0" * 32,
+        "custom_id": "row-0",
+        "response": {
+            "status_code": 200,
+            "request_id": "req_" + "0" * 32,
+            "body": {"text": text},
+        },
+        "error": None,
+    })) + 1
+    # Room for two results, and for the input file, not for ten error rows.
+    limit = 2 * one_row + one_row // 2
+    files = FileStore(max_file_bytes=limit)
+    source = files.create(
+        "tenant",
+        filename="requests.jsonl",
+        purpose="batch",
+        content_type="application/jsonl",
+        content=("\n".join(json.dumps(row) for row in rows) + "\n").encode(),
+    )
+    manager = BatchManager(files, lambda endpoint, body, tenant: (200, {"text": text}))
+    batch = manager.create(
+        "tenant",
+        {
+            "input_file_id": source["id"],
+            "endpoint": "/v1/embeddings",
+            "completion_window": "24h",
+        },
+    )
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        result = manager.get("tenant", batch["id"])
+        if result["status"] in {"completed", "failed"}:
+            break
+        time.sleep(0.01)
+    assert result["status"] == "completed", result["errors"]
+    assert result["request_counts"] == {"total": 12, "completed": 2, "failed": 10}
+    outputs = files.content("tenant", result["output_file_id"])[0].splitlines()
+    assert [json.loads(line)["custom_id"] for line in outputs] == ["row-0", "row-1"]
+    content = files.content("tenant", result["error_file_id"])[0]
+    assert len(content) <= limit
+    errors = [json.loads(line) for line in content.splitlines()]
+    recorded, marker = errors[:-1], errors[-1]
+    # The errors that fit are recorded in row order, then one marker counts
+    # the rest, so every failed row is accounted for.
+    assert recorded
+    assert [line["custom_id"] for line in recorded] == [
+        f"row-{index}" for index in range(2, 2 + len(recorded))
+    ]
+    assert {line["error"]["code"] for line in recorded} == {"output_limit_exceeded"}
+    assert marker["custom_id"] is None
+    assert marker["error"]["code"] == "error_limit_exceeded"
+    assert marker["error"]["message"].startswith(f"{10 - len(recorded)} ")

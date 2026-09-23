@@ -751,6 +751,29 @@ class BatchManager:
         output_limit = min(self.file_store.max_file_bytes, self.file_store.max_bytes)
         output_bytes = 0
         output_full = False
+        # The error file is bounded the same way, or its rows (which repeat
+        # each client-chosen custom_id) could outgrow the store and fail the
+        # whole batch.  Room is kept for one closing row that counts the
+        # errors past the bound, sized for a count of every row.
+        error_bytes = 0
+        errors_dropped = 0
+
+        def dropped_errors_row(count):
+            return json.dumps(
+                {
+                    "id": "batch_req_" + uuid.uuid4().hex,
+                    "custom_id": None,
+                    "response": None,
+                    "error": {
+                        "code": "error_limit_exceeded",
+                        "message": f"{count} further row errors were not recorded"
+                        f" (the batch error file is bounded at {output_limit} bytes)",
+                    },
+                },
+                allow_nan=False,
+            ).encode()
+
+        error_reserve = len(dropped_errors_row(len(lines))) + 1
 
         def keep_output(encoded):
             nonlocal output_bytes, output_full
@@ -761,8 +784,16 @@ class BatchManager:
             outputs.append(encoded)
             return True
 
+        def keep_error(encoded):
+            nonlocal error_bytes, errors_dropped
+            if errors_dropped or error_bytes + len(encoded) + 1 + error_reserve > output_limit:
+                errors_dropped += 1
+                return
+            error_bytes += len(encoded) + 1
+            errors.append(encoded)
+
         def output_limit_error(custom_id, message):
-            errors.append(
+            keep_error(
                 json.dumps(
                     {
                         "id": "batch_req_" + uuid.uuid4().hex,
@@ -870,10 +901,14 @@ class BatchManager:
                         "response": None,
                         "error": {"code": "invalid_request", "message": str(error)},
                     }
-                    errors.append(json.dumps(result, allow_nan=False).encode())
+                    keep_error(json.dumps(result, allow_nan=False).encode())
                 with self._lock:
                     record["request_counts"]["failed"] += 1
                     self._persist(record)
+        if errors_dropped and error_reserve <= output_limit:
+            # A store too small for even this row gets no error file; the
+            # request counts still report every failed row.
+            errors.append(dropped_errors_row(errors_dropped))
         with self._lock:
             record = self._batches[key]
             cancelled = record["cancel"].is_set()
