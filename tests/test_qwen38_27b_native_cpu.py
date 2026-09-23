@@ -130,3 +130,57 @@ assert all(
         check=True,
         timeout=30,
     )
+
+
+def test_checkpoint_mtp_head_is_dropped_when_the_model_has_none():
+    # The Qwen3.5-9B adapter always builds the trunk without an MTP head,
+    # but an "-mtp" checkpoint still ships the head's tensors.  Sanitize must
+    # drop them so the strict load that starts the server succeeds.
+    import mlx.core as mx
+    from mlx.utils import tree_flatten
+
+    from mlx2.runtime.models.qwen38_27b import Model, ModelArgs
+
+    text = dict(
+        model_type="qwen3_5",
+        hidden_size=32,
+        intermediate_size=64,
+        num_hidden_layers=4,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        head_dim=8,
+        vocab_size=128,
+        linear_num_key_heads=2,
+        linear_num_value_heads=4,
+        linear_key_head_dim=8,
+        linear_value_head_dim=8,
+        linear_conv_kernel_dim=3,
+        full_attention_interval=4,
+        partial_rotary_factor=0.5,
+        rope_parameters=None,
+        max_position_embeddings=128,
+    )
+
+    def build(mtp_layers):
+        return Model(
+            ModelArgs.from_dict(
+                {
+                    "model_type": "qwen3_5",
+                    "text_config": {**text, "mtp_num_hidden_layers": mtp_layers},
+                }
+            )
+        )
+
+    checkpoint = {
+        key.removeprefix("language_model."): value
+        for key, value in tree_flatten(build(1).parameters())
+    }
+    assert any(key.startswith("mtp.") for key in checkpoint)
+
+    model = build(0)
+    weights = model.sanitize(dict(checkpoint))
+    assert not any("mtp." in key for key in weights)
+    model.load_weights(list(weights.items()), strict=True)
+    tokens = mx.array([[1, 2, 3]])
+    assert model(tokens).shape == (1, 3, 128)
+    assert model.language_model.mtp is None

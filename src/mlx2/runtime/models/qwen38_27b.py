@@ -333,10 +333,12 @@ class TextModel(nn.Module):
         )
         should_shift_norm_weights = has_unsanitized_conv1d
         has_mtp_weights = any(("mtp." in k for k in weights))
-        if not (has_mtp_weights and hasattr(self, "mtp")):
+        # ``mtp`` is always an attribute (None when the model was built
+        # without a head), so test its value: an "-mtp" checkpoint loaded
+        # into a head-less trunk must drop the head's tensors.
+        if not (has_mtp_weights and getattr(self, "mtp", None) is not None):
             weights = {k: v for (k, v) in weights.items() if "mtp." not in k}
-            if hasattr(self, "mtp"):
-                self.mtp = None
+            self.mtp = None
         if self.args.tie_word_embeddings:
             weights.pop("lm_head.weight", None)
         norm_keys = (
