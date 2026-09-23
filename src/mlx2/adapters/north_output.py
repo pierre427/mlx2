@@ -75,13 +75,15 @@ def constrained_tool_grammar(tools, tool_choice, *, parallel_tool_calls=True):
         functions = [function for function in functions if function["name"] == selected]
     if not functions:
         raise ValueError("constrained tool_choice selects no declared function")
-    generic_root, definitions = recursive_json_object_pattern()
+    # ``parse_actions`` decodes the arguments and rejects infinity.
+    generic_root, definitions = recursive_json_object_pattern(finite_numbers=True)
     needs_definitions = False
     calls = []
     for function in functions:
         if function.get("strict", False):
             parameters = _schema_pattern(
-                executable_schema(function.get("parameters", {}))
+                executable_schema(function.get("parameters", {})),
+                finite_numbers=True,
             )
         else:
             # Free values, but required keys must appear (sglang #40051).

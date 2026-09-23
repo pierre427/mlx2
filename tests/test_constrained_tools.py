@@ -490,7 +490,7 @@ def _server_admits(grammar, text):
     return admitted
 
 
-def _muse_tool(schema, *, strict):
+def _single_parameter_tool(schema, *, strict):
     return [{"type": "function", "function": {
         "name": "f",
         "strict": strict,
@@ -549,7 +549,7 @@ def test_muse_grammars_admit_only_numbers_the_parser_can_serve(
     up to 308."""
     if isinstance(schema, list):
         schema = {"type": schema}
-    tools = _muse_tool(schema, strict=strict)
+    tools = _single_parameter_tool(schema, strict=strict)
     grammar = muse_grammar(tools, "required", parallel_tool_calls=False)
     for value in finite:
         assert _server_admits(grammar, _muse_call(value)), value
@@ -558,6 +558,52 @@ def test_muse_grammars_admit_only_numbers_the_parser_can_serve(
         assert not _server_admits(grammar, _muse_call(value)), value
         with pytest.raises(ValueError):
             _muse_value(_muse_call(value), tools)
+
+
+@pytest.mark.parametrize(
+    ("schema", "strict", "finite", "overflowing"),
+    [
+        ({"type": "number"}, True, ["1e300", "-1.7976931348623157e308"], ["1e400", "9e308"]),
+        (
+            {"type": "array", "items": {"type": "number"}}, True,
+            ["[1e300]"], ["[1, 1e400]"],
+        ),
+        ({"type": "object"}, False, ['{"a": [1e300]}'], ['{"a": [1e400]}']),
+        ({}, False, ["1e300"], ["9e308"]),
+    ],
+)
+def test_north_grammars_admit_only_numbers_the_parser_can_serve(
+    schema, strict, finite, overflowing
+):
+    """The North strict lowering and its recursive JSON rules admitted
+    ``1e400``; ``parse_actions`` decodes it to infinity and refuses to
+    serialize it, so the forced call failed with 502."""
+    import json
+
+    from mlx2.adapters.north_output import NorthOutputParser
+
+    tools = _single_parameter_tool(schema, strict=strict)
+    grammar = north_grammar(tools, "required", parallel_tool_calls=False)
+
+    def action(value):
+        return (
+            '<|START_ACTION|>[{"tool_name":"f","parameters":{"x":'
+            + value + "}}]<|END_ACTION|>"
+        )
+
+    def serve(text):
+        parser = NorthOutputParser(chat=True, thinking=False, tools=tools)
+        events = parser.push(text) + parser.push("", final=True)
+        (call,) = [event["tool_calls"][0] for event in events if "tool_calls" in event]
+        return json.loads(call["function"]["arguments"])["x"]
+
+    for value in finite:
+        assert _server_admits(grammar, action(value)), value
+        serve(action(value))
+    for value in overflowing:
+        assert not _server_admits(grammar, action(value)), value
+        with pytest.raises(ValueError):
+            serve(action(value))
 
 
 def test_finite_number_language_keeps_a_spelling_for_every_finite_value():
@@ -614,8 +660,11 @@ def test_non_strict_tool_blocks_compose_with_a_json_answer():
     from mlx2.structured_automaton import automaton_for
     from mlx2.tool_grammar import plan_tool_grammar
 
-    tools = _muse_tool({"type": "object"}, strict=False)
-    for builder, marker in ((muse_grammar, "<atem:function_calls>"),):
+    tools = _single_parameter_tool({"type": "object"}, strict=False)
+    for builder, marker in (
+        (muse_grammar, "<atem:function_calls>"),
+        (north_grammar, "<|START_ACTION|>"),
+    ):
         pattern, status, _ = plan_tool_grammar(
             {"tools": tools, "response_format": {"type": "json_object"}},
             lambda request, builder=builder: builder(
