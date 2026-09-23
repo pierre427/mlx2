@@ -1153,6 +1153,7 @@ class ServingEngine:
     # path: no exclusive operation and no admission preparing outside the lock.
     _exclusive_operation_active = False
     _admissions_preparing = 0
+    _worker_stopped = False
 
     def __init__(
         self,
@@ -1985,6 +1986,12 @@ class ServingEngine:
                 # claimed the idle boundary.
                 self._ensure_admission(admission_class, admitted=True)
                 self._publish_job(job)
+            with self.lock:
+                # The worker may have exited after the liveness check above,
+                # and its final sweep may have missed this job.
+                orphaned = self._worker_stopped and self.jobs.get(job.id) is job
+            if orphaned:
+                self._finish(job, {"error": self.error or "server stopped", "status": 503})
             return job
         except BaseException:
             self.slots.release()
@@ -6903,6 +6910,9 @@ class ServingEngine:
             self.error = f"{type(exc).__name__}: {exc}"
         finally:
             with self.lock:
+                # Published under the same lock: a submission that registers
+                # its job after this snapshot sees the flag and fails it.
+                self._worker_stopped = True
                 remaining = list(self.jobs.values())
             for job in remaining:
                 self._finish(

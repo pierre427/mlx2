@@ -442,3 +442,21 @@ def test_cancelled_member_fails_a_held_cohort_without_a_free_lane(scripted_engin
     assert status["inflight"] == 1 and status["queue_depth"] == 0
     running.cancelled.set()
     assert _wait_for_terminal(running, 5.0) == {"error": "cancelled"}
+
+
+def test_submission_racing_worker_exit_gets_a_terminal_event(scripted_engine):
+    from types import SimpleNamespace
+
+    build, state = scripted_engine
+    engine = build(declare_marker=True)
+    worker = engine.thread
+    engine.stop_event.set()
+    worker.join(10)
+    assert not worker.is_alive()
+    # A submission that passed its liveness check just before the worker's
+    # final sweep: pretend the check still sees a live thread.
+    engine.thread = SimpleNamespace(is_alive=lambda: True, join=lambda timeout=None: None)
+    job = engine.submit({"messages": [{"role": "user", "content": "x"}], "max_tokens": 2})
+    assert _wait_for_terminal(job, 1.0) == {"error": "server stopped", "status": 503}
+    with engine.lock:
+        assert not engine.jobs
