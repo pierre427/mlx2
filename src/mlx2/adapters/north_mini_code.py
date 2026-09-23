@@ -246,6 +246,10 @@ def inspect_artifact(model_path: str | Path) -> dict:
         "num_experts_per_tok": 8,
         "num_shared_experts": 0,
         "first_k_dense_replace": 1,
+        # Pinned for the same reason: with pattern 1 the reference rotates the
+        # dense-prefix layer, and a dropped key would silently change which
+        # layers carry RoPE.
+        "prefix_dense_sliding_window_pattern": 1,
         "expert_selection_fn": "sigmoid",
         "sliding_window": 4096,
         "rope_theta": 50000,
@@ -568,10 +572,24 @@ class NorthMiniCodeAdapter(ExternalDraftAdapterMixin):
     # 0.2 and 0.4 - but North needed only ~240 reasoning tokens on those, so
     # that says alpha does not break ordinary multi-step work, no more.
     #
-    # DEFAULTS.  All three levers are ON by default for this model
-    # (`thinking_guard_defaults` below: budget anchor 512, alpha 0.2, no
-    # hammer) - Pierre's call on 2026-09-18 after the campaign: 400/400 on the
-    # 20x20 run with 44% fewer tokens and no measured accuracy cost.  An
+    # All of the above was measured on a body that ran layer 0 without RoPE.
+    # The reference rotates North's dense-prefix layer (Cohere2Moe
+    # ``force_rope``); corrected on 2026-09-23, the artifact's held-out
+    # perplexity fell from 50.8 to 8.9 on code and from 290 to 35 on prose
+    # (qualification/runs/north-rope-l0-20260923).  On the corrected body
+    # the same 16-prompt held-out grid reads:
+    #   off                      16/16 closed and correct, 2,761 tokens
+    #   alpha 0.2 at layer 32    16/16 correct, 3,971 tokens (one run-on
+    #                            prompt looped to 1,712 tokens)
+    #   same-norm RANDOM vector  a prompt never closed at 2,400 tokens
+    # The run-on reasoning the levers were built for was the broken layer 0.
+    #
+    # DEFAULTS.  The budget and the run-on alarm stay on (anchor 512, no
+    # hammer): they act only on a detected run-on and leave healthy reasoning
+    # alone.  Alpha steering is OFF by default since 2026-09-23 - on the
+    # corrected body it lengthened reasoning instead of shortening it.  It was
+    # on from 2026-09-18 (Pierre's call after the 400/400 20x20 run with 44%
+    # fewer tokens), on the unrotated body.  An
     # operator flag overrides a default, and an explicit 0 turns that lever off
     # (`--thinking-steer-alpha 0`, `--thinking-budget 0`); a request can do the
     # same for itself with `thinking_steer_alpha: 0` / `thinking_budget: 0`.
@@ -607,25 +625,27 @@ class NorthMiniCodeAdapter(ExternalDraftAdapterMixin):
     # ------------------------------------------------------------------
     THINKING_GUARD_DEFAULTS = {
         "thinking_budget": 512,          # medium-effort anchor; unspecified effort is "high" = 2048
-        "thinking_steer_alpha": 0.2,     # the campaign's operating point at layer 28
+        "thinking_steer_alpha": 0.0,     # off: lengthened reasoning on the corrected body
         "thinking_steer_hammer": 0.0,    # the two-mode hammer never fired in the grid; leave off
     }
 
     def thinking_guard_defaults(self):
         """Run-on reasoning defaults the server applies when the operator sets none.
 
-        The steering default is a *wish*, not a guarantee: the server only
-        steers with a direction bound to the exact artifact it loaded (see
-        `commit_direction_assets`).  For any other North artifact it calibrates
-        one at startup and, if that does not pass its gates, serves with the
-        budget/alarm guard only.
+        Steering is off by default.  An operator who turns it on gets a
+        direction only if one is bound to the exact artifact loaded or the
+        server's startup calibration passes its gates (see
+        `commit_direction_assets`); otherwise an explicit request fails closed
+        and the server serves with the budget/alarm guard only.
         """
         return dict(self.THINKING_GUARD_DEFAULTS)
 
     COMMIT_DIRECTION_ASSET = "north_mini_code_commit_direction.npz"
+    # L32 on the corrected layer-0 RoPE body (2026-09-23 recalibration, schema
+    # v3): consistency +0.554, tied with L28 and higher than the v2 body's
+    # +0.518 at every probed depth; `choose_layer` selects L32.  Before that,
     # L32 on the corrected RMSNorm body (2026-09-20 recalibration): cross-trace
-    # consistency peaks there (+0.518, against +0.511 at L28), and L32 is what
-    # `choose_layer` selects.  The pre-fix asset's L28 was measured in the
+    # consistency peaked there (+0.518, against +0.511 at L28).  The pre-fix asset's L28 was measured in the
     # LayerNorm residual geometry and is void.  See
     # `qualification/runs/north-requal-20260920/`.
     COMMIT_DIRECTION_LAYER = 32
@@ -652,10 +672,12 @@ class NorthMiniCodeAdapter(ExternalDraftAdapterMixin):
         skips the attempt, and `/v1/status.settings.thinking_steer.calibration`
         reports what happened.
         """
-        from pathlib import Path
-
-        return {"paths": [Path(__file__).with_name("assets") / self.COMMIT_DIRECTION_ASSET],
-                "layer": self.COMMIT_DIRECTION_LAYER}
+        # No asset ships since 2026-09-23.  On the corrected layer-0 RoPE body
+        # the recalibrated L32 direction did not beat no steering on the
+        # held-out grid (3,971 reasoning tokens against 2,761), so it fails the
+        # gate a shipped direction must pass.  An operator who asks for
+        # steering gets the server's own startup calibration and its gates.
+        return {"paths": [], "layer": self.COMMIT_DIRECTION_LAYER}
 
     def structured_envelope_token_ids(self):
         """North frames an answer as <|START_TEXT|> ... <|END_TEXT|>.

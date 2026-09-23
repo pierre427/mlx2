@@ -369,38 +369,26 @@ def test_prompt_lookup_steering_matches_ordinary_steered_greedy(policy, prompt, 
     assert guard.steered_steps == expected
 
 
-def test_north_ships_guard_and_steering_defaults_and_an_identity_bound_asset():
-    import json
+def test_north_ships_the_guard_with_steering_off_and_no_direction_asset():
     from pathlib import Path
 
     from mlx2.adapters.north_mini_code import NorthMiniCodeAdapter
-    from mlx2.thinking_calibration import SCHEMA
 
     adapter = object.__new__(NorthMiniCodeAdapter)
+    # 2026-09-23: with North's layer 0 rotated as the reference does, the
+    # held-out grid closed 16/16 unsteered in 2,761 reasoning tokens, and the
+    # recalibrated alpha 0.2 direction took 3,971 (one prompt looped).  The
+    # budget and run-on alarm stay on; steering is off by default.
     assert adapter.thinking_guard_defaults() == {
-        "thinking_budget": 512, "thinking_steer_alpha": 0.2, "thinking_steer_hammer": 0.0}
+        "thinking_budget": 512, "thinking_steer_alpha": 0.0, "thinking_steer_hammer": 0.0}
+    # A shipped direction must beat no steering on held-out prompts; none
+    # does on the corrected body, so none ships and none may linger to bind.
     assets = adapter.commit_direction_assets()
-    (npz,) = assets["paths"]
-    meta = json.loads(Path(npz).with_suffix(".json").read_text())
-    assert assets["layer"] == meta["layer"] == 32
-    assert len(meta["artifact_identity"]) == 64 and meta["artifact"].endswith("4bit")
-    # 2026-09-20: re-shipped after the normalization correction.  The previous
-    # asset was calibrated on 2026-09-18 against a North body that ran
-    # mean-centred LayerNorm where the reference uses RMSNorm; a commit
-    # direction is a property of that residual geometry, so it was invalid
-    # under the corrected norm.  The artifact-file identity hash cannot see a
-    # code change and would still have matched, so SCHEMA is what failed it
-    # closed -- which is why this asset must now declare the CURRENT schema and
-    # not a pinned literal: the next body change bumps SCHEMA and this asset
-    # must go stale with it rather than keep binding.
-    assert meta["schema"] == SCHEMA
-    # The replacement is a gated calibration, not just a fresh one: it beat no
-    # steering on the held-out set and a same-norm random direction did not.
-    assert meta["gate_failures"] == []
-    assert meta["validation"]["calibrated"]["think_tokens"] < meta["validation"]["off"]["think_tokens"]
-    assert meta["validation"]["calibrated"]["think_tokens"] < meta["validation"]["random"]["think_tokens"]
-    assert meta["validation"]["calibrated"]["correct"] >= meta["validation"]["off"]["correct"]
-    assert meta["supersedes"]["schema"] == "mlx2.commit-direction.v1"
+    assert assets["paths"] == []
+    import mlx2.adapters.north_mini_code as module
+
+    asset_dir = Path(module.__file__).with_name("assets")
+    assert not (asset_dir / NorthMiniCodeAdapter.COMMIT_DIRECTION_ASSET).exists()
 
 
 def test_explicit_zero_budget_turns_the_guard_off_for_a_request():

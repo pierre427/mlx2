@@ -38,7 +38,12 @@ log = logging.getLogger(__name__)
 # only and would still have matched, so the schema string is what fails this
 # closed: v1 files no longer bind, and the server recalibrates at startup
 # behind its own held-out and random-control gates (or serves guard-only).
-SCHEMA = "mlx2.commit-direction.v2"
+# v3 (2026-09-23): North's layer 0 changed.  The reference rotates the
+# dense-prefix layer (Cohere2Moe ``force_rope``), which mlx2 ran as NoPE; the
+# real artifact's held-out perplexity fell from 50.8 to 8.9 once it was
+# rotated.  Every v2 direction was measured on the unrotated body, so it fails
+# closed the same way the v1 directions did.
+SCHEMA = "mlx2.commit-direction.v3"
 COMMIT_TAIL = 24
 REFLECT_FRACTION = 0.45
 # Fail-closed gates for an automatic calibration.

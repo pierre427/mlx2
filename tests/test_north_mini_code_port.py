@@ -41,6 +41,7 @@ def north_config():
         "num_experts_per_tok": 8,
         "num_shared_experts": 0,
         "first_k_dense_replace": 1,
+        "prefix_dense_sliding_window_pattern": 1,
         "expert_selection_fn": "sigmoid",
         "sliding_window": 4096,
         "rope_theta": 50000,
@@ -645,7 +646,11 @@ kwargs = dict(
     sliding_window=4, layer_types=["full_attention", "sliding_attention"],
 )
 mx.random.seed(9)
-port = Port(PortArgs(**kwargs))
+# The mined source predates the reference's dense-prefix RoPE (force_rope), so
+# compare the math the two still share: a prefix pattern other than 1 leaves
+# the dense-prefix layer unrotated in both.
+port = Port(PortArgs(**kwargs, prefix_dense_sliding_window_pattern=2))
+assert port.model.layers[0].self_attn.rope is None
 ref = Ref(RefArgs(**kwargs))
 ref.load_weights(tree_flatten(port.parameters()), strict=True)
 tokens = mx.array([[1, 2, 3, 4, 5, 6]])
@@ -728,3 +733,96 @@ def test_artifact_check_rejects_a_flipped_norm_selector(tmp_path):
     (root / "config.json").write_text(json.dumps(config))
     with pytest.raises(ValueError, match="topology"):
         inspect_artifact(root)
+
+
+def _tiny_north_kwargs(**overrides):
+    kwargs = dict(
+        model_type="cohere2_moe", hidden_size=64, head_dim=16,
+        num_hidden_layers=8, intermediate_size=32,
+        prefix_dense_intermediate_size=96, num_attention_heads=4,
+        num_key_value_heads=2, vocab_size=96, rope_theta=50000.0,
+        rms_norm_eps=1e-6, sliding_window=6, num_experts=8,
+        num_experts_per_tok=2, first_k_dense_replace=1,
+        layer_types=[
+            "full_attention" if i % 4 == 0 else "sliding_attention"
+            for i in range(8)
+        ],
+    )
+    kwargs.update(overrides)
+    return kwargs
+
+
+def test_dense_prefix_layer_is_rotated_like_the_reference():
+    # Cohere2Moe ``force_rope``: with prefix_dense_sliding_window_pattern 1 the
+    # dense-prefix layer carries RoPE although it is full attention.  North
+    # ran its layer 0 unrotated until 2026-09-23; the real artifact's held-out
+    # perplexity was 50.8 against 8.9 with the reference layout.
+    from mlx2.runtime.models.cohere2_moe import Model, ModelArgs
+
+    rotated = lambda model: [
+        layer.self_attn.rope is not None for layer in model.model.layers
+    ]
+    north = Model(ModelArgs.from_dict(_tiny_north_kwargs(
+        prefix_dense_sliding_window_pattern=1
+    )))
+    assert rotated(north) == [True, True, True, True, False, True, True, True]
+    # The field is declared, so from_dict keeps it rather than dropping it.
+    other = Model(ModelArgs.from_dict(_tiny_north_kwargs(
+        prefix_dense_sliding_window_pattern=2
+    )))
+    assert rotated(other)[0] is False
+    # The reference config class defaults the pattern to 1.
+    default = Model(ModelArgs.from_dict(_tiny_north_kwargs()))
+    assert rotated(default)[0] is True
+
+
+def test_tiny_north_matches_the_transformers_reference():
+    torch = pytest.importorskip("torch")
+    transformers = pytest.importorskip("transformers")
+    if not hasattr(transformers, "Cohere2MoeForCausalLM"):
+        pytest.skip("transformers has no Cohere2Moe reference")
+    import mlx.core as mx
+    import numpy as np
+
+    from mlx2.runtime.models.cohere2_moe import Model, ModelArgs
+
+    kwargs = _tiny_north_kwargs()
+    kwargs.pop("model_type")
+    config = transformers.Cohere2MoeConfig(
+        **kwargs, layer_norm_eps=1e-5, logit_scale=1.0,
+        num_shared_experts=0, norm_topk_prob=False,
+        expert_selection_fn="sigmoid", use_parallel_block=True,
+        use_qk_norm=False, max_position_embeddings=4096,
+        prefix_dense_sliding_window_pattern=1, tie_word_embeddings=True,
+    )
+    torch.manual_seed(0)
+    reference = transformers.Cohere2MoeForCausalLM(config).eval()
+    if not hasattr(reference.model.layers[0].self_attn, "force_rope"):
+        pytest.skip("installed transformers predates the dense-prefix RoPE")
+    with torch.no_grad():
+        for name, parameter in reference.named_parameters():
+            parameter.copy_(
+                torch.randn_like(parameter) * 0.2
+                + (1.0 if name.endswith("norm.weight") else 0.0)
+            )
+    weights = {}
+    for key, value in reference.state_dict().items():
+        value = value.detach().float().numpy()
+        if "rotary_emb" in key or key == "lm_head.weight":
+            continue
+        if key.endswith(".mlp.experts.gate_up_proj"):
+            prefix = key[: -len(".experts.gate_up_proj")]
+            half = value.shape[1] // 2
+            weights[prefix + ".switch_mlp.gate_proj.weight"] = mx.array(value[:, :half])
+            weights[prefix + ".switch_mlp.up_proj.weight"] = mx.array(value[:, half:])
+        elif key.endswith(".mlp.experts.down_proj"):
+            weights[key.replace(".experts.down_proj", ".switch_mlp.down_proj.weight")] = mx.array(value)
+        else:
+            weights[key] = mx.array(value)
+    port = Model(ModelArgs.from_dict(_tiny_north_kwargs(max_position_embeddings=4096)))
+    port.load_weights(list(port.sanitize(weights).items()), strict=True)
+    tokens = np.random.RandomState(1).randint(0, 96, (1, 13))
+    with torch.no_grad():
+        expected = reference(torch.tensor(tokens)).logits.numpy()
+    actual = np.array(port(mx.array(tokens)))
+    assert np.abs(expected - actual).max() < 1e-4

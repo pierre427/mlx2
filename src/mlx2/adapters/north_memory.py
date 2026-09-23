@@ -1,6 +1,6 @@
 """Architecture-derived cache bound for North Mini Code ordinary decode.
 
-The bound charges all K/V arrays at fp32.  Global NoPE layers grow with the
+The bound charges all K/V arrays at fp32.  Global layers grow with the
 context; sliding-RoPE layers are capped at their 4K window and additionally
 charge the four exact restore snapshots retained by the shared cache runtime.
 Forward workspace and the common 20 GiB service/driver reserve remain separate.

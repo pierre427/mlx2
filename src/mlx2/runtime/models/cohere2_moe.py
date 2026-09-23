@@ -46,6 +46,11 @@ class ModelArgs(BaseModelArgs):
     num_shared_experts: int = 0
     norm_topk_prob: bool = False
     first_k_dense_replace: int = 1
+    # Upstream Cohere2Moe rotates the dense-prefix layers when this is 1 even
+    # though their layer_types entry is full_attention (``force_rope``).  Like
+    # rms_norm_eps it must stay a declared field or from_dict drops it; the
+    # default matches the reference config class.
+    prefix_dense_sliding_window_pattern: int = 1
     expert_selection_fn: str = "sigmoid"
     layer_types: list[str] | None = None
     use_parallel_block: bool = True
@@ -177,9 +182,18 @@ class Attention(nn.Module):
         self.k_proj = nn.Linear(dim, self.n_kv_heads * self.head_dim, bias=False)
         self.v_proj = nn.Linear(dim, self.n_kv_heads * self.head_dim, bias=False)
         self.o_proj = nn.Linear(self.n_heads * self.head_dim, dim, bias=False)
+        # The reference applies RoPE to sliding layers and, when the prefix
+        # pattern is 1, to the dense-prefix layers as well: North's layer 0 is
+        # a full-attention layer with RoPE, not a NoPE layer.  Running it
+        # unrotated raised the real 4-bit artifact's perplexity from 8.9 to
+        # 50.8 on held-out code (2026-09-23).
+        force_rope = (
+            layer_idx < args.first_k_dense_replace
+            and args.prefix_dense_sliding_window_pattern == 1
+        )
         self.rope = (
             nn.RoPE(self.head_dim, traditional=True, base=args.rope_theta)
-            if self.is_sliding
+            if self.is_sliding or force_rope
             else None
         )
 
