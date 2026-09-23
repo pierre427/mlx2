@@ -1368,7 +1368,13 @@ def handler_for(
             previous_context = response_store.context(
                 tenant_id, options["previous_response_id"]
             )
-            instruction = request["messages"][:1] if "instructions" in raw_body else []
+            # responses_to_chat_request prepends a system message only for
+            # non-null instructions; an explicit null adds none to split off.
+            instruction = (
+                request["messages"][:1]
+                if raw_body.get("instructions") is not None
+                else []
+            )
             current = request["messages"][len(instruction) :]
             request["messages"] = instruction + previous_context + current
         if options["previous_response_id"] is not None:

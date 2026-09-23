@@ -1190,6 +1190,23 @@ def test_responses_store_retrieve_continue_and_delete_are_tenant_scoped(http_eng
     assert error.value.code == 404
 
 
+def test_responses_continuation_with_null_instructions_keeps_turn_order(
+    http_engine,
+):
+    engine, base = http_engine
+    with post_response(base, input="first") as response:
+        first = json.load(response)
+    with post_response(
+        base, input="second", instructions=None, previous_response_id=first["id"]
+    ):
+        pass
+    assert engine.job.request["messages"] == [
+        {"role": "user", "content": "first"},
+        {"role": "assistant", "content": "hello"},
+        {"role": "user", "content": "second"},
+    ]
+
+
 def test_responses_input_items_derive_old_records_and_fail_closed(http_engine):
     engine, base = http_engine
     store = engine.api_resources["responses"]
