@@ -301,3 +301,125 @@ def test_atomic_cohort_memory_loss_fails_before_plain_fallback(monkeypatch):
     finally:
         batch.remove(uids)
         batch.close()
+
+
+def _warm_target_only_cache(model, prefix):
+    from mlx2.runtime.models.cache import make_prompt_cache
+
+    warm = make_prompt_cache(model)
+    model(mx.array([prefix], mx.uint32), cache=warm)
+    mx.eval([c.state for c in warm])
+    return warm
+
+
+def _target_only_generator(model):
+    from mlx2.runtime.memory_policy import (
+        SelfMTPLaneAdmissionController,
+        _make_self_mtp_admission_callback,
+    )
+
+    controller = SelfMTPLaneAdmissionController(
+        host_memory_gib=16, advisory_gib=12, transient_gib_per_lane=0.01
+    )
+    admit = _make_self_mtp_admission_callback(
+        controller, free_memory=lambda: 64.0, max_draft=2
+    )
+    return BatchGenerator(
+        model,
+        completion_batch_size=4,
+        prefill_batch_size=2,
+        prefill_step_size=32,
+        self_mtp={"num_draft": 2, "persistent": True},
+        mtp_admission=admit,
+    )
+
+
+def _insert_mixed_target_only_cohort(batch, model, prefix):
+    """Member 0 is a target-only warm hit (no sidecar); member 1 is cold."""
+    cohort = {"tenant_id": "t", "id": "mixed", "size": 2}
+    uids = batch.insert(
+        [[4], [4, 5, 6, 2, 8]],
+        max_tokens=[6, 6],
+        caches=[_warm_target_only_cache(model, prefix), None],
+        all_tokens=[prefix, []],
+        mtp_states=[None, None],
+        lane_rngs=[LaneRNG(1), LaneRNG(2)],
+        self_mtp_configs=[
+            {
+                "sampling_temp": 0.0,
+                "batch_cohort": dict(cohort),
+                "target_only_plain_fallback": True,
+            },
+            {"sampling_temp": 0.0, "batch_cohort": dict(cohort)},
+        ],
+    )
+    return uids, cohort
+
+
+def test_cohort_with_one_target_only_member_fails_closed_not_the_scheduler():
+    """A partial target-only cohort used to be prepared as self-MTP lanes.
+
+    ``prepare_self_mtp_lane`` then raised "detached self-MTP cache mismatch"
+    inside ``next()`` after the rows were popped, which kills the serving
+    worker.  The cohort now fails atomically (serving answers 429) and the
+    scheduler keeps serving other requests.
+    """
+    model = _tiny_qwen4_model()
+    prefix = [1, 7, 3, 9, 2, 8]
+    batch = _target_only_generator(model)
+    try:
+        uids, cohort = _insert_mixed_target_only_cohort(batch, model, prefix)
+        batch.next()
+        failures = batch.take_atomic_cohort_failures()
+        assert [(f["uids"], f["cohort"]) for f in failures] == [(tuple(uids), cohort)]
+        assert "without draft state" in failures[0]["reason"]
+        # Nothing was popped or prepared: serving removes the failed rows.
+        assert [s[0] for s in batch._unprocessed_sequences] == uids
+        batch.remove(uids)
+
+        later = batch.insert(
+            [[4, 5, 6, 2, 8]],
+            max_tokens=[4],
+            lane_rngs=[LaneRNG(3)],
+            self_mtp_configs=[{"sampling_temp": 0.0}],
+        )[0]
+        tokens = []
+        for _ in range(40):
+            _, step = batch.next()
+            tokens.extend(int(r.token) for r in step if r.uid == later)
+            if len(tokens) >= 4:
+                break
+        assert len(tokens) == 4
+    finally:
+        batch.close()
+
+
+def test_make_mtp_batch_refuses_draftless_rows_before_popping():
+    model = _tiny_qwen4_model()
+    prefix = [1, 7, 3, 9, 2, 8]
+    batch = _target_only_generator(model)
+    try:
+        uids, cohort = _insert_mixed_target_only_cohort(batch, model, prefix)
+        assert batch._make_mtp_batch(2) == (None, [])
+        assert [s[0] for s in batch._unprocessed_sequences] == uids
+        assert [f["uids"] for f in batch.take_atomic_cohort_failures()] == [
+            tuple(uids)
+        ]
+        batch.remove(uids)
+
+        lone = batch.insert(
+            [[4]],
+            max_tokens=[4],
+            caches=[_warm_target_only_cache(model, prefix)],
+            all_tokens=[prefix],
+            mtp_states=[None],
+            lane_rngs=[LaneRNG(1)],
+            self_mtp_configs=[
+                {"sampling_temp": 0.0, "target_only_plain_fallback": True}
+            ],
+        )[0]
+        assert batch._make_mtp_batch(1) == (None, [])
+        assert [s[0] for s in batch._unprocessed_sequences] == [lone]
+        assert [f["uid"] for f in batch.take_mtp_prefill_failures()] == [lone]
+    finally:
+        batch.close()

@@ -3494,6 +3494,24 @@ class BatchGenerator:
             # A published cohort owns this boundary.  Do not merge later
             # ungrouped work into its strict-width speculative batch.
             n = size
+            if any(
+                self._mtp_row_lacks_draft_state(sequence)
+                for sequence in queued[:size]
+            ):
+                # A member with a warm target prefix but no draft state can
+                # decode only on the ordinary path, which the other members
+                # cannot join without an ordinary prefill this route lacks
+                # (a wholly target-only cohort is routed ordinary before
+                # this).  Preparing it as a self-MTP lane would raise inside
+                # ``next``, so fail the cohort closed before anything
+                # allocates or prefills.
+                self._record_atomic_cohort_failure(
+                    cohort_uids,
+                    cohort,
+                    "declared batch cohort mixes a warm prefix without draft "
+                    "state with self-MTP members",
+                )
+                return 0
         else:
             # Ungrouped work ahead of a cohort must not pull a proper prefix of
             # it into this boundary; the cohort waits to own the next one.
@@ -3737,6 +3755,31 @@ class BatchGenerator:
             self.scheduler_stats.get("mtp_prefill_bound_violations", 0) + 1
         )
 
+    def _mtp_row_lacks_draft_state(self, sequence) -> bool:
+        """A queued target-only APC hit: warm target prefix, no draft state.
+
+        ``insert`` accepts such a row only for the ordinary fallback;
+        ``prepare_self_mtp_lane`` cannot teacher-force it into a self-MTP
+        lane.
+        """
+        uid = sequence[0]
+        return (
+            bool(self._mtp_configs.get(uid, {}).get("target_only_plain_fallback"))
+            and bool(sequence[4])
+            and getattr(self, "_mtp_states", {}).get(uid) is None
+        )
+
+    def _record_mtp_lane_refusal(self, uid, reason):
+        """Fail one queued lane through the bounded-prefill failure channel."""
+        failures = getattr(self, "_mtp_prefill_failures", None)
+        if failures is None:
+            failures = self._mtp_prefill_failures = []
+        uid = int(uid)
+        if any(item["uid"] == uid for item in failures):
+            return
+        failures.append({"uid": uid, "reason": str(reason)})
+        _bump_bounded_counter(self.scheduler_stats, "mtp_draftless_lane_refusals")
+
     def take_mtp_prefill_failures(self):
         """Transfer bounded-prefill lanes that can never be admitted."""
         failures = list(getattr(self, "_mtp_prefill_failures", ()))
@@ -3772,6 +3815,29 @@ class BatchGenerator:
             raise RuntimeError(
                 "declared batch cohort must be prepared as one whole batch"
             )
+        draftless = [
+            sequence
+            for sequence in list(self._unprocessed_sequences)[:n]
+            if self._mtp_row_lacks_draft_state(sequence)
+        ]
+        if draftless:
+            # Admission routes these rows ordinary or fails their cohort, so
+            # reaching here is a scheduler bug.  Refuse before popping and
+            # fail the rows through the scheduler's failure channels: a raise
+            # from ``prepare_self_mtp_lane`` would escape ``next`` and take
+            # every other lane down with it.
+            reason = "self-MTP lane has a warm target prefix without draft state"
+            if atomic_cohort:
+                self._record_atomic_cohort_failure(
+                    [sequence[0] for sequence in list(self._unprocessed_sequences)[:n]],
+                    self._mtp_configs.get(draftless[0][0], {}).get("batch_cohort")
+                    or {},
+                    reason,
+                )
+            else:
+                for sequence in draftless:
+                    self._record_mtp_lane_refusal(sequence[0], reason)
+            return (None, [])
         sequences = [self._unprocessed_sequences.popleft() for _ in range(n)]
         if atomic_cohort:
             # Keep the same all-lanes uniform-depth policy at later decode
@@ -5237,7 +5303,8 @@ class BatchGenerator:
                         self.scheduler_stats.get("mtp_short_prefill_interleaved", 0) + 1
                     )
                     (batch, progress) = self._make_mtp_batch(1)
-                    self._generation_batch.extend(batch)
+                    if batch is not None:
+                        self._generation_batch.extend(batch)
                     prompt_responses.extend(progress)
                     generation_responses.extend(self._migrate_plain_fallbacks())
                     return (prompt_responses, generation_responses)
@@ -5262,7 +5329,8 @@ class BatchGenerator:
                         self.scheduler_stats.get("mtp_short_prefill_interleaved", 0) + 1
                     )
                     (batch, progress) = self._make_mtp_batch(1)
-                    self._generation_batch.extend(batch)
+                    if batch is not None:
+                        self._generation_batch.extend(batch)
                     prompt_responses.extend(progress)
                     generation_responses.extend(self._migrate_plain_fallbacks())
                     return (prompt_responses, generation_responses)
@@ -5296,7 +5364,8 @@ class BatchGenerator:
                     self._generation_batch.extend(batch)
             else:
                 (batch, progress) = self._make_mtp_batch(n)
-                self._generation_batch.extend(batch)
+                if batch is not None:
+                    self._generation_batch.extend(batch)
             prompt_responses.extend(progress)
             generation_responses.extend(self._migrate_plain_fallbacks())
         return (prompt_responses, generation_responses)
