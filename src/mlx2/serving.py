@@ -6070,6 +6070,19 @@ class ServingEngine:
                                 failed_job,
                                 {"error": failure["reason"], "status": 503},
                             )
+                    for failure in getattr(
+                        batch, "take_lane_failures", lambda: ()
+                    )():
+                        # The executor already dropped this lane; only its
+                        # request fails, the worker and other lanes go on.
+                        batch.remove([failure["uid"]])
+                        self.counts["executor_lane_failures"] += 1
+                        failed_job = active.pop(failure["uid"], None)
+                        if failed_job is not None:
+                            self._finish(
+                                failed_job,
+                                {"error": failure["reason"], "status": 500},
+                            )
                     if not prompts and not responses:
                         # Reclaim idle scratch while memory admission is deferred.
                         now = time.monotonic()

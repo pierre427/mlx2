@@ -1248,3 +1248,53 @@ def test_round_snapshot_of_hooked_apc_planes_takes_the_descriptor_route(monkeypa
     assert all(not hasattr(c, "_cow_segment_tokens") for c in thawed["cache"])
     hit.cache.close()
     apc.clear(release_memory=False)
+
+
+def _poison_sampled_target_law(monkeypatch, temperature):
+    """NaN target logits for lanes sampling at ``temperature`` only."""
+    real = ExternalDraftBatchGenerator._target_law
+
+    def poisoned(self, lane, logits, *args, **kwargs):
+        if float(lane.sampling.get("sampling_temp", 0)) == temperature:
+            logits = logits * float("nan")
+        return real(self, lane, logits, *args, **kwargs)
+
+    monkeypatch.setattr(ExternalDraftBatchGenerator, "_target_law", poisoned)
+
+
+def test_invalid_target_law_fails_only_its_lane(monkeypatch):
+    # A non-finite verification law raised "Invalid probability
+    # distribution" out of next(), which serving treats as a dead worker.
+    m, d = tiny()
+    _poison_sampled_target_law(monkeypatch, 0.7)
+    b = generator(m, d)
+    poisoned, healthy = b.insert(
+        [[1, 2, 3, 4, 5], [1, 2]], max_tokens=[5, 5],
+        sampling_configs=[{"sampling_temp": 0.7}, {"sampling_temp": 0}],
+    )
+    got, final = drain(b)
+    failures = b.take_lane_failures()
+    assert [failure["uid"] for failure in failures] == [poisoned]
+    assert "probability distribution" in failures[0]["reason"]
+    assert poisoned not in final and poisoned not in b.lanes
+    cache = m.make_cache(); tokens = [1, 2]; reference = []
+    for i in range(5):
+        logits = m(mx.array([tokens if i == 0 else [tokens[-1]]]), cache=cache)
+        token = int(mx.argmax(logits[0, -1]).item()); tokens.append(token); reference.append(token)
+    assert got[healthy] == reference
+    assert b.take_lane_failures() == []
+
+
+def test_invalid_target_law_is_a_request_error_not_a_worker_death(monkeypatch):
+    m, d = tiny(sliding_window=16)
+    _poison_sampled_target_law(monkeypatch, 0.7)
+    engine = _external_engine(monkeypatch, m, d)
+    try:
+        failed = _serve(engine, {"tokens": [1, 2, 3], "max_tokens": 4, "temperature": 0.7, "seed": 3})
+        after = _serve(engine, {"tokens": [1, 2, 3], "max_tokens": 4, "temperature": 0})
+        alive, error = engine.thread.is_alive(), engine.error
+    finally:
+        engine.close()
+    assert "probability distribution" in failed.get("error", "")
+    assert alive and error is None
+    assert after["tokens"] == _greedy_reference(m, [1, 2, 3], 4)

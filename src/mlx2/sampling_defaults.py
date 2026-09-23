@@ -77,6 +77,12 @@ LEGACY_FALLBACK = MappingProxyType(
     }
 )
 
+# Positive temperatures below this sample greedily, as vLLM's
+# ``_SAMPLING_EPS`` does.  The request validator only keeps 1/temperature
+# finite; scaling a logprob by a reciprocal that large still overflows, and
+# every route would then sample from an all-NaN law.
+SAMPLING_EPS = 1e-5
+
 GENERATION_CONFIG = "generation_config.json"
 MODEL_CARD = "model card"
 
@@ -286,7 +292,14 @@ def resolve_sampling(
     for name, value in record["fallback"].items():
         effective[name] = value
     record["fallback_kind"] = "legacy" if vendor is None else "neutral"
-    return {name: effective[name] for name in SAMPLING_FIELDS}, record
+    effective = {name: effective[name] for name in SAMPLING_FIELDS}
+    temperature = effective["temperature"]
+    if 0 < temperature < SAMPLING_EPS:
+        # Every route reads the effective temperature, so this is the one
+        # place a vanishing temperature becomes greedy decoding.
+        effective["temperature"] = 0.0
+        record["greedy_temperature"] = {"requested": temperature, "epsilon": SAMPLING_EPS}
+    return effective, record
 
 
 def generation_config_drift(model_path, vendor: Optional[VendorSampling]) -> dict:

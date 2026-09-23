@@ -51,6 +51,20 @@ class DraftUnavailable(RuntimeError):
     """A recoverable drafter-only failure; target ordinary path remains valid."""
 
 
+class LaneFailure(RuntimeError):
+    """One lane cannot continue, e.g. its target law is not a distribution.
+
+    Only that request fails: the round restores every lane of its cohort,
+    the executor drops the failed lane, and serving collects it through
+    ``take_lane_failures``.
+    """
+
+    def __init__(self, uid, reason):
+        super().__init__(reason)
+        self.uid = uid
+        self.reason = reason
+
+
 @dataclass
 class ExternalDraftState:
     state: object
@@ -210,6 +224,7 @@ class ExternalDraftBatchGenerator:
         self.stops = {int(t[0]) for t in stop_tokens}
         self.layers = tuple(draft_model.config.target_layer_ids)
         self.lanes = {}; self.next_uid = 0; self.boundaries = {}
+        self._lane_failures = []
         self.scheduler_stats = {"external_rounds": 0, "accepted_proposals": 0, "proposed_tokens": 0, "ordinary_rounds": 0, "cancelled": 0, "target_max_width": 0, "draft_max_width": 1, "prefill_rounds": 0, "paired_cache_resumes": 0, "segmented_transactions": 0, "segmented_rollbacks": 0, "draft_fallbacks": 0, "recovery_checkpoint_captures": 0, "recovery_checkpoint_restores": 0, "external_draft_masked_positions": 0, "external_ordinary_fast_path_rounds": 0, "external_ordinary_fast_path_lanes": 0, "external_draft_context_skipped": 0, "external_taps_skipped": 0, "external_transactions_skipped": 0, "fly_relaxed_accepts": 0, "external_context_token_pairings": 0, "external_verify_steer_rounds": 0, "external_verify_steered_lanes": 0}
         # Drafters that fuse each target feature with the token that follows
         # it (EAGLE) opt in; DFlash-family drafters keep the original calls.
@@ -403,7 +418,15 @@ class ExternalDraftBatchGenerator:
         if response_rows is not None:
             response_rows.append(None)
         transform = make_transformed_logprobs(temp, top_p=lane.sampling.get("top_p", 0), top_k=lane.sampling.get("top_k", 0), min_p=lane.sampling.get("min_p", 0))
-        return probability(np.asarray(self.mx.exp(transform(value)[0])))
+        try:
+            return probability(np.asarray(self.mx.exp(transform(value)[0])))
+        except ValueError as error:
+            # Non-finite logits are this request's failure, not the
+            # executor's: raising out of next() would stop the worker.
+            raise LaneFailure(
+                lane.uid,
+                f"external draft target law is not a probability distribution: {error}",
+            ) from error
 
     def _verification_receipt(self, lane):
         hists = {
@@ -1089,7 +1112,17 @@ class ExternalDraftBatchGenerator:
                     for lane in failed:
                         lane.ordinary = True
                     self.scheduler_stats["draft_fallbacks"] += len(failed)
-                    self._round(failed)
+                    # The ordinary fallback runs next, before the retry.
+                    if retry:
+                        pending.append(retry)
+                    pending.append(failed)
+                except LaneFailure as error:
+                    # ``_round`` restored every lane of the group; drop the
+                    # failed one and rerun the others from their boundary.
+                    self._lane_failures.append({"uid": error.uid, "reason": error.reason})
+                    _bump(self.scheduler_stats, "lane_failures")
+                    self.remove([error.uid], cancelled=False)
+                    retry = [lane for lane in group if lane.uid != error.uid]
                     if retry:
                         pending.append(retry)
         for lane in list(self.lanes.values()):
@@ -1099,6 +1132,11 @@ class ExternalDraftBatchGenerator:
         return prompts, responses
 
     def pop_prompt_boundary(self, uid): return self.boundaries.pop(uid, None)
+
+    def take_lane_failures(self):
+        """Transfer lanes that failed on their own; serving fails their requests."""
+        failures, self._lane_failures = self._lane_failures, []
+        return failures
 
     def remove(self, uids, return_prompt_caches=False, *, cancelled=True):
         if self._open: raise RuntimeError("Cannot remove during external transaction")

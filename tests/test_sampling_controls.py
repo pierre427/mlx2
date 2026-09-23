@@ -25,21 +25,74 @@ def test_min_p_removes_small_relative_probability_and_normalizes():
     np.testing.assert_allclose(np.exp(np.array(result)).sum(), 1.0, rtol=1e-6)
 
 
-def test_sub_float32_temperature_is_rejected_and_small_positive_kept():
+def test_sub_float32_temperature_is_rejected_and_small_positive_accepted():
     import pytest
 
+    from mlx2.sampling_defaults import SAMPLING_EPS, resolve_sampling
     from mlx2.server import MIN_POSITIVE_TEMPERATURE, validate_request
 
     with pytest.raises(ValueError, match="temperature must be 0 or at least"):
         validate_request({"prompt": "hi", "temperature": 1e-40}, chat=False)
     validate_request({"prompt": "hi", "temperature": 0}, chat=False)
     validate_request({"prompt": "hi", "temperature": MIN_POSITIVE_TEMPERATURE}, chat=False)
-    # Small but float32-finite reciprocals stay valid.
+    # Small positive temperatures stay valid requests.
     validate_request({"prompt": "hi", "temperature": 1e-5}, chat=False)
     validate_request({"prompt": "hi", "temperature": 1e-38}, chat=False)
     assert np.isfinite(np.float32(1.0 / MIN_POSITIVE_TEMPERATURE))
     with np.errstate(over="ignore"):
         assert not np.isfinite(np.float32(1.0 / 1e-40))
+    # A finite 1/temperature still overflows once it scales a logprob, so
+    # every temperature below the sampling epsilon resolves to greedy.
+    for tiny in (MIN_POSITIVE_TEMPERATURE, 1e-38, 1e-6):
+        effective, record = resolve_sampling({"temperature": tiny}, None, thinking=None)
+        assert effective["temperature"] == 0
+        assert record["greedy_temperature"] == {"requested": tiny, "epsilon": SAMPLING_EPS}
+    effective, record = resolve_sampling({"temperature": SAMPLING_EPS}, None, thinking=None)
+    assert effective["temperature"] == SAMPLING_EPS and "greedy_temperature" not in record
+
+
+def _tiny_temperature_routes():
+    from route_harness import (
+        make_engine, make_external_engine, tiny_muse_dflash, tiny_qwen38_mtp,
+    )
+
+    qwen, qwen_vocab = tiny_qwen38_mtp()
+    muse, draft, muse_vocab = tiny_muse_dflash()
+    segmented = {"segment_aware_live_tip": True, "segment_aware_cohort_size": 1}
+    return {
+        "ordinary": lambda: make_engine(qwen, qwen_vocab, mtp=False),
+        "native_mtp": lambda: make_engine(qwen, qwen_vocab, mtp=True, extra=segmented),
+        "prompt_lookup": lambda: make_engine(qwen, qwen_vocab, mtp=False, prompt_lookup=True),
+        "external_draft": lambda: make_external_engine(muse, draft, muse_vocab),
+    }
+
+
+def test_tiny_positive_temperature_is_greedy_on_every_route(monkeypatch):
+    # 1/temperature was finite, but scaling a logprob by it overflowed: every
+    # route sampled from an all-NaN law.  Ordinary and prompt lookup emitted
+    # a constant token, native MTP emitted id 0, and the external route
+    # raised "Invalid probability distribution" and killed the worker.
+    from route_harness import patch_host, run
+
+    from mlx2.server import MIN_POSITIVE_TEMPERATURE
+
+    patch_host(monkeypatch)
+    prompt = [(5 * i + 2) % 100 + 1 for i in range(20)]
+    for name, factory in _tiny_temperature_routes().items():
+        engine = factory()
+        try:
+            greedy = run(engine, {"tokens": prompt, "max_tokens": 6, "temperature": 0})
+            outputs = [
+                run(engine, {"tokens": prompt, "max_tokens": 6, "temperature": temperature, "seed": 1})
+                for temperature in (3e-39, MIN_POSITIVE_TEMPERATURE, 1e-6)
+            ]
+            alive, error = engine.thread.is_alive(), engine.error
+        finally:
+            engine.close()
+        assert alive and error is None, name
+        assert len(greedy["tokens"]) == 6, name
+        for output in outputs:
+            assert output.get("tokens") == greedy["tokens"], (name, output.get("error"))
 
 
 def test_top_p_nucleus_is_dtype_independent_on_wide_vocabularies():
