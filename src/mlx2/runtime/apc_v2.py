@@ -1402,14 +1402,15 @@ class APCv2(PrefixIndex):
         self._capsule_generation.advance()
 
     def _spill_entry_locked(
-        self, key, tokens, entry, *, reason: str, hard_cap: Optional[int] = None
+        self, key, tokens, entry, *, reason: str, hard_cap: Optional[int] = None,
+        keep_resident: bool = False,
     ) -> bool:
         if self._idle_disk_dir is None or not entry.prompt_cache:
             return False
         if self._entry_pinned(entry):
             return False
         resident_cap = int(self.max_bytes if hard_cap is None else hard_cap)
-        if int(entry.nbytes) > resident_cap:
+        if not keep_resident and int(entry.nbytes) > resident_cap:
             # Disk-only checkpoints may become restorable after a cap change,
             # but they cannot be used under the current resident budget.  This
             # matters most for full-context snapshots whose spills are huge.
@@ -1552,6 +1553,10 @@ class APCv2(PrefixIndex):
                         except OSError:
                             self._disk_stats["persistence_io_failures"] += 1
                 return False
+        if keep_resident:
+            # Persist only: the caller keeps serving the resident copy and
+            # needs a crash-safe snapshot of exactly this content.
+            return True
         resident_nbytes = int(entry.nbytes)
         if isinstance(entry.prompt_cache, COWFrozenPromptCache):
             entry.prompt_cache.close()
@@ -2979,11 +2984,24 @@ class APCv2(PrefixIndex):
                 cow_source.close()
             return replace(capabilities, stored=False)
         self._capsule_generation.advance()
+        superseded_parks = []
         for reason, _removed_key, _removed_tokens, entry in removed_entries:
             if reason != "replaced":
                 self._record_entry_eviction_locked(entry)
             if isinstance(entry.prompt_cache, COWFrozenPromptCache):
                 entry.prompt_cache.close()
+            if (
+                reason == "replaced"
+                and existing_disk_pins
+                and self._persist_dir is not None
+                and getattr(entry, "_apc_disk", None)
+            ):
+                # A parked session's persisted snapshot is its only
+                # crash-safe copy.  The replacement inherits the disk pin, so
+                # unlink the old snapshot only once the replacement's own
+                # content has been persisted in its place.
+                superseded_parks.append(entry)
+                continue
             self._remove_disk_files_locked(entry)
         survivor = self._trie.search(key, tokens)
         if survivor.exact is not None:
@@ -3016,6 +3034,14 @@ class APCv2(PrefixIndex):
             )
             stored_entry._apc_disk_pin_expiries = existing_disk_pins
             stored_entry._apc_resident_pin_expiries = existing_resident_pins
+            if superseded_parks:
+                self._spill_entry_locked(
+                    key, list(survivor.exact), stored_entry,
+                    reason="republish", keep_resident=True,
+                )
+        for entry in superseded_parks:
+            self._remove_disk_files_locked(entry)
+        if survivor.exact is not None:
             self._enforce_entry_limits_locked(
                 publication=(key, list(survivor.exact), stored_entry)
             )

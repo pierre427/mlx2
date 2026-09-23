@@ -144,6 +144,33 @@ def test_longer_store_preserves_parked_shorter_session(tmp_path):
     restarted.close()
 
 
+def test_republishing_a_parked_boundary_persists_the_replacement_before_a_crash(tmp_path):
+    key = _identity()
+    tag = ("tenant-a", "regenerate")
+    tokens = list(range(16))
+    first = _persistent(tmp_path)
+    first.store(key, tokens, [_state(16, 0)], session_tag=tag)
+    assert first.park_session(*tag, ttl_seconds=3600)["state"] == "disk"
+    old_manifest = next(tmp_path.glob("apc-idle-*.manifest.json"))
+    # A retried request republishes the same boundary with different content.
+    first.store(key, tokens, [_state(16, 500)], session_tag=tag)
+    state = first.session_state(*tag)
+    assert state["state"] == "resident" and state["disk_pin_expires_at"]
+    manifests = list(tmp_path.glob("apc-idle-*.manifest.json"))
+    assert len(manifests) == 1 and manifests[0] != old_manifest
+    # Crash: the process dies without close(); only its lock is released.
+    first._release_persist_lock()
+
+    second = _persistent(tmp_path)
+    assert second.session_state(*tag)["state"] == "disk"
+    hit = second.lookup(key, tokens + [99], session_tag=tag)
+    assert hit.hit and hit.cached_tokens == 16
+    keys, _values = hit.cache[0].state
+    assert keys[0, 0, :16, 0].tolist() == list(range(500, 516))
+    hit.cache.close()
+    second.close()
+
+
 def test_prefix_subsumption_preserves_committed_boundary_but_prunes_plain_cache(tmp_path):
     apc = _persistent(tmp_path)
     key = _identity()
