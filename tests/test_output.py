@@ -272,6 +272,45 @@ def test_qwen_non_strict_recursive_ref_keeps_legacy_raw_argument_fallback():
     ) == {"name": "sum", "arguments": {"x": "123"}}
 
 
+def test_qwen_untyped_parameter_decodes_objects_and_arrays_only():
+    # mlx-lm#1910: a parameter schema without ``type`` admits any JSON value;
+    # returning a structured argument as its source text handed clients a
+    # string where the model wrote an object.
+    tools = [{
+        "type": "function",
+        "function": {
+            "name": "configure",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "config": {"description": "settings"},
+                    "ids": {"description": "targets"},
+                    "label": {"description": "free text"},
+                    "count": {},
+                },
+            },
+        },
+    }]
+    call = parse_tool_call(
+        "<function=configure>"
+        '<parameter=config>{"depth": 2, "tags": ["a"]}</parameter>'
+        "<parameter=ids>[1, 2]</parameter>"
+        "<parameter=label>not {json</parameter>"
+        "<parameter=count>123</parameter>"
+        "</function>",
+        tools,
+    )
+    assert call == {
+        "name": "configure",
+        "arguments": {
+            "config": {"depth": 2, "tags": ["a"]},
+            "ids": [1, 2],
+            "label": "not {json",
+            "count": "123",
+        },
+    }
+
+
 _SUM_TOOLS = [{
     "type": "function",
     "function": {

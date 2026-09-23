@@ -84,10 +84,21 @@ def _convert_param_value(
             raise ValueError(f"Strict parameter {param_name} violates its schema")
         return value
 
-    # Resolve anyOf/oneOf/list-form unions to a concrete non-null type; an
-    # unresolved schema is treated as a string (values returned verbatim).
+    # Resolve anyOf/oneOf/list-form unions to a concrete non-null type.
     inferred = infer_type_from_json_schema(param)
-    param_type = inferred.strip().lower() if inferred else "string"
+    if not inferred:
+        # A schema without a resolvable type admits any JSON value.  Decode
+        # objects and arrays, which the model can only mean structurally;
+        # keep scalars verbatim so text such as "123" is not coerced to a
+        # number (mlx-lm#1910).
+        if param_value.lower() == "null" and _declares_null(param):
+            return None
+        try:
+            value = json.loads(param_value, strict=False)
+        except json.JSONDecodeError:
+            return param_value
+        return value if isinstance(value, (dict, list)) else param_value
+    param_type = inferred.strip().lower()
     if param_value.lower() == "null":
         if _declares_null(param):
             return None
