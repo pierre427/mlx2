@@ -214,7 +214,6 @@ def _responses_messages(
                 item["call_id"],
                 item["name"],
                 _agent.shim_arguments(item["input"]),
-                merge=True,
             )
             _agent.count(counts, "agent_compat_custom_tool_replays")
             continue
@@ -234,7 +233,6 @@ def _responses_messages(
                 item["call_id"],
                 _agent.qualified_call_name(item) if compat_on else item["name"],
                 item["arguments"],
-                merge=compat_on,
             )
             continue
         if item_type != "message":
@@ -256,15 +254,17 @@ def _responses_messages(
         content = _responses_content(item.get("content"), file_resolver=file_resolver)
         previous = messages[-1] if messages else None
         if (
-            compat_on
-            and role == "assistant"
+            role == "assistant"
             and isinstance(content, str)
             and previous is not None
             and previous.get("role") == "assistant"
             and not previous.get("content")
             and not previous.get("tool_calls")
         ):
-            # A replayed reasoning item precedes its message: one turn.
+            # A replayed reasoning item precedes its message: one turn.  This
+            # and the call merge in ``_append_call`` hold in every mode, so a
+            # stateless ``input += response.output`` replay renders the same
+            # history as ``previous_response_id`` does.
             previous["content"] = content
             continue
         messages.append(
@@ -276,14 +276,14 @@ def _responses_messages(
     return messages
 
 
-def _append_call(messages, call_id, name, arguments, *, merge):
+def _append_call(messages, call_id, name, arguments):
     call = {
         "id": call_id,
         "type": "function",
         "function": {"name": name, "arguments": arguments},
     }
     previous = messages[-1] if messages else None
-    if merge and previous is not None and previous.get("role") == "assistant":
+    if previous is not None and previous.get("role") == "assistant":
         # Reasoning, commentary text and (parallel) calls of one model turn
         # render as the single assistant message the model produced.
         previous.setdefault("tool_calls", []).append(call)

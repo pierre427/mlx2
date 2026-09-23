@@ -326,3 +326,86 @@ def test_reasoning_output_item_round_trips_and_its_content_is_never_trusted():
     assert echoed[1]["reasoning_content"] == "trusted thought"
     assert "INJECTED" not in json.dumps(tampered + unsigned)
     assert not any("reasoning_content" in message for message in unsigned)
+
+
+class ToolTurnEngine(ContinuationEngine):
+    """First turn: reasoning, commentary text and two parallel calls."""
+
+    def submit(self, request, *, tenant_id="default"):
+        self.requests.append(request)
+        job = Job(request)
+        job.prompt_tokens = 2
+        job.completion_tokens = 2
+        if len(self.requests) == 1:
+            events = [
+                {"delta": {"reasoning_content": "plan"}},
+                {"delta": {"content": "Checking."}},
+                *(
+                    {"delta": {"tool_calls": [{
+                        "index": index,
+                        "id": call_id,
+                        "type": "function",
+                        "function": {"name": "f", "arguments": "{}"},
+                    }]}}
+                    for index, call_id in enumerate(("call_a", "call_b"))
+                ),
+                {"finish_reason": "tool_calls", "receipt": {}},
+            ]
+        else:
+            events = [
+                {"delta": {"content": "done"}},
+                {"finish_reason": "stop", "receipt": {}},
+            ]
+        for event in events:
+            job.events.put(event)
+        return job
+
+
+def test_stateless_replay_renders_the_same_history_as_previous_response_id():
+    # One model turn (reasoning, text, two parallel calls) must replay as the
+    # single assistant message the model produced, whether the client echoes
+    # ``response.output`` or the server holds the context, with agent-compat
+    # off as well as on.
+    tools = [{"type": "function", "name": "f", "parameters": {"type": "object"}}]
+    outputs = [
+        {"type": "function_call_output", "call_id": call_id, "output": "ok"}
+        for call_id in ("call_a", "call_b")
+    ]
+    engine = ToolTurnEngine()
+    with _Served(engine, response_store=ResponseStore()) as base:
+        with _post(base, {
+            "model": "fixture",
+            "input": "go",
+            "tools": tools,
+            "include": ["reasoning.encrypted_content"],
+        }) as response:
+            first = json.load(response)
+        assert [item["type"] for item in first["output"]] == [
+            "reasoning", "message", "function_call", "function_call"
+        ]
+        with _post(base, {
+            "model": "fixture",
+            "input": outputs,
+            "tools": tools,
+            "previous_response_id": first["id"],
+        }) as response:
+            assert response.status == 200
+        held = engine.requests[-1]["messages"]
+        with _post(base, {
+            "model": "fixture",
+            "input": [{"role": "user", "content": "go"}, *first["output"], *outputs],
+            "tools": tools,
+            "include": ["reasoning.encrypted_content"],
+        }) as response:
+            assert response.status == 200
+        stateless = engine.requests[-1]["messages"]
+    assert stateless == held
+    assert [message["role"] for message in stateless] == [
+        "user", "assistant", "tool", "tool"
+    ]
+    assert stateless[1]["content"] == "Checking."
+    assert stateless[1]["reasoning_content"] == "plan"
+    assert [call["id"] for call in stateless[1]["tool_calls"]] == [
+        "call_a", "call_b"
+    ]
+    assert engine.counts["reasoning_signature_rejections"] == 0
