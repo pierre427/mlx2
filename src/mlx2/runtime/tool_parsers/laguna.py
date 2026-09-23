@@ -62,7 +62,8 @@ def _deserialize(value):
     except (TypeError, ValueError):
         try:
             decoded = ast.literal_eval(value)
-        except (SyntaxError, ValueError):
+        except Exception:  # noqa: BLE001 - any failure means "not a literal"
+            # An unhashable dict key or set member raises TypeError.
             return value
     return decoded if json_native(decoded) else value
 

@@ -231,3 +231,18 @@ def test_poolside_values_the_arguments_cannot_carry_stay_text(schema, value, ser
         _, events = _poolside_events(tools, text, split)
         calls = [c for e in events for c in e.get("tool_calls", ())]
         assert [json.loads(c["function"]["arguments"]) for c in calls] == [{"x": served}]
+
+
+@pytest.mark.parametrize("schema", [{"type": "object"}, {"description": "any value"}])
+@pytest.mark.parametrize("value", ["{[1]: 2}", "{1, [2]}"])
+def test_poolside_literals_that_fail_to_build_stay_text(schema, value):
+    """A Python literal with an unhashable key or set member raises
+    ``TypeError`` while it is built, which the best-effort decode did not
+    catch, so the call failed instead of serving the text.  It now stays the
+    string the model wrote, however it is chunked."""
+    tools = _poolside_tools(schema)
+    text = _poolside_call(value)
+    for split in (len(text), 1, 7):
+        _, events = _poolside_events(tools, text, split)
+        calls = [c for e in events for c in e.get("tool_calls", ())]
+        assert [json.loads(c["function"]["arguments"]) for c in calls] == [{"x": value}]

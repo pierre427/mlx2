@@ -837,6 +837,35 @@ def test_qwen_free_values_json_would_rewrite_stay_text(schema, value, served):
         assert _qwen_served(tools, text, split) == [{"x": served}]
 
 
+@pytest.mark.parametrize(
+    ("schema", "value"),
+    [
+        pytest.param({"type": "object"}, "{[1]: 2}", id="object-unhashable-key"),
+        pytest.param({"type": "array"}, "{1, [2]}", id="array-unhashable-member"),
+        pytest.param({"type": "tuple"}, "{[1]: 2}", id="unknown-unhashable-key"),
+        pytest.param({"type": "object"}, "1" * 4301, id="object-long-integer"),
+        pytest.param(
+            {"description": "any value"}, "[" + "1" * 4301 + "]", id="untyped-long-integer"
+        ),
+    ],
+)
+def test_qwen_free_values_that_fail_to_decode_stay_text(schema, value):
+    """Best-effort decoding of a free value fell back to the text only on the
+    errors a malformed value usually raises.  A Python literal with an
+    unhashable key or member raises ``TypeError``, and JSON with an integer
+    past the interpreter's 4300-digit limit raises a plain ``ValueError``;
+    both escaped and failed a call the grammar admitted with 502.  Such text
+    now stays the string the model wrote, however it is chunked."""
+    tools = [{"type": "function", "function": {"name": "f", "parameters": {
+        "type": "object", "properties": {"x": schema}, "required": ["x"],
+    }}}]
+    grammar = qwen_grammar(tools, "required", parallel_tool_calls=False)
+    text = _qwen_call(value)
+    assert _server_admits(grammar, text)
+    for split in (len(text), 1, 7):
+        assert _qwen_served(tools, text, split) == [{"x": value}]
+
+
 def _qwen_call(value, name="f"):
     return (
         f"<tool_call>\n<function={name}>\n<parameter=x>\n{value}\n</parameter>"

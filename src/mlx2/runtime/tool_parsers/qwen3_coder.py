@@ -127,7 +127,9 @@ def _convert_param_value(
             return None
         try:
             value = json.loads(param_value, strict=False)
-        except json.JSONDecodeError:
+        except ValueError:
+            # Not only a JSONDecodeError: an integer past the interpreter's
+            # digit limit raises a plain ValueError.
             return param_value
         if isinstance(value, (dict, list)):
             return _servable(value, param_value)
@@ -176,7 +178,7 @@ def _convert_param_value(
         ):
             try:
                 return _servable(json.loads(param_value, strict=False), param_value)
-            except json.JSONDecodeError:
+            except ValueError:  # a JSONDecodeError, or an integer too long
                 return _safe_literal_eval(param_value)
 
         # Unknown / unresolved type: try a literal, but never let a malformed
@@ -185,11 +187,16 @@ def _convert_param_value(
 
 
 def _safe_literal_eval(param_value: str) -> Any:
-    """ast.literal_eval that returns the raw string instead of raising."""
+    """ast.literal_eval that returns the raw string instead of raising.
+
+    Building a literal can raise more than ``ValueError`` and ``SyntaxError``:
+    an unhashable dict key or set member (``{[1]: 2}``) raises ``TypeError``.
+    """
     try:
-        return _servable(ast.literal_eval(param_value), param_value)
-    except (ValueError, SyntaxError):
+        value = ast.literal_eval(param_value)
+    except Exception:  # noqa: BLE001 - any failure means "not a literal"
         return param_value
+    return _servable(value, param_value)
 
 
 def _servable(value: Any, param_value: str) -> Any:
