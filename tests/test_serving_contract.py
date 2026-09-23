@@ -1700,6 +1700,107 @@ def test_schema_reference_validation_failures_are_counted(http_engine):
     assert engine.counts["schema_ref_failures"] == 1
 
 
+_CHAT_HI = [{"role": "user", "content": "hi"}]
+
+
+def _recorded_http_requests(engine, expected=1):
+    # The handler records the metric just after the response bytes are
+    # written, so a fast client can read the response before it lands.
+    deadline = time.monotonic() + 2
+    while True:
+        count = sum(engine.http_metrics.prometheus_snapshot()["requests"].values())
+        if count >= expected or time.monotonic() > deadline:
+            return count
+        time.sleep(0.005)
+
+
+@pytest.mark.parametrize(
+    "path, body",
+    [
+        ("/v1/responses", []),
+        ("/v1/messages", None),
+        ("/v1/messages/count_tokens", [1]),
+        ("/v1/chat/completions", {"messages": [{"role": ["user"], "content": "hi"}]}),
+        ("/v1/chat/completions", {"messages": _CHAT_HI, "thinking_budget_mode": []}),
+        ("/v1/responses", {"input": [{"type": ["message"]}]}),
+        ("/v1/responses", {"input": "hi", "text": {"verbosity": {}}}),
+        (
+            "/v1/messages",
+            {"max_tokens": 8, "messages": _CHAT_HI, "tool_choice": {"type": []}},
+        ),
+        (
+            "/v1/batches",
+            {"endpoint": [], "completion_window": "24h", "input_file_id": "x"},
+        ),
+        ("/v1/embeddings", {"input": "x", "encoding_format": []}),
+        ("/v1/audio/speech", {"input": "x", "response_format": []}),
+        ("/tokenize", {"messages": _CHAT_HI, "thinking_budget_mode": {}}),
+    ],
+)
+def test_wrongly_typed_json_fields_are_a_counted_400(path, body):
+    from http.client import HTTPConnection
+    from mlx2.batch_metrics import HttpRuntimeMetrics
+
+    engine = FakeEngine()
+    engine.http_metrics = HttpRuntimeMetrics()
+    server = ThreadingHTTPServer(("127.0.0.1", 0), handler_for(engine))
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    client = HTTPConnection("127.0.0.1", server.server_port, timeout=5)
+    try:
+        client.request(
+            "POST",
+            path,
+            body=json.dumps(body).encode(),
+            headers={"Content-Type": "application/json"},
+        )
+        response = client.getresponse()
+        payload = json.loads(response.read())
+        assert response.status == 400
+        assert payload["error"]["message"]
+        assert engine.job is None
+        assert _recorded_http_requests(engine) == 1
+    finally:
+        client.close()
+        server.shutdown()
+        server.server_close()
+        thread.join()
+
+
+def test_unexpected_engine_fault_is_a_counted_500_not_a_client_error():
+    from http.client import HTTPConnection
+    from mlx2.batch_metrics import HttpRuntimeMetrics
+
+    class BrokenEngine(FakeEngine):
+        def submit(self, request, *, tenant_id="default"):
+            raise TypeError("engine bug")
+
+    engine = BrokenEngine()
+    engine.http_metrics = HttpRuntimeMetrics()
+    server = ThreadingHTTPServer(("127.0.0.1", 0), handler_for(engine))
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    client = HTTPConnection("127.0.0.1", server.server_port, timeout=5)
+    try:
+        client.request(
+            "POST",
+            "/v1/chat/completions",
+            body=json.dumps({"model": "fixture", "messages": _CHAT_HI}).encode(),
+            headers={"Content-Type": "application/json"},
+        )
+        response = client.getresponse()
+        payload = json.loads(response.read())
+        assert response.status == 500
+        assert payload["error"]["type"] == "server_error"
+        assert "engine bug" not in payload["error"]["message"]
+        assert _recorded_http_requests(engine) == 1
+    finally:
+        client.close()
+        server.shutdown()
+        server.server_close()
+        thread.join()
+
+
 def test_batching_status_endpoint_and_tenant_header(http_engine):
     engine, base = http_engine
     request = Request(

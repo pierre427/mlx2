@@ -837,6 +837,22 @@ class SampleFailed(RuntimeError):
         self.code = code
 
 
+@contextlib.contextmanager
+def wrongly_typed_request_is_invalid():
+    """Report a wrongly typed field in a parsed JSON body as a client error.
+
+    Request validation and translation compare client values against sets
+    and read nested values as mappings, so a list or object where a string
+    was expected raises TypeError or AttributeError instead of ValueError.
+    Wrap only validation and translation in this: the same exception types
+    raised while generating are server faults, not malformed requests.
+    """
+    try:
+        yield
+    except (TypeError, AttributeError) as error:
+        raise ValueError(f"request field has the wrong JSON type: {error}") from error
+
+
 def parse_multipart_form(content_type, raw):
     """Parse one bounded multipart request without the deprecated cgi module."""
     if not isinstance(content_type, str) or not content_type.lower().startswith(
@@ -891,7 +907,7 @@ def embeddings_payload(
     ):
         raise ValueError("embedding dimensions must be a positive integer")
     encoding = body.get("encoding_format", "float")
-    if encoding not in {"float", "base64"}:
+    if not isinstance(encoding, str) or encoding not in {"float", "base64"}:
         raise ValueError("encoding_format must be float or base64")
     provider = getattr(engine, "embed", None)
     if not callable(provider):
@@ -998,18 +1014,19 @@ def prompt_render_payload(engine, body, path):
     model = status.get("model")
     if body.get("model", model) != model:
         raise ResourceNotFound("unknown model")
-    request = validate_request(
-        body,
-        "messages" in body,
-        structured_thinking=bool(
-            (status.get("structured_output") or {}).get("thinking_deferral")
-        ),
-        allow_buffered_tool_stream=True,
-        allow_strict_auto=True,
-        constrained_tool_grammar=bool(
-            (status.get("settings") or {}).get("constrained_tool_grammar")
-        ),
-    )
+    with wrongly_typed_request_is_invalid():
+        request = validate_request(
+            body,
+            "messages" in body,
+            structured_thinking=bool(
+                (status.get("structured_output") or {}).get("thinking_deferral")
+            ),
+            allow_buffered_tool_stream=True,
+            allow_strict_auto=True,
+            constrained_tool_grammar=bool(
+                (status.get("settings") or {}).get("constrained_tool_grammar")
+            ),
+        )
     if any(
         isinstance(message.get("content"), list)
         for message in request.get("messages", ())
@@ -2273,15 +2290,18 @@ def handler_for(
                     )
                     return
                 body = json.loads(raw)
+                if not isinstance(body, dict):
+                    raise ValueError("request must be a JSON object")
                 if path in {
                     "/v1/chat/completions",
                     "/v1/completions",
                     "/v1/responses",
                     "/v1/messages",
                 }:
-                    body = resolve_request_session(
-                        body, self.headers.get("X-mlx2-Session-ID")
-                    )
+                    with wrongly_typed_request_is_invalid():
+                        body = resolve_request_session(
+                            body, self.headers.get("X-mlx2-Session-ID")
+                        )
                 if responses_api or anthropic:
                     agent_compat = compat_policy.resolve(
                         self.headers,
@@ -2290,7 +2310,8 @@ def handler_for(
                         getattr(engine, "counts", None),
                     )
                 if path == "/v1/audio/speech":
-                    speech = validate_speech_request(body)
+                    with wrongly_typed_request_is_invalid():
+                        speech = validate_speech_request(body)
                     if speech["stream_format"] == "sse":
                         raise CapabilityUnavailable(
                             "speech SSE requires a qualified streaming audio adapter"
@@ -2313,11 +2334,16 @@ def handler_for(
                     self.send_bytes(200, output.data, content_type=output.media_type)
                     return
                 if path == "/v1/batches":
+
+                    def create_batch():
+                        with wrongly_typed_request_is_invalid():
+                            return batches.create(tenant_id, body)
+
                     admit_batch = getattr(engine, "admit_batch_submission", None)
                     value = (
-                        admit_batch(lambda: batches.create(tenant_id, body))
+                        admit_batch(create_batch)
                         if callable(admit_batch)
-                        else batches.create(tenant_id, body)
+                        else create_batch()
                     )
                     self.send_json(200, value)
                     return
@@ -2350,16 +2376,17 @@ def handler_for(
                         self.api_error(404, "unknown model", anthropic=True)
                         return
                     translation_metadata = {}
-                    body = anthropic_request_to_chat(
-                        body,
-                        count_tokens=anthropic_count_tokens,
-                        signer=getattr(engine, "reasoning_signer", None),
-                        tenant_id=tenant_id,
-                        model=body.get("model") or engine.status().get("model"),
-                        translation_metadata=translation_metadata,
-                        agent_compat=agent_compat,
-                        counts=getattr(engine, "counts", None),
-                    )
+                    with wrongly_typed_request_is_invalid():
+                        body = anthropic_request_to_chat(
+                            body,
+                            count_tokens=anthropic_count_tokens,
+                            signer=getattr(engine, "reasoning_signer", None),
+                            tenant_id=tenant_id,
+                            model=body.get("model") or engine.status().get("model"),
+                            translation_metadata=translation_metadata,
+                            agent_compat=agent_compat,
+                            counts=getattr(engine, "counts", None),
+                        )
                     rejections = translation_metadata.get(
                         "reasoning_signature_rejections", 0
                     )
@@ -2373,31 +2400,37 @@ def handler_for(
                         )
                         return
                 if responses_api:
-                    body, response_options = prepare_responses_request(
-                        body, tenant_id, agent_compat
-                    )
+                    with wrongly_typed_request_is_invalid():
+                        body, response_options = prepare_responses_request(
+                            body, tenant_id, agent_compat
+                        )
                     response_metadata = response_options["metadata"]
                 chat = path != "/v1/completions"
                 status = engine.status()
-                body = validate_request(
-                    body,
-                    chat,
-                    structured_thinking=bool(
-                        (status.get("structured_output") or {}).get("thinking_deferral")
-                    ),
-                    allow_buffered_tool_stream=True,
-                    allow_strict_auto=bool(
-                        responses_api
-                        and response_options
-                        and response_options.get("tool_executors")
-                    ),
-                    constrained_tool_grammar=bool(
-                        (status.get("settings") or {}).get(
-                            "constrained_tool_grammar"
-                        )
-                    ),
-                    max_tools=128 if responses_api and agent_compat.enabled else 64,
-                )
+                with wrongly_typed_request_is_invalid():
+                    body = validate_request(
+                        body,
+                        chat,
+                        structured_thinking=bool(
+                            (status.get("structured_output") or {}).get(
+                                "thinking_deferral"
+                            )
+                        ),
+                        allow_buffered_tool_stream=True,
+                        allow_strict_auto=bool(
+                            responses_api
+                            and response_options
+                            and response_options.get("tool_executors")
+                        ),
+                        constrained_tool_grammar=bool(
+                            (status.get("settings") or {}).get(
+                                "constrained_tool_grammar"
+                            )
+                        ),
+                        max_tools=128
+                        if responses_api and agent_compat.enabled
+                        else 64,
+                    )
                 if semantic_middleware is not None and chat:
                     ensure_semantic_classifier()
                     body, semantic_state = semantic_middleware.prepare(
@@ -3456,6 +3489,28 @@ def handler_for(
             except (RuntimeError, TimeoutError) as exc:
                 if not streaming:
                     self.api_error(503, str(exc), anthropic=anthropic)
+            except Exception as exc:
+                # A fault the handler does not classify must still answer and
+                # be counted; an escaping exception drops the connection with
+                # no response and no HTTP metric.  The detail stays in the log.
+                logging.getLogger("mlx2.server").exception(
+                    "request failed unexpectedly",
+                    exc_info=(type(exc), exc, exc.__traceback__),
+                )
+                message = "internal server error"
+                if streaming and anthropic and anthropic_translator is not None:
+                    for failure in anthropic_translator.failure(message, 500):
+                        self._anthropic_sse(failure)
+                    self._record_http(200)
+                elif streaming and responses_api:
+                    self._responses_failure(job, message, "server_error")
+                    self._record_http(200)
+                elif streaming:
+                    self._sse({"error": {"message": message}})
+                    self._sse("[DONE]")
+                    self._record_http(200)
+                else:
+                    self.api_error(500, message, anthropic=anthropic)
             finally:
                 if job is not None:
                     job.cancelled.set()
