@@ -16,9 +16,14 @@ from mlx2.runtime.models.cache import (
     ArraysCache,
     KVCache,
     PrefixIndex,
+    QuantizedKVCache,
     RotatingKVCache,
+    RotatingQuantizedKVCache,
+    SinkWindowKVCache,
     _copy_prompt_cache_for_restore,
     achievable_trim,
+    load_prompt_cache,
+    save_prompt_cache,
 )
 
 
@@ -378,6 +383,96 @@ def test_apcv2_spills_idle_target_and_mtp_sidecar_then_restores_exactly():
         assert mx.array_equal(hit.sidecar.rng_key, mx.array([7, 11], dtype=mx.uint32))
         assert apc.apc_stats["idle_disk"]["restores"] == 1
         hit.cache.close()
+
+
+@pytest.mark.parametrize(
+    "make_empty",
+    [
+        KVCache,
+        lambda: RotatingKVCache(max_size=8),
+        lambda: QuantizedKVCache(group_size=32, bits=8),
+        lambda: RotatingQuantizedKVCache(max_size=8, group_size=32, bits=8),
+        lambda: ArraysCache(2),
+        lambda: SinkWindowKVCache(8),
+    ],
+    ids=["kv", "rotating", "quantized", "rotating_quantized", "arrays", "sink_window"],
+)
+def test_prompt_cache_round_trips_layers_with_nothing_written(tmp_path, make_empty):
+    # An empty KVCache reports ``(None, None)``; saving it raised
+    # ``std::bad_cast``, so a short self-MTP checkpoint (empty draft) could
+    # never be spilled.  A trailing leafless state was dropped on load.
+    cache = [make_empty(), _state(KVCache(), 3), make_empty()]
+    path = str(tmp_path / "empty-layers.safetensors")
+    save_prompt_cache(path, cache)
+    restored = load_prompt_cache(path)
+    assert [type(layer) for layer in restored] == [type(layer) for layer in cache]
+    assert restored[1].offset == 3
+    for layer in (restored[0], restored[2]):
+        assert layer.nbytes == 0
+        if hasattr(layer, "offset"):
+            assert layer.offset == 0
+
+
+def test_apcv2_spills_and_restores_a_one_token_mtp_checkpoint(tmp_path):
+    now = [0.0]
+    apc = APCv2(
+        max_size=4,
+        layout_name="short-mtp-spill-v1",
+        idle_disk_seconds=180,
+        idle_disk_dir=str(tmp_path),
+        now_fn=lambda: now[0],
+    )
+    # A two-token prompt commits a one-token boundary whose draft plane has
+    # nothing written yet.
+    sidecar = MTPAPCSidecar(
+        ([KVCache()], mx.ones((1, 1, 4), dtype=mx.float32)), covered_tokens=1
+    )
+    key = APCKey("short")
+    apc.store(key, [5], [_state(KVCache(), 1)], sidecar=sidecar)
+    now[0] = 180
+    assert apc.spill_idle_entries() == 1
+    disk = apc.apc_stats["idle_disk"]
+    assert disk["spill_failures"] == 0 and disk["disk_entries"] == 1
+    hit = apc.lookup(key, [5, 6])
+    assert hit.hit_kind == "mtp_sidecar" and hit.cached_tokens == 1
+    assert hit.sidecar.state[0][0].offset == 0
+    assert apc.apc_stats["idle_disk"]["restores"] == 1
+    hit.cache.close()
+
+
+def test_apcv2_idle_scan_backs_off_a_snapshot_that_fails_to_spill(
+    tmp_path, monkeypatch
+):
+    now = [0.0]
+    apc = APCv2(
+        max_size=4,
+        layout_name="spill-backoff-v1",
+        idle_disk_seconds=1,
+        idle_disk_dir=str(tmp_path),
+        now_fn=lambda: now[0],
+    )
+    key = APCKey("backoff")
+    apc.store(key, [1, 2, 3], [_state(KVCache(), 3)])
+    save = APCv2._atomic_save_cache
+
+    def failing_save(path, cache):
+        raise RuntimeError("injected spill failure")
+
+    monkeypatch.setattr(APCv2, "_atomic_save_cache", staticmethod(failing_save))
+    for second in range(1, 121):
+        now[0] = float(second)
+        assert apc.spill_idle_entries() == 0
+    # Two minutes of one-second scans used to re-serialize (and count) the
+    # entry 120 times.  Every attempt is still counted, at 1, 3, 7, 15, 31
+    # and 63 seconds.
+    assert apc.apc_stats["idle_disk"]["spill_failures"] == 6
+    assert apc._trie.get(key, [1, 2, 3]).prompt_cache
+
+    monkeypatch.setattr(APCv2, "_atomic_save_cache", staticmethod(save))
+    now[0] = 127.0
+    assert apc.spill_idle_entries() == 1
+    assert apc.apc_stats["idle_disk"]["disk_entries"] == 1
+    assert apc.apc_stats["idle_disk"]["spill_failures"] == 6
 
 
 def test_apcv2_pending_prefetch_cancellation_releases_slot_and_stays_on_disk(

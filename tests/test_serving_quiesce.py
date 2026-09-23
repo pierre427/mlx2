@@ -460,3 +460,47 @@ def test_submission_racing_worker_exit_gets_a_terminal_event(scripted_engine):
     assert _wait_for_terminal(job, 1.0) == {"error": "server stopped", "status": 503}
     with engine.lock:
         assert not engine.jobs
+
+
+def test_short_self_mtp_checkpoints_suspend_park_and_restore(monkeypatch, tmp_path):
+    # A two-token prompt commits a one-token boundary whose draft plane has
+    # nothing written.  Saving it raised std::bad_cast: suspend dropped the
+    # entry as a failure and a session park never completed.
+    from route_harness import collect, make_engine, patch_host, tiny_qwen38_mtp
+
+    patch_host(monkeypatch)
+    model, vocab = tiny_qwen38_mtp()
+    engine = make_engine(model, vocab, max_lanes=2, cache_dir=str(tmp_path))
+    try:
+        apc = engine.apc
+        request = {"tokens": [5, 6], "max_tokens": 3, "temperature": 0,
+                   "session_id": "s1"}
+        first = collect(engine.submit(dict(request)), timeout=60)
+        assert first.get("error") is None
+        engine.apc_session_park("default", "s1", ttl_seconds=600)
+        deadline = time.monotonic() + 10
+        while (
+            engine.apc_session_state("default", "s1")["park_pending"]
+            and time.monotonic() < deadline
+        ):
+            time.sleep(0.05)
+        state = engine.apc_session_state("default", "s1")
+        assert state["park_pending"] == 0 and state["resident_entries"] == 0
+
+        collect(engine.submit({"tokens": [9, 8], "max_tokens": 3, "temperature": 0}),
+                timeout=60)
+        engine.quiesce(suspend=True, drain_timeout_seconds=5)
+        assert engine.wait_for_quiesce(10)
+        report = engine.service_state()["last_transition"]["result"]["suspend"]
+        assert report["failures"] == 0
+        assert report["resident_entries_after"] == 0
+        engine.resume()
+
+        second = collect(engine.submit(dict(request)), timeout=60)
+        assert second["tokens"] == first["tokens"]
+        assert apc.apc_stats["idle_disk"]["restores"] >= 1
+        assert apc.apc_stats["idle_disk"]["spill_failures"] == 0
+        alive, error = engine.thread.is_alive(), engine.error
+    finally:
+        engine.close()
+    assert alive and error is None

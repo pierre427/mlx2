@@ -141,10 +141,13 @@ def save_prompt_cache(file_name: str, cache: List[Any], metadata: Dict[str, str]
     cache_data = [c.state for c in cache]
     cache_info = [c.meta_state for c in cache]
     cache_data = dict(tree_flatten(cache_data))
+    # A cache with nothing written reports ``None`` leaves (KVCache keys and
+    # values; ArraysCache slots), which safetensors cannot hold either.  They
+    # are recorded as ``null`` beside the zero-size arrays and rebuilt on load.
     empty = {
-        key: (str(value.dtype), list(value.shape))
+        key: None if value is None else (str(value.dtype), list(value.shape))
         for (key, value) in cache_data.items()
-        if isinstance(value, mx.array) and value.size == 0
+        if value is None or (isinstance(value, mx.array) and value.size == 0)
     }
     for key in empty:
         del cache_data[key]
@@ -202,10 +205,14 @@ def load_prompt_cache(file_name, return_metadata=False):
     (info, metadata, classes) = cache_metadata[:3]
     arrays = dict(arrays)
     if len(cache_metadata) > 3:
-        for key, (dtype, shape) in json.loads(cache_metadata[3]).items():
+        for key, placeholder in json.loads(cache_metadata[3]).items():
+            if placeholder is None:
+                arrays[key] = None
+                continue
             # Only zero-size arrays are recorded here (safetensors cannot hold
             # them).  A corrupt or hostile header must not turn this into an
             # arbitrary allocation before any consistency check runs.
+            (dtype, shape) = placeholder
             shape = tuple(int(dim) for dim in shape)
             if not shape or 0 not in shape or any(dim < 0 for dim in shape):
                 raise ValueError(
@@ -214,6 +221,11 @@ def load_prompt_cache(file_name, return_metadata=False):
                 )
             arrays[key] = mx.zeros(shape, dtype=_dtype_registry()[dtype])
     arrays = tree_unflatten(list(arrays.items()))
+    if isinstance(arrays, list):
+        # A trailing cache whose state has no leaves at all (an empty
+        # SinkWindowKVCache reports ``[]``) leaves no key behind; without
+        # this the zip below would silently drop that layer.
+        arrays.extend([] for _ in range(len(classes) - len(arrays)))
     cache = [
         _resolve_cache_class(c).from_state(state, meta_state)
         for (c, state, meta_state) in zip(classes, arrays, info)
@@ -1055,7 +1067,11 @@ class KVCache(_BaseCache):
         same_storage = getattr(self, "keys", None) is v[0]
         previous_offset = getattr(self, "offset", None) if same_storage else None
         (self.keys, self.values) = v
-        self.offset = self.keys.shape[2] if previous_offset is None else previous_offset
+        if previous_offset is not None:
+            self.offset = previous_offset
+        else:
+            # An empty cache's state is ``(None, None)``.
+            self.offset = 0 if self.keys is None else self.keys.shape[2]
 
     @property
     def meta_state(self):

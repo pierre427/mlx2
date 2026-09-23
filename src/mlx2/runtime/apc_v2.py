@@ -480,6 +480,8 @@ class APCv2(PrefixIndex):
     )
     _PERSIST_SCHEMA = "mlx2.apcv2.persisted-entry.v1"
     _SESSION_TAG_LIMIT = 16
+    # Longest wait before an idle scan retries a snapshot that failed to spill.
+    _SPILL_RETRY_MAX_SECONDS = 300.0
     _RETENTION_DEFAULT = "default"
     _RETENTION_INTERIOR = "interior_checkpoint"
     _RETENTION_PROMPT_BOUNDARY = "committed_prompt_boundary"
@@ -2600,11 +2602,14 @@ class APCv2(PrefixIndex):
                     entry.prompt_cache
                     and not self._entry_resident_pinned_locked(key, tokens, entry)
                     and (parked or now - last_access >= self._idle_disk_seconds)
+                    and now >= getattr(entry, "_apc_spill_retry_at", now)
                 ):
+                    failures = self._disk_stats["spill_failures"]
                     if self._spill_entry_locked(
                         key, tokens, entry, reason="park" if parked else "idle"
                     ):
                         entry._apc_park_pending = False
+                        entry._apc_spill_failed_attempts = 0
                         spilled += 1
                     elif self._spill_capacity_violation is not None and getattr(
                         entry, "_apc_disk_pin_expiries", {}
@@ -2616,6 +2621,18 @@ class APCv2(PrefixIndex):
                         entry._apc_disk_pin_expiries = {}
                         entry._apc_park_pending = False
                         self._disk_stats["pin_cap_rejections"] += 1
+                    elif self._disk_stats["spill_failures"] > failures:
+                        # A snapshot that failed to serialize almost always
+                        # fails the same way on the next scan.  Retry it with
+                        # exponential backoff, so each failure is still
+                        # counted but one bad entry is not re-serialized every
+                        # second forever.
+                        attempts = getattr(entry, "_apc_spill_failed_attempts", 0) + 1
+                        entry._apc_spill_failed_attempts = attempts
+                        entry._apc_spill_retry_at = now + min(
+                            scan_interval * 2 ** min(attempts, 16),
+                            self._SPILL_RETRY_MAX_SECONDS,
+                        )
             if spilled:
                 mx.clear_cache()
                 self._enforce_disk_limit_locked()
