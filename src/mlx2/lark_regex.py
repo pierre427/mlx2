@@ -24,6 +24,10 @@ import re
 
 MAX_GRAMMAR_CHARS = 16384
 MAX_REGEX_CHARS = 4096
+# ``~n`` lowers to a counted regex repeat, which ``regex`` unrolls into one
+# node per required repeat; the same bound ``structured_output`` prices every
+# compiled pattern against (nested repeats are priced there by their product).
+MAX_REPEAT_COUNT = 4096
 
 # Lark's ``common.lark`` terminals, restricted to the regular ones.
 COMMON_TERMINALS = {
@@ -244,6 +248,10 @@ class _Compiler:
                 bounds = [int(item) for item in re.findall(r"[0-9]+", value)]
                 if len(bounds) == 2 and bounds[0] > bounds[1]:
                     raise LarkGrammarError("lark repetition range is inverted")
+                if max(bounds) > MAX_REPEAT_COUNT:
+                    raise LarkGrammarError(
+                        f"lark repetition count exceeds {MAX_REPEAT_COUNT}"
+                    )
                 spec = "{%d}" % bounds[0] if len(bounds) == 1 else "{%d,%d}" % tuple(bounds)
                 return f"(?:{atom}){spec}", position + 1
         return atom, position

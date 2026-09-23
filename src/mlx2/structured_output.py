@@ -10,11 +10,13 @@ marker (``defer_until``).
 
 from __future__ import annotations
 
+import functools
 import json
 import time
 from collections import OrderedDict
 
 import regex
+from regex import _regex_core
 
 from .runtime.tool_parsers._schema import (
     executable_schema,
@@ -75,6 +77,26 @@ _FAILURE_HISTORY_TOKENS = 64
 _FAILURE_TOP_LOGITS = 8
 _FAILURE_TEXT_CHARS = 64
 _FAILURE_BYTES = 32
+# ``regex`` compiles a counted repetition into one node per required repeat
+# (measured at 260-400 bytes each), so the 13-character grammar
+# ``a{100000000}`` allocated ~26 GB in the request thread, and a large
+# repeated alternation (``(?:ab|cd){262144}``) crashed the interpreter.  Every
+# client-reachable pattern is priced with ``regex``'s own parser before it is
+# compiled: each repeat bound is capped at the 4096-character wire bound that
+# JSON strings already use, and the whole pattern at a budget of unrolled
+# nodes (each node weighted by the product of its enclosing minimum counts),
+# which holds one compile near 100 MB.  The largest legitimate pattern
+# measured, a 64-tool x 16-parameter strict tool grammar, prices at ~215K
+# nodes and compiles to ~75 MB.
+_MAX_REPEAT_COUNT = 4096
+_MAX_UNROLLED_NODES = 1 << 18
+# Parsing costs time and memory in the pattern's length before it can be
+# priced; no pattern this long fits the node budget anyway (~3 characters per
+# node for the JSON grammars).
+_MAX_PATTERN_CHARS = 1 << 20
+# A JSON schema array repeats its item pattern, so nested arrays double the
+# pattern per level; building stops once one schema's pattern passes this.
+_MAX_SCHEMA_PATTERN_CHARS = 1 << 18
 
 
 def vocabulary_bound(tokenizer):
@@ -178,7 +200,77 @@ def _json_literal(value):
         raise ValueError("JSON schema literals must be valid finite JSON values") from exc
 
 
+def _pattern_children(node):
+    for value in vars(node).values():
+        if isinstance(value, _regex_core.RegexBase):
+            yield value
+        elif isinstance(value, (list, tuple)):
+            for item in value:
+                if isinstance(item, _regex_core.RegexBase):
+                    yield item
+
+
+@functools.lru_cache(maxsize=64)
+def _price_pattern(pattern, what="pattern"):
+    """Refuse ``pattern`` unless ``regex`` can compile it within the budget.
+
+    Parses with ``regex``'s own parser, so verbose mode (where ``a{1 0 0}``
+    is a count of 100), inline flags and nested sets read exactly as the
+    compiler reads them, but builds nothing.  Every parsed node is then
+    weighted by the product of the minimum counts of the repeats around it,
+    which is the number of nodes the compiler would build.  Syntax errors
+    propagate as ``regex.error``; bound violations raise ``ValueError``.
+    Cached because server tool grammars repeat across requests and
+    ``regex.compile`` itself hits its own cache for them.
+    """
+    if len(pattern) > _MAX_PATTERN_CHARS:
+        raise ValueError(f"{what} exceeds {_MAX_PATTERN_CHARS} regex characters")
+    flags = 0
+    try:
+        while True:
+            source = _regex_core.Source(pattern)
+            info = _regex_core.Info(flags, source.char_type, {})
+            info.guess_encoding = _regex_core.UNICODE
+            source.ignore_space = bool(info.flags & _regex_core.VERBOSE)
+            try:
+                root = _regex_core._parse_pattern(source, info)
+                break
+            except _regex_core._UnscopedFlagSet:
+                # A global inline flag restarts the parse, as in regex.compile.
+                flags = info.global_flags
+    except RecursionError as exc:
+        raise ValueError(f"{what} nests too deeply") from exc
+    total = 0
+    stack = [(root, 1)]
+    while stack:
+        node, weight = stack.pop()
+        total += weight
+        if total > _MAX_UNROLLED_NODES:
+            raise ValueError(
+                f"{what} unrolls to more than {_MAX_UNROLLED_NODES} regex nodes"
+            )
+        if isinstance(node, _regex_core.GreedyRepeat):  # lazy and possessive too
+            if node.min_count > _MAX_REPEAT_COUNT or (
+                node.max_count is not None and node.max_count > _MAX_REPEAT_COUNT
+            ):
+                raise ValueError(
+                    f"{what} repeat counts must be at most {_MAX_REPEAT_COUNT}"
+                )
+            weight *= max(node.min_count, 1)
+        stack.extend((child, weight) for child in _pattern_children(node))
+    return total
+
+
 def _schema_pattern(schema, depth=0, *, finite_numbers=False):
+    pattern = _schema_pattern_unbounded(schema, depth, finite_numbers=finite_numbers)
+    if len(pattern) > _MAX_SCHEMA_PATTERN_CHARS:
+        raise ValueError(
+            f"JSON schema lowers to more than {_MAX_SCHEMA_PATTERN_CHARS} regex characters"
+        )
+    return pattern
+
+
+def _schema_pattern_unbounded(schema, depth=0, *, finite_numbers=False):
     if depth > 16 or not isinstance(schema, dict):
         raise ValueError("JSON schema must be an object with nesting depth at most 16")
     if "anyOf" in schema:
@@ -268,10 +360,18 @@ def _schema_pattern(schema, depth=0, *, finite_numbers=False):
         # Canonical schema order makes the automaton bounded and deterministic.
         parts = []
         optional_seen = False
+        built = 0
         for name, subschema in properties.items():
             value = _schema_pattern(
                 subschema, depth + 1, finite_numbers=finite_numbers
             )
+            # Stop before 64 capped members are joined, not after.
+            built += len(value)
+            if built > _MAX_SCHEMA_PATTERN_CHARS:
+                raise ValueError(
+                    "JSON schema lowers to more than "
+                    f"{_MAX_SCHEMA_PATTERN_CHARS} regex characters"
+                )
             pair = regex.escape(json.dumps(name)) + _WS + ":" + _WS + value
             if name in required:
                 if optional_seen:
@@ -643,8 +743,10 @@ def compile_constraint(response_format=None, grammar=None, *, leading_whitespace
     if grammar is not None:
         if not isinstance(grammar, str) or not grammar or len(grammar) > 4096:
             raise ValueError("grammar must be a nonempty regex of at most 4096 characters")
+        source = rf"(?:{grammar})"
         try:
-            return _Constraint(regex.compile(rf"(?:{grammar})"), kind="grammar")
+            _price_pattern(source, "grammar")
+            return _Constraint(regex.compile(source), kind="grammar")
         except regex.error as exc:
             raise ValueError(f"invalid grammar regex: {exc}") from exc
     if response_format is None or response_format == {"type": "text"}:
@@ -669,8 +771,10 @@ def compile_constraint(response_format=None, grammar=None, *, leading_whitespace
         if wrapper.get("strict", True) is not True or not isinstance(wrapper.get("schema"), dict):
             raise ValueError("json_schema requires strict:true and a schema object")
         schema = executable_schema(wrapper["schema"])
+        pattern = lead + _schema_pattern(schema)
+        _price_pattern(pattern, "JSON schema")
         return _Constraint(
-            regex.compile(lead + _schema_pattern(schema)),
+            regex.compile(pattern),
             schema,
             _canonical_json_prefix,
             "json_schema",
@@ -2107,10 +2211,11 @@ def make_structured_processor(
     if server_grammar is not None:
         # A server-composed pattern (item 12 tool grammars): not client input,
         # so the client grammar length cap does not apply; it is used verbatim.
+        # It is still priced, because it embeds the client's tool schemas.
+        source = rf"(?:{server_grammar})"
         try:
-            constraint = _Constraint(
-                regex.compile(rf"(?:{server_grammar})"), kind="tool_grammar"
-            )
+            _price_pattern(source, "server tool grammar")
+            constraint = _Constraint(regex.compile(source), kind="tool_grammar")
         except regex.error as exc:
             raise ValueError(f"invalid server tool grammar: {exc}") from exc
     else:

@@ -1228,3 +1228,132 @@ def test_recursive_schema_refs_fail_closed():
     }
     with pytest.raises(ValueError, match="recursive"):
         compile_constraint(response_format)
+
+
+def _refuse_compiling(monkeypatch, *fragments):
+    """Make ``regex.compile`` fail the test if it sees a dangerous pattern.
+
+    ``regex`` unrolls counted repeats while compiling (``a{100000000}``
+    allocated ~26 GB), so the pricing must refuse these before compiling; a
+    regression then fails here instead of exhausting the machine.
+    """
+    import regex
+
+    real = regex.compile
+
+    def guarded(pattern, *args, **kwargs):
+        if isinstance(pattern, str) and (
+            len(pattern) > 1 << 19 or any(fragment in pattern for fragment in fragments)
+        ):
+            raise AssertionError(f"regex.compile reached the unpriced pattern {pattern[:60]!r}")
+        return real(pattern, *args, **kwargs)
+
+    monkeypatch.setattr(regex, "compile", guarded)
+
+
+@pytest.mark.parametrize(
+    ("grammar", "message"),
+    [
+        ("a{100000000}", "repeat counts must be at most 4096"),
+        ("a{4097}", "repeat counts must be at most 4096"),
+        ("a{0,4097}", "repeat counts must be at most 4096"),
+        ("a{100000000,}", "repeat counts must be at most 4096"),
+        ("a{100000000}?", "repeat counts must be at most 4096"),
+        # Nested repeats multiply: each bound is small, the product is not.
+        ("((a{100}){100}){100}", "unrolls to more than"),
+        ("(?:(?:ab|cd){4096}){64}", "unrolls to more than"),
+        ("(?=(?:a{4096}){4096})", "unrolls to more than"),
+        # Verbose mode ignores whitespace inside the count: this is 10**8.
+        ("(?x)a{1 0 0 0 0 0 0 0 0}", "repeat counts must be at most 4096"),
+        ("(?x:a{1 0 0 0 0 0 0 0 0})", "repeat counts must be at most 4096"),
+    ],
+)
+def test_counted_repeat_grammars_are_refused_before_compiling(monkeypatch, grammar, message):
+    _refuse_compiling(monkeypatch, grammar)
+    with pytest.raises(ValueError, match=message):
+        validate_request({
+            "messages": [{"role": "user", "content": "x"}],
+            "grammar": grammar,
+        })
+    with pytest.raises(ValueError, match=message):
+        validate_request({"prompt": "x", "grammar": grammar}, chat=False)
+
+
+def test_bounded_counted_repeats_still_compile():
+    uuid = compile_constraint(
+        grammar=r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
+    )
+    assert accepts(uuid, "123e4567-e89b-12d3-a456-426614174000")
+    assert accepts(compile_constraint(grammar="a{4096}"), "a" * 4096)
+    assert accepts(compile_constraint(grammar="(?:a{64}){64}"), "a" * 4096)
+    assert accepts(compile_constraint(grammar="(?x) a{1 0} "), "a" * 10)
+    assert accepts(compile_constraint(grammar=r"\p{L}{2,3}"), "ab")
+
+
+def test_lark_repetitions_are_bounded_individually_and_by_product(monkeypatch):
+    from mlx2.agent_compat import _custom_format
+    from mlx2.lark_regex import LarkGrammarError, lark_to_regex
+
+    _refuse_compiling(monkeypatch, "{100000000}", "{100}){100}){100}")
+    with pytest.raises(LarkGrammarError, match="repetition count exceeds 4096"):
+        lark_to_regex('start: "a" ~ 100000000')
+    tool = {
+        "name": "t",
+        "format": {
+            "type": "grammar",
+            "syntax": "lark",
+            "definition": 'start: (("a" ~ 100) ~ 100) ~ 100',
+        },
+    }
+    with pytest.raises(ValueError, match="unrolls to more than"):
+        _custom_format(tool, "validate")
+    tool["format"] = {"type": "grammar", "syntax": "regex", "definition": "a{100000000}"}
+    with pytest.raises(ValueError, match="repeat counts must be at most 4096"):
+        _custom_format(tool, "validate")
+    assert accepts(compile_constraint(grammar=lark_to_regex('start: "a" ~ 2..4096')), "aa")
+
+
+def _nested_arrays(depth, leaf):
+    for _ in range(depth):
+        leaf = {"type": "array", "items": leaf}
+    return {"type": "json_schema", "json_schema": {"strict": True, "schema": leaf}}
+
+
+def test_json_schema_patterns_are_priced_before_compiling(monkeypatch):
+    # Each array level repeats its item pattern: four levels hold sixteen
+    # copies of a 4096-repeat string, and sixteen levels of plain strings
+    # lowered to ~11 MB of regex that took >1.8 GB and >29 s to compile.
+    _refuse_compiling(monkeypatch, "{4096,4096}")
+    with pytest.raises(ValueError, match="unrolls to more than"):
+        compile_constraint(_nested_arrays(4, {"type": "string", "minLength": 4096}))
+    with pytest.raises(ValueError, match="lowers to more than"):
+        compile_constraint(_nested_arrays(16, {"type": "string"}))
+    wide = {
+        "type": "object",
+        "properties": {
+            f"p{index}": {"type": "array", "items": {"type": "array", "items": {
+                "type": "array", "items": {"type": "array", "items": {
+                    "type": "array", "items": {"type": "array", "items": {
+                        "type": "array", "items": {"type": "string"},
+                    }},
+                }},
+            }}}
+            for index in range(64)
+        },
+        "required": [f"p{index}" for index in range(64)],
+        "additionalProperties": False,
+    }
+    with pytest.raises(ValueError, match="lowers to more than"):
+        compile_constraint(
+            {"type": "json_schema", "json_schema": {"strict": True, "schema": wide}}
+        )
+    small = compile_constraint(_nested_arrays(2, {"type": "string", "minLength": 2}))
+    assert accepts(small, '[["ab","cd"],[]]')
+
+
+def test_server_tool_grammar_is_priced_before_compiling(monkeypatch):
+    from mlx2.structured_output import make_structured_processor
+
+    _refuse_compiling(monkeypatch, "(?:a{4096}){4096}")
+    with pytest.raises(ValueError, match="server tool grammar unrolls to more than"):
+        make_structured_processor(None, 0, server_grammar="(?:a{4096}){4096}")
