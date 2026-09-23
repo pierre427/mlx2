@@ -207,11 +207,15 @@ class NorthOutputParser:
             hits = [(self.buffer.find(marker), marker) for marker in markers if marker in self.buffer]
             if hits:
                 end, marker = min(hits)
-                if end:
-                    events.extend(self._emit(self.buffer[:end], final=True))
-                    if self.stopped:
-                        self.buffer = ""
-                        break
+                # Flush even when the marker starts the buffer: a stop-string
+                # prefix held back from an earlier push must not be completed
+                # by text on the far side of a channel marker.  Otherwise the
+                # outcome depends on how the text was chunked (per-token pushes
+                # versus several tokens per decode step).
+                events.extend(self._emit(self.buffer[:end], final=True))
+                if self.stopped:
+                    self.buffer = ""
+                    break
                 self.buffer = self.buffer[end + len(marker) :]
                 action = markers[marker]
                 if action == "stop":

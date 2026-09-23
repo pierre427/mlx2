@@ -541,6 +541,42 @@ def test_visible_stop_ignores_reasoning_and_is_chunk_safe(split):
     assert parser.stopped is True
 
 
+def test_stop_string_never_matches_across_a_channel_marker_at_any_split():
+    """A stop prefix held back before a marker was flushed only when the text
+    and the marker arrived in the same push.  With per-token pushes ``ST`` +
+    ``<|END_TEXT|>...<|START_TEXT|>`` + ``OP`` matched ``STOP``, truncating
+    the answer, while a single push delivered it whole."""
+    tools = [{"type": "function", "function": {"name": "echo", "parameters": {
+        "type": "object", "properties": {},
+    }}}]
+    segments = [
+        "think", "<|END_THINKING|>", "<|START_TEXT|>", "Plan: ST", "<|END_TEXT|>",
+        "<|START_ACTION|>", '[{"tool_name":"echo","parameters":{}}]',
+        "<|END_ACTION|>", "<|START_TEXT|>", "OP-gap then the rest", "<|END_TEXT|>",
+        "<|START_THINKING|>", "x", "<|END_THINKING|>", "tail ST", "<|START_THINKING|>",
+        "OP", "<|END_THINKING|>", "done", "<|END_OF_TURN_TOKEN|>",
+    ]
+    text = "".join(segments)
+
+    def run(chunks, finish=None):
+        parser = NorthOutputParser(chat=True, tools=tools, stops=["STOP"])
+        events = []
+        for chunk in chunks:
+            events += parser.push(chunk)
+        events += parser.finish("", finish) if finish else parser.push("", final=True)
+        content = "".join(e.get("content", "") for e in events)
+        calls = [c["function"]["name"] for e in events for c in e.get("tool_calls", ())]
+        return content, calls, parser.stop_sequence
+
+    whole = run([text])
+    assert whole == ("Plan: STOP-gap then the resttail STdone", ["echo"], None)
+    assert run(segments) == whole
+    assert run(list(text)) == whole
+    for split in range(1, len(text)):
+        assert run([text[:split], text[split:]]) == whole, split
+        assert run([text[:split], text[split:]], "length") == whole, split
+
+
 @pytest.mark.parametrize("split", range(1, 8))
 def test_raw_completion_stop_remains_chunk_safe(split):
     parser = NorthOutputParser(chat=False, stops=("_READY",))
