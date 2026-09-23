@@ -51,15 +51,26 @@ def within_parallel_bound(parser, calls):
 
 
 def _safe_prefix(text, markers):
-    hold = max(
-        (
-            n
-            for marker in markers
-            for n in range(1, len(marker))
-            if text.endswith(marker[:n])
-        ),
-        default=0,
-    )
+    """Length of ``text`` that can be released without splitting a marker.
+
+    The held tail is the longest suffix of ``text`` that is a proper prefix of
+    some marker.  Only a suffix starting with the marker's first character can
+    be one, so the scan visits those positions, longest suffix first, instead
+    of slicing and comparing every prefix length: with 16 client stop strings
+    of 256 characters that was about 200 us of host time per token.
+    """
+    hold = 0
+    for marker in markers:
+        width = min(len(marker) - 1, len(text))
+        if width <= hold:
+            continue
+        tail = text[len(text) - width :]
+        start = tail.find(marker[0])
+        while start != -1 and width - start > hold:
+            if marker.startswith(tail[start:]):
+                hold = width - start
+                break
+            start = tail.find(marker[0], start + 1)
     return len(text) - hold
 
 

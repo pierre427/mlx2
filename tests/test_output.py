@@ -120,6 +120,55 @@ def test_stop_at_every_chunk_boundary():
         assert parser.stop_sequence == "STOP"
 
 
+def test_safe_prefix_holds_the_longest_partial_marker():
+    """The released length matches the definition: hold the longest suffix
+    that is a proper prefix of some marker, including overlapping ones."""
+    import random
+
+    from mlx2.output import _safe_prefix
+
+    def reference(text, markers):
+        hold = max(
+            (n for m in markers for n in range(1, len(m)) if text.endswith(m[:n])),
+            default=0,
+        )
+        return len(text) - hold
+
+    rng = random.Random(0)
+    for _ in range(3000):
+        markers = [
+            "".join(rng.choice("ab<") for _ in range(rng.randint(1, 7)))
+            for _ in range(rng.randint(1, 4))
+        ]
+        text = "".join(rng.choice("ab<x") for _ in range(rng.randint(0, 12)))
+        assert _safe_prefix(text, markers) == reference(text, markers), (text, markers)
+    assert _safe_prefix("say aab", ["aabaa"]) == len("say ")
+    assert _safe_prefix("<thi", ["<think>", "</think>"]) == 0
+    assert _safe_prefix("done", []) == 4
+
+
+def test_long_client_stop_strings_cost_little_per_token():
+    """16 stop strings of 256 characters (the Anthropic maximum) cost about
+    200 us per pushed token when every prefix length was sliced and compared;
+    the scan now visits only positions that can start a marker."""
+    import random
+    import string
+    import time
+
+    from mlx2.output import StopSequenceMatcher
+
+    rng = random.Random(0)
+    stops = [
+        "".join(rng.choice(string.ascii_letters) for _ in range(256))
+        for _ in range(16)
+    ]
+    matcher = StopSequenceMatcher(stops)
+    started = time.perf_counter()
+    for _ in range(2000):
+        matcher.push("tok ")
+    assert time.perf_counter() - started < 0.2
+
+
 def test_tool_call_at_every_boundary():
     tools = [
         {
