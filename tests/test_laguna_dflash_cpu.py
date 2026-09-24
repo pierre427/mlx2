@@ -160,7 +160,7 @@ def test_laguna_adapter_external_policy_fails_closed_and_keeps_ordinary_config(m
     assert "backend" not in adapter.execution_config(max_lanes=2, prefill_step=64)
     adapter.draft_model, adapter.external_policy = object(), {"draft_model": "x"}
     config = adapter.execution_config(max_lanes=2, prefill_step=64)
-    assert config["backend"] == "external_draft" and config["num_draft"] == 7
+    assert config["backend"] == "external_draft" and config["num_draft"] == 3
     assert laguna.LagunaXS21Adapter.external_profile_name(False) == "laguna-xs21-apcv2-laguna-dflash"
     snapshot = _snapshot()
     if snapshot is None:

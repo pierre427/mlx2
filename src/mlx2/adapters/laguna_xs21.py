@@ -229,9 +229,13 @@ class LagunaXS21Adapter(ExternalDraftAdapterMixin):
         return "laguna-xs21-apcv2-ordinary"
 
     # Candidate external route: poolside's causal DFlash block drafter.  The
-    # card measures K=15; the default starts shallower because every verify
-    # row is a full MoE forward on the target (see the rm06 GPU sweep).
-    EXTERNAL_DEFAULT_NUM_DRAFT = 7
+    # card measures K=15; every verify row is a full MoE forward on the
+    # target, so the rm06 GPU sweep (qualification/runs/rm06-laguna-20260919/
+    # greedy-merged.json, B1 greedy, 3 interleaved reps against ordinary
+    # 99.0 tok/s) picks the shallowest depth: k3 107.3 tok/s (1.083x), k5
+    # 1.007x, k7 0.920x, k11 0.80x.  The previous default of 7 was slower
+    # than ordinary.  No qualified receipt pins this route.
+    EXTERNAL_DEFAULT_NUM_DRAFT = 3
     EXTERNAL_ROUTE_TAG = "external-laguna-dflash-v1"
     EXTERNAL_PROFILE = "laguna-xs21-apcv2-laguna-dflash"
 
