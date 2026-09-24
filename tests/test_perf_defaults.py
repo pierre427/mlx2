@@ -199,3 +199,43 @@ def test_muse_dflash2_unqualified_default_depth_is_three_qualified_pins_four():
     root = Path(__file__).resolve().parents[1]
     policy = json.loads((root / "qualification/policies/muse-dflash2.json").read_text())
     assert policy["num_draft"] == 4
+
+
+def test_bare_server_cli_reaches_the_qualified_handoff_geometry():
+    from mlx2.server import build_parser
+
+    args = build_parser().parse_args(["--model", "fixture"])
+    # The handoff fires only above width 4; every handoff receipt ran 16/32.
+    assert args.max_lanes == 16
+    assert args.max_inflight == 32
+    assert args.max_lanes > 4
+
+
+@pytest.mark.parametrize(
+    ("physical_gib", "expected_gib"),
+    [(128, 16.0), (96, 12.0), (64, 8.0), (36, 4.5), (8, 1.0), (None, 16.0)],
+)
+def test_default_cache_bytes_scales_with_host_memory(physical_gib, expected_gib):
+    from mlx2.server import default_cache_bytes
+
+    physical = None if physical_gib is None else physical_gib << 30
+    if physical is None:
+        # Unknown host: fall back to the qualified 128 GiB geometry.
+        import mlx2.server as server
+
+        original = server.physical_memory_bytes
+        server.physical_memory_bytes = lambda: None
+        try:
+            assert default_cache_bytes() == 16 << 30
+        finally:
+            server.physical_memory_bytes = original
+        return
+    assert default_cache_bytes(physical) == int(expected_gib * (1 << 30))
+
+
+def test_default_cache_bytes_never_exceeds_the_m3_advisory_share():
+    from mlx2.server import default_cache_bytes
+
+    # 36 GiB M3: Metal advisory 28.08 GiB; a 19 GiB model must still fit
+    # with the default cache full.
+    assert 19 * (1 << 30) + default_cache_bytes(36 << 30) < 28.08 * (1 << 30)

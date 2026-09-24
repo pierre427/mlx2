@@ -13,6 +13,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import logging
 import math
+import os
 import hmac
 import ipaddress
 from pathlib import Path
@@ -3994,6 +3995,35 @@ def build_tenant_authenticator(args):
     )
 
 
+DEFAULT_MAX_LANES = 16
+DEFAULT_MAX_INFLIGHT = 32
+# 16 GiB is the qualified cache geometry on the 128 GiB host.  A flat 16 GiB
+# is a hazard on the 36 GiB M3: its Metal advisory is 28.08 GiB, so a 19 GiB
+# Qwen3.6 artifact plus a full 16 GiB prefix cache is past the advisory before
+# one lane is costed.  One eighth of physical memory matches the 12.5% service
+# share the host-scaled reserves use (runtime/memory_policy.py): 16 GiB at
+# 128 GiB, 4.5 GiB at 36 GiB.
+MAX_DEFAULT_CACHE_BYTES = 16 << 30
+MIN_DEFAULT_CACHE_BYTES = 1 << 30
+
+
+def physical_memory_bytes() -> int | None:
+    """Physical RAM without importing MLX (the parser must stay GPU-free)."""
+    try:
+        return int(os.sysconf("SC_PHYS_PAGES")) * int(os.sysconf("SC_PAGE_SIZE"))
+    except (AttributeError, OSError, ValueError):
+        return None
+
+
+def default_cache_bytes(physical=None) -> int:
+    physical = physical_memory_bytes() if physical is None else physical
+    if not physical or physical <= 0:
+        return MAX_DEFAULT_CACHE_BYTES
+    return max(
+        MIN_DEFAULT_CACHE_BYTES, min(MAX_DEFAULT_CACHE_BYTES, int(physical) // 8)
+    )
+
+
 def build_parser():
     parser = argparse.ArgumentParser(description="mlx2 APCv2 Flash-Next server")
     parser.add_argument("--model", required=True)
@@ -4090,8 +4120,23 @@ def build_parser():
         ),
     )
     parser.add_argument("--execution-policy", type=Path, help="JSON file with adapter execution choices; included in qualification identity")
-    parser.add_argument("--max-lanes", type=int, default=4)
-    parser.add_argument("--max-inflight", type=int, default=8)
+    # The geometry every handoff qualification ran at (settings in
+    # qualification/runs/mtp-handoff-20260920/*-qualification.json).  The
+    # MTP->ordinary handoff fires only above max_mtp_width 4, so the old
+    # default of 4 lanes made it, and every B8/B16 number, unreachable from a
+    # bare start.  Memory admission still bounds the real width per host.
+    parser.add_argument(
+        "--max-lanes",
+        type=int,
+        default=DEFAULT_MAX_LANES,
+        help=f"decode lanes (default: {DEFAULT_MAX_LANES}; admission bounds real width)",
+    )
+    parser.add_argument(
+        "--max-inflight",
+        type=int,
+        default=DEFAULT_MAX_INFLIGHT,
+        help=f"queued plus active requests (default: {DEFAULT_MAX_INFLIGHT})",
+    )
     parser.add_argument(
         "--coalesce-window-ms",
         type=float,
@@ -4104,7 +4149,15 @@ def build_parser():
         default=1000.0,
         help="deadline for a declared atomic HTTP batch cohort (default: 1000 ms)",
     )
-    parser.add_argument("--cache-bytes", type=int, default=12 << 30)
+    parser.add_argument(
+        "--cache-bytes",
+        type=int,
+        default=default_cache_bytes(),
+        help=(
+            "APCv2 resident prefix-cache cap (default: min(16 GiB, 1/8 of "
+            f"physical memory) = {default_cache_bytes() / (1 << 30):.2f} GiB here)"
+        ),
+    )
     parser.add_argument("--cache-dir")
     parser.add_argument(
         "--apc-persist-dir",
