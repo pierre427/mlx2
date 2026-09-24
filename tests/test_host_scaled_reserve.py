@@ -399,6 +399,69 @@ def test_parallel_sample_guard_uses_the_same_reserve(monkeypatch):
     assert engine.admit_parallel_samples(2)["required_headroom_bytes"] == 24 << 30
 
 
+def test_parallel_sample_guard_charges_the_route_lane_cost(monkeypatch):
+    """North prompt lookup on the M3: n=2 "Name a boat." was refused.
+
+    Series 2026-09-24, --max-context 32768 --cache-bytes 4 GiB: right after a
+    warm 32K cohort the server measured 6,617,612,288 bytes of execution
+    headroom with 1,748,592,640 bytes of unleased resident prefix checkpoints.
+    The guard asked for 4.0 + 2 * 2 = 8.0 GiB, charging each sample a flat
+    2 GiB and none of the checkpoints lane admission would evict.  Lane
+    admission costs a North prompt-lookup lane (0.35 GiB MoE transient,
+    num_draft 8) at 0.35/3 + 0.35*8/3 = 1.05 GiB.
+    """
+    from collections import Counter
+
+    from mlx2 import memory, serving
+
+    headroom = 6_617_612_288
+    evictable = 1_748_592_640
+    engine = serving.ServingEngine.__new__(serving.ServingEngine)
+    engine.max_lanes = 4
+    engine.queued_jobs = 0
+    engine.counts = Counter()
+    engine.batch_metrics = type("M", (), {"rejected": lambda self, *a: None})()
+    engine.PARALLEL_SAMPLE_WAIT_SECONDS = 0.0
+    engine._clear_allocator_cache_before_reject = lambda: False
+    engine.apc = type("A", (), {"unleased_resident_nbytes": lambda self: evictable})()
+    monkeypatch.setattr(memory, "execution_headroom", lambda: headroom)
+    monkeypatch.setattr(memory, "host_memory_gib", lambda: M3_HOST_GIB)
+    monkeypatch.setattr(memory, "metal_advisory_gib", lambda: M3_ADVISORY_GIB)
+    engine._hard_reserve_gib = None
+
+    controller = C(
+        host_memory_gib=M3_HOST_GIB,
+        advisory_gib=M3_ADVISORY_GIB,
+        transient_gib_per_lane=C.MOE_TRANSIENT_GIB_PER_LANE,
+    )
+    engine._parallel_sample_lane_gib = serving.parallel_sample_lane_gib(
+        controller, draft_depth=0, prompt_lookup_num_draft=8
+    )
+    assert engine._parallel_sample_lane_gib == pytest.approx(0.35 * 3)
+    receipt = engine.admit_parallel_samples(2)
+    assert receipt["per_sample_gib"] == pytest.approx(1.05)
+    assert receipt["required_headroom_bytes"] == int(
+        (M3_RESERVE_GIB + 2.1) * (1 << 30)
+    )
+
+    # Ordinary North lanes cost only the width-one share of the transient.
+    assert serving.parallel_sample_lane_gib(
+        controller, draft_depth=0
+    ) == pytest.approx(0.35 / 3)
+
+    # The checkpoints count only as far as they reach: with none evictable and
+    # less headroom than the route needs, the guard still refuses.
+    engine.apc = None
+    monkeypatch.setattr(memory, "execution_headroom", lambda: 5 << 30)
+    with pytest.raises(serving.Overloaded):
+        engine.admit_parallel_samples(2)
+
+    # Before the serving loop has sized the lane, the 2 GiB default stands.
+    engine._parallel_sample_lane_gib = None
+    monkeypatch.setattr(memory, "execution_headroom", lambda: 30 << 30)
+    assert engine.admit_parallel_samples(2)["per_sample_gib"] == 2.0
+
+
 def test_the_policy_module_stays_pure():
     """The policy must not reach into Metal to size itself."""
     import inspect

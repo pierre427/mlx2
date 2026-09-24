@@ -796,9 +796,17 @@ def warm_cache_copy_gib(hit, *, context_tokens, prefill_step, mtp):
     from .runtime.apc_v2 import _walk_cache_entries
 
     rows = list(_walk_cache_entries(hit.cache))
-    size = sum(int(getattr(row, "nbytes", 0)) for row in rows)
-    if mtp:
-        size += int(hit.sidecar.nbytes)
+    # Only token-indexed state grows with the requested extent.  A row with no
+    # K/V sequence axis -- GDN/SSM convolution and recurrent state -- is the
+    # same size at every length and is charged once.  Scaling it too charged
+    # a Qwen3.8-27B warm hit (0.29 GiB of recurrent state behind a 17-token
+    # checkpoint) 0.71 GiB for a 24-token answer, and the controller then
+    # extrapolated the excess over its envelope per token into a 14.6 GiB
+    # lane.  On a 36 GiB M3 Pro (8.5-11.8 GiB of headroom) every warm
+    # follow-up waited out its deadline and answered 429 while the identical
+    # cold request (5.4 GiB) was served.
+    fixed = 0
+    scaled = int(hit.sidecar.nbytes) if mtp else 0
     # Scale per *allocated* token.  A hit can be a longer checkpoint trimmed
     # to a short shared prefix (every chat prompt shares its template head):
     # its buffers still hold the whole entry, so dividing by the few cached
@@ -806,13 +814,17 @@ def warm_cache_copy_gib(hit, *, context_tokens, prefill_step, mtp):
     # admission deadline (HTTP 429 on an idle server).
     capacity = hit.cached_tokens
     for row in rows:
+        size = int(getattr(row, "nbytes", 0))
         keys = getattr(row, "keys", None)
         if isinstance(keys, (tuple, list)) and keys:
             keys = keys[0]
         shape = getattr(keys, "shape", None)
         if shape is not None and len(shape) >= 2:
             capacity = max(capacity, int(shape[-2]))
-    return size * max(1.0, context_tokens / capacity) / (1 << 30)
+            scaled += size
+        else:
+            fixed += size
+    return (fixed + scaled * max(1.0, context_tokens / capacity)) / (1 << 30)
 
 
 EVICTION_ESTIMATE_SLACK = 1.25
@@ -839,6 +851,29 @@ def lane_admission_required_gib(
     if prompt_lookup_num_draft is not None:
         required += prompt_lookup_verification_gib(controller, prompt_lookup_num_draft)
     return required
+
+
+PARALLEL_SAMPLE_DEFAULT_GIB = 2.0
+
+
+def parallel_sample_lane_gib(controller, *, draft_depth, prompt_lookup_num_draft=None):
+    """Per-sample charge of the ``n > 1`` guard, in GiB, excluding the reserve.
+
+    The guard fronts lane admission, so it charges what lane admission will
+    charge each sample's lane on this route before any context is known: the
+    adapter's calibrated per-lane transient at the route's draft depth plus
+    the prompt-lookup verify term.  A flat 2 GiB (Flash-Next's 1.76 rounded
+    up) charged North's prompt-lookup lanes, which admission costs at 1.24
+    GiB, and ordinary North lanes (0.31 GiB) six times over; on a 36 GiB M3
+    Pro it refused n=2 that lane admission seats.
+    """
+    return lane_admission_required_gib(
+        controller,
+        context_tokens=0,
+        draft_depth=draft_depth,
+        cache_gib=0.0,
+        prompt_lookup_num_draft=prompt_lookup_num_draft,
+    ) - controller.hard_reserve_gib
 
 
 def admit_lane_headroom(
@@ -3152,19 +3187,37 @@ class ServingEngine:
             execution_headroom = partial(execution_headroom, host_signals=True)
         # Preserve the same hard reserve used by lane admission: 20 GiB on the
         # 128 GiB calibration host, derived from that host's advisory and RAM
-        # below it (a flat 20 refused every request on a 36 GiB M3 Pro).  Each sample is charged 2 GiB, the
-        # measured 1.76 GiB per-lane transient rounded up (the earlier 4 GiB
-        # refused 70% of n=2 requests on Flash-Next under a 20-lane load).
-        # Headroom moves with every finished lane, so wait briefly the way
-        # single requests queue on admission instead of refusing on one unlucky
-        # reading.  This runs on the HTTP thread at the request boundary, never
-        # on the token hot path.
-        required = int((self.hard_reserve_gib + 2 * count) * (1 << 30))
+        # below it (a flat 20 refused every request on a 36 GiB M3 Pro).  Each
+        # sample is charged what lane admission charges its lane on this
+        # route (``parallel_sample_lane_gib``); before the serving loop has
+        # sized that, 2 GiB, Flash-Next's measured 1.76 GiB rounded up (the
+        # earlier 4 GiB refused 70% of n=2 requests on Flash-Next under a
+        # 20-lane load).  Unleased resident prefix checkpoints count as
+        # available, as they do for lane admission, which evicts them before
+        # it refuses a lane: a warm 32K North prompt left 1.6 GiB of them on
+        # the M3 and the guard refused n=2 behind memory admission would have
+        # reclaimed.  Headroom moves with every finished lane, so wait briefly
+        # the way single requests queue on admission instead of refusing on
+        # one unlucky reading.  This runs on the HTTP thread at the request
+        # boundary, never on the token hot path.
+        per_sample_gib = getattr(self, "_parallel_sample_lane_gib", None)
+        if per_sample_gib is None:
+            per_sample_gib = PARALLEL_SAMPLE_DEFAULT_GIB
+        required = int((self.hard_reserve_gib + per_sample_gib * count) * (1 << 30))
+        apc = getattr(self, "apc", None)
+        evictable = getattr(apc, "unleased_resident_nbytes", None)
+
+        def available():
+            free = execution_headroom()
+            if free >= required or evictable is None:
+                return free
+            return free + int(evictable())
+
         deadline = time.monotonic() + self.PARALLEL_SAMPLE_WAIT_SECONDS
-        while execution_headroom() < required:
+        while available() < required:
             if time.monotonic() >= deadline:
                 self._clear_allocator_cache_before_reject()
-                if execution_headroom() >= required:
+                if available() >= required:
                     break
                 self.batch_metrics.rejected("parallel_sample_footprint", self.queued_jobs)
                 raise Overloaded("parallel samples denied by physical footprint guard")
@@ -3173,6 +3226,7 @@ class ServingEngine:
             "schema": "mlx2.parallel-sampling-admission.v1",
             "samples": count,
             "required_headroom_bytes": required,
+            "per_sample_gib": per_sample_gib,
             "guard": "physical_footprint",
         }
 
@@ -4864,6 +4918,11 @@ class ServingEngine:
                     stop_tokens=[[token] for token in stop_token_ids],
                     post_prefill_transform=post_prefill_transform,
                 )
+            self._parallel_sample_lane_gib = parallel_sample_lane_gib(
+                controller,
+                draft_depth=config["num_draft"] if self.mtp else 0,
+                prompt_lookup_num_draft=batch.num_draft if prompt_lookup else None,
+            )
             if profile_name is None:
                 profile_name = selected_profile_name()
             with self.lock:
@@ -7253,6 +7312,7 @@ class ServingEngine:
                 else:
                     apc.clear()
                 self.apc = None
+            self._parallel_sample_lane_gib = None
             if self.verify_bitexact_handle is not None:
                 self.verify_bitexact_handle.remove()
             if self.int8_prefill_handle is not None:

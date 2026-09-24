@@ -3,6 +3,7 @@ from collections import Counter
 from types import SimpleNamespace as NS
 
 import mlx.core as mx
+import pytest
 
 from mlx2 import serving
 from mlx2.runtime.memory_policy import SelfMTPLaneAdmissionController
@@ -173,3 +174,58 @@ def test_prompt_lookup_verification_width_requires_more_headroom_than_plain_deco
         prompt_lookup, headroom=lambda: headroom, reclaim=lambda: None,
         evict=lambda: False,
     )
+
+
+def test_warm_copy_charges_fixed_recurrent_state_once():
+    """Qwen3.8-27B on a 36 GiB M3 Pro, series 2026-09-24.
+
+    Every warm follow-up (the same prompt again, n=2's second sample, a
+    thinking round trip) waited out its 60 s deadline and answered 429 while
+    the identical cold request was served.  The checkpoint's 48 GDN layers
+    hold 0.29 GiB of fixed-size state (APC layer segments: 1,847,328,768
+    bytes over 6 entries), and its 16 attention layers hold exactly the
+    cached tokens.  Scaling the recurrent state by context/capacity charged
+    it 2.5x for a 24-token answer; the controller then extrapolated the
+    excess per token.
+    """
+    from mlx2.adapters.qwen38_memory import Qwen38CacheBudget
+    from mlx2.serving import lane_admission_required_gib
+
+    recurrent = 1_847_328_768 // 6 // 48
+    kv_per_token = 2 * 4 * 256 * 2  # K and V, 4 heads x 256, bf16
+
+    def hit(cached):
+        rows = [NS(nbytes=recurrent) for _ in range(48)] + [
+            NS(nbytes=kv_per_token * cached, keys=NS(shape=(1, 4, cached, 256)))
+            for _ in range(16)
+        ]
+        return NS(cache=rows, cached_tokens=cached, remaining_tokens=[1], sidecar=None)
+
+    fixed = 48 * recurrent / 2**30
+    copy = warm_cache_copy_gib(hit(17), context_tokens=42, prefill_step=2048, mtp=False)
+    assert copy == pytest.approx(fixed + 16 * kv_per_token * 42 / 2**30)
+
+    budget = Qwen38CacheBudget(
+        attention_layers=16, recurrent_layers=48, mtp_layers=0, kv_heads=4,
+        head_dim=256, recurrent_heads=48, recurrent_key_heads=16,
+        recurrent_key_dim=128, recurrent_value_dim=128, conv_kernel=4,
+    )
+    controller = SelfMTPLaneAdmissionController(
+        host_memory_gib=36.0, advisory_gib=28.08, cache_estimator=budget.project,
+        transient_gib_per_lane=budget.transient_gib_per_lane,
+        saturation_lane_cap=4, verification_row_cap=4,
+    )
+    # 8.54 GiB: the smallest headroom the M3 reported during that run.
+    headroom = 9_166_750_408 / 2**30
+    for cached, context in ((17, 42), (19, 36), (15, 79), (58, 2190)):
+        warm = lane_admission_required_gib(
+            controller, context_tokens=context, draft_depth=0,
+            cache_gib=warm_cache_copy_gib(
+                hit(cached), context_tokens=context, prefill_step=2048, mtp=False
+            ),
+        )
+        cold = lane_admission_required_gib(
+            controller, context_tokens=context, draft_depth=0, cache_gib=0.0
+        )
+        assert warm < headroom, (cached, context, warm)
+        assert warm < cold + 0.1, (cached, context, warm, cold)
