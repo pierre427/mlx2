@@ -518,9 +518,17 @@ def test_engine_register_unregister_lifecycle(host, adapters):
         with pytest.raises(ValueError, match="not loaded"):
             engine.unload_lora_adapter("code")
         assert engine.status()["multi_lora"]["registered"] == ["sql"]
-        # An unregistered name is the base model (historical behavior).
-        _, receipt = collect(engine.submit(request(PROMPTS[0], "code")))
-        assert receipt["lora"]["name"] is None and receipt["lora"]["slot"] == 0
+        # An unloaded alias is an unknown model, never a silent fall back to
+        # the base weights (f3af8200: a disappearing alias could otherwise be
+        # served by the wrong adapter or cache identity).
+        from mlx2.api_resources import ResourceNotFound
+
+        with pytest.raises(ResourceNotFound, match="unknown model"):
+            engine.submit(request(PROMPTS[0], "code"))
+        # The base model is addressed by its own name or by no name.
+        for base in ("tiny", None):
+            _, receipt = collect(engine.submit(request(PROMPTS[0], base)))
+            assert receipt["lora"]["name"] is None and receipt["lora"]["slot"] == 0
     finally:
         engine.close()
 
