@@ -3,6 +3,7 @@ import json
 import pytest
 
 from mlx2.adapters.flash_next import FlashNextAdapter
+from mlx2.adapters.gemma4 import Gemma431BAdapter, Gemma4A4BAdapter
 from mlx2.adapters.laguna_xs21 import LagunaXS21Adapter
 from mlx2.adapters.mlx_vlm import Gemma3nAdapter, MiniCPMOAdapter
 from mlx2.adapters.muse_glimmer import MuseGlimmerAdapter
@@ -30,6 +31,8 @@ def _adapter_parser(adapter_type):
         pytest.param(FlashNextAdapter, id="flash-next-generic"),
         pytest.param(LagunaXS21Adapter, id="laguna-generic"),
         pytest.param(Gemma3nAdapter, id="gemma3n-generic"),
+        pytest.param(Gemma4A4BAdapter, id="gemma4-a4b-generic"),
+        pytest.param(Gemma431BAdapter, id="gemma4-31b-generic"),
         pytest.param(MiniCPMOAdapter, id="minicpmo-generic"),
         pytest.param(NorthMiniCodeAdapter, id="north"),
         pytest.param(MuseGlimmerAdapter, id="muse"),

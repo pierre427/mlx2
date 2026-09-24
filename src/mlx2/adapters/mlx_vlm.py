@@ -144,7 +144,9 @@ def _media_token_end(processed) -> int:
     """One-past-last media placeholder required before encoder-free resume."""
     import numpy as np
 
-    token_types = processed.get("token_type_ids")
+    token_types = processed.get("mm_token_type_ids")
+    if token_types is None:
+        token_types = processed.get("token_type_ids")
     if token_types is not None:
         values = np.asarray(token_types)
         positions = np.where(values.reshape(-1) != 0)[0]
@@ -181,6 +183,8 @@ class _LogitsModel:
 
 def _load_model(load, model_path, *, expected, config):
     """Apply narrowly scoped released-artifact compatibility at load time."""
+    if expected == "gemma4":
+        return load(str(model_path), lazy=False, strict=True, trust_remote_code=False)
     if expected != "minicpmo":
         return load(str(model_path), lazy=False)
     text = config.get("text_config") or config
@@ -266,6 +270,10 @@ class _MLXVLMAdapter:
 
         return BPEStreamingDetokenizer
 
+    @staticmethod
+    def _wrap_model(model):
+        return _LogitsModel(model)
+
     def __init__(self, model_path, *, execution_policy=None):
         if execution_policy:
             raise ValueError("mlx-vlm adapters do not accept speculative policy")
@@ -276,14 +284,14 @@ class _MLXVLMAdapter:
         try:
             from mlx_vlm import load
         except ImportError as error:
-            raise RuntimeError("Gemma 3n and MiniCPM-o require the optional mlx-vlm runtime") from error
+            raise RuntimeError("multimodal adapters require the optional mlx-vlm runtime") from error
         model, self.processor = _load_model(
             load,
             Path(model_path).resolve(),
             expected=self.descriptor.model_type,
             config=self.identity["config"],
         )
-        self.model = _LogitsModel(model)
+        self.model = self._wrap_model(model)
         self.media_feature_cache = MediaFeatureCache()
         tokenizer = self.processor.tokenizer
         from ..runtime.tokenizer_utils import TokenizerWrapper

@@ -166,6 +166,14 @@ def _minicpmo(path: Path, config: dict) -> AdapterResolution:
     return AdapterResolution(module.MiniCPMOAdapter, module.MINICPMO, artifact)
 
 
+def _gemma4(path: Path, config: dict) -> AdapterResolution:
+    module = importlib.import_module(".gemma4", __package__)
+    artifact = module.inspect_gemma4_artifact(path)
+    if artifact["variant"] == "26b-a4b":
+        return AdapterResolution(module.Gemma4A4BAdapter, module.GEMMA4_A4B, artifact)
+    return AdapterResolution(module.Gemma431BAdapter, module.GEMMA4_31B, artifact)
+
+
 _RESOLVERS: dict[str, Callable[[Path, dict], AdapterResolution]] = {
     "qwen4_exp": _flash_next,
     "qwen3_5": _qwen3_5_dense,
@@ -177,6 +185,7 @@ _RESOLVERS: dict[str, Callable[[Path, dict], AdapterResolution]] = {
     "xing4_0": _xing4_0,
     "nemotron_h": _nemotron_h,
     "gemma3n": _gemma3n,
+    "gemma4": _gemma4,
     "minicpmo": _minicpmo,
 }
 

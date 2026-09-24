@@ -2,6 +2,7 @@ import json
 
 import pytest
 
+from mlx2.adapters.gemma4 import GEMMA4_31B, GEMMA4_A4B, Gemma431BAdapter, Gemma4A4BAdapter
 from mlx2.adapters.flash_next import (
     DEFAULT_MTP_ORDINARY_HANDOFF_MAX_WIDTH as FLASH_NEXT_HANDOFF_WIDTH,
     FlashNextAdapter,
@@ -47,6 +48,8 @@ def _resolution(adapter_type, descriptor):
         (NorthMiniCodeAdapter, NORTH_MINI_CODE),
         (LagunaXS21Adapter, LAGUNA_XS21),
         (Gemma3nAdapter, GEMMA3N),
+        (Gemma4A4BAdapter, GEMMA4_A4B),
+        (Gemma431BAdapter, GEMMA4_31B),
         (MiniCPMOAdapter, MINICPMO),
     ],
 )

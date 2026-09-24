@@ -3,6 +3,7 @@ from types import SimpleNamespace
 import pytest
 
 from mlx2.adapters.flash_next import FlashNextAdapter
+from mlx2.adapters.gemma4 import Gemma431BAdapter, Gemma4A4BAdapter
 from mlx2.adapters.laguna_xs21 import LagunaXS21Adapter
 from mlx2.adapters.mlx_vlm import Gemma3nAdapter, MiniCPMOAdapter
 from mlx2.adapters.muse_glimmer import MuseGlimmerAdapter
@@ -25,6 +26,8 @@ from mlx2.structured_output import make_structured_processor
         LagunaXS21Adapter,
         XingAdapter,
         Gemma3nAdapter,
+        Gemma4A4BAdapter,
+        Gemma431BAdapter,
         MiniCPMOAdapter,
     ],
 )
