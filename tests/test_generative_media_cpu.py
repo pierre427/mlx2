@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import subprocess
@@ -59,7 +60,7 @@ def test_converted_gguf_requires_complete_base_components(tmp_path: Path) -> Non
     for index in range(33):
         name = f"block-{index:02d}.safetensors"
         _write(tmp_path / "transformer" / name)
-        shards[name] = {"size": 1}
+        shards[name] = {"size": 1, "sha256": hashlib.sha256(b"x").hexdigest()}
     (tmp_path / "mlx2-conversion.json").write_text(json.dumps({
         "source_revision": GGUF_REVISION, "base_revision": QWEN_REVISION,
         "tensor_count": 297, "output_files": shards,
@@ -79,7 +80,15 @@ def test_ltx_distilled_source_requires_all_pipeline_components(tmp_path: Path) -
         "vae/ltx-2.5-audio-vae-bf16.safetensors",
     ]
     _snapshot(tmp_path, "Lightricks/LTX-2.5", LTX_REVISION, names)
+    manifest_path = tmp_path / ".hf-download-manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["files"][0]["sha256"] = hashlib.sha256(b"x").hexdigest()
+    manifest_path.write_text(json.dumps(manifest))
     assert inspect_ltx25_source(tmp_path).kind == "ltx-2.5-distilled-source"
+    _write(tmp_path / names[0], b"y")
+    with pytest.raises(ValueError, match="hash changed"):
+        inspect_ltx25_source(tmp_path)
+    _write(tmp_path / names[0])
     (tmp_path / names[0]).unlink()
     with pytest.raises(ValueError, match="missing or incomplete"):
         inspect_ltx25_source(tmp_path)

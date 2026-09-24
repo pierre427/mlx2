@@ -61,6 +61,14 @@ def _fingerprint(value: dict[str, Any]) -> str:
     return hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
 
 
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for block in iter(lambda: handle.read(8 * 1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
 def _complete_snapshot(path: Path, *, repo: str, revision: str) -> dict[str, Any]:
     receipt = _json(path / ".hf-download-complete.json")
     manifest = _json(path / ".hf-download-manifest.json")
@@ -79,6 +87,8 @@ def _complete_snapshot(path: Path, *, repo: str, revision: str) -> dict[str, Any
             raise ValueError("manifest path escapes model artifact")
         if not target.is_file() or target.stat().st_size != entry["size"]:
             raise ValueError(f"missing or incomplete model file: {rel}")
+        if entry.get("sha256") and _file_sha256(target) != entry["sha256"]:
+            raise ValueError(f"model file hash changed: {rel}")
     return manifest
 
 
@@ -101,7 +111,11 @@ def inspect_qwen_image21(path: str | Path) -> MediaArtifact:
             raise ValueError("converted GGUF transformer is incomplete")
         for name, record in proof["output_files"].items():
             target = (root / "transformer" / name).resolve()
-            if not target.is_relative_to(root) or target.stat().st_size != record["size"]:
+            if (
+                not target.is_relative_to(root)
+                or target.stat().st_size != record["size"]
+                or _file_sha256(target) != record["sha256"]
+            ):
                 raise ValueError(f"converted transformer shard missing: {name}")
         for rel in ("processor/tokenizer.json", "text_encoder/config.json", "vae/config.json"):
             if not (root / rel).is_file():
