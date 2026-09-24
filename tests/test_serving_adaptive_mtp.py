@@ -113,9 +113,10 @@ def test_completed_adaptive_receipt_publishes_bounded_qualification_evidence():
     )["adaptive_mtp_depth"] == 0
 
 
-def test_adaptive_mtp_serving_selection_requires_candidate_or_receipt():
-    with pytest.raises(ValueError, match="matching qualification record"):
-        ServingEngine("unused", adaptive_mtp_depth=True)
+def test_adaptive_mtp_serving_selection_runs_unqualified_or_qualified():
+    # Adaptive depth is exact; without a receipt it runs, labelled
+    # unqualified (AGENTS.md).  Qualifying it still needs benchmark evidence.
+    ServingEngine.validate_arguments("unused", adaptive_mtp_depth=True)
     ServingEngine.validate_arguments(
         "unused",
         qualification="qualified.json",
@@ -137,11 +138,10 @@ def test_adaptive_mtp_serving_selection_requires_candidate_or_receipt():
 
 
 def test_execution_policy_can_select_adaptive_mtp_and_is_fail_closed():
-    with pytest.raises(ValueError, match="matching qualification record"):
-        ServingEngine.validate_arguments(
-            "unused",
-            execution_policy={"adaptive_mtp_depth": {"enabled": True}},
-        )
+    ServingEngine.validate_arguments(
+        "unused",
+        execution_policy={"adaptive_mtp_depth": {"enabled": True}},
+    )
     ServingEngine.validate_arguments(
         "unused",
         qualification="qualified.json",
@@ -178,8 +178,9 @@ def test_mtp_ordinary_handoff_is_explicit_qualified_and_native_only():
             qualification_mode=True,
             execution_policy={"mtp_ordinary_handoff": {"max_mtp_width": 8}},
         )
-    with pytest.raises(ValueError, match="observed handoff evidence"):
-        ServingEngine.validate_arguments("unused", execution_policy=selected)
+    # Runs unqualified without a receipt; qualifying it still requires the
+    # feature check above.
+    ServingEngine.validate_arguments("unused", execution_policy=selected)
     ServingEngine.validate_arguments(
         "unused", qualification="qualified.json", execution_policy=selected
     )

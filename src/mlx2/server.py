@@ -4736,11 +4736,6 @@ def main():
         )
     except ValueError as error:
         parser.error(str(error))
-    if adaptive_selected and not args.qualification_mode and not args.qualification:
-        parser.error(
-            "adaptive MTP depth requires --qualification-mode or a matching "
-            "--qualification record with observed benchmark evidence"
-        )
     if adaptive_selected and not native_mtp:
         parser.error("--adaptive-mtp-depth requires the native self-MTP route")
     try:
@@ -4749,11 +4744,6 @@ def main():
         ).enabled
     except ValueError as error:
         parser.error(str(error))
-    if handoff_selected and not args.qualification_mode and not args.qualification:
-        parser.error(
-            "MTP ordinary handoff requires --qualification-mode or a matching "
-            "--qualification record with observed handoff evidence"
-        )
     if handoff_selected and not native_mtp:
         parser.error("MTP ordinary handoff requires the native self-MTP route")
     if args.spomin_live_surgery and not args.qualification_mode:
@@ -4777,7 +4767,11 @@ def main():
         route_selection.source,
     )
     if not args.qualification_mode and not args.qualification:
-        parser.error("provide --qualification or explicitly run --qualification-mode")
+        # Qualification is confidence, not permission to run (AGENTS.md).
+        logging.getLogger("mlx2.server").warning(
+            "no --qualification receipt: serving UNQUALIFIED; /v1/status and "
+            "every route receipt report qualification=unqualified"
+        )
     try:
         signing_key_path = resolve_reasoning_signing_key(args)
     except (OSError, ValueError) as error:

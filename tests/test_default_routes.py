@@ -137,9 +137,12 @@ def test_handoff_default_resolves_only_for_native_mtp_and_can_be_disabled():
         (Qwen3635BA3BAdapter, qwen36(has_mtp=True)),
     ],
 )
-def test_default_handoff_without_qualification_still_fails_closed(
+def test_default_handoff_without_qualification_runs_unqualified(
     adapter_type, descriptor
 ):
+    # Qualification is confidence, not permission to run (AGENTS.md): the
+    # adapter-default handoff is exact, so an unqualified MTP model keeps it
+    # and is labelled unqualified instead of being refused.
     from mlx2.server import RouteSelection, resolve_execution_policy_defaults
     from mlx2.serving import ServingEngine
 
@@ -147,8 +150,11 @@ def test_default_handoff_without_qualification_still_fails_closed(
     policy = resolve_execution_policy_defaults(
         None, RouteSelection("native_mtp", "adapter_default"), resolution
     )
-    with pytest.raises(ValueError, match="observed handoff evidence"):
-        ServingEngine.validate_arguments("unused", execution_policy=policy)
+    assert policy["mtp_ordinary_handoff"]["enabled"] is True
+    ServingEngine.validate_arguments("unused", execution_policy=policy)
+    # Handoff still needs the native self-MTP route.
+    with pytest.raises(ValueError, match="native self-MTP"):
+        ServingEngine.validate_arguments("unused", mtp=False, execution_policy=policy)
     ServingEngine.validate_arguments(
         "unused", mtp=False, execution_policy=resolve_execution_policy_defaults(
             None, RouteSelection("ordinary", "explicit_flag"), resolution

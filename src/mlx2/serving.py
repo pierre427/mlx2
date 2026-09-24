@@ -1452,20 +1452,13 @@ class ServingEngine:
                 raise ValueError(
                     "MTP acceptance logging requires the native self-MTP route"
                 )
+        # Adaptive depth and ordinary handoff are exact: they change how fast
+        # tokens come, not which tokens.  Like the route itself they may run
+        # unqualified; the status and every receipt then say "unqualified".
         if self.adaptive_mtp_policy.enabled:
-            if not qualification_mode and not qualification:
-                raise ValueError(
-                    "adaptive MTP depth requires qualification mode or a matching "
-                    "qualification record with observed benchmark evidence"
-                )
             if not mtp or prompt_lookup:
                 raise ValueError("adaptive MTP depth requires the native self-MTP route")
         if self.mtp_ordinary_handoff_policy.enabled:
-            if not qualification_mode and not qualification:
-                raise ValueError(
-                    "MTP ordinary handoff requires qualification mode or a matching "
-                    "qualification record with observed handoff evidence"
-                )
             if not mtp or prompt_lookup:
                 raise ValueError(
                     "MTP ordinary handoff requires the native self-MTP route"
@@ -1566,6 +1559,17 @@ class ServingEngine:
         self.prompt_lookup = bool(prompt_lookup)
         self.route_selection_source = route_selection_source
         self.qualification_mode, self.qualification = qualification_mode, qualification
+        # Qualification is confidence, not permission to run (AGENTS.md):
+        # with neither a receipt nor qualification mode the route still
+        # serves, from the adapter's declared capabilities, labelled
+        # "unqualified" in its status and every route receipt.  Test-only
+        # extras stay with qualification mode; approximate operations still
+        # need qualification mode or a receipt.
+        self.qualification_state = (
+            "candidate" if qualification_mode
+            else "qualified" if qualification
+            else "unqualified"
+        )
         # Off by default: one prefix cache shared by every client is the point
         # of the single-user lab deployment.  On, the APCv2 namespace carries
         # the request tenant so a client cannot warm-hit, or probe through
@@ -4288,7 +4292,14 @@ class ServingEngine:
                     raise ValueError(
                         "model adapter does not declare prompt-lookup execution"
                     )
-            if self.qualification_mode:
+            if self.qualification_state != "qualified":
+                if self.qualification_state == "unqualified":
+                    route_receipt = "unqualified"
+                    logging.getLogger("mlx2.serving").warning(
+                        "serving %s UNQUALIFIED: no qualification receipt, so this "
+                        "route has no evidence that it runs properly",
+                        Path(self.model_path).name,
+                    )
                 # Candidate mode advertises implemented capabilities, but a
                 # speculation route the server did not select is not on this
                 # route.  Mirror the qualified derivation so ``--ordinary``
@@ -4304,10 +4315,6 @@ class ServingEngine:
                     unselected.add(Capability.PROMPT_LOOKUP)
                 route_capabilities = frozenset(route_capabilities) - unselected
             else:
-                if not self.qualification:
-                    raise ValueError(
-                        "A matching qualification receipt is required; use --qualification-mode for validation"
-                    )
                 from .qualification import load_qualified_route
 
                 route = load_qualified_route(
@@ -4867,11 +4874,9 @@ class ServingEngine:
                     "qualified_capabilities": sorted(
                         capability.value for capability in self.route_capabilities
                     )
-                    if not self.qualification_mode
+                    if self.qualification_state == "qualified"
                     else [],
-                    "qualification": "candidate"
-                    if self.qualification_mode
-                    else "qualified",
+                    "qualification": self.qualification_state,
                     "max_context": self.max_context,
                     "max_lanes": self.max_lanes,
                     # Whether a request that says nothing about reasoning opens
