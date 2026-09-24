@@ -334,6 +334,10 @@ def _probe_logits_processors(logits_processors, y, logits):
     return batched[0] if logits.ndim == 1 else batched
 
 
+# Host-path switch for equivalence tests; production keeps it on.
+DEVICE_SAMPLED_DRAFTS = True
+
+
 def _device_draft_token(logprobs, sampling_temp: float, *, rng=None) -> mx.array:
     """The draw ``_sample_from_logprobs`` makes, left on device (uint32 scalar).
 
@@ -2090,12 +2094,15 @@ def _propose_batched_self_mtp_round(
     draft_h = [lane.seed_h for lane in batch.lanes]
     draft_steps = [0] * n_lanes
     greedy_cycle = all((lane.sampling_temp <= 0 for lane in batch.lanes))
-    # Sampled (or mixed) cycles draft on device too unless a lane's logits
-    # processors need host tokens: each ``_sample_from_logprobs(...).item()``
-    # was a blocking sync per lane per depth (2026-09-23 audit). The hosted
-    # ints are read once, below, before verification.
+    # Sampled (or mixed) cycles draft on device too: each
+    # ``_sample_from_logprobs(...).item()`` was a blocking sync per lane per
+    # depth (2026-09-23 audit). Logits processors do not need host ints here:
+    # ``_lane_mtp_draft_logprobs`` feeds them the device ``draft_tokens``, as
+    # the greedy cycle always has. (Gating on processors disabled this for
+    # every Qwen non-thinking request, whose vendor profile sets
+    # presence_penalty 1.5.) The hosted ints are read once, before verify.
     device_rows = [
-        (not greedy_cycle) and (not lane.logits_processors) for lane in batch.lanes
+        DEVICE_SAMPLED_DRAFTS and not greedy_cycle for _ in batch.lanes
     ]
     probes = [getattr(lane, "confidence_probe", None) for lane in batch.lanes]
     probe_active = any(probe is not None for probe in probes)

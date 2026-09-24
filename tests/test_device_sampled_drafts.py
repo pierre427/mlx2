@@ -1,26 +1,30 @@
 """Sampled batched MTP drafts are drawn on device, bit-identically (2026-09-23).
 
-A lane with logits processors keeps the host path (``.item()`` per draft).
-A no-op processor therefore gives a host-path oracle with the same
-distribution and the same RNG draws: the device path must produce exactly
-the same tokens, and must actually engage (counter).
+``DEVICE_SAMPLED_DRAFTS = False`` restores the host path (``.item()`` per
+draft), which is the oracle: same distribution, same RNG draws. The device
+path must produce exactly the same tokens and must actually engage (counter),
+including with logits processors -- Qwen's non-thinking profile always
+carries presence_penalty 1.5, and an earlier processor gate silently kept
+every such request on the host path.
 """
 import mlx.core as mx
 import pytest
 
-from mlx2.runtime import round_levers
+from mlx2.runtime import hybrid_speculative, round_levers
 from mlx2.runtime.hybrid_speculative import (
     attach_self_mtp_lanes,
     commit_batched_self_mtp,
     prepare_self_mtp_lane,
     propose_batched_self_mtp,
 )
-from mlx2.runtime.sample_utils import LaneRNG
+from mlx2.runtime.sample_utils import LaneRNG, make_presence_penalty
 from test_batched_mtp import _tiny_qwen4_model
 
 
-def _noop(tokens, logits):
-    return logits
+def _processors(kind):
+    if kind == "presence":
+        return [make_presence_penalty(1.5, 0)]
+    return []
 
 
 def _generate(model, processors, *, cycles=4, temps=(0.8, 0.8)):
@@ -46,14 +50,16 @@ def _generate(model, processors, *, cycles=4, temps=(0.8, 0.8)):
     return emitted
 
 
+@pytest.mark.parametrize("kind", ["none", "presence"])
 @pytest.mark.parametrize("temps", [(0.8, 0.8), (0.8, 0.0)], ids=["sampled", "mixed"])
-def test_device_drafts_match_the_host_path_exactly(temps):
+def test_device_drafts_match_the_host_path_exactly(temps, kind, monkeypatch):
     model = _tiny_qwen4_model()
     round_levers.reset_counters()
-    device = _generate(model, [], temps=temps)
+    device = _generate(model, _processors(kind), temps=temps)
     engaged = round_levers.counters()["device_sampled_drafts"]
     round_levers.reset_counters()
-    host = _generate(model, [_noop], temps=temps)
+    monkeypatch.setattr(hybrid_speculative, "DEVICE_SAMPLED_DRAFTS", False)
+    host = _generate(model, _processors(kind), temps=temps)
     assert engaged > 0, "the device-draft path never engaged"
     assert round_levers.counters()["device_sampled_drafts"] == 0
     assert device == host
