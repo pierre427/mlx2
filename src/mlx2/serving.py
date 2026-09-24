@@ -2161,7 +2161,13 @@ class ServingEngine:
         lora = None
         manager = getattr(self, "multi_lora", None)
         if manager is not None:
-            lora = manager.lookup(public_request.get("model"))
+            requested_model = public_request.get("model")
+            base_request = requested_model in (None, Path(self.model_path).name)
+            lora = None if base_request else manager.lookup(requested_model)
+            if lora is None and not base_request:
+                from .api_resources import ResourceNotFound
+
+                raise ResourceNotFound("unknown model")
             if lora is not None:
                 # The adapter identity joins the APCv2 namespace (content
                 # fingerprint, not name): no cross-adapter prefix reuse.
@@ -5297,7 +5303,10 @@ class ServingEngine:
 
                             try:
                                 job.lora_slot, job.lora_residency = (
-                                    self.multi_lora.acquire(job.lora_name)
+                                    self.multi_lora.acquire(
+                                        job.lora_name,
+                                        expected_fingerprint=job.lora_fingerprint,
+                                    )
                                 )
                             except SlotUnavailable:
                                 # Every resident adapter slot is pinned by a

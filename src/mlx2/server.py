@@ -1034,6 +1034,18 @@ def rerank_payload(engine, body):
     }
 
 
+def _generation_model(status, body):
+    """Resolve the base or an advertised concurrent LoRA generation model."""
+    base = status.get("model")
+    selected = body.get("model", base)
+    if selected == base:
+        return base
+    registered = (status.get("multi_lora") or {}).get("registered") or ()
+    if isinstance(selected, str) and selected in registered:
+        return selected
+    raise ResourceNotFound("unknown model")
+
+
 def prompt_render_payload(engine, body, path):
     """Answer ``POST /tokenize`` or ``POST /apply-template`` without generating.
 
@@ -1045,9 +1057,7 @@ def prompt_render_payload(engine, body, path):
     if not isinstance(body, dict):
         raise ValueError("request must be a JSON object")
     status = engine.status()
-    model = status.get("model")
-    if body.get("model", model) != model:
-        raise ResourceNotFound("unknown model")
+    _generation_model(status, body)
     with wrongly_typed_request_is_invalid():
         request = validate_request(
             body,
@@ -1493,13 +1503,6 @@ def handler_for(
         )
         response_store.put(tenant_id, payload, context)
 
-    def selectable_model(status, requested):
-        """Accept exactly the base model and the adapters advertised by /v1/models."""
-        base = status.get("model", Path(engine.model_path).name)
-        return requested == base or requested in (
-            (status.get("multi_lora") or {}).get("registered") or ()
-        )
-
     def _batch_execute(endpoint, raw_body, tenant_id):
         if not isinstance(raw_body, dict):
             raise ValueError("batch row body must be an object")
@@ -1541,9 +1544,7 @@ def handler_for(
             ),
             max_tools=128 if responses_api and batch_compat.enabled else 64,
         )
-        model = body.get("model", status.get("model"))
-        if not selectable_model(status, model):
-            raise ResourceNotFound("unknown model")
+        model = _generation_model(status, body)
         if body.get("n", 1) != 1:
             raise ValueError("batch rows currently require n=1")
         submit_kwargs = {"tenant_id": tenant_id}
@@ -2552,10 +2553,7 @@ def handler_for(
                 if anthropic:
                     anthropic_request = body
                     status = engine.status()
-                    model = status.get("model")
-                    if not selectable_model(status, body.get("model", model)):
-                        self.api_error(404, "unknown model", anthropic=True)
-                        return
+                    model = _generation_model(status, body)
                     translation_metadata = {}
                     with wrongly_typed_request_is_invalid():
                         body = anthropic_request_to_chat(
@@ -2665,10 +2663,7 @@ def handler_for(
                     and not compat_tool_map.get("namespaces")
                     and (status.get("settings") or {}).get("tool_grammar_streaming")
                 )
-                model = body.get("model", status.get("model"))
-                if not selectable_model(status, model):
-                    self.api_error(404, "unknown model", anthropic=anthropic)
-                    return
+                model = _generation_model(status, body)
                 sample_count = body.get("n", 1)
                 acquire_admission = getattr(engine, "acquire_admission", None)
                 if callable(acquire_admission):

@@ -26,6 +26,7 @@ import hashlib
 import threading
 from collections import OrderedDict, defaultdict
 from dataclasses import dataclass
+from io import BytesIO
 from pathlib import Path
 
 MULTI_LORA_RECEIPT_SCHEMA = "mlx2.multi-lora.v1"
@@ -162,6 +163,13 @@ class SlotUnavailable(RuntimeError):
     """Every resident slot is pinned by a live row."""
 
 
+def _adapter_fingerprint(payload, rank, scale, keys):
+    digest = hashlib.sha256()
+    digest.update(repr((rank, scale, tuple(sorted(keys)))).encode())
+    digest.update(payload)
+    return digest.hexdigest()
+
+
 class MultiLoRAManager:
     """Registry, slot residency (pin + LRU), row binding and counters."""
 
@@ -247,12 +255,9 @@ class MultiLoRAManager:
         weights_path = path / "adapters.safetensors"
         payload = weights_path.read_bytes()
         header = _safetensors_header(payload)
-        digest = hashlib.sha256()
-        digest.update(
-            repr((config["rank"], config["scale"], tuple(sorted(config["keys"])))).encode()
+        fingerprint = _adapter_fingerprint(
+            payload, config["rank"], config["scale"], config["keys"]
         )
-        digest.update(payload)
-        fingerprint = digest.hexdigest()
         expected = {
             f"{key}.{leaf}" for key in config["keys"] for leaf in ("lora_a", "lora_b")
         }
@@ -305,19 +310,27 @@ class MultiLoRAManager:
 
     def _materialize(self, adapter):
         """Load and scale-fold the adapter tensors (generation worker only)."""
-        import mlx.core as mx
-
         if adapter.tensors:
             return
-        weights = mx.load(str(Path(adapter.path) / "adapters.safetensors"))
-        tensors = {}
-        for key in adapter.keys:
-            module = self.wrapped[key]
-            dtype = module.lora_a.dtype
-            a = weights[f"{key}.lora_a"].astype(dtype)
-            b = (weights[f"{key}.lora_b"].astype(mx.float32) * adapter.scale).astype(dtype)
-            tensors[key] = (a, b)
-        mx.eval(list(tensors.values()))
+        payload = (Path(adapter.path) / "adapters.safetensors").read_bytes()
+        if _adapter_fingerprint(
+            payload, adapter.rank, adapter.scale, adapter.keys
+        ) != adapter.fingerprint:
+            raise ValueError(f"LoRA adapter {adapter.name!r} weights changed after registration")
+        import mlx.core as mx
+
+        # Loading the checked byte snapshot closes the hash/open race; the
+        # path can change again without changing this request's model state.
+        with BytesIO(payload) as source:
+            weights = mx.load(source, format="safetensors")
+            tensors = {}
+            for key in adapter.keys:
+                module = self.wrapped[key]
+                dtype = module.lora_a.dtype
+                a = weights[f"{key}.lora_a"].astype(dtype)
+                b = (weights[f"{key}.lora_b"].astype(mx.float32) * adapter.scale).astype(dtype)
+                tensors[key] = (a, b)
+            mx.eval(list(tensors.values()))
         adapter.tensors = tensors
         self.counts["materializations"] += 1
 
@@ -433,7 +446,7 @@ class MultiLoRAManager:
             updated.append((module.lora_a, module.lora_b))
         mx.eval(updated)
 
-    def acquire(self, name):
+    def acquire(self, name, *, expected_fingerprint=None):
         """Pin a resident slot for ``name``.  Returns ``(slot, residency)``.
 
         Raises :class:`SlotUnavailable` when every slot is pinned.
@@ -442,6 +455,11 @@ class MultiLoRAManager:
             adapter = self.registry.get(name)
             if adapter is None:
                 raise ValueError(f"LoRA adapter {name!r} is not loaded")
+            if (
+                expected_fingerprint is not None
+                and adapter.fingerprint != expected_fingerprint
+            ):
+                raise ValueError(f"LoRA adapter {name!r} changed before admission")
             for slot, resident in self.resident.items():
                 if resident == name:
                     self.resident.move_to_end(slot)
