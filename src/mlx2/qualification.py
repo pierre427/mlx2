@@ -81,43 +81,43 @@ def required_feature_checks(settings):
 
 def _route_feature_checks(settings):
     env = settings.get("environment", {})
-    common = set()
-    if env.get("MLX_QWEN4_PLE_NVME"):
-        common.add("file_backed_ple")
-    if env.get("MLX_QWEN4_PLE_COMPILE") == "1":
-        common.add("compiled_ple")
-    if env.get("MLX_QWEN4_QSA_POOLED_KEY_CACHE") == "1":
-        common.add("pooled_qsa")
-    if env.get("MLX_QWEN4_QSA_SCATTER_CHOSEN") == "1":
-        common.add("scatter_qsa")
-    if env.get("MLX_QWEN4_FUSED_GDN_DECODE") == "1":
-        common.add("fused_gdn_decode")
-    if env.get("MLX_QWEN4_EAGER_DISPATCH") == "1":
-        common.add("eager_dispatch")
-    if (env.get("MLX_QWEN4_MOE_FUSED_GATE_UP") == "1"
-            and env.get("MLX_QWEN4_FUSED_EXPERT_KERNEL", "stock") != "stock"):
-        common.add("fused_moe")
+    features = set()
     if settings.get("speculation") == "external_draft":
-        features = {"feature_external_draft", "feature_proposal_distribution", "feature_paired_draft_cache", "feature_segmented_transaction"}
+        features.update({"external_draft", "proposal_distribution", "paired_draft_cache", "segmented_transaction"})
         if (settings.get("fly_verification") or {}).get("enabled") is True:
-            features.add("feature_fly_verification")
+            features.add("fly_verification")
         if (settings.get("execution_policy") or {}).get("pairwise_selection") == "batched":
-            features.add("feature_external_pairwise_selection")
-        return features | {"feature_" + name for name in common}
-    if settings.get("speculation") == "prompt_lookup":
-        features = {
-            "feature_prompt_lookup",
-            "feature_prompt_lookup_proposals",
-            "feature_prompt_lookup_rollback",
-        }
+            features.add("external_pairwise_selection")
+    elif settings.get("speculation") == "prompt_lookup":
+        features.update({
+            "prompt_lookup",
+            "prompt_lookup_proposals",
+            "prompt_lookup_rollback",
+        })
         # The default-off rotating replay transaction is a selected mechanism
         # only when the served prompt-lookup policy turns it on.
         if (settings.get("prompt_lookup") or {}).get("rotating_replay") is True:
-            features.add("feature_prompt_lookup_rotating_replay")
-        return features | {"feature_" + name for name in common}
+            features.add("prompt_lookup_rotating_replay")
+    # Every speculation route still executes the target model.  Its selected
+    # kernels and state mechanisms need evidence alongside proposal/rollback
+    # checks; returning early here would silently waive those requirements.
     policy = settings.get("execution_policy", {})
     context = settings.get("max_context", 0)
-    features = common
+    if env.get("MLX_QWEN4_PLE_NVME"):
+        features.add("file_backed_ple")
+    if env.get("MLX_QWEN4_PLE_COMPILE") == "1":
+        features.add("compiled_ple")
+    if env.get("MLX_QWEN4_QSA_POOLED_KEY_CACHE") == "1":
+        features.add("pooled_qsa")
+    if env.get("MLX_QWEN4_QSA_SCATTER_CHOSEN") == "1":
+        features.add("scatter_qsa")
+    if env.get("MLX_QWEN4_FUSED_GDN_DECODE") == "1":
+        features.add("fused_gdn_decode")
+    if env.get("MLX_QWEN4_EAGER_DISPATCH") == "1":
+        features.add("eager_dispatch")
+    if (env.get("MLX_QWEN4_MOE_FUSED_GATE_UP") == "1"
+            and env.get("MLX_QWEN4_FUSED_EXPERT_KERNEL", "stock") != "stock"):
+        features.add("fused_moe")
     if (settings.get("spomin_live_surgery") or {}).get("enabled") is True:
         # Approximate compaction is selectable only with an observed edit.
         features.add("spomin_surgery")
@@ -146,7 +146,7 @@ def _route_feature_checks(settings):
         # Present only when the server-owned policy is selected; the harness
         # must observe an SRPT reorder or bypass-capped service to qualify it.
         features.add("prefill_scheduling")
-    if not settings.get("mtp"):
+    if not settings.get("mtp") or settings.get("speculation") in {"external_draft", "prompt_lookup"}:
         return {"feature_" + name for name in features}
     if settings.get("adaptive_mtp_depth", {}).get("enabled") is True:
         features.add("adaptive_mtp_depth")

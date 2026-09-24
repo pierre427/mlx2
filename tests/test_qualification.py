@@ -129,6 +129,50 @@ def test_prompt_lookup_route_requires_observed_proposal_and_rollback():
     assert observed["prompt_lookup_rotating_replay"] == 0
 
 
+@pytest.mark.parametrize("speculation", ["prompt_lookup", "external_draft"])
+def test_speculative_routes_preserve_target_mechanism_requirements(speculation):
+    from mlx2.qualification import required_feature_checks
+
+    route = {"speculation": speculation, "mtp": False}
+    checks = required_feature_checks(route)
+    assert required_feature_checks({
+        **route,
+        "apc_rolling_checkpoints": {"interval_tokens": 16},
+        "prefill_scheduling": {"enabled": True},
+        "environment": {
+            "MLX_QWEN4_PLE_NVME": "/artifact/ple_rows.bin",
+            "MLX_QWEN4_PLE_COMPILE": "1",
+            "MLX_QWEN4_FUSED_GDN_DECODE": "1",
+        },
+    }) == checks | {
+        "feature_file_backed_ple", "feature_compiled_ple", "feature_fused_gdn_decode",
+        "feature_apc_rolling_checkpoints", "feature_prefill_scheduling",
+    }
+
+
+def test_prompt_lookup_cannot_qualify_without_selected_target_mechanism(tmp_path):
+    from mlx2.qualification import required_feature_checks
+
+    settings = {"speculation": "prompt_lookup", "mtp": False}
+    checks = REQUIRED_CHECKS | required_feature_checks(settings) | {"structured_output"}
+    settings["environment"] = {"MLX_QWEN4_PLE_NVME": "/artifact/ple_rows.bin"}
+    record = {
+        "passed": True,
+        "runtime": {"source": "abc"},
+        "artifact": "weights",
+        "settings": settings,
+        "qualification_harness": APPROVED_QUALIFICATION_HARNESS,
+        "checks": {name: {"passed": True} for name in checks},
+    }
+    path = tmp_path / "qualification.json"
+    path.write_text(json.dumps(record))
+    with pytest.raises(ValueError, match="feature_file_backed_ple"):
+        load_qualified_route(
+            path, runtime=record["runtime"], artifact="weights", settings=settings,
+            descriptor=QWEN4_FLASH_NEXT, name="prompt-lookup",
+        )
+
+
 def test_rotating_replay_policy_requires_observed_transaction_rounds():
     from mlx2.qualification import required_feature_checks
     from scripts.qualify_serving import feature_observations
@@ -666,12 +710,19 @@ def _selectable_feature_names():
             if (
                 isinstance(node, ast.Call)
                 and isinstance(node.func, ast.Attribute)
-                and node.func.attr == "add"
+                and node.func.attr in {"add", "update"}
                 and isinstance(node.func.value, ast.Name)
                 and node.func.value.id in {"features", "common"}
             ):
+                values = node.args
+                if node.func.attr == "update":
+                    values = [
+                        element for arg in node.args
+                        if isinstance(arg, (ast.Set, ast.List, ast.Tuple))
+                        for element in arg.elts
+                    ]
                 names.update(
-                    arg.value for arg in node.args
+                    arg.value for arg in values
                     if isinstance(arg, ast.Constant) and isinstance(arg.value, str)
                 )
             elif isinstance(node, ast.Set):
