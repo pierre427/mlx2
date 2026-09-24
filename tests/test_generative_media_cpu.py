@@ -70,7 +70,17 @@ def test_converted_gguf_requires_complete_base_components(tmp_path: Path) -> Non
         inspect_qwen_image21(tmp_path)
     for name in ("processor/tokenizer.json", "text_encoder/config.json", "vae/config.json"):
         _write(tmp_path / name)
+    proof_path = tmp_path / "mlx2-conversion.json"
+    proof = json.loads(proof_path.read_text())
+    proof["base_files"] = {
+        name: {"size": (tmp_path / name).stat().st_size, "sha256": hashlib.sha256((tmp_path / name).read_bytes()).hexdigest()}
+        for name in ("model_index.json", "processor/tokenizer.json", "text_encoder/config.json", "vae/config.json")
+    }
+    proof_path.write_text(json.dumps(proof))
     assert inspect_qwen_image21(tmp_path).kind == "qwen-image-2.1-gguf-mlx-bf16"
+    _write(tmp_path / "processor/tokenizer.json", b"y")
+    with pytest.raises(ValueError, match="base component changed"):
+        inspect_qwen_image21(tmp_path)
 
 
 def test_ltx_distilled_source_requires_all_pipeline_components(tmp_path: Path) -> None:

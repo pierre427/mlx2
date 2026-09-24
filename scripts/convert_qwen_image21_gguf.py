@@ -46,13 +46,18 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _copy_base_components(base: Path, output: Path) -> None:
+def _copy_base_components(base: Path, output: Path) -> dict[str, dict]:
     marker = base / ".hf-download-complete.json"
     if not marker.is_file():
         raise ValueError("base Qwen-Image-2.1 snapshot is not verified complete")
     proof = json.loads(marker.read_text())
     if proof.get("repo") != BASE_REPO or proof.get("revision") != BASE_REVISION:
         raise ValueError("base snapshot identity differs from the pinned revision")
+    manifest = json.loads((base / ".hf-download-manifest.json").read_text())
+    if manifest.get("repo") != BASE_REPO or manifest.get("revision") != BASE_REVISION:
+        raise ValueError("base manifest identity differs from the pinned revision")
+    base_files = {}
+    selected = {"model_index.json"}
     for dirname in ("processor", "scheduler", "text_encoder", "vae"):
         source = base / dirname
         if not source.is_dir():
@@ -60,7 +65,9 @@ def _copy_base_components(base: Path, output: Path) -> None:
         for item in source.rglob("*"):
             if not item.is_file():
                 continue
-            target = output / item.relative_to(base)
+            relative = item.relative_to(base)
+            selected.add(relative.as_posix())
+            target = output / relative
             target.parent.mkdir(parents=True, exist_ok=True)
             if target.exists():
                 if target.stat().st_size != item.stat().st_size:
@@ -71,6 +78,17 @@ def _copy_base_components(base: Path, output: Path) -> None:
             except OSError:
                 shutil.copy2(item, target)
     shutil.copy2(base / "model_index.json", output / "model_index.json")
+    entries = {entry["path"]: entry for entry in manifest["files"]}
+    if not selected.issubset(entries):
+        raise ValueError("base manifest is missing support components")
+    for name in sorted(selected):
+        path = base / name
+        entry = entries[name]
+        if path.stat().st_size != entry["size"]:
+            raise ValueError(f"base support component changed: {name}")
+        digest = entry.get("sha256") or _sha256(path)
+        base_files[name] = {"size": entry["size"], "sha256": digest}
+    return base_files
 
 
 def link_base(base: Path, output: Path) -> dict:
@@ -85,7 +103,7 @@ def link_base(base: Path, output: Path) -> dict:
         candidate = output / "transformer" / name
         if candidate.stat().st_size != record["size"] or _sha256(candidate) != record["sha256"]:
             raise ValueError(f"converted shard changed: {name}")
-    _copy_base_components(base, output)
+    proof["base_files"] = _copy_base_components(base, output)
     proof["base_repo"] = BASE_REPO
     proof["base_revision"] = BASE_REVISION
     receipt_path.write_text(json.dumps(proof, indent=2) + "\n")
@@ -185,8 +203,7 @@ def convert(gguf_path: Path, output: Path, *, base: Path | None = None) -> dict:
         del arrays
         gc.collect()
     del reader
-    if base is not None:
-        _copy_base_components(base, output)
+    base_files = _copy_base_components(base, output) if base is not None else None
     proof = {
         "source_repo": SOURCE_REPO,
         "source_revision": SOURCE_REVISION,
@@ -194,6 +211,7 @@ def convert(gguf_path: Path, output: Path, *, base: Path | None = None) -> dict:
         "source_sha256": source_hash,
         "base_repo": BASE_REPO if base is not None else None,
         "base_revision": BASE_REVISION if base is not None else None,
+        "base_files": base_files,
         "tensor_count": EXPECTED_TENSOR_COUNT,
         "layout_sha256": layout_hash,
         "output_dtype": "bfloat16",

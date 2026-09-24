@@ -117,6 +117,19 @@ def inspect_qwen_image21(path: str | Path) -> MediaArtifact:
                 or _file_sha256(target) != record["sha256"]
             ):
                 raise ValueError(f"converted transformer shard missing: {name}")
+        base_files = proof.get("base_files")
+        if not isinstance(base_files, dict) or not base_files:
+            raise ValueError("converted pipeline lacks verified base components")
+        for name, record in base_files.items():
+            target = (root / name).resolve()
+            if (
+                not target.is_relative_to(root)
+                or not isinstance(record, dict)
+                or not target.is_file()
+                or target.stat().st_size != record.get("size")
+                or _file_sha256(target) != record.get("sha256")
+            ):
+                raise ValueError(f"converted base component changed: {name}")
         for rel in ("processor/tokenizer.json", "text_encoder/config.json", "vae/config.json"):
             if not (root / rel).is_file():
                 raise ValueError(f"converted pipeline lacks {rel}")
