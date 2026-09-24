@@ -152,7 +152,26 @@ def inspect_artifact(model_path: str | Path) -> dict:
     }
 
 
-def configure_environment() -> dict[str, str]:
+# Kernel switches the execution policy may select for a GPU A/B.  Each
+# defaults to the qualified stock profile, so a policy that omits them keeps
+# the environment -- and the qualification identity -- byte-identical.
+#   fused_gdn_decode: bit-exact B1 decode kernel, 1.077x/1.107x warm decode
+#     (docs/ports/QWEN36-35B-A3B.md); batched and speculative-verify cells
+#     are unmeasured.  Falls back (counted) wherever admission declines.
+#   moe_fused_gate_up: load-time gate/up concatenation, on in Flash-Next,
+#     pinned off here with no recorded reason.
+#   gdn_core: MLX's native gated_delta_update for 17-256 row prefill chunks;
+#     parity on this head geometry is not established.
+# The MoE router and fused-expert kernels are shape-locked to Flash-Next's
+# 512-expert top-10 layout and cannot engage on this 256/top-8 model.
+KERNEL_POLICY_ENV = {
+    "fused_gdn_decode": "MLX_QWEN36_FUSED_GDN_DECODE",
+    "moe_fused_gate_up": "MLX_QWEN4_MOE_FUSED_GATE_UP",
+    "gdn_core": "MLX_GDN_CORE",
+}
+
+
+def configure_environment(kernels=None) -> dict[str, str]:
     profile = {
         "HF_HUB_OFFLINE": "1",
         "TRANSFORMERS_OFFLINE": "1",
@@ -171,6 +190,8 @@ def configure_environment() -> dict[str, str]:
         # receipt records it.
         "MLX_LM_MTP_BOUNDARY_COW": "1",
     }
+    for key, enabled in (kernels or {}).items():
+        profile[KERNEL_POLICY_ENV[key]] = "1" if enabled else "0"
     for name in tuple(os.environ):
         if name.startswith(("MLX_QWEN", "MLX_LM_", "MLXUAG_", "MLX_GDN_")):
             del os.environ[name]
@@ -214,15 +235,28 @@ class Qwen3635BA3BAdapter(Qwen3827BAdapter):
         if execution_policy is not None and not isinstance(execution_policy, dict):
             raise ValueError("execution policy must be a JSON object")
         policy = {} if execution_policy is None else dict(execution_policy)
-        if set(policy) - {"num_draft"}:
-            raise ValueError("Qwen3.6 execution policy supports only num_draft")
+        if set(policy) - {"num_draft", *KERNEL_POLICY_ENV}:
+            raise ValueError(
+                "Qwen3.6 execution policy supports only num_draft and the "
+                "kernel switches " + ", ".join(sorted(KERNEL_POLICY_ENV))
+            )
         self._num_draft = validate_self_mtp_num_draft(policy.get("num_draft", 2))
+        self._kernels = {}
+        for key in KERNEL_POLICY_ENV:
+            if key in policy:
+                if type(policy[key]) is not bool:
+                    raise ValueError(f"Qwen3.6 {key} must be boolean")
+                self._kernels[key] = policy[key]
         artifact = inspect_artifact(model_path)
         if require_mtp and not artifact["has_mtp"]:
             raise ValueError("requested MTP requires embedded head weights")
         self.identity = artifact["identity"]
         self.descriptor = descriptor_for(has_mtp=artifact["has_mtp"])
-        self.environment = configure_environment()
+        self.environment = (
+            configure_environment(self._kernels)
+            if self._kernels
+            else configure_environment()
+        )
         self.layout = CACHE_LAYOUT
         self._tables = []
         path = Path(self.identity["path"])
@@ -311,4 +345,9 @@ class Qwen3635BA3BAdapter(Qwen3827BAdapter):
         result["compiled_decode_selected"] = False
         result["mtp_norm_repairs"] = list(getattr(self, "mtp_norm_repairs", ()))
         result["mtp_norm_means"] = dict(getattr(self, "mtp_norm_means", {}))
+        if (getattr(self, "_kernels", None) or {}).get("fused_gdn_decode"):
+            # The A/B reads fused calls and fallback reasons here.
+            from ..runtime.models.qwen36_35b import qwen36_fused_gdn_stats
+
+            result["fused_gdn_decode"] = qwen36_fused_gdn_stats(self.model)
         return result

@@ -261,3 +261,77 @@ def test_nemotron_environment_strips_inherited_lab_switches(monkeypatch):
     assert profile == {
         "HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1", "MLX_ENABLE_TF32": "0",
     }
+
+
+# --- Kernel A/B plumbing: switches exist, default to the qualified profile ---
+
+
+def test_qwen36_kernel_switches_default_to_stock_and_toggle_by_policy(monkeypatch):
+    from mlx2.adapters import qwen36_35b
+
+    for name in ("HF_HUB_OFFLINE", "TRANSFORMERS_OFFLINE", "MLX_ENABLE_TF32"):
+        monkeypatch.delenv(name, raising=False)
+    for variable in qwen36_35b.KERNEL_POLICY_ENV.values():
+        monkeypatch.delenv(variable, raising=False)
+    stock = qwen36_35b.configure_environment()
+    assert stock == qwen36_35b.configure_environment({})
+    assert stock["MLX_QWEN36_FUSED_GDN_DECODE"] == "0"
+    assert stock["MLX_QWEN4_MOE_FUSED_GATE_UP"] == "0"
+    assert stock["MLX_GDN_CORE"] == "0"
+    fused = qwen36_35b.configure_environment(
+        {"fused_gdn_decode": True, "moe_fused_gate_up": True, "gdn_core": True}
+    )
+    import os
+
+    assert fused["MLX_QWEN36_FUSED_GDN_DECODE"] == "1"
+    assert os.environ["MLX_QWEN36_FUSED_GDN_DECODE"] == "1"
+    assert fused["MLX_QWEN4_MOE_FUSED_GATE_UP"] == "1"
+    assert fused["MLX_GDN_CORE"] == "1"
+    # Only the three switches differ.
+    assert {k for k in stock if stock[k] != fused[k]} == set(
+        qwen36_35b.KERNEL_POLICY_ENV.values()
+    )
+
+
+def test_qwen36_adapter_accepts_kernel_switches_and_validates_them():
+    from mlx2.adapters.qwen36_35b import Qwen3635BA3BAdapter
+
+    with pytest.raises(ValueError, match="must be boolean"):
+        Qwen3635BA3BAdapter("/missing", execution_policy={"fused_gdn_decode": "on"})
+    with pytest.raises(ValueError, match="kernel switches"):
+        Qwen3635BA3BAdapter("/missing", execution_policy={"moe_router_kernel": True})
+    # A valid switch passes validation and fails only on the missing artifact.
+    with pytest.raises(Exception) as error:
+        Qwen3635BA3BAdapter("/missing", execution_policy={"fused_gdn_decode": True})
+    assert "kernel switches" not in str(error.value)
+    assert "must be boolean" not in str(error.value)
+
+
+def test_qwen38_adapter_accepts_gdn_core_switch():
+    with pytest.raises(ValueError, match="gdn_core must be boolean"):
+        Qwen3827BAdapter("/missing", execution_policy={"gdn_core": 1})
+    with pytest.raises(Exception) as error:
+        Qwen3827BAdapter("/missing", execution_policy={"gdn_core": True})
+    assert "supports only" not in str(error.value)
+
+
+def test_flash_next_policy_kernel_switches_are_opt_in_and_receipt_neutral():
+    from mlx2.adapters.flash_next_policy import FlashNextPolicy
+
+    default = FlashNextPolicy()
+    for name in ("moe_router_kernel", "qsa_nax_decode", "gdn_core"):
+        assert name not in default.as_dict()
+    env = default.environment()
+    assert "MLX_QWEN4_MOE_ROUTER_KERNEL" not in env
+    assert "MLX_QWEN4_QSA_NAX_DECODE" not in env
+    assert "MLX_GDN_CORE" not in env
+    selected = FlashNextPolicy.from_mapping(
+        {"moe_router_kernel": True, "qsa_nax_decode": True, "gdn_core": True}
+    )
+    env = selected.environment()
+    assert env["MLX_QWEN4_MOE_ROUTER_KERNEL"] == "1"
+    assert env["MLX_QWEN4_QSA_NAX_DECODE"] == "1"
+    assert env["MLX_GDN_CORE"] == "1"
+    assert selected.as_dict()["qsa_nax_decode"] is True
+    with pytest.raises(ValueError):
+        FlashNextPolicy.from_mapping({"gdn_core": "yes"})

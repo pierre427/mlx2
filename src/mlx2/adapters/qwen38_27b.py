@@ -244,15 +244,28 @@ class Qwen3827BAdapter(FlashNextAdapter):
         if execution_policy is not None and not isinstance(execution_policy, dict):
             raise ValueError("execution policy must be a JSON object")
         policy = {} if execution_policy is None else dict(execution_policy)
-        if set(policy) - {"num_draft"}:
-            raise ValueError("Qwen3.8 27B execution policy supports only num_draft")
+        if set(policy) - {"num_draft", "gdn_core"}:
+            raise ValueError(
+                "Qwen3.8 27B execution policy supports only num_draft and gdn_core"
+            )
         self._num_draft = validate_self_mtp_num_draft(policy.get("num_draft", 2))
+        # A/B switch for MLX's native gated_delta_update on 17-256 row prefill
+        # chunks (MLX_GDN_CORE).  Absent keeps the pinned "0" profile and its
+        # qualification identity; parity on this geometry is unestablished.
+        gdn_core = policy.get("gdn_core")
+        if gdn_core is not None and type(gdn_core) is not bool:
+            raise ValueError("gdn_core must be boolean")
         artifact = self.artifact_inspector(model_path)
         if require_mtp and not artifact["has_mtp"]:
             raise ValueError("requested MTP requires embedded head weights")
         self.identity = artifact["identity"]
         self.descriptor = self.descriptor_builder(has_mtp=artifact["has_mtp"])
         self.environment = self.environment_configurator()
+        if gdn_core is not None:
+            self.environment = {
+                **self.environment, "MLX_GDN_CORE": "1" if gdn_core else "0"
+            }
+            os.environ["MLX_GDN_CORE"] = self.environment["MLX_GDN_CORE"]
         self.layout = self.descriptor.cache_layout
         self._tables = []
         path = Path(self.identity["path"])

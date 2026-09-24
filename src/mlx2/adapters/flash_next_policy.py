@@ -8,6 +8,13 @@ from dataclasses import asdict, dataclass
 from .mtp_depth_cap import validate_self_mtp_num_draft
 
 
+_OPTIONAL_KERNEL_ENV = {
+    "moe_router_kernel": "MLX_QWEN4_MOE_ROUTER_KERNEL",
+    "qsa_nax_decode": "MLX_QWEN4_QSA_NAX_DECODE",
+    "gdn_core": "MLX_GDN_CORE",
+}
+
+
 @dataclass(frozen=True)
 class FlashNextPolicy:
     num_draft: int = 2
@@ -32,6 +39,18 @@ class FlashNextPolicy:
     # 8192-token prefill chunks: -9..11% prefill at 16K/64K with the same KL
     # to the unchunked result as 2048, +5 GiB peak (triage-20260925).
     prefill_step: int = 8192
+    # Opt-in A/B switches for kernels with no mlx2 full-model evidence yet.
+    # Like fused_gdn_dynamic_accept they enter the environment and receipts
+    # only when enabled, so default receipts are unchanged.
+    #   moe_router_kernel: exact-shape B1 512/top-10 router kernel
+    #     (MLX_QWEN4_MOE_ROUTER_KERNEL); no mlx2 A/B found.
+    #   qsa_nax_decode: NAX QSA on decode rows (MLX_QWEN4_QSA_NAX_DECODE);
+    #     "NAX decode off", no decode A/B (docs/FLASHNEXT-PARITY.md).
+    #   gdn_core: MLX gated_delta_update for 17-256 row prefill chunks
+    #     (MLX_GDN_CORE); parity on this geometry unestablished.
+    moe_router_kernel: bool = False
+    qsa_nax_decode: bool = False
+    gdn_core: bool = False
 
     def __post_init__(self):
         validate_self_mtp_num_draft(self.num_draft)
@@ -46,6 +65,7 @@ class FlashNextPolicy:
             "allow_unverified_indexed",
             "eager_dispatch",
             "fused_gdn_dynamic_accept",
+            *_OPTIONAL_KERNEL_ENV,
         ):
             if type(getattr(self, name)) is not bool:
                 raise ValueError(f"{name} must be boolean")
@@ -79,6 +99,9 @@ class FlashNextPolicy:
         # Default-off keys stay out so default receipts are unchanged.
         if not self.fused_gdn_dynamic_accept:
             del values["fused_gdn_dynamic_accept"]
+        for name in _OPTIONAL_KERNEL_ENV:
+            if not getattr(self, name):
+                del values[name]
         return values
 
     def environment(self):
@@ -100,6 +123,9 @@ class FlashNextPolicy:
         }
         if self.fused_gdn_dynamic_accept:
             environment["MLX_QWEN4_FUSED_GDN_DYNAMIC_ACCEPT"] = "1"
+        for name, variable in _OPTIONAL_KERNEL_ENV.items():
+            if getattr(self, name):
+                environment[variable] = "1"
         return environment
 
     def batch_config(self, *, max_lanes, prefill_step):
