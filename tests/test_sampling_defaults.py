@@ -40,6 +40,7 @@ def _adapter_classes():
     from mlx2.adapters.qwen38_27b import Qwen3827BAdapter
     from mlx2.adapters.laguna_xs21 import LagunaXS21Adapter
     from mlx2.adapters.mlx_vlm import Gemma3nAdapter, MiniCPMOAdapter
+    from mlx2.adapters.nemotron3_super import Nemotron3SuperAdapter
     from mlx2.adapters.xing import XingAdapter
 
     return {
@@ -52,6 +53,7 @@ def _adapter_classes():
         "laguna": LagunaXS21Adapter,
         "gemma3n": Gemma3nAdapter,
         "minicpmo": MiniCPMOAdapter,
+        "nemotron_h": Nemotron3SuperAdapter,
     }
 
 
@@ -205,6 +207,10 @@ EXPECTED = {
     },
     "gemma3n": {"general": dict(top_p=0.95, top_k=64)},
     "minicpmo": {"general": dict(temperature=0.5)},
+    # Cited to the artifact's generation_config.json by the adapter (2ccd1a47);
+    # the artifact was not on this host when the entry was added, so these
+    # values are the adapter's declaration, not re-read from the artifact.
+    "nemotron_h": {"general": dict(temperature=1.0, top_p=0.95)},
 }
 
 
