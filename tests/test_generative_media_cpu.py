@@ -16,8 +16,10 @@ import pytest
 
 from mlx2.adapters.generative_media import (
     GGUF_REVISION,
+    LTX_CONVERTER_SHA256,
     LTX_REVISION,
     LTX_RUNTIME_REVISION,
+    QWEN_BACKEND_REVISION,
     QWEN_REVISION,
     LTX25Adapter,
     QwenImage21Adapter,
@@ -125,6 +127,32 @@ def test_qwen_adapter_encodes_backend_pixels_without_model_load(tmp_path: Path) 
     assert result.data.startswith(b"\x89PNG\r\n\x1a\n")
     assert result.width == result.height == 256
     assert seen[0].prompt == "test"
+    with pytest.raises(FileNotFoundError, match="reference image"):
+        adapter.edit_image("change the image", [tmp_path / "missing.png"], width=256, height=256)
+
+
+def test_official_qwen_8bit_requires_pinned_quantization_and_hashes(tmp_path: Path) -> None:
+    quant = {"group_size": 64, "bits": 8, "mode": "affine"}
+    _write(tmp_path / "model_index.json", b'{"_class_name":"QwenImage21Pipeline"}')
+    _write(tmp_path / "transformer/config.json", json.dumps({
+        "_class_name": "QwenImage21Transformer2DModel", "num_layers": 32,
+        "num_attention_heads": 32, "mlx_format": True, "quantization": quant,
+    }).encode())
+    _write(tmp_path / "text_encoder/config.json", json.dumps({"mlx_format": True, "quantization": quant}).encode())
+    _write(tmp_path / "transformer/model.safetensors")
+    files = {
+        name: {"size": (tmp_path / name).stat().st_size, "sha256": hashlib.sha256((tmp_path / name).read_bytes()).hexdigest()}
+        for name in ("model_index.json", "transformer/config.json", "transformer/model.safetensors", "text_encoder/config.json")
+    }
+    (tmp_path / "mlx2-official-conversion.json").write_text(json.dumps({
+        "source_repo": "Qwen/Qwen-Image-2.1", "source_revision": QWEN_REVISION,
+        "backend_revision": QWEN_BACKEND_REVISION, "quantization": quant,
+        "output_files": files,
+    }))
+    assert inspect_qwen_image21(tmp_path).kind == "qwen-image-2.1-official-mlx-8bit"
+    _write(tmp_path / "transformer/model.safetensors", b"y")
+    with pytest.raises(ValueError, match="output changed"):
+        inspect_qwen_image21(tmp_path)
 
 
 def test_artifact_adapter_import_does_not_import_mlx() -> None:
@@ -185,11 +213,20 @@ def test_ltx_adapter_rejects_changed_conversion_output(tmp_path: Path, monkeypat
     )}
     (output / ".mlx2-cpu-conversion.json").write_text(json.dumps({
         "source_fingerprint": fingerprint, "runtime_revision": LTX_RUNTIME_REVISION,
+        "converter_sha256": LTX_CONVERTER_SHA256,
         "steps": steps,
     }))
     _write(runtime / ".venv/bin/python")
     monkeypatch.setattr(subprocess, "run", lambda *args, **kwargs: SimpleNamespace(stdout=LTX_RUNTIME_REVISION + "\n"))
     assert LTX25Adapter(source=source, mlx_model=output, runtime_root=runtime).artifact.fingerprint == fingerprint
+    receipt_path = output / ".mlx2-cpu-conversion.json"
+    receipt = json.loads(receipt_path.read_text())
+    receipt["converter_sha256"] = "0" * 64
+    receipt_path.write_text(json.dumps(receipt))
+    with pytest.raises(ValueError, match="receipt is incomplete"):
+        LTX25Adapter(source=source, mlx_model=output, runtime_root=runtime)
+    receipt["converter_sha256"] = LTX_CONVERTER_SHA256
+    receipt_path.write_text(json.dumps(receipt))
     _write(output / "probe.safetensors", b"y")
     with pytest.raises(ValueError, match="output changed"):
         LTX25Adapter(source=source, mlx_model=output, runtime_root=runtime)

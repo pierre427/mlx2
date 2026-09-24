@@ -1,4 +1,4 @@
-"""Artifact-bound image and video adapters; execution remains unqualified.
+"""Artifact-bound image and video adapters; serving routes remain unqualified.
 
 These adapters are deliberately separate from the causal-token resolver. They
 inspect weights without importing MLX, then delegate model-specific math to
@@ -22,6 +22,7 @@ QWEN_REVISION = "790c92633540aa0cb11d9abf19eb46d861714758"
 GGUF_REVISION = "40319fb15542f0ad22921e0124a191a8a935a60a"
 LTX_REVISION = "5e6e71018ee1756ed329b697a7b4aedc934dfce9"
 LTX_RUNTIME_REVISION = "fbc4b0524dd1e01da2d07a44e14dd9dfe0a74d5e"
+LTX_CONVERTER_SHA256 = "2c880778d7772275b96f4eef4ee32376a29de0c94de52f4ca2b0aaccad9af98e"
 QWEN_BACKEND_REVISION = "cc8b86f110278505296d461f612ee41c21d5fd65"
 
 
@@ -102,6 +103,36 @@ def inspect_qwen_image21(path: str | Path) -> MediaArtifact:
         raise ValueError("expected Qwen-Image-2.1 transformer")
     if (transformer.get("num_layers"), transformer.get("num_attention_heads")) != (32, 32):
         raise ValueError("unexpected Qwen-Image-2.1 topology")
+    official_conversion = root / "mlx2-official-conversion.json"
+    if official_conversion.exists():
+        proof = _json(official_conversion)
+        quantization = {"group_size": 64, "bits": 8, "mode": "affine"}
+        if (
+            proof.get("source_repo") != "Qwen/Qwen-Image-2.1"
+            or proof.get("source_revision") != QWEN_REVISION
+            or proof.get("backend_revision") != QWEN_BACKEND_REVISION
+            or proof.get("quantization") != quantization
+            or transformer.get("quantization") != quantization
+            or transformer.get("mlx_format") is not True
+        ):
+            raise ValueError("official Qwen 8-bit conversion identity differs")
+        encoder = _json(root / "text_encoder" / "config.json")
+        if encoder.get("quantization") != quantization or encoder.get("mlx_format") is not True:
+            raise ValueError("Qwen text encoder is not the matching MLX 8-bit format")
+        files = proof.get("output_files")
+        if not isinstance(files, dict) or not files:
+            raise ValueError("official Qwen 8-bit output checksums are missing")
+        for name, record in files.items():
+            target = (root / name).resolve()
+            if (
+                not target.is_relative_to(root)
+                or not isinstance(record, dict)
+                or not target.is_file()
+                or target.stat().st_size != record.get("size")
+                or _file_sha256(target) != record.get("sha256")
+            ):
+                raise ValueError(f"official Qwen 8-bit output changed: {name}")
+        return MediaArtifact("qwen-image-2.1-official-mlx-8bit", root, QWEN_REVISION, _fingerprint(proof))
     conversion = root / "mlx2-conversion.json"
     if conversion.exists():
         proof = _json(conversion)
@@ -207,10 +238,7 @@ class QwenImage21Adapter:
         self, prompt: str, *, width: int = 1024, height: int = 1024,
         steps: int = 30, seed: int = 0,
     ) -> GeneratedImage:
-        if not prompt.strip() or width < 256 or height < 256 or width % 16 or height % 16:
-            raise ValueError("prompt and 16-aligned dimensions of at least 256 are required")
-        if not 1 <= steps <= 100:
-            raise ValueError("steps must be in 1..100")
+        self._validate_request(prompt, width, height, steps)
         from mlx_vlm.generate.image import ImageGenerationRequest
 
         if self._generator is None:
@@ -224,17 +252,28 @@ class QwenImage21Adapter:
         self, prompt: str, image_paths: list[str | Path], *,
         width: int = 1024, height: int = 1024, steps: int = 40, seed: int = 0,
     ) -> GeneratedImage:
-        if not prompt.strip() or not image_paths:
-            raise ValueError("prompt and at least one reference image are required")
+        self._validate_request(prompt, width, height, steps)
+        if not image_paths:
+            raise ValueError("at least one reference image is required")
+        references = [Path(path).expanduser().resolve() for path in image_paths]
+        if any(not path.is_file() for path in references):
+            raise FileNotFoundError("Qwen reference image is missing")
         from mlx_vlm.generate.edit_image import ImageEditRequest
 
         if self._editor is None:
             self._editor = self._model(edit=True)
         result = self._editor.edit(ImageEditRequest(
-            prompt=prompt, image_paths=[str(Path(p).expanduser().resolve()) for p in image_paths],
+            prompt=prompt, image_paths=[str(path) for path in references],
             width=width, height=height, steps=steps, seed=seed,
         ))
         return self._encode(result.array)
+
+    @staticmethod
+    def _validate_request(prompt: str, width: int, height: int, steps: int) -> None:
+        if not prompt.strip() or width < 256 or height < 256 or width % 16 or height % 16:
+            raise ValueError("prompt and 16-aligned dimensions of at least 256 are required")
+        if not 1 <= steps <= 100:
+            raise ValueError("steps must be in 1..100")
 
     def _encode(self, array: Any) -> GeneratedImage:
         import numpy as np
@@ -264,6 +303,7 @@ class LTX25Adapter:
         if (
             conversion.get("source_fingerprint") != self.artifact.fingerprint
             or conversion.get("runtime_revision") != LTX_RUNTIME_REVISION
+            or conversion.get("converter_sha256") != LTX_CONVERTER_SHA256
             or set(conversion.get("steps", {})) != {
                 "config", "transformer-distilled", "connector", "text-encoder",
                 "vae", "audio-vae", "duration-head", "upscalers",
@@ -307,7 +347,8 @@ class LTX25Adapter:
             raise ValueError("output must be a new .mp4 path")
         target.parent.mkdir(parents=True, exist_ok=True)
         runner = (
-            "import sys; from ltx_pipelines_mlx.cli import main; "
+            "import mlx.core as mx, sys; mx.set_default_device(mx.gpu); "
+            "from ltx_pipelines_mlx.cli import main; "
             "sys.argv=['ltx-2-mlx', *sys.argv[1:], '--prompt', sys.stdin.read()]; main()"
         )
         command = [

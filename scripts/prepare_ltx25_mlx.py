@@ -16,6 +16,7 @@ import sys
 from pathlib import Path
 
 RUNTIME_REVISION = "fbc4b0524dd1e01da2d07a44e14dd9dfe0a74d5e"
+CONVERTER_SHA256 = "2c880778d7772275b96f4eef4ee32376a29de0c94de52f4ca2b0aaccad9af98e"
 STEPS = (
     "config", "transformer-distilled", "connector", "text-encoder",
     "vae", "audio-vae", "duration-head", "upscalers",
@@ -24,11 +25,17 @@ EXPECTED = {
     "config": ("config.json", "embedded_config.json"),
     "transformer-distilled": ("transformer-distilled.safetensors",),
     "connector": ("connector.safetensors",),
-    "text-encoder": ("text_encoder/config.json", "text_encoder/model.safetensors", "text_encoder/tokenizer.json"),
+    "text-encoder": (
+        "text_encoder/config.json", "text_encoder/model.safetensors", "text_encoder/tokenizer.json",
+        "text_encoder/tokenizer_config.json", "text_encoder/generation_config.json",
+    ),
     "vae": ("vae_encoder.safetensors", "vae_decoder.safetensors"),
     "audio-vae": ("audio_vae.safetensors", "vocoder.safetensors"),
     "duration-head": ("duration_head.safetensors",),
-    "upscalers": ("spatial_upscaler_x2.safetensors", "temporal_upscaler_x2.safetensors"),
+    "upscalers": (
+        "spatial_upscaler_x2.safetensors", "spatial_upscaler_x2_config.json",
+        "temporal_upscaler_x2.safetensors", "temporal_upscaler_x2_config.json",
+    ),
 }
 NEEDED = {
     "config": ("--distilled",),
@@ -103,6 +110,8 @@ def prepare(source: Path, output: Path, runtime: Path, *, only_step: str | None 
     python = runtime / ".venv" / "bin" / "python"
     if not script.is_file() or not python.is_file():
         raise FileNotFoundError("pinned LTX converter or interpreter is missing")
+    if _sha256(script) != CONVERTER_SHA256:
+        raise ValueError("LTX converter must include the reviewed bias fix in patches/ltx25-converter-bias.patch")
     output.mkdir(parents=True, exist_ok=True)
     receipt_path = output / ".mlx2-cpu-conversion.json"
     flags = {
@@ -130,11 +139,15 @@ def prepare(source: Path, output: Path, runtime: Path, *, only_step: str | None 
         "source_fingerprint": fingerprint,
         "source_revision": source_revision,
         "runtime_revision": revision,
+        "converter_sha256": CONVERTER_SHA256,
         "steps": {},
         "execution_qualification": "pending",
     }
     if receipt["source_fingerprint"] != fingerprint or receipt["runtime_revision"] != revision:
         raise ValueError("existing LTX conversion is bound to another source/runtime")
+    if receipt.get("converter_sha256") not in (None, CONVERTER_SHA256):
+        raise ValueError("existing LTX conversion used another converter")
+    receipt["converter_sha256"] = CONVERTER_SHA256
     launch = (
         "import mlx.core as mx, runpy, sys; "
         "mx.set_default_device(mx.cpu); "
