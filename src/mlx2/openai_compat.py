@@ -74,7 +74,7 @@ def _responses_content(content, *, file_resolver=None):
     for part in content:
         if not isinstance(part, Mapping):
             raise ValueError("Responses content parts must be objects")
-        if part.get("type") in {"input_text", "output_text"} and isinstance(
+        if part.get("type") in ("input_text", "output_text") and isinstance(
             part.get("text"), str
         ):
             pieces.append({"type": "text", "text": part["text"]})
@@ -96,7 +96,7 @@ def _responses_content(content, *, file_resolver=None):
                 raise ValueError("input_audio requires data, audio_url, or file_id")
             pieces.append(dict(part))
             has_media = True
-        elif part.get("type") in {"input_video", "video_url"}:
+        elif part.get("type") in ("input_video", "video_url"):
             unknown = set(part) - {
                 "type", "video_url", "file_id", "fps", "max_frames"
             }
@@ -136,7 +136,7 @@ def _responses_messages(
             raise ValueError("Responses input items must be objects")
         item_type = item.get("type", "message")
         if not compat_on and (
-            item_type in {"custom_tool_call", "custom_tool_call_output"}
+            item_type in ("custom_tool_call", "custom_tool_call_output")
             or (item_type == "function_call" and "namespace" in item)
             or (item_type == "message" and "phase" in item)
         ):
@@ -238,7 +238,7 @@ def _responses_messages(
         if item_type != "message":
             raise ValueError("unsupported Responses input item type")
         role = item.get("role")
-        if role not in {"user", "assistant", "system", "developer"}:
+        if role not in ("user", "assistant", "system", "developer"):
             raise ValueError("unsupported Responses message role")
         if compat_on:
             unknown = set(item) - {"type", "role", "content", "id", "status", "phase"}
@@ -248,7 +248,7 @@ def _responses_messages(
                 )
             phase = item.get("phase")
             if phase is not None:
-                if phase not in _agent.MESSAGE_PHASES:
+                if not isinstance(phase, str) or phase not in _agent.MESSAGE_PHASES:
                     raise ValueError("message phase must be commentary or final_answer")
                 _agent.count(counts, "agent_compat_phase_inputs")
         content = _responses_content(item.get("content"), file_resolver=file_resolver)
@@ -323,7 +323,7 @@ def _responses_text_format(value):
         or set(value) - {"format", "verbosity"}
     ):
         raise ValueError("text only supports format and verbosity")
-    if value.get("verbosity", "medium") not in {"low", "medium", "high"}:
+    if value.get("verbosity", "medium") not in ("low", "medium", "high"):
         raise ValueError("text.verbosity must be low, medium, or high")
     format_value = value.get("format", {"type": "text"})
     if not isinstance(format_value, Mapping):
@@ -422,10 +422,10 @@ def responses_to_chat_request(
         raise ValueError("service_tier must be auto or default")
     include = body.get("include", [])
     if not isinstance(include, list) or any(
-        not isinstance(item, str) or item not in {
+        not isinstance(item, str) or item not in (
             "reasoning.encrypted_content",
             "message.output_text.logprobs",
-        }
+        )
         for item in include
     ):
         raise ValueError(
@@ -497,13 +497,13 @@ def responses_to_chat_request(
             raise ValueError("reasoning only supports effort and summary")
         if "effort" in reasoning:
             request["reasoning_effort"] = reasoning["effort"]
-        if reasoning.get("summary", "auto") not in {
+        if reasoning.get("summary", "auto") not in (
             "auto", "concise", "detailed"
-        }:
+        ):
             raise ValueError("reasoning.summary must be auto, concise, or detailed")
     choice = request.get("tool_choice")
     if isinstance(choice, Mapping) and set(choice) == {"type", "name"}:
-        allowed_choice = {"function", "custom"} if compat_on else {"function"}
+        allowed_choice = ("function", "custom") if compat_on else ("function",)
         if choice.get("type") not in allowed_choice:
             raise ValueError("mlx2 Responses supports function tool_choice only")
         request["tool_choice"] = {
@@ -521,7 +521,7 @@ def responses_to_chat_request(
         else:
             # Every declared tool was hosted and dropped: plain generation.
             request.pop("parallel_tool_calls", None)
-            if request.get("tool_choice") not in {None, "auto", "none"}:
+            if request.get("tool_choice") not in (None, "auto", "none"):
                 raise ValueError("tool_choice names a tool this route cannot run")
             request.pop("tool_choice", None)
     elif "tools" in body:

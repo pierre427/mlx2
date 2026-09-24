@@ -311,7 +311,7 @@ def _custom_format(tool, grammar_mode):
     if kind != "grammar" or set(fmt) - {"type", "syntax", "definition"}:
         raise ValueError("custom tool format supports text or grammar")
     syntax, definition = fmt.get("syntax"), fmt.get("definition")
-    if syntax not in {"lark", "regex"}:
+    if syntax not in ("lark", "regex"):
         raise ValueError("custom tool grammar syntax must be lark or regex")
     if not isinstance(definition, str) or not definition:
         raise ValueError("custom tool grammar definition must be nonempty text")
@@ -350,6 +350,8 @@ def translate_responses_tools(value, compat: AgentCompat, counts=None):
             raise ValueError(
                 "unsupported Responses function fields: " + ", ".join(sorted(unknown))
             )
+        if not isinstance(tool.get("name"), str) or not tool["name"]:
+            raise ValueError("function tool requires a nonempty name")
         function = {key: tool[key] for key in tool if key != "type"}
         if qualified_name is not None:
             function["name"] = qualified_name
@@ -359,6 +361,9 @@ def translate_responses_tools(value, compat: AgentCompat, counts=None):
         if not isinstance(tool, Mapping):
             raise ValueError("Responses tools must be objects")
         kind = tool.get("type")
+        if not isinstance(kind, str):
+            # Request validation uses ValueError so the HTTP boundary returns 400.
+            raise ValueError("Responses tool type must be text")  # noqa: TRY004
         if kind == "function":
             tools.append(function_tool(tool))
         elif kind == "custom":
@@ -453,7 +458,7 @@ def tool_output_text(output, *, kind) -> str:
     for part in output:
         if not isinstance(part, Mapping):
             raise ValueError(f"{kind} parts must be objects")
-        if part.get("type") in {"input_text", "output_text", "text"} and isinstance(
+        if part.get("type") in ("input_text", "output_text", "text") and isinstance(
             part.get("text"), str
         ):
             pieces.append(part["text"])

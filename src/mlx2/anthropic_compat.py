@@ -41,7 +41,7 @@ def _cache_control(value):
     _only(value, {"type", "ttl"}, "cache_control")
     if value.get("type") != "ephemeral":
         raise ValueError("cache_control type must be ephemeral")
-    if "ttl" in value and value["ttl"] not in {"5m", "1h"}:
+    if "ttl" in value and value["ttl"] not in ("5m", "1h"):
         raise ValueError("cache_control ttl must be 5m or 1h")
 
 
@@ -120,7 +120,7 @@ def _anthropic_message(
         return [{"role": "system", "content": _anthropic_system(
             message.get("content")
         )}], 0
-    if role not in {"user", "assistant"}:
+    if role not in ("user", "assistant"):
         raise ValueError("Anthropic message role must be user or assistant")
     content = message.get("content")
     if isinstance(content, str):
@@ -230,7 +230,7 @@ def _anthropic_message(
                     _cache_control(block["cache_control"])
                 _text(block.get("data"), "redacted thinking data")
                 rejections += 1
-            elif kind in {"image", "document"}:
+            elif kind in ("image", "document"):
                 raise ValueError("image and document content blocks are unsupported")
             else:
                 raise ValueError(f"unsupported assistant content block: {kind!r}")
@@ -296,7 +296,7 @@ def _anthropic_message(
                     "content": result,
                 }
             )
-        elif kind in {"image", "document"}:
+        elif kind in ("image", "document"):
             raise ValueError("image and document content blocks are unsupported")
         else:
             raise ValueError(f"unsupported user content block: {kind!r}")
@@ -307,7 +307,7 @@ def _anthropic_message(
 def _anthropic_tool_choice(value):
     value = _object(value, "tool_choice")
     kind = value.get("type")
-    if kind in {"auto", "any", "none"}:
+    if kind in ("auto", "any", "none"):
         _only(value, {"type", "disable_parallel_tool_use"}, "tool_choice")
         if "disable_parallel_tool_use" in value and not isinstance(
             value["disable_parallel_tool_use"], bool
@@ -374,7 +374,7 @@ def anthropic_request_to_chat(
         raise ValueError("container is unsupported")
     if "mcp_servers" in body:
         raise ValueError("mcp_servers is unsupported")
-    if body.get("service_tier", "auto") not in {"auto", "standard_only"}:
+    if body.get("service_tier", "auto") not in ("auto", "standard_only"):
         raise ValueError("service_tier must be auto or standard_only")
     messages = []
     if "system" in body:
@@ -462,7 +462,7 @@ def anthropic_request_to_chat(
                 raise ValueError("thinking budget_tokens must be less than max_tokens")
         elif compat and kind == "adaptive":
             _only(thinking, {"type", "display"}, "thinking")
-            if thinking.get("display", "summarized") not in {"summarized", "omitted"}:
+            if thinking.get("display", "summarized") not in ("summarized", "omitted"):
                 raise ValueError("thinking display must be summarized or omitted")
             # Effort-scaled default budget; never the history-pure close mode.
             result["enable_thinking"] = True
@@ -475,7 +475,7 @@ def anthropic_request_to_chat(
         config = _object(body["output_config"], "output_config")
         _only(config, {"effort"}, "output_config")
         if "effort" in config:
-            if config["effort"] not in {"low", "medium", "high", "xhigh", "max"}:
+            if config["effort"] not in ("low", "medium", "high", "xhigh", "max"):
                 raise ValueError("output_config effort must be low, medium, high, xhigh, or max")
             result["reasoning_effort"] = config["effort"]
             _agent.count(counts, "agent_compat_output_effort")

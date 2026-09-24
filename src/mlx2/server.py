@@ -195,9 +195,9 @@ def validate_quiesce_body(body):
     timeout = body.get("drain_timeout_seconds", 600)
     if isinstance(timeout, bool) or not isinstance(timeout, (int, float)):
         raise ValueError("drain_timeout_seconds must be numeric")
-    timeout = float(timeout)
-    if not math.isfinite(timeout) or not 0.1 <= timeout <= 3600:
+    if not 0.1 <= timeout <= 3600:
         raise ValueError("drain_timeout_seconds must be between 0.1 and 3600")
+    timeout = float(timeout)
     suspend = body.get("suspend", True)
     if not isinstance(suspend, bool):
         raise ValueError("suspend must be boolean")
@@ -303,7 +303,7 @@ def validate_speech_request(body):
     ):
         raise ValueError("speech instructions must be a string up to 4096 characters")
     response_format = body.get("response_format", "mp3")
-    if response_format not in _AUDIO_RESPONSE_TYPES:
+    if not isinstance(response_format, str) or response_format not in _AUDIO_RESPONSE_TYPES:
         raise ValueError(
             "speech response_format must be one of "
             + ", ".join(sorted(_AUDIO_RESPONSE_TYPES))
@@ -311,11 +311,11 @@ def validate_speech_request(body):
     speed = body.get("speed", 1.0)
     if isinstance(speed, bool) or not isinstance(speed, (int, float)):
         raise ValueError("speech speed must be numeric")
-    speed = float(speed)
-    if not math.isfinite(speed) or not 0.25 <= speed <= 4.0:
+    if not 0.25 <= speed <= 4.0:
         raise ValueError("speech speed must be finite and between 0.25 and 4.0")
+    speed = float(speed)
     stream_format = body.get("stream_format", "audio")
-    if stream_format not in {"audio", "sse"}:
+    if stream_format not in ("audio", "sse"):
         raise ValueError("speech stream_format must be audio or sse")
     return {
         "model": body.get("model"),
@@ -451,12 +451,12 @@ def validate_request(
         if not isinstance(messages, list) or not messages:
             raise ValueError("messages must be a non-empty list")
         for message in messages:
-            if not isinstance(message, dict) or message.get("role") not in {
+            if not isinstance(message, dict) or message.get("role") not in (
                 "system",
                 "user",
                 "assistant",
                 "tool",
-            }:
+            ):
                 raise ValueError("invalid text message role")
             content = message.get("content")
             if isinstance(content, list):
@@ -469,6 +469,7 @@ def validate_request(
                 }
                 if any(
                     not isinstance(part, dict)
+                    or not isinstance(part.get("type"), str)
                     or part.get("type") not in allowed_parts
                     for part in content
                 ):
@@ -694,8 +695,8 @@ def validate_request(
         if (
             isinstance(value, bool)
             or not isinstance(value, (int, float))
-            or not math.isfinite(value)
             or not lower <= value <= upper
+            or not math.isfinite(value)
         ):
             raise ValueError(f"{key} must be finite and between {lower} and {upper}")
     if "sampling_profile" in body:
@@ -711,8 +712,8 @@ def validate_request(
         for token, value in biases.items():
             if (not isinstance(token, str) or not token.isdecimal()
                 or not 0 <= int(token) < 2**31 or isinstance(value, bool)
-                or not isinstance(value, (int, float)) or not math.isfinite(value)
-                or not -100 <= value <= 100):
+                or not isinstance(value, (int, float))
+                or not -100 <= value <= 100 or not math.isfinite(value)):
                 raise ValueError("invalid logit_bias token or value")
     for key in (
         "stream", "enable_thinking", "skip_writing_prefix_cache", "return_progress"
@@ -725,10 +726,10 @@ def validate_request(
         raise ValueError("return_progress requires stream")
     if "session_id" in body:
         validate_session_id(body["session_id"])
-    if body.get("thinking_budget_mode", "state_aware") not in {
+    if body.get("thinking_budget_mode", "state_aware") not in (
         "state_aware",
         "history",
-    }:
+    ):
         raise ValueError("thinking_budget_mode must be state_aware or history")
     if "seed" in body and (
         isinstance(body["seed"], bool)
@@ -2476,7 +2477,7 @@ def handler_for(
                             "speech SSE requires a qualified streaming audio adapter"
                         )
                     model = engine.status().get("model")
-                    if speech["model"] not in {None, model}:
+                    if speech["model"] is not None and speech["model"] != model:
                         raise ResourceNotFound("unknown model")
                     output = engine.synthesize_speech(
                         speech["input"],

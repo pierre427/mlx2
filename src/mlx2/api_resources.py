@@ -687,7 +687,7 @@ class BatchManager:
         if unknown:
             raise ValueError("unsupported batch fields: " + ", ".join(sorted(unknown)))
         endpoint = body.get("endpoint")
-        if endpoint not in self.ENDPOINTS:
+        if not isinstance(endpoint, str) or endpoint not in self.ENDPOINTS:
             raise ValueError("unsupported batch endpoint")
         if body.get("completion_window") != "24h":
             raise ValueError("completion_window must be '24h'")
