@@ -2700,7 +2700,12 @@ class BatchGenerator:
         adaptive_prefill: bool = False,
         adaptive_prefill_target_itl_ms: float = 1500.0,
         adaptive_prefill_max_defer_ms: float = 2000.0,
-        adaptive_prefill_slices: Sequence[int] = (64, 128, 256, 512),
+        # 1024/2048: below 1024 query rows MLX's head_dim-256 prefill SDPA
+        # leaves the fused kernel and materializes the full score matrix --
+        # 1.3-1.4x the cost per row and up to 13x the memory at 128K
+        # (2026-09-23, qualification/runs/prefill-qwen-profile-20260923/
+        # slice_cost.log). The ITL budget still picks the largest that fits.
+        adaptive_prefill_slices: Sequence[int] = (64, 128, 256, 512, 1024, 2048),
         max_kv_size: Optional[int] = None,
         kv_budget_bytes: Optional[int] = None,
         kv_cost: Optional[Tuple[float, float, Optional[int]]] = None,

@@ -368,3 +368,14 @@ def test_batch_scheduler_turns_defer_prefill_until_decode_repays_debt(monkeypatc
     assert scheduler.decode_time_fairness.debt_seconds == pytest.approx(0.1)
     assert scheduler.scheduler_stats["decode_fairness_debt_deferrals"] == 1
     assert scheduler.scheduler_stats["decode_fairness_debt_repayments"] == 2
+
+
+def test_default_adaptive_slices_reach_the_fused_attention_width():
+    """Contended prefill may use >=1024-row slices when the ITL budget allows
+    (below 1024 rows head_dim-256 SDPA leaves the fused kernel)."""
+    import inspect
+
+    from mlx2.runtime.generate import BatchGenerator
+
+    default = inspect.signature(BatchGenerator.__init__).parameters["adaptive_prefill_slices"].default
+    assert max(default) >= 1024 and 2048 in default

@@ -23,6 +23,7 @@ from .models.cache import (
     trim_ragged_prompt_cache,
 )
 from .prompt_lookup import HybridStats as _PromptLookupStatsBase
+from . import round_levers
 from .sample_utils import LaneRNG, draw_key, make_transformed_logprobs
 from .verify_sync import record_verify_sync, verify_sync_round
 
@@ -331,6 +332,18 @@ def _probe_logits_processors(logits_processors, y, logits):
     batched = logits[None] if logits.ndim == 1 else logits
     batched = probe_logits_processors(logits_processors, y, batched)
     return batched[0] if logits.ndim == 1 else batched
+
+
+def _device_draft_token(logprobs, sampling_temp: float, *, rng=None) -> mx.array:
+    """The draw ``_sample_from_logprobs`` makes, left on device (uint32 scalar).
+
+    Same op, same key: ``draw_key`` advances the lane key (or the global key
+    sequence) when the op is built, so the token is identical; only the
+    per-draft host sync is gone.
+    """
+    if sampling_temp and sampling_temp > 0:
+        return mx.random.categorical(logprobs, key=draw_key(rng)).astype(mx.uint32)
+    return mx.argmax(logprobs).astype(mx.uint32)
 
 
 def _sample_from_logprobs(logprobs, sampling_temp: float = 0.0, *, rng=None) -> int:
@@ -2077,6 +2090,13 @@ def _propose_batched_self_mtp_round(
     draft_h = [lane.seed_h for lane in batch.lanes]
     draft_steps = [0] * n_lanes
     greedy_cycle = all((lane.sampling_temp <= 0 for lane in batch.lanes))
+    # Sampled (or mixed) cycles draft on device too unless a lane's logits
+    # processors need host tokens: each ``_sample_from_logprobs(...).item()``
+    # was a blocking sync per lane per depth (2026-09-23 audit). The hosted
+    # ints are read once, below, before verification.
+    device_rows = [
+        (not greedy_cycle) and (not lane.logits_processors) for lane in batch.lanes
+    ]
     probes = [getattr(lane, "confidence_probe", None) for lane in batch.lanes]
     probe_active = any(probe is not None for probe in probes)
     # Unverified lookahead drafts exist only to observe confidences past the
@@ -2157,6 +2177,9 @@ def _propose_batched_self_mtp_round(
                     )
                 if greedy_cycle:
                     token = mx.argmax(lp).astype(mx.uint32)
+                elif device_rows[row]:
+                    token = _device_draft_token(lp, lane.sampling_temp, rng=lane.rng)
+                    round_levers.bump("device_sampled_drafts")
                 else:
                     hosted_token = _sample_from_logprobs(
                         lp, lane.sampling_temp, rng=lane.rng
@@ -2168,9 +2191,13 @@ def _propose_batched_self_mtp_round(
                 draft_steps[row] += 1
                 lane.pending_hs = None
                 lane.pending_ts = []
-            if greedy_cycle:
+            if greedy_cycle or any(device_rows):
                 mx.async_eval(
-                    *(row[-1] for row in draft_tokens if row),
+                    *(
+                        row_tokens[-1]
+                        for (row, row_tokens) in enumerate(draft_tokens)
+                        if row_tokens and (greedy_cycle or device_rows[row])
+                    ),
                     *(draft_h[row] for (row, k) in enumerate(k_vector) if k),
                 )
             for depth in range(1, max_k):
@@ -2208,6 +2235,11 @@ def _propose_batched_self_mtp_round(
                         )
                     if greedy_cycle:
                         token = mx.argmax(lp).astype(mx.uint32)
+                    elif device_rows[row]:
+                        token = _device_draft_token(
+                            lp, lane.sampling_temp, rng=lane.rng
+                        )
+                        round_levers.bump("device_sampled_drafts")
                     else:
                         hosted_token = _sample_from_logprobs(
                             lp, lane.sampling_temp, rng=lane.rng
@@ -2217,12 +2249,12 @@ def _propose_batched_self_mtp_round(
                     draft_tokens[row].append(token)
                     draft_logprobs[row].append(lp)
                     draft_steps[row] += 1
-                if greedy_cycle:
+                if greedy_cycle or any(device_rows):
                     mx.async_eval(
                         *(
                             draft_tokens[row][-1]
                             for (row, active) in enumerate(lengths)
-                            if active
+                            if active and (greedy_cycle or device_rows[row])
                         ),
                         *(
                             draft_h[row]
@@ -2242,6 +2274,15 @@ def _propose_batched_self_mtp_round(
             raise RuntimeError(
                 f"draft head advanced {tuple(draft_steps)}, expected {d_vector}"
             )
+    device_drafted = [
+        row for row in range(n_lanes) if device_rows[row] and draft_tokens[row]
+    ]
+    if device_drafted:
+        stacked = [mx.stack(draft_tokens[row]) for row in device_drafted]
+        record_verify_sync("hybrid.sampled.draft_boundary")
+        mx.eval(stacked)
+        for row, values in zip(device_drafted, stacked):
+            drafts[row] = [int(value) for value in values.tolist()]
     feature_payload = None
     if probe_active:
         feature_payload = _stack_confidence_payload(

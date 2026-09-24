@@ -56,6 +56,10 @@ ARMS = {
     "idx4_b4096": {"index": {"bits": 4, "budget": 4096}},
     "idx4_b8192": {"index": {"bits": 4, "budget": 8192}},
     "exact_b4096": {"index": {"exact_scores": True, "budget": 4096}},
+    # W8A8 int8 prefill (runtime/int8_prefill.py) on the prompt only; removed
+    # before decode, so decode runs stock kernels on an int8-prefilled cache.
+    "int8_mlp": {"int8_prefill": "mlp"},
+    "int8_all": {"int8_prefill": "all"},
 }
 DEFAULT_ARMS = "dense,kv_q8,kv_k8v4,idx8_b4096,idx4_b4096,idx4_b8192,exact_b4096,dense"
 CANDIDATES = ("idx8_b4096", "idx4_b4096", "idx4_b8192")
@@ -173,11 +177,32 @@ def run_arm(model, arm, prompt, text, questions, *, encode, decode, eos, args):
     indexed = []
     if "index" in spec:
         cache, indexed = install_index(cache, window=args.window, **spec["index"])
+    int8_handle = None
+    if "int8_prefill" in spec:
+        from mlx2.runtime import int8_prefill
+
+        int8_handle = int8_prefill.apply(model, int8_prefill.Int8PrefillPolicy(
+            enabled=True, scope=spec["int8_prefill"]))
+    # Production-like prefill: evaluate cache state per chunk (discarded
+    # logits are never computed); only the last chunk's logits are kept.
     logits = None
-    for start in range(0, len(prompt), args.prefill_step):
-        logits = model(mx.array([prompt[start : start + args.prefill_step]], dtype=mx.uint32),
-                       cache=cache)
-        mx.eval(logits)
+    prefill_started = time.perf_counter()
+    try:
+        for start in range(0, len(prompt), args.prefill_step):
+            logits = model(mx.array([prompt[start : start + args.prefill_step]], dtype=mx.uint32),
+                           cache=cache)
+            last = start + args.prefill_step >= len(prompt)
+            mx.eval([c.state for c in cache] + ([logits] if last else []))
+    finally:
+        int8_info = None
+        if int8_handle is not None:
+            from mlx2.runtime import int8_prefill
+
+            int8_info = {"bound_modules": len(int8_handle._bound), **dict(int8_handle.counts)}
+            int8_prefill.remove(int8_handle)
+    prefill_ms = (time.perf_counter() - prefill_started) * 1e3
+    if int8_info is not None and not int8_info["engaged_calls"]:
+        raise SystemExit(f"{arm}: int8 prefill never engaged; refusing to report")
     converted = 0
     if "quantize" in spec:
         cache, converted = quantize_full_attention(cache, **spec["quantize"])
@@ -237,6 +262,8 @@ def run_arm(model, arm, prompt, text, questions, *, encode, decode, eos, args):
 
     record = {
         "arm": arm,
+        "prefill_ms": prefill_ms,
+        "int8_prefill": int8_info,
         "decode_ms": statistics.median(timed) if timed else None,
         "decode_ms_p90": sorted(timed)[int(0.9 * (len(timed) - 1))] if timed else None,
         "timed_steps": len(timed),
@@ -415,7 +442,8 @@ def main(argv=None):
             record["vs_dense"] = compare(dense_rows, rows, text, dense_record, record)
         record["label"] = arm if arm != "dense" or (i == 0 and args.reference is None) else "dense_end"
         report["arms"].append(record)
-        brief = {"arm": record["label"], "ms": round(record["decode_ms"], 2),
+        brief = {"arm": record["label"], "prefill_s": round(record["prefill_ms"] / 1e3, 2),
+                 "ms": round(record["decode_ms"], 2),
                  "peak_gb": round(record["peak_memory_gb"], 1), "wall_s": round(record["wall_s"], 1)}
         if "vs_dense" in record:
             v = record["vs_dense"]
