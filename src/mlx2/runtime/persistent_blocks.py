@@ -38,6 +38,8 @@ def _contained_block_path(directory: Path, name: object) -> Path:
         raise ValueError("APCv2 persistent block name is not a strict basename")
     if name in {".", ".."} or not name.endswith(".block"):
         raise ValueError("APCv2 persistent block name is invalid")
+    if directory.is_symlink() or (directory / name).is_symlink():
+        raise ValueError("APCv2 persistent block paths must not be symlinks")
     root = directory.resolve()
     candidate = (directory / name).resolve()
     if candidate.parent != root:

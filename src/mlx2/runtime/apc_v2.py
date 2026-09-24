@@ -1172,9 +1172,12 @@ class APCv2(PrefixIndex):
                 self._capsule_capacity["reservation_rejections"] += 1
                 return None
             original_limit = int(self.max_bytes)
-            self.max_bytes = available_limit - required
+            # Resident enforcement already subtracts existing reservations.
+            self.max_bytes = original_limit - required
             try:
-                self._spill_resident_budget_locked(exclude=None, include_exclude=True)
+                self._spill_resident_budget_locked(
+                    exclude=None, include_exclude=True, hard_cap=original_limit
+                )
             finally:
                 self.max_bytes = original_limit
             if self._n_bytes > available_limit - required:
@@ -1671,6 +1674,11 @@ class APCv2(PrefixIndex):
             getattr(sidecar, "nbytes", 0)
         )
 
+    @property
+    def _resident_entry_budget(self) -> int:
+        """Bytes available to stored entries while fanout owners are live."""
+        return max(0, int(self.max_bytes) - self._capsule_reserved_bytes)
+
     def _reserve_restore_bytes_locked(self, required: int, *, entry) -> bool:
         """Reserve a hard-capped resident budget before publishing a restore."""
         required = int(required)
@@ -1679,11 +1687,11 @@ class APCv2(PrefixIndex):
             # Impossible under any occupancy: the snapshot itself exceeds the
             # cap.  Callers drop it; a transient shortage returns False below.
             raise ValueError("APCv2 snapshot exceeds the resident byte cap")
-        # Capsule reservations are hard-reserved against the same cap.  They
-        # are transient, so a restore they crowd out is deferred, not dropped.
-        temporary_limit = original_limit - self._capsule_reserved_bytes - required
-        if temporary_limit < 0:
+        if required > self._resident_entry_budget:
+            # Capsules are temporary consumers; keep the healthy disk entry
+            # available for a later restore after their reservations release.
             return False
+        temporary_limit = original_limit - required
         self.max_bytes = temporary_limit
         try:
             self._spill_resident_budget_locked(
@@ -1691,7 +1699,7 @@ class APCv2(PrefixIndex):
             )
         finally:
             self.max_bytes = original_limit
-        return self._n_bytes <= temporary_limit
+        return self._n_bytes <= temporary_limit - self._capsule_reserved_bytes
 
     def _restore_entry_locked(self, key, tokens, entry) -> bool:
         disk = getattr(entry, "_apc_disk", None) or {}
@@ -1862,10 +1870,10 @@ class APCv2(PrefixIndex):
         self, *, exclude=None, include_exclude: bool = True,
         hard_cap: Optional[int] = None,
     ) -> int:
-        if self._idle_disk_dir is None or self._n_bytes <= self.max_bytes:
+        if self._idle_disk_dir is None or self._n_bytes <= self._resident_entry_budget:
             return 0
         spilled = 0
-        while self._n_bytes > self.max_bytes:
+        while self._n_bytes > self._resident_entry_budget:
             records = self._pressure_candidates_locked(
                 exclude=exclude, include_exclude=include_exclude
             )
@@ -1948,18 +1956,13 @@ class APCv2(PrefixIndex):
         )
         # Capsule reservations are hard-reserved against the same cap.
         original_limit = int(self.max_bytes)
-        resident_limit = original_limit - self._capsule_reserved_bytes
         if self._idle_disk_dir is not None:
-            self.max_bytes = resident_limit
-            try:
-                self._spill_resident_budget_locked(
-                    exclude=None, include_exclude=True, hard_cap=original_limit
-                )
-            finally:
-                self.max_bytes = original_limit
+            self._spill_resident_budget_locked(
+                exclude=None, include_exclude=True, hard_cap=original_limit
+            )
         # A failed/unavailable spill must not turn a retention preference into
         # permission to exceed the hard resident cap.
-        while self._n_bytes > resident_limit:
+        while self._n_bytes > self._resident_entry_budget:
             records = self._pressure_candidates_locked(
                 exclude=None, include_exclude=True
             )
@@ -1979,7 +1982,7 @@ class APCv2(PrefixIndex):
                 break
             _rank, _last_access, key, tokens, entry = victim
             self._drop_entry_locked(key, tokens, entry)
-        fits = self._count_pools_fit_locked() and self._n_bytes <= resident_limit
+        fits = self._count_pools_fit_locked() and self._n_bytes <= self._resident_entry_budget
         if not fits and publication is not None:
             key, tokens, entry = publication
             try:
@@ -1990,7 +1993,7 @@ class APCv2(PrefixIndex):
                 self._drop_entry_locked(key, tokens, entry)
                 self._disk_stats["publication_rejections"] += 1
                 publication_rejected = True
-            fits = self._count_pools_fit_locked() and self._n_bytes <= resident_limit
+            fits = self._count_pools_fit_locked() and self._n_bytes <= self._resident_entry_budget
         self._enforce_disk_limit_locked()
         if publication is not None and not publication_rejected:
             key, tokens, entry = publication

@@ -288,9 +288,12 @@ class CacheCapsuleOwner:
     def _retire(self):
         product, reservation = self._product, self._reservation
         self._product = self._reservation = None
+        self._source = None
         _release(product); _release(reservation)
 
     def _assert_current(self):
+        if self._source is None:
+            raise CacheCapsuleOwnerReleased("capsule backing was released")
         if self._generation.current != self._source.generation:
             self._release_requested = True
             if self._leases == 0:
@@ -299,9 +302,9 @@ class CacheCapsuleOwner:
 
     def lease(self):
         with self._lock:
+            self._assert_current()
             if threading.get_ident() != self._source.creator_thread:
                 raise CacheCapsuleError("capsule lease must use source thread")
-            self._assert_current()
             if self._product is None or self._release_requested:
                 raise CacheCapsuleOwnerReleased("capsule owner was released")
             self._leases += 1
@@ -380,7 +383,10 @@ class CacheCapsuleTicket:
 
     def dispose_completed(self):
         with self._lock:
-            if self.disposed or not self.future.done() or self.future.cancelled():
+            if (
+                self.state != "cancelled" or self.disposed
+                or not self.future.done() or self.future.cancelled()
+            ):
                 return False
             try:
                 product = self.future.result()
@@ -473,6 +479,8 @@ class CacheCapsulePool:
             raise CacheCapsuleError("backend changed compatibility signature")
         if payload.layout_fingerprint != source.layout_fingerprint:
             raise CacheCapsuleError("backend changed layout fingerprint")
+        if payload.offset != source.offset:
+            raise CacheCapsuleError("backend changed cache offset")
         for output, original in ((payload.keys, source.keys), (payload.values, source.values)):
             if tuple(output.shape[1:]) != tuple(original.shape[1:]) or int(output.shape[0]) != source.target_batch:
                 raise CacheCapsuleError("backend changed output geometry")
@@ -480,7 +488,10 @@ class CacheCapsulePool:
                 raise CacheCapsuleError("backend changed dtype")
         if self.verify_raw_bits:
             expected = _raw_digest(source.keys, source.values, source.target_batch)
-            if source.raw_digest is None or payload.raw_digest != expected:
+            if (
+                source.raw_digest is None or payload.raw_digest != expected
+                or _raw_digest(payload.keys, payload.values) != expected
+            ):
                 raise CacheCapsuleError("raw-bit checksum mismatch")
 
     def _accept(
@@ -501,10 +512,16 @@ class CacheCapsulePool:
                 raise CacheCapsuleError("capacity reservation rejected")
             # Reservation may reclaim APC entries, so generation must be checked twice.
             self._check(source)
-            return CacheCapsuleReceipt(
-                CacheCapsuleOwner(product, self.generation, source, reservation),
-                backend, reason,
-            )
+            # Closing may race with an external build, adoption, or a fallback
+            # build after its ticket was cancelled. Serialize final ownership
+            # publication with close, then let the caller own accepted leases.
+            with self._ticket_lock:
+                if self._closed:
+                    raise CacheCapsuleError("capsule pool is closed")
+                return CacheCapsuleReceipt(
+                    CacheCapsuleOwner(product, self.generation, source, reservation),
+                    backend, reason,
+                )
         except BaseException:
             _release(reservation); _release(product)
             raise
@@ -513,6 +530,9 @@ class CacheCapsulePool:
         self, source, *, primary, fallback="gpu", timeout_s=None,
         prepared_reservation=None,
     ):
+        with self._ticket_lock:
+            if self._closed:
+                raise CacheCapsuleError("capsule pool is closed")
         if prepared_reservation is not None:
             prepared_reservation.claim(
                 self, source.generation, source.required_bytes
@@ -577,6 +597,9 @@ class CacheCapsulePool:
         return ticket
 
     def _await(self, ticket, timeout_s, fallback):
+        with ticket._lock:
+            if ticket.state != "pending":
+                raise CacheCapsuleError("capsule ticket is no longer pending")
         if threading.get_ident() != ticket.source.creator_thread:
             ticket.cancel("wrong_thread")
             raise CacheCapsuleError("adoption must use source thread")
@@ -588,7 +611,9 @@ class CacheCapsulePool:
         try:
             built = ticket.future.result(timeout=timeout_s)
         except TimeoutError as error:
-            self._count("timeouts"); ticket.cancel("deadline")
+            self._count("timeouts")
+            if not ticket.cancel("deadline"):
+                raise CacheCapsuleError("capsule ticket is no longer pending") from error
             if fallback is None:
                 raise CacheCapsuleDeadline("external_timeout") from error
             self._count("fallbacks")
@@ -596,7 +621,9 @@ class CacheCapsulePool:
                                 fallback, "external_timeout",
                                 prepared_reservation=ticket.prepared_reservation)
         except Exception as error:
-            self._count("errors"); ticket.cancel("build_error")
+            self._count("errors")
+            if not ticket.cancel("build_error"):
+                raise CacheCapsuleError("capsule ticket is no longer pending") from error
             if fallback is None:
                 raise CacheCapsuleError("external_error") from error
             self._count("fallbacks")
@@ -610,6 +637,13 @@ class CacheCapsulePool:
             # callback dispose it later, and always terminalize the ticket.
             ticket.cancel("stale_before_adopt")
             raise
+        # Transfer exclusive ownership before calling the adapter. Cancellation
+        # may have disposed the host result while the future was being awaited;
+        # after this point it must leave disposal to the adoption path.
+        with ticket._lock:
+            if ticket.state != "pending":
+                raise CacheCapsuleError("capsule ticket is no longer pending")
+            ticket.state = "adopting"
         try:
             product = self.adapter.adopt(built, ticket.source)
         except BaseException:
