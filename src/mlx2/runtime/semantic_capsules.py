@@ -160,6 +160,8 @@ class CapsuleStore:
             raise CapsuleIntegrityError("capsule must be owner-private")
         try:
             value = json.loads(path.read_text())
+            if not isinstance(value, dict):
+                raise CapsuleIntegrityError("capsule envelope must be an object")
             embedded = value.pop("digest")
             if embedded != digest or content_digest(value) != digest:
                 raise CapsuleIntegrityError("capsule digest mismatch")
@@ -168,7 +170,7 @@ class CapsuleStore:
             if value.get("kind") not in CAPSULE_KINDS:
                 raise CapsuleIntegrityError("unsupported capsule kind")
             return {"digest": digest, **value}
-        except (json.JSONDecodeError, KeyError, TypeError, CapsuleIntegrityError) as error:
+        except (json.JSONDecodeError, UnicodeDecodeError, KeyError, TypeError, CapsuleIntegrityError) as error:
             stamp = time.time_ns()
             target = self.quarantine / f"{digest}.{stamp}.json"
             try:

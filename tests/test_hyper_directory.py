@@ -1,11 +1,13 @@
 import json
+import hashlib
 import os
 from pathlib import Path
 import tempfile
+import threading
 import unittest
 
 from mlx2.runtime.hyper_directory import DirectoryContext, HyperDirectory, Scope
-from mlx2.runtime.semantic_capsules import CapsuleIntegrityError, CapsuleStore
+from mlx2.runtime.semantic_capsules import CapsuleIntegrityError, CapsuleStore, canonical_json
 
 
 class HyperDirectoryTests(unittest.TestCase):
@@ -232,6 +234,135 @@ class HyperDirectoryTests(unittest.TestCase):
         self.assertTrue(self.directory.delete_session(context))
         remaining = {path.stem for path in self.capsules.objects.glob("*.json")}
         self.assertEqual(remaining, {shared.digest, victim.digest})
+
+    def test_composite_keys_do_not_alias_or_delete_other_sessions(self):
+        a = DirectoryContext(model="qwen", tenant="a--b", session="c")
+        b = DirectoryContext(model="qwen", tenant="a", session="b--c")
+        self.directory.update(Scope.SESSION, a, expected_revision=0, policies={"owner": "a"})
+        self.assertFalse(self.directory.delete_session(b))
+        self.directory.update(Scope.SESSION, b, expected_revision=0, policies={"owner": "b"})
+        self.assertEqual(self.directory.resolve(a).policies["owner"], "a")
+        self.assertEqual(self.directory.resolve(b).policies["owner"], "b")
+        self.directory.delete_session(b)
+        self.assertEqual(self.directory.resolve(a).policies["owner"], "a")
+
+    def test_maximum_length_scope_components_fit_filesystem(self):
+        context = DirectoryContext(model="m" * 128, tenant="t" * 128, session="s" * 128)
+        self.directory.update(Scope.SESSION, context, expected_revision=0, policies={"limit": 4})
+        self.assertEqual(self.directory.resolve(context).policies["limit"], 4)
+        self.assertTrue(self.directory.delete_session(context))
+
+    def test_previous_hashed_layer_migrates_and_deletes_without_resurrection(self):
+        context = DirectoryContext(model="qwen", tenant="a", session="s")
+        key = context.key_for(Scope.SESSION)
+        identity = hashlib.sha256(canonical_json(["session", *key])).hexdigest()
+        previous = self.directory.root / f"session--{identity}.json"
+        capsule = self.capsule("previous hash format")
+        layer = self.directory._empty(Scope.SESSION, key)
+        layer.update(revision=3, handles={"memory": capsule.digest})
+        previous.write_text(json.dumps(layer))
+        self.assertEqual(self.directory.resolve(context).handles["memory"], capsule.digest)
+        self.directory.update(Scope.SESSION, context, expected_revision=3)
+        self.assertTrue(self.directory.delete_session(context))
+        self.assertFalse(previous.exists())
+        resolved = self.directory.resolve(context)
+        self.assertEqual(resolved.handles, {})
+        self.assertEqual(resolved.layers[-1]["revision"], 5)
+        self.assertFalse((self.capsules.objects / f"{capsule.digest}.json").exists())
+
+    def test_nested_transaction_blocks_other_instances_until_publication(self):
+        context = DirectoryContext(model="qwen", tenant="a", session="s")
+        other = HyperDirectory(self.directory.root, self.capsules)
+        started, finished = threading.Event(), threading.Event()
+        results = []
+
+        def delete():
+            started.set()
+            results.append(other.delete_session(context))
+            finished.set()
+
+        thread = threading.Thread(target=delete)
+        try:
+            with self.directory.transaction():
+                capsule = self.capsule("pending publication")
+                with self.directory.transaction():
+                    self.directory.update(
+                        Scope.SESSION, context, expected_revision=0,
+                        handles={"memory": capsule.digest},
+                    )
+                    self.assertEqual(self.directory.resolve(context).handles["memory"], capsule.digest)
+                thread.start()
+                self.assertTrue(started.wait(5))
+                self.assertFalse(finished.wait(0.1))
+                self.assertTrue((self.capsules.objects / f"{capsule.digest}.json").exists())
+        finally:
+            if thread.ident is not None:
+                thread.join(5)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(results, [True])
+
+    def test_legacy_layer_migrates_without_resurrection(self):
+        context = DirectoryContext(model="qwen", tenant="a", session="s")
+        legacy = self.directory.root / "session--qwen--a--s.json"
+        value = self.directory._empty(Scope.SESSION, context.key_for(Scope.SESSION))
+        value.update(revision=3, policies={"legacy": True})
+        legacy.write_text(json.dumps(value))
+        self.assertEqual(self.directory.resolve(context).policies, {"legacy": True})
+        self.directory.update(Scope.SESSION, context, expected_revision=3, policies={"new": True})
+        self.assertEqual(self.directory.resolve(context).layers[-1]["revision"], 4)
+        self.assertTrue(self.directory.delete_session(context))
+        self.assertEqual(self.directory.resolve(context).policies, {})
+
+    def test_corrupt_non_object_and_non_utf8_capsules_are_quarantined(self):
+        for payload in (b"null", b"[]", b"\xff"):
+            with self.subTest(payload=payload):
+                capsule = self.capsule(str(payload))
+                path = self.capsules.objects / f"{capsule.digest}.json"
+                path.write_bytes(payload)
+                with self.assertRaisesRegex(CapsuleIntegrityError, "quarantined"):
+                    self.capsules.get(capsule.digest)
+                self.assertFalse(path.exists())
+
+    def test_compare_and_swap_serializes_independent_directory_instances(self):
+        context = DirectoryContext(model="qwen", tenant="a", session="s")
+        other = HyperDirectory(self.directory.root, self.capsules)
+        read = self.directory._read
+        first_read, release, second_done = threading.Event(), threading.Event(), threading.Event()
+        results = []
+
+        def paused_read(scope, key):
+            value = read(scope, key)
+            first_read.set()
+            if not release.wait(5):
+                raise RuntimeError("test update was not released")
+            return value
+
+        def update(directory, completed=None):
+            try:
+                directory.update(Scope.SESSION, context, expected_revision=0)
+                results.append("committed")
+            except ValueError as error:
+                results.append(str(error))
+            finally:
+                if completed is not None:
+                    completed.set()
+
+        self.directory._read = paused_read
+        first = threading.Thread(target=update, args=(self.directory,))
+        second = threading.Thread(target=update, args=(other, second_done))
+        first.start()
+        try:
+            self.assertTrue(first_read.wait(5))
+            second.start()
+            premature_commit = second_done.wait(0.1)
+        finally:
+            release.set()
+            first.join(5)
+            if second.ident is not None:
+                second.join(5)
+        self.assertFalse(premature_commit)
+        self.assertEqual(results.count("committed"), 1)
+        self.assertTrue(any("revision conflict" in result for result in results))
 
 
 if __name__ == "__main__":

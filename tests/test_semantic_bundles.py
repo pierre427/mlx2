@@ -3,7 +3,7 @@ import tempfile
 import unittest
 
 from mlx2.runtime.classifier_bundle import AdaptiveBundleSelector, ForcedChoiceClassifier
-from mlx2.runtime.hyper_directory import DirectoryContext, HyperDirectory
+from mlx2.runtime.hyper_directory import DirectoryContext, HyperDirectory, Scope
 from mlx2.runtime.semantic_capsules import CapsuleStore
 from mlx2.runtime.semantic_memory import SemanticMemory, SemanticProposal, concept_token
 
@@ -127,6 +127,98 @@ class SemanticBundleTests(unittest.TestCase):
             response_delivered=True, authenticated_tenant=True, expected_revision=1,
         )
         self.assertEqual(second["revision"], 2)
+
+    def test_request_scope_does_not_replace_session_commit_revision(self):
+        context = DirectoryContext(model="qwen9b", tenant="alice", session="walk", request="r1")
+        self.memory.directory.update(Scope.SESSION, context, expected_revision=0)
+        self.memory.directory.update(Scope.REQUEST, context, expected_revision=0)
+        self.memory.directory.update(Scope.REQUEST, context, expected_revision=1)
+        self.assertEqual(self.memory.load(context)[2], 1)
+
+    def test_identical_accepted_and_deferred_evidence_does_not_publish_another_revision(self):
+        for confidence, margin in ((0.99, 0.8), (0.6, 0.1)):
+            with self.subTest(confidence=confidence):
+                context = DirectoryContext(
+                    model="qwen9b", tenant="alice", session=f"evidence-{confidence}"
+                )
+                proposal = SemanticProposal(
+                    "forest", "related_to", "leaves", confidence, margin, "turn-1"
+                )
+                first = self.memory.commit_after_delivery(
+                    context, [proposal], response_delivered=True, authenticated_tenant=True
+                )
+                before = self.memory.load(context)
+                prepared = []
+                second = self.memory.commit_after_delivery(
+                    context, [proposal], response_delivered=True, authenticated_tenant=True,
+                    expected_revision=first["revision"],
+                    prepare_derived_handles=lambda *_args, prepared=prepared: prepared.append(True) or {},
+                )
+                self.assertFalse(second["committed"])
+                self.assertEqual(second["reason"], "unchanged")
+                self.assertEqual(self.memory.load(context), before)
+                self.assertEqual(prepared, [])
+
+    def test_new_evidence_updates_an_existing_edge(self):
+        first = self.memory.commit_after_delivery(
+            self.context,
+            [SemanticProposal("forest", "related_to", "leaves", 0.99, 0.8, "old")],
+            response_delivered=True, authenticated_tenant=True,
+        )
+        second = self.memory.commit_after_delivery(
+            self.context,
+            [SemanticProposal("forest", "related_to", "leaves", 0.99, 0.8, "new")],
+            response_delivered=True, authenticated_tenant=True,
+            expected_revision=first["revision"],
+        )
+        self.assertTrue(second["committed"])
+        self.assertEqual(second["revision"], first["revision"] + 1)
+        graph, digest, _ = self.memory.load(self.context)
+        self.assertEqual(len(graph["edges"]), 1)
+        self.assertNotEqual(digest, first["capsule"])
+
+    def test_session_commit_does_not_persist_request_override(self):
+        first = self.memory.commit_after_delivery(
+            self.context,
+            [SemanticProposal("forest", "related_to", "leaves", 0.99, 0.8, "one")],
+            response_delivered=True, authenticated_tenant=True,
+        )
+        other = DirectoryContext(model="qwen9b", tenant="alice", session="other")
+        override = self.memory.commit_after_delivery(
+            other,
+            [SemanticProposal("private", "related_to", "request", 0.99, 0.8, "local")],
+            response_delivered=True, authenticated_tenant=True,
+        )
+        request = DirectoryContext(model="qwen9b", tenant="alice", session="walk", request="r1")
+        self.memory.directory.update(
+            Scope.REQUEST, request, expected_revision=0,
+            handles={"semantic-memory": override["capsule"]},
+        )
+        self.assertEqual(self.memory.load(request)[1], override["capsule"])
+        committed = self.memory.commit_after_delivery(
+            request,
+            [SemanticProposal("forest", "related_to", "walking", 0.99, 0.8, "two")],
+            response_delivered=True, authenticated_tenant=True,
+            expected_revision=first["revision"],
+        )
+        graph, digest, revision = self.memory.load(self.context)
+        self.assertEqual({item["label"] for item in graph["concepts"].values()},
+                         {"forest", "leaves", "walking"})
+        self.assertEqual(digest, committed["capsule"])
+        self.assertEqual(revision, first["revision"] + 1)
+        self.assertEqual(self.memory.capsules.get(digest)["parents"], [first["capsule"]])
+        self.assertEqual(self.memory.load(request)[1], override["capsule"])
+
+    def test_retrieval_expands_exactly_one_hop_independent_of_edge_order(self):
+        proposals = [
+            SemanticProposal("alpha", "related_to", "beta", 0.99, 0.8, "one"),
+            SemanticProposal("beta", "related_to", "gamma", 0.99, 0.8, "two"),
+        ]
+        self.memory.commit_after_delivery(
+            self.context, proposals, response_delivered=True, authenticated_tenant=True
+        )
+        result = self.memory.retrieve(self.context, "alpha")
+        self.assertEqual({item["label"] for item in result.concepts}, {"alpha", "beta"})
 
 
 class ClassifierBundleTests(unittest.TestCase):

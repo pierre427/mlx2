@@ -10,7 +10,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from mlx2.runtime.hyper_directory import DirectoryContext, HyperDirectory
+from mlx2.runtime.hyper_directory import DirectoryContext, HyperDirectory, Scope
 from mlx2.runtime.neural_concepts import (
     NEURAL_CONCEPT_SCHEMA,
     ConceptCrossAttention,
@@ -244,7 +244,10 @@ def test_neural_middleware_rebuilds_after_delivery_then_injects_state(artifact, 
     assert middleware.receipt(recalled)["neural_observed_used"] is True
 
 
-def test_neural_prepare_failure_does_not_publish_semantic_state(artifact, tmp_path, monkeypatch):
+@pytest.mark.parametrize("seed_existing", [False, True])
+def test_neural_prepare_failure_preserves_published_state(
+    artifact, tmp_path, monkeypatch, seed_existing
+):
     capsules = CapsuleStore(tmp_path / "capsules")
     directory = HyperDirectory(tmp_path / "directory", capsules)
     semantic = SemanticMemory(
@@ -255,6 +258,16 @@ def test_neural_prepare_failure_does_not_publish_semantic_state(artifact, tmp_pa
     middleware = SemanticServingMiddleware(
         semantic, model_scope="model", neural_memory=neural, bridge_mode="neural"
     )
+    context = middleware._context("alice", "walk")
+    if seed_existing:
+        semantic.commit_after_delivery(
+            context,
+            [SemanticProposal("forest", "related_to", "leaves", 0.99, 0.8, "earlier")],
+            response_delivered=True, authenticated_tenant=True,
+        )
+        neural.rebuild(context)
+    before = directory.resolve(context)
+    previous_neural = neural.load(context)
     _, state = middleware.prepare(
         {"session_id": "walk", "messages": [
             {"role": "user", "content": "Remember that Cedar Loop is earthy scent."}
@@ -262,14 +275,91 @@ def test_neural_prepare_failure_does_not_publish_semantic_state(artifact, tmp_pa
         tenant_id="alice", authenticated_tenant=True,
     )
 
-    def fail_prepare(_graph, _digest):
-        raise RuntimeError("injected neural preparation failure")
+    def fail_encoding(*_args, **_kwargs):
+        raise RuntimeError("injected neural encoding failure")
 
-    monkeypatch.setattr(neural, "prepare", fail_prepare)
-    result = middleware.complete(state, "Noted.")
-    assert result == {"committed": False, "reason": "post-delivery-commit-failed"}
-    graph, digest, revision = semantic.load(state.context)
-    assert not graph["concepts"] and digest is None and revision == 0
+    monkeypatch.setattr(neural.encoder, "state_document", fail_encoding)
+    assert middleware.complete(state, "Noted.") == {
+        "committed": False, "reason": "post-delivery-commit-failed"
+    }
+    assert directory.resolve(context) == before
+    assert neural.load(context) == previous_neural
+
+
+def test_neural_rebuild_uses_session_graph_under_request_override(artifact, tmp_path):
+    capsules = CapsuleStore(tmp_path / "capsules")
+    directory = HyperDirectory(tmp_path / "directory", capsules)
+    semantic = SemanticMemory(
+        capsules=capsules, directory=directory,
+        model_binding="model", tokenizer_binding="tokenizer", runtime_binding="runtime",
+    )
+    context = DirectoryContext(model="model", tenant="alice", session="walk")
+    first = semantic.commit_after_delivery(
+        context,
+        [SemanticProposal("forest", "related_to", "leaves", 0.99, 0.8, "earlier")],
+        response_delivered=True, authenticated_tenant=True,
+    )
+    other = DirectoryContext(model="model", tenant="alice", session="other")
+    override = semantic.commit_after_delivery(
+        other,
+        [SemanticProposal("private", "related_to", "request", 0.99, 0.8, "local")],
+        response_delivered=True, authenticated_tenant=True,
+    )
+    request = DirectoryContext(model="model", tenant="alice", session="walk", request="r1")
+    directory.update(Scope.REQUEST, request, expected_revision=0,
+                     handles={"semantic-memory": override["capsule"]})
+    neural = NeuralConceptMemory(semantic, artifact)
+    receipt = neural.rebuild(request)
+    assert receipt["semantic_capsule"] == first["capsule"]
+    assert len(neural.load(context)) == 2
+
+
+def test_neural_commit_conflict_does_not_publish_either_handle(artifact, tmp_path, monkeypatch):
+    capsules = CapsuleStore(tmp_path / "capsules")
+    directory = HyperDirectory(tmp_path / "directory", capsules)
+    semantic = SemanticMemory(
+        capsules=capsules, directory=directory,
+        model_binding="model", tokenizer_binding="tokenizer", runtime_binding="runtime",
+    )
+    neural = NeuralConceptMemory(semantic, artifact)
+    middleware = SemanticServingMiddleware(
+        semantic, model_scope="model", neural_memory=neural, bridge_mode="neural"
+    )
+    context = middleware._context("alice", "walk")
+    semantic.commit_after_delivery(
+        context,
+        [SemanticProposal("forest", "related_to", "leaves", 0.99, 0.8, "earlier")],
+        response_delivered=True, authenticated_tenant=True,
+    )
+    neural.rebuild(context)
+    before = directory.resolve(context)
+    previous_neural = neural.load(context)
+    _, state = middleware.prepare(
+        {"session_id": "walk", "messages": [
+            {"role": "user", "content": "Remember that Cedar Loop is earthy scent."}
+        ]},
+        tenant_id="alice", authenticated_tenant=True,
+    )
+    prepare = neural.prepare
+
+    def race_with_commit(graph, digest):
+        prepared = prepare(graph, digest)
+        assert directory.resolve(context) == before
+        directory.update(
+            Scope.SESSION, context, expected_revision=state.directory_revision,
+            policies={"concurrent-update": True},
+        )
+        return prepared
+
+    monkeypatch.setattr(neural, "prepare", race_with_commit)
+    assert middleware.complete(state, "Noted.") == {
+        "committed": False, "reason": "post-delivery-commit-failed"
+    }
+    after = directory.resolve(context)
+    assert after.handles == before.handles
+    assert after.policies["concurrent-update"] is True
+    assert after.revision == before.revision + 1
+    assert neural.load(context) == previous_neural
 
 
 def test_engine_binds_neural_bridge_only_after_adapter_is_ready():
@@ -385,3 +475,31 @@ def test_neural_concept_request_is_refused_where_the_route_would_drop_it(monkeyp
             assert output.get("status") == 400, (route, output)
             assert f"{route} route cannot apply" in output["error"]
             assert engagements == 0 and not seen
+
+
+def test_neural_prepare_failure_does_not_publish_semantic_state(artifact, tmp_path, monkeypatch):
+    capsules = CapsuleStore(tmp_path / "capsules")
+    directory = HyperDirectory(tmp_path / "directory", capsules)
+    semantic = SemanticMemory(
+        capsules=capsules, directory=directory,
+        model_binding="model", tokenizer_binding="tokenizer", runtime_binding="runtime",
+    )
+    neural = NeuralConceptMemory(semantic, artifact)
+    middleware = SemanticServingMiddleware(
+        semantic, model_scope="model", neural_memory=neural, bridge_mode="neural"
+    )
+    _, state = middleware.prepare(
+        {"session_id": "walk", "messages": [
+            {"role": "user", "content": "Remember that Cedar Loop is earthy scent."}
+        ]},
+        tenant_id="alice", authenticated_tenant=True,
+    )
+
+    def fail_prepare(_graph, _digest):
+        raise RuntimeError("injected neural preparation failure")
+
+    monkeypatch.setattr(neural, "prepare", fail_prepare)
+    result = middleware.complete(state, "Noted.")
+    assert result == {"committed": False, "reason": "post-delivery-commit-failed"}
+    graph, digest, revision = semantic.load(state.context)
+    assert not graph["concepts"] and digest is None and revision == 0

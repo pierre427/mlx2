@@ -367,16 +367,19 @@ class NeuralConceptMemory:
         return validate_state_document(document, self.artifact)
 
     def rebuild(self, context: DirectoryContext) -> dict:
+        session_context = DirectoryContext(
+            model=context.model, tenant=context.tenant, session=context.session
+        )
         # Put and publish under the directory lock; see
         # HyperDirectory.transaction.
         with self.directory.transaction():
-            graph, semantic_digest, revision = self.semantic_memory.load(context)
+            graph, semantic_digest, revision = self.semantic_memory.load(session_context)
             if semantic_digest is None:
                 return {"committed": False, "reason": "no-semantic-memory"}
             capsule_digest, concepts = self.prepare(graph, semantic_digest)
             layer = self.directory.update(
                 Scope.SESSION,
-                context,
+                session_context,
                 expected_revision=revision,
                 handles={"neural-concepts": capsule_digest},
             )

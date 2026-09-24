@@ -288,7 +288,7 @@ class SemanticMemory:
             # cannot expose a new graph with stale derived handles.
             layer = self.directory.update(
                 Scope.SESSION,
-                context,
+                session_context,
                 expected_revision=current_revision,
                 handles=handles,
             )

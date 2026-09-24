@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from contextlib import contextmanager
 from enum import Enum
+import fcntl
 import hashlib
 import json
 import os
@@ -134,8 +136,10 @@ class HyperDirectory:
         os.chmod(self.root, 0o700)
         self.capsules = capsules
         self._lock = threading.RLock()
+        self._transaction_depth = 0
 
-    def transaction(self) -> threading.RLock:
+    @contextmanager
+    def transaction(self):
         """Lock to hold across a capsule put and the update that publishes it.
 
         delete_session removes capsules that no layer references while
@@ -143,18 +147,50 @@ class HyperDirectory:
         later must hold the lock across both steps, or the sweep could
         remove a capsule (or a parent it reuses) before the handle lands.
         """
-        return self._lock
+        # The file lock extends the transaction to independent instances and
+        # processes. Nested resolve/update calls reuse the outer file lock:
+        # flock on another descriptor would deadlock against our own lock.
+        with self._lock:
+            if self._transaction_depth:
+                self._transaction_depth += 1
+                try:
+                    yield
+                finally:
+                    self._transaction_depth -= 1
+                return
+            fd = os.open(self.root / ".lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX)
+                self._transaction_depth = 1
+                try:
+                    yield
+                finally:
+                    self._transaction_depth = 0
+                    fcntl.flock(fd, fcntl.LOCK_UN)
+            finally:
+                os.close(fd)
+
+    def _transaction(self):
+        return self.transaction()
 
     def _path(self, scope: Scope, key: Sequence[str]) -> Path:
         identity = hashlib.sha256(canonical_json([scope.value, *key])).hexdigest()
-        return self.root / f"{scope.value}--{identity}.json"
+        # '%' cannot occur in a legacy scope name, including a name that
+        # happens to equal an older hashed identity.
+        return self.root / f"{scope.value}--%{identity}.json"
 
-    def _legacy_path(self, scope: Scope, key: Sequence[str]) -> Path:
-        return self.root / f"{'--'.join((scope.value, *key))}.json"
+    def _legacy_path(self, scope: Scope, key: Sequence[str]) -> Path | None:
+        name = f"{'--'.join((scope.value, *key))}.json"
+        return self.root / name if len(name.encode()) <= 255 else None
 
-    def _read_path(self, scope: Scope, key: Sequence[str]) -> Path:
-        path = self._path(scope, key)
-        return path if path.exists() else self._legacy_path(scope, key)
+    def _layer_paths(self, scope: Scope, key: Sequence[str]) -> tuple[Path, ...]:
+        identity = hashlib.sha256(canonical_json([scope.value, *key])).hexdigest()
+        candidates = (
+            self._path(scope, key),
+            self.root / f"{scope.value}--{identity}.json",
+            self._legacy_path(scope, key),
+        )
+        return tuple(dict.fromkeys(path for path in candidates if path is not None))
 
     @staticmethod
     def _empty(scope: Scope, key: Sequence[str]) -> dict:
@@ -173,23 +209,26 @@ class HyperDirectory:
         if path.is_symlink() or not path.is_file():
             raise ValueError("directory layer must be a regular file")
         value = json.loads(path.read_text())
+        if not isinstance(value, dict):
+            raise ValueError("invalid hyper directory layer")  # noqa: TRY004 - invalid persisted schema
         if (
-            path == self._legacy_path(scope, key)
-            and isinstance(value, dict)
+            path != self._path(scope, key)
             and value.get("schema") == DIRECTORY_SCHEMA
             and value.get("scope") == scope.value
             and value.get("key") != list(key)
         ):
-            # Another valid tuple can occupy the old separator-based name.
+            # Another valid tuple can occupy an older name, either through
+            # delimiter joining or a literal name matching an old digest.
             return None
         return _validate_layer(value, scope, key)
 
     def _read(self, scope: Scope, key: Sequence[str]) -> dict:
-        path = self._read_path(scope, key)
-        if not path.exists():
-            return self._empty(scope, key)
-        value = self._load(path, scope, key)
-        return self._empty(scope, key) if value is None else value
+        for path in self._layer_paths(scope, key):
+            if path.exists() or path.is_symlink():
+                value = self._load(path, scope, key)
+                if value is not None:
+                    return value
+        return self._empty(scope, key)
 
     def update(
         self,
@@ -204,7 +243,7 @@ class HyperDirectory:
         key = context.key_for(scope)
         if type(expected_revision) is not int or expected_revision < 0:
             raise ValueError("expected_revision must be a nonnegative integer")
-        with self._lock:
+        with self._transaction():
             current = self._read(scope, key)
             if current["revision"] != expected_revision:
                 raise ValueError(
@@ -250,6 +289,10 @@ class HyperDirectory:
                 os.unlink(temporary)
 
     def resolve(self, context: DirectoryContext) -> ResolvedDirectory:
+        with self._transaction():
+            return self._resolve(context)
+
+    def _resolve(self, context: DirectoryContext) -> ResolvedDirectory:
         layers = []
         handles: dict[str, str] = {}
         policies: dict[str, Any] = {}
@@ -289,7 +332,7 @@ class HyperDirectory:
 
     def delete_session(self, context: DirectoryContext) -> bool:
         key = context.key_for(Scope.SESSION)
-        with self._lock:
+        with self._transaction():
             # Validate the layer before touching either current or legacy path.
             current = self._read(Scope.SESSION, key)
             owned = []
@@ -301,8 +344,8 @@ class HyperDirectory:
             # validate each here exactly as a read would: the handles of an
             # unchecked legacy file could name any unreferenced capsule.
             owned_roots = []
-            for path in (self._path(Scope.SESSION, key), self._legacy_path(Scope.SESSION, key)):
-                if not path.exists():
+            for path in self._layer_paths(Scope.SESSION, key):
+                if not path.exists() and not path.is_symlink():
                     continue
                 value = self._load(path, Scope.SESSION, key)
                 if value is None:
@@ -324,7 +367,7 @@ class HyperDirectory:
                 if path.is_symlink() or not path.is_file():
                     raise ValueError("directory layer must be a regular file")
                 value = json.loads(path.read_text())
-                if value.get("schema") != DIRECTORY_SCHEMA or not isinstance(
+                if not isinstance(value, dict) or value.get("schema") != DIRECTORY_SCHEMA or not isinstance(
                     value.get("handles"), dict
                 ):
                     raise ValueError("invalid hyper directory layer")
@@ -340,9 +383,9 @@ class HyperDirectory:
             tombstone["revision"] = current["revision"] + 1
             tombstone["deleted"] = True
             self._write(self._path(Scope.SESSION, key), tombstone)
-            legacy = self._legacy_path(Scope.SESSION, key)
-            if legacy in owned:
-                legacy.unlink()
+            for path in owned:
+                if path != self._path(Scope.SESSION, key):
+                    path.unlink()
             for digest in sorted(doomed):
                 self.capsules.delete(digest)
             return True
