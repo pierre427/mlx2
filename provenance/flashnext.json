@@ -519,6 +519,8 @@
     "lines": 40,
     "source_revision": "1e2bc604f71d070bee970c3e7db8b60f7855599b",
     "license": "MIT",
+    "modifications": "Namespace extraction; compute uneven reverse-rank partitions from cumulative per-rank counts and reject negative custom counts before layer mutation.",
+    "validation": "tests/test_pipeline_partition.py checks complete disjoint layer ownership, uneven and empty ranks, custom parity, and negative-count rejection without importing MLX.",
     "license_basis": "Source repository LICENSE (MIT)"
   },
   "models/precise_ops.py": {
