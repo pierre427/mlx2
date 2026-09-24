@@ -257,6 +257,19 @@ class LTX25Adapter:
             }
         ):
             raise ValueError("LTX conversion receipt is incomplete or source mismatched")
+        for records in conversion["steps"].values():
+            if not isinstance(records, dict) or not records:
+                raise ValueError("LTX conversion output checksums are missing")
+            for name, record in records.items():
+                path = (self.mlx_model / name).resolve()
+                if (
+                    not path.is_relative_to(self.mlx_model)
+                    or not isinstance(record, dict)
+                    or not path.is_file()
+                    or path.stat().st_size != record.get("size")
+                    or _file_sha256(path) != record.get("sha256")
+                ):
+                    raise ValueError(f"LTX conversion output changed: {name}")
         revision = subprocess.run(
             ["git", "-C", str(self.runtime_root), "rev-parse", "HEAD"],
             check=True, capture_output=True, text=True, timeout=5,

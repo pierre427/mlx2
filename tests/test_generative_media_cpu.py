@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import runpy
 import subprocess
 import sys
 from pathlib import Path
@@ -125,3 +126,13 @@ def test_artifact_adapter_import_does_not_import_mlx() -> None:
     environment = os.environ.copy()
     environment["PYTHONPATH"] = str(Path(__file__).resolve().parents[1] / "src")
     subprocess.run([sys.executable, "-c", script], env=environment, check=True)
+
+
+def test_ltx_conversion_resume_rechecks_output_hash(tmp_path: Path) -> None:
+    module = runpy.run_path(str(Path(__file__).resolve().parents[1] / "scripts" / "prepare_ltx25_mlx.py"))
+    path = tmp_path / "transformer-distilled.safetensors"
+    _write(path, b"abc")
+    records = {path.name: {"size": 3, "sha256": hashlib.sha256(b"abc").hexdigest()}}
+    assert module["_matches"](tmp_path, records, (path.name,))
+    _write(path, b"xyz")
+    assert not module["_matches"](tmp_path, records, (path.name,))
