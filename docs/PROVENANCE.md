@@ -75,6 +75,10 @@ modifications, tests or benchmarks, and the capability profile affected.
   image normalization, minimum/pixel checks, bounded WAV metadata,
   deterministic capped video frames, content hashes, and an adapter-owned
   execution hook. Current text adapters remain fail-closed.
+- Host-only media boundary correction (2026-09-23): enforce image dimensions
+  and WAV duration before decoded-payload allocation; reject truncated PCM
+  payloads. `tests/test_media_decode_bounds.py` covers these changes with real
+  small images/WAV data and decoder spies under a hard MLX import guard.
 - Original mlx2 work: atomic tenant-scoped Responses/Files/Batch persistence,
   cursor listings, interrupted-batch recovery, decoder-input representation and
   reranking, allowlisted MCP Streamable HTTP execution, bounded automatic tool

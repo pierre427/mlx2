@@ -51,27 +51,21 @@ def decode_image(payload, mime_type, *, max_pixels=16_000_000):
     from PIL import Image, ImageOps
 
     try:
-        image = Image.open(BytesIO(payload))
+        with Image.open(BytesIO(payload)) as source:
+            width, height = source.size
+            if min(width, height) < 3:
+                raise ValueError("image minimum dimension is 3 pixels")
+            if width * height > max_pixels:
+                raise ValueError("image exceeds the pixel bound")
+            # Inspect the encoded dimensions before decoding or allocating
+            # transposed/RGB copies of a potentially highly compressed image.
+            source.load()
+            image = ImageOps.exif_transpose(source).convert("RGB")
     except (Image.DecompressionBombError, Image.DecompressionBombWarning) as error:
-        # PIL's own bomb guard (past about 179M pixels) raises from
-        # Image.open as neither OSError nor ValueError; the warning is an
-        # exception only when warnings are promoted to errors.
+        # The warning is an exception when warnings are promoted to errors.
         raise ValueError("image exceeds the pixel bound") from error
     except (OSError, ValueError) as error:
         raise ValueError(f"failed to decode image: {error}") from error
-    # Image.open reads only the header.  Check the declared size before
-    # load() and convert() allocate it: a ~100 KB PNG can declare 12000 x
-    # 12000 pixels and cost hundreds of MiB per request to reject.
-    width, height = image.size
-    if min(width, height) < 3:
-        raise ValueError("image minimum dimension is 3 pixels")
-    if width * height > max_pixels:
-        raise ValueError("image exceeds the pixel bound")
-    try:
-        image.load()
-    except (OSError, ValueError) as error:
-        raise ValueError(f"failed to decode image: {error}") from error
-    image = ImageOps.exif_transpose(image).convert("RGB")
     width, height = image.size
     return MediaValue(
         "image",
@@ -90,17 +84,19 @@ def decode_wav_audio(payload, mime_type, *, max_seconds=600):
             rate = stream.getframerate()
             channels = stream.getnchannels()
             width = stream.getsampwidth()
+            duration = frames / rate if rate else math.inf
+            if not rate or channels not in {1, 2} or width not in {1, 2, 3, 4}:
+                raise ValueError("unsupported WAV channel or sample format")
+            if duration <= 0 or duration > max_seconds:
+                raise ValueError("audio duration exceeds the configured bound")
             pcm = stream.readframes(frames)
+            if len(pcm) != frames * channels * width:
+                raise ValueError("truncated WAV sample payload")
     except (wave.Error, EOFError, RuntimeError, struct.error) as error:
         # The stdlib chunk reader raises a bare RuntimeError when a chunk
         # size runs past the payload; that is malformed input, not a fault.
         detail = str(error) or type(error).__name__
         raise ValueError(f"failed to decode WAV audio: {detail}") from error
-    duration = frames / rate if rate else math.inf
-    if not rate or channels not in {1, 2} or width not in {1, 2, 3, 4}:
-        raise ValueError("unsupported WAV channel or sample format")
-    if duration <= 0 or duration > max_seconds:
-        raise ValueError("audio duration exceeds the configured bound")
     return MediaValue(
         "audio",
         mime_type,
