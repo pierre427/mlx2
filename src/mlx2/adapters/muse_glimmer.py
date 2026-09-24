@@ -290,6 +290,16 @@ MUSE_GLIMMER_SAMPLING = VendorSampling.single(
 )
 
 
+# DFlash2 block width when an external-draft policy omits ``num_draft``.
+# The block-width GPU sweep (qualification/runs/dflash-long-block-20260920/
+# sweep.log, 4-bit target) selects 3: B1 T0 35.1 vs 34.2 tok/s at K=4
+# (ordinary 28.8), B1 T1 33.6 vs 32.1, B4 T0 45.7 vs 45.7, B4 T1 43.1 vs 41.8.
+# The qualified profile (qualification/policies/muse-dflash2.json, receipt
+# qualification/runs/macos-26.7/muse-glimmer/dflash2/route-qualification.json)
+# pins num_draft 4 explicitly and is unchanged; this is the unqualified
+# default only.
+DFLASH2_DEFAULT_NUM_DRAFT = 3
+
 class MuseGlimmerAdapter:
     default_route = "ordinary"
     descriptor = MUSE_GLIMMER
@@ -314,7 +324,7 @@ class MuseGlimmerAdapter:
     def execution_config(self, *, max_lanes, prefill_step):
         config = {
             "persistent": True,
-            "num_draft": self.external_policy.get("num_draft", 4) if getattr(self,"draft_model",None) is not None else 0,
+            "num_draft": self.external_policy.get("num_draft", DFLASH2_DEFAULT_NUM_DRAFT) if getattr(self,"draft_model",None) is not None else 0,
             "backend": "external_draft" if getattr(self,"draft_model",None) is not None else "ordinary",
             "rate_gate": False,
             "prefill_step_size": prefill_step,
@@ -339,7 +349,7 @@ class MuseGlimmerAdapter:
         if self.external_policy:
             from .dflash2 import inspect_drafter
             draft_record = inspect_drafter(self.external_policy["draft_model"], model_path)
-            count = self.external_policy.get("num_draft", 4)
+            count = self.external_policy.get("num_draft", DFLASH2_DEFAULT_NUM_DRAFT)
             if type(count) is not int or not 1 <= count < draft_record["args"].block_size:
                 raise ValueError("num_draft must be a positive integer below draft block size")
         path = Path(model_path).expanduser().resolve()
@@ -413,7 +423,7 @@ class MuseGlimmerAdapter:
         if self.draft_model is None:
             raise ValueError("No external draft model bound")
         from ..runtime.external_speculative import ExternalDraftBatchGenerator
-        return ExternalDraftBatchGenerator(self.model, draft_model=self.draft_model, binding=self.identity["fingerprint"], num_draft=self.external_policy.get("num_draft",4), pairwise_selection=self.external_policy.get("pairwise_selection","host"), **kwargs)
+        return ExternalDraftBatchGenerator(self.model, draft_model=self.draft_model, binding=self.identity["fingerprint"], num_draft=self.external_policy.get("num_draft", DFLASH2_DEFAULT_NUM_DRAFT), pairwise_selection=self.external_policy.get("pairwise_selection","host"), **kwargs)
 
     def prompt_tokens(self, request: dict) -> list[int]:
         return self.tokenizer.encode(

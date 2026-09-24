@@ -183,3 +183,19 @@ def test_server_main_passes_max_lanes_to_the_defaults(monkeypatch):
 
     source = inspect.getsource(server.main)
     assert "max_lanes=args.max_lanes" in source
+
+
+def test_muse_dflash2_unqualified_default_depth_is_three_qualified_pins_four():
+    import json
+    from pathlib import Path
+
+    from mlx2.adapters import muse_glimmer
+
+    adapter = muse_glimmer.MuseGlimmerAdapter.__new__(muse_glimmer.MuseGlimmerAdapter)
+    adapter.draft_model = object()
+    adapter.external_policy = {"draft_model": "x"}
+    assert adapter.execution_config(max_lanes=4, prefill_step=8)["num_draft"] == 3
+    # The qualified profile keeps its explicit, receipt-bound depth.
+    root = Path(__file__).resolve().parents[1]
+    policy = json.loads((root / "qualification/policies/muse-dflash2.json").read_text())
+    assert policy["num_draft"] == 4
