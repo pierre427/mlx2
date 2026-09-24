@@ -425,6 +425,10 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
         tokenizer = AutoTokenizer.from_pretrained(
             path, local_files_only=True, trust_remote_code=False
         )
+        # transformers' Qwen2Tokenizer drops the declared combining-mark split rule.
+        from ..runtime.tokenizer_integrity import enforce_declared_regex
+
+        self.pretokenizer_receipt = enforce_declared_regex(tokenizer, path)
         eos = resolve_eos_token_ids(config, tokenizer)
         self.tokenizer = TokenizerWrapper(
             tokenizer, detokenizer_class=BPEStreamingDetokenizer, eos_token_ids=eos
