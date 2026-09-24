@@ -1475,6 +1475,17 @@ class MTPGenerationBatch:
             values = values[0]
         return [int(token) for token in values]
 
+    @staticmethod
+    def _prefix_length(lane):
+        """Tokens in the lane's committed prefix, from the array's shape.
+
+        ``len(_prefix_tokens(lane))`` synced the GPU and converted the whole
+        context to Python ints (~4 ms per call at 128K), up to 10 times per
+        MTP cycle via ``mtp_cycle_state`` (2026-09-23 audit).
+        """
+        prefix = lane.token_prefix
+        return int(prefix.shape[-1]) if prefix.ndim else 0
+
     def mtp_cycle_state(self):
         """Rows ``(uid, context, depth, resident, cache_gib, pending_gib)``.
 
@@ -1497,7 +1508,7 @@ class MTPGenerationBatch:
             rows = [
                 (
                     lane.uid,
-                    len(self._prefix_tokens(lane)) + 1,
+                    self._prefix_length(lane) + 1,
                     lane.num_draft,
                     True,
                     (
@@ -1516,7 +1527,7 @@ class MTPGenerationBatch:
                     for cache in self.state.caches.target + self.state.caches.draft
                 )
             )
-            contexts = [len(self._prefix_tokens(lane)) + 1 for lane in self.state.lanes]
+            contexts = [self._prefix_length(lane) + 1 for lane in self.state.lanes]
             gib_per_token = active_bytes / lane_count / max(contexts, default=1) / gib
             rows = [
                 (
@@ -1530,7 +1541,7 @@ class MTPGenerationBatch:
                 for (lane, context) in zip(self.state.lanes, contexts)
             ]
         for uid, paused in self._paused.items():
-            context = len(self._prefix_tokens(paused.detached.lane)) + 1
+            context = self._prefix_length(paused.detached.lane) + 1
             paused_gib = (
                 sum(
                     (
