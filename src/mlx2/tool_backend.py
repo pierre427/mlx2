@@ -25,14 +25,34 @@ class HostedToolError(RuntimeError):
     code = "hosted_tool_error"
 
 
-def _rpc_payload(raw):
+def _rpc_payload(raw, *, expected_id):
     text = raw.decode("utf-8")
     if text.lstrip().startswith("{"):
-        return json.loads(text)
-    events = [line[6:] for line in text.splitlines() if line.startswith("data: ")]
-    if not events:
-        raise HostedToolError("MCP server returned neither JSON nor SSE data")
-    return json.loads(events[-1])
+        events = [json.loads(text)]
+    else:
+        events, data = [], []
+        # SSE recognizes CR/LF only. Unicode line separators can be literal
+        # characters inside the JSON data and must not split an event.
+        for line in [*text.replace("\r\n", "\n").replace("\r", "\n").split("\n"), ""]:
+            if not line:
+                if data:
+                    events.append(json.loads("\n".join(data)))
+                    data = []
+            elif line.startswith("data:"):
+                value = line[5:]
+                data.append(value.removeprefix(" "))
+    responses = [
+        event for event in events
+        if isinstance(event, dict)
+        and type(event.get("id")) is type(expected_id)
+        and event.get("id") == expected_id
+    ]
+    if len(responses) != 1:
+        raise HostedToolError("MCP server did not return one matching response")
+    response = responses[0]
+    if response.get("jsonrpc") != "2.0" or ("result" in response) == ("error" in response):
+        raise HostedToolError("MCP server returned an invalid JSON-RPC response")
+    return response
 
 
 class _HTTPMCPClient:
@@ -70,7 +90,7 @@ class _HTTPMCPClient:
                     self.session_id = session
                 if notification:
                     return None
-                result = _rpc_payload(response.read())
+                result = _rpc_payload(response.read(), expected_id=message["id"])
         except HostedToolError:
             raise
         except (OSError, ValueError, HTTPException) as error:
@@ -112,13 +132,26 @@ class _HTTPMCPClient:
     def list_tools(self):
         with self.lock:
             self._initialize()
-            result = self._call("tools/list") or {}
-            tools = result.get("tools", []) if isinstance(result, dict) else None
-            if not isinstance(tools, list) or any(
-                not isinstance(tool, dict) for tool in tools
-            ):
-                raise HostedToolError("MCP tools/list reply has no list of tool objects")
-            return tools
+            tools, seen, params = [], set(), None
+            for _ in range(128):
+                result = self._call("tools/list", params)
+                if (
+                    not isinstance(result, dict)
+                    or not isinstance(result.get("tools"), list)
+                    or any(not isinstance(tool, dict) for tool in result["tools"])
+                ):
+                    raise HostedToolError(
+                        "MCP server returned an invalid tools/list response"
+                    )
+                tools.extend(result["tools"])
+                cursor = result.get("nextCursor")
+                if cursor is None:
+                    return tools
+                if not isinstance(cursor, str) or cursor in seen:
+                    raise HostedToolError("MCP server returned an invalid pagination cursor")
+                seen.add(cursor)
+                params = {"cursor": cursor}
+            raise HostedToolError("MCP tools/list exceeded the pagination page bound")
 
     def call_tool(self, name, arguments):
         with self.lock:
@@ -157,11 +190,18 @@ class ConfiguredToolBackend:
 
     def prepare(self, tools):
         chat_tools, executors = [], {}
+        names = set()
         for tool in tools:
             if tool.get("type") == "function":
                 unknown = set(tool) - {"type", "name", "description", "parameters", "strict"}
                 if unknown:
                     raise ValueError("unsupported Responses function fields: " + ", ".join(sorted(unknown)))
+                name = tool.get("name")
+                if not isinstance(name, str) or not name:
+                    raise ValueError("function name must be nonempty text")
+                if name in names:
+                    raise ValueError("tool names collide after normalization")
+                names.add(name)
                 chat_tools.append(
                     {"type": "function", "function": {key: tool[key] for key in tool if key != "type"}}
                 )
@@ -193,8 +233,9 @@ class ConfiguredToolBackend:
                 if not isinstance(original, str) or (allowed is not None and original not in allowed):
                     continue
                 safe = re.sub(r"[^A-Za-z0-9_-]", "_", f"mcp__{label}__{original}")[:128]
-                if safe in executors:
-                    raise ValueError("MCP tool names collide after normalization")
+                if safe in names:
+                    raise ValueError("tool names collide after normalization")
+                names.add(safe)
                 chat_tools.append(
                     {
                         "type": "function",
