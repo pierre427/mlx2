@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import stat
 import threading
@@ -635,6 +636,7 @@ class BatchManager:
             raise ValueError("batch bounds must be positive")
         self.root = Path(root).expanduser().resolve() if root is not None else None
         self._batches = OrderedDict()
+        self._counts = Counter()
         self._lock = threading.Lock()
         self._restore()
 
@@ -651,12 +653,27 @@ class BatchManager:
     def _restore(self):
         if self.root is None or not self.root.exists():
             return
-        candidates = sorted(
-            self.root.glob("*/*.json"), key=lambda path: path.stat().st_mtime_ns
-        )
-        for path in candidates:
+        for path in _restore_candidates(self.root, self._counts):
             try:
-                record = json.loads(path.read_bytes())
+                record = _restore_json(_read_restore_file(path, 64 << 10))
+                _restore_identity(path, record["tenant_id"], record["id"])
+                counts = record.get("request_counts")
+                if (
+                    record.get("object") != "batch"
+                    or not isinstance(record.get("endpoint"), str)
+                    or record["endpoint"] not in self.ENDPOINTS
+                    or record.get("status") not in (
+                        "validating", "in_progress", "cancelling",
+                        "completed", "failed", "cancelled",
+                    )
+                    or type(record.get("created_at")) is not int
+                    or record["created_at"] < 0
+                    or not isinstance(counts, dict)
+                    or set(counts) != {"total", "completed", "failed"}
+                    or any(type(value) is not int or value < 0 for value in counts.values())
+                    or counts["completed"] + counts["failed"] > counts["total"]
+                ):
+                    raise ValueError("invalid stored batch metadata")
                 if record["status"] in {"validating", "in_progress", "cancelling"}:
                     record["status"] = "failed"
                     record["failed_at"] = int(time.time())
@@ -668,17 +685,18 @@ class BatchManager:
                             }
                         ]
                     }
+                    self._persist(record)
                 record["cancel"] = threading.Event()
                 key = (record["tenant_id"], record["id"])
                 self._batches[key] = record
-                self._persist(record)
-            except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError):
+            except (OSError, ValueError, KeyError, TypeError, RecursionError):
+                self._counts["restore_failures"] += 1
                 continue
-        while len(self._batches) > self.max_batches:
-            key, _ = self._batches.popitem(last=False)
-            path = self._path(*key)
-            if path is not None:
-                path.unlink(missing_ok=True)
+            while len(self._batches) > self.max_batches:
+                key, _ = self._batches.popitem(last=False)
+                _unlink_restored(self._path(*key), self._counts)
+                self._counts["evictions"] += 1
+        self._counts["restored"] += len(self._batches)
 
     def create(self, tenant_id, body):
         if not isinstance(body, dict):
@@ -759,7 +777,11 @@ class BatchManager:
                 if path is not None:
                     path.unlink(missing_ok=True)
             self._batches[key] = record
-            self._persist(record)
+            try:
+                self._persist(record)
+            except Exception:
+                self._batches.pop(key, None)
+                raise
         threading.Thread(
             target=self._run,
             args=(key, tuple(lines)),
@@ -769,6 +791,28 @@ class BatchManager:
         return self._public(record)
 
     def _run(self, key, lines):
+        try:
+            self._execute(key, lines)
+        except Exception as error:
+            # Persistence can fail before the first row or while recording a
+            # row failure. The worker must still become terminal in memory;
+            # otherwise it permanently occupies batch capacity and pins drain.
+            logging.getLogger(__name__).exception("batch worker failed")
+            with self._lock:
+                record = self._batches[key]
+                record["status"] = "failed"
+                record["failed_at"] = int(time.time())
+                record["errors"] = {
+                    "data": [{"code": "storage_error", "message": str(error)}]
+                }
+                try:
+                    self._persist(record)
+                except Exception:
+                    logging.getLogger(__name__).exception(
+                        "could not persist terminal batch failure"
+                    )
+
+    def _execute(self, key, lines):
         with self._lock:
             record = self._batches[key]
             record["status"] = "in_progress"
@@ -860,7 +904,6 @@ class BatchManager:
             )
             with self._lock:
                 record["request_counts"]["failed"] += 1
-                self._persist(record)
 
         for raw in lines:
             with self._lock:
@@ -878,6 +921,8 @@ class BatchManager:
                     custom_id if isinstance(custom_id, str) else None,
                     "row not run: the batch output is full",
                 )
+                with self._lock:
+                    self._persist(record)
                 continue
             try:
                 row = json.loads(raw)
@@ -906,10 +951,9 @@ class BatchManager:
                     output_limit_error(
                         custom_id, "row result dropped: it would overflow the batch output"
                     )
-                    continue
-                with self._lock:
-                    record["request_counts"]["completed"] += 1
-                    self._persist(record)
+                else:
+                    with self._lock:
+                        record["request_counts"]["completed"] += 1
             except Exception as error:  # one malformed row must not abort siblings
                 status = getattr(error, "status", None)
                 code = getattr(error, "code", "server_error")
@@ -943,6 +987,8 @@ class BatchManager:
                             custom_id,
                             "row result dropped: it would overflow the batch output",
                         )
+                        with self._lock:
+                            self._persist(record)
                         continue
                 else:
                     result = {
@@ -954,7 +1000,10 @@ class BatchManager:
                     keep_error(json.dumps(result, allow_nan=False).encode())
                 with self._lock:
                     record["request_counts"]["failed"] += 1
-                    self._persist(record)
+            # Storage errors are batch failures, not a second result for the
+            # row that already finished above.
+            with self._lock:
+                self._persist(record)
         if errors_dropped:
             # The reserve left room for this row.  Without one it is written
             # only if it fits what is left; the request counts still report
@@ -966,10 +1015,6 @@ class BatchManager:
                 and output_bytes + error_bytes + size <= pair_limit
             ):
                 errors.append(marker)
-        with self._lock:
-            record = self._batches[key]
-            cancelled = record["cancel"].is_set()
-            abort_reason = record.get("abort_reason")
         try:
             if outputs:
                 object_ = self.file_store.create(
@@ -1008,6 +1053,8 @@ class BatchManager:
             with self._lock:
                 record["output_file_id"] = output_file_id
                 record["error_file_id"] = error_file_id
+                cancelled = record["cancel"].is_set()
+                abort_reason = record.get("abort_reason")
                 if abort_reason:
                     remaining = (
                         record["request_counts"]["total"]
@@ -1128,4 +1175,5 @@ class BatchManager:
                 "states": dict(states),
                 "requests_completed": completed,
                 "requests_failed": failed,
+                "counts": dict(self._counts),
             }
