@@ -208,7 +208,7 @@ def run_arm(model, arm, prompt, text, questions, *, encode, decode, eos, args):
                         "margin": float(vals[first].item() - vals[second].item())})
         return token
 
-    def generate(prompt_text):
+    def generate(prompt_text, cache=cache):
         out = model(mx.array([list(encode(prompt_text))], dtype=mx.uint32), cache=cache)
         token = pick(out[0, -1])
         generated = []
