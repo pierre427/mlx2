@@ -901,6 +901,16 @@ def parse_multipart_form(content_type, raw):
     return fields
 
 
+def _request_json(raw):
+    try:
+        value = json.loads(raw)
+    except RecursionError as error:
+        raise ValueError("request JSON is nested too deeply") from error
+    if not isinstance(value, dict):
+        raise ValueError("request must be a JSON object")
+    return value
+
+
 def embeddings_payload(
     engine, body, *, admission_class="embeddings", admitted=False
 ):
@@ -1628,7 +1638,22 @@ def handler_for(
             self._tenant_auth_method = None
             self._body_consumed = False
             self._connection_header_sent = False
-            return super().parse_request()
+            if not super().parse_request():
+                return False
+            try:
+                if self.headers.get_all("Transfer-Encoding"):
+                    raise ValueError("Transfer-Encoding is unsupported")
+                self._content_length()
+            except ValueError as error:
+                self.close_connection = True
+                self.api_error(
+                    400,
+                    str(error),
+                    anthropic=self.path.split("?", 1)[0].startswith("/v1/messages"),
+                    headers={"Connection": "close"},
+                )
+                return False
+            return True
 
         def send_header(self, keyword, value):
             if keyword.lower() == "connection":
@@ -1663,11 +1688,8 @@ def handler_for(
             and non-ASCII digits, and a proxy may frame the same bytes
             differently; refuse anything but one decimal byte count.
             """
-            values = {
-                value.strip(" \t")
-                for value in self.headers.get_all("Content-Length", ("0",))
-            }
-            value = values.pop() if len(values) == 1 else ""
+            values = self.headers.get_all("Content-Length", ("0",))
+            value = values[0].strip(" \t") if len(values) == 1 else ""
             if not (value.isascii() and value.isdigit()):
                 raise ValueError("Content-Length must be one decimal byte count")
             return int(value)
@@ -1815,10 +1837,7 @@ def handler_for(
             limit = body_limit if max_bytes is None else min(body_limit, max_bytes)
             if not 0 < size <= limit:
                 raise ValueError(f"body must contain at most {limit} bytes")
-            value = json.loads(self.read_body(size))
-            if not isinstance(value, dict):
-                raise ValueError("request must be a JSON object")
-            return value
+            return _request_json(self.read_body(size))
 
         def _session_failure(self, error):
             from .runtime.apc_v2 import (
@@ -1871,7 +1890,11 @@ def handler_for(
                 if budget <= 0:
                     raise TimeoutError("request body was not received in time")
                 self.connection.settimeout(min(30, budget))
-                chunk = self.rfile.read(min(remaining, 1 << 20))
+                # read() may loop over many socket receives internally,
+                # restarting the socket timeout after each trickled byte.
+                # read1() returns after one receive so the absolute deadline
+                # is checked even while the client keeps sending data.
+                chunk = self.rfile.read1(min(remaining, 1 << 20))
                 if not chunk:
                     raise ValueError("request body ended early")
                 chunks.append(chunk)
@@ -2449,9 +2472,7 @@ def handler_for(
                         ),
                     )
                     return
-                body = json.loads(raw)
-                if not isinstance(body, dict):
-                    raise ValueError("request must be a JSON object")
+                body = _request_json(raw)
                 if path in {
                     "/v1/chat/completions",
                     "/v1/completions",

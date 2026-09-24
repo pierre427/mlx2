@@ -56,7 +56,7 @@ HEADER_POLICIES = ("must-match", "ignore")
 FAILURES = {
     "missing": (401, "tenant authentication required"),
     "malformed": (401, "malformed tenant credential"),
-    "ambiguous": (401, "conflicting Authorization and x-api-key credentials"),
+    "ambiguous": (401, "ambiguous tenant authentication headers"),
     "unknown_key": (401, "invalid tenant credential"),
     "disabled": (401, "invalid tenant credential"),
     "bad_signature": (401, "invalid tenant credential"),
@@ -300,6 +300,12 @@ class TenantAuthenticator:
 
     @staticmethod
     def _presented(headers):
+        get_all = getattr(headers, "get_all", None)
+        if callable(get_all) and any(
+            len(get_all(name) or ()) > 1
+            for name in ("Authorization", "x-api-key", "X-Tenant-ID")
+        ):
+            return None, "ambiguous"
         authorization = headers.get("Authorization")
         api_key = headers.get("x-api-key")
         bearer = None
