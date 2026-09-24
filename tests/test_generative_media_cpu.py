@@ -17,7 +17,9 @@ import pytest
 from mlx2.adapters.generative_media import (
     GGUF_REVISION,
     LTX_REVISION,
+    LTX_RUNTIME_REVISION,
     QWEN_REVISION,
+    LTX25Adapter,
     QwenImage21Adapter,
     inspect_ltx25_source,
     inspect_qwen_image21,
@@ -161,3 +163,33 @@ def test_ltx_partial_conversion_checks_pinned_source_hash(tmp_path: Path) -> Non
     _write(path, b"y")
     with pytest.raises(ValueError, match="hash changed"):
         module["_partial_fingerprint"](tmp_path, (path,))
+
+
+def test_ltx_adapter_rejects_changed_conversion_output(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    source, output, runtime = (tmp_path / part for part in ("source", "output", "runtime"))
+    names = [
+        "diffusion_models/ltx-2.5-22b-distilled-transformer-bf16.safetensors",
+        "text_encoders/gemma4-12b-with-proj-ltx-2.5-bf16.safetensors",
+        "vae/ltx-2.5-video-vae-conv-bf16.safetensors",
+        "vae/ltx-2.5-audio-vae-bf16.safetensors",
+    ]
+    _snapshot(source, "Lightricks/LTX-2.5", LTX_REVISION, names)
+    fingerprint = inspect_ltx25_source(source).fingerprint
+    _write(output / "config.json", b'{"model_version":"2.5.0"}')
+    _write(output / "transformer-distilled.safetensors")
+    _write(output / "probe.safetensors")
+    record = {"probe.safetensors": {"size": 1, "sha256": hashlib.sha256(b"x").hexdigest()}}
+    steps = {name: record for name in (
+        "config", "transformer-distilled", "connector", "text-encoder",
+        "vae", "audio-vae", "duration-head", "upscalers",
+    )}
+    (output / ".mlx2-cpu-conversion.json").write_text(json.dumps({
+        "source_fingerprint": fingerprint, "runtime_revision": LTX_RUNTIME_REVISION,
+        "steps": steps,
+    }))
+    _write(runtime / ".venv/bin/python")
+    monkeypatch.setattr(subprocess, "run", lambda *args, **kwargs: SimpleNamespace(stdout=LTX_RUNTIME_REVISION + "\n"))
+    assert LTX25Adapter(source=source, mlx_model=output, runtime_root=runtime).artifact.fingerprint == fingerprint
+    _write(output / "probe.safetensors", b"y")
+    with pytest.raises(ValueError, match="output changed"):
+        LTX25Adapter(source=source, mlx_model=output, runtime_root=runtime)
