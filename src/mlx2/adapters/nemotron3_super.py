@@ -136,6 +136,24 @@ def inspect_artifact(model_path: str | Path) -> dict:
             "identity": {"path": str(path), "fingerprint": digest.hexdigest(), "files": records}}
 
 
+def configure_environment() -> dict[str, str]:
+    """Pin the serving profile and drop inherited lab switches.
+
+    Same hygiene as every other adapter: an ``MLX_QWEN*``/``MLX_LM_*``/
+    ``MLXUAG_*``/``MLX_GDN_*`` variable left in the shell by an experiment
+    must not silently change this model's serving path.  The profile itself
+    (and so the qualification identity) is unchanged.
+    """
+    profile = {
+        "HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1",
+        "MLX_ENABLE_TF32": "0",
+    }
+    for name in tuple(os.environ):
+        if name.startswith(("MLX_QWEN", "MLX_LM_", "MLXUAG_", "MLX_GDN_")):
+            del os.environ[name]
+    os.environ.update(profile)
+    return profile
+
 class Nemotron3SuperAdapter(FlashNextAdapter):
     descriptor = DESCRIPTOR
     sampling_defaults = SAMPLING
@@ -165,11 +183,7 @@ class Nemotron3SuperAdapter(FlashNextAdapter):
         artifact = inspect_artifact(model_path)
         self.identity = artifact["identity"]
         self.layout = CACHE_LAYOUT
-        self.environment = {
-            "HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1",
-            "MLX_ENABLE_TF32": "0",
-        }
-        os.environ.update(self.environment)
+        self.environment = configure_environment()
         path = Path(self.identity["path"])
         import mlx.core as mx
         from mlx import nn

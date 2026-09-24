@@ -239,3 +239,25 @@ def test_default_cache_bytes_never_exceeds_the_m3_advisory_share():
     # 36 GiB M3: Metal advisory 28.08 GiB; a 19 GiB model must still fit
     # with the default cache full.
     assert 19 * (1 << 30) + default_cache_bytes(36 << 30) < 28.08 * (1 << 30)
+
+
+def test_nemotron_environment_strips_inherited_lab_switches(monkeypatch):
+    from mlx2.adapters import nemotron3_super
+
+    for name in ("MLX_LM_BATCH_ATTENTION_BACKEND", "MLX_QWEN4_MEGAKERNEL",
+                 "MLXUAG_EXPERIMENT", "MLX_GDN_CORE"):
+        monkeypatch.setenv(name, "1")
+    monkeypatch.setenv("MLX2_UNRELATED", "kept")
+    for name in ("HF_HUB_OFFLINE", "TRANSFORMERS_OFFLINE", "MLX_ENABLE_TF32"):
+        monkeypatch.delenv(name, raising=False)  # restored after the test
+    profile = nemotron3_super.configure_environment()
+    import os
+
+    for name in ("MLX_LM_BATCH_ATTENTION_BACKEND", "MLX_QWEN4_MEGAKERNEL",
+                 "MLXUAG_EXPERIMENT", "MLX_GDN_CORE"):
+        assert name not in os.environ
+    assert os.environ["MLX2_UNRELATED"] == "kept"
+    # The pinned profile, and so the qualification identity, is unchanged.
+    assert profile == {
+        "HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1", "MLX_ENABLE_TF32": "0",
+    }
