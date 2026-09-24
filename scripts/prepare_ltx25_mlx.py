@@ -20,14 +20,14 @@ STEPS = (
     "vae", "audio-vae", "duration-head", "upscalers",
 )
 EXPECTED = {
-    "config": "config.json",
-    "transformer-distilled": "transformer-distilled.safetensors",
-    "connector": "connector.safetensors",
-    "text-encoder": "text_encoder/config.json",
-    "vae": "vae_decoder.safetensors",
-    "audio-vae": "audio_vae.safetensors",
-    "duration-head": "duration_head.safetensors",
-    "upscalers": "spatial_upscaler_x2.safetensors",
+    "config": ("config.json", "embedded_config.json"),
+    "transformer-distilled": ("transformer-distilled.safetensors",),
+    "connector": ("connector.safetensors",),
+    "text-encoder": ("text_encoder/config.json", "text_encoder/model.safetensors", "text_encoder/tokenizer.json"),
+    "vae": ("vae_encoder.safetensors", "vae_decoder.safetensors"),
+    "audio-vae": ("audio_vae.safetensors", "vocoder.safetensors"),
+    "duration-head": ("duration_head.safetensors",),
+    "upscalers": ("spatial_upscaler_x2.safetensors", "temporal_upscaler_x2.safetensors"),
 }
 
 
@@ -77,8 +77,8 @@ def prepare(source: Path, output: Path, runtime: Path) -> dict:
         "runpy.run_path(sys.argv[0], run_name='__main__')"
     )
     for step in STEPS:
-        expected = EXPECTED.get(step)
-        if step in receipt["steps"] and (expected is None or (output / expected).is_file()):
+        expected = EXPECTED[step]
+        if step in receipt["steps"] and all((output / name).is_file() for name in expected):
             continue
         args = [str(python), "-c", launch, str(script), "--out", str(output), "--step", step]
         for flag, path in flags.items():
@@ -91,13 +91,11 @@ def prepare(source: Path, output: Path, runtime: Path) -> dict:
         environment.update({"HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1"})
         print(f"CPU converting LTX-2.5 {step}", flush=True)
         subprocess.run(args, cwd=runtime, env=environment, check=True)
-        if expected is not None and not (output / expected).is_file():
-            raise RuntimeError(f"LTX converter did not produce {expected}")
+        for name in expected:
+            if not (output / name).is_file():
+                raise RuntimeError(f"LTX converter did not produce {name}")
         receipt["steps"][step] = "done"
         receipt_path.write_text(json.dumps(receipt, indent=2) + "\n")
-    for name in ("vae_encoder.safetensors", "vocoder.safetensors", "temporal_upscaler_x2.safetensors"):
-        if not (output / name).is_file():
-            raise RuntimeError(f"LTX conversion is missing {name}")
     return receipt
 
 
