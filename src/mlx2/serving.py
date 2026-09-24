@@ -157,13 +157,15 @@ def cache_capsule_policy(value) -> dict:
 
 # The configuration that carried the 2026-09-19/20 GPU qualification
 # (`qualification/runs/interior-ckpt-20260919/flashnext-all-gated.json` and
-# `qwen38-27b-shared-rag.json`): TTFT 8.30s -> 0.52s on Flash-Next and
-# 23.75s -> 0.90s on Qwen3.8 27B, zero output differences, and -0.7% on the
-# linear no-harm control.  headroom_fraction 0.25 starved the RAG workload;
+# `qwen38-27b-shared-rag.json`): TTFT on Flash-Next 8.30s -> 0.52s (shared
+# system) and 23.75s -> 0.90s (RAG); on Qwen3.8 27B 7.72s -> 0.29s and
+# 20.82s -> 0.42s; zero output differences, and -0.7% on the linear no-harm
+# control.  headroom_fraction 0.25 starved the RAG workload;
 # min_uncached_fraction 0.5 is what turns the linear control from +3.9%/+7.2%
-# into no harm.  This preset is what `"auto"` means, not what any route
-# serves: `apc_interior_checkpoints` stays opt-in per route profile until the
-# serving profiles are themselves re-qualified with it on.
+# into no harm.  The engine keeps the key default-off; the Flash-Next, Qwen3.8
+# 27B and Qwen3.6 35B adapters declare `"auto"` for their native-MTP route
+# (``default_route_execution_policy``, applied by the server).  Their route
+# receipts must be re-qualified with it on.
 APC_INTERIOR_AUTO_POLICY = {
     "count": 4,
     "min_stride": 256,

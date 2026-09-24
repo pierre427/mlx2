@@ -210,6 +210,13 @@ class Qwen3827BAdapter(FlashNextAdapter):
     default_mtp_ordinary_handoff_max_width = (
         DEFAULT_MTP_ORDINARY_HANDOFF_MAX_WIDTH
     )
+    # Interior checkpoints ``"auto"``: GPU-qualified on this model, native MTP,
+    # zero output differences, gate go (TTFT shared system 7.72 -> 0.29 s, RAG
+    # 20.82 -> 0.42 s; qualification/runs/interior-ckpt-20260919/
+    # qwen38-27b-shared-rag.json).
+    default_route_execution_policy = {
+        "native_mtp": {"apc_interior_checkpoints": "auto"},
+    }
     """Dense text adapter using shared chat parsing and modern runtime state."""
 
     descriptor = QWEN38_27B

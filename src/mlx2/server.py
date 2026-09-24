@@ -4503,8 +4503,19 @@ def resolve_route_selection(args, policy, adapter_resolution=None):
     return RouteSelection(route, source)
 
 
-def resolve_execution_policy_defaults(policy, route_selection, adapter_resolution):
-    """Apply adapter defaults only after the serving route is known."""
+def resolve_execution_policy_defaults(
+    policy, route_selection, adapter_resolution, *, approximate_kv=False
+):
+    """Apply adapter defaults only after the serving route is known.
+
+    A default fills only a key the operator's policy does not name: any
+    explicit value, including ``null`` or a disabled object, wins.  State
+    checkpoint defaults are skipped when approximate KV was requested, because
+    the engine refuses them there and a default must never stop a startup
+    that would otherwise succeed.
+    """
+    from .adapters.registry import STATE_CHECKPOINT_POLICY_KEYS
+
     resolved = {} if policy is None else dict(policy)
     if (
         route_selection.native_mtp
@@ -4514,6 +4525,14 @@ def resolve_execution_policy_defaults(policy, route_selection, adapter_resolutio
         handoff = adapter_resolution.default_mtp_ordinary_handoff
         if handoff is not None:
             resolved["mtp_ordinary_handoff"] = handoff
+    if adapter_resolution is not None:
+        declared = adapter_resolution.default_execution_policy(route_selection.route)
+        for key, value in declared.items():
+            if key in resolved:
+                continue
+            if approximate_kv and key in STATE_CHECKPOINT_POLICY_KEYS:
+                continue
+            resolved[key] = value
     return resolved or None
 
 
@@ -4719,7 +4738,10 @@ def main():
         route_selection = resolve_route_selection(args, policy, adapter_resolution)
         native_mtp = route_selection.native_mtp
         policy = resolve_execution_policy_defaults(
-            policy, route_selection, adapter_resolution
+            policy,
+            route_selection,
+            adapter_resolution,
+            approximate_kv=getattr(args, "approximate_kv", None) is not None,
         )
     except ValueError as error:
         parser.error(str(error))

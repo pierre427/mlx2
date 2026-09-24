@@ -7,6 +7,7 @@ artifact/runtime/settings-bound qualification receipt.
 
 from __future__ import annotations
 
+import copy
 import importlib
 import json
 from collections.abc import Callable
@@ -53,6 +54,65 @@ class AdapterResolution:
                 "positive integer"
             )
         return {"enabled": True, "max_mtp_width": width}
+
+    def default_execution_policy(self, route: str) -> dict:
+        """Return adapter-declared server-owned policy defaults for ``route``.
+
+        Read from the adapter class's *own* namespace, never inherited: these
+        are evidence-backed per-model performance defaults, and a subclass
+        (Nemotron and Qwen3.5 9B subclass Flash-Next / Qwen3.8) must not
+        acquire a measurement taken on its parent.  Only exact, server-owned
+        mechanisms may be declared, and only for the two routes an adapter
+        can default to; prompt-lookup and external-draft routes get nothing.
+        """
+        declared = vars(self.adapter_type).get("default_route_execution_policy")
+        if declared is None:
+            return {}
+        name = self.adapter_type.__name__
+        if not isinstance(declared, dict) or set(declared) - {
+            "ordinary",
+            "native_mtp",
+        }:
+            raise ValueError(
+                f"{name} default_route_execution_policy must map 'ordinary' "
+                "or 'native_mtp' to a policy object"
+            )
+        if route not in {"ordinary", "native_mtp"}:
+            return {}
+        if route == "native_mtp" and Capability.MTP not in self.descriptor.capabilities:
+            return {}
+        policy = declared.get(route) or {}
+        if not isinstance(policy, dict):
+            raise ValueError(f"{name} {route} default policy must be an object")
+        unknown = set(policy) - ADAPTER_DEFAULT_POLICY_KEYS
+        if unknown:
+            raise ValueError(
+                f"{name} declares non-default-able policy keys: {sorted(unknown)}"
+            )
+        return copy.deepcopy(policy)
+
+
+# Server-owned execution-policy keys an adapter may default on.  Each is exact
+# (it changes how fast tokens come, not which tokens) and each fails closed at
+# engine startup where its route or cache cannot support it.
+ADAPTER_DEFAULT_POLICY_KEYS = frozenset(
+    {
+        "apc_interior_checkpoints",
+        "apc_junction_checkpoints",
+        "apc_rolling_checkpoints",
+        "self_mtp_copy_draft",
+        "prefill_scheduling",
+    }
+)
+# The subset that snapshots hybrid state; the engine refuses these on
+# approximate-KV routes, so a default must not select them there.
+STATE_CHECKPOINT_POLICY_KEYS = frozenset(
+    {
+        "apc_interior_checkpoints",
+        "apc_junction_checkpoints",
+        "apc_rolling_checkpoints",
+    }
+)
 
 
 def _flash_next(path: Path, config: dict) -> AdapterResolution:

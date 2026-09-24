@@ -197,6 +197,14 @@ class Qwen3635BA3BAdapter(Qwen3827BAdapter):
     default_mtp_ordinary_handoff_max_width = (
         DEFAULT_MTP_ORDINARY_HANDOFF_MAX_WIDTH
     )
+    # Interior checkpoints ``"auto"``: measured on the two sibling hybrids that
+    # share this GDN cache and capture path (Flash-Next and Qwen3.8 27B native
+    # MTP, zero output differences; qualification/runs/interior-ckpt-20260919).
+    # The capture is exact state, so the sibling evidence covers correctness;
+    # the 35B TTFT gain itself is unmeasured.
+    default_route_execution_policy = {
+        "native_mtp": {"apc_interior_checkpoints": "auto"},
+    }
     descriptor = QWEN36_35B
     # Vendor sampling defaults: Qwen/Qwen3.6-35B-A3B model card and the
     # artifact's generation_config.json (see ``adapters/qwen.py``).

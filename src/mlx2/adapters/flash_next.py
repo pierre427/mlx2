@@ -129,6 +129,14 @@ class FlashNextAdapter:
     default_mtp_ordinary_handoff_max_width = (
         DEFAULT_MTP_ORDINARY_HANDOFF_MAX_WIDTH
     )
+    # APCv2 interior checkpoints at the ``"auto"`` preset on the native-MTP
+    # route: GPU-qualified on this model with zero output differences (TTFT
+    # shared system 8.30 -> 0.52 s, RAG 23.75 -> 0.90 s, linear no-harm
+    # control 4.05 -> 4.02 s; qualification/runs/interior-ckpt-20260919/
+    # flashnext-all-gated.json).  Declared per class, not inherited.
+    default_route_execution_policy = {
+        "native_mtp": {"apc_interior_checkpoints": "auto"},
+    }
     # Vendor sampling defaults: Qwen/Qwen3.8-Flash-Next model card and the
     # artifact's generation_config.json (see ``adapters/qwen.py``).
     from .qwen import QWEN38_FLASH_NEXT_SAMPLING as sampling_defaults

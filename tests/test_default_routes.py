@@ -114,8 +114,8 @@ def test_handoff_default_resolves_only_for_native_mtp_and_can_be_disabled():
     selected = resolve_execution_policy_defaults(
         None, RouteSelection("native_mtp", "adapter_default"), resolution
     )
-    assert selected == {
-        "mtp_ordinary_handoff": {"enabled": True, "max_mtp_width": 4}
+    assert selected["mtp_ordinary_handoff"] == {
+        "enabled": True, "max_mtp_width": 4
     }
     assert resolve_execution_policy_defaults(
         None, RouteSelection("ordinary", "explicit_flag"), resolution
@@ -124,13 +124,13 @@ def test_handoff_default_resolves_only_for_native_mtp_and_can_be_disabled():
         {"mtp_ordinary_handoff": False},
         RouteSelection("native_mtp", "explicit_flag"),
         resolution,
-    ) == {"mtp_ordinary_handoff": False}
+    )["mtp_ordinary_handoff"] is False
     explicit = {"mtp_ordinary_handoff": {"enabled": True, "max_mtp_width": 4}}
     assert resolve_execution_policy_defaults(
         explicit,
         RouteSelection("native_mtp", "explicit_flag"),
         _resolution(FlashNextAdapter, QWEN4_FLASH_NEXT),
-    ) == explicit
+    )["mtp_ordinary_handoff"] == explicit["mtp_ordinary_handoff"]
 
 
 @pytest.mark.parametrize(
