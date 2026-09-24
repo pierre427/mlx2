@@ -109,7 +109,35 @@ def test_ltx_distilled_source_requires_all_pipeline_components(tmp_path: Path) -
         inspect_ltx25_source(tmp_path)
 
 
-def test_qwen_adapter_encodes_backend_pixels_without_model_load(tmp_path: Path) -> None:
+def _stub_qwen_request_type(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Provide mlx-vlm's request dataclass when the optional extra is absent.
+
+    The injected backend replaces every model call, but ``generate_image``
+    still builds its request from ``mlx_vlm.generate.image``.  mlx-vlm is the
+    optional ``multimodal`` extra and the Qwen image module lives only in the
+    pinned local checkout, so a host without it would otherwise fail on the
+    import rather than on anything this test checks.  Where the real module
+    imports, it is used unchanged.
+    """
+    try:
+        import mlx_vlm.generate.image  # noqa: F401
+        return
+    except ImportError:
+        pass
+    import types
+
+    image = types.ModuleType("mlx_vlm.generate.image")
+    image.ImageGenerationRequest = lambda **kw: SimpleNamespace(**kw)
+    generate = types.ModuleType("mlx_vlm.generate")
+    generate.image = image
+    package = types.ModuleType("mlx_vlm")
+    package.generate = generate
+    for name, module in (("mlx_vlm", package), ("mlx_vlm.generate", generate), ("mlx_vlm.generate.image", image)):
+        monkeypatch.setitem(sys.modules, name, module)
+
+
+def test_qwen_adapter_encodes_backend_pixels_without_model_load(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _stub_qwen_request_type(monkeypatch)
     _write(tmp_path / "model_index.json", b'{"_class_name":"QwenImage21Pipeline"}')
     _write(tmp_path / "transformer/config.json", b'{"_class_name":"QwenImage21Transformer2DModel","num_layers":32,"num_attention_heads":32}')
     _snapshot(tmp_path, "Qwen/Qwen-Image-2.1", QWEN_REVISION, ["model_index.json", "transformer/config.json"])
