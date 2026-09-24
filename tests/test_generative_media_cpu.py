@@ -63,13 +63,13 @@ def test_converted_gguf_requires_complete_base_components(tmp_path: Path) -> Non
         shards[name] = {"size": 1, "sha256": hashlib.sha256(b"x").hexdigest()}
     (tmp_path / "mlx2-conversion.json").write_text(json.dumps({
         "source_revision": GGUF_REVISION, "base_revision": QWEN_REVISION,
-        "tensor_count": 297, "output_files": shards,
+        "tensor_count": 297, "output_dtype": "bfloat16", "output_files": shards,
     }))
     with pytest.raises(ValueError, match="lacks"):
         inspect_qwen_image21(tmp_path)
     for name in ("processor/tokenizer.json", "text_encoder/config.json", "vae/config.json"):
         _write(tmp_path / name)
-    assert inspect_qwen_image21(tmp_path).kind == "qwen-image-2.1-gguf-mlx"
+    assert inspect_qwen_image21(tmp_path).kind == "qwen-image-2.1-gguf-mlx-bf16"
 
 
 def test_ltx_distilled_source_requires_all_pipeline_components(tmp_path: Path) -> None:

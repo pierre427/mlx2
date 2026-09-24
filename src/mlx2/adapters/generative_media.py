@@ -120,7 +120,16 @@ def inspect_qwen_image21(path: str | Path) -> MediaArtifact:
         for rel in ("processor/tokenizer.json", "text_encoder/config.json", "vae/config.json"):
             if not (root / rel).is_file():
                 raise ValueError(f"converted pipeline lacks {rel}")
-        return MediaArtifact("qwen-image-2.1-gguf-mlx", root, GGUF_REVISION, _fingerprint(proof))
+        quantization = {"group_size": 64, "bits": 4, "mode": "affine"}
+        if proof.get("output_dtype") == "bfloat16" and proof.get("quantization") is None:
+            kind = "qwen-image-2.1-gguf-mlx-bf16"
+        elif proof.get("output_dtype") == "mlx-affine-4bit" and proof.get("quantization") == quantization:
+            if transformer.get("quantization") != quantization:
+                raise ValueError("converted transformer quantization config differs")
+            kind = "qwen-image-2.1-gguf-mlx-4bit"
+        else:
+            raise ValueError("converted transformer format is unsupported")
+        return MediaArtifact(kind, root, GGUF_REVISION, _fingerprint(proof))
     manifest = _complete_snapshot(root, repo="Qwen/Qwen-Image-2.1", revision=QWEN_REVISION)
     return MediaArtifact("qwen-image-2.1", root, QWEN_REVISION, _fingerprint(manifest))
 
