@@ -120,7 +120,9 @@ def prepare(source: Path, output: Path, runtime: Path) -> dict:
                 raise RuntimeError(f"LTX converter did not produce {name}")
             records[name] = {"size": path.stat().st_size, "sha256": _sha256(path)}
         receipt["steps"][step] = records
-        receipt_path.write_text(json.dumps(receipt, indent=2) + "\n")
+        pending = receipt_path.with_suffix(".json.tmp")
+        pending.write_text(json.dumps(receipt, indent=2) + "\n")
+        os.replace(pending, receipt_path)
     return receipt
 
 
