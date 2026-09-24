@@ -99,3 +99,39 @@ def test_adapter_default_policy_rejects_non_defaultable_keys():
 
     with pytest.raises(ValueError, match="non-default-able"):
         _resolution(Bad, QWEN38_27B).default_execution_policy("native_mtp")
+
+
+def test_qwen38_27b_native_mtp_defaults_copy_drafts_single_lane():
+    from mlx2.runtime.copy_draft import CopyDraftPolicy
+    from mlx2.serving import ServingEngine
+
+    resolution = _resolution(Qwen3827BAdapter, QWEN38_27B)
+    policy = resolve_execution_policy_defaults(None, MTP, resolution)
+    parsed = CopyDraftPolicy.from_value(policy["self_mtp_copy_draft"])
+    assert parsed.enabled is True
+    # The GO verdict was measured with cohort copies refused.
+    assert parsed.batched_max_span == 0
+    ServingEngine.validate_arguments("unused", execution_policy=policy)
+    # Ordinary route: copy drafts need self-MTP, so no default there.
+    ordinary = resolve_execution_policy_defaults(None, ORDINARY, resolution) or {}
+    assert "self_mtp_copy_draft" not in ordinary
+    # An explicit disable wins.
+    off = resolve_execution_policy_defaults(
+        {"self_mtp_copy_draft": {"enabled": False}}, MTP, resolution
+    )
+    assert off["self_mtp_copy_draft"] == {"enabled": False}
+
+
+@pytest.mark.parametrize(
+    ("adapter_type", "descriptor"),
+    [
+        (Qwen3635BA3BAdapter, qwen36(has_mtp=True)),
+        (FlashNextAdapter, QWEN4_FLASH_NEXT),
+        (XingAdapter, xing(has_mtp=True)),
+    ],
+)
+def test_copy_drafts_stay_off_where_unproven(adapter_type, descriptor):
+    policy = resolve_execution_policy_defaults(
+        None, MTP, _resolution(adapter_type, descriptor)
+    ) or {}
+    assert "self_mtp_copy_draft" not in policy

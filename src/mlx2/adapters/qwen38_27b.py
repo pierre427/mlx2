@@ -214,8 +214,19 @@ class Qwen3827BAdapter(FlashNextAdapter):
     # zero output differences, gate go (TTFT shared system 7.72 -> 0.29 s, RAG
     # 20.82 -> 0.42 s; qualification/runs/interior-ckpt-20260919/
     # qwen38-27b-shared-rag.json).
+    #
+    # Copy drafts (single-lane default, batched_max_span 0): GO at B1 on this
+    # model, native MTP d2, full pre-registered criterion.  Code 1.204x (t0)
+    # and 1.261x (t0.7); prose 0.999x (worst rep 0.962); B4 1.009x; peak
+    # memory +/-0.02 GiB (qualification/runs/copy-mtp-20260919/
+    # STATUS-rm01-gpu.md, ab-27b-t0-v2.json).  Above the handoff width the
+    # cohort runs ordinary and copies are inert.  Not declared on Qwen3.6:
+    # its prose dispersion did not clear.
     default_route_execution_policy = {
-        "native_mtp": {"apc_interior_checkpoints": "auto"},
+        "native_mtp": {
+            "apc_interior_checkpoints": "auto",
+            "self_mtp_copy_draft": {"enabled": True},
+        },
     }
     """Dense text adapter using shared chat parsing and modern runtime state."""
 
