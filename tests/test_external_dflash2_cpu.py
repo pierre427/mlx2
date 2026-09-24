@@ -1032,6 +1032,11 @@ def test_actual_serving_factory_preserves_reserve_and_reclaims(monkeypatch,gross
             raise RuntimeError('stop at factory seam without model allocation')
         def close(self):pass
     monkeypatch.setattr(memory,'execution_headroom',lambda:gross*(1<<30))
+    # Expected net headroom is gross minus the 128 GiB calibration host's
+    # 16+4 GiB reserve; the reserve is host-scaled, so pin the host readings
+    # rather than probe the machine running the test.
+    monkeypatch.setattr(memory,'host_memory_gib',lambda:128.0)
+    monkeypatch.setattr(memory,'metal_advisory_gib',lambda:112.0)
     monkeypatch.setattr(apc_v2,'APCv2',APC)
     monkeypatch.setattr(serving,'runtime_identity',lambda:{'source_sha256':'test'})
     monkeypatch.setattr(mx,'synchronize',lambda:events.append('sync'))

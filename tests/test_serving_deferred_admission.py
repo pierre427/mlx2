@@ -73,6 +73,13 @@ def deferred_engine(monkeypatch):
         def close(self): pass
     monkeypatch.setattr(serving, 'runtime_identity', lambda: {'source_sha256': 'fake'})
     monkeypatch.setattr(memory, 'execution_headroom', lambda: state['free'])
+    # Admission reserves are host-scaled from installed RAM and Metal's
+    # advisory (16+4 GiB on the 128 GiB calibration host, 3+~1 GiB on a
+    # 36 GiB M3). The fake 21 GiB of headroom is sized against the
+    # calibration reserves, so pin those readings instead of probing the
+    # machine running the test.
+    monkeypatch.setattr(memory, 'host_memory_gib', lambda: 128.0)
+    monkeypatch.setattr(memory, 'metal_advisory_gib', lambda: 112.0)
     monkeypatch.setattr(os_memory, 'physical_footprint_bytes', lambda: 0)
     monkeypatch.setattr(apc_v2, 'APCv2', APC)
     monkeypatch.setattr(generate, 'BatchGenerator', Batch)
