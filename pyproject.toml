@@ -27,6 +27,7 @@ observability = [
 # (fork 653f1f13), and 0.7.1 is reported slower per MTP cycle (omlx#3750:
 # +10.6% ms/cycle) and a suspect in a cold-path drift (Rapid#3551). A/B first.
 multimodal = ["pillow>=10", "opencv-python>=4.10", "mlx-vlm>=0.6.17,<0.7"]
+image-convert = ["gguf>=0.19,<0.20", "numpy>=2", "safetensors>=0.8", "torch>=2.4"]
 
 [project.scripts]
 mlx2-serve = "mlx2.server:main"
