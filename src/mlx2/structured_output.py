@@ -398,6 +398,7 @@ def _schema_pattern_unbounded(schema, depth=0, *, finite_numbers=False):
             raise ValueError("JSON schema supports at most 64 object properties")
         if (
             not isinstance(required, list)
+            or any(not isinstance(name, str) for name in required)
             or len(required) != len(set(required))
             or set(required) - set(properties)
             or any(not isinstance(name, str) for name in properties)

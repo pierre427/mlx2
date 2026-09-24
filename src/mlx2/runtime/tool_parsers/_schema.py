@@ -123,6 +123,11 @@ def resolve_local_refs(schema: Any) -> dict:
 
     def visit(value: Any, depth: int, active: tuple[str, ...], ref_depth: int):
         nonlocal nodes
+        if depth > _MAX_REF_DEPTH:
+            too_large(
+                f"JSON schema nesting depth must be at most {_MAX_REF_DEPTH}",
+                through_ref=bool(active),
+            )
         nodes += 1
         if nodes > _MAX_RESOLVED_NODES:
             too_large(
@@ -170,14 +175,6 @@ def resolve_local_refs(schema: Any) -> dict:
                 result[key] = visit(item, depth + 1, active, ref_depth)
             else:
                 result[key] = copy.deepcopy(item)
-        # Do not turn the pre-existing schema nesting bound into a reference
-        # failure for schemas that contain no reference at all. Once a target
-        # has been expanded, however, its schema nesting is bounded at the same
-        # sixteen levels as the strict compiler.
-        if depth > _MAX_REF_DEPTH and active:
-            raise SchemaReferenceError(
-                f"JSON schema reference expansion exceeds schema depth {_MAX_REF_DEPTH}"
-            )
         return result
 
     resolved = visit(root, 0, (), 0)
@@ -328,13 +325,33 @@ def raw_string_pattern(schema: Any, *, forbidden: str = "<", wire_max: int = 409
     return rf"[^{excluded}]{{{minimum},{maximum}}}"
 
 
+def _json_equal(left: Any, right: Any) -> bool:
+    # Python treats True == 1 (including inside containers); JSON Schema does
+    # not. Integer and floating-point spellings still share a numeric value.
+    if type(left) in (int, float) and type(right) in (int, float):
+        return left == right
+    if type(left) is not type(right):
+        return False
+    if isinstance(left, dict):
+        return left.keys() == right.keys() and all(
+            _json_equal(value, right[key]) for key, value in left.items()
+        )
+    if isinstance(left, list):
+        return len(left) == len(right) and all(
+            _json_equal(a, b) for a, b in zip(left, right)
+        )
+    return left == right
+
+
 def schema_value_matches(value: Any, schema: Any) -> bool:
     """Validate values against the bounded schema subset used by tool wires."""
     if not isinstance(schema, dict):
         return False
-    if "enum" in schema and value not in schema["enum"]:
-        return False
-    if "const" in schema and value != schema["const"]:
+    if "enum" in schema:
+        choices = schema["enum"]
+        if not isinstance(choices, list) or not any(_json_equal(value, item) for item in choices):
+            return False
+    if "const" in schema and not _json_equal(value, schema["const"]):
         return False
     for key in ("anyOf", "oneOf"):
         if key in schema:
@@ -344,11 +361,6 @@ def schema_value_matches(value: Any, schema: Any) -> bool:
             matches = sum(schema_value_matches(value, branch) for branch in branches)
             return matches >= 1 if key == "anyOf" else matches == 1
     declared = schema.get("type")
-    if isinstance(declared, list):
-        return any(
-            schema_value_matches(value, {**schema, "type": item})
-            for item in declared
-        )
     checks = {
         "string": lambda item: isinstance(item, str),
         "integer": lambda item: type(item) is int,
@@ -358,6 +370,15 @@ def schema_value_matches(value: Any, schema: Any) -> bool:
         "array": lambda item: isinstance(item, list),
         "null": lambda item: item is None,
     }
+    if isinstance(declared, list):
+        if not declared or any(not isinstance(item, str) or item not in checks for item in declared):
+            return False
+        return any(
+            schema_value_matches(value, {**schema, "type": item})
+            for item in declared
+        )
+    if "type" in schema and (not isinstance(declared, str) or declared not in checks):
+        return False
     if declared in checks and not checks[declared](value):
         return False
     if declared == "string":
