@@ -296,6 +296,52 @@ def test_stream_request_rows_match_the_evidence_schema():
     )["passed"]
 
 
+def test_stream_request_keeps_the_receipt_when_a_usage_only_chunk_follows():
+    """include_usage sends a choice-less usage chunk after the finish chunk.
+
+    That chunk carries no ``mlx2`` receipt, so taking the receipt from the
+    last usage-bearing event recorded an empty one on every request.
+    """
+    receipt = {"ordinary_compute_width": 1, "mtp": {"mtp_ordinary_handoff": {"engaged": True}}}
+
+    class StreamHandler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            events = [
+                {"choices": [{"delta": {"role": "assistant", "content": "A"}}]},
+                {
+                    "choices": [{"delta": {}, "finish_reason": "length"}],
+                    "usage": {"completion_tokens": 1},
+                    "mlx2": receipt,
+                },
+                {"choices": [], "usage": {"completion_tokens": 1}},
+            ]
+            body = b"".join(
+                f"data: {json.dumps(event)}\n\n".encode() for event in events
+            ) + b"data: [DONE]\n\n"
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *_args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), StreamHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        row = benchmark._stream_request(
+            f"http://127.0.0.1:{server.server_port}", "prompt", 5.0, 4
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
+    assert row["receipt"] == receipt
+    assert row["usage"] == {"completion_tokens": 1}
+
+
 def _qualification_report(*, decreases=0, recoveries=0, d2_rate=104.8):
     status = {
         "settings": {

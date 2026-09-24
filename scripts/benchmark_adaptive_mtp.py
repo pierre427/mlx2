@@ -250,6 +250,7 @@ def _stream_request(url: str, prompt: str, timeout: float, max_tokens: int) -> d
     output_parts: list[str] = []
     tokens: list[dict[str, Any]] = []
     terminal: dict[str, Any] = {}
+    receipt: dict[str, Any] = {}
     with urlopen(
         Request(
             url + "/v1/chat/completions",
@@ -294,6 +295,10 @@ def _stream_request(url: str, prompt: str, timeout: float, max_tokens: int) -> d
                     first_token_at = time.monotonic()
             if "usage" in event:
                 terminal = event
+            # The include_usage chunk that closes the stream carries usage but
+            # no receipt; the receipt rides on the finish chunk before it.
+            if event.get("mlx2"):
+                receipt = event["mlx2"]
     finished = time.monotonic()
     if not terminal.get("usage") or first_token_at is None:
         raise RuntimeError("stream completed without token timing or terminal usage")
@@ -308,7 +313,7 @@ def _stream_request(url: str, prompt: str, timeout: float, max_tokens: int) -> d
         "ttft_seconds": first_token_at - started,
         "wall_seconds": finished - started,
         "decode_tokens_per_second": max(0, completion_tokens - 1) / decode_seconds,
-        "receipt": terminal.get("mlx2") or {},
+        "receipt": receipt,
     }
 
 
