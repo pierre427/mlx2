@@ -146,3 +146,18 @@ def test_ltx_conversion_resume_rechecks_output_hash(tmp_path: Path) -> None:
     assert module["_matches"](tmp_path, records, (path.name,))
     _write(path, b"xyz")
     assert not module["_matches"](tmp_path, records, (path.name,))
+
+
+def test_ltx_partial_conversion_checks_pinned_source_hash(tmp_path: Path) -> None:
+    module = runpy.run_path(str(Path(__file__).resolve().parents[1] / "scripts" / "prepare_ltx25_mlx.py"))
+    names = ["diffusion_models/ltx-2.5-22b-distilled-transformer-bf16.safetensors"] + [f"other-{i}" for i in range(7)]
+    _snapshot(tmp_path, "Lightricks/LTX-2.5", LTX_REVISION, names)
+    manifest_path = tmp_path / ".hf-download-manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["files"][0]["sha256"] = hashlib.sha256(b"x").hexdigest()
+    manifest_path.write_text(json.dumps(manifest))
+    path = tmp_path / names[0]
+    assert module["_partial_fingerprint"](tmp_path, (path,))
+    _write(path, b"y")
+    with pytest.raises(ValueError, match="hash changed"):
+        module["_partial_fingerprint"](tmp_path, (path,))

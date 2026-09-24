@@ -30,6 +30,16 @@ EXPECTED = {
     "duration-head": ("duration_head.safetensors",),
     "upscalers": ("spatial_upscaler_x2.safetensors", "temporal_upscaler_x2.safetensors"),
 }
+NEEDED = {
+    "config": ("--distilled",),
+    "transformer-distilled": ("--distilled",),
+    "connector": ("--distilled", "--gemma4"),
+    "text-encoder": ("--gemma4",),
+    "vae": ("--vae-conv",),
+    "audio-vae": ("--audio-vae",),
+    "duration-head": ("--duration-head",),
+    "upscalers": ("--spatial-upscaler", "--temporal-upscaler"),
+}
 
 
 def _sha256(path: Path) -> str:
@@ -53,12 +63,36 @@ def _matches(output: Path, records: dict, expected: tuple[str, ...]) -> bool:
     return True
 
 
-def prepare(source: Path, output: Path, runtime: Path) -> dict:
+def _partial_fingerprint(source: Path, paths: tuple[Path, ...]) -> str:
+    manifest = json.loads((source / ".hf-download-manifest.json").read_text())
+    if (
+        manifest.get("repo") != "Lightricks/LTX-2.5"
+        or manifest.get("revision") != "5e6e71018ee1756ed329b697a7b4aedc934dfce9"
+        or len(manifest.get("files", [])) != 8
+    ):
+        raise ValueError("LTX partial manifest is not the pinned selected snapshot")
+    entries = {entry["path"]: entry for entry in manifest["files"]}
+    for path in paths:
+        relative = path.relative_to(source).as_posix()
+        entry = entries.get(relative)
+        if entry is None or not path.is_file() or path.stat().st_size != entry["size"]:
+            raise ValueError(f"LTX source component is incomplete: {relative}")
+        if entry.get("sha256") and _sha256(path) != entry["sha256"]:
+            raise ValueError(f"LTX source component hash changed: {relative}")
+    return hashlib.sha256(json.dumps(manifest, sort_keys=True).encode()).hexdigest()
+
+
+def prepare(source: Path, output: Path, runtime: Path, *, only_step: str | None = None) -> dict:
+    source = source.expanduser().resolve()
+    output = output.expanduser().resolve()
+    runtime = runtime.expanduser().resolve()
     root = Path(__file__).resolve().parents[1]
     sys.path.insert(0, str(root / "src"))
     from mlx2.adapters.generative_media import inspect_ltx25_source
 
-    artifact = inspect_ltx25_source(source)
+    steps = (only_step,) if only_step else STEPS
+    if only_step is not None and only_step not in STEPS:
+        raise ValueError(f"unsupported LTX conversion step: {only_step}")
     revision = subprocess.run(
         ["git", "-C", str(runtime), "rev-parse", "HEAD"], check=True,
         capture_output=True, text=True, timeout=5,
@@ -71,15 +105,6 @@ def prepare(source: Path, output: Path, runtime: Path) -> dict:
         raise FileNotFoundError("pinned LTX converter or interpreter is missing")
     output.mkdir(parents=True, exist_ok=True)
     receipt_path = output / ".mlx2-cpu-conversion.json"
-    receipt = json.loads(receipt_path.read_text()) if receipt_path.exists() else {
-        "source_fingerprint": artifact.fingerprint,
-        "source_revision": artifact.source_revision,
-        "runtime_revision": revision,
-        "steps": {},
-        "execution_qualification": "pending",
-    }
-    if receipt["source_fingerprint"] != artifact.fingerprint or receipt["runtime_revision"] != revision:
-        raise ValueError("existing LTX conversion is bound to another source/runtime")
     flags = {
         "--distilled": source / "diffusion_models/ltx-2.5-22b-distilled-transformer-bf16.safetensors",
         "--gemma4": source / "text_encoders/gemma4-12b-with-proj-ltx-2.5-bf16.safetensors",
@@ -89,16 +114,34 @@ def prepare(source: Path, output: Path, runtime: Path) -> dict:
         "--spatial-upscaler": source / "latent_upscale_models/ltx-2.5-latent-spatial-upscaler-x2-bf16-1.0.safetensors",
         "--temporal-upscaler": source / "latent_upscale_models/ltx-2.5-latent-temporal-upscaler-x2-bf16-1.0.safetensors",
     }
-    for flag, path in flags.items():
+    required = {flag for step in steps for flag in NEEDED[step]}
+    for flag in required:
+        path = flags[flag]
         if not path.is_file():
             raise FileNotFoundError(f"{flag}: {path}")
+    if only_step:
+        fingerprint = _partial_fingerprint(source, tuple(flags[flag] for flag in sorted(required)))
+        source_revision = "5e6e71018ee1756ed329b697a7b4aedc934dfce9"
+    else:
+        artifact = inspect_ltx25_source(source)
+        fingerprint = artifact.fingerprint
+        source_revision = artifact.source_revision
+    receipt = json.loads(receipt_path.read_text()) if receipt_path.exists() else {
+        "source_fingerprint": fingerprint,
+        "source_revision": source_revision,
+        "runtime_revision": revision,
+        "steps": {},
+        "execution_qualification": "pending",
+    }
+    if receipt["source_fingerprint"] != fingerprint or receipt["runtime_revision"] != revision:
+        raise ValueError("existing LTX conversion is bound to another source/runtime")
     launch = (
         "import mlx.core as mx, runpy, sys; "
         "mx.set_default_device(mx.cpu); "
         "sys.argv = [sys.argv[1], *sys.argv[2:]]; "
         "runpy.run_path(sys.argv[0], run_name='__main__')"
     )
-    for step in STEPS:
+    for step in steps:
         expected = EXPECTED[step]
         if _matches(output, receipt["steps"].get(step), expected):
             continue
@@ -131,8 +174,9 @@ def main() -> None:
     parser.add_argument("--source", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--runtime", required=True, type=Path)
+    parser.add_argument("--step", choices=STEPS, help="Convert one verified component before the full snapshot completes")
     args = parser.parse_args()
-    print(json.dumps(prepare(args.source, args.output, args.runtime), indent=2))
+    print(json.dumps(prepare(args.source, args.output, args.runtime, only_step=args.step), indent=2))
 
 
 if __name__ == "__main__":
