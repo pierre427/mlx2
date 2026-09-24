@@ -141,3 +141,47 @@ def test_kernel_batch_and_head_dim_128():
     finally:
         os.environ.pop("MLX2_QSDPA_DECODE_KERNEL", None)
         mx.set_default_device(mx.cpu)
+
+
+# --- unquantized (fp16/bf16) tiled kernel: opt-in ------------------------------
+
+
+def test_fp_kernel_is_opt_in(pretend_gpu, monkeypatch):
+    q = mx.zeros((1, 16, 1, 256), dtype=mx.bfloat16)
+    k = mx.zeros((1, 2, qdm.FP_MIN_CONTEXT, 256), dtype=mx.bfloat16)
+    monkeypatch.delenv("MLX2_FP_DECODE_KERNEL", raising=False)
+    assert not qdm.use_fp_decode_kernel(q, k, k)
+    monkeypatch.setenv("MLX2_FP_DECODE_KERNEL", "1")
+    assert qdm.use_fp_decode_kernel(q, k, k)
+    short = mx.zeros((1, 2, qdm.FP_MIN_CONTEXT - 1, 256), dtype=mx.bfloat16)
+    assert not qdm.use_fp_decode_kernel(q, short, short)
+    assert not qdm.use_fp_decode_kernel(q, k, k, mask=mx.ones((1, 1, 1, qdm.FP_MIN_CONTEXT), dtype=mx.bool_))
+    assert not qdm.use_fp_decode_kernel(mx.zeros((1, 16, 2, 256), dtype=mx.bfloat16), k, k)
+
+
+@metal
+@pytest.mark.parametrize("Hq,Hkv", [(16, 2), (24, 4), (16, 4), (8, 8)])
+def test_fp_kernel_matches_sdpa(Hq, Hkv, monkeypatch):
+    from mlx2.runtime.models import base
+    from mlx2.runtime.models.cache import KVCache
+
+    mx.set_default_device(mx.gpu)
+    try:
+        mx.random.seed(5)
+        c = KVCache()
+        for s in range(0, qdm.FP_MIN_CONTEXT + 37, 4096):
+            n = min(4096, qdm.FP_MIN_CONTEXT + 37 - s)
+            c.update_and_fetch(mx.random.normal((1, Hkv, n, 256)).astype(mx.bfloat16),
+                               mx.random.normal((1, Hkv, n, 256)).astype(mx.bfloat16))
+        k, v = c.keys_and_values()
+        q = mx.random.normal((1, Hq, 1, 256)).astype(mx.bfloat16)
+        want = mx.fast.scaled_dot_product_attention(q, k, v, scale=0.0625)
+        got = qdm.gqa_decode_attention_fp(q, k, v, scale=0.0625)
+        assert mx.abs(got.astype(mx.float32) - want.astype(mx.float32)).max().item() < 5e-3
+        monkeypatch.setenv("MLX2_FP_DECODE_KERNEL", "1")
+        routed = base.scaled_dot_product_attention(q, k, v, cache=c, scale=0.0625, mask=None)
+        assert mx.array_equal(routed, got).item()
+        monkeypatch.delenv("MLX2_FP_DECODE_KERNEL")
+        assert mx.array_equal(base.scaled_dot_product_attention(q, k, v, cache=c, scale=0.0625, mask=None), want).item()
+    finally:
+        mx.set_default_device(mx.cpu)

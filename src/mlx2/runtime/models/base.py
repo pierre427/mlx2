@@ -242,6 +242,12 @@ def scaled_dot_product_attention(
             out = out * _expand_kv_scale(value_scale, out.shape[1])
         return out
     else:
+        if queries.shape[2] == 1 and sinks is None:
+            from .qsdpa_decode_metal import gqa_decode_attention_fp, use_fp_decode_kernel
+
+            row_mask = None if isinstance(mask, str) else mask
+            if use_fp_decode_kernel(queries, keys, values, mask=row_mask):
+                return gqa_decode_attention_fp(queries, keys, values, scale=scale)
         return mx.fast.scaled_dot_product_attention(
             queries, keys, values, scale=scale, mask=mask, sinks=sinks
         )
