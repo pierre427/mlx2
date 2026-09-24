@@ -137,6 +137,16 @@ def quantized_scaled_dot_product_attention(
     )
     key_bits = bits if key_bits is None else key_bits
     value_bits = bits if value_bits is None else value_bits
+    if L == 1:
+        from .qsdpa_decode_metal import gqa_quantized_decode_attention, use_decode_kernel
+
+        # A causal mask means nothing for a single query row.
+        row_mask = None if isinstance(mask, str) else mask
+        if use_decode_kernel(queries, q_keys, q_values, group_size=group_size,
+                             key_bits=key_bits, value_bits=value_bits, mask=row_mask):
+            return gqa_quantized_decode_attention(
+                queries, q_keys, q_values, scale=scale, group_size=group_size,
+                key_bits=key_bits, value_bits=value_bits)
     if L >= flash_min_l:
         keys = mx.dequantize(
             *_contiguous_quant(q_keys), group_size=group_size, bits=key_bits

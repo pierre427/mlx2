@@ -195,9 +195,22 @@ def run_arm(model, arm, prompt, text, questions, *, encode, decode, eos, args):
         rows.append(out)
     timed = step_ms[args.warmup_steps:]
 
+    margins = []
+
+    def pick(logits):
+        """Greedy token; records the top-2 log-prob margin of every choice."""
+        logp = logits.astype(mx.float32) - mx.logsumexp(logits.astype(mx.float32))
+        top2 = mx.argpartition(-logp, kth=1)[:2]
+        vals = logp[top2]
+        first, second = (0, 1) if vals[0].item() >= vals[1].item() else (1, 0)
+        token = int(top2[first].item())
+        margins.append({"token": token, "runner_up": int(top2[second].item()),
+                        "margin": float(vals[first].item() - vals[second].item())})
+        return token
+
     def generate(prompt_text):
         out = model(mx.array([list(encode(prompt_text))], dtype=mx.uint32), cache=cache)
-        token = int(mx.argmax(out[0, -1]).item())
+        token = pick(out[0, -1])
         generated = []
         for _ in range(args.answer_tokens):
             if token in eos:
@@ -206,7 +219,7 @@ def run_arm(model, arm, prompt, text, questions, *, encode, decode, eos, args):
             if "\n" in decode(generated):
                 break
             out = model(mx.array([[token]], dtype=mx.uint32), cache=cache)
-            token = int(mx.argmax(out[0, -1]).item())
+            token = pick(out[0, -1])
         return decode(generated)
 
     answers = []
@@ -233,6 +246,7 @@ def run_arm(model, arm, prompt, text, questions, *, encode, decode, eos, args):
         "index_bytes": sum(c.index_nbytes() for c in indexed),
         "peak_memory_gb": mx.get_peak_memory() / 1e9,
         "answers": answers,
+        "answer_margins": margins,
     }
     if indexed:
         expected = len(indexed) * (len(text) - 1)
