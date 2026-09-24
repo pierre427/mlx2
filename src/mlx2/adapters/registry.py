@@ -148,6 +148,12 @@ def _xing4_0(path: Path, config: dict) -> AdapterResolution:
     )
 
 
+def _nemotron_h(path: Path, config: dict) -> AdapterResolution:
+    module = importlib.import_module(".nemotron3_super", __package__)
+    artifact = module.inspect_artifact(path)
+    return AdapterResolution(module.Nemotron3SuperAdapter, module.DESCRIPTOR, artifact)
+
+
 def _gemma3n(path: Path, config: dict) -> AdapterResolution:
     module = importlib.import_module(".mlx_vlm", __package__)
     artifact = module.inspect_artifact(path, expected="gemma3n")
@@ -169,6 +175,7 @@ _RESOLVERS: dict[str, Callable[[Path, dict], AdapterResolution]] = {
     "cohere2_moe": _north_mini_code,
     "laguna": _laguna_xs21,
     "xing4_0": _xing4_0,
+    "nemotron_h": _nemotron_h,
     "gemma3n": _gemma3n,
     "minicpmo": _minicpmo,
 }

@@ -207,3 +207,31 @@ class SwitchGLU(nn.Module):
         if do_sort:
             x = _scatter_unsort(x, inv_order, indices.shape)
         return x.squeeze(-2)
+
+
+class SwitchMLP(nn.Module):
+    """Two-projection expert MLP with locality-aware gather ordering."""
+
+    def __init__(
+        self, input_dims: int, hidden_dims: int, num_experts: int,
+        activation=None, bias: bool = False,
+    ):
+        super().__init__()
+        self.fc1 = SwitchLinear(input_dims, hidden_dims, num_experts, bias=bias)
+        self.fc2 = SwitchLinear(hidden_dims, input_dims, num_experts, bias=bias)
+        self.activation = activation if activation is not None else nn.GELU(approx="precise")
+
+    def __call__(self, x, indices):
+        x = mx.expand_dims(x, (-2, -3))
+        do_sort = indices.size >= _GATHER_SORT_MIN_ASSIGNMENTS
+        idx = indices
+        inv_order = None
+        if do_sort:
+            x, idx, inv_order = _gather_sort(x, indices)
+        if self.training:
+            idx = mx.stop_gradient(idx)
+        x = self.fc1(x, idx, sorted_indices=do_sort)
+        x = self.fc2(self.activation(x), idx, sorted_indices=do_sort)
+        if do_sort:
+            x = _scatter_unsort(x, inv_order, indices.shape)
+        return x.squeeze(-2)

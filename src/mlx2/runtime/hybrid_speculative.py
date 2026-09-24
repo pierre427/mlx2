@@ -841,9 +841,19 @@ def prepare_self_mtp_lane(
     processor_prompt = prompt.astype(mx.uint32)
     y = processor_prompt
     prev_h = restored_seed_h
+    aligned_final = (
+        bool(getattr(model, "mtp_align_full_final_chunk", False))
+        and prompt_cache is None
+        and mtp_state is None
+        and prompt_boundary_out is None
+        and not record_prefix_fanout
+    )
+    final_chunk = (
+        (int(y.size) - 1) % prefill_step_size + 1 if aligned_final else 1
+    )
     with mx.stream(generation_stream):
-        while y.size > 1:
-            n = min(prefill_step_size, int(y.size) - 1)
+        while y.size > final_chunk:
+            n = min(prefill_step_size, int(y.size) - final_chunk)
             scope = getattr(model, "gdn_catchup_scope", None)
             context = scope(fused_gdn_catchup) if callable(scope) else nullcontext()
             with context:
@@ -876,7 +886,7 @@ def prepare_self_mtp_lane(
             )
             if checkpoint is not None:
                 prompt_boundary_out.update(checkpoint)
-        if prev_h is not None:
+        if prev_h is not None and not aligned_final:
             model.mtp_step(prev_h, y[None], draft_cache)
             if diagnostic_stages is not None:
                 mx.eval([c.state for c in draft_cache])
@@ -892,6 +902,16 @@ def prepare_self_mtp_lane(
             if diagnostic_stages is not None:
                 mx.eval(logit_hidden, hidden, [c.state for c in target_cache])
             finish_diagnostic_stage("final_target_m1_ms")
+            if aligned_final:
+                if prev_h is None:
+                    hs, ts = hidden[:, :-1], y[1:][None]
+                else:
+                    hs = mx.concatenate([prev_h, hidden[:, :-1]], axis=1)
+                    ts = y[None]
+                if ts.size > 0:
+                    model.mtp_step(hs, ts, draft_cache)
+                    if diagnostic_stages is not None:
+                        mx.eval([c.state for c in draft_cache])
             seed_h = hidden[:, -1:, :]
             logits = model.logits(logit_hidden[:, -1:, :])[0, -1]
             logits = _apply_logits_processors(
@@ -2328,9 +2348,10 @@ def _propose_batched_self_mtp_round(
     verify_ids = mx.concatenate(verify_rows, axis=0)
     _prepare_self_mtp_cache_group(batch.caches.target, valid_lengths, right_padding)
     try:
-        (vlogit_hidden, batched_hidden) = _mtp_backbone(
-            model, verify_ids, batch.caches.target
-        )
+        verifier = getattr(model, "mtp_verify_backbone", None)
+        if verifier is None:
+            verifier = lambda ids, caches: _mtp_backbone(model, ids, caches)
+        (vlogit_hidden, batched_hidden) = verifier(verify_ids, batch.caches.target)
         batched_logits = model.logits(vlogit_hidden)
     finally:
         _finalize_self_mtp_cache_group(batch.caches.target)
