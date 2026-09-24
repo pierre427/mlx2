@@ -19,9 +19,11 @@
     "Serializable empty draft planes preserve first real KV dtype",
     "Architecture-neutral external sidecar kind and distinct external route capability",
     "Metadata-only safetensors header reconciliation rejects missing, extra, mis-shaped, wrong-dtype, overlapping or mis-indexed draft tensors before payload allocation",
-    "Request-level DFlash receipts preserve cumulative engagement when the final budget-limited round uses the ordinary target"
+    "Request-level DFlash receipts preserve cumulative engagement when the final budget-limited round uses the ordinary target",
+    "Keep local safetensors shard names during header inspection so Hugging Face snapshot symlinks into sibling blobs retain index identity; reject nonlocal and non-string index paths before filesystem access"
   ],
   "validation": "103 targeted CPU tests passed on macOS 26.7 (tiny FP32/BF16 target+draft, q-distribution oracle, exact rollback, APCv2 disk/RNG, cancellation, atomic failures, CLI/qualification including fail-closed fallback evidence, actual serving reserve callback, fair partial-fit progress, real APC pressure lease protection, request-level cumulative route receipt, real 5.54 GB artifact header schema and duplicate-key/wrong-shape/wrong-dtype/overlap/index/missing/extra rejection); no actual artifact payload/model load and no GPU execution; unqualified",
+  "validation_2026_09_23": "tests/test_dflash2_artifact_metadata.py validates indexed and single-file snapshot symlinks plus invalid path rejection with synthetic headers under a hard MLX import guard; no real model artifact or GPU use.",
   "local_integration_dependency": {
     "repository": "mlx2",
     "path": "src/mlx2/runtime/apc_v2.py",

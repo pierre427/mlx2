@@ -165,14 +165,23 @@ def inspect_drafter(path, target):
     if index.exists():
         content=index.read_bytes();digest.update(content);mapping=_decode_unique_json(content, 'draft weight index').get('weight_map')
         if not isinstance(mapping,dict) or not mapping: raise ValueError('Invalid draft weight index')
+        if any(not isinstance(name, str) for name in mapping.values()):
+            raise ValueError('Invalid draft shard path')
         names=sorted(set(mapping.values()))
     else:
         mapping=None;names=['model.safetensors']
     files=[]
     paths=[]
     for name in names:
-        file=(path/name).resolve()
-        if not file.is_relative_to(path) or file.suffix!='.safetensors': raise ValueError('Invalid draft shard path')
+        # HF snapshots use local shard names symlinked into a sibling blob
+        # directory. Keep the lexical name for index/header reconciliation,
+        # as the other external-drafter inspectors do.
+        if (
+            '/' in name or '\\' in name or name.startswith('.')
+            or not name.endswith('.safetensors') or not (path / name).is_file()
+        ):
+            raise ValueError('Invalid draft shard path')
+        file = path / name
         stat=file.stat();record=(name,stat.st_size,stat.st_mtime_ns);files.append(record);paths.append(file);digest.update(json.dumps(record).encode())
     header_digests = _validate_weight_headers(paths, mapping, args, config.get('dtype'))
     digest.update(json.dumps(header_digests).encode())
