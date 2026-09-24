@@ -208,6 +208,8 @@ def apply_min_p(
         raise ValueError(
             f"`min_tokens_to_keep` has to be a positive integer, but is {min_tokens_to_keep}"
         )
+    if min_p == 0:
+        return logprobs
     top_logprobs = mx.max(logprobs, axis=-1, keepdims=True)
     scaled_min_p = top_logprobs + math.log(min_p)
     tokens_to_remove = logprobs < scaled_min_p
