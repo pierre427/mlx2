@@ -4503,8 +4503,26 @@ def resolve_route_selection(args, policy, adapter_resolution=None):
     return RouteSelection(route, source)
 
 
+# SRPT prefill order with the bypass cap, default on for every native
+# self-MTP route.  Measured on Qwen3.6 35B native MTP
+# (qualification/runs/srpt-prefill-20260920/mtp-{off,on}.bench.json): short
+# request TTFT p50 0.95 -> 0.51 s and max 1.27 -> 0.73 s with the long
+# request unchanged (8.96 -> 8.92 s).  The ordinary route stays FIFO: there
+# p50 moved 1.88 -> 1.85 s but the max rose 1.95 -> 2.36 s (ord-*.bench.json).
+NATIVE_MTP_PREFILL_SCHEDULING = {
+    "order": "srpt",
+    "max_bypass": 3,
+    "one_slice_contention": True,
+}
+
+
 def resolve_execution_policy_defaults(
-    policy, route_selection, adapter_resolution, *, approximate_kv=False
+    policy,
+    route_selection,
+    adapter_resolution,
+    *,
+    approximate_kv=False,
+    max_lanes=None,
 ):
     """Apply adapter defaults only after the serving route is known.
 
@@ -4533,6 +4551,16 @@ def resolve_execution_policy_defaults(
             if approximate_kv and key in STATE_CHECKPOINT_POLICY_KEYS:
                 continue
             resolved[key] = value
+    if (
+        route_selection.native_mtp
+        and "prefill_scheduling" not in resolved
+        and max_lanes is not None
+        # The bypass cap needs a self-MTP admission window (--max-lanes) of
+        # at least max_bypass + 1; below that the engine refuses the policy,
+        # so the default steps aside instead of breaking a small startup.
+        and max_lanes > NATIVE_MTP_PREFILL_SCHEDULING["max_bypass"]
+    ):
+        resolved["prefill_scheduling"] = dict(NATIVE_MTP_PREFILL_SCHEDULING)
     return resolved or None
 
 
@@ -4742,6 +4770,7 @@ def main():
             route_selection,
             adapter_resolution,
             approximate_kv=getattr(args, "approximate_kv", None) is not None,
+            max_lanes=args.max_lanes,
         )
     except ValueError as error:
         parser.error(str(error))

@@ -135,3 +135,51 @@ def test_copy_drafts_stay_off_where_unproven(adapter_type, descriptor):
         None, MTP, _resolution(adapter_type, descriptor)
     ) or {}
     assert "self_mtp_copy_draft" not in policy
+
+
+ALL_MTP = HYBRID_MTP + [
+    (XingAdapter, xing(has_mtp=True)),
+    (Nemotron3SuperAdapter, NEMOTRON),
+]
+
+
+@pytest.mark.parametrize(("adapter_type", "descriptor"), ALL_MTP)
+def test_native_mtp_routes_default_srpt_prefill_scheduling(adapter_type, descriptor):
+    from mlx2.runtime.adaptive_policy import PrefillOrder
+
+    resolution = _resolution(adapter_type, descriptor)
+    policy = resolve_execution_policy_defaults(None, MTP, resolution, max_lanes=16)
+    order = PrefillOrder.from_value(policy["prefill_scheduling"])
+    assert order.enabled and order.order == "srpt"
+    assert order.max_bypass == 3 and order.one_slice_contention is True
+    # Ordinary stays FIFO: SRPT raised its max TTFT 1.95 -> 2.36 s.
+    ordinary = resolve_execution_policy_defaults(
+        None, ORDINARY, resolution, max_lanes=16
+    ) or {}
+    assert "prefill_scheduling" not in ordinary
+
+
+def test_srpt_default_steps_aside_below_the_bypass_window_and_for_explicit():
+    resolution = _resolution(Qwen3635BA3BAdapter, qwen36(has_mtp=True))
+    for lanes in (1, 2, 3):
+        policy = resolve_execution_policy_defaults(
+            None, MTP, resolution, max_lanes=lanes
+        )
+        assert "prefill_scheduling" not in policy
+    assert "prefill_scheduling" in resolve_execution_policy_defaults(
+        None, MTP, resolution, max_lanes=4
+    )
+    explicit = resolve_execution_policy_defaults(
+        {"prefill_scheduling": None}, MTP, resolution, max_lanes=16
+    )
+    assert explicit["prefill_scheduling"] is None
+
+
+def test_server_main_passes_max_lanes_to_the_defaults(monkeypatch):
+    # The CLI path is what makes the default reach a bare server start.
+    import inspect
+
+    from mlx2 import server
+
+    source = inspect.getsource(server.main)
+    assert "max_lanes=args.max_lanes" in source
