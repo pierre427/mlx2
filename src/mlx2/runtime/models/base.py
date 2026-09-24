@@ -107,6 +107,44 @@ else:
     _QUANT_SDPA_FLASH_MIN_L_MHA = 192
 
 
+# MLX (39400a0d4) sends head_dim-256 causal prefill to its fused NAX kernel
+# only at >= 1024 query rows; below that it materializes the score matrix.
+# At the Qwen head shapes on an M5 Max, forcing the fused kernel is
+# 1.1-1.35x faster at 256-768 rows (2.6x where unfused hits a memory cliff)
+# and slower below 256 (2026-09-24, qualification/runs/
+# prefill-qwen-profile-20260923/fused_small_slices.log). Those rows are
+# adaptive prefill slices under decode contention and every prompt's last
+# partial chunk. MLX2_FUSED_SDPA_MIN_L=0 turns this off.
+_FUSED_D256_MIN_L = int(os.environ.get("MLX2_FUSED_SDPA_MIN_L", "256"))
+_FUSED_D256_MAX_L = 1024
+_FUSED_D256_UNAVAILABLE = set()
+
+
+def fast_sdpa(queries, keys, values, *, scale, mask, sinks=None):
+    """``mx.fast.scaled_dot_product_attention`` with the fused d256 range widened."""
+    L = queries.shape[2]
+    if (
+        0 < _FUSED_D256_MIN_L <= L < _FUSED_D256_MAX_L
+        and queries.shape[-1] == 256
+        and isinstance(mask, str)
+        and mask == "causal"
+        and sinks is None
+        and queries.dtype in (mx.bfloat16, mx.float16)
+    ):
+        key = (str(mx.default_device()), str(queries.dtype))
+        if key not in _FUSED_D256_UNAVAILABLE:
+            try:
+                return mx.fast.scaled_dot_product_attention(
+                    queries, keys, values, scale=scale, mask=mask, force_fused=True
+                )
+            except ValueError:
+                # No fused kernel here (CPU, a pre-NAX GPU): stop asking.
+                _FUSED_D256_UNAVAILABLE.add(key)
+    return mx.fast.scaled_dot_product_attention(
+        queries, keys, values, scale=scale, mask=mask, sinks=sinks
+    )
+
+
 def _contiguous_quant(q):
     """Return quantized cache views directly on mlx 0.32.2 or newer.
 
@@ -154,9 +192,7 @@ def quantized_scaled_dot_product_attention(
         values = mx.dequantize(
             *_contiguous_quant(q_values), group_size=group_size, bits=value_bits
         )
-        return mx.fast.scaled_dot_product_attention(
-            queries, keys, values, scale=scale, mask=mask
-        )
+        return fast_sdpa(queries, keys, values, scale=scale, mask=mask)
     # Not `queries *= scale`: that mutates the caller's array in place.
     queries = queries * scale
     if n_repeats > 1:
@@ -248,6 +284,4 @@ def scaled_dot_product_attention(
             row_mask = None if isinstance(mask, str) else mask
             if use_fp_decode_kernel(queries, keys, values, mask=row_mask):
                 return gqa_decode_attention_fp(queries, keys, values, scale=scale)
-        return mx.fast.scaled_dot_product_attention(
-            queries, keys, values, scale=scale, mask=mask, sinks=sinks
-        )
+        return fast_sdpa(queries, keys, values, scale=scale, mask=mask, sinks=sinks)

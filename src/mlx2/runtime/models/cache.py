@@ -3386,6 +3386,7 @@ class BatchKVCache(_BaseCache):
             if isinstance(left_padding, (list, tuple))
             else None
         )
+        self._bind_unpadded(self._padding_floor())
         self.offset = mx.array([-l for l in left_padding])
         self._idx = 0
         self._right_padding = None
@@ -3633,6 +3634,7 @@ class BatchKVCache(_BaseCache):
                     "Left padding can only be added to an empty BatchKVCache"
                 )
             left_padding = mx.array(left_padding)
+            self._unpadded_ref = None  # in-place: identity survives
             self.left_padding += left_padding
             self.offset -= left_padding
         if right_padding is not None and max(right_padding) > 0:
@@ -3683,6 +3685,7 @@ class BatchKVCache(_BaseCache):
             else:
                 self.keys = dynamic_roll(self.keys, padding[:, None], axis=2)
                 self.values = dynamic_roll(self.values, padding[:, None], axis=2)
+                self._unpadded_ref = None  # in-place: identity survives
                 self.left_padding += padding
             self.offset -= padding
             if floor is not None:
@@ -3884,7 +3887,37 @@ class BatchKVCache(_BaseCache):
             return list(cached[1])
         return [0] * rows
 
+    def _bind_unpadded(self, host_padding):
+        """Record that the current ``left_padding`` array is all <= 0.
+
+        Keyed by identity like ``_padding_floor``, so any rebinding (here or
+        by outside code) drops the proof; the in-place updates in this class
+        clear it explicitly. Only an exact host list may set it.
+        """
+        exact = getattr(self, "_host_padding_floor", None)
+        self._unpadded_ref = (
+            self.left_padding
+            if exact is not None
+            and exact[0] is self.left_padding
+            and all(p <= 0 for p in host_padding)
+            else None
+        )
+
     def make_mask(self, N: int, return_array: bool = False, **kwargs):
+        # Unpadded rows need no mask array: "causal" computes the same (keys
+        # are fetched as exactly ``[:_idx]``, so MLX's kL - qL offset is the
+        # diagonal) and lets head_dim-256 prefill take the causal fused
+        # kernel, which skips fully masked blocks; the array mask kept the
+        # Qwen3.5-9B ordinary route off it (2026-09-24). Decode (N == 1),
+        # windows and explicit array requests are unchanged.
+        if (
+            N > 1
+            and not return_array
+            and kwargs.get("window_size") is None
+            and getattr(self, "_unpadded_ref", None) is not None
+            and self._unpadded_ref is self.left_padding
+        ):
+            return "causal"
         return create_causal_mask(
             N, offset=self._idx, left_padding=self.left_padding, **kwargs
         )
@@ -3913,6 +3946,7 @@ class BatchKVCache(_BaseCache):
             self.left_padding,
             [p - min_left_pad for p in padding],
         )
+        self._bind_unpadded(self._host_padding_floor[1])
 
     def extend(self, other):
         """
