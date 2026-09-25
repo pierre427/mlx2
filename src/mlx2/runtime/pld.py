@@ -242,6 +242,7 @@ class PromptLookupBatchGenerator:
             "rotating_replay",
             "batched_verify",
             "max_proposal_tokens",
+            "memory_max_draft",
         }
     )
 
@@ -270,6 +271,7 @@ class PromptLookupBatchGenerator:
             "verify_cliff_start": 2,
             "verify_cliff_end": 1,
             "max_proposal_tokens": 1,
+            "memory_max_draft": 0,
         }
         for name, minimum in integer_bounds.items():
             if name not in validated:
@@ -908,6 +910,11 @@ class PromptLookupBatchGenerator:
                 lane.stats.span_snap_cycles += 1
                 lane.stats.span_snap_tokens += len(proposal) - safe
                 proposal = proposal[:safe]
+        # Serving admission may seat a lane below the full verify span when
+        # the host cannot hold num_draft + 1 rows; 0 decodes it at width one.
+        memory_cap = lane.config.get("memory_max_draft")
+        if memory_cap is not None and len(proposal) > memory_cap:
+            proposal = proposal[:memory_cap]
         inputs = [lane.anchor] + proposal
         # The driver owns the verify forward and the cache transaction, so a
         # round can run alone or share one batched forward with other lanes.
@@ -1056,6 +1063,7 @@ class PromptLookupBatchGenerator:
             "span_snap_cycles": lane.stats.span_snap_cycles,
             "span_extend_cycles": lane.stats.span_extend_cycles,
             "target_width": lane.target_max_width,
+            "memory_max_draft": lane.config.get("memory_max_draft"),
             "qualification_authority": "serving_route",
         }
         if finish_reason and lane.speculation_started:

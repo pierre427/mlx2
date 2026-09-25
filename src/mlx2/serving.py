@@ -863,9 +863,10 @@ def parallel_sample_lane_gib(controller, *, draft_depth, prompt_lookup_num_draft
     charge each sample's lane on this route before any context is known: the
     adapter's calibrated per-lane transient at the route's draft depth plus
     the prompt-lookup verify term.  A flat 2 GiB (Flash-Next's 1.76 rounded
-    up) charged North's prompt-lookup lanes, which admission costs at 1.24
-    GiB, and ordinary North lanes (0.31 GiB) six times over; on a 36 GiB M3
-    Pro it refused n=2 that lane admission seats.
+    up) charged ordinary North lanes (0.31 GiB) six times over; on a 36 GiB
+    M3 Pro it refused n=2 that lane admission seats.  The serving loop sizes
+    it at the route's floor (depth 0, no prompt-lookup verify span), because
+    lane admission seats a lane there when the full width does not fit.
     """
     return lane_admission_required_gib(
         controller,
@@ -954,6 +955,51 @@ def admit_lane_headroom(
         if fits:
             return (True, True, floor)
     return (False, False, required)
+
+
+def admit_prompt_lookup_lane(
+    controller, *, context_tokens, cache_gib, num_draft, headroom, **kwargs
+):
+    """Seat a prompt-lookup lane at the widest verify span that fits.
+
+    Returns ``(admitted, span, required_gib)``.  The verify term is charged
+    per row (``prompt_lookup_verification_gib``), so on a small host a dense
+    model's full span can exceed the whole idle headroom: Qwen3.8-27B at
+    num_draft 8 charged 3.1 * 8 / 3 = 8.27 GiB on top of a 5.39 GiB lane,
+    13.66 GiB against the 11-13 GiB an idle 36 GiB M3 Pro measured, so every
+    request on that route waited out its deadline and answered 429 while the
+    ordinary route served them.  A lane that cannot hold the full span is
+    seated at the widest span that fits, down to width one (``span`` 0, plain
+    target decode), exactly as the MTP route falls back to its depth floor;
+    the lane's receipt reports the cap.
+    """
+    (admitted, _floor, required) = admit_lane_headroom(
+        controller,
+        context_tokens=context_tokens,
+        draft_depth=0,
+        cache_gib=cache_gib,
+        prompt_lookup_num_draft=num_draft,
+        headroom=headroom,
+        **kwargs,
+    )
+    if admitted:
+        return (True, num_draft, required)
+    base = lane_admission_required_gib(
+        controller, context_tokens=context_tokens, draft_depth=0, cache_gib=cache_gib
+    )
+    per_row = prompt_lookup_verification_gib(controller, 1)
+    spare = headroom() / float(1 << 30) - base
+    span = max(0, min(num_draft - 1, math.floor(spare / per_row))) if spare > 0 else 0
+    (admitted, _floor, required) = admit_lane_headroom(
+        controller,
+        context_tokens=context_tokens,
+        draft_depth=0,
+        cache_gib=cache_gib,
+        prompt_lookup_num_draft=span or None,
+        headroom=headroom,
+        **kwargs,
+    )
+    return (admitted, span, required)
 
 
 def ensure_admission_headroom(
@@ -1156,6 +1202,8 @@ class Job:
     # Lane bytes admission granted this job that its cache has not allocated
     # yet; cleared by its first generated token (see ``unmaterialized_lane_bytes``).
     admission_reserved_gib: float = 0.0
+    # Verify-span cap prompt-lookup admission seated this lane at, or None.
+    prompt_lookup_span: int | None = None
     apc_interior_positions: tuple[int, ...] = ()
     # Budgeted P1 plan when rolling checkpoints are enabled (else empty), and
     # the (key, tokens) of this lane's latest disposable rolling checkpoint.
@@ -3212,8 +3260,8 @@ class ServingEngine:
         # Preserve the same hard reserve used by lane admission: 20 GiB on the
         # 128 GiB calibration host, derived from that host's advisory and RAM
         # below it (a flat 20 refused every request on a 36 GiB M3 Pro).  Each
-        # sample is charged what lane admission charges its lane on this
-        # route (``parallel_sample_lane_gib``); before the serving loop has
+        # sample is charged what lane admission charges its lane at the
+        # route's floor (``parallel_sample_lane_gib``); before the loop has
         # sized that, 2 GiB, Flash-Next's measured 1.76 GiB rounded up (the
         # earlier 4 GiB refused 70% of n=2 requests on Flash-Next under a
         # 20-lane load).  Unleased resident prefix checkpoints count as
@@ -3367,6 +3415,11 @@ class ServingEngine:
         branch = job.cache_branch
         job.cache_branch = None
         job.admission_hit = job.admission_tokens = None
+        # Grants are summed over attached lanes only, so a finished job no
+        # longer counts once it leaves ``active``; clearing here as well keeps
+        # a job object that some path forgot to detach from pinning memory.
+        if getattr(job, "admission_reserved_gib", 0.0):
+            job.admission_reserved_gib = 0.0
         if branch is not None and hasattr(branch, "close"):
             branch.close()
             if getattr(self, "apc_rolling_route", None) is not None:
@@ -4942,10 +4995,11 @@ class ServingEngine:
                     stop_tokens=[[token] for token in stop_token_ids],
                     post_prefill_transform=post_prefill_transform,
                 )
+            # The guard fronts lane admission, which seats a lane at its floor
+            # (MTP depth 0, prompt-lookup span 0) when the full width does not
+            # fit; charging the full width refused n>1 that admission serves.
             self._parallel_sample_lane_gib = parallel_sample_lane_gib(
-                controller,
-                draft_depth=config["num_draft"] if self.mtp else 0,
-                prompt_lookup_num_draft=batch.num_draft if prompt_lookup else None,
+                controller, draft_depth=0
             )
             if profile_name is None:
                 profile_name = selected_profile_name()
@@ -5378,23 +5432,38 @@ class ServingEngine:
                         # the actual forward width; the ordinary one-row
                         # share is already included by the lane cost.
                         granted = unmaterialized_lane_bytes(active.values())
-                        (admitted, depth_floor, required) = admit_lane_headroom(
-                            controller,
-                            context_tokens=len(tokens) + maximum,
-                            draft_depth=config["num_draft"] if self.mtp else 0,
-                            cache_gib=cache_copy,
-                            prompt_lookup_num_draft=(
-                                batch.num_draft if prompt_lookup else None
-                            ),
-                            headroom=(
-                                (lambda: execution_headroom() - granted)
-                                if granted
-                                else execution_headroom
-                            ),
-                            reclaim=reclaim_allocator,
-                            evict=evict_unused_checkpoint,
-                            evictable=getattr(apc, "unleased_resident_nbytes", None),
+                        admission_headroom = (
+                            (lambda: execution_headroom() - granted)
+                            if granted
+                            else execution_headroom
                         )
+                        job.prompt_lookup_span = None
+                        if prompt_lookup:
+                            (admitted, span, required) = admit_prompt_lookup_lane(
+                                controller,
+                                context_tokens=len(tokens) + maximum,
+                                cache_gib=cache_copy,
+                                num_draft=batch.num_draft,
+                                headroom=admission_headroom,
+                                reclaim=reclaim_allocator,
+                                evict=evict_unused_checkpoint,
+                                evictable=getattr(apc, "unleased_resident_nbytes", None),
+                            )
+                            depth_floor = False
+                            if admitted and span < batch.num_draft:
+                                job.prompt_lookup_span = span
+                                self.counts["prompt_lookup_admission_span_capped"] += 1
+                        else:
+                            (admitted, depth_floor, required) = admit_lane_headroom(
+                                controller,
+                                context_tokens=len(tokens) + maximum,
+                                draft_depth=config["num_draft"] if self.mtp else 0,
+                                cache_gib=cache_copy,
+                                headroom=admission_headroom,
+                                reclaim=reclaim_allocator,
+                                evict=evict_unused_checkpoint,
+                                evictable=getattr(apc, "unleased_resident_nbytes", None),
+                            )
                         if depth_floor:
                             self.counts["memory_admission_depth_floor_admits"] += 1
                         if granted and not admitted:
@@ -6018,6 +6087,8 @@ class ServingEngine:
                             sampling_config["emit_logprobs"] = wants_logprobs(job.request)
                         if getattr(hit, "target_only_plain_fallback", False):
                             sampling_config["target_only_plain_fallback"] = True
+                        if prompt_lookup and job.prompt_lookup_span is not None:
+                            sampling_config["memory_max_draft"] = job.prompt_lookup_span
                         if job.request.get("batch_cohort") is not None:
                             sampling_config["batch_cohort"] = {
                                 "tenant_id": job.tenant_id,
