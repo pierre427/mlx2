@@ -2894,6 +2894,15 @@ def commit_batched_self_mtp(
         raise
     batch.proposal_open = False
     batch._open_proposal = None
+    _retire_committed_rollbacks(batch.caches.target)
+
+
+def _retire_committed_rollbacks(caches) -> None:
+    """Release rollback records older than the committed cycle's own."""
+    for cache in caches:
+        retire = getattr(cache, "retire_rollbacks", None)
+        if retire is not None:
+            retire(keep=1)
 
 
 def abort_batched_self_mtp(

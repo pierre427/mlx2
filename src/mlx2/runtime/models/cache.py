@@ -2185,6 +2185,23 @@ class ArraysCache(_BaseCache):
         ):
             total -= self._rollbacks.popleft().span
 
+    def retire_rollbacks(self, keep: int = 1) -> int:
+        """Drop all but the newest ``keep`` records once a cycle has committed.
+
+        Each record pins a whole-batch pre-forward state, and a self-MTP
+        cohort starts speculation once per membership, so the window alone
+        kept ~window/(k+1) of them alive. Nothing rewinds past committed
+        tokens; the newest record still serves an abort and
+        ``latest_exact_rollback_boundary``. Same bookkeeping as the window's
+        own pruning. Returns the number of records dropped.
+        """
+        keep = max(1, int(keep))
+        dropped = 0
+        while len(self._rollbacks) > keep:
+            self._rollbacks.popleft()
+            dropped += 1
+        return dropped
+
     def latest_exact_rollback_boundary(self) -> ExactRollbackBoundary:
         """Export the newest uniform single-row rollback as a safe handle.
 

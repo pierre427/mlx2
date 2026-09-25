@@ -16,7 +16,7 @@ from mlx2.runtime.hybrid_speculative import (
     prepare_self_mtp_lane,
     propose_batched_self_mtp,
 )
-from mlx2.runtime.models.cache import make_prompt_cache
+from mlx2.runtime.models.cache import ArraysCache, make_prompt_cache
 from mlx2.runtime.models.qwen4_exp import (
     BatchQSAKVCache,
     Model,
@@ -1969,3 +1969,28 @@ def test_ragged_finalize_keeps_no_pooled_qsa_block_the_padded_row_left_open(
     cached = run(True)
     if not mtp:
         assert mx.array_equal(cached, run(False)).item()
+
+
+def test_committed_cycles_retire_older_rollback_records():
+    """Each verify forward records a GDN rollback that pins the whole
+    pre-forward recurrent state. The non-segmented route starts speculation
+    once per membership, so without retirement ~window/(k+1) records (21 at
+    k=2) stayed alive per cache. A commit keeps only the newest record, which
+    abort and prefix fan-out still use; tokens stay exact."""
+    mx.random.seed(43)
+    model = _tiny_qwen4_model()
+    prompts = ([1, 2, 3, 4, 5], [7, 8, 9, 10, 11, 12])
+    accepts = [(2, 2), (1, 0), (2, 1), (0, 2)] * 6
+    tokens, batch = _forced_cycles(model, prompts, accepts, uids=[0, 1])
+    recurrent = [
+        cache for cache in batch.caches.target if isinstance(cache, ArraysCache)
+    ]
+    assert recurrent
+    for cache in recurrent:
+        assert len(cache._rollbacks) == 1, len(cache._rollbacks)
+        assert cache.is_trimmable()
+    for row, prompt in enumerate(prompts):
+        alone, _ = _forced_cycles(
+            model, [prompt], [(pair[row],) for pair in accepts], uids=[row]
+        )
+        assert tokens[row] == alone[0]
