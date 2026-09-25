@@ -5,6 +5,8 @@ from functools import lru_cache
 from typing import Callable, Dict, List, Optional
 import mlx.core as mx
 
+from ..sampling_defaults import SAMPLING_EPS
+
 
 def _probe_safe(function):
     """Declare a stateless transform safe to reuse for provisional tokens.
@@ -131,7 +133,9 @@ def make_sampler(
         Callable[mx.array, mx.array]:
             A sampler which takes log-probabilities and returns tokens.
     """
-    if temp == 0:
+    # resolve_sampling already maps 0 < temp < SAMPLING_EPS to 0; guard here
+    # too so a direct caller cannot scale by an overflowing 1 / temp.
+    if 0 <= temp < SAMPLING_EPS:
         argmax_sampler = lambda x: mx.argmax(x, axis=-1)
         argmax_sampler.batch_groupable = True
         return argmax_sampler
@@ -301,8 +305,17 @@ def apply_xtc(
     )
 
 
+def _scale_by_temperature(logits, temp):
+    # float16 tops out at 65504: a flat row's max logprob (~-12) times
+    # 1 / 1e-4 is -inf, every token then is, and categorical returns id 0.
+    # bfloat16 and float32 keep their dtype so seeded draws do not move.
+    if logits.dtype == mx.float16:
+        logits = logits.astype(mx.float32)
+    return logits * (1 / temp)
+
+
 def categorical_sampling(logits, temp):
-    return mx.random.categorical(logits * (1 / temp))
+    return mx.random.categorical(_scale_by_temperature(logits, temp))
 
 
 @lru_cache(maxsize=32)
