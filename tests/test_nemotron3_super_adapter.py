@@ -335,3 +335,60 @@ def test_self_mtp_batched_cycles_cpu(force_accept, segmented):
             terminal=[False, False],
         )
     assert all(lane.stats.draft_proposed >= 6 for lane in batch.lanes)
+
+
+def _nemotron_channels(chunks, **request):
+    from mlx2.adapters.nemotron3_super import Nemotron3SuperAdapter
+
+    parser = Nemotron3SuperAdapter.__new__(Nemotron3SuperAdapter).output_parser(
+        {"messages": [{"role": "user", "content": "hi"}], **request}
+    )
+    events = []
+    for chunk in chunks:
+        events += parser.push(chunk)
+    events += parser.push("", final=True)
+    return (
+        "".join(e.get("reasoning_content", "") for e in events),
+        "".join(e.get("content", "") for e in events),
+    )
+
+
+def test_nemotron_think_close_separator_is_not_content():
+    """Qualifier stream evidence (series-20260924): thinking on by default,
+    the model wrote ``...string.\\n\\n</think>\\n\\nMLX2_READY`` and the
+    template's separator newlines leaked into ``content``."""
+    text = "Ensure it's exactly that string.\n\n</think>\n\nMLX2_READY"
+    whole = _nemotron_channels([text])
+    assert whole == ("Ensure it's exactly that string.\n\n", "MLX2_READY")
+    for split in range(1, len(text)):
+        assert _nemotron_channels([text[:split], text[split:]]) == whole, split
+    assert _nemotron_channels(list(text)) == whole
+    # Only the run directly after the marker is separator: indentation and
+    # later blank lines in the answer are kept, as is a separator-only answer
+    # being empty.
+    assert _nemotron_channels(["r</think>\n  x\n\ny\n"])[1] == "  x\n\ny\n"
+    assert _nemotron_channels(["r</think>\n\n"])[1] == ""
+    # Thinking off: the prompt ends with ``<think></think>``, so the output
+    # starts right after the close marker (raw/core/011-tools-required.json
+    # returned content "\n\n" beside its tool call).
+    assert _nemotron_channels(["\n", "\nhi\n"], enable_thinking=False) == ("", "hi\n")
+
+
+def test_nemotron_think_close_separator_before_a_tool_call():
+    tools = [{"type": "function", "function": {"name": "weather", "parameters": {
+        "type": "object", "properties": {"city": {"type": "string"}}}}}]
+    from mlx2.adapters.nemotron3_super import Nemotron3SuperAdapter
+
+    call = ("<tool_call>\n<function=weather>\n"
+            "<parameter=city>\nParis\n</parameter>\n</function>\n</tool_call>")
+    for thinking, prefix in ((True, "plan\n</think>\n\n"), (False, "\n\n")):
+        parser = Nemotron3SuperAdapter.__new__(Nemotron3SuperAdapter).output_parser(
+            {"messages": [{"role": "user", "content": "hi"}], "tools": tools,
+             "enable_thinking": thinking}
+        )
+        events = []
+        for char in prefix + call:
+            events += parser.push(char)
+        events += parser.push("", final=True)
+        assert "".join(e.get("content", "") for e in events) == ""
+        assert [e["tool_calls"][0]["function"]["name"] for e in events if "tool_calls" in e] == ["weather"]

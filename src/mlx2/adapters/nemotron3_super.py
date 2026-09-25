@@ -162,6 +162,10 @@ class Nemotron3SuperAdapter(FlashNextAdapter):
     # than ordinary decode at the tested 8K and 32K contexts; batched MTP,
     # cached-prefix parity, and longer contexts still need qualification.
     default_route = "ordinary"
+    # The template renders a turn as ``<think>\n...\n</think>\n`` + content
+    # (content trimmed), and the model writes ``</think>\n\n`` before its
+    # answer.  Those newlines are template structure, not the answer.
+    think_close_separator = "\r\n"
 
     @staticmethod
     def spomin_backend(model, prompt_cache):

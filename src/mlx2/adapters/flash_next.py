@@ -308,7 +308,12 @@ class FlashNextAdapter:
             constrained_tools=constrained_tool_choice(request),
             parallel_tool_calls=request.get("parallel_tool_calls", True),
             tolerant_tool_markers=request.get("_tolerant_tool_markers", False),
+            think_close_separator=self.think_close_separator,
         )
+
+    # Separator characters the chat template renders after ``</think>``;
+    # empty means the model's text after the marker is content verbatim.
+    think_close_separator = ""
 
     # Item 12: opener free text must avoid for the ``auto`` tool grammar.
     tool_call_open_marker = "<tool_call>"

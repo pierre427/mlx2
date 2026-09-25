@@ -159,7 +159,7 @@ class OutputParser:
     def __init__(
         self, *, chat=False, thinking=False, tools=None, parse_tool=None, stops=(),
         constrained_tools=False, parallel_tool_calls=True,
-        tolerant_tool_markers=False,
+        tolerant_tool_markers=False, think_close_separator="",
     ):
         self.chat, self.tools, self.parse_tool = chat, tools or [], parse_tool
         self.constrained_tools = bool(constrained_tools)
@@ -175,6 +175,16 @@ class OutputParser:
         # and an answer may quote them.
         self._leading = bool(chat)
         self._reasoning_open = self.channel == "reasoning_content"
+        # Characters the chat template places between ``</think>`` and the
+        # answer (Nemotron 3 Super: ``\n``).  The run of them directly after
+        # the close marker is template structure, not content; whitespace
+        # anywhere else is kept.  Empty (the default) drops nothing.  With
+        # thinking off the template's generation prompt already ends with the
+        # close marker, so the run at the start of the output is dropped.
+        self.think_close_separator = think_close_separator
+        self._drop_separator = bool(
+            think_close_separator and chat and self.channel == "content"
+        )
         self.buffer = ""
         self.stop_matcher = StopSequenceMatcher(stops)
         self.stopped = False
@@ -206,6 +216,11 @@ class OutputParser:
         self.buffer += text
         events = []
         while self.buffer:
+            if self._drop_separator:
+                self.buffer = self.buffer.lstrip(self.think_close_separator)
+                if not self.buffer:
+                    break  # the answer may still start with a separator
+                self._drop_separator = False
             if not self.chat:
                 events.append({"content": self.buffer})
                 self.buffer = ""
@@ -334,6 +349,7 @@ class OutputParser:
                     self.channel = markers[marker]
                     if marker == THINKING_CLOSE_MARKER:
                         self._reasoning_open = False
+                        self._drop_separator = bool(self.think_close_separator)
                 self.buffer = self.buffer[end + len(marker) :]
             else:
                 end = len(self.buffer) if final else _safe_prefix(self.buffer, markers)
