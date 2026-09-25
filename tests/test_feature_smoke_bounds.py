@@ -148,3 +148,66 @@ def test_timed_out_check_closes_its_abandoned_stream(path, tmp_path):
         server.server_close()
         thread.join()
 
+
+class EngineHTTP:
+    """Routes the admin check onto the real ServingEngine service state machine."""
+
+    def __init__(self, engine):
+        from mlx2.server import validate_quiesce_body, validate_resume_body
+
+        self.engine = engine
+        self.validate_quiesce = validate_quiesce_body
+        self.validate_resume = validate_resume_body
+        self.posts = []
+
+    def get(self, path):
+        if path == "/v1/admin/state":
+            return {"status": 200, "body": self.engine.service_state()}
+        return {"status": 200, "body": {}}
+
+    def post(self, path, body, *, stream=False):
+        self.posts.append((path, body))
+        if path == "/v1/admin/quiesce":
+            return {"status": 202, "body": self.engine.quiesce(**self.validate_quiesce(body))}
+        if path == "/v1/admin/resume":
+            sessions = self.validate_resume(body)
+            return {"status": 202, "body": self.engine.resume(prefetch_sessions=sessions)}
+        return {"status": 200, "body": {"choices": [{"message": {"content": "OK"}}]}}
+
+
+@pytest.mark.parametrize("path", HARNESSES, ids=lambda p: p.parent.name)
+def test_admin_check_that_never_sees_suspended_reopens_the_server(path):
+    from test_serving_quiesce import _engine
+
+    from mlx2.serving import AdmissionClosed
+
+    feature = load(path)
+    engine = _engine()
+    # The in-flight request (the abandoned 32K-token stream) blocks the drain.
+    engine.jobs["abandoned-stream"] = object()
+    http = EngineHTTP(engine)
+    outcome = feature._admin_suspend_resume(http, timeout=0.4)
+    assert not outcome.passed
+    assert outcome.detail == "admin service did not reach suspended"
+    quiesce_body = next(body for p, body in http.posts if p == "/v1/admin/quiesce")
+    # The server's drain deadline must end inside the check's wait window.
+    assert quiesce_body.get("drain_timeout_seconds", 600) <= 0.4 / 2
+    assert any(p == "/v1/admin/resume" for p, _body in http.posts)
+    state = engine.service_state()
+    assert state["state"] == "serving"
+    assert state["last_transition"]["result"]["status"] == "drain_cancelled"
+    try:
+        engine._ensure_admission("generation")
+    except AdmissionClosed as error:  # pragma: no cover - the regression
+        pytest.fail(f"server left closed after the admin check: {error}")
+
+
+@pytest.mark.parametrize("path", HARNESSES, ids=lambda p: p.parent.name)
+def test_admin_check_resumes_a_suspend_that_completes_after_it_gives_up(path):
+    feature = load(path)
+    http = RecordingHTTP(admin_state="draining")
+    outcome = feature._admin_suspend_resume(http, timeout=0.4)
+    assert not outcome.passed
+    # Recorded evidence of the recovery travels with the raw exchange.
+    assert outcome.raw["recovery_resume"]["status"] == 200
+    assert http.admin_state == "serving"
