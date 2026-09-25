@@ -1167,6 +1167,9 @@ class PublishedCohort:
     atomic: bool = True
 
 
+DEFAULT_PREFILL_STEP = 2048
+
+
 class ServingEngine:
     MEMORY_ADMISSION_TIMEOUT = 60.0
     MEMORY_ADMISSION_RETRY = 0.25
@@ -1187,7 +1190,7 @@ class ServingEngine:
         max_context=16384,
         default_max_tokens=DEFAULT_OUTPUT_TOKENS,
         max_request_bytes=2 << 20,
-        prefill_step=2048,
+        prefill_step=None,
         cache_bytes=12 << 30,
         cache_dir=None,
         host_prompt_cache_entries=128,
@@ -1232,6 +1235,12 @@ class ServingEngine:
         _validate_only=False,
     ):
         self.default_max_tokens = validate_default_max_tokens(default_max_tokens)
+        # None: the adapter's prefill_step_default() applies once it loads,
+        # else DEFAULT_PREFILL_STEP. An explicit value always wins.
+        self._prefill_step_override = prefill_step
+        self.prefill_step_source = "engine_argument" if prefill_step is not None else "default"
+        if prefill_step is None:
+            prefill_step = DEFAULT_PREFILL_STEP
         if min(
             max_inflight,
             max_lanes,
@@ -3858,6 +3867,13 @@ class ServingEngine:
                 else self.adapter_factory(self.model_path)
             )
             self.adapter = adapter
+            preferred = getattr(adapter, "prefill_step_default", None)
+            if self._prefill_step_override is None and callable(preferred):
+                step = int(preferred())
+                if step <= 0:
+                    raise ValueError(f"adapter prefill_step_default must be positive, got {step}")
+                self.prefill_step = step
+                self.prefill_step_source = "adapter"
             stop_token_ids = generation_stop_token_ids(adapter)
             # A model adapter may ship its own run-on reasoning defaults (North
             # does: its calibrated guard and steering).  Operator flags win,
@@ -3927,6 +3943,7 @@ class ServingEngine:
                 "max_lanes": self.max_lanes,
                 "max_inflight": self.max_inflight,
                 "prefill_step": self.prefill_step,
+                "prefill_step_source": self.prefill_step_source,
                 "cache_bytes": self.cache_bytes,
                 "disk_cache": bool(self.cache_dir or self.apc_persist_dir),
                 "apc_persistence": bool(self.apc_persist_dir),

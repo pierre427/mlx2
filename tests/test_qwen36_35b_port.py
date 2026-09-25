@@ -307,7 +307,11 @@ def test_flash_next_stops_on_the_tokenizer_chat_eos(tmp_path, monkeypatch):
         json.dumps({"weight_map": {"model.embed_tokens.weight": "model.safetensors"}})
     )
     (tmp_path / "model.safetensors").write_bytes(b"metadata-only")
+    from mlx2.runtime.models import import_env
+
     monkeypatch.setattr(flash_next, "configure_environment", lambda *_a, **_k: {})
+    # No profile is pinned here, so the import-order guard has nothing to check.
+    monkeypatch.setattr(import_env, "assert_profile_applied", lambda *_a, **_k: None)
     monkeypatch.setattr(flash_next, "artifact_identity", lambda path: {"path": str(path)})
     monkeypatch.setattr(qwen4_exp, "Model", _LoadedModel)
     monkeypatch.setattr(qwen4_exp.ModelArgs, "from_dict", classmethod(lambda cls, config: config))

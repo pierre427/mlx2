@@ -29,6 +29,9 @@ class FlashNextPolicy:
     # count (MLX_QWEN4_FUSED_GDN_DYNAMIC_ACCEPT). The adapter strips inherited
     # MLX_QWEN* variables, so the policy is the only way to select it.
     fused_gdn_dynamic_accept: bool = False
+    # 8192-token prefill chunks: -9..11% prefill at 16K/64K with the same KL
+    # to the unchunked result as 2048, +5 GiB peak (triage-20260925).
+    prefill_step: int = 8192
 
     def __post_init__(self):
         validate_self_mtp_num_draft(self.num_draft)
@@ -55,7 +58,7 @@ class FlashNextPolicy:
             value = getattr(self, name)
             if type(value) is not int or value < 0:
                 raise ValueError(f"{name} must be a nonnegative integer")
-        for name in ("eager_dispatch_max_rows", "eager_dispatch_stride"):
+        for name in ("eager_dispatch_max_rows", "eager_dispatch_stride", "prefill_step"):
             value = getattr(self, name)
             if type(value) is not int or value < 1:
                 raise ValueError(f"{name} must be a positive integer")

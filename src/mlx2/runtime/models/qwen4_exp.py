@@ -19,6 +19,9 @@ from typing import Any, Dict, List, Optional, Union
 import mlx.core as mx
 import mlx.nn as nn
 import numpy as np
+from .import_env import snapshot as _import_env_snapshot
+
+_import_env_snapshot(__name__)
 from .. import round_levers as _lv
 from .base import (
     BaseModelArgs,

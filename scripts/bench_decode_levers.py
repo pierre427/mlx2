@@ -28,7 +28,6 @@ GPU only, single request, self-MTP, greedy:
 import argparse
 import json
 import os
-import sys
 import time
 
 import mlx.core as mx

@@ -11,6 +11,9 @@ from typing import Any, Dict, List, Optional, Union
 import mlx.core as mx
 import mlx.nn as nn
 from mlx.nn.layers.distributed import sum_gradients
+from .import_env import snapshot as _import_env_snapshot
+
+_import_env_snapshot(__name__)
 from .activations import swiglu
 from .base import BaseModelArgs
 from .precise_ops import gate_sigmoid

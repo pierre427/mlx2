@@ -71,6 +71,9 @@ def configure_environment(model_path: Path, policy=None) -> dict[str, str]:
         "MLX_QWEN4_FUSED_GDN_DECODE": "1",
         "MLX_QWEN4_FUSED_GDN_VERIFY": "1",
         "MLX_QWEN4_FUSED_GDN_REPLAY_ROLLBACK": "1",
+        # omlx #3903 prefill prework + gated norm: bit-identical to the eager
+        # path on the GPU, -2..3% prefill (triage-20260925).
+        "MLX_QWEN4_FUSED_GDN_PREFILL": "1",
         "MLX_GDN_PACKED": "1",
         "MLX_GDN_CORE": "0",
         "MLX_QWEN4_MOE_FUSED_GATE_UP": "1",
@@ -144,6 +147,10 @@ class FlashNextAdapter:
         from .flash_next_memory import FlashNextCacheBudget
         return FlashNextCacheBudget.from_config(self.model.args.text_config, mtp=mtp)
 
+    def prefill_step_default(self):
+        """Adapter-preferred prefill chunk; an explicit engine setting wins."""
+        return int(self.policy.prefill_step)
+
     def execution_config(self, *, max_lanes, prefill_step):
         return self.policy.batch_config(max_lanes=max_lanes, prefill_step=prefill_step)
 
@@ -166,7 +173,11 @@ class FlashNextAdapter:
         from ..runtime.models.qwen4_ple_nvme import install_file_backed_ple
         from ..runtime.tokenizer_utils import TokenizerWrapper, BPEStreamingDetokenizer
         from ..runtime.ubc_evict import load_shards_evicting, ubc_evict_paths
+        from ..runtime.models.import_env import assert_profile_applied
 
+        # qwen4_exp reads its selections at import: if it was imported before
+        # the profile above was pinned, this model would run another route.
+        assert_profile_applied("the Flash-Next adapter")
         config = json.loads((path / "config.json").read_text())
         if config.get("model_type") != "qwen4_exp" or config.get("ngram_table"):
             raise ValueError(
