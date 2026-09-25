@@ -702,3 +702,41 @@ def test_stop_check_runs_with_thinking_off():
     call = source[source.index('"Reply with exactly MLX2_READY", stop="_READY"'):]
     call = call[: call.index("))")]
     assert 'reasoning_effort="none"' in call and "think=False" in call
+
+
+def test_reply_evidence_carries_text_usage_and_receipt():
+    reply = {
+        "choices": [{
+            "message": {"content": "  " + "x" * 2500 + "  ", "reasoning_content": "why " * 10},
+            "finish_reason": "length",
+        }],
+        "usage": {"prompt_tokens": 7, "completion_tokens": 64},
+        "mlx2": {"cached_tokens": 5, "request_controls": {}},
+    }
+    evidence = qualify.reply_evidence(reply)
+    assert evidence["content"].startswith("x" * qualify.REPLY_EVIDENCE_TEXT_CHARS)
+    assert "truncated 500 chars" in evidence["content"]
+    assert len(evidence["content"]) < 2100
+    assert evidence["reasoning_content"] == "why " * 10
+    assert evidence["finish_reason"] == "length"
+    assert evidence["usage"] == reply["usage"]
+    assert evidence["mlx2"] == reply["mlx2"]
+
+    short = qualify.reply_evidence({
+        "choices": [{"message": {"content": "LONG_READY"}}],
+        "usage": {}, "mlx2": {},
+    })
+    assert short["content"] == "LONG_READY"
+    assert "reasoning_content" not in short
+
+    refusal = {"refused": {"status": 429, "body": "busy"}}
+    assert qualify.reply_evidence(refusal) is refusal
+    assert qualify.reply_evidence({"error": "bad"})["content"] == ""
+
+
+def test_long_context_checks_record_reply_evidence():
+    source = (ROOT / "scripts" / "qualify_serving.py").read_text()
+    assert "[reply_evidence(r) for r in shared]" in source
+    assert "reply_evidence(primed)" in source
+    assert '{"cold": reply_evidence(long), "warm": reply_evidence(repeated)}' in source
+    assert '[r.get("mlx2", r) for r in shared]' not in source

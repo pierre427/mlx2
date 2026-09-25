@@ -197,6 +197,43 @@ def long_context_answer_passes(text):
     return "LONG_READY" in text or "compiler" in text.lower()
 
 
+REPLY_EVIDENCE_TEXT_CHARS = 2000
+
+
+def _truncate_evidence_text(text, limit=REPLY_EVIDENCE_TEXT_CHARS):
+    if not isinstance(text, str) or len(text) <= limit:
+        return text
+    return text[:limit] + f"... [truncated {len(text) - limit} chars]"
+
+
+def reply_evidence(response, limit=REPLY_EVIDENCE_TEXT_CHARS):
+    """Diagnosable evidence for one chat reply: text, usage and receipt.
+
+    A check that records only the ``mlx2`` receipt cannot say why an answer
+    check failed once the reply text is gone.  Refusal entries pass through
+    unchanged.  Never raises: a malformed reply is recorded as it came.
+    """
+    if not isinstance(response, dict) or "refused" in response:
+        return response
+    try:
+        choice = response["choices"][0]
+        message = choice["message"]
+    except (KeyError, IndexError, TypeError):
+        choice, message = {}, {}
+    evidence = {
+        "content": _truncate_evidence_text(
+            (message.get("content") or "").strip(), limit
+        ),
+    }
+    reasoning = message.get("reasoning_content")
+    if reasoning:
+        evidence["reasoning_content"] = _truncate_evidence_text(reasoning, limit)
+    evidence["finish_reason"] = choice.get("finish_reason")
+    evidence["usage"] = response.get("usage")
+    evidence["mlx2"] = response.get("mlx2")
+    return evidence
+
+
 def near_limit_usage_passes(
     usage, context_cap, completion_budget=LONG_CONTEXT_COMPLETION_TOKENS
 ):
@@ -1673,7 +1710,7 @@ def main():
             primed = post(shared_request)
             check("shared_cohort_priming", long_context_answer_passes(content(primed))
                   and primed["usage"]["completion_tokens"]
-                      == shared_completion_budget, primed)
+                      == shared_completion_budget, reply_evidence(primed))
             report["shared_cohort_domain"] = {
                 "context_limit": shared_context, "requested_width": 2,
                 "completion_budget": shared_completion_budget,
@@ -1699,7 +1736,7 @@ def main():
                     and r["mlx2"]["request_controls"].get("batch_cohort")
                         == shared_cohort
                     for r in shared),
-                [r.get("mlx2", r) for r in shared],
+                [reply_evidence(r) for r in shared],
             )
             long_request = long_context_request(initial["max_context"])
             long = post(long_request)
@@ -1710,7 +1747,7 @@ def main():
                 and long_context_answer_passes(content(repeated))
                 and near_limit_usage_passes(long["usage"], initial["max_context"])
                 and repeated["mlx2"]["cached_tokens"] > n - LONG_CONTEXT_CACHE_TOLERANCE,
-                {"cold": long, "warm": repeated},
+                {"cold": reply_evidence(long), "warm": reply_evidence(repeated)},
             )
             try:
                 post(prompt(long_context_filler(initial["max_context"]), max_tokens=16))
