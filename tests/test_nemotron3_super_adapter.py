@@ -392,3 +392,91 @@ def test_nemotron_think_close_separator_before_a_tool_call():
         events += parser.push("", final=True)
         assert "".join(e.get("content", "") for e in events) == ""
         assert [e["tool_calls"][0]["function"]["name"] for e in events if "tool_calls" in e] == ["weather"]
+
+
+def _inline_tiny_mtp_model():
+    """A tiny nemotron_h with an MTP head that needs no local artifact."""
+    import mlx.core as mx
+
+    from mlx2.runtime.models.nemotron_h import Model, ModelArgs
+
+    mx.set_default_device(mx.cpu)
+    mx.random.seed(0)
+    config = dict(
+        model_type="nemotron_h", vocab_size=64, hidden_size=16,
+        intermediate_size=16, hybrid_override_pattern="ME*",
+        mtp_hybrid_override_pattern="*E", num_hidden_layers=3,
+        num_attention_heads=2, num_key_value_heads=1, head_dim=8,
+        attention_bias=False, mamba_num_heads=2, mamba_head_dim=8,
+        mamba_proj_bias=False, use_bias=False, ssm_state_size=8, conv_kernel=3, n_groups=1,
+        chunk_size=128, use_conv_bias=True, time_step_limit=None,
+        mlp_bias=False, mlp_hidden_act="relu2", layer_norm_epsilon=1e-5,
+        n_routed_experts=2, num_experts_per_tok=1, n_group=1, topk_group=1,
+        norm_topk_prob=True, routed_scaling_factor=5.0, n_shared_experts=1,
+        moe_latent_size=8, moe_intermediate_size=16,
+        moe_shared_expert_intermediate_size=16, num_nextn_predict_layers=1,
+        max_position_embeddings=4096, rope_theta=10000,
+        partial_rotary_factor=1.0, tie_word_embeddings=False,
+    )
+    return Model(ModelArgs.from_dict(config))
+
+
+@pytest.mark.parametrize("lanes", [1, 2])
+def test_segmented_mtp_uses_exact_b1_verifier_cpu(lanes):
+    """Segmented native MTP on Nemotron must never reach the prepared-width
+    segmented KV mask with the tokenwise verifier's one-token steps.
+
+    Regression: a single live lane in the (default-on) true-batched
+    segmented cohort prepared a width-(K+1) SegmentedBatchKVCache, then
+    ``mtp_verify_backbone`` fed it one token at a time and ``make_mask``
+    raised inside the generation worker.  The route must take the exact
+    serial B1 fallback instead, and every row must match ordinary decode.
+    """
+    import mlx.core as mx
+
+    from mlx2.runtime.hybrid_speculative import (
+        attach_segmented_self_mtp_lanes,
+        commit_batched_self_mtp,
+        prepare_self_mtp_lane,
+        propose_batched_self_mtp,
+    )
+    from mlx2.runtime.segmented_self_mtp import segmented_self_mtp_stats
+
+    model = _inline_tiny_mtp_model()
+    prompts = [[1, 2, 3, 4], [2, 3, 4, 5]][:lanes]
+    references, currents, detached = [], [], []
+    for uid, prompt in enumerate(prompts, start=1):
+        reference = model.make_cache()
+        for start in range(0, len(prompt), 2):
+            logits = model(mx.array([prompt[start:start + 2]]), cache=reference)
+            mx.eval(logits)
+        references.append(reference)
+        currents.append(int(mx.argmax(logits[0, -1]).item()))
+        lane, first = prepare_self_mtp_lane(
+            mx.array(prompt), model, uid=uid, max_tokens=16,
+            prompt_cache=None, mtp_state=None, lane_rng=None, num_draft=3,
+            sampling_temp=0, sampling_top_p=1, sampling_top_k=0,
+            sampling_min_p=0, accept_rule="exact", logits_processors=[],
+            prefill_step_size=2, share_qsa_indices=False,
+        )
+        assert first.token == currents[-1]
+        detached.append(lane)
+    segmented_self_mtp_stats(reset=True)
+    batch = attach_segmented_self_mtp_lanes(model, None, detached)
+    for _ in range(3):
+        proposal = propose_batched_self_mtp(model, batch)
+        assert len(proposal.outputs) == lanes
+        for row, reference in enumerate(references):
+            for item in proposal.outputs[row]:
+                logits = model(mx.array([[currents[row]]]), cache=reference)
+                mx.eval(logits)
+                currents[row] = int(mx.argmax(logits[0, -1]).item())
+                assert item.token == currents[row]
+        commit_batched_self_mtp(
+            batch, proposal,
+            emitted_counts=[len(row) for row in proposal.outputs],
+            terminal=[False] * lanes,
+        )
+    stats = segmented_self_mtp_stats()
+    assert stats["true_batched_engaged"] == 0
+    assert stats["b1_target_forwards"] == 3 * lanes

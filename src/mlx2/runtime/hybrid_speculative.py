@@ -1645,6 +1645,17 @@ def _restore_segmented_recovery(batch: SegmentedSelfMTPState) -> None:
     note_segmented_self_mtp("recovery_checkpoint_restores", len(restored_pairs))
 
 
+def _model_allows_segmented_true_batch(model: nn.Module) -> bool:
+    """Whether a model's MTP verifier can consume a prepared segmented step.
+
+    A model whose verifier cannot run one prepared width-(K+1) step over
+    segmented compute caches (for example a tokenwise exact B1 verifier)
+    declares ``mtp_segmented_true_batch = False``; its segmented cohorts
+    then use the exact serial B1 consumer instead of raising in the worker.
+    """
+    return bool(getattr(model, "mtp_segmented_true_batch", True))
+
+
 def _propose_segmented_self_mtp(
     model: nn.Module, batch: SegmentedSelfMTPState
 ) -> SelfMTPCycleResult:
@@ -1677,6 +1688,11 @@ def _propose_segmented_self_mtp(
                 transaction.fork(f"mtp:{batch.membership_epoch}:{lane.uid}")
             )
         true_batched = true_batched_segmented_self_mtp_enabled()
+        if true_batched and not _model_allows_segmented_true_batch(model):
+            # Fail closed onto the exact serial B1 consumer below.
+            note_segmented_self_mtp("true_batched_requests")
+            note_segmented_self_mtp("true_batched_declined")
+            true_batched = False
         if true_batched:
             from .segmented_batch_cache import (
                 SegmentedBatchUnsupported,
@@ -1891,6 +1907,10 @@ def advance_batched_self_mtp_zero(
             true_batched_segmented_self_mtp_enabled,
         )
 
+        if not _model_allows_segmented_true_batch(model):
+            raise ZeroDepthFastUnavailable(
+                "the model declines true-batched segmented self-MTP"
+            )
         if not true_batched_segmented_self_mtp_enabled():
             # Reuse the existing transactional B1 proposal/commit path.  It
             # performs the same exact K=0 target step without locking or

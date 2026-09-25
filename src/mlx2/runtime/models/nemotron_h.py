@@ -659,6 +659,12 @@ class NemotronHModel(nn.Module):
 
 class Model(nn.Module):
     mtp_align_full_final_chunk = True
+    # ``mtp_verify_backbone`` verifies a B1 row one token at a time for exact
+    # parity with ordinary decode. A true-batched segmented cohort prepares
+    # its compute caches for one width-(K+1) step, which those one-token
+    # forwards cannot consume, and batched MTP is unqualified here anyway.
+    # Segmented cohorts therefore take the exact serial B1 consumer.
+    mtp_segmented_true_batch = False
 
     def __init__(self, args: ModelArgs):
         super().__init__()
