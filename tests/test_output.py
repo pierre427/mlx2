@@ -855,3 +855,25 @@ def test_qwen_opener_naming_a_declared_parameter_is_still_unclosed(tools):
     body = "\n<function=write>\n<parameter=content>\nx\n<parameter=path>\ny\n</parameter>\n</function>\n"
     with pytest.raises(ValueError, match="Unclosed parameter"):
         parse_tool_call(body, tools)
+
+
+@pytest.mark.parametrize("chunked", [False, True])
+def test_content_beside_tool_calls_is_kept_verbatim(chunked):
+    """Non-streamed content is the joined stream, so the invariants mlx-vlm
+    had to restore by hand (mlx-vlm#2344 follow-up) hold by construction:
+    ``<...>`` text beside a call is content, not a control token, and a call
+    leaves no separator of its own."""
+    text = f"Use <b>bold</b>.{_SUM_CALL}B"
+    content, calls = _content_after_calls(text, chunked)
+    assert (content, calls) == ("Use <b>bold</b>.B", ["sum"])
+
+
+@pytest.mark.parametrize("chunked", [False, True])
+def test_unfinished_tool_call_at_the_end(chunked):
+    """A call the output ends inside is malformed by default, and content
+    when tolerant markers are on; never silently dropped."""
+    text = f"{_SUM_CALL}\n<tool_call>\n<function=sum"
+    with pytest.raises(ValueError, match="incomplete tool call"):
+        _content_after_calls(text, chunked)
+    content, calls = _content_after_calls(text, chunked, tolerant_tool_markers=True)
+    assert (content, calls) == ("<tool_call>\n<function=sum", ["sum"])
