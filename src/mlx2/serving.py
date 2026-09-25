@@ -877,6 +877,37 @@ def parallel_sample_lane_gib(controller, *, draft_depth, prompt_lookup_num_draft
     ) - controller.hard_reserve_gib
 
 
+def admission_memory_limit_bytes(advisory_gib, service_reserve_gib, driver_allowance_gib):
+    """MLX memory limit that keeps the allocator inside the admission plan.
+
+    Admission keeps the service and driver reserve free below Metal's advisory
+    and seats lanes in the rest.  MLX's own defaults ignore that plan: its
+    memory limit is 1.5x the advisory and it trims its free-buffer cache only
+    once active plus cached bytes pass 0.95x the advisory.  On a 36 GiB M3 Pro
+    (advisory 28.08 GiB) that is 26.7 GiB, above what the host can wire beside
+    macOS, so a 16K dense prefill rode the ceiling chunk after chunk (wired
+    29.2 GB, free 0.06 GB) until a command buffer failed with Metal
+    out-of-memory.  Setting the limit to advisory minus the reserve makes MLX
+    reclaim its cache before it spends the reserve; the limit is a guideline
+    for live allocations, never a refusal while RAM remains.  Returns ``None``
+    when the advisory is unknown.
+    """
+    if advisory_gib is None or advisory_gib <= 0:
+        return None
+    budget = float(advisory_gib) - float(service_reserve_gib) - float(driver_allowance_gib)
+    if budget <= 0:
+        return None
+    return int(budget * (1 << 30))
+
+
+def is_device_out_of_memory(exc):
+    """A Metal command buffer that failed for lack of memory."""
+    text = str(exc)
+    return isinstance(exc, RuntimeError) and (
+        "OutOfMemory" in text or "Insufficient Memory" in text
+    )
+
+
 def unmaterialized_lane_bytes(jobs):
     """Lane bytes granted to attached jobs that have not been allocated yet.
 
@@ -3563,6 +3594,49 @@ class ServingEngine:
             self.fanout_capsules.pop(job.fanout_group, None)
         return bound
 
+    def _recover_device_out_of_memory(self, exc, batch, active, build_batch):
+        """Fail the lanes of a step Metal could not run; keep the server.
+
+        A failed command buffer leaves every lane stepped in it with cache
+        state that may be partly written, and one ``next`` can step every
+        attached lane, so all of them fail with 503.  Queued and deferred
+        requests hold no device state and stay queued.  The generator is
+        rebuilt from scratch and a small evaluation must succeed before the
+        worker continues; if the device cannot run even that, the original
+        error propagates and the worker stops as before.
+        """
+        import mlx.core as mx
+
+        self.counts["device_oom_events"] += 1
+        log.error(
+            "Metal out-of-memory in a generation step; failing %d in-flight "
+            "request(s) and rebuilding the generator: %s",
+            len(active),
+            exc,
+        )
+        failed = list(active.values())
+        active.clear()
+        for job in failed:
+            self._finish(
+                job, {"error": f"device out of memory: {exc}", "status": 503}
+            )
+        try:
+            batch.close()
+        except Exception:  # noqa: BLE001 - its state is already abandoned
+            log.exception("closing the failed generator raised")
+        try:
+            mx.clear_cache()
+            probe = mx.arange(4096, dtype=mx.float32)
+            mx.eval((probe * 2.0).sum())
+            rebuilt = build_batch()
+        except Exception:
+            self.counts["device_oom_unrecoverable"] += 1
+            log.exception("device did not recover after out-of-memory")
+            raise exc
+        self.counts["device_oom_recoveries"] += 1
+        self.counts["device_oom_failed_requests"] += len(failed)
+        return rebuilt
+
     def _fail_deferred_admission_timeout(self, batch, job):
         self._cancel_pending_cache_capsule(
             batch, job, "memory_admission_timeout"
@@ -4677,6 +4751,27 @@ class ServingEngine:
                 controller.transient_gib_per_lane,
                 self.max_lanes,
             )
+            mlx_limit = admission_memory_limit_bytes(
+                controller.advisory_gib,
+                controller.service_reserve_gib,
+                controller.driver_allowance_gib,
+            )
+            if (
+                mlx_limit is not None
+                and mx.metal.is_available()
+                and mx.default_device() == mx.gpu
+            ):
+                previous_limit = mx.set_memory_limit(mlx_limit)
+                if previous_limit < mlx_limit:
+                    # Never raise an operator's (or another engine's) lower limit.
+                    mx.set_memory_limit(previous_limit)
+                else:
+                    self._mlx_memory_limit_previous = previous_limit
+                    log.info(
+                        "MLX memory limit %.4g GiB (advisory minus reserve; was %.4g)",
+                        mlx_limit / float(1 << 30),
+                        previous_limit / float(1 << 30),
+                    )
             admission = {}
             spomin_manager = None
             post_prefill_transform = None
@@ -4916,85 +5011,89 @@ class ServingEngine:
                             return False
                 return True
 
-            if external_draft:
-                batch = adapter.create_external_batch(
-                    completion_batch_size=self.max_lanes,
-                    prefill_step_size=self.prefill_step,
-                    memory_headroom=lambda: max(0, execution_headroom() - controller.hard_reserve_gib * (1 << 30)),
-                    reclaim_memory=reclaim_allocator,
-                    evict_checkpoint=evict_unused_checkpoint,
-                    stop_tokens=[[token] for token in stop_token_ids],
-                    fly_verification=self.fly_verification_policy,
-                )
-            elif prompt_lookup:
-                from .runtime.pld import PromptLookupBatchGenerator
-
-                batch = PromptLookupBatchGenerator(
-                    adapter.model,
-                    completion_batch_size=self.max_lanes,
-                    prefill_step_size=self.prefill_step,
-                    prompt_lookup=prompt_lookup_policy,
-                    stop_tokens=[[token] for token in stop_token_ids],
-                )
-            else:
-                batch = BatchGenerator(
-                    adapter.model,
-                    completion_batch_size=self.max_lanes,
-                    # Surgery edits one request-private cache at an isolated
-                    # boundary; decode lanes still batch normally afterwards.
-                    prefill_batch_size=(
-                        1 if self.spomin_policy.enabled else min(2, self.max_lanes)
-                    ),
-                    prefill_step_size=self.prefill_step,
-                    prefill_batch_window=1,
-                    adaptive_prefill=True,
-                    decode_time_fairness=settings["decode_time_fairness"],
-                    adaptive_mtp_depth=(
-                        self.adaptive_mtp_policy.controller_kwargs()
-                        if self.adaptive_mtp_policy.enabled
-                        else None
-                    ),
-                    mtp_ordinary_handoff=(
-                        self.mtp_ordinary_handoff_policy
-                        if self.mtp_ordinary_handoff_policy.enabled
-                        else None
-                    ),
-                    fly_verification=self.fly_verification_policy,
-                    **(
-                        {"copy_draft": self.copy_draft_policy}
-                        if self.copy_draft_policy.enabled
-                        else {}
-                    ),
-                    **(
-                        {"mtp_acceptance_log": self.mtp_acceptance_log}
-                        if self.mtp_acceptance_log is not None
-                        else {}
-                    ),
-                    apc_interior_checkpoints=(
-                        self.apc_interior_checkpoint_policy
-                        if self.apc_interior_route_supported
-                        else {"count": 0, "min_stride": 1}
-                    ),
-                    **(
-                        {"memory_pressure_level": self.memory_pressure_level}
-                        if self.apc_rolling_route == "hybrid"
-                        else {}
-                    ),
-                    prefill_scheduling=self.prefill_scheduling_policy,
-                    self_mtp=config if self.mtp else None,
-                    mtp_admission=_make_self_mtp_admission_callback(
-                        controller,
-                        free_memory=lambda: execution_headroom() / (1 << 30),
-                        observer=observe_admission,
+            def build_batch():
+                """This route generator; rebuilt after a device out-of-memory."""
+                if external_draft:
+                    return adapter.create_external_batch(
+                        completion_batch_size=self.max_lanes,
+                        prefill_step_size=self.prefill_step,
+                        memory_headroom=lambda: max(0, execution_headroom() - controller.hard_reserve_gib * (1 << 30)),
                         reclaim_memory=reclaim_allocator,
-                        evict_unused_cache=evict_unused_checkpoint,
-                        max_draft=config["num_draft"],
+                        evict_checkpoint=evict_unused_checkpoint,
+                        stop_tokens=[[token] for token in stop_token_ids],
+                        fly_verification=self.fly_verification_policy,
                     )
-                    if self.mtp
-                    else None,
-                    stop_tokens=[[token] for token in stop_token_ids],
-                    post_prefill_transform=post_prefill_transform,
-                )
+                elif prompt_lookup:
+                    from .runtime.pld import PromptLookupBatchGenerator
+
+                    return PromptLookupBatchGenerator(
+                        adapter.model,
+                        completion_batch_size=self.max_lanes,
+                        prefill_step_size=self.prefill_step,
+                        prompt_lookup=prompt_lookup_policy,
+                        stop_tokens=[[token] for token in stop_token_ids],
+                    )
+                else:
+                    return BatchGenerator(
+                        adapter.model,
+                        completion_batch_size=self.max_lanes,
+                        # Surgery edits one request-private cache at an isolated
+                        # boundary; decode lanes still batch normally afterwards.
+                        prefill_batch_size=(
+                            1 if self.spomin_policy.enabled else min(2, self.max_lanes)
+                        ),
+                        prefill_step_size=self.prefill_step,
+                        prefill_batch_window=1,
+                        adaptive_prefill=True,
+                        decode_time_fairness=settings["decode_time_fairness"],
+                        adaptive_mtp_depth=(
+                            self.adaptive_mtp_policy.controller_kwargs()
+                            if self.adaptive_mtp_policy.enabled
+                            else None
+                        ),
+                        mtp_ordinary_handoff=(
+                            self.mtp_ordinary_handoff_policy
+                            if self.mtp_ordinary_handoff_policy.enabled
+                            else None
+                        ),
+                        fly_verification=self.fly_verification_policy,
+                        **(
+                            {"copy_draft": self.copy_draft_policy}
+                            if self.copy_draft_policy.enabled
+                            else {}
+                        ),
+                        **(
+                            {"mtp_acceptance_log": self.mtp_acceptance_log}
+                            if self.mtp_acceptance_log is not None
+                            else {}
+                        ),
+                        apc_interior_checkpoints=(
+                            self.apc_interior_checkpoint_policy
+                            if self.apc_interior_route_supported
+                            else {"count": 0, "min_stride": 1}
+                        ),
+                        **(
+                            {"memory_pressure_level": self.memory_pressure_level}
+                            if self.apc_rolling_route == "hybrid"
+                            else {}
+                        ),
+                        prefill_scheduling=self.prefill_scheduling_policy,
+                        self_mtp=config if self.mtp else None,
+                        mtp_admission=_make_self_mtp_admission_callback(
+                            controller,
+                            free_memory=lambda: execution_headroom() / (1 << 30),
+                            observer=observe_admission,
+                            reclaim_memory=reclaim_allocator,
+                            evict_unused_cache=evict_unused_checkpoint,
+                            max_draft=config["num_draft"],
+                        )
+                        if self.mtp
+                        else None,
+                        stop_tokens=[[token] for token in stop_token_ids],
+                        post_prefill_transform=post_prefill_transform,
+                    )
+
+            batch = build_batch()
             # The guard fronts lane admission, which seats a lane at its floor
             # (MTP depth 0, prompt-lookup span 0) when the full width does not
             # fit; charging the full width refused n>1 that admission serves.
@@ -6407,7 +6506,15 @@ class ServingEngine:
                     self.counts["cycles"] += 1
                     self.counts["multi_request_cycles"] += int(len(active) > 1)
                     self.batch_metrics.batch_cycle(len(active), len(deferred))
-                    prompts, responses = batch.next()
+                    try:
+                        prompts, responses = batch.next()
+                    except RuntimeError as exc:
+                        if not is_device_out_of_memory(exc):
+                            raise
+                        batch = self._recover_device_out_of_memory(
+                            exc, batch, active, build_batch
+                        )
+                        continue
                     if (
                         self.apc_rolling_route == "hybrid"
                         or self.apc_junction_checkpoints
@@ -7419,6 +7526,12 @@ class ServingEngine:
                     apc.clear()
                 self.apc = None
             self._parallel_sample_lane_gib = None
+            previous_limit = getattr(self, "_mlx_memory_limit_previous", None)
+            if previous_limit is not None:
+                import mlx.core as mx
+
+                mx.set_memory_limit(previous_limit)
+                self._mlx_memory_limit_previous = None
             if self.verify_bitexact_handle is not None:
                 self.verify_bitexact_handle.remove()
             if self.int8_prefill_handle is not None:
