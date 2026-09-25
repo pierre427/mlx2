@@ -3567,6 +3567,11 @@ class APCv2(PrefixIndex):
                     mx.clear_cache()
             self._release_persist_lock()
 
+    def resident_nbytes(self) -> int:
+        """Bytes of every resident checkpoint, leased or not."""
+        with self._apc_lock:
+            return int(self._n_bytes)
+
     def unleased_resident_nbytes(self) -> int:
         """Resident bytes that pressure eviction could actually reclaim."""
         with self._apc_lock:

@@ -838,14 +838,23 @@ def prompt_lookup_verification_gib(controller, num_draft):
 
 
 def lane_admission_required_gib(
-    controller, *, context_tokens, draft_depth, cache_gib, prompt_lookup_num_draft=None
+    controller,
+    *,
+    context_tokens,
+    draft_depth,
+    cache_gib,
+    prompt_lookup_num_draft=None,
+    prefill_gib=0.0,
 ):
     """Headroom one arriving request needs to start at ``draft_depth``.
 
     Split out of the scheduler loop so the self-MTP depth floor below can be
     costed with exactly the same arithmetic as the full-depth requirement.
+    ``prefill_gib`` is the adapter's chunked-prefill transient for the
+    request's uncached tail (``prefill_transient_gib``), held by the lane's
+    grant until its first token.
     """
-    required = controller.hard_reserve_gib + controller.lane_gib(
+    required = controller.hard_reserve_gib + float(prefill_gib) + controller.lane_gib(
         context_tokens, draft_depth, cache_gib=cache_gib
     )
     if prompt_lookup_num_draft is not None:
@@ -908,6 +917,20 @@ def is_device_out_of_memory(exc):
     )
 
 
+def prefill_transient_gib(cache_budget, *, context_tokens, uncached_tokens, prefill_step):
+    """The adapter's chunked-prefill transient for one arriving lane, in GiB.
+
+    Zero when the adapter declares none or when there is no prefill chunk to
+    run (a warm hit leaves at most the anchor token).  The chunk is the
+    smaller of the uncached tail and the prefill step.
+    """
+    estimate = getattr(cache_budget, "prefill_transient_bytes", None)
+    if estimate is None or uncached_tokens <= 1:
+        return 0.0
+    rows = min(int(uncached_tokens), int(prefill_step))
+    return float(estimate(int(context_tokens), rows)) / float(1 << 30)
+
+
 def unmaterialized_lane_bytes(jobs):
     """Lane bytes granted to attached jobs that have not been allocated yet.
 
@@ -936,6 +959,7 @@ def admit_lane_headroom(
     draft_depth,
     cache_gib,
     prompt_lookup_num_draft=None,
+    prefill_gib=0.0,
     headroom,
     reclaim,
     evict,
@@ -968,6 +992,7 @@ def admit_lane_headroom(
             draft_depth=depth,
             cache_gib=cache_gib,
             prompt_lookup_num_draft=prompt_lookup_num_draft,
+            prefill_gib=prefill_gib,
         )
         fits = ensure_admission_headroom(
             required * (1 << 30),
@@ -1016,7 +1041,11 @@ def admit_prompt_lookup_lane(
     if admitted:
         return (True, num_draft, required)
     base = lane_admission_required_gib(
-        controller, context_tokens=context_tokens, draft_depth=0, cache_gib=cache_gib
+        controller,
+        context_tokens=context_tokens,
+        draft_depth=0,
+        cache_gib=cache_gib,
+        prefill_gib=kwargs.get("prefill_gib", 0.0),
     )
     per_row = prompt_lookup_verification_gib(controller, 1)
     spare = headroom() / float(1 << 30) - base
@@ -3594,19 +3623,16 @@ class ServingEngine:
             self.fanout_capsules.pop(job.fanout_group, None)
         return bound
 
-    def _recover_device_out_of_memory(self, exc, batch, active, build_batch):
-        """Fail the lanes of a step Metal could not run; keep the server.
+    DEVICE_OOM_RELEASE_TOLERANCE_GIB = 1.0
+
+    def _fail_lanes_after_device_oom(self, exc, batch, active):
+        """Fail every lane of a step Metal could not run and drop its generator.
 
         A failed command buffer leaves every lane stepped in it with cache
         state that may be partly written, and one ``next`` can step every
         attached lane, so all of them fail with 503.  Queued and deferred
-        requests hold no device state and stay queued.  The generator is
-        rebuilt from scratch and a small evaluation must succeed before the
-        worker continues; if the device cannot run even that, the original
-        error propagates and the worker stops as before.
+        requests hold no device state and stay queued.
         """
-        import mlx.core as mx
-
         self.counts["device_oom_events"] += 1
         log.error(
             "Metal out-of-memory in a generation step; failing %d in-flight "
@@ -3624,17 +3650,87 @@ class ServingEngine:
             batch.close()
         except Exception:  # noqa: BLE001 - its state is already abandoned
             log.exception("closing the failed generator raised")
+        self.counts["device_oom_failed_requests"] += len(failed)
+
+    def _rebuild_after_device_oom(self, exc, build_batch, apc):
+        """Release what the failed step held, verify it, then rebuild.
+
+        Called after the caller dropped its last reference to the failed
+        generator.  The exception's traceback still pins the failed frames'
+        locals -- the prompt batch, its caches and the step's intermediates --
+        so its frames are cleared and cycles collected before the allocator
+        cache is emptied; clearing the cache first (as 040210e1 did, while the
+        old generator was still alive) returned nothing, and a Qwen3.8-27B
+        server on the 36 GiB M3 Pro then refused every request for 70 minutes
+        with 0.2 GB free.  Active device memory must fall back to what the
+        server legitimately holds -- the load-time resident set plus APCv2's
+        resident checkpoints -- within a tolerance.  If it does not, device
+        memory is still held somewhere this process cannot reach, and serving
+        on would only answer 429 until restarted, so the worker stops and
+        /health reports the error instead.
+        """
+        import gc
+        import traceback
+
+        import mlx.core as mx
+
+        try:
+            traceback.clear_frames(exc.__traceback__)
+        except Exception:  # noqa: BLE001 - best effort; memory is verified below
+            pass
+        gc.collect()
+        try:
+            mx.synchronize()
+        except RuntimeError:
+            # The failed command buffer can report again here; its work is
+            # abandoned either way.
+            pass
         try:
             mx.clear_cache()
             probe = mx.arange(4096, dtype=mx.float32)
             mx.eval((probe * 2.0).sum())
-            rebuilt = build_batch()
+            del probe
+            mx.clear_cache()
+            active_bytes = int(mx.get_active_memory())
         except Exception:
             self.counts["device_oom_unrecoverable"] += 1
             log.exception("device did not recover after out-of-memory")
             raise exc
+        baseline = getattr(self, "_device_resident_baseline", None)
+        if baseline is not None:
+            resident_apc = int(getattr(apc, "resident_nbytes", lambda: 0)())
+            allowed = (
+                int(baseline)
+                + resident_apc
+                + int(
+                    (self.expert_stream_reserve_gib() + self.DEVICE_OOM_RELEASE_TOLERANCE_GIB)
+                    * (1 << 30)
+                )
+            )
+            log.info(
+                "after out-of-memory: active %.4g GiB, load-time resident %.4g GiB, "
+                "APCv2 resident %.4g GiB",
+                active_bytes / float(1 << 30),
+                baseline / float(1 << 30),
+                resident_apc / float(1 << 30),
+            )
+            if active_bytes > allowed:
+                self.counts["device_oom_memory_not_released"] += 1
+                log.error(
+                    "device memory not released after out-of-memory: %.4g GiB "
+                    "active, %.4g GiB expected; stopping the worker (restart "
+                    "the server)",
+                    active_bytes / float(1 << 30),
+                    allowed / float(1 << 30),
+                )
+                raise exc
+        try:
+            rebuilt = build_batch()
+        except Exception:
+            self.counts["device_oom_unrecoverable"] += 1
+            log.exception("generator could not be rebuilt after out-of-memory")
+            raise exc
         self.counts["device_oom_recoveries"] += 1
-        self.counts["device_oom_failed_requests"] += len(failed)
         return rebuilt
 
     def _fail_deferred_admission_timeout(self, batch, job):
@@ -4751,6 +4847,12 @@ class ServingEngine:
                 controller.transient_gib_per_lane,
                 self.max_lanes,
             )
+            # What the loaded model holds before any cache, lane or generator
+            # exists: the floor device memory must return to after an OOM.
+            try:
+                self._device_resident_baseline = int(mx.get_active_memory())
+            except Exception:  # noqa: BLE001 - verification is then skipped
+                self._device_resident_baseline = None
             mlx_limit = admission_memory_limit_bytes(
                 controller.advisory_gib,
                 controller.service_reserve_gib,
@@ -5531,6 +5633,12 @@ class ServingEngine:
                         # the actual forward width; the ordinary one-row
                         # share is already included by the lane cost.
                         granted = unmaterialized_lane_bytes(active.values())
+                        prefill_gib = prefill_transient_gib(
+                            cache_budget,
+                            context_tokens=len(tokens),
+                            uncached_tokens=len(hit.remaining_tokens),
+                            prefill_step=self.prefill_step,
+                        )
                         admission_headroom = (
                             (lambda: execution_headroom() - granted)
                             if granted
@@ -5543,6 +5651,7 @@ class ServingEngine:
                                 context_tokens=len(tokens) + maximum,
                                 cache_gib=cache_copy,
                                 num_draft=batch.num_draft,
+                                prefill_gib=prefill_gib,
                                 headroom=admission_headroom,
                                 reclaim=reclaim_allocator,
                                 evict=evict_unused_checkpoint,
@@ -5558,6 +5667,7 @@ class ServingEngine:
                                 context_tokens=len(tokens) + maximum,
                                 draft_depth=config["num_draft"] if self.mtp else 0,
                                 cache_gib=cache_copy,
+                                prefill_gib=prefill_gib,
                                 headroom=admission_headroom,
                                 reclaim=reclaim_allocator,
                                 evict=evict_unused_checkpoint,
@@ -6511,8 +6621,10 @@ class ServingEngine:
                     except RuntimeError as exc:
                         if not is_device_out_of_memory(exc):
                             raise
-                        batch = self._recover_device_out_of_memory(
-                            exc, batch, active, build_batch
+                        self._fail_lanes_after_device_oom(exc, batch, active)
+                        batch = None
+                        batch = self._rebuild_after_device_oom(
+                            exc, build_batch, apc
                         )
                         continue
                     if (

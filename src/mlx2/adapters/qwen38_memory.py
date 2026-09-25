@@ -27,6 +27,17 @@ class Qwen38CacheBudget:
     allocation_step: int = 256
     transcript_bytes_per_token: int = 16
     transient_gib_per_lane: float = 3.1
+    # Chunked-prefill transient, measured on a 36 GiB M3 Pro (2026-09-25,
+    # Qwen3.8-27B-CRACK-MLX-4bit, 16K prompt, 2048-token chunks, MLX memory
+    # limit 24.08 GiB): wired memory peaked 2.0-2.8 GB above each chunk's
+    # trough, the peaks rising with context (26.7 -> 29.4 GB over 16K), and a
+    # 32K prefill without the limit reached 5.5 GB.  Two-second sampling
+    # misses the true spikes, so the charge is set above every observation:
+    # a fixed 2.0 GiB per full chunk (scaled by the chunk's rows) plus one
+    # extra bf16 copy of the attention K/V at the prompt's length, which a
+    # growing cache reallocates and copies while the old buffer is live.
+    prefill_chunk_transient_gib: float = 2.0
+    prefill_chunk_rows: int = 2048
 
     @classmethod
     def from_config(cls, config, *, mtp):
@@ -128,6 +139,26 @@ class Qwen38CacheBudget:
     def _validate_context(context_tokens):
         if type(context_tokens) is not int or context_tokens < 0:
             raise ValueError("context_tokens must be nonnegative integer")
+
+    def prefill_transient_bytes(self, context_tokens, chunk_rows):
+        """Transient bytes one prefill chunk of ``chunk_rows`` needs at ``context_tokens``."""
+        self._validate_context(context_tokens)
+        rows = max(0, int(chunk_rows))
+        fixed = (
+            self.prefill_chunk_transient_gib
+            * min(rows, self.prefill_chunk_rows)
+            / self.prefill_chunk_rows
+            * (1 << 30)
+        )
+        kv_copy = (
+            (self.attention_layers + self.mtp_layers)
+            * int(context_tokens)
+            * 2
+            * self.kv_heads
+            * self.head_dim
+            * 2
+        )
+        return int(fixed + kv_copy)
 
     def project_resident(self, context_tokens):
         """Bytes for one retained cache without speculative scratch."""
