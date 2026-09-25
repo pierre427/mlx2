@@ -209,9 +209,12 @@ class Model(nn.Module):
 
     def sanitize(self, weights):
         out = {}
+        vision = ("vision_tower", "vision_adapter", "vision_projection")
         for k, v in weights.items():
-            # Drop the vision tower — this is a text-only port.
-            if k.startswith(("vision_tower", "vision_adapter", "vision_projection")):
+            # Drop the vision tower — this is a text-only port. The original
+            # Hugging Face checkpoint nests it under ``model.`` (as it does the
+            # text tower); the MLX conversion keeps it at the top level.
+            if k.startswith(vision) or k.startswith(tuple("model." + p for p in vision)):
                 continue
             # Meta/MLX nest the text tower under language_model.*
             if k.startswith("language_model.model."):
