@@ -876,6 +876,27 @@ def parallel_sample_lane_gib(controller, *, draft_depth, prompt_lookup_num_draft
     ) - controller.hard_reserve_gib
 
 
+def unmaterialized_lane_bytes(jobs):
+    """Lane bytes granted to attached jobs that have not been allocated yet.
+
+    Admission measures headroom, but an attached lane allocates nothing until
+    the scheduler steps it: a warm hit is a descriptor-only COW branch whose
+    copy materializes on the lane's first write, and a cold prompt has not
+    been prefilled.  Lanes attached in one pass -- both members of an atomic
+    cohort, or a burst -- were each tested against the same reading, so the
+    second spent the first's grant.  Qwen3.8-27B on a 36 GiB M3 Pro admitted
+    two warm 32K cohort lanes (3.45 GiB each) against one 7.45 GiB reading and
+    the first decode step failed with a Metal out-of-memory.  A grant is held
+    until the lane's first generated token, by which point its cache copy,
+    recurrent state and one decode transient have all been allocated and the
+    measurement sees them.
+    """
+    return int(
+        sum(float(getattr(job, "admission_reserved_gib", 0.0) or 0.0) for job in jobs)
+        * (1 << 30)
+    )
+
+
 def admit_lane_headroom(
     controller,
     *,
@@ -1132,6 +1153,9 @@ class Job:
     approximate_kv_applied: bool = False
     verify_bitexact_start: dict | None = None
     admission_final_reclaim_done: bool = False
+    # Lane bytes admission granted this job that its cache has not allocated
+    # yet; cleared by its first generated token (see ``unmaterialized_lane_bytes``).
+    admission_reserved_gib: float = 0.0
     apc_interior_positions: tuple[int, ...] = ()
     # Budgeted P1 plan when rolling checkpoints are enabled (else empty), and
     # the (key, tokens) of this lane's latest disposable rolling checkpoint.
@@ -5353,6 +5377,7 @@ class ServingEngine:
                         # fit. Scale the calibrated width-3 transient to
                         # the actual forward width; the ordinary one-row
                         # share is already included by the lane cost.
+                        granted = unmaterialized_lane_bytes(active.values())
                         (admitted, depth_floor, required) = admit_lane_headroom(
                             controller,
                             context_tokens=len(tokens) + maximum,
@@ -5361,13 +5386,19 @@ class ServingEngine:
                             prompt_lookup_num_draft=(
                                 batch.num_draft if prompt_lookup else None
                             ),
-                            headroom=execution_headroom,
+                            headroom=(
+                                (lambda: execution_headroom() - granted)
+                                if granted
+                                else execution_headroom
+                            ),
                             reclaim=reclaim_allocator,
                             evict=evict_unused_checkpoint,
                             evictable=getattr(apc, "unleased_resident_nbytes", None),
                         )
                         if depth_floor:
                             self.counts["memory_admission_depth_floor_admits"] += 1
+                        if granted and not admitted:
+                            self.counts["memory_admission_deferred_behind_grants"] += 1
                         if not admitted:
                             if attaching_cohort is not None:
                                 raise Overloaded(
@@ -6101,6 +6132,9 @@ class ServingEngine:
                             }
                             job.neural_concept_receipt = prepared["receipt"]
                             self.counts["neural_concept_bridge_engagements"] += 1
+                        job.admission_reserved_gib = max(
+                            0.0, float(required) - float(controller.hard_reserve_gib)
+                        )
                         job.uid = batch.insert(
                             [hit.remaining_tokens], max_tokens=[maximum],
                             caches=[lane_cache], all_tokens=[tokens[:hit.cached_tokens]],
@@ -6820,6 +6854,7 @@ class ServingEngine:
                         if job.first_token is None:
                             job.first_token = time.monotonic()
                         job.completion_tokens += 1
+                        job.admission_reserved_gib = 0.0
                         job.replaying = False
                         if job.generated_token_ids is not None:
                             job.generated_token_ids.append(int(response.token))
