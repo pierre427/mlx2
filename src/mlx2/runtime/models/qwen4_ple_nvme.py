@@ -255,6 +255,86 @@ def index_json_sha256(model_path) -> str:
         return hashlib.sha256(f.read()).hexdigest()
 
 
+def file_sha256(path, chunk_bytes: int = 8 << 20) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as f:
+        while chunk := f.read(chunk_bytes):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def verify_converted_sidecar(sidecar_path: str, model_path, manifest: dict) -> dict:
+    """Verify a source-tensor-free sidecar produced by the mlx2 converter.
+
+    A converted mlx-serve artifact intentionally has no resident PLE shard
+    tensors to sample. In that case, accept only an explicitly marked
+    conversion whose receipt, model index, target path, and complete sidecar
+    digest all agree. Any missing or mismatched field fails closed.
+    """
+    conversion = manifest.get("conversion")
+    expected_conversion = {
+        "schema": "mlx2.mlx-serve-ngram-import.v1",
+        "receipt": "mlx2-conversion.json",
+        "source_format": "mlx-serve-ngram",
+    }
+    if conversion != expected_conversion:
+        raise ValueError(
+            "PLE source tensors are absent and the manifest is not an approved mlx2 conversion"
+        )
+    receipt_path = Path(model_path) / conversion["receipt"]
+    with open(receipt_path, "r") as f:
+        receipt = json.load(f)
+    if receipt.get("schema") != "mlx2.artifact-conversion.v1":
+        raise ValueError("unsupported mlx2 conversion receipt schema")
+    actual_index = index_json_sha256(model_path)
+    if receipt.get("source_index_sha256") != actual_index:
+        raise ValueError("mlx2 conversion receipt does not match the model index")
+    if Path(receipt.get("target", "")).resolve() != Path(model_path).resolve():
+        raise ValueError("mlx2 conversion receipt target does not match the model path")
+    marker = receipt.get("source_completion_marker")
+    if not isinstance(marker, dict) or not all(
+        marker.get(field) for field in ("repo", "revision", "completed_at")
+    ):
+        raise ValueError("mlx2 conversion receipt lacks exact source identity")
+    if not isinstance(marker.get("files"), int) or marker["files"] <= 0:
+        raise ValueError("mlx2 conversion receipt has an invalid source file count")
+    if not isinstance(marker.get("total_bytes"), int) or marker["total_bytes"] <= 0:
+        raise ValueError("mlx2 conversion receipt has an invalid source byte count")
+    expected_file = manifest.get("file_sha256")
+    if not isinstance(expected_file, str) or len(expected_file) != 64:
+        raise ValueError("converted PLE manifest lacks a full-file sha256")
+    if receipt.get("ple_output_sha256") != expected_file:
+        raise ValueError("converted PLE manifest and receipt hashes disagree")
+    actual_file = file_sha256(sidecar_path)
+    if actual_file != expected_file:
+        raise ValueError(
+            f"converted PLE sidecar sha256={actual_file} does not match manifest {expected_file}"
+        )
+    return receipt
+
+
+def verify_sidecar_content(sidecar_path: str, model_path, manifest: dict) -> str:
+    """Bind the sidecar's row content to the artifact; return the method used.
+
+    An artifact that carries the source ``shard_*`` tensors is spot-checked
+    row-by-row against them (``"spot_check"``). An artifact with no source
+    tensors at all is accepted only as a verified mlx2 conversion: marked
+    manifest, matching receipt, and a full-file sha256 of the sidecar
+    (``"converted"``). A partial set of source shards still goes through the
+    spot check, which refuses it.
+    """
+    if _source_shard_refs(model_path, manifest):
+        spot_check_sidecar_rows(
+            sidecar_path,
+            model_path,
+            manifest,
+            num_random=int(os.getenv("MLX_QWEN4_PLE_NVME_SPOT_CHECK_ROWS", "256")),
+        )
+        return "spot_check"
+    verify_converted_sidecar(sidecar_path, model_path, manifest)
+    return "converted"
+
+
 def verify_sidecar_against_artifact(sidecar_path: str, model_path) -> dict:
     """Check the sidecar manifest and file against the source artifact.
 
@@ -867,12 +947,7 @@ def install_file_backed_ple(
     """
     assert_sidecar_not_in_weight_files(sidecar_path)
     manifest = verify_sidecar_against_artifact(sidecar_path, model_path)
-    spot_check_sidecar_rows(
-        sidecar_path,
-        model_path,
-        manifest,
-        num_random=int(os.getenv("MLX_QWEN4_PLE_NVME_SPOT_CHECK_ROWS", "256")),
-    )
+    verify_sidecar_content(sidecar_path, model_path, manifest)
     installed = False
     for prefix, ngram_embedding in _iter_ple_embeddings(model):
         if prefix != manifest["tensor_prefix"]:
