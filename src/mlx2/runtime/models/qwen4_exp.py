@@ -56,6 +56,7 @@ from .qwen4_fused_gdn_verify import (
     validate_qwen4_gdn_replay_acceptance,
 )
 from .qwen4_gdn_outproj import admit_qwen4_gdn_outproj
+from . import qwen4_fused_gdn_prefill as _gdn_prefill
 from .qwen4_qsa_nax import (
     block_sparse_layout_supported,
     compact_blocks_to_kernel_inputs,
@@ -355,6 +356,11 @@ _FUSED_GDN_DYNAMIC_ACCEPT = _env_flag("MLX_QWEN4_FUSED_GDN_DYNAMIC_ACCEPT")
 _FUSED_GDN_CATCHUP_DEFAULT = _env_flag("MLX_QWEN4_FUSED_GDN_CATCHUP")
 _FUSED_GDN_CATCHUP_SCOPE = ContextVar("qwen4_fused_gdn_catchup_scope", default=False)
 _FUSED_GDN_VERIFY_MODES = ("stock", "fused")
+# omlx #3903 port: fused prefill prework + norm-gate; default off until the
+# GPU bit/ULP gate (scripts/check_omlx3903_port.py) qualifies it.
+_FUSED_GDN_PREFILL = _gdn_prefill.prefill_enabled_from_env()
+_FUSED_GDN_PREFILL_MODES = ("stock", "fused")
+_PREFILL_FALLBACK_REASON_LIMIT = 16
 _FUSED_GDN_REPLAY_ROLLBACK_MODES = ("snapshots", "compact")
 
 
@@ -858,6 +864,12 @@ class GatedDeltaNet(Qwen35GatedDeltaNet):
             self, "_fused_gdn_outproj_control", mx.zeros((64,), mx.uint32)
         )
         self._fused_gdn_outproj_epoch = 0
+        self.fused_gdn_prefill_mode = "fused" if _FUSED_GDN_PREFILL else "stock"
+        self.fused_gdn_prefill_calls = 0
+        self.fused_gdn_prefill_fallbacks = 0
+        self.fused_gdn_prefill_norm_eager = 0
+        self.fused_gdn_prefill_last_fallback = None
+        object.__setattr__(self, "fused_gdn_prefill_fallback_reasons", {})
 
     def _normalize_qk(self, q, k):
         """Preserve Qwen4-Exp's direct L2 materialization boundaries."""
@@ -1152,6 +1164,86 @@ class GatedDeltaNet(Qwen35GatedDeltaNet):
 
         return fn, rows
 
+    def set_fused_gdn_prefill_mode(self, mode: str):
+        """Select the multi-token prefill implementation (stock or fused)."""
+        if mode not in _FUSED_GDN_PREFILL_MODES:
+            raise ValueError(
+                f"unknown fused GDN prefill mode {mode!r}; expected one of {_FUSED_GDN_PREFILL_MODES}"
+            )
+        self.fused_gdn_prefill_mode = mode
+
+    def _fused_gdn_prefill_fallback(self, reason: str):
+        self.fused_gdn_prefill_fallbacks += 1
+        self.fused_gdn_prefill_last_fallback = reason
+        reasons = self.fused_gdn_prefill_fallback_reasons
+        if reason not in reasons and len(reasons) >= _PREFILL_FALLBACK_REASON_LIMIT:
+            reason = "other"
+        reasons[reason] = reasons.get(reason, 0) + 1
+        return None
+
+    def _try_fused_prefill(self, qkv, z, b, a, mask, cache):
+        """Fused conv/L2 prework and norm-gate around the stock recurrence.
+
+        Returns ``None`` (eager path runs) on any refusal, before the cache
+        is touched.  See ``qwen4_fused_gdn_prefill`` for the semantics audit.
+        """
+        admission = _gdn_prefill.admit_qwen4_fused_gdn_prefill(
+            qkv=qkv,
+            z=z,
+            b=b,
+            a=a,
+            conv_state=cache[0] if cache is not None else None,
+            recurrent_state=cache[1] if cache is not None else None,
+            conv_weight=self.conv1d.weight,
+            norm_weight=self.norm.weight,
+            mask=mask,
+            has_cache=cache is not None,
+            lengths=getattr(cache, "lengths", None),
+            left_padding=getattr(cache, "left_padding", None),
+            speculating=bool(getattr(cache, "speculating", False)),
+            training=bool(self.training),
+            sharded=self.sharding_group is not None,
+            num_key_heads=self.num_k_heads,
+            num_value_heads=self.num_v_heads,
+            key_head_dim=self.head_k_dim,
+            value_head_dim=self.head_v_dim,
+            conv_kernel=self.conv_kernel_size,
+            gate_activation=self.norm.activation,
+        )
+        if not admission.accepted:
+            return self._fused_gdn_prefill_fallback(admission.reason)
+        if not _gdn_prefill.runtime_supported():
+            return self._fused_gdn_prefill_fallback("Metal runtime unavailable")
+        steps = int(qkv.shape[1])
+        norm_eager = False
+        try:
+            (q, k, v, conv_state) = _gdn_prefill.qwen4_gdn_prefill_prework(
+                qkv, cache[0], self.conv1d.weight
+            )
+            (out, state) = self._gated_delta_update(
+                q, k, v, a, b, cache[1], None, not self.training
+            )
+            if out.dtype == mx.bfloat16:
+                flat = _gdn_prefill.qwen4_gdn_prefill_norm_gate(
+                    out, z, self.norm.weight, self.norm.eps
+                )
+            else:
+                norm_eager = True
+                gate = z.reshape(1, steps, self.num_v_heads, self.head_v_dim)
+                flat = self.norm(out, gate).reshape(1, steps, -1)
+        except Exception as exc:
+            return self._fused_gdn_prefill_fallback(
+                f"Metal kernel dispatch failed: {type(exc).__name__}"
+            )
+        cache[0] = conv_state
+        cache[1] = state
+        cache.advance(steps)
+        self.fused_gdn_prefill_calls += 1
+        if norm_eager:
+            self.fused_gdn_prefill_norm_eager += 1
+        self.fused_gdn_prefill_last_fallback = None
+        return self.out_proj(flat)
+
     def _try_fused_decode(self, qkv, z, b, a, mask, cache):
         if cache is not None and qkv.shape[1] > 1:
             speculating = bool(getattr(cache, "speculating", False))
@@ -1159,6 +1251,8 @@ class GatedDeltaNet(Qwen35GatedDeltaNet):
                 return self._try_fused_verify(
                     qkv, z, b, a, mask, cache, catchup=not speculating
                 )
+        if qkv.shape[1] > 1 and self.fused_gdn_prefill_mode == "fused":
+            return self._try_fused_prefill(qkv, z, b, a, mask, cache)
         if self.fused_gdn_decode_mode == "stock":
             return None
         if qkv.shape[1] > 1:
@@ -1432,6 +1526,21 @@ def qwen4_fused_gdn_stats(
         durable = stats["replay_fallback_reasons"]
         for reason, count in module.fused_gdn_replay_fallback_reasons.items():
             durable[reason] = durable.get(reason, 0) + count
+        if module.fused_gdn_prefill_mode != "stock":
+            # Reported only when selected, so default diagnostics are unchanged.
+            stats["prefill_calls"] = (
+                stats.get("prefill_calls", 0) + module.fused_gdn_prefill_calls
+            )
+            stats["prefill_fallbacks"] = (
+                stats.get("prefill_fallbacks", 0) + module.fused_gdn_prefill_fallbacks
+            )
+            stats["prefill_norm_eager"] = (
+                stats.get("prefill_norm_eager", 0)
+                + module.fused_gdn_prefill_norm_eager
+            )
+            durable = stats.setdefault("prefill_fallback_reasons", {})
+            for reason, count in module.fused_gdn_prefill_fallback_reasons.items():
+                durable[reason] = durable.get(reason, 0) + count
         stats["catchup_calls"] += module.fused_gdn_catchup_calls
         stats["catchup_fallbacks"] += module.fused_gdn_catchup_fallbacks
         reason = module.fused_gdn_catchup_last_fallback
@@ -1458,6 +1567,11 @@ def qwen4_fused_gdn_stats(
             module.fused_gdn_catchup_calls = 0
             module.fused_gdn_catchup_fallbacks = 0
             module.fused_gdn_catchup_last_fallback = None
+            module.fused_gdn_prefill_calls = 0
+            module.fused_gdn_prefill_fallbacks = 0
+            module.fused_gdn_prefill_norm_eager = 0
+            module.fused_gdn_prefill_last_fallback = None
+            module.fused_gdn_prefill_fallback_reasons.clear()
     return stats
 
 

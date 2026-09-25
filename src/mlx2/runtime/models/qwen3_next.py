@@ -20,6 +20,7 @@ from .qwen4_moe_router import (
     qwen4_moe_router,
 )
 from . import switch_layers as _switch_layers
+from . import qwen4_moe_weighted_sum as _moe_wsum
 from .switch_layers import (
     QuantizedSwitchLinear,
     SwiGLU,
@@ -53,6 +54,8 @@ def _env_flag(name: str, default: bool = False) -> bool:
 _MOE_GATE_COMPILE = _env_flag("MLX_QWEN4_MOE_GATE_COMPILE")
 _MOE_ROUTER_KERNEL = _env_flag("MLX_QWEN4_MOE_ROUTER_KERNEL")
 _MOE_ROUTER_MODES = ("stock", "fused")
+# omlx #3903 port: sorted-order weighted sum for prefill; default off.
+_MOE_WEIGHTED_SUM = _moe_wsum.weighted_sum_enabled_from_env()
 _MOE_GATE_COMPILE_MAX_TOKENS = 8
 _COMPILE_GLUE_DEFAULT = False
 _COMPILE_GLUE = _env_flag("MLX_QWEN4_COMPILE_GLUE", default=_COMPILE_GLUE_DEFAULT)
@@ -418,12 +421,7 @@ class FusedGateUpSwitchGLU(nn.Module):
         if fused is not None:
             return fused
         x = self.down_proj(hidden, idx, sorted_indices=do_sort)
-        if do_sort:
-            x = _scatter_unsort(x, inv_order, indices.shape)
-        x = x.squeeze(-2)
-        if scores is not None:
-            return (x * scores[..., None]).sum(axis=-2)
-        return x
+        return _routed_tail(self, x, indices, inv_order, scores, do_sort)
 
 
 class FusedDownSwitchGLU(SwitchGLU):
@@ -458,12 +456,54 @@ class FusedDownSwitchGLU(SwitchGLU):
         if fused is not None:
             return fused
         x = self.down_proj(hidden, idx, sorted_indices=do_sort)
-        if do_sort:
-            x = _scatter_unsort(x, inv_order, indices.shape)
-        x = x.squeeze(-2)
-        if scores is not None:
-            return (x * scores[..., None]).sum(axis=-2)
-        return x
+        return _routed_tail(self, x, indices, inv_order, scores, do_sort)
+
+
+def _routed_tail(switch_mlp, x, indices, inv_order, scores, do_sort):
+    """Unsort and weight the down-projection rows (stock), or fuse both.
+
+    With ``moe_weighted_sum`` selected on the switch module, an admitted
+    sorted prefill tail runs ``qwen4_moe_weighted_sum.moe_weighted_sum`` on
+    the sorted rows instead of ``_scatter_unsort`` + ``(x * scores).sum``.
+    """
+    # Decode and short verify widths (unsorted, or under the row floor)
+    # decline quietly: they are not candidates, so they are not fallbacks.
+    if (
+        getattr(switch_mlp, "moe_weighted_sum", False)
+        and scores is not None
+        and do_sort
+        and indices.size >= _moe_wsum.MIN_ROUTED_ROWS
+    ):
+        admission = _moe_wsum.admit_moe_weighted_sum(
+            x_sorted=x,
+            inv_order=inv_order,
+            scores=scores,
+            indices=indices,
+            do_sort=do_sort,
+            training=bool(switch_mlp.training),
+        )
+        if admission.accepted and not _moe_wsum.runtime_supported():
+            admission = _moe_wsum.WeightedSumAdmission(False, "Metal runtime unavailable")
+        if admission.accepted:
+            switch_mlp.moe_weighted_sum_calls += 1
+            switch_mlp.moe_weighted_sum_last_fallback = None
+            return _moe_wsum.moe_weighted_sum(x, inv_order, scores)
+        switch_mlp.moe_weighted_sum_fallbacks += 1
+        switch_mlp.moe_weighted_sum_last_fallback = admission.reason
+    if do_sort:
+        x = _scatter_unsort(x, inv_order, indices.shape)
+    x = x.squeeze(-2)
+    if scores is not None:
+        return (x * scores[..., None]).sum(axis=-2)
+    return x
+
+
+def _enable_moe_weighted_sum(switch_mlp, enabled: bool) -> None:
+    """Attach the weighted-sum selection and its counters to a switch module."""
+    switch_mlp.moe_weighted_sum = bool(enabled)
+    switch_mlp.moe_weighted_sum_calls = 0
+    switch_mlp.moe_weighted_sum_fallbacks = 0
+    switch_mlp.moe_weighted_sum_last_fallback = None
 
 
 def _fused_outcome(variant: str, indices) -> str:
@@ -487,6 +527,7 @@ def _try_qwen4_fused_down(
     """
     if (
         scores is None
+        or variant == "stock"
         or sorted_indices
         or down_proj.training
         or (not isinstance(down_proj, QuantizedSwitchLinear))
@@ -760,6 +801,10 @@ class Qwen3NextSparseMoeBlock(nn.Module):
         self.switch_mlp = switch_cls(
             dim, intermediate_size, num_experts + (1 if self.shared_folded else 0)
         )
+        # The weighted sum needs scores inside the switch module; a folded
+        # shared row weights its rows outside it, so it keeps the stock tail.
+        self.moe_weighted_sum = _MOE_WEIGHTED_SUM and not self.shared_folded
+        _enable_moe_weighted_sum(self.switch_mlp, self.moe_weighted_sum)
         if not self.shared_folded:
             self.shared_expert = Qwen3NextMLP(dim, shared_expert_intermediate_size)
         self.shared_expert_gate = nn.Linear(dim, 1, bias=False)
@@ -780,6 +825,14 @@ class Qwen3NextSparseMoeBlock(nn.Module):
         if mode != "stock" and self.shared_folded:
             raise ValueError("fused expert kernels do not support a folded shared row")
         self.fused_expert_kernel_mode = mode
+
+    def set_moe_weighted_sum(self, enabled: bool) -> bool:
+        """Live-toggle the sorted-order weighted-sum tail (omlx #3903 port)."""
+        if enabled and self.shared_folded:
+            raise ValueError("the weighted-sum tail does not support a folded shared row")
+        self.moe_weighted_sum = bool(enabled)
+        self.switch_mlp.moe_weighted_sum = bool(enabled)
+        return self.moe_weighted_sum
 
     def set_moe_router_mode(self, mode: str):
         if mode not in _MOE_ROUTER_MODES:
@@ -837,6 +890,15 @@ class Qwen3NextSparseMoeBlock(nn.Module):
                     self.fused_expert_dispatches[outcome] += 1
                 else:
                     self.fused_expert_fallbacks += 1
+            elif (
+                self.moe_weighted_sum
+                and self.sharding_group is None
+                and inds.size >= _moe_wsum.MIN_ROUTED_ROWS
+            ):
+                # Prefill widths only: hand the scores to the switch module so
+                # its sorted tail can weight rows in place.  ``variant="stock"``
+                # keeps the fused-down kernel out of this route.
+                y = self.switch_mlp(x, inds, scores=scores, variant="stock")
             else:
                 y = self.switch_mlp(x, inds)
                 y = (y * scores[..., None]).sum(axis=-2)
