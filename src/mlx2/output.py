@@ -207,13 +207,39 @@ class OutputParser:
     def stop_sequence(self):
         return self.stop_matcher.stop_sequence
 
+    def _stop_gated(self):
+        """Whether buffered text is (or may still become) reasoning.
+
+        Client stop strings apply to the answer, never to reasoning: OpenAI
+        and Anthropic define them over the returned text, and the dedicated
+        Xing, North and Muse parsers already match only content.  Text is held
+        back from the stop matcher while reasoning is open, or while a leading
+        ``<think>`` may still open it, or while the template's separator after
+        ``</think>`` is still being dropped, and handed to the matcher at the
+        point the answer starts.
+        """
+        return self.chat and (
+            self.channel == "reasoning_content"
+            or self._leading
+            or self._drop_separator
+        )
+
+    def _match_stops(self, text, final):
+        """Pass unmatched answer text through the client stop matcher."""
+        visible, stop_hit = self.stop_matcher.push(text, final=final)
+        if stop_hit:
+            self.stopped = True
+        return visible, stop_hit
+
     def push(self, text, *, final=False):
         if self.stopped:
             return []
-        text, stop_hit = self.stop_matcher.push(text, final=final)
-        if stop_hit:
-            self.stopped, final = True, True
+        gated = self._stop_gated()
+        stop_hit = False
+        if not gated:
+            text, stop_hit = self._match_stops(text, final)
         self.buffer += text
+        final = final or stop_hit
         events = []
         while self.buffer:
             if self._drop_separator:
@@ -221,6 +247,14 @@ class OutputParser:
                 if not self.buffer:
                     break  # the answer may still start with a separator
                 self._drop_separator = False
+            if gated and not self._stop_gated():
+                # The answer starts here: everything still buffered is answer
+                # text the stop matcher has not seen yet.
+                gated = False
+                self.buffer, stop_hit = self._match_stops(self.buffer, final)
+                final = final or stop_hit
+                if not self.buffer:
+                    break
             if not self.chat:
                 events.append({"content": self.buffer})
                 self.buffer = ""
@@ -237,7 +271,7 @@ class OutputParser:
                     self.buffer = self.buffer[len(THINKING_OPEN_MARKER) :]
                     self.channel = "reasoning_content"
                     self._reasoning_open = True
-                    continue
+                continue  # the answer may start here: recheck the stop gate
             if self.channel == "tool":
                 first = end = self.buffer.find("</tool_call>")
                 outcome = None

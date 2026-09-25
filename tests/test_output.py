@@ -113,6 +113,104 @@ def test_with_thinking_off_only_a_leading_open_marker_is_reasoning():
     assert _channels_at_every_split("<thin") == ("", "<thin")
 
 
+def _stopped_channels(text, chunks_of, **kwargs):
+    parser = OutputParser(chat=True, **kwargs)
+    events = []
+    for chunk in chunks_of(text):
+        events += parser.push(chunk)
+    events += parser.push("", final=True)
+    return (
+        "".join(e.get("reasoning_content", "") for e in events),
+        "".join(e.get("content", "") for e in events),
+        parser.stopped,
+        parser.stop_sequence,
+    )
+
+
+def _every_split(text):
+    yield [text]
+    for split in range(1, len(text)):
+        yield [text[:split], text[split:]]
+    yield list(text)
+
+
+@pytest.mark.parametrize(
+    "text, thinking, expected",
+    [
+        pytest.param(
+            # Laguna 20x20 stop_string: the model counts in its reasoning
+            # before it answers; the client stop "10" used to end the request
+            # there with empty content.
+            "I will count 1..10 then 20.</think>1\n2\n9\n10\n11",
+            True,
+            ("I will count 1..10 then 20.", "1\n2\n9\n", True, "10"),
+            id="implied-open",
+        ),
+        pytest.param(
+            "<think>up to 10</think>9\n10\n11",
+            True,
+            ("up to 10", "9\n", True, "10"),
+            id="explicit-open",
+        ),
+        pytest.param(
+            "<think>up to 10</think>9\n10\n11",
+            False,
+            ("up to 10", "9\n", True, "10"),
+            id="leading-open-thinking-off",
+        ),
+        pytest.param(
+            "reason 1\n</think>10",
+            True,
+            ("reason 1\n", "", True, "10"),
+            id="stop-at-answer-start",
+        ),
+        pytest.param(
+            # A stop spanning the close marker is not a stop in the answer.
+            "ends with 1</think>0 ok",
+            True,
+            ("ends with 1", "0 ok", False, None),
+            id="no-match-across-close",
+        ),
+        pytest.param(
+            "still reasoning about 10",
+            True,
+            ("still reasoning about 10", "", False, None),
+            id="reasoning-only",
+        ),
+    ],
+)
+def test_client_stops_apply_to_the_answer_not_to_reasoning(text, thinking, expected):
+    for chunks in _every_split(text):
+        got = _stopped_channels(
+            text, lambda _text, c=chunks: c, thinking=thinking, stops=["10"]
+        )
+        assert got == expected, chunks
+
+
+def test_client_stop_after_the_template_separator_is_not_the_separator():
+    """The run after ``</think>`` that the template writes (Nemotron: ``\n``)
+    is structure; a client stop of ``\n`` applies to the answer after it."""
+    text = "why</think>\n\nA\nB"
+    for chunks in _every_split(text):
+        got = _stopped_channels(
+            text, lambda _text, c=chunks: c, thinking=True, stops=["\n"],
+            think_close_separator="\n",
+        )
+        assert got == ("why", "A", True, "\n"), chunks
+
+
+def test_laguna_parser_does_not_stop_inside_default_reasoning():
+    adapter = LagunaXS21Adapter.__new__(LagunaXS21Adapter)
+    parser = adapter.output_parser(
+        {"messages": [{"role": "user", "content": "Count"}], "stop": ["10"]}
+    )
+    events = parser.push("count 1 to 10.") + parser.push("</think>9\n10\n11")
+    assert not any("10" in e.get("content", "") for e in events)
+    assert "".join(e.get("reasoning_content", "") for e in events) == "count 1 to 10."
+    assert "".join(e.get("content", "") for e in events) == "9\n"
+    assert parser.stopped and parser.stop_sequence == "10"
+
+
 def test_stop_at_every_chunk_boundary():
     text = "hello STOP hidden"
     for split in range(len(text) + 1):
