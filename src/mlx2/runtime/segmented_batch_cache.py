@@ -725,6 +725,8 @@ class SegmentedBatchArraysCache(Qwen4ArraysCache):
         self.rows = list(rows)
         self._note = note
         self.speculating = True
+        # Slots written through this view since the last trim; see trim_ragged.
+        self._written_slots = set()
         self._refresh_state()
         self._checkpoints = [
             list(row._checkpoints[0]) if len(row._checkpoints) == 1 else []
@@ -760,6 +762,7 @@ class SegmentedBatchArraysCache(Qwen4ArraysCache):
 
     def __setitem__(self, idx, value):
         self.cache[idx] = value
+        self._written_slots.add(idx)
         if value is None:
             for row in self.rows:
                 row[idx] = None
@@ -797,6 +800,21 @@ class SegmentedBatchArraysCache(Qwen4ArraysCache):
     def advance(self, N):
         return ArraysCache.advance(self, N)
 
+    @staticmethod
+    def _shared_replay(fn):
+        """Run the full-batch replay once per accepted length, not once per row."""
+        if fn is None:
+            return None
+        replays = {}
+
+        def replay(value, _fn=fn):
+            key = int(value)
+            if key not in replays:
+                replays[key] = _fn(value)
+            return replays[key]
+
+        return replay
+
     def _row_closure(self, fn, row):
         if fn is None:
             return None
@@ -808,6 +826,7 @@ class SegmentedBatchArraysCache(Qwen4ArraysCache):
 
     def stage_ple_rollback(self, num_tokens, fn, snapshot, *, per_row_fn=None):
         del per_row_fn
+        fn = self._shared_replay(fn)
         for index, row in enumerate(self.rows):
             stage = getattr(row, "stage_ple_rollback", None)
             if stage is not None:
@@ -819,6 +838,7 @@ class SegmentedBatchArraysCache(Qwen4ArraysCache):
 
     def record_rollback(self, num_tokens, fn, snapshot, *, per_row_fn=None, **_kwargs):
         del per_row_fn
+        fn = self._shared_replay(fn)
         for index, row in enumerate(self.rows):
             row.record_rollback(
                 num_tokens,
@@ -841,7 +861,12 @@ class SegmentedBatchArraysCache(Qwen4ArraysCache):
         counts = self.preflight_ragged_trim(counts, validate=validate)
         for row, count in zip(self.rows, counts):
             row.trim_ragged([count], validate=False)
-        self._refresh_state()
+        # A zero-drop trim leaves every row untouched, so the batched view is
+        # still exact when a forward wrote every slot through it since the
+        # last trim. Anything else re-joins from the rows.
+        if any(counts) or len(self._written_slots) != len(self.cache):
+            self._refresh_state()
+        self._written_slots = set()
         return counts
 
     def trim(self, count):
