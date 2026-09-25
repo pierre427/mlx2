@@ -181,7 +181,8 @@ def test_poolside_json_values_keep_quoted_closing_tags(schema, value):
             assert [json.loads(c["function"]["arguments"]) for c in calls] == [
                 {"x": json.loads(value)}
             ] * count
-            assert "".join(e.get("content", "") for e in events) == "\n" * (count - 1)
+            # The newline between two calls is template structure, not content.
+            assert "".join(e.get("content", "") for e in events) == ""
 
 
 @pytest.mark.parametrize("value", ["a</arg_value>b", "a</tool_call>b"])

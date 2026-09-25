@@ -192,6 +192,13 @@ class OutputParser:
         self.tool_call_parse_fallbacks = 0
         self.tool_call_constraint_truncations = 0
         self._code = _CodeSpans()
+        # Whitespace-only content after a tool call is held back: the newline
+        # between two parallel calls is template structure, not an answer.  It
+        # is dropped at the end of the output, and before another call when no
+        # text has been shown; otherwise it goes out with the next text.
+        self._after_call = False
+        self._pending_space = ""
+        self._shown_text = False
 
     def _emit(self, events, text):
         if self.channel == "content":
@@ -200,6 +207,15 @@ class OutputParser:
             events.append({self.channel: text})
 
     def _content(self, events, text):
+        if self._after_call:
+            if text.isspace():
+                self._pending_space += text
+                return
+            text = self._pending_space + text
+            self._pending_space = ""
+            self._after_call = False
+        if not text.isspace():
+            self._shown_text = True
         events.append({"content": text})
         self._code.feed(text)
 
@@ -359,6 +375,7 @@ class OutputParser:
                 self.tool_count += len(parsed_events)
                 self.buffer = self.buffer[end + len("</tool_call>") :]
                 self.channel = "content"
+                self._after_call = True
                 continue
             markers = {}
             if self._reasoning_open:
@@ -381,6 +398,8 @@ class OutputParser:
                     self._content(events, marker)  # a quoted example
                 else:
                     self.channel = markers[marker]
+                    if marker == "<tool_call>" and not self._shown_text:
+                        self._pending_space = ""
                     if marker == THINKING_CLOSE_MARKER:
                         self._reasoning_open = False
                         self._drop_separator = bool(self.think_close_separator)
@@ -391,4 +410,6 @@ class OutputParser:
                     self._emit(events, self.buffer[:end])
                 self.buffer = self.buffer[end:]
                 break
+        if final:
+            self._pending_space = ""
         return events

@@ -741,8 +741,15 @@ def test_qwen_unclosed_middle_string_parameter_is_malformed_not_swallowed():
         assert grammar.fullmatch(text) is None
         quoted = closed.replace("a.txt", "a<parameter=b.txt")
         assert grammar.fullmatch(quoted) is None
-        with pytest.raises(ValueError, match="Unclosed parameter"):
-            parse_tool_call(quoted[len("<tool_call>"):-len("</tool_call>")], strict_tools)
+        body = quoted[len("<tool_call>"):-len("</tool_call>")]
+        if strict:
+            with pytest.raises(ValueError, match="Unclosed parameter"):
+                parse_tool_call(body, strict_tools)
+        else:
+            # Not a tag naming a declared parameter: text the model wrote.
+            assert parse_tool_call(body, strict_tools)["arguments"] == {
+                "path": "a<parameter=b.txt", "content": "hello",
+            }
 
 
 def test_qwen_unclosed_trailing_parameter_is_closed_by_the_function_end():
@@ -764,3 +771,87 @@ def test_qwen_unclosed_trailing_parameter_is_closed_by_the_function_end():
     )
     with pytest.raises(ValueError):
         parse_tool_call(middle, tools)
+
+
+def _content_after_calls(text, chunked, **options):
+    parser = OutputParser(chat=True, tools=_SUM_TOOLS, parse_tool=parse_tool_call, **options)
+    chunks = list(text) if chunked else [text]
+    events = []
+    for index, chunk in enumerate(chunks):
+        events += parser.push(chunk, final=index == len(chunks) - 1)
+    calls = [event["tool_calls"][0]["function"]["name"] for event in events if "tool_calls" in event]
+    return "".join(event.get("content", "") for event in events), calls
+
+
+_SUM_CALL = "<tool_call>\n<function=sum>\n<parameter=x>\n1\n</parameter>\n</function>\n</tool_call>"
+
+
+@pytest.mark.parametrize("chunked", [False, True])
+@pytest.mark.parametrize(
+    "text,expected",
+    [
+        # The newline between parallel calls is template structure, not an answer.
+        (f"{_SUM_CALL}\n{_SUM_CALL}", ""),
+        (f"{_SUM_CALL}\n{_SUM_CALL}\n", ""),
+        (f"{_SUM_CALL}\n\n", ""),
+        # Whitespace between visible text is kept, and text after a call too.
+        (f"A{_SUM_CALL} \n{_SUM_CALL}B", "A \nB"),
+        (f"{_SUM_CALL}\nDone.", "\nDone."),
+        ("Plain answer\n\n", "Plain answer\n\n"),
+    ],
+)
+def test_whitespace_between_tool_calls_is_not_content(text, expected, chunked):
+    content, calls = _content_after_calls(text, chunked)
+    assert content == expected
+    assert calls == ["sum"] * text.count("<tool_call>")
+
+
+def test_held_whitespace_precedes_a_tolerant_fallback():
+    malformed = "<tool_call>\n<function=sum>\n<parameter=x>\nnope\n</parameter>\n</function>\n</tool_call>"
+    for chunked in (False, True):
+        content, calls = _content_after_calls(
+            f"A{_SUM_CALL}\n{malformed}", chunked, tolerant_tool_markers=True
+        )
+        assert calls == ["sum"] and content == "A\n" + malformed
+        content, calls = _content_after_calls(
+            f"{_SUM_CALL}\n{malformed}", chunked, tolerant_tool_markers=True
+        )
+        assert calls == ["sum"] and content == malformed
+
+
+_WRITE_TOOLS = [{"type": "function", "function": {"name": "write", "parameters": {
+    "type": "object",
+    "properties": {"path": {"type": "string"}, "content": {"type": "string"}},
+}}}]
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "Use <parameter=name> in the template.",
+        "first line\n<parameter=city>\nlast line",
+        "<parameter=",
+        "a <parameter=path",  # declared name, but not a well-formed tag
+    ],
+)
+def test_qwen_closed_value_may_quote_an_undeclared_parameter_tag(value):
+    body = f"\n<function=write>\n<parameter=content>\n{value}\n</parameter>\n</function>\n"
+    assert parse_tool_call(body, _WRITE_TOOLS)["arguments"] == {"content": value}
+
+
+@pytest.mark.parametrize(
+    "tools",
+    [
+        _WRITE_TOOLS,
+        None,  # no schema: no evidence the opener is text
+        [{"type": "function", "function": {
+            **_WRITE_TOOLS[0]["function"], "strict": True,
+            "parameters": {**_WRITE_TOOLS[0]["function"]["parameters"],
+                           "additionalProperties": False},
+        }}],
+    ],
+)
+def test_qwen_opener_naming_a_declared_parameter_is_still_unclosed(tools):
+    body = "\n<function=write>\n<parameter=content>\nx\n<parameter=path>\ny\n</parameter>\n</function>\n"
+    with pytest.raises(ValueError, match="Unclosed parameter"):
+        parse_tool_call(body, tools)

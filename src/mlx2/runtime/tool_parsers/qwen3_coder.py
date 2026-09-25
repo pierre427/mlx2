@@ -42,6 +42,7 @@ _JSON_STRING = re.compile(r'"[^"\\]*(?:\\.[^"\\]*)*"', re.DOTALL)
 # reference parser truncates the value there too.
 _RAW_DELIMITERS = (_PARAMETER_CLOSE, _PARAMETER_OPEN, _FUNCTION_CLOSE, _TOOL_CALL_CLOSE)
 _RAW_VALUE_CHAR = r"(?:(?!</parameter>|<parameter=|</function>|</tool_call>)[\s\S])"
+_PARAMETER_TAG = re.compile(r"<parameter=([^\s<>]+)>")
 
 
 class UnclosedJSONString(ValueError):
@@ -314,6 +315,29 @@ def _json_value_end(text, start, name):
         position = string.end()
 
 
+def _swallows_parameter(value, param_config, strict):
+    """Whether an opener inside a closed raw value may be a swallowed parameter.
+
+    A missing ``</parameter>`` before the next parameter and a string value
+    that quotes an opener are the same text.  A strict value, or one whose
+    tool declares no parameters, rejects any opener (the constrained grammar
+    never admits one).  Otherwise the schema decides: only a well-formed tag
+    naming a declared parameter can be one; any other opener is text the model
+    wrote, such as ``Use <parameter=name> in the template.``
+    """
+    if _PARAMETER_OPEN not in value:
+        return False
+    if strict or not param_config:
+        return True
+    position = 0
+    while (opener := value.find(_PARAMETER_OPEN, position)) >= 0:
+        tag = _PARAMETER_TAG.match(value, opener)
+        if tag is not None and tag.group(1) in param_config:
+            return True
+        position = opener + len(_PARAMETER_OPEN)
+    return False
+
+
 def _parse_function(text: str, start: int, tools: Optional[Any]):
     """``(call, end)`` for the ``<function=`` block whose body starts at ``start``.
 
@@ -353,11 +377,10 @@ def _walk_function(text: str, start: int, tools: Optional[Any]):
         if not param_name.strip() or "<" in param_name or param_name in param_dict:
             raise ValueError("Malformed or duplicate parameter name")
         param_value = str(match_text[param_match.end() :])
-        if not json_value and _PARAMETER_OPEN in param_value:
+        if not json_value and _swallows_parameter(param_value, param_config, strict):
             # The previous parameter was never closed and swallowed the next
-            # one, whose argument would silently disappear.  The reference
-            # parser never lets a value contain an opener either.  In a JSON
-            # value an opener outside a string fails the decode instead.
+            # one, whose argument would silently disappear.  In a JSON value an
+            # opener outside a string fails the decode instead.
             raise ValueError("Unclosed parameter before the next parameter")
         if param_value.startswith("\n"):
             param_value = param_value[1:]
