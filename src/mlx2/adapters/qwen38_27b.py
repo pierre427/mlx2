@@ -460,6 +460,8 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
             binding=self.identity["fingerprint"],
             num_draft=self._external_num_draft(),
             pairwise_selection=self.external_policy.get("pairwise_selection", "host"),
+            # Keep B>1 lanes in lockstep (see ExternalDraftBatchGenerator).
+            ready_drain="all",
             **kwargs,
         )
 

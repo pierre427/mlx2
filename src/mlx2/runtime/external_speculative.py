@@ -208,7 +208,7 @@ class ExternalDraftBatchGenerator:
     def __init__(self, model, *, draft_model, binding, completion_batch_size=4,
                  prefill_step_size=2048, num_draft=4, stop_tokens=(), memory_headroom=None,
                  reclaim_memory=None, evict_checkpoint=None, fly_verification=None,
-                 pairwise_selection="host", **kwargs):
+                 pairwise_selection="host", ready_drain="one", **kwargs):
         import mlx.core as mx
         self.mx = mx; self.model = model; self.draft = draft_model
         self.memory_headroom = memory_headroom
@@ -220,6 +220,15 @@ class ExternalDraftBatchGenerator:
         if pairwise_selection not in ("host", "batched"):
             raise ValueError("pairwise_selection must be 'host' or 'batched'")
         self.pairwise_selection = pairwise_selection
+        # "one" (default, unchanged): one ready token per lane per poll.  A
+        # lane still draining a multi-token round sits out the next cohort,
+        # so at B>1 a lane that accepted more waits one round of the others
+        # per token it holds.  "all" returns every ready token of a lane in
+        # the poll that produced it, as the self-MTP generator does, so
+        # lanes stay in lockstep.  Opt-in per adapter (mlx2).
+        if ready_drain not in ("one", "all"):
+            raise ValueError("ready_drain must be 'one' or 'all'")
+        self.ready_drain = ready_drain
         if not 1 <= self.num_draft < draft_model.config.block_size:
             raise ValueError("External draft count must fit trained block")
         if any(len(t) != 1 for t in stop_tokens):
@@ -1209,10 +1218,13 @@ class ExternalDraftBatchGenerator:
         # offered, so it still goes with its lane.
         prompt_ended = {prompt.uid for prompt in prompts if prompt.end_of_prompt}
         for lane in list(self.lanes.values()):
-            if lane.ready:
+            while lane.ready:
                 response = lane.ready.popleft(); responses.append(response)
                 if response.finish_reason:
                     self.remove([lane.uid], cancelled=False, keep_boundary=lane.uid in prompt_ended)
+                    break
+                if self.ready_drain == "one":
+                    break
         return prompts, responses
 
     def pop_prompt_boundary(self, uid): return self.boundaries.pop(uid, None)

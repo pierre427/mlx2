@@ -289,3 +289,37 @@ def test_batched_pairwise_greedy_equals_ordinary_b2():
     got, _ = drain(batch)
     for uid, prompt in zip(uids, PROMPTS[:2]):
         assert got[uid] == ordinary_greedy(target, prompt, 9)
+
+
+@pytest.mark.parametrize("mode", ["one", "all"])
+def test_ready_drain_modes_are_exact_and_all_keeps_lanes_in_lockstep(monkeypatch, mode):
+    target, draft = tiny_pair()
+    batch = generator(target, draft, num_draft=4, ready_drain=mode)
+    prompts = [PROMPTS[0], [11, 12, 13, 14, 15, 16, 17]]
+    _install_oracle(monkeypatch, batch, target, prompts, 24)
+    widths = []
+    real_round = batch._round
+
+    def record(cohort):
+        widths.append(len(cohort))
+        return real_round(cohort)
+
+    monkeypatch.setattr(batch, "_round", record)
+    uids = batch.insert(prompts, max_tokens=[24, 24], sampling_configs=[{"sampling_temp": 0}] * 2)
+    got, _ = drain(batch)
+    for uid, prompt in zip(uids, prompts):
+        assert got[uid] == ordinary_greedy(target, prompt, 24)
+    start = widths.index(2)
+    lockstep = all(a >= b for a, b in zip(widths[start:], widths[start + 1:]))
+    if mode == "all":
+        # Once both lanes decode, they share every round until one finishes.
+        assert lockstep, widths
+    else:
+        # A lane draining a longer round sits out the other's next round.
+        assert not lockstep, widths
+
+
+def test_ready_drain_rejects_unknown_mode():
+    target, draft = tiny_pair()
+    with pytest.raises(ValueError, match="ready_drain"):
+        generator(target, draft, ready_drain="some")

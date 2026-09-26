@@ -222,10 +222,15 @@ def _request(url, item, *, arm, max_tokens, temperature, timeout, nonce, seed):
     }
 
 
-def run_cell(url, arm, workload, width, temperature, args, seed_base):
+def run_cell(url, arm, workload, width, temperature, args, seed_base, rep):
     items = WORKLOADS[workload]
     batch = items[:width] if width > 1 else items[: args.b1_prompts]
-    nonce = uuid.uuid4().hex
+    # Identical across arms (so greedy outputs are comparable), distinct per
+    # cell (so no cell reuses another's prefix cache in the same process).
+    # APCv2 disk persistence is off, so nothing crosses server processes.
+    nonce = hashlib.sha256(
+        f"{args.nonce_salt}:{rep}:{workload}:{width}:{temperature}".encode()
+    ).hexdigest()[:16]
 
     def one(pair):
         index, item = pair
@@ -281,7 +286,7 @@ def run_arm(args, arm, rep):
         for temperature in args.temperatures:
             for workload in WORKLOADS:
                 for width in args.widths:
-                    cell = run_cell(url, arm, workload, width, temperature, args, seed_base)
+                    cell = run_cell(url, arm, workload, width, temperature, args, seed_base, rep)
                     guard.check()
                     status_after = _status(url)
                     cell.update({"arm": arm, "rep": rep, "workload": workload, "width": width,
@@ -324,6 +329,7 @@ def main():
     parser.add_argument("--temperatures", default="0,1")
     parser.add_argument("--timeout", type=float, default=900)
     parser.add_argument("--startup-timeout", type=float, default=600)
+    parser.add_argument("--nonce-salt", default="sp-dflash2")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--i-own-the-gpu", action="store_true")
     args = parser.parse_args()
