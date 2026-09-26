@@ -154,8 +154,6 @@ def test_engine_keeps_its_default_when_the_adapter_declines(monkeypatch):
     settings, seen, engine = _engine_settings(monkeypatch, "decline")
     assert engine.prefill_step == 2048 and seen["prefill_step"] == 2048
     assert settings["prefill_step_source"] == "default"
-
-
 def test_serving_wires_weights_once_for_every_route(monkeypatch):
     """The wired limit is raised after the adapter loads, not by one generator."""
     from mlx2.runtime import weight_residency
