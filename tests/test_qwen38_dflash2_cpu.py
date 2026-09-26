@@ -323,3 +323,170 @@ def test_ready_drain_rejects_unknown_mode():
     target, draft = tiny_pair()
     with pytest.raises(ValueError, match="ready_drain"):
         generator(target, draft, ready_drain="some")
+
+
+# --- served route on the real ServingEngine (CPU, tiny models) -------------
+
+
+def _serving_adapter(target, draft, *, external, vocab=VOCAB):
+    from mlx2.contracts import Capability
+
+    class Detok:
+        def __init__(self):
+            self.last_segment = ""
+
+        def reset(self):
+            self.last_segment = ""
+
+        def add_token(self, token):
+            self.last_segment = f"{int(token)} "
+
+        def finalize(self):
+            pass
+
+    class Parser:
+        stopped = False
+        tool_count = 0
+
+        def push(self, text, final=False):
+            return [{"content": text}] if text else []
+
+    class Tokenizer:
+        vocab_size = vocab
+        eos_token_ids = []
+
+        @property
+        def detokenizer(self):
+            return Detok()
+
+    class Adapter:
+        max_context = 512
+        identity = {"fingerprint": "tiny-qwen38-dflash2" if external else "tiny-qwen38"}
+        environment = {}
+        layout = "tiny-qwen38-layout"
+        tokenizer = Tokenizer()
+
+        def __init__(self, _path):
+            self.model = target
+            self.draft_model = draft if external else None
+
+        def profile_name(self, mtp):
+            return "tiny-dflash2" if external else "tiny-ordinary"
+
+        def execution_config(self, *, max_lanes, prefill_step):
+            config = {"persistent": True, "num_draft": 0, "rate_gate": False,
+                      "prefill_step_size": prefill_step}
+            if external:
+                config.update(num_draft=4, backend="external_draft")
+            return config
+
+        def create_external_batch(self, **kwargs):
+            return ExternalDraftBatchGenerator(
+                self.model, draft_model=self.draft_model,
+                binding=self.identity["fingerprint"], num_draft=4,
+                pairwise_selection="batched", ready_drain="all", **kwargs,
+            )
+
+        def prompt_tokens(self, request):
+            return list(request["tokens"])
+
+        def output_parser(self, _request):
+            return Parser()
+
+        def diagnostics(self):
+            return {}
+
+        def close(self):
+            pass
+
+    return Adapter
+
+
+def _serve(adapter, requests, **kw):
+    import threading
+
+    from mlx2.serving import ServingEngine
+
+    engine = ServingEngine("tiny", adapter_factory=adapter, qualification_mode=True,
+                           mtp=False, max_lanes=4, prefill_step=8, **kw)
+    assert engine.ready.wait(60), engine.error
+    results = [None] * len(requests)
+
+    def one(index, tokens):
+        job = engine.submit({"tokens": list(tokens), "max_tokens": 16, "temperature": 0})
+        text = ""
+        while True:
+            event = job.events.get(timeout=300)
+            assert "error" not in event, event
+            if "delta" in event:
+                text += event["delta"].get("content", "")
+            if "finish_reason" in event:
+                results[index] = ([int(t) for t in text.split()], event.get("receipt") or {}, job)
+                return
+
+    try:
+        threads = [threading.Thread(target=one, args=pair) for pair in enumerate(requests)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        status = engine.status()
+    finally:
+        engine.close()
+    return results, status
+
+
+@pytest.fixture
+def host(monkeypatch):
+    from mlx2 import memory, serving
+    from mlx2.runtime import os_memory
+
+    monkeypatch.setattr(serving, "runtime_identity", lambda: {"source_sha256": "src"})
+    monkeypatch.setattr(memory, "execution_headroom", lambda: 100 * 2**30)
+    monkeypatch.setattr(os_memory, "physical_footprint_bytes", lambda: 0)
+
+
+def test_served_external_route_b1_b3_equals_ordinary_and_reports_dflash2(host):
+    target, draft = tiny_pair()
+    prompts = [[(7 * i + 3) % 120 + 1 for i in range(20)], PROMPTS[0], PROMPTS[2]]
+    ordinary, _ = _serve(_serving_adapter(target, None, external=False), prompts[:1])
+    served, _ = _serve(_serving_adapter(target, draft, external=True), prompts[:1])
+    assert served[0][0] == ordinary[0][0] == ordinary_greedy(target, prompts[0], 16)
+    receipt = served[0][1]
+    assert receipt["speculation"]["kind"] == "external_dflash2"
+    assert receipt["speculation"]["external_rounds"] > 0
+    batched, status = _serve(_serving_adapter(target, draft, external=True), prompts)
+    for (tokens, receipt, _), prompt in zip(batched, prompts):
+        assert tokens == ordinary_greedy(target, prompt, 16)
+        assert receipt["speculation"]["kind"] == "external_dflash2"
+
+
+def test_served_external_warm_prefix_hit_equals_cold(host):
+    target, draft = tiny_pair()
+    prompt = [(5 * i + 2) % 120 + 1 for i in range(40)]
+    extended = prompt + [9, 8, 7, 6, 5]
+    adapter = _serving_adapter(target, draft, external=True)
+    from mlx2.serving import ServingEngine
+
+    engine = ServingEngine("tiny", adapter_factory=adapter, qualification_mode=True,
+                           mtp=False, max_lanes=1, prefill_step=8)
+    assert engine.ready.wait(60), engine.error
+    outputs = []
+    try:
+        for tokens in (prompt, extended):
+            job = engine.submit({"tokens": tokens, "max_tokens": 12, "temperature": 0})
+            text = ""
+            while True:
+                event = job.events.get(timeout=300)
+                assert "error" not in event, event
+                if "delta" in event:
+                    text += event["delta"].get("content", "")
+                if "finish_reason" in event:
+                    outputs.append(([int(t) for t in text.split()], job))
+                    break
+    finally:
+        engine.close()
+    assert outputs[1][0] == ordinary_greedy(target, extended, 12)
+    assert outputs[0][0] == ordinary_greedy(target, prompt, 12)
+    # The second request resumed the paired target + draft boundary.
+    assert int(outputs[1][1].cached_tokens or 0) > 0

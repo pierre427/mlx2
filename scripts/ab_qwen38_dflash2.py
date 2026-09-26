@@ -262,12 +262,20 @@ def run_arm(args, arm, rep):
     env = dict(os.environ, PYTHONPATH=str(ROOT / "src"))
     out = Path(args.out)
     log_path = out.with_suffix(f".{arm}.r{rep}.server.log")
+    import socket
+
+    with socket.socket() as probe:
+        # Another session's server on this port would answer our polls.
+        probe.bind(("127.0.0.1", args.port))
     guard = SwapGuard()
     log = open(log_path, "w")
     process = subprocess.Popen(command, cwd=ROOT, env=env, stdout=log, stderr=subprocess.STDOUT)
     cells = []
     try:
         status = _wait_ready(url, process, args.startup_timeout, guard)
+        served = json.dumps(status.get("model") or status.get("model_path") or "")
+        if Path(args.model).name not in served:
+            raise RuntimeError(f"refusing: port {args.port} serves {served}, not {args.model}")
         route = {k: status.get(k) for k in ("route", "profile", "execution_policy", "adapter")}
         # Discarded warm-up: every workload, both temperatures, B1 and B4.
         for temperature in args.temperatures:
