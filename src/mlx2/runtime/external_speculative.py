@@ -243,8 +243,35 @@ class ExternalDraftBatchGenerator:
         self.round_timing = bool(os.environ.get("MLX2_EXTERNAL_ROUND_TIMING"))
         self.round_times = defaultdict(float)
 
+    @property
+    def _target_args(self):
+        # Hybrid targets keep text geometry under ``speculative_args``.
+        return getattr(self.model, "speculative_args", self.model.args)
+
+    def _target_owner(self, rows):
+        """Verify-transaction owner chosen by cache topology, never by model.
+
+        Recurrent + KV lanes use the hybrid record-and-replay owner; plain
+        and rotating KV lanes keep the segmented KV owner.
+        """
+        from .hybrid_verify_rows import HybridVerifyRows, is_hybrid_rows
+        from .segmented_rotating_kv import SegmentedKVRows
+
+        if is_hybrid_rows(rows):
+            if not getattr(self.model, "supports_speculative_rollback", False):
+                raise ValueError("target has recurrent state but declares no speculative rollback")
+            _bump(self.scheduler_stats, "external_hybrid_transactions")
+            return HybridVerifyRows(rows)
+        return SegmentedKVRows(rows)
+
+    @staticmethod
+    def _is_hybrid(rows):
+        from .hybrid_verify_rows import is_hybrid_rows
+
+        return is_hybrid_rows(rows)
+
     def _empty_hidden(self):
-        return self.mx.zeros((1, 0, len(self.layers)*self.model.args.hidden_size))
+        return self.mx.zeros((1, 0, len(self.layers)*self._target_args.hidden_size))
 
     def _append_context(self, lane, following):
         """Commit ``lane.tail`` to the draft plane.
@@ -340,7 +367,12 @@ class ExternalDraftBatchGenerator:
             draft_cache = self.draft.make_cache(); tail = self._empty_hidden()
             if state is not None:
                 state.validate(self.binding, len(prefix))
-                if target is None or any(int(c.offset) != len(prefix) for c in target):
+                # Recurrent planes carry no position; their KV siblings pin it.
+                if target is None or any(
+                    int(c.offset) != len(prefix)
+                    for c in target
+                    if getattr(c, "offset", None) is not None
+                ):
                     raise ValueError("External target cache boundary mismatch")
                 target, state, _ = snapshot_prompt_cache_descriptors(
                     target, state
@@ -845,7 +877,6 @@ class ExternalDraftBatchGenerator:
         return now
 
     def _round(self, cohort):
-        from .segmented_rotating_kv import SegmentedKVRows
         if cohort and all(lane.ordinary for lane in cohort):
             return self._ordinary_round(cohort)
         clock = time.perf_counter() if self.round_timing else None
@@ -862,7 +893,7 @@ class ExternalDraftBatchGenerator:
                 clock = self._mark("draft", clock)
             proposal_counts = [0 if block is None else int(block.lengths[0]) for block in blocks]
             verify_width = max(proposal_counts, default=0) + 1
-            owner = SegmentedKVRows([l.cache for l in cohort])
+            owner = self._target_owner([l.cache for l in cohort])
             transaction = owner.begin(lengths=[count+1 for count in proposal_counts])
             inputs = [
                 [lane.anchor]+_block_row(block, None)[0]+[0]*(verify_width-count-1)
@@ -916,10 +947,18 @@ class ExternalDraftBatchGenerator:
             inputs = self.mx.array(
                 [[lane.anchor] for lane in cohort], dtype=self.mx.int32
             )
+            hybrid = None
             if len(cohort) == 1:
                 # Preserve the authoritative row's allocation/capacity. A
                 # merge/extract round-trip compacts it and perturbs admission.
                 batched_cache = cohort[0].cache
+            elif self._is_hybrid([lane.cache for lane in cohort]):
+                # Recurrent + KV rows: segmented compute views over the
+                # authoritative B1 rows, one token each, nothing trimmed.
+                hybrid = self._target_owner([lane.cache for lane in cohort]).begin(
+                    [1] * len(cohort)
+                )
+                batched_cache = hybrid.caches
             else:
                 batched_cache = []
                 for layer in range(len(cohort[0].cache)):
@@ -937,12 +976,21 @@ class ExternalDraftBatchGenerator:
                 taps.steer = steer
             try:
                 logits = self.model(inputs, cache=batched_cache)
-                self.mx.eval(logits, [cache.state for cache in batched_cache])
+                if hybrid is not None:
+                    self.mx.eval(logits)
+                    hybrid.commit([1] * len(cohort))
+                    self.mx.eval([c.state for lane in cohort for c in lane.cache])
+                else:
+                    self.mx.eval(logits, [cache.state for cache in batched_cache])
+            except BaseException:
+                if hybrid is not None and not hybrid.closed:
+                    hybrid.abort()
+                raise
             finally:
                 if steer is not None:
                     taps.steer = None
             for row,lane in enumerate(cohort):
-                if len(cohort) > 1:
+                if len(cohort) > 1 and hybrid is None:
                     lane.cache = [cache.extract(row) for cache in batched_cache]
                 response_rows = (
                     [] if lane.sampling.get("emit_logprobs", True) else None
@@ -1040,7 +1088,7 @@ class ExternalDraftBatchGenerator:
         The server callback already excludes its mandatory process reserve.
         """
         if self.memory_headroom is None: return True
-        target = self.model.args; draft = self.draft.config
+        target = self._target_args; draft = self.draft.config
         target_per_token = 2*target.num_key_value_heads*target.head_dim*4
         draft_per_token = 2*draft.num_key_value_heads*draft.head_dim*4
         required = 0

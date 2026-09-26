@@ -191,6 +191,8 @@ class Qwen3_5TextModel(PipelineMixin, nn.Module):
         cache: Optional[Any] = None,
         input_embeddings: Optional[mx.array] = None,
         deep_concept_memory: Optional[dict] = None,
+        capture_layers=(),
+        hidden_sink=None,
     ) -> mx.array:
         if input_embeddings is not None:
             hidden_states = input_embeddings
@@ -226,6 +228,10 @@ class Qwen3_5TextModel(PipelineMixin, nn.Module):
                 hidden_states = _apply_deep_concept_memory(
                     hidden_states, deep_concept_memory
                 )
+            if hidden_sink is not None and layer_index in capture_layers:
+                # Post-block residual stream, before the final norm: the
+                # tap an external block drafter conditions on.
+                hidden_sink.append(hidden_states)
         if pipeline_rank != 0:
             hidden_states = mx.distributed.send(
                 hidden_states, (pipeline_rank - 1) % pipeline_size
@@ -294,6 +300,42 @@ class TextModel(nn.Module):
     @property
     def layers(self):
         return self.model.pipeline_layers
+
+    def forward_with_taps(self, inputs, cache, capture_layers, *, body_only=False):
+        """Logits plus post-block target taps in ascending layer order.
+
+        Taps are the residual stream after each listed decoder layer, before
+        the final norm, concatenated on the feature axis.  ``body_only``
+        skips the vocabulary projection (prefill).  External draft routes
+        only; the ordinary and self-MTP paths never call this.
+        """
+        capture_layers = tuple(int(value) for value in capture_layers)
+        if (
+            not capture_layers
+            or tuple(sorted(set(capture_layers))) != capture_layers
+            or capture_layers[0] < 0
+            or capture_layers[-1] >= len(self.model.layers)
+        ):
+            raise ValueError("Invalid target capture layers")
+        if self.model.pipeline_size != 1:
+            raise ValueError("target taps are not implemented under pipeline parallelism")
+        taps = []
+        hidden = self.model(
+            inputs, cache, capture_layers=frozenset(capture_layers), hidden_sink=taps
+        )
+        if len(taps) != len(capture_layers):
+            raise RuntimeError("target tap count does not match capture layers")
+        features = mx.concatenate(taps, axis=-1)
+        if body_only:
+            return None, features
+        return self.logits(hidden), features
+
+    def prefill_body(self, inputs, cache, capture_layers):
+        return self.forward_with_taps(inputs, cache, capture_layers, body_only=True)[1]
+
+    @property
+    def speculative_args(self):
+        return self.args
 
     def make_cache(self):
         return [ArraysCache(size=2) if l.is_linear else KVCache() for l in self.layers]
@@ -476,6 +518,19 @@ class Model(nn.Module):
     @property
     def layers(self):
         return self.language_model.model.pipeline_layers
+
+    @property
+    def speculative_args(self):
+        """Text geometry for external draft executors (hidden size, heads)."""
+        return self.language_model.args
+
+    def forward_with_taps(self, inputs, cache, capture_layers, *, body_only=False):
+        return self.language_model.forward_with_taps(
+            inputs, cache, capture_layers, body_only=body_only
+        )
+
+    def prefill_body(self, inputs, cache, capture_layers):
+        return self.forward_with_taps(inputs, cache, capture_layers, body_only=True)[1]
 
     def make_cache(self):
         return self.language_model.make_cache()

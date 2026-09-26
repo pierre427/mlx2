@@ -148,7 +148,8 @@ class DFlash2DraftModel(DFlashDraftModel):
         self.candidate_selector = CandidateSelector(config)
 
     def validate_target_compatibility(self, target_model) -> None:
-        args = target_model.args
+        # Hybrid targets nest text geometry; they expose it here (mlx2).
+        args = getattr(target_model, "speculative_args", target_model.args)
         for field in ("hidden_size", "vocab_size"):
             if getattr(args, field) != getattr(self.config, field):
                 raise ValueError(f"DFlash2 target {field} mismatch")

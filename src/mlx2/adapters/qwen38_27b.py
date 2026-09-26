@@ -12,6 +12,7 @@ import os
 from pathlib import Path
 
 from ..contracts import Capability, ModelDescriptor, StatePlane
+from .external_draft_policy import ExternalDraftAdapterMixin
 from .flash_next import FlashNextAdapter
 from .mtp_depth_cap import validate_self_mtp_num_draft
 
@@ -165,6 +166,85 @@ def inspect_artifact(model_path: str | Path) -> dict:
     }
 
 
+def content_revision(model_path: str | Path) -> str:
+    """Content pin of the target: config plus weight index (mlx2).
+
+    ``identity["fingerprint"]`` also binds shard sizes and mtimes; this pin
+    is what an external-draft policy names so a re-downloaded identical
+    revision still matches while any config or tensor-map change fails.
+    """
+    path = Path(model_path).expanduser().resolve()
+    digest = hashlib.sha256()
+    for name in ("config.json", "model.safetensors.index.json"):
+        digest.update(name.encode())
+        digest.update((path / name).read_bytes())
+    return digest.hexdigest()
+
+
+# External DFlash2 policy keys.  The two revision pins are mandatory: the
+# drafter was trained against one target's hidden taps, so a draft or target
+# that is not the pinned pair must fail before any tensor loads.
+EXTERNAL_POLICY_KEYS = frozenset(
+    {
+        "draft_model",
+        "num_draft",
+        "pairwise_selection",
+        "draft_revision",
+        "target_revision",
+        "draft_quantization",
+    }
+)
+
+
+def inspect_external_policy(policy: dict, model_path: str | Path) -> dict:
+    """Header-only drafter inspection and revision check; no tensor loads."""
+    from .dflash2 import content_revision as draft_content_revision
+    from .dflash2 import inspect_drafter, validate_runtime_quantization
+
+    unknown = set(policy) - EXTERNAL_POLICY_KEYS
+    if unknown:
+        raise ValueError(
+            f"Qwen3.8 27B external draft policy has unknown keys: {sorted(unknown)}"
+        )
+    for key in ("draft_revision", "target_revision"):
+        if not isinstance(policy.get(key), str) or len(policy[key]) != 64:
+            raise ValueError(f"Qwen3.8 27B external draft policy must pin {key}")
+    if policy.get("pairwise_selection", "host") not in ("host", "batched"):
+        raise ValueError("pairwise_selection must be 'host' or 'batched'")
+    target_revision = content_revision(model_path)
+    if target_revision != policy["target_revision"]:
+        raise ValueError(
+            "DFlash2 target revision mismatch: policy pins "
+            f"{policy['target_revision'][:12]}, artifact is {target_revision[:12]}"
+        )
+    record = inspect_drafter(policy["draft_model"], model_path)
+    draft_revision = draft_content_revision(record)
+    if draft_revision != policy["draft_revision"]:
+        raise ValueError(
+            "DFlash2 draft revision mismatch: policy pins "
+            f"{policy['draft_revision'][:12]}, artifact is {draft_revision[:12]}"
+        )
+    args = record["args"]
+    count = policy.get("num_draft", Qwen3827BAdapter.EXTERNAL_DEFAULT_NUM_DRAFT)
+    if type(count) is not int or not 1 <= count < args.block_size:
+        raise ValueError("num_draft must be a positive integer below the draft block size")
+    quantization = validate_runtime_quantization(policy.get("draft_quantization"))
+    if quantization is not None:
+        # Numerics differ from the bf16 drafter: a distinct cache identity.
+        record = {
+            **record,
+            "fingerprint": hashlib.sha256(
+                (record["fingerprint"] + json.dumps(quantization, sort_keys=True)).encode()
+            ).hexdigest(),
+        }
+    return {
+        **record,
+        "draft_revision": draft_revision,
+        "target_revision": target_revision,
+        "runtime_quantization": quantization,
+    }
+
+
 def configure_environment() -> dict[str, str]:
     """Candidate dense profile; flags confer no qualification by themselves."""
     profile = {
@@ -204,7 +284,7 @@ def resolve_eos_token_ids(config: dict, tokenizer) -> list[int]:
     return result
 
 
-class Qwen3827BAdapter(FlashNextAdapter):
+class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
     default_route = "native_mtp"
     # Explicit because Flash-Next deliberately defaults its handoff off.
     default_mtp_ordinary_handoff_max_width = (
@@ -231,6 +311,15 @@ class Qwen3827BAdapter(FlashNextAdapter):
     """Dense text adapter using shared chat parsing and modern runtime state."""
 
     descriptor = QWEN38_27B
+    # Candidate external route: Inco's DFlash2 block drafter
+    # (incoai/Qwen3.8-27B-DFlash2, block 8, taps 5/19/33/47/61) verified on
+    # the hybrid target through ``runtime/hybrid_verify_rows``.  Opt-in via
+    # ``--external-draft`` and a pinned policy
+    # (qualification/policies/qwen38-27b-dflash2.json); implemented, not
+    # qualified.  The default stays self-MTP K=2.
+    EXTERNAL_DEFAULT_NUM_DRAFT = 7
+    EXTERNAL_ROUTE_TAG = "external-dflash2-qwen38-v1"
+    EXTERNAL_PROFILE = "qwen38-27b-apcv2-dflash2"
     # Vendor sampling defaults: Qwen/Qwen3.8-27B model card and the artifact's
     # generation_config.json (see ``adapters/qwen.py``).
     from .qwen import QWEN38_27B_SAMPLING as sampling_defaults
@@ -244,6 +333,17 @@ class Qwen3827BAdapter(FlashNextAdapter):
         if execution_policy is not None and not isinstance(execution_policy, dict):
             raise ValueError("execution policy must be a JSON object")
         policy = {} if execution_policy is None else dict(execution_policy)
+        self.external_policy = {}
+        self.draft_model = None
+        draft_record = None
+        if "draft_model" in policy:
+            if require_mtp:
+                raise ValueError("External draft is not native MTP")
+            # Revision pins and drafter headers are checked before the
+            # target's tensors load; a mismatch fails closed here.
+            draft_record = inspect_external_policy(policy, model_path)
+            self.external_policy = policy
+            policy = {}
         if set(policy) - {"num_draft", "gdn_core", "fp32_head_logits"}:
             raise ValueError(
                 "Qwen3.8 27B execution policy supports only num_draft, gdn_core "
@@ -286,7 +386,8 @@ class Qwen3827BAdapter(FlashNextAdapter):
         # Conversion configs may advertise a head that was stripped from weights.
         config = dict(config)
         config["text_config"] = dict(config.get("text_config", config))
-        if not artifact["has_mtp"]:
+        if not artifact["has_mtp"] or draft_record is not None:
+            # The external route never runs the embedded head: do not load it.
             config["text_config"]["mtp_num_hidden_layers"] = 0
         self.model = Model(ModelArgs.from_dict(config))
         files = [path / name for name in sorted(set(artifact["weight_map"].values()))]
@@ -328,6 +429,39 @@ class Qwen3827BAdapter(FlashNextAdapter):
             tokenizer, detokenizer_class=BPEStreamingDetokenizer, eos_token_ids=eos
         )
         self.max_context = int(config["text_config"]["max_position_embeddings"])
+        if draft_record is not None:
+            from .dflash2 import load_drafter
+
+            self.identity = {
+                **self.identity,
+                "draft_revision": draft_record["draft_revision"],
+                "target_revision": draft_record["target_revision"],
+            }
+            base = self.descriptor_builder(has_mtp=False)
+            self._bind_external_drafter(
+                draft_record,
+                lambda record, target: load_drafter(
+                    record, target,
+                    runtime_quantization=record["runtime_quantization"],
+                ),
+                base,
+            )
+            mx.clear_cache()
+
+    def create_external_batch(self, **kwargs):
+        """Candidate DFlash2 draft/verify batch; implemented, not qualified."""
+        if getattr(self, "draft_model", None) is None:
+            raise ValueError("No external draft model bound")
+        from ..runtime.external_speculative import ExternalDraftBatchGenerator
+
+        return ExternalDraftBatchGenerator(
+            self.model,
+            draft_model=self.draft_model,
+            binding=self.identity["fingerprint"],
+            num_draft=self._external_num_draft(),
+            pairwise_selection=self.external_policy.get("pairwise_selection", "host"),
+            **kwargs,
+        )
 
     def profile_name(self, mtp):
         if mtp and Capability.MTP not in self.descriptor.capabilities:
@@ -339,6 +473,10 @@ class Qwen3827BAdapter(FlashNextAdapter):
         )
 
     def execution_config(self, *, max_lanes, prefill_step):
+        if getattr(self, "draft_model", None) is not None:
+            return self._external_execution_config(
+                max_lanes=max_lanes, prefill_step=prefill_step
+            )
         config = {
             "persistent": True,
             "num_draft": getattr(self, "_num_draft", 2)
@@ -398,6 +536,12 @@ class Qwen3827BAdapter(FlashNextAdapter):
             "architecture": "dense-hybrid-gdn-gqa",
             "layout": self.layout,
             "mtp_head_present": Capability.MTP in self.descriptor.capabilities,
+            "speculation": (
+                "external-dflash2-implemented-unqualified"
+                if getattr(self, "draft_model", None) is not None
+                else "self-mtp" if Capability.MTP in self.descriptor.capabilities
+                else "ordinary"
+            ),
             "segmented_mtp": segmented_self_mtp_stats(),
             "norm_convention": (
                 None

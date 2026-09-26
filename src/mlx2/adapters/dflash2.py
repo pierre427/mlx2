@@ -188,7 +188,31 @@ def inspect_drafter(path, target):
     return {'path':str(path),'fingerprint':digest.hexdigest(),'files':files,'header_sha256':header_digests,'config':config,'args':args}
 
 
-def load_drafter(record,target_model):
+def content_revision(record):
+    """Content pin of a DFlash2 artifact: config bytes plus shard headers.
+
+    Unlike ``fingerprint`` (which also binds file size and mtime for the
+    cache identity), this survives a re-download of the same revision and
+    changes with any config or tensor-layout change (mlx2).
+    """
+    digest = hashlib.sha256()
+    digest.update(json.dumps(record['config'], sort_keys=True).encode())
+    digest.update(json.dumps(record['header_sha256']).encode())
+    return digest.hexdigest()
+
+
+def validate_runtime_quantization(value):
+    """Load-time affine quantization of a bf16 drafter's projections (mlx2)."""
+    if value is None:
+        return None
+    if not isinstance(value, dict) or set(value) != {'bits', 'group_size'}:
+        raise ValueError('draft_quantization must be {"bits": 4|8, "group_size": 32|64|128}')
+    if value['bits'] not in (4, 8) or value['group_size'] not in (32, 64, 128):
+        raise ValueError('draft_quantization must be {"bits": 4|8, "group_size": 32|64|128}')
+    return dict(value)
+
+
+def load_drafter(record,target_model,*,runtime_quantization=None):
     # Import/load only after both artifact roles and dimensions are checked.
     import mlx.core as mx
     import mlx.nn as nn
@@ -205,5 +229,18 @@ def load_drafter(record,target_model):
         nn.quantize(model,group_size=quant['group_size'],bits=quant['bits'],mode=quant.get('mode','affine'),class_predicate=predicate)
     # Target embedding/head are absent from draft checkpoint and bound AFTER strict load.
     model.load_weights(list(weights.items()),strict=True)
+    runtime_quantization=validate_runtime_quantization(runtime_quantization)
+    if runtime_quantization is not None:
+        if quant:
+            raise ValueError('draft_quantization applies to unquantized drafters only')
+        # Projections only (the Splash Q4 set): selector codebooks, norms and
+        # conv base kernels stay bf16.  Before bind, so the target's shared
+        # embedding/head are never touched.
+        nn.quantize(
+            model,
+            group_size=runtime_quantization['group_size'],
+            bits=runtime_quantization['bits'],
+            class_predicate=lambda _name, module: isinstance(module, nn.Linear),
+        )
     model.eval();mx.eval(model.parameters());weights.clear()
     return model.bind(target_model)
