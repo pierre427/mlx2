@@ -17,10 +17,11 @@ from mlx2.runtime.cache_capsule import (
     StaleCacheCapsule,
     build_kv_cache_capsule_cpu,
     capture_kv_cache_plane,
+    inspect_kv_cache_capsule,
     prepare_prompt_cache_capsules,
 )
 from mlx2.runtime.generate import BatchGenerator
-from mlx2.runtime.models.cache import ArraysCache, KVCache, RotatingKVCache
+from mlx2.runtime.models.cache import ArraysCache, BatchKVCache, KVCache, RotatingKVCache
 from mlx2.runtime.persistent_blocks import (
     block_file_paths,
     encode_block_file,
@@ -39,6 +40,74 @@ def _cache(length=5):
 
 def _key():
     return APCKey("model", "revision", "adapter", "tokenizer", "layout", "semantic")
+
+
+@pytest.mark.parametrize("operation", ["append", "trim", "right_pad", "filter"])
+def test_plain_b1_merge_reuses_live_view_without_mutating_apc_source(monkeypatch, operation):
+    apc = APCv2(max_bytes=1 << 20, layout_name="layout")
+    key, tokens = _key(), [1, 2, 3, 4, 5]
+    apc.store(key, tokens, [_cache()])
+    hit = apc.lookup(key, tokens + [9])
+    try:
+        source = hit.cache[0]
+        assert source.keys.shape[2] > source.offset  # spare APC source capacity
+        source_keys, source_values = source.keys.tolist(), source.values.tolist()
+        reference = BatchKVCache.merge([source, source])
+
+        def no_full_copy(*_args, **_kwargs):
+            raise AssertionError("B=1 merge allocated a full K/V prefix")
+
+        with monkeypatch.context() as patch:
+            patch.setattr(mx, "zeros", no_full_copy)
+            batch = BatchKVCache.merge([source])
+        assert batch.keys.shape[2] == source.offset
+        assert batch.values.shape[2] == source.offset
+
+        if operation == "trim":
+            batch.trim(1)
+            reference.trim(1)
+        elif operation == "right_pad":
+            batch.prepare(right_padding=[1])
+            reference.prepare(right_padding=[1, 1])
+        elif operation == "filter":
+            batch.filter([0])
+            reference.filter([0])
+        row = mx.full((1, 1, 1, 2), 37, dtype=mx.bfloat16)
+        reference_row = row if operation == "filter" else mx.concatenate([row, row])
+        batch.update_and_fetch(row, row)
+        reference.update_and_fetch(reference_row, reference_row)
+        if operation == "right_pad":
+            batch.finalize()
+            reference.finalize()
+        mx.eval(batch.state, reference.state)
+        assert mx.array_equal(batch.keys, reference.keys[:1]).item()
+        assert mx.array_equal(batch.values, reference.values[:1]).item()
+        assert mx.array_equal(batch.offset, reference.offset[:1]).item()
+        assert mx.array_equal(batch.left_padding, reference.left_padding[:1]).item()
+        assert source.keys.tolist() == source_keys
+        assert source.values.tolist() == source_values
+    finally:
+        hit.cache.close()
+        apc.close()
+
+
+def test_session_disk_restore_keeps_single_row_plain_kv_capsule_eligible(tmp_path):
+    apc = APCv2(max_bytes=1 << 20, layout_name="layout",
+                idle_disk_seconds=180, idle_disk_dir=str(tmp_path))
+    key, tokens, tag = _key(), [1, 2, 3, 4, 5], ("tenant", "session")
+    apc.store(key, tokens, [_cache()], session_tag=tag)
+    assert apc.park_session(*tag, ttl_seconds=60)["state"] == "disk"
+    apc.resume_session(*tag)
+    apc.service_pending_prefetch()
+    assert apc.session_state(*tag)["state"] == "resident"
+    hit = apc.lookup(key, tokens + [99], session_tag=tag)
+    try:
+        assert hit.hit and hit.cached_tokens == len(tokens)
+        assert len(hit.cache) == 1 and type(hit.cache[0]) is KVCache
+        assert inspect_kv_cache_capsule(hit.cache[0], target_batch=3) == (True, None)
+    finally:
+        hit.cache.close()
+        apc.close()
 
 
 class _Reservation:
@@ -824,3 +893,65 @@ def test_persistent_block_manifest_is_authenticated_not_just_checksummed(tmp_pat
     with pytest.raises(ValueError, match="authentication failed"):
         with materialize_block_file(path, expected_signature="sig"):
             pass
+
+
+def test_capsule_reservation_reclaim_of_unleased_entries_keeps_leased_source_fresh(tmp_path):
+    """The reservation's own pressure spill must not stale the capsule it funds.
+
+    ``reserve_capsule_bytes`` makes room by spilling *unleased* resident
+    entries, and every spill advances the global capsule generation.  The
+    capsule source is a leased lookup branch, which that reclaim can never
+    touch, yet the post-reservation recheck compared against the advanced
+    generation and declined every fanout whose reservation had to reclaim.
+    Qwen3.6-27B at 8 GiB of APCv2 on a 36 GiB host logged
+    "cache capsule preparation declined ... source generation is stale" on
+    the series' n=3 fanout and never engaged.
+    """
+    one = _cache(4).nbytes
+    apc = APCv2(max_bytes=4 * one, layout_name="layout", idle_disk_seconds=3600,
+                idle_disk_dir=str(tmp_path))
+    key = _key()
+    apc.store(key, [1, 2, 3, 4], [_cache(4)])      # unleased: reclaimable
+    apc.store(key, [5, 6, 7, 8], [_cache(4)])      # the fanout's boundary
+    hit = apc.lookup(key, [5, 6, 7, 8])
+    assert hit.hit and hit.capsule_generation is not None
+    pool = apc.new_cache_capsule_pool(enabled=True)
+    try:
+        prepared = prepare_prompt_cache_capsules(
+            hit.cache, target_batch=3, generation=hit.capsule_generation,
+            pool=pool,
+            compatibility_signature=apc.capsule_compatibility_signature(key, "layout"),
+            backend="cpu", fallback=None,
+        )
+        assert prepared is not None
+        assert prepared.prompt_cache[0].keys.shape[0] == 3
+        assert pool.counters["stale"] == 0
+        assert pool.counters["reclaim_rebases"] == 1
+        assert apc.apc_stats["idle_disk"]["pressure_spills"] == 1
+        prepared.close()
+    finally:
+        hit.cache.close()
+        pool.close()
+
+
+def test_capsule_reservation_still_stales_when_generation_moved_before_it():
+    """Rebasing covers only the reservation's own reclaim, never a change
+    that happened between the lookup and the reservation."""
+    apc = APCv2(max_bytes=1 << 20, layout_name="layout")
+    key = _key()
+    apc.store(key, [5, 6, 7, 8], [_cache(4)])
+    hit = apc.lookup(key, [5, 6, 7, 8])
+    apc.store(key, [1, 2, 3, 4], [_cache(4)])      # unrelated publication
+    pool = apc.new_cache_capsule_pool(enabled=True)
+    try:
+        with pytest.raises(StaleCacheCapsule):
+            prepare_prompt_cache_capsules(
+                hit.cache, target_batch=2, generation=hit.capsule_generation,
+                pool=pool,
+                compatibility_signature=apc.capsule_compatibility_signature(key, "layout"),
+                backend="cpu", fallback=None,
+            )
+        assert pool.counters["stale"] == 1
+    finally:
+        hit.cache.close()
+        pool.close()

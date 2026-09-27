@@ -24,9 +24,11 @@ from mlx2.runtime.models.cache import (
     SinkWindowKVCache,
     _copy_prompt_cache_for_restore,
     achievable_trim,
+    can_trim_prompt_cache_at,
     load_prompt_cache,
     save_prompt_cache,
 )
+from mlx2.adapters.qwen25_rope import Qwen25RoPECache
 
 
 def _state(cache, length, seed=0):
@@ -1566,6 +1568,49 @@ def test_untrimmable_exact_entry_falls_back_to_the_deepest_shorter_prefix():
     cache, remaining = index.fetch_nearest_cache("model", prompt)
     assert cache is not None and remaining == prompt[8:]
     assert cache[1].offset == 8
+
+
+def test_qwen_media_trim_preflight_preserves_safe_prefix_and_skips_inside_media():
+    class BooleanRefusal:
+        def is_trimmable(self):
+            return True
+
+        def preflight_trim(self, _count):
+            return False
+
+    assert not can_trim_prompt_cache_at([BooleanRefusal()], 1)
+
+    def plane(length, media_end=0):
+        return Qwen25RoPECache([{
+            "length": length, "delta": -1 if media_end else 0,
+            "media": bool(media_end), "media_end": media_end,
+        }])
+
+    index = PrefixIndex(max_size=8)
+    prefix = [1, 2]
+    full = [1, 2, 3, 4, 5, 6, 7, 8]
+    assert index.insert_cache("model", prefix, [_state(KVCache(), 2), plane(2)])
+    assert index.insert_cache("model", full, [_state(KVCache(), 8), plane(8, 6)])
+    # The full media prompt cannot recreate a cache at token 2, so insertion
+    # must not prune that earlier checkpoint.
+    assert index._trie.get("model", prefix) is not None
+
+    inside, remaining = index.fetch_nearest_cache("model", [1, 2, 3, 9])
+    assert inside is not None and remaining == [3, 9]
+    assert inside[-1].rows[0]["length"] == 2
+    assert index._trie.get("model", full).prompt_cache[-1].rows[0]["length"] == 8
+
+    after, remaining = index.fetch_nearest_cache("model", [1, 2, 3, 4, 5, 6, 7, 9])
+    assert after is not None and remaining == [9]
+    assert after[-1].rows[0]["length"] == 7
+    exact, remaining = index.fetch_nearest_cache("model", full)
+    assert exact is not None and remaining == [8]
+    assert exact[-1].rows[0]["length"] == 7
+
+    tip = index._trie.get("model", full)
+    boundary = index._trie.get("model", prefix)
+    assert not APCv2._tip_serves_depth(tip, full, boundary, 2)
+    assert APCv2._tip_serves_depth(tip, full, boundary, 7)
 
 
 def test_apc_untrimmable_exact_entry_serves_and_credits_the_shorter_prefix(tmp_path):

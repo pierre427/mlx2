@@ -6,6 +6,7 @@ from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import json
 import math
+import os
 import re
 from pathlib import Path
 import subprocess
@@ -19,7 +20,8 @@ QUALIFICATION_HARNESS_SCHEMA = "mlx2.qualification-harness.v1"
 APPROVED_ADAPTIVE_BENCHMARK_SHA256 = (
     "6beb390d0ee56fad5e30c4cf5ec719f65b9993bc8cb27d8c82c75da6da55db04"
 )
-PREFLIGHT_SCHEMA = "mlx2.qualification-preflight.v1"
+PREFLIGHT_SCHEMA = "mlx2.qualification-preflight.v2"
+CROSS_HOST_PREFLIGHT_SCHEMA = "mlx2.qualification-preflight.v3"
 QUALIFICATION_COVERAGE = {
     "response_format_json_object": False,
     "strict_json_schema": True,
@@ -399,6 +401,94 @@ def run_structured_thinking_probe(post, status):
     }
 
 
+def selected_capability_scope(status):
+    """Trust only the selected route's capabilities, cross-checked at status."""
+    selected = status.get("selected_capabilities")
+    implemented = status.get("implemented_capabilities")
+    active = status.get("capabilities")
+    if any(not isinstance(value, list) or any(type(name) is not str for name in value)
+           for value in (selected, implemented, active)):
+        return set(), False
+    selected_set, implemented_set, active_set = map(set, (selected, implemented, active))
+    valid = (len(selected_set) == len(selected)
+             and selected_set <= implemented_set
+             and selected_set == active_set)
+    return selected_set, valid
+
+
+def read_adapter_qualification(path, status):
+    """Embed a source-bound media companion only for the same live route."""
+    from mlx2.qualification import validate_adapter_qualification
+
+    report = json.loads(Path(path).read_text())
+    validate_adapter_qualification(
+        report, runtime=status.get("runtime"), artifact=status.get("artifact"),
+        settings=status.get("settings"),
+    )
+    return report
+
+
+def source_text_cases(companion):
+    """Use only a validated Smol companion's direct-source text witnesses."""
+    if not isinstance(companion, dict) or "text_source" not in companion:
+        return None
+    if companion.get("model_type") != "smolvlm":
+        raise ValueError("source-text HTTP semantics require the approved Smol producer")
+    text_source = companion["text_source"]
+    if not isinstance(text_source, dict) or not isinstance(text_source.get("cases"), dict):
+        raise ValueError("source-text cases are missing")
+    return text_source["cases"]
+
+
+def source_token_response_matches(response, case, *, prompt_text):
+    """Check HTTP token output against a source-bound greedy witness."""
+    if not isinstance(response, dict) or not isinstance(case, dict):
+        return False
+    choices = response.get("choices")
+    if not isinstance(choices, list) or len(choices) != 1:
+        return False
+    choice = choices[0]
+    if not isinstance(choice, dict):
+        return False
+    entries = (choice.get("logprobs") or {}).get("content")
+    expected = case.get("generated_token_ids")
+    receipt = response.get("mlx2") or {}
+    controls = receipt.get("request_controls") or {}
+    usage = response.get("usage") or {}
+    budget = case.get("max_tokens")
+    return (case.get("prompt") == prompt_text
+            and type(budget) is int and budget in (16, 64)
+            and isinstance(expected, list) and len(expected) == budget
+            and all(type(token) is int and token >= 0 for token in expected)
+            and isinstance(entries, list)
+            and [entry.get("id") if isinstance(entry, dict) else None
+                 for entry in entries] == expected
+            and usage.get("prompt_tokens") == case.get("prompt_tokens")
+            and usage.get("completion_tokens") == len(expected)
+            and choice.get("finish_reason") == "length"
+            and isinstance(choice.get("message", {}).get("content"), str)
+            and bool(choice["message"]["content"])
+            and receipt.get("route") == "ordinary"
+            and receipt.get("qualification") == "candidate"
+            and receipt.get("cache") == "apcv2"
+            and controls.get("max_tokens") == budget
+            and controls.get("min_tokens") == case.get("min_tokens", 0)
+            and controls.get("sampling") == case.get("sampling"))
+
+
+def interior_stop_witness(text):
+    """Choose a unique noninitial substring from a verified source output."""
+    if not isinstance(text, str) or len(text) < 12:
+        return None
+    middle = len(text) // 2
+    for width in (10, 8, 6, 4):
+        for start in range(middle, max(1, len(text) - width)):
+            fragment = text[start:start + width]
+            if fragment and text.count(fragment) == 1 and text[:start].strip():
+                return fragment, text[:start]
+    return None
+
+
 def qualification_harness_identity(path=None):
     source = Path(__file__) if path is None else Path(path)
     return {
@@ -432,32 +522,89 @@ def preflight_identity(runtime_identity_fn=None):
         "runtime": runtime_identity_fn(),
         "qualification_harness": qualification_harness_identity(),
         "test_source_sha256": _tree_sha256(root, "tests/**/*.py"),
+        "pytest_config_sha256": hashlib.sha256((root / "pyproject.toml").read_bytes()).hexdigest(),
     }
 
 
 FULL_SUITE_PYTEST_ARGS = ("-m", "pytest")
+# These tests deliberately reject a real MLX import.  tests/conftest.py imports
+# MLX to put ordinary tensor tests on the CPU, so the guards need a fresh
+# interpreter without that conftest.  Every listed module is still required:
+# the ordinary run excludes exactly these files and the guard run includes
+# exactly these files.  A new guard must be added here before it can qualify.
+PREFLIGHT_IMPORT_GUARD_MODULES = (
+    "tests/test_agnes_hy_v3_adapters.py",
+    "tests/test_deepseek_v4_candidate_cpu.py",
+    "tests/test_deepseek_v4_vision_layout_cpu.py",
+    "tests/test_diffusion_gemma_cpu.py",
+    "tests/test_flash_next_vlm_cpu.py",
+    "tests/test_glm52_dsa_candidate_cpu.py",
+    "tests/test_granite_hils_cpu.py",
+    "tests/test_laguna_s21_adapter.py",
+    "tests/test_lfm25_dspark_compat_cpu.py",
+    "tests/test_lfm25_fused_shortconv_cpu.py",
+    "tests/test_lfm25_hybrid_persistence_cpu.py",
+    "tests/test_lfm25_vl_cpu.py",
+    "tests/test_llada_denoising_cpu.py",
+    "tests/test_multimodal_prefill_contract_cpu.py",
+    "tests/test_multimodal_registry_gate_cpu.py",
+    "tests/test_muse_glimmer_vision_candidate_cpu.py",
+    "tests/test_nemotron3_diarization_candidate_cpu.py",
+    "tests/test_phi4mm_candidate_cpu.py",
+    "tests/test_pinned_vlm_candidates_cpu.py",
+    "tests/test_qwen25_rope_cpu.py",
+    "tests/test_qwen25_vision_grouped_cpu.py",
+    "tests/test_qwen35_4b_adapter.py",
+    "tests/test_qwen35_122b_cpu.py",
+    "tests/test_qwen35_vlm_candidate_cpu.py",
+    "tests/test_smolvlm2_apcv2_cpu.py",
+    "tests/test_standard_decoder_cpu.py",
+    "tests/test_vision_feature_reuse_cpu.py",
+)
+
+
+def preflight_test_commands(*, pytest_args=None):
+    root = Path(__file__).resolve().parents[1]
+    guards = PREFLIGHT_IMPORT_GUARD_MODULES
+    if len(guards) != len(set(guards)) or not guards or any(
+        not (root / module).is_file() for module in guards
+    ):
+        raise AssertionError("preflight import-guard manifest is missing or invalid")
+    ordinary = [sys.executable, *FULL_SUITE_PYTEST_ARGS,
+                *(f"--ignore={module}" for module in guards), *(pytest_args or [])]
+    guarded = [sys.executable, *FULL_SUITE_PYTEST_ARGS, "--noconftest", *guards]
+    return ordinary, guarded
 
 
 def write_preflight_receipt(path, *, pytest_args=None, run=subprocess.run,
                             identity_fn=preflight_identity):
-    command = [sys.executable, *FULL_SUITE_PYTEST_ARGS, *(pytest_args or [])]
-    completed = run(command, capture_output=True, text=True)
+    command, guard_command = preflight_test_commands(pytest_args=pytest_args)
+    env = {**os.environ, "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1",
+           "PYTEST_ADDOPTS": "", "PYTEST_PLUGINS": ""}
+    root = Path(__file__).resolve().parents[1]
+    completed = run(command, capture_output=True, text=True, env=env, cwd=root)
+    guarded = run(guard_command, capture_output=True, text=True, env=env, cwd=root)
     output = completed.stdout + completed.stderr
+    guard_output = guarded.stdout + guarded.stderr
     receipt = {
         "schema": PREFLIGHT_SCHEMA,
-        "passed": completed.returncode == 0,
+        "passed": completed.returncode == guarded.returncode == 0,
         "timestamp": time.time(),
         "identity": identity_fn(),
         "test_command": command,
         "returncode": completed.returncode,
         "output_sha256": hashlib.sha256(output.encode()).hexdigest(),
         "output_tail": output[-16000:],
+        "guard_test_command": guard_command,
+        "guard_returncode": guarded.returncode,
+        "guard_output_sha256": hashlib.sha256(guard_output.encode()).hexdigest(),
+        "guard_output_tail": guard_output[-16000:],
     }
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(receipt, indent=2, sort_keys=True) + "\n")
     if not receipt["passed"]:
-        raise AssertionError(f"full unit suite failed; see {path}")
+        raise AssertionError(f"full unit suite or import guards failed; see {path}")
     return receipt
 
 
@@ -472,23 +619,165 @@ def validate_preflight_receipt(path, active_runtime, *, identity_fn=preflight_id
     if receipt["identity"].get("runtime") != active_runtime:
         raise AssertionError("preflight receipt runtime does not match active server")
     command = receipt.get("test_command")
+    guard_command = receipt.get("guard_test_command")
+    ordinary_args, guarded_args = preflight_test_commands()
     # --preflight-pytest-arg exists for scoped historical/control receipts.
     # Any extra argument can scope the run (--collect-only, -k, a test path,
     # --lf, --deselect, --ignore) and still exit 0 with passed=True, so only
     # the unscoped default command stands in for the unit_tests check.
-    if (
-        not isinstance(command, list)
-        or len(command) != 1 + len(FULL_SUITE_PYTEST_ARGS)
-        or not isinstance(command[0], str)
-        or tuple(command[1:]) != FULL_SUITE_PYTEST_ARGS
-    ):
+    if (not isinstance(command, list) or not command or
+            not isinstance(command[0], str) or command[1:] != ordinary_args[1:] or
+            not isinstance(guard_command, list) or not guard_command or
+            not isinstance(guard_command[0], str) or
+            guard_command[1:] != guarded_args[1:] or
+            receipt.get("returncode") != 0 or receipt.get("guard_returncode") != 0):
         raise AssertionError(
             "preflight receipt did not run the full unit suite: "
-            f"{command!r}: {path}"
+            f"{command!r} / {guard_command!r}: {path}"
         )
     return {"path": str(path.resolve()),
             "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
-            "identity": expected, "test_command": command, "passed": True}
+            "identity": expected, "test_command": command,
+            "guard_test_command": guard_command, "passed": True}
+
+
+def _proof_sha256(proof):
+    return hashlib.sha256(json.dumps(proof, sort_keys=True,
+                                  separators=(",", ":")).encode()).hexdigest()
+
+
+def _checked_node_results(results, expected, *, approved_skips=None):
+    """Compare observed calls to an independently collected exact node set."""
+    if not isinstance(results, list) or not expected:
+        raise AssertionError("cross-host preflight has no structured test results")
+    approved_skips = approved_skips or {}
+    seen = {}
+    for result in results:
+        if not isinstance(result, dict) or set(result) - {"nodeid", "status", "reason"}:
+            raise AssertionError("cross-host preflight has malformed test results")
+        node = result.get("nodeid")
+        if not isinstance(node, str) or not node.startswith("tests/") or node in seen:
+            raise AssertionError("cross-host preflight has duplicate or invalid test node")
+        status = result.get("status")
+        if status == "passed" and "reason" not in result:
+            pass
+        elif (status == "skipped" and isinstance(result.get("reason"), str)
+              and result["reason"] == approved_skips.get(node)):
+            pass
+        else:
+            raise AssertionError("cross-host preflight has failed or unapproved test outcome")
+        seen[node] = status
+    if set(seen) != set(expected):
+        raise AssertionError("cross-host preflight test coverage is incomplete or unexpected")
+    return seen
+
+
+def validate_cross_host_preflight_receipt(
+    path, *, active_runtime, active_artifact, active_settings, active_host_id,
+    expected_source_nodes, required_m3_nodes, target_command,
+    artifact_dependent_nodes=(), approved_source_skips=None,
+    identity_fn=preflight_identity,
+):
+    """Validate opt-in M5 source plus M3 target proof; v2 remains unchanged.
+
+    The caller must supply an independently collected, reviewed node inventory
+    and target command. This pure validator is not wired to route selection:
+    no model gains ``unit_tests`` from a self-declared receipt.
+    """
+    raw = Path(path).read_bytes()
+    bundle = json.loads(raw)
+    if (not isinstance(bundle, dict)
+            or bundle.get("schema") != CROSS_HOST_PREFLIGHT_SCHEMA
+            or bundle.get("passed") is not True):
+        raise AssertionError("cross-host preflight receipt is absent or failed")
+    source, target = bundle.get("source"), bundle.get("target")
+    if not isinstance(source, dict) or not isinstance(target, dict):
+        raise AssertionError("cross-host preflight needs source and target proofs")
+    if (bundle.get("source_proof_sha256") != _proof_sha256(source)
+            or bundle.get("target_proof_sha256") != _proof_sha256(target)):
+        raise AssertionError("cross-host preflight proof digest mismatch")
+    expected_identity = identity_fn()
+    source_identity, target_identity = source.get("identity"), target.get("identity")
+    if (not isinstance(expected_identity, dict)
+            or set(expected_identity) != {"git", "runtime", "qualification_harness",
+                                          "test_source_sha256", "pytest_config_sha256"}
+            or not isinstance(source_identity, dict)
+            or target_identity != expected_identity
+            or set(source_identity) != set(expected_identity)
+            or any(source_identity[key] != value for key, value in expected_identity.items()
+                   if key != "runtime")
+            or not isinstance(source_identity.get("runtime"), dict)
+            or set(source_identity["runtime"]) != set(active_runtime)
+            or source_identity["runtime"].get("source_sha256") != active_runtime.get("source_sha256")
+            or target_identity.get("runtime") != active_runtime):
+        raise AssertionError("cross-host preflight source or target identity mismatch")
+    from mlx2.qualification import APPROVED_QUALIFICATION_HARNESS
+    if expected_identity["qualification_harness"] != APPROVED_QUALIFICATION_HARNESS:
+        raise AssertionError("cross-host preflight producer is not approved")
+    if (not isinstance(source.get("host_id"), str) or not source["host_id"]
+            or not isinstance(target.get("host_id"), str) or not target["host_id"]
+            or not isinstance(active_host_id, str) or not active_host_id
+            or target["host_id"] != active_host_id
+            or source["host_id"] == target["host_id"]):
+        raise AssertionError("cross-host preflight host identity mismatch")
+    if (target.get("artifact") != active_artifact
+            or target.get("settings") != active_settings):
+        raise AssertionError("cross-host preflight target route mismatch")
+    ordinary, guarded = preflight_test_commands()
+    commands = {"ordinary": ordinary[1:], "guard": guarded[1:]}
+    if (not isinstance(expected_source_nodes, dict)
+            or set(expected_source_nodes) != set(commands)
+            or any(not isinstance(nodes, (set, frozenset)) or not nodes
+                   for nodes in expected_source_nodes.values())
+            or set(expected_source_nodes["ordinary"]) & set(expected_source_nodes["guard"])):
+        raise AssertionError("cross-host preflight needs an exact source inventory")
+    suites = source.get("suites")
+    if not isinstance(suites, dict) or set(suites) != set(commands):
+        raise AssertionError("cross-host preflight source partition is incomplete")
+    approved_source_skips = approved_source_skips or {}
+    if (not isinstance(approved_source_skips, dict)
+            or not set(approved_source_skips) <= set().union(*expected_source_nodes.values())):
+        raise AssertionError("cross-host preflight skip policy is invalid")
+    observed = {}
+    for name, command in commands.items():
+        suite = suites[name]
+        if (not isinstance(suite, dict) or type(suite.get("returncode")) is not int
+                or suite["returncode"] != 0
+                or not isinstance(suite.get("command"), list)
+                or not suite["command"] or not isinstance(suite["command"][0], str)
+                or not suite["command"][0]
+                or suite["command"][1:] != command):
+            raise AssertionError("cross-host preflight source command failed or was scoped")
+        observed.update(_checked_node_results(
+            suite.get("results"), expected_source_nodes[name],
+            approved_skips=approved_source_skips,
+        ))
+    artifact_nodes = set(artifact_dependent_nodes)
+    if not artifact_nodes or not artifact_nodes <= set(observed) or any(
+        observed[node] != "passed" for node in artifact_nodes
+    ):
+        raise AssertionError("cross-host preflight waived an artifact-dependent test")
+    artifacts = source.get("artifact_evidence")
+    if (not isinstance(artifacts, dict) or set(artifacts) != artifact_nodes
+            or any(not isinstance(value, str) or
+                   re.fullmatch(r"[0-9a-f]{64}", value) is None
+                   for value in artifacts.values())):
+        raise AssertionError("cross-host preflight artifact evidence is incomplete")
+    required = set(required_m3_nodes)
+    if (not required or not required <= set(observed)
+            or not isinstance(target_command, (list, tuple)) or not target_command):
+        raise AssertionError("cross-host preflight M3 coverage policy is missing")
+    if (type(target.get("returncode")) is not int or target["returncode"] != 0
+            or target.get("command") != list(target_command)
+            or not isinstance(target.get("command"), list)):
+        raise AssertionError("cross-host preflight target command failed or was scoped")
+    _checked_node_results(target.get("results"), required)
+    return {"path": str(Path(path).resolve()), "sha256": hashlib.sha256(raw).hexdigest(),
+            "schema": CROSS_HOST_PREFLIGHT_SCHEMA, "passed": True,
+            "source_host": source["host_id"], "target_host": target["host_id"],
+            "source_nodes": len(observed), "target_nodes": len(required),
+            "runtime": active_runtime, "artifact": active_artifact,
+            "settings": active_settings}
 
 
 # The concurrent warm pair must finish in less than this fraction of the same
@@ -785,7 +1074,60 @@ def wait_for_quiescence(
         sleep(min(poll_interval_seconds, remaining))
 
 
-def feature_observations(final, kv_fidelity=None, adaptive_benchmark=None):
+def sp_qmm_routed_observation(initial, final):
+    """Count only routed calls made during this qualification run."""
+    if initial is None:
+        return 0
+    selected = (initial.get("settings") or {}).get("sp_qmm")
+    if not selected or selected != (final.get("settings") or {}).get("sp_qmm"):
+        return 0
+    before = initial.get("sp_qmm") or {}
+    after = final.get("sp_qmm") or {}
+    if before.get("enabled") is not True or after.get("enabled") is not True:
+        return 0
+    modules = before.get("modules")
+    if type(modules) is not int or modules <= 0 or after.get("modules") != modules:
+        return 0
+    start, end = before.get("routed_calls"), after.get("routed_calls")
+    if (type(start) is not int or type(end) is not int
+            or start < 0 or end <= start):
+        return 0
+    return end - start
+
+
+def qsdpa_verify_observation(initial, final):
+    """Count only selected verify-kernel calls made during this run."""
+    if initial is None:
+        return 0
+    selected = (initial.get("settings") or {}).get("qsdpa_verify_kernel") or {}
+    if selected.get("enabled") is not True or selected != (
+        (final.get("settings") or {}).get("qsdpa_verify_kernel") or {}
+    ):
+        return 0
+    before = (initial.get("qsdpa_verify") or {}).get("counts") or {}
+    after = (final.get("qsdpa_verify") or {}).get("counts") or {}
+    start, end = before.get("verify_kernel_calls"), after.get("verify_kernel_calls")
+    if type(start) is not int or type(end) is not int or start < 0 or end <= start:
+        return 0
+    if not ((initial.get("settings") or {}).get("approximate_kv") or {}).get(
+        "compose_mtp", False
+    ):
+        return end - start
+    # L=1 can be an ordinary fallback. For self-MTP prove that a multirow
+    # target verification, rather than just an unrelated decode, engaged.
+    before_rows = (initial.get("qsdpa_verify") or {}).get("by_rows") or {}
+    after_rows = (final.get("qsdpa_verify") or {}).get("by_rows") or {}
+    multirow_delta = 0
+    for rows in range(2, 9):
+        key = f"verify_kernel_L{rows}"
+        old, new = before_rows.get(key, 0), after_rows.get(key, 0)
+        if type(old) is not int or type(new) is not int or new < old:
+            return 0
+        multirow_delta += new - old
+    return min(end - start, multirow_delta)
+
+
+def feature_observations(final, kv_fidelity=None, adaptive_benchmark=None, initial=None):
     execution = final.get("execution", {})
     segmented = execution.get("segmented_mtp", {})
     indexed = execution.get("indexed_qsa", {}).get("counts", {})
@@ -905,6 +1247,8 @@ def feature_observations(final, kv_fidelity=None, adaptive_benchmark=None):
         # feature_int8_prefill whenever the policy is enabled, so the
         # observation key must exist or the qualifier raises KeyError.
         "int8_prefill": final.get("int8_prefill", {}).get("counts", {}).get("engaged_calls", 0),
+        "sp_qmm": sp_qmm_routed_observation(initial, final),
+        "qsdpa_verify_kernel": qsdpa_verify_observation(initial, final),
         "verify_bitexact": (
             (final.get("verify_bitexact") or {}).get("dispatches", 0)
             if (final.get("verify_bitexact") or {}).get("active") is True
@@ -1125,6 +1469,8 @@ def main():
     )
     parser.add_argument("--preflight-receipt", type=Path,
                         help="Use an exact passing preflight receipt instead of rerunning pytest")
+    parser.add_argument("--adapter-qualification", type=Path,
+                        help="Source-bound media companion for this exact live route")
     parser.add_argument(
         "--adaptive-benchmark",
         type=Path,
@@ -1217,6 +1563,7 @@ def main():
 
     initial = get("/v1/status")
     assert initial["healthy"] and initial["inflight"] == 0
+    selected_capabilities, scope_valid = selected_capability_scope(initial)
     adaptive_benchmark = validate_adaptive_benchmark(
         args.adaptive_benchmark, initial
     )
@@ -1240,6 +1587,11 @@ def main():
         "thinking_budget": {"thinking_default": thinking["default"],
                             "extra_completion_tokens": thinking["allowance"] if thinking["default"] else 0},
     }
+    if args.adapter_qualification:
+        report["adapter_qualification"] = read_adapter_qualification(
+            args.adapter_qualification, initial
+        )
+    source_cases = source_text_cases(report.get("adapter_qualification"))
     if adaptive_benchmark is not None:
         report["adaptive_benchmark"] = adaptive_benchmark[1]
     context_delegation = (
@@ -1275,6 +1627,12 @@ def main():
             not unobservable,
             {"required": sorted(required_features), "unobservable": unobservable},
         )
+        check(
+            "capability_scope",
+            scope_valid,
+            {"selected": sorted(selected_capabilities),
+             "implemented": initial.get("implemented_capabilities")},
+        )
         if trusted_preflight:
             check("unit_tests", True, trusted_preflight)
         else:
@@ -1282,8 +1640,19 @@ def main():
                 [sys.executable, "-m", "pytest"], capture_output=True, text=True
             )
             check("unit_tests", tests.returncode == 0, tests.stdout + tests.stderr)
-        hermes = post(prompt("Reply with exactly HERMES_READY", options={"num_ctx": 262144}, reasoning_effort="none", think=False))
-        check("hermes_client", content(hermes) == "HERMES_READY" and hermes["mlx2"]["request_controls"]["thinking"] is False, hermes)
+        hermes_text = "Reply with exactly HERMES_READY"
+        hermes_request = prompt(hermes_text, options={"num_ctx": 262144},
+                                reasoning_effort="none", think=False)
+        if source_cases is not None:
+            hermes_request.update(max_tokens=16, logprobs=True)
+        hermes = post(hermes_request)
+        hermes_output_ok = (
+            source_token_response_matches(
+                hermes, source_cases["hermes_client"], prompt_text=hermes_text
+            ) if source_cases is not None else content(hermes) == "HERMES_READY"
+        )
+        check("hermes_client", hermes_output_ok and
+              hermes["mlx2"]["request_controls"]["thinking"] is False, hermes)
         probability_request = prompt("Write a short sentence about compilers.", max_tokens=8)
         probability_reference = post(probability_request)
         probability_response = post({**probability_request, "logprobs": True,
@@ -1353,13 +1722,25 @@ def main():
             and bool(content(defaults_a)),
             {"declared": declared, "a": defaults_a["mlx2"], "b": defaults_b["mlx2"]},
         )
-        request = prompt("Reply with exactly MLX2_READY")
+        cold_text_prompt = "Reply with exactly MLX2_READY"
+        request = prompt(cold_text_prompt)
+        if source_cases is not None:
+            request.update(max_tokens=16, logprobs=True)
         cold, warm = post(request), post(request)
         report["responses"].update(cold=cold, warm=warm)
-        check("cold_text", content(cold) == "MLX2_READY", cold["mlx2"])
+        cold_output_ok = (
+            source_token_response_matches(
+                cold, source_cases["cold_text"], prompt_text=cold_text_prompt
+            ) if source_cases is not None else content(cold) == "MLX2_READY"
+        )
+        check("cold_text", cold_output_ok, cold["mlx2"])
         check(
             "warm_prefix",
-            content(warm) == content(cold) and warm["mlx2"]["cached_tokens"] > 0,
+            content(warm) == content(cold)
+            and warm["mlx2"]["cached_tokens"] > 0
+            and (source_cases is None or source_token_response_matches(
+                warm, source_cases["cold_text"], prompt_text=cold_text_prompt
+            )),
             warm["mlx2"],
         )
         if initial["settings"].get("disk_cache") is True:
@@ -1468,81 +1849,87 @@ def main():
         )
         check(
             "stream",
-            text == "MLX2_READY"
+            text == (content(cold) if source_cases is not None else "MLX2_READY")
             and wire.endswith("data: [DONE]\n\n")
             and "mlx2" in chunks[-1],
             chunks,
         )
-        tools = [
-            {
-                "type": "function",
-                "function": {
-                    "name": "weather",
-                    "description": "Get weather for a city",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {"city": {"type": "string"}},
-                        "required": ["city"],
-                    },
-                },
-            }
-        ]
-        tool_request = prompt(
-            "Use the weather tool to get the weather in Toronto.",
-            tools=tools,
-            max_tokens=128,
-        )
-        tool_response = post(tool_request)
-        choice = tool_response["choices"][0]
-        calls = choice["message"].get("tool_calls", [])
-        check(
-            "tools",
-            choice["finish_reason"] == "tool_calls"
-            and len(calls) == 1
-            and calls[0]["function"]["name"] == "weather"
-            and json.loads(calls[0]["function"]["arguments"]).get("city") == "Toronto",
-            tool_response,
-        )
-        followup = post(
-            {
-                "tools": tools,
-                "messages": tool_request["messages"]
-                + [
-                    choice["message"],
-                    {
-                        "role": "tool",
-                        "tool_call_id": calls[0]["id"],
+        if "tools" in selected_capabilities:
+            tools = [
+                {
+                    "type": "function",
+                    "function": {
                         "name": "weather",
-                        "content": '{"temperature_c": 21, "condition": "sunny"}',
+                        "description": "Get weather for a city",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"city": {"type": "string"}},
+                            "required": ["city"],
+                        },
                     },
-                ],
-            }
-        )
-        check("tool_roundtrip", "21" in content(followup), followup)
-        reasoning_budget = (
-            REASONING_PROBE_THINKING_BUDGET
-            if (initial.get("structured_output") or {}).get("thinking_deferral") is True
-            else None
-        )
-        thought, thought_attempts = run_reasoning_probe(
-            post, thinking_budget=reasoning_budget
-        )
-        check(
-            "reasoning",
-            reasoning_response_passes(thought),
-            {"attempts": thought_attempts},
-        )
+                }
+            ]
+            tool_request = prompt(
+                "Use the weather tool to get the weather in Toronto.",
+                tools=tools,
+                max_tokens=128,
+            )
+            tool_response = post(tool_request)
+            choice = tool_response["choices"][0]
+            calls = choice["message"].get("tool_calls", [])
+            check(
+                "tools",
+                choice["finish_reason"] == "tool_calls"
+                and len(calls) == 1
+                and calls[0]["function"]["name"] == "weather"
+                and json.loads(calls[0]["function"]["arguments"]).get("city") == "Toronto",
+                tool_response,
+            )
+            followup = post(
+                {
+                    "tools": tools,
+                    "messages": tool_request["messages"]
+                    + [
+                        choice["message"],
+                        {
+                            "role": "tool",
+                            "tool_call_id": calls[0]["id"],
+                            "name": "weather",
+                            "content": '{"temperature_c": 21, "condition": "sunny"}',
+                        },
+                    ],
+                }
+            )
+            check("tool_roundtrip", "21" in content(followup), followup)
+        if "reasoning" in selected_capabilities:
+            reasoning_budget = (
+                REASONING_PROBE_THINKING_BUDGET
+                if (initial.get("structured_output") or {}).get("thinking_deferral") is True
+                else None
+            )
+            thought, thought_attempts = run_reasoning_probe(
+                post, thinking_budget=reasoning_budget
+            )
+            check(
+                "reasoning",
+                reasoning_response_passes(thought),
+                {"attempts": thought_attempts},
+            )
         # Unrelated to reasoning, so thinking is off: a thinking-default model
         # (Laguna) otherwise quotes MLX2_READY in its reasoning, the stop
         # matches there, and the answer is empty (the pass-3 triage's
         # "checks consume only reasoning" harness class).
+        stop_witness = (interior_stop_witness(content(cold))
+                        if source_cases is not None else None)
+        stop_text = stop_witness[0] if stop_witness else "_READY"
         stopped = post(prompt(
-            "Reply with exactly MLX2_READY", stop="_READY",
+            cold_text_prompt, stop=stop_text,
             reasoning_effort="none", think=False,
         ))
         check(
             "stop",
-            content(stopped) == "MLX2"
+            (stop_witness is not None if source_cases is not None else True)
+            and content(stopped) == (stop_witness[1] if stop_witness else "MLX2")
             and stopped["choices"][0]["finish_reason"] == "stop",
             stopped,
         )
@@ -1558,112 +1945,113 @@ def main():
             content(first) == content(second),
             {"first": first, "second": second},
         )
-        # Four concurrent requests cover row lifetimes and observed compute width.
-        # Fixed 160-token lanes measure batching, not reasoning: thinking is
-        # turned off so a thinking-default model fills the same budget.
-        batch_request = prompt(
-            "Explain how a compiler works in detail.", max_tokens=160,
-            reasoning_effort="none", think=False,
-        )
-        start = time.monotonic()
-        with ThreadPoolExecutor(max_workers=4) as pool:
-            batch = list(pool.map(post, [batch_request] * 4))
-        elapsed = time.monotonic() - start
-        report["responses"]["batch"] = batch
-        widths = sorted(
-            {
-                width
-                for r in batch
-                for width in observed_compute_widths(r["mlx2"])
-            }
-        )
-        # The prompt-lookup route reports its verify width in the speculation
-        # receipt: shared (>= 2) where batched verification engages, 1 on
-        # models that keep the per-lane driver, whose concurrency evidence is
-        # then wall-time overlap of the four lanes.
-        lane_seconds = sum(r["mlx2"]["elapsed_seconds"] for r in batch)
-        prompt_lookup_route = initial["settings"].get("speculation") == "prompt_lookup"
-        if prompt_lookup_route:
-            widths = sorted(set(widths) | {
-                int((r["mlx2"].get("speculation") or {}).get("target_width") or 0) for r in batch
-            })
-        check(
-            "batch",
-            all(r["usage"]["completion_tokens"] == 160 and content(r) for r in batch)
-            and (
-                max(widths, default=0) >= 2
-                or (prompt_lookup_route and elapsed < 0.6 * lane_seconds)
-            ),
-            {
-                "observed_widths": widths,
-                "wall_seconds": elapsed,
-                "lane_seconds": lane_seconds,
-                "prompt_lookup_route": prompt_lookup_route,
-                "aggregate_tokens_per_second": 640 / elapsed,
-                "request_receipts": [r["mlx2"] for r in batch],
-            },
-        )
-        # Both pairs must do identical work for their wall times to compare:
-        # thinking off (a thinking-default model otherwise gets the reasoning
-        # allowance and answered 906 and 1,490 tokens on North) and EOS held
-        # until the 64-token budget, as the batch check above does.
-        mixed_prompts = [
-            prompt(
-                "Explain how a compiler works, in numbered sections.",
-                max_tokens=64, min_tokens=64,
+        if "continuous_batch" in selected_capabilities:
+            # Four concurrent requests cover row lifetimes and observed compute width.
+            # Fixed 160-token lanes measure batching, not reasoning: thinking is
+            # turned off so a thinking-default model fills the same budget.
+            batch_request = prompt(
+                "Explain how a compiler works in detail.", max_tokens=160,
                 reasoning_effort="none", think=False,
-            ),
-            prompt(
-                "Explain how a database transaction works, in numbered sections.",
-                max_tokens=64, min_tokens=64,
-                reasoning_effort="none", think=False,
-            ),
-        ]
-        # The sequential warm-up is also the timing reference: two warm
-        # requests together must finish faster than the same pair one after
-        # the other.  A fixed wall clock failed models that simply answer at
-        # length (Xing4.0: ~2.2K tokens each, 45-48 s concurrent).
-        # Both pairs stream, so their client work is identical too, and each
-        # token delta of the concurrent pair is stamped on the pair's shared
-        # clock: a per-lane route shows its overlap by interleaved tokens.
-        def post_streamed(item, clock_start):
-            with post(item, stream=True) as response:
-                return read_streamed_chat(
-                    response, lambda: time.monotonic() - clock_start
-                )
-
-        sequential_start = time.monotonic()
-        for item in mixed_prompts:
-            post_streamed(item, sequential_start)
-        sequential = time.monotonic() - sequential_start
-        start = time.monotonic()
-        with ThreadPoolExecutor(max_workers=2) as pool:
-            streamed = list(
-                pool.map(lambda item: post_streamed(item, start), mixed_prompts)
             )
-        concurrent = time.monotonic() - start
-        mixed = [response for response, _ in streamed]
-        lane_token_seconds = [arrivals for _, arrivals in streamed]
-        check(
-            "mixed_warm",
-            all(content(r) and r["mlx2"]["cached_tokens"] > 0
-                and r["usage"]["completion_tokens"] == 64 for r in mixed)
-            and mixed_warm_timing_passes(
-                concurrent,
-                sequential,
-                [r["mlx2"] for r in mixed],
-                lane_token_seconds=lane_token_seconds,
-            ),
-            {
-                "concurrent_seconds": concurrent,
-                "sequential_seconds": sequential,
-                "lane_token_seconds": lane_token_seconds,
-                "lane_overlap_shares": mixed_warm_lane_overlap_shares(
-                    lane_token_seconds
+            start = time.monotonic()
+            with ThreadPoolExecutor(max_workers=4) as pool:
+                batch = list(pool.map(post, [batch_request] * 4))
+            elapsed = time.monotonic() - start
+            report["responses"]["batch"] = batch
+            widths = sorted(
+                {
+                    width
+                    for r in batch
+                    for width in observed_compute_widths(r["mlx2"])
+                }
+            )
+            # The prompt-lookup route reports its verify width in the speculation
+            # receipt: shared (>= 2) where batched verification engages, 1 on
+            # models that keep the per-lane driver, whose concurrency evidence is
+            # then wall-time overlap of the four lanes.
+            lane_seconds = sum(r["mlx2"]["elapsed_seconds"] for r in batch)
+            prompt_lookup_route = initial["settings"].get("speculation") == "prompt_lookup"
+            if prompt_lookup_route:
+                widths = sorted(set(widths) | {
+                    int((r["mlx2"].get("speculation") or {}).get("target_width") or 0) for r in batch
+                })
+            check(
+                "batch",
+                all(r["usage"]["completion_tokens"] == 160 and content(r) for r in batch)
+                and (
+                    max(widths, default=0) >= 2
+                    or (prompt_lookup_route and elapsed < 0.6 * lane_seconds)
                 ),
-                "receipts": [r["mlx2"] for r in mixed],
-            },
-        )
+                {
+                    "observed_widths": widths,
+                    "wall_seconds": elapsed,
+                    "lane_seconds": lane_seconds,
+                    "prompt_lookup_route": prompt_lookup_route,
+                    "aggregate_tokens_per_second": 640 / elapsed,
+                    "request_receipts": [r["mlx2"] for r in batch],
+                },
+            )
+            # Both pairs must do identical work for their wall times to compare:
+            # thinking off (a thinking-default model otherwise gets the reasoning
+            # allowance and answered 906 and 1,490 tokens on North) and EOS held
+            # until the 64-token budget, as the batch check above does.
+            mixed_prompts = [
+                prompt(
+                    "Explain how a compiler works, in numbered sections.",
+                    max_tokens=64, min_tokens=64,
+                    reasoning_effort="none", think=False,
+                ),
+                prompt(
+                    "Explain how a database transaction works, in numbered sections.",
+                    max_tokens=64, min_tokens=64,
+                    reasoning_effort="none", think=False,
+                ),
+            ]
+            # The sequential warm-up is also the timing reference: two warm
+            # requests together must finish faster than the same pair one after
+            # the other.  A fixed wall clock failed models that simply answer at
+            # length (Xing4.0: ~2.2K tokens each, 45-48 s concurrent).
+            # Both pairs stream, so their client work is identical too, and each
+            # token delta of the concurrent pair is stamped on the pair's shared
+            # clock: a per-lane route shows its overlap by interleaved tokens.
+            def post_streamed(item, clock_start):
+                with post(item, stream=True) as response:
+                    return read_streamed_chat(
+                        response, lambda: time.monotonic() - clock_start
+                    )
+
+            sequential_start = time.monotonic()
+            for item in mixed_prompts:
+                post_streamed(item, sequential_start)
+            sequential = time.monotonic() - sequential_start
+            start = time.monotonic()
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                streamed = list(
+                    pool.map(lambda item: post_streamed(item, start), mixed_prompts)
+                )
+            concurrent = time.monotonic() - start
+            mixed = [response for response, _ in streamed]
+            lane_token_seconds = [arrivals for _, arrivals in streamed]
+            check(
+                "mixed_warm",
+                all(content(r) and r["mlx2"]["cached_tokens"] > 0
+                    and r["usage"]["completion_tokens"] == 64 for r in mixed)
+                and mixed_warm_timing_passes(
+                    concurrent,
+                    sequential,
+                    [r["mlx2"] for r in mixed],
+                    lane_token_seconds=lane_token_seconds,
+                ),
+                {
+                    "concurrent_seconds": concurrent,
+                    "sequential_seconds": sequential,
+                    "lane_token_seconds": lane_token_seconds,
+                    "lane_overlap_shares": mixed_warm_lane_overlap_shares(
+                        lane_token_seconds
+                    ),
+                    "receipts": [r["mlx2"] for r in mixed],
+                },
+            )
         if context_delegation:
             check("long_context_delegation", True, context_delegation)
         # Keep the near-limit cohort alive long enough to join before decoding
@@ -1684,60 +2072,67 @@ def main():
             # completion, and whether a model ends its answer early is not what
             # these checks measure (North, once its layer 0 was rotated, ended
             # a warm B2 answer at 39 of 64 tokens).
+            source_near_case = (
+                source_cases.get("near_context") if source_cases is not None
+                and context_cap == initial["max_context"] else None
+            )
             return prompt(
-                long_context_prompt(context_cap),
+                source_near_case["prompt"] if source_near_case is not None
+                else long_context_prompt(context_cap),
                 max_tokens=completion_budget,
                 min_tokens=completion_budget,
+                **({"logprobs": True} if source_near_case is not None else {}),
                 reasoning_effort="none", think=False,
             )
         if not context_delegation:
-            # Context capacity and concurrency are separate domains. The near-cap
-            # B1 check below reaches the full cap. Exercise B2 shared/private
-            # state first, up to 131K where two complete copies plus reserve fit
-            # this deployment profile. Running B2 first prevents the deliberate
-            # near-cap B1 allocation from perturbing cohort admission.
-            shared_context = min(initial["max_context"], 131072)
-            shared_completion_budget = shared_qsa_completion_budget(
-                initial["settings"], shared_context
-            )
-            shared_request = long_context_request(
-                shared_context, shared_completion_budget
-            )
-            # The cohort check below asserts a warm hit for both members, so
-            # the shared prompt must be primed first regardless of whether the
-            # cohort context equals the served cap: an atomic cohort admits
-            # both members together, so neither can warm the other.
-            primed = post(shared_request)
-            check("shared_cohort_priming", long_context_answer_passes(content(primed))
-                  and primed["usage"]["completion_tokens"]
-                      == shared_completion_budget, reply_evidence(primed))
-            report["shared_cohort_domain"] = {
-                "context_limit": shared_context, "requested_width": 2,
-                "completion_budget": shared_completion_budget,
-                "primed_separately": True,
-            }
-            # Exact same immutable P-1 checkpoint admits a shared-prefix cohort.
-            shared_cohort = {"id": "qualification-shared-prefix-b2", "size": 2}
-            shared_pair = [
-                {**shared_request, "batch_cohort": shared_cohort}
-                for _ in range(2)
-            ]
-            with ThreadPoolExecutor(max_workers=2) as pool:
-                shared = list(pool.map(post_or_refusal, shared_pair))
-            check(
-                "shared_warm_requests",
-                all("refused" not in r
-                    and long_context_answer_passes(content(r))
-                    and near_limit_usage_passes(
-                        r["usage"], shared_context, shared_completion_budget
-                    )
-                    and r["mlx2"]["cached_tokens"]
-                        > near_limit_prompt_floor(shared_context) - LONG_CONTEXT_CACHE_TOLERANCE
-                    and r["mlx2"]["request_controls"].get("batch_cohort")
-                        == shared_cohort
-                    for r in shared),
-                [reply_evidence(r) for r in shared],
-            )
+            if "continuous_batch" in selected_capabilities:
+                # Context capacity and concurrency are separate domains. The near-cap
+                # B1 check below reaches the full cap. Exercise B2 shared/private
+                # state first, up to 131K where two complete copies plus reserve fit
+                # this deployment profile. Running B2 first prevents the deliberate
+                # near-cap B1 allocation from perturbing cohort admission.
+                shared_context = min(initial["max_context"], 131072)
+                shared_completion_budget = shared_qsa_completion_budget(
+                    initial["settings"], shared_context
+                )
+                shared_request = long_context_request(
+                    shared_context, shared_completion_budget
+                )
+                # The cohort check below asserts a warm hit for both members, so
+                # the shared prompt must be primed first regardless of whether the
+                # cohort context equals the served cap: an atomic cohort admits
+                # both members together, so neither can warm the other.
+                primed = post(shared_request)
+                check("shared_cohort_priming", long_context_answer_passes(content(primed))
+                      and primed["usage"]["completion_tokens"]
+                          == shared_completion_budget, reply_evidence(primed))
+                report["shared_cohort_domain"] = {
+                    "context_limit": shared_context, "requested_width": 2,
+                    "completion_budget": shared_completion_budget,
+                    "primed_separately": True,
+                }
+                # Exact same immutable P-1 checkpoint admits a shared-prefix cohort.
+                shared_cohort = {"id": "qualification-shared-prefix-b2", "size": 2}
+                shared_pair = [
+                    {**shared_request, "batch_cohort": shared_cohort}
+                    for _ in range(2)
+                ]
+                with ThreadPoolExecutor(max_workers=2) as pool:
+                    shared = list(pool.map(post_or_refusal, shared_pair))
+                check(
+                    "shared_warm_requests",
+                    all("refused" not in r
+                        and long_context_answer_passes(content(r))
+                        and near_limit_usage_passes(
+                            r["usage"], shared_context, shared_completion_budget
+                        )
+                        and r["mlx2"]["cached_tokens"]
+                            > near_limit_prompt_floor(shared_context) - LONG_CONTEXT_CACHE_TOLERANCE
+                        and r["mlx2"]["request_controls"].get("batch_cohort")
+                            == shared_cohort
+                        for r in shared),
+                    [reply_evidence(r) for r in shared],
+                )
             long_request = long_context_request(initial["max_context"])
             long = post(long_request)
             repeated = post(long_request)
@@ -1745,6 +2140,16 @@ def main():
                 "context",
                 long_context_answer_passes(content(long))
                 and long_context_answer_passes(content(repeated))
+                and (source_cases is None or (
+                    source_token_response_matches(
+                        long, source_cases["near_context"],
+                        prompt_text=source_cases["near_context"]["prompt"]
+                    )
+                    and source_token_response_matches(
+                        repeated, source_cases["near_context"],
+                        prompt_text=source_cases["near_context"]["prompt"]
+                    )
+                ))
                 and near_limit_usage_passes(long["usage"], initial["max_context"])
                 and repeated["mlx2"]["cached_tokens"] > n - LONG_CONTEXT_CACHE_TOLERANCE,
                 {"cold": reply_evidence(long), "warm": reply_evidence(repeated)},
@@ -1782,7 +2187,11 @@ def main():
         recovered = post(request)
         check(
             "recovery",
-            content(recovered) == "MLX2_READY" and get("/health")["status"] == "ok",
+            content(recovered) == (content(cold) if source_cases is not None else "MLX2_READY")
+            and (source_cases is None or source_token_response_matches(
+                recovered, source_cases["cold_text"], prompt_text=cold_text_prompt
+            ))
+            and get("/health")["status"] == "ok",
             recovered,
         )
         spomin_policy = initial["settings"].get("spomin_live_surgery") or {}
@@ -1865,14 +2274,26 @@ def main():
             adaptive_benchmark=(
                 None if adaptive_benchmark is None else adaptive_benchmark[0]
             ),
+            initial=initial,
         )
         report["feature_observations"] = observed
         for feature in sorted(required_features):
-            evidence = (
-                report.get("adaptive_benchmark")
-                if feature in {"adaptive_mtp_depth", "mtp_ordinary_handoff"}
-                else execution
-            )
+            if feature in {"adaptive_mtp_depth", "mtp_ordinary_handoff"}:
+                evidence = report.get("adaptive_benchmark")
+            elif feature == "sp_qmm":
+                evidence = {
+                    "before": initial.get("sp_qmm"),
+                    "after": final.get("sp_qmm"),
+                    "routed_delta": observed["sp_qmm"],
+                }
+            elif feature == "qsdpa_verify_kernel":
+                evidence = {
+                    "before": initial.get("qsdpa_verify"),
+                    "after": final.get("qsdpa_verify"),
+                    "verify_delta": observed["qsdpa_verify_kernel"],
+                }
+            else:
+                evidence = execution
             # A feature without an observation is a failed check, never a
             # KeyError that discards the whole run's evidence.
             check("feature_" + feature, observed.get(feature, 0) > 0, evidence)

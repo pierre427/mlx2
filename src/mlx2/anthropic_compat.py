@@ -446,9 +446,13 @@ def anthropic_request_to_chat(
         elif kind == "enabled":
             _only(thinking, {"type", "budget_tokens"}, "thinking")
             budget = thinking.get("budget_tokens")
-            if isinstance(budget, bool) or not isinstance(budget, int) or budget < 0:
+            # Messages ``budget_tokens`` caps thinking; it cannot ask for none
+            # (that is ``type: disabled``).  mlx2's own ``thinking_budget: 0``
+            # means "no guard", so a 0 passed through would lift the cap
+            # entirely: unbounded thinking for a request that asked for zero.
+            if isinstance(budget, bool) or not isinstance(budget, int) or budget < 1:
                 raise ValueError(
-                    "thinking budget_tokens must be a non-negative integer"
+                    "thinking budget_tokens must be a positive integer"
                 )
             result.update(
                 enable_thinking=True,

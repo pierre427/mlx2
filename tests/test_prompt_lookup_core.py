@@ -1,7 +1,10 @@
+import random
+
 import pytest
 
 from mlx2.runtime.prompt_lookup import (
     AdaptiveLookback,
+    CostAwarePLDLatch,
     IndexedPromptLookup,
     plan_proposal_around_verify_cliff,
     verify_prompt_lookup,
@@ -15,6 +18,115 @@ def test_indexed_oracle_hot_segment_and_rejection_ttl():
     assert oracle.propose(4) == []
     oracle.add_hot_segment([8, 1, 2, 3, 7, 6])
     assert oracle.propose(2) == [7, 6]
+
+
+def test_context_match_screens_ambiguous_recent_copy_source():
+    # Both sites match the 3-token suffix; only the older one also matches
+    # the preceding token. The new knobs are opt-in, including the scan cap.
+    history = [7, 1, 2, 3, 9, 8, 1, 2, 3, 6, 7, 1, 2, 3]
+    oracle = IndexedPromptLookup(history, ngram_min=3, ngram_max=3)
+    assert oracle.propose(2) == [6, 7]
+    assert oracle.propose(2, min_context_match=4) == [9, 8]
+    assert oracle.propose(2, min_context_match=4, max_sources=1) == []
+    assert oracle.propose(2, min_context_match=4, max_sources=2) == [9, 8]
+    assert oracle.lookup_calls == 4
+    assert oracle.context_mismatch_sites >= 2
+
+
+def test_recent_lookup_stops_at_window_even_for_repeated_long_history():
+    class CountedBucket(list):
+        visited = 0
+
+        def __reversed__(self):
+            for item in super().__reversed__():
+                self.visited += 1
+                yield item
+
+    oracle = IndexedPromptLookup([1, 2] * 5000, ngram_min=2, ngram_max=2)
+    bucket = CountedBucket(oracle.index[2][(1, 2)])
+    oracle.index[2][(1, 2)] = bucket
+    assert oracle.propose(2, lookback=64) == [1, 2]
+    assert bucket.visited <= 34  # 32 in-window sites and one boundary
+    assert oracle.source_sites_scanned <= 32
+
+
+def test_recent_prompt_segments_index_only_the_tail_and_evict_as_tip_moves():
+    history = [1, 2, 3, 9] + list(range(20, 120)) + [1, 2, 3]
+    oracle = IndexedPromptLookup(
+        history, ngram_min=3, ngram_max=3,
+        recent_prompt_segments=2, prompt_segment_tokens=4,
+    )
+    assert oracle.indexed_start == len(history) - 8
+    assert oracle.propose(1, lookback=1000) == []  # old match is outside both segments
+    assert oracle.index_entries <= 8
+
+    oracle = IndexedPromptLookup(
+        [1, 2, 3, 7, 1, 2, 3], ngram_min=3, ngram_max=3,
+        recent_prompt_segments=2, prompt_segment_tokens=4,
+    )
+    assert oracle.propose(1, lookback=1000) == [7]
+    oracle.observe(9)
+    oracle.observe(8)
+    assert oracle.indexed_start == 1
+    assert tuple(oracle.index[3][(1, 2, 3)]) == (4,)
+    assert oracle.index_entries <= 8
+
+
+def test_recent_prompt_segment_index_matches_full_index_with_same_token_window():
+    rng = random.Random(718)
+    history = [rng.randrange(7) for _ in range(300)]
+    full = IndexedPromptLookup(history, ngram_min=2, ngram_max=4)
+    recent = IndexedPromptLookup(
+        history, ngram_min=2, ngram_max=4,
+        recent_prompt_segments=3, prompt_segment_tokens=16,
+    )
+    for _ in range(100):
+        assert recent.propose(5, lookback=48) == full.propose(5, lookback=48)
+        assert recent.propose(5, lookback=48, max_sources=8, min_context_match=5) == full.propose(
+            5, lookback=48, max_sources=8, min_context_match=5,
+        )
+        assert recent.index_entries <= 48 * 3
+        token = rng.randrange(7)
+        recent.observe(token)
+        full.observe(token)
+
+
+def test_cost_latch_requires_multi_token_shadow_and_own_goodput():
+    latch = CostAwarePLDLatch(
+        shadow_span=4, probe_stride=4, shadow_window=2,
+        plain_rounds=8, explore_rounds=2, park_rounds=4,
+        reprobe_interval=16,
+    )
+    for i in range(8):
+        if latch.should_probe(i):
+            latch.start_shadow([1, 2, 3, 4])
+        latch.observe_plain_token((1, 2, 3, 4)[i % 4])
+        latch.observe_round(10, 1, 0, i + 1)
+    assert latch.state == "explore"
+    assert latch.receipt()["shadow_matches"] == 8
+    latch.observe_round(40, 8, 7, 16)
+    latch.observe_round(40, 8, 7, 24)
+    assert latch.state == "active"
+    for i in range(4):
+        latch.observe_round(100, 1, 1, 25 + i)
+    assert latch.state == "parked" and latch.reprobe_at >= 42
+    assert not latch.should_probe(30)
+    assert latch.receipt()["parks"] == 1
+
+
+def test_cost_latch_stays_parked_on_one_token_hits_and_width_change():
+    latch = CostAwarePLDLatch(shadow_span=3, probe_stride=1, shadow_window=2,
+                              plain_rounds=2, reprobe_interval=8)
+    for i in range(6):
+        if latch.should_probe(i):
+            latch.start_shadow([1, 2, 3])
+        latch.observe_plain_token(1 if i % 2 == 0 else 9)
+        latch.observe_round(10, 1, 0, i + 1)
+    assert latch.state == "parked"
+    assert latch.receipt()["shadow_matches"] < latch.receipt()["shadow_trials"] * 3
+    latch.state = "active"
+    latch.suspend_for_width(6)
+    assert latch.state == "parked" and latch.receipt()["width_parks"] == 1
 
 
 def test_verifier_accepts_prefix_and_returns_exact_boundary():
@@ -82,6 +194,13 @@ def test_prompt_lookup_policy_strictly_validates_every_runtime_value():
         {"ngram_min": 4, "ngram_max": 3},
         {"hot_segments": -1},
         {"reject_ttl": "8"},
+        {"min_context_match": True},
+        {"min_context_match": 65},
+        {"max_sources": -1},
+        {"recent_prompt_segments": -1},
+        {"prompt_segment_tokens": 0},
+        {"recent_prompt_segments": 65, "prompt_segment_tokens": 1024},
+        {"recent_prompt_segments": 2, "retrieval_segments": [[1, 2, 3]]},
         {"lookback_misses": 0},
         {"lookback_rejects": False},
         {"adaptive_warmup": -1},
@@ -96,6 +215,15 @@ def test_prompt_lookup_policy_strictly_validates_every_runtime_value():
         {"admission_window": 0},
         {"admission_confirm_windows": False},
         {"admission_reprobe_interval": -1},
+        {"admission_probe_stride": 0},
+        {"cost_aware_admission": 1},
+        {"cost_shadow_span": 1},
+        {"cost_probe_stride": 0},
+        {"cost_shadow_gate": 1.1},
+        {"cost_margin": -0.1},
+        {"cost_plain_rounds": 0},
+        {"cost_aware_admission": True, "deferred_admission": True},
+        {"cost_aware_admission": True, "num_draft": 2, "cost_shadow_span": 3},
         {"admission_gate": "0.5"},
         {"admission_gate": math.nan},
         {"admission_gate": math.inf},

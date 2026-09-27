@@ -115,3 +115,44 @@ def test_both_variants_use_the_pinned_vendor_sampling_defaults():
         defaults = adapter.sampling_defaults.profiles["general"]
         assert defaults.values() == {"temperature": 1.0, "top_p": 0.95, "top_k": 64}
         assert defaults.source == "generation_config.json"
+
+
+def _served_adapter(cls, encoded):
+    """An adapter shell with a fake tokenizer: no weights, no mlx-vlm."""
+    adapter = object.__new__(cls)
+    tokenizer = SimpleNamespace(bos_token_id=2)
+    adapter.processor = SimpleNamespace(
+        tokenizer=tokenizer,
+        apply_chat_template=lambda messages, **_: messages[-1]["content"],
+    )
+    adapter.tokenizer = SimpleNamespace(encode=lambda text, add_special_tokens: list(encoded))
+    return adapter
+
+
+@pytest.mark.parametrize("cls", [Gemma4A4BAdapter, Gemma431BAdapter])
+def test_text_prompts_start_with_bos_exactly_once(cls):
+    # Base checkpoints have no chat template; without <bos> the served text
+    # path degenerated (results/smoke-26b-q8-prefix-nobos.json).
+    adapter = _served_adapter(cls, [818, 5279])
+    assert adapter.prompt_tokens({"prompt": "The capital"}) == [2, 818, 5279]
+    assert adapter.prompt_tokens(
+        {"messages": [{"role": "user", "content": "The capital"}]}
+    ) == [2, 818, 5279]
+    already = _served_adapter(cls, [2, 818])
+    assert already.prompt_tokens({"prompt": "<bos>The"}) == [2, 818]
+    # Processor-built media prompts already carry their own ids untouched.
+    prepared = {"messages": [], "_mlx2_prompt_tokens": [2, 255999, 7]}
+    assert adapter.prompt_tokens(prepared) == [2, 255999, 7]
+
+
+def test_prefill_step_defaults_are_per_variant_measured_values():
+    # qualification/runs/gemma4-defaults-20260925/results/prefill-*-q8.json
+    assert Gemma431BAdapter.default_prefill_step == 512
+    assert Gemma4A4BAdapter.default_prefill_step == 2048
+    for cls in (Gemma4A4BAdapter, Gemma431BAdapter):
+        adapter = object.__new__(cls)
+        assert adapter.prefill_step_default() == cls.default_prefill_step
+        # Before the engine configures a step, the budget uses the default.
+        assert adapter._budget_prefill_step() == cls.default_prefill_step
+        adapter.execution_config(max_lanes=2, prefill_step=1024)
+        assert adapter._budget_prefill_step() == 1024

@@ -11,7 +11,7 @@ import weakref
 import numpy as np
 import pytest
 
-from mlx2.logprobs import token_logprob, wants_logprobs
+from mlx2.logprobs import MAX_TOP_LOGPROBS, token_logprob, wants_logprobs
 from mlx2.server import validate_request
 
 
@@ -104,7 +104,9 @@ def test_actual_mtp_output_construction_uses_target_rows_for_accept_and_replacem
 
 
 @pytest.mark.parametrize("extra", [
-    {"logprobs": 1}, {"logprobs": "yes"}, {"top_logprobs": True},
+    {"logprobs": "yes"}, {"logprobs": -1}, {"logprobs": 12},
+    {"logprobs": 1.5}, {"logprobs": 2, "top_logprobs": 3},
+    {"top_logprobs": True},
     {"top_logprobs": -1}, {"top_logprobs": 12}, {"top_logprobs": 1.5},
     {"response_format": {"type": "text", "grammar": "x"}},
     {"response_format": {"type": "json_schema"}}, {"grammar": "("},
@@ -121,3 +123,16 @@ def test_text_format_is_normalized_and_top_alone_requests_probabilities():
     assert "response_format" not in request
     assert wants_logprobs(request)
     assert not wants_logprobs({"logprobs": False, "top_logprobs": 0})
+
+
+@pytest.mark.parametrize("count", [0, 1, MAX_TOP_LOGPROBS])
+def test_legacy_completions_integer_logprobs_maps_to_bounded_top_n(count):
+    request = validate_request({"prompt": "hi", "logprobs": count}, chat=False)
+    assert request["logprobs"] is True
+    assert request["top_logprobs"] == count
+    assert wants_logprobs(request)
+    assert validate_request({"prompt": "hi", "logprobs": count,
+                             "top_logprobs": count}, chat=False) == request
+    with pytest.raises(ValueError, match="logprobs must be boolean"):
+        validate_request({"messages": [{"role": "user", "content": "hi"}],
+                          "logprobs": count}, chat=True)

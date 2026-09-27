@@ -468,6 +468,158 @@ def test_external_draft_min_tokens_and_grammar_complete_on_cpu():
     assert output[0][-1] == 0
 
 
+def _structured_forced_external_round(
+    monkeypatch, accept, slow=False, *, admit=False, stop_at=None
+):
+    """One sampled DFlash round under a grammar, accepting ``accept`` of 2 drafts.
+
+    With ``slow``, only that round's verify row 2 overruns the grammar budget:
+    the stalled check rejects its text, or with ``admit`` decides it normally
+    (the sampled walk then records a tail bound instead of failing).  With
+    ``stop_at``, emitted token ``stop_at`` is a stop token, so delivery is cut
+    after it.  Returns (round steps, processor).
+    """
+    import time
+
+    import mlx2.runtime.external_speculative as module
+    import mlx2.structured_output as structured
+    from mlx2.runtime.speculative_sampling import VerifiedBlock
+    from mlx2.structured_output import StructuredOutputProcessor
+
+    class Tokenizer:
+        eos_token_ids = (0,)
+        vocab_size = 32
+
+        def decode(self, tokens, **_kwargs):
+            return "".join(chr(65 + int(token)) for token in tokens if int(token) != 0)
+
+    armed = {"length": None}
+
+    class Anything:
+        pattern = None
+
+        @staticmethod
+        def canonicalize(value):
+            return value
+
+        @staticmethod
+        def fullmatch(value, *, partial=False, timeout=None):
+            del timeout
+            if armed["length"] is not None and len(value) >= armed["length"]:
+                time.sleep(0.02)
+                if not admit:
+                    return None
+            return object() if partial else None
+
+    monkeypatch.setattr(structured, "_ALLOWED_BUDGET_SECONDS", 0.005)
+    prompt = [1, 2, 3]
+    stop_token = 5
+    m, d = tiny()
+    b = generator(m, d, **({} if stop_at is None else {"stop_tokens": [[stop_token]]}))
+    processor = StructuredOutputProcessor(Tokenizer(), len(prompt), Anything())
+    uid = b.insert(
+        [prompt], max_tokens=[8], logits_processors=[[processor]],
+        sampling_configs=[{"sampling_temp": 0.8}],
+    )[0]
+    rounds = []
+    real_verify = b._verify
+
+    def verify(cohort, blocks, logits):
+        drafted = blocks[0] is not None and int(blocks[0].lengths[0])
+        if slow and drafted:
+            # Row j tests candidate texts of generated + j + 1 characters.
+            armed["length"] = len(cohort[0].history) + 1 - len(prompt) + 3
+        try:
+            decisions = real_verify(cohort, blocks, logits)
+        finally:
+            armed["length"] = None
+        rounds.append((drafted, decisions[0].accepted))
+        return decisions
+
+    real_proposals = module.verify_proposals
+
+    def forced(tokens, proposals, targets, rng, **kwargs):
+        if tokens:
+            emitted = list(tokens[:accept]) + [1]
+            if stop_at is not None:
+                emitted[stop_at] = stop_token
+            return VerifiedBlock(
+                accept, tuple(emitted), tuple(targets[: accept + 1]),
+                accept < len(tokens),
+            )
+        return real_proposals(tokens, proposals, targets, rng, **kwargs)
+
+    monkeypatch.setattr(b, "_verify", verify)
+    monkeypatch.setattr(module, "verify_proposals", forced)
+    try:
+        for _ in range(8):
+            # Settlement happens at commit, so count the steps of the whole
+            # round (drafting probes are isolated and count none).
+            before = processor.constrained_steps
+            b.next()
+            if any(drafted for drafted, _ in rounds):
+                break
+            if uid not in b.lanes:
+                break
+    finally:
+        b.close()
+    drafted = [entry for entry in rounds if entry[0]]
+    assert drafted == [(2, accept)]
+    return processor.constrained_steps - before, processor
+
+
+def test_external_overrun_on_accepted_row_cut_by_stop_does_not_fail(monkeypatch):
+    # Both drafts accepted, but a stop at emitted token 0 delivers row 0
+    # only; the overrun on accepted row 2 was never delivered.  (max_tokens
+    # cannot cut inside an external block: the draft count is capped at the
+    # remaining budget.)
+    steps, processor = _structured_forced_external_round(
+        monkeypatch, 2, slow=True, stop_at=0
+    )
+    assert processor.failure is None
+    assert steps == 1
+    steps, processor = _structured_forced_external_round(
+        monkeypatch, 2, slow=True, admit=True, stop_at=0
+    )
+    assert processor.failure is None
+    assert processor.tail_mass_bound == 0.0
+    assert steps == 1
+
+
+def test_external_overrun_on_delivered_row_before_stop_still_fails(monkeypatch):
+    # The stop is the bonus token: row 2 is delivered, and its overrun stands.
+    _, processor = _structured_forced_external_round(
+        monkeypatch, 2, slow=True, stop_at=2
+    )
+    assert processor.failure == (
+        "structured-output grammar exceeded its per-token match budget"
+    )
+    steps, processor = _structured_forced_external_round(
+        monkeypatch, 2, slow=True, admit=True, stop_at=2
+    )
+    assert processor.failure is None
+    assert processor.tail_mass_bound > 0.0
+    assert steps == 3
+
+
+def test_external_structured_steps_count_only_used_verify_rows(monkeypatch):
+    # A sampled lane keeps every row reachable; only the rows through the
+    # correction/bonus row were used.
+    for accept in (0, 1, 2):
+        steps, processor = _structured_forced_external_round(monkeypatch, accept)
+        assert steps == accept + 1
+        assert processor.failure is None
+
+
+def test_external_budget_overrun_past_accept_point_does_not_fail_request(monkeypatch):
+    steps, processor = _structured_forced_external_round(monkeypatch, 0, slow=True)
+    assert processor.failure is None
+    assert steps == 1
+    steps, processor = _structured_forced_external_round(monkeypatch, 2, slow=True)
+    assert processor.failure == "structured-output grammar exceeded its per-token match budget"
+    assert steps == 2
+
+
 def test_no_legal_dflash_candidate_truncates_round_without_lane_demotion():
     from mlx2.structured_output import StructuredOutputProcessor
 

@@ -7,8 +7,23 @@ from mlx2.qualification import (
     APPROVED_QUALIFICATION_HARNESS,
     REQUIRED_CHECKS,
     load_qualified_route,
+    required_generic_checks,
     required_descriptor_checks,
 )
+
+
+def test_generic_checks_follow_adapter_capabilities():
+    from mlx2.adapters.lfm25_vl import LFM25_VL
+
+    assert {"tools", "reasoning", "batch", "mixed_warm"} <= required_generic_checks(
+        QWEN4_FLASH_NEXT
+    )
+    assert not {"tools", "reasoning", "batch", "mixed_warm"} & required_generic_checks(
+        LFM25_VL
+    )
+    assert {"cold_text", "warm_prefix", "context", "recovery"} <= required_generic_checks(
+        LFM25_VL
+    )
 
 
 def test_qualification_binds_artifact_runtime_settings_and_checks(tmp_path):
@@ -53,6 +68,46 @@ def test_qualification_binds_artifact_runtime_settings_and_checks(tmp_path):
             load_qualified_route(path, **args)
 
 
+@pytest.mark.parametrize("qualified_fp32", [False, True])
+def test_fp32_head_receipt_cannot_select_opposite_head_mode(tmp_path, qualified_fp32):
+    """The head precision is execution identity in both directions."""
+    execution_policy = {"persistent": True}
+    if qualified_fp32:
+        execution_policy["fp32_head_logits"] = True
+    settings = {
+        "mtp": False,
+        "max_context": 32768,
+        "execution_policy": execution_policy,
+    }
+    record = {
+        "passed": True,
+        "runtime": {"source": "abc"},
+        "artifact": "weights",
+        "settings": settings,
+        "qualification_harness": APPROVED_QUALIFICATION_HARNESS,
+        "checks": {
+            name: {"passed": True}
+            for name in REQUIRED_CHECKS | {"structured_output"}
+        },
+    }
+    path = tmp_path / "qualification.json"
+    path.write_text(json.dumps(record))
+    args = dict(
+        runtime=record["runtime"], artifact=record["artifact"],
+        descriptor=QWEN4_FLASH_NEXT, name="fp32-head-identity",
+    )
+    assert load_qualified_route(path, settings=settings, **args).profile
+    opposite = dict(execution_policy)
+    if qualified_fp32:
+        del opposite["fp32_head_logits"]
+    else:
+        opposite["fp32_head_logits"] = True
+    with pytest.raises(ValueError, match="serving settings"):
+        load_qualified_route(
+            path, settings={**settings, "execution_policy": opposite}, **args
+        )
+
+
 def test_multimodal_descriptor_requires_adapter_owned_live_checks(tmp_path):
     from mlx2.adapters.mlx_vlm import GEMMA3N
 
@@ -83,14 +138,71 @@ def test_multimodal_descriptor_requires_adapter_owned_live_checks(tmp_path):
         descriptor=GEMMA3N,
         name="mlx-vlm-apcv2-ordinary",
     )
-    with pytest.raises(ValueError, match="missing or failed"):
+    with pytest.raises(ValueError, match="cannot produce adapter checks"):
         load_qualified_route(path, **args)
     record["checks"].update({name: {"passed": True} for name in required})
     path.write_text(json.dumps(record))
-    profile = load_qualified_route(path, **args).profile
-    assert {"vision", "video", "audio"} <= {
-        capability.value for capability in profile.capabilities
+    with pytest.raises(ValueError, match="cannot produce adapter checks"):
+        load_qualified_route(path, **args)
+
+
+def test_smol_companion_is_recomputed_before_route_selection(tmp_path):
+    from mlx2.adapters.smolvlm2 import DESCRIPTOR
+
+    companion = json.loads((Path(__file__).resolve().parents[1] / "docs/experiments"
+                            / "SMOLVLM2-M3-LIVE-MEDIA-QUALIFICATION-2026-09-26.json").read_text())
+    record = {
+        "passed": True, "runtime": companion["runtime"],
+        "artifact": companion["artifact"], "settings": companion["settings"],
+        "qualification_harness": APPROVED_QUALIFICATION_HARNESS,
+        "checks": {name: {"passed": True} for name in required_generic_checks(DESCRIPTOR)},
+        "adapter_qualification": companion,
     }
+    path = tmp_path / "synthetic-generic.json"
+    path.write_text(json.dumps(record))
+    args = {"runtime": record["runtime"], "artifact": record["artifact"],
+            "settings": record["settings"], "descriptor": DESCRIPTOR,
+            "name": "synthetic-contract-check"}
+    assert load_qualified_route(path, **args).profile.name == "synthetic-contract-check"
+
+    forged = json.loads(json.dumps(record))
+    forged["adapter_qualification"]["arms"]["video"]["parity"]["decode"][0]["max_abs"] = 1.0
+    path.write_text(json.dumps(forged))
+    with pytest.raises(ValueError, match="traces"):
+        load_qualified_route(path, **args)
+
+
+@pytest.mark.parametrize("family,module_name,descriptor_name", [
+    ("QWEN25", "mlx2.adapters.qwen25_vl", "DESCRIPTOR"),
+    ("LFM25", "mlx2.adapters.lfm25_vl", "LFM25_VL"),
+])
+def test_family_media_companion_binds_normal_route_contract(
+    tmp_path, family, module_name, descriptor_name,
+):
+    import importlib
+
+    descriptor = getattr(importlib.import_module(module_name), descriptor_name)
+    companion = json.loads((Path(__file__).resolve().parents[1] / "docs/experiments"
+                            / f"{family}-M3-LIVE-MEDIA-QUALIFICATION-2026-09-26.json").read_text())
+    record = {
+        "passed": True, "runtime": companion["runtime"],
+        "artifact": companion["artifact"], "settings": companion["settings"],
+        "qualification_harness": APPROVED_QUALIFICATION_HARNESS,
+        "checks": {name: {"passed": True} for name in required_generic_checks(descriptor)},
+        "adapter_qualification": companion,
+    }
+    path = tmp_path / "synthetic-generic.json"
+    path.write_text(json.dumps(record))
+    args = {"runtime": record["runtime"], "artifact": record["artifact"],
+            "settings": record["settings"], "descriptor": descriptor,
+            "name": "synthetic-contract-check"}
+    assert load_qualified_route(path, **args).profile.name == "synthetic-contract-check"
+
+    forged = json.loads(json.dumps(record))
+    forged["adapter_qualification"]["arms"]["video"]["parity"]["decode"][0]["max_abs"] = 1.0
+    path.write_text(json.dumps(forged))
+    with pytest.raises(ValueError, match="traces"):
+        load_qualified_route(path, **args)
 
 
 def test_advanced_qualified_domain_requires_actual_mechanisms():
@@ -684,6 +796,127 @@ def test_prompt_lookup_keeps_common_environment_evidence_requirements():
     assert "feature_prompt_lookup" in checks
     assert "feature_file_backed_ple" in checks
     assert "feature_compiled_ple" in checks
+
+
+@pytest.mark.parametrize("speculation", [None, "prompt_lookup", "external_draft"])
+def test_selected_sp_qmm_requires_observed_routed_calls(speculation):
+    from mlx2.qualification import required_feature_checks
+    from scripts.qualify_serving import feature_observations
+
+    settings = {"mtp": False, "sp_qmm": {"modules": 2, "policy": "measured"}}
+    if speculation is not None:
+        settings["speculation"] = speculation
+    assert "feature_sp_qmm" in required_feature_checks(settings)
+    initial = {
+        "settings": settings,
+        "sp_qmm": {"enabled": True, "modules": 2, "routed_calls": 7, "stock_calls": 4},
+    }
+    final = {
+        "settings": settings,
+        "sp_qmm": {"enabled": True, "modules": 2, "routed_calls": 7, "stock_calls": 19},
+    }
+    # A selected policy, eligible modules, prior routed calls, and stock
+    # fallback calls cannot certify execution in this qualification run.
+    assert feature_observations(final, initial=initial)["sp_qmm"] == 0
+    assert feature_observations(final)["sp_qmm"] == 0
+    final["sp_qmm"]["routed_calls"] = 9
+    assert feature_observations(final, initial=initial)["sp_qmm"] == 2
+    final["sp_qmm"]["enabled"] = False
+    assert feature_observations(final, initial=initial)["sp_qmm"] == 0
+    final["sp_qmm"]["enabled"] = True
+    final["sp_qmm"]["modules"] = 0
+    assert feature_observations(final, initial=initial)["sp_qmm"] == 0
+    final["sp_qmm"]["modules"] = 2
+    final["settings"] = {"mtp": False}
+    assert feature_observations(final, initial=initial)["sp_qmm"] == 0
+
+
+def test_sp_qmm_qualification_receipt_requires_feature_check(tmp_path):
+    from mlx2.qualification import required_feature_checks
+
+    settings = {"mtp": False, "max_context": 32768,
+                "sp_qmm": {"modules": 2, "policy": "measured"}}
+    record = {
+        "passed": True,
+        "runtime": {"source": "abc"},
+        "artifact": "weights",
+        "settings": settings,
+        "qualification_harness": APPROVED_QUALIFICATION_HARNESS,
+        "checks": {name: {"passed": True}
+                   for name in REQUIRED_CHECKS | {"structured_output"}},
+    }
+    path = tmp_path / "qualification.json"
+    path.write_text(json.dumps(record))
+    with pytest.raises(ValueError, match="feature_sp_qmm"):
+        load_qualified_route(
+            path, runtime=record["runtime"], artifact="weights", settings=settings,
+            descriptor=QWEN4_FLASH_NEXT, name="sp-qmm-ordinary",
+        )
+    assert "feature_sp_qmm" in required_feature_checks(settings)
+
+
+def test_quantized_verify_requires_run_local_multirow_engagement():
+    from scripts.qualify_serving import feature_observations
+
+    settings = {
+        "max_context": 65536,
+        "approximate_kv": {"enabled": True, "compose_mtp": True},
+        "qsdpa_verify_kernel": {"enabled": True, "min_context": 32768},
+    }
+    initial = {
+        "settings": settings,
+        "qsdpa_verify": {
+            "counts": {"verify_kernel_calls": 4},
+            "by_rows": {"verify_kernel_L1": 2, "verify_kernel_L3": 2},
+        },
+    }
+    final = {
+        "settings": settings,
+        "qsdpa_verify": {
+            "counts": {"verify_kernel_calls": 5},
+            "by_rows": {"verify_kernel_L1": 3, "verify_kernel_L3": 2},
+        },
+    }
+    # Prior calls and a new single-row fallback cannot certify MTP verify.
+    assert feature_observations(final, initial=initial)["qsdpa_verify_kernel"] == 0
+    assert feature_observations(final)["qsdpa_verify_kernel"] == 0
+    final["qsdpa_verify"]["counts"]["verify_kernel_calls"] = 6
+    final["qsdpa_verify"]["by_rows"]["verify_kernel_L3"] = 3
+    assert feature_observations(final, initial=initial)["qsdpa_verify_kernel"] == 1
+    final["settings"] = {
+        **settings,
+        "qsdpa_verify_kernel": {"enabled": False, "min_context": 32768},
+    }
+    assert feature_observations(final, initial=initial)["qsdpa_verify_kernel"] == 0
+    ordinary = {**settings, "approximate_kv": {"enabled": True}}
+    initial["settings"] = final["settings"] = ordinary
+    assert feature_observations(final, initial=initial)["qsdpa_verify_kernel"] == 2
+
+
+def test_quantized_verify_qualification_receipt_requires_feature_check(tmp_path):
+    settings = {
+        "mtp": True,
+        "max_context": 65536,
+        "approximate_kv": {"enabled": True, "operation": "kv_q8", "compose_mtp": True},
+        "qsdpa_verify_kernel": {"enabled": True, "min_context": 32768},
+    }
+    record = {
+        "passed": True,
+        "runtime": {"source": "abc"},
+        "artifact": "weights",
+        "settings": settings,
+        "qualification_harness": APPROVED_QUALIFICATION_HARNESS,
+        "checks": {name: {"passed": True}
+                   for name in REQUIRED_CHECKS | {"structured_output", "mtp_execution"}
+                   | required_descriptor_checks(QWEN4_FLASH_NEXT)},
+    }
+    path = tmp_path / "qualification.json"
+    path.write_text(json.dumps(record))
+    with pytest.raises(ValueError, match="feature_qsdpa_verify_kernel"):
+        load_qualified_route(
+            path, runtime=record["runtime"], artifact="weights", settings=settings,
+            descriptor=QWEN4_FLASH_NEXT, name="quantized-verify-mtp",
+        )
 
 
 def _selectable_feature_names():

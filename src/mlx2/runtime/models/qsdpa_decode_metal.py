@@ -183,6 +183,9 @@ def _kernel():
 # overhead); measured 2026-09-23, qualification/runs/kvq-decode-20260923.
 MIN_CONTEXT = 16384
 
+# Host-side engagement count (read by qualification tracers).
+STATS = {"decode_kernel_calls": 0}
+
 
 def decode_kernel_config(n: int, gqa: int) -> tuple[int, int, int]:
     """(simdgroups, head_split, blocks) from the 2026-09-23 sweep on M5 Max.
@@ -252,6 +255,7 @@ def gqa_quantized_decode_attention(
     if G % head_split or simdgroups % head_split:
         raise ValueError("head_split must divide the GQA group and the simdgroup count")
     P = blocks * simdgroups // head_split
+    STATS["decode_kernel_calls"] += 1
     part_o, part_l, part_m = _kernel()(
         inputs=[queries, *q_keys, *q_values, mx.array([scale], dtype=mx.float32)],
         template=[("T", queries.dtype), ("D", D), ("G", G), ("KB", key_bits),

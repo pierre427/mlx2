@@ -42,6 +42,8 @@ def _adapter_classes():
     from mlx2.adapters.mlx_vlm import Gemma3nAdapter, MiniCPMOAdapter
     from mlx2.adapters.gemma4 import Gemma4A4BAdapter
     from mlx2.adapters.nemotron3_super import Nemotron3SuperAdapter
+    from mlx2.adapters.gpt_oss import GptOssAdapter, GptOssPuzzleAdapter
+    from mlx2.adapters.granite_swa import GraniteSWAAdapter
     from mlx2.adapters.xing import XingAdapter
 
     return {
@@ -56,6 +58,9 @@ def _adapter_classes():
         "gemma4": Gemma4A4BAdapter,
         "minicpmo": MiniCPMOAdapter,
         "nemotron_h": Nemotron3SuperAdapter,
+        "gpt_oss": GptOssAdapter,
+        "gpt_oss_puzzle": GptOssPuzzleAdapter,
+        "granitemoe_swa": GraniteSWAAdapter,
     }
 
 
@@ -214,6 +219,9 @@ EXPECTED = {
     # the artifact was not on this host when the entry was added, so these
     # values are the adapter's declaration, not re-read from the artifact.
     "nemotron_h": {"general": dict(temperature=1.0, top_p=0.95)},
+    "gpt_oss": {"general": dict(temperature=1.0)},
+    "gpt_oss_puzzle": {"general": dict(temperature=1.0)},
+    "granitemoe_swa": {"general": dict(temperature=1.0)},
 }
 
 
@@ -221,7 +229,13 @@ def test_every_target_adapter_declares_cited_vendor_defaults():
     from mlx2.adapters.registry import _RESOLVERS
 
     classes = _adapter_classes()
-    assert set(EXPECTED) <= set(_RESOLVERS) and set(_RESOLVERS) - set(EXPECTED) == {"muse_glimmer_text"}
+    # Explicitly account for routes without a cited vendor profile, including
+    # the muse text alias. New routes require a deliberate choice here.
+    no_vendor_profile = {
+        "agnes", "hy_v3", "lfm2_vl", "llama", "muse_glimmer_text",
+        "qwen2", "qwen2_5_vl", "qwen3", "qwen3_moe", "smolvlm",
+    }
+    assert set(_RESOLVERS) == set(EXPECTED) | no_vendor_profile
     for model_type, profiles in EXPECTED.items():
         vendor = vendor_sampling(classes[model_type])
         assert vendor is not None and vendor.model, model_type

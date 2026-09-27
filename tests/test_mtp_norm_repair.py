@@ -60,9 +60,16 @@ def test_qwen36_35b_oq_artifact_mtp_norms_are_repaired():
     assert len(weights) == 7
 
     repaired = repair_unshifted_norms(weights)
+    # The table holds all seven raw official head norms; oQ left four raw.
     assert sorted(k.removeprefix("language_model.") for k in repaired) == sorted(
-        e.key for e in QWEN36_35B_UNSHIFTED_MTP_NORMS
+        [
+            "mtp.layers.0.post_attention_layernorm.weight",
+            "mtp.layers.0.self_attn.q_norm.weight",
+            "mtp.layers.0.self_attn.k_norm.weight",
+            "mtp.norm.weight",
+        ]
     )
+    assert len(QWEN36_35B_UNSHIFTED_MTP_NORMS) == 7
     # Runtime means are raw-HF + 1 for all seven (raw values measured against
     # Qwen/Qwen3.6-35B-A3B@995ad96).
     expected = {

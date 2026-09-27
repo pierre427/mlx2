@@ -5,8 +5,10 @@ leased and these tests must never take it; the arithmetic they check is
 device-independent anyway.
 """
 
+import gc
 import json
 import struct
+import weakref
 
 import pytest
 
@@ -129,7 +131,107 @@ def test_index_addresses_expert_rows_byte_exactly(checkpoint):
     )
     for expert in (0, 1, NUM_EXPERTS - 1):
         (rebuilt,) = reader.materialize(reader.read_bytes(expert))
-        assert np.array_equal(np.array(rebuilt), np.array(weights[name][expert]))
+    assert np.array_equal(np.array(rebuilt), np.array(weights[name][expert]))
+
+
+def _write_index_fixture(path, records, payload=b"\0\0\0\0"):
+    header = json.dumps(records).encode()
+    path.write_bytes(struct.pack("<Q", len(header)) + header + payload)
+
+
+@pytest.mark.parametrize("mutation, expected", [
+    ("dtype", "dtype"),
+    ("unhashable_dtype", "dtype"),
+    ("negative_shape", "shape"),
+    ("boolean_shape", "shape"),
+    ("huge_shape", "shape"),
+    ("product_overflow", "shape"),
+    ("byte_count", "byte count"),
+    ("negative_offset", "offsets"),
+    ("reversed_offset", "offsets"),
+    ("out_of_file", "offsets"),
+    ("overlap", "overlapping"),
+])
+def test_safetensors_index_rejects_invalid_tensor_ranges(tmp_path, mutation, expected):
+    records = {
+        "first": {"dtype": "U8", "shape": [2], "data_offsets": [0, 2]},
+        "second": {"dtype": "U8", "shape": [2], "data_offsets": [2, 4]},
+    }
+    first, second = records["first"], records["second"]
+    if mutation == "dtype":
+        first["dtype"] = ""
+    elif mutation == "unhashable_dtype":
+        first["dtype"] = ["U8"]
+    elif mutation == "negative_shape":
+        first["shape"] = [-2]
+    elif mutation == "boolean_shape":
+        first["shape"] = [True, 2]
+    elif mutation == "huge_shape":
+        first["shape"] = [2**70]
+    elif mutation == "product_overflow":
+        first["shape"] = [2**62, 3]
+    elif mutation == "byte_count":
+        first["shape"] = [3]
+    elif mutation == "negative_offset":
+        first["data_offsets"] = [-1, 1]
+    elif mutation == "reversed_offset":
+        first["data_offsets"] = [2, 1]
+    elif mutation == "out_of_file":
+        second["data_offsets"] = [4, 6]
+    elif mutation == "overlap":
+        second["data_offsets"] = [1, 3]
+    shard = tmp_path / "model.safetensors"
+    _write_index_fixture(shard, records)
+    with pytest.raises(StreamingUnavailable, match=expected):
+        SafetensorsIndex.from_model_path(tmp_path)
+
+
+def test_safetensors_index_rejects_duplicate_names_and_headers(tmp_path):
+    record = '{"dtype":"U8","shape":[2],"data_offsets":[0,2]}'
+    shard = tmp_path / "model.safetensors"
+    duplicate = ('{"same":' + record + ',"same":' + record + '}').encode()
+    shard.write_bytes(struct.pack("<Q", len(duplicate)) + duplicate + b"\0\0")
+    with pytest.raises(StreamingUnavailable, match="duplicate safetensors key"):
+        SafetensorsIndex.from_model_path(tmp_path)
+
+    _write_index_fixture(shard, {"same": json.loads(record)}, b"\0\0")
+    _write_index_fixture(tmp_path / "other.safetensors", {"same": json.loads(record)}, b"\0\0")
+    with pytest.raises(StreamingUnavailable, match="duplicate safetensors tensor"):
+        SafetensorsIndex.from_model_path(tmp_path)
+
+
+def test_safetensors_index_keeps_unrelated_future_dtype(tmp_path):
+    shard = tmp_path / "model.safetensors"
+    _write_index_fixture(shard, {
+        "unrelated": {"dtype": "FUTURE_DTYPE", "shape": [2], "data_offsets": [0, 2]}
+    }, b"\0\0")
+    assert SafetensorsIndex.from_model_path(tmp_path)["unrelated"].dtype == "FUTURE_DTYPE"
+
+
+@pytest.mark.parametrize("header", [b"[1, 2]", b"{invalid JSON}"])
+def test_safetensors_index_rejects_invalid_header_object(tmp_path, header):
+    shard = tmp_path / "model.safetensors"
+    shard.write_bytes(struct.pack("<Q", len(header)) + header)
+    with pytest.raises(StreamingUnavailable, match="header"):
+        SafetensorsIndex.from_model_path(tmp_path)
+
+
+@pytest.mark.parametrize("bad_length", [0, 20, (64 << 20) + 1])
+def test_safetensors_index_bounds_header_before_reading(tmp_path, bad_length):
+    shard = tmp_path / "model.safetensors"
+    shard.write_bytes(struct.pack("<Q", bad_length) + b"{}")
+    with pytest.raises(StreamingUnavailable, match="header length"):
+        SafetensorsIndex.from_model_path(tmp_path)
+
+
+def test_safetensors_index_caps_header_even_when_file_is_large(tmp_path):
+    shard = tmp_path / "model.safetensors"
+    length = (64 << 20) + 1
+    with shard.open("wb") as handle:
+        handle.write(struct.pack("<Q", length))
+        handle.truncate(8 + length)
+    with pytest.raises(StreamingUnavailable, match="header length"):
+        SafetensorsIndex.from_model_path(tmp_path)
 
 
 def test_unsupported_dtype_is_refused(checkpoint):
@@ -193,6 +295,51 @@ def test_streamed_output_is_bit_identical_to_resident(checkpoint, capacity):
         assert actual.dtype == expected.dtype
         assert manager.stats.page_ins > 0, "nothing was actually paged in"
         assert manager.stats.resident_bytes <= manager.plan.ceiling_bytes
+    finally:
+        manager.close()
+
+
+def test_flash_next_diagnostic_snapshot_does_not_pin_replaced_experts(checkpoint):
+    from types import SimpleNamespace
+
+    from mlx2.adapters.flash_next import FlashNextAdapter
+    from mlx2.runtime.models.switch_layers import QuantizedSwitchLinear
+
+    class CounterOwner(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.fused_gate_up = True
+            self.fused_expert_kernel_mode = "tile4"
+            self.fused_expert_dispatches = {"scalar": 1, "tile4": 2}
+            self.fused_expert_fallbacks = 3
+            self.moe_router_calls = 4
+
+    path, weights = checkpoint
+    model = _reference(weights)
+    owner = CounterOwner()
+    model.counter_owner = owner
+    originals = [
+        weakref.ref(module) for _, module in model.named_modules()
+        if isinstance(module, QuantizedSwitchLinear)
+    ]
+    assert originals
+
+    adapter = object.__new__(FlashNextAdapter)
+    adapter.model = model
+    adapter.policy = SimpleNamespace(as_dict=dict)
+    adapter._tables = []
+    adapter._diagnostic_modules = adapter._snapshot_diagnostic_modules(model)
+    assert adapter._diagnostic_modules == (owner,)
+
+    manager = install_expert_streaming(
+        model, path, ceiling_bytes=_ceiling_for(path, TOP_K), top_k=TOP_K
+    )
+    try:
+        gc.collect()
+        assert all(reference() is None for reference in originals)
+        assert adapter.diagnostics()["moe"]["dispatches"] == {
+            "scalar": 1, "tile4": 2,
+        }
     finally:
         manager.close()
 
@@ -954,3 +1101,107 @@ def test_laguna_fused_down_declines_a_streamed_expert_table(tmp_path, monkeypatc
         assert mlp.fused_down_calls == 0
     finally:
         manager.close()
+
+
+# ---------------------------------------------------------------------------
+# omlx #3935: a resident MTP head under streaming
+# ---------------------------------------------------------------------------
+
+
+class TinyMoEWithMTP(nn.Module):
+    """TinyMoE plus an ``mtp.layers.0`` switch, the Flash-Next module layout."""
+
+    def __init__(self):
+        super().__init__()
+        self.layers = [
+            SwitchGLU(HIDDEN, INTERMEDIATE, NUM_EXPERTS, bias=False)
+            for _ in range(LAYERS)
+        ]
+        self.mtp = nn.Module()
+        self.mtp.layers = [SwitchGLU(HIDDEN, INTERMEDIATE, NUM_EXPERTS, bias=False)]
+
+    def backbone(self, x, indices):
+        for layer in self.layers:
+            x = x + mx.sum(layer(x, indices), axis=-2)
+        return x
+
+    def draft(self, x, indices):
+        return x + mx.sum(self.mtp.layers[0](x, indices), axis=-2)
+
+
+def _mtp_checkpoint(tmp_path):
+    mx.random.seed(3)
+    model = TinyMoEWithMTP()
+    nn.quantize(model, group_size=GROUP_SIZE, bits=BITS)
+    mx.eval(model.parameters())
+    weights = dict(_flatten(model))
+    path = tmp_path / "mtp-model"
+    path.mkdir()
+    mx.save_safetensors(str(path / "model.safetensors"), weights)
+
+    def fresh():
+        m = TinyMoEWithMTP()
+        nn.quantize(m, group_size=GROUP_SIZE, bits=BITS)
+        m.load_weights(list(weights.items()))
+        mx.eval(m.parameters())
+        return m
+
+    return path, fresh
+
+
+def test_mtp_path_predicate():
+    assert weight_stream.is_mtp_path("mtp.layers.0.mlp.switch_mlp.down_proj")
+    assert weight_stream.is_mtp_path("language_model.mtp.layers.0.switch_mlp.up_proj")
+    assert not weight_stream.is_mtp_path("language_model.model.layers.3.mlp.switch_mlp.down_proj")
+    assert not weight_stream.is_mtp_path("layers.0.mtp_gate.down_proj")
+
+
+@pytest.mark.parametrize("mtp_resident", [False, True])
+def test_mtp_resident_keeps_the_draft_head_off_the_page_in_path(tmp_path, mtp_resident):
+    path, fresh = _mtp_checkpoint(tmp_path)
+    (x, indices) = _inputs()
+    reference = fresh()
+    want_backbone = np.array(reference.backbone(x, indices))
+    want_draft = np.array(reference.draft(x, indices))
+
+    streamed = fresh()
+    per_expert = sum(
+        SafetensorsIndex.from_model_path(path)[f"layers.0.gate_proj.{key}"].row_bytes()
+        for key in ("weight", "scales", "biases")
+    )
+    manager = install_expert_streaming(
+        streamed,
+        path,
+        ceiling_bytes=per_expert * (LAYERS + 1) * 3 * NUM_EXPERTS,
+        top_k=TOP_K,
+        read_workers=2,
+        mtp_resident=mtp_resident,
+    )
+    try:
+        mtp_projections = ("gate_proj", "up_proj", "down_proj")
+        expected_resident = (
+            tuple(f"mtp.layers.0.{p}" for p in sorted(mtp_projections)) if mtp_resident else ()
+        )
+        assert manager.plan.resident_paths == expected_resident
+        assert manager.plan.layers == (LAYERS if mtp_resident else LAYERS + 1) * 3
+        head = streamed.mtp.layers[0].gate_proj
+        assert ("weight" in head) is mtp_resident
+        assert np.array_equal(np.array(streamed.backbone(x, indices)), want_backbone)
+        before = manager.stats.page_ins
+        draft = np.array(streamed.draft(x, indices))
+        assert np.array_equal(draft, want_draft), "draft head diverged"
+        assert (manager.stats.page_ins == before) is mtp_resident
+        assert ("resident_paths" in manager.plan.as_dict()) is mtp_resident
+    finally:
+        manager.close()
+
+
+def test_policy_accepts_mtp_resident_and_keeps_default_receipts():
+    from mlx2.serving import moe_expert_streaming_policy
+
+    assert "mtp_resident" not in moe_expert_streaming_policy(None)
+    assert "mtp_resident" not in moe_expert_streaming_policy({"enabled": True, "cache_gib": 1})
+    chosen = moe_expert_streaming_policy({"enabled": True, "cache_gib": 1, "mtp_resident": True})
+    assert chosen["mtp_resident"] is True
+    with pytest.raises(ValueError, match="mtp_resident"):
+        moe_expert_streaming_policy({"mtp_resident": 1})

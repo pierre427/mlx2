@@ -136,7 +136,58 @@ def copy_sharing(value, shared):
     return copy.deepcopy(value, dict(shared)) if shared else copy.deepcopy(value)
 
 
+class VerifyWindow:
+    """Rewind the rows of one speculative verify window past its accept point.
+
+    A verify forward scores K+1 positions at once, and the real processors run
+    on each position's history before the accept point is known.  Rows past
+    it are never used: no emitted token is drawn from them.  A processor that
+    publishes ``verify_ledger()`` / ``restore_verify_ledger(ledger)`` (the
+    structured-output grammar) has its receipt and failure fields snapshotted
+    after every row, and ``settle(used)`` restores the snapshot taken after
+    the last used row.  Accepted-token semantics are unchanged: masks are
+    still computed for every row, which exact rejection sampling needs up to
+    and including the first rejection; only the bookkeeping of unused rows is
+    dropped.  Processors without a ledger are untouched.
+    """
+
+    __slots__ = ("_processors", "_marks")
+
+    def __init__(self, processors):
+        self._processors = tuple(
+            processor
+            for processor in processors or ()
+            if callable(getattr(processor, "verify_ledger", None))
+            and callable(getattr(processor, "restore_verify_ledger", None))
+        )
+        self._marks = [self._ledgers()] if self._processors else []
+
+    def _ledgers(self):
+        return tuple(processor.verify_ledger() for processor in self._processors)
+
+    def mark(self):
+        """Record the ledgers after one more verify row was processed."""
+        if self._processors:
+            self._marks.append(self._ledgers())
+
+    def settle(self, used):
+        """Keep the effects of the first ``used`` rows only."""
+        if not self._processors:
+            return
+        used = int(used)
+        processed = len(self._marks) - 1
+        if not 0 <= used <= processed:
+            raise ValueError(
+                f"verify window settled at {used} rows of {processed}"
+            )
+        if used == processed:
+            return
+        for processor, ledger in zip(self._processors, self._marks[used]):
+            processor.restore_verify_ledger(ledger)
+
+
 __all__ = [
+    "VerifyWindow",
     "isolated_logits_processor",
     "probe_logits_processors",
     "copy_sharing",

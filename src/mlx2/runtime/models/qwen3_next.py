@@ -24,6 +24,7 @@ from .qwen4_moe_router import (
 )
 from . import switch_layers as _switch_layers
 from . import qwen4_moe_weighted_sum as _moe_wsum
+from . import qwen4_routed_decode as _routed
 from .switch_layers import (
     QuantizedSwitchLinear,
     SwiGLU,
@@ -59,6 +60,8 @@ _MOE_ROUTER_KERNEL = _env_flag("MLX_QWEN4_MOE_ROUTER_KERNEL")
 _MOE_ROUTER_MODES = ("stock", "fused")
 # omlx #3903 port: sorted-order weighted sum for prefill; default off.
 _MOE_WEIGHTED_SUM = _moe_wsum.weighted_sum_enabled_from_env()
+# omlx #3912 port: one-token routed experts in fewer launches; default off.
+_MOE_ROUTED_DECODE = _routed.mode_from_env()
 _MOE_GATE_COMPILE_MAX_TOKENS = 8
 _COMPILE_GLUE_DEFAULT = False
 _COMPILE_GLUE = _env_flag("MLX_QWEN4_COMPILE_GLUE", default=_COMPILE_GLUE_DEFAULT)
@@ -411,9 +414,16 @@ class FusedGateUpSwitchGLU(nn.Module):
             (x, idx, inv_order) = _gather_sort(x, indices)
         if self.training:
             idx = mx.stop_gradient(idx)
-        gate_up = self.gate_up_proj(x, idx, sorted_indices=do_sort)
-        half = self.hidden_dims
-        hidden = self.activation(gate_up[..., half:], gate_up[..., :half])
+        routed = _try_routed_decode(self, x, idx, scores, do_sort)
+        if routed is not None and routed[0] == "two_launch":
+            object.__setattr__(self, "_last_fused_variant", "routed_two_launch")
+            return routed[1]
+        if routed is not None:
+            hidden = routed[1]
+        else:
+            gate_up = self.gate_up_proj(x, idx, sorted_indices=do_sort)
+            half = self.hidden_dims
+            hidden = self.activation(gate_up[..., half:], gate_up[..., :half])
         fused = _try_qwen4_fused_down(
             hidden, idx, scores, self.down_proj, do_sort, variant
         )
@@ -460,6 +470,49 @@ class FusedDownSwitchGLU(SwitchGLU):
             return fused
         x = self.down_proj(hidden, idx, sorted_indices=do_sort)
         return _routed_tail(self, x, indices, inv_order, scores, do_sort)
+
+
+def _enable_routed_decode(switch_mlp, mode: str) -> None:
+    """Attach the omlx #3912 routed-decode selection and its counters."""
+    if mode not in _routed.MODES:
+        raise ValueError(f"unknown routed decode mode {mode!r}; expected {_routed.MODES}")
+    switch_mlp.routed_decode_mode = mode
+    switch_mlp.routed_decode_calls = 0
+    switch_mlp.routed_decode_fallbacks = 0
+    switch_mlp.routed_decode_last_fallback = None
+
+
+def _try_routed_decode(switch_mlp, x, indices, scores, do_sort):
+    """``(mode, value)`` from the #3912 kernels, or None to run the composed body.
+
+    ``gate_up`` returns the SwiGLU hidden in the composed body's shape
+    ``indices.shape + (1, inter)``; ``two_launch`` returns the weighted routed
+    sum ``indices.shape[:-1] + (hidden,)``. Only an unsorted one-token gather is
+    a candidate, so multi-token forwards decline quietly, uncounted.
+    """
+    mode = getattr(switch_mlp, "routed_decode_mode", "off")
+    if mode == "off" or do_sort or x.size != x.shape[-1]:
+        return None
+    if mode == "two_launch" and scores is None:
+        mode = "gate_up"
+    admission = _routed.admit_routed_decode(
+        x, indices, scores, switch_mlp.gate_up_proj, switch_mlp.down_proj
+    )
+    if admission.accepted and switch_mlp.training:
+        admission = _routed.RoutedDecodeAdmission(False, "training")
+    if admission.accepted and not _routed.runtime_supported():
+        admission = _routed.RoutedDecodeAdmission(False, "Metal runtime unavailable")
+    if not admission.accepted:
+        switch_mlp.routed_decode_fallbacks += 1
+        switch_mlp.routed_decode_last_fallback = admission.reason
+        return None
+    hidden = _routed.gate_up_swiglu(x, indices, switch_mlp.gate_up_proj)
+    switch_mlp.routed_decode_calls += 1
+    switch_mlp.routed_decode_last_fallback = None
+    if mode == "two_launch":
+        y = _routed.down_combine(hidden, indices, scores, switch_mlp.down_proj)
+        return ("two_launch", y.reshape(indices.shape[:-1] + (y.shape[-1],)))
+    return ("gate_up", hidden.reshape(indices.shape + (1, hidden.shape[-1])))
 
 
 def _routed_tail(switch_mlp, x, indices, inv_order, scores, do_sort):
@@ -808,6 +861,14 @@ class Qwen3NextSparseMoeBlock(nn.Module):
         # shared row weights its rows outside it, so it keeps the stock tail.
         self.moe_weighted_sum = _MOE_WEIGHTED_SUM and not self.shared_folded
         _enable_moe_weighted_sum(self.switch_mlp, self.moe_weighted_sum)
+        # The #3912 kernels read the fused [gate|up] table; split gate/up
+        # projections (FusedDownSwitchGLU) keep the composed body.
+        _enable_routed_decode(
+            self.switch_mlp,
+            _MOE_ROUTED_DECODE
+            if self.fused_gate_up and not self.shared_folded
+            else "off",
+        )
         if not self.shared_folded:
             self.shared_expert = Qwen3NextMLP(dim, shared_expert_intermediate_size)
         self.shared_expert_gate = nn.Linear(dim, 1, bias=False)
@@ -836,6 +897,17 @@ class Qwen3NextSparseMoeBlock(nn.Module):
         self.moe_weighted_sum = bool(enabled)
         self.switch_mlp.moe_weighted_sum = bool(enabled)
         return self.moe_weighted_sum
+
+    def set_moe_routed_decode_mode(self, mode: str) -> str:
+        """Live-select the omlx #3912 one-token routed-expert kernels."""
+        if mode not in _routed.MODES:
+            raise ValueError(
+                f"unknown routed decode mode {mode!r}; expected {_routed.MODES}"
+            )
+        if mode != "off" and (self.shared_folded or not self.fused_gate_up):
+            raise ValueError("routed decode needs the fused [gate|up] table and no folded shared row")
+        self.switch_mlp.routed_decode_mode = mode
+        return mode
 
     def set_moe_router_mode(self, mode: str):
         if mode not in _MOE_ROUTER_MODES:
@@ -891,6 +963,8 @@ class Qwen3NextSparseMoeBlock(nn.Module):
                 outcome = getattr(self.switch_mlp, "_last_fused_variant", None)
                 if outcome in self.fused_expert_dispatches:
                     self.fused_expert_dispatches[outcome] += 1
+                elif outcome == "routed_two_launch":
+                    pass  # counted by switch_mlp.routed_decode_calls
                 else:
                     self.fused_expert_fallbacks += 1
             elif (

@@ -245,6 +245,28 @@ def can_trim_prompt_cache(cache: List[Any]) -> bool:
     return bool(cache) and all((c.is_trimmable() for c in cache))
 
 
+def can_trim_prompt_cache_at(cache: List[Any], num_tokens: int) -> bool:
+    """Check an exact branch landing before cloning and mutating its cache.
+
+    Most cache planes can trim at every position. A model-owned metadata plane
+    may forbid a subset, such as a point inside a vision media span. The
+    optional preflight hook leaves that tensor math and state rule in the
+    adapter while APCv2 can decline the branch without surfacing a request
+    error or partially trimming a cloned cache.
+    """
+    if not can_trim_prompt_cache(cache) or type(num_tokens) is not int or num_tokens < 0:
+        return False
+    for plane in cache:
+        preflight = getattr(plane, "preflight_trim", None)
+        if callable(preflight):
+            try:
+                if preflight(num_tokens) is False:
+                    return False
+            except ValueError:
+                return False
+    return True
+
+
 def _snap_trim_position(cache: List[Any], position: int) -> Optional[int]:
     """Largest position <= ``position`` that every cache in the list can be
     restored to, or ``None`` if some cache cannot restore any position.
@@ -297,6 +319,28 @@ def _thin_checkpoints(checkpoints: List, max_checkpoints: int):
         del checkpoints[drop]
 
 
+def _window_checkpoint_due(lane: List, position: int) -> bool:
+    """Whether a sliding-window restore snapshot is due at ``position``.
+
+    Only at least one stride past the previous snapshot (the first measured
+    from position 0), and never forced.  The forced end-of-prompt checkpoint
+    a recurrent cache takes is redundant for a window: the prompt boundary
+    extracted at that position already holds that exact window as its live
+    state, and a decode tip never carries window snapshots
+    (``release_window_checkpoints``).  With every gap at least the stride, a
+    lane that has prefilled ``c`` tokens holds at most ``floor(c / stride)``
+    snapshots however many turns it spans, within what the sliding cache
+    budgets charge (``SlidingKVCacheBudget.sliding_snapshots``).
+    """
+    last = lane[-1][0] if lane else 0
+    return position - last >= _state_checkpoint_stride()
+
+
+def _append_window_checkpoint(lane: List, entry: tuple, max_checkpoints: int):
+    lane.append(entry)
+    _thin_checkpoints(lane, max_checkpoints)
+
+
 def achievable_trim(cache: List[Any], num_tokens: int):
     """Dry-run of ``trim_prompt_cache(cache, num_tokens, allow_partial=True)``.
 
@@ -311,8 +355,10 @@ def achievable_trim(cache: List[Any], num_tokens: int):
     if size <= 0:
         return None
     target = max(0, size - num_tokens)
-    if can_trim_prompt_cache(cache):
+    if can_trim_prompt_cache_at(cache, size - target):
         return (target, size - target)
+    if can_trim_prompt_cache(cache):
+        return None
     position = _snap_trim_position(cache, target)
     if position is None:
         return None
@@ -630,6 +676,92 @@ def record_state_checkpoints(cache: List[Any], positions: List[int], force=False
         record = getattr(c, "state_checkpoint", None)
         if record is not None:
             record(positions, force=force)
+
+
+def release_window_checkpoints(cache: List[Any]) -> int:
+    """Drop the per-lane sliding-window restore snapshots of a batch cache.
+
+    Called once the prompt boundary has been extracted: the boundary (and so
+    its APCv2 entry) now owns the snapshots, and none of them lies past the
+    prompt, so a decode tip carrying them again could never land deeper than
+    that boundary.  Releasing them frees the lane's copy for the rest of
+    decode and keeps APCv2 from charging the same arrays twice.  Recurrent
+    ``ArraysCache`` checkpoints are left alone.  Returns the bytes released.
+    """
+    released = 0
+    for c in cache:
+        if isinstance(c, CacheList):
+            released += release_window_checkpoints(c.caches)
+        elif isinstance(c, BatchRotatingKVCache) and c._checkpoints:
+            released += sum(
+                k.nbytes + v.nbytes for lane in c._checkpoints for _, k, v in lane
+            )
+            c._checkpoints = []
+            c._checkpoint_fill = None
+    return released
+
+
+# Batch sliding-window caches that share mlx2's ``BatchRotatingKVCache``
+# layout (keys/values, ``_idx``, ``rotated``, ``left_padding``, ``_lengths``,
+# ``max_size``) and whose decode and mask paths trim exactly as it does.  An
+# adapter registers a foreign class here (mlx-vlm's, for Gemma 3n) after
+# checking that contract; unregistered classes are never touched.
+_WINDOW_COMPACTABLE_BATCH_CLASSES: set = set()
+
+
+def register_window_compactable_batch_cache(cls):
+    _WINDOW_COMPACTABLE_BATCH_CLASSES.add(cls)
+    return cls
+
+
+def _compact_batch_rotating_window(c) -> bool:
+    """Drop the columns a batch rotating cache holds beyond its window.
+
+    A multi-token update concatenates the chunk onto the window, so after a
+    prefill chunk of ``S`` rows each sliding layer holds up to
+    ``max_size - 1 + S`` columns; the next update discards all but the last
+    ``max_size`` (decode) or ``max_size - 1`` (another chunk).  This performs
+    that trim now, with the same ``left_padding`` bookkeeping, so the state is
+    exactly what the next update would start from and every later mask,
+    update, ``extract`` and ``extend`` sees identical window contents.  The
+    kept columns are copied so the full-length buffer is released.
+    """
+    keys = c.keys
+    if (
+        keys is None
+        or getattr(c, "speculating", False)
+        or getattr(c, "_lengths", None) is not None
+        or c.rotated
+        or c._idx != keys.shape[2]
+    ):
+        return False
+    trim_size = c._idx - c.max_size
+    if trim_size <= 0:
+        return False
+    c.keys = mx.contiguous(keys[..., trim_size:, :])
+    c.values = mx.contiguous(c.values[..., trim_size:, :])
+    c.left_padding = c.left_padding - trim_size
+    c._idx = c.max_size
+    return True
+
+
+def compact_prompt_cache_windows(cache: List[Any]) -> int:
+    """Trim every sliding-window cache in ``cache`` back to its window.
+
+    Exact (see ``_compact_batch_rotating_window``); returns how many caches
+    were trimmed.  Called at prefill chunk boundaries so a long one-chunk
+    prefill (an isolated multimodal prompt) does not leave full-prompt-length
+    sliding K/V in the extracted APCv2 prompt boundary or in a restore
+    snapshot, both of which outlive the forward.
+    """
+    trimmed = 0
+    for c in cache:
+        compact = getattr(c, "compact_to_window", None)
+        if compact is not None:
+            trimmed += int(bool(compact()))
+        elif type(c) in _WINDOW_COMPACTABLE_BATCH_CLASSES:
+            trimmed += int(_compact_batch_rotating_window(c))
+    return trimmed
 
 
 def _state_checkpoint_max() -> int:
@@ -1128,6 +1260,19 @@ class KVCache(_BaseCache):
         return quant_cache
 
     def make_mask(self, *args, **kwargs):
+        # Ordinary's B=1 BatchKVCache supplies an explicit all-valid mask for
+        # a one-token full-attention forward. A cost-aware PLD lane can opt in
+        # to that same target arithmetic without changing other KVCache users.
+        if (
+            getattr(self, "_pld_ordinary_mask_padding", None) is not None
+            and (args[0] if args else kwargs.get("N")) == 1
+            and kwargs.get("window_size") is None
+        ):
+            self._pld_ordinary_mask_calls += 1
+            return create_causal_mask(
+                1, offset=self.offset,
+                left_padding=self._pld_ordinary_mask_padding,
+            )
         return create_attention_mask(*args, offset=self.offset, **kwargs)
 
     @classmethod
@@ -1403,20 +1548,50 @@ class RotatingKVCache(_BaseCache):
         self.max_size = max_size
         self._idx = 0
 
+    def compact_to_window(self) -> bool:
+        """Trim a post-chunk concatenation back to ``max_size`` columns.
+
+        Exactly the trim the next ``_update_in_place`` performs (and a superset
+        of the ``max_size - 1`` a further ``_update_concat`` keeps), so later
+        masks and updates are unchanged; a restore snapshot recorded after it
+        holds the window instead of the whole chunk.
+        """
+        keys = self.keys
+        if (
+            keys is None
+            or self.speculating
+            or self._idx != keys.shape[2]
+            or keys.shape[2] <= self.max_size
+        ):
+            return False
+        trim_size = keys.shape[2] - self.max_size
+        self.keys = mx.contiguous(self._trim(trim_size, keys))
+        self.values = mx.contiguous(self._trim(trim_size, self.values))
+        self._idx = self.keys.shape[2]
+        return True
+
     def state_checkpoint(self, positions: List[int], force: bool = False):
         max_checkpoints = _state_checkpoint_max()
         if max_checkpoints <= 0 or self.keys is None or len(positions) != 1:
             return
         position = positions[0]
-        last = self._checkpoints[-1][0] if self._checkpoints else 0
-        if position <= last:
-            return
-        if not force and position - last < _state_checkpoint_stride():
+        if not _window_checkpoint_due(self._checkpoints, position):
             return
         keys = self._temporal_order(self.keys)
         values = self._temporal_order(self.values)
-        self._checkpoints.append((position, mx.array(keys), mx.array(values)))
-        _thin_checkpoints(self._checkpoints, max_checkpoints)
+        # A restore needs only the window: the next update keeps at most
+        # ``max_size`` columns of whatever it starts from (the trim
+        # ``compact_to_window`` performs), so a longer post-chunk buffer would
+        # be charged and retained for nothing.
+        excess = keys.shape[2] - self.max_size
+        if excess > 0:
+            keys = self._trim(excess, keys)
+            values = self._trim(excess, values)
+        _append_window_checkpoint(
+            self._checkpoints,
+            (position, mx.contiguous(mx.array(keys)), mx.contiguous(mx.array(values))),
+            max_checkpoints,
+        )
 
     def snap_trim_position(self, position: int) -> Optional[int]:
         if self.offset < self.max_size:
@@ -1655,6 +1830,12 @@ class RotatingKVCache(_BaseCache):
     def is_trimmable(self):
         return self.speculating or self.offset < self.max_size
 
+    def _drop_checkpoints_past_offset(self):
+        """A restore snapshot above the live position describes tokens the
+        cache no longer holds; once the cache regrows they would be stale."""
+        while self._checkpoints and self._checkpoints[-1][0] > self.offset:
+            self._checkpoints.pop()
+
     def trim(self, n):
         if not self.speculating:
             if self.offset >= self.max_size:
@@ -1664,6 +1845,7 @@ class RotatingKVCache(_BaseCache):
             n = min(self.offset, n)
             self.offset -= n
             self._idx -= n
+            self._drop_checkpoints_past_offset()
             return n
         recorded = sum((r[0] for r in self._rollbacks))
         if recorded < n:
@@ -1690,6 +1872,7 @@ class RotatingKVCache(_BaseCache):
                     self._update_concat(keys[..., :m, :], values[..., :m, :])
                 self._rollbacks.append((m, snap, keys, values))
             trimmed += take
+        self._drop_checkpoints_past_offset()
         return n
 
     def to_quantized(
@@ -3190,9 +3373,16 @@ class BatchQuantizedKVCache(_BaseCache):
         return drops
 
     def make_mask(self, N: int, return_array: bool = False, **kwargs):
-        return create_causal_mask(
+        mask = create_causal_mask(
             N, offset=self._idx, left_padding=self.left_padding, **kwargs
         )
+        if not any(v is not None for v in kwargs.values()):
+            # Plain causal + left padding: the quantized verify kernel may
+            # consume it without reading the array (qsdpa_verify_metal).
+            from .qsdpa_verify_metal import register_causal_mask
+
+            register_causal_mask(mask, self.left_padding)
+        return mask
 
     def empty(self):
         return self.keys is None
@@ -3611,6 +3801,8 @@ class BatchKVCache(_BaseCache):
             return self._fallback("string_mask")
         if mask is not None and mask.dtype != mx.bool_:
             return self._fallback("additive_mask")
+        if self.offset.shape[0] < 2:
+            return self._fallback("batch_one")
         groups = self._bucket_groups or self._build_attention_groups()
         if not groups:
             return None
@@ -4032,6 +4224,23 @@ class BatchKVCache(_BaseCache):
         max_length = max(lengths)
         if max_length == 0:
             return BatchKVCache([0] * len(caches))
+        if (
+            len(caches) == 1
+            and type(caches[0]) is KVCache
+            and caches[0].keys.shape[0] == caches[0].values.shape[0] == 1
+            and caches[0].keys.dtype == caches[0].values.dtype
+        ):
+            # A restored B=1 prefix is already the right batch shape.  Keep
+            # only its live span: the next append must allocate a private
+            # grown buffer, rather than writing into the APC source's spare
+            # capacity.  stop_gradient gives this batch its own descriptors.
+            source = caches[0]
+            cache = BatchKVCache([0])
+            cache.keys = mx.stop_gradient(source.keys[..., : source.offset, :])
+            cache.values = mx.stop_gradient(source.values[..., : source.offset, :])
+            cache.offset = mx.array([source.offset])
+            cache._idx = source.offset
+            return cache
         padding = [max_length - l for l in lengths]
         B = len(caches)
         H = max((c.keys.shape[1] for c in caches if c.keys is not None))
@@ -4078,6 +4287,14 @@ class BatchRotatingKVCache(_BaseCache):
         # ``from_state`` skips ``__init__``; a loaded cache has no pending
         # right padding either.
         instance._lengths = None
+        # Per-lane exact restore snapshots, in ``RotatingKVCache._checkpoints``
+        # form: ``[(position, keys, values), ...]`` for each batch row, where
+        # keys/values are that row's last ``min(position, max_size)`` tokens
+        # in temporal order.  Empty when no row has recorded any.
+        instance._checkpoints = []
+        # ``_offset`` when the newest snapshot was recorded: a trim below it
+        # could leave a row under one of its snapshot positions.
+        instance._checkpoint_fill = None
         return instance
 
     def __init__(self, max_size, left_padding: List[int]):
@@ -4225,6 +4442,80 @@ class BatchRotatingKVCache(_BaseCache):
             return self._update_in_place(keys, values)
         return self._update_concat(keys, values)
 
+    def compact_to_window(self) -> bool:
+        return _compact_batch_rotating_window(self)
+
+    def state_checkpoint(self, positions: List[int], force: bool = False):
+        """Record an exact per-row restore snapshot of each row's window.
+
+        The batch counterpart of ``RotatingKVCache.state_checkpoint`` (same
+        stride, count and thinning; ``force`` is ignored, see
+        ``_window_checkpoint_due``), called by prefill at chunk boundaries.
+        A wrapped sliding window cannot be trimmed, so these snapshots are
+        the only points inside a stored prompt that APCv2 can branch from;
+        ``extract`` hands a row's snapshots to its ``RotatingKVCache``.
+
+        A row is recorded only when its live window holds exactly the tokens
+        a cold prefill would hold at ``position``: its offset (net of pending
+        right padding) must equal ``position`` and it must hold at least
+        ``min(position, max_size)`` real columns.  Any other row is skipped,
+        never approximated.
+        """
+        max_checkpoints = _state_checkpoint_max()
+        if (
+            max_checkpoints <= 0
+            or self.keys is None
+            or self.speculating
+            or len(positions) != self.keys.shape[0]
+        ):
+            return
+        batch = self.keys.shape[0]
+        if len(self._checkpoints) != batch:
+            self._checkpoints = [[] for _ in range(batch)]
+        due = [
+            (i, int(position))
+            for i, position in enumerate(positions)
+            if _window_checkpoint_due(self._checkpoints[i], int(position))
+        ]
+        if not due:
+            return
+        if self.rotated:
+            keys = mx.roll(self.keys, -self._idx, axis=2)
+            values = mx.roll(self.values, -self._idx, axis=2)
+            end_column = keys.shape[2]
+        else:
+            (keys, values) = (self.keys, self.values)
+            end_column = self._idx
+        left_padding = self.left_padding.tolist()
+        offsets = self.offset.tolist()
+        lengths = None if self._lengths is None else self._lengths.tolist()
+        recorded = []
+        for i, position in due:
+            pending = 0 if lengths is None else max(0, offsets[i] - lengths[i])
+            end = end_column - pending
+            real = end - max(0, left_padding[i])
+            want = min(position, self.max_size)
+            if offsets[i] - pending != position or real < want or want <= 0:
+                continue
+            snapshot = (
+                position,
+                mx.contiguous(keys[i : i + 1, :, end - want : end]),
+                mx.contiguous(values[i : i + 1, :, end - want : end]),
+            )
+            _append_window_checkpoint(self._checkpoints[i], snapshot, max_checkpoints)
+            recorded.extend(snapshot[1:])
+        if recorded:
+            # Row slices of the live buffers would pin the whole batch (and
+            # alias buffers a later in-place update writes); schedule the
+            # copies now, without a host sync.
+            mx.async_eval(recorded)
+            self._checkpoint_fill = self._offset
+
+    def _checkpoint_lanes(self, batch: int):
+        if self._checkpoints:
+            return [list(lane) for lane in self._checkpoints]
+        return [[] for _ in range(batch)]
+
     def prepare(self, *, left_padding=None, lengths=None, right_padding=None):
         if left_padding is not None:
             if self.keys is not None:
@@ -4277,6 +4568,15 @@ class BatchRotatingKVCache(_BaseCache):
         self._offset -= n
         self._idx -= n
         self.offset -= n
+        if (
+            n > 0
+            and self._checkpoint_fill is not None
+            and self._offset < self._checkpoint_fill
+        ):
+            # Some row may now sit below a snapshot it recorded.  Rows are
+            # not tracked on the host, so drop them all (fail closed).
+            self._checkpoints = []
+            self._checkpoint_fill = None
         return n
 
     def trim_ragged(self, n, *, validate: bool = True):
@@ -4331,6 +4631,15 @@ class BatchRotatingKVCache(_BaseCache):
         In-place filter to keep just the given indices in the cache.
         """
         self._rollbacks.clear()
+        if self._checkpoints:
+            rows = (
+                batch_indices.tolist()
+                if isinstance(batch_indices, mx.array)
+                else list(batch_indices)
+            )
+            self._checkpoints = [self._checkpoints[int(i)] for i in rows]
+            if not any(self._checkpoints):
+                self._checkpoints = []
         if self.keys is not None:
             self.keys = self.keys[batch_indices]
             self.values = self.values[batch_indices]
@@ -4342,6 +4651,7 @@ class BatchRotatingKVCache(_BaseCache):
         In-place extend this cache with the other cache.
         """
         self._rollbacks.clear()
+        self._extend_checkpoints(other)
         if self.keys is None and other.keys is None:
             self.left_padding = mx.concatenate([self.left_padding, other.left_padding])
             self.offset = mx.concatenate([self.offset, other.offset])
@@ -4386,6 +4696,27 @@ class BatchRotatingKVCache(_BaseCache):
         )
         self._idx = max_idx
         self._offset = max(self._offset, other._offset)
+
+    def _extend_checkpoints(self, other):
+        """Concatenate both sides' per-row snapshots before ``extend``.
+
+        ``extend`` pads the shorter side on the left up to the larger
+        ``_offset``, which shifts that side's rows relative to ``_offset``;
+        the trim guard shifts with them.
+        """
+        mine = getattr(self, "_checkpoints", [])
+        theirs = getattr(other, "_checkpoints", [])
+        if mine or theirs:
+            self._checkpoints = self._checkpoint_lanes(
+                int(self.offset.shape[0])
+            ) + other._checkpoint_lanes(int(other.offset.shape[0]))
+        grown = max(self._offset, other._offset)
+        fills = [
+            fill + (grown - side._offset)
+            for side in (self, other)
+            if (fill := getattr(side, "_checkpoint_fill", None)) is not None
+        ]
+        self._checkpoint_fill = max(fills) if fills else None
 
     def _extract_rotating_state(
         self, idx, keys, values, offset, left_padding, _offset, cache_idx, rotated
@@ -4449,6 +4780,10 @@ class BatchRotatingKVCache(_BaseCache):
             # the row's ``state``, so schedule the history copies here, where
             # they are cut; otherwise the row pins every batch row.
             mx.async_eval(list(cache._rollbacks))
+        if idx < len(self._checkpoints):
+            # Snapshot arrays are row-private copies (see state_checkpoint).
+            cache._checkpoints = list(self._checkpoints[idx])
+            cache._drop_checkpoints_past_offset()
         return cache
 
     @classmethod
@@ -4481,6 +4816,12 @@ class BatchRotatingKVCache(_BaseCache):
         cache.offset = mx.array(offsets)
         cache._idx = keys.shape[2]
         cache._offset = keys.shape[2]
+        lanes = [list(getattr(c, "_checkpoints", ())) for c in caches]
+        if any(lanes):
+            cache._checkpoints = lanes
+            # Each row sits at or above its own snapshots; any trim at all
+            # before the batch grows past this point drops them.
+            cache._checkpoint_fill = cache._offset
         return cache
 
     def size(self):
@@ -4493,7 +4834,11 @@ class BatchRotatingKVCache(_BaseCache):
     def nbytes(self):
         if self.keys is None:
             return 0
-        return self.keys.nbytes + self.values.nbytes
+        total = self.keys.nbytes + self.values.nbytes
+        for lane in self._checkpoints:
+            for _, keys, values in lane:
+                total += keys.nbytes + values.nbytes
+        return total
 
 
 class BatchRotatingQuantizedKVCache(_BaseCache):
@@ -5192,7 +5537,7 @@ class PrefixIndex:
     @staticmethod
     def _exact_entry_serves(cache_entry, tokens: List[int]) -> bool:
         """Whether an exact entry can land strictly inside its own prompt."""
-        if can_trim_prompt_cache(cache_entry.prompt_cache):
+        if can_trim_prompt_cache_at(cache_entry.prompt_cache, 1):
             return True
         landing = achievable_trim(cache_entry.prompt_cache, 1)
         return landing is not None and landing[1] < len(tokens)
@@ -5218,7 +5563,7 @@ class PrefixIndex:
             return (_copy_prompt_cache_for_restore(cache_entry.prompt_cache), [])
         if result.exact is not None:
             cache_entry = self._trie.get(result.model, result.exact)
-            if can_trim_prompt_cache(cache_entry.prompt_cache):
+            if can_trim_prompt_cache_at(cache_entry.prompt_cache, 1):
                 cache = _copy_prompt_cache_for_restore(cache_entry.prompt_cache)
                 trim_prompt_cache(cache, 1)
                 return (cache, tokens[-1:])
@@ -5235,7 +5580,7 @@ class PrefixIndex:
             cache_entry = self._trie.get(result.model, result.longer)
             prefix = min(len(tokens) - 1, result.common_prefix)
             num_to_trim = len(result.longer) - prefix
-            if can_trim_prompt_cache(cache_entry.prompt_cache):
+            if can_trim_prompt_cache_at(cache_entry.prompt_cache, num_to_trim):
                 cache = _copy_prompt_cache_for_restore(cache_entry.prompt_cache)
                 trim_prompt_cache(cache, num_to_trim)
                 return (cache, tokens[prefix:])
@@ -5293,9 +5638,18 @@ class PrefixIndex:
                 removed_entries.append(("replaced", model, tokens, prev))
         self._lru.push(model, tokens, cache_type)
         if prune_prefixes and can_trim_prompt_cache(prompt_cache) and sidecar is None:
+            def subsumed_prefix(prefix_len, older_entry):
+                return (
+                    (not callable(prune_prefixes)
+                     or prune_prefixes(prefix_len, older_entry))
+                    and can_trim_prompt_cache_at(
+                        prompt_cache, len(tokens) - prefix_len
+                    )
+                )
+
             for prefix_len, entry in self._trie.pop_prefixes(
                 model, tokens,
-                predicate=prune_prefixes if callable(prune_prefixes) else None,
+                predicate=subsumed_prefix,
             ):
                 self._n_bytes -= entry.nbytes
                 self._n_bytes_by_type[entry.cache_type] -= entry.nbytes

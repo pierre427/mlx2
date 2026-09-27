@@ -2,6 +2,7 @@
 # Adapted from mlx-lm-unified; see docs/PROVENANCE.md and provenance/flashnext.json.
 from __future__ import annotations
 import logging
+import os
 from functools import lru_cache
 from threading import Lock
 from typing import Any, Optional
@@ -25,9 +26,57 @@ from .qwen4_fused_gdn import (
     probe_qwen4_fused_gdn_decode,
 )
 
+from .import_env import snapshot as _import_env_snapshot
+
+_import_env_snapshot(__name__)
+
 logger = logging.getLogger(__name__)
+# Why the admitted bound was 8 (mlx-lm-unified 13638af, 2026-09-02): not a
+# resource limit.  Every threadgroup array is sized by DK/DV; ``S`` is a
+# template constant that sets the token loop's trip count and the leading
+# extent of the device-memory outputs (snapshots or the compact replay tape),
+# so each width is its own specialization with the same per-token arithmetic.
+# The kernel was gated bit-exact to 17 on Metal, but on the prompt-lookup
+# route (always width 17, snapshot rollback) widening measured no decode gain
+# for +4.3 GiB peak, so production stayed at 8.  Copy drafts inside self-MTP
+# verify 9..15 wide with ~90% acceptance and the compact tape costs ~29 KB per
+# step per layer, so the bound is now selectable (2..MAX_VERIFY_WIDTH_PROVEN)
+# through MLX_QWEN4_FUSED_GDN_VERIFY_MAX_STEPS, or ``set_verify_max_steps`` in
+# lab harnesses.  Re-gated on Metal 2..17: tests/test_qwen4_fused_gdn_verify_metal.py.
 MAX_VERIFY_WIDTH_PROVEN = 17
-MAX_VERIFY_STEPS = 8
+DEFAULT_VERIFY_STEPS = 8
+
+
+def verify_max_steps_from_env(environ=None) -> int:
+    raw = (os.environ if environ is None else environ).get(
+        "MLX_QWEN4_FUSED_GDN_VERIFY_MAX_STEPS"
+    )
+    if raw in (None, ""):
+        return DEFAULT_VERIFY_STEPS
+    try:
+        value = int(raw)
+    except ValueError:
+        raise ValueError(
+            f"MLX_QWEN4_FUSED_GDN_VERIFY_MAX_STEPS={raw!r} is not an integer"
+        ) from None
+    if not 2 <= value <= MAX_VERIFY_WIDTH_PROVEN:
+        raise ValueError(
+            f"MLX_QWEN4_FUSED_GDN_VERIFY_MAX_STEPS={value} outside 2..{MAX_VERIFY_WIDTH_PROVEN}"
+        )
+    return value
+
+
+MAX_VERIFY_STEPS = verify_max_steps_from_env()
+
+
+def set_verify_max_steps(value: int) -> int:
+    """Set the admitted verify width (2..MAX_VERIFY_WIDTH_PROVEN); returns the old one."""
+    global MAX_VERIFY_STEPS
+    value = int(value)
+    if not 2 <= value <= MAX_VERIFY_WIDTH_PROVEN:
+        raise ValueError(f"verify max steps {value} outside 2..{MAX_VERIFY_WIDTH_PROVEN}")
+    previous, MAX_VERIFY_STEPS = MAX_VERIFY_STEPS, value
+    return previous
 
 
 def admit_qwen4_fused_gdn_verify(

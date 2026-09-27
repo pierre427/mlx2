@@ -119,6 +119,32 @@ def test_kept_lazy_tensors_defer_their_file_s_eviction(shards, trace):
     assert len(weights) == 6
 
 
+def test_pruned_lazy_tensors_allow_mixed_shard_eviction(shards, trace):
+    weights = ubc.load_shards_evicting(
+        shards, keep_lazy=lambda name: name.endswith(".bias"), prune_lazy=True
+    )
+
+    assert len(weights) == 3
+    assert all(name.endswith(".weight") for name in weights)
+    assert trace == [
+        event for shard in shards for event in (("eval", ""), ("evict", str(shard)))
+    ]
+
+
+def test_fully_pruned_shards_do_not_eval_or_evict(shards, trace):
+    weights = ubc.load_shards_evicting(
+        shards, keep_lazy=lambda name: True, prune_lazy=True
+    )
+
+    assert weights == {}
+    assert trace == []
+
+
+def test_prune_lazy_requires_predicate(shards):
+    with pytest.raises(ValueError, match="keep_lazy"):
+        ubc.load_shards_evicting(shards, prune_lazy=True)
+
+
 def test_keep_lazy_without_a_deferred_list_is_refused(shards):
     """Silently dropping the held paths would leak the mirror we came to kill."""
     with pytest.raises(ValueError, match="deferred"):

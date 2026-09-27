@@ -548,3 +548,68 @@ def test_real_tokenizer_tool_grammars_take_the_special_message_header(
         assert json.loads(only["tool_calls"][0]["function"]["arguments"]) == {"city": "Paris"}
     else:
         assert events == [{"content": "Hello there."}]
+
+
+def _finish(text, split, finish_reason, **kwargs):
+    parser = MuseOutputParser(chat=True, tools=TOOLS, **kwargs)
+    events = parser.push(text[:split]) + parser.finish(text[split:], finish_reason)
+    content = "".join(e.get("content", "") for e in events)
+    reasoning = "".join(e.get("reasoning_content", "") for e in events)
+    tool_calls = [call for event in events for call in event.get("tool_calls", ())]
+    return parser, content, reasoning, tool_calls
+
+
+@pytest.mark.parametrize("cut", [len("<atem:function_calls>"), 30, len(ATEM) // 2, len(ATEM)])
+def test_max_tokens_inside_an_atem_call_drops_the_partial_call(cut):
+    # A length finish is a requested stop, not malformed output: drop the
+    # unclosed block (as OutputParser and North do); EOS still fails closed.
+    text = (
+        "to=self<|message|>plan<|eom|>to=user<|message|>Sure.<|eom|>"
+        "to=functions.echo<|message|>" + ("<atem:function_calls>" + ATEM)[:cut]
+    )
+    for split in range(len(text) + 1):
+        parser, content, reasoning, tool_calls = _finish(text, split, "length")
+        assert (content, reasoning, tool_calls) == ("Sure.", "plan", [])
+        assert parser.tool_count == 0
+        if cut > len("<atem:function_calls>"):
+            with pytest.raises(ValueError, match="incomplete"):
+                _finish(text, split, "stop")
+
+
+@pytest.mark.parametrize("split", [0, len("to=functions.echo<|message|><atem:function_calls>")])
+def test_eos_after_empty_atem_opener_fails_closed(split):
+    text = "to=functions.echo<|message|><atem:function_calls>"
+    with pytest.raises(ValueError, match="incomplete ATEM tool call"):
+        _finish(text, split, "stop")
+    parser, content, reasoning, calls = _finish(text, split, "length")
+    assert (content, reasoning, calls, parser.tool_count) == ("", "", [], 0)
+
+
+def test_max_tokens_inside_a_channel_header_is_dropped():
+    text = "to=user<|message|>Sure.<|eom|>to=functions.echo<|mess"
+    for split in range(len(text) + 1):
+        _, content, _, tool_calls = _finish(text, split, "length")
+        assert (content, tool_calls) == ("Sure.", [])
+        with pytest.raises(ValueError, match="incomplete"):
+            _finish(text, split, "stop")
+
+
+def test_max_tokens_after_a_complete_atem_call_keeps_that_call():
+    text = (
+        "to=functions.echo<|message|><atem:function_calls>" + ATEM
+        + "</atem:function_calls><|eom|>to=functions.echo<|message|>"
+        "<atem:function_calls>" + ATEM[:40]
+    )
+    for split in range(len(text) + 1):
+        parser, content, _, tool_calls = _finish(text, split, "length")
+        assert content == "" and parser.tool_count == 1
+        assert json.loads(tool_calls[0]["function"]["arguments"]) == {"text": "  a<b  ", "count": 2}
+
+
+def test_client_stop_string_inside_an_atem_call_drops_the_partial_call():
+    # Muse matches stop strings over the raw stream, markup included; a stop
+    # that lands inside a call is a requested stop, as in OutputParser.
+    text = "to=functions.echo<|message|><atem:function_calls>" + ATEM
+    parser, events = collect(text, tools=TOOLS, stops=["count"])
+    assert parser.stopped and parser.tool_count == 0
+    assert not any("tool_calls" in event for event in events)

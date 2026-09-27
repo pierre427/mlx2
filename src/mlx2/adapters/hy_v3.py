@@ -1,0 +1,131 @@
+"""HY V3 full and REAP-pruned ordinary text decode candidates."""
+
+from __future__ import annotations
+
+import os
+from pathlib import Path
+
+from ..contracts import Capability, ModelDescriptor, StatePlane
+from .ordinary_artifact import inspect_indexed_artifact
+from .ordinary_text import OrdinaryTextAdapter
+
+CACHE_LAYOUT = "hy-v3-full-kv-v1"
+
+
+def descriptor_for(*, reap: bool) -> ModelDescriptor:
+    return ModelDescriptor(
+        model_type="hy_v3", family="hy-v3", variant="reap50-4bit-ordinary" if reap else "6bit-ordinary",
+        state_planes=frozenset({StatePlane.ATTENTION_KV, StatePlane.RNG,
+                                StatePlane.TRANSCRIPT}),
+        capabilities=frozenset({Capability.TEXT, Capability.STREAMING,
+                                Capability.CONTINUOUS_BATCH, Capability.PREFIX_REUSE,
+                                Capability.APC_V2}),
+        cache_layout=CACHE_LAYOUT,
+        metadata={"execution": "mlx2.adapters.hy_v3.HYV3Adapter",
+                  "qualification": "pending", "scope": "text-only", "mtp": "absent"},
+    )
+
+
+def inspect_artifact(model_path: str | Path) -> dict:
+    artifact = inspect_indexed_artifact(model_path)
+    config = artifact["config"]
+    if config.get("model_type") != "hy_v3":
+        raise ValueError("artifact is not HY V3")
+    expected = {"hidden_size": 4096, "num_hidden_layers": 80,
+                "intermediate_size": 13312, "num_attention_heads": 64,
+                "num_key_value_heads": 8, "head_dim": 128,
+                "num_experts_per_tok": 8, "num_shared_experts": 1,
+                "expert_hidden_dim": 1536, "first_k_dense_replace": 1,
+                "qk_norm": True, "route_norm": True,
+                "moe_router_use_sigmoid": True,
+                "moe_router_enable_expert_bias": True}
+    if any(config.get(key) != value for key, value in expected.items()):
+        raise ValueError("HY V3 topology mismatch")
+    n_experts = config.get("num_experts")
+    reap = n_experts == 96 and config.get("mtp_num_experts") == 192
+    if not reap and (n_experts != 192 or config.get("mtp_num_experts") not in (None, 192)):
+        raise ValueError("HY V3 expert topology is neither full nor REAP50")
+    quant = config.get("quantization")
+    if not isinstance(quant, dict) or any(quant.get(k) != v for k, v in
+          {"group_size": 64, "bits": 4 if reap else 6, "mode": "affine"}.items()):
+        raise ValueError("HY V3 quantization does not match expert topology")
+    weights = artifact["weight_map"]
+    required = {"model.embed_tokens.weight", "model.norm.weight", "lm_head.weight"}
+    for i in range(80):
+        prefix = f"model.layers.{i}."
+        required.update({prefix + "self_attn.q_proj.weight",
+                         prefix + "self_attn.k_proj.weight",
+                         prefix + "self_attn.v_proj.weight",
+                         prefix + "self_attn.o_proj.weight"})
+        if i:
+            required.update({prefix + "mlp.router.gate.weight",
+                             prefix + "mlp.switch_mlp.gate_proj.weight",
+                             prefix + "mlp.switch_mlp.up_proj.weight",
+                             prefix + "mlp.switch_mlp.down_proj.weight"})
+        else:
+            required.add(prefix + "mlp.gate_proj.weight")
+    if not required <= weights.keys():
+        raise ValueError("HY V3 ordinary trunk tensors are incomplete")
+    mtp_count = sum(k.startswith(("mtp.", "model.layers.80.")) for k in weights)
+    if reap and mtp_count == 0:
+        raise ValueError("HY V3 REAP50 artifact is missing its declared sidecar")
+    artifact.update(reap=reap, mtp_tensor_count=mtp_count, has_mtp=False)
+    return artifact
+
+
+def configure_environment() -> dict[str, str]:
+    profile = {"HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1",
+               "MLX_ENABLE_TF32": "0", "MLX_LM_COMPILED_DECODE": "0"}
+    for name in tuple(os.environ):
+        if name.startswith(("MLX_QWEN", "MLX_LM_", "MLXUAG_", "MLX_GDN_")):
+            del os.environ[name]
+    os.environ.update(profile)
+    return profile
+
+
+class HYV3Adapter(OrdinaryTextAdapter):
+    descriptor = descriptor_for(reap=False)
+    artifact_inspector = staticmethod(inspect_artifact)
+    profile = "hy-v3-apcv2-ordinary"
+
+    def __init__(self, model_path: str, *, execution_policy=None):
+        if execution_policy:
+            raise ValueError("HY V3 ordinary decode accepts no model execution policy")
+        artifact = inspect_artifact(model_path)
+        self.descriptor = descriptor_for(reap=artifact["reap"])
+        self.identity = artifact["identity"]
+        self.layout = CACHE_LAYOUT
+        self.environment = configure_environment()
+        path = Path(self.identity["path"])
+        import mlx.core as mx
+        from mlx import nn
+        from transformers import AutoTokenizer
+        from ..runtime.models.hy_v3 import Model, ModelArgs
+        from ..runtime.tokenizer_utils import BPEStreamingDetokenizer, TokenizerWrapper
+        from ..runtime.ubc_evict import load_shards_evicting
+
+        config = artifact["config"]
+        self.model = Model(ModelArgs.from_dict(config))
+        files = [path / name for name in sorted(set(artifact["weight_map"].values()))]
+        weights = self.model.sanitize(load_shards_evicting(files))
+
+        def predicate(name, module):
+            override = config["quantization"].get(name)
+            if isinstance(override, dict):
+                return override
+            return hasattr(module, "to_quantized") and f"{name}.scales" in weights
+
+        quant = config["quantization"]
+        nn.quantize(self.model, group_size=quant["group_size"], bits=quant["bits"],
+                    mode=quant["mode"], class_predicate=predicate)
+        self.model.load_weights(list(weights.items()), strict=True)
+        self.model.eval()
+        mx.eval(self.model.parameters())
+        weights.clear()
+        mx.clear_cache()
+        tokenizer = AutoTokenizer.from_pretrained(path, local_files_only=True,
+                                                  trust_remote_code=False)
+        self.tokenizer = TokenizerWrapper(tokenizer,
+                                          detokenizer_class=BPEStreamingDetokenizer,
+                                          eos_token_ids=[int(config["eos_token_id"])])
+        self.max_context = int(config["max_position_embeddings"])

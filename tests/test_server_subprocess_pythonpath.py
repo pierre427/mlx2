@@ -48,7 +48,16 @@ def test_spawner_never_inherits_the_ambient_pythonpath(name):
             f"{name} spawns a subprocess with the inherited environment; the "
             f"server would import mlx2 from whatever checkout is on PYTHONPATH"
         )
-    assert "PYTHONPATH" in source, f"{name} does not pin the child's PYTHONPATH"
+    # Pinning through a shared helper counts: server_env() in these modules
+    # puts this checkout's src first on the child's PYTHONPATH.
+    helper = re.search(
+        r"from (qualify_interior_checkpoints|smoke_external_route_serving) "
+        r"import [^\n]*\bserver_env\b",
+        source,
+    )
+    assert "PYTHONPATH" in source or helper, (
+        f"{name} does not pin the child's PYTHONPATH"
+    )
 
 
 def test_external_route_smoke_puts_this_checkout_first(monkeypatch):

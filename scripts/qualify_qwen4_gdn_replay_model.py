@@ -11,7 +11,9 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import statistics
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -19,17 +21,55 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
+HOST_LOCK = Path("/Users/Shared/mlxuag/gpu.lock/owner.json")
 
 
-def _require_lock() -> list[dict]:
-    paths = (
-        Path("/tmp/gpu.lock/owner.json"),
-        Path("/Users/Shared/mlxuag/gpu.lock/owner.json"),
-    )
-    missing = [str(path) for path in paths if not path.is_file()]
-    if missing:
-        raise SystemExit(f"GPU qualification requires both lock receipts; missing {missing}")
-    return [json.loads(path.read_text()) for path in paths]
+def _require_lock(task_id: str, *, now: float | None = None) -> dict:
+    """Require this process's cpg_job parent, host lock, and live lease receipt."""
+    now = time.time() if now is None else now
+    if not task_id or not HOST_LOCK.is_file():
+        raise RuntimeError("GPU qualification requires a CPG task and host lock")
+    owner = json.loads(HOST_LOCK.read_text())
+    if not isinstance(owner, dict) or owner.get("agent") != "cpg_job":
+        raise RuntimeError("host GPU lock is not owned by cpg_job")
+    if type(owner.get("pid")) is not int or owner["pid"] != os.getppid():
+        raise RuntimeError("host GPU lock belongs to another process")
+    if owner.get("cpg_task") != task_id:
+        raise RuntimeError("host GPU lock belongs to another CPG task")
+    if any(not isinstance(owner.get(key), str) or not owner[key]
+           for key in ("agent_id", "cpg_session", "cpg_worker", "log")):
+        raise RuntimeError("host GPU lock lacks CPG identity")
+    generation = owner.get("cpg_generation")
+    if type(generation) is not int or generation < 1:
+        raise RuntimeError("host GPU lock lacks a positive CPG generation")
+    radio_path = Path(owner["log"] + ".radio.json")
+    radio = json.loads(radio_path.read_text())
+    if not isinstance(radio, dict) or radio.get("agent_id") != owner["agent_id"]:
+        raise RuntimeError("CPG radio receipt has another owner")
+    if "release_task" in radio or "complete_worker" in radio:
+        raise RuntimeError("CPG radio receipt is already closed")
+    claim = radio.get("claim_task")
+    if not isinstance(claim, dict) or claim.get("claimed") is not True:
+        raise RuntimeError("CPG radio receipt has no successful claim")
+    if (claim.get("task_id") != task_id
+            or claim.get("lease_generation") != generation
+            or claim.get("owner_agent_id") != owner["agent_id"]):
+        raise RuntimeError("CPG claim does not match the host lock")
+    lease = radio.get("renew_lease", claim)
+    if (not isinstance(lease, dict)
+            or lease.get("task_id") != task_id
+            or lease.get("lease_generation") != generation
+            or (lease is not claim and lease.get("renewed") is not True)
+            or type(lease.get("lease_expires_at")) not in (int, float)
+            or lease["lease_expires_at"] <= now):
+        raise RuntimeError("CPG GPU lease receipt is mismatched or expired")
+    return {"host_lock": owner, "radio_claim": claim,
+            "radio_renewal": radio.get("renew_lease")}
+
+
+def _git_head() -> str:
+    return subprocess.run(["git", "rev-parse", "HEAD"], cwd=ROOT, check=True,
+                          capture_output=True, text=True).stdout.strip()
 
 
 def _source_hash() -> str:
@@ -144,6 +184,7 @@ def main() -> int:
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--widths", default="3,4,8")
     parser.add_argument("--repeats", type=int, default=3)
+    parser.add_argument("--cpg-lease", required=True, help="exact CPG GPU task ID held by cpg_job")
     parser.add_argument(
         "--prompt",
         default="Explain why exact transactional state matters in speculative decoding.",
@@ -154,9 +195,12 @@ def main() -> int:
         help="compact arm uses the device-count reconstruct kernel",
     )
     args = parser.parse_args()
+    widths = list(map(int, args.widths.split(",")))
+    if not widths or any(width < 2 for width in widths) or args.repeats < 1:
+        parser.error("widths must be >=2 and repeats must be >=1")
     global _DYNAMIC_ACCEPT
     _DYNAMIC_ACCEPT = args.dynamic_accept
-    locks = _require_lock()
+    locks = _require_lock(args.cpg_lease)
 
     import mlx.core as mx
     from mlx2.adapters.flash_next import FlashNextAdapter
@@ -194,7 +238,6 @@ def main() -> int:
             adapter.environment.get("MLX_QWEN4_FUSED_GDN_REPLAY_ROLLBACK") == "1"
             and initial_replay_modes == ["compact"]
         )
-        widths = list(map(int, args.widths.split(",")))
         probes = {
             str(width): {
                 "snapshot": probe_qwen4_fused_gdn_verify(mx.bfloat16, width),
@@ -388,6 +431,8 @@ def main() -> int:
                 "passed": profile_default_selected,
             },
             "source_hash": _source_hash(),
+            "script_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+            "git_head": _git_head(),
             "model": str(args.model.resolve()),
             "model_identity": adapter.identity,
             "device": mx.device_info(),

@@ -21,7 +21,9 @@ from .models.cache import (
     KVCache,
     RotatingKVCache,
     TokenBuffer,
+    compact_prompt_cache_windows,
     record_state_checkpoints,
+    release_window_checkpoints,
 )
 from .sample_utils import LaneRNG, draw_key
 from .state_boundaries import BoundaryPurpose, StateBoundary
@@ -45,6 +47,16 @@ ALLOCATOR_RECLAIM_MTP_TOKEN_INTERVAL = 256
 _COUNTER_MAX = (1 << 63) - 1
 _PERSISTENT_DECODE_INPUTS = "_mlx2_persistent_decode_inputs"
 generation_stream = mx.new_thread_local_stream(mx.default_device())
+
+
+def _invalid_output_reason(token: int, logprobs: mx.array) -> Optional[str]:
+    """Validate a sampled token before it can enter history or a response."""
+    vocab = int(logprobs.shape[-1])
+    if token < 0 or token >= vocab:
+        return f"sampled token {token} is outside vocabulary of size {vocab}"
+    if not bool(mx.isfinite(logprobs[token]).item()):
+        return f"sampled token {token} has non-finite log probability"
+    return None
 
 
 def _bump_bounded_counter(counters, key, amount=1):
@@ -574,6 +586,12 @@ class PromptProcessingBatch:
                     ),
                     np.asarray(tokens[:, context_start:n_to_process]),
                 )
+            # Trim sliding windows to their bound before the chunk is
+            # evaluated: an isolated multimodal prompt is one chunk of the
+            # whole prompt, and without this the APCv2 prompt boundary
+            # extracted after prefill kept full-prompt-length sliding K/V for
+            # the life of the request.  Exact.
+            compact_prompt_cache_windows(self.prompt_cache)
             mx.eval([c.state for c in self.prompt_cache])
             processed += n_to_process
             record_state_checkpoints(
@@ -585,6 +603,7 @@ class PromptProcessingBatch:
         if max_padding > 0:
             for c in self.prompt_cache:
                 c.finalize()
+            compact_prompt_cache_windows(self.prompt_cache)
             mx.eval([c.state for c in self.prompt_cache])
             mx.clear_cache()
         record_state_checkpoints(self.prompt_cache, totals, force=True)
@@ -728,6 +747,7 @@ class GenerationBatch:
         self._token_context = [TokenBuffer(t) for t in tokens]
         self._num_tokens = [0] * len(self.uids)
         self._matcher_states = [m.make_state() for m in stop_matchers]
+        self._lane_failures = []
         if self.uids:
             self._step()
 
@@ -779,6 +799,7 @@ class GenerationBatch:
         self._matcher_states.extend(batch._matcher_states)
         self.route_receipts.extend(batch.route_receipts)
         self.lane_rngs.extend(batch.lane_rngs)
+        self._lane_failures.extend(batch._lane_failures)
 
     def _residual_steer(self, inputs):
         """Assemble this step's per-lane residual steering, if any lane asks.
@@ -849,6 +870,37 @@ class GenerationBatch:
         Returns:
             Tuple of token list and logprobs list.
         """
+        if self._next_logprobs:
+            # A prior sample is about to become this forward's input and the
+            # response returned by this step.  Filter corrupt rows first;
+            # constructor-time filtering would change the prefill handoff's
+            # expected width before its prompt responses are assembled.
+            vocab = int(self._next_logprobs[0].shape[-1])
+            safe_ids = mx.minimum(self._next_tokens.astype(mx.uint32), vocab - 1)
+            selected_finite = mx.isfinite(
+                mx.take_along_axis(
+                    mx.stack(self._next_logprobs), safe_ids[:, None], axis=-1
+                )[:, 0]
+            )
+            mx.eval(self._next_tokens, selected_finite)
+            keep = []
+            for i, (token, finite) in enumerate(
+                zip(self._next_tokens.tolist(), selected_finite.tolist())
+            ):
+                if token < 0 or token >= vocab:
+                    reason = f"sampled token {token} is outside vocabulary of size {vocab}"
+                elif not finite:
+                    reason = f"sampled token {token} has non-finite log probability"
+                else:
+                    reason = None
+                if reason is None:
+                    keep.append(i)
+                else:
+                    self._lane_failures.append({"uid": self.uids[i], "reason": reason})
+            if len(keep) != len(self.uids):
+                self.filter(keep)
+            if not self.uids:
+                return ([], [])
         self._current_tokens = self._next_tokens
         self._current_logprobs = self._next_logprobs
         inputs = self._current_tokens
@@ -922,6 +974,10 @@ class GenerationBatch:
         for sti, ti in zip(self.tokens, inputs):
             sti.append(ti)
         return (inputs, self._current_logprobs)
+
+    def take_lane_failures(self):
+        failures, self._lane_failures = self._lane_failures, []
+        return failures
 
     def extract_cache(self, idx: int) -> List[Any]:
         return [c.extract(idx) for c in self.prompt_cache]
@@ -2352,6 +2408,11 @@ class MTPGenerationBatch:
         self._normalize_empty_segmented_admission()
 
     def _emit_initial(self):
+        for output in self._initial_outputs:
+            if output is not None:
+                reason = _invalid_output_reason(int(output.token), output.logprobs)
+                if reason is not None:
+                    raise RuntimeError(f"self-MTP model output invalid: {reason}")
         responses = []
         terminal = []
         last = {}
@@ -2497,6 +2558,12 @@ class MTPGenerationBatch:
             responses = []
             last = {}
             for i, outputs in enumerate(proposal.outputs):
+                for output in outputs:
+                    reason = _invalid_output_reason(int(output.token), output.logprobs)
+                    if reason is not None:
+                        raise RuntimeError(
+                            f"self-MTP model output invalid for uid {self.uids[i]}: {reason}"
+                        )
                 emitted = 0
                 is_terminal = False
                 for output in outputs:
@@ -5686,6 +5753,10 @@ class BatchGenerator:
                     "target_cache": target_cache,
                     "committed_only": True,
                 }
+            if exact_prompt_boundary is None:
+                # Each boundary now owns its lane's sliding-window restore
+                # snapshots; decode does not need a second copy.
+                release_window_checkpoints(ready.prompt_cache)
             gen_batch = ready.generate(last_inputs)
             for i, p in enumerate(progress):
                 prompt_responses.append(
@@ -5886,6 +5957,15 @@ class BatchGenerator:
             if response.finish_reason:
                 self._release_cache_capsule_uid(response.uid)
         return result
+
+    def take_lane_failures(self):
+        """Transfer ordinary decode failures to the serving executor."""
+        failures = []
+        for batch in (self._generation_batch, self._plain_fallback_batch):
+            take = getattr(batch, "take_lane_failures", None)
+            if take is not None:
+                failures.extend(take())
+        return failures
 
     def _observe_adaptive_mtp_responses(self, responses):
         """Publish bounded engagement evidence from completed cohort receipts."""

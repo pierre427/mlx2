@@ -351,12 +351,34 @@ class TextModel(nn.Module):
             ".q_norm.weight",
             ".k_norm.weight",
         )
+        # The +1 fold is decided per group: the layout trigger decides (and
+        # the pooled check verifies) the trunk, and every MTP-head norm is
+        # decided on its own evidence, because converters such as oQ skip the
+        # fold on some head norms only. Ambiguity raises (see norm_repair).
+        from ...adapters.norm_repair import resolve_norm_convention
+
+        self.norm_convention = resolve_norm_convention(
+            weights, fold_suffixes=norm_keys, trunk_raw=should_shift_norm_weights
+        )
+        # After the fold (done in the stored float32), round float32 norm
+        # gammas to the compute dtype: a float32 gamma makes rms_norm return
+        # float32 and promotes the residual stream and KV cache (CRACK
+        # conversions). GDN A_log/dt_bias/linear_attn.norm do not promote and
+        # stay as stored. See dtype_normalize.
+        from .dtype_normalize import normalize_norm_dtypes, resolve_compute_dtype
+
+        self.compute_dtype = resolve_compute_dtype(
+            getattr(self.args, "dtype", None), weights
+        )
+        # A dict attribute would join the nn.Module parameter tree.
+        object.__setattr__(
+            self,
+            "dtype_normalization",
+            normalize_norm_dtypes(weights, norm_keys, self.compute_dtype),
+        )
         for k, v in weights.items():
             if "conv1d.weight" in k and v.shape[-1] != 1:
                 weights[k] = v.moveaxis(2, 1)
-            if has_unsanitized_conv1d and any((k.endswith(sfx) for sfx in norm_keys)):
-                if v.ndim == 1:
-                    weights[k] = v + 1.0
         return weights
 
     @property

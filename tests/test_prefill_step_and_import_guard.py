@@ -63,7 +63,9 @@ def _engine_settings(monkeypatch, adapter_step, **overrides):
         def close(self):
             pass
 
-    if adapter_step is not None:
+    if adapter_step == "decline":
+        Adapter.prefill_step_default = lambda self: None
+    elif adapter_step is not None:
         Adapter.prefill_step_default = lambda self: adapter_step
     monkeypatch.setattr(serving, "runtime_identity", lambda: {"source_sha256": "fake"})
     monkeypatch.setattr(memory, "execution_headroom", lambda: 100 * 2**30)
@@ -133,3 +135,54 @@ def test_flash_next_profile_enables_fused_gdn_prefill(monkeypatch, tmp_path):
     monkeypatch.setattr(os, "environ", dict(os.environ))
     profile = flash_next.configure_environment(tmp_path)
     assert profile["MLX_QWEN4_FUSED_GDN_PREFILL"] == "1"
+
+
+def test_flash_next_subclasses_without_a_policy_defer_to_the_engine(monkeypatch):
+    # Qwen3.8/3.6 dense and Nemotron inherit FlashNextAdapter but carry no
+    # FlashNextPolicy: the inherited prefill_step_default must not raise
+    # (it crashed every such model's generation worker at startup).
+    from mlx2.adapters.flash_next import FlashNextAdapter
+
+    class Subclass(FlashNextAdapter):
+        def __init__(self):  # no FlashNextPolicy, like Qwen3827BAdapter
+            pass
+
+    assert Subclass().prefill_step_default() is None
+
+
+def test_engine_keeps_its_default_when_the_adapter_declines(monkeypatch):
+    settings, seen, engine = _engine_settings(monkeypatch, "decline")
+    assert engine.prefill_step == 2048 and seen["prefill_step"] == 2048
+    assert settings["prefill_step_source"] == "default"
+
+
+def test_serving_wires_weights_once_for_every_route(monkeypatch):
+    """The wired limit is raised after the adapter loads, not by one generator."""
+    from mlx2.runtime import weight_residency
+
+    calls = []
+    receipt = {"wired": True, "wired_limit_bytes": 123}
+    monkeypatch.setattr(
+        weight_residency, "wire_serving_weights", lambda: calls.append(1) or receipt
+    )
+    _settings, _seen, engine = _engine_settings(monkeypatch, None)
+    assert calls == [1]
+    assert engine.status()["weight_residency"] == receipt
+
+
+def test_wire_serving_weights_sets_the_working_set_limit(monkeypatch):
+    from mlx2.runtime import weight_residency
+
+    mx = weight_residency.mx
+    seen = []
+    monkeypatch.setattr(mx.metal, "is_available", lambda: True)
+    monkeypatch.setattr(
+        mx, "device_info", lambda: {"max_recommended_working_set_size": 1 << 30}
+    )
+    monkeypatch.setattr(mx, "set_wired_limit", lambda limit: seen.append(limit) or 0)
+    receipt = weight_residency.wire_serving_weights()
+    assert seen == [1 << 30]
+    assert receipt["wired"] and receipt["wired_limit_bytes"] == 1 << 30
+
+    monkeypatch.setattr(mx.metal, "is_available", lambda: False)
+    assert weight_residency.wire_serving_weights()["wired"] is False

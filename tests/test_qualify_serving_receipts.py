@@ -2,6 +2,7 @@ import importlib.util
 import hashlib
 import math
 import json
+import copy
 from types import SimpleNamespace
 from pathlib import Path
 
@@ -41,10 +42,20 @@ def test_preflight_receipt_is_bound_to_git_runtime_tests_and_harness(tmp_path):
         identity_fn=lambda: identity,
     )
     assert receipt["passed"] and receipt["schema"] == qualify.PREFLIGHT_SCHEMA
+    assert receipt["returncode"] == receipt["guard_returncode"] == 0
+    assert receipt["test_command"] != receipt["guard_test_command"]
     evidence = qualify.validate_preflight_receipt(
         path, identity["runtime"], identity_fn=lambda: identity
     )
     assert evidence["passed"] and evidence["identity"] == identity
+    assert evidence["guard_test_command"] == receipt["guard_test_command"]
+
+
+def test_preflight_identity_binds_pytest_configuration():
+    identity = qualify.preflight_identity(runtime_identity_fn=lambda: {"source_sha256": "test"})
+    assert identity["pytest_config_sha256"] == hashlib.sha256(
+        (ROOT / "pyproject.toml").read_bytes()
+    ).hexdigest()
 
 
 def test_unimplemented_generic_http_gates_are_machine_visible():
@@ -115,8 +126,252 @@ def test_preflight_receipt_must_have_run_the_full_unit_suite(tmp_path, pytest_ar
         full, identity["runtime"], identity_fn=lambda: identity
     )
     # The serving receipt's unit_tests evidence names the command it trusts.
-    assert evidence["passed"] and evidence["test_command"] == ran[-1]
-    assert ran[-1][1:] == ["-m", "pytest"]
+    assert evidence["passed"] and evidence["test_command"] == ran[-2]
+    ordinary, guarded = qualify.preflight_test_commands()
+    assert ran[-2:] == [ordinary, guarded]
+    assert evidence["guard_test_command"] == guarded
+
+
+def test_preflight_guard_manifest_partitions_the_test_tree():
+    ordinary, guarded = qualify.preflight_test_commands()
+    guards = qualify.PREFLIGHT_IMPORT_GUARD_MODULES
+    assert guards and len(guards) == len(set(guards))
+    assert ordinary[1:3] == ["-m", "pytest"]
+    assert ordinary[3:] == [f"--ignore={module}" for module in guards]
+    assert guarded[1:] == ["-m", "pytest", "--noconftest", *guards]
+    assert all((ROOT / module).is_file() for module in guards)
+    assert "tests/test_qualify_serving_receipts.py" not in guards
+
+
+@pytest.mark.parametrize("mutation", ["ordinary_failed", "guard_failed", "guard_missing",
+                                      "guard_scoped", "ordinary_scoped"])
+def test_preflight_rejects_incomplete_or_failed_partition(tmp_path, mutation):
+    identity = {
+        "git": {"revision": "abc"}, "runtime": {"source_sha256": "runtime"},
+        "qualification_harness": {"sha256": "harness"}, "test_source_sha256": "tests",
+    }
+    path = tmp_path / "preflight.json"
+    ordinary, guarded = qualify.preflight_test_commands()
+    receipt = {
+        "schema": qualify.PREFLIGHT_SCHEMA, "passed": True, "identity": identity,
+        "test_command": ordinary, "guard_test_command": guarded,
+        "returncode": 0, "guard_returncode": 0,
+    }
+    if mutation == "ordinary_failed":
+        receipt["returncode"] = 1
+    elif mutation == "guard_failed":
+        receipt["guard_returncode"] = 1
+    elif mutation == "guard_missing":
+        receipt.pop("guard_test_command")
+    elif mutation == "guard_scoped":
+        receipt["guard_test_command"] = guarded[:-1]
+    else:
+        receipt["test_command"] = ordinary[:-1]
+    path.write_text(json.dumps(receipt))
+    with pytest.raises(AssertionError, match="full unit suite"):
+        qualify.validate_preflight_receipt(
+            path, identity["runtime"], identity_fn=lambda: identity
+        )
+
+
+def test_preflight_records_guard_failure_even_when_ordinary_passes(tmp_path):
+    identity = {
+        "git": {"revision": "abc"}, "runtime": {"source_sha256": "runtime"},
+        "qualification_harness": {"sha256": "harness"}, "test_source_sha256": "tests",
+    }
+    calls = []
+
+    def run(command, **kwargs):
+        calls.append((command, kwargs))
+        return SimpleNamespace(returncode=0 if len(calls) == 1 else 1,
+                               stdout="ordinary pass" if len(calls) == 1 else "guard fail",
+                               stderr="")
+
+    path = tmp_path / "failed.json"
+    with pytest.raises(AssertionError, match="import guards failed"):
+        qualify.write_preflight_receipt(path, run=run, identity_fn=lambda: identity)
+    receipt = json.loads(path.read_text())
+    assert receipt["passed"] is False and receipt["guard_returncode"] == 1
+    assert all(call[1]["env"]["PYTEST_DISABLE_PLUGIN_AUTOLOAD"] == "1" for call in calls)
+
+
+def _cross_host_case(tmp_path):
+    ordinary, guard = qualify.preflight_test_commands()
+    source_runtime = {"source_sha256": "source", "mlx_native_sha256": "m5"}
+    target_runtime = {"source_sha256": "source", "mlx_native_sha256": "m3"}
+    identity = {
+        "git": {"revision": "commit"},
+        "runtime": target_runtime,
+        "qualification_harness": qualify.qualification_harness_identity(),
+        "test_source_sha256": "test-tree",
+        "pytest_config_sha256": "config",
+    }
+    artifact_node = "tests/test_a.py::test_local_artifact"
+    guard_node = "tests/test_b.py::test_import_guard"
+    target_command = ["python", "-m", "pytest", "--noconftest", guard_node]
+    source = {
+        "host_id": "m5",
+        "identity": {**copy.deepcopy(identity), "runtime": copy.deepcopy(source_runtime)},
+        "suites": {
+            "ordinary": {"command": ordinary, "returncode": 0, "results": [
+                {"nodeid": artifact_node, "status": "passed"}]},
+            "guard": {"command": guard, "returncode": 0, "results": [
+                {"nodeid": guard_node, "status": "passed"}]},
+        },
+        "artifact_evidence": {artifact_node: "a" * 64},
+    }
+    target = {
+        "host_id": "m3", "identity": copy.deepcopy(identity),
+        "artifact": "target-fingerprint", "settings": {"mtp": False},
+        "command": list(target_command), "returncode": 0,
+        "results": [{"nodeid": guard_node, "status": "passed"}],
+    }
+    bundle = {"schema": qualify.CROSS_HOST_PREFLIGHT_SCHEMA, "passed": True,
+              "source": source, "target": target}
+    arguments = {
+        "active_runtime": copy.deepcopy(target_runtime),
+        "active_artifact": "target-fingerprint",
+        "active_settings": {"mtp": False},
+        "active_host_id": "m3",
+        "expected_source_nodes": {"ordinary": {artifact_node}, "guard": {guard_node}},
+        "required_m3_nodes": {guard_node},
+        "target_command": list(target_command),
+        "artifact_dependent_nodes": {artifact_node},
+        "identity_fn": lambda: copy.deepcopy(identity),
+    }
+    path = tmp_path / "cross-host.json"
+    return path, bundle, arguments
+
+
+def _write_cross_host(path, bundle):
+    bundle["source_proof_sha256"] = qualify._proof_sha256(bundle["source"])
+    bundle["target_proof_sha256"] = qualify._proof_sha256(bundle["target"])
+    path.write_text(json.dumps(bundle))
+
+
+def test_cross_host_preflight_requires_two_exact_proofs(tmp_path):
+    path, bundle, arguments = _cross_host_case(tmp_path)
+    _write_cross_host(path, bundle)
+    result = qualify.validate_cross_host_preflight_receipt(path, **arguments)
+    assert result["passed"] and result["source_nodes"] == 2
+    assert result["target_nodes"] == 1
+    assert result["runtime"] == arguments["active_runtime"]
+
+
+@pytest.mark.parametrize("mutation", [
+    "source_commit", "source_runtime_source", "target_runtime", "target_artifact",
+    "target_settings", "same_host", "scoped_source", "scoped_target",
+    "missing_source_node", "duplicate_source_node", "extra_source_node",
+    "artifact_skip", "artifact_evidence_missing", "missing_target_node",
+    "skipped_target_node", "failed_source", "failed_target", "tampered_digest",
+])
+def test_cross_host_preflight_fails_closed(tmp_path, mutation):
+    path, bundle, arguments = _cross_host_case(tmp_path)
+    source, target = bundle["source"], bundle["target"]
+    source_rows = source["suites"]["ordinary"]["results"]
+    if mutation == "source_commit":
+        source["identity"]["git"]["revision"] = "other"
+    elif mutation == "source_runtime_source":
+        source["identity"]["runtime"]["source_sha256"] = "other"
+    elif mutation == "target_runtime":
+        target["identity"]["runtime"]["mlx_native_sha256"] = "other"
+    elif mutation == "target_artifact":
+        target["artifact"] = "other"
+    elif mutation == "target_settings":
+        target["settings"]["mtp"] = True
+    elif mutation == "same_host":
+        target["host_id"] = "m5"
+    elif mutation == "scoped_source":
+        source["suites"]["ordinary"]["command"].append("-k")
+    elif mutation == "scoped_target":
+        target["command"].append("-k")
+    elif mutation == "missing_source_node":
+        source_rows.clear()
+    elif mutation == "duplicate_source_node":
+        source_rows.append(copy.deepcopy(source_rows[0]))
+    elif mutation == "extra_source_node":
+        source_rows.append({"nodeid": "tests/test_extra.py::test_new", "status": "passed"})
+    elif mutation == "artifact_skip":
+        source_rows[0] = {"nodeid": source_rows[0]["nodeid"],
+                          "status": "skipped", "reason": "local artifact absent"}
+        arguments["approved_source_skips"] = {source_rows[0]["nodeid"]: "local artifact absent"}
+    elif mutation == "artifact_evidence_missing":
+        source["artifact_evidence"].clear()
+    elif mutation == "missing_target_node":
+        target["results"].clear()
+    elif mutation == "skipped_target_node":
+        target["results"][0]["status"] = "skipped"
+        target["results"][0]["reason"] = "M3 artifact absent"
+    elif mutation == "failed_source":
+        source["suites"]["ordinary"]["returncode"] = 1
+    elif mutation == "failed_target":
+        target["returncode"] = 1
+    _write_cross_host(path, bundle)
+    if mutation == "tampered_digest":
+        bundle["source"]["host_id"] = "changed"
+        path.write_text(json.dumps(bundle))
+    with pytest.raises(AssertionError, match="cross-host preflight"):
+        qualify.validate_cross_host_preflight_receipt(path, **arguments)
+
+
+def test_source_text_http_witness_requires_exact_ids_prompt_and_route():
+    tokens = list(range(16))
+    sampling = {"temperature": 0, "repetition_penalty": 1.0,
+                "presence_penalty": 0.0, "frequency_penalty": 0.0}
+    case = {"prompt": "Reply with exactly MLX2_READY", "prompt_tokens": 18,
+            "generated_token_ids": tokens, "max_tokens": 16, "sampling": sampling}
+    companion = {"model_type": "smolvlm", "text_source": {
+        "cases": {"cold_text": case}}}
+    assert qualify.source_text_cases(companion)["cold_text"] is case
+    assert qualify.source_text_cases({"model_type": "qwen2_5_vl"}) is None
+    with pytest.raises(ValueError, match="approved Smol producer"):
+        qualify.source_text_cases({"model_type": "qwen2_5_vl", "text_source": {
+            "cases": {"cold_text": case}}})
+    response = {
+        "choices": [{"message": {"content": "some deterministic text"},
+                     "finish_reason": "length",
+                     "logprobs": {"content": [{"id": token} for token in tokens]}}],
+        "usage": {"prompt_tokens": 18, "completion_tokens": 16},
+        "mlx2": {"route": "ordinary", "qualification": "candidate",
+                 "cache": "apcv2", "request_controls": {
+                     "max_tokens": 16, "min_tokens": 0, "sampling": sampling}},
+    }
+    assert qualify.source_token_response_matches(
+        response, case, prompt_text=case["prompt"])
+    for changed in (
+        {**response, "usage": {"prompt_tokens": 9, "completion_tokens": 16}},
+        {**response, "mlx2": {**response["mlx2"], "route": "mtp"}},
+        {**response, "choices": [{**response["choices"][0], "logprobs": {
+            "content": [{"id": 99}, *[{"id": token} for token in tokens[1:]]]}}]},
+    ):
+        assert not qualify.source_token_response_matches(
+            changed, case, prompt_text=case["prompt"])
+    assert not qualify.source_token_response_matches(
+        response, case, prompt_text="Reply with exactly HERMES_READY")
+    near_case = {**case, "prompt": "near-context compiler prompt",
+                 "prompt_tokens": 3869, "generated_token_ids": list(range(64)),
+                 "max_tokens": 64, "min_tokens": 64}
+    near_response = {**response,
+                     "choices": [{**response["choices"][0], "logprobs": {
+                         "content": [{"id": token} for token in range(64)]}}],
+                     "usage": {"prompt_tokens": 3869, "completion_tokens": 64},
+                     "mlx2": {**response["mlx2"], "request_controls": {
+                         "max_tokens": 64, "min_tokens": 64, "sampling": sampling}}}
+    assert qualify.source_token_response_matches(
+        near_response, near_case, prompt_text=near_case["prompt"])
+    near_response["mlx2"]["request_controls"]["min_tokens"] = 0
+    assert not qualify.source_token_response_matches(
+        near_response, near_case, prompt_text=near_case["prompt"])
+
+
+def test_source_text_stop_witness_is_interior_and_unique():
+    output = "To solve the problem, we need to find the value of the variable x"
+    witness = qualify.interior_stop_witness(output)
+    assert witness is not None
+    stop, expected = witness
+    assert stop and expected and output.count(stop) == 1
+    assert output.split(stop, 1)[0] == expected
+    assert qualify.interior_stop_witness("short") is None
 
 
 def test_long_context_probe_uses_one_consistent_safe_headroom():
@@ -668,12 +923,33 @@ def test_streamed_chat_is_rebuilt_with_its_receipt_and_token_arrivals():
 def test_mixed_warm_pair_is_streamed_and_judged_on_token_arrivals():
     source = (ROOT / "scripts" / "qualify_serving.py").read_text()
     block = source[source.index("def post_streamed(item, clock_start):"):]
-    block = block[: block.index('check(\n            "mixed_warm"')]
+    block = block[: block.index('"mixed_warm"')]
     assert "post(item, stream=True)" in block
     assert "read_streamed_chat(" in block
     assert "post_streamed(item, sequential_start)" in block
     assert "post_streamed(item, start)" in block
     assert "lane_token_seconds=lane_token_seconds" in source
+
+
+def test_capability_scope_rejects_conflicting_status_fields():
+    status = {
+        "selected_capabilities": ["text", "vision"],
+        "implemented_capabilities": ["text", "vision", "video"],
+        "capabilities": ["text", "vision"],
+    }
+    assert qualify.selected_capability_scope(status) == ({"text", "vision"}, True)
+    assert qualify.selected_capability_scope({**status, "capabilities": ["text"]})[1] is False
+    assert qualify.selected_capability_scope({**status, "implemented_capabilities": ["text"]})[1] is False
+    assert qualify.selected_capability_scope({**status, "selected_capabilities": ["text", "text"]})[1] is False
+
+
+def test_live_media_companion_binds_the_generic_harness_route():
+    path = ROOT / "docs/experiments/SMOLVLM2-M3-LIVE-MEDIA-QUALIFICATION-2026-09-26.json"
+    report = json.loads(path.read_text())
+    status = {key: report[key] for key in ("runtime", "artifact", "settings")}
+    assert qualify.read_adapter_qualification(path, status)["passed"] is True
+    with pytest.raises(ValueError, match="does not match"):
+        qualify.read_adapter_qualification(path, {**status, "artifact": "other"})
 
 
 def test_near_limit_requests_hold_eos_until_the_full_budget():
@@ -699,7 +975,7 @@ def test_mixed_warm_pairs_do_identical_work():
 
 def test_stop_check_runs_with_thinking_off():
     source = (ROOT / "scripts" / "qualify_serving.py").read_text()
-    call = source[source.index('"Reply with exactly MLX2_READY", stop="_READY"'):]
+    call = source[source.index('cold_text_prompt, stop=stop_text'):]
     call = call[: call.index("))")]
     assert 'reasoning_effort="none"' in call and "think=False" in call
 

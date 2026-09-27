@@ -2,6 +2,7 @@
 # Adapted from mlx-lm-unified; see docs/PROVENANCE.md and provenance/flashnext.json.
 import copy
 import math
+import os
 import time
 from contextlib import nullcontext
 from dataclasses import dataclass, field
@@ -22,6 +23,7 @@ from .models.cache import (
     make_prompt_cache,
     trim_ragged_prompt_cache,
 )
+from .processor_probe import VerifyWindow
 from .prompt_lookup import HybridStats as _PromptLookupStatsBase
 from . import round_levers
 from .sample_utils import LaneRNG, draw_key, make_transformed_logprobs
@@ -265,6 +267,19 @@ class SelfMTPCycleResult:
     # and the matching drafted token ids.  Empty unless a probe was set.
     draft_features: Tuple[Tuple[Tuple[float, ...], ...], ...] = ()
     draft_feature_tokens: Tuple[Tuple[int, ...], ...] = ()
+    # Per lane: the verify window over its real logits processors, or None.
+    # Settled at commit to the delivered rows (after stop and max_tokens
+    # truncation), and to none on abort.
+    _verify_windows: Tuple[Optional[VerifyWindow], ...] = field(
+        default=(), repr=False, compare=False
+    )
+
+
+def _settle_verify_windows(proposal, used_rows) -> None:
+    """Rewind each lane's processor ledgers to its first ``used_rows`` rows."""
+    for window, used in zip(proposal._verify_windows, used_rows):
+        if window is not None:
+            window.settle(used)
 
 
 def _mtp_backbone(model, tokens, cache):
@@ -353,9 +368,18 @@ def _device_draft_token(logprobs, sampling_temp: float, *, rng=None) -> mx.array
 def _sample_from_logprobs(logprobs, sampling_temp: float = 0.0, *, rng=None) -> int:
     if sampling_temp and sampling_temp > 0:
         record_verify_sync("hybrid.sample.categorical_item")
-        return int(mx.random.categorical(logprobs, key=draw_key(rng)).item())
-    record_verify_sync("hybrid.sample.argmax_item")
-    return int(mx.argmax(logprobs).item())
+        token = int(mx.random.categorical(logprobs, key=draw_key(rng)).item())
+    else:
+        record_verify_sync("hybrid.sample.argmax_item")
+        token = int(mx.argmax(logprobs).item())
+    # This host sync already exists at the sampling seam.  Reject an invalid
+    # law before the sampled id becomes the lane's next cache input.
+    from .generate import _invalid_output_reason
+
+    reason = _invalid_output_reason(token, logprobs)
+    if reason is not None:
+        raise RuntimeError(f"self-MTP model output invalid: {reason}")
+    return token
 
 
 def _residual_sample(
@@ -1962,7 +1986,11 @@ def advance_batched_self_mtp_zero(
         finally:
             _finalize_self_mtp_cache_group(target_caches)
 
-        outputs = []
+        # The target cache forward above is already live.  Validate every
+        # sampled row before changing *any* lane's committed token metadata
+        # or publishing a segmented branch: a later bad row must not leave
+        # earlier lanes advanced inside a poisoned cohort.
+        sampled_rows = []
         for row, lane in enumerate(batch.lanes):
             logits = batched_logits[row, 0]
             if lane.logits_processors:
@@ -1976,6 +2004,12 @@ def advance_batched_self_mtp_zero(
             bonus = _sample_from_logprobs(
                 logprobs, lane.sampling_temp, rng=lane.rng
             )
+            sampled_rows.append((bonus, logprobs))
+
+        outputs = []
+        for row, (lane, (bonus, logprobs)) in enumerate(
+            zip(batch.lanes, sampled_rows)
+        ):
             new_hidden = old_seed_hs[row]
             new_tokens = [old_curs[row]]
             if lane.pending_ts:
@@ -2381,9 +2415,86 @@ def _propose_batched_self_mtp_round(
     lane_hiddens: List[mx.array] = []
     # Copy rows under logits processors: each row's reachability, evaluated
     # at the acceptance boundary, and the inputs the real processors are
-    # then run on through the reachable prefix.
+    # then run on through the used rows.
     copy_guards: Dict[int, Tuple[mx.array, List[mx.array], List[mx.array]]] = {}
+    # Real processors run on every verify row before the accept point is
+    # known; the window rewinds the bookkeeping of rows past it (steps,
+    # tail bound, a latched budget overrun) once the delivered rows are
+    # known, at commit.
+    verify_windows: Dict[int, VerifyWindow] = {}
+    host_accept_targets = None
+    # Candidate-only B=1 path.  Rejected suffixes need no grammar scan, but
+    # only this processor chain has a host mask with the same acceptance law.
+    # Keep the eager path selected until source-bound parity and latency gates.
+    host_accept = (
+        os.environ.get("MLX2_SELF_MTP_HOST_ACCEPT", "0") == "1"
+        and n_lanes == 1
+        and greedy_cycle
+        and k_vector[0] > 0
+        and not copy_rows[0]
+        and not probe_active
+        and batch.lanes[0].logprob_transform is None
+        and len(batch.lanes[0].logits_processors) == 1
+    )
+    if host_accept:
+        from mlx2.structured_output import StructuredOutputProcessor
+
+        lane = batch.lanes[0]
+        processor = lane.logits_processors[0]
+        host_accept = (
+            type(processor) is StructuredOutputProcessor
+            and processor._defer_until is None
+            and processor._envelope is None
+            and processor.failure is None
+            and not processor.capture_failure_context
+        )
+    if host_accept:
+        # One boundary moves all verify rows, draft ids and the fixed history.
+        # There is no device-to-host decision inside the accepted-prefix loop.
+        host_logits = batched_logits[0, :valid_lengths[0]].astype(mx.float32)
+        host_drafts = mx.stack(draft_tokens[0]).astype(mx.uint32)
+        record_verify_sync("hybrid.greedy.host_accept_boundary")
+        mx.eval(host_logits, host_drafts, lane.token_prefix)
+        values = np.asarray(host_logits)
+        draft_ids = [int(value) for value in host_drafts.tolist()]
+        prefix_ids = [int(value) for value in lane.token_prefix.tolist()]
+        if not np.isfinite(values).all() or any(
+            token in processor.eos_ids for token in [lane.cur, *draft_ids]
+        ):
+            host_accept = False
+        else:
+            window = verify_windows[0] = VerifyWindow(lane.logits_processors)
+            masks = []
+            host_accept_targets = []
+            for pos in range(valid_lengths[0]):
+                mask = processor.acceptance_mask_host(
+                    [*prefix_ids, lane.cur, *draft_ids[:pos]], values[pos]
+                )
+                masks.append(mask)
+                window.mark()
+                target = int(np.argmax(np.where(mask, values[pos], -np.inf)))
+                host_accept_targets.append(target)
+                if pos < len(draft_ids) and target != draft_ids[pos]:
+                    break
+            round_levers.bump("host_accept_rounds")
+            round_levers.bump("host_accept_rows_skipped", valid_lengths[0] - len(masks))
+            drafts[0] = draft_ids
+            masked_rows = [
+                mx.where(
+                    mx.array(mask),
+                    batched_logits[0, pos],
+                    mx.array(-float("inf"), dtype=batched_logits.dtype),
+                )
+                for pos, mask in enumerate(masks)
+            ]
+            # Only reached rows need logprobs. The verify backbone has already
+            # scored the full window, but rejected suffixes pay no grammar or
+            # normalization work and are never published.
+            lane_logprobs.append(_lane_mtp_logprobs(lane, mx.stack(masked_rows)))
+            lane_hiddens.append(batched_hidden[0:1, :valid_lengths[0], :])
     for row, (lane, k, valid) in enumerate(zip(batch.lanes, k_vector, valid_lengths)):
+        if host_accept:
+            continue
         if lane.logits_processors and copy_rows[row]:
             # Head drafts were drawn from the processed law, but copied spans
             # are host tokens no processor has seen.  A row that follows a
@@ -2421,6 +2532,7 @@ def _propose_batched_self_mtp_round(
             copy_guards[row] = (reach, histories, raw)
         elif lane.logits_processors:
             processed = []
+            window = verify_windows[row] = VerifyWindow(lane.logits_processors)
             for pos in range(valid):
                 processor_tokens = mx.concatenate(
                     [lane.token_prefix, mx.array([lane.cur], mx.uint32)]
@@ -2433,6 +2545,7 @@ def _propose_batched_self_mtp_round(
                         batched_logits[row, pos],
                     )
                 )
+                window.mark()
             logits = mx.stack(processed)
         else:
             logits = batched_logits[row, :valid]
@@ -2442,24 +2555,27 @@ def _propose_batched_self_mtp_round(
         lane_hiddens.append(hidden)
     greedy_targets = None
     if greedy_cycle:
-        target_rows = []
-        drafted_rows = []
-        for row, (k, valid) in enumerate(zip(k_vector, valid_lengths)):
-            target = mx.argmax(lane_logprobs[row], axis=-1).astype(mx.uint32)
-            target_rows.append(mx.pad(target, [(0, width - valid)]))
-            drafted = mx.stack(draft_tokens[row]) if k else mx.zeros((0,), mx.uint32)
-            drafted_rows.append(mx.pad(drafted, [(0, width - k)]))
-        accept_payload = mx.stack([mx.stack(target_rows), mx.stack(drafted_rows)])
-        record_verify_sync("hybrid.greedy.accept_boundary")
-        # Confidence features and copy-row reachability ride on the existing
-        # accept boundary.
-        mx.eval(
-            accept_payload,
-            *(() if feature_payload is None else feature_payload),
-            *(guard[0] for guard in copy_guards.values()),
-        )
-        (greedy_targets, hosted_drafts) = accept_payload.tolist()
-        drafts = [row[:k] for (row, k) in zip(hosted_drafts, k_vector)]
+        if host_accept:
+            greedy_targets = [host_accept_targets]
+        else:
+            target_rows = []
+            drafted_rows = []
+            for row, (k, valid) in enumerate(zip(k_vector, valid_lengths)):
+                target = mx.argmax(lane_logprobs[row], axis=-1).astype(mx.uint32)
+                target_rows.append(mx.pad(target, [(0, width - valid)]))
+                drafted = mx.stack(draft_tokens[row]) if k else mx.zeros((0,), mx.uint32)
+                drafted_rows.append(mx.pad(drafted, [(0, width - k)]))
+            accept_payload = mx.stack([mx.stack(target_rows), mx.stack(drafted_rows)])
+            record_verify_sync("hybrid.greedy.accept_boundary")
+            # Confidence features and copy-row reachability ride on the existing
+            # accept boundary.
+            mx.eval(
+                accept_payload,
+                *(() if feature_payload is None else feature_payload),
+                *(guard[0] for guard in copy_guards.values()),
+            )
+            (greedy_targets, hosted_drafts) = accept_payload.tolist()
+            drafts = [row[:k] for (row, k) in zip(hosted_drafts, k_vector)]
     accepted: List[int] = []
     relaxed_accepts: List[int] = []
     bonuses: List[int] = []
@@ -2584,11 +2700,14 @@ def _propose_batched_self_mtp_round(
             )
         )
     # The real processors see the copy rows they would have seen scored one
-    # at a time: the reachable prefix, known now without another sync.
+    # at a time: the used rows (accepted copies plus the correction/bonus
+    # row), all inside the reachable prefix, known now without another sync.
     for row, (reach, histories, raw) in copy_guards.items():
         lane = batch.lanes[row]
-        for pos in range(sum(reach.tolist())):
+        window = verify_windows[row] = VerifyWindow(lane.logits_processors)
+        for pos in range(min(sum(reach.tolist()), accepted[row] + 1)):
             _apply_logits_processors(lane.logits_processors, histories[pos], raw[pos])
+            window.mark()
     target_drops = tuple((k - a for (k, a) in zip(k_vector, accepted)))
     _trim_self_mtp_cache_group(batch.caches.target, target_drops, validate=False)
     (host_features, host_feature_tokens) = _host_confidence_payload(
@@ -2613,6 +2732,9 @@ def _propose_batched_self_mtp_round(
         copy_decisions=copy_decisions,
         draft_features=host_features,
         draft_feature_tokens=host_feature_tokens,
+        _verify_windows=tuple(
+            verify_windows.get(row) for row in range(len(batch.lanes))
+        ),
     )
     batch.proposal_open = True
     batch._open_proposal = proposal
@@ -2793,6 +2915,9 @@ def commit_batched_self_mtp(
         delivery_drops.append(
             accepted - count + 1 if is_terminal and count <= accepted else 0
         )
+    # Delivered token j was drawn from verify row j, so exactly ``count``
+    # rows were used; rows past a stop or max_tokens cut leave no trace.
+    _settle_verify_windows(proposal, emitted)
     try:
         if any(delivery_drops):
             _trim_self_mtp_cache_group(
@@ -2921,6 +3046,9 @@ def abort_batched_self_mtp(
     _require_healthy_self_mtp_batch(batch)
     if not batch.proposal_open or batch._open_proposal is not proposal:
         raise RuntimeError("abort requires the currently open self-MTP proposal")
+    # No row of an aborted proposal was delivered.
+    for opened in (proposal, *getattr(batch, "_row_proposals", ())):
+        _settle_verify_windows(opened, (0,) * len(opened._verify_windows))
     if isinstance(batch, SegmentedSelfMTPState):
         from .segmented_self_mtp import note_segmented_self_mtp
 

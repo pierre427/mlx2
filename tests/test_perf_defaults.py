@@ -122,11 +122,31 @@ def test_qwen38_27b_native_mtp_defaults_copy_drafts_single_lane():
     assert off["self_mtp_copy_draft"] == {"enabled": False}
 
 
+def test_flash_next_native_mtp_defaults_match_gated_copy_drafts():
+    from mlx2.runtime.copy_draft import CopyDraftPolicy
+    from mlx2.serving import ServingEngine
+
+    resolution = _resolution(FlashNextAdapter, QWEN4_FLASH_NEXT)
+    policy = resolve_execution_policy_defaults(None, MTP, resolution)
+    assert policy["apc_interior_checkpoints"] == "auto"
+    parsed = CopyDraftPolicy.from_value(policy["self_mtp_copy_draft"])
+    assert parsed.enabled and parsed.batched_max_span == 0
+    # The measured policy: fused-verify width, match gate, strong spans.
+    assert (parsed.max_span, parsed.min_match, parsed.strong_match,
+            parsed.strong_max_span, parsed.initial_span) == (7, 8, 32, 16, 7)
+    ServingEngine.validate_arguments("unused", execution_policy=policy)
+    ordinary = resolve_execution_policy_defaults(None, ORDINARY, resolution) or {}
+    assert "self_mtp_copy_draft" not in ordinary
+    off = resolve_execution_policy_defaults(
+        {"self_mtp_copy_draft": {"enabled": False}}, MTP, resolution
+    )
+    assert off["self_mtp_copy_draft"] == {"enabled": False}
+
+
 @pytest.mark.parametrize(
     ("adapter_type", "descriptor"),
     [
         (Qwen3635BA3BAdapter, qwen36(has_mtp=True)),
-        (FlashNextAdapter, QWEN4_FLASH_NEXT),
         (XingAdapter, xing(has_mtp=True)),
     ],
 )
@@ -211,26 +231,71 @@ def test_bare_server_cli_reaches_the_qualified_handoff_geometry():
     assert args.max_lanes > 4
 
 
+def test_server_prefill_step_can_match_a_bound_media_qualification():
+    from mlx2.server import build_parser, serving_engine_kwargs
+
+    parser = build_parser()
+    default = parser.parse_args(["--model", "fixture"])
+    explicit = parser.parse_args(["--model", "fixture", "--prefill-step", "256"])
+    assert default.prefill_step is None
+    assert explicit.prefill_step == 256
+    kwargs = serving_engine_kwargs(
+        explicit, None, native_mtp=False, approximate_kv=None,
+        max_request_bytes=1 << 20,
+    )
+    assert kwargs["prefill_step"] == 256
+    for invalid in ("0", "-1", "not-an-int"):
+        with pytest.raises(SystemExit):
+            parser.parse_args(["--model", "fixture", "--prefill-step", invalid])
+
+
 @pytest.mark.parametrize(
     ("physical_gib", "expected_gib"),
-    [(128, 16.0), (96, 12.0), (64, 8.0), (36, 4.5), (8, 1.0), (None, 16.0)],
+    [
+        (8, 1.0),
+        (16, 2.0),
+        (36, 4.5),
+        (64, 8.0),
+        (96, 28.0),
+        (128, 48.0),
+        (192, 88.0),
+        (256, 96.0),
+        (512, 96.0),
+        (None, 16.0),
+    ],
 )
-def test_default_cache_bytes_scales_with_host_memory(physical_gib, expected_gib):
+def test_default_cache_bytes_scales_with_host_memory(
+    monkeypatch, physical_gib, expected_gib
+):
+    from mlx2 import cache_sizing
     from mlx2.server import default_cache_bytes
 
-    physical = None if physical_gib is None else physical_gib << 30
-    if physical is None:
-        # Unknown host: fall back to the qualified 128 GiB geometry.
-        import mlx2.server as server
-
-        original = server.physical_memory_bytes
-        server.physical_memory_bytes = lambda: None
-        try:
-            assert default_cache_bytes() == 16 << 30
-        finally:
-            server.physical_memory_bytes = original
+    if physical_gib is None:
+        # Unknown host: keep the legacy qualified 128 GiB geometry, not the
+        # large-host curve it cannot be shown to have.
+        monkeypatch.setattr(cache_sizing, "physical_memory_bytes", lambda: None)
+        assert default_cache_bytes() == 16 << 30
         return
-    assert default_cache_bytes(physical) == int(expected_gib * (1 << 30))
+    assert default_cache_bytes(physical_gib << 30) == int(expected_gib * (1 << 30))
+
+
+def test_default_cache_bytes_is_continuous_and_monotone():
+    from mlx2.cache_sizing import default_cache_bytes, legacy_default_cache_bytes
+
+    gib = 1 << 30
+    previous = 0
+    for physical in range(4 * gib, 1024 * gib, gib // 4):
+        value = default_cache_bytes(physical)
+        assert value >= previous
+        # One step of host RAM never moves the cache by more than 5/8 of it.
+        assert value - previous <= (gib // 4) * 5 // 8 + 1 or previous == 0
+        previous = value
+        # Never below what the legacy rule gave the same host.
+        assert value >= legacy_default_cache_bytes(physical)
+    # Up to 64 GiB the curve *is* the legacy rule.
+    for physical_gib in (8, 16, 24, 32, 36, 48, 64):
+        physical = physical_gib * gib
+        assert default_cache_bytes(physical) == legacy_default_cache_bytes(physical)
 
 
 def test_default_cache_bytes_never_exceeds_the_m3_advisory_share():
@@ -239,6 +304,314 @@ def test_default_cache_bytes_never_exceeds_the_m3_advisory_share():
     # 36 GiB M3: Metal advisory 28.08 GiB; a 19 GiB model must still fit
     # with the default cache full.
     assert 19 * (1 << 30) + default_cache_bytes(36 << 30) < 28.08 * (1 << 30)
+
+
+def test_cache_bytes_parser_default_is_gpu_free_and_records_its_source():
+    import subprocess
+    import sys
+
+    code = (
+        "import sys; from mlx2.server import build_parser, default_cache_bytes; "
+        "a = build_parser().parse_args(['--model', 'm']); "
+        "assert a.cache_bytes == default_cache_bytes(), a.cache_bytes; "
+        "assert a.cache_bytes_source == 'host_default'; "
+        "b = build_parser().parse_args(['--model', 'm', '--cache-bytes', '8589934592']); "
+        "assert b.cache_bytes == 8589934592 and b.cache_bytes_source == 'explicit'; "
+        "assert 'mlx.core' not in sys.modules and 'mlx' not in sys.modules"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", code], capture_output=True, text=True, timeout=120
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_engine_kwargs_carry_the_cache_bytes_source():
+    from types import SimpleNamespace
+
+    from mlx2.server import build_parser, serving_engine_kwargs
+
+    for argv, source in (
+        (["--model", "m"], "host_default"),
+        (["--model", "m", "--cache-bytes", "12884901888"], "explicit"),
+    ):
+        args = build_parser().parse_args(argv)
+        kwargs = serving_engine_kwargs(
+            args,
+            None,
+            native_mtp=False,
+            approximate_kv=None,
+            max_request_bytes=1 << 20,
+        )
+        assert kwargs["cache_bytes_source"] == source
+    # A hand-built namespace has no source: its value is the operator's.
+    bare = SimpleNamespace(**vars(build_parser().parse_args(["--model", "m"])))
+    del bare.cache_bytes_source
+    assert (
+        serving_engine_kwargs(
+            bare, None, native_mtp=False, approximate_kv=None, max_request_bytes=1
+        )["cache_bytes_source"]
+        == "explicit"
+    )
+
+
+def test_clamp_host_default_cache_bytes_arithmetic():
+    from mlx2.cache_sizing import clamp_host_default_cache_bytes
+
+    gib = 1 << 30
+
+    def clamp(resident_gib, limit_gib=92, requested_gib=48, floor_gib=16):
+        return clamp_host_default_cache_bytes(
+            requested_gib * gib,
+            floor_bytes=floor_gib * gib,
+            admission_limit_bytes=None if limit_gib is None else limit_gib * gib,
+            resident_bytes=None if resident_gib is None else int(resident_gib * gib),
+            stream_reserve_bytes=0,
+            lane_need_bytes=1 * gib,
+            lanes=4,
+        )
+
+    # Small model: 92 - 18 - 4 = 70 GiB of room, the full 48 GiB default fits.
+    assert clamp(18) == (48 * gib, clamp(18)[1])
+    assert clamp(18)[1]["reason"] == "fits"
+    # Mid model: 92 - 60 - 4 = 28 GiB.
+    (value, detail) = clamp(60)
+    assert value == 28 * gib and detail["reason"] == "headroom"
+    # Flash-Next's 72.5 GiB: 15.5 GiB of room is below the legacy 16 GiB, so
+    # the legacy geometry holds (it is what that model already runs with).
+    (value, detail) = clamp(72.5)
+    assert value == 16 * gib and detail["reason"] == "legacy_floor"
+    # Unmeasurable headroom falls back to the floor, never to the new curve.
+    (value, detail) = clamp(None)
+    assert value == 16 * gib and detail["reason"] == "headroom_unmeasured"
+    (value, detail) = clamp(18, limit_gib=None)
+    assert value == 16 * gib and detail["reason"] == "headroom_unmeasured"
+    # The clamp never raises a request, including one below the floor.
+    assert clamp(0, requested_gib=4, floor_gib=16)[0] == 4 * gib
+
+
+def _cache_engine(monkeypatch, *, resident_gib, **overrides):
+    from types import SimpleNamespace as NS
+
+    from mlx2 import cache_sizing, memory, serving
+    from mlx2.runtime import apc_v2, generate, os_memory
+
+    gib = 1 << 30
+    seen = {}
+
+    class APC:
+        def __init__(self, **kwargs):
+            seen["max_bytes"] = kwargs.get("max_bytes")
+            self.apc_stats = {}
+
+        def key(self, *_a, **_kw):
+            return "key"
+
+        def spill_idle_entries(self):
+            pass
+
+        def clear(self):
+            pass
+
+    class Batch:
+        scheduler_stats = {}
+
+        def __init__(self, *_a, **_kw):
+            pass
+
+        def next(self):
+            return [], []
+
+        def close(self):
+            pass
+
+    class Adapter:
+        max_context = 1000
+        identity = {"fingerprint": "fake"}
+        environment = {}
+        layout = "fake"
+        model = None
+        tokenizer = NS(vocab_size=10, eos_token_ids=[])
+
+        def __init__(self, _path):
+            pass
+
+        def profile_name(self, _mtp):
+            return "fake"
+
+        def execution_config(self, *, max_lanes, prefill_step):
+            return {"num_draft": 0}
+
+        def diagnostics(self):
+            return {}
+
+        def close(self):
+            pass
+
+    # The 128 GiB calibration host: advisory 112, reserves 16 + 4, so the
+    # MLX admission limit is 92 GiB.  The adapter footprint is faked.
+    monkeypatch.setattr(cache_sizing, "physical_memory_bytes", lambda: 128 * gib)
+    monkeypatch.setattr(memory, "host_memory_gib", lambda: 128.0)
+    monkeypatch.setattr(memory, "metal_advisory_gib", lambda: 112.0)
+    monkeypatch.setattr(
+        serving, "resident_device_bytes", lambda: int(resident_gib * gib)
+    )
+    monkeypatch.setattr(serving, "runtime_identity", lambda: {"source_sha256": "fake"})
+    monkeypatch.setattr(memory, "execution_headroom", lambda: 100 * gib)
+    monkeypatch.setattr(os_memory, "physical_footprint_bytes", lambda: 0)
+    monkeypatch.setattr(apc_v2, "APCv2", APC)
+    monkeypatch.setattr(generate, "BatchGenerator", Batch)
+    engine = serving.ServingEngine(
+        "fake",
+        adapter_factory=Adapter,
+        qualification_mode=True,
+        mtp=False,
+        max_lanes=2,
+        max_inflight=2,
+        **overrides,
+    )
+    try:
+        assert engine.ready.wait(5), engine.error
+        status = engine.status()
+    finally:
+        engine.close()
+    return status["settings"], seen
+
+
+def _lane_need_gib():
+    # Fake adapter: no cache_budget, so the envelope applies at its 1000-token
+    # max_context; depth floor 0 pays one third of the k=2 transient.
+    return 0.44 * 1000 / 1024 + 1.76 / 3
+
+
+def test_post_load_clamp_lowers_a_host_default_beside_a_large_model(monkeypatch):
+    gib = 1 << 30
+    (settings, seen) = _cache_engine(
+        monkeypatch,
+        resident_gib=60,
+        cache_bytes=48 * gib,
+        cache_bytes_source="host_default",
+    )
+    # min(requested, 92 - 60 - 2 lanes x need); max_lanes=2 bounds the lanes.
+    expected = 92 * gib - 60 * gib - 2 * int(_lane_need_gib() * gib)
+    assert settings["cache_bytes"] == seen["max_bytes"] == expected
+    assert settings["cache_bytes_source"] == "host_default"
+    assert settings["cache_bytes_clamped_from"] == 48 * gib
+    headroom = settings["cache_bytes_headroom"]
+    assert headroom["reason"] == "headroom"
+    assert headroom["admission_limit_bytes"] == 92 * gib
+    assert headroom["resident_bytes"] == 60 * gib
+    assert headroom["lanes"] == 2
+    assert headroom["floor_bytes"] == 16 * gib
+
+
+def test_post_load_clamp_never_goes_below_the_legacy_default(monkeypatch):
+    gib = 1 << 30
+    # 92 - 80 - 2 lanes leaves ~10 GiB: below the legacy 16 GiB the host
+    # already ran with, so the legacy geometry holds.
+    (settings, seen) = _cache_engine(
+        monkeypatch,
+        resident_gib=80,
+        cache_bytes=48 * gib,
+        cache_bytes_source="host_default",
+    )
+    assert settings["cache_bytes"] == seen["max_bytes"] == 16 * gib
+    assert settings["cache_bytes_clamped_from"] == 48 * gib
+    assert settings["cache_bytes_headroom"]["reason"] == "legacy_floor"
+
+
+def test_post_load_clamp_leaves_room_for_a_small_model(monkeypatch):
+    gib = 1 << 30
+    (settings, seen) = _cache_engine(
+        monkeypatch,
+        resident_gib=18,
+        cache_bytes=48 * gib,
+        cache_bytes_source="host_default",
+    )
+    assert settings["cache_bytes"] == seen["max_bytes"] == 48 * gib
+    assert settings["cache_bytes_source"] == "host_default"
+    assert settings["cache_bytes_clamped_from"] is None
+    assert settings["cache_bytes_headroom"]["reason"] == "fits"
+
+
+def test_explicit_cache_bytes_is_never_clamped(monkeypatch):
+    gib = 1 << 30
+    (settings, seen) = _cache_engine(
+        monkeypatch,
+        resident_gib=80,
+        cache_bytes=48 * gib,
+        cache_bytes_source="explicit",
+    )
+    assert settings["cache_bytes"] == seen["max_bytes"] == 48 * gib
+    assert settings["cache_bytes_source"] == "explicit"
+    assert settings["cache_bytes_clamped_from"] is None
+    assert settings["cache_bytes_headroom"] is None
+
+
+def test_cache_bytes_provenance_is_not_route_identity(tmp_path):
+    import json
+
+    from mlx2.qualification import (
+        APPROVED_QUALIFICATION_HARNESS,
+        PROVENANCE_ONLY_SETTINGS,
+        REQUIRED_CHECKS,
+        load_qualified_route,
+    )
+
+    assert {
+        "route_selection_source",
+        "cache_bytes_source",
+        "cache_bytes_clamped_from",
+        "cache_bytes_headroom",
+    } <= PROVENANCE_ONLY_SETTINGS
+    assert "cache_bytes" not in PROVENANCE_ONLY_SETTINGS
+
+    # A receipt recorded with an explicit 12 GiB, before the provenance
+    # fields existed, still matches a server given --cache-bytes 12 GiB (or a
+    # host default that resolves to 12 GiB); a different value never does.
+    receipt = tmp_path / "receipt.json"
+    receipt.write_text(
+        json.dumps(
+            {
+                "passed": True,
+                "qualification_harness": APPROVED_QUALIFICATION_HARNESS,
+                "runtime": {"source": "abc"},
+                "artifact": "weights",
+                "settings": {"mtp": True, "cache_bytes": 12 << 30},
+                "checks": {
+                    c: {"passed": True}
+                    for c in REQUIRED_CHECKS | {"mtp_execution", "structured_output"}
+                },
+            }
+        )
+    )
+
+    def load(settings):
+        return load_qualified_route(
+            receipt,
+            runtime={"source": "abc"},
+            artifact="weights",
+            settings=settings,
+            descriptor=QWEN4_FLASH_NEXT,
+            name="test",
+        )
+
+    served = {
+        "mtp": True,
+        "cache_bytes": 12 << 30,
+        "cache_bytes_source": "explicit",
+        "cache_bytes_clamped_from": None,
+        "cache_bytes_headroom": None,
+    }
+    assert "profile=test" in load(served).receipt
+    clamped = {
+        **served,
+        "cache_bytes_source": "host_default",
+        "cache_bytes_clamped_from": 48 << 30,
+        "cache_bytes_headroom": {"reason": "headroom"},
+    }
+    assert "profile=test" in load(clamped).receipt
+    with pytest.raises(ValueError, match="does not match serving settings"):
+        load({**served, "cache_bytes": 48 << 30, "cache_bytes_source": "host_default"})
 
 
 def test_nemotron_environment_strips_inherited_lab_switches(monkeypatch):

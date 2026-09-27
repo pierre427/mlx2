@@ -44,7 +44,7 @@ def test_muse_dispatch_is_metadata_based(tmp_path):
         resolve_adapter(path, mtp=True)
 
 
-@pytest.mark.parametrize("model_type", ["unknown", "qwen3", None])
+@pytest.mark.parametrize("model_type", ["unknown", None])
 def test_unknown_target_fails_closed(tmp_path, model_type):
     path = artifact(tmp_path, {"model_type": model_type})
     with pytest.raises(ValueError, match="No mlx2 adapter"):

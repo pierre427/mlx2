@@ -44,6 +44,7 @@ from .models.cache import (
     _copy_prompt_cache_for_restore,
     _mark_prompt_cache_restored,
     can_trim_prompt_cache,
+    can_trim_prompt_cache_at,
     load_prompt_cache,
     save_prompt_cache,
 )
@@ -88,17 +89,22 @@ class APCCapabilities:
     reason: Optional[str] = None
     stored: Optional[bool] = None
     native: Any = None
+    # Some leaf cannot branch at an arbitrary token once it holds enough
+    # state (recurrent state, a wrapped sliding window) and restores only at
+    # positions where it recorded an exact snapshot.
+    restores_at_checkpoints: bool = False
 
     @property
     def interior_checkpoint_target(self) -> bool:
-        """Whether exact interior snapshots benefit this target topology.
+        """Whether exact interior snapshots benefit this cache.
 
-        Recurrent/hybrid state cannot branch at an arbitrary token unless an
-        exact state checkpoint already exists there.  A restored branch can
-        therefore become trimmable without ceasing to be the target topology
-        that needs interior checkpoints.
+        Recurrent state and a wrapped sliding window cannot branch at an
+        arbitrary token unless an exact snapshot already exists there.  A
+        restored branch can therefore become trimmable (a short sliding
+        window has not wrapped yet) without ceasing to be a cache that needs
+        interior checkpoints.  Decided by cache capability, never by model.
         """
-        return self.exact_prefix and self.topology == "checkpointed_hybrid"
+        return self.exact_prefix and self.restores_at_checkpoints
 
 
 @dataclass
@@ -333,9 +339,17 @@ class _FixedHistogram:
 class _CapsuleCapacityReservation:
     """Pins a transient fanout allocation against APCv2's resident budget."""
 
-    def __init__(self, owner: "APCv2", nbytes: int):
+    def __init__(
+        self, owner: "APCv2", nbytes: int, *, generation_before=None,
+        generation_after=None,
+    ):
         self._owner = owner
         self.nbytes = int(nbytes)
+        # Capsule generation on entry to the reservation and after its own
+        # reclaim, both read under the APC lock.  Any advance between them
+        # came from spilling *unleased* entries (see ``reserve_capsule_bytes``).
+        self.generation_before = generation_before
+        self.generation_after = generation_after
         self._closed = False
         self._lock = threading.Lock()
 
@@ -405,6 +419,9 @@ def inspect_apc_capabilities(prompt_cache: List[Any]) -> APCCapabilities:
         exact_prefix=known,
         arbitrary_branch=arbitrary_branch,
         reason=None if known else "unsupported_cache_entry",
+        restores_at_checkpoints=any(
+            isinstance(c, (ArraysCache, RotatingKVCache)) for c in leaves
+        ),
     )
 
 
@@ -1164,9 +1181,18 @@ class APCv2(PrefixIndex):
         The reservation shares APCv2's hard resident cap.  Reclaim is limited
         to unleased entries and occurs before publication; callers then repeat
         the generation check because reclaim can invalidate their source.
+
+        The reclaim itself advances the generation (every spill does), but it
+        cannot touch a capsule source: sources are leased lookup branches (or
+        independent copies), and pinned entries are never pressure-spilled.
+        The reservation therefore records the generation on entry and after
+        its own reclaim, so a caller whose source was current on entry can
+        rebase instead of declining a capsule its reservation just paid for.
         """
         required = int(nbytes)
         with self._apc_lock:
+            authority = getattr(self, "_capsule_generation", None)
+            generation_before = authority.current if authority is not None else None
             available_limit = int(self.max_bytes) - self._capsule_reserved_bytes
             if required < 0 or required > available_limit:
                 self._capsule_capacity["reservation_rejections"] += 1
@@ -1189,7 +1215,14 @@ class APCv2(PrefixIndex):
                 self._capsule_capacity["reserved_bytes_peak"],
                 self._capsule_reserved_bytes,
             )
-            return _CapsuleCapacityReservation(self, required)
+            return _CapsuleCapacityReservation(
+                self,
+                required,
+                generation_before=generation_before,
+                generation_after=(
+                    authority.current if authority is not None else None
+                ),
+            )
 
     def new_cache_capsule_pool(self, **kwargs) -> CacheCapsulePool:
         """Create the default-off fanout lane under APCv2 capacity ownership."""
@@ -2341,7 +2374,7 @@ class APCv2(PrefixIndex):
             or (getattr(entry, "_apc_disk", None) or {}).get("sidecar") is not None
         ):
             return False
-        if can_trim_prompt_cache(tip.prompt_cache):
+        if can_trim_prompt_cache_at(tip.prompt_cache, len(tip_tokens) - depth):
             return True
         if achievable_trim is None:
             return False
@@ -3076,12 +3109,14 @@ class APCv2(PrefixIndex):
                 reason = "disk_restore_requires_admission"
             elif restore_deferred:
                 reason = "disk_restore_budget_unavailable"
-            else:
+            elif has_unusable_branch:
                 reason = (
-                    "untrimmable_branch"
-                    if has_unusable_branch
-                    else "no_compatible_prefix"
+                    "branch_cache_records_no_restore_points"
+                    if self._branch_lacks_restore_points_locked(key, trie_result)
+                    else "untrimmable_branch"
                 )
+            else:
+                reason = "no_compatible_prefix"
         elif fetch_view.exact is not None:
             kind = "exact"
             reason = None
@@ -3114,6 +3149,21 @@ class APCv2(PrefixIndex):
                 else None
             ),
             branch_tokens=branch_beyond(cached_tokens),
+        )
+
+    def _branch_lacks_restore_points_locked(self, key, trie_result) -> bool:
+        """Whether the unusable branch holds a cache type that cannot record
+        restore snapshots at all (a vendor sliding cache), as opposed to one
+        that simply recorded none at a usable depth."""
+        path = trie_result.exact if trie_result.exact is not None else trie_result.longer
+        try:
+            entry = self._trie.get(key, path)
+        except (KeyError, TypeError):
+            return False
+        return any(
+            not c.is_trimmable() and not callable(getattr(c, "snap_trim_position", None))
+            for c in _walk_cache_entries(getattr(entry, "prompt_cache", None) or [])
+            if callable(getattr(c, "is_trimmable", None))
         )
 
     def store(

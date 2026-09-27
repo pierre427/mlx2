@@ -185,6 +185,20 @@ def quantized_scaled_dot_product_attention(
             return gqa_quantized_decode_attention(
                 queries, q_keys, q_values, scale=scale, group_size=group_size,
                 key_bits=key_bits, value_bits=value_bits)
+    if L <= 8:
+        # Verify blocks (and left-padded batched decode): one pass over the
+        # int8 K/V for every query head and row of each KV head.
+        from . import qsdpa_verify_metal as qvm
+
+        left_padding = qvm.causal_left_padding(mask, B, L, q_keys[0].shape[-2])
+        if left_padding is not qvm.NOT_CAUSAL and qvm.use_verify_kernel(
+            queries, q_keys, q_values, group_size=group_size,
+            key_bits=key_bits, value_bits=value_bits,
+        ):
+            return qvm.gqa_quantized_verify_attention(
+                queries, q_keys, q_values, scale=scale, group_size=group_size,
+                key_bits=key_bits, value_bits=value_bits, left_padding=left_padding)
+        qvm.note("composed", L)
     if L >= flash_min_l:
         keys = mx.dequantize(
             *_contiguous_quant(q_keys), group_size=group_size, bits=key_bits

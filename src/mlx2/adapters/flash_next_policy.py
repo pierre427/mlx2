@@ -51,12 +51,31 @@ class FlashNextPolicy:
     moe_router_kernel: bool = False
     qsa_nax_decode: bool = False
     gdn_core: bool = False
+    # Widest verify block the fused GDN verify kernel admits
+    # (MLX_QWEN4_FUSED_GDN_VERIFY_MAX_STEPS, 2..17; the kernel module's own
+    # default stays 8).  17 since 2026-09-25: every width is bit-exact to the
+    # stock block on Metal, and served greedy/T=0.7 output is token-identical
+    # to the 8 bound with decode within +/-2% on every cell, while copy-draft
+    # verifies (9..17 wide) stop falling back (fn-mlxserve-ab-20260925,
+    # ab-vcap-*.json).  8 restores the old bound.
+    fused_gdn_verify_max_steps: int = 17
+    # omlx #3912 one-token routed experts (MLX_QWEN4_MOE_ROUTED_DECODE):
+    # "gate_up" runs gate+up with a SwiGLU epilogue in one launch; "two_launch"
+    # also replaces the tile4 fused down with omlx's down + weighted sum.
+    # Opt-in; enters the environment and receipts only when not "off".
+    moe_routed_decode: str = "off"
+    # Opt-in: the quantized lm_head stores fp32 logits instead of rounding
+    # them to bf16 (runtime/fp32_head.py).  Not an environment switch; it
+    # enters receipts only when enabled, like the kernels above.
+    fp32_head_logits: bool = False
 
     def __post_init__(self):
         validate_self_mtp_num_draft(self.num_draft)
         for name in ("shared_qsa_suffix", "indexed_qsa"):
             if getattr(self, name) not in {"auto", "on", "off"}:
                 raise ValueError(f"{name} must be auto, on, or off")
+        if self.moe_routed_decode not in {"off", "gate_up", "two_launch"}:
+            raise ValueError("moe_routed_decode must be off, gate_up, or two_launch")
         for name in (
             "async_qsa_promotion",
             "known_tail_ple_prefetch",
@@ -65,6 +84,7 @@ class FlashNextPolicy:
             "allow_unverified_indexed",
             "eager_dispatch",
             "fused_gdn_dynamic_accept",
+            "fp32_head_logits",
             *_OPTIONAL_KERNEL_ENV,
         ):
             if type(getattr(self, name)) is not bool:
@@ -78,6 +98,9 @@ class FlashNextPolicy:
             value = getattr(self, name)
             if type(value) is not int or value < 0:
                 raise ValueError(f"{name} must be a nonnegative integer")
+        value = self.fused_gdn_verify_max_steps
+        if type(value) is not int or not 2 <= value <= 17:
+            raise ValueError("fused_gdn_verify_max_steps must be an integer in 2..17")
         for name in ("eager_dispatch_max_rows", "eager_dispatch_stride", "prefill_step"):
             value = getattr(self, name)
             if type(value) is not int or value < 1:
@@ -99,9 +122,15 @@ class FlashNextPolicy:
         # Default-off keys stay out so default receipts are unchanged.
         if not self.fused_gdn_dynamic_accept:
             del values["fused_gdn_dynamic_accept"]
+        if not self.fp32_head_logits:
+            del values["fp32_head_logits"]
         for name in _OPTIONAL_KERNEL_ENV:
             if not getattr(self, name):
                 del values[name]
+        if self.fused_gdn_verify_max_steps == 8:
+            del values["fused_gdn_verify_max_steps"]
+        if self.moe_routed_decode == "off":
+            del values["moe_routed_decode"]
         return values
 
     def environment(self):
@@ -126,13 +155,22 @@ class FlashNextPolicy:
         for name, variable in _OPTIONAL_KERNEL_ENV.items():
             if getattr(self, name):
                 environment[variable] = "1"
+        if self.fused_gdn_verify_max_steps != 8:
+            environment["MLX_QWEN4_FUSED_GDN_VERIFY_MAX_STEPS"] = str(
+                self.fused_gdn_verify_max_steps
+            )
+        if self.moe_routed_decode != "off":
+            environment["MLX_QWEN4_MOE_ROUTED_DECODE"] = self.moe_routed_decode
         return environment
 
     def batch_config(self, *, max_lanes, prefill_step):
-        return {
+        config = {
             "persistent": True, "num_draft": self.num_draft, "rate_gate": False,
             "prefill_step_size": prefill_step, "segment_aware_live_tip": True,
             "segment_aware_cohort_size": max_lanes,
             "segment_aware_async_qsa_promotion": self.async_qsa_promotion,
             "prefetch_known_tail_ple": self.known_tail_ple_prefetch,
         }
+        if self.fp32_head_logits:
+            config["fp32_head_logits"] = True
+        return config

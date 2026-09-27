@@ -8,7 +8,6 @@ version-pinned MLX image/video runtimes only when explicitly invoked.
 from __future__ import annotations
 
 import hashlib
-import importlib.util
 import io
 import json
 import os
@@ -18,12 +17,26 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .mlx_vlm_pin import MLX_VLM_REVISION, require_pinned_mlx_vlm
+
 QWEN_REVISION = "790c92633540aa0cb11d9abf19eb46d861714758"
 GGUF_REVISION = "40319fb15542f0ad22921e0124a191a8a935a60a"
 LTX_REVISION = "5e6e71018ee1756ed329b697a7b4aedc934dfce9"
 LTX_RUNTIME_REVISION = "fbc4b0524dd1e01da2d07a44e14dd9dfe0a74d5e"
 LTX_CONVERTER_SHA256 = "2c880778d7772275b96f4eef4ee32376a29de0c94de52f4ca2b0aaccad9af98e"
-QWEN_BACKEND_REVISION = "cc8b86f110278505296d461f612ee41c21d5fd65"
+# The Qwen image backend runs on the one mlx-vlm pin shared by every mlx-vlm
+# route (``mlx_vlm_pin.MLX_VLM_REVISION``).
+QWEN_BACKEND_REVISION = MLX_VLM_REVISION
+# mlx-vlm revisions whose Qwen-Image conversion code (``mlx_vlm/models/qwen_image``
+# convert/weights/config) is identical, so an official 8-bit conversion
+# recorded under either is accepted.  cc8b86f1 is the local fork commit the
+# existing 8-bit artifact was converted and first qualified on (upstream
+# 884bbd93 plus a cache.py-only change); its qwen_image tree differs from
+# 67599f2e only by the num_images batching of #2355.
+QWEN_CONVERSION_BACKEND_REVISIONS = frozenset({
+    "cc8b86f110278505296d461f612ee41c21d5fd65",
+    MLX_VLM_REVISION,
+})
 
 
 @dataclass(frozen=True, slots=True)
@@ -110,7 +123,7 @@ def inspect_qwen_image21(path: str | Path) -> MediaArtifact:
         if (
             proof.get("source_repo") != "Qwen/Qwen-Image-2.1"
             or proof.get("source_revision") != QWEN_REVISION
-            or proof.get("backend_revision") != QWEN_BACKEND_REVISION
+            or proof.get("backend_revision") not in QWEN_CONVERSION_BACKEND_REVISIONS
             or proof.get("quantization") != quantization
             or transformer.get("quantization") != quantization
             or transformer.get("mlx_format") is not True
@@ -193,19 +206,12 @@ def inspect_ltx25_source(path: str | Path) -> MediaArtifact:
     return MediaArtifact("ltx-2.5-distilled-source", root, LTX_REVISION, _fingerprint(manifest))
 
 
-def _verify_qwen_backend_revision() -> None:
-    spec = importlib.util.find_spec("mlx_vlm")
-    if spec is None or spec.origin is None:
-        raise RuntimeError("mlx-vlm Qwen image backend is not installed")
-    root = Path(spec.origin).resolve().parents[1]
-    if not (root / ".git").exists():
-        raise RuntimeError("mlx-vlm backend must be installed from the pinned local checkout")
-    revision = subprocess.run(
-        ["git", "-C", str(root), "rev-parse", "HEAD"],
-        check=True, capture_output=True, text=True, timeout=5,
-    ).stdout.strip()
-    if revision != QWEN_BACKEND_REVISION:
-        raise RuntimeError("mlx-vlm Qwen image backend revision differs from the inspected source")
+def _verify_qwen_backend_revision() -> dict:
+    """Fail closed unless the installed mlx-vlm is the shared pinned revision."""
+    try:
+        return require_pinned_mlx_vlm()
+    except RuntimeError as exc:
+        raise RuntimeError(f"mlx-vlm Qwen image backend: {exc}") from None
 
 
 class QwenImage21Adapter:

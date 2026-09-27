@@ -14,15 +14,18 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
+from mlx2.adapters import generative_media, mlx_vlm_pin
 from mlx2.adapters.generative_media import (
     GGUF_REVISION,
     LTX_CONVERTER_SHA256,
     LTX_REVISION,
     LTX_RUNTIME_REVISION,
     QWEN_BACKEND_REVISION,
+    QWEN_CONVERSION_BACKEND_REVISIONS,
     QWEN_REVISION,
     LTX25Adapter,
     QwenImage21Adapter,
+    _verify_qwen_backend_revision,
     inspect_ltx25_source,
     inspect_qwen_image21,
 )
@@ -110,20 +113,7 @@ def test_ltx_distilled_source_requires_all_pipeline_components(tmp_path: Path) -
 
 
 def _stub_qwen_request_type(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Provide mlx-vlm's request dataclass when the optional extra is absent.
-
-    The injected backend replaces every model call, but ``generate_image``
-    still builds its request from ``mlx_vlm.generate.image``.  mlx-vlm is the
-    optional ``multimodal`` extra and the Qwen image module lives only in the
-    pinned local checkout, so a host without it would otherwise fail on the
-    import rather than on anything this test checks.  Where the real module
-    imports, it is used unchanged.
-    """
-    try:
-        import mlx_vlm.generate.image  # noqa: F401
-        return
-    except ImportError:
-        pass
+    """Stub the request class so this CPU test never imports real MLX."""
     import types
 
     image = types.ModuleType("mlx_vlm.generate.image")
@@ -159,7 +149,29 @@ def test_qwen_adapter_encodes_backend_pixels_without_model_load(tmp_path: Path, 
         adapter.edit_image("change the image", [tmp_path / "missing.png"], width=256, height=256)
 
 
-def test_official_qwen_8bit_requires_pinned_quantization_and_hashes(tmp_path: Path) -> None:
+def test_qwen_backend_uses_the_shared_mlx_vlm_pin(monkeypatch: pytest.MonkeyPatch) -> None:
+    assert QWEN_BACKEND_REVISION == mlx_vlm_pin.MLX_VLM_REVISION
+    runtime = {"version": "0.7.3", "source": "file:///x", "editable": True, "revision": mlx_vlm_pin.MLX_VLM_REVISION}
+    monkeypatch.setattr(mlx_vlm_pin, "mlx_vlm_runtime", lambda: runtime)
+    assert _verify_qwen_backend_revision() is runtime
+    # The fork commit the 8-bit artifact was converted on is not a valid runtime.
+    monkeypatch.setattr(mlx_vlm_pin, "mlx_vlm_runtime", lambda: {**runtime, "revision": "cc8b86f110278505296d461f612ee41c21d5fd65"})
+    with pytest.raises(RuntimeError, match="Qwen image backend.*not the pinned revision"):
+        _verify_qwen_backend_revision()
+    monkeypatch.setattr(mlx_vlm_pin, "mlx_vlm_runtime", lambda: None)
+    with pytest.raises(RuntimeError, match="Qwen image backend"):
+        _verify_qwen_backend_revision()
+
+
+def test_qwen_model_load_fails_closed_off_pin(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(generative_media, "inspect_qwen_image21", lambda path: SimpleNamespace(path=tmp_path))
+    monkeypatch.setattr(mlx_vlm_pin, "mlx_vlm_runtime", lambda: {"version": "0.7.2", "source": "index", "editable": False, "revision": None})
+    with pytest.raises(RuntimeError, match="not the pinned revision"):
+        QwenImage21Adapter(tmp_path)._model(edit=False)
+
+
+@pytest.mark.parametrize("backend", sorted(QWEN_CONVERSION_BACKEND_REVISIONS) + ["0" * 40])
+def test_official_qwen_8bit_requires_pinned_quantization_and_hashes(tmp_path: Path, backend: str) -> None:
     quant = {"group_size": 64, "bits": 8, "mode": "affine"}
     _write(tmp_path / "model_index.json", b'{"_class_name":"QwenImage21Pipeline"}')
     _write(tmp_path / "transformer/config.json", json.dumps({
@@ -174,9 +186,13 @@ def test_official_qwen_8bit_requires_pinned_quantization_and_hashes(tmp_path: Pa
     }
     (tmp_path / "mlx2-official-conversion.json").write_text(json.dumps({
         "source_repo": "Qwen/Qwen-Image-2.1", "source_revision": QWEN_REVISION,
-        "backend_revision": QWEN_BACKEND_REVISION, "quantization": quant,
+        "backend_revision": backend, "quantization": quant,
         "output_files": files,
     }))
+    if backend not in QWEN_CONVERSION_BACKEND_REVISIONS:
+        with pytest.raises(ValueError, match="conversion identity differs"):
+            inspect_qwen_image21(tmp_path)
+        return
     assert inspect_qwen_image21(tmp_path).kind == "qwen-image-2.1-official-mlx-8bit"
     _write(tmp_path / "transformer/model.safetensors", b"y")
     with pytest.raises(ValueError, match="output changed"):

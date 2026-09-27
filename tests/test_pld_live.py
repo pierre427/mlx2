@@ -1,6 +1,6 @@
 import mlx.core as mx
 
-from mlx2.runtime.models.cache import KVCache
+from mlx2.runtime.models.cache import BatchKVCache, KVCache
 from mlx2.runtime.pld import PromptLookupBatchGenerator
 
 
@@ -57,6 +57,34 @@ def test_live_prompt_lookup_accepts_exact_indexed_continuation():
     assert final.prompt_cache[0].offset == len(final.all_tokens) == 6
 
 
+def test_recent_prompt_segments_include_exact_apcv2_prefix_tokens():
+    model = _PatternModel()
+    cache = [KVCache()]
+    model(mx.array([[1, 2, 1, 2]], dtype=mx.uint32), cache=cache)
+    generator = PromptLookupBatchGenerator(
+        model, prefill_step_size=16,
+        prompt_lookup={
+            "num_draft": 2, "ngram_min": 2, "ngram_max": 2,
+            "recent_prompt_segments": 2, "prompt_segment_tokens": 3,
+            "adaptive": False,
+        },
+    )
+    uid = generator.insert(
+        [[1, 2, 1, 2]], all_tokens=[[1, 2, 1, 2]],
+        max_tokens=[3], caches=[cache],
+    )[0]
+    assert generator.lanes[uid].proposer.indexed_start == 2
+    emitted, final = [], None
+    while final is None:
+        _prompts, responses = generator.next()
+        emitted.extend(response.token for response in responses)
+        final = next((response for response in responses if response.finish_reason), None)
+    assert emitted == [1, 2, 1]
+    assert final.speculative_receipt["recent_prompt_segments"] == 2
+    assert final.speculative_receipt["prompt_segment_tokens"] == 3
+    assert final.speculative_receipt["accepted"] > 0
+
+
 def test_live_prompt_lookup_rejection_rewinds_to_committed_boundary():
     emitted, final = _run(_PatternModel(reject=True), 2)
     assert emitted == [4, 4]
@@ -92,6 +120,184 @@ def test_deferred_admission_probes_on_plain_path_then_activates():
     # closed boundary is the first one allowed to run a verify span.
     _, third = generator.next()
     assert any(response.from_draft for response in third)
+
+
+def test_deferred_admission_probe_stride_keeps_plain_rounds_unprobed():
+    generator = PromptLookupBatchGenerator(
+        _PatternModel(),
+        prefill_step_size=16,
+        prompt_lookup={
+            "num_draft": 2, "ngram_min": 2, "ngram_max": 2,
+            "deferred_admission": True, "admission_probe_stride": 3,
+            "admission_window": 2, "admission_gate": 1.0,
+            "adaptive_warmup": 100,
+        },
+    )
+    generator.insert([[1, 2, 1, 2]], max_tokens=[8], caches=[[KVCache()]])
+    generator.next()  # prefill
+    _, first = generator.next()  # token 0 is probed
+    assert first[-1].speculative_receipt["admission_probe_tokens"] == 1
+    _, second = generator.next()  # token 1 is ordinary without lookup
+    assert second[-1].speculative_receipt["admission_probe_tokens"] == 1
+    assert second[-1].speculative_receipt["lookup_calls"] == 1
+    _, third = generator.next()  # token 2 is ordinary without lookup
+    assert third[-1].speculative_receipt["admission_probe_tokens"] == 1
+    _, fourth = generator.next()  # token 3 is probed; window can activate
+    assert fourth[-1].speculative_receipt["admission_probe_tokens"] == 2
+    assert fourth[-1].speculative_receipt["admission_activations"] == 1
+
+
+def test_cost_aware_latch_uses_shadow_copies_and_keeps_exact_output():
+    policy = {
+        "num_draft": 2, "ngram_min": 2, "ngram_max": 2,
+        "cost_aware_admission": True, "cost_shadow_span": 2,
+        "cost_probe_stride": 2, "cost_shadow_window": 2,
+        "cost_plain_rounds": 4, "cost_explore_rounds": 2,
+    }
+    generator = PromptLookupBatchGenerator(
+        _PatternModel(), prefill_step_size=16, prompt_lookup=policy,
+    )
+    generator.insert([[1, 2] * 6], max_tokens=[20], caches=[[KVCache()]])
+    emitted, final = [], None
+    while final is None:
+        _prompts, responses = generator.next()
+        emitted.extend(response.token for response in responses)
+        final = next((response for response in responses if response.finish_reason), None)
+    assert emitted == [1, 2] * 10
+    assert final.prompt_cache[0].offset == len(final.all_tokens)
+    latch = final.speculative_receipt["cost_latch"]
+    assert latch["shadow_trials"] >= 2 and latch["shadow_matches"] >= 4
+    assert latch["activations"] >= 1
+    assert latch["plain_ns"] > 0 and latch["plain_tokens"] >= 4
+    assert latch["verify_ns"] > 0 and latch["verify_tokens"] >= 1
+    assert generator.scheduler_stats["pld_parked_direct_rounds"] >= 4
+
+
+def test_cost_aware_latch_leaves_novel_lane_parked_with_sparse_lookups():
+    class NovelModel:
+        def __call__(self, tokens, *, cache):
+            values = tokens.astype(mx.float32)[:, None, :, None]
+            cache[0].update_and_fetch(values, values)
+            predicted = (tokens + 1) % 32
+            return mx.where(
+                mx.arange(32)[None, None, :] == predicted[..., None], 20.0, -20.0
+            )
+
+    generator = PromptLookupBatchGenerator(
+        NovelModel(), prefill_step_size=16,
+        prompt_lookup={
+            "num_draft": 2, "ngram_min": 2, "ngram_max": 2,
+            "cost_aware_admission": True, "cost_shadow_span": 2,
+            "cost_probe_stride": 4, "cost_plain_rounds": 4,
+        },
+    )
+    generator.insert([list(range(1, 13))], max_tokens=[12], caches=[[KVCache()]])
+    final = None
+    while final is None:
+        _prompts, responses = generator.next()
+        final = next((response for response in responses if response.finish_reason), None)
+    receipt = final.speculative_receipt
+    assert receipt["execution"] == "ordinary_target"
+    assert receipt["lookup_calls"] <= 3
+    assert receipt["cost_latch"]["state"] == "parked"
+    assert receipt["cost_latch"]["activations"] == 0
+    assert generator.scheduler_stats["pld_recovery_checkpoint_captures"] == 1
+    assert generator.scheduler_stats["pld_parked_direct_rounds"] == 12
+
+
+def test_cost_latch_uses_ordinary_b1_full_attention_mask():
+    class MaskSensitiveModel:
+        def __call__(self, tokens, *, cache):
+            mask = cache[0].make_mask(
+                tokens.shape[1], return_array=False, window_size=None,
+            )
+            values = tokens.astype(mx.float32)[:, None, :, None]
+            cache[0].update_and_fetch(values, values)
+            chosen = 2 if isinstance(mask, mx.array) else 1
+            return mx.where(
+                mx.arange(8)[None, None, :] == chosen, 20.0, -20.0,
+            ) * mx.ones((*tokens.shape, 1))
+
+    cache = [KVCache()]
+    generator = PromptLookupBatchGenerator(
+        MaskSensitiveModel(), prefill_step_size=16,
+        prompt_lookup={
+            "num_draft": 2, "cost_aware_admission": True,
+            "cost_shadow_span": 2, "cost_reprobe_interval": 0,
+        },
+    )
+    generator.insert([[3, 4, 5]], max_tokens=[2], caches=[cache],
+                     prompt_lookup_configs=[{"memory_max_draft": 0}])
+    assert cache[0].make_mask(3, return_array=False, window_size=None) == "causal"
+    mask = cache[0].make_mask(1, return_array=False, window_size=None)
+    reference = BatchKVCache([0]).make_mask(1, return_array=False, window_size=None)
+    assert mask.shape == reference.shape == (1, 1, 1, 1)
+    assert bool(mx.array_equal(mask, reference))
+    tokens, final = [], None
+    while final is None:
+        _, responses = generator.next()
+        tokens.extend(response.token for response in responses)
+        final = next((response for response in responses if response.finish_reason), None)
+    assert tokens == [2, 2]
+    assert final.speculative_receipt["proposed"] == 0
+    assert final.speculative_receipt["ordinary_b1_mask_calls"] >= 2
+
+
+def test_cost_latch_does_not_activate_when_admission_cannot_fit_shadow_span():
+    generator = PromptLookupBatchGenerator(
+        _PatternModel(), prefill_step_size=16,
+        prompt_lookup={
+            "num_draft": 4, "ngram_min": 2, "ngram_max": 2,
+            "cost_aware_admission": True, "cost_shadow_span": 4,
+            "cost_reprobe_interval": 0,
+        },
+    )
+    generator.insert([[1, 2] * 6], max_tokens=[12], caches=[[KVCache()]],
+                     prompt_lookup_configs=[{"memory_max_draft": 0}])
+    final = None
+    while final is None:
+        _prompts, responses = generator.next()
+        final = next((response for response in responses if response.finish_reason), None)
+    receipt = final.speculative_receipt
+    assert receipt["proposed"] == receipt["lookup_calls"] == 0
+    assert receipt["cost_latch"]["activations"] == 0
+    assert receipt["cost_latch"]["memory_blocked_rounds"] == 12
+
+
+def test_cost_latch_keeps_concurrent_lanes_at_physical_width_one():
+    generator = PromptLookupBatchGenerator(
+        _PatternModel(), completion_batch_size=2, prefill_step_size=16,
+        prompt_lookup={
+            "num_draft": 2, "ngram_min": 2, "ngram_max": 2,
+            "cost_aware_admission": True, "cost_shadow_span": 2,
+            "cost_probe_stride": 2, "cost_shadow_window": 2,
+            "cost_plain_rounds": 4, "cost_explore_rounds": 2,
+        },
+    )
+    uids = generator.insert(
+        [[1, 2] * 6, [1, 2] * 6], max_tokens=[20, 20],
+        caches=[[KVCache()], [KVCache()]],
+    )
+    tokens = {uid: [] for uid in uids}
+    finals = {}
+    for _ in range(100):
+        _, responses = generator.next()
+        for response in responses:
+            tokens[response.uid].append(response.token)
+            if response.finish_reason:
+                finals[response.uid] = response
+        if len(finals) == 2:
+            break
+    assert len(finals) == 2
+    assert all(tokens[uid] == [1, 2] * 10 for uid in uids)
+    assert all(finals[uid].speculative_receipt["target_width"] == 1 for uid in uids)
+    assert all(
+        finals[uid].speculative_receipt["cost_width1_cohort_splits"] > 0
+        for uid in uids
+    )
+    assert generator.scheduler_stats["pld_cost_width1_cohort_splits"] > 0
+    assert generator.scheduler_stats["pld_batched_max_width"] <= 1
+    assert generator.scheduler_stats["pld_proposed"] > 0
 
 
 def test_cliff_aware_pld_extends_past_the_configured_plateau():

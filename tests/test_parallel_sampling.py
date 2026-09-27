@@ -24,7 +24,12 @@ def test_nonstream_sample_collector_keeps_receipt_and_usage():
     job = SimpleNamespace(events=events, prompt_tokens=3, completion_tokens=1)
     choice, usage, receipt = collect_nonstream_job(job, {}, chat=True)
     assert choice["message"]["content"] == "yes"
-    assert usage == {"prompt_tokens": 3, "completion_tokens": 1, "total_tokens": 4}
+    assert usage == {
+        "prompt_tokens": 3,
+        "completion_tokens": 1,
+        "total_tokens": 4,
+        "completion_tokens_details": {"reasoning_tokens": 0},
+    }
     assert receipt == {"route": "ordinary"}
 
 

@@ -185,6 +185,12 @@ def test_mtp_quantized_target_matches_ordinary_quantized_route(host):
     assert status["approximate_kv"]["mtp_lanes"] == 1
     assert status["approximate_kv"]["compose_mtp"] is True
     assert status["approximate_kv"]["draft_cache"] == "exact"
+    assert status["settings"]["qsdpa_verify_kernel"] == {
+        "enabled": True,
+        "min_context": 32768,
+    }
+    assert "verify_kernel_calls" in status["qsdpa_verify"]["counts"]
+    assert "composed_calls" in status["qsdpa_verify"]["counts"]
     assert status["apcv2"]["stores"] == 0
     # Mechanism: the quantized segmented view carried target attention on the
     # true-batched path; the draft (MTP head) attention stayed on exact rows.
@@ -293,6 +299,20 @@ def test_qualification_demands_fidelity_and_mtp_observation():
         "feature_approximate_kv_fidelity",
         "feature_approximate_kv_mtp",
     } <= required_feature_checks(composed)
+    selected_verify = {
+        **composed,
+        "max_context": 65536,
+        "qsdpa_verify_kernel": {"enabled": True, "min_context": 32768},
+    }
+    assert "feature_qsdpa_verify_kernel" in required_feature_checks(selected_verify)
+    assert "feature_qsdpa_verify_kernel" not in required_feature_checks({
+        **selected_verify,
+        "max_context": 16384,
+    })
+    assert "feature_qsdpa_verify_kernel" not in required_feature_checks({
+        **selected_verify,
+        "qsdpa_verify_kernel": {"enabled": False, "min_context": 32768},
+    })
     assert not {
         "feature_approximate_kv_fidelity", "feature_approximate_kv_mtp"
     } & required_feature_checks({"mtp": False, "approximate_kv": {"enabled": False}})

@@ -194,11 +194,13 @@ class OutputParser:
         self._code = _CodeSpans()
         # Whitespace-only content after a tool call is held back: the newline
         # between two parallel calls is template structure, not an answer.  It
-        # is dropped at the end of the output, and before another call when no
-        # text has been shown; otherwise it goes out with the next text.
+        # is dropped at the end of the output or when the next call parses;
+        # otherwise it goes out with the next text.
         self._after_call = False
         self._pending_space = ""
         self._shown_text = False
+        # Set only for the duration of :meth:`finish` on a ``length`` stop.
+        self._length_finish = False
 
     def _emit(self, events, text):
         if self.channel == "content":
@@ -246,6 +248,21 @@ class OutputParser:
         if stop_hit:
             self.stopped = True
         return visible, stop_hit
+
+    def finish(self, text, finish_reason):
+        """Push the last text of a generation that ended with ``finish_reason``.
+
+        The serving loop calls this instead of ``push(..., final=True)``.  A
+        ``length`` finish (``max_tokens``) that lands inside a tool call is a
+        requested stop, not malformed output: the partial call is dropped, as
+        for a client stop string and in the North parser, and the finish
+        reason stays ``length``.  A half-formed call is never emitted.
+        """
+        self._length_finish = finish_reason == "length"
+        try:
+            return self.push(text, final=True)
+        finally:
+            self._length_finish = False
 
     def push(self, text, *, final=False):
         if self.stopped:
@@ -307,14 +324,19 @@ class OutputParser:
                     # on to a later closer, and fails at the first one unless
                     # a later one parses.
                     end = self.buffer.find("</tool_call>", end + 1)
-                if end < 0 and first >= 0 and final and not stop_hit:
-                    end = first  # no later closer: the call is malformed
+                truncated = final and (stop_hit or self._length_finish)
+                if end < 0 and first >= 0 and final and not truncated:
+                    # No later closer: the call is malformed.  (Under a stop
+                    # the only closer seen was quoted: the call is unfinished.)
+                    end = first
                 if end < 0:
-                    if final and stop_hit:
-                        # The client's stop string cut the call short.  That is
-                        # a requested stop, not a malformed model output: drop
-                        # the partial call rather than fail the request.
+                    if truncated:
+                        # The client's stop string or max_tokens cut the call
+                        # short.  That is a requested stop, not a malformed
+                        # model output: drop the partial call (it is neither
+                        # a call nor answer text) rather than fail the request.
                         self.buffer = ""
+                        self.channel = "content"
                         break
                     if final:
                         if self.constrained_tools or not self.tolerant_tool_markers:
@@ -371,6 +393,10 @@ class OutputParser:
                     self.buffer = self.buffer[end + len("</tool_call>") :]
                     self.channel = "content"
                     continue
+                # A parsed call confirms that pending whitespace separated two
+                # calls, even if answer text appeared before the first one.
+                # Keep it for the tolerant raw-content fallback above.
+                self._pending_space = ""
                 events.extend(parsed_events)
                 self.tool_count += len(parsed_events)
                 self.buffer = self.buffer[end + len("</tool_call>") :]
@@ -380,10 +406,10 @@ class OutputParser:
             markers = {}
             if self._reasoning_open:
                 markers[THINKING_CLOSE_MARKER] = "content"
-            if self.tools and (
-                not self.tolerant_tool_markers
-                or self.channel != "reasoning_content"
-            ):
+            # Tool markup inside reasoning is the model thinking about a call,
+            # never a call (vLLM parses tools from content only), under either
+            # marker policy.  A call after ``</think>`` still parses.
+            if self.tools and self.channel != "reasoning_content":
                 markers["<tool_call>"] = "tool"
             matches = [(self.buffer.find(m), m) for m in markers if m in self.buffer]
             if matches:

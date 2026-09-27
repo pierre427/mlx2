@@ -16,7 +16,7 @@ from scripts.bench_qwen4_gdn_replay_cpu import (
 )
 
 
-@pytest.mark.parametrize("width", [3, 8])
+@pytest.mark.parametrize("width", list(range(2, fused.MAX_VERIFY_WIDTH_PROVEN + 1)))
 def test_cpu_reconstruction_matches_every_partial_acceptance(width):
     initial, keys, corrections, decay = _case(width)
     snapshots = replay_states(initial, keys, corrections, decay)
@@ -25,7 +25,7 @@ def test_cpu_reconstruction_matches_every_partial_acceptance(width):
         assert np.array_equal(actual, snapshots[accepted - 1])
 
 
-@pytest.mark.parametrize("width", [3, 8])
+@pytest.mark.parametrize("width", list(range(2, fused.MAX_VERIFY_WIDTH_PROVEN + 1)))
 def test_cpu_reconstruction_matches_state_dependent_gdn_corrections(width):
     """Exercise the part ReplaySSM depends on: ``u`` comes from live state."""
     rng = np.random.default_rng(100 + width)
@@ -54,7 +54,7 @@ def test_cpu_reconstruction_matches_state_dependent_gdn_corrections(width):
         assert np.array_equal(actual, expected[accepted - 1])
 
 
-@pytest.mark.parametrize("width", [3, 8])
+@pytest.mark.parametrize("width", list(range(2, fused.MAX_VERIFY_WIDTH_PROVEN + 1)))
 def test_conv_window_is_derived_from_checkpoint_and_qkv(width):
     keep, dim = 3, 7
     initial = np.arange(keep * dim, dtype=np.float32).reshape(keep, dim)

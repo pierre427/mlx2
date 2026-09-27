@@ -57,6 +57,7 @@ def _restore_levers():
     xing4_0.set_compile_mhc(True)
     xing4_0.set_absorbed_max_query_override(None)
     xing4_0.set_mhc_kernel(True)
+    xing4_0.set_fused_mla(False)
 
 
 def close(a, b, **kw):
@@ -64,6 +65,14 @@ def close(a, b, **kw):
 
 
 # ----------------------------------------------------------------- parity
+
+
+def test_unqualified_fused_mla_rejects_cpu_before_cache_append(model, ref):
+    cache = model.make_cache()
+    xing4_0.set_fused_mla(True)
+    with pytest.raises(ValueError, match="before cache append"):
+        model(ref["ids_a"][:, :1], cache=cache)
+    assert all(layer.offset == 0 for layer in cache)
 
 
 @pytest.mark.parametrize("seq", ["a", "b"])

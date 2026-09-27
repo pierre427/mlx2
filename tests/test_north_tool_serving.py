@@ -230,10 +230,72 @@ def test_north_required_and_named_force_action_after_optional_thinking(
             "name": "weather",
             "arguments": '{"city": "Toronto"}',
         }
-        assert choice["finish_reason"] == "tool_calls"
+        # The fake batch ends every script on max_tokens, right after the
+        # call: the call is kept and the truncation is still reported.
+        assert choice["finish_reason"] == "length"
         assert batch.observed_processor_counts[-1] == 1
     finally:
         engine.close()
+
+
+def test_complete_call_then_max_tokens_mid_second_call_reports_length(monkeypatch):
+    # One call completes, then max_tokens cuts a second one off.  The complete
+    # call is kept, the partial one dropped, and finish_reason is "length"
+    # (not "tool_calls"): the client must learn the turn was truncated.
+    script = [10, 11, 10, 12]
+    request = {
+        "messages": [{"role": "user", "content": "Weather in Toronto?"}],
+        "tools": [TOOL],
+        "enable_thinking": False,
+        "temperature": 0,
+        "max_tokens": len(script),
+    }
+    engine, _ = _engine(monkeypatch, script, use_processors=False)
+    try:
+        choice, _, _ = collect_nonstream_job(engine.submit(request), request, chat=True)
+    finally:
+        engine.close()
+    assert choice["finish_reason"] == "length"
+    assert [call["function"] for call in choice["message"]["tool_calls"]] == [
+        {"name": "weather", "arguments": '{"city": "Toronto"}'}
+    ]
+
+    engine, _ = _engine(monkeypatch, script, use_processors=False)
+    server = ThreadingHTTPServer(("127.0.0.1", 0), handler_for(engine))
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        http = Request(
+            f"http://127.0.0.1:{server.server_port}/v1/chat/completions",
+            data=json.dumps({**request, "model": "fake", "stream": True}).encode(),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urlopen(http) as response:
+            chunks = [
+                json.loads(line[6:])
+                for line in response.read().decode().splitlines()
+                if line.startswith("data: {")
+            ]
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
+        engine.close()
+    finishes = [
+        c["choices"][0]["finish_reason"]
+        for c in chunks
+        if c.get("choices") and c["choices"][0].get("finish_reason")
+    ]
+    streamed = [
+        call
+        for c in chunks
+        if c.get("choices")
+        for call in c["choices"][0].get("delta", {}).get("tool_calls") or ()
+    ]
+    assert finishes == ["length"]
+    assert len({call["index"] for call in streamed}) == 1
+    assert streamed[0]["function"]["name"] == "weather"
 
 
 def test_anthropic_required_partial_action_at_budget_is_max_tokens(monkeypatch):

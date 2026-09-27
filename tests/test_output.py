@@ -3,15 +3,15 @@ import json
 import pytest
 
 from mlx2.adapters.flash_next import FlashNextAdapter
-from mlx2.adapters.gemma4 import Gemma431BAdapter, Gemma4A4BAdapter
+from mlx2.adapters.gemma4 import Gemma4A4BAdapter, Gemma431BAdapter
 from mlx2.adapters.laguna_xs21 import LagunaXS21Adapter
 from mlx2.adapters.mlx_vlm import Gemma3nAdapter, MiniCPMOAdapter
 from mlx2.adapters.muse_glimmer import MuseGlimmerAdapter
 from mlx2.adapters.north_mini_code import NorthMiniCodeAdapter
 from mlx2.adapters.xing import XingAdapter
+from mlx2.memory import available_execution_bytes
 from mlx2.output import OutputParser
 from mlx2.runtime.tool_parsers.qwen3_coder import parse_tool_call
-from mlx2.memory import available_execution_bytes
 
 
 def _adapter_parser(adapter_type):
@@ -342,7 +342,8 @@ def test_model_truncated_tool_call_still_fails_closed_without_a_stop():
         parser.push("<tool_call><function=sum>", final=True)
 
 
-def test_tool_markers_inside_reasoning_are_never_executable():
+@pytest.mark.parametrize("tolerant", [False, True])
+def test_tool_markers_inside_reasoning_are_never_executable(tolerant):
     tools = [{"type": "function", "function": {"name": "sum", "parameters": {}}}]
     text = (
         "<think>consider <tool_call><function=sum></function></tool_call> carefully"
@@ -351,13 +352,113 @@ def test_tool_markers_inside_reasoning_are_never_executable():
     for split in range(len(text) + 1):
         parser = OutputParser(
             chat=True, thinking=True, tools=tools, parse_tool=parse_tool_call,
-            tolerant_tool_markers=True,
+            tolerant_tool_markers=tolerant,
         )
         events = parser.push(text[:split]) + parser.push(text[split:], final=True)
         assert not any(event.get("tool_calls") for event in events)
         reasoning = "".join(event.get("reasoning_content", "") for event in events)
         assert "<tool_call>" in reasoning and "<function=sum>" in reasoning
         assert "".join(event.get("content", "") for event in events) == "answer"
+
+
+WEATHER = [
+    {
+        "type": "function",
+        "function": {
+            "name": "get_weather",
+            "parameters": {"type": "object", "properties": {"city": {"type": "string"}}},
+        },
+    }
+]
+
+
+def _collect(events):
+    content = "".join(event.get("content", "") for event in events)
+    reasoning = "".join(event.get("reasoning_content", "") for event in events)
+    calls = [call for event in events for call in event.get("tool_calls", ())]
+    return content, reasoning, calls
+
+
+@pytest.mark.parametrize(
+    "policy",
+    [{}, {"tolerant_tool_markers": True}, {"constrained_tools": True}],
+)
+def test_max_tokens_inside_a_tool_call_drops_the_partial_call(policy):
+    # omlx #3868: a length stop mid-call was a 502 under the default policy.
+    text = "Sure.<tool_call>\n<function=get_weather>\n<parameter=city>\nPar"
+    for split in range(len(text) + 1):  # streaming, split at every boundary
+        parser = OutputParser(
+            chat=True, tools=WEATHER, parse_tool=parse_tool_call, **policy
+        )
+        events = parser.push(text[:split]) + parser.finish(text[split:], "length")
+        assert _collect(events) == ("Sure.", "", [])
+    parser = OutputParser(chat=True, tools=WEATHER, parse_tool=parse_tool_call, **policy)
+    assert _collect(parser.finish(text, "length")) == ("Sure.", "", [])
+    assert parser.tool_call_parse_fallbacks == 0
+    # The flag is scoped to that one call: an EOS-cut call still fails closed.
+    if not policy.get("tolerant_tool_markers"):
+        parser = OutputParser(
+            chat=True, tools=WEATHER, parse_tool=parse_tool_call, **policy
+        )
+        with pytest.raises(ValueError, match="incomplete"):
+            parser.finish(text, "stop")
+
+
+def test_max_tokens_after_a_complete_call_keeps_the_call():
+    call = (
+        "<tool_call>\n<function=get_weather>\n<parameter=city>\nParis\n"
+        "</parameter>\n</function>\n</tool_call>"
+    )
+    text = call + "\n<tool_call>\n<function=get_we"
+    for split in range(len(text) + 1):
+        parser = OutputParser(chat=True, tools=WEATHER, parse_tool=parse_tool_call)
+        events = parser.push(text[:split]) + parser.finish(text[split:], "length")
+        content, _, calls = _collect(events)
+        assert content == ""
+        assert [c["function"]["name"] for c in calls] == ["get_weather"]
+        assert json.loads(calls[0]["function"]["arguments"]) == {"city": "Paris"}
+
+
+def test_finish_without_length_matches_a_final_push():
+    text = "<think>plan</think>Answer 4"
+    streamed = OutputParser(chat=True, tools=WEATHER, parse_tool=parse_tool_call)
+    finished = OutputParser(chat=True, tools=WEATHER, parse_tool=parse_tool_call)
+    assert streamed.push(text, final=True) == finished.finish(text, "stop")
+
+
+@pytest.mark.parametrize("tolerant", [False, True])
+def test_literal_tool_marker_in_reasoning_then_a_real_call(tolerant):
+    # A marker that only appears in reasoning is prose, never a call (and
+    # never a 502); a real call after ``</think>`` still parses.
+    prose = "I could emit <tool_call> here but won't.</think>Answer 4"
+    call = (
+        "I could emit <tool_call> here.</think><tool_call>\n<function=get_weather>\n"
+        "<parameter=city>\nParis\n</parameter>\n</function>\n</tool_call>"
+    )
+    for split in range(len(prose) + 1):
+        parser = OutputParser(
+            chat=True, thinking=True, tools=WEATHER, parse_tool=parse_tool_call,
+            tolerant_tool_markers=tolerant,
+        )
+        events = parser.push(prose[:split]) + parser.push(prose[split:], final=True)
+        assert _collect(events) == (
+            "Answer 4", "I could emit <tool_call> here but won't.", []
+        )
+    for split in range(len(call) + 1):
+        parser = OutputParser(
+            chat=True, thinking=True, tools=WEATHER, parse_tool=parse_tool_call,
+            tolerant_tool_markers=tolerant,
+        )
+        events = parser.push(call[:split]) + parser.push(call[split:], final=True)
+        content, reasoning, calls = _collect(events)
+        assert (content, reasoning) == ("", "I could emit <tool_call> here.")
+        assert [c["function"]["name"] for c in calls] == ["get_weather"]
+    # Non-streaming: the whole output in one push.
+    parser = OutputParser(
+        chat=True, thinking=True, tools=WEATHER, parse_tool=parse_tool_call,
+        tolerant_tool_markers=tolerant,
+    )
+    assert _collect(parser.push(prose, final=True))[2] == []
 
 
 @pytest.mark.parametrize(
@@ -794,8 +895,10 @@ _SUM_CALL = "<tool_call>\n<function=sum>\n<parameter=x>\n1\n</parameter>\n</func
         (f"{_SUM_CALL}\n{_SUM_CALL}", ""),
         (f"{_SUM_CALL}\n{_SUM_CALL}\n", ""),
         (f"{_SUM_CALL}\n\n", ""),
-        # Whitespace between visible text is kept, and text after a call too.
-        (f"A{_SUM_CALL} \n{_SUM_CALL}B", "A \nB"),
+        # Earlier prose must not turn the separator between calls into content.
+        (f"A{_SUM_CALL} \n{_SUM_CALL}B", "AB"),
+        # Whitespace after the last call and before answer text remains visible.
+        (f"A{_SUM_CALL} \n{_SUM_CALL}\nB", "A\nB"),
         (f"{_SUM_CALL}\nDone.", "\nDone."),
         ("Plain answer\n\n", "Plain answer\n\n"),
     ],

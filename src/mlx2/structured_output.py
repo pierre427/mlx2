@@ -89,6 +89,8 @@ _MATCH_TIMEOUT_SECONDS = 0.01
 # budget the request fails closed instead.
 _ALLOWED_BUDGET_SECONDS = 2.0
 _BUDGET_CHECK_INTERVAL = 256
+# Marks a ledger field the processor had not set yet (restored by deletion).
+_LEDGER_UNSET = object()
 # Sampling: stop examining tokens once the unexamined mass is below this
 # fraction of the admissible mass already admitted.  Structured routes are
 # qualified as numerically bounded, not exact; the tail of a 248K-token
@@ -1261,8 +1263,10 @@ class StructuredOutputProcessor:
         # fail-safe: the scanner stays in charge, nothing is left unmasked.
         self.engine = "scanner"
         self.automaton_refusal = None
-        # Masks this processor produced (either engine); deferred passthrough
-        # steps and steps after a failure are not counted.
+        # Masks this processor produced (either engine) for rows an emitted
+        # token was drawn from; deferred passthrough steps, steps after a
+        # failure, and speculative verify rows past the accept point (rewound
+        # through ``restore_verify_ledger``) are not counted.
         self.constrained_steps = 0
         self._automaton = None
         self._trie = None
@@ -1351,6 +1355,43 @@ class StructuredOutputProcessor:
         import copy
 
         return copy.deepcopy(self)(tokens, logits)
+
+    # Receipt- and failure-visible fields a verify row writes.  A speculative
+    # verify window runs this processor at every drafted position before the
+    # accept point is known; the rows past it are never used, so their effects
+    # on these fields are rewound (``processor_probe.VerifyWindow``).  Engine
+    # caches and work counters (``parallel_scans``) are left alone: the work
+    # was done, and memoized decisions stay valid for any later prefix.
+    _VERIFY_LEDGER_FIELDS = (
+        "constrained_steps",
+        "tail_mass_bound",
+        "failure",
+        "failure_context",
+        "constraining",
+        "deferred_tokens",
+        "_generated_token_count",
+        "_recent_generated_ids",
+    )
+
+    def verify_ledger(self):
+        """Snapshot of the fields a verify row can write, for ``restore_verify_ledger``."""
+        return tuple(
+            getattr(self, name, _LEDGER_UNSET) for name in self._VERIFY_LEDGER_FIELDS
+        )
+
+    def restore_verify_ledger(self, ledger):
+        """Rewind the fields to a ``verify_ledger`` snapshot.
+
+        Used to drop the rows of a verify window past the accept point: their
+        masks count no step, widen no tail bound, and a budget overrun or dead
+        end latched there does not fail the request, because no emitted token
+        was drawn from them.
+        """
+        for name, value in zip(self._VERIFY_LEDGER_FIELDS, ledger):
+            if value is _LEDGER_UNSET:
+                self.__dict__.pop(name, None)
+            else:
+                setattr(self, name, value)
 
     def settle(self, generated):
         """Re-derive the deferral receipt from the committed generated ids.
@@ -2209,6 +2250,64 @@ class StructuredOutputProcessor:
         indexes = mx.array(allowed)
         mask = mx.put_along_axis(mask, indexes, mx.zeros(indexes.shape, dtype=logits.dtype), axis=-1)
         return logits + mask
+
+    def acceptance_mask_host(self, tokens, logits_row):
+        """Mask one greedy verify row on the host, without an MLX round trip.
+
+        This deliberately covers only the plain grammar state used by the
+        opt-in B=1 acceptance path. Other framing modes keep the eager path.
+        The scanner and automaton call the same admissibility engines as
+        ``__call__``; the caller keeps only rows reached by acceptance.
+        """
+        import numpy as np
+
+        if self._defer_until is not None or self._envelope is not None:
+            raise ValueError("host acceptance requires an active plain grammar")
+        if self.capture_failure_context:
+            raise ValueError("host acceptance requires a plain grammar without diagnostics")
+        if self.failure is not None:
+            return np.ones(len(logits_row), dtype=bool)
+        token_ids = [int(item) for item in tokens][self.prompt_length :]
+        if any(token in self.eos_ids for token in token_ids):
+            raise ValueError("host acceptance cannot follow a terminal token")
+        self._generated_token_count = len(token_ids)
+        self._recent_generated_ids = tuple(token_ids[-_FAILURE_HISTORY_TOKENS:])
+        token_ids = self._constrained_ids(token_ids)
+        if token_ids is None:
+            raise RuntimeError("plain grammar unexpectedly deferred")
+        width = len(logits_row)
+        if self._automaton is not None:
+            try:
+                allowed = self._automaton_allowed(token_ids)
+            except Exception as exc:  # noqa: BLE001 - same lane-local failure as _mask
+                self._latch_failure(exc, token_ids, logits_row)
+                return np.ones(width, dtype=bool)
+            mask = np.zeros(width, dtype=bool)
+            mask[: min(width, len(allowed))] = allowed[:width]
+        else:
+            prefix = self.constraint.canonicalize(self._grammar_text(token_ids))
+            try:
+                allowed = self._allowed_cache.get(prefix)
+                if allowed is None:
+                    allowed = self._allowed_by_logit_order(prefix, logits_row)
+            except Exception as exc:  # noqa: BLE001 - same lane-local failure as _mask
+                self._latch_failure(exc, token_ids, logits_row, prefix=prefix)
+                return np.ones(width, dtype=bool)
+            mask = np.zeros(width, dtype=bool)
+            mask[[token for token in allowed if 0 <= token < width]] = True
+            if not mask.any():
+                self._latch_failure(
+                    ValueError(
+                        "structured-output grammar admits no token inside the "
+                        "logits vocabulary"
+                    ),
+                    token_ids,
+                    logits_row,
+                    prefix=prefix,
+                )
+                return np.ones(width, dtype=bool)
+        self.constrained_steps += 1
+        return mask
 
     def _bounded_token(self, token_id):
         """Return a small, JSON-safe description of one vocabulary token."""

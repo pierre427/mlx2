@@ -148,6 +148,14 @@ def _flash_next(path: Path, config: dict) -> AdapterResolution:
 def _qwen3_5_dense(path: Path, config: dict) -> AdapterResolution:
     text = config.get("text_config", config)
     topology = (text.get("num_hidden_layers"), text.get("hidden_size"))
+    if topology == (32, 2560):
+        module = importlib.import_module(".qwen35_4b", __package__)
+        artifact = module.inspect_artifact(path)
+        return AdapterResolution(
+            module.Qwen354BAdapter,
+            module.descriptor_for(has_mtp=False),
+            artifact,
+        )
     if topology == (32, 4096):
         module = importlib.import_module(".qwen35_9b", __package__)
         artifact = module.inspect_artifact(path)
@@ -168,6 +176,13 @@ def _qwen3_5_dense(path: Path, config: dict) -> AdapterResolution:
 
 
 def _qwen36_35b(path: Path, config: dict) -> AdapterResolution:
+    text = config.get("text_config", config)
+    if (text.get("num_hidden_layers"), text.get("hidden_size")) == (48, 3072):
+        module = importlib.import_module(".qwen35_122b", __package__)
+        artifact = module.inspect_artifact(path)
+        return AdapterResolution(
+            module.Qwen35122BA10BAdapter, module.QWEN35_122B, artifact
+        )
     module = importlib.import_module(".qwen36_35b", __package__)
     artifact = module.inspect_artifact(path)
     return AdapterResolution(
@@ -193,6 +208,12 @@ def _north_mini_code(path: Path, config: dict) -> AdapterResolution:
 
 
 def _laguna_xs21(path: Path, config: dict) -> AdapterResolution:
+    if (config.get("num_hidden_layers"), config.get("hidden_size")) == (48, 3072):
+        module = importlib.import_module(".laguna_s21", __package__)
+        artifact = module.inspect_artifact(path)
+        return AdapterResolution(
+            module.LagunaS21Adapter, module.LAGUNA_S21, artifact
+        )
     module = importlib.import_module(".laguna_xs21", __package__)
     artifact = module.inspect_artifact(path)
     return AdapterResolution(
@@ -234,6 +255,63 @@ def _gemma4(path: Path, config: dict) -> AdapterResolution:
     return AdapterResolution(module.Gemma431BAdapter, module.GEMMA4_31B, artifact)
 
 
+def _standard_decoder(path: Path, config: dict) -> AdapterResolution:
+    module = importlib.import_module(".standard_decoder", __package__)
+    model_type = config["model_type"]
+    artifact = module.inspect_artifact(path, expected=model_type)
+    return AdapterResolution(
+        module.StandardDecoderAdapter, module.descriptor_for(model_type), artifact
+    )
+
+
+def _agnes(path: Path, config: dict) -> AdapterResolution:
+    module = importlib.import_module(".agnes_3_flash", __package__)
+    artifact = module.inspect_artifact(path)
+    return AdapterResolution(module.Agnes3FlashAdapter, module.DESCRIPTOR, artifact)
+
+
+def _hy_v3(path: Path, config: dict) -> AdapterResolution:
+    module = importlib.import_module(".hy_v3", __package__)
+    artifact = module.inspect_artifact(path)
+    return AdapterResolution(
+        module.HYV3Adapter, module.descriptor_for(reap=artifact["reap"]), artifact
+    )
+
+
+def _gpt_oss(path: Path, config: dict) -> AdapterResolution:
+    module = importlib.import_module(".gpt_oss", __package__)
+    artifact = module.inspect_artifact(path, expected=config["model_type"])
+    if config["model_type"] == "gpt_oss_puzzle":
+        return AdapterResolution(
+            module.GptOssPuzzleAdapter, module.GPT_OSS_PUZZLE, artifact
+        )
+    return AdapterResolution(module.GptOssAdapter, module.GPT_OSS, artifact)
+
+
+def _granite_swa(path: Path, config: dict) -> AdapterResolution:
+    module = importlib.import_module(".granite_swa", __package__)
+    artifact = module.inspect_artifact(path)
+    return AdapterResolution(module.GraniteSWAAdapter, module.DESCRIPTOR, artifact)
+
+
+def _lfm25_vl(path: Path, config: dict) -> AdapterResolution:
+    module = importlib.import_module(".lfm25_vl", __package__)
+    artifact = module.inspect_artifact(path)
+    return AdapterResolution(module.LFM25VLAdapter, module.LFM25_VL, artifact)
+
+
+def _smolvlm2(path: Path, config: dict) -> AdapterResolution:
+    module = importlib.import_module(".smolvlm2", __package__)
+    artifact = module.inspect_artifact(path)
+    return AdapterResolution(module.SmolVLM2CandidateAdapter, module.DESCRIPTOR, artifact)
+
+
+def _qwen25_vl(path: Path, config: dict) -> AdapterResolution:
+    module = importlib.import_module(".qwen25_vl", __package__)
+    artifact = module.inspect_artifact(path)
+    return AdapterResolution(module.Qwen25VLCandidateAdapter, module.DESCRIPTOR, artifact)
+
+
 _RESOLVERS: dict[str, Callable[[Path, dict], AdapterResolution]] = {
     "qwen4_exp": _flash_next,
     "qwen3_5": _qwen3_5_dense,
@@ -247,7 +325,24 @@ _RESOLVERS: dict[str, Callable[[Path, dict], AdapterResolution]] = {
     "gemma3n": _gemma3n,
     "gemma4": _gemma4,
     "minicpmo": _minicpmo,
+    "qwen3": _standard_decoder,
+    "qwen3_moe": _standard_decoder,
+    "qwen2": _standard_decoder,
+    "llama": _standard_decoder,
+    "agnes": _agnes,
+    "hy_v3": _hy_v3,
+    "gpt_oss": _gpt_oss,
+    "gpt_oss_puzzle": _gpt_oss,
+    "granitemoe_swa": _granite_swa,
+    "lfm2_vl": _lfm25_vl,
+    "smolvlm": _smolvlm2,
+    "qwen2_5_vl": _qwen25_vl,
 }
+
+# These source-backed multimodal bridges expose cache-safe candidate contracts,
+# but have no model-path numerical qualification yet. Keep discovery available
+# for qualification runs without silently selecting an unqualified server route.
+_QUALIFICATION_GATED_TYPES = frozenset({"lfm2_vl", "smolvlm", "qwen2_5_vl"})
 
 
 def inspect_model(model_path: str | Path) -> AdapterResolution:
@@ -268,12 +363,37 @@ def inspect_model(model_path: str | Path) -> AdapterResolution:
     return resolver(path, config)
 
 
-def resolve_adapter(model_path: str | Path, *, mtp: bool = False) -> type:
+def inspect_audio_model(model_path: str | Path) -> AdapterResolution:
+    """Resolve an audio classifier without admitting it to text serving."""
+    path = Path(model_path).expanduser().resolve()
+    config = json.loads((path / "config.json").read_text())
+    if config.get("model_type") == "nemotron3_diarization":
+        module = importlib.import_module(".nemotron3_diarization", __package__)
+        return AdapterResolution(
+            module.Nemotron3DiarizationAdapter,
+            module.DIARIZATION_DESCRIPTOR,
+            module.inspect_artifact(path),
+        )
+    raise ValueError(
+        f"No mlx2 audio-classifier adapter for model_type {config.get('model_type')!r}"
+    )
+
+
+def resolve_adapter(
+    model_path: str | Path, *, mtp: bool = False,
+    qualification_mode: bool = False, qualification: str | Path | None = None,
+) -> type:
     if type(mtp) is not bool:
         raise ValueError("mtp selection must be boolean")
     result = inspect_model(model_path)
     if mtp and Capability.MTP not in result.descriptor.capabilities:
         raise ValueError(
             f"{result.descriptor.family} artifact has no implemented native MTP route"
+        )
+    if (result.descriptor.model_type in _QUALIFICATION_GATED_TYPES
+            and not qualification_mode and not qualification):
+        raise ValueError(
+            f"{result.descriptor.family} requires qualification mode or an "
+            "artifact-bound qualification receipt before serving"
         )
     return result.adapter_type

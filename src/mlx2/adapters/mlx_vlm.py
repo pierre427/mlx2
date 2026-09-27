@@ -216,6 +216,12 @@ def _load_model(load, model_path, *, expected, config):
             return normalized_config
 
         def normalized(cls, params):
+            # The released omni checkpoint contains speech-synthesis tensors
+            # outside the pinned mlx-vlm TTS module's parameter tree.  This
+            # adapter serves input audio but deliberately refuses output
+            # audio, so omit that module and its weights while retaining a
+            # strict load of every served text, vision, and input-audio part.
+            params["init_tts"] = False
             nested = params.get("text_config")
             if nested:
                 nested.setdefault("head_dim", hidden // heads)
@@ -243,6 +249,22 @@ def _load_model(load, model_path, *, expected, config):
             minicpmo_module.LanguageModel = original_language_model
 
 
+def register_mlx_vlm_window_compaction():
+    """Let prefill trim mlx-vlm's batch sliding cache back to its window.
+
+    Gemma 3n keeps mlx-vlm's cache types, whose ``merge`` builds mlx-vlm's
+    ``BatchRotatingKVCache``.  At the pinned revision it has mlx2's layout and
+    trims identically in ``_update_in_place``/``_update_concat``/``make_mask``
+    (tests/test_multimodal_window_compaction.py checks exactness), so the
+    same compaction applies.  Idempotent.
+    """
+    from mlx_vlm.models.cache import BatchRotatingKVCache
+
+    from ..runtime.models.cache import register_window_compactable_batch_cache
+
+    register_window_compactable_batch_cache(BatchRotatingKVCache)
+
+
 class _MLXVLMAdapter:
     default_route = "ordinary"
     reasoning_effort_semantics = "boolean"
@@ -254,6 +276,8 @@ class _MLXVLMAdapter:
         return "mlx-vlm-apcv2-ordinary"
 
     def execution_config(self, *, max_lanes, prefill_step):
+        # The sliding-window cache bound depends on the prefill chunk size.
+        self._prefill_step = int(prefill_step)
         return {
             "persistent": True,
             "num_draft": 0,
@@ -263,6 +287,15 @@ class _MLXVLMAdapter:
             "segment_aware_live_tip": False,
             "segment_aware_cohort_size": max_lanes,
         }
+
+    def _budget_prefill_step(self):
+        from .mlx_vlm_memory import DEFAULT_PREFILL_STEP
+
+        return getattr(self, "_prefill_step", DEFAULT_PREFILL_STEP)
+
+    def _text_config(self):
+        config = self.identity["config"]
+        return config.get("text_config") or config
 
     @staticmethod
     def streaming_detokenizer_class():
@@ -281,10 +314,14 @@ class _MLXVLMAdapter:
         self.environment = {}
         self.max_context = self.identity["max_context"]
         self.layout = self.descriptor.cache_layout
+        from .mlx_vlm_pin import require_pinned_mlx_vlm
+
+        self.mlx_vlm_runtime = require_pinned_mlx_vlm()
         try:
             from mlx_vlm import load
         except ImportError as error:
             raise RuntimeError("multimodal adapters require the optional mlx-vlm runtime") from error
+        register_mlx_vlm_window_compaction()
         model, self.processor = _load_model(
             load,
             Path(model_path).resolve(),
@@ -346,6 +383,7 @@ class _MLXVLMAdapter:
         return {
             "architecture": self.descriptor.model_type,
             "multimodal": True,
+            "mlx_vlm": self.mlx_vlm_runtime,
             "media_feature_cache": self.media_feature_cache.snapshot(),
         }
 
@@ -387,6 +425,15 @@ class Gemma3nAdapter(_MLXVLMAdapter):
         from ..runtime.tokenizer_utils import SPMStreamingDetokenizer
 
         return SPMStreamingDetokenizer
+
+    def cache_budget(self, *, mtp):
+        from .mlx_vlm_memory import SlidingKVCacheBudget
+
+        return SlidingKVCacheBudget.from_gemma3n_config(
+            self._text_config(), mtp=mtp,
+            prefill_step=self._budget_prefill_step(),
+            root_config=self.identity["config"],
+        )
 
     def __init__(self, model_path, *, execution_policy=None):
         super().__init__(model_path, execution_policy=execution_policy)
@@ -463,6 +510,15 @@ MINICPMO = ModelDescriptor(
 class MiniCPMOAdapter(_MLXVLMAdapter):
     descriptor = MINICPMO
     sampling_defaults = MINICPMO_SAMPLING
+
+    def cache_budget(self, *, mtp):
+        from .mlx_vlm_memory import SlidingKVCacheBudget
+
+        return SlidingKVCacheBudget.from_qwen2_config(
+            self._text_config(), mtp=mtp,
+            prefill_step=self._budget_prefill_step(),
+            root_config=self.identity["config"],
+        )
 
     def __init__(self, model_path, *, execution_policy=None):
         super().__init__(model_path, execution_policy=execution_policy)

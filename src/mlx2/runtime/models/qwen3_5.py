@@ -54,6 +54,9 @@ class TextModelArgs(BaseModelArgs):
     partial_rotary_factor: float = 0.25
     rope_theta: float = 100000.0
     rope_scaling: Optional[Dict[str, Union[float, str]]] = None
+    # Compute dtype from the artifact's text_config (e.g. "bfloat16"); the
+    # dense/MoE Qwen3.8 sanitize casts float32 norm gammas to it.
+    dtype: Optional[str] = None
 
     def __post_init__(self):
         if self.head_dim is None:

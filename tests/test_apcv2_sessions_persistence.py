@@ -92,6 +92,8 @@ def test_session_park_resume_prefetch_and_delete(tmp_path):
         time.sleep(0.01)
     hit = apc.lookup(key, tokens + [99], session_tag=tag)
     assert hit.hit and hit.cached_tokens == len(tokens)
+    assert len(hit.cache) == 1 and type(hit.cache[0]) is KVCache
+    assert hit.cache[0].keys.shape[0] == 1 and hit.cache[0].offset == len(tokens)
     hit.cache.close()
     assert apc.apc_stats["idle_disk"]["prefetch_restores_ok"] == 1
     assert apc.apc_stats["idle_disk"]["prefetch_hits"] == 1

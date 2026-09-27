@@ -1,0 +1,267 @@
+"""CPU-safe GPT-OSS/Puzzle inspection and ordinary text execution.
+
+Registration is deliberately separate.  Import and inspection never import MLX;
+only constructing an adapter opens tensors or allocates model state.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+from pathlib import Path
+
+from ..contracts import Capability, ModelDescriptor, StatePlane
+from ..sampling_defaults import GENERATION_CONFIG, SamplingDefaults, VendorSampling
+
+
+_COMMON = frozenset({
+    Capability.TEXT, Capability.STREAMING, Capability.CONTINUOUS_BATCH,
+    Capability.PREFIX_REUSE, Capability.APC_V2, Capability.LAYERED_CACHE,
+})
+
+
+def descriptor_for(model_type: str) -> ModelDescriptor:
+    if model_type not in {"gpt_oss", "gpt_oss_puzzle"}:
+        raise ValueError("unsupported GPT-OSS model type")
+    puzzle = model_type == "gpt_oss_puzzle"
+    return ModelDescriptor(
+        model_type=model_type,
+        family="gpt-oss-puzzle" if puzzle else "gpt-oss",
+        variant="88b-ordinary" if puzzle else "20b-ordinary",
+        state_planes=frozenset({StatePlane.ATTENTION_KV, StatePlane.RNG, StatePlane.TRANSCRIPT}),
+        capabilities=_COMMON,
+        cache_layout="gpt-oss-puzzle-per-layer-kv-v1" if puzzle else "gpt-oss-alternating-kv-v1",
+        metadata={
+            "execution": "mlx2.adapters.gpt_oss.GptOssPuzzleAdapter" if puzzle
+            else "mlx2.adapters.gpt_oss.GptOssAdapter",
+            "qualification": "pending",
+            "scope": "ordinary text decode; no tool, reasoning, or speculative route",
+        },
+    )
+
+
+GPT_OSS = descriptor_for("gpt_oss")
+GPT_OSS_PUZZLE = descriptor_for("gpt_oss_puzzle")
+# Both local generation_config.json files set do_sample=true and specify no
+# temperature or truncation controls.  Explicit neutral sampling fills those
+# omitted fields without inheriting mlx2's historical 0.7/0.8/20 profile.
+GPT_OSS_SAMPLING = VendorSampling.single(
+    SamplingDefaults(temperature=1.0, source=GENERATION_CONFIG,
+                     note="do_sample=true; temperature omitted"),
+    model="GPT-OSS 20B / GPT-OSS Puzzle 88B local artifacts",
+)
+
+
+def _json(path: Path) -> dict:
+    def unique(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError(f"duplicate {key!r} in {path.name}")
+            result[key] = value
+        return result
+    value = json.loads(path.read_text(), object_pairs_hook=unique)
+    if not isinstance(value, dict):
+        raise ValueError(f"{path.name} must contain a JSON object")
+    return value
+
+
+def _topology(config: dict, model_type: str) -> tuple[int, list[int | None]]:
+    puzzle = model_type == "gpt_oss_puzzle"
+    expected = {
+        "model_type": model_type,
+        "architectures": ["GptOssPuzzleForCausalLM"] if puzzle else ["GptOssForCausalLM"],
+        "hidden_size": 2880, "intermediate_size": 2880, "vocab_size": 201088,
+        "num_attention_heads": 64, "num_key_value_heads": 8, "head_dim": 64,
+        "num_experts_per_tok": 4, "num_hidden_layers": 36 if puzzle else 24,
+        "tie_word_embeddings": False,
+    }
+    if not puzzle:
+        expected.update(num_local_experts=32, sliding_window=128)
+    if any(config.get(key) != value for key, value in expected.items()):
+        raise ValueError("GPT-OSS artifact topology does not match the local target")
+    n = expected["num_hidden_layers"]
+    if puzzle:
+        blocks = config.get("block_configs")
+        if not isinstance(blocks, list) or len(blocks) != n:
+            raise ValueError("Puzzle requires one block config per layer")
+        if any(
+            not isinstance(block, dict)
+            or block.get("num_local_experts") not in (64, 128)
+            or block.get("sliding_window", object()) not in (128, 8192, None)
+            for block in blocks
+        ):
+            raise ValueError("Puzzle per-layer expert/window topology is invalid")
+        windows = [block["sliding_window"] for block in blocks]
+    else:
+        windows = [128 if i % 2 == 0 else None for i in range(n)]
+    layer_types = ["full_attention" if window is None else "sliding_attention" for window in windows]
+    if config.get("layer_types") != layer_types:
+        raise ValueError("GPT-OSS layer order disagrees with window topology")
+    return n, windows
+
+
+def inspect_artifact(model_path: str | Path, *, expected: str | None = None) -> dict:
+    path = Path(model_path).expanduser().resolve()
+    config = _json(path / "config.json")
+    model_type = config.get("model_type")
+    if model_type not in {"gpt_oss", "gpt_oss_puzzle"} or (expected and model_type != expected):
+        raise ValueError("artifact is not the requested GPT-OSS target")
+    n, windows = _topology(config, model_type)
+    weight_map = _json(path / "model.safetensors.index.json").get("weight_map")
+    if not isinstance(weight_map, dict) or not weight_map:
+        raise ValueError("GPT-OSS requires a nonempty weight index")
+    required = {"model.embed_tokens.weight", "model.norm.weight", "lm_head.weight"}
+    for layer in range(n):
+        prefix = f"model.layers.{layer}."
+        required.update({prefix + "self_attn.q_proj.weight", prefix + "self_attn.sinks", prefix + "mlp.router.weight"})
+        if model_type == "gpt_oss_puzzle":
+            required.add(prefix + "mlp.experts.gate_proj.weight")
+        else:
+            required.add(prefix + "mlp.experts.gate_up_proj_blocks")
+    if not required <= weight_map.keys():
+        raise ValueError("GPT-OSS indexed tensor topology is incomplete")
+    if any(marker in key.lower() for key in weight_map for marker in ("mtp.", "draft.")):
+        raise ValueError("GPT-OSS target index contains speculative tensors")
+    names = sorted(set(weight_map.values()))
+    records = []
+    for name in names:
+        if not isinstance(name, str) or Path(name).is_absolute() or ".." in Path(name).parts or Path(name).suffix != ".safetensors":
+            raise ValueError("GPT-OSS index contains an unsafe shard path")
+        item = path / name
+        # Hub snapshots use links into their own blob store. Allow those links
+        # within the same model repository, but reject a link to another tree.
+        repository_root = path.parent.parent if path.parent.name == "snapshots" else path
+        if not item.is_file() or not item.resolve().is_relative_to(repository_root):
+            raise ValueError(f"missing or foreign GPT-OSS shard: {name}")
+        stat = item.stat()
+        records.append((name, stat.st_size, stat.st_mtime_ns))
+    digest = hashlib.sha256()
+    for name in ("config.json", "model.safetensors.index.json", "tokenizer.json", "tokenizer_config.json", "chat_template.jinja", "generation_config.json"):
+        item = path / name
+        if item.is_file():
+            digest.update(name.encode())
+            digest.update(item.read_bytes())
+    for record in records:
+        digest.update(json.dumps(record).encode())
+    return {
+        "config": config, "weight_map": weight_map, "windows": windows,
+        "identity": {"path": str(path), "fingerprint": digest.hexdigest(), "files": records},
+        "has_mtp": False,
+    }
+
+
+def configure_environment() -> dict[str, str]:
+    profile = {"HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1", "MLX_ENABLE_TF32": "0"}
+    os.environ.update(profile)
+    return profile
+
+
+class _GptOssOrdinaryAdapter:
+    default_route = "ordinary"
+    expected_type: str
+
+    def __init__(self, model_path: str, *, execution_policy=None):
+        if execution_policy not in (None, {}):
+            raise ValueError("GPT-OSS supports only ordinary execution")
+        artifact = inspect_artifact(model_path, expected=self.expected_type)
+        self.identity = artifact["identity"]
+        self.descriptor = descriptor_for(self.expected_type)
+        self.layout = self.descriptor.cache_layout
+        self.environment = configure_environment()
+        config = artifact["config"]
+        path = Path(self.identity["path"])
+
+        import mlx.core as mx
+        from mlx import nn
+        from transformers import AutoTokenizer
+        from ..runtime.tokenizer_utils import BPEStreamingDetokenizer, TokenizerWrapper
+        from ..runtime.ubc_evict import load_shards_evicting
+        if self.expected_type == "gpt_oss_puzzle":
+            from ..runtime.models.gpt_oss_puzzle import Model, ModelArgs
+        else:
+            from ..runtime.models.gpt_oss import Model, ModelArgs
+
+        self.model = Model(ModelArgs.from_dict(config))
+        files = [path / name for name in sorted(set(artifact["weight_map"].values()))]
+        weights = self.model.sanitize(load_shards_evicting(files))
+        quant = config.get("quantization")
+        if quant is None:
+            method = config.get("quantization_config", {}).get("quant_method")
+            if method != "mxfp4":
+                raise ValueError("GPT-OSS 20B requires MXFP4 quantization metadata")
+            quant = {"group_size": 32, "bits": 4, "mode": "mxfp4"}
+        if any(key not in {"group_size", "bits", "mode"} and not isinstance(value, dict) for key, value in quant.items()):
+            raise ValueError("invalid per-module GPT-OSS quantization metadata")
+        def predicate(name, module):
+            override = quant.get(name)
+            if isinstance(override, dict):
+                return override
+            return hasattr(module, "to_quantized") and f"{name}.scales" in weights
+        nn.quantize(self.model, group_size=quant["group_size"], bits=quant["bits"], mode=quant.get("mode", "affine"), class_predicate=predicate)
+        self.model.load_weights(list(weights.items()), strict=True)
+        self.model.eval()
+        mx.eval(self.model.parameters())
+        weights.clear()
+        mx.clear_cache()
+        tokenizer = AutoTokenizer.from_pretrained(path, local_files_only=True, trust_remote_code=False)
+        generation = _json(path / "generation_config.json")
+        configured_eos = generation.get("eos_token_id", config["eos_token_id"])
+        eos_ids = configured_eos if isinstance(configured_eos, list) else [configured_eos]
+        if not eos_ids or any(type(value) is not int or value < 0 for value in eos_ids):
+            raise ValueError("GPT-OSS generation config has invalid EOS tokens")
+        self.tokenizer = TokenizerWrapper(tokenizer, detokenizer_class=BPEStreamingDetokenizer,
+                                          eos_token_ids=eos_ids)
+        self.max_context = int(config["max_position_embeddings"])
+
+    def prompt_tokens(self, request: dict) -> list[int]:
+        if request.get("tools"):
+            raise ValueError("GPT-OSS tool calling is not implemented")
+        if "messages" in request:
+            tokens = self.tokenizer.apply_chat_template(
+                request["messages"], add_generation_prompt=True, tokenize=True
+            )
+            # The artifact template ends in an open assistant header.  Select
+            # the final channel explicitly so this text-only route yields
+            # answer content, not an unimplemented reasoning/tool channel.
+            return list(tokens) + list(self.tokenizer.encode(
+                "<|channel|>final<|message|>", add_special_tokens=False
+            ))
+        return self.tokenizer.encode(request["prompt"], add_special_tokens=False)
+
+    def output_parser(self, request):
+        if request.get("tools"):
+            raise ValueError("GPT-OSS tool calling is not implemented")
+        from ..output import OutputParser
+        return OutputParser(chat=False, stops=request.get("stop", ()))
+
+    def profile_name(self, mtp):
+        if mtp:
+            raise ValueError("GPT-OSS MTP is not implemented")
+        return f"{self.expected_type}-apcv2-ordinary"
+
+    def execution_config(self, *, max_lanes, prefill_step):
+        return {"persistent": True, "num_draft": 0, "rate_gate": False,
+                "prefill_step_size": prefill_step, "segment_aware_live_tip": False,
+                "segment_aware_cohort_size": max_lanes}
+
+    def diagnostics(self):
+        return {"architecture": self.expected_type, "cache_layout": self.layout,
+                "qualification": "pending", "route": "ordinary"}
+
+    def close(self):
+        self.model = None
+        self.tokenizer = None
+
+
+class GptOssAdapter(_GptOssOrdinaryAdapter):
+    expected_type = "gpt_oss"
+    descriptor = GPT_OSS
+    sampling_defaults = GPT_OSS_SAMPLING
+
+
+class GptOssPuzzleAdapter(_GptOssOrdinaryAdapter):
+    expected_type = "gpt_oss_puzzle"
+    descriptor = GPT_OSS_PUZZLE
+    sampling_defaults = GPT_OSS_SAMPLING

@@ -98,6 +98,52 @@ def test_anthropic_thinking_budget_can_reach_one_below_output_limit():
         )
 
 
+@pytest.mark.parametrize("budget", [0, -1, None, True, 1.5])
+def test_anthropic_thinking_budget_must_be_positive(budget):
+    # A 0 reached thinking_budget, where 0 turns the guard off: unbounded
+    # thinking for a request that asked for none.
+    with pytest.raises(ValueError, match="positive integer"):
+        anthropic_request_to_chat(
+            {
+                "model": "fixture",
+                "messages": [{"role": "user", "content": "hello"}],
+                "max_tokens": 64,
+                "thinking": {"type": "enabled", "budget_tokens": budget},
+            }
+        )
+    request = anthropic_request_to_chat(
+        {
+            "model": "fixture",
+            "messages": [{"role": "user", "content": "hello"}],
+            "max_tokens": 64,
+            "thinking": {"type": "enabled", "budget_tokens": 1},
+        }
+    )
+    assert request["thinking_budget"] == 1
+
+
+def test_anthropic_http_rejects_zero_thinking_budget(anthropic_endpoint):
+    _engine, base = anthropic_endpoint
+    body = {
+        "model": "fixture",
+        "messages": [{"role": "user", "content": "hello"}],
+        "max_tokens": 64,
+        "thinking": {"type": "enabled", "budget_tokens": 0},
+    }
+    for path, payload in (
+        ("/v1/messages", body),
+        ("/v1/messages", {**body, "stream": True}),
+        ("/v1/messages/count_tokens", {k: v for k, v in body.items() if k != "max_tokens"}),
+    ):
+        with pytest.raises(HTTPError) as error:
+            _post(base, path, payload)
+        assert error.value.code == 400
+        detail = json.load(error.value)
+        assert detail["type"] == "error"
+        assert detail["error"]["type"] == "invalid_request_error"
+        assert "budget_tokens must be a positive integer" in detail["error"]["message"]
+
+
 def test_anthropic_output_and_stream_sign_reasoning_and_fail_closed_tool_json():
     signer = ReasoningSigner(b"shared-secret")
     result = {

@@ -4,6 +4,9 @@ import json
 from pathlib import Path
 
 from .contracts import Capability, Fidelity, QualifiedProfile, RouteRequest
+from .media_qualification import SMOL_MEDIA_CHECKS, evaluate_smol_media_report
+from .qwen25_media_qualification import CHECKS as QWEN_MEDIA_CHECKS, evaluate_qwen25_media_report
+from .lfm25_media_qualification import LFM_MEDIA_CHECKS, evaluate_lfm_media_report
 from .routing import RoutePlanner
 
 
@@ -30,14 +33,91 @@ REQUIRED_CHECKS = frozenset(
 )
 
 
+def required_generic_checks(descriptor):
+    """Require only generic probes the selected adapter can actually serve.
+
+    The approved harness uses the route's selected capabilities for the same
+    decision. Adapter-owned media checks remain separate and fail closed until
+    a reviewed media producer exists.
+    """
+    required = set(REQUIRED_CHECKS)
+    if Capability.TOOLS not in descriptor.capabilities:
+        required.discard("tools")
+    if Capability.REASONING not in descriptor.capabilities:
+        required.discard("reasoning")
+    if Capability.CONTINUOUS_BATCH not in descriptor.capabilities:
+        required.difference_update({"batch", "mixed_warm"})
+    return required
+
+
 # Independent trust anchor for the reviewed receipt producer. Updating
 # qualify_serving.py intentionally requires a source/runtime re-freeze and an
 # explicit update here; a receipt may not authorize its own producer.
 APPROVED_QUALIFICATION_HARNESS = {
     "schema": "mlx2.qualification-harness.v1",
     "name": "scripts/qualify_serving.py",
-    "sha256": "b198d17efdceda4004994a5b367e1a71444467952ad834cad07b0938344b69ad",
+    "sha256": "7dcdb6507b429c47da009ed92768f7485ebedcfebf6a4d62103ab57ca3c787dd",
 }
+
+# The approved generic producer has no live adapter-owned media probes. A
+# caller may edit a receipt file, so a bare {"passed": true} under an invented
+# check name is not evidence that the reviewed producer ran that check. Add
+# names here only with the corresponding reviewed producer implementation.
+APPROVED_ADAPTER_CHECKS = SMOL_MEDIA_CHECKS | QWEN_MEDIA_CHECKS | LFM_MEDIA_CHECKS
+APPROVED_MEDIA_HARNESS = {
+    "name": "scripts/qualify_media_serving.py",
+    "sha256": "ff1714119b544ced3f774b4c2e1ebef7c87e0314e3bacc231f3512ce0b41ca68",
+}
+APPROVED_MEDIA_PRODUCERS = {
+    "smolvlm": (APPROVED_MEDIA_HARNESS, evaluate_smol_media_report, SMOL_MEDIA_CHECKS),
+    "qwen2_5_vl": (
+        {"name": "scripts/qualify_qwen25_media_serving.py",
+         "sha256": "61e2cfc82dfbcc1bf216c329f5fa8f1ab29d4dc7043ab5a210dbacf7adb10f3f"},
+        evaluate_qwen25_media_report, QWEN_MEDIA_CHECKS,
+    ),
+    "lfm2_vl": (
+        {"name": "scripts/qualify_lfm25_media_serving.py",
+         "sha256": "99128033df589d6525dd71f94dc113c021911e38682b0f7f558dd3a76f5479e7"},
+        evaluate_lfm_media_report, LFM_MEDIA_CHECKS,
+    ),
+}
+PINNED_MEDIA_SOURCE_REVISION = "8a5e704e0fe43cd8654c144c4ecbd4c8aececeb5"
+
+
+def validate_adapter_qualification(report, *, runtime, artifact, settings, descriptor=None):
+    """Bind a companion producer's traces to the same exact serving route."""
+    if not isinstance(report, dict):
+        raise ValueError("adapter qualification producer is unavailable")
+    model_type = report.get("model_type")
+    if (descriptor is not None and model_type != descriptor.model_type) or model_type not in APPROVED_MEDIA_PRODUCERS:
+        raise ValueError("adapter qualification producer is unavailable")
+    harness, evaluator, expected_checks = APPROVED_MEDIA_PRODUCERS[model_type]
+    if (report.get("schema") != "mlx2.media-serving-qualification.v1"
+            or report.get("qualification_harness") != harness
+            or report.get("source_revision") != PINNED_MEDIA_SOURCE_REVISION
+            or (descriptor is not None and descriptor.metadata.get("source_revision") != PINNED_MEDIA_SOURCE_REVISION)
+            or report.get("runtime") != runtime
+            or report.get("artifact") != artifact):
+        raise ValueError("adapter qualification does not match approved producer or artifact")
+    reported_settings = report.get("settings")
+    if not isinstance(reported_settings, dict) or {
+        key: value for key, value in reported_settings.items()
+        if key not in PROVENANCE_ONLY_SETTINGS
+    } != {
+        key: value for key, value in settings.items()
+        if key not in PROVENANCE_ONLY_SETTINGS
+    }:
+        raise ValueError("adapter qualification does not match serving settings")
+    observed = evaluator(report)
+    checks = report.get("checks")
+    if (report.get("passed") is not True or not isinstance(checks, dict)
+            or set(checks) != expected_checks
+            or any(not isinstance(checks.get(name), dict)
+                   or checks[name].get("passed") is not value
+                   for name, value in observed.items())
+            or not all(observed.values())):
+        raise ValueError("adapter qualification traces are missing or failed")
+    return observed
 
 
 def _environment_mode_enabled(value):
@@ -57,6 +137,21 @@ def required_feature_checks(settings):
     if (settings.get("int8_prefill") or {}).get("enabled") is True:
         # Any route: a selected int8 prefill policy must show engaged calls.
         features.add("feature_int8_prefill")
+    if settings.get("sp_qmm"):
+        # Patching eligible projections does not prove that the measured
+        # shape policy actually routed any model calls through the kernel.
+        features.add("feature_sp_qmm")
+    verify = settings.get("qsdpa_verify_kernel") or {}
+    if (
+        (settings.get("approximate_kv") or {}).get("enabled") is True
+        and verify.get("enabled") is True
+        and type(verify.get("min_context")) is int
+        and type(settings.get("max_context")) is int
+        and settings["max_context"] >= verify["min_context"]
+    ):
+        # A selected long-context quantized attention route must actually
+        # reach the fused kernel during this qualification run.
+        features.add("feature_qsdpa_verify_kernel")
     if (settings.get("host_memory_signals") or {}).get("enabled") is True:
         # Any route: the selected host signal must be observed in telemetry.
         features.add("feature_host_memory_signals")
@@ -206,6 +301,24 @@ def required_descriptor_checks(descriptor):
     return required
 
 
+# Settings that record *how* a value was chosen rather than the value itself.
+# They are excluded from the receipt match; the values they explain are not.
+#   route_selection_source: an explicit --ordinary qualification authorizes
+#     the same resolved ordinary route when it comes from an adapter default.
+#   cache_bytes_source / cache_bytes_clamped_from / cache_bytes_headroom: an
+#     explicit --cache-bytes receipt authorizes a host default (or a
+#     post-load clamp) that resolves to the same ``cache_bytes``, and a
+#     receipt recorded before these fields existed still matches.
+PROVENANCE_ONLY_SETTINGS = frozenset(
+    {
+        "route_selection_source",
+        "cache_bytes_source",
+        "cache_bytes_clamped_from",
+        "cache_bytes_headroom",
+    }
+)
+
+
 def load_qualified_route(
     path,
     *,
@@ -220,25 +333,41 @@ def load_qualified_route(
         raise ValueError("qualification does not match approved harness")
     if record.get("runtime") != runtime or record.get("artifact") != artifact:
         raise ValueError("qualification does not match runtime and artifact")
-    # How the operator selected a route is observational provenance, not route
-    # identity.  An explicit --ordinary qualification therefore authorizes the
-    # same resolved ordinary route when it comes from an adapter default.
+    # How a setting was chosen is observational provenance, not route
+    # identity (see PROVENANCE_ONLY_SETTINGS); the chosen values stay bound.
     qualified_settings = record.get("settings")
     if not isinstance(qualified_settings, dict) or not isinstance(settings, dict):
         raise ValueError("qualification does not match serving settings")
-    qualified_settings = dict(qualified_settings)
-    serving_settings = dict(settings)
-    qualified_settings.pop("route_selection_source", None)
-    serving_settings.pop("route_selection_source", None)
+    qualified_settings = {
+        key: value
+        for key, value in qualified_settings.items()
+        if key not in PROVENANCE_ONLY_SETTINGS
+    }
+    serving_settings = {
+        key: value
+        for key, value in settings.items()
+        if key not in PROVENANCE_ONLY_SETTINGS
+    }
     if qualified_settings != serving_settings:
         raise ValueError("qualification does not match serving settings")
     checks = record.get("checks", {})
-    required = set(REQUIRED_CHECKS) | (
+    required = required_generic_checks(descriptor) | (
         {"mtp_execution"} if settings["mtp"] else set()
     )
     if Capability.GRAMMAR in descriptor.capabilities:
         required.add("structured_output")
-    required |= required_descriptor_checks(descriptor)
+    descriptor_checks = required_descriptor_checks(descriptor)
+    unsupported = descriptor_checks - APPROVED_ADAPTER_CHECKS
+    if unsupported:
+        raise ValueError(
+            "approved qualification harness cannot produce adapter checks: "
+            + ", ".join(sorted(unsupported))
+        )
+    if descriptor_checks:
+        validate_adapter_qualification(
+            record.get("adapter_qualification"), runtime=runtime,
+            artifact=artifact, settings=settings, descriptor=descriptor,
+        )
     if record.get("passed") is not True or any(
         checks.get(c, {}).get("passed") is not True for c in required
     ):

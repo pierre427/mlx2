@@ -362,6 +362,7 @@ def scripted_engine(monkeypatch):
             return OutputParser(
                 chat="messages" in request,
                 thinking=request.get("enable_thinking", False),
+                stops=request.get("stop", ()),
                 tools=request.get("tools"),
                 parse_tool=parse_tool_call,
                 constrained_tools=constrained_tool_choice(request),
@@ -1177,6 +1178,27 @@ def test_prompt_lookup_structured_stop_inside_thinking_finishes_normally(scripte
     assert final.get("finish_reason") == "stop" and "error" not in final
     assert reasoning == "Let me" and content == ""
     assert engine.counts["structured_output_failures"] == 0
+
+
+def test_request_stop_inside_thinking_is_applied_only_to_answer(scripted_engine):
+    from mlx2.server import validate_request
+
+    build, state = scripted_engine
+    engine = build(declare_marker=True)
+    request = validate_request({
+        "messages": [{"role": "user", "content": "hi"}],
+        "enable_thinking": True,
+        "stop": " me",
+        "temperature": 0,
+        "max_tokens": 12,
+    })
+    assert request["stop"] == " me"
+    state["script"] = [2, 3, THINK_CLOSE, HELLO, 3, EOS]
+    reasoning, content, final = _collect(engine.submit(request))
+    assert reasoning == "Let me"
+    assert content == "hello"
+    assert final["finish_reason"] == "stop"
+    assert final["receipt"]["stop_sequence"] == " me"
 
 
 def test_serving_dead_end_receipt_is_qualification_only(scripted_engine, caplog):

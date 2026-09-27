@@ -160,54 +160,9 @@ assert 'mlx2.runtime.models.qwen38_27b' not in sys.modules
         with self.assertRaises(ValueError):
             adapter.profile_name(True)
 
-    def test_mined_sanitizer_does_not_double_shift_converted_norms(self):
-        # Execute only the pure sanitizer method, not the tensor module.
-        path = Path(__file__).parents[1] / "src/mlx2/runtime/models/qwen38_27b.py"
-        model = next(
-            n
-            for n in ast.parse(path.read_text()).body
-            if isinstance(n, ast.ClassDef) and n.name == "TextModel"
-        )
-        method = next(
-            n
-            for n in model.body
-            if isinstance(n, ast.FunctionDef) and n.name == "sanitize"
-        )
-        namespace = {}
-        exec(
-            compile(ast.Module(body=[method], type_ignores=[]), str(path), "exec"),
-            namespace,
-        )
-
-        class Array:
-            def __init__(self, shape, value=0):
-                self.shape, self.ndim, self.value = shape, len(shape), value
-
-            def moveaxis(self, _a, _b):
-                return Array((self.shape[0], self.shape[2], self.shape[1]), self.value)
-
-            def __add__(self, value):
-                return Array(self.shape, self.value + value)
-
-        from types import SimpleNamespace
-
-        model = SimpleNamespace(
-            mtp=object(), args=SimpleNamespace(tie_word_embeddings=False)
-        )
-        weights = {
-            "model.layers.0.linear_attn.conv1d.weight": Array((4, 3, 1)),
-            "model.norm.weight": Array((4,), 1),
-            "mtp.norm.weight": Array((4,), 1),
-        }
-        actual = namespace["sanitize"](model, weights)
-        self.assertEqual(actual["model.norm.weight"].value, 1)
-        self.assertEqual(actual["mtp.norm.weight"].value, 1)
-        weights["model.layers.0.linear_attn.conv1d.weight"] = Array((4, 1, 3))
-        actual = namespace["sanitize"](model, weights)
-        self.assertEqual(actual["model.norm.weight"].value, 2)
-        self.assertEqual(
-            actual["model.layers.0.linear_attn.conv1d.weight"].shape, (4, 3, 1)
-        )
+    # The sanitizer's norm-fold contract (converted layout never double-shifts,
+    # raw layout shifts once, per-group MTP repair) needs MLX tensors and lives
+    # in tests/test_norm_convention.py.
 
     def test_execution_policy_rejects_qsa_and_invalid_draft_before_artifact_read(self):
         for policy in (

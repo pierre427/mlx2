@@ -347,6 +347,8 @@ class XingOutputParser:
         self.stopped = False
         self.tool_count = 0
         self.turn_closed_tool_calls = 0
+        # Set only for the duration of :meth:`finish` on a ``length`` stop.
+        self._length_finish = False
 
     @property
     def stop_sequence(self):
@@ -433,6 +435,19 @@ class XingOutputParser:
 
     # -- driver -----------------------------------------------------------
 
+    def finish(self, text: str, finish_reason: str) -> list[dict]:
+        """Push the last text of a generation that ended with ``finish_reason``.
+
+        Same contract as :meth:`mlx2.output.OutputParser.finish`: a ``length``
+        finish (``max_tokens``) inside an unclosed tool block drops the partial
+        call instead of failing the request; EOS keeps the completeness rule.
+        """
+        self._length_finish = finish_reason == "length"
+        try:
+            return self.push(text, final=True)
+        finally:
+            self._length_finish = False
+
     def push(self, text: str, *, final: bool = False) -> list[dict]:
         if self.stopped:
             return []
@@ -461,6 +476,15 @@ class XingOutputParser:
                     self.stopped, self.buffer = True, ""
                     break
                 if end < 0:
+                    if final and self._length_finish:
+                        # max_tokens cut the block off: the model never
+                        # finished it, so it is neither a call nor answer
+                        # text.  Drop it; the finish reason stays ``length``.
+                        self.buffer = ""
+                        self.channel = "content"
+                        events.extend(self._finish_visible())
+                        self.stopped = True
+                        return events
                     if final:
                         # EOS ends generation without reaching the parser as
                         # text: the same completeness rule as a turn marker.

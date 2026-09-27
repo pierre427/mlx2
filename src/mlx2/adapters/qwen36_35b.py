@@ -190,6 +190,13 @@ def configure_environment(kernels=None) -> dict[str, str]:
         # receipt records it.
         "MLX_LM_MTP_BOUNDARY_COW": "1",
     }
+    # These three switches are supported Qwen3.6 A/B choices.  Preserve an
+    # operator's explicit environment value unless the request's execution
+    # policy selects that switch.  Other inherited MLX kernel experiments are
+    # still cleared below; they are not qualified for this model's geometry.
+    for name in KERNEL_POLICY_ENV.values():
+        if name in os.environ:
+            profile[name] = os.environ[name]
     for key, enabled in (kernels or {}).items():
         profile[KERNEL_POLICY_ENV[key]] = "1" if enabled else "0"
     for name in tuple(os.environ):
@@ -271,16 +278,19 @@ class Qwen3635BA3BAdapter(Qwen3827BAdapter):
         from ..runtime.models.qwen36_35b import Model, ModelArgs
         from ..runtime.tokenizer_utils import BPEStreamingDetokenizer, TokenizerWrapper
         from ..runtime.ubc_evict import load_shards_evicting
-        from .norm_repair import norm_means, repair_unshifted_norms
+        from .norm_repair import norm_means
 
         self.model = Model(ModelArgs.from_dict(config))
         files = [path / name for name in sorted(set(artifact["weight_map"].values()))]
         weights = self.model.sanitize(
             load_shards_evicting(files, sanitize=self.model.shard_prune)
         )
-        # Byte-exact repair of MTP norms a converter left unshifted (oQ's
-        # mean<0.5 rule skips four of seven on this head; see norm_repair).
-        self.mtp_norm_repairs = repair_unshifted_norms(weights)
+        # ``sanitize`` decided the norm fold per group and repaired MTP norms
+        # a converter left unshifted (oQ's mean<0.5 rule skips four of seven
+        # on this head; see norm_repair). Record which ones.
+        report = getattr(getattr(self.model, "language_model", None), "norm_convention", None)
+        self.norm_convention = report
+        self.mtp_norm_repairs = [] if report is None else report.repaired_head_keys
         self.mtp_norm_means = norm_means(weights, "mtp.")
         quant = config.get("quantization", config.get("quantization_config"))
         if quant:
@@ -300,6 +310,7 @@ class Qwen3635BA3BAdapter(Qwen3827BAdapter):
         mx.eval(self.model.parameters())
         weights.clear()
         mx.clear_cache()
+        self._record_load_dtype()
         tokenizer = AutoTokenizer.from_pretrained(path, local_files_only=True, trust_remote_code=False)
         # The official config names only <|endoftext|>; the tokenizer's chat
         # EOS <|im_end|> ends an assistant turn and must stop generation too.

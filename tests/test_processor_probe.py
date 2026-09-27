@@ -67,3 +67,44 @@ def test_every_stateless_serving_processor_declares_an_identical_probe():
         np.testing.assert_allclose(
             np.asarray(actual), np.asarray(expected), rtol=0, atol=0, equal_nan=True
         )
+
+
+def test_verify_window_rewinds_ledgers_past_the_used_rows_only():
+    import pytest
+
+    from mlx2.runtime.processor_probe import VerifyWindow
+
+    class Ledgered:
+        def __init__(self):
+            self.steps = 0
+            self.failure = None
+
+        def verify_ledger(self):
+            return (self.steps, self.failure)
+
+        def restore_verify_ledger(self, ledger):
+            (self.steps, self.failure) = ledger
+
+    class Plain:
+        calls = 0
+
+    ledgered, plain = Ledgered(), Plain()
+    window = VerifyWindow([plain, ledgered])
+    for row in range(3):
+        ledgered.steps += 1
+        plain.calls += 1
+        if row == 2:
+            ledgered.failure = "budget"
+        window.mark()
+    with pytest.raises(ValueError):
+        window.settle(4)
+    window.settle(1)
+    assert (ledgered.steps, ledgered.failure) == (1, None)
+    assert plain.calls == 3  # processors without a ledger are untouched
+
+    kept = Ledgered()
+    window = VerifyWindow([kept])
+    kept.steps, kept.failure = 2, "budget"
+    window.mark()
+    window.settle(1)  # every row used: nothing to rewind
+    assert (kept.steps, kept.failure) == (2, "budget")

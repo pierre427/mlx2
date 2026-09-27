@@ -369,6 +369,17 @@ class XingAdapter:
         # experts, the router, mHC operands, heads and the MTP layer stay stock.
         return ("mlp", "all")
 
+    @staticmethod
+    def latent_kv8_candidate_descriptor():
+        """Research candidate, not a selectable approximate-KV operation.
+
+        Selection requires model-path fidelity and APCv2 qualification before
+        this descriptor may be returned by ``approximate_kv_operations``.
+        """
+        from ..runtime.approximate_kv import XingLatentKV8Descriptor
+
+        return XingLatentKV8Descriptor()
+
     def __init__(self, model_path: str, *, require_mtp: bool = False, execution_policy=None):
         if execution_policy is not None and not isinstance(execution_policy, dict):
             raise ValueError("execution policy must be a JSON object")

@@ -76,6 +76,55 @@ def standard_kv_quantization_operations(*, group_size: int = 64) -> dict:
 
 
 @dataclass(frozen=True)
+class XingLatentKV8Descriptor:
+    """Candidate-only Xing MLA format; positional key remains dense BF16.
+
+    This descriptor is deliberately separate from the generic key/value
+    quantizer: a Xing ``KVCache`` stores the latent in ``keys`` and the RoPE
+    key in ``values``.  Generic KV8 would quantize both and change RoPE math.
+    An adapter must explicitly declare this operation after model-path and
+    APCv2 qualification before serving can select it.
+    """
+
+    cache_layout: str = "xing-mla-latent-kv8-rope-bf16-v1"
+    latent_bits: int = 8
+    latent_group_size: int = 64
+    positional_dtype: str = "bfloat16"
+
+    def as_dict(self) -> dict:
+        return {
+            "cache_layout": self.cache_layout,
+            "latent_bits": self.latent_bits,
+            "latent_group_size": self.latent_group_size,
+            "positional_dtype": self.positional_dtype,
+        }
+
+
+class XingLatentKV8Operation:
+    """Revision-bound, private exact-to-approximate Xing cache transform."""
+
+    def __init__(self, *, adapter_fingerprint):
+        self.name = "xing_latent_kv8"
+        self.descriptor = XingLatentKV8Descriptor()
+        self.revision = operation_revision(adapter_fingerprint, self.name, self.descriptor)
+
+    def apply(self, state: "LaneKVState") -> "LaneKVState":
+        from .models.cache import KVCache
+        from .models.xing_latent_kv8 import XingLatentKV8Cache
+
+        if not state.planes or any(type(plane) is not KVCache for plane in state.planes):
+            raise ApproximateStateError(
+                "Xing latent KV8 requires homogeneous exact KVCache source planes"
+            )
+        planes = tuple(XingLatentKV8Cache.from_exact(plane) for plane in state.planes)
+        return LaneKVState(
+            f"{state.revision}:{self.name}:{self.descriptor.cache_layout}",
+            planes,
+            len(planes),
+        )
+
+
+@dataclass(frozen=True)
 class ServingApproximateKVPolicy:
     """Server-side selection.  Default off; never inferred from a bare flag."""
 
@@ -298,9 +347,15 @@ def declared_operations(adapter, *, adapter_fingerprint) -> dict:
     """Bind every operation the adapter declares.  Default: none."""
     from ..adapters.base import approximate_kv_operations
 
-    return {
-        name: KVQuantizationOperation(
-            name, descriptor, adapter_fingerprint=adapter_fingerprint
-        )
-        for name, descriptor in approximate_kv_operations(adapter).items()
-    }
+    operations = {}
+    for name, descriptor in approximate_kv_operations(adapter).items():
+        if isinstance(descriptor, XingLatentKV8Descriptor):
+            operation = XingLatentKV8Operation(adapter_fingerprint=adapter_fingerprint)
+            if name != operation.name or descriptor != operation.descriptor:
+                raise ValueError("invalid Xing latent KV8 operation declaration")
+        else:
+            operation = KVQuantizationOperation(
+                name, descriptor, adapter_fingerprint=adapter_fingerprint
+            )
+        operations[name] = operation
+    return operations

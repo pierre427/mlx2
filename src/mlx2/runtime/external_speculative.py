@@ -17,7 +17,7 @@ from types import SimpleNamespace
 import numpy as np
 
 from .committed_recovery import CommittedRecoverySlot
-from .processor_probe import copy_sharing, rollback_shared_memo
+from .processor_probe import VerifyWindow, copy_sharing, rollback_shared_memo
 from .cow_cache import (
     COWCacheUnsupported,
     restore_recovery_descriptors,
@@ -174,13 +174,15 @@ class RoundDecision:
     target law per emitted token (``None`` when the verifier kept no dense
     law); ``relaxed`` counts FLy relaxed accepts.  ``response_logprobs``
     holds, per verify row, the log-probability row to publish instead of the
-    law (``None`` entries fall back to the law).
+    law (``None`` entries fall back to the law).  ``verify_window`` holds
+    the processor ledgers per verify row, settled at commit.
     """
     accepted: int
     emitted: list
     target_laws: object
     relaxed: int = 0
     response_logprobs: object = None
+    verify_window: object = None
 
 
 def _block_row(block, vocab):
@@ -412,10 +414,18 @@ class ExternalDraftBatchGenerator:
         if temp == 0:
             # Greedy verification uses the one-hot law, but the logprobs API
             # reports the processed log-softmax, as ordinary decode does.
+            row = value[0].astype(self.mx.float32)
+            normalizer = self.mx.logsumexp(row)
+            selected = self.mx.argmax(row)
+            self.mx.eval(normalizer, selected)
+            if not np.isfinite(float(normalizer.item())):
+                raise LaneFailure(
+                    lane.uid,
+                    "external draft target law is not a probability distribution",
+                )
             if response_rows is not None:
-                row = value[0].astype(self.mx.float32)
-                response_rows.append(row - self.mx.logsumexp(row))
-            p = np.zeros(value.shape[-1]); p[int(self.mx.argmax(value).item())] = 1; return p
+                response_rows.append(row - normalizer)
+            p = np.zeros(value.shape[-1]); p[int(selected.item())] = 1; return p
         if response_rows is not None:
             response_rows.append(None)
         transform = make_transformed_logprobs(temp, top_p=lane.sampling.get("top_p", 0), top_k=lane.sampling.get("top_k", 0), min_p=lane.sampling.get("min_p", 0))
@@ -703,8 +713,13 @@ class ExternalDraftBatchGenerator:
             targets, reachable = [], True
             response_rows = [] if lane.sampling.get("emit_logprobs", True) else None
             count = len(drafts)
+            # The processors run on every reachable row before the accept
+            # point is known; the window rewinds the bookkeeping of the rows
+            # past it (steps, tail bound, a latched budget overrun) at commit.
+            window = VerifyWindow(lane.processors)
             for j in range(count+1):
                 targets.append(self._target_law(lane, logits[row,j], lane.history + inputs[:j+1], reachable, response_rows))
+                window.mark()
                 if reachable and j < count and lane.processors and targets[-1][int(drafts[j])] <= 0:
                     reachable = False
             if isinstance(laws, CompactDraftRow):
@@ -743,6 +758,7 @@ class ExternalDraftBatchGenerator:
                     result.target_probabilities,
                     result.relaxed_accepts,
                     response_rows,
+                    window,
                 )
             )
         return decisions
@@ -755,6 +771,12 @@ class ExternalDraftBatchGenerator:
         ]
         clock = time.perf_counter() if self.round_timing else None
         rows = transaction.commit(accepted_lengths=consumed)
+        for decision, used in zip(decisions, consumed):
+            # Delivered token j was drawn from verify row j: exactly ``used``
+            # rows (accepted drafts plus the correction/bonus row, cut at a
+            # stop) were used, and rows past them leave no trace.
+            if decision.verify_window is not None:
+                decision.verify_window.settle(used)
         self.scheduler_stats["segmented_transactions"] += len(decisions)
         self.scheduler_stats["segmented_rollbacks"] += sum(
             int(used < count + 1)

@@ -60,6 +60,19 @@ _SAFETENSORS_DTYPES = {
     "F64": ("f8", "float64"),
 }
 
+_SAFETENSORS_HEADER_LIMIT = 64 << 20
+_MAX_TENSOR_ELEMENTS = (1 << 63) - 1
+_SAFETENSORS_DTYPE_BYTES = {
+    name: int(numpy_code[1:])
+    for name, (numpy_code, _) in _SAFETENSORS_DTYPES.items()
+}
+# These are valid safetensors dtypes even when an expert reader cannot
+# materialize them. The index validates the whole shard, not only experts.
+_SAFETENSORS_DTYPE_BYTES.update({
+    "F8_E4M3FN": 1, "F8_E5M2": 1,
+    "F8_E4M3FNUZ": 1, "F8_E5M2FNUZ": 1,
+})
+
 
 class StreamingUnavailable(RuntimeError):
     """Streaming cannot be installed for this model; run fully resident."""
@@ -106,12 +119,30 @@ class TensorLocation:
 
 
 def read_safetensors_header(path: Path) -> Dict[str, dict]:
+    def unique_object(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise StreamingUnavailable(f"duplicate safetensors key {key!r}: {path}")
+            result[key] = value
+        return result
+
     with open(path, "rb") as handle:
+        size = os.fstat(handle.fileno()).st_size
         raw = handle.read(8)
         if len(raw) != 8:
             raise StreamingUnavailable(f"truncated safetensors header: {path}")
         length = int.from_bytes(raw, "little")
-        header = json.loads(handle.read(length).decode("utf-8"))
+        if not 0 < length <= min(_SAFETENSORS_HEADER_LIMIT, size - 8):
+            raise StreamingUnavailable(f"invalid safetensors header length: {path}")
+        try:
+            header = json.loads(
+                handle.read(length).decode("utf-8"), object_pairs_hook=unique_object
+            )
+        except (UnicodeDecodeError, json.JSONDecodeError, ValueError, RecursionError) as error:
+            raise StreamingUnavailable(f"invalid safetensors JSON header: {path}") from error
+    if not isinstance(header, dict) or "__data_offset__" in header:
+        raise StreamingUnavailable(f"invalid safetensors header object: {path}")
     header.pop("__metadata__", None)
     return {"__data_offset__": 8 + length, **header}
 
@@ -132,15 +163,52 @@ class SafetensorsIndex:
         for shard in shards:
             header = read_safetensors_header(shard)
             base = header.pop("__data_offset__")
+            payload_bytes = shard.stat().st_size - base
+            ranges = []
             for name, spec in header.items():
-                offsets = spec.get("data_offsets") or [0, 0]
+                if name in tensors:
+                    raise StreamingUnavailable(f"duplicate safetensors tensor {name!r}")
+                if not isinstance(spec, dict):
+                    raise StreamingUnavailable(f"invalid safetensors tensor {name!r}")
+                dtype = spec.get("dtype")
+                shape = spec.get("shape")
+                offsets = spec.get("data_offsets")
+                # The index covers unrelated model tensors too. Preserve
+                # their existing dtype acceptance; the expert materializer
+                # still refuses formats it cannot reconstruct.
+                if not isinstance(dtype, str) or not dtype:
+                    raise StreamingUnavailable(f"invalid safetensors dtype for {name!r}")
+                if not isinstance(shape, list) or any(
+                    type(dim) is not int or not 0 <= dim <= _MAX_TENSOR_ELEMENTS
+                    for dim in shape
+                ):
+                    raise StreamingUnavailable(f"invalid safetensors shape for {name!r}")
+                if not (isinstance(offsets, list) and len(offsets) == 2
+                        and all(type(offset) is int for offset in offsets)
+                        and 0 <= offsets[0] <= offsets[1] <= payload_bytes):
+                    raise StreamingUnavailable(f"invalid safetensors offsets for {name!r}")
+                elements = 1
+                for dim in shape:
+                    elements *= dim
+                    if elements > _MAX_TENSOR_ELEMENTS:
+                        raise StreamingUnavailable(f"invalid safetensors shape for {name!r}")
+                itemsize = _SAFETENSORS_DTYPE_BYTES.get(dtype)
+                if itemsize is not None and offsets[1] - offsets[0] != elements * itemsize:
+                    raise StreamingUnavailable(f"safetensors byte count mismatch for {name!r}")
                 tensors[name] = TensorLocation(
                     path=shard,
-                    dtype=str(spec.get("dtype")),
-                    shape=tuple(int(dim) for dim in spec.get("shape") or ()),
+                    dtype=dtype,
+                    shape=tuple(shape),
                     begin=base + int(offsets[0]),
                     end=base + int(offsets[1]),
                 )
+                if offsets[0] != offsets[1]:
+                    ranges.append((offsets[0], offsets[1], name))
+            for previous, current in zip(sorted(ranges), sorted(ranges)[1:]):
+                if previous[1] > current[0]:
+                    raise StreamingUnavailable(
+                        f"overlapping safetensors tensor ranges: {previous[2]!r}, {current[2]!r}"
+                    )
         return cls(tensors)
 
     def __contains__(self, name: str) -> bool:
@@ -673,9 +741,12 @@ class ExpertStreamPlan:
     capacity_experts: int = 0
     ceiling_bytes: int = 0
     projections: Tuple[str, ...] = ()
+    resident_paths: Tuple[str, ...] = ()
 
     def as_dict(self) -> Dict[str, object]:
+        extra = {"resident_paths": list(self.resident_paths)} if self.resident_paths else {}
         return {
+            **extra,
             "layers": self.layers,
             "experts_per_layer": self.experts_per_layer,
             "expert_bytes": self.expert_bytes,
@@ -761,6 +832,11 @@ def _module_parent(model, path: str):
     return (node, parts[-1])
 
 
+def is_mtp_path(path: str) -> bool:
+    """True for a module under an embedded MTP draft head (``mtp.*``/``*.mtp.*``)."""
+    return "mtp" in path.split(".")
+
+
 def install_expert_streaming(
     model,
     model_path,
@@ -769,8 +845,17 @@ def install_expert_streaming(
     top_k: int = 1,
     read_workers: int = DEFAULT_READ_WORKERS,
     collector=None,
+    mtp_resident: bool = False,
 ) -> ExpertStreamManager:
     """Replace every streamable ``QuantizedSwitchLinear`` with a streamed one.
+
+    ``mtp_resident`` keeps the expert tables of an embedded MTP draft head
+    (any module path with an ``mtp`` component, e.g. Flash-Next's
+    ``mtp.layers.0.mlp.switch_mlp``) resident: a native-MTP route drafts from
+    that head every cycle, so streaming it puts page-ins on the draft path
+    (omlx #3935). Kept tables are not in the plan's layers or ceiling; they
+    are charged as ordinary resident weights, and listed in
+    ``plan.resident_paths``.
 
     Raises :class:`StreamingUnavailable` when the checkpoint's tensor names do
     not match the live module tree (an adapter that fuses or renames expert
@@ -785,8 +870,12 @@ def install_expert_streaming(
     handles = _FileHandles()
 
     targets: List[Tuple[str, object, List[ExpertSliceSpec]]] = []
+    resident_paths: List[str] = []
     for (path, module) in model.named_modules():
         if not isinstance(module, QuantizedSwitchLinear):
+            continue
+        if mtp_resident and is_mtp_path(path):
+            resident_paths.append(path)
             continue
         specs = []
         for key in ("weight", "scales", "biases"):
@@ -877,6 +966,7 @@ def install_expert_streaming(
         capacity_experts=capacity,
         ceiling_bytes=int(ceiling_bytes),
         projections=projections,
+        resident_paths=tuple(sorted(resident_paths)),
     )
     if collector is not None:
         collector.bind(num_layers=plan.layers, num_units=plan.experts_per_layer)

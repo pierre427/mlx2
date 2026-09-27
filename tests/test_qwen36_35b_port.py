@@ -127,12 +127,46 @@ def test_wrong_topology_rejected():
 
 def test_baseline_environment_selects_stock_moe():
     with patch.dict(os.environ, {"MLX_QWEN4_MOE_ROUTER_KERNEL": "1"}):
+        # Other tests exercise explicit kernel switches in this process.  A
+        # baseline profile means these three supported overrides are absent.
+        for name in (
+            "MLX_QWEN36_FUSED_GDN_DECODE", "MLX_QWEN4_MOE_FUSED_GATE_UP",
+            "MLX_GDN_CORE",
+        ):
+            os.environ.pop(name, None)
         profile = configure_environment()
         assert profile["MLX_LM_COMPILED_DECODE"] == "0"
         assert profile["MLX_QWEN36_FUSED_GDN_DECODE"] == "0"
         assert profile["MLX_QWEN4_MOE_ROUTER_KERNEL"] == "0"
         assert profile["MLX_QWEN4_FUSED_EXPERT_KERNEL"] == "stock"
         assert os.environ["MLX_QWEN4_MOE_FUSED_GATE_UP"] == "0"
+
+
+def test_declared_kernel_env_values_survive_unless_policy_overrides_them():
+    with patch.dict(os.environ, {
+        "MLX_QWEN36_FUSED_GDN_DECODE": "1",
+        "MLX_QWEN4_MOE_FUSED_GATE_UP": "1",
+        "MLX_GDN_CORE": "1",
+        "MLX_QWEN4_MOE_ROUTER_KERNEL": "1",  # unsupported 512/top-10 kernel
+    }):
+        effective = configure_environment()
+        for name in (
+            "MLX_QWEN36_FUSED_GDN_DECODE", "MLX_QWEN4_MOE_FUSED_GATE_UP",
+            "MLX_GDN_CORE",
+        ):
+            assert effective[name] == os.environ[name] == "1"
+        assert effective["MLX_QWEN4_MOE_ROUTER_KERNEL"] == "0"
+        assert os.environ["MLX_QWEN4_MOE_ROUTER_KERNEL"] == "0"
+
+        overridden = configure_environment({
+            "fused_gdn_decode": False, "moe_fused_gate_up": False,
+            "gdn_core": False,
+        })
+        for name in (
+            "MLX_QWEN36_FUSED_GDN_DECODE", "MLX_QWEN4_MOE_FUSED_GATE_UP",
+            "MLX_GDN_CORE",
+        ):
+            assert overridden[name] == os.environ[name] == "0"
 
 
 def test_profile_names_remain_unqualified_candidates():

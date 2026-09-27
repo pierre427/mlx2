@@ -326,10 +326,26 @@ class MuseOutputParser:
         self.parallel_tool_calls = bool(parallel_tool_calls)
         self.stopped, self.tool_count = False, 0
         self.tool_call_constraint_truncations = 0
+        # Set only for the duration of :meth:`finish` on a ``length`` stop.
+        self._length_finish = False
 
     @property
     def stop_sequence(self):
         return self.stop_matcher.stop_sequence
+
+    def finish(self, text, finish_reason):
+        """Push the last text of a generation that ended with ``finish_reason``.
+
+        Same contract as :meth:`mlx2.output.OutputParser.finish`: a ``length``
+        finish (``max_tokens``) inside an unclosed ATEM block, or inside a
+        channel header, drops the unfinished markup instead of failing the
+        request; EOS still fails closed.
+        """
+        self._length_finish = finish_reason == "length"
+        try:
+            return self.push(text, final=True)
+        finally:
+            self._length_finish = False
 
     def push(self, text, *, final=False):
         if self.stopped:
@@ -337,6 +353,9 @@ class MuseOutputParser:
         text, stop_hit = self.stop_matcher.push(text, final=final)
         if stop_hit:
             self.stopped, final = True, True
+        # A requested stop (max_tokens or a client stop string) that cuts
+        # markup short is not malformed model output.
+        truncated = final and (stop_hit or self._length_finish)
         self.buffer += text
         events = []
         while self.buffer:
@@ -359,6 +378,9 @@ class MuseOutputParser:
                 potential = _partial_header(self.buffer)
                 if potential and not final and len(self.buffer) < 512:
                     break
+                if potential and final and truncated:
+                    self.buffer = ""
+                    break
                 if potential and final:
                     raise ValueError("Model produced an incomplete Muse channel header")
                 if self.buffer.lstrip().startswith("<|start|>"):
@@ -375,6 +397,12 @@ class MuseOutputParser:
                         # That closer is quoted inside a JSON value.
                         end = self.buffer.find(_TOOL_CLOSE, end + 1)
                 if calls is None:
+                    if truncated:
+                        # Drop the partial call: it is neither a call nor
+                        # answer text.  The finish reason stays as it was.
+                        self.buffer = ""
+                        self.state, self.channel = "body", "content"
+                        break
                     if final:
                         raise ValueError("Model produced an incomplete ATEM tool call")
                     break
@@ -431,4 +459,9 @@ class MuseOutputParser:
                     events.append({self.channel: self.buffer[:end]})
                 self.buffer = self.buffer[end:]
                 break
+        if final and self.state == "tool":
+            if truncated:
+                self.state, self.channel = "body", "content"
+            else:
+                raise ValueError("Model produced an incomplete ATEM tool call")
         return events

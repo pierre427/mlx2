@@ -22,7 +22,7 @@ def _sha256(path: Path) -> str:
 
 def run(args: argparse.Namespace) -> dict:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-    from mlx2.adapters.generative_media import QWEN_BACKEND_REVISION, QwenImage21Adapter
+    from mlx2.adapters.generative_media import QwenImage21Adapter, _verify_qwen_backend_revision
 
     target = args.output.expanduser().resolve()
     if target.suffix.lower() != ".png" or target.exists():
@@ -37,6 +37,9 @@ def run(args: argparse.Namespace) -> dict:
 
         mx.set_default_device(mx.gpu)
         adapter = QwenImage21Adapter(args.model)
+        backend_runtime = _verify_qwen_backend_revision()
+        conversion = adapter.artifact.path / "mlx2-official-conversion.json"
+        conversion_backend = json.loads(conversion.read_text()).get("backend_revision") if conversion.exists() else None
         edit = args.edit_image is not None
         started = time.perf_counter()
         backend = adapter._model(edit=edit)
@@ -66,7 +69,9 @@ def run(args: argparse.Namespace) -> dict:
             "model_kind": adapter.artifact.kind,
             "model_revision": adapter.artifact.source_revision,
             "model_fingerprint": adapter.artifact.fingerprint,
-            "backend_revision": QWEN_BACKEND_REVISION,
+            "backend_revision": backend_runtime["revision"],
+            "backend_version": backend_runtime["version"],
+            "conversion_backend_revision": conversion_backend,
             "adapter_source_sha256": _sha256(Path(__file__).resolve().parents[1] / "src/mlx2/adapters/generative_media.py"),
             "operation": "edit" if edit else "generate",
             "prompt": args.prompt,

@@ -221,7 +221,9 @@ def test_muse_required_and_named_tool_streams_complete_through_serving_engine(
             "name": "weather",
             "arguments": '{"city": "Toronto"}',
         }
-        assert choice["finish_reason"] == "tool_calls"
+        # The fake batch ends the script on max_tokens, right after the call:
+        # the call is kept and the truncation is still reported.
+        assert choice["finish_reason"] == "length"
         assert not engine.error
         if tool_choice == "required":
             assert Batch.observed_processor_counts[-1] == 1

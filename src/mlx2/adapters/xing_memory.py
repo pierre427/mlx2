@@ -77,6 +77,35 @@ class XingCacheBudget:
             + layers * 4096
         )
 
+    def candidate_latent_kv8_storage_bytes(self, context_tokens):
+        """Conservative array-storage projection for the opt-in KV8 candidate.
+
+        This is *not* an admission budget until a measured receipt covers the
+        host, artifact, context range, batching, and transient peaks.  The
+        512-channel latent uses one byte per value plus two fp32 metadata
+        values per 64-channel group; the 64-channel RoPE key stays BF16.
+        Charging fp32 metadata also covers BF16 metadata without assuming
+        the model's current activation dtype.  The allocation step, spare
+        block, transcript, and per-layer overhead match ``project``.
+        """
+        if type(context_tokens) is not int or context_tokens < 0:
+            raise ValueError("context_tokens must be nonnegative integer")
+        if self.latent_dim % 64 or self.rope_dim != 64:
+            raise ValueError("Xing latent KV8 candidate requires 64-group latent and 64-wide RoPE")
+        capacity = (
+            math.ceil(context_tokens / self.allocation_step) * self.allocation_step
+            + self.allocation_step
+        )
+        latent_bytes = self.latent_dim  # eight bits per latent value
+        metadata_bytes = (self.latent_dim // 64) * 2 * 4
+        rope_bytes = self.rope_dim * 2
+        layers = self.attention_layers + self.mtp_layers
+        return (
+            layers * capacity * (latent_bytes + metadata_bytes + rope_bytes)
+            + capacity * self.transcript_bytes_per_token
+            + layers * 4096
+        )
+
     def as_dict(self):
         return {
             "schema": "xing4-0-mla-cache-geometry-v1",

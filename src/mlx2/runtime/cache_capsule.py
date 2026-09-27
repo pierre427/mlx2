@@ -414,7 +414,7 @@ class CacheCapsulePool:
 
     _COUNTERS = (
         "requests", "primary_successes", "fallbacks", "timeouts", "errors",
-        "stale", "capacity_rejections", "late_disposals",
+        "stale", "capacity_rejections", "late_disposals", "reclaim_rebases",
     )
 
     def __init__(self, generation, *, adapter=None, enabled=None,
@@ -445,6 +445,15 @@ class CacheCapsulePool:
         if self.reserve and backing is None:
             self._count("capacity_rejections")
             raise CacheCapsuleError("capacity reservation rejected")
+        if (
+            generation != self.generation.current
+            and getattr(backing, "generation_before", None) == generation
+            and getattr(backing, "generation_after", None) == self.generation.current
+        ):
+            # Only the reservation's own reclaim of unleased entries moved
+            # the generation; the leased source is intact.  Rebase onto it.
+            generation = int(backing.generation_after)
+            self._count("reclaim_rebases")
         token = _PreparedCapacityReservation(
             self, generation, required_bytes, backing
         )
@@ -748,6 +757,9 @@ def prepare_prompt_cache_capsules(prompt_cache, *, target_batch, generation, poo
             plane_bytes = int(nbytes)
         required_bytes += plane_bytes * target_batch
     reservation = pool.reserve_prepared(generation, required_bytes)
+    # The reservation may have rebased past its own reclaim; capture against
+    # the generation it actually holds.
+    generation = reservation.generation
     batched, receipts, leases, ordinary = [], [], [], 0
     try:
         for index, (cache, supported) in enumerate(zip(prompt_cache, capabilities)):

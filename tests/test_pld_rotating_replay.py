@@ -107,6 +107,31 @@ def test_rotating_replay_is_default_off_and_validated():
         PromptLookupBatchGenerator.validate_policy({"max_proposal_tokens": 0})
 
 
+def test_cost_parked_direct_rounds_match_segmented_plain_mixed_cache():
+    def make(*, cost):
+        policy = {
+            "num_draft": 4, "ngram_min": 2, "ngram_max": 3,
+            "memory_max_draft": 0,
+        }
+        if cost:
+            policy.update(cost_aware_admission=True, cost_shadow_span=4)
+        generator = PromptLookupBatchGenerator(
+            _MixedCacheModel(), prefill_step_size=4, prompt_lookup=policy,
+        )
+        generator.insert(
+            [PROMPT], max_tokens=[24],
+            caches=[[KVCache(), RotatingKVCache(max_size=WINDOW)]],
+        )
+        return generator
+
+    reference, candidate = make(cost=False), make(cost=True)
+    tokens, finals = _lockstep(reference, candidate)
+    _assert_same_final(finals)
+    assert len(tokens) == 24
+    assert reference.scheduler_stats["pld_batched_rounds"] > 0
+    assert candidate.scheduler_stats["pld_parked_direct_rounds"] == 24
+
+
 def test_rotating_replay_matches_copy_snapshot_on_wrapped_ring():
     reference_model, candidate_model = _MixedCacheModel(), _MixedCacheModel()
     reference = _generator(reference_model)

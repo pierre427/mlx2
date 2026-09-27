@@ -324,6 +324,16 @@ class SegmentedBatchQuantizedKVCache(SegmentedBatchKVCache):
         self._refresh_geometry()
         self._bump("quantized_kv_segmented_layers")
 
+    def make_mask(self, N, return_array=False, **kwargs):
+        mask = super().make_mask(N, return_array=return_array, **kwargs)
+        if not any(v is not None for v in kwargs.values()):
+            # Each row's slice of this mask (``row_views``) is plain causal
+            # over that row's own history, so rows may pass "causal".
+            from .models.qsdpa_verify_metal import register_causal_mask
+
+            register_causal_mask(mask, None, kind="segmented")
+        return mask
+
     def update_and_fetch(self, keys, values):
         if self._step_lengths is None or self._updated:
             raise RuntimeError("segmented KV append requires one prepared step")
@@ -383,6 +393,15 @@ class SegmentedBatchQuantizedKVCache(SegmentedBatchKVCache):
             raise ValueError("segmented KV query geometry mismatch")
         if self.rotate and hadamard_size_ok(queries.shape[-1]):
             queries = rotate_last(queries)
+        from .models import qsdpa_verify_metal as qvm
+
+        # A row's slice of the prepared mask (or of no mask) is plain causal
+        # over its own history. Saying so lets the quantized decode/verify
+        # kernels take the row; an explicit array always takes the composed
+        # path. MLX2_QSDPA_VERIFY_KERNEL=0 keeps the explicit row masks.
+        plain_causal = qvm.verify_kernel_enabled() and (
+            mask is None or qvm.registered_mask_kind(mask) == "segmented"
+        )
         outputs = []
         for index, valid, keys, values, row_mask in self.row_views(mask):
             if not valid:
@@ -398,7 +417,7 @@ class SegmentedBatchQuantizedKVCache(SegmentedBatchKVCache):
                 keys,
                 values,
                 scale=scale,
-                mask=row_mask,
+                mask="causal" if plain_causal else row_mask,
                 group_size=self.group_size,
                 key_bits=self.key_bits,
                 value_bits=self.value_bits,

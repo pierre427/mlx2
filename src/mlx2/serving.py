@@ -12,6 +12,7 @@ import importlib.metadata
 from itertools import islice
 import json
 import math
+import os
 import platform
 import logging
 from pathlib import Path
@@ -36,6 +37,42 @@ from .sampling_defaults import (
 from .batch_metrics import BatchFaultSpec, BatchRuntimeMetrics, HttpRuntimeMetrics
 
 log = logging.getLogger(__name__)
+
+
+def validated_adapter_prefill_inputs(adapter, request, remaining_tokens, prefill_input):
+    """Let an adapter attest CPU token/media alignment before array conversion.
+
+    The optional callback is model-specific; serving never interprets the
+    model's media markers or emits a trust flag of its own.
+    """
+    if prefill_input is None:
+        return None
+    validate = getattr(adapter, "validate_prefill_inputs", None)
+    if not callable(validate):
+        return prefill_input
+    result = validate(request, remaining_tokens, dict(prefill_input))
+    if not isinstance(result, dict):
+        raise TypeError("adapter prefill validation must return a dict")
+    return result
+
+
+def adapter_media_checkpoint_position(adapter, request, tokens, *, cached_tokens):
+    """Validate an adapter-declared exact post-media APCv2 boundary.
+
+    Serving owns the checkpoint lifecycle. The adapter alone certifies where
+    its complete media state ends in the prepared token stream.
+    """
+    hook = getattr(adapter, "apc_media_checkpoint_position", None)
+    if not callable(hook):
+        return None
+    position = hook(request, tokens, cached_tokens=cached_tokens)
+    if position is not None and (
+        type(position) is not int
+        or not cached_tokens < position < len(tokens) - 1
+        or position != request.get("_mlx2_media_token_end")
+    ):
+        raise ValueError("adapter APC media checkpoint boundary is invalid")
+    return position
 
 
 def _preemption_receipt(job):
@@ -303,16 +340,19 @@ def moe_expert_streaming_policy(value) -> dict:
         "atlas": False,
         "atlas_path": None,
         "trace_path": None,
+        # omlx #3935: keep an embedded MTP head's experts resident. Opt-in;
+        # appears in the resolved policy only when true.
+        "mtp_resident": False,
     }
     if value is None:
-        return defaults
+        return {k: v for (k, v) in defaults.items() if k != "mtp_resident"}
     if not isinstance(value, dict):
         raise ValueError("moe_expert_streaming must be an object")
     unknown = set(value) - set(defaults)
     if unknown:
         raise ValueError(f"unknown MoE expert streaming settings: {sorted(unknown)}")
     policy = {**defaults, **value}
-    for flag in ("enabled", "atlas"):
+    for flag in ("enabled", "atlas", "mtp_resident"):
         if type(policy[flag]) is not bool:
             raise ValueError(f"moe_expert_streaming.{flag} must be boolean")
     cache_gib = policy["cache_gib"]
@@ -340,7 +380,7 @@ def moe_expert_streaming_policy(value) -> dict:
         )
     if policy["trace_path"] and not policy["atlas"]:
         raise ValueError("moe_expert_streaming.trace_path requires atlas collection")
-    return {
+    resolved = {
         "enabled": policy["enabled"],
         "cache_gib": float(cache_gib),
         "read_workers": int(workers),
@@ -348,6 +388,9 @@ def moe_expert_streaming_policy(value) -> dict:
         "atlas_path": policy["atlas_path"],
         "trace_path": policy["trace_path"],
     }
+    if policy["mtp_resident"]:
+        resolved["mtp_resident"] = True
+    return resolved
 
 
 def apc_rolling_checkpoint_policy(value) -> dict:
@@ -721,6 +764,31 @@ def verify_bitexact_status(engine):
     return engine_status(engine)
 
 
+def sp_qmm_selected(execution_policy) -> bool:
+    """Execution-policy ``sp_qmm`` (boolean); MLX2_SP_QMM=1 selects it when
+    the policy does not say. An explicit policy value always wins."""
+    value = (execution_policy or {}).get(
+        "sp_qmm", os.environ.get("MLX2_SP_QMM", "0") == "1"
+    )
+    if type(value) is not bool:
+        raise ValueError("sp_qmm must be boolean")
+    return value
+
+
+def sp_qmm_status(engine):
+    """Selected and observed-used state of the small-M quantized matmul."""
+    if not getattr(engine, "sp_qmm_enabled", False):
+        return {"enabled": False}
+    from .runtime.models import sp_qmm
+
+    return {
+        "enabled": True,
+        "modules": len(engine.sp_qmm_handle or ()),
+        "routed_calls": sp_qmm.STATS["routed"],
+        "stock_calls": sp_qmm.STATS["stock"],
+    }
+
+
 def verify_bitexact_receipt_fields(handle, start):
     """Terminal receipt fields; ``verify_bitexact`` is false unless proven."""
     if handle is None:
@@ -909,6 +977,16 @@ def admission_memory_limit_bytes(advisory_gib, service_reserve_gib, driver_allow
     return int(budget * (1 << 30))
 
 
+def resident_device_bytes():
+    """MLX active memory now (the loaded model before any lane), or ``None``."""
+    try:
+        import mlx.core as mx
+
+        return int(mx.get_active_memory())
+    except Exception:  # noqa: BLE001 - a sizing probe must not break startup
+        return None
+
+
 def is_device_out_of_memory(exc):
     """A Metal command buffer that failed for lack of memory."""
     text = str(exc)
@@ -917,18 +995,50 @@ def is_device_out_of_memory(exc):
     )
 
 
-def prefill_transient_gib(cache_budget, *, context_tokens, uncached_tokens, prefill_step):
+def prefill_transient_gib(
+    cache_budget, *, context_tokens, uncached_tokens, prefill_step, single_chunk=False
+):
     """The adapter's chunked-prefill transient for one arriving lane, in GiB.
 
     Zero when the adapter declares none or when there is no prefill chunk to
     run (a warm hit leaves at most the anchor token).  The chunk is the
-    smaller of the uncached tail and the prefill step.
+    smaller of the uncached tail and the prefill step, or the whole uncached
+    tail when ``single_chunk`` (a cold multimodal request: its first prefill
+    runs the whole prompt in one isolated forward).
     """
     estimate = getattr(cache_budget, "prefill_transient_bytes", None)
     if estimate is None or uncached_tokens <= 1:
         return 0.0
-    rows = min(int(uncached_tokens), int(prefill_step))
+    rows = (
+        int(uncached_tokens)
+        if single_chunk
+        else min(int(uncached_tokens), int(prefill_step))
+    )
     return float(estimate(int(context_tokens), rows)) / float(1 << 30)
+
+
+def cold_media_feature_peak_increment_gib(
+    adapter, request, *, cached_tokens: int, uncached_tokens: int
+) -> float:
+    """Reserve a newly retained media feature, never resident cache bytes.
+
+    This adapter hook is meaningful only for an isolated cold media prefill.
+    Measured execution headroom already includes evaluated feature-cache
+    entries; adding those entries again would charge them twice. This is a
+    retained-cache bound, not a bound on all donor vision activations.
+    """
+    if (cached_tokens or uncached_tokens <= 1
+            or request.get("_mlx2_prefill_inputs") is None
+            or request.get("_mlx2_lora_fingerprint") is not None
+            or not request.get("_mlx2_tower_inputs_digest")):
+        return 0.0
+    estimate = getattr(adapter, "cold_media_feature_peak_increment_bytes", None)
+    if not callable(estimate):
+        return 0.0
+    value = estimate()
+    if type(value) is not int or value < 0:
+        raise ValueError("cold media feature peak increment must be nonnegative bytes")
+    return value / float(1 << 30)
 
 
 def unmaterialized_lane_bytes(jobs):
@@ -1229,6 +1339,9 @@ class Job:
     observed_width: int = 1
     admission_hit: object = None
     admission_tokens: list | None = None
+    # Only independent, exact APCv2-compatible requests use this admission key.
+    apc_sequence_key: object = None
+    apc_sequence_waited: bool = False
     admission_retry_at: float = 0
     admission_deadline: float = 0
     fault_fired: bool = False
@@ -1361,6 +1474,7 @@ class ServingEngine:
         max_request_bytes=2 << 20,
         prefill_step=None,
         cache_bytes=12 << 30,
+        cache_bytes_source="explicit",
         cache_dir=None,
         host_prompt_cache_entries=128,
         host_prompt_cache_tokens=1 << 20,
@@ -1421,6 +1535,8 @@ class ServingEngine:
             raise ValueError("limits must be positive")
         if max_lanes > max_inflight:
             raise ValueError("max_lanes must not exceed max_inflight")
+        if cache_bytes_source not in {"explicit", "host_default"}:
+            raise ValueError("invalid cache_bytes source")
         if route_selection_source not in {
             "adapter_default",
             "explicit_flag",
@@ -1456,6 +1572,10 @@ class ServingEngine:
         if type(junction_policy) is not bool:
             raise ValueError("apc_junction_checkpoints must be boolean")
         self.apc_junction_checkpoints = junction_policy
+        # Default-off: route small-M 4/5-bit verify matmuls through the mlx2
+        # simdgroup kernel (runtime/models/sp_qmm.py) where it measured faster.
+        self.sp_qmm_enabled = sp_qmm_selected(execution_policy)
+        self.sp_qmm_handle = None
         self.apc_rolling_checkpoint_policy = apc_rolling_checkpoint_policy(
             (execution_policy or {}).get("apc_rolling_checkpoints")
         )
@@ -1717,6 +1837,11 @@ class ServingEngine:
         self.max_context, self.max_request_bytes = max_context, max_request_bytes
         self.prefill_step = prefill_step
         self.cache_bytes, self.cache_dir = cache_bytes, cache_dir
+        # ``host_default`` may be lowered once the model's footprint is known
+        # (``_clamp_host_default_cache_bytes``); an explicit value never is.
+        self.cache_bytes_source = cache_bytes_source
+        self.cache_bytes_clamped_from = None
+        self.cache_bytes_headroom = None
         self.host_prompt_cache = HostPromptCache(
             max_entries=host_prompt_cache_entries,
             max_tokens=host_prompt_cache_tokens,
@@ -1873,7 +1998,10 @@ class ServingEngine:
         if adapter_factory is None:
             from .adapters.registry import resolve_adapter
 
-            adapter_factory = resolve_adapter(model_path, mtp=mtp)
+            adapter_factory = resolve_adapter(
+                model_path, mtp=mtp, qualification_mode=qualification_mode,
+                qualification=qualification,
+            )
         self.adapter_factory = adapter_factory
         self.thread = threading.Thread(
             target=self._run, name="mlx2-generation", daemon=True
@@ -2720,6 +2848,89 @@ class ServingEngine:
             self._finish(job, {"error": self.error or "server stopped", "status": 503})
         return jobs
 
+    def _clamp_host_default_cache_bytes(self, adapter):
+        """Lower a host-default APCv2 cap to the room beside the loaded model.
+
+        The parser sizes the default from physical RAM alone (48 GiB on the
+        128 GiB host).  After the load the resident footprint is known, so
+        the cap is bounded by the MLX admission limit (advisory minus the
+        service and driver reserves) minus that footprint, the streamed-weight
+        ceiling, and ``CACHE_CLAMP_LANES`` lanes at the route's depth floor
+        with ``CACHE_CLAMP_REFERENCE_CONTEXT`` tokens each -- never below the
+        legacy min(16 GiB, physical/8).  See ``cache_sizing``.
+        """
+        from .cache_sizing import (
+            CACHE_CLAMP_LANES,
+            CACHE_CLAMP_REFERENCE_CONTEXT,
+            clamp_host_default_cache_bytes,
+            legacy_default_cache_bytes,
+            physical_memory_bytes,
+        )
+        from .memory import host_memory_gib, metal_advisory_gib
+        from .runtime.memory_policy import SelfMTPLaneAdmissionController
+
+        advisory_gib = metal_advisory_gib()
+        controller = None
+        lane_need = None
+        try:
+            budget = (
+                adapter.cache_budget(mtp=self.mtp)
+                if hasattr(adapter, "cache_budget")
+                else None
+            )
+            controller = SelfMTPLaneAdmissionController(
+                host_memory_gib=host_memory_gib(),
+                advisory_gib=advisory_gib,
+                cache_estimator=budget.project if budget else None,
+                transient_gib_per_lane=getattr(
+                    budget,
+                    "transient_gib_per_lane",
+                    SelfMTPLaneAdmissionController.K2_TRANSIENT_GIB_PER_LANE,
+                ),
+            )
+            lane_need = int(
+                controller.lane_gib(
+                    min(self.max_context, CACHE_CLAMP_REFERENCE_CONTEXT), 0
+                )
+                * (1 << 30)
+            )
+        except Exception:  # noqa: BLE001 - unmeasured headroom takes the floor
+            log.exception("could not cost lanes for the APCv2 default clamp")
+        limit = (
+            admission_memory_limit_bytes(
+                controller.advisory_gib,
+                controller.service_reserve_gib,
+                controller.driver_allowance_gib,
+            )
+            if controller is not None
+            else None
+        )
+        requested = int(self.cache_bytes)
+        (effective, detail) = clamp_host_default_cache_bytes(
+            requested,
+            floor_bytes=legacy_default_cache_bytes(physical_memory_bytes()),
+            admission_limit_bytes=limit,
+            resident_bytes=resident_device_bytes(),
+            stream_reserve_bytes=int(self.expert_stream_reserve_gib() * (1 << 30)),
+            lane_need_bytes=lane_need,
+            lanes=max(1, min(self.max_lanes, CACHE_CLAMP_LANES)),
+        )
+        self.cache_bytes_headroom = detail
+        if effective < requested:
+            self.cache_bytes = effective
+            self.cache_bytes_clamped_from = requested
+            log.info(
+                "APCv2 host-default cache %.4g GiB clamped to %.4g GiB (%s): "
+                "admission limit %s, resident %s, %d lanes x %s",
+                requested / float(1 << 30),
+                effective / float(1 << 30),
+                detail["reason"],
+                detail["admission_limit_bytes"],
+                detail["resident_bytes"],
+                detail["lanes"],
+                detail["lane_need_bytes"],
+            )
+
     def expert_stream_reserve_gib(self) -> float:
         """``B_stream``: the enforced expert-cache ceiling, in GiB.
 
@@ -2778,10 +2989,13 @@ class ServingEngine:
             top_k=top_k,
             read_workers=policy["read_workers"],
             collector=collector,
+            mtp_resident=bool(policy.get("mtp_resident", False)),
         )
         self.expert_stream_collector = collector
 
     def status(self):
+        from .runtime.models import qsdpa_verify_metal as qvm
+
         with self.lock:
             quiesce = self._service_state_locked()
             return {
@@ -2813,6 +3027,11 @@ class ServingEngine:
                 },
                 "int8_prefill": int8_prefill_status(self),
                 "verify_bitexact": verify_bitexact_status(self),
+                "sp_qmm": sp_qmm_status(self),
+                "qsdpa_verify": {
+                    "counts": dict(qvm.STATS),
+                    "by_rows": dict(qvm.STATS_BY_ROWS),
+                },
                 "recent_receipts": self.recent_receipts(),
                 "recent_operation_receipts": list(self.operation_receipts),
                 "model_revision": self.model_revision,
@@ -3758,6 +3977,27 @@ class ServingEngine:
             sibling.cache_capsule_receipt = dict(receipt)
         return False
 
+    @staticmethod
+    def _cache_capsule_source_failure(capsule_hit, expected, rows):
+        """Explain a declined source without exposing the prompt or cache arrays."""
+        from .runtime.cache_capsule import inspect_kv_cache_capsule
+
+        if not capsule_hit.hit:
+            return {"reason": "apc_miss", "apc_miss_reason": capsule_hit.miss_reason}
+        if capsule_hit.cached_tokens != expected:
+            return {"reason": "boundary_mismatch", "cached_tokens": capsule_hit.cached_tokens,
+                    "expected_tokens": expected}
+        if not capsule_hit.cache:
+            return {"reason": "empty_cache"}
+        if capsule_hit.capsule_generation is None:
+            return {"reason": "generation_missing"}
+        inspections = [inspect_kv_cache_capsule(plane, rows) for plane in capsule_hit.cache]
+        if any(supported for supported, _reason in inspections):
+            return None
+        return {"reason": "no_eligible_plane",
+                "plane_reasons": sorted({reason for _supported, reason in inspections}),
+                "plane_types": sorted({type(plane).__name__ for plane in capsule_hit.cache})}
+
     def _select_rolling_route(self, adapter, *, external_draft, prompt_lookup, inspect):
         """Choose how rolling prefill checkpoints work on this route, or fail closed."""
         if external_draft or prompt_lookup or self.approximate_kv_policy.enabled:
@@ -4131,6 +4371,7 @@ class ServingEngine:
         active = {}
         deferred = deque()
         published = deque()
+        prefix_waiting = deque()
         held_cohort = None
         attaching_cohort = None
         try:
@@ -4155,6 +4396,7 @@ class ServingEngine:
                         "tolerant_tool_markers",
                         "constrained_tool_grammar_auto",
                         "tool_grammar_streaming",
+                        "sp_qmm",
                     }
                 }
                 if self.execution_policy is not None
@@ -4170,9 +4412,17 @@ class ServingEngine:
                 else self.adapter_factory(self.model_path)
             )
             self.adapter = adapter
+            # Wire the weights for the process lifetime, on every route and
+            # before any cache exists (runtime/weight_residency.py).  The
+            # prompt-lookup and external-draft generators never raised the
+            # wired limit, so their weights stayed pageable.
+            from .runtime import weight_residency
+
+            self.weight_residency = weight_residency.wire_serving_weights()
             preferred = getattr(adapter, "prefill_step_default", None)
-            if self._prefill_step_override is None and callable(preferred):
-                step = int(preferred())
+            preference = preferred() if self._prefill_step_override is None and callable(preferred) else None
+            if preference is not None:
+                step = int(preference)
                 if step <= 0:
                     raise ValueError(f"adapter prefill_step_default must be positive, got {step}")
                 self.prefill_step = step
@@ -4240,6 +4490,8 @@ class ServingEngine:
 
             identity = runtime_identity()
             self.max_context = min(self.max_context, adapter.max_context)
+            if self.cache_bytes_source == "host_default":
+                self._clamp_host_default_cache_bytes(adapter)
             settings = {
                 "max_context": self.max_context,
                 "default_max_tokens": self.default_max_tokens,
@@ -4248,6 +4500,12 @@ class ServingEngine:
                 "prefill_step": self.prefill_step,
                 "prefill_step_source": self.prefill_step_source,
                 "cache_bytes": self.cache_bytes,
+                # How the value was chosen is provenance, not route identity
+                # (qualification.PROVENANCE_ONLY_SETTINGS); ``cache_bytes``
+                # itself stays bound.
+                "cache_bytes_source": self.cache_bytes_source,
+                "cache_bytes_clamped_from": self.cache_bytes_clamped_from,
+                "cache_bytes_headroom": self.cache_bytes_headroom,
                 "disk_cache": bool(self.cache_dir or self.apc_persist_dir),
                 "apc_persistence": bool(self.apc_persist_dir),
                 "apc_persist_on_shutdown": self.apc_persist_on_shutdown,
@@ -4292,6 +4550,11 @@ class ServingEngine:
                     self.apc_interior_checkpoint_policy
                 ),
             }
+            mlx_vlm_runtime = getattr(adapter, "mlx_vlm_runtime", None)
+            if mlx_vlm_runtime is not None:
+                # Only routes that execute mlx-vlm code bind its revision, so
+                # installing the multimodal extra leaves text receipts valid.
+                settings["mlx_vlm"] = dict(mlx_vlm_runtime)
             if self.memory_preemption_policy["enabled"]:
                 # Present only when enabled so default receipts stay unchanged.
                 settings["memory_preemption"] = dict(self.memory_preemption_policy)
@@ -4352,6 +4615,17 @@ class ServingEngine:
                     else None
                 ),
             )
+            if self.approximate_kv_policy.enabled:
+                from .runtime.models import qsdpa_verify_metal as qvm
+
+                # The verify kernel is a separate, context-dependent route
+                # over quantized K/V. Bind its switch and threshold to
+                # the qualification identity; a selected kernel still needs
+                # an observed call before its route can be qualified.
+                settings["qsdpa_verify_kernel"] = {
+                    "enabled": qvm.verify_kernel_enabled(),
+                    "min_context": qvm.MIN_CONTEXT,
+                }
             config = adapter.execution_config(
                 max_lanes=self.max_lanes, prefill_step=self.prefill_step
             )
@@ -4553,6 +4827,18 @@ class ServingEngine:
                     self.verify_bitexact_handle,
                     settings["verify_bitexact"],
                 ) = bind_verify_bitexact(self.verify_bitexact_policy)
+            if self.sp_qmm_enabled:
+                # Recorded in settings only when enabled so default-off
+                # records match.  Instance-scoped: a draft model is untouched.
+                from .runtime.models import sp_qmm
+
+                self.sp_qmm_handle = sp_qmm.apply(adapter.model)
+                if not self.sp_qmm_handle:
+                    raise ValueError("sp_qmm selected but no eligible 4/5-bit gs64 projections")
+                settings["sp_qmm"] = {
+                    "modules": len(self.sp_qmm_handle),
+                    "policy": "measured-m5max-20260925",
+                }
             if self.int8_prefill_policy.enabled:
                 # Fails closed (unsupported device, undeclared scope, or a
                 # decode/verify block that could reach the row threshold)
@@ -4583,6 +4869,7 @@ class ServingEngine:
                         if self.verify_bitexact_policy.enabled
                         else ""
                     )
+                    + ("-sp-qmm" if self.sp_qmm_enabled else "")
                     + (
                         "-adaptive-mtp-depth"
                         if self.adaptive_mtp_policy.enabled
@@ -5214,6 +5501,7 @@ class ServingEngine:
                     "artifact": adapter.identity["fingerprint"],
                     "profile": profile_name,
                     "settings": settings,
+                    "weight_residency": getattr(self, "weight_residency", None),
                     "route_receipt": route_receipt,
                     "capabilities": sorted(
                         capability.value for capability in self.route_capabilities
@@ -5419,6 +5707,14 @@ class ServingEngine:
                 held_cohort = self._finish_cancelled_queued(
                     batch, published, held_cohort, attaching_cohort
                 )
+                # A same-prefix follower has no prompt-cache lease. Cancel it
+                # even while unrelated work occupies every execution lane.
+                for _ in range(len(prefix_waiting)):
+                    waiting = prefix_waiting.popleft()
+                    if waiting.cancelled.is_set():
+                        self._finish(waiting, {"error": "cancelled"})
+                    else:
+                        prefix_waiting.append(waiting)
                 # Admission is bounded before prompt caches are allocated.
                 coalescer = IdleAdmissionCoalescer(
                     self.coalesce_window_seconds,
@@ -5427,6 +5723,7 @@ class ServingEngine:
                 while len(active) < self.max_lanes:
                     try:
                         queued_job = False
+                        prefix_retry = False
                         timeout = coalescer.timeout(
                             now=time.monotonic(),
                             idle=not active,
@@ -5471,6 +5768,20 @@ class ServingEngine:
                             published.extend(attaching_cohort.jobs)
                             job = published.popleft()
                             queued_job = True
+                        elif prefix_waiting and (ready_index := next(
+                            (
+                                index for index, waiting in enumerate(prefix_waiting)
+                                if not any(
+                                    lane.apc_sequence_key == waiting.apc_sequence_key
+                                    and lane.cached_tokens == 0
+                                    for lane in active.values()
+                                )
+                            ),
+                            None,
+                        )) is not None:
+                            job = prefix_waiting[ready_index]
+                            del prefix_waiting[ready_index]
+                            prefix_retry = True
                         elif published:
                             job = published.popleft()
                             queued_job = True
@@ -5503,7 +5814,8 @@ class ServingEngine:
                         else:
                             with self.lock:
                                 queue_depth = self.queued_jobs
-                        self.batch_metrics.dequeued(job.id, queue_depth)
+                        if not prefix_retry:
+                            self.batch_metrics.dequeued(job.id, queue_depth)
                     except queue.Empty:
                         break
                     if job.cancelled.is_set():
@@ -5528,7 +5840,6 @@ class ServingEngine:
                     try:
                         if not job.started:
                             job.started = time.monotonic()
-                            job.admission_deadline = job.started + self.MEMORY_ADMISSION_TIMEOUT
                             if job.fault and not job.fault_fired and job.fault.kind in {
                                 "cache_evict",
                                 "cache_reallocate",
@@ -5539,6 +5850,8 @@ class ServingEngine:
                                     reclaim_allocator()
                                 job.fault_fired = True
                                 self.batch_metrics.fault(job.id, job.fault.kind)
+                        if not job.admission_deadline:
+                            job.admission_deadline = time.monotonic() + self.MEMORY_ADMISSION_TIMEOUT
                         if time.monotonic() >= job.admission_deadline:
                             if not job.admission_final_reclaim_done:
                                 self._clear_allocator_cache_before_reject(
@@ -5571,6 +5884,44 @@ class ServingEngine:
                         context_limit = min(self.max_context, job.request.get("context_limit", self.max_context))
                         if not tokens:
                             raise ValueError("prompt must contain at least one token")
+                        # Serialise only requests whose APCv2 namespace, exact
+                        # rendered tokens and session ownership all match. A
+                        # fanout cohort, media payload, approximate operation,
+                        # preempted replay or write-suppressed leader cannot
+                        # promise a reusable exact checkpoint to its follower.
+                        # A leader that already hit APCv2 has a checkpoint its
+                        # peers can independently reuse and need not serialize.
+                        sequence_eligible = (
+                            attaching_cohort is None
+                            and not job.parallel_sample
+                            and not job.preempted
+                            and not job.request.get("skip_writing_prefix_cache", False)
+                            and not job.request.get("_mlx2_prefill_inputs")
+                            and not job.request.get("_mlx2_neural_concepts")
+                            and not job.request.get("_mlx2_media_fingerprint")
+                            and not self.approximate_kv_policy.enabled
+                            and not self.memory_preemption_policy["enabled"]
+                            and spomin_manager is None
+                        )
+                        if sequence_eligible:
+                            job.apc_sequence_key = (
+                                cache_key_for(
+                                    job.tenant_id,
+                                    request_apc_scope(job.request),
+                                ),
+                                tuple(tokens),
+                                session_tag_for(job),
+                            )
+                            if any(
+                                lane.apc_sequence_key == job.apc_sequence_key
+                                and lane.cached_tokens == 0
+                                for lane in active.values()
+                            ):
+                                job.apc_sequence_waited = True
+                                job.admission_deadline = 0
+                                prefix_waiting.append(job)
+                                self.counts["apcv2_same_prefix_sequenced"] += 1
+                                continue
                         if job.effective_max_tokens is None:
                             maximum, defaulted = resolve_output_limit(
                                 job.request,
@@ -5638,6 +5989,22 @@ class ServingEngine:
                             context_tokens=len(tokens),
                             uncached_tokens=len(hit.remaining_tokens),
                             prefill_step=self.prefill_step,
+                            # Same rule the insert below uses to pass a
+                            # prefill payload: a cold media request (or a
+                            # concept payload) prefills its uncached tail in
+                            # one isolated chunk.
+                            single_chunk=(
+                                (
+                                    job.request.get("_mlx2_prefill_inputs") is not None
+                                    and not hit.cached_tokens
+                                )
+                                or job.request.get("_mlx2_neural_concepts") is not None
+                            ),
+                        )
+                        prefill_gib += cold_media_feature_peak_increment_gib(
+                            adapter, job.request,
+                            cached_tokens=hit.cached_tokens,
+                            uncached_tokens=len(hit.remaining_tokens),
                         )
                         admission_headroom = (
                             (lambda: execution_headroom() - granted)
@@ -5743,6 +6110,10 @@ class ServingEngine:
                             int(job.request.get("_mlx2_media_token_end", 0) or 0),
                         ):
                             turn_end_boundary = None
+                        media_checkpoint_position = adapter_media_checkpoint_position(
+                            adapter, job.request, tokens,
+                            cached_tokens=int(hit.cached_tokens),
+                        )
                         planning_target = (
                             self.apc_interior_route_supported
                             and (
@@ -5753,6 +6124,7 @@ class ServingEngine:
                                 or self.apc_rolling_route == "hybrid"
                                 or self.apc_junction_checkpoints
                                 or turn_end_boundary is not None
+                                or media_checkpoint_position is not None
                             )
                             and not job.request.get("skip_writing_prefix_cache", False)
                             and (
@@ -5821,6 +6193,17 @@ class ServingEngine:
                             )
                             self.counts[
                                 "apc_interior_positions_planned_generation_prompt"
+                            ] += 1
+                        if (
+                            planning_target
+                            and media_checkpoint_position is not None
+                            and media_checkpoint_position not in checkpoint_candidates
+                        ):
+                            checkpoint_candidates = tuple(sorted((
+                                *checkpoint_candidates, media_checkpoint_position
+                            )))
+                            self.counts[
+                                "apc_interior_positions_planned_media_boundary"
                             ] += 1
                         if planning_target and self.apc_junction_checkpoints:
                             branch = int(getattr(hit, "branch_tokens", 0) or 0)
@@ -6380,6 +6763,9 @@ class ServingEngine:
                             job.request.get("_mlx2_prefill_inputs")
                             if not hit.cached_tokens
                             else None
+                        )
+                        prefill_input = validated_adapter_prefill_inputs(
+                            adapter, job.request, hit.remaining_tokens, prefill_input
                         )
                         neural_payload = job.request.get("_mlx2_neural_concepts")
                         if neural_payload is not None:
@@ -6994,28 +7380,39 @@ class ServingEngine:
                                             )
                                         ):
                                             from .runtime.cache_capsule import (
-                                                inspect_kv_cache_capsule,
                                                 prepare_prompt_cache_capsules,
                                             )
 
+                                            # The capsule replaces every
+                                            # sibling's prompt cache, so its
+                                            # source must be the very state
+                                            # the siblings leased: look it up
+                                            # with their tokens and require
+                                            # the same committed length.  A
+                                            # lookup of the boundary tokens
+                                            # alone is an exact hit, which
+                                            # APCv2 serves one token short
+                                            # (KV trimmed to len-1) or from an
+                                            # older hybrid checkpoint, and the
+                                            # siblings then decoded their
+                                            # one remaining token on a state
+                                            # missing 1-7 prompt tokens.
                                             capsule_hit = apc.lookup(
-                                                key, boundary["tokens"]
+                                                key,
+                                                siblings[0].admission_tokens,
+                                                allow_disk_restore=False,
                                             )
                                             prepared = None
                                             started = time.monotonic()
                                             try:
-                                                compatible = bool(
-                                                    capsule_hit.hit
-                                                    and capsule_hit.cache
-                                                    and capsule_hit.capsule_generation
-                                                    is not None
-                                                    and any(
-                                                        inspect_kv_cache_capsule(
-                                                            plane, len(siblings)
-                                                        )[0]
-                                                        for plane in capsule_hit.cache
-                                                    )
+                                                failure = self._cache_capsule_source_failure(
+                                                    capsule_hit, expected, len(siblings)
                                                 )
+                                                if failure is not None and failure["reason"] == "boundary_mismatch":
+                                                    self.counts[
+                                                        "cache_capsule_boundary_mismatch_fallbacks"
+                                                    ] += 1
+                                                compatible = failure is None
                                                 if compatible:
                                                     prepared = prepare_prompt_cache_capsules(
                                                         capsule_hit.cache,
@@ -7042,6 +7439,15 @@ class ServingEngine:
                                                     self.counts[
                                                         "cache_capsule_incompatible_fallbacks"
                                                     ] += 1
+                                                    receipt = {
+                                                        "schema": "mlx2.cache-capsule.v1",
+                                                        "status": "fallback",
+                                                        "reason": "source_incompatible",
+                                                        "rows": len(siblings),
+                                                        "source_failure": failure,
+                                                    }
+                                                    for sibling in siblings:
+                                                        sibling.cache_capsule_receipt = dict(receipt)
                                             except Exception:
                                                 if prepared is not None:
                                                     prepared.close()
@@ -7314,6 +7720,7 @@ class ServingEngine:
                                     "request_id": job.id,
                                     "cache": "apcv2",
                                     "cached_tokens": job.cached_tokens,
+                                    "apcv2_same_prefix_waited": job.apc_sequence_waited,
                                     "cache_checkpoint_role": job.cache_retention_role,
                                     "stop_sequence": getattr(
                                         job.output_parser, "stop_sequence", None
@@ -7557,8 +7964,19 @@ class ServingEngine:
                             self.counts["completed"] += 1
                             if job.structured is not None:
                                 self.counts["structured_output_completed"] += 1
+                            # max_tokens outranks tool_calls: a call that
+                            # completed before the budget ran out is kept, but
+                            # the client must learn the turn was truncated
+                            # (OpenAI's "length" definition; vLLM's streaming
+                            # path does the same).  A parser that stopped on
+                            # its own (turn end, client stop) was not cut off.
+                            truncated = (
+                                response.finish_reason == "length" and not stopped
+                            )
                             reason = (
-                                "tool_calls"
+                                "length"
+                                if truncated
+                                else "tool_calls"
                                 if job.output_parser.tool_count
                                 else "stop"
                                 if stopped

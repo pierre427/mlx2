@@ -430,6 +430,58 @@ def test_copied_token_the_grammar_forbids_does_not_latch_a_failure(cpu, route):
         assert stats["self_mtp_copy_rounds"] > 0
 
 
+@pytest.mark.parametrize("delivered", [1, 2, 3])
+def test_accepted_copy_rows_settle_structured_steps_at_delivery(cpu, delivered):
+    """Only delivered copy/bonus rows may count as grammar verify steps."""
+    from mlx2.runtime.hybrid_speculative import (
+        attach_self_mtp_lanes,
+        commit_batched_self_mtp,
+        prepare_self_mtp_lane,
+        propose_batched_self_mtp,
+    )
+    from mlx2.structured_output import StructuredOutputProcessor
+
+    class LongAnswer:
+        pattern = None
+
+        @staticmethod
+        def canonicalize(value):
+            return value
+
+        @staticmethod
+        def fullmatch(value, *, partial=False, timeout=None):
+            return object() if partial or len(value) >= 100 else None
+
+    model = _copying_model()
+    processor = StructuredOutputProcessor(
+        _LetterTokenizer(), len(PROMPT), LongAnswer()
+    )
+    detached, first = prepare_self_mtp_lane(
+        mx.array(PROMPT, mx.uint32), model, uid=3, max_tokens=30,
+        prompt_cache=None, mtp_state=None, lane_rng=LaneRNG(3), num_draft=2,
+        sampling_temp=0.0, sampling_top_p=1.0, sampling_top_k=0,
+        sampling_min_p=0.0, accept_rule="residual",
+        logits_processors=[processor], prefill_step_size=32,
+        share_qsa_indices=False,
+    )
+    before = processor.constrained_steps
+    detached.lane.copy_draft = CopyDraftState(
+        CopyDraftPolicy(enabled=True), PROMPT + [first.token]
+    )
+    batch = attach_self_mtp_lanes(model, None, [detached])
+    proposal = propose_batched_self_mtp(model, batch)
+    assert proposal.copy_spans == (2,)
+    assert proposal.accepted_lengths == (2,)
+    assert len(proposal.outputs[0]) == 3
+    # Isolated probes cannot publish steps; real verification sees all rows.
+    assert processor.constrained_steps == before + 3
+    commit_batched_self_mtp(
+        batch, proposal, emitted_counts=[delivered], terminal=[delivered < 3]
+    )
+    assert processor.failure is None
+    assert processor.constrained_steps == before + delivered
+
+
 def test_copy_verify_under_a_processor_reads_back_once_per_round(cpu, monkeypatch):
     """The copy-row processor guard read each copied token's legality back
     with ``.item()``: a serial device-to-host sync per copied token in the
@@ -899,3 +951,95 @@ def test_logits_processors_reject_forbidden_copied_tokens_exactly(cpu):
     assert copied == baseline
     assert forbidden not in copied
     assert stats["self_mtp_copy_rounds"] > 0
+
+
+# -- match-strength admission (design input: ddalcu/mlx-serve #523) ----------
+
+MLXSERVE_LIKE = {
+    "enabled": True, "max_span": 7, "min_match": 8, "strong_match": 16,
+    "strong_max_span": 12, "initial_span": 7,
+}
+
+
+@pytest.mark.parametrize(
+    "value,error",
+    [
+        ({"enabled": True, "strong_match": 32}, "set together"),
+        ({"enabled": True, "strong_max_span": 14}, "set together"),
+        ({"enabled": True, "min_match": 8, "strong_match": 4, "strong_max_span": 9},
+         "strong_match must be >= min_match"),
+        ({"enabled": True, "min_match": 65}, "<= 64"),
+        ({"enabled": True, "initial_span": 9, "max_span": 8}, "initial_span"),
+        ({"enabled": True, "min_match": -1}, ">= 0"),
+    ],
+)
+def test_match_strength_policy_validation(value, error):
+    with pytest.raises(ValueError, match=error):
+        CopyDraftPolicy.from_value(value)
+
+
+def test_match_strength_keys_stay_out_of_default_receipts():
+    default = CopyDraftPolicy(enabled=True)
+    assert not {"min_match", "strong_match", "strong_max_span", "initial_span"} & set(
+        default.as_dict()
+    )
+    assert "strong_matches" not in CopyDraftState(default, [1, 2, 3]).receipt()
+    tuned = CopyDraftPolicy.from_value(MLXSERVE_LIKE)
+    assert tuned.as_dict()["min_match"] == 8
+    assert CopyDraftPolicy.from_value(tuned.as_dict()) == tuned
+    assert tuned.span_ceiling == 12
+
+
+def test_min_match_refuses_short_agreement_and_finds_an_older_long_one():
+    policy = CopyDraftPolicy(enabled=True, ngram_min=3, ngram_max=3, min_match=6)
+    # Two earlier "1 2 3" sites.  The most recent agrees back only through
+    # "1 2 3" (3 tokens); the older one agrees through "5 6 7 1 2 3" (6).
+    context = [5, 6, 7, 1, 2, 3, 40, 41, 42, 9, 9, 1, 2, 3, 50, 51, 5, 6, 7, 1, 2, 3]
+    state = CopyDraftState(policy, context)
+    assert state.lookup(3) == [40, 41, 42]
+    # The historical lookup (min_match 0) takes the most recent source.
+    plain = CopyDraftState(CopyDraftPolicy(enabled=True, ngram_min=3, ngram_max=3), context)
+    assert plain.lookup(3) == [50, 51, 5]
+    # Nothing agrees for 7 tokens: a miss, counted as one.
+    strict = CopyDraftState(
+        CopyDraftPolicy(enabled=True, ngram_min=3, ngram_max=3, min_match=7), context
+    )
+    assert strict.lookup(3) == []
+    assert strict.plan(head_depth=2, cap=8) == ([], "miss")
+    assert strict.lookup_misses == 1
+
+
+def test_strong_match_widens_the_span_and_initial_span_starts_the_sizer():
+    policy = CopyDraftPolicy.from_value(MLXSERVE_LIKE)
+    block = list(range(100, 140))
+    state = CopyDraftState(policy, block + block[:20])  # agreement 20 >= 16
+    span, decision = state.plan(head_depth=2, cap=100)
+    assert decision == "copy" and span == block[20:27]  # initial_span 7
+    assert state.strong_matches == 1
+    state.record(copy_span=7, head_depth=0, accepted=7, emitted=8,
+                 committed=block[20:28])
+    span, _ = state.plan(head_depth=2, cap=100)
+    assert span == block[28:40]  # sizer doubled to 14, strong cap 12
+    # A weak match (agreement 8..15) stays at max_span.
+    weak = CopyDraftState(policy, [60, 61] + CYCLE[:9] + [62, 63] + CYCLE[:9])
+    span, decision = weak.plan(head_depth=2, cap=100)
+    assert decision == "copy" and len(span) <= 7 and weak.strong_matches == 0
+    # Solo cohorts honour the strong ceiling; batched cohorts still refuse.
+    assert cohort_copy_cap(policy, lanes=1, head_depths=[2]) == 12
+    assert cohort_copy_cap(policy, lanes=2, head_depths=[2, 2]) == 0
+
+
+@pytest.mark.parametrize("segmented", [True, False])
+def test_match_strength_copy_mtp_is_exact(cpu, segmented):
+    model = _copying_model()
+    baseline, _, _ = _run(model, PROMPT, max_tokens=40, segmented=segmented)
+    copied, stats, receipts = _run(
+        model, PROMPT, max_tokens=40, segmented=segmented, copy=MLXSERVE_LIKE
+    )
+    assert copied == baseline
+    assert stats["self_mtp_copy_rounds"] > 0
+    receipt = next(iter(receipts.values()))["copy_draft"]
+    assert receipt["policy"]["min_match"] == 8
+    assert receipt["strong_matches"] > 0
+    # Wider than the historical 8-token ceiling once the match is strong.
+    assert stats["self_mtp_copy_proposed_tokens"] > 7 * stats["self_mtp_copy_rounds"] - 7

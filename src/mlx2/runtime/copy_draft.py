@@ -30,6 +30,10 @@ from dataclasses import asdict, dataclass, fields
 from typing import Any, Dict, List, Mapping, Optional, Sequence
 
 COPY_DRAFT_RECEIPT_SCHEMA = "mlx2.self-mtp-copy-draft.v1"
+# Longest agreement a lookup measures, and how many earlier occurrences of a
+# suffix it examines for one that clears ``min_match``.
+MATCH_SCAN_CAP = 64
+MATCH_SCAN_SOURCES = 8
 
 
 def _positive_int(name: str, value: Any, *, minimum: int = 1) -> int:
@@ -72,6 +76,17 @@ class CopyDraftPolicy:
     min_yield_ratio: float = 1.0
     verify_row_cost: float = 0.1
     draft_step_cost: float = 0.15
+    # Match-strength admission (design input: ddalcu/mlx-serve #523, see
+    # docs/PROVENANCE.md).  ``min_match`` > 0 copies only when the matched
+    # site agrees with the live context for at least that many tokens going
+    # back (the n-gram included, counted up to MATCH_SCAN_CAP); 0 keeps the
+    # historical lookup exactly.  A match agreeing for ``strong_match`` (> 0)
+    # tokens may copy up to ``strong_max_span`` instead of ``max_span``.
+    # ``initial_span`` starts the sizer there instead of at ``probe_span``.
+    min_match: int = 0
+    strong_match: int = 0
+    strong_max_span: int = 0
+    initial_span: Optional[int] = None
 
     def __post_init__(self):
         if not isinstance(self.enabled, bool):
@@ -93,6 +108,23 @@ class CopyDraftPolicy:
         _nonnegative_float("min_yield_ratio", self.min_yield_ratio)
         _nonnegative_float("verify_row_cost", self.verify_row_cost)
         _nonnegative_float("draft_step_cost", self.draft_step_cost)
+        _positive_int("min_match", self.min_match, minimum=0)
+        _positive_int("strong_match", self.strong_match, minimum=0)
+        _positive_int("strong_max_span", self.strong_max_span, minimum=0)
+        if (self.strong_match == 0) != (self.strong_max_span == 0):
+            raise ValueError(
+                "copy-draft strong_match and strong_max_span must be set together"
+            )
+        if self.strong_match and self.strong_match < self.min_match:
+            raise ValueError("copy-draft strong_match must be >= min_match")
+        if max(self.min_match, self.strong_match) > MATCH_SCAN_CAP:
+            raise ValueError(f"copy-draft match lengths must be <= {MATCH_SCAN_CAP}")
+        if self.initial_span is not None:
+            _positive_int("initial_span", self.initial_span)
+            if self.initial_span > self.span_ceiling:
+                raise ValueError(
+                    "copy-draft initial_span must be <= max(max_span, strong_max_span)"
+                )
 
     @classmethod
     def from_value(cls, value: Any) -> "CopyDraftPolicy":
@@ -111,13 +143,30 @@ class CopyDraftPolicy:
         return cls(**dict(value))
 
     def as_dict(self) -> Dict[str, Any]:
-        return asdict(self)
+        values = asdict(self)
+        # Match-strength keys enter receipts only when set, so receipts and
+        # qualification identities of existing copy-draft profiles are unchanged.
+        for name in _MATCH_FIELDS:
+            if values[name] == _MATCH_DEFAULTS[name]:
+                del values[name]
+        return values
+
+    @property
+    def span_ceiling(self) -> int:
+        """Widest span any single-lane round may copy."""
+        return max(self.max_span, self.strong_max_span)
 
     def head_cost(self, depth: int) -> float:
         return 1.0 + (self.draft_step_cost + self.verify_row_cost) * max(int(depth), 0)
 
     def copy_cost(self, span: int) -> float:
         return 1.0 + self.verify_row_cost * max(int(span), 0)
+
+
+_MATCH_DEFAULTS = {
+    "min_match": 0, "strong_match": 0, "strong_max_span": 0, "initial_span": None,
+}
+_MATCH_FIELDS = tuple(_MATCH_DEFAULTS)
 
 
 class _CopyIndexStore:
@@ -173,7 +222,9 @@ class CopyDraftState:
         self._store = _CopyIndexStore(policy.ngram_min, policy.ngram_max)
         self.length = 0
         # Sizer: next copy width (congestion window).
-        self.width = policy.probe_span
+        self.width = (
+            policy.initial_span if policy.initial_span is not None else policy.probe_span
+        )
         # Gate windows: (emitted tokens, cost) per round of each source.
         self._copy_window: deque = deque(maxlen=policy.gate_window)
         self._head_window: deque = deque(maxlen=policy.gate_window)
@@ -188,6 +239,7 @@ class CopyDraftState:
         self.gate_declines = 0
         self.probe_rounds = 0
         self.lookup_misses = 0
+        self.strong_matches = 0
         self.observe(context)
 
     # -- snapshot contract ------------------------------------------------
@@ -220,10 +272,28 @@ class CopyDraftState:
     def index_tokens(self) -> int:
         return self.length
 
-    def lookup(self, max_span: int) -> List[int]:
-        """Most recent verbatim continuation of the longest suffix match."""
-        if max_span <= 0:
-            return []
+    def _agreement(self, end: int) -> int:
+        """Tokens ending at ``end`` that equal the live suffix, going back."""
+        tokens = self._store.tokens
+        length = self.length
+        count = 0
+        while (
+            count < MATCH_SCAN_CAP
+            and end - 1 - count >= 0
+            and tokens[end - 1 - count] == tokens[length - 1 - count]
+        ):
+            count += 1
+        return count
+
+    def _find(self) -> Optional[tuple]:
+        """``(begin, agreement)`` of the copy source, or None.
+
+        With ``min_match == 0`` this is the historical choice: the most recent
+        continuation of the longest indexed suffix (agreement reported as that
+        suffix length).  Otherwise the most recent of at most
+        MATCH_SCAN_SOURCES earlier sources per suffix length whose agreement
+        with the live context reaches ``min_match``.
+        """
         self._sync()
         tokens = self._store.tokens
         length = self.length
@@ -232,14 +302,39 @@ class CopyDraftState:
             bucket = self._store.index[size].get(tuple(tokens[length - size : length]))
             if not bucket:
                 continue
+            examined = 0
             for start in reversed(bucket):
                 begin = start + size
                 if begin >= length:
                     continue  # the live suffix itself
                 if length - start > policy.lookback:
                     break
-                return list(tokens[begin : min(begin + max_span, length)])
-        return []
+                if policy.min_match <= 0:
+                    return (begin, size)
+                agreement = self._agreement(begin)
+                if agreement >= policy.min_match:
+                    return (begin, agreement)
+                examined += 1
+                if examined >= MATCH_SCAN_SOURCES:
+                    break
+        return None
+
+    def _span_cap(self, agreement: int) -> int:
+        policy = self.policy
+        if policy.strong_match and agreement >= policy.strong_match:
+            return policy.strong_max_span
+        return policy.max_span
+
+    def lookup(self, max_span: int) -> List[int]:
+        """Verbatim continuation of the chosen source (see :meth:`_find`)."""
+        if max_span <= 0:
+            return []
+        found = self._find()
+        if found is None:
+            return []
+        begin, agreement = found
+        width = min(max_span, self._span_cap(agreement))
+        return list(self._store.tokens[begin : min(begin + width, self.length)])
 
     def has_candidate(self) -> bool:
         return bool(self.lookup(1))
@@ -264,8 +359,16 @@ class CopyDraftState:
         if cap <= 0:
             return ([], "miss")
         policy = self.policy
-        width = min(self.width, cap, policy.max_span)
-        span = self.lookup(width)
+        found = self._find()
+        if found is None:
+            self.lookup_misses += 1
+            return ([], "miss")
+        begin, agreement = found
+        span_cap = self._span_cap(agreement)
+        if span_cap != policy.max_span:
+            self.strong_matches += 1
+        width = min(self.width, cap, span_cap)
+        span = list(self._store.tokens[begin : min(begin + width, self.length)])
         if not span:
             self.lookup_misses += 1
             return ([], "miss")
@@ -307,7 +410,7 @@ class CopyDraftState:
             self.copy_accepted += accepted
             self._copy_window.append((int(emitted), policy.copy_cost(copy_span)))
             if accepted >= copy_span:
-                self.width = min(max(self.width, copy_span) * 2, policy.max_span)
+                self.width = min(max(self.width, copy_span) * 2, policy.span_ceiling)
             else:
                 self.width = max(
                     policy.probe_span, min(math.ceil(1.5 * accepted), copy_span)
@@ -336,6 +439,7 @@ class CopyDraftState:
             "gate_declines": self.gate_declines,
             "probe_rounds": self.probe_rounds,
             "lookup_misses": self.lookup_misses,
+            **({"strong_matches": self.strong_matches} if self.policy.strong_match else {}),
             "index_tokens": self.index_tokens,
             "sizer_width": self.width,
         }
@@ -346,7 +450,7 @@ def cohort_copy_cap(
 ) -> int:
     """Widest copy row a cohort of ``lanes`` may verify this round."""
     if lanes <= 1:
-        return policy.max_span
+        return policy.span_ceiling
     if policy.batched_max_span is not None:
         # 0 refuses cohort copies outright (the default).
         return min(policy.batched_max_span, policy.max_span)

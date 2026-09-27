@@ -1532,6 +1532,483 @@ def test_self_mtp_min_tokens_and_grammar_complete_on_cpu():
         mx.set_default_device(previous_device)
 
 
+class _LetterTokenizer:
+    eos_token_ids = [0]
+    vocab_size = 64
+
+    def decode(self, tokens, **_kwargs):
+        return "".join(chr(65 + int(token)) for token in tokens if int(token) != 0)
+
+
+def _only_b_overrunning_at(slow_length, *, admit=False):
+    """``B*`` that is never complete; texts of ``slow_length`` overrun the budget.
+
+    An overrunning check rejects its text, or with ``admit`` decides it
+    normally after the stall (the sampled walk then records a tail bound
+    instead of failing, once one token is admitted).
+    """
+    import time
+
+    class OnlyB:
+        pattern = None
+
+        @staticmethod
+        def canonicalize(value):
+            return value
+
+        @staticmethod
+        def fullmatch(value, *, partial=False, timeout=None):
+            del timeout
+            if slow_length is not None and len(value) >= slow_length:
+                time.sleep(0.02)
+                if not admit:
+                    return None
+            return object() if partial and all(char == "B" for char in value) else None
+
+    return OnlyB()
+
+
+def _structured_forced_self_mtp_round(accept, slow_length=None, delivered=None):
+    """One num_draft=2 self-MTP round under a grammar, accepting ``accept`` drafts.
+
+    Generated text is ``cur`` plus the drafts, so verify row ``pos`` tests
+    candidate texts of length ``pos + 2``.
+    """
+    from mlx2.structured_output import StructuredOutputProcessor
+
+    model = _tiny_qwen4_model()
+    detached = _prepare_lane(model, 0, [1, 2, 3, 4])
+    processor = StructuredOutputProcessor(
+        _LetterTokenizer(), 4, _only_b_overrunning_at(slow_length)
+    )
+    detached.lane.cur = 1
+    detached.lane.logits_processors = [processor]
+    batch = attach_self_mtp_lanes(model, None, [detached])
+
+    def force(logprobs, _draft_lps, _drafts, _temperature, *, rng=None):
+        return accept, int(mx.argmax(logprobs[accept]).item())
+
+    with patch("mlx2.structured_output._ALLOWED_BUDGET_SECONDS", 0.005), patch(
+        "mlx2.runtime.hybrid_speculative._batched_residual_verify", side_effect=force
+    ):
+        proposal = propose_batched_self_mtp(model, batch)
+    assert proposal._drafts == ((1, 1),)
+    assert proposal.accepted_lengths == (accept,)
+    delivered = accept + 1 if delivered is None else delivered
+    commit_batched_self_mtp(
+        batch, proposal, emitted_counts=[delivered],
+        terminal=[delivered < accept + 1],
+    )
+    return processor
+
+
+def test_self_mtp_structured_steps_count_only_used_verify_rows():
+    # Three verify rows are masked, but after a first-draft rejection only
+    # row 0 (the correction row) was used.
+    assert _structured_forced_self_mtp_round(0).constrained_steps == 1
+    assert _structured_forced_self_mtp_round(1).constrained_steps == 2
+    assert _structured_forced_self_mtp_round(2).constrained_steps == 3
+
+
+@pytest.mark.parametrize("automaton", [False, True])
+@pytest.mark.parametrize("draft_sequence", [(2, 2), (1, 2), (1, 1)])
+@pytest.mark.parametrize("truncate", [False, True])
+def test_greedy_host_accept_skips_rejected_grammar_rows(
+    automaton, draft_sequence, truncate
+):
+    """Acceptance masks the first correction or bonus row, never the suffix."""
+    from mlx2.structured_output import StructuredOutputProcessor, compile_constraint
+
+    previous_device = mx.default_device()
+    mx.set_default_device(mx.cpu)
+    try:
+        results = []
+        for enabled in (False, True):
+            mx.random.seed(933)
+            model = _tiny_qwen4_model()
+            (detached, _) = prepare_self_mtp_lane(
+                mx.array([1, 2, 3, 4], mx.uint32), model,
+                uid=0, max_tokens=8, prompt_cache=None, mtp_state=None,
+                lane_rng=LaneRNG(700), num_draft=2, sampling_temp=0.0,
+                sampling_top_p=1.0, sampling_top_k=0, sampling_min_p=0.0,
+                accept_rule="residual", logits_processors=[],
+                prefill_step_size=4, share_qsa_indices=False,
+            )
+            constraint = (
+                compile_constraint(None, "B+")
+                if automaton else _only_b_overrunning_at(
+                    3 if draft_sequence == (2, 2) else None
+                )
+            )
+            processor = StructuredOutputProcessor(
+                _LetterTokenizer(), 4, constraint, greedy=True
+            )
+            detached.lane.cur = 1
+            detached.lane.logits_processors = [processor]
+            batch = attach_self_mtp_lanes(model, None, [detached])
+            calls = {"eager": 0, "host": 0}
+            original_call = StructuredOutputProcessor.__call__
+            original_host = StructuredOutputProcessor.acceptance_mask_host
+
+            def counted_call(self, *args):
+                calls["eager"] += 1
+                return original_call(self, *args)
+
+            def counted_host(self, *args):
+                calls["host"] += 1
+                return original_host(self, *args)
+
+            draft_index = iter(draft_sequence)
+
+            def forced_draft(_lane, _logits, _drafted):
+                values = mx.full((64,), -float("inf"))
+                return mx.put_along_axis(
+                    values, mx.array([next(draft_index)]), mx.array([0.0]), axis=-1
+                )
+
+            from mlx2.runtime import round_levers
+
+            before_levers = round_levers.counters()
+            with patch("mlx2.structured_output._ALLOWED_BUDGET_SECONDS", 0.005), patch.dict(
+                "os.environ", {"MLX2_SELF_MTP_HOST_ACCEPT": "1" if enabled else "0"}
+            ), patch(
+                "mlx2.runtime.hybrid_speculative._lane_mtp_draft_logprobs",
+                side_effect=forced_draft,
+            ), patch.object(
+                StructuredOutputProcessor, "__call__", counted_call
+            ), patch.object(
+                StructuredOutputProcessor, "acceptance_mask_host", counted_host
+            ):
+                proposal = propose_batched_self_mtp(model, batch)
+            assert proposal._drafts == (draft_sequence,)
+            accepted = next(
+                (index for index, token in enumerate(draft_sequence) if token != 1),
+                len(draft_sequence),
+            )
+            assert proposal.accepted_lengths == (accepted,)
+            precommit_failure = processor.failure
+            outputs = tuple(
+                (item.token, np.asarray(item.logprobs))
+                for item in proposal.outputs[0]
+            )
+            commit_batched_self_mtp(
+                batch, proposal,
+                emitted_counts=[1 if truncate else accepted + 1], terminal=[True]
+            )
+            results.append((
+                outputs,
+                processor.verify_ledger(), _cache_offsets(batch.caches.target),
+                calls,
+                precommit_failure,
+                {
+                    name: round_levers.counters()[name] - before_levers[name]
+                    for name in ("host_accept_rounds", "host_accept_rows_skipped")
+                },
+            ))
+        eager, host = results
+        assert [item[0] for item in host[0]] == [item[0] for item in eager[0]]
+        for (_, host_law), (_, eager_law) in zip(host[0], eager[0]):
+            np.testing.assert_array_equal(host_law, eager_law)
+        assert host[1:3] == eager[1:3]
+        assert eager[3] == {"eager": 3, "host": 0}
+        assert host[3] == {"eager": 0, "host": accepted + 1}
+        if not automaton and draft_sequence == (2, 2):
+            assert eager[4] is not None  # rejected tail exceeded its budget
+            assert host[4] is None  # that tail was never scanned
+        assert eager[5] == {"host_accept_rounds": 0, "host_accept_rows_skipped": 0}
+        assert host[5] == {
+            "host_accept_rounds": 1,
+            "host_accept_rows_skipped": len(draft_sequence) - accepted,
+        }
+    finally:
+        mx.set_default_device(previous_device)
+
+
+@pytest.mark.parametrize("automaton", [False, True])
+def test_host_acceptance_mask_keeps_equal_logit_tie_and_ledger(automaton):
+    from mlx2.structured_output import StructuredOutputProcessor, compile_constraint
+
+    constraint = (
+        compile_constraint(None, "B+")
+        if automaton else _only_b_overrunning_at(None)
+    )
+    eager = StructuredOutputProcessor(_LetterTokenizer(), 4, constraint, greedy=True)
+    host = StructuredOutputProcessor(_LetterTokenizer(), 4, constraint, greedy=True)
+    tokens = [1, 2, 3, 4, 1]
+    row = np.zeros(64, dtype=np.float32)
+    previous_device = mx.default_device()
+    mx.set_default_device(mx.cpu)
+    try:
+        eager_row = np.asarray(eager(mx.array(tokens), mx.array(row)[None]))[0]
+        host_mask = host.acceptance_mask_host(tokens, row)
+        host_row = np.where(host_mask, row, -np.inf)
+        np.testing.assert_array_equal(host_row, eager_row)
+        assert int(np.argmax(host_row)) == int(np.argmax(eager_row))
+        assert host.verify_ledger() == eager.verify_ledger()
+    finally:
+        mx.set_default_device(previous_device)
+
+
+def test_host_acceptance_delegates_preceding_processors_to_eager_path():
+    from mlx2.structured_output import StructuredOutputProcessor
+    from mlx2.runtime import round_levers
+
+    previous_device = mx.default_device()
+    mx.set_default_device(mx.cpu)
+    try:
+        model = _tiny_qwen4_model()
+        (detached, _) = prepare_self_mtp_lane(
+            mx.array([1, 2, 3, 4], mx.uint32), model,
+            uid=0, max_tokens=8, prompt_cache=None, mtp_state=None,
+            lane_rng=LaneRNG(700), num_draft=2, sampling_temp=0.0,
+            sampling_top_p=1.0, sampling_top_k=0, sampling_min_p=0.0,
+            accept_rule="residual", logits_processors=[],
+            prefill_step_size=4, share_qsa_indices=False,
+        )
+        detached.lane.cur = 1
+        detached.lane.logits_processors = [
+            lambda _tokens, logits: logits,
+            StructuredOutputProcessor(
+                _LetterTokenizer(), 4, _only_b_overrunning_at(None), greedy=True
+            ),
+        ]
+        batch = attach_self_mtp_lanes(model, None, [detached])
+        before = round_levers.counters()["host_accept_rounds"]
+        with patch.dict("os.environ", {"MLX2_SELF_MTP_HOST_ACCEPT": "1"}):
+            proposal = propose_batched_self_mtp(model, batch)
+        assert len(proposal.outputs[0]) >= 1
+        assert round_levers.counters()["host_accept_rounds"] == before
+        commit_batched_self_mtp(
+            batch, proposal, emitted_counts=[len(proposal.outputs[0])],
+            terminal=[True],
+        )
+    finally:
+        mx.set_default_device(previous_device)
+
+
+def test_host_acceptance_mask_latches_used_row_budget_failure():
+    from mlx2.structured_output import StructuredOutputProcessor
+
+    tokens = [1, 2, 3, 4, 1]
+    row = np.zeros(64, dtype=np.float32)
+    eager = StructuredOutputProcessor(
+        _LetterTokenizer(), 4, _only_b_overrunning_at(2), greedy=True
+    )
+    host = StructuredOutputProcessor(
+        _LetterTokenizer(), 4, _only_b_overrunning_at(2), greedy=True
+    )
+    previous_device = mx.default_device()
+    mx.set_default_device(mx.cpu)
+    try:
+        with patch("mlx2.structured_output._ALLOWED_BUDGET_SECONDS", 0.005):
+            eager_row = np.asarray(eager(mx.array(tokens), mx.array(row)[None]))[0]
+            host_mask = host.acceptance_mask_host(tokens, row)
+        np.testing.assert_array_equal(np.where(host_mask, row, -np.inf), eager_row)
+        assert host.failure == eager.failure
+        assert host.failure is not None
+        assert host.verify_ledger() == eager.verify_ledger()
+    finally:
+        mx.set_default_device(previous_device)
+
+
+def test_host_acceptance_falls_back_before_processing_nonfinite_target():
+    from mlx2.structured_output import StructuredOutputProcessor
+    from mlx2.runtime import round_levers
+
+    previous_device = mx.default_device()
+    mx.set_default_device(mx.cpu)
+    try:
+        model = _tiny_qwen4_model()
+        (detached, _) = prepare_self_mtp_lane(
+            mx.array([1, 2, 3, 4], mx.uint32), model,
+            uid=0, max_tokens=8, prompt_cache=None, mtp_state=None,
+            lane_rng=LaneRNG(700), num_draft=2, sampling_temp=0.0,
+            sampling_top_p=1.0, sampling_top_k=0, sampling_min_p=0.0,
+            accept_rule="residual", logits_processors=[],
+            prefill_step_size=4, share_qsa_indices=False,
+        )
+        processor = StructuredOutputProcessor(
+            _LetterTokenizer(), 4, _only_b_overrunning_at(None), greedy=True
+        )
+        detached.lane.cur = 1
+        detached.lane.logits_processors = [processor]
+        batch = attach_self_mtp_lanes(model, None, [detached])
+        before = round_levers.counters()["host_accept_rounds"]
+        with patch.dict("os.environ", {"MLX2_SELF_MTP_HOST_ACCEPT": "1"}), patch.object(
+            model, "logits", side_effect=lambda hidden: mx.full(
+                (*hidden.shape[:-1], 64), -float("inf")
+            ),
+        ), patch.object(
+            StructuredOutputProcessor, "acceptance_mask_host",
+            wraps=processor.acceptance_mask_host,
+        ) as host_mask:
+            # The existing eager route may reject this invalid law later;
+            # either way the candidate must not derive an acceptance mask.
+            try:
+                propose_batched_self_mtp(model, batch)
+            except (RuntimeError, ValueError):
+                pass
+        assert host_mask.call_count == 0
+        assert round_levers.counters()["host_accept_rounds"] == before
+    finally:
+        mx.set_default_device(previous_device)
+
+
+def test_self_mtp_budget_overrun_past_accept_point_does_not_fail_request():
+    # Row 2 overruns the grammar budget.  Rejected at row 0, the overrun row
+    # was never used and must not fail the request ...
+    rejected = _structured_forced_self_mtp_round(0, slow_length=4)
+    assert rejected.failure is None
+    assert rejected.constrained_steps == 1
+    # ... but when every draft is accepted, row 2 is the bonus row, and the
+    # overrun fails the request closed as in ordinary decode.
+    used = _structured_forced_self_mtp_round(2, slow_length=4)
+    assert used.failure == "structured-output grammar exceeded its per-token match budget"
+    assert used.constrained_steps == 2
+
+
+def _structured_self_mtp_generation(max_tokens, *, stop=None, slow_length=None,
+                                    admit=False, temperature=0.0,
+                                    return_draft_flags=False):
+    """Generate under ``B*`` with num_draft=2 until the request finishes.
+
+    Every draft is accepted (the grammar admits one token), so the prefill
+    emits one token and each round verifies rows 0..2, whose candidate texts
+    are 2..4 characters long in the first round.  Returns the delivered
+    tokens, the finish reason and the grammar processor.
+    """
+    from mlx2.runtime.generate import BatchGenerator, StopSequenceMatcher
+    from mlx2.structured_output import StructuredOutputProcessor
+
+    previous_device = mx.default_device()
+    mx.set_default_device(mx.cpu)
+    generator = None
+    try:
+        mx.random.seed(923)
+        model = _tiny_qwen4_model()
+        prompt = [1, 7, 3]
+        processor = StructuredOutputProcessor(
+            _LetterTokenizer(), len(prompt),
+            _only_b_overrunning_at(slow_length, admit=admit),
+        )
+        boost = mx.where(mx.arange(64) == 1, 8.0, 0.0)
+        # "B" first in logit order, so an admitting stall admits it and the
+        # walk records a tail bound instead of failing.
+        processors = [lambda _tokens, logits: logits + boost, processor]
+        generator = BatchGenerator(
+            model, completion_batch_size=1, prefill_batch_size=1,
+            prefill_step_size=32,
+            self_mtp={
+                "num_draft": 2, "persistent": True,
+                "segment_aware_live_tip": True, "segment_aware_cohort_size": 2,
+            },
+        )
+        with patch("mlx2.structured_output._ALLOWED_BUDGET_SECONDS", 0.005):
+            generator.insert(
+                [prompt], max_tokens=[max_tokens], lane_rngs=[LaneRNG(11)],
+                logits_processors=[processors],
+                stop_matchers=None if stop is None else [StopSequenceMatcher([stop])],
+                self_mtp_configs=[{"sampling_temp": temperature}],
+            )
+            tokens, reason, rounds, draft_flags = [], None, [], []
+            for _ in range(12):
+                _, responses = generator.next()
+                if responses:
+                    rounds.append(len(responses))
+                tokens.extend(response.token for response in responses)
+                draft_flags.extend(response.from_draft for response in responses)
+                reason = next(
+                    (r.finish_reason for r in responses if r.finish_reason), reason
+                )
+                if reason or processor.failure is not None:
+                    break
+        result = (tokens, reason, rounds, processor)
+        return result + (draft_flags,) if return_draft_flags else result
+    finally:
+        if generator is not None:
+            generator.close()
+        mx.set_default_device(previous_device)
+
+
+@pytest.mark.parametrize("delivered", [0, 1, 2])
+def test_self_mtp_terminal_commit_settles_ledger_to_delivered_rows(delivered):
+    # Both drafts accepted; a terminal cut (stop sequence or max_tokens, the
+    # commit contract does not distinguish) delivers ``delivered`` tokens.
+    # The overrun on accepted row 2 was never delivered.
+    processor = _structured_forced_self_mtp_round(2, slow_length=4, delivered=delivered)
+    assert processor.failure is None
+    assert processor.constrained_steps == delivered
+
+
+# Through BatchGenerator.  The max_tokens case is a guard: the draft depth is
+# capped at the remaining budget, so max_tokens cannot cut inside accepted
+# drafts today; the stop sequence does.
+@pytest.mark.parametrize(
+    "truncation",
+    [dict(max_tokens=2), dict(max_tokens=8, stop=[1, 1])],
+    ids=["max_tokens", "stop_sequence"],
+)
+def test_self_mtp_overrun_on_accepted_but_undelivered_row_does_not_fail(truncation):
+    # Round 1 accepts both drafts, but the cut delivers only row 0; the
+    # overrun on accepted row 2 was never delivered.
+    tokens, reason, rounds, processor = _structured_self_mtp_generation(
+        slow_length=4, **truncation
+    )
+    assert tokens == [1, 1] and rounds == [1, 1]
+    assert reason == ("length" if "stop" not in truncation else "stop")
+    assert processor.failure is None
+    # One mask for the prefill token, one for the delivered verify row.
+    assert processor.constrained_steps == 2
+
+
+def test_self_mtp_stop_inside_second_accepted_draft_settles_at_delivery():
+    # The first token is prefill output. In the next round both drafts are
+    # accepted, but the stop sequence ends on draft 2 before the bonus row.
+    tokens, reason, rounds, processor, draft_flags = (
+        _structured_self_mtp_generation(
+            8, stop=[1, 1, 1], slow_length=4, return_draft_flags=True
+        )
+    )
+    assert (tokens, reason, rounds) == ([1, 1, 1], "stop", [1, 2])
+    assert draft_flags == [False, True, True]
+    assert processor.constrained_steps == 3
+    assert processor.failure is None
+
+
+@pytest.mark.parametrize(
+    "truncation",
+    [dict(max_tokens=2), dict(max_tokens=8, stop=[1, 1])],
+    ids=["max_tokens", "stop_sequence"],
+)
+def test_self_mtp_tail_bound_of_undelivered_row_is_rewound(truncation):
+    tokens, reason, _, processor = _structured_self_mtp_generation(
+        slow_length=4, admit=True, temperature=0.8, **truncation
+    )
+    assert tokens == [1, 1] and reason is not None
+    assert processor.failure is None
+    assert processor.tail_mass_bound == 0.0
+    assert processor.constrained_steps == 2
+
+
+@pytest.mark.parametrize(
+    "truncation",
+    [dict(max_tokens=4), dict(max_tokens=8, stop=[1, 1, 1, 1])],
+    ids=["max_tokens", "stop_sequence"],
+)
+def test_self_mtp_overrun_on_delivered_row_still_fails_closed(truncation):
+    # Row 2 of round 1 is delivered (the fourth token): its overrun stands.
+    _, _, _, rejecting = _structured_self_mtp_generation(slow_length=4, **truncation)
+    assert rejecting.failure == (
+        "structured-output grammar exceeded its per-token match budget"
+    )
+    _, _, _, admitting = _structured_self_mtp_generation(
+        slow_length=4, admit=True, temperature=0.8, **truncation
+    )
+    assert admitting.failure is None
+    assert admitting.tail_mass_bound > 0.0
+    assert admitting.constrained_steps == 4
+
+
 def test_depth_zero_fast_path_honours_true_batched_off(monkeypatch):
     from mlx2.runtime.generate import BatchGenerator
     from mlx2.runtime import segmented_self_mtp as segmented

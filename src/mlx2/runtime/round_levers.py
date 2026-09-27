@@ -13,6 +13,8 @@ COUNTER_NAMES = (
     "ple_dq_hits",
     "ple_dq_misses",
     "device_sampled_drafts",
+    "host_accept_rounds",
+    "host_accept_rows_skipped",
     "hedge_built",
     "hedge_hit",
     "hedge_miss",

@@ -147,6 +147,42 @@ class _Gemma4Adapter(_MLXVLMAdapter):
             "variant", "precision", "full_attention_layers", "sliding_attention_layers"
         )})
 
+    def prefill_step_default(self):
+        """Adapter-preferred prefill chunk; an explicit engine setting wins."""
+        return int(type(self).default_prefill_step)
+
+    def _budget_prefill_step(self):
+        return getattr(self, "_prefill_step", self.prefill_step_default())
+
+    def cache_budget(self, *, mtp):
+        from .mlx_vlm_memory import SlidingKVCacheBudget
+
+        return SlidingKVCacheBudget.from_gemma4_config(
+            self._text_config(), mtp=mtp,
+            prefill_step=self._budget_prefill_step(),
+            root_config=self.identity["config"],
+        )
+
+    def prompt_tokens(self, request):
+        """Text prompts must start with ``<bos>``, as processor-built media prompts do.
+
+        The base checkpoints ship no chat template, so neither the raw
+        completions prompt nor the processor's plain-text chat fallback
+        carries ``<bos>``, and the base encoder call adds no special tokens.
+        Without it the 26B-A4B degenerated on the served text path ("The
+        capital of France is" -> "the the the ..."; qualification/runs/
+        gemma4-defaults-20260925/results/smoke-26b-q8-prefix-nobos.json).
+        A prompt that already starts with ``<bos>`` (an instruct template, or
+        a client that sent it) is left unchanged.
+        """
+        ids = super().prompt_tokens(request)
+        if "_mlx2_prompt_tokens" in request:
+            return ids
+        bos = getattr(self.processor.tokenizer, "bos_token_id", None)
+        if bos is not None and (not ids or ids[0] != bos):
+            ids = [int(bos), *ids]
+        return ids
+
     def _render(self, messages):
         # Base Gemma 4 tokenizer files have no chat template; the processor
         # handles them and preserves explicit media placeholders.
@@ -231,6 +267,14 @@ class _Gemma4Adapter(_MLXVLMAdapter):
 
 class Gemma4A4BAdapter(_Gemma4Adapter):
     descriptor = GEMMA4_A4B
+    # Serving prefill loop on the serving (merged Batch*) caches, 8-bit
+    # artifact, ABBA medians of 4 after a discarded warm-up
+    # (qualification/runs/gemma4-defaults-20260925/results/
+    # prefill-26b-q8-batchcache.json): 16K 512/1024/2048/4096 ->
+    # 2282/2703/2952/2831 tok/s, peak above weights 1.3/1.7/2.6/4.3 GiB.
+    # Plain caches agree (prefill-26b-q8.json).  The MoE wants wide chunks;
+    # 2048 is the fastest step, so the engine-wide default is kept, declared.
+    default_prefill_step = 2048
     sampling_defaults = VendorSampling.single(
         SamplingDefaults(temperature=1.0, top_p=0.95, top_k=64, source=GENERATION_CONFIG),
         model="google/gemma-4-26B-A4B",
@@ -239,6 +283,14 @@ class Gemma4A4BAdapter(_Gemma4Adapter):
 
 class Gemma431BAdapter(_Gemma4Adapter):
     descriptor = GEMMA4_31B
+    # Same harness on the serving (merged Batch*) caches
+    # (results/prefill-31b-q8-batchcache.json): 16K 512/1024/2048 ->
+    # 467/450/430 tok/s, peak above weights 3.4/4.3/6.3 GiB; 4K 511/488/463.
+    # On plain caches (results/prefill-31b-q8.json) the order is the same out
+    # to 8192 (445/434/423/388/327 tok/s at 16K).  Each sliding layer holds
+    # window + chunk tokens, so on the dense model a small chunk is both
+    # faster and lighter than the engine-wide 2048.
+    default_prefill_step = 512
     sampling_defaults = VendorSampling.single(
         SamplingDefaults(temperature=1.0, top_p=0.95, top_k=64, source=GENERATION_CONFIG),
         model="google/gemma-4-31B",

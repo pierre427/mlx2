@@ -125,6 +125,23 @@ def chat_template(tokenizer, request: dict, *, tokenize: bool):
 
 class FlashNextAdapter:
     from .qwen import QWEN4_FLASH_NEXT as descriptor
+
+    @staticmethod
+    def _snapshot_diagnostic_modules(model):
+        """Keep only live counter owners, never replaceable expert tables.
+
+        Expert streaming replaces QuantizedSwitchLinear children after model
+        load. Retaining all named modules here would pin their old stacked
+        weights even after the replacements are installed and collected.
+        """
+        from ..runtime.models.qwen4_exp import GatedDeltaNet
+
+        return tuple(
+            module for _, module in model.named_modules()
+            if isinstance(module, GatedDeltaNet)
+            or hasattr(module, "fused_expert_dispatches")
+        )
+
     default_route = "native_mtp"
     default_mtp_ordinary_handoff_max_width = (
         DEFAULT_MTP_ORDINARY_HANDOFF_MAX_WIDTH
@@ -134,8 +151,28 @@ class FlashNextAdapter:
     # shared system 8.30 -> 0.52 s, RAG 23.75 -> 0.90 s, linear no-harm
     # control 4.05 -> 4.02 s; qualification/runs/interior-ckpt-20260919/
     # flashnext-all-gated.json).  Declared per class, not inherited.
+    #
+    # Copy drafts under the mlx-serve #523 admission (source agrees with the
+    # live context for >= 8 tokens; 7-token spans keep verify at S <= 8, the
+    # fused GDN verify limit; 14 when the agreement runs back >= 32; the sizer
+    # starts at 7; cohorts do not copy): GPU A/B in one process, 4 rotated
+    # reps x 3 runs (qualification/runs/fn-mlxserve-ab-20260925/README.md).
+    # Copy-heavy B1 1.52-1.57x (greedy and T=0.7), prose B1 1.00x, B4
+    # 0.99-1.00x; greedy output identical to plain MTP through end-of-turn
+    # except teacher-forced near-ties.  The rm01 default policy ({"enabled":
+    # true}) was 1.20x here: its 8-token spans verify at width 9 and leave the
+    # fused GDN verify kernel.  Strong spans are 16 (verify width 17) since the
+    # policy's fused_gdn_verify_max_steps default became 17: vs 14 with the
+    # same bound, copy-heavy B1 1.066x at T=0.7 (4/4 reps > 1), 0.995x greedy,
+    # prose and B4 within +/-2% (ab-vcap-*.json, arm s16v17).
     default_route_execution_policy = {
-        "native_mtp": {"apc_interior_checkpoints": "auto"},
+        "native_mtp": {
+            "apc_interior_checkpoints": "auto",
+            "self_mtp_copy_draft": {
+                "enabled": True, "max_span": 7, "min_match": 8,
+                "strong_match": 32, "strong_max_span": 16, "initial_span": 7,
+            },
+        },
     }
     # Vendor sampling defaults: Qwen/Qwen3.8-Flash-Next model card and the
     # artifact's generation_config.json (see ``adapters/qwen.py``).
@@ -156,8 +193,14 @@ class FlashNextAdapter:
         return FlashNextCacheBudget.from_config(self.model.args.text_config, mtp=mtp)
 
     def prefill_step_default(self):
-        """Adapter-preferred prefill chunk; an explicit engine setting wins."""
-        return int(self.policy.prefill_step)
+        """Adapter-preferred prefill chunk; an explicit engine setting wins.
+
+        Subclasses that carry no FlashNextPolicy (the Qwen3.8/3.6 dense and
+        Nemotron adapters) have no preference and return None, so the engine
+        keeps its own default.
+        """
+        policy = getattr(self, "policy", None)
+        return None if policy is None else int(policy.prefill_step)
 
     def execution_config(self, *, max_lanes, prefill_step):
         return self.policy.batch_config(max_lanes=max_lanes, prefill_step=prefill_step)
@@ -207,6 +250,9 @@ class FlashNextAdapter:
                 deferred=held_files,
             )
         )
+        self.norm_convention = getattr(
+            getattr(self.model, "language_model", None), "norm_convention", None
+        )
         self._tables = []
         try:
             weights = install_file_backed_ple(
@@ -234,14 +280,17 @@ class FlashNextAdapter:
             self.model.load_weights(list(weights.items()), strict=True)
             self.model.eval()
             mx.eval(self.model.parameters())
+            self.fp32_head = None
+            if self.policy.fp32_head_logits:
+                from ..runtime.fp32_head import enable_fp32_head_logits
+
+                self.fp32_head = enable_fp32_head_logits(self.model.language_model)
             # MLX may lazily rewrite module dictionaries while speculative
             # execution is first compiling. Diagnostics run from the serving
             # worker and must never traverse that live mutable tree. The
-            # module objects themselves are stable after load/quantization, so
-            # retain a tuple for counter snapshots before serving starts.
-            self._diagnostic_modules = tuple(
-                module for _, module in self.model.named_modules()
-            )
+            # Counter owners stay live when expert children are replaced.
+            # Snapshot them before serving starts without pinning old tables.
+            self._diagnostic_modules = self._snapshot_diagnostic_modules(self.model)
             weights.clear()
             mx.clear_cache()
             tokenizer = AutoTokenizer.from_pretrained(
@@ -345,9 +394,7 @@ class FlashNextAdapter:
         from ..runtime.segmented_self_mtp import segmented_self_mtp_stats
         diagnostic_modules = getattr(self, "_diagnostic_modules", None)
         if diagnostic_modules is None:
-            diagnostic_modules = tuple(
-                module for _, module in self.model.named_modules()
-            )
+            diagnostic_modules = self._snapshot_diagnostic_modules(self.model)
         moe_modules = [
             module
             for module in diagnostic_modules
@@ -360,6 +407,22 @@ class FlashNextAdapter:
             "fallbacks": sum(m.fused_expert_fallbacks for m in moe_modules),
             "router_calls": sum(m.moe_router_calls for m in moe_modules),
         }
+        routed = [
+            switch
+            for switch in (getattr(m, "switch_mlp", None) for m in moe_modules)
+            if getattr(switch, "routed_decode_mode", "off") != "off"
+        ]
+        if routed:
+            # omlx #3912 port; absent while off so default receipts are unchanged.
+            moe["routed_decode"] = {
+                "modes": sorted({s.routed_decode_mode for s in routed}),
+                "calls": sum(s.routed_decode_calls for s in routed),
+                "fallbacks": sum(s.routed_decode_fallbacks for s in routed),
+                "last_fallback": next(
+                    (s.routed_decode_last_fallback for s in routed if s.routed_decode_last_fallback),
+                    None,
+                ),
+            }
         return {
             "moe": moe,
             "policy": self.policy.as_dict(),
@@ -373,6 +436,16 @@ class FlashNextAdapter:
             "indexed_qsa": qsa_indexed_status(),
             "qsa_mtp_amendment": qsa_mtp_amendment_status(),
             "segmented_mtp": segmented_self_mtp_stats(),
+            "norm_convention": (
+                None
+                if getattr(self, "norm_convention", None) is None
+                else self.norm_convention.summary()
+            ),
+            **(
+                {"fp32_head_logits": self.fp32_head}
+                if getattr(self, "fp32_head", None)
+                else {}
+            ),
         }
 
     def close(self):

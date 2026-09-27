@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import math
+import time
 from collections import deque
 from contextlib import suppress
 from dataclasses import dataclass, field
@@ -24,6 +25,7 @@ from .generate import (
     ALLOCATOR_RECLAIM_STEP_INTERVAL,
     GenerationBatch,
     StopSequenceMatcher,
+    _invalid_output_reason,
     _crossed_counter_interval,
     generation_stream,
 )
@@ -31,6 +33,7 @@ from .models import cache as cache_module
 from .models.cache import ArraysCache, CacheList, KVCache, RotatingKVCache
 from .prompt_lookup import (
     AdaptiveLookback,
+    CostAwarePLDLatch,
     HybridStats,
     IndexedPromptLookup,
     plan_proposal_around_verify_cliff,
@@ -41,6 +44,15 @@ from .rotating_replay import (
     RotatingReplayTransaction,
 )
 from ..thinking_guard import stack_block_steer, verify_block_steer
+
+
+class PromptLookupLaneFailure(RuntimeError):
+    """A sampled output is invalid for one prompt-lookup request."""
+
+    def __init__(self, uid, reason):
+        super().__init__(reason)
+        self.uid = uid
+        self.reason = reason
 
 
 def _walk_state(caches):
@@ -72,6 +84,30 @@ def _validate_cache(caches):
 
     for entry in caches:
         visit(entry)
+
+
+def _set_ordinary_b1_mask(caches, enabled):
+    """Give request-private raw full-attention KV the ordinary B=1 mask."""
+    stack = list(caches)
+    while stack:
+        entry = stack.pop()
+        if isinstance(entry, CacheList):
+            stack.extend(entry.caches)
+        elif type(entry) is KVCache:
+            entry._pld_ordinary_mask_padding = mx.array([0]) if enabled else None
+            entry._pld_ordinary_mask_calls = 0
+
+
+def _ordinary_b1_mask_calls(caches):
+    count = 0
+    stack = list(caches)
+    while stack:
+        entry = stack.pop()
+        if isinstance(entry, CacheList):
+            stack.extend(entry.caches)
+        elif type(entry) is KVCache:
+            count += getattr(entry, "_pld_ordinary_mask_calls", 0)
+    return count
 
 
 def _rotating_leaves(caches):
@@ -199,11 +235,14 @@ class _Lane:
     admission_tokens: int = 0
     admission_consecutive: int = 0
     reprobe_at: int = 0
+    cost_latch: CostAwarePLDLatch | None = None
     acceptance_window: deque = field(default_factory=deque)
     rotating: list = field(default_factory=list)
     recovery: CommittedRecoverySlot = field(default_factory=CommittedRecoverySlot)
+    recovery_boundary: int | None = None
     # Widest committed verify forward; the receipt's ``target_width``.
     target_max_width: int = 1
+    cost_width1_cohort_splits: int = 0
 
 
 class PromptLookupBatchGenerator:
@@ -224,6 +263,10 @@ class PromptLookupBatchGenerator:
             "ngram_max",
             "hot_segments",
             "reject_ttl",
+            "min_context_match",
+            "max_sources",
+            "recent_prompt_segments",
+            "prompt_segment_tokens",
             "retrieval_segments",
             "lookback_ladder",
             "lookback_misses",
@@ -236,6 +279,17 @@ class PromptLookupBatchGenerator:
             "admission_gate",
             "admission_confirm_windows",
             "admission_reprobe_interval",
+            "admission_probe_stride",
+            "cost_aware_admission",
+            "cost_shadow_span",
+            "cost_probe_stride",
+            "cost_shadow_window",
+            "cost_shadow_gate",
+            "cost_plain_rounds",
+            "cost_explore_rounds",
+            "cost_margin",
+            "cost_reprobe_interval",
+            "cost_park_rounds",
             "cliff_aware_span",
             "verify_cliff_start",
             "verify_cliff_end",
@@ -262,12 +316,24 @@ class PromptLookupBatchGenerator:
             "ngram_max": 1,
             "hot_segments": 0,
             "reject_ttl": 0,
+            "min_context_match": 0,
+            "max_sources": 0,
+            "recent_prompt_segments": 0,
+            "prompt_segment_tokens": 1,
             "lookback_misses": 1,
             "lookback_rejects": 1,
             "adaptive_warmup": 0,
             "admission_window": 1,
             "admission_confirm_windows": 1,
             "admission_reprobe_interval": 0,
+            "admission_probe_stride": 1,
+            "cost_shadow_span": 2,
+            "cost_probe_stride": 1,
+            "cost_shadow_window": 1,
+            "cost_plain_rounds": 1,
+            "cost_explore_rounds": 1,
+            "cost_reprobe_interval": 0,
+            "cost_park_rounds": 1,
             "verify_cliff_start": 2,
             "verify_cliff_end": 1,
             "max_proposal_tokens": 1,
@@ -282,16 +348,24 @@ class PromptLookupBatchGenerator:
                 raise ValueError(f"prompt_lookup {name} must be a {qualifier} integer")
         if validated.get("ngram_max", 6) < validated.get("ngram_min", 3):
             raise ValueError("prompt_lookup ngram_max must be at least ngram_min")
+        if validated.get("min_context_match", 0) > 64:
+            raise ValueError("prompt_lookup min_context_match must be at most 64")
+        if validated.get("recent_prompt_segments", 0):
+            if validated.get("retrieval_segments"):
+                raise ValueError("prompt_lookup recent prompt segments cannot include external retrieval segments")
+            if validated["recent_prompt_segments"] * validated.get("prompt_segment_tokens", 1024) > 65536:
+                raise ValueError("prompt_lookup recent prompt source window exceeds 65536 tokens")
         for name in (
             "adaptive",
             "deferred_admission",
+            "cost_aware_admission",
             "cliff_aware_span",
             "rotating_replay",
             "batched_verify",
         ):
             if name in validated and type(validated[name]) is not bool:
                 raise ValueError(f"prompt_lookup {name} must be a boolean")
-        for name in ("adaptive_gate", "admission_gate"):
+        for name in ("adaptive_gate", "admission_gate", "cost_shadow_gate", "cost_margin"):
             if name not in validated:
                 continue
             gate = validated[name]
@@ -301,6 +375,10 @@ class PromptLookupBatchGenerator:
             if not math.isfinite(gate) or not 0.0 <= gate <= 1.0:
                 raise ValueError(f"prompt_lookup {name} must be a finite probability")
             validated[name] = gate
+        if validated.get("cost_aware_admission") and validated.get("deferred_admission"):
+            raise ValueError("prompt_lookup cost_aware_admission and deferred_admission are exclusive")
+        if validated.get("cost_aware_admission") and validated.get("cost_shadow_span", 4) > validated.get("num_draft", 8):
+            raise ValueError("prompt_lookup cost_shadow_span exceeds num_draft")
         if "lookback_ladder" in validated:
             ladder = validated["lookback_ladder"]
             if (
@@ -377,6 +455,7 @@ class PromptLookupBatchGenerator:
         )
         self.default_matcher = StopSequenceMatcher(stop_tokens or None)
         self.lanes = {}
+        self._lane_failures = []
         self.next_uid = 0
         self.boundaries = {}
         # Decode rounds that delivered tokens; drives the same allocator
@@ -401,6 +480,8 @@ class PromptLookupBatchGenerator:
             "pld_batched_rounds": 0,
             "pld_batched_lanes": 0,
             "pld_batched_max_width": 0,
+            "pld_parked_direct_rounds": 0,
+            "pld_cost_width1_cohort_splits": 0,
             "pld_recovery_checkpoint_captures": 0,
             "pld_recovery_checkpoint_restores": 0,
             "pld_recovery_checkpoint_failures": 0,
@@ -484,12 +565,17 @@ class PromptLookupBatchGenerator:
                 },
             }
             config = {**overrides, **self.validate_policy(policy)}
+            _set_ordinary_b1_mask(
+                prompt_cache, bool(config.get("cost_aware_admission", False))
+            )
             proposer = IndexedPromptLookup(
                 prefix + prompt,
                 ngram_min=config.get("ngram_min", 3),
                 ngram_max=config.get("ngram_max", 6),
                 hot_segments=config.get("hot_segments", 4),
                 reject_ttl=config.get("reject_ttl", 8),
+                recent_prompt_segments=config.get("recent_prompt_segments", 0),
+                prompt_segment_tokens=config.get("prompt_segment_tokens", 1024),
             )
             for segment in config.get("retrieval_segments", ()):
                 proposer.add_hot_segment(segment)
@@ -514,7 +600,20 @@ class PromptLookupBatchGenerator:
                 maximum=int(maximum),
                 config=config,
                 ordinary=bool(config.get("deferred_admission", False)),
+                cost_latch=(CostAwarePLDLatch(
+                    shadow_span=config.get("cost_shadow_span", 4),
+                    probe_stride=config.get("cost_probe_stride", 4),
+                    shadow_window=config.get("cost_shadow_window", 2),
+                    shadow_gate=config.get("cost_shadow_gate", 0.75),
+                    plain_rounds=config.get("cost_plain_rounds", 8),
+                    explore_rounds=config.get("cost_explore_rounds", 2),
+                    cost_margin=config.get("cost_margin", 0.05),
+                    reprobe_interval=config.get("cost_reprobe_interval", 32),
+                    park_rounds=config.get("cost_park_rounds", 4),
+                ) if config.get("cost_aware_admission", False) else None),
             )
+            if lane.cost_latch is not None:
+                lane.ordinary = True
             lane.matcher_state = matcher.make_state()
             self.lanes[uid] = lane
             uids.append(uid)
@@ -626,8 +725,10 @@ class PromptLookupBatchGenerator:
                 restore=self._restore_recovery_cache,
             )
             self.scheduler_stats["pld_recovery_checkpoint_captures"] += 1
+            lane.recovery_boundary = len(lane.history)
         except Exception:
             lane.recovery.invalidate()
+            lane.recovery_boundary = None
             self.scheduler_stats["pld_recovery_checkpoint_failures"] += 1
         finally:
             if was_armed:
@@ -657,6 +758,7 @@ class PromptLookupBatchGenerator:
             self.scheduler_stats["pld_recovery_full_rebuilds"] += 1
             lane.cache = cache_module.make_prompt_cache(self.model)
             tokens = list(lane.history) + list(committed_inputs)
+        _set_ordinary_b1_mask(lane.cache, lane.cost_latch is not None)
         # The committed inputs are the tail of ``tokens``.  A full re-prefill
         # (no recovery checkpoint) replays earlier generated positions
         # unsteered; it is the last-resort path after a failed transaction.
@@ -691,9 +793,16 @@ class PromptLookupBatchGenerator:
 
     def _round(self, lane):
         """One lane, one verify forward: snapshot, verify, rewind and replay."""
+        lane.round_width = 1
         steps = self._round_steps(lane)
         inputs, proposal = next(steps)
-        lane.round_width = 1
+        if (
+            proposal and lane.cost_latch is not None
+            and lane.recovery_boundary != len(lane.history)
+        ):
+            # Parked rounds need no recovery snapshot. Capture their exact
+            # committed boundary immediately before the next verify attempt.
+            self._capture_lane_recovery(lane)
         transaction = None
         if lane.rotating and proposal:
             try:
@@ -734,7 +843,18 @@ class PromptLookupBatchGenerator:
                 for entry in lane.rotating:
                     entry.stop_speculation()
             raise
-        consumed = steps.send(logits)
+        try:
+            consumed = steps.send(logits)
+        except PromptLookupLaneFailure:
+            # The verify forward touched this lane's cache, but no generated
+            # token or checkpoint has been published.  Restore the snapshot
+            # before the executor drops the failed request.
+            if transaction is not None:
+                with suppress(Exception):
+                    transaction.rollback()
+            with suppress(Exception):
+                _rewind(lane.cache, snapshots)
+            raise
         if consumed < len(inputs):
             self.scheduler_stats["pld_rollbacks"] += 1
             _rewind(lane.cache, snapshots)
@@ -829,12 +949,18 @@ class PromptLookupBatchGenerator:
         """
         from .segmented_rotating_kv import SegmentedKVRows
 
-        steps = [self._round_steps(lane) for lane in lanes]
-        plans = [next(step) for step in steps]
-        lengths = [len(inputs) for inputs, _proposal in plans]
-        width = max(lengths)
         for lane in lanes:
             lane.round_width = len(lanes)
+        steps = [self._round_steps(lane) for lane in lanes]
+        plans = [next(step) for step in steps]
+        for lane, (_inputs, proposal) in zip(lanes, plans):
+            if (
+                proposal and lane.cost_latch is not None
+                and lane.recovery_boundary != len(lane.history)
+            ):
+                self._capture_lane_recovery(lane)
+        lengths = [len(inputs) for inputs, _proposal in plans]
+        width = max(lengths)
         transaction = SegmentedKVRows([lane.cache for lane in lanes]).begin(lengths=lengths)
         try:
             padded = [inputs + [0] * (width - len(inputs)) for inputs, _proposal in plans]
@@ -857,6 +983,13 @@ class PromptLookupBatchGenerator:
             transaction = None
             for commit, count in zip(commits, consumed):
                 commit(count)
+        except PromptLookupLaneFailure:
+            # Lane-local retry is sound only if the shared cache transaction
+            # actually aborts.  An abort failure must fail the cohort closed.
+            if transaction is not None:
+                transaction.abort()
+                transaction = None
+            raise
         finally:
             if transaction is not None:
                 with suppress(Exception):
@@ -874,6 +1007,17 @@ class PromptLookupBatchGenerator:
                 next(step)
 
     def _round_steps(self, lane):
+        cost = lane.cost_latch
+        cost_memory_cap = lane.config.get("memory_max_draft")
+        cost_memory_ok = cost is None or cost_memory_cap is None or cost_memory_cap >= cost.shadow_span
+        if cost is not None:
+            if not cost_memory_ok:
+                cost.suspend_for_memory(lane.generated)
+                lane.ordinary = True
+            elif lane.round_width != 1:
+                cost.suspend_for_width(lane.generated)
+                lane.ordinary = True
+        round_started_ns = time.perf_counter_ns() if cost is not None and lane.round_width == 1 else None
         remaining_budget = lane.maximum - lane.generated
         nominal_proposal_budget = max(0, min(self.num_draft, remaining_budget - 1))
         proposal_budget = nominal_proposal_budget
@@ -886,14 +1030,34 @@ class PromptLookupBatchGenerator:
                 cliff_end=int(lane.config.get("verify_cliff_end", 15)),
             )
         deferred = bool(lane.config.get("deferred_admission", False))
-        probing = deferred and lane.ordinary and lane.generated >= lane.reprobe_at
+        probing = (
+            deferred
+            and lane.ordinary
+            and lane.generated >= lane.reprobe_at
+            and lane.generated % lane.config.get("admission_probe_stride", 1) == 0
+        )
         probe_candidate = (
-            lane.proposer.propose(1, lookback=lane.lookback.current)
+            lane.proposer.propose(
+                1, lookback=lane.lookback.current,
+                min_context_match=lane.config.get("min_context_match", 0),
+                max_sources=lane.config.get("max_sources", 0),
+            )
             if probing
             else []
         )
+        if cost is not None and cost_memory_ok and cost.should_probe(lane.generated) and lane.round_width == 1:
+            shadow_candidate = lane.proposer.propose(
+                cost.shadow_span,
+                lookback=lane.lookback.current,
+                min_context_match=lane.config.get("min_context_match", 0),
+                max_sources=lane.config.get("max_sources", 0),
+            )
+            cost.start_shadow(shadow_candidate)
         proposal = [] if lane.ordinary else lane.proposer.propose(
-            proposal_budget, lookback=lane.lookback.current
+            proposal_budget,
+            lookback=lane.lookback.current,
+            min_context_match=lane.config.get("min_context_match", 0),
+            max_sources=lane.config.get("max_sources", 0),
         )
         if proposal and len(proposal) > nominal_proposal_budget:
             lane.stats.span_extend_cycles += 1
@@ -924,6 +1088,9 @@ class PromptLookupBatchGenerator:
         for index in range(len(proposal) + 1):
             row = self._processed_row(lane, logits[index], proposal[:index])
             token = int(lane.sampler(row[None])[0].item())
+            reason = _invalid_output_reason(token, row)
+            if reason is not None:
+                raise PromptLookupLaneFailure(lane.uid, reason)
             from_draft = index < len(proposal) and token == proposal[index]
             emitted.append((token, row, from_draft))
             if not from_draft:
@@ -952,7 +1119,8 @@ class PromptLookupBatchGenerator:
         lane.matcher_state = matcher_state
         lane.anchor = delivered[-1][0]
         lane.generated += len(delivered)
-        self._capture_lane_recovery(lane)
+        if cost is None or proposal:
+            self._capture_lane_recovery(lane)
         lane.stats.cycles += 1
         lane.stats.verify_span_hist[len(inputs)] = lane.stats.verify_span_hist.get(len(inputs), 0) + 1
         _round_accepted = sum(item[2] for item in delivered)
@@ -987,6 +1155,13 @@ class PromptLookupBatchGenerator:
         for token, _row, _from_draft in delivered:
             lane.lookup_history.append(token)
             lane.proposer.observe(token)
+            if cost is not None and not proposal:
+                cost.observe_plain_token(token)
+        if cost is not None and round_started_ns is not None:
+            duration_ns = time.perf_counter_ns() - round_started_ns
+            cost.observe_round(duration_ns, len(delivered), len(proposal), lane.generated)
+            lane.ordinary = cost.state == "parked"
+            lane.stats.latched = lane.ordinary
         if probing and delivered:
             lane.admission_matches += probe_matched
             lane.admission_tokens += 1
@@ -1017,7 +1192,8 @@ class PromptLookupBatchGenerator:
         warmup = lane.config.get("adaptive_warmup", 48)
         gate = lane.config.get("adaptive_gate", 0.12)
         if (
-            lane.config.get("adaptive", True)
+            cost is None
+            and lane.config.get("adaptive", True)
             and not lane.ordinary
             and lane.generated >= warmup
             and len(lane.acceptance_window)
@@ -1053,6 +1229,16 @@ class PromptLookupBatchGenerator:
             "round_proposed": len(proposal),
             "round_accepted": sum(item[2] for item in delivered),
             "lookback": lane.lookback.current,
+            "lookup_calls": lane.proposer.lookup_calls,
+            "source_sites_scanned": lane.proposer.source_sites_scanned,
+            "source_index_entries": lane.proposer.index_entries,
+            "recent_prompt_segments": lane.proposer.recent_prompt_segments,
+            "prompt_segment_tokens": lane.proposer.prompt_segment_tokens,
+            "source_window_tokens": (
+                min(lane.lookback.current, lane.proposer.index_window)
+                if lane.proposer.index_window else lane.lookback.current
+            ),
+            "context_mismatch_sites": lane.proposer.context_mismatch_sites,
             "admission_windows": lane.stats.admission_windows,
             "admission_probe_tokens": lane.stats.admission_probe_tokens,
             "admission_activations": lane.stats.admission_activations,
@@ -1066,6 +1252,11 @@ class PromptLookupBatchGenerator:
             "memory_max_draft": lane.config.get("memory_max_draft"),
             "qualification_authority": "serving_route",
         }
+        if cost is not None:
+            receipt["cost_latch"] = cost.receipt()
+            receipt["cost_width1_cohort_splits"] = lane.cost_width1_cohort_splits
+        if finish_reason:
+            receipt["ordinary_b1_mask_calls"] = _ordinary_b1_mask_calls(lane.cache)
         if finish_reason and lane.speculation_started:
             _stop_speculation(lane.cache)
             lane.speculation_started = False
@@ -1104,14 +1295,44 @@ class PromptLookupBatchGenerator:
             lane = waiting[self._prefill_cursor % len(waiting)]
             self._prefill_cursor += 1
             prompts.append(self._prefill(lane))
-        together = [lane for lane in pending if getattr(lane, "batched", False)]
+        # The cost latch measures one physical target row. Keep that geometry
+        # when several PLD requests coexist: a width-two segmented target is
+        # numerically distinct from the ordinary B1 path and has no matched
+        # cost baseline. Other PLD lanes retain their batched verify route.
+        together = [
+            lane for lane in pending
+            if getattr(lane, "batched", False) and lane.cost_latch is None
+        ]
         if together:
             # A lone batchable lane takes the same transactional path: it is
             # unarmed, so the snapshot/rewind driver is not its rollback.
-            self._round_batched(together)
+            try:
+                self._round_batched(together)
+            except PromptLookupLaneFailure as error:
+                # The shared transaction aborted before any lane committed.
+                # Peers retry from their own unchanged boundaries next poll.
+                self._lane_failures.append({"uid": error.uid, "reason": error.reason})
+                self.remove([error.uid])
         for lane in pending:
-            if lane not in together:
-                self._round(lane)
+            if lane not in together and lane.uid in self.lanes:
+                try:
+                    if lane.cost_latch is not None:
+                        if len(pending) > 1:
+                            lane.cost_width1_cohort_splits += 1
+                            self.scheduler_stats["pld_cost_width1_cohort_splits"] += 1
+                        if getattr(lane, "batched", False) and not lane.ordinary:
+                            # Keep the exact segmented transaction for a
+                            # speculative verify, but with one target row.
+                            self._round_batched([lane])
+                        else:
+                            if lane.ordinary:
+                                self.scheduler_stats["pld_parked_direct_rounds"] += 1
+                            self._round(lane)
+                    else:
+                        self._round(lane)
+                except PromptLookupLaneFailure as error:
+                    self._lane_failures.append({"uid": error.uid, "reason": error.reason})
+                    self.remove([error.uid])
         responses = []
         for uid, lane in list(self.lanes.items()):
             if lane.ready:
@@ -1133,6 +1354,10 @@ class PromptLookupBatchGenerator:
         """Lanes still prefilling: they wait on the prefill round-robin, not
         on memory, so the serving stall watchdog must not fail them."""
         return [uid for uid, lane in self.lanes.items() if lane.anchor is None]
+
+    def take_lane_failures(self):
+        failures, self._lane_failures = self._lane_failures, []
+        return failures
 
     def pop_prompt_boundary(self, uid):
         return self.boundaries.pop(int(uid), None)

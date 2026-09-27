@@ -912,6 +912,10 @@ def build_segmented_batch_cache_group(groups, *, note=None, shared_qsa_prefix=Fa
                     layer_rows, note=note, shared_qsa_prefix=shared_qsa_prefix
                 )
             )
+        elif callable(getattr(type(first), "segment_batch", None)):
+            # The cache class owns its model-specific batched representation.
+            # The generic scheduler never needs to inspect a family name.
+            result.append(type(first).segment_batch(layer_rows, note=note))
         elif type(first) is QuantizedKVCache:
             # Approximate KV composed with self-MTP: target rows quantized by
             # the adapter-declared operation.  Exact rows never reach here.

@@ -112,6 +112,26 @@ def test_occupied_scheduler_width_declines_capsule_before_preparation():
     )
 
 
+def test_capsule_source_failure_distinguishes_apc_and_plane_reasons():
+    inspect = ServingEngine._cache_capsule_source_failure
+    miss = NS(hit=False, miss_reason="disk_restore_requires_admission")
+    assert inspect(miss, 100, 3) == {
+        "reason": "apc_miss", "apc_miss_reason": "disk_restore_requires_admission"
+    }
+    mismatch = NS(hit=True, cached_tokens=4, cache=[object()], capsule_generation=1)
+    assert inspect(mismatch, 100, 3)["reason"] == "boundary_mismatch"
+    ineligible = NS(hit=True, cached_tokens=100, cache=[object()], capsule_generation=1)
+    assert inspect(ineligible, 100, 3) == {
+        "reason": "no_eligible_plane", "plane_reasons": ["plain_kv_only"],
+        "plane_types": ["object"],
+    }
+    kv = KVCache()
+    values = mx.zeros((1, 1, 100, 2), dtype=mx.bfloat16)
+    kv.update_and_fetch(values, values)
+    eligible = NS(hit=True, cached_tokens=100, cache=[kv], capsule_generation=1)
+    assert inspect(eligible, 100, 3) is None
+
+
 def test_cache_capsule_policy_rejects_unknown_or_unqualified_selection(tmp_path):
     with pytest.raises(ValueError, match="unknown cache capsule"):
         cache_capsule_policy({"enabled": True, "mystery": 1})
@@ -134,7 +154,8 @@ def test_cache_capsule_policy_is_ordinary_only():
         )
 
 
-def test_qualification_serving_fanout_engages_cache_capsule(monkeypatch):
+@pytest.mark.parametrize("source_eligible", (True, False))
+def test_qualification_serving_fanout_engages_cache_capsule(monkeypatch, source_eligible):
     def cache():
         value = mx.arange(6, dtype=mx.float32).astype(mx.bfloat16).reshape(1, 1, 3, 2)
         result = KVCache(); result.update_and_fetch(value, value); mx.eval(result.state)
@@ -244,7 +265,7 @@ def test_qualification_serving_fanout_engages_cache_capsule(monkeypatch):
         committed = getattr(instance, "_capsule_test_tokens", None)
         if committed and requested[:len(committed)] == committed:
             return apc_v2.APCLookup(
-                cache=Branch([cache(), rotating_cache()]),
+                cache=Branch([cache(), rotating_cache()] if source_eligible else [rotating_cache()]),
                 remaining_tokens=requested[len(committed):],
                 cached_tokens=len(committed),
                 hit=True,
@@ -272,12 +293,19 @@ def test_qualification_serving_fanout_engages_cache_capsule(monkeypatch):
         results = collect_parallel_samples(jobs, body, chat=True)
     finally:
         engine.close()
-    assert engine.counts["cache_capsule_prepared"] == 1
+    assert engine.counts["cache_capsule_prepared"] == int(source_eligible)
     sibling_receipts = [result[2]["cache_capsule"] for result in results[1:]]
-    assert all(receipt["status"] == "engaged" for receipt in sibling_receipts)
-    assert all(receipt["planes"] == 2 for receipt in sibling_receipts)
-    assert all(receipt["capsule_planes"] == 1 for receipt in sibling_receipts)
-    assert all(receipt["ordinary_planes"] == 1 for receipt in sibling_receipts)
+    if source_eligible:
+        assert all(receipt["status"] == "engaged" for receipt in sibling_receipts)
+        assert all(receipt["planes"] == 2 for receipt in sibling_receipts)
+        assert all(receipt["capsule_planes"] == 1 for receipt in sibling_receipts)
+        assert all(receipt["ordinary_planes"] == 1 for receipt in sibling_receipts)
+    else:
+        assert all(receipt["status"] == "fallback" for receipt in sibling_receipts)
+        assert all(receipt["source_failure"] == {
+            "reason": "no_eligible_plane", "plane_reasons": ["plain_kv_only"],
+            "plane_types": ["RotatingKVCache"],
+        } for receipt in sibling_receipts)
     with pytest.raises(ValueError, match="ordinary decode"):
         ServingEngine(
             "unused", qualification_mode=True, cache_capsules=True,

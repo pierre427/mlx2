@@ -13,10 +13,9 @@ the first rep of ``stock:2048`` (bit-identical / max |diff| / top-1 agree).
 
 import argparse
 import json
+import sys
 import time
-
-import mlx.core as mx
-from mlx.utils import tree_flatten
+from pathlib import Path
 
 
 def main():
@@ -31,6 +30,14 @@ def main():
     a = ap.parse_args()
     if not a.i_own_the_gpu:
         ap.error("refusing Metal execution without --i-own-the-gpu")
+    if Path(sys.prefix).name == ".venv-mlx0322":
+        ap.error(
+            ".venv-mlx0322 has a stock MLX 0.32.2 routed-row bound bug; "
+            "use a verified fixed MLX build for MoE prefill benchmarks"
+        )
+
+    import mlx.core as mx
+    from mlx.utils import tree_flatten
 
     from mlx2.adapters.registry import resolve_adapter
     from mlx2.runtime.models.cache import make_prompt_cache

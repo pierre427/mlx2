@@ -377,7 +377,8 @@ class Model(nn.Module):
 
     @property
     def apc_v2_layout(self):
-        return "laguna-xs21-layer-segments-v1"
+        return ("laguna-s21-layer-segments-v1" if self.args.num_hidden_layers == 48
+                else "laguna-xs21-layer-segments-v1")
 
     def __call__(self, inputs, cache=None, input_embeddings=None):
         hidden = self.model(inputs, cache, input_embeddings)
@@ -417,6 +418,24 @@ class Model(nn.Module):
             weights = {key.removeprefix("language_model."): value for key, value in weights.items()}
         if self.args.tie_word_embeddings:
             weights.pop("lm_head.weight", None)
+        # The bf16 S checkpoint stores experts separately and uses the vendor
+        # router names; the quantized XS/S repacks already store stacked rows.
+        for layer_idx in range(self.args.num_hidden_layers):
+            prefix = f"model.layers.{layer_idx}.mlp"
+            gate = f"{prefix}.gate.weight"
+            if gate in weights:
+                weights[f"{prefix}.gate.proj.weight"] = weights.pop(gate)
+            correction = f"{prefix}.experts.e_score_correction_bias"
+            if correction in weights:
+                weights[f"{prefix}.gate.e_score_correction_bias"] = weights.pop(correction)
+            for projection in ("gate_proj", "up_proj", "down_proj"):
+                for suffix in ("weight", "scales", "biases"):
+                    first = f"{prefix}.experts.0.{projection}.{suffix}"
+                    if first not in weights:
+                        continue
+                    rows = [weights.pop(f"{prefix}.experts.{expert}.{projection}.{suffix}")
+                            for expert in range(self.args.num_experts)]
+                    weights[f"{prefix}.switch_mlp.{projection}.{suffix}"] = mx.stack(rows)
         return {
             key: value for key, value in weights.items()
             if "rotary_emb.inv_freq" not in key

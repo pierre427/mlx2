@@ -244,10 +244,16 @@ class Qwen3827BAdapter(FlashNextAdapter):
         if execution_policy is not None and not isinstance(execution_policy, dict):
             raise ValueError("execution policy must be a JSON object")
         policy = {} if execution_policy is None else dict(execution_policy)
-        if set(policy) - {"num_draft", "gdn_core"}:
+        if set(policy) - {"num_draft", "gdn_core", "fp32_head_logits"}:
             raise ValueError(
-                "Qwen3.8 27B execution policy supports only num_draft and gdn_core"
+                "Qwen3.8 27B execution policy supports only num_draft, gdn_core "
+                "and fp32_head_logits"
             )
+        # Opt-in: the quantized lm_head stores fp32 logits instead of rounding
+        # them to bf16 (runtime/fp32_head.py).  Absent keeps receipts as-is.
+        fp32_head = policy.get("fp32_head_logits", False)
+        if type(fp32_head) is not bool:
+            raise ValueError("fp32_head_logits must be boolean")
         self._num_draft = validate_self_mtp_num_draft(policy.get("num_draft", 2))
         # A/B switch for MLX's native gated_delta_update on 17-256 row prefill
         # chunks (MLX_GDN_CORE).  Absent keeps the pinned "0" profile and its
@@ -285,6 +291,9 @@ class Qwen3827BAdapter(FlashNextAdapter):
         self.model = Model(ModelArgs.from_dict(config))
         files = [path / name for name in sorted(set(artifact["weight_map"].values()))]
         weights = self.model.sanitize(load_shards_evicting(files))
+        self.norm_convention = getattr(
+            getattr(self.model, "language_model", None), "norm_convention", None
+        )
         quant = config.get("quantization", config.get("quantization_config"))
         if quant:
 
@@ -303,8 +312,14 @@ class Qwen3827BAdapter(FlashNextAdapter):
         self.model.load_weights(list(weights.items()), strict=True)
         self.model.eval()
         mx.eval(self.model.parameters())
+        self.fp32_head = None
+        if fp32_head:
+            from ..runtime.fp32_head import enable_fp32_head_logits
+
+            self.fp32_head = enable_fp32_head_logits(self.model.language_model)
         weights.clear()
         mx.clear_cache()
+        self._record_load_dtype()
         tokenizer = AutoTokenizer.from_pretrained(
             path, local_files_only=True, trust_remote_code=False
         )
@@ -324,7 +339,7 @@ class Qwen3827BAdapter(FlashNextAdapter):
         )
 
     def execution_config(self, *, max_lanes, prefill_step):
-        return {
+        config = {
             "persistent": True,
             "num_draft": getattr(self, "_num_draft", 2)
             if Capability.MTP in self.descriptor.capabilities
@@ -334,6 +349,9 @@ class Qwen3827BAdapter(FlashNextAdapter):
             "segment_aware_live_tip": True,
             "segment_aware_cohort_size": max_lanes,
         }
+        if getattr(self, "fp32_head", None):
+            config["fp32_head_logits"] = True
+        return config
 
     def approximate_kv_operations(self):
         """KV quantization for the ordinary route (implemented, unqualified).
@@ -355,6 +373,24 @@ class Qwen3827BAdapter(FlashNextAdapter):
             self.model.args.text_config, mtp=mtp
         )
 
+    def _record_load_dtype(self):
+        """Record the float32-norm cast receipt and the load dtype check."""
+        from ..runtime.models.dtype_normalize import check_compute_dtype
+
+        text = getattr(self.model, "language_model", None)
+        self.dtype_normalized = getattr(text, "dtype_normalization", None)
+        self.load_dtype_check = (
+            None
+            if text is None
+            else check_compute_dtype(text, getattr(text, "compute_dtype", None))
+        )
+
+    def dtype_diagnostics(self):
+        return {
+            "dtype_normalized": getattr(self, "dtype_normalized", None),
+            "load_dtype_check": getattr(self, "load_dtype_check", None),
+        }
+
     def diagnostics(self):
         from ..runtime.segmented_self_mtp import segmented_self_mtp_stats
 
@@ -363,4 +399,15 @@ class Qwen3827BAdapter(FlashNextAdapter):
             "layout": self.layout,
             "mtp_head_present": Capability.MTP in self.descriptor.capabilities,
             "segmented_mtp": segmented_self_mtp_stats(),
+            "norm_convention": (
+                None
+                if getattr(self, "norm_convention", None) is None
+                else self.norm_convention.summary()
+            ),
+            **self.dtype_diagnostics(),
+            **(
+                {"fp32_head_logits": self.fp32_head}
+                if getattr(self, "fp32_head", None)
+                else {}
+            ),
         }

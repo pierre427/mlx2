@@ -1800,6 +1800,21 @@ def test_nonstreaming_logprobs_are_in_token_order(http_engine):
     assert data["choices"][0]["message"]["content"] == "hello"
 
 
+def test_legacy_completions_integer_logprobs_reaches_engine(http_engine):
+    engine, base = http_engine
+    request = Request(
+        base + "/v1/completions",
+        data=json.dumps({"model": "fixture", "prompt": "hi", "logprobs": 2}).encode(),
+        headers={"Content-Type": "application/json"},
+    )
+    with urlopen(request) as response:
+        data = json.load(response)
+    assert engine.job.request["logprobs"] is True
+    assert engine.job.request["top_logprobs"] == 2
+    assert data["choices"][0]["text"] == "hello"
+    assert [row["id"] for row in data["choices"][0]["logprobs"]["content"]] == [5, 6]
+
+
 def test_streaming_logprobs_are_emitted_once_without_duplicate_text(http_engine):
     _, base = http_engine
     with post(base, stream=True, logprobs=True, top_logprobs=1) as response:
@@ -1917,6 +1932,7 @@ def test_parallel_sample_usage_counts_the_shared_prompt_once():
         "completion_tokens": 10 + 11 + 12 + 13,
         "total_tokens": 1046,
         "prompt_tokens_details": {"cached_tokens": 600},
+        "completion_tokens_details": {"reasoning_tokens": 0},
     }
 
 

@@ -397,3 +397,46 @@ def test_json_tool_call_closed_by_turn_end():
     parser, events = _run(['<tool_call>{"name": "weather", "arguments": {"city": "Oslo"}}<_end>'])
     calls = [call for event in events for call in event.get("tool_calls", [])]
     assert json.loads(calls[0]["function"]["arguments"]) == {"city": "Oslo"}
+
+
+def _finish(text, split, finish_reason, **kwargs):
+    parser = XingOutputParser(chat=True, thinking=True, tools=TOOLS, **kwargs)
+    events = parser.push(text[:split]) + parser.finish(text[split:], finish_reason)
+    out = {"reasoning_content": "", "content": "", "tool_calls": []}
+    for event in events:
+        for key, value in event.items():
+            if key == "tool_calls":
+                out["tool_calls"].extend(value)
+            else:
+                out[key] += value
+    return parser, out
+
+
+@pytest.mark.parametrize("partial", [
+    "<tool_call>get_weather<param_key>city</param_key><param_value>Os",
+    "<tool_call>get_weather<param_key>city</param_key><param_value>Oslo</param_value>",
+    '<tool_call>{"name": "get_weather", "arguments": {"city": "Os',
+    "<tool_call>get_wea",
+])
+def test_max_tokens_inside_a_tool_call_drops_the_partial_call(partial):
+    # A length finish is a requested stop, not malformed output: drop the
+    # unclosed block (as OutputParser and North do); EOS still fails closed.
+    text = "plan</think>Sure." + partial
+    for split in range(len(text) + 1):
+        parser, out = _finish(text, split, "length")
+        assert out == {"reasoning_content": "plan", "content": "Sure.", "tool_calls": []}
+        assert parser.tool_count == 0 and parser.stopped
+    if partial.endswith("</param_value>"):
+        return  # a structurally complete payload is closed by EOS (see above)
+    for split in range(len(text) + 1):
+        with pytest.raises(ValueError, match="incomplete"):
+            _finish(text, split, "stop")
+
+
+def test_max_tokens_after_a_complete_call_keeps_that_call():
+    text = "</think>" + _call("get_weather", city="Oslo") + "<tool_call>get_weather<param_key>ci"
+    for split in range(len(text) + 1):
+        parser, out = _finish(text, split, "length")
+        assert calls(out) == [("get_weather", {"city": "Oslo"})]
+        assert out["content"] == ""
+        assert parser.tool_count == 1

@@ -88,12 +88,17 @@ def configure_environment() -> dict[str, str]:
     return profile
 
 
-def inspect_artifact(model_path: str | Path) -> dict:
-    """Validate the exact dense 9B topology without importing MLX."""
+def inspect_artifact(
+    model_path: str | Path,
+    *,
+    expected_topology: Mapping[str, int] | None = None,
+    family: str = "9B",
+) -> dict:
+    """Validate one dense Qwen3.5 topology without importing MLX."""
     path = Path(model_path).expanduser().resolve()
     config = json.loads((path / "config.json").read_text())
     text = config.get("text_config", config)
-    expected = {
+    expected = dict(expected_topology) if expected_topology is not None else {
         "num_hidden_layers": 32,
         "hidden_size": 4096,
         "intermediate_size": 12288,
@@ -108,15 +113,15 @@ def inspect_artifact(model_path: str | Path) -> dict:
         "linear_value_head_dim": 128,
     }
     if config.get("model_type") != "qwen3_5" or text.get("num_experts", 0):
-        raise ValueError("Qwen3.5 9B requires the dense qwen3_5 artifact layout")
+        raise ValueError(f"Qwen3.5 {family} requires the dense qwen3_5 artifact layout")
     if any(text.get(key) != value for key, value in expected.items()):
-        raise ValueError("artifact topology does not match Qwen3.5 9B")
+        raise ValueError(f"artifact topology does not match Qwen3.5 {family}")
     expected_layers = [
         "full_attention" if (index + 1) % 4 == 0 else "linear_attention"
-        for index in range(32)
+        for index in range(expected["num_hidden_layers"])
     ]
     if text.get("layer_types") not in (None, expected_layers):
-        raise ValueError("artifact layer order does not match Qwen3.5 9B")
+        raise ValueError(f"artifact layer order does not match Qwen3.5 {family}")
 
     index = json.loads((path / "model.safetensors.index.json").read_text()).get(
         "weight_map"
@@ -356,6 +361,7 @@ class Qwen359BAdapter(Qwen3827BAdapter):
             "layout": self.layout,
             "mtp_head_present": False,
             "scope": "text-only",
+            **self.dtype_diagnostics(),
         }
         artifact = getattr(self, "_neural_concept_artifact", None)
         if artifact is not None:

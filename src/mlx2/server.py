@@ -21,7 +21,6 @@ from urllib.parse import parse_qs, unquote, urlsplit
 import queue
 import re
 import select
-import signal
 import socket
 import threading
 import time
@@ -37,6 +36,14 @@ from .serving import (
     take_prompt_progress,
 )
 from .batch_metrics import http_metric_route
+# The --cache-bytes default and its post-load clamp live in cache_sizing: pure
+# arithmetic with no MLX import, so the parser stays GPU-free.
+from .cache_sizing import (  # noqa: F401 - re-exported for callers and tests
+    MAX_DEFAULT_CACHE_BYTES,
+    MIN_DEFAULT_CACHE_BYTES,
+    default_cache_bytes,
+    physical_memory_bytes,
+)
 from .logprobs import MAX_TOP_LOGPROBS, wants_logprobs
 from .request_limits import (
     DEFAULT_OUTPUT_TOKENS,
@@ -235,6 +242,16 @@ def default_max_tokens_arg(value):
         return validate_default_max_tokens(value)
     except (TypeError, ValueError) as error:
         raise argparse.ArgumentTypeError(str(error)) from error
+
+
+def prefill_step_arg(value):
+    try:
+        step = int(value)
+    except (TypeError, ValueError) as error:
+        raise argparse.ArgumentTypeError("prefill step must be a positive integer") from error
+    if step <= 0:
+        raise argparse.ArgumentTypeError("prefill step must be a positive integer")
+    return step
 
 
 def validate_session_id(value):
@@ -518,7 +535,19 @@ def validate_request(
             # constraint honoured.  Grammar completion ends the output.
             raise ValueError("min_tokens cannot be combined with structured output")
     if "logprobs" in body and not isinstance(body["logprobs"], bool):
-        raise ValueError("logprobs must be boolean")
+        # Legacy /v1/completions puts the alternative count in logprobs.
+        legacy_count = body["logprobs"]
+        if (
+            chat
+            or not isinstance(legacy_count, int)
+            or not 0 <= legacy_count <= MAX_TOP_LOGPROBS
+        ):
+            raise ValueError(
+                "logprobs must be boolean or a completions integer from 0 to 11"
+            )
+        if "top_logprobs" in body and body["top_logprobs"] != legacy_count:
+            raise ValueError("logprobs and top_logprobs disagree")
+        body = {**body, "logprobs": True, "top_logprobs": legacy_count}
     if "verify_bitexact" in body and not isinstance(body["verify_bitexact"], bool):
         raise ValueError("verify_bitexact must be boolean")
     top_logprobs = body.get("top_logprobs", 0)
@@ -1193,6 +1222,9 @@ def collect_nonstream_job(job, body, *, chat, responses=False):
             "prompt_tokens": job.prompt_tokens,
             "completion_tokens": job.completion_tokens,
             "total_tokens": job.prompt_tokens + job.completion_tokens,
+            "completion_tokens_details": {
+                "reasoning_tokens": int(getattr(job, "reasoning_tokens", 0) or 0)
+            },
         }, event["receipt"]
 
 
@@ -1625,6 +1657,7 @@ def handler_for(
             self._body_consumed = False
             self._connection_header_sent = False
             self._interim_response = False
+            self._request_body_remaining = 0
 
         def parse_request(self):
             # BaseHTTPRequestHandler reuses this instance for every request on
@@ -1640,12 +1673,13 @@ def handler_for(
             self._tenant_auth_method = None
             self._body_consumed = False
             self._connection_header_sent = False
+            self._request_body_remaining = 0
             if not super().parse_request():
                 return False
             try:
                 if self.headers.get_all("Transfer-Encoding"):
                     raise ValueError("Transfer-Encoding is unsupported")
-                self._content_length()
+                self._request_body_remaining = self._content_length()
             except ValueError as error:
                 self.close_connection = True
                 self.api_error(
@@ -1901,6 +1935,7 @@ def handler_for(
                     raise ValueError("request body ended early")
                 chunks.append(chunk)
                 remaining -= len(chunk)
+                self._request_body_remaining -= len(chunk)
             self.connection.settimeout(30)
             self._body_consumed = True
             return b"".join(chunks)
@@ -2696,6 +2731,12 @@ def handler_for(
                     usage = {
                         "prompt_tokens": usages[0]["prompt_tokens"],
                         "completion_tokens": sum(item["completion_tokens"] for item in usages),
+                        "completion_tokens_details": {
+                            "reasoning_tokens": sum(
+                                item["completion_tokens_details"]["reasoning_tokens"]
+                                for item in usages
+                            )
+                        },
                     }
                     usage["total_tokens"] = usage["prompt_tokens"] + usage["completion_tokens"]
                     usage["prompt_tokens_details"] = {
@@ -3034,6 +3075,13 @@ def handler_for(
                             "total_tokens": job.prompt_tokens + job.completion_tokens,
                             "prompt_tokens_details": {
                                 "cached_tokens": job.cached_tokens
+                            },
+                            # The engine counts every token decoded in the
+                            # reasoning channel, a truncated think block too.
+                            "completion_tokens_details": {
+                                "reasoning_tokens": int(
+                                    getattr(job, "reasoning_tokens", 0) or 0
+                                )
                             },
                         }
                         hosted_usage["prompt_tokens"] += usage["prompt_tokens"]
@@ -3997,31 +4045,14 @@ def build_tenant_authenticator(args):
 
 DEFAULT_MAX_LANES = 16
 DEFAULT_MAX_INFLIGHT = 32
-# 16 GiB is the qualified cache geometry on the 128 GiB host.  A flat 16 GiB
-# is a hazard on the 36 GiB M3: its Metal advisory is 28.08 GiB, so a 19 GiB
-# Qwen3.6 artifact plus a full 16 GiB prefix cache is past the advisory before
-# one lane is costed.  One eighth of physical memory matches the 12.5% service
-# share the host-scaled reserves use (runtime/memory_policy.py): 16 GiB at
-# 128 GiB, 4.5 GiB at 36 GiB.
-MAX_DEFAULT_CACHE_BYTES = 16 << 30
-MIN_DEFAULT_CACHE_BYTES = 1 << 30
 
 
-def physical_memory_bytes() -> int | None:
-    """Physical RAM without importing MLX (the parser must stay GPU-free)."""
-    try:
-        return int(os.sysconf("SC_PHYS_PAGES")) * int(os.sysconf("SC_PAGE_SIZE"))
-    except (AttributeError, OSError, ValueError):
-        return None
+class _ExplicitCacheBytes(argparse.Action):
+    """Record that --cache-bytes was given, so the post-load clamp skips it."""
 
-
-def default_cache_bytes(physical=None) -> int:
-    physical = physical_memory_bytes() if physical is None else physical
-    if not physical or physical <= 0:
-        return MAX_DEFAULT_CACHE_BYTES
-    return max(
-        MIN_DEFAULT_CACHE_BYTES, min(MAX_DEFAULT_CACHE_BYTES, int(physical) // 8)
-    )
+    def __call__(self, parser, namespace, values, option_string=None):
+        setattr(namespace, self.dest, values)
+        namespace.cache_bytes_source = "explicit"
 
 
 def build_parser():
@@ -4101,7 +4132,19 @@ def build_parser():
         metavar="SECONDS",
         help="drain accepted work before SIGTERM/SIGINT shutdown (default: immediate)",
     )
+    parser.add_argument(
+        "--fault-log",
+        type=Path,
+        metavar="PATH",
+        default=os.environ.get("MLX2_FAULT_LOG") or None,
+        help="append faulthandler stack dumps for fatal signals (SIGSEGV, "
+        "SIGBUS, SIGABRT, ...) to PATH instead of stderr (env MLX2_FAULT_LOG)",
+    )
     parser.add_argument("--max-context", type=int, default=262144)
+    parser.add_argument(
+        "--prefill-step", type=prefill_step_arg,
+        help="prefill chunk step; the resolved value is bound to route qualification",
+    )
     parser.add_argument(
         "--default-max-tokens",
         type=default_max_tokens_arg,
@@ -4153,11 +4196,17 @@ def build_parser():
         "--cache-bytes",
         type=int,
         default=default_cache_bytes(),
+        action=_ExplicitCacheBytes,
         help=(
-            "APCv2 resident prefix-cache cap (default: min(16 GiB, 1/8 of "
-            f"physical memory) = {default_cache_bytes() / (1 << 30):.2f} GiB here)"
+            "APCv2 resident prefix-cache cap (default: physical/8 up to a "
+            "64 GiB host, then 5/8 of each further GiB, capped at 96 GiB = "
+            f"{default_cache_bytes() / (1 << 30):.2f} GiB here; after the "
+            "model loads the default is clamped to the headroom beside it, "
+            "never below min(16 GiB, physical/8). An explicit value is used "
+            "exactly as given)"
         ),
     )
+    parser.set_defaults(cache_bytes_source="host_default")
     parser.add_argument("--cache-dir")
     parser.add_argument(
         "--apc-persist-dir",
@@ -4636,9 +4685,13 @@ def serving_engine_kwargs(
         "max_inflight": args.max_inflight,
         "max_lanes": args.max_lanes,
         "max_context": args.max_context,
+        "prefill_step": getattr(args, "prefill_step", None),
         "default_max_tokens": args.default_max_tokens,
         "max_request_bytes": max_request_bytes,
         "cache_bytes": args.cache_bytes,
+        # A namespace built without the parser has no source; treat its value
+        # as the operator's, which is never clamped.
+        "cache_bytes_source": getattr(args, "cache_bytes_source", "explicit"),
         "cache_dir": args.cache_dir,
         "host_prompt_cache_entries": args.host_prompt_cache_entries,
         "host_prompt_cache_tokens": args.host_prompt_cache_tokens,
@@ -4865,6 +4918,12 @@ def main():
     logging.basicConfig(
         level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s"
     )
+    from .exit_trace import ExitTrace
+
+    try:
+        exit_trace = ExitTrace().install(args.fault_log)
+    except OSError as error:
+        parser.error(f"cannot open --fault-log: {error}")
     logging.getLogger("mlx2.server").info(
         "selected %s route from %s",
         route_selection.route,
@@ -4974,17 +5033,25 @@ def main():
     )
 
     stop = SignalShutdownController(server, engine, args.drain_on_sigterm)
-    signal.signal(signal.SIGTERM, stop)
-    signal.signal(signal.SIGINT, stop)
+    exit_trace.install_shutdown_signals(stop)
 
     def watch_worker():
         engine.thread.join()
         if engine.error:
+            exit_trace.set_reason(f"generation worker failed: {engine.error}")
             server.shutdown()
 
     threading.Thread(target=watch_worker, daemon=True).start()
+    logging.getLogger("mlx2.server").info(
+        "serving on %s:%d (pid %d)", args.host, server.server_address[1], os.getpid()
+    )
     try:
         server.serve_forever(poll_interval=0.1)
+    except BaseException as error:
+        exit_trace.set_reason(f"serve loop raised {type(error).__name__}")
+        raise
+    else:
+        exit_trace.set_reason("server shutdown")
     finally:
         try:
             engine.close()

@@ -123,6 +123,26 @@ class ModelArgs(BaseModelArgs):
 #: the absorbed branch). The two branches are the same math.
 ABSORBED_MAX_QUERY_OVERRIDE: Optional[int] = None
 _ABSORBED_UNBOUNDED = 1 << 30
+# Research-only toggle used by the source-bound GPU probe. Keep production
+# imports on the ordinary path until this capability has a qualification
+# receipt and an adapter route declaration.
+_FUSED_MLA = False
+
+
+def set_fused_mla(enabled: bool) -> None:
+    """Select the experimental dense-cache Metal MLA path explicitly."""
+    global _FUSED_MLA
+    _FUSED_MLA = bool(enabled)
+
+
+def fused_mla_stats(reset: bool = False) -> dict[str, int]:
+    """Read the mechanism counter; a benchmark must require fused_calls > 0."""
+    from . import xing4_0_mla_metal
+
+    result = xing4_0_mla_metal.snapshot_stats()
+    if reset:
+        xing4_0_mla_metal.reset_stats()
+    return result
 
 
 def set_absorbed_max_query_override(value: Optional[int]) -> None:
@@ -273,11 +293,19 @@ class Xing4_0Attention(nn.Module):
         output = mx.fast.scaled_dot_product_attention(q, kv_latent, kv_latent, scale=self.scale, mask=pe_scores)
         return output.reshape(B, L, H, D).transpose(0, 2, 1, 3)
 
-    def _attend(self, q_nope, q_pe, kv_latent, k_pe, mask):
+    def _attend(self, q_nope, q_pe, kv_latent, k_pe, mask, *, fused_q_latent=None):
         """MLA over one latent history; returns [B, H, L, v_head_dim]."""
         L = q_nope.shape[2]
         if mask is not None and isinstance(mask, str):
             raise ValueError("Xing4.0 MLA requires an array attention mask")
+        if _FUSED_MLA:
+            from . import xing4_0_mla_metal
+
+            q_latent = fused_q_latent if fused_q_latent is not None else self.embed_q(q_nope)
+            latent_output = xing4_0_mla_metal.attend(
+                q_latent, q_pe, kv_latent, k_pe, mask, scale=self.scale
+            )
+            return self.unembed_out(latent_output)
         if use_absorbed_path(L, k_pe.shape[-2], self.absorbed_geometry):
             return self.unembed_out(self._absorbed(self.embed_q(q_nope), q_pe, kv_latent, k_pe, mask))
         pe_scores = (q_pe * self.scale) @ k_pe.swapaxes(-1, -2)
@@ -307,6 +335,34 @@ class Xing4_0Attention(nn.Module):
         q_pe = self.rope(q_pe, offset)
         k_pe = self.rope(k_pe, offset)
         kv_latent = mx.expand_dims(kv_latent, axis=1)
+        from .xing_latent_kv8 import (
+            XingLatentKV8Cache, SegmentedBatchXingLatentKV8Cache,
+        )
+        approved_approximate_cache = isinstance(
+            cache, (XingLatentKV8Cache, SegmentedBatchXingLatentKV8Cache)
+        )
+        if (cache is not None and getattr(cache, "key_bits", None) is not None
+                and not approved_approximate_cache):
+            raise NotImplementedError("Xing4.0 MLA only admits its explicit latent KV8 candidate")
+        fused_q_latent = None
+        if _FUSED_MLA:
+            # Reject before a cache append changes its logical state. The
+            # experimental kernel has not been qualified with compressed
+            # approximate state or segmented row views.
+            from . import xing4_0_mla_metal
+
+            if approved_approximate_cache:
+                xing4_0_mla_metal.STATS["rejected_calls"] += 1
+                raise ValueError("fused Xing MLA is not qualified with latent KV8")
+            if cache is not None and type(cache) is not KVCache:
+                xing4_0_mla_metal.STATS["rejected_calls"] += 1
+                raise ValueError("fused Xing MLA requires an exact, unsegmented KVCache")
+            fused_q_latent = self.embed_q(q_nope)
+            if not xing4_0_mla_metal.supported(
+                fused_q_latent, q_pe, kv_latent, k_pe, mask, context_len=offset + L
+            ):
+                xing4_0_mla_metal.STATS["rejected_calls"] += 1
+                raise ValueError("fused Xing MLA geometry/device/mask gate rejected before cache append")
         if cache is not None and hasattr(cache, "row_views"):
             # Segmented batch: history stays in per-row caches; attend each
             # row's own latent with the same MLA math.
@@ -316,6 +372,8 @@ class Xing4_0Attention(nn.Module):
                 if not valid:
                     outputs.append(mx.zeros((1, self.num_heads, L, self.v_head_dim), dtype=q_nope.dtype))
                     continue
+                if not (isinstance(row_latent, mx.array) and isinstance(row_pe, mx.array)):
+                    raise NotImplementedError("Xing4.0 MLA requires dense latent and RoPE row views")
                 output = self._attend(
                     q_nope[index : index + 1, :, :valid], q_pe[index : index + 1, :, :valid],
                     row_latent, row_pe, row_mask,
@@ -326,12 +384,21 @@ class Xing4_0Attention(nn.Module):
             cache.note_attention()
             output = mx.concatenate(outputs, axis=0)
         else:
-            if cache is not None:
-                kv_latent, k_pe = cache.update_and_fetch(kv_latent, k_pe)
-            if not isinstance(k_pe, mx.array):
-                # Fail closed: a quantized latent cache is not qualified here.
-                raise NotImplementedError("Xing4.0 MLA does not support a quantized KV cache")
-            output = self._attend(q_nope, q_pe, kv_latent, k_pe, mask)
+            previous_offset = cache.offset if _FUSED_MLA and cache is not None else None
+            try:
+                if cache is not None:
+                    kv_latent, k_pe = cache.update_and_fetch(kv_latent, k_pe)
+                if not isinstance(k_pe, mx.array):
+                    # The only admitted approximate cache returns dequantized
+                    # latent and dense RoPE arrays; all other packed forms fail.
+                    raise NotImplementedError("Xing4.0 MLA does not support this quantized KV cache")
+                output = self._attend(
+                    q_nope, q_pe, kv_latent, k_pe, mask, fused_q_latent=fused_q_latent
+                )
+            except Exception:
+                if previous_offset is not None and cache.offset > previous_offset:
+                    cache.trim(cache.offset - previous_offset)
+                raise
         output = output.transpose(0, 2, 1, 3).reshape(B, L, -1)
         return self.o_proj(output)
 
@@ -861,18 +928,20 @@ class Model(nn.Module):
     def logits(self, hidden: mx.array) -> mx.array:
         return self.lm_head(hidden)
 
-    def make_cache(self):
-        return [KVCache() for _ in self.model.layers]
+    def make_cache(self, *, cache_factory=None):
+        factory = KVCache if cache_factory is None else cache_factory
+        return [factory() for _ in self.model.layers]
 
     def mtp_backbone(self, inputs: mx.array, cache=None):
         """(LM-head hidden, MTP seed hidden): both the post-final-norm hidden."""
         hidden = self.model(inputs, cache=cache)
         return hidden, hidden
 
-    def make_mtp_cache(self):
+    def make_mtp_cache(self, *, cache_factory=None):
         if self.mtp is None:
             raise RuntimeError("Xing4.0 MTP head is not loaded")
-        return [KVCache() for _ in self.mtp.layers]
+        factory = KVCache if cache_factory is None else cache_factory
+        return [factory() for _ in self.mtp.layers]
 
     def mtp_step(self, hidden, tokens, mtp_cache):
         """One MTP forward over S positions.

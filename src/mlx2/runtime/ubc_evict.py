@@ -158,9 +158,10 @@ def ubc_evict(path: str) -> int:
 def load_shards_evicting(
     files: Iterable[object],
     *,
-    sanitize: "Callable[[dict], dict] | None" = None,
-    keep_lazy: "Callable[[str], bool] | None" = None,
-    deferred: "list[str] | None" = None,
+    sanitize: Callable[[dict], dict] | None = None,
+    keep_lazy: Callable[[str], bool] | None = None,
+    deferred: list[str] | None = None,
+    prune_lazy: bool = False,
 ) -> dict:
     """Load safetensors shards, evicting each shard's UBC mirror as it lands.
 
@@ -189,11 +190,15 @@ def load_shards_evicting(
     later step prunes or rebinds to a sidecar. They are returned lazily, and
     because their bytes are still unread, the file holding them cannot be
     evicted yet: its path is appended to ``deferred`` for the caller to evict
-    once it is done with them.
+    once it is done with them. With ``prune_lazy``, those tensors are discarded
+    instead; mixed files can then be evicted after their retained tensors land.
+    This is only for callers that will never use the pruned tensors.
     """
     import mlx.core as mx
 
-    if keep_lazy is not None and deferred is None:
+    if prune_lazy and keep_lazy is None:
+        raise ValueError("prune_lazy requires keep_lazy")
+    if keep_lazy is not None and deferred is None and not prune_lazy:
         raise ValueError("keep_lazy requires a deferred list to record held paths")
 
     weights: dict = {}
@@ -202,18 +207,21 @@ def load_shards_evicting(
         shard = mx.load(path)
         if sanitize is not None:
             shard = sanitize(shard)
-        if keep_lazy is None:
+        if prune_lazy:
+            shard = {
+                name: value for name, value in shard.items() if not keep_lazy(name)
+            }
+        if keep_lazy is None or prune_lazy:
             eager = list(shard.values())
             held = False
         else:
             eager = [value for name, value in shard.items() if not keep_lazy(name)]
             held = len(eager) != len(shard)
         if eager:
-            # Materialise first -- eviction below depends on this having run.
             mx.eval(eager)
         if held:
             deferred.append(path)
-        else:
+        elif eager:
             ubc_evict_paths([path])
         weights.update(shard)
     return weights
