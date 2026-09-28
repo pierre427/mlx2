@@ -2343,6 +2343,9 @@ def test_flash_next_diagnostics_do_not_rewalk_a_mutating_model_tree():
         "fallbacks": 3,
         "router_calls": 4,
     }
+    assert diagnostics["qsa_stage1"]["candidates"]["default_producer"] == (
+        "mpp_exact_band"
+    )
 
 
 def test_trickled_request_body_is_bounded_by_a_whole_body_deadline(monkeypatch):

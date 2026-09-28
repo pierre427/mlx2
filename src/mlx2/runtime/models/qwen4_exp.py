@@ -83,7 +83,8 @@ from .qwen4_qsa_indexed import (
 )
 from .qwen4_qsa_indexed_merge import fused_gate_enabled, mlx_apply_output_gate
 from .qwen4_qsa_stage1 import (
-    qsa_stage1_score_producer,
+    qsa_stage1_candidate_status,
+    qsa_stage1_route,
     qsa_stage1_select,
     qsa_stage1_supported,
 )
@@ -440,6 +441,36 @@ def _qsa_stage1_admission_reason(query_width: int, physical_width: int) -> str |
     return None
 
 
+def qsa_stage1_status(*, reset: bool = False) -> dict:
+    """Return bounded stage-one admission and producer receipts."""
+    global _QSA_STAGE1_LAST_DECISION
+    if _QSA_STAGE1_KERNEL is None:
+        mode = "auto"
+    else:
+        mode = "on" if _QSA_STAGE1_KERNEL else "off"
+    with _QSA_STAGE1_STATS_LOCK:
+        counts = dict(_QSA_STAGE1_STATS)
+        engagements = sum(
+            count for reason, count in counts.items() if reason.startswith("engaged_")
+        )
+        attempts = sum(counts.values())
+        report = {
+            "mode": mode,
+            "min_query_width": int(_QSA_STAGE1_MIN_QUERY),
+            "min_physical_kv": int(_QSA_STAGE1_MIN_PHYSICAL_KV),
+            "candidates": qsa_stage1_candidate_status(reset=reset),
+            "attempts": attempts,
+            "engagements": engagements,
+            "fallbacks": attempts - engagements,
+            "counts": counts,
+            "last_receipt": _QSA_STAGE1_LAST_DECISION,
+        }
+        if reset:
+            _QSA_STAGE1_STATS.clear()
+            _QSA_STAGE1_LAST_DECISION = None
+    return report
+
+
 _QSA_NAX_MIN_QUERY = int(os.environ.get("MLX_QWEN4_QSA_NAX_MIN_QUERY", "64"))
 _QSA_NAX_AUTO_MIN_PHYSICAL_KV = int(
     os.environ.get("MLX_QWEN4_QSA_NAX_AUTO_MIN_PHYSICAL_KV", "16384")
@@ -558,7 +589,15 @@ def _record_qsa_nax_decode(*, engaged: bool, reason: str, context: int) -> None:
 
 
 def _record_qsa_stage1(
-    *, engaged: bool, reason: str, batch: int, query_width: int, blocks: int
+    *,
+    engaged: bool,
+    reason: str,
+    batch: int,
+    query_width: int,
+    blocks: int,
+    score_producer: str | None = None,
+    selector: str | None = None,
+    refine_selector: str | None = None,
 ) -> None:
     global _QSA_STAGE1_LAST_DECISION
     receipt = {
@@ -567,6 +606,9 @@ def _record_qsa_stage1(
         "batch": int(batch),
         "query_width": int(query_width),
         "blocks": int(blocks),
+        "score_producer": score_producer,
+        "selector": selector,
+        "refine_selector": refine_selector,
     }
     with _QSA_STAGE1_STATS_LOCK:
         _QSA_STAGE1_STATS[reason] += 1
@@ -5156,6 +5198,9 @@ class QSAIndexer(nn.Module):
                 length, n_blocks * self.compress_ratio
             )
             stage1_engaged = False
+            stage1_score_producer = None
+            stage1_selector = None
+            stage1_refine_selector = None
             if stage1_reason is None:
                 if qsa_stage1_supported(
                     q,
@@ -5164,6 +5209,12 @@ class QSAIndexer(nn.Module):
                     block_topk=self.block_topk,
                     compress_ratio=self.compress_ratio,
                 ):
+                    stage1_route = qsa_stage1_route(
+                        q, pooled, block_topk=self.block_topk
+                    )
+                    stage1_score_producer = stage1_route["score_producer"]
+                    stage1_selector = stage1_route["selector"]
+                    stage1_refine_selector = stage1_route["refine_selector"]
                     selected = qsa_stage1_select(
                         q,
                         pooled,
@@ -5171,7 +5222,11 @@ class QSAIndexer(nn.Module):
                         block_topk=self.block_topk,
                         compress_ratio=self.compress_ratio,
                     )
-                    stage1_reason = f"engaged_{qsa_stage1_score_producer(q, pooled)}"
+                    stage1_reason = (
+                        f"engaged_{stage1_score_producer}_{stage1_selector}"
+                    )
+                    if stage1_refine_selector is not None:
+                        stage1_reason += f"_refine_{stage1_refine_selector}"
                     stage1_engaged = True
                 else:
                     stage1_reason = "unsupported_geometry"
@@ -5191,6 +5246,9 @@ class QSAIndexer(nn.Module):
                     batch=batch,
                     query_width=length,
                     blocks=n_blocks,
+                    score_producer=stage1_score_producer,
+                    selector=stage1_selector,
+                    refine_selector=stage1_refine_selector,
                 )
             _capture_qsa_segment_inputs(
                 q, pooled, q_pos, valid_blocks, selected, layer_id=self.layer_id

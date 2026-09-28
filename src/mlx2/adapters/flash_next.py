@@ -385,9 +385,10 @@ class FlashNextAdapter:
 
         from ..runtime.models.qwen4_exp import (
             qwen4_eager_dispatch_status,
-            qsa_mtp_amendment_status,
             qwen4_fused_gdn_stats,
             qwen4_ple_compile_status,
+            qsa_mtp_amendment_status,
+            qsa_stage1_status,
         )
         from ..runtime.models.qwen4_qsa_indexed import qsa_indexed_status
         from ..runtime.round_levers import counters as lever_snapshot
@@ -434,6 +435,7 @@ class FlashNextAdapter:
             ),
             "ple_compile": qwen4_ple_compile_status(),
             "indexed_qsa": qsa_indexed_status(),
+            "qsa_stage1": qsa_stage1_status(),
             "qsa_mtp_amendment": qsa_mtp_amendment_status(),
             "segmented_mtp": segmented_self_mtp_stats(),
             "norm_convention": (
