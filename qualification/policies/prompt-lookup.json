@@ -1,1 +1,13 @@
-{"prompt_lookup": {"num_draft": 8, "ngram_min": 3, "ngram_max": 6}}
+{
+  "prompt_lookup": {
+    "num_draft": 8,
+    "ngram_min": 3,
+    "ngram_max": 6,
+    "cliff_aware_span": true,
+    "deferred_admission": false,
+    "cost_aware_admission": false,
+    "recent_prompt_segments": 0,
+    "rotating_replay": false,
+    "batched_verify": false
+  }
+}

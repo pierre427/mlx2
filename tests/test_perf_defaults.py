@@ -221,6 +221,26 @@ def test_muse_dflash2_unqualified_default_depth_is_three_qualified_pins_four():
     assert policy["num_draft"] == 4
 
 
+def test_selected_prompt_lookup_policy_enables_only_qualified_candidate():
+    import json
+    from pathlib import Path
+
+    from mlx2.runtime.pld import PromptLookupBatchGenerator
+
+    root = Path(__file__).resolve().parents[1]
+    policy = json.loads(
+        (root / "qualification/policies/prompt-lookup.json").read_text()
+    )["prompt_lookup"]
+    validated = PromptLookupBatchGenerator.validate_policy(policy)
+    assert validated["cliff_aware_span"] is True
+    assert validated["deferred_admission"] is False
+    assert validated["cost_aware_admission"] is False
+    assert validated["recent_prompt_segments"] == 0
+    assert validated["rotating_replay"] is False
+    assert validated["batched_verify"] is False
+    assert "retrieval_segments" not in validated
+
+
 def test_bare_server_cli_reaches_the_qualified_handoff_geometry():
     from mlx2.server import build_parser
 
