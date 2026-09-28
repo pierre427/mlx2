@@ -62,3 +62,4 @@ def enable_fp32_head_logits(language_model) -> dict:
         "mode": str(head.mode),
         "extra_resident_bytes": after - before,
     }
+
