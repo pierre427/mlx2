@@ -66,6 +66,12 @@ def row_from(result: dict, wall: float) -> dict:
     completion = int(result["usage"]["completion_tokens"])
     elapsed = receipt.get("elapsed_seconds")
     ttft = receipt.get("ttft_seconds")
+    peer = result.get("tensorfold")
+    if not receipt and isinstance(peer, dict):
+        # TensorFold's own receipt: total and time-to-first-token seconds.
+        elapsed, ttft = peer.get("seconds"), peer.get("time_to_first_token")
+        receipt = {"route": "tensorfold", "tensorfold": peer,
+                   "speculation": result.get("speculative")}
     decode = (elapsed - ttft) if elapsed is not None and ttft is not None else None
     spec = receipt.get("speculation") or {}
     return {
@@ -98,6 +104,8 @@ def main() -> None:
     p.add_argument("--tokens", type=int, default=256)
     p.add_argument("--reps", type=int, default=3)
     p.add_argument("--sampling", choices=("greedy", "default", "both"), default="greedy")
+    p.add_argument("--extra-body", default="{}",
+                   help="JSON merged into every request body (e.g. penalties, draft)")
     p.add_argument("--concurrency", type=int, default=1,
                    help="send N distinct-seed copies at once (B-n); default B1")
     args = p.parse_args()
@@ -116,7 +124,8 @@ def main() -> None:
     rows = []
     for name, messages in prompts.items():
         for mode in modes:
-            body = {"messages": messages, "max_tokens": args.tokens, "enable_thinking": False}
+            body = {"messages": messages, "max_tokens": args.tokens, "enable_thinking": False,
+                    **json.loads(args.extra_body)}
             if mode == "greedy":
                 body.update(temperature=0.0)
             for rep in range(args.reps + 1):
@@ -163,8 +172,11 @@ def main() -> None:
                     "distinct_outputs": len({r["output_sha256"] for r in measured}),
                     "routes": sorted({str(r["route"]) for r in measured}),
                 }
-    with urlopen(args.base.rstrip("/") + "/v1/status", timeout=30) as r:
-        status = json.load(r)
+    try:
+        with urlopen(args.base.rstrip("/") + "/v1/status", timeout=30) as r:
+            status = json.load(r)
+    except OSError:
+        status = None  # peer servers have no mlx2 status endpoint
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps({
         "schema": "mlx2.qwen38-b1-routes.v1", "label": args.label, "tokens": args.tokens,
