@@ -1489,6 +1489,72 @@ def _add_int8_prefill(builder: PrometheusBuilder, engine: Any) -> None:
     )
 
 
+_LANE_PATHS = {
+    "lane_calls": "lane",
+    "stock_below_min_rows": "stock_below_min_rows",
+    "stock_above_max_rows": "stock_above_max_rows",
+    "stock_disabled": "stock_disabled",
+    "stock_unsupported": "stock_unsupported",
+}
+
+
+def _add_lane_matmul(builder: PrometheusBuilder, engine: Any) -> None:
+    """Lane matmul coverage and host call counters, always exported."""
+    from .runtime.lane.installer import ROW_BUCKETS, stats
+
+    receipt = getattr(engine, "lane_matmul_receipt", None) or {}
+    policy = receipt.get("policy") or {}
+    covered = receipt.get("covered") or {}
+    counts = stats()
+    builder.gauge(
+        "mlx2_lane_matmul_enabled",
+        "Whether the lane matmul is installed on the served model.",
+        int(bool(covered)),
+        {"mode": str(policy.get("mode", "off"))},
+    )
+    for fmt, number in sorted(covered.items()):
+        builder.gauge(
+            "mlx2_lane_matmul_covered_projections",
+            "Projections routed through the lane matmul, by weight format.",
+            int(number),
+            {"format": str(fmt)},
+        )
+    for key, path in _LANE_PATHS.items():
+        builder.counter(
+            "mlx2_lane_matmul_calls_total",
+            "Calls of covered projections, by the path they took.",
+            int(counts.get(key, 0)),
+            {"path": path},
+        )
+    builder.counter(
+        "mlx2_lane_matmul_rows_total",
+        "Activation rows computed by the lane matmul.",
+        int(counts.get("lane_rows", 0)),
+    )
+    for low, high in ROW_BUCKETS:
+        builder.counter(
+            "mlx2_lane_matmul_calls_by_rows_total",
+            "Covered-projection calls on the lane or below-threshold stock path, by rows.",
+            int(counts.get(f"rows_{low}-{high}", 0)),
+            {"rows": f"{low}-{high}"},
+        )
+    builder.counter(
+        "mlx2_lane_matmul_launches_total",
+        "Lane kernel launches (a grouped launch serves several projections).",
+        int(counts.get("lane_launches", 0)),
+    )
+    builder.counter(
+        "mlx2_lane_matmul_group_launches_total",
+        "Launches that computed a stacked sibling group.",
+        int(counts.get("group_launches", 0)),
+    )
+    builder.counter(
+        "mlx2_lane_matmul_group_reuses_total",
+        "Sibling projection calls served from their group's launch.",
+        int(counts.get("group_reuses", 0)),
+    )
+
+
 def _add_verify_bitexact(builder: PrometheusBuilder, engine: Any) -> None:
     """Bit-exact verify mode: host counters plus mlx's host-side route counter."""
 
@@ -1717,6 +1783,7 @@ def render_engine_metrics(engine: Any) -> str:
                 {"component": component, "event": event},
             )
     _add_int8_prefill(builder, engine)
+    _add_lane_matmul(builder, engine)
     _add_verify_bitexact(builder, engine)
     builder.gauge(
         "mlx2_peak_observed_batch_width",

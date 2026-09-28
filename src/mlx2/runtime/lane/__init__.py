@@ -1,6 +1,15 @@
 """Row-invariant small-M matmul for every weight format (see ``matmul``)."""
 
-from .installer import LAW_ID, install, installed, law_id, set_enabled, uninstall
+from .installer import (
+    LAW_ID,
+    apply_policy,
+    install,
+    installed,
+    law_id,
+    set_enabled,
+    stats,
+    uninstall,
+)
 from .matmul import (
     GROUP_SIZES,
     MAX_ROWS,
@@ -22,6 +31,7 @@ __all__ = [
     "UNQUANTIZED_BITS",
     "LaneUnsupported",
     "LaneWeights",
+    "apply_policy",
     "available",
     "install",
     "installed",
@@ -30,5 +40,6 @@ __all__ = [
     "prepare",
     "set_enabled",
     "split_k",
+    "stats",
     "uninstall",
 ]

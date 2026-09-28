@@ -797,6 +797,29 @@ def verify_bitexact_receipt_fields(handle, start):
     return {"verify_bitexact": detail["verify_bitexact"], "verify_bitexact_detail": detail}
 
 
+def lane_matmul_status(engine) -> dict:
+    """Lane matmul policy, coverage and host call counters for /v1/status."""
+    from .runtime.lane import stats
+
+    receipt = getattr(engine, "lane_matmul_receipt", None) or {}
+    policy = receipt.get("policy") or {}
+    return {
+        "requested": getattr(engine, "lane_matmul", "off"),
+        "mode": policy.get("mode", "off"),
+        "installed": bool(receipt.get("covered")),
+        "law_id": receipt.get("law_id"),
+        "covered": receipt.get("covered", {}),
+        "refused": receipt.get("refused", {}),
+        "groups": receipt.get("groups", {}),
+        "min_rows": policy.get("min_rows"),
+        "max_rows": policy.get("max_rows"),
+        "detected": policy.get("detected"),
+        "family": policy.get("family"),
+        "sources": policy.get("sources"),
+        "counts": stats(),
+    }
+
+
 def int8_prefill_status(engine):
     """Host-only int8 prefill status (policy, bound modules, live counters)."""
     from .runtime.int8_prefill import engine_status
@@ -1494,6 +1517,8 @@ class ServingEngine:
         thinking_steer_alpha=None,
         thinking_steer_hammer=None,
         thinking_auto_calibration=True,
+        lane_matmul="off",
+        lane_policy=None,
         cache_capsules=None,
         persistent_block_bytes=0,
         approximate_kv=None,
@@ -1667,6 +1692,14 @@ class ServingEngine:
         self.thinking_steer_hammer = float(thinking_steer_hammer or 0.0)
         self.thinking_defaults_source = "server"
         self.thinking_auto_calibration = bool(thinking_auto_calibration)
+        if lane_matmul not in ("auto", "off", "crossover", "exact"):
+            raise ValueError("lane_matmul must be auto, off, crossover or exact")
+        from .runtime.lane.policy import load_overrides
+
+        self.lane_matmul = lane_matmul
+        # Parse and validate overrides at startup, before any model loads.
+        self.lane_policy_overrides = load_overrides(lane_policy)
+        self.lane_matmul_receipt = None
         self._commit_direction = None
         self.thinking_steer_status = {"state": "off"}
         self.cache_capsule_policy = cache_capsule_policy(cache_capsules)
@@ -3026,6 +3059,7 @@ class ServingEngine:
                     ],
                 },
                 "int8_prefill": int8_prefill_status(self),
+                "lane_matmul": lane_matmul_status(self),
                 "verify_bitexact": verify_bitexact_status(self),
                 "sp_qmm": sp_qmm_status(self),
                 "qsdpa_verify": {
@@ -4412,6 +4446,21 @@ class ServingEngine:
                 else self.adapter_factory(self.model_path)
             )
             self.adapter = adapter
+            if self.lane_matmul != "off":
+                # Before any cache or generator exists: every later call of a
+                # covered projection sees the installed arithmetic.
+                from .runtime.lane import apply_policy
+                from .runtime.lane.policy import detect, resolve
+
+                policy = resolve(
+                    detect(adapter.model),
+                    family=getattr(getattr(adapter, "descriptor", None), "family", None),
+                    overrides=self.lane_policy_overrides,
+                    mode=self.lane_matmul,
+                )
+                self.lane_matmul_receipt = apply_policy(adapter.model, policy) or {
+                    "law_id": "stock", "covered": {}, "policy": {
+                        k: policy[k] for k in ("mode", "detected", "family", "sources")}}
             # Wire the weights for the process lifetime, on every route and
             # before any cache exists (runtime/weight_residency.py).  The
             # prompt-lookup and external-draft generators never raised the
@@ -4493,6 +4542,13 @@ class ServingEngine:
             if self.cache_bytes_source == "host_default":
                 self._clamp_host_default_cache_bytes(adapter)
             settings = {
+                # Present only when enabled, so default-off settings are unchanged.
+                # Bound into route identity: the resolved law, not the request.
+                **({"lane_matmul": {
+                    "mode": self.lane_matmul_receipt["policy"]["mode"],
+                    "law_id": self.lane_matmul_receipt["law_id"],
+                    "covered": self.lane_matmul_receipt["covered"],
+                }} if (self.lane_matmul_receipt or {}).get("covered") else {}),
                 "max_context": self.max_context,
                 "default_max_tokens": self.default_max_tokens,
                 "max_lanes": self.max_lanes,

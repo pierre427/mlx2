@@ -65,6 +65,23 @@ _GROUP_OF: dict[int, _Group] = {}
 ENABLED = [True]
 GROUPING = [True]
 
+# Host-side call counters for covered projections (status and /metrics).
+# Row buckets keep label cardinality bounded.
+ROW_BUCKETS = ((1, 3), (4, 7), (8, 15), (16, 32), (33, MAX_ROWS))
+STATS: Counter = Counter()
+
+
+def _bucket(rows: int) -> str:
+    for low, high in ROW_BUCKETS:
+        if low <= rows <= high:
+            return f"{low}-{high}"
+    return f">{MAX_ROWS}"
+
+
+def stats() -> dict:
+    """Copy of the call counters (see ``STATS`` keys)."""
+    return dict(STATS)
+
 
 def _rows(x) -> int:
     rows = 1
@@ -84,21 +101,39 @@ class _LaneMixin:
 
     def __call__(self, x):
         lw = _PREPARED.get(id(self))
-        if (lw is not None and ENABLED[0]
-                and self._lane_min_rows <= _rows(x) <= self._lane_max_rows and available()):
+        rows = _rows(x)
+        if lw is None or not ENABLED[0] or not available():
+            STATS["stock_disabled"] += 1
+        elif rows < self._lane_min_rows:
+            STATS["stock_below_min_rows"] += 1
+            STATS[f"rows_{_bucket(rows)}"] += 1
+        elif rows > self._lane_max_rows:
+            STATS["stock_above_max_rows"] += 1
+        else:
             group = _GROUP_OF.get(id(self)) if GROUPING[0] else None
             try:
                 if group is None:
-                    return lane_matmul(x, lw)
-                # The first sibling to see this input computes the whole group;
-                # the others take their columns of the same result.
-                if group.last is None or group.last[0] is not x:
-                    group.last = (x, lane_matmul(x, group.lw))
-                start, stop = group.columns[id(self)]
-                y = group.last[1][..., start:stop]
-                return y if lw.bias is None else y + lw.bias
+                    y = lane_matmul(x, lw)
+                    STATS["lane_launches"] += 1
+                else:
+                    # The first sibling to see this input computes the whole
+                    # group; the others take their columns of the same result.
+                    if group.last is None or group.last[0] is not x:
+                        group.last = (x, lane_matmul(x, group.lw))
+                        STATS["lane_launches"] += 1
+                        STATS["group_launches"] += 1
+                    else:
+                        STATS["group_reuses"] += 1
+                    start, stop = group.columns[id(self)]
+                    y = group.last[1][..., start:stop]
+                    if lw.bias is not None:
+                        y = y + lw.bias
+                STATS["lane_calls"] += 1
+                STATS["lane_rows"] += rows
+                STATS[f"rows_{_bucket(rows)}"] += 1
+                return y
             except LaneUnsupported:
-                pass
+                STATS["stock_unsupported"] += 1
         return self._lane_stock_call(x)
 
 
@@ -168,7 +203,8 @@ def _group_siblings(model, groups) -> Counter:
 
 
 def install(model, *, min_rows: int = 4, max_rows: int = 32, unquantized: bool = True,
-            groups=DEFAULT_GROUPS, skip=lambda name, module: False) -> dict:
+            groups=DEFAULT_GROUPS, skip=lambda name, module: False,
+            min_rows_by_format: dict | None = None) -> dict:
     """Swap every supported projection to its lane class; returns a receipt.
 
     ``groups``: tuples of sibling attribute names that read the same input;
@@ -179,12 +215,21 @@ def install(model, *, min_rows: int = 4, max_rows: int = 32, unquantized: bool =
     """
     if not 1 <= min_rows <= max_rows <= MAX_ROWS:
         raise ValueError(f"need 1 <= min_rows <= max_rows <= {MAX_ROWS}")
+    from .policy import format_class
+
+    def threshold(module):
+        """Per-projection min rows; None keeps the projection on stock."""
+        if min_rows_by_format is None:
+            return min_rows
+        value = min_rows_by_format.get(format_class(module))
+        return None if value is None or value > max_rows else int(value)
     covered: Counter = Counter()
     refused: Counter = Counter()
     for name, module in model.named_modules():
         kind = type(module)
         if kind in _RESTORE:
-            object.__setattr__(module, "_lane_min_rows", int(min_rows))
+            rows = threshold(module)
+            object.__setattr__(module, "_lane_min_rows", rows if rows is not None else max_rows + 1)
             object.__setattr__(module, "_lane_max_rows", int(max_rows))
             covered["already"] += 1
             continue
@@ -193,6 +238,10 @@ def install(model, *, min_rows: int = 4, max_rows: int = 32, unquantized: bool =
         if skip(name, module):
             refused["skipped"] += 1
             continue
+        rows = threshold(module)
+        if rows is None:
+            refused["no threshold for this format"] += 1
+            continue
         try:
             lw = prepare(module)
         except LaneUnsupported as exc:
@@ -200,12 +249,18 @@ def install(model, *, min_rows: int = 4, max_rows: int = 32, unquantized: bool =
             continue
         _PREPARED[id(module)] = lw
         module.__class__ = _SWAP[kind]
-        object.__setattr__(module, "_lane_min_rows", int(min_rows))
+        object.__setattr__(module, "_lane_min_rows", int(rows))
         object.__setattr__(module, "_lane_max_rows", int(max_rows))
         covered[lw.format] += 1
     formed = _group_siblings(model, groups) if groups else Counter()
-    return {"law_id": law_id(min_rows) + ("+grouped" if groups else ""),
-            "min_rows": min_rows, "max_rows": max_rows, "covered": dict(covered),
+    if min_rows_by_format is None:
+        law = law_id(min_rows)
+    else:
+        spec = ",".join(f"{k}:{v}" for k, v in sorted(min_rows_by_format.items()))
+        law = f"{LAW_ID}+stock-below[{spec}]"
+    return {"law_id": law + ("+grouped" if groups else ""),
+            "min_rows": min_rows if min_rows_by_format is None else dict(min_rows_by_format),
+            "max_rows": max_rows, "covered": dict(covered),
             "groups": dict(formed), "refused": dict(refused), "available": available()}
 
 
@@ -231,3 +286,21 @@ def set_enabled(on: bool, *, grouping: bool | None = None) -> None:
 
 def installed(module) -> bool:
     return type(module) in _RESTORE and id(module) in _PREPARED
+
+
+def apply_policy(model, policy: dict) -> dict | None:
+    """Install according to a resolved ``policy.resolve`` result (None when off)."""
+    from .policy import skipped
+
+    if policy["mode"] == "off":
+        return None
+    by_format = ({fmt: 1 for fmt in policy["min_rows"]} if policy["mode"] == "exact"
+                 else dict(policy["min_rows"]))
+    receipt = install(
+        model, min_rows=1, max_rows=int(policy["max_rows"]),
+        groups=DEFAULT_GROUPS if policy["grouping"] else (),
+        skip=lambda name, module: skipped(policy, name),
+        min_rows_by_format=by_format,
+    )
+    return {**receipt, "policy": {k: policy[k] for k in (
+        "mode", "min_rows", "max_rows", "grouping", "skip", "detected", "family", "sources")}}

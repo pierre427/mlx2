@@ -4475,6 +4475,26 @@ def build_parser():
         help="stronger steering strength used once the run-on alarm or soft budget has tripped (0 keeps alpha)",
     )
     parser.add_argument(
+        "--lane-matmul",
+        choices=("auto", "off", "crossover", "exact"),
+        default="auto",
+        help=(
+            "row-invariant lane matmul for small multi-row projection calls "
+            "(runtime/lane). auto: per-format thresholds detected from the model "
+            "(dense on, mixture-of-experts off); crossover: force on with the "
+            "policy's thresholds; exact: every 1..max_rows call; off: stock only"
+        ),
+    )
+    parser.add_argument(
+        "--lane-policy",
+        default=None,
+        help=(
+            "JSON object (inline or a file path) overriding lane defaults: mode, "
+            "min_rows per format (q2..q8, bf16, fp16), max_rows, grouping, skip "
+            "name patterns, and moe (overrides applied to mixture-of-experts models)"
+        ),
+    )
+    parser.add_argument(
         "--no-thinking-auto-calibration",
         action="store_true",
         help=(
@@ -4718,6 +4738,8 @@ def serving_engine_kwargs(
         "thinking_steer_alpha": args.thinking_steer_alpha,
         "thinking_steer_hammer": args.thinking_steer_hammer,
         "thinking_auto_calibration": not args.no_thinking_auto_calibration,
+        "lane_matmul": args.lane_matmul,
+        "lane_policy": args.lane_policy,
         "cache_capsules": {
             "enabled": args.cache_capsules,
             "backend": args.cache_capsule_backend,
