@@ -5,10 +5,22 @@ import json
 import subprocess
 from pathlib import Path
 
+import pytest
+
 from mlx2.adapters.deepseek_v4_candidate import SOURCE_REVISION, SOURCE_ROOT
 
 
 MODEL = Path("~/mlx-models/DeepSeek-V4-Flash-Vision-Exp-Q4")
+SOURCE = Path(SOURCE_ROOT)
+
+pytestmark = pytest.mark.skipif(
+    not all((
+        (SOURCE / "mlx_vlm/models/deepseek_v4/language.py").is_file(),
+        (SOURCE / "mlx_vlm/models/deepseek_v4/deepseek_v4.py").is_file(),
+        (MODEL / "model.safetensors.index.json").is_file(),
+    )),
+    reason="optional DeepSeek V4 source and model fixtures are absent",
+)
 
 
 def _method(tree, class_name, method_name):
@@ -17,7 +29,7 @@ def _method(tree, class_name, method_name):
 
 
 def test_pinned_decoder_has_embedding_seam_but_no_image_attention_or_gate():
-    root = Path(SOURCE_ROOT)
+    root = SOURCE
     revision = subprocess.check_output(
         ["git", "-C", str(root), "rev-parse", "HEAD"], text=True
     ).strip()

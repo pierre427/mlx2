@@ -19,7 +19,6 @@ import json
 from pathlib import Path
 import statistics
 import subprocess
-import sys
 import time
 
 ROOT = Path(__file__).resolve().parents[2]

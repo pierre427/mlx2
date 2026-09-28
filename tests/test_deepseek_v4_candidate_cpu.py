@@ -3,6 +3,7 @@
 import importlib.abc
 import subprocess
 import sys
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -14,8 +15,15 @@ from mlx2.adapters._direct_mlx_vlm import load_backend
 
 
 PATH = "~/mlx-models/DeepSeek-V4-Flash-Vision-Exp-Q4"
+ARTIFACT = Path(PATH)
+SOURCE_TREE = Path("~/Desktop/mlx-uag/worktrees/agnes-vlm-support")
+requires_artifact = pytest.mark.skipif(
+    not (ARTIFACT / "model.safetensors.index.json").is_file(),
+    reason="optional DeepSeek V4 model fixture is absent",
+)
 
 
+@requires_artifact
 def test_complete_local_index_is_inspectable_but_unserved():
     record = inspect_artifact(PATH)
     assert record["indexed_tensors"] == 73677
@@ -27,6 +35,7 @@ def test_complete_local_index_is_inspectable_but_unserved():
     assert record["implementation"] == "direct-mlx-vlm-text-candidate"
 
 
+@requires_artifact
 def test_direct_text_candidate_rejects_embedded_media_and_mtp(tmp_path):
     calls = []
     model = SimpleNamespace(model_type="deepseek_v4", config=SimpleNamespace(model_type="deepseek_v4"))
@@ -59,6 +68,7 @@ def test_direct_text_candidate_rejects_embedded_media_and_mtp(tmp_path):
     assert visible[0].shape == visible[1].shape == (len(expanded),)
 
 
+@requires_artifact
 def test_inspection_blocks_mlx_import():
     script = r'''
 import importlib.abc, sys
@@ -75,6 +85,10 @@ assert "mlx.core" not in sys.modules
     assert proc.returncode == 0, proc.stderr
 
 
+@pytest.mark.skipif(
+    not (SOURCE_TREE / "mlx_vlm/models/deepseek_v4").is_dir(),
+    reason="optional DeepSeek V4 source fixture is absent",
+)
 def test_source_revision_guard_stops_before_mlx_import():
     with pytest.raises(RuntimeError, match="revision mismatch"):
         load_backend("~/Desktop/mlx-uag/worktrees/agnes-vlm-support",

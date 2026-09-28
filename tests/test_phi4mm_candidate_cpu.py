@@ -2,6 +2,7 @@
 
 import subprocess
 import sys
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -10,6 +11,11 @@ from mlx2.adapters.phi4mm_candidate import Phi4MMCandidate, inspect_artifact
 
 
 PATH = "~/.cache/huggingface/hub/models--microsoft--Phi-4-multimodal-instruct/snapshots/93f923e1a7727d1c4f446756212d9d3e8fcc5d81"
+
+pytestmark = pytest.mark.skipif(
+    not all(((Path(PATH) / "config.json").is_file(), (Path(PATH) / "model.safetensors.index.json").is_file())),
+    reason="optional Phi-4 multimodal model fixture is absent",
+)
 
 
 def test_all_modality_components_and_sidecars_present():

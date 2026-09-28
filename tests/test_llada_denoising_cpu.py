@@ -5,6 +5,7 @@ import json
 import subprocess
 import sys
 import types
+from pathlib import Path
 
 import pytest
 
@@ -12,7 +13,12 @@ from mlx2.adapters.llada import LLADA, LLaDADenoisingAdapter, inspect_artifact, 
 from mlx2.contracts import Capability, StatePlane
 
 
-_ROOT = "~/Desktop/mlx-uag/models"
+_ROOT = Path("~/Desktop/mlx-uag/models")
+
+
+def _require_artifact(path):
+    if not all(((path / "config.json").is_file(), (path / "model.safetensors.index.json").is_file())):
+        pytest.skip(f"optional local LLaDA fixture is absent: {path}")
 
 
 @pytest.mark.parametrize("name,quantized", [
@@ -21,7 +27,9 @@ _ROOT = "~/Desktop/mlx-uag/models"
     ("LLaDA-8B-Instruct-q6", True),
 ])
 def test_local_artifacts_are_denoising_only(name, quantized):
-    record = inspect_artifact(f"{_ROOT}/{name}")
+    path = _ROOT / name
+    _require_artifact(path)
+    record = inspect_artifact(path)
     assert record["quantized"] is quantized
     assert record["execution_kind"] == "bidirectional-denoising"
     assert record["has_autoregressive_cache"] is False
@@ -33,6 +41,8 @@ def test_local_artifacts_are_denoising_only(name, quantized):
 
 
 def test_inspection_does_not_import_mlx():
+    path = _ROOT / "LLaDA-8B-Instruct-q4"
+    _require_artifact(path)
     script = r'''
 import importlib.abc, sys
 class Block(importlib.abc.MetaPathFinder):
@@ -45,7 +55,7 @@ inspect_artifact(sys.argv[1])
 assert "mlx.core" not in sys.modules
 '''
     proc = subprocess.run(
-        [sys.executable, "-c", script, f"{_ROOT}/LLaDA-8B-Instruct-q4"],
+        [sys.executable, "-c", script, str(path)],
         capture_output=True, text=True,
     )
     assert proc.returncode == 0, proc.stderr
@@ -168,8 +178,9 @@ def test_direct_route_stops_client_output_before_canvas_fill(monkeypatch):
 
 
 def test_bad_topology_rejected_before_tensor_load(tmp_path):
-    source = f"{_ROOT}/LLaDA-8B-Instruct-q4"
-    config = json.loads(open(f"{source}/config.json").read())
+    source = _ROOT / "LLaDA-8B-Instruct-q4"
+    _require_artifact(source)
+    config = json.loads((source / "config.json").read_text())
     config["use_cache"] = True
     (tmp_path / "config.json").write_text(json.dumps(config))
     with pytest.raises(ValueError, match="bidirectional topology"):

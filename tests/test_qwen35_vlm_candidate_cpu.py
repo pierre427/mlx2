@@ -22,8 +22,22 @@ from mlx2.adapters.qwen35_vlm_candidate import Qwen35VLMAdapter, inspect_artifac
 
 ROOT = Path("~/mlx-models")
 CACHE = Path("~/.cache/huggingface/hub")
+VISION_ARTIFACTS = (
+    CACHE / "models--mlx-community--Qwen3.5-4B-MLX-4bit/snapshots/32f3e8ecf65426fc3306969496342d504bfa13f3",
+    CACHE / "models--mlx-community--Qwen3.5-4B-OptiQ-4bit/snapshots/6cb5bdfd0bf15f484881fb9f1ab6d7c840fddde9",
+    CACHE / "models--mlx-community--Qwen3.5-9B-4bit/snapshots/8b2b98c00a6b4d291155e4890773ca8f769aee53",
+    ROOT / "Qwen3.8-27B-MLX-4bit",
+    ROOT / "Qwen3.6-35B-A3B-uncensored-heretic-Native-MTP-Preserved-oQ4e-mtp",
+)
 
 
+@pytest.mark.skipif(
+    not all(
+        (path / "config.json").is_file() and (path / "model.safetensors.index.json").is_file()
+        for path in VISION_ARTIFACTS
+    ),
+    reason="one or more optional Qwen vision model fixtures are absent",
+)
 def test_local_vision_artifacts_and_mtp_are_distinct():
     small = inspect_artifact(CACHE / "models--mlx-community--Qwen3.5-4B-MLX-4bit/snapshots/32f3e8ecf65426fc3306969496342d504bfa13f3")
     optiq = inspect_artifact(CACHE / "models--mlx-community--Qwen3.5-4B-OptiQ-4bit/snapshots/6cb5bdfd0bf15f484881fb9f1ab6d7c840fddde9")

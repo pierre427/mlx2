@@ -20,7 +20,6 @@ import json
 import os
 from pathlib import Path
 import random
-import statistics
 import subprocess
 import sys
 import time
@@ -508,7 +507,9 @@ def _run(args) -> dict:
             }
         direct_arms = {
             f"tile{tile}": (
-                lambda tile=tile: launch(tile, hidden, weight, scales, biases, indices, scores)
+                lambda tile=tile, hidden=hidden, indices=indices, scores=scores: launch(
+                    tile, hidden, weight, scales, biases, indices, scores
+                )
             )
             for tile in TILES
         }
@@ -517,7 +518,7 @@ def _run(args) -> dict:
         )
         compiled_arms = {
             f"tile{tile}": (
-                lambda tile=tile: compiled[tile](
+                lambda tile=tile, hidden=hidden, indices=indices, scores=scores: compiled[tile](
                     hidden, weight, scales, biases, indices, scores
                 )
             )

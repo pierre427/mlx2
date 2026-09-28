@@ -102,7 +102,7 @@ inline float rsqrt_refine(float x) {
         case = {'rows': rows, 'distribution': 'normal sd=1.7, weight=1+normal sd=.05',
                 'accuracy': accuracy(x, weight)}
         case['timing'] = time_variants(
-            {arm: lambda arm=arm: launch(arm, x, weight) for arm in kernels},
+            {arm: lambda arm=arm, x=x: launch(arm, x, weight) for arm in kernels},
             rounds=args.rounds, inner=3, seed=args.seed + rows)
         case['compiled_chain_calls_per_eval'] = args.chain
         case['compiled_chain_parity'] = {}
@@ -112,7 +112,7 @@ inline float rsqrt_refine(float x) {
             assert parity['nonfinite_candidate'] == parity['nonfinite_reference'] == 0
             case['compiled_chain_parity'][arm] = parity
         case['compiled_chain_timing'] = time_variants(
-            {arm: lambda arm=arm: compiled[arm](x, weight) for arm in kernels},
+            {arm: lambda arm=arm, x=x: compiled[arm](x, weight) for arm in kernels},
             rounds=args.rounds, inner=3, seed=args.seed + rows + 1)
         result['timing_cases'].append(case)
         save()

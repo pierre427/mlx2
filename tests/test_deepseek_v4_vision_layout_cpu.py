@@ -21,6 +21,12 @@ from mlx2.adapters.deepseek_v4_vision_weights import (
     materialize_vision_weights, plan_vision_weights,
 )
 
+MODEL = Path("~/mlx-models/DeepSeek-V4-Flash-Vision-Exp-Q4")
+requires_model = pytest.mark.skipif(
+    not (MODEL / "model.safetensors.index.json").is_file(),
+    reason="optional DeepSeek V4 model fixture is absent",
+)
+
 
 @pytest.mark.parametrize("dimensions", [(512, 512), (1200, 320), (32, 32), (64, 1024)])
 def test_image_prefill_budget_and_patch_geometry(tmp_path, dimensions):
@@ -76,13 +82,13 @@ assert "mlx.core" not in sys.modules
     assert result.returncode == 0, result.stderr
 
 
+@requires_model
 def test_candidate_vit_aligner_names_cover_all_indexed_blocks():
     path = Path(__file__).resolve().parents[1]
     tree = ast.parse((path / "src/mlx2/runtime/models/deepseek_v4_vision.py").read_text())
     classes = {node.name for node in tree.body if isinstance(node, ast.ClassDef)}
     assert {"VisionTower", "Aligner", "VisionComponents", "Block", "Attention"} <= classes
-    index = json.loads((Path("~/mlx-models/DeepSeek-V4-Flash-Vision-Exp-Q4")
-                        / "model.safetensors.index.json").read_text())["weight_map"]
+    index = json.loads((MODEL / "model.safetensors.index.json").read_text())["weight_map"]
     for layer in range(32):
         prefix = f"vision.blocks.{layer}."
         for part in ("norm1.weight", "norm2.weight", "attn.wqkv.weight",
@@ -120,8 +126,9 @@ def test_fake_aligner_output_merges_before_hyper_connection_and_visibility():
         merge_image_embeddings(hidden, [image], [features[:3]], sentinels)
 
 
+@requires_model
 def test_mixed_q4_vision_weight_plan_and_fake_strict_materialization():
-    plan = plan_vision_weights("~/mlx-models/DeepSeek-V4-Flash-Vision-Exp-Q4")
+    plan = plan_vision_weights(MODEL)
     assert len(plan.tensor_shards) == 529
     assert len(plan.quantized_modules) == 131
     assert {spec["mode"] for spec in plan.quantized_modules.values()} == {"affine"}

@@ -43,6 +43,8 @@ def test_local_config_matches_glm52_topology_but_fragment_fails_closed():
 
 
 def test_shared_indexer_and_moe_schedule_fail_before_weights(tmp_path):
+    if not (FRAGMENT / "config.json").is_file():
+        pytest.skip("optional local GLM fragment is absent")
     config = json.loads((FRAGMENT / "config.json").read_text())
     config["indexer_types"][6] = "shared"
     (tmp_path / "config.json").write_text(json.dumps(config))

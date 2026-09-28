@@ -2,8 +2,10 @@
 
 import subprocess
 import sys
+from pathlib import Path
 
 import numpy as np
+import pytest
 
 from mlx2.adapters.nemotron3_diarization import (
     STREAMING_PROFILES, extract_features, inspect_artifact, segments_from_logits,
@@ -11,6 +13,11 @@ from mlx2.adapters.nemotron3_diarization import (
 
 
 PATH = "/Volumes/T7/models/Nemotron-3-Diarization"
+
+pytestmark = pytest.mark.skipif(
+    not all(((Path(PATH) / "config.json").is_file(), (Path(PATH) / "processor_config.json").is_file())),
+    reason="optional Nemotron diarization model fixture is absent",
+)
 
 
 def test_artifact_profiles_frontend_and_overlap():
