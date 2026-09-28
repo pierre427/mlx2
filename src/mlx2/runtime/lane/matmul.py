@@ -31,8 +31,9 @@ The weight format only changes how ``q`` reaches the tensor units:
 This is not bitwise equal to MLX's own kernels.  It defines a numerical law,
 and a caller that needs serial/verify equality must use it for one-row decode
 as well.  The q4 structure (fragment mapping, (s, b) pairing, slice
-reduction) is adapted from TensorFold ``bb4b4a35`` ``lane_qmm`` (MIT); see
-provenance/lane-matmul.json.
+reduction) is adapted from TensorFold ``bb4b4a35`` ``lane_qmm``
+(MIT License, Copyright (c) 2026 TensorFold contributors; full notice in the
+repository's NOTICE file; provenance in provenance/lane-matmul.json).
 """
 
 from __future__ import annotations
