@@ -1,0 +1,42 @@
+{
+  "component": "Qwen4 QSA stage-one keys-stationary scorer and one-workgroup selector candidates",
+  "source_repository": "halo-box/strix-llama.cpp",
+  "source_pull_request": 91,
+  "source_revision": "85d8480c60e846b3d5add8ffaff23b4b37e24c9e",
+  "source_paths": [
+    "ggml/src/ggml-cuda/mmb.cu:mmb_idx_score_kernel",
+    "ggml/src/ggml-cuda/mmb.cu:ggml_cuda_mmb_idx_score",
+    "ggml/src/ggml-cuda/top-k.cu:top_k_wg_kernel"
+  ],
+  "license": "MIT",
+  "license_basis": "Source repository LICENSE at the recorded revision",
+  "destination_paths": [
+    "src/mlx2/runtime/models/qwen4_qsa_stage1.py",
+    "src/mlx2/runtime/models/qwen4_exp.py",
+    "src/mlx2/adapters/flash_next.py",
+    "scripts/qualify_qsa_stage1_pr91.py",
+    "tests/test_qwen4_qsa_stage1_candidate.py",
+    "tests/test_serving_contract.py"
+  ],
+  "modifications": [
+    "Reimplemented the CUDA/HIP key-stationary scheduling idea as a separate Metal Performance Primitives scorer: one workgroup retains a 32-key tile in threadgroup memory while walking all 16-query tiles.",
+    "Kept mlx2's existing FP16/BF16 inputs, 16x32x16 cooperative-matrix accumulation order, ReLU and four-head epilogue, exact-band repair, and exact radix selector; no upstream CUDA/HIP kernel code was copied.",
+    "Added an independent default-off MLX_QWEN4_QSA_STAGE1_KEYS_STATIONARY gate and minimum-query threshold. Unsupported or unselected geometries retain the existing MPP or MLX scorer.",
+    "Reimplemented the one-workgroup selector idea with a 12-bit threshold histogram, bounded candidate compaction, two 10-bit refinement passes, overflow rescans, mlx2's larger-block-ID tie rule, and ascending output canonicalization.",
+    "Added an independent default-off MLX_QWEN4_QSA_STAGE1_ONEPASS_TOPK gate and minimum-block threshold; the existing exact eight-pass radix selector remains the default and fallback.",
+    "Added bounded stage-one scorer and selector receipts to FlashNext diagnostics so qualification can prove actual candidate engagement.",
+    "Kept both candidates default-off after qualification. The keys-stationary scorer did not meet the benefit gate; the one-workgroup selector is rejected for performance."
+  ],
+  "validation": [
+    "A Python harness set mx.set_default_device(mx.cpu) before invoking the focused candidate tests (9 passed).",
+    "python -m ruff check --no-cache tests/test_qwen4_qsa_stage1_candidate.py src/mlx2/runtime/models/qwen4_qsa_stage1.py (passed).",
+    "Fatal Python lint on all changed Python files, git diff --check, JSON parsing, and Python compileall passed.",
+    "On Apple M5 Max with MLX 0.32.2.dev20260919+39400a0d4, the Metal qualification covered FP16 and BF16 scorer parity, distinct scores, ties, oversized threshold buckets, partial validity, padding, exact-band repair, and full-route parity.",
+    "The final benchmark uses five warmups and fifty rotating interleaved repetitions at 65,024 tokens with 64 and 512 query rows and at 98,304 tokens with 64 query rows."
+  ],
+  "qualification": {
+    "receipt": "qualification/runs/qsa-stage1-pr91-20260928/qualification.json",
+    "keys_stationary": "exact but not qualified for benefit; median 2.23 percent scorer gain with a 1.62 to 5.15 percent range, below the 3 percent component gate; median full-route gain 0.70 percent with a -0.44 to +0.89 percent range, below the 3 percent route gate; unselected and not observed-used in production",
+    "onepass_topk": "exact but rejected; selector 3.61 to 4.76 times the radix cost and full route 2.03 to 2.77 times baseline; unselected and not observed-used in production"
+  }
+}

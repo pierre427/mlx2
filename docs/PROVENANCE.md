@@ -765,3 +765,32 @@ checks do not qualify Muse GPU execution or select its external route.
     lookahead, identical verify-sync sites, and BatchGenerator log counters.
   - GPU: `qualification/runs/mtp-confidence-20260919/` (the scheduler no-go,
     the measured cycle tables, the acceptance logs and the trained heads).
+
+## 2026-09-28 — Qwen4 QSA stage-one scorer and selector candidates
+
+- Source: `halo-box/strix-llama.cpp` PR 91 at revision
+  `85d8480c60e846b3d5add8ffaff23b4b37e24c9e`, MIT, path
+  `ggml/src/ggml-cuda/mmb.cu` (`mmb_idx_score_kernel` and its dispatch) and
+  `ggml/src/ggml-cuda/top-k.cu` (`top_k_wg_kernel`).
+- mlx2 reimplements the scheduling idea in Metal Performance Primitives: a
+  workgroup keeps one pooled-key tile in threadgroup memory while walking the
+  query tiles. It also adapts the one-workgroup top-k design with bounded
+  candidate compaction and exact overflow rescans. The existing accumulation
+  order, exact-band repair, exact radix selector, and ordinary scorer remain
+  intact as defaults and fallbacks.
+- The candidates remain independently default-off and report configured and
+  observed producer state through Flash-Next diagnostics. Apple M5 Max GPU
+  qualification found both paths exact. The keys-stationary scorer is
+  not qualified for benefit (median 2.23% faster; 1.62–5.15% across the tested
+  geometries, below the 3% component gate), and its median full stage-one
+  route gain was only 0.70% (−0.44% to +0.89%), below the 3% route gate. It
+  remains default-off and unselected. The
+  one-workgroup selector was 3.61–4.76x the radix-selector cost, and the full
+  route was 2.03–2.77x baseline; the candidate is rejected.
+  Neither path is selected or observed-used in production.
+- The revision-bound receipt, including dual-lock evidence, nonzero mechanism
+  counters, thermal brackets, exactness cases, and 50-repetition interleaved
+  timings, is in
+  `qualification/runs/qsa-stage1-pr91-20260928/qualification.json`.
+- Exact paths and modifications are recorded in
+  `provenance/qsa-stage1-keys-stationary-2026-09-28.json`.
