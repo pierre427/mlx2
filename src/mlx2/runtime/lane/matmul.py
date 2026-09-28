@@ -12,7 +12,8 @@ output column), with ``q`` the unsigned integer weights:
     P[m, n, g] = x[m, g-block] . q[n, g-block]        tensor units, fp32 result
     y[m, n]    = sum over g, in order, of  s[n, g] * P + b[n, g] * xs[m, g]
 
-``xs[m, g]`` is the fp32 sum of the group's inputs, added sequentially.  The
+``xs[m, g]`` is the fp32 sum of the group's inputs, added sequentially inside
+the same kernel (one launch per projection).  The
 K groups are split into ``SK`` slices chosen from the weight shape and format
 only, never from the row count, and the slices are added in slice order.  Every
 row therefore gets the same bits whether it is computed alone or with others.
@@ -54,17 +55,6 @@ _TYPES = {mx.bfloat16: "bfloat", mx.float16: "half"}
 _HEADER = r"""
 #include <MetalPerformancePrimitives/MetalPerformancePrimitives.h>
 using namespace mpp::tensor_ops;
-"""
-
-# fp32 group sums of x, added in index order.
-_XSUM = r"""
-  const int M = mdims[0], MP = mdims[1];
-  const uint m = thread_position_in_grid.y;
-  const uint g = thread_position_in_grid.x;
-  if (g >= K / GS || int(m) >= MP) return;
-  float acc = 0.0f;
-  if (int(m) < M) for (int i = 0; i < GS; i++) acc += float(X[m * K + g * GS + i]);
-  XS[g * MP + m] = acc;
 """
 
 _MAIN = r"""
@@ -135,10 +125,27 @@ _SB_LOAD = r"""
     }
 """
 
+# The group sums of x are computed in the kernel (no second launch).  The four
+# lanes that share fragment row fm (lane bits 0 and 3) each add a quarter of
+# the group in index order, then combine as (q0 + q1) + (q2 + q3) with two
+# shuffles.  The order is fixed, independent of the row count.
 _ACCUM_AFFINE = r"""
     for (int t = 0; t < TMR; t++) {
-      const float xs0 = XS[g * MP + rb + t * 16 + fm];
-      const float xs1 = XS[g * MP + rb + t * 16 + fm + 8];
+      const int m0 = rb + t * 16 + fm;
+      const int quarter = (((lane >> 3) & 1) << 1) | (lane & 1);
+      float xs0 = 0.0f, xs1 = 0.0f;
+      if (m0 < M) {
+        const device XT* xp = (const device XT*)X + (int64_t)m0 * K + g * GS + quarter * (GS / 4);
+        for (int i = 0; i < GS / 4; i++) xs0 += float(xp[i]);
+      }
+      if (m0 + 8 < M) {
+        const device XT* xp = (const device XT*)X + (int64_t)(m0 + 8) * K + g * GS + quarter * (GS / 4);
+        for (int i = 0; i < GS / 4; i++) xs1 += float(xp[i]);
+      }
+      xs0 += simd_shuffle_xor(xs0, ushort(1));
+      xs1 += simd_shuffle_xor(xs1, ushort(1));
+      xs0 += simd_shuffle_xor(xs0, ushort(8));
+      xs1 += simd_shuffle_xor(xs1, ushort(8));
       for (int f = 0; f < NF; f++)
         for (int r = 0; r < 2; r++)
           for (int j = 0; j < 4; j++) {
@@ -343,7 +350,6 @@ def main_source(bits: int, group_size: int) -> str:
 
 _KERNELS: dict[tuple, Any] = {}
 _MDIMS: dict[tuple[int, int], Any] = {}
-_XS_CACHE: dict[tuple[int, int], tuple[Any, Any]] = {}
 
 
 def _named(base: str, source: str) -> str:
@@ -361,20 +367,8 @@ def _kernel(bits: int, group_size: int, xt: str, wt: str, st: str) -> Any:
                   f"typedef {st} ST;\nconstexpr constant int BITS = {bits};\n")
         _KERNELS[key] = mx.fast.metal_kernel(
             name=_named(f"q{bits}g{group_size}_{xt}_{wt}_{st}", header + source),
-            input_names=["X", "XS", "W", "SBt", "mdims"], output_names=["Y"],
+            input_names=["X", "W", "SBt", "mdims"], output_names=["Y"],
             source=source, header=header, ensure_row_contiguous=True,
-        )
-    return _KERNELS[key]
-
-
-def _xsum_kernel(xt: str) -> Any:
-    key = ("xsum", xt)
-    if key not in _KERNELS:
-        header = _HEADER + f"typedef {xt} XT;\n"
-        _KERNELS[key] = mx.fast.metal_kernel(
-            name=_named(f"xsum_{xt}", header + _XSUM),
-            input_names=["X", "mdims"], output_names=["XS"],
-            source=_XSUM, header=header,
         )
     return _KERNELS[key]
 
@@ -384,24 +378,6 @@ def _mdims(m: int, mp: int):
     if key not in _MDIMS:
         _MDIMS[key] = mx.array(key, dtype=mx.int32)
     return _MDIMS[key]
-
-
-def _group_sums(x2, k: int, group_size: int, mdims, mp: int, xt: str):
-    """Group sums of x, shared by projections that read the same input."""
-    key = (id(x2), group_size)
-    hit = _XS_CACHE.get(key)
-    if hit is not None and hit[0] is x2:
-        return hit[1]
-    groups = k // group_size
-    xs = _xsum_kernel(xt)(
-        inputs=[x2, mdims], template=[("K", k), ("GS", group_size)],
-        grid=(groups, mp, 1), threadgroup=(min(groups, 256), 1, 1),
-        output_shapes=[(groups, mp)], output_dtypes=[mx.float32],
-    )[0]
-    _XS_CACHE[key] = (x2, xs)
-    while len(_XS_CACHE) > 8:
-        _XS_CACHE.pop(next(iter(_XS_CACHE)))
-    return xs
 
 
 def lane_matmul(x, lw: LaneWeights):
@@ -423,15 +399,13 @@ def lane_matmul(x, lw: LaneWeights):
     if lw.bits == UNQUANTIZED_BITS:
         wt = _TYPES[lw.weight.dtype]
         st = "bfloat"
-        xs = mdims                       # unused by the plain accumulator
-        sbt = mdims
+        sbt = mdims                      # unused by the plain accumulator
     else:
         wt = "uchar"
         st = _TYPES[lw.scale_bias.dtype]
-        xs = _group_sums(x2, k, lw.group_size, mdims, mp, xt)
         sbt = lw.scale_bias
     y = _kernel(lw.bits, lw.group_size, xt, wt, st)(
-        inputs=[x2, xs, lw.weight, sbt, mdims],
+        inputs=[x2, lw.weight, sbt, mdims],
         template=[("TMR", block // 16), ("N", lw.n), ("K", k), ("NT", NT),
                   ("SK", lw.split_k), ("GS", lw.group_size)],
         grid=(-(-lw.n // NT) * 32 * lw.split_k, -(-mp // block), 1),

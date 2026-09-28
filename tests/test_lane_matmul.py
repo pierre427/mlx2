@@ -125,6 +125,8 @@ def test_install_covers_formats_falls_back_on_cpu_and_uninstalls():
     x = mx.random.normal((3, 128), key=mx.random.key(3)).astype(mx.bfloat16)
     before = [model.q4(x), model.q5(x), model.dense(x)]
     receipt = lane.install(model, max_rows=16)
+    assert receipt["law_id"] == "lane-matmul-v1+stock-below-4+grouped"
+    assert receipt["min_rows"] == 4 and receipt["groups"] == {}
     assert receipt["covered"] == {"affine-q4-g64": 1, "affine-q5-g32": 1, "unquantized": 1}
     assert sum(receipt["refused"].values()) == 1
     assert receipt["available"] is False
@@ -133,7 +135,9 @@ def test_install_covers_formats_falls_back_on_cpu_and_uninstalls():
     after = [model.q4(x), model.q5(x), model.dense(x)]
     for old, new in zip(before, after, strict=True):
         assert mx.array_equal(old, new)          # CPU: stock arithmetic unchanged
-    assert lane.install(model)["covered"] == {"already": 3}
+    exact = lane.install(model, min_rows=1, groups=())
+    assert exact["covered"] == {"already": 3} and exact["law_id"] == lane.LAW_ID
+    assert model.q4._lane_min_rows == 1
     assert lane.uninstall(model) == 3
     assert type(model.q4) is nn.QuantizedLinear and type(model.dense) is nn.Linear
 
@@ -146,3 +150,60 @@ def test_lane_matmul_refuses_bad_calls():
         lane.lane_matmul(mx.zeros((lane.MAX_ROWS + 1, 128), dtype=mx.bfloat16), lw)
     with pytest.raises(lane.LaneUnsupported, match="bf16 or fp16"):
         lane.lane_matmul(mx.zeros((1, 128), dtype=mx.float32), lw)
+
+
+def test_install_rejects_an_empty_row_window():
+    with pytest.raises(ValueError, match="min_rows"):
+        lane.install(_Tiny(), min_rows=8, max_rows=4)
+
+
+class _Attention(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.q_proj = _quantized(128, 64, 4, 64, seed=4)
+        self.k_proj = _quantized(128, 32, 4, 64, seed=5)
+        self.v_proj = _quantized(128, 32, 5, 64, seed=6)     # other format: not stacked
+        self.o_proj = _quantized(64, 128, 4, 64, seed=7)     # not a sibling
+
+
+def test_grouping_stacks_same_format_siblings_as_views(monkeypatch):
+    from mlx2.runtime.lane import installer as inst
+
+    model = _Attention()
+    x = mx.random.normal((5, 128), key=mx.random.key(8)).astype(mx.bfloat16)
+    before = {name: getattr(model, name)(x) for name in ("q_proj", "k_proj", "v_proj")}
+    receipt = lane.install(model, min_rows=1)
+    assert receipt["groups"] == {"affine-q4-g64x2": 1}
+    group = inst._GROUP_OF[id(model.q_proj)]
+    assert inst._GROUP_OF[id(model.k_proj)] is group and id(model.v_proj) not in inst._GROUP_OF
+    assert group.lw.n == 96 and group.columns[id(model.k_proj)] == (64, 96)
+    # Module weights are row views of the stacked buffer, with unchanged values.
+    assert mx.array_equal(model.k_proj.weight, group.lw.weight[64:96])
+
+    calls = []
+
+    def reference(inp, lw):
+        calls.append(lw.n)
+        w = mx.dequantize(lw.weight, lw.scale_bias[..., 0].T, lw.scale_bias[..., 1].T,
+                          group_size=lw.group_size, bits=lw.bits)
+        return (inp.astype(mx.float32) @ w.T.astype(mx.float32)).astype(inp.dtype)
+
+    monkeypatch.setattr(inst, "lane_matmul", reference)
+    monkeypatch.setattr(inst, "available", lambda: True)
+    q, k = model.q_proj(x), model.k_proj(x)
+    assert calls == [96]                                   # one launch for q and k
+    assert model.k_proj(x.astype(mx.bfloat16)).shape == (5, 32)
+    assert calls == [96, 96]                               # a new input recomputes
+    stacked = reference(x, group.lw)
+    calls.pop()
+    assert mx.array_equal(q, stacked[:, :64]) and mx.array_equal(k, stacked[:, 64:96])
+    # Stock arithmetic through the view-backed weights is unchanged.
+    lane.set_enabled(False)
+    try:
+        assert all(mx.array_equal(getattr(model, n)(x), before[n]) for n in ("q_proj", "k_proj"))
+    finally:
+        lane.set_enabled(True)
+    model.v_proj(x)
+    assert calls[-1] == 32                                 # ungrouped sibling alone
+    lane.uninstall(model)
+    assert not inst._GROUP_OF
