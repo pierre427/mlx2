@@ -41,6 +41,79 @@ def _bump(stats, key, amount=1):
     stats[key] = min(_COUNTER_MAX, int(stats.get(key, 0)) + int(amount))
 
 
+# Default-off tree15 round-cost experiment gates (TensorFold parity bridge).
+# Each maps to its environment spelling and the accepted value that enables it.
+_TREE_GATES = {
+    "cache_executor": ("MLX2_TENSORFOLD_CACHE_EXECUTOR", "1"),
+    "codebook_cache": ("MLX2_DFLASH_TREE_CODEBOOK_CACHE", "1"),
+    "batched_laws": ("MLX2_TREE_BATCHED_TARGET_LAWS", "1"),
+    "logprobs_on_request": ("MLX2_TREE_LOGPROBS_ON_REQUEST", "1"),
+    "single_fence": ("MLX2_TREE_SINGLE_FENCE", "1"),
+    "pipeline_draft": ("MLX2_TREE_PIPELINE_DRAFT", "1"),
+}
+# Bounded integer engagement counters each enabled gate publishes.
+_TREE_GATE_COUNTERS = {
+    "cache_executor": (
+        "external_tensorfold_executor_validations",
+        "external_tensorfold_executor_cache_hits",
+    ),
+    "codebook_cache": ("external_tree_codebook_cache_hits",),
+    "batched_laws": (
+        "external_tree_batched_law_rounds",
+        "external_tree_row_law_rounds",
+        "external_tree_sparse_law_rows",
+    ),
+    "logprobs_on_request": ("external_tree_logprob_rows_skipped",),
+    "single_fence": ("external_tree_single_fence_rounds",),
+    "pipeline_draft": (
+        "external_tree_pipelined_drafts",
+        "external_tree_pipeline_discards",
+    ),
+}
+
+
+def _tree_gates(topology, target_execution):
+    """Read the tree experiment gates; fail closed on a gate the route lacks."""
+
+    gates = {}
+    for gate, (name, enabled) in _TREE_GATES.items():
+        value = os.environ.get(name, "")
+        if value not in ("", "0", enabled):
+            raise ValueError(f"{name} must be unset, 0 or {enabled}")
+        gates[gate] = value == enabled
+    if any(gates.values()) and topology != "tree15":
+        raise ValueError("tree experiment gates require MLX2_DFLASH_TOPOLOGY=tree15")
+    if gates["cache_executor"] and target_execution != "tensorfold":
+        raise ValueError(
+            "MLX2_TENSORFOLD_CACHE_EXECUTOR requires MLX2_QWEN_TARGET_EXECUTION=tensorfold"
+        )
+    if gates["single_fence"] and not gates["batched_laws"]:
+        raise ValueError(
+            "MLX2_TREE_SINGLE_FENCE requires MLX2_TREE_BATCHED_TARGET_LAWS=1"
+        )
+    return gates
+
+
+# Laws with at most this many top-k survivors are read back sparsely.
+_SPARSE_LAW_LIMIT = 256
+
+
+class _PhaseClock:
+    """Accumulate host time between existing sync points (round timing only)."""
+
+    __slots__ = ("owner", "last")
+
+    def __init__(self, owner):
+        self.owner = owner
+        self.last = time.perf_counter()
+
+    def __call__(self, phase):
+        self.last = self.owner._mark(phase, self.last)
+
+    def skip(self):
+        self.last = time.perf_counter()
+
+
 def _context_pairing(history, following, length):
     """Return only the needed history suffix plus its following token."""
     if not length:
@@ -167,6 +240,19 @@ class CompactDraftRow:
 
 
 @dataclass
+class TreeDraftRow:
+    """One best-first proposal tree; parents index ``tokens`` and use -1 as root."""
+
+    tokens: list
+    parents: list
+    width: int = 1
+
+    @property
+    def lengths(self):
+        return (len(self.tokens),)
+
+
+@dataclass
 class RoundDecision:
     """Verify outcome for one row, before commit.
 
@@ -183,6 +269,7 @@ class RoundDecision:
     relaxed: int = 0
     response_logprobs: object = None
     verify_window: object = None
+    commit_rows: object = None
 
 
 def _block_row(block, vocab):
@@ -193,9 +280,35 @@ def _block_row(block, vocab):
         return list(block.tokens), list(block.laws)
     if isinstance(block, CompactDraftRow):
         return list(block.tokens), block
+    if isinstance(block, TreeDraftRow):
+        return list(block.tokens), None
     length = int(block.lengths[0])
     tokens = [int(t) for t in np.asarray(block.tokens)[0, :length].tolist()]
     return tokens, (None if vocab is None else block.dense_laws(vocab)[0])
+
+
+class _ReferenceTreeTransaction:
+    """Commit a serial-tree accepted path through the ordinary target forward."""
+
+    def __init__(self, owner, cache, inputs):
+        self.owner = owner
+        self.cache = cache
+        self.inputs = list(inputs)
+        self.closed = False
+
+    def commit_paths(self, paths):
+        if self.closed or len(paths) != 1 or not paths[0]:
+            raise RuntimeError("reference tree commit requires one nonempty path")
+        tokens = [self.inputs[index] for index in paths[0]]
+        logits, features = self.owner.model.forward_with_taps(
+            self.owner.mx.array([tokens]), self.cache, self.owner.layers
+        )
+        self.owner.mx.eval(logits, features)
+        self.closed = True
+        return [self.cache]
+
+    def abort(self):
+        self.closed = True
 
 
 class ExternalDraftBatchGenerator:
@@ -220,6 +333,25 @@ class ExternalDraftBatchGenerator:
         if pairwise_selection not in ("host", "batched"):
             raise ValueError("pairwise_selection must be 'host' or 'batched'")
         self.pairwise_selection = pairwise_selection
+        self.draft_topology = os.environ.get(
+            "MLX2_DFLASH_TOPOLOGY", "chain"
+        )
+        self.target_execution = os.environ.get(
+            "MLX2_QWEN_TARGET_EXECUTION", "reference"
+        )
+        if self.draft_topology not in ("chain", "tree15"):
+            raise ValueError("MLX2_DFLASH_TOPOLOGY must be chain or tree15")
+        if self.target_execution not in ("reference", "tensorfold"):
+            raise ValueError(
+                "MLX2_QWEN_TARGET_EXECUTION must be reference or tensorfold"
+            )
+        if self.target_execution == "tensorfold" and not os.environ.get(
+            "MLX2_TENSORFOLD_SOURCE"
+        ):
+            raise ValueError(
+                "TensorFold target execution requires MLX2_TENSORFOLD_SOURCE"
+            )
+        self.tree_gates = _tree_gates(self.draft_topology, self.target_execution)
         # "one" (default, unchanged): one ready token per lane per poll.  A
         # lane still draining a multi-token round sits out the next cohort,
         # so at B>1 a lane that accepted more waits one round of the others
@@ -245,6 +377,21 @@ class ExternalDraftBatchGenerator:
         if pairwise_selection == "batched":
             # Default-off receipts keep their existing key set.
             self.scheduler_stats.update(external_pairwise_selection_groups=0, external_pairwise_selection_lanes=0)
+        if self.draft_topology == "tree15":
+            self.scheduler_stats.update(
+                external_tree_rounds=0,
+                external_tree_nodes=0,
+                external_tree_accepted_edges=0,
+            )
+        if self.target_execution == "tensorfold":
+            self.scheduler_stats["external_tensorfold_target_rounds"] = 0
+        for gate, counters in _TREE_GATE_COUNTERS.items():
+            if self.tree_gates[gate]:
+                self.scheduler_stats.update(dict.fromkeys(counters, 0))
+        self._tree_clock = None
+        # uid -> next round's lattice queued after this round's commit
+        # (MLX2_TREE_PIPELINE_DRAFT). Never part of a lane or its snapshot.
+        self._prelaunched = {}
         self._open = False
         # Host-time attribution for one external round.  Default off: a
         # perf_counter in this path is cheap but the block exists only for
@@ -508,10 +655,29 @@ class ExternalDraftBatchGenerator:
         draws the sequential sampler makes, so RNG state and receipts match.
         """
         count = arguments[3]
+        forbidden = []
+        for lane in lanes:
+            row = []
+            for position in range(count):
+                ids = set()
+                length = len(lane.history) + 1 + position
+                for processor in lane.processors:
+                    rule = getattr(
+                        processor, "forbidden_token_ids_at_length", None
+                    )
+                    if not callable(rule):
+                        raise TypeError(
+                            "batched pairwise selection requires compatible "
+                            "forbidden-token processor metadata"
+                        )
+                    ids.update(int(token) for token in rule(length))
+                row.append(tuple(sorted(ids)))
+            forbidden.append(row)
         block = self.draft.propose_block(
             *arguments[:4],
             [[lane.rng.uniform() for _ in range(count)] for lane in lanes],
             arguments[5],
+            forbidden_token_ids=forbidden,
         )
         _bump(self.scheduler_stats, "external_pairwise_selection_groups")
         _bump(self.scheduler_stats, "external_pairwise_selection_lanes", len(lanes))
@@ -646,7 +812,10 @@ class ExternalDraftBatchGenerator:
         A zero-count round only appends pending draft context so the draft
         plane stays paired with the target boundary.
         """
-        requested_count = min(self.num_draft, min(l.maximum-l.generated-1 for l in cohort))
+        requested_count = min(
+            15 if self.draft_topology == "tree15" else self.num_draft,
+            min(l.maximum-l.generated-1 for l in cohort),
+        )
         if any(l.ordinary for l in cohort): requested_count = 0
         blocks = [None]*len(cohort)
         if not requested_count:
@@ -701,13 +870,54 @@ class ExternalDraftBatchGenerator:
                 except (TypeError, ValueError):
                     pass
                 extra = {"context_tokens": pairing} if self.pair_context_tokens else {}
-                if (
+                if self.draft_topology == "tree15":
+                    if self.pair_context_tokens:
+                        raise ValueError("tree15 is unavailable for paired-context drafters")
+                    forbidden = [self._tree_forbidden(lane) for lane in lanes]
+                    trees = None
+                    if len(lanes) == 1:
+                        trees = self._adopt_prelaunched(
+                            lanes[0], requested_count, forbidden[0]
+                        )
+                    if trees is None:
+                        tree_options = self._tree_options(count_hits=True)
+                        if self._tree_clock is not None:
+                            self._tree_clock("tree_draft_setup")
+                            tree_options["mark"] = self._tree_clock
+                        trees = self.draft.propose_tree(
+                            *arguments[:4], forbidden_token_ids=forbidden, **tree_options
+                        )
+                    tokens = [tree[0] for tree in trees]
+                    q = [
+                        TreeDraftRow(tree[0], tree[1], len(lanes))
+                        for tree in trees
+                    ]
+                else:
+                    trees = None
+                pairwise_processors = all(
+                    all(
+                        callable(
+                            getattr(
+                                processor,
+                                "forbidden_token_ids_at_length",
+                                None,
+                            )
+                        )
+                        for processor in lane.processors
+                    )
+                    for lane in lanes
+                )
+                if trees is not None:
+                    pass
+                elif (
                     self.pairwise_selection == "batched"
-                    and not any(processors)
+                    and pairwise_processors
                     and not self.pair_context_tokens
                 ):
-                    # Processor rows keep the sequential host path; so do
-                    # pairing (EAGLE) drafters, which have no pair table.
+                    # Stateless forbidden-token processors can mask the pair
+                    # table without a per-position host read. Other processor
+                    # kinds and pairing (EAGLE) drafters keep the sequential
+                    # path.
                     tokens, q = self._propose_pairwise(lanes, arguments)
                 elif any(processors) and supports_processors:
                     tokens,q = self.draft.draft_distributions(
@@ -739,7 +949,7 @@ class ExternalDraftBatchGenerator:
             self.scheduler_stats["draft_max_width"] = max(self.scheduler_stats["draft_max_width"],len(lanes))
             for j,row in enumerate(indices):
                 blocks[row] = (
-                    q[j] if isinstance(q[j], CompactDraftRow)
+                    q[j] if isinstance(q[j], (CompactDraftRow, TreeDraftRow))
                     else HostDraftRow(tokens[j], q[j], len(lanes))
                 )
         return blocks
@@ -804,6 +1014,440 @@ class ExternalDraftBatchGenerator:
             )
         return decisions
 
+    @staticmethod
+    def _target_tree_parents(block):
+        return [-1] + [0 if int(parent) < 0 else int(parent) + 1 for parent in block.parents]
+
+    @staticmethod
+    def _tree_paths(parents):
+        from .drafters.dflash_tree import tree_paths
+
+        return tree_paths(parents)
+
+    @staticmethod
+    def _copy_reference_cache(cache):
+        """Clone a B1 cache and force KV appends onto fresh buffers."""
+
+        cloned = copy.deepcopy(cache)
+        for item in cloned:
+            if (
+                hasattr(item, "keys")
+                and getattr(item, "keys", None) is not None
+                and isinstance(getattr(item, "offset", None), int)
+            ):
+                offset = int(item.offset)
+                item.keys = item.keys[..., :offset, :]
+                item.values = item.values[..., :offset, :]
+        return cloned
+
+    def _reference_tree_forward(self, lane, inputs, parents):
+        """Exact generic control: independently replay every root-to-node path."""
+
+        logits, features = [], []
+        for path in self._tree_paths(parents):
+            cache = self._copy_reference_cache(lane.cache)
+            row_inputs = self.mx.array([[inputs[index] for index in path]])
+            row_logits, row_features = self.model.forward_with_taps(
+                row_inputs, cache, self.layers
+            )
+            self.mx.eval(row_logits, row_features)
+            logits.append(row_logits[:, -1:])
+            features.append(row_features[:, -1:])
+        return (
+            self.mx.concatenate(logits, axis=1),
+            self.mx.concatenate(features, axis=1),
+            _ReferenceTreeTransaction(self, lane.cache, inputs),
+        )
+
+    def _target_tree_forward(self, lane, inputs, parents):
+        if self.target_execution == "reference":
+            return self._reference_tree_forward(lane, inputs, parents)
+        from .qwen38_tensorfold import forward
+
+        cached = self.tree_gates["cache_executor"]
+        result = forward(
+            self.model,
+            inputs,
+            parents,
+            lane.cache,
+            self.layers,
+            os.environ["MLX2_TENSORFOLD_SOURCE"],
+            cached=cached,
+        )
+        _bump(self.scheduler_stats, "external_tensorfold_target_rounds")
+        if cached:
+            _bump(
+                self.scheduler_stats,
+                "external_tensorfold_executor_cache_hits"
+                if result[2].executor_cached
+                else "external_tensorfold_executor_validations",
+            )
+        return result
+
+    @staticmethod
+    def _tree_forbidden(lane):
+        """The proposer's forbidden ids at the lane's next position.
+
+        Only when every processor declares the stateless mask; otherwise
+        the lattice stays unmasked and verification alone enforces them.
+        """
+
+        ids = set()
+        for processor in lane.processors:
+            rule = getattr(processor, "forbidden_token_ids_at_length", None)
+            if not callable(rule):
+                return ()
+            ids.update(int(token) for token in rule(len(lane.history) + 1))
+        return tuple(sorted(ids))
+
+    def _tree_options(self, *, count_hits):
+        options = {}
+        if self.tree_gates["codebook_cache"]:
+            pred, succ, hit = self.draft.tree_codebooks()
+            options["codebooks"] = (pred, succ)
+            if hit:
+                _bump(self.scheduler_stats, "external_tree_codebook_cache_hits")
+        return options
+
+    @staticmethod
+    def _tree_count(lane):
+        return min(15, lane.maximum - lane.generated - 1)
+
+    def _prelaunch_tree(self, lane, decision):
+        """Queue the next round's lattice right after this round's commit.
+
+        The lattice runs on a descriptor copy of the draft cache, so the
+        committed draft plane is untouched: the copy becomes the lane's only
+        when the next round adopts it inside its own transaction, after its
+        recovery snapshot, and only if the committed boundary still matches.
+        Any failure here discards the work; the committed round stands.
+        """
+
+        self._prelaunched.pop(lane.uid, None)
+        if (
+            lane.ordinary
+            or lane.cancelled
+            or lane.maximum - lane.generated <= 1
+            or (decision.emitted and decision.emitted[-1] in self.stops)
+        ):
+            return
+        try:
+            count = self._tree_count(lane)
+            forbidden = self._tree_forbidden(lane)
+            options = self._tree_options(count_hits=False)
+            draft_cache, tail = self._snapshot_draft_state(lane.draft_cache, lane.tail)
+            state = self.draft.start_tree(
+                [lane.anchor],
+                tail,
+                self.draft.batch_caches([draft_cache]),
+                count,
+                forbidden_token_ids=[forbidden],
+                **options,
+            )
+            self.mx.async_eval(*state["pending"])
+        except Exception:
+            _bump(self.scheduler_stats, "external_tree_pipeline_discards")
+            return
+        self._prelaunched[lane.uid] = SimpleNamespace(
+            tail=lane.tail,
+            key=(len(lane.history), lane.anchor, lane.generated, count, forbidden),
+            options=options,
+            state=state,
+            draft_cache=draft_cache,
+        )
+
+    def _adopt_prelaunched(self, lane, count, forbidden):
+        """Return the queued trees if they belong to this exact boundary."""
+
+        record = self._prelaunched.pop(lane.uid, None)
+        if record is None:
+            return None
+        if (
+            record.tail is not lane.tail
+            or record.key
+            != (len(lane.history), lane.anchor, lane.generated, count, forbidden)
+        ):
+            _bump(self.scheduler_stats, "external_tree_pipeline_discards")
+            return None
+        if self._tree_clock is not None:
+            self._tree_clock("tree_draft_setup")
+        # Inside this round's transaction: a restore returns the committed
+        # draft plane captured by the snapshot, never this copy.
+        lane.draft_cache = record.draft_cache
+        _bump(self.scheduler_stats, "external_tree_pipelined_drafts")
+        return self.draft.finish_tree(record.state, mark=self._tree_clock)
+
+    def _discard_prelaunched(self, uids):
+        for uid in uids:
+            if self._prelaunched.pop(uid, None) is not None:
+                _bump(self.scheduler_stats, "external_tree_pipeline_discards")
+
+    def _walk_tree(self, block, sample_row):
+        """Follow target samples through matching children; otherwise correct.
+
+        ``sample_row(row, prefix_rows)`` draws the target token at ``row``,
+        whose root-to-node path is ``prefix_rows``. Rows are visited in path
+        order, so the lane RNG advances once per visited row only.
+        """
+
+        inputs = [None] + list(block.tokens)
+        parents = self._target_tree_parents(block)
+        children = defaultdict(list)
+        for row, parent in enumerate(parents):
+            if parent >= 0:
+                children[parent].append(row)
+        row = 0
+        commit_rows, emitted = [], []
+        while True:
+            token = int(sample_row(row, commit_rows + [row]))
+            emitted.append(token)
+            commit_rows.append(row)
+            if token in self.stops:
+                break
+            child = next(
+                (
+                    candidate
+                    for candidate in children.get(row, ())
+                    if int(inputs[candidate]) == token
+                ),
+                None,
+            )
+            if child is None:
+                break
+            row = child
+        return commit_rows, emitted
+
+    def _verify_tree(self, lane, block, logits):
+        """Row-wise reference: one processed target law and host read per row."""
+
+        inputs = [lane.anchor] + list(block.tokens)
+        target_laws = []
+        response_rows = (
+            []
+            if lane.sampling.get("emit_logprobs", True)
+            or not self.tree_gates["logprobs_on_request"]
+            else None
+        )
+
+        def sample_row(row, prefix_rows):
+            law = self._target_law(
+                lane,
+                logits[0, row],
+                lane.history + [inputs[index] for index in prefix_rows],
+                True,
+                response_rows,
+            )
+            target_laws.append(law)
+            return lane.rng.sample(law)
+
+        commit_rows, emitted = self._walk_tree(block, sample_row)
+        if response_rows is None:
+            _bump(
+                self.scheduler_stats,
+                "external_tree_logprob_rows_skipped",
+                len(commit_rows),
+            )
+        return RoundDecision(
+            accepted=max(0, len(commit_rows) - 1),
+            emitted=emitted,
+            target_laws=target_laws,
+            response_logprobs=response_rows,
+            commit_rows=commit_rows,
+        )
+
+    @staticmethod
+    def _batched_law_contract(lane):
+        """True when every processor has a proven batched per-row form.
+
+        Two declared kinds qualify. ``forbidden_token_ids_at_length(n)`` on a
+        history-pure processor declares ``where(isin(vocab, ids), -inf,
+        logits)`` for an ``n``-token history (``minimum_tokens_processor``).
+        ``presence_window = (penalty, context_size, generation_start)``
+        declares ``logits - penalty`` on the distinct tokens of that
+        processor's generated window (``make_presence_penalty``). Any other
+        processor keeps the row-wise reference verifier.
+        """
+
+        return all(
+            getattr(processor, "presence_window", None) is not None
+            or (
+                callable(getattr(processor, "forbidden_token_ids_at_length", None))
+                and getattr(processor, "history_pure", False)
+            )
+            for processor in lane.processors
+        )
+
+    def _launch_tree_laws(self, lane, block, logits):
+        """Queue every tree row's processed target law as one batched tensor.
+
+        Returns ``(fence, state)``: the lazy arrays to evaluate in the round's
+        single device read, and what ``_verify_tree_batched`` needs after it.
+        Mirrors ``_target_law`` operation for operation, batched over rows:
+        each processor in order on each row's own history, then the greedy
+        float32 argmax and normalizer, or the sampling transform.
+        """
+
+        mx = self.mx
+        parents = self._target_tree_parents(block)
+        paths = self._tree_paths(parents)
+        width = len(paths)
+        rows = logits[0, :width]
+        vocab = int(rows.shape[-1])
+        inputs = [lane.anchor] + list(block.tokens)
+        histories = [
+            lane.history + [inputs[index] for index in path] for path in paths
+        ]
+        for processor in lane.processors:
+            presence = getattr(processor, "presence_window", None)
+            if presence is not None:
+                penalty, context_size, start = presence
+                flat = []
+                for row, history in enumerate(histories):
+                    window = history if start is None else history[start:]
+                    for token in set(window[-context_size:]):
+                        flat.append(row * vocab + int(token))
+                if flat:
+                    mask = mx.zeros((width * vocab,), dtype=mx.bool_)
+                    mask[mx.array(flat, dtype=mx.int32)] = True
+                    rows = mx.where(mask.reshape(width, vocab), rows - penalty, rows)
+                continue
+            forbidden = [
+                sorted({
+                    int(token)
+                    for token in processor.forbidden_token_ids_at_length(len(history))
+                })
+                for history in histories
+            ]
+            count = max((len(ids) for ids in forbidden), default=0)
+            if count:
+                table = mx.array(
+                    [ids + [-1] * (count - len(ids)) for ids in forbidden],
+                    dtype=mx.int32,
+                )
+                mask = mx.any(
+                    mx.arange(vocab)[None, None, :] == table[:, :, None], axis=1
+                )
+                rows = mx.where(mask, -float("inf"), rows)
+        temp = float(lane.sampling.get("sampling_temp", 0))
+        state = {"temp": temp, "vocab": vocab, "width": width}
+        if temp == 0:
+            values = rows.astype(mx.float32)
+            normalizer = mx.logsumexp(values, axis=-1)
+            selected = mx.argmax(values, axis=-1)
+            state.update(values=values, normalizer=normalizer, selected=selected)
+            return (normalizer, selected), state
+        from .sample_utils import make_transformed_logprobs
+
+        transform = make_transformed_logprobs(
+            temp,
+            top_p=lane.sampling.get("top_p", 0),
+            top_k=lane.sampling.get("top_k", 0),
+            min_p=lane.sampling.get("min_p", 0),
+        )
+        law = mx.exp(transform(rows))
+        finite = mx.all(mx.isfinite(law), axis=-1)
+        top_k = int(lane.sampling.get("top_k", 0) or 0)
+        if 0 < top_k <= _SPARSE_LAW_LIMIT and top_k < vocab:
+            # Top-k leaves at most ``top_k`` nonzero entries per row, so the
+            # host needs only their ids and values; ``survivors`` proves it.
+            support = mx.argpartition(-law, kth=top_k - 1, axis=-1)[:, :top_k]
+            values = mx.take_along_axis(law, support, axis=-1)
+            survivors = mx.sum(law > 0, axis=-1)
+            state.update(law=law, support=support, support_values=values,
+                         survivors=survivors, finite=finite, top_k=top_k)
+            return (support, values, survivors, finite), state
+        state.update(law=law, finite=finite)
+        return (law, finite), state
+
+    def _verify_tree_batched(self, lane, block, state):
+        """Host walk over laws already landed by the round's device read.
+
+        Produces the same tokens, laws, RNG draws and failures as
+        ``_verify_tree``: each visited row's dense law is rebuilt bit for bit
+        and passed through the same ``probability`` and ``RequestRNG.sample``
+        calls; a greedy row draws the one uniform the one-hot sample consumes.
+        """
+
+        from .speculative_sampling import probability
+
+        emit = lane.sampling.get("emit_logprobs", True)
+        keep_laws = emit or not self.tree_gates["logprobs_on_request"]
+        target_laws = [] if keep_laws else None
+        response_rows = []
+        vocab = state["vocab"]
+        if state["temp"] == 0:
+            normalizer = np.asarray(state["normalizer"])
+            selected = np.asarray(state["selected"])
+
+            def sample_row(row, _prefix_rows):
+                if not np.isfinite(float(normalizer[row])):
+                    raise LaneFailure(
+                        lane.uid,
+                        "external draft target law is not a probability distribution",
+                    )
+                token = int(selected[row])
+                # RequestRNG.sample on a one-hot law returns its index and
+                # consumes exactly one uniform.
+                lane.rng.uniform()
+                if keep_laws:
+                    law = np.zeros(vocab)
+                    law[token] = 1
+                    target_laws.append(law)
+                    response_rows.append(
+                        state["values"][row] - state["normalizer"][row]
+                    )
+                return token
+        else:
+            finite = np.asarray(state["finite"])
+            sparse = "support" in state
+            if sparse:
+                support = np.asarray(state["support"])
+                support_values = np.asarray(state["support_values"])
+                survivors = np.asarray(state["survivors"])
+                dense_law = None
+            else:
+                dense_law = np.asarray(state["law"])
+
+            def sample_row(row, _prefix_rows):
+                if sparse and int(survivors[row]) > state["top_k"]:
+                    raise RuntimeError("top-k target law has more survivors than k")
+                if sparse:
+                    values = np.zeros(vocab, dtype=support_values.dtype)
+                    values[support[row]] = support_values[row]
+                    _bump(self.scheduler_stats, "external_tree_sparse_law_rows")
+                else:
+                    values = dense_law[row]
+                try:
+                    if not bool(finite[row]):
+                        raise ValueError("Invalid probability distribution")
+                    law = probability(values)
+                except ValueError as error:
+                    raise LaneFailure(
+                        lane.uid,
+                        "external draft target law is not a probability "
+                        f"distribution: {error}",
+                    ) from error
+                if keep_laws:
+                    target_laws.append(law)
+                    response_rows.append(None)
+                return lane.rng.sample(law)
+
+        commit_rows, emitted = self._walk_tree(block, sample_row)
+        if not keep_laws:
+            response_rows = None
+            _bump(
+                self.scheduler_stats,
+                "external_tree_logprob_rows_skipped",
+                len(commit_rows),
+            )
+        return RoundDecision(
+            accepted=max(0, len(commit_rows) - 1),
+            emitted=emitted,
+            target_laws=target_laws,
+            response_logprobs=response_rows,
+            commit_rows=commit_rows,
+        )
+
     def _commit(self, cohort, decisions, features, *, blocks, transaction):
         """Commit accepted prefixes, then publish responses for every row."""
         proposal_counts = [0 if block is None else int(block.lengths[0]) for block in blocks]
@@ -811,7 +1455,18 @@ class ExternalDraftBatchGenerator:
             min(decision.accepted+1, len(decision.emitted)) for decision in decisions
         ]
         clock = time.perf_counter() if self.round_timing else None
-        rows = transaction.commit(accepted_lengths=consumed)
+        paths = [
+            (
+                list(decision.commit_rows)
+                if decision.commit_rows is not None
+                else list(range(used))
+            )
+            for decision, used in zip(decisions, consumed)
+        ]
+        if any(decision.commit_rows is not None for decision in decisions):
+            rows = transaction.commit_paths(paths)
+        else:
+            rows = transaction.commit(accepted_lengths=consumed)
         for decision, used in zip(decisions, consumed):
             # Delivered token j was drawn from verify row j: exactly ``used``
             # rows (accepted drafts plus the correction/bonus row, cut at a
@@ -830,9 +1485,17 @@ class ExternalDraftBatchGenerator:
             emitted = decision.emitted
             drafts, _laws = _block_row(blocks[row], None)
             inputs = [lane.anchor] + drafts
+            committed_inputs = [inputs[index] for index in paths[row]]
             lane.cache = rows[row]
-            lane.tail = features[row:row+1,:consumed[row]]
-            lane.history.extend(inputs[:consumed[row]])
+            if decision.commit_rows is None:
+                lane.tail = features[row:row+1,:consumed[row]]
+            else:
+                lane.tail = self.mx.take(
+                    features[row:row+1],
+                    self.mx.array(paths[row], dtype=self.mx.int32),
+                    axis=1,
+                )
+            lane.history.extend(committed_inputs)
             lane.anchor = emitted[-1]
             round_accepted = min(decision.accepted, len(emitted)-1)
             self.scheduler_stats["accepted_proposals"] += round_accepted
@@ -883,11 +1546,20 @@ class ExternalDraftBatchGenerator:
         """Accumulate host time for ``phase``; returns the new reference time."""
         now = time.perf_counter()
         self.round_times[phase] += now - since
+        # Receipt copy: integer nanoseconds per phase, present only when
+        # MLX2_EXTERNAL_ROUND_TIMING is set.
+        _bump(
+            self.scheduler_stats,
+            f"external_phase_{phase}_ns",
+            int((now - since) * 1e9),
+        )
         return now
 
     def _round(self, cohort):
         if cohort and all(lane.ordinary for lane in cohort):
             return self._ordinary_round(cohort)
+        if self.draft_topology == "tree15":
+            return self._tree_round(cohort)
         clock = time.perf_counter() if self.round_timing else None
         recovery = self._snapshot_round(cohort)
         self.scheduler_stats["recovery_checkpoint_captures"] += len(recovery)
@@ -902,21 +1574,33 @@ class ExternalDraftBatchGenerator:
                 clock = self._mark("draft", clock)
             proposal_counts = [0 if block is None else int(block.lengths[0]) for block in blocks]
             verify_width = max(proposal_counts, default=0) + 1
-            owner = self._target_owner([l.cache for l in cohort])
-            transaction = owner.begin(lengths=[count+1 for count in proposal_counts])
             inputs = [
                 [lane.anchor]+_block_row(block, None)[0]+[0]*(verify_width-count-1)
                 for lane,block,count in zip(cohort,blocks,proposal_counts)
             ]
-            if clock is not None:
-                clock = self._mark("transaction_begin", clock)
             taps, steer, steer_commits = self._verify_steer(
                 cohort, inputs, proposal_counts
             )
             if steer is not None:
                 taps.steer = steer
             try:
-                logits, features = self.model.forward_with_taps(self.mx.array(inputs), transaction.caches, self.layers)
+                if self.target_execution == "tensorfold":
+                    if len(cohort) != 1:
+                        raise ValueError(
+                            "TensorFold target execution probe is single-lane"
+                        )
+                    parents = list(range(-1, len(inputs[0]) - 1))
+                    logits, features, transaction = self._target_tree_forward(
+                        cohort[0], inputs[0], parents
+                    )
+                else:
+                    owner = self._target_owner([l.cache for l in cohort])
+                    transaction = owner.begin(
+                        lengths=[count + 1 for count in proposal_counts]
+                    )
+                    logits, features = self.model.forward_with_taps(
+                        self.mx.array(inputs), transaction.caches, self.layers
+                    )
                 self.mx.eval(logits, features)
             finally:
                 if steer is not None:
@@ -941,6 +1625,99 @@ class ExternalDraftBatchGenerator:
             self.scheduler_stats["recovery_checkpoint_restores"] += len(recovery)
             raise
         finally: self._open = False
+
+    def _tree_round(self, cohort):
+        if len(cohort) != 1:
+            raise ValueError("tree15 experimental topology requires one lane")
+        lane = cohort[0]
+        if lane.maximum - lane.generated <= 1:
+            return self._ordinary_round(cohort)
+        clock = time.perf_counter() if self.round_timing else None
+        phase = _PhaseClock(self) if self.round_timing else None
+        recovery = self._snapshot_round(cohort)
+        self.scheduler_stats["recovery_checkpoint_captures"] += 1
+        if phase is not None:
+            phase("tree_recovery_capture")
+        stats_snapshot = dict(self.scheduler_stats)
+        self._open = True
+        transaction = None
+        self._tree_clock = phase
+        try:
+            block = self._propose(cohort)[0]
+            if not isinstance(block, TreeDraftRow):
+                raise RuntimeError("tree15 proposal did not return a tree")
+            inputs = [lane.anchor] + list(block.tokens)
+            parents = self._target_tree_parents(block)
+            logits, features, transaction = self._target_tree_forward(
+                lane, inputs, parents
+            )
+            batched = self.tree_gates["batched_laws"] and self._batched_law_contract(lane)
+            if batched and self.tree_gates["single_fence"]:
+                # One fence: the law transform is queued behind the target
+                # forward and lands with it; taps stay device-resident for
+                # the next round's draft context.
+                fence, state = self._launch_tree_laws(lane, block, logits)
+                if phase is not None:
+                    phase("tree_target_launch")
+                self.mx.eval(*fence)
+                _bump(self.scheduler_stats, "external_tree_single_fence_rounds")
+                if phase is not None:
+                    phase("tree_target_wait")
+            else:
+                if phase is not None:
+                    phase("tree_target_launch")
+                self.mx.eval(logits, features)
+                if phase is not None:
+                    phase("tree_target_wait")
+                if batched:
+                    fence, state = self._launch_tree_laws(lane, block, logits)
+                    self.mx.eval(*fence)
+            if batched:
+                decision = self._verify_tree_batched(lane, block, state)
+                _bump(self.scheduler_stats, "external_tree_batched_law_rounds")
+            else:
+                decision = self._verify_tree(lane, block, logits)
+                if self.tree_gates["batched_laws"]:
+                    _bump(self.scheduler_stats, "external_tree_row_law_rounds")
+            if phase is not None:
+                phase("tree_target_law")
+            self._commit(
+                cohort,
+                [decision],
+                features,
+                blocks=[block],
+                transaction=transaction,
+            )
+            if phase is not None:
+                phase.skip()
+            if self.tree_gates["pipeline_draft"]:
+                self._prelaunch_tree(lane, decision)
+                if phase is not None:
+                    phase("tree_draft_prelaunch")
+            _bump(self.scheduler_stats, "external_tree_rounds")
+            _bump(self.scheduler_stats, "external_tree_nodes", len(block.tokens))
+            _bump(
+                self.scheduler_stats,
+                "external_tree_accepted_edges",
+                decision.accepted,
+            )
+            if clock is not None:
+                self._mark("tree_round", clock)
+                _bump(self.scheduler_stats, "external_phase_rounds")
+        except BaseException:
+            if transaction is not None and not transaction.closed:
+                try:
+                    transaction.abort()
+                except BaseException:
+                    pass
+            self._restore_round(cohort, recovery)
+            self.scheduler_stats = stats_snapshot
+            self.scheduler_stats["recovery_checkpoint_restores"] += 1
+            self._discard_prelaunched([lane.uid])
+            raise
+        finally:
+            self._tree_clock = None
+            self._open = False
 
     def _ordinary_round(self, cohort):
         """Advance permanently ordinary external lanes on target state only.
@@ -1147,6 +1924,7 @@ class ExternalDraftBatchGenerator:
     def disable_speculation(self, uid):
         if self._open: raise RuntimeError("Cannot change route inside a transaction")
         self.lanes[uid].ordinary = True
+        self._discard_prelaunched([uid])
 
     def next(self):
         prompts, responses = [], []
@@ -1237,6 +2015,7 @@ class ExternalDraftBatchGenerator:
     def remove(self, uids, return_prompt_caches=False, *, cancelled=True, keep_boundary=False):
         if self._open: raise RuntimeError("Cannot remove during external transaction")
         result = {}
+        self._discard_prelaunched(uids)
         for uid in uids:
             lane = self.lanes.pop(uid,None)
             if not keep_boundary: self.boundaries.pop(uid,None)

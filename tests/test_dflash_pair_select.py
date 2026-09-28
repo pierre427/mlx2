@@ -194,6 +194,82 @@ def test_processor_rows_stay_on_host_path(monkeypatch):
     assert b.scheduler_stats["external_draft_masked_positions"] > 0
 
 
+@pytest.mark.parametrize("temp", [0.0, 0.8])
+def test_minimum_token_mask_uses_batched_pairwise_exactly(temp):
+    from mlx2.serving import minimum_tokens_processor
+
+    m, d = tiny(vocab=64, top_k=16, block_size=8)
+    prompt = [1, 2, 3]
+    processors = [[minimum_tokens_processor(mx, [0, 7], len(prompt), 64)]]
+    runs = {}
+    for mode in ("host", "batched"):
+        b = generator(m, d, pairwise_selection=mode, stop_tokens=[[0], [7]])
+        b.insert(
+            [prompt],
+            max_tokens=[12],
+            logits_processors=processors,
+            sampling_configs=[{"sampling_temp": temp}],
+            lane_rngs=[type("Seed", (), {"key": mx.array([123, 456])})()],
+        )
+        runs[mode] = drain(b), dict(b.scheduler_stats)
+    assert runs["batched"][0] == runs["host"][0]
+    assert runs["batched"][1]["external_pairwise_selection_groups"] > 0
+    assert runs["batched"][1]["external_draft_masked_positions"] > 0
+
+
+def test_pairwise_block_rejects_bad_forbidden_shape():
+    m, d = tiny()
+    hidden = taps(m, [[1, 2]])
+    cache = d.batch_caches([d.make_cache()])
+    with pytest.raises(ValueError, match="forbidden-token rows"):
+        d.propose_block(
+            [3], hidden, cache, 2, [[0.5, 0.5]], [0.0],
+            forbidden_token_ids=[[()]],
+        )
+
+
+def test_tree15_reference_route_completes_and_reports_engagement(monkeypatch):
+    monkeypatch.setenv("MLX2_DFLASH_TOPOLOGY", "tree15")
+    m, d = tiny(vocab=64, top_k=16, block_size=8)
+    b = generator(m, d, pairwise_selection="batched")
+    b.insert(
+        [[1, 2, 3]],
+        max_tokens=[6],
+        sampling_configs=[{"sampling_temp": 0.0}],
+    )
+    output, receipts = drain(b)
+    assert len(output[0]) == 6
+    assert receipts[0]["verification"] == "exact"
+    assert b.scheduler_stats["external_tree_rounds"] > 0
+    assert b.scheduler_stats["external_tree_nodes"] >= b.scheduler_stats[
+        "external_tree_rounds"
+    ]
+    assert "external_tensorfold_target_rounds" not in b.scheduler_stats
+
+
+def test_best_first_tree_parents_precede_children():
+    from mlx2.runtime.drafters.dflash_tree import best_first_tree, tree_paths
+
+    rng = np.random.default_rng(42)
+    candidates = rng.integers(0, 32, size=(8, 16))
+    unary = rng.normal(size=(8, 16))
+    projected = rng.normal(size=(8, 4))
+    predecessor = rng.normal(size=(32, 4))
+    successor = rng.normal(size=(32, 4))
+    tokens, parents = best_first_tree(
+        candidates,
+        unary,
+        projected,
+        3,
+        predecessor,
+        successor,
+        max_nodes=15,
+    )
+    assert len(tokens) == len(parents) == 15
+    assert all(parent < row for row, parent in enumerate(parents))
+    assert max(map(len, tree_paths(parents))) <= 8
+
+
 @pytest.mark.parametrize("prompts", [[[1, 2, 3]], [[1, 2, 3], [4, 5, 6]]])
 def test_one_block_eval_sync_per_draft_group(monkeypatch, prompts):
     # One host read per draft group; lanes whose pending tails differ in

@@ -647,6 +647,9 @@ def minimum_tokens_processor(array_module, eos_token_ids, prompt_tokens, minimum
     processor.probe = processor
     processor.history_pure = True
     processor.dormant = lambda tokens: int(tokens.shape[-1]) - prompt_tokens >= minimum
+    processor.forbidden_token_ids_at_length = lambda length: (
+        eos_token_ids if int(length) - prompt_tokens < minimum else ()
+    )
     return processor
 
 

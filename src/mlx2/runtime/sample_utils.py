@@ -507,6 +507,14 @@ def make_presence_penalty(
             logits[:, tokens] -= penalty
         return logits
 
+    # Declared contract for batched verifiers: the output is ``logits -
+    # penalty`` on exactly the distinct tokens of
+    # ``_generated_window(history, context_size, generation_start)``.
+    presence_penalty_processor.presence_window = (
+        penalty,
+        int(context_size),
+        None if generation_start is None else int(generation_start),
+    )
     return _probe_safe(presence_penalty_processor)
 
 

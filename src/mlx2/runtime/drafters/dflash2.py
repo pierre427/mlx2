@@ -470,7 +470,17 @@ def pairwise_walk(candidates, scores, uniforms, temperatures):
     return mx.stack(tokens, axis=1), mx.stack(laws, axis=1), invalid
 
 
-def _propose_block(self, anchors, hidden, cache, proposal_length, uniforms, temperatures):
+def _propose_block(
+    self,
+    anchors,
+    hidden,
+    cache,
+    proposal_length,
+    uniforms,
+    temperatures,
+    *,
+    forbidden_token_ids=None,
+):
     """P3: one trunk pass, one pair table, one walk, one host read.
 
     ``uniforms`` is ``[B][proposal_length]`` drawn in position order from each
@@ -497,6 +507,25 @@ def _propose_block(self, anchors, hidden, cache, proposal_length, uniforms, temp
     candidates = mx.argpartition(logits, -count, axis=-1)[..., -count:]
     unary = mx.take_along_axis(logits, candidates, axis=-1)
     scores = self.pairwise_score_table(anchors, features, candidates, unary)
+    if forbidden_token_ids is not None:
+        if len(forbidden_token_ids) != batch or any(
+            len(row) != proposal_length for row in forbidden_token_ids
+        ):
+            raise ValueError("DFlash2 forbidden-token rows must match the draft block")
+        width = max(
+            (len(ids) for row in forbidden_token_ids for ids in row),
+            default=0,
+        )
+        if width:
+            padded = [
+                [list(ids) + [-1] * (width - len(ids)) for ids in row]
+                for row in forbidden_token_ids
+            ]
+            forbidden = mx.array(padded, dtype=mx.int32)
+            masked = mx.any(
+                candidates[:, :, :, None] == forbidden[:, :, None, :], axis=-1
+            )
+            scores = mx.where(masked[:, :, None, :], -float("inf"), scores)
     tokens, cand_q, invalid = pairwise_walk(
         candidates, scores, uniforms, temperatures
     )
@@ -511,3 +540,153 @@ def _propose_block(self, anchors, hidden, cache, proposal_length, uniforms, temp
 
 DFlash2DraftModel.pairwise_score_table = pairwise_score_table
 DFlash2DraftModel.propose_block = _propose_block
+
+
+def tree_codebooks(self):
+    """Return ``(predecessor, successor, cache_hit)`` float32 host codebooks.
+
+    Cached once per draft instance after evaluation, as TensorFold's
+    ``DFlashProposer._codebooks`` does. The cache holds the weight arrays it
+    was built from and rebuilds when either is replaced. The uncached tree
+    path converts both ``[vocab, rank]`` codebooks on device every round.
+    """
+
+    import numpy as np
+
+    selector = self.candidate_selector
+    pred = selector.predecessor_codebook.weight
+    succ = selector.successor_codebook.weight
+    cached = getattr(self, "_tree_codebooks", None)
+    if cached is not None and cached[0] is pred and cached[1] is succ:
+        return cached[2], cached[3], True
+    pred_rows = np.array(pred.astype(mx.float32))
+    succ_rows = np.array(succ.astype(mx.float32))
+    object.__setattr__(self, "_tree_codebooks", (pred, succ, pred_rows, succ_rows))
+    return pred_rows, succ_rows, False
+
+
+def _start_tree(
+    self,
+    anchors,
+    hidden,
+    cache,
+    max_nodes,
+    *,
+    forbidden_token_ids=None,
+    lattice_positions=16,
+    codebooks=None,
+):
+    """Queue the lattice graph (draft-context append included) on ``cache``.
+
+    Returns the state ``finish_tree`` evaluates and searches; nothing is
+    evaluated here, so a caller may ``mx.async_eval(*state["pending"])``.
+    """
+
+    anchors_list = [int(value) for value in anchors]
+    anchors_array = mx.array(anchors_list, dtype=mx.int32)
+    batch = int(anchors_array.shape[0])
+    depth = min(int(lattice_positions), int(max_nodes) + 1)
+    if depth < 2:
+        raise ValueError("DFlash2 tree lattice needs at least one draft position")
+    inputs = mx.concatenate(
+        [
+            anchors_array[:, None],
+            mx.full(
+                (batch, depth - 1),
+                self.config.mask_token_id,
+                dtype=mx.int32,
+            ),
+        ],
+        axis=1,
+    )
+    features = self._hidden(inputs, hidden, cache)[:, 1:]
+    logits = self._logits(features)
+    selector = self.candidate_selector
+    count = min(selector.top_k, int(logits.shape[-1]))
+    candidates = mx.argpartition(logits, -count, axis=-1)[..., -count:]
+    unary = mx.take_along_axis(logits, candidates, axis=-1).astype(mx.float32)
+    if forbidden_token_ids is not None:
+        if len(forbidden_token_ids) != batch:
+            raise ValueError("DFlash2 tree forbidden-token rows must match the batch")
+        width = max((len(row) for row in forbidden_token_ids), default=0)
+        if width:
+            forbidden = mx.array(
+                [list(row) + [-1] * (width - len(row)) for row in forbidden_token_ids],
+                dtype=mx.int32,
+            )
+            masked = mx.any(
+                candidates[:, :, :, None] == forbidden[:, None, None, :], axis=-1
+            )
+            unary = mx.where(masked, -float("inf"), unary)
+    projected = selector.hidden_projection(features).astype(mx.float32)
+    pending = [candidates, unary, projected]
+    if codebooks is None:
+        pending += [
+            selector.predecessor_codebook.weight.astype(mx.float32),
+            selector.successor_codebook.weight.astype(mx.float32),
+        ]
+    return {
+        "anchors": anchors_list,
+        "max_nodes": int(max_nodes),
+        "pending": pending,
+        "codebooks": codebooks,
+        "cache": cache,
+    }
+
+
+def _finish_tree(self, state, *, mark=None):
+    """Evaluate a started lattice and run the host best-first search."""
+
+    import numpy as np
+
+    from .dflash_tree import best_first_tree
+
+    mx.eval(*state["pending"])
+    if state["codebooks"] is None:
+        candidates, unary, projected, pred, succ = state["pending"]
+        pred_rows, succ_rows = np.asarray(pred), np.asarray(succ)
+    else:
+        candidates, unary, projected = state["pending"]
+        pred_rows, succ_rows = state["codebooks"]
+    if mark is not None:
+        mark("tree_draft_wait")
+    candidate_rows = np.asarray(candidates)
+    unary_rows = np.asarray(unary)
+    projected_rows = np.asarray(projected)
+    result = []
+    for row, anchor in enumerate(state["anchors"]):
+        result.append(
+            best_first_tree(
+                candidate_rows[row],
+                unary_rows[row],
+                projected_rows[row],
+                anchor,
+                pred_rows,
+                succ_rows,
+                max_nodes=state["max_nodes"],
+            )
+        )
+    if mark is not None:
+        mark("tree_search")
+    return result
+
+
+def _propose_tree(self, anchors, hidden, cache, max_nodes, *, mark=None, **options):
+    """Build one 15-node-style best-first lattice per draft row.
+
+    ``lattice_positions`` bounds the draft input block (anchor plus masks);
+    the lattice has one fewer candidate position. ``codebooks`` is an
+    optional ``(predecessor, successor)`` host pair from ``tree_codebooks``.
+    ``mark(phase)`` attributes host time at existing sync points only.
+    """
+
+    state = _start_tree(self, anchors, hidden, cache, max_nodes, **options)
+    if mark is not None:
+        mark("tree_draft_build")
+    return _finish_tree(self, state, mark=mark)
+
+
+DFlash2DraftModel.propose_tree = _propose_tree
+DFlash2DraftModel.start_tree = _start_tree
+DFlash2DraftModel.finish_tree = _finish_tree
+DFlash2DraftModel.tree_codebooks = tree_codebooks
