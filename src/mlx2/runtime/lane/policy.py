@@ -59,9 +59,30 @@ def format_class(module) -> str | None:
     return None
 
 
-def detect(model) -> dict:
-    """What the policy keys on: MoE-ness and the projection formats present."""
-    moe = False
+_EXPERT_KEYS = ("num_experts", "n_routed_experts", "num_local_experts", "moe_num_experts")
+
+
+def config_moe(config: dict | None) -> bool:
+    """Whether an artifact config declares routed experts (top level or text_config)."""
+    if not isinstance(config, dict):
+        return False
+    for scope in (config, config.get("text_config"), config.get("llm_config")):
+        if isinstance(scope, dict) and any(
+            isinstance(scope.get(key), int) and not isinstance(scope.get(key), bool)
+            and scope[key] > 0 for key in _EXPERT_KEYS
+        ):
+            return True
+    return False
+
+
+def detect(model, config: dict | None = None) -> dict:
+    """What the policy keys on: MoE-ness and the projection formats present.
+
+    MoE is detected from either the artifact config's expert count or an
+    expert module in the model (``*Switch*``, ``*MoE``, ``*SparseMoeBlock``,
+    ``*Experts``).
+    """
+    moe = config_moe(config)
     formats: Counter = Counter()
     for _name, module in model.named_modules():
         kind = type(module).__name__

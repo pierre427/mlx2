@@ -4452,8 +4452,14 @@ class ServingEngine:
                 from .runtime.lane import apply_policy
                 from .runtime.lane.policy import detect, resolve
 
+                try:
+                    artifact_config = json.loads(
+                        (Path(self.model_path) / "config.json").read_text()
+                    )
+                except (OSError, ValueError):
+                    artifact_config = None
                 policy = resolve(
-                    detect(adapter.model),
+                    detect(adapter.model, artifact_config),
                     family=getattr(getattr(adapter, "descriptor", None), "family", None),
                     overrides=self.lane_policy_overrides,
                     mode=self.lane_matmul,

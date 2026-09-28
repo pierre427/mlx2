@@ -68,7 +68,14 @@ def forward_fn(model):
             return getattr(out, "logits", out)
 
         return call, target.make_cache
-    raise RuntimeError("model has no make_cache on itself or its language_model")
+    # Last resort, as serving does: the generic per-layer prompt cache.
+    from mlx2.runtime.models.cache import make_prompt_cache
+
+    def call(x, cache):
+        out = model(x, cache=cache)
+        return getattr(out, "logits", out)
+
+    return call, lambda: make_prompt_cache(model)
 
 
 def timed_forward(call, cache, tokens):

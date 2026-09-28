@@ -46,6 +46,19 @@ def test_detect_reports_formats_and_moe():
     assert policy.detect(_MoE())["moe"] is True
 
 
+@pytest.mark.parametrize("config", [
+    {"num_experts": 128},
+    {"text_config": {"n_routed_experts": 256}},
+    {"num_local_experts": 8},
+])
+def test_config_declared_experts_mark_moe(config):
+    assert policy.detect(_Dense(), config)["moe"] is True
+
+
+def test_zero_experts_is_dense():
+    assert policy.detect(_Dense(), {"num_experts": 0, "text_config": {}})["moe"] is False
+
+
 def test_dense_defaults_come_from_the_builtin_table():
     resolved = policy.resolve(policy.detect(_Dense()))
     assert resolved["mode"] == "crossover"
