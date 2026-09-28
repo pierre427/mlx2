@@ -1,4 +1,5 @@
 import random
+from collections import defaultdict, deque
 
 import pytest
 
@@ -11,6 +12,83 @@ from mlx2.runtime.prompt_lookup import (
 )
 
 
+class _ReferencePromptLookup:
+    """The exhaustive pre-optimization lookup retained as a differential oracle."""
+
+    def __init__(
+        self, tokens=(), *, ngram_min=3, ngram_max=6, hot_segments=4, reject_ttl=8
+    ):
+        self.ngram_min, self.ngram_max = ngram_min, ngram_max
+        self.tokens = []
+        self.index = {
+            size: defaultdict(list) for size in range(ngram_min, ngram_max + 1)
+        }
+        self.hot = deque(maxlen=hot_segments)
+        self.reject_ttl = reject_ttl
+        self.clock = 0
+        self.rejected_until = {}
+        self.last_source = None
+        for token in tokens:
+            self.observe(token)
+
+    def observe(self, token):
+        self.tokens.append(int(token))
+        end = len(self.tokens)
+        for size in self.index:
+            start = end - size
+            if start >= 0:
+                self.index[size][tuple(self.tokens[start:end])].append(start)
+
+    def add_hot_segment(self, tokens):
+        self.hot.append(tuple(int(token) for token in tokens))
+
+    def propose(self, max_span, *, lookback):
+        self.clock += 1
+        self.last_source = None
+        size_limit = min(self.ngram_max, len(self.tokens))
+        for size in range(size_limit, self.ngram_min - 1, -1):
+            key = tuple(self.tokens[-size:])
+            candidates = []
+            for start in self.index[size].get(key, ()):
+                if (
+                    start >= len(self.tokens) - size
+                    or len(self.tokens) - start > lookback
+                ):
+                    continue
+                continuation = tuple(
+                    self.tokens[start + size : start + size + max_span]
+                )
+                source = ("target", size, start, continuation)
+                if continuation and self.rejected_until.get(source, -1) < self.clock:
+                    candidates.append((start, continuation, source))
+            for segment_id, segment in enumerate(self.hot):
+                first = max(0, len(segment) - lookback - size)
+                for start in range(first, len(segment) - size):
+                    if segment[start : start + size] != key:
+                        continue
+                    continuation = segment[start + size : start + size + max_span]
+                    source = ("hot", segment_id, size, start, continuation)
+                    if (
+                        continuation
+                        and self.rejected_until.get(source, -1) < self.clock
+                    ):
+                        candidates.append((start, continuation, source))
+            if candidates:
+                chosen = max(candidates, key=lambda item: (len(item[1]), item[0]))
+                self.last_source = chosen[2]
+                return list(chosen[1])
+        return []
+
+    def feedback(self, proposed, accepted):
+        if (
+            self.last_source is not None
+            and proposed
+            and not accepted
+            and self.reject_ttl
+        ):
+            self.rejected_until[self.last_source] = self.clock + self.reject_ttl
+
+
 def test_indexed_oracle_hot_segment_and_rejection_ttl():
     oracle = IndexedPromptLookup([1, 2, 3, 9, 1, 2, 3], ngram_min=3, ngram_max=3)
     assert oracle.propose(4) == [9, 1, 2, 3]
@@ -18,6 +96,93 @@ def test_indexed_oracle_hot_segment_and_rejection_ttl():
     assert oracle.propose(4) == []
     oracle.add_hot_segment([8, 1, 2, 3, 7, 6])
     assert oracle.propose(2) == [7, 6]
+
+
+def test_indexed_oracle_matches_reference_across_randomized_state_changes():
+    rng = random.Random(19)
+    for _case in range(300):
+        length = rng.randrange(3, 100)
+        period = rng.randrange(1, min(24, length) + 1)
+        base = [rng.randrange(32) for _ in range(period)]
+        tokens = (base * (length // period + 1))[:length]
+        ngram_min = rng.randrange(1, 4)
+        ngram_max = rng.randrange(ngram_min, 7)
+        index_window = rng.randrange(8, 65)
+        hot_segments = rng.randrange(0, 4)
+        reject_ttl = rng.randrange(0, 6)
+        reference = _ReferencePromptLookup(
+            tokens,
+            ngram_min=ngram_min,
+            ngram_max=ngram_max,
+            hot_segments=hot_segments,
+            reject_ttl=reject_ttl,
+        )
+        indexed = IndexedPromptLookup(
+            tokens,
+            ngram_min=ngram_min,
+            ngram_max=ngram_max,
+            hot_segments=hot_segments,
+            reject_ttl=reject_ttl,
+            index_window=index_window,
+        )
+        for _round in range(8):
+            if hot_segments and rng.random() < 0.35:
+                hot = [rng.randrange(32) for _ in range(rng.randrange(1, 80))]
+                reference.add_hot_segment(hot)
+                indexed.add_hot_segment(hot)
+            max_span = rng.randrange(0, 12)
+            lookback = rng.randrange(1, index_window + 1)
+            expected = reference.propose(max_span, lookback=lookback)
+            actual = indexed.propose(max_span, lookback=lookback)
+            assert actual == expected
+            assert indexed.last_source == reference.last_source
+            accepted = len(actual) if rng.random() < 0.5 else 0
+            reference.feedback(len(expected), accepted)
+            indexed.feedback(len(actual), accepted)
+            token = rng.randrange(32)
+            reference.observe(token)
+            indexed.observe(token)
+
+
+def test_index_window_bounds_initial_memory_without_changing_lookup_result():
+    tokens = [7] * 4096
+    complete = IndexedPromptLookup(tokens, ngram_min=3, ngram_max=6)
+    bounded = IndexedPromptLookup(tokens, ngram_min=3, ngram_max=6, index_window=256)
+    assert bounded.propose(8, lookback=256) == complete.propose(8, lookback=256)
+    assert (
+        bounded.index_receipt()["target_occurrences_indexed"]
+        < complete.index_receipt()["target_occurrences_indexed"] // 8
+    )
+
+
+def test_lookup_stops_after_the_first_optimal_candidate():
+    oracle = IndexedPromptLookup([7] * 4096, ngram_min=3, ngram_max=6)
+    assert oracle.propose(8, lookback=256) == [7] * 8
+    receipt = oracle.index_receipt()
+    assert receipt["candidate_checks"] == 1
+    assert receipt["target_occurrences_visited"] <= 8
+    assert receipt["target_occurrences_skipped"] > 3000
+
+
+def test_hot_segments_use_the_index_and_preserve_target_tie_priority():
+    oracle = IndexedPromptLookup(
+        [1, 2, 3, 4, 1, 2, 3],
+        ngram_min=3,
+        ngram_max=3,
+        index_window=64,
+    )
+    oracle.add_hot_segment([1, 2, 3, 4, 1])
+    assert oracle.propose(2, lookback=64) == [4, 1]
+    assert oracle.last_source[0] == "target"
+
+    hot_only = IndexedPromptLookup([1, 2, 3], ngram_min=3, ngram_max=3, index_window=64)
+    hot_only.add_hot_segment([0] * 128 + [1, 2, 3, 9, 8])
+    assert hot_only.propose(2, lookback=64) == [9, 8]
+    assert hot_only.last_source[0] == "hot"
+    receipt = hot_only.index_receipt()
+    assert receipt["hot_key_lookups"] == 1
+    assert receipt["hot_starts_avoided"] > 50
+    assert receipt["hot_segments_indexed"] == 1
 
 
 def test_context_match_screens_ambiguous_recent_copy_source():
@@ -303,6 +468,22 @@ def test_prompt_lookup_lane_policy_overrides_use_the_same_strict_contract():
             caches=[[KVCache()]],
             prompt_lookup_configs=[{"adaptive": "false"}],
         )
+
+
+def test_prompt_lookup_lane_bounds_default_index_to_the_configured_ladder():
+    from mlx2.runtime.models.cache import KVCache
+    from mlx2.runtime.pld import PromptLookupBatchGenerator
+
+    generator = PromptLookupBatchGenerator(
+        object(), prompt_lookup={"lookback_ladder": [8, 32]}
+    )
+    uid = generator.insert([[1, 2, 3]], caches=[[KVCache()]])[0]
+    try:
+        proposer = generator.lanes[uid].proposer
+        assert proposer.index_window == 32
+        assert proposer.index_receipt()["index_window"] == 32
+    finally:
+        generator.remove([uid])
 
 
 def test_prompt_lookup_policy_allowlist_covers_every_key_the_generator_reads():

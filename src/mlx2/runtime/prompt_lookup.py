@@ -303,22 +303,78 @@ class AdaptiveLookback:
             self._misses = self._rejects = 0
 
 
+@dataclass
+class PromptLookupIndexStats:
+    """Timer-free counters describing bounded host lookup work."""
+
+    calls: int = 0
+    hits: int = 0
+    misses: int = 0
+    target_key_lookups: int = 0
+    hot_key_lookups: int = 0
+    target_occurrences_visited: int = 0
+    target_occurrences_skipped: int = 0
+    hot_occurrences_visited: int = 0
+    hot_starts_avoided: int = 0
+    candidate_checks: int = 0
+    rejected_candidates: int = 0
+    sources_rejected: int = 0
+    target_occurrences_indexed: int = 0
+    hot_segments_indexed: int = 0
+    hot_tokens_indexed: int = 0
+    hot_occurrences_indexed: int = 0
+
+    def receipt(self, *, index_window: int) -> dict:
+        return {
+            "schema": "mlx2.prompt-lookup-index.v1",
+            "index_window": index_window,
+            "calls": self.calls,
+            "hits": self.hits,
+            "misses": self.misses,
+            "target_key_lookups": self.target_key_lookups,
+            "hot_key_lookups": self.hot_key_lookups,
+            "target_occurrences_visited": self.target_occurrences_visited,
+            "target_occurrences_skipped": self.target_occurrences_skipped,
+            "hot_occurrences_visited": self.hot_occurrences_visited,
+            "hot_starts_avoided": self.hot_starts_avoided,
+            "candidate_checks": self.candidate_checks,
+            "rejected_candidates": self.rejected_candidates,
+            "sources_rejected": self.sources_rejected,
+            "target_occurrences_indexed": self.target_occurrences_indexed,
+            "hot_segments_indexed": self.hot_segments_indexed,
+            "hot_tokens_indexed": self.hot_tokens_indexed,
+            "hot_occurrences_indexed": self.hot_occurrences_indexed,
+        }
+
+
+@dataclass(frozen=True)
+class _IndexedSegment:
+    tokens: tuple[int, ...]
+    index: dict[int, dict[tuple[int, ...], list[int]]]
+
+
 class IndexedPromptLookup:
     """Exact indexed oracle with bounded hot segments and rejected-source TTL."""
 
     def __init__(
         self, tokens=(), *, ngram_min=3, ngram_max=6, hot_segments=4,
         reject_ttl=8, recent_prompt_segments=0, prompt_segment_tokens=1024,
+        index_window=None,
     ):
         if ngram_min < 1 or ngram_max < ngram_min:
             raise ValueError("invalid ngram bounds")
         if recent_prompt_segments < 0 or prompt_segment_tokens < 1:
             raise ValueError("invalid recent prompt segment bounds")
+        if index_window is not None and (
+            type(index_window) is not int or index_window < 1
+        ):
+            raise ValueError("index_window must be a positive integer")
         self.ngram_min, self.ngram_max = ngram_min, ngram_max
         self.tokens = [int(token) for token in tokens]
         self.recent_prompt_segments = int(recent_prompt_segments)
         self.prompt_segment_tokens = int(prompt_segment_tokens)
-        self.index_window = self.recent_prompt_segments * self.prompt_segment_tokens
+        configured_window = self.recent_prompt_segments * self.prompt_segment_tokens
+        self.index_window = index_window if index_window is not None else configured_window
         bucket = deque if self.index_window else list
         self.index = {size: defaultdict(bucket) for size in range(ngram_min, ngram_max + 1)}
         self.index_entries = 0
@@ -331,10 +387,26 @@ class IndexedPromptLookup:
         self.lookup_calls = 0
         self.source_sites_scanned = 0
         self.context_mismatch_sites = 0
+        self.index_stats = PromptLookupIndexStats()
         for size, buckets in self.index.items():
             for start in range(self.indexed_start, len(self.tokens) - size + 1):
                 buckets[tuple(self.tokens[start : start + size])].append(start)
                 self.index_entries += 1
+        self.index_stats.target_occurrences_indexed = self.index_entries
+
+    def _build_hot_index(self, tokens):
+        index = {
+            size: defaultdict(list)
+            for size in range(self.ngram_min, self.ngram_max + 1)
+        }
+        length = len(tokens)
+        for size, buckets in index.items():
+            first_start = 0
+            if self.index_window:
+                first_start = max(0, length - self.index_window - size)
+            for start in range(first_start, length - size + 1):
+                buckets[tuple(tokens[start : start + size])].append(start)
+        return index
 
     def observe(self, token):
         self.tokens.append(int(token))
@@ -358,72 +430,173 @@ class IndexedPromptLookup:
                         if not positions:
                             del buckets[key]
                 self.indexed_start = expired + 1
+        self.index_stats.target_occurrences_indexed = self.index_entries
 
     def add_hot_segment(self, tokens):
         segment = tuple(int(token) for token in tokens)
         if not segment:
             raise ValueError("hot segment must be nonempty")
-        self.hot.append(segment)
+        if self.hot.maxlen == 0:
+            return
+        indexed = _IndexedSegment(segment, self._build_hot_index(segment))
+        if self.hot.maxlen is not None and len(self.hot) == self.hot.maxlen:
+            evicted = self.hot[0]
+            self.index_stats.hot_tokens_indexed -= len(evicted.tokens)
+            self.index_stats.hot_occurrences_indexed -= sum(
+                len(positions)
+                for buckets in evicted.index.values()
+                for positions in buckets.values()
+            )
+        self.hot.append(indexed)
+        self.index_stats.hot_segments_indexed = len(self.hot)
+        self.index_stats.hot_tokens_indexed += len(segment)
+        self.index_stats.hot_occurrences_indexed += sum(
+            len(positions)
+            for buckets in indexed.index.values()
+            for positions in buckets.values()
+        )
 
-    def propose(self, max_span, *, lookback=4096, min_context_match=0, max_sources=0):
-        """Find a copy source, visiting recent occurrences before older ones.
+    def _best_source_candidate(
+        self,
+        *,
+        kind,
+        segment_id,
+        tokens,
+        positions,
+        size,
+        max_span,
+        first_start,
+        final_start,
+        min_context_match,
+        max_sources,
+        old_hot_starts=0,
+    ):
+        visited = 0
+        chosen = None
 
-        ``max_sources`` is an optional per n-gram scan budget; zero preserves
-        the historical exhaustive choice. The backward match includes the
-        n-gram and is useful for screening ambiguous long-context matches.
-        """
-        self.clock += 1
-        self.lookup_calls += 1
-        self.last_source = None
-        size_limit = min(self.ngram_max, len(self.tokens))
-        for size in range(size_limit, self.ngram_min - 1, -1):
-            key = tuple(self.tokens[-size:])
-            chosen = None
-            chosen_score = None
-            seen = 0
-            for start in reversed(self.index[size].get(key, ())):
-                if start >= len(self.tokens) - size:
+        def consider(start):
+            continuation = tuple(tokens[start + size : start + size + max_span])
+            if not continuation:
+                return None
+            source = (
+                ("target", size, start, continuation)
+                if kind == "target"
+                else ("hot", segment_id, size, start, continuation)
+            )
+            self.index_stats.candidate_checks += 1
+            if self.rejected_until.get(source, -1) >= self.clock:
+                self.index_stats.rejected_candidates += 1
+                return None
+            return continuation, source, (len(continuation), start)
+
+        if not min_context_match and not max_sources:
+            # Skip the at-most-max_span recent partial sites without slicing
+            # them. The first accepted full site is optimal; partial sites are
+            # revisited oldest-first only when every full source is rejected.
+            partial_starts = []
+            full_boundary = len(tokens) - size - max_span
+            for start in reversed(positions):
+                if start >= final_start:
                     continue
-                if len(self.tokens) - start > lookback:
+                if start < first_start:
                     break
-                seen += 1
-                if max_sources and seen > max_sources:
+                visited += 1
+                self.source_sites_scanned += 1
+                if start > full_boundary:
+                    partial_starts.append(start)
+                    continue
+                chosen = consider(start)
+                if chosen is not None:
                     break
+            if chosen is None:
+                for start in reversed(partial_starts):
+                    chosen = consider(start)
+                    if chosen is not None:
+                        break
+        else:
+            for start in reversed(positions):
+                if start >= final_start:
+                    continue
+                if start < first_start:
+                    break
+                if max_sources and visited >= max_sources:
+                    break
+                visited += 1
                 self.source_sites_scanned += 1
                 if min_context_match and not self._context_matches(
-                    self.tokens, start, size, min_context_match
+                    tokens, start, size, min_context_match
                 ):
                     self.context_mismatch_sites += 1
                     continue
-                continuation = tuple(self.tokens[start + size : start + size + max_span])
-                source = ("target", size, start, continuation)
-                if continuation and self.rejected_until.get(source, -1) < self.clock:
-                    score = (len(continuation), start)
-                    if chosen_score is None or score > chosen_score:
-                        chosen, chosen_score = (continuation, source), score
+                candidate = consider(start)
+                if candidate is not None and (
+                    chosen is None or candidate[2] > chosen[2]
+                ):
+                    chosen = candidate
+                if chosen is not None and len(chosen[0]) == max_span:
+                    break
+
+        if kind == "target":
+            self.index_stats.target_occurrences_visited += visited
+            self.index_stats.target_occurrences_skipped += max(
+                0, len(positions) - visited
+            )
+        else:
+            self.index_stats.hot_occurrences_visited += visited
+            self.index_stats.hot_starts_avoided += max(0, old_hot_starts - visited)
+        return chosen
+
+    def propose(self, max_span, *, lookback=4096, min_context_match=0, max_sources=0):
+        """Find the exact best copy source without materializing candidates."""
+        self.clock += 1
+        self.lookup_calls += 1
+        self.index_stats.calls += 1
+        self.last_source = None
+        if max_span <= 0 or lookback <= 0:
+            self.index_stats.misses += 1
+            return []
+        size_limit = min(self.ngram_max, len(self.tokens))
+        for size in range(size_limit, self.ngram_min - 1, -1):
+            key = tuple(self.tokens[-size:])
+            self.index_stats.target_key_lookups += 1
+            chosen = self._best_source_candidate(
+                kind="target",
+                segment_id=None,
+                tokens=self.tokens,
+                positions=self.index[size].get(key, ()),
+                size=size,
+                max_span=max_span,
+                first_start=len(self.tokens) - lookback,
+                final_start=len(self.tokens) - size,
+                min_context_match=min_context_match,
+                max_sources=max_sources,
+            )
             for segment_id, segment in enumerate(self.hot):
-                seen = 0
-                for start in reversed(range(max(0, len(segment) - lookback - size), len(segment) - size)):
-                    if segment[start : start + size] != key:
-                        continue
-                    seen += 1
-                    if max_sources and seen > max_sources:
-                        break
-                    self.source_sites_scanned += 1
-                    if min_context_match and not self._context_matches(
-                        segment, start, size, min_context_match
-                    ):
-                        self.context_mismatch_sites += 1
-                        continue
-                    continuation = segment[start + size : start + size + max_span]
-                    source = ("hot", segment_id, size, start, continuation)
-                    if continuation and self.rejected_until.get(source, -1) < self.clock:
-                        score = (len(continuation), start)
-                        if chosen_score is None or score > chosen_score:
-                            chosen, chosen_score = (continuation, source), score
+                self.index_stats.hot_key_lookups += 1
+                first_start = max(0, len(segment.tokens) - lookback - size)
+                final_start = len(segment.tokens) - size
+                candidate = self._best_source_candidate(
+                    kind="hot",
+                    segment_id=segment_id,
+                    tokens=segment.tokens,
+                    positions=segment.index[size].get(key, ()),
+                    size=size,
+                    max_span=max_span,
+                    first_start=first_start,
+                    final_start=final_start,
+                    min_context_match=min_context_match,
+                    max_sources=max_sources,
+                    old_hot_starts=max(0, final_start - first_start),
+                )
+                if candidate is not None and (
+                    chosen is None or candidate[2] > chosen[2]
+                ):
+                    chosen = candidate
             if chosen is not None:
                 self.last_source = chosen[1]
+                self.index_stats.hits += 1
                 return list(chosen[0])
+        self.index_stats.misses += 1
         return []
 
     def _context_matches(self, source, start, size, minimum):
@@ -437,6 +610,11 @@ class IndexedPromptLookup:
     def feedback(self, proposed, accepted):
         if self.last_source is not None and proposed and not accepted and self.reject_ttl:
             self.rejected_until[self.last_source] = self.clock + self.reject_ttl
+            self.index_stats.sources_rejected += 1
+
+    def index_receipt(self):
+        self.index_stats.target_occurrences_indexed = self.index_entries
+        return self.index_stats.receipt(index_window=self.index_window)
 
 
 @dataclass(frozen=True)

@@ -565,6 +565,10 @@ class PromptLookupBatchGenerator:
                 },
             }
             config = {**overrides, **self.validate_policy(policy)}
+            lookback_ladder = config.get(
+                "lookback_ladder", (256, 1024, 4096, 16384)
+            )
+            recent_prompt_segments = config.get("recent_prompt_segments", 0)
             _set_ordinary_b1_mask(
                 prompt_cache, bool(config.get("cost_aware_admission", False))
             )
@@ -574,13 +578,14 @@ class PromptLookupBatchGenerator:
                 ngram_max=config.get("ngram_max", 6),
                 hot_segments=config.get("hot_segments", 4),
                 reject_ttl=config.get("reject_ttl", 8),
-                recent_prompt_segments=config.get("recent_prompt_segments", 0),
+                recent_prompt_segments=recent_prompt_segments,
                 prompt_segment_tokens=config.get("prompt_segment_tokens", 1024),
+                index_window=(None if recent_prompt_segments else max(lookback_ladder)),
             )
             for segment in config.get("retrieval_segments", ()):
                 proposer.add_hot_segment(segment)
             lookback = AdaptiveLookback(
-                config.get("lookback_ladder", (256, 1024, 4096, 16384)),
+                lookback_ladder,
                 misses=config.get("lookback_misses", 4),
                 rejects=config.get("lookback_rejects", 2),
             )
@@ -1248,6 +1253,7 @@ class PromptLookupBatchGenerator:
             "verify_accept_hist": dict(lane.stats.verify_accept_hist),
             "span_snap_cycles": lane.stats.span_snap_cycles,
             "span_extend_cycles": lane.stats.span_extend_cycles,
+            "lookup_index": lane.proposer.index_receipt(),
             "target_width": lane.target_max_width,
             "memory_max_draft": lane.config.get("memory_max_draft"),
             "qualification_authority": "serving_route",
