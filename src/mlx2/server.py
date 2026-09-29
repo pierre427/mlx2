@@ -901,26 +901,29 @@ def wait_event(
     poll_seconds=0.5,
     idle_seconds=None,
     on_idle=None,
+    idle_since=None,
 ):
     """Block for the next engine event, watching the client socket meanwhile.
 
-    ``on_idle`` runs after every ``idle_seconds`` without an event (a stream's
-    keepalive); the overall deadline is unchanged.
+    ``on_idle`` (a stream's keepalive) runs whenever ``idle_seconds`` have
+    passed since ``idle_since()``, the last byte the response wrote -- not
+    since the last engine event, which a buffered stream consumes without
+    writing.  The overall deadline is unchanged.
     """
-    now = time.monotonic()
-    deadline = now + deadline_seconds
-    idle_at = now + idle_seconds if on_idle is not None and idle_seconds else None
+    deadline = time.monotonic() + deadline_seconds
+    watching = on_idle is not None and bool(idle_seconds) and idle_since is not None
     while True:
         now = time.monotonic()
         remaining = deadline - now
         if remaining <= 0:
             raise TimeoutError("generation timed out")
-        if idle_at is not None and now >= idle_at:
-            on_idle()
-            idle_at = now + idle_seconds
         timeout = min(poll_seconds, remaining)
-        if idle_at is not None:
-            timeout = max(0.0, min(timeout, idle_at - now))
+        if watching:
+            due = idle_since() + idle_seconds
+            if now >= due:
+                on_idle()
+                due = idle_since() + idle_seconds
+            timeout = max(0.0, min(timeout, due - now))
         try:
             return events.get(timeout=timeout)
         except queue.Empty:
@@ -2512,6 +2515,8 @@ def handler_for(
             # grammar is engaged (tool_grammar_streaming); Responses ids and
             # output indexes already sent for function_call items.
             grammar_tool_stream = False
+            grammar_stream_decided = False
+            prologue_sent = False
             grammar_stream_ready = False
             grammar_message_index = None
             streamed_calls = {}
@@ -2811,9 +2816,11 @@ def handler_for(
                     "reasoning_tokens": 0,
                 }
                 hosted_receipts = []
-                def open_stream():
-                    """Commit the SSE response and send its protocol prologue."""
-                    nonlocal streaming, anthropic_translator
+                def commit_stream():
+                    """Commit the SSE response headers (once)."""
+                    nonlocal streaming
+                    if streaming:
+                        return
                     self.send_response(200)
                     self.send_header("Content-Type", "text/event-stream")
                     self.send_header("Cache-Control", "no-cache")
@@ -2821,6 +2828,12 @@ def handler_for(
                     self.end_headers()
                     self.close_connection = True
                     streaming = True
+
+                def open_stream():
+                    """Commit the SSE response and send its protocol prologue."""
+                    nonlocal anthropic_translator, prologue_sent
+                    commit_stream()
+                    prologue_sent = True
                     if anthropic:
                         anthropic_translator = AnthropicStreamTranslator(
                             message_id=job.id,
@@ -2862,11 +2875,42 @@ def handler_for(
                     their status.
                     """
                     if not streaming:
-                        if not job.prompt_tokens:
-                            return
-                        open_stream()
+                        if job.uid is None:
+                            return  # not attached to a lane yet
+                        if buffered_hosted_stream:
+                            # Its response is named after the last hosted
+                            # round's job; the prologue waits for that.
+                            commit_stream()
+                        else:
+                            open_stream()
                     self.wfile.write(SSE_KEEPALIVE)
                     self.wfile.flush()
+                    self._last_stream_write = time.monotonic()
+
+                def with_keepalive(call):
+                    """Run a blocking ``call`` (a hosted tool) keeping the stream alive."""
+                    if not (body.get("stream") and sse_keepalive_seconds):
+                        return call()
+                    outcome = {}
+
+                    def run():
+                        try:
+                            outcome["value"] = call()
+                        except BaseException as error:  # noqa: BLE001 - re-raised below
+                            outcome["error"] = error
+
+                    worker = threading.Thread(target=run, daemon=True)
+                    worker.start()
+                    while worker.is_alive():
+                        due = self._last_stream_write + sse_keepalive_seconds
+                        worker.join(max(0.0, min(0.5, due - time.monotonic())))
+                        if worker.is_alive() and time.monotonic() >= due:
+                            keepalive()
+                    if "error" in outcome:
+                        raise outcome["error"]
+                    return outcome["value"]
+
+                self._last_stream_write = time.monotonic()
 
                 while True:
                     # A stream can go quiet during a long prefill after its
@@ -2878,6 +2922,7 @@ def handler_for(
                         connection=self.connection,
                         idle_seconds=sse_keepalive_seconds,
                         on_idle=keepalive if body.get("stream") else None,
+                        idle_since=lambda: self._last_stream_write,
                     )
                     if "error" in event:
                         mlx2 = event.get("mlx2")
@@ -2946,9 +2991,15 @@ def handler_for(
                             # Buffered streams commit no bytes before terminal
                             # validation, so there is no stream to report into.
                             continue
+                    # Decided once, at the first event past prompt progress
+                    # (a keepalive may already have opened the stream, but no
+                    # delta has been sent).
+                    grammar_stream_decision, grammar_stream_decided = (
+                        not grammar_stream_decided, True
+                    )
                     if (
                         grammar_stream_ready
-                        and not streaming
+                        and grammar_stream_decision
                         and getattr(job, "tool_grammar_status", None) == "engaged"
                     ):
                         # Admission engaged the tool grammar before the first
@@ -3216,8 +3267,10 @@ def handler_for(
                                     raise ToolContractError(
                                         "hosted tool arguments must be a JSON object"
                                     )
-                                result = tool_backend.execute(
-                                    executors[function["name"]], arguments
+                                result = with_keepalive(
+                                    lambda: tool_backend.execute(
+                                        executors[function["name"]], arguments
+                                    )
                                 )
                                 outputs.append(
                                     {
@@ -3271,7 +3324,7 @@ def handler_for(
                                     "receipts": hosted_receipts,
                                 },
                             }
-                        if buffered_hosted_stream and not streaming:
+                        if buffered_hosted_stream and not prologue_sent:
                             open_stream()
                             # The buffered message is opened, with its whole
                             # text as one delta, where the final payload
@@ -3917,6 +3970,7 @@ def handler_for(
             )
             self.wfile.write(f"data: {data}\n\n".encode())
             self.wfile.flush()
+            self._last_stream_write = time.monotonic()
 
         def _chat_delta(self, delta):
             """Name the assistant role on the first content (or final) delta.
@@ -4054,11 +4108,13 @@ def handler_for(
             data = json.dumps(value, allow_nan=False)
             self.wfile.write(f"event: {value['type']}\ndata: {data}\n\n".encode())
             self.wfile.flush()
+            self._last_stream_write = time.monotonic()
 
         def _anthropic_sse(self, value):
             data = json.dumps(value, allow_nan=False)
             self.wfile.write(f"event: {value['type']}\ndata: {data}\n\n".encode())
             self.wfile.flush()
+            self._last_stream_write = time.monotonic()
 
     return Handler
 

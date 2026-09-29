@@ -39,18 +39,24 @@ class SilentEngine(FakeEngine):
     delay = 0.9
     admitted = True
     events = ()
+    spacing = 0.0
+    tool_grammar_status = None
 
     def submit(self, request, *, tenant_id="default"):
         job = self.job = Job(request)
         job.tenant_id = tenant_id
         if self.admitted:
+            # Counted, then attached to a lane: the keepalive's admission test.
             job.prompt_tokens, job.cached_tokens = 5, 0
+            job.uid = 0
+        job.tool_grammar_status = self.tool_grammar_status
         job.completion_tokens = 1
 
         def later():
             time.sleep(self.delay)
             for event in self.events:
                 job.events.put(event)
+                time.sleep(self.spacing)
 
         threading.Thread(target=later, daemon=True).start()
         return job
@@ -174,3 +180,110 @@ def test_anthropic_stream_opens_with_the_admitted_prompt_count(served):
     message_start = json.loads(raw[start:].split("data: ", 1)[1].split("\n", 1)[0])
     assert message_start["message"]["usage"]["input_tokens"] == 5
     assert "event: message_stop" in raw
+
+
+def test_counted_but_unattached_request_commits_nothing(served):
+    """A prompt counted but still waiting for memory or a LoRA slot is not
+    admitted: an admission error must keep its HTTP status."""
+    engine, base = served
+    original = SilentEngine.submit
+
+    def counted_only(self, request, *, tenant_id="default"):
+        job = original(self, request, tenant_id=tenant_id)
+        job.uid = None
+        return job
+
+    engine.submit = counted_only.__get__(engine)
+    engine.events = ({"error": "no memory", "status": 503},)
+    with pytest.raises(HTTPError) as caught:
+        post(base, stream=True)
+    assert caught.value.code == 503
+
+
+def test_buffered_stream_keeps_alive_while_it_consumes_deltas_silently(served):
+    """Keepalives follow bytes written, not engine events: a buffered tool
+    stream receiving a delta every 0.1 s still writes nothing for seconds."""
+    engine, base = served
+    engine.delay, engine.spacing = 0.0, 0.1
+    pieces = ['{"q": "', *"abcdefghij", '"}']
+    engine.events = tuple(
+        {"delta": {"tool_calls": [{"index": 0, "id": "call_1", "type": "function",
+                                   "function": {"name": "lookup", "arguments": piece}}]}}
+        for piece in pieces
+    ) + ({**FINISH, "finish_reason": "tool_calls"},)
+    with post(base, stream=True, tools=[STRICT_TOOL]) as response:
+        raw = response.read().decode()
+    assert raw.count(": keep-alive\n\n") >= 2
+
+
+def test_grammar_tool_streaming_still_engages_after_an_early_keepalive(served):
+    engine, base = served
+    engine.tool_grammar_status = "engaged"
+    engine.status = lambda: {**FakeEngine.status(engine), "settings": {"tool_grammar_streaming": True}}
+    call = {"tool_calls": [{"index": 0, "id": "call_1", "type": "function",
+                            "function": {"name": "lookup", "arguments": '{"q": "x"}'}}]}
+    engine.events = ({"delta": call}, {**FINISH, "finish_reason": "tool_calls"})
+    with post(base, stream=True, tools=[STRICT_TOOL]) as response:
+        raw = response.read().decode()
+    assert raw.index(": keep-alive") < raw.index("data: {")
+    assert engine.counts["constrained_tool_grammar_streams"] == 1
+
+
+def test_hosted_stream_keeps_alive_through_a_slow_tool_with_one_response_id():
+    from test_serving_contract import TOOLS, post_response
+
+    class Backend:
+        def prepare(self, tools):
+            return TOOLS, {"weather": "binding"}
+
+        def execute(self, binding, arguments):
+            time.sleep(0.9)  # a slow hosted tool writes nothing meanwhile
+            return {"temperature": 21}
+
+    class ToolEngine(SilentEngine):
+        rounds = 0
+
+        def submit(self, request, *, tenant_id="default"):
+            self.rounds += 1
+            if self.rounds == 1:
+                self.events = (
+                    {"delta": {"tool_calls": [{
+                        "index": 0, "id": "call_weather", "type": "function",
+                        "function": {"name": "weather", "arguments": '{"city":"T"}'},
+                    }]}},
+                    {"finish_reason": "tool_calls", "receipt": {}},
+                )
+            else:
+                self.delay = 0.0
+                self.events = ({"delta": {"content": "21 C."}}, {"finish_reason": "stop", "receipt": {}})
+            return super().submit(request, tenant_id=tenant_id)
+
+    engine = ToolEngine()
+    server = ThreadingHTTPServer(
+        ("127.0.0.1", 0),
+        handler_for(engine, tool_backend=Backend(), sse_keepalive_seconds=0.2),
+    )
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        with post_response(
+            f"http://127.0.0.1:{server.server_port}",
+            input="weather?",
+            stream=True,
+            tools=[{
+                "type": "mcp", "server_label": "weather",
+                "server_url": "https://example.invalid/mcp", "require_approval": "never",
+            }],
+        ) as response:
+            raw = response.read().decode()
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
+    # Keepalives before the first event and during the tool call.
+    assert raw.count(": keep-alive\n\n") >= 6
+    events = [json.loads(line[6:]) for line in raw.splitlines() if line.startswith("data: {")]
+    created = [e for e in events if e["type"] == "response.created"]
+    completed = [e for e in events if e["type"] == "response.completed"]
+    assert len(created) == 1 and len(completed) == 1
+    assert created[0]["response"]["id"] == completed[0]["response"]["id"]

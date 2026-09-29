@@ -5739,7 +5739,11 @@ class ServingEngine:
                     "thinking_allowance_tokens": getattr(adapter, "thinking_allowance_tokens", None),
                     "structured_output": {
                         "engines": ["automaton", "scanner"],
-                        "thinking_deferral": thinking_close_token_ids(adapter) is not None,
+                        # A grammar can wait past reasoning for the
+                        # thinking-close marker or, like Muse, for the
+                        # header that opens the answer.
+                        "thinking_deferral": thinking_close_token_ids(adapter) is not None
+                        or callable(getattr(adapter, "structured_answer_token_ids", None)),
                         "constrained_tools": self.constrained_tool_grammar and callable(
                             getattr(adapter, "tool_constraint", None)
                         ),

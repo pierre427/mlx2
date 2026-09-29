@@ -1550,6 +1550,8 @@ def test_answer_header_defers_a_client_grammar_past_the_reply_framing(scripted_e
     build, state = scripted_engine
     state["answer_ids"] = SPLIT_MARKER
     engine = build(declare_marker=False)
+    # HTTP validation reads this to admit structured output with thinking.
+    assert engine.status()["structured_output"]["thinking_deferral"] is True
     state["script"] = [2, 3, *SPLIT_MARKER, BLANK]
     reasoning, content, final = _collect(engine.submit(dict(THINKING_JSON_REQUEST)))
     assert "error" not in final, final

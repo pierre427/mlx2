@@ -361,7 +361,10 @@ class LagunaXS21Adapter(ExternalDraftAdapterMixin):
         # transformers' Qwen2Tokenizer drops the declared combining-mark split rule.
         from ..runtime.tokenizer_integrity import repair_loaded_tokenizer
 
-        self.pretokenizer_receipt = repair_loaded_tokenizer(tokenizer, path)
+        # fix_mistral_regex corrects the file's regex on purpose: keep it.
+        self.pretokenizer_receipt = repair_loaded_tokenizer(
+            tokenizer, path, file_authoritative=False
+        )
         eos = self.config.get("eos_token_id")
         self.tokenizer = TokenizerWrapper(
             tokenizer,
