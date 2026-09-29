@@ -40,9 +40,10 @@ BUILTIN = {
     "moe": {"mode": "off"},
 }
 
-# Family-specific adjustments (descriptor.family -> partial policy).  Empty
-# until a family measures differently from its format defaults.
-FAMILY_DEFAULTS: dict[str, dict] = {}
+# Muse's q4 lane wrapper passed batched correctness, but three-repetition
+# width-one serving ladders at 4K and 16K were slower than stock even when
+# grouping was disabled.  Keep the kernel available for explicit trials.
+FAMILY_DEFAULTS: dict[str, dict] = {"muse-glimmer": {"mode": "off"}}
 
 _KEYS = {"mode", "min_rows", "max_rows", "grouping", "skip", "moe"}
 

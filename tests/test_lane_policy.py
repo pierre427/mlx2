@@ -91,6 +91,16 @@ def test_family_defaults_then_overrides_win(monkeypatch):
     assert user["max_rows"] == 16
 
 
+def test_muse_family_keeps_stock_default_and_allows_explicit_opt_in():
+    detected = policy.detect(_Dense())
+    default = policy.resolve(detected, family="muse-glimmer", mode="auto")
+    assert default["mode"] == "off"
+    assert default["sources"]["mode"] == "family:muse-glimmer"
+    opted = policy.resolve(detected, family="muse-glimmer", mode="crossover")
+    assert opted["mode"] == "crossover"
+    assert opted["sources"]["mode"] == "cli"
+
+
 @pytest.mark.parametrize(
     ("override", "message"),
     [
