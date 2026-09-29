@@ -1,0 +1,21 @@
+{
+  "source_repository": "https://github.com/ashhart/TensorFold.git",
+  "source_revision": "bb4b4a35863af562fc4ccb2586300d8f94b5d6de",
+  "source_paths": [
+    "src/tensorfold/kernels/qwen/flash_next/v1/kernels.py:_QMV_ROWS",
+    "src/tensorfold/kernels/qwen/flash_next/v1/kernels.py:load16,qdot16,qmv_rows"
+  ],
+  "license": "MIT",
+  "notice": "provenance/LICENSE.TensorFold-MIT",
+  "destination_paths": [
+    "src/mlx2/runtime/models/flash_tensorfold_qmv.py",
+    "src/mlx2/adapters/flash_next_policy.py",
+    "src/mlx2/adapters/flash_next.py"
+  ],
+  "modifications": [
+    "Generalized the source's group-32 row matvec to the artifact's 4-bit group-64 dense projections while preserving row-independent arithmetic.",
+    "Restricted installation to eligible dense projections; streamed PLE and routed expert weights remain owned by mlx2.",
+    "Use one numerical law at both one-row decode and multi-row verification, bind the policy and counters to route receipts, and leave the ordinary route available as reference."
+  ],
+  "qualification": "candidate; synthetic numerical, model output, memory, and thermal performance gates pending"
+}

@@ -315,6 +315,11 @@ class FlashNextAdapter:
             self.model.load_weights(list(weights.items()), strict=True)
             self.model.eval()
             mx.eval(self.model.parameters())
+            self.tensorfold_qmv = None
+            if self.policy.tensorfold_qmv_rows:
+                from ..runtime.models.flash_tensorfold_qmv import install
+
+                self.tensorfold_qmv = install(self.model)
             self.fp32_head = None
             if self.policy.fp32_head_logits:
                 from ..runtime.fp32_head import enable_fp32_head_logits
@@ -425,6 +430,7 @@ class FlashNextAdapter:
 
     def diagnostics(self) -> dict:
         from dataclasses import asdict
+        from ..runtime.models.flash_tensorfold_qmv import counters as tensorfold_qmv_counters
 
         from ..runtime.models.qwen4_exp import (
             qwen4_eager_dispatch_status,
@@ -470,6 +476,13 @@ class FlashNextAdapter:
         return {
             "moe": moe,
             "policy": self.policy.as_dict(),
+            **(
+                {"tensorfold_qmv": {
+                    **self.tensorfold_qmv,
+                    "counters": tensorfold_qmv_counters(),
+                }}
+                if getattr(self, "tensorfold_qmv", None) else {}
+            ),
             "round_levers": lever_snapshot(),
             "eager_dispatch": qwen4_eager_dispatch_status(),
             "ple_tables": [asdict(table.stats) for table in self._tables],

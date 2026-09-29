@@ -4454,6 +4454,10 @@ class ServingEngine:
                 else self.adapter_factory(self.model_path)
             )
             self.adapter = adapter
+            if getattr(adapter, "tensorfold_qmv", None) and self.lane_matmul != "off":
+                raise ValueError(
+                    "TensorFold Flash qmv and lane_matmul cannot own the same projections"
+                )
             if self.lane_matmul != "off":
                 # Before any cache or generator exists: every later call of a
                 # covered projection sees the installed arithmetic.

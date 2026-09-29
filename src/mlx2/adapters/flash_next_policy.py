@@ -72,6 +72,8 @@ class FlashNextPolicy:
     # The target/verify head remains full width.  Constrained requests bypass
     # this head in hybrid_speculative rather than risking an empty legal set.
     mtp_draft_vocab: bool = False
+    # Candidate TensorFold Flash row matvec generalized for q4/group-64.
+    tensorfold_qmv_rows: bool = False
 
     def __post_init__(self):
         validate_self_mtp_num_draft(self.num_draft)
@@ -90,6 +92,7 @@ class FlashNextPolicy:
             "fused_gdn_dynamic_accept",
             "fp32_head_logits",
             "mtp_draft_vocab",
+            "tensorfold_qmv_rows",
             *_OPTIONAL_KERNEL_ENV,
         ):
             if type(getattr(self, name)) is not bool:
@@ -131,6 +134,8 @@ class FlashNextPolicy:
             del values["fp32_head_logits"]
         if not self.mtp_draft_vocab:
             del values["mtp_draft_vocab"]
+        if not self.tensorfold_qmv_rows:
+            del values["tensorfold_qmv_rows"]
         for name in _OPTIONAL_KERNEL_ENV:
             if not getattr(self, name):
                 del values[name]
