@@ -989,7 +989,27 @@ def test_memory_defers_without_mutating_or_drawing():
     uid=b.insert([[1,2,3]],max_tokens=[4])[0];state=b.lanes[uid].rng.snapshot()
     assert b.next()==([],[])
     assert b.lanes[uid].rng.snapshot()==state and b.lanes[uid].history==[]
-    assert b.scheduler_stats['memory_deferred']==1
+    assert b.scheduler_stats['memory_deferred']>=1
+
+
+def test_prefill_adapts_to_admissible_slice_without_overbooking():
+    m,d=tiny();budget=[10**12]
+    b=generator(m,d,memory_headroom=lambda:budget[0])
+    uid=b.insert([[1,2,3,4,5]],max_tokens=[4])[0]
+    lane=b.lanes[uid]
+    state=lane.rng.snapshot()
+    assert b._admit([lane],1,prefill=True)
+    one_token_bytes=b.scheduler_stats['reservation_bytes']
+    assert b._admit([lane],2,prefill=True)
+    assert one_token_bytes < b.scheduler_stats['reservation_bytes']
+    budget[0]=one_token_bytes
+    prompts,responses=b.next()
+    assert len(prompts)==1 and not responses
+    assert lane.history==[1]
+    assert lane.rng.snapshot()==state
+    assert b.scheduler_stats['prefill_adaptive_slices']==1
+    assert b.scheduler_stats['reservation_bytes']<=budget[0]
+    b.close()
 
 
 def test_selector_batched_projection_and_single_lane_agree():

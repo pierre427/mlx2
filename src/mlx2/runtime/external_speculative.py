@@ -556,9 +556,9 @@ class ExternalDraftBatchGenerator:
         state = ExternalDraftState((draft_cache, tail), len(lane.history), self.mx.array(list(json.dumps(lane.rng.snapshot(), sort_keys=True).encode()), dtype=self.mx.uint8), lane.rng.draws, binding=self.binding)
         state.validate(self.binding, len(lane.history)); return state
 
-    def _prefill(self, lane):
+    def _prefill(self, lane, *, step=None):
         if len(lane.remaining) > 1:
-            n = min(self.prefill_step, len(lane.remaining)-1)
+            n = min(self.prefill_step if step is None else step, len(lane.remaining)-1)
             if lane.tail.shape[1]:
                 self._append_context(lane, lane.remaining[0])
             inputs = [lane.remaining.popleft() for _ in range(n)]
@@ -1943,8 +1943,14 @@ class ExternalDraftBatchGenerator:
             admitted = self._admit([lane], append, prefill=True)
             while not admitted and self._reclaim_for_admission():
                 admitted = self._admit([lane], append, prefill=True)
+            initial_append = append
+            while not admitted and append > 1:
+                append = max(1, append // 2)
+                admitted = self._admit([lane], append, prefill=True)
             if admitted:
-                prompts.append(self._prefill(lane)); break
+                if append < initial_append:
+                    self.scheduler_stats["prefill_adaptive_slices"] = self.scheduler_stats.get("prefill_adaptive_slices", 0) + 1
+                prompts.append(self._prefill(lane, step=append)); break
         ready = [l for l in ordered if l.anchor is not None and not l.ready and not l.cancelled][:self.capacity]
         groups = {}
         for lane in ready:
