@@ -68,6 +68,10 @@ class FlashNextPolicy:
     # them to bf16 (runtime/fp32_head.py).  Not an environment switch; it
     # enters receipts only when enabled, like the kernels above.
     fp32_head_logits: bool = False
+    # Opt-in artifact-bound reduced vocabulary for the MTP proposal head.
+    # The target/verify head remains full width.  Constrained requests bypass
+    # this head in hybrid_speculative rather than risking an empty legal set.
+    mtp_draft_vocab: bool = False
 
     def __post_init__(self):
         validate_self_mtp_num_draft(self.num_draft)
@@ -85,6 +89,7 @@ class FlashNextPolicy:
             "eager_dispatch",
             "fused_gdn_dynamic_accept",
             "fp32_head_logits",
+            "mtp_draft_vocab",
             *_OPTIONAL_KERNEL_ENV,
         ):
             if type(getattr(self, name)) is not bool:
@@ -124,6 +129,8 @@ class FlashNextPolicy:
             del values["fused_gdn_dynamic_accept"]
         if not self.fp32_head_logits:
             del values["fp32_head_logits"]
+        if not self.mtp_draft_vocab:
+            del values["mtp_draft_vocab"]
         for name in _OPTIONAL_KERNEL_ENV:
             if not getattr(self, name):
                 del values[name]

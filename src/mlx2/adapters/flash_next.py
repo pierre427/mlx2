@@ -40,6 +40,9 @@ def artifact_identity(path: Path) -> dict:
         "tokenizer_config.json",
         "chat_template.jinja",
         "ple_rows.bin.manifest.json",
+        "mtp_draft_vocab.json",
+        "mtp_draft_vocab.ids",
+        "mtp_draft_vocab.ids.LICENSE",
     ):
         item = path / name
         if item.exists():
@@ -224,6 +227,11 @@ class FlashNextAdapter:
         path = Path(model_path).expanduser().resolve()
         self.identity = artifact_identity(path)
         self.environment = configure_environment(path, self.policy)
+        draft_vocab = None
+        if self.policy.mtp_draft_vocab:
+            from ..runtime.mtp_draft_vocab import load_manifest
+
+            draft_vocab = load_manifest(path)
         import mlx.core as mx
         import mlx.nn as nn
         from transformers import AutoTokenizer
@@ -309,6 +317,14 @@ class FlashNextAdapter:
                 from ..runtime.fp32_head import enable_fp32_head_logits
 
                 self.fp32_head = enable_fp32_head_logits(self.model.language_model)
+            self.mtp_draft_vocab = None
+            if draft_vocab is not None:
+                from ..runtime.mtp_draft_vocab import install_reduced_mtp_head
+
+                self.mtp_draft_vocab = install_reduced_mtp_head(
+                    self.model, *draft_vocab
+                )
+                mx.eval(self.model.mtp_draft_head.parameters())
             # MLX may lazily rewrite module dictionaries while speculative
             # execution is first compiling. Diagnostics run from the serving
             # worker and must never traverse that live mutable tree. The
@@ -470,6 +486,11 @@ class FlashNextAdapter:
             **(
                 {"fp32_head_logits": self.fp32_head}
                 if getattr(self, "fp32_head", None)
+                else {}
+            ),
+            **(
+                {"mtp_draft_vocab": self.model.mtp_draft_vocab_status()}
+                if getattr(self, "mtp_draft_vocab", None)
                 else {}
             ),
         }

@@ -6011,7 +6011,7 @@ class Model(nn.Module):
                 cache._mtp_shared_topk = None
                 cache._mtp_shared_topk_n_blocks = None
 
-    def mtp_step(self, hidden, tokens, mtp_cache):
+    def _mtp_step(self, hidden, tokens, mtp_cache, *, full_vocab):
         embeddings = self.language_model.model.embed_tokens(tokens)
         multi = self.mtp.fuse(embeddings, hidden)
         cache = mtp_cache[0]
@@ -6020,7 +6020,35 @@ class Model(nn.Module):
             mask = mask[None, None, :, :]
         multi = self.mtp.layers[0](multi, tokens, mask, cache, None)
         sample = self.mtp.hyper_connection_mixer(multi)
-        return (self.logits(sample), multi)
+        draft_head = getattr(self, "mtp_draft_head", None)
+        draft_enabled = bool(getattr(self, "mtp_draft_vocab_enabled", False))
+        if draft_head is None or full_vocab or not draft_enabled:
+            if draft_head is not None:
+                self.mtp_draft_vocab_full_bypasses += 1
+            logits = self.logits(sample)
+        else:
+            self.mtp_draft_vocab_calls += 1
+            logits = draft_head(sample)
+        return (logits, multi)
+
+    def mtp_step(self, hidden, tokens, mtp_cache):
+        return self._mtp_step(hidden, tokens, mtp_cache, full_vocab=False)
+
+    def mtp_step_full_vocab(self, hidden, tokens, mtp_cache):
+        """Draft one step through the full head for constrained proposal laws."""
+        return self._mtp_step(hidden, tokens, mtp_cache, full_vocab=True)
+
+    def mtp_draft_vocab_status(self):
+        head = getattr(self, "mtp_draft_head", None)
+        if head is None:
+            return {"enabled": False}
+        return {
+            **getattr(self, "mtp_draft_vocab_manifest", {}),
+            **head.receipt(),
+            "runtime_enabled": bool(self.mtp_draft_vocab_enabled),
+            "reduced_head_calls": int(self.mtp_draft_vocab_calls),
+            "full_vocab_bypasses": int(self.mtp_draft_vocab_full_bypasses),
+        }
 
     def sanitize(self, weights):
         has_mtp_weights = any(

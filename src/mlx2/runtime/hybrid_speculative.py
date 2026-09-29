@@ -294,6 +294,15 @@ def _mtp_backbone(model, tokens, cache):
     return (hidden, hidden)
 
 
+def _mtp_proposal_step(model, hidden, tokens, cache, lanes):
+    """Use a full proposal head whenever any batched lane is constrained."""
+    if any(lane.logits_processors for lane in lanes):
+        full_step = getattr(model, "mtp_step_full_vocab", None)
+        if full_step is not None:
+            return full_step(hidden, tokens, cache)
+    return model.mtp_step(hidden, tokens, cache)
+
+
 def _restore_mtp_state(cache, mtp_state):
     """Validate and unpack an MTP sidecar paired with ``cache``.
 
@@ -2235,10 +2244,12 @@ def _propose_batched_self_mtp_round(
                 batch.caches.draft, first_lengths, right_padding
             )
             try:
-                (d_logits, post) = model.mtp_step(
+                (d_logits, post) = _mtp_proposal_step(
+                    model,
                     mx.concatenate(hidden_rows),
                     mx.concatenate(token_rows),
                     batch.caches.draft,
+                    batch.lanes,
                 )
             finally:
                 _finalize_self_mtp_cache_group(batch.caches.draft)
@@ -2298,8 +2309,8 @@ def _propose_batched_self_mtp_round(
                     batch.caches.draft, lengths, right_padding
                 )
                 try:
-                    (d_logits, post) = model.mtp_step(
-                        hidden, tokens, batch.caches.draft
+                    (d_logits, post) = _mtp_proposal_step(
+                        model, hidden, tokens, batch.caches.draft, batch.lanes
                     )
                 finally:
                     _finalize_self_mtp_cache_group(batch.caches.draft)

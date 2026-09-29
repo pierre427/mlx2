@@ -1,0 +1,7 @@
+Design adapted from dime-online/qwen3.8-Flash-DGX-UltraFast at revision
+0c391a3e74b6a775cfe248691ca7fd855b1876a5, licensed under Apache-2.0.
+
+The mlx2 implementation is an original MLX port. It retains the design's
+restricted-support proposal law and full-width negative-infinity scatter, but
+uses mlx2 artifact binding, adapter policy, diagnostics, and constrained-lane
+fallback contracts. No vLLM or CUDA/Marlin implementation is included.

@@ -1,0 +1,45 @@
+{
+  "schema": "mlx2-provenance-v1",
+  "component": "Artifact-bound reduced-vocabulary native-MTP proposal head",
+  "source_repository": "https://github.com/dime-online/qwen3.8-Flash-DGX-UltraFast",
+  "source_revision": "0c391a3e74b6a775cfe248691ca7fd855b1876a5",
+  "source_paths": [
+    "recipe/build/image/src/vllm_mtp_draft_vocab.py",
+    "recipe/build/image/src/draft_vocab_common.py"
+  ],
+  "license": "Apache-2.0",
+  "notice": "provenance/mtp-draft-vocab.NOTICE",
+  "destination_paths": [
+    "src/mlx2/runtime/mtp_draft_vocab.py",
+    "src/mlx2/runtime/models/qwen4_exp.py",
+    "src/mlx2/runtime/hybrid_speculative.py",
+    "src/mlx2/adapters/flash_next.py",
+    "src/mlx2/adapters/flash_next_policy.py",
+    "scripts/build_mtp_draft_vocab_manifest.py",
+    "scripts/plan_mtp_draft_vocab_ab.py",
+    "scripts/qualify_mtp_draft_vocab.py",
+    "scripts/analyze_mtp_draft_vocab_divergence.py",
+    "tests/test_mtp_draft_vocab_cpu.py"
+  ],
+  "modifications": [
+    "Ported the reduced-output-row concept to an adapter-owned MLX module for affine-quantized or float heads; no vLLM or CUDA/Marlin code copied.",
+    "Added exact artifact binding for the id list, its retained license file, and the model config, weight index, and tokenizer.",
+    "Kept ordinary target logits and verification full-vocabulary and added a capability-based full-head bypass for any batched lane with logits processors.",
+    "Left the mechanism default-off and exposed separate selected and observed-use diagnostics.",
+    "Added a CPU-only manifest builder, a non-executing A/B plan generator, an isolated same-load GPU A/B harness, and a teacher-forced divergence analyzer."
+  ],
+  "validation": [
+    "CPU-only manifest binding, full-slice identity, reduced-slice -inf scatter, constrained-request bypass, policy, and rejection-law tests.",
+    "GPU smoke and counterbalanced same-load A/B on Apple M5 Max with MLX 0.32.2.dev20260919+39400a0d4; raw receipts are under qualification/runs/mtp-draft-vocab-20260929/.",
+    "The candidate was observed used, the constrained-request full-head bypass was observed used, and timed A/B rounds incurred zero swapout growth.",
+    "Median paired throughput changed by +3.43% at B1, -0.92% at B4, and -0.84% at B8; therefore the feature remains default-off and is not selected for production.",
+    "Exact greedy parity passed at B1 and B8. B4 diverged at one repeated near-tie: the reduced arm selected the teacher-forced full-target argmax by a 0.125-logit margin while the control selected the runner-up; this still fails the exact-token qualification gate."
+  ],
+  "qualification": {
+    "status": "observed-used-not-selected",
+    "summary": "qualification/runs/mtp-draft-vocab-20260929/README.md",
+    "smoke": "qualification/runs/mtp-draft-vocab-20260929/smoke.json",
+    "ab": "qualification/runs/mtp-draft-vocab-20260929/ab-b1-b4-b8.json",
+    "divergence_analysis": "qualification/runs/mtp-draft-vocab-20260929/divergence-analysis.json"
+  }
+}
