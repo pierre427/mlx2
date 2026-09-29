@@ -230,6 +230,56 @@ def test_quantized_base_is_supported(adapters):
     assert manager.status()["counts"]["delta_applications"] > 0
 
 
+def test_checkpoint_lora_keys_map_to_loaded_modules(tmp_path):
+    model = tiny_model()
+    module_key = KEYS_A[0]
+    artifact_key = "language_model." + module_key
+    artifact = write_adapter(
+        tmp_path / "aliased", keys=(artifact_key,),
+        dims={artifact_key: dims_for(model, (module_key,))[module_key]},
+        rank=2, seed=7,
+    )
+    object.__setattr__(
+        model, "lora_module_key",
+        lambda key: key.removeprefix("language_model."),
+    )
+    manager = MultiLoRAManager(model, max_loras=1, max_lora_rank=2)
+    adapter, new_keys = manager.prepare("aliased", artifact)
+    assert adapter.keys == (artifact_key,)
+    assert adapter.module_keys == new_keys == (module_key,)
+    manager.wrap_keys(new_keys)
+    manager.commit(adapter)
+    slot, _ = manager.acquire("aliased")
+    manager.bind_uid(1, slot)
+    bound = bind_lora_rows(model, [1])
+    try:
+        output = model(mx.array([PROMPTS[0]]))
+        mx.eval(output)
+    finally:
+        clear_lora_rows(bound)
+        manager.release(slot)
+    assert manager.status()["counts"]["delta_applications"] > 0
+    assert not mx.allclose(output, tiny_model()(mx.array([PROMPTS[0]])), atol=1e-4)
+
+
+def test_checkpoint_lora_key_collision_fails_closed(tmp_path):
+    model = tiny_model()
+    module_key = KEYS_A[0]
+    aliases = (module_key, "language_model." + module_key)
+    artifact = write_adapter(
+        tmp_path / "collision", keys=aliases,
+        dims={key: dims_for(model, (module_key,))[module_key] for key in aliases},
+        rank=2, seed=9,
+    )
+    object.__setattr__(
+        model, "lora_module_key",
+        lambda key: key.removeprefix("language_model."),
+    )
+    manager = MultiLoRAManager(model, max_loras=1, max_lora_rank=2)
+    with pytest.raises(ValueError, match="one-to-one"):
+        manager.prepare("collision", artifact)
+
+
 # --------------------------------------------------------------------------
 # Engine integration (ordinary route, qualification mode, tiny hybrid model)
 # --------------------------------------------------------------------------

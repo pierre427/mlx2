@@ -157,6 +157,7 @@ class RegisteredAdapter:
     tensors: dict  # key -> (A (in, rank), B_scaled (rank, out))
     nbytes: int
     lora_int_id: int | None = None
+    module_keys: tuple = ()  # loaded-model keys, in source key order
 
 
 class SlotUnavailable(RuntimeError):
@@ -268,16 +269,22 @@ class MultiLoRAManager:
                 f"LoRA tensor coverage mismatch; missing={missing}, extra={extra}"
             )
         modules = dict(self.model.named_modules())
+        resolve_key = getattr(self.model, "lora_module_key", lambda key: key)
+        module_keys = tuple(resolve_key(key) for key in config["keys"])
+        if any(not isinstance(key, str) or not key for key in module_keys):
+            raise ValueError("LoRA module key mapping returned an invalid key")
+        if len(set(module_keys)) != len(module_keys):
+            raise ValueError("LoRA module key mapping is not one-to-one")
         wrapper = multi_lora_linear_class()
         new_keys = []
         nbytes = 0
-        for key in config["keys"]:
-            module = modules.get(key)
+        for key, module_key in zip(config["keys"], module_keys):
+            module = modules.get(module_key)
             if isinstance(module, wrapper):
                 base = module.base
             elif isinstance(module, (nn.Linear, nn.QuantizedLinear)):
                 base = module
-                new_keys.append(key)
+                new_keys.append(module_key)
             else:
                 raise ValueError(
                     f"LoRA key {key!r} is not a Linear/QuantizedLinear module"
@@ -305,6 +312,7 @@ class MultiLoRAManager:
             tensors={},
             nbytes=nbytes,
             lora_int_id=lora_int_id,
+            module_keys=module_keys,
         )
         return adapter, tuple(new_keys)
 
@@ -324,12 +332,12 @@ class MultiLoRAManager:
         with BytesIO(payload) as source:
             weights = mx.load(source, format="safetensors")
             tensors = {}
-            for key in adapter.keys:
-                module = self.wrapped[key]
+            for key, module_key in zip(adapter.keys, adapter.module_keys or adapter.keys):
+                module = self.wrapped[module_key]
                 dtype = module.lora_a.dtype
                 a = weights[f"{key}.lora_a"].astype(dtype)
                 b = (weights[f"{key}.lora_b"].astype(mx.float32) * adapter.scale).astype(dtype)
-                tensors[key] = (a, b)
+                tensors[module_key] = (a, b)
             mx.eval(list(tensors.values()))
         adapter.tensors = tensors
         self.counts["materializations"] += 1
@@ -372,7 +380,7 @@ class MultiLoRAManager:
         with self.lock:
             if adapter.name in self.registry:
                 raise ValueError(f"LoRA adapter {adapter.name!r} is already loaded")
-            missing = [key for key in adapter.keys if key not in self.wrapped]
+            missing = [key for key in (adapter.module_keys or adapter.keys) if key not in self.wrapped]
             if missing:
                 raise RuntimeError("LoRA keys must be wrapped before registration")
             self.registry[adapter.name] = adapter

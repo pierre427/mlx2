@@ -226,6 +226,17 @@ class Model(nn.Module):
             out[k] = v
         return out
 
+    @staticmethod
+    def lora_module_key(key):
+        """Resolve checkpoint LoRA names to the loaded text model's modules."""
+        if key.startswith("language_model.model."):
+            return "model." + key[len("language_model.model.") :]
+        if key.startswith("language_model.lm_head."):
+            return "lm_head." + key[len("language_model.lm_head.") :]
+        if key.startswith("model.language_model."):
+            return "model." + key[len("model.language_model.") :]
+        return key
+
     @property
     def layers(self):
         return self.model.layers
