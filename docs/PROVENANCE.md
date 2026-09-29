@@ -1,5 +1,18 @@
 # Provenance
 
+## Nemotron 3.5 Lightning 30B-A3B 8-bit with original BF16 MTP
+
+The model-specific Lightning adapter reuses mlx2's existing Nemotron H math,
+whose read-only `mlx-lm-unified` source revision, paths and MIT notice are
+recorded in [`nemotron3-super-5bit.json`](../provenance/nemotron3-super-5bit.json).
+The pinned McG-221 target and NVIDIA's separate original BF16 MTP-only shard
+are under OpenMDW-1.1. Their repository revisions, SHA-256 digests, tensor
+layout, adaptation and CPU validation are recorded in
+[`nemotron35-lightning-mtp.json`](../provenance/nemotron35-lightning-mtp.json).
+The adapter retains ordinary decode and requires an exact source attachment
+before declaring an implemented MTP route. The bounded direct-model GPU smoke
+is a candidate check; serving qualification is recorded separately.
+
 ## Laguna XS 2.1
 
 The Laguna sparse-MoE tensor model and Poolside XML-like tool parser were

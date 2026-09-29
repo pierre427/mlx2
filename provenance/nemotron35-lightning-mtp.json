@@ -1,0 +1,35 @@
+{
+  "component": "Nemotron 3.5 Lightning 30B-A3B MLX 8-bit target and original BF16 MTP sidecar adapter",
+  "implementation_basis": {
+    "repository": "mlx-lm-unified (read-only source checkout)",
+    "revision": "e555a7f94012708a6d7cd7f7ba38336004672f32",
+    "paths": [
+      "mlx_lm/models/nemotron_h.py",
+      "mlx_lm/models/ssm.py",
+      "mlx_lm/models/switch_layers.py"
+    ],
+    "license": "MIT",
+    "existing_mlx2_port": "provenance/nemotron3-super-5bit.json"
+  },
+  "target": {
+    "repository": "McG-221/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16-mlx-8Bit",
+    "revision": "a9db86e1fe5baf448346efd33541ce117b5b8403",
+    "config_sha256": "a1b0135c0973322d188a836c86746e69ea07c02b241e1f26681bf5123345359b",
+    "index_sha256": "14f9c8d6ff717ea35d64585e4f723544aa0964d7492c10dbf2e27a1ee29a87e5",
+    "license": "OpenMDW-1.1"
+  },
+  "mtp_source": {
+    "repository": "nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16",
+    "revision": "a9904d24bcc1d289a1950fa9d2b978c47cf903b9",
+    "path": "model-00014-of-00014.safetensors",
+    "sha256": "64577b275ca4e7e5266eae0903674f7f46ec2a8cbf4f4f1a3207f80d503cd1d0",
+    "license": "OpenMDW-1.1"
+  },
+  "modifications": [
+    "Bind the exact 52-layer affine-8-bit target and optional original BF16 MTP shard to the existing Nemotron H runtime",
+    "Validate source SHA-256 and MTP-only tensor index before advertising native MTP",
+    "Load source BF16 MTP tensors without quantizing them; quantize only modules represented as 8-bit weights in the target",
+    "Preserve ordinary decode as the reference and default route, APCv2 state, tokenwise B1 verification, and exact Mamba rollback"
+  ],
+  "validation": "CPU-only checks: exact target metadata and seven shard-header/index reconciliation; source SHA-256 and 270 MTP-only tensors; native-MTP capability advertised only with valid attachment; absent/invalid sidecar refusal; representative 8-bit target parameter-key parity after quantization; all 16 MTP module keys match the original source after expert stacking; tiny CPU MTP forward; cache geometry. Focused Lightning and existing Nemotron Super test suites passed. Full-model load, parity, throughput and serving remain unverified; no GPU qualification, benchmark, or serving-selection evidence."
+}

@@ -231,6 +231,14 @@ def _xing4_0(path: Path, config: dict) -> AdapterResolution:
 
 
 def _nemotron_h(path: Path, config: dict) -> AdapterResolution:
+    if (config.get("num_hidden_layers"), config.get("hidden_size")) == (52, 2688):
+        module = importlib.import_module(".nemotron35_lightning", __package__)
+        artifact = module.inspect_artifact(path)
+        return AdapterResolution(
+            module.Nemotron35LightningAdapter,
+            module.descriptor_for(has_mtp=artifact["has_mtp"]),
+            artifact,
+        )
     module = importlib.import_module(".nemotron3_super", __package__)
     artifact = module.inspect_artifact(path)
     return AdapterResolution(module.Nemotron3SuperAdapter, module.DESCRIPTOR, artifact)
