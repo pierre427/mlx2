@@ -2489,6 +2489,44 @@ def test_streaming_client_disconnect_is_counted_like_a_nonstreaming_one():
         thread.join()
 
 
+def test_streaming_disconnect_during_silent_prefill_cancels_job():
+    """A stream with an initial progress event must notice a later disconnect
+    even if no further event is available to trigger a socket write."""
+    import socket
+    import time
+
+    class ProgressThenSilentEngine(FakeEngine):
+        def submit(self, request, *, tenant_id="default"):
+            self.job = Job(request)
+            self.job.prompt_tokens = 2048
+            self.job.events.put({"prompt_progress": {"processed_tokens": 512,
+                                                      "prompt_tokens": 2048}})
+            return self.job
+
+    engine = ProgressThenSilentEngine()
+    server = ThreadingHTTPServer(("127.0.0.1", 0), handler_for(engine))
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        body = json.dumps({"model": "fixture", "stream": True,
+                           "messages": [{"role": "user", "content": "hi"}]}).encode()
+        client = socket.create_connection(("127.0.0.1", server.server_port))
+        client.settimeout(5)
+        client.sendall(
+            b"POST /v1/chat/completions HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\n"
+            + f"Content-Length: {len(body)}\r\n\r\n".encode() + body
+        )
+        assert client.recv(4096).startswith(b"HTTP/1.")
+        assert not engine.job.cancelled.is_set()
+        client.close()
+        assert engine.job.cancelled.wait(5), "silent streaming prefill did not cancel"
+        assert engine.counts["client_disconnects"] == 1
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
+
+
 class SingleToolCallEngine(FakeEngine):
     """An engine whose parser honoured ``parallel_tool_calls:false``.
 

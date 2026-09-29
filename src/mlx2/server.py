@@ -2770,11 +2770,11 @@ def handler_for(
                 }
                 hosted_receipts = []
                 while True:
-                    # Streaming detects a gone client on write; non-streaming
-                    # never writes until the end, so watch the socket here.
-                    event = wait_event(
-                        job.events, connection=None if streaming else self.connection
-                    )
+                    # A stream can go quiet during a long prefill after its
+                    # first progress event. Keep watching the socket so a
+                    # disconnected client releases its lane and the partial
+                    # cache can be published for APCv2 rolling recovery.
+                    event = wait_event(job.events, connection=self.connection)
                     if "error" in event:
                         mlx2 = event.get("mlx2")
                         if streaming:
