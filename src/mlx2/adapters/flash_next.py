@@ -345,9 +345,9 @@ class FlashNextAdapter:
                 path, local_files_only=True, trust_remote_code=False
             )
             # transformers' Qwen2Tokenizer drops the declared combining-mark split rule.
-            from ..runtime.tokenizer_integrity import enforce_declared_regex
+            from ..runtime.tokenizer_integrity import repair_loaded_tokenizer
 
-            self.pretokenizer_receipt = enforce_declared_regex(tokenizer, path)
+            self.pretokenizer_receipt = repair_loaded_tokenizer(tokenizer, path)
             # Deferred: qwen38_27b subclasses this adapter.  The tokenizer's
             # chat EOS joins the config's <|endoftext|>, as for Qwen3.8.
             from .qwen38_27b import resolve_eos_token_ids

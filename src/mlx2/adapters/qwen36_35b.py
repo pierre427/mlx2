@@ -313,9 +313,9 @@ class Qwen3635BA3BAdapter(Qwen3827BAdapter):
         self._record_load_dtype()
         tokenizer = AutoTokenizer.from_pretrained(path, local_files_only=True, trust_remote_code=False)
         # transformers' Qwen2Tokenizer drops the declared combining-mark split rule.
-        from ..runtime.tokenizer_integrity import enforce_declared_regex
+        from ..runtime.tokenizer_integrity import repair_loaded_tokenizer
 
-        self.pretokenizer_receipt = enforce_declared_regex(tokenizer, path)
+        self.pretokenizer_receipt = repair_loaded_tokenizer(tokenizer, path)
         # The official config names only <|endoftext|>; the tokenizer's chat
         # EOS <|im_end|> ends an assistant turn and must stop generation too.
         eos = resolve_eos_token_ids(config, tokenizer)

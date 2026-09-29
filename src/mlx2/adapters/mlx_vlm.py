@@ -394,11 +394,11 @@ class _MLXVLMAdapter:
         self.model = self._wrap_model(model)
         self.media_feature_cache = MediaFeatureCache()
         tokenizer = self.processor.tokenizer
-        from ..runtime.tokenizer_integrity import enforce_declared_regex
+        from ..runtime.tokenizer_integrity import repair_loaded_tokenizer
         from ..runtime.tokenizer_utils import TokenizerWrapper
 
         # transformers' Qwen2Tokenizer drops the declared combining-mark split rule.
-        self.pretokenizer_receipt = enforce_declared_regex(tokenizer, Path(model_path).resolve())
+        self.pretokenizer_receipt = repair_loaded_tokenizer(tokenizer, Path(model_path).resolve())
 
         eos = getattr(getattr(self.model, "config", None), "eos_token_id", None)
         eos = {int(eos)} if isinstance(eos, int) else {int(v) for v in (eos or ())}

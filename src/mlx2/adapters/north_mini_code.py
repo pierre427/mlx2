@@ -777,9 +777,9 @@ class NorthMiniCodeAdapter(ExternalDraftAdapterMixin):
             path, local_files_only=True, trust_remote_code=False
         )
         # transformers' Qwen2Tokenizer drops the declared combining-mark split rule.
-        from ..runtime.tokenizer_integrity import enforce_declared_regex
+        from ..runtime.tokenizer_integrity import repair_loaded_tokenizer
 
-        self.pretokenizer_receipt = enforce_declared_regex(tokenizer, path)
+        self.pretokenizer_receipt = repair_loaded_tokenizer(tokenizer, path)
         eos = config.get("eos_token_id")
         self.tokenizer = TokenizerWrapper(
             tokenizer,

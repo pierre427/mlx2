@@ -146,7 +146,7 @@ class LagunaS21Adapter(LagunaXS21Adapter):
         tokenizer = AutoTokenizer.from_pretrained(path, local_files_only=True,
                                                   trust_remote_code=False,
                                                   fix_mistral_regex=True)
-        # Preserve the deliberate regex correction while checking the declared rule.
+        # fix_mistral_regex corrects the file's regex on purpose; keep only the declared rule.
         from ..runtime.tokenizer_integrity import repair_loaded_tokenizer
 
         self.pretokenizer_receipt = repair_loaded_tokenizer(tokenizer, path, file_authoritative=False)

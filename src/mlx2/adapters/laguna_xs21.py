@@ -358,12 +358,10 @@ class LagunaXS21Adapter(ExternalDraftAdapterMixin):
         tokenizer = AutoTokenizer.from_pretrained(
             path, local_files_only=True, trust_remote_code=False, fix_mistral_regex=True
         )
-        # Preserve the deliberate regex correction while checking the declared rule.
+        # transformers' Qwen2Tokenizer drops the declared combining-mark split rule.
         from ..runtime.tokenizer_integrity import repair_loaded_tokenizer
 
-        self.pretokenizer_receipt = repair_loaded_tokenizer(
-            tokenizer, path, file_authoritative=False
-        )
+        self.pretokenizer_receipt = repair_loaded_tokenizer(tokenizer, path)
         eos = self.config.get("eos_token_id")
         self.tokenizer = TokenizerWrapper(
             tokenizer,

@@ -219,7 +219,12 @@ class StandardDecoderAdapter:
         weights.clear()
         mx.clear_cache()
         tokenizer = AutoTokenizer.from_pretrained(path, local_files_only=True, trust_remote_code=False)
+        # Some tokenizer classes rebuild the pre-tokenizer instead of reading tokenizer.json.
+        from ..runtime.tokenizer_integrity import repair_loaded_tokenizer
+
+        self.pretokenizer_receipt = repair_loaded_tokenizer(tokenizer, path)
         from .eos import artifact_eos_token_ids
+
         self.tokenizer = TokenizerWrapper(
             tokenizer, detokenizer_class=BPEStreamingDetokenizer,
             eos_token_ids=artifact_eos_token_ids(path, self.config, tokenizer),
