@@ -42,8 +42,11 @@ BUILTIN = {
 
 # Muse's q4 lane wrapper passed batched correctness, but three-repetition
 # width-one serving ladders at 4K and 16K were slower than stock even when
-# grouping was disabled.  Keep the kernel available for explicit trials.
+# grouping was disabled. Other Muse formats were not in this qualification.
 FAMILY_DEFAULTS: dict[str, dict] = {"muse-glimmer": {"mode": "off"}}
+FAMILY_DEFAULT_FORMATS: dict[str, frozenset[str]] = {
+    "muse-glimmer": frozenset({"q4"}),
+}
 
 _KEYS = {"mode", "min_rows", "max_rows", "grouping", "skip", "moe"}
 
@@ -165,6 +168,9 @@ def resolve(detected: dict, *, family: str | None = None, overrides=None,
     user = load_overrides(overrides)
     _validate(user, "--lane-policy")
     fam = FAMILY_DEFAULTS.get(family or "", {})
+    required_formats = FAMILY_DEFAULT_FORMATS.get(family or "")
+    if required_formats is not None and frozenset(detected.get("formats", {})) != required_formats:
+        fam = {}
     _validate(fam, f"family {family}")
     policy = _merge(policy, fam, f"family:{family}", sources)
     policy = _merge(policy, user, "override", sources)

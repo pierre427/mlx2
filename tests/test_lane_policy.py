@@ -92,13 +92,18 @@ def test_family_defaults_then_overrides_win(monkeypatch):
 
 
 def test_muse_family_keeps_stock_default_and_allows_explicit_opt_in():
-    detected = policy.detect(_Dense())
+    detected = {"moe": False, "formats": {"q4": 417}}
     default = policy.resolve(detected, family="muse-glimmer", mode="auto")
     assert default["mode"] == "off"
     assert default["sources"]["mode"] == "family:muse-glimmer"
     opted = policy.resolve(detected, family="muse-glimmer", mode="crossover")
     assert opted["mode"] == "crossover"
     assert opted["sources"]["mode"] == "cli"
+    for other_format in ("q8", "bf16"):
+        other = policy.resolve({"moe": False, "formats": {other_format: 1}},
+                               family="muse-glimmer", mode="auto")
+        assert other["mode"] == "crossover"
+        assert other["sources"]["mode"] == "builtin"
 
 
 @pytest.mark.parametrize(
