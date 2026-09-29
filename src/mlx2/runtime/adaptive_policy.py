@@ -289,9 +289,10 @@ class CohortAdaptiveMTPDepth:
     Depth zero is an exact ordinary target round over the still-owned target
     state.  Goodput is learned independently for bounded width buckets at
     closed verification boundaries.  Concurrent buckets use infrequent,
-    deterministic one-round probes; width one remains at the model's qualified
-    depth so adaptive B1 is the fixed-depth correctness oracle.  Acceptance is
-    retained as a fast safety valve, including the bounded park/re-entry path.
+    deterministic one-round probes.  Width one remains at the model's
+    qualified depth by default as a correctness anchor.  An explicit
+    ``adaptive_single_lane`` selection lets the same bounded probes and
+    park/re-entry gate apply to single-stream sections.
     """
 
     max_depth: int
@@ -307,6 +308,7 @@ class CohortAdaptiveMTPDepth:
     goodput_window: int = 8
     probe_interval: int = 16
     stale_rounds: int = 128
+    adaptive_single_lane: bool = False
     current_depth: int | None = None
     acceptance_ewma: float | None = None
     bad_streak: int = 0
@@ -382,6 +384,8 @@ class CohortAdaptiveMTPDepth:
         self.stale_rounds = _positive_integer(
             self.stale_rounds, name="adaptive MTP stale_rounds"
         )
+        if not isinstance(self.adaptive_single_lane, bool):
+            raise ValueError("adaptive MTP adaptive_single_lane must be boolean")
         if self.current_depth is not None and (
             isinstance(self.current_depth, bool)
             or not isinstance(self.current_depth, int)
@@ -513,7 +517,7 @@ class CohortAdaptiveMTPDepth:
         previous_label = self._active_bucket
         self._active_bucket = label
         state = self._bucket(label)
-        if width == 1:
+        if width == 1 and not self.adaptive_single_lane:
             # Width one is the fixed-depth correctness anchor. Cost learning
             # remains diagnostic here; neither acceptance nor a previous
             # concurrent choice may change the qualified depth.
@@ -554,7 +558,10 @@ class CohortAdaptiveMTPDepth:
                     _bump(self.counters, "reentries")
                     _bump(self.counters, "probes")
                     probe_kind = "reentry"
-        elif width > 1 and int(state["rounds"]) % self.probe_interval == 0:
+        elif (
+            (width > 1 or self.adaptive_single_lane)
+            and int(state["rounds"]) % self.probe_interval == 0
+        ):
             candidates = [
                 candidate
                 for candidate in range(min(self.max_depth, cap) + 1)
@@ -757,7 +764,7 @@ class CohortAdaptiveMTPDepth:
             else self.ewma_alpha * ratio
             + (1.0 - self.ewma_alpha) * state["acceptance_ewma"]
         )
-        if width == 1:
+        if width == 1 and not self.adaptive_single_lane:
             state["bad_streak"] = state["good_streak"] = 0
             self._set_chosen_depth(state, self.max_depth, width=width)
             self._sync_public_state(state)
@@ -831,10 +838,13 @@ class AdaptiveMTPDepthPolicy:
     goodput_window: int = 8
     probe_interval: int = 16
     stale_rounds: int = 128
+    adaptive_single_lane: bool = False
 
     def __post_init__(self) -> None:
         if not isinstance(self.enabled, bool):
             raise ValueError("adaptive MTP enabled must be boolean")
+        if not isinstance(self.adaptive_single_lane, bool):
+            raise ValueError("adaptive MTP adaptive_single_lane must be boolean")
         # Reuse the executable controller's validation so the serving contract
         # cannot accept a policy that later fails after model allocation.
         CohortAdaptiveMTPDepth(max_depth=1, **self.controller_kwargs())
@@ -865,14 +875,15 @@ class AdaptiveMTPDepthPolicy:
             "goodput_window",
             "probe_interval",
             "stale_rounds",
+            "adaptive_single_lane",
         }
         unknown = set(value) - allowed
         if unknown:
             raise ValueError(f"unknown adaptive MTP settings: {sorted(unknown)}")
         return cls(**dict(value))
 
-    def controller_kwargs(self) -> dict[str, float | int]:
-        return {
+    def controller_kwargs(self) -> dict[str, float | int | bool]:
+        values = {
             "ewma_alpha": self.ewma_alpha,
             "shrink_gate": self.shrink_gate,
             "grow_gate": self.grow_gate,
@@ -886,6 +897,9 @@ class AdaptiveMTPDepthPolicy:
             "probe_interval": self.probe_interval,
             "stale_rounds": self.stale_rounds,
         }
+        if self.adaptive_single_lane:
+            values["adaptive_single_lane"] = True
+        return values
 
     def as_dict(self) -> dict[str, bool | float | int]:
         values = {
@@ -908,6 +922,8 @@ class AdaptiveMTPDepthPolicy:
                     "stale_rounds": self.stale_rounds,
                 }
             )
+            if self.adaptive_single_lane:
+                values["adaptive_single_lane"] = True
         return values
 
 

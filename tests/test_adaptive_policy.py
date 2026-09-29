@@ -93,6 +93,57 @@ def test_width_one_is_qualified_depth_anchor_after_concurrent_decrease():
     assert policy.diagnostics()["buckets"]["1"]["chosen_depth"] == 2
 
 
+def test_opt_in_single_lane_mtp_latch_parks_and_reprobes():
+    policy = CohortAdaptiveMTPDepth(
+        max_depth=2, adaptive_single_lane=True, ewma_alpha=1.0,
+        loss_rounds=1, park_rounds=2, probe_interval=16,
+    )
+    assert policy.select(width=1) == 2
+    policy.observe(2, 0, width=1)
+    assert policy.select(width=1) == 1
+    policy.observe(1, 0, width=1)
+    assert policy.select(width=1) == 0
+    assert policy.select(width=1) == 0
+    assert policy.select(width=1) == 1
+    assert policy.counters["parks"] == 1
+    assert policy.counters["reentries"] == 1
+    assert policy.diagnostics()["buckets"]["1"]["chosen_depth"] == 1
+
+
+def test_opt_in_single_lane_mtp_latch_selects_faster_ordinary_sections():
+    policy = CohortAdaptiveMTPDepth(
+        max_depth=1, adaptive_single_lane=True, goodput_alpha=1.0,
+        min_samples_per_depth=2, goodput_window=2,
+        probe_interval=2, stale_rounds=1000,
+    )
+    for _ in range(6):
+        depth = policy.select(width=1)
+        rate = 80.0 if depth else 120.0
+        policy.observe(
+            depth, depth, width=1, committed=1,
+            elapsed_seconds=1 / rate,
+        )
+    bucket = policy.diagnostics()["buckets"]["1"]
+    assert bucket["samples"]["0"] >= 2
+    assert bucket["chosen_depth"] == 0
+    assert policy.counters["cost_depth_changes"] >= 1
+
+
+def test_single_lane_mtp_latch_policy_is_explicit_and_strict():
+    assert "adaptive_single_lane" not in AdaptiveMTPDepthPolicy(
+        enabled=True
+    ).as_dict()
+    enabled = AdaptiveMTPDepthPolicy.from_value({
+        "enabled": True, "adaptive_single_lane": True,
+    })
+    assert enabled.as_dict()["adaptive_single_lane"] is True
+    assert enabled.controller_kwargs()["adaptive_single_lane"] is True
+    with pytest.raises(ValueError, match="adaptive_single_lane must be boolean"):
+        AdaptiveMTPDepthPolicy.from_value({
+            "enabled": True, "adaptive_single_lane": 1,
+        })
+
+
 def test_parked_probe_waits_for_a_nonzero_admission_cap():
     policy = CohortAdaptiveMTPDepth(
         max_depth=1,
@@ -368,4 +419,3 @@ def test_batch_scheduler_turns_defer_prefill_until_decode_repays_debt(monkeypatc
     assert scheduler.decode_time_fairness.debt_seconds == pytest.approx(0.1)
     assert scheduler.scheduler_stats["decode_fairness_debt_deferrals"] == 1
     assert scheduler.scheduler_stats["decode_fairness_debt_repayments"] == 2
-
