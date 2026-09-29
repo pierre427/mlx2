@@ -52,3 +52,7 @@ Feature-run status: **partial**; applicable operations: 8; engaged and passing i
 Passing observations in a partial/contaminated run; not promoted by this report: apc_junction_snapshots, block_persistence, cache_capsules, host_memory_signals, memory_preemption.
 Open or inconclusive operations: apc_rolling_checkpoints, srpt_prefill_scheduling.
 Feature engagement and qualification do not select a production route or establish production use.
+
+## Current-main control
+
+This checkpoint was also used for the M5 single-prompt [mlx2, TensorFold, and omlx comparison](upstream-main-comparison.md). That later control has its own source revisions, settings, and thermal receipts; it is separate from this campaign's M3 ladder and 20×20 workload.

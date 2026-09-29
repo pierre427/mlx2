@@ -295,6 +295,8 @@ def model_page(name: str) -> str:
                 lines += ["", *candidate]
     if name in NOTES:
         lines += ["", "## Interpretation", "", NOTES[name]]
+    if name == "qwen38-mlx-4bit":
+        lines += ["", "## Current-main control", "", "This checkpoint was also used for the M5 single-prompt [mlx2, TensorFold, and omlx comparison](upstream-main-comparison.md). That later control has its own source revisions, settings, and thermal receipts; it is separate from this campaign's M3 ladder and 20×20 workload."]
     return "\n".join(lines).rstrip() + "\n"
 
 
@@ -321,6 +323,7 @@ def main() -> None:
         "## Flash-Next follow-up", "",
         "Both staged Flash variants received focused M5 memory and feature checks after the pause. Their model pages distinguish combined feature observations, isolated APCv2 rolling recovery, optional kernel checks, and any 20×20 result. The new default avoids gate/up fusion's observed swap while retaining file-backed PLE. The M3 does not hold either large Flash artifact.", "",
         "The Flash-Next page also reports the later opt-in TensorFold row-kernel and gated MTP/prompt-copy candidate when its thermal ladder has completed. It is a candidate measurement, not a default-route promotion or a full TensorFold executor qualification.", "",
+        "A later [current-main comparison](upstream-main-comparison.md) records why the staged Flash-Next checkpoint did not load in TensorFold or omlx, plus a thermally controlled three-engine speed control using the shared Qwen3.8 27B 4-bit checkpoint.", "",
         "The 20×20 rate is median aggregate generated tokens per second across mixed domain rounds. Context-ladder decode is per stream, from thermally admitted measured runs. They are different measurements. A functional smoke, stress pass, feature implementation, feature qualification, route selection, and observed production use are distinct states.", "",
         "## Model pages", "", "| Model | M5 smoke | M5 20×20 | M3 staged |", "|---|---|---|---|",
     ]

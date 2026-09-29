@@ -16,6 +16,8 @@ Both staged Flash variants received focused M5 memory and feature checks after t
 
 The Flash-Next page also reports the later opt-in TensorFold row-kernel and gated MTP/prompt-copy candidate when its thermal ladder has completed. It is a candidate measurement, not a default-route promotion or a full TensorFold executor qualification.
 
+A later [current-main comparison](upstream-main-comparison.md) records why the staged Flash-Next checkpoint did not load in TensorFold or omlx, plus a thermally controlled three-engine speed control using the shared Qwen3.8 27B 4-bit checkpoint.
+
 The 20×20 rate is median aggregate generated tokens per second across mixed domain rounds. Context-ladder decode is per stream, from thermally admitted measured runs. They are different measurements. A functional smoke, stress pass, feature implementation, feature qualification, route selection, and observed production use are distinct states.
 
 ## Model pages
