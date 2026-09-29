@@ -17,7 +17,8 @@ ROOT = HERE.parents[1]
 DEST = HERE / "scripts"
 SOURCES = {
     "requal": [
-        "flash_memory_probe.py", "queue_features.py", "queue_perf.py",
+        "flash_memory_probe.py", "run_flash_moe_isolation.py",
+        "queue_features.py", "queue_perf.py",
         "queue_smoke.py", "queue_stress.py", "run.py", "run_features.py",
         "run_perf.py", "run_preflight.py", "run_stress.py",
         "trace_stress_swap.py",
@@ -47,7 +48,11 @@ def main() -> None:
             text = original.decode("utf-8")
             # These defaults are path examples, not evidence. At runtime the
             # user's own home replaces the campaign host's absolute prefix.
+            home_prefix_rewritten = bool(re.search(r'"/Users/(?!Shared/)[^/]+/', text))
+            local_service_label = f"com.{Path.home().name}."
+            local_service_label_rewritten = local_service_label in text
             public = re.sub(r'"/Users/(?!Shared/)[^/]+/', 'str(Path.home()) + "/', text)
+            public = public.replace(local_service_label, "com.localuser.")
             if re.search(r"/Users/(?!Shared/)[^/]+/", public):
                 raise RuntimeError(f"unredacted home path in {source}")
             data = public.encode("utf-8")
@@ -58,7 +63,8 @@ def main() -> None:
                 "published": str(target.relative_to(HERE)),
                 "source_sha256": digest(original),
                 "published_sha256": digest(data),
-                "home_prefix_rewritten": data != original,
+                "home_prefix_rewritten": home_prefix_rewritten,
+                "local_service_label_rewritten": local_service_label_rewritten,
             })
     policy_source = ROOT / "qualification/runs/series-20260924/policies"
     policy_target = DEST / "series/policies"

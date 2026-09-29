@@ -40,11 +40,11 @@ candidate profiles have passed**. The deployment receipt and final reports in
 | Adapter-default native MTP | Yes | No route flag on a complete MTP artifact | Pre-load metadata resolution; explicit `--native-mtp` is equivalent |
 | Ordinary decode reference | Yes | `--ordinary` separate qualified profile | Full same HTTP lifecycle; independent source-bound receipt |
 | Continuous batching, memory admission, adaptive prefill | Yes | On | Batch/mixed-warm/churn/cancellation; actual widths in receipt |
-| File-backed PLE + 2 GiB LRU + compiled PLE | Yes | On | Table lookup/hit counters and compile diagnostics |
+| File-backed PLE + 2 GiB LRU + compiled PLE | Yes | On by Flash adapter default | Current-source M5 probes of both staged Flash variants read 4,016 sidecar rows each and held swap-outs flat from load through shutdown. This verifies offload use on the tested prompts, not a guarantee for every context or memory load. |
 | Known cached-tail PLE prefetch | Yes | On | Required `ple_tail_prefetch_tables > 0` |
 | Pooled QSA and scatter-chosen | Yes | On | Shared-cache oracles and model execution |
 | Fused GDN decode/verify, eager dispatch | Yes | On | Actual fused counters and fallbacks in diagnostics |
-| Fused MoE gate/up and expert dispatch | Yes | Gate/up on; expert auto | Actual scalar/tile4 dispatch counters; shape fallback preserved |
+| Fused MoE gate/up and expert dispatch | Yes | Gate/up off; expert auto | The 2026-09-29 Flash gate/up isolation grew swap-outs during load while the split control and expert-only arm stayed flat. Both Flash variants then loaded with split projections, observed tile4 expert dispatch and PLE row reads, and held swap-outs flat. Gate/up fusion remains a rejected candidate on this host; expert dispatch remains separately selected. |
 | Fast RMSNorm | Yes | Source width gate | Numerical/model qualification; no whole-decode compilation claim |
 | Shared-prefix QSA suffix state | Yes; HTTP checkpoint attestation added | Auto, source context/output-budget crossover | Must observe `shared_qsa_batched_selections`; equal text alone never attests state |
 | Asynchronous QSA physical promotion | Yes | On, output-budget gated | Required `async_qsa_promotion_engaged > 0`; cohort transitions tested |

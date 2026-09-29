@@ -294,6 +294,12 @@ def main():
     summary = {task: {"n": e["n"], "correct": e["correct"], "issues": dict(e["issues"])} for task, e in by_task.items()}
     widths = Counter(r["mlx2"].get("ordinary_compute_width") for r in records if r["mlx2"])
     counts = {k: after["counts"].get(k, 0) - before["counts"].get(k, 0) for k in after["counts"] if k != "peak_observed_width"}
+    mtp_before = ((before.get("execution") or {}).get("segmented_mtp") or {})
+    mtp_after = ((after.get("execution") or {}).get("segmented_mtp") or {})
+    mtp_delta = {key: value - mtp_before.get(key, 0)
+                 for key, value in mtp_after.items()
+                 if isinstance(value, int) and not isinstance(value, bool)
+                 and isinstance(mtp_before.get(key, 0), int)}
     report = {
         "schema": "mlx2.sanity-20x20.v1", "base": BASE, "thinking": THINK, "thinking_budget_tokens": THINKING_BUDGET_TOKENS if THINK else 0, "rounds": ROUNDS, "width": WIDTH,
         "settings": {k: after["settings"].get(k) for k in ("profile", "mtp", "speculation", "max_lanes", "max_context")},
@@ -304,6 +310,7 @@ def main():
         "retried_429": sum(r.get("retries_429", 0) for r in records),
         "by_task": summary, "rounds_detail": rounds, "observed_widths": {str(k): v for k, v in widths.items()},
         "counts_delta": {k: v for k, v in counts.items() if v}, "peak_observed_width": after["counts"].get("peak_observed_width"),
+        "segmented_mtp_delta": {k: v for k, v in mtp_delta.items() if v},
         "scheduler": after.get("scheduler"), "healthy": after["healthy"], "inflight": after["inflight"], "error": after.get("error"),
         "active_leases": after.get("apcv2", {}).get("cow", {}).get("active_leases"),
         "records": records,

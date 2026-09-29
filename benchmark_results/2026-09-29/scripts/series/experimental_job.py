@@ -239,9 +239,13 @@ def applicability(model, facts, bitexact_api):
     def put(name, applies, reason=""):
         out[name] = (bool(applies), reason)
 
-    for name in ("cache_capsules", "block_persistence", "apc_rolling_checkpoints", "srpt_prefill_scheduling",
+    for name in ("block_persistence", "apc_rolling_checkpoints", "srpt_prefill_scheduling",
                  "memory_preemption", "host_memory_signals"):
         put(name, ordinary is not None, "" if ordinary else "no ordinary route")
+    put("cache_capsules", ordinary is not None and fam != "flash-next",
+        "" if ordinary is not None and fam != "flash-next" else
+        "Flash-Next hybrid cache has no plain KVCache plane eligible for capsules"
+        if fam == "flash-next" else "no ordinary route")
     put("apc_junction_snapshots", ordinary is not None and fam in HYBRID_FAMILIES,
         "" if fam in HYBRID_FAMILIES else "KV-only cache: trims to any prefix, junctions never needed (startup refuses)")
     put("fly_verification", spec is not None, "" if spec else "no MTP or external-draft route")
@@ -628,7 +632,7 @@ def check_rolling(http):
                 "notes": admission_note(memory) or "rolling probe request failed; no prefill timing to abandon against"}
     abandoned = xc.filler(ROLLING_UNITS, f"rolling-cancel-{nonce()}") + "\nReply OK."
     # Past the first strides, well before the prompt boundary.
-    after_s = max(0.3, 0.6 * float(ttft))
+    after_s = max(0.3, 0.35 * float(ttft))
     http.abandon(abandoned, after_s)
     time.sleep(2)
     retry = http.chat(abandoned, max_tokens=4)
@@ -731,8 +735,13 @@ def check_host_signals(http):
 
 def check_fly(http):
     before = http.settled()
-    greedy = http.chat(xc.PROMPT_OPEN, max_tokens=128)
-    sampled = http.chat(xc.PROMPT_OPEN, max_tokens=128, temperature=0.7, seed=5)
+    # Vendor penalty defaults add logits processors, which intentionally
+    # disable FLy. Ask explicitly for neutral penalties to test FLy itself.
+    neutral = {"repetition_penalty": 1, "presence_penalty": 0,
+               "frequency_penalty": 0}
+    greedy = http.chat(xc.PROMPT_OPEN, max_tokens=128, **neutral)
+    sampled = http.chat(xc.PROMPT_OPEN, max_tokens=128, temperature=0.7,
+                        seed=5, **neutral)
     after = http.settled()
     mechanisms = []
     for reply in (greedy, sampled):
@@ -741,7 +750,9 @@ def check_fly(http):
     verification = [m.get("verification") for m in mechanisms]
     relaxed = (xc.delta(before, after, "scheduler", "fly_relaxed_accepts") or 0) + sum(
         int(m.get("relaxed_accepts") or 0) for m in mechanisms)
-    engaged = "fly" in verification and not any(m.get("fly_disabled") for m in mechanisms)
+    engaged = (verification == ["fly", "exact"]
+               and not mechanisms[0].get("fly_disabled")
+               and bool(mechanisms[1].get("fly_disabled")))
     ok = greedy["status"] == sampled["status"] == 200 and bool(xc.text_of(greedy))
     return {"engaged": engaged, "ok": ok, "evidence": {"verification": verification, "relaxed_accepts": relaxed,
             "fly_disabled": [m.get("fly_disabled") for m in mechanisms]}}

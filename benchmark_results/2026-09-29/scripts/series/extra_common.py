@@ -38,7 +38,7 @@ JOBS = RUN / "series" / "jobs"
 RUNTIME = RUN / ".runtime"
 SHIM_DIR = RUN / "kernel_shim"
 SERIES_LOCK = Path("/tmp/gpu.lock.series-20260924")
-SERVICE = "com.pierrelamy.fn-uncensored-mlx-serve"
+SERVICE = "com.localuser.fn-uncensored-mlx-serve"
 PLIST = Path.home() / "Library/LaunchAgents" / f"{SERVICE}.plist"
 BASE_ENV = {**os.environ, "HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1"}
 

@@ -18,8 +18,8 @@ RUNS = ROOT / "qualification/runs/requal-20260928"
 HOSTS = (("m5-max-128gb", "M5 Max, 128 GB"), ("m3-pro-36gb", "M3 Pro, 36 GB"))
 
 NOTES = {
-    "flash-next": "File-backed PLE was observed in clean smoke, but the full 20×20 run swapped during load; the stress gate remains contaminated. The harness sampled width one while scheduler counters reported multi-request cycles; that batching discrepancy needs review.",
-    "flash-next-uncensored": "File-backed PLE passed a clean longer probe; a current-source full 20×20 stress pass remains open.",
+    "flash-next": "The earlier contaminated 20×20 remains historical. A source-bound MoE isolation run measured zero swap-out pages for the split control and expert-only dispatch, versus 389,404 pages during fused gate/up load plus 33,784 while active. This identifies the triggering option, not the underlying allocator mechanism. The current Flash default retains split gate/up projections and file-backed PLE; the current-source stress and focused feature receipts above are separate gates.",
+    "flash-next-uncensored": "The current Flash default retains split gate/up projections and file-backed PLE. Its focused memory and feature checks and the full 20×20 stress receipt are independent gates.",
     "laguna": "Default reasoning exhausted the answer allowance in many requests. A guarded candidate scored 400/400 but leaked `</think>` and was not promoted.",
     "xing": "Fifteen empty final answers kept the default-route quality gate open.",
     "xing-bf16": "Eleven empty answers and swap growth kept the quality and memory gates open.",
@@ -40,21 +40,30 @@ def fmt(value: object) -> str:
 
 
 def stress_lines(directory: Path) -> list[str]:
+    for tag in ("split-mtp-counter", "split-default"):
+        focused = directory / f"stress-{tag}"
+        if focused.joinpath("stress.json").is_file():
+            directory = focused
+            break
     receipt = read(directory / "stress.json")
     result = read(directory / "20x20.json")
     if receipt is None and result is None:
         return ["20×20: not run in this queue. The smoke pass below does not imply a stress pass."]
     lines = [f"20×20 gate: **{fmt(receipt.get('status') if receipt else 'receipt unavailable')}**."]
     if result:
+        mtp = result.get("segmented_mtp_delta") or {}
+        width_label = "ordinary-reply peak-width field" if mtp else "observed peak batch width"
         speeds = [row.get("tokens_per_second") for row in result.get("rounds_detail", [])]
         speeds = [float(speed) for speed in speeds if isinstance(speed, (int, float))]
         lines += [
-            f"Graded correct: **{result.get('graded_correct', 0)}/{result.get('requests', 0)}**; HTTP errors: **{result.get('http_errors', 0)}**; observed peak batch width: **{fmt(result.get('peak_observed_width'))}**.",
+            f"Graded correct: **{result.get('graded_correct', 0)}/{result.get('requests', 0)}**; HTTP errors: **{result.get('http_errors', 0)}**; {width_label}: **{fmt(result.get('peak_observed_width'))}**.",
             f"Median aggregate generated rate across rounds: **{statistics.median(speeds):.1f} tokens/s**. This is mixed-workload throughput, not single-stream decode speed." if speeds else "Round throughput: unavailable.",
         ]
         issues = result.get("issue_totals") or {}
         if issues:
             lines.append("Issue counts: " + ", ".join(f"{key}={value}" for key, value in sorted(issues.items())) + ".")
+        if mtp:
+            lines.append(f"Native-MTP batched target forwards during 20×20: **{mtp.get('batched_target_forwards', 0)}**; true-batched requests: **{mtp.get('true_batched_requests', 0)}**. Ordinary reply width is not the native-MTP batching metric.")
     if receipt:
         swap = (receipt.get("swapouts") or {}).get("delta")
         lines.append(f"Owned-run swap-out delta: **{fmt(swap)} pages**; APCv2 repeated-prefix probe: **{fmt((receipt.get('apc_probe') or {}).get('passed'))}**; batching engaged: **{fmt(receipt.get('batching_engaged'))}**.")
@@ -102,6 +111,46 @@ def ladder_lines(directory: Path, host: str) -> list[str]:
 
 
 def feature_lines(directory: Path) -> list[str]:
+    if directory.name in {"flash-next", "flash-next-uncensored"}:
+        initial_core = read(directory / "features-core/qualification.json")
+        cache16_core = read(directory / "features-core-cache16/qualification.json")
+        core = cache16_core if cache16_core and cache16_core.get("status") != "running" else initial_core
+        if core:
+            rolling = read(directory / "features-apc_rolling_checkpoints/qualification.json")
+            kernels = read(directory / "features-kernels-safe/qualification.json")
+            memory_probes = [read(p) for p in directory.glob("memory-probe-split-projections-*.json")]
+            memory_probes = [p for p in memory_probes if p]
+            latest_probe = max(memory_probes, key=lambda p: p.get("finished_at", 0), default=None)
+            summary = core.get("summary") or {}
+            cap = (core.get("host_caps") or {}).get("cache_gib")
+            lines = [f"Core feature sweep: **{core.get('status')}**, {summary.get('ok')}/{summary.get('applicable')} applicable checks in one combined run, APCv2 budget {cap or 'default'} GiB; source `{core.get('source_head')}`; swap-out delta {(core.get('swapouts') or {}).get('delta')} pages."]
+            if cache16_core and initial_core and core is cache16_core:
+                earlier = initial_core.get("summary") or {}
+                earlier_rolling = (((earlier.get("detail") or {}).get("apc_rolling_checkpoints") or {}).get("evidence") or {})
+                lines.append(f"Earlier 8 GiB combined sweep: **{initial_core.get('status')}**, {earlier.get('ok')}/{earlier.get('applicable')} checks; rolling recovery missed as APCv2 recorded {(earlier_rolling.get('memory') or {}).get('apc_pressure_spills')} pressure spills. Its isolated retry passed separately below.")
+                rolling_evidence = (((summary.get("detail") or {}).get("apc_rolling_checkpoints") or {}).get("evidence") or {})
+                if core.get("status") != "pass":
+                    lines.append(f"The 16 GiB rerun still recorded {(rolling_evidence.get('memory') or {}).get('apc_pressure_spills')} APCv2 pressure spills and only {rolling_evidence.get('retry_cached_tokens')} cached retry tokens; the combined interaction remains open.")
+            if summary.get("failed"):
+                lines.append("Combined-run open checks: " + ", ".join(summary["failed"]) + ".")
+            if rolling:
+                evidence = (((rolling.get("summary") or {}).get("detail") or {}).get("apc_rolling_checkpoints") or {}).get("evidence") or {}
+                lines.append(f"Isolated rolling recovery: **{rolling.get('status')}**, {evidence.get('rolling_hits')} APCv2 rolling hit(s), {evidence.get('retry_cached_tokens')} retry cached tokens, swap-out delta {(rolling.get('swapouts') or {}).get('delta')} pages; source `{rolling.get('source_head')}`.")
+            fly = (summary.get("detail") or {}).get("fly_verification") or {}
+            fly_evidence = fly.get("evidence") or {}
+            lines.append(f"FLy greedy route selected with sampled exact fallback; relaxed accepts observed: {fly_evidence.get('relaxed_accepts')}. Approximate relaxation has no observed-use claim from this probe and remains default-off.")
+            lines.append("Cache capsules are inapplicable: this hybrid artifact has no plain KVCache plane eligible for capsule fanout.")
+            if latest_probe:
+                ple = latest_probe.get("ple_offload") or {}
+                values = [row.get("swapouts") for row in latest_probe.get("phases") or []]
+                delta = values[-1] - values[0] if len(values) > 1 and None not in values else None
+                lines.append(f"Current-default PLE and smoke probe: **{latest_probe.get('status')}**, {ple.get('rows_read')} sidecar rows read, {delta} swap-out pages from before load through shutdown; source `{latest_probe.get('source_head')}`.")
+            if kernels:
+                rows = (kernels.get("summary") or {}).get("kernels") or []
+                passed = [row["kernel"] for row in rows if row.get("ok")]
+                lines.append(f"Safe kernel sweep: **{kernels.get('status')}**, {len(passed)}/{len(rows)} output-equal engaged arms, swap-out delta {(kernels.get('swapouts') or {}).get('delta')} pages; source `{kernels.get('source_head')}`. Passing arms: " + ", ".join(passed) + ". Gate/up fusion was excluded after its separate swap failure.")
+            lines.append("Kernel rates in this sweep use one quick repetition; they do not establish a thermal performance gain or change route selection.")
+            return lines
     receipt = read(directory / "features/qualification.json")
     if not receipt:
         return ["Feature qualification was not run on this model and host."]
@@ -162,18 +211,22 @@ def main() -> None:
         "- Flash-Next also has a separately retained contaminated 20×20 attempt, although it was excluded from the later eligible queue. This is why five model pages show a nonpassing 20×20 receipt while the queue itself reports four failures.",
         "- M3 Pro 36 GB: six locally staged models passed smoke and 400/400 in 20×20. The other artifacts were absent on that host, not load failures.",
         "- Qwen3.6 passed the complete M5 three-repetition context ladder. Qwen3.8 was partial. Muse's M5 ladder was deliberately interrupted after nine passing cells. Five M3 models passed a separate single-stream 1K/4K basic ladder.",
-        "- M3 North qualified eight applicable exercised feature operations. Other M3 feature attempts were partial or contaminated; no M5 per-model feature run began.", "",
+        "- At the campaign pause, M3 North qualified eight applicable exercised feature operations. Other M3 feature attempts were partial or contaminated; no M5 per-model feature run had begun. The Flash follow-up below is later work.", "",
+        "## Flash-Next follow-up", "",
+        "Both staged Flash variants received focused M5 memory and feature checks after the pause. Their model pages distinguish combined feature observations, isolated APCv2 rolling recovery, optional kernel checks, and any 20×20 result. The new default avoids gate/up fusion's observed swap while retaining file-backed PLE. The M3 does not hold either large Flash artifact.", "",
         "The 20×20 rate is median aggregate generated tokens per second across mixed domain rounds. Context-ladder decode is per stream, from thermally admitted measured runs. They are different measurements. A functional smoke, stress pass, feature implementation, feature qualification, route selection, and observed production use are distinct states.", "",
         "## Model pages", "", "| Model | M5 smoke | M5 20×20 | M3 staged |", "|---|---|---|---|",
     ]
     for name in names:
         m5 = RUNS / HOSTS[0][0] / name
         m3 = RUNS / HOSTS[1][0] / name
-        stress = read(m5 / "stress.json")
+        stress = (read(m5 / "stress-split-mtp-counter/stress.json")
+                  or read(m5 / "stress-split-default/stress.json")
+                  or read(m5 / "stress.json"))
         index.append(f"| [{name}]({name}.md) | passed | {stress.get('status', 'not run') if stress else 'not run'} | {'yes' if (m3 / 'smoke.json').exists() else 'no'} |")
     index += [
         "", "## Scripts and provenance", "",
-        "The `scripts/` directory snapshots the smoke, 20×20, concurrency, thermal-ladder, feature, queue, and memory-probe scripts plus their execution policies. `scripts/manifest.json` records each original and published SHA-256. Two Python snapshots replace the run host's home-directory prefix with `Path.home()`; two policies use a literal `${HOME}` placeholder for the external draft path. Other algorithm and test settings are unchanged. Restore the original qualification layout and set local model paths before running these historical snapshots; they also require the local MLX environment. The generated pages can be rebuilt from the private source-bound receipts with `build_model_pages.py --receipt-root <campaign-receipt-directory>`; `package_scripts.py` rebuilds the script snapshot from the private qualification source.", "",
+        "The `scripts/` directory snapshots the smoke, 20×20, concurrency, thermal-ladder, feature, queue, and memory-probe scripts plus their execution policies. `scripts/manifest.json` records each original and published SHA-256. Two Python snapshots replace the run host's home-directory prefix with `Path.home()`; two policies use a literal `${HOME}` placeholder for the external draft path, and one local LaunchAgent label is anonymized. Other algorithm and test settings are unchanged. Restore the original qualification layout and set local model paths before running these historical snapshots; they also require the local MLX environment. The generated pages can be rebuilt from the private source-bound receipts with `build_model_pages.py --receipt-root <campaign-receipt-directory>`; `package_scripts.py` rebuilds the script snapshot from the private qualification source.", "",
         "Private source receipt paths are recorded only as source commit IDs and artifact configuration hashes on the model pages. The private pause record is `qualification/runs/requal-20260928/PAUSED-20260929.md` at Forgejo commit `df0120ca`; it is intentionally not copied here.", "",
         "## Open gates at pause", "",
         "Flash-Next full-stress load swap; Laguna final-answer quality and thinking-marker leakage; Xing final-answer quality and BF16 swap; Gemma 3n supported-surface quality; Qwen3.8 M5 warm APCv2 misses and 262K admission; M3 multi-stream APCv2/admission limits; M3 Muse Fly repeated-prefix admission; remaining M5 performance and per-model feature qualification.", "",

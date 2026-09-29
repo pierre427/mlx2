@@ -7,6 +7,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -49,15 +50,25 @@ def main() -> int:
     parser.add_argument("--model", required=True)
     parser.add_argument("--host-label", required=True)
     parser.add_argument("--max-lanes", type=int, default=20)
+    parser.add_argument("--cache-cap-gib", type=int, default=0)
     parser.add_argument("--port", type=int, default=8397)
     parser.add_argument("--load-timeout", type=float, default=2400)
+    parser.add_argument("--tag", default="", help="separate this run from historical model receipts")
     args = parser.parse_args()
+    if args.tag and not re.fullmatch(r"[a-zA-Z0-9_-]+", args.tag):
+        parser.error("tag must contain only letters, digits, underscores or hyphens")
+    if args.cache_cap_gib < 0:
+        parser.error("cache cap must be nonnegative")
+    if args.cache_cap_gib:
+        os.environ["MLX2_SERIES_CACHE_GIB_CAP"] = str(args.cache_cap_gib)
     models = {model.name: model for model in config.MODELS}
     model = models.get(args.model)
     if model is None:
         parser.error(f"model not present on this host: {args.model}")
     route = next(route for route in model.routes if route.name == model.default_route)
     output = HERE / args.host_label / model.name
+    if args.tag:
+        output /= f"stress-{args.tag}"
     output.mkdir(parents=True, exist_ok=True)
     path = output / "stress.json"
     head = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
@@ -68,6 +79,8 @@ def main() -> int:
         "artifact_config_sha256": hashlib.sha256((Path(model.path) / "config.json").read_bytes()).hexdigest(),
         "harness_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
         "max_lanes": args.max_lanes, "started_at": time.time(), "status": "running",
+        "tag": args.tag,
+        "cache_cap_gib": args.cache_cap_gib or None,
     }
 
     def save() -> None:
@@ -126,7 +139,15 @@ def main() -> int:
                     report = json.loads((output / "20x20.json").read_text())
                     widths = {int(k): v for k, v in report.get("observed_widths", {}).items()
                               if k not in {"None", "null"}}
-                    receipt["batching_engaged"] = any(width > 1 and count > 0 for width, count in widths.items())
+                    mtp_batches = int((report.get("segmented_mtp_delta") or {}).get(
+                        "batched_target_forwards") or 0)
+                    receipt["batching_evidence"] = {
+                        "ordinary_reply_widths": widths,
+                        "mtp_batched_target_forwards": mtp_batches,
+                    }
+                    receipt["batching_engaged"] = (any(width > 1 and count > 0
+                                                       for width, count in widths.items())
+                                                   or mtp_batches > 0)
                     receipt["status_after"] = owned.get_json(base + "/v1/status")
                     receipt["health_after"] = owned.get_json(base + "/health")
                     receipt["status"] = "passed" if (receipt["batching_engaged"]

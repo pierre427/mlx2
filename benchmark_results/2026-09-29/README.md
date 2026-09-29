@@ -8,7 +8,11 @@ The 2026-09-28–29 campaign was paused at the user's request. These are public 
 - Flash-Next also has a separately retained contaminated 20×20 attempt, although it was excluded from the later eligible queue. This is why five model pages show a nonpassing 20×20 receipt while the queue itself reports four failures.
 - M3 Pro 36 GB: six locally staged models passed smoke and 400/400 in 20×20. The other artifacts were absent on that host, not load failures.
 - Qwen3.6 passed the complete M5 three-repetition context ladder. Qwen3.8 was partial. Muse's M5 ladder was deliberately interrupted after nine passing cells. Five M3 models passed a separate single-stream 1K/4K basic ladder.
-- M3 North qualified eight applicable exercised feature operations. Other M3 feature attempts were partial or contaminated; no M5 per-model feature run began.
+- At the campaign pause, M3 North qualified eight applicable exercised feature operations. Other M3 feature attempts were partial or contaminated; no M5 per-model feature run had begun. The Flash follow-up below is later work.
+
+## Flash-Next follow-up
+
+Both staged Flash variants received focused M5 memory and feature checks after the pause. Their model pages distinguish combined feature observations, isolated APCv2 rolling recovery, optional kernel checks, and any 20×20 result. The new default avoids gate/up fusion's observed swap while retaining file-backed PLE. The M3 does not hold either large Flash artifact.
 
 The 20×20 rate is median aggregate generated tokens per second across mixed domain rounds. Context-ladder decode is per stream, from thermally admitted measured runs. They are different measurements. A functional smoke, stress pass, feature implementation, feature qualification, route selection, and observed production use are distinct states.
 
@@ -16,8 +20,8 @@ The 20×20 rate is median aggregate generated tokens per second across mixed dom
 
 | Model | M5 smoke | M5 20×20 | M3 staged |
 |---|---|---|---|
-| [flash-next](flash-next.md) | passed | contaminated | no |
-| [flash-next-uncensored](flash-next-uncensored.md) | passed | not run | no |
+| [flash-next](flash-next.md) | passed | passed | no |
+| [flash-next-uncensored](flash-next-uncensored.md) | passed | passed | no |
 | [gemma3n](gemma3n.md) | passed | error | no |
 | [gemma4-26b-bf16](gemma4-26b-bf16.md) | passed | not run | no |
 | [gemma4-26b-q8](gemma4-26b-q8.md) | passed | not run | no |
@@ -53,7 +57,7 @@ The 20×20 rate is median aggregate generated tokens per second across mixed dom
 
 ## Scripts and provenance
 
-The `scripts/` directory snapshots the smoke, 20×20, concurrency, thermal-ladder, feature, queue, and memory-probe scripts plus their execution policies. `scripts/manifest.json` records each original and published SHA-256. Two Python snapshots replace the run host's home-directory prefix with `Path.home()`; two policies use a literal `${HOME}` placeholder for the external draft path. Other algorithm and test settings are unchanged. Restore the original qualification layout and set local model paths before running these historical snapshots; they also require the local MLX environment. The generated pages can be rebuilt from the private source-bound receipts with `build_model_pages.py --receipt-root <campaign-receipt-directory>`; `package_scripts.py` rebuilds the script snapshot from the private qualification source.
+The `scripts/` directory snapshots the smoke, 20×20, concurrency, thermal-ladder, feature, queue, and memory-probe scripts plus their execution policies. `scripts/manifest.json` records each original and published SHA-256. Two Python snapshots replace the run host's home-directory prefix with `Path.home()`; two policies use a literal `${HOME}` placeholder for the external draft path, and one local LaunchAgent label is anonymized. Other algorithm and test settings are unchanged. Restore the original qualification layout and set local model paths before running these historical snapshots; they also require the local MLX environment. The generated pages can be rebuilt from the private source-bound receipts with `build_model_pages.py --receipt-root <campaign-receipt-directory>`; `package_scripts.py` rebuilds the script snapshot from the private qualification source.
 
 Private source receipt paths are recorded only as source commit IDs and artifact configuration hashes on the model pages. The private pause record is `qualification/runs/requal-20260928/PAUSED-20260929.md` at Forgejo commit `df0120ca`; it is intentionally not copied here.
 

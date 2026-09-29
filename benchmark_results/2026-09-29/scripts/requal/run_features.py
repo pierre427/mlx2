@@ -7,6 +7,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -36,7 +37,20 @@ def main() -> int:
     parser.add_argument("--cache-cap-gib", type=int, default=None)
     parser.add_argument("--context-cap", type=int, default=None)
     parser.add_argument("--max-lanes-cap", type=int, default=None)
+    parser.add_argument("--tag", default="", help="separate this run from earlier feature receipts")
+    parser.add_argument("--skip-kernels", action="store_true",
+                        help="run feature mechanisms without the separately measured kernel sweep")
+    parser.add_argument("--only-feature", choices=[name for name, _ in experimental.FEATURES],
+                        help="isolate one feature on a fresh server")
+    parser.add_argument("--kernels-only-safe", action="store_true",
+                        help="measure kernel arms except gate/up fusion that caused swap")
     args = parser.parse_args()
+    if args.tag and not re.fullmatch(r"[a-zA-Z0-9_-]+", args.tag):
+        parser.error("tag must contain only letters, digits, underscores or hyphens")
+    if args.kernels_only_safe and (args.only_feature or args.skip_kernels):
+        parser.error("--kernels-only-safe cannot be combined with feature selection")
+    if args.only_feature:
+        args.skip_kernels = True
     if (args.cache_cap_gib is not None and args.cache_cap_gib < 1
             or args.context_cap is not None and args.context_cap < 1
             or args.max_lanes_cap is not None and args.max_lanes_cap < 1):
@@ -54,7 +68,13 @@ def main() -> int:
     model = models.get(args.model)
     if model is None:
         parser.error(f"model not staged on this host: {args.model}")
-    output = HERE / args.host_label / model.name / "features"
+    output_name = (
+        "features-kernels-safe" if args.kernels_only_safe else
+        f"features-{args.only_feature}" if args.only_feature else
+        "features-core" if args.skip_kernels else "features")
+    if args.tag:
+        output_name += f"-{args.tag}"
+    output = HERE / args.host_label / model.name / output_name
     output.mkdir(parents=True, exist_ok=True)
     path = output / "qualification.json"
     head = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
@@ -68,6 +88,10 @@ def main() -> int:
         "source_tree": tree,
         "host_caps": {"cache_gib": cache_cap, "max_context": context_cap,
                       "max_lanes": args.max_lanes_cap},
+        "skip_kernels": args.skip_kernels,
+        "only_feature": args.only_feature,
+        "kernels_only_safe": args.kernels_only_safe,
+        "tag": args.tag,
         "artifact": model.path,
         "artifact_config_sha256": sha256(Path(model.path) / "config.json"),
         "harness_sha256": {name: sha256(file) for name, file in {
@@ -139,11 +163,33 @@ def main() -> int:
 
             xc.Server.start, xc.Server.stop = tracked_start, tracked_stop
             xc.server_command = capped_command
+            original_run_kernels = experimental.run_kernels
+            original_features = experimental.FEATURES
+            original_kernels = experimental.KERNELS.get("flash-next")
+            if args.skip_kernels:
+                experimental.run_kernels = lambda *_args, **_kwargs: ([], {
+                    "skipped": "kernel sweep measured separately"})
+            if args.only_feature:
+                experimental.FEATURES = tuple(
+                    feature for feature in experimental.FEATURES
+                    if feature[0] == args.only_feature)
+            if args.kernels_only_safe:
+                if model.name not in {"flash-next", "flash-next-uncensored"}:
+                    raise ValueError("safe kernel subset is defined only for Flash-Next")
+                experimental.FEATURES = ()
+                base, arms = experimental.KERNELS["flash-next"]
+                experimental.KERNELS["flash-next"] = (
+                    base, tuple(arm for arm in arms
+                                if arm[0] not in {"moe_fused_gate_up_expert", "serving_profile"}))
             try:
                 result, summary = experimental.run(model, output)
             finally:
                 xc.Server.start, xc.Server.stop = original_start, original_stop
                 xc.server_command = original_command
+                experimental.run_kernels = original_run_kernels
+                experimental.FEATURES = original_features
+                if original_kernels is not None:
+                    experimental.KERNELS["flash-next"] = original_kernels
             receipt["status"] = result
             receipt["summary"] = summary
     except Exception as exc:
