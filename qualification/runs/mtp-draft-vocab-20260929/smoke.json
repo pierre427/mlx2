@@ -1,0 +1,528 @@
+{
+  "schema": "mlx2.mtp-draft-vocab-gpu-ab.v1",
+  "mode": "smoke",
+  "source": {
+    "head": "42304181864ce8a641def60eea28e04cc0f07d90",
+    "tracked_diff_sha256": "28f101ebc603b0737eb71d85b3db8b238c0a964a083f05ecbaddfd3169d643a5",
+    "untracked": [
+      [
+        "provenance/mtp-draft-vocab.NOTICE",
+        "6e31d8f517e147877a1f75f5df5de0feb98c83f8e7d27b399928e681ef6b3c9a"
+      ],
+      [
+        "provenance/mtp-draft-vocab.json",
+        "6c321dd404e210f249c40c94f89b2d146a8df6c0c0cad63c272950ac66ba772f"
+      ],
+      [
+        "scripts/build_mtp_draft_vocab_manifest.py",
+        "daecdda7a09892f7d29f3d8b4c81098a3760c8e750f117dc18f31f06947b985a"
+      ],
+      [
+        "scripts/plan_mtp_draft_vocab_ab.py",
+        "17ee9c60d5c1e25179c68566bd9287e4ff4ca985e50b0ff65633a81d9b36c6ae"
+      ],
+      [
+        "scripts/qualify_mtp_draft_vocab.py",
+        "562edb71f75045665051a1a0e322f6ccf7ce55c9b02b9e1e73091cfc2a718491"
+      ],
+      [
+        "src/mlx2/runtime/mtp_draft_vocab.py",
+        "185dd07b1b602657a193aaf06f02a931dc3cf180082048b7c7ae5162de2a3fc2"
+      ],
+      [
+        "tests/test_mtp_draft_vocab_cpu.py",
+        "a2c27215d8edaaefb7db54070b50247f5d1c7e49efb637a85c823085bb7f670b"
+      ]
+    ]
+  },
+  "artifact_identity": {
+    "path": "Qwen3.8-Flash-Next-MLX-4bit-MTP",
+    "fingerprint": "f1f50c5861cd055b818e9633eb991322fb7fef38d5b212c9faee600950afdf07",
+    "files": [
+      [
+        "model-00001-of-00020.safetensors",
+        5269867108,
+        1787763792019276613
+      ],
+      [
+        "model-00002-of-00020.safetensors",
+        5250035154,
+        1787763795112301395
+      ],
+      [
+        "model-00003-of-00020.safetensors",
+        5250035156,
+        1787763797568853436
+      ],
+      [
+        "model-00004-of-00020.safetensors",
+        5250035164,
+        1787763799795899554
+      ],
+      [
+        "model-00005-of-00020.safetensors",
+        5250035154,
+        1787763802219521492
+      ],
+      [
+        "model-00006-of-00020.safetensors",
+        5250035197,
+        1787763804628789963
+      ],
+      [
+        "model-00007-of-00020.safetensors",
+        5266267219,
+        1787763807202765530
+      ],
+      [
+        "model-00008-of-00020.safetensors",
+        5323321374,
+        1787763811607771778
+      ],
+      [
+        "model-00009-of-00020.safetensors",
+        5363888722,
+        1787763816707510759
+      ],
+      [
+        "model-00010-of-00020.safetensors",
+        5363888860,
+        1787763824197616574
+      ],
+      [
+        "model-00011-of-00020.safetensors",
+        5319600417,
+        1787763836593095132
+      ],
+      [
+        "model-00012-of-00020.safetensors",
+        5363888848,
+        1787763843735070415
+      ],
+      [
+        "model-00013-of-00020.safetensors",
+        5363888820,
+        1787763847449561808
+      ],
+      [
+        "model-00014-of-00020.safetensors",
+        5319600423,
+        1787763851288691395
+      ],
+      [
+        "model-00015-of-00020.safetensors",
+        5363888836,
+        1787763855198899940
+      ],
+      [
+        "model-00016-of-00020.safetensors",
+        5363888826,
+        1787763858503468595
+      ],
+      [
+        "model-00017-of-00020.safetensors",
+        5319600387,
+        1787763862716925024
+      ],
+      [
+        "model-00018-of-00020.safetensors",
+        5363888842,
+        1787763866563154407
+      ],
+      [
+        "model-00019-of-00020.safetensors",
+        5363888866,
+        1787763870894658903
+      ],
+      [
+        "model-00020-of-00020.safetensors",
+        1787099916,
+        1787763872212807079
+      ],
+      [
+        "model-mtp-q4.safetensors",
+        1467251930,
+        1787767069242346395
+      ],
+      [
+        "ple_rows.bin",
+        32000153600,
+        1787788508308843315
+      ]
+    ]
+  },
+  "draft_vocab": {
+    "schema": "mlx2.mtp-draft-vocab.v1",
+    "vocab_size": 248320,
+    "token_count": 65536,
+    "ids_sha256": "f667de23949073f1d579bd2f702a18dc733554437c1e8c57f2ec38160f257075",
+    "license_sha256": "4d977a14f139582f043e3e5380e041eebd7ee51c46d29d18af62af026194ef23",
+    "config_sha256": "2fe9ba742da993ffe27c68f56ddc30deff43ed5aeb07d25a82cc6381d9208d9b",
+    "index_sha256": "f643b2bd4f768a6a68fcdec89870f080f71420e8adbd084801291835df0cca5c",
+    "tokenizer_sha256": "a5cd9732badce41de57e6efce8302930ded1c1188c5f81feb2bd6c24c4a1941f",
+    "source_repository": "https://github.com/dime-online/qwen3.8-Flash-DGX-UltraFast",
+    "source_revision": "0c391a3e74b6a775cfe248691ca7fd855b1876a5",
+    "corpus_profile": "upstream-v16b-english-code-k65536",
+    "enabled": true,
+    "quantized": true,
+    "bits": 4,
+    "group_size": 64,
+    "mode": "affine",
+    "runtime_enabled": true,
+    "proposal_calls": 35,
+    "full_vocab_bypasses": 37
+  },
+  "mlx_version": "0.32.2.dev20260919+39400a0d4",
+  "load_seconds": 32.74456383404322,
+  "peak_gib": 72.46088774502277,
+  "swapout_delta_mb": 14039.3125,
+  "config": {
+    "persistent": true,
+    "num_draft": 2,
+    "rate_gate": false,
+    "prefill_step_size": 8192,
+    "segment_aware_live_tip": true,
+    "segment_aware_cohort_size": 1,
+    "segment_aware_async_qsa_promotion": true,
+    "prefetch_known_tail_ple": true
+  },
+  "constrained_bypass": {
+    "counter_delta": {
+      "proposal_calls": 3,
+      "full_vocab_bypasses": 5
+    },
+    "passed": false
+  },
+  "parity": [
+    {
+      "rep": 0,
+      "width": 1,
+      "equal": true
+    }
+  ],
+  "summary": {
+    "full/B1": {
+      "tok_s_median": 96.03754779409208,
+      "tokens_per_cycle_median": 2.909090909090909,
+      "proposal_calls": 0,
+      "full_vocab_bypasses": 24
+    },
+    "reduced/B1": {
+      "tok_s_median": 101.81444575101938,
+      "tokens_per_cycle_median": 2.909090909090909,
+      "proposal_calls": 24,
+      "full_vocab_bypasses": 0
+    }
+  },
+  "results": [
+    {
+      "arm": "full",
+      "width": 1,
+      "constrained": false,
+      "tokens": [
+        [
+          71093,
+          12305,
+          198,
+          727,
+          10562,
+          39914,
+          36053,
+          7080,
+          16,
+          25,
+          1103,
+          11,
+          1103,
+          17,
+          25,
+          1103,
+          8,
+          1411,
+          1103,
+          25,
+          198,
+          262,
+          4071,
+          50346,
+          1330,
+          10300,
+          11140,
+          1083,
+          264,
+          3074,
+          10300,
+          1103
+        ]
+      ],
+      "elapsed_seconds": 0.3227904159575701,
+      "tokens_decoded": 31,
+      "tok_s": 96.03754779409208,
+      "cycles": 11,
+      "receipt_emitted": 32,
+      "tokens_per_cycle": 2.909090909090909,
+      "counter_delta": {
+        "proposal_calls": 0,
+        "full_vocab_bypasses": 24
+      },
+      "scheduler": {
+        "prefill_rounds": 0,
+        "prefill_only_rounds": 0,
+        "decode_priority_release_rounds": 0,
+        "decode_priority_deferred_rounds": 0,
+        "adaptive_prefill_release_rounds": 0,
+        "adaptive_prefill_slack_deferred_rounds": 0,
+        "adaptive_prefill_deadline_forced_rounds": 0,
+        "adaptive_prefill_apc_priority_admissions": 0,
+        "mtp_short_prefill_interleaved": 0,
+        "short_prefill_overflow_admissions": 0,
+        "apc_interior_checkpoints_captured": 0,
+        "apc_interior_checkpoints_skipped_trimmable": 0,
+        "apc_interior_checkpoints_skipped_inexact": 0,
+        "prefill_chunk_rounds_recorded": 0,
+        "prefill_chunk_varied_requests": 0,
+        "adaptive_prefill_chunk_histogram": {}
+      },
+      "receipts": [
+        {
+          "route": "continuous_batched_self_mtp",
+          "observed_compute_widths": [
+            1
+          ],
+          "num_draft": 2,
+          "requested_num_draft": null,
+          "admission_stage": null,
+          "accept_rule": "residual",
+          "sampling_temperature": 0.0,
+          "verification": "exact",
+          "verification_parameters": null,
+          "relaxed_accepts": 0,
+          "fly_disabled": false,
+          "fly_disabled_reason": null,
+          "stats": {
+            "cycles": 11,
+            "retrieval_cycles": 0,
+            "plain_cycles": 0,
+            "retrieval_proposed": 0,
+            "retrieval_accepted": 0,
+            "bonus_tokens": 11,
+            "plain_tokens": 1,
+            "span_snap_cycles": 0,
+            "span_snap_tokens": 0,
+            "span_extend_cycles": 0,
+            "span_extend_tokens": 0,
+            "verify_span_hist": {
+              "3": 10,
+              "2": 1
+            },
+            "verify_accept_hist": {
+              "2": 9,
+              "1": 2
+            },
+            "latched": false,
+            "rate_gate_probed": false,
+            "rate_gate_delatched": false,
+            "rate_gate_spec_ms_per_tok": 0.0,
+            "rate_gate_plain_ms_per_tok": 0.0,
+            "retrieval_corpus_mode": "target",
+            "retrieval_corpus_tokens": 0,
+            "lookback_current": 0,
+            "lookback_peak": 0,
+            "lookback_widen_events": 0,
+            "lookback_narrow_events": 0,
+            "source_rejections": 0,
+            "admission_windows": 0,
+            "admission_probe_tokens": 0,
+            "admission_matches": 0,
+            "admission_activations": 0,
+            "admission_delatches": 0,
+            "admission_reentries": 0,
+            "draft_cycles": 11,
+            "draft_proposed": 21,
+            "draft_accepted": 20,
+            "external_cache_reconciled": false,
+            "external_cache_trimmed_tokens": 0,
+            "router_plain_cycles": 0,
+            "router_reengagements": 0,
+            "router_last_num_draft": 0,
+            "router_accept_prob": 0.0,
+            "total_emitted": 32,
+            "draft_acceptance": 0.9523809523809523
+          },
+          "async_qsa_promotion": {
+            "queued_ns": 714375,
+            "finish_ns": 2256958,
+            "stream_wait_ns": 1258792,
+            "reserved_bytes": 7601408,
+            "patched_bytes": 82944,
+            "recurrent_arrays_reused": 74,
+            "cleanup_error_count": 0,
+            "rows": 1,
+            "layers": 49,
+            "advance": 3
+          },
+          "adaptive_depth": null
+        }
+      ],
+      "rep": 0
+    },
+    {
+      "arm": "reduced",
+      "width": 1,
+      "constrained": false,
+      "tokens": [
+        [
+          71093,
+          12305,
+          198,
+          727,
+          10562,
+          39914,
+          36053,
+          7080,
+          16,
+          25,
+          1103,
+          11,
+          1103,
+          17,
+          25,
+          1103,
+          8,
+          1411,
+          1103,
+          25,
+          198,
+          262,
+          4071,
+          50346,
+          1330,
+          10300,
+          11140,
+          1083,
+          264,
+          3074,
+          10300,
+          1103
+        ]
+      ],
+      "elapsed_seconds": 0.30447545798961073,
+      "tokens_decoded": 31,
+      "tok_s": 101.81444575101938,
+      "cycles": 11,
+      "receipt_emitted": 32,
+      "tokens_per_cycle": 2.909090909090909,
+      "counter_delta": {
+        "proposal_calls": 24,
+        "full_vocab_bypasses": 0
+      },
+      "scheduler": {
+        "prefill_rounds": 0,
+        "prefill_only_rounds": 0,
+        "decode_priority_release_rounds": 0,
+        "decode_priority_deferred_rounds": 0,
+        "adaptive_prefill_release_rounds": 0,
+        "adaptive_prefill_slack_deferred_rounds": 0,
+        "adaptive_prefill_deadline_forced_rounds": 0,
+        "adaptive_prefill_apc_priority_admissions": 0,
+        "mtp_short_prefill_interleaved": 0,
+        "short_prefill_overflow_admissions": 0,
+        "apc_interior_checkpoints_captured": 0,
+        "apc_interior_checkpoints_skipped_trimmable": 0,
+        "apc_interior_checkpoints_skipped_inexact": 0,
+        "prefill_chunk_rounds_recorded": 0,
+        "prefill_chunk_varied_requests": 0,
+        "adaptive_prefill_chunk_histogram": {}
+      },
+      "receipts": [
+        {
+          "route": "continuous_batched_self_mtp",
+          "observed_compute_widths": [
+            1
+          ],
+          "num_draft": 2,
+          "requested_num_draft": null,
+          "admission_stage": null,
+          "accept_rule": "residual",
+          "sampling_temperature": 0.0,
+          "verification": "exact",
+          "verification_parameters": null,
+          "relaxed_accepts": 0,
+          "fly_disabled": false,
+          "fly_disabled_reason": null,
+          "stats": {
+            "cycles": 11,
+            "retrieval_cycles": 0,
+            "plain_cycles": 0,
+            "retrieval_proposed": 0,
+            "retrieval_accepted": 0,
+            "bonus_tokens": 11,
+            "plain_tokens": 1,
+            "span_snap_cycles": 0,
+            "span_snap_tokens": 0,
+            "span_extend_cycles": 0,
+            "span_extend_tokens": 0,
+            "verify_span_hist": {
+              "3": 10,
+              "2": 1
+            },
+            "verify_accept_hist": {
+              "2": 9,
+              "1": 2
+            },
+            "latched": false,
+            "rate_gate_probed": false,
+            "rate_gate_delatched": false,
+            "rate_gate_spec_ms_per_tok": 0.0,
+            "rate_gate_plain_ms_per_tok": 0.0,
+            "retrieval_corpus_mode": "target",
+            "retrieval_corpus_tokens": 0,
+            "lookback_current": 0,
+            "lookback_peak": 0,
+            "lookback_widen_events": 0,
+            "lookback_narrow_events": 0,
+            "source_rejections": 0,
+            "admission_windows": 0,
+            "admission_probe_tokens": 0,
+            "admission_matches": 0,
+            "admission_activations": 0,
+            "admission_delatches": 0,
+            "admission_reentries": 0,
+            "draft_cycles": 11,
+            "draft_proposed": 21,
+            "draft_accepted": 20,
+            "external_cache_reconciled": false,
+            "external_cache_trimmed_tokens": 0,
+            "router_plain_cycles": 0,
+            "router_reengagements": 0,
+            "router_last_num_draft": 0,
+            "router_accept_prob": 0.0,
+            "total_emitted": 32,
+            "draft_acceptance": 0.9523809523809523
+          },
+          "async_qsa_promotion": {
+            "queued_ns": 751583,
+            "finish_ns": 1186500,
+            "stream_wait_ns": 474958,
+            "reserved_bytes": 7601408,
+            "patched_bytes": 82944,
+            "recurrent_arrays_reused": 74,
+            "cleanup_error_count": 0,
+            "rows": 1,
+            "layers": 49,
+            "advance": 3
+          },
+          "adaptive_depth": null
+        }
+      ],
+      "rep": 0
+    }
+  ],
+  "gate": {
+    "all_greedy_equal": true,
+    "candidate_engaged": true,
+    "control_bypassed": true,
+    "constrained_bypass": false,
+    "swap_within_limit": false
+  }
+}

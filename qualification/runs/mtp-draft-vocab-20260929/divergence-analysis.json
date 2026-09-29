@@ -1,0 +1,262 @@
+{
+  "schema": "mlx2.mtp-draft-vocab-divergence-analysis.v1",
+  "source": {
+    "head": "42304181864ce8a641def60eea28e04cc0f07d90",
+    "tracked_diff_sha256": "f878286acd3f428702b58aff431d9dc804872aef03ce126ede6052a234189b87",
+    "untracked": [
+      [
+        "provenance/mtp-draft-vocab.NOTICE",
+        "6e31d8f517e147877a1f75f5df5de0feb98c83f8e7d27b399928e681ef6b3c9a"
+      ],
+      [
+        "provenance/mtp-draft-vocab.json",
+        "6c321dd404e210f249c40c94f89b2d146a8df6c0c0cad63c272950ac66ba772f"
+      ],
+      [
+        "qualification/runs/mtp-draft-vocab-20260929/smoke.json",
+        "24e22a114691c733938cfd702103edb101bc2c2a83a4b1f352e4bc6dac2216b5"
+      ],
+      [
+        "scripts/build_mtp_draft_vocab_manifest.py",
+        "daecdda7a09892f7d29f3d8b4c81098a3760c8e750f117dc18f31f06947b985a"
+      ],
+      [
+        "scripts/plan_mtp_draft_vocab_ab.py",
+        "17ee9c60d5c1e25179c68566bd9287e4ff4ca985e50b0ff65633a81d9b36c6ae"
+      ],
+      [
+        "scripts/qualify_mtp_draft_vocab.py",
+        "d513489159ba23eda8efad7174e5091c78596d345ee6979cceef3568fa17d9ce"
+      ],
+      [
+        "src/mlx2/runtime/mtp_draft_vocab.py",
+        "185dd07b1b602657a193aaf06f02a931dc3cf180082048b7c7ae5162de2a3fc2"
+      ],
+      [
+        "tests/test_mtp_draft_vocab_cpu.py",
+        "a2c27215d8edaaefb7db54070b50247f5d1c7e49efb637a85c823085bb7f670b"
+      ]
+    ]
+  },
+  "artifact_identity": {
+    "path": "Qwen3.8-Flash-Next-MLX-4bit-MTP",
+    "fingerprint": "f1f50c5861cd055b818e9633eb991322fb7fef38d5b212c9faee600950afdf07",
+    "files": [
+      [
+        "model-00001-of-00020.safetensors",
+        5269867108,
+        1787763792019276613
+      ],
+      [
+        "model-00002-of-00020.safetensors",
+        5250035154,
+        1787763795112301395
+      ],
+      [
+        "model-00003-of-00020.safetensors",
+        5250035156,
+        1787763797568853436
+      ],
+      [
+        "model-00004-of-00020.safetensors",
+        5250035164,
+        1787763799795899554
+      ],
+      [
+        "model-00005-of-00020.safetensors",
+        5250035154,
+        1787763802219521492
+      ],
+      [
+        "model-00006-of-00020.safetensors",
+        5250035197,
+        1787763804628789963
+      ],
+      [
+        "model-00007-of-00020.safetensors",
+        5266267219,
+        1787763807202765530
+      ],
+      [
+        "model-00008-of-00020.safetensors",
+        5323321374,
+        1787763811607771778
+      ],
+      [
+        "model-00009-of-00020.safetensors",
+        5363888722,
+        1787763816707510759
+      ],
+      [
+        "model-00010-of-00020.safetensors",
+        5363888860,
+        1787763824197616574
+      ],
+      [
+        "model-00011-of-00020.safetensors",
+        5319600417,
+        1787763836593095132
+      ],
+      [
+        "model-00012-of-00020.safetensors",
+        5363888848,
+        1787763843735070415
+      ],
+      [
+        "model-00013-of-00020.safetensors",
+        5363888820,
+        1787763847449561808
+      ],
+      [
+        "model-00014-of-00020.safetensors",
+        5319600423,
+        1787763851288691395
+      ],
+      [
+        "model-00015-of-00020.safetensors",
+        5363888836,
+        1787763855198899940
+      ],
+      [
+        "model-00016-of-00020.safetensors",
+        5363888826,
+        1787763858503468595
+      ],
+      [
+        "model-00017-of-00020.safetensors",
+        5319600387,
+        1787763862716925024
+      ],
+      [
+        "model-00018-of-00020.safetensors",
+        5363888842,
+        1787763866563154407
+      ],
+      [
+        "model-00019-of-00020.safetensors",
+        5363888866,
+        1787763870894658903
+      ],
+      [
+        "model-00020-of-00020.safetensors",
+        1787099916,
+        1787763872212807079
+      ],
+      [
+        "model-mtp-q4.safetensors",
+        1467251930,
+        1787767069242346395
+      ],
+      [
+        "ple_rows.bin",
+        32000153600,
+        1787788508308843315
+      ]
+    ]
+  },
+  "analyses": [
+    {
+      "rep": 0,
+      "width": 4,
+      "equal": false,
+      "lane": 1,
+      "position": 118,
+      "full_token": 2222,
+      "reduced_token": 15773,
+      "argmax": 15773,
+      "full_margin": 0.125,
+      "reduced_margin": 0.0,
+      "top5": [
+        {
+          "token": 15773,
+          "logit": 20.625
+        },
+        {
+          "token": 2222,
+          "logit": 20.5
+        },
+        {
+          "token": 2560,
+          "logit": 20.125
+        },
+        {
+          "token": 944,
+          "logit": 16.25
+        },
+        {
+          "token": 478,
+          "logit": 16.125
+        }
+      ]
+    },
+    {
+      "rep": 1,
+      "width": 4,
+      "equal": false,
+      "lane": 1,
+      "position": 118,
+      "full_token": 2222,
+      "reduced_token": 15773,
+      "argmax": 15773,
+      "full_margin": 0.125,
+      "reduced_margin": 0.0,
+      "top5": [
+        {
+          "token": 15773,
+          "logit": 20.625
+        },
+        {
+          "token": 2222,
+          "logit": 20.5
+        },
+        {
+          "token": 2560,
+          "logit": 20.125
+        },
+        {
+          "token": 944,
+          "logit": 16.25
+        },
+        {
+          "token": 478,
+          "logit": 16.125
+        }
+      ]
+    },
+    {
+      "rep": 2,
+      "width": 4,
+      "equal": false,
+      "lane": 1,
+      "position": 118,
+      "full_token": 2222,
+      "reduced_token": 15773,
+      "argmax": 15773,
+      "full_margin": 0.125,
+      "reduced_margin": 0.0,
+      "top5": [
+        {
+          "token": 15773,
+          "logit": 20.625
+        },
+        {
+          "token": 2222,
+          "logit": 20.5
+        },
+        {
+          "token": 2560,
+          "logit": 20.125
+        },
+        {
+          "token": 944,
+          "logit": 16.25
+        },
+        {
+          "token": 478,
+          "logit": 16.125
+        }
+      ]
+    }
+  ],
+  "all_near_tie": true
+}
