@@ -70,7 +70,7 @@ ROTATING_FAMILIES = {"muse", "north", "laguna"}
 SPOMIN_FAMILIES = {"muse", "north", "laguna"}
 # Checkpointed-hybrid caches (GDN/Mamba + attention): junction snapshots only
 # exist there.  A KV-only cache is refused at startup, which is also handled.
-HYBRID_FAMILIES = {"qwen36", "qwen38", "flash-next", "nemotron"}
+HYBRID_FAMILIES = {"qwen36", "qwen38", "flash-next", "nemotron", "nemotron35-lightning"}
 
 FEATURES = (
     ("cache_capsules", "ordinary"),
@@ -167,6 +167,7 @@ NO_KERNELS = {
     "muse": "no fused/compiled kernel toggle in the Muse Glimmer runtime",
     "north": "no fused/compiled kernel toggle in the North Mini Code runtime",
     "nemotron": "fused chunked-SSD prefill kernels are unconditional (no toggle to A/B)",
+    "nemotron35-lightning": "fused chunked-SSD prefill kernels are unconditional (no toggle to A/B)",
     "gemma4": "mlx-vlm runtime; mlx2 exposes no kernel toggle",
     "gemma3n": "mlx-vlm runtime; mlx2 exposes no kernel toggle",
     "minicpmo": "mlx-vlm runtime; mlx2 exposes no kernel toggle",

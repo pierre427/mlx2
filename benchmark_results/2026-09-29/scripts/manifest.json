@@ -60,8 +60,8 @@
     {
       "source": "qualification/runs/requal-20260928/run.py",
       "published": "scripts/requal/run.py",
-      "source_sha256": "02572f760ba608ce42157a0a9d91eb73de42072e7e9b7cf6ef1e9ff77193b96e",
-      "published_sha256": "02572f760ba608ce42157a0a9d91eb73de42072e7e9b7cf6ef1e9ff77193b96e",
+      "source_sha256": "9bf4606055003488f84ca92b955298f109bebcc604db06725e581a3f08a93d6e",
+      "published_sha256": "9bf4606055003488f84ca92b955298f109bebcc604db06725e581a3f08a93d6e",
       "home_prefix_rewritten": false,
       "local_service_label_rewritten": false
     },
@@ -92,8 +92,8 @@
     {
       "source": "qualification/runs/requal-20260928/run_stress.py",
       "published": "scripts/requal/run_stress.py",
-      "source_sha256": "5fd8fec0df8c1c1160954951a0b75c7442f8b801b95f89d0407c2045ea923f26",
-      "published_sha256": "5fd8fec0df8c1c1160954951a0b75c7442f8b801b95f89d0407c2045ea923f26",
+      "source_sha256": "ebda4f4d23a87c211c040e1edf204c3b576b79d839db3c2b0cc763d0767391ad",
+      "published_sha256": "ebda4f4d23a87c211c040e1edf204c3b576b79d839db3c2b0cc763d0767391ad",
       "home_prefix_rewritten": false,
       "local_service_label_rewritten": false
     },
@@ -106,10 +106,18 @@
       "local_service_label_rewritten": false
     },
     {
+      "source": "qualification/runs/requal-20260928/monitor_host_memory.py",
+      "published": "scripts/requal/monitor_host_memory.py",
+      "source_sha256": "09ee7c0b6d30f8c4ef6bbab530428d097f7dcca009b0ac34845a4a445741a72d",
+      "published_sha256": "09ee7c0b6d30f8c4ef6bbab530428d097f7dcca009b0ac34845a4a445741a72d",
+      "home_prefix_rewritten": false,
+      "local_service_label_rewritten": false
+    },
+    {
       "source": "qualification/runs/series-20260924/campaign_config.py",
       "published": "scripts/series/campaign_config.py",
-      "source_sha256": "14e44ee7a952e57081b2b871eb99ce98ac50e1eb7420b6a5c25fbccdf820d247",
-      "published_sha256": "546e8e1b5059ebe6fd6f143fa8fd04ffece2b2a8f003c323ccce07527d161e04",
+      "source_sha256": "c0ad567cc9fe5b5ff5115214539ef8d1e9ab0f07d55795461229cdd0450a19db",
+      "published_sha256": "e117981b2d50e52c143c04b26f8d0c2737e649cae9a9c8e2004c48d9e4663e41",
       "home_prefix_rewritten": true,
       "local_service_label_rewritten": false
     },
@@ -124,8 +132,8 @@
     {
       "source": "qualification/runs/series-20260924/experimental_job.py",
       "published": "scripts/series/experimental_job.py",
-      "source_sha256": "cb37c454fc7417bf6d7bf78c6229e9d9bb74c1a002957233e4b0d1bcb6097ace",
-      "published_sha256": "8053a9ea633818cc52ab79e52df1fe6713e179e02dc0ee50c4691c1a542d6501",
+      "source_sha256": "3567e926185ba030b3265cc11d1d5e7034a92c89118a7704938d9294dbf5c729",
+      "published_sha256": "e6237b3f6cd7b6c5ee6f2cf378dd460eca7c25ae467ce2ee493eab93853e529c",
       "home_prefix_rewritten": true,
       "local_service_label_rewritten": false
     },
@@ -229,6 +237,20 @@
       "published": "scripts/series/policies/muse-pld-opt-in.json",
       "source_sha256": "4257ffcb612e63f1090ef356e65af02b45c5e91358b699def6c04e264deb91aa",
       "published_sha256": "4257ffcb612e63f1090ef356e65af02b45c5e91358b699def6c04e264deb91aa",
+      "home_prefix_rewritten": false
+    },
+    {
+      "source": "qualification/runs/series-20260924/policies/nemotron35-mtp1.json",
+      "published": "scripts/series/policies/nemotron35-mtp1.json",
+      "source_sha256": "c505bc15ad1a53d9770f2e8721a4eac295ff53b96e72d354cce69d38616770ac",
+      "published_sha256": "c505bc15ad1a53d9770f2e8721a4eac295ff53b96e72d354cce69d38616770ac",
+      "home_prefix_rewritten": false
+    },
+    {
+      "source": "qualification/runs/series-20260924/policies/nemotron35-mtp3.json",
+      "published": "scripts/series/policies/nemotron35-mtp3.json",
+      "source_sha256": "3f5cdc3ba3208cc825f17566e4e9c9fb578003439820b6676e7117bef4fdf4bb",
+      "published_sha256": "3f5cdc3ba3208cc825f17566e4e9c9fb578003439820b6676e7117bef4fdf4bb",
       "home_prefix_rewritten": false
     },
     {

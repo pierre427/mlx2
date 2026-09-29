@@ -1,0 +1,33 @@
+EXPERIMENTAL nemotron35-lightning adapter=Nemotron35LightningAdapter family=nemotron35-lightning
+  FEATURE cache_capsules: applicable
+  FEATURE block_persistence: applicable
+  FEATURE apc_junction_snapshots: applicable
+  FEATURE apc_rolling_checkpoints: applicable
+  FEATURE srpt_prefill_scheduling: applicable
+  FEATURE memory_preemption: applicable
+  FEATURE host_memory_signals: applicable
+  FEATURE fly_verification: applicable
+  FEATURE self_mtp_copy_draft: applicable
+  FEATURE pld_rotating_replay: n/a (no prompt-lookup route in the series matrix)
+  FEATURE spomin_live_compaction: n/a (no standard-attention Spomin backend (hybrid state is declined by design))
+  FEATURE int8_prefill: n/a (adapter declares no int8 prefill scope)
+  FEATURE multi_lora: n/a (no local LoRA adapter for this base (searched ~/mlx-models, mlx-uag, tests))
+  FEATURE verify_bitexact: n/a (installed mlx has no mx.metal.set_qmv_bitexact (startup fails closed))
+  SERVER[ordinary] route=ordinary ${HOME}/Desktop/mlx2/.venv/bin/python -u -m mlx2.server --model ${HOME}/mlx-models/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16-mlx-8Bit --host 127.0.0.1 --port 8297 --max-context 32768 --max-lanes 4 --max-inflight 8 --cache-bytes 8589934592 --qualification-mode --ordinary --execution-policy /var/folders/kh/h5zm266x29z35tfv8_lt83v80000gn/T/series-experimental-dry-81ixxv0z/experimental-nemotron35-lightning-ordinary/policies/ordinary.json --cache-dir /var/folders/kh/h5zm266x29z35tfv8_lt83v80000gn/T/series-experimental-dry-81ixxv0z/experimental-nemotron35-lightning-ordinary/cache-ordinary --admin-token-file ${HOME}/.codex/worktrees/qualification-20260928/mlx2/qualification/runs/series-20260924/.runtime/admin-token --reasoning-signing-key-file ${HOME}/.codex/worktrees/qualification-20260928/mlx2/qualification/runs/series-20260924/.runtime/reasoning-key --cache-capsules --persistent-block-bytes 4194304
+    POLICY {"apc_junction_checkpoints": true, "apc_rolling_checkpoints": {"interval_tokens": 512}, "host_memory_signals": {"enabled": true, "fall_after_seconds": 5.0}, "memory_preemption": {"enabled": true, "on_pressure": true, "stall_seconds": 60}, "prefill_scheduling": {"max_bypass": 3, "one_slice_contention": true, "order": "srpt"}}
+    CHECK base: short chat (95), repeated prefix (APCv2 hit), streaming (Ottawa)
+    CHECK cache_capsules: greedy n=3 fanout on a warm prompt; cache_capsules.requests and primary_successes|fallbacks move, no errors/stale; then the same server command without --cache-capsules replays it and every sample's first words must match (width-1 answer recorded, not gated)
+    CHECK block_persistence: session park to disk, resume, re-ask; idle_disk.block_bytes set, parks+restores move, cached hit, same text
+    CHECK apc_junction_snapshots: 4 chats sharing a long system prompt, diverging user turns; junction published and hit
+    CHECK apc_rolling_checkpoints: ~2.6K-token prefill abandoned at 0.6x its TTFT, then retried; rolling published+hit or cancel-published (planned/degraded and admission counters recorded)
+    CHECK srpt_prefill_scheduling: 2 long (~2.6K tok) + 4 short concurrent streams, below max-inflight; bypasses|bypass_forced|one_slice_clamps move, short answers correct
+    CHECK memory_preemption: warm, reference, solo prefill fault, concurrent peer+faulted victim; preemptions and replays move
+    CHECK host_memory_signals: /v1/status host_memory_available_bytes > 0 and a pressure level
+  SERVER[speculative] route=mtp2 ${HOME}/Desktop/mlx2/.venv/bin/python -u -m mlx2.server --model ${HOME}/mlx-models/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16-mlx-8Bit --host 127.0.0.1 --port 8297 --max-context 32768 --max-lanes 4 --max-inflight 8 --cache-bytes 8589934592 --qualification-mode --native-mtp --execution-policy /var/folders/kh/h5zm266x29z35tfv8_lt83v80000gn/T/series-experimental-dry-81ixxv0z/experimental-nemotron35-lightning-ordinary/policies/speculative.json --cache-dir /var/folders/kh/h5zm266x29z35tfv8_lt83v80000gn/T/series-experimental-dry-81ixxv0z/experimental-nemotron35-lightning-ordinary/cache-speculative --admin-token-file ${HOME}/.codex/worktrees/qualification-20260928/mlx2/qualification/runs/series-20260924/.runtime/admin-token --reasoning-signing-key-file ${HOME}/.codex/worktrees/qualification-20260928/mlx2/qualification/runs/series-20260924/.runtime/reasoning-key
+    POLICY {"fly_verification": {"enabled": true, "entropy_threshold": 2.0, "min_prob": 0.01, "window": 2}, "self_mtp_copy_draft": {"enabled": true}}
+    CHECK base: short chat (95), repeated prefix (APCv2 hit), streaming (Ottawa)
+    CHECK fly_verification: greedy and sampled 128-token chats; receipt verification == fly
+    CHECK self_mtp_copy_draft: verbatim-repeat request; scheduler self_mtp_copy_rounds moves
+  FUSED: none (fused chunked-SSD prefill kernels are unconditional (no toggle to A/B))
+  RESULT -> ${HOME}/.codex/worktrees/qualification-20260928/mlx2/qualification/runs/series-20260924/series/jobs/nemotron35-lightning/experimental.json
+DRY-RUN PASS experimental nemotron35-lightning

@@ -12,6 +12,7 @@ import fcntl
 import hashlib
 import json
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -151,6 +152,8 @@ def stop_owned(process: subprocess.Popen) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", required=True)
+    parser.add_argument("--route", default=None, help="named route; defaults to the model's selected route")
+    parser.add_argument("--tag", default="", help="filename-safe suffix for an isolated smoke receipt")
     parser.add_argument("--host-label", required=True)
     parser.add_argument("--port", type=int, default=8397)
     parser.add_argument("--load-timeout", type=float, default=2400)
@@ -159,10 +162,19 @@ def main() -> int:
     model = models.get(args.model)
     if model is None:
         parser.error(f"model not present on this host: {args.model}")
-    route = next(route for route in model.routes if route.name == model.default_route)
+    if args.tag and not re.fullmatch(r"[A-Za-z0-9_-]+", args.tag):
+        parser.error("tag must contain only letters, digits, underscores or hyphens")
+    route = next((route for route in model.routes
+                  if route.name == (args.route or model.default_route)), None)
+    if route is None:
+        parser.error(f"route {args.route!r} is not declared for {model.name}")
     output = HERE / args.host_label / model.name
     output.mkdir(parents=True, exist_ok=True)
-    receipt_path = output / "smoke.json"
+    suffix = f"-{route.name}" if route.name != model.default_route else ""
+    if args.tag:
+        suffix += f"-{args.tag}"
+    receipt_path = output / f"smoke{suffix}.json"
+    server_log = output / f"server{suffix}.log"
     head = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
     config_path = Path(model.path) / "config.json"
     receipt = {
@@ -191,7 +203,7 @@ def main() -> int:
                 pass
             else:
                 raise RuntimeError(f"port {args.port} already serves /health")
-            with (output / "server.log").open("w") as log:
+            with server_log.open("w") as log:
                 process = subprocess.Popen(command, cwd=ROOT, env=env, stdout=log,
                                            stderr=subprocess.STDOUT, start_new_session=True)
                 receipt["server_pid"] = process.pid
@@ -226,7 +238,7 @@ def main() -> int:
         receipt["status"] = "error"
         receipt["error"] = f"{type(exc).__name__}: {exc}"
         if process is not None:
-            receipt["server_log_tail"] = (output / "server.log").read_text(errors="replace")[-3000:]
+            receipt["server_log_tail"] = server_log.read_text(errors="replace")[-3000:]
     finally:
         receipt["finished_at"] = time.time()
         save()

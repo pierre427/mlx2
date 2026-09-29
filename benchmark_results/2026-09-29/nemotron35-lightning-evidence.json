@@ -1,0 +1,112 @@
+{
+  "host": "m5-max-128gb",
+  "model": "nemotron35-lightning",
+  "schema": "mlx2.public-lightning-evidence.v1",
+  "smoke": {
+    "artifact_config_sha256": "a1b0135c0973322d188a836c86746e69ea07c02b241e1f26681bf5123345359b",
+    "cases": [
+      {
+        "case": "arithmetic",
+        "finish_reason": "stop",
+        "passed": true
+      },
+      {
+        "case": "knowledge-default-sampling",
+        "finish_reason": "stop",
+        "passed": true
+      }
+    ],
+    "default_checks": {
+      "artifact_sampling_matches_documented_policy": true,
+      "healthy": true,
+      "qualification_is_candidate": true,
+      "served_model": true
+    },
+    "receipt_sha256": "f69dc87cc392b8accfd21de2abc01e9f5ca54d9585eaa976484a69c522812221",
+    "route": "ordinary",
+    "sampling_drift": {
+      "expected": {},
+      "observed": {}
+    },
+    "source_head": "bbfa0d3ce1b7d532606d62fb1069deb5d6ce5f06",
+    "status": "passed"
+  },
+  "stress_attempts": [
+    {
+      "aggregate_generated_tokens_per_second": null,
+      "apcv2_probe_passed": true,
+      "batching_engaged": null,
+      "cache_cap_gib": 8,
+      "graded_correct": null,
+      "http_errors": null,
+      "issues": null,
+      "max_lanes": 20,
+      "observed_widths": null,
+      "receipt_sha256": "d15d39d247587671b36e84eab87c92017e5133de3bc10ca5ec09c4e24e87b793",
+      "requests": null,
+      "route": "ordinary",
+      "source_head": "bbfa0d3ce1b7d532606d62fb1069deb5d6ce5f06",
+      "status": "contaminated",
+      "swapout_pages": 34296,
+      "tag": "lightning-ordinary-20260929",
+      "thinking_allowance": null,
+      "workload_sha256": null
+    },
+    {
+      "aggregate_generated_tokens_per_second": {
+        "max": 219.5,
+        "median": 183.64999999999998,
+        "min": 171.4
+      },
+      "apcv2_probe_passed": true,
+      "batching_engaged": null,
+      "cache_cap_gib": 4,
+      "graded_correct": 397,
+      "http_errors": 0,
+      "issues": {
+        "empty": 3
+      },
+      "max_lanes": 8,
+      "observed_widths": {
+        "8": 380,
+        "None": 20
+      },
+      "receipt_sha256": "e7d2f56f9a85851b767d59f701585f54e39410c28b19c212b1463efa193137eb",
+      "requests": 400,
+      "route": "ordinary",
+      "source_head": "87c68d2cab96b06ae8483856c7b42656a1393495",
+      "status": "error",
+      "swapout_pages": 0,
+      "tag": "lightning-ordinary-l8c4-20260929",
+      "thinking_allowance": null,
+      "workload_sha256": "1135de18e2158e153973b05b22b124078b2619faeb737ef90ce0fd993f1810e5"
+    },
+    {
+      "aggregate_generated_tokens_per_second": {
+        "max": 204.4,
+        "median": 181.14999999999998,
+        "min": 161.6
+      },
+      "apcv2_probe_passed": true,
+      "batching_engaged": true,
+      "cache_cap_gib": 4,
+      "graded_correct": 400,
+      "http_errors": 0,
+      "issues": {},
+      "max_lanes": 8,
+      "observed_widths": {
+        "8": 380,
+        "None": 20
+      },
+      "receipt_sha256": "fe5c3bdd4ca20e5e4836e4f62832997a8c096b833480a04e25c43b5a92bcad95",
+      "requests": 400,
+      "route": "ordinary",
+      "source_head": "4fd313315377a1ed820a5037d46e6f8e67689bb4",
+      "status": "passed",
+      "swapout_pages": 0,
+      "tag": "lightning-ordinary-l8c4-think4096-20260929",
+      "thinking_allowance": 4096,
+      "workload_sha256": "b4bca750729b658aa6edbf2d29f10ae4b65846fb1026246d8578dfda8a3c23c4"
+    }
+  ]
+}

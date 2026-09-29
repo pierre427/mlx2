@@ -1,0 +1,19 @@
+{
+  "schema": "mlx2.requal.host-load-feasibility.v1",
+  "model": "nemotron35-lightning",
+  "host": "m3-pro-36gb",
+  "source_head": "bbfa0d3ce1b7d532606d62fb1069deb5d6ce5f06",
+  "artifact_config_sha256": "a1b0135c0973322d188a836c86746e69ea07c02b241e1f26681bf5123345359b",
+  "target_shards": 7,
+  "target_shard_bytes": 33559963550,
+  "mtp_sidecar_bytes": 2670685240,
+  "mtp_sidecar_sha256": "64577b275ca4e7e5266eae0903674f7f46ec2a8cbf4f4f1a3207f80d503cd1d0",
+  "m3_physical_bytes": 38654705664,
+  "m3_artifact_copy": "15 target files and MTP sidecar hash-verified, zero partials",
+  "m3_cpu_preflight": "Nemotron35LightningAdapter resolved ordinary and mtp2 routes",
+  "m5_same_artifact_ready_metal_active_bytes": 36232578184,
+  "m5_same_artifact_ready_metal_peak_bytes": 38786909320,
+  "m5_ready_measurement": "m5-max-128gb/nemotron35-lightning/stress-lightning-ordinary-20260929/stress.json status_at_ready",
+  "m3_gpu_load": "not_attempted",
+  "decision": "The measured ready allocation leaves about 2.26 GiB of M3 physical memory for the OS and service reserves, and the measured load peak exceeds M3 physical memory. No swap-safe M3 load is feasible for this 8-bit target plus BF16 MTP sidecar."
+}

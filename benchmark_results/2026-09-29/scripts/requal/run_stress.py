@@ -61,6 +61,8 @@ def main() -> int:
     parser.add_argument("--host-label", required=True)
     parser.add_argument("--max-lanes", type=int, default=20)
     parser.add_argument("--cache-cap-gib", type=int, default=0)
+    parser.add_argument("--thinking-allowance", type=int, default=None,
+                        help="extra generation tokens for models that think by default")
     parser.add_argument("--port", type=int, default=8397)
     parser.add_argument("--load-timeout", type=float, default=2400)
     parser.add_argument("--tag", default="", help="separate this run from historical model receipts")
@@ -72,6 +74,8 @@ def main() -> int:
         parser.error("tag must contain only letters, digits, underscores or hyphens")
     if args.cache_cap_gib < 0:
         parser.error("cache cap must be nonnegative")
+    if args.thinking_allowance is not None and args.thinking_allowance < 0:
+        parser.error("thinking allowance must be nonnegative")
     if args.cache_cap_gib:
         os.environ["MLX2_SERIES_CACHE_GIB_CAP"] = str(args.cache_cap_gib)
     models = {model.name: model for model in config.MODELS}
@@ -97,6 +101,7 @@ def main() -> int:
         "max_lanes": args.max_lanes, "started_at": time.time(), "status": "running",
         "tag": args.tag,
         "cache_cap_gib": args.cache_cap_gib or None,
+        "thinking_allowance": args.thinking_allowance,
     }
 
     def save() -> None:
@@ -123,6 +128,8 @@ def main() -> int:
     receipt["command"] = command
     env = {**os.environ, "PYTHONPATH": config.stage_pythonpath(model),
            "HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1"}
+    if args.thinking_allowance is not None:
+        env["SANITY_THINK_ALLOWANCE"] = str(args.thinking_allowance)
     base = f"http://127.0.0.1:{args.port}"
     before = swapouts()
     server = None

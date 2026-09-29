@@ -203,6 +203,15 @@ SERIES_VARIANTS = (
         ),
         "ordinary", TEXT, 8, _ladder_cache(79),
     ),
+    Model(
+        "nemotron35-lightning", "Nemotron 3.5 Lightning 30B-A3B MLX 8-bit",
+        _M + "NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16-mlx-8Bit", 262144,
+        (
+            Route("ordinary", ("--ordinary",), None, None),
+            Route("mtp2", ("--native-mtp",), None, None, True),
+        ),
+        "ordinary", TEXT, 8, 48,
+    ),
 )
 MM_GEMMA4 = frozenset({"text", "streaming", "vision", "apc"})
 GEMMA4 = tuple(
