@@ -1,0 +1,29 @@
+# north-8bit
+
+Artifact: `North-Mini-Code-1.0-mlx-8bit`. This page summarizes the 2026-09-28–29 campaign; model files and raw request content are not included.
+
+Statuses below are per workload and host. A smoke or 20×20 pass does not by itself qualify every route or feature.
+
+## M5 Max, 128 GB
+
+Served smoke: **passed**; default route: `ordinary`; source commit: `b81aaf03846cf9e22decb195d96032d0b9eddd5a`; artifact config SHA-256: `7dcd78088bb1df15479a3f6b2f14a08e11a1619ffbcdf2bf904b7321af4a93dc`.
+
+### 20×20 domain and batching
+
+20×20 gate: **passed**.
+Graded correct: **400/400**; HTTP errors: **0**; observed peak batch width: **4**.
+Median aggregate generated rate across rounds: **150.2 tokens/s**. This is mixed-workload throughput, not single-stream decode speed.
+Owned-run swap-out delta: **0 pages**; APCv2 repeated-prefix probe: **True**; batching engaged: **True**.
+Source commit: `225f7a3050870becf3c1e5e48008fe60bd3ab8df`; artifact config SHA-256: `7dcd78088bb1df15479a3f6b2f14a08e11a1619ffbcdf2bf904b7321af4a93dc`.
+
+### Context performance
+
+No three-repetition performance ladder in this campaign.
+
+### Feature qualification
+
+Feature qualification was not run on this model and host.
+
+## M3 Pro, 36 GB
+
+Model artifact not staged on this host; no load or performance verdict.

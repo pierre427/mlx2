@@ -1,0 +1,5 @@
+{
+  "constrained_tool_grammar": true,
+  "tolerant_tool_markers": true,
+  "apc_interior_checkpoints": {"count": 2, "min_stride": 64}
+}
