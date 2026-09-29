@@ -20,6 +20,8 @@ The Flash-Next page also reports the later opt-in TensorFold row-kernel and gate
 
 The [Muse-Glimmer 4-bit page](muse.md) records the later M5 and M3 feature
 qualification, lane-matmul comparisons, and an external DFlash2 candidate.
+Its [single chart](muse-performance.png) plots the mixed 20×20 rates and
+single-stream thermal ladders on separate axes.
 Its family default is ordinary decode with the M5 lane wrapper off; the
 full TensorFold fused executor has no Muse implementation. APCv2 rolling
 recovery passed on both hosts. The M3 external-draft route remains an open gate.

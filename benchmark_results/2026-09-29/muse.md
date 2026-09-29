@@ -2,6 +2,10 @@
 
 Artifact: `Muse-Glimmer-30B-mlx-4bit`; config SHA-256 `c7f48468db2ef9c3de4cb912be24ecc9fbed36d83f3b8386a0b224ee7ba876ca`. These are source-bound results from the M5 Max 128 GB and M3 Pro 36 GB. Rates from the 20×20 mixed domain workload are aggregate generated tokens/s; ladder decode rates are per stream. The latter used three thermally admitted measured repetitions per cell, a warmup, needle recall, and zero-swap checks.
 
+![Muse-Glimmer 20×20 and thermal ladder results](muse-performance.png)
+
+[Vector chart](muse-performance.svg) · [Chart source](make_muse_chart.py)
+
 ## Selection and scope
 
 The selected general route is **ordinary decode**. For this q4 artifact, `--lane-matmul auto` resolves to **off**; an explicit lane policy still permits experiments on the M5. Other Muse weight formats retain their detected crossover pending separate qualification. DFlash2 and prompt lookup (PLD) remain explicit routes. The full TensorFold fused Qwen3.8 target executor has no Muse implementation; the applicable TensorFold-derived lane projection kernel was tested separately. Muse has no native MTP. No observation here establishes production use.
@@ -43,6 +47,8 @@ DFlash2 and PLD completed all 400 domain requests correctly, but their speculati
 | M5 PLD | `95aef357` | 4,096 | 6.21 | 41.6 | 6/6 | 0 |
 | M3 ordinary, lane off | `176eeaea` | 1,024 | 10.04 | 8.43 | 6/6 | 0 |
 | M3 ordinary, lane off | `176eeaea` | 4,096 | 40.91 | 8.32 | 6/6 | 0 |
+| M3 ordinary, current default | `45a91d2b` | 1,024 | 10.05 | 8.43 | 6/6 | 0 |
+| M3 ordinary, current default | `45a91d2b` | 4,096 | 40.93 | 8.34 | 6/6 | 0 |
 | M3 PLD | `95aef357` | 1,024 | 9.89 | 11.34 | 6/6 | 0 |
 | M3 PLD | `95aef357` | 4,096 | 40.81 | 12.18 | 6/6 | 0 |
 
@@ -85,6 +91,7 @@ These SHA-256 digests identify the private source-bound receipts used for the fi
 | M5 | current-default 1K/4K ladder run | `ebee138e78cf4b31c0c6614953af7c70016e722e5fc7a0e26c63712f7ef38660` |
 | M5 | final-default feature sweep | `f11e24c07e57827a6db3f8e459bcef1283cdde717321e621c6afab5a2d75e8aa` |
 | M3 | current-default 20×20 | `0b32502de4cea1fa4bd6924d9948305c1c56655c4f4738e8ca1ca43ac66c3ef8` |
+| M3 | current-default 1K/4K ladder run | `5c114676d91e800b7274b7fff760ef1c2c9d3fdd2bb8a68a446e142c11552c32` |
 | M3 | current-default safe feature sweep | `9c233ed3d2d7cd8707bafedea9a3ec7a71dcebbb0a26b39619dcfe25a46777d1` |
 
 The public [script snapshot](scripts/manifest.json) includes the smoke, stress, thermal-ladder and feature harnesses plus candidate policies, with source and published SHA-256 digests. Model weights, LoRA payloads, raw prompts, local paths, and credentials are excluded.
