@@ -87,16 +87,22 @@ def install_lora(model, *, name, path):
             return self.linear(value) + (self.scale * update).astype(value.dtype)
 
     modules = dict(model.named_modules())
+    resolve_key = getattr(model, "lora_module_key", lambda key: key)
+    module_keys = tuple(resolve_key(key) for key in config["keys"])
+    if any(not isinstance(key, str) or not key for key in module_keys):
+        raise ValueError("LoRA module key mapping returned an invalid key")
+    if len(set(module_keys)) != len(module_keys):
+        raise ValueError("LoRA module key mapping is not one-to-one")
     originals = {}
     replacements = []
-    for key in config["keys"]:
-        module = modules.get(key)
+    for key, module_key in zip(config["keys"], module_keys):
+        module = modules.get(module_key)
         if not isinstance(module, (nn.Linear, nn.QuantizedLinear)):
             raise ValueError(  # noqa: TRY004 - the selected key is incompatible
                 f"LoRA key {key!r} is not a Linear/QuantizedLinear module"
             )
-        originals[key] = module
-        replacements.append((key, ServingLoRALinear(module)))
+        originals[module_key] = module
+        replacements.append((module_key, ServingLoRALinear(module)))
     model.update_modules(tree_unflatten(replacements))
     try:
         weights = mx.load(str(path / "adapters.safetensors"))
@@ -110,13 +116,19 @@ def install_lora(model, *, name, path):
             missing = sorted(expected - set(weights))
             extra = sorted(set(weights) - expected)
             raise ValueError(f"LoRA tensor coverage mismatch; missing={missing}, extra={extra}")
+        mapped_weights = []
+        source_to_module = dict(zip(config["keys"], module_keys))
         for key, value in weights.items():
-            if key not in parameters or tuple(value.shape) != tuple(parameters[key].shape):
-                expected_shape = tuple(parameters[key].shape) if key in parameters else None
+            source, leaf = key.rsplit(".", 1)
+            module_key = source_to_module[source]
+            target = f"{module_key}.{leaf}"
+            if target not in parameters or tuple(value.shape) != tuple(parameters[target].shape):
+                expected_shape = tuple(parameters[target].shape) if target in parameters else None
                 raise ValueError(
                     f"LoRA tensor {key!r} has shape {tuple(value.shape)}, expected {expected_shape}"
                 )
-        model.load_weights(list(weights.items()), strict=False)
+            mapped_weights.append((target, value))
+        model.load_weights(mapped_weights, strict=False)
         mx.eval(model.parameters())
     except BaseException:
         model.update_modules(tree_unflatten(list(originals.items())))

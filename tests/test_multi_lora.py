@@ -280,6 +280,29 @@ def test_checkpoint_lora_key_collision_fails_closed(tmp_path):
         manager.prepare("collision", artifact)
 
 
+def test_single_lora_uses_checkpoint_module_mapping(tmp_path):
+    model = tiny_model()
+    module_key = KEYS_A[0]
+    artifact_key = "language_model." + module_key
+    artifact = write_adapter(
+        tmp_path / "single-aliased", keys=(artifact_key,),
+        dims={artifact_key: dims_for(model, (module_key,))[module_key]},
+        rank=2, seed=11,
+    )
+    object.__setattr__(
+        model, "lora_module_key",
+        lambda key: key.removeprefix("language_model."),
+    )
+    base = model(mx.array([PROMPTS[0]]))
+    session = install_lora(model, name="single-aliased", path=artifact)
+    try:
+        changed = model(mx.array([PROMPTS[0]]))
+        assert not mx.allclose(changed, base, atol=1e-4)
+    finally:
+        session.restore(model)
+    assert mx.array_equal(model(mx.array([PROMPTS[0]])), base)
+
+
 # --------------------------------------------------------------------------
 # Engine integration (ordinary route, qualification mode, tiny hybrid model)
 # --------------------------------------------------------------------------
