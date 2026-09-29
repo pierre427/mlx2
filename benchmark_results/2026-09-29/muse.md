@@ -29,6 +29,8 @@ The formal earlier served smoke passed on both hosts with the expected ordinary 
 
 DFlash2 and PLD completed all 400 domain requests correctly, but their speculative executors did not expose cross-request batching in the gate. Their 20×20 runs therefore failed the combined batching gate even though quality, HTTP stability, and APCv2 prefix reuse passed. DFlash2 proposal acceptance and target verification width do not by themselves prove cross-request batching. PLD's rotating replay engaged for 611 rounds, but `pld_batched_rounds` remained zero.
 
+An M3 DFlash2 follow-up at `949606ff` passed APCv2 reuse, the width 1/2/4 concurrency probe, and cancellation recovery under a 4 GiB cache cap and 16K context cap. Its 20×20 workload then returned one HTTP error in the first round and further 429 responses as load continued. The owned run was stopped after that conclusive stability failure; system swap remained zero. This is a partial stress attempt, not a completed 400-request result. The M3 DFlash2 heavy-load route remains unqualified.
+
 ## Thermally controlled single-prompt performance
 
 | Host and route | Source | Prompt tokens | Median cold TTFT (s) | Median decode tok/s | Needle checks | Swap-out pages |
@@ -38,6 +40,12 @@ DFlash2 and PLD completed all 400 domain requests correctly, but their speculati
 | M5 ordinary, lane off | `13358154` | 16,384 | 26.76 | 24.8 | 6/6 | 0 |
 | M5 ordinary, current default | `45a91d2b` | 1,024 | 1.22 | 29.2 | 6/6 | 0 |
 | M5 ordinary, current default | `45a91d2b` | 4,096 | 7.81 | 20.9 | 6/6 | 0 |
+| M5 ordinary, prior long ladder | `42a6095d` | 1,024 | 1.20 | 29.9 | 6/6 | 0 |
+| M5 ordinary, prior long ladder | `42a6095d` | 4,096 | 6.44 | 25.2 | 6/6 | 0 |
+| M5 ordinary, prior long ladder | `42a6095d` | 16,384 | 26.06 | 24.8 | 6/6 | 0 |
+| M5 ordinary, prior long ladder | `42a6095d` | 32,768 | 47.29 | 25.3 | 6/6 | 0 |
+| M5 ordinary, prior long ladder | `42a6095d` | 65,536 | 100.96 | 22.4 | 6/6 | 0 |
+| M5 ordinary, completed max context | `23df2842` | 131,072 | 223.91 | 19.5 | 6/6 | 0 |
 | M5 ordinary, lane auto | `13358154` | 1,024 | 1.21 | 28.5 | 6/6 | 0 |
 | M5 ordinary, lane auto | `13358154` | 4,096 | 8.55 | 21.0 | 6/6 | 0 |
 | M5 ordinary, lane auto | `13358154` | 16,384 | 32.09 | 20.8 | 6/6 | 0 |
@@ -54,9 +62,22 @@ DFlash2 and PLD completed all 400 domain requests correctly, but their speculati
 
 The M5 lane-auto run installed grouped wrappers around 417 q4 projections. It slightly improved the 20×20 median, but lost 20–21% decode speed at 4K/16K, increased TTFT, and raised the ready process footprint from about 17.1 to 25.1 GiB. At width one the lane kernel itself recorded no calls; the wrappers fell back to stock math, so these losses are wrapper and grouping costs. A no-group candidate restored the footprint but still lost at longer contexts. The M3 cannot execute this M5-only lane kernel; the loader now skips installation and preserves stock weights.
 
-DFlash2's 1K speed gain did not carry to 4K or the mixed 20×20 workload. PLD's ladder prompts contain repeated filler that can trigger n-gram reuse; these figures are not a general-chat speed prediction. Its diverse 20×20 rate was 21.35 tokens/s versus ordinary's 55.9, with no observed cross-request batching. Both speculative routes remain opt-in.
+DFlash2's M5 1K speed gain did not carry to 4K or the mixed 20×20 workload. PLD's ladder prompts contain repeated filler that can trigger n-gram reuse; these figures are not a general-chat speed prediction. Its diverse 20×20 rate was 21.35 tokens/s versus ordinary's 55.9, with no observed cross-request batching. Both speculative routes remain opt-in.
 
 The final-source M5 4K default cell varied across its three repetitions: 20.7–29.3 decode tokens/s and 4.23–7.96 seconds cold TTFT. Thermal state remained zero with stable admission temperatures and no swap in every repetition. The 20.9 tokens/s median is the conservative result; this spread limits small speed comparisons against earlier source revisions.
+
+The M5 follow-up completed three thermal repetitions at the artifact's 131,072-token maximum context. Median cold TTFT was 223.91 seconds, median single-stream decode was 19.5 tokens/s, all six needle checks passed, and swap remained zero. The requested 262K rung was outside this artifact's declared maximum and was not run.
+
+## Thermally controlled four-stream performance
+
+The earlier long-context run was interrupted at 131K by request. Its nine completed cells through 65K passed. Width-four medians from that same source-bound run are below; these are per-stream decode rates, while the 20×20 table reports aggregate output.
+
+| Host and route | Source | Prompt tokens | Width | Median cold TTFT (s) | Median decode tok/s per stream | Needle checks | Swap-out pages |
+|---|---|---:|---:|---:|---:|---:|---:|
+| M5 ordinary, prior long ladder | `42a6095d` | 1,024 | 4 | 5.83 | 14.5 | 24/24 | 0 |
+| M5 ordinary, prior long ladder | `42a6095d` | 4,096 | 4 | 22.46 | 14.1 | 24/24 | 0 |
+| M5 ordinary, prior long ladder | `42a6095d` | 16,384 | 4 | 80.18 | 13.3 | 24/24 | 0 |
+| M5 ordinary, prior long ladder | `42a6095d` | 32,768 | 4 | 147.69 | 12.7 | 24/24 | 0 |
 
 ## Feature qualification
 
@@ -68,10 +89,10 @@ The final-source M5 4K default cell varied across its three repetitions: 20.7–
 | PLD rotating replay | qualified | qualified | Mechanism engaged in a focused feature group; production route remains opt-in. |
 | Spomin live compaction | qualified | qualified | Approximate operation engaged under its explicit policy; ordinary decode remains exact. |
 | Multi-LoRA | qualified | qualified | Mixed served forwards and 3,744 delta applications passed after Muse key resolution. |
-| Fly verification route gate | qualified on M5 | open on M3 | Neutral greedy and sampled calls selected Fly, while penalty-controlled calls selected exact verification. No relaxed accepts were observed, so the approximate acceptance path is not qualified. M3 DFlash2 loading caused 87,176 swap-out pages in the earlier combined attempt, and its repeated-prefix probe returned 429. |
+| Fly verification route gate | qualified | qualified with adaptive prefill | Neutral greedy and sampled calls selected Fly, while penalty-controlled calls selected exact verification on both hosts. No relaxed accepts were observed, so the approximate acceptance path is not qualified. M3 repeated-prefix requests returned 200/200 with 794 cached tokens and zero swap under the normal prefill setting after the admission fix. |
 | Junction snapshots, int8 prefill, native self-MTP copy draft, bit-exact verify | not applicable | not applicable | Muse's declared route/cache or model topology does not support these gates. |
 
-The final-source M5 combined sweep at `45a91d2b` passed **10/10** applicable gates with zero swap, including rolling recovery. The M3 safe combined sweep at `95aef357` passed **9/9** applicable gates, including rolling, with zero swap; Fly was excluded because its external-draft route has a separate unresolved load/admission gate. These are per-operation qualification receipts, not a claim that every combination has been selected or used in production.
+The final-source M5 combined sweep at `45a91d2b` passed **10/10** applicable gates with zero swap, including rolling recovery. The M3 safe combined sweep at `95aef357` passed **9/9** applicable gates, including rolling, with zero swap; the separately isolated Fly gate passed at `949606ff` under the normal prefill setting. These are per-operation qualification receipts, not a claim that every combination has been selected or used in production.
 
 ## Issues repaired and open gates
 
@@ -79,7 +100,8 @@ The final-source M5 combined sweep at `45a91d2b` passed **10/10** applicable gat
 - The M3 previously installed M5-only lane wrappers that could only fall back to stock math. Device gating now skips them before changing weights.
 - A quiet streaming prefill was not checked for client disconnect after its first event. The handler now notices the disconnect. Muse lacked the cache projection required by hybrid rolling-checkpoint admission, so every planned checkpoint had been degraded. The projection and a progress-triggered qualification probe exposed and repaired that gate.
 - The Muse cache projection uses the declared attention geometry and a conservative provisional forward-transient bound. Final-source ordinary/default 20×20 loads on both hosts passed 400/400 with APCv2 reuse, cross-request batching, and zero swap.
-- The M3 DFlash2 route is not qualified because its prior load caused swap and a 429 gate failure. M5 DFlash2 remains opt-in because of slower 4K and mixed-load performance and missing cross-request batching evidence.
+- The earlier M3 external-draft attempts exposed two distinct problems: draft loading caused swap, then a fixed 2,048-token prefill reservation returned 429 even after the load became swap-free. The scheduler now halves a rejected prefill slice until its full reservation fits. An explicit 64-token probe and a follow-up at the normal 2,048-token setting both passed Fly's base and route checks with zero swap. This closes the M3 Fly gate. The M3 DFlash2 heavy-load attempt still returned 429 under concurrent 20×20 work, so that route's stability and performance remain open.
+- M5 DFlash2 remains opt-in because of slower 4K and mixed-load performance and missing cross-request batching evidence. Fly's approximate acceptance path has no observed relaxed accept on either host.
 
 ## Receipt integrity
 
@@ -90,8 +112,12 @@ These SHA-256 digests identify the private source-bound receipts used for the fi
 | M5 | current-default 20×20 | `790480c9b5b90825cf259da946029dd8bbb6f107ea7a26fbbebe3d0d7bffb37d` |
 | M5 | current-default 1K/4K ladder run | `ebee138e78cf4b31c0c6614953af7c70016e722e5fc7a0e26c63712f7ef38660` |
 | M5 | final-default feature sweep | `f11e24c07e57827a6db3f8e459bcef1283cdde717321e621c6afab5a2d75e8aa` |
+| M5 | completed 131K max-context ladder | `899d36ec693097c52a3a06fdd4dc7aef81e6b5c01be141353d7d5af306c7075b` |
 | M3 | current-default 20×20 | `0b32502de4cea1fa4bd6924d9948305c1c56655c4f4738e8ca1ca43ac66c3ef8` |
 | M3 | current-default 1K/4K ladder run | `5c114676d91e800b7274b7fff760ef1c2c9d3fdd2bb8a68a446e142c11552c32` |
 | M3 | current-default safe feature sweep | `9c233ed3d2d7cd8707bafedea9a3ec7a71dcebbb0a26b39619dcfe25a46777d1` |
+| M3 | Fly isolated 64-token prefill | `e1fcaa33277cbad6c483f27a0c7ee1fa0d6d8071115fb6036ec6af00ce7804ef` |
+| M3 | Fly isolated normal prefill with adaptive admission | `f6a4e931e785dd541702027f802241c5ec4ae97aa70f9152c28352fbd4eb81f5` |
+| M3 | interrupted DFlash2 20×20 attempt after 429 | `50f531eb171b4ed01e040f078e9eb9f5c2f835bd3dda468b1138743ee2e6c604` |
 
 The public [script snapshot](scripts/manifest.json) includes the smoke, stress, thermal-ladder and feature harnesses plus candidate policies, with source and published SHA-256 digests. Model weights, LoRA payloads, raw prompts, local paths, and credentials are excluded.
