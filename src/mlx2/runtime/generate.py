@@ -2140,6 +2140,13 @@ class MTPGenerationBatch:
             if (
                 current_adaptive is None
                 or incoming_adaptive is None
+                # A single-stream latch must start from the qualified depth
+                # for each new request. Reusing an empty batch's learned
+                # depth lets one request's proposals change the next one's
+                # greedy output at numerically close target logits.
+                or incoming_adaptive.adaptive_single_lane
+                or current_adaptive.adaptive_single_lane
+                != incoming_adaptive.adaptive_single_lane
                 or current_adaptive.max_depth != incoming_adaptive.max_depth
                 or current_adaptive.ewma_alpha != incoming_adaptive.ewma_alpha
                 or current_adaptive.shrink_gate != incoming_adaptive.shrink_gate
@@ -2159,6 +2166,16 @@ class MTPGenerationBatch:
                 != incoming_adaptive.probe_interval
                 or current_adaptive.stale_rounds != incoming_adaptive.stale_rounds
             ):
+                if (
+                    current_adaptive is not None
+                    and incoming_adaptive is not None
+                    and current_adaptive.adaptive_single_lane
+                    and incoming_adaptive.adaptive_single_lane
+                    and current_adaptive.max_depth == incoming_adaptive.max_depth
+                ):
+                    # Preserve host-visible engagement totals while the new
+                    # request gets fresh acceptance/goodput buckets.
+                    incoming_adaptive.counters.update(current_adaptive.counters)
                 self.adaptive_depth_policy = incoming_adaptive
             self._adaptive_admitted_cap = batch._adaptive_admitted_cap
         if getattr(self, "acceptance_logger", None) is None:
@@ -2399,6 +2416,11 @@ class MTPGenerationBatch:
                             ),
                             "stale_rounds": int(
                                 self.adaptive_depth_policy.stale_rounds
+                            ),
+                            **(
+                                {"adaptive_single_lane": True}
+                                if self.adaptive_depth_policy.adaptive_single_lane
+                                else {}
                             ),
                         },
                         "counters": dict(self.adaptive_depth_policy.counters),
