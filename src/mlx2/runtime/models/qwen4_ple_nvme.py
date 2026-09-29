@@ -933,7 +933,8 @@ def _iter_ple_embeddings(model):
 
 
 def install_file_backed_ple(
-    model, weights: dict, sidecar_path: str, model_path, *, _owned_tables=None
+    model, weights: dict, sidecar_path: str, model_path, *, _owned_tables=None,
+    preverified=None,
 ):
     """Replace the matching resident ``ShardedEmbedding`` with the sidecar.
 
@@ -947,7 +948,15 @@ def install_file_backed_ple(
     """
     assert_sidecar_not_in_weight_files(sidecar_path)
     manifest = verify_sidecar_against_artifact(sidecar_path, model_path)
-    verify_sidecar_content(sidecar_path, model_path, manifest)
+    if preverified is None:
+        verify_sidecar_content(sidecar_path, model_path, manifest)
+    else:
+        expected_manifest, expected_stat = preverified
+        stat = os.stat(sidecar_path)
+        current_stat = (stat.st_dev, stat.st_ino, stat.st_size,
+                        stat.st_mtime_ns, stat.st_ctime_ns)
+        if manifest != expected_manifest or current_stat != expected_stat:
+            raise ValueError("PLE sidecar changed after load-time verification")
     installed = False
     for prefix, ngram_embedding in _iter_ple_embeddings(model):
         if prefix != manifest["tensor_prefix"]:

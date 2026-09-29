@@ -228,7 +228,11 @@ class FlashNextAdapter:
         import mlx.nn as nn
         from transformers import AutoTokenizer
         from ..runtime.models.qwen4_exp import Model, ModelArgs
-        from ..runtime.models.qwen4_ple_nvme import install_file_backed_ple
+        from ..runtime.models.qwen4_ple_nvme import (
+            install_file_backed_ple,
+            verify_sidecar_against_artifact,
+            verify_sidecar_content,
+        )
         from ..runtime.tokenizer_utils import TokenizerWrapper, BPEStreamingDetokenizer
         from ..runtime.ubc_evict import load_shards_evicting, ubc_evict_paths
         from ..runtime.models.import_env import assert_profile_applied
@@ -246,15 +250,27 @@ class FlashNextAdapter:
             "weight_map"
         ]
         files = [path / name for name in sorted(set(index.values()))]
-        # install_file_backed_ple below prunes the PLE shard tensors and rebinds
-        # them to the sidecar, so they must never be materialised: keep them lazy
-        # and hold back eviction of their files until that prune has run.
+        sidecar = path / "ple_rows.bin"
+        manifest = verify_sidecar_against_artifact(str(sidecar), path)
+        verification = verify_sidecar_content(str(sidecar), path, manifest)
+        stat = sidecar.stat()
+        preverified = (manifest, (stat.st_dev, stat.st_ino, stat.st_size,
+                                  stat.st_mtime_ns, stat.st_ctime_ns))
+        # Converted artifacts hash the whole sidecar. Drop those cache pages
+        # before materialising the model, while no request can read the table.
+        if verification == "converted":
+            ubc_evict_paths([sidecar])
+        # The CPU PLE route never needs resident source shards. Prune them
+        # before materialisation so their mixed weight files can be evicted
+        # one at a time. Device verification explicitly keeps the old path.
+        verify_device = os.environ.get("MLX_QWEN4_PLE_VERIFY_DEVICE") == "1"
         held_files: list[str] = []
         weights = self.model.sanitize(
             load_shards_evicting(
                 files,
                 keep_lazy=lambda name: ".shard_" in name,
-                deferred=held_files,
+                deferred=held_files if verify_device else None,
+                prune_lazy=not verify_device,
             )
         )
         self.norm_convention = getattr(
@@ -265,9 +281,10 @@ class FlashNextAdapter:
             weights = install_file_backed_ple(
                 self.model,
                 weights,
-                str(path / "ple_rows.bin"),
+                str(sidecar),
                 path,
                 _owned_tables=self._tables,
+                preverified=preverified,
             )
             ubc_evict_paths(held_files)
             quant = config["quantization"]
