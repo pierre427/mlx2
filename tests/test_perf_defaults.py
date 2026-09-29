@@ -129,6 +129,7 @@ def test_flash_next_native_mtp_defaults_match_gated_copy_drafts():
     resolution = _resolution(FlashNextAdapter, QWEN4_FLASH_NEXT)
     policy = resolve_execution_policy_defaults(None, MTP, resolution)
     assert policy["apc_interior_checkpoints"] == "auto"
+    assert policy["host_memory_signals"] == {"enabled": True}
     parsed = CopyDraftPolicy.from_value(policy["self_mtp_copy_draft"])
     assert parsed.enabled and parsed.batched_max_span == 0
     # The measured policy: fused-verify width, match gate, strong spans.
@@ -137,6 +138,13 @@ def test_flash_next_native_mtp_defaults_match_gated_copy_drafts():
     ServingEngine.validate_arguments("unused", execution_policy=policy)
     ordinary = resolve_execution_policy_defaults(None, ORDINARY, resolution) or {}
     assert "self_mtp_copy_draft" not in ordinary
+    assert ordinary["host_memory_signals"] == {"enabled": True}
+    assert "host_memory_signals" not in resolve_execution_policy_defaults(
+        None, MTP, _resolution(Qwen3827BAdapter, QWEN38_27B)
+    )
+    assert resolve_execution_policy_defaults(
+        {"host_memory_signals": {"enabled": False}}, MTP, resolution
+    )["host_memory_signals"] == {"enabled": False}
     off = resolve_execution_policy_defaults(
         {"self_mtp_copy_draft": {"enabled": False}}, MTP, resolution
     )
@@ -409,7 +417,7 @@ def test_clamp_host_default_cache_bytes_arithmetic():
     assert clamp(0, requested_gib=4, floor_gib=16)[0] == 4 * gib
 
 
-def _cache_engine(monkeypatch, *, resident_gib, **overrides):
+def _cache_engine(monkeypatch, *, resident_gib, guarded=False, **overrides):
     from types import SimpleNamespace as NS
 
     from mlx2 import cache_sizing, memory, serving
@@ -445,6 +453,7 @@ def _cache_engine(monkeypatch, *, resident_gib, **overrides):
             pass
 
     class Adapter:
+        apc_cache_headroom_guard = guarded
         max_context = 1000
         identity = {"fingerprint": "fake"}
         environment = {}
@@ -565,6 +574,24 @@ def test_explicit_cache_bytes_is_never_clamped(monkeypatch):
     assert settings["cache_bytes_source"] == "explicit"
     assert settings["cache_bytes_clamped_from"] is None
     assert settings["cache_bytes_headroom"] is None
+
+
+def test_flash_guard_clamps_explicit_cache_below_legacy_floor(monkeypatch):
+    gib = 1 << 30
+    (settings, seen) = _cache_engine(
+        monkeypatch,
+        resident_gib=80,
+        guarded=True,
+        cache_bytes=16 * gib,
+        cache_bytes_source="explicit",
+    )
+    expected = 92 * gib - 80 * gib - 2 * int(_lane_need_gib() * gib)
+    assert 0 < expected < 16 * gib
+    assert settings["cache_bytes"] == seen["max_bytes"] == expected
+    assert settings["cache_bytes_source"] == "explicit"
+    assert settings["cache_bytes_clamped_from"] == 16 * gib
+    assert settings["cache_bytes_headroom"]["floor_bytes"] == 0
+    assert settings["cache_bytes_headroom"]["reason"] == "headroom"
 
 
 def test_cache_bytes_provenance_is_not_route_identity(tmp_path):

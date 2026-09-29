@@ -126,6 +126,11 @@ def chat_template(tokenizer, request: dict, *, tokenize: bool):
 class FlashNextAdapter:
     from .qwen import QWEN4_FLASH_NEXT as descriptor
 
+    # The file-backed PLE profile is large enough that an operator's explicit
+    # APC cap still needs the post-load memory guard.  The scheduler reads this
+    # adapter contract without branching on model names.
+    apc_cache_headroom_guard = True
+
     @staticmethod
     def _snapshot_diagnostic_modules(model):
         """Keep only live counter owners, never replaceable expert tables.
@@ -166,7 +171,9 @@ class FlashNextAdapter:
     # same bound, copy-heavy B1 1.066x at T=0.7 (4/4 reps > 1), 0.995x greedy,
     # prose and B4 within +/-2% (ab-vcap-*.json, arm s16v17).
     default_route_execution_policy = {
+        "ordinary": {"host_memory_signals": {"enabled": True}},
         "native_mtp": {
+            "host_memory_signals": {"enabled": True},
             "apc_interior_checkpoints": "auto",
             "self_mtp_copy_draft": {
                 "enabled": True, "max_span": 7, "min_match": 8,

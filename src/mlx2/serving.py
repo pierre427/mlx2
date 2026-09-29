@@ -1873,8 +1873,8 @@ class ServingEngine:
         self.max_context, self.max_request_bytes = max_context, max_request_bytes
         self.prefill_step = prefill_step
         self.cache_bytes, self.cache_dir = cache_bytes, cache_dir
-        # ``host_default`` may be lowered once the model's footprint is known
-        # (``_clamp_host_default_cache_bytes``); an explicit value never is.
+        # Host defaults and adapters that require a measured headroom guard
+        # may be lowered once the model's footprint is known.
         self.cache_bytes_source = cache_bytes_source
         self.cache_bytes_clamped_from = None
         self.cache_bytes_headroom = None
@@ -2885,15 +2885,16 @@ class ServingEngine:
         return jobs
 
     def _clamp_host_default_cache_bytes(self, adapter):
-        """Lower a host-default APCv2 cap to the room beside the loaded model.
+        """Lower an APCv2 cap to the room beside the loaded model.
 
         The parser sizes the default from physical RAM alone (48 GiB on the
         128 GiB host).  After the load the resident footprint is known, so
         the cap is bounded by the MLX admission limit (advisory minus the
         service and driver reserves) minus that footprint, the streamed-weight
         ceiling, and ``CACHE_CLAMP_LANES`` lanes at the route's depth floor
-        with ``CACHE_CLAMP_REFERENCE_CONTEXT`` tokens each -- never below the
-        legacy min(16 GiB, physical/8).  See ``cache_sizing``.
+        with ``CACHE_CLAMP_REFERENCE_CONTEXT`` tokens each.  A Flash-Next
+        adapter guard also checks explicit requests and has no legacy floor.
+        See ``cache_sizing``.
         """
         from .cache_sizing import (
             CACHE_CLAMP_LANES,
@@ -2941,10 +2942,12 @@ class ServingEngine:
             if controller is not None
             else None
         )
+        guarded = bool(vars(type(adapter)).get("apc_cache_headroom_guard", False))
         requested = int(self.cache_bytes)
+        floor = 0 if guarded else legacy_default_cache_bytes(physical_memory_bytes())
         (effective, detail) = clamp_host_default_cache_bytes(
             requested,
-            floor_bytes=legacy_default_cache_bytes(physical_memory_bytes()),
+            floor_bytes=floor,
             admission_limit_bytes=limit,
             resident_bytes=resident_device_bytes(),
             stream_reserve_bytes=int(self.expert_stream_reserve_gib() * (1 << 30)),
@@ -2952,11 +2955,13 @@ class ServingEngine:
             lanes=max(1, min(self.max_lanes, CACHE_CLAMP_LANES)),
         )
         self.cache_bytes_headroom = detail
+        if guarded and (detail["reason"] == "headroom_unmeasured" or effective <= 0):
+            raise RuntimeError("APCv2 headroom cannot be established for this adapter")
         if effective < requested:
             self.cache_bytes = effective
             self.cache_bytes_clamped_from = requested
             log.info(
-                "APCv2 host-default cache %.4g GiB clamped to %.4g GiB (%s): "
+                "APCv2 cache %.4g GiB clamped to %.4g GiB (%s): "
                 "admission limit %s, resident %s, %d lanes x %s",
                 requested / float(1 << 30),
                 effective / float(1 << 30),
@@ -4548,7 +4553,9 @@ class ServingEngine:
 
             identity = runtime_identity()
             self.max_context = min(self.max_context, adapter.max_context)
-            if self.cache_bytes_source == "host_default":
+            if self.cache_bytes_source == "host_default" or vars(type(adapter)).get(
+                "apc_cache_headroom_guard", False
+            ):
                 self._clamp_host_default_cache_bytes(adapter)
             settings = {
                 # Present only when enabled, so default-off settings are unchanged.

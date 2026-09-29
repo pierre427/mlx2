@@ -92,9 +92,9 @@ class AdapterResolution:
         return copy.deepcopy(policy)
 
 
-# Server-owned execution-policy keys an adapter may default on.  Each is exact
-# (it changes how fast tokens come, not which tokens) and each fails closed at
-# engine startup where its route or cache cannot support it.
+# Server-owned execution-policy keys an adapter may default on.  The host
+# signal changes admission timing, not token math; all keys fail closed at
+# engine startup where their route or cache cannot support them.
 ADAPTER_DEFAULT_POLICY_KEYS = frozenset(
     {
         "apc_interior_checkpoints",
@@ -102,6 +102,7 @@ ADAPTER_DEFAULT_POLICY_KEYS = frozenset(
         "apc_rolling_checkpoints",
         "self_mtp_copy_draft",
         "prefill_scheduling",
+        "host_memory_signals",
     }
 )
 # The subset that snapshots hybrid state; the engine refuses these on
