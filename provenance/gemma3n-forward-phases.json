@@ -1,0 +1,24 @@
+{
+  "source_repository": "https://github.com/Blaizzy/mlx-vlm",
+  "source_revision": "67599f2e8ec31bf35cbb7b02794114f20844f0bb",
+  "source_paths": [
+    "mlx_vlm/generate/ar.py",
+    "mlx_vlm/models/gemma3n/gemma3n.py",
+    "mlx_vlm/models/gemma3n/language.py"
+  ],
+  "license": "MIT",
+  "destination_paths": [
+    "src/mlx2/adapters/mlx_vlm.py",
+    "src/mlx2/runtime/generate.py"
+  ],
+  "modifications": [
+    "Expose an adapter-owned prefill_forward hook to the generic batch runtime without a model-name branch",
+    "For Gemma 3n prompt tokens, pass outer-model input embeddings and per-layer inputs to the pinned language model",
+    "For generated tokens, call the pinned language model with token IDs so its decode embedding scaling is applied"
+  ],
+  "validation": {
+    "diagnosis": "At main a1214d87, pinned mlx-vlm and its language-model forward answered Paris; the outer-model forward and mlx2 served path answered incorrect cities on the same greedy prompt.",
+    "public_result": "benchmark_results/2026-09-29/gemma3n.md",
+    "post_fix": "served text and image regression checks passed on the M5 qualification host; the generic 20x20 gate remains open"
+  }
+}

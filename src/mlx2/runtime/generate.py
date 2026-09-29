@@ -573,7 +573,8 @@ class PromptProcessingBatch:
             # this forward (no-op unless a manager is attached to the model).
             lora_rows = bind_lora_rows(self.model, self.uids)
             try:
-                self.model(tokens[:, :n_to_process], cache=self.prompt_cache, **kwargs)
+                forward = getattr(self.model, "prefill_forward", self.model)
+                forward(tokens[:, :n_to_process], cache=self.prompt_cache, **kwargs)
             finally:
                 clear_lora_rows(lora_rows)
             if kwargs:
@@ -912,7 +913,9 @@ class GenerationBatch:
         lora_rows = bind_lora_rows(self.model, self.uids)
         try:
             kwargs = self._persistent_step_inputs()
-            logits = self.model(inputs[:, None], cache=self.prompt_cache, **kwargs)
+            forward = (getattr(self.model, "prefill_forward", self.model)
+                       if self._decode_steps == 0 else self.model)
+            logits = forward(inputs[:, None], cache=self.prompt_cache, **kwargs)
         finally:
             clear_lora_rows(lora_rows)
             if steer is not None:

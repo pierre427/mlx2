@@ -181,6 +181,33 @@ class _LogitsModel:
         return getattr(output, "logits", output)
 
 
+class _Gemma3nLogitsModel(_LogitsModel):
+    """Keep Gemma 3n's prompt embeddings and token decode paths distinct.
+
+    The pinned mlx-vlm generator supplies get_input_embeddings() to the
+    language model for prefill, then calls the language model with token IDs
+    for decode. The outer model embeds every decode token without the text
+    model's decode scaling, which changes even greedy factual output.
+    """
+
+    def prefill_forward(self, input_ids, *, cache=None, **kwargs):
+        inputs_embeds = kwargs.pop("inputs_embeds", None)
+        per_layer_inputs = kwargs.pop("per_layer_inputs", None)
+        if inputs_embeds is None:
+            features = self._model.get_input_embeddings(input_ids, **kwargs)
+            inputs_embeds = features.inputs_embeds
+            per_layer_inputs = features.per_layer_inputs
+        output = self._model.language_model(
+            input_ids, inputs_embeds=inputs_embeds,
+            per_layer_inputs=per_layer_inputs, cache=cache, **kwargs,
+        )
+        return getattr(output, "logits", output)
+
+    def __call__(self, input_ids, *, cache=None, **kwargs):
+        output = self._model.language_model(input_ids, cache=cache, **kwargs)
+        return getattr(output, "logits", output)
+
+
 def _load_model(load, model_path, *, expected, config):
     """Apply narrowly scoped released-artifact compatibility at load time."""
     if expected == "gemma4":
@@ -419,6 +446,10 @@ GEMMA3N = ModelDescriptor(
 class Gemma3nAdapter(_MLXVLMAdapter):
     descriptor = GEMMA3N
     sampling_defaults = GEMMA3N_SAMPLING
+
+    @staticmethod
+    def _wrap_model(model):
+        return _Gemma3nLogitsModel(model)
 
     @staticmethod
     def streaming_detokenizer_class():
