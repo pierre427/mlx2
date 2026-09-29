@@ -1,0 +1,21 @@
+{
+  "num_draft": 2,
+  "shared_qsa_suffix": "auto",
+  "async_qsa_promotion": true,
+  "known_tail_ple_prefetch": true,
+  "indexed_qsa": "auto",
+  "fused_gdn_dynamic_accept": true,
+  "moe_router_kernel": true,
+  "indexed_output_gate": true,
+  "moe_routed_decode": "gate_up",
+  "tensorfold_qmv_rows": true,
+  "adaptive_mtp_depth": {"enabled": true, "adaptive_single_lane": true},
+  "self_mtp_copy_draft": {
+    "enabled": true,
+    "max_span": 7,
+    "min_match": 8,
+    "strong_match": 32,
+    "strong_max_span": 16,
+    "initial_span": 7
+  }
+}

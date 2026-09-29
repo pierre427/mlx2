@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 import re
+import signal
 import subprocess
 import sys
 import time
@@ -21,6 +22,14 @@ sys.path.insert(0, str(ROOT / "qualification/runs/series-20260924"))
 import campaign_config as config  # noqa: E402
 import run as owned  # noqa: E402
 from queue_smoke import swapouts  # noqa: E402
+
+
+class InterruptedRun(Exception):
+    """The owned stress run received a termination signal."""
+
+
+def _interrupt(signum: int, _frame: object) -> None:
+    raise InterruptedRun(f"signal {signum}")
 
 
 def apc_probe(base: str, model_id: str) -> dict:
@@ -54,6 +63,8 @@ def main() -> int:
     parser.add_argument("--port", type=int, default=8397)
     parser.add_argument("--load-timeout", type=float, default=2400)
     parser.add_argument("--tag", default="", help="separate this run from historical model receipts")
+    parser.add_argument("--execution-policy", type=Path, default=None)
+    parser.add_argument("--lane-matmul", choices=("off", "auto", "crossover", "exact"), default=None)
     args = parser.parse_args()
     if args.tag and not re.fullmatch(r"[a-zA-Z0-9_-]+", args.tag):
         parser.error("tag must contain only letters, digits, underscores or hyphens")
@@ -91,12 +102,23 @@ def main() -> int:
     command = [str(config.PYTHON), "-u", "-m", "mlx2.server", *config.server_args(model, route, "sanity")]
     command[command.index("--port") + 1] = str(args.port)
     command[command.index("--max-lanes") + 1] = str(args.max_lanes)
+    if args.execution_policy is not None:
+        selected = args.execution_policy.resolve(strict=True)
+        if "--execution-policy" in command:
+            command[command.index("--execution-policy") + 1] = str(selected)
+        else:
+            command.extend(["--execution-policy", str(selected)])
+        receipt["execution_policy_sha256"] = hashlib.sha256(selected.read_bytes()).hexdigest()
+    if args.lane_matmul is not None:
+        command.extend(["--lane-matmul", args.lane_matmul])
     receipt["command"] = command
     env = {**os.environ, "PYTHONPATH": config.stage_pythonpath(model),
            "HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1"}
     base = f"http://127.0.0.1:{args.port}"
     before = swapouts()
     server = None
+    signal.signal(signal.SIGTERM, _interrupt)
+    signal.signal(signal.SIGINT, _interrupt)
     try:
         with ExitStack() as stack:
             receipt["locks"] = owned.lock_host(stack)
@@ -128,14 +150,19 @@ def main() -> int:
                     receipt["steps"] = {}
                     for name, step, timeout in steps:
                         with (output / f"{name}.log").open("w") as step_log:
-                            result = subprocess.run(step, cwd=ROOT, env=env,
-                                                    stdout=step_log, stderr=subprocess.STDOUT,
-                                                    timeout=timeout, check=False)
-                        receipt["steps"][name] = {"returncode": result.returncode,
+                            step_process = subprocess.Popen(
+                                step, cwd=ROOT, env=env, stdout=step_log,
+                                stderr=subprocess.STDOUT, start_new_session=True,
+                            )
+                            try:
+                                returncode = step_process.wait(timeout=timeout)
+                            finally:
+                                owned.stop_owned(step_process)
+                        receipt["steps"][name] = {"returncode": returncode,
                                                   "log": str(output / f"{name}.log")}
                         save()
-                        if result.returncode:
-                            raise RuntimeError(f"{name} gate exited {result.returncode}")
+                        if returncode:
+                            raise RuntimeError(f"{name} gate exited {returncode}")
                     report = json.loads((output / "20x20.json").read_text())
                     widths = {int(k): v for k, v in report.get("observed_widths", {}).items()
                               if k not in {"None", "null"}}
@@ -154,6 +181,9 @@ def main() -> int:
                         and receipt["health_after"].get("status") == "ok") else "failed"
                 finally:
                     owned.stop_owned(server)
+    except InterruptedRun as exc:
+        receipt["status"] = "interrupted"
+        receipt["interruption"] = str(exc)
     except Exception as exc:
         receipt["status"] = "error"
         receipt["error"] = f"{type(exc).__name__}: {exc}"

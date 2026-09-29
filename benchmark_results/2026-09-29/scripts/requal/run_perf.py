@@ -7,6 +7,7 @@ import argparse
 import hashlib
 import json
 import os
+import signal
 import subprocess
 import sys
 import time
@@ -22,6 +23,14 @@ import run as owned  # noqa: E402
 from queue_smoke import swapouts  # noqa: E402
 
 
+class InterruptedRun(Exception):
+    """The owned performance run received a termination signal."""
+
+
+def _interrupt(signum: int, _frame: object) -> None:
+    raise InterruptedRun(f"signal {signum}")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", required=True)
@@ -33,6 +42,11 @@ def main() -> int:
     parser.add_argument("--wide", type=int, default=4,
                         help="second ladder width; 1 runs a width-one-only basic ladder")
     parser.add_argument("--port", type=int, default=8397)
+    parser.add_argument("--profile-tag", default="",
+                        help="unique output suffix for an explicit candidate profile")
+    parser.add_argument("--execution-policy", type=Path, default=None)
+    parser.add_argument("--lane-matmul", choices=("off", "auto", "crossover", "exact"), default=None)
+    parser.add_argument("--lane-policy", type=Path, default=None)
     parser.add_argument("--load-timeout", type=float, default=2400)
     parser.add_argument("--cache-cap-gib", type=int, default=None,
                         help="Host cache cap; defaults to 8 GiB on M3")
@@ -41,6 +55,9 @@ def main() -> int:
     args = parser.parse_args()
     if args.runs < 1 or args.wide < 1 or args.min_length > args.max_length:
         parser.error("invalid repetition count or length range")
+    if args.profile_tag and (not args.profile_tag.replace("-", "").isalnum()
+                             or args.profile_tag.startswith("-")):
+        parser.error("profile tag must be alphanumeric with internal hyphens")
     models = {model.name: model for model in config.MODELS}
     model = models.get(args.model)
     if model is None:
@@ -51,6 +68,8 @@ def main() -> int:
     stem = f"ladder-{args.min_length}-{args.max_length}-r{args.runs}"
     if args.wide != 4:
         stem += f"-w{args.wide}"
+    if args.profile_tag:
+        stem += f"-{args.profile_tag}"
     ladder_path = output / f"{stem}.json"
     receipt_path = output / f"{stem}-run.json"
     head = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
@@ -79,12 +98,31 @@ def main() -> int:
         receipt["m3_host_caps"] = {"cache_gib": cache_cap, "max_context": context_cap}
     command = [str(config.PYTHON), "-u", "-m", "mlx2.server", *config.server_args(model, route, "ladder")]
     command[command.index("--port") + 1] = str(args.port)
+    if args.execution_policy is not None:
+        selected = args.execution_policy.resolve(strict=True)
+        if not selected.is_file():
+            parser.error(f"execution policy does not exist: {selected}")
+        if "--execution-policy" in command:
+            command[command.index("--execution-policy") + 1] = str(selected)
+        else:
+            command.extend(["--execution-policy", str(selected)])
+        receipt["execution_policy_sha256"] = hashlib.sha256(selected.read_bytes()).hexdigest()
+    if args.lane_matmul is not None:
+        command.extend(["--lane-matmul", args.lane_matmul])
+    if args.lane_policy is not None:
+        selected = args.lane_policy.resolve(strict=True)
+        if not selected.is_file():
+            parser.error(f"lane policy does not exist: {selected}")
+        command.extend(["--lane-policy", str(selected)])
+        receipt["lane_policy_sha256"] = hashlib.sha256(selected.read_bytes()).hexdigest()
     receipt["server_command"] = command
     env = {**os.environ, "PYTHONPATH": config.stage_pythonpath(model),
            "HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1"}
     base = f"http://127.0.0.1:{args.port}"
     before = swapouts()
     server = None
+    signal.signal(signal.SIGTERM, _interrupt)
+    signal.signal(signal.SIGINT, _interrupt)
     try:
         with ExitStack() as stack:
             receipt["locks"] = owned.lock_host(stack)
@@ -116,10 +154,15 @@ def main() -> int:
                     receipt["ladder_command"] = ladder_command
                     save()
                     with (output / f"{stem}.log").open("w") as ladder_log:
-                        result = subprocess.run(ladder_command, cwd=ROOT, env=env,
-                                                stdout=ladder_log, stderr=subprocess.STDOUT,
-                                                check=False)
-                    receipt["ladder_returncode"] = result.returncode
+                        ladder_process = subprocess.Popen(
+                            ladder_command, cwd=ROOT, env=env,
+                            stdout=ladder_log, stderr=subprocess.STDOUT,
+                            start_new_session=True,
+                        )
+                        try:
+                            receipt["ladder_returncode"] = ladder_process.wait()
+                        finally:
+                            owned.stop_owned(ladder_process)
                     if ladder_path.exists():
                         ladder = json.loads(ladder_path.read_text())
                         receipt["ladder_summary"] = {
@@ -127,9 +170,14 @@ def main() -> int:
                             "finished_at": ladder.get("finished_at"),
                         }
                     receipt["status_after"] = owned.get_json(base + "/v1/status")
-                    receipt["status"] = "passed" if result.returncode == 0 else "failed"
+                    receipt["status"] = (
+                        "passed" if receipt["ladder_returncode"] == 0 else "failed"
+                    )
                 finally:
                     owned.stop_owned(server)
+    except InterruptedRun as exc:
+        receipt["status"] = "interrupted"
+        receipt["interruption"] = str(exc)
     except Exception as exc:
         receipt["status"] = "error"
         receipt["error"] = f"{type(exc).__name__}: {exc}"

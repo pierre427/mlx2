@@ -14,6 +14,8 @@ The 2026-09-28–29 campaign was paused at the user's request. These are public 
 
 Both staged Flash variants received focused M5 memory and feature checks after the pause. Their model pages distinguish combined feature observations, isolated APCv2 rolling recovery, optional kernel checks, and any 20×20 result. The new default avoids gate/up fusion's observed swap while retaining file-backed PLE. The M3 does not hold either large Flash artifact.
 
+The Flash-Next page also reports the later opt-in TensorFold row-kernel and gated MTP/prompt-copy candidate when its thermal ladder has completed. It is a candidate measurement, not a default-route promotion or a full TensorFold executor qualification.
+
 The 20×20 rate is median aggregate generated tokens per second across mixed domain rounds. Context-ladder decode is per stream, from thermally admitted measured runs. They are different measurements. A functional smoke, stress pass, feature implementation, feature qualification, route selection, and observed production use are distinct states.
 
 ## Model pages

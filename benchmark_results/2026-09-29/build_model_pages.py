@@ -73,6 +73,12 @@ def stress_lines(directory: Path) -> list[str]:
 
 def ladder_lines(directory: Path, host: str) -> list[str]:
     pattern = "ladder-1024-262144-r3.json" if host.startswith("m5") else "ladder-1024-8192-r3-w1.json"
+    single_flash = False
+    if host.startswith("m5") and directory.name == "flash-next":
+        single_prompt = directory / "ladder-1024-262144-r3-w1.json"
+        if single_prompt.is_file() and read(single_prompt).get("finished_at"):
+            pattern = single_prompt.name
+            single_flash = True
     path = directory / pattern
     ladder = read(path)
     if ladder is None:
@@ -87,13 +93,24 @@ def ladder_lines(directory: Path, host: str) -> list[str]:
         ttft = [r.get("summary", {}).get("ttft_seconds") for r in runs]
         ttft = [float(v) for v in ttft if isinstance(v, (int, float))]
         if decode:
-            rows.append(f"| {cell['requested_tokens']:,} | {cell['width']} | {len(runs)} | {fmt(cell.get('passed'))} | {statistics.median(ttft):.2f} | {statistics.median(decode):.1f} |")
+            if single_flash:
+                prefill = [float(v) for r in runs if isinstance((v := r.get("summary", {}).get("prefill_tokens_per_second")), (int, float))]
+                warm_ttft = [float(v) for r in runs if isinstance((v := r.get("summary", {}).get("warm_ttft_seconds")), (int, float))]
+                decode_spread = (((cell.get("stats") or {}).get("decode_tokens_per_second") or {}).get("spread_pct"))
+                rows.append(f"| {cell['requested_tokens']:,} | {len(runs)} | {fmt(cell.get('passed'))} | {statistics.median(ttft):.2f} | {statistics.median(prefill):.0f} | {statistics.median(decode):.1f} | {decode_spread:.0f}% | {statistics.median(warm_ttft):.2f} |")
+            else:
+                rows.append(f"| {cell['requested_tokens']:,} | {cell['width']} | {len(runs)} | {fmt(cell.get('passed'))} | {statistics.median(ttft):.2f} | {statistics.median(decode):.1f} |")
     if not rows:
         return ["Ladder attempted, with no complete measured cell."]
     state = "passed" if ladder.get("passed") is True else "partial or interrupted"
-    lines = [f"Three-repetition ladder: **{state}**. Only completed measured cells appear below.",
-             "", "| Prompt tokens | Width | Measured runs | Cell passed | Median cold TTFT (s) | Median decode (tokens/s/stream) |",
-             "|---:|---:|---:|:---:|---:|---:|", *rows]
+    if single_flash:
+        lines = [f"Thermally controlled single-prompt ladder: **{state}**. Only completed measured cells appear below.",
+                 "", "| Prompt tokens | Measured runs | Cell passed | Median cold TTFT (s) | Median prefill (tokens/s) | Median decode (tokens/s) | Decode spread | Median warm TTFT (s) |",
+                 "|---:|---:|:---:|---:|---:|---:|---:|---:|", *rows]
+    else:
+        lines = [f"Three-repetition ladder: **{state}**. Only completed measured cells appear below.",
+                 "", "| Prompt tokens | Width | Measured runs | Cell passed | Median cold TTFT (s) | Median decode (tokens/s/stream) |",
+                 "|---:|---:|---:|:---:|---:|---:|", *rows]
     run = read(path.with_name(path.stem + "-run.json"))
     if run:
         lines.append(f"Source commit: `{run.get('source_head', 'unknown')}`; owned-run swap-out delta: {fmt((run.get('swapouts') or {}).get('delta'))} pages.")
@@ -107,6 +124,91 @@ def ladder_lines(directory: Path, host: str) -> list[str]:
             cell = retry["cells"][0]
             speeds = [float(r["summary"]["decode_tokens_per_second"]) for r in cell["runs"]]
             lines.append(f"Separate capped 4K retry: **passed** {len(speeds)} measured runs at {statistics.median(speeds):.2f} median decode tokens/s/stream; 4 GiB APCv2 cache and 8K serving context.")
+    return lines
+
+
+def flash_candidate_lines(directory: Path) -> list[str]:
+    stem = "ladder-1024-262144-r3-w1-tensorfold-qmv-mtp-pld-latched-reset"
+    ladder = read(directory / f"{stem}.json")
+    run = read(directory / f"{stem}-run.json")
+    if not ladder or not run or not ladder.get("finished_at"):
+        return []
+    lines = [
+        "### TensorFold row kernel and gated speculation candidate",
+        "",
+        "Opt-in profile: adapted TensorFold q4/group-64 row matvec for eligible dense projections; "
+        "native MTP with a single-stream acceptance/goodput latch; prompt-copy proposals "
+        "inside MTP with match-strength and yield latches. This prompt-copy path is "
+        "PLD-style, not the separate `prompt_lookup` route. The full TensorFold fused "
+        "Flash executor is not integrated or qualified.",
+        "",
+    ]
+    reset_gate = read(directory / "ladder-1024-1024-r3-w1-tensorfold-latched-reset-gate.json")
+    fixed_control = read(directory / "ladder-1024-1024-r3-w1-tensorfold-fixed-depth-control.json")
+    if reset_gate and fixed_control:
+        reset_runs = [r for c in reset_gate.get("cells", []) for r in c.get("runs", [])]
+        fixed_runs = [r for c in fixed_control.get("cells", []) for r in c.get("runs", [])]
+        lines += [
+            "The first latched ladder was interrupted after cold/warm output mismatches. "
+            "An empty scheduler batch had retained the prior request's adaptive "
+            "depth and goodput state. The same-source fixed-depth control matched "
+            f"{sum(r.get('summary', {}).get('warm_equals_cold') == 1 for r in fixed_runs)}/{len(fixed_runs)} "
+            "at 1K; after the request-boundary reset, the latched 1K gate matched "
+            f"{sum(r.get('summary', {}).get('warm_equals_cold') == 1 for r in reset_runs)}/{len(reset_runs)}. "
+            "The interrupted cells are excluded from this ladder.",
+            "",
+        ]
+    lines += [
+        f"Thermal ladder: **{fmt(run.get('status'))}**; source `{run.get('source_head')}`; "
+        f"execution policy SHA-256 `{run.get('execution_policy_sha256')}`; "
+        f"owned-run swap-out delta **{fmt((run.get('swapouts') or {}).get('delta'))} pages**.",
+        "",
+        "| Prompt tokens | Runs | Cell passed | Cold/warm equal | Median cold TTFT (s) | Median prefill (tokens/s) | Median decode (tokens/s) | Decode spread |",
+        "|---:|---:|:---:|:---:|---:|---:|---:|---:|",
+    ]
+    for cell in ladder.get("cells", []):
+        runs = cell.get("runs") or []
+        if len(runs) != 3 or not cell.get("passed"):
+            continue
+        stats = cell.get("stats") or {}
+        equal = sum(r.get("summary", {}).get("warm_equals_cold") == 1 for r in runs)
+        lines.append(
+            f"| {cell['requested_tokens']:,} | 3 | yes | {equal}/3 | "
+            f"{stats['ttft_seconds']['median']:.2f} | "
+            f"{stats['prefill_tokens_per_second']['median']:.0f} | "
+            f"{stats['decode_tokens_per_second']['median']:.1f} | "
+            f"{stats['decode_tokens_per_second']['spread_pct']:.0f}% |"
+        )
+    all_runs = [r for cell in ladder.get("cells", []) for r in cell.get("runs", [])]
+    equal_runs = sum(r.get("summary", {}).get("warm_equals_cold") == 1 for r in all_runs)
+    failed_cells = [c for c in ladder.get("cells", []) if not c.get("passed")]
+    lines += [
+        "",
+        f"Temperature-zero cold/warm equality: **{equal_runs}/{len(all_runs)}** "
+        "measured repeats. Any mismatch keeps this candidate unqualified.",
+    ]
+    for cell in failed_cells:
+        lines.append(
+            f"The {cell['requested_tokens']:,}-token cell did not pass: "
+            f"{cell.get('error') or 'incomplete'}; {len(cell.get('runs') or [])} measured runs. "
+            "This cell is excluded from performance medians."
+        )
+    scheduler = (run.get("status_after") or {}).get("scheduler") or {}
+    if scheduler:
+        lines += [
+            "",
+            "Observed latch counters across the owned run: "
+            f"MTP depth changes {scheduler.get('adaptive_mtp_depth_changes', 0)}, "
+            f"MTP cost probes {scheduler.get('adaptive_mtp_cost_probes', 0)}, "
+            f"prompt-copy rounds {scheduler.get('self_mtp_copy_rounds', 0)}, "
+            f"copy gate declines {scheduler.get('self_mtp_copy_gate_declines', 0)}. "
+            "These show exercised candidate behavior, not a production default.",
+        ]
+    candidate_stress = directory / "stress-tensorfold-qmv-mtp-pld-latched-reset"
+    stress_receipt = read(candidate_stress / "stress.json")
+    if stress_receipt and stress_receipt.get("finished_at"):
+        lines += ["", "#### Candidate 20×20, APCv2, and batching", "",
+                  *stress_lines(candidate_stress)]
     return lines
 
 
@@ -187,6 +289,10 @@ def model_page(name: str) -> str:
                   "", "### 20×20 domain and batching", "", *stress_lines(directory),
                   "", "### Context performance", "", *ladder_lines(directory, host),
                   "", "### Feature qualification", "", *feature_lines(directory)]
+        if host.startswith("m5") and name == "flash-next":
+            candidate = flash_candidate_lines(directory)
+            if candidate:
+                lines += ["", *candidate]
     if name in NOTES:
         lines += ["", "## Interpretation", "", NOTES[name]]
     return "\n".join(lines).rstrip() + "\n"
@@ -214,6 +320,7 @@ def main() -> None:
         "- At the campaign pause, M3 North qualified eight applicable exercised feature operations. Other M3 feature attempts were partial or contaminated; no M5 per-model feature run had begun. The Flash follow-up below is later work.", "",
         "## Flash-Next follow-up", "",
         "Both staged Flash variants received focused M5 memory and feature checks after the pause. Their model pages distinguish combined feature observations, isolated APCv2 rolling recovery, optional kernel checks, and any 20×20 result. The new default avoids gate/up fusion's observed swap while retaining file-backed PLE. The M3 does not hold either large Flash artifact.", "",
+        "The Flash-Next page also reports the later opt-in TensorFold row-kernel and gated MTP/prompt-copy candidate when its thermal ladder has completed. It is a candidate measurement, not a default-route promotion or a full TensorFold executor qualification.", "",
         "The 20×20 rate is median aggregate generated tokens per second across mixed domain rounds. Context-ladder decode is per stream, from thermally admitted measured runs. They are different measurements. A functional smoke, stress pass, feature implementation, feature qualification, route selection, and observed production use are distinct states.", "",
         "## Model pages", "", "| Model | M5 smoke | M5 20×20 | M3 staged |", "|---|---|---|---|",
     ]

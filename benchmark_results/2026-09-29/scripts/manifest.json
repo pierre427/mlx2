@@ -2,6 +2,14 @@
   "schema": "mlx2.public-benchmark-script-snapshot.v1",
   "files": [
     {
+      "source": "qualification/runs/requal-20260928/check_flash_tensorfold_qmv.py",
+      "published": "scripts/requal/check_flash_tensorfold_qmv.py",
+      "source_sha256": "9cea8e623cb1d5e32c2b95cf71cbaac96f819c7ca584e0f86b5fb1ab1acd55ed",
+      "published_sha256": "9cea8e623cb1d5e32c2b95cf71cbaac96f819c7ca584e0f86b5fb1ab1acd55ed",
+      "home_prefix_rewritten": false,
+      "local_service_label_rewritten": false
+    },
+    {
       "source": "qualification/runs/requal-20260928/flash_memory_probe.py",
       "published": "scripts/requal/flash_memory_probe.py",
       "source_sha256": "6ba66ba0df6ece4a5d48bb508a91c3fb045858c499dc0f39d3b49e4532c51acf",
@@ -68,8 +76,8 @@
     {
       "source": "qualification/runs/requal-20260928/run_perf.py",
       "published": "scripts/requal/run_perf.py",
-      "source_sha256": "772bf45d13259fa598392928642f6dbc9bf0d71b43777d2e504574990d1e5297",
-      "published_sha256": "772bf45d13259fa598392928642f6dbc9bf0d71b43777d2e504574990d1e5297",
+      "source_sha256": "a12b31fbabce4f6cf159b1b8e12f11bfefa2736913bf32255fe7aa094ee3d301",
+      "published_sha256": "a12b31fbabce4f6cf159b1b8e12f11bfefa2736913bf32255fe7aa094ee3d301",
       "home_prefix_rewritten": false,
       "local_service_label_rewritten": false
     },
@@ -84,8 +92,8 @@
     {
       "source": "qualification/runs/requal-20260928/run_stress.py",
       "published": "scripts/requal/run_stress.py",
-      "source_sha256": "c074e56f64ad9615bb0af6a4b18e1c20b95b5e32bd799d8e922210a2be039e73",
-      "published_sha256": "c074e56f64ad9615bb0af6a4b18e1c20b95b5e32bd799d8e922210a2be039e73",
+      "source_sha256": "518a0abd7a7819887c9f98555707c44c1a03653bda8684bc451dcd3af258daa7",
+      "published_sha256": "518a0abd7a7819887c9f98555707c44c1a03653bda8684bc451dcd3af258daa7",
       "home_prefix_rewritten": false,
       "local_service_label_rewritten": false
     },
@@ -326,6 +334,13 @@
       "published": "scripts/series/policies/xing-pld-opt-in.json",
       "source_sha256": "4257ffcb612e63f1090ef356e65af02b45c5e91358b699def6c04e264deb91aa",
       "published_sha256": "4257ffcb612e63f1090ef356e65af02b45c5e91358b699def6c04e264deb91aa",
+      "home_prefix_rewritten": false
+    },
+    {
+      "source": "qualification/runs/requal-20260928/policies/flash-next-tensorfold-qmv-candidate.json",
+      "published": "scripts/requal/policies/flash-next-tensorfold-qmv-candidate.json",
+      "source_sha256": "a48294b5f23fd7ea52d2fb91590e9d88e0cc0eadf46a3ceef7dc2bee81c1e372",
+      "published_sha256": "a48294b5f23fd7ea52d2fb91590e9d88e0cc0eadf46a3ceef7dc2bee81c1e372",
       "home_prefix_rewritten": false
     }
   ]
