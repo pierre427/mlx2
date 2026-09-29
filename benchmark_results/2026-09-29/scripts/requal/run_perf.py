@@ -56,6 +56,9 @@ def main() -> int:
     args = parser.parse_args()
     if args.runs < 1 or args.wide < 1 or args.min_length > args.max_length:
         parser.error("invalid repetition count or length range")
+    if (args.cache_cap_gib is not None and args.cache_cap_gib < 1
+            or args.context_cap is not None and args.context_cap < 1):
+        parser.error("host caps must be positive")
     if args.profile_tag and (not args.profile_tag.replace("-", "").isalnum()
                              or args.profile_tag.startswith("-")):
         parser.error("profile tag must be alphanumeric with internal hyphens")
@@ -94,12 +97,16 @@ def main() -> int:
         receipt_path.write_text(json.dumps(receipt, indent=2, sort_keys=True) + "\n")
 
     save()
+    cache_cap = args.cache_cap_gib
+    context_cap = args.context_cap
     if args.host_label.startswith("m3"):
-        cache_cap = args.cache_cap_gib if args.cache_cap_gib is not None else 8
-        context_cap = args.context_cap if args.context_cap is not None else 32768
+        cache_cap = cache_cap if cache_cap is not None else 8
+        context_cap = context_cap if context_cap is not None else 32768
+    if cache_cap is not None:
         os.environ["MLX2_SERIES_CACHE_GIB_CAP"] = str(cache_cap)
+    if context_cap is not None:
         os.environ["MLX2_SERIES_CONTEXT_CAP"] = str(context_cap)
-        receipt["m3_host_caps"] = {"cache_gib": cache_cap, "max_context": context_cap}
+    receipt["host_caps"] = {"cache_gib": cache_cap, "max_context": context_cap}
     command = [str(config.PYTHON), "-u", "-m", "mlx2.server", *config.server_args(model, route, "ladder")]
     command[command.index("--port") + 1] = str(args.port)
     if args.execution_policy is not None:

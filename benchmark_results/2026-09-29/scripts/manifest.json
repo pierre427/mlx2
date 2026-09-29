@@ -76,8 +76,8 @@
     {
       "source": "qualification/runs/requal-20260928/run_perf.py",
       "published": "scripts/requal/run_perf.py",
-      "source_sha256": "6030146aa0be664db9da6bc680c984b221c88417d3819f3496f508bcb60c2997",
-      "published_sha256": "6030146aa0be664db9da6bc680c984b221c88417d3819f3496f508bcb60c2997",
+      "source_sha256": "383ed6b0e375ac7fb79400098f847c7f84d3bfcafbef888178645253065ba92a",
+      "published_sha256": "383ed6b0e375ac7fb79400098f847c7f84d3bfcafbef888178645253065ba92a",
       "home_prefix_rewritten": false,
       "local_service_label_rewritten": false
     },

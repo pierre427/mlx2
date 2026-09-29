@@ -16,7 +16,9 @@ The first M5 ordinary 20×20 attempt completed concurrency and cancellation prob
 
 The first capped retry completed 400/400 HTTP requests, used eight-way ordinary batches for 380 replies, had no swapouts, and remained healthy. The graded gate failed at 397/400 because three answers had empty visible content. All three spent the 2,048-token thinking allowance on reasoning and ended at the token limit. This is a complete **failed quality gate**, not a qualified 20×20 pass.
 
-The second capped retry raised the recorded thinking allowance to 4,096 tokens. It **passed 400/400 graded answers**, with zero HTTP errors, zero issues, zero swapouts, an APCv2 reuse pass, cancellation recovery, and eight-way ordinary batches on 380 replies. The median aggregate generated rate was **181.15 tokens/s** across 20 rounds (range 161.6–204.4). This qualifies the **eight-lane, 4 GiB cache** profile for this workload; it does not qualify the earlier 20-lane profile. The thermally controlled context ladder is running. Applicable feature gates remain pending. The MTP route remains implemented and opt-in pending served qualification. No selected speculative route is claimed.
+The second capped retry raised the recorded thinking allowance to 4,096 tokens. It **passed 400/400 graded answers**, with zero HTTP errors, zero issues, zero swapouts, an APCv2 reuse pass, cancellation recovery, and eight-way ordinary batches on 380 replies. The median aggregate generated rate was **181.15 tokens/s** across 20 rounds (range 161.6–204.4). This qualifies the **eight-lane, 4 GiB cache** profile for this workload; it does not qualify the earlier 20-lane profile.
+
+The first thermally controlled ladder attempt passed all three repetitions of its 1K and 4K cells, but its M5 runner ignored the requested 4 GiB cache cap and started a server with a 48 GiB cap. It was stopped at 16K and is **not** the capped-profile qualification result. The runner now applies explicit caps on either host and records the effective cap; the 1K–32K retry is running. Applicable feature gates remain pending. The MTP route remains implemented and opt-in pending served qualification. No selected speculative route is claimed.
 
 ## Receipt integrity
 
@@ -26,4 +28,5 @@ The second capped retry raised the recorded thinking allowance to 4,096 tokens. 
 | M5 | interrupted 20×20 attempt, contaminated | `d15d39d247587671b36e84eab87c92017e5133de3bc10ca5ec09c4e24e87b793` |
 | M5 | complete 20×20 retry, 397/400 quality gate | `e7d2f56f9a85851b767d59f701585f54e39410c28b19c212b1463efa193137eb` |
 | M5 | qualified capped 20×20, 400/400 | `fe5c3bdd4ca20e5e4836e4f62832997a8c096b833480a04e25c43b5a92bcad95` |
+| M5 | aborted 48 GiB-cap ladder attempt | `d82bb0592d16ada8fb3a2ee7459ab97a527d818006019eae78bb0fc8937b7aed` |
 | M3 | hash-verified load feasibility | `119c027c459044036e7d36016576feced932a5e8e40d516876feda83db9fc1d4` |
