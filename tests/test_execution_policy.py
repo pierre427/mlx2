@@ -34,7 +34,7 @@ def test_flash_adapter_explicitly_selects_observable_parity_paths(tmp_path, monk
     monkeypatch.setenv("MLX_GDN_UNBOUND_EXPERIMENT", "1")
     environment = configure_environment(tmp_path, FlashNextPolicy())
     assert environment["MLX_QWEN4_QSA_SCATTER_CHOSEN"] == "1"
-    assert environment["MLX_QWEN4_MOE_FUSED_GATE_UP"] == "1"
+    assert environment["MLX_QWEN4_MOE_FUSED_GATE_UP"] == "0"
     assert environment["MLX_QWEN4_FUSED_EXPERT_KERNEL"] == "auto"
     assert environment["MLX_QWEN4_FUSED_GDN_REPLAY_ROLLBACK"] == "1"
     assert environment["MLX_GDN_PACKED"] == "1"

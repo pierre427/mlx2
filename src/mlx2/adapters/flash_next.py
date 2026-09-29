@@ -79,7 +79,10 @@ def configure_environment(model_path: Path, policy=None) -> dict[str, str]:
         "MLX_QWEN4_FUSED_GDN_PREFILL": "1",
         "MLX_GDN_PACKED": "1",
         "MLX_GDN_CORE": "0",
-        "MLX_QWEN4_MOE_FUSED_GATE_UP": "1",
+        # The Flash artifacts already load split expert projections. Re-fusing
+        # them triggered swap under the feature workload on M5; the split
+        # projection route remains the ordinary reference and avoids it.
+        "MLX_QWEN4_MOE_FUSED_GATE_UP": "0",
         "MLX_QWEN4_FUSED_EXPERT_KERNEL": "auto",
         "MLX_QWEN4_MEGAKERNEL": "0",
         "MLX_LM_COMPILED_DECODE": "0",
