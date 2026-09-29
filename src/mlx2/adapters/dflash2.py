@@ -217,10 +217,26 @@ def load_drafter(record,target_model,*,runtime_quantization=None):
     import mlx.core as mx
     import mlx.nn as nn
     from ..runtime.drafters.dflash2 import DFlash2DraftModel
+    from ..runtime.ubc_evict import ubc_evict_paths
     model=DFlash2DraftModel(record['args'])
     weights={}
-    for name,_,_ in record['files']:weights.update(mx.load(str(Path(record['path'])/name)))
-    weights=model.sanitize(weights)
+    for name,_,_ in record['files']:
+        path = Path(record['path']) / name
+        shard = model.sanitize(mx.load(str(path)))
+        pending = []
+        pending_bytes = 0
+        for tensor in shard.values():
+            pending.append(tensor)
+            pending_bytes += tensor.nbytes
+            if pending_bytes >= 256 << 20:
+                mx.eval(pending)
+                ubc_evict_paths([str(path)])
+                pending.clear()
+                pending_bytes = 0
+        if pending:
+            mx.eval(pending)
+            ubc_evict_paths([str(path)])
+        weights.update(shard)
     quant=record['config'].get('quantization') or record['config'].get('quantization_config')
     if quant:
         def predicate(name,module):
@@ -242,5 +258,5 @@ def load_drafter(record,target_model,*,runtime_quantization=None):
             bits=runtime_quantization['bits'],
             class_predicate=lambda _name, module: isinstance(module, nn.Linear),
         )
-    model.eval();mx.eval(model.parameters());weights.clear()
+    model.eval();mx.eval(model.parameters());weights.clear();mx.clear_cache()
     return model.bind(target_model)
