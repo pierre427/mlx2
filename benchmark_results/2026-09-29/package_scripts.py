@@ -69,7 +69,11 @@ def main() -> None:
             })
     policy_groups = {
         "series": sorted((ROOT / "qualification/runs/series-20260924/policies").glob("*.json")),
-        "requal": [ROOT / "qualification/runs/requal-20260928/policies/flash-next-tensorfold-qmv-candidate.json"],
+        "requal": [
+            ROOT / "qualification/runs/requal-20260928/policies/flash-next-tensorfold-qmv-candidate.json",
+            ROOT / "qualification/runs/requal-20260928/policies/muse-lane-no-group-candidate.json",
+            ROOT / "qualification/runs/requal-20260928/policies/muse-pld-rotating-candidate.json",
+        ],
     }
     for group, sources in policy_groups.items():
         policy_target = DEST / group / "policies"

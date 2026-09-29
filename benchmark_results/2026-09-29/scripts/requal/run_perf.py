@@ -34,6 +34,7 @@ def _interrupt(signum: int, _frame: object) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", required=True)
+    parser.add_argument("--route", default=None, help="named model route; defaults to its selected route")
     parser.add_argument("--host-label", required=True)
     parser.add_argument("--runs", type=int, default=3)
     parser.add_argument("--min-length", type=int, default=1024)
@@ -62,7 +63,10 @@ def main() -> int:
     model = models.get(args.model)
     if model is None:
         parser.error(f"model not present on this host: {args.model}")
-    route = next(route for route in model.routes if route.name == model.default_route)
+    route = next((route for route in model.routes
+                  if route.name == (args.route or model.default_route)), None)
+    if route is None:
+        parser.error(f"route {args.route!r} is not declared for {model.name}")
     output = HERE / args.host_label / model.name
     output.mkdir(parents=True, exist_ok=True)
     stem = f"ladder-{args.min_length}-{args.max_length}-r{args.runs}"

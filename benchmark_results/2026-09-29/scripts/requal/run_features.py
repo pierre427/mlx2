@@ -40,15 +40,30 @@ def main() -> int:
     parser.add_argument("--tag", default="", help="separate this run from earlier feature receipts")
     parser.add_argument("--skip-kernels", action="store_true",
                         help="run feature mechanisms without the separately measured kernel sweep")
+    parser.add_argument("--rolling-units", type=int, default=None,
+                        help="isolate rolling recovery with a longer prefill (default: 140 units)")
+    parser.add_argument("--rolling-prefill-step", type=int, default=None,
+                        help="use smaller server prefill slices for isolated rolling recovery")
     parser.add_argument("--only-feature", choices=[name for name, _ in experimental.FEATURES],
                         help="isolate one feature on a fresh server")
+    parser.add_argument("--exclude-feature", action="append", default=[],
+                        choices=[name for name, _ in experimental.FEATURES],
+                        help="omit a feature whose route needs an isolated host gate")
     parser.add_argument("--kernels-only-safe", action="store_true",
                         help="measure kernel arms except gate/up fusion that caused swap")
     args = parser.parse_args()
     if args.tag and not re.fullmatch(r"[a-zA-Z0-9_-]+", args.tag):
         parser.error("tag must contain only letters, digits, underscores or hyphens")
-    if args.kernels_only_safe and (args.only_feature or args.skip_kernels):
+    if args.kernels_only_safe and (args.only_feature or args.exclude_feature or args.skip_kernels):
         parser.error("--kernels-only-safe cannot be combined with feature selection")
+    if args.only_feature and args.exclude_feature:
+        parser.error("--only-feature and --exclude-feature cannot be combined")
+    if args.rolling_units is not None and (args.rolling_units < 140 or
+                                           args.only_feature != "apc_rolling_checkpoints"):
+        parser.error("--rolling-units >= 140 requires isolated APCv2 rolling qualification")
+    if args.rolling_prefill_step is not None and (args.rolling_prefill_step < 16 or
+                                                  args.only_feature != "apc_rolling_checkpoints"):
+        parser.error("--rolling-prefill-step >= 16 requires isolated APCv2 rolling qualification")
     if args.only_feature:
         args.skip_kernels = True
     if (args.cache_cap_gib is not None and args.cache_cap_gib < 1
@@ -90,8 +105,11 @@ def main() -> int:
                       "max_lanes": args.max_lanes_cap},
         "skip_kernels": args.skip_kernels,
         "only_feature": args.only_feature,
+        "excluded_features": args.exclude_feature,
         "kernels_only_safe": args.kernels_only_safe,
         "tag": args.tag,
+        "rolling_units": args.rolling_units or experimental.ROLLING_UNITS,
+        "rolling_prefill_step": args.rolling_prefill_step,
         "artifact": model.path,
         "artifact_config_sha256": sha256(Path(model.path) / "config.json"),
         "harness_sha256": {name: sha256(file) for name, file in {
@@ -131,6 +149,8 @@ def main() -> int:
                 if args.max_lanes_cap is not None and "--max-lanes" in command:
                     index = command.index("--max-lanes") + 1
                     command[index] = str(min(int(command[index]), args.max_lanes_cap))
+                if args.rolling_prefill_step is not None:
+                    command.extend(["--prefill-step", str(args.rolling_prefill_step)])
                 return command
 
             def record_phase(server, phase, start_count, end_count):
@@ -166,6 +186,9 @@ def main() -> int:
             original_run_kernels = experimental.run_kernels
             original_features = experimental.FEATURES
             original_kernels = experimental.KERNELS.get("flash-next")
+            original_rolling_units = experimental.ROLLING_UNITS
+            if args.rolling_units is not None:
+                experimental.ROLLING_UNITS = args.rolling_units
             if args.skip_kernels:
                 experimental.run_kernels = lambda *_args, **_kwargs: ([], {
                     "skipped": "kernel sweep measured separately"})
@@ -173,6 +196,11 @@ def main() -> int:
                 experimental.FEATURES = tuple(
                     feature for feature in experimental.FEATURES
                     if feature[0] == args.only_feature)
+            elif args.exclude_feature:
+                excluded = set(args.exclude_feature)
+                experimental.FEATURES = tuple(
+                    feature for feature in experimental.FEATURES
+                    if feature[0] not in excluded)
             if args.kernels_only_safe:
                 if model.name not in {"flash-next", "flash-next-uncensored"}:
                     raise ValueError("safe kernel subset is defined only for Flash-Next")
@@ -188,6 +216,7 @@ def main() -> int:
                 xc.server_command = original_command
                 experimental.run_kernels = original_run_kernels
                 experimental.FEATURES = original_features
+                experimental.ROLLING_UNITS = original_rolling_units
                 if original_kernels is not None:
                     experimental.KERNELS["flash-next"] = original_kernels
             receipt["status"] = result

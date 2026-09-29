@@ -68,16 +68,16 @@
     {
       "source": "qualification/runs/requal-20260928/run_features.py",
       "published": "scripts/requal/run_features.py",
-      "source_sha256": "c9dc39569608bf966556ff05691e539b6cf30f32f8885416ffede88f2aa48b49",
-      "published_sha256": "c9dc39569608bf966556ff05691e539b6cf30f32f8885416ffede88f2aa48b49",
+      "source_sha256": "e32c0b60a62ea16784567711898caf99e117fd6ea8e808ec912552edb07bade2",
+      "published_sha256": "e32c0b60a62ea16784567711898caf99e117fd6ea8e808ec912552edb07bade2",
       "home_prefix_rewritten": false,
       "local_service_label_rewritten": false
     },
     {
       "source": "qualification/runs/requal-20260928/run_perf.py",
       "published": "scripts/requal/run_perf.py",
-      "source_sha256": "a12b31fbabce4f6cf159b1b8e12f11bfefa2736913bf32255fe7aa094ee3d301",
-      "published_sha256": "a12b31fbabce4f6cf159b1b8e12f11bfefa2736913bf32255fe7aa094ee3d301",
+      "source_sha256": "6030146aa0be664db9da6bc680c984b221c88417d3819f3496f508bcb60c2997",
+      "published_sha256": "6030146aa0be664db9da6bc680c984b221c88417d3819f3496f508bcb60c2997",
       "home_prefix_rewritten": false,
       "local_service_label_rewritten": false
     },
@@ -92,8 +92,8 @@
     {
       "source": "qualification/runs/requal-20260928/run_stress.py",
       "published": "scripts/requal/run_stress.py",
-      "source_sha256": "518a0abd7a7819887c9f98555707c44c1a03653bda8684bc451dcd3af258daa7",
-      "published_sha256": "518a0abd7a7819887c9f98555707c44c1a03653bda8684bc451dcd3af258daa7",
+      "source_sha256": "5fd8fec0df8c1c1160954951a0b75c7442f8b801b95f89d0407c2045ea923f26",
+      "published_sha256": "5fd8fec0df8c1c1160954951a0b75c7442f8b801b95f89d0407c2045ea923f26",
       "home_prefix_rewritten": false,
       "local_service_label_rewritten": false
     },
@@ -124,16 +124,16 @@
     {
       "source": "qualification/runs/series-20260924/experimental_job.py",
       "published": "scripts/series/experimental_job.py",
-      "source_sha256": "ed8ea706b2112c96a8c17a665449a29173a38d916079e56a6e126c118b1b625f",
-      "published_sha256": "b85f5d1a17d3aee75a69dbbf802dcfdc1eaaf560c195ca97ab4f77ec6ee85eaf",
+      "source_sha256": "cb37c454fc7417bf6d7bf78c6229e9d9bb74c1a002957233e4b0d1bcb6097ace",
+      "published_sha256": "8053a9ea633818cc52ab79e52df1fe6713e179e02dc0ee50c4691c1a542d6501",
       "home_prefix_rewritten": true,
       "local_service_label_rewritten": false
     },
     {
       "source": "qualification/runs/series-20260924/extra_common.py",
       "published": "scripts/series/extra_common.py",
-      "source_sha256": "78eb13c48b13ba1502990f0c7002fa5d9bc10286d76758f29ef72521f5b454a3",
-      "published_sha256": "18632318a8a7116bf7861091d9d9f9cb299ef200aaba51e4f6514b7db96c060b",
+      "source_sha256": "750a4bb9665d38f35b26cda99b656283bb1b32de57686ba23389ee21dcad1a14",
+      "published_sha256": "475c7ef53f51ded35828492f6ca9338236e4985a8fdbfe69d3f5c44d84fab3de",
       "home_prefix_rewritten": false,
       "local_service_label_rewritten": true
     },
@@ -341,6 +341,20 @@
       "published": "scripts/requal/policies/flash-next-tensorfold-qmv-candidate.json",
       "source_sha256": "a48294b5f23fd7ea52d2fb91590e9d88e0cc0eadf46a3ceef7dc2bee81c1e372",
       "published_sha256": "a48294b5f23fd7ea52d2fb91590e9d88e0cc0eadf46a3ceef7dc2bee81c1e372",
+      "home_prefix_rewritten": false
+    },
+    {
+      "source": "qualification/runs/requal-20260928/policies/muse-lane-no-group-candidate.json",
+      "published": "scripts/requal/policies/muse-lane-no-group-candidate.json",
+      "source_sha256": "1afdb1d45359d5af0623573c07543e16026d1afb00c789fbb6c9b24779d421f3",
+      "published_sha256": "1afdb1d45359d5af0623573c07543e16026d1afb00c789fbb6c9b24779d421f3",
+      "home_prefix_rewritten": false
+    },
+    {
+      "source": "qualification/runs/requal-20260928/policies/muse-pld-rotating-candidate.json",
+      "published": "scripts/requal/policies/muse-pld-rotating-candidate.json",
+      "source_sha256": "a991d6d51300f2db362769e760bfcf95fc85c572d262f1027f89961a5f192693",
+      "published_sha256": "a991d6d51300f2db362769e760bfcf95fc85c572d262f1027f89961a5f192693",
       "home_prefix_rewritten": false
     }
   ]

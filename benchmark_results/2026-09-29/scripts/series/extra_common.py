@@ -444,6 +444,42 @@ class HTTP:
         connection.close()
         return {"abandoned_after_s": after_seconds}
 
+    def abandon_after_progress(self, prompt, minimum_processed, **extra):
+        """Close a streaming request after an observed prefill boundary.
+
+        Wall-clock cancellation races the model's first prefill slice. A
+        progress event proves that a reusable partial cache actually exists.
+        """
+        body = json.dumps(self.chat_body(prompt, stream=True,
+                                         return_progress=True, **extra)).encode()
+        host, port = self.base.split("//", 1)[1].split(":")
+        connection = http.client.HTTPConnection(host, int(port), timeout=60)
+        try:
+            connection.request("POST", "/v1/chat/completions", body,
+                               {"Content-Type": "application/json"})
+            response = connection.getresponse()
+            if response.status != 200:
+                raise RuntimeError(f"progress stream returned HTTP {response.status}")
+            while raw := response.readline():
+                if not raw.startswith(b"data: "):
+                    continue
+                try:
+                    event = json.loads(raw[6:])
+                except (ValueError, UnicodeDecodeError):
+                    continue
+                progress = event.get("prompt_progress") or {}
+                processed = int(progress.get("processed") or 0)
+                if processed >= minimum_processed:
+                    return {"processed": processed, "total": int(progress.get("total") or 0)}
+            raise RuntimeError("stream ended before requested prefill progress")
+        finally:
+            if connection.sock is not None:
+                try:
+                    connection.sock.shutdown(2)
+                except OSError:
+                    pass
+            connection.close()
+
     def count(self, text):
         reply = self.post("/v1/messages/count_tokens", {
             "model": self.model_id, "messages": [{"role": "user", "content": text}]})

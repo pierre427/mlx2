@@ -631,21 +631,23 @@ def check_rolling(http):
         return {"engaged": False, "ok": False, "evidence": evidence,
                 "notes": admission_note(memory) or "rolling probe request failed; no prefill timing to abandon against"}
     abandoned = xc.filler(ROLLING_UNITS, f"rolling-cancel-{nonce()}") + "\nReply OK."
-    # Past the first strides, well before the prompt boundary.
-    after_s = max(0.3, 0.35 * float(ttft))
-    http.abandon(abandoned, after_s)
+    # Cancel after an observed boundary: elapsed TTFT is an unreliable proxy
+    # for when the first prefill slice becomes available to APCv2.
+    abandon = http.abandon_after_progress(abandoned, 1024)
     time.sleep(2)
     retry = http.chat(abandoned, max_tokens=4)
     after = http.settled()
     published = xc.delta(before, after, "counts", "apc_rolling_checkpoints_published") or 0
     hits = xc.delta(before, after, "apcv2", "lifetime", "rolling_hits") or 0
     cancel = xc.delta(before, after, "counts", "apc_rolling_checkpoints_cancel_published") or 0
+    disconnects = xc.delta(before, after, "counts", "client_disconnects") or 0
     memory = memory_evidence(before, after, [probe, retry])
     engaged = max(min(published, hits), cancel) > 0
     ok = retry["status"] == 200
     evidence.update({
-        "abandon_after_s": after_s, "published": published, "rolling_hits": hits, "cancel_published": cancel,
+        "abandon_progress": abandon, "published": published, "rolling_hits": hits, "cancel_published": cancel,
         "planned": xc.delta(before, after, "counts", "apc_rolling_checkpoints_planned"),
+        "client_disconnects": disconnects,
         "degraded": xc.delta(before, after, "counts", "apc_rolling_checkpoints_degraded"),
         "retired": xc.delta(before, after, "counts", "apc_rolling_checkpoints_retired"),
         "retry_status": retry["status"], "retry_cached_tokens": xc.cached_tokens(retry), "memory": memory})
@@ -742,19 +744,25 @@ def check_fly(http):
     greedy = http.chat(xc.PROMPT_OPEN, max_tokens=128, **neutral)
     sampled = http.chat(xc.PROMPT_OPEN, max_tokens=128, temperature=0.7,
                         seed=5, **neutral)
+    processed = http.chat(xc.PROMPT_OPEN, max_tokens=64,
+                          repetition_penalty=1.1,
+                          presence_penalty=0, frequency_penalty=0)
     after = http.settled()
     mechanisms = []
-    for reply in (greedy, sampled):
+    for reply in (greedy, sampled, processed):
         receipt = xc.receipt_of(reply)
         mechanisms.append(receipt.get("mtp") or receipt.get("speculation") or {})
     verification = [m.get("verification") for m in mechanisms]
-    relaxed = (xc.delta(before, after, "scheduler", "fly_relaxed_accepts") or 0) + sum(
-        int(m.get("relaxed_accepts") or 0) for m in mechanisms)
-    engaged = (verification == ["fly", "exact"]
+    relaxed = xc.delta(before, after, "scheduler", "fly_relaxed_accepts") or 0
+    # Temperature sampling alone does not install a logits processor.  An
+    # actual penalty processor is the exact-verification fallback control.
+    engaged = (verification == ["fly", "fly", "exact"]
                and not mechanisms[0].get("fly_disabled")
-               and bool(mechanisms[1].get("fly_disabled")))
-    ok = greedy["status"] == sampled["status"] == 200 and bool(xc.text_of(greedy))
+               and not mechanisms[1].get("fly_disabled")
+               and mechanisms[2].get("fly_disabled") == "logits_processors")
+    ok = all(reply["status"] == 200 for reply in (greedy, sampled, processed)) and bool(xc.text_of(greedy))
     return {"engaged": engaged, "ok": ok, "evidence": {"verification": verification, "relaxed_accepts": relaxed,
+            "receipt_relaxed_accepts": [int(m.get("relaxed_accepts") or 0) for m in mechanisms],
             "fly_disabled": [m.get("fly_disabled") for m in mechanisms]}}
 
 

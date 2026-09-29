@@ -57,6 +57,7 @@ def apc_probe(base: str, model_id: str) -> dict:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", required=True)
+    parser.add_argument("--route", default=None, help="named model route; defaults to its selected route")
     parser.add_argument("--host-label", required=True)
     parser.add_argument("--max-lanes", type=int, default=20)
     parser.add_argument("--cache-cap-gib", type=int, default=0)
@@ -65,6 +66,7 @@ def main() -> int:
     parser.add_argument("--tag", default="", help="separate this run from historical model receipts")
     parser.add_argument("--execution-policy", type=Path, default=None)
     parser.add_argument("--lane-matmul", choices=("off", "auto", "crossover", "exact"), default=None)
+    parser.add_argument("--lane-policy", type=Path, default=None)
     args = parser.parse_args()
     if args.tag and not re.fullmatch(r"[a-zA-Z0-9_-]+", args.tag):
         parser.error("tag must contain only letters, digits, underscores or hyphens")
@@ -76,7 +78,10 @@ def main() -> int:
     model = models.get(args.model)
     if model is None:
         parser.error(f"model not present on this host: {args.model}")
-    route = next(route for route in model.routes if route.name == model.default_route)
+    route = next((route for route in model.routes
+                  if route.name == (args.route or model.default_route)), None)
+    if route is None:
+        parser.error(f"route {args.route!r} is not declared for {model.name}")
     output = HERE / args.host_label / model.name
     if args.tag:
         output /= f"stress-{args.tag}"
@@ -111,6 +116,10 @@ def main() -> int:
         receipt["execution_policy_sha256"] = hashlib.sha256(selected.read_bytes()).hexdigest()
     if args.lane_matmul is not None:
         command.extend(["--lane-matmul", args.lane_matmul])
+    if args.lane_policy is not None:
+        selected = args.lane_policy.resolve(strict=True)
+        command.extend(["--lane-policy", str(selected)])
+        receipt["lane_policy_sha256"] = hashlib.sha256(selected.read_bytes()).hexdigest()
     receipt["command"] = command
     env = {**os.environ, "PYTHONPATH": config.stage_pythonpath(model),
            "HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1"}
