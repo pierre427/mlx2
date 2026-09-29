@@ -74,6 +74,32 @@ def test_default_topology_and_layout():
     assert ModelArgs(sliding_window=1024).cache_layout != args.cache_layout
 
 
+def test_muse_cache_projection_keeps_rolling_boundaries():
+    from mlx2.runtime.state_boundaries import (
+        BoundaryPurpose,
+        budget_state_boundaries,
+        plan_state_boundaries,
+    )
+
+    adapter = object.__new__(MuseGlimmerAdapter)
+    adapter._config = {"dtype": "bfloat16", "text_config": vars(ModelArgs())}
+    budget = adapter.cache_budget(mtp=False)
+    assert (budget.global_layers, budget.sliding_layers) == (13, 39)
+    assert budget.item_bytes == 2
+    assert budget.project(4096) > budget.project(1024) > 0
+    planned = plan_state_boundaries(
+        prompt_tokens=4096, cached_tokens=0, rolling_interval=512
+    )
+    kept, charged = budget_state_boundaries(
+        planned, available_bytes=2 * budget.project(4096),
+        cache_projection=budget.project,
+    )
+    assert charged > 0
+    assert any(bound.purpose == BoundaryPurpose.ROLLING for bound in kept)
+    with pytest.raises(ValueError, match="no native MTP"):
+        adapter.cache_budget(mtp=True)
+
+
 @pytest.mark.parametrize(
     "kwargs",
     [

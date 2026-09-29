@@ -275,6 +275,33 @@ class SlidingKVCacheBudget:
     # ------------------------------------------------------------------
 
     @classmethod
+    def from_muse_config(cls, text_config, *, mtp, prefill_step=DEFAULT_PREFILL_STEP,
+                         root_config=None):
+        """Muse's declared full/sliding attention geometry and restore slots."""
+        if mtp:
+            raise ValueError("Muse has no native MTP route")
+        layers = _layer_types(text_config, derive_from_pattern=False)
+        heads = int(text_config["num_key_value_heads"])
+        head_dim = int(text_config["head_dim"])
+        copies, stride = _mlx2_rotating_checkpoint_policy()
+        return cls(
+            global_layers=layers.count("full_attention"),
+            global_kv_heads=heads,
+            global_head_dim=head_dim,
+            sliding_layers=layers.count("sliding_attention"),
+            sliding_kv_heads=heads,
+            sliding_head_dim=head_dim,
+            sliding_window=int(text_config["sliding_window"]),
+            prefill_step=int(prefill_step),
+            checkpoint_copies=copies,
+            checkpoint_stride=stride,
+            item_bytes=_kv_item_bytes(text_config, root_config),
+            transient_gib_per_lane=DENSE_TRANSIENT_GIB_PER_LANE,
+            transient_basis="provisional dense bound; Muse forward transient not measured",
+            schema="muse-full-sliding-cache-geometry-v1",
+        )._validated()
+
+    @classmethod
     def from_gemma4_config(cls, text_config, *, mtp, prefill_step=DEFAULT_PREFILL_STEP, root_config=None):
         """Gemma 4 (mlx-vlm ``gemma4/language.py`` cache contract)."""
         if mtp:

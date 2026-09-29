@@ -306,6 +306,16 @@ class MuseGlimmerAdapter:
     sampling_defaults = MUSE_GLIMMER_SAMPLING
     reasoning_effort_semantics = "reasoning_strength"
 
+    def cache_budget(self, *, mtp):
+        from .mlx_vlm_memory import SlidingKVCacheBudget
+
+        config = self._config
+        return SlidingKVCacheBudget.from_muse_config(
+            config.get("text_config") or config,
+            mtp=mtp,
+            root_config=config,
+        )
+
     @staticmethod
     def spomin_backend(model, prompt_cache):
         """Adapter-owned approximate KV surgery for full + sliding attention."""
@@ -358,6 +368,7 @@ class MuseGlimmerAdapter:
         self.layout = self.identity["cache_layout"]
         self.max_context = self.identity["max_context"]
         config = json.loads((path / "config.json").read_text())
+        self._config = config
         import mlx.core as mx
         import mlx.nn as nn
         from transformers import AutoTokenizer
