@@ -4479,6 +4479,11 @@ class ServingEngine:
                 self.lane_matmul_receipt = apply_policy(adapter.model, policy) or {
                     "law_id": "stock", "covered": {}, "policy": {
                         k: policy[k] for k in ("mode", "detected", "family", "sources")}}
+                if (
+                    self.lane_matmul not in ("auto", "off")
+                    and self.lane_matmul_receipt.get("available") is False
+                ):
+                    raise ValueError("requested lane matmul mode is unavailable on this device")
             # Wire the weights for the process lifetime, on every route and
             # before any cache exists (runtime/weight_residency.py).  The
             # prompt-lookup and external-draft generators never raised the

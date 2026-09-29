@@ -294,6 +294,18 @@ def apply_policy(model, policy: dict) -> dict | None:
 
     if policy["mode"] == "off":
         return None
+    if not available():
+        # Do not rewrite weights into grouped views on a device that can
+        # never execute the lane kernel.  Stock fallback then retains its
+        # original modules and allocations.
+        return {
+            "law_id": "stock", "covered": {}, "groups": {},
+            "refused": {"device_unsupported": sum(policy["detected"]["formats"].values())},
+            "available": False,
+            "policy": {k: policy[k] for k in (
+                "mode", "min_rows", "max_rows", "grouping", "skip",
+                "detected", "family", "sources")},
+        }
     by_format = ({fmt: 1 for fmt in policy["min_rows"]} if policy["mode"] == "exact"
                  else dict(policy["min_rows"]))
     receipt = install(

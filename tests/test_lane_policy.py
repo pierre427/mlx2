@@ -118,7 +118,8 @@ def test_overrides_load_inline_or_from_a_file(tmp_path):
         policy.load_overrides("[1, 2]")
 
 
-def test_apply_policy_sets_per_format_thresholds_and_skips():
+def test_apply_policy_sets_per_format_thresholds_and_skips(monkeypatch):
+    monkeypatch.setattr(installer, "available", lambda: True)
     model = _Dense()
     resolved = policy.resolve(policy.detect(model), overrides={"skip": ["lm_head"]})
     receipt = lane.apply_policy(model, resolved)
@@ -140,7 +141,22 @@ def test_apply_policy_sets_per_format_thresholds_and_skips():
     assert lane.apply_policy(model, policy.resolve(policy.detect(model), mode="off")) is None
 
 
+def test_unavailable_device_keeps_stock_modules_and_weights(monkeypatch):
+    monkeypatch.setattr(installer, "available", lambda: False)
+    model = _Dense()
+    modules = (model.q_proj, model.k_proj)
+    weights = (model.q_proj.weight, model.k_proj.weight)
+    result = lane.apply_policy(model, policy.resolve(policy.detect(model)))
+    assert result["available"] is False
+    assert result["covered"] == {}
+    assert result["refused"]["device_unsupported"] == 5
+    assert model.q_proj is modules[0] and model.k_proj is modules[1]
+    assert model.q_proj.weight is weights[0] and model.k_proj.weight is weights[1]
+    assert not lane.installed(model.q_proj)
+
+
 def test_call_counters_track_paths(monkeypatch):
+    monkeypatch.setattr(installer, "available", lambda: True)
     model = _Dense()
     lane.apply_policy(model, policy.resolve(policy.detect(model), overrides={"min_rows": {"q4": 4}}))
     monkeypatch.setattr(installer, "available", lambda: True)
@@ -164,7 +180,8 @@ def test_call_counters_track_paths(monkeypatch):
         lane.uninstall(model)
 
 
-def test_status_and_metrics_expose_lane_state():
+def test_status_and_metrics_expose_lane_state(monkeypatch):
+    monkeypatch.setattr(installer, "available", lambda: True)
     from test_prometheus import FakeEngine, assert_valid_prometheus_text
 
     from mlx2.prometheus import render_engine_metrics
