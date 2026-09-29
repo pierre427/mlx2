@@ -44,6 +44,8 @@ def main() -> int:
                         help="isolate rolling recovery with a longer prefill (default: 140 units)")
     parser.add_argument("--rolling-prefill-step", type=int, default=None,
                         help="use smaller server prefill slices for isolated rolling recovery")
+    parser.add_argument("--prefill-step", type=int, default=None,
+                        help="override server prefill slices for an isolated feature gate")
     parser.add_argument("--only-feature", choices=[name for name, _ in experimental.FEATURES],
                         help="isolate one feature on a fresh server")
     parser.add_argument("--exclude-feature", action="append", default=[],
@@ -64,6 +66,9 @@ def main() -> int:
     if args.rolling_prefill_step is not None and (args.rolling_prefill_step < 16 or
                                                   args.only_feature != "apc_rolling_checkpoints"):
         parser.error("--rolling-prefill-step >= 16 requires isolated APCv2 rolling qualification")
+    if args.prefill_step is not None and (args.prefill_step < 16 or not args.only_feature
+                                           or args.rolling_prefill_step is not None):
+        parser.error("--prefill-step >= 16 requires one isolated feature and no rolling override")
     if args.only_feature:
         args.skip_kernels = True
     if (args.cache_cap_gib is not None and args.cache_cap_gib < 1
@@ -110,6 +115,7 @@ def main() -> int:
         "tag": args.tag,
         "rolling_units": args.rolling_units or experimental.ROLLING_UNITS,
         "rolling_prefill_step": args.rolling_prefill_step,
+        "prefill_step": args.prefill_step,
         "artifact": model.path,
         "artifact_config_sha256": sha256(Path(model.path) / "config.json"),
         "harness_sha256": {name: sha256(file) for name, file in {
@@ -149,8 +155,9 @@ def main() -> int:
                 if args.max_lanes_cap is not None and "--max-lanes" in command:
                     index = command.index("--max-lanes") + 1
                     command[index] = str(min(int(command[index]), args.max_lanes_cap))
-                if args.rolling_prefill_step is not None:
-                    command.extend(["--prefill-step", str(args.rolling_prefill_step)])
+                selected_prefill_step = args.prefill_step or args.rolling_prefill_step
+                if selected_prefill_step is not None:
+                    command.extend(["--prefill-step", str(selected_prefill_step)])
                 return command
 
             def record_phase(server, phase, start_count, end_count):
