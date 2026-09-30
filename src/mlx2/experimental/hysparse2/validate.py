@@ -3,6 +3,7 @@
 import argparse
 import json
 import math
+import os
 import time
 from dataclasses import asdict
 from pathlib import Path
@@ -12,6 +13,10 @@ from .resources import gpu_guard
 
 
 def run(args):
+    # The parity gate compares differently tiled executions. MLX's default TF32
+    # matmuls can amplify harmless tiling roundoff past the strict FP32 bound,
+    # so make this validation process use full FP32 before its first operation.
+    os.environ["MLX_ENABLE_TF32"] = "0"
     import mlx.core as mx
     import numpy as np
 
@@ -60,6 +65,7 @@ def run(args):
         "config": asdict(c),
         "fp32_prefill_max_abs_error": prefill_error,
         "fp32_decode_max_abs_error": decode_error,
+        "fp32_matmul_precision": "full",
         "dtype": args.dtype,
         "contexts": [],
         "learned_retrieval_qualified": False,
