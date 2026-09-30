@@ -115,7 +115,8 @@ else:
 # MLX's CPU quantized matmul loops over rows, so tiles are bitwise equal to
 # the untiled path there.  On Metal the kernel family follows the row count;
 # the tile floor keeps tiled and untiled calls in one family, but that is
-# not yet checked on a GPU, so the budget defaults to 0 (off).
+# checked on the pinned M5 build (see the 2026-09-30 intake evidence), not
+# across every serving shape/build, so the budget defaults to 0 (off).
 _QSDPA_SCORES_BUDGET = int(os.environ.get("MLX2_QSDPA_SCORES_BUDGET_BYTES", "0"))
 if _QSDPA_SCORES_BUDGET < 0:
     raise ValueError("MLX2_QSDPA_SCORES_BUDGET_BYTES must be >= 0")
@@ -238,16 +239,20 @@ def quantized_scaled_dot_product_attention(
             # The rows' own slice of the bottom-right causal mask.
             rows_at = mx.arange(S - L + start, S - L + stop)
             tile_mask = rows_at[:, None] >= mx.arange(S)[None]
-        elif mask is not None and mask.shape[-2] == L:
+        elif mask is not None and mask.ndim >= 2 and mask.shape[-2] == L:
             tile_mask = mask[..., start:stop, :]
         else:
             tile_mask = mask
-        outputs.append(
-            _composed_qsdpa(
-                queries[:, :, start:stop], q_keys, q_values, scale, tile_mask,
-                group_size, key_bits, value_bits,
-            )
+        output = _composed_qsdpa(
+            queries[:, :, start:stop], q_keys, q_values, scale, tile_mask,
+            group_size, key_bits, value_bits,
         )
+        # Bound the live score intermediates, not just each matmul's shape.
+        # Keeping every tile lazy reserves the whole score allocation when
+        # the final concatenation is evaluated. This opt-in memory path
+        # intentionally completes one tile before constructing the next.
+        mx.eval(output)
+        outputs.append(output)
         qvm.note("composed_tile", count)
         start = stop
     return mx.concatenate(outputs, axis=-2)
@@ -260,7 +265,7 @@ def _scores_tile_rows(queries, q_keys, mask, n_repeats):
         return None
     (B, n_q_heads, L, _) = queries.shape
     array_mask = mask is not None and not isinstance(mask, str)
-    if array_mask and mask.shape[-2] not in (1, L):
+    if array_mask and mask.ndim >= 2 and mask.shape[-2] not in (1, L):
         return None
     dtype = mx.result_type(queries, q_keys[1])
     if array_mask and mask.dtype != mx.bool_:

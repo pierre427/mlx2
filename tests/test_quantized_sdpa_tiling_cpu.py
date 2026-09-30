@@ -2,9 +2,9 @@
 
 Above ``MLX2_QSDPA_SCORES_BUDGET_BYTES`` the composed path runs its query rows
 in balanced tiles so it never holds the whole ``B * Hq * L * S`` score block.
-On the CPU every tile is bitwise equal to the untiled path.  The Metal oracle
-at the end is opt-in and has not been run: the tiled path is implemented, not
-qualified, and the budget stays 0 (off) by default.
+On the CPU every tile is bitwise equal to the untiled path. The opt-in Metal
+oracles check parity and bounded live allocations. This remains a default-off
+memory option; synthetic qualification does not select a serving route.
 """
 
 import os
@@ -44,6 +44,8 @@ def _mask(kind, B, Hq, L, S):
     if kind == "left_padded":
         padding = mx.arange(B) * 3
         return visible[None, None] & (mx.arange(S)[None, None, None] >= padding[:, None, None, None])
+    if kind == "key_broadcast":
+        return mx.arange(S) >= 2
     if kind == "query_broadcast":
         return (mx.arange(S) >= 2)[None, None, None]
     raise ValueError(kind)
@@ -64,7 +66,34 @@ GEOMETRIES = {
     "batch": (3, 4, 2, 45),
 }
 MASKS = ["none", "causal", "bool_2d", "bool_per_head", "additive_f32",
-         "left_padded", "query_broadcast"]
+         "left_padded", "query_broadcast", "key_broadcast"]
+
+
+def test_each_tile_is_evaluated_before_the_next_is_constructed(monkeypatch):
+    q, keys, values = _inputs(1, 8, 2, 60, 257, mx.bfloat16, (8, 8))
+    monkeypatch.setattr(base, "_QSDPA_SCORES_BUDGET", 1)
+    compose = base._composed_qsdpa
+    evaluate = mx.eval
+    pending = []
+    evaluations = []
+
+    def tracked_compose(*args, **kwargs):
+        assert not pending, "previous tile still lazy when constructing the next"
+        out = compose(*args, **kwargs)
+        pending.append(out)
+        return out
+
+    def tracked_eval(*arrays):
+        if pending and any(array is pending[0] for array in arrays):
+            evaluations.append(pending.pop().shape[-2])
+        return evaluate(*arrays)
+
+    monkeypatch.setattr(base, "_composed_qsdpa", tracked_compose)
+    monkeypatch.setattr(mx, "eval", tracked_eval)
+    out = qsdpa(q, keys, values, scale=0.125, mask="causal", group_size=64, bits=8)
+    evaluate(out)
+    assert not pending
+    assert evaluations == base._scores_tile_rows(q, keys, "causal", 4)
 
 
 @pytest.mark.parametrize("geometry", sorted(GEOMETRIES))
@@ -170,3 +199,28 @@ def test_metal_tiles_are_bitwise_equal_at_a_qwen_shape(monkeypatch):
         whole = _run(0, monkeypatch, q, keys, values, **kwargs)
         tiled = _run(1, monkeypatch, q, keys, values, **kwargs)
     assert mx.array_equal(tiled, whole).item()
+
+
+@pytest.mark.skipif(
+    os.environ.get("MLX2_RUN_METAL_TESTS") != "1" or not mx.metal.is_available(),
+    reason="set MLX2_RUN_METAL_TESTS=1 (under the GPU lock) for the memory oracle",
+)
+def test_metal_tiles_reduce_peak_live_allocation(monkeypatch):
+    with mx.stream(mx.gpu):
+        # Below the GQA flash threshold, so this exercises composed tiling.
+        q, keys, values = _inputs(1, 24, 4, 120, 32768, mx.bfloat16, (8, 8), D=256)
+        mx.eval(q, keys, values)
+        kwargs = dict(scale=0.0625, mask="causal", group_size=64, key_bits=8, value_bits=8)
+        mx.clear_cache()
+        mx.reset_peak_memory()
+        whole = _run(0, monkeypatch, q, keys, values, **kwargs)
+        whole_peak = mx.get_peak_memory()
+        mx.clear_cache()
+        mx.reset_peak_memory()
+        before = qvm.STATS.get("composed_tiled_calls", 0)
+        tiled = _run(16 << 20, monkeypatch, q, keys, values, **kwargs)
+        tiled_peak = mx.get_peak_memory()
+        assert qvm.STATS["composed_tiled_calls"] == before + 1
+        assert mx.array_equal(tiled, whole).item()
+        # The unfixed lazy concatenate retains all score DAGs and fails this.
+        assert tiled_peak < 0.75 * whole_peak, (tiled_peak, whole_peak)
