@@ -2,7 +2,7 @@
 
 Artifact: `NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16-mlx-8Bit`, config SHA-256 `a1b0135c0973322d188a836c86746e69ea07c02b241e1f26681bf5123345359b`. The target is pinned to revision `a9db86e1fe5baf448346efd33541ce117b5b8403`; the separately verified original BF16 MTP head is pinned to revision `a9904d24bcc1d289a1950fa9d2b978c47cf903b9` and SHA-256 `64577b275ca4e7e5266eae0903674f7f46ec2a8cbf4f4f1a3207f80d503cd1d0`.
 
-**Current-source boundary:** private main gained `46139b74`, changing the Lightning Mamba time-step clamp and therefore model outputs, after the runs below. Their passes and speed measurements remain source-bound historical evidence; ordinary and MTP serving on the new head require fresh qualification.
+**Current-source boundary:** private main gained `46139b74`, changing the Lightning Mamba time-step clamp and therefore model outputs, after the earlier runs below. Their passes and speed measurements remain source-bound historical evidence. Ordinary smoke passed on newer source `9f5e525d`; its capped 20×20 follow-up is running. MTP serving on this head remains unqualified.
 
 ## Host coverage
 
@@ -66,5 +66,6 @@ The 64K–262K width-one extension was **interrupted** after newer main commits 
 | M5 | ordinary smoke on integrated main `d17430de` | `3f2489141708bf0facabf407f45659dca5391b10c00af87b1f07d9161d448914` |
 | M5 | integrated-source capped 20×20, 400/400 | `07ca24f3bd89487b62b6e634b4c0de35de97439e5410ca66499f7e837280e333` |
 | M5 | integrated-source passed 1K–32K ladder | `7ce1c48a3a1abf35c0b728582263ca7a14f50230d986b2f7a237c390dd3d5563` |
+| M5 | ordinary smoke after Mamba clamp on `9f5e525d` | `aeb42bda9c5b9b78acfeeeadf50e605fec65c54c8fc28346623fe1a44c91ce17` |
 | M3 | hash-verified load feasibility | `119c027c459044036e7d36016576feced932a5e8e40d516876feda83db9fc1d4` |
 | M3 | integrated-source CPU and memory feasibility | `0b9861b9d31ddf88516c5702f5e41d2cec74898e9810095344e349e884eee3cc` |

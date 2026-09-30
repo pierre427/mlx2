@@ -293,6 +293,35 @@
       },
       "source_head": "d17430de4c1f57f4d3290dabe0147632b3a5da57",
       "status": "passed"
+    },
+    {
+      "artifact_config_sha256": "a1b0135c0973322d188a836c86746e69ea07c02b241e1f26681bf5123345359b",
+      "cases": [
+        {
+          "case": "arithmetic",
+          "finish_reason": "stop",
+          "passed": true
+        },
+        {
+          "case": "knowledge-default-sampling",
+          "finish_reason": "stop",
+          "passed": true
+        }
+      ],
+      "default_checks": {
+        "artifact_sampling_matches_documented_policy": true,
+        "healthy": true,
+        "qualification_is_candidate": true,
+        "served_model": true
+      },
+      "receipt_sha256": "aeb42bda9c5b9b78acfeeeadf50e605fec65c54c8fc28346623fe1a44c91ce17",
+      "route": "ordinary",
+      "sampling_drift": {
+        "expected": {},
+        "observed": {}
+      },
+      "source_head": "9f5e525d8957f4926e276bae778c0b2713ee7a6e",
+      "status": "passed"
     }
   ],
   "stress_attempts": [

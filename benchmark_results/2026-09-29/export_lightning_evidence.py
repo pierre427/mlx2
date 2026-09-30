@@ -133,6 +133,7 @@ def main() -> None:
         "lightning-ordinary-l8c4-20260929",
         "lightning-ordinary-l8c4-think4096-20260929",
         "lightning-ordinary-latest-d174-20260929",
+        "lightning-ordinary-current-mamba-clamp-20260929",
     )
     report = {
         "schema": "mlx2.public-lightning-evidence.v1",
@@ -140,6 +141,7 @@ def main() -> None:
         "host": "m5-max-128gb",
         "smokes": [row for name in (
             "smoke.json", "smoke-latest-d174-20260929.json",
+            "smoke-current-mamba-clamp-20260929.json",
         ) if (row := smoke(name)) is not None],
         "stress_attempts": [row for tag in tags if (row := stress(tag)) is not None],
         "ladders": [row for stem in (
