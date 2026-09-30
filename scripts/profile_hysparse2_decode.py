@@ -1,6 +1,7 @@
 """Synchronized first-anchor attribution; probe overhead is not decode speed."""
 
 import argparse
+import importlib.util
 import json
 import time
 from pathlib import Path
@@ -15,6 +16,7 @@ def main():
     p.add_argument("--checkpoint", type=Path, required=True)
     p.add_argument("--tokens", type=Path, required=True)
     p.add_argument("--output", type=Path, required=True)
+    p.add_argument("--reference-attention", type=Path)
     p.add_argument("--lengths", type=int, nargs="+", default=[256, 1024, 4096, 16384])
     args = p.parse_args()
     if args.output.exists():
@@ -33,10 +35,19 @@ def main():
             Path("src/mlx2/experimental/hysparse2/attention.py")
         ),
     }
+    reference_attention = None
+    if args.reference_attention:
+        spec = importlib.util.spec_from_file_location(
+            "attention_reference", args.reference_attention
+        )
+        reference_attention = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(reference_attention)
+        report["reference_attention_sha256"] = file_hash(args.reference_attention)
     with gpu_guard(wait_seconds=0):
         import mlx.core as mx
         import numpy as np
 
+        from mlx2.experimental.hysparse2 import model as model_module
         from mlx2.experimental.hysparse2.attention import attention
         from mlx2.experimental.hysparse2.model import Model
 
@@ -109,6 +120,42 @@ def main():
                 "valid_support_slots": int(mx.sum(selected[1][2] <= offset).item()),
                 "finite_anchor": bool(mx.all(mx.isfinite(selected[0])).item()),
             }
+            if reference_attention is not None:
+                original, original_seconds = timed(
+                    reference_attention.attention,
+                    q,
+                    blocks,
+                    **common,
+                    select=(c.local_window, c.global_tokens),
+                    block_select=(c.candidate_block_size, c.candidate_blocks),
+                )
+                support_equal = bool(mx.all(original[1][2] == selected[1][2]).item())
+                support_set_equal = bool(
+                    mx.all(
+                        mx.sort(original[1][2], axis=-1)
+                        == mx.sort(selected[1][2], axis=-1)
+                    ).item()
+                )
+                original_error = float(mx.max(mx.abs(original[0] - selected[0])).item())
+                row["paired_reference_block_seconds"] = original_seconds
+                row["paired_reference_support_equal"] = support_equal
+                row["paired_reference_support_set_equal"] = support_set_equal
+                row["paired_reference_anchor_max_abs_error"] = original_error
+                optimized_logits, _ = timed(model._cross, hidden, cache, offset)
+                try:
+                    model_module.attention = reference_attention.attention
+                    original_logits, _ = timed(model._cross, hidden, cache, offset)
+                finally:
+                    model_module.attention = attention
+                logit_error = float(
+                    mx.max(mx.abs(original_logits - optimized_logits)).item()
+                )
+                row["paired_reference_full_logits_max_abs_error"] = logit_error
+                if not support_set_equal or original_error != 0 or logit_error != 0:
+                    report["failure"] = row
+                    args.output.write_text(json.dumps(report, indent=2) + "\n")
+                    print(json.dumps(row), flush=True)
+                    raise AssertionError("optimized support set or full logits differ")
             report["contexts"].append(row)
             args.output.parent.mkdir(parents=True, exist_ok=True)
             args.output.write_text(json.dumps(report, indent=2) + "\n")

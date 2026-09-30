@@ -39,6 +39,7 @@ def main():
                 Path("src/mlx2/experimental/hysparse2/model.py"),
                 Path("src/mlx2/experimental/hysparse2/config.py"),
                 Path("src/mlx2/experimental/hysparse2/train.py"),
+                Path("src/mlx2/experimental/hysparse2/attention.py"),
             ]
         },
         "checkpoint_sha256": file_hash(args.checkpoint / "model.safetensors"),

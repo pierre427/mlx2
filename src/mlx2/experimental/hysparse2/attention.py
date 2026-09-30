@@ -70,6 +70,26 @@ def _candidate_tiles(blocks, block_size):
         )
 
 
+def _candidate_groups(blocks, block_size, key_tile):
+    """Bounded batches of absolute blocks for one coarse scoring operation.
+
+    Partial blocks use causally invalid position padding, so their score is
+    still the sum over their real tokens. No full-context score matrix is kept.
+    """
+    group_count = max(1, key_tile // block_size)
+    keys, positions, ids = [], [], []
+    for k, _, kp, block_id in _candidate_tiles(blocks, block_size):
+        padding = block_size - k.shape[2]
+        keys.append(mx.pad(k, [(0, 0), (0, 0), (0, padding), (0, 0)]))
+        positions.append(mx.pad(kp, [(0, padding)], constant_values=2147483647))
+        ids.append(block_id)
+        if len(ids) == group_count:
+            yield mx.concatenate(keys, axis=2), mx.concatenate(positions), mx.array(ids)
+            keys, positions, ids = [], [], []
+    if ids:
+        yield mx.concatenate(keys, axis=2), mx.concatenate(positions), mx.array(ids)
+
+
 def attention(
     q,
     blocks,
@@ -118,7 +138,7 @@ def attention(
             block_size, candidate_count = block_select
             candidate_scores = mx.zeros((b, t, 0), dtype=mx.float32)
             candidate_ids = mx.zeros((b, t, 0), dtype=mx.int32)
-            for k, _, kp, block_id in _candidate_tiles(blocks, block_size):
+            for k, kp, block_ids in _candidate_groups(blocks, block_size, key_tile):
                 scores, valid = _logits(
                     mx.stop_gradient(query), mx.stop_gradient(k), qp, kp, None
                 )
@@ -126,16 +146,18 @@ def attention(
                     mx.stop_gradient(denom), 1e-30
                 )
                 token_scores = mx.mean(probabilities, axis=1)
+                valid_blocks = valid.reshape(t, -1, block_size)
                 score = mx.where(
-                    mx.any(valid, axis=-1, keepdims=True)[None],
+                    mx.any(valid_blocks, axis=-1)[None],
                     mx.sum(
-                        mx.where(valid[None], token_scores, 0.0),
+                        mx.where(valid[None], token_scores, 0.0).reshape(
+                            b, t, -1, block_size
+                        ),
                         axis=-1,
-                        keepdims=True,
                     ),
                     -1e30,
                 )
-                block_ids = mx.full((b, t, 1), block_id, dtype=mx.int32)
+                block_ids = mx.broadcast_to(block_ids, score.shape)
                 merged_scores = mx.concatenate((candidate_scores, score), axis=-1)
                 merged_ids = mx.concatenate((candidate_ids, block_ids), axis=-1)
                 take = min(candidate_count, merged_scores.shape[-1])
@@ -147,12 +169,9 @@ def attention(
         sk = mx.zeros((b, t, 0, d), dtype=q.dtype)
         sv = mx.zeros_like(sk)
         positions = mx.zeros((b, t, 0), dtype=mx.int32)
-        selection_tiles = (
-            ((k, v, kp) for k, v, kp, _ in _candidate_tiles(blocks, block_select[0]))
-            if block_select is not None
-            else _tiles(blocks, key_tile)
-        )
-        for k, v, kp in selection_tiles:
+        # Eligibility is per absolute token position. Fine ranking can use
+        # larger bounded tiles even when coarse candidates use small blocks.
+        for k, v, kp in _tiles(blocks, key_tile):
             scores, valid = _logits(
                 mx.stop_gradient(query), mx.stop_gradient(k), qp, kp, None
             )
@@ -165,8 +184,7 @@ def attention(
             if candidate_ids is not None:
                 block_ids = kp // block_select[0]
                 eligible = eligible & mx.any(
-                    block_ids[None, None, :, None]
-                    == candidate_ids[:, :, None, :],
+                    block_ids[None, None, :, None] == candidate_ids[:, :, None, :],
                     axis=-1,
                 )
             rank = mx.where(recent[None], 2.0, mx.where(eligible, rank, -1e30))

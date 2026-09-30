@@ -132,6 +132,48 @@ def test_block_selector_masks_unused_support_slots():
     close(got, mx.array([[[[22.0 / 5]]]]))
 
 
+@pytest.mark.parametrize("tied", [False, True])
+def test_block_selector_grouping_preserves_support_and_gradients(tied):
+    q = mx.zeros((2, 3, 13, 4)) if tied else mx.random.normal((2, 3, 13, 4))
+    k = mx.random.normal((2, 1, 13, 4))
+    v = mx.random.normal(k.shape)
+    blocks = [
+        (k[:, :, :3], v[:, :, :3], 0),
+        (k[:, :, 3:9], v[:, :, 3:9], 3),
+        (k[:, :, 9:], v[:, :, 9:], 9),
+    ]
+
+    def execute(q, v, tile):
+        split = [
+            (block[0], v[:, :, start : start + block[0].shape[2]], start)
+            for block, start in zip(blocks, (0, 3, 9))
+        ]
+        dense, selected = attention(
+            q,
+            split,
+            offset=0,
+            query_tile=4,
+            key_tile=tile,
+            select=(2, 4),
+            block_select=(2, 2),
+        )
+        sparse = sparse_attention(q, selected, offset=0, sinks=mx.zeros(3))
+        return dense, selected, sparse
+
+    reference = execute(q, v, 2)
+    grouped = execute(q, v, 8)
+    close(reference[0], grouped[0])
+    close(reference[1][2], grouped[1][2], 0)
+    close(reference[2], grouped[2])
+    for tile in (2, 8):
+        gradient = mx.grad(lambda v, tile=tile: mx.sum(execute(q, v, tile)[2]))(v)
+        assert bool(mx.all(mx.isfinite(gradient)).item())
+        if tile == 2:
+            expected_gradient = gradient
+        else:
+            close(expected_gradient, gradient)
+
+
 @pytest.mark.parametrize("chunk", [1, 4, 16])
 def test_prefill_decode_and_cache_bytes(chunk):
     c = replace(Config.smoke(), prefill_chunk=chunk)
