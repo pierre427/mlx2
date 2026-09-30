@@ -99,3 +99,25 @@ def test_granite_layer_order_rejected(tmp_path):
     (tmp_path / "model.safetensors").write_bytes(b"metadata only")
     with pytest.raises(ValueError, match="layer order"):
         inspect_granite(tmp_path)
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("layer_rope_theta", [10000.0] * 28, "layer_rope_theta"),
+        ("head_dim", 128, "head_dim"),
+    ],
+)
+def test_granite_unimplemented_config_fails_closed(tmp_path, field, value, message):
+    """Per-layer rope and an explicit head_dim were ignored: a same-shaped
+    checkpoint carrying them loaded and served wrong logits."""
+    source = GRANITE_ROOT / "granite-swash-3b-a600m-mlx-4bit/config.json"
+    if not source.is_file():
+        pytest.skip("optional local Granite fixture is absent")
+    config = json.loads(open(source).read())
+    config[field] = value
+    (tmp_path / "config.json").write_text(json.dumps(config))
+    (tmp_path / "model.safetensors.index.json").write_text(json.dumps({"weight_map": {"x": "model.safetensors"}}))
+    (tmp_path / "model.safetensors").write_bytes(b"metadata only")
+    with pytest.raises(ValueError, match=message):
+        inspect_granite(tmp_path)

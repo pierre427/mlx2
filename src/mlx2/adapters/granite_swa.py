@@ -92,6 +92,14 @@ def inspect_artifact(model_path: str | Path) -> dict:
     }
     if any(config.get(key) != value for key, value in expected.items()):
         raise ValueError("Granite SWA artifact topology does not match local 3B target")
+    # The port gives every layer the global rope and derives head_dim from
+    # hidden_size / heads.  A same-shaped checkpoint carrying per-layer rope
+    # (layer_rope_theta, 0 = no rope) or its own head_dim would load and serve
+    # silently wrong logits, so both fail closed.
+    if config.get("layer_rope_theta") is not None:
+        raise ValueError("Granite SWA per-layer rope (layer_rope_theta) is not implemented")
+    if config.get("head_dim") not in (None, expected["hidden_size"] // expected["num_attention_heads"]):
+        raise ValueError("Granite SWA head_dim differs from hidden_size / num_attention_heads")
     layers = config.get("layer_types")
     if layers != ["full_attention" if i in (0, 3, 7, 11, 15, 19, 23, 27)
                   else "sliding_attention" for i in range(28)]:
