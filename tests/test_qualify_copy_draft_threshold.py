@@ -98,10 +98,12 @@ def test_engagement_invariants_catch_an_unbound_threshold():
 
 def _run(arm, *, differential=0, band=None, copy_rounds=3):
     band = differential if band is None else band
-    run = {"arm": arm, "tokens": [1, 2, 3], "logprob_rows": ["a", "b"], "finish_reason": "length",
+    run = {"arm": arm, "tokens": [1, 2, 3], "logprob_rows": ["a", "b", "c"], "finish_reason": "length",
            "failures": [], "verify_cap": 17, "decode_s": 1.0,
+           "memory": {"active_bytes": 1, "cache_bytes": 0, "peak_bytes": 2},
            "target_state": {"status": "complete", "sha256": "t"}, "draft_state": {"status": "complete", "sha256": "d"},
-           "continuation": {"status": "complete", "tokens": [4], "final_state": {"sha256": "c"}}}
+           "continuation": {"status": "complete", "tokens": [4, 5],
+                            "final_state": {"status": "complete", "sha256": "c"}}}
     if arm == "ordinary":
         return run
     run.update(held_copy_policy=dict(Q.ARMS[arm]), route="segmented_self_mtp",
@@ -123,7 +125,7 @@ def _cells(pairs=2):
     return {"copy": [cell("copy")], "control": [cell("control")]}
 
 
-EVAL_ARGS = types.SimpleNamespace(gen=3, logprob_rows=2)
+EVAL_ARGS = types.SimpleNamespace(gen=3, logprob_rows=3, continuation_tokens=2)
 
 
 def _evaluate(edit=None):
@@ -177,13 +179,15 @@ def test_missing_or_unbound_evidence_is_refused(edit, reason):
 
 @pytest.mark.parametrize("edit,difference", [
     (lambda c: c["copy"][0]["pairs"][0]["s16"].update(tokens=[1, 2, 4]), "copy0 pair 0 s32 vs s16: tokens differ"),
-    (lambda c: c["copy"][0]["pairs"][0]["s16"].update(logprob_rows=["a", "x"]),
+    (lambda c: c["copy"][0]["pairs"][0]["s16"].update(logprob_rows=["a", "x", "c"]),
+     "copy0 pair 0 s32 vs s16: logprob row bits differ"),
+    (lambda c: c["copy"][0]["pairs"][0]["s16"].update(logprob_rows=["a", "b", "late"]),   # late drift
      "copy0 pair 0 s32 vs s16: logprob row bits differ"),
     (lambda c: c["copy"][0]["pairs"][0]["s16"]["draft_state"].update(sha256="x"),
      "copy0 pair 0 s32 vs s16: draft_state digest differs"),
     (lambda c: c["control"][0]["pairs"][1]["s16"]["target_state"].update(sha256="x"),
      "control0 pair 1 s32 vs s16: target_state digest differs"),
-    (lambda c: c["copy"][0]["pairs"][0]["s16"]["continuation"].update(tokens=[5]),
+    (lambda c: c["copy"][0]["pairs"][0]["s16"]["continuation"].update(tokens=[4, 6]),
      "copy0 pair 0 s32 vs s16: continuation differs"),
     (lambda c: [p["s32"].update(tokens=[1, 2, 9]) for p in c["copy"][0]["pairs"][1:]],
      "copy0 s32 pair 0 vs 1: tokens differ"),
@@ -201,11 +205,56 @@ def test_bit_differences_are_counterexamples(edit, difference):
      "copy0 pair 0 s32 vs s16: target_state complete/unavailable"),
     (lambda c: c["copy"][0]["pairs"][0]["s32"].update(continuation={"status": "unavailable"}),
      "copy0 pair 0 s32 vs s16: continuation unavailable"),
+    # complete status wrapping an unavailable nested digest
+    (lambda c: [p["s16"]["continuation"].update(final_state={"status": "unavailable", "sha256": None})
+                for p in c["copy"][0]["pairs"]],
+     "copy0 pair 0 s32 vs s16: continuation final state digest is not complete"),
+    (lambda c: [p[a]["continuation"].update(final_state={"status": "complete", "sha256": None})
+                for p in c["copy"][0]["pairs"] for a in p],
+     "copy0 pair 0 s32 vs s16: continuation final state digest is not complete"),
+    (lambda c: [p[a]["continuation"].update(tokens=[4]) for p in c["copy"][0]["pairs"] for a in p],
+     "copy0 pair 0 s32 vs s16: continuation has 1 of 2 tokens"),
+    # truncated logprob coverage in both runs, identical where sampled
+    (lambda c: [p[a].update(logprob_rows=["a", "b"]) for p in c["copy"][0]["pairs"] for a in p],
+     "copy0 pair 0 s32 vs s16: logprob rows cover 2 of 3 emitted tokens"),
+    (lambda c: c["copy"][0]["pairs"][0]["s16"].pop("memory"), "copy0 pair 0 s32 vs s16: memory not captured (b)"),
+    (lambda c: c["copy"][0]["pairs"][0]["s32"]["memory"].update(peak_bytes=None),
+     "copy0 pair 0 s32 vs s16: memory not captured (a)"),
 ])
 def test_missing_bits_are_never_equal(edit, item):
     result = _evaluate(edit)
     assert result["verdict"] == "exact_with_unavailable_parts"
     assert item in result["incomparable"]
+
+
+def test_a_sampled_prefix_never_hides_late_drift():
+    """16 sampled rows of a longer run: equal prefix, drift only beyond the
+    sample. The pre-repair gate passed this; it must not pass now."""
+    cells = _cells()
+    for cls in cells.values():
+        cls[0]["reference"]["tokens"] = list(range(32))
+        for pair in cls[0]["pairs"]:
+            for run in pair.values():
+                run["tokens"] = list(range(32))
+                run["logprob_rows"] = [f"r{i}" for i in range(16)]
+    args = types.SimpleNamespace(gen=32, logprob_rows=16, continuation_tokens=2)
+    result = Q.evaluate(cells, args)
+    assert result["verdict"] == "exact_with_unavailable_parts"
+    assert "copy0 pair 0 s32 vs s16: logprob rows cover 16 of 32 emitted tokens" in result["incomparable"]
+
+
+def test_logprob_rows_default_to_every_emitted_token():
+    assert _args().logprob_rows == _args().gen == 24
+    assert _args("--gen", "40").logprob_rows == 40 and _args("--logprob-rows", "5").logprob_rows == 5
+
+
+def test_continuation_problem_requires_count_and_complete_digest():
+    good = {"status": "complete", "tokens": [1, 2], "final_state": {"status": "complete", "sha256": "x"}}
+    assert Q.continuation_problem(good, 2) is None
+    assert Q.continuation_problem(good, 3) == "continuation has 2 of 3 tokens"
+    assert Q.continuation_problem({**good, "final_state": {"status": "metadata_unavailable", "sha256": None}}, 2)
+    assert Q.continuation_problem({**good, "tokens": None}, 2) == "continuation has no of 2 tokens"
+    assert Q.continuation_problem(None, 2) == "continuation unavailable"
 
 
 def test_disabled_logprob_rows_are_labelled_unavailable():
@@ -214,7 +263,7 @@ def test_disabled_logprob_rows_are_labelled_unavailable():
         for pair in cls[0]["pairs"]:
             for run in pair.values():
                 run["logprob_rows"] = []
-    result = Q.evaluate(cells, types.SimpleNamespace(gen=3, logprob_rows=0))
+    result = Q.evaluate(cells, types.SimpleNamespace(gen=3, logprob_rows=0, continuation_tokens=2))
     assert result["verdict"] == "exact_with_unavailable_parts"
     assert any("(disabled (--logprob-rows 0))" in i for i in result["incomparable"])
 
@@ -266,8 +315,9 @@ def test_tiny_smoke_captures_full_evidence_and_refuses_without_engagement(tiny):
                 assert run["held_copy_policy"]["strong_match"] == Q.ARMS[arm]["strong_match"]
                 assert run["verify_cap"] == 17 and run["plans"]["plans"] > 0
                 assert run["target_state"]["status"] == run["draft_state"]["status"] == "complete"
-                assert run["continuation"]["status"] == "complete"
-                assert len(run["logprob_rows"]) == 16 and None not in run["logprob_rows"]
+                assert run["continuation"]["status"] == "complete" and len(run["continuation"]["tokens"]) == 4
+                assert run["continuation"]["final_state"]["status"] == "complete"
+                assert len(run["logprob_rows"]) == len(run["tokens"]) and None not in run["logprob_rows"]
                 assert set(run["memory"]) >= {"active_bytes", "peak_bytes", "cache_bytes"}
 
 

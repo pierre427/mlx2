@@ -35,7 +35,11 @@ target and draft cache ``state_digest`` (state + meta_state), an ordinary
 B1 continuation from the final cache, the self-MTP and copy-draft receipts,
 memory sampled while the generator is alive, and decode seconds. Every run
 of an arm must equal every other run of that arm, and each pair's s16 run
-must equal its s32 run, bit for bit. Missing evidence is never equal.
+must equal its s32 run, bit for bit. Missing evidence is never equal:
+logprob rows must cover every emitted token (``--logprob-rows`` below
+``--gen`` is a partial sample and makes the cell incomparable), a
+continuation must carry its full requested token count and a complete
+nested cache digest, and a run without a memory sample is incomplete.
 Verdict: refused > counterexample > exact_with_unavailable_parts > pass.
 Latencies are paired diagnostics, not a controlled performance run.
 
@@ -354,7 +358,11 @@ def continuation(ctx, prompt, record, final, tokens):
                 break
         if last is None:
             return {"status": "unavailable", "reason": "continuation did not finish"}
-        return {"status": "complete", "tokens": out, "final_state": state_digest(last.prompt_cache)}
+        digest = state_digest(last.prompt_cache)
+        result = {"status": "complete", "tokens": out, "final_state": digest}
+        problem = continuation_problem(result, tokens)
+        return result if problem is None else {"status": "unavailable", "reason": problem,
+                                               "tokens": out, "final_state": digest}
     except Exception as error:  # noqa: BLE001 - unavailable, never exact
         return {"status": "unavailable", "reason": f"{type(error).__name__}: {error}"[:200]}
     finally:
@@ -363,20 +371,43 @@ def continuation(ctx, prompt, record, final, tokens):
 
 # ================================================================ gates
 
-EXACT_KEYS = ("tokens", "logprob_rows", "target_state", "draft_state", "continuation")
+def continuation_problem(continuation, requested):
+    """Why a continuation is not complete evidence (None when it is)."""
+    if not isinstance(continuation, dict) or continuation.get("status") != "complete":
+        return "continuation unavailable"
+    tokens = continuation.get("tokens")
+    if not isinstance(tokens, list) or len(tokens) != requested:
+        return f"continuation has {len(tokens) if isinstance(tokens, list) else 'no'} of {requested} tokens"
+    digest = continuation.get("final_state")
+    if not isinstance(digest, dict) or digest.get("status") != "complete" or not digest.get("sha256"):
+        return "continuation final state digest is not complete"
+    return None
 
 
-def compare(a, b, label, rows):
-    """``(differences, incomparable)`` between two self-MTP runs."""
+def memory_complete(run):
+    memory = run.get("memory")
+    return isinstance(memory, dict) and all(
+        type(memory.get(k)) is int and memory[k] >= 0 for k in ("active_bytes", "cache_bytes", "peak_bytes"))
+
+
+def compare(a, b, label, rows, continuation_tokens):
+    """``(differences, incomparable)`` between two self-MTP runs.
+
+    Logprob rows count only when they cover every emitted token of both runs:
+    a partial sample cannot show that later rows agree.
+    """
     differences, incomparable = [], []
     if a["tokens"] != b["tokens"]:
         return [f"{label}: tokens differ"], []
     lp = a["logprob_rows"] + b["logprob_rows"]
+    covered = min(len(a["logprob_rows"]), len(b["logprob_rows"]))
     if not lp or None in lp:
         incomparable.append(f"{label}: logprob rows unavailable"
                             + (" (disabled (--logprob-rows 0))" if not rows else ""))
-    elif a["logprob_rows"] != b["logprob_rows"]:
+    elif a["logprob_rows"][:covered] != b["logprob_rows"][:covered]:
         differences.append(f"{label}: logprob row bits differ")
+    elif len(a["logprob_rows"]) != len(a["tokens"]) or len(b["logprob_rows"]) != len(b["tokens"]):
+        incomparable.append(f"{label}: logprob rows cover {covered} of {len(a['tokens'])} emitted tokens")
     for key in ("target_state", "draft_state"):
         sa, sb = a[key]["status"], b[key]["status"]
         if sa != "complete" or sb != "complete":
@@ -384,10 +415,15 @@ def compare(a, b, label, rows):
         elif a[key] != b[key]:
             differences.append(f"{label}: {key} digest differs")
     ca, cb = a["continuation"], b["continuation"]
-    if ca.get("status") != "complete" or cb.get("status") != "complete":
-        incomparable.append(f"{label}: continuation unavailable")
+    problems = [p for p in (continuation_problem(ca, continuation_tokens),
+                            continuation_problem(cb, continuation_tokens)) if p]
+    if problems:
+        incomparable.append(f"{label}: " + "; ".join(sorted(set(problems))))
     elif ca != cb:
         differences.append(f"{label}: continuation differs")
+    for side, run in (("a", a), ("b", b)):
+        if not memory_complete(run):
+            incomparable.append(f"{label}: memory not captured ({side})")
     return differences, incomparable
 
 
@@ -438,7 +474,8 @@ def evaluate(cells, args):
                         refusals.append(f"{name} pair {k} {arm}: negative control reached agreement "
                                         f"{BAND[0]}..{BAND[1]} ({run['plans']['band_rounds']} rounds)")
                 for k, run in enumerate(arm_runs[1:], 1):  # repeatability within the arm
-                    d, i = compare(arm_runs[0], run, f"{name} {arm} pair 0 vs {k}", args.logprob_rows)
+                    d, i = compare(arm_runs[0], run, f"{name} {arm} pair 0 vs {k}", args.logprob_rows,
+                                   args.continuation_tokens)
                     differences += d
                     incomparable += i
             if cls == "copy":
@@ -446,7 +483,7 @@ def evaluate(cells, args):
             ratios = []
             for k, pair in enumerate(runs):
                 d, i = compare(pair[BASE_ARM], pair[CANDIDATE_ARM], f"{name} pair {k} s32 vs s16",
-                               args.logprob_rows)
+                               args.logprob_rows, args.continuation_tokens)
                 differences += d
                 incomparable += i
                 a, b = pair[BASE_ARM]["decode_s"], pair[CANDIDATE_ARM]["decode_s"]
@@ -528,7 +565,8 @@ def build_parser():
     ap.add_argument("--pairs", type=int, default=3)
     ap.add_argument("--gen", type=int, default=None, help="generated tokens per run (<= 512)")
     ap.add_argument("--warmup-gen", type=int, default=32)
-    ap.add_argument("--logprob-rows", type=int, default=16)
+    ap.add_argument("--logprob-rows", type=int, default=None,
+                    help="rows digested per run (default: every emitted token; fewer is a partial sample)")
     ap.add_argument("--continuation-tokens", type=int, default=4)
     ap.add_argument("--seed", type=int, default=1)
     ap.add_argument("--time-limit-s", type=float, default=1800.0)
@@ -549,6 +587,7 @@ def resolve_args(ap, argv=None):
         if not a.model:
             ap.error("--model is required for a real run")
         a.gen = 256 if a.gen is None else a.gen
+    a.logprob_rows = a.gen if a.logprob_rows is None else a.logprob_rows
     if not 1 <= a.pairs <= MAX_PAIRS:
         ap.error(f"--pairs 1..{MAX_PAIRS}")
     if not 1 <= a.gen <= MAX_GEN or not 1 <= a.warmup_gen <= MAX_GEN:
