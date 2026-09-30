@@ -57,6 +57,33 @@ def test_diffusion_fused_bidirectional_attention_matches_dense_reference():
     close(fused, dense, 1e-4)
 
 
+def test_diffusion_feedback_connects_trunk_and_ple_without_changing_forward():
+    config = Config.smoke()
+    detached = Model(config)
+    coupled = Model(replace(config, diffusion_trunk_gradient_scale=1.0))
+    coupled.load_weights(tree_flatten(detached.parameters()), strict=True)
+    tokens = mx.array([[1, 2, 3, 4, 5, 6, 7, 8]])
+    a, ga = nn.value_and_grad(detached, loss)(detached, tokens)
+    b, gb = nn.value_and_grad(coupled, loss)(coupled, tokens)
+    close(a, b, 0)
+    da, db = dict(tree_flatten(ga)), dict(tree_flatten(gb))
+    for name in (
+        "self_decoder.0.attention.q.weight",
+        "cross_decoder.0.attention.q.weight",
+        "semantic_ple.embedding.weight",
+    ):
+        assert float(mx.max(mx.abs(da[name] - db[name])).item()) > 1e-7, name
+    detached.eval()
+    coupled.eval()
+    close(detached(tokens)[0], coupled(tokens)[0], 0)
+
+
+@pytest.mark.parametrize("scale", [-1, 1.01, float("nan"), float("inf")])
+def test_diffusion_feedback_rejects_invalid_scale(scale):
+    with pytest.raises(ValueError, match="gradient scale"):
+        replace(Config.smoke(), diffusion_trunk_gradient_scale=scale)
+
+
 @pytest.mark.parametrize("window", [None, 3])
 @pytest.mark.parametrize("sink", [False, True])
 def test_tiled_attention_dense_reference(window, sink):

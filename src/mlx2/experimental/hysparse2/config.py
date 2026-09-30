@@ -37,6 +37,7 @@ class Config:
     semantic_ngram: int = 4
     diffusion_layers: int = 0
     diffusion_width_multiplier: int = 8
+    diffusion_trunk_gradient_scale: float = 0.0
     norm_eps: float = 1e-6
     mtp: bool = True
 
@@ -93,6 +94,13 @@ class Config:
             or type(self.mtp) is not bool
         ):
             raise ValueError("invalid normalization, RoPE or MTP setting")
+        if (
+            not math.isfinite(self.diffusion_trunk_gradient_scale)
+            or not 0 <= self.diffusion_trunk_gradient_scale <= 1
+        ):
+            raise ValueError(
+                "diffusion trunk gradient scale must be between zero and one"
+            )
 
     @property
     def layers(self):

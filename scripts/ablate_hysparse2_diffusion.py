@@ -15,6 +15,7 @@ def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--checkpoint", type=Path, required=True)
     p.add_argument("--output", type=Path, required=True)
+    p.add_argument("--trunk-gradient-scale", type=float)
     args = p.parse_args()
     if args.output.exists():
         p.error("use a fresh receipt")
@@ -32,6 +33,11 @@ def main():
         mx.set_cache_limit(256 << 20)
         model = Model(c)
         _load_model_state(args.checkpoint, model)
+        if args.trunk_gradient_scale is not None:
+            c = replace(c, diffusion_trunk_gradient_scale=args.trunk_gradient_scale)
+            coupled = Model(c)
+            coupled.load_weights(tree_flatten(model.parameters()), strict=True)
+            model = coupled
         removed = Model(replace(c, diffusion_layers=0))
         removed.load_weights(
             [
@@ -85,6 +91,7 @@ def main():
             "schema": "mlx2.hysparse2-diffusion-ablation.v1",
             "checkpoint_sha256": file_hash(args.checkpoint / "model.safetensors"),
             "model_parameters": c.capacity()["parameters"],
+            "diffusion_trunk_gradient_scale": c.diffusion_trunk_gradient_scale,
             "diffusion_parameters": c.capacity()["parameters"]
             - removed.config.capacity()["parameters"],
             "batch": 2,
@@ -100,6 +107,9 @@ def main():
             "without_diffusion_forward_backward_seconds": without_seconds,
             "shared_embedding_gradient_max_abs_delta": deltas["embedding.weight"],
             "teacher_trunk_gradient_max_abs_delta": max(trunk.values()),
+            "semantic_ple_gradient_max_abs_delta": deltas[
+                "semantic_ple.embedding.weight"
+            ],
             "diffusion_gradient_absolute_sum": sum(
                 float(mx.sum(mx.abs(value)).item())
                 for name, value in a.items()

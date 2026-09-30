@@ -201,6 +201,8 @@ class DiffusionStudent(nn.Module):
         self.condition = nn.Linear(c.hidden_size, c.hidden_size, bias=False)
         self.norm = nn.RMSNorm(c.hidden_size, eps=c.norm_eps)
 
+        self.trunk_gradient_scale = c.diffusion_trunk_gradient_scale
+
     def __call__(self, tokens, embedding, teacher):
         positions = mx.arange(tokens.shape[1], dtype=mx.int32)[None]
         seed = tokens[:, :1].astype(mx.int32) % 16
@@ -209,7 +211,14 @@ class DiffusionStudent(nn.Module):
         score = (positions * 13 + seed * 7) % 16
         mask = (score < threshold) | (positions == 0)
         masked = mx.where(mask, mx.ones_like(tokens), tokens)
-        x = embedding(masked) + self.condition(mx.stop_gradient(teacher))
+        # Preserve the same conditioning values while controlling how much of
+        # the denoising gradient trains the causal teacher. Zero preserves
+        # historical detached checkpoints; one couples the full objective.
+        scale = self.trunk_gradient_scale
+        conditioned = teacher if scale == 1 else mx.stop_gradient(teacher)
+        if 0 < scale < 1:
+            conditioned = conditioned + scale * (teacher - mx.stop_gradient(teacher))
+        x = embedding(masked) + self.condition(conditioned)
         noise_level = (threshold.astype(x.dtype) / 16)[..., None]
         for layer in self.layers:
             x = layer(x, noise_level)
