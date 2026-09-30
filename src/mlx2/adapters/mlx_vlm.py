@@ -140,6 +140,44 @@ def _ids_and_kwargs(processed):
     return [int(token) for token in ids], data
 
 
+_AUDIO_FRONTEND_FIELDS = (
+    "sampling_rate", "feature_size", "hop_length", "n_fft", "fft_length",
+    "frame_length", "chunk_length", "n_samples", "nb_max_frames", "dither",
+    "padding_value", "padding_side", "preemphasis", "mel_floor",
+)
+
+
+def audio_frontend_identity(processor) -> dict | None:
+    """The audio feature extractor a processor encodes audio with, or None.
+
+    Audio features come from transformers, not mlx-vlm: Gemma 3n loads
+    ``Gemma3nAudioFeatureExtractor`` through ``AutoFeatureExtractor`` and
+    MiniCPM-o builds ``WhisperFeatureExtractor``.  transformers #48114 moves
+    every audio front end to new ``AudioProcessor`` classes, so an upgrade
+    within ``transformers<6`` may change the features for identical bytes.
+    The class, its parameters and the transformers version join the media
+    fingerprint, so a prefix cached under one front end is never reused
+    under another.
+    """
+    extractor = getattr(processor, "feature_extractor", None) or getattr(
+        processor, "audio_processor", None
+    )
+    if extractor is None:
+        return None
+    import transformers
+
+    kind = type(extractor)
+    return {
+        "class": f"{kind.__module__}.{kind.__qualname__}",
+        "transformers": transformers.__version__,
+        **{
+            name: getattr(extractor, name)
+            for name in _AUDIO_FRONTEND_FIELDS
+            if isinstance(getattr(extractor, name, None), (bool, int, float, str))
+        },
+    }
+
+
 def _media_token_end(processed) -> int:
     """One-past-last media placeholder required before encoder-free resume."""
     import numpy as np
@@ -412,6 +450,7 @@ class _MLXVLMAdapter:
             "multimodal": True,
             "mlx_vlm": self.mlx_vlm_runtime,
             "media_feature_cache": self.media_feature_cache.snapshot(),
+            "audio_frontend": audio_frontend_identity(self.processor),
         }
 
     def invalidate_feature_cache(self):
@@ -513,7 +552,7 @@ class Gemma3nAdapter(_MLXVLMAdapter):
         ids, kwargs = _ids_and_kwargs(processed)
         if images:
             kwargs["_mlx2_vision_cache_key"] = f"{self.identity['fingerprint']}:{media_fingerprint([value for value in media if value.kind in {'image', 'video'}], policy=asdict(self.video_policy))}"
-        return {**request, "messages": messages, "_mlx2_prompt_tokens": ids, "_mlx2_prefill_inputs": kwargs, "_mlx2_media_token_end": media_token_end, "_mlx2_media_fingerprint": media_fingerprint(media, policy={"family": "gemma3n", "video": asdict(self.video_policy)}), "_mlx2_multimodal_stats": {"gemma3n_video_requests": video_requests, "gemma3n_video_frames": video_frames, "gemma3n_video_frame_batches": video_frame_batches}}
+        return {**request, "messages": messages, "_mlx2_prompt_tokens": ids, "_mlx2_prefill_inputs": kwargs, "_mlx2_media_token_end": media_token_end, "_mlx2_media_fingerprint": media_fingerprint(media, policy={"family": "gemma3n", "video": asdict(self.video_policy), **({"audio_frontend": audio_frontend_identity(self.processor)} if audios else {})}), "_mlx2_multimodal_stats": {"gemma3n_video_requests": video_requests, "gemma3n_video_frames": video_frames, "gemma3n_video_frame_batches": video_frame_batches}}
 
 
 MINICPMO = ModelDescriptor(
@@ -586,7 +625,7 @@ class MiniCPMOAdapter(_MLXVLMAdapter):
         if images:
             kwargs["_mlx2_vision_cache_key"] = f"{self.identity['fingerprint']}:{media_fingerprint([value for value in media if value.kind == 'image'], policy=self.media_policy.receipt())}"
         vision_batches = math.ceil(vision_slices / self.media_policy.vision_batch_size) if self.media_policy.batch_vision_input else vision_slices
-        return {**request, "messages": messages, "_mlx2_prompt_tokens": ids, "_mlx2_prefill_inputs": kwargs, "_mlx2_media_token_end": media_token_end, "_mlx2_media_fingerprint": media_fingerprint(media, policy={"family": "minicpmo", **self.media_policy.receipt()}), "_mlx2_multimodal_stats": {"minicpmo_vision_batches": vision_batches, "minicpmo_vision_slices": vision_slices, "minicpmo_audio_chunks": audio_chunks}}
+        return {**request, "messages": messages, "_mlx2_prompt_tokens": ids, "_mlx2_prefill_inputs": kwargs, "_mlx2_media_token_end": media_token_end, "_mlx2_media_fingerprint": media_fingerprint(media, policy={"family": "minicpmo", **self.media_policy.receipt(), **({"audio_frontend": audio_frontend_identity(self.processor)} if audios else {})}), "_mlx2_multimodal_stats": {"minicpmo_vision_batches": vision_batches, "minicpmo_vision_slices": vision_slices, "minicpmo_audio_chunks": audio_chunks}}
 
     def diagnostics(self):
         return {**super().diagnostics(), "media_policy": self.media_policy.receipt(), "output_audio": "unqualified_fail_closed"}
