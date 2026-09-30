@@ -106,6 +106,31 @@ def main():
             mx.synchronize()
             decode = time.perf_counter() - start
             finite = finite and bool(mx.all(mx.isfinite(logits)).item())
+            expected_length = n + args.decode_tokens
+            expected_kv_bytes = (
+                (
+                    (1 + c.cross_blocks) * expected_length
+                    + (c.self_layers - 1) * min(expected_length, c.local_window)
+                )
+                * 2
+                * c.head_dim
+                * 2
+            )  # K/V, MQA head width, BF16 bytes.
+            expected_self_calls = c.self_layers * (
+                (n + c.prefill_chunk - 1) // c.prefill_chunk + args.decode_tokens
+            )
+            expected_cross_calls = (
+                c.cross_blocks * (1 + c.sparse_per_block) * (1 + args.decode_tokens)
+            )
+            if (
+                cache.length != expected_length
+                or cache.resident_bytes() != expected_kv_bytes
+                or cache.self_layer_calls != expected_self_calls
+                or cache.cross_layer_calls != expected_cross_calls
+            ):
+                raise AssertionError(
+                    "cache length, KV bytes or layer-call accounting differs"
+                )
             row = {
                 "context": n,
                 "prefill_seconds": prefill,
@@ -118,6 +143,10 @@ def main():
                 "finite_logits": finite,
                 "self_layer_calls": cache.self_layer_calls,
                 "cross_layer_calls": cache.cross_layer_calls,
+                "final_cache_length": cache.length,
+                "expected_kv_bytes": expected_kv_bytes,
+                "expected_self_layer_calls": expected_self_calls,
+                "expected_cross_layer_calls": expected_cross_calls,
             }
             receipt["contexts"].append(row)
             save()
