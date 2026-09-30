@@ -51,7 +51,8 @@ def main():
     full = head(hidden)
     proposed, compact = request.propose(hidden, greedy=True)
     selected = mx.take(full, request.head.token_ids, axis=-1)
-    mx.eval(full, proposed, compact, selected)
+    full_after = head(hidden)
+    mx.eval(full, proposed, compact, selected, full_after)
     error = float(mx.max(mx.abs(compact.astype(mx.float32) -
                                 selected.astype(mx.float32))).item())
     print(json.dumps({
@@ -65,7 +66,7 @@ def main():
         "selected_row_max_abs_logit_difference": error,
         "compact_token": int(proposed[0, 0].item()),
         "full_target_token": int(mx.argmax(full[0, 0]).item()),
-        "target_head_unchanged": True,
+        "target_head_unchanged": bool(mx.array_equal(full, full_after).item()),
     }, indent=2))
 
 
