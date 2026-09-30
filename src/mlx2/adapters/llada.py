@@ -159,6 +159,10 @@ class LLaDADenoisingAdapter:
         weights.clear()
         mx.clear_cache()
         self.tokenizer = AutoTokenizer.from_pretrained(path, local_files_only=True, trust_remote_code=False)
+        # Some tokenizer classes rebuild the pre-tokenizer instead of reading tokenizer.json.
+        from ..runtime.tokenizer_integrity import repair_loaded_tokenizer
+
+        self.pretokenizer_receipt = repair_loaded_tokenizer(self.tokenizer, path)
 
     def generate(self, *, prompt: str | None = None, messages: list[dict] | None = None,
                  gen_length: int = 128, block_length: int = 128,

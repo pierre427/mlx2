@@ -125,6 +125,10 @@ class HYV3Adapter(OrdinaryTextAdapter):
         mx.clear_cache()
         tokenizer = AutoTokenizer.from_pretrained(path, local_files_only=True,
                                                   trust_remote_code=False)
+        # Some tokenizer classes rebuild the pre-tokenizer instead of reading tokenizer.json.
+        from ..runtime.tokenizer_integrity import repair_loaded_tokenizer
+
+        self.pretokenizer_receipt = repair_loaded_tokenizer(tokenizer, path)
         self.tokenizer = TokenizerWrapper(tokenizer,
                                           detokenizer_class=BPEStreamingDetokenizer,
                                           eos_token_ids=[int(config["eos_token_id"])])

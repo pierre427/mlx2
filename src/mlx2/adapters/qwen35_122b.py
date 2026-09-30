@@ -209,6 +209,10 @@ class Qwen35122BA10BAdapter(Qwen3635BA3BAdapter):
         mx.clear_cache()
         self._record_load_dtype()
         tokenizer = AutoTokenizer.from_pretrained(path, local_files_only=True, trust_remote_code=False)
+        # Some tokenizer classes rebuild the pre-tokenizer instead of reading tokenizer.json.
+        from ..runtime.tokenizer_integrity import repair_loaded_tokenizer
+
+        self.pretokenizer_receipt = repair_loaded_tokenizer(tokenizer, path)
         eos = resolve_eos_token_ids(config, tokenizer)
         self.tokenizer = TokenizerWrapper(
             tokenizer, detokenizer_class=BPEStreamingDetokenizer, eos_token_ids=eos

@@ -206,6 +206,10 @@ class _GptOssOrdinaryAdapter:
         weights.clear()
         mx.clear_cache()
         tokenizer = AutoTokenizer.from_pretrained(path, local_files_only=True, trust_remote_code=False)
+        # Some tokenizer classes rebuild the pre-tokenizer instead of reading tokenizer.json.
+        from ..runtime.tokenizer_integrity import repair_loaded_tokenizer
+
+        self.pretokenizer_receipt = repair_loaded_tokenizer(tokenizer, path)
         generation = _json(path / "generation_config.json")
         configured_eos = generation.get("eos_token_id", config["eos_token_id"])
         eos_ids = configured_eos if isinstance(configured_eos, list) else [configured_eos]
