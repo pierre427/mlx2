@@ -36,10 +36,33 @@ model mode (``--tiny`` or ``--model``)
     polls and time. Refused on zero proposals, zero rejections, no batched
     width, no retirement on ``retire`` or retirement on ``control``.
 
+    Route policy is source-bound, never inherited silently.
+    ``segment_aware_cohort_size`` is bound to ``--batch`` (as every adapter's
+    ``execution_config`` binds it to ``max_lanes``); without it the runtime
+    floor of 2 caps a segmented B4 cohort at width 2. ``--mtp-layout
+    physical|segmented`` passes ``segment_aware_live_tip`` False/True and
+    ``segment_aware_async_qsa_promotion`` explicitly (``--async-promotion``,
+    segmented only, default off), and the run is refused when any lane's
+    receipt route does not match. Physical is the existing batched
+    reference path, not a new serving route. Without ``--mtp-layout`` the
+    layout is whatever the process environment resolves (adapters export
+    ``MLX_LM_SEGMENTED_SELF_MTP``) and is labelled environment-resolved.
+    The config actually held by each generator and the runtime's own
+    resolution of it are recorded per arm.
+
+    ``--prompt-layout ragged`` (constructor default) keeps disjoint unequal
+    slices (lane i: context - 16 i); ``aligned`` takes disjoint equal
+    slices, which is what physical/async-promotion retirement cells need
+    (ragged starting QSA offsets decline async physical promotion). An
+    aligned cell is not ragged qualification. ``--prompt-ids`` is labelled
+    by its observed lengths and refused if it contradicts an explicit
+    ``--prompt-layout``.
+
   PYTHONPATH=src .venv/bin/python scripts/qualify_gdn_retirement.py --synthetic-oracle --out /tmp/o.json
   PYTHONPATH=src .venv/bin/python scripts/qualify_gdn_retirement.py --tiny --out /tmp/r.json
   PYTHONPATH=src .venv/bin/python scripts/qualify_gdn_retirement.py --i-own-the-gpu \\
-      --model ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP --batch 4 --context 1024 --gen 64 --out r.json
+      --model ~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP --batch 4 --context 1024 --gen 64 \\
+      --mtp-layout physical --prompt-layout aligned --out r.json
 """
 
 from __future__ import annotations
@@ -61,6 +84,13 @@ sys.path.insert(0, str(ROOT))
 
 SCHEMA = "mlx2.direct-model.gdn-retirement.v1"
 SELF_MTP_POLICY = {"num_draft": 2, "persistent": True, "rate_gate": False, "prefill_step_size": 2048}
+# Receipt ``route`` values written by MTPGenerationBatch._complete_responses.
+PHYSICAL_ROUTE, SEGMENTED_ROUTE = "continuous_batched_self_mtp", "segmented_self_mtp"
+# Process-environment knobs that change the self-MTP layout when the config
+# does not name them (read by runtime/generate.py and segmented_self_mtp.py).
+LAYOUT_ENVIRONMENT = ("MLX_LM_SEGMENTED_SELF_MTP", "MLX_LM_TRUE_BATCHED_SEGMENTED_MTP",
+                      "MLX_LM_SEGMENTED_ASYNC_QSA_PROMOTION",
+                      "MLX_LM_SEGMENTED_ASYNC_QSA_MIN_REMAINING_TOKENS")
 MAX_CONTEXT = 16384
 MAX_GEN = 512
 MAX_ROWS = 512
@@ -215,10 +245,73 @@ def live_records(cache):
 
 
 def batch_live_records(gen):
-    """Rollback records held by the live self-MTP batch (host lengths only)."""
+    """Rollback records held by the live self-MTP batch (host lengths only).
+
+    Returns ``(count, source)``: ``physical_batch`` reads the batched target
+    cache, ``segmented_rows`` sums the per-row B1 target caches, and
+    ``(None, "unavailable")`` means neither shape was observable.
+    """
     state = getattr(getattr(gen, "_generation_batch", None), "state", None)
     caches = getattr(getattr(state, "caches", None), "target", None)
-    return None if caches is None else live_records(caches)
+    if caches is not None:
+        return live_records(caches), "physical_batch"
+    rows = getattr(state, "row_caches", None)
+    if rows is not None and all(getattr(pair, "target", None) is not None for pair in rows):
+        return sum(live_records(pair.target) for pair in rows), "segmented_rows"
+    return None, "unavailable"
+
+
+def self_mtp_config(args):
+    """The self-MTP config this cell passes, plus what it leaves unbound.
+
+    Keys are the runtime's own (runtime/generate.py) and match the adapters'
+    ``batch_config``. ``segment_aware_cohort_size`` is always bound to the
+    requested batch. Layout keys are passed only for an explicit
+    ``--mtp-layout``; otherwise they are listed as environment-resolved.
+    """
+    config = dict(SELF_MTP_POLICY, prefill_step_size=args.prefill_step,
+                  segment_aware_cohort_size=args.batch)
+    unbound = []
+    if args.mtp_layout is None:
+        unbound = ["segment_aware_live_tip", "segment_aware_async_qsa_promotion"]
+    else:
+        config["segment_aware_live_tip"] = args.mtp_layout == "segmented"
+        config["segment_aware_async_qsa_promotion"] = args.async_promotion == "on"
+    return config, unbound
+
+
+def resolve_self_mtp(config):
+    """The runtime's own resolution of ``config`` in this process."""
+    from mlx2.runtime import generate as G
+    from mlx2.runtime.segmented_self_mtp import true_batched_segmented_self_mtp_enabled
+
+    segmented = G._segment_aware_live_tip_enabled(config)
+    return {
+        "layout": "segmented" if segmented else "physical",
+        "segment_aware_live_tip": segmented,
+        "segment_aware_cohort_size": G._segment_aware_cohort_size(config),
+        "async_qsa_promotion": G._segmented_async_qsa_promotion_enabled(config),
+        "async_qsa_min_remaining_tokens": G._segmented_async_qsa_min_remaining_tokens(config),
+        "share_qsa_indices": G._share_qsa_indices_for_config(config),
+        # No config key exists for this one: environment only.
+        "true_batched_segmented": true_batched_segmented_self_mtp_enabled() if segmented else None,
+        "environment": {name: os.environ.get(name) for name in LAYOUT_ENVIRONMENT},
+    }
+
+
+def allowed_routes(args, async_promotion):
+    """Receipt routes an explicit layout request accepts (None: not explicit)."""
+    if args.mtp_layout is None:
+        return None
+    if args.mtp_layout == "physical":
+        return {PHYSICAL_ROUTE}
+    # A segmented cohort promoted to physical storage reports the physical
+    # route; that is only a match when the lane carries a promotion receipt.
+    return {SEGMENTED_ROUTE, PHYSICAL_ROUTE} if async_promotion else {SEGMENTED_ROUTE}
+
+
+def prompt_layout(prompts):
+    return "aligned" if len({len(p) for p in prompts}) == 1 else "ragged"
 
 
 class OwnerRefs:
@@ -284,8 +377,11 @@ class RetirementDriver:
         if args.tiny:
             mx.set_default_device(mx.cpu)
             self.model = tiny_flash_next()
-            self.prompts = [[1 + (i * 5 + j) % 60 for j in range(12 + 5 * i)] for i in range(args.batch)]
-            self.identity = {"model": "tiny-random-qwen4_exp", "fingerprint": None}
+            aligned = args.prompt_layout == "aligned"
+            self.prompts = [[1 + (i * 5 + j) % 60 for j in range(16 if aligned else 12 + 5 * i)]
+                            for i in range(args.batch)]
+            self.identity = {"model": "tiny-random-qwen4_exp", "fingerprint": None,
+                             "prompt_source": f"tiny deterministic constructor ({args.prompt_layout or 'ragged'})"}
             return
         from mlx2.adapters.registry import resolve_adapter
 
@@ -306,13 +402,15 @@ class RetirementDriver:
             except TypeError:
                 unit = list(tokenizer.encode(FILLER))
             stream = unit * (args.context * args.batch // len(unit) + 2)
-            # Disjoint, unequal slices: lane i gets context - 16 * i tokens.
+            # Disjoint slices. Ragged: lane i gets context - 16 * i tokens;
+            # aligned: every lane gets context tokens.
+            aligned = args.prompt_layout == "aligned"
             self.prompts, start = [], 0
             for i in range(args.batch):
-                length = args.context - 16 * i
+                length = args.context if aligned else args.context - 16 * i
                 self.prompts.append(stream[start:start + length])
                 start += length
-            source = "deterministic filler constructor"
+            source = f"deterministic filler constructor ({'aligned' if aligned else 'ragged'})"
         self.identity = {
             "model": str(args.model), "adapter": f"{cls.__module__}.{cls.__qualname__}",
             "adapter_sha256": _sha(Path(sys.modules[cls.__module__].__file__).read_bytes()),
@@ -327,6 +425,10 @@ class RetirementDriver:
         for prompt in self.prompts:
             if not 8 <= len(prompt) <= MAX_CONTEXT or any(type(t) is not int or t < 0 for t in prompt):
                 raise SystemExit(f"refused: each prompt must be 8..{MAX_CONTEXT} token ids")
+        observed = prompt_layout(self.prompts)
+        if self.args.prompt_layout is not None and observed != self.args.prompt_layout:
+            raise SystemExit(f"refused: --prompt-layout {self.args.prompt_layout} but the prompts are "
+                             f"{observed} (lengths {[len(p) for p in self.prompts]})")
 
     def run_arm(self, arm):
         import gc
@@ -356,7 +458,8 @@ class RetirementDriver:
         mx.reset_peak_memory()
         lanes = {i: {"tokens": [], "logprob_rows": [], "final": None, "finish_reason": None}
                  for i in range(len(self.prompts))}
-        failures, polls, max_live = [], 0, None
+        failures, polls, max_live, live_sources = [], 0, None, set()
+        config, _ = self_mtp_config(args)
         limit = args.gen * len(self.prompts) * 4 + sum(map(len, self.prompts)) // 256 + 256
         deadline = time.monotonic() + args.time_limit_s
         HS._retire_committed_rollbacks = counted if arm == "retire" else suppressed
@@ -364,7 +467,9 @@ class RetirementDriver:
         try:
             gen = BatchGenerator(self.model, completion_batch_size=len(self.prompts), prefill_batch_size=1,
                                  prefill_step_size=args.prefill_step, stop_tokens=[[t] for t in self.stops],
-                                 self_mtp=dict(SELF_MTP_POLICY, prefill_step_size=args.prefill_step))
+                                 self_mtp=dict(config))
+            held = dict(gen.self_mtp or {})
+            policy = {"passed": config, "held_by_generator": held, "resolved": resolve_self_mtp(held)}
             started = time.perf_counter()
             uids = gen.insert([list(p) for p in self.prompts], max_tokens=[args.gen] * len(self.prompts),
                               lane_rngs=[LaneRNG(args.seed + i) for i in lanes],
@@ -377,7 +482,8 @@ class RetirementDriver:
                     failures.append(f"bounded: stopped after {polls} polls")
                     break
                 _, responses = gen.next()
-                live_now = batch_live_records(gen)
+                live_now, source = batch_live_records(gen)
+                live_sources.add(source)
                 if live_now is not None:
                     max_live = live_now if max_live is None else max(max_live, live_now)
                 lost = gen.take_lane_failures()
@@ -419,6 +525,7 @@ class RetirementDriver:
                 # this is 0 by construction; see max_live_rollback_records.
                 "live_rollback_records_at_finish": live_records(cache),
                 "mtp": {"route": receipt.get("route"), "observed_widths": receipt.get("observed_compute_widths"),
+                        "async_qsa_promotion": receipt.get("async_qsa_promotion"),
                         "num_draft": receipt.get("num_draft"),
                         "draft_cycles": stats.get("draft_cycles", 0), "draft_proposed": stats.get("draft_proposed", 0),
                         "draft_accepted": stats.get("draft_accepted", 0),
@@ -427,11 +534,12 @@ class RetirementDriver:
                 "_final": final,
             }
         tally["max_live_rollback_records"] = max_live  # None: batch caches not observable
+        tally["live_rollback_sources"] = sorted(live_sources)
         owners = OwnerRefs()
         owners.track(gen)
         for record in out.values():
             owners.track_response(record["_final"])
-        return {"lanes": out, "failures": failures, "retirement": tally, "memory": memory,
+        return {"lanes": out, "failures": failures, "retirement": tally, "memory": memory, "self_mtp": policy,
                 "diagnostic_elapsed_s": elapsed, "polls": polls, "_owners": owners}
 
     def continuation(self, lane, record, owners=None):
@@ -493,7 +601,8 @@ def model_mode(args):
             assert "_final" not in record
         arms[arm] = data
         del data
-    refusals, differences, incomparable, widths = [], [], [], {}
+    refusals, differences, incomparable, widths, routes = [], [], [], {}, {}
+    planned, unbound = self_mtp_config(args)
     for arm, check in isolation.items():
         if check is not None and (check["alive"] or check["unreferenceable"]):
             refusals.append(f"{arm}: preceding arm's tensor owners not released "
@@ -501,6 +610,25 @@ def model_mode(args):
     for arm in order:
         refusals += [f"{arm}: {f}" for f in arms[arm]["failures"]]
         lanes = arms[arm]["lanes"].values()
+        policy = arms[arm]["self_mtp"]
+        if policy["held_by_generator"] != planned:
+            refusals.append(f"{arm}: generator self-MTP config differs from the planned config")
+        if policy["resolved"]["segment_aware_cohort_size"] != args.batch:
+            refusals.append(f"{arm}: segment_aware_cohort_size "
+                            f"{policy['resolved']['segment_aware_cohort_size']} != requested batch {args.batch}")
+        routes[arm] = sorted({str(l["mtp"]["route"]) for l in lanes})
+        allowed = allowed_routes(args, policy["resolved"]["async_qsa_promotion"])
+        if args.mtp_layout is not None and policy["resolved"]["layout"] != args.mtp_layout:
+            refusals.append(f"{arm}: runtime resolved layout {policy['resolved']['layout']} "
+                            f"!= requested {args.mtp_layout}")
+        for i, l in arms[arm]["lanes"].items():
+            route = l["mtp"]["route"]
+            if allowed is None:
+                continue
+            if route not in allowed or (args.mtp_layout == "segmented" and route == PHYSICAL_ROUTE
+                                        and not l["mtp"]["async_qsa_promotion"]):
+                refusals.append(f"{arm} lane {i}: observed route {route} does not match requested "
+                                f"--mtp-layout {args.mtp_layout}")
         if sum(l["mtp"]["draft_proposed"] for l in lanes) <= 0:
             refusals.append(f"{arm}: no self-MTP proposals")
         if sum(l["mtp"]["draft_proposed"] - l["mtp"]["draft_accepted"] for l in lanes) <= 0:
@@ -516,6 +644,7 @@ def model_mode(args):
         for i, l in arms[arm]["lanes"].items():
             if l["finish_reason"] is None or (len(l["tokens"]) < args.gen and l["finish_reason"] != "stop"):
                 refusals.append(f"{arm} lane {i}: early stop ({len(l['tokens'])}/{args.gen})")
+    # Zero retired records stays a refusal whatever the live-record probe saw.
     if arms["retire"]["retirement"]["records_dropped"] <= 0:
         refusals.append("retire: no rollback record was retired")
     if arms["control"]["retirement"]["retire_calls"] or arms["control"]["retirement"]["suppressed_calls"] <= 0:
@@ -548,10 +677,21 @@ def model_mode(args):
         "arm_isolation": isolation,
         "widths": {"requested": args.batch, "observed_max": widths,
                    "note": "observed = maximum self-MTP compute width in each lane's receipt"},
+        "route": {"requested_layout": args.mtp_layout or "environment-resolved (no explicit --mtp-layout)",
+                  "requested_async_promotion": args.async_promotion,
+                  "resolved_layout": {arm: arms[arm]["self_mtp"]["resolved"]["layout"] for arm in order},
+                  "observed_routes": routes, "unbound_keys": unbound,
+                  "note": ("physical = existing continuous_batched_self_mtp reference path, not a new serving "
+                           "route; an explicit layout is refused on any mismatching lane route")},
+        "prompt_layout": {"requested": args.prompt_layout, "observed": prompt_layout(driver.prompts),
+                          "lengths": [len(p) for p in driver.prompts],
+                          "source": driver.identity.get("prompt_source"),
+                          "note": "an aligned cell is not ragged qualification"},
         "arms": {arm: {**data, "lanes": {str(i): r for i, r in data["lanes"].items()}}
                  for arm, data in arms.items()},
         "lanes": [{"prompt_tokens": len(p), "prompt_sha256": _sha(json.dumps(p).encode())} for p in driver.prompts],
-        "protocol": {"batch": args.batch, "context": args.context, "gen": args.gen, "self_mtp": SELF_MTP_POLICY,
+        "protocol": {"batch": args.batch, "context": args.context, "gen": args.gen, "self_mtp": planned,
+                     "ignore_eos": bool(getattr(args, "ignore_eos", False)),
                      "prefill_step": args.prefill_step, "seed": args.seed, "sampling": "greedy",
                      "arm_order": list(order), "logprob_rows": args.logprob_rows,
                      "continuation_tokens": args.continuation_tokens, "time_limit_s": args.time_limit_s,
@@ -577,6 +717,14 @@ def build_parser():
     ap.add_argument("--seed", type=int, default=1)
     ap.add_argument("--time-limit-s", type=float, default=1800.0)
     ap.add_argument("--ignore-eos", action="store_true")
+    ap.add_argument("--mtp-layout", choices=("physical", "segmented"), default=None,
+                    help="pass segment_aware_live_tip False/True and refuse a mismatching route "
+                         "(default: environment-resolved, labelled as such)")
+    ap.add_argument("--async-promotion", choices=("on", "off"), default=None,
+                    help="segment_aware_async_qsa_promotion; --mtp-layout segmented only (default off)")
+    ap.add_argument("--prompt-layout", choices=("aligned", "ragged"), default=None,
+                    help="constructor: equal or unequal disjoint slices (default ragged); with "
+                         "--prompt-ids, the layout the file must have")
     ap.add_argument("--out", required=True)
     return ap
 
@@ -608,6 +756,12 @@ def resolve_args(ap, argv=None):
         ap.error(f"--prefill-step 1..{MAX_PREFILL_STEP}")
     if not 0 <= a.logprob_rows <= MAX_ROWS or not 0 <= a.continuation_tokens <= MAX_ROWS:
         ap.error(f"--logprob-rows and --continuation-tokens 0..{MAX_ROWS} (0 = explicitly unavailable)")
+    if a.async_promotion is not None and a.mtp_layout != "segmented":
+        ap.error("--async-promotion needs --mtp-layout segmented (promotion starts from a segmented cohort)")
+    if a.mtp_layout == "segmented" and a.async_promotion is None:
+        a.async_promotion = "off"
+    if a.prompt_layout is None and not a.prompt_ids:
+        a.prompt_layout = "ragged"
     return a
 
 

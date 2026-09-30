@@ -97,8 +97,12 @@ def test_tiny_b2_arms_engage_and_match_exactly(tiny_b2):
             assert lane["final_state"]["status"] == "complete"
             assert lane["continuation"]["status"] == "complete"
             assert len(lane["logprob_rows"]) == 16
+    # Tiny resolves --prefill-step to 8; the cohort is bound to --batch and
+    # no layout key is passed without --mtp-layout.
     assert record["protocol"]["self_mtp"] == {"num_draft": 2, "persistent": True, "rate_gate": False,
-                                              "prefill_step_size": 2048}
+                                              "prefill_step_size": 8, "segment_aware_cohort_size": 2}
+    assert record["route"]["unbound_keys"] == ["segment_aware_live_tip", "segment_aware_async_qsa_promotion"]
+    assert record["route"]["requested_layout"].startswith("environment-resolved")
     assert "not a controlled performance run" in record["protocol"]["timing"]
 
 
@@ -340,3 +344,164 @@ def test_b2_cohort_demands_width_two(monkeypatch):
     _cap_width(monkeypatch, 1)
     record = R.model_mode(_args())[1]
     assert "retire: observed compute width 1 < requested batch 2" in record["refusals"]
+
+
+# ---- source-bound route policy and prompt layout ----
+
+@pytest.mark.parametrize("argv,message", [
+    (["--async-promotion", "on"], "needs --mtp-layout segmented"),
+    (["--mtp-layout", "physical", "--async-promotion", "on"], "needs --mtp-layout segmented"),
+    (["--mtp-layout", "physical", "--async-promotion", "off"], "needs --mtp-layout segmented"),
+    (["--mtp-layout", "paged"], "invalid choice"),
+    (["--prompt-layout", "packed"], "invalid choice"),
+])
+def test_route_and_prompt_layout_cli_refusals(argv, message, capsys):
+    with pytest.raises(SystemExit):
+        R.resolve_args(R.build_parser(), ["--tiny", *argv, "--out", "/dev/null"])
+    assert message in capsys.readouterr().err
+
+
+def test_cli_layout_defaults_are_explicit():
+    assert (_args().mtp_layout, _args().async_promotion, _args().prompt_layout) == (None, None, "ragged")
+    segmented = _args("--mtp-layout", "segmented")
+    assert segmented.async_promotion == "off"
+    real = R.resolve_args(R.build_parser(), ["--i-own-the-gpu", "--model", "m", "--prompt-ids", "p.json",
+                                             "--out", "/dev/null"])
+    assert real.prompt_layout is None  # an explicit file is labelled by what it holds
+
+
+@pytest.mark.parametrize("argv,live_tip,promotion", [
+    ([], None, None),
+    (["--mtp-layout", "physical"], False, False),
+    (["--mtp-layout", "segmented"], True, False),
+    (["--mtp-layout", "segmented", "--async-promotion", "on"], True, True),
+])
+def test_policy_passed_into_the_generator(monkeypatch, argv, live_tip, promotion):
+    from mlx2.runtime import hybrid_speculative as HS
+    from mlx2.runtime.generate import BatchGenerator
+
+    seen = []
+
+    def capture(self, model, **kwargs):
+        seen.append(kwargs["self_mtp"])
+        raise RuntimeError("captured")
+
+    original = HS._retire_committed_rollbacks
+    monkeypatch.setattr(BatchGenerator, "__init__", capture)
+    driver = R.RetirementDriver(_args("--batch", "4", *argv))
+    with pytest.raises(RuntimeError, match="captured"):
+        driver.run_arm("retire")
+    assert HS._retire_committed_rollbacks is original
+    (config,) = seen
+    assert config["segment_aware_cohort_size"] == 4 and config["prefill_step_size"] == 8
+    assert config.get("segment_aware_live_tip") == live_tip
+    assert config.get("segment_aware_async_qsa_promotion") == promotion
+
+
+def test_environment_cannot_move_an_explicit_layout(monkeypatch):
+    monkeypatch.setenv("MLX_LM_SEGMENTED_SELF_MTP", "1")
+    monkeypatch.setenv("MLX_LM_SEGMENTED_ASYNC_QSA_PROMOTION", "1")
+    physical, unbound = R.self_mtp_config(_args("--mtp-layout", "physical"))
+    assert unbound == [] and R.resolve_self_mtp(physical)["layout"] == "physical"
+    segmented, _ = R.self_mtp_config(_args("--mtp-layout", "segmented"))
+    resolved = R.resolve_self_mtp(segmented)
+    assert resolved["layout"] == "segmented" and resolved["async_qsa_promotion"] is False
+    # Without --mtp-layout the environment decides, and the record says so.
+    default, unbound = R.self_mtp_config(_args())
+    resolved = R.resolve_self_mtp(default)
+    assert unbound and resolved["layout"] == "segmented" and resolved["async_qsa_promotion"] is True
+    assert resolved["environment"]["MLX_LM_SEGMENTED_SELF_MTP"] == "1"
+    assert resolved["segment_aware_cohort_size"] == 2  # bound to --batch, not the runtime floor
+
+
+@pytest.fixture(scope="module")
+def tiny_physical_aligned():
+    return R.model_mode(_args("--mtp-layout", "physical", "--prompt-layout", "aligned"))[1]
+
+
+def test_explicit_physical_aligned_cell_records_policy_route_and_prompts(tiny_physical_aligned):
+    record = tiny_physical_aligned
+    assert record["verdict"] == "pass", record["refusals"] + record["differences"]
+    assert record["route"]["requested_layout"] == "physical" and record["route"]["unbound_keys"] == []
+    assert record["route"]["observed_routes"] == {"retire": [R.PHYSICAL_ROUTE], "control": [R.PHYSICAL_ROUTE]}
+    assert record["prompt_layout"] == {"requested": "aligned", "observed": "aligned", "lengths": [16, 16],
+                                       "source": "tiny deterministic constructor (aligned)",
+                                       "note": "an aligned cell is not ragged qualification"}
+    for arm in record["arms"].values():
+        policy = arm["self_mtp"]
+        assert policy["passed"] == policy["held_by_generator"] == record["protocol"]["self_mtp"]
+        assert policy["passed"]["segment_aware_live_tip"] is False
+        assert policy["resolved"]["segment_aware_cohort_size"] == 2
+        assert arm["retirement"]["live_rollback_sources"] == ["physical_batch"]
+    assert record["protocol"]["ignore_eos"] is False
+
+
+def _edit_lanes(monkeypatch, edit, arm="retire"):
+    _perturb(monkeypatch, arm, lambda d: [edit(l) for l in d["lanes"].values()])
+
+
+def test_wrong_observed_route_is_refused_for_an_explicit_layout(monkeypatch):
+    _edit_lanes(monkeypatch, lambda l: l["mtp"].update(route=R.SEGMENTED_ROUTE))
+    record = R.model_mode(_args("--mtp-layout", "physical"))[1]
+    assert record["verdict"] == "refused"
+    assert "retire lane 0: observed route segmented_self_mtp does not match requested --mtp-layout physical" \
+        in record["refusals"]
+    assert not any(r.startswith("control lane") and "observed route" in r for r in record["refusals"])
+
+
+def test_physical_route_without_a_promotion_receipt_is_not_a_segmented_match(monkeypatch):
+    _edit_lanes(monkeypatch, lambda l: l["mtp"].update(async_qsa_promotion=None))
+    record = R.model_mode(_args("--mtp-layout", "segmented", "--async-promotion", "on",
+                                "--prompt-layout", "aligned"))[1]
+    assert record["verdict"] == "refused"
+    assert any(r.startswith("retire lane 0: observed route continuous_batched_self_mtp does not match")
+               for r in record["refusals"]), record["refusals"]
+
+
+def test_unrequested_route_on_the_default_layout_is_recorded_not_refused(monkeypatch):
+    _edit_lanes(monkeypatch, lambda l: l["mtp"].update(route=R.SEGMENTED_ROUTE))
+    record = R.model_mode(_args())[1]
+    assert not any("observed route" in r for r in record["refusals"])
+    assert record["route"]["observed_routes"]["retire"] == [R.SEGMENTED_ROUTE]
+
+
+@pytest.mark.parametrize("edit,reason", [
+    (lambda d: d["self_mtp"]["held_by_generator"].update(segment_aware_cohort_size=2),
+     "retire: generator self-MTP config differs"),
+    (lambda d: d["self_mtp"]["resolved"].update(segment_aware_cohort_size=2),
+     "retire: segment_aware_cohort_size 2 != requested batch 4"),
+    (lambda d: d["self_mtp"]["resolved"].update(layout="segmented"),
+     "retire: runtime resolved layout segmented != requested physical"),
+])
+def test_policy_binding_mismatches_are_refused(monkeypatch, edit, reason):
+    _perturb(monkeypatch, "retire", edit)
+    record = R.model_mode(_args("--batch", "4", "--mtp-layout", "physical", "--prompt-layout", "aligned"))[1]
+    assert record["verdict"] == "refused"
+    assert any(r.startswith(reason) for r in record["refusals"]), record["refusals"]
+
+
+def test_segmented_cell_with_zero_retired_records_is_refused():
+    """Tiny segmented B2: the hook runs, retires nothing; that is a refusal,
+    and the per-row live records are reported as segmented, not physical."""
+    record = R.model_mode(_args("--mtp-layout", "segmented"))[1]
+    assert record["verdict"] == "refused"
+    assert "retire: no rollback record was retired" in record["refusals"]
+    assert not any("observed route" in r for r in record["refusals"])
+    retire = record["arms"]["retire"]
+    assert retire["retirement"]["retire_calls"] > 0 and retire["retirement"]["records_dropped"] == 0
+    assert retire["retirement"]["live_rollback_sources"] == ["segmented_rows"]
+    assert record["route"]["observed_routes"]["retire"] == [R.SEGMENTED_ROUTE]
+
+
+def test_prompt_layout_is_validated_and_labelled():
+    driver = R.RetirementDriver(_args())
+    assert R.prompt_layout(driver.prompts) == "ragged"
+    driver.args.prompt_layout = "aligned"
+    with pytest.raises(SystemExit, match="--prompt-layout aligned but the prompts are ragged"):
+        driver.check_geometry()
+    driver.args.prompt_layout = None  # explicit ids: labelled by what they are
+    driver.check_geometry()
+    driver.prompts = [list(range(1, 17))] * 2
+    driver.args.prompt_layout = "ragged"
+    with pytest.raises(SystemExit, match="--prompt-layout ragged but the prompts are aligned"):
+        driver.check_geometry()
