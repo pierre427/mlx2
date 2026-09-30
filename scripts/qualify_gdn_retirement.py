@@ -493,7 +493,7 @@ def model_mode(args):
             assert "_final" not in record
         arms[arm] = data
         del data
-    refusals, differences, incomparable = [], [], []
+    refusals, differences, incomparable, widths = [], [], [], {}
     for arm, check in isolation.items():
         if check is not None and (check["alive"] or check["unreferenceable"]):
             refusals.append(f"{arm}: preceding arm's tensor owners not released "
@@ -507,6 +507,12 @@ def model_mode(args):
             refusals.append(f"{arm}: no rejected proposals (no rollback)")
         if not any(max(l["mtp"]["observed_widths"] or [1]) >= 2 for l in lanes):
             refusals.append(f"{arm}: never ran batched (width >= 2)")
+        observed = max((max(l["mtp"]["observed_widths"] or [0]) for l in lanes), default=0)
+        widths[arm] = observed
+        if observed < args.batch:
+            # Inserted requests are not a compute width: a B4 cohort that
+            # only ever computed at width 2 is not a B4 retirement cell.
+            refusals.append(f"{arm}: observed compute width {observed} < requested batch {args.batch}")
         for i, l in arms[arm]["lanes"].items():
             if l["finish_reason"] is None or (len(l["tokens"]) < args.gen and l["finish_reason"] != "stop"):
                 refusals.append(f"{arm} lane {i}: early stop ({len(l['tokens'])}/{args.gen})")
@@ -540,6 +546,8 @@ def model_mode(args):
     return driver, {
         "verdict": verdict, "refusals": refusals, "differences": differences, "incomparable": incomparable,
         "arm_isolation": isolation,
+        "widths": {"requested": args.batch, "observed_max": widths,
+                   "note": "observed = maximum self-MTP compute width in each lane's receipt"},
         "arms": {arm: {**data, "lanes": {str(i): r for i, r in data["lanes"].items()}}
                  for arm, data in arms.items()},
         "lanes": [{"prompt_tokens": len(p), "prompt_sha256": _sha(json.dumps(p).encode())} for p in driver.prompts],

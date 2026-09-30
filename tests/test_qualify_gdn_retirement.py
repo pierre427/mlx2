@@ -306,3 +306,37 @@ def test_nonfinite_or_unbounded_settings_are_refused(argv, message, capsys):
 def test_explicit_zero_rows_and_continuation_are_legal():
     args = _args("--logprob-rows", "0", "--continuation-tokens", "0", "--prefill-step", "16384")
     assert (args.logprob_rows, args.continuation_tokens, args.prefill_step) == (0, 0, 16384)
+
+
+# ---- requested vs observed compute width ----
+
+def test_widths_are_recorded_requested_vs_observed(tiny_b2):
+    assert tiny_b2["widths"]["requested"] == 2
+    assert tiny_b2["widths"]["observed_max"] == {"retire": 2, "control": 2}
+
+
+def _cap_width(monkeypatch, width):
+    run = R.RetirementDriver.run_arm
+
+    def capped(self, name):
+        data = run(self, name)
+        for lane in data["lanes"].values():
+            lane["mtp"]["observed_widths"] = [w for w in lane["mtp"]["observed_widths"] if w <= width] or [1]
+        return data
+
+    monkeypatch.setattr(R.RetirementDriver, "run_arm", capped)
+
+
+def test_b4_cohort_observed_at_width_two_is_refused(monkeypatch):
+    _cap_width(monkeypatch, 2)
+    record = R.model_mode(_args("--batch", "4"))[1]
+    assert record["verdict"] == "refused"
+    assert "retire: observed compute width 2 < requested batch 4" in record["refusals"]
+    assert "control: observed compute width 2 < requested batch 4" in record["refusals"]
+    assert not any("never ran batched" in r for r in record["refusals"])  # width>=2 alone passed
+
+
+def test_b2_cohort_demands_width_two(monkeypatch):
+    _cap_width(monkeypatch, 1)
+    record = R.model_mode(_args())[1]
+    assert "retire: observed compute width 1 < requested batch 2" in record["refusals"]

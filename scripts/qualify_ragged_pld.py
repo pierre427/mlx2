@@ -107,12 +107,23 @@ def tiny_model():
     return model
 
 
-def tiny_prompts():
-    """Unequal lengths: two repeated-structure lanes and one all-distinct lane."""
+def tiny_prompts(lanes=3):
+    """Fixed tiny fixtures; each reaches compute width == lanes on CPU.
+
+    Unequal lengths and caps, repeated-structure lanes and one all-distinct
+    lane. The width-3 fixture (the default) uses cap 6 on its distinct lane: with
+    cap 2 that lane finished before the cohort verified at width 3.
+    """
     repeat = [3, 4, 5, 6, 7] * 4 + [3, 4]
     looping = [9, 10, 11, 12] * 5 + [9]
     distinct = [20, 21, 22, 23, 24, 25, 26]
-    return [repeat, looping, distinct], [24, 28, 2]
+    triple = [13, 14, 15] * 6 + [13]
+    fixtures = {
+        2: ([looping, distinct], [28, 12]),
+        3: ([repeat, looping, distinct], [24, 28, 6]),
+        4: ([repeat, looping, distinct, triple], [24, 28, 8, 20]),
+    }
+    return fixtures[lanes]
 
 
 def constructed_prompts(tokenizer, lanes):
@@ -130,6 +141,16 @@ def constructed_prompts(tokenizer, lanes):
     return prompts[:lanes], caps[:lanes]
 
 
+def load_workload(path):
+    """(prompts, caps, receipt, source) from a pinned token file; fail closed."""
+    raw = Path(path).read_bytes()
+    data = json.loads(raw)
+    if not isinstance(data, dict) or set(data) - {"prompts", "max_tokens", "receipt"} \
+            or not isinstance(data.get("prompts"), list) or not isinstance(data.get("max_tokens"), list):
+        raise SystemExit("refused: token file needs prompts and max_tokens lists (optional receipt)")
+    return data["prompts"], data["max_tokens"], data.get("receipt"), f"explicit token file sha256 {_sha(raw)}"
+
+
 # ---------------------------------------------------------------- run one arm
 
 class Driver:
@@ -139,10 +160,12 @@ class Driver:
         self.args, self.mx = args, mx
         self.stops = ()
         self.identity = {}
+        self.workload_receipt = None
+        self.lane_policies = None
         if args.tiny:
             mx.set_default_device(mx.cpu)
             self.model = tiny_model()
-            self.prompts, self.caps = tiny_prompts()
+            self.prompts, self.caps = tiny_prompts(args.lanes)
             self.identity = {"model": "tiny-random-muse", "fingerprint": None}
             self.followup = [5, 6, 7]
             return
@@ -156,9 +179,7 @@ class Driver:
         self.model = self.adapter.model
         self.stops = () if args.ignore_eos else generation_stop_token_ids(self.adapter)
         if args.prompt_ids:
-            data = json.loads(Path(args.prompt_ids).read_text())
-            self.prompts, self.caps = data["prompts"], data["max_tokens"]
-            prompt_source = f"explicit token file sha256 {_sha(Path(args.prompt_ids).read_bytes())}"
+            self.prompts, self.caps, self.workload_receipt, prompt_source = load_workload(args.prompt_ids)
         else:
             self.prompts, self.caps = constructed_prompts(self.adapter.tokenizer, args.lanes)
             prompt_source = "deterministic constructor (not the 2026-09-18 campaign prompts)"
@@ -172,6 +193,32 @@ class Driver:
             "prompt_source": prompt_source,
         }
 
+    def check_lane_policies(self):
+        """Validate per-lane PLD policy overrides; fail closed."""
+        policies = self.args.lane_policies
+        if policies is None:
+            self.lane_policies = None
+            return
+        from mlx2.runtime.pld import PromptLookupBatchGenerator
+
+        if not isinstance(policies, list) or len(policies) != len(self.prompts):
+            raise SystemExit("refused: --lane-policies needs one object per lane")
+        validated = []
+        for index, policy in enumerate(policies):
+            if not isinstance(policy, dict):
+                raise SystemExit(f"refused: lane {index} policy must be an object")
+            if "batched_verify" in policy:
+                raise SystemExit("refused: batched_verify is fixed per arm, not per lane")
+            unknown = set(policy) - PromptLookupBatchGenerator.POLICY_KEYS
+            if unknown:
+                raise SystemExit(f"refused: lane {index} unknown policy keys {sorted(unknown)}")
+            try:
+                PromptLookupBatchGenerator.validate_policy({**self.args.pld_policy, **policy})
+            except ValueError as error:
+                raise SystemExit(f"refused: lane {index} policy: {error}") from None
+            validated.append(dict(policy))
+        self.lane_policies = validated
+
     def check_geometry(self):
         if not 2 <= len(self.prompts) <= MAX_LANES or len(self.caps) != len(self.prompts):
             raise SystemExit(f"refused: need 2..{MAX_LANES} lanes with one cap each")
@@ -182,6 +229,7 @@ class Driver:
                 raise SystemExit("refused: prompts must be token id lists")
         if not 0 <= self.args.remove_lane < len(self.prompts):
             raise SystemExit("refused: --remove-lane out of range")
+        self.check_lane_policies()
 
     def generator(self, arm, width):
         stops = [[t] for t in self.stops]
@@ -217,6 +265,10 @@ class Driver:
                 insert.update(caches=caches, all_tokens=all_tokens)
             if arm.startswith("ordinary"):
                 insert["lane_rngs"] = [LaneRNG(args.seed + i) for i in lanes]
+            elif self.lane_policies is not None and caches is None:
+                # Per-lane PLD overrides only alter PLD arms; the ordinary
+                # references keep the same tokens, stops and caps.
+                insert["prompt_lookup_configs"] = [dict(self.lane_policies[i]) for i in lanes]
             uids = gen.insert(prompts, **insert)
             by_uid = dict(zip(uids, lanes))
             live = set(uids)
@@ -237,7 +289,11 @@ class Driver:
                 for response in responses:
                     record = records[by_uid[response.uid]]
                     record["tokens"].append(int(response.token))
-                    record["widths"].add(int(getattr(response, "execution_width", 1) or 1))
+                    if not arm.startswith("ordinary"):
+                        # PLD rounds report their compute width; ordinary
+                        # responses carry only a dataclass default, so their
+                        # width is not reported rather than assumed.
+                        record["widths"].add(int(getattr(response, "execution_width", 1) or 1))
                     receipt = getattr(response, "speculative_receipt", None)
                     if receipt is not None and (not record["receipts"] or record["receipts"][-1] is not receipt):
                         record["receipts"].append(receipt)
@@ -268,7 +324,8 @@ class Driver:
                 "tokens": record["tokens"],
                 "token_sha256": _sha(json.dumps(record["tokens"]).encode()),
                 "finish_reason": record["finish_reason"],
-                "execution_widths": sorted(record["widths"]),
+                "execution_widths": (sorted(record["widths"]) if not arm.startswith("ordinary")
+                                     else "not reported by the ordinary route"),
                 "logprob_rows": [d["sha256"] for d in record["logprob_rows"]],
                 "logprob_rows_status": sorted({d["status"] for d in record["logprob_rows"]}) or ["unavailable"],
                 "final_state": state_digest(getattr(final, "prompt_cache", None)),
@@ -395,6 +452,9 @@ def coverage(driver, results, stats, removed):
         "partial_acceptance": any(batched[i]["rounds"]["partial_accept_rounds"] > 0 for i in lanes),
         "rollback_then_append": any(batched[i]["rounds"]["rollback_then_append"] for i in lanes),
         "batched_width_ge2": stats["pld_batched"].get("pld_batched_max_width", 0) >= 2,
+        # Inserted requests are not a compute width: the batched verify must
+        # actually have run at the requested cohort width.
+        "requested_width_engaged": stats["pld_batched"].get("pld_batched_max_width", 0) == len(driver.prompts),
         "closed_boundary_removal": bool(removed),
         "survivor_ran_at_lower_width": any(
             len(removal[i]["execution_widths"]) > 1 and min(removal[i]["execution_widths"]) < len(driver.prompts)
@@ -484,6 +544,15 @@ def run_all(args):
         "coverage": cov,
         "refusals": engagement,
         "removed": removed,
+        "widths": {
+            "requested": len(driver.prompts),
+            "observed_max": {arm: stats[arm].get("pld_batched_max_width", 0)
+                             for arm in ("pld_batched", "pld_removal")},
+            "note": ("observed = PLD batched-verify compute width; per-lane PLD and ordinary "
+                     "routes do not report a compute width"),
+        },
+        "lane_policies": driver.lane_policies,
+        "workload_receipt": driver.workload_receipt,
         "lanes": [{"prompt_tokens": len(p), "prompt_sha256": _sha(json.dumps(p).encode()), "max_tokens": c}
                   for p, c in zip(driver.prompts, driver.caps)],
         "results": {arm: {str(i): {k: v for k, v in r.items() if not k.startswith("_")}
@@ -506,7 +575,10 @@ def build_parser():
     ap.add_argument("--model")
     ap.add_argument("--i-own-the-gpu", action="store_true")
     ap.add_argument("--prompt-ids", help='JSON {"prompts": [[ids]...], "max_tokens": [..]}')
-    ap.add_argument("--lanes", type=int, default=2, help="constructed prompts: 2..4 lanes")
+    ap.add_argument("--lanes", type=int, default=None,
+                    help="lanes: constructed real prompts (default 2) or tiny fixture (default 3); 2..4")
+    ap.add_argument("--lane-policies", type=json.loads, default=None,
+                    help="JSON list of per-lane PLD policy overrides (PLD arms only; no batched_verify)")
     ap.add_argument("--pld-policy", type=json.loads, default={}, help="PLD policy JSON (batched_verify set per arm)")
     ap.add_argument("--prefill-step", type=int, default=None)
     ap.add_argument("--logprob-rows", type=int, default=16)
@@ -526,12 +598,14 @@ def resolve_args(ap, argv=None):
         if a.i_own_the_gpu or a.model or a.prompt_ids:
             ap.error("--tiny runs a random CPU model; drop --i-own-the-gpu/--model/--prompt-ids")
         a.prefill_step = 8 if a.prefill_step is None else a.prefill_step
+        a.lanes = 3 if a.lanes is None else a.lanes
     else:
         if not a.i_own_the_gpu:
             ap.error("refusing Metal execution without --i-own-the-gpu")
         if not a.model:
             ap.error("--model is required for a real run")
         a.prefill_step = 2048 if a.prefill_step is None else a.prefill_step
+        a.lanes = 2 if a.lanes is None else a.lanes
     if "batched_verify" in a.pld_policy:
         ap.error("batched_verify is set per arm; drop it from --pld-policy")
     if not math.isfinite(a.time_limit_s) or a.time_limit_s <= 0:

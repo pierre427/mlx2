@@ -188,3 +188,93 @@ def test_zero_rows_and_continuation_are_explicitly_unavailable_not_exact():
 def test_no_final_responses_survive_in_the_record(tiny_record):
     for arm in tiny_record["results"].values():
         assert all("_final" not in lane for lane in arm.values())
+
+
+# ---- requested vs observed compute width, per-lane policies ----
+
+@pytest.mark.parametrize("lanes", [2, 4])
+def test_tiny_b2_and_b4_fixtures_engage_their_requested_width(lanes):
+    record = Q.run_all(_args("--lanes", str(lanes)))
+    assert record["widths"]["requested"] == lanes
+    assert record["widths"]["observed_max"]["pld_batched"] == lanes
+    assert record["coverage"]["requested_width_engaged"] and all(record["coverage"].values())
+    assert record["verdict"] in ("pass", "token_exact_bits_diverge")
+
+
+def test_default_tiny_fixture_is_reported_as_width_three(tiny_record):
+    assert tiny_record["widths"]["requested"] == 3
+    assert tiny_record["widths"]["observed_max"]["pld_batched"] == 3
+    assert len(tiny_record["lanes"]) == 3
+
+
+def _fixture(monkeypatch, prompts, caps):
+    monkeypatch.setattr(Q, "tiny_prompts", lambda lanes: (prompts, caps))
+
+
+def test_b4_cohort_that_only_computes_at_width_three_is_refused(monkeypatch):
+    repeat, looping = [3, 4, 5, 6, 7] * 4 + [3, 4], [9, 10, 11, 12] * 5 + [9]
+    distinct, alt = [20, 21, 22, 23, 24, 25, 26], [30, 31, 32, 33, 34, 35] * 3 + [30]
+    _fixture(monkeypatch, [repeat, looping, distinct, alt], [24, 28, 6, 20])
+    record = Q.run_all(_args("--lanes", "4"))
+    assert record["widths"]["requested"] == 4
+    assert record["widths"]["observed_max"]["pld_batched"] == 3
+    assert record["coverage"]["batched_width_ge2"]  # the old generic signal still passes
+    assert not record["coverage"]["requested_width_engaged"]
+    assert record["verdict"] == "coverage_refused"
+
+
+def test_the_old_width_three_fixture_with_cap_two_is_refused(monkeypatch):
+    _fixture(monkeypatch, [[3, 4, 5, 6, 7] * 4 + [3, 4], [9, 10, 11, 12] * 5 + [9],
+                           [20, 21, 22, 23, 24, 25, 26]], [24, 28, 2])
+    record = Q.run_all(_args())
+    assert record["widths"]["observed_max"]["pld_batched"] == 2
+    assert record["verdict"] == "coverage_refused"
+
+
+def test_ordinary_routes_do_not_claim_a_compute_width(tiny_record):
+    for arm in ("ordinary_b1", "ordinary_bN"):
+        for lane in tiny_record["results"][arm].values():
+            assert lane["execution_widths"] == "not reported by the ordinary route"
+
+
+def test_lane_policies_reach_pld_arms_only(monkeypatch):
+    from mlx2.runtime.generate import BatchGenerator
+    from mlx2.runtime.pld import PromptLookupBatchGenerator
+
+    seen = {"pld": [], "ordinary": []}
+    pld_insert, ord_insert = PromptLookupBatchGenerator.insert, BatchGenerator.insert
+
+    def spy_pld(self, prompts, **kwargs):
+        seen["pld"].append(kwargs.get("prompt_lookup_configs"))
+        return pld_insert(self, prompts, **kwargs)
+
+    def spy_ord(self, prompts, **kwargs):
+        seen["ordinary"].append("prompt_lookup_configs" in kwargs)
+        return ord_insert(self, prompts, **kwargs)
+
+    monkeypatch.setattr(PromptLookupBatchGenerator, "insert", spy_pld)
+    monkeypatch.setattr(BatchGenerator, "insert", spy_ord)
+    policies = [{"num_draft": 2}, {"deferred_admission": True}]
+    record = Q.run_all(_args("--lanes", "2", "--lane-policies", json.dumps(policies)))
+    assert record["lane_policies"] == policies
+    assert seen["pld"] and all(configs == policies for configs in seen["pld"])
+    assert seen["ordinary"] and not any(seen["ordinary"])
+    # The deferred (ordinary-admission) lane really proposed nothing.
+    assert record["results"]["pld_batched"]["1"]["rounds"]["proposed"] == 0
+    plain = Q.run_all(_args("--lanes", "2"))
+    for i in ("0", "1"):
+        assert record["results"]["ordinary_b1"][i]["tokens"] == plain["results"]["ordinary_b1"][i]["tokens"]
+
+
+@pytest.mark.parametrize("policies,message", [
+    ([{"num_draft": 2}], "one object per lane"),
+    ({"num_draft": 2}, "one object per lane"),
+    ([{"num_draft": 2}, 5], "lane 1 policy must be an object"),
+    ([{"num_draft": 2}, {"batched_verify": False}], "batched_verify is fixed per arm"),
+    ([{"num_draft": 2}, {"proposer": "fake"}], "unknown policy keys"),
+    ([{"num_draft": 0}, {}], "lane 0 policy"),
+])
+def test_invalid_lane_policies_fail_closed(policies, message):
+    driver = Q.Driver(_args("--lanes", "2", "--lane-policies", json.dumps(policies)))
+    with pytest.raises(SystemExit, match=message):
+        driver.check_geometry()
