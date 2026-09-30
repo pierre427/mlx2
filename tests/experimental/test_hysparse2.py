@@ -2,9 +2,9 @@
 
 from dataclasses import replace
 
-import numpy as np
 import pytest
 
+np = pytest.importorskip("numpy")
 mx = pytest.importorskip("mlx.core")
 from mlx import nn, optimizers
 from mlx.utils import tree_flatten

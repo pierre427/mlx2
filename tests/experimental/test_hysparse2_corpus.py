@@ -1,5 +1,7 @@
 import json
 
+import pytest
+
 from mlx2.experimental.hysparse2.corpus import (
     archive_examples,
     clean,
@@ -101,7 +103,8 @@ def test_archive_excludes_tools_analysis_and_other_projects(tmp_path):
 
 
 def test_tokenizer_roundtrip_and_npy(tmp_path):
-    import numpy as np
+    np = pytest.importorskip("numpy")
+    pytest.importorskip("tokenizers")
     from tokenizers import Tokenizer
 
     root = tmp_path / "corpus"
@@ -119,3 +122,36 @@ def test_tokenizer_roundtrip_and_npy(tmp_path):
         values = np.load(tmp_path / "tokens" / (split + ".npy"))
         assert values.dtype == np.uint32 and len(values) == result["tokens"][split]
         assert values[-1] == tokenizer.token_to_id("<eos>")
+
+
+def test_reused_tokenizer_preserves_ids_and_source_shards(tmp_path):
+    np = pytest.importorskip("numpy")
+    pytest.importorskip("tokenizers")
+
+    root = tmp_path / "corpus"
+    root.mkdir()
+    for split in ("train", "valid"):
+        (root / (split + ".jsonl")).write_text(
+            json.dumps(
+                {
+                    "text": "Stable technical vocabulary: tensor, cache, Python and λ.",
+                    "source": "code",
+                }
+            )
+            + "\n"
+        )
+    (root / "receipt.json").write_text("{}")
+    first = tokenize(root, tmp_path / "first", vocab_size=300)
+    second = tokenize(
+        root,
+        tmp_path / "second",
+        vocab_size=300,
+        tokenizer_path=tmp_path / "first/tokenizer.json",
+    )
+    assert first["tokenizer_sha256"] == second["tokenizer_sha256"]
+    for split in ("train", "valid"):
+        file = second["source_files"][split]["code"]["path"]
+        assert np.array_equal(
+            np.load(tmp_path / "first" / (split + ".npy")),
+            np.load(tmp_path / "second" / file),
+        )

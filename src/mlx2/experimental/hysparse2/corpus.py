@@ -12,6 +12,7 @@ import os
 import re
 import subprocess
 from collections import Counter
+from contextlib import ExitStack
 from pathlib import Path
 
 
@@ -65,6 +66,12 @@ def messages_text(messages):
 
 
 def rows(path):
+    if path.suffix == ".parquet":
+        import pyarrow.parquet as pq
+
+        for batch in pq.ParquetFile(path).iter_batches(batch_size=128):
+            yield from batch.to_pylist()
+        return
     opener = gzip.open if path.suffix == ".gz" else open
     with opener(path, "rt", encoding="utf-8") as f:
         for line in f:
@@ -77,7 +84,46 @@ def json_examples(source):
         split = str(row.get("split", "train")).lower()
         if split not in ("train", "training"):
             continue
-        if source["kind"] == "nkos":
+        if source["kind"] == "magicoder":
+            text = "user: " + row["problem"] + "\n\nassistant: " + row["solution"]
+            group = digest(row.get("seed") or row["problem"])
+        elif source["kind"] == "public-tools":
+            parts = []
+            for message in row["messages"]:
+                role = message.get("role")
+                if role not in ("user", "assistant", "tool"):
+                    continue
+                content = text_content(message.get("content"))
+                if message.get("reasoning_content"):
+                    content = (
+                        "reasoning: " + message["reasoning_content"] + "\n" + content
+                    )
+                if message.get("tool_calls"):
+                    content += "\ntool_calls: " + json.dumps(
+                        message["tool_calls"], ensure_ascii=False
+                    )
+                if role == "tool":
+                    identity = {
+                        k: message[k] for k in ("name", "tool_call_id") if k in message
+                    }
+                    content = json.dumps(identity, ensure_ascii=False) + "\n" + content
+                parts.append(role + ": " + content)
+            text = "\n\n".join(parts)
+            # Keep multiple trajectories for the same task in one split.
+            group = digest(
+                next(
+                    (
+                        text_content(m.get("content"))
+                        for m in row["messages"]
+                        if m.get("role") == "user"
+                    ),
+                    row["uuid"],
+                )
+            )
+        elif source["kind"] == "parquet-text":
+            text = row[source.get("text_field", "text")]
+            group = digest(str(row.get(source.get("group_field", "prompt")) or text))
+        elif source["kind"] == "nkos":
             text = json.dumps(
                 {
                     k: row[k]
@@ -263,37 +309,57 @@ def prepare(manifest, output, *, limit=2000):
     return receipt
 
 
-def tokenize(corpus, output, *, vocab_size=32768):
+def tokenize(corpus, output, *, vocab_size=32768, tokenizer_path=None):
     """Train byte-level BPE on train only; stream EOS-delimited uint32 NPYs."""
     import numpy as np
     from tokenizers import Tokenizer, decoders, models, pre_tokenizers, trainers
 
     corpus, output = Path(corpus), Path(output)
     output.mkdir(parents=True, exist_ok=False)
-    tokenizer = Tokenizer(models.BPE(unk_token="<unk>"))
-    tokenizer.pre_tokenizer = pre_tokenizers.ByteLevel(add_prefix_space=False)
-    tokenizer.decoder = decoders.ByteLevel()
-    trainer = trainers.BpeTrainer(
-        vocab_size=vocab_size,
-        special_tokens=["<pad>", "<unk>", "<bos>", "<eos>"],
-        initial_alphabet=pre_tokenizers.ByteLevel.alphabet(),
-        show_progress=False,
-    )
-    tokenizer.train_from_iterator(
-        (r["text"] for r in rows(corpus / "train.jsonl")), trainer
-    )
+    if tokenizer_path is not None:
+        tokenizer = Tokenizer.from_file(str(tokenizer_path))
+        if (
+            tokenizer.get_vocab_size() > vocab_size
+            or tokenizer.token_to_id("<eos>") is None
+        ):
+            raise ValueError("incompatible existing tokenizer")
+    else:
+        tokenizer = Tokenizer(models.BPE(unk_token="<unk>"))
+        tokenizer.pre_tokenizer = pre_tokenizers.ByteLevel(add_prefix_space=False)
+        tokenizer.decoder = decoders.ByteLevel()
+        trainer = trainers.BpeTrainer(
+            vocab_size=vocab_size,
+            special_tokens=["<pad>", "<unk>", "<bos>", "<eos>"],
+            initial_alphabet=pre_tokenizers.ByteLevel.alphabet(),
+            show_progress=False,
+        )
+        tokenizer.train_from_iterator(
+            (r["text"] for r in rows(corpus / "train.jsonl")), trainer
+        )
     tokenizer.save(str(output / "tokenizer.json"))
     sha = hashlib.sha256((output / "tokenizer.json").read_bytes()).hexdigest()
     eos = tokenizer.token_to_id("<eos>")
     counts = {}
+    source_files = {}
     source_tokens = Counter()
     for split in ("train", "valid"):
         raw = output / (split + ".u32")
-        with raw.open("wb") as f:
+        source_handles = {}
+        with ExitStack() as stack, raw.open("wb") as f:
             for row in rows(corpus / (split + ".jsonl")):
                 encoded = tokenizer.encode(row["text"]).ids + [eos]
                 source_tokens[row.get("source", "unknown")] += len(encoded)
-                np.asarray(encoded, dtype=np.uint32).tofile(f)
+                encoded = np.asarray(encoded, dtype=np.uint32)
+                encoded.tofile(f)
+                source = row.get("source", "unknown")
+                if not re.fullmatch(r"[A-Za-z0-9_-]+", source):
+                    raise ValueError("unsafe source ID")
+                if source not in source_handles:
+                    name = f"{split}-{source}.u32"
+                    source_handles[source] = stack.enter_context(
+                        (output / name).open("wb")
+                    )
+                encoded.tofile(source_handles[source])
         count = raw.stat().st_size // 4
         if not count:
             raise ValueError(f"{split} split has no tokens")
@@ -307,12 +373,31 @@ def tokenize(corpus, output, *, vocab_size=32768):
         del values, final
         raw.unlink()
         counts[split] = count
+        source_files[split] = {}
+        for source in source_handles:
+            source_raw = output / f"{split}-{source}.u32"
+            n = source_raw.stat().st_size // 4
+            source_array = np.memmap(source_raw, dtype=np.uint32, mode="r")
+            name = f"{split}-{source}.npy"
+            result = np.lib.format.open_memmap(
+                output / name, mode="w+", dtype=np.uint32, shape=(n,)
+            )
+            for start in range(0, n, 1 << 20):
+                result[start : start + (1 << 20)] = source_array[
+                    start : start + (1 << 20)
+                ]
+            result.flush()
+            del source_array, result
+            source_raw.unlink()
+            source_files[split][source] = {"path": name, "tokens": n}
     receipt = {
         "schema": "mlx2.hysparse2-tokens.v1",
         "tokenizer_sha256": sha,
         "vocab_size": tokenizer.get_vocab_size(),
         "tokens": counts,
         "source_tokens": dict(source_tokens),
+        "source_files": source_files,
+        "reused_tokenizer": tokenizer_path is not None,
         "source_receipt_sha256": hashlib.sha256(
             (corpus / "receipt.json").read_bytes()
         ).hexdigest(),
@@ -329,13 +414,18 @@ def main(argv=None):
     p.add_argument("--output", type=Path, required=True)
     p.add_argument("--limit", type=int, default=2000, help="accepted rows per source")
     p.add_argument("--vocab-size", type=int, default=32768)
+    p.add_argument(
+        "--tokenizer", type=Path, help="Reuse a tokenizer without changing token IDs"
+    )
     a = p.parse_args(argv)
     if a.limit < 1 or a.vocab_size < 260:
         p.error("positive row limit and vocabulary >=260 required")
     result = (
         prepare(json.loads(a.input.read_text()), a.output, limit=a.limit)
         if a.action == "prepare"
-        else tokenize(a.input, a.output, vocab_size=a.vocab_size)
+        else tokenize(
+            a.input, a.output, vocab_size=a.vocab_size, tokenizer_path=a.tokenizer
+        )
     )
     print(json.dumps(result, indent=2))
 

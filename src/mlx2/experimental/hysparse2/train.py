@@ -5,16 +5,14 @@ reports capacity without importing MLX. Training consumes prepared .npy tokens.
 """
 
 import argparse
-import fcntl
 import hashlib
 import json
 import math
-import platform
 import re
-import subprocess
+import shutil
 import time
 import uuid
-from contextlib import ExitStack
+from contextlib import nullcontext
 from dataclasses import asdict
 from pathlib import Path
 
@@ -39,6 +37,14 @@ def save_checkpoint(root, model, optimizer, step, run):
     if target.exists():
         raise FileExistsError(target)
     temporary = root / f".writing-{uuid.uuid4().hex}"
+    # Adam moments plus weights can exceed 20 GB at the default geometry.
+    # Refuse before opening any checkpoint payload when disk headroom is low.
+    model_bytes = sum(x.nbytes for _, x in tree_flatten(model.parameters()))
+    state_bytes = sum(x.nbytes for _, x in tree_flatten(optimizer.state))
+    if shutil.disk_usage(root).free < int((model_bytes + state_bytes) * 1.05) + (
+        64 << 20
+    ):
+        raise OSError("insufficient disk space for atomic checkpoint")
     temporary.mkdir()
     model.save_weights(str(temporary / "model.safetensors"))
     state = dict(tree_flatten(optimizer.state))
@@ -98,11 +104,15 @@ def train(args, c):
     from .model import Model
 
     mx.set_default_device(mx.cpu if args.device == "cpu" else mx.gpu)
+    if args.device == "gpu":
+        mx.set_memory_limit(int(args.memory_limit_gib * 2**30))
+        mx.set_cache_limit(1 << 30)
+        mx.reset_peak_memory()
     mx.random.seed(args.seed)
     # FP32 parameters and optimizer state are deliberate for initial research
     # training. Inference can cast a saved model to BF16 separately.
     values = None
-    if not args.smoke:
+    if not args.smoke and args.mixture is None:
         values = np.load(args.tokens, mmap_mode="r", allow_pickle=False)
         if (
             values.ndim != 1
@@ -120,6 +130,13 @@ def train(args, c):
                 or metadata["vocab_size"] > c.vocab_size
             ):
                 raise ValueError("prepared tokenizer hash or vocabulary differs")
+    mixture = None
+    if args.mixture is not None:
+        from .mixture import Mixture
+
+        mixture = Mixture(
+            args.mixture, tokenizer_sha256=args.tokenizer_sha256, sequence=args.sequence
+        )
     validation = None
     if args.validation_tokens is not None:
         validation = np.load(args.validation_tokens, mmap_mode="r", allow_pickle=False)
@@ -134,6 +151,15 @@ def train(args, c):
             and args.tokens.resolve() == args.validation_tokens.resolve()
         ):
             raise ValueError("validation and training inputs must differ")
+    if args.validation_tokens is not None:
+        validation_metadata = args.validation_tokens.parent / "receipt.json"
+        if validation_metadata.exists():
+            meta = json.loads(validation_metadata.read_text())
+            if (
+                meta.get("schema") == "mlx2.hysparse2-tokens.v1"
+                and meta["tokenizer_sha256"] != args.tokenizer_sha256
+            ):
+                raise ValueError("validation tokenizer differs")
     model = Model(c)
     model.train()
     model.checkpoint_layers = not args.no_checkpoint
@@ -141,7 +167,9 @@ def train(args, c):
         learning_rate=args.learning_rate, betas=[0.9, 0.95], weight_decay=0.1
     )
     run = {
-        "tokens_sha256": None if args.smoke else file_hash(args.tokens),
+        "tokens_sha256": None
+        if args.smoke or mixture is not None
+        else file_hash(args.tokens),
         "tokenizer_sha256": None if args.smoke else args.tokenizer_sha256,
         "validation_sha256": None
         if validation is None
@@ -157,6 +185,8 @@ def train(args, c):
         "dtype": "float32",
         "checkpoint_layers": model.checkpoint_layers,
     }
+    if mixture is not None:
+        run["mixture"] = mixture.receipt
     step = load_checkpoint(args.resume, model, optimizer, run) if args.resume else 0
     fn = nn.value_and_grad(
         model, lambda m, b: loss(m, b, args.mtp_weight, args.router_weight)
@@ -176,6 +206,7 @@ def train(args, c):
         started = time.perf_counter()
         gradients = None
         mean_loss = 0.0
+        sampled_sources = {}
         for micro in range(args.accumulation):
             rng = np.random.default_rng(args.seed + current * args.accumulation + micro)
             if args.smoke:
@@ -185,6 +216,12 @@ def train(args, c):
                     size=(args.batch, args.sequence + 2),
                     dtype=np.uint32,
                 )
+            elif mixture is not None:
+                batch, names = mixture.sample(rng, args.batch)
+                for name in names:
+                    sampled_sources[name] = sampled_sources.get(name, 0) + args.sequence
+                if np.any(batch >= c.vocab_size):
+                    raise ValueError("mixture token exceeds configured vocabulary")
             else:
                 starts = rng.integers(
                     0, len(values) - args.sequence - 1, size=args.batch
@@ -215,6 +252,13 @@ def train(args, c):
                     "grad_norm": float(norm.item()),
                     "tokens": args.batch * args.sequence * args.accumulation,
                     "seconds": time.perf_counter() - started,
+                    "sampled_source_tokens": sampled_sources,
+                    "mlx_peak_memory_bytes": mx.get_peak_memory()
+                    if args.device == "gpu"
+                    else None,
+                    "mlx_active_memory_bytes": mx.get_active_memory()
+                    if args.device == "gpu"
+                    else None,
                 }
             ),
             flush=True,
@@ -265,6 +309,14 @@ def main(argv=None):
         help="Use tiny test geometry and generated tokens; never measures model quality",
     )
     p.add_argument("--tokens", type=Path)
+    p.add_argument("--mixture", type=Path)
+    p.add_argument("--memory-limit-gib", type=float, default=64.0)
+    p.add_argument(
+        "--wait-for-gpu",
+        type=float,
+        default=0,
+        help="Maximum seconds to wait without loading MLX weights",
+    )
     p.add_argument("--tokenizer-sha256")
     p.add_argument("--validation-tokens", type=Path)
     p.add_argument("--eval-every", type=int, default=100)
@@ -282,6 +334,12 @@ def main(argv=None):
     p.add_argument("--save-every", type=int, default=100)
     p.add_argument("--no-checkpoint", action="store_true")
     args = p.parse_args(argv)
+    if not math.isfinite(args.wait_for_gpu) or args.wait_for_gpu < 0:
+        p.error("GPU wait must be finite and nonnegative")
+    if args.mixture is not None and (args.tokens is not None or args.smoke):
+        p.error("--mixture is mutually exclusive with --tokens and --smoke")
+    if not math.isfinite(args.memory_limit_gib) or args.memory_limit_gib <= 0:
+        p.error("memory limit must be finite and positive")
     if args.smoke and args.config:
         p.error("--smoke and --config are mutually exclusive")
     c = (
@@ -304,10 +362,13 @@ def main(argv=None):
         )
         return 0
     if args.output is None or (
-        not args.smoke and (args.tokens is None or not args.tokenizer_sha256)
+        not args.smoke
+        and (
+            (args.tokens is None and args.mixture is None) or not args.tokenizer_sha256
+        )
     ):
         p.error(
-            "training requires --output and, outside smoke, --tokens and --tokenizer-sha256"
+            "training requires --output and, outside smoke, --tokens or --mixture, plus --tokenizer-sha256"
         )
     if any(
         getattr(args, n) < 1
@@ -339,21 +400,13 @@ def main(argv=None):
         or args.router_weight < 0
     ):
         p.error("invalid optimizer/loss settings")
-    with ExitStack() as stack:
-        if args.device == "gpu":
-            if platform.system() != "Darwin" or platform.machine() != "arm64":
-                p.error("GPU training requires Apple Silicon")
-            for lock in ("/Users/Shared/mlxuag/gpu.lock", "/tmp/gpu.lock"):
-                f = stack.enter_context(open(lock, "a"))
-                fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            processes = subprocess.check_output(["ps", "-axo", "command"], text=True)
-            if any(
-                "-m mlx2.server" in row
-                or "tensorfold serve" in row
-                or "run_perf.py" in row
-                for row in processes.splitlines()
-            ):
-                raise RuntimeError("another inference/qualification process is running")
+    from .resources import gpu_guard
+
+    with (
+        gpu_guard(wait_seconds=args.wait_for_gpu)
+        if args.device == "gpu"
+        else nullcontext()
+    ):
         return train(args, c)
 
 
