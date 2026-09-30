@@ -508,6 +508,7 @@ _SCHEDULER_EVENTS = frozenset(
         "external_tree_single_fence_rounds",
         "external_tree_pipelined_drafts",
         "external_tree_pipeline_discards",
+        "external_allocator_reclaims",
         "memory_deferred",
         "memory_pressure_evictions",
         "stream_page_ins_total",
@@ -1122,6 +1123,7 @@ def _scheduler_mechanism(key: str) -> str:
         "external_tree_single_fence_rounds",
         "external_tree_pipelined_drafts",
         "external_tree_pipeline_discards",
+        "external_allocator_reclaims",
     }:
         return "external_speculative"
     if key == "fly_relaxed_accepts":

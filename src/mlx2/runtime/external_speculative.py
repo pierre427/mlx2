@@ -25,6 +25,7 @@ from .cow_cache import (
     snapshot_prompt_cache_descriptors,
     snapshot_recovery_descriptors,
 )
+from .generate import ALLOCATOR_RECLAIM_MTP_TOKEN_INTERVAL, _crossed_counter_interval
 from .speculative_sampling import (
     FLyVerificationPolicy,
     RequestRNG,
@@ -346,6 +347,8 @@ class ExternalDraftBatchGenerator:
         self.memory_headroom = memory_headroom
         self.reclaim_memory = reclaim_memory; self.evict_checkpoint = evict_checkpoint
         self._schedule_cursor = 0; self._reclaims_left = 0; self._allocator_reclaimed = False
+        # Responses returned by next(); drives the periodic allocator reclaim.
+        self._emitted_responses = 0
         self.binding = binding; self.capacity = completion_batch_size
         self.fly_verification = FLyVerificationPolicy.from_value(fly_verification)
         self.prefill_step = prefill_step_size; self.num_draft = int(num_draft)
@@ -390,7 +393,7 @@ class ExternalDraftBatchGenerator:
         self.layers = tuple(draft_model.config.target_layer_ids)
         self.lanes = {}; self.next_uid = 0; self.boundaries = {}
         self._lane_failures = []
-        self.scheduler_stats = {"external_rounds": 0, "accepted_proposals": 0, "proposed_tokens": 0, "ordinary_rounds": 0, "cancelled": 0, "target_max_width": 0, "draft_max_width": 1, "prefill_rounds": 0, "paired_cache_resumes": 0, "segmented_transactions": 0, "segmented_rollbacks": 0, "draft_fallbacks": 0, "recovery_checkpoint_captures": 0, "recovery_checkpoint_restores": 0, "external_draft_masked_positions": 0, "external_ordinary_fast_path_rounds": 0, "external_ordinary_fast_path_lanes": 0, "external_draft_context_skipped": 0, "external_taps_skipped": 0, "external_transactions_skipped": 0, "fly_relaxed_accepts": 0, "external_context_token_pairings": 0, "external_verify_steer_rounds": 0, "external_verify_steered_lanes": 0}
+        self.scheduler_stats = {"external_rounds": 0, "accepted_proposals": 0, "proposed_tokens": 0, "ordinary_rounds": 0, "cancelled": 0, "target_max_width": 0, "draft_max_width": 1, "prefill_rounds": 0, "paired_cache_resumes": 0, "segmented_transactions": 0, "segmented_rollbacks": 0, "draft_fallbacks": 0, "recovery_checkpoint_captures": 0, "recovery_checkpoint_restores": 0, "external_draft_masked_positions": 0, "external_ordinary_fast_path_rounds": 0, "external_ordinary_fast_path_lanes": 0, "external_draft_context_skipped": 0, "external_taps_skipped": 0, "external_transactions_skipped": 0, "fly_relaxed_accepts": 0, "external_context_token_pairings": 0, "external_verify_steer_rounds": 0, "external_verify_steered_lanes": 0, "external_allocator_reclaims": 0}
         # Drafters that fuse each target feature with the token that follows
         # it (EAGLE) opt in; DFlash-family drafters keep the original calls.
         self.pair_context_tokens = bool(getattr(draft_model, "requires_context_tokens", False))
@@ -2141,7 +2144,26 @@ class ExternalDraftBatchGenerator:
                     break
                 if self.ready_drain == "one":
                     break
+        self._reclaim_after_emission(len(responses))
         return prompts, responses
+
+    def _reclaim_after_emission(self, count):
+        """Release the MLX buffer pool on the self-MTP emitted-token cadence.
+
+        Each round frees verify-width KV and activation buffers that the pool
+        keeps.  One poll can return several tokens (several lanes, or
+        ``ready_drain="all"``), so the clear fires on crossing a multiple of
+        the interval, not only on landing on one (Ollama #18510).  Admission
+        reclaim stays pressure-only; like the self-MTP clear, this periodic
+        one does not synchronize.
+        """
+        previous = self._emitted_responses
+        self._emitted_responses = min(_COUNTER_MAX, previous + int(count))
+        if _crossed_counter_interval(
+            previous, self._emitted_responses, ALLOCATOR_RECLAIM_MTP_TOKEN_INTERVAL
+        ):
+            self.mx.clear_cache()
+            _bump(self.scheduler_stats, "external_allocator_reclaims")
 
     def pop_prompt_boundary(self, uid): return self.boundaries.pop(uid, None)
 

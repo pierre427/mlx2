@@ -2,10 +2,12 @@
 
 Ollama v0.34.2: freed KV/intermediate buffers pile up in the MLX pool during
 speculative decode unless something clears it. The prompt-lookup route had no
-clear in prefill or decode.
+clear in prefill or decode; the external-draft route reclaimed only under
+admission pressure (Ollama #18510: clear on crossing the interval).
 """
 
 import mlx.core as mx
+import pytest
 
 from mlx2.runtime import generate as G
 from mlx2.runtime import pld
@@ -112,6 +114,111 @@ def test_self_mtp_reclaim_follows_emitted_tokens(monkeypatch):
         gen.close()
     assert emitted >= 32
     assert calls["n"] >= emitted // 16 - 1
+
+
+def _fake_clears(monkeypatch):
+    """Replace the allocator clear with a counter; nothing is released."""
+    calls = {"n": 0}
+
+    def fake():
+        calls["n"] += 1
+
+    monkeypatch.setattr(mx, "clear_cache", fake)
+    return calls
+
+
+def _external_generator():
+    from test_external_dflash2_cpu import generator, tiny
+
+    model, draft = tiny()
+    return generator(model, draft)
+
+
+@pytest.mark.parametrize(
+    ("start", "emitted", "cleared"),
+    [
+        (0, 255, False),  # 255: short of the first boundary
+        (255, 1, True),  # 256: lands on it
+        (256, 1, False),  # 257: already past it
+        (254, 3, True),  # 254 -> 257 jumps over 256; an equality gate misses it
+        (511, 2, True),  # 513: the next boundary, crossed by two
+        (100, 700, True),  # three boundaries in one poll still clear once
+        (255, 0, False),  # an empty poll never clears
+    ],
+)
+def test_external_draft_reclaims_on_emitted_boundary_crossing(
+    monkeypatch, start, emitted, cleared
+):
+    assert G.ALLOCATOR_RECLAIM_MTP_TOKEN_INTERVAL == 256
+    gen = _external_generator()
+    try:
+        calls = _fake_clears(monkeypatch)
+        gen._emitted_responses = start
+        gen._reclaim_after_emission(emitted)
+        assert gen._emitted_responses == start + emitted
+        assert calls["n"] == int(cleared)
+        assert gen.scheduler_stats["external_allocator_reclaims"] == int(cleared)
+    finally:
+        gen.close()
+
+
+def _external_decode(monkeypatch, start, *, fake_clear=True):
+    """Decode two lanes from an emitted count of ``start``.
+
+    Returns per-poll ``(before, after)`` counts, the clear count and tokens.
+    """
+    gen = _external_generator()
+    polls, tokens = [], {}
+    try:
+        gen.insert([[1, 2, 3], [3, 4, 5]], max_tokens=[12, 12])
+        while not all(lane.anchor is not None for lane in gen.lanes.values()):
+            for response in gen.next()[1]:
+                tokens.setdefault(response.uid, []).append(response.token)
+        calls = _fake_clears(monkeypatch) if fake_clear else {"n": 0}
+        gen._emitted_responses = start
+        while gen.lanes:
+            before = gen._emitted_responses
+            for response in gen.next()[1]:
+                tokens.setdefault(response.uid, []).append(response.token)
+            polls.append((before, gen._emitted_responses))
+        reclaims = gen.scheduler_stats["external_allocator_reclaims"]
+    finally:
+        gen.close()
+        monkeypatch.undo()
+    return polls, calls["n"], reclaims, tokens
+
+
+@pytest.mark.parametrize("start", [254, 255])
+def test_external_draft_next_reclaims_when_a_poll_crosses_256(monkeypatch, start):
+    """next() drives the reclaim.  Two live lanes return two tokens per poll,
+    so from 255 the count goes 257, 259, ... and never lands on 256."""
+    polls, clears, reclaims, _tokens = _external_decode(monkeypatch, start)
+    assert polls[0] == (start, start + 2)
+    crossings = [p for p in polls if p[1] // 256 > p[0] // 256]
+    assert crossings == [polls[0]]
+    assert clears == reclaims == 1
+
+
+def test_external_draft_reclaim_does_not_change_tokens(monkeypatch):
+    """A real clear at the boundary leaves decode output unchanged."""
+    _polls, _clears, crossed, reclaimed = _external_decode(
+        monkeypatch, 255, fake_clear=False
+    )
+    _polls, _clears, idle, plain = _external_decode(
+        monkeypatch, 0, fake_clear=False
+    )
+    assert (crossed, idle) == (1, 0)
+    assert reclaimed == plain and all(len(t) == 12 for t in plain.values())
+
+
+def test_prometheus_exports_external_allocator_reclaims():
+    from mlx2 import prometheus
+
+    assert "external_allocator_reclaims" in prometheus._SCHEDULER_EVENTS
+    assert (
+        prometheus._scheduler_mechanism("external_allocator_reclaims")
+        == "external_speculative"
+    )
 
 
 def _lazy_nodes(array):
