@@ -191,7 +191,8 @@ class ReducedMTPHead(nn.Module):
             self.mode = str(source.mode)
         self.freeze()
 
-    def __call__(self, hidden):
+    def compact_logits(self, hidden):
+        """Return only proposal rows without changing the full target head."""
         if self.quantized:
             reduced = mx.quantized_matmul(
                 hidden,
@@ -207,6 +208,10 @@ class ReducedMTPHead(nn.Module):
             reduced = hidden @ self.weight.T
         if self.bias is not None:
             reduced = reduced + self.bias
+        return reduced
+
+    def __call__(self, hidden):
+        reduced = self.compact_logits(hidden)
         full = mx.full((*reduced.shape[:-1], self.vocab_size), -mx.inf, reduced.dtype)
         indices = mx.broadcast_to(self.token_ids, reduced.shape)
         return mx.put_along_axis(full, indices, reduced, axis=-1)
@@ -228,6 +233,26 @@ class ReducedMTPHead(nn.Module):
             ),
         }
 
+
+@dataclass(frozen=True)
+class RequestCompactGreedyHead:
+    """Per-request proposal-only view; no model-wide drafting flag or hook."""
+
+    head: ReducedMTPHead
+    manifest: DraftVocabManifest
+
+    @classmethod
+    def from_bound_artifact(cls, model_path: Path, source_head):
+        manifest, ids = load_manifest(model_path)
+        return cls(ReducedMTPHead(source_head, ids, manifest.vocab_size), manifest)
+
+    def propose(self, hidden, *, greedy: bool):
+        """Return vocabulary IDs; sampling must use the ordinary full head."""
+        if greedy is not True:
+            raise DraftVocabError("compact proposal head is greedy-only")
+        logits = self.head.compact_logits(hidden)
+        compact_ids = mx.argmax(logits, axis=-1)
+        return mx.take(self.head.token_ids, compact_ids), logits
 
 def install_reduced_mtp_head(model, manifest, token_ids) -> dict:
     """Install an adapter-requested proposal head, refusing tied/no-MTP models."""

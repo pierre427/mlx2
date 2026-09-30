@@ -158,6 +158,55 @@ def test_restricted_proposal_rejection_law_recovers_target_distribution():
     assert emitted == pytest.approx(p)
 
 
+def test_request_compact_greedy_proposal_is_isolated_from_target():
+    import mlx.core as mx
+    from mlx import nn
+
+    from mlx2.runtime.mtp_draft_vocab import (
+        DraftVocabError, DraftVocabManifest, RequestCompactGreedyHead,
+        ReducedMTPHead,
+    )
+
+    mx.set_default_device(mx.cpu)
+    target = nn.Linear(4, 8, bias=False)
+    manifest = DraftVocabManifest(
+        schema="mlx2.mtp-draft-vocab.v1", vocab_size=8, token_count=3,
+        ids_sha256="a", license_sha256="b", config_sha256="c",
+        index_sha256="d", tokenizer_sha256="e", source_repository="repo",
+        source_revision="revision", corpus_profile="test",
+    )
+    request = RequestCompactGreedyHead(ReducedMTPHead(target, (1, 3, 7), 8), manifest)
+    hidden = mx.random.normal((1, 2, 4))
+    full_before = target(hidden)
+    ids, compact = request.propose(hidden, greedy=True)
+    mx.eval(full_before, ids, compact)
+    assert compact.shape == (1, 2, 3)
+    assert mx.allclose(
+        compact, mx.take(full_before, mx.array([1, 3, 7]), axis=-1),
+        atol=1e-5, rtol=1e-5,
+    ).item()
+    assert mx.array_equal(ids, mx.take(request.head.token_ids, mx.argmax(compact, axis=-1))).item()
+    assert mx.array_equal(full_before, target(hidden)).item()
+    with pytest.raises(DraftVocabError, match="greedy-only"):
+        request.propose(hidden, greedy=False)
+
+
+def test_request_compact_head_requires_bound_artifact(tmp_path):
+    import mlx.core as mx
+    from mlx import nn
+    from mlx2.runtime.mtp_draft_vocab import DraftVocabError, RequestCompactGreedyHead
+
+    mx.set_default_device(mx.cpu)
+    _artifact(tmp_path)
+    source = nn.Linear(4, 4160, bias=False)
+    request = RequestCompactGreedyHead.from_bound_artifact(tmp_path, source)
+    assert request.head.vocab_size == 4160
+    assert request.head.token_ids.size == 4096
+    (tmp_path / "tokenizer.json").write_text('{"modified":true}')
+    with pytest.raises(DraftVocabError, match="binding mismatch"):
+        RequestCompactGreedyHead.from_bound_artifact(tmp_path, source)
+
+
 def test_constrained_lane_selects_full_vocab_proposal_path():
     from mlx2.runtime.hybrid_speculative import _mtp_proposal_step
 
