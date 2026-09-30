@@ -1,22 +1,23 @@
 """Bounded GPU checkpoint/context validation; does not qualify learned retrieval."""
 
+import os
 import argparse
 import json
 import math
-import os
 import time
 from dataclasses import asdict
 from pathlib import Path
 
 from .config import Config
 from .resources import gpu_guard
+from mlx2.process_env import PROCESS_NUMERICS
 
 
 def run(args):
     # The parity gate compares differently tiled executions. MLX's default TF32
     # matmuls can amplify harmless tiling roundoff past the strict FP32 bound,
     # so make this validation process use full FP32 before its first operation.
-    os.environ["MLX_ENABLE_TF32"] = "0"
+    os.environ.update(PROCESS_NUMERICS)  # forced: the strict FP32 bound needs it
     import mlx.core as mx
     import numpy as np
 
