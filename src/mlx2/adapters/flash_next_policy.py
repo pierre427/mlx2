@@ -71,6 +71,12 @@ class FlashNextPolicy:
     # are counted.  Opt-in; enters the environment and receipts only when
     # enabled.
     hc_decode_kernels: bool = False
+    # omlx #4106 GDN half (MLX_QWEN4_FUSED_GDN_BATCH_DECODE): one launch of
+    # the one-row fused GDN decode step for every row of a batched one-token
+    # decode (the MTP->ordinary handoff width).  "row_exact" runs each row's
+    # one-row arithmetic, bit-identical to its B=1 launch.  Opt-in; enters
+    # the environment and receipts only when not "off".
+    fused_gdn_batch_decode: str = "off"
     # Opt-in: the quantized lm_head stores fp32 logits instead of rounding
     # them to bf16 (runtime/fp32_head.py).  Not an environment switch; it
     # enters receipts only when enabled, like the kernels above.
@@ -95,6 +101,8 @@ class FlashNextPolicy:
                 raise ValueError(f"{name} must be auto, on, or off")
         if self.moe_routed_decode not in {"off", "gate_up", "two_launch"}:
             raise ValueError("moe_routed_decode must be off, gate_up, or two_launch")
+        if self.fused_gdn_batch_decode not in {"off", "row_exact"}:
+            raise ValueError("fused_gdn_batch_decode must be off or row_exact")
         for name in (
             "async_qsa_promotion",
             "known_tail_ple_prefetch",
@@ -187,6 +195,8 @@ class FlashNextPolicy:
             del values["moe_routed_decode"]
         if not self.hc_decode_kernels:
             del values["hc_decode_kernels"]
+        if self.fused_gdn_batch_decode == "off":
+            del values["fused_gdn_batch_decode"]
         return values
 
     def environment(self):
@@ -219,6 +229,10 @@ class FlashNextPolicy:
             environment["MLX_QWEN4_MOE_ROUTED_DECODE"] = self.moe_routed_decode
         if self.hc_decode_kernels:
             environment["MLX_QWEN4_HC_DECODE"] = "1"
+        if self.fused_gdn_batch_decode != "off":
+            environment["MLX_QWEN4_FUSED_GDN_BATCH_DECODE"] = (
+                self.fused_gdn_batch_decode
+            )
         return environment
 
     def batch_config(self, *, max_lanes, prefill_step):

@@ -41,9 +41,11 @@ from .cache import (
 from .gated_delta import gated_delta_update
 from .pipeline import PipelineMixin
 from .qwen4_fused_gdn import (
+    admit_qwen4_fused_gdn_batch_decode,
     admit_qwen4_fused_gdn_decode,
     fused_gdn_runtime_supported,
     probe_qwen4_fused_gdn_decode,
+    qwen4_fused_gdn_batch_decode,
     qwen4_fused_gdn_decode,
     qwen4_fused_gdn_decode_outproj,
 )
@@ -390,6 +392,22 @@ _GDN_FUSED_INPROJ_MAX_ROWS = 8
 _GDN_INPROJ_MODULES = ("in_proj_qkv", "in_proj_z", "in_proj_b", "in_proj_a")
 _FUSED_GDN_DECODE = _env_flag("MLX_QWEN4_FUSED_GDN_DECODE")
 _FUSED_GDN_DECODE_MODES = ("stock", "fused", "fused_outproj")
+# omlx #4106 GDN half: one launch of the one-row decode step for every row of
+# a batched one-token decode.  "row_exact" is per-row one-token arithmetic,
+# bit-identical to each row's B=1 fused launch.  Default off; the Flash-Next
+# policy field ``fused_gdn_batch_decode`` is the only way the adapter sets it.
+_FUSED_GDN_BATCH_DECODE_MODES = ("off", "row_exact")
+_FUSED_GDN_BATCH_DECODE = os.environ.get(
+    "MLX_QWEN4_FUSED_GDN_BATCH_DECODE", "off"
+).strip().lower()
+_FUSED_GDN_BATCH_DECODE = {"": "off", "0": "off", "false": "off", "1": "row_exact"}.get(
+    _FUSED_GDN_BATCH_DECODE, _FUSED_GDN_BATCH_DECODE
+)
+if _FUSED_GDN_BATCH_DECODE not in _FUSED_GDN_BATCH_DECODE_MODES:
+    raise ValueError(
+        "MLX_QWEN4_FUSED_GDN_BATCH_DECODE must be one of "
+        f"{_FUSED_GDN_BATCH_DECODE_MODES}, got {_FUSED_GDN_BATCH_DECODE!r}"
+    )
 _FUSED_GDN_VERIFY = _env_flag("MLX_QWEN4_FUSED_GDN_VERIFY")
 _FUSED_GDN_REPLAY_ROLLBACK = _env_flag("MLX_QWEN4_FUSED_GDN_REPLAY_ROLLBACK")
 _FUSED_GDN_DYNAMIC_ACCEPT = _env_flag("MLX_QWEN4_FUSED_GDN_DYNAMIC_ACCEPT")
@@ -927,6 +945,12 @@ class GatedDeltaNet(Qwen35GatedDeltaNet):
         self.fused_gdn_decode_fallbacks = 0
         self.fused_gdn_decode_last_fallback = None
         object.__setattr__(self, "fused_gdn_decode_fallback_reasons", {})
+        self.fused_gdn_batch_decode_mode = _FUSED_GDN_BATCH_DECODE
+        self.fused_gdn_batch_decode_calls = 0
+        self.fused_gdn_batch_decode_rows = 0
+        self.fused_gdn_batch_decode_fallbacks = 0
+        self.fused_gdn_batch_decode_last_fallback = None
+        object.__setattr__(self, "fused_gdn_batch_decode_fallback_reasons", {})
         object.__setattr__(self, "_gdn_inproj_fused_cache", None)
         self.gdn_fused_inproj = _GDN_FUSED_INPROJ
         self.gdn_fused_inproj_calls = 0
@@ -994,6 +1018,91 @@ class GatedDeltaNet(Qwen35GatedDeltaNet):
                 f"unknown fused GDN decode mode {mode!r}; expected one of {_FUSED_GDN_DECODE_MODES}"
             )
         self.fused_gdn_decode_mode = mode
+
+    def set_fused_gdn_batch_decode_mode(self, mode: str):
+        """Select the batched one-token decode route; B=1 decode is untouched."""
+        if mode not in _FUSED_GDN_BATCH_DECODE_MODES:
+            raise ValueError(
+                f"unknown fused GDN batch decode mode {mode!r}; expected one of {_FUSED_GDN_BATCH_DECODE_MODES}"
+            )
+        self.fused_gdn_batch_decode_mode = mode
+
+    def _fused_gdn_batch_fallback(self, reason: str):
+        self.fused_gdn_batch_decode_fallbacks += 1
+        self.fused_gdn_batch_decode_last_fallback = reason
+        reasons = self.fused_gdn_batch_decode_fallback_reasons
+        if reason not in reasons and len(reasons) >= _DECODE_FALLBACK_REASON_LIMIT:
+            reason = "other"
+        reasons[reason] = reasons.get(reason, 0) + 1
+        return None
+
+    def _try_fused_batch_decode(self, qkv, z, b, a, mask, cache):
+        """Batched one-token decode: one launch, each row's one-row arithmetic.
+
+        Admission is re-run on every call, so lanes that finish or join (a new
+        leading extent, a fresh row with no state yet) are re-checked; every
+        refusal is counted and returns ``None`` to the stock chain.
+        """
+        if cache is None or cache[0] is None or cache[1] is None:
+            return self._fused_gdn_batch_fallback("uninitialized cache")
+        describe = getattr(cache, "rollback_spans", None)
+        spans = describe(int(qkv.shape[1]), mask) if callable(describe) else ()
+        admission = admit_qwen4_fused_gdn_batch_decode(
+            qkv=qkv,
+            z=z,
+            b=b,
+            a=a,
+            conv_state=cache[0],
+            recurrent_state=cache[1],
+            conv_weight=self.conv1d.weight,
+            A_log=self.A_log,
+            dt_bias=self.dt_bias,
+            norm_weight=self.norm.weight,
+            mask=mask,
+            spans=spans,
+            speculating=bool(getattr(cache, "speculating", False)),
+            training=bool(self.training),
+            sharded=self.sharding_group is not None,
+            num_key_heads=self.num_k_heads,
+            num_value_heads=self.num_v_heads,
+            key_head_dim=self.head_k_dim,
+            value_head_dim=self.head_v_dim,
+            conv_kernel=self.conv_kernel_size,
+            gate_activation=self.norm.activation,
+        )
+        if not admission.accepted:
+            return self._fused_gdn_batch_fallback(admission.reason)
+        if not fused_gdn_runtime_supported():
+            return self._fused_gdn_batch_fallback("Metal runtime unavailable")
+        try:
+            threadgroup_y = probe_qwen4_fused_gdn_decode(qkv.dtype)
+            if threadgroup_y is None:
+                return self._fused_gdn_batch_fallback("Metal kernel probe declined")
+            (out, conv_state, recurrent_state) = qwen4_fused_gdn_batch_decode(
+                qkv,
+                z,
+                b,
+                a,
+                cache[0],
+                self.conv1d.weight,
+                self.A_log,
+                self.dt_bias,
+                cache[1],
+                self.norm.weight,
+                self.norm.eps,
+                threadgroup_y=threadgroup_y,
+            )
+        except Exception as exc:
+            return self._fused_gdn_batch_fallback(
+                f"Metal kernel dispatch failed: {type(exc).__name__}"
+            )
+        cache[0] = conv_state
+        cache[1] = recurrent_state
+        cache.advance(1)
+        self.fused_gdn_batch_decode_calls += 1
+        self.fused_gdn_batch_decode_rows += int(qkv.shape[0])
+        self.fused_gdn_batch_decode_last_fallback = None
+        return self.out_proj(out)
 
     def _fused_gdn_fallback(self, reason: str):
         self.fused_gdn_decode_fallbacks += 1
@@ -1355,6 +1464,11 @@ class GatedDeltaNet(Qwen35GatedDeltaNet):
             # a single-token decode candidate. Booking it as a decode
             # fallback buried the real decode refusals in the receipts.
             return None
+        if qkv.shape[0] > 1 and self.fused_gdn_batch_decode_mode != "off":
+            # A batched one-token step: its own route, counters and refusals.
+            # With the mode off it keeps the B=1 admission (and its counted
+            # "qkv shape" refusal) exactly as before.
+            return self._try_fused_batch_decode(qkv, z, b, a, mask, cache)
         if cache is None or cache[0] is None or cache[1] is None:
             return self._fused_gdn_fallback("uninitialized cache")
         describe = getattr(cache, "rollback_spans", None)
@@ -1636,6 +1750,33 @@ def qwen4_fused_gdn_stats(
             durable = stats.setdefault("prefill_fallback_reasons", {})
             for reason, count in module.fused_gdn_prefill_fallback_reasons.items():
                 durable[reason] = durable.get(reason, 0) + count
+        if module.fused_gdn_batch_decode_mode != "off":
+            # Reported only when selected, so default diagnostics are unchanged.
+            batch = stats.setdefault(
+                "batch_decode",
+                {
+                    "modes": [],
+                    "calls": 0,
+                    "rows": 0,
+                    "fallbacks": 0,
+                    "fallback_reasons": {},
+                    "last_fallbacks": {},
+                },
+            )
+            if module.fused_gdn_batch_decode_mode not in batch["modes"]:
+                batch["modes"].append(module.fused_gdn_batch_decode_mode)
+            batch["calls"] += module.fused_gdn_batch_decode_calls
+            batch["rows"] += module.fused_gdn_batch_decode_rows
+            batch["fallbacks"] += module.fused_gdn_batch_decode_fallbacks
+            for reason, count in module.fused_gdn_batch_decode_fallback_reasons.items():
+                batch["fallback_reasons"][reason] = (
+                    batch["fallback_reasons"].get(reason, 0) + count
+                )
+            reason = module.fused_gdn_batch_decode_last_fallback
+            if reason is not None:
+                batch["last_fallbacks"][reason] = (
+                    batch["last_fallbacks"].get(reason, 0) + 1
+                )
         stats["catchup_calls"] += module.fused_gdn_catchup_calls
         stats["catchup_fallbacks"] += module.fused_gdn_catchup_fallbacks
         reason = module.fused_gdn_catchup_last_fallback
@@ -1649,6 +1790,11 @@ def qwen4_fused_gdn_stats(
             module.fused_gdn_decode_fallbacks = 0
             module.fused_gdn_decode_last_fallback = None
             module.fused_gdn_decode_fallback_reasons.clear()
+            module.fused_gdn_batch_decode_calls = 0
+            module.fused_gdn_batch_decode_rows = 0
+            module.fused_gdn_batch_decode_fallbacks = 0
+            module.fused_gdn_batch_decode_last_fallback = None
+            module.fused_gdn_batch_decode_fallback_reasons.clear()
             module.fused_gdn_verify_calls = 0
             module.fused_gdn_verify_fallbacks = 0
             module.fused_gdn_verify_last_fallback = None

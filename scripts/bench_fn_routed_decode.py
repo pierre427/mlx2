@@ -33,7 +33,9 @@ def main():
     ap.add_argument("--model", required=True)
     ap.add_argument("--prompt-file", required=True)
     ap.add_argument("--phase", choices=("speed", "quality"), required=True)
-    ap.add_argument("--arms", nargs="+", default=["off", "gate_up", "two_launch"])
+    ap.add_argument("--knob", choices=("moe_routed", "gdn_batch"), default="moe_routed",
+                    help="gdn_batch: arms are fused GDN batched-decode modes (off | row_exact)")
+    ap.add_argument("--arms", nargs="+", default=None)
     ap.add_argument("--configs", nargs="+", default=["ordinary:1", "mtp:1", "ordinary:4", "mtp:4"])
     ap.add_argument("--context", type=int, default=4096)
     ap.add_argument("--gen", type=int, default=384)
@@ -47,6 +49,8 @@ def main():
     ap.add_argument("--out", required=True)
     ap.add_argument("--i-own-the-gpu", action="store_true")
     a = ap.parse_args()
+    if a.arms is None:
+        a.arms = ["off", "row_exact"] if a.knob == "gdn_batch" else ["off", "gate_up", "two_launch"]
     if not a.i_own_the_gpu:
         ap.error("refusing Metal execution without --i-own-the-gpu")
 
@@ -62,7 +66,14 @@ def main():
 
     default_expert_mode = blocks[0].fused_expert_kernel_mode
 
+    gdn_layers = [m for _, m in model.named_modules() if hasattr(m, "set_fused_gdn_batch_decode_mode")]
+
     def configure(arm):
+        if a.knob == "gdn_batch":
+            # Arms: the fused GDN batched one-token decode mode (off | row_exact).
+            for layer in gdn_layers:
+                layer.set_fused_gdn_batch_decode_mode(arm)
+            return
         # Arms: a routed-decode mode (off | gate_up | two_launch), or
         # "stock_down": routed off and the fused-expert tile4 down replaced by
         # the stock gather_qmm + weighted sum (the numerics two_launch matches).
@@ -71,6 +82,9 @@ def main():
             b.set_fused_expert_kernel_mode("stock" if arm == "stock_down" else default_expert_mode)
 
     def calls():
+        if a.knob == "gdn_batch":
+            return sum(m.fused_gdn_batch_decode_calls for m in gdn_layers), sum(
+                m.fused_gdn_batch_decode_fallbacks for m in gdn_layers)
         return sum(b.switch_mlp.routed_decode_calls for b in blocks), sum(
             b.switch_mlp.routed_decode_fallbacks for b in blocks)
 
@@ -186,7 +200,7 @@ def main():
         batch = int(batch)
         configure(a.arms[0])
         run(route, batch)  # warm-up, discarded
-        per_arm = {arm: {"tps": [], "sha": [], "calls": [], "ms_per_step": [],
+        per_arm = {arm: {"tps": [], "sha": [], "calls": [], "fallbacks": [], "ms_per_step": [],
                          "tokens_per_step": [], "offset": []} for arm in a.arms}
         first_tokens = {}
         for rep in range(a.reps):
@@ -205,6 +219,7 @@ def main():
                 per_arm[arm]["tps"].append(tps)
                 per_arm[arm]["sha"].append(sha)
                 per_arm[arm]["calls"].append(after[0] - before[0])
+                per_arm[arm]["fallbacks"].append(after[1] - before[1])
                 first_tokens.setdefault(arm, toks)
                 print(f"{config} rep{rep} off{offset} {arm} {tps:.2f} tok/s {run.last['ms_per_step']:.2f} ms/step "
                       f"{run.last['tokens_per_step']:.3f} tok/step calls={after[0] - before[0]} sha={sha}", flush=True)
@@ -223,6 +238,9 @@ def main():
                             "mean_tokens_per_step": statistics.mean(v["tokens_per_step"]), "min_tps": min(v["tps"]), "max_tps": max(v["tps"]),
                             "delta_vs_off_pct": None if base is None else 100 * (med / base - 1),
                             "routed_calls_per_run": v["calls"][0],
+                            "fallbacks_per_run": v["fallbacks"],
+                            "lanes_identical_to_off": None if arm == "off" or "off" not in first_tokens else [
+                                x == y for x, y in zip(first_tokens["off"], first_tokens[arm])],
                             "tokens_identical_to_off": None if arm == "off" else all(
                                 s == r for s, r in zip(v["sha"], per_arm["off"]["sha"])),
                             "first_divergence": diverge,
@@ -233,7 +251,7 @@ def main():
         results[config] = {"runs": per_arm, "summary": summary}
         print(config, json.dumps(summary, indent=1), flush=True)
     configure("off")
-    json.dump({"phase": "speed", "context": a.context, "gen": a.gen, "reps": a.reps,
+    json.dump({"phase": "speed", "knob": a.knob, "context": a.context, "gen": a.gen, "reps": a.reps,
                "prefill_step": a.prefill_step, "results": results,
                "peak_gib": mx.get_peak_memory() / 2**30, "mlx": mx.__version__},
               open(a.out, "w"), indent=1)
