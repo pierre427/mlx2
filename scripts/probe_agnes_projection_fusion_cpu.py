@@ -162,8 +162,8 @@ def main():
                 mx.eval(call())
                 return (time.perf_counter() - start) * 1000
 
-            stock_call = lambda: tuple(module(one) for module in stock_modules)
-            fused_call = lambda: GatedDeltaNet._input_projections(layer, one)
+            stock_call = lambda one=one, modules=stock_modules: tuple(module(one) for module in modules)
+            fused_call = lambda layer=layer, one=one: GatedDeltaNet._input_projections(layer, one)
             for _ in range(3):
                 timed(stock_call)
                 timed(fused_call)

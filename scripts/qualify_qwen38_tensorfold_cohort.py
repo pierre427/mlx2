@@ -17,6 +17,7 @@ import os
 import re
 import statistics
 import subprocess
+import sys
 import threading
 import time
 from datetime import UTC, datetime
@@ -169,7 +170,7 @@ def run_arm(args, root: Path, output: Path, limit: int, ordinal: int) -> dict:
     arm.mkdir(parents=True)
     port = args.port + ordinal
     base = f"http://127.0.0.1:{port}"
-    python = Path("~/Desktop/mlx2/.venv/bin/python")
+    python = Path(sys.executable)   # the interpreter running this qualifier
     environment = dict(
         os.environ,
         PYTHONPATH=str(root / "src"),

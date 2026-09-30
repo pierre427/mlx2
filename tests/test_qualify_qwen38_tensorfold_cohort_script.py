@@ -2,6 +2,7 @@
 
 import json
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -41,7 +42,7 @@ def _status(limit, *, rounds, width):
 
 def test_dry_run_plans_only_singleton_and_width_four(tmp_path):
     command = [
-        str(Path("~/Desktop/mlx2/.venv/bin/python")),
+        sys.executable,
         str(SCRIPT),
         "--mlx2-root", str(ROOT),
         "--model", str(tmp_path / "model"),
