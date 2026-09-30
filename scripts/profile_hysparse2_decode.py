@@ -17,8 +17,15 @@ def main():
     p.add_argument("--tokens", type=Path, required=True)
     p.add_argument("--output", type=Path, required=True)
     p.add_argument("--reference-attention", type=Path)
+    p.add_argument(
+        "--warm-paired",
+        action="store_true",
+        help="Warm each paired attention and full-cross path before timing",
+    )
     p.add_argument("--lengths", type=int, nargs="+", default=[256, 1024, 4096, 16384])
     args = p.parse_args()
+    if args.warm_paired and not args.reference_attention:
+        p.error("--warm-paired requires --reference-attention")
     if args.output.exists():
         p.error("use a fresh receipt path")
     state = json.loads((args.checkpoint / "state.json").read_text())
@@ -31,6 +38,8 @@ def main():
         "repetitions": 1,
         "completed": False,
         "production_throughput_measurement": False,
+        "paired_paths_warmed": args.warm_paired,
+        "script_sha256": file_hash(Path(__file__)),
         "attention_source_sha256": file_hash(
             Path("src/mlx2/experimental/hysparse2/attention.py")
         ),
@@ -97,6 +106,16 @@ def main():
             oracle, oracle_seconds = timed(
                 attention, q, blocks, **common, select=(c.local_window, c.global_tokens)
             )
+            if args.warm_paired:
+                for function in (attention, reference_attention.attention):
+                    timed(
+                        function,
+                        q,
+                        blocks,
+                        **common,
+                        select=(c.local_window, c.global_tokens),
+                        block_select=(c.candidate_block_size, c.candidate_blocks),
+                    )
             selected, block_seconds = timed(
                 attention,
                 q,
@@ -141,16 +160,29 @@ def main():
                 row["paired_reference_support_equal"] = support_equal
                 row["paired_reference_support_set_equal"] = support_set_equal
                 row["paired_reference_anchor_max_abs_error"] = original_error
-                optimized_logits, _ = timed(model._cross, hidden, cache, offset)
+                if args.warm_paired:
+                    timed(model._cross, hidden, cache, offset)
+                    try:
+                        model_module.attention = reference_attention.attention
+                        timed(model._cross, hidden, cache, offset)
+                    finally:
+                        model_module.attention = attention
+                optimized_logits, optimized_cross_seconds = timed(
+                    model._cross, hidden, cache, offset
+                )
                 try:
                     model_module.attention = reference_attention.attention
-                    original_logits, _ = timed(model._cross, hidden, cache, offset)
+                    original_logits, original_cross_seconds = timed(
+                        model._cross, hidden, cache, offset
+                    )
                 finally:
                     model_module.attention = attention
                 logit_error = float(
                     mx.max(mx.abs(original_logits - optimized_logits)).item()
                 )
                 row["paired_reference_full_logits_max_abs_error"] = logit_error
+                row["optimized_full_cross_seconds"] = optimized_cross_seconds
+                row["reference_full_cross_seconds"] = original_cross_seconds
                 if not support_set_equal or original_error != 0 or logit_error != 0:
                     report["failure"] = row
                     args.output.write_text(json.dumps(report, indent=2) + "\n")
