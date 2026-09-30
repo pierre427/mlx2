@@ -251,6 +251,7 @@ def test_ltx_adapter_rejects_changed_conversion_output(tmp_path: Path, monkeypat
     _write(output / "transformer-distilled.safetensors")
     _write(output / "probe.safetensors")
     record = {name: {"size": 1, "sha256": hashlib.sha256(b"x").hexdigest()} for name in ("probe.safetensors", "transformer-distilled.safetensors")}
+    record["config.json"] = {"size": (output / "config.json").stat().st_size, "sha256": hashlib.sha256((output / "config.json").read_bytes()).hexdigest()}
     steps = {name: record for name in (
         "config", "transformer-distilled", "connector", "text-encoder",
         "vae", "audio-vae", "duration-head", "upscalers",

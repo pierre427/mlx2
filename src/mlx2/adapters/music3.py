@@ -12,6 +12,8 @@ import io
 import json
 import os
 import sys
+import tempfile
+import threading
 import wave
 from dataclasses import dataclass
 from pathlib import Path
@@ -28,6 +30,8 @@ from .music3_pin import SOURCE_SHA256, UNIFIED_SHA256, UNIFIED_TREE_SHA256
 
 MUSIC3_SOURCE_REVISION = "fbdf52fbaaca799592917417eb05f1899f1255ec"
 MUSIC3_RUNTIME_REVISION = "36cddae1146af463cace351af4a1404042ce3268"
+_VERIFIED_MODULES = {}
+_RUNTIME_IMPORT_LOCK = threading.RLock()
 
 
 def inspect_music3(path):
@@ -70,7 +74,7 @@ def inspect_music3(path):
         str(p.relative_to(root))
         for folder in ("qwen_7B/qwen_7B", "qwen_7B/qwen3-8B-tokenizer-music")
         for p in (root / folder).rglob("*")
-        if p.is_file()
+        if p.is_file() and p.name != ".DS_Store"
     }
     if not consumed.issubset(files):
         raise ValueError("Music3 unbound loader input files")
@@ -101,6 +105,11 @@ class GeneratedMusic:
 
 
 def _runtime_modules(runtime_root):
+    with _RUNTIME_IMPORT_LOCK:
+        return _load_runtime_modules(runtime_root)
+
+
+def _load_runtime_modules(runtime_root):
     root = Path(runtime_root).expanduser().resolve()
     for name, expected in SOURCE_SHA256.items():
         if _file_sha256(root / name) != expected:
@@ -123,15 +132,25 @@ def _runtime_modules(runtime_root):
     for name, module in list(sys.modules.items()):
         if name == "minimax_music3_mlx" or name.startswith("minimax_music3_mlx."):
             file = getattr(module, "__file__", None)
-            if file is None or not Path(file).resolve().is_relative_to(package):
+            if (
+                _VERIFIED_MODULES.get(name) is not module
+                or file is None
+                or not Path(file).resolve().is_relative_to(package)
+            ):
                 raise RuntimeError("another Music3 runtime is already imported")
     for name, module in list(sys.modules.items()):
         if name == "mlx_lm" or name.startswith("mlx_lm."):
             file = getattr(module, "__file__", None)
-            if file is None or not Path(file).resolve().is_relative_to(
-                unified / "mlx_lm"
+            if (
+                _VERIFIED_MODULES.get(name) is not module
+                or file is None
+                or not Path(file).resolve().is_relative_to(unified / "mlx_lm")
             ):
                 raise RuntimeError("another unified dependency is already imported")
+    previous_path = list(sys.path)
+    previous_cache = sys.pycache_prefix
+    cache = tempfile.TemporaryDirectory(prefix="mlx2-music-code-")
+    sys.pycache_prefix = cache.name
     sys.path.insert(0, str(root))
     try:
         modules = {
@@ -155,9 +174,18 @@ def _runtime_modules(runtime_root):
                     raise RuntimeError(
                         "Music3 unified dependency import identity differs"
                     )
+        for name, module in list(sys.modules.items()):
+            if name in ("mlx_lm", "minimax_music3_mlx") or name.startswith(
+                ("mlx_lm.", "minimax_music3_mlx.")
+            ):
+                _VERIFIED_MODULES[name] = module
         return modules
     finally:
-        sys.path.remove(str(root))
+        # The external backbone inserts its own dependency path. Restore the
+        # complete list, including on import failure, rather than one entry.
+        sys.path[:] = previous_path
+        sys.pycache_prefix = previous_cache
+        cache.cleanup()
 
 
 class Music3Adapter(MediaLoRAControl):
@@ -186,7 +214,7 @@ class Music3Adapter(MediaLoRAControl):
             if any(
                 str(p.relative_to(root)) not in self._input_identity
                 for p in (root / folder).rglob("*")
-                if p.is_file()
+                if p.is_file() and p.name != ".DS_Store"
             ):
                 raise ValueError("Music3 new unbound loader input")
 

@@ -397,11 +397,15 @@ class QwenImage21Adapter(MediaLoRAControl):
 
 
 def _ltx_origin_probe():
+    # A private fresh cache avoids executing ignored, pre-existing bytecode.
     return (
-        "import sys; from pathlib import Path; import ltx_core_mlx, ltx_pipelines_mlx; "
-        "root=Path(sys.argv[1]).resolve()/'packages'; "
-        "assert all(Path(m.__file__).resolve().is_relative_to(root) "
-        "for m in (ltx_core_mlx, ltx_pipelines_mlx)), 'LTX import origin differs from pinned source'"
+        "import sys, tempfile; _cache=tempfile.TemporaryDirectory(prefix='mlx2-ltx-code-'); "
+        "sys.pycache_prefix=_cache.name; from pathlib import Path; "
+        "import ltx_core_mlx, ltx_pipelines_mlx; "
+        "root=Path(sys.argv[1]).resolve()/'packages'\n"
+        "if not all(Path(m.__file__).resolve().is_relative_to(root) "
+        "for m in (ltx_core_mlx, ltx_pipelines_mlx)):\n"
+        " raise SystemExit('LTX import origin differs from pinned source')\n"
     )
 
 
@@ -454,6 +458,10 @@ class LTX25Adapter(MediaLoRAControl):
                     or _file_sha256(path) != record.get("sha256")
                 ):
                     raise ValueError(f"LTX conversion output changed: {name}")
+        self._bound_inputs = {
+            name for records in conversion["steps"].values() for name in records
+        }
+        self._verify_input_listing()
         self._conversion_identity = {
             name: self._file_identity(self.mlx_model / name)
             for records in conversion["steps"].values()
@@ -487,6 +495,18 @@ class LTX25Adapter(MediaLoRAControl):
         st = path.stat()
         return (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns)
 
+    def _verify_input_listing(self):
+        # Every model/config/tokenizer input must be receipt-bound, including
+        # files which native fallback resolvers might prefer over canonical ones.
+        for path in self.mlx_model.rglob("*"):
+            if not path.is_file():
+                continue
+            name = str(path.relative_to(self.mlx_model))
+            if name == ".mlx2-cpu-conversion.json" or path.name == ".DS_Store":
+                continue
+            if name not in self._bound_inputs:
+                raise ValueError(f"LTX unbound loader input: {name}")
+
     def _verify_checkpoint_selection(self):
         # The native resolver prefers these files over our receipt-bound name.
         if (self.mlx_model / "transformer.safetensors").exists() or any(
@@ -496,6 +516,7 @@ class LTX25Adapter(MediaLoRAControl):
 
     def _verify_execution_identity(self):
         self._verify_checkpoint_selection()
+        self._verify_input_listing()
         # Checksums were verified at construction; reject changed files rather
         # than silently use different weights under the old base identity.
         for name, expected in self._conversion_identity.items():
@@ -610,8 +631,10 @@ class LTX25Adapter(MediaLoRAControl):
         if target.suffix.lower() != ".mp4" or target.exists():
             raise ValueError("output must be a new .mp4 path")
         target.parent.mkdir(parents=True, exist_ok=True)
-        runner = (
-            "import mlx.core as mx, sys; mx.set_default_device(mx.gpu); "
+        runner = _ltx_origin_probe().replace(
+            "sys.argv[1]", repr(str(self.runtime_root))
+        ) + (
+            "import mlx.core as mx; mx.set_default_device(mx.gpu); "
             "from ltx_pipelines_mlx.cli import main; "
             "sys.argv=['ltx-2-mlx', *sys.argv[1:], '--prompt', sys.stdin.read()]; main()"
         )

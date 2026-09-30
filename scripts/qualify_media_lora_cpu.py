@@ -25,6 +25,8 @@ def main():
     parser.add_argument("--runtime-root", type=Path)
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
+    code_cache = tempfile.TemporaryDirectory(prefix="mlx2-media-code-")
+    sys.pycache_prefix = code_cache.name
     import mlx.core as mx
 
     mx.set_default_device(mx.cpu)

@@ -304,6 +304,7 @@ def test_ltx_output_is_published_only_on_success_without_clobbering(
 
     adapter._init_lora("ltx-2.5", LTX_RUNTIME_REVISION)
     adapter._conversion_identity = {}
+    adapter._bound_inputs = set()
     adapter.runtime_root = tmp_path
     adapter.executable = Path("unused-python")
     adapter.mlx_model = tmp_path / "model"

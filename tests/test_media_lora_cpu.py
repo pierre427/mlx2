@@ -501,6 +501,7 @@ def test_ltx_native_forwarding_failure_and_unload(tmp_path, monkeypatch):
     owner.runtime_root = tmp_path
     owner.executable = tmp_path / "python"
     owner._conversion_identity = {}
+    owner._bound_inputs = set()
     key = "transformer_blocks.0.attn1.to_q"
     save_file(
         {"transformer." + key + ".weight": np.zeros((3, 4), np.float32)},
@@ -517,6 +518,7 @@ def test_ltx_native_forwarding_failure_and_unload(tmp_path, monkeypatch):
         backend_revision=LTX_RUNTIME_REVISION,
         scale=3,
     )
+    owner._bound_inputs = {"transformer-distilled.safetensors"}
     seen = []
     fail = [False]
 
@@ -720,7 +722,18 @@ def test_bf16_conversion_and_peft_metadata(tmp_path):
         },
     )
     config = tmp_path / "adapter_config.json"
-    config.write_text(json.dumps({"r": 2, "lora_alpha": 4}))
+    config.write_text(
+        json.dumps(
+            {
+                "r": 2,
+                "lora_alpha": 4,
+                "alpha_pattern": {},
+                "rank_pattern": {},
+                "use_rslora": False,
+                "bias": "none",
+            }
+        )
+    )
     result = convert_media_lora(
         source,
         tmp_path / "converted",
@@ -957,6 +970,7 @@ def test_ltx_rejects_dirty_runtime_and_checks_import_origin(tmp_path, monkeypatc
     owner.runtime_root = tmp_path
     owner.executable = tmp_path / "python"
     owner._conversion_identity = {}
+    owner._bound_inputs = set()
     calls = []
     dirty = [True]
 
@@ -988,3 +1002,154 @@ def test_music_pins_package_initialization_before_import(tmp_path, monkeypatch):
     (package / "__init__.py").write_text("raise RuntimeError('must not execute')")
     with pytest.raises(ValueError, match="Python package"):
         music3._runtime_modules(tmp_path)
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        "spatial_upscaler_x2_v1_1.safetensors",
+        "spatial_upscaler_x2-1.1.safetensors",
+        "text_encoder/model-extra.safetensors",
+        "text_encoder/tokenizer_config.json",
+    ],
+)
+def test_ltx_all_loader_inputs_must_be_bound(tmp_path, extra):
+    from mlx2.adapters.generative_media import LTX25Adapter
+
+    owner = object.__new__(LTX25Adapter)
+    owner.mlx_model = tmp_path
+    owner._bound_inputs = {"spatial_upscaler_x2.safetensors"}
+    (tmp_path / "spatial_upscaler_x2.safetensors").write_bytes(b"bound")
+    owner._verify_input_listing()
+    path = tmp_path / extra
+    path.parent.mkdir(exist_ok=True)
+    path.write_bytes(b"unbound")
+    with pytest.raises(ValueError, match="unbound"):
+        owner._verify_input_listing()
+
+
+def test_ltx_origin_probe_survives_optimization_and_stale_bytecode(tmp_path):
+    import importlib.util
+    import os
+    import py_compile
+    import struct
+    import subprocess
+    import sys
+
+    from mlx2.adapters.generative_media import _ltx_origin_probe
+
+    root = tmp_path / "runtime"
+    packages = root / "packages"
+    for name in ("ltx_core_mlx", "ltx_pipelines_mlx"):
+        folder = packages / name
+        folder.mkdir(parents=True)
+        (folder / "__init__.py").write_text("MARKER = 'source'\n")
+    source = packages / "ltx_core_mlx/__init__.py"
+    evil = tmp_path / "evil.py"
+    evil.write_text("raise RuntimeError('stale compiled code')\n")
+    cached = importlib.util.cache_from_source(str(source))
+    py_compile.compile(str(evil), cfile=cached, doraise=True)
+    from pathlib import Path
+
+    data = Path(cached).read_bytes()
+    st = source.stat()
+    Path(cached).write_bytes(
+        data[:8] + struct.pack("<II", int(st.st_mtime), st.st_size) + data[16:]
+    )
+    env = {**os.environ, "PYTHONPATH": str(packages)}
+    env.pop("PYTHONPYCACHEPREFIX", None)
+    unguarded = subprocess.run(
+        [sys.executable, "-c", "import ltx_core_mlx"],
+        env=env,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert unguarded.returncode != 0 and "stale compiled code" in unguarded.stderr
+    guarded = subprocess.run(
+        [sys.executable, "-c", _ltx_origin_probe(), str(root)],
+        env=env,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert guarded.returncode == 0, guarded.stderr
+    wrong_root = tmp_path / "other"
+    wrong_root.mkdir()
+    optimized = subprocess.run(
+        [sys.executable, "-O", "-c", _ltx_origin_probe(), str(wrong_root)],
+        env=env,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert optimized.returncode != 0 and "origin differs" in optimized.stderr
+
+
+@pytest.mark.parametrize(
+    "metadata",
+    [
+        {"lora_alpha": "8"},
+        {"transformer.lora_adapter_metadata": json.dumps({"r": 2, "lora_alpha": 8})},
+        {"network_alphas": json.dumps({"transformer.block.alpha": 8})},
+        {"rank": "3"},
+        {"lora_adapter_metadata": json.dumps({"use_rslora": True})},
+        {"lora_adapter_metadata": json.dumps({"use_dora": True})},
+        {"lora_adapter_metadata": json.dumps({"alpha_pattern": {"block": 4}})},
+        {"lora_adapter_metadata": json.dumps({"rank_pattern": {"block": 2}})},
+    ],
+)
+def test_embedded_alpha_and_rank_metadata_cannot_be_ignored(tmp_path, metadata):
+    key = "transformer_blocks.0.attn.to_q"
+    path = tmp_path / "source.safetensors"
+    save_file(
+        {
+            key + ".lora_A.weight": np.ones((2, 4), np.float32),
+            key + ".lora_B.weight": np.ones((3, 2), np.float32),
+        },
+        str(path),
+        metadata=metadata,
+    )
+    with pytest.raises(ValueError, match="embedded PEFT"):
+        convert_media_lora(
+            path,
+            tmp_path / "bad",
+            family="qwen-image-2.1",
+            base_fingerprint=BASE,
+            backend_revision=REV,
+            alpha=4,
+        )
+    assert not (tmp_path / "bad").exists()
+
+
+def test_embedded_matching_alpha_metadata_converts(tmp_path):
+    key = "transformer_blocks.0.attn.to_q"
+    path = tmp_path / "source.safetensors"
+    save_file(
+        {
+            key + ".lora_A.weight": np.ones((2, 4), np.float32),
+            key + ".lora_B.weight": np.ones((3, 2), np.float32),
+        },
+        str(path),
+        metadata={
+            "transformer.lora_adapter_metadata": json.dumps(
+                {
+                    "r": 2,
+                    "lora_alpha": 4,
+                    "alpha_pattern": {},
+                    "rank_pattern": {},
+                    "use_rslora": False,
+                    "bias": "none",
+                }
+            )
+        },
+    )
+    result = convert_media_lora(
+        path,
+        tmp_path / "good",
+        family="qwen-image-2.1",
+        base_fingerprint=BASE,
+        backend_revision=REV,
+        alpha=4,
+    )
+    assert result.config["scale"] == 2

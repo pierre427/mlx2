@@ -354,6 +354,7 @@ def convert_media_lora(
         raise ValueError("PEFT rank differs from tensor rank")
     if "lora_alpha" in peft and _number(peft["lora_alpha"], "PEFT alpha") != alpha:
         raise ValueError("PEFT alpha differs from supplied alpha")
+    _check_embedded_peft_metadata(source_data, rank=rank, alpha=alpha)
     return write_media_lora(
         output,
         tensors,
@@ -367,6 +368,59 @@ def convert_media_lora(
             "source_sha256": source_hash,
         },
     )
+
+
+def _check_embedded_peft_metadata(data, *, rank, alpha):
+    # Rust deserialize has already validated the file. Inspect its original
+    # header as well so embedded alpha/rank cannot silently override the CLI.
+    header = json.loads(data[8 : 8 + int.from_bytes(data[:8], "little")])
+    metadata = header.get("__metadata__", {})
+
+    def walk(value, field=""):
+        if isinstance(value, str):
+            try:
+                value = json.loads(value)
+            except (ValueError, TypeError):
+                pass
+        if isinstance(value, dict):
+            if field in ("rank_pattern", "alpha_pattern"):
+                if value:
+                    raise ValueError("unsupported embedded PEFT configuration")
+                return
+            if "alpha" in field.lower():
+                if field != "network_alphas":
+                    raise ValueError("unsupported embedded PEFT alpha metadata")
+                for item in value.values():
+                    walk(item, "alpha")
+                return
+            for key, item in value.items():
+                walk(item, key)
+            return
+        leaf = field.rsplit(".", 1)[-1]
+        if (
+            leaf
+            in (
+                "use_dora",
+                "use_rslora",
+                "rank_pattern",
+                "alpha_pattern",
+                "modules_to_save",
+            )
+            and value
+        ):
+            raise ValueError("unsupported embedded PEFT configuration")
+        if leaf == "bias" and value != "none":
+            raise ValueError("unsupported embedded PEFT configuration")
+        if leaf in ("alpha", "lora_alpha"):
+            if _number(value, "embedded PEFT alpha") != alpha:
+                raise ValueError("embedded PEFT alpha differs from supplied alpha")
+        elif leaf in ("r", "rank"):
+            if type(value) is not int or value != rank:
+                raise ValueError("embedded PEFT rank differs from tensor rank")
+        elif "alpha" in field.lower():
+            raise ValueError("unsupported embedded PEFT alpha metadata")
+
+    walk(metadata)
 
 
 def validate_model_targets(model, artifact):
