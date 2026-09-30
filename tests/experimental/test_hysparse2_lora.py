@@ -98,6 +98,42 @@ def test_invalid_keys_do_not_mutate():
     assert set(dict(tree_flatten(model.parameters()))) == keys
 
 
+@pytest.mark.parametrize("fail_baseline", [False, True])
+def test_evaluation_baseline_state_cannot_escape(fail_baseline):
+    model = Model(Config.smoke())
+    model.eval()
+    tokens = mx.array([[1, 2, 3, 4, 5, 6]])
+    episode = LoRAEpisode(model, ["self_decoder.0.attention.q"], base_revision="r")
+    try:
+        episode.step(tokens, loss)
+        revision = model.adapter_revision
+        captured = []
+
+        def evaluate(m, t):
+            _, cache = m.prefill(t[:, :4])
+            baseline = not hasattr(m.self_decoder[0].attention.q, "lora_a")
+            captured.append((baseline, m.adapter_revision, cache))
+            if baseline and fail_baseline:
+                raise RuntimeError("evaluator failed")
+            return mx.array(1.0)
+
+        if fail_baseline:
+            with pytest.raises(RuntimeError, match="evaluator failed"):
+                episode.evaluate(tokens, tokens, evaluate)
+        else:
+            episode.evaluate(tokens, tokens, evaluate)
+        assert model.adapter_revision == revision
+        assert hasattr(model.self_decoder[0].attention.q, "lora_a")
+        for baseline, observed_revision, cache in captured:
+            assert observed_revision == (None if baseline else revision)
+            with pytest.raises(ValueError, match="another model"):
+                model.decode(tokens[:, 4:5], cache)
+        _, valid = model.prefill(tokens[:, :4])
+        model.decode(tokens[:, 4:5], valid)
+    finally:
+        episode.close()
+
+
 def test_candidate_revision_and_budget(tmp_path):
     model = Model(Config.smoke())
     tokens = mx.array([[1, 2, 3, 4, 5]])

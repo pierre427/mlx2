@@ -139,11 +139,15 @@ class LoRAEpisode:
         wrapped = {key: dict(self.model.named_modules())[key] for key in self.keys}
         try:
             self.model.update_modules(tree_unflatten(list(self.originals.items())))
+            self.model.adapter_revision = self.previous_revision
+            self.model._cache_owner = object()
             baseline = [
                 float(objective(self.model, x).item()) for x in (heldout, preservation)
             ]
         finally:
             self.model.update_modules(tree_unflatten(list(wrapped.items())))
+            self.model.adapter_revision = self.live_revision
+            self.model._cache_owner = object()
         self.promoted = (
             all(math.isfinite(v) for v in adapted + baseline)
             and adapted[0] < baseline[0]
