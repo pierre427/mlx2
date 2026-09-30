@@ -314,9 +314,11 @@ class _ReferenceTreeTransaction:
 class ExternalDraftBatchGenerator:
     """Same request-lifecycle seam as BatchGenerator, distinct external protocol.
 
-    The target trunk is evaluated at cohort width B. Draft trunk forwards
-    group lanes by pending-context length; attention remains per-row SDPA.
-    Receipts report actual target and draft projection widths. No dense cache repacking or shared global random generator.
+    The ordinary target trunk is evaluated at cohort width B. TensorFold keeps
+    B1 state records but queues up to four lane trees behind one evaluation
+    fence. Draft trunk forwards group lanes by pending-context length;
+    attention remains per-row SDPA. Receipts report actual target and draft
+    widths. No dense cache repacking or shared global random generator.
     """
     def __init__(self, model, *, draft_model, binding, completion_batch_size=4,
                  prefill_step_size=2048, num_draft=4, stop_tokens=(), memory_headroom=None,
@@ -341,8 +343,8 @@ class ExternalDraftBatchGenerator:
         )
         if self.draft_topology not in ("chain", "tree15"):
             raise ValueError("MLX2_DFLASH_TOPOLOGY must be chain or tree15")
-        # Both probes run one lane per round; next() splits cohorts for them
-        # (a multi-lane cohort raised on every poll and stalled every lane).
+        # The reference tree remains one lane per round.  TensorFold cohorts
+        # independent B1 records under its fixed four-lane ownership bound.
         if self.target_execution not in ("reference", "tensorfold"):
             raise ValueError(
                 "MLX2_QWEN_TARGET_EXECUTION must be reference or tensorfold"
@@ -386,7 +388,18 @@ class ExternalDraftBatchGenerator:
                 external_tree_accepted_edges=0,
             )
         if self.target_execution == "tensorfold":
-            self.scheduler_stats["external_tensorfold_target_rounds"] = 0
+            from .qwen38_tensorfold import MAX_COHORT_LANES
+
+            self.tensorfold_cohort_limit = min(self.capacity, MAX_COHORT_LANES)
+            self.scheduler_stats.update(
+                external_tensorfold_target_rounds=0,
+                external_tensorfold_cohort_rounds=0,
+                external_tensorfold_cohort_lanes=0,
+                external_tensorfold_cohort_max_width=0,
+                external_tensorfold_cohort_limit=self.tensorfold_cohort_limit,
+            )
+        else:
+            self.tensorfold_cohort_limit = 1
         for gate, counters in _TREE_GATE_COUNTERS.items():
             if self.tree_gates[gate]:
                 self.scheduler_stats.update(dict.fromkeys(counters, 0))
@@ -649,6 +662,21 @@ class ExternalDraftBatchGenerator:
         if self.fly_verification.enabled and lane.processors:
             result["fly_disabled"] = "logits_processors"
         return result
+
+    def _target_execution_receipt(self):
+        if self.target_execution != "tensorfold":
+            return {}
+        return {
+            "tensorfold_target": {
+                "cohort_limit": self.tensorfold_cohort_limit,
+                "cohort_max_width": self.scheduler_stats[
+                    "external_tensorfold_cohort_max_width"
+                ],
+                "cohort_rounds": self.scheduler_stats[
+                    "external_tensorfold_cohort_rounds"
+                ],
+            }
+        }
 
     def _propose_pairwise(self, lanes, arguments):
         """Batched DFlash2 selection: one pair-table walk, one host read.
@@ -1077,6 +1105,42 @@ class ExternalDraftBatchGenerator:
             cached=cached,
         )
         _bump(self.scheduler_stats, "external_tensorfold_target_rounds")
+        if cached:
+            _bump(
+                self.scheduler_stats,
+                "external_tensorfold_executor_cache_hits"
+                if result[2].executor_cached
+                else "external_tensorfold_executor_validations",
+            )
+        return result
+
+    def _target_tree_forward_many(self, cohort, inputs, parents):
+        """Queue one independent TensorFold tree per lane as one cohort."""
+
+        if len(cohort) == 1:
+            return self._target_tree_forward(cohort[0], inputs[0], parents[0])
+        if self.target_execution != "tensorfold":
+            raise ValueError("multi-lane tree execution requires TensorFold")
+        if len(cohort) > self.tensorfold_cohort_limit:
+            raise ValueError("TensorFold target cohort exceeds its bounded lane limit")
+        from .qwen38_tensorfold import forward_many
+
+        cached = self.tree_gates["cache_executor"]
+        result = forward_many(
+            self.model,
+            inputs,
+            parents,
+            [lane.cache for lane in cohort],
+            self.layers,
+            os.environ["MLX2_TENSORFOLD_SOURCE"],
+            cached=cached,
+        )
+        _bump(self.scheduler_stats, "external_tensorfold_target_rounds")
+        _bump(self.scheduler_stats, "external_tensorfold_cohort_rounds")
+        _bump(self.scheduler_stats, "external_tensorfold_cohort_lanes", len(cohort))
+        self.scheduler_stats["external_tensorfold_cohort_max_width"] = max(
+            self.scheduler_stats["external_tensorfold_cohort_max_width"], len(cohort)
+        )
         if cached:
             _bump(
                 self.scheduler_stats,
@@ -1536,7 +1600,7 @@ class ExternalDraftBatchGenerator:
                 if logp is not None and decision.response_logprobs:
                     if j < len(decision.response_logprobs) and decision.response_logprobs[j] is not None:
                         logp = decision.response_logprobs[j]
-                lane.ready.append(SimpleNamespace(uid=lane.uid, token=token, logprobs=logp, finish_reason=finish, execution_width=len(cohort), all_tokens=list(lane.history) if final else None, prompt_cache=self._freeze_cache(lane.cache) if finish else None, cache_sidecar=self._sidecar(lane) if finish else None, mtp_state=None, mtp_receipt=None, speculative_receipt={"kind":self.receipt_kind, "execution":"external_draft_verify" if lane.external_rounds else "ordinary_target", "current_execution":"ordinary_target" if count == 0 else "external_draft_verify", "ordinary_fallback":lane.ordinary, "external_rounds":lane.external_rounds, "accepted":lane.accepted,"proposed":lane.proposed,"round_accepted":round_accepted,"round_proposed":count,"target_width":lane.target_max_width,"draft_width":lane.draft_max_width,"qualification_authority":"serving_route", **self._verification_receipt(lane)}))
+                lane.ready.append(SimpleNamespace(uid=lane.uid, token=token, logprobs=logp, finish_reason=finish, execution_width=len(cohort), all_tokens=list(lane.history) if final else None, prompt_cache=self._freeze_cache(lane.cache) if finish else None, cache_sidecar=self._sidecar(lane) if finish else None, mtp_state=None, mtp_receipt=None, speculative_receipt={"kind":self.receipt_kind, "execution":"external_draft_verify" if lane.external_rounds else "ordinary_target", "current_execution":"ordinary_target" if count == 0 else "external_draft_verify", "ordinary_fallback":lane.ordinary, "external_rounds":lane.external_rounds, "accepted":lane.accepted,"proposed":lane.proposed,"round_accepted":round_accepted,"round_proposed":count,"target_width":lane.target_max_width,"draft_width":lane.draft_max_width,"qualification_authority":"serving_route", **self._target_execution_receipt(), **self._verification_receipt(lane)}))
         if clock is not None:
             self._mark("emit", clock)
         self.scheduler_stats[
@@ -1592,13 +1656,11 @@ class ExternalDraftBatchGenerator:
                 taps.steer = steer
             try:
                 if self.target_execution == "tensorfold":
-                    if len(cohort) != 1:
-                        raise ValueError(
-                            "TensorFold target execution probe is single-lane"
-                        )
-                    parents = list(range(-1, len(inputs[0]) - 1))
-                    logits, features, transaction = self._target_tree_forward(
-                        cohort[0], inputs[0], parents
+                    parents = [
+                        list(range(-1, len(row) - 1)) for row in inputs
+                    ]
+                    logits, features, transaction = self._target_tree_forward_many(
+                        cohort, inputs, parents
                     )
                 else:
                     owner = self._target_owner([l.cache for l in cohort])
@@ -1634,13 +1696,16 @@ class ExternalDraftBatchGenerator:
         finally: self._open = False
 
     def _tree_round(self, cohort):
-        if len(cohort) != 1:
-            raise ValueError("tree15 experimental topology requires one lane")
-        lane = cohort[0]
+        if not cohort:
+            return
+        if len(cohort) > 1 and self.target_execution != "tensorfold":
+            raise ValueError("multi-lane tree15 requires TensorFold target execution")
+        if len(cohort) > self.tensorfold_cohort_limit:
+            raise ValueError("tree15 cohort exceeds its bounded lane limit")
         clock = time.perf_counter() if self.round_timing else None
         phase = _PhaseClock(self) if self.round_timing else None
         recovery = self._snapshot_round(cohort)
-        self.scheduler_stats["recovery_checkpoint_captures"] += 1
+        self.scheduler_stats["recovery_checkpoint_captures"] += len(recovery)
         if phase is not None:
             phase("tree_recovery_capture")
         stats_snapshot = dict(self.scheduler_stats)
@@ -1648,24 +1713,40 @@ class ExternalDraftBatchGenerator:
         transaction = None
         self._tree_clock = phase
         try:
-            block = self._propose(cohort)[0]
-            if not isinstance(block, TreeDraftRow):
+            blocks = self._propose(cohort)
+            if any(not isinstance(block, TreeDraftRow) for block in blocks):
                 raise RuntimeError("tree15 proposal did not return a tree")
-            inputs = [lane.anchor] + list(block.tokens)
-            parents = self._target_tree_parents(block)
-            logits, features, transaction = self._target_tree_forward(
-                lane, inputs, parents
+            inputs = [
+                [lane.anchor] + list(block.tokens)
+                for lane, block in zip(cohort, blocks)
+            ]
+            parents = [self._target_tree_parents(block) for block in blocks]
+            logits, features, transaction = self._target_tree_forward_many(
+                cohort, inputs, parents
             )
-            batched = self.tree_gates["batched_laws"] and self._batched_law_contract(lane)
-            if batched and self.tree_gates["single_fence"]:
-                # One fence: the law transform is queued behind the target
-                # forward and lands with it; taps stay device-resident for
-                # the next round's draft context.
-                fence, state = self._launch_tree_laws(lane, block, logits)
+            batched = [
+                self.tree_gates["batched_laws"]
+                and self._batched_law_contract(lane)
+                for lane in cohort
+            ]
+            states = [None] * len(cohort)
+            fences = []
+            if all(batched) and self.tree_gates["single_fence"]:
+                # Every lane keeps its own law transform and RNG, but all lazy
+                # target rows land at one cohort fence.
+                for row, (lane, block) in enumerate(zip(cohort, blocks)):
+                    fence, states[row] = self._launch_tree_laws(
+                        lane, block, logits[row : row + 1]
+                    )
+                    fences.extend(fence)
                 if phase is not None:
                     phase("tree_target_launch")
-                self.mx.eval(*fence)
-                _bump(self.scheduler_stats, "external_tree_single_fence_rounds")
+                self.mx.eval(*fences)
+                _bump(
+                    self.scheduler_stats,
+                    "external_tree_single_fence_rounds",
+                    len(cohort),
+                )
                 if phase is not None:
                     phase("tree_target_wait")
             else:
@@ -1674,37 +1755,58 @@ class ExternalDraftBatchGenerator:
                 self.mx.eval(logits, features)
                 if phase is not None:
                     phase("tree_target_wait")
-                if batched:
-                    fence, state = self._launch_tree_laws(lane, block, logits)
-                    self.mx.eval(*fence)
-            if batched:
-                decision = self._verify_tree_batched(lane, block, state)
-                _bump(self.scheduler_stats, "external_tree_batched_law_rounds")
-            else:
-                decision = self._verify_tree(lane, block, logits)
-                if self.tree_gates["batched_laws"]:
-                    _bump(self.scheduler_stats, "external_tree_row_law_rounds")
+                for row, (lane, block, enabled) in enumerate(
+                    zip(cohort, blocks, batched)
+                ):
+                    if enabled:
+                        fence, states[row] = self._launch_tree_laws(
+                            lane, block, logits[row : row + 1]
+                        )
+                        fences.extend(fence)
+                if fences:
+                    self.mx.eval(*fences)
+            decisions = []
+            for row, (lane, block, enabled) in enumerate(
+                zip(cohort, blocks, batched)
+            ):
+                if enabled:
+                    decision = self._verify_tree_batched(
+                        lane, block, states[row]
+                    )
+                    _bump(self.scheduler_stats, "external_tree_batched_law_rounds")
+                else:
+                    decision = self._verify_tree(
+                        lane, block, logits[row : row + 1]
+                    )
+                    if self.tree_gates["batched_laws"]:
+                        _bump(self.scheduler_stats, "external_tree_row_law_rounds")
+                decisions.append(decision)
             if phase is not None:
                 phase("tree_target_law")
             self._commit(
                 cohort,
-                [decision],
+                decisions,
                 features,
-                blocks=[block],
+                blocks=blocks,
                 transaction=transaction,
             )
             if phase is not None:
                 phase.skip()
             if self.tree_gates["pipeline_draft"]:
-                self._prelaunch_tree(lane, decision)
+                for lane, decision in zip(cohort, decisions):
+                    self._prelaunch_tree(lane, decision)
                 if phase is not None:
                     phase("tree_draft_prelaunch")
-            _bump(self.scheduler_stats, "external_tree_rounds")
-            _bump(self.scheduler_stats, "external_tree_nodes", len(block.tokens))
+            _bump(self.scheduler_stats, "external_tree_rounds", len(cohort))
+            _bump(
+                self.scheduler_stats,
+                "external_tree_nodes",
+                sum(len(block.tokens) for block in blocks),
+            )
             _bump(
                 self.scheduler_stats,
                 "external_tree_accepted_edges",
-                decision.accepted,
+                sum(decision.accepted for decision in decisions),
             )
             if clock is not None:
                 self._mark("tree_round", clock)
@@ -1717,8 +1819,8 @@ class ExternalDraftBatchGenerator:
                     pass
             self._restore_round(cohort, recovery)
             self.scheduler_stats = stats_snapshot
-            self.scheduler_stats["recovery_checkpoint_restores"] += 1
-            self._discard_prelaunched([lane.uid])
+            self.scheduler_stats["recovery_checkpoint_restores"] += len(recovery)
+            self._discard_prelaunched([lane.uid for lane in cohort])
             raise
         finally:
             self._tree_clock = None
@@ -1848,6 +1950,7 @@ class ExternalDraftBatchGenerator:
                             "target_width":lane.target_max_width,
                             "draft_width":lane.draft_max_width,
                             "qualification_authority":"serving_route",
+                            **self._target_execution_receipt(),
                             **self._verification_receipt(lane),
                         },
                     )
@@ -1966,9 +2069,11 @@ class ExternalDraftBatchGenerator:
             # transient final-budget rows, whose draft context remains exact.
             groups.setdefault((count, lane.ordinary),[]).append(lane)
         for (count, _ordinary), candidates in groups.items():
+            if self.target_execution == "tensorfold":
+                candidates = candidates[: self.tensorfold_cohort_limit]
             cohort = self._fit_cohort(candidates, count+1)
             if not cohort: continue
-            if self.draft_topology == "tree15" or self.target_execution == "tensorfold":
+            if self.draft_topology == "tree15" and self.target_execution != "tensorfold":
                 pending = [[lane] for lane in reversed(cohort)]
             else:
                 pending = [cohort]

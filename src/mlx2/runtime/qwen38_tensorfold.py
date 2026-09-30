@@ -31,6 +31,11 @@ _KERNEL_MODULES = (
 # Resolved source root -> validated lane_tree module (MLX2_TENSORFOLD_CACHE_EXECUTOR).
 _EXECUTORS = {}
 
+# The imported TensorFold tree kernel owns a B1 cache record.  mlx2 may queue
+# several independent records before one evaluation fence, but deliberately
+# bounds the live records and never constructs a shared cross-request cache.
+MAX_COHORT_LANES = 4
+
 
 def _validate(root):
     revision = subprocess.check_output(
@@ -121,6 +126,52 @@ class TensorfoldTransaction:
             self.closed = True
 
 
+class TensorfoldCohortTransaction:
+    """One scheduler transaction over independent TensorFold lane records."""
+
+    def __init__(self, transactions, *, executor_cached=False):
+        self.transactions = tuple(transactions)
+        self.closed = False
+        self.executor_cached = bool(executor_cached)
+
+    def commit_paths(self, paths):
+        if self.closed or len(paths) != len(self.transactions):
+            raise RuntimeError("TensorFold cohort path count mismatch")
+        rows = []
+        try:
+            for transaction, path in zip(self.transactions, paths):
+                rows.extend(transaction.commit_paths([path]))
+        finally:
+            # A later lane can fail after an earlier lane committed.  The
+            # caller's authoritative round snapshots restore every lane; the
+            # aggregate is closed so no second commit can publish stale paths.
+            self.closed = True
+        return rows
+
+    def commit(self, *, accepted_lengths):
+        if len(accepted_lengths) != len(self.transactions):
+            raise RuntimeError("TensorFold cohort length count mismatch")
+        return self.commit_paths(
+            [list(range(int(length))) for length in accepted_lengths]
+        )
+
+    def abort(self):
+        if self.closed:
+            return
+        error = None
+        for transaction in self.transactions:
+            if transaction.closed:
+                continue
+            try:
+                transaction.abort()
+            except BaseException as caught:  # noqa: BLE001 - snapshots restore all lanes
+                if error is None:
+                    error = caught
+        self.closed = True
+        if error is not None:
+            raise error
+
+
 def _capture_storage(model, capture_layers, cached):
     """Install the capture slots on the draft tap layers; return the storage.
 
@@ -151,10 +202,7 @@ def _capture_storage(model, capture_layers, cached):
     return storage
 
 
-def forward(model, tokens, parents, cache, capture_layers, source_root, *, cached=False):
-    """Return logits, target taps, and an exact arbitrary-path transaction."""
-
-    lane_tree, hit = _modules(source_root, cached=cached)
+def _forward(lane_tree, model, tokens, parents, cache, capture_layers, *, cached):
     capture_layers = tuple(int(index) for index in capture_layers)
     storage = _capture_storage(model, capture_layers, cached)
     start = _offset(cache)
@@ -171,8 +219,83 @@ def forward(model, tokens, parents, cache, capture_layers, source_root, *, cache
         raise RuntimeError("TensorFold target executor did not capture every draft tap")
     features = mx.concatenate(taps, axis=-1)
     transaction = TensorfoldTransaction(lane_tree, cache, record, len(tokens), start)
+    return logits, features, transaction
+
+
+def forward(model, tokens, parents, cache, capture_layers, source_root, *, cached=False):
+    """Return logits, target taps, and an exact arbitrary-path transaction."""
+
+    lane_tree, hit = _modules(source_root, cached=cached)
+    logits, features, transaction = _forward(
+        lane_tree, model, tokens, parents, cache, capture_layers, cached=cached
+    )
     transaction.executor_cached = hit
     return logits, features, transaction
 
 
-__all__ = ["EXPECTED_REVISION", "TensorfoldTransaction", "forward"]
+def forward_many(
+    model,
+    token_rows,
+    parent_rows,
+    caches,
+    capture_layers,
+    source_root,
+    *,
+    cached=False,
+):
+    """Queue a bounded cohort of independent B1 trees behind one fence.
+
+    TensorFold's stateful kernels remain lane-owned: each row has its own
+    parents, cache boundary and commit record.  Only the lazy target work and
+    its eventual evaluation fence are coalesced.  This is intentionally not a
+    cross-request cache pack.
+    """
+
+    token_rows = tuple(token_rows)
+    parent_rows = tuple(parent_rows)
+    caches = tuple(caches)
+    width = len(token_rows)
+    if not 1 <= width <= MAX_COHORT_LANES:
+        raise ValueError(
+            f"TensorFold cohort takes 1..{MAX_COHORT_LANES} lanes, got {width}"
+        )
+    if len(parent_rows) != width or len(caches) != width:
+        raise ValueError("TensorFold cohort rows, parents and caches must align")
+    if len({id(cache) for cache in caches}) != width:
+        raise ValueError("TensorFold cohort requires one cache owner per lane")
+    lengths = {len(tokens) for tokens in token_rows}
+    if len(lengths) != 1 or any(
+        len(tokens) != len(parents)
+        for tokens, parents in zip(token_rows, parent_rows)
+    ):
+        raise ValueError("TensorFold cohort requires uniform token/parent widths")
+
+    lane_tree, hit = _modules(source_root, cached=cached)
+    results = [
+        _forward(
+            lane_tree,
+            model,
+            tokens,
+            parents,
+            cache,
+            capture_layers,
+            cached=cached,
+        )
+        for tokens, parents, cache in zip(token_rows, parent_rows, caches)
+    ]
+    logits = mx.concatenate([result[0] for result in results], axis=0)
+    features = mx.concatenate([result[1] for result in results], axis=0)
+    transaction = TensorfoldCohortTransaction(
+        [result[2] for result in results], executor_cached=hit
+    )
+    return logits, features, transaction
+
+
+__all__ = [
+    "EXPECTED_REVISION",
+    "MAX_COHORT_LANES",
+    "TensorfoldCohortTransaction",
+    "TensorfoldTransaction",
+    "forward",
+    "forward_many",
+]

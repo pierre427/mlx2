@@ -144,9 +144,9 @@ def tree_forward(core, head, tokens, parents, cache, start):
         storage = getattr(layer, "_storage", None)
         if storage is not None:
             storage[layer._idx] = mx.full((1, len(tokens), 2), float(layer._idx))
-    return mx.zeros((1, len(tokens), 4)), {"start": start}
+    return mx.zeros((1, len(tokens), 4)), {"start": start, "parents": list(parents)}
 def commit_tree(cache, record, path, window, start):
-    cache.append(("commit", list(path), window, start))
+    cache.append(("commit", list(path), window, start, record["parents"]))
 '''
     roots = []
     for name in ("a", "b"):
@@ -247,6 +247,170 @@ def test_cached_executor_does_not_spawn_git_per_forward(fake_tensorfold, monkeyp
     for _ in range(3):
         _forward_with_offset(model, roots[0], True)
     assert not spawned and len(calls) == 1
+
+
+def test_cohort_executor_keeps_parents_cache_and_commit_paths_per_lane(fake_tensorfold):
+    roots, calls, _ = fake_tensorfold
+    model = _fake_model()
+
+    class Entry:
+        def __init__(self, offset):
+            self.offset = offset
+
+    caches = [[Entry(5)], [Entry(9)]]
+    logits, features, transaction = qwen38_tensorfold.forward_many(
+        model,
+        [[1, 2, 3], [4, 5, 6]],
+        [[-1, 0, 0], [-1, 0, 1]],
+        caches,
+        (0, 3),
+        roots[0],
+        cached=True,
+    )
+    assert logits.shape == (2, 3, 4)
+    assert features.shape == (2, 3, 4)
+    rows = transaction.commit_paths([[0, 2], [0, 1, 2]])
+    assert rows == caches
+    assert caches[0][-1] == ("commit", [0, 2], 3, 5, [-1, 0, 0])
+    assert caches[1][-1] == ("commit", [0, 1, 2], 3, 9, [-1, 0, 1])
+    assert transaction.closed and all(item.closed for item in transaction.transactions)
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize(
+    "tokens, parents, cache_alias, message",
+    [
+        ([[1]] * 5, [[-1]] * 5, False, "takes 1..4 lanes"),
+        ([[1], [2, 3]], [[-1], [-1, 0]], False, "uniform token/parent widths"),
+        ([[1], [2]], [[-1], [-1]], True, "one cache owner per lane"),
+    ],
+)
+def test_cohort_executor_fails_closed_on_bounds_and_ownership(
+    fake_tensorfold, tokens, parents, cache_alias, message
+):
+    roots, _, _ = fake_tensorfold
+
+    class Entry:
+        offset = 5
+
+    caches = [[Entry()] for _ in tokens]
+    if cache_alias:
+        caches[1] = caches[0]
+    with pytest.raises(ValueError, match=message):
+        qwen38_tensorfold.forward_many(
+            _fake_model(), tokens, parents, caches, (0, 3), roots[0], cached=True
+        )
+
+
+def _install_reference_cohort(batch, monkeypatch, seen):
+    """Exercise cohort scheduling with the generic exact tree as CPU oracle."""
+
+    def target(cohort, inputs, parents):
+        seen.append((tuple(lane.uid for lane in cohort), tuple(map(tuple, parents))))
+        results = [
+            batch._reference_tree_forward(lane, row, parent_row)
+            for lane, row, parent_row in zip(cohort, inputs, parents)
+        ]
+        if len(cohort) > 1:
+            batch.scheduler_stats["external_tensorfold_target_rounds"] += 1
+            batch.scheduler_stats["external_tensorfold_cohort_rounds"] += 1
+            batch.scheduler_stats["external_tensorfold_cohort_lanes"] += len(cohort)
+            batch.scheduler_stats["external_tensorfold_cohort_max_width"] = max(
+                batch.scheduler_stats["external_tensorfold_cohort_max_width"],
+                len(cohort),
+            )
+        return (
+            mx.concatenate([result[0] for result in results]),
+            mx.concatenate([result[1] for result in results]),
+            qwen38_tensorfold.TensorfoldCohortTransaction(
+                [result[2] for result in results]
+            ),
+        )
+
+    monkeypatch.setattr(batch, "_target_tree_forward_many", target)
+
+
+def test_tensorfold_tree_cohort_matches_single_lane_reference(monkeypatch):
+    prompts = [[1, 2, 3], [4, 5, 6]]
+    seeds = [type("Seed", (), {"key": mx.array([17 + row])})() for row in range(2)]
+
+    monkeypatch.setenv("MLX2_DFLASH_TOPOLOGY", "tree15")
+    model, draft = tiny(vocab=64, top_k=16, block_size=8)
+    reference = generator(model, draft, ready_drain="all")
+    reference.insert(
+        prompts,
+        max_tokens=[12, 12],
+        sampling_configs=[{"sampling_temp": 0.8, "top_k": 20}] * 2,
+        lane_rngs=seeds,
+    )
+    reference_lanes = list(reference.lanes.values())
+    expected, _ = drain(reference)
+    expected_draws = [lane.rng.draws for lane in reference_lanes]
+
+    monkeypatch.setenv("MLX2_QWEN_TARGET_EXECUTION", "tensorfold")
+    monkeypatch.setenv("MLX2_TENSORFOLD_SOURCE", "/unused-by-cpu-oracle")
+    candidate = generator(model, draft, ready_drain="all")
+    candidate.insert(
+        prompts,
+        max_tokens=[12, 12],
+        sampling_configs=[{"sampling_temp": 0.8, "top_k": 20}] * 2,
+        lane_rngs=seeds,
+    )
+    candidate_lanes = list(candidate.lanes.values())
+    seen = []
+    _install_reference_cohort(candidate, monkeypatch, seen)
+    actual, receipts = drain(candidate)
+
+    assert actual == expected
+    assert [lane.rng.draws for lane in candidate_lanes] == expected_draws
+    assert any(len(uids) == 2 for uids, _ in seen)
+    assert all(1 <= len(uids) <= 4 for uids, _ in seen)
+    stats = candidate.scheduler_stats
+    assert stats["external_tensorfold_cohort_rounds"] > 0
+    assert stats["external_tensorfold_cohort_lanes"] >= 2
+    assert stats["external_tensorfold_cohort_max_width"] == 2
+    assert stats["external_tensorfold_cohort_limit"] == 4
+    assert all(receipt["target_width"] >= 2 for receipt in receipts.values())
+    assert all(
+        receipt["tensorfold_target"]["cohort_max_width"] == 2
+        for receipt in receipts.values()
+    )
+
+
+def test_tensorfold_cohort_partial_commit_restores_every_lane(monkeypatch):
+    _tree_env(monkeypatch)
+    monkeypatch.setenv("MLX2_QWEN_TARGET_EXECUTION", "tensorfold")
+    monkeypatch.setenv("MLX2_TENSORFOLD_SOURCE", "/unused-by-cpu-oracle")
+    model, draft = tiny(vocab=64, top_k=16, block_size=8)
+    batch = generator(model, draft, ready_drain="all")
+    batch.insert(
+        [[1, 2, 3], [4, 5, 6]],
+        max_tokens=[12, 12],
+        sampling_configs=[{"sampling_temp": 0.8, "top_k": 20}] * 2,
+        lane_rngs=[
+            type("Seed", (), {"key": mx.array([31])})(),
+            type("Seed", (), {"key": mx.array([32])})(),
+        ],
+    )
+    lanes = list(batch.lanes.values())
+    for lane in lanes:
+        while lane.anchor is None:
+            batch._prefill(lane, step=3)
+    before = [_lane_state(lane) for lane in lanes]
+    _install_reference_cohort(batch, monkeypatch, [])
+
+    def fail_after_first_commit(
+        self, cohort, decisions, features, *, blocks, transaction
+    ):
+        transaction.transactions[0].commit_paths([decisions[0].commit_rows])
+        raise RuntimeError("injected cohort commit")
+
+    monkeypatch.setattr(type(batch), "_commit", fail_after_first_commit)
+    with pytest.raises(RuntimeError, match="injected cohort commit"):
+        batch._tree_round(lanes)
+    assert [_lane_state(lane) for lane in lanes] == before
+    assert all(not lane.ready for lane in lanes)
+    assert batch.scheduler_stats["recovery_checkpoint_restores"] == 2
 
 
 # -- task 2: block lattice and codebook cache ---------------------------------

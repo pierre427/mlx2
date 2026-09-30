@@ -442,7 +442,13 @@ _STREAM_GAUGES = {
 }
 
 _SCHEDULER_GAUGES = frozenset(
-    {"target_max_width", "draft_max_width", "reservation_bytes"}
+    {
+        "target_max_width",
+        "draft_max_width",
+        "reservation_bytes",
+        "external_tensorfold_cohort_max_width",
+        "external_tensorfold_cohort_limit",
+    }
 )
 
 # Export schemas are intentionally independent of runtime dictionary keys.
@@ -490,6 +496,8 @@ _SCHEDULER_EVENTS = frozenset(
         "external_tree_nodes",
         "external_tree_accepted_edges",
         "external_tensorfold_target_rounds",
+        "external_tensorfold_cohort_rounds",
+        "external_tensorfold_cohort_lanes",
         "external_tensorfold_executor_validations",
         "external_tensorfold_executor_cache_hits",
         "external_tree_codebook_cache_hits",
@@ -1141,6 +1149,10 @@ def _scheduler_mechanism(key: str) -> str:
         "external_tree_nodes",
         "external_tree_accepted_edges",
         "external_tensorfold_target_rounds",
+        "external_tensorfold_cohort_rounds",
+        "external_tensorfold_cohort_lanes",
+        "external_tensorfold_cohort_max_width",
+        "external_tensorfold_cohort_limit",
         "external_tensorfold_executor_validations",
         "external_tensorfold_executor_cache_hits",
         "external_tree_codebook_cache_hits",

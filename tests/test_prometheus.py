@@ -527,6 +527,33 @@ def test_apcv2_interior_event_names_are_exported_on_only_one_surface():
     }
 
 
+def test_tensorfold_cohort_scheduler_receipts_are_bounded_metrics():
+    engine = FakeEngine()
+    engine.snapshot["scheduler"].update(
+        external_tensorfold_cohort_rounds=3,
+        external_tensorfold_cohort_lanes=8,
+        external_tensorfold_cohort_max_width=4,
+        external_tensorfold_cohort_limit=4,
+    )
+    rendered = render_engine_metrics(engine)
+    assert (
+        'mlx2_scheduler_events_total{event="external_tensorfold_cohort_rounds",'
+        'mechanism="external_speculative"} 3'
+    ) in rendered
+    assert (
+        'mlx2_scheduler_events_total{event="external_tensorfold_cohort_lanes",'
+        'mechanism="external_speculative"} 8'
+    ) in rendered
+    assert (
+        'mlx2_scheduler_state{mechanism="external_speculative",'
+        'state="external_tensorfold_cohort_max_width"} 4'
+    ) in rendered
+    assert (
+        'mlx2_scheduler_state{mechanism="external_speculative",'
+        'state="external_tensorfold_cohort_limit"} 4'
+    ) in rendered
+
+
 def test_concurrent_scrapes_are_stable():
     engine = FakeEngine()
     outputs = []
