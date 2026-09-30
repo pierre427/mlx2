@@ -107,6 +107,42 @@ def _candidate_groups(blocks, block_size, key_tile):
         yield mx.concatenate(keys, axis=2), mx.concatenate(positions), mx.array(ids)
 
 
+def _gather_groups(blocks, *, max_bytes=16 << 20, max_tokens=16384):
+    """Coalesce adjacent KV segments within a bounded temporary-copy budget."""
+    keys, values, beginning, length, geometry = [], [], None, 0, None
+
+    def emit():
+        return (
+            keys[0] if len(keys) == 1 else mx.concatenate(keys, axis=2),
+            values[0] if len(values) == 1 else mx.concatenate(values, axis=2),
+            beginning,
+        )
+
+    for k, v, start in blocks:
+        if k.shape[2] == 0:
+            continue
+        current = (k.shape[:2], k.shape[3:], k.dtype, v.dtype)
+        bytes_per_token = (k.nbytes + v.nbytes) // k.shape[2]
+        limit = max(1, min(max_tokens, max_bytes // bytes_per_token))
+        for offset in range(0, k.shape[2], limit):
+            size = min(limit, k.shape[2] - offset)
+            position = start + offset
+            if keys and (
+                position != beginning + length
+                or length + size > limit
+                or current != geometry
+            ):
+                yield emit()
+                keys, values, length = [], [], 0
+            if not keys:
+                beginning, geometry = position, current
+            keys.append(k[:, :, offset : offset + size])
+            values.append(v[:, :, offset : offset + size])
+            length += size
+    if keys:
+        yield emit()
+
+
 def _rank_candidate_tokens(
     query, blocks, qp, candidate_ids, block_size, local, global_count, maximum, denom
 ):
@@ -122,10 +158,8 @@ def _rank_candidate_tokens(
     k = mx.zeros((*positions.shape, d), dtype=query.dtype)
     v = mx.zeros_like(k)
     found = mx.zeros(positions.shape, dtype=mx.bool_)
-    # Gather across original segment boundaries without joining full history.
-    for keys, values, start in blocks:
-        if keys.shape[2] == 0:
-            continue
+    # Bounded coalescing avoids candidate-sized copies for every tiny segment.
+    for keys, values, start in _gather_groups(blocks):
         present = (positions >= start) & (positions < start + keys.shape[2])
         indices = mx.clip(positions - start, 0, keys.shape[2] - 1)[..., None]
         gathered_k = mx.take_along_axis(keys[:, 0, None], indices, axis=2)

@@ -5,6 +5,7 @@ import pytest
 mx = pytest.importorskip("mlx.core")
 from mlx2.experimental.hysparse2.attention import (
     _candidate_tiles,
+    _gather_groups,
     _tiles,
     attention,
     sparse_attention,
@@ -106,3 +107,18 @@ def test_gathered_fine_ranking_keeps_local_unique_and_padding_invalid():
             valid = [p for p in positions if p != 2147483647]
             assert len(valid) == len(set(valid))
             assert set(valid) == set(range(28, 30 + i))
+
+
+def test_gather_groups_respect_byte_budget_gaps_and_values():
+    k = mx.arange(20).astype(mx.float32).reshape(1, 1, 10, 2)
+    blocks = [
+        (k[:, :, :3], k[:, :, :3], 0),
+        (k[:, :, 3:7], k[:, :, 3:7], 3),
+        (k[:, :, 7:], k[:, :, 7:], 9),
+    ]
+    grouped = list(_gather_groups(blocks, max_bytes=64, max_tokens=5))
+    assert [(a.shape[2], start) for a, _, start in grouped] == [(3, 0), (4, 3), (3, 9)]
+    assert all(a.nbytes + b.nbytes <= 64 for a, b, _ in grouped)
+    merged = list(_gather_groups(blocks, max_bytes=128, max_tokens=8))
+    assert [(a.shape[2], start) for a, _, start in merged] == [(7, 0), (3, 9)]
+    assert bool(mx.all(merged[0][0] == k[:, :, :7]).item())
