@@ -439,6 +439,36 @@
       "thinking_allowance": 4096,
       "weighted_generated_tokens_per_second": 202.77,
       "workload_sha256": "826eef3d843ccdff8474f218585c84894d70e08bd02d6e586a7fc1ad88dfbd9d"
+    },
+    {
+      "aggregate_generated_tokens_per_second": {
+        "max": 218.1,
+        "median": 197.8,
+        "min": 155.9
+      },
+      "apcv2_probe_passed": true,
+      "batching_engaged": true,
+      "cache_cap_gib": 4,
+      "completion_tokens": 234479,
+      "graded_correct": 400,
+      "http_errors": 0,
+      "issues": {},
+      "max_lanes": 8,
+      "observed_widths": {
+        "8": 380,
+        "None": 20
+      },
+      "receipt_sha256": "6ea4b814ce2835c05427adc23bd52ada600a61f939bd94b8cf32be90fd2ed6c3",
+      "requests": 400,
+      "round_seconds": 1199.69,
+      "route": "ordinary",
+      "source_head": "9f5e525d8957f4926e276bae778c0b2713ee7a6e",
+      "status": "passed",
+      "swapout_pages": 0,
+      "tag": "lightning-ordinary-current-mamba-clamp-20260929",
+      "thinking_allowance": 4096,
+      "weighted_generated_tokens_per_second": 195.45,
+      "workload_sha256": "c91249c655fadb1807d6930fc25d41e0db13e856099187c55af04a2e18a2f4c4"
     }
   ]
 }

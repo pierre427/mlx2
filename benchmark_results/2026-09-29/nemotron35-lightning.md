@@ -2,7 +2,7 @@
 
 Artifact: `NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16-mlx-8Bit`, config SHA-256 `a1b0135c0973322d188a836c86746e69ea07c02b241e1f26681bf5123345359b`. The target is pinned to revision `a9db86e1fe5baf448346efd33541ce117b5b8403`; the separately verified original BF16 MTP head is pinned to revision `a9904d24bcc1d289a1950fa9d2b978c47cf903b9` and SHA-256 `64577b275ca4e7e5266eae0903674f7f46ec2a8cbf4f4f1a3207f80d503cd1d0`.
 
-**Current-source boundary:** private main gained `46139b74`, changing the Lightning Mamba time-step clamp and therefore model outputs, after the earlier runs below. Their passes and speed measurements remain source-bound historical evidence. Ordinary smoke passed on newer source `9f5e525d`; its capped 20×20 follow-up is running. MTP serving on this head remains unqualified.
+**Current-source boundary:** private main gained `46139b74`, changing the Lightning Mamba time-step clamp and therefore model outputs, after the earlier runs below. Their passes and speed measurements remain source-bound historical evidence. Ordinary smoke and the capped 20×20 workload passed on newer source `9f5e525d`; its context ladder and MTP serving qualification remain pending.
 
 ## Host coverage
 
@@ -50,6 +50,8 @@ The integrated-source ladder on `ab212902` used the same server command, 4 GiB c
 
 The prior ladder began about 10 minutes after its preceding 20×20 run; the integrated-source ladder began 39 seconds after the newer 20×20 run. The thermal probe admitted every measured repetition and recorded no warning, but that unequal cooldown prevents attributing the long-context speed difference to source changes. An isolated, cooled 16K repeat is pending.
 
+After the Mamba clamp correction, source `9f5e525d` passed ordinary smoke and the same capped 20×20 profile: **400/400** graded answers, zero HTTP errors, zero issues, zero swapouts, APCv2 reuse, cancellation recovery, and eight-way batches on 380 replies. Its median aggregate generated rate was **197.8 tokens/s** (20 rounds), versus **201.5** on `d17430de`, a 1.8% decrease. It generated 234,479 completion tokens in 1,199.69 seconds, a weighted **195.45 tokens/s**, versus 202.77 on `d17430de`, a 3.6% decrease. The profiles match, but the model's Mamba computation and outputs changed; this is an observed workload comparison, not a controlled attribution. A cooled context ladder on the corrected source is pending.
+
 The 64K–262K width-one extension was **interrupted** after newer main commits changed Nemotron runtime math and APC/lane ownership. At its older source, the 64K cell missed one exact-code needle repetition (4/6 checks); one completed 131K repetition missed both needles. Those are real failures for that source, but the incomplete ladder does not qualify long context on the newer main. Its 8 GiB cache profile had zero swapouts. On integrated private source `d17430de`, a repeat ordinary smoke passed both prompts and all default checks with no sampling drift. The matching capped 20×20 run passed **400/400** graded answers, zero HTTP errors, zero issues, and zero swapouts. Its median aggregate generated rate was **201.5 tokens/s** across 20 rounds (range 183.0–224.3), 11.2% above the prior capped run's 181.15 tokens/s median. The prior and newer runs generated 236,786 and 237,876 completion tokens in 1,303.91 and 1,173.16 seconds, respectively. This comparison is not thermally controlled and does not isolate the cause of the change. Applicable feature gates remain pending. The MTP route remains implemented and opt-in pending served qualification. No selected speculative route is claimed.
 
 ## Receipt integrity
@@ -67,5 +69,6 @@ The 64K–262K width-one extension was **interrupted** after newer main commits 
 | M5 | integrated-source capped 20×20, 400/400 | `07ca24f3bd89487b62b6e634b4c0de35de97439e5410ca66499f7e837280e333` |
 | M5 | integrated-source passed 1K–32K ladder | `7ce1c48a3a1abf35c0b728582263ca7a14f50230d986b2f7a237c390dd3d5563` |
 | M5 | ordinary smoke after Mamba clamp on `9f5e525d` | `aeb42bda9c5b9b78acfeeeadf50e605fec65c54c8fc28346623fe1a44c91ce17` |
+| M5 | ordinary 20×20 after Mamba clamp, 400/400 | `6ea4b814ce2835c05427adc23bd52ada600a61f939bd94b8cf32be90fd2ed6c3` |
 | M3 | hash-verified load feasibility | `119c027c459044036e7d36016576feced932a5e8e40d516876feda83db9fc1d4` |
 | M3 | integrated-source CPU and memory feasibility | `0b9861b9d31ddf88516c5702f5e41d2cec74898e9810095344e349e884eee3cc` |
