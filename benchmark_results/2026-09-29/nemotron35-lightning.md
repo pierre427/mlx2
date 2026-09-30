@@ -4,7 +4,7 @@ Artifact: `NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16-mlx-8Bit`, config SHA-256 
 
 ## Host coverage
 
-The M5 Max 128 GB is the qualification host for this checkpoint. The M3 Pro 36 GB received and hash-verified all 15 target files and the MTP sidecar; CPU preflight resolved the adapter and both declared routes. An M5 ready-state measurement for the same artifact allocated 33.75 GiB of Metal memory and peaked at 36.12 GiB during load. The M3 has 36 GiB total physical memory, leaving no safe room for the OS and service reserves. Its GPU load was therefore not attempted; no M3 throughput or serving qualification is claimed.
+The M5 Max 128 GB is the qualification host for this checkpoint. The M3 Pro 36 GB received and hash-verified all 15 target files and the MTP sidecar; CPU preflight resolved the adapter and both declared routes. Its isolated checkout was advanced to integrated private source `9699e669` and passed 32/32 adapter and bug-sweep CPU tests. M5 ready-state measurements before and after the expert-conversion fix both allocated 33.75 GiB of Metal memory and peaked at 36.12 GiB during load. The M3 has 36 GiB total physical memory, leaving no safe room for the OS and service reserves. Its GPU load was therefore not attempted; no M3 throughput or serving qualification is claimed.
 
 ## Ordinary served smoke
 
@@ -48,3 +48,4 @@ The 64K–262K width-one extension was **interrupted** after newer main commits 
 | M5 | interrupted 64K–262K ladder, long-context needle failures | `ebd28267c7878d1481ec88da455048edffa3dd113fb7769c041000b7494d6cff` |
 | M5 | ordinary smoke on integrated main `d17430de` | `3f2489141708bf0facabf407f45659dca5391b10c00af87b1f07d9161d448914` |
 | M3 | hash-verified load feasibility | `119c027c459044036e7d36016576feced932a5e8e40d516876feda83db9fc1d4` |
+| M3 | integrated-source CPU and memory feasibility | `0b9861b9d31ddf88516c5702f5e41d2cec74898e9810095344e349e884eee3cc` |

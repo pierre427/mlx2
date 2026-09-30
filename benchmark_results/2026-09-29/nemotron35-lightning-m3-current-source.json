@@ -1,0 +1,18 @@
+{
+  "artifact_config_sha256": "a1b0135c0973322d188a836c86746e69ea07c02b241e1f26681bf5123345359b",
+  "artifact_files_hash_verified": 15,
+  "cpu_tests": {
+    "command": "PYTHONPATH=src python -m pytest -q tests/test_nemotron35_lightning_adapter.py tests/test_bug_sweep_sep29.py",
+    "failed": 0,
+    "passed": 32
+  },
+  "host": "m3-pro-36gb",
+  "m3_gpu_load_attempted": false,
+  "physical_memory_bytes": 38654705664,
+  "reason": "Same-artifact M5 load peak exceeds M3 physical memory; ready allocation leaves too little OS and service headroom.",
+  "same_artifact_m5_load_metal_peak_bytes": 38786909320,
+  "same_artifact_m5_ready_metal_active_bytes": 36232578184,
+  "schema": "mlx2.lightning-m3-current-source-feasibility.v1",
+  "sidecar_sha256": "64577b275ca4e7e5266eae0903674f7f46ec2a8cbf4f4f1a3207f80d503cd1d0",
+  "source_head": "9699e6697136f2467cc9f2441487b33c8ea3ac02"
+}
