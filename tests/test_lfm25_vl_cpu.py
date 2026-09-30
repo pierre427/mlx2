@@ -1,23 +1,16 @@
 """Import-guarded LFM2.5-VL target and DSpark artifact contracts."""
 
-import importlib.abc
 import json
 import sys
 import tempfile
 import types
 import unittest
+from mlx_blocker import install_for_test_case
 from pathlib import Path
 from unittest.mock import patch
 
 
-class BlockMLX(importlib.abc.MetaPathFinder):
-    def find_spec(self, fullname, path=None, target=None):
-        if fullname == "mlx" or fullname.startswith("mlx."):
-            raise AssertionError(f"real MLX import forbidden: {fullname}")
-        return None
 
-
-sys.meta_path.insert(0, BlockMLX())
 from mlx2.adapters.lfm25_vl import (  # noqa: E402
     LFM25_VL, LFM25VLAdapter, _LFMLogitsModel, generate_candidate_dspark,
     inspect_artifact, inspect_dspark_artifact,
@@ -36,6 +29,9 @@ def write_weights(path, shapes):
 
 
 class LFM25VLCPUTest(unittest.TestCase):
+    def setUp(self):
+        install_for_test_case(self)
+
     def make_target(self, root):
         path = root / "target"
         path.mkdir()

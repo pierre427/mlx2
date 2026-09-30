@@ -1,23 +1,16 @@
 """Import-guarded local Flash-Next VLM candidate preflight."""
 
-import importlib.abc
 import json
 import sys
 import tempfile
 import types
 import unittest
+from mlx_blocker import install_for_test_case
 from pathlib import Path
 from unittest.mock import patch
 
 
-class BlockMLX(importlib.abc.MetaPathFinder):
-    def find_spec(self, fullname, path=None, target=None):
-        if fullname == "mlx" or fullname.startswith("mlx."):
-            raise AssertionError(f"real MLX import forbidden: {fullname}")
-        return None
 
-
-sys.meta_path.insert(0, BlockMLX())
 from mlx2.adapters.flash_next_vlm import (  # noqa: E402
     FlashNextVisionCandidate, inspect_flash_next_vlm, split_candidate_mtp,
 )
@@ -27,6 +20,9 @@ ARTIFACT = Path("~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP-VLM")
 
 @unittest.skipUnless(ARTIFACT.is_dir(), "local Flash-Next VLM artifact unavailable")
 class FlashNextVLMCPUTest(unittest.TestCase):
+    def setUp(self):
+        install_for_test_case(self)
+
     def test_local_complete_embedded_components_are_candidates(self):
         record = inspect_flash_next_vlm(ARTIFACT)
         self.assertEqual((record["tensor_count"], record["shards"]), (3845, 22))

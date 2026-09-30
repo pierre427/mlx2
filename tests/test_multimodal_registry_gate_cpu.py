@@ -1,28 +1,21 @@
 """The three new APCv2 bridges are discoverable but need route evidence."""
 
-import importlib.abc
 import json
 import sys
 
 import pytest
+from mlx_blocker import block_mlx_imports
 
 from mlx2.adapters import registry
 from mlx2.contracts import Capability, ModelDescriptor, StatePlane
 
-
-class BlockMLX(importlib.abc.MetaPathFinder):
-    def find_spec(self, fullname, path=None, target=None):
-        if fullname == "mlx" or fullname.startswith("mlx."):
-            raise AssertionError("real MLX import during CPU-only registry test")
-        return None
 
 
 @pytest.mark.parametrize("model_type", ["lfm2_vl", "smolvlm", "qwen2_5_vl"])
 def test_new_multimodal_routes_require_qualification_before_serving(
     tmp_path, monkeypatch, model_type,
 ):
-    assert "mlx.core" not in sys.modules
-    monkeypatch.setattr(sys, "meta_path", [BlockMLX(), *sys.meta_path])
+    block_mlx_imports(monkeypatch, __name__)
     (tmp_path / "config.json").write_text(json.dumps({"model_type": model_type}))
 
     class Candidate:

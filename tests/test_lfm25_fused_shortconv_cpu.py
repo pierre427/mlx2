@@ -1,20 +1,13 @@
 """CPU-only structural tests for the default-off LFM ShortConv candidate."""
 
-import importlib.abc
 import sys
 import types
 import unittest
+from mlx_blocker import install_for_test_case
 from unittest.mock import patch
 
 
-class BlockMLX(importlib.abc.MetaPathFinder):
-    def find_spec(self, fullname, path=None, target=None):
-        if fullname == "mlx" or fullname.startswith("mlx."):
-            raise AssertionError(f"real MLX import forbidden: {fullname}")
-        return None
 
-
-sys.meta_path.insert(0, BlockMLX())
 from mlx2.adapters import lfm25_fused_shortconv as shortconv  # noqa: E402
 from mlx2.adapters.lfm25_vl import LFM25VLAdapter  # noqa: E402
 
@@ -46,6 +39,7 @@ class Cache:
 
 class ShortConvCandidateTest(unittest.TestCase):
     def setUp(self):
+        install_for_test_case(self)
         self.projected = Array((1, 1, 6144))
         self.cache = Cache()
         self.weight = Array((2048, 3, 1))

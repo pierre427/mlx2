@@ -1,11 +1,11 @@
 """CPU-only GLM-5.2 DSA artifact and source-compatibility gates."""
 
-import importlib.abc
 import json
 import sys
 from pathlib import Path
 
 import pytest
+from mlx_blocker import block_mlx_imports
 
 from mlx2.adapters.glm52_dsa_candidate import (
     DESCRIPTOR, _required_tensors, inspect_artifact, validate_topology,
@@ -16,17 +16,10 @@ FRAGMENT = Path("~/mlx-models/glm52-mtp-src")
 SOURCE = Path("~/Desktop/mlx-uag/mlx-lm-unified/mlx_lm/models")
 
 
-class _BlockMLX(importlib.abc.MetaPathFinder):
-    def find_spec(self, fullname, path=None, target=None):
-        if fullname == "mlx" or fullname.startswith("mlx."):
-            raise AssertionError("real MLX import in CPU-only GLM test")
-        return None
-
 
 @pytest.fixture(autouse=True)
 def block_mlx(monkeypatch):
-    assert "mlx" not in sys.modules and "mlx.core" not in sys.modules
-    monkeypatch.setattr(sys, "meta_path", [_BlockMLX(), *sys.meta_path])
+    block_mlx_imports(monkeypatch, __name__)
 
 
 def test_local_config_matches_glm52_topology_but_fragment_fails_closed():

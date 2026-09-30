@@ -6,25 +6,20 @@ real safetensors writer and mixed KV layout still need a device qualification.
 
 import ast
 import copy
-import importlib.abc
 import sys
 from collections import deque
 from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
+
+from mlx_blocker import block_mlx_imports
 
 
-class BlockMLX(importlib.abc.MetaPathFinder):
-    def find_spec(self, fullname, path=None, target=None):
-        if fullname == "mlx" or fullname.startswith("mlx."):
-            raise AssertionError(f"real MLX import forbidden: {fullname}")
-        return None
-
-
-_mlx_modules_before = {name for name in sys.modules
-                       if name == "mlx" or name.startswith("mlx.")}
-sys.meta_path.insert(0, BlockMLX())
+@pytest.fixture(autouse=True)
+def block_mlx(monkeypatch):
+    block_mlx_imports(monkeypatch, __name__)
 
 
 def _arrays_cache():
@@ -87,5 +82,5 @@ def test_lfm_shortconv_checkpoint_roundtrip_and_long_branch_replay():
     np.testing.assert_array_equal(second[0], np.full((1, 3, 4), landing + 22))
     assert first._checkpoints[0][-1][0] == landing
     assert second._checkpoints[0][-1][0] == landing
-    assert {name for name in sys.modules
-            if name == "mlx" or name.startswith("mlx.")} == _mlx_modules_before
+    # The blocker unlinked MLX for this test; nothing may have brought it back.
+    assert not [name for name in sys.modules if name == "mlx" or name.startswith("mlx.")]

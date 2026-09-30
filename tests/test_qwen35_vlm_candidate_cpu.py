@@ -1,23 +1,20 @@
 """CPU-only checks for the separate Qwen3.5 full vision candidate."""
 
-import importlib.abc
 import sys
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 
 import pytest
+from mlx_blocker import block_mlx_imports
 
 
-class BlockMLX(importlib.abc.MetaPathFinder):
-    def find_spec(self, fullname, path=None, target=None):
-        if fullname == "mlx" or fullname.startswith("mlx."):
-            raise AssertionError(f"real MLX import forbidden: {fullname}")
-        return None
-
-
-sys.meta_path.insert(0, BlockMLX())
 
 from mlx2.adapters.qwen35_vlm_candidate import Qwen35VLMAdapter, inspect_artifact  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def block_mlx(monkeypatch):
+    block_mlx_imports(monkeypatch, __name__)
 
 
 ROOT = Path("~/mlx-models")

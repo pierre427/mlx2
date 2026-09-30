@@ -1,26 +1,18 @@
 """CPU-only metadata and fail-closed checks; run with --noconftest."""
 
-import importlib.abc
 import json
 import os
 import sys
 from pathlib import Path
 
 import pytest
+from mlx_blocker import block_mlx_imports
 
-
-class _BlockMLX(importlib.abc.MetaPathFinder):
-    def find_spec(self, fullname, path=None, target=None):
-        if fullname == "mlx" or fullname.startswith("mlx."):
-            raise AssertionError("real MLX import during CPU-only adapter test")
-        return None
 
 
 @pytest.fixture(autouse=True)
 def block_mlx(monkeypatch):
-    assert "mlx" not in sys.modules and "mlx.core" not in sys.modules
-    blocker = _BlockMLX()
-    monkeypatch.setattr(sys, "meta_path", [blocker, *sys.meta_path])
+    block_mlx_imports(monkeypatch, __name__)
 
 
 AGNES = Path(os.environ.get("MLX2_AGNES_ARTIFACT", "~/mlx-models/Agnes-3.0-Flash-Preview-MLX-6bit"))

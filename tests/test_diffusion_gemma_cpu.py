@@ -1,21 +1,14 @@
 """CPU artifact and direct lifecycle contract without importing real MLX."""
 
-import importlib.abc
 import json
 import sys
 import tempfile
 import unittest
+from mlx_blocker import install_for_test_case
 from pathlib import Path
 
 
-class BlockMLX(importlib.abc.MetaPathFinder):
-    def find_spec(self, fullname, path=None, target=None):
-        if fullname == "mlx" or fullname.startswith("mlx."):
-            raise AssertionError(f"real MLX import forbidden: {fullname}")
-        return None
 
-
-sys.meta_path.insert(0, BlockMLX())
 from mlx2.adapters.diffusion_gemma import (  # noqa: E402
     DiffusionGemmaAdapter, inspect_diffusion_gemma,
 )
@@ -59,6 +52,9 @@ def fixture(root):
 
 
 class DiffusionGemmaCPUTest(unittest.TestCase):
+    def setUp(self):
+        install_for_test_case(self)
+
     def test_artifact_and_fail_closed_direct_candidate(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

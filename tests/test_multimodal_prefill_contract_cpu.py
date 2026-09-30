@@ -1,23 +1,15 @@
 """Adapter validation at the serving CPU-token handoff uses no MLX."""
 
-import importlib.abc
-import sys
 from types import SimpleNamespace
 
 import pytest
+from mlx_blocker import block_mlx_imports
 
-
-class BlockMLX(importlib.abc.MetaPathFinder):
-    def find_spec(self, fullname, path=None, target=None):
-        if fullname == "mlx" or fullname.startswith("mlx."):
-            raise AssertionError("real MLX import during CPU prefill validation")
-        return None
 
 
 @pytest.fixture(autouse=True)
 def block_mlx(monkeypatch):
-    assert "mlx.core" not in sys.modules
-    monkeypatch.setattr(sys, "meta_path", [BlockMLX(), *sys.meta_path])
+    block_mlx_imports(monkeypatch, __name__)
 
 
 def test_smol_scatter_only_receives_trust_on_exact_cold_media_tokens():

@@ -1,11 +1,11 @@
 """Qwen vision grouping geometry and execution with real MLX imports blocked."""
 
-import importlib.abc
 import sys
 import types
 
 import numpy as np
 import pytest
+from mlx_blocker import block_mlx_imports
 
 from mlx2.adapters.qwen25_vision_grouped import (
     _grouped_sdpa,
@@ -15,17 +15,10 @@ from mlx2.adapters.qwen25_vision_grouped import (
 )
 
 
-class _BlockMLX(importlib.abc.MetaPathFinder):
-    def find_spec(self, fullname, path=None, target=None):
-        if fullname == "mlx" or fullname.startswith("mlx."):
-            raise AssertionError("real MLX import in CPU-only Qwen vision test")
-        return None
-
 
 @pytest.fixture(autouse=True)
 def block_real_mlx(monkeypatch):
-    assert "mlx.core" not in sys.modules
-    monkeypatch.setattr(sys, "meta_path", [_BlockMLX(), *sys.meta_path])
+    block_mlx_imports(monkeypatch, __name__)
 
 
 def _softmax_sdpa(q, k, v, *, scale, mask):

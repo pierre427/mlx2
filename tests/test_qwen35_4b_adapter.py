@@ -4,6 +4,7 @@ import json
 import sys
 
 import pytest
+from mlx_blocker import block_mlx_imports
 
 from mlx2.adapters.registry import inspect_model, resolve_adapter
 from mlx2.contracts import Capability
@@ -32,6 +33,11 @@ def _artifact(path):
     )
     (path / "model.safetensors").write_bytes(b"metadata-only test")
     return path
+
+
+@pytest.fixture(autouse=True)
+def block_mlx(monkeypatch):
+    block_mlx_imports(monkeypatch, __name__)
 
 
 def test_4b_dispatch_is_ordinary_and_cpu_safe(tmp_path):

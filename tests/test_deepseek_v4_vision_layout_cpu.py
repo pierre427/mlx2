@@ -1,6 +1,5 @@
 """DeepSeek V4 official N-layout prefill invariants, CPU and no MLX."""
 
-import importlib.abc
 import ast
 import json
 import subprocess
@@ -9,12 +8,13 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+from mlx_blocker import block_mlx_imports
 from PIL import Image as PILImage
 
 from mlx2.adapters.deepseek_v4_vision_layout import (
     IMAGE, IMAGE_END, IMAGE_NEW_LINE, IMAGE_PAD, IMAGE_START,
     MAX_IMAGE_TOKENS, ImagePrefill, build_image_block, expand_image_tokens,
-    grid_tokens, image_size, image_visible, merge_image_embeddings,
+    image_visible, merge_image_embeddings,
     prepare_local_image, visible_window_indices,
 )
 from mlx2.adapters.deepseek_v4_vision_weights import (
@@ -26,6 +26,11 @@ requires_model = pytest.mark.skipif(
     not (MODEL / "model.safetensors.index.json").is_file(),
     reason="optional DeepSeek V4 model fixture is absent",
 )
+
+
+@pytest.fixture(autouse=True)
+def block_mlx(monkeypatch):
+    block_mlx_imports(monkeypatch, __name__)
 
 
 @pytest.mark.parametrize("dimensions", [(512, 512), (1200, 320), (32, 32), (64, 1024)])

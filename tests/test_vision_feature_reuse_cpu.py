@@ -1,20 +1,12 @@
 """Fake-source, import-guarded tests for exact-order vision feature reuse."""
 
-import importlib.abc
-import sys
 import unittest
+from mlx_blocker import install_for_test_case
 
 import numpy as np
 
 
-class BlockMLX(importlib.abc.MetaPathFinder):
-    def find_spec(self, fullname, path=None, target=None):
-        if fullname == "mlx" or fullname.startswith("mlx."):
-            raise AssertionError(f"real MLX import forbidden: {fullname}")
-        return None
 
-
-sys.meta_path.insert(0, BlockMLX())
 from mlx2.adapters.multimodal import MediaFeatureCache  # noqa: E402
 from mlx2.adapters.vision_feature_reuse import (  # noqa: E402
     VisionFeatureCertificate, certify_cold_prefill, install_qwen25, install_smol,
@@ -99,6 +91,9 @@ def cert(family="qwen2_5_vl", *, media="media-1", adaptation="base", tokens=None
 
 
 class VisionFeatureReuseTest(unittest.TestCase):
+    def setUp(self):
+        install_for_test_case(self)
+
     def test_tower_digest_exact_inputs_and_cpu_budget(self):
         pixels = np.arange(12, dtype=np.float32).reshape(2, 6)
         qwen = {"pixel_values": pixels, "image_grid_thw": np.array([[1, 2, 3]])}

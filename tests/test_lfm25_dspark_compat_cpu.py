@@ -1,20 +1,11 @@
 """DSpark offline binding preflight without importing or using real MLX."""
 
-import importlib.abc
-import sys
 import unittest
+from mlx_blocker import install_for_test_case
 from types import SimpleNamespace
-from unittest.mock import patch
 
 
-class BlockMLX(importlib.abc.MetaPathFinder):
-    def find_spec(self, fullname, path=None, target=None):
-        if fullname == "mlx" or fullname.startswith("mlx."):
-            raise AssertionError(f"real MLX import forbidden: {fullname}")
-        return None
 
-
-sys.meta_path.insert(0, BlockMLX())
 from mlx2.adapters.lfm25_dspark_compat import (  # noqa: E402
     install_offline_dspark_bridge, require_offline_dspark_target,
     offline_dspark_target_transaction,
@@ -42,6 +33,9 @@ class VLTarget:
 
 
 class OfflineDSparkCompatibilityTest(unittest.TestCase):
+    def setUp(self):
+        install_for_test_case(self)
+
     def test_current_pinned_vl_wrapper_fails_before_source_or_draft_weights(self):
         target = VLTarget()
         with self.assertRaisesRegex(ValueError, "lacks rollback_speculative_cache"):
@@ -119,6 +113,9 @@ def _fake_verifier(language, inputs, *, cache, input_embeddings, capture_layer_i
 
 
 class OfflineDSparkBridgeTest(unittest.TestCase):
+    def setUp(self):
+        install_for_test_case(self)
+
     def make_target(self):
         target = SimpleNamespace(language_model=_FakeVL())
         install_offline_dspark_bridge(

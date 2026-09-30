@@ -1,21 +1,14 @@
 """CPU-only validation for 122B ordinary and embedded candidate contracts."""
 
-import importlib.abc
 import json
 import sys
 import tempfile
 import unittest
+from mlx_blocker import install_for_test_case
 from pathlib import Path
 
 
-class BlockMLX(importlib.abc.MetaPathFinder):
-    def find_spec(self, fullname, path=None, target=None):
-        if fullname == "mlx" or fullname.startswith("mlx."):
-            raise AssertionError(f"real MLX import forbidden: {fullname}")
-        return None
 
-
-sys.meta_path.insert(0, BlockMLX())
 from mlx2.adapters.qwen35_122b import (  # noqa: E402
     EXPECTED, QWEN35_122B, Qwen35122BA10BAdapter, inspect_artifact,
 )
@@ -24,6 +17,9 @@ from mlx2.adapters.qwen35_122b_vision import Qwen35122BVisionCandidate  # noqa: 
 
 
 class Qwen35122BCPUTest(unittest.TestCase):
+    def setUp(self):
+        install_for_test_case(self)
+
     def make_artifact(self):
         tmp = tempfile.TemporaryDirectory()
         path = Path(tmp.name)

@@ -1,21 +1,14 @@
 """CPU-only ordinary-decoder artifact and capability checks."""
 
-import importlib.abc
 import json
 import sys
 import tempfile
 import unittest
+from mlx_blocker import install_for_test_case
 from pathlib import Path
 
 
-class BlockMLX(importlib.abc.MetaPathFinder):
-    def find_spec(self, fullname, path=None, target=None):
-        if fullname == "mlx" or fullname.startswith("mlx."):
-            raise AssertionError(f"real MLX import forbidden: {fullname}")
-        return None
 
-
-sys.meta_path.insert(0, BlockMLX())
 from mlx2.adapters.standard_decoder import (  # noqa: E402
     StandardDecoderAdapter, descriptor_for, inspect_artifact,
 )
@@ -32,6 +25,9 @@ BASE = {
 
 
 class StandardDecoderCPUTest(unittest.TestCase):
+    def setUp(self):
+        install_for_test_case(self)
+
     def make_artifact(self, family):
         temp = tempfile.TemporaryDirectory()
         path = Path(temp.name)

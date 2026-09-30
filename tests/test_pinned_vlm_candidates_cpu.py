@@ -1,25 +1,18 @@
 """CPU-only artifact gates for embedded vision and local VLM candidates."""
 
-import importlib.abc
 import json
 import sys
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from mlx_blocker import block_mlx_imports
 
-
-class _BlockMLX(importlib.abc.MetaPathFinder):
-    def find_spec(self, fullname, path=None, target=None):
-        if fullname == "mlx" or fullname.startswith("mlx."):
-            raise AssertionError("real MLX import during CPU-only VLM candidate test")
-        return None
 
 
 @pytest.fixture(autouse=True)
 def block_mlx(monkeypatch):
-    assert "mlx" not in sys.modules and "mlx.core" not in sys.modules
-    monkeypatch.setattr(sys, "meta_path", [_BlockMLX(), *sys.meta_path])
+    block_mlx_imports(monkeypatch, __name__)
 
 
 CASES = [

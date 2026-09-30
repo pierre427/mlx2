@@ -1,27 +1,24 @@
 """CPU-only artifact and request-contract checks for Muse image generation."""
 
-import importlib.abc
 import json
 import sys
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 
 import pytest
+from mlx_blocker import block_mlx_imports
 
 
-class BlockMLX(importlib.abc.MetaPathFinder):
-    def find_spec(self, fullname, path=None, target=None):
-        if fullname == "mlx" or fullname.startswith("mlx."):
-            raise AssertionError(f"real MLX import forbidden: {fullname}")
-        return None
-
-
-sys.meta_path.insert(0, BlockMLX())
 
 from mlx2.adapters.muse_glimmer_vision_candidate import (  # noqa: E402
     MuseGlimmerVisionCandidate,
     inspect_artifact,
 )
+
+
+@pytest.fixture(autouse=True)
+def block_mlx(monkeypatch):
+    block_mlx_imports(monkeypatch, __name__)
 
 
 ROOT = Path("~/mlx-models")

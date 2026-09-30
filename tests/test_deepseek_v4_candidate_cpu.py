@@ -1,12 +1,12 @@
 """DeepSeek V4 artifact receipt and fail-closed execution, no real MLX."""
 
-import importlib.abc
 import subprocess
 import sys
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from mlx_blocker import block_mlx_imports
 import numpy as np
 from PIL import Image as PILImage
 
@@ -21,6 +21,11 @@ requires_artifact = pytest.mark.skipif(
     not (ARTIFACT / "model.safetensors.index.json").is_file(),
     reason="optional DeepSeek V4 model fixture is absent",
 )
+
+
+@pytest.fixture(autouse=True)
+def block_mlx(monkeypatch):
+    block_mlx_imports(monkeypatch, __name__)
 
 
 @requires_artifact
