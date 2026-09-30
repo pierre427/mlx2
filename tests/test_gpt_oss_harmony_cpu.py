@@ -166,3 +166,48 @@ def test_raw_prompt_is_not_templated():
     value = adapter(GptOssPuzzleAdapter)
     assert value.prompt_tokens({"prompt": "abc"}) == ["a", "b", "c"]
     assert not value.thinking_enabled({"prompt": "abc"})
+
+
+class _HarmonyTokenizer(_Tokenizer):
+    """Harmony specials and ``assistant``/``final`` as single ids."""
+
+    VOCAB = {"<|end|>": 200007, "<|start|>": 200006, "assistant": 173781,
+             "<|channel|>": 200005, "final": 17196, "<|message|>": 200008}
+
+    def encode(self, text, add_special_tokens=False):
+        import re
+        pieces = re.findall(r"<\|\w+\|>|assistant|final|.", text)
+        return [self.VOCAB.get(piece, ord(piece[0])) for piece in pieces]
+
+    def decode(self, ids):
+        names = {value: key for key, value in self.VOCAB.items()}
+        return "".join(names.get(token, chr(token)) for token in ids)
+
+
+def test_harmony_final_switch_is_the_declared_close_marker():
+    for cls in (GptOssAdapter, GptOssPuzzleAdapter):
+        value = object.__new__(cls)
+        value.tokenizer = _HarmonyTokenizer()
+        assert value.thinking_close_token_ids() == (200007, 200006, 173781, 200005, 17196, 200008)
+    # A tokenizer that splits the switch differently declares nothing.
+    value = adapter(GptOssPuzzleAdapter)
+    assert value.thinking_close_token_ids() is None
+
+
+@pytest.mark.parametrize("request_fields,budget", [
+    ({"enable_thinking": False, "max_tokens": 64}, 32),
+    ({"enable_thinking": False, "max_tokens": 20}, 16),
+    ({"enable_thinking": False, "max_tokens": 4096}, 512),
+    ({"enable_thinking": False}, 512),
+    ({"reasoning_effort": "none", "max_tokens": 100}, 50),
+    ({}, 0),                       # visible reasoning: the operator's budget applies
+    ({"enable_thinking": True}, 0),
+])
+def test_puzzle_bounds_hidden_reasoning_by_max_tokens(request_fields, budget):
+    assert adapter(GptOssPuzzleAdapter).hidden_thinking_budget({**CHAT, **request_fields}) == budget
+
+
+def test_stock_gpt_oss_has_no_hidden_reasoning_to_bound():
+    value = adapter(GptOssAdapter)
+    assert value.hidden_thinking_budget({**CHAT, "enable_thinking": False, "max_tokens": 64}) == 0
+    assert value.hidden_thinking_budget({"prompt": "x"}) == 0

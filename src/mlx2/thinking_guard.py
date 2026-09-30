@@ -13,6 +13,12 @@ problems, so the guard is state-aware:
   ``ramp_nats`` per step, so the model winds down over a few tokens rather than
   being cut mid-thought.
 
+The close marker may be a token sequence (GPT-OSS harmony closes analysis with
+``<|end|><|start|>assistant<|channel|>final<|message|>``).  The release then
+boosts the next marker token after whatever prefix of it the output already
+ends with, and a forced close emits the rest of the marker token by token, as
+``ThinkingBudgetProcessor`` does in history mode.
+
 The guard is a pure function of the generated ids, so speculative verify rows
 and rollbacks need no bookkeeping from the caller.  Internally it is
 incremental: each step reads only the tail of the token context and a rollback
@@ -37,8 +43,8 @@ class ThinkingGuard:
         self.prompt_length = int(prompt_length)
         self.rewrite_window = max(1, int(rewrite_window))
         self.close_ids = tuple(int(token) for token in close_ids)
-        if len(self.close_ids) != 1:
-            raise ValueError("the thinking guard needs a single-token close marker")
+        if not self.close_ids:
+            raise ValueError("the thinking guard needs a close marker")
         self.budget = None if budget is None else int(budget)
         self.soft = (
             None
@@ -66,6 +72,8 @@ class ThinkingGuard:
         # this lane (hammer * vector once the alarm or soft budget has tripped).
         # It is a pull toward the model's own close decision, not a cut.
         self._direction = direction if (direction and alpha > 0) else None
+        if self._direction is not None and len(self.close_ids) != 1:
+            raise ValueError("residual steering needs a single-token close marker")
         self.alpha, self.hammer = float(alpha), float(hammer)
         self._open = True
         self.steered_steps = 0
@@ -165,19 +173,38 @@ class ThinkingGuard:
             common += 1
         del known[common:]
         known.extend(tail[common - start :])
-        if self._close_at is not None and self._close_at >= common:
+        width = len(self.close_ids)
+        if self._close_at is not None and self._close_at + width > common:
             self._close_at = None
         if self._close_at is None:
-            close = self.close_ids[0]
-            self._close_at = next(
-                (index for index in range(common, len(known)) if known[index] == close),
-                None,
-            )
+            self._close_at = self._find_close(known, max(0, common - width + 1))
         if self._forced_at is not None and common < self._forced_at:
             self._forced_at = None
             self.forced = False
         self._truncate(min(len(self._ids), common))
         return length
+
+    def _find_close(self, known, start):
+        """Index of the first complete close marker at or after ``start``."""
+        marker, width = self.close_ids, len(self.close_ids)
+        first = marker[0]
+        for index in range(start, len(known) - width + 1):
+            if known[index] == first and tuple(known[index : index + width]) == marker:
+                return index
+        return None
+
+    def _marker_offset(self, length):
+        """The longest proper close-marker prefix the first ``length`` ids end with.
+
+        Both the release and a forced close continue the marker from here, so
+        which marker token comes next is a function of the ids alone: a
+        rollback or a stale speculative row needs no forcing state.
+        """
+        known, marker = self._generated, self.close_ids
+        for width in range(min(len(marker) - 1, length), 0, -1):
+            if tuple(known[length - width : length]) == marker[:width]:
+                return width
+        return 0
 
     def _observe(self, tokens):
         """Sync the guard state to ``tokens``; the state half of ``__call__``."""
@@ -200,21 +227,25 @@ class ThinkingGuard:
             return False
         self.forced = True
         if self._forced_at is None:
-            self._forced_at = length
+            # A marker prefix the model already wrote continues, not restarts.
+            self._forced_at = length - self._marker_offset(length)
         return True
 
     def __call__(self, tokens, logits):
         import mlx.core as mx
 
         length = self._observe(tokens)
-        close = self.close_ids[0]
-        if self._close_at is not None:
-            return logits
-        if self._tripped_at is None or close >= logits.shape[-1]:
+        if self._close_at is not None or self._tripped_at is None:
             return logits
         if self._forces(length):
+            close = self.close_ids[self._marker_offset(length)]
+            if close >= logits.shape[-1]:
+                return logits
             keep = mx.arange(logits.shape[-1]) == close
             return mx.where(keep, logits, mx.array(-float("inf"), dtype=logits.dtype))
+        close = self.close_ids[self._marker_offset(length)]
+        if close >= logits.shape[-1]:
+            return logits
         bias = self.ramp_nats * (length - self._tripped_at + 1)
         boost = mx.where(mx.arange(logits.shape[-1]) == close,
                          mx.array(bias, dtype=logits.dtype), mx.array(0.0, dtype=logits.dtype))
@@ -296,13 +327,14 @@ class ThinkingGuard:
             # a time; a speculative route may have skipped some of them.
             for token in self._generated[len(self._ids) : close_at]:
                 self._advance(token)
-        # A forcing row admits only the close token, so a step that forced
-        # committed the close at its own position: a close at or past the
-        # budget, with the alarm tripped by then, is exactly a forced one.
+        # A forcing row admits only the next marker token, so a forced close
+        # ends at or past the budget while a natural one ends before it: a
+        # marker whose last token is at or past the budget, with the alarm
+        # tripped by then, is exactly a forced one.
         self.forced = (
             self.budget is not None
             and close_at is not None
-            and close_at >= self.budget
+            and close_at + len(self.close_ids) - 1 >= self.budget
             and self._tripped_at is not None
         )
         self._forced_at = close_at if self.forced else None
@@ -316,7 +348,15 @@ class ThinkingGuard:
         generated = tokens[self.prompt_length :]
         if hasattr(generated, "tolist"):
             generated = generated.tolist()
-        return self.close_ids[0] in [int(item) for item in generated]
+        generated = [int(item) for item in generated]
+        return self._find_close_in(generated)
+
+    def _find_close_in(self, generated):
+        marker, width = self.close_ids, len(self.close_ids)
+        return any(
+            tuple(generated[index : index + width]) == marker
+            for index in range(len(generated) - width + 1)
+        )
 
     def receipt(self):
         return {

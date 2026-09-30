@@ -49,7 +49,86 @@ def test_guard_is_a_pure_function_of_the_ids_across_rollbacks():
     fresh = _call(ThinkingGuard(2, (CLOSE,), budget=10, soft_ratio=0.5), ids[:7])
     np.testing.assert_array_equal(rolled_back, fresh)
     with pytest.raises(ValueError, match="single-token"):
-        ThinkingGuard(2, (1, 2), budget=10)
+        ThinkingGuard(2, (1, 2), budget=10, direction={"layer": 0, "vector": mx.ones((4,))}, alpha=0.2)
+
+
+# A GPT-OSS-shaped marker: <|end|><|start|>assistant<|channel|>final<|message|>.
+SWITCH = (3, 4, 5, 6)
+
+
+def _multi(budget=10, **config):
+    return ThinkingGuard(2, SWITCH, budget=budget, soft_ratio=0.5, ramp_nats=2.0, **config)
+
+
+def _masked_to(row):
+    finite = np.flatnonzero(np.isfinite(row))
+    return int(finite[0]) if finite.size == 1 else None
+
+
+def test_multi_token_close_is_forced_token_by_token_after_the_budget():
+    guard = _multi()
+    novel = list(range(8, 16)) + [9, 10]
+    assert not _call(guard, novel[:4]).any()
+    # The release boosts the first marker token until the model writes it.
+    assert _call(guard, novel[:6])[SWITCH[0]] == 4.0 and not _call(guard, novel[:6])[SWITCH[1]]
+    ids = novel[:10]
+    for expected in SWITCH:
+        row = _call(guard, ids)
+        assert _masked_to(row) == expected
+        ids.append(expected)
+    assert guard.receipt()["forced_close"] is True
+    assert not _call(guard, ids + [9, 9]).any()  # closed: out of the way
+    assert guard.receipt()["released_at"] == 10 and guard.receipt()["think_tokens"] == 10
+    settled = _multi()
+    settled.settle(ids + [9])
+    assert settled.receipt()["forced_close"] is True
+
+
+def test_multi_token_release_boosts_the_next_marker_token_after_a_written_prefix():
+    guard = _multi(budget=40)
+    ids = list(range(8, 16)) + [9, 10, 11, 12, 13, 14, 15, 8, 9, 10, 11, 12]
+    ids = ids[:21]  # past the soft budget (20)
+    assert _call(guard, ids)[SWITCH[0]] > 0
+    row = _call(guard, ids + [SWITCH[0]])
+    assert row[SWITCH[1]] > 0 and row[SWITCH[0]] == 0.0
+    row = _call(guard, ids + list(SWITCH[:3]))
+    assert row[SWITCH[3]] > 0
+
+
+def test_forced_close_continues_a_marker_prefix_the_model_already_wrote():
+    guard = _multi()
+    ids = list(range(8, 16)) + [9, SWITCH[0]]  # the budget lands after <|end|>
+    assert _masked_to(_call(guard, ids)) == SWITCH[1]  # not a second <|end|>
+
+
+def test_a_partial_or_different_switch_does_not_close_reasoning():
+    guard = _multi(budget=None)
+    # <|end|><|start|>assistant<|channel|>analysis: another analysis message.
+    ids = [8, 9] + list(SWITCH[:3]) + [11, 12, 13]
+    _call(guard, ids)
+    assert guard.receipt()["released_at"] is None and not guard.dormant(np.array([1, 2] + ids))
+    closed = [1, 2, 8, 9] + list(SWITCH) + [11]
+    assert guard.dormant(np.array(closed))
+    _call(guard, closed[2:])
+    assert guard.receipt()["released_at"] == 2 and guard.receipt()["forced_close"] is False
+
+
+def test_multi_token_guard_matches_a_fresh_guard_under_random_rollbacks():
+    rng = np.random.default_rng(1)
+    marker = (3, 4, 5)
+
+    def make():
+        return ThinkingGuard(2, marker, budget=150, soft_ratio=0.8, tau=2.5,
+                             ngram=4, rewrite_window=32)
+    live, ids = make(), []
+    for _ in range(600):
+        if ids and rng.random() < 0.2:
+            del ids[len(ids) - int(rng.integers(1, min(len(ids), 12) + 1)):]
+        ids += [int(token) for token in rng.integers(3, 12, size=int(rng.integers(1, 4)))]
+        ours = _call(live, ids)
+        fresh_guard = make()
+        np.testing.assert_array_equal(ours, _call(fresh_guard, ids))
+        assert live.receipt()["released_at"] == fresh_guard.receipt()["released_at"]
 
 
 def test_rejected_close_restores_steering_and_release_receipt():
@@ -717,3 +796,68 @@ def test_recovery_snapshots_share_a_guard_that_resyncs_after_rollback():
     assert shared is plain
     # Steering counts committed positions, which the ids do not determine.
     assert copied is not steering and copied.steered_steps == steering.steered_steps
+
+
+def test_multi_token_forced_close_is_the_same_committed_stream_on_every_route(monkeypatch):
+    # A GPT-OSS-style switch sequence: every route commits the same stream,
+    # and a forced close writes the whole marker, token by token.
+    from route_harness import make_engine, patch_host, run, tiny_qwen38_mtp
+
+    patch_host(monkeypatch)
+    model, vocab = tiny_qwen38_mtp()
+    marker = (97, 98, 99)
+    base = {"messages": [{"role": "user", "content": "x"}],
+            "tokens": [(7 * i + 3) % (vocab - 2) + 1 for i in range(40)],
+            "max_tokens": 20, "temperature": 0}
+    requests = [{**base, "thinking_budget": budget} for budget in (1, 12)]
+    outputs = {}
+    for route, options in _guard_routes().items():
+        engine = make_engine(model, vocab, close_id=marker, **options)
+        try:
+            outputs[route] = [run(engine, request) for request in requests]
+        finally:
+            engine.close()
+    forced, released = outputs["ordinary"]
+    guard = forced["receipt"]["request_controls"]["thinking_guard"]
+    assert tuple(forced["tokens"][1:4]) == marker, forced["tokens"]
+    assert guard["forced_close"] is True and guard["think_tokens"] == 1
+    late = released["receipt"]["request_controls"]["thinking_guard"]
+    at = late["think_tokens"]
+    assert late["tripped"] and at <= 12 and tuple(released["tokens"][at:at + 3]) == marker
+    for route, results in outputs.items():
+        for result, reference in zip(results, outputs["ordinary"]):
+            assert result["tokens"] == reference["tokens"], route
+            receipt = result["receipt"]["request_controls"]["thinking_guard"]
+            assert receipt == reference["receipt"]["request_controls"]["thinking_guard"], route
+
+
+def test_adapter_hidden_budget_guards_a_thinking_off_request(monkeypatch):
+    # A model that reasons even with thinking off (GPT-OSS Puzzle) bounds that
+    # hidden reasoning through the adapter; others get no guard.
+    from route_harness import make_engine, patch_host, run, tiny_qwen38_mtp
+
+    patch_host(monkeypatch)
+    model, vocab = tiny_qwen38_mtp()
+    marker = (97, 98, 99)
+
+    class Hidden:
+        def hidden_thinking_budget(self, request):
+            return 1
+
+    request = {"messages": [{"role": "user", "content": "x"}], "enable_thinking": False,
+               "tokens": [(7 * i + 3) % (vocab - 2) + 1 for i in range(40)],
+               "max_tokens": 16, "temperature": 0}
+    engine = make_engine(model, vocab, mtp=False, close_id=marker, adapter_mixin=Hidden)
+    try:
+        hidden = run(engine, request)
+    finally:
+        engine.close()
+    guard = hidden["receipt"]["request_controls"]["thinking_guard"]
+    assert guard is not None and guard["budget"] == 1 and guard["forced_close"] is True
+    assert tuple(hidden["tokens"][1:4]) == marker
+    engine = make_engine(model, vocab, mtp=False, close_id=marker)
+    try:
+        plain = run(engine, request)
+    finally:
+        engine.close()
+    assert plain["receipt"]["request_controls"]["thinking_guard"] is None

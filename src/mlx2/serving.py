@@ -6712,6 +6712,17 @@ class ServingEngine:
                             and thinking_enabled(adapter, job.request)
                             else 0
                         )
+                        hidden_budget = getattr(adapter, "hidden_thinking_budget", None)
+                        if (
+                            not think_budget
+                            and callable(hidden_budget)
+                            and "messages" in job.request
+                            and not thinking_enabled(adapter, job.request)
+                        ):
+                            # Thinking off on a model that must still reason
+                            # (GPT-OSS Puzzle): bound the hidden reasoning so
+                            # the answer keeps room within max_tokens.
+                            think_budget = int(hidden_budget(job.request) or 0)
                         thinking_budget_mode = job.request.get(
                             "thinking_budget_mode", "state_aware"
                         )
@@ -6722,16 +6733,6 @@ class ServingEngine:
                                     "thinking_budget needs an adapter-declared thinking-close token"
                                 )
                             think_budget = 0  # a server default never fails a request
-                        if (
-                            think_budget
-                            and thinking_budget_mode == "state_aware"
-                            and len(close_ids or ()) != 1
-                        ):
-                            if job.request.get("thinking_budget"):
-                                raise ValueError(
-                                    "state-aware thinking_budget needs a single-token thinking-close marker"
-                                )
-                            think_budget = 0
                         steer_alpha = float(
                             self.thinking_steer_alpha
                             if job.request.get("thinking_steer_alpha") is None
@@ -6748,10 +6749,14 @@ class ServingEngine:
                                 )
                             if direction is not None and close_ids is None:
                                 close_ids = thinking_close_token_ids(adapter)
-                        if (
-                            len(close_ids or ()) == 1
-                            and (think_budget or direction is not None)
-                        ):
+                            if direction is not None and len(close_ids or ()) != 1:
+                                # Residual steering reads a single close token.
+                                if job.request.get("thinking_steer_alpha"):
+                                    raise ValueError(
+                                        "thinking_steer_alpha needs a single-token thinking-close marker"
+                                    )
+                                direction = None
+                        if close_ids and (think_budget or direction is not None):
                             job.thinking_guard = ThinkingGuard(
                                 prompt_len, close_ids,
                                 budget=(

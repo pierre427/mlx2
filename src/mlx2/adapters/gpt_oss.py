@@ -22,6 +22,7 @@ _COMMON = frozenset({
 })
 # The template's ``Reasoning:`` levels for the server's reasoning_effort
 # values; "none" means thinking off (see ``thinking_enabled``).
+_FINAL_SWITCH = "<|end|><|start|>assistant<|channel|>final<|message|>"
 _EFFORTS = {
     "none": "low", "minimal": "low", "low": "low", "medium": "medium",
     "high": "high", "xhigh": "high", "max": "high", "ultra": "high",
@@ -247,6 +248,37 @@ class _GptOssOrdinaryAdapter:
         if effort is not None:
             return effort != "none"
         return not self.direct_final
+
+    def thinking_close_token_ids(self):
+        """The harmony switch from analysis to the answer, or None.
+
+        ``<|end|><|start|>assistant<|channel|>final<|message|>``: the thinking
+        guard forces it token by token when a budget runs out, and grammars
+        would defer to it.  Declared only when it encodes to one id per
+        marker piece and decodes back exactly.
+        """
+        try:
+            ids = [int(token) for token in self.tokenizer.encode(_FINAL_SWITCH, add_special_tokens=False)]
+            if len(ids) != 6 or self.tokenizer.decode(ids) != _FINAL_SWITCH:
+                return None
+        except Exception:  # noqa: BLE001 - undeclared marker, not a load failure
+            return None
+        return tuple(ids)
+
+    def hidden_thinking_budget(self, request: dict) -> int:
+        """Reasoning-token bound for a thinking-off request, or 0 for none.
+
+        A model that cannot skip analysis still reasons with thinking off
+        (hidden, ``Reasoning: low``).  Half of ``max_tokens`` (16 to 512) goes
+        to it, so a short-budget request still gets an answer: the guard
+        switches to the final channel when the bound is reached.
+        """
+        if self.direct_final or "messages" not in request or self.thinking_enabled(request):
+            return 0
+        limit = request.get("max_tokens")
+        if not isinstance(limit, int) or limit <= 0:
+            return 512
+        return max(16, min(512, limit // 2))
 
     def _answers_directly(self, request: dict) -> bool:
         return self.direct_final and not self.thinking_enabled(request)
