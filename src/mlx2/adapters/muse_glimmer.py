@@ -445,6 +445,38 @@ class MuseGlimmerAdapter:
         """Prompt text whose special-token-free encoding is ``prompt_tokens``."""
         return render_prompt_text(self.tokenizer, request)
 
+    @staticmethod
+    def thinking_enabled(request: dict) -> bool:
+        """The template's view: ``reasoning_effort`` alone opens reasoning too.
+
+        Serving asks this before deferring a grammar or refusing structured
+        output with thinking on; reading ``enable_thinking`` alone, it took a
+        ``reasoning_effort``-only request for a direct answer.
+        """
+        return "messages" in request and _thinking_enabled(request)
+
+    def structured_answer_token_ids(self, request):
+        """The `` to=user<|message|>`` ids a client grammar waits for, or None.
+
+        Every Muse reply opens with a recipient header.  The prompt writes the
+        user's header only for a direct answer (thinking off, no tools); in
+        every other case the model writes it, after its reasoning or instead
+        of a tool's header, and a grammar bound from the first token would
+        have to spell it inside the JSON answer (ollama #18687, llama.cpp
+        #29615).  A reply to a tool never opens it, so the grammar never binds
+        a call.
+        """
+        if "messages" not in request:
+            return None
+        choice = request.get("tool_choice", "auto")
+        if not _thinking_enabled(request) and (
+            not _tool_names(request) or choice == "none"
+        ):
+            return None
+        return tuple(
+            self.tokenizer.encode(_recipient_header("user"), add_special_tokens=False)
+        )
+
     def request_logits_processors(self, request, *, prompt_length):
         """Return the request-scoped Muse recipient policy, if one is needed."""
         if "messages" not in request or _thinking_enabled(request):

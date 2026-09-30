@@ -344,6 +344,8 @@ def scripted_engine(monkeypatch):
             self.descriptor = NS(capabilities=frozenset({Capability.PROMPT_LOOKUP}))
             if state["declare_marker"]:
                 self.thinking_close_token_ids = lambda: (THINK_CLOSE,)
+            if state.get("answer_ids") is not None:
+                self.structured_answer_token_ids = lambda request: state["answer_ids"]
             if not state["declare_tool_constraint"]:
                 self.tool_constraint = None
             self._thinking_direction = state["thinking_direction"]
@@ -1535,3 +1537,24 @@ def test_deferral_and_guard_receipts_describe_the_committed_stream(monkeypatch, 
         ), name
     structured = ordinary["receipt"]["request_controls"]["structured_output"]
     assert structured["deferred"] and structured["deferred_tokens"] == len(ordinary["tokens"]) + 1
+
+
+def test_answer_header_defers_a_client_grammar_past_the_reply_framing(scripted_engine):
+    """ollama #18687 / llama.cpp #29615: an adapter whose replies open with a
+    header the prompt did not write (Muse's `` to=user<|message|>``) defers a
+    client grammar until that header, even with no thinking-close marker."""
+    build, state = scripted_engine
+    state["answer_ids"] = SPLIT_MARKER
+    engine = build(declare_marker=False)
+    state["script"] = [2, 3, *SPLIT_MARKER, BLANK]
+    reasoning, content, final = _collect(engine.submit(dict(THINKING_JSON_REQUEST)))
+    assert "error" not in final, final
+    assert reasoning == "Let me"
+    assert json.loads(content) == {}
+    structured = final["receipt"]["request_controls"]["structured_output"]
+    assert structured["deferred"] is True and structured["deferred_tokens"] == 5
+    # Without the answer header the same thinking request is still refused.
+    state["answer_ids"] = None
+    engine = build(declare_marker=False)
+    *_, final = _collect(engine.submit(dict(THINKING_JSON_REQUEST)))
+    assert "structured output requires thinking to be disabled" in final["error"]

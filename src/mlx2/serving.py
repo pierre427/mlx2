@@ -844,6 +844,22 @@ def thinking_close_token_ids(adapter):
     return tuple(int(token) for token in ids) if ids else None
 
 
+def structured_answer_token_ids(adapter, request):
+    """The ids opening the answer a client grammar constrains, or None.
+
+    An adapter whose replies open with a framing header the prompt did not
+    already write (Muse's `` to=user<|message|>``) declares it here, and a
+    client ``response_format``/``grammar`` defers until it: bound from the
+    first token, the header would be spelled inside the constrained answer
+    (ollama #18687, llama.cpp #29615).  A reply addressed to a tool never
+    opens it, so the grammar never binds a tool call.  None means the
+    thinking-close deferral applies as for every other adapter.
+    """
+    accessor = getattr(adapter, "structured_answer_token_ids", None)
+    ids = accessor(request) if callable(accessor) else None
+    return tuple(int(token) for token in ids) if ids else None
+
+
 def structured_envelope_token_ids(adapter):
     """The adapter's answer-channel (open ids, close ids), or None."""
     accessor = getattr(adapter, "structured_envelope_token_ids", None)
@@ -2581,6 +2597,10 @@ class ServingEngine:
             server_tool_grammar, tool_grammar, _, _ = self._tool_grammar_plan(
                 adapter, request, defer_until
             )
+            if not (server_tool_grammar or tool_grammar):
+                defer_until = (
+                    structured_answer_token_ids(adapter, request) or defer_until
+                )
             return prepare_structured_automata(
                 response_format=request.get("response_format"),
                 grammar=request.get("grammar"),
@@ -6720,6 +6740,16 @@ class ServingEngine:
                             )
                             processors.append(budget_processor)
                         job.thinking_budget = budget_processor
+                        # A client grammar binds the answer, which an adapter's
+                        # reply framing may open only after its own header;
+                        # the adapter's tool grammars spell that framing
+                        # themselves and keep the thinking-close deferral.
+                        structured_defer = (
+                            defer_until
+                            if tool_grammar or server_tool_grammar
+                            else structured_answer_token_ids(adapter, job.request)
+                            or defer_until
+                        )
                         structured = make_structured_processor(
                             adapter.tokenizer,
                             prompt_len,
@@ -6741,7 +6771,7 @@ class ServingEngine:
                             greedy=(temp == 0),
                             top_k=top_k,
                             top_p=top_p,
-                            defer_until=defer_until,
+                            defer_until=structured_defer,
                             # Chat only: a raw completion has no channel framing.
                             envelope=(
                                 structured_envelope_token_ids(adapter)
@@ -6768,7 +6798,7 @@ class ServingEngine:
                             job.receipt_token_ids = []
                         if structured is not None:
                             if (
-                                defer_until is None
+                                structured_defer is None
                                 and "messages" in job.request
                                 and thinking_enabled(adapter, job.request)
                             ):

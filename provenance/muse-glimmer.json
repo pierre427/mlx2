@@ -1,5 +1,5 @@
 {
-  "source_repository": "~/Desktop/mlx-uag/mlx-lm-unified",
+  "source_repository": "local read-only mlx-lm-unified checkout",
   "source_revision": "1e2bc604f71d070bee970c3e7db8b60f7855599b",
   "source_paths": [
     "mlx_lm/models/muse_glimmer.py"
@@ -16,17 +16,21 @@
     "Use existing mlx2 cache and attention primitives only",
     "Declare revision-bound model cache layout",
     "Honor per-layer RoPE theta and reject mismatched cache lengths",
-    "Keep ordinary decode reference; no native MTP or DFlash route enabled"
+    "Keep ordinary decode reference; no native MTP or DFlash route enabled",
+    "sanitize also drops the vision tower under the Hugging Face original's model. prefix (model.vision_tower/vision_adapter/vision_projection), so the unconverted HF checkpoint loads by pure rename like the MLX conversion",
+    "Adapter declares structured_answer_token_ids (the ' to=user<|message|>' header) so a client response_format/grammar binds only the user-addressed answer, after reasoning or a tool's header (ollama #18687, llama.cpp #29615), and thinking_enabled so serving reads reasoning_effort-only requests as thinking like the template does"
   ],
   "validation": [
     "39 Muse CPU/static tests plus11 adapter-registry tests passed",
     "Local tokenizer and ATEM tool-history roundtrip passed, 131 tokens; BPE detokenizer preserves channel tokens",
     "Four local safetensors headers inspected without opening tensor payloads; q/k/gate/lm_head packed shapes match config",
-    "No MLX import, model load, tensor computation or GPU test performed"
+    "No MLX import, model load, tensor computation or GPU test performed",
+    "2026-09-25: CPU header check of ~/mlx-models/Muse-Glimmer-30B (HF original) and Muse-Glimmer-30B-mlx-bf16: each 1436 header keys sanitize to exactly the model's 627 parameters (809 vision keys dropped), every shape equal, all BF16; no tensor payload loaded, no GPU; tests/test_muse_glimmer_hf_original.py",
+    "tests/test_muse_structured_answer.py; tests/test_structured_deferral.py::test_answer_header_defers_a_client_grammar_past_the_reply_framing (CPU)"
   ],
   "inspected_not_mined": [
     {
-      "repository": "~/Desktop/mlx-uag/worktrees/agnes-vlm-support",
+      "repository": "local read-only Agnes VLM support checkout",
       "revision": "8a5e704e0fe43cd8654c144c4ecbd4c8aececeb5",
       "path": "mlx_vlm/speculative/drafters/dflash2/dflash2.py"
     }
