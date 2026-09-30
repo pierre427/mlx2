@@ -28,6 +28,10 @@ recovery passed on both hosts. The M3 external-draft route remains an open gate.
 
 A later [current-main comparison](upstream-main-comparison.md) records why the staged Flash-Next checkpoint did not load in TensorFold or omlx, plus a thermally controlled three-engine speed control using the shared Qwen3.8 27B 4-bit checkpoint.
 
+## Nemotron 3.5 Lightning follow-up
+
+The [Lightning result page](nemotron35-lightning.md) records M5 ordinary smoke, passing capped ordinary 20×20 runs, a cooled three-repetition 1K–32K ladder, native-MTP candidate tests, and nine applicable feature engagement checks across a combined run and two isolated reruns. Eight-lane native-MTP batching is not qualified: the candidate verifier ran serial rows and its bounded eight-lane speculative round was slower than ordinary. The M3 could not safely load this artifact; its CPU and memory feasibility receipts are recorded without an M3 throughput claim. The current-source 64K–262K ladder is still pending.
+
 The 20×20 rate is median aggregate generated tokens per second across mixed domain rounds. Context-ladder decode is per stream, from thermally admitted measured runs. They are different measurements. A functional smoke, stress pass, feature implementation, feature qualification, route selection, and observed production use are distinct states.
 
 ## Model pages
@@ -50,6 +54,7 @@ The 20×20 rate is median aggregate generated tokens per second across mixed dom
 | [muse-cyber-bf16](muse-cyber-bf16.md) | passed | passed | no |
 | [muse-original](muse-original.md) | passed | passed | no |
 | [nemotron](nemotron.md) | passed | not run | no |
+| [nemotron35-lightning](nemotron35-lightning.md) | passed | passed, capped profile | no safe load |
 | [north](north.md) | passed | passed | yes |
 | [north-8bit](north-8bit.md) | passed | passed | no |
 | [qwen36](qwen36.md) | passed | passed | yes |
