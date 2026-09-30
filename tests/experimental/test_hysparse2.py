@@ -112,6 +112,26 @@ def test_oracle_forced_local_global_no_future_and_tile_ties():
         )
 
 
+def test_block_selector_masks_unused_support_slots():
+    q = mx.zeros((1, 1, 1, 1))
+    k = mx.zeros((1, 1, 12, 1))
+    v = mx.arange(12, dtype=mx.float32).reshape(1, 1, 12, 1)
+    _, selected = attention(
+        q,
+        [(k, v, 0)],
+        offset=11,
+        query_tile=1,
+        key_tile=4,
+        select=(2, 4),
+        block_select=(2, 1),
+    )
+    positions = np.array(selected[2])[0, 0]
+    assert set(positions[positions <= 11].tolist()) == {0, 1, 10, 11}
+    got = sparse_attention(q, selected, offset=11, sinks=mx.zeros(1))
+    # Four valid tokens plus a zero-value sink with equal logits.
+    close(got, mx.array([[[[22.0 / 5]]]]))
+
+
 @pytest.mark.parametrize("chunk", [1, 4, 16])
 def test_prefill_decode_and_cache_bytes(chunk):
     c = replace(Config.smoke(), prefill_chunk=chunk)

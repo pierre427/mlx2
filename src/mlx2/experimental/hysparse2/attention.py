@@ -194,6 +194,11 @@ def attention(
             sk = mx.take_along_axis(ck, indices[..., None], axis=2)
             sv = mx.take_along_axis(cv, indices[..., None], axis=2)
             positions = mx.take_along_axis(cp, indices, axis=-1)
+        # A restricted block set can contain fewer eligible tokens than the
+        # requested support budget. Keep padding slots causally invalid; their
+        # stored K/V must never re-enter sparse attention just because the
+        # discarded source position happened to be in the past.
+        positions = mx.where(best > -1e29, positions, 2147483647)
         selections.append((sk, sv, positions))
     output = mx.concatenate(outputs, axis=2)
     selected = (
