@@ -55,7 +55,7 @@ def _serving(end=7):
             "changed_lead": row(0, output="other"),
             "changed_pixels": row(0, output="other"),
             "return_original": row(11)}
-    checks = producer.check_serving_rows(rows, end)
+    checks = producer.check_serving_rows(rows, end, 4)
     return {**rows, "derived_checks": checks, "apcv2_hits_delta": 4}
 
 
@@ -123,3 +123,12 @@ def test_processor_boundary_must_leave_decode_anchor():
     prepared["_mlx2_prompt_tokens"].pop()
     with pytest.raises(AssertionError, match="boundary"):
         producer.prompt_alignment(prepared, 42)
+
+
+def test_changed_pixels_reuse_inside_the_media_span_fails():
+    """media occupies [4, 7); a restore at 5 or 6 reuses the original pixels'
+    KV, which the evaluator accepted as long as it stayed below media_end."""
+    for cached in (5, 6):
+        report = _report()
+        report["arms"]["image"]["serving"]["changed_pixels"]["receipt"]["cached_tokens"] = cached
+        assert not producer.evaluate_lfm_media_report(report)["image_apcv2_reuse"]

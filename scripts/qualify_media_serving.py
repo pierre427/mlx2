@@ -319,7 +319,7 @@ def collect(job) -> dict:
                     )}}
 
 
-def check_serving_rows(rows: dict, media_end: int) -> dict:
+def check_serving_rows(rows: dict, media_end: int, media_start: int) -> dict:
     """Return derived predicates; the independent loader recomputes these."""
     required = ("cold", "warm1", "warm2", "changed_tail", "changed_lead",
                 "changed_pixels", "return_original")
@@ -348,11 +348,14 @@ def check_serving_rows(rows: dict, media_end: int) -> dict:
     tail = (type(receipt("changed_tail").get("cached_tokens")) is int
             and media_end <= receipt("changed_tail")["cached_tokens"]
             < receipt("changed_tail")["prompt_tokens"])
+    # Only the prefix before the media may be reused once the media or the
+    # leading text changed: a restore inside [media_start, media_end) reuses
+    # KV computed from the original pixels.
     lead = (type(receipt("changed_lead").get("cached_tokens")) is int
             and receipt("changed_lead")["cached_tokens"]
-            < min(media_end, receipt("changed_lead")["prompt_tokens"]))
+            <= min(media_start, receipt("changed_lead")["prompt_tokens"] - 1))
     pixels = (type(receipt("changed_pixels").get("cached_tokens")) is int
-              and receipt("changed_pixels")["cached_tokens"] < media_end)
+              and receipt("changed_pixels")["cached_tokens"] <= media_start)
     return {"route_receipts": valid, "cold_apcv2_miss": cold,
             "warm_apcv2_restore": warm, "post_media_branch": tail,
             "changed_leading_text_refuses_media_reuse": lead,
@@ -401,7 +404,9 @@ def run_arm(model_path: str, kind: str) -> dict:
         before = dict(engine.apc.apc_stats)
         rows = {name: collect(engine.submit(body)) for name, body in inputs.items()}
         after = dict(engine.apc.apc_stats)
-        checks = check_serving_rows(rows, alignment["media_token_end"])
+        checks = check_serving_rows(
+            rows, alignment["media_token_end"], alignment["media_token_positions"][0]
+        )
         checks["apcv2_hit_counter"] = after.get("hits", 0) - before.get("hits", 0) >= 3
         if rows["cold"]["receipt"].get("prompt_tokens") != alignment["prompt_tokens"]:
             raise AssertionError("direct/serving prompt token count mismatch")

@@ -66,18 +66,18 @@ APPROVED_QUALIFICATION_HARNESS = {
 APPROVED_ADAPTER_CHECKS = SMOL_MEDIA_CHECKS | QWEN_MEDIA_CHECKS | LFM_MEDIA_CHECKS
 APPROVED_MEDIA_HARNESS = {
     "name": "scripts/qualify_media_serving.py",
-    "sha256": "ff1714119b544ced3f774b4c2e1ebef7c87e0314e3bacc231f3512ce0b41ca68",
+    "sha256": "796cb204b9927e53f74bf1d0186b8c24d385947db5a36e56f2f336675a7fc2b5",
 }
 APPROVED_MEDIA_PRODUCERS = {
     "smolvlm": (APPROVED_MEDIA_HARNESS, evaluate_smol_media_report, SMOL_MEDIA_CHECKS),
     "qwen2_5_vl": (
         {"name": "scripts/qualify_qwen25_media_serving.py",
-         "sha256": "61e2cfc82dfbcc1bf216c329f5fa8f1ab29d4dc7043ab5a210dbacf7adb10f3f"},
+         "sha256": "e430c5521cb2bd0cbb51d1458b98fa850d0ca2d7be305bf8013c2ef5915292e8"},
         evaluate_qwen25_media_report, QWEN_MEDIA_CHECKS,
     ),
     "lfm2_vl": (
         {"name": "scripts/qualify_lfm25_media_serving.py",
-         "sha256": "99128033df589d6525dd71f94dc113c021911e38682b0f7f558dd3a76f5479e7"},
+         "sha256": "706f232dc13ef062e6f15f8262b683edc6bf4f58c26fe5556ee50bf591cd7776"},
         evaluate_lfm_media_report, LFM_MEDIA_CHECKS,
     ),
 }

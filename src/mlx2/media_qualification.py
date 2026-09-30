@@ -216,7 +216,8 @@ def evaluate_smol_media_report(report):
         return (rows["cold"]["cached_tokens"] == 0
                 and all(rows[name]["cached_tokens"] == prompt - 1
                         for name in ("warm1", "warm2", "return_original"))
-                and rows["changed_tail"]["cached_tokens"] >= media_end
+                and media_end <= rows["changed_tail"]["cached_tokens"]
+                < rows["changed_tail"]["prompt_tokens"]
                 and rows["changed_lead"]["cached_tokens"] == 0
                 and rows["changed_pixels"]["cached_tokens"] == 0
                 and type(rows.get("apcv2_hits_delta")) is int

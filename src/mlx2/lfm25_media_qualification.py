@@ -19,7 +19,7 @@ def sha256(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
-def check_serving_rows(rows: dict, media_end: int) -> dict:
+def check_serving_rows(rows: dict, media_end: int, media_start: int) -> dict:
     """Return derived predicates; the independent loader recomputes these."""
     required = ("cold", "warm1", "warm2", "changed_tail", "changed_lead",
                 "changed_pixels", "return_original")
@@ -48,11 +48,14 @@ def check_serving_rows(rows: dict, media_end: int) -> dict:
     tail = (type(receipt("changed_tail").get("cached_tokens")) is int
             and media_end <= receipt("changed_tail")["cached_tokens"]
             < receipt("changed_tail")["prompt_tokens"])
+    # Only the prefix before the media may be reused once the media or the
+    # leading text changed: a restore inside [media_start, media_end) reuses
+    # KV computed from the original pixels.
     lead = (type(receipt("changed_lead").get("cached_tokens")) is int
             and receipt("changed_lead")["cached_tokens"]
-            < min(media_end, receipt("changed_lead")["prompt_tokens"]))
+            <= min(media_start, receipt("changed_lead")["prompt_tokens"] - 1))
     pixels = (type(receipt("changed_pixels").get("cached_tokens")) is int
-              and receipt("changed_pixels")["cached_tokens"] < media_end)
+              and receipt("changed_pixels")["cached_tokens"] <= media_start)
     return {"route_receipts": valid, "cold_apcv2_miss": cold,
             "warm_apcv2_restore": warm, "post_media_branch": tail,
             "changed_leading_text_refuses_media_reuse": lead,
@@ -192,7 +195,9 @@ def evaluate_lfm_media_report(report: dict) -> dict[str, bool]:
                 {key: serving[key] for key in (
                     "cold", "warm1", "warm2", "changed_tail", "changed_lead",
                     "changed_pixels", "return_original"
-                )}, end if type(end) is int else -1
+                )}, end if type(end) is int else -1,
+                positions[0] if isinstance(positions, list) and positions
+                and type(positions[0]) is int else -1,
             )
         except (KeyError, TypeError, ValueError):
             return result

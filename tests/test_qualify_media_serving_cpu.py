@@ -38,20 +38,20 @@ def serving_rows():
 
 def test_serving_predicates_detect_media_prefix_reuse_and_drift():
     rows = serving_rows()
-    assert all(producer.check_serving_rows(rows, media_end=7).values())
+    assert all(producer.check_serving_rows(rows, media_end=7, media_start=4).values())
 
     rows["changed_pixels"]["receipt"]["cached_tokens"] = 7
-    checks = producer.check_serving_rows(rows, media_end=7)
+    checks = producer.check_serving_rows(rows, media_end=7, media_start=4)
     assert not checks["changed_pixels_refuses_media_reuse"]
     assert checks["post_media_branch"]
 
     rows = serving_rows()
     rows["warm2"]["output"] = "red"
-    assert not producer.check_serving_rows(rows, media_end=7)["warm_apcv2_restore"]
+    assert not producer.check_serving_rows(rows, media_end=7, media_start=4)["warm_apcv2_restore"]
 
     rows = serving_rows()
     rows["cold"]["receipt"]["qualification"] = "qualified"
-    assert not producer.check_serving_rows(rows, media_end=7)["route_receipts"]
+    assert not producer.check_serving_rows(rows, media_end=7, media_start=4)["route_receipts"]
 
 
 def test_prompt_alignment_requires_last_media_token_before_decode_reserve():
@@ -126,3 +126,17 @@ def test_text_trace_uses_typed_prompt_and_source_greedy_chain(monkeypatch):
     assert len(trace["decode"]) == 15
     assert [row["input_token"] for row in trace["decode"]] == list(range(100, 115))
     assert len(calls) == 16
+
+
+def test_changed_pixels_may_reuse_only_the_prefix_before_the_media():
+    """A restore landing inside the media span ([4, 7) here) reuses KV from
+    the original pixels; the predicate accepted anything below media_end."""
+    for arm in ("changed_pixels", "changed_lead"):
+        rows = serving_rows()
+        rows[arm]["receipt"]["cached_tokens"] = 4
+        assert all(producer.check_serving_rows(rows, media_end=7, media_start=4).values())
+        rows[arm]["receipt"]["cached_tokens"] = 6
+        checks = producer.check_serving_rows(rows, media_end=7, media_start=4)
+        name = ("changed_pixels_refuses_media_reuse" if arm == "changed_pixels"
+                else "changed_leading_text_refuses_media_reuse")
+        assert not checks[name]

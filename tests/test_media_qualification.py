@@ -186,3 +186,14 @@ def test_companion_binds_producer_source_runtime_artifact_and_settings(monkeypat
     corrupted["arms"]["image"]["parity"]["prefill_max_abs"] = 1.0
     with pytest.raises(ValueError, match="traces"):
         qualification.validate_adapter_qualification(corrupted, **args)
+
+
+def test_changed_tail_may_not_reuse_the_whole_prompt():
+    """changed_tail must branch after the media but before the changed tail;
+    reusing all 100 prompt tokens (nothing recomputed) passed."""
+    report = {"artifact": "artifact-fingerprint", "source_revision": "rev",
+              "text_source": _text_source(),
+              "arms": {"image": _arm(), "video": _arm("video")},
+              "checks": {name: {"passed": True} for name in SMOL_MEDIA_CHECKS}}
+    report["arms"]["image"]["serving"]["changed_tail"]["cached_tokens"] = 100
+    assert evaluate_smol_media_report(report)["multimodal_apcv2_reuse"] is False

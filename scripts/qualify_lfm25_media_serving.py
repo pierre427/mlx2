@@ -330,7 +330,9 @@ def run_arm(model_path: str, kind: str) -> dict:
                          "temperature": 0, "max_tokens": MAX_TOKENS}
             text_rows = {"cold": collect(engine.submit(text_body)),
                          "warm": collect(engine.submit(text_body))}
-        checks = check_serving_rows(rows, alignment["media_token_end"])
+        checks = check_serving_rows(
+            rows, alignment["media_token_end"], alignment["media_token_positions"][0]
+        )
         checks["apcv2_hit_counter"] = after.get("hits", 0) - before.get("hits", 0) >= 3
         if rows["cold"]["receipt"].get("prompt_tokens") != alignment["prompt_tokens"]:
             raise AssertionError("direct/serving prompt token count mismatch")

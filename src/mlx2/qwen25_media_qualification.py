@@ -134,8 +134,15 @@ def _serving(value, fixture):
     if not isinstance(value, dict) or not isinstance(fixture, dict):
         return False, False
     end = fixture.get("media_token_end")
+    positions = fixture.get("media_token_positions")
     if type(end) is not int or not all(_row(value.get(name), end) for name in ROW_NAMES):
         return False, False
+    if not isinstance(positions, list) or not positions or type(positions[0]) is not int:
+        return False, False
+    # Only the prefix before the media may be reused by a request whose media
+    # or leading text changed: a restore landing inside [start, end) reuses
+    # KV computed from the original pixels.
+    start = positions[0]
     cold = value["cold"]
     prompt = cold["prompt_tokens"]
     same = (cold["output"], cold["reasoning"], cold["finish_reason"])
@@ -152,8 +159,8 @@ def _serving(value, fixture):
                      for name in ("warm1", "warm2", "return_original"))
              and end <= value["changed_tail"]["cached_tokens"]
              and value["changed_tail"]["cached_tokens"] < value["changed_tail"]["prompt_tokens"]
-             and value["changed_lead"]["cached_tokens"] < end
-             and value["changed_pixels"]["cached_tokens"] < end
+             and value["changed_lead"]["cached_tokens"] <= start
+             and value["changed_pixels"]["cached_tokens"] <= start
              and type(value.get("apcv2_hits_delta")) is int
              and value["apcv2_hits_delta"] >= 3
              and type(value.get("apcv2_hits_before")) is int

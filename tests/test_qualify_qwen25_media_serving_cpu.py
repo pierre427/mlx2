@@ -123,9 +123,9 @@ def test_serving_predicates_allow_leading_prefix_only_before_media():
             "changed_pixels", "return_original",
         )
     }
-    assert all(producer.check_serving_rows(rows, 7).values())
+    assert all(producer.check_serving_rows(rows, 7, 4).values())
     rows["changed_lead"]["receipt"]["cached_tokens"] = 7
-    assert not producer.check_serving_rows(rows, 7)[
+    assert not producer.check_serving_rows(rows, 7, 4)[
         "changed_leading_text_refuses_media_reuse"
     ]
 
@@ -159,3 +159,15 @@ def test_evaluator_fails_closed_on_incomplete_and_type_damaged_receipts():
     damaged = report()
     damaged["arms"]["image"]["serving"]["apcv2_hits_after"] = None
     assert evaluator.evaluate_qwen25_media_report(damaged)["multimodal_apcv2_reuse"] is False
+
+
+def test_evaluator_refuses_changed_pixels_reuse_inside_the_media_span():
+    """The evaluator accepted changed_pixels.cached_tokens < media_end, so a
+    restore inside the media span ([4, 7)) reusing the original pixels' KV
+    qualified the route."""
+    stale = report()
+    for arm in stale["arms"].values():
+        arm["serving"]["changed_pixels"]["cached_tokens"] = 6
+        arm["serving"]["changed_pixels"]["receipt"]["cached_tokens"] = 6
+    checks = evaluator.evaluate_qwen25_media_report(stale)
+    assert not checks["multimodal_apcv2_reuse"]
