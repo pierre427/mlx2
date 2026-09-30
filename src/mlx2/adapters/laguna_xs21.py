@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 
@@ -57,6 +58,42 @@ def _load_json(path: Path):
     return json.loads(path.read_text(), object_pairs_hook=unique)
 
 
+def _correct_stale_yarn(config: dict) -> tuple[dict, tuple[dict, ...]]:
+    """Restore the full-attention YaRN attention factor a stale conversion lost.
+
+    poolside's 2026-07-02 config wrote ``attention_factor: 1.0``; its
+    2026-07-14 fix (Laguna-XS-2.1 commit 5e82aa8f74, "YaRN attention_factor
+    is (0.1*ln(factor)+1)*attn_factor") sets 0.1*ln(32)+1 = 1.3466.
+    Conversions of the earlier revision (the AtomicChat and mlx-community MLX
+    packs, poolside's NVFP4-mlx build) still carry 1.0.  vLLM, mlx-lm and
+    mlx-vlm ignore the key and compute 1.3466; mlx2 honours it, so those packs
+    scaled the rotated half of every full-attention logit ~1.81x too low.
+    An absent key already derives 1.3466; any other value fails closed.
+    """
+    rope = config.get("rope_parameters")
+    full = rope.get("full_attention") if isinstance(rope, dict) else None
+    if not isinstance(full, dict) or full.get("rope_type") != "yarn":
+        return config, ()
+    have = full.get("attention_factor")
+    factor = float(full.get("factor", 1.0))
+    want = 0.1 * math.log(factor) + 1.0 if factor > 1.0 else 1.0
+    if have is None or math.isclose(float(have), want, rel_tol=1e-9):
+        return config, ()
+    if float(have) != 1.0:
+        raise ValueError(
+            f"Laguna XS full-attention YaRN attention_factor {have} is neither "
+            f"the vendor value {want} nor the stale 1.0"
+        )
+    corrected = copy.deepcopy(config)
+    corrected["rope_parameters"]["full_attention"]["attention_factor"] = want
+    return corrected, ({
+        "field": "rope_parameters.full_attention.attention_factor",
+        "from": 1.0,
+        "to": want,
+        "source": "poolside/Laguna-XS-2.1@5e82aa8f74",
+    },)
+
+
 def inspect_artifact(model_path: str | Path) -> dict:
     """Validate the supported Laguna topology and shard closure without MLX."""
     path = Path(model_path).expanduser().resolve()
@@ -98,6 +135,7 @@ def inspect_artifact(model_path: str | Path) -> dict:
     required_heads = [48 if index % 4 == 0 else 64 for index in range(40)]
     if heads != required_heads:
         raise ValueError("artifact attention-head order does not match Laguna XS 2.1")
+    config, config_corrections = _correct_stale_yarn(config)
     index_value = _load_json(path / "model.safetensors.index.json")
     weight_map = index_value.get("weight_map") if isinstance(index_value, dict) else None
     if not isinstance(weight_map, dict) or not weight_map:
@@ -147,8 +185,13 @@ def inspect_artifact(model_path: str | Path) -> dict:
             digest.update(item.read_bytes())
     for record in records:
         digest.update(json.dumps(record).encode())
+    if config_corrections:
+        # The served math differs from the file's: prefixes cached under the
+        # uncorrected scale must not be reused.
+        digest.update(json.dumps(config_corrections, sort_keys=True).encode())
     return {
         "config": config,
+        "config_corrections": list(config_corrections),
         "weight_map": weight_map,
         "identity": {
             "path": str(path),

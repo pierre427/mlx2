@@ -272,3 +272,65 @@ def test_poolside_string_values_keep_their_whitespace(split):
     assert json.loads(call["function"]["arguments"]) == {
         "old": old, "line": 12, "note": "  as is ",
     }
+
+
+_POOLSIDE_ROPE = {
+    "full_attention": {
+        "rope_theta": 500000.0, "rope_type": "yarn", "factor": 32.0,
+        "original_max_position_embeddings": 8192, "beta_slow": 1.0, "beta_fast": 64.0,
+        "attention_factor": 1.0, "partial_rotary_factor": 0.5,
+    },
+    "sliding_attention": {"rope_type": "default", "rope_theta": 10000.0, "partial_rotary_factor": 1.0},
+}
+
+
+def _with_rope(path, rope):
+    path.mkdir(parents=True, exist_ok=True)
+    artifact(path)
+    config = {**laguna_config(), "rope_parameters": rope}
+    (path / "config.json").write_text(json.dumps(config))
+    return path
+
+
+def test_stale_yarn_attention_factor_is_restored_to_the_vendor_value(tmp_path):
+    """poolside/Laguna-XS-2.1@5e82aa8f74: attention_factor is 0.1*ln(32)+1;
+    conversions of the 2026-07-02 revision (our AtomicChat pack) carry 1.0,
+    which mlx2 honoured, scaling full-attention logits ~1.81x too low."""
+    import copy
+    import math
+
+    import mlx.core as mx
+
+    from mlx2.adapters.laguna_xs21 import inspect_artifact
+    from mlx2.runtime.models.laguna import Attention, ModelArgs
+
+    want = 0.1 * math.log(32.0) + 1.0
+    stale = inspect_artifact(_with_rope(tmp_path / "stale", copy.deepcopy(_POOLSIDE_ROPE)))
+    assert stale["config"]["rope_parameters"]["full_attention"]["attention_factor"] == want
+    assert stale["config_corrections"] == [{
+        "field": "rope_parameters.full_attention.attention_factor",
+        "from": 1.0, "to": want, "source": "poolside/Laguna-XS-2.1@5e82aa8f74",
+    }]
+    fixed_rope = copy.deepcopy(_POOLSIDE_ROPE)
+    fixed_rope["full_attention"]["attention_factor"] = 1.3465735902799727
+    fixed = inspect_artifact(_with_rope(tmp_path / "fixed", fixed_rope))
+    assert fixed["config_corrections"] == []
+    # Served math identical, but the files differ, so the fingerprints do too;
+    # the corrected stale pack must not share one with its uncorrected self.
+    assert stale["identity"]["fingerprint"] != fixed["identity"]["fingerprint"]
+    mx.set_default_device(mx.cpu)
+    attention = Attention(ModelArgs.from_dict(stale["config"]), 0)
+    assert math.isclose(attention.rope.mscale, want, rel_tol=1e-9)
+
+
+def test_unexpected_yarn_attention_factor_fails_closed(tmp_path):
+    import copy
+
+    import pytest
+
+    from mlx2.adapters.laguna_xs21 import inspect_artifact
+
+    rope = copy.deepcopy(_POOLSIDE_ROPE)
+    rope["full_attention"]["attention_factor"] = 2.0
+    with pytest.raises(ValueError, match="neither the vendor value"):
+        inspect_artifact(_with_rope(tmp_path, rope))
