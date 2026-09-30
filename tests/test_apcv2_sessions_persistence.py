@@ -407,22 +407,29 @@ class _Int8Policy:
         self.revision = revision
 
 
-def _serving_semantic(tenant, *, scope=None, int8_revision=None):
-    """Build a semantic fingerprint exactly as serving's ``cache_key_for`` does."""
+def _serving_semantic(tenant, *, scope=None, int8_revision=None, lane_law=None,
+                      prefill_identity=None):
+    """Build a semantic fingerprint exactly as serving's ``cache_key_for`` does:
+    int8(lane(prefill(semantic)))."""
     from mlx2.runtime.int8_prefill import apc_semantic_fingerprint
+    from mlx2.runtime.lane.installer import apc_lane_fingerprint
+    from mlx2.runtime.prefill_plan import apc_prefill_fingerprint
     from mlx2.serving import cache_semantic_fingerprint
 
     semantic = cache_semantic_fingerprint(tenant)
     if scope:
         semantic = f"{semantic}:media:{scope}"
+    semantic = apc_prefill_fingerprint(semantic, prefill_identity)
+    lane = {"law_id": lane_law, "covered": {"affine-q4-g64": 1}} if lane_law else None
+    semantic = apc_lane_fingerprint(semantic, lane)
     policy = _Int8Policy(int8_revision) if int8_revision else None
     return apc_semantic_fingerprint(semantic, policy)
 
 
-def _namespace_server(directory, namespace, *, int8_revision=None):
+def _namespace_server(directory, namespace, *, int8_revision=None, **laws):
     template = _serving_semantic(
         "__tenant_template__" if namespace == "tenant" else None,
-        int8_revision=int8_revision,
+        int8_revision=int8_revision, **laws,
     )
     return APCv2(
         max_size=16,
@@ -1100,3 +1107,49 @@ def test_resumed_next_turn_uses_the_prefetched_generation_prompt_boundary(
         cold.close()
     assert int(cold_job.cached_tokens or 0) == 0
     assert out == cold_out
+
+
+
+LANE = "lane-matmul-v1+stock-below-4+grouped"
+PREFILL = {"candidate": "grouped-gdn", "revision": 1}
+
+
+@pytest.mark.parametrize("namespace", ("shared", "tenant"))
+@pytest.mark.parametrize(
+    "laws",
+    (
+        {"lane_law": LANE},
+        {"prefill_identity": PREFILL},
+        {"lane_law": LANE, "prefill_identity": PREFILL, "int8_revision": "int8-rev-1"},
+    ),
+)
+def test_restart_keeps_lane_and_prefill_law_parked_sessions(tmp_path, namespace, laws):
+    """Only the int8 wrapper was unwrapped at rescan: a lane- or
+    prefill-wrapped checkpoint was classed identity_mismatch and deleted on
+    every restart of the same route."""
+    tenant = "tenant-a" if namespace == "tenant" else None
+    semantic = _serving_semantic(tenant, scope="image-sha", **laws)
+    apc = _namespace_server(tmp_path, namespace, **laws)
+    key = replace(_identity(), semantic_fingerprint=semantic)
+    tag = ("tenant-a", "parked")
+    apc.store(key, list(range(8)), [_state(8)], session_tag=tag)
+    assert apc.park_session(*tag, ttl_seconds=600)["state"] == "disk"
+    apc.close()
+    restarted = _namespace_server(tmp_path, namespace, **laws)
+    rescan = restarted.apc_stats["persistence"]["rescan"]
+    assert rescan["registered"] == 1 and rescan["discarded"] == {}
+
+
+def test_restart_under_another_lane_law_discards_the_state(tmp_path):
+    semantic = _serving_semantic(None, lane_law=LANE)
+    apc = _namespace_server(tmp_path, "shared", lane_law=LANE)
+    key = replace(_identity(), semantic_fingerprint=semantic)
+    tag = ("tenant-a", "parked")
+    apc.store(key, list(range(8)), [_state(8)], session_tag=tag)
+    assert apc.park_session(*tag, ttl_seconds=600)["state"] == "disk"
+    apc.close()
+    for laws in ({}, {"lane_law": LANE + "+rows-le-64"}):
+        restarted = _namespace_server(tmp_path, "shared", **laws)
+        rescan = restarted.apc_stats["persistence"]["rescan"]
+        assert rescan["registered"] == 0
+        restarted.close()

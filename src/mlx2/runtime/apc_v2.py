@@ -258,13 +258,27 @@ _SEMANTIC_TEXT_NAMESPACE = "text-token-v1"
 _SEMANTIC_SCOPE_SEPARATOR = ":media:"
 
 
-def _is_int8_semantic_wrapper(semantic) -> bool:
-    """Whether ``semantic`` is ``int8_prefill.apc_semantic_fingerprint``'s wrapper."""
-    return (
+# Numerical-law namespaces that serving wraps around a semantic namespace:
+# (inner, tag, revision).  int8-prefill: int8_prefill.apc_semantic_fingerprint;
+# lane-matmul: lane.installer.apc_lane_fingerprint; prefill-execution-v1:
+# prefill_plan.apc_prefill_fingerprint.
+_NUMERICS_WRAPPER_TAGS = frozenset({"int8-prefill", "lane-matmul", "prefill-execution-v1"})
+
+
+def _numerics_layers(semantic):
+    """``(base, layers)``: ``semantic`` with its numerical-law wrappers removed.
+
+    ``layers`` lists each wrapper's ``(tag, revision)`` from the outside in.
+    """
+    layers = []
+    while (
         isinstance(semantic, tuple)
         and len(semantic) == 3
-        and semantic[1] == "int8-prefill"
-    )
+        and semantic[1] in _NUMERICS_WRAPPER_TAGS
+    ):
+        layers.append(tuple(semantic[1:]))
+        semantic = semantic[0]
+    return semantic, tuple(layers)
 
 
 def _is_tenant_semantic(semantic) -> bool:
@@ -812,15 +826,15 @@ class APCv2(PrefixIndex):
         namespace = self._persist_semantic_namespace
         if namespace not in {"tenant", "shared"}:
             return semantic == expected.semantic_fingerprint
-        # Int8 prefill wraps every serving namespace in the same numerics
-        # revision, so the wrapper must match the template exactly: exact and
-        # int8 state, or two int8 revisions, never adopt each other's entries.
-        template = expected.semantic_fingerprint
-        if _is_int8_semantic_wrapper(template):
-            if not _is_int8_semantic_wrapper(semantic) or semantic[1:] != template[1:]:
-                return False
-            semantic = semantic[0]
-        elif _is_int8_semantic_wrapper(semantic):
+        # Numerical-law wrappers (int8 prefill, lane matmul, prefill
+        # execution) enclose every serving namespace with the same laws, so
+        # they must match the template layer for layer: state computed under
+        # one law never adopts another's entries.  Only int8 was unwrapped,
+        # so a lane- or prefill-wrapped checkpoint was rescanned as a
+        # mismatch and deleted on every restart.
+        semantic, layers = _numerics_layers(semantic)
+        _template_base, template_layers = _numerics_layers(expected.semantic_fingerprint)
+        if layers != template_layers:
             return False
         return _serving_semantic_mode(semantic) == namespace
 
