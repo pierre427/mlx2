@@ -13,7 +13,12 @@ from mlx.utils import tree_flatten
 from mlx2.experimental.hysparse2.attention import attention, sparse_attention
 from mlx2.experimental.hysparse2.config import Config
 from mlx2.experimental.hysparse2.model import DiffusionLayer, Model
-from mlx2.experimental.hysparse2.train import load_checkpoint, loss, save_checkpoint
+from mlx2.experimental.hysparse2.train import (
+    initialize_from_checkpoint,
+    load_checkpoint,
+    loss,
+    save_checkpoint,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -260,6 +265,23 @@ def test_model_only_checkpoint_is_explicitly_not_an_exact_resume(tmp_path):
             optimizers.AdamW(learning_rate=1e-4),
             {"seed": 9},
         )
+
+    initialized = Model(c)
+    receipt = initialize_from_checkpoint(checkpoint, initialized)
+    assert receipt["schema"] == "mlx2.hysparse2-model-checkpoint.v1"
+    assert receipt["step"] == 7
+    assert receipt["optimizer_state_restored"] is False
+    assert receipt["exact_training_resume"] is False
+    assert receipt["semantic_ple_sha256"] == state["permanent_sidecar"]["sha256"]
+    assert len(receipt["model_sha256"]) == len(receipt["state_sha256"]) == 64
+    for (_, expected), (_, actual) in zip(
+        tree_flatten(model.parameters()), tree_flatten(initialized.parameters())
+    ):
+        close(expected, actual, 0)
+
+    (checkpoint / "semantic-ple.safetensors").write_bytes(b"corrupt")
+    with pytest.raises(ValueError, match="missing or corrupt"):
+        initialize_from_checkpoint(checkpoint, Model(c))
 
 
 def test_apcv2_identity_binds_block_selector_and_semantic_capsule():

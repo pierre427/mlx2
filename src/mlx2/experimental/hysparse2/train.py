@@ -96,9 +96,8 @@ def save_checkpoint(root, model, optimizer, step, run, mode="full"):
     return target
 
 
-def load_checkpoint(path, model, optimizer, run):
+def _load_model_state(path, model):
     import mlx.core as mx
-    from mlx.utils import tree_unflatten
 
     path = Path(path)
     metadata = json.loads((path / "state.json").read_text())
@@ -106,12 +105,13 @@ def load_checkpoint(path, model, optimizer, run):
         saved_config = asdict(Config(**metadata["config"]))
     except (TypeError, ValueError):
         saved_config = None
-    if metadata["schema"] != "mlx2.hysparse2-checkpoint.v1":
-        raise ValueError("checkpoint does not contain exact optimizer resume state")
+    if metadata.get("schema") not in {
+        "mlx2.hysparse2-checkpoint.v1",
+        "mlx2.hysparse2-model-checkpoint.v1",
+    }:
+        raise ValueError("unsupported checkpoint schema")
     if saved_config != asdict(model.config):
         raise ValueError("checkpoint configuration differs")
-    if metadata["run"] != run:
-        raise ValueError("resume data, tokenizer or training settings differ")
     sidecar = metadata.get("permanent_sidecar")
     if model.config.semantic_ple_rows:
         if not isinstance(sidecar, dict):
@@ -138,6 +138,37 @@ def load_checkpoint(path, model, optimizer, run):
             raise ValueError("checkpoint permanent semantic PLE sidecar is missing or corrupt")
         model.ple_sidecar_digest = sidecar["sha256"]
     model.load_weights(str(path / "model.safetensors"), strict=True)
+    mx.eval(model.parameters())
+    return metadata
+
+
+def initialize_from_checkpoint(path, model):
+    """Load model state while explicitly starting a new optimizer/run lineage."""
+    path = Path(path)
+    metadata = _load_model_state(path, model)
+    sidecar = metadata.get("permanent_sidecar") or {}
+    return {
+        "schema": metadata["schema"],
+        "step": metadata.get("step"),
+        "model_sha256": file_hash(path / "model.safetensors"),
+        "state_sha256": file_hash(path / "state.json"),
+        "semantic_ple_sha256": sidecar.get("sha256"),
+        "optimizer_state_restored": False,
+        "exact_training_resume": False,
+    }
+
+
+def load_checkpoint(path, model, optimizer, run):
+    import mlx.core as mx
+    from mlx.utils import tree_unflatten
+
+    path = Path(path)
+    metadata = json.loads((path / "state.json").read_text())
+    if metadata.get("schema") != "mlx2.hysparse2-checkpoint.v1":
+        raise ValueError("checkpoint does not contain exact optimizer resume state")
+    if metadata["run"] != run:
+        raise ValueError("resume data, tokenizer or training settings differ")
+    metadata = _load_model_state(path, model)
     optimizer.state = tree_unflatten(
         list(mx.load(str(path / "optimizer.safetensors")).items())
     )
@@ -265,6 +296,8 @@ def train(args, c):
         run["diffusion_weight"] = args.diffusion_weight
     if mixture is not None:
         run["mixture"] = mixture.receipt
+    if args.initialize_from is not None:
+        run["initialized_from"] = initialize_from_checkpoint(args.initialize_from, model)
     step = load_checkpoint(args.resume, model, optimizer, run) if args.resume else 0
     fn = nn.value_and_grad(
         model,
@@ -410,6 +443,14 @@ def main(argv=None):
     p.add_argument("--eval-every", type=int, default=100)
     p.add_argument("--output", type=Path)
     p.add_argument("--resume", type=Path)
+    p.add_argument(
+        "--initialize-from",
+        type=Path,
+        help=(
+            "Warm-start model and permanent PLE weights while starting a new "
+            "optimizer/run lineage; this is never an exact resume"
+        ),
+    )
     p.add_argument("--device", choices=["cpu", "gpu"], default="gpu")
     p.add_argument("--steps", type=int, default=100)
     p.add_argument("--sequence", type=int, default=256)
@@ -436,6 +477,8 @@ def main(argv=None):
         p.error("GPU wait must be finite and nonnegative")
     if args.mixture is not None and (args.tokens is not None or args.smoke):
         p.error("--mixture is mutually exclusive with --tokens and --smoke")
+    if args.resume is not None and args.initialize_from is not None:
+        p.error("--resume and --initialize-from are mutually exclusive")
     if not math.isfinite(args.memory_limit_gib) or args.memory_limit_gib <= 0:
         p.error("memory limit must be finite and positive")
     if args.smoke and args.config:
