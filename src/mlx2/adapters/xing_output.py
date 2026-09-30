@@ -131,12 +131,21 @@ def _deserialize(text: str):
 
 
 def _parameter_value(raw: str, schema):
+    """The argument ``raw`` spells, as the template wrote it.
+
+    The template writes a string value raw, so its leading indentation and
+    trailing newlines are part of the value (an edit tool's ``old_string``,
+    a file's final newline).  Only a value decoded as JSON or a literal may
+    shed the whitespace around it.
+    """
     types = _schema_types(schema)
     if "string" in types:
-        if raw == "null" and "null" in types:
+        if raw.strip() == "null" and "null" in types:
             return None
         return raw
-    return _deserialize(raw)
+    text = raw.strip()
+    value = _deserialize(text)
+    return raw if value is text else value
 
 
 def _json_value_end(text: str, start: int):
@@ -220,7 +229,7 @@ def _tag_arguments(text: str, properties: dict) -> dict:
     if text[position:].strip():
         raise ValueError("Malformed Xing tool-call parameters")
     for key, raw, quoted in pairs:
-        key, raw = key.strip(), raw.strip()
+        key = key.strip()
         if not key:
             raise ValueError("Xing tool-call parameter has an empty name")
         if key in arguments:

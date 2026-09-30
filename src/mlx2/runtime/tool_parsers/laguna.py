@@ -135,8 +135,15 @@ def _parse_arguments(name, body, position, tools):
             # its first closer, so a </tool_call> the string itself contains
             # fails closed instead of serving the call without it.
             raise ValueError("Unclosed Laguna argument value")
-        value = body[start:end].strip()
-        arguments[key] = value if string_type else _deserialize(value)
+        # The template writes a string value raw: its leading indentation and
+        # trailing newlines belong to it.  Only a decoded value sheds the
+        # whitespace around it; text that decodes as nothing stays as written.
+        value = body[start:end]
+        if not string_type:
+            text = value.strip()
+            decoded = _deserialize(text)
+            value = value if decoded is text else decoded
+        arguments[key] = value
         position = end + len(_ARG_VALUE_CLOSE)
 
 

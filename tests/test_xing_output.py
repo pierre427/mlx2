@@ -112,7 +112,9 @@ def test_tool_calls_typed_by_schema_back_to_back():
     assert out["reasoning_content"] == "Checking."
     assert out["content"] == "Let me look."
     assert calls(out) == [
-        ("get_weather", {"city": "Paris", "days": 3, "scale": 1.5, "live": True,
+        # A string value is written raw by the template, so its whitespace
+        # is part of it (SGLang #41384).
+        ("get_weather", {"city": "  Paris ", "days": 3, "scale": 1.5, "live": True,
                           "opts": {"a": [1, None]}, "tags": ["x", "y"], "unit": None, "note": None}),
         ("get_weather", {"city": "123", "days": "7", "extra": {"k": [1, 2]}}),
         ("get", {}),
@@ -440,3 +442,20 @@ def test_max_tokens_after_a_complete_call_keeps_that_call():
         assert calls(out) == [("get_weather", {"city": "Oslo"})]
         assert out["content"] == ""
         assert parser.tool_count == 1
+
+
+@pytest.mark.parametrize("size", [1, 5, None])
+def test_string_values_keep_their_whitespace(size):
+    # SGLang #41384: the template writes a string value raw, so leading
+    # indentation and trailing newlines are the value; decoded values still
+    # shed the whitespace around them.
+    text = "</think>" + _call(
+        "get_weather", city="\n  Paris\n", days=" 3\n", note="null\n", unit=" x "
+    )
+    out = run(text, chunks=None if size is None else split_every(text, size))
+    assert calls(out) == [
+        ("get_weather", {"city": "\n  Paris\n", "days": 3, "note": None, "unit": " x "}),
+    ]
+    untyped = {"type": "function", "function": {"name": "raw", "parameters": {}}}
+    out = run("</think>" + _call("raw", body="  keep\n"), tools=[untyped])
+    assert calls(out) == [("raw", {"body": "  keep\n"})]

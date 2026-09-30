@@ -247,3 +247,28 @@ def test_poolside_literals_that_fail_to_build_stay_text(schema, value):
         _, events = _poolside_events(tools, text, split)
         calls = [c for e in events for c in e.get("tool_calls", ())]
         assert [json.loads(c["function"]["arguments"]) for c in calls] == [{"x": value}]
+
+
+@pytest.mark.parametrize("split", [1, 3, 1000])
+def test_poolside_string_values_keep_their_whitespace(split):
+    # SGLang #41384: the template writes a string argument raw, so an edit
+    # tool's indented ``old_string`` or a file's final newline is the value.
+    tools = [{"type": "function", "function": {"name": "edit", "parameters": {
+        "type": "object", "properties": {
+            "old": {"type": "string"}, "line": {"type": "integer"}, "note": {},
+        },
+    }}}]
+    old = "    return x\n\n"
+    text = (
+        "<tool_call>edit\n<arg_key>old</arg_key>\n<arg_value>" + old + "</arg_value>\n"
+        "<arg_key>line</arg_key>\n<arg_value> 12\n</arg_value>\n"
+        "<arg_key>note</arg_key>\n<arg_value>  as is </arg_value>\n</tool_call>"
+    )
+    assert parse_tool_call(text, tools)["arguments"] == {
+        "old": old, "line": 12, "note": "  as is ",
+    }
+    _, events = _poolside_events(tools, text, split)
+    (call,) = [c for e in events for c in e.get("tool_calls", ())]
+    assert json.loads(call["function"]["arguments"]) == {
+        "old": old, "line": 12, "note": "  as is ",
+    }
