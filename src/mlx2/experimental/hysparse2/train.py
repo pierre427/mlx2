@@ -43,13 +43,13 @@ def save_checkpoint(root, model, optimizer, step, run, mode="full"):
     # Refuse before opening any checkpoint payload when disk headroom is low.
     flat_parameters = tree_flatten(model.parameters())
     ple = {
-        name: value for name, value in flat_parameters if name.startswith("semantic_ple.")
+        name: value
+        for name, value in flat_parameters
+        if name.startswith("semantic_ple.")
     }
     model_bytes = sum(x.nbytes for _, x in flat_parameters)
     state_bytes = (
-        sum(x.nbytes for _, x in tree_flatten(optimizer.state))
-        if mode == "full"
-        else 0
+        sum(x.nbytes for _, x in tree_flatten(optimizer.state)) if mode == "full" else 0
     )
     sidecar_bytes = sum(x.nbytes for x in ple.values())
     if shutil.disk_usage(root).free < int(
@@ -124,18 +124,27 @@ def _load_model_state(path, model):
         legacy_identity["semantic_fingerprint"] = (
             legacy_fingerprint[:2] + legacy_fingerprint[3:]
         )
-        if (
-            sidecar.get("schema") != "mlx2.hysparse2-semantic-ple.v1"
-            or sidecar.get("apcv2_identity")
-            not in (
-                json.loads(json.dumps(expected_identity)),
-                json.loads(json.dumps(legacy_identity)),
-            )
-        ):
+        # Old checkpoints predate attention-math cache identity. Their exact
+        # saved configuration is checked above; rebuild new cache identities
+        # from it rather than rejecting otherwise valid saved weights.
+        accepted_identities = [expected_identity, legacy_identity]
+        for identity in list(accepted_identities):
+            old_math = dict(identity)
+            old_math["cache_layout_fingerprint"] = identity[
+                "cache_layout_fingerprint"
+            ].rsplit(":", 1)[0]
+            accepted_identities.append(old_math)
+        if sidecar.get("schema") != "mlx2.hysparse2-semantic-ple.v1" or sidecar.get(
+            "apcv2_identity"
+        ) not in [json.loads(json.dumps(identity)) for identity in accepted_identities]:
             raise ValueError("checkpoint permanent semantic PLE sidecar differs")
         sidecar_path = path / sidecar.get("file", "")
-        if not sidecar_path.is_file() or file_hash(sidecar_path) != sidecar.get("sha256"):
-            raise ValueError("checkpoint permanent semantic PLE sidecar is missing or corrupt")
+        if not sidecar_path.is_file() or file_hash(sidecar_path) != sidecar.get(
+            "sha256"
+        ):
+            raise ValueError(
+                "checkpoint permanent semantic PLE sidecar is missing or corrupt"
+            )
         model.ple_sidecar_digest = sidecar["sha256"]
     model.load_weights(str(path / "model.safetensors"), strict=True)
     mx.eval(model.parameters())
@@ -176,9 +185,7 @@ def load_checkpoint(path, model, optimizer, run):
     return metadata["step"]
 
 
-def loss(
-    model, tokens, mtp_weight=0.1, router_weight=0.01, diffusion_weight=0.2
-):
+def loss(model, tokens, mtp_weight=0.1, router_weight=0.01, diffusion_weight=0.2):
     import mlx.core as mx
     from mlx import nn
 
@@ -196,8 +203,7 @@ def loss(
             diffusion_logits.astype(mx.float32), tokens[:, :-2]
         )
         value = value + diffusion_weight * (
-            mx.sum(mx.where(mask, token_loss, 0.0))
-            / mx.maximum(mx.sum(mask), 1)
+            mx.sum(mx.where(mask, token_loss, 0.0)) / mx.maximum(mx.sum(mask), 1)
         )
     return value + router_weight * aux
 
@@ -297,7 +303,9 @@ def train(args, c):
     if mixture is not None:
         run["mixture"] = mixture.receipt
     if args.initialize_from is not None:
-        run["initialized_from"] = initialize_from_checkpoint(args.initialize_from, model)
+        run["initialized_from"] = initialize_from_checkpoint(
+            args.initialize_from, model
+        )
     step = load_checkpoint(args.resume, model, optimizer, run) if args.resume else 0
     fn = nn.value_and_grad(
         model,

@@ -49,9 +49,11 @@ def test_diffusion_fused_bidirectional_attention_matches_dense_reference():
         axis=-1,
     ).astype(v.dtype)
     dense = (probabilities @ v).transpose(0, 2, 1, 3).reshape(x.shape)
-    fused = mx.fast.scaled_dot_product_attention(
-        q, k, v, scale=layer.head_dim**-0.5
-    ).transpose(0, 2, 1, 3).reshape(x.shape)
+    fused = (
+        mx.fast.scaled_dot_product_attention(q, k, v, scale=layer.head_dim**-0.5)
+        .transpose(0, 2, 1, 3)
+        .reshape(x.shape)
+    )
     close(fused, dense, 1e-4)
 
 
@@ -148,6 +150,46 @@ def test_cache_only_and_identity_limits():
     other.eval()
     with pytest.raises(ValueError):
         other.decode(mx.array([[1]]), cache)
+
+
+def test_cache_rejects_changed_ple_revision_before_mutating_state():
+    model = Model(Config.smoke())
+    model.eval()
+    model.ple_sidecar_digest = "a" * 64
+    _, cache = model.prefill(mx.array([[1, 2, 3]]))
+    model.ple_sidecar_digest = "b" * 64
+    with pytest.raises(ValueError, match="revision"):
+        model.decode(mx.array([[4]]), cache)
+    assert cache.length == 3
+
+
+@pytest.mark.parametrize(
+    "change", [{"rope_base": 20000.0}, {"rope_dims": 0}, {"norm_eps": 1e-5}]
+)
+def test_cache_identity_binds_attention_math(change):
+    config = Config.smoke()
+    assert config.apcv2_identity() != replace(config, **change).apcv2_identity()
+
+
+def test_old_checkpoint_load_rebuilds_math_bound_cache_identity(tmp_path):
+    config = Config.smoke()
+    model = Model(config)
+    path = save_checkpoint(
+        tmp_path, model, optimizers.AdamW(learning_rate=1e-4), 0, {}, mode="model"
+    )
+    state_path = path / "state.json"
+    state = json.loads(state_path.read_text())
+    identity = state["permanent_sidecar"]["apcv2_identity"]
+    identity["cache_layout_fingerprint"] = identity["cache_layout_fingerprint"].rsplit(
+        ":", 1
+    )[0]
+    state_path.write_text(json.dumps(state))
+    restored = Model(config)
+    initialize_from_checkpoint(path, restored)
+    assert (
+        restored.new_cache().apcv2_identity["cache_layout_fingerprint"]
+        == config.apcv2_identity()["cache_layout_fingerprint"]
+    )
 
 
 def test_high_absolute_positions_without_full_allocation():

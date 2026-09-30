@@ -150,8 +150,7 @@ class PermanentKnowledgePLE(nn.Module):
             mx.mean(mx.square(query.astype(mx.float32)), axis=-1, keepdims=True) + 1e-6
         ).astype(query.dtype)
         gate = mx.sigmoid(
-            (query * key).astype(mx.float32) * query.shape[-1] ** -0.5
-            + self.gate_bias
+            (query * key).astype(mx.float32) * query.shape[-1] ** -0.5 + self.gate_bias
         ).astype(value.dtype)
         return gate * value
 
@@ -184,9 +183,11 @@ class DiffusionLayer(nn.Module):
         # The student is bidirectional, so the fused SDPA kernel needs no mask.
         # Keeping the probability matrix implicit avoids materializing the
         # B,H,T,T tensor during long-sequence diffusion training.
-        attended = mx.fast.scaled_dot_product_attention(
-            q, k, v, scale=self.head_dim**-0.5
-        ).transpose(0, 2, 1, 3).reshape(x.shape)
+        attended = (
+            mx.fast.scaled_dot_product_attention(q, k, v, scale=self.head_dim**-0.5)
+            .transpose(0, 2, 1, 3)
+            .reshape(x.shape)
+        )
         x = x + self.out(attended)
         return x + self.mlp(self.norm2(x))
 
@@ -459,6 +460,18 @@ class Model(nn.Module):
             raise ValueError("cached inference requires model.eval()")
         if cache.owner is not self._cache_owner or cache.batch != tokens.shape[0]:
             raise ValueError("cache belongs to another model or batch")
+        expected = self.config.apcv2_identity(
+            ple_sidecar_digest=self.ple_sidecar_digest
+        )
+        actual = cache.apcv2_identity
+        if (
+            not isinstance(actual, dict)
+            or actual.get("cache_layout_fingerprint")
+            != expected["cache_layout_fingerprint"]
+            or actual.get("semantic_fingerprint", ())[2:]
+            != expected["semantic_fingerprint"][2:]
+        ):
+            raise ValueError("cache geometry, attention math or PLE revision differs")
         offset = cache.length
         if offset + tokens.shape[1] > self.config.max_context:
             raise ValueError("context limit exceeded")

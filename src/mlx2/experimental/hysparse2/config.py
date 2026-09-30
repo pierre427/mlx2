@@ -101,9 +101,7 @@ class Config:
     def as_dict(self):
         return asdict(self)
 
-    def apcv2_identity(
-        self, semantic_capsule_digest=None, ple_sidecar_digest=None
-    ):
+    def apcv2_identity(self, semantic_capsule_digest=None, ple_sidecar_digest=None):
         """Revision material an adapter must bind into its APCv2 key.
 
         The semantic capsule is paired with the exact prompt state. A missing
@@ -145,8 +143,21 @@ class Config:
         fingerprint = hashlib.sha256(
             json.dumps(layout, sort_keys=True, separators=(",", ":")).encode()
         ).hexdigest()
+        math_fingerprint = hashlib.sha256(
+            json.dumps(
+                {
+                    key: getattr(self, key)
+                    for key in ("rope_base", "rope_dims", "norm_eps")
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode()
+        ).hexdigest()
         return {
-            "cache_layout_fingerprint": "hysparse2:" + fingerprint,
+            "cache_layout_fingerprint": "hysparse2:"
+            + fingerprint
+            + ":"
+            + math_fingerprint,
             "semantic_fingerprint": (
                 "hysparse2-semantic-v1",
                 semantic_capsule_digest or "no-capsule",
