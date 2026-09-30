@@ -141,6 +141,7 @@ def test_wrong_bindings_and_token_bounds_fail_closed(tmp_path):
             encode=lambda _: [1],
             vocab_size=c.vocab_size,
         )
+
     with pytest.raises(ValueError, match="tokenization"):
         CapsuleMemory.from_store(
             store,
@@ -151,3 +152,75 @@ def test_wrong_bindings_and_token_bounds_fail_closed(tmp_path):
             encode=lambda _: [c.vocab_size],
             vocab_size=c.vocab_size,
         )
+
+
+def test_memory_batch_apc_diffusion_and_adapter_composition(tmp_path):
+    from dataclasses import replace
+
+    from mlx2.experimental.hysparse2.apc import EndpointAPC
+    from mlx2.experimental.hysparse2.batching import ResearchBatcher
+    from mlx2.experimental.hysparse2.lora import LoRAEpisode
+    from mlx2.runtime.apc_v2 import APCv2
+
+    c = replace(
+        Config.smoke(),
+        diffusion_conditioning="prefix",
+        diffusion_position_encoding="sinusoidal",
+    )
+    model = Model(c)
+    model.eval()
+    store = CapsuleStore(tmp_path / "capsules")
+    a = snapshot(store, c.vocab_size)
+    b = snapshot(store, c.vocab_size, text="revised arguments", parent=a.capsule_digest)
+    model.attach_semantic_capsules(a)
+    batcher = ResearchBatcher(model)
+    prompts = [[1, 2, 3, 4, 5, 6], [7, 8, 9, 10]]
+    _, caches, _ = batcher.prefill(prompts)
+    engine = APCv2(max_size=4, layout_name="hysparse2-endpoint-v1")
+    episode = None
+    leases = []
+    try:
+        bridge = EndpointAPC(
+            model,
+            engine,
+            checkpoint_revision="fixture",
+            tokenizer_fingerprint="character-fixture",
+        )
+        bridge.publish(prompts[0], caches[0])
+        expected = model.decode(mx.array([[11]]), caches[0])
+        model.attach_semantic_capsules(b)
+        with pytest.raises(ValueError, match="owner"):
+            batcher.decode([[11], [12]], caches)
+        assert bridge.restore(prompts[0] + [11])[0] is None
+        model.attach_semantic_capsules(a)
+        restored, hit = bridge.restore(prompts[0] + [11])
+        leases.append(hit.cache)
+        assert hit.hit
+        model.diffusion_propose(restored, count=3, steps=2)
+        assert restored.length == 6
+        got, _, _ = batcher.decode([[11]], [restored])
+        assert float(mx.max(mx.abs(got[0] - expected)).item()) == 0
+        episode = LoRAEpisode(model, ["semantic_ple.value"], base_revision="fixture")
+        assert bridge.restore(prompts[0] + [11])[0] is None
+        model.eval()
+        with pytest.raises(ValueError, match="owner"):
+            batcher.decode([[11]], [restored])
+        episode.close()
+        restored, hit = bridge.restore(prompts[0] + [11])
+        leases.append(hit.cache)
+        assert hit.hit
+        assert (
+            float(
+                mx.max(
+                    mx.abs(model.decode(mx.array([[11]]), restored) - expected)
+                ).item()
+            )
+            == 0
+        )
+    finally:
+        if episode is not None:
+            episode.close()
+        for lease in leases:
+            if hasattr(lease, "close"):
+                lease.close()
+        engine.close()
