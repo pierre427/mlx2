@@ -287,3 +287,89 @@ def test_hosted_stream_keeps_alive_through_a_slow_tool_with_one_response_id():
     completed = [e for e in events if e["type"] == "response.completed"]
     assert len(created) == 1 and len(completed) == 1
     assert created[0]["response"]["id"] == completed[0]["response"]["id"]
+
+
+def test_a_queued_stream_waits_between_keepalive_attempts(monkeypatch):
+    """A keepalive declines to write for a request not yet on a lane.  The
+    wait then recomputed a deadline in the past and polled the socket with a
+    zero timeout: one busy core per queued stream (~280k polls in 2 s)."""
+    import mlx2.server as server_mod
+
+    polls = {"n": 0}
+    original = server_mod.client_disconnected
+
+    def counting(connection):
+        polls["n"] += 1
+        return original(connection)
+
+    monkeypatch.setattr(server_mod, "client_disconnected", counting)
+    engine = SilentEngine()
+    engine.admitted, engine.delay = False, 2.0
+    engine.events = ({"delta": {"content": "hello"}}, FINISH)
+    server = ThreadingHTTPServer(
+        ("127.0.0.1", 0), server_mod.handler_for(engine, sse_keepalive_seconds=0.2)
+    )
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        with post(f"http://127.0.0.1:{server.server_port}", stream=True) as response:
+            raw = response.read().decode()
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
+    assert "hello" in raw
+    assert polls["n"] < 60, polls
+
+
+@pytest.mark.parametrize("variant", ["tool_error", "engine_error"])
+def test_a_failing_hosted_stream_still_sends_response_created_first(variant):
+    """A keepalive opens a hosted-tool Responses stream without its prologue;
+    a later failure wrote a bare response.failed with no response.created."""
+    from mlx2.tool_backend import HostedToolError
+    from test_serving_contract import TOOLS, post_response
+
+    class Backend:
+        def prepare(self, tools):
+            return TOOLS, {"weather": "binding"}
+
+        def execute(self, binding, arguments):
+            time.sleep(0.6)
+            raise HostedToolError("MCP server unreachable")
+
+    class ToolEngine(SilentEngine):
+        def submit(self, request, *, tenant_id="default"):
+            self.events = (
+                ({"error": "lane fault", "status": 503},)
+                if variant == "engine_error"
+                else (
+                    {"delta": {"tool_calls": [{
+                        "index": 0, "id": "call_weather", "type": "function",
+                        "function": {"name": "weather", "arguments": '{"city":"T"}'},
+                    }]}},
+                    {"finish_reason": "tool_calls", "receipt": {}},
+                )
+            )
+            return super().submit(request, tenant_id=tenant_id)
+
+    engine = ToolEngine()
+    server = ThreadingHTTPServer(
+        ("127.0.0.1", 0),
+        handler_for(engine, tool_backend=Backend(), sse_keepalive_seconds=0.2),
+    )
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        with post_response(
+            f"http://127.0.0.1:{server.server_port}", input="weather?", stream=True,
+            tools=[{"type": "mcp", "server_label": "weather",
+                    "server_url": "https://example.invalid/mcp", "require_approval": "never"}],
+        ) as response:
+            raw = response.read().decode()
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
+    assert raw.count(": keep-alive") >= 1
+    types = [json.loads(line[6:])["type"] for line in raw.splitlines() if line.startswith("data: {")]
+    assert types[0] == "response.created" and types[-1] == "response.failed", types

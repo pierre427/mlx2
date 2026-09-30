@@ -912,6 +912,10 @@ def wait_event(
     """
     deadline = time.monotonic() + deadline_seconds
     watching = on_idle is not None and bool(idle_seconds) and idle_since is not None
+    # ``on_idle`` may decline to write (a request not yet on a lane); the
+    # next attempt then waits a full interval instead of retrying at once,
+    # which spun a core polling the socket for every queued stream.
+    next_attempt = None
     while True:
         now = time.monotonic()
         remaining = deadline - now
@@ -920,9 +924,12 @@ def wait_event(
         timeout = min(poll_seconds, remaining)
         if watching:
             due = idle_since() + idle_seconds
+            if next_attempt is not None:
+                due = max(due, next_attempt)
             if now >= due:
                 on_idle()
-                due = idle_since() + idle_seconds
+                next_attempt = now + idle_seconds
+                due = max(idle_since() + idle_seconds, next_attempt)
             timeout = max(0.0, min(timeout, due - now))
         try:
             return events.get(timeout=timeout)
@@ -2408,6 +2415,7 @@ def handler_for(
                 self.error(404, "resource not found")
 
         def do_POST(self):
+            self._pending_responses_prologue = None
             self._ensure_trace()
             if not self._authorize_request():
                 return
@@ -2861,6 +2869,12 @@ def handler_for(
                             }
                         )
 
+                def ensure_prologue():
+                    """Send ``response.created`` if a keepalive opened the stream without it."""
+                    self._pending_responses_prologue = None
+                    if streaming and not prologue_sent:
+                        open_stream()
+
                 def keepalive():
                     """Send bytes on a stream that has been silent too long.
 
@@ -2879,8 +2893,10 @@ def handler_for(
                             return  # not attached to a lane yet
                         if buffered_hosted_stream:
                             # Its response is named after the last hosted
-                            # round's job; the prologue waits for that.
+                            # round's job; the prologue waits for that, or
+                            # for a failure, which must follow it.
                             commit_stream()
+                            self._pending_responses_prologue = ensure_prologue
                         else:
                             open_stream()
                     self.wfile.write(SSE_KEEPALIVE)
@@ -2901,11 +2917,15 @@ def handler_for(
 
                     worker = threading.Thread(target=run, daemon=True)
                     worker.start()
+                    next_attempt = 0.0
                     while worker.is_alive():
-                        due = self._last_stream_write + sse_keepalive_seconds
+                        due = max(
+                            self._last_stream_write + sse_keepalive_seconds, next_attempt
+                        )
                         worker.join(max(0.0, min(0.5, due - time.monotonic())))
                         if worker.is_alive() and time.monotonic() >= due:
                             keepalive()
+                            next_attempt = time.monotonic() + sse_keepalive_seconds
                     if "error" in outcome:
                         raise outcome["error"]
                     return outcome["value"]
@@ -2950,6 +2970,7 @@ def handler_for(
                                     response["error"]["code"] = event["code"]
                                 if mlx2 is not None:
                                     response["mlx2"] = mlx2
+                                ensure_prologue()
                                 self._responses_sse(
                                     {
                                         "type": "response.failed",
@@ -4087,6 +4108,11 @@ def handler_for(
             )
 
         def _responses_failure(self, job, message, error_type, *, code=None):
+            # A keepalive may have opened a hosted-tool stream before its
+            # response.created; clients expect that event first.
+            pending = getattr(self, "_pending_responses_prologue", None)
+            if pending is not None:
+                pending()
             error = {"message": message, "type": error_type}
             if code is not None:
                 error["code"] = code
