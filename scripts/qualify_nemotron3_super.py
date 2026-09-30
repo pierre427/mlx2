@@ -16,7 +16,7 @@ import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-ARTIFACT = Path('~/Desktop/mlx-uag/models/Nemotron-3-Super-120B-A12B-5bit-MTP')
+ARTIFACT = Path('~/mlx-models/Nemotron-3-Super-120B-A12B-5bit-MTP')
 LOCKS = (Path('/tmp/gpu.lock/owner.json'), Path('/Users/Shared/mlxuag/gpu.lock/owner.json'))
 
 

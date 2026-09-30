@@ -15,7 +15,7 @@ OUTPUT = ROOT / "docs/research/sept26-smoke-manifest.json"
 ROOTS = {
     "M": Path("~/mlx-models"),
     "T": Path("/Volumes/T7/models"),
-    "U": Path("~/Desktop/mlx-uag/models"),
+    "U": Path("~/mlx-models"),
     "H": Path("~/.cache/huggingface/hub"),
     "A": Path("~/Library/Application Support/mlxuag-thinkingcap/models"),
 }
