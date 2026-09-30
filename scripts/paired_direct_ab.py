@@ -44,8 +44,12 @@ row), and MLX memory: peak (reset per run), plus active and cache sampled
 in-run before the generator closes and the highest cache seen between polls.
 A lane the generator drops, or a run that stops responding, is refused
 rather than waited on. After timing, the final target cache and the draft
-sidecar are hashed; differing hashes are a counterexample, and a missing
-one is reported as ``unavailable`` (never as a passing state check).
+sidecar are digested by ``state_digest`` (cache class, ``state`` and
+``meta_state``, raw array bits; schema v2). Differing digests or statuses
+are a counterexample. A cache without ``meta_state`` is labelled
+``metadata_unavailable`` and a missing, cyclic or unsupported tree
+``unavailable``; neither counts as a passing state check. Digests cover
+final cache snapshots only, not RNG, scheduler or full transaction state.
 
 Verdict: ``pass`` when every run engaged as required and every run's tokens
 (and logprob rows where available) equal the first run's; ``counterexample``
@@ -259,46 +263,155 @@ class Cohort:
 
 # ---------------------------------------------------------------- arms
 
-def state_hash(obj):
-    """sha256 over a cache/sidecar tree's arrays and scalars, or None.
+STATE_ORACLE = "mlx2.cache-state-digest.v1"
+_MAX_DEPTH = 64
 
-    Each cache contributes its ``state`` (the arrays a snapshot would keep);
-    other objects contribute their attributes. None means unavailable, never
-    a passing state comparison.
+
+class _Unavailable(Exception):
+    """The tree cannot be digested exactly; recorded, never treated as equal."""
+
+
+def state_digest(obj):
+    """Digest a cache/sidecar tree: ``{"status", "sha256", "reason"}``.
+
+    Tagged, length-prefixed encoding. A cache (anything with ``state``)
+    contributes its class ``module.qualname``, ``state`` and ``meta_state``;
+    a dataclass its class and fields in declared order. Arrays contribute
+    dtype, shape and raw storage bits (bf16, signed zero and NaN payloads
+    kept). Python scalars are typed (``1``, ``1.0``, ``True`` and ``"1"``
+    differ; floats as IEEE-754 bits). Status:
+
+    - ``complete``: every cache had state and metadata; ``sha256`` is set.
+    - ``metadata_unavailable``: some cache has no ``meta_state``; the state
+      digest is kept in ``state_only_sha256`` and ``sha256`` is None.
+    - ``unavailable``: None input, a cycle, an unsupported object, or a
+      state/metadata getter that raised; ``sha256`` is None.
+
+    A digest describes cache snapshots only, never RNG, scheduler or full
+    transaction state.
     """
     if obj is None:
-        return None
+        return {"status": "unavailable", "sha256": None, "reason": "no state returned"}
+    import dataclasses
+    import struct
+
     import mlx.core as mx
     import numpy as np
-    from mlx.utils import tree_flatten
 
-    def plain(node):
+    out = bytearray()
+    missing_meta = []
+    active = set()
+
+    def put(tag, payload=b""):
+        out.extend(tag + struct.pack(">Q", len(payload)) + payload)
+
+    def text(value):
+        return value.encode("utf-8", "surrogatepass")
+
+    def array_bits(value):
+        width = {1: np.uint8, 2: np.uint16, 4: np.uint32, 8: np.uint64}
+        if isinstance(value, mx.array):
+            dtype = str(value.dtype)
+            size = value.dtype.size
+            if dtype != "mlx.core.bool" and size in width and not dtype.endswith(("complex64",)):
+                host = np.array(value.view({1: mx.uint8, 2: mx.uint16, 4: mx.uint32, 8: mx.uint64}[size]))
+            else:
+                host = np.array(value)
+        else:
+            dtype = f"numpy.{value.dtype.str}"
+            host = value.view(width[value.dtype.itemsize]) if value.dtype.itemsize in width and value.dtype.kind in "fiucb" else value
+        host = np.ascontiguousarray(host)
+        return dtype, tuple(int(n) for n in value.shape), host.tobytes()
+
+    def walk(node, depth):
+        if depth > _MAX_DEPTH:
+            raise _Unavailable("tree deeper than 64")
+        if node is None:
+            put(b"N")
+        elif isinstance(node, bool):
+            put(b"B", b"\x01" if node else b"\x00")
+        elif isinstance(node, int):
+            put(b"I", text(str(node)))
+        elif isinstance(node, float):
+            put(b"F", struct.pack(">d", node))
+        elif isinstance(node, str):
+            put(b"S", text(node))
+        elif isinstance(node, (bytes, bytearray)):
+            put(b"Y", bytes(node))
+        elif isinstance(node, (mx.array, np.ndarray)):
+            dtype, shape, raw = array_bits(node)
+            put(b"A", text(dtype) + b"|" + text(repr(shape)))
+            put(b"R", raw)
+        elif isinstance(node, np.generic):
+            walk(np.asarray(node), depth)
+        else:
+            key = id(node)
+            if key in active:
+                raise _Unavailable(f"cycle through {type(node).__qualname__}")
+            active.add(key)
+            try:
+                composite(node, depth)
+            finally:
+                active.discard(key)
+
+    def composite(node, depth):
+        cls = type(node)
+        name = f"{cls.__module__}.{cls.__qualname__}"
         if isinstance(node, (list, tuple)):
-            return [plain(item) for item in node]
-        if isinstance(node, dict):
-            return {str(k): plain(v) for k, v in sorted(node.items(), key=lambda kv: str(kv[0]))}
-        if isinstance(node, mx.array) or node is None or isinstance(node, (int, float, str, bool)):
-            return node
-        if hasattr(node, "state"):
-            return plain(node.state)
-        if hasattr(node, "__dict__"):
-            return plain(vars(node))
-        return repr(node)
+            put(b"L" if isinstance(node, list) else b"T", struct.pack(">Q", len(node)))
+            for item in node:
+                walk(item, depth + 1)
+        elif isinstance(node, dict):
+            if not all(isinstance(k, str) for k in node):
+                raise _Unavailable("dict with non-string keys")
+            put(b"D", struct.pack(">Q", len(node)))
+            for k in sorted(node):
+                put(b"K", text(k))
+                walk(node[k], depth + 1)
+        elif isinstance(getattr(cls, "state", None), property) or (
+            hasattr(node, "state") and not dataclasses.is_dataclass(node)
+        ):
+            put(b"C", text(name))
+            try:
+                state = node.state
+            except Exception as error:  # noqa: BLE001
+                raise _Unavailable(f"{name}.state raised {type(error).__name__}") from None
+            walk(state, depth + 1)
+            if not hasattr(node, "meta_state"):
+                missing_meta.append(name)
+                put(b"M0")
+            else:
+                try:
+                    meta = node.meta_state
+                except Exception as error:  # noqa: BLE001
+                    raise _Unavailable(f"{name}.meta_state raised {type(error).__name__}") from None
+                put(b"M1")
+                walk(meta, depth + 1)
+        elif dataclasses.is_dataclass(node) and not isinstance(node, type):
+            fields = dataclasses.fields(node)
+            put(b"O", text(name) + struct.pack(">Q", len(fields)))
+            for field in fields:
+                put(b"K", text(field.name))
+                walk(getattr(node, field.name), depth + 1)
+        else:
+            raise _Unavailable(f"unsupported {name}")
 
     try:
-        digest = hashlib.sha256()
-        for key, leaf in tree_flatten(plain(obj)):
-            digest.update(key.encode())
-            if isinstance(leaf, mx.array):
-                digest.update(f"{leaf.dtype}{leaf.shape}".encode())
-                if leaf.dtype == mx.bfloat16:
-                    leaf = leaf.view(mx.uint16)
-                digest.update(np.array(leaf).tobytes())
-            else:
-                digest.update(repr(leaf).encode())
-        return digest.hexdigest()
-    except Exception:  # noqa: BLE001 - unavailable is recorded, never passed
-        return None
+        walk(obj, 0)
+    except _Unavailable as error:
+        return {"status": "unavailable", "sha256": None, "reason": str(error)}
+    except Exception as error:  # noqa: BLE001 - recorded, never passed
+        return {"status": "unavailable", "sha256": None, "reason": f"{type(error).__name__}: {error}"[:200]}
+    digest = hashlib.sha256(STATE_ORACLE.encode() + bytes(out)).hexdigest()
+    if missing_meta:
+        return {"status": "metadata_unavailable", "sha256": None, "state_only_sha256": digest,
+                "reason": "no meta_state on " + ", ".join(sorted(set(missing_meta)))[:200]}
+    return {"status": "complete", "sha256": digest, "reason": None}
+
+
+def state_hash(obj):
+    """The complete digest, or None when state or metadata is unavailable."""
+    return state_digest(obj)["sha256"]
 
 
 def _set_budget(value):
@@ -406,8 +519,8 @@ def run_arm(cohort, arm):
         active_end, cache_end = mx.get_active_memory(), mx.get_cache_memory()
         peak_end = mx.get_peak_memory()
         # After timing: final target cache and draft sidecar state.
-        target_state = state_hash(getattr(final, "prompt_cache", None))
-        sidecar_state = state_hash(getattr(final, "cache_sidecar", None))
+        target_state = state_digest(getattr(final, "prompt_cache", None))
+        sidecar_state = state_digest(getattr(final, "cache_sidecar", None))
     finally:
         batch.close()
         if previous_budget is not None:
@@ -429,8 +542,10 @@ def run_arm(cohort, arm):
         "memory_note": "in-run samples before generator close; diagnostic, not a performance claim",
         "boundary_samples": boundary_samples,
         "max_responses_per_poll": max_per_poll,
-        "final_target_state_sha256": target_state,
-        "final_draft_sidecar_sha256": sidecar_state,
+        "final_target_state_sha256": target_state["sha256"],
+        "final_draft_sidecar_sha256": sidecar_state["sha256"],
+        "final_target_state": target_state,
+        "final_draft_sidecar": sidecar_state,
         "counters": {
             "composed_tiled_calls": qvm.STATS.get("composed_tiled_calls", 0) - tiled_before,
             "composed_tiles": qvm.STATS.get("composed_tile_calls", 0) - tiles_before,
@@ -472,6 +587,14 @@ def engagement_refusal(mechanism, record, logprob_rows=0):
     return None
 
 
+def _comparison_label(runs, key):
+    """``compared`` only when every run has a complete digest."""
+    statuses = {r[key]["status"] for r in runs}
+    if not runs or "unavailable" in statuses:
+        return "unavailable"
+    return "compared" if statuses == {"complete"} else "state_only (metadata unavailable)"
+
+
 def run_cohort(args):
     cohort = Cohort(args)
     first, second = ARMS[args.mechanism]
@@ -497,9 +620,14 @@ def run_cohort(args):
             mismatches.append(f"pair {record['pair']} {record['arm']}: tokens differ at {index}")
         elif record["logprob_row_sha256"] != reference["logprob_row_sha256"]:
             mismatches.append(f"pair {record['pair']} {record['arm']}: logprob rows differ")
-        for key in ("final_target_state_sha256", "final_draft_sidecar_sha256"):
-            if record[key] is not None and reference[key] is not None and record[key] != reference[key]:
-                mismatches.append(f"pair {record['pair']} {record['arm']}: {key} differs")
+        for key in ("final_target_state", "final_draft_sidecar"):
+            mine, ref = record[key], reference[key]
+            if mine["status"] != ref["status"]:
+                mismatches.append(f"pair {record['pair']} {record['arm']}: {key} status "
+                                  f"{mine['status']} vs {ref['status']}")
+            elif (mine.get("sha256") or mine.get("state_only_sha256")) != (
+                    ref.get("sha256") or ref.get("state_only_sha256")):
+                mismatches.append(f"pair {record['pair']} {record['arm']}: {key}_sha256 differs")
     for record in runs:
         del record["_tokens"]
     summary = {}
@@ -513,7 +641,13 @@ def run_cohort(args):
             }
     verdict = "refused" if refusals or not runs else ("counterexample" if mismatches else "pass")
     return {
-        "schema": "mlx2.direct-model.paired-ab.v1",
+        "schema": "mlx2.direct-model.paired-ab.v2",
+        "state_oracle": {
+            "version": STATE_ORACLE,
+            "binds": "cache class identity, state and meta_state; dataclass fields; raw array bits",
+            "scope": ("final cache snapshots only; not RNG, scheduler or full "
+                      "transaction-state qualification"),
+        },
         "scope": ("direct-model B1 A/B (adapter + generator in one process); not HTTP "
                   "serving, not serving qualification, not a controlled performance run"
                   + ("; TINY random CPU models, numbers meaningless" if args.tiny else "")),
@@ -523,8 +657,7 @@ def run_cohort(args):
         "mismatches": mismatches,
         "arms": [first, second],
         "state_comparison": {
-            key: ("compared" if runs and all(r[key] is not None for r in runs) else "unavailable")
-            for key in ("final_target_state_sha256", "final_draft_sidecar_sha256")
+            key: _comparison_label(runs, key) for key in ("final_target_state", "final_draft_sidecar")
         },
         "protocol": {
             "pairs": args.pairs, "warmups_discarded": args.warmups, "order": "alternating AB/BA",

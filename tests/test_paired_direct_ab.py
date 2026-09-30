@@ -123,7 +123,7 @@ def test_main_writes_the_record_and_exit_code(tmp_path):
                    "--out", str(out)])
     record = json.loads(out.read_text())
     assert code == 0 and record["verdict"] == "pass"
-    assert record["schema"] == "mlx2.direct-model.paired-ab.v1"
+    assert record["schema"] == "mlx2.direct-model.paired-ab.v2"
     assert all("_tokens" not in run for run in record["runs"])
 
 
@@ -176,7 +176,7 @@ def test_dropped_or_stuck_lane_is_refused_not_waited_on(monkeypatch, failures, r
 def test_reclaim_records_draft_engagement_boundaries_and_state():
     record = H.run_cohort(_args("--mechanism", "external-reclaim"))
     assert record["state_comparison"] == {
-        "final_target_state_sha256": "compared", "final_draft_sidecar_sha256": "compared",
+        "final_target_state": "compared", "final_draft_sidecar": "compared",
     }
     for run in record["runs"]:
         assert run["counters"]["external_rounds"] > 0 and run["counters"]["proposed_tokens"] > 0
@@ -207,7 +207,7 @@ def test_final_state_difference_is_a_counterexample(monkeypatch):
     def drifted(cohort, arm):
         record = run_arm(cohort, arm)
         if arm == "on":
-            record["final_target_state_sha256"] = "0" * 64
+            record["final_target_state"] = dict(record["final_target_state"], sha256="0" * 64)
         return record
 
     monkeypatch.setattr(H, "run_arm", drifted)
@@ -242,3 +242,22 @@ def test_even_pair_counts_use_the_true_median(monkeypatch):
     # Order off,on,on,off -> off {1, 20}, on {3, 10}.
     assert record["median_by_arm"]["off"]["ttft_s"] == 10.5
     assert record["median_by_arm"]["on"]["ttft_s"] == 6.5
+
+
+def test_state_status_mismatch_is_a_counterexample(monkeypatch):
+    run_arm = H.run_arm
+
+    def degraded(cohort, arm):
+        record = run_arm(cohort, arm)
+        if arm == "on":
+            record["final_target_state"] = {"status": "metadata_unavailable", "sha256": None,
+                                            "state_only_sha256": "x", "reason": "no meta_state"}
+        return record
+
+    monkeypatch.setattr(H, "run_arm", degraded)
+    record = H.run_cohort(_args("--mechanism", "qsdpa-tiling"))
+    assert record["verdict"] == "counterexample"
+    assert record["mismatches"] == [
+        "pair 0 on: final_target_state status metadata_unavailable vs complete"]
+    assert record["state_oracle"]["version"] == H.STATE_ORACLE
+    assert "not RNG, scheduler or full transaction-state" in record["state_oracle"]["scope"]
