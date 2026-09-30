@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import statistics
 from pathlib import Path
 
@@ -32,6 +33,16 @@ def stress(tag: str) -> dict | None:
     if receipt.get("status") == "running":
         return None
     result = read(workload_path) if workload_path.is_file() else None
+    log_path = directory / "20x20.log"
+    partial_rounds = []
+    if result is None and log_path.is_file():
+        for seconds, tokens, rate in re.findall(
+            r"round \d+\s+([\d.]+)s\s+(\d+) tok\s+([\d.]+) tok/s",
+            log_path.read_text(),
+        ):
+            partial_rounds.append({"seconds": float(seconds),
+                                   "completion_tokens": int(tokens),
+                                   "aggregate_generated_tokens_per_second": float(rate)})
     rounds = (result or {}).get("rounds_detail", [])
     rates = [row.get("tokens_per_second") for row in rounds]
     rates = [float(rate) for rate in rates if isinstance(rate, (float, int))]
@@ -48,6 +59,9 @@ def stress(tag: str) -> dict | None:
         "max_lanes": receipt.get("max_lanes"),
         "cache_cap_gib": receipt.get("cache_cap_gib"),
         "thinking_allowance": receipt.get("thinking_allowance"),
+        "execution_policy_sha256": receipt.get("execution_policy_sha256"),
+        "partial_rounds": partial_rounds,
+        "workload_log_sha256": digest(log_path) if log_path.is_file() else None,
         "swapout_pages": (receipt.get("swapouts") or {}).get("delta"),
         "apcv2_probe_passed": (receipt.get("apc_probe") or {}).get("passed"),
         "batching_engaged": receipt.get("batching_engaged"),
@@ -157,6 +171,7 @@ def main() -> None:
         "lightning-ordinary-current-mamba-clamp-20260929",
         "lightning-ordinary-current-apc-20260929",
         "lightning-mtp2-current-apc-20260929",
+        "lightning-mtp2-width8-current-20260929",
     )
     report = {
         "schema": "mlx2.public-lightning-evidence.v1",

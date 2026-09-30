@@ -505,6 +505,7 @@
       "batching_evidence": null,
       "cache_cap_gib": 8,
       "completion_tokens": 0,
+      "execution_policy_sha256": null,
       "graded_correct": null,
       "http_errors": null,
       "issues": null,
@@ -513,6 +514,63 @@
       "mtp_ordinary_handoff_lanes": null,
       "mtp_status_counters": null,
       "observed_widths": null,
+      "partial_rounds": [
+        {
+          "aggregate_generated_tokens_per_second": 244.0,
+          "completion_tokens": 10497,
+          "seconds": 43.0
+        },
+        {
+          "aggregate_generated_tokens_per_second": 167.6,
+          "completion_tokens": 11084,
+          "seconds": 66.1
+        },
+        {
+          "aggregate_generated_tokens_per_second": 158.0,
+          "completion_tokens": 10184,
+          "seconds": 64.4
+        },
+        {
+          "aggregate_generated_tokens_per_second": 227.8,
+          "completion_tokens": 10398,
+          "seconds": 45.7
+        },
+        {
+          "aggregate_generated_tokens_per_second": 214.8,
+          "completion_tokens": 10160,
+          "seconds": 47.3
+        },
+        {
+          "aggregate_generated_tokens_per_second": 224.9,
+          "completion_tokens": 11127,
+          "seconds": 49.5
+        },
+        {
+          "aggregate_generated_tokens_per_second": 220.2,
+          "completion_tokens": 10108,
+          "seconds": 45.9
+        },
+        {
+          "aggregate_generated_tokens_per_second": 201.9,
+          "completion_tokens": 11799,
+          "seconds": 58.4
+        },
+        {
+          "aggregate_generated_tokens_per_second": 195.8,
+          "completion_tokens": 12516,
+          "seconds": 63.9
+        },
+        {
+          "aggregate_generated_tokens_per_second": 190.7,
+          "completion_tokens": 12331,
+          "seconds": 64.7
+        },
+        {
+          "aggregate_generated_tokens_per_second": 194.5,
+          "completion_tokens": 12338,
+          "seconds": 63.4
+        }
+      ],
       "receipt_sha256": "d15d39d247587671b36e84eab87c92017e5133de3bc10ca5ec09c4e24e87b793",
       "requests": null,
       "round_seconds": 0,
@@ -523,6 +581,7 @@
       "tag": "lightning-ordinary-20260929",
       "thinking_allowance": null,
       "weighted_generated_tokens_per_second": null,
+      "workload_log_sha256": "4e95c077ebe9668e6fd4cb77dd58b8acb0625b11d04bcfb6fe39bf70f00c9c3e",
       "workload_sha256": null
     },
     {
@@ -536,6 +595,7 @@
       "batching_evidence": null,
       "cache_cap_gib": 4,
       "completion_tokens": 229735,
+      "execution_policy_sha256": null,
       "graded_correct": 397,
       "http_errors": 0,
       "issues": {
@@ -549,6 +609,7 @@
         "8": 380,
         "None": 20
       },
+      "partial_rounds": [],
       "receipt_sha256": "e7d2f56f9a85851b767d59f701585f54e39410c28b19c212b1463efa193137eb",
       "requests": 400,
       "round_seconds": 1232.47,
@@ -559,6 +620,7 @@
       "tag": "lightning-ordinary-l8c4-20260929",
       "thinking_allowance": null,
       "weighted_generated_tokens_per_second": 186.4,
+      "workload_log_sha256": "37eba0eed1e531b49a3a24f3cb06babce01ad2b785f66e2c4bdc4d1bd97539d4",
       "workload_sha256": "1135de18e2158e153973b05b22b124078b2619faeb737ef90ce0fd993f1810e5"
     },
     {
@@ -577,6 +639,7 @@
       },
       "cache_cap_gib": 4,
       "completion_tokens": 236786,
+      "execution_policy_sha256": null,
       "graded_correct": 400,
       "http_errors": 0,
       "issues": {},
@@ -592,6 +655,7 @@
         "8": 380,
         "None": 20
       },
+      "partial_rounds": [],
       "receipt_sha256": "fe5c3bdd4ca20e5e4836e4f62832997a8c096b833480a04e25c43b5a92bcad95",
       "requests": 400,
       "round_seconds": 1303.91,
@@ -602,6 +666,7 @@
       "tag": "lightning-ordinary-l8c4-think4096-20260929",
       "thinking_allowance": 4096,
       "weighted_generated_tokens_per_second": 181.6,
+      "workload_log_sha256": "0e15a4adb6034cf893beb49cfb9f4ccaa3b7bb1573b9344bc66d340bfccdb05d",
       "workload_sha256": "b4bca750729b658aa6edbf2d29f10ae4b65846fb1026246d8578dfda8a3c23c4"
     },
     {
@@ -620,6 +685,7 @@
       },
       "cache_cap_gib": 4,
       "completion_tokens": 237876,
+      "execution_policy_sha256": null,
       "graded_correct": 400,
       "http_errors": 0,
       "issues": {},
@@ -635,6 +701,7 @@
         "8": 380,
         "None": 20
       },
+      "partial_rounds": [],
       "receipt_sha256": "07ca24f3bd89487b62b6e634b4c0de35de97439e5410ca66499f7e837280e333",
       "requests": 400,
       "round_seconds": 1173.16,
@@ -645,6 +712,7 @@
       "tag": "lightning-ordinary-latest-d174-20260929",
       "thinking_allowance": 4096,
       "weighted_generated_tokens_per_second": 202.77,
+      "workload_log_sha256": "8e53d825c9de245f7052fbc53c45f76e5a1ab31f5a1ef607b0558154086343bf",
       "workload_sha256": "826eef3d843ccdff8474f218585c84894d70e08bd02d6e586a7fc1ad88dfbd9d"
     },
     {
@@ -663,6 +731,7 @@
       },
       "cache_cap_gib": 4,
       "completion_tokens": 234479,
+      "execution_policy_sha256": null,
       "graded_correct": 400,
       "http_errors": 0,
       "issues": {},
@@ -678,6 +747,7 @@
         "8": 380,
         "None": 20
       },
+      "partial_rounds": [],
       "receipt_sha256": "6ea4b814ce2835c05427adc23bd52ada600a61f939bd94b8cf32be90fd2ed6c3",
       "requests": 400,
       "round_seconds": 1199.69,
@@ -688,6 +758,7 @@
       "tag": "lightning-ordinary-current-mamba-clamp-20260929",
       "thinking_allowance": 4096,
       "weighted_generated_tokens_per_second": 195.45,
+      "workload_log_sha256": "5bea7266c8d65fb556c6e2e8f1a1cd9707b5c7a4de204ba5716832c2ccba26c8",
       "workload_sha256": "c91249c655fadb1807d6930fc25d41e0db13e856099187c55af04a2e18a2f4c4"
     },
     {
@@ -706,6 +777,7 @@
       },
       "cache_cap_gib": 4,
       "completion_tokens": 232318,
+      "execution_policy_sha256": null,
       "graded_correct": 400,
       "http_errors": 0,
       "issues": {},
@@ -721,6 +793,7 @@
         "8": 380,
         "None": 20
       },
+      "partial_rounds": [],
       "receipt_sha256": "006f05e90456c3e8ef9efdfcbf52b9b7346c10d2b5626df3f7ac5addb712c913",
       "requests": 400,
       "round_seconds": 1125.55,
@@ -731,6 +804,7 @@
       "tag": "lightning-ordinary-current-apc-20260929",
       "thinking_allowance": 4096,
       "weighted_generated_tokens_per_second": 206.4,
+      "workload_log_sha256": "b835d46d6472ae6c6bc1709d1f34976df680df8c733774641848e71a44d69cfd",
       "workload_sha256": "9a60975a864029fbb6770182107e0b2e9d8129ac221ae48f6635e2d23c84021c"
     },
     {
@@ -747,6 +821,7 @@
       },
       "cache_cap_gib": 4,
       "completion_tokens": 229109,
+      "execution_policy_sha256": null,
       "graded_correct": 400,
       "http_errors": 0,
       "issues": {},
@@ -761,6 +836,7 @@
       "observed_widths": {
         "None": 400
       },
+      "partial_rounds": [],
       "receipt_sha256": "84040c868a761f971045e52115e597257e17bcf94fde27c7fb493518331cbdf9",
       "requests": 400,
       "round_seconds": 1135.32,
@@ -771,7 +847,44 @@
       "tag": "lightning-mtp2-current-apc-20260929",
       "thinking_allowance": 4096,
       "weighted_generated_tokens_per_second": 201.8,
+      "workload_log_sha256": "b82f6267d5d459f893f49d66cd8aba6c3fbee44258adaa4d3aa9a67576776f9e",
       "workload_sha256": "84ee9e576c17eb67f5480b0e5c2c847f3d1187e405f7bab6ece74a9919057e79"
+    },
+    {
+      "aggregate_generated_tokens_per_second": null,
+      "apcv2_probe_passed": true,
+      "batching_engaged": null,
+      "batching_evidence": null,
+      "cache_cap_gib": 4,
+      "completion_tokens": 0,
+      "execution_policy_sha256": "6d849544d6e8a533b01ca67d5e2ac6bed5a396200bc2158787e9cbb4125bc4bc",
+      "graded_correct": null,
+      "http_errors": null,
+      "issues": null,
+      "max_lanes": 8,
+      "mtp_ordinary_handoff_events": null,
+      "mtp_ordinary_handoff_lanes": null,
+      "mtp_status_counters": null,
+      "observed_widths": null,
+      "partial_rounds": [
+        {
+          "aggregate_generated_tokens_per_second": 83.0,
+          "completion_tokens": 12456,
+          "seconds": 150.0
+        }
+      ],
+      "receipt_sha256": "6c81afd343b6ea65cbdd4bc9b6e7828d8e7da56697b11804807820ede919d62e",
+      "requests": null,
+      "round_seconds": 0,
+      "route": "mtp2",
+      "source_head": "bb25fe0089e9551d5b34da563afb7b2ea5166598",
+      "status": "interrupted",
+      "swapout_pages": 0,
+      "tag": "lightning-mtp2-width8-current-20260929",
+      "thinking_allowance": 4096,
+      "weighted_generated_tokens_per_second": null,
+      "workload_log_sha256": "8467b472a672b1f31c160a56eb97e8a3ffdf013b4db75c9dffa849c5cf1dd395",
+      "workload_sha256": null
     }
   ]
 }
