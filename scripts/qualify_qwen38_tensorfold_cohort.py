@@ -190,7 +190,7 @@ def run_arm(args, root: Path, output: Path, limit: int, ordinal: int) -> dict:
         "--host", "127.0.0.1", "--port", str(port),
         "--cache-dir", str(arm / "cache"),
         "--max-context", "8192", "--max-lanes", "4", "--max-inflight", "4",
-        "--cache-bytes", "1", "--qualification-mode", "--external-draft",
+        "--cache-bytes", str(8 << 30), "--qualification-mode", "--external-draft",
         "--execution-policy", str(args.execution_policy.resolve()),
         "--lane-matmul", "crossover",
         "--lane-policy", json.dumps({"max_rows": 128}),
