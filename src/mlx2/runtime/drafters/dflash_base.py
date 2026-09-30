@@ -8,7 +8,9 @@ import mlx.nn as nn
 def swiglu(gate, value):
     return nn.silu(gate) * value
 from ..models.cache import KVCache, RotatingKVCache
-def initialize_rope(*, dims, base, traditional, scaling_config, max_position_embeddings):
+def initialize_rope(*, dims, base, traditional, scaling_config):
+    # Default RoPE has no position bound to configure, so the checkpoint's
+    # max_position_embeddings is not taken: accepting it implied otherwise.
     if scaling_config and scaling_config.get("rope_type", "default") != "default":
         raise ValueError("DFlash2 supports default RoPE only")
     return nn.RoPE(dims, traditional=traditional, base=base)
@@ -25,7 +27,6 @@ def _build_rope(config: DFlashConfig):
         base=config.rope_theta,
         traditional=traditional,
         scaling_config=config.rope_scaling,
-        max_position_embeddings=config.max_position_embeddings,
     )
 
 

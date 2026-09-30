@@ -97,6 +97,9 @@ def create_ssm_mask(h, cache=None):
     return None
 
 
+from .import_env import snapshot as _import_env_snapshot
+
+_import_env_snapshot(__name__)
 _QSDPA_ENV = os.environ.get("MLX_LM_QSDPA_FLASH_MIN_L")
 if _QSDPA_ENV is not None and int(_QSDPA_ENV) <= 0:
     _QUANT_SDPA_FLASH_MIN_L_GQA = _QUANT_SDPA_FLASH_MIN_L_MHA = float("inf")

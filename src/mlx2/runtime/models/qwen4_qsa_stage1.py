@@ -13,6 +13,10 @@ import mlx.core as mx
 
 from .qwen4_qsa_nax import nax_kernel_available
 
+from .import_env import snapshot as _import_env_snapshot
+
+_import_env_snapshot(__name__)
+
 _SUPPORTED_DTYPES = (mx.float16, mx.bfloat16, mx.float32)
 _MAX_TOPK = 512
 _EXACT_BAND_EXTRA = 32

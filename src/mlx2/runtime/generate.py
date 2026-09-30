@@ -4514,11 +4514,6 @@ class BatchGenerator:
             waiting.extend(self._generation_batch.scheduler_waiting_uids())
         return waiting
 
-    def set_mtp_num_draft(self, depths: Union[int, Mapping[int, int]]):
-        if self.self_mtp is None:
-            raise RuntimeError("BatchGenerator is not in self-MTP mode")
-        self._generation_batch.set_num_draft(depths)
-
     def _find_uids(self, uids):
         uids = set(uids)
         results = {}
@@ -4734,43 +4729,6 @@ class BatchGenerator:
             if key is not None:
                 cohorts[key] = self._mtp_configs[sequence[0]]["batch_cohort"]
         return cohorts
-
-    @property
-    def prompt_cache_nbytes(self):
-        total = sum((c.nbytes for p in self._unprocessed_sequences for c in p[3]))
-        total += sum(
-            (
-                int(getattr(leaf, "nbytes", 0))
-                for state in self._mtp_states.values()
-                if state is not None
-                for leaf in state[0]
-            )
-        )
-        total += sum(
-            int(getattr(leaf, "nbytes", 0))
-            for checkpoints in (
-                *getattr(self, "_interior_checkpoints", {}).values(),
-                [item[1] for item in getattr(self, "_state_checkpoints", ())],
-            )
-            for snapshot in checkpoints
-            for leaf in list(snapshot.get("target_cache", ()))
-            + list((snapshot.get("mtp_state") or ((), None))[0])
-        )
-        total += sum((c.nbytes for c in self._prompt_batch.prompt_cache))
-        total += sum(
-            (
-                int(getattr(leaf, "nbytes", 0))
-                for snapshot in getattr(self, "_prompt_boundaries", {}).values()
-                for leaf in list(snapshot.get("target_cache", ()))
-                + list((snapshot.get("mtp_state") or ((), None))[0])
-            )
-        )
-        if self.self_mtp is None:
-            total += sum((c.nbytes for c in self._generation_batch.prompt_cache))
-        else:
-            total += self._generation_batch.cache_nbytes
-        total += sum((c.nbytes for c in self._plain_fallback_batch.prompt_cache))
-        return total
 
     def _make_batch(self, n: int, indices=None):
         selected = (
@@ -5110,11 +5068,6 @@ class BatchGenerator:
             return bound
         return chunk
 
-    def _capped_tokens(self, tokens):
-        if self.max_kv_size is not None:
-            return min(tokens, self.max_kv_size)
-        return tokens
-
     def _budget_admissible(self, n):
         """How many of the first n queued sequences fit the state budget.
 
@@ -5165,7 +5118,8 @@ class BatchGenerator:
         states = []
         gb = self._generation_batch
         for i in range(len(gb)):
-            current = len(gb.tokens[i])
+            # ``gb.tokens`` converts every lane's whole context per access.
+            current = MTPGenerationBatch._prefix_length(gb.state.lanes[i])
             final = current + max(gb.max_tokens[i] - gb._num_tokens[i], 0)
             states.append(
                 AdmissionState(
@@ -6018,17 +5972,3 @@ class BatchGenerator:
                 # reviewed label bounds when exporting it.
                 self.scheduler_stats["adaptive_mtp_cost_model"] = dict(cost_model)
 
-    def next_generated(self):
-        """
-        Return only generated tokens ignoring batch generation responses.
-
-        Returns:
-            List of GenerationBatch.Response objects
-        """
-        with mx.stream(self._stream):
-            while True:
-                (prompt_responses, generation_responses) = self._next()
-                if not generation_responses and prompt_responses:
-                    continue
-                self._observe_adaptive_mtp_responses(generation_responses)
-                return generation_responses

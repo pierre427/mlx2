@@ -857,6 +857,8 @@ def _build_piece_index(pieces, excluded):
 # vocabulary pieces once and compile each grammar on first use.
 
 _WORKER_PIECES = None
+# Client grammars are unbounded; the compiled patterns a worker keeps are not.
+_WORKER_PATTERN_LIMIT = 256
 _WORKER_PATTERNS = {}
 
 
@@ -865,17 +867,25 @@ def _scanner_init(pieces):
     _WORKER_PIECES = pieces
 
 
+def _worker_pattern(pattern_source, pattern_flags):
+    """The compiled pattern for one grammar, kept LRU-bounded per worker."""
+    key = (pattern_source, pattern_flags)
+    pattern = _WORKER_PATTERNS.pop(key, None)
+    if pattern is None:
+        pattern = regex.compile(pattern_source, pattern_flags)
+        while len(_WORKER_PATTERNS) >= _WORKER_PATTERN_LIMIT:
+            _WORKER_PATTERNS.pop(next(iter(_WORKER_PATTERNS)))
+    _WORKER_PATTERNS[key] = pattern
+    return pattern
+
+
 def _scanner_scan(pattern_source, pattern_flags, prefix, tokens, timeout, wall_deadline):
     """Admissible ``tokens`` under ``prefix``; ``None`` once ``wall_deadline`` passes.
 
     Aborting in the worker keeps an overrun from leaving stale shards that
     later scans would queue behind.
     """
-    pattern = _WORKER_PATTERNS.get((pattern_source, pattern_flags))
-    if pattern is None:
-        pattern = _WORKER_PATTERNS[(pattern_source, pattern_flags)] = regex.compile(
-            pattern_source, pattern_flags
-        )
+    pattern = _worker_pattern(pattern_source, pattern_flags)
     admitted = []
     count = len(_WORKER_PIECES)
     for index, token in enumerate(tokens):
@@ -2074,7 +2084,10 @@ class StructuredOutputProcessor:
 
         if self.failure is not None:
             return logits
-        token_ids = [int(item) for item in tokens.tolist()][self.prompt_length :]
+        # Slice on the array first: converting the whole context to Python
+        # ints cost 3.4 ms per generated token at 128K (the 2026-09-23 audit
+        # fixed the same pattern in generate.py).
+        token_ids = [int(item) for item in tokens[self.prompt_length :].tolist()]
         self._generated_token_count = len(token_ids)
         self._recent_generated_ids = tuple(token_ids[-_FAILURE_HISTORY_TOKENS:])
         token_ids = self._constrained_ids(token_ids)

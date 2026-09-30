@@ -487,6 +487,9 @@ def _make_mlp(args: ModelArgs, layer_idx: int) -> nn.Module:
 # mHC (Manifold-constrained Hyper-Connections)
 # --------------------------------------------------------------------------
 
+from .import_env import snapshot as _import_env_snapshot
+
+_import_env_snapshot(__name__)
 _COMPILE_MHC = os.environ.get("MLX2_XING_COMPILE_MHC", "1") == "1"
 # Fused Metal mHC kernels (``xing4_0_mhc_metal``); GPU only, compiled path otherwise.
 _MHC_KERNEL = os.environ.get("MLX2_XING_MHC_KERNEL", "1") == "1"
@@ -506,9 +509,6 @@ def set_compile_mhc(enabled: bool) -> None:
     global _COMPILE_MHC
     _COMPILE_MHC = bool(enabled)
 
-
-def compile_mhc_enabled() -> bool:
-    return _COMPILE_MHC
 
 
 def set_mhc_kernel(enabled: bool) -> None:
@@ -660,15 +660,16 @@ class HyperConnection(nn.Module):
     def _kernel_params(self):
         from .xing4_0_mhc_metal import pack_params
 
-        key = (id(self.hc_scale), id(self.hc_base))
         cached = getattr(self, "_packed", None)
-        if cached is None or cached[0] != key:
+        # Hold the parameter arrays themselves: an ``id()`` key outlives a
+        # freed array whose address CPython hands to its replacement.
+        if cached is None or cached[0] is not self.hc_scale or cached[1] is not self.hc_base:
             packed = pack_params(
                 self.norm_eps, self.eps, self.clamp_min, self.clamp_max, self.hc_scale, self.hc_base
             )
-            object.__setattr__(self, "_packed", (key, packed))
+            object.__setattr__(self, "_packed", (self.hc_scale, self.hc_base, packed))
             return packed
-        return cached[1]
+        return cached[2]
 
     def __call__(self, streams):
         if _kernel_usable(streams):

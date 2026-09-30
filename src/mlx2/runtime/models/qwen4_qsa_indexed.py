@@ -21,6 +21,10 @@ from .qwen4_qsa_indexed_merge import (
 )
 from .qwen4_qsa_nax import compact_blocks_to_kernel_inputs, compact_token_validity
 
+from .import_env import snapshot as _import_env_snapshot
+
+_import_env_snapshot(__name__)
+
 _BLOCK_SIZE = 4
 _SDPA_BLOCKS = 128
 _SPLIT_CANDIDATES = (128, 64, 32, 16, 8)

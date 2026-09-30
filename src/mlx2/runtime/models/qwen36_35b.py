@@ -28,6 +28,9 @@ from .qwen38_27b import (
 )
 
 
+from .import_env import snapshot as _import_env_snapshot
+
+_import_env_snapshot(__name__)
 _FUSED_GDN_DECODE = os.environ.get("MLX_QWEN36_FUSED_GDN_DECODE", "0") == "1"
 
 

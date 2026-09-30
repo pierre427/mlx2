@@ -16,7 +16,23 @@ import os
 import sys
 from typing import Dict, Iterable, Mapping, Optional
 
-PREFIXES = ("MLX_QWEN4_", "MLX_GDN_")
+# Every flag family a tensor module reads at import.  A family missing here is
+# invisible to the guard: the 09-25 triage lost fused GDN that way, and the
+# Qwen3.6 decode switch (``MLX_QWEN36_``) had the same gap until 09-30.
+# ``MLX_ENABLE_TF32`` is latched process-wide by MLX at the first fp32 GEMM;
+# modules that dispatch such GEMMs snapshot it here.
+PREFIXES = (
+    "MLX_QWEN4_",
+    "MLX_QWEN36_",
+    "MLX_GDN_",
+    "MLX_LM_GDN_",
+    "MLX_LM_QSDPA_",
+    "MLX2_FUSED_SDPA_",
+    "MLX2_XING_",
+    "MLX_LM_QSA_",
+    "MLX_SDPA_",
+    "MLX_ENABLE_TF32",
+)
 
 _SNAPSHOTS: Dict[str, Dict[str, str]] = {}
 

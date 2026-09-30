@@ -7,6 +7,9 @@ import mlx.core as mx
 import mlx.nn as nn
 from .precise_ops import gate_sigmoid
 
+from .import_env import snapshot as _import_env_snapshot
+
+_import_env_snapshot(__name__)
 _ENABLE_GDN_PACKED = os.environ.get("MLX_GDN_PACKED", "1") != "0"
 _ENABLE_GDN_CORE = os.environ.get("MLX_GDN_CORE", "0") == "1"
 _CORE_GDN_CHUNK_SIZE = 8
@@ -302,6 +305,10 @@ def _gated_delta_step_ops(
     if mask is not None:
         mask = mx.expand_dims(mask, axis=(1, 2, 3))
         state = mx.where(mask, state, old_state)
+        # A masked (padding) step contributes nothing: the Metal kernels write
+        # a zero readout there, and the reference must agree so CPU oracles
+        # and CPU/GPU parity hold on left-padded batches.
+        y = mx.where(mask[..., 0], y, mx.zeros_like(y))
     return (_cast_readout(y, q.dtype, old_state.dtype), state)
 
 

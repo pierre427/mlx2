@@ -247,6 +247,11 @@ class DynamicNTKScalingRoPE(nn.Module):
         return f"{self.dims}, traditional={self.traditional}, max_position_embeddings={self.max_position_embeddings}, factor={self.factor}"
 
     def __call__(self, x: mx.array, offset: int = 0) -> mx.array:
+        if isinstance(offset, bool) or not isinstance(offset, int):
+            # Batched caches pass a per-row offset array; the NTK base below
+            # is one scalar per call, so a ragged batch has no single correct
+            # base.  Fail closed instead of a TypeError deep in the graph.
+            raise ValueError("dynamic NTK RoPE needs a scalar integer offset")
         seq_len = max(x.shape[-2] + offset, self.max_position_embeddings)
         base = self.base * (
             self.factor * seq_len / self.max_position_embeddings - (self.factor - 1)

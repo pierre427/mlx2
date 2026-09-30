@@ -89,6 +89,8 @@ def _negate(intervals):
 
 
 _ALL_CHARS = None
+# Pattern fragments come from client grammars; keep the enumeration cache bounded.
+_ENUMERATED_LIMIT = 1024
 _ENUMERATED = {}
 _ENUMERATE_LOCK = threading.Lock()
 
@@ -122,6 +124,8 @@ def _enumerate_charset(source):
             starts = np.concatenate(([points[0]], points[breaks + 1]))
             ends = np.concatenate((points[breaks], [points[-1]]))
             result = tuple((int(lo), int(hi)) for lo, hi in zip(starts, ends))
+        while len(_ENUMERATED) >= _ENUMERATED_LIMIT:
+            _ENUMERATED.pop(next(iter(_ENUMERATED)))
         _ENUMERATED[source] = result
         return result
 

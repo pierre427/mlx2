@@ -13,6 +13,9 @@ from .qwen3_next import Qwen3NextRMSNormGated as RMSNormGated
 _GDN_FUSED_MAX_ROWS = 8
 # Opt-in: stage a one-graph per-row rollback that takes the accepted count as
 # a device array (see GatedDeltaNet._masked_rollback).
+from .import_env import snapshot as _import_env_snapshot
+
+_import_env_snapshot(__name__)
 _GDN_ARRAY_ACCEPT = os.environ.get("MLX_LM_GDN_ARRAY_ACCEPT") == "1"
 
 

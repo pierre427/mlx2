@@ -82,6 +82,15 @@ def _rotary(layer, index):
     }
 
 
+def _tail_rows(array, held):
+    """The last ``held`` rows along the sequence axis; ``held == 0`` is empty.
+
+    A ``-held:`` slice selects the whole ring when ``held == 0``.
+    """
+    rows = array.shape[2]
+    return array[..., rows - min(int(held), rows) :, :]
+
+
 def _kept_positions(state, removed):
     by_id = {segment.segment_id: segment for segment in state.transcript.segments}
     cursor = 0
@@ -176,8 +185,8 @@ class StandardAttentionSpominBackend:
                 if rotary is not None:
                     keys = shift_rope(keys, delta, **rotary)
             else:
-                keys = cache._temporal_order(cache.keys)[..., -_held:, :]
-                values = cache._temporal_order(cache.values)[..., -_held:, :]
+                keys = _tail_rows(cache._temporal_order(cache.keys), _held)
+                values = _tail_rows(cache._temporal_order(cache.values), _held)
                 if rotary is not None:
                     uniform = mx.full((1, 1, keys.shape[2]), -float(dropped), dtype=mx.float32)
                     keys = shift_rope(keys, uniform, **rotary)

@@ -115,7 +115,8 @@ def build_image_block(n_llm_h: int, n_llm_w: int, start_pos: int) -> tuple[np.nd
                             np.array([IMAGE_START], dtype=np.int64), types[order],
                             np.full(pad_last, IMAGE_PAD, dtype=np.int64),
                             np.array([IMAGE_END], dtype=np.int64)))
-    assert len(perm) == n_llm_h * n_llm_w
+    if len(perm) != n_llm_h * n_llm_w:
+        raise ValueError("vision layout permutation does not cover the LLM grid")
     return types, perm
 
 

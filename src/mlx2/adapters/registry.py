@@ -128,8 +128,13 @@ def _flash_next(path: Path, config: dict) -> AdapterResolution:
     if not isinstance(weights, dict) or not weights:
         raise ValueError("Artifact must have a nonempty weight index")
     for name in weights.values():
-        if not isinstance(name, str) or not (path / name).resolve().is_relative_to(
-            path
+        # A basename gate prevents traversal while keeping Hugging Face
+        # snapshots, whose shards are links into the sibling blobs tree (the
+        # rule standard_decoder already applies).
+        if (
+            not isinstance(name, str)
+            or Path(name).name != name
+            or not name.endswith(".safetensors")
         ):
             raise ValueError("Weight shard paths must stay within the artifact")
     has_mtp = any(name.startswith(("mtp.", "language_model.mtp.")) for name in weights)

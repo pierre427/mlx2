@@ -198,7 +198,8 @@ def nax_qsa_attention(
     """
     (batch, nqh, length, dim) = q.shape
     gqa = nqh // n_kv_heads
-    assert gqa <= MTILE, "one token's heads must fit a 16-row NAX tile"
+    if gqa > MTILE:
+        raise ValueError("one token's heads must fit a 16-row NAX tile")
     (out,) = _KERNEL(
         inputs=[
             mx.contiguous(q),

@@ -55,6 +55,9 @@ QUALIFIED_ROW_COUNTS: tuple[int, ...] = ()
 # intended fail-closed behaviour rather than a silent approximation.
 CANDIDATE_ROW_COUNTS: tuple[int, ...] = (1024, 2048, 4096, 8192, 16384)
 
+from .import_env import snapshot as _import_env_snapshot
+
+_import_env_snapshot(__name__)
 _ENABLE = os.environ.get("MLX_QWEN4_FUSED_GROUP_NORM", "0") == "1"
 
 
