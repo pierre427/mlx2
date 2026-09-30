@@ -900,7 +900,9 @@
     "lines": 5435,
     "source_revision": "1e2bc604f71d070bee970c3e7db8b60f7855599b",
     "license": "Apache-2.0",
-    "license_basis": "Explicit source file notice"
+    "license_basis": "Explicit source file notice",
+    "modifications": "QSA indexer rotates by the rope initialize_rope builds from rope_scaling (inverse frequencies and YaRN attention factor), as the reference passes it attention's position embeddings; plain RoPE keeps the exact unscaled table; unsupported scaling fails at construction (FreeToken #573).",
+    "validation": "tests/test_qwen4_qsa_indexer_rope.py (CPU): YaRN and linear match attention's rotation, default keeps the exact table, dynamic fails closed."
   },
   "models/qwen4_fused_gdn.py": {
     "source": "mlx_lm/models/qwen4_fused_gdn.py",

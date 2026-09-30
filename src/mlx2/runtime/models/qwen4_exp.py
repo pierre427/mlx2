@@ -106,7 +106,7 @@ from .qwen3_next import (
     table_bytes,
     transform_moe_weights,
 )
-from .rope_utils import initialize_rope
+from .rope_utils import Llama3RoPE, YarnRoPE, initialize_rope
 from ..verify_sync import record_verify_sync
 
 _QSA_SEGMENT_CAPTURE_LOCK = threading.Lock()
@@ -2509,16 +2509,58 @@ class PLELayer(nn.Module):
 _ROPE_POSITION_FREQS: Dict[tuple, mx.array] = {}
 
 
-def _apply_rope_positions(x: mx.array, positions: mx.array, dims: int, base: float):
-    """Transformers-compatible non-traditional partial RoPE at arbitrary positions."""
+def _rope_position_scaling(dims: int, base: float, scaling_config, max_position):
+    """``(inv_freq, mscale)`` of the rope ``initialize_rope`` builds, or None for plain RoPE.
+
+    The QSA indexer rotates by the same position embeddings as attention (the
+    reference passes it the model's one rotary table), so a scaled rope --
+    YaRN extending 262,144 trained positions to 1M -- must scale the
+    indexer's rotation too (FreeToken #573).  Plain RoPE returns None, which
+    keeps the indexer's exact unscaled table.  A rope whose rotation this
+    cannot reproduce fails at construction rather than rotating the indexer
+    differently from attention.
+    """
+    rope = initialize_rope(
+        dims,
+        base=base,
+        traditional=False,
+        scaling_config=scaling_config,
+        max_position_embeddings=max_position,
+    )
+    if type(rope) is nn.RoPE:
+        if rope.scale == 1.0:
+            return None
+        inv_freq = mx.exp(-math.log(base) * mx.arange(0, dims, 2) / dims)
+        return inv_freq * rope.scale, 1.0
+    if isinstance(rope, (YarnRoPE, Llama3RoPE)):
+        return 1.0 / rope._freqs, float(getattr(rope, "mscale", 1.0))
+    raise ValueError(
+        f"Qwen4-Exp QSA indexer does not support {type(rope).__name__} rope scaling"
+    )
+
+
+def _apply_rope_positions(
+    x: mx.array, positions: mx.array, dims: int, base: float, scaling=None
+):
+    """Transformers-compatible non-traditional partial RoPE at arbitrary positions.
+
+    ``scaling`` is ``_rope_position_scaling``'s ``(inv_freq, mscale)``; the
+    reference multiplies cos and sin by the YaRN attention factor.
+    """
     if dims == 0:
         return x
-    freqs = _ROPE_POSITION_FREQS.get((dims, base))
-    if freqs is None:
-        freqs = mx.exp(-math.log(base) * mx.arange(0, dims, 2) / dims)
-        _ROPE_POSITION_FREQS[dims, base] = freqs
+    if scaling is None:
+        freqs = _ROPE_POSITION_FREQS.get((dims, base))
+        if freqs is None:
+            freqs = mx.exp(-math.log(base) * mx.arange(0, dims, 2) / dims)
+            _ROPE_POSITION_FREQS[dims, base] = freqs
+        mscale = 1.0
+    else:
+        freqs, mscale = scaling
     angles = positions[..., None].astype(mx.float32) * freqs
     (cos, sin) = (mx.cos(angles), mx.sin(angles))
+    if mscale != 1.0:
+        (cos, sin) = (cos * mscale, sin * mscale)
     (rope, tail) = (x[..., :dims], x[..., dims:])
     half = dims // 2
     (left, right) = (rope[..., :half], rope[..., half:])
@@ -4668,6 +4710,17 @@ class QSAIndexer(nn.Module):
         self.block_topk = args.indexer_budget // args.indexer_compress_ratio
         self.rotary_dim = int(args.head_dim * args.partial_rotary_factor)
         self.rope_theta = args.rope_theta
+        # Not a parameter: kept off the module tree so weights stay unchanged.
+        object.__setattr__(
+            self,
+            "rope_scaling",
+            _rope_position_scaling(
+                self.rotary_dim,
+                args.rope_theta,
+                args.rope_scaling,
+                args.max_position_embeddings,
+            ),
+        )
         self.layer_id = layer_id
         self.summary_identity = _qsa_summary_identity(args, layer_id)
         self.index_qk_proj = nn.Linear(
@@ -4693,7 +4746,8 @@ class QSAIndexer(nn.Module):
         )
         pooled = self.k_layernorm(pooled)
         return _apply_rope_positions(
-            pooled, starts[None, :], self.rotary_dim, self.rope_theta
+            pooled, starts[None, :], self.rotary_dim, self.rope_theta,
+            self.rope_scaling,
         )
 
     def _pool_blocks_left_padded(
@@ -4903,7 +4957,8 @@ class QSAIndexer(nn.Module):
         if shared_topk is None:
             q = self.q_layernorm(q.reshape(batch, length, self.n_heads, self.head_dim))
             q = _apply_rope_positions(
-                q, q_pos[..., None], self.rotary_dim, self.rope_theta
+                q, q_pos[..., None], self.rotary_dim, self.rope_theta,
+                self.rope_scaling,
             )
             suffix_blocks = n_blocks - base_blocks
             if suffix_blocks < 0:
@@ -5031,7 +5086,9 @@ class QSAIndexer(nn.Module):
         starts = mx.arange(n_blocks) * ratio
         valid_blocks = (starts + ratio - 1)[None, None, :] <= q_pos[..., None]
         q = self.q_layernorm(q.reshape(batch, length, self.n_heads, self.head_dim))
-        q = _apply_rope_positions(q, q_pos[..., None], self.rotary_dim, self.rope_theta)
+        q = _apply_rope_positions(
+            q, q_pos[..., None], self.rotary_dim, self.rope_theta, self.rope_scaling
+        )
         suffix_blocks = n_blocks - base_blocks
         cached_rows = [cache._suffix_pooled_keys for cache in caches]
         cached_counts = {
@@ -5183,7 +5240,8 @@ class QSAIndexer(nn.Module):
         if shared_topk is None:
             q = self.q_layernorm(q.reshape(batch, length, self.n_heads, self.head_dim))
             q = _apply_rope_positions(
-                q, q_pos[..., None], self.rotary_dim, self.rope_theta
+                q, q_pos[..., None], self.rotary_dim, self.rope_theta,
+                self.rope_scaling,
             )
         starts = mx.arange(n_blocks) * self.compress_ratio
         valid_blocks = (starts + self.compress_ratio - 1)[None, None, :] <= q_pos[
