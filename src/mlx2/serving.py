@@ -5217,6 +5217,7 @@ class ServingEngine:
             # warm prompts while the cohort is being primed, so those lanes
             # cannot compose batching with APCv2 reuse.
             from .runtime.int8_prefill import apc_semantic_fingerprint
+            from .runtime.lane.installer import apc_lane_fingerprint
 
             persistent_identity = APCv2.key(
                 adapter.identity["fingerprint"],
@@ -5225,8 +5226,11 @@ class ServingEngine:
                 tokenizer_fingerprint=adapter.identity["fingerprint"],
                 cache_layout_fingerprint=adapter.layout,
                 semantic_fingerprint=apc_semantic_fingerprint(
-                    cache_semantic_fingerprint(
-                        "__tenant_template__" if self.tenant_scoped_cache else None
+                    apc_lane_fingerprint(
+                        cache_semantic_fingerprint(
+                            "__tenant_template__" if self.tenant_scoped_cache else None
+                        ),
+                        self.lane_matmul_receipt,
                     ),
                     self.int8_prefill_policy,
                 ),
@@ -5277,7 +5281,7 @@ class ServingEngine:
                         # Int8-prefill state lives in its own namespace
                         # (memory and disk); identity when disabled.
                         semantic_fingerprint=apc_semantic_fingerprint(
-                            semantic,
+                            apc_lane_fingerprint(semantic, self.lane_matmul_receipt),
                             self.int8_prefill_policy,
                         ),
                     )

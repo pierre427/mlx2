@@ -125,7 +125,9 @@ def test_install_covers_formats_falls_back_on_cpu_and_uninstalls():
     x = mx.random.normal((3, 128), key=mx.random.key(3)).astype(mx.bfloat16)
     before = [model.q4(x), model.q5(x), model.dense(x)]
     receipt = lane.install(model, max_rows=16)
-    assert receipt["law_id"] == "lane-matmul-v1+stock-below-4+grouped"
+    # No sibling group formed, so the law is ungrouped; the 16-row window
+    # (narrower than the default 32) is part of it.
+    assert receipt["law_id"] == "lane-matmul-v1+stock-below-4+rows-le-16"
     assert receipt["min_rows"] == 4 and receipt["groups"] == {}
     assert receipt["covered"] == {"affine-q4-g64": 1, "affine-q5-g32": 1, "unquantized": 1}
     assert sum(receipt["refused"].values()) == 1
@@ -174,9 +176,9 @@ def test_grouping_stacks_same_format_siblings_as_views(monkeypatch):
     before = {name: getattr(model, name)(x) for name in ("q_proj", "k_proj", "v_proj")}
     receipt = lane.install(model, min_rows=1)
     assert receipt["groups"] == {"affine-q4-g64x2": 1}
-    group = inst._GROUP_OF[id(model.q_proj)]
-    assert inst._GROUP_OF[id(model.k_proj)] is group and id(model.v_proj) not in inst._GROUP_OF
-    assert group.lw.n == 96 and group.columns[id(model.k_proj)] == (64, 96)
+    group = inst._group(model.q_proj)
+    assert inst._group(model.k_proj) is group and inst._group(model.v_proj) is None
+    assert group.lw.n == 96 and model.k_proj.__dict__["_lane_columns"] == (64, 96)
     # Module weights are row views of the stacked buffer, with unchanged values.
     assert mx.array_equal(model.k_proj.weight, group.lw.weight[64:96])
 
@@ -206,4 +208,93 @@ def test_grouping_stacks_same_format_siblings_as_views(monkeypatch):
     model.v_proj(x)
     assert calls[-1] == 32                                 # ungrouped sibling alone
     lane.uninstall(model)
-    assert not inst._GROUP_OF
+    assert all(inst._group(m) is None and inst._prepared(m) is None
+               for _n, m in model.named_modules())
+
+
+def _cpu_lane(monkeypatch):
+    from mlx2.runtime.lane import installer as inst
+
+    monkeypatch.setattr(inst, "available", lambda: True)
+
+    def reference(x, lw):
+        if lw.bits == inst.UNQUANTIZED_BITS:
+            y = x @ lw.weight.T
+        else:
+            w = mx.dequantize(lw.weight, lw.scale_bias[..., 0].T, lw.scale_bias[..., 1].T,
+                              group_size=lw.group_size, bits=lw.bits)
+            y = (x.astype(mx.float32) @ w.T.astype(mx.float32)).astype(x.dtype)
+        return y if lw.bias is None else y + lw.bias
+
+    monkeypatch.setattr(inst, "lane_matmul", reference)
+    return inst
+
+
+class _BF16Attention(nn.Module):
+    def __init__(self, seed):
+        super().__init__()
+        for i, name in enumerate(("q_proj", "k_proj", "v_proj")):
+            layer = nn.Linear(64, 8, bias=False)
+            layer.weight = mx.random.normal((8, 64), key=mx.random.key(seed + i)).astype(mx.bfloat16)
+            setattr(self, name, layer)
+
+
+class _Layers(nn.Module):
+    def __init__(self, seed, n=8):
+        super().__init__()
+        self.layers = [_BF16Attention(seed + 10 * i) for i in range(n)]
+
+
+def test_a_dropped_models_lane_state_never_reaches_the_next_model(monkeypatch):
+    """State was keyed by id(module) in process-wide maps; a model freed
+    without uninstall() left its stacked weights behind, and the next model's
+    module with a reused id computed with them."""
+    import gc
+
+    _cpu_lane(monkeypatch)
+    x = mx.random.normal((1, 8, 64), key=mx.random.key(1)).astype(mx.bfloat16)
+    for trial in range(30):
+        first = _Layers(1000 + trial)
+        lane.install(first, min_rows=1)
+        del first
+        gc.collect()
+        second = _Layers(5000 + trial)
+        receipt = lane.install(second, min_rows=1)
+        assert receipt["groups"] == {"unquantizedx3": 8}
+        for layer in second.layers:
+            for name in ("q_proj", "k_proj", "v_proj"):
+                module = getattr(layer, name)
+                assert mx.array_equal(module(x), x @ module.weight.T), (trial, name)
+        lane.uninstall(second)
+
+
+def test_reinstalling_without_grouping_dissolves_the_groups(monkeypatch):
+    inst = _cpu_lane(monkeypatch)
+    model = _Layers(7, n=1)
+    first = lane.install(model, min_rows=1)
+    assert first["law_id"].endswith("+grouped")
+    again = lane.install(model, min_rows=1, groups=())
+    assert again["law_id"] == lane.LAW_ID and again["groups"] == {}
+    assert all(inst._group(m) is None for _n, m in model.named_modules())
+    inst.STATS.clear()
+    x = mx.random.normal((2, 64), key=mx.random.key(3)).astype(mx.bfloat16)
+    model.layers[0].q_proj(x)
+    model.layers[0].k_proj(x)
+    assert inst.STATS["group_launches"] == 0 and inst.STATS["lane_launches"] == 2
+
+
+def test_the_row_window_is_part_of_the_law_and_the_apc_namespace(monkeypatch):
+    """A 64-row window runs 33-64-row calls (verify, prefill tails) on the
+    lane arithmetic; it was the same law_id as the 32-row default, and APCv2
+    keys carried no lane law at all."""
+    from mlx2.runtime.lane.installer import apc_lane_fingerprint
+
+    _cpu_lane(monkeypatch)
+    default = lane.install(_Layers(9, n=1), min_rows=1)
+    wide = lane.install(_Layers(9, n=1), min_rows=1, max_rows=64)
+    assert default["law_id"] == "lane-matmul-v1+grouped"
+    assert wide["law_id"] == "lane-matmul-v1+rows-le-64+grouped"
+    assert apc_lane_fingerprint("base", None) == "base"
+    assert apc_lane_fingerprint("base", {"law_id": "stock", "covered": {}}) == "base"
+    assert apc_lane_fingerprint("base", default) != apc_lane_fingerprint("base", wide)
+    assert apc_lane_fingerprint("base", default) != "base"

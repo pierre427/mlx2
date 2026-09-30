@@ -20,7 +20,7 @@ stock kernels and are reported.
 from __future__ import annotations
 
 from collections import Counter
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 import mlx.core as mx
 from mlx import nn
@@ -37,7 +37,19 @@ from .matmul import (
 )
 
 LAW_ID = "lane-matmul-v1"
-_PREPARED: dict[int, object] = {}
+
+
+# Lane state lives on each module (outside its parameter tree), never in
+# process-wide maps keyed by id(module): CPython reuses a freed module's id at
+# once, so a model dropped without uninstall() left its prepared weights and
+# groups behind for the next model's modules, which then computed with the
+# old model's stacked weights (and kept them alive).
+def _prepared(module):
+    return module.__dict__.get("_lane_prepared")
+
+
+def _group(module):
+    return module.__dict__.get("_lane_group")
 
 # Sibling projections that read the same input, by attribute name under one
 # parent module.  Common across model families; an adapter may pass its own.
@@ -56,11 +68,8 @@ class _Group:
     """Same-format siblings stacked along N; one launch computes all of them."""
 
     lw: LaneWeights
-    columns: dict = field(default_factory=dict)   # id(module) -> (start, stop)
     last: tuple | None = None                     # (x, stacked output) of the latest call
 
-
-_GROUP_OF: dict[int, _Group] = {}
 # Process-wide switches for paired A/B measurement; a route never flips them.
 ENABLED = [True]
 GROUPING = [True]
@@ -100,7 +109,7 @@ class _LaneMixin:
     _lane_max_rows = MAX_ROWS
 
     def __call__(self, x):
-        lw = _PREPARED.get(id(self))
+        lw = _prepared(self)
         rows = _rows(x)
         if lw is None or not ENABLED[0] or not available():
             STATS["stock_disabled"] += 1
@@ -110,7 +119,7 @@ class _LaneMixin:
         elif rows > self._lane_max_rows:
             STATS["stock_above_max_rows"] += 1
         else:
-            group = _GROUP_OF.get(id(self)) if GROUPING[0] else None
+            group = _group(self) if GROUPING[0] else None
             try:
                 if group is None:
                     y = lane_matmul(x, lw)
@@ -124,7 +133,7 @@ class _LaneMixin:
                         STATS["group_launches"] += 1
                     else:
                         STATS["group_reuses"] += 1
-                    start, stop = group.columns[id(self)]
+                    start, stop = self.__dict__["_lane_columns"]
                     y = group.last[1][..., start:stop]
                     if lw.bias is not None:
                         y = y + lw.bias
@@ -158,17 +167,17 @@ def _format_key(lw: LaneWeights) -> tuple:
 
 def _stack(members) -> _Group:
     """Stack same-format siblings; each module's arrays become views of the stack."""
-    first = _PREPARED[id(members[0])]
+    first = _prepared(members[0])
     quantized = first.bits != UNQUANTIZED_BITS
     names = ("weight", "scales", "biases") if quantized else ("weight",)
     stacked = {name: mx.concatenate([m[name] for m in members], axis=0) for name in names}
     mx.eval(*stacked.values())
-    columns, start = {}, 0
+    start = 0
     for m in members:
         stop = start + int(m["weight"].shape[0])
         for name in names:
             setattr(m, name, stacked[name][start:stop])     # zero-copy row views
-        columns[id(m)] = (start, stop)
+        object.__setattr__(m, "_lane_columns", (start, stop))
         start = stop
     mx.eval([m[name] for m in members for name in names])
     n = start
@@ -178,8 +187,8 @@ def _stack(members) -> _Group:
                      split_k(n, first.k, first.group_size, first.bits),
                      stacked["weight"], pairs, None)
     for m in members:
-        _PREPARED[id(m)] = prepare(m)       # individual views, for unmatched inputs
-    return _Group(lw, columns)
+        object.__setattr__(m, "_lane_prepared", prepare(m))  # individual views
+    return _Group(lw)
 
 
 def _group_siblings(model, groups) -> Counter:
@@ -187,22 +196,37 @@ def _group_siblings(model, groups) -> Counter:
     for _name, parent in model.named_modules():
         for names in groups:
             present = [getattr(parent, n, None) for n in names]
-            present = [m for m in present if m is not None and id(m) in _PREPARED
-                       and id(m) not in _GROUP_OF]
+            present = [m for m in present if m is not None and _prepared(m) is not None
+                       and _group(m) is None]
             by_format: dict[tuple, list] = {}
             for m in present:
-                by_format.setdefault(_format_key(_PREPARED[id(m)]), []).append(m)
+                by_format.setdefault(_format_key(_prepared(m)), []).append(m)
             for members in by_format.values():
                 if len(members) < 2:
                     continue
                 group = _stack(members)
                 for m in members:
-                    _GROUP_OF[id(m)] = group
+                    object.__setattr__(m, "_lane_group", group)
                 formed[f"{group.lw.format}x{len(members)}"] += 1
     return formed
 
 
-def install(model, *, min_rows: int = 4, max_rows: int = 32, unquantized: bool = True,
+DEFAULT_MAX_ROWS = 32
+
+
+def apc_lane_fingerprint(base, receipt):
+    """APCv2 namespace for prefix state computed under an installed lane law.
+
+    The lane arithmetic is a numerical law distinct from stock MLX, so KV and
+    recurrent state produced under it (in memory, idle disk and a persist
+    dir) must not be served to a route running stock kernels or another law.
+    """
+    if not receipt or not receipt.get("covered"):
+        return base
+    return (base, "lane-matmul", receipt["law_id"])
+
+
+def install(model, *, min_rows: int = 4, max_rows: int = DEFAULT_MAX_ROWS, unquantized: bool = True,
             groups=DEFAULT_GROUPS, skip=lambda name, module: False,
             min_rows_by_format: dict | None = None) -> dict:
     """Swap every supported projection to its lane class; returns a receipt.
@@ -247,18 +271,32 @@ def install(model, *, min_rows: int = 4, max_rows: int = 32, unquantized: bool =
         except LaneUnsupported as exc:
             refused[str(exc)] += 1
             continue
-        _PREPARED[id(module)] = lw
+        object.__setattr__(module, "_lane_prepared", lw)
         module.__class__ = _SWAP[kind]
         object.__setattr__(module, "_lane_min_rows", int(rows))
         object.__setattr__(module, "_lane_max_rows", int(max_rows))
         covered[lw.format] += 1
-    formed = _group_siblings(model, groups) if groups else Counter()
+    if groups:
+        formed = _group_siblings(model, groups)
+    else:
+        # A repeat install without grouping dissolves earlier groups; they
+        # kept running the stacked launch (a different split-K) while the
+        # receipt said ungrouped.
+        formed = Counter()
+        for _name, module in model.named_modules():
+            for name in ("_lane_group", "_lane_columns"):
+                module.__dict__.pop(name, None)
     if min_rows_by_format is None:
         law = law_id(min_rows)
     else:
         spec = ",".join(f"{k}:{v}" for k, v in sorted(min_rows_by_format.items()))
         law = f"{LAW_ID}+stock-below[{spec}]"
-    return {"law_id": law + ("+grouped" if groups else ""),
+    if max_rows != DEFAULT_MAX_ROWS:
+        # Calls up to max_rows take the lane arithmetic: a wider window is a
+        # different law (33-64-row verify or prefill tails change).
+        law += f"+rows-le-{max_rows}"
+    grouped = any(_group(module) is not None for _name, module in model.named_modules())
+    return {"law_id": law + ("+grouped" if grouped else ""),
             "min_rows": min_rows if min_rows_by_format is None else dict(min_rows_by_format),
             "max_rows": max_rows, "covered": dict(covered),
             "groups": dict(formed), "refused": dict(refused), "available": available()}
@@ -271,8 +309,8 @@ def uninstall(model) -> int:
         old = _RESTORE.get(type(module))
         if old is not None:
             module.__class__ = old
-            _PREPARED.pop(id(module), None)
-            _GROUP_OF.pop(id(module), None)
+            for name in ("_lane_prepared", "_lane_group", "_lane_columns"):
+                module.__dict__.pop(name, None)
             restored += 1
     return restored
 
@@ -285,7 +323,7 @@ def set_enabled(on: bool, *, grouping: bool | None = None) -> None:
 
 
 def installed(module) -> bool:
-    return type(module) in _RESTORE and id(module) in _PREPARED
+    return type(module) in _RESTORE and _prepared(module) is not None
 
 
 def apply_policy(model, policy: dict) -> dict | None:
