@@ -189,6 +189,36 @@ def test_parameters_gradients_checkpoint_and_resume(tmp_path):
         load_checkpoint(checkpoint, restored, opt2, {"seed": 10})
 
 
+def test_model_only_checkpoint_is_explicitly_not_an_exact_resume(tmp_path):
+    c = Config.smoke()
+    model = Model(c)
+    optimizer = optimizers.AdamW(learning_rate=1e-4)
+    tokens = mx.array([[1, 2, 3, 4, 5, 6, 7, 8]])
+    _, gradients = nn.value_and_grad(model, loss)(model, tokens)
+    optimizer.update(model, gradients)
+    mx.eval(model.parameters(), optimizer.state)
+
+    checkpoint = save_checkpoint(
+        tmp_path, model, optimizer, 7, {"seed": 9}, mode="model"
+    )
+    state = json.loads((checkpoint / "state.json").read_text())
+    assert state["schema"] == "mlx2.hysparse2-model-checkpoint.v1"
+    assert state["optimizer_state_saved"] is False
+    assert state["exact_training_resume"] is False
+    assert (checkpoint / "model.safetensors").is_file()
+    assert (checkpoint / "semantic-ple.safetensors").is_file()
+    assert not (checkpoint / "optimizer.safetensors").exists()
+
+    restored = Model(c)
+    with pytest.raises(ValueError, match="exact optimizer resume state"):
+        load_checkpoint(
+            checkpoint,
+            restored,
+            optimizers.AdamW(learning_rate=1e-4),
+            {"seed": 9},
+        )
+
+
 def test_apcv2_identity_binds_block_selector_and_semantic_capsule():
     c = Config.smoke()
     digest = "a" * 64

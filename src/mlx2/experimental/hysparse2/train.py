@@ -27,10 +27,12 @@ def file_hash(path):
     return h.hexdigest()
 
 
-def save_checkpoint(root, model, optimizer, step, run):
+def save_checkpoint(root, model, optimizer, step, run, mode="full"):
     import mlx.core as mx
     from mlx.utils import tree_flatten
 
+    if mode not in {"full", "model"}:
+        raise ValueError("checkpoint mode must be full or model")
     root = Path(root)
     root.mkdir(parents=True, exist_ok=True)
     target = root / f"step-{step:08d}"
@@ -44,7 +46,11 @@ def save_checkpoint(root, model, optimizer, step, run):
         name: value for name, value in flat_parameters if name.startswith("semantic_ple.")
     }
     model_bytes = sum(x.nbytes for _, x in flat_parameters)
-    state_bytes = sum(x.nbytes for _, x in tree_flatten(optimizer.state))
+    state_bytes = (
+        sum(x.nbytes for _, x in tree_flatten(optimizer.state))
+        if mode == "full"
+        else 0
+    )
     sidecar_bytes = sum(x.nbytes for x in ple.values())
     if shutil.disk_usage(root).free < int(
         (model_bytes + state_bytes + sidecar_bytes) * 1.05
@@ -65,14 +71,21 @@ def save_checkpoint(root, model, optimizer, step, run):
             "ngram": model.config.semantic_ngram,
             "apcv2_identity": model.config.apcv2_identity(),
         }
-    state = dict(tree_flatten(optimizer.state))
-    mx.save_safetensors(str(temporary / "optimizer.safetensors"), state)
+    if mode == "full":
+        state = dict(tree_flatten(optimizer.state))
+        mx.save_safetensors(str(temporary / "optimizer.safetensors"), state)
     metadata = {
-        "schema": "mlx2.hysparse2-checkpoint.v1",
+        "schema": (
+            "mlx2.hysparse2-checkpoint.v1"
+            if mode == "full"
+            else "mlx2.hysparse2-model-checkpoint.v1"
+        ),
         "step": step,
         "config": asdict(model.config),
         "run": run,
         "permanent_sidecar": permanent_sidecar,
+        "optimizer_state_saved": mode == "full",
+        "exact_training_resume": mode == "full",
     }
     (temporary / "state.json").write_text(json.dumps(metadata, indent=2) + "\n")
     temporary.rename(target)
@@ -89,7 +102,9 @@ def load_checkpoint(path, model, optimizer, run):
         saved_config = asdict(Config(**metadata["config"]))
     except (TypeError, ValueError):
         saved_config = None
-    if metadata["schema"] != "mlx2.hysparse2-checkpoint.v1" or saved_config != asdict(model.config):
+    if metadata["schema"] != "mlx2.hysparse2-checkpoint.v1":
+        raise ValueError("checkpoint does not contain exact optimizer resume state")
+    if saved_config != asdict(model.config):
         raise ValueError("checkpoint configuration differs")
     if metadata["run"] != run:
         raise ValueError("resume data, tokenizer or training settings differ")
@@ -342,7 +357,14 @@ def train(args, c):
         if (current + 1) % args.save_every == 0 or current == step + args.steps - 1:
             print(
                 "checkpoint",
-                save_checkpoint(args.output, model, optimizer, current + 1, run),
+                save_checkpoint(
+                    args.output,
+                    model,
+                    optimizer,
+                    current + 1,
+                    run,
+                    mode=args.checkpoint_mode,
+                ),
                 flush=True,
             )
     return 0
@@ -382,6 +404,15 @@ def main(argv=None):
     p.add_argument("--diffusion-weight", type=float, default=0.2)
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--save-every", type=int, default=100)
+    p.add_argument(
+        "--checkpoint-mode",
+        choices=["full", "model"],
+        default="full",
+        help=(
+            "full saves exact optimizer resume state; model omits optimizer state "
+            "and is an explicitly non-resumable low-disk artifact"
+        ),
+    )
     p.add_argument("--no-checkpoint", action="store_true")
     args = p.parse_args(argv)
     if not math.isfinite(args.wait_for_gpu) or args.wait_for_gpu < 0:
