@@ -4,6 +4,8 @@ Resolution order (later wins, per key):
 
 1. built-in defaults, chosen by what is detected on the loaded model:
    whether it is a mixture of experts, and each projection's weight format;
+   then per-backend defaults (``BACKEND_DEFAULTS``, keyed by the lane
+   backend this device runs: ``mpp`` on M5, ``simd`` on M1-M4);
 2. per-family defaults (``FAMILY_DEFAULTS``, keyed by the adapter
    descriptor's ``family``);
 3. operator overrides (``--lane-policy`` JSON).
@@ -48,6 +50,12 @@ BUILTIN = {
 # width-one serving ladders at 4K and 16K were slower than stock even when
 # grouping was disabled. Other Muse formats were not in this qualification.
 FAMILY_DEFAULTS: dict[str, dict] = {"muse-glimmer": {"mode": "off"}}
+
+# The M1-M4 backend (simd.py) is a separate numerical law.  Its kernels pass
+# the row-invariance gate and cost about stock at one row on an M3 Pro, but no
+# serving route has been qualified under it, so ``auto`` keeps M1-M4 hosts on
+# stock; ``--lane-matmul crossover|exact`` or a ``--lane-policy`` mode opts in.
+BACKEND_DEFAULTS: dict[str, dict] = {"simd": {"mode": "off"}}
 FAMILY_DEFAULT_FORMATS: dict[str, frozenset[str]] = {
     "muse-glimmer": frozenset({"q4"}),
 }
@@ -90,6 +98,8 @@ def detect(model, config: dict | None = None) -> dict:
     expert module in the model (``*Switch*``, ``*MoE``, ``*SparseMoeBlock``,
     ``*Experts``).
     """
+    from .matmul import backend
+
     moe = config_moe(config)
     formats: Counter = Counter()
     for _name, module in model.named_modules():
@@ -99,7 +109,11 @@ def detect(model, config: dict | None = None) -> dict:
         fmt = format_class(module)
         if fmt is not None:
             formats[fmt] += 1
-    return {"moe": moe, "formats": dict(formats)}
+    detected = {"moe": moe, "formats": dict(formats)}
+    found = backend()
+    if found is not None:
+        detected["backend"] = found
+    return detected
 
 
 def load_overrides(value) -> dict:
@@ -173,6 +187,8 @@ def resolve(detected: dict, *, family: str | None = None, overrides=None,
     policy = copy.deepcopy(BUILTIN)
     user = load_overrides(overrides)
     _validate(user, "--lane-policy")
+    name = detected.get("backend")
+    policy = _merge(policy, BACKEND_DEFAULTS.get(name or "", {}), f"backend:{name}", sources)
     fam = FAMILY_DEFAULTS.get(family or "", {})
     required_formats = FAMILY_DEFAULT_FORMATS.get(family or "")
     if required_formats is not None and frozenset(detected.get("formats", {})) != required_formats:

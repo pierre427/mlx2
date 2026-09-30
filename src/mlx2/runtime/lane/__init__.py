@@ -2,6 +2,7 @@
 
 from .installer import (
     LAW_ID,
+    LAW_IDS,
     ProjectionGroup,
     apply_policy,
     install,
@@ -19,6 +20,8 @@ from .matmul import (
     LaneUnsupported,
     LaneWeights,
     available,
+    backend,
+    force_backend,
     lane_matmul,
     prepare,
     split_k,
@@ -27,6 +30,7 @@ from .matmul import (
 __all__ = [
     "GROUP_SIZES",
     "LAW_ID",
+    "LAW_IDS",
     "MAX_ROWS",
     "QUANT_BITS",
     "UNQUANTIZED_BITS",
@@ -35,6 +39,8 @@ __all__ = [
     "ProjectionGroup",
     "apply_policy",
     "available",
+    "backend",
+    "force_backend",
     "install",
     "installed",
     "lane_matmul",

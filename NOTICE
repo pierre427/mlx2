@@ -12,6 +12,9 @@ Adapted in src/mlx2/runtime/lane/ (the row-invariant lane matmul's q4 group
 formulation, fragment mapping, scale/bias pairing and split-K reduction).
 TensorFold revision 71377a5373ed7b394f1b480ba2a6a3986b03af1c is also adapted in
 src/mlx2/runtime/drafters/dflash_tree.py (the DFlash2 best-first tree search).
+TensorFold revision 9cd52ab4daba68ddd09be89be8f23ad43175e821 is adapted in
+src/mlx2/runtime/lane/simd.py (the M1-M4 row-exact simd_qmm, simd_qmm_bits and
+affine_rows kernels, their dispatch and thread-limit probing).
 Licensed under the MIT License:
 
 MIT License

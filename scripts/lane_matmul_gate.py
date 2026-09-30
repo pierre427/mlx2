@@ -5,13 +5,20 @@ For each weight format (affine 2/3/4/5/6/8-bit at group sizes 32/64/128, and
 bf16/fp16 unquantized) and each projection shape:
 
 * invariance: every row of a 1..128-row call is bitwise equal to the same row
-  computed alone;
+  computed alone.  Each multi-row call gets a freshly allocated input of
+  exactly that many rows, so a read past the last row cannot land in valid
+  memory, and the row counts include the partial last 32-row blocks
+  (33-48, 65-80, 97-112) where TensorFold 0.5.0 found an out-of-bounds read
+  in its own kernel;
 * accuracy: max |lane - fp32 reference| is within 2x of max |MLX - fp32 ref|
   (plus one bf16 ulp of the output scale), where the reference dequantizes
   with MLX and multiplies in fp32;
-* cost: median ms at 1, 8 and 16 rows for lane and for MLX's own kernel.
+* cost: median ms at 1, 4, 8 and 16 rows for lane and for MLX's own kernel.
 
-Needs an M5 GPU.  Writes one JSON receipt and exits non-zero on any failure.
+``--backend mpp`` (the default on an M5) needs the M5 tensor units;
+``--backend simd`` runs the M1-M4 kernels on any Apple GPU (bf16 activations,
+quantized weights only).  Writes one JSON receipt and exits non-zero on any
+failure.
 """
 
 from __future__ import annotations
@@ -24,13 +31,14 @@ import time
 from pathlib import Path
 
 import mlx.core as mx
+import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from mlx2.runtime.lane import matmul as lane
 
 SHAPES = {"small": [(2048, 1024), (1024, 4096)],
           "model": [(5120, 6144), (17408, 5120), (5120, 17408), (5120, 248320)]}
-ROWS = (1, 2, 3, 4, 7, 8, 13, 16, 17, 24, 32, 48, 64, 128)
+ROWS = (1, 2, 3, 4, 5, 7, 8, 9, 13, 16, 17, 24, 32, 33, 40, 48, 64, 65, 72, 80, 97, 100, 112, 128)
 
 
 def timed(fn, reps=7, batch=20):
@@ -65,12 +73,18 @@ def case(bits, gs, k, n, dtype, key):
         ref_w = mx.dequantize(wq, scales, biases, group_size=gs, bits=bits).astype(mx.float32)
     lw = lane.prepare(module)
     rec = {"bits": bits, "group_size": gs, "k": k, "n": n, "dtype": str(dtype),
-           "split_k": lw.split_k}
+           "split_k": lw.split_k, "backend": lw.backend}
+    if lw.backend == "simd":
+        from mlx2.runtime.lane import simd
+        rec["simd_path"] = simd.path(bits, gs, n, k, lw.scales_dtype)
+        rec["simd_twin_same"] = simd.check(lw.weight, lw.scales, lw.biases, gs, bits)
     alone = mx.concatenate([lane.lane_matmul(x[i:i + 1], lw) for i in range(max(ROWS))], axis=0)
     mx.eval(alone)
     bad = []
     for r in ROWS:
-        together = lane.lane_matmul(x[:r], lw)
+        fresh = mx.array(np.array(x[:r].astype(mx.float32))).astype(dtype)   # exactly r rows
+        mx.eval(fresh)
+        together = lane.lane_matmul(fresh, lw)
         if not bool(mx.array_equal(together, alone[:r]).item()):
             bad.append(r)
     rec["invariant_fail_rows"] = bad
@@ -83,7 +97,7 @@ def case(bits, gs, k, n, dtype, key):
                accurate=lane_err <= 2 * stock_err + ulp)
     rec["ms"] = {f"{kind}_{r}": timed(
         (lambda r=r: lane.lane_matmul(x[:r], lw)) if kind == "lane" else (lambda r=r: stock(x[:r])))
-        for kind in ("lane", "stock") for r in (1, 8, 16)}
+        for kind in ("lane", "stock") for r in (1, 4, 8, 16)}
     rec["passed"] = not bad and rec["accurate"]
     return rec
 
@@ -95,9 +109,14 @@ def main():
     p.add_argument("--bits", default="2,3,4,5,6,8,16")
     p.add_argument("--group-sizes", default="32,64,128")
     p.add_argument("--dtypes", default="bfloat16")
+    p.add_argument("--backend", choices=("auto", "mpp", "simd"), default="auto")
     args = p.parse_args()
+    if args.backend != "auto":
+        lane.force_backend(args.backend)
     if not lane.available():
-        raise SystemExit("lane matmul needs an M5 GPU as the default device")
+        raise SystemExit(f"no lane backend for {args.backend} on this device")
+    if lane.backend() == "simd" and "16" in args.bits.split(","):
+        args.bits = ",".join(b for b in args.bits.split(",") if b != "16")   # simd: quantized only
     key = mx.random.key(0)
     records = []
     for dname in args.dtypes.split(","):
@@ -117,8 +136,11 @@ def main():
                         "lane_max_err", "stock_max_err", "ms", "error")}), flush=True)
     summary = {"cases": len(records), "passed": sum(r["passed"] for r in records)}
     args.output.parent.mkdir(parents=True, exist_ok=True)
+    info = mx.device_info() if hasattr(mx, "device_info") else mx.metal.device_info()
     args.output.write_text(json.dumps({"schema": "mlx2.lane-matmul-gate.v1",
-                                       "mlx": mx.__version__, "summary": summary,
+                                       "mlx": mx.__version__, "backend": lane.backend(),
+                                       "device": {k: str(info.get(k)) for k in ("device_name", "architecture")},
+                                       "summary": summary,
                                        "cases": records}, indent=1) + "\n")
     print(json.dumps(summary), flush=True)
     if summary["passed"] != summary["cases"]:

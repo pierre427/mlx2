@@ -39,10 +39,13 @@ repository's NOTICE file; provenance in provenance/lane-matmul.json).
 from __future__ import annotations
 
 import hashlib
+import re
 from dataclasses import dataclass
 from typing import Any
 
 import mlx.core as mx
+
+from . import simd
 
 QUANT_BITS = (2, 3, 4, 5, 6, 8)
 UNQUANTIZED_BITS = 16
@@ -240,8 +243,16 @@ class LaneWeights:
     k: int
     split_k: int
     weight: Any                 # MLX packed uint32 (quantized) or bf16/fp16 (N, K)
-    scale_bias: Any = None      # (K/GS, N, 2) in the scales' dtype; None when unquantized
+    scale_bias: Any = None      # (K/GS, N, 2) in the scales' dtype; None when unquantized or simd
     bias: Any = None            # optional additive bias (N,)
+    backend: str = "mpp"        # "mpp" (M5 tensor units) or "simd" (M1-M4, see simd.py)
+    scales: Any = None          # simd only: MLX's own (N, K/GS) scales and biases, shared
+    biases: Any = None
+
+    @property
+    def scales_dtype(self):
+        source = self.scale_bias if self.scale_bias is not None else self.scales
+        return None if source is None else source.dtype
 
     @property
     def format(self) -> str:
@@ -289,10 +300,16 @@ def check_geometry(*, bits: int, group_size: int, mode: str, n: int, k: int,
         raise LaneUnsupported("N must be a positive multiple of 4")
 
 
-def prepare(module) -> LaneWeights:
-    """Prepare an ``nn.QuantizedLinear`` or ``nn.Linear`` for the lane matmul."""
+def prepare(module, backend_name: str | None = None) -> LaneWeights:
+    """Prepare an ``nn.QuantizedLinear`` or ``nn.Linear`` for the lane matmul.
+
+    ``backend_name`` defaults to this device's ``backend()``.  The simd
+    backend reads MLX's scales and biases in place (no second copy) and does
+    not cover unquantized weights.
+    """
     from mlx import nn
 
+    backend_name = backend_name or backend() or "mpp"
     if isinstance(module, nn.QuantizedLinear):
         weight, scales, biases = module["weight"], module["scales"], module.get("biases")
         bits, group_size = int(module.bits), int(module.group_size)
@@ -301,6 +318,17 @@ def prepare(module) -> LaneWeights:
             raise LaneUnsupported("affine lane matmul needs quantization biases")
         n = int(weight.shape[0])
         k = int(weight.shape[1]) * 32 // bits
+        if backend_name == "simd":
+            try:
+                simd.check_geometry(bits=bits, group_size=group_size, mode=mode, n=n, k=k,
+                                    weight_dtype=weight.dtype, scales_dtype=scales.dtype,
+                                    biases_dtype=biases.dtype, weight_ndim=weight.ndim)
+            except simd.SimdUnsupported as exc:
+                raise LaneUnsupported(str(exc)) from None
+            if tuple(scales.shape) != (n, k // group_size) or biases.shape != scales.shape:
+                raise LaneUnsupported("scale/bias geometry does not match the packed weight")
+            return LaneWeights(bits, group_size, n, k, simd.splits(n, k), weight, None,
+                               module.get("bias"), "simd", scales, biases)
         check_geometry(bits=bits, group_size=group_size, mode=mode, n=n, k=k,
                        weight_dtype=weight.dtype, scales_dtype=scales.dtype)
         if tuple(scales.shape) != (n, k // group_size) or biases.shape != scales.shape:
@@ -309,6 +337,8 @@ def prepare(module) -> LaneWeights:
         return LaneWeights(bits, group_size, n, k, split_k(n, k, group_size, bits),
                            weight, pairs, module.get("bias"))
     if isinstance(module, nn.Linear):
+        if backend_name == "simd":
+            raise LaneUnsupported("unquantized weights need the M5 tensor units")
         weight = module["weight"]
         if weight.ndim != 2:
             raise LaneUnsupported("linear weight must be rank 2")
@@ -394,6 +424,13 @@ def lane_matmul(x, lw: LaneWeights):
     m = int(x2.shape[0])
     if not 1 <= m <= MAX_ROWS:
         raise LaneUnsupported(f"lane matmul takes 1-{MAX_ROWS} rows, got {m}")
+    if lw.backend == "simd":
+        try:
+            y = simd.qmm(x2, lw.weight, lw.scales, lw.biases, lw.group_size, lw.bits)
+        except simd.SimdUnsupported as exc:
+            raise LaneUnsupported(str(exc)) from None
+        y = y.reshape(*lead, lw.n)
+        return y + lw.bias if lw.bias is not None else y
     mp = 16 * ((m + 15) // 16)
     block = min(mp, ROW_BLOCK)
     mdims = _mdims(m, mp)
@@ -419,16 +456,45 @@ def lane_matmul(x, lw: LaneWeights):
 
 
 _M5: list[bool] = []
+BACKENDS = ("mpp", "simd")
+_FORCED: list[str | None] = [None]
 
 
-def available() -> bool:
-    """True when the default device can run the M5 tensor-unit kernels."""
-    if mx.default_device() != mx.gpu:
-        return False
+def _tensor_units() -> bool:
     if not _M5:
         try:
             info = mx.device_info() if hasattr(mx, "device_info") else mx.metal.device_info()
-            _M5.append(mx.metal.is_available() and "M5" in str(info.get("device_name", "")))
+            arch = re.match(r"applegpu_g(\d+)", str(info.get("architecture", "")))
+            _M5.append(mx.metal.is_available() and (
+                "M5" in str(info.get("device_name", "")) or (arch is not None and int(arch.group(1)) >= 17)))
         except Exception:  # noqa: BLE001 - absent Metal means unavailable
             _M5.append(False)
     return _M5[0]
+
+
+def backend() -> str | None:
+    """The lane backend for the default device.
+
+    "mpp" on GPUs with Metal 4 tensor units (M5), "simd" on every other Apple
+    GPU (M1-M4, see ``simd``), None off the GPU.  The two are different
+    numerical laws; a route binds the one it installed.
+    """
+    if mx.default_device() != mx.gpu:
+        return None
+    if _FORCED[0] is not None:
+        return _FORCED[0] if (_FORCED[0] == "simd" and simd.available()) or _tensor_units() else None
+    if _tensor_units():
+        return "mpp"
+    return "simd" if simd.available() else None
+
+
+def force_backend(name: str | None) -> None:
+    """Pin the backend (gates and paired A/B; "simd" also runs on an M5), None for auto."""
+    if name is not None and name not in BACKENDS:
+        raise ValueError(f"lane backend must be one of {BACKENDS}")
+    _FORCED[0] = name
+
+
+def available() -> bool:
+    """True when the default device can run a lane backend."""
+    return backend() is not None

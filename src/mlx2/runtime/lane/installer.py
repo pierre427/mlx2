@@ -26,18 +26,23 @@ from dataclasses import dataclass, field
 import mlx.core as mx
 from mlx import nn
 
+from . import simd
 from .matmul import (
     MAX_ROWS,
     UNQUANTIZED_BITS,
     LaneUnsupported,
     LaneWeights,
     available,
+    backend,
     lane_matmul,
     prepare,
     split_k,
 )
 
 LAW_ID = "lane-matmul-v1"
+# One numerical law per backend: the M5 tensor-unit kernels and the M1-M4
+# simdgroup kernels compute different bits for the same row.
+LAW_IDS = {"mpp": LAW_ID, "simd": "lane-simd-v1"}
 
 
 # Lane state lives on each module (outside its parameter tree), never in
@@ -138,9 +143,10 @@ def _rows(x) -> int:
     return rows
 
 
-def law_id(min_rows: int) -> str:
-    """Numerical-law identity for a given crossover (1 = exact)."""
-    return LAW_ID if min_rows == 1 else f"{LAW_ID}+stock-below-{min_rows}"
+def law_id(min_rows: int, backend_name: str | None = None) -> str:
+    """Numerical-law identity for a given crossover (1 = exact) and backend."""
+    base = LAW_IDS[backend_name or backend() or "mpp"]
+    return base if min_rows == 1 else f"{base}+stock-below-{min_rows}"
 
 
 class _LaneMixin:
@@ -212,8 +218,7 @@ _RESTORE = {new: old for old, new in _SWAP.items()}
 
 
 def _format_key(lw: LaneWeights) -> tuple:
-    return (lw.bits, lw.group_size, lw.k, lw.weight.dtype,
-            None if lw.scale_bias is None else lw.scale_bias.dtype)
+    return (lw.backend, lw.bits, lw.group_size, lw.k, lw.weight.dtype, lw.scales_dtype)
 
 
 def _stack(members) -> _Group:
@@ -232,13 +237,18 @@ def _stack(members) -> _Group:
         start = stop
     mx.eval([m[name] for m in members for name in names])
     n = start
-    pairs = (mx.contiguous(mx.stack([stacked["scales"].T, stacked["biases"].T], axis=-1))
-             if quantized else None)
-    lw = LaneWeights(first.bits, first.group_size, n, first.k,
-                     split_k(n, first.k, first.group_size, first.bits),
-                     stacked["weight"], pairs, None)
+    if first.backend == "simd":
+        # The simd kernels read MLX's scale/bias layout: the stack is enough.
+        lw = LaneWeights(first.bits, first.group_size, n, first.k, simd.splits(n, first.k),
+                         stacked["weight"], None, None, "simd", stacked["scales"], stacked["biases"])
+    else:
+        pairs = (mx.contiguous(mx.stack([stacked["scales"].T, stacked["biases"].T], axis=-1))
+                 if quantized else None)
+        lw = LaneWeights(first.bits, first.group_size, n, first.k,
+                         split_k(n, first.k, first.group_size, first.bits),
+                         stacked["weight"], pairs, None)
     for m in members:
-        object.__setattr__(m, "_lane_prepared", prepare(m))  # individual views
+        object.__setattr__(m, "_lane_prepared", prepare(m, first.backend))  # individual views
     return _Group(lw)
 
 
@@ -360,6 +370,12 @@ def install(model, *, min_rows: int = 4, max_rows: int = DEFAULT_MAX_ROWS, unqua
             return min_rows
         value = min_rows_by_format.get(format_class(module))
         return None if value is None or value > max_rows else int(value)
+    current = backend() or "mpp"
+    if any(lw is not None and lw.backend != current
+           for lw in (_prepared(m) for _n, m in model.named_modules())):
+        # Installed under the other backend: its prepared weights and groups
+        # would keep running that law under this receipt.  Start over.
+        uninstall(model)
     covered: Counter = Counter()
     refused: Counter = Counter()
     for name, module in model.named_modules():
@@ -411,11 +427,13 @@ def install(model, *, min_rows: int = 4, max_rows: int = DEFAULT_MAX_ROWS, unqua
         # receipt said ungrouped.
         formed = Counter()
         _dissolve(model)
+    twins = _check_simd_twins(model)
+    base = LAW_IDS[current]
     if min_rows_by_format is None:
         law = law_id(min_rows)
     else:
         spec = ",".join(f"{k}:{v}" for k, v in sorted(min_rows_by_format.items()))
-        law = f"{LAW_ID}+stock-below[{spec}]"
+        law = f"{base}+stock-below[{spec}]"
     if max_rows != DEFAULT_MAX_ROWS:
         # Calls up to max_rows take the lane arithmetic: a wider window is a
         # different law (33-64-row verify or prefill tails change).
@@ -425,10 +443,18 @@ def install(model, *, min_rows: int = 4, max_rows: int = DEFAULT_MAX_ROWS, unqua
     grouped = any(_group(module) is not None for _name, module in model.named_modules())
     if live:
         law += _declared_digest([spec for spec in declared if spec.name in live])
+    if twins.get("affine"):
+        # A 5/6/8-bit shape whose twins differ here runs affine_rows: other bits.
+        shapes = ",".join(twins["affine"])
+        law += f"+simd-affine[{hashlib.sha256(shapes.encode()).hexdigest()[:12]}]"
     receipt = {"law_id": law + ("+grouped" if grouped else ""),
                "min_rows": min_rows if min_rows_by_format is None else dict(min_rows_by_format),
                "max_rows": max_rows, "covered": dict(covered),
-               "groups": dict(formed), "refused": dict(refused), "available": available()}
+               "groups": dict(formed), "refused": dict(refused), "available": available(),
+               "backend": backend()}
+    if twins:
+        # simd only: per-shape scalar/matrix twin checks on this GPU.
+        receipt["simd_twins"] = twins
     if declared:
         # Only present when declared groups were passed, so receipts of
         # every other install are byte-identical to before.
@@ -439,6 +465,34 @@ def install(model, *, min_rows: int = 4, max_rows: int = DEFAULT_MAX_ROWS, unqua
                         "refused": declared_refused.get(spec.name, {})}
             for spec in declared}
     return receipt
+
+
+def _check_simd_twins(model) -> dict:
+    """Run the simd twin check once per weight shape actually launched.
+
+    A shape whose scalar twin differs from the matrix kernel on this GPU is
+    routed so that every row count keeps one arithmetic (see ``simd.check``).
+    Both a group's stack and its members are checked: ``set_enabled(grouping=
+    False)`` launches members alone.
+    """
+    seen: dict = {}
+    for _name, module in model.named_modules():
+        group = _group(module)
+        for lw in (_prepared(module), group.lw if group is not None else None):
+            if lw is None or lw.backend != "simd":
+                continue
+            key = (lw.n, lw.k, lw.group_size, lw.bits, str(lw.scales_dtype))
+            if key not in seen:
+                simd.check(lw.weight, lw.scales, lw.biases, lw.group_size, lw.bits)
+                # Read the route back: a shape rerouted by an earlier install
+                # stays rerouted, and must be reported (and in the law) again.
+                seen[key] = simd.rerouted(lw.n, lw.k, lw.group_size, lw.bits)
+    if not seen:
+        return {}
+    by_kind = {kind: sorted(f"{n}x{k}q{bits}g{gs}" for (n, k, gs, bits, _d), how in seen.items()
+                            if how == kind) for kind in ("affine", "mma")}
+    return {"shapes": len(seen), "rerouted": sum(1 for how in seen.values() if how),
+            **{kind: shapes for kind, shapes in by_kind.items() if shapes}}
 
 
 def uninstall(model) -> int:

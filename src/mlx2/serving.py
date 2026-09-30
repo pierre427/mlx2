@@ -811,6 +811,8 @@ def lane_matmul_status(engine) -> dict:
         "mode": policy.get("mode", "off"),
         "installed": bool(receipt.get("covered")),
         "law_id": receipt.get("law_id"),
+        "backend": receipt.get("backend"),
+        "simd_twins": receipt.get("simd_twins"),
         "covered": receipt.get("covered", {}),
         "refused": receipt.get("refused", {}),
         "groups": receipt.get("groups", {}),
