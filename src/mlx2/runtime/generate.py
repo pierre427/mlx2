@@ -59,6 +59,22 @@ def _invalid_output_reason(token: int, logprobs: mx.array) -> Optional[str]:
     return None
 
 
+def prefill_clear_cache(decode_active: bool) -> bool:
+    """Whether a prefill chunk ends with ``mx.clear_cache()``.
+
+    Inherited from single-stream ``mlx_lm.generate``; in the batched engine a
+    chunk runs beside decoding lanes, and the clear returns their activation
+    buffers to Metal so the next step re-allocates.  MLX2_PREFILL_CLEAR_CACHE:
+    ``always`` (default), ``idle`` (only when no lane is decoding), ``never``.
+    """
+    mode = os.environ.get("MLX2_PREFILL_CLEAR_CACHE", "always").strip().lower()
+    if mode == "never":
+        return False
+    if mode == "idle":
+        return not decode_active
+    return True
+
+
 # Experiment aid: when a list, ``GenerationBatch._step`` appends
 # ``(mode, check_ms, build_ms, wait_ms, forward_py_ms)`` per step so an A/B can see whether
 # graph build overlaps device execution.  ``None`` (default) costs one test.
@@ -422,6 +438,9 @@ class PromptProcessingBatch:
         self._restart_prompt_rollback()
         self.tokens = tokens if tokens is not None else [[] for _ in uids]
         self.prefill_step_size = prefill_step_size
+        # Set by the scheduler before each ``prompt`` call: whether decode
+        # lanes run beside this prefill (MLX2_PREFILL_CLEAR_CACHE=idle).
+        self.decode_active = False
         self.samplers = samplers if samplers is not None else []
         self.fallback_sampler = fallback_sampler or (lambda x: mx.argmax(x, axis=-1))
         self.logits_processors = (
@@ -651,14 +670,16 @@ class PromptProcessingBatch:
                 self.prompt_cache,
                 [b + min(processed, l) for (b, l) in zip(bases, lengths)],
             )
-            mx.clear_cache()
+            if prefill_clear_cache(self.decode_active):
+                mx.clear_cache()
             tokens = tokens[:, n_to_process:]
         if max_padding > 0:
             for c in self.prompt_cache:
                 c.finalize()
             compact_prompt_cache_windows(self.prompt_cache)
             mx.eval([c.state for c in self.prompt_cache])
-            mx.clear_cache()
+            if prefill_clear_cache(self.decode_active):
+                mx.clear_cache()
         record_state_checkpoints(self.prompt_cache, totals, force=True)
 
     def generate(self, tokens: List[List[int]]):
@@ -5983,6 +6004,7 @@ class BatchGenerator:
             elif self.decode_priority_cadence > 1:
                 self.scheduler_stats["decode_priority_release_rounds"] += 1
         tic = time.perf_counter()
+        self._prompt_batch.decode_active = self._has_active_decode()
         self._prompt_batch.prompt(prompts)
         self._capture_plain_interior_checkpoints()
         for index, sequence in enumerate(self._currently_processing):
