@@ -18,6 +18,7 @@ from .qwen4_fused_gdn import (
     fused_gdn_runtime_supported,
     probe_qwen4_fused_gdn_decode,
     qwen4_fused_gdn_decode,
+    served_silu_refusal,
 )
 from .pipeline import PipelineMixin
 from .qwen38_27b import (
@@ -95,6 +96,9 @@ class GatedDeltaNet(ReferenceGatedDeltaNet):
             return self._fallback(admission.reason)
         if not fused_gdn_runtime_supported():
             return self._fallback("Metal runtime unavailable")
+        refusal = served_silu_refusal()
+        if refusal is not None:
+            return self._fallback(refusal)
         try:
             threadgroup_y = probe_qwen4_fused_gdn_decode(qkv.dtype)
             if threadgroup_y is None:

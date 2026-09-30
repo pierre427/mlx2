@@ -48,6 +48,7 @@ from .qwen4_fused_gdn import (
     qwen4_fused_gdn_batch_decode,
     qwen4_fused_gdn_decode,
     qwen4_fused_gdn_decode_outproj,
+    served_silu_refusal,
 )
 from .qwen4_fused_gdn_verify import (
     admit_qwen4_fused_gdn_verify,
@@ -1223,6 +1224,9 @@ class GatedDeltaNet(Qwen35GatedDeltaNet):
             return fallback(admission.reason)
         if not fused_gdn_runtime_supported():
             return fallback("Metal runtime unavailable")
+        refusal = served_silu_refusal()
+        if refusal is not None:
+            return fallback(refusal)
         try:
             probe = (
                 probe_qwen4_fused_gdn_catchup
@@ -1425,6 +1429,9 @@ class GatedDeltaNet(Qwen35GatedDeltaNet):
             return self._fused_gdn_prefill_fallback(admission.reason)
         if not _gdn_prefill.runtime_supported():
             return self._fused_gdn_prefill_fallback("Metal runtime unavailable")
+        refusal = served_silu_refusal()
+        if refusal is not None:
+            return self._fused_gdn_prefill_fallback(refusal)
         steps = int(qkv.shape[1])
         norm_eager = False
         try:
@@ -1507,6 +1514,9 @@ class GatedDeltaNet(Qwen35GatedDeltaNet):
             return self._fused_gdn_fallback(admission.reason)
         if not fused_gdn_runtime_supported():
             return self._fused_gdn_fallback("Metal runtime unavailable")
+        refusal = served_silu_refusal()
+        if refusal is not None:
+            return self._fused_gdn_fallback(refusal)
         try:
             threadgroup_y = probe_qwen4_fused_gdn_decode(qkv.dtype)
             if threadgroup_y is None:

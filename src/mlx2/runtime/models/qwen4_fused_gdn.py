@@ -677,6 +677,114 @@ def fused_gdn_runtime_supported() -> bool:
     )
 
 
+# The kernels reproduce MLX's served SiLU spans bit for bit: the conv SiLU
+# (compiled ``nn.silu`` in bf16) and the Qwen3.5 float32 norm gate use the
+# ``metal::exp`` sigmoid (``mlx_sigmoid_fast``), because runtime-compiled MLX
+# spans lowered ``Sigmoid`` to it.  MLX #4461 (v0.32.3) spells that sigmoid
+# ``metal::precise::exp``, so a build with it serves a different SiLU and the
+# fused paths must decline rather than fork from the reference (omlx#4122).
+KERNEL_SILU_EXP = "metal::exp"
+_SILU_EXP_CANDIDATES = ("metal::exp", "metal::precise::exp")
+_SILU_PROBE_SOURCE = """
+  uint i = thread_position_in_grid.x;
+  T x = inp[i];
+  float xf = float(x);
+  fast_t[i] = x * mlx_sigmoid_fast(x);
+  precise_t[i] = x * mlx_sigmoid_precise(x);
+  fast_f[i] = xf * mlx_sigmoid_fast<float>(xf);
+  precise_f[i] = xf * mlx_sigmoid_precise<float>(xf);
+"""
+
+
+def all_16bit_encodings(dtype) -> mx.array:
+    """Every value of a 16-bit float type, in bit-pattern order."""
+    if dtype not in (mx.bfloat16, mx.float16):
+        raise ValueError(f"not a 16-bit float type: {dtype}")
+    return mx.arange(1 << 16, dtype=mx.uint32).astype(mx.uint16).view(dtype)
+
+
+def same_bits(a: mx.array, b: mx.array) -> bool:
+    """Bitwise equality in which any NaN matches any NaN."""
+    if a.shape != b.shape or a.dtype != b.dtype or a.dtype.size not in (2, 4):
+        return False
+    width = mx.uint16 if a.dtype.size == 2 else mx.uint32
+    equal = (a.view(width) == b.view(width)) | (mx.isnan(a) & mx.isnan(b))
+    return bool(mx.all(equal).item())
+
+
+def select_silu_exp(matches) -> Optional[str]:
+    """The first ``exp`` spelling that reproduced every served SiLU value."""
+    return next((name for name in _SILU_EXP_CANDIDATES if matches.get(name)), None)
+
+
+def _probe_served_silu() -> dict:
+    """Compare both sigmoid forms of the kernel header with MLX's served SiLU
+    over every bf16 encoding, as the bf16 conv span and as the float32 gate."""
+    import mlx.nn as nn
+
+    x = all_16bit_encodings(mx.bfloat16)
+    kernel = mx.fast.metal_kernel(
+        name="qwen4_fused_gdn_served_silu_probe",
+        input_names=["inp"],
+        output_names=["fast_t", "precise_t", "fast_f", "precise_f"],
+        header=_HEADER,
+        source=_SILU_PROBE_SOURCE,
+        ensure_row_contiguous=True,
+    )
+    fast_t, precise_t, fast_f, precise_f = kernel(
+        inputs=[x],
+        template=[("T", mx.bfloat16)],
+        grid=(x.size, 1, 1),
+        threadgroup=(256, 1, 1),
+        output_shapes=[x.shape] * 4,
+        output_dtypes=[mx.bfloat16, mx.bfloat16, mx.float32, mx.float32],
+    )
+    served_t = nn.silu(x)
+    served_f = nn.silu(x.astype(mx.float32))
+    return {
+        "metal::exp": same_bits(fast_t, served_t) and same_bits(fast_f, served_f),
+        "metal::precise::exp": (
+            same_bits(precise_t, served_t) and same_bits(precise_f, served_f)
+        ),
+    }
+
+
+_SERVED_SILU_EXP: Optional[str] = None
+_SERVED_SILU_COMPLETE = False
+_SERVED_SILU_LOCK = Lock()
+
+
+def served_silu_exp() -> Optional[str]:
+    """Probe once per process; ``None`` when no form matches or it fails."""
+    global _SERVED_SILU_COMPLETE, _SERVED_SILU_EXP
+    if _SERVED_SILU_COMPLETE:
+        return _SERVED_SILU_EXP
+    with _SERVED_SILU_LOCK:
+        if not _SERVED_SILU_COMPLETE:
+            try:
+                _SERVED_SILU_EXP = select_silu_exp(_probe_served_silu())
+            except Exception as exc:
+                logger.info("Served SiLU probe failed: %s", exc)
+                _SERVED_SILU_EXP = None
+            _SERVED_SILU_COMPLETE = True
+        return _SERVED_SILU_EXP
+
+
+def served_silu_refusal() -> Optional[str]:
+    """Why the fused GDN kernels may not run under this MLX build, or None.
+
+    Callers check ``fused_gdn_runtime_supported()`` first: the probe needs
+    Metal.  The kernels are never rewritten to the other spelling here; that
+    arithmetic would need its own GPU qualification.
+    """
+    spelling = served_silu_exp()
+    if spelling == KERNEL_SILU_EXP:
+        return None
+    if spelling is None:
+        return "served SiLU matches no kernel form"
+    return f"served SiLU uses {spelling}"
+
+
 _PROBED_THREADGROUP_Y: Optional[int] = None
 _PROBE_COMPLETE = False
 _PROBE_LOCK = Lock()
