@@ -855,9 +855,75 @@ def test_adapter_hidden_budget_guards_a_thinking_off_request(monkeypatch):
     guard = hidden["receipt"]["request_controls"]["thinking_guard"]
     assert guard is not None and guard["budget"] == 1 and guard["forced_close"] is True
     assert tuple(hidden["tokens"][1:4]) == marker
+    # History mode defers to a visible channel; hidden reasoning is still
+    # bounded, by the state-aware guard (codex review).
+    engine = make_engine(model, vocab, mtp=False, close_id=marker, adapter_mixin=Hidden)
+    try:
+        history = run(engine, {**request, "thinking_budget_mode": "history"})
+    finally:
+        engine.close()
+    assert history["tokens"] == hidden["tokens"]
+    assert history["receipt"]["request_controls"]["thinking_guard"]["budget"] == 1
     engine = make_engine(model, vocab, mtp=False, close_id=marker)
     try:
         plain = run(engine, request)
     finally:
         engine.close()
     assert plain["receipt"]["request_controls"]["thinking_guard"] is None
+
+
+NUDGE = (12, 13, 14)
+
+
+def test_soft_landing_nudge_is_written_at_the_soft_budget_then_the_model_may_close():
+    guard = ThinkingGuard(2, SWITCH, budget=20, soft_ratio=0.5, nudge_ids=NUDGE)
+    ids = [8, 9, 10, 11, 15] * 2  # 10 = the soft budget
+    for expected in NUDGE:
+        assert _masked_to(_call(guard, ids)) == expected
+        ids.append(expected)
+    row = _call(guard, ids)
+    assert _masked_to(row) is None and row[SWITCH[0]] > 0  # back to the ramp
+    assert guard.receipt()["nudged"] is True and guard.receipt()["forced_close"] is False
+    # The model closes on its own after the nudge: no forced close.
+    closed = ids + list(SWITCH) + [9]
+    _call(guard, closed)
+    assert guard.receipt()["released_at"] == 13 and guard.receipt()["nudged"] is True
+    settled = ThinkingGuard(2, SWITCH, budget=20, soft_ratio=0.5, nudge_ids=NUDGE)
+    settled.settle(closed)
+    assert settled.receipt()["nudged"] is True and settled.receipt()["forced_close"] is False
+
+
+def test_nudge_is_skipped_when_it_and_the_marker_do_not_fit_the_budget():
+    guard = ThinkingGuard(2, SWITCH, budget=12, soft_ratio=0.5, nudge_ids=NUDGE)  # 6+3+4 > 12
+    ids = [8, 9, 10, 11, 15, 8]
+    assert _masked_to(_call(guard, ids)) is None
+    assert guard.receipt()["nudged"] is False
+
+
+def test_nudge_after_a_natural_close_or_on_a_stale_branch_is_not_written():
+    guard = ThinkingGuard(2, SWITCH, budget=20, soft_ratio=0.5, nudge_ids=NUDGE)
+    closed = [8, 9] + list(SWITCH) + [10, 11, 15, 8]
+    assert not _call(guard, closed).any()
+    fresh = ThinkingGuard(2, SWITCH, budget=20, soft_ratio=0.5, nudge_ids=NUDGE)
+    stale = [8, 9, 10, 11, 15, 8, 9, 10, 11, 15] + [NUDGE[0], 9]  # diverged mid-nudge
+    assert _masked_to(_call(fresh, stale)) is None
+
+
+def test_nudge_guard_matches_a_fresh_guard_under_random_rollbacks():
+    rng = np.random.default_rng(2)
+
+    def make():
+        return ThinkingGuard(2, (3, 4, 5), budget=60, soft_ratio=0.5, tau=2.5, ngram=4,
+                             rewrite_window=32, nudge_ids=(6, 7, 6, 8))
+    live, ids = make(), []
+    for _ in range(600):
+        if ids and rng.random() < 0.15:
+            del ids[len(ids) - int(rng.integers(1, min(len(ids), 10) + 1)):]
+        row = _call(live, ids)
+        fresh = make()
+        np.testing.assert_array_equal(row, _call(fresh, ids))
+        assert live.receipt()["nudged"] == fresh.receipt()["nudged"]
+        if np.isinf(row).any() and rng.random() < 0.5:
+            ids.append(int(np.flatnonzero(np.isfinite(row))[0]))
+        else:
+            ids += [int(token) for token in rng.integers(3, 12, size=int(rng.integers(1, 3)))]

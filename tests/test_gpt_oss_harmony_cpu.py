@@ -73,6 +73,21 @@ def test_output_without_harmony_framing_is_kept_as_the_answer():
     assert out == {"content": "Plain answer without a header."}
 
 
+@pytest.mark.parametrize("chunk", [1, 1000])
+def test_a_message_marker_without_a_channel_header_is_answer_text(chunk):
+    # Codex review: the text before <|message|> is not a header here.
+    out = run(HarmonyOutputParser(), "Plain <|message|> answer", chunk=chunk)
+    assert out == {"content": "Plain <|message|> answer"}
+
+
+def test_headers_with_recipient_and_constraint_annotations_parse():
+    text = ("<|channel|>commentary to=functions.lookup <|constrain|>json<|message|>{}<|end|>"
+            "<|start|>assistant<|channel|>final<|message|>done")
+    parser = HarmonyOutputParser()
+    assert run(parser, text, chunk=3) == {"reasoning_content": "{}", "content": "done"}
+    assert parser.headers == ["commentary", "final"]
+
+
 def test_length_finish_inside_analysis_has_no_content():
     out = run(HarmonyOutputParser(), "<|channel|>analysis<|message|>still thinking", finish="length")
     assert out == {"reasoning_content": "still thinking"}
@@ -176,7 +191,7 @@ class _HarmonyTokenizer(_Tokenizer):
 
     def encode(self, text, add_special_tokens=False):
         import re
-        pieces = re.findall(r"<\|\w+\|>|assistant|final|.", text)
+        pieces = re.findall(r"<\|\w+\|>|assistant|final|.", text, re.DOTALL)
         return [self.VOCAB.get(piece, ord(piece[0])) for piece in pieces]
 
     def decode(self, ids):
@@ -195,11 +210,13 @@ def test_harmony_final_switch_is_the_declared_close_marker():
 
 
 @pytest.mark.parametrize("request_fields,budget", [
-    ({"enable_thinking": False, "max_tokens": 64}, 32),
-    ({"enable_thinking": False, "max_tokens": 20}, 16),
+    ({"enable_thinking": False, "max_tokens": 64}, 29),
+    # The six-token switch and an answer still fit (codex review).
+    ({"enable_thinking": False, "max_tokens": 20}, 7),
+    ({"enable_thinking": False, "max_tokens": 8}, 1),
     ({"enable_thinking": False, "max_tokens": 4096}, 512),
     ({"enable_thinking": False}, 512),
-    ({"reasoning_effort": "none", "max_tokens": 100}, 50),
+    ({"reasoning_effort": "none", "max_tokens": 100}, 47),
     ({}, 0),                       # visible reasoning: the operator's budget applies
     ({"enable_thinking": True}, 0),
 ])
@@ -211,3 +228,13 @@ def test_stock_gpt_oss_has_no_hidden_reasoning_to_bound():
     value = adapter(GptOssAdapter)
     assert value.hidden_thinking_budget({**CHAT, "enable_thinking": False, "max_tokens": 64}) == 0
     assert value.hidden_thinking_budget({"prompt": "x"}) == 0
+
+
+def test_gpt_oss_declares_the_juice_soft_landing_nudge():
+    from mlx2.adapters.gpt_oss import _NUDGE_TEXT
+
+    value = object.__new__(GptOssPuzzleAdapter)
+    value.tokenizer = _HarmonyTokenizer()
+    ids = value.thinking_nudge_token_ids()
+    assert ids and value.tokenizer.decode(list(ids)) == _NUDGE_TEXT
+    assert "final answer" in _NUDGE_TEXT

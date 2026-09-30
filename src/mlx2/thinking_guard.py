@@ -19,6 +19,12 @@ boosts the next marker token after whatever prefix of it the output already
 ends with, and a forced close emits the rest of the marker token by token, as
 ``ThinkingBudgetProcessor`` does in history mode.
 
+**Soft landing** (JUICE, the lab's Puzzle server): an adapter may declare a
+short plain-text wrap-up nudge.  At the soft budget the guard writes it into
+the reasoning, token by token, so the model concludes on its own before the
+hard close.  Like the marker, which nudge token comes next is read from the
+ids, and a budget too small to hold nudge and marker skips it.
+
 The guard is a pure function of the generated ids, so speculative verify rows
 and rollbacks need no bookkeeping from the caller.  Internally it is
 incremental: each step reads only the tail of the token context and a rollback
@@ -39,12 +45,13 @@ class ThinkingGuard:
 
     def __init__(self, prompt_length, close_ids, *, budget, soft_ratio=0.8, ramp_nats=2.0,
                  tau=2.5, ngram=6, direction=None, alpha=0.0, hammer=0.0,
-                 rewrite_window=256):
+                 rewrite_window=256, nudge_ids=()):
         self.prompt_length = int(prompt_length)
         self.rewrite_window = max(1, int(rewrite_window))
         self.close_ids = tuple(int(token) for token in close_ids)
         if not self.close_ids:
             raise ValueError("the thinking guard needs a close marker")
+        self.nudge_ids = tuple(int(token) for token in nudge_ids)
         self.budget = None if budget is None else int(budget)
         self.soft = (
             None
@@ -206,6 +213,23 @@ class ThinkingGuard:
                 return width
         return 0
 
+    def _nudge_start(self):
+        """Where the soft-landing nudge goes, or None when it does not fit."""
+        if not self.nudge_ids or self.budget is None or self.soft is None:
+            return None
+        if self.soft + len(self.nudge_ids) + len(self.close_ids) > self.budget:
+            return None
+        return self.soft
+
+    def _nudge_target(self, length):
+        """The nudge token the step after ``length`` ids writes, or None."""
+        start = self._nudge_start()
+        if start is None or not start <= length < start + len(self.nudge_ids):
+            return None
+        if tuple(self._generated[start:length]) != self.nudge_ids[: length - start]:
+            return None  # a stale branch: the nudge is not being written here
+        return self.nudge_ids[length - start]
+
     def _observe(self, tokens):
         """Sync the guard state to ``tokens``; the state half of ``__call__``."""
         length = self._sync(tokens)
@@ -237,6 +261,10 @@ class ThinkingGuard:
         length = self._observe(tokens)
         if self._close_at is not None or self._tripped_at is None:
             return logits
+        nudge = self._nudge_target(length)
+        if nudge is not None and nudge < logits.shape[-1]:
+            keep = mx.arange(logits.shape[-1]) == nudge
+            return mx.where(keep, logits, mx.array(-float("inf"), dtype=logits.dtype))
         if self._forces(length):
             close = self.close_ids[self._marker_offset(length)]
             if close >= logits.shape[-1]:
@@ -358,6 +386,15 @@ class ThinkingGuard:
             for index in range(len(generated) - width + 1)
         )
 
+    def _nudged(self):
+        """Whether the committed ids hold the whole soft-landing nudge."""
+        start = self._nudge_start()
+        if start is None:
+            return False
+        end = start + len(self.nudge_ids)
+        return (tuple(self._generated[start:end]) == self.nudge_ids
+                and (self._close_at is None or self._close_at >= end))
+
     def receipt(self):
         return {
             "schema": "mlx2.thinking-guard.v1",
@@ -368,6 +405,7 @@ class ThinkingGuard:
             "tripped_at": self._tripped_at,
             "released_at": self.released_at,
             "forced_close": self.forced,
+            "nudged": self._nudged(),
             "steering": (
                 {"layer": self._direction["layer"], "alpha": self.alpha, "hammer": self.hammer,
                  "steered_steps": self.steered_steps, "source": self._direction.get("source")}

@@ -16,7 +16,13 @@ from ..output import StopSequenceMatcher, _safe_prefix
 _MESSAGE = "<|message|>"
 _START = "<|start|>"
 _TERMINATORS = ("<|end|>", "<|return|>", "<|call|>", _START)
-_CHANNEL = re.compile(r"<\|channel\|>\s*([A-Za-z_]+)")
+# ``[assistant]<|channel|>NAME`` plus optional `` to=...`` and
+# ``<|constrain|>...`` annotations.
+_HEADER = re.compile(
+    r"\s*(?:assistant\s*)?<\|channel\|>\s*([A-Za-z_]+)"
+    r"(?:\s*to=[\w.-]+)?(?:\s*<\|constrain\|>\s*\S+)?\s*",
+    re.DOTALL,
+)
 # A header is ``assistant<|channel|>final`` plus optional ``to=...`` and
 # ``<|constrain|>...`` annotations; anything much longer is not a header.
 _MAX_HEADER = 256
@@ -72,8 +78,12 @@ class HarmonyOutputParser:
                         continue
                     break
                 header = self.buffer[:end]
-                match = _CHANNEL.search(header)
-                self._body = match.group(1).lower() if match else "final"
+                match = _HEADER.fullmatch(header)
+                if match is None:
+                    # Not a harmony header: keep the text as the answer.
+                    self._state, self._body = "body", "final"
+                    continue
+                self._body = match.group(1).lower()
                 self.headers.append(self._body)
                 self.buffer = self.buffer[end + len(_MESSAGE):]
                 self._state = "body"

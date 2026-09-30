@@ -23,6 +23,8 @@ _COMMON = frozenset({
 # The template's ``Reasoning:`` levels for the server's reasoning_effort
 # values; "none" means thinking off (see ``thinking_enabled``).
 _FINAL_SWITCH = "<|end|><|start|>assistant<|channel|>final<|message|>"
+_NUDGE_TEXT = ("\n\nI've reasoned enough about this \u2014 let me stop here and give "
+               "the final answer.\n\n")
 _EFFORTS = {
     "none": "low", "minimal": "low", "low": "low", "medium": "medium",
     "high": "high", "xhigh": "high", "max": "high", "ultra": "high",
@@ -265,20 +267,34 @@ class _GptOssOrdinaryAdapter:
             return None
         return tuple(ids)
 
+    def thinking_nudge_token_ids(self):
+        """The JUICE soft-landing nudge the thinking guard writes at its soft budget.
+
+        The lab's Puzzle server injects this text once, at 80% of the budget,
+        so the model wraps up its analysis before the forced final switch
+        (mlx-uag puzzle_openai_server.py NUDGE_TEXT, commit 1c72610).
+        """
+        try:
+            return tuple(int(token) for token in self.tokenizer.encode(_NUDGE_TEXT, add_special_tokens=False))
+        except Exception:  # noqa: BLE001 - no nudge, not a load failure
+            return ()
+
     def hidden_thinking_budget(self, request: dict) -> int:
         """Reasoning-token bound for a thinking-off request, or 0 for none.
 
         A model that cannot skip analysis still reasons with thinking off
-        (hidden, ``Reasoning: low``).  Half of ``max_tokens`` (16 to 512) goes
-        to it, so a short-budget request still gets an answer: the guard
-        switches to the final channel when the bound is reached.
+        (hidden, ``Reasoning: low``).  Half of what ``max_tokens`` leaves after
+        the six-token final-channel switch goes to it (at most 512), so a
+        short-budget request still has room to answer: the guard switches to
+        the final channel when the bound is reached.
         """
         if self.direct_final or "messages" not in request or self.thinking_enabled(request):
             return 0
         limit = request.get("max_tokens")
         if not isinstance(limit, int) or limit <= 0:
             return 512
-        return max(16, min(512, limit // 2))
+        switch = len(self.thinking_close_token_ids() or ()) or 6
+        return max(1, min(512, (limit - switch) // 2))
 
     def _answers_directly(self, request: dict) -> bool:
         return self.direct_final and not self.thinking_enabled(request)

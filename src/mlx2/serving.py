@@ -6723,8 +6723,15 @@ class ServingEngine:
                             # (GPT-OSS Puzzle): bound the hidden reasoning so
                             # the answer keeps room within max_tokens.
                             think_budget = int(hidden_budget(job.request) or 0)
-                        thinking_budget_mode = job.request.get(
-                            "thinking_budget_mode", "state_aware"
+                            hidden_reasoning = bool(think_budget)
+                        else:
+                            hidden_reasoning = False
+                        # History mode defers to a visible reasoning channel;
+                        # hidden reasoning is bounded by the guard alone.
+                        thinking_budget_mode = (
+                            "state_aware"
+                            if hidden_reasoning
+                            else job.request.get("thinking_budget_mode", "state_aware")
                         )
                         close_ids = thinking_close_token_ids(adapter) if think_budget else None
                         if think_budget and close_ids is None:
@@ -6757,8 +6764,10 @@ class ServingEngine:
                                     )
                                 direction = None
                         if close_ids and (think_budget or direction is not None):
+                            nudge = getattr(adapter, "thinking_nudge_token_ids", None)
                             job.thinking_guard = ThinkingGuard(
                                 prompt_len, close_ids,
+                                nudge_ids=(nudge() if callable(nudge) else None) or (),
                                 budget=(
                                     think_budget
                                     if thinking_budget_mode == "state_aware"
