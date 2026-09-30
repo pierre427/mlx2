@@ -101,9 +101,10 @@ def _run(arm, *, differential=0, band=None, copy_rounds=3):
     run = {"arm": arm, "tokens": [1, 2, 3], "logprob_rows": ["a", "b", "c"], "finish_reason": "length",
            "failures": [], "verify_cap": 17, "decode_s": 1.0,
            "memory": {"active_bytes": 1, "cache_bytes": 0, "peak_bytes": 2},
-           "target_state": {"status": "complete", "sha256": "t"}, "draft_state": {"status": "complete", "sha256": "d"},
+           "target_state": {"status": "complete", "sha256": "1" * 64},
+           "draft_state": {"status": "complete", "sha256": "2" * 64},
            "continuation": {"status": "complete", "tokens": [4, 5],
-                            "final_state": {"status": "complete", "sha256": "c"}}}
+                            "final_state": {"status": "complete", "sha256": "3" * 64}}}
     if arm == "ordinary":
         return run
     run.update(held_copy_policy=dict(Q.ARMS[arm]), route="segmented_self_mtp",
@@ -183,9 +184,9 @@ def test_missing_or_unbound_evidence_is_refused(edit, reason):
      "copy0 pair 0 s32 vs s16: logprob row bits differ"),
     (lambda c: c["copy"][0]["pairs"][0]["s16"].update(logprob_rows=["a", "b", "late"]),   # late drift
      "copy0 pair 0 s32 vs s16: logprob row bits differ"),
-    (lambda c: c["copy"][0]["pairs"][0]["s16"]["draft_state"].update(sha256="x"),
+    (lambda c: c["copy"][0]["pairs"][0]["s16"]["draft_state"].update(sha256="f" * 64),
      "copy0 pair 0 s32 vs s16: draft_state digest differs"),
-    (lambda c: c["control"][0]["pairs"][1]["s16"]["target_state"].update(sha256="x"),
+    (lambda c: c["control"][0]["pairs"][1]["s16"]["target_state"].update(sha256="e" * 64),
      "control0 pair 1 s32 vs s16: target_state digest differs"),
     (lambda c: c["copy"][0]["pairs"][0]["s16"]["continuation"].update(tokens=[4, 6]),
      "copy0 pair 0 s32 vs s16: continuation differs"),
@@ -202,14 +203,24 @@ def test_bit_differences_are_counterexamples(edit, difference):
     (lambda c: c["copy"][0]["pairs"][0]["s16"]["logprob_rows"].__setitem__(1, None),
      "copy0 pair 0 s32 vs s16: logprob rows unavailable"),
     (lambda c: c["copy"][0]["pairs"][0]["s16"].update(target_state={"status": "unavailable", "sha256": None}),
-     "copy0 pair 0 s32 vs s16: target_state complete/unavailable"),
+     "copy0 pair 0 s32 vs s16: target_state not complete with a sha256 (complete/unavailable)"),
+    # root 2857: "complete" with a null or malformed hash, identical on both sides
+    (lambda c: [p[a]["target_state"].update(sha256=None) for cl in c.values() for p in cl[0]["pairs"] for a in p],
+     "copy0 pair 0 s32 vs s16: target_state not complete with a sha256 (complete/complete)"),
+    (lambda c: [p[a]["draft_state"].update(sha256="") for cl in c.values() for p in cl[0]["pairs"] for a in p],
+     "copy0 pair 0 s32 vs s16: draft_state not complete with a sha256 (complete/complete)"),
+    (lambda c: [p[a]["draft_state"].update(sha256="G" * 64) for p in c["copy"][0]["pairs"] for a in p],
+     "copy0 pair 0 s32 vs s16: draft_state not complete with a sha256 (complete/complete)"),
+    (lambda c: [p[a]["continuation"].update(final_state={"status": "unavailable", "sha256": None})
+                for p in c["copy"][0]["pairs"] for a in p],
+     "copy0 pair 0 s32 vs s16: continuation final state digest is not complete"),
     (lambda c: c["copy"][0]["pairs"][0]["s32"].update(continuation={"status": "unavailable"}),
      "copy0 pair 0 s32 vs s16: continuation unavailable"),
     # complete status wrapping an unavailable nested digest
     (lambda c: [p["s16"]["continuation"].update(final_state={"status": "unavailable", "sha256": None})
                 for p in c["copy"][0]["pairs"]],
      "copy0 pair 0 s32 vs s16: continuation final state digest is not complete"),
-    (lambda c: [p[a]["continuation"].update(final_state={"status": "complete", "sha256": None})
+    (lambda c: [p[a]["continuation"].update(final_state={"status": "complete", "sha256": "abc"})
                 for p in c["copy"][0]["pairs"] for a in p],
      "copy0 pair 0 s32 vs s16: continuation final state digest is not complete"),
     (lambda c: [p[a]["continuation"].update(tokens=[4]) for p in c["copy"][0]["pairs"] for a in p],
@@ -225,6 +236,29 @@ def test_missing_bits_are_never_equal(edit, item):
     result = _evaluate(edit)
     assert result["verdict"] == "exact_with_unavailable_parts"
     assert item in result["incomparable"]
+
+
+def test_root_2857_fixtures_never_pass():
+    """Each of root's three pure-Python counterexamples, applied to every run."""
+    def apply(edit):
+        cells = _cells()
+        for cl in cells.values():
+            for pair in cl[0]["pairs"]:
+                for run in pair.values():
+                    edit(run)
+        return Q.evaluate(cells, EVAL_ARGS)["verdict"]
+
+    assert apply(lambda r: r.update(logprob_rows=r["logprob_rows"][:1])) != "pass"
+    assert apply(lambda r: r["target_state"].update(sha256=None)) != "pass"
+    assert apply(lambda r: r["continuation"].update(final_state={"status": "unavailable", "sha256": None})) != "pass"
+
+
+def test_digest_complete_requires_a_hex_sha256():
+    assert Q.digest_complete({"status": "complete", "sha256": "0" * 64})
+    for bad in ({"status": "complete", "sha256": None}, {"status": "complete", "sha256": "0" * 63},
+                {"status": "complete", "sha256": "Z" * 64}, {"status": "metadata_unavailable", "sha256": "0" * 64},
+                {"status": "complete"}, None, "complete"):
+        assert not Q.digest_complete(bad)
 
 
 def test_a_sampled_prefix_never_hides_late_drift():
@@ -249,7 +283,7 @@ def test_logprob_rows_default_to_every_emitted_token():
 
 
 def test_continuation_problem_requires_count_and_complete_digest():
-    good = {"status": "complete", "tokens": [1, 2], "final_state": {"status": "complete", "sha256": "x"}}
+    good = {"status": "complete", "tokens": [1, 2], "final_state": {"status": "complete", "sha256": "a" * 64}}
     assert Q.continuation_problem(good, 2) is None
     assert Q.continuation_problem(good, 3) == "continuation has 2 of 3 tokens"
     assert Q.continuation_problem({**good, "final_state": {"status": "metadata_unavailable", "sha256": None}}, 2)

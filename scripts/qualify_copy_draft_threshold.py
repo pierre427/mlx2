@@ -371,6 +371,13 @@ def continuation(ctx, prompt, record, final, tokens):
 
 # ================================================================ gates
 
+def digest_complete(digest):
+    """A ``state_digest`` result that is complete with a 64-hex sha256."""
+    sha = digest.get("sha256") if isinstance(digest, dict) else None
+    return (isinstance(digest, dict) and digest.get("status") == "complete" and isinstance(sha, str)
+            and len(sha) == 64 and all(c in "0123456789abcdef" for c in sha))
+
+
 def continuation_problem(continuation, requested):
     """Why a continuation is not complete evidence (None when it is)."""
     if not isinstance(continuation, dict) or continuation.get("status") != "complete":
@@ -378,8 +385,7 @@ def continuation_problem(continuation, requested):
     tokens = continuation.get("tokens")
     if not isinstance(tokens, list) or len(tokens) != requested:
         return f"continuation has {len(tokens) if isinstance(tokens, list) else 'no'} of {requested} tokens"
-    digest = continuation.get("final_state")
-    if not isinstance(digest, dict) or digest.get("status") != "complete" or not digest.get("sha256"):
+    if not digest_complete(continuation.get("final_state")):
         return "continuation final state digest is not complete"
     return None
 
@@ -409,9 +415,10 @@ def compare(a, b, label, rows, continuation_tokens):
     elif len(a["logprob_rows"]) != len(a["tokens"]) or len(b["logprob_rows"]) != len(b["tokens"]):
         incomparable.append(f"{label}: logprob rows cover {covered} of {len(a['tokens'])} emitted tokens")
     for key in ("target_state", "draft_state"):
-        sa, sb = a[key]["status"], b[key]["status"]
-        if sa != "complete" or sb != "complete":
-            incomparable.append(f"{label}: {key} {sa}/{sb}")
+        if not (digest_complete(a[key]) and digest_complete(b[key])):
+            status = lambda d: d.get("status") if isinstance(d, dict) else None  # noqa: E731
+            incomparable.append(f"{label}: {key} not complete with a sha256 "
+                                f"({status(a[key])}/{status(b[key])})")
         elif a[key] != b[key]:
             differences.append(f"{label}: {key} digest differs")
     ca, cb = a["continuation"], b["continuation"]
