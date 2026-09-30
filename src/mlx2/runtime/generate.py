@@ -75,6 +75,21 @@ def prefill_clear_cache(decode_active: bool) -> bool:
     return True
 
 
+def allocator_reclaim_step_interval() -> int:
+    """Decode rounds between ``mx.clear_cache()`` calls (0 disables).
+
+    MLX2_ALLOCATOR_RECLAIM_STEP_INTERVAL overrides the 512-round default so
+    the clear can be A/B'd against ``mx.set_cache_limit``.
+    """
+    raw = os.environ.get("MLX2_ALLOCATOR_RECLAIM_STEP_INTERVAL")
+    if raw is None or not raw.strip():
+        return ALLOCATOR_RECLAIM_STEP_INTERVAL
+    try:
+        return max(0, int(raw))
+    except ValueError:
+        return ALLOCATOR_RECLAIM_STEP_INTERVAL
+
+
 # Experiment aid: when a list, ``GenerationBatch._step`` appends
 # ``(mode, check_ms, build_ms, wait_ms, forward_py_ms)`` per step so an A/B can see whether
 # graph build overlaps device execution.  ``None`` (default) costs one test.
@@ -5892,10 +5907,11 @@ class BatchGenerator:
             self._gen_tokens_counter += len(generation_responses)
             previous_steps = self._steps_counter
             self._steps_counter += 1
-            if _crossed_counter_interval(
+            reclaim_interval = allocator_reclaim_step_interval()
+            if reclaim_interval and _crossed_counter_interval(
                 previous_steps,
                 self._steps_counter,
-                ALLOCATOR_RECLAIM_STEP_INTERVAL,
+                reclaim_interval,
             ):
                 mx.clear_cache()
         if len(self._generation_batch) >= self.completion_batch_size:

@@ -1316,6 +1316,24 @@ class PromptTemplateFailure(RuntimeError):
 _TEMPLATE_UNDEFINED_MARKERS = ("Undefined", "undefined")
 
 
+def mlx_cache_limit_bytes():
+    """``mx.set_cache_limit`` value from MLX2_CACHE_LIMIT_GIB, or ``None``.
+
+    Unset (default) leaves the MLX allocator pool unbounded, as it always
+    was; the pool is then only trimmed by the periodic ``mx.clear_cache()``.
+    """
+    raw = os.environ.get("MLX2_CACHE_LIMIT_GIB")
+    if raw is None or not raw.strip():
+        return None
+    try:
+        gib = float(raw)
+    except ValueError:
+        return None
+    if gib < 0:
+        return None
+    return int(gib * float(1 << 30))
+
+
 def greedy_batch_sampler_enabled() -> bool:
     """MLX2_GREEDY_BATCH_SAMPLER=1 groups temperature-0 lanes into one argmax."""
     return os.environ.get("MLX2_GREEDY_BATCH_SAMPLER", "0").strip() == "1"
@@ -5469,6 +5487,20 @@ class ServingEngine:
                         mlx_limit / float(1 << 30),
                         previous_limit / float(1 << 30),
                     )
+            cache_limit = mlx_cache_limit_bytes()
+            if (
+                cache_limit is not None
+                and mx.metal.is_available()
+                and mx.default_device() == mx.gpu
+            ):
+                # The allocator pool is otherwise unbounded here; the engine
+                # relies on periodic ``mx.clear_cache()`` to return it.
+                previous_cache_limit = mx.set_cache_limit(cache_limit)
+                log.info(
+                    "MLX cache limit %.4g GiB (MLX2_CACHE_LIMIT_GIB; was %.4g)",
+                    cache_limit / float(1 << 30),
+                    previous_cache_limit / float(1 << 30),
+                )
             admission = {}
             spomin_manager = None
             post_prefill_transform = None
