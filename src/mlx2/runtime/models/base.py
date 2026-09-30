@@ -109,6 +109,17 @@ else:
     _QUANT_SDPA_FLASH_MIN_L_GQA = 128
     _QUANT_SDPA_FLASH_MIN_L_MHA = 192
 
+# Byte budget for the composed path's score block (B * Hq * L * S); above it
+# the query rows run in balanced tiles (mlx-lm#1929's idea).  Each row's
+# scores, softmax and value product are independent of the other rows, and
+# MLX's CPU quantized matmul loops over rows, so tiles are bitwise equal to
+# the untiled path there.  On Metal the kernel family follows the row count;
+# the tile floor keeps tiled and untiled calls in one family, but that is
+# not yet checked on a GPU, so the budget defaults to 0 (off).
+_QSDPA_SCORES_BUDGET = int(os.environ.get("MLX2_QSDPA_SCORES_BUDGET_BYTES", "0"))
+if _QSDPA_SCORES_BUDGET < 0:
+    raise ValueError("MLX2_QSDPA_SCORES_BUDGET_BYTES must be >= 0")
+
 
 # MLX (39400a0d4) sends head_dim-256 causal prefill to its fused NAX kernel
 # only at >= 1024 query rows; below that it materializes the score matrix.
@@ -210,6 +221,67 @@ def quantized_scaled_dot_product_attention(
             *_contiguous_quant(q_values), group_size=group_size, bits=value_bits
         )
         return fast_sdpa(queries, keys, values, scale=scale, mask=mask)
+    rows = _scores_tile_rows(queries, q_keys, mask, n_repeats)
+    if rows is None:
+        return _composed_qsdpa(
+            queries, q_keys, q_values, scale, mask, group_size, key_bits, value_bits
+        )
+    from . import qsdpa_verify_metal as qvm
+
+    qvm.note("composed_tiled", L)
+    S = q_keys[0].shape[-2]
+    outputs = []
+    start = 0
+    for count in rows:
+        stop = start + count
+        if isinstance(mask, str):
+            # The rows' own slice of the bottom-right causal mask.
+            rows_at = mx.arange(S - L + start, S - L + stop)
+            tile_mask = rows_at[:, None] >= mx.arange(S)[None]
+        elif mask is not None and mask.shape[-2] == L:
+            tile_mask = mask[..., start:stop, :]
+        else:
+            tile_mask = mask
+        outputs.append(
+            _composed_qsdpa(
+                queries[:, :, start:stop], q_keys, q_values, scale, tile_mask,
+                group_size, key_bits, value_bits,
+            )
+        )
+        qvm.note("composed_tile", count)
+        start = stop
+    return mx.concatenate(outputs, axis=-2)
+
+
+def _scores_tile_rows(queries, q_keys, mask, n_repeats):
+    """Balanced query-row tiles when the composed score block exceeds the
+    budget, or None to run the untiled path."""
+    if _QSDPA_SCORES_BUDGET <= 0:
+        return None
+    (B, n_q_heads, L, _) = queries.shape
+    array_mask = mask is not None and not isinstance(mask, str)
+    if array_mask and mask.shape[-2] not in (1, L):
+        return None
+    dtype = mx.result_type(queries, q_keys[1])
+    if array_mask and mask.dtype != mx.bool_:
+        dtype = mx.result_type(dtype, mask)
+    per_row = B * n_q_heads * q_keys[0].shape[-2] * dtype.size
+    if L * per_row <= _QSDPA_SCORES_BUDGET:
+        return None
+    # Smaller tiles change the Metal kernel: the folded score product needs
+    # more than 32 rows (n_repeats * tile), the value product at least 4.
+    floor = max(4, 32 // n_repeats + 1)
+    tiles = -(-L // max(_QSDPA_SCORES_BUDGET // per_row, 2 * floor))
+    if tiles < 2:
+        return None
+    (size, extra) = divmod(L, tiles)
+    return [size + (index < extra) for index in range(tiles)]
+
+
+def _composed_qsdpa(queries, q_keys, q_values, scale, mask, group_size, key_bits, value_bits):
+    (B, n_q_heads, L, D) = queries.shape
+    n_kv_heads = q_keys[0].shape[-3]
+    n_repeats = n_q_heads // n_kv_heads
     # Not `queries *= scale`: that mutates the caller's array in place.
     queries = queries * scale
     if n_repeats > 1:
