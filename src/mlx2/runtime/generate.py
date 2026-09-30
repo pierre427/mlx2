@@ -59,6 +59,58 @@ def _invalid_output_reason(token: int, logprobs: mx.array) -> Optional[str]:
     return None
 
 
+# Experiment aid: when a list, ``GenerationBatch._step`` appends
+# ``(mode, check_ms, build_ms, wait_ms, forward_py_ms)`` per step so an A/B can see whether
+# graph build overlaps device execution.  ``None`` (default) costs one test.
+STEP_TRACE = None
+
+
+def step_validity_mode() -> str:
+    """Where ``GenerationBatch._step`` checks a sampled row for corruption.
+
+    ``current`` (default): before the row is fed back, at the top of the
+    step.  That ``mx.eval`` waits for the previous step's forward, so the
+    next graph is built only after the GPU has gone idle.  ``deferred``: the
+    same test runs on the step's *input* rows after the next forward has
+    been dispatched (``mx.async_eval``), so graph build overlaps execution;
+    a corrupt row costs one wasted forward before its lane is dropped and
+    still never enters history or a response.  MLX2_STEP_VALIDITY selects.
+    """
+    mode = os.environ.get("MLX2_STEP_VALIDITY", "current").strip().lower()
+    return "deferred" if mode == "deferred" else "current"
+
+
+def _corrupt_rows(tokens: mx.array, logprobs: List[mx.array]):
+    """Return ``(vocab, finite)`` for sampled ``tokens``.
+
+    ``finite`` is the lazy per-row finiteness array; the caller evaluates it
+    together with whatever else it is waiting on, then
+    ``_resolve_corrupt_rows`` turns it into kept indices and failure reasons.
+    """
+    vocab = int(logprobs[0].shape[-1])
+    safe_ids = mx.minimum(tokens.astype(mx.uint32), vocab - 1)
+    selected_finite = mx.isfinite(
+        mx.take_along_axis(mx.stack(logprobs), safe_ids[:, None], axis=-1)[:, 0]
+    )
+    return vocab, selected_finite
+
+
+def _resolve_corrupt_rows(vocab, tokens, selected_finite, uids):
+    keep, failures = [], []
+    for i, (token, finite) in enumerate(zip(tokens.tolist(), selected_finite.tolist())):
+        if token < 0 or token >= vocab:
+            reason = f"sampled token {token} is outside vocabulary of size {vocab}"
+        elif not finite:
+            reason = f"sampled token {token} has non-finite log probability"
+        else:
+            reason = None
+        if reason is None:
+            keep.append(i)
+        else:
+            failures.append({"uid": uids[i], "reason": reason})
+    return keep, failures
+
+
 def _bump_bounded_counter(counters, key, amount=1):
     counters[key] = min(
         _COUNTER_MAX, int(counters.get(key, 0)) + int(amount)
@@ -742,6 +794,10 @@ class GenerationBatch:
             raise ValueError("Insufficient number of logits_processors provided")
         self._current_tokens = None
         self._current_logprobs = []
+        # ``deferred`` validity: finiteness of ``_next_tokens`` computed inside
+        # the same async graph as the step that sampled them.
+        self._next_finite = None
+        self._current_finite = None
         self._decode_steps = 0
         self._next_tokens = inputs
         self._next_logprobs = []
@@ -781,6 +837,7 @@ class GenerationBatch:
         self.max_tokens.extend(batch.max_tokens)
         self.stop_matchers.extend(batch.stop_matchers)
         self.persistent_inputs.extend(batch.persistent_inputs)
+        self._next_finite = None  # recomputed lazily at the next step's tail
         if self._current_tokens is None:
             self._current_tokens = batch._current_tokens
             self._current_logprobs = batch._current_logprobs
@@ -877,39 +934,29 @@ class GenerationBatch:
         Returns:
             Tuple of token list and logprobs list.
         """
-        if self._next_logprobs:
+        validity = step_validity_mode() if self._next_logprobs else None
+        trace_t0 = time.perf_counter() if STEP_TRACE is not None else None
+        if validity == "current":
             # A prior sample is about to become this forward's input and the
             # response returned by this step.  Filter corrupt rows first;
             # constructor-time filtering would change the prefill handoff's
             # expected width before its prompt responses are assembled.
-            vocab = int(self._next_logprobs[0].shape[-1])
-            safe_ids = mx.minimum(self._next_tokens.astype(mx.uint32), vocab - 1)
-            selected_finite = mx.isfinite(
-                mx.take_along_axis(
-                    mx.stack(self._next_logprobs), safe_ids[:, None], axis=-1
-                )[:, 0]
+            vocab, selected_finite = _corrupt_rows(
+                self._next_tokens, self._next_logprobs
             )
             mx.eval(self._next_tokens, selected_finite)
-            keep = []
-            for i, (token, finite) in enumerate(
-                zip(self._next_tokens.tolist(), selected_finite.tolist())
-            ):
-                if token < 0 or token >= vocab:
-                    reason = f"sampled token {token} is outside vocabulary of size {vocab}"
-                elif not finite:
-                    reason = f"sampled token {token} has non-finite log probability"
-                else:
-                    reason = None
-                if reason is None:
-                    keep.append(i)
-                else:
-                    self._lane_failures.append({"uid": self.uids[i], "reason": reason})
+            keep, failures = _resolve_corrupt_rows(
+                vocab, self._next_tokens, selected_finite, self.uids
+            )
+            self._lane_failures.extend(failures)
             if len(keep) != len(self.uids):
                 self.filter(keep)
             if not self.uids:
                 return ([], [])
+        trace_t1 = time.perf_counter() if STEP_TRACE is not None else None
         self._current_tokens = self._next_tokens
         self._current_logprobs = self._next_logprobs
+        self._current_finite = self._next_finite
         inputs = self._current_tokens
         if BATCH_UID_HOOK is not None:
             BATCH_UID_HOOK(list(self.uids))
@@ -926,6 +973,7 @@ class GenerationBatch:
             clear_lora_rows(lora_rows)
             if steer is not None:
                 taps.steer = None
+        trace_t1b = time.perf_counter() if STEP_TRACE is not None else None
         logits = logits[:, -1, :]
         token_context = []
         if any(self.logits_processors):
@@ -975,10 +1023,52 @@ class GenerationBatch:
         self._next_logprobs = list(logprobs)
         self._decode_steps += 1
         eval_targets = [self._next_tokens, self._next_logprobs, token_context]
+        if validity == "deferred" or (validity is None and step_validity_mode() == "deferred"):
+            # Part of this step's graph, so the next step's tail check waits
+            # only for this step, never on a fresh graph queued behind the
+            # one it has just dispatched.
+            _, self._next_finite = _corrupt_rows(self._next_tokens, self._next_logprobs)
+            eval_targets.append(self._next_finite)
+        else:
+            self._next_finite = None
         if self._decode_steps % CACHE_STATE_EVAL_INTERVAL == 0:
             eval_targets.append([c.state for c in self.prompt_cache])
         mx.async_eval(*eval_targets)
-        mx.eval(inputs, self._current_logprobs)
+        trace_t2 = time.perf_counter() if STEP_TRACE is not None else None
+        if validity == "deferred":
+            # The input rows were sampled by the previous step and are the
+            # response of this one; the check waits on that step (already
+            # complete or completing) while the forward just dispatched runs.
+            if self._current_finite is not None:
+                vocab, selected_finite = (
+                    int(self._current_logprobs[0].shape[-1]), self._current_finite
+                )
+            else:
+                vocab, selected_finite = _corrupt_rows(inputs, self._current_logprobs)
+            mx.eval(inputs, self._current_logprobs, selected_finite)
+            keep, failures = _resolve_corrupt_rows(
+                vocab, inputs, selected_finite, self.uids
+            )
+            if failures:
+                self._lane_failures.extend(failures)
+                logprobs_out = [self._current_logprobs[i] for i in keep]
+                inputs = inputs[keep] if keep else inputs[:0]
+                self.filter(keep)
+                self._current_tokens = inputs
+                self._current_logprobs = logprobs_out
+                if not self.uids:
+                    return ([], [])
+        else:
+            mx.eval(inputs, self._current_logprobs)
+        if STEP_TRACE is not None:
+            trace_t3 = time.perf_counter()
+            STEP_TRACE.append((
+                validity,
+                (trace_t1 - trace_t0) * 1e3,
+                (trace_t2 - trace_t1) * 1e3,
+                (trace_t3 - trace_t2) * 1e3,
+                (trace_t1b - trace_t1) * 1e3,
+            ))
         inputs = inputs.tolist()
         for sti, ti in zip(self.tokens, inputs):
             sti.append(ti)
@@ -1008,6 +1098,8 @@ class GenerationBatch:
         self.stop_matchers = [self.stop_matchers[idx] for idx in keep]
         self.persistent_inputs = [self.persistent_inputs[idx] for idx in keep]
         self._next_tokens = self._next_tokens[keep] if keep else None
+        if getattr(self, "_next_finite", None) is not None:
+            self._next_finite = self._next_finite[keep] if keep else None
         self._next_logprobs = [self._next_logprobs[idx] for idx in keep]
         self._token_context = [self._token_context[idx] for idx in keep]
         self._num_tokens = [self._num_tokens[idx] for idx in keep]
