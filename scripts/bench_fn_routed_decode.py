@@ -46,7 +46,9 @@ def main():
                     help="quality: prompt offsets; speed: with --prompt-offsets, per-rep prompts")
     ap.add_argument("--prompt-offsets", type=int, nargs="+", default=None,
                     help="speed: rep r uses the prompt at offset[r %% n] (content-varied reps)")
-    ap.add_argument("--cache-limit-gib", type=int, default=8)
+    ap.add_argument("--max-swapout-pages", type=int, default=20000,
+                    help="abort when vm_stat Swapouts grows by more than this since load")
+    ap.add_argument("--cache-limit-gib", type=int, default=4)
     ap.add_argument("--out", required=True)
     ap.add_argument("--i-own-the-gpu", action="store_true")
     a = ap.parse_args()
@@ -61,11 +63,21 @@ def main():
     model = adapter.model
     mx.eval(model.parameters())
     mx.set_cache_limit(a.cache_limit_gib << 30)
+    import subprocess
+
+    def swapouts():
+        out = subprocess.run(["vm_stat"], capture_output=True, text=True).stdout
+        line = next(l for l in out.splitlines() if l.startswith("Swapouts"))
+        return int(line.split(":")[1].strip().rstrip("."))
+
+    swap0 = swapouts()
     blocks = [m for _, m in model.named_modules() if hasattr(m, "set_moe_routed_decode_mode")]
     print("LOADED", len(blocks), "moe blocks", f"active={mx.get_active_memory() / 2**30:.1f}GiB", flush=True)
     all_ids = list(adapter.tokenizer.encode(open(a.prompt_file).read()))
 
     default_expert_mode = blocks[0].fused_expert_kernel_mode
+
+    from mlx2.runtime.models import qwen4_routed_decode as RD
 
     gdn_layers = [m for _, m in model.named_modules() if hasattr(m, "set_fused_gdn_batch_decode_mode")]
 
@@ -75,12 +87,18 @@ def main():
             for layer in gdn_layers:
                 layer.set_fused_gdn_batch_decode_mode(arm)
             return
-        # Arms: a routed-decode mode (off | gate_up | two_launch), or
-        # "stock_down": routed off and the fused-expert tile4 down replaced by
-        # the stock gather_qmm + weighted sum (the numerics two_launch matches).
+        # Arms: a routed-decode mode (off | gate_up | gate_up_down |
+        # two_launch), optionally suffixed ":rows4" (served_down rows per
+        # threadgroup, default 2) and/or ":noviews" (bind whole expert
+        # tables); or "stock_down": routed off and the fused-expert tile4
+        # down replaced by the stock gather_qmm + weighted sum (the numerics
+        # two_launch matches).
+        mode, *opts = arm.split(":")
+        RD.set_served_down_rows(4 if "rows4" in opts else 2)
+        RD.set_expert_views("noviews" not in opts)
         for b in blocks:
-            b.set_moe_routed_decode_mode("off" if arm == "stock_down" else arm)
-            b.set_fused_expert_kernel_mode("stock" if arm == "stock_down" else default_expert_mode)
+            b.set_moe_routed_decode_mode("off" if mode == "stock_down" else mode)
+            b.set_fused_expert_kernel_mode("stock" if mode == "stock_down" else default_expert_mode)
 
     def calls():
         if a.knob == "gdn_batch":
@@ -88,6 +106,10 @@ def main():
                 m.fused_gdn_batch_decode_fallbacks for m in gdn_layers)
         return sum(b.switch_mlp.routed_decode_calls for b in blocks), sum(
             b.switch_mlp.routed_decode_fallbacks for b in blocks)
+
+    def down_calls():
+        return sum(getattr(b.switch_mlp, "routed_down_calls", 0) for b in blocks), sum(
+            getattr(b.switch_mlp, "routed_down_fallbacks", 0) for b in blocks)
 
     if a.phase == "quality":
         from mlx.utils import tree_flatten
@@ -157,8 +179,8 @@ def main():
         prompts = [all_ids[offset + i * a.context : offset + (i + 1) * a.context] for i in range(batch)]
         kwargs = {}
         if route == "mtp":
-            kwargs["self_mtp"] = {"num_draft": 2, "persistent": True, "rate_gate": False,
-                                  "prefill_step_size": a.prefill_step}
+            kwargs["self_mtp"] = {"num_draft": adapter.policy.num_draft, "persistent": True,
+                                  "rate_gate": False, "prefill_step_size": a.prefill_step}
         gen = G.BatchGenerator(model, completion_batch_size=batch, prefill_batch_size=1,
                                prefill_step_size=a.prefill_step, **kwargs)
         insert = {"max_tokens": [a.gen] * batch,
@@ -201,8 +223,8 @@ def main():
         batch = int(batch)
         configure(a.arms[0])
         run(route, batch)  # warm-up, discarded
-        per_arm = {arm: {"tps": [], "sha": [], "calls": [], "fallbacks": [], "ms_per_step": [],
-                         "tokens_per_step": [], "offset": []} for arm in a.arms}
+        per_arm = {arm: {"tps": [], "sha": [], "calls": [], "fallbacks": [], "down_calls": [], "down_fallbacks": [],
+                         "ms_per_step": [], "tokens_per_step": [], "offset": []} for arm in a.arms}
         first_tokens = {}
         for rep in range(a.reps):
             order = a.arms[rep % len(a.arms):] + a.arms[: rep % len(a.arms)]
@@ -213,9 +235,16 @@ def main():
             for arm in order:
                 configure(arm)
                 before = calls()
+                dbefore = down_calls()
                 offset = a.prompt_offsets[rep % len(a.prompt_offsets)] if a.prompt_offsets else 0
                 tps, sha, toks = run(route, batch, offset)
                 after = calls()
+                dafter = down_calls()
+                grew = swapouts() - swap0
+                if grew > a.max_swapout_pages:
+                    raise SystemExit(f"aborting: Swapouts grew by {grew} pages since load")
+                per_arm[arm]["down_calls"].append(dafter[0] - dbefore[0])
+                per_arm[arm]["down_fallbacks"].append(dafter[1] - dbefore[1])
                 per_arm[arm]["ms_per_step"].append(run.last["ms_per_step"])
                 per_arm[arm]["tokens_per_step"].append(run.last["tokens_per_step"])
                 per_arm[arm]["offset"].append(offset)
@@ -225,7 +254,8 @@ def main():
                 per_arm[arm]["fallbacks"].append(after[1] - before[1])
                 first_tokens.setdefault(arm, toks)
                 print(f"{config} rep{rep} off{offset} {arm} {tps:.2f} tok/s {run.last['ms_per_step']:.2f} ms/step "
-                      f"{run.last['tokens_per_step']:.3f} tok/step calls={after[0] - before[0]} sha={sha}", flush=True)
+                      f"{run.last['tokens_per_step']:.3f} tok/step calls={after[0] - before[0]} "
+                      f"down={dafter[0] - dbefore[0]} sha={sha}", flush=True)
         base = statistics.median(per_arm["off"]["tps"]) if "off" in per_arm else None
         summary = {}
         for arm, v in per_arm.items():
@@ -244,6 +274,8 @@ def main():
                             "fallbacks_per_run": v["fallbacks"],
                             "lanes_identical_to_off": None if arm == "off" or "off" not in first_tokens else [
                                 x == y for x, y in zip(first_tokens["off"], first_tokens[arm])],
+                            "routed_down_calls_per_run": v["down_calls"][0],
+                            "routed_down_fallbacks_per_run": v["down_fallbacks"][0],
                             "tokens_identical_to_off": None if arm == "off" else all(
                                 s == r for s, r in zip(v["sha"], per_arm["off"]["sha"])),
                             "first_divergence": diverge,
@@ -254,7 +286,8 @@ def main():
         results[config] = {"runs": per_arm, "summary": summary}
         print(config, json.dumps(summary, indent=1), flush=True)
     configure("off")
-    json.dump({"phase": "speed", "knob": a.knob, "context": a.context, "gen": a.gen, "reps": a.reps,
+    json.dump({"phase": "speed", "knob": a.knob, "swapouts_delta_pages": swapouts() - swap0,
+               "num_draft": adapter.policy.num_draft, "context": a.context, "gen": a.gen, "reps": a.reps,
                "prefill_step": a.prefill_step, "results": results,
                "peak_gib": mx.get_peak_memory() / 2**30, "mlx": mx.__version__},
               open(a.out, "w"), indent=1)

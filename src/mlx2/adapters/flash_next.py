@@ -500,7 +500,9 @@ class FlashNextAdapter:
             if getattr(switch, "routed_decode_mode", "off") != "off"
         ]
         if routed:
-            # omlx #3912 port; absent while off so default receipts are unchanged.
+            # omlx #3912/#4113 port; absent while off so default receipts are unchanged.
+            from ..runtime.models import qwen4_routed_decode as routed_decode
+
             moe["routed_decode"] = {
                 "modes": sorted({s.routed_decode_mode for s in routed}),
                 "calls": sum(s.routed_decode_calls for s in routed),
@@ -509,6 +511,15 @@ class FlashNextAdapter:
                     (s.routed_decode_last_fallback for s in routed if s.routed_decode_last_fallback),
                     None,
                 ),
+                "down_calls": sum(getattr(s, "routed_down_calls", 0) for s in routed),
+                "down_fallbacks": sum(getattr(s, "routed_down_fallbacks", 0) for s in routed),
+                "down_last_fallback": next(
+                    (s.routed_down_last_fallback for s in routed
+                     if getattr(s, "routed_down_last_fallback", None)),
+                    None,
+                ),
+                "expert_views": routed_decode.expert_views_enabled(),
+                "served_down_rows": routed_decode.served_down_rows(),
             }
         return {
             "moe": moe,

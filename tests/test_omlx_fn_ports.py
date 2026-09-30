@@ -211,3 +211,217 @@ def test_metal_kernels_track_the_composed_body():
                 got = sw(x, inds, scores=scores, variant="stock").astype(mx.float32)
                 rel = (mx.linalg.norm(got - want) / mx.linalg.norm(want)).item()
                 assert rel < 0.03, (mode, seed, rel)
+
+
+# --------------------------------------------------------------------------
+# Split gate/up tables (the served Flash-Next layout, MLX_QWEN4_MOE_FUSED_GATE_UP=0)
+# --------------------------------------------------------------------------
+
+
+def _split_switch(seed=0, bits=4, group_size=64):
+    mx.random.seed(seed)
+    sw = QN.FusedDownSwitchGLU(H, I, E)
+    for proj, shape in (("gate_proj", (E, I, H)), ("up_proj", (E, I, H)), ("down_proj", (E, H, I))):
+        getattr(sw, proj).weight = (mx.random.normal(shape) * 0.05).astype(mx.bfloat16)
+    nn.quantize(sw, group_size=group_size, bits=bits)
+    sw.set_dtype(mx.bfloat16)
+    QN._enable_routed_decode(sw, "off")
+    sw.eval()
+    return sw
+
+
+@pytest.fixture
+def split_reference_kernels(monkeypatch):
+    """Composed stand-ins for the split gate+up and served-down kernels."""
+    calls = {"split_gate_up": 0, "served_down": 0, "down": 0}
+
+    def split_gate_up_swiglu(x, indices, gate, up):
+        calls["split_gate_up"] += 1
+        return QN.SwiGLU()(up(x, indices), gate(x, indices)).reshape(10, I)
+
+    def composed_down(h, indices, scores, down):
+        y = down(h.reshape(indices.shape + (1, h.shape[-1])), indices).squeeze(-2)
+        return (y * scores[..., None]).sum(axis=-2).reshape(-1)
+
+    def served_down(h, indices, scores, down, rows=None):
+        calls["served_down"] += 1
+        return composed_down(h, indices, scores, down)
+
+    def down_combine(h, indices, scores, down):
+        calls["down"] += 1
+        return composed_down(h, indices, scores, down)
+
+    monkeypatch.setattr(RD, "split_gate_up_swiglu", split_gate_up_swiglu)
+    monkeypatch.setattr(RD, "served_down", served_down)
+    monkeypatch.setattr(RD, "down_combine", down_combine)
+    monkeypatch.setattr(RD, "runtime_supported", lambda: True)
+    return calls
+
+
+def test_split_admission_accepts_served_layout_and_refuses_the_rest():
+    sw = _split_switch()
+    inds, scores = _route(0)
+    x = mx.expand_dims(_x(0), (-2, -3))
+    ok = RD.admit_split_routed_decode(x, inds, scores, sw.gate_proj, sw.up_proj, sw.down_proj)
+    assert ok.accepted, ok.reason
+    q8 = _split_switch(bits=8)
+    assert "bits" in RD.admit_split_routed_decode(x, inds, scores, q8.gate_proj, q8.up_proj, q8.down_proj).reason
+    # gate and up tables must match each other and the down table
+    other = _split_switch(seed=1)
+    other.up_proj.weight = other.up_proj.weight[:, : I // 2]
+    other.up_proj.scales = other.up_proj.scales[:, : I // 2]
+    other.up_proj.biases = other.up_proj.biases[:, : I // 2]
+    assert "do not match" in RD.admit_split_routed_decode(
+        x, inds, scores, other.gate_proj, other.up_proj, other.down_proj).reason
+
+    class Streamed(type(sw.gate_proj)):
+        pass
+
+    sub = Streamed.__new__(Streamed)
+    nn.Module.__init__(sub)
+    sub.weight, sub.scales, sub.biases = (sw.gate_proj[k] for k in ("weight", "scales", "biases"))
+    sub.bits, sub.group_size, sub.mode = 4, 64, "affine"
+    assert "resident" in RD.admit_split_routed_decode(x, inds, scores, sub, sw.up_proj, sw.down_proj).reason
+
+
+@pytest.mark.parametrize("mode", ["gate_up", "two_launch"])
+def test_split_tables_route_through_the_kernels(split_reference_kernels, mode):
+    sw = _split_switch()
+    for seed in range(3):
+        x = _x(seed)
+        inds, scores = _route(seed)
+        sw.routed_decode_mode = "off"
+        want = sw(x, inds, scores=scores, variant="stock")
+        sw.routed_decode_mode = mode
+        got = sw(x, inds, scores=scores, variant="stock")
+        assert got.shape == want.shape == (1, 1, H)
+        assert mx.array_equal(got, want).item()
+    assert sw.routed_decode_calls == 3 and sw.routed_decode_fallbacks == 0
+    assert split_reference_kernels["split_gate_up"] == 3
+    assert split_reference_kernels["down"] == (3 if mode == "two_launch" else 0)
+    assert sw.routed_down_calls == (3 if mode == "two_launch" else 0)
+
+
+def test_gate_up_down_runs_served_down_where_tile4_would(split_reference_kernels, monkeypatch):
+    seen = []
+
+    def refusal(switch_mlp, hidden, indices, scores, variant):
+        seen.append(variant)
+        return None
+
+    monkeypatch.setattr(QN, "_served_down_refusal", refusal)
+    sw = _split_switch()
+    x = _x(5)
+    inds, scores = _route(5)
+    sw.routed_decode_mode = "off"
+    want = sw(x, inds, scores=scores, variant="stock")
+    sw.routed_decode_mode = "gate_up_down"
+    got = sw(x, inds, scores=scores, variant="auto")
+    assert mx.array_equal(got, want).item()
+    assert seen == ["auto"]
+    assert sw.routed_decode_calls == 1 and sw.routed_down_calls == 1
+    assert sw._last_fused_variant == "routed_gate_up_down"
+    assert split_reference_kernels == {"split_gate_up": 1, "served_down": 1, "down": 0}
+
+
+def test_gate_up_down_declines_the_down_half_off_tile4(split_reference_kernels):
+    """variant="stock" (or a CPU/odd-shape tile4 refusal) keeps the block's
+    own down after the gate+up kernel, and the decline is counted."""
+    sw = _split_switch()
+    x = _x(6)
+    inds, scores = _route(6)
+    sw.routed_decode_mode = "off"
+    want = sw(x, inds, scores=scores, variant="stock")
+    sw.routed_decode_mode = "gate_up_down"
+    got = sw(x, inds, scores=scores, variant="stock")
+    assert mx.array_equal(got, want).item()
+    assert sw.routed_decode_calls == 1
+    assert sw.routed_down_calls == 0 and sw.routed_down_fallbacks == 1
+    assert "not tile4" in sw.routed_down_last_fallback
+    # tile4 selected, but the tile4 admission refuses this geometry / CPU
+    sw(x, inds, scores=scores, variant="tile4")
+    assert sw.routed_down_fallbacks == 2
+    assert sw.routed_down_last_fallback.startswith("tile4 admission")
+    assert split_reference_kernels["served_down"] == 0
+
+
+def test_gate_up_down_without_scores_is_gate_up(split_reference_kernels):
+    sw = _split_switch()
+    x = _x(7)
+    inds, _ = _route(7)
+    sw.routed_decode_mode = "off"
+    want = sw(x, inds)
+    sw.routed_decode_mode = "gate_up_down"
+    assert mx.array_equal(sw(x, inds), want).item()
+    assert sw.routed_down_calls == 0 and sw.routed_down_fallbacks == 0
+
+
+def test_served_block_layout_accepts_routed_modes(monkeypatch):
+    """The served profile (split tables) used to force routed decode off and
+    refuse the setter; it now carries the selected mode."""
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(QN, "_MOE_FUSED_GATE_UP", False)
+    monkeypatch.setattr(QN, "_MOE_ROUTED_DECODE", "gate_up_down")
+    args = SimpleNamespace(
+        hidden_size=H, moe_intermediate_size=I, shared_expert_intermediate_size=I,
+        norm_topk_prob=True, num_experts=E, num_experts_per_tok=10,
+    )
+    block = QN.Qwen3NextSparseMoeBlock(args)
+    assert isinstance(block.switch_mlp, QN.FusedDownSwitchGLU)
+    assert block.switch_mlp.routed_decode_mode == "gate_up_down"
+    for mode in RD.MODES:
+        assert block.set_moe_routed_decode_mode(mode) == mode
+
+
+def test_policy_accepts_gate_up_down():
+    from mlx2.adapters.flash_next_policy import FlashNextPolicy
+
+    chosen = FlashNextPolicy.from_mapping({"moe_routed_decode": "gate_up_down"})
+    assert chosen.environment()[RD.ROUTED_DECODE_ENV] == "gate_up_down"
+    assert chosen.as_dict()["moe_routed_decode"] == "gate_up_down"
+
+
+def test_scheduling_env_parsing(monkeypatch):
+    monkeypatch.delenv(RD.VIEWS_ENV, raising=False)
+    assert RD.views_from_env() is True
+    monkeypatch.setenv(RD.VIEWS_ENV, "0")
+    assert RD.views_from_env() is False
+    monkeypatch.delenv(RD.DOWN_ROWS_ENV, raising=False)
+    assert RD.down_rows_from_env() == 2
+    monkeypatch.setenv(RD.DOWN_ROWS_ENV, "4")
+    assert RD.down_rows_from_env() == 4
+    monkeypatch.setenv(RD.DOWN_ROWS_ENV, "3")
+    with pytest.raises(ValueError):
+        RD.down_rows_from_env()
+    with pytest.raises(ValueError):
+        RD.set_served_down_rows(8)
+
+
+def test_expert_views_alias_the_table_and_rebuild_on_replace():
+    sw = _split_switch()
+    layer = sw.gate_proj
+    prev = RD.expert_views_enabled()
+    try:
+        RD.set_expert_views(True)
+        views = RD.expert_operands(layer)
+        assert [v.shape[0] for v in views] == [1, 1, 1]
+        for whole, view in zip((layer["weight"], layer["scales"], layer["biases"]), views):
+            assert RD._address(view) == RD._address(whole)
+        assert RD.expert_view_count(layer) == 3
+        assert RD.expert_operands(layer) is views  # cached
+        layer.weight = mx.array(layer.weight)  # replaced array -> rebuilt
+        again = RD.expert_operands(layer)
+        assert again is not views and RD._address(again[0]) == RD._address(layer.weight)
+        RD.set_expert_views(False)
+        whole = RD.expert_operands(layer)
+        assert whole[0] is layer["weight"] and whole[0].shape[0] == E
+    finally:
+        RD.set_expert_views(prev)
+
+
+def test_expert_view_keeps_a_non_contiguous_table_whole():
+    t = mx.zeros((E, 2 * I, H // 8), mx.uint32)
+    half = t[:, I:, :]  # strided rows: a [:1] view would not index experts
+    mx.eval(half)
+    assert RD._expert_view(half) is half

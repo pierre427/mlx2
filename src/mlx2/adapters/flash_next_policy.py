@@ -59,9 +59,15 @@ class FlashNextPolicy:
     # verifies (9..17 wide) stop falling back (fn-mlxserve-ab-20260925,
     # ab-vcap-*.json).  8 restores the old bound.
     fused_gdn_verify_max_steps: int = 17
-    # omlx #3912 one-token routed experts (MLX_QWEN4_MOE_ROUTED_DECODE):
-    # "gate_up" runs gate+up with a SwiGLU epilogue in one launch; "two_launch"
-    # also replaces the tile4 fused down with omlx's down + weighted sum.
+    # omlx #3912/#4113 one-token routed experts (MLX_QWEN4_MOE_ROUTED_DECODE):
+    # "gate_up" runs gate+up with a SwiGLU epilogue in one launch (on the
+    # split gate/up tables the served artifact loads, or a fused table);
+    # "gate_up_down" also runs the tile4 fused down's arithmetic in its own
+    # launch with one-expert views and two rows per threadgroup (#4039/#4055
+    # scheduling; bit-identical to the default); "gate_up_down_shared" also
+    # folds the shared expert, its 8-bit gate and the combine into those two
+    # launches (omlx #4039 shared fold); "two_launch" replaces the
+    # tile4 fused down with omlx's down + weighted sum (stock-down numerics).
     # Opt-in; enters the environment and receipts only when not "off".
     moe_routed_decode: str = "off"
     # omlx #4038 two-launch hyper-connection decode (MLX_QWEN4_HC_DECODE):
@@ -116,8 +122,13 @@ class FlashNextPolicy:
         for name in ("shared_qsa_suffix", "indexed_qsa"):
             if getattr(self, name) not in {"auto", "on", "off"}:
                 raise ValueError(f"{name} must be auto, on, or off")
-        if self.moe_routed_decode not in {"off", "gate_up", "two_launch"}:
-            raise ValueError("moe_routed_decode must be off, gate_up, or two_launch")
+        if self.moe_routed_decode not in {
+            "off", "gate_up", "gate_up_down", "gate_up_down_shared", "two_launch"
+        }:
+            raise ValueError(
+                "moe_routed_decode must be off, gate_up, gate_up_down, "
+                "gate_up_down_shared, or two_launch"
+            )
         if self.fused_gdn_batch_decode not in {"off", "row_exact"}:
             raise ValueError("fused_gdn_batch_decode must be off or row_exact")
         for name in (

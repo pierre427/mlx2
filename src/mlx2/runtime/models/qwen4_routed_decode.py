@@ -5,18 +5,22 @@
 """One-token routed experts for Flash-Next decode in fewer launches.
 
 After routing, a one-token Flash-Next MoE block runs its routed experts as the
-gate+up ``gather_qmm``, the compiled SwiGLU, and the down projection with the
-router-weighted top-k sum (mlx2's ``qwen4_fused_down`` tile4 kernel in the
-Flash-Next profile, or ``gather_qmm`` + multiply + sum on the stock path).
+gate and up ``gather_qmm`` (one launch on a fused [gate|up] table, two on the
+split tables the served artifact loads), the compiled SwiGLU, and the down
+projection with the router-weighted top-k sum (mlx2's ``qwen4_fused_down``
+tile4 kernel in the Flash-Next profile, or ``gather_qmm`` + multiply + sum on
+the stock path).
 
-Two kernels from omlx #3912:
+Kernels (#3912 and #4113 from jundot/omlx, #4039/#4055 scheduling ideas):
 
-``gate_up_swiglu``
-    gate+up with a SwiGLU epilogue. Each simdgroup computes gate rows and the
-    matching up rows of one expert with MLX's ``qmv_fast`` lane partition and
-    add order, rounds both to the activation dtype, then applies MLX's
-    ``Sigmoid`` and the two multiplies of the compiled ``swiglu`` in order.
-    Intended to equal ``gather_qmm`` + ``swiglu`` bit for bit.
+``gate_up_swiglu`` / ``split_gate_up_swiglu``
+    gate+up with a SwiGLU epilogue, reading one fused [gate|up] table or the
+    separate gate and up tables (omlx #4113's two-table ``qmv_rows``). Each
+    simdgroup computes gate rows and the matching up rows of one expert with
+    MLX's ``qmv_fast`` lane partition and add order, rounds both to the
+    activation dtype, then applies MLX's ``Sigmoid`` and the two multiplies of
+    the compiled ``swiglu`` in order. Intended to equal ``gather_qmm`` (x2 on
+    split tables) + ``swiglu`` bit for bit. Grid z is ``token * TOPK + slot``.
 ``down_combine``
     down with the router-weighted sum: simdgroup ``j`` runs the stock ``qmv``
     work of expert ``j``, rounds, multiplies by the score in the activation
@@ -24,14 +28,32 @@ Two kernels from omlx #3912:
     equal the stock ``gather_qmm`` + ``(x * scores).sum`` tail bit for bit, which
     is NOT the Flash-Next profile's tile4 fused down (that one accumulates the
     weighted products in fp32).
+``served_down``
+    the Flash-Next profile's tile4 fused down (``qwen4_fused_moe``) with the
+    same per-row arithmetic (lane-strided words, ``simd_sum``, two T-valued
+    roundings, fp32 slot sum in slot order) but ``DOWN_ROWS_SERVED`` output
+    rows per threadgroup (omlx #4055: two rows, twice the threadgroups) and
+    one-expert views. Intended to equal tile4 bit for bit.
+
+One-expert views (omlx #4039): MLX commits a command buffer once the inputs
+bound to it pass its size cap (50 MB on this GPU class), counting each input
+array whole, so every launch that binds a 400+ MB expert table ends a command
+buffer. The kernels bind ``w[:1]``, a view sharing the table's buffer at its
+offset, and index the other experts from it. The view is used only when it
+provably aliases the row-contiguous table; otherwise the whole table is bound.
+Scheduling only: the bytes read are the same.
 
 Modes (``MLX_QWEN4_MOE_ROUTED_DECODE``, or the Flash-Next policy field
 ``moe_routed_decode``; ``set_moe_routed_decode_mode`` switches live):
 
-``off``        (default) nothing changes.
-``gate_up``    the gate+up kernel replaces ``gather_qmm`` + SwiGLU; the down
-               path is whatever the block would run anyway.
-``two_launch`` both kernels, the literal omlx pairing.
+``off``          (default) nothing changes.
+``gate_up``      the gate+up kernel replaces the gate/up ``gather_qmm`` +
+                 SwiGLU; the down path is whatever the block would run anyway.
+``gate_up_down`` gate+up kernel, then ``served_down`` in place of the tile4
+                 fused down. Only where the block would run tile4; otherwise
+                 the down half declines (counted) and the block's down runs.
+``two_launch``   gate+up kernel and ``down_combine``, the literal omlx pairing
+                 (stock-down numerics, not the Flash-Next default's).
 
 Admission is structural and exact-shape: one token (so the gather is
 unsorted), bf16 activations and scales, top-k 10, affine 4-bit group-64,
@@ -50,13 +72,18 @@ from dataclasses import dataclass
 import mlx.core as mx
 
 ROUTED_DECODE_ENV = "MLX_QWEN4_MOE_ROUTED_DECODE"
-MODES = ("off", "gate_up", "two_launch")
+VIEWS_ENV = "MLX_QWEN4_MOE_ROUTED_VIEWS"
+DOWN_ROWS_ENV = "MLX_QWEN4_MOE_ROUTED_DOWN_ROWS"
+MODES = ("off", "gate_up", "gate_up_down", "two_launch")
 TOP_K = 10
 BITS = 4
 GROUP_SIZE = 64
 GATE_UP_ROWS = 2  # gate rows (and as many up rows) per simdgroup
 GATE_UP_SIMDGROUPS = 2
 DOWN_ROWS = 4
+# served_down: output rows per threadgroup. 4 is the tile4 partition; 2 is
+# omlx #4055's one-token choice (twice the threadgroups). Grid-only change.
+DOWN_ROWS_SERVED_CHOICES = (2, 4)
 
 
 def mode_from_env() -> str:
@@ -68,6 +95,52 @@ def mode_from_env() -> str:
             f"{ROUTED_DECODE_ENV}={raw!r}: expected one of {MODES}"
         )
     return raw
+
+
+def views_from_env() -> bool:
+    raw = os.environ.get(VIEWS_ENV, "1").strip().lower()
+    return raw not in {"0", "false", "off", "no"}
+
+
+def down_rows_from_env() -> int:
+    raw = os.environ.get(DOWN_ROWS_ENV, "2").strip() or "2"
+    try:
+        rows = int(raw)
+    except ValueError:
+        rows = -1
+    if rows not in DOWN_ROWS_SERVED_CHOICES:
+        raise ValueError(
+            f"{DOWN_ROWS_ENV}={raw!r}: expected one of {DOWN_ROWS_SERVED_CHOICES}"
+        )
+    return rows
+
+
+# Live scheduling switches (both bit-neutral); read once at import, settable
+# in process so an A/B can rotate them without a reload.
+_VIEWS = views_from_env()
+_DOWN_ROWS_SERVED = down_rows_from_env()
+
+
+def set_expert_views(enabled: bool) -> bool:
+    global _VIEWS
+    _VIEWS = bool(enabled)
+    return _VIEWS
+
+
+def expert_views_enabled() -> bool:
+    return _VIEWS
+
+
+def set_served_down_rows(rows: int) -> int:
+    global _DOWN_ROWS_SERVED
+    if rows not in DOWN_ROWS_SERVED_CHOICES:
+        raise ValueError(f"served down rows must be one of {DOWN_ROWS_SERVED_CHOICES}")
+    _DOWN_ROWS_SERVED = int(rows)
+    return _DOWN_ROWS_SERVED
+
+
+def served_down_rows() -> int:
+    return _DOWN_ROWS_SERVED
 
 
 @dataclass(frozen=True)
@@ -125,6 +198,91 @@ def admit_routed_decode(x, indices, scores, gate_up, down) -> RoutedDecodeAdmiss
     if (2 * inter) % (GATE_UP_ROWS * GATE_UP_SIMDGROUPS) or hidden % DOWN_ROWS:
         return RoutedDecodeAdmission(False, "row tiling")
     return RoutedDecodeAdmission(True, "eligible")
+
+
+def admit_split_routed_decode(x, indices, scores, gate, up, down) -> RoutedDecodeAdmission:
+    """``admit_routed_decode`` for separate gate and up expert tables.
+
+    Same geometry; the gate and up tables must each be ``[E, inter, hidden]``
+    packed like the down table's experts. Never evaluates an array.
+    """
+    hidden = x.shape[-1]
+    if x.size != hidden:
+        return RoutedDecodeAdmission(False, "not one token")
+    if x.dtype != mx.bfloat16:
+        return RoutedDecodeAdmission(False, "activation must be bfloat16")
+    if indices.size != TOP_K or indices.shape[-1] != TOP_K:
+        return RoutedDecodeAdmission(False, f"top-k must be {TOP_K}")
+    if scores is not None and (scores.size != TOP_K or scores.dtype != x.dtype):
+        return RoutedDecodeAdmission(False, "scores must be [10] in the activation dtype")
+    from .switch_layers import QuantizedSwitchLinear
+
+    for name, layer in (("gate", gate), ("up", up), ("down", down)):
+        # Exactly the class whose call is a bare gather_qmm: a subclass
+        # (streamed or repacked tables) may hold no rows or compute otherwise.
+        if type(layer) is not QuantizedSwitchLinear:
+            return RoutedDecodeAdmission(False, f"{name}: not a resident QuantizedSwitchLinear")
+        reason = _quantized_ok(layer)
+        if reason is not None:
+            return RoutedDecodeAdmission(False, f"{name}: {reason}")
+    experts = down["weight"].shape[0]
+    inter = down["weight"].shape[-1] * 32 // BITS
+    if hidden % 512:
+        return RoutedDecodeAdmission(False, "hidden % 512 != 0 (MLX would not pick qmv_fast)")
+    if inter % 512 == 0 or inter % GROUP_SIZE:
+        return RoutedDecodeAdmission(False, "intermediate must be a non-multiple of 512, multiple of 64")
+    table = (experts, inter, hidden * BITS // 32)
+    if tuple(gate["weight"].shape) != table or tuple(up["weight"].shape) != table:
+        return RoutedDecodeAdmission(False, "gate/up tables do not match down")
+    if tuple(down["weight"].shape) != (experts, hidden, inter * BITS // 32):
+        return RoutedDecodeAdmission(False, f"down weight shape {tuple(down['weight'].shape)}")
+    if inter % (GATE_UP_ROWS * GATE_UP_SIMDGROUPS) or hidden % DOWN_ROWS:
+        return RoutedDecodeAdmission(False, "row tiling")
+    return RoutedDecodeAdmission(True, "eligible")
+
+
+def _address(a) -> int:
+    import numpy as np
+
+    return np.frombuffer(memoryview(a).cast("B"), dtype=np.uint8).ctypes.data
+
+
+def _expert_view(a):
+    """``a[:1]`` when it provably aliases ``a`` (same buffer address, both
+    C-contiguous), else ``a``. The kernels index every expert from the bound
+    pointer, so a copied or offset view would read the wrong bytes."""
+    view = a[:1]
+    mx.eval(a, view)
+    whole, first = memoryview(a), memoryview(view)
+    if whole.c_contiguous and first.c_contiguous and _address(view) == _address(a):
+        return view
+    return a
+
+
+def expert_operands(layer):
+    """(weight, scales, biases) to bind for a resident expert table.
+
+    With views on, one-expert views cached on the module and rebuilt when any
+    of its arrays is replaced (the cache holds the originals, so an id cannot
+    be reused under it). The first build evaluates the table once.
+    """
+    arrays = (layer["weight"], layer["scales"], layer["biases"])
+    if not _VIEWS:
+        return arrays
+    cached = layer.__dict__.get("_mlx2_expert_views")
+    if cached is not None and all(c is a for c, a in zip(cached[0], arrays)):
+        return cached[1]
+    views = tuple(_expert_view(a) for a in arrays)
+    layer.__dict__["_mlx2_expert_views"] = (arrays, views)
+    return views
+
+
+def expert_view_count(layer) -> int:
+    """How many of the layer's cached operands are true one-expert views."""
+    cached = layer.__dict__.get("_mlx2_expert_views")
+    if cached is None:
+        return 0
+    return sum(v is not a for a, v in zip(*cached))
 
 
 def runtime_supported() -> bool:
@@ -438,6 +596,163 @@ DOWN_SOURCE = r"""
 """
 
 
+# Split-table gate+up (omlx #4113 @1335263e ``qmv_rows`` with gate rows from
+# (wg, sg, bg) and up rows from (wu, su, bu)); the per-row arithmetic is
+# GATE_UP_SOURCE's. Grid z = token * TOPK + slot: x row ``token``, output row
+# ``tid.z``. Only one token is admitted today; the z axis is the extension
+# point for batched rows (see docs in the report / provenance).
+SPLIT_GATE_UP_SOURCE = r"""
+    const uint3 tid = threadgroup_position_in_grid;
+    const uint simd_gid = simdgroup_index_in_threadgroup;
+    const uint simd_lid = thread_index_in_simdgroup;
+    const int in_vec_size_w = K * BYTES_PER_PACK / PACK_FACTOR;
+    const int in_vec_size_g = K / GS;
+    const int out_row = int(tid.y) * (NSG * RPS) + int(simd_gid) * RPS;
+    const int token = int(tid.z) / TOPK;
+    const size_t row0 = size_t(rhs[tid.z]) * NI + out_row;
+    const int lane_w = int(simd_lid) * PACKS_PER_THREAD * BYTES_PER_PACK;
+    const int lane_g = int(simd_lid) / SCALE_STEP_PER_THREAD;
+
+    const device uint8_t* gw = (const device uint8_t*)wg + row0 * in_vec_size_w + lane_w;
+    const device uint8_t* uw = (const device uint8_t*)wu + row0 * in_vec_size_w + lane_w;
+    const device T* gs = sg + row0 * in_vec_size_g + lane_g;
+    const device T* gb = bg + row0 * in_vec_size_g + lane_g;
+    const device T* us = su + row0 * in_vec_size_g + lane_g;
+    const device T* ub = bu + row0 * in_vec_size_g + lane_g;
+    const device T* xp = x + size_t(token) * K + int(simd_lid) * VALUES_PER_THREAD;
+
+    float x_thread[VALUES_PER_THREAD];
+    float result[2 * RPS] = {0};
+
+    for (int k = 0; k < K; k += BLOCK_SIZE) {
+      float sum = load_vector<T>(xp, x_thread);
+      for (int row = 0; row < 2 * RPS; row++) {
+        const bool g = row < RPS;
+        const int r = g ? row : row - RPS;
+        const device uint8_t* wl = (g ? gw : uw) + r * in_vec_size_w;
+        float s = (g ? gs : us)[r * in_vec_size_g];
+        float b = (g ? gb : ub)[r * in_vec_size_g];
+        result[row] += qdot_n(wl, x_thread, s, b, sum, VALUES_PER_THREAD);
+      }
+      gw += BLOCK_SIZE * BYTES_PER_PACK / PACK_FACTOR;
+      uw += BLOCK_SIZE * BYTES_PER_PACK / PACK_FACTOR;
+      gs += BLOCK_SIZE / GS;
+      gb += BLOCK_SIZE / GS;
+      us += BLOCK_SIZE / GS;
+      ub += BLOCK_SIZE / GS;
+      xp += BLOCK_SIZE;
+    }
+
+    for (int row = 0; row < 2 * RPS; row++) {
+      result[row] = simd_sum(result[row]);
+    }
+    if (simd_lid == 0) {
+      device T* yp = y + size_t(tid.z) * NI + out_row;
+      for (int row = 0; row < RPS; row++) {
+        T g = static_cast<T>(result[row]);
+        T u = static_cast<T>(result[row + RPS]);
+        T t = g * omlx_mlx_sigmoid<T>(g);
+        yp[row] = t * u;
+      }
+    }
+"""
+
+# The Flash-Next profile's tile4 fused down (qwen4_fused_moe
+# _DOWN_REDUCE_TILE4_SOURCE, mlx2's own kernel) with RPS output rows per
+# threadgroup. Per (slot, row) the arithmetic is tile4's: lane-strided packed
+# words, fp32 accum_x / accum_q in nibble order, simd_sum, the expert value
+# and the weighted value rounded to T, then the fp32 sum over slots 0..9 in
+# order. Five simdgroups own two slots each, as in tile4. hidden, rhs and
+# scores are row-contiguous here (the caller passes this module's own
+# gate+up output and a contiguous routing row). Grid z is the token.
+SERVED_DOWN_SOURCE = r"""
+    constexpr uint DOWN_WORDS = EH / 8;
+    constexpr uint DOWN_GROUPS = EH / 64;
+
+    uint lane = thread_index_in_simdgroup;
+    uint sg = simdgroup_index_in_threadgroup;
+    uint row_base = threadgroup_position_in_grid.y * RPS;
+    uint token = threadgroup_position_in_grid.z;
+    uint slot_base = sg * 2;
+    const device uint32_t* packed = w;
+    threadgroup float partials[TOPK * RPS];
+
+    float values[2 * RPS];
+#pragma unroll
+    for (uint i = 0; i < 2 * RPS; ++i) {
+        values[i] = 0.0f;
+    }
+
+#pragma unroll
+    for (uint local_slot = 0; local_slot < 2; ++local_slot) {
+        uint slot = slot_base + local_slot;
+        uint elem = token * TOPK + slot;
+        uint expert = uint(rhs[elem]);
+        const device T* hrow = hidden + size_t(elem) * EH;
+
+        for (uint word = lane; word < DOWN_WORDS; word += 32) {
+            size_t hbase = size_t(word) * 8;
+            float xv[8];
+            float accum_x = 0.0f;
+#pragma unroll
+            for (uint nibble = 0; nibble < 8; ++nibble) {
+                xv[nibble] = float(hrow[hbase + nibble]);
+                accum_x += xv[nibble];
+            }
+
+#pragma unroll
+            for (uint local_row = 0; local_row < RPS; ++local_row) {
+                uint row = row_base + local_row;
+                size_t wrow = size_t(expert) * H + row;
+                uint32_t p = packed[wrow * DOWN_WORDS + word];
+                uint group = word >> 3;
+                float scale = float(scales[wrow * DOWN_GROUPS + group]);
+                float bias = float(biases[wrow * DOWN_GROUPS + group]);
+                float accum_q = 0.0f;
+#pragma unroll
+                for (uint nibble = 0; nibble < 8; ++nibble) {
+                    accum_q += xv[nibble] *
+                        float((p >> (4 * nibble)) & 0xFu);
+                }
+                values[local_slot * RPS + local_row] +=
+                    scale * accum_q + bias * accum_x;
+            }
+        }
+    }
+
+#pragma unroll
+    for (uint i = 0; i < 2 * RPS; ++i) {
+        values[i] = simd_sum(values[i]);
+    }
+    if (lane == 0) {
+#pragma unroll
+        for (uint local_slot = 0; local_slot < 2; ++local_slot) {
+            uint slot = slot_base + local_slot;
+            float score = float(scores[token * TOPK + slot]);
+#pragma unroll
+            for (uint local_row = 0; local_row < RPS; ++local_row) {
+                T expert_value = static_cast<T>(
+                    values[local_slot * RPS + local_row]);
+                T weighted_value = static_cast<T>(
+                    float(expert_value) * score);
+                partials[slot * RPS + local_row] = float(weighted_value);
+            }
+        }
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    if (sg == 0 && lane < RPS) {
+        float routed = 0.0f;
+#pragma unroll
+        for (uint slot = 0; slot < TOPK; ++slot) {
+            routed += partials[slot * RPS + lane];
+        }
+        out[size_t(token) * H + row_base + lane] = static_cast<T>(routed);
+    }
+"""
+SERVED_DOWN_SIMDGROUPS = 5  # two slots each, as tile4
+
+
 def _header(fast: bool) -> str:
     return (
         QMV_HEADER.replace("__BITS__", str(BITS))
@@ -467,7 +782,20 @@ def _kernels():
             header=_header(fast=False),
             source=DOWN_SOURCE,
         )
-        _KERNELS = (gate_up, down)
+        split_gate_up = mx.fast.metal_kernel(
+            name="mlx2_qwen4_moe_split_gate_up_swiglu_decode",
+            input_names=["x", "wg", "sg", "bg", "wu", "su", "bu", "rhs"],
+            output_names=["y"],
+            header=_header(fast=True),
+            source=SPLIT_GATE_UP_SOURCE,
+        )
+        served_down = mx.fast.metal_kernel(
+            name="mlx2_qwen4_moe_served_down_decode",
+            input_names=["hidden", "w", "scales", "biases", "rhs", "scores"],
+            output_names=["out"],
+            source=SERVED_DOWN_SOURCE,
+        )
+        _KERNELS = (gate_up, down, split_gate_up, served_down)
     return _KERNELS
 
 
@@ -480,9 +808,7 @@ def gate_up_swiglu(x, indices, gate_up):
     return kernel(
         inputs=[
             x.reshape(hidden),
-            gate_up["weight"],
-            gate_up["scales"],
-            gate_up["biases"],
+            *expert_operands(gate_up),
             indices.reshape(TOP_K).astype(mx.uint32),
         ],
         template=[
@@ -507,15 +833,73 @@ def down_combine(h, indices, scores, down):
     return kernel(
         inputs=[
             h.reshape(TOP_K, inter),
-            down["weight"],
-            down["scales"],
-            down["biases"],
+            *expert_operands(down),
             indices.reshape(TOP_K).astype(mx.uint32),
             scores.reshape(TOP_K),
         ],
         template=[("T", h.dtype), ("K", inter), ("N", hidden), ("RPS", DOWN_ROWS)],
         grid=(32, TOP_K * hidden // DOWN_ROWS, 1),
         threadgroup=(32, TOP_K, 1),
+        output_shapes=[(hidden,)],
+        output_dtypes=[h.dtype],
+    )[0]
+
+
+def split_gate_up_swiglu(x, indices, gate, up):
+    """``swiglu(gate_j(x), up_j(x))`` of the ten routed experts from separate
+    gate and up tables for one token: [10, inter]."""
+    hidden = x.shape[-1]
+    inter = gate["weight"].shape[1]
+    rows = GATE_UP_ROWS * GATE_UP_SIMDGROUPS
+    kernel = _kernels()[2]
+    return kernel(
+        inputs=[
+            x.reshape(hidden),
+            *expert_operands(gate),
+            *expert_operands(up),
+            indices.reshape(TOP_K).astype(mx.uint32),
+        ],
+        template=[
+            ("T", x.dtype),
+            ("K", hidden),
+            ("NI", inter),
+            ("RPS", GATE_UP_ROWS),
+            ("NSG", GATE_UP_SIMDGROUPS),
+            ("TOPK", TOP_K),
+        ],
+        grid=(32, GATE_UP_SIMDGROUPS * inter // rows, TOP_K),
+        threadgroup=(32, GATE_UP_SIMDGROUPS, 1),
+        output_shapes=[(TOP_K, inter)],
+        output_dtypes=[x.dtype],
+    )[0]
+
+
+def served_down(h, indices, scores, down, rows=None):
+    """The tile4 fused down for one token with ``rows`` output rows per
+    threadgroup: [hidden]. Admission is the caller's (``admit_qwen4_fused_down``
+    at width 1 with the tile4 variant)."""
+    rows = _DOWN_ROWS_SERVED if rows is None else rows
+    if rows not in DOWN_ROWS_SERVED_CHOICES:
+        raise ValueError(f"served down rows must be one of {DOWN_ROWS_SERVED_CHOICES}")
+    inter = h.shape[-1]
+    hidden = down["weight"].shape[1]
+    kernel = _kernels()[3]
+    return kernel(
+        inputs=[
+            h.reshape(TOP_K, inter),
+            *expert_operands(down),
+            indices.reshape(TOP_K),
+            scores.reshape(TOP_K),
+        ],
+        template=[
+            ("T", h.dtype),
+            ("H", hidden),
+            ("EH", inter),
+            ("TOPK", TOP_K),
+            ("RPS", rows),
+        ],
+        grid=(32 * SERVED_DOWN_SIMDGROUPS, hidden // rows, 1),
+        threadgroup=(32 * SERVED_DOWN_SIMDGROUPS, 1, 1),
         output_shapes=[(hidden,)],
         output_dtypes=[h.dtype],
     )[0]

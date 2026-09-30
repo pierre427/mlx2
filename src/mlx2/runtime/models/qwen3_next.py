@@ -414,9 +414,9 @@ class FusedGateUpSwitchGLU(nn.Module):
             (x, idx, inv_order) = _gather_sort(x, indices)
         if self.training:
             idx = mx.stop_gradient(idx)
-        routed = _try_routed_decode(self, x, idx, scores, do_sort)
-        if routed is not None and routed[0] == "two_launch":
-            object.__setattr__(self, "_last_fused_variant", "routed_two_launch")
+        routed = _try_routed_decode(self, x, idx, scores, do_sort, variant)
+        if routed is not None and routed[0] != "gate_up":
+            object.__setattr__(self, "_last_fused_variant", f"routed_{routed[0]}")
             return routed[1]
         if routed is not None:
             hidden = routed[1]
@@ -455,10 +455,17 @@ class FusedDownSwitchGLU(SwitchGLU):
             (x, idx, inv_order) = _gather_sort(x, indices)
         if self.training:
             idx = mx.stop_gradient(idx)
-        hidden = self.activation(
-            self.up_proj(x, idx, sorted_indices=do_sort),
-            self.gate_proj(x, idx, sorted_indices=do_sort),
-        )
+        routed = _try_routed_decode(self, x, idx, scores, do_sort, variant)
+        if routed is not None and routed[0] != "gate_up":
+            object.__setattr__(self, "_last_fused_variant", f"routed_{routed[0]}")
+            return routed[1]
+        if routed is not None:
+            hidden = routed[1]
+        else:
+            hidden = self.activation(
+                self.up_proj(x, idx, sorted_indices=do_sort),
+                self.gate_proj(x, idx, sorted_indices=do_sort),
+            )
         fused = _try_qwen4_fused_down(
             hidden, idx, scores, self.down_proj, do_sort, variant
         )
@@ -473,31 +480,75 @@ class FusedDownSwitchGLU(SwitchGLU):
 
 
 def _enable_routed_decode(switch_mlp, mode: str) -> None:
-    """Attach the omlx #3912 routed-decode selection and its counters."""
+    """Attach the omlx #3912/#4113 routed-decode selection and its counters."""
     if mode not in _routed.MODES:
         raise ValueError(f"unknown routed decode mode {mode!r}; expected {_routed.MODES}")
     switch_mlp.routed_decode_mode = mode
     switch_mlp.routed_decode_calls = 0
     switch_mlp.routed_decode_fallbacks = 0
     switch_mlp.routed_decode_last_fallback = None
+    # The down half (gate_up_down: served_down; two_launch: down_combine).
+    switch_mlp.routed_down_calls = 0
+    switch_mlp.routed_down_fallbacks = 0
+    switch_mlp.routed_down_last_fallback = None
 
 
-def _try_routed_decode(switch_mlp, x, indices, scores, do_sort):
-    """``(mode, value)`` from the #3912 kernels, or None to run the composed body.
+def _served_down_refusal(switch_mlp, hidden, indices, scores, variant):
+    """Why served_down may not stand in for the block's down here, or None.
+
+    It reproduces the tile4 fused down only, so it runs only where the block
+    would dispatch tile4 at width 1 on a resident table.
+    """
+    from .qwen4_fused_moe import admit_qwen4_fused_down, auto_variant
+
+    down = switch_mlp.down_proj
+    resolved = auto_variant(1) if variant == "auto" else variant
+    if resolved != "tile4":
+        return f"block down variant {variant!r} is not tile4"
+    if type(down) is not QuantizedSwitchLinear:
+        return "down is not a resident QuantizedSwitchLinear"
+    admission = admit_qwen4_fused_down(
+        hidden.reshape(indices.shape + (hidden.shape[-1],)),
+        indices,
+        scores,
+        down["weight"],
+        down["scales"],
+        down.get("biases"),
+        num_experts=down.num_experts,
+        group_size=down.group_size,
+        bits=down.bits,
+        mode=down.mode,
+    )
+    if not admission.accepted:
+        return f"tile4 admission: {admission.reason}"
+    return None
+
+
+def _try_routed_decode(switch_mlp, x, indices, scores, do_sort, variant="scalar"):
+    """``(mode, value)`` from the routed kernels, or None to run the composed body.
 
     ``gate_up`` returns the SwiGLU hidden in the composed body's shape
-    ``indices.shape + (1, inter)``; ``two_launch`` returns the weighted routed
-    sum ``indices.shape[:-1] + (hidden,)``. Only an unsorted one-token gather is
-    a candidate, so multi-token forwards decline quietly, uncounted.
+    ``indices.shape + (1, inter)``; ``gate_up_down`` and ``two_launch`` return
+    the weighted routed sum ``indices.shape[:-1] + (hidden,)``. Only an
+    unsorted one-token gather is a candidate, so multi-token forwards decline
+    quietly, uncounted. Fused [gate|up] and split gate/up tables are both
+    served; which kernel runs follows the switch module's own tables.
     """
     mode = getattr(switch_mlp, "routed_decode_mode", "off")
     if mode == "off" or do_sort or x.size != x.shape[-1]:
         return None
-    if mode == "two_launch" and scores is None:
+    if mode in ("two_launch", "gate_up_down") and scores is None:
         mode = "gate_up"
-    admission = _routed.admit_routed_decode(
-        x, indices, scores, switch_mlp.gate_up_proj, switch_mlp.down_proj
-    )
+    split = "gate_up_proj" not in switch_mlp
+    if split:
+        admission = _routed.admit_split_routed_decode(
+            x, indices, scores, switch_mlp.gate_proj, switch_mlp.up_proj,
+            switch_mlp.down_proj,
+        )
+    else:
+        admission = _routed.admit_routed_decode(
+            x, indices, scores, switch_mlp.gate_up_proj, switch_mlp.down_proj
+        )
     if admission.accepted and switch_mlp.training:
         admission = _routed.RoutedDecodeAdmission(False, "training")
     if admission.accepted and not _routed.runtime_supported():
@@ -506,11 +557,28 @@ def _try_routed_decode(switch_mlp, x, indices, scores, do_sort):
         switch_mlp.routed_decode_fallbacks += 1
         switch_mlp.routed_decode_last_fallback = admission.reason
         return None
-    hidden = _routed.gate_up_swiglu(x, indices, switch_mlp.gate_up_proj)
+    if split:
+        hidden = _routed.split_gate_up_swiglu(
+            x, indices, switch_mlp.gate_proj, switch_mlp.up_proj
+        )
+    else:
+        hidden = _routed.gate_up_swiglu(x, indices, switch_mlp.gate_up_proj)
     switch_mlp.routed_decode_calls += 1
     switch_mlp.routed_decode_last_fallback = None
+    if mode == "gate_up_down":
+        refusal = _served_down_refusal(switch_mlp, hidden, indices, scores, variant)
+        if refusal is not None:
+            switch_mlp.routed_down_fallbacks += 1
+            switch_mlp.routed_down_last_fallback = refusal
+            mode = "gate_up"
+        else:
+            y = _routed.served_down(hidden, indices, scores, switch_mlp.down_proj)
+            switch_mlp.routed_down_calls += 1
+            switch_mlp.routed_down_last_fallback = None
+            return ("gate_up_down", y.reshape(indices.shape[:-1] + (y.shape[-1],)))
     if mode == "two_launch":
         y = _routed.down_combine(hidden, indices, scores, switch_mlp.down_proj)
+        switch_mlp.routed_down_calls += 1
         return ("two_launch", y.reshape(indices.shape[:-1] + (y.shape[-1],)))
     return ("gate_up", hidden.reshape(indices.shape + (1, hidden.shape[-1])))
 
@@ -867,13 +935,12 @@ class Qwen3NextSparseMoeBlock(nn.Module):
         # shared row weights its rows outside it, so it keeps the stock tail.
         self.moe_weighted_sum = _MOE_WEIGHTED_SUM and not self.shared_folded
         _enable_moe_weighted_sum(self.switch_mlp, self.moe_weighted_sum)
-        # The #3912 kernels read the fused [gate|up] table; split gate/up
-        # projections (FusedDownSwitchGLU) keep the composed body.
+        # The routed kernels read the fused [gate|up] table (#3912) or the
+        # split gate/up tables (#4113 two-table gate+up); a folded shared row
+        # keeps the composed body.
         _enable_routed_decode(
             self.switch_mlp,
-            _MOE_ROUTED_DECODE
-            if self.fused_gate_up and not self.shared_folded
-            else "off",
+            _MOE_ROUTED_DECODE if not self.shared_folded else "off",
         )
         if not self.shared_folded:
             self.shared_expert = Qwen3NextMLP(dim, shared_expert_intermediate_size)
@@ -905,13 +972,13 @@ class Qwen3NextSparseMoeBlock(nn.Module):
         return self.moe_weighted_sum
 
     def set_moe_routed_decode_mode(self, mode: str) -> str:
-        """Live-select the omlx #3912 one-token routed-expert kernels."""
+        """Live-select the one-token routed-expert kernels (omlx #3912/#4113)."""
         if mode not in _routed.MODES:
             raise ValueError(
                 f"unknown routed decode mode {mode!r}; expected {_routed.MODES}"
             )
-        if mode != "off" and (self.shared_folded or not self.fused_gate_up):
-            raise ValueError("routed decode needs the fused [gate|up] table and no folded shared row")
+        if mode != "off" and self.shared_folded:
+            raise ValueError("routed decode does not support a folded shared row")
         self.switch_mlp.routed_decode_mode = mode
         return mode
 
@@ -969,8 +1036,8 @@ class Qwen3NextSparseMoeBlock(nn.Module):
                 outcome = getattr(self.switch_mlp, "_last_fused_variant", None)
                 if outcome in self.fused_expert_dispatches:
                     self.fused_expert_dispatches[outcome] += 1
-                elif outcome == "routed_two_launch":
-                    pass  # counted by switch_mlp.routed_decode_calls
+                elif outcome in ("routed_two_launch", "routed_gate_up_down"):
+                    pass  # counted by switch_mlp.routed_down_calls
                 else:
                     self.fused_expert_fallbacks += 1
             elif (
