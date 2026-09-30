@@ -457,6 +457,7 @@ def test_music_generation_backend_contract_and_lora(tmp_path, monkeypatch):
         value = m.blocks[0].attn.to_qkv(mx.ones((1, 4))).mean().item()
         return np.full((2, 64), value, np.float32), min(2, kw["max_frames"])
 
+    (tmp_path / "mlx2-music3-manifest.json").write_text(json.dumps({"files": {}}))
     adapter = music3.Music3Adapter(
         tmp_path,
         runtime_root=tmp_path,
@@ -521,7 +522,11 @@ def test_ltx_native_forwarding_failure_and_unload(tmp_path, monkeypatch):
 
     def run(command, **kwargs):
         if command[0] == "git":
-            return SimpleNamespace(stdout=LTX_RUNTIME_REVISION + "\n")
+            return SimpleNamespace(
+                stdout=LTX_RUNTIME_REVISION + "\n" if "rev-parse" in command else ""
+            )
+        if "--output" not in command:
+            return SimpleNamespace(returncode=0, stdout="")
         if "--lora" in command:
             native = load_file(command[command.index("--lora") + 1])
             assert np.array_equal(
@@ -702,3 +707,284 @@ def test_training_export_failure_restores_prior_training_flags(tmp_path):
     assert m.transformer_blocks[0].attn.to_q is original
     assert {key: module.training for key, module in m.named_modules()} == prior
     assert (existing / "keep").read_text() == "unrelated"
+
+
+def test_bf16_conversion_and_peft_metadata(tmp_path):
+    source = tmp_path / "peft.safetensors"
+    key = "transformer_blocks.0.attn.to_q"
+    mx.save_safetensors(
+        str(source),
+        {
+            key + ".lora_A.weight": mx.full((2, 4), 0.5, dtype=mx.bfloat16),
+            key + ".lora_B.weight": mx.full((3, 2), 0.25, dtype=mx.bfloat16),
+        },
+    )
+    config = tmp_path / "adapter_config.json"
+    config.write_text(json.dumps({"r": 2, "lora_alpha": 4}))
+    result = convert_media_lora(
+        source,
+        tmp_path / "converted",
+        family="qwen-image-2.1",
+        base_fingerprint=BASE,
+        backend_revision=REV,
+        alpha=4,
+    )
+    assert result.config["scale"] == 2
+    assert np.array_equal(result.tensors()[key + ".lora_a"], np.full((4, 2), 0.5))
+    for metadata, alpha, match in [
+        ({"r": 3}, 4, "rank"),
+        ({"lora_alpha": 8}, 4, "alpha"),
+    ]:
+        config.write_text(json.dumps(metadata))
+        with pytest.raises(ValueError, match=match):
+            convert_media_lora(
+                source,
+                tmp_path / "bad",
+                family="qwen-image-2.1",
+                base_fingerprint=BASE,
+                backend_revision=REV,
+                alpha=alpha,
+            )
+
+
+@pytest.mark.parametrize(
+    "source,target",
+    [
+        ("transformer.layers.2.self_attn.to_qkv", "blocks.2.attn.to_qkv"),
+        ("transformer.layers.2.self_attn.to_out", "blocks.2.attn.to_out"),
+        ("transformer.layers.2.ff.ff.0.proj", "blocks.2.ff_in"),
+        ("transformer.layers.2.ff.ff.2", "blocks.2.ff_out"),
+    ],
+)
+def test_music_reference_target_mapping(source, target):
+    assert target_key("minimax-music3", source) == target
+    with pytest.raises(ValueError):
+        target_key("minimax-music3", "diffusion_transformer." + source)
+
+
+def test_artifact_consumes_same_bytes_it_hashes(tmp_path, monkeypatch):
+    from pathlib import Path
+
+    from safetensors.numpy import save
+
+    _m, key = model()
+    a = artifact(tmp_path / "a", "qwen-image-2.1", key)
+    weights = a.path / "adapters.safetensors"
+    original = Path.read_bytes
+    replacement = save(
+        {
+            key + ".lora_a": np.full((4, 2), 9, np.float32),
+            key + ".lora_b": np.full((2, 3), 9, np.float32),
+        }
+    )
+
+    def read(path):
+        data = original(path)
+        if path == weights:
+            weights.write_bytes(replacement)
+        return data
+
+    monkeypatch.setattr(Path, "read_bytes", read)
+    assert np.array_equal(a.tensors()[key + ".lora_b"], np.ones((2, 3)))
+    with pytest.raises(ValueError, match="weights changed"):
+        a.tensors()
+
+
+def test_trained_requires_complete_loss_evidence(tmp_path):
+    _m, key = model()
+    with pytest.raises(ValueError, match="training evidence"):
+        write_media_lora(
+            tmp_path / "a",
+            {
+                key + ".lora_a": np.ones((4, 2), np.float32),
+                key + ".lora_b": np.ones((2, 3), np.float32),
+            },
+            family="qwen-image-2.1",
+            base_fingerprint=BASE,
+            backend_revision=REV,
+            training={"trained": True},
+        )
+    assert not (tmp_path / "a").exists()
+
+
+def test_editor_only_lora_load_and_lazy_generator(tmp_path, monkeypatch):
+    from mlx2.adapters import generative_media as media
+
+    monkeypatch.setattr(
+        media,
+        "inspect_qwen_image21",
+        lambda p: media.MediaArtifact("qwen-image-2.1", tmp_path, "s", BASE),
+    )
+    calls = []
+
+    def factory(path, edit):
+        calls.append(edit)
+        m, _ = model()
+        return SimpleNamespace(
+            pipeline=SimpleNamespace(transformer=m),
+            generate=lambda request: SimpleNamespace(
+                array=np.zeros((256, 256, 3), np.uint8)
+            ),
+        )
+
+    owner = media.QwenImage21Adapter(tmp_path, backend_factory=factory)
+    owner._editor = owner._model(edit=True)
+    key = "transformer_blocks.0.attn.to_q"
+    a = write_media_lora(
+        tmp_path / "a",
+        {
+            key + ".lora_a": np.ones((4, 2), np.float32),
+            key + ".lora_b": np.ones((2, 3), np.float32),
+        },
+        family="qwen-image-2.1",
+        base_fingerprint=BASE,
+        backend_revision=media.QWEN_BACKEND_REVISION,
+    )
+    owner.load_lora(a.path)
+    assert (
+        calls == [True] and owner._generator is None and len(owner._lora_sessions) == 1
+    )
+    owner.generate_image("test", width=256, height=256)
+    assert calls == [True, False] and len(owner._lora_sessions) == 2
+    owner.unload_lora()
+    assert all(
+        not hasattr(b.pipeline.transformer.transformer_blocks[0].attn.to_q, "lora_a")
+        for b in (owner._editor, owner._generator)
+    )
+
+
+@pytest.mark.parametrize(
+    "shadow", ["transformer.safetensors", "transformer-distilled-1.1.safetensors"]
+)
+def test_ltx_rejects_native_checkpoint_shadows(tmp_path, shadow):
+    from mlx2.adapters.generative_media import LTX25Adapter
+
+    owner = object.__new__(LTX25Adapter)
+    owner.mlx_model = tmp_path
+    (tmp_path / shadow).write_bytes(b"shadow")
+    with pytest.raises(ValueError, match="shadow"):
+        owner._verify_execution_identity()
+
+
+def test_music_lazy_loader_rejects_changed_or_new_inputs(tmp_path, monkeypatch):
+    from mlx2.adapters import music3
+
+    monkeypatch.setattr(
+        music3,
+        "inspect_music3",
+        lambda p: music3.MediaArtifact("minimax-music3", tmp_path, "s", BASE),
+    )
+    (tmp_path / "flowmatching_vae.pth").write_bytes(b"original")
+    (tmp_path / "mlx2-music3-manifest.json").write_text(
+        json.dumps({"files": {"flowmatching_vae.pth": {}}})
+    )
+    calls = []
+    owner = music3.Music3Adapter(
+        tmp_path, runtime_root=tmp_path, backend_factory=lambda p: calls.append(p)
+    )
+    (tmp_path / "flowmatching_vae.pth").write_bytes(b"changed!")
+    with pytest.raises(ValueError, match="changed"):
+        owner._ensure_backend()
+    assert not calls and owner._backend is None
+
+
+def test_generation_and_unload_serialize(tmp_path, monkeypatch):
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+
+    from mlx2.adapters import generative_media as media
+
+    monkeypatch.setattr(
+        media,
+        "inspect_qwen_image21",
+        lambda p: media.MediaArtifact("qwen-image-2.1", tmp_path, "s", BASE),
+    )
+    entered, release, unload_started = (
+        threading.Event(),
+        threading.Event(),
+        threading.Event(),
+    )
+    m, key = model()
+
+    def generate(request):
+        assert hasattr(m.transformer_blocks[0].attn.to_q, "lora_a")
+        entered.set()
+        assert release.wait(5)
+        assert hasattr(m.transformer_blocks[0].attn.to_q, "lora_a")
+        return SimpleNamespace(array=np.zeros((256, 256, 3), np.uint8))
+
+    owner = media.QwenImage21Adapter(
+        tmp_path,
+        backend_factory=lambda path, edit: SimpleNamespace(
+            pipeline=SimpleNamespace(transformer=m), generate=generate
+        ),
+    )
+    a = write_media_lora(
+        tmp_path / "a",
+        {
+            key + ".lora_a": np.ones((4, 2), np.float32),
+            key + ".lora_b": np.ones((2, 3), np.float32),
+        },
+        family="qwen-image-2.1",
+        base_fingerprint=BASE,
+        backend_revision=media.QWEN_BACKEND_REVISION,
+    )
+    owner.load_lora(a.path)
+
+    def unload():
+        unload_started.set()
+        return owner.unload_lora()
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        render = pool.submit(owner.generate_image, "test", width=256, height=256)
+        try:
+            assert entered.wait(5)
+            removing = pool.submit(unload)
+            assert unload_started.wait(5)
+            assert not removing.done()
+        finally:
+            release.set()
+        assert render.result().lora_fingerprint == a.fingerprint
+        assert not removing.result()["selected"]
+    assert not hasattr(m.transformer_blocks[0].attn.to_q, "lora_a")
+
+
+def test_ltx_rejects_dirty_runtime_and_checks_import_origin(tmp_path, monkeypatch):
+    from mlx2.adapters import generative_media as media
+
+    owner = object.__new__(media.LTX25Adapter)
+    owner.mlx_model = tmp_path
+    owner.runtime_root = tmp_path
+    owner.executable = tmp_path / "python"
+    owner._conversion_identity = {}
+    calls = []
+    dirty = [True]
+
+    def run(command, **kwargs):
+        calls.append(command)
+        return SimpleNamespace(
+            stdout=media.LTX_RUNTIME_REVISION
+            if "rev-parse" in command
+            else (" M packages/a.py" if dirty[0] and "status" in command else "")
+        )
+
+    monkeypatch.setattr(media.subprocess, "run", run)
+    with pytest.raises(ValueError, match="packages"):
+        owner._verify_execution_identity()
+    assert len(calls) == 2
+    dirty[0] = False
+    owner._verify_execution_identity()
+    assert calls[-1][0] == str(owner.executable)
+    assert "__file__" in calls[-1][2]
+
+
+def test_music_pins_package_initialization_before_import(tmp_path, monkeypatch):
+    from mlx2.adapters import music3
+
+    monkeypatch.setattr(music3, "SOURCE_SHA256", {})
+    monkeypatch.setenv("MM3_MLX_LM_UNIFIED", str(tmp_path / "unified"))
+    package = tmp_path / "unified/mlx_lm"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text("raise RuntimeError('must not execute')")
+    with pytest.raises(ValueError, match="Python package"):
+        music3._runtime_modules(tmp_path)

@@ -109,6 +109,8 @@ def main():
     else:
         import subprocess
 
+        import ltx_core_mlx
+        import ltx_pipelines_mlx
         from ltx_core_mlx.model.transformer.model import LTXModel, LTXModelConfig
 
         from mlx2.adapters.generative_media import LTX_RUNTIME_REVISION
@@ -122,6 +124,28 @@ def main():
             != LTX_RUNTIME_REVISION
         ):
             raise ValueError("LTX source pin differs")
+        package_root = args.runtime_root.expanduser().resolve() / "packages"
+        if any(
+            not Path(module.__file__).resolve().is_relative_to(package_root)
+            for module in (ltx_core_mlx, ltx_pipelines_mlx)
+        ):
+            raise ValueError(
+                "LTX qualification import origin differs from runtime root"
+            )
+        if subprocess.check_output(
+            [
+                "git",
+                "-C",
+                str(args.runtime_root),
+                "status",
+                "--porcelain",
+                "--untracked-files=all",
+                "--",
+                "packages",
+            ],
+            text=True,
+        ).strip():
+            raise ValueError("LTX qualification runtime packages are dirty")
         revision = LTX_RUNTIME_REVISION
         config = {
             "num_layers": 1,

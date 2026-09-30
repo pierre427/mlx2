@@ -24,3 +24,6 @@ UNIFIED_SHA256 = {
     "mlx_lm/models/cache.py": "fd7f25548166e60c46fae24f1f16f962111eef1d0ceaeba8071f9fb09a0ccc4b",
     "mlx_lm/models/activations.py": "dbca5bae41ba0a8380a53903c3e98da37c1e15b46383bc2edb5806ba94fafe72",
 }
+
+# Whole package includes initialization and transitive Python imports.
+UNIFIED_TREE_SHA256 = "2df3cedc24b99639e0567c02a8aad52428d3836bab32045ff0dda69be8530a45"

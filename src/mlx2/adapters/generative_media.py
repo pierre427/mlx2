@@ -25,7 +25,9 @@ QWEN_REVISION = "790c92633540aa0cb11d9abf19eb46d861714758"
 GGUF_REVISION = "40319fb15542f0ad22921e0124a191a8a935a60a"
 LTX_REVISION = "5e6e71018ee1756ed329b697a7b4aedc934dfce9"
 LTX_RUNTIME_REVISION = "fbc4b0524dd1e01da2d07a44e14dd9dfe0a74d5e"
-LTX_CONVERTER_SHA256 = "2c880778d7772275b96f4eef4ee32376a29de0c94de52f4ca2b0aaccad9af98e"
+LTX_CONVERTER_SHA256 = (
+    "2c880778d7772275b96f4eef4ee32376a29de0c94de52f4ca2b0aaccad9af98e"
+)
 # The Qwen image backend runs on the one mlx-vlm pin shared by every mlx-vlm
 # route (``mlx_vlm_pin.MLX_VLM_REVISION``).
 QWEN_BACKEND_REVISION = MLX_VLM_REVISION
@@ -35,10 +37,12 @@ QWEN_BACKEND_REVISION = MLX_VLM_REVISION
 # existing 8-bit artifact was converted and first qualified on (upstream
 # 884bbd93 plus a cache.py-only change); its qwen_image tree differs from
 # 67599f2e only by the num_images batching of #2355.
-QWEN_CONVERSION_BACKEND_REVISIONS = frozenset({
-    "cc8b86f110278505296d461f612ee41c21d5fd65",
-    MLX_VLM_REVISION,
-})
+QWEN_CONVERSION_BACKEND_REVISIONS = frozenset(
+    {
+        "cc8b86f110278505296d461f612ee41c21d5fd65",
+        MLX_VLM_REVISION,
+    }
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -96,9 +100,9 @@ def _complete_snapshot(path: Path, *, repo: str, revision: str) -> dict[str, Any
         raise ValueError(f"unverified {repo} revision at {path}")
     if manifest.get("repo") != repo or manifest.get("revision") != revision:
         raise ValueError(f"manifest revision differs at {path}")
-    if receipt.get("files") != len(manifest["files"]) or receipt.get("total_bytes") != sum(
-        entry["size"] for entry in manifest["files"]
-    ):
+    if receipt.get("files") != len(manifest["files"]) or receipt.get(
+        "total_bytes"
+    ) != sum(entry["size"] for entry in manifest["files"]):
         raise ValueError(f"completion marker differs from manifest at {path}")
     for entry in manifest["files"]:
         rel = Path(entry["path"])
@@ -120,7 +124,10 @@ def inspect_qwen_image21(path: str | Path) -> MediaArtifact:
         raise ValueError("expected Qwen-Image-2.1 pipeline")
     if transformer.get("_class_name") != "QwenImage21Transformer2DModel":
         raise ValueError("expected Qwen-Image-2.1 transformer")
-    if (transformer.get("num_layers"), transformer.get("num_attention_heads")) != (32, 32):
+    if (transformer.get("num_layers"), transformer.get("num_attention_heads")) != (
+        32,
+        32,
+    ):
         raise ValueError("unexpected Qwen-Image-2.1 topology")
     official_conversion = root / "mlx2-official-conversion.json"
     if official_conversion.exists():
@@ -136,7 +143,10 @@ def inspect_qwen_image21(path: str | Path) -> MediaArtifact:
         ):
             raise ValueError("official Qwen 8-bit conversion identity differs")
         encoder = _json(root / "text_encoder" / "config.json")
-        if encoder.get("quantization") != quantization or encoder.get("mlx_format") is not True:
+        if (
+            encoder.get("quantization") != quantization
+            or encoder.get("mlx_format") is not True
+        ):
             raise ValueError("Qwen text encoder is not the matching MLX 8-bit format")
         files = proof.get("output_files")
         if not isinstance(files, dict) or not files:
@@ -151,11 +161,16 @@ def inspect_qwen_image21(path: str | Path) -> MediaArtifact:
                 or _file_sha256(target) != record.get("sha256")
             ):
                 raise ValueError(f"official Qwen 8-bit output changed: {name}")
-        return MediaArtifact("qwen-image-2.1-official-mlx-8bit", root, QWEN_REVISION, _fingerprint(proof))
+        return MediaArtifact(
+            "qwen-image-2.1-official-mlx-8bit", root, QWEN_REVISION, _fingerprint(proof)
+        )
     conversion = root / "mlx2-conversion.json"
     if conversion.exists():
         proof = _json(conversion)
-        if proof.get("source_revision") != GGUF_REVISION or proof.get("base_revision") != QWEN_REVISION:
+        if (
+            proof.get("source_revision") != GGUF_REVISION
+            or proof.get("base_revision") != QWEN_REVISION
+        ):
             raise ValueError("converted GGUF lacks its pinned base components")
         if proof.get("tensor_count") != 297 or len(proof.get("output_files", {})) != 33:
             raise ValueError("converted GGUF transformer is incomplete")
@@ -180,26 +195,40 @@ def inspect_qwen_image21(path: str | Path) -> MediaArtifact:
                 or _file_sha256(target) != record.get("sha256")
             ):
                 raise ValueError(f"converted base component changed: {name}")
-        for rel in ("processor/tokenizer.json", "text_encoder/config.json", "vae/config.json"):
+        for rel in (
+            "processor/tokenizer.json",
+            "text_encoder/config.json",
+            "vae/config.json",
+        ):
             if not (root / rel).is_file():
                 raise ValueError(f"converted pipeline lacks {rel}")
         quantization = {"group_size": 64, "bits": 4, "mode": "affine"}
-        if proof.get("output_dtype") == "bfloat16" and proof.get("quantization") is None:
+        if (
+            proof.get("output_dtype") == "bfloat16"
+            and proof.get("quantization") is None
+        ):
             kind = "qwen-image-2.1-gguf-mlx-bf16"
-        elif proof.get("output_dtype") == "mlx-affine-4bit" and proof.get("quantization") == quantization:
+        elif (
+            proof.get("output_dtype") == "mlx-affine-4bit"
+            and proof.get("quantization") == quantization
+        ):
             if transformer.get("quantization") != quantization:
                 raise ValueError("converted transformer quantization config differs")
             kind = "qwen-image-2.1-gguf-mlx-4bit"
         else:
             raise ValueError("converted transformer format is unsupported")
         return MediaArtifact(kind, root, GGUF_REVISION, _fingerprint(proof))
-    manifest = _complete_snapshot(root, repo="Qwen/Qwen-Image-2.1", revision=QWEN_REVISION)
+    manifest = _complete_snapshot(
+        root, repo="Qwen/Qwen-Image-2.1", revision=QWEN_REVISION
+    )
     return MediaArtifact("qwen-image-2.1", root, QWEN_REVISION, _fingerprint(manifest))
 
 
 def inspect_ltx25_source(path: str | Path) -> MediaArtifact:
     root = Path(path).expanduser().resolve()
-    manifest = _complete_snapshot(root, repo="Lightricks/LTX-2.5", revision=LTX_REVISION)
+    manifest = _complete_snapshot(
+        root, repo="Lightricks/LTX-2.5", revision=LTX_REVISION
+    )
     names = {entry["path"] for entry in manifest["files"]}
     required = {
         "diffusion_models/ltx-2.5-22b-distilled-transformer-bf16.safetensors",
@@ -209,7 +238,9 @@ def inspect_ltx25_source(path: str | Path) -> MediaArtifact:
     }
     if not required.issubset(names):
         raise ValueError("LTX-2.5 distilled pipeline is incomplete")
-    return MediaArtifact("ltx-2.5-distilled-source", root, LTX_REVISION, _fingerprint(manifest))
+    return MediaArtifact(
+        "ltx-2.5-distilled-source", root, LTX_REVISION, _fingerprint(manifest)
+    )
 
 
 def _verify_qwen_backend_revision() -> dict:
@@ -236,13 +267,15 @@ class QwenImage21Adapter(MediaLoRAControl):
         self._init_lora("qwen-image-2.1", QWEN_BACKEND_REVISION)
 
     def _lora_models(self):
-        if self._generator is None:
+        if self._generator is None and self._editor is None:
             self._generator = self._model(edit=False)
-        models = [self._generator]
-        if self._editor is not None:
-            models.append(self._editor)
+        models = [m for m in (self._generator, self._editor) if m is not None]
         # Some factories share a pipeline: install once per transformer identity.
-        return list({id(m.pipeline.transformer): m.pipeline.transformer for m in models}.values())
+        return list(
+            {
+                id(m.pipeline.transformer): m.pipeline.transformer for m in models
+            }.values()
+        )
 
     def _model(self, *, edit: bool) -> Any:
         if self._backend_factory is not None:
@@ -258,26 +291,42 @@ class QwenImage21Adapter(MediaLoRAControl):
 
     @serialized
     def generate_image(
-        self, prompt: str, *, width: int = 1024, height: int = 1024,
-        steps: int = 30, seed: int = 0,
+        self,
+        prompt: str,
+        *,
+        width: int = 1024,
+        height: int = 1024,
+        steps: int = 30,
+        seed: int = 0,
     ) -> GeneratedImage:
         self._validate_request(prompt, width, height, steps)
         from mlx_vlm.generate.image import ImageGenerationRequest
 
         if self._generator is None:
             candidate = self._model(edit=False)
-            if self._lora is not None:
+            if self._lora is not None and not any(
+                session.model is candidate.pipeline.transformer
+                for session in self._lora_sessions
+            ):
                 self._attach_lora(candidate.pipeline.transformer)
             self._generator = candidate
         result = self._generator.generate(
-            ImageGenerationRequest(prompt=prompt, width=width, height=height, steps=steps, seed=seed)
+            ImageGenerationRequest(
+                prompt=prompt, width=width, height=height, steps=steps, seed=seed
+            )
         )
         return self._encode(result.array)
 
     @serialized
     def edit_image(
-        self, prompt: str, image_paths: list[str | Path], *,
-        width: int = 1024, height: int = 1024, steps: int = 40, seed: int = 0,
+        self,
+        prompt: str,
+        image_paths: list[str | Path],
+        *,
+        width: int = 1024,
+        height: int = 1024,
+        steps: int = 40,
+        seed: int = 0,
     ) -> GeneratedImage:
         self._validate_request(prompt, width, height, steps)
         if not image_paths:
@@ -289,19 +338,36 @@ class QwenImage21Adapter(MediaLoRAControl):
 
         if self._editor is None:
             candidate = self._model(edit=True)
-            if self._lora is not None and not any(session.model is candidate.pipeline.transformer for session in self._lora_sessions):
+            if self._lora is not None and not any(
+                session.model is candidate.pipeline.transformer
+                for session in self._lora_sessions
+            ):
                 self._attach_lora(candidate.pipeline.transformer)
             self._editor = candidate
-        result = self._editor.edit(ImageEditRequest(
-            prompt=prompt, image_paths=[str(path) for path in references],
-            width=width, height=height, steps=steps, seed=seed,
-        ))
+        result = self._editor.edit(
+            ImageEditRequest(
+                prompt=prompt,
+                image_paths=[str(path) for path in references],
+                width=width,
+                height=height,
+                steps=steps,
+                seed=seed,
+            )
+        )
         return self._encode(result.array)
 
     @staticmethod
     def _validate_request(prompt: str, width: int, height: int, steps: int) -> None:
-        if not prompt.strip() or width < 256 or height < 256 or width % 16 or height % 16:
-            raise ValueError("prompt and 16-aligned dimensions of at least 256 are required")
+        if (
+            not prompt.strip()
+            or width < 256
+            or height < 256
+            or width % 16
+            or height % 16
+        ):
+            raise ValueError(
+                "prompt and 16-aligned dimensions of at least 256 are required"
+            )
         if not 1 <= steps <= 100:
             raise ValueError("steps must be in 1..100")
 
@@ -310,18 +376,41 @@ class QwenImage21Adapter(MediaLoRAControl):
         from PIL import Image
 
         pixels = np.array(array)
-        if pixels.dtype != np.uint8 or pixels.ndim != 3 or pixels.shape[2] not in (3, 4):
+        if (
+            pixels.dtype != np.uint8
+            or pixels.ndim != 3
+            or pixels.shape[2] not in (3, 4)
+        ):
             raise ValueError("Qwen image backend returned invalid pixels")
         buffer = io.BytesIO()
         Image.fromarray(pixels).save(buffer, format="PNG")
         self._mark_lora_used()
-        return GeneratedImage(buffer.getvalue(), "image/png", pixels.shape[1], pixels.shape[0], self.artifact.fingerprint, self._lora.fingerprint if self._lora else None, self._lora_epoch)
+        return GeneratedImage(
+            buffer.getvalue(),
+            "image/png",
+            pixels.shape[1],
+            pixels.shape[0],
+            self.artifact.fingerprint,
+            self._lora.fingerprint if self._lora else None,
+            self._lora_epoch,
+        )
+
+
+def _ltx_origin_probe():
+    return (
+        "import sys; from pathlib import Path; import ltx_core_mlx, ltx_pipelines_mlx; "
+        "root=Path(sys.argv[1]).resolve()/'packages'; "
+        "assert all(Path(m.__file__).resolve().is_relative_to(root) "
+        "for m in (ltx_core_mlx, ltx_pipelines_mlx)), 'LTX import origin differs from pinned source'"
+    )
 
 
 class LTX25Adapter(MediaLoRAControl):
     """Distilled LTX video bridge to a pinned local ltx-2-mlx runtime."""
 
-    def __init__(self, *, source: str | Path, mlx_model: str | Path, runtime_root: str | Path) -> None:
+    def __init__(
+        self, *, source: str | Path, mlx_model: str | Path, runtime_root: str | Path
+    ) -> None:
         self.artifact = inspect_ltx25_source(source)
         self._init_lora("ltx-2.5", LTX_RUNTIME_REVISION)
         self.mlx_model = Path(mlx_model).expanduser().resolve()
@@ -331,17 +420,27 @@ class LTX25Adapter(MediaLoRAControl):
             raise ValueError("LTX MLX conversion is not version 2.5")
         if not (self.mlx_model / "transformer-distilled.safetensors").is_file():
             raise ValueError("LTX MLX distilled transformer is missing")
+        self._verify_checkpoint_selection()
         conversion = _json(self.mlx_model / ".mlx2-cpu-conversion.json")
         if (
             conversion.get("source_fingerprint") != self.artifact.fingerprint
             or conversion.get("runtime_revision") != LTX_RUNTIME_REVISION
             or conversion.get("converter_sha256") != LTX_CONVERTER_SHA256
-            or set(conversion.get("steps", {})) != {
-                "config", "transformer-distilled", "connector", "text-encoder",
-                "vae", "audio-vae", "duration-head", "upscalers",
+            or set(conversion.get("steps", {}))
+            != {
+                "config",
+                "transformer-distilled",
+                "connector",
+                "text-encoder",
+                "vae",
+                "audio-vae",
+                "duration-head",
+                "upscalers",
             }
         ):
-            raise ValueError("LTX conversion receipt is incomplete or source mismatched")
+            raise ValueError(
+                "LTX conversion receipt is incomplete or source mismatched"
+            )
         for records in conversion["steps"].values():
             if not isinstance(records, dict) or not records:
                 raise ValueError("LTX conversion output checksums are missing")
@@ -355,33 +454,89 @@ class LTX25Adapter(MediaLoRAControl):
                     or _file_sha256(path) != record.get("sha256")
                 ):
                     raise ValueError(f"LTX conversion output changed: {name}")
-        self._conversion_identity = {name: self._file_identity(self.mlx_model / name) for records in conversion["steps"].values() for name in records}
+        self._conversion_identity = {
+            name: self._file_identity(self.mlx_model / name)
+            for records in conversion["steps"].values()
+            for name in records
+        }
         revision = subprocess.run(
             ["git", "-C", str(self.runtime_root), "rev-parse", "HEAD"],
-            check=True, capture_output=True, text=True, timeout=5,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=5,
         ).stdout.strip()
         if revision != LTX_RUNTIME_REVISION:
-            raise ValueError("LTX runtime revision differs from the inspected implementation")
-        self._lora_base_identity = _fingerprint({"source_fingerprint": self.artifact.fingerprint, "conversion": conversion})
+            raise ValueError(
+                "LTX runtime revision differs from the inspected implementation"
+            )
+        self._lora_base_identity = _fingerprint(
+            {"source_fingerprint": self.artifact.fingerprint, "conversion": conversion}
+        )
         self.executable = self.runtime_root / ".venv" / "bin" / "python"
         if not self.executable.is_file():
             raise ValueError("LTX runtime executable is missing")
+        if "transformer-distilled.safetensors" not in self._conversion_identity:
+            raise ValueError(
+                "LTX canonical transformer is absent from conversion receipt"
+            )
+        self._verify_execution_identity()
 
     @staticmethod
     def _file_identity(path):
         st = path.stat()
         return (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns)
 
+    def _verify_checkpoint_selection(self):
+        # The native resolver prefers these files over our receipt-bound name.
+        if (self.mlx_model / "transformer.safetensors").exists() or any(
+            self.mlx_model.glob("transformer-distilled-*.safetensors")
+        ):
+            raise ValueError("LTX shadow transformer checkpoint is unbound")
+
     def _verify_execution_identity(self):
+        self._verify_checkpoint_selection()
         # Checksums were verified at construction; reject changed files rather
         # than silently use different weights under the old base identity.
         for name, expected in self._conversion_identity.items():
             if self._file_identity(self.mlx_model / name) != expected:
-                raise ValueError(f"LTX converted artifact changed since inspection: {name}")
-        revision = subprocess.run(["git", "-C", str(self.runtime_root), "rev-parse", "HEAD"],
-                                  check=True, capture_output=True, text=True, timeout=5).stdout.strip()
+                raise ValueError(
+                    f"LTX converted artifact changed since inspection: {name}"
+                )
+        revision = subprocess.run(
+            ["git", "-C", str(self.runtime_root), "rev-parse", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        ).stdout.strip()
         if revision != LTX_RUNTIME_REVISION:
             raise ValueError("LTX runtime revision changed since inspection")
+        dirty = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(self.runtime_root),
+                "status",
+                "--porcelain",
+                "--untracked-files=all",
+                "--",
+                "packages",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        ).stdout.strip()
+        if dirty:
+            raise ValueError("LTX runtime packages differ from pinned source")
+        subprocess.run(
+            [str(self.executable), "-c", _ltx_origin_probe(), str(self.runtime_root)],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
 
     def _lora_models(self):
         # Native CLI owns model loading. Validate every canonical target against
@@ -391,16 +546,24 @@ class LTX25Adapter(MediaLoRAControl):
     @serialized
     def load_lora(self, path):
         from mlx2.runtime.media_lora import inspect_media_lora
-        artifact = inspect_media_lora(path, family="ltx-2.5", base_fingerprint=self.lora_base_fingerprint,
-                                      backend_revision=LTX_RUNTIME_REVISION)
+
+        artifact = inspect_media_lora(
+            path,
+            family="ltx-2.5",
+            base_fingerprint=self.lora_base_fingerprint,
+            backend_revision=LTX_RUNTIME_REVISION,
+        )
         self._validate_ltx_lora(artifact)
         return super().load_lora(path)
 
     def _validate_ltx_lora(self, artifact):
         self._verify_execution_identity()
         from safetensors import safe_open
+
         tensors = artifact.tensors()
-        with safe_open(str(self.mlx_model / "transformer-distilled.safetensors"), framework="numpy") as f:
+        with safe_open(
+            str(self.mlx_model / "transformer-distilled.safetensors"), framework="numpy"
+        ) as f:
             names = set(f.keys())
             for key in artifact.keys:
                 weight = f"transformer.{key}.weight"
@@ -409,7 +572,9 @@ class LTX25Adapter(MediaLoRAControl):
                 if f"transformer.{key}.scales" in names:
                     # Native fusion guesses quantization geometry and re-quantizes;
                     # preserve exact ordinary weights by accepting float targets only.
-                    raise ValueError("LTX LoRA fusion of quantized targets is unsupported")
+                    raise ValueError(
+                        "LTX LoRA fusion of quantized targets is unsupported"
+                    )
                 shape = f.get_slice(weight).get_shape()
                 a, b = tensors[key + ".lora_a"], tensors[key + ".lora_b"]
                 if len(shape) != 2 or (b.shape[1], a.shape[0]) != tuple(shape):
@@ -417,12 +582,27 @@ class LTX25Adapter(MediaLoRAControl):
 
     @serialized
     def generate_video(
-        self, prompt: str, *, output: str | Path, width: int = 704,
-        height: int = 480, frames: int = 97, frame_rate: int = 24,
-        seed: int = 0, timeout_seconds: int = 7200,
+        self,
+        prompt: str,
+        *,
+        output: str | Path,
+        width: int = 704,
+        height: int = 480,
+        frames: int = 97,
+        frame_rate: int = 24,
+        seed: int = 0,
+        timeout_seconds: int = 7200,
     ) -> GeneratedVideo:
-        if not prompt.strip() or width % 32 or height % 32 or width < 256 or height < 256:
-            raise ValueError("prompt and 32-aligned dimensions of at least 256 are required")
+        if (
+            not prompt.strip()
+            or width % 32
+            or height % 32
+            or width < 256
+            or height < 256
+        ):
+            raise ValueError(
+                "prompt and 32-aligned dimensions of at least 256 are required"
+            )
         if frames < 9 or (frames - 1) % 8 or frame_rate <= 0:
             raise ValueError("LTX frames must be 8n+1 and frame rate positive")
         self._verify_execution_identity()
@@ -440,26 +620,62 @@ class LTX25Adapter(MediaLoRAControl):
         # Keep partial renders private, including on timeout. A same-filesystem
         # exclusive link publishes the completed file without replacing a
         # competing writer that arrived after the initial existence check.
-        with tempfile.TemporaryDirectory(prefix=".mlx2-ltx-", dir=target.parent) as staging:
+        with tempfile.TemporaryDirectory(
+            prefix=".mlx2-ltx-", dir=target.parent
+        ) as staging:
             rendered = Path(staging) / target.name
             command = [
-                str(self.executable), "-c", runner, "generate", "--distilled", "--model", str(self.mlx_model),
-                "--gemma", str(self.mlx_model / "text_encoder"), "--output", str(rendered),
-                "--width", str(width), "--height", str(height), "--frames", str(frames),
-                "--frame-rate", str(frame_rate), "--seed", str(seed), "--quiet",
+                str(self.executable),
+                "-c",
+                runner,
+                "generate",
+                "--distilled",
+                "--model",
+                str(self.mlx_model),
+                "--gemma",
+                str(self.mlx_model / "text_encoder"),
+                "--output",
+                str(rendered),
+                "--width",
+                str(width),
+                "--height",
+                str(height),
+                "--frames",
+                str(frames),
+                "--frame-rate",
+                str(frame_rate),
+                "--seed",
+                str(seed),
+                "--quiet",
             ]
             if self._lora is not None:
                 from mlx2.runtime.media_lora import export_ltx_native
+
                 self._validate_ltx_lora(self._lora)
                 native = Path(staging) / "lora.safetensors"
                 export_ltx_native(self._lora, native)
                 command.extend(["--lora", str(native), "1.0"])
             completed = subprocess.run(
-                command, input=prompt, env=environment, capture_output=True,
-                text=True, timeout=timeout_seconds, check=False,
+                command,
+                input=prompt,
+                env=environment,
+                capture_output=True,
+                text=True,
+                timeout=timeout_seconds,
+                check=False,
             )
-            if completed.returncode or not rendered.is_file() or rendered.stat().st_size == 0:
+            if (
+                completed.returncode
+                or not rendered.is_file()
+                or rendered.stat().st_size == 0
+            ):
                 raise RuntimeError(f"LTX generation failed: {completed.stderr[-2000:]}")
             os.link(rendered, target)
         self._mark_lora_used()
-        return GeneratedVideo(target, "video/mp4", self.artifact.fingerprint, self._lora.fingerprint if self._lora else None, self._lora_epoch)
+        return GeneratedVideo(
+            target,
+            "video/mp4",
+            self.artifact.fingerprint,
+            self._lora.fingerprint if self._lora else None,
+            self._lora_epoch,
+        )

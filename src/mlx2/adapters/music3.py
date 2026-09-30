@@ -6,6 +6,7 @@ No automatic serving route is registered by this direct adapter.
 
 from __future__ import annotations
 
+import hashlib
 import importlib
 import io
 import json
@@ -15,9 +16,15 @@ import wave
 from dataclasses import dataclass
 from pathlib import Path
 
-from .generative_media import MediaArtifact, _file_sha256, _fingerprint, _json
+from .generative_media import (
+    LTX25Adapter,
+    MediaArtifact,
+    _file_sha256,
+    _fingerprint,
+    _json,
+)
 from .media_lora_control import MediaLoRAControl, serialized
-from .music3_pin import SOURCE_SHA256, UNIFIED_SHA256
+from .music3_pin import SOURCE_SHA256, UNIFIED_SHA256, UNIFIED_TREE_SHA256
 
 MUSIC3_SOURCE_REVISION = "fbdf52fbaaca799592917417eb05f1899f1255ec"
 MUSIC3_RUNTIME_REVISION = "36cddae1146af463cace351af4a1404042ce3268"
@@ -103,6 +110,12 @@ def _runtime_modules(runtime_root):
         .expanduser()
         .resolve()
     )
+    tree = hashlib.sha256()
+    for path in sorted((unified / "mlx_lm").rglob("*.py")):
+        name = str(path.relative_to(unified))
+        tree.update(name.encode() + b"\0" + bytes.fromhex(_file_sha256(path)))
+    if tree.hexdigest() != UNIFIED_TREE_SHA256:
+        raise ValueError("Music3 unified Python package differs from pinned revision")
     for name, expected in UNIFIED_SHA256.items():
         if _file_sha256(unified / name) != expected:
             raise ValueError(f"Music3 unified dependency changed: {name}")
@@ -112,6 +125,13 @@ def _runtime_modules(runtime_root):
             file = getattr(module, "__file__", None)
             if file is None or not Path(file).resolve().is_relative_to(package):
                 raise RuntimeError("another Music3 runtime is already imported")
+    for name, module in list(sys.modules.items()):
+        if name == "mlx_lm" or name.startswith("mlx_lm."):
+            file = getattr(module, "__file__", None)
+            if file is None or not Path(file).resolve().is_relative_to(
+                unified / "mlx_lm"
+            ):
+                raise RuntimeError("another unified dependency is already imported")
     sys.path.insert(0, str(root))
     try:
         modules = {
@@ -126,11 +146,15 @@ def _runtime_modules(runtime_root):
                 "prompt",
             )
         }
-        for name in UNIFIED_SHA256:
-            module_name = name[:-3].replace("/", ".")
-            module = sys.modules.get(module_name)
-            if module is not None and Path(module.__file__).resolve() != unified / name:
-                raise RuntimeError("Music3 unified dependency import identity differs")
+        for name, module in list(sys.modules.items()):
+            if name == "mlx_lm" or name.startswith("mlx_lm."):
+                file = getattr(module, "__file__", None)
+                if file is None or not Path(file).resolve().is_relative_to(
+                    unified / "mlx_lm"
+                ):
+                    raise RuntimeError(
+                        "Music3 unified dependency import identity differs"
+                    )
         return modules
     finally:
         sys.path.remove(str(root))
@@ -139,13 +163,36 @@ def _runtime_modules(runtime_root):
 class Music3Adapter(MediaLoRAControl):
     def __init__(self, path, *, runtime_root, backend_factory=None):
         self.artifact = inspect_music3(path)
+        proof = _json(self.artifact.path / "mlx2-music3-manifest.json")
+        self._input_identity = {
+            name: LTX25Adapter._file_identity(self.artifact.path / name)
+            for name in (*proof["files"], "mlx2-music3-manifest.json")
+        }
         self.runtime_root = Path(runtime_root).expanduser().resolve()
         self._backend_factory = backend_factory
+        if inspect_music3(path).fingerprint != self.artifact.fingerprint:
+            raise ValueError("Music3 snapshot changed during inspection")
         self._backend = None
         self._init_lora("minimax-music3", MUSIC3_RUNTIME_REVISION)
 
+    def _verify_input_identity(self):
+        for name, expected in self._input_identity.items():
+            if LTX25Adapter._file_identity(self.artifact.path / name) != expected:
+                raise ValueError(
+                    f"Music3 loader input changed since inspection: {name}"
+                )
+        root = self.artifact.path
+        for folder in ("qwen_7B/qwen_7B", "qwen_7B/qwen3-8B-tokenizer-music"):
+            if any(
+                str(p.relative_to(root)) not in self._input_identity
+                for p in (root / folder).rglob("*")
+                if p.is_file()
+            ):
+                raise ValueError("Music3 new unbound loader input")
+
     def _ensure_backend(self):
         if self._backend is None:
+            self._verify_input_identity()
             if self._backend_factory is not None:
                 candidate = self._backend_factory(self.artifact.path)
             else:
@@ -196,6 +243,7 @@ class Music3Adapter(MediaLoRAControl):
                     )
 
                 candidate = SimpleNamespace(dit=dit, generate=generate)
+            self._verify_input_identity()
             self._attach_lora(candidate.dit)
             self._backend = candidate
         return self._backend

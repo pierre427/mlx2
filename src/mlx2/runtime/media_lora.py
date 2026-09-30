@@ -40,6 +40,19 @@ def target_key(family: str, source: str) -> str:
         key = key.replace(".audio_ff.net.0.proj", ".audio_ff.proj_in").replace(
             ".audio_ff.net.2", ".audio_ff.proj_out"
         )
+    if family == "minimax-music3":
+        match = re.fullmatch(
+            r"layers\.(0|[1-9][0-9]*)\.(self_attn\.(to_qkv|to_out)|ff\.ff\.(0\.proj|2))",
+            key,
+        )
+        if match:
+            projection = {
+                "self_attn.to_qkv": "attn.to_qkv",
+                "self_attn.to_out": "attn.to_out",
+                "ff.ff.0.proj": "ff_in",
+                "ff.ff.2": "ff_out",
+            }[match[2]]
+            key = f"blocks.{match[1]}.{projection}"
     pattern = {"qwen-image-2.1": _QWEN, "ltx-2.5": _LTX, "minimax-music3": _MUSIC}[
         family
     ]
@@ -90,7 +103,7 @@ class MediaLoRA:
         return tuple(self.config["targets"])
 
     def tensors(self):
-        from safetensors.numpy import load_file
+        from safetensors.numpy import load
 
         # Re-verify before every consumption: artifact identity binds bytes.
         current = json.loads((self.path / "adapter_config.json").read_text())
@@ -104,9 +117,10 @@ class MediaLoRA:
             != self.fingerprint
         ):
             raise ValueError("media LoRA in-memory identity changed")
-        if _digest(self.path / "adapters.safetensors") != self.config["weights_sha256"]:
+        data = (self.path / "adapters.safetensors").read_bytes()
+        if hashlib.sha256(data).hexdigest() != self.config["weights_sha256"]:
             raise ValueError("media LoRA weights changed")
-        return load_file(str(self.path / "adapters.safetensors"))
+        return load(data)
 
 
 def inspect_media_lora(
@@ -147,10 +161,7 @@ def inspect_media_lora(
         raise ValueError("media LoRA targets must be nonempty and unique")
     if any(target_key(family, k) != k for k in targets):
         raise ValueError("media LoRA targets must be canonical")
-    if not isinstance(config["training"], dict) or config["training"].get(
-        "trained"
-    ) not in (True, False):
-        raise ValueError("media LoRA requires explicit training state")
+    _validate_training(config["training"])
     fingerprint = hashlib.sha256(
         json.dumps(config, sort_keys=True).encode()
     ).hexdigest()
@@ -158,6 +169,57 @@ def inspect_media_lora(
     tensors = artifact.tensors()
     _validate_tensors(tensors, targets)
     return artifact
+
+
+def _validate_training(training):
+    if not isinstance(training, dict) or type(training.get("trained")) is not bool:
+        raise ValueError("media LoRA requires explicit training state")
+    if not training["trained"]:
+        return
+    if (
+        training.get("objective") != "conditional-flow-velocity-mse"
+        or not isinstance(training.get("data_fingerprint"), str)
+        or not re.fullmatch("[0-9a-f]{64}", training["data_fingerprint"])
+        or type(training.get("steps")) is not int
+        or training["steps"] < 1
+    ):
+        raise ValueError("trained media LoRA requires training evidence")
+    losses = training.get("training_losses")
+    if not isinstance(losses, list) or len(losses) != training["steps"]:
+        raise ValueError("trained media LoRA requires per-step losses")
+    initial = _number(
+        training.get("initial_validation_loss"), "initial validation loss"
+    )
+    final = _number(training.get("final_validation_loss"), "final validation loss")
+    if (
+        initial < 0
+        or final < 0
+        or final > initial
+        or any(_number(v, "training loss") < 0 for v in losses)
+    ):
+        raise ValueError("trained media LoRA loss evidence failed")
+
+
+def _source_tensors(data):
+    """Deserialize validated safetensors bytes on CPU, including BF16 PEFT."""
+    import numpy as np
+    from safetensors import deserialize
+
+    result = {}
+    for name, tensor in deserialize(data):
+        dtype = tensor["dtype"]
+        if dtype == "BF16":
+            value = (
+                np.frombuffer(tensor["data"], dtype="<u2").astype("<u4") << 16
+            ).view("<f4")
+        elif dtype in ("F16", "F32", "F64"):
+            value = np.frombuffer(
+                tensor["data"], dtype={"F16": "<f2", "F32": "<f4", "F64": "<f8"}[dtype]
+            )
+        else:
+            raise ValueError("media LoRA source must be floating point")
+        result[name] = value.reshape(tensor["shape"]).copy()
+    return result
 
 
 def _validate_tensors(tensors, targets):
@@ -250,11 +312,11 @@ def convert_media_lora(
     Only declared block linear targets are accepted. DoRA, LoKr, convolutions,
     fused gate_up, biases, partial pairs and unknown keys fail before export.
     """
-    from safetensors.numpy import load_file
-
     alpha, strength = _number(alpha, "alpha"), _number(strength, "strength")
     source = Path(source).expanduser().resolve()
-    source_hash = _digest(source)
+    source_data = source.read_bytes()
+    source_hash = hashlib.sha256(source_data).hexdigest()
+    peft = {}
     peft_config = source.parent / "adapter_config.json"
     if peft_config.is_file():
         peft = json.loads(peft_config.read_text())
@@ -268,9 +330,7 @@ def convert_media_lora(
             or peft.get("modules_to_save")
         ):
             raise ValueError("unsupported PEFT configuration")
-    raw = load_file(str(source))
-    if _digest(source) != source_hash:
-        raise ValueError("source LoRA changed during conversion")
+    raw = _source_tensors(source_data)
     tensors, ranks = {}, set()
     for key, value in raw.items():
         match = re.fullmatch(r"(.+)\.lora_([AB])(?:\.default)?\.weight", key)
@@ -290,6 +350,10 @@ def convert_media_lora(
     rank = ranks.pop()
     if rank <= 0:
         raise ValueError("invalid LoRA rank")
+    if "r" in peft and (type(peft["r"]) is not int or peft["r"] != rank):
+        raise ValueError("PEFT rank differs from tensor rank")
+    if "lora_alpha" in peft and _number(peft["lora_alpha"], "PEFT alpha") != alpha:
+        raise ValueError("PEFT alpha differs from supplied alpha")
     return write_media_lora(
         output,
         tensors,

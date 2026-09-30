@@ -250,7 +250,7 @@ def test_ltx_adapter_rejects_changed_conversion_output(tmp_path: Path, monkeypat
     _write(output / "config.json", b'{"model_version":"2.5.0"}')
     _write(output / "transformer-distilled.safetensors")
     _write(output / "probe.safetensors")
-    record = {"probe.safetensors": {"size": 1, "sha256": hashlib.sha256(b"x").hexdigest()}}
+    record = {name: {"size": 1, "sha256": hashlib.sha256(b"x").hexdigest()} for name in ("probe.safetensors", "transformer-distilled.safetensors")}
     steps = {name: record for name in (
         "config", "transformer-distilled", "connector", "text-encoder",
         "vae", "audio-vae", "duration-head", "upscalers",
@@ -261,7 +261,7 @@ def test_ltx_adapter_rejects_changed_conversion_output(tmp_path: Path, monkeypat
         "steps": steps,
     }))
     _write(runtime / ".venv/bin/python")
-    monkeypatch.setattr(subprocess, "run", lambda *args, **kwargs: SimpleNamespace(stdout=LTX_RUNTIME_REVISION + "\n"))
+    monkeypatch.setattr(subprocess, "run", lambda command, **kwargs: SimpleNamespace(stdout=LTX_RUNTIME_REVISION + "\n" if "rev-parse" in command else ""))
     assert LTX25Adapter(source=source, mlx_model=output, runtime_root=runtime).artifact.fingerprint == fingerprint
     receipt_path = output / ".mlx2-cpu-conversion.json"
     receipt = json.loads(receipt_path.read_text())
