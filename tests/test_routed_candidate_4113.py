@@ -467,6 +467,23 @@ def test_qwen36_adapter_declares_the_candidate_qualification_mode_only():
     assert Qwen3635BA3BAdapter.qualification_mode_only_policy <= set(KERNEL_POLICY_ENV)
 
 
-def test_checker_refuses_zero_cases(monkeypatch, tmp_path):
-    code, rec = _dry_run(monkeypatch, tmp_path, cases=0)
-    assert code == 1 and rec["refusals"] == ["incomplete: no or too few cases checked"]
+@pytest.mark.parametrize("override", [
+    {"cases": 0}, {"layers": -1}, {"experts": 0}, {"hidden": 0}, {"inter": 0}, {"experts": 4},
+])
+def test_checker_rejects_zero_engagement_and_invalid_geometry(monkeypatch, tmp_path, override):
+    """An explicit 0 is not masked by the default; nothing runs, nothing passes."""
+    with pytest.raises(ValueError):
+        _dry_run(monkeypatch, tmp_path, **override)
+    assert not (tmp_path / "out.json").exists()
+
+
+def test_checker_cli_rejects_zero_cases():
+    import subprocess
+    import sys
+
+    result = subprocess.run(
+        [sys.executable, "scripts/check_fn_routed_decode.py", "--candidate", "--cpu-dry-run",
+         "--cases", "0", "--out", os.devnull],
+        capture_output=True, text=True, env={**os.environ, "PYTHONPATH": "src"},
+    )
+    assert result.returncode == 2 and "must be positive" in result.stderr

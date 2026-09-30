@@ -74,9 +74,16 @@ def run_candidate(a):
     from mlx2.runtime.models import qwen3_next as QN
     from mlx2.runtime.models import qwen4_routed_decode as RD
 
-    E, H, I, K = a.experts or 256, a.hidden or 2048, a.inter or 512, a.topk or 8
+    defaults = (16, 512, 512, 8) if a.cpu_dry_run else (256, 2048, 512, 8)
+    E, H, I, K = (
+        default if value is None else value
+        for value, default in zip((a.experts, a.hidden, a.inter, a.topk), defaults)
+    )
+    if min(E, H, I) <= 0 or K not in RD.CANDIDATE_TOP_K or E < K:
+        raise ValueError(f"invalid geometry E={E} H={H} I={I} topk={K}")
+    if a.cases <= 0 or a.layers < 0 or a.reps < 0:
+        raise ValueError("--cases must be positive; --layers/--reps non-negative")
     if a.cpu_dry_run:
-        E, H, I, K = a.experts or 16, a.hidden or 512, a.inter or 512, a.topk or 8
         mx.set_default_device(mx.cpu)
         _install_reference_kernels(RD, QN)
     refusals = []
@@ -207,6 +214,9 @@ def main():
     a = ap.parse_args()
     if not a.candidate and (a.cpu_dry_run or any(v is not None for v in (a.experts, a.hidden, a.inter, a.topk))):
         ap.error("--experts/--hidden/--inter/--topk/--cpu-dry-run need --candidate")
+    if a.candidate and (a.cases <= 0 or a.layers < 0 or a.reps < 0
+                        or any(v is not None and v <= 0 for v in (a.experts, a.hidden, a.inter))):
+        ap.error("--cases and geometry overrides must be positive; --layers/--reps non-negative")
     if a.candidate and a.cpu_dry_run:
         if a.i_own_the_gpu:
             ap.error("--cpu-dry-run never touches the GPU; drop --i-own-the-gpu")
