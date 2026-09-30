@@ -1335,8 +1335,14 @@ def mlx_cache_limit_bytes():
 
 
 def greedy_batch_sampler_enabled() -> bool:
-    """MLX2_GREEDY_BATCH_SAMPLER=1 groups temperature-0 lanes into one argmax."""
-    return os.environ.get("MLX2_GREEDY_BATCH_SAMPLER", "0").strip() == "1"
+    """Temperature-0 lanes share one batched argmax (default on since 2026-09-30).
+
+    Per-lane closures cost slice, argmax and concatenate launches per lane
+    per step; the shared sampler measured +2.7 % aggregate at 4 greedy lanes
+    with identical tokens.  MLX2_GREEDY_BATCH_SAMPLER=0 restores per-lane
+    sampling.
+    """
+    return os.environ.get("MLX2_GREEDY_BATCH_SAMPLER", "1").strip() != "0"
 
 
 def _greedy_batch_sampler(logprobs):

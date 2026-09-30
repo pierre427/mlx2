@@ -64,6 +64,14 @@ def _batch(model, sampler):
     )
 
 
+@pytest.fixture(autouse=True)
+def _current_step_validity(monkeypatch):
+    """These tests pin the ``current`` contract (a bad row never reaches the
+    next forward).  The shipped default is ``deferred``; its contract lives in
+    test_step_validity_deferred.py."""
+    monkeypatch.setenv("MLX2_STEP_VALIDITY", "current")
+
+
 def test_nonfinite_law_drops_only_bad_lane_before_next_forward_or_response():
     model = _TwoLaneModel(invalid_logits=True)
     batch = _batch(model, lambda rows: mx.argmax(rows, axis=-1))

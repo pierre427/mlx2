@@ -99,16 +99,19 @@ STEP_TRACE = None
 def step_validity_mode() -> str:
     """Where ``GenerationBatch._step`` checks a sampled row for corruption.
 
-    ``current`` (default): before the row is fed back, at the top of the
-    step.  That ``mx.eval`` waits for the previous step's forward, so the
-    next graph is built only after the GPU has gone idle.  ``deferred``: the
-    same test runs on the step's *input* rows after the next forward has
-    been dispatched (``mx.async_eval``), so graph build overlaps execution;
-    a corrupt row costs one wasted forward before its lane is dropped and
-    still never enters history or a response.  MLX2_STEP_VALIDITY selects.
+    ``deferred`` (default since 2026-09-30): the test runs on the step's
+    *input* rows after the next forward has been dispatched
+    (``mx.async_eval``), so graph build overlaps execution; a corrupt row
+    costs one wasted forward before its lane is dropped and still never
+    enters history or a response.  Measured on Qwen3.6-27B-8bit: +6.8 %
+    tok/s at 1 lane, +2.8 % at 4 lanes, token-identical
+    (docs/audits/2026-09-30-basics-sweep).  ``current``: before the row is
+    fed back, at the top of the step; that ``mx.eval`` waits for the
+    previous step's forward, so the next graph is built only after the GPU
+    has gone idle.  MLX2_STEP_VALIDITY selects.
     """
-    mode = os.environ.get("MLX2_STEP_VALIDITY", "current").strip().lower()
-    return "deferred" if mode == "deferred" else "current"
+    mode = os.environ.get("MLX2_STEP_VALIDITY", "deferred").strip().lower()
+    return "current" if mode == "current" else "deferred"
 
 
 def _corrupt_rows(tokens: mx.array, logprobs: List[mx.array]):

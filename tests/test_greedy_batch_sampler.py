@@ -52,3 +52,10 @@ def test_greedy_batch_sampler_matches_per_lane_and_batches_rows(monkeypatch):
     assert max(rows_on) == 2, rows_on
     assert batched == per_lane
     assert all(len(tokens) == 12 for tokens in per_lane), per_lane
+
+
+def test_greedy_batch_sampler_is_on_by_default(monkeypatch):
+    monkeypatch.delenv("MLX2_GREEDY_BATCH_SAMPLER", raising=False)
+    assert serving.greedy_batch_sampler_enabled()
+    monkeypatch.setenv("MLX2_GREEDY_BATCH_SAMPLER", "0")
+    assert not serving.greedy_batch_sampler_enabled()

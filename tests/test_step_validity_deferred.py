@@ -72,8 +72,17 @@ def test_deferred_drops_bad_lane_after_one_forward_never_in_history_or_response(
     assert model.inputs[-1] == [[2]]
 
 
-def test_current_default_drops_bad_lane_before_next_forward(monkeypatch):
+def test_default_is_deferred(monkeypatch):
+    from mlx2.runtime.generate import step_validity_mode
+
     monkeypatch.delenv("MLX2_STEP_VALIDITY", raising=False)
+    assert step_validity_mode() == "deferred"
+    monkeypatch.setenv("MLX2_STEP_VALIDITY", "current")
+    assert step_validity_mode() == "current"
+
+
+def test_current_mode_drops_bad_lane_before_next_forward(monkeypatch):
+    monkeypatch.setenv("MLX2_STEP_VALIDITY", "current")
     model = _TwoLaneModel()
     batch = _batch(model)
     first = batch.next()
