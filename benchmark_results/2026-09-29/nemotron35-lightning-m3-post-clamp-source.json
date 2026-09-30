@@ -1,0 +1,18 @@
+{
+  "schema": "mlx2.lightning-m3-post-clamp-feasibility.v1",
+  "host": "m3-pro-36gb",
+  "source_head": "8e90684bc7c49b8b99cae0a2abce3d950cf4962e",
+  "artifact_config_sha256": "a1b0135c0973322d188a836c86746e69ea07c02b241e1f26681bf5123345359b",
+  "sidecar_sha256": "64577b275ca4e7e5266eae0903674f7f46ec2a8cbf4f4f1a3207f80d503cd1d0",
+  "artifact_files_hash_verified_previously": 15,
+  "cpu_tests": {
+    "command": "PYTHONPATH=src python -m pytest -q tests/test_nemotron35_lightning_adapter.py tests/test_bug_sweep_sep29.py",
+    "passed": 33,
+    "failed": 0
+  },
+  "physical_memory_bytes": 38654705664,
+  "same_artifact_prior_m5_load_metal_peak_bytes": 38786909320,
+  "same_artifact_prior_m5_ready_metal_active_bytes": 36232578184,
+  "m3_gpu_load_attempted": false,
+  "reason": "The prior same-artifact M5 load peak exceeded M3 physical memory, and ready allocation leaves insufficient OS and service headroom. The Mamba clamp changes computation, not artifact size; no new M3 GPU load is claimed."
+}
