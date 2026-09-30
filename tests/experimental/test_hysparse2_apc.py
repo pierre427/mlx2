@@ -163,3 +163,81 @@ def test_failed_restore_releases_lookup_lease():
     with pytest.raises(ValueError, match="metadata"):
         bridge.restore([1, 2])
     assert lease.closed
+
+
+@pytest.mark.parametrize("damage", ["missing_layer", "offset", "boundary", "history"])
+def test_incomplete_endpoint_cannot_be_published(damage):
+    model = Model(replace(Config.smoke(), local_window=4))
+    model.eval()
+    tokens = list(range(1, 15))
+    _, cache = model.prefill(mx.array([tokens]))
+    if damage == "missing_layer":
+        del cache.self_kv[0]
+    elif damage == "offset":
+        k, v, start = cache.cross_kv[0][0]
+        cache.cross_kv[0][0] = (k, v, start + 1)
+    elif damage == "boundary":
+        cache.boundary = cache.boundary[:, :, :1]
+    else:
+        cache.ple_history = None
+    engine = APCv2(max_size=4, layout_name="hysparse2-endpoint-v1")
+    try:
+        bridge = EndpointAPC(
+            model, engine, checkpoint_revision="r", tokenizer_fingerprint="t"
+        )
+        with pytest.raises(ValueError, match="endpoint state"):
+            bridge.publish(tokens, cache)
+    finally:
+        engine.close()
+
+
+@pytest.mark.parametrize("damage", ["missing_layer", "offset", "boundary", "history"])
+def test_malformed_restored_geometry_releases_lease(damage, monkeypatch):
+    import json
+    from types import SimpleNamespace
+
+    from mlx2.runtime.semantic_capsules import canonical_json
+
+    class Lease(list):
+        closed = False
+
+        def close(self):
+            self.closed = True
+
+    model = Model(replace(Config.smoke(), local_window=4))
+    model.eval()
+    tokens = list(range(1, 15))
+    _, cache = model.prefill(mx.array([tokens]))
+    engine = APCv2(max_size=4, layout_name="hysparse2-endpoint-v1")
+    try:
+        bridge = EndpointAPC(
+            model, engine, checkpoint_revision="r", tokenizer_fingerprint="t"
+        )
+        bridge.publish(tokens, cache)
+        hit = engine.lookup(bridge.key(), tokens + [15])
+        leaf = hit.cache[0]
+        header = json.loads(bytes(leaf.cache[0][0].tolist()))
+        if damage == "missing_layer":
+            del header["groups"]["self_kv"]["0"]
+        elif damage == "offset":
+            header["groups"]["cross_kv"]["0"][0][2] += 1
+        elif damage == "boundary":
+            header["boundary"] = header["groups"]["cross_kv"]["0"][0][0]
+        else:
+            header["ple_history"] = None
+        leaf.cache[0] = mx.array(list(canonical_json(header)), dtype=mx.uint8)[None]
+        lease = Lease([leaf])
+        monkeypatch.setattr(
+            engine,
+            "lookup",
+            lambda *_: SimpleNamespace(
+                hit=True, cache=lease, cached_tokens=len(tokens)
+            ),
+        )
+        with pytest.raises(ValueError, match="endpoint state"):
+            bridge.restore(tokens)
+        assert lease.closed
+        if hasattr(hit.cache, "close"):
+            hit.cache.close()
+    finally:
+        engine.close()

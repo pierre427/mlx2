@@ -34,6 +34,72 @@ class EndpointAPC:
             ),
         )
 
+    def _validate_endpoint(self, cache):
+        """Require every layer's complete, exact endpoint geometry."""
+        c = self.model.config
+        if type(cache.length) is not int or not 1 <= cache.length <= c.max_context:
+            raise ValueError("invalid endpoint state length")
+        for name, layers in (
+            ("self_kv", self.model.self_decoder),
+            ("cross_kv", self.model.cross_decoder),
+        ):
+            required = {i for i, layer in enumerate(layers) if layer.kind != "sparse"}
+            groups = getattr(cache, name)
+            if not isinstance(groups, dict) or set(groups) != required:
+                raise ValueError("incomplete endpoint state layer coverage")
+            for i in required:
+                position = (
+                    max(0, cache.length - c.local_window)
+                    if layers[i].kind == "swa"
+                    else 0
+                )
+                blocks = groups[i]
+                if not blocks:
+                    raise ValueError("empty endpoint state KV")
+                for k, v, start in blocks:
+                    if (
+                        type(start) is not int
+                        or start != position
+                        or not isinstance(k, mx.array)
+                        or not isinstance(v, mx.array)
+                        or k.ndim != 4
+                        or k.shape != v.shape
+                        or k.shape[:2] != (1, 1)
+                        or k.shape[2] < 1
+                        or k.shape[3] != c.head_dim
+                        or k.dtype != v.dtype
+                        or not mx.issubdtype(k.dtype, mx.floating)
+                    ):
+                        raise ValueError("invalid endpoint state KV geometry")
+                    position += k.shape[2]
+                if position != cache.length:
+                    raise ValueError("incomplete endpoint state KV history")
+        boundary = cache.boundary
+        if (
+            not isinstance(boundary, mx.array)
+            or boundary.shape != (1, 1, c.residual_streams, c.hidden_size)
+            or not mx.issubdtype(boundary.dtype, mx.floating)
+        ):
+            raise ValueError("invalid endpoint state boundary")
+        history_length = (
+            min(cache.length, c.semantic_ngram - 1) if c.semantic_ple_rows else 0
+        )
+        history = cache.ple_history
+        if history_length:
+            if (
+                not isinstance(history, mx.array)
+                or history.shape != (1, history_length)
+                or not mx.issubdtype(history.dtype, mx.integer)
+            ):
+                raise ValueError("invalid endpoint state PLE history")
+        elif history is not None:
+            raise ValueError("unexpected endpoint state PLE history")
+        if any(
+            type(v) is not int or v < 0
+            for v in (cache.self_layer_calls, cache.cross_layer_calls)
+        ):
+            raise ValueError("invalid endpoint state counters")
+
     def publish(self, tokens, cache):
         tokens = list(tokens)
         if (
@@ -56,6 +122,7 @@ class EndpointAPC:
         identity = self.model.new_cache().apcv2_identity
         if canonical_json(cache.apcv2_identity) != canonical_json(identity):
             raise ValueError("cache revision differs before publication")
+        self._validate_endpoint(cache)
         arrays = []
 
         def add(value):
@@ -170,4 +237,5 @@ class EndpointAPC:
             header["self_layer_calls"],
             header["cross_layer_calls"],
         )
+        self._validate_endpoint(cache)
         return cache
