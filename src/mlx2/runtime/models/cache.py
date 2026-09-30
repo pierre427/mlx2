@@ -2921,6 +2921,16 @@ class ArraysCache(_BaseCache):
             self._host_lengths = (self.lengths, [v - N for v in lengths])
         if padding is not None:
             self._host_left_padding = (self.left_padding, [v - N for v in padding])
+        self._tie_row_metadata()
+
+    def _tie_row_metadata(self):
+        """Make evaluating the state also evaluate the rebound row metadata.
+
+        Only the cache whose mask the forward builds reads ``lengths`` and
+        ``left_padding``; on every other layer each decode step would add one
+        lazy node and one live buffer (mlx-lm#1911).  Same contract as
+        ``BatchKVCache._tie_row_metadata``.
+        """
         metadata = tuple(
             (v for v in (self.lengths, self.left_padding) if v is not None)
         )

@@ -327,6 +327,64 @@ def test_batched_self_mtp_keeps_unmasked_layer_metadata_evaluated(monkeypatch):
     assert sum(map(len, tokens)) > 120
 
 
+def _ordinary_hybrid_run(monkeypatch, rounds, tie):
+    """Ordinary batched decode on the tiny GDN hybrid, a lane joining late.
+
+    The 256-step cache-state evaluation is pushed out of reach, so only the
+    ``ArraysCache`` row-metadata tie can keep the chain bounded.
+    """
+    from mlx2.runtime.models import cache as C
+
+    monkeypatch.setattr(G, "CACHE_STATE_EVAL_INTERVAL", 1 << 40)
+    if not tie:
+        monkeypatch.setattr(C.ArraysCache, "_tie_row_metadata", lambda self: None)
+    model = tiny_model()
+    prompts = [[(i * (k + 3)) % 97 + 2 for i in range(20 + 13 * k)] for k in range(3)]
+    gen = G.BatchGenerator(model, completion_batch_size=3, prefill_batch_size=3,
+                           prefill_step_size=64)
+    tokens = {}
+    try:
+        gen.insert(prompts[:2], max_tokens=[rounds + 50] * 2)
+        for step in range(rounds):
+            if step == 5:
+                gen.insert(prompts[2:], max_tokens=[rounds + 50])
+            for response in gen.next()[1]:
+                tokens.setdefault(response.uid, []).append(response.token)
+        states = [c for c in gen._generation_batch.prompt_cache
+                  if isinstance(c, C.ArraysCache)]
+        metadata = [
+            _lazy_nodes(value)
+            for c in states
+            for value in (c.lengths, c.left_padding)
+            if value is not None
+        ]
+        entries = [_lazy_nodes(v) for c in states for v in c.cache if v is not None]
+    finally:
+        gen.close()
+    monkeypatch.undo()
+    return tokens, metadata, entries
+
+
+def test_ordinary_hybrid_decode_keeps_arrays_cache_metadata_evaluated(monkeypatch):
+    """mlx-lm#1911: long batched hybrid decode ran out of live buffers.
+
+    ``ArraysCache.advance`` rebinds ``left_padding`` every step, and only the
+    GDN layer whose mask the forward builds reads it.  Tying the metadata into
+    the state keeps every layer's chain flat without evaluating each cache
+    state every step, which cost that PR's review a long-context throughput
+    regression.
+    """
+    (leaky_tokens, leaky_metadata, _) = _ordinary_hybrid_run(
+        monkeypatch, 150, tie=False
+    )
+    (tokens, metadata, entries) = _ordinary_hybrid_run(monkeypatch, 150, tie=True)
+    # The falsifier: without the tie the metadata chains grow every step.
+    assert max(leaky_metadata) > 100
+    assert metadata and max(metadata) <= 4
+    assert entries and max(entries) <= 8
+    assert tokens == leaky_tokens and len(tokens) == 3
+
+
 def _ragged_reference_run(cache, rounds, pattern, *, qsa):
     """Drive ragged verify rounds and check every row against a host oracle.
 
