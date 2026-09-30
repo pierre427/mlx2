@@ -85,3 +85,24 @@ def test_visible_attention_output_and_gradient_match_dense(window):
             for t in _tiles([(k, v, 0)], 16, minimum=16 - window + 1, maximum=23)
         )
         assert count == 23
+
+
+def test_gathered_fine_ranking_keeps_local_unique_and_padding_invalid():
+    q = mx.ones((2, 2, 3, 1))
+    k = mx.arange(32).astype(mx.float32).reshape(1, 1, 32, 1)
+    k = mx.broadcast_to(k, (2, 1, 32, 1))
+    _, support = attention(
+        q,
+        [(k, k, 0)],
+        offset=29,
+        query_tile=2,
+        key_tile=8,
+        select=(2, 6),
+        block_select=(4, 1),
+    )
+    assert support[2].shape == (2, 3, 8)
+    for row in support[2].tolist():
+        for i, positions in enumerate(row):
+            valid = [p for p in positions if p != 2147483647]
+            assert len(valid) == len(set(valid))
+            assert set(valid) == set(range(28, 30 + i))

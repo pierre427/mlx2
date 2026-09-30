@@ -107,6 +107,83 @@ def _candidate_groups(blocks, block_size, key_tile):
         yield mx.concatenate(keys, axis=2), mx.concatenate(positions), mx.array(ids)
 
 
+def _rank_candidate_tokens(
+    query, blocks, qp, candidate_ids, block_size, local, global_count, maximum, denom
+):
+    """Fine-score candidate tokens and forced local positions, not all history."""
+    b, _, t, d = query.shape
+    candidates = (
+        candidate_ids[..., None] * block_size + mx.arange(block_size)
+    ).reshape(b, t, -1)
+    recent = mx.broadcast_to(
+        qp[None, :, None] - local + 1 + mx.arange(local), (b, t, local)
+    )
+    positions = mx.concatenate((candidates, recent), axis=-1)
+    k = mx.zeros((*positions.shape, d), dtype=query.dtype)
+    v = mx.zeros_like(k)
+    found = mx.zeros(positions.shape, dtype=mx.bool_)
+    # Gather across original segment boundaries without joining full history.
+    for keys, values, start in blocks:
+        if keys.shape[2] == 0:
+            continue
+        present = (positions >= start) & (positions < start + keys.shape[2])
+        indices = mx.clip(positions - start, 0, keys.shape[2] - 1)[..., None]
+        gathered_k = mx.take_along_axis(keys[:, 0, None], indices, axis=2)
+        gathered_v = mx.take_along_axis(values[:, 0, None], indices, axis=2)
+        k = k + mx.where(present[..., None], gathered_k, 0)
+        v = v + mx.where(present[..., None], gathered_v, 0)
+        found = found | present
+    scores = (
+        mx.einsum(
+            "bhtd,btkd->bhtk",
+            mx.stop_gradient(query).astype(mx.float32),
+            mx.stop_gradient(k).astype(mx.float32),
+        )
+        * d**-0.5
+    )
+    valid = found & (positions <= qp[None, :, None])
+    scores = mx.where(valid[:, None], scores, -1e30)
+    probabilities = mx.exp(scores - mx.stop_gradient(maximum)) / mx.maximum(
+        mx.stop_gradient(denom), 1e-30
+    )
+    rank = mx.mean(probabilities, axis=1)
+    candidate_width = candidates.shape[-1]
+    # Candidate-local overlap appears only once: the forced-local copy wins.
+    candidate_valid = valid[..., :candidate_width] & (
+        candidates <= qp[None, :, None] - local
+    )
+    rank = mx.concatenate(
+        (
+            mx.where(candidate_valid, rank[..., :candidate_width], -1e30),
+            mx.where(valid[..., candidate_width:], 2.0, -1e30),
+        ),
+        axis=-1,
+    )
+    take = min(local + global_count, sum(keys.shape[2] for keys, _, _ in blocks))
+    by_position = mx.argsort(positions, axis=-1)
+    by_rank = mx.argsort(-mx.take_along_axis(rank, by_position, axis=-1), axis=-1)[
+        ..., :take
+    ]
+    indices = mx.stop_gradient(mx.take_along_axis(by_position, by_rank, axis=-1))
+    best = mx.take_along_axis(rank, indices, axis=-1)
+    chosen_positions = mx.take_along_axis(positions, indices, axis=-1)
+    selected = (
+        mx.take_along_axis(k, indices[..., None], axis=2),
+        mx.take_along_axis(v, indices[..., None], axis=2),
+        mx.where(best > -1e29, chosen_positions, 2147483647),
+    )
+    padding = take - selected[2].shape[-1]
+    if padding:
+        selected = (
+            mx.pad(selected[0], [(0, 0), (0, 0), (0, padding), (0, 0)]),
+            mx.pad(selected[1], [(0, 0), (0, 0), (0, padding), (0, 0)]),
+            mx.pad(
+                selected[2], [(0, 0), (0, 0), (0, padding)], constant_values=2147483647
+            ),
+        )
+    return selected
+
+
 def attention(
     q,
     blocks,
@@ -185,6 +262,24 @@ def attention(
                 order = mx.argsort(-merged_scores, axis=-1)[..., :take]
                 candidate_scores = mx.take_along_axis(merged_scores, order, axis=-1)
                 candidate_ids = mx.take_along_axis(merged_ids, order, axis=-1)
+            if (
+                sum(k.shape[2] for k, _, _ in blocks)
+                > candidate_ids.shape[-1] * block_size + local
+            ):
+                selections.append(
+                    _rank_candidate_tokens(
+                        query,
+                        blocks,
+                        qp,
+                        candidate_ids,
+                        block_size,
+                        local,
+                        global_count,
+                        maximum,
+                        denom,
+                    )
+                )
+                continue
         budget = local + global_count
         best = mx.zeros((b, t, 0), dtype=mx.float32)
         sk = mx.zeros((b, t, 0, d), dtype=q.dtype)
