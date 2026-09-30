@@ -200,13 +200,22 @@ def inspect_artifact(model_path: str | Path) -> dict:
 
 
 def _runtime_config(config: dict) -> dict:
-    """Carry the checkpoint's Mamba dt floor into the existing SSM runtime.
+    """The Mamba time-step clamp: the config's ``time_step_limit``, else (0, inf).
 
-    Nemotron H's reference forward clamps at time_step_min with no upper
-    bound. time_step_max controls only dt-bias initialization, not inference.
+    NVIDIA's own Nemotron H forward (the Nano 3 remote code, whose config
+    carries the same ``time_step_limit: null`` / ``time_step_min: 0.001``),
+    vLLM and mlx-lm clamp to ``time_step_limit`` and use ``time_step_min`` and
+    ``time_step_max`` only to initialize the dt bias.  transformers' native
+    ``nemotron_h`` inherits Zamba2's ``(time_step_min, inf)`` floor instead
+    (transformers #48989).  On this checkpoint that floor is not a rare
+    clip: 133 of 1,472 heads have ``softplus(dt_bias) < 0.001``, so it raised
+    their step 10-100x on every token and shortened their memory.
     """
     result = dict(config)
-    result["time_step_limit"] = (config["time_step_min"], float("inf"))
+    limit = config.get("time_step_limit")
+    result["time_step_limit"] = (
+        (float(limit[0]), float(limit[1])) if limit else (0.0, float("inf"))
+    )
     return result
 
 

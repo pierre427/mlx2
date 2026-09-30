@@ -112,7 +112,17 @@ def test_cpu_mtp_module_matches_source_keys_and_steps():
     assert post.shape == (1, 1, 64)
 
 
-def test_mamba_time_step_floor_matches_reference_forward_cpu():
+def test_mamba_time_step_clamp_follows_the_config_like_nvidias_forward():
+    """transformers #48989: NVIDIA's forward clamps dt to ``time_step_limit``
+    (default (0, inf)); ``time_step_min`` only initializes the dt bias."""
+    from mlx2.adapters.nemotron35_lightning import _runtime_config
+
+    config = {"time_step_min": 0.001, "time_step_max": 0.1, "time_step_limit": None}
+    assert _runtime_config(config)["time_step_limit"] == (0.0, float("inf"))
+    assert _runtime_config({**config, "time_step_limit": [0.0, 5.0]})["time_step_limit"] == (0.0, 5.0)
+
+
+def test_mamba_time_step_is_not_floored_on_the_checkpoint_cpu():
     _require_local_target()
     import mlx.core as mx
 
@@ -123,12 +133,12 @@ def test_mamba_time_step_floor_matches_reference_forward_cpu():
     mx.set_default_device(mx.cpu)
     config = json.loads((TARGET / "config.json").read_text())
     args = ModelArgs.from_dict(_runtime_config(config))
-    assert args.time_step_limit == (0.001, float("inf"))
-    # The configured 0.1 maximum is only an initialization bound. Reference
-    # inference leaves large time steps unclamped.
-    dt = compute_dt(mx.array([-30.0, 2.0]), mx.zeros((2,)), args.time_step_limit)
+    assert args.time_step_limit == (0.0, float("inf"))
+    # A slow head (dt_bias -9.7 on this checkpoint) keeps its ~6e-5 step, and
+    # the configured 0.1 maximum does not clamp large steps.
+    dt = compute_dt(mx.array([0.0, 2.0]), mx.array([-9.688, 0.0]), args.time_step_limit)
     mx.eval(dt)
-    assert abs(float(dt[0]) - 0.001) < 1e-7
+    assert 5e-5 < float(dt[0]) < 1e-4
     assert float(dt[1]) > config["time_step_max"]
 
 

@@ -36,9 +36,13 @@ single-row target verification, exact recurrent rollback, APCv2 prefix state,
 and shard-by-shard buffer-cache eviction during loading. The configured
 context ceiling is **262,144 tokens**, the value in this conversion's config.
 Actual usable context is still limited by memory and qualification.
-The Mamba recurrence uses an FP32 state and clamps the inference time step at
-the checkpoint's 0.001 minimum with no upper bound, matching the reference
-forward. The config's 0.1 maximum applies to time-step bias initialization.
+The Mamba recurrence uses an FP32 state and clamps the inference time step to
+the config's `time_step_limit`, which is unset, so (0, inf), as NVIDIA's own
+Nemotron H forward, vLLM and mlx-lm do. The config's 0.001 minimum and 0.1
+maximum apply to time-step bias initialization only. transformers' native
+`nemotron_h` floors the step at 0.001 instead (transformers #48989); an earlier
+mlx2 revision copied that floor, which raised the step of 133 of 1,472 heads
+(those with `softplus(dt_bias) < 0.001`) 10-100x on every token.
 
 Generation defaults are **temperature 1.0** and **top-p 0.95**, matching the
 checkpoint and [NVIDIA's model card](https://huggingface.co/nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16).
@@ -58,7 +62,7 @@ rounding settings without parity and device evidence.
 ## Validation state
 
 CPU-only checks cover source-bound artifact dispatch, absent/invalid sidecar
-refusal, cache geometry, the Mamba time-step floor, exact MTP parameter-key correspondence after expert
+refusal, cache geometry, the Mamba time-step clamp, exact MTP parameter-key correspondence after expert
 stacking, and a tiny MTP forward. They do not load the full checkpoint or
 establish full-model output parity, speed, memory peaks, cached-prefix MTP
 parity, or serving qualification. An explicit MTP route still requires a fresh
