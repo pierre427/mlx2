@@ -59,34 +59,3 @@ def inspect_mtp_candidate(model_path: str | Path) -> dict:
             "qualified": False, "selected": False}
 
 
-def load_mtp_candidate(target_adapter):
-    """Attach a strict depth-1 sidecar to an already loaded ordinary target.
-
-    Only a caller performing offline verification should invoke this. The
-    serving resolver never reaches it and the target descriptor stays ordinary.
-    """
-    record = inspect_mtp_candidate(target_adapter.identity["path"])
-    if record["identity"]["fingerprint"] != target_adapter.identity["fingerprint"]:
-        raise ValueError("MTP sidecar and HY V3 target identities differ")
-    import mlx.core as mx
-    from mlx import nn
-    from ..runtime.models.hy_v3 import HYV3MTP, ModelArgs
-    from ..runtime.ubc_evict import load_shards_evicting
-
-    path = Path(record["identity"]["path"])
-    weight_map = inspect_artifact(path)["weight_map"]
-    files = [path / name for name in sorted({weight_map[k] for k in weight_map if k.startswith("mtp.")})]
-    weights = {key.removeprefix("mtp."): value for key, value in
-               load_shards_evicting(files).items() if key.startswith("mtp.")}
-    sidecar = HYV3MTP(ModelArgs.from_dict(record["config"]))
-    quant = record["config"]["quantization"]
-    nn.quantize(sidecar, group_size=quant["group_size"], bits=quant["bits"],
-                mode=quant["mode"], class_predicate=lambda name, module:
-                hasattr(module, "to_quantized") and f"{name}.scales" in weights)
-    sidecar.load_weights(list(weights.items()), strict=True)
-    sidecar.eval()
-    mx.eval(sidecar.parameters())
-    target_adapter.model.mtp = sidecar
-    weights.clear()
-    mx.clear_cache()
-    return {**record, "loaded": True, "qualified": False, "selected": False}

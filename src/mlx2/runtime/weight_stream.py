@@ -696,15 +696,6 @@ def resident_fraction(table_bytes: int, budget_bytes: int) -> float:
     return points[-1][1]
 
 
-def advisory_budget_bytes() -> int:
-    """Metal's recommended working set, not physical RAM."""
-    try:
-        import mlx.core as mx
-
-        return int(mx.device_info().get("max_recommended_working_set_size", 0) or 0)
-    except Exception:  # noqa: BLE001 - a sizing probe must not break startup
-        return 0
-
 
 def plan_cache_experts(
     *,

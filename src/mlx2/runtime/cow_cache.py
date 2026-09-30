@@ -40,17 +40,6 @@ class COWCacheUnsupported(COWCacheError):
     """A cache graph cannot be cloned without speculative semantics."""
 
 
-def cow_cache_enabled(value: Optional[bool] = None) -> bool:
-    """Resolve the APC COW gate.  The absent environment value is off."""
-    if value is not None:
-        return bool(value)
-    return os.environ.get("MLX_LM_APC_COW_BRANCH", "0").strip().lower() in {
-        "1",
-        "true",
-        "yes",
-        "on",
-    }
-
 
 def mtp_boundary_cow_enabled(value: Optional[bool] = None) -> bool:
     """Resolve the committed MTP-boundary snapshot gate. Default is on."""

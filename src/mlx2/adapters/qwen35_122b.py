@@ -248,38 +248,3 @@ class Qwen35122BA10BAdapter(Qwen3635BA3BAdapter):
         return result
 
 
-def load_candidate_mtp(model_path: str | Path):
-    """Load the full text and embedded MTP head for offline validation only.
-
-    No serving route selects this function. A separate model-path verification
-    and qualification receipt are required before enabling native MTP.
-    """
-    artifact = inspect_artifact(model_path)
-    config = artifact["config"]
-    path = Path(artifact["identity"]["path"])
-    import mlx.core as mx
-    import mlx.nn as nn
-    from ..runtime.models.qwen35_122b import MTPModel, ModelArgs
-    from ..runtime.ubc_evict import load_shards_evicting
-
-    model = MTPModel(ModelArgs.from_dict(config))
-    files = [path / name for name in sorted(set(artifact["weight_map"].values()))]
-    weights = model.sanitize(load_shards_evicting(files, sanitize=model.shard_prune))
-    quant = config["quantization"]
-
-    def predicate(name, module):
-        if name in quant:
-            return quant[name]
-        return hasattr(module, "to_quantized") and f"{name}.scales" in weights
-
-    nn.quantize(model, group_size=quant["group_size"], bits=quant["bits"],
-                mode=quant["mode"], class_predicate=predicate)
-    model.load_weights(list(weights.items()), strict=True)
-    model.eval()
-    mx.eval(model.parameters())
-    weights.clear()
-    mx.clear_cache()
-    if model.mtp is None:
-        raise RuntimeError("Qwen3.5 122B MTP head was not instantiated")
-    return model, {**artifact["identity"], "qualified": False,
-                   "selected": False, "embedded_mtp_tensor_count": artifact["embedded_mtp_tensor_count"]}

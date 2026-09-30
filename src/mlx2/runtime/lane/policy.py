@@ -221,14 +221,6 @@ def resolve(detected: dict, *, family: str | None = None, overrides=None,
     return {**policy, "detected": detected, "family": family, "sources": sources}
 
 
-def min_rows_for(policy: dict, fmt: str | None) -> int | None:
-    """Per-projection threshold; None means keep the projection on stock."""
-    if policy["mode"] == "off" or fmt is None:
-        return None
-    if policy["mode"] == "exact":
-        return 1
-    return policy["min_rows"].get(fmt)
-
 
 def skipped(policy: dict, name: str) -> bool:
     return any(fnmatch.fnmatch(name, pattern) for pattern in policy.get("skip", ()))

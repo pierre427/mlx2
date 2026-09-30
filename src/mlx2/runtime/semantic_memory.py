@@ -6,7 +6,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 import hashlib
 import re
-from typing import Any, Callable, Mapping, Sequence
+from typing import Any, Mapping, Sequence
 
 from .hyper_directory import DirectoryContext, HyperDirectory, Scope
 from .semantic_capsules import CapsuleStore, canonical_json

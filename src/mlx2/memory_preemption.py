@@ -63,14 +63,6 @@ def memory_preemption_policy(value) -> dict:
     return policy
 
 
-def processors_history_pure(processors) -> bool:
-    """Contract P5: every processor's state is rebuildable from token history.
-
-    Absent the attribute a processor is assumed stateful, so a lane carrying it
-    is not replayable once decode has started.
-    """
-    return all(getattr(processor, "history_pure", False) for processor in processors)
-
 
 DECODE_REPLAY_BLOCK = "decode_state_not_reconstructible"
 

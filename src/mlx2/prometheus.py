@@ -781,47 +781,6 @@ def _add_http_metrics(builder: PrometheusBuilder, engine: Any) -> None:
             )
 
 
-def _add_response_store(builder: PrometheusBuilder, engine: Any, counts) -> None:
-    store = getattr(engine, "response_store", None)
-    if store is None or not hasattr(store, "status"):
-        return
-    status = store.status()
-    builder.gauge(
-        "mlx2_response_store_entries",
-        "Responses objects currently retained in process-local state.",
-        int(status.get("entries", 0)),
-    )
-    builder.gauge(
-        "mlx2_response_store_bytes",
-        "Serialized bytes currently retained in process-local Responses state.",
-        int(status.get("bytes", 0)),
-    )
-    for event in ("stores", "hits", "misses"):
-        builder.counter(
-            f"mlx2_response_store_{event}_total",
-            f"Process-local Responses store {event}.",
-            int(status.get(event, 0)),
-        )
-    for reason in ("ttl", "lru", "bytes"):
-        builder.counter(
-            "mlx2_response_store_evictions_total",
-            "Process-local Responses store evictions by bounded reason.",
-            int(status.get(f"evictions_{reason}", 0)),
-            {"reason": reason},
-        )
-    for reason in ("too_large", "write_error"):
-        builder.counter(
-            "mlx2_response_store_skipped_total",
-            "Completed Responses objects skipped by process-local state retention.",
-            int(status.get(f"skipped_{reason}", 0)),
-            {"reason": reason},
-        )
-    builder.counter(
-        "mlx2_thinking_signature_rejections_total",
-        "Signed reasoning input blocks dropped after authentication failure.",
-        int(counts.get("thinking_signature_rejections", 0)),
-    )
-
 
 def _add_capabilities(builder: PrometheusBuilder, snapshot: Mapping[str, Any]) -> None:
     qualification = str(snapshot.get("qualification") or "unavailable")

@@ -837,24 +837,3 @@ def require_qsa_private_delta_engagement(
         )
 
 
-def require_qsa_exact_set_fold_engagement(
-    counters: dict[str, Any] | None = None,
-) -> None:
-    counters = segmented_self_mtp_stats() if counters is None else counters
-    require_qsa_private_delta_engagement(counters)
-    if int(counters.get("exact_set_fold_attention_calls", 0)) < 1:
-        raise RuntimeError("QSA exact-set folded consumer never engaged")
-    if int(counters.get("exact_set_fold_rows", 0)) < 2:
-        raise RuntimeError("QSA exact-set folded consumer saw no B2 cohort")
-    requests = int(counters.get("exact_set_fold_requests", 0))
-    engaged = int(counters.get("exact_set_fold_attention_calls", 0))
-    declined = int(counters.get("exact_set_fold_declines", 0))
-    if requests != engaged + declined:
-        raise RuntimeError(
-            "QSA exact-set fold accounting is incomplete: "
-            f"{requests} requests != {engaged} engaged + {declined} declined"
-        )
-    if declined:
-        raise RuntimeError(
-            f"QSA exact-set fold qualification saw {declined} declined calls"
-        )

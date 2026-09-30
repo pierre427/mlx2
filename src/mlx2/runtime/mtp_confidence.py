@@ -119,11 +119,6 @@ def draft_position_features(logprobs, hidden=None, projection=None):
     return mx.concatenate(parts)
 
 
-def random_hidden_projection(hidden_size: int, rank: int, seed: int = 0):
-    """Return a fixed Gaussian sketch ``(hidden, rank)`` scaled by 1/sqrt(hidden)."""
-    rng = np.random.default_rng(int(seed))
-    return (rng.standard_normal((int(hidden_size), int(rank))) / math.sqrt(hidden_size)).astype(np.float32)
-
 
 # --------------------------------------------------------------------------
 # Per-cycle host rows

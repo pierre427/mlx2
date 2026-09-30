@@ -11,7 +11,7 @@ own expert count + window, and to size the per-layer KV cache.
 """
 
 import copy
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, List, Optional
 
 import mlx.core as mx

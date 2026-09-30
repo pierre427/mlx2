@@ -1,14 +1,7 @@
 # SPDX-License-Identifier: MIT
 # Adapted tokenizer primitives; see provenance/.
 import codecs
-import copy
-import importlib
-import json
 import operator
-from functools import partial
-from json import JSONDecodeError
-from typing import Any, Dict, Optional
-from transformers import AutoTokenizer
 
 
 def _decode_complete(data) -> str:

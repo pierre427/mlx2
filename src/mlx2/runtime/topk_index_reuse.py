@@ -25,7 +25,7 @@ from __future__ import annotations
 
 from collections import Counter
 from dataclasses import dataclass
-from typing import Literal, Optional, Sequence
+from typing import Literal, Sequence
 
 import mlx.core as mx
 
