@@ -157,3 +157,34 @@ def test_main_writes_a_json_record(tmp_path):
     assert record["identity"]["files"] and record["identity"]["mlx"]["version"]
     lane0 = record["results"]["pld_batched"]["0"]
     assert lane0["final_state"]["status"] == "complete" and lane0["continuation"]["status"] == "complete"
+
+
+# ---- repairs after parent review (bounds, disabled continuation) ----
+
+@pytest.mark.parametrize("argv,message", [
+    (["--time-limit-s", "nan"], "finite"),
+    (["--time-limit-s", "inf"], "finite"),
+    (["--continuation-tokens", "513"], "0..512"),
+    (["--logprob-rows", "513"], "0..512"),
+    (["--prefill-step", "16385"], "--prefill-step 1..16384"),
+    (["--prefill-step", "0"], "--prefill-step 1..16384"),
+])
+def test_nonfinite_or_unbounded_settings_are_refused(argv, message, capsys):
+    with pytest.raises(SystemExit):
+        Q.resolve_args(Q.build_parser(), ["--tiny", *argv, "--out", "/dev/null"])
+    assert message in capsys.readouterr().err
+
+
+def test_zero_rows_and_continuation_are_explicitly_unavailable_not_exact():
+    record = Q.run_all(_args("--logprob-rows", "0", "--continuation-tokens", "0"))
+    assert record["verdict"] != "pass"
+    lane = record["results"]["pld_batched"]["0"]
+    assert lane["continuation"] == {"status": "unavailable", "reason": "disabled (--continuation-tokens 0)"}
+    assert lane["logprob_rows_status"] == ["unavailable"]
+    primary = [c for c in record["comparisons"] if c["reference"] == "ordinary_b1" and c["arm"].startswith("pld")]
+    assert all(not c["bits_exact"] and any("unavailable" in x for x in c["incomparable"]) for c in primary)
+
+
+def test_no_final_responses_survive_in_the_record(tiny_record):
+    for arm in tiny_record["results"].values():
+        assert all("_final" not in lane for lane in arm.values())

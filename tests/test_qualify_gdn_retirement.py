@@ -201,3 +201,108 @@ def test_main_writes_oracle_and_model_records(tmp_path):
     data = json.loads(model.read_text())
     assert code == 0 and data["verdict"] == "pass" and data["protocol"]["batch"] == 4
     assert data["identity"]["files"] and data["identity"]["mlx"]["version"]
+
+
+# ---- repairs after parent review (arm isolation, row status, bounds) ----
+
+def test_arm_isolation_gate_tracks_owners_and_finds_none_alive(tiny_b2):
+    check = tiny_b2["arm_isolation"]["control"]
+    assert tiny_b2["arm_isolation"]["retire"] is None
+    # generator(s), responses, cache entries and their state arrays
+    assert check["tracked"] > 20 and check["alive"] == 0 and check["unreferenceable"] == 0
+    for arm in tiny_b2["arms"].values():
+        assert "_owners" not in arm
+        assert all("_final" not in lane for lane in arm["lanes"].values())
+
+
+def test_a_preceding_arm_owner_kept_alive_is_refused(monkeypatch):
+    """The pre-repair shape: the retire arm's final response (and its caches)
+    held while control runs. The gate must see it, not just equal tokens."""
+    leaked = []
+    real = R.RetirementDriver.continuation
+
+    def leaking(self, lane, record, owners=None):
+        leaked.append(record.get("_final"))
+        return real(self, lane, record, owners)
+
+    monkeypatch.setattr(R.RetirementDriver, "continuation", leaking)
+    record = R.model_mode(_args())[1]
+    check = record["arm_isolation"]["control"]
+    assert check["alive"] > 0
+    assert record["verdict"] == "refused"
+    assert any(r.startswith("control: preceding arm's tensor owners not released") for r in record["refusals"])
+    assert leaked  # still referenced here, which is what the gate detected
+
+
+def test_a_leaked_generator_is_refused(monkeypatch):
+    from mlx2.runtime import generate
+
+    kept = []
+    real_init = generate.BatchGenerator.__init__
+
+    def keep(self, *args, **kwargs):
+        real_init(self, *args, **kwargs)
+        kept.append(self)
+
+    monkeypatch.setattr(generate.BatchGenerator, "__init__", keep)
+    record = R.model_mode(_args())[1]
+    assert record["arm_isolation"]["control"]["alive"] >= 1
+    assert record["verdict"] == "refused"
+
+
+def test_unavailable_logprob_rows_on_both_arms_never_pass(monkeypatch):
+    def blank(data):
+        for lane in data["lanes"].values():
+            lane["logprob_rows"] = [None] * len(lane["logprob_rows"])
+
+    run = R.RetirementDriver.run_arm
+
+    def perturbed(self, name):
+        data = run(self, name)
+        blank(data)
+        return data
+
+    monkeypatch.setattr(R.RetirementDriver, "run_arm", perturbed)
+    record = R.model_mode(_args())[1]
+    assert record["verdict"] != "pass"
+    assert record["verdict"] == "exact_with_unavailable_parts"
+    assert all("logprob rows unavailable (missing or undigestable)" in item
+               for item in record["incomparable"] if "logprob" in item)
+    assert sum("logprob" in item for item in record["incomparable"]) == 2
+
+
+def test_logprob_rows_disabled_is_explicitly_unavailable():
+    record = R.model_mode(_args("--logprob-rows", "0"))[1]
+    assert record["verdict"] == "exact_with_unavailable_parts"
+    assert any("(disabled (--logprob-rows 0))" in item for item in record["incomparable"])
+
+
+def test_disabled_continuation_with_a_bounded_early_stop_does_not_crash():
+    record = R.model_mode(_args("--continuation-tokens", "0", "--time-limit-s", "1e-9"))[1]
+    assert record["verdict"] == "refused"
+    for arm in record["arms"].values():
+        for lane in arm["lanes"].values():
+            assert lane["continuation"] == {"status": "unavailable",
+                                            "reason": "disabled (--continuation-tokens 0)"}
+            assert "_final" not in lane
+
+
+@pytest.mark.parametrize("argv,message", [
+    (["--time-limit-s", "nan"], "finite"),
+    (["--time-limit-s", "inf"], "finite"),
+    (["--time-limit-s", "0"], "finite"),
+    (["--continuation-tokens", "513"], "0..512"),
+    (["--logprob-rows", "513"], "0..512"),
+    (["--continuation-tokens", "-1"], "0..512"),
+    (["--prefill-step", "16385"], "--prefill-step 1..16384"),
+    (["--prefill-step", "0"], "--prefill-step 1..16384"),
+])
+def test_nonfinite_or_unbounded_settings_are_refused(argv, message, capsys):
+    with pytest.raises(SystemExit):
+        R.resolve_args(R.build_parser(), ["--tiny", *argv, "--out", "/dev/null"])
+    assert message in capsys.readouterr().err
+
+
+def test_explicit_zero_rows_and_continuation_are_legal():
+    args = _args("--logprob-rows", "0", "--continuation-tokens", "0", "--prefill-step", "16384")
+    assert (args.logprob_rows, args.continuation_tokens, args.prefill_step) == (0, 0, 16384)

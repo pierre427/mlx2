@@ -51,6 +51,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import os
 import sys
 import time
@@ -281,6 +282,8 @@ class Driver:
     def continuation(self, lane, record):
         """Greedy ordinary B1 continuation from the lane's final cache."""
         final = record.pop("_final", None)
+        if not self.args.continuation_tokens:
+            return {"status": "unavailable", "reason": "disabled (--continuation-tokens 0)"}
         covered = record["covered_tokens"]
         if final is None or getattr(final, "prompt_cache", None) is None or covered is None:
             return {"status": "unavailable", "reason": "no final cache or inconsistent offsets"}
@@ -414,17 +417,19 @@ def run_all(args):
                 arm_stats.append(st)
                 arm_failures += fl
             results[arm], stats[arm], failures[arm] = merged, {"per_lane": arm_stats}, arm_failures
-            continue
-        remove = (args.remove_lane, args.remove_after) if arm == "pld_removal" else None
-        out, st, fl, rem = driver.run(arm, lanes, remove=remove)
-        results[arm], stats[arm], failures[arm] = out, st, fl
-        if arm == "pld_removal":
-            removed = rem
-    for arm in ("ordinary_b1", "ordinary_bN", "pld_per_lane", "pld_batched"):
+        else:
+            remove = (args.remove_lane, args.remove_after) if arm == "pld_removal" else None
+            out, st, fl, rem = driver.run(arm, lanes, remove=remove)
+            results[arm], stats[arm], failures[arm] = out, st, fl
+            if arm == "pld_removal":
+                removed = rem
+        # Finish this arm's continuations now and drop its final responses and
+        # caches, so no arm's tensors are alive while the next one runs.
         for i in lanes:
-            results[arm][i]["continuation"] = driver.continuation(i, results[arm][i])
-    for i in lanes:
-        results["pld_removal"][i].pop("_final", None)
+            if arm == "pld_removal":
+                results[arm][i].pop("_final", None)
+            else:
+                results[arm][i]["continuation"] = driver.continuation(i, results[arm][i])
     comparisons = [
         compare("ordinary_bN", PRIMARY_REFERENCE, lanes, results) | {"kind": "ordinary geometry (B1 vs BN)"},
         compare("pld_per_lane", PRIMARY_REFERENCE, lanes, results) | {"kind": "pld vs primary reference"},
@@ -527,8 +532,13 @@ def resolve_args(ap, argv=None):
         a.prefill_step = 2048 if a.prefill_step is None else a.prefill_step
     if "batched_verify" in a.pld_policy:
         ap.error("batched_verify is set per arm; drop it from --pld-policy")
-    if not 2 <= a.lanes <= MAX_LANES or a.prefill_step <= 0 or a.logprob_rows < 0 \
-            or a.continuation_tokens <= 0 or a.remove_after <= 0 or a.time_limit_s <= 0:
+    if not math.isfinite(a.time_limit_s) or a.time_limit_s <= 0:
+        ap.error("--time-limit-s must be finite and positive")
+    if not 1 <= a.prefill_step <= MAX_PROMPT_TOKENS:
+        ap.error(f"--prefill-step 1..{MAX_PROMPT_TOKENS}")
+    if not 0 <= a.logprob_rows <= MAX_OUTPUT_TOKENS or not 0 <= a.continuation_tokens <= MAX_OUTPUT_TOKENS:
+        ap.error(f"--logprob-rows and --continuation-tokens 0..{MAX_OUTPUT_TOKENS} (0 = explicitly unavailable)")
+    if not 2 <= a.lanes <= MAX_LANES or not 1 <= a.remove_after <= MAX_OUTPUT_TOKENS:
         ap.error("invalid bounds")
     return a
 

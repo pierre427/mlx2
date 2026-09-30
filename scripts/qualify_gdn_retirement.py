@@ -47,6 +47,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import os
 import sys
 import time
@@ -62,6 +63,8 @@ SCHEMA = "mlx2.direct-model.gdn-retirement.v1"
 SELF_MTP_POLICY = {"num_draft": 2, "persistent": True, "rate_gate": False, "prefill_step_size": 2048}
 MAX_CONTEXT = 16384
 MAX_GEN = 512
+MAX_ROWS = 512
+MAX_PREFILL_STEP = 16384
 IDENTITY_FILES = (
     "scripts/qualify_gdn_retirement.py",
     "scripts/paired_direct_ab.py",
@@ -218,6 +221,60 @@ def batch_live_records(gen):
     return None if caches is None else live_records(caches)
 
 
+class OwnerRefs:
+    """Weak references to one arm's tensor owners (never strong ones).
+
+    Tracks generators, final responses, their target and draft cache
+    entries and every array in those caches' ``state``; ``alive`` runs GC
+    and counts survivors. Objects that cannot be weakly referenced are
+    counted as untrackable, which the driver treats as unverified.
+    """
+
+    def __init__(self):
+        self.refs, self.unreferenceable = [], 0
+
+    def track(self, obj):
+        import weakref
+
+        if obj is None:
+            return
+        try:
+            self.refs.append(weakref.ref(obj))
+        except TypeError:
+            self.unreferenceable += 1
+
+    def track_cache(self, cache):
+        import mlx.core as mx
+        from mlx.utils import tree_flatten
+
+        for entry in cache or ():
+            self.track(entry)
+            try:
+                leaves = tree_flatten(entry.state)
+            except Exception:  # noqa: BLE001 - the entry itself is still tracked
+                continue
+            for _, leaf in leaves:
+                if isinstance(leaf, mx.array):
+                    self.track(leaf)
+
+    def track_response(self, response):
+        if response is None:
+            return
+        self.track(response)
+        self.track_cache(getattr(response, "prompt_cache", None))
+        mtp_state = getattr(response, "mtp_state", None)
+        if isinstance(mtp_state, tuple) and mtp_state:
+            self.track_cache(mtp_state[0])
+            self.track(mtp_state[1] if len(mtp_state) > 1 else None)
+
+    def alive(self):
+        import gc
+
+        gc.collect()
+        return {"tracked": len(self.refs), "alive": sum(ref() is not None for ref in self.refs),
+                "unreferenceable": self.unreferenceable}
+
+
 class RetirementDriver:
     def __init__(self, args):
         import mlx.core as mx
@@ -331,8 +388,11 @@ class RetirementDriver:
                     lane = lanes[by_uid[response.uid]]
                     lane["tokens"].append(int(response.token))
                     row = getattr(response, "logprobs", None)
-                    if row is not None and len(lane["logprob_rows"]) < args.logprob_rows:
-                        lane["logprob_rows"].append(state_digest([row])["sha256"])
+                    if len(lane["logprob_rows"]) < args.logprob_rows:
+                        # None marks a row the route did not return or that
+                        # could not be digested: unavailable, never equal.
+                        lane["logprob_rows"].append(
+                            None if row is None else state_digest([row])["sha256"])
                     if response.finish_reason:
                         lane["finish_reason"] = response.finish_reason
                         lane["final"] = response
@@ -367,14 +427,20 @@ class RetirementDriver:
                 "_final": final,
             }
         tally["max_live_rollback_records"] = max_live  # None: batch caches not observable
+        owners = OwnerRefs()
+        owners.track(gen)
+        for record in out.values():
+            owners.track_response(record["_final"])
         return {"lanes": out, "failures": failures, "retirement": tally, "memory": memory,
-                "diagnostic_elapsed_s": elapsed, "polls": polls}
+                "diagnostic_elapsed_s": elapsed, "polls": polls, "_owners": owners}
 
-    def continuation(self, lane, record):
+    def continuation(self, lane, record, owners=None):
         from mlx2.runtime.generate import BatchGenerator
         from scripts.paired_direct_ab import state_digest
 
         final = record.pop("_final", None)
+        if not self.args.continuation_tokens:
+            return {"status": "unavailable", "reason": "disabled (--continuation-tokens 0)"}
         covered = record["covered_tokens"]
         full = list(self.prompts[lane]) + record["tokens"]
         if final is None or getattr(final, "prompt_cache", None) is None or covered is None \
@@ -382,6 +448,8 @@ class RetirementDriver:
             return {"status": "unavailable", "reason": "no final cache or no single covered offset"}
         gen = BatchGenerator(self.model, completion_batch_size=1, prefill_batch_size=1,
                              prefill_step_size=self.args.prefill_step)
+        if owners is not None:
+            owners.track(gen)
         tokens = []
         try:
             (uid,) = gen.insert([full[covered:] + list(self.prompts[lane][:2])],
@@ -398,6 +466,8 @@ class RetirementDriver:
                     break
             if last is None:
                 return {"status": "unavailable", "reason": "continuation did not finish"}
+            if owners is not None:
+                owners.track_response(last)
             return {"status": "complete", "tokens": tokens, "final_state": state_digest(last.prompt_cache)}
         except Exception as error:  # noqa: BLE001 - unavailable, never exact
             return {"status": "unavailable", "reason": f"{type(error).__name__}: {error}"[:200]}
@@ -408,16 +478,26 @@ class RetirementDriver:
 def model_mode(args):
     driver = RetirementDriver(args)
     driver.check_geometry()
-    arms = {}
+    arms, isolation = {}, {}
     order = ("retire", "control")
+    previous = None
     for arm in order:
-        arms[arm] = driver.run_arm(arm)
-    for arm in order:
-        for i, record in arms[arm]["lanes"].items():
-            record["continuation"] = (driver.continuation(i, record) if args.continuation_tokens
-                                      else record.pop("_final", None) and {"status": "unavailable",
-                                                                           "reason": "disabled"})
+        # The preceding arm keeps host scalars and digests only: every final
+        # response, cache, array and generator it owned must be gone (after
+        # GC) before this arm allocates, or its memory samples are shared.
+        isolation[arm] = previous.alive() if previous is not None else None
+        data = driver.run_arm(arm)
+        previous = data.pop("_owners")
+        for i, record in data["lanes"].items():
+            record["continuation"] = driver.continuation(i, record, previous)
+            assert "_final" not in record
+        arms[arm] = data
+        del data
     refusals, differences, incomparable = [], [], []
+    for arm, check in isolation.items():
+        if check is not None and (check["alive"] or check["unreferenceable"]):
+            refusals.append(f"{arm}: preceding arm's tensor owners not released "
+                            f"({check['alive']} alive, {check['unreferenceable']} untrackable)")
     for arm in order:
         refusals += [f"{arm}: {f}" for f in arms[arm]["failures"]]
         lanes = arms[arm]["lanes"].values()
@@ -439,10 +519,12 @@ def model_mode(args):
         if a["tokens"] != b["tokens"]:
             differences.append(f"lane {i}: tokens differ")
             continue
-        if a["logprob_rows"] != b["logprob_rows"]:
+        rows = a["logprob_rows"] + b["logprob_rows"]
+        if not rows or None in rows:
+            reason = "disabled (--logprob-rows 0)" if not args.logprob_rows else "missing or undigestable"
+            incomparable.append(f"lane {i}: logprob rows unavailable ({reason})")
+        elif a["logprob_rows"] != b["logprob_rows"]:
             differences.append(f"lane {i}: logprob row bits differ")
-        if not a["logprob_rows"]:
-            incomparable.append(f"lane {i}: logprob rows unavailable")
         if "complete" not in (a["final_state"]["status"], b["final_state"]["status"]) or \
                 a["final_state"]["status"] != b["final_state"]["status"]:
             incomparable.append(f"lane {i}: final state {a['final_state']['status']}/{b['final_state']['status']}")
@@ -455,11 +537,9 @@ def model_mode(args):
             differences.append(f"lane {i}: continuation differs")
     verdict = ("refused" if refusals else "counterexample" if differences
                else "exact_with_unavailable_parts" if incomparable else "pass")
-    for arm in order:
-        for record in arms[arm]["lanes"].values():
-            record.pop("_final", None)
     return driver, {
         "verdict": verdict, "refusals": refusals, "differences": differences, "incomparable": incomparable,
+        "arm_isolation": isolation,
         "arms": {arm: {**data, "lanes": {str(i): r for i, r in data["lanes"].items()}}
                  for arm, data in arms.items()},
         "lanes": [{"prompt_tokens": len(p), "prompt_sha256": _sha(json.dumps(p).encode())} for p in driver.prompts],
@@ -514,8 +594,12 @@ def resolve_args(ap, argv=None):
         ap.error("--batch must be 2 or 4 (the authorized bounded cells)")
     if not 8 <= a.context <= MAX_CONTEXT or not 1 <= a.gen <= MAX_GEN:
         ap.error("--context 8..16384 and --gen 1..512 per lane")
-    if a.prefill_step <= 0 or a.logprob_rows < 0 or a.continuation_tokens < 0 or a.time_limit_s <= 0:
-        ap.error("invalid bounds")
+    if not math.isfinite(a.time_limit_s) or a.time_limit_s <= 0:
+        ap.error("--time-limit-s must be finite and positive")
+    if not 1 <= a.prefill_step <= MAX_PREFILL_STEP:
+        ap.error(f"--prefill-step 1..{MAX_PREFILL_STEP}")
+    if not 0 <= a.logprob_rows <= MAX_ROWS or not 0 <= a.continuation_tokens <= MAX_ROWS:
+        ap.error(f"--logprob-rows and --continuation-tokens 0..{MAX_ROWS} (0 = explicitly unavailable)")
     return a
 
 
