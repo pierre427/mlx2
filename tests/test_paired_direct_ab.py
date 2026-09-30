@@ -161,7 +161,7 @@ class _StuckGenerator:
 def test_dropped_or_stuck_lane_is_refused_not_waited_on(monkeypatch, failures, reason):
     made = []
 
-    def generator(self):
+    def generator(self, arm=None):
         made.append(_StuckGenerator(failures))
         return made[-1]
 
@@ -261,3 +261,57 @@ def test_state_status_mismatch_is_a_counterexample(monkeypatch):
         "pair 0 on: final_target_state status metadata_unavailable vs complete"]
     assert record["state_oracle"]["version"] == H.STATE_ORACLE
     assert "not RNG, scheduler or full transaction-state" in record["state_oracle"]["scope"]
+
+
+def test_tiny_prefill_reclaim_pairs_engage_with_identical_decode_cadence():
+    record = H.run_cohort(_args("--mechanism", "external-prefill-reclaim"))
+    assert record["verdict"] == "pass", record["refusals"] + record["mismatches"]
+    by_arm = {r["arm"]: r for r in record["runs"]}
+    on, ref = by_arm["prefill_reclaim"]["counters"], by_arm["reference"]["counters"]
+    assert on["external_prefill_allocator_reclaims"] == on["prefill_rounds"] >= 2
+    assert ref["external_prefill_allocator_reclaims"] == 0
+    for key in ("prefill_rounds", "external_allocator_reclaims", "external_rounds",
+                "proposed_tokens", "accepted_proposals"):
+        assert on[key] == ref[key], key
+    assert record["state_comparison"] == {"final_target_state": "compared",
+                                          "final_draft_sidecar": "compared"}
+    boundary = by_arm["prefill_reclaim"]["prompt_boundary"]
+    assert boundary == by_arm["reference"]["prompt_boundary"]
+    assert boundary["target"]["status"] == boundary["sidecar"]["status"] == "complete"
+    assert by_arm["prefill_reclaim"]["prefill_samples"]
+
+
+def test_prefill_reclaim_refuses_a_probe_with_too_few_chunks():
+    record = H.run_cohort(_args("--mechanism", "external-prefill-reclaim", "--prompt-tokens", "9"))
+    assert record["verdict"] == "refused"
+    assert all("1 prefill chunks: too short" in r for r in record["refusals"])
+
+
+def test_prefill_reclaim_refuses_an_arm_that_never_reclaims(monkeypatch):
+    generator = H.Cohort.generator
+    monkeypatch.setattr(H.Cohort, "generator", lambda self, arm=None: generator(self, None))
+    record = H.run_cohort(_args("--mechanism", "external-prefill-reclaim"))
+    assert record["verdict"] == "refused"
+    assert record["refusals"] == ["pair 0 prefill_reclaim: prefill reclaim ran 0 times over 5 chunks"]
+
+
+def test_prompt_boundary_difference_is_a_counterexample(monkeypatch):
+    run_arm = H.run_arm
+
+    def shifted(cohort, arm):
+        record = run_arm(cohort, arm)
+        if arm == "prefill_reclaim":
+            record["prompt_boundary"] = dict(record["prompt_boundary"], covered_tokens=-1)
+        return record
+
+    monkeypatch.setattr(H, "run_arm", shifted)
+    record = H.run_cohort(_args("--mechanism", "external-prefill-reclaim"))
+    assert record["verdict"] == "counterexample"
+    assert record["mismatches"] == ["pair 0 prefill_reclaim: prompt boundary differs"]
+
+
+def test_prefill_mode_needs_a_policy_for_real_runs(capsys):
+    with pytest.raises(SystemExit):
+        H.resolve_args(H.build_parser(), ["--mechanism", "external-prefill-reclaim",
+                                          "--i-own-the-gpu", "--model", "m", "--out", "/dev/null"])
+    assert "external-prefill-reclaim needs an explicit --policy" in capsys.readouterr().err

@@ -33,6 +33,19 @@ Mechanisms (one per cohort):
     the real default, are needed to see a plateau). Staged external-draft
     *prefill* reclaim is a separate candidate and is not exercised here.
 
+``external-prefill-reclaim``
+    B1 external-draft route with the default-off constructor candidate
+    ``ExternalDraftBatchGenerator(prefill_allocator_reclaim=True)`` on arm
+    ``prefill_reclaim`` against the reference default on arm ``reference``.
+    Both arms keep the product decode reclaim, so decode cadence is identical.
+    Engagement: ``external_prefill_allocator_reclaims`` equals the arm's
+    non-empty prefill chunks (at least two) and is 0 on ``reference``; the
+    draft must have proposed. Each run records host-counter memory samples at
+    prefill-progress polls (no sync, outside the timers) and the APCv2 prompt
+    boundary (covered tokens, token hash, target and sidecar digests), which
+    must match across runs. Not a serving policy; no whole-process memory
+    benefit is implied.
+
 Protocol: fresh generator and caches per run; identical pinned prompt token
 IDs, ``LaneRNG(--seed)``, sampler, stop tokens and ``--max-tokens`` on both
 arms; ``--warmups`` discarded rounds (both arms); ``--pairs`` measured pairs
@@ -77,7 +90,15 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-ARMS = {"qsdpa-tiling": ("off", "on"), "external-reclaim": ("reclaim", "control")}
+ARMS = {
+    "qsdpa-tiling": ("off", "on"),
+    "external-reclaim": ("reclaim", "control"),
+    "external-prefill-reclaim": ("reference", "prefill_reclaim"),
+}
+EXTERNAL = ("external-reclaim", "external-prefill-reclaim")
+# A prefill-reclaim probe needs at least this many non-empty prefill chunks.
+MIN_PREFILL_CHUNKS = 2
+PREFILL_SAMPLE_LIMIT = 64
 IDENTITY_FILES = (
     "scripts/paired_direct_ab.py",
     "src/mlx2/runtime/models/base.py",
@@ -200,7 +221,7 @@ class Cohort:
 
         cls = resolve_adapter(args.model, mtp=False, qualification_mode=True)
         policy = None
-        if args.mechanism == "external-reclaim":
+        if args.mechanism in EXTERNAL:
             policy = json.loads(Path(args.policy).read_text())
             self.adapter = cls(args.model, execution_policy=policy)
             if getattr(self.adapter, "draft_model", None) is None:
@@ -236,9 +257,12 @@ class Cohort:
         ids = (unit * (args.prompt_tokens // len(unit) + 1))[: args.prompt_tokens]
         return ids
 
-    def generator(self):
+    def generator(self, arm=None):
         args = self.args
         stops = [[token] for token in self.stops]
+        # Default-off constructor candidate; only the prefill arm selects it,
+        # so decode reclaim cadence is identical across prefill arms.
+        extra = {"prefill_allocator_reclaim": True} if arm == "prefill_reclaim" else {}
         if args.mechanism == "qsdpa-tiling":
             from mlx2.runtime.generate import BatchGenerator
 
@@ -253,11 +277,11 @@ class Cohort:
             return ExternalDraftBatchGenerator(
                 self.model, draft_model=self.draft, binding="tiny",
                 completion_batch_size=1, prefill_step_size=args.prefill_step,
-                num_draft=2, stop_tokens=stops,
+                num_draft=2, stop_tokens=stops, **extra,
             )
         return self.adapter.create_external_batch(
             completion_batch_size=1, prefill_step_size=args.prefill_step,
-            stop_tokens=stops,
+            stop_tokens=stops, **extra,
         )
 
 
@@ -461,11 +485,12 @@ def run_arm(cohort, arm):
     mx.synchronize()
     mx.clear_cache()
     mx.reset_peak_memory()
-    batch = cohort.generator()
+    batch = cohort.generator(arm)
     from mlx2.runtime.generate import ALLOCATOR_RECLAIM_MTP_TOKEN_INTERVAL as INTERVAL
 
     tokens, rows, first = [], [], None
     boundary_samples, max_per_poll, final = [], 0, None
+    prefill_samples, polls, boundary = [], 0, None
     try:
         if arm == "control":
             _suppress_reclaim(batch, tally)
@@ -505,6 +530,20 @@ def run_arm(cohort, arm):
                     done = True
                     final = response
             max_per_poll = max(max_per_poll, len(tokens) - before)
+            polls += 1
+            if boundary is None and hasattr(batch, "pop_prompt_boundary"):
+                # As serving does: take the frozen APCv2 prompt boundary when
+                # it appears; it is digested after timing.
+                boundary = batch.pop_prompt_boundary(uid)
+            if (args.mechanism == "external-prefill-reclaim" and before == 0
+                    and len(prefill_samples) < PREFILL_SAMPLE_LIMIT):
+                # Prefill-progress polls (no token yet): host counters only,
+                # no sync, outside the timer boundaries.
+                prefill_samples.append({
+                    "poll": polls, "prefill_rounds": batch.scheduler_stats.get("prefill_rounds", 0),
+                    "active_bytes": mx.get_active_memory(), "cache_bytes": mx.get_cache_memory(),
+                    "peak_bytes": mx.get_peak_memory(),
+                })
             if args.mechanism == "external-reclaim" and len(tokens) // INTERVAL > before // INTERVAL:
                 # Diagnostic pool samples at each crossed quotient, same method
                 # on both arms; host counters only, no device sync.
@@ -521,6 +560,12 @@ def run_arm(cohort, arm):
         # After timing: final target cache and draft sidecar state.
         target_state = state_digest(getattr(final, "prompt_cache", None))
         sidecar_state = state_digest(getattr(final, "cache_sidecar", None))
+        prompt_boundary = None if boundary is None else {
+            "covered_tokens": boundary.get("covered_tokens"),
+            "tokens_sha256": _sha(json.dumps(list(boundary.get("tokens", ()))).encode()),
+            "target": state_digest(boundary.get("target_cache")),
+            "sidecar": state_digest(boundary.get("cache_sidecar")),
+        }
     finally:
         batch.close()
         if previous_budget is not None:
@@ -541,11 +586,13 @@ def run_arm(cohort, arm):
         "peak_bytes": peak_end,
         "memory_note": "in-run samples before generator close; diagnostic, not a performance claim",
         "boundary_samples": boundary_samples,
+        "prefill_samples": prefill_samples,
         "max_responses_per_poll": max_per_poll,
         "final_target_state_sha256": target_state["sha256"],
         "final_draft_sidecar_sha256": sidecar_state["sha256"],
         "final_target_state": target_state,
         "final_draft_sidecar": sidecar_state,
+        "prompt_boundary": prompt_boundary,
         "counters": {
             "composed_tiled_calls": qvm.STATS.get("composed_tiled_calls", 0) - tiled_before,
             "composed_tiles": qvm.STATS.get("composed_tile_calls", 0) - tiles_before,
@@ -554,6 +601,8 @@ def run_arm(cohort, arm):
             "external_rounds": stats.get("external_rounds", 0),
             "proposed_tokens": stats.get("proposed_tokens", 0),
             "accepted_proposals": stats.get("accepted_proposals", 0),
+            "prefill_rounds": stats.get("prefill_rounds", 0),
+            "external_prefill_allocator_reclaims": stats.get("external_prefill_allocator_reclaims", 0),
         },
     }
     record["_tokens"] = tokens
@@ -574,6 +623,18 @@ def engagement_refusal(mechanism, record, logprob_rows=0):
             return "tiling not engaged on the on arm"
         if arm == "off" and c["composed_tiled_calls"] != 0:
             return "tiling engaged on the off arm"
+        return None
+    if mechanism == "external-prefill-reclaim":
+        if c["prefill_rounds"] < MIN_PREFILL_CHUNKS:
+            return (f"{c['prefill_rounds']} prefill chunks: too short for a prefill "
+                    f"reclaim probe (need {MIN_PREFILL_CHUNKS})")
+        if c["external_rounds"] <= 0 or c["proposed_tokens"] <= 0:
+            return "external draft never proposed (ordinary fallback, not the external route)"
+        reclaims = c["external_prefill_allocator_reclaims"]
+        if arm == "prefill_reclaim" and reclaims != c["prefill_rounds"]:
+            return f"prefill reclaim ran {reclaims} times over {c['prefill_rounds']} chunks"
+        if arm == "reference" and reclaims != 0:
+            return "prefill reclaim engaged on the reference arm"
         return None
     if record["tokens"] < ALLOCATOR_RECLAIM_MTP_TOKEN_INTERVAL:
         return (f"{record['tokens']} tokens: too short to cross the "
@@ -620,6 +681,8 @@ def run_cohort(args):
             mismatches.append(f"pair {record['pair']} {record['arm']}: tokens differ at {index}")
         elif record["logprob_row_sha256"] != reference["logprob_row_sha256"]:
             mismatches.append(f"pair {record['pair']} {record['arm']}: logprob rows differ")
+        if record["prompt_boundary"] != reference["prompt_boundary"]:
+            mismatches.append(f"pair {record['pair']} {record['arm']}: prompt boundary differs")
         for key in ("final_target_state", "final_draft_sidecar"):
             mine, ref = record[key], reference[key]
             if mine["status"] != ref["status"]:
@@ -704,7 +767,9 @@ def resolve_args(ap, argv=None):
     if a.tiny:
         if a.i_own_the_gpu or a.model or a.policy:
             ap.error("--tiny runs random CPU models; drop --i-own-the-gpu/--model/--policy")
-        defaults = (64, 8, 8, 4096, 1024) if qsdpa else (8, 300, None, 2048, None)
+        defaults = {"qsdpa-tiling": (64, 8, 8, 4096, 1024),
+                    "external-reclaim": (8, 300, None, 2048, None),
+                    "external-prefill-reclaim": (40, 16, None, 8, None)}[a.mechanism]
         a.ignore_eos = True
     else:
         if not a.i_own_the_gpu:
@@ -712,8 +777,10 @@ def resolve_args(ap, argv=None):
         if not a.model:
             ap.error("--model is required for a real run")
         if not qsdpa and not a.policy:
-            ap.error("external-reclaim needs an explicit --policy")
-        defaults = (16504, 128, 8, 8192, 16 << 20) if qsdpa else (512, 1024, None, 2048, None)
+            ap.error(f"{a.mechanism} needs an explicit --policy")
+        defaults = {"qsdpa-tiling": (16504, 128, 8, 8192, 16 << 20),
+                    "external-reclaim": (512, 1024, None, 2048, None),
+                    "external-prefill-reclaim": (8192, 64, None, 2048, None)}[a.mechanism]
     prompt, max_tokens, kv_bits, step, budget = defaults
     a.budget_bytes = budget if a.budget_bytes is None else a.budget_bytes
     a.prompt_tokens = prompt if a.prompt_tokens is None else a.prompt_tokens

@@ -341,7 +341,8 @@ class ExternalDraftBatchGenerator:
     def __init__(self, model, *, draft_model, binding, completion_batch_size=4,
                  prefill_step_size=2048, num_draft=4, stop_tokens=(), memory_headroom=None,
                  reclaim_memory=None, evict_checkpoint=None, fly_verification=None,
-                 pairwise_selection="host", ready_drain="one", **kwargs):
+                 pairwise_selection="host", ready_drain="one",
+                 prefill_allocator_reclaim=False, **kwargs):
         import mlx.core as mx
         self.mx = mx; self.model = model; self.draft = draft_model
         self.memory_headroom = memory_headroom
@@ -398,6 +399,15 @@ class ExternalDraftBatchGenerator:
         # it (EAGLE) opt in; DFlash-family drafters keep the original calls.
         self.pair_context_tokens = bool(getattr(draft_model, "requires_context_tokens", False))
         self.receipt_kind = str(getattr(draft_model, "receipt_kind", "external_dflash2"))
+        # Default-off, unqualified candidate for direct-model A/Bs only (no
+        # serving policy selects it): release the MLX pool after each
+        # non-empty prefill chunk, once its target and draft state are
+        # materialized, as the ordinary and prompt-lookup prefill already do.
+        if type(prefill_allocator_reclaim) is not bool:
+            raise ValueError("prefill_allocator_reclaim must be boolean")
+        self.prefill_allocator_reclaim = prefill_allocator_reclaim
+        if prefill_allocator_reclaim:
+            self.scheduler_stats.update(external_prefill_allocator_reclaims=0)
         if pairwise_selection == "batched":
             # Default-off receipts keep their existing key set.
             self.scheduler_stats.update(external_pairwise_selection_groups=0, external_pairwise_selection_lanes=0)
@@ -603,6 +613,10 @@ class ExternalDraftBatchGenerator:
             lane.history.extend(inputs)
             self.mx.eval(lane.tail, [c.state for c in lane.cache], [c.state for c in lane.draft_cache if c.offset])
             self.scheduler_stats["prefill_rounds"] += 1
+            if self.prefill_allocator_reclaim:
+                # After the materialization above; lane.tail stays referenced.
+                self.mx.clear_cache()
+                _bump(self.scheduler_stats, "external_prefill_allocator_reclaims")
         done = len(lane.remaining) == 1
         # (done, span) over the whole prompt; the final token is consumed by
         # the first decode round, so the prompt counts as done here.
