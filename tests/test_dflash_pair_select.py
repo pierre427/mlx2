@@ -322,3 +322,43 @@ def test_muse_adapter_policy_key(monkeypatch):
     assert adapter.execution_config(max_lanes=4, prefill_step=8)["pairwise_selection"] == "batched"
     with pytest.raises(ValueError, match="pairwise_selection"):
         muse_glimmer.MuseGlimmerAdapter("/nonexistent", execution_policy={"draft_model": "x", "pairwise_selection": "gpu"})
+
+
+def test_tree15_serves_concurrent_requests_one_lane_per_round(monkeypatch):
+    """tree15 needs one lane per round, but next() built multi-lane cohorts:
+    the refusal escaped next() on every poll and no lane ever progressed."""
+    monkeypatch.setenv("MLX2_DFLASH_TOPOLOGY", "tree15")
+    model, draft = tiny(vocab=64, top_k=16, block_size=8)
+    batch = generator(model, draft)
+    assert batch.capacity > 1
+    batch.insert([[1, 2, 3], [4, 5, 6]], max_tokens=[8, 8],
+                 sampling_configs=[{"sampling_temp": 0.0}] * 2)
+    out, _ = drain(batch)
+    assert sorted(out) == [0, 1] and all(len(tokens) == 8 for tokens in out.values())
+
+
+@pytest.mark.parametrize("max_tokens", [2, 3, 5, 6, 9])
+def test_tree15_final_token_receipt_matches_chain(monkeypatch, max_tokens):
+    """A tree15 lane's last budget token went through the permanent-fallback
+    path: its receipt claimed ordinary_fallback and no sidecar was published."""
+    def run(topology):
+        monkeypatch.delenv("MLX2_DFLASH_TOPOLOGY", raising=False)
+        if topology:
+            monkeypatch.setenv("MLX2_DFLASH_TOPOLOGY", topology)
+        model, draft = tiny(vocab=64, top_k=16, block_size=8)
+        batch = generator(model, draft)
+        batch.insert([[1, 2, 3]], max_tokens=[max_tokens],
+                     sampling_configs=[{"sampling_temp": 0.0}])
+        responses = []
+        for _ in range(100):
+            _, out = batch.next()
+            responses += out
+            if not batch.lanes:
+                break
+        final = responses[-1]
+        return ([r.token for r in responses], final.speculative_receipt["ordinary_fallback"],
+                final.cache_sidecar is not None)
+
+    chain, tree = run(None), run("tree15")
+    assert tree == chain
+    assert tree[1] is False and tree[2] is True

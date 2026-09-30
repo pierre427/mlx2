@@ -341,6 +341,8 @@ class ExternalDraftBatchGenerator:
         )
         if self.draft_topology not in ("chain", "tree15"):
             raise ValueError("MLX2_DFLASH_TOPOLOGY must be chain or tree15")
+        # Both probes run one lane per round; next() splits cohorts for them
+        # (a multi-lane cohort raised on every poll and stalled every lane).
         if self.target_execution not in ("reference", "tensorfold"):
             raise ValueError(
                 "MLX2_QWEN_TARGET_EXECUTION must be reference or tensorfold"
@@ -1558,7 +1560,12 @@ class ExternalDraftBatchGenerator:
     def _round(self, cohort):
         if cohort and all(lane.ordinary for lane in cohort):
             return self._ordinary_round(cohort)
-        if self.draft_topology == "tree15":
+        if self.draft_topology == "tree15" and all(
+            lane.maximum - lane.generated > 1 for lane in cohort
+        ):
+            # A lane's last budget token takes the chain body's zero-count
+            # round, which appends the draft context and publishes the
+            # sidecar; the ordinary path reported ordinary_fallback for it.
             return self._tree_round(cohort)
         clock = time.perf_counter() if self.round_timing else None
         recovery = self._snapshot_round(cohort)
@@ -1630,8 +1637,6 @@ class ExternalDraftBatchGenerator:
         if len(cohort) != 1:
             raise ValueError("tree15 experimental topology requires one lane")
         lane = cohort[0]
-        if lane.maximum - lane.generated <= 1:
-            return self._ordinary_round(cohort)
         clock = time.perf_counter() if self.round_timing else None
         phase = _PhaseClock(self) if self.round_timing else None
         recovery = self._snapshot_round(cohort)
@@ -1963,7 +1968,10 @@ class ExternalDraftBatchGenerator:
         for (count, _ordinary), candidates in groups.items():
             cohort = self._fit_cohort(candidates, count+1)
             if not cohort: continue
-            pending = [cohort]
+            if self.draft_topology == "tree15" or self.target_execution == "tensorfold":
+                pending = [[lane] for lane in reversed(cohort)]
+            else:
+                pending = [cohort]
             while pending:
                 group = pending.pop()
                 try:
