@@ -115,15 +115,23 @@ def inspect_artifact(model_path: str | Path) -> dict:
             "mtp.layers.0.self_attn.v_proj.weight",
             "mtp.layers.0.self_attn.o_proj.weight",
             "mtp.layers.0.mlp.gate.weight",
-            "mtp.layers.0.mlp.switch_mlp.down_proj.weight",
         }
-        if not required <= normalized or not (
+        converted = "mtp.layers.0.mlp.switch_mlp.down_proj.weight" in normalized and (
             "mtp.layers.0.mlp.switch_mlp.gate_up_proj.weight" in normalized
             or {
                 "mtp.layers.0.mlp.switch_mlp.gate_proj.weight",
                 "mtp.layers.0.mlp.switch_mlp.up_proj.weight",
             } <= normalized
-        ):
+        )
+        # The official checkpoint keeps the experts fused in the hub layout
+        # (``experts.gate_up_proj`` [E, 2I, H], ``experts.down_proj``
+        # [E, H, I]).  ``Model.sanitize`` converts both and the strict load
+        # checks every shape (MTPLX#574 lost these keys to a lenient load).
+        fused = {
+            "mtp.layers.0.mlp.experts.gate_up_proj",
+            "mtp.layers.0.mlp.experts.down_proj",
+        } <= normalized
+        if not required <= normalized or not (converted or fused):
             raise ValueError("embedded MTP head is incomplete")
     digest = hashlib.sha256()
     for name in (
