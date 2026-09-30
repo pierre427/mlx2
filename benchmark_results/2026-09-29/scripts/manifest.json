@@ -378,6 +378,13 @@
       "source_sha256": "a991d6d51300f2db362769e760bfcf95fc85c572d262f1027f89961a5f192693",
       "published_sha256": "a991d6d51300f2db362769e760bfcf95fc85c572d262f1027f89961a5f192693",
       "home_prefix_rewritten": false
+    },
+    {
+      "source": "qualification/runs/requal-20260928/policies/nemotron35-lightning-mtp2-width8.json",
+      "published": "scripts/requal/policies/nemotron35-lightning-mtp2-width8.json",
+      "source_sha256": "6d849544d6e8a533b01ca67d5e2ac6bed5a396200bc2158787e9cbb4125bc4bc",
+      "published_sha256": "6d849544d6e8a533b01ca67d5e2ac6bed5a396200bc2158787e9cbb4125bc4bc",
+      "home_prefix_rewritten": false
     }
   ]
 }

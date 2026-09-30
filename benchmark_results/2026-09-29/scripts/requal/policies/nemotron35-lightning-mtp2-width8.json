@@ -1,0 +1,6 @@
+{
+  "mtp_ordinary_handoff": {
+    "enabled": true,
+    "max_mtp_width": 8
+  }
+}

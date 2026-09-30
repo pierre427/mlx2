@@ -22,7 +22,7 @@ SOURCES = {
         "queue_features.py", "queue_perf.py",
         "queue_smoke.py", "queue_stress.py", "run.py", "run_features.py",
         "run_perf.py", "run_preflight.py", "run_stress.py",
-        "trace_stress_swap.py",
+        "trace_stress_swap.py", "monitor_host_memory.py",
     ],
     "series": [
         "campaign_config.py", "concurrency_probe.py", "experimental_job.py",
@@ -73,6 +73,7 @@ def main() -> None:
             ROOT / "qualification/runs/requal-20260928/policies/flash-next-tensorfold-qmv-candidate.json",
             ROOT / "qualification/runs/requal-20260928/policies/muse-lane-no-group-candidate.json",
             ROOT / "qualification/runs/requal-20260928/policies/muse-pld-rotating-candidate.json",
+            ROOT / "qualification/runs/requal-20260928/policies/nemotron35-lightning-mtp2-width8.json",
         ],
     }
     for group, sources in policy_groups.items():
