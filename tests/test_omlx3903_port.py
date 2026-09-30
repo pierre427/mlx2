@@ -171,6 +171,9 @@ def kernels_on_cpu(monkeypatch):
         return mx.array(out[None]).astype(y.dtype)
 
     monkeypatch.setattr(gdn_prefill, "runtime_supported", lambda: True)
+    # The simulated Metal build serves the SiLU the mirrors reproduce; the real
+    # probe needs Metal (tests/test_fused_gdn_served_silu.py covers refusal).
+    monkeypatch.setattr(qwen4_exp, "served_silu_refusal", lambda: None)
     monkeypatch.setattr(gdn_prefill, "qwen4_gdn_prefill_prework", prework)
     monkeypatch.setattr(gdn_prefill, "qwen4_gdn_prefill_norm_gate", norm_gate)
     return calls
