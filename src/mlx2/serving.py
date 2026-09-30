@@ -7683,7 +7683,13 @@ class ServingEngine:
                             if response.finish_reason != "stop":
                                 job.detokenizer.add_token(response.token)
                             if response.finish_reason:
-                                job.detokenizer.finalize()
+                                # The stream ends here: a character its last
+                                # token left incomplete never completes, so
+                                # its bytes are dropped, not sent as U+FFFD.
+                                finalize = getattr(
+                                    job.detokenizer, "finalize_complete", None
+                                )
+                                (finalize or job.detokenizer.finalize)()
                             text = job.detokenizer.last_segment
                             finish_output = getattr(job.output_parser, "finish", None)
                             if response.finish_reason and callable(finish_output):

@@ -113,3 +113,113 @@ def test_undecodable_sampled_id_fails_its_request_not_the_worker(host):
     assert f"unknown BPE token ID: {padded}" in failed["error"]
     assert after.get("finish_reason") == "length", after
     assert not engine.error
+
+
+def _byte_level(data: bytes) -> str:
+    """GPT-2 byte-level spelling of ``data``."""
+    from mlx2.runtime.tokenizer_utils import BPEStreamingDetokenizer
+
+    BPEStreamingDetokenizer.make_byte_decoder()
+    encoder = {v: k for k, v in BPEStreamingDetokenizer._byte_decoder.items()}
+    return "".join(encoder[b] for b in data)
+
+
+def test_bpe_stream_cut_mid_character_drops_it_instead_of_u_fffd():
+    """vLLM #59133: a stream cut inside a multi-byte character (max_tokens,
+    a stop token) never completes it; the served text drops those bytes.
+    ``finalize`` still matches the full decode, which spells them U+FFFD."""
+    euro = "€".encode()  # 3 bytes
+    vocab = {_byte_level(b"hi"): 0, _byte_level(euro[:1]): 1,
+             _byte_level(euro[1:]): 2, "Ġ": 3, _byte_level(b"\xff"): 4}
+    tokenizer = SimpleNamespace(vocab=vocab)
+
+    def run(ids, complete):
+        stream = BPEStreamingDetokenizer(tokenizer)
+        for token in ids:
+            stream.add_token(token)
+        stream.finalize_complete() if complete else stream.finalize()
+        return stream.text
+
+    assert run([0, 1], complete=False) == "hi�"
+    assert run([0, 1], complete=True) == "hi"
+    assert run([0, 1, 2], complete=True) == "hi€"
+    # An invalid byte is not an incomplete character: it stays U+FFFD.
+    assert run([0, 4], complete=True) == "hi�"
+    assert run([0, 4, 1], complete=True) == "hi�"
+
+
+def test_bpe_finalize_with_a_pending_added_token_character():
+    """An added token spelled outside the byte map, pending behind an
+    incomplete character, raised KeyError from ``finalize``."""
+    euro = "€".encode()
+    vocab = {_byte_level(euro[:1]): 0, "中": 1}  # not a byte-level character
+    for complete in (False, True):
+        stream = BPEStreamingDetokenizer(SimpleNamespace(vocab=vocab))
+        stream.add_token(0)
+        stream.add_token(1)
+        stream.finalize_complete() if complete else stream.finalize()
+        assert stream.text.endswith("中")
+
+
+def test_spm_stream_cut_mid_character_drops_it_instead_of_u_fffd():
+    vocab = {"▁hi": 0, "<0xE2>": 1, "<0x82>": 2, "<0xAC>": 3, "<0xFF>": 4}
+
+    def run(ids, complete):
+        stream = SPMStreamingDetokenizer(SimpleNamespace(vocab=vocab))
+        for token in ids:
+            stream.add_token(token)
+        stream.finalize_complete() if complete else stream.finalize()
+        return stream.text
+
+    assert run([0, 1, 2], complete=False) == "hi�"
+    assert run([0, 1, 2], complete=True) == "hi"
+    assert run([0, 1, 2, 3], complete=True) == "hi€"
+    assert run([0, 4], complete=True) == "hi�"
+
+
+def test_served_length_stop_mid_character_sends_no_u_fffd(host):
+    """The engine finishes the stream with ``finalize_complete``: a length
+    stop right after a character's lead byte sends nothing for it."""
+    model = tiny_model()
+    decodable = 100
+    lead = 50
+    vocab = {chr(0x100 + i): i for i in range(decodable) if i != lead}
+    vocab[_byte_level("€".encode()[:1])] = lead
+
+    class Tokenizer:
+        vocab_size = decodable
+        eos_token_ids = []
+
+        @property
+        def detokenizer(self):
+            return BPEStreamingDetokenizer(SimpleNamespace(vocab=vocab))
+
+    def processors(request, prompt_length):
+        def force(tokens, logits):
+            bias = mx.full((logits.shape[-1],), -1e4)
+            bias[lead] = 0.0
+            return logits + bias
+
+        return [force]
+
+    adapter = make_adapter(model, processors=processors)
+    adapter.tokenizer = Tokenizer()
+    engine = ServingEngine(
+        "tiny", adapter_factory=adapter, qualification_mode=True, mtp=False,
+        max_lanes=1, prefill_step=8,
+    )
+    text = ""
+    try:
+        assert engine.ready.wait(60), engine.error
+        job = engine.submit({"tokens": B_PROMPT, "max_tokens": 1, "temperature": 0})
+        while True:
+            event = job.events.get(timeout=120)
+            assert "error" not in event, event
+            for value in (event.get("delta") or {}).values():
+                text += value if isinstance(value, str) else ""
+            if "finish_reason" in event:
+                break
+    finally:
+        engine.close()
+    assert event["finish_reason"] == "length"
+    assert "�" not in text

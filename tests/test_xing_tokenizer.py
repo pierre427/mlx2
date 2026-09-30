@@ -314,3 +314,24 @@ def test_stamped_load_and_wrapper_route(fast_dir):
     (fast_dir / "tokenizer.json").write_text((fast_dir / "tokenizer.json").read_text() + " ")
     with pytest.raises(xt.XingTokenizerError):
         xt.load_tokenizer(fast_dir)
+
+
+def test_finalize_complete_drops_only_an_incomplete_trailing_character():
+    """vLLM #59133: a stream cut inside a character never completes it."""
+    tables = _fixture_tables()
+    byte = lambda b: xt.BYTE_OFFSET + b  # noqa: E731
+    hi = 13029  # "▁hi"
+    cases = {
+        (hi, byte(0xF0), byte(0x9F)): "hi",  # valid 4-byte prefix: dropped
+        (hi, byte(0xF0), byte(0x9F), byte(0x98), byte(0x80)): "hi\U0001F600",
+        (hi, byte(0xF0), byte(0x41)): "hi�A",  # invalid: spelled as usual
+        (hi, byte(0xFF)): "hi�",
+        # The control piece drains the first F0; only the final prefix drops.
+        (byte(0xF0), 7, byte(0xF0), byte(0x9F)): "\ufffd",
+    }
+    for ids, want in cases.items():
+        detok = xt.XingStreamingDetokenizer(_TablesOnly(tables))
+        for token in ids:
+            detok.add_token(token)
+        detok.finalize_complete()
+        assert detok.text == want, ids

@@ -21,6 +21,7 @@ Runtime needs neither ``sentencepiece`` nor remote code on the fast path.
 
 from __future__ import annotations
 
+import codecs
 import copy
 import hashlib
 import json
@@ -202,8 +203,23 @@ class _SpmRun:
         self.bos = False
         return head + piece.replace(SPIECE, " ")
 
-    def end(self) -> str:
-        text = self._drain(True)
+    def end(self, complete: bool = False) -> str:
+        """Close the run.  ``complete`` drops a trailing incomplete character.
+
+        sentencepiece spells each byte of a character left incomplete as
+        U+FFFD; a stream cut there never completes it, so ``complete`` drops
+        those bytes when they are a valid UTF-8 prefix (vLLM #59133).
+        """
+        text = self._drain(not complete)
+        if complete and self.pending:
+            try:
+                codecs.getincrementaldecoder("utf-8")("strict").decode(
+                    bytes(self.pending), final=False
+                )
+            except UnicodeDecodeError:
+                text += self._drain(True)
+            else:
+                self.pending.clear()
         self.bos = True
         return text
 
@@ -303,6 +319,10 @@ class XingStreamingDetokenizer:
 
     def finalize(self):
         self.text += self._run.end()
+
+    def finalize_complete(self):
+        """``finalize`` without the U+FFFD of a trailing incomplete character."""
+        self.text += self._run.end(complete=True)
 
     @property
     def last_segment(self):

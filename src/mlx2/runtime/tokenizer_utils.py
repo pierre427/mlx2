@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: MIT
 # Adapted tokenizer primitives; see provenance/.
+import codecs
 import copy
 import importlib
 import json
@@ -8,6 +9,11 @@ from functools import partial
 from json import JSONDecodeError
 from typing import Any, Dict, Optional
 from transformers import AutoTokenizer
+
+
+def _decode_complete(data) -> str:
+    """``data`` decoded with U+FFFD for invalid bytes, minus an incomplete final character."""
+    return codecs.getincrementaldecoder("utf-8")("replace").decode(bytes(data), final=False)
 
 
 class StreamingDetokenizer:
@@ -50,6 +56,19 @@ class StreamingDetokenizer:
 
     def finalize(self):
         raise NotImplementedError()
+
+    def finalize_complete(self):
+        """``finalize`` for a stream that ends here, without a dangling half character.
+
+        ``finalize`` matches ``tokenizer.decode(tokens)``, which spells the
+        bytes of a character the last token left incomplete as U+FFFD.  A
+        stream cut there (``max_tokens``, a stop token) never completes that
+        character, so the served text drops those bytes instead, as vLLM's
+        incremental detokenizer does (vLLM #59133).  Invalid bytes anywhere
+        else still read as U+FFFD.  A detokenizer that cannot tell falls back
+        to ``finalize``.
+        """
+        self.finalize()
 
     @property
     def last_segment(self):
@@ -134,9 +153,13 @@ class SPMStreamingDetokenizer(StreamingDetokenizer):
         self.text = ""
         self.tokens = []
 
-    def _try_flush(self, force=False):
-        text = self._unflushed.replace(self._sep, b" ").decode("utf-8", "replace")
-        if not force and text.endswith("�"):
+    def _try_flush(self, force=False, complete=False):
+        data = self._unflushed.replace(self._sep, b" ")
+        if complete:
+            text = _decode_complete(data)
+        else:
+            text = data.decode("utf-8", "replace")
+        if not force and text.endswith("\ufffd"):
             return
         if not self.text and self.trim_space and text and (text[0] == " "):
             text = text[1:]
@@ -158,6 +181,9 @@ class SPMStreamingDetokenizer(StreamingDetokenizer):
 
     def finalize(self):
         self._try_flush(force=True)
+
+    def finalize_complete(self):
+        self._try_flush(force=True, complete=True)
         self._unflushed = b""
 
 
@@ -188,7 +214,7 @@ class BPEStreamingDetokenizer(StreamingDetokenizer):
         self.text = ""
         self.tokens = []
 
-    def _decode_bytes(self, seq):
+    def _bytes(self, seq):
         barr = bytearray()
         for c in seq:
             res = self._byte_decoder.get(c)
@@ -196,7 +222,10 @@ class BPEStreamingDetokenizer(StreamingDetokenizer):
                 barr.append(res)
             else:
                 barr.extend(bytes(c, "utf-8"))
-        return barr.decode("utf-8", "replace")
+        return barr
+
+    def _decode_bytes(self, seq):
+        return self._bytes(seq).decode("utf-8", "replace")
 
     def _maybe_trim_space(self, current_text):
         if len(current_text) == 0:
@@ -221,10 +250,15 @@ class BPEStreamingDetokenizer(StreamingDetokenizer):
             self._unflushed = ""
 
     def finalize(self):
-        current_text = bytearray(
-            (self._byte_decoder[c] for c in self._unflushed)
-        ).decode("utf-8", "replace")
-        self.text += self._maybe_trim_space(current_text)
+        # A pending added-token character is not in the byte map; it is its
+        # own UTF-8, as in ``add_token`` (indexing the map raised KeyError).
+        self.text += self._maybe_trim_space(self._decode_bytes(self._unflushed))
+        self._unflushed = ""
+
+    def finalize_complete(self):
+        self.text += self._maybe_trim_space(
+            _decode_complete(self._bytes(self._unflushed))
+        )
         self._unflushed = ""
 
     @classmethod
