@@ -210,13 +210,13 @@ def test_harmony_final_switch_is_the_declared_close_marker():
 
 
 @pytest.mark.parametrize("request_fields,budget", [
-    ({"enable_thinking": False, "max_tokens": 64}, 29),
+    ({"enable_thinking": False, "max_tokens": 64}, 38),
     # The six-token switch and an answer still fit (codex review).
-    ({"enable_thinking": False, "max_tokens": 20}, 7),
+    ({"enable_thinking": False, "max_tokens": 20}, 9),
     ({"enable_thinking": False, "max_tokens": 8}, 1),
     ({"enable_thinking": False, "max_tokens": 4096}, 512),
     ({"enable_thinking": False}, 512),
-    ({"reasoning_effort": "none", "max_tokens": 100}, 47),
+    ({"reasoning_effort": "none", "max_tokens": 100}, 62),
     ({}, 0),                       # visible reasoning: the operator's budget applies
     ({"enable_thinking": True}, 0),
 ])

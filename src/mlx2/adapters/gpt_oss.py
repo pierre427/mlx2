@@ -283,10 +283,12 @@ class _GptOssOrdinaryAdapter:
         """Reasoning-token bound for a thinking-off request, or 0 for none.
 
         A model that cannot skip analysis still reasons with thinking off
-        (hidden, ``Reasoning: low``).  Half of what ``max_tokens`` leaves after
-        the six-token final-channel switch goes to it (at most 512), so a
+        (hidden, ``Reasoning: low``).  Two thirds of what ``max_tokens`` leaves
+        after the six-token final-channel switch go to it (at most 512), so a
         short-budget request still has room to answer: the guard switches to
-        the final channel when the bound is reached.
+        the final channel when the bound is reached.  Two thirds beat one half
+        on Puzzle-88B, 137/150 vs 130/150 at max_tokens 32-128 (8 fixes, 1
+        break; qualification/experiments/gpt-oss-harmony-20260930).
         """
         if self.direct_final or "messages" not in request or self.thinking_enabled(request):
             return 0
@@ -294,7 +296,7 @@ class _GptOssOrdinaryAdapter:
         if not isinstance(limit, int) or limit <= 0:
             return 512
         switch = len(self.thinking_close_token_ids() or ()) or 6
-        return max(1, min(512, (limit - switch) // 2))
+        return max(1, min(512, (limit - switch) * 2 // 3))
 
     def _answers_directly(self, request: dict) -> bool:
         return self.direct_final and not self.thinking_enabled(request)
