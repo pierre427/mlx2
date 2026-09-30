@@ -798,3 +798,15 @@ def test_qualifier_observes_int8_prefill_engaged_calls():
     )
     assert observed["int8_prefill"] == 7
     assert module.feature_observations({})["int8_prefill"] == 0
+
+
+def test_int8_prefill_needs_qualification_mode_or_evidence():
+    """int8 prefill is approximate; like approximate KV it may run only in
+    qualification mode or behind a qualification record (it was accepted with
+    neither, and published approximate prefix state)."""
+    from mlx2.serving import ServingEngine
+
+    with pytest.raises(ValueError, match="int8 prefill is approximate"):
+        ServingEngine.validate_arguments("tiny", int8_prefill="mlp")
+    ServingEngine.validate_arguments("tiny", int8_prefill="mlp", qualification_mode=True)
+    ServingEngine.validate_arguments("tiny")

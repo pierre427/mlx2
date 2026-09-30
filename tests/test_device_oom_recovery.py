@@ -231,3 +231,56 @@ def test_qwen38_prefill_transient_is_charged_at_admission():
         reclaim=lambda: False, evict=lambda: False, evictable=lambda: 0,
     )
     assert not admitted
+
+
+def test_memory_the_server_holds_on_purpose_is_not_a_leak(monkeypatch):
+    """Multi-LoRA slot tensors and the media feature cache are allocated after
+    the load-time baseline; recovery counted them as unreleased memory and
+    stopped a worker that had recovered."""
+    from types import SimpleNamespace
+
+    patch_host(monkeypatch)
+    monkeypatch.setattr(serving.ServingEngine, "DEVICE_OOM_RELEASE_TOLERANCE_GIB", 32 / 1024)
+    held = []
+    original = generate.BatchGenerator.next
+    state = {"armed": True}
+
+    def next_(self):
+        if state["armed"] and getattr(self, "_prompt_batch", None) is not None:
+            state["armed"] = False
+            held.append(mx.zeros(((256 << 20) // 4,), dtype=mx.float32))
+            mx.eval(held[-1])
+            raise OOM
+        return original(self)
+
+    monkeypatch.setattr(generate.BatchGenerator, "next", next_)
+    model, vocab = tiny_qwen38_mtp()
+    engine = make_engine(model, vocab, mtp=False, max_lanes=2)
+    try:
+        # The held bytes belong to a cache the server keeps by design.
+        engine.adapter.media_feature_cache = SimpleNamespace(bytes=256 << 20)
+        prompt = [(7 * i + 2) % (vocab - 2) + 1 for i in range(40)]
+        body = {"tokens": prompt, "max_tokens": 4, "temperature": 0}
+        failed = collect(engine.submit(dict(body)))
+        assert failed.get("status") == 503
+        served = collect(engine.submit(dict(body)))
+        assert "error" not in served, served
+        assert engine.error is None
+        assert engine.counts["device_oom_memory_not_released"] == 0
+    finally:
+        held.clear()
+        engine.close()
+
+
+def test_multi_lora_reports_its_slot_bytes():
+    from types import SimpleNamespace
+    import threading
+
+    from mlx2.runtime.multi_lora import MultiLoRAManager
+
+    manager = object.__new__(MultiLoRAManager)
+    manager.lock = threading.Lock()
+    manager.wrapped = {
+        "a": SimpleNamespace(lora_a=mx.zeros((3, 8, 4)), lora_b=mx.zeros((3, 4, 16))),
+    }
+    assert manager.slot_nbytes() == (3 * 8 * 4 + 3 * 4 * 16) * 4

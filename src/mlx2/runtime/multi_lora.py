@@ -376,6 +376,14 @@ class MultiLoRAManager:
                 self.counts["structural_wraps"] += len(replacements)
         return len(replacements)
 
+    def slot_nbytes(self) -> int:
+        """Device bytes held by the stacked slot tensors of every wrapped module."""
+        with self.lock:
+            return sum(
+                int(module.lora_a.nbytes) + int(module.lora_b.nbytes)
+                for module in self.wrapped.values()
+            )
+
     def commit(self, adapter):
         with self.lock:
             if adapter.name in self.registry:

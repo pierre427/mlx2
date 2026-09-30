@@ -1814,6 +1814,14 @@ class ServingEngine:
         # The handle is bound in the worker once the adapter's model exists.
         self.int8_prefill_policy = Int8PrefillPolicy.from_value(int8_prefill)
         self.int8_prefill_handle = None
+        if self.int8_prefill_policy.enabled and not qualification_mode and not qualification:
+            # Approximate state may only be published through a qualified
+            # approximate operation (AGENTS.md); the same gate as approximate
+            # KV below.  It was dropped with the global receipt requirement.
+            raise ValueError(
+                "int8 prefill is approximate and restricted to qualification mode "
+                "unless a qualification record carries its evidence"
+            )
         from .runtime.verify_bitexact import VerifyBitexactPolicy
 
         # Bit-exact (batch-invariant) verify: default off.  The mode is
@@ -3960,9 +3968,20 @@ class ServingEngine:
         baseline = getattr(self, "_device_resident_baseline", None)
         if baseline is not None:
             resident_apc = int(getattr(apc, "resident_nbytes", lambda: 0)())
+            # Holders allocated after the load-time baseline that the server
+            # keeps on purpose: multi-LoRA slot tensors (wrapped when an
+            # adapter first loads) and the media feature cache.  Leaving them
+            # out read a legitimate recovery as a leak and stopped the worker.
+            manager = getattr(self, "multi_lora", None)
+            feature_cache = getattr(self.adapter, "media_feature_cache", None)
+            resident_extra = (
+                (int(manager.slot_nbytes()) if manager is not None else 0)
+                + int(getattr(feature_cache, "bytes", 0) or 0)
+            )
             allowed = (
                 int(baseline)
                 + resident_apc
+                + resident_extra
                 + int(
                     (self.expert_stream_reserve_gib() + self.DEVICE_OOM_RELEASE_TOLERANCE_GIB)
                     * (1 << 30)
@@ -6000,6 +6019,15 @@ class ServingEngine:
                             ):
                                 job.apc_sequence_waited = True
                                 job.admission_deadline = 0
+                                # A memory-deferred retry still holds its
+                                # first lookup (a miss, or a leased partial
+                                # hit).  Drop it: the follower must look up
+                                # again after the leader publishes, and holds
+                                # no lease while it waits.
+                                branch = job.cache_branch
+                                job.cache_branch = job.admission_hit = None
+                                if branch is not None and hasattr(branch, "close"):
+                                    branch.close()
                                 prefix_waiting.append(job)
                                 self.counts["apcv2_same_prefix_sequenced"] += 1
                                 continue

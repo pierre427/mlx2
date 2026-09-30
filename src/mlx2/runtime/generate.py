@@ -750,7 +750,7 @@ class GenerationBatch:
         self._matcher_states = [m.make_state() for m in stop_matchers]
         self._lane_failures = []
         if self.uids:
-            self._step()
+            self._step(prompt_tail=True)
 
     def __len__(self):
         return len(self.uids)
@@ -864,9 +864,15 @@ class GenerationBatch:
         ]
         return {"deep_concept_memory": stepped}
 
-    def _step(self) -> Tuple[List[int], List[mx.array]]:
+    def _step(self, *, prompt_tail: bool = False) -> Tuple[List[int], List[mx.array]]:
         """
         Perform a single generation step.
+
+        ``prompt_tail``: the constructor's step, which feeds the last prompt
+        token.  Only it may use ``prefill_forward`` (Gemma 3n: generated
+        tokens must take the decode ``__call__``).  Keying this on the step
+        counter sent the first generated token of every lane extended into
+        the long-lived, empty-built batch through ``prefill_forward``.
 
         Returns:
             Tuple of token list and logprobs list.
@@ -914,7 +920,7 @@ class GenerationBatch:
         try:
             kwargs = self._persistent_step_inputs()
             forward = (getattr(self.model, "prefill_forward", self.model)
-                       if self._decode_steps == 0 else self.model)
+                       if prompt_tail else self.model)
             logits = forward(inputs[:, None], cache=self.prompt_cache, **kwargs)
         finally:
             clear_lora_rows(lora_rows)

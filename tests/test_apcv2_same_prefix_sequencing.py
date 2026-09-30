@@ -114,3 +114,54 @@ def test_write_suppressed_leader_and_distinct_sessions_do_not_sequence(engine):
     collect(first)
     collect(second)
     assert second.apc_sequence_waited is False
+
+
+@pytest.mark.parametrize("defer_first", [False, True])
+def test_a_memory_deferred_follower_reuses_the_checkpoint_it_waited_for(
+    monkeypatch, defer_first
+):
+    """A follower deferred by memory admission before its leader was admitted
+    kept its stale APCv2 miss: it waited out the leader's generation, then
+    re-prefilled cold instead of reusing the leader's checkpoint."""
+    import time
+
+    from mlx2 import memory, serving
+    from mlx2.runtime import os_memory
+    from mlx2.serving import ServingEngine
+    from test_apc_hits_hybrid_gdn_self_mtp import make_adapter, tiny_qwen38_mtp
+
+    mx.set_default_device(mx.cpu)
+    monkeypatch.setattr(serving, "runtime_identity", lambda: {"source_sha256": "cpu-l1"})
+    monkeypatch.setattr(memory, "execution_headroom", lambda: 100 * 2**30)
+    monkeypatch.setattr(os_memory, "physical_footprint_bytes", lambda: 0)
+    monkeypatch.setattr(ServingEngine, "MEMORY_ADMISSION_RETRY", 0.05)
+    real = serving.admit_lane_headroom
+    calls = {"n": 0}
+
+    def admit(*a, **kw):
+        calls["n"] += 1
+        if defer_first and calls["n"] == 1:
+            return (False, False, 1.0)  # the follower's first reading is short
+        return real(*a, **kw)
+
+    monkeypatch.setattr(serving, "admit_lane_headroom", admit)
+    model, vocab = tiny_qwen38_mtp()
+    engine = ServingEngine(
+        "tiny", adapter_factory=make_adapter(model, vocab),
+        qualification_mode=True, mtp=False, max_lanes=2, max_inflight=4,
+        tenant_scoped_cache=True, prefill_step=16, coalesce_window_ms=1,
+    )
+    assert engine.ready.wait(60), engine.error
+    try:
+        follower = submit(engine, prompt(), max_tokens=8)
+        deadline = time.monotonic() + 10
+        while defer_first and calls["n"] < 1 and time.monotonic() < deadline:
+            time.sleep(0.001)
+        leader = submit(engine, prompt(), max_tokens=160)
+        collect(leader)
+        _, receipt = collect(follower)
+        if follower.apc_sequence_waited:
+            # It waited for the leader's publication; it must reuse it.
+            assert follower.cached_tokens == 127
+    finally:
+        engine.close()
