@@ -212,3 +212,60 @@ def test_receipt_target_width_is_the_lanes_widest_verify():
     assert widths[long_lane] == {1, 2}
     for uid in (long_lane, short_lane):
         assert finals[uid].speculative_receipt["target_width"] == max(widths[uid])
+
+
+def test_a_failing_batched_lane_does_not_advance_its_peers_streams():
+    """One lane's invalid output aborted the whole batched round after its
+    peers had drawn from their LaneRNG streams, which never rewind: a healthy
+    seeded lane's sampled output then depended on its neighbour."""
+    from mlx2.runtime.sample_utils import LaneRNG, draw_key, make_transformed_logprobs
+
+    model = _north(seed=5)
+    healthy = [1, 2, 3, 4, 5, 6, 1, 2, 3, 4, 5, 6, 1, 2, 3]
+    other = [7, 8, 9, 7, 8, 9, 7, 8, 9, 7, 8]
+    fail_at = 3
+
+    def sampler(seed):
+        rng = LaneRNG(seed)
+        transform = make_transformed_logprobs(1.0, top_p=0, top_k=0, min_p=0)
+
+        def draw(logprobs):
+            return mx.random.categorical(transform(logprobs), key=draw_key(rng))
+
+        return draw
+
+    def poisoned(tokens, logits):
+        if int(tokens.shape[-1]) - len(other) >= fail_at:
+            return mx.full(logits.shape, -float("inf"), dtype=logits.dtype)
+        return logits
+
+    def run(mode):
+        generator = PromptLookupBatchGenerator(
+            model, completion_batch_size=2, prefill_step_size=5,
+            prompt_lookup={"num_draft": 4, "ngram_min": 2, "ngram_max": 3,
+                           "adaptive": False, "deferred_admission": False,
+                           "batched_verify": True},
+        )
+        ua, ub = generator.insert(
+            [healthy, other], max_tokens=[16, 16],
+            samplers=[sampler(1234), sampler(99)],
+            logits_processors=[[], [poisoned] if mode == "fail" else []],
+        )
+        out, removed, failures = [], False, []
+        for _ in range(500):
+            lane = generator.lanes.get(ub)
+            if (mode == "remove" and not removed and lane is not None
+                    and lane.anchor is not None and lane.generated >= fail_at):
+                generator.remove([ub])
+                removed = True
+            _, responses = generator.next()
+            failures += generator.take_lane_failures()
+            out += [r.token for r in responses if r.uid == ua]
+            if ua not in generator.lanes:
+                break
+        return out, failures
+
+    failed, failures = run("fail")
+    control, _ = run("remove")
+    assert [f["uid"] for f in failures] == [1]
+    assert failed == control

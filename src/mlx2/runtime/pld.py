@@ -54,6 +54,23 @@ class PromptLookupLaneFailure(RuntimeError):
         self.uid = uid
         self.reason = reason
 
+    @property
+    def failures(self):
+        return (self,)
+
+
+class PromptLookupRoundFailures(PromptLookupLaneFailure):
+    """Lanes of a batched round that failed after their peers committed."""
+
+    def __init__(self, failures):
+        first = failures[0]
+        super().__init__(first.uid, first.reason)
+        self._failures = tuple(failures)
+
+    @property
+    def failures(self):
+        return self._failures
+
 
 def _walk_state(caches):
     return [entry.state for entry in caches]
@@ -983,11 +1000,25 @@ class PromptLookupBatchGenerator:
             finally:
                 if steer is not None:
                     taps.steer = None
-            consumed = [step.send(logits[row]) for row, step in enumerate(steps)]
+            # Each row samples from its own lane's stream (LaneRNG never
+            # rewinds) and runs its processors, so a peer's failure must not
+            # discard the rows already sampled: that advanced the healthy
+            # lanes' streams without committing their tokens, and their seeded
+            # output then depended on the neighbour.  A failed row keeps only
+            # its anchor (its cache is dropped with the lane); the rest commit.
+            consumed, failures, failed_rows = [], [], set()
+            for row, step in enumerate(steps):
+                try:
+                    consumed.append(step.send(logits[row]))
+                except PromptLookupLaneFailure as error:
+                    failures.append(error)
+                    failed_rows.add(row)
+                    consumed.append(1)
             transaction.commit(accepted_lengths=consumed)
             transaction = None
-            for commit, count in zip(commits, consumed):
-                commit(count)
+            for row, (commit, count) in enumerate(zip(commits, consumed)):
+                if row not in failed_rows:
+                    commit(count)
         except PromptLookupLaneFailure:
             # Lane-local retry is sound only if the shared cache transaction
             # actually aborts.  An abort failure must fail the cohort closed.
@@ -1005,11 +1036,16 @@ class PromptLookupBatchGenerator:
             self.scheduler_stats["pld_batched_max_width"], len(lanes)
         )
         self.scheduler_stats["pld_rollbacks"] += sum(
-            int(done < length) for done, length in zip(consumed, lengths)
+            int(done < length)
+            for row, (done, length) in enumerate(zip(consumed, lengths))
+            if row not in failed_rows
         )
-        for step in steps:
-            with suppress(StopIteration):
-                next(step)
+        for row, step in enumerate(steps):
+            if row not in failed_rows:
+                with suppress(StopIteration):
+                    next(step)
+        if failures:
+            raise PromptLookupRoundFailures(failures)
 
     def _round_steps(self, lane):
         cost = lane.cost_latch
@@ -1315,10 +1351,12 @@ class PromptLookupBatchGenerator:
             try:
                 self._round_batched(together)
             except PromptLookupLaneFailure as error:
-                # The shared transaction aborted before any lane committed.
-                # Peers retry from their own unchanged boundaries next poll.
-                self._lane_failures.append({"uid": error.uid, "reason": error.reason})
-                self.remove([error.uid])
+                # Healthy peers committed their rows; the failed lanes leave.
+                for failure in error.failures:
+                    self._lane_failures.append(
+                        {"uid": failure.uid, "reason": failure.reason}
+                    )
+                    self.remove([failure.uid])
         for lane in pending:
             if lane not in together and lane.uid in self.lanes:
                 try:
@@ -1337,8 +1375,11 @@ class PromptLookupBatchGenerator:
                     else:
                         self._round(lane)
                 except PromptLookupLaneFailure as error:
-                    self._lane_failures.append({"uid": error.uid, "reason": error.reason})
-                    self.remove([error.uid])
+                    for failure in error.failures:
+                        self._lane_failures.append(
+                            {"uid": failure.uid, "reason": failure.reason}
+                        )
+                        self.remove([failure.uid])
         responses = []
         for uid, lane in list(self.lanes.items()):
             if lane.ready:
