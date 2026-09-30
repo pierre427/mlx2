@@ -189,7 +189,14 @@ class _GateUpGroup:
         # x broadcasts over the leading axis: one launch, every assignment
         # routed to its gate expert and to its up expert.  Still sorted.
         routed = mx.stack([indices, indices + self.num_experts])
-        out = self.projection(x, routed, sorted_indices=sorted_indices)
+        # MLX's sorted gather_qmm path assumes one sorted rhs-index stream.
+        # The gate/up axis broadcasts ``x`` across two individually sorted
+        # streams; on Metal, large rows with native quantized K geometry can
+        # be read as one stream and return incorrect rows. Dense gather_mm is
+        # exact, but quantized groups must decline that specialization. This
+        # remains one coalesced gather_qmm launch.
+        safe_sorted = sorted_indices and type(self.projection) is SwitchLinear
+        out = self.projection(x, routed, sorted_indices=safe_sorted)
         if trim is not None:
             return out[0, :trim], out[1, :trim]
         return out[0], out[1]

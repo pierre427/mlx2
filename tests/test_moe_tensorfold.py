@@ -266,6 +266,24 @@ def test_doubled_rows_stay_out_of_the_sorted_tail_window(monkeypatch):
     assert moe_tensorfold.stats()["tail_padded_calls"] == 1
 
 
+def test_quantized_group_declines_sorted_gather_qmm(monkeypatch):
+    model = Model(quant={"group_size": 64, "bits": 4}, dtype=mx.bfloat16)
+    moe_tensorfold.install(model)
+    seen = []
+    original = QuantizedSwitchLinear.__call__
+
+    def spy(self, x, idx, sorted_indices=False):
+        seen.append(sorted_indices)
+        return original(self, x, idx, sorted_indices=sorted_indices)
+
+    monkeypatch.setattr(QuantizedSwitchLinear, "__call__", spy)
+    x = mx.zeros((3, DIMS), dtype=mx.bfloat16)
+    indices = mx.array([[0, 1, 2, 3, 4, 5, 6, 7]] * 3)
+    mx.eval(model(x, indices))
+    # Coalesced gate/up is the first call; down_proj keeps its stock policy.
+    assert seen == [False, True]
+
+
 def _pair(model):
     return model.experts.gate_proj, model.experts.up_proj
 
