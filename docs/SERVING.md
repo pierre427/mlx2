@@ -89,7 +89,8 @@ counted (`tool_calls{reason="parallel_bound_truncated"}`), so the terminal
 check never sees a set it would have to fail, and over-calling -- a model
 behaviour -- never reaches the client as a 5xx or a mid-stream error. Strict,
 required, named and single-call Chat streams are buffered through terminal
-validation before the first response byte. `description` is optional in both
+validation before the first response byte (before the first call, once a
+keepalive has opened a silent stream; see below). `description` is optional in both
 accepted tool schemas, so a definition that omits it is carried as the empty
 string rather than reaching the chat template as a Jinja `Undefined`; a chat
 template that fails to render anyway answers 400 naming the omitted field when
@@ -115,6 +116,17 @@ dropped as an incomplete call and returns `finish_reason:"length"` (Anthropic
 `stop_reason:"max_tokens"`), retaining any reasoning or content parsed before
 the action. EOS/stop with the same malformed block still fails closed.
 `POST /v1/completions` accepts a text prompt.
+
+A stream silent for `--sse-keepalive-seconds` (default 15; 0 disables) gets an
+SSE comment (`: keep-alive`) every interval: Node's `fetch` (undici) drops a
+connection after 300 s without bytes, and a long prefill sends none before the
+first token, a buffered stream none before its terminal contract (FreeToken
+#572, Splash #208). Once the request is admitted the first keepalive opens the
+stream with its normal prologue (Anthropic `message_start` with the prompt
+count, Responses `response.created`); a buffered stream opened that way still
+sends no call before its contract passes, and reports a terminal failure as an
+SSE error event rather than an HTTP status. A request not yet admitted commits
+nothing, so admission errors keep their status.
 
 Main's post-generation validation is the default tool contract. Two
 output-changing parser mechanisms are explicit execution-policy opt-ins:
@@ -251,7 +263,7 @@ approximate KV, live Spomin surgery and cache capsules are refused at startup.
 | `min_tokens` | Minimum output, 0–2,097,152, bounded again by the effective `max_tokens`; unavailable with structured output |
 | `thinking_budget` | Explicit reasoning budget, independently bounded from 0 through 2,097,152 on OpenAI-shaped and Hermes/Ollama requests. This does not change the effort-scaled default budget, which remains capped at 8,192. Anthropic's separate `thinking.budget_tokens` rule is described below |
 | `stop` | Up to four stop strings |
-| `stream` | Chat/completions SSE or typed Responses text/function events, with cancellation when the consumer disconnects or stops draining; strict/required/named/single-tool Chat calls are terminal-buffered and validated before headers |
+| `stream` | Chat/completions SSE or typed Responses text/function events, with cancellation when the consumer disconnects or stops draining; strict/required/named/single-tool Chat calls are terminal-buffered and validated before headers (or, once a keepalive has opened the stream, before the call is sent) |
 | `enable_thinking`, `think`, `chat_template_kwargs.enable_thinking` | Boolean aliases; conflicting toggles are rejected |
 | `reasoning_effort` | `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`, `ultra`; adapter-specific meaning recorded in the receipt |
 | `options` | Supports `temperature`, `top_p`, `top_k`, `min_p`, `seed`, `stop`, `num_predict` and `num_ctx` |

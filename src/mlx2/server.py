@@ -864,6 +864,13 @@ def normalize_client_options(body):
     return result
 
 
+# A streamed response silent this long gets a keepalive: Node's fetch (undici)
+# drops a connection after 300 s without bytes (FreeToken #572, Splash #208),
+# and a long prefill or a buffered tool call sends none.
+DEFAULT_SSE_KEEPALIVE_SECONDS = 15.0
+SSE_KEEPALIVE = b": keep-alive\n\n"
+
+
 class ClientGone(RuntimeError):
     """The HTTP client closed its connection while a response was pending."""
 
@@ -886,15 +893,36 @@ def client_disconnected(connection) -> bool:
         return True
 
 
-def wait_event(events, *, connection=None, deadline_seconds=1800.0, poll_seconds=0.5):
-    """Block for the next engine event, watching the client socket meanwhile."""
-    deadline = time.monotonic() + deadline_seconds
+def wait_event(
+    events,
+    *,
+    connection=None,
+    deadline_seconds=1800.0,
+    poll_seconds=0.5,
+    idle_seconds=None,
+    on_idle=None,
+):
+    """Block for the next engine event, watching the client socket meanwhile.
+
+    ``on_idle`` runs after every ``idle_seconds`` without an event (a stream's
+    keepalive); the overall deadline is unchanged.
+    """
+    now = time.monotonic()
+    deadline = now + deadline_seconds
+    idle_at = now + idle_seconds if on_idle is not None and idle_seconds else None
     while True:
-        remaining = deadline - time.monotonic()
+        now = time.monotonic()
+        remaining = deadline - now
         if remaining <= 0:
             raise TimeoutError("generation timed out")
+        if idle_at is not None and now >= idle_at:
+            on_idle()
+            idle_at = now + idle_seconds
+        timeout = min(poll_seconds, remaining)
+        if idle_at is not None:
+            timeout = max(0.0, min(timeout, idle_at - now))
         try:
-            return events.get(timeout=min(poll_seconds, remaining))
+            return events.get(timeout=timeout)
         except queue.Empty:
             if client_disconnected(connection):
                 raise ClientGone("client disconnected before the response was ready")
@@ -1368,6 +1396,7 @@ def handler_for(
     tenant_authenticator=None,
     agent_compat=None,
     semantic_middleware=None,
+    sse_keepalive_seconds: float | None = DEFAULT_SSE_KEEPALIVE_SECONDS,
 ):
     if (
         tenant_authenticator is not None
@@ -2788,12 +2817,74 @@ def handler_for(
                     "reasoning_tokens": 0,
                 }
                 hosted_receipts = []
+                def open_stream():
+                    """Commit the SSE response and send its protocol prologue."""
+                    nonlocal streaming, anthropic_translator
+                    self.send_response(200)
+                    self.send_header("Content-Type", "text/event-stream")
+                    self.send_header("Cache-Control", "no-cache")
+                    self.send_header("Connection", "close")
+                    self.end_headers()
+                    self.close_connection = True
+                    streaming = True
+                    if anthropic:
+                        anthropic_translator = AnthropicStreamTranslator(
+                            message_id=job.id,
+                            model=model,
+                            request=anthropic_request,
+                            input_tokens=job.prompt_tokens,
+                            cache_read_input_tokens=job.cached_tokens,
+                            signer=getattr(engine, "reasoning_signer", None),
+                            tenant_id=tenant_id,
+                        )
+                        for initial in anthropic_translator.start():
+                            self._anthropic_sse(initial)
+                    elif responses_api:
+                        self._responses_sse(
+                            {
+                                "type": "response.created",
+                                "response": {
+                                    "id": response_id(job),
+                                    "object": "response",
+                                    "created_at": int(job.created),
+                                    "status": "in_progress",
+                                    "model": model,
+                                    "output": [],
+                                },
+                            }
+                        )
+
+                def keepalive():
+                    """Send bytes on a stream that has been silent too long.
+
+                    A long prefill sends nothing until the first token, and a
+                    buffered tool stream nothing until its terminal contract
+                    has passed.  Once the job is admitted (its prompt counted,
+                    which the Anthropic prologue reports) the stream is opened
+                    early; a buffered stream then reports a terminal failure as
+                    an SSE error event instead of an HTTP status, and still
+                    sends no call before the contract passes.  Before
+                    admission nothing is committed, so admission errors keep
+                    their status.
+                    """
+                    if not streaming:
+                        if not job.prompt_tokens:
+                            return
+                        open_stream()
+                    self.wfile.write(SSE_KEEPALIVE)
+                    self.wfile.flush()
+
                 while True:
                     # A stream can go quiet during a long prefill after its
                     # first progress event. Keep watching the socket so a
                     # disconnected client releases its lane and the partial
                     # cache can be published for APCv2 rolling recovery.
-                    event = wait_event(job.events, connection=self.connection)
+                    event = wait_event(
+                        job.events,
+                        connection=self.connection,
+                        idle_seconds=sse_keepalive_seconds,
+                        on_idle=keepalive if body.get("stream") else None,
+                    )
                     if "error" in event:
                         mlx2 = event.get("mlx2")
                         if streaming:
@@ -2882,39 +2973,7 @@ def handler_for(
                         and not buffered_tool_stream
                         and not buffered_hosted_stream
                     ):
-                        self.send_response(200)
-                        self.send_header("Content-Type", "text/event-stream")
-                        self.send_header("Cache-Control", "no-cache")
-                        self.send_header("Connection", "close")
-                        self.end_headers()
-                        self.close_connection = True
-                        streaming = True
-                        if anthropic:
-                            anthropic_translator = AnthropicStreamTranslator(
-                                message_id=job.id,
-                                model=model,
-                                request=anthropic_request,
-                                input_tokens=job.prompt_tokens,
-                                cache_read_input_tokens=job.cached_tokens,
-                                signer=getattr(engine, "reasoning_signer", None),
-                                tenant_id=tenant_id,
-                            )
-                            for initial in anthropic_translator.start():
-                                self._anthropic_sse(initial)
-                        elif responses_api:
-                            self._responses_sse(
-                                {
-                                    "type": "response.created",
-                                    "response": {
-                                        "id": response_id(job),
-                                        "object": "response",
-                                        "created_at": int(job.created),
-                                        "status": "in_progress",
-                                        "model": model,
-                                        "output": [],
-                                    },
-                                }
-                            )
+                        open_stream()
                     if prompt_progress is not None:
                         if anthropic:
                             self._anthropic_sse(
@@ -2956,7 +3015,7 @@ def handler_for(
                         if responses_api:
                             # Held until the token's delta names its item.
                             text_logprobs.logprob(event["logprob"])
-                        elif streaming:
+                        elif streaming and not buffered_tool_stream:
                             choice = {"index": 0, "finish_reason": None,
                                       "logprobs": {"content": [event["logprob"]]}}
                             choice.update({"delta": {}} if chat else {"text": ""})
@@ -2972,7 +3031,13 @@ def handler_for(
                         parts.append(delta.get("content", ""))
                         reasoning.append(delta.get("reasoning_content", ""))
                         calls.extend(delta.get("tool_calls", []))
-                        if streaming:
+                        # A keepalive may have opened a buffered stream early;
+                        # it still sends nothing before its terminal contract.
+                        if (
+                            streaming
+                            and not buffered_tool_stream
+                            and not buffered_hosted_stream
+                        ):
                             if anthropic:
                                 for translated in anthropic_translator.delta(delta):
                                     self._anthropic_sse(translated)
@@ -3213,26 +3278,7 @@ def handler_for(
                                 },
                             }
                         if buffered_hosted_stream and not streaming:
-                            self.send_response(200)
-                            self.send_header("Content-Type", "text/event-stream")
-                            self.send_header("Cache-Control", "no-cache")
-                            self.send_header("Connection", "close")
-                            self.end_headers()
-                            self.close_connection = True
-                            streaming = True
-                            self._responses_sse(
-                                {
-                                    "type": "response.created",
-                                    "response": {
-                                        "id": response_id(job),
-                                        "object": "response",
-                                        "created_at": int(job.created),
-                                        "status": "in_progress",
-                                        "model": model,
-                                        "output": [],
-                                    },
-                                }
-                            )
+                            open_stream()
                             # The buffered message is opened, with its whole
                             # text as one delta, where the final payload
                             # places it: a reasoning item may precede it.
@@ -3247,19 +3293,16 @@ def handler_for(
                                     for call in calls
                                 ]
                             # The defining property of this path: validate the
-                            # terminal contract before committing HTTP bytes.
+                            # terminal contract before sending any call (and
+                            # before committing HTTP bytes, unless a keepalive
+                            # already opened the stream).
                             enforce_tool_contract(
                                 body,
                                 message.get("tool_calls", []),
                                 finish_reason=event["finish_reason"],
                             )
-                            self.send_response(200)
-                            self.send_header("Content-Type", "text/event-stream")
-                            self.send_header("Cache-Control", "no-cache")
-                            self.send_header("Connection", "close")
-                            self.end_headers()
-                            self.close_connection = True
-                            streaming = True
+                            if not streaming:
+                                open_stream()
                             delta = {"role": "assistant"}
                             if message.get("content"):
                                 delta["content"] = message["content"]
@@ -4152,6 +4195,16 @@ def build_parser():
         help="drain accepted work before SIGTERM/SIGINT shutdown (default: immediate)",
     )
     parser.add_argument(
+        "--sse-keepalive-seconds",
+        type=float,
+        default=DEFAULT_SSE_KEEPALIVE_SECONDS,
+        metavar="SECONDS",
+        help=(
+            "send an SSE keepalive on a stream silent this long, opening it "
+            "once the request is admitted (default: %(default)s; 0 disables)"
+        ),
+    )
+    parser.add_argument(
         "--fault-log",
         type=Path,
         metavar="PATH",
@@ -4857,6 +4910,11 @@ def main():
         )
     except ValueError as error:
         parser.error(str(error))
+    if not math.isfinite(args.sse_keepalive_seconds) or not (
+        args.sse_keepalive_seconds == 0 or 1 <= args.sse_keepalive_seconds <= 280
+    ):
+        # Past 280 s the keepalive no longer beats undici's 300 s timeout.
+        parser.error("--sse-keepalive-seconds must be 0 or between 1 and 280")
     if args.drain_on_sigterm is not None and (
         not math.isfinite(args.drain_on_sigterm)
         or not 0.1 <= args.drain_on_sigterm <= 3600
@@ -5071,6 +5129,7 @@ def main():
             else None,
         ),
         semantic_middleware=semantic_middleware,
+        sse_keepalive_seconds=args.sse_keepalive_seconds or None,
     )
 
     stop = SignalShutdownController(server, engine, args.drain_on_sigterm)
