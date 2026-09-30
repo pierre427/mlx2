@@ -811,7 +811,7 @@ def _prepare_restore_disk_enforcement_race(tmp_path):
     key = APCKey("restore-disk-enforcement-race")
     restoring_tokens = [1, 2, 3]
     resident_tokens = [8, 9, 10]
-    apc.store(key, restoring_tokens, [_state(KVCache(), 1)])
+    apc.store(key, restoring_tokens, [_state(KVCache(), 3)])
     restoring_entry = apc._trie.get(key, restoring_tokens)
     assert restoring_entry.nbytes == 2048
     with apc._apc_lock:
@@ -825,7 +825,7 @@ def _prepare_restore_disk_enforcement_race(tmp_path):
     # actual 2048-byte footprint must spill B and enforce a disk cap containing
     # only A's files, without evicting the A placeholder being restored.
     restoring_entry._apc_disk["resident_nbytes"] = 1
-    apc.store(key, resident_tokens, [_state(KVCache(), 1, seed=100)])
+    apc.store(key, resident_tokens, [_state(KVCache(), 3, seed=100)])
     assert apc.nbytes == 2048
     apc.max_bytes = 2049
     apc._idle_disk_max_bytes = restoring_disk_bytes
@@ -1824,3 +1824,103 @@ def test_one_token_stored_prefix_is_a_shorter_match_for_untrimmable_caches():
     assert hit.hit and hit.cached_tokens == 1 and hit.hit_kind == "prefix"
     hit.cache.close()
     apc.clear()
+
+
+# Fail-closed guards behind omlx#3908's split-GDN sidecar invariants.  Each
+# test below was checked against the weakened guard it names.
+_SIDECAR_TOKENS = list(range(10, 20))
+
+
+def _draft_sidecar(pairs, covered, *, seed=True):
+    draft = [_state(KVCache(), pairs, seed=50)]
+    hidden = mx.ones((1, 1, 4), dtype=mx.float32) if seed else None
+    return MTPAPCSidecar((draft, hidden), covered_tokens=covered)
+
+
+def test_apcv2_store_refuses_a_cache_off_its_token_boundary():
+    """A lookup resumes after every stored token, so a KV cache holding fewer
+    tokens than it was stored under silently skipped the missing ones."""
+    apc = APCv2(max_size=4, layout_name="test-kv-v1")
+    key = APCKey("boundary")
+    tokens = _SIDECAR_TOKENS
+    short = apc.store(key, tokens[:5], [_state(KVCache(), 4)])
+    long = apc.store(key, tokens[:3], [_recurrent(3), _state(KVCache(), 4)])
+    assert not short.stored and not long.stored
+    assert apc.boundary_rejections == 2
+    assert apc._storage_stats["boundary_rejections"] == 2
+    assert not apc.lookup(key, tokens[:8]).hit
+    assert apc.store(key, tokens[:4], [_state(KVCache(), 4)]).stored
+    hit = apc.lookup(key, tokens[:8])
+    assert hit.cached_tokens == hit.cache[0].offset == 4
+    assert hit.remaining_tokens == tokens[4:8]
+    hit.cache.close()
+    apc.clear()
+
+
+def test_apcv2_sidecar_hit_requires_the_target_at_its_covered_boundary():
+    """Draft state claiming 3 tokens beside a 4-token target is not restored:
+    the hit falls back to the target prefix without the sidecar."""
+    apc = APCv2(max_size=4, layout_name="qwen4-exp-layer-segments-v1")
+    key = APCKey("sidecar-offset")
+    target = [_recurrent(4), _state(KVCache(), 4)]
+    assert apc.store(key, _SIDECAR_TOKENS[:4], target, sidecar=_draft_sidecar(2, 3)).stored
+    hit = apc.lookup(key, _SIDECAR_TOKENS[:6])
+    assert hit.hit_kind != "mtp_sidecar" and hit.sidecar is None
+    assert hit.cached_tokens == hit.cache[1].offset == 4
+    hit.cache.close()
+    apc.clear()
+
+
+def test_apcv2_sidecar_never_serves_its_own_full_prompt():
+    """Draft state covering the whole request leaves nothing to decode from;
+    the lookup must leave at least one token to run."""
+    apc = APCv2(max_size=4, layout_name="qwen4-exp-layer-segments-v1")
+    key = APCKey("sidecar-full")
+    target = [_recurrent(6), _state(KVCache(), 6)]
+    assert apc.store(key, _SIDECAR_TOKENS[:6], target, sidecar=_draft_sidecar(5, 6)).stored
+    hit = apc.lookup(key, _SIDECAR_TOKENS[:6])
+    assert hit.hit_kind != "mtp_sidecar" and hit.sidecar is None
+    assert len(hit.remaining_tokens) >= 1
+    if hit.cache is not None:
+        hit.cache.close()
+    apc.clear()
+
+
+def test_restore_mtp_state_rejects_an_unpaired_sidecar_before_mutation():
+    from mlx2.runtime.hybrid_speculative import _restore_mtp_state
+
+    target = [_state(KVCache(), 4)]
+    seed = mx.ones((1, 1, 4), dtype=mx.float32)
+    (draft, restored_seed) = _restore_mtp_state(target, ([_state(KVCache(), 3)], seed))
+    assert draft[0].offset == 3 and restored_seed is seed
+    for state in (
+        ([_state(KVCache(), 4)], seed),  # one pair too many
+        ([_state(KVCache(), 2)], seed),  # one pair short
+        ([_state(KVCache(), 3)], None),  # no boundary hidden
+    ):
+        with pytest.raises(ValueError):
+            _restore_mtp_state(target, state)
+        assert target[0].offset == 4
+    with pytest.raises(ValueError):
+        _restore_mtp_state([KVCache()], ([_state(KVCache(), 1)], None))
+
+
+def test_capture_self_mtp_checkpoint_refuses_unpaired_state():
+    from mlx2.runtime.hybrid_speculative import capture_self_mtp_checkpoint
+
+    target = [_recurrent(4), _state(KVCache(), 4)]
+    seed = mx.ones((1, 1, 4), dtype=mx.float32)
+    captured = capture_self_mtp_checkpoint(target, ([_state(KVCache(), 3)], seed))
+    assert captured is not None and captured["covered_tokens"] == 4
+    assert capture_self_mtp_checkpoint(target, ([_state(KVCache(), 2)], seed)) is None
+    assert capture_self_mtp_checkpoint(target, ([_state(KVCache(), 3)], None)) is None
+
+
+def test_arrays_cache_trim_without_a_checkpoint_fails_closed():
+    """Recurrent state cannot be rewound arithmetically; without a recorded
+    checkpoint the rewind must fail, never restore zeros or partial state."""
+    cache = _recurrent(8)
+    before = mx.array(cache[0])
+    with pytest.raises(RuntimeError, match="no state checkpoint"):
+        cache.trim_to_position(4, 4)
+    assert mx.array_equal(cache[0], before).item()

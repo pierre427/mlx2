@@ -7,7 +7,9 @@ from mlx2.runtime import apc_v2, generate, os_memory
 from mlx2.server import collect_nonstream_job
 
 
-def test_mtp_route_marks_prompt_boundary_hit_for_plain_fallback(monkeypatch):
+def _serve_warm_target_hit(monkeypatch, behind):
+    """Serve one request whose warm hit is a target prefix ``behind`` tokens
+    short of the prompt, with no draft state (an ordinary-route checkpoint)."""
     inserted = []
     closed = []
 
@@ -26,8 +28,8 @@ def test_mtp_route_marks_prompt_boundary_hit_for_plain_fallback(monkeypatch):
             # An ordinary-route checkpoint: warm target prefix, no sidecar.
             return NS(
                 cache=Branch([object()]),
-                cached_tokens=len(tokens) - 1,
-                remaining_tokens=list(tokens[-1:]),
+                cached_tokens=len(tokens) - behind,
+                remaining_tokens=list(tokens[-behind:]),
                 miss_reason=None,
                 sidecar=None,
                 hit=True,
@@ -150,14 +152,32 @@ def test_mtp_route_marks_prompt_boundary_hit_for_plain_fallback(monkeypatch):
         _choice, _usage, receipt = collect_nonstream_job(job, body, chat=False)
     finally:
         engine.close()
+    return inserted, closed, receipt, engine.counts
+
+
+def test_mtp_route_marks_prompt_boundary_hit_for_plain_fallback(monkeypatch):
+    inserted, closed, receipt, counts = _serve_warm_target_hit(monkeypatch, 1)
     prompts, caches, all_tokens, mtp_states, configs = inserted[0]
     assert prompts == [[4]] and caches[0] is not None and all_tokens == [[1, 2, 3]]
     assert mtp_states == [None]
     assert configs[0]["target_only_plain_fallback"] is True
     assert closed == [True], "the warm lease is released only after the request"
     assert receipt["cached_tokens"] == 3
-    assert engine.counts["mtp_sidecar_missing_plain_fallbacks"] == 1
-    assert engine.counts["mtp_sidecar_missing_misses"] == 0
+    assert counts["mtp_sidecar_missing_plain_fallbacks"] == 1
+    assert counts["mtp_sidecar_missing_misses"] == 0
+
+
+def test_mtp_route_target_only_hit_below_the_boundary_fails_closed(monkeypatch):
+    """A draft-less target prefix two or more tokens short cannot seed the
+    MTP lane: the request reruns the whole prompt cold and the lease is
+    released at once, instead of decoding on a target the draft never saw."""
+    inserted, closed, receipt, counts = _serve_warm_target_hit(monkeypatch, 2)
+    prompts, caches, all_tokens, mtp_states, configs = inserted[0]
+    assert prompts == [[1, 2, 3, 4]] and caches == [None]
+    assert closed == [True]
+    assert receipt["cached_tokens"] == 0
+    assert counts["mtp_sidecar_missing_misses"] == 1
+    assert counts["mtp_sidecar_missing_plain_fallbacks"] == 0
 
 
 def test_checkpoint_publication_failure_does_not_escape():

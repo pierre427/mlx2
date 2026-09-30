@@ -388,6 +388,21 @@ def _walk_cache_entries(prompt_cache: Iterable[Any]):
             yield entry
 
 
+def _positions_disagree(prompt_cache: Iterable[Any], length: int) -> bool:
+    """Whether a positional cache holds other than exactly ``length`` tokens.
+
+    A lookup reports the stored token count as cached and resumes after it,
+    so a cache stored short of its tokens would silently skip them (and a
+    longer one would repeat them).  Recurrent state has no position; it is
+    stored beside the KV it was captured with.
+    """
+    for cache in _walk_cache_entries(prompt_cache):
+        offset = getattr(cache, "offset", None)
+        if isinstance(offset, int) and not isinstance(offset, bool) and offset != length:
+            return True
+    return False
+
+
 def _iter_trie_entries(trie: PromptTrie):
     """Yield every stored cache entry, whatever the LRU bookkeeping says."""
     stack = [trie._trie]
@@ -593,6 +608,7 @@ class APCv2(PrefixIndex):
         self._apc_lifetime = {key: 0 for key in self._STAT_KEYS}
         self._apc_clears = 0
         self._interior_reused_entries = 0
+        self.boundary_rejections = 0
         age_buckets = (1, 5, 30, 120, 600, 3600)
         self._reuse_histograms = {
             "hit_age_seconds": _FixedHistogram(age_buckets),
@@ -3294,6 +3310,9 @@ class APCv2(PrefixIndex):
         if self.max_tokens is not None and len(tokens) > self.max_tokens:
             self.overlength_rejections += 1
             return replace(capabilities, stored=False)
+        if _positions_disagree(prompt_cache, len(tokens)):
+            self.boundary_rejections += 1
+            return replace(capabilities, stored=False)
         if self._cow_branching:
             try:
                 (prompt_cache, sidecar) = freeze_prompt_cache(
@@ -3607,6 +3626,7 @@ class APCv2(PrefixIndex):
             stats["resident_max_bytes"] = int(self.max_bytes)
             stats["max_entry_tokens"] = self.max_entry_tokens
             stats["overlength_rejections"] = self.overlength_rejections
+            stats["boundary_rejections"] = self.boundary_rejections
             stats["idle_disk"] = {
                 "enabled": self._idle_disk_dir is not None,
                 "persistent": self._persist_dir is not None,
