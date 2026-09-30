@@ -15,6 +15,7 @@ from ..contracts import Capability, ModelDescriptor, StatePlane
 from .external_draft_policy import ExternalDraftAdapterMixin
 from .flash_next import FlashNextAdapter
 from .mtp_depth_cap import validate_self_mtp_num_draft
+from ..process_env import PROCESS_NUMERICS
 
 CACHE_LAYOUT = "qwen38-27b-hybrid-layer-segments-v1"
 # Adapter-owned rather than inherited from Flash-Next: threshold four passed
@@ -268,8 +269,7 @@ def configure_environment() -> dict[str, str]:
     profile = {
         "HF_HUB_OFFLINE": "1",
         "TRANSFORMERS_OFFLINE": "1",
-        "MLX_ENABLE_TF32": "0",
-        "MLX_GDN_PACKED": "1",
+        **PROCESS_NUMERICS, "MLX_GDN_PACKED": "1",
         "MLX_GDN_CORE": "0",
         "MLX_LM_COMPILED_DECODE": "0",
         "MLX_LM_SEGMENTED_SELF_MTP": "1",

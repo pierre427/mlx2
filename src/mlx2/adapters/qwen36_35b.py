@@ -10,6 +10,7 @@ from pathlib import Path
 from ..contracts import Capability, ModelDescriptor, StatePlane
 from .mtp_depth_cap import validate_self_mtp_num_draft
 from .qwen38_27b import Qwen3827BAdapter, resolve_eos_token_ids
+from ..process_env import PROCESS_NUMERICS
 
 CACHE_LAYOUT = "qwen36-35b-a3b-hybrid-layer-segments-v1"
 # Explicit rather than inherited through Qwen3.8: threshold four passed the
@@ -175,8 +176,7 @@ def configure_environment(kernels=None) -> dict[str, str]:
     profile = {
         "HF_HUB_OFFLINE": "1",
         "TRANSFORMERS_OFFLINE": "1",
-        "MLX_ENABLE_TF32": "0",
-        "MLX_GDN_PACKED": "1",
+        **PROCESS_NUMERICS, "MLX_GDN_PACKED": "1",
         "MLX_GDN_CORE": "0",
         "MLX_QWEN36_FUSED_GDN_DECODE": "0",
         "MLX_LM_COMPILED_DECODE": "0",

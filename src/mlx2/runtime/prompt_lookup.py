@@ -42,17 +42,10 @@ class HybridStats:
     verify_span_hist: dict[int, int] = field(default_factory=dict)
     verify_accept_hist: dict[int, int] = field(default_factory=dict)
     latched: bool = False
-    rate_gate_probed: bool = False
-    rate_gate_delatched: bool = False
-    rate_gate_spec_ms_per_tok: float = 0.0
-    rate_gate_plain_ms_per_tok: float = 0.0
-    retrieval_corpus_mode: str = "target"
-    retrieval_corpus_tokens: int = 0
     lookback_current: int = 0
     lookback_peak: int = 0
     lookback_widen_events: int = 0
     lookback_narrow_events: int = 0
-    source_rejections: int = 0
     admission_windows: int = 0
     admission_probe_tokens: int = 0
     admission_matches: int = 0

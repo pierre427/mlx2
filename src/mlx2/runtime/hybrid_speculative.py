@@ -79,16 +79,6 @@ class HybridStats(_PromptLookupStatsBase):
     draft_cycles: int = 0
     draft_proposed: int = 0
     draft_accepted: int = 0
-    external_cache_reconciled: bool = False
-    external_cache_trimmed_tokens: int = 0
-    rate_gate_probed: bool = False
-    rate_gate_delatched: bool = False
-    rate_gate_spec_ms_per_tok: float = 0.0
-    rate_gate_plain_ms_per_tok: float = 0.0
-    router_plain_cycles: int = 0
-    router_reengagements: int = 0
-    router_last_num_draft: int = 0
-    router_accept_prob: float = 0.0
 
     @property
     def total_emitted(self) -> int:

@@ -15,6 +15,7 @@ from .artifact_paths import shard_within_artifact
 from ..contracts import Capability, ModelDescriptor, StatePlane
 from ..sampling_defaults import GENERATION_CONFIG, SamplingDefaults, VendorSampling
 from .flash_next import FlashNextAdapter
+from ..process_env import PROCESS_NUMERICS
 
 CACHE_LAYOUT = "nemotron3-super-hybrid-mamba-kv-v1"
 SAMPLING = VendorSampling.single(
@@ -147,8 +148,7 @@ def configure_environment() -> dict[str, str]:
     """
     profile = {
         "HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1",
-        "MLX_ENABLE_TF32": "0",
-    }
+        **PROCESS_NUMERICS}
     for name in tuple(os.environ):
         if name.startswith(("MLX_QWEN", "MLX_LM_", "MLXUAG_", "MLX_GDN_")):
             del os.environ[name]

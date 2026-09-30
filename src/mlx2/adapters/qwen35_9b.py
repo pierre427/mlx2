@@ -16,6 +16,7 @@ from pathlib import Path
 
 from ..contracts import Capability, ModelDescriptor, StatePlane
 from .qwen38_27b import Qwen3827BAdapter
+from ..process_env import PROCESS_NUMERICS
 
 
 CACHE_LAYOUT = "qwen35-9b-hybrid-layer-segments-v1"
@@ -72,8 +73,7 @@ def configure_environment() -> dict[str, str]:
     profile = {
         "HF_HUB_OFFLINE": "1",
         "TRANSFORMERS_OFFLINE": "1",
-        "MLX_ENABLE_TF32": "0",
-        "MLX_GDN_PACKED": "1",
+        **PROCESS_NUMERICS, "MLX_GDN_PACKED": "1",
         "MLX_GDN_CORE": "0",
         "MLX_LM_COMPILED_DECODE": "0",
         "MLX_LM_SEGMENTED_SELF_MTP": "0",

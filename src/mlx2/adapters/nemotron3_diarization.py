@@ -17,6 +17,7 @@ from pathlib import Path
 import numpy as np
 
 from ..contracts import Capability, ModelDescriptor
+from ..process_env import apply_process_numerics
 
 MODEL_REVISION = "f667ed73aee57d40cc39428eb768b4fd87a0a29e"
 MODEL_SHA256 = "c074d86335b3b794f8fa5edc25594558f128bdb3914d27806a3a5a2e44963cb6"
@@ -334,7 +335,7 @@ class Nemotron3DiarizationAdapter:
         # Keep the F32 reference path precise unless the caller explicitly
         # selected TF32 before importing MLX. Reduced precision is opt-in.
         if dtype == "float32" and "mlx.core" not in sys.modules:
-            os.environ.setdefault("MLX_ENABLE_TF32", "0")
+            apply_process_numerics()  # one owner for TF32: mlx2.process_env
         import mlx.core as mx
 
         artifact = inspect_artifact(model_path, verify_hash=verify_hash)

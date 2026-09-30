@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 
 from ..contracts import Capability, ModelDescriptor, StatePlane
+from ..process_env import PROCESS_NUMERICS
 from .ordinary_artifact import inspect_indexed_artifact
 from .ordinary_text import OrdinaryTextAdapter
 
@@ -65,7 +66,7 @@ def inspect_artifact(model_path: str | Path) -> dict:
 
 def configure_environment() -> dict[str, str]:
     profile = {"HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1",
-               "MLX_ENABLE_TF32": "0", "MLX_GDN_PACKED": "1",
+               **PROCESS_NUMERICS, "MLX_GDN_PACKED": "1",
                "MLX_GDN_CORE": "0", "MLX_LM_COMPILED_DECODE": "0"}
     for name in tuple(os.environ):
         if name.startswith(("MLX_QWEN", "MLX_LM_", "MLXUAG_", "MLX_GDN_", "MLX_AGNES_")):

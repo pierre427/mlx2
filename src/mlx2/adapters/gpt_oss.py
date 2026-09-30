@@ -13,6 +13,7 @@ from pathlib import Path
 
 from ..contracts import Capability, ModelDescriptor, StatePlane
 from ..sampling_defaults import GENERATION_CONFIG, SamplingDefaults, VendorSampling
+from ..process_env import PROCESS_NUMERICS
 
 
 _COMMON = frozenset({
@@ -164,7 +165,7 @@ def inspect_artifact(model_path: str | Path, *, expected: str | None = None) -> 
 
 
 def configure_environment() -> dict[str, str]:
-    profile = {"HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1", "MLX_ENABLE_TF32": "0"}
+    profile = {"HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1", **PROCESS_NUMERICS}
     os.environ.update(profile)
     return profile
 

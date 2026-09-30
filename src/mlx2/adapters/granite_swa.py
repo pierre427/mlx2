@@ -12,6 +12,7 @@ from .artifact_paths import shard_within_artifact
 from ..contracts import Capability, ModelDescriptor, StatePlane
 from ..sampling_defaults import GENERATION_CONFIG, SamplingDefaults, VendorSampling
 from .ordinary_text import OrdinaryTextAdapter
+from ..process_env import PROCESS_NUMERICS
 
 
 DESCRIPTOR = ModelDescriptor(
@@ -141,7 +142,7 @@ class GraniteSWAAdapter(OrdinaryTextAdapter):
         self.identity = artifact["identity"]
         self.config = artifact["config"]
         self.layout = DESCRIPTOR.cache_layout
-        self.environment = {"HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1", "MLX_ENABLE_TF32": "0"}
+        self.environment = {"HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1", **PROCESS_NUMERICS}
         os.environ.update(self.environment)
         path = Path(self.identity["path"])
         import mlx.core as mx

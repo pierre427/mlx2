@@ -12,6 +12,7 @@ from pathlib import Path
 from ..contracts import Capability, ModelDescriptor, StatePlane
 from .external_draft_policy import ExternalDraftAdapterMixin
 from ..sampling_defaults import GENERATION_CONFIG, SamplingDefaults, VendorSampling
+from ..process_env import PROCESS_NUMERICS
 
 CACHE_LAYOUT = "laguna-xs21-layer-segments-v1"
 
@@ -218,8 +219,7 @@ def configure_environment() -> dict[str, str]:
     profile = {
         "HF_HUB_OFFLINE": "1",
         "TRANSFORMERS_OFFLINE": "1",
-        "MLX_ENABLE_TF32": "0",
-        "MLX_LM_COMPILED_DECODE": "0",
+        **PROCESS_NUMERICS, "MLX_LM_COMPILED_DECODE": "0",
         "MLX_LM_SEGMENTED_SELF_MTP": "0",
         "MLX_LM_TRUE_BATCHED_SEGMENTED_MTP": "0",
         "MLX_LAGUNA_FUSED_DOWN": "stock",
