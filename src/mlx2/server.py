@@ -505,6 +505,25 @@ def validate_request(
                     for c in calls
                 ):
                     raise ValueError("invalid tool call history")
+        if any(
+            "content" in message and message["content"] is None for message in messages
+        ):
+            # A tool-call turn's null content means "no content", but chat
+            # templates read it as a value: Granite's concatenates it and
+            # fails (transformers #45422 drops the key before rendering).  An
+            # empty string is the one spelling every served template accepts:
+            # Granite's indexes the key and fails on an absent one too, and
+            # Qwen, Flash-Next, North, Nemotron, Laguna, LFM and Agnes render
+            # "" exactly like a null or absent content.
+            body = {
+                **body,
+                "messages": [
+                    {**message, "content": ""}
+                    if "content" in message and message["content"] is None
+                    else message
+                    for message in messages
+                ],
+            }
     elif not isinstance(body.get("prompt"), str) or not body["prompt"]:
         raise ValueError("prompt must be a non-empty string")
     # OpenAI clients serialize an unset constraint as an explicit null.  Treat

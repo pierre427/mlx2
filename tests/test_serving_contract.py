@@ -2990,3 +2990,53 @@ def test_hosted_usage_sums_cached_and_reasoning_tokens_over_rounds(stream):
         "input_tokens_details": {"cached_tokens": 140},
         "output_tokens_details": {"reasoning_tokens": 7},
     }
+
+
+def test_null_tool_call_content_reaches_templates_as_absent():
+    """transformers #45422: ``content: null`` on a tool-call turn means no
+    content.  Chat templates read it as a value (Granite's concatenates it and
+    raises TypeError), so validation spells it as ""; the body is untouched."""
+    body = {
+        "messages": [
+            {"role": "user", "content": "hi"},
+            {"role": "assistant", "content": None, "tool_calls": [
+                {"id": "c1", "type": "function", "function": {"name": "f", "arguments": "{}"}},
+            ]},
+            {"role": "tool", "tool_call_id": "c1", "content": "ok"},
+        ],
+        "tools": [{"type": "function", "function": {"name": "f", "parameters": {}}}],
+    }
+    request = validate_request(body, True)
+    assert request["messages"][1]["content"] == ""
+    assert request["messages"][1]["tool_calls"][0]["id"] == "c1"
+    assert body["messages"][1]["content"] is None
+    template = (
+        "{%- for m in messages %}{{ m['role'] }}: "
+        "{%- if m.content is defined %}{{ m.content }}{% endif %}\n{% endfor %}"
+    )
+    from jinja2 import Environment
+
+    rendered = Environment().from_string(template).render(messages=request["messages"])
+    assert "None" not in rendered
+
+
+def test_null_tool_call_content_renders_with_the_granite_template():
+    from pathlib import Path
+
+    pack = Path.home() / "mlx-models" / "granite-swash-3b-a600m"
+    if not (pack / "tokenizer_config.json").is_file():
+        pytest.skip("Granite pack not present")
+    from transformers import AutoTokenizer
+
+    tokenizer = AutoTokenizer.from_pretrained(str(pack), local_files_only=True)
+    request = validate_request({
+        "messages": [
+            {"role": "user", "content": "hi"},
+            {"role": "assistant", "content": None, "tool_calls": [
+                {"id": "c1", "type": "function", "function": {"name": "f", "arguments": {}}},
+            ]},
+            {"role": "tool", "tool_call_id": "c1", "content": "ok"},
+        ],
+    }, True)
+    text = tokenizer.apply_chat_template(request["messages"], tokenize=False, add_generation_prompt=True)
+    assert "None" not in text
