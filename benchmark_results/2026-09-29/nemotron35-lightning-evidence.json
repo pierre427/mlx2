@@ -448,6 +448,53 @@
       },
       "source_head": "a6a570891604ac385ec7d48475a519c80d045777",
       "status": "passed"
+    },
+    {
+      "artifact_config_sha256": "a1b0135c0973322d188a836c86746e69ea07c02b241e1f26681bf5123345359b",
+      "cases": [
+        {
+          "case": "arithmetic",
+          "finish_reason": "stop",
+          "mtp": {
+            "draft_acceptance": 0.8839285714285714,
+            "draft_accepted": 99,
+            "draft_proposed": 112,
+            "num_draft": 2,
+            "plain_cycles": 0,
+            "route": "segmented_self_mtp",
+            "verification": "exact"
+          },
+          "passed": true
+        },
+        {
+          "case": "knowledge-default-sampling",
+          "finish_reason": "stop",
+          "mtp": {
+            "draft_acceptance": 0.9186046511627907,
+            "draft_accepted": 79,
+            "draft_proposed": 86,
+            "num_draft": 2,
+            "plain_cycles": 0,
+            "route": "segmented_self_mtp",
+            "verification": "exact"
+          },
+          "passed": true
+        }
+      ],
+      "default_checks": {
+        "artifact_sampling_matches_documented_policy": true,
+        "healthy": true,
+        "qualification_is_candidate": true,
+        "served_model": true
+      },
+      "receipt_sha256": "c7f9fb59f8ae2aaa1edf5dd92014e93306ba02732f744fee395861dc05e5038e",
+      "route": "mtp2",
+      "sampling_drift": {
+        "expected": {},
+        "observed": {}
+      },
+      "source_head": "129092a265fc0c247daeebe6a0ed70b62ec7671d",
+      "status": "passed"
     }
   ],
   "stress_attempts": [

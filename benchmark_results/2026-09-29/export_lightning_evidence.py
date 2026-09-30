@@ -73,6 +73,22 @@ def smoke(name: str) -> dict | None:
     receipt = read(path)
     if receipt.get("status") == "running":
         return None
+    def case_summary(row: dict) -> dict:
+        summary = {"case": row.get("case"), "passed": row.get("passed"),
+                   "finish_reason": row.get("finish_reason")}
+        mtp = (row.get("route_receipt") or {}).get("mtp") or {}
+        if mtp:
+            stats = mtp.get("stats") or {}
+            summary["mtp"] = {
+                "route": mtp.get("route"), "num_draft": mtp.get("num_draft"),
+                "verification": mtp.get("verification"),
+                "draft_proposed": stats.get("draft_proposed"),
+                "draft_accepted": stats.get("draft_accepted"),
+                "draft_acceptance": stats.get("draft_acceptance"),
+                "plain_cycles": stats.get("plain_cycles"),
+            }
+        return summary
+
     return {
         "source_head": receipt.get("source_head"),
         "status": receipt.get("status"),
@@ -80,11 +96,7 @@ def smoke(name: str) -> dict | None:
         "artifact_config_sha256": receipt.get("artifact_config_sha256"),
         "default_checks": receipt.get("default_checks"),
         "sampling_drift": receipt.get("sampling_drift"),
-        "cases": [
-            {"case": row.get("case"), "passed": row.get("passed"),
-             "finish_reason": row.get("finish_reason")}
-            for row in (receipt.get("smoke") or {}).get("cases", [])
-        ],
+        "cases": [case_summary(row) for row in (receipt.get("smoke") or {}).get("cases", [])],
         "receipt_sha256": digest(path),
     }
 
@@ -143,6 +155,7 @@ def main() -> None:
             "smoke.json", "smoke-latest-d174-20260929.json",
             "smoke-current-mamba-clamp-20260929.json",
             "smoke-current-apc-20260929.json",
+            "smoke-mtp2-current-apc-mtp2-20260929.json",
         ) if (row := smoke(name)) is not None],
         "stress_attempts": [row for tag in tags if (row := stress(tag)) is not None],
         "ladders": [row for stem in (

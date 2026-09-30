@@ -2,7 +2,7 @@
 
 Artifact: `NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16-mlx-8Bit`, config SHA-256 `a1b0135c0973322d188a836c86746e69ea07c02b241e1f26681bf5123345359b`. The target is pinned to revision `a9db86e1fe5baf448346efd33541ce117b5b8403`; the separately verified original BF16 MTP head is pinned to revision `a9904d24bcc1d289a1950fa9d2b978c47cf903b9` and SHA-256 `64577b275ca4e7e5266eae0903674f7f46ec2a8cbf4f4f1a3207f80d503cd1d0`.
 
-**Current-source boundary:** private main gained `46139b74`, changing the Lightning Mamba time-step clamp and therefore model outputs, after the earlier runs below. Their passes and speed measurements remain source-bound historical evidence. Ordinary smoke and the capped 20×20 workload passed on `9f5e525d`; its cooled 1K–32K ladder passed on `0fb9c092`. After later APCv2/serving changes, ordinary smoke passed on `a6a57089`. Batched stress, native MTP, and feature serving qualification on that newest head remain pending.
+**Current-source boundary:** private main gained `46139b74`, changing the Lightning Mamba time-step clamp and therefore model outputs, after the earlier runs below. Their passes and speed measurements remain source-bound historical evidence. Ordinary smoke and the capped 20×20 workload passed on `9f5e525d`; its cooled 1K–32K ladder passed on `0fb9c092`. After later APCv2/serving changes, ordinary and native-MTP2 smokes passed on the newest source. Batched stress, long context, and feature serving qualification on that head remain pending.
 
 ## Host coverage
 
@@ -67,6 +67,8 @@ The post-clamp source `0fb9c092` started its 1K–32K ladder more than 10 minute
 
 The cooled 16K/32K decode medians are near the older `7dd504ba` ladder and substantially above the short-cooldown `ab212902` ladder. The source also changed, so cooldown is a strong confounder rather than an isolated causal explanation. Some longer-context prefill medians remain below the older ladder. The 64K–262K extension, MTP, and feature gates on the post-clamp source remain pending.
 
+On source `129092a2`, the native-MTP2 served smoke passed arithmetic and knowledge prompts with the correct sampling defaults and healthy final status. Both response receipts selected segmented self-MTP with exact verification and draft depth two. Arithmetic proposed/accepted **112/99** draft tokens; knowledge proposed/accepted **86/79**. This demonstrates an engaged candidate route, not batched, long-context, performance, feature, or production qualification. Ordinary smoke also passed after the APCv2/serving changes on `a6a57089`.
+
 The 64K–262K width-one extension was **interrupted** after newer main commits changed Nemotron runtime math and APC/lane ownership. At its older source, the 64K cell missed one exact-code needle repetition (4/6 checks); one completed 131K repetition missed both needles. Those are real failures for that source, but the incomplete ladder does not qualify long context on the newer main. Its 8 GiB cache profile had zero swapouts. On integrated private source `d17430de`, a repeat ordinary smoke passed both prompts and all default checks with no sampling drift. The matching capped 20×20 run passed **400/400** graded answers, zero HTTP errors, zero issues, and zero swapouts. Its median aggregate generated rate was **201.5 tokens/s** across 20 rounds (range 183.0–224.3), 11.2% above the prior capped run's 181.15 tokens/s median. The prior and newer runs generated 236,786 and 237,876 completion tokens in 1,303.91 and 1,173.16 seconds, respectively. This comparison is not thermally controlled and does not isolate the cause of the change. Applicable feature gates remain pending. The MTP route remains implemented and opt-in pending served qualification. No selected speculative route is claimed.
 
 ## Receipt integrity
@@ -87,6 +89,7 @@ The 64K–262K width-one extension was **interrupted** after newer main commits 
 | M5 | ordinary 20×20 after Mamba clamp, 400/400 | `6ea4b814ce2835c05427adc23bd52ada600a61f939bd94b8cf32be90fd2ed6c3` |
 | M5 | post-clamp cooled 1K–32K ladder, 3 reps per cell | `15bb00d55189c6151b89747bb5116318b76beead439888826f520180293e416a` |
 | M5 | ordinary smoke after APCv2/serving changes on `a6a57089` | `eac82fbe832c68f7c3ce2f76ed1c9182a682b8691bc9d6b250f7b62aa77bc32f` |
+| M5 | native-MTP2 candidate smoke on `129092a2` | `c7f9fb59f8ae2aaa1edf5dd92014e93306ba02732f744fee395861dc05e5038e` |
 | M3 | hash-verified load feasibility | `119c027c459044036e7d36016576feced932a5e8e40d516876feda83db9fc1d4` |
 | M3 | integrated-source CPU and memory feasibility | `0b9861b9d31ddf88516c5702f5e41d2cec74898e9810095344e349e884eee3cc` |
 | M3 | post-clamp source CPU and memory feasibility | `8810035cf000a2a748bcdf68738d4fc1eb039edc1b2a8980df8a0ae58b9b05f1` |
