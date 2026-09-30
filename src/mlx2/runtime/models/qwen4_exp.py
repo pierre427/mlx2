@@ -268,6 +268,40 @@ _QSA_SUMMARY_BLOCKS = Counter({"reused": 0, "recomputed": 0, "invalidated": 0})
 _QSA_SUMMARY_REASONS = Counter()
 _QSA_SUMMARY_LAST_RECEIPT = None
 
+# Route-level evidence for ragged QSA rollback. The physical batch cache must
+# rewrite its Bxcontext K/V tensors to keep every row right-aligned; the
+# segmented cache owns independent B1 rows and can finish the same cycle with
+# metadata updates and scalar trims only. Keep these counters independent of
+# attention-kernel receipts so qualification proves which layout paid rollback.
+_QSA_ROLLBACK_STATS_LOCK = threading.Lock()
+_QSA_ROLLBACK_STATS = Counter()
+
+
+def _record_qsa_rollback(event: str, *, amount: int = 1) -> None:
+    with _QSA_ROLLBACK_STATS_LOCK:
+        _QSA_ROLLBACK_STATS[event] += int(amount)
+
+
+def qsa_rollback_status(*, reset: bool = False) -> dict[str, int]:
+    """Return cache-layout receipts for QSA finalize/rollback operations."""
+    keys = (
+        "physical_finalize_calls",
+        "physical_finalize_noops",
+        "physical_kv_roll_calls",
+        "physical_kv_arrays_rolled",
+        "physical_kv_bytes_rewritten",
+        "physical_index_roll_calls",
+        "segmented_finalize_calls",
+        "segmented_self_mtp_finalize_calls",
+        "segmented_trim_calls",
+        "segmented_rows_trimmed",
+    )
+    with _QSA_ROLLBACK_STATS_LOCK:
+        report = {key: int(_QSA_ROLLBACK_STATS[key]) for key in keys}
+        if reset:
+            _QSA_ROLLBACK_STATS.clear()
+    return report
+
 
 def _qsa_summary_config_hash(args) -> str:
     payload = json.dumps(
@@ -3284,6 +3318,11 @@ class BatchQSAKVCache(_StepGrownIndexLedger, BatchKVCache):
 
     def _finalize(self, *, keep_shared=False):
         padding = self._right_padding
+        rolled_index = padding is not None and self.index_keys is not None
+        rolled_kv = padding is not None and self.keys is not None
+        rewritten_bytes = (
+            int(self.keys.nbytes) + int(self.values.nbytes) if rolled_kv else 0
+        )
         if padding is not None and self.index_keys is not None:
             self.index_keys = dynamic_roll(self.index_keys, padding, axis=1)
         # A live shared top-k holds block ids on the physical grid, so a
@@ -3295,6 +3334,19 @@ class BatchQSAKVCache(_StepGrownIndexLedger, BatchKVCache):
             cursor_final=not keep_shared,
             keep_shared=keep_shared,
         )
+        _record_qsa_rollback("physical_finalize_calls")
+        if padding is None:
+            _record_qsa_rollback("physical_finalize_noops")
+        if rolled_index:
+            _record_qsa_rollback("physical_index_roll_calls")
+        if rolled_kv:
+            _record_qsa_rollback("physical_kv_roll_calls")
+            _record_qsa_rollback("physical_kv_arrays_rolled", amount=2)
+            # BatchKVCache.finalize currently rolls the allocated arrays,
+            # including step-capacity beyond the live cursor.
+            _record_qsa_rollback(
+                "physical_kv_bytes_rewritten", amount=rewritten_bytes
+            )
 
     def finalize(self):
         self._finalize()

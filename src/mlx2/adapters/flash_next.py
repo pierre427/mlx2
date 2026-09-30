@@ -437,6 +437,7 @@ class FlashNextAdapter:
             qwen4_fused_gdn_stats,
             qwen4_ple_compile_status,
             qsa_mtp_amendment_status,
+            qsa_rollback_status,
             qsa_stage1_status,
         )
         from ..runtime.models.qwen4_qsa_indexed import qsa_indexed_status
@@ -493,6 +494,7 @@ class FlashNextAdapter:
             "indexed_qsa": qsa_indexed_status(),
             "qsa_stage1": qsa_stage1_status(),
             "qsa_mtp_amendment": qsa_mtp_amendment_status(),
+            "qsa_rollback": qsa_rollback_status(),
             "segmented_mtp": segmented_self_mtp_stats(),
             "norm_convention": (
                 None

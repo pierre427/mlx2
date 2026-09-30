@@ -9,6 +9,7 @@ from .models.qwen4_exp import (
     QSACompactBlocks,
     QSAKVCache,
     Qwen4ArraysCache,
+    _record_qsa_rollback,
     qsa_dense_attention_from_selection,
 )
 from .models.qwen4_qsa_indexed import (
@@ -71,6 +72,7 @@ class SegmentedBatchQSAKVCache(BatchQSAKVCache):
             )
         self.rows = list(rows)
         self._note = note
+        self._bump("private_delta_group_checks")
         offsets = [_host_offset(row) for row in rows]
         aligned = min(offsets, default=0) // 4 * 4
         if shared:
@@ -80,11 +82,22 @@ class SegmentedBatchQSAKVCache(BatchQSAKVCache):
                     "shared-suffix QSA rows do not reference one immutable base"
                 )
             self._private_delta_base_tokens = int(bases[0].length)
+            self._bump("private_delta_group_shared_suffix")
         else:
             self._private_delta_base_tokens = (
                 aligned
                 if shared_qsa_prefix and aligned > 0 and (len(set(offsets)) == 1)
                 else None
+            )
+            self._bump(
+                "private_delta_group_plain_shared"
+                if self._private_delta_base_tokens is not None
+                else "private_delta_group_plain_unshared"
+            )
+        if self._private_delta_base_tokens is not None:
+            self._bump(
+                "private_delta_group_base_tokens_cumulative",
+                int(self._private_delta_base_tokens),
             )
         self._step_lengths = None
         self._right_padding = None
@@ -169,11 +182,23 @@ class SegmentedBatchQSAKVCache(BatchQSAKVCache):
         shared_rows = bool(self.rows) and getattr(
             self.rows[0], "supports_shared_qsa_suffix", False
         )
+        private_enabled = qsa_private_delta_enabled()
+        uniform_step = len(set(self._step_lengths)) == 1
+        nonempty_step = bool(self._step_lengths) and self._step_lengths[0] > 0
+        self._bump("private_delta_candidate_checks")
+        if not private_enabled:
+            self._bump("private_delta_ineligible_disabled")
+        elif self._private_delta_base_tokens is None:
+            self._bump("private_delta_ineligible_missing_base")
+        elif not uniform_step:
+            self._bump("private_delta_ineligible_ragged_step")
+        elif not nonempty_step:
+            self._bump("private_delta_ineligible_empty_step")
         private_candidate = (
-            qsa_private_delta_enabled()
+            private_enabled
             and self._private_delta_base_tokens is not None
-            and (len(set(self._step_lengths)) == 1)
-            and (self._step_lengths[0] > 0)
+            and uniform_step
+            and nonempty_step
         )
         if private_candidate:
             from .segmented_self_mtp import (
@@ -660,6 +685,7 @@ class SegmentedBatchQSAKVCache(BatchQSAKVCache):
         self._right_padding = None
         self.release_qsa_cycle("SegmentedBatchQSAKVCache.finalize")
         self._refresh_geometry()
+        _record_qsa_rollback("segmented_finalize_calls")
 
     def finalize_self_mtp_step(self):
         share = self._mtp_share_topk
@@ -671,6 +697,8 @@ class SegmentedBatchQSAKVCache(BatchQSAKVCache):
         self._mtp_share_topk = share
         self._mtp_shared_topk = shared
         self._mtp_shared_topk_n_blocks = shared_n_blocks
+        _record_qsa_rollback("segmented_finalize_calls")
+        _record_qsa_rollback("segmented_self_mtp_finalize_calls")
 
     def supports_ragged_trim(self):
         return True
@@ -691,6 +719,8 @@ class SegmentedBatchQSAKVCache(BatchQSAKVCache):
                 row.trim(count)
         self.release_qsa_cycle("SegmentedBatchQSAKVCache.trim_ragged")
         self._refresh_geometry()
+        _record_qsa_rollback("segmented_trim_calls")
+        _record_qsa_rollback("segmented_rows_trimmed", amount=len(counts))
         return counts
 
     def trim(self, count):

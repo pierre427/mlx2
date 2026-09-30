@@ -1980,6 +1980,34 @@ def test_exact_set_preflight_decline_uses_proven_private_path(monkeypatch):
     }
 
 
+def test_private_delta_ineligibility_records_missing_base(monkeypatch):
+    from test_batched_mtp import _tiny_qwen4_model
+    from mlx2.runtime.models.qwen4_exp import QSAKVCache
+    from mlx2.runtime.segmented_batch_cache import SegmentedBatchQSAKVCache
+    from mlx2.runtime.segmented_self_mtp import note_segmented_self_mtp
+
+    segmented_self_mtp_stats(reset=True)
+    monkeypatch.setenv("MLX_LM_QSA_PRIVATE_DELTA", "1")
+    model = _tiny_qwen4_model()
+    attention = model.language_model.model.layers[1].self_attn
+    rows = [
+        QSAKVCache(attention.indexer.summary_identity),
+        QSAKVCache(attention.indexer.summary_identity),
+    ]
+    segmented = SegmentedBatchQSAKVCache(
+        rows, note=note_segmented_self_mtp, shared_qsa_prefix=False
+    )
+    segmented.prepare(lengths=[1, 1], right_padding=[0, 0])
+    hidden = mx.random.normal((2, 1, 32), key=mx.random.key(119))
+
+    segmented.segmented_attention(attention, hidden, None)
+
+    counters = segmented_self_mtp_stats()
+    assert counters["private_delta_candidate_checks"] == 1
+    assert counters["private_delta_ineligible_missing_base"] == 1
+    assert counters["private_delta_requests"] == 0
+
+
 def test_exact_set_success_records_engagement_and_updates_each_row_once(monkeypatch):
     from test_batched_mtp import _tiny_qwen4_model
     from qsa_oracle import private_delta_reference
