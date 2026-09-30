@@ -34,6 +34,11 @@ def run(args):
     mx.set_cache_limit(1 << 30)
     model = Model(c)
     model.load_weights(str(args.checkpoint / "model.safetensors"), strict=True)
+    sidecar = state.get("permanent_sidecar")
+    if c.semantic_ple_rows:
+        if not isinstance(sidecar, dict) or not isinstance(sidecar.get("sha256"), str):
+            raise ValueError("checkpoint semantic PLE identity is missing")
+        model.ple_sidecar_digest = sidecar["sha256"]
     model.eval()
     values = np.load(args.tokens, mmap_mode="r", allow_pickle=False)
     if (

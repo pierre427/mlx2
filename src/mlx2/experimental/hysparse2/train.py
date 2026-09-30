@@ -62,15 +62,19 @@ def save_checkpoint(root, model, optimizer, step, run, mode="full"):
     if ple:
         sidecar_path = temporary / "semantic-ple.safetensors"
         mx.save_safetensors(str(sidecar_path), ple)
+        sidecar_sha256 = file_hash(sidecar_path)
         permanent_sidecar = {
             "schema": "mlx2.hysparse2-semantic-ple.v1",
             "file": sidecar_path.name,
-            "sha256": file_hash(sidecar_path),
+            "sha256": sidecar_sha256,
             "rows": model.config.semantic_ple_rows,
             "dimension": model.config.semantic_ple_dim,
             "ngram": model.config.semantic_ngram,
-            "apcv2_identity": model.config.apcv2_identity(),
+            "apcv2_identity": model.config.apcv2_identity(
+                ple_sidecar_digest=sidecar_sha256
+            ),
         }
+        model.ple_sidecar_digest = permanent_sidecar["sha256"]
     if mode == "full":
         state = dict(tree_flatten(optimizer.state))
         mx.save_safetensors(str(temporary / "optimizer.safetensors"), state)
@@ -110,16 +114,29 @@ def load_checkpoint(path, model, optimizer, run):
         raise ValueError("resume data, tokenizer or training settings differ")
     sidecar = metadata.get("permanent_sidecar")
     if model.config.semantic_ple_rows:
+        if not isinstance(sidecar, dict):
+            raise ValueError("checkpoint permanent semantic PLE sidecar differs")
+        expected_identity = model.config.apcv2_identity(
+            ple_sidecar_digest=sidecar.get("sha256")
+        )
+        legacy_identity = model.config.apcv2_identity()
+        legacy_fingerprint = legacy_identity["semantic_fingerprint"]
+        legacy_identity["semantic_fingerprint"] = (
+            legacy_fingerprint[:2] + legacy_fingerprint[3:]
+        )
         if (
-            not isinstance(sidecar, dict)
-            or sidecar.get("schema") != "mlx2.hysparse2-semantic-ple.v1"
+            sidecar.get("schema") != "mlx2.hysparse2-semantic-ple.v1"
             or sidecar.get("apcv2_identity")
-            != json.loads(json.dumps(model.config.apcv2_identity()))
+            not in (
+                json.loads(json.dumps(expected_identity)),
+                json.loads(json.dumps(legacy_identity)),
+            )
         ):
             raise ValueError("checkpoint permanent semantic PLE sidecar differs")
         sidecar_path = path / sidecar.get("file", "")
         if not sidecar_path.is_file() or file_hash(sidecar_path) != sidecar.get("sha256"):
             raise ValueError("checkpoint permanent semantic PLE sidecar is missing or corrupt")
+        model.ple_sidecar_digest = sidecar["sha256"]
     model.load_weights(str(path / "model.safetensors"), strict=True)
     optimizer.state = tree_unflatten(
         list(mx.load(str(path / "optimizer.safetensors")).items())

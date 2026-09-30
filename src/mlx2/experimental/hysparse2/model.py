@@ -381,6 +381,9 @@ class Model(nn.Module):
         if c.diffusion_layers:
             self.diffusion_student = DiffusionStudent(c)
         self.checkpoint_layers = False
+        # Set by exact checkpoint loading. An unsaved research initialization
+        # remains in an explicit, non-colliding APCv2 namespace.
+        self.ple_sidecar_digest = None
         self._cache_owner = object()
 
     def _embed(self, tokens, ple_history=None):
@@ -446,7 +449,9 @@ class Model(nn.Module):
         return Cache(
             self._cache_owner,
             batch,
-            apcv2_identity=self.config.apcv2_identity(semantic_capsule_digest),
+            apcv2_identity=self.config.apcv2_identity(
+                semantic_capsule_digest, self.ple_sidecar_digest
+            ),
         )
 
     def _append(self, tokens, cache):

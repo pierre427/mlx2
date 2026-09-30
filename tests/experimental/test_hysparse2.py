@@ -193,6 +193,10 @@ def test_parameters_gradients_checkpoint_and_resume(tmp_path):
     checkpoint = save_checkpoint(tmp_path, m, optimizer, 1, {"seed": 9})
     state = json.loads((checkpoint / "state.json").read_text())
     assert state["permanent_sidecar"]["schema"] == "mlx2.hysparse2-semantic-ple.v1"
+    assert (
+        state["permanent_sidecar"]["apcv2_identity"]["semantic_fingerprint"][2]
+        == state["permanent_sidecar"]["sha256"]
+    )
     assert (checkpoint / "semantic-ple.safetensors").is_file()
     restored = Model(c)
     restored.checkpoint_layers = True
@@ -208,6 +212,24 @@ def test_parameters_gradients_checkpoint_and_resume(tmp_path):
         close(x, y, 1e-6)
     with pytest.raises(ValueError):
         load_checkpoint(checkpoint, restored, opt2, {"seed": 10})
+    # The first full-size validation predates PLE-SHA cache identity binding.
+    # Its separately verified sidecar remains an exact training resume input.
+    legacy_identity = c.apcv2_identity()
+    fingerprint = legacy_identity["semantic_fingerprint"]
+    legacy_identity["semantic_fingerprint"] = fingerprint[:2] + fingerprint[3:]
+    state["permanent_sidecar"]["apcv2_identity"] = legacy_identity
+    (checkpoint / "state.json").write_text(json.dumps(state))
+    legacy = Model(c)
+    assert (
+        load_checkpoint(
+            checkpoint,
+            legacy,
+            optimizers.AdamW(learning_rate=1e-4),
+            {"seed": 9},
+        )
+        == 1
+    )
+    assert legacy.ple_sidecar_digest == state["permanent_sidecar"]["sha256"]
 
 
 def test_model_only_checkpoint_is_explicitly_not_an_exact_resume(tmp_path):
@@ -243,14 +265,26 @@ def test_model_only_checkpoint_is_explicitly_not_an_exact_resume(tmp_path):
 def test_apcv2_identity_binds_block_selector_and_semantic_capsule():
     c = Config.smoke()
     digest = "a" * 64
-    a = c.apcv2_identity(digest)
-    b = replace(c, candidate_blocks=c.candidate_blocks + 1).apcv2_identity(digest)
+    ple_digest = "b" * 64
+    a = c.apcv2_identity(digest, ple_digest)
+    b = replace(c, candidate_blocks=c.candidate_blocks + 1).apcv2_identity(
+        digest, ple_digest
+    )
     assert a["cache_layout_fingerprint"] != b["cache_layout_fingerprint"]
     assert a["semantic_fingerprint"][1] == digest
-    cache = Model(c).new_cache(semantic_capsule_digest=digest)
+    assert a["semantic_fingerprint"][2] == ple_digest
+    model = Model(c)
+    model.ple_sidecar_digest = ple_digest
+    cache = model.new_cache(semantic_capsule_digest=digest)
     assert cache.apcv2_identity == a
+    assert c.apcv2_identity(digest, "c" * 64) != a
+    assert c.apcv2_identity(digest)["semantic_fingerprint"][2] == "unversioned-ple"
     with pytest.raises(ValueError):
         c.apcv2_identity("stale")
+    with pytest.raises(ValueError):
+        replace(c, semantic_ple_rows=0, semantic_ple_dim=0).apcv2_identity(
+            ple_sidecar_digest=ple_digest
+        )
 
 
 def test_oracle_matches_dense_normalized_multihead_ranking():

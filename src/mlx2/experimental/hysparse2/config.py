@@ -101,19 +101,27 @@ class Config:
     def as_dict(self):
         return asdict(self)
 
-    def apcv2_identity(self, semantic_capsule_digest=None):
+    def apcv2_identity(
+        self, semantic_capsule_digest=None, ple_sidecar_digest=None
+    ):
         """Revision material an adapter must bind into its APCv2 key.
 
         The semantic capsule is paired with the exact prompt state. A missing
         capsule has an explicit identity rather than sharing a namespace with
         an unknown or stale sidecar.
         """
-        if semantic_capsule_digest is not None and (
-            not isinstance(semantic_capsule_digest, str)
-            or len(semantic_capsule_digest) != 64
-            or any(c not in "0123456789abcdef" for c in semantic_capsule_digest)
+        for name, digest in (
+            ("semantic capsule", semantic_capsule_digest),
+            ("PLE sidecar", ple_sidecar_digest),
         ):
-            raise ValueError("semantic capsule digest must be lowercase SHA-256")
+            if digest is not None and (
+                not isinstance(digest, str)
+                or len(digest) != 64
+                or any(c not in "0123456789abcdef" for c in digest)
+            ):
+                raise ValueError(f"{name} digest must be lowercase SHA-256")
+        if ple_sidecar_digest is not None and not self.semantic_ple_rows:
+            raise ValueError("PLE sidecar digest requires enabled semantic PLE")
         layout = {
             key: getattr(self, key)
             for key in (
@@ -142,6 +150,13 @@ class Config:
             "semantic_fingerprint": (
                 "hysparse2-semantic-v1",
                 semantic_capsule_digest or "no-capsule",
+                (
+                    ple_sidecar_digest
+                    if ple_sidecar_digest is not None
+                    else "unversioned-ple"
+                    if self.semantic_ple_rows
+                    else "no-ple"
+                ),
                 self.semantic_ple_rows,
                 self.semantic_ple_dim,
                 self.semantic_ngram,
