@@ -946,9 +946,10 @@ def test_capability_scope_rejects_conflicting_status_fields():
 def test_live_media_companion_binds_the_generic_harness_route(tmp_path):
     from mlx2.qualification import APPROVED_MEDIA_PRODUCERS
 
-    report = json.loads(
-        (ROOT / "docs/experiments/SMOLVLM2-M3-LIVE-MEDIA-QUALIFICATION-2026-09-26.json").read_text()
-    )
+    fixture = ROOT / "docs/experiments/SMOLVLM2-M3-LIVE-MEDIA-QUALIFICATION-2026-09-26.json"
+    if not fixture.is_file():
+        pytest.skip("source-bound private media receipt is absent from public projection")
+    report = json.loads(fixture.read_text())
     # The recorded run names the producer revision that ran it; the producer
     # has since tightened its media-reuse predicate, which invalidates the
     # receipt until it is re-run.  Re-bind the real traces to the current pin
