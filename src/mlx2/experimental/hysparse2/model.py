@@ -203,6 +203,7 @@ class DiffusionStudent(nn.Module):
 
         self.trunk_gradient_scale = c.diffusion_trunk_gradient_scale
         self.conditioning = c.diffusion_conditioning
+        self.position_encoding = c.diffusion_position_encoding
 
     def __call__(self, tokens, embedding, teacher):
         seed_tokens = tokens[:, :1]
@@ -230,6 +231,14 @@ class DiffusionStudent(nn.Module):
         if 0 < scale < 1:
             conditioned = conditioned + scale * (teacher - mx.stop_gradient(teacher))
         x = embedding(masked) + self.condition(conditioned)
+        if self.position_encoding == "sinusoidal":
+            # Relative suffix positions distinguish identical masked tokens.
+            # Fixed features add no parameters or persistent context allocation.
+            d = x.shape[-1]
+            frequency = mx.exp(-math.log(10000.0) * mx.arange(0, d, 2) / d)
+            phase = mx.arange(tokens.shape[1])[:, None] * frequency[None]
+            position = mx.stack((mx.sin(phase), mx.cos(phase)), axis=-1).reshape(tokens.shape[1], -1)[:, :d]
+            x = x + (position[None] * d**-0.5).astype(x.dtype)
         for layer in self.layers:
             x = layer(x, noise_level.astype(x.dtype))
         return embedding.as_linear(self.norm(x))
@@ -626,4 +635,3 @@ class Model(nn.Module):
         logits = self._cross(x, cache, offset)
         mx.eval(logits)
         return logits
-

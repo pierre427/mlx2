@@ -14,6 +14,9 @@ def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--checkpoint", type=Path, required=True)
     p.add_argument("--output", type=Path, required=True)
+    p.add_argument(
+        "--position-encoding", choices=("none", "sinusoidal"), default="none"
+    )
     args = p.parse_args()
     args.output.mkdir(parents=True, exist_ok=False)
     original_config = Config(
@@ -23,6 +26,7 @@ def main():
         original_config,
         diffusion_conditioning="prefix",
         diffusion_trunk_gradient_scale=1.0,
+        diffusion_position_encoding=args.position_encoding,
     )
     report = {
         "schema": "mlx2.hysparse2-prefix-diffusion.v1",
@@ -57,6 +61,30 @@ def main():
         _load_model_state(args.checkpoint, original)
         model = Model(c)
         model.load_weights(tree_flatten(original.parameters()), strict=True)
+        if args.position_encoding == "sinusoidal":
+            masked = mx.ones((2, 8), dtype=mx.int32)
+            mask = mx.ones(masked.shape, dtype=mx.bool_)
+            teacher = mx.ones((2, 1, c.hidden_size))
+            level = mx.ones((2, 1, 1))
+            old = original.diffusion_student.denoise(
+                masked, original.embedding, teacher, mask, level
+            )
+            new = model.diffusion_student.denoise(
+                masked, model.embedding, teacher, mask, level
+            )
+            report["fully_masked_position_logit_span"] = {
+                "original": float(mx.max(mx.abs(old[:, :1] - old[:, 1:])).item()),
+                "positioned": float(mx.max(mx.abs(new[:, :1] - new[:, 1:])).item()),
+            }
+            assert report["fully_masked_position_logit_span"]["positioned"] > 1e-4
+            original.eval()
+            model.eval()
+            report["ordinary_logits_same_weights_error"] = float(
+                mx.max(mx.abs(original(masked)[0] - model(masked)[0])).item()
+            )
+            assert report["ordinary_logits_same_weights_error"] == 0
+            model.train()
+            del old, new
         del original
         model.checkpoint_layers = True
         tokens = (mx.arange(2 * 144).reshape(2, 144) * 17 + 1) % c.vocab_size

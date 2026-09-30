@@ -39,6 +39,7 @@ class Config:
     diffusion_width_multiplier: int = 8
     diffusion_trunk_gradient_scale: float = 0.0
     diffusion_conditioning: str = "aligned"
+    diffusion_position_encoding: str = "none"
     norm_eps: float = 1e-6
     mtp: bool = True
 
@@ -105,6 +106,8 @@ class Config:
 
         if self.diffusion_conditioning not in {"aligned", "prefix"}:
             raise ValueError("diffusion conditioning must be aligned or prefix")
+        if self.diffusion_position_encoding not in {"none", "sinusoidal"}:
+            raise ValueError("diffusion position encoding must be none or sinusoidal")
 
     @property
     def layers(self):

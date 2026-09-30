@@ -46,6 +46,28 @@ def test_future_teacher_states_are_not_used():
         assert float(mx.sum(mx.abs(dict(tree_flatten(gradients))[key])).item()) > 0
 
 
+def test_fully_masked_suffix_can_distinguish_positions():
+    c = replace(Config.smoke(), diffusion_conditioning="prefix")
+    legacy = Model(c)
+    positioned = Model(replace(c, diffusion_position_encoding="sinusoidal"))
+    positioned.load_weights(tree_flatten(legacy.parameters()), strict=True)
+    tokens = mx.ones((1, 8), dtype=mx.int32)
+    mask = mx.ones(tokens.shape, dtype=mx.bool_)
+    teacher = mx.ones((1, 1, c.hidden_size))
+    level = mx.ones((1, 1, 1))
+    a = legacy.diffusion_student.denoise(tokens, legacy.embedding, teacher, mask, level)
+    b = positioned.diffusion_student.denoise(
+        tokens, positioned.embedding, teacher, mask, level
+    )
+    assert float(mx.max(mx.abs(a[:, :1] - a[:, 1:])).item()) < 1e-6
+    assert float(mx.max(mx.abs(b[:, :1] - b[:, 1:])).item()) > 1e-4
+    legacy.eval()
+    positioned.eval()
+    assert float(mx.max(mx.abs(legacy(tokens)[0] - positioned(tokens)[0])).item()) == 0
+    with pytest.raises(ValueError, match="position encoding"):
+        replace(c, diffusion_position_encoding="invalid")
+
+
 def test_bounded_proposal_preserves_causal_reference_and_cache():
     c = replace(Config.smoke(), diffusion_conditioning="prefix")
     model = Model(c)
