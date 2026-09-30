@@ -16,6 +16,8 @@ dependencies = []
 [project.optional-dependencies]
 dev = ["pytest>=8", "ruff>=0.16"]
 mlx = ["mlx>=0.32"]
+hysparse2-research = ["mlx>=0.32", "numpy>=2", "tokenizers>=0.22"]
+hysparse2-data = ["numpy>=2", "tokenizers>=0.22", "pyarrow>=25"]
 serve = ["mlx>=0.32.2.dev20260829", "transformers>=5.12,<6", "numpy>=2", "psutil>=7", "jinja2>=3.1", "regex>=2024.11"]
 observability = [
     "opentelemetry-api>=1.29",
