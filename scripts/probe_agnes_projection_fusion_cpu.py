@@ -1,4 +1,4 @@
-"""Bounded real-artifact Agnes projection probe; CPU only, no route selection."""
+"""Bounded real-artifact Agnes projection probe; CPU default, no route selection."""
 
 from __future__ import annotations
 
@@ -6,6 +6,8 @@ import argparse
 import gc
 import hashlib
 import json
+import statistics
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -29,7 +31,7 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _layer(path: Path, mapping: dict, index: int, quant: dict, hidden: int):
+def _layer(path: Path, mapping: dict, index: int, quant: dict, hidden: int, device):
     prefix = f"language_model.model.layers.{index}.delta_attn."
     names = ("in_proj_qkv", "in_proj_z", "in_proj_b", "in_proj_a")
     keys = tuple(prefix + name + "." + field for name in names
@@ -38,17 +40,18 @@ def _layer(path: Path, mapping: dict, index: int, quant: dict, hidden: int):
     if len(shards) != 1:
         raise ValueError(f"layer {index} projection weights span shards: {sorted(shards)}")
     loaded = mx.load(path / shards.pop(), stream=mx.cpu)
+    mx.eval(*(loaded[key] for key in keys))
     layer = nn.Module()
     for name in names:
         stem = prefix + name + "."
-        weight = loaded[stem + "weight"]
+        weight = mx.array(loaded[stem + "weight"])
         module = nn.QuantizedLinear(
             hidden, weight.shape[0], bias=False, group_size=quant["group_size"],
             bits=quant["bits"], mode=quant["mode"],
         )
         module.weight = weight
-        module.scales = loaded[stem + "scales"]
-        module.biases = loaded[stem + "biases"]
+        module.scales = mx.array(loaded[stem + "scales"])
+        module.biases = mx.array(loaded[stem + "biases"])
         setattr(layer, name, module)
     layer.sharding_group = None
     del loaded
@@ -101,8 +104,13 @@ def main():
     parser.add_argument("artifact", type=Path)
     parser.add_argument("--layers", type=int, nargs="+", default=(0, 70))
     parser.add_argument("--metadata-only", action="store_true")
+    parser.add_argument("--device", choices=("cpu", "gpu"), default="cpu")
+    parser.add_argument("--bench-reps", type=int, default=0)
     args = parser.parse_args()
-    mx.set_default_device(mx.cpu)
+    if args.bench_reps < 0 or args.bench_reps > 30:
+        raise ValueError("bench reps must be between 0 and 30")
+    device = mx.cpu if args.device == "cpu" else mx.gpu
+    mx.set_default_device(device)
     path = args.artifact.expanduser().resolve()
     artifact = inspect_artifact(path)
     config = artifact["config"]
@@ -114,35 +122,73 @@ def main():
         if index < 0 or index >= len(plan) or plan[index] != "agnes_delta_attention":
             raise ValueError(f"layer {index} is not an Agnes GDN layer")
         layer = _layer(path, artifact["weight_map"], index, config["quantization"],
-                       config["text_config"]["hidden_size"])
+                       config["text_config"]["hidden_size"], device)
         supported = probe_agnes_projection_layer(layer)
+        names = ("in_proj_qkv", "in_proj_z", "in_proj_b", "in_proj_a")
+        stock_modules = tuple(getattr(layer, name) for name in names)
+        cases = {}
+        for dtype_name, dtype in (("float16", mx.float16), ("bfloat16", mx.bfloat16)):
+            if dtype_name not in supported:
+                continue
+            for width in (9, 16):
+                inputs = mx.random.normal(
+                    (1, width, config["text_config"]["hidden_size"]),
+                    key=mx.random.key(1000 + index + width),
+                ).astype(dtype)
+                stock = tuple(module(inputs) for module in stock_modules)
+                mx.eval(stock)
+                cases[(dtype_name, width)] = (inputs, stock)
         receipt = install_agnes_projection_fusion(
             SimpleNamespace(model_type="agnes", layers=[SimpleNamespace(
                 is_linear=True, delta_attn=layer)]), enabled=True,
         )
         parity = None
-        if receipt.fused_layers and "float16" in supported:
-            inputs = mx.random.normal((1, 9, config["text_config"]["hidden_size"]),
-                                      key=mx.random.key(1000 + index)).astype(mx.float16)
-            fused = GatedDeltaNet._input_projections(layer, inputs)
-            parts = ("in_proj_qkv", "in_proj_z", "in_proj_b", "in_proj_a")
-            bounds = layer._gdn_fused_bounds
-            lower = 0
-            exact = []
-            for name, upper, candidate in zip(parts, bounds, fused):
-                packed = layer.in_proj_fused
-                reference = mx.quantized_matmul(
-                    inputs, packed.weight[lower:upper], packed.scales[lower:upper],
-                    packed.biases[lower:upper], transpose=True,
-                    group_size=packed.group_size, bits=packed.bits,
+        parity_cases = {}
+        if receipt.fused_layers:
+            for (dtype_name, width), (inputs, stock) in cases.items():
+                fused = GatedDeltaNet._input_projections(layer, inputs)
+                mx.eval(fused)
+                parity_cases[f"{dtype_name}/{width}"] = all(
+                    bool(mx.array_equal(candidate, reference).item())
+                    for candidate, reference in zip(fused, stock)
                 )
-                mx.eval(candidate, reference)
-                exact.append(bool(mx.array_equal(candidate, reference).item()))
-                lower = upper
-            parity = all(exact)
+            parity = all(parity_cases.values()) if parity_cases else None
+        microbench = None
+        if receipt.fused_layers and args.bench_reps:
+            one = cases[("float16", 9)][0][:, :1, :]
+
+            def timed(call):
+                start = time.perf_counter()
+                mx.eval(call())
+                return (time.perf_counter() - start) * 1000
+
+            stock_call = lambda: tuple(module(one) for module in stock_modules)
+            fused_call = lambda: GatedDeltaNet._input_projections(layer, one)
+            for _ in range(3):
+                timed(stock_call)
+                timed(fused_call)
+            stock_ms, fused_ms = [], []
+            for repeat in range(args.bench_reps):
+                if repeat % 2:
+                    fused_ms.append(timed(fused_call))
+                    stock_ms.append(timed(stock_call))
+                else:
+                    stock_ms.append(timed(stock_call))
+                    fused_ms.append(timed(fused_call))
+            microbench = {
+                "scope": "one-row GDN input projections only, not serving throughput",
+                "paired_repetitions": args.bench_reps,
+                "stock_median_ms": statistics.median(stock_ms),
+                "fused_median_ms": statistics.median(fused_ms),
+            }
+            microbench["stock_over_fused"] = (
+                microbench["stock_median_ms"] / microbench["fused_median_ms"]
+            )
         rows.append({"layer": index, "probe_dtypes": list(supported),
                      "fused": receipt.fused_layers == 1,
-                     "wide_rows_exact": parity})
+                     "wide_rows_exact": parity,
+                     "wide_rows_exact_by_dtype": parity_cases,
+                     "microbenchmark": microbench})
         del layer
         gc.collect()
         mx.clear_cache()
@@ -150,7 +196,8 @@ def main():
         "artifact": str(path),
         "config_sha256": _sha256(path / "config.json"),
         "index_sha256": _sha256(path / "model.safetensors.index.json"),
-        "device": "CPU", "selected_for_serving": False,
+        "device": args.device.upper(), "effective_device": str(mx.default_device()),
+        "selected_for_serving": False,
         "metadata_audited_gdn_layers": audited, "layers": rows,
     }, indent=2))
 

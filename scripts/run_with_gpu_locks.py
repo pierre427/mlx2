@@ -21,10 +21,11 @@ from pathlib import Path
 
 LOCKS = (Path("/Users/Shared/mlxuag/gpu.lock"), Path("/tmp/gpu.lock"))
 WAITERS = Path("/Users/Shared/mlxuag/gpu.lock.waiters")
-SESSION = "codex-hils-declared-groups-20260930"
+DEFAULT_SESSION = "codex-hils-declared-groups-20260930"
 MODEL_PROCESS = re.compile(
     r"-m mlx2\.server|mlx_lm\.server|mlx_vlm\.server|rapid-mlx|llama-server|"
-    r"qualify_hils_declared_groups\.py"
+    r"qualify_hils_declared_groups\.py",
+    re.IGNORECASE,
 )
 
 
@@ -68,6 +69,9 @@ def foreign_model_processes() -> list[str]:
     for row in rows.splitlines():
         fields = row.strip().split(None, 1)
         if len(fields) != 2 or int(fields[0]) in {os.getpid(), os.getppid()}:
+            continue
+        executable = fields[1].split(None, 1)[0]
+        if executable.endswith(("/zsh", "/bash", "/sh", "/git", "/git-remote-https")):
             continue
         if MODEL_PROCESS.search(fields[1]):
             foreign.append(row.strip()[:500])
@@ -147,6 +151,7 @@ def release(backups: list[tuple[Path, Path | None]]) -> list[dict]:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--session", default=DEFAULT_SESSION)
     parser.add_argument("--label", required=True)
     parser.add_argument("--receipt", type=Path, required=True)
     parser.add_argument("command", nargs=argparse.REMAINDER)
@@ -156,10 +161,10 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("a command is required after --")
     WAITERS.mkdir(parents=True, exist_ok=True)
     created = int(time.time())
-    waiter = WAITERS / f"{SESSION}.{args.label}.{os.getpid()}.{created}"
+    waiter = WAITERS / f"{args.session}.{args.label}.{os.getpid()}.{created}"
     receipt = {
         "schema": "mlx2.gpu-lock-window.v1",
-        "session": SESSION,
+        "session": args.session,
         "label": args.label,
         "pid": os.getpid(),
         "created_at": time.time(),
@@ -189,8 +194,8 @@ def main(argv: list[str] | None = None) -> int:
         if foreign:
             raise RuntimeError(f"foreign model process present: {foreign[:5]}")
         owner = {
-            "lease_id": f"{SESSION}-{args.label}",
-            "session": SESSION,
+            "lease_id": f"{args.session}-{args.label}",
+            "session": args.session,
             "label": args.label,
             "pid": os.getpid(),
             "since": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
