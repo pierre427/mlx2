@@ -80,6 +80,22 @@ class Attention(nn.Module):
         return self.o_proj(out)
 
 
+def lane_projection_groups():
+    """Lane groups: ``Attention.__call__`` feeds its one ``x`` to each member.
+
+    The output gate reads the attention input, not the attention output, so
+    it stacks with q/k/v (tests/test_lane_projection_groups.py pins the call
+    site).  The MLP's gate/up stay on the default group.
+    """
+    from ..lane import ProjectionGroup
+
+    return (
+        ProjectionGroup(
+            "muse-attn-qkv-gate", Attention, ("q_proj", "k_proj", "v_proj", "gate_proj")
+        ),
+    )
+
+
 class MLP(nn.Module):
     def __init__(self, args: ModelArgs):
         super().__init__()

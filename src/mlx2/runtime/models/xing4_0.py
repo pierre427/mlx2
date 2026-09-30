@@ -739,6 +739,22 @@ def _mhc_span(streams, out, post, comb, hc, norm):
     return fn(streams, out, post, comb, hc.hc_fn, hc._kernel_params(), norm.weight)
 
 
+def lane_projection_groups():
+    """Lane groups: ``Xing4_0Attention.__call__`` feeds one ``x`` to each member.
+
+    With a query LoRA (every Xing4.0 artifact: q_lora_rank 768) the query's
+    down projection pairs with the latent KV projection; without one the full
+    q_proj does.  q_b_proj reads the normed rank-768 result and cannot join.
+    """
+    from ..lane import ProjectionGroup
+
+    members = ("kv_a_proj_with_mqa",)
+    return (
+        ProjectionGroup("xing-mla-qa-kva", Xing4_0Attention, ("q_a_proj", *members)),
+        ProjectionGroup("xing-mla-q-kva", Xing4_0Attention, ("q_proj", *members)),
+    )
+
+
 def _mhc_last_update(streams, out, post, comb):
     from .xing4_0_mhc_metal import mhc_update
 

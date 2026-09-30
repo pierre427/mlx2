@@ -814,6 +814,7 @@ def lane_matmul_status(engine) -> dict:
         "covered": receipt.get("covered", {}),
         "refused": receipt.get("refused", {}),
         "groups": receipt.get("groups", {}),
+        "declared_groups": receipt.get("declared_groups", {}),
         "min_rows": policy.get("min_rows"),
         "max_rows": policy.get("max_rows"),
         "detected": policy.get("detected"),
@@ -4591,7 +4592,10 @@ class ServingEngine:
                     overrides=self.lane_policy_overrides,
                     mode=self.lane_matmul,
                 )
-                self.lane_matmul_receipt = apply_policy(adapter.model, policy) or {
+                offered = getattr(adapter, "lane_projection_groups", None)
+                self.lane_matmul_receipt = apply_policy(
+                    adapter.model, policy, declared=offered() if callable(offered) else ()
+                ) or {
                     "law_id": "stock", "covered": {}, "policy": {
                         k: policy[k] for k in ("mode", "detected", "family", "sources")}}
                 if (

@@ -19,8 +19,9 @@ stock kernels and are reported.
 
 from __future__ import annotations
 
+import hashlib
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import mlx.core as mx
 from mlx import nn
@@ -63,12 +64,50 @@ DEFAULT_GROUPS = (
 )
 
 
+@dataclass(frozen=True)
+class ProjectionGroup:
+    """Adapter-declared projections that read one input tensor object.
+
+    ``parent`` is the module class whose ``__call__`` passes the identical
+    tensor to every member (the adapter vouches for that call site, and a
+    static test pins it); ``members`` are paths under it, a digit indexing a
+    list (``"lmk_q_proj.0"``).  The group forms only on modules of exactly
+    that class and only when every member is covered, ungrouped and of one
+    weight format; otherwise none of it is stacked and the members fall
+    through to ``DEFAULT_GROUPS``.
+    """
+
+    name: str
+    parent: type
+    members: tuple[str, ...]
+
+    def __post_init__(self):
+        if not self.name or len(self.members) < 2 or len(set(self.members)) != len(self.members):
+            raise ValueError(f"projection group {self.name!r} needs 2+ distinct members")
+
+    @property
+    def spec(self) -> str:
+        parent = f"{self.parent.__module__}.{self.parent.__qualname__}"
+        return f"{self.name}={parent}:{','.join(self.members)}"
+
+
+def _declared_digest(declared) -> str:
+    """Law suffix for the declared groups that formed: stacking changes N,
+    and with it split-K, for every member (docs: lane matmul law)."""
+    specs = sorted({group.spec for group in declared})
+    digest = hashlib.sha256("\n".join(specs).encode()).hexdigest()[:12]
+    return f"+declared[{','.join(sorted({g.name for g in declared}))}@{digest}]"
+
+
 @dataclass
 class _Group:
     """Same-format siblings stacked along N; one launch computes all of them."""
 
     lw: LaneWeights
     last: tuple | None = None                     # (x, stacked output) of the latest call
+    declared: str | None = None                   # adapter group name, None for defaults
+    size: int = 0
+    served: set = field(default_factory=set)      # members served by the latest launch
 
 # Process-wide switches for paired A/B measurement; a route never flips them.
 ENABLED = [True]
@@ -127,13 +166,25 @@ class _LaneMixin:
                 else:
                     # The first sibling to see this input computes the whole
                     # group; the others take their columns of the same result.
+                    start, stop = self.__dict__["_lane_columns"]
+                    declared = group.declared
                     if group.last is None or group.last[0] is not x:
+                        if declared is not None and group.last is not None \
+                                and len(group.served) < group.size:
+                            # The previous launch fed only part of the group:
+                            # its members did not all see one tensor object.
+                            STATS[f"declared_partial:{declared}"] += 1
                         group.last = (x, lane_matmul(x, group.lw))
                         STATS["lane_launches"] += 1
                         STATS["group_launches"] += 1
+                        if declared is not None:
+                            group.served = {start}
+                            STATS[f"declared_launches:{declared}"] += 1
                     else:
                         STATS["group_reuses"] += 1
-                    start, stop = self.__dict__["_lane_columns"]
+                        if declared is not None:
+                            group.served.add(start)
+                            STATS[f"declared_reuses:{declared}"] += 1
                     y = group.last[1][..., start:stop]
                     if lw.bias is not None:
                         y = y + lw.bias
@@ -191,6 +242,65 @@ def _stack(members) -> _Group:
     return _Group(lw)
 
 
+def _member(parent, path: str):
+    module = parent
+    for part in path.split("."):
+        if part.isdigit():
+            if not isinstance(module, (list, tuple)) or int(part) >= len(module):
+                return None
+            module = module[int(part)]
+        else:
+            module = getattr(module, part, None)
+        if module is None:
+            return None
+    return module
+
+
+def _declared_refusal(members) -> str | None:
+    if any(m is None for m in members):
+        return "member missing"
+    if any(not isinstance(m, nn.Module) or _prepared(m) is None for m in members):
+        return "member not covered"
+    if any(_group(m) is not None for m in members):
+        return "member already grouped"
+    if len({id(m) for m in members}) != len(members):
+        return "member repeated"
+    if len({_format_key(_prepared(m)) for m in members}) != 1:
+        return "mixed formats"
+    return None
+
+
+def _dissolve(model) -> None:
+    """Drop every group; members keep their (view) weights and preparation."""
+    for _name, module in model.named_modules():
+        for name in ("_lane_group", "_lane_columns"):
+            module.__dict__.pop(name, None)
+
+
+def _group_declared(model, declared) -> tuple[Counter, dict, dict]:
+    """Stack adapter-declared groups whole or not at all (before defaults)."""
+    formed: Counter = Counter()
+    by_name: dict[str, Counter] = {}
+    refused: dict[str, Counter] = {}
+    for _name, parent in model.named_modules():
+        for spec in declared:
+            if type(parent) is not spec.parent:
+                continue
+            members = [_member(parent, path) for path in spec.members]
+            reason = _declared_refusal(members)
+            if reason is not None:
+                refused.setdefault(spec.name, Counter())[reason] += 1
+                continue
+            group = _stack(members)
+            group.declared, group.size = spec.name, len(members)
+            for m in members:
+                object.__setattr__(m, "_lane_group", group)
+            formed[f"{group.lw.format}x{len(members)}"] += 1
+            by_name.setdefault(spec.name, Counter())[group.lw.format] += 1
+    return (formed, {k: dict(v) for k, v in by_name.items()},
+            {k: dict(v) for k, v in refused.items()})
+
+
 def _group_siblings(model, groups) -> Counter:
     formed: Counter = Counter()
     for _name, parent in model.named_modules():
@@ -205,6 +315,7 @@ def _group_siblings(model, groups) -> Counter:
                 if len(members) < 2:
                     continue
                 group = _stack(members)
+                group.size = len(members)
                 for m in members:
                     object.__setattr__(m, "_lane_group", group)
                 formed[f"{group.lw.format}x{len(members)}"] += 1
@@ -228,11 +339,13 @@ def apc_lane_fingerprint(base, receipt):
 
 def install(model, *, min_rows: int = 4, max_rows: int = DEFAULT_MAX_ROWS, unquantized: bool = True,
             groups=DEFAULT_GROUPS, skip=lambda name, module: False,
-            min_rows_by_format: dict | None = None) -> dict:
+            min_rows_by_format: dict | None = None, declared=()) -> dict:
     """Swap every supported projection to its lane class; returns a receipt.
 
     ``groups``: tuples of sibling attribute names that read the same input;
     same-format siblings are stacked and run as one launch (``()`` disables).
+    ``declared``: adapter ``ProjectionGroup``s, formed before ``groups`` and
+    only when grouping is on; any that form add their digest to the law.
     ``skip(name, module)`` lets an adapter keep a projection on stock kernels
     (for example a huge vocabulary head it measures separately).  Idempotent
     for the class swap; a repeat call updates the row window.
@@ -276,16 +389,28 @@ def install(model, *, min_rows: int = 4, max_rows: int = DEFAULT_MAX_ROWS, unqua
         object.__setattr__(module, "_lane_min_rows", int(rows))
         object.__setattr__(module, "_lane_max_rows", int(max_rows))
         covered[lw.format] += 1
+    declared = tuple(declared or ())
+    if any(not isinstance(spec, ProjectionGroup) for spec in declared):
+        raise TypeError("declared projection groups must be ProjectionGroup instances")
+    if len({spec.name for spec in declared}) != len(declared):
+        raise ValueError("declared projection group names must be unique")
+    if declared and not groups:
+        raise ValueError("declared projection groups require grouping")
+    declared_formed, declared_refused = {}, {}
+    if declared or any(getattr(_group(m), "declared", None) is not None
+                       for _n, m in model.named_modules()):
+        # Declared groups change which siblings stack: re-form every group
+        # from scratch so none from an earlier install outlives its spec.
+        _dissolve(model)
     if groups:
-        formed = _group_siblings(model, groups)
+        formed, declared_formed, declared_refused = _group_declared(model, declared)
+        formed.update(_group_siblings(model, groups))
     else:
         # A repeat install without grouping dissolves earlier groups; they
         # kept running the stacked launch (a different split-K) while the
         # receipt said ungrouped.
         formed = Counter()
-        for _name, module in model.named_modules():
-            for name in ("_lane_group", "_lane_columns"):
-                module.__dict__.pop(name, None)
+        _dissolve(model)
     if min_rows_by_format is None:
         law = law_id(min_rows)
     else:
@@ -295,11 +420,25 @@ def install(model, *, min_rows: int = 4, max_rows: int = DEFAULT_MAX_ROWS, unqua
         # Calls up to max_rows take the lane arithmetic: a wider window is a
         # different law (33-64-row verify or prefill tails change).
         law += f"+rows-le-{max_rows}"
+    live = {group.declared for _name, module in model.named_modules()
+            if (group := _group(module)) is not None and group.declared is not None}
     grouped = any(_group(module) is not None for _name, module in model.named_modules())
-    return {"law_id": law + ("+grouped" if grouped else ""),
-            "min_rows": min_rows if min_rows_by_format is None else dict(min_rows_by_format),
-            "max_rows": max_rows, "covered": dict(covered),
-            "groups": dict(formed), "refused": dict(refused), "available": available()}
+    if live:
+        law += _declared_digest([spec for spec in declared if spec.name in live])
+    receipt = {"law_id": law + ("+grouped" if grouped else ""),
+               "min_rows": min_rows if min_rows_by_format is None else dict(min_rows_by_format),
+               "max_rows": max_rows, "covered": dict(covered),
+               "groups": dict(formed), "refused": dict(refused), "available": available()}
+    if declared:
+        # Only present when declared groups were passed, so receipts of
+        # every other install are byte-identical to before.
+        receipt["declared_groups"] = {
+            spec.name: {"members": list(spec.members),
+                        "parent": f"{spec.parent.__module__}.{spec.parent.__qualname__}",
+                        "formed": declared_formed.get(spec.name, {}),
+                        "refused": declared_refused.get(spec.name, {})}
+            for spec in declared}
+    return receipt
 
 
 def uninstall(model) -> int:
@@ -326,8 +465,12 @@ def installed(module) -> bool:
     return type(module) in _RESTORE and _prepared(module) is not None
 
 
-def apply_policy(model, policy: dict) -> dict | None:
-    """Install according to a resolved ``policy.resolve`` result (None when off)."""
+def apply_policy(model, policy: dict, declared=()) -> dict | None:
+    """Install according to a resolved ``policy.resolve`` result (None when off).
+
+    ``declared``: the adapter's ``ProjectionGroup``s; stacked only when the
+    policy selects ``declared_groups`` (default off), and always reported.
+    """
     from .policy import skipped
 
     if policy["mode"] == "off":
@@ -341,16 +484,35 @@ def apply_policy(model, policy: dict) -> dict | None:
             "refused": {"device_unsupported": sum(policy["detected"]["formats"].values())},
             "available": False,
             "policy": {k: policy[k] for k in (
-                "mode", "min_rows", "max_rows", "grouping", "skip",
+                "mode", "min_rows", "max_rows", "grouping", "declared_groups", "skip",
                 "detected", "family", "sources")},
         }
     by_format = ({fmt: 1 for fmt in policy["min_rows"]} if policy["mode"] == "exact"
                  else dict(policy["min_rows"]))
+    declared = tuple(declared or ())
+    selected = bool(policy.get("declared_groups")) and bool(policy["grouping"])
+    if selected and not declared:
+        raise ValueError("lane policy selects declared_groups but the adapter declares none")
     receipt = install(
         model, min_rows=1, max_rows=int(policy["max_rows"]),
         groups=DEFAULT_GROUPS if policy["grouping"] else (),
         skip=lambda name, module: skipped(policy, name),
         min_rows_by_format=by_format,
+        declared=declared if selected else (),
     )
+    if selected and not any(entry["formed"] for entry in receipt["declared_groups"].values()):
+        # Asked for and not delivered: restore stock rather than serve a
+        # route whose policy says grouped while nothing was stacked.
+        uninstall(model)
+        raise ValueError("lane policy selects declared_groups but none formed: "
+                         f"{ {k: v['refused'] for k, v in receipt['declared_groups'].items()} }")
+    if declared and not selected:
+        # Offered but not selected: report it without touching the law.
+        receipt["declared_groups"] = {
+            spec.name: {"members": list(spec.members),
+                        "parent": f"{spec.parent.__module__}.{spec.parent.__qualname__}",
+                        "formed": {}, "refused": {"not selected": 1}}
+            for spec in declared}
     return {**receipt, "policy": {k: policy[k] for k in (
-        "mode", "min_rows", "max_rows", "grouping", "skip", "detected", "family", "sources")}}
+        "mode", "min_rows", "max_rows", "grouping", "declared_groups", "skip", "detected",
+        "family", "sources")}}

@@ -2,6 +2,7 @@
 
 from .installer import (
     LAW_ID,
+    ProjectionGroup,
     apply_policy,
     install,
     installed,
@@ -31,6 +32,7 @@ __all__ = [
     "UNQUANTIZED_BITS",
     "LaneUnsupported",
     "LaneWeights",
+    "ProjectionGroup",
     "apply_policy",
     "available",
     "install",

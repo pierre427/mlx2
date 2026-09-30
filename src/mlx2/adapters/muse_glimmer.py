@@ -317,6 +317,13 @@ class MuseGlimmerAdapter:
         )
 
     @staticmethod
+    def lane_projection_groups():
+        """Offered to the lane installer; stacked only under ``declared_groups``."""
+        from ..runtime.models.muse_glimmer import lane_projection_groups
+
+        return lane_projection_groups()
+
+    @staticmethod
     def spomin_backend(model, prompt_cache):
         """Adapter-owned approximate KV surgery for full + sliding attention."""
         from ..runtime.spomin_standard_surgery import StandardAttentionSpominBackend

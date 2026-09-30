@@ -637,6 +637,24 @@ class HiLSAttention(nn.Module):
         return self.o_proj(o)
 
 
+def lane_projection_groups():
+    """Lane groups: ``HiLSAttention.__call__`` feeds its one ``x`` to each member.
+
+    The landmark query's first (down) projection reads the attention input;
+    its second reads the rank-``lmk_q_lora_dim`` result and cannot join.
+    ``SWAAttention`` layers keep the default q/k/v group.
+    """
+    from ..lane import ProjectionGroup
+
+    return (
+        ProjectionGroup(
+            "hils-attn-qkv-lmkq",
+            HiLSAttention,
+            ("q_proj", "k_proj", "v_proj", "lmk_q_proj.0"),
+        ),
+    )
+
+
 class OlmoHilsDecoderLayer(nn.Module):
     def __init__(self, args: ModelArgs, layer_idx: int):
         super().__init__()

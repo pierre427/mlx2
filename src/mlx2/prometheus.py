@@ -1581,6 +1581,17 @@ def _add_lane_matmul(builder: PrometheusBuilder, engine: Any) -> None:
         "Sibling projection calls served from their group's launch.",
         int(counts.get("group_reuses", 0)),
     )
+    # Adapter-declared groups: one series per declared name the receipt lists
+    # (bounded by the adapter), whether or not the policy selected them.
+    for name in sorted(receipt.get("declared_groups") or {}):
+        for event in ("launches", "reuses", "partial"):
+            builder.counter(
+                "mlx2_lane_matmul_declared_group_events_total",
+                "Adapter-declared group launches, member reuses, and launches "
+                "that fed only part of the group (members saw different inputs).",
+                int(counts.get(f"declared_{event}:{name}", 0)),
+                {"group": str(name), "event": event},
+            )
 
 
 def _add_verify_bitexact(builder: PrometheusBuilder, engine: Any) -> None:

@@ -126,6 +126,13 @@ class OlmoHiLSAdapter(OrdinaryTextAdapter):
                                           eos_token_ids=[int(self.config["eos_token_id"])])
         self.max_context = int(self.config["max_position_embeddings"])
 
+    @staticmethod
+    def lane_projection_groups():
+        """Offered to the lane installer; stacked only under ``declared_groups``."""
+        from ..runtime.models.olmo_hils import lane_projection_groups
+
+        return lane_projection_groups()
+
     def prompt_tokens(self, request):
         if "messages" in request or request.get("tools"):
             raise ValueError("HiLS candidate accepts plain text prompts only")

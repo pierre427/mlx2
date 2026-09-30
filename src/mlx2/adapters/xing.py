@@ -356,6 +356,13 @@ class XingAdapter:
     thinking_allowance_tokens = 4096
 
     @staticmethod
+    def lane_projection_groups():
+        """Offered to the lane installer; stacked only under ``declared_groups``."""
+        from ..runtime.models.xing4_0 import lane_projection_groups
+
+        return lane_projection_groups()
+
+    @staticmethod
     def thinking_enabled(request: dict) -> bool:
         return reasoning_policy(request)[1]
 

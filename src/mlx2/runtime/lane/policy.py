@@ -35,6 +35,10 @@ BUILTIN = {
                  "bf16": 16, "fp16": 16},
     "max_rows": 32,
     "grouping": True,
+    # Adapter-declared projection groups (installer.ProjectionGroup): offered
+    # by the adapter, stacked only when selected.  Off until GPU-qualified;
+    # when on, the formed groups' digest joins the law.
+    "declared_groups": False,
     "skip": [],
     # Applied on top when the model is a mixture of experts.
     "moe": {"mode": "off"},
@@ -48,7 +52,7 @@ FAMILY_DEFAULT_FORMATS: dict[str, frozenset[str]] = {
     "muse-glimmer": frozenset({"q4"}),
 }
 
-_KEYS = {"mode", "min_rows", "max_rows", "grouping", "skip", "moe"}
+_KEYS = {"mode", "min_rows", "max_rows", "grouping", "declared_groups", "skip", "moe"}
 
 
 def format_class(module) -> str | None:
@@ -128,8 +132,9 @@ def _validate(partial: dict, where: str) -> None:
     if "max_rows" in partial and (type(partial["max_rows"]) is not int
                                   or not 1 <= partial["max_rows"] <= 128):
         raise ValueError(f"{where}: max_rows must be 1-128")
-    if "grouping" in partial and type(partial["grouping"]) is not bool:
-        raise ValueError(f"{where}: grouping must be boolean")
+    for key in ("grouping", "declared_groups"):
+        if key in partial and type(partial[key]) is not bool:
+            raise ValueError(f"{where}: {key} must be boolean")
     if "skip" in partial and (not isinstance(partial["skip"], list)
                               or not all(isinstance(p, str) for p in partial["skip"])):
         raise ValueError(f"{where}: skip must be a list of name patterns")
@@ -162,7 +167,8 @@ def resolve(detected: dict, *, family: str | None = None, overrides=None,
     Returns the policy plus ``sources`` naming where every tuned value came
     from (builtin, builtin.moe, family:<name>, override, override.moe, cli).
     """
-    sources = {key: "builtin" for key in ("mode", "max_rows", "grouping", "skip")}
+    sources = {key: "builtin"
+               for key in ("mode", "max_rows", "grouping", "declared_groups", "skip")}
     sources.update({f"min_rows.{fmt}": "builtin" for fmt in FORMAT_CLASSES})
     policy = copy.deepcopy(BUILTIN)
     user = load_overrides(overrides)
@@ -193,6 +199,8 @@ def resolve(detected: dict, *, family: str | None = None, overrides=None,
         sources["mode"] = "cli"
     if policy["mode"] == "auto":
         policy["mode"] = "crossover"
+    if policy["declared_groups"] and not policy["grouping"]:
+        raise ValueError("lane policy: declared_groups requires grouping")
     policy.pop("moe", None)
     return {**policy, "detected": detected, "family": family, "sources": sources}
 
