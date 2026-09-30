@@ -460,6 +460,15 @@ class FusedDownSwitchGLU(SwitchGLU):
             (x, idx, inv_order) = _gather_sort(x, indices)
         if self.training:
             idx = mx.stop_gradient(idx)
+        # An explicitly selected candidate runs first, on stock arithmetic
+        # only: a selected fused expert kernel keeps its own down arithmetic.
+        candidate = (
+            _try_routed_candidate(self, x, idx, scores, do_sort)
+            if variant == "stock" else None
+        )
+        if candidate is not None:
+            object.__setattr__(self, "_last_fused_variant", "routed_candidate")
+            return candidate
         routed = _try_routed_decode(self, x, idx, scores, do_sort, variant)
         if routed is not None and routed[0] != "gate_up":
             object.__setattr__(self, "_last_fused_variant", f"routed_{routed[0]}")
@@ -490,6 +499,12 @@ def _enable_routed_decode(switch_mlp, mode: str) -> None:
         raise ValueError(f"unknown routed decode mode {mode!r}; expected {_routed.MODES}")
     switch_mlp.routed_decode_mode = mode
     switch_mlp.routed_decode_calls = 0
+    # ``calls`` counts every routed gate+up launch; ``down_calls`` the launches
+    # that also ran the routed down (kept equal to ``routed_down_calls``), and
+    # ``degraded`` the ``two_launch``/``gate_up_down`` calls that had no scores
+    # and so ran gate+up only.
+    switch_mlp.routed_decode_down_calls = 0
+    switch_mlp.routed_decode_degraded = 0
     switch_mlp.routed_decode_fallbacks = 0
     switch_mlp.routed_decode_last_fallback = None
     # The down half (gate_up_down: served_down; two_launch: down_combine).
@@ -546,7 +561,8 @@ def _try_routed_decode(switch_mlp, x, indices, scores, do_sort, variant="scalar"
         # The block folds the shared expert when it can; reaching the switch
         # means it declined (counted there), so run the routed half alone.
         mode = "gate_up_down"
-    if mode in ("two_launch", "gate_up_down") and scores is None:
+    degraded = mode in ("two_launch", "gate_up_down") and scores is None
+    if degraded:
         mode = "gate_up"
     split = "gate_up_proj" not in switch_mlp
     if split:
@@ -573,6 +589,7 @@ def _try_routed_decode(switch_mlp, x, indices, scores, do_sort, variant="scalar"
     else:
         hidden = _routed.gate_up_swiglu(x, indices, switch_mlp.gate_up_proj)
     switch_mlp.routed_decode_calls += 1
+    switch_mlp.routed_decode_degraded += int(degraded)
     switch_mlp.routed_decode_last_fallback = None
     if mode == "gate_up_down":
         refusal = _served_down_refusal(
@@ -585,11 +602,13 @@ def _try_routed_decode(switch_mlp, x, indices, scores, do_sort, variant="scalar"
         else:
             y = _routed.served_down(hidden, indices, scores, switch_mlp.down_proj)
             switch_mlp.routed_down_calls += 1
+            switch_mlp.routed_decode_down_calls += 1
             switch_mlp.routed_down_last_fallback = None
             return ("gate_up_down", y.reshape(indices.shape[:-1] + (y.shape[-1],)))
     if mode == "two_launch":
         y = _routed.down_combine(hidden, indices, scores, switch_mlp.down_proj)
         switch_mlp.routed_down_calls += 1
+        switch_mlp.routed_decode_down_calls += 1
         return ("two_launch", y.reshape(indices.shape[:-1] + (y.shape[-1],)))
     return ("gate_up", hidden.reshape(indices.shape + (1, hidden.shape[-1])))
 
@@ -649,6 +668,7 @@ def _try_shared_fold(block, x, inds, scores):
     block.shared_fold_last_fallback = None
     sw.routed_decode_calls += 1
     sw.routed_down_calls += 1
+    sw.routed_decode_down_calls += 1
     return y.reshape(x.shape[:-1] + (y.shape[-1],))
 
 
@@ -916,6 +936,7 @@ def _try_topk_fold_decode(block, x):
         y = y + gate_sigmoid(block.shared_expert_gate(x)) * shared_y
     sw.routed_decode_calls += 1
     sw.routed_down_calls += 1
+    sw.routed_decode_down_calls += 1
     block.moe_topk_calls["fold"] += 1
     block.moe_topk_last_fallback = None
     return y.reshape(x.shape)
@@ -938,6 +959,80 @@ def _try_topk_launch(block, x, gates):
     block.moe_topk_last_fallback = None
     lead = gates.shape[:-1]
     return inds.reshape(*lead, _window.TOP_K), scores.reshape(*lead, _window.TOP_K)
+
+
+_CANDIDATE_REASON_SLOTS = 16
+
+
+def _enable_routed_candidate(switch_mlp, mode: str = "off") -> None:
+    """Attach the default-off omlx #4113 candidate selection and counters.
+
+    A fixed set of plain host integer counters, like the routed-decode ones
+    (no sync, no timing): ``calls`` counts one-token forwards the candidate
+    kernels served; ``fallbacks`` the one-token forwards it declined, keyed
+    by reason (at most 16 distinct reasons, then ``other``). The composed
+    reference body runs on every decline.
+    """
+    if mode not in _routed.CANDIDATE_MODES:
+        raise ValueError(
+            f"unknown routed candidate mode {mode!r}; expected {_routed.CANDIDATE_MODES}"
+        )
+    switch_mlp.routed_candidate_mode = mode
+    switch_mlp.routed_candidate_calls = 0
+    switch_mlp.routed_candidate_fallbacks = 0
+    switch_mlp.routed_candidate_fallback_reasons = {}
+    switch_mlp.routed_candidate_last_fallback = None
+
+
+def _try_routed_candidate(switch_mlp, x, indices, scores, do_sort):
+    """The candidate's weighted routed sum ``indices.shape[:-1] + (hidden,)``,
+    or None to run the composed body. Multi-token forwards decline quietly."""
+    if getattr(switch_mlp, "routed_candidate_mode", "off") == "off":
+        return None
+    if do_sort or x.size != x.shape[-1]:
+        return None
+    admission = _routed.admit_routed_candidate(
+        x, indices, scores,
+        switch_mlp.get("gate_proj"), switch_mlp.get("up_proj"), switch_mlp.down_proj,
+    )
+    reason = admission.reason if admission.accepted is False else None
+    if reason is None and switch_mlp.training:
+        reason = "training"
+    if reason is None:
+        reason = _routed.candidate_runtime_refusal()
+    if reason is not None:
+        reasons = switch_mlp.routed_candidate_fallback_reasons
+        if reason not in reasons and len(reasons) >= _CANDIDATE_REASON_SLOTS:
+            reason = "other"
+        reasons[reason] = reasons.get(reason, 0) + 1
+        switch_mlp.routed_candidate_fallbacks += 1
+        switch_mlp.routed_candidate_last_fallback = reason
+        return None
+    hidden = _routed.candidate_gate_up_swiglu(
+        x, indices, switch_mlp.gate_proj, switch_mlp.up_proj
+    )
+    y = _routed.candidate_down_combine(hidden, indices, scores, switch_mlp.down_proj)
+    switch_mlp.routed_candidate_calls += 1
+    switch_mlp.routed_candidate_last_fallback = None
+    return y.reshape(indices.shape[:-1] + (y.shape[-1],))
+
+
+def routed_candidate_stats(model, *, reset: bool = False) -> dict:
+    """Summed candidate counters over every switch module that carries them."""
+    report = {"mode": "off", "layers": 0, "calls": 0, "fallbacks": 0, "reasons": {}}
+    for _, module in model.named_modules():
+        if not hasattr(module, "routed_candidate_mode"):
+            continue
+        report["layers"] += 1
+        if module.routed_candidate_mode != "off":
+            report["mode"] = module.routed_candidate_mode
+        report["calls"] += module.routed_candidate_calls
+        report["fallbacks"] += module.routed_candidate_fallbacks
+        for reason, count in module.routed_candidate_fallback_reasons.items():
+            report["reasons"][reason] = report["reasons"].get(reason, 0) + count
+        if reset:
+            _enable_routed_candidate(module, module.routed_candidate_mode)
+    return report
 
 
 def _routed_tail(switch_mlp, x, indices, inv_order, scores, do_sort):
@@ -1299,6 +1394,10 @@ class Qwen3NextSparseMoeBlock(nn.Module):
             self.switch_mlp,
             _MOE_ROUTED_DECODE if not self.shared_folded else "off",
         )
+        # The omlx #4113 candidate reads split gate/up tables; attached (off)
+        # to the split-table switch only.
+        if not self.fused_gate_up:
+            _enable_routed_candidate(self.switch_mlp, "off")
         if not self.shared_folded:
             self.shared_expert = Qwen3NextMLP(dim, shared_expert_intermediate_size)
         self.shared_expert_gate = nn.Linear(dim, 1, bias=False)
@@ -1326,6 +1425,8 @@ class Qwen3NextSparseMoeBlock(nn.Module):
             )
         if mode != "stock" and self.shared_folded:
             raise ValueError("fused expert kernels do not support a folded shared row")
+        if mode != "stock" and getattr(self.switch_mlp, "routed_candidate_mode", "off") != "off":
+            raise ValueError("fused expert kernels exclude the routed candidate")
         self.fused_expert_kernel_mode = mode
 
     def set_moe_weighted_sum(self, enabled: bool) -> bool:
@@ -1365,6 +1466,21 @@ class Qwen3NextSparseMoeBlock(nn.Module):
         if mode != "off" and self.shared_folded:
             raise ValueError("the top-k launch does not support a folded shared row")
         self.moe_topk_mode = mode
+        return mode
+
+    def set_moe_routed_candidate_mode(self, mode: str) -> str:
+        """Select the default-off omlx #4113 candidate (unqualified)."""
+        if mode not in _routed.CANDIDATE_MODES:
+            raise ValueError(
+                f"unknown routed candidate mode {mode!r}; expected {_routed.CANDIDATE_MODES}"
+            )
+        if mode != "off" and (
+            self.shared_folded or not hasattr(self.switch_mlp, "routed_candidate_mode")
+        ):
+            raise ValueError("the routed candidate needs split gate/up tables and no folded shared row")
+        if mode != "off" and self.fused_expert_kernel_mode != "stock":
+            raise ValueError("the routed candidate needs the stock expert kernel")
+        self.switch_mlp.routed_candidate_mode = mode
         return mode
 
     def set_moe_router_mode(self, mode: str):
@@ -1438,6 +1554,24 @@ class Qwen3NextSparseMoeBlock(nn.Module):
                     pass  # counted by switch_mlp.routed_down_calls
                 else:
                     self.fused_expert_fallbacks += 1
+            elif (
+                getattr(self.switch_mlp, "routed_decode_mode", "off") == "two_launch"
+                and self.sharding_group is None
+                and inds.size == self.top_k
+            ):
+                # One token: the routed down + weighted sum needs the scores
+                # inside the switch module, or ``two_launch`` silently runs
+                # gate+up only.  ``variant="stock"`` keeps the fused-down
+                # kernel out; a declined admission runs the same ops as below.
+                y = self.switch_mlp(x, inds, scores=scores, variant="stock")
+            elif (
+                getattr(self.switch_mlp, "routed_candidate_mode", "off") != "off"
+                and self.sharding_group is None
+                and inds.size == self.top_k
+            ):
+                # One token: the candidate needs the scores inside the switch
+                # module; a decline runs the same ops as the stock branch.
+                y = self.switch_mlp(x, inds, scores=scores, variant="stock")
             elif (
                 self.moe_weighted_sum
                 and self.sharding_group is None

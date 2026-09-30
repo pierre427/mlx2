@@ -112,6 +112,8 @@ def test_routed_modes_match_the_composed_body(reference_kernels, mode, variant):
         if variant == "stock" or mode == "two_launch":
             assert mx.array_equal(got, want).item()
     assert sw.routed_decode_calls == 4
+    assert sw.routed_decode_down_calls == (4 if mode == "two_launch" else 0)
+    assert sw.routed_decode_degraded == 0
     assert sw.routed_decode_fallbacks == 0
     assert reference_kernels["gate_up"] == 4
     assert reference_kernels["down"] == (4 if mode == "two_launch" else 0)
@@ -129,6 +131,10 @@ def test_two_launch_without_scores_degrades_to_gate_up(reference_kernels):
     got = sw(x, inds)
     assert mx.array_equal(got, want).item()
     assert reference_kernels == {"gate_up": 1, "down": 0}
+    # Counted as a gate+up launch, and reported as a degraded two_launch.
+    assert sw.routed_decode_calls == 1
+    assert sw.routed_decode_down_calls == 0
+    assert sw.routed_decode_degraded == 1
 
 
 def test_multi_token_forwards_decline_quietly(reference_kernels):
@@ -138,6 +144,7 @@ def test_multi_token_forwards_decline_quietly(reference_kernels):
     inds, scores = _route(2, rows=3)
     sw(x, inds, scores=scores, variant="stock")
     assert sw.routed_decode_calls == 0 and sw.routed_decode_fallbacks == 0
+    assert sw.routed_decode_down_calls == 0 and sw.routed_decode_degraded == 0
     assert reference_kernels == {"gate_up": 0, "down": 0}
 
 
@@ -177,6 +184,65 @@ def test_block_setter_validates():
     assert block.switch_mlp.routed_decode_mode == "two_launch"
     with pytest.raises(ValueError):
         block.set_moe_routed_decode_mode("on")
+
+
+def _block(monkeypatch, bits=4):
+    """A Flash-Next-shaped MoE block whose expert tables admit routed decode."""
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(QN, "_MOE_FUSED_GATE_UP", True)
+    monkeypatch.setattr(QN, "_MOE_SHARED_IN_GATHER", False)
+    args = SimpleNamespace(
+        hidden_size=H, moe_intermediate_size=I, shared_expert_intermediate_size=I,
+        norm_topk_prob=True, num_experts=E, num_experts_per_tok=10,
+    )
+    mx.random.seed(21)
+    block = QN.Qwen3NextSparseMoeBlock(args)
+    switch = block.switch_mlp
+    switch.gate_up_proj.weight = mx.random.normal((E, 2 * I, H)) * 0.05
+    switch.down_proj.weight = mx.random.normal((E, H, I)) * 0.05
+    nn.quantize(switch, group_size=64, bits=bits)
+    block.set_dtype(mx.bfloat16)
+    block.eval()
+    return block
+
+
+def test_block_two_launch_under_the_stock_expert_kernel_runs_the_routed_down(
+    monkeypatch, reference_kernels
+):
+    """The stock expert branch called the switch without scores, so a selected
+    ``two_launch`` silently ran gate+up only while its call counter rose."""
+    block = _block(monkeypatch)
+    block.set_fused_expert_kernel_mode("stock")
+    x = _x(7)
+    want = block(x)
+    block.set_moe_routed_decode_mode("two_launch")
+    got = block(x)
+    switch = block.switch_mlp
+    assert reference_kernels == {"gate_up": 1, "down": 1}
+    assert switch.routed_decode_calls == switch.routed_decode_down_calls == 1
+    assert switch.routed_decode_degraded == switch.routed_decode_fallbacks == 0
+    assert got.dtype == want.dtype and mx.array_equal(got, want).item()
+    # A multi-token forward keeps the stock branch and counts nothing.
+    block(_x(8, rows=3))
+    assert switch.routed_decode_calls == 1
+    assert reference_kernels == {"gate_up": 1, "down": 1}
+
+
+def test_block_pass_through_is_bit_identical_when_admission_declines(monkeypatch):
+    """8-bit experts are refused; the scores handed to the switch then take
+    the stock ops, so the output equals the routed-off block bit for bit."""
+    monkeypatch.setattr(RD, "runtime_supported", lambda: True)
+    block = _block(monkeypatch, bits=8)
+    block.set_fused_expert_kernel_mode("stock")
+    x = _x(9)
+    want = block(x)
+    block.set_moe_routed_decode_mode("two_launch")
+    got = block(x)
+    switch = block.switch_mlp
+    assert mx.array_equal(got, want).item()
+    assert switch.routed_decode_fallbacks == 1 and "bits" in switch.routed_decode_last_fallback
+    assert switch.routed_decode_calls == switch.routed_decode_down_calls == 0
 
 
 def test_flash_next_policy_switch_defaults_to_the_fold_and_off_is_receipt_neutral():
