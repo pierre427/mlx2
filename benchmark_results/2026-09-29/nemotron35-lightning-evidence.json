@@ -1,4 +1,221 @@
 {
+  "feature_runs": [
+    {
+      "applicable": 9,
+      "features": {
+        "apc_junction_snapshots": {
+          "applicable": true,
+          "engaged": true,
+          "evidence": {},
+          "notes": "",
+          "okay": true
+        },
+        "apc_rolling_checkpoints": {
+          "applicable": true,
+          "engaged": false,
+          "evidence": {
+            "cancel_published": 0,
+            "planned": 15,
+            "published": 13,
+            "retired": 12,
+            "retry_cached_tokens": 10,
+            "retry_status": 200,
+            "rolling_hits": 0
+          },
+          "notes": "enabled but not observed engaged",
+          "okay": false
+        },
+        "block_persistence": {
+          "applicable": true,
+          "engaged": true,
+          "evidence": {},
+          "notes": "",
+          "okay": true
+        },
+        "cache_capsules": {
+          "applicable": true,
+          "engaged": true,
+          "evidence": {},
+          "notes": "",
+          "okay": true
+        },
+        "fly_verification": {
+          "applicable": true,
+          "engaged": false,
+          "evidence": {
+            "fly_disabled": [
+              false,
+              true,
+              true
+            ],
+            "fly_disabled_reason": null,
+            "relaxed_accepts": 0,
+            "verification": [
+              "fly",
+              "exact",
+              "exact"
+            ]
+          },
+          "notes": "enabled but not observed engaged",
+          "okay": false
+        },
+        "host_memory_signals": {
+          "applicable": true,
+          "engaged": true,
+          "evidence": {},
+          "notes": "",
+          "okay": true
+        },
+        "int8_prefill": {
+          "applicable": false,
+          "engaged": null,
+          "evidence": {},
+          "notes": "adapter declares no int8 prefill scope",
+          "okay": null
+        },
+        "memory_preemption": {
+          "applicable": true,
+          "engaged": true,
+          "evidence": {},
+          "notes": "",
+          "okay": true
+        },
+        "multi_lora": {
+          "applicable": false,
+          "engaged": null,
+          "evidence": {},
+          "notes": "no local LoRA adapter for this base (searched ~/mlx-models, mlx-uag, tests)",
+          "okay": null
+        },
+        "pld_rotating_replay": {
+          "applicable": false,
+          "engaged": null,
+          "evidence": {},
+          "notes": "no prompt-lookup route in the series matrix",
+          "okay": null
+        },
+        "self_mtp_copy_draft": {
+          "applicable": true,
+          "engaged": true,
+          "evidence": {},
+          "notes": "",
+          "okay": true
+        },
+        "spomin_live_compaction": {
+          "applicable": false,
+          "engaged": null,
+          "evidence": {},
+          "notes": "no standard-attention Spomin backend (hybrid state is declined by design)",
+          "okay": null
+        },
+        "srpt_prefill_scheduling": {
+          "applicable": true,
+          "engaged": true,
+          "evidence": {},
+          "notes": "",
+          "okay": true
+        },
+        "verify_bitexact": {
+          "applicable": false,
+          "engaged": null,
+          "evidence": {},
+          "notes": "installed mlx has no mx.metal.set_qmv_bitexact (startup fails closed)",
+          "okay": null
+        }
+      },
+      "host_caps": {
+        "cache_gib": 4,
+        "max_context": 32768,
+        "max_lanes": 4
+      },
+      "okay": 7,
+      "only_feature": null,
+      "receipt_sha256": "8329c2bbf741104395f12a939dc3b913ed7b18abaf0118c1550f4153426df74c",
+      "rolling_prefill_step": null,
+      "rolling_units": 140,
+      "source_head": "340f520982e065adaeae1e941e0b74ddd90dd077",
+      "status": "partial",
+      "swapout_pages": 0,
+      "tag": "features-core-lightning-final-20260929"
+    },
+    {
+      "applicable": 1,
+      "features": {
+        "fly_verification": {
+          "applicable": true,
+          "engaged": true,
+          "evidence": {
+            "fly_disabled": [
+              false,
+              true,
+              true
+            ],
+            "fly_disabled_reason": [
+              null,
+              "sampling_or_block_verifier",
+              "logits_processors"
+            ],
+            "relaxed_accepts": 0,
+            "verification": [
+              "fly",
+              "exact",
+              "exact"
+            ]
+          },
+          "notes": "",
+          "okay": true
+        }
+      },
+      "host_caps": {
+        "cache_gib": 4,
+        "max_context": 32768,
+        "max_lanes": 4
+      },
+      "okay": 1,
+      "only_feature": "fly_verification",
+      "receipt_sha256": "50a485f4a318a3cc9ba2d6982530d2801b68878672d624ec467c835d2a6550b0",
+      "rolling_prefill_step": null,
+      "rolling_units": 140,
+      "source_head": "340f520982e065adaeae1e941e0b74ddd90dd077",
+      "status": "pass",
+      "swapout_pages": 0,
+      "tag": "features-fly_verification-lightning-isolated-fly-20260929"
+    },
+    {
+      "applicable": 1,
+      "features": {
+        "apc_rolling_checkpoints": {
+          "applicable": true,
+          "engaged": true,
+          "evidence": {
+            "cancel_published": 0,
+            "planned": 34,
+            "published": 24,
+            "retired": 23,
+            "retry_cached_tokens": 1024,
+            "retry_status": 200,
+            "rolling_hits": 1
+          },
+          "notes": "",
+          "okay": true
+        }
+      },
+      "host_caps": {
+        "cache_gib": 4,
+        "max_context": 32768,
+        "max_lanes": 4
+      },
+      "okay": 1,
+      "only_feature": "apc_rolling_checkpoints",
+      "receipt_sha256": "b390d946ff5d317e51e37c212174f5a1a231522815325a1eabbdd0d1ad517bba",
+      "rolling_prefill_step": 64,
+      "rolling_units": 300,
+      "source_head": "340f520982e065adaeae1e941e0b74ddd90dd077",
+      "status": "pass",
+      "swapout_pages": 0,
+      "tag": "features-apc_rolling_checkpoints-lightning-isolated-rolling-u300-s64-20260929"
+    }
+  ],
   "host": "m5-max-128gb",
   "ladders": [
     {

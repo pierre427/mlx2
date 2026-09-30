@@ -757,14 +757,17 @@ def check_fly(http):
     relaxed = xc.delta(before, after, "scheduler", "fly_relaxed_accepts") or 0
     # Temperature sampling alone does not install a logits processor.  An
     # actual penalty processor is the exact-verification fallback control.
-    engaged = (verification == ["fly", "fly", "exact"]
+    # Sampled self-MTP uses residual acceptance, so FLy must yield to exact
+    # verification even without a logits processor.
+    engaged = (verification == ["fly", "exact", "exact"]
                and not mechanisms[0].get("fly_disabled")
-               and not mechanisms[1].get("fly_disabled")
-               and mechanisms[2].get("fly_disabled") == "logits_processors")
+               and mechanisms[1].get("fly_disabled_reason") == "sampling_or_block_verifier"
+               and mechanisms[2].get("fly_disabled_reason") == "logits_processors")
     ok = all(reply["status"] == 200 for reply in (greedy, sampled, processed)) and bool(xc.text_of(greedy))
     return {"engaged": engaged, "ok": ok, "evidence": {"verification": verification, "relaxed_accepts": relaxed,
             "receipt_relaxed_accepts": [int(m.get("relaxed_accepts") or 0) for m in mechanisms],
-            "fly_disabled": [m.get("fly_disabled") for m in mechanisms]}}
+            "fly_disabled": [m.get("fly_disabled") for m in mechanisms],
+            "fly_disabled_reason": [m.get("fly_disabled_reason") for m in mechanisms]}}
 
 
 PASSAGE = ("The lighthouse keeper climbed the spiral stairs at dusk, trimmed the wick, polished the great lens, "
@@ -883,7 +886,7 @@ CHECK_TEXT = {
                                 "bypasses|bypass_forced|one_slice_clamps move, short answers correct"),
     "memory_preemption": "warm, reference, solo prefill fault, concurrent peer+faulted victim; preemptions and replays move",
     "host_memory_signals": "/v1/status host_memory_available_bytes > 0 and a pressure level",
-    "fly_verification": "greedy and sampled 128-token chats; receipt verification == fly",
+    "fly_verification": "greedy FLy verification; sampled and penalty controls use exact verification",
     "self_mtp_copy_draft": "verbatim-repeat request; scheduler self_mtp_copy_rounds moves",
     "pld_rotating_replay": "long prompt that wraps the sliding window, repeat request; pld_rotating_replay_rounds moves",
     "spomin_live_compaction": ("prompt at 0.8x a capacity sized so removed segments have left the sliding window "

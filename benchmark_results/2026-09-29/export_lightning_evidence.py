@@ -162,6 +162,46 @@ def ladder(stem: str) -> dict | None:
     }
 
 
+def feature_run(stem: str) -> dict | None:
+    path = RUN / stem / "qualification.json"
+    if not path.is_file():
+        return None
+    receipt = read(path)
+    if receipt.get("status") == "running":
+        return None
+    details = (receipt.get("summary") or {}).get("detail") or {}
+    selected_evidence = {
+        "apc_rolling_checkpoints": ("planned", "published", "retired", "rolling_hits",
+                                    "cancel_published", "retry_cached_tokens", "retry_status"),
+        "fly_verification": ("verification", "fly_disabled", "fly_disabled_reason",
+                             "relaxed_accepts"),
+    }
+    return {
+        "tag": stem,
+        "source_head": receipt.get("source_head"),
+        "status": receipt.get("status"),
+        "only_feature": receipt.get("only_feature"),
+        "host_caps": receipt.get("host_caps"),
+        "rolling_units": receipt.get("rolling_units"),
+        "rolling_prefill_step": receipt.get("rolling_prefill_step"),
+        "applicable": (receipt.get("summary") or {}).get("applicable"),
+        "okay": sum(bool(row.get("applicable") and row.get("engaged") and row.get("ok"))
+                    for row in details.values()),
+        "swapout_pages": (receipt.get("swapouts") or {}).get("delta"),
+        "features": {
+            name: {
+                "applicable": row.get("applicable"),
+                "engaged": row.get("engaged"),
+                "okay": row.get("ok"),
+                "notes": row.get("notes"),
+                "evidence": {key: (row.get("evidence") or {}).get(key) for key in selected_evidence.get(name, ())},
+            }
+            for name, row in details.items()
+        },
+        "receipt_sha256": digest(path),
+    }
+
+
 def main() -> None:
     tags = (
         "lightning-ordinary-20260929",
@@ -192,6 +232,11 @@ def main() -> None:
             "ladder-1024-32768-r3-lightning-ordinary-post-clamp-cooled-20260929",
             "ladder-65536-262144-r3-w1-lightning-ordinary-post-clamp-long-20260929",
         ) if (row := ladder(stem)) is not None],
+        "feature_runs": [row for stem in (
+            "features-core-lightning-final-20260929",
+            "features-fly_verification-lightning-isolated-fly-20260929",
+            "features-apc_rolling_checkpoints-lightning-isolated-rolling-u300-s64-20260929",
+        ) if (row := feature_run(stem)) is not None],
     }
     OUTPUT.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
     print(OUTPUT)
