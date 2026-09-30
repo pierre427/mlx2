@@ -37,7 +37,17 @@ The unmeasured 262K warmup is excluded from the table; the first measured reques
 
 ### Feature qualification
 
-Feature qualification was not run on this model and host.
+On current private source `688ad376`, the first combined M5 run with a 4 GiB APC cache engaged seven of nine applicable feature checks. Junction snapshots published four times but had no junction hit; rolling checkpoints had no publication or retry hit. Host swapouts rose by 47,960 pages during ordinary feature work, so the entire attempt is **contaminated** and is not a qualification pass. The receipt SHA-256 is `500b944dc7b6eabd3c08c8c6182dc9c726a895e7cce8e531e3aac4a7afd160a1`.
+
+Three fresh-server runs on the same source used an 8 GiB APC cache and a 32K context cap, with zero swapouts throughout. The seven-feature combined run passed cache capsules, block persistence, SRPT prefill scheduling, memory preemption, host memory signals, Fly verification, and self-MTP copy draft. An isolated junction run published two snapshots and recorded three junction hits. An isolated rolling run used a 300-unit prefill and 64-token slices; its cancelled request's retry reused 1,024 tokens and recorded one rolling hit. All applicable feature checks therefore have passing engagement evidence **across these three clean runs**; there is no single 9/9 combined receipt. The original 4 GiB result remains a capacity and host-swap warning for that profile, not proof of a runtime defect or a clean pass.
+
+| Clean M5 feature receipt | Result | SHA-256 |
+|---|---|---|
+| Seven-feature combined, 8 GiB cache | 7/7 passed | `d9930573d6ac94b20cfc1b96a8bfe0588c132eb3fd6a52b826771cb3d6fbf653` |
+| APCv2 junction snapshots, isolated | passed | `34669be6d7c598a00af5ca9c247fc0a2beffc454f60e4bf3e754b2d99a58b850` |
+| APCv2 rolling recovery, isolated | passed | `060f754c470785c2808bc9cadaf51156750d0b0367e0698f1a3f6ed913170fda` |
+
+These checks qualify feature engagement under the recorded policies. They do not select those policies as defaults, show performance benefit, or prove production use. The existing MTP2 default route and its 20×20 result remain separate source-bound evidence.
 
 ## M3 Pro, 36 GB
 
@@ -45,4 +55,4 @@ Model artifact not staged on this host; no load or performance verdict.
 
 ## Interpretation
 
-The M5 32K four-stream cell missed warm APCv2 reuse; measured 262K was refused by memory admission after a successful unmeasured warmup.
+The M5 32K four-stream cell missed warm APCv2 reuse; measured 262K was refused by memory admission after a successful unmeasured warmup. Those long-context gates remain open. The new feature checks do not resolve them.
