@@ -145,3 +145,10 @@ Hermes controls and qualification. For the tensor-free control core, install
 
 See [architecture](docs/ARCHITECTURE.md), [results](docs/RESULTS.md),
 [API parity](docs/API-PARITY.md), and [provenance](docs/PROVENANCE.md).
+
+### Media LoRA direct adapters
+
+Qwen-Image-2.1, LTX-2.5 and MiniMax-Music3 have revision-bound LoRA artifacts,
+reversible backend integration and bounded training on pre-encoded flow examples.
+Actual tiny transformer contracts are CPU-validated; full media LoRA generation
+remains unqualified. See [media LoRA contracts and limitations](docs/MEDIA-LORA.md).
