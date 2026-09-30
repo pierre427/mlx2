@@ -7,7 +7,10 @@ CPU tests use NumPy. Returned values own no device arrays or cache references.
 import math
 
 
-MAX_TOP_LOGPROBS = 11
+# The OpenAI contract admits 0..20 alternatives per position.  The early cap of
+# 11 rejected valid requests (eval harnesses send 20) and saved nothing: one
+# argpartition over the vocabulary serves any count.
+MAX_TOP_LOGPROBS = 20
 
 
 def wants_logprobs(request):

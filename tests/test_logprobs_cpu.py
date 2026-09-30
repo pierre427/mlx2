@@ -104,10 +104,10 @@ def test_actual_mtp_output_construction_uses_target_rows_for_accept_and_replacem
 
 
 @pytest.mark.parametrize("extra", [
-    {"logprobs": "yes"}, {"logprobs": -1}, {"logprobs": 12},
+    {"logprobs": "yes"}, {"logprobs": -1}, {"logprobs": MAX_TOP_LOGPROBS + 1},
     {"logprobs": 1.5}, {"logprobs": 2, "top_logprobs": 3},
     {"top_logprobs": True},
-    {"top_logprobs": -1}, {"top_logprobs": 12}, {"top_logprobs": 1.5},
+    {"top_logprobs": -1}, {"top_logprobs": MAX_TOP_LOGPROBS + 1}, {"top_logprobs": 1.5},
     {"response_format": {"type": "text", "grammar": "x"}},
     {"response_format": {"type": "json_schema"}}, {"grammar": "("},
     {"tools": [{"type": "function", "function": {"name": "x", "strict": True}}]},
@@ -136,3 +136,19 @@ def test_legacy_completions_integer_logprobs_maps_to_bounded_top_n(count):
     with pytest.raises(ValueError, match="logprobs must be boolean"):
         validate_request({"messages": [{"role": "user", "content": "hi"}],
                           "logprobs": count}, chat=True)
+
+
+def test_top_logprobs_admits_the_openai_range():
+    body = {"model": "m", "messages": [{"role": "user", "content": "hi"}], "logprobs": True}
+    validate_request({**body, "top_logprobs": 20}, chat=True)
+    with pytest.raises(ValueError, match="top_logprobs"):
+        validate_request({**body, "top_logprobs": 21}, chat=True)
+
+
+def test_classifier_label_bound_is_independent_of_the_logprob_cap():
+    from mlx2.server import MAX_CLASSIFIER_LABELS, score_choice_tokens_via_engine
+
+    assert MAX_CLASSIFIER_LABELS < MAX_TOP_LOGPROBS
+    labels = {f"label-{i}": i for i in range(MAX_CLASSIFIER_LABELS + 1)}
+    with pytest.raises(ValueError, match="classifier requires"):
+        score_choice_tokens_via_engine(None, "prompt", labels, tenant_id="t")

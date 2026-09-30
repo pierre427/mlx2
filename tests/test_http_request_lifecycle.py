@@ -18,11 +18,13 @@ from mlx2.server import handler_for
 
 
 @contextmanager
-def _server(engine=None, *, deadline=None, **kwargs):
+def _server(engine=None, *, deadline=None, header_deadline=None, **kwargs):
     engine = engine or AdminEngine()
     handler = handler_for(engine, **kwargs)
     if deadline is not None:
         handler.REQUEST_BODY_DEADLINE_SECONDS = deadline
+    if header_deadline is not None:
+        handler.REQUEST_HEADER_DEADLINE_SECONDS = header_deadline
     server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -107,6 +109,63 @@ def test_body_deadline_expires_while_bytes_keep_arriving():
         finally:
             stopped.set()
             sender.join()
+
+
+def test_header_deadline_expires_while_bytes_keep_arriving():
+    with (
+        _server(header_deadline=0.3) as (_, port),
+        socket.create_connection(("127.0.0.1", port), timeout=3) as client,
+    ):
+        client.sendall(b"POST /v1/chat/completions HTTP/1.1\r\nHost: localhost\r\nX-Slow: ")
+        stopped = threading.Event()
+
+        def trickle():
+            for _ in range(40):
+                try:
+                    client.sendall(b"a")
+                except OSError:
+                    return
+                if stopped.wait(0.04):
+                    return
+
+        sender = threading.Thread(target=trickle)
+        started = time.monotonic()
+        sender.start()
+        try:
+            response = client.recv(4096)
+            elapsed = time.monotonic() - started
+            assert b" 408 " in response.split(b"\r\n", 1)[0]
+            assert elapsed < 1.0
+        finally:
+            stopped.set()
+            sender.join()
+
+
+def test_header_reader_zero_limit_never_touches_the_socket():
+    from mlx2.server import _HeaderPhaseReader
+
+    class Explode:
+        def peek(self, n):
+            raise AssertionError("socket read on a zero-limit readline")
+
+    class Conn:
+        def settimeout(self, value):
+            raise AssertionError("timeout set on a zero-limit readline")
+
+    reader = _HeaderPhaseReader(Explode(), Conn(), 30, lambda: 30)
+    assert reader.readline(0) == b""
+
+
+def test_idle_keepalive_time_is_not_charged_to_the_header_deadline():
+    with (
+        _server(header_deadline=0.3) as (_, port),
+        socket.create_connection(("127.0.0.1", port), timeout=3) as client,
+    ):
+        time.sleep(0.5)  # longer than the header deadline, before any byte
+        client.sendall(b"GET /health HTTP/1.1\r\nHost: localhost\r\n\r\n")
+        response = client.recv(4096)
+        assert response.startswith(b"HTTP/1.1 ")
+        assert b" 408 " not in response.split(b"\r\n", 1)[0]
 
 
 def test_expect_continue_keeps_connection_open_until_body_arrives():

@@ -2591,7 +2591,35 @@ class ServingEngine:
         if row_exact is not None:
             job.row_exact_verify_start = row_exact.snapshot()
         job.structured_automata = self._prepare_structured_automata(job.request)
+        job.admission_tokens = self._prerender_prompt(job.request)
         return job
+
+    def _prerender_prompt(self, request):
+        """Render ``request`` to prompt tokens on the submitting thread.
+
+        Admission rendered every fresh prompt on the generation worker under
+        ``prompt_lock`` (``HostPromptCache`` is only ever filled there), so
+        each newly admitted request stalled every decoding lane for its
+        template render and tokenization: ~0.7 ms per 1k prompt tokens, 25 ms
+        at 32k.  The same reasoning moved grammar compilation off the worker
+        (``_prepare_structured_automata``).  A failure is left for admission
+        to raise with the error and status it maps; the worker path stays as
+        the fallback for replays and re-admissions.
+        """
+        cache = getattr(self, "host_prompt_cache", None)
+        adapter = getattr(self, "adapter", None)
+        lock = getattr(self, "prompt_lock", None)
+        if cache is None or adapter is None or lock is None:
+            return None  # a partially built engine: admission renders
+        tokens = cache.get(request)
+        if tokens is None:
+            try:
+                with lock:
+                    tokens = render_prompt_tokens(adapter, request)
+            except Exception:
+                return None
+            cache.put(request, tokens)
+        return tokens
 
     def _prepare_structured_automata(self, request):
         """Compile the automaton of ``request``'s grammar before it is published.
@@ -3337,16 +3365,6 @@ class ServingEngine:
     def supports_multimodal(self):
         return callable(
             getattr(getattr(self, "adapter", None), "prepare_multimodal_request", None)
-        )
-
-    def supports_output_audio(self):
-        from .contracts import Capability
-
-        return (
-            Capability.OUTPUT_AUDIO in self.route_capabilities
-            and callable(
-                getattr(getattr(self, "adapter", None), "synthesize_speech", None)
-            )
         )
 
     def synthesize_speech(

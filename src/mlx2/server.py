@@ -45,6 +45,9 @@ from .cache_sizing import (  # noqa: F401 - re-exported for callers and tests
     physical_memory_bytes,
 )
 from .logprobs import MAX_TOP_LOGPROBS, wants_logprobs
+
+# Labeled-choice classifier bound; independent of the logprob serialization cap.
+MAX_CLASSIFIER_LABELS = 11
 from .request_limits import (
     DEFAULT_OUTPUT_TOKENS,
     MAX_OUTPUT_TOKENS,
@@ -562,7 +565,7 @@ def validate_request(
             or not 0 <= legacy_count <= MAX_TOP_LOGPROBS
         ):
             raise ValueError(
-                "logprobs must be boolean or a completions integer from 0 to 11"
+                f"logprobs must be boolean or a completions integer from 0 to {MAX_TOP_LOGPROBS}"
             )
         if "top_logprobs" in body and body["top_logprobs"] != legacy_count:
             raise ValueError("logprobs and top_logprobs disagree")
@@ -571,7 +574,7 @@ def validate_request(
         raise ValueError("verify_bitexact must be boolean")
     top_logprobs = body.get("top_logprobs", 0)
     if isinstance(top_logprobs, bool) or not isinstance(top_logprobs, int) or not 0 <= top_logprobs <= MAX_TOP_LOGPROBS:
-        raise ValueError("top_logprobs must be an integer from 0 to 11")
+        raise ValueError(f"top_logprobs must be an integer from 0 to {MAX_TOP_LOGPROBS}")
     if "tools" in body:
         tools = body["tools"]
         if not chat or not isinstance(tools, list) or not 1 <= len(tools) <= max_tools:
@@ -1286,8 +1289,8 @@ def collect_nonstream_job(job, body, *, chat, responses=False):
 
 def score_choice_tokens_via_engine(engine, prompt, token_ids, *, tenant_id):
     """Score a bounded choice set through the ordinary serving lifecycle."""
-    if not isinstance(token_ids, dict) or not 2 <= len(token_ids) <= MAX_TOP_LOGPROBS:
-        raise ValueError("classifier requires 2..11 labeled token ids")
+    if not isinstance(token_ids, dict) or not 2 <= len(token_ids) <= MAX_CLASSIFIER_LABELS:
+        raise ValueError(f"classifier requires 2..{MAX_CLASSIFIER_LABELS} labeled token ids")
     request = {
         "prompt": prompt,
         "max_tokens": 1,
@@ -1388,6 +1391,69 @@ def tenant_batching_status(engine, tenant_id):
     if isinstance(fairness, dict) and "tenant_token_rates" in fairness:
         status["fairness"] = {**fairness, "tenant_token_rates": {}}
     return status
+
+
+class _HeaderPhaseReader:
+    """``rfile`` wrapper that bounds the whole request-line and header phase.
+
+    ``BufferedReader.readline`` restarts the socket timeout after every
+    received byte, so a client trickling one header byte per timeout holds a
+    handler thread (and one of the connection slots) indefinitely.  ``peek``
+    performs at most one raw receive, which lets an absolute deadline be
+    checked between receives.  The deadline starts at the first byte of a
+    request so idle keep-alive time is not charged to it.
+    """
+
+    def __init__(self, rfile, connection, idle_timeout, deadline_seconds):
+        self._rfile = rfile
+        self._connection = connection
+        self._idle_timeout = idle_timeout
+        self._deadline_seconds = deadline_seconds
+        self.deadline = None
+        self.expired = False
+
+    def begin_request(self):
+        self.deadline = None
+        self.expired = False
+
+    def readline(self, limit=-1):
+        if limit is not None and limit == 0:
+            return b""
+        chunks = []
+        size = 0
+        while True:
+            if self.deadline is None:
+                self._connection.settimeout(self._idle_timeout)
+            else:
+                budget = self.deadline - time.monotonic()
+                if budget <= 0:
+                    self.expired = True
+                    raise TimeoutError("request headers were not received in time")
+                self._connection.settimeout(min(self._idle_timeout, budget))
+            try:
+                buffered = self._rfile.peek(1)
+            except TimeoutError:
+                if self.deadline is not None:
+                    self.expired = True
+                raise
+            if not buffered:
+                break
+            if self.deadline is None:
+                self.deadline = time.monotonic() + float(self._deadline_seconds())
+            end = buffered.find(b"\n")
+            take = len(buffered) if end < 0 else end + 1
+            if limit is not None and limit >= 0:
+                take = min(take, limit - size)
+            # Served from the buffer ``peek`` filled: no further receive.
+            chunk = self._rfile.read(take)
+            chunks.append(chunk)
+            size += len(chunk)
+            if chunk.endswith(b"\n") or (limit is not None and 0 <= limit <= size):
+                break
+        return b"".join(chunks)
+
+    def __getattr__(self, name):
+        return getattr(self._rfile, name)
 
 
 def handler_for(
@@ -1702,10 +1768,19 @@ def handler_for(
         # thread and, at 32 of them, the whole connection semaphore.  Bound
         # the entire body read instead.
         REQUEST_BODY_DEADLINE_SECONDS = 30.0
+        # The request line and headers get the same absolute bound; the
+        # per-receive timeout alone let a header trickle hold a slot forever.
+        REQUEST_HEADER_DEADLINE_SECONDS = 30.0
 
         def setup(self):
             super().setup()
             self.connection.settimeout(30)
+            self.rfile = _HeaderPhaseReader(
+                self.rfile,
+                self.connection,
+                30,
+                lambda: self.REQUEST_HEADER_DEADLINE_SECONDS,
+            )
             self._http_started_at = None
             self._http_recorded = False
             self._request_trace = None
@@ -1715,6 +1790,29 @@ def handler_for(
             self._connection_header_sent = False
             self._interim_response = False
             self._request_body_remaining = 0
+
+        def handle_one_request(self):
+            self.rfile.begin_request()
+            super().handle_one_request()
+            if self.rfile.expired:
+                # The stdlib swallowed the timeout; tell the client why the
+                # connection is going away.
+                for attr, value in (
+                    ("requestline", ""),
+                    ("command", None),
+                    ("request_version", self.protocol_version),
+                ):
+                    if not hasattr(self, attr):
+                        setattr(self, attr, value)
+                self.close_connection = True
+                try:
+                    self.api_error(
+                        408,
+                        "request headers were not received in time",
+                        headers={"Connection": "close"},
+                    )
+                except OSError:
+                    pass
 
         def parse_request(self):
             # BaseHTTPRequestHandler reuses this instance for every request on
@@ -1746,6 +1844,9 @@ def handler_for(
                     headers={"Connection": "close"},
                 )
                 return False
+            # The header phase may have left a short remaining budget on the
+            # socket; body reads set their own.
+            self.connection.settimeout(30)
             return True
 
         def send_header(self, keyword, value):
