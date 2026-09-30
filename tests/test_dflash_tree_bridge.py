@@ -29,7 +29,11 @@ ALL_GATES = [name for name, _ in _TREE_GATES.values()]
 
 @pytest.fixture(autouse=True)
 def _clean_gates(monkeypatch):
-    for name in ALL_GATES + ["MLX2_DFLASH_TOPOLOGY", "MLX2_EXTERNAL_ROUND_TIMING"]:
+    for name in ALL_GATES + [
+        "MLX2_DFLASH_TOPOLOGY",
+        "MLX2_EXTERNAL_ROUND_TIMING",
+        "MLX2_TENSORFOLD_COHORT_LIMIT",
+    ]:
         monkeypatch.delenv(name, raising=False)
 
 
@@ -129,6 +133,34 @@ def test_gates_fail_closed(monkeypatch, env, message):
     m, d = tiny()
     with pytest.raises(ValueError, match=message):
         generator(m, d)
+
+
+@pytest.mark.parametrize("value", ["0", "5", "yes", "01"])
+def test_tensorfold_cohort_limit_is_bounded_and_strict(monkeypatch, value):
+    monkeypatch.setenv("MLX2_QWEN_TARGET_EXECUTION", "tensorfold")
+    monkeypatch.setenv("MLX2_TENSORFOLD_SOURCE", "/unused")
+    monkeypatch.setenv("MLX2_TENSORFOLD_COHORT_LIMIT", value)
+    model, draft = tiny()
+    with pytest.raises(ValueError, match="must be one of"):
+        generator(model, draft)
+
+
+def test_tensorfold_cohort_limit_defaults_singleton_and_is_target_only(monkeypatch):
+    model, draft = tiny()
+    monkeypatch.setenv("MLX2_QWEN_TARGET_EXECUTION", "tensorfold")
+    monkeypatch.setenv("MLX2_TENSORFOLD_SOURCE", "/unused")
+    singleton = generator(model, draft, completion_batch_size=8)
+    assert singleton.tensorfold_cohort_limit == 1
+    assert singleton.scheduler_stats["external_tensorfold_cohort_limit"] == 1
+
+    monkeypatch.setenv("MLX2_TENSORFOLD_COHORT_LIMIT", "4")
+    cohort = generator(model, draft, completion_batch_size=8)
+    assert cohort.tensorfold_cohort_limit == 4
+    assert cohort.scheduler_stats["external_tensorfold_cohort_limit"] == 4
+
+    monkeypatch.setenv("MLX2_QWEN_TARGET_EXECUTION", "reference")
+    with pytest.raises(ValueError, match="requires MLX2_QWEN_TARGET_EXECUTION=tensorfold"):
+        generator(model, draft)
 
 
 # -- task 1: executor cache ---------------------------------------------------
@@ -349,6 +381,7 @@ def test_tensorfold_tree_cohort_matches_single_lane_reference(monkeypatch):
 
     monkeypatch.setenv("MLX2_QWEN_TARGET_EXECUTION", "tensorfold")
     monkeypatch.setenv("MLX2_TENSORFOLD_SOURCE", "/unused-by-cpu-oracle")
+    monkeypatch.setenv("MLX2_TENSORFOLD_COHORT_LIMIT", "4")
     candidate = generator(model, draft, ready_drain="all")
     candidate.insert(
         prompts,
@@ -381,6 +414,7 @@ def test_tensorfold_cohort_partial_commit_restores_every_lane(monkeypatch):
     _tree_env(monkeypatch)
     monkeypatch.setenv("MLX2_QWEN_TARGET_EXECUTION", "tensorfold")
     monkeypatch.setenv("MLX2_TENSORFOLD_SOURCE", "/unused-by-cpu-oracle")
+    monkeypatch.setenv("MLX2_TENSORFOLD_COHORT_LIMIT", "4")
     model, draft = tiny(vocab=64, top_k=16, block_size=8)
     batch = generator(model, draft, ready_drain="all")
     batch.insert(

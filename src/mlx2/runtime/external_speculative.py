@@ -94,6 +94,23 @@ def _tree_gates(topology, target_execution):
     return gates
 
 
+def _tensorfold_cohort_limit(target_execution, capacity):
+    """Return the explicit bounded TensorFold cohort limit (singleton default)."""
+
+    from .qwen38_tensorfold import MAX_COHORT_LANES
+
+    name = "MLX2_TENSORFOLD_COHORT_LIMIT"
+    raw = os.environ.get(name)
+    if raw is None:
+        return 1
+    if target_execution != "tensorfold":
+        raise ValueError(f"{name} requires MLX2_QWEN_TARGET_EXECUTION=tensorfold")
+    allowed = {str(value) for value in range(1, MAX_COHORT_LANES + 1)}
+    if raw not in allowed:
+        raise ValueError(f"{name} must be one of {', '.join(sorted(allowed))}")
+    return min(int(capacity), int(raw))
+
+
 # Laws with at most this many top-k survivors are read back sparsely.
 _SPARSE_LAW_LIMIT = 256
 
@@ -388,9 +405,9 @@ class ExternalDraftBatchGenerator:
                 external_tree_accepted_edges=0,
             )
         if self.target_execution == "tensorfold":
-            from .qwen38_tensorfold import MAX_COHORT_LANES
-
-            self.tensorfold_cohort_limit = min(self.capacity, MAX_COHORT_LANES)
+            self.tensorfold_cohort_limit = _tensorfold_cohort_limit(
+                self.target_execution, self.capacity
+            )
             self.scheduler_stats.update(
                 external_tensorfold_target_rounds=0,
                 external_tensorfold_cohort_rounds=0,
@@ -399,7 +416,9 @@ class ExternalDraftBatchGenerator:
                 external_tensorfold_cohort_limit=self.tensorfold_cohort_limit,
             )
         else:
-            self.tensorfold_cohort_limit = 1
+            self.tensorfold_cohort_limit = _tensorfold_cohort_limit(
+                self.target_execution, self.capacity
+            )
         for gate, counters in _TREE_GATE_COUNTERS.items():
             if self.tree_gates[gate]:
                 self.scheduler_stats.update(dict.fromkeys(counters, 0))
