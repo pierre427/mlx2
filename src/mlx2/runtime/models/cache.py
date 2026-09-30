@@ -793,6 +793,19 @@ def create_attention_mask(
         return "causal"
 
 
+
+def decode_mask_mode() -> str:
+    """Mask ``BatchKVCache`` hands SDPA for single-token decode.
+
+    ``array`` (default): a ``(B, 1, 1, offset + 1)`` boolean mask built every
+    step.  ``none``: no mask when no row is left-padded (the same proof the
+    N > 1 ``"causal"`` path uses), so SDPA takes its no-mask decode path.
+    MLX2_DECODE_MASK selects; read per call so a running process can switch.
+    """
+    mode = os.environ.get("MLX2_DECODE_MASK", "array").strip().lower()
+    return "none" if mode == "none" else "array"
+
+
 class _BaseCache:
     def __init_subclass__(cls, **kwargs):
         super().__init_subclass__(**kwargs)
@@ -4099,14 +4112,20 @@ class BatchKVCache(_BaseCache):
         # kernel, which skips fully masked blocks; the array mask kept the
         # Qwen3.5-9B ordinary route off it (2026-09-24). Decode (N == 1),
         # windows and explicit array requests are unchanged.
-        if (
-            N > 1
-            and not return_array
+        unpadded = (
+            not return_array
             and kwargs.get("window_size") is None
             and getattr(self, "_unpadded_ref", None) is not None
             and self._unpadded_ref is self.left_padding
-        ):
+        )
+        if N > 1 and unpadded:
             return "causal"
+        if N == 1 and unpadded and decode_mask_mode() == "none":
+            # Every row attends to exactly the ``[:_idx]`` keys fetched, so
+            # the (B, 1, 1, _idx + 1) all-true mask only selects SDPA's
+            # array-mask path; ``create_attention_mask`` already returns
+            # ``None`` for single-token decode on the plain cache.
+            return None
         return create_causal_mask(
             N, offset=self._idx, left_padding=self.left_padding, **kwargs
         )
