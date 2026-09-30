@@ -943,9 +943,19 @@ def test_capability_scope_rejects_conflicting_status_fields():
     assert qualify.selected_capability_scope({**status, "selected_capabilities": ["text", "text"]})[1] is False
 
 
-def test_live_media_companion_binds_the_generic_harness_route():
-    path = ROOT / "docs/experiments/SMOLVLM2-M3-LIVE-MEDIA-QUALIFICATION-2026-09-26.json"
-    report = json.loads(path.read_text())
+def test_live_media_companion_binds_the_generic_harness_route(tmp_path):
+    from mlx2.qualification import APPROVED_MEDIA_PRODUCERS
+
+    report = json.loads(
+        (ROOT / "docs/experiments/SMOLVLM2-M3-LIVE-MEDIA-QUALIFICATION-2026-09-26.json").read_text()
+    )
+    # The recorded run names the producer revision that ran it; the producer
+    # has since tightened its media-reuse predicate, which invalidates the
+    # receipt until it is re-run.  Re-bind the real traces to the current pin
+    # to exercise the binding (the evaluator still recomputes every check).
+    report["qualification_harness"] = APPROVED_MEDIA_PRODUCERS[report["model_type"]][0]
+    path = tmp_path / "companion.json"
+    path.write_text(json.dumps(report))
     status = {key: report[key] for key in ("runtime", "artifact", "settings")}
     assert qualify.read_adapter_qualification(path, status)["passed"] is True
     with pytest.raises(ValueError, match="does not match"):

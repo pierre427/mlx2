@@ -1091,3 +1091,33 @@ def test_selectable_feature_observations_need_the_mechanism_to_engage(
     # A selected policy (or any counter short of engagement) is not evidence.
     assert feature_observations(idle)[feature] == 0
     assert feature_observations({})[feature] == 0
+
+def test_a_recorded_failed_check_refuses_the_route(tmp_path):
+    """The loader re-checked only the required and feature gates and trusted
+    the top-level flag for the rest (capability scope, quiescence, APCv2
+    reuse/stores, context bound, MTP aggregates)."""
+    record = {
+        "passed": True, "runtime": {"source": "abc"}, "artifact": "weights",
+        "settings": {"mtp": True, "max_context": 16384, "default_max_tokens": 65_536},
+        "qualification_harness": APPROVED_QUALIFICATION_HARNESS,
+        "checks": {c: {"passed": True}
+                   for c in REQUIRED_CHECKS | {"mtp_execution", "structured_output"}},
+    }
+    args = dict(runtime=record["runtime"], artifact="weights", settings=record["settings"],
+                descriptor=QWEN4_FLASH_NEXT, name="failed-gate")
+    path = tmp_path / "receipt.json"
+    path.write_text(json.dumps(record))
+    assert load_qualified_route(path, **args)
+    record["checks"]["quiescence"] = {"passed": False}
+    path.write_text(json.dumps(record))
+    with pytest.raises(ValueError, match="failed checks: quiescence"):
+        load_qualified_route(path, **args)
+
+
+def test_the_serving_producer_gates_without_assert():
+    """Under python -O a bare assert is skipped: a failed check was recorded,
+    the run went on, and the producer wrote passed: true and exited 0."""
+    import ast
+
+    source = (Path(__file__).resolve().parents[1] / "scripts" / "qualify_serving.py").read_text()
+    assert not [node for node in ast.walk(ast.parse(source)) if isinstance(node, ast.Assert)]

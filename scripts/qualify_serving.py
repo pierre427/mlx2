@@ -1562,7 +1562,10 @@ def main():
         return response["choices"][0]["message"]["content"].strip()
 
     initial = get("/v1/status")
-    assert initial["healthy"] and initial["inflight"] == 0
+    # Explicit raises, not assert: under python -O an assert is skipped, a
+    # failed check was recorded and the run went on to write passed: true.
+    if not (initial["healthy"] and initial["inflight"] == 0):
+        raise AssertionError("server must start healthy and idle")
     selected_capabilities, scope_valid = selected_capability_scope(initial)
     adaptive_benchmark = validate_adaptive_benchmark(
         args.adaptive_benchmark, initial
@@ -1612,7 +1615,8 @@ def main():
     def check(name, condition, evidence):
         report["checks"][name] = {"passed": bool(condition), "evidence": evidence}
         print(f"{name}: {'PASS' if condition else 'FAIL'}", flush=True)
-        assert condition, name
+        if not condition:
+            raise AssertionError(name)
 
     from mlx2.qualification import required_feature_checks
 

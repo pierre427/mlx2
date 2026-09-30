@@ -56,7 +56,7 @@ def required_generic_checks(descriptor):
 APPROVED_QUALIFICATION_HARNESS = {
     "schema": "mlx2.qualification-harness.v1",
     "name": "scripts/qualify_serving.py",
-    "sha256": "7dcdb6507b429c47da009ed92768f7485ebedcfebf6a4d62103ab57ca3c787dd",
+    "sha256": "a15d63311009b7eaf421568d11d0ba6afd23e64964a602669ae12faaf6b8eb40",
 }
 
 # The approved generic producer has no live adapter-owned media probes. A
@@ -372,6 +372,17 @@ def load_qualified_route(
         checks.get(c, {}).get("passed") is not True for c in required
     ):
         raise ValueError("qualification checks are missing or failed")
+    # Every recorded gate, not only the required and feature ones: the loader
+    # trusted the top-level flag for capability scope, quiescence, APCv2
+    # reuse and stores, context bound and the MTP aggregates, so a receipt
+    # written with any of them failed (python -O skips the producer's
+    # asserts) still selected the route.
+    failed = sorted(
+        name for name, value in checks.items()
+        if not (isinstance(value, dict) and value.get("passed") is True)
+    )
+    if failed:
+        raise ValueError("qualification records failed checks: " + ", ".join(failed))
     missing_features = sorted(
         name
         for name in required_feature_checks(settings)
