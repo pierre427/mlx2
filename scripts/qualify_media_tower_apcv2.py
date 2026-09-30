@@ -108,6 +108,59 @@ def check_row(row, *, cold=False):
         raise AssertionError(f"cold request unexpectedly reused APCv2: {row}")
 
 
+def executed_source_root(root=ROOT):
+    """The ``mlx2`` package that will run, refusing one outside ``root/src``.
+
+    The report hashes files under ``root/src``; importing ``mlx2`` from
+    anywhere else would record hashes of source that never ran.
+    """
+    import mlx2
+
+    package = Path(mlx2.__file__).resolve().parent
+    expected = (Path(root) / "src" / "mlx2").resolve()
+    if package != expected:
+        raise AssertionError(f"executing mlx2 from {package}, not {expected}")
+    return package
+
+
+def _feature_misses(engine, kind):
+    diagnostics = engine.adapter.diagnostics() if hasattr(engine.adapter, "diagnostics") else {}
+    counters = (diagnostics.get("qwen25_vision_feature_reuse") if kind == "qwen"
+                else diagnostics.get("vision_feature_reuse"))
+    return None if not isinstance(counters, dict) else counters.get("misses")
+
+
+def media_span(adapter, request):
+    """(first media position, media end, prompt tokens) of ``request``'s prompt."""
+    prepared = adapter.prepare_multimodal_request(request)
+    ids = [int(token) for token in prepared["_mlx2_prompt_tokens"]]
+    config = adapter.identity["config"]
+    media_ids = {int(config[key]) for key in ("image_token_id", "video_token_id")
+                 if config.get(key) is not None}
+    positions = [index for index, token in enumerate(ids) if token in media_ids]
+    if not positions:
+        raise AssertionError("prepared prompt has no media placeholders")
+    return positions[0], int(prepared["_mlx2_media_token_end"]), len(ids)
+
+
+def check_media_reuse(changed_tail, changed_lead, changed_pixels, spans):
+    """Changed media or leading text may reuse only the prefix before the media.
+
+    ``spans`` maps each arm to ``media_span``.  The previous gate only checked
+    that a request reporting zero reuse was cold, so a cache keyed on tokens
+    alone (reusing 99 of 100 tokens across different pixels) passed.
+    """
+    start, _end, _prompt = spans["changed_pixels"]
+    if changed_pixels["cached_tokens"] > start:
+        raise AssertionError(f"changed pixels reused media KV: {changed_pixels}")
+    start, _end, _prompt = spans["changed_lead"]
+    if changed_lead["cached_tokens"] > start:
+        raise AssertionError(f"changed leading text reused media KV: {changed_lead}")
+    _start, end, _prompt = spans["changed_tail"]
+    if not end <= changed_tail["cached_tokens"] < changed_tail["prompt_tokens"]:
+        raise AssertionError(f"changed tail did not branch after the media: {changed_tail}")
+
+
 def main(kind, media_kind, mode, report):
     if (kind not in MODELS or media_kind not in ("image", "video")
             or mode not in ("source", "candidate")):
@@ -136,6 +189,7 @@ def main(kind, media_kind, mode, report):
             os.environ["MLX2_QWEN25_VISION_TOWER_REUSE_CANDIDATE"] = "1"
 
     import mlx.core as mx
+    executed_source_root()
     from mlx2.serving import ServingEngine
 
     mx.set_default_device(mx.gpu)
@@ -168,7 +222,9 @@ def main(kind, media_kind, mode, report):
         prefix_branch = collect(engine.submit(changed_lead))
         report["changed_lead_branch"] = prefix_branch
         report["stage"] = "changed_pixels"
+        misses_before = _feature_misses(engine, kind)
         changed_media = collect(engine.submit(changed_pixels))
+        misses_after = _feature_misses(engine, kind)
         report["changed_pixels"] = changed_media
         report["stage"] = "return_original"
         returned = collect(engine.submit(base))
@@ -200,6 +256,12 @@ def main(kind, media_kind, mode, report):
                     raise AssertionError(f"warm {key} differs from cold request")
         check_row(branch, cold=branch["cached_tokens"] == 0)
         check_row(prefix_branch, cold=prefix_branch["cached_tokens"] == 0)
+        check_row(changed_media, cold=changed_media["cached_tokens"] == 0)
+        spans = {name: media_span(engine.adapter, request) for name, request in (
+            ("changed_tail", changed), ("changed_lead", changed_lead),
+            ("changed_pixels", changed_pixels))}
+        report["media_spans"] = spans
+        check_media_reuse(branch, prefix_branch, changed_media, spans)
         if after.get("hits", 0) - before.get("hits", 0) < 3:
             raise AssertionError("three repeated/returned warm APCv2 hits missing")
         if mode == "candidate":
@@ -211,6 +273,8 @@ def main(kind, media_kind, mode, report):
             if (counters is None or counters["misses"] < 1
                     or counters["stores"] < 1 or counters["hits"] < 1):
                 raise AssertionError(f"tower feature candidate did not engage: {counters}")
+            if misses_after is None or misses_before is None or misses_after <= misses_before:
+                raise AssertionError("changed pixels did not miss the tower feature cache")
         report["ok"] = True
     finally:
         engine.close()

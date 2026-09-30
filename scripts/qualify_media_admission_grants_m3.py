@@ -58,6 +58,12 @@ def collect(job):
 
 def run(report):
     import mlx.core as mx
+    import mlx2
+
+    # The receipt hashes files under ROOT/src; refuse to run any other mlx2.
+    package = Path(mlx2.__file__).resolve().parent
+    if package != (ROOT / "src" / "mlx2").resolve():
+        raise AssertionError(f"executing mlx2 from {package}, not {ROOT / 'src' / 'mlx2'}")
     from mlx2 import memory, serving
 
     mx.set_default_device(mx.gpu)
