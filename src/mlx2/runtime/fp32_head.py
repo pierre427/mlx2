@@ -45,6 +45,12 @@ def enable_fp32_head_logits(language_model) -> dict:
         raise ValueError("fp32_head_logits requires a quantized lm_head")
     if "bias" in head:
         raise ValueError("fp32_head_logits supports a bias-free lm_head only")
+    if getattr(head, "mode", "affine") != "affine" or not mx.issubdtype(
+        head["scales"].dtype, mx.floating
+    ):
+        # mxfp4/mxfp8/nvfp4 scales are uint8 exponent codes, not multipliers:
+        # casting them broke every later forward of the head.
+        raise ValueError("fp32_head_logits supports an affine-quantized lm_head only")
     before = int(head["scales"].nbytes) + int(
         0 if head.get("biases") is None else head["biases"].nbytes
     )
