@@ -112,6 +112,109 @@ class MLP(nn.Module):
         return self.down(nn.silu(self.gate(x)) * self.up(x))
 
 
+class PermanentKnowledgePLE(nn.Module):
+    """Trainable n-gram knowledge sidecar kept with the model checkpoint.
+
+    Semantic capsules remain the authoritative, revisioned memory. This PLE
+    table learns a bounded neural prior for recurring token sequences during
+    ordinary training and never mutates from an inference request.
+    """
+
+    def __init__(self, c):
+        super().__init__()
+        self.rows = c.semantic_ple_rows
+        self.order = c.semantic_ngram
+        self.embedding = nn.Embedding(c.semantic_ple_rows, c.semantic_ple_dim)
+        self.key = nn.Linear(c.semantic_ple_dim, c.hidden_size, bias=False)
+        self.value = nn.Linear(c.semantic_ple_dim, c.hidden_size, bias=False)
+        self.gate_bias = mx.zeros((c.hidden_size,))
+
+    def indices(self, tokens, history=None):
+        values = tokens.astype(mx.int64)
+        if history is not None:
+            values = mx.concatenate((history.astype(mx.int64), values), axis=1)
+        padding = mx.zeros((values.shape[0], self.order - 1), dtype=mx.int64)
+        padded = mx.concatenate((padding, values), axis=1)
+        start = self.order - 1
+        hashed = padded[:, start : start + values.shape[1]] % self.rows
+        for shift in range(1, self.order):
+            previous = padded[:, start - shift : start - shift + values.shape[1]]
+            hashed = (hashed * 1000003 + previous * (97 + shift * 2)) % self.rows
+        return hashed[:, -tokens.shape[1] :]
+
+    def __call__(self, tokens, query, history=None):
+        row = self.embedding(self.indices(tokens, history))
+        key = self.key(row)
+        value = self.value(row)
+        query = query * mx.rsqrt(
+            mx.mean(mx.square(query.astype(mx.float32)), axis=-1, keepdims=True) + 1e-6
+        ).astype(query.dtype)
+        gate = mx.sigmoid(
+            (query * key).astype(mx.float32) * query.shape[-1] ** -0.5
+            + self.gate_bias
+        ).astype(value.dtype)
+        return gate * value
+
+
+class DiffusionLayer(nn.Module):
+    """Bidirectional denoising layer; all positions refine in parallel."""
+
+    def __init__(self, c):
+        super().__init__()
+        d = c.hidden_size
+        self.heads = c.num_heads
+        if d % self.heads:
+            raise ValueError("diffusion hidden size must divide by query heads")
+        self.head_dim = d // self.heads
+        self.q = nn.Linear(d, d, bias=False)
+        self.k = nn.Linear(d, d, bias=False)
+        self.v = nn.Linear(d, d, bias=False)
+        self.out = nn.Linear(d, d, bias=False)
+        self.norm1 = nn.RMSNorm(d, eps=c.norm_eps)
+        self.norm2 = nn.RMSNorm(d, eps=c.norm_eps)
+        self.mlp = MLP(d, c.diffusion_width_multiplier * d)
+        self.time_scale = mx.zeros((d,))
+
+    def __call__(self, x, noise_level):
+        h = self.norm1(x) + noise_level * self.time_scale
+        shape = (*h.shape[:-1], self.heads, self.head_dim)
+        q = self.q(h).reshape(shape).transpose(0, 2, 1, 3)
+        k = self.k(h).reshape(shape).transpose(0, 2, 1, 3)
+        v = self.v(h).reshape(shape).transpose(0, 2, 1, 3)
+        weights = mx.softmax(
+            (q.astype(mx.float32) @ k.astype(mx.float32).swapaxes(-1, -2))
+            * self.head_dim**-0.5,
+            axis=-1,
+        ).astype(v.dtype)
+        attended = (weights @ v).transpose(0, 2, 1, 3).reshape(x.shape)
+        x = x + self.out(attended)
+        return x + self.mlp(self.norm2(x))
+
+
+class DiffusionStudent(nn.Module):
+    """Masked-diffusion auxiliary student with a 2x-standard (8d) MLP."""
+
+    def __init__(self, c):
+        super().__init__()
+        self.layers = [DiffusionLayer(c) for _ in range(c.diffusion_layers)]
+        self.condition = nn.Linear(c.hidden_size, c.hidden_size, bias=False)
+        self.norm = nn.RMSNorm(c.hidden_size, eps=c.norm_eps)
+
+    def __call__(self, tokens, embedding, teacher):
+        positions = mx.arange(tokens.shape[1], dtype=mx.int32)[None]
+        seed = tokens[:, :1].astype(mx.int32) % 16
+        phase = tokens[:, :1].astype(mx.int32) % 4
+        threshold = mx.take(mx.array([2, 4, 8, 12]), phase)
+        score = (positions * 13 + seed * 7) % 16
+        mask = (score < threshold) | (positions == 0)
+        masked = mx.where(mask, mx.ones_like(tokens), tokens)
+        x = embedding(masked) + self.condition(mx.stop_gradient(teacher))
+        noise_level = (threshold.astype(x.dtype) / 16)[..., None]
+        for layer in self.layers:
+            x = layer(x, noise_level)
+        return embedding.as_linear(self.norm(x)), mask
+
+
 class Attention(nn.Module):
     def __init__(self, c, kind):
         super().__init__()
@@ -171,6 +274,9 @@ class Attention(nn.Module):
                 sinks=self.sinks if self.kind == "swa" else None,
                 select=(c.local_window, c.global_tokens)
                 if self.kind == "cross"
+                else None,
+                block_select=(c.candidate_block_size, c.candidate_blocks)
+                if self.kind == "cross" and c.candidate_blocks
                 else None,
             )
         out = out.transpose(0, 2, 1, 3)
@@ -236,6 +342,8 @@ class Cache:
     boundary: object = None
     self_layer_calls: int = 0
     cross_layer_calls: int = 0
+    ple_history: object = None
+    apcv2_identity: object = None
 
     def arrays(self):
         return [
@@ -257,6 +365,8 @@ class Model(nn.Module):
         c = Config() if c is None else c
         self.config = c
         self.embedding = nn.Embedding(c.vocab_size, c.hidden_size)
+        if c.semantic_ple_rows:
+            self.semantic_ple = PermanentKnowledgePLE(c)
         self.self_decoder = [
             Layer(c, "full" if i == c.self_full_layer else "swa")
             for i in range(c.self_layers)
@@ -268,10 +378,12 @@ class Model(nn.Module):
         self.norm = nn.RMSNorm(c.hidden_size, eps=c.norm_eps)
         if c.mtp:
             self.mtp_head = MTP(c)
+        if c.diffusion_layers:
+            self.diffusion_student = DiffusionStudent(c)
         self.checkpoint_layers = False
         self._cache_owner = object()
 
-    def _embed(self, tokens):
+    def _embed(self, tokens, ple_history=None):
         if (
             tokens.ndim != 2
             or tokens.shape[0] < 1
@@ -280,6 +392,8 @@ class Model(nn.Module):
         ):
             raise ValueError("tokens must be a nonempty B,T array within max_context")
         x = self.embedding(tokens)
+        if self.config.semantic_ple_rows:
+            x = x + self.semantic_ple(tokens, x, ple_history)
         return mx.broadcast_to(
             x[..., None, :], (*x.shape[:-1], self.config.residual_streams, x.shape[-1])
         )
@@ -319,12 +433,21 @@ class Model(nn.Module):
             mtp_logits = self.embedding.as_linear(
                 self.norm(self.mtp_head(boundary, self.embedding(next_tokens)))
             )
-        return logits, aux / self.config.layers, mtp_logits
+        diffusion = None
+        if self.config.diffusion_layers and self.training:
+            diffusion = self.diffusion_student(
+                tokens, self.embedding, self.norm(mx.mean(x, axis=-2))
+            )
+        return logits, aux / self.config.layers, mtp_logits, diffusion
 
-    def new_cache(self, batch=1):
+    def new_cache(self, batch=1, *, semantic_capsule_digest=None):
         if type(batch) is not int or batch < 1:
             raise ValueError("cache batch must be positive")
-        return Cache(self._cache_owner, batch)
+        return Cache(
+            self._cache_owner,
+            batch,
+            apcv2_identity=self.config.apcv2_identity(semantic_capsule_digest),
+        )
 
     def _append(self, tokens, cache):
         if self.training:
@@ -334,7 +457,18 @@ class Model(nn.Module):
         offset = cache.length
         if offset + tokens.shape[1] > self.config.max_context:
             raise ValueError("context limit exceeded")
-        x = self._embed(tokens)
+        x = self._embed(tokens, cache.ple_history)
+        if self.config.semantic_ple_rows:
+            history = (
+                tokens
+                if cache.ple_history is None
+                else mx.concatenate((cache.ple_history, tokens), axis=1)
+            )
+            cache.ple_history = (
+                None
+                if self.config.semantic_ngram == 1
+                else mx.contiguous(history[:, -(self.config.semantic_ngram - 1) :])
+            )
         source = None
         fresh = []
         for i, layer in enumerate(self.self_decoder):

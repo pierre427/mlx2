@@ -59,7 +59,7 @@ def test_group_holdout_exact_dedup_and_existing_eval(tmp_path):
     assert all("MUST NOT LEAK" not in r["text"] for r in train + valid)
 
 
-def test_archive_excludes_tools_analysis_and_other_projects(tmp_path):
+def test_archive_includes_tools_but_excludes_analysis_and_other_projects(tmp_path):
     def item(role, text, channel=None):
         return {
             "type": "response_item",
@@ -81,7 +81,20 @@ def test_archive_excludes_tools_analysis_and_other_projects(tmp_path):
         item("assistant", "PRIVATE ANALYSIS", "analysis"),
         {
             "type": "response_item",
-            "payload": {"type": "function_call_output", "output": "TOOL SECRET"},
+            "payload": {
+                "type": "function_call",
+                "name": "lookup_docs",
+                "arguments": '{"query":"causal masks"}',
+                "call_id": "call-1",
+            },
+        },
+        {
+            "type": "response_item",
+            "payload": {
+                "type": "function_call_output",
+                "call_id": "call-1",
+                "output": "Future positions are excluded before normalization.",
+            },
         },
         item(
             "assistant",
@@ -93,7 +106,9 @@ def test_archive_excludes_tools_analysis_and_other_projects(tmp_path):
     source = {"path": str(tmp_path), "projects": ["/mlx2"]}
     found = list(archive_examples(source))
     assert len(found) == 1
-    assert "PRIVATE ANALYSIS" not in found[0][0] and "SECRET" not in found[0][0]
+    assert "PRIVATE ANALYSIS" not in found[0][0]
+    assert "tool_call lookup_docs" in found[0][0]
+    assert "tool: lookup_docs" in found[0][0]
     data[-1]["payload"].pop("channel")
     data[-1]["payload"]["phase"] = "final_answer"
     (tmp_path / "session.jsonl").write_text("".join(json.dumps(r) + "\n" for r in data))

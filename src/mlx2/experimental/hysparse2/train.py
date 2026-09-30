@@ -39,14 +39,32 @@ def save_checkpoint(root, model, optimizer, step, run):
     temporary = root / f".writing-{uuid.uuid4().hex}"
     # Adam moments plus weights can exceed 20 GB at the default geometry.
     # Refuse before opening any checkpoint payload when disk headroom is low.
-    model_bytes = sum(x.nbytes for _, x in tree_flatten(model.parameters()))
+    flat_parameters = tree_flatten(model.parameters())
+    ple = {
+        name: value for name, value in flat_parameters if name.startswith("semantic_ple.")
+    }
+    model_bytes = sum(x.nbytes for _, x in flat_parameters)
     state_bytes = sum(x.nbytes for _, x in tree_flatten(optimizer.state))
-    if shutil.disk_usage(root).free < int((model_bytes + state_bytes) * 1.05) + (
-        64 << 20
-    ):
+    sidecar_bytes = sum(x.nbytes for x in ple.values())
+    if shutil.disk_usage(root).free < int(
+        (model_bytes + state_bytes + sidecar_bytes) * 1.05
+    ) + (64 << 20):
         raise OSError("insufficient disk space for atomic checkpoint")
     temporary.mkdir()
     model.save_weights(str(temporary / "model.safetensors"))
+    permanent_sidecar = None
+    if ple:
+        sidecar_path = temporary / "semantic-ple.safetensors"
+        mx.save_safetensors(str(sidecar_path), ple)
+        permanent_sidecar = {
+            "schema": "mlx2.hysparse2-semantic-ple.v1",
+            "file": sidecar_path.name,
+            "sha256": file_hash(sidecar_path),
+            "rows": model.config.semantic_ple_rows,
+            "dimension": model.config.semantic_ple_dim,
+            "ngram": model.config.semantic_ngram,
+            "apcv2_identity": model.config.apcv2_identity(),
+        }
     state = dict(tree_flatten(optimizer.state))
     mx.save_safetensors(str(temporary / "optimizer.safetensors"), state)
     metadata = {
@@ -54,6 +72,7 @@ def save_checkpoint(root, model, optimizer, step, run):
         "step": step,
         "config": asdict(model.config),
         "run": run,
+        "permanent_sidecar": permanent_sidecar,
     }
     (temporary / "state.json").write_text(json.dumps(metadata, indent=2) + "\n")
     temporary.rename(target)
@@ -66,12 +85,26 @@ def load_checkpoint(path, model, optimizer, run):
 
     path = Path(path)
     metadata = json.loads((path / "state.json").read_text())
-    if metadata["schema"] != "mlx2.hysparse2-checkpoint.v1" or metadata[
-        "config"
-    ] != asdict(model.config):
+    try:
+        saved_config = asdict(Config(**metadata["config"]))
+    except (TypeError, ValueError):
+        saved_config = None
+    if metadata["schema"] != "mlx2.hysparse2-checkpoint.v1" or saved_config != asdict(model.config):
         raise ValueError("checkpoint configuration differs")
     if metadata["run"] != run:
         raise ValueError("resume data, tokenizer or training settings differ")
+    sidecar = metadata.get("permanent_sidecar")
+    if model.config.semantic_ple_rows:
+        if (
+            not isinstance(sidecar, dict)
+            or sidecar.get("schema") != "mlx2.hysparse2-semantic-ple.v1"
+            or sidecar.get("apcv2_identity")
+            != json.loads(json.dumps(model.config.apcv2_identity()))
+        ):
+            raise ValueError("checkpoint permanent semantic PLE sidecar differs")
+        sidecar_path = path / sidecar.get("file", "")
+        if not sidecar_path.is_file() or file_hash(sidecar_path) != sidecar.get("sha256"):
+            raise ValueError("checkpoint permanent semantic PLE sidecar is missing or corrupt")
     model.load_weights(str(path / "model.safetensors"), strict=True)
     optimizer.state = tree_unflatten(
         list(mx.load(str(path / "optimizer.safetensors")).items())
@@ -80,17 +113,28 @@ def load_checkpoint(path, model, optimizer, run):
     return metadata["step"]
 
 
-def loss(model, tokens, mtp_weight=0.1, router_weight=0.01):
+def loss(
+    model, tokens, mtp_weight=0.1, router_weight=0.01, diffusion_weight=0.2
+):
     import mlx.core as mx
     from mlx import nn
 
-    logits, aux, mtp = model(
+    logits, aux, mtp, diffusion = model(
         tokens[:, :-2], next_tokens=tokens[:, 1:-1] if model.config.mtp else None
     )
     value = mx.mean(nn.losses.cross_entropy(logits.astype(mx.float32), tokens[:, 1:-1]))
     if mtp is not None:
         value = value + mtp_weight * mx.mean(
             nn.losses.cross_entropy(mtp.astype(mx.float32), tokens[:, 2:])
+        )
+    if diffusion is not None:
+        diffusion_logits, mask = diffusion
+        token_loss = nn.losses.cross_entropy(
+            diffusion_logits.astype(mx.float32), tokens[:, :-2]
+        )
+        value = value + diffusion_weight * (
+            mx.sum(mx.where(mask, token_loss, 0.0))
+            / mx.maximum(mx.sum(mask), 1)
         )
     return value + router_weight * aux
 
@@ -185,11 +229,16 @@ def train(args, c):
         "dtype": "float32",
         "checkpoint_layers": model.checkpoint_layers,
     }
+    if c.diffusion_layers:
+        run["diffusion_weight"] = args.diffusion_weight
     if mixture is not None:
         run["mixture"] = mixture.receipt
     step = load_checkpoint(args.resume, model, optimizer, run) if args.resume else 0
     fn = nn.value_and_grad(
-        model, lambda m, b: loss(m, b, args.mtp_weight, args.router_weight)
+        model,
+        lambda m, b: loss(
+            m, b, args.mtp_weight, args.router_weight, args.diffusion_weight
+        ),
     )
     print(
         json.dumps(
@@ -330,6 +379,7 @@ def main(argv=None):
     p.add_argument("--learning-rate", type=float, default=1e-4)
     p.add_argument("--mtp-weight", type=float, default=0.1)
     p.add_argument("--router-weight", type=float, default=0.01)
+    p.add_argument("--diffusion-weight", type=float, default=0.2)
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--save-every", type=int, default=100)
     p.add_argument("--no-checkpoint", action="store_true")

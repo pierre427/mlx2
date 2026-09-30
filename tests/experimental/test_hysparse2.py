@@ -1,5 +1,6 @@
 """CPU-only reference checks. No serving or 2M quality claim."""
 
+import json
 from dataclasses import replace
 
 import pytest
@@ -161,12 +162,17 @@ def test_parameters_gradients_checkpoint_and_resume(tmp_path):
         "cross_decoder.0.attention.k.weight",
         "mtp_head.projection.weight",
         "self_decoder.0.moe.router.weight",
+        "semantic_ple.embedding.weight",
+        "diffusion_student.layers.0.mlp.up.weight",
     ):
         assert float(mx.sum(mx.abs(gradients[name])).item()) > 0, name
     optimizer = optimizers.AdamW(learning_rate=1e-4)
     optimizer.update(m, gb)
     mx.eval(m.parameters(), optimizer.state)
     checkpoint = save_checkpoint(tmp_path, m, optimizer, 1, {"seed": 9})
+    state = json.loads((checkpoint / "state.json").read_text())
+    assert state["permanent_sidecar"]["schema"] == "mlx2.hysparse2-semantic-ple.v1"
+    assert (checkpoint / "semantic-ple.safetensors").is_file()
     restored = Model(c)
     restored.checkpoint_layers = True
     opt2 = optimizers.AdamW(learning_rate=1e-4)
@@ -181,6 +187,19 @@ def test_parameters_gradients_checkpoint_and_resume(tmp_path):
         close(x, y, 1e-6)
     with pytest.raises(ValueError):
         load_checkpoint(checkpoint, restored, opt2, {"seed": 10})
+
+
+def test_apcv2_identity_binds_block_selector_and_semantic_capsule():
+    c = Config.smoke()
+    digest = "a" * 64
+    a = c.apcv2_identity(digest)
+    b = replace(c, candidate_blocks=c.candidate_blocks + 1).apcv2_identity(digest)
+    assert a["cache_layout_fingerprint"] != b["cache_layout_fingerprint"]
+    assert a["semantic_fingerprint"][1] == digest
+    cache = Model(c).new_cache(semantic_capsule_digest=digest)
+    assert cache.apcv2_identity == a
+    with pytest.raises(ValueError):
+        c.apcv2_identity("stale")
 
 
 def test_oracle_matches_dense_normalized_multihead_ranking():

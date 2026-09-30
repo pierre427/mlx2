@@ -29,8 +29,58 @@ def _tiles(blocks, key_tile):
             )
 
 
+def _candidate_tiles(blocks, block_size):
+    """Yield absolute, fixed-size cache blocks without joining full history."""
+    pending_k, pending_v, pending_start = [], [], None
+    pending_length = 0
+    for k, v, start in blocks:
+        cursor = 0
+        while cursor < k.shape[2]:
+            absolute = start + cursor
+            block_start = absolute - absolute % block_size
+            room = block_size - (absolute - block_start)
+            take = min(room, k.shape[2] - cursor)
+            if pending_start is not None and block_start != pending_start:
+                yield (
+                    mx.concatenate(pending_k, axis=2),
+                    mx.concatenate(pending_v, axis=2),
+                    mx.arange(pending_start, pending_start + pending_length),
+                    pending_start // block_size,
+                )
+                pending_k, pending_v, pending_length = [], [], 0
+            pending_start = block_start
+            pending_k.append(k[:, :, cursor : cursor + take])
+            pending_v.append(v[:, :, cursor : cursor + take])
+            pending_length += take
+            cursor += take
+            if absolute + take == block_start + block_size:
+                yield (
+                    mx.concatenate(pending_k, axis=2),
+                    mx.concatenate(pending_v, axis=2),
+                    mx.arange(block_start, block_start + pending_length),
+                    block_start // block_size,
+                )
+                pending_k, pending_v, pending_start, pending_length = [], [], None, 0
+    if pending_k:
+        yield (
+            mx.concatenate(pending_k, axis=2),
+            mx.concatenate(pending_v, axis=2),
+            mx.arange(pending_start, pending_start + pending_length),
+            pending_start // block_size,
+        )
+
+
 def attention(
-    q, blocks, *, offset, query_tile, key_tile, window=None, sinks=None, select=None
+    q,
+    blocks,
+    *,
+    offset,
+    query_tile,
+    key_tile,
+    window=None,
+    sinks=None,
+    select=None,
+    block_select=None,
 ):
     """Return output and optional (selected K, V, absolute positions).
 
@@ -63,12 +113,46 @@ def attention(
         if select is None:
             continue
         local, global_count = select
+        candidate_ids = None
+        if block_select is not None:
+            block_size, candidate_count = block_select
+            candidate_scores = mx.zeros((b, t, 0), dtype=mx.float32)
+            candidate_ids = mx.zeros((b, t, 0), dtype=mx.int32)
+            for k, _, kp, block_id in _candidate_tiles(blocks, block_size):
+                scores, valid = _logits(
+                    mx.stop_gradient(query), mx.stop_gradient(k), qp, kp, None
+                )
+                probabilities = mx.exp(scores - mx.stop_gradient(maximum)) / mx.maximum(
+                    mx.stop_gradient(denom), 1e-30
+                )
+                token_scores = mx.mean(probabilities, axis=1)
+                score = mx.where(
+                    mx.any(valid, axis=-1, keepdims=True)[None],
+                    mx.sum(
+                        mx.where(valid[None], token_scores, 0.0),
+                        axis=-1,
+                        keepdims=True,
+                    ),
+                    -1e30,
+                )
+                block_ids = mx.full((b, t, 1), block_id, dtype=mx.int32)
+                merged_scores = mx.concatenate((candidate_scores, score), axis=-1)
+                merged_ids = mx.concatenate((candidate_ids, block_ids), axis=-1)
+                take = min(candidate_count, merged_scores.shape[-1])
+                order = mx.argsort(-merged_scores, axis=-1)[..., :take]
+                candidate_scores = mx.take_along_axis(merged_scores, order, axis=-1)
+                candidate_ids = mx.take_along_axis(merged_ids, order, axis=-1)
         budget = local + global_count
         best = mx.zeros((b, t, 0), dtype=mx.float32)
         sk = mx.zeros((b, t, 0, d), dtype=q.dtype)
         sv = mx.zeros_like(sk)
         positions = mx.zeros((b, t, 0), dtype=mx.int32)
-        for k, v, kp in _tiles(blocks, key_tile):
+        selection_tiles = (
+            ((k, v, kp) for k, v, kp, _ in _candidate_tiles(blocks, block_select[0]))
+            if block_select is not None
+            else _tiles(blocks, key_tile)
+        )
+        for k, v, kp in selection_tiles:
             scores, valid = _logits(
                 mx.stop_gradient(query), mx.stop_gradient(k), qp, kp, None
             )
@@ -77,7 +161,15 @@ def attention(
             )
             rank = mx.mean(probabilities, axis=1)
             recent = valid & (kp[None, :] > qp[:, None] - local)
-            rank = mx.where(recent[None], 2.0, mx.where(valid[None], rank, -1e30))
+            eligible = valid[None]
+            if candidate_ids is not None:
+                block_ids = kp // block_select[0]
+                eligible = eligible & mx.any(
+                    block_ids[None, None, :, None]
+                    == candidate_ids[:, :, None, :],
+                    axis=-1,
+                )
+            rank = mx.where(recent[None], 2.0, mx.where(eligible, rank, -1e30))
             merged = mx.concatenate((best, rank), axis=-1)
             take = min(budget, merged.shape[-1])
             ck = mx.concatenate(

@@ -61,7 +61,8 @@ def messages_text(messages):
     return "\n\n".join(
         f"{m['role']}: {text_content(m.get('content', ''))}"
         for m in messages
-        if m.get("role") in ("user", "assistant") and text_content(m.get("content", ""))
+        if m.get("role") in ("user", "assistant", "tool")
+        and text_content(m.get("content", ""))
     )
 
 
@@ -160,7 +161,12 @@ def json_examples(source):
 
 
 def archive_examples(source):
-    """Only explicit technical project sessions and user/final-assistant text."""
+    """Extract technical turns and their tool interactions from private sessions.
+
+    System/developer prompts and hidden reasoning remain excluded. Tool calls
+    are paired with bounded outputs inside an accepted user/final-answer turn;
+    the complete rendered row still passes the credential/scaffold filter.
+    """
     root = Path(os.path.expandvars(source["path"])).expanduser()
     allowed = source["projects"]
     files = sorted(root.rglob("*.jsonl"))
@@ -179,9 +185,35 @@ def archive_examples(source):
             continue
         session = str(meta.get("id") or meta.get("session_id") or path.stem)
         pending = []
+        calls = {}
         for row in rows(path):
             item = row.get("payload", {})
-            if row.get("type") != "response_item" or item.get("type") != "message":
+            if row.get("type") != "response_item":
+                continue
+            kind = item.get("type")
+            if kind in ("function_call", "custom_tool_call") and pending:
+                call_id = str(item.get("call_id") or item.get("id") or "")
+                name = str(item.get("name") or "tool")
+                arguments = str(item.get("arguments") or item.get("input") or "")
+                calls[call_id] = name
+                pending.append(
+                    {
+                        "role": "assistant",
+                        "content": f"tool_call {name}: {arguments[:16000]}",
+                    }
+                )
+                continue
+            if kind in ("function_call_output", "custom_tool_call_output") and pending:
+                call_id = str(item.get("call_id") or item.get("id") or "")
+                name = calls.get(call_id, "tool")
+                output = item.get("output", item.get("content", ""))
+                if not isinstance(output, str):
+                    output = json.dumps(output, ensure_ascii=False)
+                pending.append(
+                    {"role": "tool", "content": f"{name}: {output[:16000]}"}
+                )
+                continue
+            if kind != "message":
                 continue
             role = item.get("role")
             text = text_content(item.get("content"))
@@ -190,6 +222,7 @@ def archive_examples(source):
                     pending.append({"role": "user", "content": text})
                 else:
                     pending = []
+                    calls = {}
             elif (
                 role == "assistant"
                 and (
@@ -203,6 +236,7 @@ def archive_examples(source):
                     "session:" + session,
                 )
                 pending = []
+                calls = {}
 
 
 def repository_examples(source):

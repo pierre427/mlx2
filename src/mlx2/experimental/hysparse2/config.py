@@ -1,5 +1,7 @@
 """Allocation-free configuration and capacity accounting."""
 
+import hashlib
+import json
 import math
 from dataclasses import asdict, dataclass
 
@@ -28,6 +30,13 @@ class Config:
     query_tile: int = 32
     key_tile: int = 1024
     prefill_chunk: int = 256
+    candidate_block_size: int = 0
+    candidate_blocks: int = 0
+    semantic_ple_rows: int = 0
+    semantic_ple_dim: int = 0
+    semantic_ngram: int = 4
+    diffusion_layers: int = 0
+    diffusion_width_multiplier: int = 8
     norm_eps: float = 1e-6
     mtp: bool = True
 
@@ -49,6 +58,8 @@ class Config:
             "query_tile",
             "key_tile",
             "prefill_chunk",
+            "semantic_ngram",
+            "diffusion_width_multiplier",
         ):
             if type(getattr(self, name)) is not int or getattr(self, name) < 1:
                 raise ValueError(f"{name} must be a positive integer")
@@ -57,6 +68,11 @@ class Config:
             "sparse_per_block",
             "shared_experts",
             "rope_dims",
+            "candidate_block_size",
+            "candidate_blocks",
+            "semantic_ple_rows",
+            "semantic_ple_dim",
+            "diffusion_layers",
         ):
             if type(getattr(self, name)) is not int or getattr(self, name) < 0:
                 raise ValueError(f"{name} must be a nonnegative integer")
@@ -66,6 +82,12 @@ class Config:
             raise ValueError("experts_per_token exceeds expert count")
         if self.rope_dims > self.head_dim or self.rope_dims % 2:
             raise ValueError("RoPE dimensions must be even and fit head_dim")
+        if bool(self.candidate_block_size) != bool(self.candidate_blocks):
+            raise ValueError("candidate block size and count must be enabled together")
+        if bool(self.semantic_ple_rows) != bool(self.semantic_ple_dim):
+            raise ValueError("semantic PLE rows and dimension must be enabled together")
+        if self.semantic_ple_dim > self.hidden_size:
+            raise ValueError("semantic PLE dimension cannot exceed hidden size")
         if (
             not all(math.isfinite(v) and v > 0 for v in (self.rope_base, self.norm_eps))
             or type(self.mtp) is not bool
@@ -78,6 +100,53 @@ class Config:
 
     def as_dict(self):
         return asdict(self)
+
+    def apcv2_identity(self, semantic_capsule_digest=None):
+        """Revision material an adapter must bind into its APCv2 key.
+
+        The semantic capsule is paired with the exact prompt state. A missing
+        capsule has an explicit identity rather than sharing a namespace with
+        an unknown or stale sidecar.
+        """
+        if semantic_capsule_digest is not None and (
+            not isinstance(semantic_capsule_digest, str)
+            or len(semantic_capsule_digest) != 64
+            or any(c not in "0123456789abcdef" for c in semantic_capsule_digest)
+        ):
+            raise ValueError("semantic capsule digest must be lowercase SHA-256")
+        layout = {
+            key: getattr(self, key)
+            for key in (
+                "model_type",
+                "hidden_size",
+                "num_heads",
+                "head_dim",
+                "self_layers",
+                "self_full_layer",
+                "cross_blocks",
+                "sparse_per_block",
+                "local_window",
+                "global_tokens",
+                "candidate_block_size",
+                "candidate_blocks",
+                "semantic_ple_rows",
+                "semantic_ple_dim",
+                "semantic_ngram",
+            )
+        }
+        fingerprint = hashlib.sha256(
+            json.dumps(layout, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+        return {
+            "cache_layout_fingerprint": "hysparse2:" + fingerprint,
+            "semantic_fingerprint": (
+                "hysparse2-semantic-v1",
+                semantic_capsule_digest or "no-capsule",
+                self.semantic_ple_rows,
+                self.semantic_ple_dim,
+                self.semantic_ngram,
+            ),
+        }
 
     def capacity(self, *, batch=1, context=None, bytes_per_element=2):
         """Conservative tensor sizes; no claim of measured peak memory."""
@@ -123,6 +192,14 @@ class Config:
         )
         if self.mtp:
             parameters += 2 * d * d + 3 * d + attention("swa") + 3 * d * (4 * d)
+        if self.semantic_ple_rows:
+            parameters += self.semantic_ple_rows * self.semantic_ple_dim
+            parameters += 2 * self.semantic_ple_dim * d + d
+        if self.diffusion_layers:
+            m = self.diffusion_width_multiplier * d
+            # Four attention projections, gated MLP, two norms and time projection.
+            parameters += self.diffusion_layers * (4 * d * d + 3 * d * m + 3 * d)
+            parameters += d * d + d
         active = (
             parameters
             - self.layers * (self.num_experts - self.experts_per_token) * 3 * d * e
@@ -161,6 +238,15 @@ class Config:
             * (self.global_tokens + self.local_window)
             * 2
             * self.head_dim,
+            "candidate_block_size": self.candidate_block_size,
+            "candidate_blocks": self.candidate_blocks,
+            "semantic_ple_parameters": 0
+            if not self.semantic_ple_rows
+            else self.semantic_ple_rows * self.semantic_ple_dim
+            + 2 * self.semantic_ple_dim * d
+            + d,
+            "diffusion_layers": self.diffusion_layers,
+            "diffusion_internal_width": self.diffusion_width_multiplier * d,
             "training_note": "Optimizer, gradients, saved activations and allocator overhead are additional; max_context is not validated retrieval quality.",
         }
 
@@ -185,4 +271,10 @@ class Config:
             query_tile=3,
             key_tile=4,
             prefill_chunk=4,
+            candidate_block_size=2,
+            candidate_blocks=2,
+            semantic_ple_rows=64,
+            semantic_ple_dim=8,
+            semantic_ngram=3,
+            diffusion_layers=1,
         )
