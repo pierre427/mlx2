@@ -104,7 +104,15 @@ def gpu():
 
 
 def _eq(x, y):
-    return bool(mx.array_equal(x, y).item())
+    # Numeric equality alone treats +0/-0 as equal. The exact route requires
+    # storage-bit identity, and matching NaN payloads must never pass a gate.
+    if x.shape != y.shape or x.dtype != y.dtype:
+        return False
+    bits = mx.uint16 if x.dtype.size == 2 else mx.uint32
+    exact = mx.array_equal(x.view(bits), y.view(bits))
+    finite = mx.all(mx.isfinite(x)) & mx.all(mx.isfinite(y))
+    mx.eval(exact, finite)
+    return bool(exact.item()) and bool(finite.item())
 
 
 @pytest.mark.parametrize("steps", WIDTHS)
