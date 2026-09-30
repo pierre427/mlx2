@@ -1368,7 +1368,9 @@
     "lines": 338,
     "source_revision": "1e2bc604f71d070bee970c3e7db8b60f7855599b",
     "license": "MIT",
-    "license_basis": "Source repository LICENSE (MIT)"
+    "license_basis": "Source repository LICENSE (MIT)",
+    "modifications": "YarnRoPE honours rope_scaling.truncate (default true): a false value leaves the correction range unrounded as transformers and OpenAI's gpt-oss reference do.",
+    "validation": "tests/test_rope_yarn_truncate.py against transformers' yarn init (CPU)."
   },
   "models/switch_layers.py": {
     "source": "mlx_lm/models/switch_layers.py",

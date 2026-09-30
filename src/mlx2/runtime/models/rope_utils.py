@@ -127,6 +127,7 @@ class YarnRoPE(nn.Module):
         mscale=1,
         mscale_all_dim=0,
         attention_factor=None,
+        truncate=True,
     ):
         super().__init__()
 
@@ -140,8 +141,13 @@ class YarnRoPE(nn.Module):
             )
 
         def yarn_find_correction_range():
-            low = math.floor(yarn_find_correction_dim(beta_fast))
-            high = math.ceil(yarn_find_correction_dim(beta_slow))
+            low = yarn_find_correction_dim(beta_fast)
+            high = yarn_find_correction_dim(beta_slow)
+            # transformers and OpenAI's gpt-oss reference round the range only
+            # when ``truncate`` is set; gpt-oss configs set it false, and
+            # rounding moved 7 of its 32 frequency bands by up to 76%.
+            if truncate:
+                low, high = math.floor(low), math.ceil(high)
             return (max(low, 0), min(high, dims - 1))
 
         def yarn_get_mscale(scale=1, mscale=1):
@@ -298,6 +304,7 @@ def initialize_rope(
                 "mscale",
                 "mscale_all_dim",
                 "attention_factor",
+                "truncate",
             ]
             if key in scaling_config
         }
