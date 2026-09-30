@@ -40,6 +40,7 @@ image-convert = ["gguf>=0.19,<0.20", "numpy>=2", "safetensors>=0.8", "torch>=2.4
 mlx2-serve = "mlx2.server:main"
 mlx2 = "mlx2.cli:main"
 mlx2-diarize = "mlx2.diarize_cli:main"
+mlx2-top = "mlx2.top:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

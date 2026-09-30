@@ -104,6 +104,25 @@ kept outside this repository. Discover a locally configured service through
 identity, memory, APC leases, scheduler decisions and mechanism counters.
 Terminal responses include an `mlx2` route receipt.
 
+### LLM test monitor
+
+`mlx2-top` is a read-only Apple-Silicon monitor for long model tests. It shows
+per-logical-CPU busy time, available AGX GPU counters, ANE active residency,
+mlx2 NAX engagement receipts, memory and swap activity, load averages, and
+thermal pressure. Unavailable hardware counters are labelled unavailable.
+
+```bash
+.venv/bin/mlx2-top --once --no-powermetrics --no-mlx2
+sudo -v
+.venv/bin/mlx2-top
+```
+
+The monitor does not start model or GPU work. macOS does not expose a
+system-wide NAX utilization percentage through these collectors, so the
+display keeps hardware utilization separate from mlx2's observed call and
+row counts. Privileged `powermetrics` sampling uses cached sudo credentials
+and never prompts from the monitor.
+
 ## Development and reproduction
 
 The tested environment uses Python 3.12 and local MLX build
