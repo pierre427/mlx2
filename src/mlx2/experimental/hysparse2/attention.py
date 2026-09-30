@@ -18,10 +18,12 @@ def _logits(q, k, qp, kp, window):
     return mx.where(valid[None, None], scores, -1e30), valid
 
 
-def _tiles(blocks, key_tile):
+def _tiles(blocks, key_tile, *, minimum=None, maximum=None):
     for k, v, start in blocks:
-        for offset in range(0, k.shape[2], key_tile):
-            end = min(offset + key_tile, k.shape[2])
+        lo = 0 if minimum is None else max(0, minimum - start)
+        hi = k.shape[2] if maximum is None else min(k.shape[2], maximum + 1 - start)
+        for offset in range(lo, hi, key_tile):
+            end = min(offset + key_tile, hi)
             yield (
                 k[:, :, offset:end],
                 v[:, :, offset:end],
@@ -31,9 +33,17 @@ def _tiles(blocks, key_tile):
 
 def _candidate_tiles(blocks, block_size):
     """Yield absolute, fixed-size cache blocks without joining full history."""
-    pending_k, pending_v, pending_start = [], [], None
+    pending_k, pending_v, pending_positions, pending_start = [], [], [], None
     pending_length = 0
+    previous_end = None
     for k, v, start in blocks:
+        if (
+            type(start) is not int
+            or start < 0
+            or (previous_end is not None and start < previous_end)
+        ):
+            raise ValueError("candidate segments must be ordered and nonoverlapping")
+        previous_end = start + k.shape[2]
         cursor = 0
         while cursor < k.shape[2]:
             absolute = start + cursor
@@ -44,28 +54,35 @@ def _candidate_tiles(blocks, block_size):
                 yield (
                     mx.concatenate(pending_k, axis=2),
                     mx.concatenate(pending_v, axis=2),
-                    mx.arange(pending_start, pending_start + pending_length),
+                    mx.concatenate(pending_positions),
                     pending_start // block_size,
                 )
-                pending_k, pending_v, pending_length = [], [], 0
+                pending_k, pending_v, pending_positions, pending_length = [], [], [], 0
             pending_start = block_start
             pending_k.append(k[:, :, cursor : cursor + take])
             pending_v.append(v[:, :, cursor : cursor + take])
+            pending_positions.append(mx.arange(absolute, absolute + take))
             pending_length += take
             cursor += take
             if absolute + take == block_start + block_size:
                 yield (
                     mx.concatenate(pending_k, axis=2),
                     mx.concatenate(pending_v, axis=2),
-                    mx.arange(block_start, block_start + pending_length),
+                    mx.concatenate(pending_positions),
                     block_start // block_size,
                 )
-                pending_k, pending_v, pending_start, pending_length = [], [], None, 0
+                (
+                    pending_k,
+                    pending_v,
+                    pending_positions,
+                    pending_start,
+                    pending_length,
+                ) = [], [], [], None, 0
     if pending_k:
         yield (
             mx.concatenate(pending_k, axis=2),
             mx.concatenate(pending_v, axis=2),
-            mx.arange(pending_start, pending_start + pending_length),
+            mx.concatenate(pending_positions),
             pending_start // block_size,
         )
 
@@ -121,7 +138,11 @@ def attention(
                 sinks.astype(mx.float32)[None, :, None, None], maximum.shape
             )
             denom = mx.ones_like(denom)
-        for k, v, kp in _tiles(blocks, key_tile):
+        minimum = None if window is None else offset + begin - window + 1
+        maximum_position = offset + begin + t - 1
+        for k, v, kp in _tiles(
+            blocks, key_tile, minimum=minimum, maximum=maximum_position
+        ):
             scores, valid = _logits(query, k, qp, kp, window)
             new_max = mx.maximum(maximum, mx.max(scores, axis=-1, keepdims=True))
             factor = mx.exp(maximum - new_max)
