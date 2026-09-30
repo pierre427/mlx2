@@ -18,7 +18,14 @@ from ..sampling_defaults import GENERATION_CONFIG, SamplingDefaults, VendorSampl
 _COMMON = frozenset({
     Capability.TEXT, Capability.STREAMING, Capability.CONTINUOUS_BATCH,
     Capability.PREFIX_REUSE, Capability.APC_V2, Capability.LAYERED_CACHE,
+    Capability.REASONING,
 })
+# The template's ``Reasoning:`` levels for the server's reasoning_effort
+# values; "none" means thinking off (see ``thinking_enabled``).
+_EFFORTS = {
+    "none": "low", "minimal": "low", "low": "low", "medium": "medium",
+    "high": "high", "xhigh": "high", "max": "high", "ultra": "high",
+}
 
 
 def descriptor_for(model_type: str) -> ModelDescriptor:
@@ -36,7 +43,8 @@ def descriptor_for(model_type: str) -> ModelDescriptor:
             "execution": "mlx2.adapters.gpt_oss.GptOssPuzzleAdapter" if puzzle
             else "mlx2.adapters.gpt_oss.GptOssAdapter",
             "qualification": "pending",
-            "scope": "ordinary text decode; no tool, reasoning, or speculative route",
+            "scope": "ordinary text decode with harmony analysis/final channels; "
+                     "no tool or speculative route",
         },
     )
 
@@ -161,6 +169,11 @@ def configure_environment() -> dict[str, str]:
 class _GptOssOrdinaryAdapter:
     default_route = "ordinary"
     expected_type: str
+    # Whether the model answers well when the prompt opens the final channel
+    # directly, skipping analysis.  Stock GPT-OSS does; the NAS-pruned Puzzle
+    # model degenerates (NBSP/ellipsis runs) and must reason first.
+    direct_final: bool = True
+    reasoning_effort_semantics = "reasoning_strength"
 
     def __init__(self, model_path: str, *, execution_policy=None):
         if execution_policy not in (None, {}):
@@ -219,26 +232,57 @@ class _GptOssOrdinaryAdapter:
                                           eos_token_ids=eos_ids)
         self.max_context = int(config["max_position_embeddings"])
 
+    def thinking_enabled(self, request: dict) -> bool:
+        """Whether this chat request shows the analysis channel.
+
+        An explicit ``enable_thinking`` wins; otherwise a ``reasoning_effort``
+        shows it, and the model's own default applies: a direct answer where
+        the model supports one, reasoning where it does not.
+        """
+        if "messages" not in request:
+            return False
+        if request.get("enable_thinking") is not None:
+            return bool(request["enable_thinking"])
+        effort = request.get("reasoning_effort")
+        if effort is not None:
+            return effort != "none"
+        return not self.direct_final
+
+    def _answers_directly(self, request: dict) -> bool:
+        return self.direct_final and not self.thinking_enabled(request)
+
     def prompt_tokens(self, request: dict) -> list[int]:
         if request.get("tools"):
             raise ValueError("GPT-OSS tool calling is not implemented")
-        if "messages" in request:
-            tokens = self.tokenizer.apply_chat_template(
-                request["messages"], add_generation_prompt=True, tokenize=True
-            )
-            # The artifact template ends in an open assistant header.  Select
-            # the final channel explicitly so this text-only route yields
-            # answer content, not an unimplemented reasoning/tool channel.
-            return list(tokens) + list(self.tokenizer.encode(
-                "<|channel|>final<|message|>", add_special_tokens=False
-            ))
-        return self.tokenizer.encode(request["prompt"], add_special_tokens=False)
+        if "messages" not in request:
+            return self.tokenizer.encode(request["prompt"], add_special_tokens=False)
+        effort = request.get("reasoning_effort")
+        if effort is not None and effort not in _EFFORTS:
+            raise ValueError("unsupported GPT-OSS reasoning_effort")
+        level = None if effort is None else _EFFORTS[effort]
+        if not self.thinking_enabled(request) and not self.direct_final:
+            # Thinking off on a model that cannot skip analysis: reason
+            # briefly and hide it (the parser drops the analysis channel).
+            level = "low"
+        kwargs = {} if level is None else {"reasoning_effort": level}
+        tokens = list(self.tokenizer.apply_chat_template(
+            request["messages"], add_generation_prompt=True, tokenize=True, **kwargs
+        ))
+        # The artifact template ends in an open ``<|start|>assistant`` header.
+        if self._answers_directly(request):
+            tokens += self.tokenizer.encode("<|channel|>final<|message|>", add_special_tokens=False)
+        return tokens
 
     def output_parser(self, request):
         if request.get("tools"):
             raise ValueError("GPT-OSS tool calling is not implemented")
-        from ..output import OutputParser
-        return OutputParser(chat=False, stops=request.get("stop", ()))
+        from .gpt_oss_output import HarmonyOutputParser
+        return HarmonyOutputParser(
+            chat="messages" in request,
+            show_reasoning=self.thinking_enabled(request),
+            start_in_final=self._answers_directly(request),
+            stops=request.get("stop", ()),
+        )
 
     def profile_name(self, mtp):
         if mtp:
@@ -267,5 +311,6 @@ class GptOssAdapter(_GptOssOrdinaryAdapter):
 
 class GptOssPuzzleAdapter(_GptOssOrdinaryAdapter):
     expected_type = "gpt_oss_puzzle"
+    direct_final = False
     descriptor = GPT_OSS_PUZZLE
     sampling_defaults = GPT_OSS_SAMPLING
