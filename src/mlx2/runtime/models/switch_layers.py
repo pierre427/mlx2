@@ -156,16 +156,18 @@ class SwitchLinear(nn.Module):
         return x
 
     def to_quantized(self, group_size: int = 64, bits: int = 4, mode: str = "affine"):
-        (num_experts, output_dims, input_dims) = self.weight.shape
-        ql = QuantizedSwitchLinear(
-            input_dims, output_dims, num_experts, False, group_size, bits, mode=mode
-        )
+        # The constructor initializes and quantizes a random full expert bank,
+        # which conversion immediately discards. Build only the real bank.
+        ql = QuantizedSwitchLinear.__new__(QuantizedSwitchLinear)
+        nn.Module.__init__(ql)
+        ql.group_size, ql.bits, ql.mode = group_size, bits, mode
         (ql.weight, ql.scales, *biases) = mx.quantize(
             self.weight, group_size, bits, mode=mode
         )
         ql.biases = biases[0] if biases else None
         if "bias" in self:
             ql.bias = self.bias
+        ql.freeze()
         return ql
 
 

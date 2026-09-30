@@ -116,15 +116,18 @@ def install_gemma3n_vision_batching(model, policy: Gemma3nVideoPolicy):
 
         if pixel_values is None or int(pixel_values.shape[0]) <= policy.frame_batch_size:
             return original(pixel_values, vision_tower, config, embed_vision)
-        features = [
-            original(
+        features = []
+        for start in range(0, int(pixel_values.shape[0]), policy.frame_batch_size):
+            feature = original(
                 pixel_values[start : start + policy.frame_batch_size],
                 vision_tower,
                 config,
                 embed_vision,
             )
-            for start in range(0, int(pixel_values.shape[0]), policy.frame_batch_size)
-        ]
+            # MLX is lazy: constructing every chunk before evaluation retains
+            # every tower graph and defeats the frame-batch memory bound.
+            mx.eval(feature)
+            features.append(feature)
         return mx.concatenate(features, axis=0)
 
     model.get_image_features = types.MethodType(batched_features, model)
@@ -339,6 +342,7 @@ def install_minicpmo_vision_batching(model, policy: MiniCPMOExecutionPolicy):
                     tgt_sizes=targets,
                 )
                 embeddings = bound.resampler(hidden, targets)
+                mx.eval(embeddings)
                 for row, (sample_index, image_index, _, _) in enumerate(chunk):
                     outputs[sample_index].append((image_index, embeddings[row]))
         return [

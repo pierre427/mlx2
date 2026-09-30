@@ -354,6 +354,11 @@ def test_flash_next_stops_on_the_tokenizer_chat_eos(tmp_path, monkeypatch):
     monkeypatch.setattr(
         qwen4_ple_nvme, "install_file_backed_ple", lambda _model, weights, *_a, **_k: weights
     )
+    # This test isolates tokenizer EOS behavior. Sidecar integrity has its
+    # own tests; supply its now-required metadata boundary without model I/O.
+    (tmp_path / "ple_rows.bin").write_bytes(b"test-sidecar")
+    monkeypatch.setattr(qwen4_ple_nvme, "verify_sidecar_against_artifact", lambda *_a: {})
+    monkeypatch.setattr(qwen4_ple_nvme, "verify_sidecar_content", lambda *_a: "converted")
     monkeypatch.setattr(nn, "quantize", lambda *_a, **_k: None)
     adapter = flash_next.FlashNextAdapter(str(tmp_path))
     assert generation_stop_token_ids(adapter) == (endoftext, im_end)

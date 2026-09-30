@@ -12,6 +12,7 @@ import io
 import json
 import os
 import subprocess
+import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -357,19 +358,24 @@ class LTX25Adapter:
             "from ltx_pipelines_mlx.cli import main; "
             "sys.argv=['ltx-2-mlx', *sys.argv[1:], '--prompt', sys.stdin.read()]; main()"
         )
-        command = [
-            str(self.executable), "-c", runner, "generate", "--distilled", "--model", str(self.mlx_model),
-            "--gemma", str(self.mlx_model / "text_encoder"), "--output", str(target),
-            "--width", str(width), "--height", str(height), "--frames", str(frames),
-            "--frame-rate", str(frame_rate), "--seed", str(seed), "--quiet",
-        ]
         environment = os.environ.copy()
         environment.update({"HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1"})
-        completed = subprocess.run(
-            command, input=prompt, env=environment, capture_output=True,
-            text=True, timeout=timeout_seconds, check=False,
-        )
-        if completed.returncode or not target.is_file() or target.stat().st_size == 0:
-            target.unlink(missing_ok=True)
-            raise RuntimeError(f"LTX generation failed: {completed.stderr[-2000:]}")
+        # Keep partial renders private, including on timeout. A same-filesystem
+        # exclusive link publishes the completed file without replacing a
+        # competing writer that arrived after the initial existence check.
+        with tempfile.TemporaryDirectory(prefix=".mlx2-ltx-", dir=target.parent) as staging:
+            rendered = Path(staging) / target.name
+            command = [
+                str(self.executable), "-c", runner, "generate", "--distilled", "--model", str(self.mlx_model),
+                "--gemma", str(self.mlx_model / "text_encoder"), "--output", str(rendered),
+                "--width", str(width), "--height", str(height), "--frames", str(frames),
+                "--frame-rate", str(frame_rate), "--seed", str(seed), "--quiet",
+            ]
+            completed = subprocess.run(
+                command, input=prompt, env=environment, capture_output=True,
+                text=True, timeout=timeout_seconds, check=False,
+            )
+            if completed.returncode or not rendered.is_file() or rendered.stat().st_size == 0:
+                raise RuntimeError(f"LTX generation failed: {completed.stderr[-2000:]}")
+            os.link(rendered, target)
         return GeneratedVideo(target, "video/mp4", self.artifact.fingerprint)

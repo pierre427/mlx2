@@ -1,0 +1,88 @@
+{
+  "initial_base": "376b5f53efc3d0355d9a51a9040438461cff5609",
+  "baseline_broad_cpu": {
+    "runtime_passed": 5149,
+    "runtime_skipped": 204,
+    "runtime_subtests_passed": 84,
+    "runtime_seconds": 411.73,
+    "metadata_passed": 113,
+    "metadata_subtests_passed": 4,
+    "metadata_seconds": 1.84,
+    "additional_hysteresis_regression_passed": true
+  },
+  "integration_validation": {
+    "runtime": {
+      "tests": 5487,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 204,
+      "passed": 5199,
+      "subtests_passed": 84,
+      "seconds": 426.6,
+      "summary": "5199 passed, 204 skipped, 84 subtests passed in 426.64s (0:07:06)",
+      "log_sha256": "52b6b00243f922f7902b5a82e78357bb70284390266f6adce3ed93c410253755",
+      "junit_sha256": "17e01113cce356db41d2d8feddaa0498d10682a61dfc74766312dbb51c5dae4a",
+      "skip_reasons": {
+        "set MLX2_AGENT_CLIENTS=1 with codex and claude installed": 1,
+        "Metal test; set MLX2_RUN_GPU_TESTS=1": 3,
+        "optional local model fixture is absent: ~/mlx-models/granite-swash-3b-a600m": 2,
+        "non-Darwin behaviour": 1,
+        "set MLX2_TEST_INT8_NAX=1 to run M5 NAX numerics": 27,
+        "Metal required": 5,
+        "local 5-bit artifact absent": 2,
+        "local config absent": 13,
+        "Metal oracle test; set MLX2_METAL_TESTS=1 on an idle GPU": 1,
+        "explicit exclusive GPU gate required": 8,
+        "Metal kernel test; set MLX2_RUN_GPU_TESTS=1": 72,
+        "set MLX2_RUN_METAL_TESTS=1 (under the GPU lock) for the real-Metal gate": 49,
+        "set MLX_QWEN4_QSA_INDEXED_TEST_METAL=1 for Metal exactness": 2,
+        "set MLX_QWEN4_QSA_INDEXED_TEST_METAL=1 for the real Metal fixture": 6,
+        "set MLX2_SDK_PYTHON to run the official client SDK smoke": 1,
+        "set MLX2_RUN_GPU_TESTS=1 while holding the GPU lease": 10,
+        "Metal is not available": 1
+      }
+    },
+    "metadata": {
+      "tests": 117,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "passed": 113,
+      "subtests_passed": 4,
+      "seconds": 1.39,
+      "summary": "113 passed, 4 subtests passed in 1.40s",
+      "log_sha256": "31756eaf1216412b9906b2f84d9e3c2d650c38a75c47e2cb6cd1e956185c006f",
+      "junit_sha256": "8862ab24556734653ccbf9f22234498001562556cecbd70ec902734f120bdc3c",
+      "skip_reasons": {}
+    }
+  },
+  "no_gpu_qualification_claimed": true,
+  "completed_at_utc": "2026-09-30T00:13:06.603401+00:00",
+  "integrated_parent": "68c89ce9f5a11d07433861e689cca8bb023b0523",
+  "source_git_tree": "3ec6319a28c635344bbacdc357e9257edbc371fa",
+  "tests_git_tree": "854fdba7cff51ff52d1de19a6c677f8dff1cfb4f",
+  "python": "3.12.13 (main, May 10 2026, 19:20:41) [Clang 22.1.3 ]",
+  "command": "python docs/research/bug-sweep-20260929/validate_cpu.py /tmp/mlx2-bug-sweep-sep29/final",
+  "checks": [
+    "git diff --check",
+    "Ruff F821/F822/F823 across src",
+    "Ruff F across changed production Python and new test/driver",
+    "No unexpected staged binary files or credential-pattern matches",
+    "Validation-driver killed-child exit is nonzero (mocked)"
+  ],
+  "owned_python_sha256": {
+    "docs/research/bug-sweep-20260929/validate_cpu.py": "8fadc5449927cb2d54b48f6082cb38c5ce7637d672cc46920736fbd8b9349b3c",
+    "src/mlx2/adapters/generative_media.py": "bae341f9a3ce31dd2a6b081e1b6ed1c0e224822a828e8f2b7ca3031494fed37e",
+    "src/mlx2/adapters/multimodal.py": "0072bd08011413246f5b3c229b39818d78684bda7366c658a944dce5154386d6",
+    "src/mlx2/runtime/apc_v2.py": "c0c51999e84709c3e82bcb7f1d6403a927fcc84420b6c8cb53b02d34ee21796f",
+    "src/mlx2/runtime/memory_policy.py": "09ff01a5801fbbca8dc9c582912359c49641dc14e9b7742515c935aaf9b9d805",
+    "src/mlx2/runtime/models/nemotron_h.py": "887952b34ccd3b590a94130d2e513903b9cc8d415bd5c3aac54f8e56a8327e1c",
+    "src/mlx2/runtime/models/switch_layers.py": "b5e0c0998ac3954b4b139e97f013bffc3b9a524994e88a29e6bc592040342945",
+    "src/mlx2/runtime/weight_stream.py": "e6ea7dbbf88108259b5728c93a098e0e7b37e63c87fdb309db3691f497d573c0",
+    "tests/test_bug_sweep_sep29.py": "1e298dca05e82a6db66e5847ee35935e2cf5df8dfaff7411d6ad37970d49dcca",
+    "tests/test_laguna_fused_moe.py": "cd7f34c5752f47d56c85e3ef1c725f7f530272fcce3a00e4e16a3ad4179aae85",
+    "tests/test_qwen36_35b_port.py": "8e327642f7d6acf8dced112eff3a7b4e101c50cac71abab702a33153646a9733",
+    "tests/test_segmented_mtp.py": "6888eaa8a51cf13bdb1e8c2b2d9b26a619e960d1071ff3736ebe8adef553bb92"
+  },
+  "new_regressions": 26
+}

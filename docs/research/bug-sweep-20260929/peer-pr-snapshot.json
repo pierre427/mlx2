@@ -1,0 +1,106 @@
+{
+  "retrieved_date": "2026-09-29",
+  "source": "PR MCP live index",
+  "purpose": "Bug-pattern leads only; no peer implementation copied.",
+  "pull_requests": [
+    {
+      "repository": "jundot/omlx",
+      "number": 4081,
+      "title": "fix(cache): cut two-row KV rebuild footprint from 5.01 to 1.52 GiB",
+      "state": "open",
+      "draft": true,
+      "merged": false,
+      "html_url": "https://github.com/jundot/omlx/pull/4081",
+      "updated_at": "2026-09-29T23:20:12Z",
+      "head_sha": "8463125325e81799619dcd296fbd93588e148700"
+    },
+    {
+      "repository": "jundot/omlx",
+      "number": 3918,
+      "title": "fix(scheduler): don't charge a prefill chunk's KV twice at admission",
+      "state": "closed",
+      "draft": false,
+      "merged": false,
+      "html_url": "https://github.com/jundot/omlx/pull/3918",
+      "updated_at": "2026-09-29T19:13:36Z",
+      "head_sha": "d52041a89ab696881da07a78d255ca8c294ae927"
+    },
+    {
+      "repository": "jundot/omlx",
+      "number": 4031,
+      "title": "fix(mtp): hand off, not replay, when a late join meets a just-filtered batch row",
+      "state": "closed",
+      "draft": false,
+      "merged": true,
+      "html_url": "https://github.com/jundot/omlx/pull/4031",
+      "updated_at": "2026-09-29T10:09:26Z",
+      "head_sha": "63346143b9a8c6952f356e12e7de758fc93073b0"
+    },
+    {
+      "repository": "jundot/omlx",
+      "number": 4050,
+      "title": "fix(mtp): greedy verify picks like the serial sampler; row-exact diagnostic for any Apple GPU (M3 follow-up, untested on M3)",
+      "state": "closed",
+      "draft": false,
+      "merged": true,
+      "html_url": "https://github.com/jundot/omlx/pull/4050",
+      "updated_at": "2026-09-29T10:29:40Z",
+      "head_sha": "65a07cab0cea09c9797ccc2c7744db85274f9252"
+    },
+    {
+      "repository": "jundot/omlx",
+      "number": 4047,
+      "title": "perf(qwen35-moe): run batched MoE rows on the fused verify-window launches (bit-exact, 4/5/6/8-bit)",
+      "state": "open",
+      "draft": true,
+      "merged": false,
+      "html_url": "https://github.com/jundot/omlx/pull/4047",
+      "updated_at": "2026-09-28T16:05:39Z",
+      "head_sha": "78b8aa208e83cab7c8ca6f659a39c4095846a892"
+    },
+    {
+      "repository": "jundot/omlx",
+      "number": 3955,
+      "title": "perf(vlm): enable vision feature cache for qwen4_exp; partial-miss encode + byte-budgeted LRU",
+      "state": "open",
+      "draft": false,
+      "merged": false,
+      "html_url": "https://github.com/jundot/omlx/pull/3955",
+      "updated_at": "2026-09-28T06:23:38Z",
+      "head_sha": "4a7464dfd15fb893559f64beb39c61a07ec1a446"
+    },
+    {
+      "repository": "sgl-project/sglang",
+      "number": 41768,
+      "title": "[Fix] Keep every image, video and audio of a request when n > 1",
+      "state": "open",
+      "draft": false,
+      "merged": false,
+      "html_url": "https://github.com/sgl-project/sglang/pull/41768",
+      "updated_at": "2026-09-29T22:30:53Z",
+      "head_sha": "25336f943e8b6e8863fa8bef23702c5547f2823f"
+    },
+    {
+      "repository": "sgl-project/sglang",
+      "number": 41759,
+      "title": "[MoE] Keep the moe_align_block_size pad fill inside sorted_token_ids",
+      "state": "open",
+      "draft": false,
+      "merged": false,
+      "html_url": "https://github.com/sgl-project/sglang/pull/41759",
+      "updated_at": "2026-09-29T21:09:44Z",
+      "head_sha": "85b5d9d69b8b814c858c24d1d39904a738008243"
+    },
+    {
+      "repository": "vllm-project/vllm",
+      "number": 55203,
+      "title": "[Bugfix][Multimodal] Fix per-video cache option reuse",
+      "state": "open",
+      "draft": true,
+      "merged": false,
+      "html_url": "https://github.com/vllm-project/vllm/pull/55203",
+      "updated_at": "2026-09-29T04:55:52Z",
+      "head_sha": "ee9c1a3e891f24dee8aed733ad686c5773599776"
+    }
+  ]
+}

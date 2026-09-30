@@ -450,31 +450,23 @@ class SelfMTPLaneAdmissionController:
     ) -> Tuple[Tuple[int, ...], float]:
         if pending_gib is None:
             pending_gib = (0.0,) * len(contexts)
-        ranked = sorted(
-            indices,
-            key=lambda i: (
-                self.lane_gib(
-                    contexts[i],
-                    draft_depth,
-                    cache_gib[i],
-                    resident_cache=resident_cache[i],
-                    pending_gib=pending_gib[i],
-                ),
-                i,
-            ),
-        )
-        chosen = []
-        used = 0.0
-        for i in ranked:
-            if max_lanes is not None and len(chosen) >= max_lanes:
-                break
-            cost = self.lane_gib(
+        costs = {
+            i: self.lane_gib(
                 contexts[i],
                 draft_depth,
                 cache_gib[i],
                 resident_cache=resident_cache[i],
                 pending_gib=pending_gib[i],
             )
+            for i in indices
+        }
+        ranked = sorted(indices, key=lambda i: (costs[i], i))
+        chosen = []
+        used = 0.0
+        for i in ranked:
+            if max_lanes is not None and len(chosen) >= max_lanes:
+                break
+            cost = costs[i]
             if used + cost <= usable_gib:
                 chosen.append(i)
                 used += cost
@@ -536,6 +528,11 @@ class SelfMTPLaneAdmissionController:
         ]
         depths: List[Optional[int]] = [0 if not ok else None for ok in eligible]
         mtp_candidates = [i for (i, ok) in enumerate(eligible) if ok]
+        plain_rows = len(contexts) - len(mtp_candidates)
+        row_budget = (
+            None if self.verification_row_cap is None
+            else max(0, self.verification_row_cap - plain_rows)
+        )
         if not mtp_candidates:
             return SelfMTPLaneAdmission(
                 tuple(modes), tuple(depths), "plain", 0.0, 0.0, len(contexts), 0
@@ -557,7 +554,7 @@ class SelfMTPLaneAdmissionController:
         usable = max(free - self.hard_reserve_gib, 0.0) if valid else 0.0
         if not valid:
             return SelfMTPLaneAdmission(
-                tuple(modes), tuple(depths), "queue", 0.0, usable, len(contexts), 0
+                tuple(modes), tuple(depths), "queue", 0.0, usable, plain_rows, 0
             )
         if max_draft == 0:
             (chosen, used) = self._fit(
@@ -567,6 +564,7 @@ class SelfMTPLaneAdmissionController:
                 resident_cache,
                 0,
                 usable,
+                max_lanes=row_budget,
                 pending_gib=pending_gib,
             )
             if atomic_cohort and len(chosen) != len(mtp_candidates):
@@ -581,15 +579,15 @@ class SelfMTPLaneAdmissionController:
                 "plain" if chosen else "queue",
                 used,
                 usable,
-                len(contexts),
+                plain_rows + len(chosen),
                 0,
             )
         for depth in range(max_draft, 0, -1):
             lane_cap = self.saturation_lane_cap
-            if self.verification_row_cap is not None:
-                branch_cap = max(
-                    0, (self.verification_row_cap - len(contexts)) // depth
-                )
+            if row_budget is not None:
+                # Queued lanes are detached before the verify forward. Only
+                # selected lanes consume an anchor plus k speculative rows.
+                branch_cap = row_budget // (depth + 1)
                 lane_cap = branch_cap if lane_cap is None else min(lane_cap, branch_cap)
             (chosen, used) = self._fit(
                 mtp_candidates,
@@ -620,7 +618,7 @@ class SelfMTPLaneAdmissionController:
                 stage,
                 used,
                 usable,
-                len(contexts),
+                plain_rows + len(chosen),
                 len(chosen) * depth,
             )
         if atomic_cohort:
@@ -630,7 +628,7 @@ class SelfMTPLaneAdmissionController:
                 "queue",
                 0.0,
                 usable,
-                len(contexts),
+                plain_rows,
                 0,
             )
         (chosen, used) = self._fit(
@@ -640,24 +638,18 @@ class SelfMTPLaneAdmissionController:
             resident_cache,
             0,
             usable,
+            max_lanes=1 if row_budget is None else min(1, row_budget),
             pending_gib=pending_gib,
         )
         if chosen:
             i = chosen[0]
             modes[i] = "plain"
             depths[i] = 0
-            used = self.lane_gib(
-                contexts[i],
-                0,
-                cache_gib[i],
-                resident_cache=resident_cache[i],
-                pending_gib=pending_gib[i],
-            )
             return SelfMTPLaneAdmission(
-                tuple(modes), tuple(depths), "plain", used, usable, len(contexts), 0
+                tuple(modes), tuple(depths), "plain", used, usable, plain_rows + 1, 0
             )
         return SelfMTPLaneAdmission(
-            tuple(modes), tuple(depths), "queue", 0.0, usable, len(contexts), 0
+            tuple(modes), tuple(depths), "queue", 0.0, usable, plain_rows, 0
         )
 
 
@@ -872,7 +864,14 @@ def _make_self_mtp_admission_callback(
                 modes=tuple(modes),
                 draft_depths=tuple(depths),
                 stage="fewer_lanes" if decision.stage == "full" else decision.stage,
+                primary_rows=decision.primary_rows - len(held),
                 speculative_rows=sum(admitted),
+                estimated_gib=decision.estimated_gib - sum(
+                    controller.lane_gib(
+                        contexts[i], decision.draft_depths[i], cache_gib[i],
+                        resident_cache=resident[i], pending_gib=pending_gib[i],
+                    ) for i in held
+                ),
             )
         if observer_stage_override is not None and decision.stage == "full":
             decision = replace(decision, stage=observer_stage_override)

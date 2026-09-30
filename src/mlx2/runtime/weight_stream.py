@@ -474,20 +474,23 @@ class ExpertLRU:
             else:
                 self.stats.misses += 1
                 missing.append(expert)
-        if missing:
-            if not overflow:
+        try:
+            if missing:
+                # Drop unrelated rows before the temporary working set is
+                # materialized, including when that set exceeds capacity.
                 self._evict_for(len(missing), keep=set(wanted))
-            payloads = self.reader.read_many(missing)
-            for expert in missing:
-                # Array construction stays on this thread by contract.
-                self._entries[expert] = self.reader.materialize(payloads[expert])
-                self.stats.page_ins += 1
-                self.stats.page_in_bytes += self.reader.expert_bytes
-        resolved = {expert: self._entries[expert] for expert in wanted}
-        if overflow:
+                payloads = self.reader.read_many(missing)
+                for expert in missing:
+                    # Release each host staging buffer after materialization.
+                    self._entries[expert] = self.reader.materialize(payloads.pop(expert))
+                    self.stats.page_ins += 1
+                    self.stats.page_in_bytes += self.reader.expert_bytes
+            return {expert: self._entries[expert] for expert in wanted}
+        finally:
+            # An OOM/read/materialization error must not leave an oversized
+            # bank resident after the request has failed.
             self._trim_to_capacity()
-        self.stats.resident_bytes = self.resident * self.reader.expert_bytes
-        return resolved
+            self.stats.resident_bytes = self.resident * self.reader.expert_bytes
 
     def _evict_for(self, incoming: int, *, keep) -> None:
         while self.resident + incoming > self.capacity:
@@ -496,7 +499,7 @@ class ExpertLRU:
                 if expert not in keep:
                     victim = expert
                     break
-            if victim is None:  # pragma: no cover - guarded by the overflow path
+            if victim is None:  # Only the current working set remains.
                 break
             self._entries.pop(victim)
             self.stats.evictions += 1

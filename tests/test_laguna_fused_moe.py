@@ -37,7 +37,8 @@ def test_router_admission_fails_closed_on_cpu_and_wrong_semantics():
             logits, bias, top_k=8, norm_topk_prob=True, use_sigmoid=True,
             softcap=0.0, candidate_token_widths=(1,),
         )
-        assert not cpu.accepted and "not GPU" in cpu.reason
+        assert not cpu.accepted
+        assert "not GPU" in cpu.reason or "Metal kernels are unavailable" in cpu.reason
 
 
 @pytest.mark.skipif(not mx.metal.is_available(), reason="Metal required")

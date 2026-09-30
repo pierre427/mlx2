@@ -1191,6 +1191,8 @@ class APCv2(PrefixIndex):
         """
         required = int(nbytes)
         with self._apc_lock:
+            if getattr(self, "_closed", False):
+                return None
             authority = getattr(self, "_capsule_generation", None)
             generation_before = authority.current if authority is not None else None
             available_limit = int(self.max_bytes) - self._capsule_reserved_bytes
@@ -2796,6 +2798,8 @@ class APCv2(PrefixIndex):
         allow_disk_restore: bool = True,
         session_tag: Optional[tuple] = None,
     ) -> APCLookup:
+        if self._closed:
+            raise RuntimeError("APCv2 is closed")
         tokens = [int(token) for token in tokens]
         self._apc_stats["queried_tokens"] += len(tokens)
         # Entries a resume of this session asked to prefetch, and those the
@@ -3214,6 +3218,8 @@ class APCv2(PrefixIndex):
         retention_role: str = _RETENTION_DEFAULT,
         session_tag: Optional[tuple] = None,
     ) -> APCCapabilities:
+        if self._closed:
+            raise RuntimeError("APCv2 is closed")
         tokens = [int(token) for token in tokens]
         capabilities = inspect_apc_capabilities(prompt_cache)
         if not capabilities.exact_prefix:
@@ -3284,6 +3290,12 @@ class APCv2(PrefixIndex):
         removed_entries = []
         resident_limit = self.max_bytes
         sequence_limit = self.max_size
+        protected_republish = bool(
+            replaced_entry is not None
+            and existing_disk_pins
+            and self._persist_dir is not None
+            and getattr(replaced_entry, "_apc_disk", None)
+        )
         # PrefixIndex cannot see APC retention roles, session pins, or live
         # leases.  Subsumption is safe only for disposable ordinary prefixes;
         # APC still owns size/byte eviction after publication.
@@ -3307,7 +3319,9 @@ class APCv2(PrefixIndex):
         try:
             inserted = super().insert_cache(
                 key, tokens, prompt_cache, cache_type=cache_type, sidecar=sidecar,
-                prune_prefixes=can_prune_prefix,
+                # Keep this transaction reversible until the pinned snapshot
+                # has a durable replacement. No unrelated prefix is pruned.
+                prune_prefixes=False if protected_republish else can_prune_prefix,
                 removed_entries=removed_entries,
             )
         finally:
@@ -3322,8 +3336,6 @@ class APCv2(PrefixIndex):
         for reason, _removed_key, _removed_tokens, entry in removed_entries:
             if reason != "replaced":
                 self._record_entry_eviction_locked(entry)
-            if isinstance(entry.prompt_cache, COWFrozenPromptCache):
-                entry.prompt_cache.close()
             if (
                 reason == "replaced"
                 and existing_disk_pins
@@ -3336,6 +3348,8 @@ class APCv2(PrefixIndex):
                 # content has been persisted in its place.
                 superseded_parks.append(entry)
                 continue
+            if isinstance(entry.prompt_cache, COWFrozenPromptCache):
+                entry.prompt_cache.close()
             self._remove_disk_files_locked(entry)
         survivor = self._trie.search(key, tokens)
         if survivor.exact is not None:
@@ -3370,11 +3384,28 @@ class APCv2(PrefixIndex):
             stored_entry._apc_disk_pin_expiries = existing_disk_pins
             stored_entry._apc_resident_pin_expiries = existing_resident_pins
             if superseded_parks:
-                self._spill_entry_locked(
+                persisted = self._spill_entry_locked(
                     key, list(survivor.exact), stored_entry,
                     reason="republish", keep_resident=True,
                 )
+                if not persisted:
+                    # A failed save must not destroy the parked session's
+                    # only crash-safe state or claim the new state was stored.
+                    # Prefix pruning was disabled for this transaction, so
+                    # restoring the exact entry also restores all accounting.
+                    previous = superseded_parks[0]
+                    self._trie.add(key, tokens, previous)
+                    self._lru.remove(key, tokens)
+                    self._lru.push(key, tokens, previous.cache_type)
+                    self._n_bytes += previous.nbytes - stored_entry.nbytes
+                    self._n_bytes_by_type[stored_entry.cache_type] -= stored_entry.nbytes
+                    self._n_bytes_by_type[previous.cache_type] += previous.nbytes
+                    if cow_source is not None:
+                        cow_source.close()
+                    return replace(capabilities, stored=False)
         for entry in superseded_parks:
+            if isinstance(entry.prompt_cache, COWFrozenPromptCache):
+                entry.prompt_cache.close()
             self._remove_disk_files_locked(entry)
         if survivor.exact is not None:
             self._enforce_entry_limits_locked(
@@ -3591,6 +3622,7 @@ class APCv2(PrefixIndex):
             if self._closed:
                 return
             self._closed = True
+            self._capsule_generation.advance()
             self._cancel_pending_prefetch_locked()
         if self._persist_dir is not None and persist_resident:
             self.park_all(time_budget_seconds=time_budget_seconds)

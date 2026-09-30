@@ -392,13 +392,13 @@ def group_expert_select(
 
     orig_scores = scores = mx.sigmoid(gates.astype(mx.float32))
     scores = scores + e_score_correction_bias
-    if n_group > 1:
+    if n_group > topk_group:
         scores = mx.unflatten(scores, axis=-1, shape=(n_group, -1))
         group_scores = mx.topk(scores, 2, axis=-1).sum(axis=-1, keepdims=True)
         k = n_group - topk_group
         group_idx = mx.argpartition(group_scores, kth=k - 1, axis=-2)[..., :k, :]
         scores = mx.put_along_axis(
-            scores, mx.stop_gradient(group_idx), mx.array(0.0), axis=-2
+            scores, mx.stop_gradient(group_idx), mx.array(-float("inf")), axis=-2
         )
         scores = mx.flatten(scores, -2, -1)
 
@@ -421,11 +421,19 @@ class MoEGate(nn.Module):
         self.norm_topk_prob = config.norm_topk_prob
         self.n_routed_experts = config.n_routed_experts
         # Puzzle configs omit group routing / scaling; default to the identity
-        # (no grouping, unit scale) so group_expert_select's `n_group > 1`
-        # guard doesn't hit a `None > 1` TypeError.
-        self.routed_scaling_factor = config.routed_scaling_factor or 1.0
-        self.n_group = config.n_group or 1
-        self.topk_group = config.topk_group or 1
+        # (no grouping, unit scale), preserving explicitly configured zeroes.
+        self.routed_scaling_factor = (
+            1.0 if config.routed_scaling_factor is None else config.routed_scaling_factor
+        )
+        self.n_group = 1 if config.n_group is None else config.n_group
+        self.topk_group = 1 if config.topk_group is None else config.topk_group
+        if (
+            self.n_group < 1 or not 1 <= self.topk_group <= self.n_group
+            or self.n_routed_experts % self.n_group
+            or not 1 <= self.top_k <= self.topk_group * (self.n_routed_experts // self.n_group)
+            or (self.n_group > self.topk_group and self.n_routed_experts // self.n_group < 2)
+        ):
+            raise ValueError("invalid Nemotron grouped expert routing geometry")
         self.weight = mx.zeros((self.n_routed_experts, config.hidden_size))
         self.e_score_correction_bias = mx.zeros((self.n_routed_experts,))
 

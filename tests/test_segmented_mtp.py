@@ -1271,7 +1271,8 @@ def test_generation_batch_promotes_after_one_uniform_segmented_cycle():
     with patch(
         "mlx2.runtime.segmented_physical_promotion.begin_segmented_physical_promotion",
         side_effect=begin,
-    ):
+    ), patch("mlx2.runtime.generate.mx.new_stream", return_value=None):
+        # The fake promotion ticket does not execute tensors or need a GPU stream.
         batch = MTPGenerationBatch(
             object(),
             detached,
@@ -2601,7 +2602,8 @@ def _promoted_physical_cohort():
     with patch(
         "mlx2.runtime.segmented_physical_promotion.begin_segmented_physical_promotion",
         side_effect=begin,
-    ):
+    ), patch("mlx2.runtime.generate.mx.new_stream", return_value=None):
+        # The fake promotion ticket does not execute tensors or need a GPU stream.
         batch = MTPGenerationBatch(
             object(), [_detached(0), _detached(1)], [None, None],
             [StopSequenceMatcher(), StopSequenceMatcher()],
