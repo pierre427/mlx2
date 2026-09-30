@@ -545,6 +545,53 @@
       "status": "passed",
       "swapout_pages": 0,
       "tag": "ladder-1024-32768-r3-lightning-ordinary-post-clamp-cooled-20260929"
+    },
+    {
+      "cells": [
+        {
+          "cold_ttft_median_seconds": 16.48779758310411,
+          "context_tokens": 65536,
+          "decode_median_tokens_per_second_per_stream": 76.85378362458015,
+          "needle_quality": "6/6 needles",
+          "passed": true,
+          "prefill_median_tokens_per_second": 3974.7576757709026,
+          "repetitions": 3,
+          "width": 1
+        },
+        {
+          "cold_ttft_median_seconds": 51.47067704203073,
+          "context_tokens": 131072,
+          "decode_median_tokens_per_second_per_stream": 58.03509175260059,
+          "needle_quality": "6/6 needles",
+          "passed": true,
+          "prefill_median_tokens_per_second": 2546.5373205207147,
+          "repetitions": 3,
+          "width": 1
+        },
+        {
+          "cold_ttft_median_seconds": 156.63615095906425,
+          "context_tokens": 262144,
+          "decode_median_tokens_per_second_per_stream": 40.713891374652135,
+          "needle_quality": "6/6 needles",
+          "passed": true,
+          "prefill_median_tokens_per_second": 1671.9511964287387,
+          "repetitions": 3,
+          "width": 1
+        }
+      ],
+      "host_caps": {
+        "cache_gib": 8,
+        "max_context": null
+      },
+      "ladder_sha256": "1f3afdd051090bffd5f3c011491804d7ba01ad72db727603df48ce550ae04bab",
+      "passed": true,
+      "receipt_sha256": "ce473026a4aa77029e8390fe06e673a3d5709af0622421bf3e703900e26f7796",
+      "route": "ordinary",
+      "runs_per_cell": 3,
+      "source_head": "3219e5d1807fead5984830a2341dd6a03639abad",
+      "status": "passed",
+      "swapout_pages": 0,
+      "tag": "ladder-65536-262144-r3-w1-lightning-ordinary-post-clamp-long-20260929"
     }
   ],
   "model": "nemotron35-lightning",

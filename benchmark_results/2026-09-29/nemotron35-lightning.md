@@ -2,7 +2,7 @@
 
 Artifact: `NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16-mlx-8Bit`, config SHA-256 `a1b0135c0973322d188a836c86746e69ea07c02b241e1f26681bf5123345359b`. The target is pinned to revision `a9db86e1fe5baf448346efd33541ce117b5b8403`; the separately verified original BF16 MTP head is pinned to revision `a9904d24bcc1d289a1950fa9d2b978c47cf903b9` and SHA-256 `64577b275ca4e7e5266eae0903674f7f46ec2a8cbf4f4f1a3207f80d503cd1d0`.
 
-**Current-source boundary:** private main gained `46139b74`, changing the Lightning Mamba time-step clamp and therefore model outputs, after the earlier runs below. Their passes and speed measurements remain source-bound historical evidence. Ordinary smoke and the capped 20×20 workload passed on `9f5e525d`; its cooled 1K–32K ladder passed on `0fb9c092`. After later APCv2/serving changes, ordinary and native-MTP2 smokes passed, followed by a fresh capped ordinary 20×20 pass on `021e532c`. The first native-MTP2 20×20 attempt answered 400/400 but did not engage batched MTP; the route remains unqualified. Nine applicable feature checks have now engaged and passed across a combined run and two isolated reruns on `340f5209`. The post-clamp 64K–262K ladder remains pending.
+**Current-source boundary:** private main gained `46139b74`, changing the Lightning Mamba time-step clamp and therefore model outputs, after the earlier runs below. Their passes and speed measurements remain source-bound historical evidence. Ordinary smoke and the capped 20×20 workload passed on `9f5e525d`; its cooled 1K–32K ladder passed on `0fb9c092`. After later APCv2/serving changes, ordinary and native-MTP2 smokes passed, followed by a fresh capped ordinary 20×20 pass on `021e532c`. The first native-MTP2 20×20 attempt answered 400/400 but did not engage batched MTP; the route remains unqualified. Nine applicable feature checks engaged and passed across a combined run and two isolated reruns on `340f5209`. The cooled ordinary 64K–262K ladder passed on `3219e5d1`.
 
 ## Host coverage
 
@@ -65,7 +65,7 @@ The post-clamp source `0fb9c092` started its 1K–32K ladder more than 10 minute
 | 32K | 1 | 9.059 s | 3,617 | 83.1 |
 | 32K | 4 | 28.559 s | 1,306 | 38.3 |
 
-The cooled 16K/32K decode medians are near the older `7dd504ba` ladder and substantially above the short-cooldown `ab212902` ladder. The source also changed, so cooldown is a strong confounder rather than an isolated causal explanation. Some longer-context prefill medians remain below the older ladder. The 64K–262K extension, MTP, and feature gates on the post-clamp source remain pending.
+The cooled 16K/32K decode medians are near the older `7dd504ba` ladder and substantially above the short-cooldown `ab212902` ladder. The source also changed, so cooldown is a strong confounder rather than an isolated causal explanation. Some longer-context prefill medians remain below the older ladder. The later 64K–262K ordinary extension and applicable feature gates are recorded below; MTP batching remains unqualified.
 
 On source `129092a2`, the native-MTP2 served smoke passed arithmetic and knowledge prompts with the correct sampling defaults and healthy final status. Both response receipts selected segmented self-MTP with exact verification and draft depth two. Arithmetic proposed/accepted **112/99** draft tokens; knowledge proposed/accepted **86/79**. This demonstrates an engaged candidate route, not batched, long-context, performance, feature, or production qualification. Ordinary smoke also passed after the APCv2/serving changes on `a6a57089`.
 
@@ -82,6 +82,18 @@ The combined M5 feature run passed **7/9 applicable checks** with zero swapouts 
 Two isolated fresh-server reruns on the same source closed those observations. The corrected Fly gate passed: greedy generation selected Fly, sampling and a logits penalty selected exact verification for their documented reasons. No relaxed accept happened in these three replies, so this proves route selection and fallback, not a measured relaxation benefit. A longer 300-unit rolling prefill with 64-token server slices passed: a cancelled request's retry reused **1,024 tokens**, recorded one rolling hit, and returned HTTP 200. The original short probe's missed recovery remains in the record. All three feature runs had zero swapouts.
 
 Across these source-bound checks, all nine applicable mechanisms have a passing engagement check, but there is no single 9/9 combined receipt. These gates do not select defaults or establish speed wins. In particular, Fly and copy draft ride the native-MTP route, whose eight-lane batching and performance remain unqualified. PLD rotating replay, Spomin live compaction, INT8 prefill, multi-LoRA, and bitexact verification were not applicable to this local artifact and environment; no qualification is claimed for them.
+
+## Cooled ordinary 64K–262K ladder on `3219e5d1`
+
+After more than ten minutes without M5 GPU work, the width-one, 8 GiB-cache ladder passed **all three rungs**, **all nine thermally admitted measured repetitions**, and **18/18 needle checks**, with zero swapouts. Each median below is from three cold measured repetitions; decode is per stream. This qualifies the measured ordinary profile through the artifact's 262,144-token declared limit. It does not extend MTP or four-stream long-context qualification.
+
+| Context | Median cold TTFT | Median prefill tok/s | Median decode tok/s |
+|---:|---:|---:|---:|
+| 64K | 16.488 s | 3,975 | 76.9 |
+| 131K | 51.471 s | 2,547 | 58.0 |
+| 262K | 156.636 s | 1,672 | 40.7 |
+
+The older long ladder's missed needles remain valid for its older source and incomplete run. The clean new-source result resolves this model's ordinary width-one long-context gate on the current source; code, profile, and thermal history differ, so the comparison does not isolate a single cause.
 
 The older 64K–262K width-one extension was **interrupted** after newer main commits changed Nemotron runtime math and APC/lane ownership. At its older source, the 64K cell missed one exact-code needle repetition (4/6 checks); one completed 131K repetition missed both needles. Those are real failures for that source, but the incomplete ladder does not qualify long context on the newer main. Its 8 GiB cache profile had zero swapouts. The MTP route remains implemented and opt-in pending served qualification. No selected speculative route is claimed.
 
@@ -110,6 +122,7 @@ The older 64K–262K width-one extension was **interrupted** after newer main co
 | M5 | combined feature run on `340f5209`, 7/9 | `8329c2bbf741104395f12a939dc3b913ed7b18abaf0118c1550f4153426df74c` |
 | M5 | isolated Fly gate on `340f5209`, passed | `50a485f4a318a3cc9ba2d6982530d2801b68878672d624ec467c835d2a6550b0` |
 | M5 | isolated rolling gate on `340f5209`, passed | `b390d946ff5d317e51e37c212174f5a1a231522815325a1eabbdd0d1ad517bba` |
+| M5 | cooled ordinary 64K–262K ladder on `3219e5d1`, passed | `ce473026a4aa77029e8390fe06e673a3d5709af0622421bf3e703900e26f7796` |
 | M3 | hash-verified load feasibility | `119c027c459044036e7d36016576feced932a5e8e40d516876feda83db9fc1d4` |
 | M3 | integrated-source CPU and memory feasibility | `0b9861b9d31ddf88516c5702f5e41d2cec74898e9810095344e349e884eee3cc` |
 | M3 | post-clamp source CPU and memory feasibility | `8810035cf000a2a748bcdf68738d4fc1eb039edc1b2a8980df8a0ae58b9b05f1` |
