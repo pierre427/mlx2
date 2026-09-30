@@ -146,6 +146,7 @@ def main() -> None:
         "lightning-ordinary-l8c4-think4096-20260929",
         "lightning-ordinary-latest-d174-20260929",
         "lightning-ordinary-current-mamba-clamp-20260929",
+        "lightning-ordinary-current-apc-20260929",
     )
     report = {
         "schema": "mlx2.public-lightning-evidence.v1",

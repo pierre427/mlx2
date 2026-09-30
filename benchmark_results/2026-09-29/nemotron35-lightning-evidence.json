@@ -642,6 +642,36 @@
       "thinking_allowance": 4096,
       "weighted_generated_tokens_per_second": 195.45,
       "workload_sha256": "c91249c655fadb1807d6930fc25d41e0db13e856099187c55af04a2e18a2f4c4"
+    },
+    {
+      "aggregate_generated_tokens_per_second": {
+        "max": 223.6,
+        "median": 206.0,
+        "min": 188.3
+      },
+      "apcv2_probe_passed": true,
+      "batching_engaged": true,
+      "cache_cap_gib": 4,
+      "completion_tokens": 232318,
+      "graded_correct": 400,
+      "http_errors": 0,
+      "issues": {},
+      "max_lanes": 8,
+      "observed_widths": {
+        "8": 380,
+        "None": 20
+      },
+      "receipt_sha256": "006f05e90456c3e8ef9efdfcbf52b9b7346c10d2b5626df3f7ac5addb712c913",
+      "requests": 400,
+      "round_seconds": 1125.55,
+      "route": "ordinary",
+      "source_head": "021e532c5783669cc8fb60d849f92bead9c61c42",
+      "status": "passed",
+      "swapout_pages": 0,
+      "tag": "lightning-ordinary-current-apc-20260929",
+      "thinking_allowance": 4096,
+      "weighted_generated_tokens_per_second": 206.4,
+      "workload_sha256": "9a60975a864029fbb6770182107e0b2e9d8129ac221ae48f6635e2d23c84021c"
     }
   ]
 }
