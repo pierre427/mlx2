@@ -226,6 +226,22 @@ GEMMA4 = tuple(
 )
 FAMILY_OF.update({model.name: "gemma4" for model in GEMMA4})
 MODELS = MODELS + SERIES_VARIANTS + GEMMA4
+# Opt-in only (MLX2_REQUAL_EXTRA=1): served families outside the series roster
+# whose serving code changed in the 2026-09-29 bug sweep. The default roster,
+# and so the paused requal-20260928 campaign, is unchanged without the flag.
+_PLAIN_TEXT = frozenset({"text", "streaming", "apc"})
+SWEEP_EXTRA = tuple(
+    Model(name, label, _M + artifact, context, (Route("ordinary", ("--ordinary",), None, None),),
+          "ordinary", _PLAIN_TEXT, 8, _ladder_cache(weights))
+    for name, label, artifact, context, weights in (
+        ("agnes-flash-6bit", "Agnes 3.0 Flash Preview 6-bit", "Agnes-3.0-Flash-Preview-MLX-6bit", 32768, 25),
+        ("gpt-oss-puzzle-q6", "gpt-oss-puzzle 88B q6 dense", "gpt-oss-puzzle-88B-q6dense-mlx", 32768, 44),
+        ("granite-swash-4bit", "Granite Swash 3B-A600M 4-bit", "granite-swash-3b-a600m-mlx-4bit", 8192, 2),
+        ("qwen3-8b-8bit", "Qwen3-8B 8-bit (standard decoder)", "Qwen3-8B-8bit", 32768, 8),
+    )
+)
+if os.environ.get("MLX2_REQUAL_EXTRA") == "1":
+    MODELS = MODELS + SWEEP_EXTRA
 # Artifacts that are gone from disk are reported, not tested.
 MISSING = tuple(model for model in MODELS if not Path(model.path).is_dir())
 MODELS = tuple(model for model in MODELS if Path(model.path).is_dir())

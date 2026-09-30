@@ -37,6 +37,9 @@ def stress(tag: str) -> dict | None:
     rates = [float(rate) for rate in rates if isinstance(rate, (float, int))]
     total_tokens = sum(row.get("completion_tokens", 0) for row in rounds)
     total_seconds = sum(row.get("seconds", 0) for row in rounds)
+    final_status = receipt.get("status_after") or {}
+    mtp = final_status.get("segmented_self_mtp") or {}
+    scheduler = final_status.get("scheduler") or {}
     return {
         "tag": tag,
         "source_head": receipt.get("source_head"),
@@ -48,6 +51,12 @@ def stress(tag: str) -> dict | None:
         "swapout_pages": (receipt.get("swapouts") or {}).get("delta"),
         "apcv2_probe_passed": (receipt.get("apc_probe") or {}).get("passed"),
         "batching_engaged": receipt.get("batching_engaged"),
+        "batching_evidence": receipt.get("batching_evidence"),
+        "mtp_status_counters": {key: mtp.get(key) for key in (
+            "batched_target_forwards", "true_batched_engaged", "true_batched_declined"
+        )} if mtp else None,
+        "mtp_ordinary_handoff_events": scheduler.get("mtp_ordinary_handoff_events"),
+        "mtp_ordinary_handoff_lanes": scheduler.get("mtp_ordinary_handoff_lanes"),
         "requests": (result or {}).get("requests"),
         "graded_correct": (result or {}).get("graded_correct"),
         "http_errors": (result or {}).get("http_errors"),
@@ -147,6 +156,7 @@ def main() -> None:
         "lightning-ordinary-latest-d174-20260929",
         "lightning-ordinary-current-mamba-clamp-20260929",
         "lightning-ordinary-current-apc-20260929",
+        "lightning-mtp2-current-apc-20260929",
     )
     report = {
         "schema": "mlx2.public-lightning-evidence.v1",

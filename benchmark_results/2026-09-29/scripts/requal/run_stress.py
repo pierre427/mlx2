@@ -187,6 +187,7 @@ def main() -> int:
                     receipt["batching_evidence"] = {
                         "ordinary_reply_widths": widths,
                         "mtp_batched_target_forwards": mtp_batches,
+                        "mtp_reply_routes": report.get("mtp_reply_routes", {}),
                     }
                     receipt["batching_engaged"] = (any(width > 1 and count > 0
                                                        for width, count in widths.items())

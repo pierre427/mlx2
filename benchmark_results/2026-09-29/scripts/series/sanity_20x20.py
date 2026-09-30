@@ -190,6 +190,18 @@ def call(body):
     return record
 
 
+def compact_mlx2_receipt(receipt):
+    receipt = receipt or {}
+    mtp = receipt.get("mtp") or {}
+    result = {k: receipt.get(k) for k in (
+        "ordinary_compute_width", "cached_tokens", "ttft_seconds", "elapsed_seconds")}
+    result["speculation"] = bool(mtp or receipt.get("speculation"))
+    result["mtp_route"] = mtp.get("route")
+    result["mtp_observed_compute_widths"] = mtp.get("observed_compute_widths") or []
+    result["mtp_ordinary_compute_widths"] = mtp.get("ordinary_compute_widths") or []
+    return result
+
+
 def call_once(body):
     request = urllib.request.Request(BASE + "/v1/chat/completions", data=json.dumps(body).encode(), headers={"Content-Type": "application/json"})
     started = time.time()
@@ -222,6 +234,7 @@ def call_once(body):
                 if not done:
                     record["finish"] = "no_done_event"
                 record["choices"] = 1
+                record["mlx2"] = compact_mlx2_receipt(record["mlx2"])
             else:
                 data = json.loads(response.read())
                 choices = data.get("choices", [])
@@ -233,8 +246,7 @@ def call_once(body):
                 record["finish"] = choices[0].get("finish_reason") if choices else None
                 record["logprobs"] = choices[0].get("logprobs") if choices else None
                 record["usage"] = data.get("usage", {})
-                record["mlx2"] = {k: data.get("mlx2", {}).get(k) for k in ("ordinary_compute_width", "cached_tokens", "ttft_seconds", "elapsed_seconds")}
-                record["mlx2"]["speculation"] = bool(data.get("mlx2", {}).get("mtp") or data.get("mlx2", {}).get("speculation"))
+                record["mlx2"] = compact_mlx2_receipt(data.get("mlx2"))
     except urllib.error.HTTPError as error:
         record["code"] = error.code
         record["content"] = error.read().decode(errors="replace")[:400]
@@ -294,8 +306,8 @@ def main():
     summary = {task: {"n": e["n"], "correct": e["correct"], "issues": dict(e["issues"])} for task, e in by_task.items()}
     widths = Counter(r["mlx2"].get("ordinary_compute_width") for r in records if r["mlx2"])
     counts = {k: after["counts"].get(k, 0) - before["counts"].get(k, 0) for k in after["counts"] if k != "peak_observed_width"}
-    mtp_before = ((before.get("execution") or {}).get("segmented_mtp") or {})
-    mtp_after = ((after.get("execution") or {}).get("segmented_mtp") or {})
+    mtp_before = before.get("segmented_self_mtp") or ((before.get("execution") or {}).get("segmented_mtp") or {})
+    mtp_after = after.get("segmented_self_mtp") or ((after.get("execution") or {}).get("segmented_mtp") or {})
     mtp_delta = {key: value - mtp_before.get(key, 0)
                  for key, value in mtp_after.items()
                  if isinstance(value, int) and not isinstance(value, bool)
@@ -311,6 +323,8 @@ def main():
         "by_task": summary, "rounds_detail": rounds, "observed_widths": {str(k): v for k, v in widths.items()},
         "counts_delta": {k: v for k, v in counts.items() if v}, "peak_observed_width": after["counts"].get("peak_observed_width"),
         "segmented_mtp_delta": {k: v for k, v in mtp_delta.items() if v},
+        "mtp_reply_routes": dict(Counter((r["mlx2"] or {}).get("mtp_route") for r in records
+                                         if (r["mlx2"] or {}).get("mtp_route"))),
         "scheduler": after.get("scheduler"), "healthy": after["healthy"], "inflight": after["inflight"], "error": after.get("error"),
         "active_leases": after.get("apcv2", {}).get("cow", {}).get("active_leases"),
         "records": records,

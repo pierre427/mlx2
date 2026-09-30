@@ -502,12 +502,16 @@
       "aggregate_generated_tokens_per_second": null,
       "apcv2_probe_passed": true,
       "batching_engaged": null,
+      "batching_evidence": null,
       "cache_cap_gib": 8,
       "completion_tokens": 0,
       "graded_correct": null,
       "http_errors": null,
       "issues": null,
       "max_lanes": 20,
+      "mtp_ordinary_handoff_events": null,
+      "mtp_ordinary_handoff_lanes": null,
+      "mtp_status_counters": null,
       "observed_widths": null,
       "receipt_sha256": "d15d39d247587671b36e84eab87c92017e5133de3bc10ca5ec09c4e24e87b793",
       "requests": null,
@@ -529,6 +533,7 @@
       },
       "apcv2_probe_passed": true,
       "batching_engaged": null,
+      "batching_evidence": null,
       "cache_cap_gib": 4,
       "completion_tokens": 229735,
       "graded_correct": 397,
@@ -537,6 +542,9 @@
         "empty": 3
       },
       "max_lanes": 8,
+      "mtp_ordinary_handoff_events": null,
+      "mtp_ordinary_handoff_lanes": null,
+      "mtp_status_counters": null,
       "observed_widths": {
         "8": 380,
         "None": 20
@@ -561,12 +569,25 @@
       },
       "apcv2_probe_passed": true,
       "batching_engaged": true,
+      "batching_evidence": {
+        "mtp_batched_target_forwards": 0,
+        "ordinary_reply_widths": {
+          "8": 380
+        }
+      },
       "cache_cap_gib": 4,
       "completion_tokens": 236786,
       "graded_correct": 400,
       "http_errors": 0,
       "issues": {},
       "max_lanes": 8,
+      "mtp_ordinary_handoff_events": null,
+      "mtp_ordinary_handoff_lanes": null,
+      "mtp_status_counters": {
+        "batched_target_forwards": 0,
+        "true_batched_declined": 0,
+        "true_batched_engaged": 0
+      },
       "observed_widths": {
         "8": 380,
         "None": 20
@@ -591,12 +612,25 @@
       },
       "apcv2_probe_passed": true,
       "batching_engaged": true,
+      "batching_evidence": {
+        "mtp_batched_target_forwards": 0,
+        "ordinary_reply_widths": {
+          "8": 380
+        }
+      },
       "cache_cap_gib": 4,
       "completion_tokens": 237876,
       "graded_correct": 400,
       "http_errors": 0,
       "issues": {},
       "max_lanes": 8,
+      "mtp_ordinary_handoff_events": null,
+      "mtp_ordinary_handoff_lanes": null,
+      "mtp_status_counters": {
+        "batched_target_forwards": 0,
+        "true_batched_declined": 0,
+        "true_batched_engaged": 0
+      },
       "observed_widths": {
         "8": 380,
         "None": 20
@@ -621,12 +655,25 @@
       },
       "apcv2_probe_passed": true,
       "batching_engaged": true,
+      "batching_evidence": {
+        "mtp_batched_target_forwards": 0,
+        "ordinary_reply_widths": {
+          "8": 380
+        }
+      },
       "cache_cap_gib": 4,
       "completion_tokens": 234479,
       "graded_correct": 400,
       "http_errors": 0,
       "issues": {},
       "max_lanes": 8,
+      "mtp_ordinary_handoff_events": null,
+      "mtp_ordinary_handoff_lanes": null,
+      "mtp_status_counters": {
+        "batched_target_forwards": 0,
+        "true_batched_declined": 0,
+        "true_batched_engaged": 0
+      },
       "observed_widths": {
         "8": 380,
         "None": 20
@@ -651,12 +698,25 @@
       },
       "apcv2_probe_passed": true,
       "batching_engaged": true,
+      "batching_evidence": {
+        "mtp_batched_target_forwards": 0,
+        "ordinary_reply_widths": {
+          "8": 380
+        }
+      },
       "cache_cap_gib": 4,
       "completion_tokens": 232318,
       "graded_correct": 400,
       "http_errors": 0,
       "issues": {},
       "max_lanes": 8,
+      "mtp_ordinary_handoff_events": null,
+      "mtp_ordinary_handoff_lanes": null,
+      "mtp_status_counters": {
+        "batched_target_forwards": 0,
+        "true_batched_declined": 0,
+        "true_batched_engaged": 0
+      },
       "observed_widths": {
         "8": 380,
         "None": 20
@@ -672,6 +732,46 @@
       "thinking_allowance": 4096,
       "weighted_generated_tokens_per_second": 206.4,
       "workload_sha256": "9a60975a864029fbb6770182107e0b2e9d8129ac221ae48f6635e2d23c84021c"
+    },
+    {
+      "aggregate_generated_tokens_per_second": {
+        "max": 218.3,
+        "median": 206.45,
+        "min": 162.2
+      },
+      "apcv2_probe_passed": true,
+      "batching_engaged": false,
+      "batching_evidence": {
+        "mtp_batched_target_forwards": 0,
+        "ordinary_reply_widths": {}
+      },
+      "cache_cap_gib": 4,
+      "completion_tokens": 229109,
+      "graded_correct": 400,
+      "http_errors": 0,
+      "issues": {},
+      "max_lanes": 8,
+      "mtp_ordinary_handoff_events": 21,
+      "mtp_ordinary_handoff_lanes": 168,
+      "mtp_status_counters": {
+        "batched_target_forwards": 0,
+        "true_batched_declined": 26,
+        "true_batched_engaged": 0
+      },
+      "observed_widths": {
+        "None": 400
+      },
+      "receipt_sha256": "84040c868a761f971045e52115e597257e17bcf94fde27c7fb493518331cbdf9",
+      "requests": 400,
+      "round_seconds": 1135.32,
+      "route": "mtp2",
+      "source_head": "9ed3d6f2125702d957fb47043e4f0100e6d5d0f5",
+      "status": "failed",
+      "swapout_pages": 0,
+      "tag": "lightning-mtp2-current-apc-20260929",
+      "thinking_allowance": 4096,
+      "weighted_generated_tokens_per_second": 201.8,
+      "workload_sha256": "84ee9e576c17eb67f5480b0e5c2c847f3d1187e405f7bab6ece74a9919057e79"
     }
   ]
 }
