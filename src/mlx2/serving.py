@@ -4572,6 +4572,25 @@ class ServingEngine:
                 else self.adapter_factory(self.model_path)
             )
             self.adapter = adapter
+            prefill_execution_identity = getattr(
+                adapter, "prefill_execution_identity", None
+            )
+            if (
+                prefill_execution_identity is not None
+                and not self.qualification_mode
+                and not self.qualification
+            ):
+                raise ValueError(
+                    "prefill candidates require qualification mode or a matching qualification receipt"
+                )
+            if getattr(adapter, "tensorfold_prefill", None) and (
+                self.lane_matmul != "off"
+                or self.sp_qmm_enabled
+                or self.int8_prefill_policy.enabled
+            ):
+                raise ValueError(
+                    "TensorFold prefill cannot share projections with lane_matmul, sp_qmm or int8_prefill"
+                )
             if getattr(adapter, "tensorfold_qmv", None) and self.lane_matmul != "off":
                 raise ValueError(
                     "TensorFold Flash qmv and lane_matmul cannot own the same projections"
@@ -4688,13 +4707,24 @@ class ServingEngine:
             ):
                 self._clamp_host_default_cache_bytes(adapter)
             settings = {
+                **(
+                    {"prefill_execution": prefill_execution_identity}
+                    if prefill_execution_identity is not None
+                    else {}
+                ),
                 # Present only when enabled, so default-off settings are unchanged.
                 # Bound into route identity: the resolved law, not the request.
-                **({"lane_matmul": {
-                    "mode": self.lane_matmul_receipt["policy"]["mode"],
-                    "law_id": self.lane_matmul_receipt["law_id"],
-                    "covered": self.lane_matmul_receipt["covered"],
-                }} if (self.lane_matmul_receipt or {}).get("covered") else {}),
+                **(
+                    {
+                        "lane_matmul": {
+                            "mode": self.lane_matmul_receipt["policy"]["mode"],
+                            "law_id": self.lane_matmul_receipt["law_id"],
+                            "covered": self.lane_matmul_receipt["covered"],
+                        }
+                    }
+                    if (self.lane_matmul_receipt or {}).get("covered")
+                    else {}
+                ),
                 "max_context": self.max_context,
                 "default_max_tokens": self.default_max_tokens,
                 "max_lanes": self.max_lanes,
@@ -4730,9 +4760,7 @@ class ServingEngine:
                 "environment": adapter.environment,
                 "adaptive_mtp_depth": self.adaptive_mtp_policy.as_dict(),
                 "mtp_acceptance_log": (
-                    None
-                    if self.mtp_acceptance_log is None
-                    else {"enabled": True}
+                    None if self.mtp_acceptance_log is None else {"enabled": True}
                 ),
                 "fly_verification": self.fly_verification_policy.as_dict(),
                 "self_mtp_copy_draft": self.copy_draft_policy.as_dict(),
@@ -4748,9 +4776,7 @@ class ServingEngine:
                 "tolerant_tool_markers": self.tolerant_tool_markers,
                 "cache_capsules": dict(self.cache_capsule_policy),
                 "persistent_block_bytes": self.persistent_block_bytes,
-                "apc_interior_checkpoints": dict(
-                    self.apc_interior_checkpoint_policy
-                ),
+                "apc_interior_checkpoints": dict(self.apc_interior_checkpoint_policy),
             }
             mlx_vlm_runtime = getattr(adapter, "mlx_vlm_runtime", None)
             if mlx_vlm_runtime is not None:
@@ -5224,6 +5250,7 @@ class ServingEngine:
             # cannot compose batching with APCv2 reuse.
             from .runtime.int8_prefill import apc_semantic_fingerprint
             from .runtime.lane.installer import apc_lane_fingerprint
+            from .runtime.prefill_plan import apc_prefill_fingerprint
 
             persistent_identity = APCv2.key(
                 adapter.identity["fingerprint"],
@@ -5233,8 +5260,11 @@ class ServingEngine:
                 cache_layout_fingerprint=adapter.layout,
                 semantic_fingerprint=apc_semantic_fingerprint(
                     apc_lane_fingerprint(
-                        cache_semantic_fingerprint(
-                            "__tenant_template__" if self.tenant_scoped_cache else None
+                        apc_prefill_fingerprint(
+                            cache_semantic_fingerprint(
+                                "__tenant_template__" if self.tenant_scoped_cache else None
+                            ),
+                            prefill_execution_identity,
                         ),
                         self.lane_matmul_receipt,
                     ),
@@ -5287,7 +5317,12 @@ class ServingEngine:
                         # Int8-prefill state lives in its own namespace
                         # (memory and disk); identity when disabled.
                         semantic_fingerprint=apc_semantic_fingerprint(
-                            apc_lane_fingerprint(semantic, self.lane_matmul_receipt),
+                            apc_lane_fingerprint(
+                                apc_prefill_fingerprint(
+                                    semantic, prefill_execution_identity
+                                ),
+                                self.lane_matmul_receipt,
+                            ),
                             self.int8_prefill_policy,
                         ),
                     )

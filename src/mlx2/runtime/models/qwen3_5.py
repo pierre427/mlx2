@@ -115,12 +115,34 @@ class GatedDeltaNet(nn.Module):
     def _normalize_qk(self, q, k):
         return normalize_gdn_qk(q, k)
 
-    def _gated_delta_update(self, q, k, v, a, b, state, mask, use_kernel):
+    def _gated_delta_update(
+        self, q, k, v, a, b, state, mask, use_kernel, *, prefill=False
+    ):
         return gated_delta_update(
-            q, k, v, a, b, self.A_log, self.dt_bias, state, mask, use_kernel=use_kernel
+            q,
+            k,
+            v,
+            a,
+            b,
+            self.A_log,
+            self.dt_bias,
+            state,
+            mask,
+            use_kernel=use_kernel,
+            prefill_chunk_size=getattr(self, "_prefill_scan_chunk", 0)
+            if prefill
+            else 0,
+            prefill_stats=getattr(self, "_prefill_scan_stats", None),
+            prefill_segment_rows=getattr(self, "_prefill_scan_segment", 256),
         )
 
     def _input_projections(self, inputs: mx.array):
+        if hasattr(self, "_prefill_counts"):
+            from .tensorfold_prefill import grouped_input
+
+            projected = grouped_input(self, inputs)
+            if projected is not None:
+                return projected
         if not hasattr(self, "in_proj_fused"):
             return (
                 self.in_proj_qkv(inputs),
@@ -271,7 +293,15 @@ class GatedDeltaNet(nn.Module):
                     S, _rollback_any, [conv_state, state], per_row_fn=_rollback_rows
                 )
         (out, state) = self._gated_delta_update(
-            q, k, v, a, b, state, mask, not self.training
+            q,
+            k,
+            v,
+            a,
+            b,
+            state,
+            mask,
+            not self.training,
+            prefill=S > 17 and not bool(getattr(cache, "speculating", False)),
         )
         if cache is not None:
             cache[1] = state

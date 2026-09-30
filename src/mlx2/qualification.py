@@ -56,7 +56,7 @@ def required_generic_checks(descriptor):
 APPROVED_QUALIFICATION_HARNESS = {
     "schema": "mlx2.qualification-harness.v1",
     "name": "scripts/qualify_serving.py",
-    "sha256": "a15d63311009b7eaf421568d11d0ba6afd23e64964a602669ae12faaf6b8eb40",
+    "sha256": "8c494905042dfc9e3bb9560b63356b29ebb54275c43543cc576933ef3e1b63d5",
 }
 
 # The approved generic producer has no live adapter-owned media probes. A
@@ -137,6 +137,11 @@ def required_feature_checks(settings):
     if (settings.get("int8_prefill") or {}).get("enabled") is True:
         # Any route: a selected int8 prefill policy must show engaged calls.
         features.add("feature_int8_prefill")
+    prefill = settings.get("prefill_execution") or {}
+    if prefill.get("projection"):
+        features.add("feature_prefill_projection")
+    if prefill.get("scan"):
+        features.add("feature_prefill_scan")
     if settings.get("sp_qmm"):
         # Patching eligible projections does not prove that the measured
         # shape policy actually routed any model calls through the kernel.

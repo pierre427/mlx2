@@ -1129,6 +1129,14 @@ def qsdpa_verify_observation(initial, final):
 
 def feature_observations(final, kv_fidelity=None, adaptive_benchmark=None, initial=None):
     execution = final.get("execution", {})
+    initial_execution = (initial or {}).get("execution", {})
+
+    def prefill_delta(mechanism, keys):
+        if initial is None:
+            return 0
+        before = initial_execution.get(mechanism, {}).get("counters", {})
+        after = execution.get(mechanism, {}).get("counters", {})
+        return sum(max(0, after.get(key, 0) - before.get(key, 0)) for key in keys)
     segmented = execution.get("segmented_mtp", {})
     indexed = execution.get("indexed_qsa", {}).get("counts", {})
     scheduler = final.get("scheduler", {})
@@ -1247,6 +1255,10 @@ def feature_observations(final, kv_fidelity=None, adaptive_benchmark=None, initi
         # feature_int8_prefill whenever the policy is enabled, so the
         # observation key must exist or the qualifier raises KeyError.
         "int8_prefill": final.get("int8_prefill", {}).get("counts", {}).get("engaged_calls", 0),
+        "prefill_projection": prefill_delta(
+            "tensorfold_prefill", ("projection_calls", "grouped_calls", "swiglu_calls")
+        ),
+        "prefill_scan": prefill_delta("gdn_prefill_scan", ("calls",)),
         "sp_qmm": sp_qmm_routed_observation(initial, final),
         "qsdpa_verify_kernel": qsdpa_verify_observation(initial, final),
         "verify_bitexact": (

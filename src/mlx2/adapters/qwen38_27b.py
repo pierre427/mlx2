@@ -192,6 +192,10 @@ EXTERNAL_POLICY_KEYS = frozenset(
         "draft_revision",
         "target_revision",
         "draft_quantization",
+        "tensorfold_prefill",
+        "tensorfold_prefill_backend",
+        "gdn_prefill_chunk",
+        "gdn_prefill_segment_rows",
     }
 )
 
@@ -206,6 +210,20 @@ def inspect_external_policy(policy: dict, model_path: str | Path) -> dict:
         raise ValueError(
             f"Qwen3.8 27B external draft policy has unknown keys: {sorted(unknown)}"
         )
+    from .flash_next_policy import FlashNextPolicy
+
+    FlashNextPolicy.from_mapping(
+        {
+            key: policy[key]
+            for key in (
+                "tensorfold_prefill",
+                "tensorfold_prefill_backend",
+                "gdn_prefill_chunk",
+                "gdn_prefill_segment_rows",
+            )
+            if key in policy
+        }
+    )
     for key in ("draft_revision", "target_revision"):
         if not isinstance(policy.get(key), str) or len(policy[key]) != 64:
             raise ValueError(f"Qwen3.8 27B external draft policy must pin {key}")
@@ -334,6 +352,21 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
         if execution_policy is not None and not isinstance(execution_policy, dict):
             raise ValueError("execution policy must be a JSON object")
         policy = {} if execution_policy is None else dict(execution_policy)
+        from .flash_next_policy import FlashNextPolicy
+
+        prefill_policy = FlashNextPolicy.from_mapping(
+            {
+                key: policy[key]
+                for key in (
+                    "tensorfold_prefill",
+                    "tensorfold_prefill_backend",
+                    "gdn_prefill_chunk",
+                    "gdn_prefill_segment_rows",
+                    "gdn_core",
+                )
+                if key in policy
+            }
+        )
         self.external_policy = {}
         self.draft_model = None
         draft_record = None
@@ -345,10 +378,19 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
             draft_record = inspect_external_policy(policy, model_path)
             self.external_policy = policy
             policy = {}
-        if set(policy) - {"num_draft", "gdn_core", "fp32_head_logits"}:
+        if set(policy) - {
+            "num_draft",
+            "gdn_core",
+            "fp32_head_logits",
+            "tensorfold_prefill",
+            "tensorfold_prefill_backend",
+            "gdn_prefill_chunk",
+            "gdn_prefill_segment_rows",
+        }:
             raise ValueError(
-                "Qwen3.8 27B execution policy supports only num_draft, gdn_core "
-                "and fp32_head_logits"
+                "Qwen3.8 27B execution policy supports only num_draft, gdn_core, "
+                "fp32_head_logits, tensorfold_prefill, tensorfold_prefill_backend, "
+                "gdn_prefill_chunk and gdn_prefill_segment_rows"
             )
         # Opt-in: the quantized lm_head stores fp32 logits instead of rounding
         # them to bf16 (runtime/fp32_head.py).  Absent keeps receipts as-is.
@@ -414,6 +456,28 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
         self.model.load_weights(list(weights.items()), strict=True)
         self.model.eval()
         mx.eval(self.model.parameters())
+        self.tensorfold_prefill = None
+        if prefill_policy.tensorfold_prefill:
+            weights.clear()
+            from ..runtime.models.tensorfold_prefill import install as install_prefill
+
+            self.tensorfold_prefill = install_prefill(
+                self.model, backend=prefill_policy.tensorfold_prefill_backend
+            )
+        self.gdn_prefill_scan = None
+        if prefill_policy.gdn_prefill_chunk:
+            from ..runtime.models.gated_delta import install_prefill_scan
+
+            self.gdn_prefill_scan = install_prefill_scan(
+                self.model,
+                prefill_policy.gdn_prefill_chunk,
+                prefill_policy.gdn_prefill_segment_rows,
+            )
+        from ..runtime.prefill_plan import execution_identity
+
+        self.prefill_execution_identity = execution_identity(
+            self.tensorfold_prefill, self.gdn_prefill_scan
+        )
         self.fp32_head = None
         if fp32_head:
             from ..runtime.fp32_head import enable_fp32_head_logits
@@ -546,7 +610,8 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
             "speculation": (
                 "external-dflash2-implemented-unqualified"
                 if getattr(self, "draft_model", None) is not None
-                else "self-mtp" if Capability.MTP in self.descriptor.capabilities
+                else "self-mtp"
+                if Capability.MTP in self.descriptor.capabilities
                 else "ordinary"
             ),
             "segmented_mtp": segmented_self_mtp_stats(),
@@ -556,6 +621,26 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
                 else self.norm_convention.summary()
             ),
             **self.dtype_diagnostics(),
+            **(
+                {
+                    "tensorfold_prefill": {
+                        **self.tensorfold_prefill,
+                        "counters": dict(self.tensorfold_prefill["counters"]),
+                    }
+                }
+                if getattr(self, "tensorfold_prefill", None)
+                else {}
+            ),
+            **(
+                {
+                    "gdn_prefill_scan": {
+                        **self.gdn_prefill_scan,
+                        "counters": dict(self.gdn_prefill_scan["counters"]),
+                    }
+                }
+                if getattr(self, "gdn_prefill_scan", None)
+                else {}
+            ),
             **(
                 {"fp32_head_logits": self.fp32_head}
                 if getattr(self, "fp32_head", None)

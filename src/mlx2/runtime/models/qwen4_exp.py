@@ -964,7 +964,9 @@ class GatedDeltaNet(Qwen35GatedDeltaNet):
         k = k * mx.rsqrt(mx.sum(mx.square(k), axis=-1, keepdims=True) + 1e-06)
         return (q * k.shape[-1] ** (-0.5), k)
 
-    def _gated_delta_update(self, q, k, v, a, b, state, mask, use_kernel):
+    def _gated_delta_update(
+        self, q, k, v, a, b, state, mask, use_kernel, *, prefill=False
+    ):
         return gated_delta_update(
             q,
             k,
@@ -977,6 +979,11 @@ class GatedDeltaNet(Qwen35GatedDeltaNet):
             mask,
             use_kernel=use_kernel,
             beta_input_dtype=True,
+            prefill_chunk_size=getattr(self, "_prefill_scan_chunk", 0)
+            if prefill
+            else 0,
+            prefill_stats=getattr(self, "_prefill_scan_stats", None),
+            prefill_segment_rows=getattr(self, "_prefill_scan_segment", 256),
         )
 
     def set_fused_gdn_decode_mode(self, mode: str):
@@ -1308,7 +1315,7 @@ class GatedDeltaNet(Qwen35GatedDeltaNet):
                 qkv, cache[0], self.conv1d.weight
             )
             (out, state) = self._gated_delta_update(
-                q, k, v, a, b, cache[1], None, not self.training
+                q, k, v, a, b, cache[1], None, not self.training, prefill=True
             )
             if out.dtype == mx.bfloat16:
                 flat = _gdn_prefill.qwen4_gdn_prefill_norm_gate(

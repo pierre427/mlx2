@@ -320,6 +320,30 @@ class FlashNextAdapter:
                 from ..runtime.models.flash_tensorfold_qmv import install
 
                 self.tensorfold_qmv = install(self.model)
+            self.tensorfold_prefill = None
+            if self.policy.tensorfold_prefill:
+                weights.clear()
+                from ..runtime.models.tensorfold_prefill import (
+                    install as install_prefill,
+                )
+
+                self.tensorfold_prefill = install_prefill(
+                    self.model, backend=self.policy.tensorfold_prefill_backend
+                )
+            self.gdn_prefill_scan = None
+            if self.policy.gdn_prefill_chunk:
+                from ..runtime.models.gated_delta import install_prefill_scan
+
+                self.gdn_prefill_scan = install_prefill_scan(
+                    self.model,
+                    self.policy.gdn_prefill_chunk,
+                    self.policy.gdn_prefill_segment_rows,
+                )
+            from ..runtime.prefill_plan import execution_identity
+
+            self.prefill_execution_identity = execution_identity(
+                self.tensorfold_prefill, self.gdn_prefill_scan
+            )
             self.fp32_head = None
             if self.policy.fp32_head_logits:
                 from ..runtime.fp32_head import enable_fp32_head_logits
@@ -482,18 +506,39 @@ class FlashNextAdapter:
             "moe": moe,
             "policy": self.policy.as_dict(),
             **(
-                {"tensorfold_qmv": {
-                    **self.tensorfold_qmv,
-                    "counters": tensorfold_qmv_counters(),
-                }}
-                if getattr(self, "tensorfold_qmv", None) else {}
+                {
+                    "tensorfold_qmv": {
+                        **self.tensorfold_qmv,
+                        "counters": tensorfold_qmv_counters(),
+                    }
+                }
+                if getattr(self, "tensorfold_qmv", None)
+                else {}
+            ),
+            **(
+                {
+                    "tensorfold_prefill": {
+                        **self.tensorfold_prefill,
+                        "counters": dict(self.tensorfold_prefill["counters"]),
+                    }
+                }
+                if getattr(self, "tensorfold_prefill", None)
+                else {}
+            ),
+            **(
+                {
+                    "gdn_prefill_scan": {
+                        **self.gdn_prefill_scan,
+                        "counters": dict(self.gdn_prefill_scan["counters"]),
+                    }
+                }
+                if getattr(self, "gdn_prefill_scan", None)
+                else {}
             ),
             "round_levers": lever_snapshot(),
             "eager_dispatch": qwen4_eager_dispatch_status(),
             "ple_tables": [asdict(table.stats) for table in self._tables],
-            "fused_gdn": qwen4_fused_gdn_stats(
-                self.model, modules=diagnostic_modules
-            ),
+            "fused_gdn": qwen4_fused_gdn_stats(self.model, modules=diagnostic_modules),
             "ple_compile": qwen4_ple_compile_status(),
             "indexed_qsa": qsa_indexed_status(),
             "qsa_stage1": qsa_stage1_status(),

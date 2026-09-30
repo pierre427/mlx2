@@ -1096,6 +1096,29 @@ def test_selectable_feature_observations_need_the_mechanism_to_engage(
     assert feature_observations(idle)[feature] == 0
     assert feature_observations({})[feature] == 0
 
+
+def test_prefill_candidates_require_observed_calls_during_qualification():
+    from mlx2.qualification import required_feature_checks
+    from scripts.qualify_serving import feature_observations
+
+    settings = {"prefill_execution": {"projection": {"kernel": "native"}, "scan": {"chunk_size": 8}}}
+    assert {"feature_prefill_projection", "feature_prefill_scan"} <= required_feature_checks(settings)
+    initial = {"execution": {
+        "tensorfold_prefill": {"counters": {"grouped_calls": 9, "swiglu_calls": 3}},
+        "gdn_prefill_scan": {"counters": {"calls": 11}},
+    }}
+    assert feature_observations(initial)["prefill_projection"] == 0
+    assert feature_observations(initial, initial=initial)["prefill_scan"] == 0
+    final = {"execution": {
+        "tensorfold_prefill": {"counters": {"grouped_calls": 10, "swiglu_calls": 5}},
+        "gdn_prefill_scan": {"counters": {"calls": 12}},
+    }}
+    observed = feature_observations(final, initial=initial)
+    assert observed["prefill_projection"] == 3
+    assert observed["prefill_scan"] == 1
+    assert not {"feature_prefill_projection", "feature_prefill_scan"} & required_feature_checks({})
+
+
 def test_a_recorded_failed_check_refuses_the_route(tmp_path):
     """The loader re-checked only the required and feature gates and trusted
     the top-level flag for the rest (capability scope, quiescence, APCv2

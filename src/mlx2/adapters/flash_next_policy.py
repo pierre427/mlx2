@@ -74,6 +74,12 @@ class FlashNextPolicy:
     mtp_draft_vocab: bool = False
     # Candidate TensorFold Flash row matvec generalized for q4/group-64.
     tensorfold_qmv_rows: bool = False
+    # Prefill-specific tiled projections and bounded core recurrence scans.
+    # Candidate policies have a separate qualification/cache identity.
+    tensorfold_prefill: bool = False
+    tensorfold_prefill_backend: str = "native"
+    gdn_prefill_chunk: int = 0
+    gdn_prefill_segment_rows: int = 2048
 
     def __post_init__(self):
         validate_self_mtp_num_draft(self.num_draft)
@@ -93,6 +99,7 @@ class FlashNextPolicy:
             "fp32_head_logits",
             "mtp_draft_vocab",
             "tensorfold_qmv_rows",
+            "tensorfold_prefill",
             *_OPTIONAL_KERNEL_ENV,
         ):
             if type(getattr(self, name)) is not bool:
@@ -109,6 +116,25 @@ class FlashNextPolicy:
         value = self.fused_gdn_verify_max_steps
         if type(value) is not int or not 2 <= value <= 17:
             raise ValueError("fused_gdn_verify_max_steps must be an integer in 2..17")
+        if type(self.gdn_prefill_chunk) is not int or self.gdn_prefill_chunk not in (
+            0,
+            8,
+            16,
+        ):
+            raise ValueError("gdn_prefill_chunk must be 0, 8 or 16")
+        if self.gdn_core and self.gdn_prefill_chunk:
+            raise ValueError("choose either gdn_core or gdn_prefill_chunk")
+        segment = self.gdn_prefill_segment_rows
+        if type(segment) is not int or not 64 <= segment <= 8192 or segment % 16:
+            raise ValueError(
+                "gdn_prefill_segment_rows must be a multiple of 16 in 64..8192"
+            )
+        if segment != 2048 and not self.gdn_prefill_chunk:
+            raise ValueError("gdn_prefill_segment_rows requires gdn_prefill_chunk")
+        if self.tensorfold_prefill_backend not in ("native", "metal"):
+            raise ValueError("tensorfold_prefill_backend must be native or metal")
+        if self.tensorfold_prefill_backend != "native" and not self.tensorfold_prefill:
+            raise ValueError("tensorfold_prefill_backend requires tensorfold_prefill")
         for name in ("eager_dispatch_max_rows", "eager_dispatch_stride", "prefill_step"):
             value = getattr(self, name)
             if type(value) is not int or value < 1:
@@ -136,6 +162,14 @@ class FlashNextPolicy:
             del values["mtp_draft_vocab"]
         if not self.tensorfold_qmv_rows:
             del values["tensorfold_qmv_rows"]
+        if not self.tensorfold_prefill:
+            del values["tensorfold_prefill"]
+        if self.tensorfold_prefill_backend == "native":
+            del values["tensorfold_prefill_backend"]
+        if not self.gdn_prefill_chunk:
+            del values["gdn_prefill_chunk"]
+        if self.gdn_prefill_segment_rows == 2048:
+            del values["gdn_prefill_segment_rows"]
         for name in _OPTIONAL_KERNEL_ENV:
             if not getattr(self, name):
                 del values[name]

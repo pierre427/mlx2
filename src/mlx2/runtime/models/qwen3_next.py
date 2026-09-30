@@ -825,6 +825,12 @@ class Qwen3NextMLP(nn.Module):
         self.up_proj = nn.Linear(dim, hidden_dim, bias=False)
 
     def __call__(self, x) -> mx.array:
+        if hasattr(self, "_prefill_counts"):
+            from .tensorfold_prefill import fused_mlp
+
+            fused = fused_mlp(self, x)
+            if fused is not None:
+                return fused
         return self.down_proj(swiglu(self.gate_proj(x), self.up_proj(x)))
 
 

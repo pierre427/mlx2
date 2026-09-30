@@ -69,6 +69,10 @@ def _can_use_core_gated_delta(q, k, v, g, state, mask):
         or (not _CORE_GDN_MIN_T <= q.shape[1] <= _CORE_GDN_MAX_T)
     ):
         return False
+    return _core_layout_supported(q, k, v, g, state)
+
+
+def _core_layout_supported(q, k, v, g, state):
     (Hk, Dk) = q.shape[2:]
     (Hv, Dv) = v.shape[2:]
     return (
@@ -83,6 +87,94 @@ def _can_use_core_gated_delta(q, k, v, g, state, mask):
         and (v.dtype in (mx.float32, mx.bfloat16, mx.float16))
         and (not _readout_needs_widening(q.dtype, state.dtype))
     )
+
+
+def _chunked_prefill(
+    q, k, v, g, beta, state, mask, chunk_size, stats, segment_rows=256
+):
+    """Long prefill via bounded core scans, carrying the exact returned state.
+
+    This is a separate candidate from MLX_GDN_CORE's historical 17..256
+    admission. It never changes that switch or the scheduler's chunk size.
+    """
+    from ..prefill_plan import recurrence_segments
+
+    reason = None
+    if _core_gated_delta_update is None:
+        reason = "primitive_unavailable"
+    elif mask is not None or g.ndim != 3:
+        reason = "masked_or_vector_gate"
+    elif q.shape[1] < _CORE_GDN_MIN_T:
+        reason = "short_sequence"
+    elif not _core_layout_supported(q, k, v, g, state):
+        reason = "unsupported_layout"
+    elif chunk_size == 16 and "M5" not in str(mx.device_info().get("device_name", "")):
+        reason = "chunk16_requires_m5"
+    if reason is not None:
+        if stats is not None:
+            stats["fallback_" + reason] += 1
+        return None
+    outputs = []
+    for start, end in recurrence_segments(
+        int(q.shape[1]), maximum=segment_rows, alignment=chunk_size
+    ):
+        out, state = _core_gated_delta_update(
+            mx.contiguous(q[:, start:end]),
+            mx.contiguous(k[:, start:end]),
+            mx.contiguous(v[:, start:end]),
+            mx.contiguous(g[:, start:end]),
+            mx.contiguous(beta[:, start:end]),
+            initial_state=state,
+            stream=mx.gpu,
+            chunk_size=chunk_size,
+        )
+        outputs.append(out)
+    if stats is not None:
+        stats["calls"] += 1
+        stats["segments"] += len(outputs)
+        stats["tokens"] += int(q.shape[0]) * int(q.shape[1])
+    return (outputs[0] if len(outputs) == 1 else mx.concatenate(outputs, axis=1), state)
+
+
+def install_prefill_scan(model, chunk_size, segment_rows=2048):
+    """Bind candidate scan geometry to each recurrent layer, not process env."""
+    from collections import Counter
+
+    if type(chunk_size) is not int or chunk_size not in (8, 16):
+        raise ValueError("prefill scan chunk_size must be 8 or 16")
+    if (
+        type(segment_rows) is not int
+        or not 64 <= segment_rows <= 8192
+        or segment_rows % 16
+    ):
+        raise ValueError(
+            "prefill scan segment_rows must be a multiple of 16 in 64..8192"
+        )
+    if _core_gated_delta_update is None:
+        raise ValueError("prefill scan requires mx.fast.gated_delta_update")
+    stats, count = Counter(), 0
+    for name, layer in model.named_modules():
+        if "mtp" in name.split("."):
+            continue
+        if (
+            callable(getattr(layer, "_gated_delta_update", None))
+            and getattr(layer, "head_k_dim", 0) == 128
+            and getattr(layer, "head_v_dim", 0) == 128
+            and (getattr(layer, "num_k_heads", 0), getattr(layer, "num_v_heads", 0))
+            in _CORE_GDN_HEADS
+        ):
+            object.__setattr__(layer, "_prefill_scan_chunk", chunk_size)
+            object.__setattr__(layer, "_prefill_scan_segment", segment_rows)
+            object.__setattr__(layer, "_prefill_scan_stats", stats)
+            count += 1
+    if not count:
+        raise ValueError("prefill scan found no supported recurrent layers")
+    return {
+        "chunk_size": chunk_size,
+        "segment_max_rows": segment_rows,
+        "layers": count,
+        "counters": stats,
+    }
 
 
 @partial(mx.compile, shapeless=True)
@@ -369,6 +461,9 @@ def gated_delta_update(
     use_kernel: bool = True,
     lower_bound: float | None = None,
     beta_input_dtype: bool = False,
+    prefill_chunk_size: int = 0,
+    prefill_segment_rows: int = 256,
+    prefill_stats=None,
 ) -> Tuple[mx.array, mx.array]:
     beta = gate_sigmoid(b) if beta_input_dtype else gate_sigmoid(b.astype(mx.float32))
     if lower_bound is None:
@@ -381,6 +476,23 @@ def gated_delta_update(
         state = mx.zeros((B, Hv, Dv, Dk), dtype=mx.float32)
     if not use_kernel or mx.default_device() != mx.gpu or (not mx.metal.is_available()):
         return gated_delta_ops(q, k, v, g, beta, state, mask)
+    if prefill_chunk_size:
+        if type(prefill_chunk_size) is not int or prefill_chunk_size not in (8, 16):
+            raise ValueError("prefill_chunk_size must be 0, 8 or 16")
+        result = _chunked_prefill(
+            q,
+            k,
+            v,
+            g,
+            beta,
+            state,
+            mask,
+            prefill_chunk_size,
+            prefill_stats,
+            prefill_segment_rows,
+        )
+        if result is not None:
+            return result
     if _can_use_core_gated_delta(q, k, v, g, state, mask):
         return _core_gated_delta_update(
             q,

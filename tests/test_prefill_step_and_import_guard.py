@@ -6,7 +6,7 @@ import types
 import pytest
 
 
-def _engine_settings(monkeypatch, adapter_step, **overrides):
+def _engine_settings(monkeypatch, adapter_step, *, prefill_identity=None, expect_error=None, **overrides):
     from types import SimpleNamespace as NS
 
     from mlx2 import memory, serving
@@ -16,7 +16,9 @@ def _engine_settings(monkeypatch, adapter_step, **overrides):
         def __init__(self, **_kw):
             self.apc_stats = {}
 
-        def key(self, *_a, **_kw):
+        @staticmethod
+        def key(*_a, **kw):
+            seen.setdefault("cache_semantics", []).append(kw["semantic_fingerprint"])
             return "key"
 
         def spill_idle_entries(self):
@@ -48,7 +50,7 @@ def _engine_settings(monkeypatch, adapter_step, **overrides):
         tokenizer = NS(vocab_size=10, eos_token_ids=[])
 
         def __init__(self, _path):
-            pass
+            self.prefill_execution_identity = prefill_identity
 
         def profile_name(self, _mtp):
             return "fake"
@@ -72,9 +74,14 @@ def _engine_settings(monkeypatch, adapter_step, **overrides):
     monkeypatch.setattr(os_memory, "physical_footprint_bytes", lambda: 0)
     monkeypatch.setattr(apc_v2, "APCv2", APC)
     monkeypatch.setattr(generate, "BatchGenerator", Batch)
-    engine = serving.ServingEngine("fake", adapter_factory=Adapter, qualification_mode=True, mtp=False,
+    engine = serving.ServingEngine("fake", adapter_factory=Adapter, qualification_mode=expect_error is None, mtp=False,
                                    max_lanes=2, max_inflight=2, **overrides)
     try:
+        if expect_error is not None:
+            engine.thread.join(5)
+            assert not engine.ready.is_set()
+            assert expect_error in engine.error
+            return {}, seen, engine
         assert engine.ready.wait(5), engine.error
         settings = engine.status()["settings"]
     finally:
@@ -184,3 +191,27 @@ def test_wire_serving_weights_sets_the_working_set_limit(monkeypatch):
 
     monkeypatch.setattr(mx.metal, "is_available", lambda: False)
     assert weight_residency.wire_serving_weights()["wired"] is False
+
+
+def test_prefill_identity_reaches_settings_and_both_cache_namespaces(monkeypatch):
+    from mlx2.runtime.prefill_plan import apc_prefill_fingerprint
+
+    identity = {
+        "version": 1,
+        "scan": {"chunk_size": 8, "segment_max_rows": 512, "layers": 48},
+    }
+    settings, seen, _ = _engine_settings(monkeypatch, 512, prefill_identity=identity)
+    assert settings["prefill_execution"] == identity
+    assert len(seen["cache_semantics"]) == 2
+    assert (
+        seen["cache_semantics"]
+        == [apc_prefill_fingerprint("text-token-v1", identity)] * 2
+    )
+    plain, plain_seen, _ = _engine_settings(monkeypatch, 512)
+    assert "prefill_execution" not in plain
+    assert plain_seen["cache_semantics"] == ["text-token-v1"] * 2
+
+
+def test_prefill_candidate_fails_closed_without_qualification(monkeypatch):
+    _engine_settings(monkeypatch, 512, prefill_identity={"scan": {"chunk_size": 8}},
+                     expect_error="prefill candidates require qualification")
