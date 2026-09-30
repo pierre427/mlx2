@@ -88,6 +88,7 @@ def save_checkpoint(root, model, optimizer, step, run, mode="full"):
         "config": asdict(model.config),
         "run": run,
         "permanent_sidecar": permanent_sidecar,
+        "capsule_binding": model.capsule_binding,
         "optimizer_state_saved": mode == "full",
         "exact_training_resume": mode == "full",
     }
@@ -112,6 +113,8 @@ def _load_model_state(path, model):
         raise ValueError("unsupported checkpoint schema")
     if saved_config != asdict(model.config):
         raise ValueError("checkpoint configuration differs")
+    if metadata.get("capsule_binding") != model.capsule_binding:
+        raise ValueError("checkpoint semantic capsule read binding differs")
     sidecar = metadata.get("permanent_sidecar")
     if model.config.semantic_ple_rows:
         if not isinstance(sidecar, dict):
@@ -148,6 +151,7 @@ def _load_model_state(path, model):
         model.ple_sidecar_digest = sidecar["sha256"]
     model.load_weights(str(path / "model.safetensors"), strict=True)
     mx.eval(model.parameters())
+    model._cache_owner = object()
     return metadata
 
 

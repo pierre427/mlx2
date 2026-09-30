@@ -396,6 +396,20 @@ class Model(nn.Module):
         self.ple_sidecar_digest = None
         self._cache_owner = object()
         self.adapter_revision = None
+        self._semantic_capsules = None
+
+    @property
+    def capsule_binding(self):
+        return self._semantic_capsules.binding() if self._semantic_capsules is not None else None
+
+    def attach_semantic_capsules(self, snapshot):
+        from .capsule_memory import CapsuleMemory
+        if snapshot is not None and (not isinstance(snapshot, CapsuleMemory) or not self.config.semantic_ple_rows):
+            raise ValueError("capsule reads require a CapsuleMemory snapshot and enabled PLE")
+        if snapshot is not None and snapshot.vocab_size != self.config.vocab_size:
+            raise ValueError("capsule token vocabulary differs")
+        self._semantic_capsules = snapshot
+        self._cache_owner = object()
 
     def _embed(self, tokens, ple_history=None):
         if (
@@ -408,6 +422,8 @@ class Model(nn.Module):
         x = self.embedding(tokens)
         if self.config.semantic_ple_rows:
             x = x + self.semantic_ple(tokens, x, ple_history)
+            if self._semantic_capsules is not None:
+                x = x + self._semantic_capsules.read(self.semantic_ple, x)
         return mx.broadcast_to(
             x[..., None, :], (*x.shape[:-1], self.config.residual_streams, x.shape[-1])
         )
@@ -457,12 +473,18 @@ class Model(nn.Module):
     def new_cache(self, batch=1, *, semantic_capsule_digest=None):
         if type(batch) is not int or batch < 1:
             raise ValueError("cache batch must be positive")
+        if self._semantic_capsules is not None:
+            digest = self._semantic_capsules.capsule_digest
+            if semantic_capsule_digest is not None and semantic_capsule_digest != digest:
+                raise ValueError("requested capsule differs from attached tensor memory")
+            semantic_capsule_digest = digest
         return Cache(
             self._cache_owner,
             batch,
             apcv2_identity={
                 **self.config.apcv2_identity(semantic_capsule_digest, self.ple_sidecar_digest),
                 **({"adapter_revision": self.adapter_revision} if self.adapter_revision else {}),
+                **({"capsule_read_fingerprint": self._semantic_capsules.fingerprint} if self._semantic_capsules is not None else {}),
             },
         )
 
@@ -478,6 +500,7 @@ class Model(nn.Module):
         if (
             not isinstance(actual, dict)
             or actual.get("adapter_revision") != self.adapter_revision
+            or actual.get("capsule_read_fingerprint") != (self._semantic_capsules.fingerprint if self._semantic_capsules is not None else None)
             or actual.get("cache_layout_fingerprint")
             != expected["cache_layout_fingerprint"]
             or actual.get("semantic_fingerprint", ())[2:]
