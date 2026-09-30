@@ -1575,6 +1575,10 @@ class RotatingKVCache(_BaseCache):
         if max_checkpoints <= 0 or self.keys is None or len(positions) != 1:
             return
         position = positions[0]
+        # ``force`` is deliberately not honoured here: window snapshots are
+        # budgeted a stride apart (see _window_checkpoint_due); an end-of-prompt
+        # force adds none.  ArraysCache honours it because its snapshots are
+        # not window-bounded.
         if not _window_checkpoint_due(self._checkpoints, position):
             return
         keys = self._temporal_order(self.keys)
@@ -3396,9 +3400,6 @@ class BatchQuantizedKVCache(_BaseCache):
             return int(self.keys[0].shape[0])
         return int(self.left_padding.shape[0])
 
-    def is_single_row(self):
-        return self.batch_size == 1
-
     @property
     def nbytes(self):
         if self.keys is None:
@@ -3637,27 +3638,6 @@ class BatchKVCache(_BaseCache):
             "last_bucketed_traffic_tax": 1.0,
             "last_group_count": 0,
         }
-
-    def set_attention_backend(self, backend: str):
-        """Select the backend for this cache group.
-
-        Existing state remains authoritative in the dense mirror. Switching
-        invalidates derived groups and rebuilds them losslessly on the next
-        supported decode call.
-        """
-        backend = backend.strip().lower()
-        if backend not in {"sdpa", "bucketed"}:
-            raise ValueError("attention backend must be 'sdpa' or 'bucketed'")
-        if backend != self.attention_backend:
-            self._invalidate_attention_groups()
-            self.attention_backend = backend
-
-    @property
-    def attention_backend_metrics(self):
-        metrics = dict(self._attention_backend_stats)
-        metrics["fallback_reasons"] = dict(metrics["fallback_reasons"])
-        metrics["backend"] = self.attention_backend
-        return metrics
 
     def _fallback(self, reason: str):
         stats = self._attention_backend_stats
@@ -5325,6 +5305,12 @@ class PromptTrieResult:
 class PromptTrie:
     def __init__(self):
         self._trie = {}
+        # Every node holding a value, keyed by the node's identity: lets a
+        # caller enumerate stored entries without re-walking each token path
+        # (an index of 32 x 32k-token prompts cost 50 ms per walk).  ``add``,
+        # ``pop`` and ``pop_prefixes`` are the only writers of ``__value__``,
+        # so the registry is exact by construction.
+        self._valued = {}
 
     def add(self, model: Any, tokens: List[int], value: Any):
         if model not in self._trie:
@@ -5336,7 +5322,13 @@ class PromptTrie:
             current = current[tok]
         prev = current.get("__value__", None)
         current["__value__"] = value
+        self._valued[id(current)] = (model, list(tokens), current)
         return prev
+
+    def entries(self):
+        """``(model, tokens, value)`` for every stored value, in no order."""
+        for model, tokens, node in list(self._valued.values()):
+            yield (model, tokens, node["__value__"])
 
     def get(self, model: Any, tokens: List[int]):
         current = self._trie[model]
@@ -5349,6 +5341,7 @@ class PromptTrie:
         for tok in tokens:
             path.append(path[-1][tok])
         value = path[-1].pop("__value__")
+        self._valued.pop(id(path[-1]), None)
         for i in range(len(tokens), 0, -1):
             node = path[i]
             parent = path[i - 1]
@@ -5366,6 +5359,7 @@ class PromptTrie:
                 predicate is None or predicate(i, current["__value__"])
             ):
                 values.append((i, current.pop("__value__")))
+                self._valued.pop(id(current), None)
             current = current[tok]
         return values
 
@@ -5688,11 +5682,3 @@ class PrefixIndex:
             self._n_bytes -= entry.nbytes
             self._n_bytes_by_type[entry.cache_type] -= entry.nbytes
 
-    def stats_by_type(self):
-        result = {}
-        for cache_type in self._lru._ordering:
-            result[cache_type] = {
-                "n_sequences": len(self._lru._lrus[cache_type]),
-                "n_bytes": self._n_bytes_by_type[cache_type],
-            }
-        return result

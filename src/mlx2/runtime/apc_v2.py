@@ -478,12 +478,16 @@ class APCv2(PrefixIndex):
         "lookups", "hits", "misses", "queried_tokens", "cached_tokens", "stores",
         "interior_hits", "rolling_hits", "junction_hits",
     )
+    # Transient restore errors keep the snapshot for a retry this many times
+    # before the entry is dropped as unusable.
+    _RESTORE_TRANSIENT_STRIKES = 3
     _DISK_STAT_KEYS = (
         "idle_spills",
         "pressure_spills",
         "restores",
         "restore_failures",
         "restore_budget_deferrals",
+        "restore_transient_deferrals",
         "spill_failures",
         "oversize_spills",
         "spill_capacity_skips",
@@ -678,6 +682,7 @@ class APCv2(PrefixIndex):
         self._rescan = {
             "registered": 0,
             "registered_bytes": 0,
+            "skipped": 0,
             "discarded": {},
             "elapsed_seconds": 0.0,
         }
@@ -1049,6 +1054,7 @@ class APCv2(PrefixIndex):
             if directory.is_dir() and directory.parent == self._persist_dir:
                 shutil.rmtree(directory, ignore_errors=True)
         self._enforce_quarantine_limits()
+        skipped_transiently = False
         for manifest in sorted(self._persist_dir.glob("apc-idle-*.manifest.json")):
             value = None
             try:
@@ -1155,12 +1161,21 @@ class APCv2(PrefixIndex):
                 self._rescan["registered_bytes"] += disk_bytes
             except _PersistedPinCapacityError:
                 raise
+            except (OSError, MemoryError):
+                # A transient read failure is not corruption: leave the
+                # manifest and payload for the next rescan.
+                log.exception("APCv2 rescan skipped %s", manifest.name)
+                self._rescan["skipped"] += 1
+                skipped_transiently = True
             except Exception:
                 self._discard_manifest(manifest, value, "corruption")
-        # Final payload names without a manifest are interrupted writes.
-        for path in self._persist_dir.glob("apc-idle-*.safetensors"):
-            if path.name not in referenced:
-                path.unlink(missing_ok=True)
+        # Final payload names without a manifest are interrupted writes -- but
+        # a manifest skipped over a transient read error names payloads this
+        # pass never saw, so the sweep waits for a clean rescan.
+        if not skipped_transiently:
+            for path in self._persist_dir.glob("apc-idle-*.safetensors"):
+                if path.name not in referenced:
+                    path.unlink(missing_ok=True)
         self._enforce_entry_limits_locked()
         self._rescan["elapsed_seconds"] = time.monotonic() - started
         log.info(
@@ -1770,12 +1785,15 @@ class APCv2(PrefixIndex):
                 or int(disk.get("token_count", -1)) != len(tokens)
             ):
                 raise ValueError("APCv2 persistent identity or token count mismatch")
-            self._verify_persisted_files(disk)
             # The recorded size is the cold-allocation admission estimate.  An
             # impossible snapshot must fail before disk I/O; clamping the
             # temporary limit to zero used to let it publish over max_bytes.
             if not self._reserve_restore_bytes_locked(expected, entry=entry):
                 raise _RestoreBudgetUnavailable("APCv2 disk snapshot exceeds resident byte cap")
+            # Digest the payload only once there is room for it: a restore the
+            # budget defers must not read and hash gigabytes under the APC
+            # lock just to learn that (09-22 audit C5).
+            self._verify_persisted_files(disk)
             with ExitStack() as stack:
                 target_path = stack.enter_context(materialize_block_file(
                     Path(target),
@@ -1870,6 +1888,7 @@ class APCv2(PrefixIndex):
             self._disk_stats["restores"] += 1
             self._disk_stats["bytes_read"] += restored_disk_bytes
             entry._apc_last_access_at = self._now()
+            entry._apc_restore_transient_failures = 0
             return True
         except _RestoreBudgetUnavailable:
             # Healthy snapshot, no room: leased residents pin the budget.  Keep
@@ -1884,7 +1903,10 @@ class APCv2(PrefixIndex):
             self._disk_stats["restore_digest_failures"] += 1
             self._disk_stats["restore_failures"] += 1
             return False
-        except Exception:
+        except (ValueError, KeyError, TypeError, FileNotFoundError):
+            # Identity, token-count or layout mismatch, unreadable content or
+            # a payload that is gone: the snapshot cannot serve this path.
+            # Drop it.
             log.exception(
                 "APCv2 disk restore failed for %d-token checkpoint",
                 len(tokens),
@@ -1893,6 +1915,25 @@ class APCv2(PrefixIndex):
                 cache.close()
             self._disk_stats["restore_failures"] += 1
             return False
+        except Exception:
+            # Anything else (MemoryError under a momentarily full heap, EMFILE
+            # or EIO, a runtime allocation failure) is transient: keep the
+            # placeholder and its files so the next lookup retries.  A parked
+            # session with a valid TTL must not be destroyed by one such
+            # error, but a persistent one must not defer forever either.
+            log.exception(
+                "APCv2 disk restore deferred for %d-token checkpoint",
+                len(tokens),
+            )
+            if isinstance(cache, COWFrozenPromptCache):
+                cache.close()
+            self._disk_stats["restore_failures"] += 1
+            self._disk_stats["restore_transient_deferrals"] += 1
+            strikes = getattr(entry, "_apc_restore_transient_failures", 0) + 1
+            entry._apc_restore_transient_failures = strikes
+            if strikes >= self._RESTORE_TRANSIENT_STRIKES:
+                return False
+            return None
 
     def _enforce_disk_limit_locked(self, *, exclude=None) -> None:
         if self._disk_bytes <= self._idle_disk_max_bytes:
@@ -1946,12 +1987,24 @@ class APCv2(PrefixIndex):
         return spilled
 
     def _resident_entry_count_locked(self, *, interior: Optional[bool] = None) -> int:
-        """Resident entries; ``interior`` selects one count pool (None: all)."""
-        return sum(
-            bool(entry.prompt_cache)
-            and (interior is None or self._is_interior_entry(entry) == interior)
-            for _key, _tokens, entry in self._entry_records_locked()
-        )
+        """Resident entries; ``interior`` selects one count pool (None: all).
+
+        Counted from the trie's value registry rather than by re-walking every
+        LRU record's token path: ``_enforce_entry_limits_locked`` asks four
+        times per store, and each walk cost 11-75 ms under ``_apc_lock`` at
+        16-32 long-context entries, stalling every decoding lane.
+        """
+        seen = set()
+        count = 0
+        for _model, _tokens, entry in self._trie.entries():
+            if id(entry) in seen:
+                continue
+            seen.add(id(entry))
+            if entry.prompt_cache and (
+                interior is None or self._is_interior_entry(entry) == interior
+            ):
+                count += 1
+        return count
 
     @classmethod
     def _is_interior_entry(cls, entry) -> bool:
