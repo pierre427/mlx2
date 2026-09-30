@@ -32,8 +32,11 @@ def stress(tag: str) -> dict | None:
     if receipt.get("status") == "running":
         return None
     result = read(workload_path) if workload_path.is_file() else None
-    rates = [row.get("tokens_per_second") for row in (result or {}).get("rounds_detail", [])]
+    rounds = (result or {}).get("rounds_detail", [])
+    rates = [row.get("tokens_per_second") for row in rounds]
     rates = [float(rate) for rate in rates if isinstance(rate, (float, int))]
+    total_tokens = sum(row.get("completion_tokens", 0) for row in rounds)
+    total_seconds = sum(row.get("seconds", 0) for row in rounds)
     return {
         "tag": tag,
         "source_head": receipt.get("source_head"),
@@ -50,6 +53,10 @@ def stress(tag: str) -> dict | None:
         "http_errors": (result or {}).get("http_errors"),
         "issues": (result or {}).get("issue_totals"),
         "observed_widths": (result or {}).get("observed_widths"),
+        "completion_tokens": total_tokens,
+        "round_seconds": round(total_seconds, 2),
+        "weighted_generated_tokens_per_second": (
+            round(total_tokens / total_seconds, 2) if total_seconds else None),
         "aggregate_generated_tokens_per_second": (
             {"median": statistics.median(rates), "min": min(rates), "max": max(rates)}
             if rates else None
@@ -138,6 +145,8 @@ def main() -> None:
         "ladders": [row for stem in (
             "ladder-1024-32768-r3-lightning-ordinary-short-c4-20260929",
             "ladder-65536-262144-r3-w1-lightning-ordinary-long-c8-20260929",
+            "ladder-1024-32768-r3-lightning-ordinary-short-latest-20260929",
+            "ladder-16384-16384-r3-lightning-ordinary-isolated-latest-20260929",
         ) if (row := ladder(stem)) is not None],
     }
     OUTPUT.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
