@@ -310,6 +310,64 @@ def allowed_routes(args, async_promotion):
     return {SEGMENTED_ROUTE, PHYSICAL_ROUTE} if async_promotion else {SEGMENTED_ROUTE}
 
 
+# Fields of runtime.segmented_physical_promotion.SegmentedPhysicalPromotionReceipt,
+# which MTPGenerationBatch stores per promoted lane as ``asdict(receipt)``.
+PROMOTION_FIELDS = ("queued_ns", "finish_ns", "stream_wait_ns", "reserved_bytes", "patched_bytes",
+                    "recurrent_arrays_reused", "cleanup_error_count", "rows", "layers", "advance")
+
+
+def is_declined_promotion(receipt):
+    """The decline shape the generator stores: exactly {selected: False, reason: str}."""
+    return (isinstance(receipt, dict) and set(receipt) == {"selected", "reason"}
+            and receipt["selected"] is False and isinstance(receipt["reason"], str) and bool(receipt["reason"]))
+
+
+def promotion_receipt_problems(receipt, *, num_draft, batch, cache_layers):
+    """Why ``receipt`` is not a completed physical promotion ([] when it is).
+
+    Requirements come from ``SegmentedPhysicalPromotionTicket.finish`` and
+    its caller: exactly the ten int fields (bool is not int); the three
+    timings are perf-counter differences (>= 0) and ``stream_wait_ns`` is
+    measured inside ``finish_ns``; staging reserves populated QSA buffers
+    (> 0) and the committed suffix is patched into them (0 < patched <=
+    reserved); old-row cleanup errors are counted, and any is a refusal;
+    ``rows`` is the promoted cohort (1..batch); ``layers`` is len(target) +
+    len(draft) of the published state; ``advance`` is the equal first-commit
+    advance, bounded by the reserved tail num_draft + 1.
+    """
+    if not isinstance(receipt, dict):
+        return [f"receipt is {type(receipt).__name__}, not a promotion receipt"]
+    problems = []
+    missing = [f for f in PROMOTION_FIELDS if f not in receipt]
+    extra = sorted(str(k) for k in receipt if k not in PROMOTION_FIELDS)
+    if missing:
+        problems.append(f"missing fields {missing}")
+    if extra:
+        problems.append(f"unexpected fields {extra}")
+    problems += [f"{f} is {type(receipt[f]).__name__}, not int" for f in PROMOTION_FIELDS
+                 if f in receipt and type(receipt[f]) is not int]
+    if problems:
+        return problems
+    r = receipt
+    if min(r[f] for f in PROMOTION_FIELDS) < 0:
+        problems.append("negative field")
+    if r["stream_wait_ns"] > r["finish_ns"]:
+        problems.append("stream_wait_ns exceeds finish_ns")
+    if r["reserved_bytes"] <= 0:
+        problems.append("reserved_bytes must be > 0")
+    if not 0 < r["patched_bytes"] <= r["reserved_bytes"]:
+        problems.append("patched_bytes must be in (0, reserved_bytes]")
+    if r["cleanup_error_count"] != 0:
+        problems.append(f"cleanup_error_count {r['cleanup_error_count']} != 0")
+    if not 1 <= r["rows"] <= batch:
+        problems.append(f"rows {r['rows']} outside 1..{batch}")
+    if cache_layers is None or r["layers"] != cache_layers:
+        problems.append(f"layers {r['layers']} != published target+draft cache layers {cache_layers}")
+    if type(num_draft) is not int or not 1 <= r["advance"] <= num_draft + 1:
+        problems.append(f"advance {r['advance']} outside 1..num_draft+1 (num_draft {num_draft})")
+    return problems
+
+
 def prompt_layout(prompts):
     return "aligned" if len({len(p) for p in prompts}) == 1 else "ragged"
 
@@ -517,6 +575,8 @@ class RetirementDriver:
             receipt = getattr(final, "mtp_receipt", None) or {}
             stats = receipt.get("stats", {}) or {}
             cache = getattr(final, "prompt_cache", None)
+            mtp_state = getattr(final, "mtp_state", None)
+            draft = mtp_state[0] if isinstance(mtp_state, tuple) and mtp_state else None
             out[i] = {
                 "tokens": lane["tokens"], "token_sha256": _sha(json.dumps(lane["tokens"]).encode()),
                 "finish_reason": lane["finish_reason"], "logprob_rows": lane["logprob_rows"],
@@ -527,6 +587,8 @@ class RetirementDriver:
                 "mtp": {"route": receipt.get("route"), "observed_widths": receipt.get("observed_compute_widths"),
                         "async_qsa_promotion": receipt.get("async_qsa_promotion"),
                         "num_draft": receipt.get("num_draft"),
+                        # Published target + draft cache layers (cross-checks a promotion receipt).
+                        "cache_layers": None if cache is None or draft is None else len(cache) + len(draft),
                         "draft_cycles": stats.get("draft_cycles", 0), "draft_proposed": stats.get("draft_proposed", 0),
                         "draft_accepted": stats.get("draft_accepted", 0),
                         "verify_span_hist": stats.get("verify_span_hist"),
@@ -601,7 +663,7 @@ def model_mode(args):
             assert "_final" not in record
         arms[arm] = data
         del data
-    refusals, differences, incomparable, widths, routes = [], [], [], {}, {}
+    refusals, differences, incomparable, widths, routes, promotions = [], [], [], {}, {}, {}
     planned, unbound = self_mtp_config(args)
     for arm, check in isolation.items():
         if check is not None and (check["alive"] or check["unreferenceable"]):
@@ -621,14 +683,38 @@ def model_mode(args):
         if args.mtp_layout is not None and policy["resolved"]["layout"] != args.mtp_layout:
             refusals.append(f"{arm}: runtime resolved layout {policy['resolved']['layout']} "
                             f"!= requested {args.mtp_layout}")
+        requested = args.mtp_layout == "segmented" and args.async_promotion == "on"
+        promoted = {}
         for i, l in arms[arm]["lanes"].items():
-            route = l["mtp"]["route"]
+            route, receipt = l["mtp"]["route"], l["mtp"]["async_qsa_promotion"]
+            if receipt is not None and not is_declined_promotion(receipt):
+                problems = promotion_receipt_problems(receipt, num_draft=l["mtp"]["num_draft"], batch=args.batch,
+                                                      cache_layers=l["mtp"]["cache_layers"])
+                if problems:
+                    refusals.append(f"{arm} lane {i}: invalid promotion receipt: " + "; ".join(problems))
+                else:
+                    promoted[i] = receipt
+            if receipt is not None and args.mtp_layout is not None and not requested:
+                refusals.append(f"{arm} lane {i}: promotion receipt but async promotion was not requested")
+            if i in promoted and route != PHYSICAL_ROUTE:
+                refusals.append(f"{arm} lane {i}: promotion receipt on route {route}")
             if allowed is None:
                 continue
+            # Truthiness is not evidence: only a schema-valid completed
+            # promotion makes a physical route match a segmented request.
             if route not in allowed or (args.mtp_layout == "segmented" and route == PHYSICAL_ROUTE
-                                        and not l["mtp"]["async_qsa_promotion"]):
+                                        and i not in promoted):
                 refusals.append(f"{arm} lane {i}: observed route {route} does not match requested "
                                 f"--mtp-layout {args.mtp_layout}")
+        # The generator copies one receipt to every lane of the promoted cohort.
+        cohorts = {}
+        for i, receipt in promoted.items():
+            cohorts.setdefault(json.dumps(receipt, sort_keys=True), []).append(i)
+        for key, members in cohorts.items():
+            if len(members) != json.loads(key)["rows"]:
+                refusals.append(f"{arm}: promotion receipt rows {json.loads(key)['rows']} carried by "
+                                f"{len(members)} lanes {members}")
+        promotions[arm] = {"lanes_promoted": sorted(promoted), "cohorts": len(cohorts)}
         if sum(l["mtp"]["draft_proposed"] for l in lanes) <= 0:
             refusals.append(f"{arm}: no self-MTP proposals")
         if sum(l["mtp"]["draft_proposed"] - l["mtp"]["draft_accepted"] for l in lanes) <= 0:
@@ -680,7 +766,7 @@ def model_mode(args):
         "route": {"requested_layout": args.mtp_layout or "environment-resolved (no explicit --mtp-layout)",
                   "requested_async_promotion": args.async_promotion,
                   "resolved_layout": {arm: arms[arm]["self_mtp"]["resolved"]["layout"] for arm in order},
-                  "observed_routes": routes, "unbound_keys": unbound,
+                  "observed_routes": routes, "unbound_keys": unbound, "promotions": promotions,
                   "note": ("physical = existing continuous_batched_self_mtp reference path, not a new serving "
                            "route; an explicit layout is refused on any mismatching lane route")},
         "prompt_layout": {"requested": args.prompt_layout, "observed": prompt_layout(driver.prompts),

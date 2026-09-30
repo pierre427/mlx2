@@ -505,3 +505,133 @@ def test_prompt_layout_is_validated_and_labelled():
     driver.args.prompt_layout = "ragged"
     with pytest.raises(SystemExit, match="--prompt-layout ragged but the prompts are aligned"):
         driver.check_geometry()
+
+
+# ---- promotion receipts are validated against the producer schema ----
+
+PROMOTE = ("--mtp-layout", "segmented", "--async-promotion", "on", "--prompt-layout", "aligned")
+VALID = {"queued_ns": 3695292, "finish_ns": 1033833, "stream_wait_ns": 404375, "reserved_bytes": 141184,
+         "patched_bytes": 320, "recurrent_arrays_reused": 4, "cleanup_error_count": 0, "rows": 2, "layers": 3,
+         "advance": 1}  # a real tiny receipt
+
+
+@pytest.fixture(scope="module")
+def tiny_promoted():
+    return R.model_mode(_args(*PROMOTE))[1]
+
+
+def test_true_tiny_promotion_cell_passes_with_valid_receipts(tiny_promoted):
+    record = tiny_promoted
+    assert record["verdict"] == "pass", record["refusals"] + record["differences"]
+    assert record["route"]["promotions"] == {arm: {"lanes_promoted": [0, 1], "cohorts": 1}
+                                             for arm in ("retire", "control")}
+    for arm in record["arms"].values():
+        for lane in arm["lanes"].values():
+            receipt = lane["mtp"]["async_qsa_promotion"]
+            assert lane["mtp"]["route"] == R.PHYSICAL_ROUTE and set(receipt) == set(R.PROMOTION_FIELDS)
+            assert "selected" not in receipt
+            assert R.promotion_receipt_problems(receipt, num_draft=lane["mtp"]["num_draft"], batch=2,
+                                                cache_layers=lane["mtp"]["cache_layers"]) == []
+
+
+def _set_receipts(monkeypatch, value, arms=("retire", "control"), route=None):
+    run = R.RetirementDriver.run_arm
+
+    def perturbed(self, name):
+        data = run(self, name)
+        if name in arms:
+            for lane in data["lanes"].values():
+                lane["mtp"]["async_qsa_promotion"] = value() if callable(value) else value
+                if route is not None:
+                    lane["mtp"]["route"] = route
+        return data
+
+    monkeypatch.setattr(R.RetirementDriver, "run_arm", perturbed)
+
+
+def test_root_falsifier_declined_receipt_on_a_physical_route_is_refused(monkeypatch):
+    _set_receipts(monkeypatch, lambda: {"selected": False, "reason": "declined"}, route=R.PHYSICAL_ROUTE)
+    record = R.model_mode(_args(*PROMOTE))[1]
+    assert record["verdict"] == "refused"
+    for arm in ("retire", "control"):
+        for lane in (0, 1):
+            assert (f"{arm} lane {lane}: observed route continuous_batched_self_mtp does not match requested "
+                    "--mtp-layout segmented") in record["refusals"]
+    assert record["route"]["promotions"]["retire"]["lanes_promoted"] == []
+
+
+@pytest.mark.parametrize("receipt,problem", [
+    ({}, "missing fields"),
+    ({"selected": True}, "missing fields"),
+    ({"selected": False, "reason": ""}, "missing fields"),       # not the decline shape either
+    ({"foo": 1}, "missing fields"),
+    ({**VALID, "selected": True}, "unexpected fields ['selected']"),
+    ({k: v for k, v in VALID.items() if k != "advance"}, "missing fields ['advance']"),
+    ({**VALID, "rows": "2"}, "rows is str, not int"),
+    ({**VALID, "advance": True}, "advance is bool, not int"),
+    ({**VALID, "patched_bytes": 320.0}, "patched_bytes is float, not int"),
+    ("promoted", "receipt is str"),
+    (True, "receipt is bool"),
+    ({**VALID, "queued_ns": -1}, "negative field"),
+    ({**VALID, "stream_wait_ns": VALID["finish_ns"] + 1}, "stream_wait_ns exceeds finish_ns"),
+    ({**VALID, "reserved_bytes": 0, "patched_bytes": 0}, "reserved_bytes must be > 0"),
+    ({**VALID, "patched_bytes": 0}, "patched_bytes must be in (0, reserved_bytes]"),
+    ({**VALID, "patched_bytes": VALID["reserved_bytes"] + 1}, "patched_bytes must be in (0, reserved_bytes]"),
+    ({**VALID, "cleanup_error_count": 1}, "cleanup_error_count 1 != 0"),
+    ({**VALID, "rows": 0}, "rows 0 outside 1..2"),
+    ({**VALID, "rows": 3}, "rows 3 outside 1..2"),
+    ({**VALID, "layers": 2}, "layers 2 != published target+draft cache layers 3"),
+    ({**VALID, "advance": 0}, "advance 0 outside 1..num_draft+1"),
+    ({**VALID, "advance": 4}, "advance 4 outside 1..num_draft+1"),
+])
+def test_promotion_receipt_schema_refusals(receipt, problem):
+    problems = R.promotion_receipt_problems(receipt, num_draft=2, batch=2, cache_layers=3)
+    assert any(p.startswith(problem) for p in problems), problems
+
+
+def test_the_valid_receipt_and_decline_shapes_are_recognised():
+    assert R.promotion_receipt_problems(dict(VALID), num_draft=2, batch=2, cache_layers=3) == []
+    assert R.promotion_receipt_problems(dict(VALID), num_draft=2, batch=2, cache_layers=None)  # unknown layers
+    assert R.is_declined_promotion({"selected": False, "reason": "memory_pressure_retains_segmented_owner"})
+    for shape in ({"selected": 0, "reason": "x"}, {"selected": False}, {"selected": False, "reason": "x", "y": 1},
+                  {"selected": False, "reason": 3}, None, VALID):
+        assert not R.is_declined_promotion(shape)
+
+
+@pytest.mark.parametrize("receipt,needle", [
+    ({"foo": 1}, "invalid promotion receipt: missing fields"),
+    ({**VALID, "rows": True}, "invalid promotion receipt: rows is bool, not int"),
+    ({**VALID, "cleanup_error_count": 2}, "invalid promotion receipt: cleanup_error_count 2 != 0"),
+    ("yes", "invalid promotion receipt: receipt is str"),
+])
+def test_malformed_receipts_are_refused_in_model_mode(monkeypatch, receipt, needle):
+    _set_receipts(monkeypatch, lambda: receipt, arms=("retire",))
+    record = R.model_mode(_args(*PROMOTE))[1]
+    assert record["verdict"] == "refused"
+    assert any(r.startswith("retire lane 0: " + needle) for r in record["refusals"]), record["refusals"]
+    assert any("retire lane 0: observed route continuous_batched_self_mtp does not match" in r
+               for r in record["refusals"])
+
+
+def test_a_receipt_carried_by_fewer_lanes_than_its_rows_is_refused(monkeypatch):
+    run = R.RetirementDriver.run_arm
+
+    def split(self, name):
+        data = run(self, name)
+        if name == "retire":
+            lane = data["lanes"][1]["mtp"]
+            lane["async_qsa_promotion"] = {**lane["async_qsa_promotion"],
+                                           "queued_ns": lane["async_qsa_promotion"]["queued_ns"] + 1}
+        return data
+
+    monkeypatch.setattr(R.RetirementDriver, "run_arm", split)
+    record = R.model_mode(_args(*PROMOTE))[1]
+    assert record["verdict"] == "refused"
+    assert sum("retire: promotion receipt rows 2 carried by 1 lanes" in r for r in record["refusals"]) == 2
+
+
+def test_a_receipt_under_an_unrequested_promotion_is_refused(monkeypatch):
+    _set_receipts(monkeypatch, lambda: dict(VALID), arms=("retire",))
+    record = R.model_mode(_args("--mtp-layout", "physical", "--prompt-layout", "aligned"))[1]
+    assert record["verdict"] == "refused"
+    assert "retire lane 0: promotion receipt but async promotion was not requested" in record["refusals"]
