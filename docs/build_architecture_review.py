@@ -23,7 +23,7 @@ from reportlab.platypus import (
 )
 
 OUT = Path(__file__).with_name("mlx2_deep_dive_feature_architecture_review.pdf")
-SOURCE = "0d6c4c66"
+SOURCE = "343cc092"
 DATE = "30 September 2026"
 INK = colors.HexColor("#14212c")
 TEAL = colors.HexColor("#087f80")
@@ -149,7 +149,7 @@ section("mlx2-top", "The read-only Apple Silicon monitor added at source 0d6c4c6
 page()
 
 chapter(6, "Model support is scoped", "A registry entry, a smoke pass and a fully qualified route are different milestones.")
-section("Adapters", "The source includes ordinary paths across dense, MoE, sliding-window and hybrid families, with model-specific tensor math isolated from the scheduler. Flash-Next, Qwen3.8, Muse-Glimmer, Nemotron Lightning, Laguna and other campaign targets have distinct artifacts and mechanisms. The qualification ledger and per-model pages state which workload and host actually passed.")
+section("Adapters", "The source includes ordinary paths across dense, MoE, sliding-window and hybrid families, with model-specific tensor math isolated from the scheduler. The current GPT-OSS Harmony adapter separates analysis and commentary from final-channel content, and its thinking guard uses a bounded multi-token close sequence; Puzzle can run hidden low-effort analysis when it cannot skip that channel. Flash-Next, Qwen3.8, Muse-Glimmer, Nemotron Lightning, Laguna and other campaign targets have distinct artifacts and mechanisms. The qualification ledger and per-model pages state which workload and host actually passed.")
 section("September campaign", "M5 Qwen3.8 MLX 4-bit passed ordinary smoke and the 20x20 domain workload; M3 repeated the 20x20 on current source. Muse-Glimmer original passed its M5 smoke and 20x20 gate with 398/400 graded correct and zero HTTP errors, but this does not qualify all feature routes. Qwen3.8 oQ4e MTP achieved the bounded 16 GiB / 32K warm APCv2 ladder; the 8 GiB profile failed its warm-reuse gate. Other model pages record their own results and open items.")
 section("Offline and candidate paths", "Media, diarization and experimental model capabilities have separate scopes. For example, a narrow offline Nemotron diarization qualification is not a text-serving or streaming qualification. A candidate trace or CPU contract is useful implementation evidence, but it cannot stand in for a served GPU route receipt.")
 page()
