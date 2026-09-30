@@ -171,3 +171,74 @@ def test_dropped_or_stuck_lane_is_refused_not_waited_on(monkeypatch, failures, r
     assert record["verdict"] == "refused"
     assert record["refusals"] == [f"pair 0 off: {reason}", f"pair 0 on: {reason}"]
     assert all(g.closed for g in made)
+
+
+def test_reclaim_records_draft_engagement_boundaries_and_state():
+    record = H.run_cohort(_args("--mechanism", "external-reclaim"))
+    assert record["state_comparison"] == {
+        "final_target_state_sha256": "compared", "final_draft_sidecar_sha256": "compared",
+    }
+    for run in record["runs"]:
+        assert run["counters"]["external_rounds"] > 0 and run["counters"]["proposed_tokens"] > 0
+        assert [s["emitted"] for s in run["boundary_samples"]] == [256]
+        assert run["max_responses_per_poll"] >= 1
+    by_arm = {r["arm"]: r for r in record["runs"]}
+    assert by_arm["reclaim"]["final_target_state_sha256"] == by_arm["control"]["final_target_state_sha256"]
+    assert by_arm["reclaim"]["final_draft_sidecar_sha256"] == by_arm["control"]["final_draft_sidecar_sha256"]
+
+
+def test_ordinary_fallback_is_not_external_engagement(monkeypatch):
+    run_arm = H.run_arm
+
+    def fallback(cohort, arm):
+        record = run_arm(cohort, arm)
+        record["counters"]["external_rounds"] = record["counters"]["proposed_tokens"] = 0
+        return record
+
+    monkeypatch.setattr(H, "run_arm", fallback)
+    record = H.run_cohort(_args("--mechanism", "external-reclaim"))
+    assert record["verdict"] == "refused"
+    assert all("never proposed" in r for r in record["refusals"])
+
+
+def test_final_state_difference_is_a_counterexample(monkeypatch):
+    run_arm = H.run_arm
+
+    def drifted(cohort, arm):
+        record = run_arm(cohort, arm)
+        if arm == "on":
+            record["final_target_state_sha256"] = "0" * 64
+        return record
+
+    monkeypatch.setattr(H, "run_arm", drifted)
+    record = H.run_cohort(_args("--mechanism", "qsdpa-tiling"))
+    assert record["verdict"] == "counterexample"
+    assert record["mismatches"] == ["pair 0 on: final_target_state_sha256 differs"]
+
+
+def test_state_hash_is_none_when_unavailable_and_sensitive_to_bits():
+    import mlx.core as mx
+
+    assert H.state_hash(None) is None
+    a = [mx.array([1.0, 2.0], dtype=mx.bfloat16)]
+    b = [mx.array([1.0, 2.015625], dtype=mx.bfloat16)]
+    assert H.state_hash(a) == H.state_hash([mx.array([1.0, 2.0], dtype=mx.bfloat16)])
+    assert H.state_hash(a) != H.state_hash(b)
+
+
+def test_even_pair_counts_use_the_true_median(monkeypatch):
+    values = iter([1.0, 3.0, 10.0, 20.0])
+    run_arm = H.run_arm
+
+    def timed(cohort, arm):
+        record = run_arm(cohort, arm)
+        record["ttft_s"] = next(values)
+        return record
+
+    monkeypatch.setattr(H, "run_arm", timed)
+    args = H.resolve_args(H.build_parser(), ["--tiny", "--out", "/dev/null", "--mechanism",
+                                             "qsdpa-tiling", "--warmups", "0", "--pairs", "2"])
+    record = H.run_cohort(args)
+    # Order off,on,on,off -> off {1, 20}, on {3, 10}.
+    assert record["median_by_arm"]["off"]["ttft_s"] == 10.5
+    assert record["median_by_arm"]["on"]["ttft_s"] == 6.5

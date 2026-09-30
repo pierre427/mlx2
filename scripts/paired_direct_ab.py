@@ -25,8 +25,13 @@ Mechanisms (one per cohort):
     switch) that only counts the crossings it skipped. Engagement:
     ``external_allocator_reclaims`` > 0 on ``reclaim``, 0 on ``control``,
     and the control arm crossed the boundary too; a run too short to cross
-    it is refused. Staged external-draft *prefill* reclaim is a separate
-    candidate and is not exercised here.
+    it is refused, and so is one whose draft never proposed (an ordinary
+    fallback is not the external route). Each run records draft rounds,
+    proposals and acceptances, the most responses one poll returned, and
+    diagnostic active/cache/peak samples at every crossed 256-response
+    quotient (same method on both arms; at least three pairs of 1024 tokens,
+    the real default, are needed to see a plateau). Staged external-draft
+    *prefill* reclaim is a separate candidate and is not exercised here.
 
 Protocol: fresh generator and caches per run; identical pinned prompt token
 IDs, ``LaneRNG(--seed)``, sampler, stop tokens and ``--max-tokens`` on both
@@ -38,7 +43,9 @@ compared is recorded, and the ordinary route must return every requested
 row), and MLX memory: peak (reset per run), plus active and cache sampled
 in-run before the generator closes and the highest cache seen between polls.
 A lane the generator drops, or a run that stops responding, is refused
-rather than waited on.
+rather than waited on. After timing, the final target cache and the draft
+sidecar are hashed; differing hashes are a counterexample, and a missing
+one is reported as ``unavailable`` (never as a passing state check).
 
 Verdict: ``pass`` when every run engaged as required and every run's tokens
 (and logprob rows where available) equal the first run's; ``counterexample``
@@ -56,6 +63,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import statistics
 import subprocess
 import sys
 import time
@@ -251,6 +259,48 @@ class Cohort:
 
 # ---------------------------------------------------------------- arms
 
+def state_hash(obj):
+    """sha256 over a cache/sidecar tree's arrays and scalars, or None.
+
+    Each cache contributes its ``state`` (the arrays a snapshot would keep);
+    other objects contribute their attributes. None means unavailable, never
+    a passing state comparison.
+    """
+    if obj is None:
+        return None
+    import mlx.core as mx
+    import numpy as np
+    from mlx.utils import tree_flatten
+
+    def plain(node):
+        if isinstance(node, (list, tuple)):
+            return [plain(item) for item in node]
+        if isinstance(node, dict):
+            return {str(k): plain(v) for k, v in sorted(node.items(), key=lambda kv: str(kv[0]))}
+        if isinstance(node, mx.array) or node is None or isinstance(node, (int, float, str, bool)):
+            return node
+        if hasattr(node, "state"):
+            return plain(node.state)
+        if hasattr(node, "__dict__"):
+            return plain(vars(node))
+        return repr(node)
+
+    try:
+        digest = hashlib.sha256()
+        for key, leaf in tree_flatten(plain(obj)):
+            digest.update(key.encode())
+            if isinstance(leaf, mx.array):
+                digest.update(f"{leaf.dtype}{leaf.shape}".encode())
+                if leaf.dtype == mx.bfloat16:
+                    leaf = leaf.view(mx.uint16)
+                digest.update(np.array(leaf).tobytes())
+            else:
+                digest.update(repr(leaf).encode())
+        return digest.hexdigest()
+    except Exception:  # noqa: BLE001 - unavailable is recorded, never passed
+        return None
+
+
 def _set_budget(value):
     from mlx2.runtime.models import base
 
@@ -299,7 +349,10 @@ def run_arm(cohort, arm):
     mx.clear_cache()
     mx.reset_peak_memory()
     batch = cohort.generator()
+    from mlx2.runtime.generate import ALLOCATOR_RECLAIM_MTP_TOKEN_INTERVAL as INTERVAL
+
     tokens, rows, first = [], [], None
+    boundary_samples, max_per_poll, final = [], 0, None
     try:
         if arm == "control":
             _suppress_reclaim(batch, tally)
@@ -321,6 +374,7 @@ def run_arm(cohort, arm):
                 failures.extend(str(f) for f in lost)
                 break
             idle = 0 if responses else idle + 1
+            before = len(tokens)
             if idle > IDLE_POLL_LIMIT:
                 failures.append(f"no response in {IDLE_POLL_LIMIT} polls")
                 break
@@ -336,11 +390,24 @@ def run_arm(cohort, arm):
                     rows.append(_sha(np.array(logprobs.astype(mx.float32)).tobytes()))
                 if getattr(response, "finish_reason", None):
                     done = True
+                    final = response
+            max_per_poll = max(max_per_poll, len(tokens) - before)
+            if args.mechanism == "external-reclaim" and len(tokens) // INTERVAL > before // INTERVAL:
+                # Diagnostic pool samples at each crossed quotient, same method
+                # on both arms; host counters only, no device sync.
+                boundary_samples.append({
+                    "emitted": len(tokens), "active_bytes": mx.get_active_memory(),
+                    "cache_bytes": mx.get_cache_memory(), "peak_bytes": mx.get_peak_memory(),
+                })
         mx.synchronize()
         ended = time.perf_counter()
         stats = dict(getattr(batch, "scheduler_stats", {}) or {})
         # In-run memory, sampled before close() returns the lane buffers.
         active_end, cache_end = mx.get_active_memory(), mx.get_cache_memory()
+        peak_end = mx.get_peak_memory()
+        # After timing: final target cache and draft sidecar state.
+        target_state = state_hash(getattr(final, "prompt_cache", None))
+        sidecar_state = state_hash(getattr(final, "cache_sidecar", None))
     finally:
         batch.close()
         if previous_budget is not None:
@@ -358,12 +425,20 @@ def run_arm(cohort, arm):
         "active_bytes": active_end,
         "cache_bytes": cache_end,
         "cache_high_bytes": max(cache_high, cache_end),
-        "peak_bytes": mx.get_peak_memory(),
+        "peak_bytes": peak_end,
+        "memory_note": "in-run samples before generator close; diagnostic, not a performance claim",
+        "boundary_samples": boundary_samples,
+        "max_responses_per_poll": max_per_poll,
+        "final_target_state_sha256": target_state,
+        "final_draft_sidecar_sha256": sidecar_state,
         "counters": {
             "composed_tiled_calls": qvm.STATS.get("composed_tiled_calls", 0) - tiled_before,
             "composed_tiles": qvm.STATS.get("composed_tile_calls", 0) - tiles_before,
             "external_allocator_reclaims": stats.get("external_allocator_reclaims", 0),
             "suppressed_crossings": tally["suppressed_crossings"],
+            "external_rounds": stats.get("external_rounds", 0),
+            "proposed_tokens": stats.get("proposed_tokens", 0),
+            "accepted_proposals": stats.get("accepted_proposals", 0),
         },
     }
     record["_tokens"] = tokens
@@ -388,6 +463,8 @@ def engagement_refusal(mechanism, record, logprob_rows=0):
     if record["tokens"] < ALLOCATOR_RECLAIM_MTP_TOKEN_INTERVAL:
         return (f"{record['tokens']} tokens: too short to cross the "
                 f"{ALLOCATOR_RECLAIM_MTP_TOKEN_INTERVAL}-response reclamation boundary")
+    if c["external_rounds"] <= 0 or c["proposed_tokens"] <= 0:
+        return "external draft never proposed (ordinary fallback, not the external route)"
     if arm == "reclaim" and c["external_allocator_reclaims"] <= 0:
         return "reclaim not engaged on the reclaim arm"
     if arm == "control" and (c["external_allocator_reclaims"] != 0 or c["suppressed_crossings"] <= 0):
@@ -420,6 +497,9 @@ def run_cohort(args):
             mismatches.append(f"pair {record['pair']} {record['arm']}: tokens differ at {index}")
         elif record["logprob_row_sha256"] != reference["logprob_row_sha256"]:
             mismatches.append(f"pair {record['pair']} {record['arm']}: logprob rows differ")
+        for key in ("final_target_state_sha256", "final_draft_sidecar_sha256"):
+            if record[key] is not None and reference[key] is not None and record[key] != reference[key]:
+                mismatches.append(f"pair {record['pair']} {record['arm']}: {key} differs")
     for record in runs:
         del record["_tokens"]
     summary = {}
@@ -427,7 +507,7 @@ def run_cohort(args):
         mine = [r for r in runs if r["arm"] == arm]
         if mine:
             summary[arm] = {
-                key: sorted(r[key] for r in mine)[len(mine) // 2]
+                key: statistics.median(r[key] for r in mine)
                 for key in ("ttft_s", "decode_tok_s", "peak_bytes", "active_bytes", "cache_bytes",
                             "cache_high_bytes")
             }
@@ -442,6 +522,10 @@ def run_cohort(args):
         "refusals": refusals,
         "mismatches": mismatches,
         "arms": [first, second],
+        "state_comparison": {
+            key: ("compared" if runs and all(r[key] is not None for r in runs) else "unavailable")
+            for key in ("final_target_state_sha256", "final_draft_sidecar_sha256")
+        },
         "protocol": {
             "pairs": args.pairs, "warmups_discarded": args.warmups, "order": "alternating AB/BA",
             "max_tokens": args.max_tokens, "seed": args.seed, "sampling": "greedy",
@@ -496,7 +580,7 @@ def resolve_args(ap, argv=None):
             ap.error("--model is required for a real run")
         if not qsdpa and not a.policy:
             ap.error("external-reclaim needs an explicit --policy")
-        defaults = (16504, 128, 8, 8192, 16 << 20) if qsdpa else (512, 384, None, 2048, None)
+        defaults = (16504, 128, 8, 8192, 16 << 20) if qsdpa else (512, 1024, None, 2048, None)
     prompt, max_tokens, kv_bits, step, budget = defaults
     a.budget_bytes = budget if a.budget_bytes is None else a.budget_bytes
     a.prompt_tokens = prompt if a.prompt_tokens is None else a.prompt_tokens
