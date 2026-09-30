@@ -1316,6 +1316,21 @@ class PromptTemplateFailure(RuntimeError):
 _TEMPLATE_UNDEFINED_MARKERS = ("Undefined", "undefined")
 
 
+def greedy_batch_sampler_enabled() -> bool:
+    """MLX2_GREEDY_BATCH_SAMPLER=1 groups temperature-0 lanes into one argmax."""
+    return os.environ.get("MLX2_GREEDY_BATCH_SAMPLER", "0").strip() == "1"
+
+
+def _greedy_batch_sampler(logprobs):
+    import mlx.core as mx  # serving imports MLX lazily; cached after the first call
+
+    return mx.argmax(logprobs, axis=-1)
+
+
+_greedy_batch_sampler.batch_groupable = True
+_GREEDY_BATCH_SAMPLER = _greedy_batch_sampler
+
+
 def render_prompt_tokens(adapter, request):
     """Render one request to prompt tokens, shaping template failures.
 
@@ -6773,6 +6788,13 @@ class ServingEngine:
                                     transform(logprobs), key=draw_key(rng)
                                 )
                             )
+
+                        if temp == 0 and greedy_batch_sampler_enabled():
+                            # One shared, batch-groupable argmax: greedy lanes
+                            # draw nothing, so ``_step`` may sample them in a
+                            # single kernel instead of one slice + argmax +
+                            # concatenate per lane.
+                            sampler = _GREEDY_BATCH_SAMPLER
 
                         processors = make_logits_processors(
                             logit_bias={int(k): v for k, v in job.request.get("logit_bias", {}).items()},
