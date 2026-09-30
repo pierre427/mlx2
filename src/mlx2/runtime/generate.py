@@ -688,7 +688,7 @@ class PromptProcessingBatch:
                 self.prompt_cache,
                 [b + min(processed, l) for (b, l) in zip(bases, lengths)],
             )
-            if prefill_clear_cache(self.decode_active):
+            if prefill_clear_cache(getattr(self, "decode_active", False)):
                 mx.clear_cache()
             tokens = tokens[:, n_to_process:]
         if max_padding > 0:
@@ -696,7 +696,7 @@ class PromptProcessingBatch:
                 c.finalize()
             compact_prompt_cache_windows(self.prompt_cache)
             mx.eval([c.state for c in self.prompt_cache])
-            if prefill_clear_cache(self.decode_active):
+            if prefill_clear_cache(getattr(self, "decode_active", False)):
                 mx.clear_cache()
         record_state_checkpoints(self.prompt_cache, totals, force=True)
 
