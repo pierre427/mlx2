@@ -394,7 +394,6 @@ def validate_request(
     chat=True,
     structured_thinking=False,
     allow_buffered_tool_stream=False,
-    allow_strict_auto=False,
     constrained_tool_grammar=False,
     max_tools=64,
     max_stops=4,
@@ -1144,7 +1143,6 @@ def prompt_render_payload(engine, body, path):
                 (status.get("structured_output") or {}).get("thinking_deferral")
             ),
             allow_buffered_tool_stream=True,
-            allow_strict_auto=True,
             constrained_tool_grammar=bool(
                 (status.get("settings") or {}).get("constrained_tool_grammar")
             ),
@@ -2681,11 +2679,6 @@ def handler_for(
                             )
                         ),
                         allow_buffered_tool_stream=True,
-                        allow_strict_auto=bool(
-                            responses_api
-                            and response_options
-                            and response_options.get("tool_executors")
-                        ),
                         constrained_tool_grammar=bool(
                             (status.get("settings") or {}).get(
                                 "constrained_tool_grammar"

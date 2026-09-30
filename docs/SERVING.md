@@ -133,7 +133,21 @@ output-changing parser mechanisms are explicit execution-policy opt-ins:
 `constrained_tool_grammar:true` applies an adapter-owned decode grammar where
 the adapter and request combination can express it, and
 `tolerant_tool_markers:true` returns malformed unconstrained markers as text.
-Both default false and are qualification-bound. Decode grammar falls back to
+Both default false and are qualification-bound. One combination decodes under
+an adapter grammar whatever the policy: a JSON `response_format` on a request
+whose tools may be called (`tool_choice` `auto`). The answer grammar bound
+alone would make every call impossible (Rapid-MLX #3871), so the request uses
+the calls-or-answer composition below (receipt `tool_choice.grammar.engaged_by:
+"response_format"`), or fails closed with a 400 where the adapter has no
+`tool_constraint`. Forced calls (`required`/named) produce no answer, so the
+answer format is not bound over them; an adapter whose answer opens with its
+own header (Muse's `` to=user<|message|>``, `structured_answer_token_ids`)
+defers the answer grammar to that header instead, which a call never writes.
+Under either policy the generic `<tool_call>` parser matches tool markup only
+in content, never inside reasoning, and drops a call cut off by `max_tokens`
+(as North, Xing and Muse do), keeping `finish_reason:"length"`. A `max_tokens`
+finish reports `"length"` even when an earlier call completed; that call stays
+in `tool_calls`. Decode grammar falls back to
 main validation, with a counter and receipt, when the adapter has no hook or a
 request combines required/named tools with another constraint or `min_tokens`.
 

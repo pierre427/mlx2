@@ -1292,15 +1292,19 @@ def test_opt_in_tool_grammar_skips_unsupported_adapter_and_conflicts(scripted_en
         declare_marker=True,
         execution_policy={"constrained_tool_grammar": True},
     )
-    state["script"] = [7, 8, 9, 10, 11]
-    _, content, final = _collect(
+    # A forced call produces no answer: the answer format is not bound over
+    # the output (it made the call impossible, Rapid-MLX #3871), and the call
+    # is checked by the terminal tool contract.
+    state["script"] = [TOOL_CALL, EOS]
+    calls, _, final = _events(
         engine.submit({
             **request,
             "response_format": {"type": "json_object"},
             "max_tokens": 8,
         })
     )
-    assert json.loads(content) == {"a": 1}
+    assert "error" not in final, final
+    assert [c["function"]["name"] for c in calls] == ["sum"]
     assert engine.counts["constrained_tool_grammar_skips"] == 1
     assert final["receipt"]["request_controls"]["tool_choice"][
         "decode_grammar"
@@ -1558,3 +1562,82 @@ def test_answer_header_defers_a_client_grammar_past_the_reply_framing(scripted_e
     engine = build(declare_marker=False)
     *_, final = _collect(engine.submit(dict(THINKING_JSON_REQUEST)))
     assert "structured output requires thinking to be disabled" in final["error"]
+
+
+SUM_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "sum",
+        "parameters": {
+            "type": "object",
+            "properties": {"x": {"type": "integer"}},
+            "required": ["x"],
+        },
+    },
+}
+ANSWER_WITH_TOOLS = {
+    "messages": [{"role": "user", "content": "add"}],
+    "tools": [SUM_TOOL],
+    "response_format": {"type": "json_object"},
+    "max_tokens": 8,
+    "temperature": 0,
+    "top_k": 5,
+}
+
+
+def _events(job):
+    calls, content = [], []
+    while True:
+        event = job.events.get(timeout=10)
+        if "delta" in event:
+            calls.extend(event["delta"].get("tool_calls", ()))
+            content.append(event["delta"].get("content", ""))
+        if "finish_reason" in event or "error" in event:
+            return calls, "".join(content), event
+
+
+def test_json_answer_with_tools_can_still_call_under_the_default_policy(scripted_engine):
+    """Rapid-MLX #3871: the answer grammar bound alone made every call
+    impossible; the request decodes under the calls-or-answer grammar."""
+    build, state = scripted_engine
+    engine = build(declare_marker=True)  # default policy: no tool grammar lever
+    state["script"] = [TOOL_CALL, EOS]
+    calls, content, final = _events(engine.submit(dict(ANSWER_WITH_TOOLS)))
+    assert "error" not in final, final
+    assert [c["function"]["name"] for c in calls] == ["sum"]
+    assert json.loads(calls[0]["function"]["arguments"]) == {"x": 1}
+    grammar = final["receipt"]["request_controls"]["tool_choice"]
+    assert grammar["decode_grammar"] == "engaged"
+    # The same request still answers in JSON when the model does not call.
+    state["script"] = [7, 8, 9, 10, 11, EOS]
+    calls, content, final = _events(engine.submit(dict(ANSWER_WITH_TOOLS)))
+    assert "error" not in final, final
+    assert calls == [] and json.loads(content) == {"a": 1}
+
+
+def test_forced_call_is_not_bound_by_the_answer_format(scripted_engine):
+    build, state = scripted_engine
+    engine = build(declare_marker=True)
+    state["script"] = [TOOL_CALL, EOS]
+    for choice in ("required", {"type": "function", "function": {"name": "sum"}}):
+        calls, _, final = _events(
+            engine.submit({**ANSWER_WITH_TOOLS, "tool_choice": choice})
+        )
+        assert "error" not in final, final
+        assert [c["function"]["name"] for c in calls] == ["sum"]
+
+
+def test_json_answer_with_tools_fails_closed_without_a_tool_grammar(scripted_engine):
+    build, state = scripted_engine
+    engine = build(declare_marker=True, declare_tool_constraint=False)
+    state["script"] = [TOOL_CALL, EOS]
+    *_, final = _events(engine.submit(dict(ANSWER_WITH_TOOLS)))
+    assert final.get("status") == 400
+    assert "calls-or-answer" in final["error"]
+    # tool_choice "none" keeps the plain answer grammar.
+    state["script"] = [7, 8, 9, 10, 11, EOS]
+    calls, content, final = _events(
+        engine.submit({**ANSWER_WITH_TOOLS, "tool_choice": "none"})
+    )
+    assert "error" not in final, final
+    assert json.loads(content) == {"a": 1}

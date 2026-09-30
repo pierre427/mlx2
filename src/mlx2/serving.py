@@ -860,6 +860,16 @@ def structured_answer_token_ids(adapter, request):
     return tuple(int(token) for token in ids) if ids else None
 
 
+def _answer_with_callable_tools(request) -> bool:
+    """A JSON answer format on a request whose tools may be called."""
+    return (
+        bool(request.get("tools"))
+        and request.get("tool_choice", "auto") != "none"
+        and request.get("response_format") not in (None, {"type": "text"})
+        and "grammar" not in request
+    )
+
+
 def structured_envelope_token_ids(adapter):
     """The adapter's answer-channel (open ids, close ids), or None."""
     accessor = getattr(adapter, "structured_envelope_token_ids", None)
@@ -2602,7 +2612,9 @@ class ServingEngine:
                     structured_answer_token_ids(adapter, request) or defer_until
                 )
             return prepare_structured_automata(
-                response_format=request.get("response_format"),
+                response_format=self._bound_answer_format(
+                    request, server_tool_grammar, tool_grammar
+                ),
                 grammar=request.get("grammar"),
                 server_grammar=server_tool_grammar or tool_grammar,
                 defer_until=defer_until,
@@ -2611,6 +2623,70 @@ class ServingEngine:
             return None
 
     def _tool_grammar_plan(self, adapter, request, defer_until):
+        """The execution-policy tool grammar, widened for a JSON answer with tools.
+
+        A ``response_format`` bound alone over a request whose tools may be
+        called (``auto``) constrains the whole output to the answer, so no
+        call can be made, whatever the policy says (Rapid-MLX #3871).  Such a
+        request decodes under the adapter's calls-or-answer grammar -- the
+        call block or the JSON answer, the same composition
+        ``constrained_tool_grammar_auto`` selects -- or fails closed where the
+        adapter cannot express it.  An adapter whose answer opens with its own
+        header (``structured_answer_token_ids``) needs neither: the answer
+        grammar waits for that header, which a call never writes.  Forced
+        calls produce no answer; ``_bound_answer_format`` drops it for them.
+        """
+        from .output import constrained_tool_choice
+
+        plan = self._policy_tool_grammar_plan(adapter, request, defer_until)
+        if (
+            plan[0] is not None
+            or plan[1] is not None
+            or not _answer_with_callable_tools(request)
+            or constrained_tool_choice(request)
+            or structured_answer_token_ids(adapter, request)
+            or (
+                defer_until is None
+                and "messages" in request
+                and thinking_enabled(adapter, request)
+            )  # refused at admission: structured output needs thinking off
+        ):
+            return plan
+        from .tool_grammar import plan_tool_grammar
+
+        grammar, status, receipt = plan_tool_grammar(
+            request,
+            getattr(adapter, "tool_constraint", None),
+            open_marker=getattr(adapter, "tool_call_open_marker", None),
+            leading_whitespace=bool(defer_until),
+        )
+        if grammar is None:
+            raise ValueError(
+                "response_format with callable tools needs the adapter's "
+                f"calls-or-answer tool grammar, which this request cannot use ({status}); "
+                "send tool_choice 'none' or drop response_format"
+            )
+        return grammar, None, status, {**receipt, "engaged_by": "response_format"}
+
+    def _bound_answer_format(self, request, server_tool_grammar, tool_grammar):
+        """The ``response_format`` a client grammar binds: none for a forced call.
+
+        ``required``/named tools produce calls only, so an answer format bound
+        over the whole output would make the forced call impossible; the
+        call is checked by the terminal tool contract as without it.
+        """
+        from .output import constrained_tool_choice
+
+        if (
+            server_tool_grammar is None
+            and tool_grammar is None
+            and _answer_with_callable_tools(request)
+            and constrained_tool_choice(request)
+        ):
+            return None
+        return request.get("response_format")
+
+    def _policy_tool_grammar_plan(self, adapter, request, defer_until):
         """The adapter tool grammar ``request`` decodes under, without effects.
 
         Returns ``(server_tool_grammar, tool_grammar, status, receipt)``:
@@ -6753,7 +6829,9 @@ class ServingEngine:
                         structured = make_structured_processor(
                             adapter.tokenizer,
                             prompt_len,
-                            response_format=job.request.get("response_format"),
+                            response_format=self._bound_answer_format(
+                                job.request, server_tool_grammar, tool_grammar
+                            ),
                             grammar=job.request.get("grammar"),
                             # The forced-call grammar is adapter-built like
                             # the auto one: the 4096-character client grammar
