@@ -41,7 +41,9 @@ Mechanisms (one per cohort):
     Engagement: ``external_prefill_allocator_reclaims`` equals the arm's
     non-empty prefill chunks (at least two) and is 0 on ``reference``; the
     draft must have proposed. Each run records host-counter memory samples at
-    prefill-progress polls (no sync, outside the timers) and the APCv2 prompt
+    prefill-progress polls (no device sync, but taken inside the TTFT and
+    generation interval, so they add host overhead to those diagnostic
+    timings; both arms sample the same way) and the APCv2 prompt
     boundary (covered tokens, token hash, target and sidecar digests), which
     must match across runs. Not a serving policy; no whole-process memory
     benefit is implied.
@@ -537,8 +539,9 @@ def run_arm(cohort, arm):
                 boundary = batch.pop_prompt_boundary(uid)
             if (args.mechanism == "external-prefill-reclaim" and before == 0
                     and len(prefill_samples) < PREFILL_SAMPLE_LIMIT):
-                # Prefill-progress polls (no token yet): host counters only,
-                # no sync, outside the timer boundaries.
+                # Prefill-progress polls (no token yet): host counters only, no
+                # device sync. Inside the TTFT/generation interval: host
+                # overhead on the diagnostic timings, symmetric across arms.
                 prefill_samples.append({
                     "poll": polls, "prefill_rounds": batch.scheduler_stats.get("prefill_rounds", 0),
                     "active_bytes": mx.get_active_memory(), "cache_bytes": mx.get_cache_memory(),
