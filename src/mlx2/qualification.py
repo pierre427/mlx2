@@ -324,6 +324,26 @@ PROVENANCE_ONLY_SETTINGS = frozenset(
 )
 
 
+# Selected candidates that no receipt may qualify yet: an environment that
+# selects one serves only as an unqualified route.  Each entry leaves when
+# its Metal gate, paired model A/B and a harness observation exist.
+UNQUALIFIABLE_CANDIDATES = {
+    "MLX_QWEN36_MOE_ROUTED_CANDIDATE": (
+        "omlx #4113 routed-decode candidate: pending the Metal geometry check "
+        "and paired model A/B"
+    ),
+}
+
+
+def unqualifiable_candidate(settings):
+    """The reason a selected candidate blocks qualification, or None."""
+    env = (settings or {}).get("environment") or {}
+    for name, reason in UNQUALIFIABLE_CANDIDATES.items():
+        if env.get(name) == "1":
+            return reason
+    return None
+
+
 def load_qualified_route(
     path,
     *,
@@ -333,6 +353,9 @@ def load_qualified_route(
     descriptor,
     name,
 ):
+    candidate = unqualifiable_candidate(settings)
+    if candidate is not None:
+        raise ValueError(f"route selects an unqualified candidate: {candidate}")
     record = json.loads(Path(path).read_text())
     if record.get("qualification_harness") != APPROVED_QUALIFICATION_HARNESS:
         raise ValueError("qualification does not match approved harness")

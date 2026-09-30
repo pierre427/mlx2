@@ -171,13 +171,19 @@ def inspect_artifact(model_path: str | Path) -> dict:
 #     pinned off here with no recorded reason.
 #   gdn_core: MLX's native gated_delta_update for 17-256 row prefill chunks;
 #     parity on this head geometry is not established.
+#   moe_routed_candidate: omlx #4113 top-8 routed decode over the split
+#     gate/up tables (qwen4_routed_decode candidate).  UNQUALIFIED, default
+#     off, explicit execution policy only (never inherited from the
+#     environment); loading refuses it when no MoE layer admits it.
 # The MoE router and fused-expert kernels are shape-locked to Flash-Next's
 # 512-expert top-10 layout and cannot engage on this 256/top-8 model.
 KERNEL_POLICY_ENV = {
     "fused_gdn_decode": "MLX_QWEN36_FUSED_GDN_DECODE",
     "moe_fused_gate_up": "MLX_QWEN4_MOE_FUSED_GATE_UP",
     "gdn_core": "MLX_GDN_CORE",
+    "moe_routed_candidate": "MLX_QWEN36_MOE_ROUTED_CANDIDATE",
 }
+EXPLICIT_ONLY_KERNELS = frozenset({"moe_routed_candidate"})
 
 
 def configure_environment(kernels=None) -> dict[str, str]:
@@ -202,10 +208,14 @@ def configure_environment(kernels=None) -> dict[str, str]:
     # operator's explicit environment value unless the request's execution
     # policy selects that switch.  Other inherited MLX kernel experiments are
     # still cleared below; they are not qualified for this model's geometry.
-    for name in KERNEL_POLICY_ENV.values():
-        if name in os.environ:
+    for key, name in KERNEL_POLICY_ENV.items():
+        if name in os.environ and key not in EXPLICIT_ONLY_KERNELS:
             profile[name] = os.environ[name]
     for key, enabled in (kernels or {}).items():
+        if key in EXPLICIT_ONLY_KERNELS and not enabled:
+            # Absent unless selected, so stock receipts keep matching; an
+            # inherited value is cleared with the MLX_QWEN prefix below.
+            continue
         profile[KERNEL_POLICY_ENV[key]] = "1" if enabled else "0"
     for name in tuple(os.environ):
         if name.startswith(("MLX_QWEN", "MLX_LM_", "MLXUAG_", "MLX_GDN_")):
@@ -242,6 +252,9 @@ class Qwen3635BA3BAdapter(Qwen3827BAdapter):
         "native_mtp": {"apc_interior_checkpoints": "auto"},
     }
     descriptor = QWEN36_35B
+    # Unqualified candidates: the server accepts these policy keys only in
+    # qualification mode (ServingEngine); direct adapter harnesses may opt in.
+    qualification_mode_only_policy = frozenset({"moe_routed_candidate"})
     # Vendor sampling defaults: Qwen/Qwen3.6-35B-A3B model card and the
     # artifact's generation_config.json (see ``adapters/qwen.py``).
     from .qwen import QWEN36_35B_SAMPLING as sampling_defaults
@@ -319,6 +332,7 @@ class Qwen3635BA3BAdapter(Qwen3827BAdapter):
         weights.clear()
         mx.clear_cache()
         self._record_load_dtype()
+        self._select_routed_candidate()
         tokenizer = AutoTokenizer.from_pretrained(path, local_files_only=True, trust_remote_code=False)
         # transformers' Qwen2Tokenizer drops the declared combining-mark split rule.
         from ..runtime.tokenizer_integrity import repair_loaded_tokenizer
@@ -360,6 +374,36 @@ class Qwen3635BA3BAdapter(Qwen3827BAdapter):
             ),
         )
 
+    def _select_routed_candidate(self):
+        """Apply an explicitly selected candidate, or refuse the load.
+
+        Fail closed: every MoE layer must admit the candidate structurally
+        (tables only, nothing evaluated); per-call runtime declines (Metal,
+        served-SiLU form) run the reference body and are counted.
+        """
+        if self.environment.get("MLX_QWEN36_MOE_ROUTED_CANDIDATE") != "1":
+            return
+        import mlx.core as mx
+        from ..runtime.models import qwen4_routed_decode as routed
+        from ..runtime.models.qwen3_next import Qwen3NextSparseMoeBlock
+
+        blocks = [m for _, m in self.model.named_modules() if isinstance(m, Qwen3NextSparseMoeBlock)]
+        if not blocks:
+            raise ValueError("moe_routed_candidate: no MoE layer")
+        for block in blocks:
+            switch = block.switch_mlp
+            hidden = switch.down_proj["weight"].shape[1]
+            probe = mx.zeros((1, 1, 1, 1, hidden), dtype=mx.bfloat16)
+            inds = mx.zeros((1, 1, block.top_k), dtype=mx.uint32)
+            scores = mx.zeros((1, 1, block.top_k), dtype=mx.bfloat16)
+            admission = routed.admit_routed_candidate(
+                probe, inds, scores,
+                switch.get("gate_proj"), switch.get("up_proj"), switch.down_proj,
+            )
+            if not admission.accepted:
+                raise ValueError(f"moe_routed_candidate refused: {admission.reason}")
+            block.set_moe_routed_candidate_mode("two_launch")
+
     def diagnostics(self):
         result = super().diagnostics()
         result["architecture"] = "sparse-moe-hybrid-gdn-gqa"
@@ -373,4 +417,11 @@ class Qwen3635BA3BAdapter(Qwen3827BAdapter):
             from ..runtime.models.qwen36_35b import qwen36_fused_gdn_stats
 
             result["fused_gdn_decode"] = qwen36_fused_gdn_stats(self.model)
+        if (getattr(self, "_kernels", None) or {}).get("moe_routed_candidate"):
+            from ..runtime.models.qwen3_next import routed_candidate_stats
+
+            result["moe_routed_candidate"] = {
+                "qualification": "unqualified",
+                **routed_candidate_stats(self.model),
+            }
         return result

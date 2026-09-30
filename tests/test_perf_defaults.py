@@ -710,7 +710,7 @@ def test_qwen36_kernel_switches_default_to_stock_and_toggle_by_policy(monkeypatc
     # Only the three switches differ.
     assert {k for k in stock if stock[k] != fused[k]} == set(
         qwen36_35b.KERNEL_POLICY_ENV.values()
-    )
+    ) - {qwen36_35b.KERNEL_POLICY_ENV["moe_routed_candidate"]}
 
 
 def test_qwen36_adapter_accepts_kernel_switches_and_validates_them():

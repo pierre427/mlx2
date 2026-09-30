@@ -2132,6 +2132,19 @@ class ServingEngine:
                 qualification=qualification,
             )
         self.adapter_factory = adapter_factory
+        # Adapter-owned candidates (default-off, unqualified kernels) are
+        # selectable only in qualification mode; neither the unqualified
+        # route nor a qualification record may select them.
+        candidates = sorted(
+            key
+            for key in getattr(adapter_factory, "qualification_mode_only_policy", ())
+            if (execution_policy or {}).get(key)
+        )
+        if candidates and not qualification_mode:
+            raise ValueError(
+                "execution policy " + ", ".join(candidates)
+                + " selects an unqualified candidate restricted to qualification mode"
+            )
         self.thread = threading.Thread(
             target=self._run, name="mlx2-generation", daemon=True
         )

@@ -1242,3 +1242,295 @@ def shared_fold_decode(x, indices, scores, gate, up, down, shared, gate_logit, r
         output_shapes=[(hidden,)],
         output_dtypes=[x.dtype],
     )[0]
+
+
+# --------------------------------------------------------------------------
+# Candidate: top-8/10 routed decode over split gate/up tables with MLX's own
+# down traversal (omlx #4113 @1335263e, Apache-2.0; see docs/PROVENANCE.md and
+# provenance/omlx-4113-routed-candidate.json). DEFAULT OFF, unqualified.
+#
+# Only the structural generalisation is mined: the top-k template, the
+# two-table ``qmv_rows`` gate+up (gate and up rows read from separate expert
+# tables, as Qwen3.6 keeps them with fused gate/up pinned off) and a down pass
+# that follows ``qmv_fast`` when MLX would pick it (intermediate % 512 == 0,
+# e.g. Qwen3.6's 512) and ``qmv`` with its guarded tail otherwise. The shared
+# expert fold, verify windows, expert views and self-disable are not taken.
+# ``qmv_fast`` down is different arithmetic and dispatch from the qualified
+# top-10 ``qmv`` down, so nothing here is presumed bit-exact: the candidate is
+# refused unless ``scripts/check_fn_routed_decode.py`` passes on Metal at the
+# served geometry and build.
+# --------------------------------------------------------------------------
+CANDIDATE_MODES = ("off", "two_launch")
+CANDIDATE_TOP_K = (8, 10)
+
+
+def qmv_fast_layout(k: int, n: int, bits: int = BITS) -> bool:
+    """Whether MLX runs ``qmv_fast`` (else ``qmv``) for a one-row affine
+    product with ``k`` inputs and ``n`` outputs (omlx #4113's reading of MLX
+    0.32.2 ``qmv_fast_k_alignment``). A GPU-checked claim on the lab fork."""
+    pack_factor = 8 if bits in (3, 5) else (4 if bits == 6 else 32 // bits)
+    return n % 8 == 0 and k % (pack_factor * (1 if bits == 2 else 2) * 32) == 0
+
+
+def _candidate_table_ok(layer) -> str | None:
+    from .switch_layers import QuantizedSwitchLinear
+
+    # Exactly the class whose call is a bare gather_qmm: a subclass (streamed
+    # tables, repacked layers) may hold no resident rows or compute otherwise.
+    if type(layer) is not QuantizedSwitchLinear:
+        return "not a resident QuantizedSwitchLinear"
+    return _quantized_ok(layer)
+
+
+def admit_routed_candidate(x, indices, scores, gate, up, down) -> RoutedDecodeAdmission:
+    """Structural check for the candidate; never evaluates an array."""
+    hidden = x.shape[-1]
+    if x.size != hidden:
+        return RoutedDecodeAdmission(False, "not one token")
+    if x.dtype != mx.bfloat16:
+        # fp16 has no served-SiLU contract probe; bf16 only until one exists.
+        return RoutedDecodeAdmission(False, "activation must be bfloat16")
+    top_k = indices.size
+    if top_k not in CANDIDATE_TOP_K or indices.shape[-1] != top_k:
+        return RoutedDecodeAdmission(False, "top-k must be 8 or 10")
+    if scores is None:
+        return RoutedDecodeAdmission(False, "no scores")
+    if scores.size != top_k or scores.dtype != x.dtype:
+        return RoutedDecodeAdmission(False, "scores must be [top-k] in the activation dtype")
+    for name, layer in (("gate", gate), ("up", up), ("down", down)):
+        reason = _candidate_table_ok(layer)
+        if reason is not None:
+            return RoutedDecodeAdmission(False, f"{name}: {reason}")
+    experts = down["weight"].shape[0]
+    inter = down["weight"].shape[-1] * 32 // BITS
+    table = (experts, inter, hidden * BITS // 32)
+    if tuple(gate["weight"].shape) != table or tuple(up["weight"].shape) != table:
+        return RoutedDecodeAdmission(False, "gate/up tables do not match down")
+    if tuple(down["weight"].shape) != (experts, hidden, inter * BITS // 32):
+        return RoutedDecodeAdmission(False, f"down weight shape {tuple(down['weight'].shape)}")
+    if not qmv_fast_layout(hidden, inter):
+        return RoutedDecodeAdmission(False, "gate/up would not take qmv_fast")
+    if inter % GROUP_SIZE:
+        return RoutedDecodeAdmission(False, "intermediate must be a multiple of 64")
+    if inter % (GATE_UP_ROWS * GATE_UP_SIMDGROUPS) or hidden % DOWN_ROWS:
+        return RoutedDecodeAdmission(False, "row tiling")
+    return RoutedDecodeAdmission(True, "eligible")
+
+
+# gate rows from (wg, sg, bg), up rows from (wu, su, bu); slot = grid z.
+CANDIDATE_GATE_UP_SOURCE = r"""
+    const uint3 tid = threadgroup_position_in_grid;
+    const uint simd_gid = simdgroup_index_in_threadgroup;
+    const uint simd_lid = thread_index_in_simdgroup;
+    const int in_vec_size_w = K * BYTES_PER_PACK / PACK_FACTOR;
+    const int in_vec_size_g = K / GS;
+    const int out_row = int(tid.y) * (NSG * RPS) + int(simd_gid) * RPS;
+    const size_t row0 = size_t(rhs[tid.z]) * NI + out_row;
+    const int lane_w = int(simd_lid) * PACKS_PER_THREAD * BYTES_PER_PACK;
+    const int lane_g = int(simd_lid) / SCALE_STEP_PER_THREAD;
+
+    const device uint8_t* gw = (const device uint8_t*)wg + row0 * in_vec_size_w + lane_w;
+    const device uint8_t* uw = (const device uint8_t*)wu + row0 * in_vec_size_w + lane_w;
+    const device T* gs = sg + row0 * in_vec_size_g + lane_g;
+    const device T* gb = bg + row0 * in_vec_size_g + lane_g;
+    const device T* us = su + row0 * in_vec_size_g + lane_g;
+    const device T* ub = bu + row0 * in_vec_size_g + lane_g;
+    const device T* xp = x + int(simd_lid) * VALUES_PER_THREAD;
+
+    float x_thread[VALUES_PER_THREAD];
+    float result[2 * RPS] = {0};
+
+    for (int k = 0; k < K; k += BLOCK_SIZE) {
+      float sum = load_vector<T>(xp, x_thread);
+      for (int row = 0; row < 2 * RPS; row++) {
+        const bool g = row < RPS;
+        const int r = g ? row : row - RPS;
+        const device uint8_t* wl = (g ? gw : uw) + r * in_vec_size_w;
+        float s = (g ? gs : us)[r * in_vec_size_g];
+        float b = (g ? gb : ub)[r * in_vec_size_g];
+        result[row] += qdot_n(wl, x_thread, s, b, sum, VALUES_PER_THREAD);
+      }
+      gw += BLOCK_SIZE * BYTES_PER_PACK / PACK_FACTOR;
+      uw += BLOCK_SIZE * BYTES_PER_PACK / PACK_FACTOR;
+      gs += BLOCK_SIZE / GS;
+      gb += BLOCK_SIZE / GS;
+      us += BLOCK_SIZE / GS;
+      ub += BLOCK_SIZE / GS;
+      xp += BLOCK_SIZE;
+    }
+
+    for (int row = 0; row < 2 * RPS; row++) {
+      result[row] = simd_sum(result[row]);
+    }
+    if (simd_lid == 0) {
+      device T* yp = y + size_t(tid.z) * NI + out_row;
+      for (int row = 0; row < RPS; row++) {
+        T g = static_cast<T>(result[row]);
+        T u = static_cast<T>(result[row + RPS]);
+        T t = g * omlx_mlx_sigmoid<T>(g);
+        yp[row] = t * u;
+      }
+    }
+"""
+
+# The top-10 down/combine with TOPK slots and MLX's traversal for the shape:
+# FAST walks whole blocks (qmv_fast), otherwise full blocks then the guarded
+# tail (qmv). The k-sum is col_reduce_small's lane j % 8 fold, then lanes in
+# order, all in T; for TOPK 10 it is the qualified top-10 order.
+CANDIDATE_DOWN_SOURCE = r"""
+    const uint3 tid = threadgroup_position_in_grid;
+    const uint simd_gid = simdgroup_index_in_threadgroup;
+    const uint simd_lid = thread_index_in_simdgroup;
+    const int in_vec_size_w = K * BYTES_PER_PACK / PACK_FACTOR;
+    const int in_vec_size_g = K / GS;
+    const int out_row = int(tid.y) * RPS;
+    const int slot = int(simd_gid);
+    const size_t expert = size_t(rhs[slot]);
+    threadgroup T part[TOPK * RPS];
+
+    const device uint8_t* ws = (const device uint8_t*)w +
+        expert * N * in_vec_size_w + out_row * in_vec_size_w +
+        int(simd_lid) * PACKS_PER_THREAD * BYTES_PER_PACK;
+    const device T* sc = scales + expert * N * in_vec_size_g +
+        out_row * in_vec_size_g + int(simd_lid) / SCALE_STEP_PER_THREAD;
+    const device T* bs = biases + expert * N * in_vec_size_g +
+        out_row * in_vec_size_g + int(simd_lid) / SCALE_STEP_PER_THREAD;
+    const device T* xp = x + slot * K + int(simd_lid) * VALUES_PER_THREAD;
+
+    float x_thread[VALUES_PER_THREAD];
+    float result[RPS] = {0};
+
+    int k = 0;
+    for (; k < (FAST ? K : K - BLOCK_SIZE); k += BLOCK_SIZE) {
+      float sum = load_vector<T>(xp, x_thread);
+      for (int row = 0; row < RPS; row++) {
+        const device uint8_t* wl = ws + row * in_vec_size_w;
+        float s = sc[row * in_vec_size_g];
+        float b = bs[row * in_vec_size_g];
+        result[row] += qdot_n(wl, x_thread, s, b, sum, VALUES_PER_THREAD);
+      }
+      ws += BLOCK_SIZE * BYTES_PER_PACK / PACK_FACTOR;
+      sc += BLOCK_SIZE / GS;
+      bs += BLOCK_SIZE / GS;
+      xp += BLOCK_SIZE;
+    }
+    if (!FAST) {
+      const int remaining = clamp(
+          int(K - k - int(simd_lid) * VALUES_PER_THREAD), 0, VALUES_PER_THREAD);
+      if (remaining > 0) {
+        float sum = load_vector_safe<T>(xp, x_thread, remaining);
+        for (int row = 0; row < RPS; row++) {
+          const device uint8_t* wl = ws + row * in_vec_size_w;
+          float s = sc[row * in_vec_size_g];
+          float b = bs[row * in_vec_size_g];
+          result[row] += qdot_n(wl, x_thread, s, b, sum, remaining);
+        }
+      }
+    }
+
+    for (int row = 0; row < RPS; row++) {
+      result[row] = simd_sum(result[row]);
+    }
+    if (simd_lid == 0) {
+      for (int row = 0; row < RPS; row++) {
+        part[slot * RPS + row] = static_cast<T>(result[row]) * scores[slot];
+      }
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (simd_gid == 0 && int(simd_lid) < RPS) {
+      const int row = int(simd_lid);
+      T lane[8];
+      for (int l = 0; l < 8; ++l) {
+        lane[l] = T(0);
+      }
+      for (int j = 0; j < TOPK; ++j) {
+        lane[j % 8] = part[j * RPS + row] + lane[j % 8];
+      }
+      T acc = lane[0];
+      for (int l = 1; l < 8; ++l) {
+        acc = lane[l] + acc;
+      }
+      y[out_row + row] = acc;
+    }
+"""
+
+_CANDIDATE_KERNELS: dict = {}
+
+
+def _candidate_kernel(kind: str, fast: bool):
+    key = (kind, fast)
+    if key not in _CANDIDATE_KERNELS:
+        if kind == "gate_up":
+            inputs = ["x", "wg", "sg", "bg", "wu", "su", "bu", "rhs"]
+            source = CANDIDATE_GATE_UP_SOURCE
+        else:
+            inputs = ["x", "w", "scales", "biases", "rhs", "scores"]
+            source = CANDIDATE_DOWN_SOURCE
+        _CANDIDATE_KERNELS[key] = mx.fast.metal_kernel(
+            name=f"mlx2_routed_candidate_{kind}_{'fast' if fast else 'qmv'}",
+            input_names=inputs,
+            output_names=["y"],
+            header=_header(fast=fast),
+            source=source,
+        )
+    return _CANDIDATE_KERNELS[key]
+
+
+def candidate_gate_up_swiglu(x, indices, gate, up):
+    """``swiglu(gate_j(x), up_j(x))`` for the top-k routed experts: [top_k, inter]."""
+    hidden = x.shape[-1]
+    inter = gate["weight"].shape[1]
+    top_k = indices.size
+    rows = GATE_UP_ROWS * GATE_UP_SIMDGROUPS
+    return _candidate_kernel("gate_up", True)(
+        inputs=[
+            x.reshape(hidden),
+            gate["weight"], gate["scales"], gate["biases"],
+            up["weight"], up["scales"], up["biases"],
+            indices.reshape(top_k).astype(mx.uint32),
+        ],
+        template=[
+            ("T", x.dtype), ("K", hidden), ("NI", inter),
+            ("RPS", GATE_UP_ROWS), ("NSG", GATE_UP_SIMDGROUPS),
+        ],
+        grid=(32, GATE_UP_SIMDGROUPS * inter // rows, top_k),
+        threadgroup=(32, GATE_UP_SIMDGROUPS, 1),
+        output_shapes=[(top_k, inter)],
+        output_dtypes=[x.dtype],
+    )[0]
+
+
+def candidate_down_combine(h, indices, scores, down):
+    """``sum_j scores[j] * down_j(h[j])`` with MLX's traversal for the shape."""
+    top_k = indices.size
+    inter = h.shape[-1]
+    hidden = down["weight"].shape[1]
+    return _candidate_kernel("down", qmv_fast_layout(inter, hidden))(
+        inputs=[
+            h.reshape(top_k, inter),
+            down["weight"], down["scales"], down["biases"],
+            indices.reshape(top_k).astype(mx.uint32),
+            scores.reshape(top_k),
+        ],
+        template=[
+            ("T", h.dtype), ("K", inter), ("N", hidden),
+            ("RPS", DOWN_ROWS), ("TOPK", top_k),
+        ],
+        grid=(32, top_k * hidden // DOWN_ROWS, 1),
+        threadgroup=(32, top_k, 1),
+        output_shapes=[(hidden,)],
+        output_dtypes=[h.dtype],
+    )[0]
+
+
+def candidate_runtime_refusal() -> str | None:
+    """Why the candidate may not run in this process, or None.
+
+    The kernels spell sigmoid with ``metal::exp``; they run only while the
+    served SiLU is probed to use that form on this build.
+    """
+    if not runtime_supported():
+        return "Metal runtime unavailable"
+    from .qwen4_fused_gdn import served_silu_refusal
+
+    return served_silu_refusal()
