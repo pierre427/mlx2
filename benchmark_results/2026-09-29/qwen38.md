@@ -56,3 +56,5 @@ Model artifact not staged on this host; no load or performance verdict.
 ## Interpretation
 
 The M5 32K four-stream cell missed warm APCv2 reuse; measured 262K was refused by memory admission after a successful unmeasured warmup. Those long-context gates remain open. The new feature checks do not resolve them.
+
+A later isolated M5 32K thermal rerun on source `91c74b7f` used an 8 GiB APCv2 cap and a 32K context cap. Width one passed all three repetitions. Width four returned all 24 needle checks with no swapouts or thermal contamination, but only **3 of 4 warm lanes** reused cache on each repetition, so the APCv2 gate failed again. The missing lane varied across runs. End status reported 156 APCv2 evictions and 103 publication rejections; capacity pressure is a lead, not a proven cause. The run and ladder receipt SHA-256 values are `3ca3b5edcc7b5597ef4985c9582afea6b21e772fe4c761ac7b0ecf38bff455e7` and `0e80075c213c2c6e05d5309cdcc7edfb459fa44f78cc19505a8b6541eb4c7269`. A 16 GiB candidate has not run because another owned job held the M5 GPU lock.
