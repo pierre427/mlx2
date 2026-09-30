@@ -12,7 +12,7 @@ from mlx.utils import tree_flatten
 
 from mlx2.experimental.hysparse2.attention import attention, sparse_attention
 from mlx2.experimental.hysparse2.config import Config
-from mlx2.experimental.hysparse2.model import Model
+from mlx2.experimental.hysparse2.model import DiffusionLayer, Model
 from mlx2.experimental.hysparse2.train import load_checkpoint, loss, save_checkpoint
 
 
@@ -27,6 +27,27 @@ def cpu():
 
 def close(a, b, tol=3e-5):
     np.testing.assert_allclose(np.array(a), np.array(b), atol=tol, rtol=tol)
+
+
+def test_diffusion_fused_bidirectional_attention_matches_dense_reference():
+    c = Config.smoke()
+    layer = DiffusionLayer(c)
+    x = mx.random.normal((2, 7, c.hidden_size))
+    h = layer.norm1(x)
+    shape = (*h.shape[:-1], layer.heads, layer.head_dim)
+    q = layer.q(h).reshape(shape).transpose(0, 2, 1, 3)
+    k = layer.k(h).reshape(shape).transpose(0, 2, 1, 3)
+    v = layer.v(h).reshape(shape).transpose(0, 2, 1, 3)
+    probabilities = mx.softmax(
+        (q.astype(mx.float32) @ k.astype(mx.float32).swapaxes(-1, -2))
+        * layer.head_dim**-0.5,
+        axis=-1,
+    ).astype(v.dtype)
+    dense = (probabilities @ v).transpose(0, 2, 1, 3).reshape(x.shape)
+    fused = mx.fast.scaled_dot_product_attention(
+        q, k, v, scale=layer.head_dim**-0.5
+    ).transpose(0, 2, 1, 3).reshape(x.shape)
+    close(fused, dense, 1e-4)
 
 
 @pytest.mark.parametrize("window", [None, 3])

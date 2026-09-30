@@ -181,12 +181,12 @@ class DiffusionLayer(nn.Module):
         q = self.q(h).reshape(shape).transpose(0, 2, 1, 3)
         k = self.k(h).reshape(shape).transpose(0, 2, 1, 3)
         v = self.v(h).reshape(shape).transpose(0, 2, 1, 3)
-        weights = mx.softmax(
-            (q.astype(mx.float32) @ k.astype(mx.float32).swapaxes(-1, -2))
-            * self.head_dim**-0.5,
-            axis=-1,
-        ).astype(v.dtype)
-        attended = (weights @ v).transpose(0, 2, 1, 3).reshape(x.shape)
+        # The student is bidirectional, so the fused SDPA kernel needs no mask.
+        # Keeping the probability matrix implicit avoids materializing the
+        # B,H,T,T tensor during long-sequence diffusion training.
+        attended = mx.fast.scaled_dot_product_attention(
+            q, k, v, scale=self.head_dim**-0.5
+        ).transpose(0, 2, 1, 3).reshape(x.shape)
         x = x + self.out(attended)
         return x + self.mlp(self.norm2(x))
 
