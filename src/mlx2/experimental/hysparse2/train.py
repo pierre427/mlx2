@@ -204,7 +204,7 @@ def loss(model, tokens, mtp_weight=0.1, router_weight=0.01, diffusion_weight=0.2
     if diffusion is not None:
         diffusion_logits, mask = diffusion
         token_loss = nn.losses.cross_entropy(
-            diffusion_logits.astype(mx.float32), tokens[:, :-2]
+            diffusion_logits.astype(mx.float32), tokens[:, :-2][:, -diffusion_logits.shape[1] :]
         )
         value = value + diffusion_weight * (
             mx.sum(mx.where(mask, token_loss, 0.0)) / mx.maximum(mx.sum(mask), 1)

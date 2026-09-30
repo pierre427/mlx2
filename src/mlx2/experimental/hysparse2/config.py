@@ -38,6 +38,7 @@ class Config:
     diffusion_layers: int = 0
     diffusion_width_multiplier: int = 8
     diffusion_trunk_gradient_scale: float = 0.0
+    diffusion_conditioning: str = "aligned"
     norm_eps: float = 1e-6
     mtp: bool = True
 
@@ -101,6 +102,9 @@ class Config:
             raise ValueError(
                 "diffusion trunk gradient scale must be between zero and one"
             )
+
+        if self.diffusion_conditioning not in {"aligned", "prefix"}:
+            raise ValueError("diffusion conditioning must be aligned or prefix")
 
     @property
     def layers(self):

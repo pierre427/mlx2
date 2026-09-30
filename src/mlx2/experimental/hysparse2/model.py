@@ -202,27 +202,37 @@ class DiffusionStudent(nn.Module):
         self.norm = nn.RMSNorm(c.hidden_size, eps=c.norm_eps)
 
         self.trunk_gradient_scale = c.diffusion_trunk_gradient_scale
+        self.conditioning = c.diffusion_conditioning
 
     def __call__(self, tokens, embedding, teacher):
+        seed_tokens = tokens[:, :1]
+        if self.conditioning == "prefix":
+            if tokens.shape[1] < 2:
+                raise ValueError("prefix diffusion needs a prefix and a future token")
+            cut = tokens.shape[1] // 2
+            seed_tokens = tokens[:, cut - 1 : cut]
+            teacher = teacher[:, cut - 1 : cut]
+            tokens = tokens[:, cut:]
         positions = mx.arange(tokens.shape[1], dtype=mx.int32)[None]
-        seed = tokens[:, :1].astype(mx.int32) % 16
-        phase = tokens[:, :1].astype(mx.int32) % 4
-        threshold = mx.take(mx.array([2, 4, 8, 12]), phase)
+        seed = seed_tokens.astype(mx.int32) % 16
+        phase = seed_tokens.astype(mx.int32) % 4
+        levels = [2, 4, 8, 16] if self.conditioning == "prefix" else [2, 4, 8, 12]
+        threshold = mx.take(mx.array(levels), phase)
         score = (positions * 13 + seed * 7) % 16
         mask = (score < threshold) | (positions == 0)
+        logits = self.denoise(tokens, embedding, teacher, mask, threshold.astype(mx.float32)[..., None] / 16)
+        return logits, mask
+
+    def denoise(self, tokens, embedding, teacher, mask, noise_level):
         masked = mx.where(mask, mx.ones_like(tokens), tokens)
-        # Preserve the same conditioning values while controlling how much of
-        # the denoising gradient trains the causal teacher. Zero preserves
-        # historical detached checkpoints; one couples the full objective.
         scale = self.trunk_gradient_scale
         conditioned = teacher if scale == 1 else mx.stop_gradient(teacher)
         if 0 < scale < 1:
             conditioned = conditioned + scale * (teacher - mx.stop_gradient(teacher))
         x = embedding(masked) + self.condition(conditioned)
-        noise_level = (threshold.astype(x.dtype) / 16)[..., None]
         for layer in self.layers:
-            x = layer(x, noise_level)
-        return embedding.as_linear(self.norm(x)), mask
+            x = layer(x, noise_level.astype(x.dtype))
+        return embedding.as_linear(self.norm(x))
 
 
 class Attention(nn.Module):
@@ -466,7 +476,7 @@ class Model(nn.Module):
         diffusion = None
         if self.config.diffusion_layers and self.training:
             diffusion = self.diffusion_student(
-                tokens, self.embedding, self.norm(mx.mean(x, axis=-2))
+                tokens, self.embedding, self.norm(boundary if self.config.diffusion_conditioning == "prefix" else mx.mean(x, axis=-2))
             )
         return logits, aux / self.config.layers, mtp_logits, diffusion
 
@@ -583,6 +593,32 @@ class Model(nn.Module):
             mx.eval(logits)
         return logits, cache
 
+    def diffusion_propose(self, cache, *, count=4, steps=2):
+        """Bounded future block proposals; never commits or verifies target KV."""
+        from mlx2.runtime.semantic_capsules import canonical_json
+        if self.training or not self.config.diffusion_layers or self.config.diffusion_conditioning != "prefix":
+            raise ValueError("future proposals require eval and prefix-conditioned diffusion")
+        if type(count) is not int or not 1 <= count <= 64 or type(steps) is not int or not 1 <= steps <= 16:
+            raise ValueError("proposal count/steps exceed bounded limits")
+        if cache.owner is not self._cache_owner or cache.boundary is None or canonical_json(cache.apcv2_identity) != canonical_json(self.new_cache(cache.batch).apcv2_identity):
+            raise ValueError("proposal cache state or revision differs")
+        if cache.length + count > self.config.max_context:
+            raise ValueError("proposal exceeds context limit")
+        teacher = self.norm(mx.mean(cache.boundary, axis=-2))
+        candidate = mx.ones((cache.batch, count), dtype=mx.int32)
+        positions = mx.arange(count)[None]
+        for step in range(steps):
+            committed = count * step // steps
+            mask = mx.broadcast_to(positions >= committed, candidate.shape)
+            level = mx.full((cache.batch, 1, 1), (count - committed) / count)
+            logits = self.diffusion_student.denoise(candidate, self.embedding, teacher, mask, level)
+            candidate = mx.where(mask, mx.argmax(logits, axis=-1), candidate)
+        mx.eval(candidate)
+        return candidate, {"schema": "mlx2.hysparse2-diffusion-proposal.v1", "count": count,
+                           "steps": steps, "prefix_tokens": cache.length,
+                           "conditioning": "prefix-only-self-boundary", "target_verified": False,
+                           "kv_committed": False, "serving_route_qualified": False}
+
     def decode(self, tokens, cache):
         if tokens.ndim != 2 or tokens.shape[1] != 1:
             raise ValueError("decode consumes one new token per row")
@@ -590,3 +626,4 @@ class Model(nn.Module):
         logits = self._cross(x, cache, offset)
         mx.eval(logits)
         return logits
+
