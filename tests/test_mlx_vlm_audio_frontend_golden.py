@@ -78,11 +78,21 @@ def test_audio_frontend_matches_the_recorded_features(name):
 
 
 def test_media_fingerprint_names_the_audio_frontend():
+    import copy
+
     from mlx2.adapters.mlx_vlm import audio_frontend_identity
 
     extractor = _extractor("gemma3n")
     identity = audio_frontend_identity(SimpleNamespace(feature_extractor=extractor))
     assert identity["class"].endswith("Gemma3nAudioFeatureExtractor")
     assert identity["transformers"] == transformers.__version__
-    assert identity["sampling_rate"] == 16_000 and identity["hop_length"] == 160
+    assert identity == audio_frontend_identity(SimpleNamespace(feature_extractor=extractor))
+    # Any feature-defining setting, not only a hand-picked few, changes it.
+    for name, value in (("min_frequency", 60.0), ("max_frequency", 7000.0), ("mel_floor", 1e-3)):
+        changed = copy.deepcopy(extractor)
+        setattr(changed, name, value)
+        assert (
+            audio_frontend_identity(SimpleNamespace(feature_extractor=changed))["config_sha256"]
+            != identity["config_sha256"]
+        ), name
     assert audio_frontend_identity(SimpleNamespace()) is None

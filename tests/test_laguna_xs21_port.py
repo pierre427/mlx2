@@ -379,6 +379,12 @@ def test_unknown_router_score_function_fails_closed(tmp_path):
     )
     with pytest.raises(ValueError, match="only sigmoid"):
         inspect_artifact(tmp_path)
+    # The legacy flag would route with softmax behind a "sigmoid" function.
+    (tmp_path / "config.json").write_text(
+        json.dumps({**laguna_config(), "moe_router_use_sigmoid": False})
+    )
+    with pytest.raises(ValueError, match="only sigmoid"):
+        inspect_artifact(tmp_path)
 
 
 @pytest.mark.parametrize(

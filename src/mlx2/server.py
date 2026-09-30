@@ -506,9 +506,10 @@ def validate_request(
                 ):
                     raise ValueError("invalid tool call history")
         if any(
-            "content" in message and message["content"] is None for message in messages
+            message["role"] == "assistant" and message.get("content") is None
+            for message in messages
         ):
-            # A tool-call turn's null content means "no content", but chat
+            # A tool-call turn's null or omitted content means "no content", but chat
             # templates read it as a value: Granite's concatenates it and
             # fails (transformers #45422 drops the key before rendering).  An
             # empty string is the one spelling every served template accepts:
@@ -519,7 +520,7 @@ def validate_request(
                 **body,
                 "messages": [
                     {**message, "content": ""}
-                    if "content" in message and message["content"] is None
+                    if message["role"] == "assistant" and message.get("content") is None
                     else message
                     for message in messages
                 ],

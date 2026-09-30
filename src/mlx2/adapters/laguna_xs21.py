@@ -121,7 +121,10 @@ def inspect_artifact(model_path: str | Path) -> dict:
     }
     if any(config.get(key) != value for key, value in expected.items()):
         raise ValueError("artifact topology does not match Laguna XS 2.1")
-    if config.get("moe_router_score_func", "sigmoid") != "sigmoid":
+    if (
+        config.get("moe_router_score_func", "sigmoid") != "sigmoid"
+        or config.get("moe_router_use_sigmoid", True) is not True
+    ):
         # The model computes sqrtsoftplus routing (transformers #48119), but
         # no such checkpoint has been qualified here.
         raise ValueError("only sigmoid Laguna router scoring is qualified")

@@ -3010,6 +3010,13 @@ def test_null_tool_call_content_reaches_templates_as_absent():
     assert request["messages"][1]["content"] == ""
     assert request["messages"][1]["tool_calls"][0]["id"] == "c1"
     assert body["messages"][1]["content"] is None
+    # An omitted content key on a tool-call turn is the same "no content".
+    omitted = {**body, "messages": [
+        body["messages"][0],
+        {k: v for k, v in body["messages"][1].items() if k != "content"},
+        body["messages"][2],
+    ]}
+    assert validate_request(omitted, True)["messages"][1]["content"] == ""
     template = (
         "{%- for m in messages %}{{ m['role'] }}: "
         "{%- if m.content is defined %}{{ m.content }}{% endif %}\n{% endfor %}"

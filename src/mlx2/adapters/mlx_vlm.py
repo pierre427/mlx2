@@ -140,13 +140,6 @@ def _ids_and_kwargs(processed):
     return [int(token) for token in ids], data
 
 
-_AUDIO_FRONTEND_FIELDS = (
-    "sampling_rate", "feature_size", "hop_length", "n_fft", "fft_length",
-    "frame_length", "chunk_length", "n_samples", "nb_max_frames", "dither",
-    "padding_value", "padding_side", "preemphasis", "mel_floor",
-)
-
-
 def audio_frontend_identity(processor) -> dict | None:
     """The audio feature extractor a processor encodes audio with, or None.
 
@@ -155,9 +148,10 @@ def audio_frontend_identity(processor) -> dict | None:
     MiniCPM-o builds ``WhisperFeatureExtractor``.  transformers #48114 moves
     every audio front end to new ``AudioProcessor`` classes, so an upgrade
     within ``transformers<6`` may change the features for identical bytes.
-    The class, its parameters and the transformers version join the media
-    fingerprint, so a prefix cached under one front end is never reused
-    under another.
+    The class, the transformers version and a digest of the extractor's
+    complete configuration (every framing, mel and normalization setting,
+    arrays included) join the media fingerprint, so a prefix cached under
+    one front end is never reused under another.
     """
     extractor = getattr(processor, "feature_extractor", None) or getattr(
         processor, "audio_processor", None
@@ -166,15 +160,19 @@ def audio_frontend_identity(processor) -> dict | None:
         return None
     import transformers
 
+    to_dict = getattr(extractor, "to_dict", None)
+    settings = to_dict() if callable(to_dict) else dict(vars(extractor))
+
+    def canonical(value):
+        tolist = getattr(value, "tolist", None)
+        return tolist() if callable(tolist) else repr(value)
+
+    config = json.dumps(settings, sort_keys=True, default=canonical, separators=(",", ":"))
     kind = type(extractor)
     return {
         "class": f"{kind.__module__}.{kind.__qualname__}",
         "transformers": transformers.__version__,
-        **{
-            name: getattr(extractor, name)
-            for name in _AUDIO_FRONTEND_FIELDS
-            if isinstance(getattr(extractor, name, None), (bool, int, float, str))
-        },
+        "config_sha256": hashlib.sha256(config.encode()).hexdigest(),
     }
 
 
