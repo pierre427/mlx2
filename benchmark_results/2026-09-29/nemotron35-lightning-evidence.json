@@ -419,6 +419,35 @@
       },
       "source_head": "9f5e525d8957f4926e276bae778c0b2713ee7a6e",
       "status": "passed"
+    },
+    {
+      "artifact_config_sha256": "a1b0135c0973322d188a836c86746e69ea07c02b241e1f26681bf5123345359b",
+      "cases": [
+        {
+          "case": "arithmetic",
+          "finish_reason": "stop",
+          "passed": true
+        },
+        {
+          "case": "knowledge-default-sampling",
+          "finish_reason": "stop",
+          "passed": true
+        }
+      ],
+      "default_checks": {
+        "artifact_sampling_matches_documented_policy": true,
+        "healthy": true,
+        "qualification_is_candidate": true,
+        "served_model": true
+      },
+      "receipt_sha256": "eac82fbe832c68f7c3ce2f76ed1c9182a682b8691bc9d6b250f7b62aa77bc32f",
+      "route": "ordinary",
+      "sampling_drift": {
+        "expected": {},
+        "observed": {}
+      },
+      "source_head": "a6a570891604ac385ec7d48475a519c80d045777",
+      "status": "passed"
     }
   ],
   "stress_attempts": [

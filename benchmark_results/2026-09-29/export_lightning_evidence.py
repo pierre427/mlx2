@@ -142,6 +142,7 @@ def main() -> None:
         "smokes": [row for name in (
             "smoke.json", "smoke-latest-d174-20260929.json",
             "smoke-current-mamba-clamp-20260929.json",
+            "smoke-current-apc-20260929.json",
         ) if (row := smoke(name)) is not None],
         "stress_attempts": [row for tag in tags if (row := stress(tag)) is not None],
         "ladders": [row for stem in (

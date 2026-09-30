@@ -2,7 +2,7 @@
 
 Artifact: `NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16-mlx-8Bit`, config SHA-256 `a1b0135c0973322d188a836c86746e69ea07c02b241e1f26681bf5123345359b`. The target is pinned to revision `a9db86e1fe5baf448346efd33541ce117b5b8403`; the separately verified original BF16 MTP head is pinned to revision `a9904d24bcc1d289a1950fa9d2b978c47cf903b9` and SHA-256 `64577b275ca4e7e5266eae0903674f7f46ec2a8cbf4f4f1a3207f80d503cd1d0`.
 
-**Current-source boundary:** private main gained `46139b74`, changing the Lightning Mamba time-step clamp and therefore model outputs, after the earlier runs below. Their passes and speed measurements remain source-bound historical evidence. Ordinary smoke and the capped 20×20 workload passed on newer source `9f5e525d`; its cooled 1K–32K ladder passed on `0fb9c092`. Native MTP and feature serving qualification remain pending.
+**Current-source boundary:** private main gained `46139b74`, changing the Lightning Mamba time-step clamp and therefore model outputs, after the earlier runs below. Their passes and speed measurements remain source-bound historical evidence. Ordinary smoke and the capped 20×20 workload passed on `9f5e525d`; its cooled 1K–32K ladder passed on `0fb9c092`. After later APCv2/serving changes, ordinary smoke passed on `a6a57089`. Batched stress, native MTP, and feature serving qualification on that newest head remain pending.
 
 ## Host coverage
 
@@ -86,6 +86,7 @@ The 64K–262K width-one extension was **interrupted** after newer main commits 
 | M5 | ordinary smoke after Mamba clamp on `9f5e525d` | `aeb42bda9c5b9b78acfeeeadf50e605fec65c54c8fc28346623fe1a44c91ce17` |
 | M5 | ordinary 20×20 after Mamba clamp, 400/400 | `6ea4b814ce2835c05427adc23bd52ada600a61f939bd94b8cf32be90fd2ed6c3` |
 | M5 | post-clamp cooled 1K–32K ladder, 3 reps per cell | `15bb00d55189c6151b89747bb5116318b76beead439888826f520180293e416a` |
+| M5 | ordinary smoke after APCv2/serving changes on `a6a57089` | `eac82fbe832c68f7c3ce2f76ed1c9182a682b8691bc9d6b250f7b62aa77bc32f` |
 | M3 | hash-verified load feasibility | `119c027c459044036e7d36016576feced932a5e8e40d516876feda83db9fc1d4` |
 | M3 | integrated-source CPU and memory feasibility | `0b9861b9d31ddf88516c5702f5e41d2cec74898e9810095344e349e884eee3cc` |
 | M3 | post-clamp source CPU and memory feasibility | `8810035cf000a2a748bcdf68738d4fc1eb039edc1b2a8980df8a0ae58b9b05f1` |
