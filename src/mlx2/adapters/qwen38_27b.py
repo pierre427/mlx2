@@ -272,7 +272,8 @@ def resolve_eos_token_ids(config: dict, tokenizer) -> list[int]:
     """Combine artifact and tokenizer EOS ids without trusting either alone."""
     text = config.get("text_config", config)
     configured = config.get("eos_token_id", text.get("eos_token_id"))
-    values = configured if isinstance(configured, list) else [configured]
+    # A copy: appending to the config's own list mutated the artifact config.
+    values = list(configured) if isinstance(configured, list) else [configured]
     values.append(getattr(tokenizer, "eos_token_id", None))
     result = []
     for value in values:

@@ -6,6 +6,8 @@ import hashlib
 import json
 from pathlib import Path
 
+from .artifact_paths import shard_within_artifact
+
 
 def inspect_indexed_artifact(model_path: str | Path) -> dict:
     path = Path(model_path).expanduser().resolve()
@@ -26,7 +28,7 @@ def inspect_indexed_artifact(model_path: str | Path) -> dict:
         if not isinstance(name, str) or Path(name).is_absolute() or ".." in Path(name).parts:
             raise ValueError("weight shard paths must stay within the artifact")
         item = (path / name).resolve()
-        if not item.is_relative_to(path) or not item.is_file():
+        if not shard_within_artifact(path, item) or not item.is_file():
             raise ValueError(f"missing or escaped weight shard: {name}")
         stat = item.stat()
         if stat.st_size < 8:

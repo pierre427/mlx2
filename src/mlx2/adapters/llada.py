@@ -12,6 +12,7 @@ import json
 from collections.abc import Mapping
 from pathlib import Path
 
+from .artifact_paths import shard_within_artifact
 from ..contracts import Capability, ModelDescriptor, StatePlane
 
 
@@ -93,7 +94,7 @@ def inspect_artifact(model_path: str | Path) -> dict:
         if not isinstance(name, str) or Path(name).is_absolute() or ".." in Path(name).parts or Path(name).suffix != ".safetensors":
             raise ValueError("LLaDA index has an unsafe shard path")
         item = path / name
-        if not item.is_file() or not item.resolve().is_relative_to(path):
+        if not item.is_file() or not shard_within_artifact(path, item.resolve()):
             raise ValueError(f"missing or foreign LLaDA shard: {name}")
         stat = item.stat()
         records.append((name, stat.st_size, stat.st_mtime_ns))

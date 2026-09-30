@@ -207,10 +207,12 @@ class PinnedVisionCandidateAdapter:
         )
 
     def _eos_ids(self):
-        value = self.identity["config"].get("eos_token_id")
-        if value is None:
-            value = getattr(self.processor.tokenizer, "eos_token_id", None)
-        return [int(v) for v in (value if isinstance(value, list) else [value]) if v is not None]
+        from .eos import artifact_eos_token_ids
+
+        return artifact_eos_token_ids(
+            self.identity["path"], self.identity["config"],
+            getattr(self.processor, "tokenizer", None),
+        )
 
     def profile_name(self, mtp):
         if mtp:

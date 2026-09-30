@@ -219,18 +219,26 @@ class StandardDecoderAdapter:
         weights.clear()
         mx.clear_cache()
         tokenizer = AutoTokenizer.from_pretrained(path, local_files_only=True, trust_remote_code=False)
-        eos = self.config.get("eos_token_id")
+        from .eos import artifact_eos_token_ids
         self.tokenizer = TokenizerWrapper(
             tokenizer, detokenizer_class=BPEStreamingDetokenizer,
-            eos_token_ids=[eos] if isinstance(eos, int) else list(eos or []),
+            eos_token_ids=artifact_eos_token_ids(path, self.config, tokenizer),
         )
         self.max_context = self.config["max_position_embeddings"]
+
+    # The descriptor declares no reasoning (an explicit enable_thinking: true
+    # is refused), so thinking defaults off.  Defaulting to the tokenizer's
+    # has_thinking rendered Qwen3 prompts in thinking mode and parsed a
+    # reasoning channel that serving's thinking_enabled() said was closed.
+    @staticmethod
+    def _thinking(request: dict) -> bool:
+        return bool(request.get("enable_thinking", False))
 
     def prompt_tokens(self, request: dict) -> list[int]:
         if "messages" in request:
             return self.tokenizer.apply_chat_template(
                 request["messages"], add_generation_prompt=True, tokenize=True,
-                enable_thinking=request.get("enable_thinking", self.tokenizer.has_thinking),
+                enable_thinking=self._thinking(request),
             )
         return self.tokenizer.encode(request["prompt"], add_special_tokens=False)
 
@@ -238,7 +246,7 @@ class StandardDecoderAdapter:
         if "messages" in request:
             return self.tokenizer.apply_chat_template(
                 request["messages"], add_generation_prompt=True, tokenize=False,
-                enable_thinking=request.get("enable_thinking", self.tokenizer.has_thinking),
+                enable_thinking=self._thinking(request),
             )
         return request["prompt"]
 
@@ -249,7 +257,7 @@ class StandardDecoderAdapter:
         return OutputParser(
             chat="messages" in request,
             thinking=self.config["model_type"] in {"qwen3", "qwen3_moe"}
-            and request.get("enable_thinking", self.tokenizer.has_thinking),
+            and self._thinking(request),
             stops=request.get("stop", ()),
         )
 

@@ -8,6 +8,7 @@ import os
 import struct
 from pathlib import Path
 
+from .artifact_paths import shard_within_artifact
 from ..contracts import Capability, ModelDescriptor, StatePlane
 from ..sampling_defaults import GENERATION_CONFIG, SamplingDefaults, VendorSampling
 from .ordinary_text import OrdinaryTextAdapter
@@ -64,7 +65,7 @@ def _metadata(model_path):
         if not isinstance(name, str) or Path(name).is_absolute() or ".." in Path(name).parts or Path(name).suffix != ".safetensors":
             raise ValueError("unsafe Granite shard path")
         item = path / name
-        if not item.is_file() or not item.resolve().is_relative_to(path):
+        if not item.is_file() or not shard_within_artifact(path, item.resolve()):
             raise ValueError(f"missing Granite shard: {name}")
         stat = item.stat()
         records.append((name, stat.st_size, stat.st_mtime_ns))

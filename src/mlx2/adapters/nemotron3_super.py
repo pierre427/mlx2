@@ -11,6 +11,7 @@ import os
 import struct
 from pathlib import Path
 
+from .artifact_paths import shard_within_artifact
 from ..contracts import Capability, ModelDescriptor, StatePlane
 from ..sampling_defaults import GENERATION_CONFIG, SamplingDefaults, VendorSampling
 from .flash_next import FlashNextAdapter
@@ -120,7 +121,7 @@ def inspect_artifact(model_path: str | Path) -> dict:
         if not isinstance(name, str) or Path(name).is_absolute() or ".." in Path(name).parts:
             raise ValueError("weight shard paths must stay within the artifact")
         item = (path / name).resolve()
-        if not item.is_relative_to(path) or not item.is_file():
+        if not shard_within_artifact(path, item) or not item.is_file():
             raise ValueError(f"missing or escaped weight shard: {name}")
         header = _shard_header(item)
         tensor_names = set(header) - {"__metadata__"}

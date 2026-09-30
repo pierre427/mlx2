@@ -28,17 +28,24 @@ class OrdinaryTextAdapter:
             "segment_aware_cohort_size": max_lanes,
         }
 
+    # No reasoning is declared and the parser is content-only, so the prompt
+    # must not open a think channel.  TokenizerWrapper defaults
+    # enable_thinking to the tokenizer's has_thinking, which rendered Agnes 3
+    # Flash's "<think>" generation prompt and leaked its reasoning (and a
+    # literal "</think>") into the answer, with no way to turn it off.
     def prompt_tokens(self, request):
         if "messages" in request:
             return self.tokenizer.apply_chat_template(
-                request["messages"], add_generation_prompt=True, tokenize=True
+                request["messages"], add_generation_prompt=True, tokenize=True,
+                enable_thinking=False,
             )
         return self.tokenizer.encode(request["prompt"], add_special_tokens=False)
 
     def render_prompt(self, request):
         if "messages" in request:
             return self.tokenizer.apply_chat_template(
-                request["messages"], add_generation_prompt=True, tokenize=False
+                request["messages"], add_generation_prompt=True, tokenize=False,
+                enable_thinking=False,
             )
         return request["prompt"]
 
