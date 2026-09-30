@@ -149,6 +149,8 @@ def main() -> None:
             "ladder-65536-262144-r3-w1-lightning-ordinary-long-c8-20260929",
             "ladder-1024-32768-r3-lightning-ordinary-short-latest-20260929",
             "ladder-16384-16384-r3-lightning-ordinary-isolated-latest-20260929",
+            "ladder-1024-32768-r3-lightning-ordinary-post-clamp-cooled-20260929",
+            "ladder-65536-262144-r3-w1-lightning-ordinary-post-clamp-long-20260929",
         ) if (row := ladder(stem)) is not None],
     }
     OUTPUT.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")

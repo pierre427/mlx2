@@ -231,6 +231,103 @@
       "status": "passed",
       "swapout_pages": 0,
       "tag": "ladder-1024-32768-r3-lightning-ordinary-short-latest-20260929"
+    },
+    {
+      "cells": [
+        {
+          "cold_ttft_median_seconds": 0.5471167500363663,
+          "context_tokens": 1024,
+          "decode_median_tokens_per_second_per_stream": 101.70771864805982,
+          "needle_quality": "6/6 needles",
+          "passed": true,
+          "prefill_median_tokens_per_second": 1871.6297754216732,
+          "repetitions": 3,
+          "width": 1
+        },
+        {
+          "cold_ttft_median_seconds": 1.1056201250175945,
+          "context_tokens": 1024,
+          "decode_median_tokens_per_second_per_stream": 51.25506053709901,
+          "needle_quality": "24/24 needles",
+          "passed": true,
+          "prefill_median_tokens_per_second": 1028.9108757159588,
+          "repetitions": 3,
+          "width": 4
+        },
+        {
+          "cold_ttft_median_seconds": 1.159345208085142,
+          "context_tokens": 4096,
+          "decode_median_tokens_per_second_per_stream": 98.73098292897934,
+          "needle_quality": "6/6 needles",
+          "passed": true,
+          "prefill_median_tokens_per_second": 3532.16623611495,
+          "repetitions": 3,
+          "width": 1
+        },
+        {
+          "cold_ttft_median_seconds": 3.24588954198407,
+          "context_tokens": 4096,
+          "decode_median_tokens_per_second_per_stream": 46.13406212625912,
+          "needle_quality": "24/24 needles",
+          "passed": true,
+          "prefill_median_tokens_per_second": 1524.8243735842793,
+          "repetitions": 3,
+          "width": 4
+        },
+        {
+          "cold_ttft_median_seconds": 3.6478832910070196,
+          "context_tokens": 16384,
+          "decode_median_tokens_per_second_per_stream": 92.70442341727005,
+          "needle_quality": "6/6 needles",
+          "passed": true,
+          "prefill_median_tokens_per_second": 4490.8234976666845,
+          "repetitions": 3,
+          "width": 1
+        },
+        {
+          "cold_ttft_median_seconds": 14.18872706242837,
+          "context_tokens": 16384,
+          "decode_median_tokens_per_second_per_stream": 41.774171408171966,
+          "needle_quality": "24/24 needles",
+          "passed": true,
+          "prefill_median_tokens_per_second": 1345.3601456084873,
+          "repetitions": 3,
+          "width": 4
+        },
+        {
+          "cold_ttft_median_seconds": 9.058824292034842,
+          "context_tokens": 32768,
+          "decode_median_tokens_per_second_per_stream": 83.07767916625855,
+          "needle_quality": "6/6 needles",
+          "passed": true,
+          "prefill_median_tokens_per_second": 3617.246448726458,
+          "repetitions": 3,
+          "width": 1
+        },
+        {
+          "cold_ttft_median_seconds": 28.559245666954666,
+          "context_tokens": 32768,
+          "decode_median_tokens_per_second_per_stream": 38.27790988991054,
+          "needle_quality": "24/24 needles",
+          "passed": true,
+          "prefill_median_tokens_per_second": 1306.3659405317267,
+          "repetitions": 3,
+          "width": 4
+        }
+      ],
+      "host_caps": {
+        "cache_gib": 4,
+        "max_context": null
+      },
+      "ladder_sha256": "2322179f2cb4489eef528eff05a747b6d86ca75bc08b07a759cf7faeaf5a65b5",
+      "passed": true,
+      "receipt_sha256": "15bb00d55189c6151b89747bb5116318b76beead439888826f520180293e416a",
+      "route": "ordinary",
+      "runs_per_cell": 3,
+      "source_head": "0fb9c0924b3df34592a18b1917a6b7751a9b6d8f",
+      "status": "passed",
+      "swapout_pages": 0,
+      "tag": "ladder-1024-32768-r3-lightning-ordinary-post-clamp-cooled-20260929"
     }
   ],
   "model": "nemotron35-lightning",
