@@ -325,6 +325,11 @@ def prepare(module, backend_name: str | None = None) -> LaneWeights:
                                     biases_dtype=biases.dtype, weight_ndim=weight.ndim)
             except simd.SimdUnsupported as exc:
                 raise LaneUnsupported(str(exc)) from None
+            if scales.dtype != mx.bfloat16:
+                # The simd kernels read bf16 activations only: an fp16/fp32
+                # checkpoint would fall back to stock on every call while its
+                # receipt claimed the lane law.
+                raise LaneUnsupported("the simd kernels need a bf16 checkpoint (bf16 activations)")
             if tuple(scales.shape) != (n, k // group_size) or biases.shape != scales.shape:
                 raise LaneUnsupported("scale/bias geometry does not match the packed weight")
             return LaneWeights(bits, group_size, n, k, simd.splits(n, k), weight, None,

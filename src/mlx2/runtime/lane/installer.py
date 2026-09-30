@@ -113,6 +113,14 @@ class _Group:
     declared: str | None = None                   # adapter group name, None for defaults
     size: int = 0
     served: set = field(default_factory=set)      # members served by the latest launch
+    stack: dict = field(default_factory=dict)     # the MLX arrays the members' weights view
+    call: dict = field(default_factory=dict)      # the members' stock quantization arguments
+    # Below the crossover the members' stock calls run as one stacked stock
+    # launch when a probe proved it bitwise equal (see _probe_stock_stack).
+    stock_stacked: bool = False
+    stock_last: tuple | None = None               # (x, stacked stock output) of the latest call
+    taken: int = 0                                # members served from ``last``
+    stock_taken: int = 0                          # members served from ``stock_last``
 
 # Process-wide switches for paired A/B measurement; a route never flips them.
 ENABLED = [True]
@@ -161,6 +169,10 @@ class _LaneMixin:
         elif rows < self._lane_min_rows:
             STATS["stock_below_min_rows"] += 1
             STATS[f"rows_{_bucket(rows)}"] += 1
+            group = _group(self)
+            if group is not None and group.stock_stacked and GROUPING[0]:
+                STATS["stock_stacked_calls"] += 1
+                return _stock_stacked(self, group, x)
         elif rows > self._lane_max_rows:
             STATS["stock_above_max_rows"] += 1
         else:
@@ -181,6 +193,7 @@ class _LaneMixin:
                             # its members did not all see one tensor object.
                             STATS[f"declared_partial:{declared}"] += 1
                         group.last = (x, lane_matmul(x, group.lw))
+                        group.taken = 0
                         STATS["lane_launches"] += 1
                         STATS["group_launches"] += 1
                         if declared is not None:
@@ -192,6 +205,11 @@ class _LaneMixin:
                             group.served.add(start)
                             STATS[f"declared_reuses:{declared}"] += 1
                     y = group.last[1][..., start:stop]
+                    group.taken += 1
+                    if group.taken >= group.size:
+                        # Every member took its columns: drop the input and
+                        # stacked output so no layer holds them between steps.
+                        group.last = None
                     if lw.bias is not None:
                         y = y + lw.bias
                 STATS["lane_calls"] += 1
@@ -201,6 +219,81 @@ class _LaneMixin:
             except LaneUnsupported:
                 STATS["stock_unsupported"] += 1
         return self._lane_stock_call(x)
+
+
+def _stock_matmul(group: _Group, x):
+    stack, call = group.stack, group.call
+    if "scales" not in stack:
+        return x @ stack["weight"].T
+    return mx.quantized_matmul(x, stack["weight"], stack["scales"], stack["biases"],
+                               transpose=True, group_size=call["group_size"],
+                               bits=call["bits"], mode=call["mode"])
+
+
+def _stock_stacked(module, group: _Group, x):
+    """This member's columns of one stock launch over the group's stack."""
+    if group.stock_last is None or group.stock_last[0] is not x:
+        group.stock_last = (x, _stock_matmul(group, x))
+        group.stock_taken = 0
+    start, stop = module.__dict__["_lane_columns"]
+    y = group.stock_last[1][..., start:stop]
+    group.stock_taken += 1
+    if group.stock_taken >= group.size:
+        group.stock_last = None
+    bias = module.get("bias")
+    return y if bias is None else y + bias
+
+
+def _probe_stock_stack(members, group: _Group, rows_below: int, seen: dict) -> bool:
+    """Is one stacked stock launch bitwise equal to the members' own stock calls?
+
+    Checked on this GPU, in bf16 and fp16, for every row count that takes
+    the stock path below the crossover, once per member-shape tuple (kernel
+    choice depends only on shapes and dtypes).
+    """
+    stack = group.stack
+    key = (tuple(tuple(m["weight"].shape) for m in members), tuple(sorted(group.call.items())),
+           str(stack["weight"].dtype), str(stack["scales"].dtype if "scales" in stack else None),
+           rows_below)
+    if key in seen:
+        return seen[key]
+    same = True
+    for dtype in (mx.bfloat16, mx.float16):
+        for rows in range(1, rows_below + 1):
+            x = (mx.random.normal((rows, group.lw.k), key=mx.random.key(rows)) * 0.5).astype(dtype)
+            apart = mx.concatenate([m._lane_stock_call(x) for m in members], axis=-1)
+            if not bool(mx.array_equal(apart, _stock_matmul(group, x)).item()):
+                same = False
+                break
+        if not same:
+            break
+    seen[key] = same
+    return same
+
+
+def _enable_stock_stacks(model) -> dict:
+    """Probe each group's stacked stock launch for the rows below its crossover."""
+    if not available():
+        return {}
+    members: dict[int, list] = {}
+    groups: dict[int, _Group] = {}
+    for _name, module in model.named_modules():
+        group = _group(module)
+        if group is not None:
+            groups[id(group)] = group
+            members.setdefault(id(group), []).append(module)
+    seen: dict = {}
+    proven = unproven = 0
+    for gid, group in groups.items():
+        ordered = sorted(members[gid], key=lambda m: m.__dict__["_lane_columns"][0])
+        rows_below = min(int(m._lane_min_rows) for m in ordered) - 1
+        rows_below = min(rows_below, int(ordered[0]._lane_max_rows))
+        if rows_below < 1:
+            continue
+        group.stock_stacked = _probe_stock_stack(ordered, group, rows_below, seen)
+        proven += group.stock_stacked
+        unproven += not group.stock_stacked
+    return {"groups": proven, "unproven": unproven} if proven or unproven else {}
 
 
 class LaneQuantizedLinear(_LaneMixin, nn.QuantizedLinear):
@@ -249,7 +342,9 @@ def _stack(members) -> _Group:
                          stacked["weight"], pairs, None)
     for m in members:
         object.__setattr__(m, "_lane_prepared", prepare(m, first.backend))  # individual views
-    return _Group(lw)
+    call = ({"bits": int(members[0].bits), "group_size": int(members[0].group_size),
+             "mode": getattr(members[0], "mode", "affine")} if quantized else {})
+    return _Group(lw, stack=stacked, call=call)
 
 
 def _member(parent, path: str):
@@ -382,7 +477,13 @@ def install(model, *, min_rows: int = 4, max_rows: int = DEFAULT_MAX_ROWS, unqua
         kind = type(module)
         if kind in _RESTORE:
             rows = threshold(module)
-            object.__setattr__(module, "_lane_min_rows", rows if rows is not None else max_rows + 1)
+            if rows is None:
+                # Covered by an earlier install, not by this one: back to
+                # stock, so the receipt describes what runs.
+                _restore(module)
+                refused["no threshold for this format"] += 1
+                continue
+            object.__setattr__(module, "_lane_min_rows", rows)
             object.__setattr__(module, "_lane_max_rows", int(max_rows))
             covered["already"] += 1
             continue
@@ -428,6 +529,7 @@ def install(model, *, min_rows: int = 4, max_rows: int = DEFAULT_MAX_ROWS, unqua
         formed = Counter()
         _dissolve(model)
     twins = _check_simd_twins(model)
+    stacked_stock = _enable_stock_stacks(model)
     base = LAW_IDS[current]
     if min_rows_by_format is None:
         law = law_id(min_rows)
@@ -455,6 +557,9 @@ def install(model, *, min_rows: int = 4, max_rows: int = DEFAULT_MAX_ROWS, unqua
     if twins:
         # simd only: per-shape scalar/matrix twin checks on this GPU.
         receipt["simd_twins"] = twins
+    if stacked_stock:
+        # Groups whose sub-crossover stock calls run as one proven-equal launch.
+        receipt["stock_stacked"] = stacked_stock
     if declared:
         # Only present when declared groups were passed, so receipts of
         # every other install are byte-identical to before.
@@ -495,15 +600,19 @@ def _check_simd_twins(model) -> dict:
             **{kind: shapes for kind, shapes in by_kind.items() if shapes}}
 
 
+def _restore(module) -> None:
+    module.__class__ = _RESTORE[type(module)]
+    for name in ("_lane_prepared", "_lane_group", "_lane_columns", "_lane_min_rows",
+                 "_lane_max_rows"):
+        module.__dict__.pop(name, None)
+
+
 def uninstall(model) -> int:
     """Restore stock classes; returns how many projections were restored."""
     restored = 0
     for _name, module in model.named_modules():
-        old = _RESTORE.get(type(module))
-        if old is not None:
-            module.__class__ = old
-            for name in ("_lane_prepared", "_lane_group", "_lane_columns"):
-                module.__dict__.pop(name, None)
+        if type(module) in _RESTORE:
+            _restore(module)
             restored += 1
     return restored
 
