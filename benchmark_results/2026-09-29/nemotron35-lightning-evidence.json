@@ -274,6 +274,33 @@
       "tag": "lightning-ordinary-l8c4-think4096-20260929",
       "thinking_allowance": 4096,
       "workload_sha256": "b4bca750729b658aa6edbf2d29f10ae4b65846fb1026246d8578dfda8a3c23c4"
+    },
+    {
+      "aggregate_generated_tokens_per_second": {
+        "max": 224.3,
+        "median": 201.5,
+        "min": 183.0
+      },
+      "apcv2_probe_passed": true,
+      "batching_engaged": true,
+      "cache_cap_gib": 4,
+      "graded_correct": 400,
+      "http_errors": 0,
+      "issues": {},
+      "max_lanes": 8,
+      "observed_widths": {
+        "8": 380,
+        "None": 20
+      },
+      "receipt_sha256": "07ca24f3bd89487b62b6e634b4c0de35de97439e5410ca66499f7e837280e333",
+      "requests": 400,
+      "route": "ordinary",
+      "source_head": "d17430de4c1f57f4d3290dabe0147632b3a5da57",
+      "status": "passed",
+      "swapout_pages": 0,
+      "tag": "lightning-ordinary-latest-d174-20260929",
+      "thinking_allowance": 4096,
+      "workload_sha256": "826eef3d843ccdff8474f218585c84894d70e08bd02d6e586a7fc1ad88dfbd9d"
     }
   ]
 }

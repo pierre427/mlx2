@@ -33,7 +33,7 @@ The corrected **1K–32K** ladder passed all eight cells with three thermally ad
 | 32K | 1 | 7.590 s | 4,317 | 84.6 |
 | 32K | 4 | 26.299 s | 1,425 | 37.9 |
 
-The 64K–262K width-one extension was **interrupted** after newer main commits changed Nemotron runtime math and APC/lane ownership. At its older source, the 64K cell missed one exact-code needle repetition (4/6 checks); one completed 131K repetition missed both needles. Those are real failures for that source, but the incomplete ladder does not qualify long context on the newer main. Its 8 GiB cache profile had zero swapouts. On integrated private source `d17430de`, a repeat ordinary smoke passed both prompts and all default checks with no sampling drift; its capped 20×20 follow-up is running. Applicable feature gates remain pending. The MTP route remains implemented and opt-in pending served qualification. No selected speculative route is claimed.
+The 64K–262K width-one extension was **interrupted** after newer main commits changed Nemotron runtime math and APC/lane ownership. At its older source, the 64K cell missed one exact-code needle repetition (4/6 checks); one completed 131K repetition missed both needles. Those are real failures for that source, but the incomplete ladder does not qualify long context on the newer main. Its 8 GiB cache profile had zero swapouts. On integrated private source `d17430de`, a repeat ordinary smoke passed both prompts and all default checks with no sampling drift. The matching capped 20×20 run passed **400/400** graded answers, zero HTTP errors, zero issues, and zero swapouts. Its median aggregate generated rate was **201.5 tokens/s** across 20 rounds (range 183.0–224.3), 11.2% above the prior capped run's 181.15 tokens/s median. This comparison is not thermally controlled and does not isolate the cause of the change. A new-source context ladder is running. Applicable feature gates remain pending. The MTP route remains implemented and opt-in pending served qualification. No selected speculative route is claimed.
 
 ## Receipt integrity
 
@@ -47,5 +47,6 @@ The 64K–262K width-one extension was **interrupted** after newer main commits 
 | M5 | passed 1K–32K ladder, 3 reps per cell | `819b294cd992bb7de6927ae4080af68c037033805aeebb2ef02799cdef46c676` |
 | M5 | interrupted 64K–262K ladder, long-context needle failures | `ebd28267c7878d1481ec88da455048edffa3dd113fb7769c041000b7494d6cff` |
 | M5 | ordinary smoke on integrated main `d17430de` | `3f2489141708bf0facabf407f45659dca5391b10c00af87b1f07d9161d448914` |
+| M5 | integrated-source capped 20×20, 400/400 | `07ca24f3bd89487b62b6e634b4c0de35de97439e5410ca66499f7e837280e333` |
 | M3 | hash-verified load feasibility | `119c027c459044036e7d36016576feced932a5e8e40d516876feda83db9fc1d4` |
 | M3 | integrated-source CPU and memory feasibility | `0b9861b9d31ddf88516c5702f5e41d2cec74898e9810095344e349e884eee3cc` |
