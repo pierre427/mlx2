@@ -395,6 +395,7 @@ class Model(nn.Module):
         # remains in an explicit, non-colliding APCv2 namespace.
         self.ple_sidecar_digest = None
         self._cache_owner = object()
+        self.adapter_revision = None
 
     def _embed(self, tokens, ple_history=None):
         if (
@@ -459,9 +460,10 @@ class Model(nn.Module):
         return Cache(
             self._cache_owner,
             batch,
-            apcv2_identity=self.config.apcv2_identity(
-                semantic_capsule_digest, self.ple_sidecar_digest
-            ),
+            apcv2_identity={
+                **self.config.apcv2_identity(semantic_capsule_digest, self.ple_sidecar_digest),
+                **({"adapter_revision": self.adapter_revision} if self.adapter_revision else {}),
+            },
         )
 
     def _append(self, tokens, cache):
@@ -475,6 +477,7 @@ class Model(nn.Module):
         actual = cache.apcv2_identity
         if (
             not isinstance(actual, dict)
+            or actual.get("adapter_revision") != self.adapter_revision
             or actual.get("cache_layout_fingerprint")
             != expected["cache_layout_fingerprint"]
             or actual.get("semantic_fingerprint", ())[2:]
