@@ -1,36 +1,203 @@
 {
   "host": "m5-max-128gb",
+  "ladders": [
+    {
+      "cells": [
+        {
+          "cold_ttft_median_seconds": 0.5241361669031903,
+          "context_tokens": 1024,
+          "decode_median_tokens_per_second_per_stream": 99.07076630190953,
+          "needle_quality": "6/6 needles",
+          "passed": true,
+          "prefill_median_tokens_per_second": 1949.8749838966307,
+          "repetitions": 3,
+          "width": 1
+        },
+        {
+          "cold_ttft_median_seconds": 1.104650083463639,
+          "context_tokens": 1024,
+          "decode_median_tokens_per_second_per_stream": 52.119236303621804,
+          "needle_quality": "24/24 needles",
+          "passed": true,
+          "prefill_median_tokens_per_second": 1024.4760882767232,
+          "repetitions": 3,
+          "width": 4
+        },
+        {
+          "cold_ttft_median_seconds": 1.1500121250282973,
+          "context_tokens": 4096,
+          "decode_median_tokens_per_second_per_stream": 98.55102186354107,
+          "needle_quality": "6/6 needles",
+          "passed": true,
+          "prefill_median_tokens_per_second": 3559.9624655255375,
+          "repetitions": 3,
+          "width": 1
+        },
+        {
+          "cold_ttft_median_seconds": 3.1957109789946117,
+          "context_tokens": 4096,
+          "decode_median_tokens_per_second_per_stream": 48.48033583245868,
+          "needle_quality": "24/24 needles",
+          "passed": true,
+          "prefill_median_tokens_per_second": 1542.4490226685184,
+          "repetitions": 3,
+          "width": 4
+        },
+        {
+          "cold_ttft_median_seconds": 3.6700459169223905,
+          "context_tokens": 16384,
+          "decode_median_tokens_per_second_per_stream": 91.46630204735409,
+          "needle_quality": "6/6 needles",
+          "passed": true,
+          "prefill_median_tokens_per_second": 4463.976846845115,
+          "repetitions": 3,
+          "width": 1
+        },
+        {
+          "cold_ttft_median_seconds": 11.464251666446216,
+          "context_tokens": 16384,
+          "decode_median_tokens_per_second_per_stream": 43.33640904246423,
+          "needle_quality": "24/24 needles",
+          "passed": true,
+          "prefill_median_tokens_per_second": 1683.419332898407,
+          "repetitions": 3,
+          "width": 4
+        },
+        {
+          "cold_ttft_median_seconds": 7.590343249961734,
+          "context_tokens": 32768,
+          "decode_median_tokens_per_second_per_stream": 84.59223958913685,
+          "needle_quality": "6/6 needles",
+          "passed": true,
+          "prefill_median_tokens_per_second": 4316.800824543105,
+          "repetitions": 3,
+          "width": 1
+        },
+        {
+          "cold_ttft_median_seconds": 26.299135874956846,
+          "context_tokens": 32768,
+          "decode_median_tokens_per_second_per_stream": 37.9274298507588,
+          "needle_quality": "24/24 needles",
+          "passed": true,
+          "prefill_median_tokens_per_second": 1424.7861805907633,
+          "repetitions": 3,
+          "width": 4
+        }
+      ],
+      "host_caps": {
+        "cache_gib": 4,
+        "max_context": null
+      },
+      "ladder_sha256": "e0f20b1d250710c3b3b91a6e5596093fed3f0fa17fa3e545c2cfbfcaf58271df",
+      "passed": true,
+      "receipt_sha256": "819b294cd992bb7de6927ae4080af68c037033805aeebb2ef02799cdef46c676",
+      "route": "ordinary",
+      "runs_per_cell": 3,
+      "source_head": "7dd504ba6d95595776b0c432c0ee7909213031ef",
+      "status": "passed",
+      "swapout_pages": 0,
+      "tag": "ladder-1024-32768-r3-lightning-ordinary-short-c4-20260929"
+    },
+    {
+      "cells": [
+        {
+          "cold_ttft_median_seconds": 17.012400124920532,
+          "context_tokens": 65536,
+          "decode_median_tokens_per_second_per_stream": 74.81312551490225,
+          "needle_quality": "4/6 needles",
+          "passed": false,
+          "prefill_median_tokens_per_second": 3852.131358232213,
+          "repetitions": 3,
+          "width": 1
+        },
+        {
+          "cold_ttft_median_seconds": null,
+          "context_tokens": 131072,
+          "decode_median_tokens_per_second_per_stream": null,
+          "needle_quality": null,
+          "passed": null,
+          "prefill_median_tokens_per_second": null,
+          "repetitions": 1,
+          "width": 1
+        }
+      ],
+      "host_caps": {
+        "cache_gib": 8,
+        "max_context": null
+      },
+      "ladder_sha256": "f9263c09642fbb034f6f7de79bb1dcd7d8d49a6b782717a68bfdaa9124953c4b",
+      "passed": null,
+      "receipt_sha256": "ebd28267c7878d1481ec88da455048edffa3dd113fb7769c041000b7494d6cff",
+      "route": "ordinary",
+      "runs_per_cell": 3,
+      "source_head": "5fe3a39b9e2a2e2a856a9c745bdd3406ff5ffe6e",
+      "status": "interrupted",
+      "swapout_pages": 0,
+      "tag": "ladder-65536-262144-r3-w1-lightning-ordinary-long-c8-20260929"
+    }
+  ],
   "model": "nemotron35-lightning",
   "schema": "mlx2.public-lightning-evidence.v1",
-  "smoke": {
-    "artifact_config_sha256": "a1b0135c0973322d188a836c86746e69ea07c02b241e1f26681bf5123345359b",
-    "cases": [
-      {
-        "case": "arithmetic",
-        "finish_reason": "stop",
-        "passed": true
+  "smokes": [
+    {
+      "artifact_config_sha256": "a1b0135c0973322d188a836c86746e69ea07c02b241e1f26681bf5123345359b",
+      "cases": [
+        {
+          "case": "arithmetic",
+          "finish_reason": "stop",
+          "passed": true
+        },
+        {
+          "case": "knowledge-default-sampling",
+          "finish_reason": "stop",
+          "passed": true
+        }
+      ],
+      "default_checks": {
+        "artifact_sampling_matches_documented_policy": true,
+        "healthy": true,
+        "qualification_is_candidate": true,
+        "served_model": true
       },
-      {
-        "case": "knowledge-default-sampling",
-        "finish_reason": "stop",
-        "passed": true
-      }
-    ],
-    "default_checks": {
-      "artifact_sampling_matches_documented_policy": true,
-      "healthy": true,
-      "qualification_is_candidate": true,
-      "served_model": true
+      "receipt_sha256": "f69dc87cc392b8accfd21de2abc01e9f5ca54d9585eaa976484a69c522812221",
+      "route": "ordinary",
+      "sampling_drift": {
+        "expected": {},
+        "observed": {}
+      },
+      "source_head": "bbfa0d3ce1b7d532606d62fb1069deb5d6ce5f06",
+      "status": "passed"
     },
-    "receipt_sha256": "f69dc87cc392b8accfd21de2abc01e9f5ca54d9585eaa976484a69c522812221",
-    "route": "ordinary",
-    "sampling_drift": {
-      "expected": {},
-      "observed": {}
-    },
-    "source_head": "bbfa0d3ce1b7d532606d62fb1069deb5d6ce5f06",
-    "status": "passed"
-  },
+    {
+      "artifact_config_sha256": "a1b0135c0973322d188a836c86746e69ea07c02b241e1f26681bf5123345359b",
+      "cases": [
+        {
+          "case": "arithmetic",
+          "finish_reason": "stop",
+          "passed": true
+        },
+        {
+          "case": "knowledge-default-sampling",
+          "finish_reason": "stop",
+          "passed": true
+        }
+      ],
+      "default_checks": {
+        "artifact_sampling_matches_documented_policy": true,
+        "healthy": true,
+        "qualification_is_candidate": true,
+        "served_model": true
+      },
+      "receipt_sha256": "3f2489141708bf0facabf407f45659dca5391b10c00af87b1f07d9161d448914",
+      "route": "ordinary",
+      "sampling_drift": {
+        "expected": {},
+        "observed": {}
+      },
+      "source_head": "d17430de4c1f57f4d3290dabe0147632b3a5da57",
+      "status": "passed"
+    }
+  ],
   "stress_attempts": [
     {
       "aggregate_generated_tokens_per_second": null,

@@ -22,11 +22,15 @@ def digest(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def stress(tag: str) -> dict:
+def stress(tag: str) -> dict | None:
     directory = RUN / f"stress-{tag}"
     receipt_path = directory / "stress.json"
+    if not receipt_path.is_file():
+        return None
     workload_path = directory / "20x20.json"
     receipt = read(receipt_path)
+    if receipt.get("status") == "running":
+        return None
     result = read(workload_path) if workload_path.is_file() else None
     rates = [row.get("tokens_per_second") for row in (result or {}).get("rounds_detail", [])]
     rates = [float(rate) for rate in rates if isinstance(rate, (float, int))]
@@ -55,34 +59,86 @@ def stress(tag: str) -> dict:
     }
 
 
-def main() -> None:
-    smoke_path = RUN / "smoke.json"
-    smoke = read(smoke_path)
-    safe_smoke = {
-        "source_head": smoke.get("source_head"),
-        "status": smoke.get("status"),
-        "route": smoke.get("route"),
-        "artifact_config_sha256": smoke.get("artifact_config_sha256"),
-        "default_checks": smoke.get("default_checks"),
-        "sampling_drift": smoke.get("sampling_drift"),
+def smoke(name: str) -> dict | None:
+    path = RUN / name
+    if not path.is_file():
+        return None
+    receipt = read(path)
+    if receipt.get("status") == "running":
+        return None
+    return {
+        "source_head": receipt.get("source_head"),
+        "status": receipt.get("status"),
+        "route": receipt.get("route"),
+        "artifact_config_sha256": receipt.get("artifact_config_sha256"),
+        "default_checks": receipt.get("default_checks"),
+        "sampling_drift": receipt.get("sampling_drift"),
         "cases": [
             {"case": row.get("case"), "passed": row.get("passed"),
              "finish_reason": row.get("finish_reason")}
-            for row in (smoke.get("smoke") or {}).get("cases", [])
+            for row in (receipt.get("smoke") or {}).get("cases", [])
         ],
-        "receipt_sha256": digest(smoke_path),
+        "receipt_sha256": digest(path),
     }
+
+
+def ladder(stem: str) -> dict | None:
+    receipt_path = RUN / f"{stem}-run.json"
+    result_path = RUN / f"{stem}.json"
+    if not receipt_path.is_file() or not result_path.is_file():
+        return None
+    receipt, result = read(receipt_path), read(result_path)
+    if receipt.get("status") == "running":
+        return None
+    cells = []
+    for cell in result.get("cells", []):
+        stats = cell.get("stats") or {}
+        cells.append({
+            "context_tokens": cell.get("requested_tokens"),
+            "width": cell.get("width"),
+            "passed": cell.get("passed"),
+            "repetitions": len(cell.get("runs") or []),
+            "needle_quality": cell.get("quality"),
+            "cold_ttft_median_seconds": (stats.get("ttft_seconds") or {}).get("median"),
+            "prefill_median_tokens_per_second": (
+                stats.get("prefill_tokens_per_second") or {}).get("median"),
+            "decode_median_tokens_per_second_per_stream": (
+                stats.get("decode_tokens_per_second") or {}).get("median"),
+        })
+    return {
+        "tag": stem,
+        "source_head": receipt.get("source_head"),
+        "status": receipt.get("status"),
+        "route": receipt.get("route"),
+        "host_caps": receipt.get("host_caps"),
+        "runs_per_cell": receipt.get("runs_per_cell"),
+        "swapout_pages": (receipt.get("swapouts") or {}).get("delta"),
+        "passed": result.get("passed"),
+        "cells": cells,
+        "receipt_sha256": digest(receipt_path),
+        "ladder_sha256": digest(result_path),
+    }
+
+
+def main() -> None:
     tags = (
         "lightning-ordinary-20260929",
         "lightning-ordinary-l8c4-20260929",
         "lightning-ordinary-l8c4-think4096-20260929",
+        "lightning-ordinary-latest-d174-20260929",
     )
     report = {
         "schema": "mlx2.public-lightning-evidence.v1",
         "model": "nemotron35-lightning",
         "host": "m5-max-128gb",
-        "smoke": safe_smoke,
-        "stress_attempts": [stress(tag) for tag in tags],
+        "smokes": [row for name in (
+            "smoke.json", "smoke-latest-d174-20260929.json",
+        ) if (row := smoke(name)) is not None],
+        "stress_attempts": [row for tag in tags if (row := stress(tag)) is not None],
+        "ladders": [row for stem in (
+            "ladder-1024-32768-r3-lightning-ordinary-short-c4-20260929",
+            "ladder-65536-262144-r3-w1-lightning-ordinary-long-c8-20260929",
+        ) if (row := ladder(stem)) is not None],
     }
     OUTPUT.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
     print(OUTPUT)
