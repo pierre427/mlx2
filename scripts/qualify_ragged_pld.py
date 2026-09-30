@@ -38,9 +38,11 @@ not ``pass``. Any PLD lane that differs from its reference is a
 ``counterexample``.
 
 Real runs need ``--i-own-the-gpu`` and explicit token prompts
-(``--prompt-ids`` JSON list of lists) or the deterministic constructor
-(``--construct``); the original text of the 2026-09-18 campaign prompts is
-not recoverable here, so this is not a reproduction of that campaign.
+(``--prompt-ids`` JSON object with prompts/caps) or the default deterministic
+constructor. The September 18 campaign's task constructor is retained in
+``qualification/runs/known-limits-20260918/sanity_20x20.py``; this driver
+does not reproduce it. September 26's warm-prefix parity receipt instead
+retains prompt hashes without the original raw prompts.
 ``--tiny`` runs a deterministic random Muse-class model on CPU.
 
   PYTHONPATH=src .venv/bin/python scripts/qualify_ragged_pld.py --tiny --out /tmp/pld.json
