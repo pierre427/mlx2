@@ -36,12 +36,14 @@ multimodal = [
     "opencv-python>=4.10",
     "mlx-vlm @ git+https://github.com/Blaizzy/mlx-vlm.git@67599f2e8ec31bf35cbb7b02794114f20844f0bb",
 ]
+radio = ["mlx>=0.32", "numpy>=2", "pillow>=10"]
 image-convert = ["gguf>=0.19,<0.20", "numpy>=2", "safetensors>=0.8", "torch>=2.4"]
 
 [project.scripts]
 mlx2-serve = "mlx2.server:main"
 mlx2 = "mlx2.cli:main"
 mlx2-diarize = "mlx2.diarize_cli:main"
+mlx2-radio = "mlx2.radio_cli:main"
 mlx2-top = "mlx2.top:main"
 
 [tool.setuptools.packages.find]
