@@ -334,3 +334,76 @@ def test_unexpected_yarn_attention_factor_fails_closed(tmp_path):
     rope["full_attention"]["attention_factor"] = 2.0
     with pytest.raises(ValueError, match="neither the vendor value"):
         inspect_artifact(_with_rope(tmp_path, rope))
+
+
+@pytest.mark.parametrize("score_func", ["sigmoid", "sqrtsoftplus"])
+def test_router_scores_with_the_configured_function(score_func):
+    """transformers #48119: moe_router_score_func selects sigmoid or
+    sqrt(softplus); from_dict used to drop the key and score with sigmoid."""
+    from types import SimpleNamespace
+
+    import mlx.core as mx
+    import numpy as np
+
+    from mlx2.runtime.models.laguna import LagunaTopKRouter
+
+    mx.set_default_device(mx.cpu)
+    args = SimpleNamespace(
+        num_experts_per_tok=2, norm_topk_prob=True, moe_router_use_sigmoid=True,
+        moe_router_logit_softcapping=0.0, hidden_size=4, num_experts=4,
+        moe_router_score_func=score_func,
+    )
+    router = LagunaTopKRouter(args)
+    logits = np.array([2.0, -1.0, 0.5, -3.0], dtype=np.float32)
+    router.proj.weight = mx.array(np.stack([np.full(4, v / 4, np.float32) for v in logits]))
+    router.e_score_correction_bias = mx.array([0.0, 2.0, 0.0, 0.0])
+    inds, weights = router(mx.ones((1, 4)))
+    score = (lambda z: 1 / (1 + np.exp(-z))) if score_func == "sigmoid" else (
+        lambda z: np.sqrt(np.log1p(np.exp(z))))
+    scores = score(logits)
+    chosen = np.argsort(-(scores + [0.0, 2.0, 0.0, 0.0]))[:2]
+    assert sorted(np.array(inds)[0].tolist()) == sorted(chosen.tolist())
+    expected = scores[np.array(inds)[0]] / scores[chosen].sum()
+    np.testing.assert_allclose(np.array(weights)[0], expected, rtol=1e-5)
+
+
+def test_unknown_router_score_function_fails_closed(tmp_path):
+    from mlx2.adapters.laguna_xs21 import inspect_artifact
+    from mlx2.runtime.models.laguna import ModelArgs
+
+    with pytest.raises(ValueError, match="moe_router_score_func"):
+        ModelArgs.from_dict({**laguna_config(), "moe_router_score_func": "softmax"})
+    artifact(tmp_path)
+    (tmp_path / "config.json").write_text(
+        json.dumps({**laguna_config(), "moe_router_score_func": "sqrtsoftplus"})
+    )
+    with pytest.raises(ValueError, match="only sigmoid"):
+        inspect_artifact(tmp_path)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "<tool_call>f\n<arg_key><arg_key>x</arg_key>\n<arg_value>hi</arg_value>\n</tool_call>",
+        "<tool_call>f\n<arg_key>x</arg_key></arg_key>\n<arg_value>hi</arg_value>\n</tool_call>",
+    ],
+)
+def test_repeated_arg_key_tags_fail_instead_of_naming_the_argument(text):
+    """vLLM #56093: a repeated <arg_key> named the argument "<arg_key>x"."""
+    with pytest.raises(ValueError):
+        parse_tool_call(text, _poolside_tools({"type": "string"}))
+    assert parse_tool_call(
+        "<tool_call>f\n<arg_key>x</arg_key>\n<arg_value>hi</arg_value>\n</tool_call>",
+        _poolside_tools({"type": "string"}),
+    ) == {"name": "f", "arguments": {"x": "hi"}}
+
+
+def test_unclosed_tool_call_runs_split_in_linear_time():
+    import time
+
+    text = "<tool_call>" * 20_000
+    started = time.perf_counter()
+    parse_tool_call(text)
+    assert time.perf_counter() - started < 0.2
+    two = "<tool_call>f\n</tool_call>junk<tool_call>g\n</tool_call><tool_call>h"
+    assert [c["name"] for c in parse_tool_call(two)] == ["f", "g"]

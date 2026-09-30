@@ -63,8 +63,16 @@ class ModelArgs(BaseModelArgs):
     moe_apply_router_weight_on_input: bool = False
     moe_router_logit_softcapping: float = 0.0
     moe_router_use_sigmoid: bool = True
+    # transformers #48119 / mlx-lm: "sigmoid" (every released checkpoint) or
+    # "sqrtsoftplus".  Read so an unknown value fails instead of being dropped
+    # by from_dict and scored as sigmoid.
+    moe_router_score_func: str = "sigmoid"
 
     def __post_init__(self):
+        if self.moe_router_score_func not in ("sigmoid", "sqrtsoftplus"):
+            raise ValueError(
+                f"unsupported Laguna moe_router_score_func {self.moe_router_score_func!r}"
+            )
         if self.gating is True:
             self.gating = "per-head"
         if self.gating not in (False, "per-head", "per-element"):
@@ -135,7 +143,8 @@ class LagunaTopKRouter(nn.Module):
         super().__init__()
         self.top_k = args.num_experts_per_tok
         self.norm_topk_prob = args.norm_topk_prob
-        self.use_sigmoid = args.moe_router_use_sigmoid
+        self.score_func = args.moe_router_score_func
+        self.use_sigmoid = args.moe_router_use_sigmoid and self.score_func == "sigmoid"
         self.softcap = args.moe_router_logit_softcapping
         self.proj = nn.Linear(args.hidden_size, args.num_experts, bias=False)
         self.e_score_correction_bias = mx.zeros((args.num_experts,))
@@ -181,7 +190,10 @@ class LagunaTopKRouter(nn.Module):
                 return result
             self.fused_fallbacks += 1
             self.last_fallback = admission.reason
-        scores = mx.sigmoid(logits) if self.use_sigmoid else mx.softmax(logits, axis=-1)
+        if self.score_func == "sqrtsoftplus":
+            scores = mx.sqrt(nn.softplus(logits))
+        else:
+            scores = mx.sigmoid(logits) if self.use_sigmoid else mx.softmax(logits, axis=-1)
         corrected = scores + self.e_score_correction_bias.astype(scores.dtype)
         inds = mx.stop_gradient(mx.argpartition(-corrected, kth=self.top_k - 1, axis=-1)[..., :self.top_k])
         weights = mx.take_along_axis(scores, inds, axis=-1)

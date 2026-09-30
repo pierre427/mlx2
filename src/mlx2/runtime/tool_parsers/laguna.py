@@ -112,6 +112,10 @@ def _parse_arguments(name, body, position, tools):
         if key_end < 0:
             raise ValueError("Malformed Laguna tool-call arguments")
         key = body[key_start:key_end].strip()
+        if "<" in key or ">" in key:
+            # A repeated <arg_key> (vLLM #56093) would otherwise name the
+            # argument "<arg_key>content".
+            raise ValueError("Malformed Laguna tool-call argument name")
         position = _SEPARATOR.match(body, key_end + len(_ARG_KEY_CLOSE)).end()
         if not body.startswith(_ARG_VALUE_OPEN, position):
             raise ValueError("Malformed Laguna tool-call arguments")
@@ -147,6 +151,24 @@ def _parse_arguments(name, body, position, tools):
         position = end + len(_ARG_VALUE_CLOSE)
 
 
+def _tool_call_bodies(text):
+    """What ``re.findall(r"<tool_call>(.*?)</tool_call>")`` finds, in linear time.
+
+    The regex rescans the rest of the text from every unclosed opener, so a
+    run of degenerate output repeating ``<tool_call>`` took quadratic time
+    (10.7 s at 20k repeats; vLLM #54678 is the same class).
+    """
+    open_tag, close_tag = "<tool_call>", "</tool_call>"
+    bodies, position = [], 0
+    while (start := text.find(open_tag, position)) >= 0:
+        end = text.find(close_tag, start + len(open_tag))
+        if end < 0:
+            break
+        bodies.append(text[start + len(open_tag) : end])
+        position = end + len(close_tag)
+    return bodies
+
+
 def parse_tool_call(text, tools=None):
     """Parse one or more complete ``<tool_call>`` blocks.
 
@@ -157,7 +179,7 @@ def parse_tool_call(text, tools=None):
     """
     bodies = None
     if text.lstrip().startswith("<tool_call>"):
-        bodies = re.findall(r"<tool_call>(.*?)</tool_call>", text, re.DOTALL)
+        bodies = _tool_call_bodies(text)
     if not bodies:
         bodies = [text]
     calls = []

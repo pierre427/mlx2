@@ -1,0 +1,20 @@
+{
+  "source_repository": "local read-only mlx-lm-unified checkout",
+  "source_revision": "1104ced19ed98800bdaf4ebcdca14bbdeb597c23",
+  "source_paths": [
+    "mlx_lm/models/laguna.py"
+  ],
+  "license": "MIT",
+  "notice": "provenance/laguna-xs21.NOTICE",
+  "destination_paths": [
+    "src/mlx2/runtime/models/laguna.py",
+    "src/mlx2/adapters/laguna_s21.py"
+  ],
+  "modifications": [
+    "Extended the existing parameterized Laguna tensor model with separate S APCv2 layout and the vendor bf16 router/expert weight remapping.",
+    "Added strict CPU-only S topology and indexed-shard inspection for 4-bit and bf16 artifacts.",
+    "Restricted the S route to ordinary decode, with no draft or native MTP selection.",
+    "admit only sigmoid Laguna router scoring until sqrtsoftplus is qualified (transformers #48119)"
+  ],
+  "validation": "CPU-only metadata inspection and guarded tests; no MLX import, model load, GPU use, or serving qualification. tests/test_laguna_xs21_port.py::test_unknown_router_score_function_fails_closed"
+}

@@ -19,13 +19,15 @@
     "added original mlx2 Metal kernels for the exact Laguna q8 top-8 down-reduction and sigmoid correction-bias router geometries",
     "kept both kernels behind fail-closed candidate gates with engagement counters until exact qualification",
     "kept string-typed and undecodable argument values byte-exact (the template writes them raw); only decoded values shed surrounding whitespace (SGLang #41384)",
-    "restore the full-attention YaRN attention_factor that conversions of the 2026-07-02 revision carry as 1.0 to poolside's 2026-07-14 value 0.1*ln(32)+1 (Laguna-XS-2.1@5e82aa8f74), recorded as config_corrections and folded into the fingerprint; any other value fails closed"
+    "restore the full-attention YaRN attention_factor that conversions of the 2026-07-02 revision carry as 1.0 to poolside's 2026-07-14 value 0.1*ln(32)+1 (Laguna-XS-2.1@5e82aa8f74), recorded as config_corrections and folded into the fingerprint; any other value fails closed",
+    "read moe_router_score_func (sigmoid or sqrtsoftplus, transformers #48119; adapters admit only sigmoid until qualified); parser rejects markup in an argument name (vLLM #56093) and splits tool-call blocks in linear time"
   ],
   "validation": [
     "tests/test_laguna_xs21_port.py",
     "tests/test_laguna_fused_moe.py",
     "exact local AtomicChat/Laguna-XS-2.1-MLX-8bit metadata inspection",
     "tests/test_laguna_xs21_port.py::test_poolside_string_values_keep_their_whitespace",
-    "tests/test_laguna_xs21_port.py YaRN correction cases; inspection of the AtomicChat 8-bit pack (CPU)"
+    "tests/test_laguna_xs21_port.py YaRN correction cases; inspection of the AtomicChat 8-bit pack (CPU)",
+    "tests/test_laguna_xs21_port.py router score-function, repeated arg_key and linear-split cases (CPU)"
   ]
 }
