@@ -91,3 +91,23 @@ def test_bounded_proposal_preserves_causal_reference_and_cache():
     assert float(mx.max(mx.abs(model(tokens)[0] - historical(tokens)[0])).item()) == 0
     with pytest.raises(ValueError, match="prefix-conditioned"):
         historical.diffusion_propose(cache)
+
+
+@pytest.mark.parametrize("damage", ["missing_layer", "offset", "boundary", "history"])
+def test_incomplete_prefix_rejected_before_diffusion(damage):
+    model = Model(replace(Config.smoke(), diffusion_conditioning="prefix"))
+    model.eval()
+    _, cache = model.prefill(mx.array([[1, 2, 3, 4]]))
+    if damage == "missing_layer":
+        del cache.self_kv[0]
+    elif damage == "offset":
+        k, v, start = cache.cross_kv[0][0]
+        cache.cross_kv[0][0] = k, v, start + 1
+    elif damage == "boundary":
+        cache.boundary = cache.boundary[:, :, :1]
+    else:
+        cache.ple_history = None
+    before = (cache.length, cache.self_layer_calls, cache.cross_layer_calls)
+    with pytest.raises(ValueError, match="endpoint state"):
+        model.diffusion_propose(cache)
+    assert before == (cache.length, cache.self_layer_calls, cache.cross_layer_calls)

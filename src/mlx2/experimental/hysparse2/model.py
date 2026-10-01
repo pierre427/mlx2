@@ -699,6 +699,7 @@ class Model(nn.Module):
             raise ValueError("proposal count/steps exceed bounded limits")
         if cache.owner is not self._cache_owner or cache.boundary is None or canonical_json(cache.apcv2_identity) != canonical_json(self.new_cache(cache.batch).apcv2_identity):
             raise ValueError("proposal cache state or revision differs")
+        self.validate_cache_state(cache)
         if cache.length + count > self.config.max_context:
             raise ValueError("proposal exceeds context limit")
         teacher = self.norm(mx.mean(cache.boundary, axis=-2))

@@ -88,6 +88,26 @@ def main():
             except ValueError as exc:
                 assert "bounded limits" in str(exc)
         report["invalid_budget_cases_rejected"] = 4
+        report["invalid_prefix_cases_rejected"] = []
+        for damage in ("missing_layer", "offset", "boundary", "history"):
+            _, bad = model.prefill(tokens)
+            if damage == "missing_layer":
+                del bad.self_kv[0]
+            elif damage == "offset":
+                k, v, offset = bad.cross_kv[0][0]
+                bad.cross_kv[0][0] = k, v, offset + 1
+            elif damage == "boundary":
+                bad.boundary = bad.boundary[:, :, :1]
+            else:
+                bad.ple_history = None
+            before = (bad.length, bad.self_layer_calls, bad.cross_layer_calls)
+            try:
+                model.diffusion_propose(bad, count=8, steps=3)
+                raise AssertionError("incomplete diffusion prefix accepted")
+            except ValueError as exc:
+                assert "endpoint state" in str(exc)
+            assert before == (bad.length, bad.self_layer_calls, bad.cross_layer_calls)
+            report["invalid_prefix_cases_rejected"].append(damage)
         report["peak_memory_bytes"] = mx.get_peak_memory()
         report["source_hashes"] = {str(path): file_hash(path) for path in (Path(__file__), Path(model_module.__file__), Path(memory_module.__file__))}
         report["completed"] = True
