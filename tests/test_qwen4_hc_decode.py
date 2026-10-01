@@ -178,9 +178,10 @@ def test_8bit_alignment_follows_mlx_qmv_fast_block():
 
 
 @pytest.fixture
-def pair_reference(monkeypatch):
+def pair_reference(monkeypatch, served_exp_forms_match):
     """Replace only the compiled Metal pair by the composed body: the plan,
-    admission, reshapes and counters around it run for real on CPU."""
+    admission, reshapes and counters around it run for real on CPU (the
+    served-exp gates, which need Metal to probe, are taken as matching)."""
 
     def compiled_pair(plan, rows):
         def pair(flat, *_weights, module):
