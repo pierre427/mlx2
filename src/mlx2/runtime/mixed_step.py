@@ -11,7 +11,28 @@ therefore sized so prompt rows plus decode rows fill whole tiles.
 
 from __future__ import annotations
 
+import os
+
 MATMUL_ROW_TILE = 64
+
+
+def mixed_prefill_decode_enabled() -> bool:
+    """MLX2_MIXED_PREFILL_DECODE=1 lets the ordinary scheduler fuse a prompt
+    slice and the decode lanes' step into one forward.  Default off until a
+    route qualifies it (outputs are not bit-identical to separate forwards:
+    the decode rows go through prefill-width matmul kernels)."""
+    return os.environ.get("MLX2_MIXED_PREFILL_DECODE", "0").strip() == "1"
+
+
+def model_supports_mixed_forward(model) -> bool:
+    """A model opts in by exposing ``mixed_forward`` and ``logits`` and no
+    special prefill entry the mixed path would bypass."""
+    return (
+        callable(getattr(model, "mixed_forward", None))
+        and callable(getattr(model, "logits", None))
+        and getattr(model, "prefill_forward", None) is None
+        and getattr(model, "prefill_prefetch_hook", None) is None
+    )
 
 
 def aligned_prompt_rows(budget_rows: int, decode_rows: int, *, tile: int = MATMUL_ROW_TILE) -> int:
@@ -35,4 +56,9 @@ def aligned_prompt_rows(budget_rows: int, decode_rows: int, *, tile: int = MATMU
     return max(0, packed - decode_rows)
 
 
-__all__ = ["MATMUL_ROW_TILE", "aligned_prompt_rows"]
+__all__ = [
+    "MATMUL_ROW_TILE",
+    "aligned_prompt_rows",
+    "mixed_prefill_decode_enabled",
+    "model_supports_mixed_forward",
+]

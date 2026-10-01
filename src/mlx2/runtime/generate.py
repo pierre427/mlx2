@@ -28,6 +28,11 @@ from .models.cache import (
 from .sample_utils import LaneRNG, draw_key
 from .state_boundaries import BoundaryPurpose, StateBoundary
 from .multi_lora import bind_lora_rows, clear_lora_rows
+from .mixed_step import (
+    aligned_prompt_rows,
+    mixed_prefill_decode_enabled,
+    model_supports_mixed_forward,
+)
 
 DEFAULT_MAX_TOKENS = 100
 MTP_STARVED_BOUNDARIES_BEFORE_PLAIN = 8
@@ -613,12 +618,16 @@ class PromptProcessingBatch:
         self.persistent_inputs = [self.persistent_inputs[idx] for idx in keep]
         self._restart_prompt_rollback()
 
-    def prompt(self, tokens: List[List[int]]):
+    def prompt(self, tokens: List[List[int]], *, forward_fn=None):
         """
         Process prompt tokens through the model.
 
         Args:
             tokens: List of token sequences to process.
+            forward_fn: optional ``(tokens, cache) -> None`` that runs the
+                chunk's forward in place of the model (the mixed
+                prefill-and-decode step).  Only a single chunk may use it;
+                everything around the forward is unchanged.
         """
         if len(self.uids) != len(tokens):
             raise ValueError("The batch length doesn't match the number of inputs")
@@ -660,12 +669,17 @@ class PromptProcessingBatch:
             kwargs = media_inputs[0] if media_inputs and processed == 0 else {}
             # Concurrent multi-LoRA: publish per-row adapter slots for exactly
             # this forward (no-op unless a manager is attached to the model).
-            lora_rows = bind_lora_rows(self.model, self.uids)
-            try:
-                forward = getattr(self.model, "prefill_forward", self.model)
-                forward(tokens[:, :n_to_process], cache=self.prompt_cache, **kwargs)
-            finally:
-                clear_lora_rows(lora_rows)
+            if forward_fn is not None:
+                if kwargs or processed or n_to_process < tokens.shape[1]:
+                    raise RuntimeError("a mixed forward covers exactly one plain chunk")
+                forward_fn(tokens[:, :n_to_process], self.prompt_cache)
+            else:
+                lora_rows = bind_lora_rows(self.model, self.uids)
+                try:
+                    forward = getattr(self.model, "prefill_forward", self.model)
+                    forward(tokens[:, :n_to_process], cache=self.prompt_cache, **kwargs)
+                finally:
+                    clear_lora_rows(lora_rows)
             if kwargs:
                 self.prefill_inputs[0] = None
             if prefill_prefetch is not None and tokens.shape[1] > n_to_process:
@@ -844,6 +858,9 @@ class GenerationBatch:
         self._num_tokens = [0] * len(self.uids)
         self._matcher_states = [m.make_state() for m in stop_matchers]
         self._lane_failures = []
+        # One prompt segment ``(tokens, cache)`` to fuse into the next step's
+        # forward; consumed (set to None) by ``_step`` when it rides along.
+        self._mixed_segment = None
         if self.uids:
             self._step(prompt_tail=True)
 
@@ -1003,11 +1020,30 @@ class GenerationBatch:
         if steer is not None:
             taps.steer = steer
         lora_rows = bind_lora_rows(self.model, self.uids)
+        mixed = getattr(self, "_mixed_segment", None)
+        mixed_eval = None
         try:
             kwargs = self._persistent_step_inputs()
-            forward = (getattr(self.model, "prefill_forward", self.model)
-                       if prompt_tail else self.model)
-            logits = forward(inputs[:, None], cache=self.prompt_cache, **kwargs)
+            if (
+                mixed is not None
+                and not prompt_tail
+                and not kwargs
+                and steer is None
+                and lora_rows is None
+            ):
+                # The prompt slice and these decode rows share one forward:
+                # every projection reads its weights once for both.
+                (prompt_tokens, prompt_cache) = mixed
+                self._mixed_segment = None
+                (_, decode_hidden) = self.model.mixed_forward(
+                    [(prompt_tokens, prompt_cache), (inputs[:, None], self.prompt_cache)]
+                )
+                logits = self.model.logits(decode_hidden)
+                mixed_eval = [c.state for c in prompt_cache]
+            else:
+                forward = (getattr(self.model, "prefill_forward", self.model)
+                           if prompt_tail else self.model)
+                logits = forward(inputs[:, None], cache=self.prompt_cache, **kwargs)
         finally:
             clear_lora_rows(lora_rows)
             if steer is not None:
@@ -1072,6 +1108,9 @@ class GenerationBatch:
             self._next_finite = None
         if self._decode_steps % CACHE_STATE_EVAL_INTERVAL == 0:
             eval_targets.append([c.state for c in self.prompt_cache])
+        if mixed_eval is not None:
+            # The prompt segment's cache updates belong to the same dispatch.
+            eval_targets.append(mixed_eval)
         mx.async_eval(*eval_targets)
         trace_t2 = time.perf_counter() if STEP_TRACE is not None else None
         if validity == "deferred":
@@ -5883,9 +5922,131 @@ class BatchGenerator:
             )
         return prompt_responses
 
+    def _mixed_round_ready(self):
+        """Whether this round can fuse the prompt slice into the decode step.
+
+        Narrow on purpose: one admitted plain-text prompt mid-prefill beside
+        ordinary decode lanes, on a model that opts in.  Admission, media,
+        persistent lanes, multi-row prompt batches and interior checkpoint
+        boundaries keep the ordinary round.
+        """
+        if not mixed_prefill_decode_enabled():
+            return False
+        if len(self._generation_batch) == 0 or len(self._prompt_batch) != 1:
+            return False
+        if len(self._currently_processing) != 1:
+            return False
+        if getattr(self._generation_batch, "has_persistent_inputs", False):
+            return False
+        if getattr(self._prompt_batch, "has_persistent_inputs", False):
+            return False
+        if not model_supports_mixed_forward(self.model):
+            return False
+        if self._should_defer_prefill():
+            return False
+        seq = self._currently_processing[0]
+        if len(seq) > 6 and seq[6] is not None:
+            return False
+        if any(value is not None for value in getattr(self._prompt_batch, "prefill_inputs", ())):
+            return False
+        segments = seq[0]
+        # The final prompt token is always its own segment (``insert``) and
+        # goes to generation on promotion, as in ``_has_prefill_work``.
+        return bool(segments) and not (len(segments) == 1 and len(segments[0]) == 1)
+
+    def _next_mixed(self):
+        """One forward for a prompt slice and every decode lane's next token.
+
+        The slice is sized for the decode-fairness stall target (the decode
+        lanes now wait one such forward per token instead of a slice plus a
+        debt of decode steps) and trimmed so prompt plus decode rows fill
+        whole matmul tiles.  No fairness debt accrues: the decode lanes
+        advance in every mixed forward.  Returns None when the slice would be
+        empty, leaving the round to the ordinary path.
+        """
+        gen = self._generation_batch
+        seq = self._currently_processing[0]
+        uid = self._prompt_batch.uids[0]
+        segments = seq[0]
+        budget = self._fairness().stall_bound(self.prefill_step_size)
+        n = aligned_prompt_rows(min(budget, self.prefill_step_size), len(gen))
+        n = min(n, self.prefill_step_size, len(segments[0]))
+        covered = int(seq[4] or 0) + int(seq[1])
+        next_checkpoint = self._next_interior_checkpoint(uid, covered)
+        if next_checkpoint is not None:
+            n = min(n, next_checkpoint - covered)
+        if n <= 0:
+            return None
+        response = PromptProcessingBatch.Response(uid, 0, False, False)
+        chunk = segments[0][:n]
+        self._record_prefill_chunk(uid, len(chunk))
+        segments[0] = segments[0][n:]
+        if len(segments[0]) == 0:
+            segments.pop(0)
+            response.end_of_segment = True
+        seq[1] += len(chunk)
+        response.progress = (seq[1], seq[2])
+        self._prompt_tokens_counter += len(chunk)
+        self.scheduler_stats["prefill_rounds"] += 1
+        self.scheduler_stats["mixed_rounds"] = self.scheduler_stats.get("mixed_rounds", 0) + 1
+        self.scheduler_stats["mixed_prompt_tokens"] = (
+            self.scheduler_stats.get("mixed_prompt_tokens", 0) + len(chunk)
+        )
+        self.scheduler_stats["mixed_decode_rows"] = (
+            self.scheduler_stats.get("mixed_decode_rows", 0) + len(gen)
+        )
+        captured = {}
+
+        def forward_fn(tokens, cache):
+            gen._mixed_segment = (tokens, cache)
+            try:
+                captured["responses"] = gen.next()
+            finally:
+                declined = gen._mixed_segment is not None
+                gen._mixed_segment = None
+            if declined:
+                # The step could not carry the segment (every lane filtered,
+                # or a lane needs steering, LoRA rows or persistent inputs):
+                # run the slice's own forward, as an ordinary round would.
+                self.scheduler_stats["mixed_declined_rounds"] = (
+                    self.scheduler_stats.get("mixed_declined_rounds", 0) + 1
+                )
+                forward = getattr(self.model, "prefill_forward", self.model)
+                forward(tokens, cache=cache)
+
+        tic = time.perf_counter()
+        self._prompt_batch.decode_active = True
+        self._prompt_batch.prompt([chunk], forward_fn=forward_fn)
+        toc = time.perf_counter()
+        self._capture_plain_interior_checkpoints()
+        generation_responses = captured.get("responses", [])
+        self._gen_tokens_counter += len(generation_responses)
+        previous_steps = self._steps_counter
+        self._steps_counter += 1
+        reclaim_interval = allocator_reclaim_step_interval()
+        if reclaim_interval and _crossed_counter_interval(
+            previous_steps, self._steps_counter, reclaim_interval
+        ):
+            mx.clear_cache()
+        self._last_decode_duration_ms = (toc - tic) * 1000
+        if self._last_decode_completed_s is not None:
+            self._last_decode_interval_ms = (toc - self._last_decode_completed_s) * 1000
+        self._last_decode_completed_s = toc
+        if self.adaptive_prefill:
+            self._mark_prefill_progress(toc)
+        self._prompt_time_counter += toc - tic
+        # Throughput feeds the stall bound; a mixed forward owes no debt.
+        self._fairness().observe_prefill(len(chunk), toc - tic, contended=False)
+        self._sync_decode_fairness_stats()
+        return ([response], generation_responses)
+
     def _next(self):
         if self.self_mtp is not None:
             return self._next_mtp()
+        if self._mixed_round_ready():
+            mixed = self._next_mixed()
+            if mixed is not None:
+                return mixed
         generation_responses = []
         prompt_responses = []
         if len(self._generation_batch) > 0:
