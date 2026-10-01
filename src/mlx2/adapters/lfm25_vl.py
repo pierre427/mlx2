@@ -255,16 +255,26 @@ def load_candidate_dspark(model_path: str | Path, *, target_artifact: dict, targ
 
 def generate_candidate_dspark(target_path: str | Path, draft_path: str | Path,
                               prompt: str, *, image: str | Path | None = None,
-                              max_tokens: int = 128) -> dict:
+                              max_tokens: int = 128,
+                              verification_width: int = 10) -> dict:
     """Run an explicit offline DSpark candidate with target verification.
 
     This is separate from mlx2's serving route; acceptance and speed need
     source-bound evaluation before speculative selection can be considered.
+
+    ``verification_width`` is the anchor plus at most width - 1 proposals per
+    round; the pinned checkpoint was trained for nine, so 2..10 is accepted.
+    Decoding is greedy (temperature 0). ``evaluation_contract`` records only
+    the REQUESTED configuration: it is not the observed effective width,
+    acceptance or engagement, confidence-head use, state parity or speed, and
+    the final round may verify fewer tokens when max_tokens runs out.
     """
     if not isinstance(prompt, str) or not prompt.strip():
         raise ValueError("DSpark candidate prompt must be nonempty")
     if type(max_tokens) is not int or not 1 <= max_tokens <= 512:
         raise ValueError("DSpark candidate max_tokens must be 1..512")
+    if type(verification_width) is not int or not 2 <= verification_width <= 10:
+        raise ValueError("DSpark candidate verification_width must be 2..10")
     if image is not None and not Path(image).expanduser().is_file():
         raise ValueError("DSpark candidate image file is missing")
     target = inspect_artifact(target_path)
@@ -283,10 +293,17 @@ def generate_candidate_dspark(target_path: str | Path, draft_path: str | Path,
     result = generate(model, processor, formatted,
                       image=str(image) if image is not None else None,
                       max_tokens=max_tokens, verbose=False, draft_model=draft,
-                      draft_kind="dflash", draft_block_size=10)
+                      draft_kind="dflash", draft_block_size=verification_width,
+                      temperature=0.0)
     return {"text": result.text, "finish_reason": result.finish_reason,
             "target_fingerprint": target["fingerprint"],
             "draft_fingerprint": record["fingerprint"],
+            "evaluation_contract": {
+                "scope": "requested", "source_revision": SOURCE_REVISION,
+                "requested_verification_width": verification_width,
+                "maximum_proposals_per_round": verification_width - 1,
+                "temperature": 0.0, "max_tokens": max_tokens,
+            },
             "qualified": False, "selected": False}
 
 
