@@ -434,6 +434,45 @@ def test_failed_checkpoint_load_preserves_live_state(tmp_path, monkeypatch, fail
     model.decode(mx.array([[5]]), cache)
 
 
+@pytest.mark.parametrize("mismatch", ["values", "coverage", "shape", "dtype"])
+def test_checkpoint_ple_sidecar_must_match_restored_tensors(tmp_path, mismatch):
+    from mlx2.experimental.hysparse2.train import file_hash
+    source = Model(Config.smoke())
+    checkpoint = save_checkpoint(tmp_path, source, optimizers.Adam(1e-3), 0, {}, mode="model")
+    model = Model(source.config)
+    model.eval()
+    before = dict(tree_flatten(model.parameters()))
+    owner, epoch, digest = model._cache_owner, model._parameter_epoch, model.ple_sidecar_digest
+    if mismatch == "values":
+        path = checkpoint / "model.safetensors"
+        values = mx.load(str(path))
+        values["semantic_ple.value.weight"] = values["semantic_ple.value.weight"] + 0.1
+        mx.eval(values)
+        mx.save_safetensors(str(path), values)
+    else:
+        path = checkpoint / "semantic-ple.safetensors"
+        values = mx.load(str(path))
+        key = "semantic_ple.value.weight"
+        if mismatch == "coverage":
+            del values[key]
+        elif mismatch == "shape":
+            values[key] = values[key][:1]
+        else:
+            values[key] = values[key].astype(mx.float16)
+        mx.eval(values)
+        mx.save_safetensors(str(path), values)
+        metadata = json.loads((checkpoint / "state.json").read_text())
+        sidecar = metadata["permanent_sidecar"]
+        sidecar["sha256"] = file_hash(path)
+        sidecar["apcv2_identity"] = source.config.apcv2_identity(ple_sidecar_digest=sidecar["sha256"])
+        (checkpoint / "state.json").write_text(json.dumps(metadata))
+    with pytest.raises(ValueError, match="PLE sidecar tensors"):
+        initialize_from_checkpoint(checkpoint, model)
+    assert model._cache_owner is owner and model._parameter_epoch is epoch
+    assert model.ple_sidecar_digest == digest
+    assert all(float(mx.max(mx.abs(dict(tree_flatten(model.parameters()))[k] - v)).item()) == 0 for k, v in before.items())
+
+
 def test_model_only_checkpoint_is_explicitly_not_an_exact_resume(tmp_path):
     c = Config.smoke()
     model = Model(c)

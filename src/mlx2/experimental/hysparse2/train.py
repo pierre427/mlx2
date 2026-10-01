@@ -173,6 +173,19 @@ def _load_model_state(path, model):
     try:
         model.load_weights(str(path / "model.safetensors"), strict=True)
         mx.eval(model.parameters())
+        if model.config.semantic_ple_rows:
+            restored_ple = {
+                name: value for name, value in tree_flatten(model.parameters())
+                if name.startswith("semantic_ple.")
+            }
+            sidecar_ple = mx.load(str(sidecar_path))
+            if set(restored_ple) != set(sidecar_ple) or any(
+                restored_ple[name].shape != value.shape
+                or restored_ple[name].dtype != value.dtype
+                or not bool(mx.all(restored_ple[name] == value).item())
+                for name, value in sidecar_ple.items()
+            ):
+                raise ValueError("checkpoint PLE sidecar tensors differ from model weights")
     except BaseException:
         model.update(tree_unflatten(previous))
         model._cache_owner, model._parameter_epoch = owner, epoch
