@@ -124,6 +124,8 @@ def main():
                              if label == "gathered" and candidate is not None else None)
                     if stats is not None:
                         stats["evaluations"] = 0
+                    print(json.dumps({"event": "arm_start", "context": length,
+                                      "arm": label}), flush=True)
                     prompt = mx.array(values[:length][None])
                     mx.eval(prompt)
                     mx.synchronize()
@@ -133,6 +135,9 @@ def main():
                     mx.synchronize()
                     prefill = time.perf_counter() - start
                     prefill_evaluations = stats["evaluations"] if stats is not None else None
+                    print(json.dumps({"event": "prefill_complete", "context": length,
+                                      "arm": label, "seconds": prefill,
+                                      "periodic_materializations": prefill_evaluations}), flush=True)
                     generated = []
                     start = time.perf_counter()
                     for _ in range(args.decode_tokens):
