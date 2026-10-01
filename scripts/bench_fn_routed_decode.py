@@ -46,6 +46,7 @@ def main():
                     help="quality: prompt offsets; speed: with --prompt-offsets, per-rep prompts")
     ap.add_argument("--prompt-offsets", type=int, nargs="+", default=None,
                     help="speed: rep r uses the prompt at offset[r %% n] (content-varied reps)")
+    ap.add_argument("--cache-limit-gib", type=int, default=8)
     ap.add_argument("--out", required=True)
     ap.add_argument("--i-own-the-gpu", action="store_true")
     a = ap.parse_args()
@@ -59,7 +60,7 @@ def main():
     adapter = resolve_adapter(a.model, mtp=True)(a.model)
     model = adapter.model
     mx.eval(model.parameters())
-    mx.set_cache_limit(8 << 30)
+    mx.set_cache_limit(a.cache_limit_gib << 30)
     blocks = [m for _, m in model.named_modules() if hasattr(m, "set_moe_routed_decode_mode")]
     print("LOADED", len(blocks), "moe blocks", f"active={mx.get_active_memory() / 2**30:.1f}GiB", flush=True)
     all_ids = list(adapter.tokenizer.encode(open(a.prompt_file).read()))
@@ -205,7 +206,9 @@ def main():
         first_tokens = {}
         for rep in range(a.reps):
             order = a.arms[rep % len(a.arms):] + a.arms[: rep % len(a.arms)]
-            if rep % 2:
+            if rep % 2 and len(a.arms) > 2:
+                # With two arms the rotation alone alternates AB/BA; reversing
+                # too would restore AB on every rep (position bias).
                 order = order[::-1]
             for arm in order:
                 configure(arm)
