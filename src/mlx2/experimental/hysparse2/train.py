@@ -409,6 +409,12 @@ def train(args, c):
         run["initialized_from"] = initialize_from_checkpoint(
             args.initialize_from, model
         )
+    if args.resume is not None:
+        # Origin provenance is already bound into the resumed checkpoint. It
+        # must survive continuation without reloading the original warm start.
+        saved_run = json.loads((args.resume / "state.json").read_text())["run"]
+        if "initialized_from" in saved_run:
+            run["initialized_from"] = saved_run["initialized_from"]
     step = load_checkpoint(args.resume, model, optimizer, run) if args.resume else 0
     fn = nn.value_and_grad(
         model,

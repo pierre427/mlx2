@@ -668,3 +668,24 @@ def test_scheduled_optimizer_checkpoint_is_not_exactly_serializable(tmp_path):
     with pytest.raises(ValueError, match="schedules"):
         save_checkpoint(tmp_path / "unsupported", model, optimizer, 0, {})
     assert not (tmp_path / "unsupported").exists()
+
+
+def test_training_cli_warm_start_can_resume_exactly(tmp_path):
+    from mlx2.experimental.hysparse2.train import main
+    base = Model(Config.smoke())
+    initial = save_checkpoint(tmp_path / "base", base, optimizers.AdamW(1e-4), 0, {}, mode="model")
+    common = ["--smoke", "--device", "cpu", "--sequence", "8", "--steps", "1"]
+    assert main(common + ["--initialize-from", str(initial), "--output", str(tmp_path / "first")]) == 0
+    first = tmp_path / "first" / "step-00000001"
+    assert main(common + ["--resume", str(first), "--output", str(tmp_path / "resumed")]) == 0
+    before = json.loads((first / "state.json").read_text())
+    after = json.loads((tmp_path / "resumed" / "step-00000002" / "state.json").read_text())
+    assert before["run"] == after["run"]
+
+    assert main(common + ["--steps", "2", "--initialize-from", str(initial),
+                          "--output", str(tmp_path / "continuous")]) == 0
+    for name in ("model.safetensors", "optimizer.safetensors"):
+        continuous = mx.load(str(tmp_path / "continuous" / "step-00000002" / name))
+        resumed = mx.load(str(tmp_path / "resumed" / "step-00000002" / name))
+        assert continuous.keys() == resumed.keys()
+        assert all(bool(mx.all(v == resumed[k]).item()) for k, v in continuous.items())
