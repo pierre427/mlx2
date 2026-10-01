@@ -170,14 +170,14 @@ def test_batch_decode_window_matches_one_token_rows(monkeypatch, ref_kernels, to
     try:
         block.set_moe_window_consumers({"batch_decode"})
         block.set_moe_topk_mode(topk)
-        x = _x(1, (4, 1, H))
+        x = _x(1, (3, 1, H))
         got = block(x)
         want = _one_token_rows(block, x)
     finally:
         W.set_window_shared(True)
-    assert got.shape == (4, 1, H)
-    assert mx.array_equal(got.reshape(4, H), want).item()
-    assert block.moe_window_calls["batch_decode"] == 1 and block.moe_window_rows == 4
+    assert got.shape == (3, 1, H)
+    assert mx.array_equal(got.reshape(3, H), want).item()
+    assert block.moe_window_calls["batch_decode"] == 1 and block.moe_window_rows == 3
     assert block.moe_window_shared_calls == int(shared)
     assert ref_kernels["shared" if shared else "routed"] == 1
     if topk != "off":

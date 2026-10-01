@@ -100,9 +100,12 @@ def window_shared_from_env() -> bool:
 
 
 # Live switches (an A/B rotates them in process). Rows above this take the
-# routing launch instead of the in-kernel fold (omlx #4106 measured the fold
-# losing from four rows on; ours is measured in the w2a evidence).
-_TOPK_FOLD_MAX_ROWS = 17
+# routing launch instead of the in-kernel fold: every gate+up simdgroup
+# recomputes its row's routing, so the fold's ALU grows with the rows while
+# the launch it saves does not. Launch-chain microbench on real layers (M5
+# Max, w2a evidence): the fold beats the launch at 1-3 rows, ties at 4 and
+# loses at 8 (+5%) and 16 (+11%); omlx #4106 also stops at 3.
+_TOPK_FOLD_MAX_ROWS = 3
 _WINDOW_SHARED = window_shared_from_env()
 
 
