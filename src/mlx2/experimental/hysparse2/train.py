@@ -103,6 +103,7 @@ def save_checkpoint(root, model, optimizer, step, run, mode="full"):
             "capsule_binding": model.capsule_binding,
             "optimizer_state_saved": mode == "full",
             "exact_training_resume": mode == "full",
+            "optimizer_type": type(optimizer).__module__ + "." + type(optimizer).__qualname__ if mode == "full" else None,
         }
         (temporary / "state.json").write_text(json.dumps(metadata, indent=2) + "\n")
         temporary.rename(target)
@@ -212,6 +213,35 @@ def initialize_from_checkpoint(path, model):
     }
 
 
+def _validate_optimizer_state(state, model, optimizer, metadata):
+    import mlx.core as mx
+    from mlx import optimizers
+    from mlx.utils import tree_flatten
+
+    identity = type(optimizer).__module__ + "." + type(optimizer).__qualname__
+    if type(optimizer) not in (optimizers.Adam, optimizers.AdamW) or metadata.get("optimizer_type", identity) != identity:
+        raise ValueError("optimizer state requires the matching supported Adam optimizer")
+    flat = dict(tree_flatten(state))
+    step = metadata.get("step")
+    counter, rate = flat.get("step"), flat.get("learning_rate")
+    if (type(step) is not int or step < 0 or not isinstance(counter, mx.array)
+            or counter.shape != () or not mx.issubdtype(counter.dtype, mx.integer)
+            or int(counter.item()) != step or not isinstance(rate, mx.array)
+            or rate.shape != () or not mx.issubdtype(rate.dtype, mx.floating)):
+        raise ValueError("optimizer state counter or learning rate differs")
+    parameters = dict(tree_flatten(model.trainable_parameters()))
+    moments = {name + "." + suffix: value.shape for name, value in parameters.items() for suffix in ("m", "v")}
+    actual = set(flat) - {"step", "learning_rate"}
+    if (actual != set(moments) and (step != 0 or actual)) or any(
+        flat[name].shape != moments[name] or not mx.issubdtype(flat[name].dtype, mx.floating)
+        for name in actual if name in moments
+    ):
+        raise ValueError("optimizer state moment coverage or shape differs")
+    finite = mx.stack([mx.all(mx.isfinite(value)) for value in flat.values()])
+    if not bool(mx.all(finite).item()) or float(rate.item()) < 0:
+        raise ValueError("optimizer state contains nonfinite or invalid values")
+
+
 def load_checkpoint(path, model, optimizer, run):
     import mlx.core as mx
     from mlx.utils import tree_unflatten
@@ -226,6 +256,7 @@ def load_checkpoint(path, model, optimizer, run):
     # Reject missing/corrupt optimizer payloads before replacing live weights.
     state = tree_unflatten(list(mx.load(str(path / "optimizer.safetensors")).items()))
     mx.eval(state)
+    _validate_optimizer_state(state, model, optimizer, metadata)
     metadata = _load_model_state(path, model)
     optimizer.state = state
     mx.eval(model.parameters(), optimizer.state)

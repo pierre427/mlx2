@@ -473,6 +473,48 @@ def test_checkpoint_ple_sidecar_must_match_restored_tensors(tmp_path, mismatch):
     assert all(float(mx.max(mx.abs(dict(tree_flatten(model.parameters()))[k] - v)).item()) == 0 for k, v in before.items())
 
 
+@pytest.mark.parametrize("damage", ["missing_moment", "shape", "nonfinite", "step"])
+def test_invalid_optimizer_resume_rejects_before_live_mutation(tmp_path, damage):
+    source = Model(Config.smoke())
+    optimizer = optimizers.AdamW(1e-3)
+    tokens = mx.array([[1, 2, 3, 4, 5]])
+    _, gradients = nn.value_and_grad(source, loss)(source, tokens)
+    optimizer.update(source, gradients)
+    checkpoint = save_checkpoint(tmp_path, source, optimizer, 1, {})
+    path = checkpoint / "optimizer.safetensors"
+    state = mx.load(str(path))
+    moment = next(k for k in state if k.endswith(".m"))
+    if damage == "missing_moment":
+        del state[moment]
+    elif damage == "shape":
+        state[moment] = state[moment].reshape(-1)[:1]
+    elif damage == "nonfinite":
+        state[moment] = mx.full(state[moment].shape, float("nan"))
+    else:
+        state["step"] = state["step"] + 1
+    mx.eval(state)
+    mx.save_safetensors(str(path), state)
+    model = Model(source.config)
+    before = dict(tree_flatten(model.parameters()))
+    owner = model._cache_owner
+    fresh_optimizer = optimizers.AdamW(1e-3)
+    previous = fresh_optimizer.state
+    with pytest.raises(ValueError, match="optimizer state"):
+        load_checkpoint(checkpoint, model, fresh_optimizer, {})
+    assert model._cache_owner is owner and fresh_optimizer.state is previous
+    assert all(dict(tree_flatten(model.parameters()))[k] is v for k, v in before.items())
+
+
+def test_checkpoint_optimizer_class_must_match(tmp_path):
+    source = Model(Config.smoke())
+    checkpoint = save_checkpoint(tmp_path, source, optimizers.AdamW(1e-3), 0, {})
+    model = Model(source.config)
+    owner = model._cache_owner
+    with pytest.raises(ValueError, match="matching supported Adam optimizer"):
+        load_checkpoint(checkpoint, model, optimizers.Adam(1e-3), {})
+    assert model._cache_owner is owner
+
+
 def test_model_only_checkpoint_is_explicitly_not_an_exact_resume(tmp_path):
     c = Config.smoke()
     model = Model(c)
