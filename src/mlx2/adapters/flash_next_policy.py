@@ -80,9 +80,12 @@ class FlashNextPolicy:
     # omlx #4106 GDN half (MLX_QWEN4_FUSED_GDN_BATCH_DECODE): one launch of
     # the one-row fused GDN decode step for every row of a batched one-token
     # decode (the MTP->ordinary handoff width).  "row_exact" runs each row's
-    # one-row arithmetic, bit-identical to its B=1 launch.  Opt-in; enters
-    # the environment and receipts only when not "off".
-    fused_gdn_batch_decode: str = "off"
+    # one-row arithmetic, bit-identical to its B=1 launch and to the stock
+    # batched chain.  Default on since 2026-09-30: lane tokens identical to
+    # stock at 2/4/8/16 lanes, step time -7.1/-3.7/-4.8/-2.8%
+    # (qualification/runs/omlx-4106-gdn-batch-20260930).  "off" restores the
+    # stock chain; it enters the environment and receipts only when not "off".
+    fused_gdn_batch_decode: str = "row_exact"
     # Opt-in: the quantized lm_head stores fp32 logits instead of rounding
     # them to bf16 (runtime/fp32_head.py).  Not an environment switch; it
     # enters receipts only when enabled, like the kernels above.
