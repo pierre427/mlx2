@@ -18,16 +18,16 @@ _SORTED_QMM_K_TILE = 64
 # MLX's GatherQMM streams each expert once (``gather_qmm_rhs``) only when a
 # sorted gather has M == 1, B >= 16 and B // E >= 4 (mlx 39400a0d4,
 # quantized.cpp GatherQMM::eval_gpu); below that every row runs a
-# ``gather_qmv`` that re-reads its expert's weights.  When a sorted quantized
-# gather has at least ``_RHS_PAD_MIN_ROWS_PER_EXPERT`` rows per expert, the
-# sorted rows are padded up to 4 per expert so MLX picks the streaming kernel
-# (ddalcu/mlx-serve#671).  The pad rows repeat the last sorted row, so they
-# stay sorted, touch no new expert, and ``inv_order`` never reads them.
-# 0 = off (default): the kernel switch is not bit-exact against gather_qmv.
+# ``gather_qmv`` that re-reads its expert's weights.  With at least
+# ``_RHS_PAD_MIN_ROWS_PER_EXPERT`` sorted rows per expert, a natively sorted
+# quantized gather is padded up to 4 rows per expert so MLX picks the
+# streaming kernel (ddalcu/mlx-serve#671).  The pad rows repeat the last
+# sorted row, so they stay sorted and touch no new expert; their outputs are
+# sliced off.  0 = off (default): the kernel switch is not bit-exact.
 _RHS_ROWS_PER_EXPERT = 4
 _RHS_MIN_ROWS = 16
 _RHS_PAD_MIN_ROWS_PER_EXPERT = int(os.environ.get("MLX2_MOE_RHS_PAD_MIN_ROWS", "0") or 0)
-# Observed-use counters: sorted gathers padded, and pad rows added.
+# Observed-use counters: padded gather_qmm calls, and pad rows added.
 rhs_pad_calls = 0
 rhs_pad_rows = 0
 
@@ -41,30 +41,12 @@ def _quantized_gather_tail_policy(mode: str, input_dims: int, sorted_indices: bo
     return "native"
 
 
-def _rhs_stream_pad(n: int, num_experts) -> int:
+def _rhs_stream_pad(n: int, num_experts: int) -> int:
     """Pad rows that lift ``n`` sorted rows to MLX's streaming-kernel floor."""
     floor = _RHS_PAD_MIN_ROWS_PER_EXPERT
-    if floor <= 0 or not num_experts or n < floor * num_experts:
+    if floor <= 0 or n < floor * num_experts:
         return 0
-    target = max(_RHS_ROWS_PER_EXPERT * num_experts, _RHS_MIN_ROWS)
-    return max(0, target - n)
-
-
-def _rhs_pad_experts(*projections):
-    """Expert count for the streaming pad, or None when it cannot apply.
-
-    Only a natively sorted quantized gather has the rows-per-expert cliff;
-    ``gather_mm`` streams every sorted gather already.
-    """
-    experts = None
-    for proj in projections:
-        if not isinstance(proj, QuantizedSwitchLinear):
-            return None
-        policy = _quantized_gather_tail_policy(proj.mode, int(proj.input_dims), True)
-        if policy != "native":
-            return None
-        experts = max(experts or 0, int(proj.num_experts))
-    return experts
+    return max(0, max(_RHS_ROWS_PER_EXPERT * num_experts, _RHS_MIN_ROWS) - n)
 
 
 def _pad_sorted_tail(x, indices, pad):
@@ -73,8 +55,7 @@ def _pad_sorted_tail(x, indices, pad):
     return x, indices
 
 
-def _gather_sort(x, indices, num_experts=None):
-    global rhs_pad_calls, rhs_pad_rows
+def _gather_sort(x, indices):
     (*_, M) = indices.shape
     indices = indices.flatten()
     order = mx.argsort(indices)
@@ -82,14 +63,8 @@ def _gather_sort(x, indices, num_experts=None):
     x = x.flatten(0, -3)[order // M]
     indices = indices[order]
     n = indices.size
-    pad = _rhs_stream_pad(n, num_experts)
-    if pad:
-        rhs_pad_calls += 1
-        rhs_pad_rows += pad
-    elif _SORTED_GATHER_TAIL_BUG and n > 32768 and (n % 64 != 0):
-        pad = 64 - n % 64
-    if pad:
-        x, indices = _pad_sorted_tail(x, indices, pad)
+    if _SORTED_GATHER_TAIL_BUG and n > 32768 and (n % 64 != 0):
+        (x, indices) = _pad_sorted_tail(x, indices, 64 - n % 64)
     return (x, indices, inv_order)
 
 
@@ -142,6 +117,7 @@ class QuantizedSwitchLinear(nn.Module):
         return self.weight.shape[0]
 
     def __call__(self, x, indices, sorted_indices=False):
+        global rhs_pad_calls, rhs_pad_rows
         tail_policy = _quantized_gather_tail_policy(
             self.mode, int(x.shape[-1]), sorted_indices
         )
@@ -159,18 +135,29 @@ class QuantizedSwitchLinear(nn.Module):
                 sorted_indices=sorted_indices,
             )
         else:
+            rows, pad = indices.size, 0
+            if sorted_indices and tail_policy == "native" and _RHS_PAD_MIN_ROWS_PER_EXPERT:
+                if indices.ndim == 1 and x.ndim == 3 and x.shape[0] == rows:
+                    pad = _rhs_stream_pad(rows, self.num_experts)
+            rhs = indices
+            if pad:
+                rhs_pad_calls += 1
+                rhs_pad_rows += pad
+                (x, rhs) = _pad_sorted_tail(x, indices, pad)
             x = mx.gather_qmm(
                 x,
                 self["weight"],
                 self["scales"],
                 self.get("biases"),
-                rhs_indices=indices,
+                rhs_indices=rhs,
                 transpose=True,
                 group_size=self.group_size,
                 bits=self.bits,
                 mode=self.mode,
                 sorted_indices=False if tail_policy == "unsorted" else sorted_indices,
             )
+            if pad:
+                x = x[:rows]
         if "bias" in self:
             x = x + mx.expand_dims(self["bias"][indices], -2)
         return x
@@ -256,10 +243,7 @@ class SwitchGLU(nn.Module):
         idx = indices
         inv_order = None
         if do_sort:
-            (x, idx, inv_order) = _gather_sort(
-                x, indices,
-                _rhs_pad_experts(self.gate_proj, self.up_proj, self.down_proj),
-            )
+            (x, idx, inv_order) = _gather_sort(x, indices)
         if self.training:
             idx = mx.stop_gradient(idx)
         x_up = self.up_proj(x, idx, sorted_indices=do_sort)
@@ -288,9 +272,7 @@ class SwitchMLP(nn.Module):
         idx = indices
         inv_order = None
         if do_sort:
-            x, idx, inv_order = _gather_sort(
-                x, indices, _rhs_pad_experts(self.fc1, self.fc2)
-            )
+            x, idx, inv_order = _gather_sort(x, indices)
         if self.training:
             idx = mx.stop_gradient(idx)
         x = self.fc1(x, idx, sorted_indices=do_sort)

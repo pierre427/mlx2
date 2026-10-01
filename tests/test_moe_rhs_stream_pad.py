@@ -22,6 +22,7 @@ from mlx2.runtime.models.switch_layers import (
     SwitchLinear,
     SwitchMLP,
 )
+from mlx2.runtime.models.qwen3_next import FusedGateUpSwitchGLU
 
 
 @pytest.fixture
@@ -44,50 +45,55 @@ def test_pad_arithmetic(pad_floor):
     assert SL._rhs_stream_pad(511, 128) == 1
     assert SL._rhs_stream_pad(512, 128) == 0  # MLX streams already
     assert SL._rhs_stream_pad(4096, 128) == 0
-    assert SL._rhs_stream_pad(300, None) == 0
     pad_floor(1)
     assert SL._rhs_stream_pad(3, 2) == 16 - 3  # B >= 16 floor as well
 
 
-def test_pad_experts_only_for_native_quantized():
-    q = SwitchLinear(64, 32, 8, bias=False).to_quantized(group_size=64, bits=4)
-    q_tail = SwitchLinear(96, 32, 8, bias=False).to_quantized(group_size=32, bits=4)
-    dense = SwitchLinear(64, 32, 8, bias=False)
-    assert SL._rhs_pad_experts(q, q) == 8
-    assert SL._rhs_pad_experts(q, dense) is None  # gather_mm streams already
-    assert SL._rhs_pad_experts(q, q_tail) is None  # K % 64: runs unsorted
+def test_pad_sorted_tail_layout():
+    x = mx.arange(5 * 4, dtype=mx.float32).reshape(5, 1, 4)
+    idx = mx.array([0, 0, 2, 3, 3], mx.uint32)
+    xp, ip = SL._pad_sorted_tail(x, idx, 3)
+    assert ip.tolist() == [0, 0, 2, 3, 3, 3, 3, 3]  # sorted, no new expert
+    assert mx.array_equal(xp[:5], x).item()  # real rows untouched, in order
+    assert all(mx.array_equal(xp[i], x[4]).item() for i in range(5, 8))
 
 
-def test_gather_sort_pad_rows_layout(pad_floor):
+def _quantized_projection(D, N, E, bits=4, group_size=64):
+    return SwitchLinear(D, N, E, bias=False).to_quantized(group_size=group_size, bits=bits)
+
+
+def test_projection_pads_only_native_sorted(pad_floor):
     pad_floor(1)
-    T, k, E, D = 5, 3, 4, 8
-    x = mx.arange(T * D, dtype=mx.float32).reshape(1, T, 1, 1, D)
-    indices = mx.array([[[3, 0, 1], [2, 1, 0], [0, 3, 2], [1, 2, 3], [0, 1, 2]]], mx.uint32)
-    xs, idx, inv = SL._gather_sort(x, indices, E)
-    n, pad = T * k, 16 - T * k
-    assert idx.size == n + pad and xs.shape[0] == n + pad
-    host = idx.tolist()
-    assert host == sorted(host)  # still sorted with the pad
-    assert host[n:] == [host[n - 1]] * pad  # pad repeats the last sorted row
-    assert inv.size == n and max(inv.tolist()) < n  # unsort never reads a pad row
-    # Each real sorted row carries its own token's activation.
-    flat = indices.reshape(-1).tolist()
-    for a, pos in enumerate(inv.tolist()):
-        assert host[pos] == flat[a]
-        assert mx.array_equal(xs[pos], x.reshape(T, 1, D)[a // k]).item()
+    mx.random.seed(1)
+    E, D, N, n = 8, 64, 32, 20  # 20 rows < 4 * 8
+    proj = _quantized_projection(D, N, E)
+    x = mx.random.normal((n, 1, D))
+    idx = mx.sort(mx.random.randint(0, E, (n,)).astype(mx.uint32))
+    calls, rows = SL.rhs_pad_calls, SL.rhs_pad_rows
+    out = proj(x, idx, sorted_indices=True)
+    assert out.shape == (n, 1, N)
+    assert (SL.rhs_pad_calls, SL.rhs_pad_rows) == (calls + 1, rows + 4 * E - n)
+    proj(x, idx, sorted_indices=False)  # unsorted: never padded
+    tail = _quantized_projection(96, N, E, group_size=32)  # K % 64: runs unsorted
+    proj_dense = SwitchLinear(D, N, E, bias=False)  # gather_mm streams already
+    tail(mx.random.normal((n, 1, 96)), idx, sorted_indices=True)
+    proj_dense(x, idx, sorted_indices=True)
+    assert SL.rhs_pad_calls == calls + 1
 
 
-@pytest.mark.parametrize("cls", ["mlp", "glu"])
+@pytest.mark.parametrize("cls", ["mlp", "glu", "fused_glu"])
 def test_padded_switch_matches_unpadded_on_cpu(pad_floor, cls):
     mx.random.seed(3)
     T, k, E, D, H = 7, 3, 16, 64, 128  # 42 sorted rows < 4 * 16
     if cls == "mlp":
         mod = SwitchMLP(D, H, E, activation=nn.ReLU2())
-    else:
+    elif cls == "glu":
         mod = SwitchGLU(D, H, E)
+    else:
+        mod = FusedGateUpSwitchGLU(D, H, E)
     nn.quantize(mod, group_size=64, bits=4)
-    assert isinstance(next(m for _, m in mod.named_modules()
-                           if isinstance(m, QuantizedSwitchLinear)), QuantizedSwitchLinear)
+    nproj = sum(isinstance(m, QuantizedSwitchLinear) for _, m in mod.named_modules())
+    assert nproj == (2 if cls != "glu" else 3)
     x = mx.random.normal((2, T, D)).astype(mx.bfloat16)
     indices = mx.argpartition(mx.random.normal((2, T, E)), kth=E - k, axis=-1)[..., E - k:]
     indices = indices.astype(mx.uint32)
@@ -96,8 +102,9 @@ def test_padded_switch_matches_unpadded_on_cpu(pad_floor, cls):
     calls, rows = SL.rhs_pad_calls, SL.rhs_pad_rows
     pad_floor(1)
     padded = mod(x, indices)
-    assert SL.rhs_pad_calls == calls + 1
-    assert SL.rhs_pad_rows == rows + (4 * E - 2 * T * k)
+    # One padded gather_qmm per projection, each lifted to 4 rows/expert.
+    assert SL.rhs_pad_calls == calls + nproj
+    assert SL.rhs_pad_rows == rows + nproj * (4 * E - 2 * T * k)
     assert padded.shape == base.shape == (2, T, k, D)
     assert mx.array_equal(padded, base).item()
 
@@ -128,7 +135,7 @@ def test_metal_padded_gather_bits(pad_floor):
         calls = SL.rhs_pad_calls
         padded = mod(x, indices)
         mx.eval(base, padded)
-        assert SL.rhs_pad_calls == calls + 1
+        assert SL.rhs_pad_calls == calls + 2  # fc1 and fc2
         diff = mx.abs(padded.astype(mx.float32) - base.astype(mx.float32))
         scale = mx.abs(base.astype(mx.float32)).max().item()
         # Not bit-exact by construction (different reduction order); the

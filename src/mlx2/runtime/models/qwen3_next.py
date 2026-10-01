@@ -32,7 +32,6 @@ from .switch_layers import (
     SwitchGLU,
     SwitchLinear,
     _gather_sort,
-    _rhs_pad_experts,
     _scatter_unsort,
 )
 
@@ -417,9 +416,7 @@ class FusedGateUpSwitchGLU(nn.Module):
         idx = indices
         inv_order = None
         if do_sort:
-            (x, idx, inv_order) = _gather_sort(
-                x, indices, _rhs_pad_experts(self.gate_up_proj, self.down_proj)
-            )
+            (x, idx, inv_order) = _gather_sort(x, indices)
         if self.training:
             idx = mx.stop_gradient(idx)
         routed = _try_routed_decode(self, x, idx, scores, do_sort, variant)
@@ -460,10 +457,7 @@ class FusedDownSwitchGLU(SwitchGLU):
         idx = indices
         inv_order = None
         if do_sort:
-            (x, idx, inv_order) = _gather_sort(
-                x, indices,
-                _rhs_pad_experts(self.gate_proj, self.up_proj, self.down_proj),
-            )
+            (x, idx, inv_order) = _gather_sort(x, indices)
         if self.training:
             idx = mx.stop_gradient(idx)
         # An explicitly selected candidate runs first, on stock arithmetic
