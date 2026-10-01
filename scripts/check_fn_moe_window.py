@@ -105,6 +105,14 @@ def main():
     def stock_routing(block, gates):
         return QN._stock_routing(block, gates)
 
+    # The serving caps (batched-decode windows above 8 lanes stay stock, the
+    # in-kernel top-k fold above 3 rows becomes the routing launch; both
+    # added after this gate was written) would make the wide windows decline
+    # by design. The gate checks the kernels at every width, so lift them.
+    serving_caps = {"batch_decode_max_rows": W.batch_decode_max_rows(),
+                    "topk_fold_max_rows": W.topk_fold_max_rows()}
+    W.set_batch_decode_max_rows(W.WINDOW_MAX_ROWS)
+    W.set_topk_fold_max_rows(W.WINDOW_MAX_ROWS)
     for prefix in a.layers:
         block = base.build_block(base.load_layer(prefix, index, cache))
         sw = block.switch_mlp
@@ -241,8 +249,11 @@ def main():
         mx.clear_cache()
 
     all_ok = all(v[0] == v[1] for v in counts.values())
+    W.set_batch_decode_max_rows(serving_caps["batch_decode_max_rows"])
+    W.set_topk_fold_max_rows(serving_caps["topk_fold_max_rows"])
     rec = {
         "verdict": "pass" if all_ok else "fail",
+        "serving_caps_lifted_for_the_gate": serving_caps,
         "counts": {k: f"{v[0]}/{v[1]}" for k, v in counts.items()},
         "first_mismatches": notes,
         "layers": a.layers,
