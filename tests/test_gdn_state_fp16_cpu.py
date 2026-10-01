@@ -221,6 +221,19 @@ def test_fused_admissions_accept_fp16_and_refuse_other_classes():
     assert decode(mx.bfloat16).reason == "recurrent_state must be float32 or float16"
 
 
+def test_probe_keys_accept_the_default_none_state_dtype(monkeypatch):
+    # mx.Dtype == None raises TypeError; the fp32 default must never reach it.
+    assert fused_verify._probe_key(3, None) == 3
+    assert fused_verify._probe_key(3, mx.float32) == 3
+    assert fused_verify._probe_key(3, mx.float16) == (3, "float16")
+    monkeypatch.setattr(fused, "_PROBE_COMPLETE", True)
+    monkeypatch.setattr(fused, "_PROBED_THREADGROUP_Y", 16)
+    monkeypatch.setattr(fused, "_probe_st16_decode", lambda dtype: 8)
+    assert fused.probe_qwen4_fused_gdn_decode(mx.bfloat16) == 16
+    assert fused.probe_qwen4_fused_gdn_decode(mx.bfloat16, state_dtype=None) == 16
+    assert fused.probe_qwen4_fused_gdn_decode(mx.bfloat16, state_dtype=mx.float16) == 8
+
+
 def test_fp16_sources_are_derived_and_fp32_sources_untouched():
     for source in (fused._SOURCE, fused_verify._SOURCE, fused_verify._REPLAY_SOURCE,
                    fused_verify._CATCHUP_SOURCE, fused_verify._RECONSTRUCT_SOURCE,

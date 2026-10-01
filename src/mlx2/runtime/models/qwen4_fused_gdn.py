@@ -894,7 +894,7 @@ def probe_qwen4_fused_gdn_decode(dtype, *, state_dtype=None) -> Optional[int]:
     ``state_dtype=mx.float16`` probes the fp16 storage-class kernels instead.
     """
     global _PROBE_COMPLETE, _PROBED_THREADGROUP_Y
-    if state_dtype == mx.float16:
+    if state_dtype is not None and state_dtype == mx.float16:
         return _probe_st16_decode(dtype)
     if _PROBE_COMPLETE:
         return _PROBED_THREADGROUP_Y

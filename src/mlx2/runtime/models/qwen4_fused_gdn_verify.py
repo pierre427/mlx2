@@ -842,7 +842,7 @@ _PROBE_LOCK = Lock()
 
 def _probe_key(steps: int, state_dtype):
     """fp32 probes keep their bare-width keys; the fp16 class is keyed apart."""
-    return (steps, "float16") if state_dtype == mx.float16 else steps
+    return (steps, "float16") if state_dtype is not None and state_dtype == mx.float16 else steps
 
 
 def probe_qwen4_fused_gdn_replay_verify(
