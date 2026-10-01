@@ -368,6 +368,41 @@ def test_parameters_gradients_checkpoint_and_resume(tmp_path):
     assert legacy.ple_sidecar_digest == state["permanent_sidecar"]["sha256"]
 
 
+@pytest.mark.parametrize("failure", ["optimizer", "metadata", "rename"])
+def test_failed_checkpoint_preserves_live_identity_and_cleans_own_staging(tmp_path, monkeypatch, failure):
+    from pathlib import Path
+    from mlx import optimizers
+
+    model = Model(Config.smoke())
+    model.eval()
+    tokens = mx.array([[1, 2, 3, 4]])
+    _, cache = model.prefill(tokens)
+    owner, digest = model._cache_owner, model.ple_sidecar_digest
+    unrelated = tmp_path / ".writing-unrelated"
+    unrelated.mkdir()
+    (unrelated / "keep").write_text("preserve")
+    def fail(*args, **kwargs):
+        raise OSError("injected checkpoint failure")
+    if failure == "optimizer":
+        save = mx.save_safetensors
+        def injected(path, *args, **kwargs):
+            return fail() if Path(path).name == "optimizer.safetensors" else save(path, *args, **kwargs)
+        monkeypatch.setattr(mx, "save_safetensors", injected)
+    elif failure == "metadata":
+        write = Path.write_text
+        def injected(path, *args, **kwargs):
+            return fail() if path.name == "state.json" else write(path, *args, **kwargs)
+        monkeypatch.setattr(Path, "write_text", injected)
+    else:
+        monkeypatch.setattr(Path, "rename", fail)
+    with pytest.raises(OSError, match="injected checkpoint failure"):
+        save_checkpoint(tmp_path, model, optimizers.Adam(1e-3), 0, {})
+    assert model._cache_owner is owner and model.ple_sidecar_digest == digest
+    assert sorted(p.name for p in tmp_path.iterdir()) == [".writing-unrelated"]
+    assert (unrelated / "keep").read_text() == "preserve"
+    model.decode(mx.array([[5]]), cache)
+
+
 def test_model_only_checkpoint_is_explicitly_not_an_exact_resume(tmp_path):
     c = Config.smoke()
     model = Model(c)

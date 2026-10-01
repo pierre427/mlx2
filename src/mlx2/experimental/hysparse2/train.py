@@ -69,43 +69,49 @@ def save_checkpoint(root, model, optimizer, step, run, mode="full"):
     ) + (64 << 20):
         raise OSError("insufficient disk space for atomic checkpoint")
     temporary.mkdir()
-    model.save_weights(str(temporary / "model.safetensors"))
-    permanent_sidecar = None
-    if ple:
-        sidecar_path = temporary / "semantic-ple.safetensors"
-        mx.save_safetensors(str(sidecar_path), ple)
-        sidecar_sha256 = file_hash(sidecar_path)
-        permanent_sidecar = {
-            "schema": "mlx2.hysparse2-semantic-ple.v1",
-            "file": sidecar_path.name,
-            "sha256": sidecar_sha256,
-            "rows": model.config.semantic_ple_rows,
-            "dimension": model.config.semantic_ple_dim,
-            "ngram": model.config.semantic_ngram,
-            "apcv2_identity": model.config.apcv2_identity(
-                ple_sidecar_digest=sidecar_sha256
+    try:
+        model.save_weights(str(temporary / "model.safetensors"))
+        permanent_sidecar = None
+        if ple:
+            sidecar_path = temporary / "semantic-ple.safetensors"
+            mx.save_safetensors(str(sidecar_path), ple)
+            sidecar_sha256 = file_hash(sidecar_path)
+            permanent_sidecar = {
+                "schema": "mlx2.hysparse2-semantic-ple.v1",
+                "file": sidecar_path.name,
+                "sha256": sidecar_sha256,
+                "rows": model.config.semantic_ple_rows,
+                "dimension": model.config.semantic_ple_dim,
+                "ngram": model.config.semantic_ngram,
+                "apcv2_identity": model.config.apcv2_identity(
+                    ple_sidecar_digest=sidecar_sha256
+                ),
+            }
+        if mode == "full":
+            state = dict(tree_flatten(optimizer.state))
+            mx.save_safetensors(str(temporary / "optimizer.safetensors"), state)
+        metadata = {
+            "schema": (
+                "mlx2.hysparse2-checkpoint.v1"
+                if mode == "full"
+                else "mlx2.hysparse2-model-checkpoint.v1"
             ),
+            "step": step,
+            "config": asdict(model.config),
+            "run": run,
+            "permanent_sidecar": permanent_sidecar,
+            "capsule_binding": model.capsule_binding,
+            "optimizer_state_saved": mode == "full",
+            "exact_training_resume": mode == "full",
         }
+        (temporary / "state.json").write_text(json.dumps(metadata, indent=2) + "\n")
+        temporary.rename(target)
+    except BaseException:
+        # Remove only this attempt; other writers and prior artifacts are untouched.
+        shutil.rmtree(temporary, ignore_errors=True)
+        raise
+    if permanent_sidecar is not None:
         model.ple_sidecar_digest = permanent_sidecar["sha256"]
-    if mode == "full":
-        state = dict(tree_flatten(optimizer.state))
-        mx.save_safetensors(str(temporary / "optimizer.safetensors"), state)
-    metadata = {
-        "schema": (
-            "mlx2.hysparse2-checkpoint.v1"
-            if mode == "full"
-            else "mlx2.hysparse2-model-checkpoint.v1"
-        ),
-        "step": step,
-        "config": asdict(model.config),
-        "run": run,
-        "permanent_sidecar": permanent_sidecar,
-        "capsule_binding": model.capsule_binding,
-        "optimizer_state_saved": mode == "full",
-        "exact_training_resume": mode == "full",
-    }
-    (temporary / "state.json").write_text(json.dumps(metadata, indent=2) + "\n")
-    temporary.rename(target)
     return target
 
 
