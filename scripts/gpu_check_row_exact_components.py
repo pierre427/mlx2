@@ -97,6 +97,41 @@ def check_qmv(rows_list, seed):
     return out
 
 
+GROUPS = (
+    ("attn.q_k_v_index", 2560, (12288, 512, 512, 640), 4, 64),
+    ("gdn.in_qkv_z_b_a", 2560, (10240, 6144, 48, 48), 4, 64),
+)
+
+
+def check_qmv_group(rows_list, seed):
+    """One grouped launch vs R stock one-row calls of each projection."""
+    import mlx.core as mx
+    import mlx.nn as nn
+    from mlx2.runtime.models import row_exact_qmv as REQ
+
+    out = []
+    for name, k, sizes, bits, gs in GROUPS:
+        mx.random.seed(seed)
+        linears = []
+        for n in sizes:
+            linear = nn.Linear(k, n, bias=False)
+            linear.weight = (mx.random.normal((n, k)) * 0.02).astype(mx.bfloat16)
+            q = nn.QuantizedLinear.from_linear(linear, group_size=gs, bits=bits)
+            q.set_dtype(mx.bfloat16)
+            linears.append(q)
+        mx.eval([q.parameters() for q in linears])
+        for rows in rows_list:
+            x = mx.random.normal((1, rows, k)).astype(mx.bfloat16)
+            (grouped, route) = REQ.quantized_linears(linears, x)
+            ok = True
+            for q, y in zip(linears, grouped):
+                serial = mx.concatenate([q(x[:, r : r + 1]) for r in range(rows)], axis=1)
+                mx.eval(serial, y)
+                ok = ok and bits_equal(y, serial)[0]
+            out.append({"group": name, "rows": rows, "route": route, "equal": ok})
+    return out
+
+
 def check_gdn(rows_list, seed):
     import mlx.core as mx
     from mlx2.runtime.models import qwen4_fused_gdn as FG
@@ -238,7 +273,7 @@ def check_norm(rows_list, seed):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--only", default="qmv,gdn,sdpa,norm")
+    parser.add_argument("--only", default="qmv,qmv_group,gdn,sdpa,norm")
     parser.add_argument("--rows", default=",".join(map(str, ROWS)))
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--qmv-seeds", default="0,1,2", help="seeds for the qmv section")
@@ -257,7 +292,7 @@ def main():
         "tf32": os.environ.get("MLX_ENABLE_TF32"),
         "device": {k: v for k, v in mx.metal.device_info().items() if k in ("architecture", "device_name")},
     }
-    sections = {"qmv": check_qmv, "gdn": check_gdn, "sdpa": check_sdpa, "norm": check_norm}
+    sections = {"qmv": check_qmv, "qmv_group": check_qmv_group, "gdn": check_gdn, "sdpa": check_sdpa, "norm": check_norm}
     for name in args.only.split(","):
         if name == "qmv":
             report[name] = [
@@ -276,6 +311,13 @@ def main():
             "row_exact_equal": sum(c["row_exact_equal"] for c in cells),
             "stock_equal": sum(c["stock_equal"] for c in cells),
             "row_exact_failures": [c for c in cells if not c["row_exact_equal"]][:10],
+        }
+    if "qmv_group" in report:
+        cells = report["qmv_group"]
+        summary["qmv_group"] = {
+            "cells": len(cells),
+            "equal": sum(c["equal"] for c in cells),
+            "routes": sorted({c["route"] for c in cells}),
         }
     if "gdn" in report:
         summary["gdn"] = report["gdn"]

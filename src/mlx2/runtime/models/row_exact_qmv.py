@@ -152,6 +152,30 @@ _SOURCE = r"""
 """
 
 
+def _group_source(count: int) -> str:
+    """Same-input projections in one launch: the tile axis walks each
+    projection's tiles in turn, and every projection writes its own output.
+    (omlx row_exact_qmv.py _group_source, verbatim.)"""
+    lines = [
+        "    const int tile = int(threadgroup_position_in_grid.z);",
+        "    const int row0 = int(threadgroup_position_in_grid.y) * ROWS;",
+        "    const uint sg = simdgroup_index_in_threadgroup;",
+        "    const uint sl = thread_index_in_simdgroup;",
+        "    int start = 0;",
+    ]
+    for i in range(count):
+        lines += [
+            f"    constexpr int TILES_{i} = (N_{i} + 2 * RPS - 1) / (2 * RPS);",
+            f"    if (tile < start + TILES_{i}) {{",
+            f"      row_exact_tile<T, K_SIZE, N_{i}, ROWS, RPS>(",
+            f"          x, w{i}, scales{i}, biases{i}, y{i}, tile - start, row0, sg, sl);",
+            "      return;",
+            "    }",
+            f"    start += TILES_{i};",
+        ]
+    return "\n".join(lines) + "\n"
+
+
 # qmv's ``qdot`` split in two: the weight terms of a full pack run are decoded
 # once per K block and output column, then every row accumulates them against
 # its own inputs, each term and accumulation step in qdot's order.  (omlx
@@ -287,6 +311,20 @@ def _kernel(bits: int, group_size: int, fast: bool):
     )
 
 
+@cache
+def _group_kernel(bits: int, group_size: int, fast: bool, count: int):
+    inputs = ["x"]
+    for i in range(count):
+        inputs += [f"w{i}", f"scales{i}", f"biases{i}"]
+    return mx.fast.metal_kernel(
+        name=f"mlx2_row_exact_qmv_group{count}_b{bits}_gs{group_size}_{int(fast)}",
+        input_names=inputs,
+        output_names=[f"y{i}" for i in range(count)],
+        header=header(bits, group_size, fast),
+        source=_group_source(count),
+    )
+
+
 def _values_per_thread(bits: int, fast: bool) -> int:
     return (8 if bits == 5 else (4 if bits == 6 else 32 // bits)) * (2 if fast else 1)
 
@@ -413,6 +451,80 @@ def quantized_linear(linear, x: mx.array, call=None):
     return y.reshape(*lead, -1), "kernel"
 
 
+class _GroupPlan:
+    """Static launch parameters of one same-input projection group."""
+
+    __slots__ = ("kernel", "template", "grid", "output_shapes", "output_dtypes")
+
+    def __init__(self, linears, x: mx.array, rows: int):
+        k = int(x.shape[-1])
+        sizes = [int(linear.weight.shape[0]) for linear in linears]
+        first = linears[0]
+        bits = int(first.bits)
+        fast = qmv_fast_layout(k, sizes[0], bits)
+        rows_per_group, rps = _launch_geometry(bits, fast, max(sizes), rows)
+        self.kernel = _group_kernel(bits, int(first.group_size), fast, len(linears))
+        self.template = [("T", x.dtype), ("K_SIZE", k)]
+        self.template += [(f"N_{i}", n) for i, n in enumerate(sizes)]
+        self.template += [("ROWS", rows_per_group), ("RPS", rps)]
+        tiles = sum((n + 2 * rps - 1) // (2 * rps) for n in sizes)
+        self.grid = (32, 2 * (rows // rows_per_group), tiles)
+        self.output_shapes = [(rows, n) for n in sizes]
+        self.output_dtypes = [x.dtype] * len(sizes)
+
+
+def _group_plan(linears, x: mx.array, rows: int):
+    first = linears[0]
+    plans = first.__dict__.get("_mlx2_row_exact_plans")
+    if plans is None:
+        plans = {}
+        object.__setattr__(first, "_mlx2_row_exact_plans", plans)
+    key = (tuple(id(linear) for linear in linears), rows, x.dtype, x.shape[-1])
+    if key not in plans:
+        grouped = (
+            rows <= MAX_ROWS
+            and all(
+                isinstance(linear, nn.QuantizedLinear)
+                and linear.bits == first.bits
+                and linear.group_size == first.group_size
+                and "bias" not in linear
+                and decline_reason(linear, x) is None
+                for linear in linears
+            )
+        )
+        plans[key] = _GroupPlan(linears, x, rows) if grouped else None
+    return plans[key]
+
+
+def quantized_linears(linears, x: mx.array):
+    """``(tuple(linear(x) for linear in linears), route)`` with one-row
+    arithmetic per row, in one launch when the projections share their
+    quantization (route ``"group_kernel"``); otherwise each projection goes
+    through ``quantized_linear`` (route of the last one)."""
+    lead = x.shape[:-1]
+    rows = 1
+    for size in lead:
+        rows *= size
+    plan = (
+        _group_plan(linears, x, rows) if 1 < rows and 1 < len(linears) <= 4 else None
+    )
+    if plan is None:
+        results = [quantized_linear(linear, x) for linear in linears]
+        return tuple(y for y, _ in results), results[-1][1]
+    inputs = [x.reshape(rows, x.shape[-1])]
+    for linear in linears:
+        inputs += [linear.weight, linear.scales, linear.biases]
+    outputs = plan.kernel(
+        inputs=inputs,
+        template=plan.template,
+        grid=plan.grid,
+        threadgroup=(32, 2, 1),
+        output_shapes=plan.output_shapes,
+        output_dtypes=plan.output_dtypes,
+    )
+    return tuple(y.reshape(*lead, -1) for y in outputs), "group_kernel"
+
+
 __all__ = [
     "BITS",
     "GROUP_SIZES",
@@ -422,4 +534,5 @@ __all__ = [
     "per_row",
     "qmv_fast_layout",
     "quantized_linear",
+    "quantized_linears",
 ]

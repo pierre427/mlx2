@@ -25,8 +25,9 @@ GDN             the fused verify kernel (already bit-identical to the
                 one-token fused decode kernel, rollback included; Metal-
                 checked at 2..17 rows); a window whose GDN falls back to the
                 stock multi-row block is not row-exact
-MoE             one call of the one-token MoE block per row (router, routed
-                experts, shared expert); wave 2 can fuse this once the
+MoE             router gate and shared expert through the kernel, routing
+                and combine batched (per-row reductions), routed experts one
+                one-token call per row; wave 2 can fuse this once the
                 routed kernel covers verify windows
 ==============  ============================================================
 
@@ -71,17 +72,52 @@ class _RowExactQuantizedLinear:
 
 
 class _RowExactMoE:
-    """Mixin: one call of the one-token MoE block per window row."""
+    """Mixin: the MoE block of a window.
+
+    The router gate and shared expert are projections (row-exact kernel) and
+    the routing (softmax, top-k) and combine are per-row reductions and
+    elementwise ops, so the block runs batched and only the routed experts
+    (``_RowExactSwitch``) run one row at a time.  The fused router kernel
+    (policy ``moe_router_kernel``) admits only the one-token shape, so with it
+    selected each row runs the whole one-token block.
+    """
 
     def __call__(self, x):
         window = REV.current()
         rows = _rows(x)
         if window is None or rows <= 1:
             return super().__call__(x)
+        if getattr(self, "moe_router_mode", "stock") != "fused":
+            window.note("moe_router", "batched", rows)
+            return super().__call__(x)
         flat = x.reshape(rows, 1, 1, x.shape[-1])
         out = mx.concatenate([super(_RowExactMoE, self).__call__(flat[r]) for r in range(rows)], axis=0)
-        window.note("moe", "per_row", rows)
+        window.note("moe", "per_row_block", rows)
         return out.reshape(*x.shape[:-1], out.shape[-1])
+
+
+class _RowExactSwitch:
+    """Mixin: the routed experts of a window, one one-token call per row."""
+
+    def __call__(self, x, indices, scores=None, variant="scalar"):
+        window = REV.current()
+        rows = _rows(indices)
+        if window is None or rows <= 1:
+            return super().__call__(x, indices, scores=scores, variant=variant)
+        lead = indices.shape[:-1]
+        xs = x.reshape(rows, 1, 1, x.shape[-1])
+        ids = indices.reshape(rows, 1, 1, indices.shape[-1])
+        ws = None if scores is None else scores.reshape(rows, 1, 1, scores.shape[-1])
+        call = super(_RowExactSwitch, self).__call__
+        out = mx.concatenate(
+            [
+                call(xs[r], ids[r], scores=None if ws is None else ws[r], variant=variant)
+                for r in range(rows)
+            ],
+            axis=0,
+        )
+        window.note("moe_experts", "per_row", rows)
+        return out.reshape(*lead, *out.shape[2:])
 
 
 def _ordinary_b1_mask(cache):
@@ -104,8 +140,31 @@ def _ordinary_b1_mask(cache):
     return create_causal_mask(1, offset=offset, left_padding=mx.array([0]))
 
 
+def _grouped(window, linears, x):
+    (outputs, route) = REQ.quantized_linears(linears, x)
+    window.note("projections", route, 1 if route == "group_kernel" else len(linears))
+    return outputs
+
+
 class _RowExactAttention:
     """Mixin: split a window's attention into one-token forwards."""
+
+    def _project_segmented_qsa(self, x):
+        window = REV.current()
+        if window is None or _rows(x) <= 1:
+            return super()._project_segmented_qsa(x)
+        from . import qwen4_exp as Q
+
+        if Q._QSA_FUSED_PROJ:
+            # The stock form multiplies one concatenated table at M=R, which
+            # is not the one-row arithmetic: not row-exact.
+            window.fail("attention_fused_projection_table")
+            return super()._project_segmented_qsa(x)
+        return _grouped(
+            window,
+            (self.q_proj, self.k_proj, self.v_proj, self.indexer.index_qk_proj),
+            x,
+        )
 
     def __call__(
         self,
@@ -137,11 +196,6 @@ class _RowExactAttention:
             refusal = "attention_batch_rows"
         elif _return_pre_o:
             refusal = "attention_pre_o_requested"
-        if refusal is None and _projected is None:
-            from . import qwen4_exp as Q
-
-            if Q._QSA_FUSED_PROJ:
-                refusal = "attention_fused_projection_table"
         if refusal is not None:
             window.fail(refusal)
             return stock(
@@ -149,12 +203,7 @@ class _RowExactAttention:
                 _selection=_selection, _fetched_kv=_fetched_kv,
             )
         if _projected is None:
-            _projected = (
-                self.q_proj(x),
-                self.k_proj(x),
-                self.v_proj(x),
-                self.indexer.index_qk_proj(x),
-            )
+            _projected = self._project_segmented_qsa(x)
         from .qwen4_qsa_indexed_merge import fused_gate_enabled
 
         # Unless the indexed kernel may fuse the output gate (policy
@@ -188,6 +237,25 @@ class _RowExactAttention:
         return self.o_proj(out * mx.sigmoid(gate))
 
 
+class _RowExactGatedDeltaNet:
+    """Mixin: the four GDN input projections in one row-exact launch.
+
+    Each output column runs the same one-row arithmetic whether the serial
+    step uses the separate projections or the fused input table, so one
+    grouped launch matches either.
+    """
+
+    def _input_projections(self, inputs):
+        window = REV.current()
+        if window is None or _rows(inputs) <= 1:
+            return super()._input_projections(inputs)
+        return _grouped(
+            window,
+            (self.in_proj_qkv, self.in_proj_z, self.in_proj_b, self.in_proj_a),
+            inputs,
+        )
+
+
 _SUBCLASSES: Dict[type, type] = {}
 
 
@@ -204,7 +272,11 @@ class RowExactVerify:
     """Installed route: class swaps on the trunk plus the verify hooks."""
 
     def __init__(self, model):
-        from .qwen3_next import Qwen3NextSparseMoeBlock
+        from .qwen3_next import (
+            FusedDownSwitchGLU,
+            FusedGateUpSwitchGLU,
+            Qwen3NextSparseMoeBlock,
+        )
         from .qwen4_exp import Attention, GatedDeltaNet
 
         self.model = model
@@ -234,6 +306,10 @@ class RowExactVerify:
                 mixin = _RowExactAttention
             elif cls is Qwen3NextSparseMoeBlock:
                 mixin = _RowExactMoE
+            elif cls is GatedDeltaNet:
+                mixin = _RowExactGatedDeltaNet
+            elif cls in (FusedGateUpSwitchGLU, FusedDownSwitchGLU):
+                mixin = _RowExactSwitch
             else:
                 continue
             self._swapped.append((module, cls))

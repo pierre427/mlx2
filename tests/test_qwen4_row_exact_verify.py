@@ -172,7 +172,8 @@ def test_enabled_route_matches_mtp_off_and_fails_closed_without_fused_gdn():
         assert status["windows_row_exact"] == 0
         assert status["failures"] == {"gdn_fused_verify_not_engaged": status["windows"]}
         assert status["stages"]["projections"] == {"per_row": status["stages"]["projections"]["per_row"]}
-        assert status["stages"]["moe"]["per_row"] >= status["rows"]
+        assert status["stages"]["moe_experts"]["per_row"] >= status["rows"]
+        assert status["stages"]["moe_router"]["batched"] >= status["rows"]
         assert status["stages"]["attention"]["per_row"] > 0
         receipt = handle.receipt(start)
         assert receipt["row_exact"] is False
