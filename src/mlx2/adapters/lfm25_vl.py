@@ -256,7 +256,8 @@ def load_candidate_dspark(model_path: str | Path, *, target_artifact: dict, targ
 def generate_candidate_dspark(target_path: str | Path, draft_path: str | Path,
                               prompt: str, *, image: str | Path | None = None,
                               max_tokens: int = 128,
-                              verification_width: int = 10) -> dict:
+                              verification_width: int = 10,
+                              collect_speculative_stats: bool = False) -> dict:
     """Run an explicit offline DSpark candidate with target verification.
 
     This is separate from mlx2's serving route; acceptance and speed need
@@ -268,6 +269,18 @@ def generate_candidate_dspark(target_path: str | Path, draft_path: str | Path,
     the REQUESTED configuration: it is not the observed effective width,
     acceptance or engagement, confidence-head use, state parity or speed, and
     the final round may verify fewer tokens when max_tokens runs out.
+
+    ``collect_speculative_stats=True`` adds ``speculative_stats``: the change
+    in the pinned source's lifetime drafter counters (rounds, accepted and
+    drafted proposals) across this request, read by host getattr from the
+    freshly loaded private drafter before and after generation.  The source
+    records a round before EOS or output-budget truncation, so counts are
+    target-verified draft proposals and may exceed emitted tokens.  Malformed,
+    partial or inconsistent counters make the diagnostic unavailable with
+    None counts.  ``engaged`` needs at least one round and one proposal.
+    Totals do not show effective-width distribution, confidence-head use,
+    per-round accept/reject, rollback or state correctness, and never affect
+    decoding or selection.
     """
     if not isinstance(prompt, str) or not prompt.strip():
         raise ValueError("DSpark candidate prompt must be nonempty")
@@ -275,6 +288,8 @@ def generate_candidate_dspark(target_path: str | Path, draft_path: str | Path,
         raise ValueError("DSpark candidate max_tokens must be 1..512")
     if type(verification_width) is not int or not 2 <= verification_width <= 10:
         raise ValueError("DSpark candidate verification_width must be 2..10")
+    if type(collect_speculative_stats) is not bool:
+        raise ValueError("DSpark candidate collect_speculative_stats must be a bool")
     if image is not None and not Path(image).expanduser().is_file():
         raise ValueError("DSpark candidate image file is missing")
     target = inspect_artifact(target_path)
@@ -290,21 +305,85 @@ def generate_candidate_dspark(target_path: str | Path, draft_path: str | Path,
                                           target_model=model)
     formatted = apply_chat_template(processor, model.config, prompt,
                                     num_images=int(image is not None))
+
+    def read_counters(phase: str) -> tuple[tuple[int, int, int] | None, str]:
+        # Host reads only; the source recorder starts absent counters at zero.
+        absent = object()
+        try:
+            raw = [getattr(draft, name, absent) for name in (
+                "speculative_total_rounds", "speculative_total_accepted",
+                "speculative_total_drafted")]
+        except Exception:
+            return None, f"{phase}_counter_read_error"
+        if all(value is absent for value in raw) and phase == "baseline":
+            return (0, 0, 0), "uninitialized"
+        if any(value is absent for value in raw):
+            return None, f"{phase}_counters_missing"
+        rounds, accepted, drafted = raw
+        if type(rounds) is not int or type(drafted) is not int or min(rounds, drafted) < 0:
+            return None, f"{phase}_counter_invalid"
+        if type(accepted) is float:
+            # is_integer() is False for NaN/Inf; 2**53 bounds exact floats.
+            if not (accepted.is_integer() and 0 <= accepted < 2 ** 53):
+                return None, f"{phase}_counter_invalid"
+            accepted = int(accepted)
+        elif type(accepted) is not int or accepted < 0:
+            return None, f"{phase}_counter_invalid"
+        if accepted > drafted:
+            return None, f"{phase}_accepted_exceeds_drafted"
+        return (rounds, accepted, drafted), "lifetime"
+
+    if collect_speculative_stats:
+        before, baseline_kind = read_counters("baseline")
     result = generate(model, processor, formatted,
                       image=str(image) if image is not None else None,
                       max_tokens=max_tokens, verbose=False, draft_model=draft,
                       draft_kind="dflash", draft_block_size=verification_width,
                       temperature=0.0)
-    return {"text": result.text, "finish_reason": result.finish_reason,
-            "target_fingerprint": target["fingerprint"],
-            "draft_fingerprint": record["fingerprint"],
-            "evaluation_contract": {
-                "scope": "requested", "source_revision": SOURCE_REVISION,
-                "requested_verification_width": verification_width,
-                "maximum_proposals_per_round": verification_width - 1,
-                "temperature": 0.0, "max_tokens": max_tokens,
-            },
-            "qualified": False, "selected": False}
+    if collect_speculative_stats:
+        delta = None
+        reason = None if before is not None else baseline_kind
+        if before is not None:
+            after, after_kind = read_counters("post")
+            if after is None:
+                reason = after_kind
+            else:
+                rounds, accepted, drafted = (a - b for a, b in zip(after, before))
+                if min(rounds, accepted, drafted) < 0:
+                    reason = "counter_regression"
+                elif rounds == 0 and (accepted or drafted):
+                    reason = "zero_round_nonzero_delta"
+                elif accepted > drafted:
+                    reason = "delta_accepted_exceeds_drafted"
+                elif drafted > rounds * (verification_width - 1):
+                    reason = "requested_ceiling_exceeded"
+                else:
+                    delta = (rounds, accepted, drafted)
+    payload = {"text": result.text, "finish_reason": result.finish_reason,
+               "target_fingerprint": target["fingerprint"],
+               "draft_fingerprint": record["fingerprint"],
+               "evaluation_contract": {
+                   "scope": "requested", "source_revision": SOURCE_REVISION,
+                   "requested_verification_width": verification_width,
+                   "maximum_proposals_per_round": verification_width - 1,
+                   "temperature": 0.0, "max_tokens": max_tokens,
+               },
+               "qualified": False, "selected": False}
+    if collect_speculative_stats:
+        payload["speculative_stats"] = {
+            "scope": "request", "attribution": "b1-private-drafter",
+            "source_revision": SOURCE_REVISION,
+            "unit": "target-verified draft proposals, not emitted tokens",
+            "available": delta is not None,
+            "engaged": delta is not None and delta[0] > 0 and delta[2] > 0,
+            "unavailable_reason": reason,
+            "baseline_kind": baseline_kind if delta is not None else None,
+            "rounds": None if delta is None else delta[0],
+            "accepted_proposals": None if delta is None else delta[1],
+            "drafted_proposals": None if delta is None else delta[2],
+            "qualified": False, "selected": False,
+        }
+    return payload
 
 
 class _LFMLogitsModel(_LogitsModel):
