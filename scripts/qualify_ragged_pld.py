@@ -1494,8 +1494,11 @@ def run_all(args):
                 removed = rem
         # Finish this arm's continuations now and drop its final responses and
         # caches, so no arm's tensors are alive while the next one runs.
+        # Only the lane the removal arm actually removed is skipped: its cache
+        # is dead and never resumed. Every surviving lane is continued.
+        dead = removed["lane"] if arm == "pld_removal" and removed else None
         for i in lanes:
-            if arm == "pld_removal":
+            if i == dead:
                 results[arm][i].pop("_final", None)
             else:
                 results[arm][i]["continuation"] = driver.continuation(i, results[arm][i])
@@ -1513,7 +1516,7 @@ def run_all(args):
         | {"kind": "pld vs batched ordinary (secondary)"},
     ]
     removal_cmp = compare("pld_removal", PRIMARY_REFERENCE, lanes, results, logprob_rows=rows,
-                          prefix_only=(removed["lane"],) if removed else (), continuation=False)
+                          prefix_only=(removed["lane"],) if removed else ())
     removal_cmp["kind"] = "membership survivor vs primary reference"
     comparisons.append(removal_cmp)
     cov = coverage(driver, results, stats, removed)
