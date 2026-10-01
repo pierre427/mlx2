@@ -13,6 +13,69 @@ from mlx2.experimental.hysparse2.model import Model
 from mlx2.runtime.apc_v2 import APCv2
 
 
+@pytest.mark.parametrize("phase", ["publish_validation", "restore_validation", "restore_allocation"])
+def test_revision_transition_during_endpoint_transfer_rejected(monkeypatch, phase):
+    from types import SimpleNamespace
+
+    class Lease(list):
+        closed = False
+
+        def close(self):
+            self.closed = True
+
+    model = Model(Config.smoke())
+    model.eval()
+    tokens = [1, 2, 3, 4]
+    _, cache = model.prefill(mx.array([tokens]))
+    engine = APCv2(max_size=4, layout_name="hysparse2-endpoint-v1")
+    hit = None
+    try:
+        bridge = EndpointAPC(model, engine, checkpoint_revision="r", tokenizer_fingerprint="t")
+        if phase == "publish_validation":
+            original = bridge._validate_endpoint
+
+            def changed(value):
+                original(value)
+                model.attach_semantic_capsules(None)
+
+            monkeypatch.setattr(bridge, "_validate_endpoint", changed)
+            with pytest.raises(ValueError, match="revision|owner"):
+                bridge.publish(tokens, cache)
+        else:
+            bridge.publish(tokens, cache)
+            hit = engine.lookup(bridge.key(), tokens + [5])
+            lease = Lease(hit.cache)
+            monkeypatch.setattr(engine, "lookup", lambda *_: SimpleNamespace(
+                hit=True, cache=lease, cached_tokens=len(tokens)))
+            if phase == "restore_validation":
+                original = bridge._validate_endpoint
+
+                def changed(value):
+                    original(value)
+                    model.update({"embedding": {"weight": model.embedding.weight}})
+
+                monkeypatch.setattr(bridge, "_validate_endpoint", changed)
+            else:
+                original = model.new_cache
+                calls = 0
+
+                def changed(*args, **kwargs):
+                    nonlocal calls
+                    calls += 1
+                    if calls == 3:
+                        model.update({"embedding": {"weight": model.embedding.weight}})
+                    return original(*args, **kwargs)
+
+                monkeypatch.setattr(model, "new_cache", changed)
+            with pytest.raises(ValueError, match="revision|owner|parameter update"):
+                bridge.restore(tokens + [5])
+            assert lease.closed
+    finally:
+        if hit is not None and hasattr(hit.cache, "close"):
+            hit.cache.close()
+        engine.close()
+
+
 @pytest.fixture(autouse=True)
 def cpu():
     previous = mx.default_device()

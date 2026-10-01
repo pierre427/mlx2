@@ -40,6 +40,15 @@ class EndpointAPC:
     def _validate_endpoint(self, cache):
         self.model.validate_cache_state(cache)
 
+    def _require_source(self, cache):
+        expected = self.model.new_cache().apcv2_identity
+        if (self.model.training or cache.owner is not self.model._cache_owner
+                or canonical_json(cache.apcv2_identity) != canonical_json(expected)):
+            raise ValueError("endpoint source owner or revision changed during transfer")
+        # A parameter replacement requires a freshly bound checkpoint bridge,
+        # even when the replacement leaves configuration and PLE hashes equal.
+        self.key()
+
     def publish(self, tokens, cache):
         tokens = list(tokens)
         if (
@@ -62,6 +71,7 @@ class EndpointAPC:
         identity = self.model.new_cache().apcv2_identity
         if canonical_json(cache.apcv2_identity) != canonical_json(identity):
             raise ValueError("cache revision differs before publication")
+        key = self.key()
         self._validate_endpoint(cache)
         arrays = []
 
@@ -102,20 +112,28 @@ class EndpointAPC:
         if leaf.snap_trim_position(cache.length) != cache.length:
             raise ValueError("exact endpoint checkpoint recording is disabled")
         mx.eval(leaf.state)
-        capability = self.engine.store(self.key(), tokens, [leaf])
+        self._require_source(cache)
+        capability = self.engine.store(key, tokens, [leaf])
         if capability.stored is not True:
             raise ValueError(f"APCv2 refused endpoint: {capability.reason}")
+        self._require_source(cache)
         return capability
 
     def restore(self, tokens):
         """Return exact state and lookup receipt; close receipt.cache after use."""
         if self.model.training:
             raise ValueError("restore requires model.eval()")
-        result = self.engine.lookup(self.key(), tokens)
+        owner = self.model._cache_owner
+        key = self.key()
+        result = self.engine.lookup(key, tokens)
         if not result.hit:
             return None, result
         try:
-            return self._restore_hit(result), result
+            cache = self._restore_hit(result)
+            self._require_source(cache)
+            if owner is not cache.owner or self.key() != key:
+                raise ValueError("endpoint lookup owner or revision changed during transfer")
+            return cache, result
         except BaseException:
             close = getattr(result.cache, "close", None)
             if callable(close):
@@ -139,7 +157,8 @@ class EndpointAPC:
         ):
             raise ValueError("invalid endpoint metadata")
         header = json.loads(bytes(arrays[0][0].tolist()))
-        expected = self.model.new_cache().apcv2_identity
+        cache = self.model.new_cache()
+        expected = cache.apcv2_identity
         if (
             header.get("schema") != "mlx2.hysparse2-apc-endpoint.v1"
             or header["length"] != result.cached_tokens
@@ -150,7 +169,6 @@ class EndpointAPC:
             raise ValueError("endpoint or revision differs")
         if [[list(a.shape), str(a.dtype)] for a in arrays[1:]] != header["arrays"]:
             raise ValueError("endpoint tensor layout differs")
-        cache = self.model.new_cache()
         cache.length = header["length"]
         referenced = set()
 
