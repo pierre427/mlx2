@@ -263,7 +263,9 @@ def _subclass(mixin, cls):
     key = (mixin, cls)
     sub = _SUBCLASSES.get(key)
     if sub is None:
-        sub = type("RowExact" + cls.__name__, (mixin, cls), {})
+        # ``_row_exact_base`` names the swapped-out class for kernels that
+        # admit only an exact layer class (qwen4_hc_decode).
+        sub = type("RowExact" + cls.__name__, (mixin, cls), {"_row_exact_base": cls})
         _SUBCLASSES[key] = sub
     return sub
 

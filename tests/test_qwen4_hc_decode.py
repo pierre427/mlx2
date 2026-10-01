@@ -182,6 +182,110 @@ def test_wide_rows_beyond_the_cap_decline_and_are_counted(reference_kernels, mon
     assert status["last_decline"].startswith("rows")
 
 
+def _law_of(plan):
+    return dict(plan["a_template"])["LAW"]
+
+
+@pytest.fixture
+def law_recorder(reference_kernels, monkeypatch):
+    laws = []
+    composed = HCD.hc_decode_launch
+
+    def launch(module, flat, *, debug=False, plan=None):
+        laws.append((flat.shape[0], _law_of(plan)))
+        return composed(module, flat, debug=debug, plan=plan)
+
+    monkeypatch.setattr(HCD, "hc_decode_launch", launch)
+    monkeypatch.setattr(HCD, "_GPU_FAMILY", 17)
+    monkeypatch.setattr(HCD, "_ROW_EXACT", True)
+    return laws
+
+
+@pytest.mark.parametrize("rows", [2, 3, 8, 9, 17])
+def test_row_exact_window_runs_the_one_row_law(law_recorder, rows):
+    from mlx2.runtime import row_exact_verify as REV
+
+    m = _module()
+    x = _x(11, rows=rows)
+    # The route pins the one-token width for the norm gate (verify_backbone).
+    with Q._declared_width(1):
+        want = m(x)
+        HCD.set_hc_decode_enabled(True)
+        record = REV.Window(rows)
+        with REV.window(record):
+            got = m(x)
+    assert law_recorder == [(rows, 0)]
+    assert all(_same(a, b) for a, b in zip(got, want))
+    assert record.stages == {"hc": {"kernel_one_row_law": 1}} and record.exact
+    assert HCD.hc_decode_status()["row_exact_calls"] == 1
+
+
+def test_outside_a_window_the_wide_law_is_unchanged(law_recorder):
+    m = _module()
+    HCD.set_hc_decode_enabled(True)
+    m(_x(12, rows=3))
+    m(_x(12, rows=1))
+    assert law_recorder == [(3, 1), (1, 0)]
+    assert HCD.hc_decode_status()["row_exact_calls"] == 0
+
+
+def test_row_exact_window_beyond_the_guard_stays_composed(law_recorder):
+    from mlx2.runtime import row_exact_verify as REV
+
+    m = _module()
+    rows = HCD.ROW_EXACT_MAX_ROWS + 1
+    HCD.set_hc_decode_enabled(True)
+    record = REV.Window(rows)
+    with REV.window(record), Q._declared_width(1):
+        m(_x(13, rows=rows))
+    assert law_recorder == []
+    assert record.stages == {"hc": {"composed": 1}}
+
+
+def test_row_exact_mode_kill_switch_keeps_windows_composed(law_recorder):
+    from mlx2.runtime import row_exact_verify as REV
+
+    m = _module()
+    HCD.set_hc_decode_enabled(True)
+    previous = HCD.set_hc_row_exact_enabled(False)
+    try:
+        record = REV.Window(3)
+        with REV.window(record), Q._declared_width(1):
+            m(_x(14, rows=3))
+        # Not the wide law either: that is not the one-token arithmetic.
+        assert law_recorder == []
+        assert record.stages == {"hc": {"composed": 1}}
+        assert HCD.hc_decode_status()["last_decline"] == "row-exact window mode off"
+    finally:
+        HCD.set_hc_row_exact_enabled(previous)
+
+
+def test_row_exact_mode_is_default_off(monkeypatch):
+    monkeypatch.delenv(HCD.HC_ROW_EXACT_ENV, raising=False)
+    assert HCD.row_exact_from_env() is False
+    monkeypatch.setenv(HCD.HC_ROW_EXACT_ENV, "1")
+    assert HCD.row_exact_from_env() is True
+    monkeypatch.setenv(HCD.HC_ROW_EXACT_ENV, "maybe")
+    with pytest.raises(ValueError):
+        HCD.row_exact_from_env()
+
+
+def test_row_exact_class_swapped_projections_are_admitted():
+    from mlx2.runtime.models import qwen4_row_exact as RE
+
+    m = _module()
+    for name in ("input_mix_weight_down", "input_mix_weight_up", "block_inject_weight"):
+        layer = m[name]
+        layer.__class__ = RE._subclass(RE._RowExactQuantizedLinear, type(layer))
+    assert HCD._cached_static_admission(m) is None
+
+    class Other(nn.QuantizedLinear):
+        pass
+
+    m.input_mix_weight_up.__class__ = Other
+    assert "plain QuantizedLinear" in HCD._cached_static_admission(m)
+
+
 def test_ineligible_layout_is_counted_and_composed(reference_kernels):
     m = _module(bits=8)
     x = _x(4)

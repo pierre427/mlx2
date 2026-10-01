@@ -43,6 +43,14 @@ which both launches also transcribe, so verify windows and multi-lane decode
 stay bit-identical to their own composed call (not to one-row decode, exactly
 as the composed path).  Other row counts are declined and counted.
 
+Row-exact verify windows (``qwen4_row_exact``, omlx #4041/#4105): inside a
+``row_exact_verify.window`` every row must carry its one-token step's bits, so
+both launches run law 0 with one grid row per verify row (up to
+``ROW_EXACT_MAX_ROWS``), never qmv_wide.  The route's class-swapped
+projections (``_row_exact_base`` = ``nn.QuantizedLinear``) are admitted.  Opt-in
+(``MLX_QWEN4_HC_ROW_EXACT``, policy ``row_exact_window_kernels``); off, a window
+keeps the composed path, which is row-exact too.
+
 Admission is structural and exact-shape: rows as above, bf16 activations, four streams, affine 4-bit group-64 projections with bf16
 scales/biases that are exactly ``nn.QuantizedLinear``, and the eager norm
 profile (fast RMS norm on, fused group norm and compiled glue off).  Anything
@@ -75,6 +83,9 @@ DOWN_ROWS = 1
 UP_SIMDGROUPS = 8
 # Widest folded row count served with qmv_wide's arithmetic (verify windows).
 MAX_WIDE_ROWS = 8
+# Widest row-exact verify window served with the one-row law (copy drafts
+# reach 17 rows; each row is its own grid row, so the bound is only a guard).
+ROW_EXACT_MAX_ROWS = 32
 
 # Where #4024's deferred write and the separate raw-gate+inject fusion meet:
 # norm_down's first load reads ``hyper_input``, which is exactly the output of
@@ -95,6 +106,23 @@ def enabled_from_env() -> bool:
 
 
 _ENABLED = enabled_from_env()
+# Row-exact verify windows (qwen4_row_exact) served with the one-row law.
+# Default off (the Flash-Next policy field ``row_exact_window_kernels`` sets
+# MLX_QWEN4_HC_ROW_EXACT=1); off, windows keep the composed path (still
+# row-exact).  Needs the kernels themselves on (MLX_QWEN4_HC_DECODE).
+HC_ROW_EXACT_ENV = "MLX_QWEN4_HC_ROW_EXACT"
+
+
+def row_exact_from_env() -> bool:
+    raw = os.environ.get(HC_ROW_EXACT_ENV, "0").strip().lower()
+    if raw in {"", "0", "false", "off", "no"}:
+        return False
+    if raw in {"1", "true", "on", "yes"}:
+        return True
+    raise ValueError(f"{HC_ROW_EXACT_ENV}={raw!r}: expected 0/off or 1/on")
+
+
+_ROW_EXACT = row_exact_from_env()
 _LOCK = threading.Lock()
 _STATS: Counter = Counter()
 _DECLINES: Counter = Counter()
@@ -106,6 +134,14 @@ _VALIDATED: set = set()
 
 def hc_decode_enabled() -> bool:
     return _ENABLED
+
+
+def set_hc_row_exact_enabled(enabled: bool) -> bool:
+    """Live switch for the row-exact window mode; returns the previous value."""
+    global _ROW_EXACT
+    previous = _ROW_EXACT
+    _ROW_EXACT = bool(enabled)
+    return previous
 
 
 def set_hc_decode_enabled(enabled: bool) -> bool:
@@ -127,6 +163,8 @@ def hc_decode_status(*, reset: bool = False) -> dict:
             "broken": bool(_BROKEN),
             "calls": int(_STATS["calls"]),
             "inject_calls": int(_STATS["inject_calls"]),
+            "row_exact_calls": int(_STATS["row_exact_calls"]),
+            "row_exact_mode": bool(_ROW_EXACT),
             "launches": int(2 * _STATS["calls"]),
             "declines": dict(_DECLINES),
             "errors": int(_STATS["errors"]),
@@ -148,8 +186,20 @@ def _decline(reason: str) -> None:
         _LAST_DECLINE = reason
 
 
+def _plain_class(layer) -> type:
+    """The module class the launches transcribe.
+
+    The row-exact verify route (``qwen4_row_exact``) class-swaps every trunk
+    ``QuantizedLinear`` to a subclass that records its original class as
+    ``_row_exact_base``; outside a verify window that subclass is the plain
+    layer (one-row calls pass straight through), and inside one it gives every
+    row the one-row arithmetic these launches transcribe (law 0)."""
+    cls = type(layer)
+    return getattr(cls, "_row_exact_base", cls)
+
+
 def _quantized_reason(layer) -> str | None:
-    if type(layer) is not nn.QuantizedLinear:
+    if _plain_class(layer) is not nn.QuantizedLinear:
         return "projection is not a plain QuantizedLinear"
     if "_lane_prepared" in layer.__dict__:
         return "projection owned by the lane matmul"
@@ -819,10 +869,43 @@ def try_hc_decode(module, hyper_input, *, eager_norm: bool, compile_glue: bool):
         _decline("input dtype")
         return None
     rows = hyper_input.shape[0] * hyper_input.shape[1]
-    law = projection_law(rows)
+    window = _row_exact_window() if rows > 1 else None
+    if window is not None:
+        # A row-exact verify window: every row must carry the bits of its
+        # one-token decode step, which the composed path (row-exact
+        # projections) gives it; law 0 is that arithmetic per grid row.
+        # (Never law 1 here: qmv_wide's multi-row arithmetic is not the
+        # one-token step's.)
+        if not _ROW_EXACT:
+            _decline("row-exact window mode off")
+            window.note("hc", "composed", 1)
+            return None
+        if rows > ROW_EXACT_MAX_ROWS:
+            _decline("row-exact window wider than ROW_EXACT_MAX_ROWS")
+            window.note("hc", "composed", 1)
+            return None
+        law = 0
+    else:
+        law = projection_law(rows)
     if law is None:
         _decline("rows (MLX runs a matvec this module does not transcribe)")
         return None
+    fused = _try_launch(module, hyper_input, rows, law, eager_norm, compile_glue)
+    if window is not None:
+        window.note("hc", "composed" if fused is None else "kernel_one_row_law", 1)
+        if fused is not None:
+            _STATS["row_exact_calls"] += 1
+    return fused
+
+
+def _row_exact_window():
+    from mlx2.runtime import row_exact_verify
+
+    return row_exact_verify.current()
+
+
+def _try_launch(module, hyper_input, rows: int, law: int, eager_norm: bool, compile_glue: bool):
+    global _BROKEN, _LAST_ERROR
     if getattr(module, "training", False):
         _decline("training")
         return None
