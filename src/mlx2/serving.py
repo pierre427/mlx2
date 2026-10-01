@@ -800,6 +800,22 @@ def verify_bitexact_receipt_fields(handle, start):
     return {"verify_bitexact": detail["verify_bitexact"], "verify_bitexact_detail": detail}
 
 
+def row_exact_verify_handle(engine):
+    """The adapter's installed row-exact verify route, or None (default)."""
+    return getattr(getattr(engine, "adapter", None), "row_exact_verify", None)
+
+
+def row_exact_verify_receipt_fields(engine, start):
+    """Terminal receipt fields, present only when the route is installed;
+    ``row_exact`` is true only when every verify window during the request
+    was row-exact (fail closed)."""
+    handle = row_exact_verify_handle(engine)
+    if handle is None:
+        return {}
+    detail = handle.receipt(start)
+    return {"row_exact_verify": detail["row_exact"], "row_exact_verify_detail": detail}
+
+
 def lane_matmul_status(engine) -> dict:
     """Lane matmul policy, coverage and host call counters for /v1/status."""
     from .runtime.lane import stats
@@ -1426,6 +1442,7 @@ class Job:
     approximate_kv_receipt: dict | None = None
     approximate_kv_applied: bool = False
     verify_bitexact_start: dict | None = None
+    row_exact_verify_start: dict | None = None
     admission_final_reclaim_done: bool = False
     # Lane bytes admission granted this job that its cache has not allocated
     # yet; cleared by its first generated token (see ``unmaterialized_lane_bytes``).
@@ -2570,6 +2587,9 @@ class ServingEngine:
             job.verify_bitexact_start = handle.begin_request(
                 explicit=bool(request.get("verify_bitexact", False))
             )
+        row_exact = row_exact_verify_handle(self)
+        if row_exact is not None:
+            job.row_exact_verify_start = row_exact.snapshot()
         job.structured_automata = self._prepare_structured_automata(job.request)
         return job
 
@@ -3176,6 +3196,11 @@ class ServingEngine:
                 "int8_prefill": int8_prefill_status(self),
                 "lane_matmul": lane_matmul_status(self),
                 "verify_bitexact": verify_bitexact_status(self),
+                **(
+                    {"row_exact_verify": row_exact_verify_handle(self).status()}
+                    if row_exact_verify_handle(self) is not None
+                    else {}
+                ),
                 "sp_qmm": sp_qmm_status(self),
                 "qsdpa_verify": {
                     "counts": dict(qvm.STATS),
@@ -4624,6 +4649,15 @@ class ServingEngine:
                     and self.lane_matmul_receipt.get("available") is False
                 ):
                     raise ValueError("requested lane matmul mode is unavailable on this device")
+                if (
+                    getattr(adapter, "row_exact_verify", None) is not None
+                    and self.lane_matmul_receipt.get("covered")
+                ):
+                    # The row-exact verify reproduces the stock one-row qmv;
+                    # a lane-covered projection has a different one-row law.
+                    raise ValueError(
+                        "row_exact_verify cannot share projections with lane_matmul"
+                    )
             # Wire the weights for the process lifetime, on every route and
             # before any cache exists (runtime/weight_residency.py).  The
             # prompt-lookup and external-draft generators never raised the
@@ -8206,6 +8240,9 @@ class ServingEngine:
                                     **verify_bitexact_receipt_fields(
                                         self.verify_bitexact_handle,
                                         job.verify_bitexact_start,
+                                    ),
+                                    **row_exact_verify_receipt_fields(
+                                        self, job.row_exact_verify_start
                                     ),
                                     "cache_capsule": (
                                         getattr(

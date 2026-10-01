@@ -194,11 +194,17 @@ class SegmentedBatchQSAKVCache(BatchQSAKVCache):
             self._bump("private_delta_ineligible_ragged_step")
         elif not nonempty_step:
             self._bump("private_delta_ineligible_empty_step")
+        from . import row_exact_verify
+
+        row_exact = row_exact_verify.current()
         private_candidate = (
             private_enabled
             and self._private_delta_base_tokens is not None
             and uniform_step
             and nonempty_step
+            # A row-exact verify window runs each lineage per row below; the
+            # private-delta reduction is a multi-row arithmetic.
+            and row_exact is None
         )
         if private_candidate:
             from .segmented_self_mtp import (
@@ -256,7 +262,17 @@ class SegmentedBatchQSAKVCache(BatchQSAKVCache):
         projected = attention._project_segmented_qsa(hidden)
         outputs = []
         gates = []
+        exact_rows = row_exact is not None
+        if exact_rows and any(
+            getattr(row, "supports_shared_qsa_suffix", False) for row in self.rows
+        ):
+            # The shared-suffix consumer is a multi-row reduction.
+            row_exact.fail("shared_qsa_suffix_row")
+            exact_rows = False
         for index, (row, valid) in enumerate(zip(self.rows, self._step_lengths)):
+            if valid == 0 and exact_rows:
+                outputs.append(mx.zeros((1, width, hidden.shape[-1]), dtype=hidden.dtype))
+                continue
             if valid == 0:
                 pre_o_shape = (
                     1,
@@ -273,6 +289,14 @@ class SegmentedBatchQSAKVCache(BatchQSAKVCache):
             row_projected = tuple(
                 (value[index : index + 1, :valid] for value in projected)
             )
+            if exact_rows:
+                # The attention module splits the lineage into one-token
+                # forwards and applies its own output projection per row.
+                output = attention(
+                    row_hidden, row_mask, row, _projected=row_projected
+                )
+                outputs.append(_pad_sequence(output, 0, width - valid, 1))
+                continue
             if getattr(row, "supports_shared_qsa_suffix", False):
                 (output, gate) = self._shared_suffix_row_attention(
                     attention, row_hidden, row_mask, row, row_projected
@@ -292,6 +316,8 @@ class SegmentedBatchQSAKVCache(BatchQSAKVCache):
         self._bump("row_state_splits", len(self.rows))
         self._capture_row_qsa_share()
         self._refresh_geometry()
+        if exact_rows:
+            return mx.concatenate(outputs, axis=0)
         output = mx.concatenate(outputs, axis=0)
         gate = mx.concatenate(gates, axis=0)
         return attention.o_proj(output * mx.sigmoid(gate))

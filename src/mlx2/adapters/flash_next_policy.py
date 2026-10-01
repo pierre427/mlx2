@@ -104,6 +104,12 @@ class FlashNextPolicy:
     # 1K, +2% / flat at 32K (qualification/runs/attn-rows-20260930).  Opt-in;
     # enters the environment and receipts only when enabled.
     attn_fused_rows: bool = False
+    # Opt-in row-exact self-MTP verify (omlx #4023/#4050/#4041 port,
+    # runtime/models/qwen4_row_exact.py): every verify row gets the bits of
+    # the one-token decode step, so greedy MTP-on output equals MTP-off.
+    # Not an environment switch; installed on the loaded model and entered
+    # in receipts only when enabled.
+    row_exact_verify: bool = False
 
     def __post_init__(self):
         validate_self_mtp_num_draft(self.num_draft)
@@ -128,6 +134,7 @@ class FlashNextPolicy:
             "tensorfold_prefill",
             "hc_decode_kernels",
             "attn_fused_rows",
+            "row_exact_verify",
             *_OPTIONAL_KERNEL_ENV,
         ):
             if type(getattr(self, name)) is not bool:
@@ -159,6 +166,13 @@ class FlashNextPolicy:
             )
         if segment != 2048 and not self.gdn_prefill_chunk:
             raise ValueError("gdn_prefill_segment_rows requires gdn_prefill_chunk")
+        if self.row_exact_verify and (self.tensorfold_qmv_rows or self.fp32_head_logits):
+            # Both replace the one-row projection the verify rows must match;
+            # the row-exact route reproduces only the stock one-row qmv.
+            raise ValueError(
+                "row_exact_verify cannot be combined with tensorfold_qmv_rows "
+                "or fp32_head_logits"
+            )
         if self.tensorfold_prefill_backend not in ("native", "metal"):
             raise ValueError("tensorfold_prefill_backend must be native or metal")
         if self.tensorfold_prefill_backend != "native" and not self.tensorfold_prefill:
@@ -192,6 +206,8 @@ class FlashNextPolicy:
             del values["tensorfold_qmv_rows"]
         if not self.tensorfold_prefill:
             del values["tensorfold_prefill"]
+        if not self.row_exact_verify:
+            del values["row_exact_verify"]
         if self.tensorfold_prefill_backend == "native":
             del values["tensorfold_prefill_backend"]
         if not self.gdn_prefill_chunk:

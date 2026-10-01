@@ -112,6 +112,7 @@ from .qwen3_next import (
 )
 from .rope_utils import Llama3RoPE, YarnRoPE, initialize_rope
 from ..verify_sync import record_verify_sync
+from ..row_exact_verify import active as _row_exact_window_active
 
 _QSA_SEGMENT_CAPTURE_LOCK = threading.Lock()
 _QSA_SEGMENT_CAPTURE_COUNT = 0
@@ -2627,6 +2628,9 @@ class PLELayer(nn.Module):
             str(hidden.dtype),
             str(embeddings.dtype),
             _trace_flags(),
+            # A row-exact verify window traces different projections and a
+            # pinned norm width; it must not share a trace with the stock one.
+            (_RMSNORM_FAST_WIDTH_OVERRIDE, _row_exact_window_active()),
         )
         compiled = self._compiled_chain(signature, has_mask, has_state, write_state)
         if compiled is None:

@@ -344,6 +344,12 @@ class FlashNextAdapter:
             self.prefill_execution_identity = execution_identity(
                 self.tensorfold_prefill, self.gdn_prefill_scan
             )
+            self.row_exact_verify = None
+            if self.policy.row_exact_verify:
+                from ..runtime.models.qwen4_row_exact import install as install_row_exact
+
+                self.row_exact_verify = install_row_exact(self.model)
+                self.row_exact_verify.enable(True)
             self.fp32_head = None
             if self.policy.fp32_head_logits:
                 from ..runtime.fp32_head import enable_fp32_head_logits
@@ -566,6 +572,11 @@ class FlashNextAdapter:
             **(
                 {"fp32_head_logits": self.fp32_head}
                 if getattr(self, "fp32_head", None)
+                else {}
+            ),
+            **(
+                {"row_exact_verify": self.row_exact_verify.status()}
+                if getattr(self, "row_exact_verify", None) is not None
                 else {}
             ),
             **(

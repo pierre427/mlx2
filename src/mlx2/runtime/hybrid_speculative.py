@@ -2414,10 +2414,15 @@ def _propose_batched_self_mtp_round(
     _prepare_self_mtp_cache_group(batch.caches.target, valid_lengths, right_padding)
     try:
         verifier = getattr(model, "mtp_verify_backbone", None)
+        verify_head = model.logits
         if verifier is None:
             verifier = lambda ids, caches: _mtp_backbone(model, ids, caches)
+        else:
+            # A model that verifies with its own backbone may also own the
+            # head for those rows (row-exact verify); default: model.logits.
+            verify_head = getattr(model, "mtp_verify_logits", model.logits)
         (vlogit_hidden, batched_hidden) = verifier(verify_ids, batch.caches.target)
-        batched_logits = model.logits(vlogit_hidden)
+        batched_logits = verify_head(vlogit_hidden)
     finally:
         _finalize_self_mtp_cache_group(batch.caches.target)
     old_curs = tuple((lane.cur for lane in batch.lanes))
