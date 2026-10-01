@@ -8,7 +8,7 @@ from pathlib import Path
 import mlx.core as mx
 import numpy as np
 from mlx import nn, optimizers
-from mlx.utils import tree_flatten, tree_unflatten
+from mlx.utils import tree_flatten, tree_map, tree_unflatten
 
 
 class EpisodeLinear(nn.Module):
@@ -110,6 +110,11 @@ class LoRAEpisode:
     def step(self, tokens, objective):
         if self.closed or self.promoted or self.steps >= self.max_steps:
             raise ValueError("episode is no longer trainable")
+        # MLX arrays are immutable; copy the containers because optimizers
+        # replace leaves in their state dictionaries during an update.
+        weights = self.weights()
+        optimizer_state = tree_map(lambda x: x, self.optimizer.state)
+        revision, steps, was_training = self.live_revision, self.steps, self.model.training
         self.model.train()
         self._allow_parameter_update = True
         try:
@@ -121,9 +126,22 @@ class LoRAEpisode:
                 raise ValueError("nonfinite episode loss or gradient")
             self.optimizer.update(self.model, gradients)
             mx.eval(self.model.parameters(), self.optimizer.state)
-            self.steps += 1
+            if any(not bool(mx.all(mx.isfinite(v)).item()) for v in self.weights().values()) or any(
+                not bool(mx.all(mx.isfinite(v)).item()) for _, v in tree_flatten(self.optimizer.state)
+            ):
+                raise ValueError("nonfinite episode update")
             self._invalidate()
+            self.steps += 1
             return float(value.item())
+        except BaseException:
+            self.model.update(tree_unflatten(list(weights.items())))
+            self.optimizer.state = optimizer_state
+            self.steps = steps
+            self.model.adapter_revision = self.live_revision = revision
+            # A callback may have created KV during the failed attempt.
+            self.model._cache_owner = object()
+            self.model.train(was_training)
+            raise
         finally:
             self._allow_parameter_update = False
 

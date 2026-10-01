@@ -3,7 +3,7 @@
 import pytest
 
 mx = pytest.importorskip("mlx.core")
-from mlx.utils import tree_flatten
+from mlx.utils import tree_flatten, tree_unflatten
 
 from mlx2.experimental.hysparse2.config import Config
 from mlx2.experimental.hysparse2.lora import LoRAEpisode
@@ -227,5 +227,48 @@ def test_episode_update_scope_closes_after_base_mutation_attempt():
         assert float(mx.max(mx.abs(model.embedding.weight - before)).item()) == 0
         assert not episode._allow_parameter_update
         assert episode.steps == 0
+    finally:
+        episode.close()
+
+
+@pytest.mark.parametrize("failure", ["exception", "nonfinite_weights", "nonfinite_state"])
+def test_failed_optimizer_step_restores_adapter_and_optimizer(monkeypatch, failure):
+    model = Model(Config.smoke())
+    episode = LoRAEpisode(model, ["self_decoder.0.attention.q"], base_revision="r")
+    tokens = mx.array([[1, 2, 3, 4]])
+    try:
+        episode.step(tokens, loss)
+        weights = episode.weights()
+        state = dict(tree_flatten(episode.optimizer.state))
+        revision, steps = model.adapter_revision, episode.steps
+        owner = model._cache_owner
+        update = episode.optimizer.update
+
+        def broken(m, gradients):
+            update(m, gradients)
+            if failure == "exception":
+                raise RuntimeError("partial optimizer failure")
+            if failure == "nonfinite_weights":
+                key, value = next(iter(episode.weights().items()))
+                m.update(tree_unflatten([(key, mx.full(value.shape, float("inf")))]))
+            else:
+                episode.optimizer.state["learning_rate"] = mx.array(float("inf"))
+
+        monkeypatch.setattr(episode.optimizer, "update", broken)
+        error = RuntimeError if failure == "exception" else ValueError
+        with pytest.raises(error, match="partial optimizer failure|nonfinite episode update"):
+            episode.step(tokens, loss)
+        for key, value in episode.weights().items():
+            assert float(mx.max(mx.abs(value - weights[key])).item()) == 0
+        restored = dict(tree_flatten(episode.optimizer.state))
+        assert restored.keys() == state.keys()
+        for key, value in state.items():
+            assert bool(mx.all(restored[key] == value).item())
+        assert model.adapter_revision == revision and episode.steps == steps
+        assert model._cache_owner is not owner
+        assert not episode._allow_parameter_update
+        monkeypatch.setattr(episode.optimizer, "update", update)
+        assert mx.isfinite(mx.array(episode.step(tokens, loss))).item()
+        assert episode.steps == steps + 1
     finally:
         episode.close()

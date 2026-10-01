@@ -105,6 +105,43 @@ def main():
             assert report["base_weight_error_after_rejected_step"] == 0 and not loaded._allow_parameter_update
             assert loaded.steps == 0
             report["base_update_rejected_inside_managed_step"] = True
+            report["transactional_step_failures"] = []
+            update = loaded.optimizer.update
+            def child_diagnostic(m, _):
+                return mx.sum(m.semantic_ple.value.lora_b)
+
+            for failure in ("exception", "nonfinite_weights", "nonfinite_state"):
+                weights = loaded.weights()
+                state = dict(tree_flatten(loaded.optimizer.state))
+                identity, owner = model.adapter_revision, model._cache_owner
+                def broken_update(m, gradients):
+                    update(m, gradients)
+                    if failure == "exception":
+                        raise RuntimeError("partial optimizer failure")
+                    if failure == "nonfinite_weights":
+                        key, value = next(iter(loaded.weights().items()))
+                        m.update(tree_unflatten([(key, mx.full(value.shape, float("inf")))]))
+                    else:
+                        loaded.optimizer.state["learning_rate"] = mx.array(float("inf"))
+                loaded.optimizer.update = broken_update
+                try:
+                    try:
+                        loaded.step(None, child_diagnostic)
+                        raise AssertionError("failed update accepted")
+                    except (RuntimeError, ValueError) as exc:
+                        assert "partial optimizer failure" in str(exc) or "nonfinite episode update" in str(exc)
+                finally:
+                    loaded.optimizer.update = update
+                assert all(float(mx.max(mx.abs(value - weights[key])).item()) == 0 for key, value in loaded.weights().items())
+                restored = dict(tree_flatten(loaded.optimizer.state))
+                assert restored.keys() == state.keys()
+                assert all(bool(mx.all(restored[key] == value).item()) for key, value in state.items())
+                assert model.adapter_revision == identity and loaded.steps == 0
+                assert model._cache_owner is not owner and not loaded._allow_parameter_update
+                report["transactional_step_failures"].append(failure)
+            report["retry_loss"] = loaded.step(None, child_diagnostic)
+            assert loaded.steps == 1 and model.adapter_revision != child_revision
+            report["managed_retry_passed"] = True
             report["peak_memory_bytes"] = mx.get_peak_memory()
             report["source_hashes"] = {str(path): file_hash(path) for path in (Path(__file__), Path(lora_module.__file__), Path(model_module.__file__))}
             report["completed"] = True
