@@ -1188,10 +1188,16 @@ def _concat_parts(parts_list, axis: int):
         at = axis % len(shapes[0])
         if len({shape[:at] + shape[at + 1 :] for shape in shapes}) > 1:
             return None
-    return {
-        suffix: mx.concatenate([parts[suffix] for parts in parts_list], axis=axis)
-        for suffix in suffixes
-    }
+    from ..weight_stream import record_concat
+
+    fused = {}
+    for suffix in suffixes:
+        pieces = [parts[suffix] for parts in parts_list]
+        fused[suffix] = mx.concatenate(pieces, axis=axis)
+        # A streamed load proves a fused table's source from this record;
+        # outside one it is a no-op.
+        record_concat(fused[suffix], pieces, axis)
+    return fused
 
 
 def transform_moe_weights(

@@ -261,8 +261,11 @@ _SEMANTIC_SCOPE_SEPARATOR = ":media:"
 # Numerical-law namespaces that serving wraps around a semantic namespace:
 # (inner, tag, revision).  int8-prefill: int8_prefill.apc_semantic_fingerprint;
 # lane-matmul: lane.installer.apc_lane_fingerprint; prefill-execution-v1:
-# prefill_plan.apc_prefill_fingerprint.
-_NUMERICS_WRAPPER_TAGS = frozenset({"int8-prefill", "lane-matmul", "prefill-execution-v1"})
+# prefill_plan.apc_prefill_fingerprint; weight-stream:
+# weight_stream.apc_weight_stream_fingerprint.
+_NUMERICS_WRAPPER_TAGS = frozenset(
+    {"int8-prefill", "lane-matmul", "prefill-execution-v1", "weight-stream"}
+)
 
 
 def _numerics_layers(semantic):

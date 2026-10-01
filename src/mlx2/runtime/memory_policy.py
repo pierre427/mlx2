@@ -308,7 +308,15 @@ class SelfMTPLaneAdmissionController:
             )
         if not math.isfinite(transient_gib_per_lane) or transient_gib_per_lane <= 0:
             raise ValueError("self-MTP transient GiB per lane must be positive")
-        stream_reserve_gib = float(stream_reserve_gib or 0.0)
+        # A callable is re-read at every decision: the streaming manager's
+        # unfilled reservation shrinks as its cache fills (the filled part is
+        # already absent from measured free memory).
+        if callable(stream_reserve_gib):
+            self._stream_reserve_source = stream_reserve_gib
+            stream_reserve_gib = 0.0
+        else:
+            self._stream_reserve_source = None
+            stream_reserve_gib = float(stream_reserve_gib or 0.0)
         if not math.isfinite(stream_reserve_gib) or stream_reserve_gib < 0:
             raise ValueError("streamed weight reserve must be non-negative")
         if saturation_lane_cap is not None and (
@@ -331,20 +339,37 @@ class SelfMTPLaneAdmissionController:
         self.service_reserve_gib = float(service_reserve_gib)
         self.driver_allowance_gib = float(driver_allowance_gib)
         self.transient_gib_per_lane = float(transient_gib_per_lane)
-        self.stream_reserve_gib = stream_reserve_gib
+        self._stream_reserve_constant = stream_reserve_gib
         self.saturation_lane_cap = saturation_lane_cap
         self.verification_row_cap = verification_row_cap
 
     @property
-    def hard_reserve_gib(self) -> float:
-        """Service + driver + the streamed weight cache ceiling.
+    def stream_reserve_gib(self) -> float:
+        source = getattr(self, "_stream_reserve_source", None)
+        if source is None:
+            return getattr(self, "_stream_reserve_constant", 0.0)
+        value = float(source())
+        if not math.isfinite(value) or value < 0:
+            raise ValueError("streamed weight reserve must be non-negative")
+        return value
 
-        ``stream_reserve_gib`` is the streaming manager's **enforced** ceiling,
-        not an estimate of its working set, and it is subtracted exactly once
-        here -- before any lane is costed -- so a lane admitted at cycle N
-        cannot be starved by expert cache growth at cycle N+1.  A streamed
-        model's resident charge is therefore ``R_fixed + B_stream``: its
-        non-streamable remainder plus this ceiling, never its file size.
+    @stream_reserve_gib.setter
+    def stream_reserve_gib(self, value) -> None:
+        self._stream_reserve_source = None
+        self._stream_reserve_constant = float(value)
+
+    @property
+    def hard_reserve_gib(self) -> float:
+        """Service + driver + the streamed weight reservation.
+
+        ``stream_reserve_gib`` is the streaming manager's reservation -- its
+        steady cache ceiling plus the reserved worst-case gather transient --
+        minus what is already resident (a callable supplied by the engine), not
+        an estimate of its working set.  It is subtracted here before any lane
+        is costed, so a lane admitted at cycle N cannot be starved by expert
+        cache growth at cycle N+1, and the filled part is never charged twice.
+        A streamed model's resident charge is therefore ``R_fixed + B_stream``:
+        its non-streamable remainder plus this reservation, never file size.
 
         It composes with, rather than replaces, the other two terms.  The
         service and driver reserves protect the rest of the host and key off

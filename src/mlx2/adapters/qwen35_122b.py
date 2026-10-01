@@ -161,12 +161,21 @@ class Qwen35122BA10BAdapter(Qwen3635BA3BAdapter):
     sampling_defaults = None
     default_route_execution_policy = {}
     default_mtp_ordinary_handoff_max_width = None
+    # Declared on this class itself; never inherited from Qwen3.6.
+    weight_streaming_modes = frozenset({"moe_experts"})
 
-    def __init__(self, model_path: str, *, execution_policy=None, require_mtp=False):
+    def __init__(
+        self, model_path: str, *, execution_policy=None, require_mtp=False,
+        weight_streaming=None,
+    ):
+        from ..runtime.streamed_load import require_declared
+
+        stream_request = require_declared(type(self), weight_streaming)
         if require_mtp:
             raise ValueError("Qwen3.5 122B embedded MTP is not implemented")
         if execution_policy not in (None, {}):
             raise ValueError("Qwen3.5 122B has no qualified execution policy")
+        self.weight_stream = None
         artifact = inspect_artifact(model_path)
         self.identity = artifact["identity"]
         self.config = artifact["config"]
@@ -188,36 +197,52 @@ class Qwen35122BA10BAdapter(Qwen3635BA3BAdapter):
         from ..runtime.tokenizer_utils import BPEStreamingDetokenizer, TokenizerWrapper
         from ..runtime.ubc_evict import load_shards_evicting
 
-        self.model = Model(ModelArgs.from_dict(config))
-        files = [path / name for name in sorted(set(artifact["weight_map"].values()))]
-        weights = self.model.sanitize(
-            load_shards_evicting(files, sanitize=self.model.shard_prune)
-        )
-        quant = config["quantization"]
-        def predicate(name, module):
-            if name in quant:
-                return quant[name]
-            return hasattr(module, "to_quantized") and f"{name}.scales" in weights
-        nn.quantize(
-            self.model, group_size=quant["group_size"], bits=quant["bits"],
-            mode=quant["mode"], class_predicate=predicate,
-        )
-        self.model.load_weights(list(weights.items()), strict=True)
-        self.model.eval()
-        mx.eval(self.model.parameters())
-        weights.clear()
-        mx.clear_cache()
-        self._record_load_dtype()
-        tokenizer = AutoTokenizer.from_pretrained(path, local_files_only=True, trust_remote_code=False)
-        # Some tokenizer classes rebuild the pre-tokenizer instead of reading tokenizer.json.
-        from ..runtime.tokenizer_integrity import repair_loaded_tokenizer
+        try:
+            self.model = Model(ModelArgs.from_dict(config))
+            names = sorted(set(artifact["weight_map"].values()))
+            files = [path / name for name in names]
+            quant = config["quantization"]
 
-        self.pretokenizer_receipt = repair_loaded_tokenizer(tokenizer, path)
-        eos = resolve_eos_token_ids(config, tokenizer)
-        self.tokenizer = TokenizerWrapper(
-            tokenizer, detokenizer_class=BPEStreamingDetokenizer, eos_token_ids=eos
-        )
-        self.max_context = int(config["text_config"]["max_position_embeddings"])
+            def quantize(weights):
+                def predicate(name, module):
+                    if name in quant:
+                        return quant[name]
+                    return hasattr(module, "to_quantized") and f"{name}.scales" in weights
+                nn.quantize(
+                    self.model, group_size=quant["group_size"], bits=quant["bits"],
+                    mode=quant["mode"], class_predicate=predicate,
+                )
+
+            if stream_request is None:
+                weights = self.model.sanitize(
+                    load_shards_evicting(files, sanitize=self.model.shard_prune)
+                )
+                quantize(weights)
+                self.model.load_weights(list(weights.items()), strict=True)
+            else:
+                weights = self._load_streamed(
+                    path, names, artifact, config, stream_request, quantize
+                )
+            self.model.eval()
+            mx.eval(self.model.parameters())
+            weights.clear()
+            mx.clear_cache()
+            self._record_load_dtype()
+            tokenizer = AutoTokenizer.from_pretrained(path, local_files_only=True, trust_remote_code=False)
+            # Some tokenizer classes rebuild the pre-tokenizer instead of reading tokenizer.json.
+            from ..runtime.tokenizer_integrity import repair_loaded_tokenizer
+
+            self.pretokenizer_receipt = repair_loaded_tokenizer(tokenizer, path)
+            eos = resolve_eos_token_ids(config, tokenizer)
+            self.tokenizer = TokenizerWrapper(
+                tokenizer, detokenizer_class=BPEStreamingDetokenizer, eos_token_ids=eos
+            )
+            self.max_context = int(config["text_config"]["max_position_embeddings"])
+            if self.weight_stream is not None:
+                self.weight_stream.begin_serving()
+        except BaseException:
+            self.close()
+            raise
 
     def profile_name(self, mtp):
         if mtp:

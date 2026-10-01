@@ -393,6 +393,79 @@ def moe_expert_streaming_policy(value) -> dict:
     return resolved
 
 
+def dense_weight_streaming_policy(value) -> dict:
+    """Validate the default-off dense trunk-MLP weight streaming policy.
+
+    When enabled, an adapter that declares ``dense_mlp`` streaming leaves its
+    quantized trunk MLP projections on disk and reads each one per call.
+    ``staging_gib`` is the reserved budget for one projection in flight (host
+    buffer plus device copy); it must hold the largest selected projection
+    twice, which the loader checks before anything is evaluated.
+    """
+    defaults = {"enabled": False, "staging_gib": 0.0, "read_workers": 16}
+    if value is None:
+        return dict(defaults)
+    if not isinstance(value, dict):
+        raise ValueError("dense_weight_streaming must be an object")
+    unknown = set(value) - set(defaults)
+    if unknown:
+        raise ValueError(f"unknown dense weight streaming settings: {sorted(unknown)}")
+    policy = {**defaults, **value}
+    if type(policy["enabled"]) is not bool:
+        raise ValueError("dense_weight_streaming.enabled must be boolean")
+    staging = policy["staging_gib"]
+    if (
+        isinstance(staging, bool)
+        or not isinstance(staging, (int, float))
+        or not math.isfinite(staging)
+        or not 0 <= staging <= 1024
+    ):
+        raise ValueError(
+            "dense_weight_streaming.staging_gib must be a number from 0 to 1024"
+        )
+    workers = policy["read_workers"]
+    if isinstance(workers, bool) or not isinstance(workers, int) or not 1 <= workers <= 64:
+        raise ValueError(
+            "dense_weight_streaming.read_workers must be an integer from 1 to 64"
+        )
+    if policy["enabled"] and staging <= 0:
+        raise ValueError(
+            "dense_weight_streaming.staging_gib must be positive when enabled"
+        )
+    return {
+        "enabled": policy["enabled"],
+        "staging_gib": float(staging),
+        "read_workers": int(workers),
+    }
+
+
+# Selectable mechanisms that read projection or expert storage directly, or
+# bind per-row adapters to it.  None has evidence with streamed weights.
+def weight_streaming_refusals(
+    *, lane_matmul, sp_qmm, int8_prefill, verify_bitexact, multi_lora, lora_root,
+    execution_policy,
+) -> list:
+    reasons = []
+    if lane_matmul in ("crossover", "exact"):
+        reasons.append(f"lane_matmul={lane_matmul}")
+    if sp_qmm:
+        reasons.append("sp_qmm")
+    if int8_prefill:
+        reasons.append("int8_prefill")
+    if verify_bitexact:
+        reasons.append("verify_bitexact")
+    if multi_lora or lora_root is not None:
+        reasons.append("LoRA")
+    policy = execution_policy or {}
+    if "draft_model" in policy:
+        reasons.append("external draft")
+    for key in ("tensorfold_prefill", "tensorfold_qmv_rows", "row_exact_verify",
+                "mtp_draft_vocab", "moe_routed_candidate"):
+        if policy.get(key):
+            reasons.append(key)
+    return reasons
+
+
 def apc_rolling_checkpoint_policy(value) -> dict:
     """Validate the default-off disposable rolling prefill checkpoint policy.
 
@@ -1058,6 +1131,13 @@ def resident_device_bytes():
         return None
 
 
+def is_weight_source_change(exc):
+    """A streamed weight file changed after binding: fatal for the worker."""
+    from .runtime.weight_stream import WeightSourceChanged
+
+    return isinstance(exc, WeightSourceChanged)
+
+
 def is_device_out_of_memory(exc):
     """A Metal command buffer that failed for lack of memory."""
     text = str(exc)
@@ -1708,8 +1788,26 @@ class ServingEngine:
         # would not be.
         if self.moe_expert_streaming_policy["enabled"] and max_lanes != 1:
             raise ValueError("MoE expert streaming requires max_lanes=1")
+        self.dense_weight_streaming_policy = dense_weight_streaming_policy(
+            (execution_policy or {}).get("dense_weight_streaming")
+        )
+        if self.dense_weight_streaming_policy["enabled"]:
+            if self.moe_expert_streaming_policy["enabled"]:
+                raise ValueError(
+                    "MoE expert streaming and dense weight streaming are mutually "
+                    "exclusive in this slice"
+                )
+            if max_lanes != 1:
+                raise ValueError("dense weight streaming requires max_lanes=1")
+        # The streaming manager.  Adapter-owned (and closed by the adapter)
+        # on the early-load path; engine-owned only on the legacy path.
         self.expert_stream = None
         self.expert_stream_collector = None
+        self._expert_stream_engine_owned = False
+        # "early" (adapter installs before materializing), "legacy" (engine
+        # installs after the adapter loaded) or None.
+        self.weight_streaming_route = None
+        self.weight_streaming_lane_matmul = None
         # P4: consumers (preemption, rolling captures) read this callable.  It
         # is a constant NORMAL unless the operator enables host signals.
         from .runtime.os_memory import MemoryPressureMonitor, PressureLevel
@@ -1962,6 +2060,27 @@ class ServingEngine:
             cache_capsules=self.cache_capsule_policy["enabled"],
         )
         self.multi_lora = None
+        if self.weight_streaming_enabled():
+            refused = weight_streaming_refusals(
+                lane_matmul=self.lane_matmul,
+                sp_qmm=self.sp_qmm_enabled,
+                int8_prefill=self.int8_prefill_policy.enabled,
+                verify_bitexact=self.verify_bitexact_policy.enabled,
+                multi_lora=self.multi_lora_policy is not None,
+                lora_root=self.lora_root,
+                execution_policy=execution_policy,
+            )
+            if refused:
+                raise ValueError(
+                    "weight streaming has no evidence with "
+                    + ", ".join(refused)
+                    + "; refusing before any weight is loaded"
+                )
+            if self.lane_matmul == "auto":
+                # A streamed projection is a plain module the lane installer
+                # skips; resolve the automatic law off for the whole route.
+                self.lane_matmul = "off"
+                self.weight_streaming_lane_matmul = "auto->off (weight streaming)"
         self.max_inflight, self.max_lanes = max_inflight, max_lanes
         self.max_context, self.max_request_bytes = max_context, max_request_bytes
         self.prefill_step = prefill_step
@@ -2132,6 +2251,24 @@ class ServingEngine:
                 qualification=qualification,
             )
         self.adapter_factory = adapter_factory
+        if self.weight_streaming_enabled():
+            from .runtime.streamed_load import declared_stream_modes
+
+            declared = declared_stream_modes(adapter_factory)
+            if self.dense_weight_streaming_policy["enabled"]:
+                if "dense_mlp" not in declared:
+                    raise ValueError(
+                        "dense weight streaming is not declared by "
+                        f"{getattr(adapter_factory, '__name__', adapter_factory)!r}; "
+                        "refusing before any weight is loaded"
+                    )
+                self.weight_streaming_route = "early"
+            else:
+                # Undeclared adapters keep the legacy post-materialization
+                # install, whose receipt says the load peak is unbounded.
+                self.weight_streaming_route = (
+                    "early" if "moe_experts" in declared else "legacy"
+                )
         # Adapter-owned candidates (default-off, unqualified kernels) are
         # selectable only in qualification mode; neither the unqualified
         # route nor a qualification record may select them.
@@ -3157,7 +3294,7 @@ class ServingEngine:
             floor_bytes=floor,
             admission_limit_bytes=limit,
             resident_bytes=resident_device_bytes(),
-            stream_reserve_bytes=int(self.expert_stream_reserve_gib() * (1 << 30)),
+            stream_reserve_bytes=int(self.stream_unfilled_reserve_gib() * (1 << 30)),
             lane_need_bytes=lane_need,
             lanes=max(1, min(self.max_lanes, CACHE_CLAMP_LANES)),
         )
@@ -3179,18 +3316,45 @@ class ServingEngine:
                 detail["lane_need_bytes"],
             )
 
+    def weight_streaming_enabled(self) -> bool:
+        dense = getattr(self, "dense_weight_streaming_policy", None) or {}
+        return bool(
+            self.moe_expert_streaming_policy["enabled"] or dense.get("enabled")
+        )
+
     def expert_stream_reserve_gib(self) -> float:
-        """``B_stream``: the enforced expert-cache ceiling, in GiB.
+        """``B_stream``: the full streaming reservation, in GiB.
 
         A streamed model's admission charge is ``R_fixed + B_stream`` -- the
-        weights that stay resident plus this ceiling -- never the size of the
-        files on disk.  It is a configured constant the manager enforces, so
-        admission can subtract it exactly once instead of tracking a working
-        set that cannot be predicted.
+        weights that stay resident plus this reservation -- never the size of
+        the files on disk.  Once a manager exists it is the steady cache
+        ceiling plus the reserved worst-case gather transient (MoE) or the
+        staging budget (dense); before then, the configured budget.  Used
+        where the whole reservation must be allowed (OOM recovery); admission
+        uses :meth:`stream_unfilled_reserve_gib`.
         """
-        if not self.moe_expert_streaming_policy["enabled"]:
-            return 0.0
-        return float(self.moe_expert_streaming_policy["cache_gib"])
+        stream = getattr(self, "expert_stream", None)
+        if stream is not None and callable(getattr(stream, "reserved_bytes", None)):
+            return stream.reserved_bytes() / float(1 << 30)
+        if self.moe_expert_streaming_policy["enabled"]:
+            return float(self.moe_expert_streaming_policy["cache_gib"])
+        dense = getattr(self, "dense_weight_streaming_policy", None) or {}
+        if dense.get("enabled"):
+            return float(dense["staging_gib"])
+        return 0.0
+
+    def stream_unfilled_reserve_gib(self) -> float:
+        """The reservation not already resident (and so not already measured).
+
+        Free-memory probes subtract resident device memory, which includes the
+        filled part of the expert cache; reserving the full ceiling again
+        would charge those bytes twice.
+        """
+        stream = getattr(self, "expert_stream", None)
+        unfilled = getattr(stream, "unfilled_reserve_bytes", None)
+        if callable(unfilled):
+            return unfilled() / float(1 << 30)
+        return self.expert_stream_reserve_gib()
 
     def expert_stream_counters(self) -> dict:
         stream = self.expert_stream
@@ -3201,35 +3365,98 @@ class ServingEngine:
         except Exception:  # noqa: BLE001 - telemetry must not break status
             return {}
 
-    def _install_expert_streaming(self, adapter) -> None:
-        """Replace the adapter's stacked expert tables with streamed ones.
+    def _atlas_collector(self):
+        policy = self.moe_expert_streaming_policy
+        if not policy["atlas"]:
+            return None
+        from .runtime.expert_atlas import AtlasCollector
 
-        Installed after the adapter loads, so the load-time peak is unchanged;
-        what it bounds is the steady-state resident cost.  An adapter whose
-        expert tensors are fused or renamed during ``sanitize`` cannot be
-        addressed by byte range and is refused here rather than served with a
-        cache that silently addresses the wrong rows.
+        return AtlasCollector(
+            self.model_path,
+            sink=policy["atlas_path"],
+            trace_path=policy["trace_path"],
+        )
+
+    def _preload_admission_limit_bytes(self):
+        """The admission limit a streamed load must fit, or None if unmeasured."""
+        try:
+            from .memory import host_memory_gib, metal_advisory_gib
+            from .runtime.memory_policy import SelfMTPLaneAdmissionController
+
+            advisory = metal_advisory_gib()
+            if advisory is None:
+                return None
+            (service, driver) = SelfMTPLaneAdmissionController.host_scaled_reserves(
+                host_memory_gib(), advisory
+            )
+            return admission_memory_limit_bytes(advisory, service, driver)
+        except Exception:  # noqa: BLE001 - an unmeasurable host skips the check
+            return None
+
+    def _weight_stream_request(self):
+        """The typed request handed to a declaring adapter before it loads."""
+        from .runtime.streamed_load import WeightStreamRequest
+
+        limit = self._preload_admission_limit_bytes()
+        dense = self.dense_weight_streaming_policy
+        if dense["enabled"]:
+            return WeightStreamRequest(
+                mode="dense_mlp",
+                budget_bytes=int(dense["staging_gib"] * (1 << 30)),
+                read_workers=dense["read_workers"],
+                admission_limit_bytes=limit,
+            )
+        policy = self.moe_expert_streaming_policy
+        self.expert_stream_collector = self._atlas_collector()
+        return WeightStreamRequest(
+            mode="moe_experts",
+            budget_bytes=int(policy["cache_gib"] * (1 << 30)),
+            read_workers=policy["read_workers"],
+            mtp_resident=bool(policy.get("mtp_resident", False)),
+            collector=self.expert_stream_collector,
+            admission_limit_bytes=limit,
+        )
+
+    def _bind_adapter_stream(self, adapter) -> None:
+        """Adopt the manager an early-load adapter installed (never install twice)."""
+        stream = getattr(adapter, "weight_stream", None)
+        if stream is None:
+            raise RuntimeError(
+                "adapter accepted a weight streaming request but installed nothing"
+            )
+        self.expert_stream = stream
+        self._expert_stream_engine_owned = False
+
+    def _install_expert_streaming(self, adapter) -> None:
+        """Legacy: replace an undeclaring adapter's expert tables after load.
+
+        Installed after the adapter loads, so the load-time peak is unchanged
+        (the receipt says ``load_peak_bounded: false``); what it bounds is the
+        steady-state resident cost.  An adapter whose expert tensors are fused
+        or renamed during ``sanitize`` cannot be addressed by byte range and is
+        refused here rather than served with a cache that silently addresses
+        the wrong rows.
         """
         if not self.moe_expert_streaming_policy["enabled"]:
             return
+        if getattr(self, "weight_streaming_route", "legacy") == "early":
+            return
+        if getattr(self, "expert_stream", None) is not None:
+            raise RuntimeError("expert streaming is already installed")
+        from .runtime.streamed_load import force_stock_expert_arithmetic
         from .runtime.weight_stream import install_expert_streaming
 
         policy = self.moe_expert_streaming_policy
         model = getattr(adapter, "model", None)
         if model is None:
             raise ValueError("adapter exposes no model to stream experts from")
-        collector = None
-        if policy["atlas"]:
-            from .runtime.expert_atlas import AtlasCollector
-
-            collector = AtlasCollector(
-                self.model_path,
-                sink=policy["atlas_path"],
-                trace_path=policy["trace_path"],
-            )
-        top_k = int(
-            getattr(getattr(model, "args", None), "num_experts_per_tok", 0) or 1
-        )
+        collector = self._atlas_collector()
+        args = getattr(model, "args", None)
+        text = getattr(args, "text_config", None)
+        top_k = getattr(args, "num_experts_per_tok", None)
+        if top_k is None and isinstance(text, dict):
+            top_k = text.get("num_experts_per_tok")
+        top_k = int(top_k or 1)
         self.expert_stream = install_expert_streaming(
             model,
             self.model_path,
@@ -3239,6 +3466,8 @@ class ServingEngine:
             collector=collector,
             mtp_resident=bool(policy.get("mtp_resident", False)),
         )
+        self._expert_stream_engine_owned = True
+        self.expert_stream.forced_stock = force_stock_expert_arithmetic(model)
         self.expert_stream_collector = collector
 
     def status(self):
@@ -3763,6 +3992,10 @@ class ServingEngine:
                 host_memory_gib(), metal_advisory_gib()
             )
             cached = self._hard_reserve_gib = service + driver
+        # The unfilled streaming reservation is live, never cached: it is the
+        # same term lane admission subtracts (zero without streaming).
+        if getattr(self, "moe_expert_streaming_policy", None) is not None:
+            return cached + self.stream_unfilled_reserve_gib()
         return cached
 
     def admit_parallel_samples(self, count):
@@ -4646,6 +4879,7 @@ class ServingEngine:
                         "apc_rolling_checkpoints",
                         "host_memory_signals",
                         "moe_expert_streaming",
+                        "dense_weight_streaming",
                         "prefill_scheduling",
                         "constrained_tool_grammar",
                         "tolerant_tool_markers",
@@ -4659,14 +4893,17 @@ class ServingEngine:
             )
             if not adapter_execution_policy:
                 adapter_execution_policy = None
-            adapter = (
-                self.adapter_factory(
-                    self.model_path, execution_policy=adapter_execution_policy
-                )
-                if adapter_execution_policy is not None
-                else self.adapter_factory(self.model_path)
-            )
+            factory_kwargs = {}
+            if adapter_execution_policy is not None:
+                factory_kwargs["execution_policy"] = adapter_execution_policy
+            if getattr(self, "weight_streaming_route", None) == "early":
+                # Only a class that declares the mode receives the request;
+                # it streams before materializing and owns the manager.
+                factory_kwargs["weight_streaming"] = self._weight_stream_request()
+            adapter = self.adapter_factory(self.model_path, **factory_kwargs)
             self.adapter = adapter
+            if getattr(self, "weight_streaming_route", None) == "early":
+                self._bind_adapter_stream(adapter)
             prefill_execution_identity = getattr(
                 adapter, "prefill_execution_identity", None
             )
@@ -4907,6 +5144,21 @@ class ServingEngine:
                         if self.expert_stream is not None
                         else None
                     ),
+                    receipt=(
+                        self.expert_stream.receipt()
+                        if self.expert_stream is not None
+                        else None
+                    ),
+                )
+            if self.dense_weight_streaming_policy["enabled"]:
+                settings["dense_weight_streaming"] = dict(
+                    self.dense_weight_streaming_policy,
+                    plan=self.expert_stream.plan.as_dict(),
+                    receipt=self.expert_stream.receipt(),
+                )
+            if self.weight_streaming_lane_matmul is not None:
+                settings["weight_streaming_lane_matmul"] = (
+                    self.weight_streaming_lane_matmul
                 )
             if self.mtp_ordinary_handoff_policy.enabled:
                 settings["mtp_ordinary_handoff"] = (
@@ -5355,24 +5607,31 @@ class ServingEngine:
             from .runtime.int8_prefill import apc_semantic_fingerprint
             from .runtime.lane.installer import apc_lane_fingerprint
             from .runtime.prefill_plan import apc_prefill_fingerprint
+            from .runtime.weight_stream import apc_weight_stream_fingerprint
 
+            # Streamed weights run stock expert arithmetic: their states live
+            # in their own namespace, live and persistent; identity when off.
+            weight_stream_manager = self.expert_stream
             persistent_identity = APCv2.key(
                 adapter.identity["fingerprint"],
                 revision=persistent_runtime_revision(identity),
                 adapter=adapter.identity["fingerprint"],
                 tokenizer_fingerprint=adapter.identity["fingerprint"],
                 cache_layout_fingerprint=adapter.layout,
-                semantic_fingerprint=apc_semantic_fingerprint(
-                    apc_lane_fingerprint(
-                        apc_prefill_fingerprint(
-                            cache_semantic_fingerprint(
-                                "__tenant_template__" if self.tenant_scoped_cache else None
+                semantic_fingerprint=apc_weight_stream_fingerprint(
+                    apc_semantic_fingerprint(
+                        apc_lane_fingerprint(
+                            apc_prefill_fingerprint(
+                                cache_semantic_fingerprint(
+                                    "__tenant_template__" if self.tenant_scoped_cache else None
+                                ),
+                                prefill_execution_identity,
                             ),
-                            prefill_execution_identity,
+                            self.lane_matmul_receipt,
                         ),
-                        self.lane_matmul_receipt,
+                        self.int8_prefill_policy,
                     ),
-                    self.int8_prefill_policy,
+                    weight_stream_manager,
                 ),
             )
             disk_dir = self.apc_persist_dir or self.cache_dir
@@ -5420,14 +5679,17 @@ class ServingEngine:
                         cache_layout_fingerprint=adapter.layout,
                         # Int8-prefill state lives in its own namespace
                         # (memory and disk); identity when disabled.
-                        semantic_fingerprint=apc_semantic_fingerprint(
-                            apc_lane_fingerprint(
-                                apc_prefill_fingerprint(
-                                    semantic, prefill_execution_identity
+                        semantic_fingerprint=apc_weight_stream_fingerprint(
+                            apc_semantic_fingerprint(
+                                apc_lane_fingerprint(
+                                    apc_prefill_fingerprint(
+                                        semantic, prefill_execution_identity
+                                    ),
+                                    self.lane_matmul_receipt,
                                 ),
-                                self.lane_matmul_receipt,
+                                self.int8_prefill_policy,
                             ),
-                            self.int8_prefill_policy,
+                            weight_stream_manager,
                         ),
                     )
                 return cached
@@ -5462,9 +5724,15 @@ class ServingEngine:
                     "transient_gib_per_lane",
                     SelfMTPLaneAdmissionController.K2_TRANSIENT_GIB_PER_LANE,
                 ),
-                # B_stream: the enforced expert-cache ceiling, reserved once
-                # before lanes are costed.  Zero unless a model is streamed.
-                stream_reserve_gib=self.expert_stream_reserve_gib(),
+                # B_stream: the streaming reservation not yet resident,
+                # reserved once before lanes are costed and re-read at every
+                # decision (the filled cache is already in measured memory).
+                # Zero unless a model is streamed.
+                stream_reserve_gib=(
+                    self.stream_unfilled_reserve_gib
+                    if self.weight_streaming_enabled()
+                    else 0.0
+                ),
             )
             # One line, once per server, naming every term of the admission
             # budget. The reserve is derived from two host readings now, and
@@ -7261,6 +7529,11 @@ class ServingEngine:
                                 )
                             attaching_cohort = None
                     except Exception as exc:
+                        if is_weight_source_change(exc):
+                            # The bound weights changed under a streamed
+                            # prefill: stop the worker before anything this
+                            # request computed can be published.
+                            raise
                         if job.cache_capsule is not None:
                             if job.uid is not None and job.uid not in active:
                                 batch.remove([job.uid])
@@ -8482,9 +8755,12 @@ class ServingEngine:
                 from .runtime.int8_prefill import remove as remove_int8_prefill
 
                 remove_int8_prefill(self.int8_prefill_handle)
-            if self.expert_stream is not None:
+            if self.expert_stream is not None and getattr(
+                self, "_expert_stream_engine_owned", True
+            ):
                 # The model thread is done with the streamed experts: release
-                # the read pool and the shard descriptors with it.
+                # the read pool and the shard descriptors with it.  An
+                # early-load manager belongs to the adapter, closed below.
                 self.expert_stream.close()
             if adapter is not None:
                 with self.prompt_lock:

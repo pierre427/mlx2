@@ -56,7 +56,10 @@ def required_generic_checks(descriptor):
 APPROVED_QUALIFICATION_HARNESS = {
     "schema": "mlx2.qualification-harness.v1",
     "name": "scripts/qualify_serving.py",
-    "sha256": "8c494905042dfc9e3bb9560b63356b29ebb54275c43543cc576933ef3e1b63d5",
+    # Re-pinned 2026-10-01 for the dense_weight_streaming serving observation
+    # (root-approved re-freeze); receipts from the previous harness must be
+    # re-run before they validate.
+    "sha256": "f3f001ecbe54925cefd851afcf32cb608fbed37d74b077138ff775b3fb0c7756",
 }
 
 # The approved generic producer has no live adapter-owned media probes. A
@@ -166,7 +169,12 @@ def required_feature_checks(settings):
     if (settings.get("moe_expert_streaming") or {}).get("enabled") is True:
         # A streamed model must show real page-ins: a "streaming" run that
         # never faulted an expert was fully resident and proves nothing.
+        # The counter is serving-phase only; the load-time dtype probe's
+        # page-ins are recorded separately and cannot satisfy it.
         features.add("feature_moe_expert_streaming")
+    if (settings.get("dense_weight_streaming") or {}).get("enabled") is True:
+        # Dense paging likewise needs projections read while serving.
+        features.add("feature_dense_weight_streaming")
     if (settings.get("memory_preemption") or {}).get("enabled") is True:
         # Any route: a selected preemption policy must show a lane that was
         # preempted and replayed to completion.

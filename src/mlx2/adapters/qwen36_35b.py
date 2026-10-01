@@ -258,8 +258,21 @@ class Qwen3635BA3BAdapter(Qwen3827BAdapter):
     # Vendor sampling defaults: Qwen/Qwen3.6-35B-A3B model card and the
     # artifact's generation_config.json (see ``adapters/qwen.py``).
     from .qwen import QWEN36_35B_SAMPLING as sampling_defaults
+    # Early-load MoE expert streaming (runtime/streamed_load.py).  Read from
+    # this class's own __dict__: subclasses must declare it themselves.
+    weight_streaming_modes = frozenset({"moe_experts"})
 
-    def __init__(self, model_path: str, *, require_mtp: bool = False, execution_policy=None):
+    def __init__(
+        self,
+        model_path: str,
+        *,
+        require_mtp: bool = False,
+        execution_policy=None,
+        weight_streaming=None,
+    ):
+        from ..runtime.streamed_load import require_declared
+
+        stream_request = require_declared(type(self), weight_streaming)
         if execution_policy is not None and not isinstance(execution_policy, dict):
             raise ValueError("execution policy must be a JSON object")
         policy = {} if execution_policy is None else dict(execution_policy)
@@ -275,6 +288,12 @@ class Qwen3635BA3BAdapter(Qwen3827BAdapter):
                 if type(policy[key]) is not bool:
                     raise ValueError(f"Qwen3.6 {key} must be boolean")
                 self._kernels[key] = policy[key]
+        if stream_request is not None and self._kernels.get("moe_routed_candidate"):
+            raise ValueError(
+                "moe_routed_candidate reads resident expert tables and cannot "
+                "run with weight streaming"
+            )
+        self.weight_stream = None
         artifact = inspect_artifact(model_path)
         if require_mtp and not artifact["has_mtp"]:
             raise ValueError("requested MTP requires embedded head weights")
@@ -293,32 +312,61 @@ class Qwen3635BA3BAdapter(Qwen3827BAdapter):
         if not artifact["has_mtp"]:
             config["text_config"]["mtp_num_hidden_layers"] = 0
 
-        import mlx.core as mx
-        import mlx.nn as nn
         from transformers import AutoTokenizer
-        from ..runtime.models.qwen36_35b import Model, ModelArgs
         from ..runtime.tokenizer_utils import BPEStreamingDetokenizer, TokenizerWrapper
         from ..runtime.ubc_evict import load_shards_evicting
+
+        try:
+            self._load_weights(
+                path, artifact, config, stream_request, load_shards_evicting
+            )
+            self._record_load_dtype()
+            self._select_routed_candidate()
+            tokenizer = AutoTokenizer.from_pretrained(path, local_files_only=True, trust_remote_code=False)
+            # transformers' Qwen2Tokenizer drops the declared combining-mark split rule.
+            from ..runtime.tokenizer_integrity import repair_loaded_tokenizer
+
+            self.pretokenizer_receipt = repair_loaded_tokenizer(tokenizer, path)
+            # The official config names only <|endoftext|>; the tokenizer's chat
+            # EOS <|im_end|> ends an assistant turn and must stop generation too.
+            eos = resolve_eos_token_ids(config, tokenizer)
+            self.tokenizer = TokenizerWrapper(
+                tokenizer, detokenizer_class=BPEStreamingDetokenizer, eos_token_ids=eos
+            )
+            self.max_context = int(config["text_config"]["max_position_embeddings"])
+            if self.weight_stream is not None:
+                # The dtype probe above paged experts in as load evidence only.
+                self.weight_stream.begin_serving()
+        except BaseException:
+            self.close()
+            raise
+
+    def _load_weights(self, path, artifact, config, stream_request, load_shards_evicting):
+        """Build ``self.model`` and load its weights, ordinary or streamed.
+
+        The ordinary branch is the reference: shard-eager load, sanitize,
+        quantize, strict load, evaluate.  The streamed branch replaces the
+        routed expert tables before anything is evaluated.
+        """
+        import mlx.core as mx
+        import mlx.nn as nn
+        from ..runtime.models.qwen36_35b import Model, ModelArgs
         from .norm_repair import norm_means
 
         self.model = Model(ModelArgs.from_dict(config))
-        files = [path / name for name in sorted(set(artifact["weight_map"].values()))]
-        weights = self.model.sanitize(
-            load_shards_evicting(files, sanitize=self.model.shard_prune)
-        )
-        # ``sanitize`` decided the norm fold per group and repaired MTP norms
-        # a converter left unshifted (oQ's mean<0.5 rule skips four of seven
-        # on this head; see norm_repair). Record which ones.
-        report = getattr(getattr(self.model, "language_model", None), "norm_convention", None)
-        self.norm_convention = report
-        self.mtp_norm_repairs = [] if report is None else report.repaired_head_keys
-        self.mtp_norm_means = norm_means(weights, "mtp.")
+        names = sorted(set(artifact["weight_map"].values()))
+        files = [path / name for name in names]
         quant = config.get("quantization", config.get("quantization_config"))
-        if quant:
+
+        def quantize(weights):
+            if not quant:
+                return
+
             def predicate(name, module):
                 if name in quant:
                     return quant[name]
                 return hasattr(module, "to_quantized") and f"{name}.scales" in weights
+
             nn.quantize(
                 self.model,
                 group_size=quant["group_size"],
@@ -326,25 +374,60 @@ class Qwen3635BA3BAdapter(Qwen3827BAdapter):
                 mode=quant.get("mode", "affine"),
                 class_predicate=predicate,
             )
-        self.model.load_weights(list(weights.items()), strict=True)
+
+        if stream_request is None:
+            weights = self.model.sanitize(
+                load_shards_evicting(files, sanitize=self.model.shard_prune)
+            )
+        else:
+            weights = self._load_streamed(
+                path, names, artifact, config, stream_request, quantize
+            )
+        # ``sanitize`` decided the norm fold per group and repaired MTP norms
+        # a converter left unshifted (oQ's mean<0.5 rule skips four of seven
+        # on this head; see norm_repair). Record which ones.
+        report = getattr(getattr(self.model, "language_model", None), "norm_convention", None)
+        self.norm_convention = report
+        self.mtp_norm_repairs = [] if report is None else report.repaired_head_keys
+        self.mtp_norm_means = norm_means(weights, "mtp.")
+        if stream_request is None:
+            quantize(weights)
+            self.model.load_weights(list(weights.items()), strict=True)
         self.model.eval()
         mx.eval(self.model.parameters())
         weights.clear()
         mx.clear_cache()
-        self._record_load_dtype()
-        self._select_routed_candidate()
-        tokenizer = AutoTokenizer.from_pretrained(path, local_files_only=True, trust_remote_code=False)
-        # transformers' Qwen2Tokenizer drops the declared combining-mark split rule.
-        from ..runtime.tokenizer_integrity import repair_loaded_tokenizer
 
-        self.pretokenizer_receipt = repair_loaded_tokenizer(tokenizer, path)
-        # The official config names only <|endoftext|>; the tokenizer's chat
-        # EOS <|im_end|> ends an assistant turn and must stop generation too.
-        eos = resolve_eos_token_ids(config, tokenizer)
-        self.tokenizer = TokenizerWrapper(
-            tokenizer, detokenizer_class=BPEStreamingDetokenizer, eos_token_ids=eos
+    def _load_streamed(self, path, names, artifact, config, stream_request, quantize):
+        """Early-load expert streaming; the manager joins ``self._tables``."""
+        from ..runtime.streamed_load import force_stock_expert_arithmetic, load_streamed
+
+        if self.environment.get("MLX_LM_COMPILED_DECODE", "0") != "0":
+            raise ValueError("weight streaming cannot run under compiled decode")
+        top_k = config["text_config"].get("num_experts_per_tok")
+        if isinstance(top_k, bool) or not isinstance(top_k, int) or top_k < 1:
+            raise ValueError("weight streaming needs the routed num_experts_per_tok")
+
+        def installed(manager):
+            # Explicit stock expert arithmetic, recorded in the receipt.
+            manager.forced_stock = force_stock_expert_arithmetic(self.model)
+
+        loaded = load_streamed(
+            self.model,
+            path,
+            names,
+            request=stream_request,
+            sanitize=self.model.sanitize,
+            quantize=quantize,
+            records=self.identity["files"],
+            weight_map=artifact["weight_map"],
+            shard_prune=self.model.shard_prune,
+            top_k=top_k,
+            on_installed=installed,
         )
-        self.max_context = int(config["text_config"]["max_position_embeddings"])
+        self.weight_stream = loaded.manager
+        self._tables.append(loaded.manager)
+        return loaded.weights
 
     def profile_name(self, mtp):
         if mtp and Capability.MTP not in self.descriptor.capabilities:

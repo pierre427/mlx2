@@ -1316,7 +1316,9 @@ def feature_observations(final, kv_fidelity=None, adaptive_benchmark=None, initi
             type(host_available) is int and host_available > 0
         ),
         # A streamed model that never paged an expert in was fully resident.
+        # Serving-phase counter: load-time probe page-ins are counted apart.
         "moe_expert_streaming": counts.get("stream_page_ins_total", 0),
+        "dense_weight_streaming": counts.get("dense_stream_page_ins_total", 0),
         # Preemption proves nothing unless the parked lane was replayed.
         "memory_preemption": min(
             counts.get("memory_preemptions", 0),

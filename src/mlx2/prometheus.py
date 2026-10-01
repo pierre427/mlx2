@@ -397,6 +397,14 @@ _ENGINE_EVENTS = {
     "stream_expert_misses_total": ("expert_stream", "miss"),
     "stream_evictions_total": ("expert_stream", "eviction"),
     "stream_admission_refusals_total": ("expert_stream", "working_set_refusal"),
+    # Load-phase page-ins (the dtype probe) and dense paging: rendered only
+    # when the engine holds the key, so a default scrape is unchanged.
+    "stream_load_page_ins_total": ("expert_stream_load", "page_in"),
+    "stream_load_page_in_bytes_total": ("expert_stream_load", "page_in_byte"),
+    "dense_stream_page_ins_total": ("dense_stream", "page_in"),
+    "dense_stream_page_in_bytes_total": ("dense_stream", "page_in_byte"),
+    "dense_stream_load_page_ins_total": ("dense_stream_load", "page_in"),
+    "dense_stream_load_page_in_bytes_total": ("dense_stream_load", "page_in_byte"),
     # Atlas collection only. These count observations, never pinned bytes:
     # the atlas does not influence residency in this iteration.
     "atlas_observations_total": ("expert_atlas", "observation"),
@@ -413,7 +421,10 @@ _ENGINE_EVENTS.update(
 # /metrics scrape differ from main's byte for byte.  These are rendered only
 # once the engine actually holds the key.
 _OPTIONAL_COMPONENTS = frozenset(
-    {"apcv2_rolling", "apcv2_junction", "memory_preemption"}
+    {
+        "apcv2_rolling", "apcv2_junction", "memory_preemption",
+        "expert_stream_load", "dense_stream", "dense_stream_load",
+    }
 )
 _OPTIONAL_ENGINE_EVENTS = {
     key: value
@@ -439,6 +450,12 @@ _STREAM_GAUGES = {
     # Bytes of expert weight currently held by the bounded per-layer LRU.
     # Present only when the server-owned moe_expert_streaming policy is on.
     "stream_resident_bytes": "mlx2_expert_stream_resident_bytes",
+    # Tracked weight-byte high-water marks (counter arithmetic, not measured
+    # process memory); present only while a streaming manager exists.
+    "stream_peak_tracked_bytes": "mlx2_expert_stream_peak_tracked_bytes",
+    "stream_peak_staging_bytes": "mlx2_expert_stream_peak_staging_bytes",
+    "dense_stream_peak_tracked_bytes": "mlx2_dense_stream_peak_tracked_bytes",
+    "dense_stream_peak_staging_bytes": "mlx2_dense_stream_peak_staging_bytes",
 }
 
 _SCHEDULER_GAUGES = frozenset(

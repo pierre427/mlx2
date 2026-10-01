@@ -345,13 +345,33 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
     artifact_inspector = staticmethod(inspect_artifact)
     descriptor_builder = staticmethod(descriptor_for)
     environment_configurator = staticmethod(configure_environment)
+    # Dense trunk-MLP paging (runtime/streamed_load.py).  Read from this
+    # class's own __dict__: the Qwen3.5 9B and Qwen3.6 subclasses do not
+    # inherit it.
+    weight_streaming_modes = frozenset({"dense_mlp"})
 
     def __init__(
-        self, model_path: str, *, require_mtp: bool = False, execution_policy=None
+        self, model_path: str, *, require_mtp: bool = False, execution_policy=None,
+        weight_streaming=None,
     ):
+        from ..runtime.streamed_load import require_declared
+
+        stream_request = require_declared(type(self), weight_streaming)
         if execution_policy is not None and not isinstance(execution_policy, dict):
             raise ValueError("execution policy must be a JSON object")
         policy = {} if execution_policy is None else dict(execution_policy)
+        if stream_request is not None:
+            if "draft_model" in policy:
+                raise ValueError(
+                    "dense weight streaming refuses the external draft route in "
+                    "this slice"
+                )
+            if policy.get("tensorfold_prefill"):
+                raise ValueError(
+                    "TensorFold prefill repacks MLP projections and cannot run "
+                    "with dense weight streaming"
+                )
+        self.weight_stream = None
         from .flash_next_policy import FlashNextPolicy
 
         prefill_policy = FlashNextPolicy.from_mapping(
@@ -433,13 +453,13 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
             # The external route never runs the embedded head: do not load it.
             config["text_config"]["mtp_num_hidden_layers"] = 0
         self.model = Model(ModelArgs.from_dict(config))
-        files = [path / name for name in sorted(set(artifact["weight_map"].values()))]
-        weights = self.model.sanitize(load_shards_evicting(files))
-        self.norm_convention = getattr(
-            getattr(self.model, "language_model", None), "norm_convention", None
-        )
+        names = sorted(set(artifact["weight_map"].values()))
+        files = [path / name for name in names]
         quant = config.get("quantization", config.get("quantization_config"))
-        if quant:
+
+        def quantize(weights):
+            if not quant:
+                return
 
             def predicate(name, module):
                 if name in quant:
@@ -453,7 +473,82 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
                 mode=quant.get("mode", "affine"),
                 class_predicate=predicate,
             )
-        self.model.load_weights(list(weights.items()), strict=True)
+
+        if stream_request is None:
+            weights = self.model.sanitize(load_shards_evicting(files))
+            self.norm_convention = getattr(
+                getattr(self.model, "language_model", None), "norm_convention", None
+            )
+            quantize(weights)
+            self.model.load_weights(list(weights.items()), strict=True)
+        else:
+            if self.environment.get("MLX_LM_COMPILED_DECODE", "0") != "0":
+                raise ValueError("weight streaming cannot run under compiled decode")
+            from ..runtime.streamed_load import load_streamed, trunk_mlp_targets
+
+            try:
+                loaded = load_streamed(
+                    self.model,
+                    path,
+                    names,
+                    request=stream_request,
+                    sanitize=self.model.sanitize,
+                    quantize=quantize,
+                    records=self.identity["files"],
+                    weight_map=artifact["weight_map"],
+                    dense_targets=lambda model: trunk_mlp_targets(
+                        model, layers_prefix="language_model.model.layers."
+                    ),
+                )
+            except BaseException:
+                self.close()
+                raise
+            weights = loaded.weights
+            self.weight_stream = loaded.manager
+            self._tables.append(loaded.manager)
+            self.norm_convention = getattr(
+                getattr(self.model, "language_model", None), "norm_convention", None
+            )
+        try:
+            self._finish_load(
+                weights, prefill_policy, fp32_head, path, config,
+                AutoTokenizer, TokenizerWrapper, BPEStreamingDetokenizer,
+            )
+        except BaseException:
+            if self.weight_stream is not None:
+                self.close()
+            raise
+        if draft_record is not None:
+            from .dflash2 import load_drafter
+
+            self.identity = {
+                **self.identity,
+                "draft_revision": draft_record["draft_revision"],
+                "target_revision": draft_record["target_revision"],
+            }
+            base = self.descriptor_builder(has_mtp=False)
+            self._bind_external_drafter(
+                draft_record,
+                lambda record, target: load_drafter(
+                    record, target,
+                    runtime_quantization=record["runtime_quantization"],
+                ),
+                base,
+            )
+            mx.clear_cache()
+
+    def _finish_load(
+        self, weights, prefill_policy, fp32_head, path, config,
+        AutoTokenizer, TokenizerWrapper, BPEStreamingDetokenizer,
+    ):
+        """Everything after the weights load: installs, probe, tokenizer.
+
+        Shared by the ordinary and the dense-streamed load; with streaming the
+        dtype probe's page-ins are load evidence, and serving counters start
+        only at :meth:`begin_serving` below.
+        """
+        import mlx.core as mx
+
         self.model.eval()
         mx.eval(self.model.parameters())
         self.tensorfold_prefill = None
@@ -498,24 +593,8 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
             tokenizer, detokenizer_class=BPEStreamingDetokenizer, eos_token_ids=eos
         )
         self.max_context = int(config["text_config"]["max_position_embeddings"])
-        if draft_record is not None:
-            from .dflash2 import load_drafter
-
-            self.identity = {
-                **self.identity,
-                "draft_revision": draft_record["draft_revision"],
-                "target_revision": draft_record["target_revision"],
-            }
-            base = self.descriptor_builder(has_mtp=False)
-            self._bind_external_drafter(
-                draft_record,
-                lambda record, target: load_drafter(
-                    record, target,
-                    runtime_quantization=record["runtime_quantization"],
-                ),
-                base,
-            )
-            mx.clear_cache()
+        if getattr(self, "weight_stream", None) is not None:
+            self.weight_stream.begin_serving()
 
     def create_external_batch(self, **kwargs):
         """Candidate DFlash2 draft/verify batch; implemented, not qualified."""
