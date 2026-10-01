@@ -36,8 +36,6 @@ CANDIDATE_ENV = {
     "MLX_ENABLE_TF32": "flag",
     # MLX gated_delta_update for 17..256-row prefill chunks; parity unestablished.
     "MLX_GDN_CORE": "flag",
-    # Fused routed weighted sum; residual ULP difference from the eager sum.
-    "MLX_QWEN4_MOE_WEIGHTED_SUM": "flag",
     # Opt-in A/B kernels with no mlx2 full-model evidence (flash_next_policy).
     "MLX_QWEN4_MOE_ROUTER_KERNEL": "flag",
     "MLX_QWEN4_QSA_NAX_DECODE": "flag",

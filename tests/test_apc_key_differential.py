@@ -200,6 +200,9 @@ NOT_BOUND = {
     "env: MLX_QWEN4_HC_DECODE": {"env": {"MLX_QWEN4_HC_DECODE": "0"}},
     "env: MLX_QWEN4_ATTN_FUSED_ROWS": {"env": {"MLX_QWEN4_ATTN_FUSED_ROWS": "0"}},
     "env: MLX_QWEN4_MOE_TOPK_FOLD": {"env": {"MLX_QWEN4_MOE_TOPK_FOLD": "off"}},
+    # Fused routed weighted sum: replays MLX's col_reduce_small order, bit-exact
+    # against the eager tail (qualification/runs/recon-20261001/l4-moe-wsum).
+    "env: MLX_QWEN4_MOE_WEIGHTED_SUM": {"env": {"MLX_QWEN4_MOE_WEIGHTED_SUM": "1"}},
     # Decode/verify-side row windows: generated-token KV already depends on
     # batch width and MTP acceptance at run time (exact-family arithmetic).
     "env: MLX_QWEN4_MOE_WINDOW": {"env": {"MLX_QWEN4_MOE_WINDOW": "batch_decode,verify"}},
@@ -266,7 +269,7 @@ def _server(directory, template):
 
 @pytest.mark.parametrize(
     "env",
-    [{"MLX_GDN_CORE": "1"}, {"MLX_ENABLE_TF32": "1"}, {"MLX_QWEN4_MOE_WEIGHTED_SUM": "1"}],
+    [{"MLX_GDN_CORE": "1"}, {"MLX_ENABLE_TF32": "1"}, {"MLX_QWEN4_MOE_ROUTER_KERNEL": "1"}],
 )
 def test_persistent_identity_refuses_another_execution_law(tmp_path, env):
     base = build_key(tmp_path / "k")
