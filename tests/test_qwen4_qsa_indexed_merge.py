@@ -64,7 +64,7 @@ class TestQSAIndexedMerge(unittest.TestCase):
             actual = merge.combine_indexed_partials(m, l, o, output_dtype=mx.float32)
         mx.eval(expected, actual)
         self.assertTrue(mx.array_equal(expected, actual).item())
-        self.assertEqual(merge.fused_merge_status(), {'engaged': False, 'fallbacks': 0, 'candidate': None, 'gate_engaged': False, 'gate_path': None})
+        self.assertEqual(merge.fused_merge_status(), {'engaged': False, 'fallbacks': 0, 'candidate': None, 'gate_engaged': False, 'gate_path': None, 'gate_refusals': 0, 'gate_last_refusal': None})
         sentinel = mx.zeros((1, 1, 1, 256), dtype=mx.float32)
         old_kernel = mock.Mock(return_value=[sentinel])
         hook_m = mx.zeros((1, 1, 1, 128), dtype=mx.float32)
@@ -88,6 +88,6 @@ class TestQSAIndexedMerge(unittest.TestCase):
         self.assertEqual(int(counter.item()), 7)
         status = indexed.qsa_indexed_status()
         self.assertEqual(status['counts']['merge_fallback'], 1)
-        self.assertEqual(status['fused_merge'], {'engaged': False, 'fallbacks': 1, 'candidate': None, 'gate_engaged': False, 'gate_path': None})
+        self.assertEqual(status['fused_merge'], {'engaged': False, 'fallbacks': 1, 'candidate': None, 'gate_engaged': False, 'gate_path': None, 'gate_refusals': 0, 'gate_last_refusal': None})
 if __name__ == '__main__':
     unittest.main()

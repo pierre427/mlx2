@@ -52,7 +52,7 @@ def _stock_routing(logits):
 
 
 @pytest.fixture
-def ref_kernels(monkeypatch):
+def ref_kernels(monkeypatch, served_exp_forms_match):
     """Composed stand-ins for the window and routing launches."""
     calls = {"routed": 0, "shared": 0, "router": 0, "fold": 0}
 

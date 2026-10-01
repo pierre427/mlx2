@@ -24,3 +24,12 @@ def _restore_process_environment():
     if os.environ != saved:
         os.environ.clear()
         os.environ.update(saved)
+
+
+@pytest.fixture
+def served_exp_forms_match(monkeypatch):
+    """Every served-exp gate accepts its kernel's spelling (the probe needs
+    Metal; tests/test_served_exp_gates.py covers the gates themselves)."""
+    from mlx2.runtime.models.served_exp import ServedExpGate
+
+    monkeypatch.setattr(ServedExpGate, "refusal", lambda self, dtype=None: None)

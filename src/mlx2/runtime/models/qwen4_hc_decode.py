@@ -73,6 +73,8 @@ from operator import is_
 import mlx.core as mx
 from mlx import nn
 
+from .served_exp import ServedExpGate, metal_helper
+
 HC_DECODE_ENV = "MLX_QWEN4_HC_DECODE"
 HC_COUNT = 4
 BITS = 4
@@ -659,6 +661,31 @@ UP_MIX_SOURCE = r"""
     }
 """
 
+# Served-graph gates (omlx #4122 follow-up; served_exp): each helper above
+# runs only while its spelling still reproduces its eager counterpart on this
+# build (bf16, the only admitted dtype).
+SILU_GATE = ServedExpGate(
+    "hc_silu",
+    served_name="compiled nn.silu",
+    served=nn.silu,
+    header=metal_helper(HEADER, "hcd_sigmoid_jit"),
+    body="    y = x * hcd_sigmoid_jit<T>(x);",
+)
+SIGMOID_GATE = ServedExpGate(
+    "hc_sigmoid",
+    served_name="eager sigmoid",
+    served=mx.sigmoid,
+    header=metal_helper(HEADER, "hcd_sigmoid_unary"),
+    body="    y = hcd_sigmoid_unary<T>(x);",
+    kernel_exp="metal::precise::exp",
+)
+
+
+def served_exp_refusal() -> str | None:
+    """Why the HC kernels' SiLU or sigmoid may not run on this build, or None."""
+    return SILU_GATE.refusal(mx.bfloat16) or SIGMOID_GATE.refusal(mx.bfloat16)
+
+
 _KERNELS: dict = {}
 
 
@@ -929,6 +956,10 @@ def _try_launch(module, hyper_input, rows: int, law: int, eager_norm: bool, comp
         return None
     if not runtime_supported():
         _decline("Metal runtime unavailable")
+        return None
+    refusal = served_exp_refusal()
+    if refusal is not None:
+        _decline(refusal)
         return None
     try:
         plan = _law_plan(module, plans, law)

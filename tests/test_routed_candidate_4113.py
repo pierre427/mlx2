@@ -193,16 +193,19 @@ def test_cpu_decline_is_counted_and_bit_equal_to_the_reference():
     assert sw.routed_candidate_fallback_reasons == {"Metal runtime unavailable": 1}
 
 
-def test_served_silu_refusal_blocks_the_candidate(monkeypatch):
-    from mlx2.runtime.models import qwen4_fused_gdn
-
+def test_served_swiglu_refusal_blocks_the_candidate(monkeypatch):
+    refusal = "served compiled SwiGLU uses metal::precise::exp"
     monkeypatch.setattr(RD, "runtime_supported", lambda: True)
-    monkeypatch.setattr(qwen4_fused_gdn, "served_silu_refusal", lambda: "served SiLU uses metal::precise::exp")
-    assert RD.candidate_runtime_refusal() == "served SiLU uses metal::precise::exp"
-    sw = _switch()
-    sw.routed_candidate_mode = "two_launch"
-    sw(_x(5), *_route(5), variant="stock")
-    assert sw.routed_candidate_last_fallback == "served SiLU uses metal::precise::exp"
+    monkeypatch.setattr(RD.SWIGLU_GATE, "probe", lambda dtype: {"metal::exp": False, "metal::precise::exp": True})
+    RD.SWIGLU_GATE.reset()
+    try:
+        assert RD.candidate_runtime_refusal() == refusal
+        sw = _switch()
+        sw.routed_candidate_mode = "two_launch"
+        sw(_x(5), *_route(5), variant="stock")
+        assert sw.routed_candidate_last_fallback == refusal
+    finally:
+        RD.SWIGLU_GATE.reset()
 
 
 def test_fallback_reasons_are_bounded(monkeypatch):

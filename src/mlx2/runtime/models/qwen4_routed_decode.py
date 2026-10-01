@@ -81,6 +81,8 @@ from dataclasses import dataclass
 
 import mlx.core as mx
 
+from .served_exp import ServedExpGate
+
 ROUTED_DECODE_ENV = "MLX_QWEN4_MOE_ROUTED_DECODE"
 VIEWS_ENV = "MLX_QWEN4_MOE_ROUTED_VIEWS"
 DOWN_ROWS_ENV = "MLX_QWEN4_MOE_ROUTED_DOWN_ROWS"
@@ -1523,14 +1525,59 @@ def candidate_down_combine(h, indices, scores, down):
     )[0]
 
 
+# Served-graph gates (omlx #4122 follow-up; served_exp). Every SwiGLU epilogue
+# here (gate_up, split, shared fold, window rows, candidate) copies the
+# compiled ``swiglu`` with SIGMOID's ``metal::exp``; the shared fold's gate
+# copies the eager ``mx.sigmoid`` unary in ``metal::precise::exp``. Each runs
+# only while its spelling reproduces the served op on this build (bf16, the
+# only admitted dtype). Callers check ``runtime_supported()`` first.
+SWIGLU_PROBE_BODY = "    T t = x * omlx_mlx_sigmoid<T>(x);\n    y = t * T(1);"
+SHARED_GATE_PROBE_BODY = (
+    "    const float g = float(x);\n"
+    "    const T e = T(1.0f + float(T(metal::precise::exp(metal::abs(g)))));\n"
+    "    const T sy = T(metal::precise::divide(1.0f, float(e)));\n"
+    "    y = g < 0.0f ? sy : T(1.0f - float(sy));"
+)
+
+
+def _served_swiglu(x):
+    from .activations import swiglu
+
+    return swiglu(x, mx.ones_like(x))
+
+
+SWIGLU_GATE = ServedExpGate(
+    "routed_swiglu",
+    served_name="compiled SwiGLU",
+    served=_served_swiglu,
+    header=SIGMOID,
+    body=SWIGLU_PROBE_BODY,
+)
+SHARED_GATE_GATE = ServedExpGate(
+    "routed_shared_gate",
+    served_name="eager sigmoid",
+    served=mx.sigmoid,
+    body=SHARED_GATE_PROBE_BODY,
+    kernel_exp="metal::precise::exp",
+)
+
+
+def served_swiglu_refusal() -> str | None:
+    """Why the SwiGLU epilogues may not run under this MLX build, or None."""
+    return SWIGLU_GATE.refusal(mx.bfloat16)
+
+
+def served_shared_gate_refusal() -> str | None:
+    """Why the folded shared-expert gate may not run here, or None."""
+    return SHARED_GATE_GATE.refusal(mx.bfloat16)
+
+
 def candidate_runtime_refusal() -> str | None:
     """Why the candidate may not run in this process, or None.
 
     The kernels spell sigmoid with ``metal::exp``; they run only while the
-    served SiLU is probed to use that form on this build.
+    served SwiGLU is probed to use that form on this build.
     """
     if not runtime_supported():
         return "Metal runtime unavailable"
-    from .qwen4_fused_gdn import served_silu_refusal
-
-    return served_silu_refusal()
+    return served_swiglu_refusal()

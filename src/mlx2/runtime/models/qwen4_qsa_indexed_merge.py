@@ -7,6 +7,8 @@ from functools import lru_cache
 from typing import Callable
 import mlx.core as mx
 
+from .served_exp import ServedExpGate
+
 _ENV_NAME = "MLX_QWEN4_QSA_INDEXED_FUSED_MERGE"
 _GATE_ENV_NAME = "MLX_QWEN4_QSA_INDEXED_FUSED_GATE"
 _THREAD_CANDIDATES = (256, 128)
@@ -16,6 +18,8 @@ _STATUS_FALLBACKS = 0
 _STATUS_CANDIDATE = None
 _STATUS_GATE_ENGAGED = False
 _STATUS_GATE_PATH = None
+_STATUS_GATE_REFUSALS = 0
+_STATUS_GATE_REFUSAL = None
 _PROBE_LOCK = threading.Lock()
 _PROBE_RESULTS = {}
 _MISSING = object()
@@ -62,6 +66,7 @@ def fused_merge_status(*, reset: bool = False) -> dict:
     """Return bounded process evidence for the optional merge."""
     global _STATUS_CANDIDATE, _STATUS_ENGAGED, _STATUS_FALLBACKS
     global _STATUS_GATE_ENGAGED, _STATUS_GATE_PATH
+    global _STATUS_GATE_REFUSALS, _STATUS_GATE_REFUSAL
     with _STATUS_LOCK:
         report = {
             "engaged": bool(_STATUS_ENGAGED),
@@ -69,6 +74,8 @@ def fused_merge_status(*, reset: bool = False) -> dict:
             "candidate": _STATUS_CANDIDATE,
             "gate_engaged": bool(_STATUS_GATE_ENGAGED),
             "gate_path": _STATUS_GATE_PATH,
+            "gate_refusals": int(_STATUS_GATE_REFUSALS),
+            "gate_last_refusal": _STATUS_GATE_REFUSAL,
         }
         if reset:
             _STATUS_ENGAGED = False
@@ -76,6 +83,8 @@ def fused_merge_status(*, reset: bool = False) -> dict:
             _STATUS_CANDIDATE = None
             _STATUS_GATE_ENGAGED = False
             _STATUS_GATE_PATH = None
+            _STATUS_GATE_REFUSALS = 0
+            _STATUS_GATE_REFUSAL = None
     if reset:
         with _PROBE_LOCK:
             _PROBE_RESULTS.clear()
@@ -178,6 +187,41 @@ _SOURCE_GATED = _SOURCE.replace(
 )
 
 
+# Served-graph gate (omlx #4122 follow-up; served_exp). Both gated epilogues
+# (this merge and qwen4_qsa_indexed's native pass 2) copy the eager
+# ``mx.sigmoid`` unary as ``metal::exp`` plus one patched bf16 edge; they run
+# only while that copy reproduces the served sigmoid for the output dtype.
+OUTPUT_GATE_PROBE_BODY = (
+    "        const T gate_x = x;\n"
+    "        const T gate_y = T(1) / (T(1) + metal::exp(metal::abs(gate_x)));\n"
+    "        T gate_sigmoid = gate_x < T(0) ? gate_y : T(1) - gate_y;\n"
+    "        if constexpr (metal::is_same_v<T, bfloat>) {\n"
+    "            if (gate_x == T(-6.84375f)) {\n"
+    "                gate_sigmoid = T(0.00106048583984375f);\n"
+    "            }\n"
+    "        }\n"
+    "        y = gate_sigmoid;"
+)
+OUTPUT_GATE_GATE = ServedExpGate(
+    "qsa_output_gate",
+    served_name="eager sigmoid",
+    served=mx.sigmoid,
+    body=OUTPUT_GATE_PROBE_BODY,
+)
+
+
+def fused_gate_refusal(dtype) -> str | None:
+    """Why the fused output-gate epilogue may not run for ``dtype``, or None
+    (recorded in the status). Callers have already chosen a Metal path."""
+    global _STATUS_GATE_REFUSAL, _STATUS_GATE_REFUSALS
+    refusal = OUTPUT_GATE_GATE.refusal(dtype)
+    if refusal is not None:
+        with _STATUS_LOCK:
+            _STATUS_GATE_REFUSAL = refusal
+            _STATUS_GATE_REFUSALS += 1
+    return refusal
+
+
 @lru_cache(maxsize=None)
 def _fused_merge_kernel(gated: bool = False):
     return mx.fast.metal_kernel(
@@ -275,6 +319,9 @@ def combine_indexed_partials(
 ):
     """Use the optional fused pass, with a sequential MLX fallback."""
     gate = output_gate if fused_gate_enabled() else None
+    if gate is not None and fused_merge_enabled() and fused_merge_available():
+        if fused_gate_refusal(output_dtype) is not None:
+            gate = None
     if not fused_merge_enabled() or not fused_merge_available():
         output = mlx_sequential_merge(m, l, o, output_dtype=output_dtype)
         return (

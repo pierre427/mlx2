@@ -44,7 +44,7 @@ def _x(seed, rows=1, dtype=mx.bfloat16):
 
 
 @pytest.fixture
-def reference_kernels(monkeypatch):
+def reference_kernels(monkeypatch, served_exp_forms_match):
     """Swap the Metal kernels for the composed ops they stand in for."""
     calls = {"gate_up": 0, "down": 0}
 
@@ -300,7 +300,7 @@ def _split_switch(seed=0, bits=4, group_size=64):
 
 
 @pytest.fixture
-def split_reference_kernels(monkeypatch):
+def split_reference_kernels(monkeypatch, served_exp_forms_match):
     """Composed stand-ins for the split gate+up and served-down kernels."""
     calls = {"split_gate_up": 0, "served_down": 0, "down": 0}
 
@@ -524,7 +524,7 @@ def _served_block(monkeypatch, mode="gate_up_down_shared", seed=0):
 
 
 @pytest.fixture
-def fold_reference(monkeypatch):
+def fold_reference(monkeypatch, served_exp_forms_match):
     """Composed stand-in for the folded launches; served_down admission forced."""
     calls = {"fold": 0}
 

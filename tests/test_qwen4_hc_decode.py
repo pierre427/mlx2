@@ -53,7 +53,7 @@ def _clean():
 
 
 @pytest.fixture
-def reference_kernels(monkeypatch):
+def reference_kernels(monkeypatch, served_exp_forms_match):
     """Swap the Metal launches for the composed body they transcribe."""
     calls = {"launch": 0}
 
@@ -321,7 +321,7 @@ def test_without_metal_the_route_falls_back(monkeypatch):
     assert HCD.hc_decode_status()["last_decline"] == "Metal runtime unavailable"
 
 
-def test_first_use_error_demotes_the_path(monkeypatch):
+def test_first_use_error_demotes_the_path(monkeypatch, served_exp_forms_match):
     def broken(module, flat, *, debug=False, plan=None):
         raise RuntimeError("compile failed")
 

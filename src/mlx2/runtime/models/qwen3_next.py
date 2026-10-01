@@ -578,6 +578,10 @@ def _try_routed_decode(switch_mlp, x, indices, scores, do_sort, variant="scalar"
         admission = _routed.RoutedDecodeAdmission(False, "training")
     if admission.accepted and not _routed.runtime_supported():
         admission = _routed.RoutedDecodeAdmission(False, "Metal runtime unavailable")
+    if admission.accepted:
+        refusal = _routed.served_swiglu_refusal()
+        if refusal is not None:
+            admission = _routed.RoutedDecodeAdmission(False, refusal)
     if not admission.accepted:
         switch_mlp.routed_decode_fallbacks += 1
         switch_mlp.routed_decode_last_fallback = admission.reason
@@ -633,6 +637,9 @@ def _shared_fold_refusal(block, x, inds, scores):
         return admission.reason
     if switch_mlp.training or block.training:
         return "training"
+    refusal = _routed.served_swiglu_refusal() or _routed.served_shared_gate_refusal()
+    if refusal is not None:
+        return refusal
     inter = switch_mlp.gate_proj["weight"].shape[1]
     refusal = _served_down_refusal(
         switch_mlp, inter, x.dtype, inds, scores, block.fused_expert_kernel_mode
@@ -776,6 +783,10 @@ def _moe_rows_refusal(block, x, rows):
     )
     if refusal is not None:
         return refusal
+    # admit_router_topk refused a non-Metal runtime, so the probe may run.
+    refusal = _routed.served_swiglu_refusal()
+    if refusal is not None:
+        return refusal
     shared = block.get("shared_expert")
     if shared is None or hasattr(shared, "_prefill_counts"):
         return "shared expert missing or tensorfold prefill MLP installed"
@@ -784,7 +795,10 @@ def _moe_rows_refusal(block, x, rows):
 
 def _shared_fold_ok(block, x) -> bool:
     inter = block.switch_mlp.gate_proj["weight"].shape[1]
-    return _routed.admit_shared_fold(block.get("shared_expert"), x.shape[-1], inter).accepted
+    if not _routed.admit_shared_fold(block.get("shared_expert"), x.shape[-1], inter).accepted:
+        return False
+    # Folded rows apply the eager sigmoid's precise-exp copy (served_exp).
+    return _routed.served_shared_gate_refusal() is None
 
 
 def _stock_routing(block, gates):

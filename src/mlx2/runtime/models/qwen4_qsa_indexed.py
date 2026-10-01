@@ -14,8 +14,10 @@ import mlx.core as mx
 import numpy as np
 from .qwen4_qsa_indexed_merge import (
     combine_indexed_partials,
+    fused_gate_refusal,
     fused_merge_enabled,
     fused_merge_status,
+    mlx_apply_output_gate,
     mlx_sequential_merge,
     record_native_gate_engaged,
 )
@@ -1377,6 +1379,12 @@ def _combine_sdpa_partials(m, l, o, engaged, *, output_dtype, output_gate=None):
         )
         return (output, engaged)
     gated = output_gate is not None
+    if gated and fused_gate_refusal(output_dtype) is not None:
+        # Counted in the merge status; the composed gate follows pass 2.
+        (output, engaged) = _combine_sdpa_partials(
+            m, l, o, engaged, output_dtype=output_dtype
+        )
+        return (mlx_apply_output_gate(output, output_gate), engaged)
     inputs = [m, l, o, mx.array([length], dtype=mx.int32)]
     if gated:
         expected = (batch, length, nqh * dim)

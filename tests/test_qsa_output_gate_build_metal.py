@@ -252,7 +252,8 @@ def _sequential_cell(mx, merge, dtype, m, l, o, gate):
         env.setenv(GATE_ENV, "1")
         merge.fused_merge_status(reset=True)
         assert merge.fused_merge_status() == {
-            "engaged": False, "fallbacks": 0, "candidate": None, "gate_engaged": False, "gate_path": None
+            "engaged": False, "fallbacks": 0, "candidate": None, "gate_engaged": False, "gate_path": None,
+            "gate_refusals": 0, "gate_last_refusal": None,
         }
         actual = merge.combine_indexed_partials(
             m, l, o, output_dtype=dtype, output_gate=gate, on_fallback=lambda: fallbacks.append("gated")
