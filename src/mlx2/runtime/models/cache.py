@@ -2684,7 +2684,9 @@ class ArraysCache(_BaseCache):
     def batch_size(self):
         for c in self.cache:
             if c is not None:
-                return c.shape[0]
+                # An APCv2 stored entry may hold a codec record (a dict of
+                # arrays, see recurrent_state_codec) in a recurrent slot.
+                return (c["q"] if isinstance(c, dict) else c).shape[0]
         if self.left_padding is not None:
             return self.left_padding.size
         elif self.lengths is not None:
@@ -3029,10 +3031,10 @@ class ArraysCache(_BaseCache):
 
     @property
     def nbytes(self):
-        total = sum((c.nbytes for c in self.cache if c is not None))
+        total = sum((_leaf_nbytes(c) for c in self.cache))
         for lane in self._checkpoints:
             for _, snapshot in lane:
-                total += sum((a.nbytes for a in snapshot if a is not None))
+                total += sum((_leaf_nbytes(a) for a in snapshot))
         return total
 
 
@@ -5439,6 +5441,26 @@ class PromptTrie:
         return PromptTrieResult(model, None, shorter, longer, common_prefix)
 
 
+def _leaf_nbytes(value) -> int:
+    """Bytes of an ArraysCache slot: an array, None, or a codec record (a
+    dict of arrays an APCv2 entry stores under recurrent_state_codec)."""
+    if value is None:
+        return 0
+    if isinstance(value, dict):
+        return sum((int(v.nbytes) for v in value.values() if isinstance(v, mx.array)))
+    return value.nbytes
+
+
+def _decode_restored_state(restored):
+    """Decode codec-stored recurrent leaves of a request-private restore.
+
+    A no-op walk for exact entries; see recurrent_state_codec."""
+    from ..recurrent_state_codec import decode_prompt_cache
+
+    decode_prompt_cache(restored)
+    return restored
+
+
 def _mark_prompt_cache_restored(prompt_cache):
     stack = list(prompt_cache)
     while stack:
@@ -5458,7 +5480,7 @@ def _mark_prompt_cache_restored(prompt_cache):
 
 def _copy_prompt_cache_for_restore(prompt_cache):
     if not getattr(prompt_cache, "_cow_frozen", False):
-        restored = copy.deepcopy(prompt_cache)
+        restored = _decode_restored_state(copy.deepcopy(prompt_cache))
         _mark_prompt_cache_restored(restored)
         return restored
     try:
@@ -5482,9 +5504,10 @@ def _copy_prompt_cache_for_restore(prompt_cache):
             record_fallback_deepcopy(
                 prompt_cache, telemetry, __import__("time").perf_counter_ns() - started
             )
+        _decode_restored_state(restored)
         _mark_prompt_cache_restored(restored)
         return restored
-    restored = copy.deepcopy(prompt_cache)
+    restored = _decode_restored_state(copy.deepcopy(prompt_cache))
     _mark_prompt_cache_restored(restored)
     return restored
 

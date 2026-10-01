@@ -467,6 +467,8 @@ def load_qualified_route(
         Fidelity.APPROXIMATE
         if settings.get("approximate_kv", {}).get("enabled") is True
         or (settings.get("int8_prefill") or {}).get("enabled") is True
+        # Restores of codec-stored recurrent state are approximate too.
+        or (settings.get("recurrent_state_codec") or {}).get("enabled") is True
         else Fidelity.NUMERICALLY_BOUNDED
     )
     planner = RoutePlanner()

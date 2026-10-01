@@ -4830,6 +4830,17 @@ def build_parser():
         ),
     )
     parser.add_argument(
+        "--recurrent-state-codec",
+        choices=("off", "int8-row-v1"),
+        default="off",
+        help=(
+            "store recurrent (GDN/SSM) state in APCv2 entries as int8 with one "
+            "scale per row; restores decode to float32.  Live state and "
+            "rollback records stay exact.  Approximate and unqualified: "
+            "qualification mode only; separate APCv2 namespace (default: off)"
+        ),
+    )
+    parser.add_argument(
         "--verify-bitexact",
         action="store_true",
         help=(
@@ -5088,6 +5099,7 @@ def serving_engine_kwargs(
         "apc_quarantine_max_bytes": args.apc_quarantine_max_bytes,
         "int8_prefill": args.int8_prefill,
         "verify_bitexact": bool(getattr(args, "verify_bitexact", False)),
+        "recurrent_state_codec": getattr(args, "recurrent_state_codec", "off"),
     }
 
 

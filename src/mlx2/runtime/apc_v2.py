@@ -48,6 +48,14 @@ from .models.cache import (
     load_prompt_cache,
     save_prompt_cache,
 )
+from .recurrent_state_codec import (
+    STATS as RECURRENT_STATE_CODEC_STATS,
+    TAG as RECURRENT_STATE_CODEC_TAG,
+    RecurrentStateCodecPolicy,
+    encode_prompt_cache,
+    key_codec_layer,
+    validate_prompt_cache,
+)
 from .persistent_blocks import (
     block_file_paths,
     encode_block_file,
@@ -263,7 +271,9 @@ _SEMANTIC_SCOPE_SEPARATOR = ":media:"
 # lane-matmul: lane.installer.apc_lane_fingerprint; prefill-execution-v1:
 # prefill_plan.apc_prefill_fingerprint; weight-stream:
 # weight_stream.apc_weight_stream_fingerprint; execution-numerics-v1:
-# apc_numerics.apc_execution_fingerprint.
+# apc_numerics.apc_execution_fingerprint; recurrent-state-codec-v1:
+# recurrent_state_codec.apc_state_codec_fingerprint (a storage law: entries
+# whose recurrent state was stored through an approximate codec).
 _NUMERICS_WRAPPER_TAGS = frozenset(
     {
         "int8-prefill",
@@ -271,6 +281,7 @@ _NUMERICS_WRAPPER_TAGS = frozenset(
         "prefill-execution-v1",
         "weight-stream",
         "execution-numerics-v1",
+        RECURRENT_STATE_CODEC_TAG,
     }
 )
 
@@ -585,6 +596,7 @@ class APCv2(PrefixIndex):
         quarantine_max_bytes: int = 1 << 30,
         max_interior_entries: Optional[int] = None,
         generation_prompt_suffixes: Iterable[Iterable[int]] = (),
+        state_codec: Any = None,
     ):
         if not layout_name:
             raise ValueError("APCv2 requires a model cache-layout declaration")
@@ -612,6 +624,22 @@ class APCv2(PrefixIndex):
             for suffix in generation_prompt_suffixes
         )
         self._apc_lock = threading.RLock()
+        # Approximate storage codec for recurrent state (default off).  Every
+        # key this instance serves must carry the matching namespace layer.
+        self._state_codec = RecurrentStateCodecPolicy.from_value(state_codec)
+        self._state_codec_layer = (
+            f"{self._state_codec.codec}@{self._state_codec.revision}"
+            if self._state_codec.enabled
+            else None
+        )
+        self._state_codec_stats = {
+            "stores_encoded": 0,
+            "encoded_leaves": 0,
+            "source_bytes": 0,
+            "encoded_bytes": 0,
+            "key_mismatch_refusals": 0,
+            "disk_restore_validated": 0,
+        }
         self._cow_branching = True
         self._cow_telemetry = COWCacheTelemetry()
         self._apc_stats = {key: 0 for key in self._STAT_KEYS}
@@ -1316,6 +1344,18 @@ class APCv2(PrefixIndex):
             semantic_fingerprint=semantic_fingerprint,
         )
 
+    def _state_codec_key_ok(self, key) -> bool:
+        """Whether ``key``'s namespace carries exactly this instance's codec.
+
+        Serving binds the codec into every key; a mismatch is a wiring bug,
+        and must neither store encoded state under an exact namespace nor
+        hand one to an exact reader."""
+        layer = key_codec_layer(getattr(key, "semantic_fingerprint", None))
+        if layer == self._state_codec_layer:
+            return True
+        self._state_codec_stats["key_mismatch_refusals"] += 1
+        return False
+
     def _entry_records_locked(self):
         seen = set()
         for cache_type in self._lru._ordering:
@@ -1827,6 +1867,11 @@ class APCv2(PrefixIndex):
                     require_manifest=bool(disk.get("block_encoded")),
                 ))
                 cache = load_prompt_cache(str(target_path))
+                # Fail closed on a codec this server does not serve, an exact
+                # leaf in a codec namespace (or the reverse), or a corrupt
+                # payload; ValueError drops the snapshot below.
+                if validate_prompt_cache(cache, self._state_codec):
+                    self._state_codec_stats["disk_restore_validated"] += 1
                 sidecar = None
                 sidecar_info = disk.get("sidecar")
                 if sidecar_info is not None:
@@ -2894,6 +2939,18 @@ class APCv2(PrefixIndex):
         if self._closed:
             raise RuntimeError("APCv2 is closed")
         tokens = [int(token) for token in tokens]
+        if not self._state_codec_key_ok(key):
+            self._apc_stats["lookups"] += 1
+            self._apc_stats["misses"] += 1
+            return APCLookup(
+                None,
+                tokens,
+                0,
+                False,
+                None,
+                "state_codec_namespace_mismatch",
+                capsule_generation=self._capsule_generation.current,
+            )
         self._apc_stats["queried_tokens"] += len(tokens)
         # Entries a resume of this session asked to prefetch, and those the
         # prefetch actually made resident before this lookup.
@@ -3323,6 +3380,17 @@ class APCv2(PrefixIndex):
         if _positions_disagree(prompt_cache, len(tokens)):
             self.boundary_rejections += 1
             return replace(capabilities, stored=False)
+        if not self._state_codec_key_ok(key):
+            return replace(capabilities, stored=False)
+        if self._state_codec.enabled:
+            # A store-private copy; the caller's (live) state stays exact.
+            (prompt_cache, codec_counts) = encode_prompt_cache(
+                prompt_cache, self._state_codec
+            )
+            if codec_counts["encoded_leaves"]:
+                self._state_codec_stats["stores_encoded"] += 1
+                for name in ("encoded_leaves", "source_bytes", "encoded_bytes"):
+                    self._state_codec_stats[name] += codec_counts[name]
         if self._cow_branching:
             try:
                 (prompt_cache, sidecar) = freeze_prompt_cache(
@@ -3632,6 +3700,11 @@ class APCv2(PrefixIndex):
                 stats["lifetime"][key] += self._apc_stats[key]
             stats["cow_enabled"] = self._cow_branching
             stats["cow"] = self._cow_telemetry.snapshot()
+            stats["recurrent_state_codec"] = {
+                **self._state_codec.as_dict(),
+                **self._state_codec_stats,
+                "process_decoded_leaves": RECURRENT_STATE_CODEC_STATS["decoded_leaves"],
+            }
             stats["max_tokens"] = self.max_tokens
             stats["resident_max_bytes"] = int(self.max_bytes)
             stats["max_entry_tokens"] = self.max_entry_tokens

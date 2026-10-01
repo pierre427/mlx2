@@ -796,6 +796,7 @@ def apc_semantic_namespace(
     lane_matmul_receipt=None,
     int8_prefill_policy=None,
     weight_stream_manager=None,
+    recurrent_state_codec=None,
 ):
     """``semantic`` wrapped in every numerical law the process serves under.
 
@@ -807,20 +808,25 @@ def apc_semantic_namespace(
     from .runtime.int8_prefill import apc_semantic_fingerprint
     from .runtime.lane.installer import apc_lane_fingerprint
     from .runtime.prefill_plan import apc_prefill_fingerprint
+    from .runtime.recurrent_state_codec import apc_state_codec_fingerprint
     from .runtime.weight_stream import apc_weight_stream_fingerprint
 
-    return apc_weight_stream_fingerprint(
-        apc_semantic_fingerprint(
-            apc_lane_fingerprint(
-                apc_prefill_fingerprint(
-                    apc_execution_fingerprint(semantic, execution_numerics),
-                    prefill_execution,
+    # The recurrent-state storage codec is the outermost law.
+    return apc_state_codec_fingerprint(
+        apc_weight_stream_fingerprint(
+            apc_semantic_fingerprint(
+                apc_lane_fingerprint(
+                    apc_prefill_fingerprint(
+                        apc_execution_fingerprint(semantic, execution_numerics),
+                        prefill_execution,
+                    ),
+                    lane_matmul_receipt,
                 ),
-                lane_matmul_receipt,
+                int8_prefill_policy,
             ),
-            int8_prefill_policy,
+            weight_stream_manager,
         ),
-        weight_stream_manager,
+        recurrent_state_codec,
     )
 
 
@@ -958,6 +964,40 @@ def lane_matmul_status(engine) -> dict:
         "sources": policy.get("sources"),
         "counts": stats(),
     }
+
+
+def recurrent_state_codec_policy(value, *, qualification_mode, qualification):
+    """Validate the APCv2 recurrent-state storage codec selection.
+
+    An enabled codec stores approximate state, so outside qualification mode
+    it needs a qualification record (or a policy that names its evidence)."""
+    from .runtime.recurrent_state_codec import RecurrentStateCodecPolicy
+
+    policy = RecurrentStateCodecPolicy.from_value(value)
+    if (
+        policy.enabled
+        and not policy.qualified
+        and not qualification_mode
+        and not qualification
+    ):
+        raise ValueError(
+            "the recurrent state codec is approximate and restricted to "
+            "qualification mode unless a qualification record carries its evidence"
+        )
+    return policy
+
+
+def recurrent_state_codec_status(engine):
+    """Host-only status: the policy and APCv2's codec counters."""
+    policy = getattr(engine, "recurrent_state_codec_policy", None)
+    if policy is None or not policy.enabled:
+        return {"enabled": False}
+    apc = getattr(engine, "apc", None)
+    counters = dict(getattr(apc, "_state_codec_stats", {}) or {})
+    from .runtime.recurrent_state_codec import STATS
+
+    counters["process_decoded_leaves"] = STATS["decoded_leaves"]
+    return {**policy.as_dict(), "counters": counters}
 
 
 def int8_prefill_status(engine):
@@ -1818,6 +1858,7 @@ class ServingEngine:
         int8_prefill=None,
         verify_bitexact=None,
         prefill_depth_budget=None,
+        recurrent_state_codec=None,
         _validate_only=False,
     ):
         self.default_max_tokens = validate_default_max_tokens(default_max_tokens)
@@ -2123,6 +2164,13 @@ class ServingEngine:
                 "int8 prefill is approximate and restricted to qualification mode "
                 "unless a qualification record carries its evidence"
             )
+        # Storage codec for recurrent state in APCv2 entries: default off,
+        # approximate by construction (AGENTS.md), so the same gate.
+        self.recurrent_state_codec_policy = recurrent_state_codec_policy(
+            recurrent_state_codec,
+            qualification_mode=qualification_mode,
+            qualification=qualification,
+        )
         from .runtime.verify_bitexact import VerifyBitexactPolicy
 
         # Bit-exact (batch-invariant) verify: default off.  The mode is
@@ -3621,6 +3669,7 @@ class ServingEngine:
                     ],
                 },
                 "int8_prefill": int8_prefill_status(self),
+                "recurrent_state_codec": recurrent_state_codec_status(self),
                 "lane_matmul": lane_matmul_status(self),
                 "verify_bitexact": verify_bitexact_status(self),
                 **(
@@ -5220,6 +5269,11 @@ class ServingEngine:
                     if (self.lane_matmul_receipt or {}).get("covered")
                     else {}
                 ),
+                **(
+                    {"recurrent_state_codec": self.recurrent_state_codec_policy.as_dict()}
+                    if self.recurrent_state_codec_policy.enabled
+                    else {}
+                ),
                 "max_context": self.max_context,
                 "default_max_tokens": self.default_max_tokens,
                 "max_lanes": self.max_lanes,
@@ -5623,6 +5677,11 @@ class ServingEngine:
                         if self.verify_bitexact_policy.enabled
                         else ""
                     )
+                    + (
+                        f"-rsc-{self.recurrent_state_codec_policy.codec}"
+                        if self.recurrent_state_codec_policy.enabled
+                        else ""
+                    )
                     + ("-sp-qmm" if self.sp_qmm_enabled else "")
                     + (
                         "-adaptive-mtp-depth"
@@ -5790,6 +5849,7 @@ class ServingEngine:
                 lane_matmul_receipt=self.lane_matmul_receipt,
                 int8_prefill_policy=self.int8_prefill_policy,
                 weight_stream_manager=self.expert_stream,
+                recurrent_state_codec=self.recurrent_state_codec_policy,
             )
             persistent_identity = APCv2.key(
                 adapter.identity["fingerprint"],
@@ -5828,6 +5888,7 @@ class ServingEngine:
                 quarantine_max_entries=self.apc_quarantine_max_entries,
                 quarantine_max_bytes=self.apc_quarantine_max_bytes,
                 generation_prompt_suffixes=self.apc_generation_prompt_suffixes,
+                state_codec=self.recurrent_state_codec_policy,
             )
             self.apc = apc
             cache_keys = {}
@@ -8735,6 +8796,15 @@ class ServingEngine:
                                     **(
                                         {"int8_prefill": self.int8_prefill_handle.receipt()}
                                         if self.int8_prefill_handle is not None
+                                        else {}
+                                    ),
+                                    **(
+                                        {
+                                            "recurrent_state_codec": self.recurrent_state_codec_policy.receipt(
+                                                restored_tokens=int(job.cached_tokens or 0)
+                                            )
+                                        }
+                                        if self.recurrent_state_codec_policy.enabled
                                         else {}
                                     ),
                                     **(
