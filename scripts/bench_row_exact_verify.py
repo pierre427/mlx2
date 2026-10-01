@@ -5,7 +5,11 @@ One process, one loaded model, greedy B=1 decode.  Arms:
 
 * ``off``       ordinary one-token decode (MTP off)
 * ``mtp``       native self-MTP, route copy drafts, stock verify
-* ``rowexact``  the same with the row-exact verify route enabled
+* ``rowexact``  the same with the row-exact verify route enabled, with the
+                wave-2 window kernels (policy ``row_exact_window_kernels``:
+                attention window + HC row-exact mode) switched on in-process
+* ``rowexact_base``  (opt-in, ``--arms``) the route without those window
+                kernels (the wave-1 route), to isolate their increment
 
 Every rep visits all arms in a rotated order (ABC, BCA, CAB, ...); rep 0 is a
 discarded warm-up.  Decode tok/s is measured from the first generated token to
@@ -34,6 +38,14 @@ sys.path.insert(0, str(ROOT / "scripts"))
 ARMS = ("off", "mtp", "rowexact")
 
 
+def _set_window_stages(on: bool):
+    from mlx2.runtime.models import qwen4_attn_window as AW
+    from mlx2.runtime.models import qwen4_hc_decode as HCD
+
+    AW.set_enabled(on)
+    HCD.set_hc_row_exact_enabled(on)
+
+
 def _decode(adapter, prompt_ids, *, arm, max_tokens, prefill_step, copy_policy):
     import mlx.core as mx
     from mlx2.runtime import generate as G
@@ -44,7 +56,8 @@ def _decode(adapter, prompt_ids, *, arm, max_tokens, prefill_step, copy_policy):
         kwargs["self_mtp"] = adapter.policy.batch_config(max_lanes=1, prefill_step=prefill_step)
         if copy_policy is not None:
             kwargs["copy_draft"] = copy_policy
-    adapter.row_exact_verify.enable(arm == "rowexact")
+    adapter.row_exact_verify.enable(arm.startswith("rowexact"))
+    _set_window_stages(arm == "rowexact")
     gen = G.BatchGenerator(adapter.model, **kwargs)
     tokens, first, last = [], None, None
     try:
@@ -67,6 +80,7 @@ def _decode(adapter, prompt_ids, *, arm, max_tokens, prefill_step, copy_policy):
     finally:
         gen.close()
         adapter.row_exact_verify.enable(False)
+        _set_window_stages(False)
     mx.clear_cache()
     decoded = len(tokens) - first_count
     return {
@@ -84,6 +98,8 @@ def main():
     parser.add_argument("--max-tokens", type=int, default=256)
     parser.add_argument("--prefill-step", type=int, default=2048)
     parser.add_argument("--no-copy", action="store_true")
+    parser.add_argument("--arms", default=",".join(ARMS))
+    parser.add_argument("--execution-policy", default=None, help="JSON FlashNextPolicy mapping")
     parser.add_argument("--out", required=True)
     parser.add_argument("--i-own-the-gpu", action="store_true")
     args = parser.parse_args()
@@ -96,7 +112,10 @@ def main():
     from mlx2.runtime.models.qwen4_row_exact import install
 
     mx.set_cache_limit(4 << 30)
-    adapter = FlashNextAdapter(args.model)
+    policy = json.loads(args.execution_policy) if args.execution_policy else None
+    adapter = FlashNextAdapter(args.model, execution_policy=policy)
+    arms = tuple(a for a in args.arms.split(",") if a)
+    assert {"off", "mtp", "rowexact"} <= set(arms), arms
     adapter.row_exact_verify = install(adapter.model)
     copy_policy = None
     if not args.no_copy:
@@ -106,12 +125,12 @@ def main():
         name: list(adapter.prompt_tokens({"messages": [{"role": "user", "content": PROMPTS[name]}]}))
         for name in names
     }
-    samples = {name: {arm: [] for arm in ARMS} for name in names}
-    shas = {name: {arm: set() for arm in ARMS} for name in names}
+    samples = {name: {arm: [] for arm in arms} for name in names}
+    shas = {name: {arm: set() for arm in arms} for name in names}
     order_log = []
     for rep in range(args.reps + 1):
         for name in names:
-            order = ARMS[rep % 3 :] + ARMS[: rep % 3]
+            order = arms[rep % len(arms) :] + arms[: rep % len(arms)]
             order_log.append([rep, name, list(order)])
             for arm in order:
                 result = _decode(
@@ -125,7 +144,7 @@ def main():
     summary = {}
     for name in names:
         cell = {}
-        for arm in ARMS:
+        for arm in arms:
             values = samples[name][arm]
             cell[arm] = {
                 "median": statistics.median(values),
@@ -138,6 +157,10 @@ def main():
         cell["rowexact_over_off"] = cell["rowexact"]["median"] / cell["off"]["median"]
         cell["mtp_over_off"] = cell["mtp"]["median"] / cell["off"]["median"]
         cell["rowexact_output_equals_off"] = shas[name]["rowexact"] == shas[name]["off"]
+        if "rowexact_base" in arms:
+            cell["rowexact_over_base"] = cell["rowexact"]["median"] / cell["rowexact_base"]["median"]
+            cell["rowexact_base_over_mtp"] = cell["rowexact_base"]["median"] / cell["mtp"]["median"]
+            cell["rowexact_base_output_equals_off"] = shas[name]["rowexact_base"] == shas[name]["off"]
         summary[name] = cell
     report = {
         "schema": "mlx2.bench-row-exact-verify.v1",
@@ -145,6 +168,7 @@ def main():
         "reps": args.reps,
         "max_tokens": args.max_tokens,
         "order": order_log,
+        "policy": adapter.policy.as_dict(),
         "route_status": adapter.row_exact_verify.status(),
         "summary": summary,
     }

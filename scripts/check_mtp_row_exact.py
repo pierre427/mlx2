@@ -13,7 +13,8 @@ Arms, all in one process on one loaded model, each on fresh caches:
                 (``MLX_QWEN4_SHAPE_STABLE_SHORT_FORWARD`` +
                 ``MLX_QWEN4_GDN_SHAPE_STABLE_PROJECTIONS``) flipped on
 * ``rowexact``  ``mtp`` with the row-exact verify route (policy
-                ``row_exact_verify``) switched on
+                ``row_exact_verify``) switched on; its window kernels (policy
+                ``row_exact_window_kernels``) follow the execution policy
 
 For every prompt the report gives the first token where an arm's output
 differs from ``off`` and, for every verify row whose input prefix still equals
@@ -470,6 +471,25 @@ def run_arm(adapter, recorder, prompt_ids, *, arm, num_draft, max_tokens, prefil
     }
 
 
+def _kernel_status():
+    """Engagement counters of the opt-in decode kernels (reset per arm)."""
+    out = {}
+    try:
+        from mlx2.runtime.models import qwen4_hc_decode as H
+
+        status = H.hc_decode_status(reset=True)
+        out["hc_decode"] = {k: status[k] for k in ("enabled", "calls", "declines", "errors")}
+    except Exception as exc:  # noqa: BLE001 - informational
+        out["hc_decode"] = repr(exc)
+    try:
+        from mlx2.runtime.models import qwen4_attn_rows as A
+
+        out["attn_rows"] = A.status(reset=True)
+    except Exception as exc:  # noqa: BLE001 - informational
+        out["attn_rows"] = repr(exc)
+    return out
+
+
 def set_arm(adapter, arm):
     """Flip the in-process switches an arm needs; return a restore callable."""
     from mlx2.runtime.models import qwen4_exp as Q
@@ -484,6 +504,10 @@ def set_arm(adapter, arm):
             from mlx2.runtime.models.qwen4_row_exact import install
 
             row_exact = adapter.row_exact_verify = install(adapter.model)
+            # Installed by this arm, not by the policy: uninstall_arm_route
+            # takes the class swaps off again so the other arms run the plain
+            # module classes.
+            adapter._row_exact_arm_owned = True
         row_exact.enable(True)
 
     def restore():
@@ -492,6 +516,19 @@ def set_arm(adapter, arm):
             row_exact.enable(False)
 
     return restore
+
+
+def uninstall_arm_route(adapter):
+    """Remove a route this script installed for the rowexact arm."""
+    route = getattr(adapter, "row_exact_verify", None)
+    if route is None or not getattr(adapter, "_row_exact_arm_owned", False):
+        return
+    route.remove()
+    model = adapter.model
+    if "_mlx2_row_exact_verify" in model.__dict__:
+        object.__delattr__(model, "_mlx2_row_exact_verify")
+    adapter.row_exact_verify = None
+    adapter._row_exact_arm_owned = False
 
 
 def _device_info(mx):
@@ -571,6 +608,8 @@ def main():
                 restore()
             if arm == "rowexact":
                 results[arm]["route"] = adapter.row_exact_verify.status()
+                uninstall_arm_route(adapter)
+            results[arm]["kernels"] = _kernel_status()
             print(name, arm, f"{len(results[arm]['tokens'])} tokens",
                   f"{results[arm]['elapsed_s']:.1f}s", results[arm]["windows"], flush=True)
         reference = results["off"]
@@ -587,6 +626,8 @@ def main():
             }
             if "route" in result:
                 summary["route"] = result["route"]
+            if "kernels" in result:
+                summary["kernels"] = result["kernels"]
             if arm != "off":
                 summary.update(compare(reference, result, len(prompt_ids), num_layers))
             entry["arms"][arm] = summary
