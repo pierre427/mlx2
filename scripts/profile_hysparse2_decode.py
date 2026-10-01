@@ -17,6 +17,7 @@ def main():
     p.add_argument("--tokens", type=Path, required=True)
     p.add_argument("--output", type=Path, required=True)
     p.add_argument("--reference-attention", type=Path)
+    p.add_argument("--full-cross", action="store_true", help="Attribute current self append versus complete cross decoder with ordinary-decode parity")
     p.add_argument(
         "--warm-paired",
         action="store_true",
@@ -26,6 +27,8 @@ def main():
     args = p.parse_args()
     if args.warm_paired and not args.reference_attention:
         p.error("--warm-paired requires --reference-attention")
+    if not args.lengths or any(n < 1 for n in args.lengths) or len(set(args.lengths)) != len(args.lengths):
+        p.error("use positive unique context lengths")
     if args.output.exists():
         p.error("use a fresh receipt path")
     state = json.loads((args.checkpoint / "state.json").read_text())
@@ -34,7 +37,10 @@ def main():
         "schema": "mlx2.hysparse2-decode-attribution.v1",
         "contexts": [],
         "checkpoint_sha256": file_hash(args.checkpoint / "model.safetensors"),
-        "target": "first cross-attention anchor only",
+        "target": "self append, first anchor and complete cross decoder" if args.full_cross else "first cross-attention anchor only",
+        "tokens_sha256": file_hash(args.tokens),
+        "model_source_sha256": file_hash(Path("src/mlx2/experimental/hysparse2/model.py")),
+        "thermal_controls": False,
         "repetitions": 1,
         "completed": False,
         "production_throughput_measurement": False,
@@ -86,6 +92,11 @@ def main():
             )
             token = mx.array(values[length : length + 1][None])
             mx.eval(token)
+            ordinary = None
+            if args.full_cross:
+                reference_cache = cache.fork()
+                ordinary, ordinary_seconds = timed(model.decode, token, reference_cache)
+                del reference_cache
             (hidden, offset), append_seconds = timed(model._append, token, cache)
             layer = model.cross_decoder[0]
             raw, _ = layer.attention_hc.read(hidden)
@@ -139,6 +150,15 @@ def main():
                 "valid_support_slots": int(mx.sum(selected[1][2] <= offset).item()),
                 "finite_anchor": bool(mx.all(mx.isfinite(selected[0])).item()),
             }
+            if args.full_cross:
+                full_logits, cross_seconds = timed(model._cross, hidden, cache, offset)
+                full_error = float(mx.max(mx.abs(full_logits - ordinary)).item())
+                if full_error != 0 or not bool(mx.all(mx.isfinite(full_logits)).item()):
+                    raise AssertionError("split self/cross path differs from ordinary decode")
+                row.update(full_cross_seconds=cross_seconds, ordinary_decode_seconds=ordinary_seconds,
+                           ordinary_logits_max_abs_error=full_error, kv_bytes=cache.resident_bytes(),
+                           final_cache_length=cache.length)
+                del ordinary, full_logits
             if reference_attention is not None:
                 original, original_seconds = timed(
                     reference_attention.attention,
