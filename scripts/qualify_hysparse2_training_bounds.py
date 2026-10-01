@@ -14,6 +14,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--checkpoint", type=Path, required=True)
     parser.add_argument("--reference", type=Path, required=True)
+    parser.add_argument("--candidate", type=Path, help="Isolated counted attention module")
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--batch", type=int, default=2)
     parser.add_argument("--sequence", type=int, default=256)
@@ -21,12 +22,21 @@ def main():
     parser.add_argument("--segment-tokens", type=int, default=0)
     parser.add_argument("--optimizer-step", action="store_true")
     args = parser.parse_args()
+    if args.candidate and args.require_coalescing:
+        parser.error("isolated candidate does not use runtime coalescing instrumentation")
     if args.batch < 1 or args.sequence < 2 or args.segment_tokens < 0:
         parser.error("batch must be positive and sequence at least two")
     args.output.mkdir(parents=True, exist_ok=False)
     spec = importlib.util.spec_from_file_location("attention_reference", args.reference)
     reference = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(reference)
+    candidate = None
+    if args.candidate:
+        spec = importlib.util.spec_from_file_location("isolated_training_candidate", args.candidate)
+        candidate = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(candidate)
+        if not hasattr(candidate, "_MATERIALIZATION_STATS"):
+            parser.error("candidate must expose completed materialization counts")
     report = {
         "schema": "mlx2.hysparse2-training-bounds.v1",
         "completed": False,
@@ -35,6 +45,7 @@ def main():
         "one_repetition_no_thermal_control": True,
         "checkpoint_sha256": file_hash(args.checkpoint / "model.safetensors"),
         "reference_sha256": file_hash(args.reference),
+        "candidate_sha256": file_hash(args.candidate) if args.candidate else None,
         "batch": args.batch,
         "sequence": args.sequence,
         "script_sha256": file_hash(Path(__file__)),
@@ -83,7 +94,7 @@ def main():
             attention._gather_groups = observed_groups
             for label, function in (
                 ("reference", reference.attention),
-                ("bounded", attention.attention),
+                ("bounded", candidate.attention if candidate is not None else attention.attention),
             ):
                 def segmented_attention(q, blocks, **kwargs):
                     if args.segment_tokens:
@@ -100,12 +111,17 @@ def main():
                 warm_value, warm_gradients = compute(model, tokens)
                 mx.eval(warm_value, warm_gradients)
                 del warm_value, warm_gradients
+                if candidate is not None:
+                    candidate._MATERIALIZATION_STATS["evaluations"] = 0
                 start = time.perf_counter()
                 value, gradients = compute(model, tokens)
                 mx.eval(value, gradients)
                 elapsed = (time.perf_counter() - start) * 1000
                 runs.append((float(value.item()), dict(tree_flatten(gradients))))
                 report[label] = {"loss": runs[-1][0], "forward_backward_ms": elapsed}
+                if candidate is not None and label == "bounded":
+                    report[label]["completed_materializations"] = candidate._MATERIALIZATION_STATS["evaluations"]
+                    assert report[label]["completed_materializations"] > 0
             left, right = runs[0][1], runs[1][1]
             assert left.keys() == right.keys()
             errors = {
@@ -153,7 +169,7 @@ def main():
                 }
                 assert all(delta > 0 for delta in report["parameter_update_probes"].values())
                 assert all(bool(mx.all(mx.isfinite(x)).item()) for x in after.values())
-                run = {"qualification": "coalesced-gather-step", "parent_checkpoint_sha256": report["checkpoint_sha256"], "batch": args.batch, "sequence": args.sequence}
+                run = {"qualification": "isolated-materialization-step" if candidate is not None else "coalesced-gather-step", "parent_checkpoint_sha256": report["checkpoint_sha256"], "batch": args.batch, "sequence": args.sequence}
                 path = save_checkpoint(args.output / "checkpoints", model, optimizer, 1, run)
                 report["optimizer_update_performed"] = True
                 report["fresh_optimizer_lineage"] = True
