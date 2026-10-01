@@ -344,3 +344,36 @@ def test_ops_reference_keeps_fp32_widening_for_the_readout():
                              v.astype(mx.float16), g, beta,
                              mx.zeros((1, 4, 8, 16), mx.float32))
     assert y16.dtype == y32.dtype == mx.float16
+
+
+def test_fp16_probe_device_fault_is_raised_not_cached(monkeypatch):
+    # A Metal OOM or GPU timeout during the probe is not a kernel refusal:
+    # serving must see it, and the next call probes again.
+    monkeypatch.setattr(fused, "_PROBED_ST16", {})
+    monkeypatch.setattr(fused, "probe_qwen4_fused_gdn_decode", lambda dtype: 8)
+
+    def fault(*_a, **_k):
+        raise RuntimeError(
+            "[METAL] Command buffer execution failed: Caused GPU Timeout Error "
+            "(00000002:kIOGPUCommandBufferCallbackErrorTimeout)"
+        )
+
+    monkeypatch.setattr(fused, "qwen4_fused_gdn_decode", fault)
+    with pytest.raises(RuntimeError):
+        fused._probe_st16_decode(mx.bfloat16)
+    assert "decode" not in fused._PROBED_ST16
+
+
+def test_recurrent_state_codec_refuses_reduced_gdn_state():
+    from types import SimpleNamespace
+
+    from mlx2.runtime.recurrent_state_codec import RecurrentStateCodecPolicy
+    from mlx2.serving import refuse_state_codec_on_reduced_state
+
+    codec = RecurrentStateCodecPolicy.from_value("int8-row-v1")
+    fp32 = SimpleNamespace(gdn_state=None)
+    fp16 = SimpleNamespace(gdn_state={"dtype": "float16"})
+    refuse_state_codec_on_reduced_state(codec, fp32)
+    refuse_state_codec_on_reduced_state(RecurrentStateCodecPolicy.from_value(None), fp16)
+    with pytest.raises(ValueError, match="fp32 GDN recurrent state"):
+        refuse_state_codec_on_reduced_state(codec, fp16)

@@ -391,3 +391,12 @@ def test_engine_argument_validation_gates_the_codec():
         "/nonexistent", recurrent_state_codec="int8-row-v1", qualification_mode=True
     )
     ServingEngine.validate_arguments("/nonexistent")
+
+
+def test_selected_codec_requires_observed_encode_and_restore():
+    from mlx2.qualification import required_feature_checks
+
+    settings = {"mtp": False, "max_context": 4096, "execution_policy": {}, "environment": {}}
+    assert "feature_recurrent_state_codec" not in required_feature_checks(settings)
+    enabled = {**settings, "recurrent_state_codec": {"enabled": True, "codec": "int8-row-v1"}}
+    assert "feature_recurrent_state_codec" in required_feature_checks(enabled)

@@ -1262,6 +1262,20 @@ def device_fault_kind(exc):
     return None
 
 
+def refuse_state_codec_on_reduced_state(policy, adapter):
+    """Fail closed: the recurrent-state codec is defined over fp32 GDN state.
+
+    With an fp16 GDN storage class selected (``gdn_state_dtype``) no leaf is
+    an fp32 recurrent leaf, so the codec would store exact fp16 state in its
+    approximate namespace while reporting codec restores.
+    """
+    if policy is not None and policy.enabled and getattr(adapter, "gdn_state", None):
+        raise ValueError(
+            "--recurrent-state-codec needs fp32 GDN recurrent state; this "
+            "adapter selected a reduced gdn_state_dtype"
+        )
+
+
 def refuse_unbounded_prefill_input(budget, remaining_tokens, depth):
     """Fail closed when a prefill-input request cannot honour the depth bound.
 
@@ -5177,6 +5191,7 @@ class ServingEngine:
                     raise ValueError(f"adapter prefill_step_default must be positive, got {step}")
                 self.prefill_step = step
                 self.prefill_step_source = "adapter"
+            refuse_state_codec_on_reduced_state(self.recurrent_state_codec_policy, adapter)
             budget_default = getattr(adapter, "prefill_depth_budget_default", None)
             if self._prefill_depth_budget_override is None and callable(budget_default):
                 budget = validate_prefill_depth_budget(budget_default())

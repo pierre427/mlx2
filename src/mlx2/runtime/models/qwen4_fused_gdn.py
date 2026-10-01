@@ -883,6 +883,11 @@ def _probe_st16_decode(dtype) -> Optional[int]:
                     mx.eval(*outputs)
                 result = start
             except (ValueError, RuntimeError) as exc:
+                from .served_exp import is_device_fault
+
+                if is_device_fault(exc):
+                    # Not a kernel refusal: let serving recover, probe again.
+                    raise
                 logger.info("Qwen4 fused GDN fp16-state probe failed: %s", exc)
         _PROBED_ST16["decode"] = result
         return result

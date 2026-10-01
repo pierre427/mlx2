@@ -200,7 +200,8 @@ def test_hc_helpers_are_the_probed_ones():
     sources = HCD.NORM_DOWN_SOURCE + HCD.UP_MIX_SOURCE
     # SiLU sites: g = jit(a) then a * g; sigmoid sites use the unary helper.
     assert sources.count("hcd_sigmoid_jit<T>(a)") == sources.count("act[") == 2
-    assert sources.count("hcd_sigmoid_unary<T>(") == 3
+    # Three sigmoid sites, plus two in the 8-bit / dense-inject HC rows (W3).
+    assert sources.count("hcd_sigmoid_unary<T>(") == 5
     assert "metal::exp(" not in sources and "metal::precise::exp(" not in sources
 
 
