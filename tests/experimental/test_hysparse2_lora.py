@@ -161,3 +161,36 @@ def test_candidate_revision_and_budget(tmp_path):
     with pytest.raises(ValueError, match="content revision"):
         LoRAEpisode.load_candidate(model, tmp_path / "candidate", base_revision="r")
     assert model.adapter_revision is None
+
+
+def test_child_revision_binds_retained_parent_and_load_preflight(tmp_path):
+    model, plain = Model(Config.smoke()), Model(Config.smoke())
+    plain.load_weights(tree_flatten(model.parameters()), strict=True)
+    parent = LoRAEpisode(model, ["self_decoder.0.attention.q"], base_revision="base", rank=2, max_steps=1)
+
+    def diagnostic(m, _):
+        layer = m.self_decoder[0].attention.q
+        return mx.sum(layer.lora_b) if hasattr(layer, "lora_b") else mx.array(0.)
+
+    parent.step(None, diagnostic)
+    assert parent.evaluate(None, None, diagnostic)["promoted"]
+    parent.close()
+    mx.random.seed(73)
+    child = LoRAEpisode(model, ["semantic_ple.value"], base_revision="base", rank=2, max_steps=1)
+    mx.random.seed(73)
+    unrelated = LoRAEpisode(plain, ["semantic_ple.value"], base_revision="base", rank=2, max_steps=1)
+    try:
+        assert model.adapter_revision != plain.adapter_revision
+        revision = model.adapter_revision
+        child.export(tmp_path / "child")
+    finally:
+        child.close()
+        unrelated.close()
+    owner = plain._cache_owner
+    with pytest.raises(ValueError, match="parent adapter revision"):
+        LoRAEpisode.load_candidate(plain, tmp_path / "child", base_revision="base")
+    assert plain._cache_owner is owner and plain.adapter_revision is None
+    loaded = LoRAEpisode.load_candidate(model, tmp_path / "child", base_revision="base")
+    assert model.adapter_revision == revision
+    loaded.close()
+    parent.rollback()

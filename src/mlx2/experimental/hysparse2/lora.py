@@ -84,12 +84,12 @@ class LoRAEpisode:
     def _invalidate(self):
         weights = self.weights()
         mx.eval(weights)
-        digest = hashlib.sha256(
-            json.dumps(
-                {"keys": self.keys, "rank": self.rank, "scale": self.scale},
-                sort_keys=True,
-            ).encode()
-        )
+        identity = {"keys": self.keys, "rank": self.rank, "scale": self.scale}
+        # Retained parent overlays affect every child result. Bind them without
+        # changing historical first-episode revisions on an ordinary base.
+        if self.previous_revision is not None:
+            identity["parent_adapter_revision"] = self.previous_revision
+        digest = hashlib.sha256(json.dumps(identity, sort_keys=True).encode())
         for key, value in sorted(weights.items()):
             digest.update(key.encode())
             digest.update(str((value.shape, value.dtype)).encode())
@@ -176,6 +176,7 @@ class LoRAEpisode:
                 "keys": list(self.keys),
             },
             "base_revision": self.base_revision,
+            "parent_adapter_revision": self.previous_revision,
             "adapter_revision": self.model.adapter_revision,
             "steps": self.steps,
             "max_steps": self.max_steps,
@@ -189,6 +190,8 @@ class LoRAEpisode:
         config = json.loads((path / "adapter_config.json").read_text())
         if config["base_revision"] != base_revision:
             raise ValueError("adapter base revision differs")
+        if config.get("parent_adapter_revision") != model.adapter_revision:
+            raise ValueError("parent adapter revision differs")
         params = config["lora_parameters"]
         episode = cls(
             model,
