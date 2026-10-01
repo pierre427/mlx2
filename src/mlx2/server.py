@@ -392,6 +392,57 @@ class BoundedHTTPServer(ThreadingHTTPServer):
             self.connections.release()
 
 
+def _canonical_json_order(value):
+    """Copy JSON data with object members in one canonical order.
+
+    Members are sorted by name; arrays keep their order.  A ``properties`` map
+    lists its sibling ``required`` names first, then the optional ones (each
+    group sorted), because the constrained-output compiler only accepts
+    required properties ahead of optional ones.
+    """
+    if isinstance(value, dict):
+        required = value.get("required")
+        ordered = {}
+        for key in sorted(value, key=str):
+            child = value[key]
+            if key == "properties" and isinstance(child, dict) and isinstance(required, list):
+                names = sorted(child, key=str)
+                names = [n for n in names if n in required] + [
+                    n for n in names if n not in required
+                ]
+                ordered[key] = {name: _canonical_json_order(child[name]) for name in names}
+            else:
+                ordered[key] = _canonical_json_order(child)
+        return ordered
+    if isinstance(value, list):
+        return [_canonical_json_order(item) for item in value]
+    return value
+
+
+def canonical_tool_definition(tool):
+    """Copy one function tool with a canonical member order (omlx #4138).
+
+    Agent clients resend equivalent tool schemas with object members in a
+    different order each turn; templates render tools through ``tojson``, which
+    keeps that order, so the prompt diverged inside the tool block and the
+    prefix cache missed the whole conversation.  The wrappers keep the
+    conventional ``type, function`` / ``name, description, parameters`` lead;
+    everything else follows ``_canonical_json_order``.  Values, array order
+    and the caller's objects are unchanged.
+    """
+    def lead(mapping, first):
+        keys = [key for key in first if key in mapping]
+        keys += sorted((key for key in mapping if key not in first), key=str)
+        return {key: mapping[key] for key in keys}
+
+    function = lead(
+        {key: _canonical_json_order(child) for key, child in tool["function"].items()},
+        ("name", "description", "parameters"),
+    )
+    rest = {key: _canonical_json_order(child) for key, child in tool.items() if key != "function"}
+    return lead({**rest, "function": function}, ("type", "function"))
+
+
 def validate_request(
     body,
     chat=True,
@@ -611,7 +662,11 @@ def validate_request(
                 from .runtime.tool_parsers._schema import resolve_local_refs
                 from .structured_output import compile_constraint
 
-                parameters = resolve_local_refs(declared_parameters)
+                # Compile the member order the strict grammar will be built
+                # from at admission: the canonical copy below.
+                parameters = _canonical_json_order(
+                    resolve_local_refs(declared_parameters)
+                )
                 compile_constraint(
                     {
                         "type": "json_schema",
@@ -628,15 +683,19 @@ def validate_request(
             # behind.  Carry the absent optional field as the empty string --
             # the same defaulting ``parameters`` already gets -- so a request
             # that is legal by the schema renders instead of failing.
+            # Equivalent schemas sent with members in another order must
+            # render the same prompt prefix (omlx #4138).
             normalized_tools.append(
-                {
-                    **tool,
-                    "function": {
-                        "description": "",
-                        **function,
-                        "parameters": parameters,
-                    },
-                }
+                canonical_tool_definition(
+                    {
+                        **tool,
+                        "function": {
+                            "description": "",
+                            **function,
+                            "parameters": parameters,
+                        },
+                    }
+                )
             )
         body = {**body, "tools": normalized_tools}
     body = normalize_tool_choice(body)
