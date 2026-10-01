@@ -40,6 +40,7 @@ def parser():
     p.add_argument("--i-own-the-gpu", action="store_true")
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--target-verify-row-exact", action="store_true")
+    p.add_argument("--whole-prompt-reference-diagnostic", action="store_true")
     p.add_argument(
         "--compute-precision",
         choices=("artifact", "float32-diagnostic"),
@@ -88,6 +89,8 @@ def plan(args):
         "model_loaded": False,
         "compute_precision": args.compute_precision,
         "target_verify_row_exact": args.target_verify_row_exact,
+        "ordinary_reference_convention": "B1 chunked prompt[:-1], original S1 anchor, then original S1 emitted tokens",
+        "whole_prompt_reference_diagnostic_requested": args.whole_prompt_reference_diagnostic,
     }
 
 
@@ -208,6 +211,30 @@ def audit_trace(frames, stats, census, observed_counts):
     }
 
 
+def ordinary_prefix_cache(model, prompt, *, prefill_step):
+    """Match serving's reserved final anchor without selecting alternate math."""
+    if not prompt or type(prefill_step) is not int or prefill_step <= 0:
+        raise ValueError(
+            "ordinary reference needs nonempty tokens and positive prefill step"
+        )
+    import mlx.core as mx
+
+    cache = model.make_cache()
+    for start in range(0, len(prompt) - 1, prefill_step):
+        stop = min(start + prefill_step, len(prompt) - 1)
+        mx.eval(model(mx.array([prompt[start:stop]]), cache=cache))
+    return cache
+
+
+def ordinary_reference_prefill(model, prompt, *, prefill_step):
+    import mlx.core as mx
+
+    cache = ordinary_prefix_cache(model, prompt, prefill_step=prefill_step)
+    logits = model(mx.array([[prompt[-1]]]), cache=cache)
+    mx.eval(logits, [entry.state for entry in cache])
+    return cache, logits
+
+
 def run(args, receipt):
     # Deferred imports keep --help, --dry-run and rejected CLI calls Metal-free.
     sys.path.insert(0, str(ROOT / "src"))
@@ -269,6 +296,8 @@ def run(args, receipt):
         from validate_xpress_metal_matrix import cast_float32_diagnostic
 
         cast_float32_diagnostic(model, adapter.draft_model)
+        if args.target_verify_row_exact:
+            model.configure_target_verify_row_exact(True)
     texts = [
         "Write a Python palindrome function and explain its complexity. ",
         "Explain mutexes, races, and thread safety with a short example. ",
@@ -312,6 +341,60 @@ def run(args, receipt):
         e.insert(prompts[:width], max_tokens=[args.max_tokens] * width)
         settle(e)
         lanes = list(e.lanes.values())
+        if width == 1:
+            reference_cache = ordinary_prefix_cache(
+                model, prompts[0], prefill_step=args.context_tokens
+            )
+            cache_equal = all(
+                actual.offset == expected.offset
+                and all(
+                    np.array_equal(
+                        np.asarray(a.astype(mx.float32)),
+                        np.asarray(b.astype(mx.float32)),
+                    )
+                    for a, b in zip(
+                        actual.keys_and_values(),
+                        expected.keys_and_values(),
+                        strict=True,
+                    )
+                )
+                for actual, expected in zip(
+                    lanes[0].cache, reference_cache, strict=True
+                )
+            )
+            anchor = mx.array([[lanes[0].anchor]])
+            expected_logits = model(anchor, cache=reference_cache)
+            transaction = e._target_owner([lanes[0].cache]).begin(lengths=[1])
+            try:
+                actual_logits, features = model.forward_with_taps(
+                    anchor, transaction.caches, e.layers
+                )
+                mx.eval(actual_logits, features, expected_logits)
+                actual_host = np.asarray(actual_logits[0, -1].astype(mx.float32))
+                expected_host = np.asarray(expected_logits[0, -1].astype(mx.float32))
+                law_error = float(
+                    np.max(
+                        np.abs(softmax(actual_host, 0.8) - softmax(expected_host, 0.8))
+                    )
+                )
+                receipt["reference_alignment_probe"] = {
+                    "context_tokens": len(prompts[0]),
+                    "prefix_cache_bitwise_equal": cache_equal,
+                    "anchor_logits_bitwise_equal": bool(
+                        np.array_equal(actual_host, expected_host)
+                    ),
+                    "anchor_law_max_absolute_error_at_temperature_0_8": law_error,
+                    "passed": cache_equal and law_error <= 1e-4,
+                    "ordinary_prefill_chunk_size": args.context_tokens,
+                }
+            finally:
+                transaction.abort()
+            if not receipt["reference_alignment_probe"]["passed"]:
+                write(args.out, receipt)
+                e.close()
+                raise AssertionError(
+                    "ordinary serving prefix/anchor reference alignment failed"
+                )
         snapshots = [snapshot_recovery_descriptors(l.cache) for l in lanes]
         table = []
         samples = []
@@ -382,9 +465,9 @@ def run(args, receipt):
     AdaptiveVerificationPolicy.from_value(policy, args.num_draft)
 
     def ordinary(prompt, count):
-        cache = model.make_cache()
-        logits = model(mx.array([prompt]), cache=cache)
-        mx.eval(logits)
+        cache, logits = ordinary_reference_prefill(
+            model, prompt, prefill_step=args.context_tokens
+        )
         result = []
         for _ in range(count):
             token = int(mx.argmax(logits[0, -1]).item())
@@ -394,6 +477,28 @@ def run(args, receipt):
         return result
 
     ordinary_output = [ordinary(p, args.max_tokens) for p in prompts]
+    if args.whole_prompt_reference_diagnostic:
+        receipt["whole_prompt_reference_diagnostic"] = []
+        for prompt in prompts:
+            _, reference = ordinary_reference_prefill(
+                model, prompt, prefill_step=args.context_tokens
+            )
+            whole = model(mx.array([prompt]), cache=model.make_cache())
+            mx.eval(reference, whole)
+            a, b = (
+                np.asarray(value[0, -1].astype(mx.float32))
+                for value in (reference, whole)
+            )
+            receipt["whole_prompt_reference_diagnostic"].append(
+                {
+                    "scope": "first decode law only; alternate prefill shape, excluded from verifier parity",
+                    "logits_max_absolute_delta": float(np.max(np.abs(a - b))),
+                    "unit_temperature_law_max_absolute_delta": float(
+                        np.max(np.abs(softmax(a, 1.0) - softmax(b, 1.0)))
+                    ),
+                    "greedy_equal": bool(np.argmax(a) == np.argmax(b)),
+                }
+            )
 
     calibrated = [None]
 
@@ -513,9 +618,9 @@ def run(args, receipt):
             if temperature:
                 maximum_error = 0.0
                 for uid, index in active:
-                    cache = model.make_cache()
-                    logits = model(mx.array([prompts[index]]), cache=cache)
-                    mx.eval(logits)
+                    cache, logits = ordinary_reference_prefill(
+                        model, prompts[index], prefill_step=args.context_tokens
+                    )
                     for position, (token, actual_logp) in enumerate(
                         zip(out[uid], laws[uid])
                     ):

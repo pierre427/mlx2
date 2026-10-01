@@ -490,6 +490,8 @@ def run(args, report):
     model, draft = adapter.model, adapter.draft_model
     if report["compute_precision_requested"] == "float32-diagnostic":
         cast_float32_diagnostic(model, draft)
+        if report["target_verify_row_exact"]:
+            model.configure_target_verify_row_exact(True)
     original_config = draft.config
     report["results"] = []
     report["aggregate"] = {

@@ -62,9 +62,12 @@ def test_execution_requires_explicit_gpu_ownership():
 
 def test_row_exact_candidate_is_explicit_and_reported_before_tensor_load():
     assert harness.preflight(args("--dry-run"))["target_verify_row_exact"] is False
-    assert harness.preflight(args("--dry-run", "--target-verify-row-exact"))[
-        "target_verify_row_exact"
-    ] is True
+    assert (
+        harness.preflight(args("--dry-run", "--target-verify-row-exact"))[
+            "target_verify_row_exact"
+        ]
+        is True
+    )
 
 
 @pytest.mark.parametrize(
@@ -221,6 +224,193 @@ def test_real_cpu_provider_probe_restores_committed_boundary_and_pins_precision(
             == 0
         )
         assert d.session.session_revision == pin
+    finally:
+        if generator is not None:
+            generator.close()
+        mx.set_default_device(previous)
+
+
+def test_ordinary_reached_reference_reserves_prompt_anchor_and_steps_emitted_s1():
+    import numpy as np
+
+    class Model:
+        def __init__(self):
+            self.calls = []
+
+        def make_cache(self):
+            return [SimpleNamespace(offset=0)]
+
+        def __call__(self, inputs, cache):
+            self.calls.append(inputs.tolist())
+            cache[0].offset += inputs.shape[1]
+            return np.zeros((1, inputs.shape[1], 3), dtype=np.float32)
+
+        def forward_with_taps(self, *_args, **_kwargs):
+            raise AssertionError("reference must use original ordinary entry")
+
+    model = Model()
+    fake_mx = SimpleNamespace(array=np.array, eval=lambda *_: None, float32=np.float32)
+    rows = list(
+        harness.ordinary_reached_rows(model, fake_mx, [1, 2, 3, 4, 5], [6, 7, 8], 2)
+    )
+    assert model.calls == [[[1, 2]], [[3, 4]], [[5]], [[6]], [[7]]]
+    assert [history for history, _, _ in rows] == [
+        [1, 2, 3, 4, 5],
+        [1, 2, 3, 4, 5, 6],
+        [1, 2, 3, 4, 5, 6, 7],
+    ]
+    assert [offsets for _, _, offsets in rows] == [[5], [6], [7]]
+
+
+def test_every_reached_audit_excludes_unmatched_future_rows_and_detects_late_drift():
+    import numpy as np
+
+    prompt, emitted = [1, 2], [3, 4, 5]
+    law = np.array([0.2, 0.3, 0.5])
+    raw = np.array([0.0, 1.0, 2.0], dtype=np.float32)
+    observations = [
+        {
+            "history_tokens": prompt + emitted[:i],
+            "reachable": True,
+            "raw_logits": raw.copy(),
+            "law": law.copy(),
+        }
+        for i in range(3)
+    ]
+    # Callback rows for a discarded draft branch are not reached by this walk.
+    observations.append(
+        {"history_tokens": [1, 2, 9], "reachable": True, "raw_logits": raw, "law": law}
+    )
+    observations.append(
+        {"history_tokens": prompt, "reachable": False, "raw_logits": raw, "law": law}
+    )
+    observations[-3]["law"] = np.array([0.3, 0.3, 0.4])
+    observations[-3]["raw_logits"][0] += 0.5
+    references = [(prompt + emitted[:i], raw, [2 + i]) for i in range(3)]
+    result = harness.audit_reached_laws(
+        observations, prompt, emitted, references, lambda _: law, temperature=0.8
+    )
+    assert result["first_processed_law_l1_vs_ordinary"] == 0
+    assert (
+        result["reached_prefix_count"] == result["compared_reached_prefix_count"] == 3
+    )
+    assert result["unreached_callback_count"] == 2
+    assert result["candidate_callback_count"] == 5
+    assert not result["every_reached_law_matches_ordinary"]
+    assert result["prefix_diagnostics"][2]["raw_logits_max_abs_vs_ordinary"] == 0.5
+    assert result["maximum_processed_law_l1_vs_ordinary"] == pytest.approx(0.2)
+
+
+def test_reached_audit_missing_callback_and_history_mismatch_fail_closed():
+    import numpy as np
+
+    raw = np.array([0.0, 1.0])
+    law = np.array([0.25, 0.75])
+    result = harness.audit_reached_laws(
+        [], [1], [2], [([1], raw, [1])], lambda _: law, temperature=0.8
+    )
+    assert result["missing_reached_prefixes"] == [0]
+    assert result["first_processed_law_l1_vs_ordinary"] is None
+    assert not result["every_reached_law_matches_ordinary"]
+    with pytest.raises(ValueError, match="history"):
+        harness.audit_reached_laws(
+            [], [1], [2], [([9], raw, [1])], lambda _: law, temperature=0.8
+        )
+
+
+def test_max_absolute_law_gate_and_raw_value_equality_are_independent():
+    import numpy as np
+
+    raw = np.array([0.0, 1.0], dtype=np.float32)
+    law = np.array([0.25, 0.75])
+    observation = {
+        "history_tokens": [1],
+        "reachable": True,
+        "raw_logits": raw.copy(),
+        "law": law + [1.1e-4, -1.1e-4],
+    }
+    result = harness.audit_reached_laws(
+        [observation], [1], [2], [([1], raw, [1])], lambda _: law, temperature=0.8
+    )
+    assert result["maximum_processed_law_l1_vs_ordinary"] < 0.01
+    assert result["maximum_processed_law_max_abs_vs_ordinary"] > 1e-4
+    assert not result["every_reached_law_matches_ordinary"]
+    assert result["every_reached_raw_logit_values_equal"]
+    assert result["processed_law_tolerances"] == {"l1": 0.01, "max_absolute": 1e-4}
+    observation["law"] = law.copy()
+    observation["raw_logits"][0] = 0.5
+    result = harness.audit_reached_laws(
+        [observation], [1], [2], [([1], raw, [1])], lambda _: law, temperature=0.8
+    )
+    assert result["every_reached_law_matches_ordinary"]
+    assert not result["every_reached_raw_logit_values_equal"]
+    assert result["prefix_diagnostics"][0]["raw_logits_max_abs_vs_ordinary"] == 0.5
+
+
+def test_actual_cpu_pool_all_sampled_draws_match_original_prefix_s1_reference():
+    import mlx.core as mx
+    import numpy as np
+    from test_external_continuation_pool_cpu import batch, prefill
+
+    from mlx2.runtime.sample_utils import LaneRNG, make_transformed_logprobs
+    from mlx2.runtime.speculative_sampling import probability
+
+    previous = mx.default_device()
+    mx.set_default_device(mx.cpu)
+    generator = None
+    try:
+        model, _base, _draft, generator = batch()
+        prompt = [1, 2, 3]
+        lane = prefill(
+            generator,
+            [prompt],
+            sampling_configs=[{"sampling_temp": 0.8}],
+            lane_rngs=[LaneRNG(329)],
+        )[0]
+        observations = []
+        original = generator._target_law
+
+        def tracked(current, logits, history, *args, **kwargs):
+            law = original(current, logits, history, *args, **kwargs)
+            observations.append(
+                {
+                    "history_tokens": list(history),
+                    "reachable": kwargs.get("reachable", args[0] if args else True),
+                    "raw_logits": np.asarray(logits.astype(mx.float32)).copy(),
+                    "law": law.copy(),
+                }
+            )
+            return law
+
+        generator._target_law = tracked
+        while lane.generated < lane.maximum:
+            generator._round([lane])
+        emitted = [response.token for response in lane.ready]
+        transform = make_transformed_logprobs(0.8)
+        result = harness.audit_reached_laws(
+            observations,
+            prompt,
+            emitted,
+            harness.ordinary_reached_rows(model, mx, prompt, emitted, 64),
+            lambda logits: probability(np.asarray(mx.exp(transform(logits[None])[0]))),
+            temperature=0.8,
+        )
+        assert result["every_reached_law_matches_ordinary"]
+        assert result["compared_reached_prefix_count"] == len(emitted) == lane.rng.draws
+        assert (
+            result["unreached_callback_count"]
+            == result["duplicate_reached_callback_count"]
+            == 0
+        )
+        assert len(emitted) > 1
+        assert (
+            max(
+                row["raw_logits_max_abs_vs_ordinary"]
+                for row in result["prefix_diagnostics"]
+            )
+            < 1e-5
+        )
+        assert any(row["emitted_position"] > 0 for row in result["prefix_diagnostics"])
     finally:
         if generator is not None:
             generator.close()

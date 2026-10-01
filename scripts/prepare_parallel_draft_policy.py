@@ -9,9 +9,49 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from pathlib import Path
 
 from mlx2.adapters.standard_decoder import _json, inspect_artifact
+
+
+def validate_row_exact_target(record):
+    """Mirror the selected runtime topology and dtype gates using headers only."""
+    config = record["config"]
+    if (
+        config["model_type"] != "qwen3"
+        or config.get("num_experts", 0)
+        or config.get("rope_scaling") is not None
+        or config.get("quantization")
+        or config.get("quantization_config")
+        or config.get("sliding_window")
+        or config.get("use_sliding_window")
+        or config.get("layer_types")
+        not in (None, ["full_attention"] * config["num_hidden_layers"])
+    ):
+        raise ValueError(
+            "target_verify_row_exact requires an unquantized dense full-attention Qwen3 target"
+        )
+    if os.environ.get("MLX2_FP_DECODE_KERNEL", "0") == "1":
+        raise ValueError(
+            "target_verify_row_exact does not support MLX2_FP_DECODE_KERNEL"
+        )
+    from mlx2.adapters.dflash2 import _read_safetensors_header
+
+    dtypes = set()
+    for filename, _, _ in record["identity"]["files"]:
+        _, header, _ = _read_safetensors_header(
+            Path(record["identity"]["path"]) / filename
+        )
+        dtypes.update(
+            tensor["dtype"]
+            for name, tensor in header.items()
+            if name.startswith("model.") and "rotary_emb.inv_freq" not in name
+        )
+    if len(dtypes) != 1 or not dtypes.issubset({"BF16", "F16", "F32"}):
+        raise ValueError(
+            "target_verify_row_exact requires a homogeneous floating backbone dtype"
+        )
 
 
 def prepare(
@@ -22,12 +62,17 @@ def prepare(
     xpress_passes=None,
     adaptive=None,
     attention_windows=None,
+    target_verify_row_exact=False,
 ):
+    if type(target_verify_row_exact) is not bool:
+        raise ValueError("target_verify_row_exact must be a boolean")
     target, draft = (
         Path(target).expanduser().resolve(),
         Path(draft).expanduser().resolve(),
     )
     target_record = inspect_artifact(target, expected="qwen3")
+    if target_verify_row_exact:
+        validate_row_exact_target(target_record)
     architecture = _json(draft / "config.json").get("architectures")
     if architecture == ["Qwen3XPressModel"]:
         from mlx2.adapters.xpress import content_revision, inspect_drafter
@@ -67,6 +112,8 @@ def prepare(
 
         AdaptiveVerificationPolicy.from_value(adaptive, count)
         policy["adaptive_verification"] = adaptive
+    if target_verify_row_exact:
+        policy["target_verify_row_exact"] = True
     return policy
 
 
@@ -76,6 +123,7 @@ def main():
     parser.add_argument("--draft", required=True, type=Path)
     parser.add_argument("--num-draft", type=int)
     parser.add_argument("--xpress-passes", type=int)
+    parser.add_argument("--target-verify-row-exact", action="store_true")
     parser.add_argument(
         "--attention-windows", help="JSON list per draft layer, e.g. [512,null,1024]"
     )
@@ -95,6 +143,7 @@ def main():
         xpress_passes=args.xpress_passes,
         adaptive=adaptive,
         attention_windows=windows,
+        target_verify_row_exact=args.target_verify_row_exact,
     )
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(json.dumps(policy, indent=2) + "\n")
@@ -105,6 +154,17 @@ def main():
                 "model_loaded": False,
                 "qualified": False,
                 "num_draft": policy["num_draft"],
+                **(
+                    {
+                        "target_verify_row_exact": {
+                            "selected": True,
+                            "qualified": False,
+                            "observed_used": False,
+                        }
+                    }
+                    if args.target_verify_row_exact
+                    else {}
+                ),
             }
         )
     )

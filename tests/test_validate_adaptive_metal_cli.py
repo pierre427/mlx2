@@ -232,3 +232,72 @@ def test_artifact_binding_detects_equal_size_equal_timestamp_corruption(tmp_path
         before["files"]["model.safetensors"]["sha256"]
         != after["files"]["model.safetensors"]["sha256"]
     )
+
+
+@pytest.mark.parametrize(
+    "prompt,step,expected",
+    [
+        ([1], 3, [[1]]),
+        ([1, 2, 3, 4, 5, 6, 7, 8], 3, [[1, 2, 3], [4, 5, 6], [7], [8]]),
+    ],
+)
+def test_reference_prefill_reserves_anchor_and_matches_external_cache_cpu(
+    prompt, step, expected
+):
+    from test_standard_xpress_serving_cpu import tiny
+
+    from mlx2.runtime.external_speculative import ExternalDraftBatchGenerator
+
+    mx.set_default_device(mx.cpu)
+    model, draft = tiny()
+    model.configure_target_verify_row_exact(True)
+    calls = []
+
+    class Spy:
+        def make_cache(self):
+            return model.make_cache()
+
+        def __call__(self, tokens, cache):
+            calls.append(tokens.tolist()[0])
+            return model(tokens, cache=cache)
+
+    script = load()
+    cache, logits = script.ordinary_reference_prefill(Spy(), prompt, prefill_step=step)
+    assert calls == expected
+    assert all(entry.offset == len(prompt) for entry in cache)
+    e = ExternalDraftBatchGenerator(
+        model,
+        draft_model=draft,
+        binding="cpu-reference",
+        num_draft=2,
+        prefill_step_size=step,
+    )
+    uid = e.insert([prompt], max_tokens=[2])[0]
+    lane = e.lanes[uid]
+    while lane.remaining:
+        e._prefill(lane)
+    prefix = script.ordinary_prefix_cache(model, prompt, prefill_step=step)
+    for a, b in zip(lane.cache, prefix, strict=True):
+        assert a.offset == b.offset == len(prompt) - 1
+        if a.offset:
+            for x, y in zip(a.keys_and_values(), b.keys_and_values(), strict=True):
+                assert mx.array_equal(x, y).item()
+    tx = e._target_owner([lane.cache]).begin(lengths=[1])
+    try:
+        actual, features = model.forward_with_taps(
+            mx.array([[lane.anchor]]), tx.caches, e.layers
+        )
+        mx.eval(actual, features, logits)
+        assert mx.array_equal(actual, logits).item()
+    finally:
+        tx.abort()
+        e.close()
+
+
+def test_whole_prompt_reference_is_explicit_nonqualifying_diagnostic(tmp_path):
+    result = cli(tmp_path, "--dry-run", "--whole-prompt-reference-diagnostic")
+    assert result.returncode == 0, result.stderr
+    plan = json.loads(result.stdout)
+    assert plan["whole_prompt_reference_diagnostic_requested"] is True
+    assert "prompt[:-1]" in plan["ordinary_reference_convention"]
+    assert plan["qualified"] is False

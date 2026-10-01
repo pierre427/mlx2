@@ -197,6 +197,144 @@ def measure_proposal_cost(
     }
 
 
+def ordinary_reached_rows(model, mx, prompt, emitted, prefill_step):
+    """Original serving convention: prompt prefix chunks, then only S1 steps.
+
+    Generated history must never be re-prefilled as a block: that would change
+    the reduction geometry whose ordinary law this diagnostic is auditing.
+    """
+    if not prompt or prefill_step < 1:
+        raise ValueError("ordinary reference requires a prompt and positive chunk size")
+    cache = model.make_cache()
+    prefix = prompt[:-1]
+    for start in range(0, len(prefix), prefill_step):
+        mx.eval(model(mx.array([prefix[start : start + prefill_step]]), cache=cache))
+    history = list(prompt)
+    anchor = prompt[-1]
+    for token in emitted:
+        logits = model(mx.array([[anchor]]), cache=cache)[0, -1]
+        mx.eval(logits)
+        yield (
+            history.copy(),
+            logits.astype(mx.float32),
+            [int(layer.offset) for layer in cache],
+        )
+        history.append(int(token))
+        anchor = int(token)
+
+
+def audit_reached_laws(
+    observations, prompt, emitted, references, transform, *, temperature
+):
+    """Audit only callbacks on committed emitted prefixes, including bonuses.
+
+    Chain fallback may process unused future rows. Matching the complete history
+    against the emitted walk excludes those rows; duplicate attempt histories
+    are reported and the latest callback supplies the committed-prefix check.
+    """
+    import numpy as np
+
+    expected = [(*prompt, *emitted[:index]) for index in range(len(emitted))]
+    expected_set = set(expected)
+    candidates = {}
+    ignored = 0
+    for observation in observations:
+        history = tuple(observation["history_tokens"])
+        if not observation["reachable"] or history not in expected_set:
+            ignored += 1
+        else:
+            candidates.setdefault(history, []).append(observation)
+    diagnostics, missing = [], []
+    references = iter(references)
+    for position, history in enumerate(expected):
+        reference_history, raw, offsets = next(references)
+        if tuple(reference_history) != history:
+            raise ValueError("ordinary reference history does not match emitted prefix")
+        matches = candidates.get(history, ())
+        if not matches:
+            missing.append(position)
+            continue
+        observation = matches[-1]
+        reference_raw = np.asarray(raw, dtype=np.float32)
+        actual_raw = np.asarray(observation["raw_logits"], dtype=np.float32)
+        reference_law = np.asarray(transform(raw), dtype=np.float64)
+        actual_law = np.asarray(observation["law"], dtype=np.float64)
+        if (
+            actual_raw.shape != reference_raw.shape
+            or actual_law.shape != reference_law.shape
+        ):
+            raise ValueError("target/reference vocabulary geometry differs")
+        raw_delta = actual_raw.astype(np.float64) - reference_raw
+        law_delta = actual_law - reference_law
+        diagnostics.append(
+            {
+                "emitted_position": position,
+                "emitted_token": int(emitted[position]),
+                "history_tokens": list(history),
+                "ordinary_cache_offsets": offsets,
+                "callback_attempts_at_prefix": len(matches),
+                "processed_law_l1_vs_ordinary": float(np.abs(law_delta).sum()),
+                "processed_law_max_abs_vs_ordinary": float(np.abs(law_delta).max()),
+                "raw_logits_max_abs_vs_ordinary": float(np.abs(raw_delta).max()),
+                "raw_logits_rmse_vs_ordinary": float(np.sqrt(np.mean(raw_delta**2))),
+                "raw_logits_exact_value_equal": bool(
+                    np.array_equal(actual_raw, reference_raw)
+                ),
+                "target_raw_argmax": int(np.argmax(actual_raw)),
+                "ordinary_raw_argmax": int(np.argmax(reference_raw)),
+                "finite": bool(
+                    np.isfinite(raw_delta).all() and np.isfinite(law_delta).all()
+                ),
+            }
+        )
+    if next(references, None) is not None:
+        raise ValueError("ordinary reference has extra unconsumed prefixes")
+    first = (
+        diagnostics[0]
+        if diagnostics and diagnostics[0]["emitted_position"] == 0
+        else None
+    )
+    return {
+        "first_processed_law_l1_vs_ordinary": None
+        if first is None
+        else first["processed_law_l1_vs_ordinary"],
+        "history_tokens": list(prompt),
+        "temperature": temperature,
+        "law_authority": "original prompt-prefix chunks plus S1 anchor/each emitted token versus canonical ranked target branch before RNG draw",
+        "empirical_distribution_qualification": False,
+        "candidate_callback_count": len(observations),
+        "reached_prefix_count": len(expected),
+        "compared_reached_prefix_count": len(diagnostics),
+        "unreached_callback_count": ignored,
+        "duplicate_reached_callback_count": sum(
+            max(0, len(values) - 1) for values in candidates.values()
+        ),
+        "missing_reached_prefixes": missing,
+        "maximum_processed_law_l1_vs_ordinary": max(
+            (value["processed_law_l1_vs_ordinary"] for value in diagnostics),
+            default=None,
+        ),
+        "maximum_processed_law_max_abs_vs_ordinary": max(
+            (value["processed_law_max_abs_vs_ordinary"] for value in diagnostics),
+            default=None,
+        ),
+        "processed_law_tolerances": {"l1": 0.01, "max_absolute": 1e-4},
+        "raw_equality_authority": "exact numeric values after independent float32 host conversion; not an artifact-byte or bitwise assertion",
+        "every_reached_raw_logit_values_equal": bool(expected)
+        and not missing
+        and all(value["raw_logits_exact_value_equal"] for value in diagnostics),
+        "every_reached_law_matches_ordinary": bool(expected)
+        and not missing
+        and all(
+            value["finite"]
+            and value["processed_law_l1_vs_ordinary"] <= 0.01
+            and value["processed_law_max_abs_vs_ordinary"] <= 1e-4
+            for value in diagnostics
+        ),
+        "prefix_diagnostics": diagnostics,
+    }
+
+
 def run(args, report):
     import mlx.core as mx
     import numpy as np
@@ -241,6 +379,8 @@ def run(args, report):
         from validate_xpress_metal_matrix import cast_float32_diagnostic
 
         cast_float32_diagnostic(adapter.model, adapter.draft_model)
+        if args.target_verify_row_exact:
+            adapter.model.configure_target_verify_row_exact(True)
     model, draft = adapter.model, adapter.draft_model
     report["critic_session_revision"] = bind_compute_precision(
         draft, args.compute_precision
@@ -256,10 +396,13 @@ def run(args, report):
 
     def fresh(ids):
         cache = model.make_cache()
-        for start in range(0, len(ids) - 1, 128):
+        for start in range(0, len(ids) - 1, args.context_tokens):
             mx.eval(
                 model(
-                    mx.array([ids[start : min(start + 128, len(ids) - 1)]]), cache=cache
+                    mx.array(
+                        [ids[start : min(start + args.context_tokens, len(ids) - 1)]]
+                    ),
+                    cache=cache,
                 )
             )
         logits = model(mx.array([[ids[-1]]]), cache=cache)[0, -1]
@@ -376,18 +519,15 @@ def run(args, report):
             )
             output, ends = {uid: [] for uid in ids}, {}
             law_checks = {}
+            law_observations = {}
             if mixed_sampling:
                 from mlx2.runtime.sample_utils import make_transformed_logprobs
                 from mlx2.runtime.speculative_sampling import probability
 
-                references = {}
                 transform = make_transformed_logprobs(0.8)
                 for uid, prompt, temp in zip(ids, prompts, temperatures, strict=True):
                     if temp:
-                        _cache, first_logits = fresh(prompt)
-                        references[uid] = probability(
-                            np.asarray(mx.exp(transform(first_logits[None])[0]))
-                        )
+                        law_observations[uid] = []
                 original_law = batch._target_law
 
                 def checked_law(
@@ -396,21 +536,26 @@ def run(args, report):
                     history,
                     *positional,
                     _law=original_law,
-                    _references=references,
-                    _checks=law_checks,
+                    _observations=law_observations,
                     **keywords,
                 ):
                     law = _law(lane, logits, history, *positional, **keywords)
-                    if lane.uid in _references and lane.uid not in _checks:
-                        _checks[lane.uid] = {
-                            "first_processed_law_l1_vs_ordinary": float(
-                                np.abs(law - _references[lane.uid]).sum()
-                            ),
-                            "history_tokens": list(history),
-                            "temperature": 0.8,
-                            "law_authority": "ordinary S1 versus canonical ranked target branch before RNG draw",
-                            "empirical_distribution_qualification": False,
-                        }
+                    if lane.uid in _observations:
+                        _observations[lane.uid].append(
+                            {
+                                "raw_logits": np.asarray(
+                                    logits.astype(mx.float32)
+                                ).copy(),
+                                "law": law.copy(),
+                                "history_tokens": list(history),
+                                "reachable": bool(
+                                    keywords.get(
+                                        "reachable",
+                                        positional[0] if positional else True,
+                                    )
+                                ),
+                            }
+                        )
                     return law
 
                 batch._target_law = checked_law
@@ -426,6 +571,23 @@ def run(args, report):
                 if not batch.lanes:
                     break
             actual_frames = frames[start:]
+            if mixed_sampling:
+
+                def transformed_reference(raw, _transform=transform):
+                    return probability(np.asarray(mx.exp(_transform(raw[None])[0])))
+
+                for uid, prompt, temp in zip(ids, prompts, temperatures, strict=True):
+                    if temp:
+                        law_checks[uid] = audit_reached_laws(
+                            law_observations[uid],
+                            prompt,
+                            output[uid],
+                            ordinary_reached_rows(
+                                model, mx, prompt, output[uid], args.context_tokens
+                            ),
+                            transformed_reference,
+                            temperature=temp,
+                        )
             tokens_equal = [
                 output[uid] == ordinary(prompt) if temp == 0 else None
                 for uid, prompt, temp in zip(ids, prompts, temperatures, strict=True)
@@ -439,12 +601,12 @@ def run(args, report):
             if mixed_sampling and (
                 len(law_checks) != 2
                 or any(
-                    value["first_processed_law_l1_vs_ordinary"] > 0.01
+                    not value["every_reached_law_matches_ordinary"]
                     for value in law_checks.values()
                 )
             ):
                 failures.append(
-                    "sampled canonical target branch law differs from ordinary S1 or was not exercised"
+                    "a reached sampled canonical target branch law differs from ordinary prefix-plus-S1 reference or was not exercised"
                 )
             check = {
                 "adaptive": adaptive,
