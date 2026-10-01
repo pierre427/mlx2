@@ -615,9 +615,7 @@ def _shared_fold_refusal(block, x, inds, scores):
     )
     if refusal is not None:
         return refusal
-    admission = _routed.admit_shared_fold(
-        block.get("shared_expert"), block.get("shared_expert_gate"), x.shape[-1], inter
-    )
+    admission = _routed.admit_shared_fold(block.get("shared_expert"), x.shape[-1], inter)
     return None if admission.accepted else admission.reason
 
 
@@ -632,10 +630,15 @@ def _try_shared_fold(block, x, inds, scores):
         block.shared_fold_fallbacks += 1
         block.shared_fold_last_fallback = refusal
         return None
+    gate_logit = block.shared_expert_gate(x)
+    if gate_logit.dtype != x.dtype or gate_logit.size != 1:
+        block.shared_fold_fallbacks += 1
+        block.shared_fold_last_fallback = "shared gate logit is not one value in the activation dtype"
+        return None
     sw = block.switch_mlp
     y = _routed.shared_fold_decode(
         x, inds, scores, sw.gate_proj, sw.up_proj, sw.down_proj,
-        block.shared_expert, block.shared_expert_gate,
+        block.shared_expert, gate_logit,
     )
     block.shared_fold_calls += 1
     block.shared_fold_last_fallback = None

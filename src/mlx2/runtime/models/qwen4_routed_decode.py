@@ -922,11 +922,14 @@ def served_down(h, indices, scores, down, rows=None):
 #   compiled swiglu, 4-bit qmv down); g = mx.sigmoid(shared_expert_gate(x))
 #   (8-bit qmv, one row; eager sigmoid from the -fno-fast-math metallib);
 #   out = y + g * s   (eager bf16 multiply, then add; glue compile off)
-# The fold computes the shared gate/up rows and the 8-bit gate row in the
-# gate+up launch (grid z 0: gate row, z 1: shared rows, z 2..11: routed
-# slots) and the shared down rows plus that combine in the down launch (a
-# sixth simdgroup). Each weight format gets its own namespaced copy of the
-# QMV header (omlx's per-format namespaces and qmv_rows helper).
+# The fold computes the shared gate/up rows in the gate+up launch (grid z 0:
+# shared rows, z 1..10: routed slots) and the shared down rows plus that
+# combine in the down launch (a sixth simdgroup). The shared gate logit stays
+# the block's own launch and enters the down launch as an input: an in-kernel
+# 8-bit qmv row matched MLX on 64/64 gate checks but differed by one bf16 ulp
+# on 1 of 36960 full-model calls (layer 16, -1.9766 vs -1.96875), so it is not
+# folded. Each weight format gets its own namespaced copy of the QMV header
+# (omlx's per-format namespaces and qmv_rows helper).
 # --------------------------------------------------------------------------
 QMV_ROWS = r"""
 template <typename T, int K, int NA, int NB>
@@ -1021,24 +1024,13 @@ SHARED_GATE_UP_SOURCE = r"""
     const int out_row = int(tid.y) * (NSG * RPS) + int(simd_gid) * RPS;
     float result[2 * RPS];
     if (tid.z == 0) {
-      if (tid.y == 0 && simd_gid == 0) {
-        q8s::qmv_rows<T, K, 1, 0>(
-            (const device uint8_t*)gw, gsc, gbi, 0,
-            (const device uint8_t*)gw, gsc, gbi, 0, x, simd_lid, result);
-        if (simd_lid == 0) {
-          y[(TOPK + 1) * NI] = static_cast<T>(result[0]);
-        }
-      }
-      return;
-    }
-    if (tid.z == 1) {
       q4f::qmv_rows<T, K, RPS, RPS>(
           (const device uint8_t*)shw, shs, shb, out_row,
           (const device uint8_t*)suw, sus, sub, out_row, x, simd_lid, result);
       swiglu_store<T, RPS>(result, y + TOPK * NI + out_row, simd_lid);
       return;
     }
-    const int slot = int(tid.z) - 2;
+    const int slot = int(tid.z) - 1;
     const size_t row0 = size_t(rhs[slot]) * NI + out_row;
     q4f::qmv_rows<T, K, RPS, RPS>(
         (const device uint8_t*)wg, sg, bg, row0,
@@ -1132,7 +1124,7 @@ SHARED_DOWN_SOURCE = r"""
             routed += partials[slot * RPS + lane];
         }
         const T yr = static_cast<T>(routed);
-        const float g = float(hidden[(TOPK + 1) * EH]);
+        const float g = float(gate[0]);
         const T e = T(1.0f + float(T(metal::precise::exp(metal::abs(g)))));
         const T sy = T(metal::precise::divide(1.0f, float(e)));
         const T gate = g < 0.0f ? sy : T(1.0f - float(sy));
@@ -1150,14 +1142,14 @@ def _shared_kernels():
         gate_up = mx.fast.metal_kernel(
             name="mlx2_qwen4_moe_gate_up_shared_decode",
             input_names=["x", "wg", "sg", "bg", "wu", "su", "bu", "rhs",
-                         "shw", "shs", "shb", "suw", "sus", "sub", "gw", "gsc", "gbi"],
+                         "shw", "shs", "shb", "suw", "sus", "sub"],
             output_names=["y"],
-            header=SHARED_COMMON + _format_header("q4f", 4, True) + _format_header("q8s", 8, False),
+            header=SHARED_COMMON + _format_header("q4f", 4, True),
             source=SHARED_GATE_UP_SOURCE,
         )
         down = mx.fast.metal_kernel(
             name="mlx2_qwen4_moe_served_down_shared_decode",
-            input_names=["hidden", "w", "scales", "biases", "rhs", "scores", "sdw", "sds", "sdb"],
+            input_names=["hidden", "w", "scales", "biases", "rhs", "scores", "sdw", "sds", "sdb", "gate"],
             output_names=["out"],
             header="using namespace metal;\n" + _format_header("q4s", 4, False),
             source=SHARED_DOWN_SOURCE,
@@ -1184,19 +1176,19 @@ def _linear_ok(layer, bits: int, out_dims: int, in_dims: int) -> str | None:
     return None
 
 
-def admit_shared_fold(shared, shared_gate, hidden: int, inter: int) -> RoutedDecodeAdmission:
-    """Structural check of the shared expert and its gate for the fold."""
-    if shared is None or shared_gate is None:
+def admit_shared_fold(shared, hidden: int, inter: int) -> RoutedDecodeAdmission:
+    """Structural check of the shared expert for the fold (its gate logit is
+    computed by the block's own module and only has to be [.., 1] in T)."""
+    if shared is None:
         return RoutedDecodeAdmission(False, "no shared expert")
     if hasattr(shared, "_prefill_counts"):
         return RoutedDecodeAdmission(False, "tensorfold prefill MLP installed")
-    for name, layer, bits, out_dims, in_dims in (
-        ("shared gate_proj", shared.get("gate_proj"), BITS, inter, hidden),
-        ("shared up_proj", shared.get("up_proj"), BITS, inter, hidden),
-        ("shared down_proj", shared.get("down_proj"), BITS, hidden, inter),
-        ("shared_expert_gate", shared_gate, 8, 1, hidden),
+    for name, layer, out_dims, in_dims in (
+        ("shared gate_proj", shared.get("gate_proj"), inter, hidden),
+        ("shared up_proj", shared.get("up_proj"), inter, hidden),
+        ("shared down_proj", shared.get("down_proj"), hidden, inter),
     ):
-        reason = _linear_ok(layer, bits, out_dims, in_dims)
+        reason = _linear_ok(layer, BITS, out_dims, in_dims)
         if reason is not None:
             return RoutedDecodeAdmission(False, f"{name}: {reason}")
     return RoutedDecodeAdmission(True, "eligible")
@@ -1206,10 +1198,11 @@ def _dense_operands(layer):
     return (layer["weight"], layer["scales"], layer["biases"])
 
 
-def shared_fold_decode(x, indices, scores, gate, up, down, shared, shared_gate, rows=None):
-    """``tile4 routed + sigmoid(shared_gate(x)) * shared_expert(x)`` for one
-    token in two launches, from split gate/up tables. Admission is the
-    caller's (split routed + tile4 + ``admit_shared_fold``)."""
+def shared_fold_decode(x, indices, scores, gate, up, down, shared, gate_logit, rows=None):
+    """``tile4 routed + sigmoid(gate_logit) * shared_expert(x)`` for one token
+    in two launches, from split gate/up tables. ``gate_logit`` is the block's
+    own ``shared_expert_gate(x)`` ([..., 1] in the activation dtype).
+    Admission is the caller's (split routed + tile4 + ``admit_shared_fold``)."""
     rows = _DOWN_ROWS_SERVED if rows is None else rows
     if rows not in DOWN_ROWS_SERVED_CHOICES:
         raise ValueError(f"served down rows must be one of {DOWN_ROWS_SERVED_CHOICES}")
@@ -1224,13 +1217,12 @@ def shared_fold_decode(x, indices, scores, gate, up, down, shared, shared_gate, 
             indices.reshape(TOP_K).astype(mx.uint32),
             *_dense_operands(shared.gate_proj),
             *_dense_operands(shared.up_proj),
-            *_dense_operands(shared_gate),
         ],
         template=[("T", x.dtype), ("K", hidden), ("NI", inter),
                   ("RPS", GATE_UP_ROWS), ("NSG", GATE_UP_SIMDGROUPS), ("TOPK", TOP_K)],
-        grid=(32, inter // GATE_UP_ROWS, TOP_K + 2),
+        grid=(32, inter // GATE_UP_ROWS, TOP_K + 1),
         threadgroup=(32, GATE_UP_SIMDGROUPS, 1),
-        output_shapes=[((TOP_K + 1) * inter + 1,)],
+        output_shapes=[((TOP_K + 1) * inter,)],
         output_dtypes=[x.dtype],
     )[0]
     return down_kernel(
@@ -1240,6 +1232,7 @@ def shared_fold_decode(x, indices, scores, gate, up, down, shared, shared_gate, 
             indices.reshape(TOP_K),
             scores.reshape(TOP_K),
             *_dense_operands(shared.down_proj),
+            gate_logit.reshape(1),
         ],
         template=[("T", x.dtype), ("H", hidden), ("EH", inter), ("TOPK", TOP_K), ("RPS", rows)],
         grid=(32 * (SERVED_DOWN_SIMDGROUPS + 1), hidden // rows, 1),

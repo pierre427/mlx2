@@ -459,12 +459,12 @@ def fold_reference(monkeypatch):
     """Composed stand-in for the folded launches; served_down admission forced."""
     calls = {"fold": 0}
 
-    def shared_fold_decode(x, indices, scores, gate, up, down, shared, shared_gate, rows=None):
+    def shared_fold_decode(x, indices, scores, gate, up, down, shared, gate_logit, rows=None):
         calls["fold"] += 1
         xe = mx.expand_dims(x, (-2, -3))
         h = QN.SwiGLU()(up(xe, indices), gate(xe, indices))
         y = (down(h, indices).squeeze(-2) * scores[..., None]).sum(axis=-2)
-        return (y + mx.sigmoid(shared_gate(x)) * shared(x)).reshape(-1)
+        return (y + mx.sigmoid(gate_logit) * shared(x)).reshape(-1)
 
     monkeypatch.setattr(RD, "shared_fold_decode", shared_fold_decode)
     monkeypatch.setattr(RD, "runtime_supported", lambda: True)
@@ -476,18 +476,17 @@ def test_shared_fold_admission():
     shared = QN.Qwen3NextMLP(H, I)
     nn.quantize(shared, group_size=64, bits=4)
     shared.set_dtype(mx.bfloat16)
-    gate = nn.QuantizedLinear.from_linear(nn.Linear(H, 1, bias=False), group_size=64, bits=8)
-    gate.set_dtype(mx.bfloat16)
-    assert RD.admit_shared_fold(shared, gate, H, I).accepted
-    gate4 = nn.QuantizedLinear.from_linear(nn.Linear(H, 1, bias=False), group_size=64, bits=4)
-    gate4.set_dtype(mx.bfloat16)
-    assert "b4g64 != b8g64" in RD.admit_shared_fold(shared, gate4, H, I).reason
-    assert "no shared expert" in RD.admit_shared_fold(None, gate, H, I).reason
+    assert RD.admit_shared_fold(shared, H, I).accepted
+    assert "no shared expert" in RD.admit_shared_fold(None, H, I).reason
     shared.down_proj.__dict__["_lane_prepared"] = object()
-    assert "lane matmul" in RD.admit_shared_fold(shared, gate, H, I).reason
+    assert "lane matmul" in RD.admit_shared_fold(shared, H, I).reason
     del shared.down_proj.__dict__["_lane_prepared"]
+    q8 = QN.Qwen3NextMLP(H, I)
+    nn.quantize(q8, group_size=64, bits=8)
+    q8.set_dtype(mx.bfloat16)
+    assert "b8g64 != b4g64" in RD.admit_shared_fold(q8, H, I).reason
     object.__setattr__(shared, "_prefill_counts", {})
-    assert "tensorfold" in RD.admit_shared_fold(shared, gate, H, I).reason
+    assert "tensorfold" in RD.admit_shared_fold(shared, H, I).reason
 
 
 def test_shared_fold_replaces_the_block_tail(monkeypatch, fold_reference):
@@ -516,12 +515,13 @@ def test_shared_fold_declines_with_reasons(monkeypatch, fold_reference):
     assert block.shared_fold_fallbacks == 1
     assert "glue" in block.shared_fold_last_fallback
     monkeypatch.setattr(QN, "_COMPILE_GLUE", False)
-    block.shared_expert_gate = nn.QuantizedLinear.from_linear(
-        nn.Linear(H, 1, bias=False), group_size=64, bits=4)
-    block.shared_expert_gate.set_dtype(mx.bfloat16)
+    shared = QN.Qwen3NextMLP(H, I)
+    nn.quantize(shared, group_size=64, bits=8)
+    shared.set_dtype(mx.bfloat16)
+    block.shared_expert = shared
     block(x)
     assert block.shared_fold_fallbacks == 2
-    assert "shared_expert_gate" in block.shared_fold_last_fallback
+    assert "shared gate_proj" in block.shared_fold_last_fallback
     assert fold_reference["fold"] == 0
 
 
