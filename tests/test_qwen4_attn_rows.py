@@ -205,3 +205,25 @@ def test_sdpa_admission_reasons(monkeypatch):
     assert R.sdpa_supported(mx.zeros((2, 24, 1, 256), dtype=mx.bfloat16), k, k, None) == "batch"
     assert R.sdpa_supported(mx.zeros((1, 24, 3, 256), dtype=mx.bfloat16), k, k, None) == "plan"
     assert R.sdpa_supported(q, k.astype(mx.float16), k, None) == "kv_dtype"
+
+
+def test_mask_and_index_q_admission(monkeypatch):
+    args, attn = _attention(indexer_budget=8)
+    indexer = attn.indexer
+    cache = Q.QSAKVCache(indexer.summary_identity)
+    attn(mx.ones((1, 40, args.hidden_size)), None, cache)
+    selection = indexer(mx.ones((1, 1, args.hidden_size)), None, cache)
+    assert R.qsa_mask_supported(selection) == "device"
+    monkeypatch.setattr(R, "metal_ready", lambda: True)
+    assert selection.kind == "explicit"
+    assert R.qsa_mask_supported(selection) is None
+    implicit = Q.QSASelection(kind="implicit_all", batch=1, length=1, block_size=4,
+                              physical_width=4, n_blocks=1)
+    assert R.qsa_mask_supported(implicit) == "kind"
+    q_pos = mx.array([[5]], dtype=mx.int32)
+    qk = mx.zeros((1, 1, 3 * 128), dtype=mx.bfloat16)
+    w = mx.ones((128,), dtype=mx.bfloat16)
+    assert R.index_q_supported(qk, w, q_pos, 64, 2, 128, None) is None
+    assert R.index_q_supported(qk, w, q_pos, 64, 2, 128, (mx.ones((32,)), 1.0)) == "scaled_rope"
+    assert R.index_q_supported(qk, w, q_pos, 64, 2, 64, None) == "head_dim"
+    assert R.index_q_supported(qk, w.astype(mx.float32), q_pos, 64, 2, 128, None) == "dtype"

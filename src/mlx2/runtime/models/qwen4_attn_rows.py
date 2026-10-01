@@ -30,6 +30,12 @@ replaces them with the same float operations in the same order:
   run in separate simdgroups spread over the GPU (MLX keeps all 32 in one
   threadgroup) and meet again in the combine launch (omlx #4052's layout).
 
+Past the indexer budget (mlx2's own, not in omlx) two more chains of MLX
+ops become one launch each: ``qsa_mask`` (``QSASelection.dense_mask()`` for
+an explicit selection; integer/bool logic) and ``index_q`` (the indexer
+query's RMS norm + position RoPE, products and sums rounded as the composed
+ops round them).  The scores matmul, argpartition and pooled keys stay MLX.
+
 Only the arithmetic MLX would run is transcribed: MLX sends ``R * GQA > 32``
 query rows (R >= 3 at GQA 12) to its unfused fallback, so those rows keep the
 stock SDPA and take only the fused projections and ``prep_qk``.
@@ -519,7 +525,8 @@ def _sdpa_source(template: str, *, masked: bool, gated: bool, chain_var: str = "
         setup = (
             "const int m_row = mask_shape[2] > 1 ? int(mask_strides[2]) : 0;\n"
             "    const int m_key = mask_shape[3] > 1 ? int(mask_strides[3]) : 0;\n"
-            f"    const device bool* mp = mask + row * m_row + {chain_var} * m_key;\n"
+            # Tiny masks arrive in the constant address space.
+            f"    auto mp = mask + row * m_row + {chain_var} * m_key;\n"
             f"    const int m_step = {step} * m_key;"
         )
         use_key, advance = "mp[0]", "mp += m_step;"
@@ -834,3 +841,285 @@ def sdpa_gate(
         output_dtypes=[dtype],
     )[0]
     return out.reshape(1, rows, heads * head_dim)
+
+
+# --------------------------------------------------------------------------
+# Stage 4 (mlx2's own, past the indexer budget): the QSA mask in one launch
+# --------------------------------------------------------------------------
+
+# QSASelection.dense_mask() for an explicit selection, cell for cell: the
+# chosen-block bitmap of one (batch, row) is built in threadgroup memory from
+# the selected ids (``chosen & valid_blocks``), then every token reads its
+# clipped block's bit, ORs the causal tail of its row, ANDs the left-padding
+# floor and the causal mask.  Integer/bool logic only (MLX's floor_divide for
+# signed ints), so equality is by construction.
+_MASK_SOURCE = r"""
+    const uint lid = thread_position_in_threadgroup.x;
+    const uint lsize = threads_per_threadgroup.x;
+    const int l = threadgroup_position_in_grid.y;
+    const int b = threadgroup_position_in_grid.z;
+    const int n_blocks = int(valid_shape[2]);
+    const int total = int(tokens_shape[1]);
+    const int K = int(selected_shape[2]);
+    threadgroup atomic_uint bits[MAX_WORDS];
+
+    for (int w = lid; w < (n_blocks + 31) / 32; w += lsize) {
+        atomic_store_explicit(&bits[w], 0u, memory_order_relaxed);
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    const size_t vb = (valid_shape[0] > 1 ? b : 0) * valid_strides[0] + l * valid_strides[1];
+    const size_t sb = b * selected_strides[0] + l * selected_strides[1];
+    for (int k = lid; k < K; k += lsize) {
+        const int id = int(selected[sb + k * selected_strides[2]]);
+        if (id >= 0 && id < n_blocks && valid[vb + id * valid_strides[2]]) {
+            atomic_fetch_or_explicit(&bits[id >> 5], 1u << (id & 31), memory_order_relaxed);
+        }
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    const int qp = int(q_pos[(q_pos_shape[0] > 1 ? b : 0) * q_pos_strides[0] + l * q_pos_strides[1]]);
+    const int complete = floor_div(qp + 1, BS) * BS;
+    const size_t tb = (tokens_shape[0] > 1 ? b : 0) * tokens_strides[0];
+    device bool* out = mask + ((size_t)b * threadgroups_per_grid.y + l) * total;
+    for (int t = lid; t < total; t += lsize) {
+        const int tl = int(tokens[tb + t * tokens_strides[1]]);
+        const int blk = clamp(floor_div(tl, BS), 0, n_blocks - 1);
+        const bool sel =
+            (atomic_load_explicit(&bits[blk >> 5], memory_order_relaxed) >> (blk & 31)) & 1u;
+        bool v = sel || (tl >= complete && tl <= qp);
+        @LEFT_PAD@
+        @CAUSAL@
+        out[t] = v;
+    }
+"""
+
+_MASK_HEADER = r"""
+inline int floor_div(int x, int y) {
+    int q = x / y;
+    if (x % y != 0 && (x < 0) != (y < 0)) {
+        q -= 1;
+    }
+    return q;
+}
+"""
+
+_MASK_MAX_BLOCKS = 131072
+
+
+def _mask_kernel(left_pad: bool, causal: bool):
+    name = f"mask_{int(left_pad)}{int(causal)}"
+    kernel = _KERNELS.get(name)
+    if kernel is not None:
+        return kernel
+    source = _MASK_SOURCE.replace(
+        "@LEFT_PAD@", "v = v && (tl >= 0);" if left_pad else ""
+    ).replace(
+        "@CAUSAL@",
+        (
+            "v = v && causal[(causal_shape[0] > 1 ? b : 0) * causal_strides[0]"
+            " + (causal_shape[2] > 1 ? l : 0) * causal_strides[2]"
+            " + (causal_shape[3] > 1 ? t : 0) * causal_strides[3]];"
+        )
+        if causal
+        else "",
+    )
+    kernel = mx.fast.metal_kernel(
+        name=f"mlx2_qwen4_attn_rows_qsa_mask_{int(left_pad)}{int(causal)}",
+        input_names=["selected", "valid", "q_pos", "tokens"] + (["causal"] if causal else []),
+        output_names=["mask"],
+        header=_MASK_HEADER,
+        source=source,
+        ensure_row_contiguous=False,
+    )
+    _KERNELS[name] = kernel
+    return kernel
+
+
+def qsa_mask_supported(selection) -> Optional[str]:
+    """``None`` when ``qsa_mask`` rebuilds ``selection.dense_mask()``."""
+    if not metal_ready():
+        return "device"
+    if selection.kind != "explicit":
+        return "kind"
+    if not 0 < selection.n_blocks <= _MASK_MAX_BLOCKS:
+        return "blocks"
+    arrays = (
+        selection.raw_block_ids,
+        selection.valid_blocks,
+        selection.q_positions,
+        selection.token_positions,
+    )
+    if any(not isinstance(a, mx.array) for a in arrays):
+        return "arrays"
+    if selection.raw_block_ids.dtype not in (mx.uint32, mx.int32, mx.int64, mx.uint64):
+        return "id_dtype"
+    if selection.valid_blocks.dtype != mx.bool_:
+        return "valid_dtype"
+    if selection.q_positions.ndim != 2 or selection.token_positions.ndim != 2:
+        return "position_rank"
+    for a in (selection.q_positions, selection.token_positions):
+        if a.dtype not in (mx.int32, mx.uint32):
+            return "position_dtype"
+    causal = selection.causal_mask
+    if causal is not None:
+        if not isinstance(causal, mx.array) or causal.dtype != mx.bool_ or causal.ndim != 4:
+            return "causal"
+        if causal.shape[1] != 1 or causal.shape[0] not in (1, selection.batch):
+            return "causal_shape"
+        if causal.shape[2] not in (1, selection.length) or causal.shape[3] not in (
+            1,
+            selection.physical_width,
+        ):
+            return "causal_shape"
+    return None
+
+
+def qsa_mask(selection) -> mx.array:
+    """``selection.dense_mask()`` for an explicit selection in one launch:
+    ``[B, 1, L, physical_width]`` bool."""
+    batch, length, total = selection.batch, selection.length, selection.physical_width
+    causal = selection.causal_mask
+    out_batch = batch if causal is None else max(batch, causal.shape[0])
+    selected = selection.raw_block_ids
+    if selected.dtype in (mx.int64, mx.uint64):
+        selected = selected.astype(mx.int32)
+    inputs = [
+        selected,
+        selection.valid_blocks,
+        selection.q_positions,
+        selection.token_positions,
+    ]
+    if causal is not None:
+        inputs.append(causal)
+    threads = 1024 if total >= 1024 else max(32, ((total + 31) // 32) * 32)
+    return _mask_kernel(selection.left_padding is not None, causal is not None)(
+        inputs=inputs,
+        template=[("BS", int(selection.block_size)), ("MAX_WORDS", _MASK_MAX_BLOCKS // 32)],
+        grid=(threads, length, out_batch),
+        threadgroup=(threads, 1, 1),
+        output_shapes=[(out_batch, 1, length, total)],
+        output_dtypes=[mx.bool_],
+    )[0]
+
+
+# --------------------------------------------------------------------------
+# Stage 5 (mlx2's own): the indexer query's RMS norm + position RoPE
+# --------------------------------------------------------------------------
+
+# ``_apply_rope_positions(q_layernorm(q), q_pos[..., None], ...)`` for the
+# unscaled table: rms_single_row (axis 128: one simdgroup), then the composed
+# MLX ops -- every product and sum is its own f32 op there, so contraction is
+# off here (an fma would round once instead of twice) and cos/sin are the
+# precise ones MLX's unary kernels call.
+_INDEX_Q_SOURCE = r"""
+#pragma METAL fp contract(off)
+    constexpr int SIMD_SIZE = 32;
+    constexpr int N_READS = 4;
+    const uint axis_size = HD;
+    const uint lid = thread_position_in_threadgroup.x;
+    const uint simd_lane_id = thread_index_in_simdgroup;
+    const uint simd_group_id = simdgroup_index_in_threadgroup;
+    const int h = threadgroup_position_in_grid.x;
+    const int t = threadgroup_position_in_grid.y;
+    const int b = threadgroup_position_in_grid.z;
+    const int rows = threadgroups_per_grid.y;
+
+    threadgroup float local_inv_mean[1];
+    threadgroup float local_sums[SIMD_SIZE];
+    threadgroup T normed[HD];
+
+    const device T* x = qk + b * qk_strides[0] + t * qk_strides[1] + h * HD + lid * N_READS;
+    const device T* w = weight + lid * N_READS;
+    float acc = 0;
+    float thread_x[N_READS];
+    for (int i = 0; i < N_READS; i++) {
+        thread_x[i] = x[i];
+        acc += thread_x[i] * thread_x[i];
+    }
+    acc = simd_sum(acc);
+    if (simd_group_id == 0) {
+        local_sums[simd_lane_id] = 0;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (simd_lane_id == 0) {
+        local_sums[simd_group_id] = acc;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (simd_group_id == 0) {
+        acc = simd_sum(local_sums[simd_lane_id]);
+        if (simd_lane_id == 0) {
+            local_inv_mean[0] = metal::precise::rsqrt(acc / axis_size + eps[0]);
+        }
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (int i = 0; i < N_READS; i++) {
+        normed[lid * N_READS + i] =
+            w[i] * static_cast<T>(thread_x[i] * local_inv_mean[0]);
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    device T* out = q_out + (((size_t)b * rows + t) * NH + h) * HD;
+    constexpr int HALF = ROT / 2;
+    if (int(lid) < HALF) {
+        const int d = lid;
+        const int pos = q_pos[(q_pos_shape[0] > 1 ? b : 0) * q_pos_strides[0] + t * q_pos_strides[1]];
+        const float angle = static_cast<float>(pos) * freqs[d];
+        const float c = metal::precise::cos(angle);
+        const float s = metal::precise::sin(angle);
+        const float left = static_cast<float>(normed[d]);
+        const float right = static_cast<float>(normed[d + HALF]);
+        const float a1 = left * c;
+        const float b1 = right * s;
+        const float a2 = right * c;
+        const float b2 = left * s;
+        out[d] = static_cast<T>(a1 - b1);
+        out[d + HALF] = static_cast<T>(a2 + b2);
+    }
+    for (int j = ROT + int(lid); j < HD; j += 32) {
+        out[j] = normed[j];
+    }
+"""
+
+
+def index_q_supported(q_view, weight, q_pos, rotary_dim, n_heads, head_dim, scaling) -> Optional[str]:
+    if not metal_ready():
+        return "device"
+    if scaling is not None:
+        return "scaled_rope"
+    if q_view.dtype not in (mx.bfloat16, mx.float16) or weight.dtype != q_view.dtype:
+        return "dtype"
+    if head_dim != 128 or weight.shape != (head_dim,):
+        return "head_dim"
+    if q_view.ndim != 3 or q_view.shape[-1] < n_heads * head_dim:
+        return "shape"
+    if not 0 < rotary_dim <= 64 or rotary_dim % 2:
+        return "rotary_dim"
+    if q_pos.ndim != 2 or q_pos.dtype not in (mx.int32, mx.uint32):
+        return "positions"
+    return None
+
+
+def index_q(q_view, weight, eps, q_pos, freqs, *, n_heads, head_dim, rotary_dim) -> mx.array:
+    """``[B, L, n_heads, head_dim]``: the indexer query normed and rotated as
+    ``_apply_rope_positions(q_layernorm(q), q_pos[..., None], ...)`` computes
+    it; ``q_view`` is ``[B, L, >= n_heads * head_dim]`` (the projected
+    index_qk, query heads first)."""
+    batch, rows, _ = q_view.shape
+    kernel = _KERNELS.get("index_q")
+    if kernel is None:
+        kernel = mx.fast.metal_kernel(
+            name="mlx2_qwen4_attn_rows_index_q",
+            input_names=["qk", "weight", "eps", "q_pos", "freqs"],
+            output_names=["q_out"],
+            source=_INDEX_Q_SOURCE,
+            ensure_row_contiguous=False,
+        )
+        _KERNELS["index_q"] = kernel
+    return kernel(
+        inputs=[q_view, weight, _scalar(float(eps), mx.float32), q_pos, freqs],
+        template=[("T", q_view.dtype), ("NH", n_heads), ("HD", head_dim), ("ROT", rotary_dim)],
+        grid=(32 * n_heads, rows, batch),
+        threadgroup=(32, 1, 1),
+        output_shapes=[(batch, rows, n_heads, head_dim)],
+        output_dtypes=[q_view.dtype],
+    )[0]

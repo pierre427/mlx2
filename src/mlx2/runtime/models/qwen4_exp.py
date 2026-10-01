@@ -5004,6 +5004,43 @@ class QSAIndexer(nn.Module):
         )
         return self._pool_blocks(gathered, starts)
 
+    def _fused_query(self, qk: mx.array, q_pos: mx.array):
+        """The query's norm + position RoPE in one launch (fused attention
+        rows), or ``None`` (counted) to keep the MLX ops."""
+        if type(self.q_layernorm) is not nn.RMSNorm:
+            reason = "norm_type"
+        else:
+            reason = _attn_rows.index_q_supported(
+                qk,
+                self.q_layernorm.weight,
+                q_pos,
+                self.rotary_dim,
+                self.n_heads,
+                self.head_dim,
+                self.rope_scaling,
+            )
+        if reason is not None:
+            _attn_rows.bump("index_q_fallback_" + reason)
+            return None
+        key = (self.rotary_dim, self.rope_theta)
+        freqs = _ROPE_POSITION_FREQS.get(key)
+        if freqs is None:
+            freqs = mx.exp(
+                -math.log(self.rope_theta) * mx.arange(0, self.rotary_dim, 2) / self.rotary_dim
+            )
+            _ROPE_POSITION_FREQS[key] = freqs
+        _attn_rows.bump("index_q_rows", qk.shape[0] * qk.shape[1])
+        return _attn_rows.index_q(
+            qk,
+            self.q_layernorm.weight,
+            self.q_layernorm.eps,
+            q_pos,
+            freqs,
+            n_heads=self.n_heads,
+            head_dim=self.head_dim,
+            rotary_dim=self.rotary_dim,
+        )
+
     def _dense_by_construction(self, n_blocks, shared_topk) -> bool:
         """True when ``causal_mask & sparse == causal_mask`` for the mask this
         call would build, i.e. when the selection removes no causal cell -- so
@@ -5175,11 +5212,19 @@ class QSAIndexer(nn.Module):
         starts = mx.arange(n_blocks) * ratio
         valid_blocks = (starts + ratio - 1)[None, None, :] <= q_pos[..., None]
         if shared_topk is None:
-            q = self.q_layernorm(q.reshape(batch, length, self.n_heads, self.head_dim))
-            q = _apply_rope_positions(
-                q, q_pos[..., None], self.rotary_dim, self.rope_theta,
-                self.rope_scaling,
-            )
+            fused_q = None
+            if fused_query:
+                fused_q = self._fused_query(qk, q_pos)
+            if fused_q is not None:
+                q = fused_q
+            else:
+                q = self.q_layernorm(
+                    q.reshape(batch, length, self.n_heads, self.head_dim)
+                )
+                q = _apply_rope_positions(
+                    q, q_pos[..., None], self.rotary_dim, self.rope_theta,
+                    self.rope_scaling,
+                )
             suffix_blocks = n_blocks - base_blocks
             if suffix_blocks < 0:
                 raise RuntimeError("shared QSA selection precedes its base")
@@ -5384,6 +5429,7 @@ class QSAIndexer(nn.Module):
         cache: QSAKVCache,
         projected_qk: Optional[mx.array] = None,
         dense_shortcircuit: bool = False,
+        fused_query: bool = False,
     ):
         (batch, length, _) = hidden.shape
         if isinstance(cache, SinkWindowKVCache):
@@ -5654,6 +5700,15 @@ class Attention(nn.Module):
             return False
         return True
 
+    def _attn_rows_mask(self, selection):
+        """``selection.dense_mask()``, from one launch when admitted."""
+        reason = _attn_rows.qsa_mask_supported(selection)
+        if reason is not None:
+            _attn_rows.bump("mask_fallback_" + reason)
+            return selection.dense_mask()
+        _attn_rows.bump("mask_rows", selection.length)
+        return _attn_rows.qsa_mask(selection)
+
     def _attn_rows_prep(self, qg: mx.array, k_flat: mx.array, offset):
         """``(q, k)`` from the fused norm + RoPE launch, or ``None``."""
         reason = None
@@ -5795,6 +5850,7 @@ class Attention(nn.Module):
                 # rows skip that selection (omlx's dense arm).  A gather arm
                 # would read the explicit selection, so it keeps it.
                 dense_shortcircuit=fused_rows and not _QSA_GATHER_KV,
+                fused_query=fused_rows,
             )
             if _selection is None
             else _selection
@@ -5876,9 +5932,12 @@ class Attention(nn.Module):
             and (length <= _QSA_GATHER_MAX_QUERY)
             and gather_context_ok
         )
-        sparse_mask = (
-            None if use_nax or use_indexed or use_gather else selection.dense_mask()
-        )
+        if use_nax or use_indexed or use_gather:
+            sparse_mask = None
+        elif fused_rows and selection.kind == "explicit":
+            sparse_mask = self._attn_rows_mask(selection)
+        else:
+            sparse_mask = selection.dense_mask()
         if qg is None:
             qg = self.q_proj(x)
             k_flat = self.k_proj(x)

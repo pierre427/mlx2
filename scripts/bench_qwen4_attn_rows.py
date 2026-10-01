@@ -1,8 +1,7 @@
 """In-process decode A/B for the fused Qwen4 attention rows (omlx #4052 port).
 
 One model load.  For each (route, context) config every arm runs once per rep
-in rotated order (ABBA-style: rep r starts at arm r mod n, odd reps reversed)
-after a discarded warm-up.  Each run prefills ``context`` tokens from an empty
+after a discarded warm-up (two arms alternate ABBA; more arms rotate).  Each run prefills ``context`` tokens from an empty
 cache through the served BatchGenerator (B1), then decodes ``--gen`` greedy
 tokens; decode tok/s is measured from the first decoded token.  Token
 identity against the first arm is recorded per run.
@@ -115,9 +114,12 @@ def main():
         run(route, min(context, 2048))  # warm-up, discarded
         per_arm = {arm: [] for arm in a.arms}
         for rep in range(a.reps):
-            order = a.arms[rep % len(a.arms):] + a.arms[: rep % len(a.arms)]
-            if rep % 2:
-                order = order[::-1]
+            if len(a.arms) == 2:
+                # ABBA: A B, B A, A B, ...
+                order = a.arms if rep % 2 == 0 else a.arms[::-1]
+            else:
+                # each arm takes each position once every len(arms) reps
+                order = a.arms[rep % len(a.arms):] + a.arms[: rep % len(a.arms)]
             for arm in order:
                 configure(arm)
                 R.status(reset=True)

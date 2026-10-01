@@ -108,6 +108,31 @@ def check_prep(attn, rng, report):
     return rows
 
 
+def check_index_q(attn, rng, report):
+    from mlx2.runtime.models import qwen4_attn_rows as R
+    from mlx2.runtime.models import qwen4_exp as Q
+
+    ix = attn.indexer
+    width = (ix.n_heads + 1) * ix.head_dim
+    rows = []
+    for r in (1, 2, 3, 8, 17):
+        for offset in (0, 5, 4093, 32767, 65536, 131071, 262000):
+            for batched in (False, True):
+                qk = mx.array(rng.standard_normal((1, r, width)).astype(np.float32) * 3).astype(mx.bfloat16)
+                if batched:
+                    q_pos = mx.array([offset])[:, None] + mx.arange(r)[None, :]
+                else:
+                    q_pos = mx.arange(offset, offset + r)[None, :]
+                q, _raw = mx.split(qk, [ix.n_heads * ix.head_dim], axis=-1)
+                ref = ix.q_layernorm(q.reshape(1, r, ix.n_heads, ix.head_dim))
+                ref = Q._apply_rope_positions(ref, q_pos[..., None], ix.rotary_dim, ix.rope_theta, ix.rope_scaling)
+                got = ix._fused_query(qk, q_pos)
+                rows.append({"rows": r, "offset": offset, "batched_positions": batched,
+                             "identical": same(got, ref), "max_abs_diff": maxdiff(got, ref)})
+    report["index_q"] = rows
+    return rows
+
+
 def _sparse_mask(rng, rows, n, budget_blocks=512, block=4):
     """QSA-shaped: a random set of complete blocks plus the causal tail per row."""
     mask = np.zeros((1, 1, rows, n), dtype=bool)
@@ -302,31 +327,45 @@ def check_count(attn, report, dot_dir, contexts, widths):
     return rows_out
 
 
-def check_time(attn, report, contexts, widths, steps):
-    """Wall time of one attention-layer call (eval'd alone), arms alternating
+def check_time(attn, report, contexts, widths, steps, arms):
+    """Wall time of one attention-layer call (eval'd alone), arms rotating
     step by step on twin caches; medians.  A layer in isolation, so this is
-    the launch-chain latency the full model pays twelve times per token."""
+    the attention cost the full model pays twelve times per token, without
+    the whole-model noise.  An arm is ``stock``/``fused`` with an optional
+    ``@<tokens>`` one-token indexed threshold (``@inf``: masked arm always,
+    ``@0``: indexed from the indexer budget)."""
     import statistics
 
     from mlx2.runtime.models import qwen4_attn_rows as R
+    from mlx2.runtime.models import qwen4_qsa_indexed as QI
     from mlx2.runtime.models.base import create_attention_mask
+
+    default_m1 = QI._AUTO_MIN_CONTEXT_M1
+
+    def configure(arm):
+        base, _, threshold = arm.partition("@")
+        R.set_enabled(base == "fused")
+        QI._AUTO_MIN_CONTEXT_M1 = (
+            default_m1 if not threshold else 2**31 - 1 if threshold == "inf" else int(threshold)
+        )
 
     hid = attn.q_proj.weight.shape[1] * 32 // attn.q_proj.bits
     rows_out = []
     for n in contexts:
         for width in widths:
-            caches = {arm: _prefill(attn, 5 + n, n, batched=True) for arm in ("stock", "fused")}
-            times = {"stock": [], "fused": []}
+            caches = {arm: _prefill(attn, 5 + n, n, batched=True) for arm in arms}
+            times = {arm: [] for arm in arms}
             x = mx.ones((1, width, hid), dtype=mx.bfloat16)
             mx.eval(x)
             for step in range(steps + 4):
-                order = ("stock", "fused") if step % 2 == 0 else ("fused", "stock")
+                order = arms[step % len(arms):] + arms[: step % len(arms)]
                 for arm in order:
-                    R.set_enabled(arm == "fused")
+                    configure(arm)
                     cache = caches[arm]
                     mask = create_attention_mask(x, cache, return_array=True)
                     if mask is not None and mask.ndim == 2:
                         mask = mask[None, None]
+                    mx.eval(mask)
                     mx.synchronize()
                     t0 = time.perf_counter()
                     out = attn(x, mask, cache)
@@ -334,21 +373,57 @@ def check_time(attn, report, contexts, widths, steps):
                     mx.synchronize()
                     if step >= 4:
                         times[arm].append(1e6 * (time.perf_counter() - t0))
-                R.set_enabled(False)
-                # keep the twins the same length (verify rows are accepted)
-            entry = {"n": n, "width": width,
-                     "stock_us": statistics.median(times["stock"]),
-                     "fused_us": statistics.median(times["fused"]),
-                     "stock_iqr": [sorted(times["stock"])[len(times["stock"]) // 4],
-                                   sorted(times["stock"])[3 * len(times["stock"]) // 4]],
-                     "fused_iqr": [sorted(times["fused"])[len(times["fused"]) // 4],
-                                   sorted(times["fused"])[3 * len(times["fused"]) // 4]]}
-            entry["delta_pct"] = 100 * (entry["fused_us"] / entry["stock_us"] - 1)
+                configure("stock")
+            entry = {"n": n, "width": width}
+            for arm in arms:
+                ts = sorted(times[arm])
+                entry[arm] = {"median_us": statistics.median(ts),
+                              "iqr_us": [ts[len(ts) // 4], ts[3 * len(ts) // 4]]}
+            base = entry[arms[0]]["median_us"]
+            entry["delta_pct_vs_first"] = {
+                arm: 100 * (entry[arm]["median_us"] / base - 1) for arm in arms[1:]}
             rows_out.append(entry)
-            print("time", entry, flush=True)
+            print("time", n, width, {arm: round(entry[arm]["median_us"], 1) for arm in arms}, flush=True)
             del caches
             mx.clear_cache()
+    configure("stock")
     report["time"] = rows_out
+    return rows_out
+
+
+def check_mask(attn, report, contexts, widths):
+    """qsa_mask vs QSASelection.dense_mask() on selections the real indexer
+    makes over prefilled caches (plain and batched), plus a broadcast
+    shared-top-k selection."""
+    from mlx2.runtime.models import qwen4_attn_rows as R
+    from mlx2.runtime.models.base import create_attention_mask
+
+    hid = attn.q_proj.weight.shape[1] * 32 // attn.q_proj.bits
+    rows_out = []
+    for n in contexts:
+        for batched in (False, True):
+            cache = _prefill(attn, 3 + n, n, batched)
+            rng = np.random.default_rng(n)
+            for width in widths:
+                x = mx.array(rng.standard_normal((1, width, hid)).astype(np.float32)).astype(mx.bfloat16)
+                mask = create_attention_mask(x, cache, return_array=True)
+                if mask is not None and mask.ndim == 2:
+                    mask = mask[None, None]
+                sel = attn.indexer(x, mask, cache)
+                entry = {"n": n, "batched": batched, "width": width, "kind": sel.kind}
+                reason = R.qsa_mask_supported(sel)
+                if reason is None:
+                    ref = sel.dense_mask()
+                    got = R.qsa_mask(sel)
+                    entry["identical"] = bool(ref.shape == got.shape and mx.array_equal(ref, got).item())
+                    entry["true_cells"] = int(got.astype(mx.int32).sum().item())
+                else:
+                    entry["refused"] = reason
+                rows_out.append(entry)
+                print("mask", entry, flush=True)
+            del cache
+            mx.clear_cache()
+    report["mask"] = rows_out
     return rows_out
 
 
@@ -356,7 +431,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--model", required=True)
     ap.add_argument("--layers", nargs="+", default=["3", "23", "47", "mtp"])
-    ap.add_argument("--stages", nargs="+", default=["proj", "prep", "sdpa", "layer"])
+    ap.add_argument("--stages", nargs="+", default=["proj", "prep", "index_q", "sdpa", "mask", "layer", "count", "time"])
     ap.add_argument("--sdpa-contexts", type=int, nargs="+",
                     default=[1, 2, 17, 511, 1000, 1023, 1024, 1025, 2048, 4096, 8192, 8193,
                              16384, 32768, 32769, 49152, 65536, 65537, 98304, 131072])
@@ -365,8 +440,12 @@ def main():
     ap.add_argument("--layer-steps", type=int, nargs="+", default=[6])
     ap.add_argument("--count-contexts", type=int, nargs="+", default=[1024, 1500, 32768])
     ap.add_argument("--dot-dir", default="attn_rows_dots")
-    ap.add_argument("--time-contexts", type=int, nargs="+", default=[512, 1500, 4096, 32768, 70000])
-    ap.add_argument("--time-steps", type=int, default=40)
+    ap.add_argument("--time-contexts", type=int, nargs="+",
+                    default=[512, 1500, 4096, 16384, 32768, 65536, 98304, 131072])
+    ap.add_argument("--time-widths", type=int, nargs="+", default=[1, 3])
+    ap.add_argument("--time-arms", nargs="+", default=["stock", "fused", "fused@inf", "fused@0"])
+    ap.add_argument("--time-steps", type=int, default=30)
+    ap.add_argument("--mask-contexts", type=int, nargs="+", default=[2600, 9000, 40000, 70001])
     ap.add_argument("--out", required=True)
     ap.add_argument("--i-own-the-gpu", action="store_true")
     a = ap.parse_args()
@@ -394,6 +473,10 @@ def main():
             rows = check_prep(attn, rng, entry)
             print("prep", layer, "all identical:", all(r["q_identical"] and r["k_identical"] for r in rows),
                   "max diff", max(r["max_abs_diff"] for r in rows), flush=True)
+        if "index_q" in a.stages:
+            rows = check_index_q(attn, rng, entry)
+            print("index_q", layer, "all identical:", all(r["identical"] for r in rows),
+                  "max diff", max(r["max_abs_diff"] for r in rows), flush=True)
         if "sdpa" in a.stages:
             rows = check_sdpa(attn, rng, entry, a.sdpa_contexts)
             bad = [r for r in rows if "refused" not in r and not (r["gated_identical"] and r["pre_identical"])]
@@ -403,9 +486,11 @@ def main():
                 print("  ", r, flush=True)
         if "layer" in a.stages:
             check_layer(attn, entry, a.layer_contexts, a.layer_steps[0], a.layer_widths)
-        if "time" in a.stages:
-            check_time(attn, entry, a.time_contexts, a.layer_widths, a.time_steps)
-        if "count" in a.stages:
+        if "mask" in a.stages:
+            check_mask(attn, entry, a.mask_contexts, a.layer_widths)
+        if "time" in a.stages and layer == a.layers[0]:
+            check_time(attn, entry, a.time_contexts, a.time_widths, a.time_steps, a.time_arms)
+        if "count" in a.stages and layer == a.layers[0]:
             Path(a.dot_dir).mkdir(parents=True, exist_ok=True)
             check_count(attn, entry, a.dot_dir, a.count_contexts, a.layer_widths)
         entry["status"] = R.status(reset=True)
