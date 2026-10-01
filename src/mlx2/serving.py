@@ -779,6 +779,51 @@ def cache_semantic_fingerprint(tenant_scope):
     return ("text-token-v1", "tenant", str(tenant_scope))
 
 
+def apc_request_semantic(tenant_scope, request_scope=None):
+    """A request's APCv2 semantic namespace before the numerical laws: the
+    tenant base plus its media/LoRA/hyper-directory scope."""
+    semantic = cache_semantic_fingerprint(tenant_scope)
+    if request_scope:
+        semantic = f"{semantic}:media:{request_scope}"
+    return semantic
+
+
+def apc_semantic_namespace(
+    semantic,
+    *,
+    execution_numerics=None,
+    prefill_execution=None,
+    lane_matmul_receipt=None,
+    int8_prefill_policy=None,
+    weight_stream_manager=None,
+):
+    """``semantic`` wrapped in every numerical law the process serves under.
+
+    The one place serving composes the APCv2 namespace (the persistent
+    template and every request key), so the two cannot drift.  Each wrapper
+    is the identity when its law is off.
+    """
+    from .runtime.apc_numerics import apc_execution_fingerprint
+    from .runtime.int8_prefill import apc_semantic_fingerprint
+    from .runtime.lane.installer import apc_lane_fingerprint
+    from .runtime.prefill_plan import apc_prefill_fingerprint
+    from .runtime.weight_stream import apc_weight_stream_fingerprint
+
+    return apc_weight_stream_fingerprint(
+        apc_semantic_fingerprint(
+            apc_lane_fingerprint(
+                apc_prefill_fingerprint(
+                    apc_execution_fingerprint(semantic, execution_numerics),
+                    prefill_execution,
+                ),
+                lane_matmul_receipt,
+            ),
+            int8_prefill_policy,
+        ),
+        weight_stream_manager,
+    )
+
+
 def request_apc_scope(request):
     """APCv2 per-request scope: media fingerprint plus LoRA adapter identity."""
     from .runtime.multi_lora import lora_apc_scope
@@ -5705,34 +5750,34 @@ class ServingEngine:
             # with the historical 16-entry floor deterministically evicts four
             # warm prompts while the cohort is being primed, so those lanes
             # cannot compose batching with APCv2 reuse.
-            from .runtime.int8_prefill import apc_semantic_fingerprint
-            from .runtime.lane.installer import apc_lane_fingerprint
-            from .runtime.prefill_plan import apc_prefill_fingerprint
-            from .runtime.weight_stream import apc_weight_stream_fingerprint
+            from .runtime.apc_numerics import execution_numerics_identity
 
+            # Process switches outside the qualified exact laws (TF32, GDN
+            # core, sp_qmm, verify_bitexact, ...): read after the adapter
+            # pinned its environment.  None (all default) keeps the key.
             # Streamed weights run stock expert arithmetic: their states live
             # in their own namespace, live and persistent; identity when off.
-            weight_stream_manager = self.expert_stream
+            numerics_laws = dict(
+                execution_numerics=execution_numerics_identity(
+                    sp_qmm=self.sp_qmm_enabled,
+                    verify_bitexact=self.verify_bitexact_policy.enabled,
+                ),
+                prefill_execution=prefill_execution_identity,
+                lane_matmul_receipt=self.lane_matmul_receipt,
+                int8_prefill_policy=self.int8_prefill_policy,
+                weight_stream_manager=self.expert_stream,
+            )
             persistent_identity = APCv2.key(
                 adapter.identity["fingerprint"],
                 revision=persistent_runtime_revision(identity),
                 adapter=adapter.identity["fingerprint"],
                 tokenizer_fingerprint=adapter.identity["fingerprint"],
                 cache_layout_fingerprint=adapter.layout,
-                semantic_fingerprint=apc_weight_stream_fingerprint(
-                    apc_semantic_fingerprint(
-                        apc_lane_fingerprint(
-                            apc_prefill_fingerprint(
-                                cache_semantic_fingerprint(
-                                    "__tenant_template__" if self.tenant_scoped_cache else None
-                                ),
-                                prefill_execution_identity,
-                            ),
-                            self.lane_matmul_receipt,
-                        ),
-                        self.int8_prefill_policy,
+                semantic_fingerprint=apc_semantic_namespace(
+                    cache_semantic_fingerprint(
+                        "__tenant_template__" if self.tenant_scoped_cache else None
                     ),
-                    weight_stream_manager,
+                    **numerics_laws,
                 ),
             )
             disk_dir = self.apc_persist_dir or self.cache_dir
@@ -5769,28 +5814,18 @@ class ServingEngine:
                 identity_scope = (scope, media_fingerprint)
                 cached = cache_keys.get(identity_scope)
                 if cached is None:
-                    semantic = cache_semantic_fingerprint(scope)
-                    if media_fingerprint:
-                        semantic = f"{semantic}:media:{media_fingerprint}"
+                    semantic = apc_request_semantic(scope, media_fingerprint)
                     cached = cache_keys[identity_scope] = apc.key(
                         adapter.identity["fingerprint"],
                         revision=persistent_runtime_revision(identity),
                         adapter=adapter.identity["fingerprint"],
                         tokenizer_fingerprint=adapter.identity["fingerprint"],
                         cache_layout_fingerprint=adapter.layout,
-                        # Int8-prefill state lives in its own namespace
-                        # (memory and disk); identity when disabled.
-                        semantic_fingerprint=apc_weight_stream_fingerprint(
-                            apc_semantic_fingerprint(
-                                apc_lane_fingerprint(
-                                    apc_prefill_fingerprint(
-                                        semantic, prefill_execution_identity
-                                    ),
-                                    self.lane_matmul_receipt,
-                                ),
-                                self.int8_prefill_policy,
-                            ),
-                            weight_stream_manager,
+                        # Every numerical law (int8 prefill, lane matmul,
+                        # prefill execution, process numerics) has its own
+                        # namespace in memory and on disk; identity when off.
+                        semantic_fingerprint=apc_semantic_namespace(
+                            semantic, **numerics_laws
                         ),
                     )
                 return cached

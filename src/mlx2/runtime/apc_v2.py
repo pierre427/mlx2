@@ -262,9 +262,16 @@ _SEMANTIC_SCOPE_SEPARATOR = ":media:"
 # (inner, tag, revision).  int8-prefill: int8_prefill.apc_semantic_fingerprint;
 # lane-matmul: lane.installer.apc_lane_fingerprint; prefill-execution-v1:
 # prefill_plan.apc_prefill_fingerprint; weight-stream:
-# weight_stream.apc_weight_stream_fingerprint.
+# weight_stream.apc_weight_stream_fingerprint; execution-numerics-v1:
+# apc_numerics.apc_execution_fingerprint.
 _NUMERICS_WRAPPER_TAGS = frozenset(
-    {"int8-prefill", "lane-matmul", "prefill-execution-v1", "weight-stream"}
+    {
+        "int8-prefill",
+        "lane-matmul",
+        "prefill-execution-v1",
+        "weight-stream",
+        "execution-numerics-v1",
+    }
 )
 
 
