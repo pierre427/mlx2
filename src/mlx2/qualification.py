@@ -141,12 +141,6 @@ def required_feature_checks(settings):
     if (settings.get("int8_prefill") or {}).get("enabled") is True:
         # Any route: a selected int8 prefill policy must show engaged calls.
         features.add("feature_int8_prefill")
-    if (settings.get("recurrent_state_codec") or {}).get("enabled") is True:
-        # A selected recurrent-state codec must show leaves encoded on store
-        # and decoded on restore, or a no-op codec could be qualified.  The
-        # approved harness has no such observation yet, so a codec route
-        # cannot qualify until the next harness freeze adds one (fail closed).
-        features.add("feature_recurrent_state_codec")
     prefill = settings.get("prefill_execution") or {}
     if prefill.get("projection"):
         features.add("feature_prefill_projection")
@@ -359,6 +353,11 @@ def unqualifiable_candidate(settings):
     for name, reason in UNQUALIFIABLE_CANDIDATES.items():
         if env.get(name) == "1":
             return reason
+    if ((settings or {}).get("recurrent_state_codec") or {}).get("enabled") is True:
+        # The approved harness cannot yet observe codec engagement (leaves
+        # encoded on store, decoded on restore), so a no-op codec could pass.
+        # The next harness freeze adds that observation and lifts this.
+        return "recurrent_state_codec (harness cannot observe codec engagement yet)"
     return None
 
 
