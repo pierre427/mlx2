@@ -190,3 +190,108 @@ def test_completed_stream_cannot_be_reported_as_active_cancellation(monkeypatch)
     with pytest.raises(AssertionError, match="finished before active"):
         harness.stream("http://example.invalid", {}, cancel=True)
     assert response.closed
+
+
+def test_adaptive_policy_pinned_config_only_reaches_enabled_routes(tmp_path):
+    import hashlib
+
+    config = {
+        "continuation_costs": {"1": list(range(1, 17)), "15": list(range(2, 18))},
+        "draft_cost": 0.25,
+        "mode": "per_request",
+        "min_observations": 2,
+    }
+    path = tmp_path / "adaptive.json"
+    raw = json.dumps(config).encode()
+    path.write_bytes(raw)
+    selected = arguments("--adaptive-policy", str(path))
+    plan = harness.preflight(selected)
+    record = plan["adaptive_policy"]
+    assert (
+        record["config"] == config
+        and record["input_sha256"] == hashlib.sha256(raw).hexdigest()
+    )
+    assert record["input_bytes"] == len(raw) and record["validation_num_draft"] == 15
+    assert record["cost_provenance"]["cost_freshness_verified"] is False
+    assert record["cost_provenance"]["artifact_environment_binding_verified"] is False
+    assert record["cost_provenance"]["context_applicability_verified"] is False
+    assert harness.route_policy(selected, plan, "ordinary_reference") is None
+    for route in ("xpress_full", "xpress_pool"):
+        assert (
+            harness.route_policy(selected, plan, route)["adaptive_verification"]
+            == config
+        )
+    draft = tmp_path / "draft"
+    draft.mkdir()
+    (draft / "config.json").write_text(json.dumps({"num_hidden_layers": 3}))
+    selected.draft = draft
+    windowed = harness.route_policy(selected, plan, "xpress_windowed")
+    assert windowed["adaptive_verification"] == config
+    assert windowed["draft_attention_windows"] == [32, 32, 32]
+    ordinary = harness.preflight(arguments())
+    assert "adaptive_policy" not in ordinary
+    base = {
+        "draft_model": "/missing",
+        "num_draft": 15,
+        "xpress_num_passes": 6,
+        "target_verify_row_exact": False,
+    }
+    assert harness.route_policy(arguments(), ordinary, "xpress_full") == base
+    assert harness.route_policy(arguments(), ordinary, "xpress_pool") == {
+        **base,
+        "continuation_pool": {"limit": 15},
+    }
+
+
+@pytest.mark.parametrize(
+    "raw,message",
+    [
+        (b"null", "dictionary"),
+        (b"false", "dictionary"),
+        (b"[]", "dictionary"),
+        (b'{"verification_costs":[1,2]}', "cost model"),
+        (b'{"draft_cost":1,"draft_cost":2}', "duplicate"),
+        (b'{"draft_cost":NaN}', "nonfinite"),
+        (b"\xff", "UTF-8 JSON"),
+        (b"{", "UTF-8 JSON"),
+    ],
+)
+def test_adaptive_policy_file_fails_closed_without_model_access(tmp_path, raw, message):
+    path = tmp_path / "bad.json"
+    path.write_bytes(raw)
+    with pytest.raises(ValueError, match=message):
+        harness.preflight(arguments("--adaptive-policy", str(path)))
+
+
+def test_adaptive_policy_read_is_bounded_before_cpu_library_import(tmp_path):
+    path = tmp_path / "large.json"
+    path.write_bytes(b" " * ((1 << 20) + 1))
+    with pytest.raises(ValueError, match="1 MiB"):
+        harness.preflight(arguments("--adaptive-policy", str(path)))
+
+
+def test_optional_adaptive_dryrun_reads_only_explicit_policy_without_mlx(tmp_path):
+    path = tmp_path / "adaptive.json"
+    path.write_text(json.dumps({"verification_costs": list(range(1, 17))}))
+    code = """
+import sys,runpy,subprocess
+class Guard:
+ def find_spec(self,fullname,*args,**kwargs):
+  if fullname=='mlx' or fullname.startswith(('mlx.','transformers','mlx2.runtime.models.')):
+   raise RuntimeError('live model import forbidden: '+fullname)
+sys.meta_path.insert(0,Guard())
+def forbidden(*args,**kwargs):raise RuntimeError('server forbidden')
+subprocess.Popen=forbidden
+sys.argv=[sys.argv[1],'--model','/missing','--draft','/missing','--out','/missing','--dry-run','--adaptive-policy',sys.argv[2]]
+runpy.run_path(sys.argv[0],run_name='__main__')
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", code, str(SCRIPT), str(path)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    plan = json.loads(result.stdout)
+    assert plan["adaptive_policy"]["config"]["verification_costs"] == list(range(1, 17))
+    assert not plan["will_execute"] and not plan["qualified"]

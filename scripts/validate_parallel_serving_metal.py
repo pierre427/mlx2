@@ -49,7 +49,59 @@ def parser():
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--i-own-the-gpu", action="store_true")
     p.add_argument("--target-verify-row-exact", action="store_true")
+    p.add_argument(
+        "--adaptive-policy",
+        type=Path,
+        help="Explicit JSON adaptive cost-model dictionary (up to 1 MiB)",
+    )
     return p
+
+
+def read_adaptive_policy(path):
+    """Bind supplied cost inputs without loading targets or claiming freshness."""
+    path = Path(path).expanduser().resolve()
+    with path.open("rb") as stream:
+        raw = stream.read((1 << 20) + 1)
+    if len(raw) > 1 << 20:
+        raise ValueError("adaptive policy exceeds 1 MiB")
+
+    def unique(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError("duplicate adaptive policy key")
+            result[key] = value
+        return result
+
+    def constant(value):
+        raise ValueError(f"nonfinite adaptive policy constant: {value}")
+
+    try:
+        config = json.loads(
+            raw.decode("utf-8"), object_pairs_hook=unique, parse_constant=constant
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ValueError("adaptive policy must be valid UTF-8 JSON") from error
+    if type(config) is not dict:
+        raise ValueError("adaptive policy must be a cost-model dictionary")
+    from mlx2.runtime.acceptance_estimator import AdaptiveVerificationPolicy
+
+    AdaptiveVerificationPolicy.from_value(config, 15)
+    return {
+        "input_path": str(path),
+        "input_sha256": hashlib.sha256(raw).hexdigest(),
+        "input_bytes": len(raw),
+        "config": config,
+        "validation_num_draft": 15,
+        "cost_provenance": {
+            "origin": "operator_supplied_policy_file",
+            "cost_units": "caller-supplied common units",
+            "cost_freshness_verified": False,
+            "artifact_environment_binding_verified": False,
+            "context_applicability_verified": False,
+            "performance_claim": False,
+        },
+    }
 
 
 def preflight(args):
@@ -61,7 +113,7 @@ def preflight(args):
         raise ValueError("request-timeout-seconds must be within 1..900")
     if not args.dry_run and not args.i_own_the_gpu:
         raise ValueError("GPU execution requires --i-own-the-gpu under both locks")
-    return {
+    report = {
         "schema": "mlx2.parallel-draft-http-validation.v1",
         "qualified": False,
         "performance_claim": False,
@@ -75,6 +127,9 @@ def preflight(args):
         "cells": {},
         "failures": [],
     }
+    if args.adaptive_policy is not None:
+        report["adaptive_policy"] = read_adaptive_policy(args.adaptive_policy)
+    return report
 
 
 def request_budgets(max_tokens):
@@ -104,6 +159,26 @@ def completion_body(identity, prompt, budget, temperature=0, *, route):
             else {}
         ),
     }
+
+
+def route_policy(args, report, route):
+    """Ordinary reference stays unchanged; selected routes consume pinned input."""
+    if route == "ordinary_reference":
+        return None
+    policy = {
+        "draft_model": str(args.draft),
+        "num_draft": 15,
+        "xpress_num_passes": 6,
+        "target_verify_row_exact": args.target_verify_row_exact,
+    }
+    if route == "xpress_pool":
+        policy["continuation_pool"] = {"limit": 15}
+    if route == "xpress_windowed":
+        config = json.loads((args.draft / "config.json").read_text())
+        policy["draft_attention_windows"] = [32] * config["num_hidden_layers"]
+    if "adaptive_policy" in report:
+        policy["adaptive_verification"] = report["adaptive_policy"]["config"]
+    return policy
 
 
 def request(base, endpoint, body=None, timeout=240):
@@ -211,18 +286,7 @@ def run_route(args, report, route):
         str(work / "cache"),
     ]
     if route != "ordinary_reference":
-        policy = {
-            "draft_model": str(args.draft),
-            "num_draft": 15,
-            "xpress_num_passes": 6,
-            "target_verify_row_exact": args.target_verify_row_exact,
-        }
-        if route == "xpress_pool":
-            policy["continuation_pool"] = {"limit": 15}
-        if route == "xpress_windowed":
-            config = json.loads((args.draft / "config.json").read_text())
-            depth = config["num_hidden_layers"]
-            policy["draft_attention_windows"] = [32] * depth
+        policy = route_policy(args, report, route)
         policy_file = work / "policy.json"
         policy_file.write_text(json.dumps(policy))
         command += ["--external-draft", "--execution-policy", str(policy_file)]
