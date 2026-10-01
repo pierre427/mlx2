@@ -267,6 +267,14 @@ def ssm_attn(
     A = -mx.exp(A_log).astype(dt.dtype)
     dtA = dt * A.reshape(1, 1, -1)
     dtx = dt.reshape(b, l, h, 1) * x
+    if mask is not None:
+        # Padding is a neutral recurrence step, matching ssd_prefill below:
+        # exp(dtA)=1 carries the state, and dtx=0 contributes no new write.
+        # Masking the final query of the triangular decay instead would erase
+        # all earlier writes when a row ends in padding, while the unmasked
+        # old-state cumsum would still decay through the padded tokens.
+        dtA = mx.where(mask[..., None], dtA, 0)
+        dtx = mx.where(mask[..., None, None], dtx, 0)
 
     def _step(dtx, dtA, B, C, state, mask):
         s = dtx.shape[1]
@@ -275,7 +283,7 @@ def ssm_attn(
         CB = mx.swapaxes(C, 1, 2) @ B
         CB = mx.repeat(CB, repeats, axis=1)
 
-        decay = mx.exp(segsum(dtA.swapaxes(1, 2), mask=mask))
+        decay = mx.exp(segsum(dtA.swapaxes(1, 2)))
 
         surrogate_attention_matrix = mx.tril(CB * decay, 0)
 
@@ -671,6 +679,26 @@ def ssd_prefill(
     return y.astype(x.dtype), state
 
 
+def _step_kernel_supported(x, A_log, B, C, D, dt, dt_bias, state):
+    """The fixed 32-lane state reduction's exact tensor/shape contract."""
+    if x.ndim != 4 or B.ndim != 4 or C.shape != B.shape or state is None:
+        return False
+    batch, length, heads, head_dim = x.shape
+    groups, state_dim = B.shape[2:]
+    return (
+        min(batch, length, heads, head_dim, groups) > 0
+        and state_dim >= 32
+        and state_dim % 32 == 0
+        and heads % groups == 0
+        and B.shape[:2] == (batch, length)
+        and state.shape == (batch, heads, head_dim, state_dim)
+        and A_log.shape == D.shape == dt_bias.shape == (heads,)
+        and dt.shape == (batch, length, heads)
+        and all(value.dtype in (mx.float32, mx.float16, mx.bfloat16)
+                for value in (x, A_log, B, C, D, dt, dt_bias, state))
+    )
+
+
 def ssm_update(
     hidden_states: mx.array,
     A_log: mx.array,
@@ -716,6 +744,11 @@ def ssm_update(
     if (
         seq_len > 1
         or state is None
+        or mask is not None
+        or lengths is not None
+        or not _step_kernel_supported(
+            hidden_states, A_log, B, C, D, dt, dt_bias, state
+        )
         or mx.default_device() != mx.gpu
         or not mx.metal.is_available()
     ):
@@ -724,6 +757,9 @@ def ssm_update(
             and state is not None
             and mask is None
             and lengths is None
+            and _step_kernel_supported(
+                hidden_states, A_log, B, C, D, dt, dt_bias, state
+            )
             and mx.default_device() == mx.gpu
             and mx.metal.is_available()
         ):

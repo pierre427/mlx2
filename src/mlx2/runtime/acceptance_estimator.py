@@ -152,7 +152,7 @@ class AdaptiveVerificationPolicy:
     group costs use the fixed-depth backstop, not a guessed speedup.
     """
 
-    verification_costs: tuple
+    verification_costs: tuple = ()
     draft_cost: float = 0.0
     cohort_size: int = 1
     min_observations: int = 32
@@ -162,6 +162,7 @@ class AdaptiveVerificationPolicy:
     refit_interval: int = 100
     mode: str = "cohort"
     verification_costs_by_cohort: tuple = ()
+    continuation_costs: tuple = ()
 
     @classmethod
     def from_value(cls, value, depth):
@@ -184,7 +185,27 @@ class AdaptiveVerificationPolicy:
 
         try:
             fields = dict(value)
-            fields["verification_costs"] = table(fields["verification_costs"])
+            pool_mapping = fields.pop("continuation_costs", {})
+            if not isinstance(pool_mapping, dict):
+                raise ValueError(  # noqa: TRY004
+                    "continuation_costs must map physical path widths to depth costs"
+                )
+            pool_converted = {}
+            for width, values in pool_mapping.items():
+                if type(width) is str and width.isdecimal():
+                    width = int(width)
+                if (
+                    type(width) is not int
+                    or not 1 <= width <= 15
+                    or width in pool_converted
+                ):
+                    raise ValueError("invalid continuation physical path width")
+                pool_converted[width] = table(values)
+            fields["continuation_costs"] = tuple(sorted(pool_converted.items()))
+            if "verification_costs" in fields:
+                fields["verification_costs"] = table(fields["verification_costs"])
+            elif not pool_converted:
+                raise ValueError("adaptive verification requires measured cost tables")
             mapping = fields.pop("verification_costs_by_cohort", {})
             if not isinstance(mapping, dict):
                 raise ValueError("verification_costs_by_cohort must be a dictionary")  # noqa: TRY004
@@ -223,7 +244,8 @@ class AdaptiveVerificationPolicy:
         if policy.minimum_depth > depth or policy.mode not in ("cohort", "per_request"):
             raise ValueError("invalid adaptive verification depth or mode")
         if (
-            policy.cohort_size in converted
+            policy.verification_costs
+            and policy.cohort_size in converted
             and converted[policy.cohort_size] != policy.verification_costs
         ):
             raise ValueError("conflicting adaptive verification cohort cost tables")
@@ -231,8 +253,60 @@ class AdaptiveVerificationPolicy:
 
     def costs(self, cohort_size):
         if cohort_size == self.cohort_size:
-            return self.verification_costs
+            return self.verification_costs or None
         return dict(self.verification_costs_by_cohort).get(cohort_size)
+
+    def choose_continuation_shape(
+        self, maximum_width, maximum_depth, coverage, rounds, path_lengths=None
+    ):
+        """Costs bind one request's physical (path width,depth+bonus) forward.
+
+        Historical top-W prefix coverage is conditional on reached positions.
+        Missing labels use the declared Beta(1,1) prior. No current target draw,
+        synthetic joint q or chain-cohort timing participates in admission.
+        """
+        full = (maximum_width, maximum_depth)
+        tables = dict(self.continuation_costs)
+        if (
+            maximum_width not in tables
+            or rounds % self.full_depth_interval == 0
+            or maximum_depth < self.minimum_depth
+        ):
+            return full
+
+        def progress(width, depth):
+            survival, expected = 1.0, 1.0
+            for position in range(depth):
+                yes, no = coverage.get((width, position), (0, 0))
+                if type(yes) is not int or type(no) is not int or min(yes, no) < 0:
+                    raise ValueError("invalid continuation coverage observations")
+                survival *= (yes + 1) / (yes + no + 2)
+                expected += survival
+            return expected
+
+        base_yes, base_no = coverage.get((maximum_width, 0), (0, 0))
+        if base_yes + base_no < self.min_observations:
+            return full
+        baseline = (self.draft_cost + tables[maximum_width][maximum_depth]) / progress(
+            *full
+        )
+        choices = [(baseline, -maximum_width, -maximum_depth, full)]
+        for width, costs in tables.items():
+            if width > maximum_width:
+                continue
+            yes, no = coverage.get((width, 0), (0, 0))
+            if yes + no < self.min_observations:
+                continue
+            bound = (
+                maximum_depth
+                if path_lengths is None
+                else min(maximum_depth, max(path_lengths[:width]))
+            )
+            for depth in range(self.minimum_depth, bound + 1):
+                cost = (self.draft_cost + costs[depth]) / progress(width, depth)
+                choices.append((cost, -width, -depth, (width, depth)))
+        cost, _, _, chosen = min(choices)
+        return chosen if cost < baseline * (1 - self.min_gain) else full
 
     def choose_from_features(self, estimator, maximum, features, cohort_size=1):
         costs = self.costs(cohort_size)

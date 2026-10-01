@@ -159,6 +159,20 @@ def test_all_branches_match_independent_prefix_oracle(context_length):
         )
 
 
+def test_empty_committed_context_skips_normalization_and_rope(monkeypatch):
+    model, _context, _spine = tiny(context_length=0)
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("empty committed context reached tensor normalization")
+
+    monkeypatch.setattr(type(model.hidden_norm), "__call__", forbidden)
+    projected = model._project_features(mx.zeros((1, 0, 16)), 0)
+    assert all(
+        key.shape == (1, 1, 0, 4) and value.shape == key.shape
+        for key, value in projected
+    )
+
+
 def test_rejected_spine_suffix_cannot_change_selected_branch():
     model, context, spine = tiny()
     original = model.prepare(spine, context).payload

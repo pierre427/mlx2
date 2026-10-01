@@ -187,12 +187,12 @@ class StandardDecoderAdapter(ExternalDraftAdapterMixin):
         }
 
     def close(self):
-        pass
+        self._close_external_feedback()
 
     def __init__(self, model_path: str, *, execution_policy=None):
         self.external_policy = dict(execution_policy or {})
         self.draft_model = None
-        allowed = {"draft_model", "num_draft", "xpress_num_passes", "draft_quantization", "adaptive_verification", "draft_revision", "target_fingerprint", "draft_attention_windows"}
+        allowed = {"draft_model", "num_draft", "xpress_num_passes", "draft_quantization", "adaptive_verification", "draft_revision", "target_fingerprint", "draft_attention_windows", "proposal_composition", "continuation_pool", "lilicorr_feedback"}
         if set(self.external_policy) - allowed or (
             self.external_policy and not self.external_policy.get("draft_model")
         ):

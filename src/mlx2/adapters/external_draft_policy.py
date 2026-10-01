@@ -4,9 +4,11 @@ Each adapter still owns its drafter family, default depth and profile name;
 this only removes the duplicated policy parsing, identity binding and batch
 construction.  Nothing here qualifies a route.
 """
+
 from __future__ import annotations
 
 import hashlib
+import json
 from dataclasses import replace
 
 from ..contracts import Capability, StatePlane
@@ -20,9 +22,14 @@ class ExternalDraftAdapterMixin:
     def _parse_external_policy(self, execution_policy, *, family):
         self.external_policy = dict(execution_policy or {})
         self.draft_model = None
-        if set(self.external_policy) - {"draft_model", "num_draft", "adaptive_verification"} or (
-            self.external_policy and not self.external_policy.get("draft_model")
-        ):
+        if set(self.external_policy) - {
+            "draft_model",
+            "num_draft",
+            "adaptive_verification",
+            "proposal_composition",
+            "continuation_pool",
+            "lilicorr_feedback",
+        } or (self.external_policy and not self.external_policy.get("draft_model")):
             raise ValueError(
                 f"{family} execution policy has no qualified overrides; only an "
                 "external draft_model, num_draft and adaptive_verification may be configured"
@@ -32,18 +39,119 @@ class ExternalDraftAdapterMixin:
     def _check_num_draft(self, record):
         count = self.external_policy.get("num_draft", self.EXTERNAL_DEFAULT_NUM_DRAFT)
         if type(count) is not int or not 1 <= count < record["args"].block_size:
-            raise ValueError("num_draft must be a positive integer below the draft block size")
+            raise ValueError(
+                "num_draft must be a positive integer below the draft block size"
+            )
         adaptive = self.external_policy.get("adaptive_verification")
         if adaptive is not None:
             from ..runtime.acceptance_estimator import AdaptiveVerificationPolicy
 
             AdaptiveVerificationPolicy.from_value(adaptive, count)
+        if "proposal_composition" in self.external_policy:
+            from ..runtime.proposal_composition import ProposalCompositionPolicy
+
+            ProposalCompositionPolicy.from_value(
+                self.external_policy["proposal_composition"]
+            )
+        if "continuation_pool" in self.external_policy:
+            from ..runtime.proposal_providers import ContinuationPoolPolicy
+
+            ContinuationPoolPolicy.from_value(self.external_policy["continuation_pool"])
+            if "proposal_composition" in self.external_policy:
+                raise ValueError(
+                    "continuation_pool already arbitrates proposal sources"
+                )
+            if not (
+                hasattr(record["args"], "xpress_rank")
+                or hasattr(record["args"], "lilicorr_candidate_topk")
+            ):
+                raise ValueError(
+                    "continuation_pool requires a compatible deterministic external head"
+                )
+        if "lilicorr_feedback" in self.external_policy:
+            from ..runtime.lilicorr_feedback import LiLiCorrFeedbackPolicy
+
+            LiLiCorrFeedbackPolicy.from_value(self.external_policy["lilicorr_feedback"])
+            if not hasattr(record["args"], "lilicorr_candidate_topk"):
+                raise ValueError(
+                    "lilicorr_feedback requires a compatible LiLiCoRR artifact"
+                )
 
     def _bind_external_drafter(self, record, loader, base_descriptor):
         self.draft_model = loader(record, self.model)
+        self._external_target_revision = self.identity["fingerprint"]
+        self._external_draft_revision = record["fingerprint"]
+        if "lilicorr_feedback" in self.external_policy and not hasattr(
+            self.draft_model, "lilicorr"
+        ):
+            raise ValueError(
+                "lilicorr_feedback requires an actual resident LiLiCoRR head"
+            )
+        composition_identity = ""
+        if "proposal_composition" in self.external_policy:
+            from ..runtime.proposal_composition import ComposedDraftModel
+            from .proposal_sources import native_mtp_source
+
+            value = self.external_policy["proposal_composition"]
+            source = (
+                native_mtp_source(self.model)
+                if value.get("native_mtp", False)
+                else None
+            )
+            self.draft_model = ComposedDraftModel(
+                self.draft_model, value, native_mtp_source=source
+            )
+            composition_identity = json.dumps(
+                self.draft_model.policy.as_dict(), sort_keys=True, separators=(",", ":")
+            )
+        if "continuation_pool" in self.external_policy:
+            from ..runtime.proposal_providers import ContinuationPoolPolicy
+            from .proposal_path_sources import build_continuation_drafter
+
+            value = self.external_policy["continuation_pool"]
+            normalized = ContinuationPoolPolicy.from_value(value).as_dict()
+            composition_identity = json.dumps(
+                normalized, sort_keys=True, separators=(",", ":")
+            )
+            session_revision = hashlib.sha256(
+                (
+                    self._external_target_revision
+                    + self._external_draft_revision
+                    + self.EXTERNAL_ROUTE_TAG
+                    + composition_identity
+                ).encode()
+            ).hexdigest()
+            self.draft_model = build_continuation_drafter(
+                self.model,
+                self.draft_model,
+                value,
+                target_revision=self._external_target_revision,
+                draft_revision=self._external_draft_revision,
+                tokenizer_revision=self._external_target_revision,
+                session_revision=session_revision,
+            )
+        if "lilicorr_feedback" in self.external_policy:
+            from dataclasses import asdict
+
+            from ..runtime.lilicorr_feedback import LiLiCorrFeedbackPolicy
+
+            composition_identity += json.dumps(
+                asdict(
+                    LiLiCorrFeedbackPolicy.from_value(
+                        self.external_policy["lilicorr_feedback"]
+                    )
+                ),
+                sort_keys=True,
+                separators=(",", ":"),
+            )
         self.profile_name = self.external_profile_name
         digest = hashlib.sha256(
-            (self.identity["fingerprint"] + record["fingerprint"] + self.EXTERNAL_ROUTE_TAG).encode()
+            (
+                self.identity["fingerprint"]
+                + record["fingerprint"]
+                + self.EXTERNAL_ROUTE_TAG
+                + composition_identity
+            ).encode()
         ).hexdigest()
         self.identity = {
             **self.identity,
@@ -86,6 +194,10 @@ class ExternalDraftAdapterMixin:
             raise ValueError("No external draft model bound")
         from ..runtime.external_speculative import ExternalDraftBatchGenerator
 
+        self._initialize_external_feedback()
+        if hasattr(self.draft_model, "last_continuation_selections"):
+            kwargs.setdefault("continuation_pool", self.draft_model.policy)
+
         adaptive = self.external_policy.get("adaptive_verification")
         if adaptive is not None:
             kwargs.setdefault("adaptive_verification", adaptive)
@@ -96,6 +208,38 @@ class ExternalDraftAdapterMixin:
             num_draft=self._external_num_draft(),
             **kwargs,
         )
+
+    def _initialize_external_feedback(self):
+        if (
+            "lilicorr_feedback" not in self.external_policy
+            or getattr(self, "_external_feedback_manager", None) is not None
+        ):
+            return
+        from ..runtime.lilicorr_feedback import LiLiCorrFeedbackManager
+
+        drafter = self.draft_model
+        while hasattr(drafter, "backend"):
+            drafter = drafter.backend
+        manager = LiLiCorrFeedbackManager(
+            drafter,
+            self.external_policy["lilicorr_feedback"],
+            target_revision=self._external_target_revision,
+            draft_revision=self._external_draft_revision,
+            binding=self.identity["fingerprint"],
+        )
+        self._external_feedback_manager = manager
+        drafter.feedback_manager = manager
+
+    def _close_external_feedback(self):
+        manager = getattr(self, "_external_feedback_manager", None)
+        if manager is not None:
+            manager.close()
+
+    def close(self):
+        self._close_external_feedback()
+        parent_close = getattr(super(), "close", None)
+        if callable(parent_close):
+            parent_close()
 
 
 __all__ = ["ExternalDraftAdapterMixin"]

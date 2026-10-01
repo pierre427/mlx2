@@ -378,6 +378,11 @@ def _gated_delta_kernel_impl(
 ) -> Tuple[mx.array, mx.array]:
     (B, T, Hk, Dk) = k.shape
     (Hv, Dv) = v.shape[2:]
+    # The generic Metal reduction assigns complete 32-lane strips. Smaller
+    # keys create a zero-length register array; partial strips silently omit
+    # the remainder. The ordinary recurrence covers both shapes exactly.
+    if Dk < 32 or Dk % 32:
+        return gated_delta_ops(q, k, v, g, beta, state, mask)
     input_type = q.dtype
     state_type = state.dtype
     st16 = state_type == mx.float16

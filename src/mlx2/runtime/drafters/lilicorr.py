@@ -215,6 +215,8 @@ class LiLiCorrDraftModel(XPressDraftModel):
         configure_attention_windows(self, windows)
         self.lilicorr = LiLiCorrHead(config)
         self.stats = {"backbone_blocks": 0, "lattice_blocks": 0}
+        self.feedback_manager = None
+        self.draft_feedback_payloads = None
 
     @property
     def receipt_settings(self):
@@ -261,6 +263,7 @@ class LiLiCorrDraftModel(XPressDraftModel):
         ):
             raise ValueError("LiLiCorr proposal length outside trained block")
         anchor_ids = [int(a) for a in anchors]
+        self.draft_feedback_payloads = None
         batch = len(anchor_ids)
         histories = processor_histories or [[] for _ in range(batch)]
         processors = logits_processors or [[] for _ in range(batch)]
@@ -314,8 +317,9 @@ class LiLiCorrDraftModel(XPressDraftModel):
             logits.astype(mx.float32), axis=-1, keepdims=True
         )
         candidate_log_probs = mx.take_along_axis(log_probs, candidates, axis=-1)
+        embeddings = self.embed_tokens(candidates)
         scores = self.lilicorr(
-            self.embed_tokens(candidates),
+            embeddings,
             candidate_log_probs,
             features,
             anchor_hidden,
@@ -328,6 +332,15 @@ class LiLiCorrDraftModel(XPressDraftModel):
         dense = np.asarray(logits.astype(mx.float32)) if any(processors) else None
         self.stats["backbone_blocks"] += batch
         self.stats["lattice_blocks"] += batch
+        if self.feedback_manager is not None:
+            self.draft_feedback_payloads = self.feedback_manager.capture_lattice(
+                candidates,
+                embeddings,
+                candidate_log_probs,
+                features,
+                anchor_hidden,
+                anchor_valid,
+            )
         tokens, laws = [[] for _ in range(batch)], [[] for _ in range(batch)]
         confidence_features = [[] for _ in range(batch)]
         for row in range(batch):

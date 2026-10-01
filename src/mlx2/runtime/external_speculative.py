@@ -7,9 +7,11 @@ No capability is qualified by importing or constructing this executor.
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import os
 import time
+import uuid
 from collections import defaultdict, deque
 from dataclasses import dataclass, field
 from types import SimpleNamespace
@@ -236,6 +238,9 @@ class HostDraftRow:
     laws: list
     width: int = 1
     confidence_features: object = None
+    proposal_source: str | None = None
+    continuation_selection: object = None
+    feedback_payload: object = None
 
     @property
     def lengths(self):
@@ -252,6 +257,7 @@ class CompactDraftRow:
     candidate_ids: np.ndarray
     candidate_probs: np.ndarray
     width: int
+    proposal_source: str | None = None
 
     @property
     def lengths(self):
@@ -289,6 +295,7 @@ class RoundDecision:
     response_logprobs: object = None
     verify_window: object = None
     commit_rows: object = None
+    continuation_outcome: object = None
 
 
 def _block_row(block, vocab):
@@ -348,7 +355,8 @@ class ExternalDraftBatchGenerator:
                  prefill_step_size=2048, num_draft=4, stop_tokens=(), memory_headroom=None,
                  reclaim_memory=None, evict_checkpoint=None, fly_verification=None,
                  pairwise_selection="host", ready_drain="one",
-                 prefill_allocator_reclaim=False, adaptive_verification=None, **kwargs):
+                 prefill_allocator_reclaim=False, adaptive_verification=None,
+                 continuation_pool=None, **kwargs):
         import mlx.core as mx
         self.mx = mx; self.model = model; self.draft = draft_model
         self.memory_headroom = memory_headroom
@@ -357,6 +365,17 @@ class ExternalDraftBatchGenerator:
         # Responses returned by next(); drives the periodic allocator reclaim.
         self._emitted_responses = 0
         self.binding = binding; self.capacity = completion_batch_size
+        self._generator_revision = uuid.uuid4().hex
+        self._feedback_outbox = None
+        self.continuation_policy = None
+        if continuation_pool is not None:
+            from .proposal_providers import ContinuationPoolPolicy
+            self.continuation_policy = (continuation_pool if isinstance(continuation_pool, ContinuationPoolPolicy)
+                                        else ContinuationPoolPolicy.from_value(continuation_pool))
+            if not hasattr(draft_model, "last_continuation_selections") or self.continuation_policy != draft_model.policy:
+                raise ValueError("continuation_pool requires the matching bound proposal provider")
+        elif hasattr(draft_model, "last_continuation_selections"):
+            self.continuation_policy = draft_model.policy
         self.fly_verification = FLyVerificationPolicy.from_value(fly_verification)
         self.prefill_step = prefill_step_size; self.num_draft = int(num_draft)
         if pairwise_selection not in ("host", "batched"):
@@ -370,6 +389,10 @@ class ExternalDraftBatchGenerator:
         )
         if self.draft_topology not in ("chain", "tree15"):
             raise ValueError("MLX2_DFLASH_TOPOLOGY must be chain or tree15")
+        if hasattr(draft_model, "last_proposal_sources") and self.draft_topology != "chain":
+            raise ValueError("proposal composition requires chain verification")
+        if self.continuation_policy is not None and (self.target_execution != "reference" or self.fly_verification.enabled or self.pairwise_selection != "host"):
+            raise ValueError("complete continuation verification requires exact reference target execution and host proposals")
         # The reference tree remains one lane per round.  TensorFold cohorts
         # independent B1 records under its fixed four-lane ownership bound.
         if self.target_execution not in ("reference", "tensorfold"):
@@ -390,6 +413,9 @@ class ExternalDraftBatchGenerator:
         self.adaptive_policy = AdaptiveVerificationPolicy.from_value(
             adaptive_verification, self.num_draft
         )
+        if (self.adaptive_policy is not None and self.adaptive_policy.continuation_costs
+                and self.continuation_policy is None):
+            raise ValueError("continuation costs require a bound complete continuation route")
         self.acceptance_estimator = None
         if self.adaptive_policy is not None:
             if self.draft_topology != "chain" or self.fly_verification.enabled:
@@ -566,9 +592,13 @@ class ExternalDraftBatchGenerator:
     def insert(self, prompts, *, max_tokens, caches=None, all_tokens=None,
                cache_states=None, lane_rngs=None, sampling_configs=None,
                logits_processors=None, samplers=None, resume_rng=False,
-               apc_interior_positions=None, prefill_inputs=None):
+               apc_interior_positions=None, prefill_inputs=None, session_keys=None):
         if self._open:
             raise RuntimeError("Membership change during external transaction")
+        if session_keys is not None and (len(session_keys) != len(prompts) or any(
+                value is not None and (type(value) is not str or len(value) != 64 or any(c not in "0123456789abcdef" for c in value))
+                for value in session_keys)):
+            raise ValueError("session_keys must contain one pinned privacy hash per request")
         apc_interior_positions = (
             [()] * len(prompts)
             if apc_interior_positions is None
@@ -625,6 +655,9 @@ class ExternalDraftBatchGenerator:
                 todo = prefix + todo; prefix = []; target = None
             uid = self.next_uid; self.next_uid += 1
             lane = Lane(uid, prefix, deque(todo), list(target) if target is not None else self.model.make_cache(), draft_cache, tail, rng, int(max_tokens[i]), (logits_processors or [[]]*len(prompts))[i] or [], dict((sampling_configs or [{}]*len(prompts))[i]))
+            lane.proposal_request_id = self._generator_revision + ":" + str(uid)
+            lane.session_scope_hash = ((session_keys or [None] * len(prompts))[i]
+                or hashlib.sha256(json.dumps([self.binding, lane.proposal_request_id]).encode()).hexdigest())
             self.lanes[uid] = lane; uids.append(uid)
         return uids
 
@@ -972,6 +1005,14 @@ class ExternalDraftBatchGenerator:
                 except (TypeError, ValueError):
                     pass
                 extra = {"context_tokens": pairing} if self.pair_context_tokens else {}
+                if getattr(self.draft, "requires_proposal_contexts", False):
+                    from .proposal_providers import continuation_context_revision
+                    extra["proposal_contexts"] = [{
+                        "request_id": l.proposal_request_id,
+                        "round_id": l.external_rounds,
+                        "context_revision": continuation_context_revision(self.draft.session.session_revision, l.history, l.anchor),
+                        "session_scope_hash": l.session_scope_hash,
+                    } for l in lanes]
                 needs_histories = bool(getattr(self.draft, "requires_processor_histories", False))
                 if needs_histories:
                     extra["processor_histories"] = [list(l.history) for l in lanes]
@@ -1052,29 +1093,70 @@ class ExternalDraftBatchGenerator:
             )
             self.scheduler_stats["draft_max_width"] = max(self.scheduler_stats["draft_max_width"],len(lanes))
             confidence = None
-            if (self.adaptive_policy is not None and self.adaptive_policy.mode == "per_request"
-                    and getattr(self.draft, "proposal_distribution", None) == "deterministic_point_mass"):
+            deterministic_admission = (
+                self.adaptive_policy is not None and self.adaptive_policy.mode == "per_request"
+                and getattr(self.draft, "proposal_distribution", None) == "deterministic_point_mass"
+            )
+            if deterministic_admission:
                 confidence = getattr(self.draft, "adaptive_confidence_features", None)
                 if confidence is not None and len(confidence) != len(lanes):
                     raise ValueError("deterministic drafter confidence rows mismatch")
+            sources = getattr(self.draft, "last_proposal_sources", None)
+            selections = getattr(self.draft, "last_continuation_selections", None) if self.continuation_policy is not None else None
+            payloads = getattr(self.draft, "draft_feedback_payloads", None)
+            if selections is not None and len(selections) != len(lanes):
+                raise ValueError("continuation selection rows mismatch")
+            if selections is not None:
+                self._continuation_open_selections.extend(selection for selection in selections if selection is not None)
+            if payloads is not None and len(payloads) != len(lanes):
+                raise ValueError("draft feedback payload rows mismatch")
+            if sources is not None and (
+                    len(sources) != len(lanes)
+                    or any(type(source) is not str or source not in {"prompt_lookup", "native_mtp", "external"}
+                           for source in sources)):
+                raise ValueError("invalid composed proposal source rows")
             for j,row in enumerate(indices):
                 feature_row = None
-                if confidence is not None:
+                if deterministic_admission:
+                    # Every deterministic row must uphold its law contract,
+                    # including PLD rows without a current confidence proxy.
+                    # Their lagged admission still happens after proposal work.
+                    if isinstance(q[j], CompactDraftRow):
+                        row_laws = list(zip(q[j].candidate_ids, q[j].candidate_probs))
+                    else:
+                        row_laws = [(None, law) for law in q[j]]
+                    if len(row_laws) != len(tokens[j]):
+                        raise ValueError("deterministic proposal law lengths mismatch")
+                    for token, (ids, law) in zip(tokens[j], row_laws):
+                        law = probability(law)
+                        index = int(token)
+                        if ids is not None:
+                            positions = np.flatnonzero(np.asarray(ids) == index)
+                            if len(positions) != 1:
+                                raise ValueError("deterministic proposal token missing from compact law")
+                            index = int(positions[0])
+                        if not 0 <= index < len(law) or law[index] != 1.0 or np.count_nonzero(law) != 1:
+                            raise ValueError("current confidence requires deterministic point-mass proposals")
+                if confidence is not None and confidence[j] is not None:
                     feature_row = np.asarray(confidence[j], dtype=np.float64)
                     if (feature_row.ndim != 1 or len(feature_row) < len(tokens[j])
                             or not np.isfinite(feature_row).all()):
                         raise ValueError("invalid deterministic drafter confidence features")
-                    # The hook is safe only when every returned q is the stated
-                    # point mass. A stochastic law must use lagged admission.
-                    for token, law in zip(tokens[j], q[j]):
-                        law = probability(law)
-                        if law[int(token)] != 1.0 or np.count_nonzero(law) != 1:
-                            raise ValueError("current confidence requires deterministic point-mass proposals")
                     feature_row = np.clip(feature_row[:len(tokens[j])], -40.0, 40.0).tolist()
                 blocks[row] = (
                     q[j] if isinstance(q[j], (CompactDraftRow, TreeDraftRow))
                     else HostDraftRow(tokens[j], q[j], len(lanes), feature_row)
                 )
+                if sources is not None:
+                    if not isinstance(blocks[row], (HostDraftRow, CompactDraftRow)):
+                        raise ValueError("composition requires supported chain proposal blocks")
+                    blocks[row].proposal_source = sources[j]
+                if selections is not None:
+                    if not isinstance(blocks[row], HostDraftRow) or selections[j] is None:
+                        raise ValueError("continuation requires host complete-path selections")
+                    blocks[row].continuation_selection = selections[j]
+                if payloads is not None and isinstance(blocks[row], HostDraftRow):
+                    blocks[row].feedback_payload = payloads[j]
         return blocks
 
     def _verify(self, cohort, blocks, logits):
@@ -1662,6 +1744,17 @@ class ExternalDraftBatchGenerator:
             lane.external_rounds += int(count > 0)
             lane.proposed += count
             lane.accepted += round_accepted
+            source = getattr(blocks[row], "proposal_source", None)
+            if hasattr(self.draft, "last_proposal_sources"):
+                lane.proposal_composition_current_source = source if count else "ordinary"
+                if source is not None and count:
+                    counters = getattr(lane, "proposal_composition_counts", {})
+                    record = counters.setdefault(source, {"verified_rounds": 0, "proposed_tokens": 0, "accepted_tokens": 0})
+                    record["verified_rounds"] += 1
+                    record["proposed_tokens"] += count
+                    record["accepted_tokens"] += round_accepted
+                    lane.proposal_composition_counts = counters
+                    _bump(self.scheduler_stats, "external_composed_" + source + "_rounds")
             if count:
                 # Two host dict bumps on ints already in hand: no device work,
                 # no eval, no per-round allocation beyond the at-most-(K+1)
@@ -1679,6 +1772,22 @@ class ExternalDraftBatchGenerator:
                 decision.relaxed,
             )
             lane.target_max_width = max(lane.target_max_width, len(cohort))
+            if decision.continuation_outcome is not None:
+                outcome = decision.continuation_outcome
+                lane.continuation_rounds = getattr(lane, "continuation_rounds", 0) + 1
+                lane.continuation_physical_width = outcome.physical_width
+                lane.continuation_physical_span = outcome.physical_span
+                lane.continuation_selected_path = outcome.selected_index
+                chosen = blocks[row].continuation_selection.paths[outcome.selected_index]
+                lane.continuation_selected_sources = tuple((path.source_id, path.source_revision)
+                    for path in chosen.contributors)
+                lane.continuation_target_rows = getattr(lane, "continuation_target_rows", 0) + outcome.physical_width * outcome.physical_span
+                lane.target_max_width = max(lane.target_max_width, outcome.physical_width)
+            if self._feedback_outbox is not None:
+                payload = getattr(blocks[row], "feedback_payload", None)
+                selection = getattr(blocks[row], "continuation_selection", None)
+                if payload is not None or selection is not None:
+                    self._feedback_outbox.append((lane, blocks[row], decision, lane.external_rounds - 1))
             if count:
                 lane.draft_max_width = max(lane.draft_max_width, getattr(blocks[row], "width", 1))
             for j,token in enumerate(emitted):
@@ -1693,13 +1802,30 @@ class ExternalDraftBatchGenerator:
                 if logp is not None and decision.response_logprobs:
                     if j < len(decision.response_logprobs) and decision.response_logprobs[j] is not None:
                         logp = decision.response_logprobs[j]
-                lane.ready.append(SimpleNamespace(uid=lane.uid, token=token, logprobs=logp, finish_reason=finish, execution_width=len(cohort), all_tokens=list(lane.history) if final else None, prompt_cache=self._freeze_cache(lane.cache) if finish else None, cache_sidecar=self._sidecar(lane) if finish else None, mtp_state=None, mtp_receipt=None, speculative_receipt={"kind":self.receipt_kind, "execution":"external_draft_verify" if lane.external_rounds else "ordinary_target", "current_execution":"ordinary_target" if count == 0 else "external_draft_verify", "ordinary_fallback":lane.ordinary, "external_rounds":lane.external_rounds, "accepted":lane.accepted,"proposed":lane.proposed,"round_accepted":round_accepted,"round_proposed":count,"target_width":lane.target_max_width,"draft_width":lane.draft_max_width,"qualification_authority":"serving_route", **self._target_execution_receipt(), **self._verification_receipt(lane), **self._adaptive_receipt(lane), **self._draft_settings_receipt()}))
+                lane.ready.append(SimpleNamespace(uid=lane.uid, token=token, logprobs=logp, finish_reason=finish, execution_width=(decision.continuation_outcome.physical_width if decision.continuation_outcome is not None else len(cohort)), all_tokens=list(lane.history) if final else None, prompt_cache=self._freeze_cache(lane.cache) if finish else None, cache_sidecar=self._sidecar(lane) if finish else None, mtp_state=None, mtp_receipt=None, speculative_receipt={"kind":self.receipt_kind, "execution":"external_draft_verify" if lane.external_rounds else "ordinary_target", "current_execution":"ordinary_target" if count == 0 else "external_draft_verify", "ordinary_fallback":lane.ordinary, "external_rounds":lane.external_rounds, "accepted":lane.accepted,"proposed":lane.proposed,"round_accepted":round_accepted,"round_proposed":count,"target_width":lane.target_max_width,"draft_width":lane.draft_max_width,"qualification_authority":"serving_route", **self._target_execution_receipt(), **self._verification_receipt(lane), **self._adaptive_receipt(lane), **self._draft_settings_receipt(), **self._proposal_composition_receipt(lane), **self._continuation_receipt(lane)}))
         if clock is not None:
             self._mark("emit", clock)
         self.scheduler_stats[
             "external_rounds" if any(proposal_counts) else "ordinary_rounds"
         ] += 1
         self.scheduler_stats["target_max_width"] = max(self.scheduler_stats["target_max_width"],len(cohort))
+
+    def _continuation_receipt(self, lane):
+        if self.continuation_policy is None:
+            return {}
+        return {"verification": "processed_target_draw_then_matching_continuation_prefix",
+                "continuation_pool": {"implemented": True, "selected": True, "qualified": False,
+                    "observed_used": getattr(lane, "continuation_rounds", 0) > 0,
+                    "unit": "complete_continuation_sequences", "limit": self.continuation_policy.limit,
+                    "committed_rounds": getattr(lane, "continuation_rounds", 0),
+                    "physical_width": getattr(lane, "continuation_physical_width", 0),
+                    "physical_span": getattr(lane, "continuation_physical_span", 0),
+                    "target_rows": getattr(lane, "continuation_target_rows", 0),
+                    "selected_path": getattr(lane, "continuation_selected_path", None),
+                    "selected_sources": list(getattr(lane, "continuation_selected_sources", ())),
+                    "session_scope_hash": lane.session_scope_hash,
+                    "adaptive_cost_binding": "one_request_physical_path_width_and_depth_plus_bonus",
+                    "coverage_calibration": "lagged_top_width_reached_prefix_beta_frequency"}}
 
     def _mark(self, phase, since):
         """Accumulate host time for ``phase``; returns the new reference time."""
@@ -1713,6 +1839,18 @@ class ExternalDraftBatchGenerator:
             int((now - since) * 1e9),
         )
         return now
+
+    def _proposal_composition_receipt(self, lane, *, current_source=None):
+        if not hasattr(self.draft, "last_proposal_sources"):
+            return {}
+        counters = getattr(lane, "proposal_composition_counts", {})
+        return {"proposal_composition": {
+            "selected": True, "qualified": False,
+            "observed_used": any(counters.get(source, {}).get("verified_rounds", 0)
+                                 for source in ("prompt_lookup", "native_mtp")),
+            "current_source": current_source or getattr(lane, "proposal_composition_current_source", "not_executed"),
+            "committed_verification": copy.deepcopy(counters),
+        }}
 
     def _draft_settings_receipt(self):
         settings = getattr(getattr(self, "draft", None), "receipt_settings", None)
@@ -1736,19 +1874,24 @@ class ExternalDraftBatchGenerator:
                 getattr(lane, "adaptive_trimmed_rounds", 0) > 0 if lane is not None
                 else self.scheduler_stats["external_adaptive_trimmed_rounds"] > 0
             ),
-            "policy": ("per_request_grouped_cost_model" if self.adaptive_policy.mode == "per_request"
+            "policy": ("continuation_physical_shape_cost_model" if self.continuation_policy is not None
+                       else "per_request_grouped_cost_model" if self.adaptive_policy.mode == "per_request"
                        else "lagged_cohort_cost_model"),
-            "confidence": ("deterministic_refined_logit_proxy_or_lagged_q"
+            "confidence": ("lagged_top_width_prefix_coverage" if self.continuation_policy is not None
+                           else "deterministic_refined_logit_proxy_or_lagged_q"
                            if self.adaptive_policy.mode == "per_request" else "lagged_q"),
-            "calibration": "shared_online_censored_logistic",
+            "calibration": ("censored_conditional_beta_frequency" if self.continuation_policy is not None
+                            else "shared_online_censored_logistic"),
             "current_policy": getattr(lane, "adaptive_round_policy", "not_executed"),
             "current_feature_source": getattr(lane, "adaptive_feature_source", "not_executed"),
             "per_request_rounds": self.scheduler_stats["external_adaptive_per_request_rounds"],
-            "cost_model_cohort_sizes": sorted({self.adaptive_policy.cohort_size,
-                *(size for size, _ in self.adaptive_policy.verification_costs_by_cohort)}),
+            "cost_model_cohort_sizes": (sorted({self.adaptive_policy.cohort_size,
+                *(size for size, _ in self.adaptive_policy.verification_costs_by_cohort)})
+                if self.adaptive_policy.verification_costs else []),
             "verification_groups": self.scheduler_stats["external_adaptive_verification_groups"],
-            "cost_model_cohort_size": self.adaptive_policy.cohort_size,
+            "cost_model_cohort_size": self.adaptive_policy.cohort_size if self.adaptive_policy.verification_costs else None,
             "cost_model_source": "caller_supplied",
+            "continuation_cost_path_widths": [width for width, _ in self.adaptive_policy.continuation_costs],
             "round_proposal_depth": self.scheduler_stats["external_adaptive_round_depth"],
             "round_verify_width": self.scheduler_stats["external_adaptive_verify_width"],
             "target_rows": self.scheduler_stats["external_adaptive_target_rows"],
@@ -1790,11 +1933,12 @@ class ExternalDraftBatchGenerator:
             return None
         if isinstance(block, CompactDraftRow):
             return CompactDraftRow(block.tokens[:depth], block.candidate_ids[:depth],
-                                   block.candidate_probs[:depth], block.width)
+                                   block.candidate_probs[:depth], block.width, block.proposal_source)
         if isinstance(block, HostDraftRow):
             confidence = block.confidence_features
             return HostDraftRow(block.tokens[:depth], block.laws[:depth], block.width,
-                                None if confidence is None else confidence[:depth])
+                                None if confidence is None else confidence[:depth], block.proposal_source,
+                                block.continuation_selection, block.feedback_payload)
         raise ValueError("adaptive chain trimming requires a supported proposal block")
 
     def _adaptive_physical_groups(self, blocks):
@@ -1847,9 +1991,11 @@ class ExternalDraftBatchGenerator:
                 for row, block in zip(indices, proposed):
                     blocks[row] = block
             if deterministic:
-                features = [getattr(block, "confidence_features", None) for block in blocks]
-                if any(feature is not None for feature in features):
+                current_features = [getattr(block, "confidence_features", None) for block in blocks]
+                if any(feature is not None for feature in current_features):
                     _bump(self.scheduler_stats, "external_adaptive_current_confidence_rounds")
+                features = [current if current is not None else lagged
+                            for current, lagged in zip(current_features, features)]
                 depths = self.adaptive_policy.request_depths(self.acceptance_estimator, maxima, features)
                 blocks = [self._trim_adaptive_block(block, depth) for block, depth in zip(blocks, depths)]
             decisions = [None] * len(cohort)
@@ -1861,10 +2007,11 @@ class ExternalDraftBatchGenerator:
             saved = max(0, baseline * len(cohort) - sum(depths))
             _bump(self.scheduler_stats, "external_adaptive_trimmed_rounds", int(saved > 0))
             _bump(self.scheduler_stats, "external_adaptive_trimmed_target_rows", saved)
-            for lane, depth, feature in zip(cohort, depths, features):
+            for lane, depth, block in zip(cohort, depths, blocks):
                 lane.adaptive_round_policy = "per_request_grouped"
                 lane.adaptive_feature_source = (
-                    "deterministic_refined_logit_proxy" if deterministic and feature is not None else "lagged_q"
+                    "deterministic_refined_logit_proxy"
+                    if deterministic and getattr(block, "confidence_features", None) is not None else "lagged_q"
                 )
                 if depth < baseline:
                     lane.adaptive_trimmed_rounds = getattr(lane, "adaptive_trimmed_rounds", 0) + 1
@@ -1915,8 +2062,185 @@ class ExternalDraftBatchGenerator:
             self._open = False
 
     def _round(self, cohort):
+        """Publish learning observations only after every request commits."""
+        self._feedback_outbox = []
+        self._continuation_open_selections = []
+        try:
+            self._run_round(cohort)
+        except BaseException:
+            if self.continuation_policy is not None:
+                pool = self.draft.proposal_pool
+                selections = list(self._continuation_open_selections)
+                selections.extend(getattr(self.draft, "last_continuation_selections", ()))
+                seen = set()
+                for selection in selections:
+                    if selection is not None and id(selection) not in seen:
+                        seen.add(id(selection))
+                        try:
+                            pool.discard(selection)
+                        except ValueError:
+                            pass  # Already consumed/discarded tickets carry no new labels.
+            raise
+        else:
+            # This is outside the transaction's restore path. A diagnostic
+            # feedback failure must never rewind already delivered target state.
+            manager = getattr(self.draft, "feedback_manager", None)
+            for lane, block, decision, round_id in self._feedback_outbox:
+                selection = block.continuation_selection
+                try:
+                    if selection is not None:
+                        coverage = getattr(lane, "continuation_coverage", {})
+                        # Each top-W subset is ranked before target draws. A
+                        # first mismatch is observed; later positions censored.
+                        for width in range(1, len(selection.paths) + 1):
+                            active = [path.tokens for path in selection.paths[:width]]
+                            for position, teacher in enumerate(decision.emitted):
+                                eligible = [path for path in active if len(path) > position]
+                                if not eligible:
+                                    break
+                                matches = [path for path in eligible if path[position] == teacher]
+                                yes, no = coverage.get((width, position), (0, 0))
+                                coverage[(width, position)] = (yes + int(bool(matches)), no + int(not matches))
+                                if not matches:
+                                    break
+                                active = matches
+                        lane.continuation_coverage = coverage
+                        self.draft.proposal_pool.commit_feedback(selection, decision.emitted)
+                    if manager is not None and block.feedback_payload is not None:
+                        first_rejected = decision.accepted if decision.accepted < len(decision.emitted) else None
+                        manager.submit_verified(block.feedback_payload, decision.emitted,
+                            first_rejected_position=first_rejected,
+                            request_id=lane.proposal_request_id, round_id=round_id)
+                except Exception as error:  # noqa: BLE001 - optional learning cannot alter committed inference
+                    _bump(self.scheduler_stats, "external_feedback_failures")
+                    self.last_feedback_error = str(error)
+                    if selection is not None:
+                        try:
+                            self.draft.proposal_pool.discard(selection)
+                        except ValueError:
+                            pass
+            if manager is not None and self._feedback_outbox:
+                try:
+                    manager.settle_round()
+                    receipt = manager.receipt()
+                    for lane, _block, _decision, _round_id in self._feedback_outbox:
+                        for response in lane.ready:
+                            response.speculative_receipt["lilicorr_feedback"] = copy.deepcopy(receipt)
+                except Exception as error:  # noqa: BLE001 - optional learning cannot alter committed inference
+                    _bump(self.scheduler_stats, "external_feedback_failures")
+                    self.last_feedback_error = str(error)
+            if self.continuation_policy is not None:
+                for lane, _block, _decision, _round_id in self._feedback_outbox:
+                    try:
+                        ranking = self.draft.proposal_pool.receipt(lane.session_scope_hash)
+                        for response in lane.ready:
+                            response.speculative_receipt["continuation_pool"]["ranking"] = copy.deepcopy(ranking)
+                    except Exception as error:  # noqa: BLE001 - diagnostics cannot invalidate committed inference
+                        _bump(self.scheduler_stats, "external_feedback_failures")
+                        self.last_feedback_error = str(error)
+        finally:
+            self._feedback_outbox = None
+            self._continuation_open_selections = []
+
+    def _pool_round(self, cohort):
+        from .continuation_verification import (
+            SelectedContinuationTransaction,
+            prepare_continuations,
+            sample_continuations,
+        )
+        recovery = self._snapshot_round(cohort)
+        self.scheduler_stats["recovery_checkpoint_captures"] += len(recovery)
+        stats_snapshot = dict(self.scheduler_stats)
+        self._open = True
+        transaction = None
+        try:
+            blocks = self._propose(cohort)
+            for lane, original_block in zip(cohort, blocks):
+                selection = original_block.continuation_selection
+                selection.require_verification_contract("target_draw_then_prefix_match")
+                maximum_width = len(selection.paths)
+                maximum_depth = max(len(path.tokens) for path in selection.paths)
+                width, depth = maximum_width, maximum_depth
+                if self.adaptive_policy is not None:
+                    width, depth = self.adaptive_policy.choose_continuation_shape(
+                        maximum_width, maximum_depth, getattr(lane, "continuation_coverage", {}),
+                        getattr(lane, "continuation_rounds", 0), [len(path.tokens) for path in selection.paths])
+                paths = tuple(path.tokens[:depth] for path in selection.paths[:width])
+                inputs = [[lane.anchor, *path] for path in paths]
+                counts = [len(path) for path in paths]
+                taps, steer, commits = self._verify_steer([lane] * len(paths), inputs, counts)
+                if steer is not None:
+                    taps.steer = steer
+                try:
+                    paths, logits, hidden, transaction = prepare_continuations(
+                        self.model, self.mx, lane.cache, lane.anchor, paths, self.layers,
+                        self._target_owner, max_sequences=self.continuation_policy.limit,
+                        max_depth=self.num_draft)
+                finally:
+                    if steer is not None:
+                        taps.steer = None
+                laws = []
+                response_rows = [] if lane.sampling.get("emit_logprobs", True) else None
+                window = VerifyWindow(lane.processors)
+
+                def sample_row(logits_row, prefix, *, _lane=lane,
+                               _response_rows=response_rows, _window=window, _laws=laws):
+                    law = self._target_law(_lane, logits_row, _lane.history + [_lane.anchor, *prefix],
+                                           True, _response_rows)
+                    _window.mark()
+                    _laws.append(law)
+                    return _lane.rng.sample(law)
+
+                outcome = sample_continuations(paths, logits, sample_row,
+                    maximum=lane.maximum - lane.generated, stop_tokens=self.stops)
+                chosen = selection.paths[outcome.selected_index]
+                source = chosen.representative.source_id
+                selected = HostDraftRow(list(paths[outcome.selected_index]), [], original_block.width,
+                    proposal_source=source if source in {"prompt_lookup", "native_mtp"} else "external",
+                    continuation_selection=selection, feedback_payload=original_block.feedback_payload)
+                decision = RoundDecision(outcome.accepted, list(outcome.emitted), laws,
+                    response_logprobs=response_rows, verify_window=window, continuation_outcome=outcome)
+                if self.adaptive_policy is not None:
+                    saved = maximum_width * (maximum_depth + 1) - outcome.physical_width * outcome.physical_span
+                    lane.adaptive_round_policy = ("continuation_lagged_coverage_cost_model" if saved
+                        else "continuation_fixed_depth_cost_backstop")
+                    lane.adaptive_feature_source = "pool_lagged_source_labels"
+                    _bump(self.scheduler_stats, "external_adaptive_rounds")
+                    _bump(self.scheduler_stats, "external_adaptive_trimmed_rounds", int(saved > 0))
+                    _bump(self.scheduler_stats, "external_adaptive_trimmed_target_rows", saved)
+                    if saved:
+                        lane.adaptive_trimmed_rounds = getattr(lane, "adaptive_trimmed_rounds", 0) + 1
+                    _bump(self.scheduler_stats, "external_adaptive_target_rows", outcome.physical_width * outcome.physical_span)
+                    _bump(self.scheduler_stats, "external_adaptive_verification_groups")
+                    self.scheduler_stats["external_adaptive_round_depth"] = outcome.physical_span - 1
+                    self.scheduler_stats["external_adaptive_verify_width"] = outcome.physical_span
+                self._commit([lane], [decision], hidden[outcome.selected_index:outcome.selected_index + 1],
+                    blocks=[selected], transaction=SelectedContinuationTransaction(transaction, outcome.selected_index, len(paths)))
+                if commits:
+                    commits[outcome.selected_index](min(outcome.accepted + 1, len(outcome.emitted)))
+                _bump(self.scheduler_stats, "external_continuation_rounds")
+                _bump(self.scheduler_stats, "external_continuation_sequences", outcome.physical_width)
+                _bump(self.scheduler_stats, "external_continuation_target_rows", outcome.physical_width * outcome.physical_span)
+                self.scheduler_stats["target_max_width"] = max(self.scheduler_stats["target_max_width"], outcome.physical_width)
+        except BaseException:
+            if transaction is not None and not transaction.closed:
+                try:
+                    transaction.abort()
+                except BaseException:  # noqa: BLE001 - original boundary is authoritative
+                    pass
+            self._restore_round(cohort, recovery)
+            self.scheduler_stats = stats_snapshot
+            self.scheduler_stats["recovery_checkpoint_restores"] += len(recovery)
+            raise
+        finally:
+            self._open = False
+
+    def _run_round(self, cohort):
         if cohort and all(lane.ordinary for lane in cohort):
             return self._ordinary_round(cohort)
+        if self.continuation_policy is not None and all(
+                not lane.ordinary and lane.maximum - lane.generated > 1 for lane in cohort):
+            return self._pool_round(cohort)
         if self.draft_topology == "tree15" and all(
             lane.maximum - lane.generated > 1 for lane in cohort
         ):
@@ -2142,7 +2466,7 @@ class ExternalDraftBatchGenerator:
             if transaction is not None and not transaction.closed:
                 try:
                     transaction.abort()
-                except BaseException:
+                except BaseException:  # noqa: S110 - preserve the original verification failure
                     pass
             self._restore_round(cohort, recovery)
             self.scheduler_stats = stats_snapshot
@@ -2286,6 +2610,7 @@ class ExternalDraftBatchGenerator:
                             "qualification_authority":"serving_route",
                             **self._target_execution_receipt(),
                             **self._verification_receipt(lane), **self._adaptive_receipt(lane), **self._draft_settings_receipt(),
+                            **self._proposal_composition_receipt(lane, current_source="ordinary"),
                         },
                     )
                 )
@@ -2331,6 +2656,10 @@ class ExternalDraftBatchGenerator:
                 # Four coexisting float64 q/p originals+normalized copies,
                 # native logits/exp/output buffers, selector and safety slack.
                 required += append*target.vocab_size*128
+        if not prefill and self.continuation_policy is not None:
+            # Conservative admission includes all private path branches and
+            # provider recomputation; it must not reserve as though B15 were B1.
+            required *= self.continuation_policy.limit
         self.scheduler_stats["reservation_bytes"] = required
         if required > self.memory_headroom():
             self.scheduler_stats["memory_deferred"] = self.scheduler_stats.get("memory_deferred",0)+1

@@ -191,6 +191,9 @@ EXTERNAL_POLICY_KEYS = frozenset(
         "num_draft",
         "pairwise_selection",
         "adaptive_verification",
+        "proposal_composition",
+        "continuation_pool",
+        "lilicorr_feedback",
         "draft_revision",
         "target_revision",
         "draft_quantization",
@@ -681,6 +684,10 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
         if getattr(self, "draft_model", None) is None:
             raise ValueError("No external draft model bound")
         from ..runtime.external_speculative import ExternalDraftBatchGenerator
+
+        self._initialize_external_feedback()
+        if hasattr(self.draft_model, "last_continuation_selections"):
+            kwargs.setdefault("continuation_pool", self.draft_model.policy)
 
         adaptive = self.external_policy.get("adaptive_verification")
         if adaptive is not None:

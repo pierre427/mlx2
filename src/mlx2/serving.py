@@ -830,6 +830,48 @@ def apc_semantic_namespace(
     )
 
 
+def proposal_session_scope_hash(tenant_id, session_id, route_revision):
+    """Explicit session ranking is tenant- and route-bound, without raw IDs."""
+    if not session_id:
+        return None  # The external executor creates a globally unique request scope.
+    return hashlib.sha256(json.dumps(
+        [str(tenant_id or "default"), str(session_id), str(route_revision)],
+        separators=(",", ":"),
+    ).encode()).hexdigest()
+
+
+def row_exact_target_mutation_guard(adapter, *, lane_policy=None, lora=False):
+    """Refuse unsupported mutations of selected native target math pre-write."""
+    model = getattr(adapter, "model", None)
+    receipt = getattr(model, "external_execution_receipt", None) or {}
+    if not receipt.get("target_verify_row_exact", {}).get("selected"):
+        return
+    if lora:
+        raise ValueError(
+            "selected target_verify_row_exact does not support dynamic LoRA projection replacement"
+        )
+    if lane_policy is None or lane_policy.get("mode") == "off":
+        return
+    from mlx import nn
+
+    from .runtime.lane import available
+    from .runtime.lane.policy import format_class, skipped
+
+    if not available():
+        return  # This device's lane installer is an identity.
+    for name, module in model.named_modules():
+        threshold = lane_policy.get("min_rows", {}).get(format_class(module))
+        if (
+            type(module) is nn.Linear
+            and threshold is not None
+            and (lane_policy.get("mode") == "exact" or threshold <= lane_policy["max_rows"])
+            and not skipped(lane_policy, name)
+        ):
+            raise ValueError(
+                "selected target_verify_row_exact cannot share native projections with lane matmul"
+            )
+
+
 def request_apc_scope(request):
     """APCv2 per-request scope: media fingerprint plus LoRA adapter identity."""
     from .runtime.multi_lora import lora_apc_scope
@@ -3987,6 +4029,7 @@ class ServingEngine:
         def install(adapter):
             if self.lora_session is not None:
                 raise ValueError("unload the active LoRA adapter before loading another")
+            row_exact_target_mutation_guard(adapter, lora=True)
             from .runtime.lora import install_lora
 
             self.lora_session = install_lora(
@@ -5156,6 +5199,7 @@ class ServingEngine:
                     overrides=self.lane_policy_overrides,
                     mode=self.lane_matmul,
                 )
+                row_exact_target_mutation_guard(adapter, lane_policy=policy)
                 offered = getattr(adapter, "lane_projection_groups", None)
                 self.lane_matmul_receipt = apply_policy(
                     adapter.model, policy, declared=offered() if callable(offered) else ()
@@ -5678,6 +5722,28 @@ class ServingEngine:
                     prompt_lookup_policy=prompt_lookup_policy,
                     copy_draft_policy=self.copy_draft_policy,
                 )
+            from .runtime.apc_numerics import execution_numerics_identity
+
+            # The exact same laws bind learning and both APCv2 namespaces.
+            # Default wrappers are identities; main GDN/QSA defaults stay put.
+            numerics_laws = dict(
+                execution_numerics=execution_numerics_identity(
+                    sp_qmm=self.sp_qmm_enabled,
+                    verify_bitexact=self.verify_bitexact_policy.enabled,
+                ),
+                prefill_execution=prefill_execution_identity,
+                lane_matmul_receipt=self.lane_matmul_receipt,
+                int8_prefill_policy=self.int8_prefill_policy,
+                weight_stream_manager=self.expert_stream,
+                recurrent_state_codec=self.recurrent_state_codec_policy,
+            )
+            if external_draft:
+                bind_namespace = getattr(adapter, "bind_external_serving_namespace", None)
+                if callable(bind_namespace):
+                    bind_namespace(
+                        apc_semantic_namespace("external-learning-v1", **numerics_laws)
+                    )
+
             def selected_profile_name():
                 return (
                     adapter.profile_name(self.mtp)
@@ -5848,24 +5914,6 @@ class ServingEngine:
             # with the historical 16-entry floor deterministically evicts four
             # warm prompts while the cohort is being primed, so those lanes
             # cannot compose batching with APCv2 reuse.
-            from .runtime.apc_numerics import execution_numerics_identity
-
-            # Process switches outside the qualified exact laws (TF32, GDN
-            # core, sp_qmm, verify_bitexact, ...): read after the adapter
-            # pinned its environment.  None (all default) keeps the key.
-            # Streamed weights run stock expert arithmetic: their states live
-            # in their own namespace, live and persistent; identity when off.
-            numerics_laws = dict(
-                execution_numerics=execution_numerics_identity(
-                    sp_qmm=self.sp_qmm_enabled,
-                    verify_bitexact=self.verify_bitexact_policy.enabled,
-                ),
-                prefill_execution=prefill_execution_identity,
-                lane_matmul_receipt=self.lane_matmul_receipt,
-                int8_prefill_policy=self.int8_prefill_policy,
-                weight_stream_manager=self.expert_stream,
-                recurrent_state_codec=self.recurrent_state_codec_policy,
-            )
             persistent_identity = APCv2.key(
                 adapter.identity["fingerprint"],
                 revision=persistent_runtime_revision(identity),
@@ -7722,6 +7770,10 @@ class ServingEngine:
                             caches=[lane_cache], all_tokens=[tokens[:hit.cached_tokens]],
                             samplers=[sampler], logits_processors=[processors], lane_rngs=[rng],
                             apc_interior_positions=[job.apc_interior_positions],
+                            **({"session_keys": [proposal_session_scope_hash(
+                                job.tenant_id, job.request.get("session_id"),
+                                adapter.identity["fingerprint"],
+                            )]} if external_draft else {}),
                             **(
                                 {"state_boundaries": [job.state_boundaries]}
                                 if job.state_boundaries

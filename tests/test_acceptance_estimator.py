@@ -193,3 +193,27 @@ def test_request_depths_need_matching_cost_tables_and_predict_real_group_gain():
         {**base, "verification_costs_by_cohort": {"2": [0.5, 1, 1.1]}}, 2
     )
     assert cheap.request_depths(fit, [2, 2], [[40, 40], [-40, -40]]) == [2, 2]
+
+
+@pytest.mark.parametrize(
+    "costs",
+    [
+        {"0": [1, 2, 3]},
+        {"16": [1, 2, 3]},
+        {"1": [1, True, 3]},
+        {"1": [1, float("nan"), 3]},
+        {"1": [1, 2]},
+        {"1": [1, 0, 3]},
+    ],
+)
+def test_complete_path_costs_reject_unbound_or_invalid_physical_shapes(costs):
+    with pytest.raises(ValueError):
+        AdaptiveVerificationPolicy.from_value({"continuation_costs": costs}, 2)
+
+
+def test_complete_path_costs_do_not_fabricate_chain_cohort_costs():
+    policy = AdaptiveVerificationPolicy.from_value(
+        {"continuation_costs": {"15": [1, 2, 3]}}, 2
+    )
+    assert policy.costs(1) is None and policy.costs(15) is None
+    assert dict(policy.continuation_costs) == {15: (1.0, 2.0, 3.0)}

@@ -236,6 +236,17 @@ class MDFlashDParaDraftModel(nn.Module):
         self._check_features(features)
         if features.dtype not in (mx.float16, mx.bfloat16, mx.float32):
             raise ValueError("DPara target features must be floating point")
+        if features.shape[1] == 0:
+            # Empty committed context has no projected tokens. Avoid launching
+            # normalization/RoPE kernels on null buffers on Metal.
+            shape = (1, self.config.num_key_value_heads, 0, self.config.head_dim)
+            return tuple(
+                (
+                    mx.zeros(shape, dtype=features.dtype),
+                    mx.zeros(shape, dtype=features.dtype),
+                )
+                for _ in self.layers
+            )
         if not bool(mx.all(mx.isfinite(features)).item()):
             raise ValueError("DPara committed target features must be finite")
         hidden = self.hidden_norm(self.fc(features))
