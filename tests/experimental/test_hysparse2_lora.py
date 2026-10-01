@@ -194,3 +194,38 @@ def test_child_revision_binds_retained_parent_and_load_preflight(tmp_path):
     assert model.adapter_revision == revision
     loaded.close()
     parent.rollback()
+
+
+@pytest.mark.parametrize("key", ["embedding.weight", "self_decoder.0.attention.q.lora_b"])
+def test_active_episode_rejects_unmanaged_parameter_updates(key):
+    from mlx.utils import tree_unflatten
+    model = Model(Config.smoke())
+    episode = LoRAEpisode(model, ["self_decoder.0.attention.q"], base_revision="r", max_steps=1)
+    try:
+        before = dict(tree_flatten(model.parameters()))[key]
+        owner, revision = model._cache_owner, model.adapter_revision
+        with pytest.raises(ValueError, match="owns parameter updates"):
+            model.update(tree_unflatten([(key, before + 0.1)]))
+        assert dict(tree_flatten(model.parameters()))[key] is before
+        assert model._cache_owner is owner and model.adapter_revision == revision
+        episode.step(mx.array([[1, 2, 3, 4]]), loss)
+        assert not episode._allow_parameter_update
+    finally:
+        episode.close()
+
+
+def test_episode_update_scope_closes_after_base_mutation_attempt():
+    model = Model(Config.smoke())
+    episode = LoRAEpisode(model, ["self_decoder.0.attention.q"], base_revision="r", max_steps=1)
+    before = model.embedding.weight
+    try:
+        def broken(m, _):
+            m.update({"embedding": {"weight": m.embedding.weight + 0.1}})
+            return mx.array(0.)
+        with pytest.raises(ValueError, match="base parameters"):
+            episode.step(None, broken)
+        assert float(mx.max(mx.abs(model.embedding.weight - before)).item()) == 0
+        assert not episode._allow_parameter_update
+        assert episode.steps == 0
+    finally:
+        episode.close()

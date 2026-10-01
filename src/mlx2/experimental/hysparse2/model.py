@@ -419,6 +419,14 @@ class Model(nn.Module):
         self._semantic_capsules = None
 
     def update(self, parameters, strict=True):
+        episode = getattr(self, "_lora_episode", None)
+        if episode is not None:
+            from mlx.utils import tree_flatten
+            if not episode._allow_parameter_update:
+                raise ValueError("active LoRA episode owns parameter updates")
+            allowed = {f"{key}.{leaf}" for key in episode.keys for leaf in ("lora_a", "lora_b")}
+            if any(key not in allowed for key, _ in tree_flatten(parameters)):
+                raise ValueError("LoRA episode cannot replace base parameters")
         # Optimizers, dtype conversion and autodiff tracer installation all
         # replace parameters through this hook. Fail closed before replacement,
         # including a partially failing update; old KV must not survive it.

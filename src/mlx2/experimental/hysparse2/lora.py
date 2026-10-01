@@ -70,6 +70,7 @@ class LoRAEpisode:
         self.was_training = model.training
         self.optimizer = optimizers.Adam(learning_rate=learning_rate)
         self.steps, self.promoted, self.closed = 0, False, False
+        self._allow_parameter_update = False
         self.previous_revision = model.adapter_revision
         replacements = [(key, EpisodeLinear(modules[key], rank, scale)) for key in keys]
         model.update_modules(tree_unflatten(replacements))
@@ -110,17 +111,21 @@ class LoRAEpisode:
         if self.closed or self.promoted or self.steps >= self.max_steps:
             raise ValueError("episode is no longer trainable")
         self.model.train()
-        value, gradients = nn.value_and_grad(self.model, objective)(self.model, tokens)
-        mx.eval(value, gradients)
-        if not math.isfinite(value.item()) or any(
-            not bool(mx.all(mx.isfinite(g)).item()) for _, g in tree_flatten(gradients)
-        ):
-            raise ValueError("nonfinite episode loss or gradient")
-        self.optimizer.update(self.model, gradients)
-        mx.eval(self.model.parameters(), self.optimizer.state)
-        self.steps += 1
-        self._invalidate()
-        return float(value.item())
+        self._allow_parameter_update = True
+        try:
+            value, gradients = nn.value_and_grad(self.model, objective)(self.model, tokens)
+            mx.eval(value, gradients)
+            if not math.isfinite(value.item()) or any(
+                not bool(mx.all(mx.isfinite(g)).item()) for _, g in tree_flatten(gradients)
+            ):
+                raise ValueError("nonfinite episode loss or gradient")
+            self.optimizer.update(self.model, gradients)
+            mx.eval(self.model.parameters(), self.optimizer.state)
+            self.steps += 1
+            self._invalidate()
+            return float(value.item())
+        finally:
+            self._allow_parameter_update = False
 
     def evaluate(
         self, heldout, preservation, objective, *, max_preservation_regression=0.0
@@ -210,7 +215,11 @@ class LoRAEpisode:
                 for k in expected
             ):
                 raise ValueError("adapter tensor coverage or values differ")
-            model.load_weights(list(weights.items()), strict=False)
+            episode._allow_parameter_update = True
+            try:
+                model.load_weights(list(weights.items()), strict=False)
+            finally:
+                episode._allow_parameter_update = False
             episode._invalidate()
             if model.adapter_revision != config["adapter_revision"]:
                 raise ValueError("adapter content revision differs")

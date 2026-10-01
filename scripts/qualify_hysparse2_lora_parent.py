@@ -20,7 +20,7 @@ def main():
               "learned_behavior_qualified": False, "parent_objective": "synthetic sum of adapter B; identity fixture only"}
     with gpu_guard(wait_seconds=0):
         import mlx.core as mx
-        from mlx.utils import tree_flatten
+        from mlx.utils import tree_flatten, tree_unflatten
         from mlx2.experimental.hysparse2 import lora as lora_module
         from mlx2.experimental.hysparse2 import model as model_module
         from mlx2.experimental.hysparse2.config import Config
@@ -55,6 +55,18 @@ def main():
             unrelated = lora_module.LoRAEpisode(plain, ["semantic_ple.value"], base_revision=revision, rank=2, max_steps=1)
             assert model.adapter_revision != plain.adapter_revision
             report["child_revisions_distinct"] = True
+            report["unmanaged_updates_rejected"] = []
+            for key in ("embedding.weight", "semantic_ple.value.lora_b"):
+                before = dict(tree_flatten(model.parameters()))[key]
+                owner, adapter_revision = model._cache_owner, model.adapter_revision
+                try:
+                    model.update(tree_unflatten([(key, before + 0.1)]))
+                    raise AssertionError("unmanaged parameter update accepted")
+                except ValueError as exc:
+                    assert "owns parameter updates" in str(exc)
+                assert dict(tree_flatten(model.parameters()))[key] is before
+                assert model._cache_owner is owner and model.adapter_revision == adapter_revision
+                report["unmanaged_updates_rejected"].append(key)
             a = EndpointAPC(model, engine, checkpoint_revision=revision, tokenizer_fingerprint="synthetic")
             b = EndpointAPC(plain, engine, checkpoint_revision=revision, tokenizer_fingerprint="synthetic")
             assert a.key() != b.key()
@@ -80,6 +92,19 @@ def main():
             actual, _ = model.prefill(tokens)
             report["correct_parent_reload_logits_error"] = float(mx.max(mx.abs(expected - actual)).item())
             assert report["correct_parent_reload_logits_error"] == 0
+            base_weight = model.embedding.weight
+            def broken(m, _):
+                m.update({"embedding": {"weight": m.embedding.weight + 0.1}})
+                return mx.array(0.)
+            try:
+                loaded.step(None, broken)
+                raise AssertionError("base mutation inside step accepted")
+            except ValueError as exc:
+                assert "base parameters" in str(exc)
+            report["base_weight_error_after_rejected_step"] = float(mx.max(mx.abs(model.embedding.weight - base_weight)).item())
+            assert report["base_weight_error_after_rejected_step"] == 0 and not loaded._allow_parameter_update
+            assert loaded.steps == 0
+            report["base_update_rejected_inside_managed_step"] = True
             report["peak_memory_bytes"] = mx.get_peak_memory()
             report["source_hashes"] = {str(path): file_hash(path) for path in (Path(__file__), Path(lora_module.__file__), Path(model_module.__file__))}
             report["completed"] = True
