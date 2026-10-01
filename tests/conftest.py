@@ -9,3 +9,18 @@ mx.set_default_device(mx.cpu)
 import os
 
 os.environ.setdefault("MLX2_STRUCTURED_WORKERS", "0")
+
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def _restore_process_environment():
+    """Adapters' configure_environment() writes os.environ directly.  Restore
+    it after every test so one test's serving profile (e.g. Flash-Next's
+    segmented self-MTP layout) cannot change a later module's behaviour
+    (test_qualify_gdn_retirement after test_execution_policy, 2026-10-01)."""
+    saved = dict(os.environ)
+    yield
+    if os.environ != saved:
+        os.environ.clear()
+        os.environ.update(saved)

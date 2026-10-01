@@ -21,17 +21,6 @@ MTP = RouteSelection("native_mtp", "adapter_default")
 ORDINARY = RouteSelection("ordinary", "explicit_flag")
 
 
-@pytest.fixture(autouse=True)
-def _restore_process_environment():
-    # Adapters' configure_environment() writes os.environ directly; without
-    # this, later modules inherit the profile (test_qualify_gdn_retirement
-    # resolved a different self-MTP layout and retired nothing, 2026-10-01).
-    saved = dict(os.environ)
-    yield
-    os.environ.clear()
-    os.environ.update(saved)
-
-
 def _resolution(adapter_type, descriptor):
     return AdapterResolution(adapter_type, descriptor, {"fingerprint": "fixture"})
 
