@@ -106,7 +106,49 @@ def _candidate_groups(blocks, block_size, key_tile, *, maximum=None):
             # Coarse selection uses keys only: do not slice or assemble values.
             yield k, None, start
 
-    for k, _, kp, block_id in _candidate_tiles(visible_blocks(), block_size, include_values=False):
+    visible = list(visible_blocks())
+    # Aligned contiguous history can be assembled directly at the coarse tile
+    # width. Keep the general absolute-block path for gaps and split blocks.
+    aligned = bool(visible) and all(
+        type(start) is int and start >= 0 and start % block_size == 0
+        and k.shape[2] > 0
+        and (i == len(visible) - 1 or k.shape[2] % block_size == 0)
+        and k.shape[:2] == visible[0][0].shape[:2]
+        and k.shape[3:] == visible[0][0].shape[3:]
+        and k.dtype == visible[0][0].dtype
+        and (i == 0 or start == visible[i - 1][2] + visible[i - 1][0].shape[2])
+        for i, (k, _, start) in enumerate(visible)
+    )
+    if aligned:
+        parts, length, beginning = [], 0, visible[0][2]
+        capacity = group_count * block_size
+
+        def emit():
+            key = parts[0] if len(parts) == 1 else mx.concatenate(parts, axis=2)
+            padded = ((length + block_size - 1) // block_size) * block_size
+            positions = mx.arange(beginning, beginning + length)
+            if padded != length:
+                key = mx.pad(key, [(0, 0), (0, 0), (0, padded - length), (0, 0)])
+                positions = mx.pad(positions, [(0, padded - length)], constant_values=2147483647)
+            return key, positions, mx.arange(beginning // block_size, beginning // block_size + padded // block_size)
+
+        for k, _, start in visible:
+            cursor = 0
+            while cursor < k.shape[2]:
+                if not parts:
+                    beginning = start + cursor
+                take = min(capacity - length, k.shape[2] - cursor)
+                parts.append(k[:, :, cursor:cursor + take])
+                length += take
+                cursor += take
+                if length == capacity:
+                    yield emit()
+                    parts, length = [], 0
+        if parts:
+            yield emit()
+        return
+
+    for k, _, kp, block_id in _candidate_tiles(visible, block_size, include_values=False):
         padding = block_size - k.shape[2]
         keys.append(mx.pad(k, [(0, 0), (0, 0), (0, padding), (0, 0)]))
         positions.append(mx.pad(kp, [(0, padding)], constant_values=2147483647))

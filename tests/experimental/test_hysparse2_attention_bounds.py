@@ -178,3 +178,22 @@ def test_coarse_candidate_groups_never_read_value_tensors():
         assert all(bool(mx.all(x == y).item()) for x, y in zip(a, b))
     valid = mx.concatenate([kp for _, kp, _ in actual])
     assert valid.tolist() == [5, 6, 7, 2147483647, 8, 9, 2147483647, 2147483647]
+
+
+@pytest.mark.parametrize("length", [65, 257])
+def test_aligned_coarse_groups_match_split_block_fallback(length):
+    keys = mx.random.normal((2, 1, length, 8))
+    aligned = [(keys, None, 64)]
+    fragmented = [(keys[:, :, :31], None, 64), (keys[:, :, 31:], None, 95)]
+    def grouped(blocks):
+        return list(_candidate_groups(blocks, 64, 128, maximum=64 + length - 2))
+    a, b = grouped(aligned), grouped(fragmented)
+    assert len(a) == len(b)
+    for fast, general in zip(a, b):
+        assert all(bool(mx.all(x == y).item()) for x, y in zip(fast, general))
+    def total(k, split):
+        blocks = [(k[:, :, :31], None, 64), (k[:, :, 31:], None, 95)] if split else [(k, None, 64)]
+        return sum(mx.sum(g[0] ** 2) for g in grouped(blocks))
+    fast_grad = mx.grad(lambda k: total(k, False))(keys)
+    general_grad = mx.grad(lambda k: total(k, True))(keys)
+    assert bool(mx.all(fast_grad == general_grad).item())
