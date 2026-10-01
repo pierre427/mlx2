@@ -67,9 +67,9 @@ def test_selected_stride_is_route_identity_and_needs_observed_use():
     )
     from mlx2.qualification import required_feature_checks
 
-    # Opt-in on both: 27B neutral end to end, 35B short of the default bar.
+    # 27B opt-in (neutral end to end); 35B default stride 2 (Pierre, 2026-10-01).
     assert policy({}, Qwen3827BAdapter.default_eager_dispatch_stride) == (0, 64)
-    assert policy({}, Qwen3635BA3BAdapter.default_eager_dispatch_stride) == (0, 64)
+    assert policy({}, Qwen3635BA3BAdapter.default_eager_dispatch_stride) == (2, 64)
     assert policy({"eager_dispatch_stride": 0}, 2) == (0, 64)
     on = eager_dispatch_environment({"A": "1"}, (2, 64))
     off = eager_dispatch_environment(on, (0, 64))

@@ -550,7 +550,7 @@ def test_flash_next_stops_on_the_tokenizer_chat_eos(tmp_path, monkeypatch):
     assert generation_stop_token_ids(adapter) == (endoftext, im_end)
 
 
-def test_qwen36_eager_dispatch_is_opt_in_and_bound_to_route_identity(tmp_path, monkeypatch):
+def test_qwen36_eager_dispatch_defaults_on_and_is_bound_to_route_identity(tmp_path, monkeypatch):
     from mlx2.adapters import qwen36_35b
     from mlx2.runtime import ubc_evict
     from mlx2.runtime.models import qwen36_35b as tensors
@@ -570,17 +570,17 @@ def test_qwen36_eager_dispatch_is_opt_in_and_bound_to_route_identity(tmp_path, m
     monkeypatch.setattr(tensors, "Model", _Model)
     monkeypatch.setattr(ubc_evict, "load_shards_evicting", lambda *_a, **_k: {})
     default = Qwen3635BA3BAdapter(str(tmp_path))
-    # Absent policy: stock forward and stock identity (opt-in lever).
-    assert calls == []
-    assert "MLX2_EAGER_DISPATCH_STRIDE" not in default.environment
+    # Absent policy: the default stride 2 is installed and is route identity.
+    assert calls == [(2, 64)]
+    assert default.environment["MLX2_EAGER_DISPATCH_STRIDE"] == "2"
     selected = Qwen3635BA3BAdapter(str(tmp_path), execution_policy={
         "eager_dispatch_stride": 4, "eager_dispatch_max_rows": 8})
-    assert calls == [(4, 8)]
+    assert calls == [(2, 64), (4, 8)]
     # A selected stride is route identity; an explicit 0 removes it again.
     assert selected.environment["MLX2_EAGER_DISPATCH_STRIDE"] == "4"
     assert selected.environment["MLX2_EAGER_DISPATCH_MAX_ROWS"] == "8"
     stock = Qwen3635BA3BAdapter(str(tmp_path), execution_policy={"eager_dispatch_stride": 0})
-    assert calls == [(4, 8)]
+    assert calls == [(2, 64), (4, 8)]
     assert "MLX2_EAGER_DISPATCH_STRIDE" not in stock.environment
     assert "MLX2_EAGER_DISPATCH_STRIDE" not in os.environ
     with pytest.raises(ValueError):

@@ -258,15 +258,14 @@ class Qwen3635BA3BAdapter(Qwen3827BAdapter):
         "native_mtp": {"apc_interior_checkpoints": "auto"},
     }
     descriptor = QWEN36_35B
-    # Per-layer eager dispatch (MTPLX #579, the Flash-Next mechanism): opt-in
-    # (``eager_dispatch_stride``).  Bit-exact here, and this 3B-active MoE is
-    # host-bound enough to gain at the forward (3-row verify -21%) and for
-    # ordinary B4 (+7%, every round), but the native-MTP B1 default route did
-    # not clear the pre-registered bar on confirmation (median +2.9%, 4 of 6
-    # rounds ahead) and ordinary B1 was noise (qualification/runs/
-    # recon-20261001/l7-decode-perf).  Default-on needs a controlled serving
-    # run over the native-MTP + handoff widths.
-    default_eager_dispatch_stride = 0
+    # Per-layer eager dispatch (MTPLX #579, the Flash-Next mechanism), default
+    # stride 2 (Pierre, 2026-10-01).  Bit-exact here, and this 3B-active MoE is
+    # host-bound enough to gain at the forward (3-row verify -21%), for
+    # ordinary B4 (+7%, every round) and native-MTP B1 (median +2.9%, 4 of 6
+    # rounds ahead); ordinary B1 was noise (qualification/runs/
+    # recon-20261001/l7-decode-perf).  ``{"eager_dispatch_stride": 0}`` turns
+    # it off.  It is route identity, so the 35B route needs requalification.
+    default_eager_dispatch_stride = 2
     # Unqualified candidates: the server accepts these policy keys only in
     # qualification mode (ServingEngine); direct adapter harnesses may opt in.
     qualification_mode_only_policy = frozenset({"moe_routed_candidate"})
