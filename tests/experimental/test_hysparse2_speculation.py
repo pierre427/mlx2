@@ -93,3 +93,35 @@ def test_budget_one_never_drafts():
         [1, 2], max_tokens=1
     )
     assert cache.length == 3 and receipt["rounds"][0]["depth"] == 0
+
+
+def test_proposal_decode_is_isolated_from_verified_target_cache():
+    model = Model(Config.smoke())
+    model.eval()
+    prompt = [1, 2, 3, 4, 5]
+    expected, expected_logits = ordinary(model, prompt, 8)
+    def proposal(m, first, state):
+        next_logits = m.decode(mx.array([[first]]), state)
+        return int(mx.argmax(next_logits[0, -1]).item())
+    got, cache, receipt = GreedyMTPReference(model, proposal_fn=proposal).generate(prompt, max_tokens=8)
+    assert got == expected and cache.length == len(prompt) + 8
+    actual = model._cross(cache.boundary, cache, cache.length - 1)
+    assert float(mx.max(mx.abs(actual - expected_logits)).item()) == 0
+    assert receipt["target_verified"]
+
+
+def test_cache_fork_shares_tensors_but_not_history_or_identity():
+    model = Model(Config.smoke())
+    model.eval()
+    _, cache = model.prefill(mx.array([[1, 2, 3, 4, 5]]))
+    fork = cache.fork()
+    assert all(a is b for a, b in zip(cache.arrays(), fork.arrays(), strict=True))
+    assert fork.boundary is cache.boundary and fork.ple_history is cache.ple_history
+    assert fork.owner is cache.owner and fork.resident_bytes() == cache.resident_bytes()
+    fork.apcv2_identity["semantic_fingerprint"] = ("modified",)
+    assert fork.apcv2_identity != cache.apcv2_identity
+    fork = cache.fork()
+    before = [len(blocks) for blocks in cache.cross_kv.values()]
+    model.decode(mx.array([[6]]), fork)
+    assert cache.length == 5 and fork.length == 6
+    assert [len(blocks) for blocks in cache.cross_kv.values()] == before

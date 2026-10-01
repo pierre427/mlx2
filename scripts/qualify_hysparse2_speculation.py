@@ -14,6 +14,7 @@ def main():
     p.add_argument("--checkpoint", type=Path, required=True)
     p.add_argument("--tokens", type=Path, required=True)
     p.add_argument("--output", type=Path, required=True)
+    p.add_argument("--isolation-only", action="store_true")
     args = p.parse_args()
     args.output.mkdir(parents=True, exist_ok=False)
     c = Config(**json.loads((args.checkpoint / "state.json").read_text())["config"])
@@ -52,6 +53,32 @@ def main():
             token = int(mx.argmax(logits[0, -1]).item())
             expected.append(token)
             logits = model.decode(mx.array([[token]]), reference)
+        if args.isolation_only:
+            def decoding_proposal(m, first, state):
+                proposal_logits = m.decode(mx.array([[first]]), state)
+                return int(mx.argmax(proposal_logits[0, -1]).item())
+            output, cache, receipt = GreedyMTPReference(model, proposal_fn=decoding_proposal).generate(prompt, max_tokens=8)
+            assert output == expected and cache.length == len(prompt) + 8
+            final = model._cross(cache.boundary, cache, cache.length - 1)
+            report["isolated_proposal_final_logit_error"] = float(mx.max(mx.abs(final - logits)).item())
+            assert report["isolated_proposal_final_logit_error"] == 0
+            fork = cache.fork()
+            report["fork_shares_all_kv_tensors"] = all(a is b for a, b in zip(cache.arrays(), fork.arrays(), strict=True))
+            assert report["fork_shares_all_kv_tensors"]
+            before = [len(blocks) for blocks in cache.cross_kv.values()]
+            model.decode(mx.array([[3]]), fork)
+            assert cache.length == len(prompt) + 8 and fork.length == cache.length + 1
+            assert [len(blocks) for blocks in cache.cross_kv.values()] == before
+            report["fork_append_preserves_original_history"] = True
+            report["proposal_isolation"] = receipt
+            report["peak_memory_bytes"] = mx.get_peak_memory()
+            report["source_hashes"] = {str(path): file_hash(path) for path in (
+                Path(__file__), Path("src/mlx2/experimental/hysparse2/speculation.py"),
+                Path("src/mlx2/experimental/hysparse2/model.py"))}
+            report["completed"] = True
+            (args.output / "receipt.json").write_text(json.dumps(report, indent=2) + "\n")
+            print(json.dumps({key: value for key, value in report.items() if key != "proposal_isolation"}), flush=True)
+            return
         natural, cache, receipt = GreedyMTPReference(model).generate(
             prompt, max_tokens=8
         )

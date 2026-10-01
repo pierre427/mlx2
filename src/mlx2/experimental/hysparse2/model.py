@@ -5,7 +5,7 @@ or training details and not registered as a qualified mlx2 serving adapter.
 """
 
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 import mlx.core as mx
 from mlx import nn
@@ -373,6 +373,17 @@ class Cache:
     cross_layer_calls: int = 0
     ple_history: object = None
     apcv2_identity: object = None
+
+    def fork(self):
+        """Private mutable containers sharing immutable MLX state tensors."""
+        from copy import deepcopy
+
+        return replace(
+            self,
+            self_kv={layer: list(blocks) for layer, blocks in self.self_kv.items()},
+            cross_kv={layer: list(blocks) for layer, blocks in self.cross_kv.items()},
+            apcv2_identity=deepcopy(self.apcv2_identity),
+        )
 
     def arrays(self):
         return [

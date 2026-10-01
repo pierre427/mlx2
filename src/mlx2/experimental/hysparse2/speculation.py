@@ -27,7 +27,7 @@ class GreedyMTPReference:
 
     def _proposal(self, first, cache):
         if self.proposal_fn is not None:
-            value = self.proposal_fn(self.model, first, cache)
+            value = self.proposal_fn(self.model, first, cache.fork())
         else:
             boundary = mx.mean(cache.boundary, axis=-2)
             hidden = self.model.mtp_head(
