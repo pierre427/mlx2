@@ -17,7 +17,13 @@ def main():
     p.add_argument("--tokens", type=Path, required=True)
     p.add_argument("--reference", type=Path, required=True)
     p.add_argument("--output", type=Path, required=True)
+    p.add_argument("--contexts", type=int, nargs="+", default=[4096, 16384])
+    p.add_argument("--decode-tokens", type=int, default=16)
     args = p.parse_args()
+    if (any(length < 8 for length in args.contexts)
+            or len(set(args.contexts)) != len(args.contexts)
+            or not 1 <= args.decode_tokens <= 64):
+        p.error("contexts must be unique and at least8; decode tokens must be1..64")
     if args.output.exists():
         p.error("use a new receipt path")
     args.output.parent.mkdir(parents=True, exist_ok=True)
@@ -33,7 +39,7 @@ def main():
         "thermal_controls": False,
         "batch": 1,
         "dtype": "bfloat16",
-        "decode_tokens": 16,
+        "decode_tokens": args.decode_tokens,
         "arm_order": ["reference", "gathered"],
         "contexts": [],
         "checkpoint_sha256": file_hash(args.checkpoint / "model.safetensors"),
@@ -61,8 +67,9 @@ def main():
         model.eval()
         mx.eval(model.parameters())
         values = np.load(args.tokens, allow_pickle=False)
-        if values.ndim != 1 or len(values) < 16384 or c.max_context < 16400:
-            raise ValueError("need flat16K tokens and context capacity")
+        if (values.ndim != 1 or len(values) < max(args.contexts)
+                or c.max_context < max(args.contexts) + args.decode_tokens):
+            raise ValueError("need flat prompt tokens and sufficient context capacity")
         report["source_hashes"] = {
             str(path): file_hash(path)
             for path in (
@@ -82,7 +89,7 @@ def main():
                 del logits, cache
             mx.synchronize()
             mx.clear_cache()
-            for length in (4096, 16384):
+            for length in args.contexts:
                 row, results = {"context": length, "arms": {}}, []
                 for label, function in (
                     ("reference", reference.attention),
@@ -99,14 +106,14 @@ def main():
                     prefill = time.perf_counter() - start
                     generated = []
                     start = time.perf_counter()
-                    for _ in range(16):
+                    for _ in range(args.decode_tokens):
                         token = mx.argmax(logits[:, -1], axis=-1)[:, None]
                         generated.append(token)
                         logits = model.decode(token, cache)
                     mx.eval(logits, generated)
                     mx.synchronize()
                     elapsed = time.perf_counter() - start
-                    assert cache.length == length + 16 and bool(
+                    assert cache.length == length + args.decode_tokens and bool(
                         mx.all(mx.isfinite(logits)).item()
                     )
                     output = mx.concatenate(generated, axis=1).tolist()[0]
@@ -115,7 +122,7 @@ def main():
                         "prefill_seconds": prefill,
                         "prefill_tokens_per_second": length / prefill,
                         "decode_seconds": elapsed,
-                        "decode_tokens_per_second": 16 / elapsed,
+                        "decode_tokens_per_second": args.decode_tokens / elapsed,
                         "peak_memory_bytes": mx.get_peak_memory(),
                         "kv_bytes": cache.resident_bytes(),
                     }
