@@ -473,7 +473,7 @@ def test_checkpoint_ple_sidecar_must_match_restored_tensors(tmp_path, mismatch):
     assert all(float(mx.max(mx.abs(dict(tree_flatten(model.parameters()))[k] - v)).item()) == 0 for k, v in before.items())
 
 
-@pytest.mark.parametrize("damage", ["missing_moment", "shape", "nonfinite", "step"])
+@pytest.mark.parametrize("damage", ["missing_moment", "shape", "nonfinite", "step", "negative_variance"])
 def test_invalid_optimizer_resume_rejects_before_live_mutation(tmp_path, damage):
     source = Model(Config.smoke())
     optimizer = optimizers.AdamW(1e-3)
@@ -490,6 +490,9 @@ def test_invalid_optimizer_resume_rejects_before_live_mutation(tmp_path, damage)
         state[moment] = state[moment].reshape(-1)[:1]
     elif damage == "nonfinite":
         state[moment] = mx.full(state[moment].shape, float("nan"))
+    elif damage == "negative_variance":
+        variance = moment[:-1] + "v"
+        state[variance] = mx.full(state[variance].shape, -1.0)
     else:
         state["step"] = state["step"] + 1
     mx.eval(state)

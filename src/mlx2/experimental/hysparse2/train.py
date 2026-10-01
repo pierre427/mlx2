@@ -237,8 +237,11 @@ def _validate_optimizer_state(state, model, optimizer, metadata):
         for name in actual if name in moments
     ):
         raise ValueError("optimizer state moment coverage or shape differs")
-    finite = mx.stack([mx.all(mx.isfinite(value)) for value in flat.values()])
-    if not bool(mx.all(finite).item()) or float(rate.item()) < 0:
+    valid_values = [mx.all(mx.isfinite(value)) for value in flat.values()]
+    # Adam second moments are averages of squared gradients. Negative values
+    # cannot be valid state and would make the next square-root update invalid.
+    valid_values.extend(mx.all(flat[name] >= 0) for name in actual if name.endswith(".v"))
+    if not bool(mx.all(mx.stack(valid_values)).item()) or float(rate.item()) < 0:
         raise ValueError("optimizer state contains nonfinite or invalid values")
 
 

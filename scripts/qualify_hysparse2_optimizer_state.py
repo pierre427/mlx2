@@ -42,7 +42,7 @@ def main():
         before = dict(tree_flatten(model.parameters()))
         owner, epoch, digest = model._cache_owner, model._parameter_epoch, model.ple_sidecar_digest
         state = optimizer.state
-        for damage in ("missing_moment", "shape", "nonfinite", "step"):
+        for damage in ("missing_moment", "shape", "nonfinite", "step", "negative_variance"):
             changed = dict(payload)
             if damage == "missing_moment":
                 del changed[moment]
@@ -50,6 +50,9 @@ def main():
                 changed[moment] = changed[moment].reshape(-1)[:1]
             elif damage == "nonfinite":
                 changed[moment] = mx.full(changed[moment].shape, float("nan"))
+            elif damage == "negative_variance":
+                variance = moment[:-1] + "v"
+                changed[variance] = mx.full(changed[variance].shape, -1.0)
             else:
                 changed["step"] = changed["step"] + 1
             def injected(path, *a, **kw):
