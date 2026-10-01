@@ -202,8 +202,11 @@ def test_signature_adds_keyword_only_width_default_ten(monkeypatch):
     assert width.kind is inspect.Parameter.KEYWORD_ONLY and width.default == 10
     assert parameters["max_tokens"].default == 128
     assert parameters["image"].kind is inspect.Parameter.KEYWORD_ONLY
+    stats = parameters["collect_speculative_stats"]
+    assert stats.kind is inspect.Parameter.KEYWORD_ONLY and stats.default is False
     assert list(parameters) == ["target_path", "draft_path", "prompt", "image",
-                                "max_tokens", "verification_width"]
+                                "max_tokens", "verification_width",
+                                "collect_speculative_stats"]
 
 
 class _IntSubclass(int):

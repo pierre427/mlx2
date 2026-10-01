@@ -507,7 +507,6 @@ class FlashNextAdapter:
             moe["routed_decode"] = {
                 "modes": sorted({s.routed_decode_mode for s in routed}),
                 "calls": sum(s.routed_decode_calls for s in routed),
-                "down_calls": sum(s.routed_decode_down_calls for s in routed),
                 "degraded": sum(s.routed_decode_degraded for s in routed),
                 "fallbacks": sum(s.routed_decode_fallbacks for s in routed),
                 "last_fallback": next(
