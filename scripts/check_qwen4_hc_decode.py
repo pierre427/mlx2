@@ -11,11 +11,17 @@ the MTP head's HC modules) from the served artifact into stand-alone
           the composed intermediates (localises any mismatch).
   launches  op trace of one call per arm: the primitives in the lazy graph that
           dispatch a kernel (views such as Reshape/Broadcast are not counted).
+  rowexact  (``--row-exact-cases``) inside a row-exact verify window, the
+          one-row law per row against each row's own one-token composed call.
   micro   a 96-call decode-shaped chain (x -> HC -> apply_inject(branch=mixed)),
           one eval per chain, arms alternated per rep after a warm-up.
 
   PYTHONPATH=src .venv/bin/python scripts/check_qwen4_hc_decode.py --i-own-the-gpu \
       --out /tmp/hc-exact.json
+
+Projection formats follow the artifact: a projection with ``scales`` is
+quantized at the width its packed weight implies (4 or 8 bits, group 64), one
+without stays a dense ``nn.Linear`` (the uncensored artifact's bf16 inject).
 """
 
 import argparse
@@ -43,6 +49,8 @@ def main():
     ap.add_argument("--cases", type=int, default=48)
     ap.add_argument("--chain", type=int, default=96)
     ap.add_argument("--reps", type=int, default=16)
+    ap.add_argument("--row-exact-cases", type=int, default=0,
+                    help="cases per module inside a row-exact window (0: skip)")
     ap.add_argument("--out", required=True)
     ap.add_argument("--i-own-the-gpu", action="store_true")
     a = ap.parse_args()
@@ -71,13 +79,17 @@ def main():
 
     def tensors(prefix):
         out = {}
-        for key, shard in index.items():
-            if key.startswith(prefix + "."):
-                if shard not in shards:
-                    shards[shard] = mx.load(str(a.model / shard))
-                out[key[len(prefix) + 1:]] = shards[shard][key]
-        if not out:
-            mtp = mx.load(str(a.model / "model-mtp-q4.safetensors"))
+        for full in (prefix, "language_model." + prefix):
+            for key, shard in index.items():
+                if key.startswith(full + "."):
+                    if shard not in shards:
+                        shards[shard] = mx.load(str(a.model / shard))
+                    out[key[len(full) + 1:]] = shards[shard][key]
+            if out:
+                return out
+        mtp_file = a.model / "model-mtp-q4.safetensors"
+        if mtp_file.exists():
+            mtp = mx.load(str(mtp_file))
             out = {k[len(prefix) + 1:]: v for k, v in mtp.items() if k.startswith(prefix + ".")}
         return out
 
@@ -85,7 +97,14 @@ def main():
         weights = tensors(prefix)
         assert weights, prefix
         module = Q.GatedResidual(args, use_combine=combine)
-        nn.quantize(module, group_size=64, bits=4)
+
+        def fmt(path, layer):
+            if f"{path}.scales" not in weights:
+                return False  # dense projection in the artifact
+            packed = weights[f"{path}.weight"].shape[1]
+            return {"group_size": 64, "bits": packed * 32 // layer.weight.shape[1]}
+
+        nn.quantize(module, class_predicate=fmt)
         module.load_weights(list(weights.items()), strict=True)
         module.eval()
         mx.eval(module.parameters())
@@ -102,9 +121,16 @@ def main():
                           ("mtp.hyper_connection_mixer", False)):
         modules[name] = build(name, combine)
     first = next(iter(modules.values()))
+
+    def describe(layer):
+        return f"q{layer.bits}" if isinstance(layer, nn.QuantizedLinear) else f"dense {layer.weight.dtype}"
+
+    formats = sorted({
+        " / ".join(f"{n} {describe(m[n])}" for n in
+                   ("input_mix_weight_down", "input_mix_weight_up", "block_inject_weight") if n in m)
+        for m in modules.values()})
     print("loaded", len(modules), "modules;", "norm dtype", first.hc_norm.weight.dtype,
-          "down", type(first.input_mix_weight_down).__name__, first.input_mix_weight_down.bits,
-          flush=True)
+          "formats", formats, flush=True)
     for name, module in modules.items():
         reason = HCD.static_admission(module)
         assert reason is None, (name, reason)
@@ -161,7 +187,7 @@ def main():
     # ---- exact -------------------------------------------------------------
     HCD.reset_for_tests()
     report = {"model": str(a.model), "mlx": mx.__version__, "modules": {},
-              "elementwise_table_mismatches": elementwise}
+              "formats": formats, "elementwise_table_mismatches": elementwise}
     scales = [0.02, 0.3, 1.0, 4.0, 30.0]
     total_mismatch = 0
     for name, module in modules.items():
@@ -213,6 +239,42 @@ def main():
     report["exact"] = {"all_bit_identical": total_mismatch == 0,
                        "mismatched_cases": total_mismatch, "status": status}
     print("EXACT", total_mismatch == 0, "mismatched", total_mismatch, "status", status, flush=True)
+
+    # ---- row-exact windows -----------------------------------------------
+    if a.row_exact_cases:
+        from mlx2.runtime import row_exact_verify as REV
+
+        HCD.set_hc_row_exact_enabled(True)
+        re_stats = {"cases": 0, "rows_equal": 0, "rows": 0, "stages": {}}
+        for name, module in modules.items():
+            for case in range(a.row_exact_cases):
+                rows = (2, 3, 5, 8, 17)[case % 5]
+                x = (mx.random.normal((1, rows, width), key=mx.random.key(104729 + case))
+                     * scales[case % len(scales)]).astype(mx.bfloat16)
+                mx.eval(x)
+                with Q._declared_width(1):
+                    want = [composed(module, x[:, r:r + 1]) for r in range(rows)]
+                    record = REV.Window(rows)
+                    with REV.window(record):
+                        got = fused(module, x)
+                got = got if isinstance(got, tuple) else (got,)
+                want = [w if isinstance(w, tuple) else (w,) for w in want]
+                mx.eval(got, want)
+                re_stats["cases"] += 1
+                for r in range(rows):
+                    ok = bits_equal(got[0][:, r:r + 1], want[r][0])
+                    if len(got) == 3:
+                        ok = ok and bits_equal(got[2][:, r:r + 1], want[r][2])
+                    re_stats["rows"] += 1
+                    re_stats["rows_equal"] += ok
+                for stage, routes in record.stages.items():
+                    for route, n in routes.items():
+                        key = f"{stage}:{route}"
+                        re_stats["stages"][key] = re_stats["stages"].get(key, 0) + n
+        HCD.set_hc_row_exact_enabled(False)
+        re_stats["all_rows_equal"] = re_stats["rows_equal"] == re_stats["rows"]
+        report["row_exact_window"] = re_stats
+        print("ROWEXACT", json.dumps(re_stats), flush=True)
 
     # ---- launches ----------------------------------------------------------
     def launches(fn, module, seq=1):

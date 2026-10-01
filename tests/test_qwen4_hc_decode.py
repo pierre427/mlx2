@@ -25,7 +25,10 @@ def _args(hidden=H, lowrank=R, hc=4):
     return SimpleNamespace(hc_count=hc, hidden_size=hidden, hc_lowrank=lowrank, rms_norm_eps=1e-6)
 
 
-def _module(seed=0, combine=True, hidden=H, lowrank=R, bits=4, quantize=True):
+def _module(seed=0, combine=True, hidden=H, lowrank=R, bits=4, quantize=True,
+            inject_bits=None, dense_inject=False):
+    """``inject_bits`` quantizes the inject at its own width; ``dense_inject``
+    leaves it a bf16 ``nn.Linear`` (the uncensored artifact's layout)."""
     mx.random.seed(seed)
     m = Q.GatedResidual(_args(hidden, lowrank), use_combine=combine)
     m.hc_norm.weight = (1 + 0.1 * mx.random.normal(m.hc_norm.weight.shape)).astype(mx.bfloat16)
@@ -33,7 +36,15 @@ def _module(seed=0, combine=True, hidden=H, lowrank=R, bits=4, quantize=True):
         if name in m:
             m[name].weight = (0.05 * mx.random.normal(m[name].weight.shape)).astype(mx.bfloat16)
     if quantize:
-        nn.quantize(m, group_size=64, bits=bits)
+        def projection(path, module):
+            if path == "block_inject_weight":
+                if dense_inject:
+                    return False
+                if inject_bits is not None:
+                    return {"group_size": 64, "bits": inject_bits}
+            return isinstance(module, nn.Linear)
+
+        nn.quantize(m, group_size=64, bits=bits, class_predicate=projection)
     m.eval()
     mx.eval(m.parameters())
     return m
@@ -105,7 +116,8 @@ def test_admission_accepts_flash_next_geometry():
 @pytest.mark.parametrize(
     "kwargs,needle",
     [
-        ({"bits": 8}, "bits"),
+        ({"bits": 6}, "bits"),
+        ({"inject_bits": 6}, "inject: bits"),
         ({"quantize": False}, "plain QuantizedLinear"),
         ({"lowrank": 512}, "lowrank"),
         ({"hidden": 320}, "hidden size"),
@@ -114,6 +126,102 @@ def test_admission_accepts_flash_next_geometry():
 def test_admission_refuses_other_layouts(kwargs, needle):
     reason = HCD.static_admission(_module(**kwargs))
     assert reason is not None and needle in reason
+
+
+@pytest.mark.parametrize(
+    "kwargs,inject",
+    [
+        ({"bits": 8}, "b8"),  # all-8-bit HC
+        ({"bits": 8, "dense_inject": True}, "dense"),  # uncensored artifact
+        ({"bits": 8, "inject_bits": 4}, "b4"),  # mixed formats in one module
+        ({"bits": 4, "inject_bits": 8}, "b8"),
+    ],
+)
+def test_admission_accepts_8bit_and_mixed_formats(kwargs, inject):
+    m = _module(hidden=2560, lowrank=320, **kwargs)
+    assert HCD.static_admission(m) is None
+    plan = HCD._build_plan(m, 0)
+    bits = kwargs["bits"]
+    assert plan["format"] == f"down b{bits} up b{bits} inject {inject}"
+    template = dict(plan["a_template"])
+    assert template["DB"] == bits and dict(plan["b_template"])["UB"] == bits
+    assert plan["has_inject"] is True
+    assert template["INJ"] == (2 if inject == "dense" else 1)
+    if inject == "dense":  # the bf16 weight is bound in the inject slot
+        assert plan["a_inputs"][6] is m.block_inject_weight.weight
+
+
+def test_dense_inject_width_must_be_whole_gemv_blocks():
+    m = _module(bits=8, dense_inject=True, hidden=H)  # width 2048: whole blocks
+    assert HCD.static_admission(m) is None
+    m = _module(bits=8, dense_inject=True, hidden=640)  # width 2560
+    assert "gemv tiling" in HCD.static_admission(m)
+
+
+def test_dense_inject_with_bias_or_other_dtype_is_refused():
+    m = _module(bits=8, dense_inject=True)
+    m.block_inject_weight.bias = mx.zeros((4,), mx.bfloat16)
+    assert "dense with bias" in HCD.static_admission(m)
+    m = _module(bits=8, dense_inject=True)
+    m.block_inject_weight.weight = m.block_inject_weight.weight.astype(mx.float32)
+    assert "dense weight dtype" in HCD.static_admission(m)
+
+
+def test_8bit_alignment_follows_mlx_qmv_fast_block():
+    assert HCD.qmv_fast_alignment(4) == 512 and HCD.qmv_fast_alignment(8) == 256
+    # lowrank 256 is a whole 8-bit qmv_fast block: MLX would run qmv_fast
+    # (not qmv) for the up rows, which the up launch does not transcribe.
+    m = _module(bits=8, lowrank=256)
+    assert "lowrank" in HCD.static_admission(m)
+
+
+@pytest.fixture
+def pair_reference(monkeypatch):
+    """Replace only the compiled Metal pair by the composed body: the plan,
+    admission, reshapes and counters around it run for real on CPU."""
+
+    def compiled_pair(plan, rows):
+        def pair(flat, *_weights, module):
+            was = HCD.set_hc_decode_enabled(False)
+            try:
+                out = module(flat[None])
+            finally:
+                HCD.set_hc_decode_enabled(was)
+            if isinstance(out, tuple):
+                return out[0].reshape(rows, -1), out[2].reshape(rows, -1)
+            return out.reshape(rows, -1), mx.zeros((rows, 4), mx.bfloat16)
+
+        return pair
+
+    real = HCD.hc_decode_launch
+
+    def launch(module, flat, *, debug=False, plan=None):
+        monkeypatch.setattr(
+            HCD, "_compiled_pair",
+            lambda p, r: (lambda *args: compiled_pair(p, r)(*args, module=module)),
+        )
+        return real(module, flat, debug=debug, plan=plan)
+
+    monkeypatch.setattr(HCD, "hc_decode_launch", launch)
+    monkeypatch.setattr(HCD, "runtime_supported", lambda: True)
+    monkeypatch.setattr(HCD, "_GPU_FAMILY", 17)
+
+
+@pytest.mark.parametrize("rows", [1, 3])
+@pytest.mark.parametrize("kwargs", [{"dense_inject": True}, {"inject_bits": 4}, {}])
+def test_8bit_module_is_served_with_its_inject(pair_reference, rows, kwargs):
+    m = _module(seed=9, bits=8, **kwargs)
+    x = _x(21, rows=rows)
+    want = m(x)
+    HCD.set_hc_decode_enabled(True)
+    got = m(x)
+    assert got[1] is x
+    assert _same(got[0], want[0]) and _same(got[2], want[2])
+    assert got[2].shape == (1, rows, 4)
+    status = HCD.hc_decode_status()
+    assert status["calls"] == 1 and status["inject_calls"] == 1
+    inject = "dense" if kwargs.get("dense_inject") else f"b{kwargs.get('inject_bits', 8)}"
+    assert status["calls_by_format"] == {f"down b8 up b8 inject {inject}": 1}
 
 
 def test_lane_owned_projection_is_refused():
@@ -287,7 +395,7 @@ def test_row_exact_class_swapped_projections_are_admitted():
 
 
 def test_ineligible_layout_is_counted_and_composed(reference_kernels):
-    m = _module(bits=8)
+    m = _module(bits=6)
     x = _x(4)
     want = m(x)
     HCD.set_hc_decode_enabled(True)

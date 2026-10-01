@@ -51,10 +51,23 @@ projections (``_row_exact_base`` = ``nn.QuantizedLinear``) are admitted.  Opt-in
 (``MLX_QWEN4_HC_ROW_EXACT``, policy ``row_exact_window_kernels``); off, a window
 keeps the composed path, which is row-exact too.
 
-Admission is structural and exact-shape: rows as above, bf16 activations, four streams, affine 4-bit group-64 projections with bf16
-scales/biases that are exactly ``nn.QuantizedLinear``, and the eager norm
-profile (fast RMS norm on, fused group norm and compiled glue off).  Anything
-else keeps the composed body.
+Admission is structural and exact-shape: rows as above, bf16 activations,
+four streams, affine group-64 projections with bf16 scales/biases that are
+exactly ``nn.QuantizedLinear``, and the eager norm profile (fast RMS norm on,
+fused group norm and compiled glue off).  Anything else keeps the composed
+body.
+
+Weight formats: down, up and a quantized inject may each be 4-bit or 8-bit
+(mixed precision artifacts quantize the HC projections at 8 bits); every
+launch transcribes the format's own MLX arithmetic (``quantized.h``
+``load_vector``/``qdot``/``dequantize`` ``bits == 8`` branches: unscaled
+inputs, one weight byte per value, a 256-value ``qmv_fast`` block and a
+128-value ``qmv`` block).  A dense (bf16 ``nn.Linear``) inject runs in
+norm_down's inject threadgroup with MLX's dense matvec arithmetic
+(``gemv.h``): ``GEMVKernel`` at one row (eight simdgroups over K, four
+products per lane per row, shuffle ladder, simdgroup sum in order) and
+``GemvWide`` at 2..8 rows (one row per simdgroup, eight float4 ``dot`` per
+lane per step).
 
 Default off.  ``MLX_QWEN4_HC_DECODE=1`` (the Flash-Next policy field
 ``hc_decode_kernels``) enables it at import; ``set_hc_decode_enabled`` switches
@@ -77,7 +90,10 @@ from .served_exp import ServedExpGate, metal_helper
 
 HC_DECODE_ENV = "MLX_QWEN4_HC_DECODE"
 HC_COUNT = 4
+# Weight formats the launches transcribe (affine, group 64), per projection:
+# MLX's 4-bit and 8-bit qmv_fast/qmv/qmv_wide arithmetic.
 BITS = 4
+FORMAT_BITS = (4, 8)
 GROUP_SIZE = 64
 # Down rows per simdgroup in norm_down; one row keeps the most threadgroups.
 DOWN_ROWS = 1
@@ -128,6 +144,7 @@ _ROW_EXACT = row_exact_from_env()
 _LOCK = threading.Lock()
 _STATS: Counter = Counter()
 _DECLINES: Counter = Counter()
+_FORMATS: Counter = Counter()
 _LAST_DECLINE: str | None = None
 _LAST_ERROR: str | None = None
 _BROKEN = False
@@ -169,6 +186,7 @@ def hc_decode_status(*, reset: bool = False) -> dict:
             "row_exact_mode": bool(_ROW_EXACT),
             "launches": int(2 * _STATS["calls"]),
             "declines": dict(_DECLINES),
+            "calls_by_format": dict(_FORMATS),
             "errors": int(_STATS["errors"]),
             "last_decline": _LAST_DECLINE,
             "last_error": _LAST_ERROR,
@@ -176,6 +194,7 @@ def hc_decode_status(*, reset: bool = False) -> dict:
         if reset:
             _STATS.clear()
             _DECLINES.clear()
+            _FORMATS.clear()
             _LAST_DECLINE = None
             _LAST_ERROR = None
     return report
@@ -210,7 +229,7 @@ def _quantized_reason(layer) -> str | None:
         return "projection is not a plain QuantizedLinear"
     if "_lane_prepared" in layer.__dict__:
         return "projection owned by the lane matmul"
-    if getattr(layer, "bits", None) != BITS:
+    if getattr(layer, "bits", None) not in FORMAT_BITS:
         return "bits"
     if getattr(layer, "group_size", None) != GROUP_SIZE:
         return "group size"
@@ -225,14 +244,35 @@ def _quantized_reason(layer) -> str | None:
     return None
 
 
+def qmv_fast_alignment(bits: int) -> int:
+    """MLX ``qmv_fast_k_alignment``: the K step of ``qmv_fast_impl``
+    (``pack_factor * 2 * 32``): 512 at 4 bits, 256 at 8 bits."""
+    return (32 // bits) * 2 * 32
+
+
+def _dense_inject_reason(layer) -> str | None:
+    """A dense (unquantized) inject projection: exactly ``nn.Linear`` without
+    bias, bf16 weight (MLX ``gemv`` at one row, ``gemv_wide`` at 2..8)."""
+    if _plain_class(layer) is not nn.Linear:
+        return "inject: not a QuantizedLinear or a plain Linear"
+    if "bias" in layer:
+        return "inject: dense with bias"
+    if layer["weight"].dtype != mx.bfloat16:
+        return "inject: dense weight dtype"
+    return None
+
+
 def static_admission(module) -> str | None:
     """Model-layout check (cached per module by identity of its tensors).
 
     Mirrors the conditions under which the composed path runs the kernels this
     module transcribes: ``qmv_fast`` for the down and inject rows (input width
-    a multiple of 512), plain ``qmv`` for the up rows (input width not a
-    multiple of 512, not 64/128), ``rms_single_row`` with whole four-element
-    reads (hidden a multiple of 128, at most 4096).
+    a multiple of the format's qmv_fast block: 512 at 4 bits, 256 at 8),
+    plain ``qmv`` for the up rows (input width not a multiple of that block,
+    not 64/128), ``rms_single_row`` with whole four-element reads (hidden a
+    multiple of 128, at most 4096).  Down, up and a quantized inject may each
+    be 4- or 8-bit; a dense bf16 inject is admitted where MLX runs the
+    ``gemv``/``gemv_wide`` tiling the launch transcribes.
     """
     hc = getattr(module, "hc_count", None)
     hidden = getattr(module, "hidden_size", None)
@@ -258,13 +298,18 @@ def static_admission(module) -> str | None:
         if reason is not None:
             return f"{name}: {reason}"
     lowrank = down["weight"].shape[0]
-    if tuple(down["weight"].shape) != (lowrank, width * BITS // 32):
+    down_bits, up_bits = down.bits, up.bits
+    if tuple(down["weight"].shape) != (lowrank, width * down_bits // 32):
         return "down shape"
-    if tuple(up["weight"].shape) != (width, lowrank * BITS // 32):
+    if tuple(up["weight"].shape) != (width, lowrank * up_bits // 32):
         return "up shape"
-    if width % 512:
-        return "width % 512 (MLX would not run qmv_fast)"
-    if lowrank % 512 == 0 or lowrank in (64, 128) or lowrank % GROUP_SIZE:
+    if width % qmv_fast_alignment(down_bits) or lowrank % 8:
+        return "width (MLX would not run qmv_fast for the down rows)"
+    if (
+        lowrank % qmv_fast_alignment(up_bits) == 0
+        or lowrank in (64, 128)
+        or lowrank % GROUP_SIZE
+    ):
         return "lowrank (MLX would not run plain qmv for the up rows)"
     simdgroups = hidden // 4 // 32
     if lowrank % (simdgroups * DOWN_ROWS) or lowrank % (simdgroups * 4):
@@ -273,12 +318,33 @@ def static_admission(module) -> str | None:
         return "hidden column tiling"
     if "block_inject_weight" in module:
         inject = module["block_inject_weight"]
-        reason = _quantized_reason(inject)
-        if reason is not None:
-            return f"inject: {reason}"
-        if tuple(inject["weight"].shape) != (hc, width * BITS // 32):
-            return "inject shape"
+        if _plain_class(inject) is nn.QuantizedLinear:
+            reason = _quantized_reason(inject)
+            if reason is not None:
+                return f"inject: {reason}"
+            if tuple(inject["weight"].shape) != (hc, width * inject.bits // 32):
+                return "inject shape"
+            if width % qmv_fast_alignment(inject.bits):
+                return "inject width (MLX would not run qmv_fast)"
+        else:
+            reason = _dense_inject_reason(inject)
+            if reason is not None:
+                return reason
+            if tuple(inject["weight"].shape) != (hc, width):
+                return "inject shape"
+            # MLX gemv at one row: K >= 16 * hc picks (BM 1, BN 8, SN 32,
+            # TM 4, TN 4); whole 1024-column blocks (no leftover tail).
+            if width % 1024 or width < 16 * hc:
+                return "inject width (MLX gemv tiling not transcribed)"
     return None
+
+
+def _inject_mode(module) -> str:
+    """'none', 'quantized' or 'dense' (both computed in norm_down)."""
+    if "block_inject_weight" not in module:
+        return "none"
+    inject = module["block_inject_weight"]
+    return "quantized" if _plain_class(inject) is nn.QuantizedLinear else "dense"
 
 
 def _identity(module) -> tuple:
@@ -328,7 +394,7 @@ def runtime_supported() -> bool:
 
 
 # --------------------------------------------------------------------------
-# Metal.  4-bit, group-64 transcriptions of the MLX fork's quantized.h helpers
+# Metal.  4- and 8-bit, group-64 transcriptions of the MLX fork's quantized.h helpers
 # (load_vector / load_vector_safe accumulate the input sum in float since the
 # fork's 2d6705923), qdot's add order, and the unary/binary/reduce operators the
 # eager path dispatches, evaluated in T = bfloat16_t exactly as those kernels do.
@@ -384,11 +450,76 @@ inline float hcd_qdot(
   return scale * accum + sum * bias;
 }
 
-// qmv_wide (affine, k_lanes = 8) for 4-bit group-64 rows: the 8-lane group of
-// one output row strides over its groups, decodes each 8-value sub-chunk as
-// dequantize() does, dots it from 0, adds the sub-chunk sums in order, then
-// the shuffle-down ladder 4, 2, 1.  All 32 lanes must call it.
-template <typename T, typename P>
+// 8-bit affine (MLX quantized.h load_vector / load_vector_safe / qdot /
+// qdot_safe, ``bits == 8`` branches): the input sum adds the raw T values to
+// the float sum, x_thread holds them unscaled, and each weight byte multiplies
+// its value; then ``scale * accum + sum * bias``.
+template <typename P, int N>
+inline float hcd_load8(P x, thread float* x_thread) {
+  float sum = 0;
+  for (int i = 0; i < N; i++) {
+    sum += x[i];
+    x_thread[i] = x[i];
+  }
+  return sum;
+}
+
+template <typename P, int VPT>
+inline float hcd_load8_safe(P x, thread float* x_thread, int N) {
+  float sum = 0;
+  for (int i = 0; i < N; i++) {
+    sum += x[i];
+    x_thread[i] = x[i];
+  }
+  for (int i = N; i < VPT; i++) {
+    x_thread[i] = 0;
+  }
+  return sum;
+}
+
+inline float hcd_qdot8(
+    const device uint8_t* w,
+    const thread float* x_thread,
+    float scale,
+    float bias,
+    float sum,
+    int N) {
+  float accum = 0;
+  for (int i = 0; i < N; i++) {
+    accum += x_thread[i] * w[i];
+  }
+  return scale * accum + sum * bias;
+}
+
+// Format dispatch (BITS is a template constant: the other branch is dead).
+template <int BITS, typename P, int N>
+inline float hcd_loadq(P x, thread float* x_thread) {
+  return BITS == 8 ? hcd_load8<P, N>(x, x_thread) : hcd_load<P, N>(x, x_thread);
+}
+
+template <int BITS, typename P, int VPT>
+inline float hcd_loadq_safe(P x, thread float* x_thread, int N) {
+  return BITS == 8 ? hcd_load8_safe<P, VPT>(x, x_thread, N)
+                   : hcd_load_safe<P, VPT>(x, x_thread, N);
+}
+
+template <int BITS>
+inline float hcd_qdotq(
+    const device uint8_t* w,
+    const thread float* x_thread,
+    float scale,
+    float bias,
+    float sum,
+    int N) {
+  return BITS == 8 ? hcd_qdot8(w, x_thread, scale, bias, sum, N)
+                   : hcd_qdot(w, x_thread, scale, bias, sum, N);
+}
+
+// qmv_wide (affine, k_lanes = 8) for 4- and 8-bit group-64 rows: the 8-lane
+// group of one output row strides over its groups, decodes each 8-value
+// sub-chunk as dequantize() does, dots it from 0, adds the sub-chunk sums in
+// order, then the shuffle-down ladder 4, 2, 1.  All 32 lanes must call it.
+template <typename T, int BITS, typename P>
 inline float hcd_wide_row(
     P x,
     const device uint8_t* wrow,
@@ -402,14 +533,20 @@ inline float hcd_wide_row(
     float bias = brow[g];
     for (int sc = 0; sc < 8; sc++) {
       const int k0 = g * 64 + sc * 8;
-      const device uint8_t* wc = wrow + k0 * 4 / 8;
+      const device uint8_t* wc = wrow + k0 * BITS / 8;
       float w_dq[8];
       const float s = float(scale);
       const float b = float(bias);
-      float scv[2] = {s, s / 16.0f};
-      for (int i = 0; i < 4; i++) {
-        w_dq[2 * i] = static_cast<float>(scv[0] * (wc[i] & 0x0f) + b);
-        w_dq[2 * i + 1] = static_cast<float>(scv[1] * (wc[i] & 0xf0) + b);
+      if (BITS == 8) {
+        for (int i = 0; i < 8; i++) {
+          w_dq[i] = static_cast<float>(s * wc[i] + b);
+        }
+      } else {
+        float scv[2] = {s, s / 16.0f};
+        for (int i = 0; i < 4; i++) {
+          w_dq[2 * i] = static_cast<float>(scv[0] * (wc[i] & 0x0f) + b);
+          w_dq[2 * i + 1] = static_cast<float>(scv[1] * (wc[i] & 0xf0) + b);
+        }
       }
       float acc = 0;
       for (int i = 0; i < 8; i++) {
@@ -457,6 +594,7 @@ NORM_DOWN_SOURCE = r"""
     threadgroup T xs[K];
     threadgroup float local_sums[HC][32];
     threadgroup float local_inv[HC];
+    threadgroup float dense_part[INJ == 2 ? 8 * HC : 1];
 
     // rms_single_row on each stream (the eager path's float32 rows of H).
     const device T* xr = x + size_t(row) * K;
@@ -508,8 +646,14 @@ NORM_DOWN_SOURCE = r"""
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
-    constexpr int IN_W = K / 2;   // bytes per 4-bit row
-    constexpr int IN_G = K / 64;  // groups per row
+    // Down rows use format DB, inject rows IB (4 or 8 bits, group 64).
+    constexpr int IN_W = K * DB / 8;   // bytes per down row
+    constexpr int INJ_W = K * IB / 8;  // bytes per inject row
+    constexpr int IN_G = K / 64;       // groups per row
+    // qmv_fast lane layout: VPT values per lane per 32 * VPT block, 8 weight
+    // bytes per lane either way.
+    constexpr int D_VPT = DB == 8 ? 8 : 16;
+    constexpr int I_VPT = IB == 8 ? 8 : 16;
     float x_thread[16];
     if (LAW == 1) {
       // Rows 2..8: MLX runs qmv_wide; one 8-lane group per output row.
@@ -517,7 +661,7 @@ NORM_DOWN_SOURCE = r"""
       const int sg_row = int(lane) / 8;
       if (int(gy) < ND) {
         const int out_row = int(gy) * (NSG * 4) + int(sg) * 4 + sg_row;
-        const float r = hcd_wide_row<T>(
+        const float r = hcd_wide_row<T, DB>(
             (const threadgroup T*)xs,
             (const device uint8_t*)down_w + out_row * IN_W,
             down_s + out_row * IN_G, down_b + out_row * IN_G, IN_G, k_lane);
@@ -527,11 +671,48 @@ NORM_DOWN_SOURCE = r"""
           const T g = hcd_sigmoid_jit<T>(a);
           act[size_t(row) * R + out_row] = a * g;
         }
+      } else if (INJ == 2) {
+        // Dense bf16 inject, MLX gemv_wide (k_lanes 32: one row per
+        // simdgroup, 4 rows per threadgroup; unroll 8 float4 blocks per lane
+        // per step, a strided float4 tail, the halving shuffle ladder).
+        if (int(sg) < HC) {
+          const int out_row = int(sg);
+          const device vec<T, 4>* w4 =
+              (const device vec<T, 4>*)((const device T*)inj_w + out_row * K);
+          constexpr int N_V4 = K / 4;
+          constexpr int N_MAIN = N_V4 - N_V4 % (32 * 8);
+          float result = 0;
+          for (int base = 0; base < N_MAIN; base += 32 * 8) {
+            float4 wf[8];
+            for (int i = 0; i < 8; i++) {
+              wf[i] = float4(w4[base + i * 32 + int(lane)]);
+            }
+            float acc = 0;
+            for (int i = 0; i < 8; i++) {
+              const int j = 4 * (base + i * 32 + int(lane));
+              acc += dot(wf[i], float4(xs[j], xs[j + 1], xs[j + 2], xs[j + 3]));
+            }
+            result += acc;
+          }
+          for (int idx = N_MAIN + int(lane); idx < N_V4; idx += 32) {
+            const int j = 4 * idx;
+            result += dot(float4(w4[idx]), float4(xs[j], xs[j + 1], xs[j + 2], xs[j + 3]));
+          }
+          for (ushort off = 16; off >= 1; off >>= 1) {
+            result += simd_shuffle_down(result, off);
+          }
+          if (lane == 0) {
+            const T raw = static_cast<T>(result);
+            const T q = raw / T(HC);
+            const T g = hcd_sigmoid_unary<T>(q);
+            inj[size_t(row) * HC + out_row] = T(2) * g;
+          }
+        }
       } else if (INJ != 0 && sg == 0) {
         const int out_row = sg_row;
-        const float r = hcd_wide_row<T>(
+        const float r = hcd_wide_row<T, IB>(
             (const threadgroup T*)xs,
-            (const device uint8_t*)inj_w + out_row * IN_W,
+            (const device uint8_t*)inj_w + out_row * INJ_W,
             inj_s + out_row * IN_G, inj_b + out_row * IN_G, IN_G, k_lane);
         if (k_lane == 0) {
           const T raw = static_cast<T>(r);
@@ -544,21 +725,21 @@ NORM_DOWN_SOURCE = r"""
       const int out_row = int(gy) * (NSG * RPS) + int(sg) * RPS;
       const device uint8_t* ws =
           (const device uint8_t*)down_w + out_row * IN_W + int(lane) * 8;
-      const device T* sc = down_s + out_row * IN_G + int(lane) / 4;
-      const device T* bs = down_b + out_row * IN_G + int(lane) / 4;
-      const threadgroup T* xp = xs + int(lane) * 16;
+      const device T* sc = down_s + out_row * IN_G + int(lane) / (64 / D_VPT);
+      const device T* bs = down_b + out_row * IN_G + int(lane) / (64 / D_VPT);
+      const threadgroup T* xp = xs + int(lane) * D_VPT;
       float result[RPS] = {0};
-      for (int k = 0; k < K; k += 512) {
-        float sum = hcd_load<const threadgroup T*, 16>(xp, x_thread);
+      for (int k = 0; k < K; k += 32 * D_VPT) {
+        float sum = hcd_loadq<DB, const threadgroup T*, D_VPT>(xp, x_thread);
         for (int r = 0; r < RPS; r++) {
           float s = sc[r * IN_G];
           float b = bs[r * IN_G];
-          result[r] += hcd_qdot(ws + r * IN_W, x_thread, s, b, sum, 16);
+          result[r] += hcd_qdotq<DB>(ws + r * IN_W, x_thread, s, b, sum, D_VPT);
         }
         ws += 256;
-        sc += 8;
-        bs += 8;
-        xp += 512;
+        sc += 32 * D_VPT / 64;
+        bs += 32 * D_VPT / 64;
+        xp += 32 * D_VPT;
       }
       for (int r = 0; r < RPS; r++) {
         result[r] = simd_sum(result[r]);
@@ -572,23 +753,78 @@ NORM_DOWN_SOURCE = r"""
           act[size_t(row) * R + out_row + r] = a * g;
         }
       }
+    } else if (INJ == 2) {
+      // Dense bf16 inject, MLX gemv (BM 1, BN 8, SM 1, SN 32, TM HC, TN 4):
+      // simdgroup g, lane l owns columns (32 g + l) * 4 + 1024 i; per block
+      // each of the HC rows adds its four products in order, then the
+      // shuffle-down ladder 16..1 and the threadgroup sum of simdgroups 1..7
+      // onto simdgroup 0 in order.
+      float result[HC];
+      for (int tm = 0; tm < HC; tm++) {
+        result[tm] = 0;
+      }
+      if (int(sg) < 8) {
+        const device T* wd = (const device T*)inj_w;
+        int bn = (int(sg) * 32 + int(lane)) * 4;
+        for (int i = 0; i < K / 1024; ++i) {
+          float v[4];
+          for (int tn = 0; tn < 4; tn++) {
+            v[tn] = static_cast<float>(xs[bn + tn]);
+          }
+          int mat_offset = 0;
+          for (int tm = 0; tm < HC; tm++) {
+            T inter[4];
+            for (int tn = 0; tn < 4; tn++) {
+              inter[tn] = wd[mat_offset + bn + tn];
+            }
+            for (int tn = 0; tn < 4; tn++) {
+              result[tm] += inter[tn] * v[tn];
+            }
+            mat_offset += K;
+          }
+          bn += 1024;
+        }
+        for (int tm = 0; tm < HC; tm++) {
+          for (ushort sn = 16; sn >= 1; sn >>= 1) {
+            result[tm] += simd_shuffle_down(result[tm], sn);
+          }
+        }
+        if (lane == 0) {
+          for (int tm = 0; tm < HC; tm++) {
+            dense_part[int(sg) * HC + tm] = result[tm];
+          }
+        }
+      }
+      threadgroup_barrier(mem_flags::mem_threadgroup);
+      if (sg == 0 && lane == 0) {
+        for (int tm = 0; tm < HC; tm++) {
+          float r = result[tm];
+          for (int sgn = 1; sgn < 8; sgn++) {
+            r += dense_part[sgn * HC + tm];
+          }
+          const T raw = static_cast<T>(r);
+          const T q = raw / T(HC);
+          const T g = hcd_sigmoid_unary<T>(q);
+          inj[size_t(row) * HC + tm] = T(2) * g;
+        }
+      }
     } else if (INJ != 0 && int(sg) < HC) {
       const int out_row = int(sg);
       const device uint8_t* ws =
-          (const device uint8_t*)inj_w + out_row * IN_W + int(lane) * 8;
-      const device T* sc = inj_s + out_row * IN_G + int(lane) / 4;
-      const device T* bs = inj_b + out_row * IN_G + int(lane) / 4;
-      const threadgroup T* xp = xs + int(lane) * 16;
+          (const device uint8_t*)inj_w + out_row * INJ_W + int(lane) * 8;
+      const device T* sc = inj_s + out_row * IN_G + int(lane) / (64 / I_VPT);
+      const device T* bs = inj_b + out_row * IN_G + int(lane) / (64 / I_VPT);
+      const threadgroup T* xp = xs + int(lane) * I_VPT;
       float result = 0;
-      for (int k = 0; k < K; k += 512) {
-        float sum = hcd_load<const threadgroup T*, 16>(xp, x_thread);
+      for (int k = 0; k < K; k += 32 * I_VPT) {
+        float sum = hcd_loadq<IB, const threadgroup T*, I_VPT>(xp, x_thread);
         float s = sc[0];
         float b = bs[0];
-        result += hcd_qdot(ws, x_thread, s, b, sum, 16);
+        result += hcd_qdotq<IB>(ws, x_thread, s, b, sum, I_VPT);
         ws += 256;
-        sc += 8;
-        bs += 8;
-        xp += 512;
+        sc += 32 * I_VPT / 64;
+        bs += 32 * I_VPT / 64;
+        xp += 32 * I_VPT;
       }
       result = simd_sum(result);
       if (lane == 0) {
@@ -606,8 +842,13 @@ UP_MIX_SOURCE = r"""
     const int h = int(threadgroup_position_in_grid.y) * NSGB + int(sg);
     const uint row = threadgroup_position_in_grid.z;
     constexpr int K = HC * H;
-    constexpr int IN_W = R / 2;
+    // Up rows use format UB (4 or 8 bits, group 64); MLX runs plain qmv
+    // (R is not a multiple of the qmv_fast block): VPT values per lane per
+    // 32 * VPT block, 4 weight bytes per lane either way, guarded tail.
+    constexpr int IN_W = R * UB / 8;
     constexpr int IN_G = R / 64;
+    constexpr int U_VPT = UB == 8 ? 4 : 8;
+    constexpr int U_BLK = 32 * U_VPT;
     const device T* ar = act + size_t(row) * R;
     float x_thread[8];
     float u[HC];
@@ -615,7 +856,7 @@ UP_MIX_SOURCE = r"""
       // qmv_wide: lane group s (8 lanes) runs up row s * H + h.
       const int s = int(lane) / 8;
       const int n = s * H + h;
-      const float r = hcd_wide_row<T>(
+      const float r = hcd_wide_row<T, UB>(
           ar, (const device uint8_t*)up_w + n * IN_W, up_s + n * IN_G,
           up_b + n * IN_G, IN_G, int(lane) % 8);
       for (int j = 0; j < HC; ++j) {
@@ -624,27 +865,27 @@ UP_MIX_SOURCE = r"""
     } else for (int s = 0; s < HC; ++s) {
       const int n = s * H + h;
       const device uint8_t* ws = (const device uint8_t*)up_w + n * IN_W + int(lane) * 4;
-      const device T* sc = up_s + n * IN_G + int(lane) / 8;
-      const device T* bs = up_b + n * IN_G + int(lane) / 8;
-      const device T* xp = ar + int(lane) * 8;
+      const device T* sc = up_s + n * IN_G + int(lane) / (64 / U_VPT);
+      const device T* bs = up_b + n * IN_G + int(lane) / (64 / U_VPT);
+      const device T* xp = ar + int(lane) * U_VPT;
       float result = 0;
       int k = 0;
-      for (; k < R - 256; k += 256) {
-        float sum = hcd_load<const device T*, 8>(xp, x_thread);
+      for (; k < R - U_BLK; k += U_BLK) {
+        float sum = hcd_loadq<UB, const device T*, U_VPT>(xp, x_thread);
         float sv = sc[0];
         float bv = bs[0];
-        result += hcd_qdot(ws, x_thread, sv, bv, sum, 8);
+        result += hcd_qdotq<UB>(ws, x_thread, sv, bv, sum, U_VPT);
         ws += 128;
-        sc += 4;
-        bs += 4;
-        xp += 256;
+        sc += U_BLK / 64;
+        bs += U_BLK / 64;
+        xp += U_BLK;
       }
-      const int remaining = clamp(int(R - k - int(lane) * 8), 0, 8);
+      const int remaining = clamp(int(R - k - int(lane) * U_VPT), 0, U_VPT);
       if (remaining > 0) {
-        float sum = hcd_load_safe<const device T*, 8>(xp, x_thread, remaining);
+        float sum = hcd_loadq_safe<UB, const device T*, U_VPT>(xp, x_thread, remaining);
         float sv = sc[0];
         float bv = bs[0];
-        result += hcd_qdot(ws, x_thread, sv, bv, sum, remaining);
+        result += hcd_qdotq<UB>(ws, x_thread, sv, bv, sum, remaining);
       }
       u[s] = simd_sum(result);
     }
@@ -725,8 +966,17 @@ def _build_plan(module, law: int = 0) -> dict:
     down = module["input_mix_weight_down"]
     up = module["input_mix_weight_up"]
     lowrank = down["weight"].shape[0]
-    has_inject = "block_inject_weight" in module
+    inject_mode = _inject_mode(module)
+    has_inject = inject_mode != "none"
+    dense = inject_mode == "dense"
     inject = module["block_inject_weight"] if has_inject else down
+    # A dense inject binds its bf16 weight; the scales/biases slots take the
+    # down arrays as unused placeholders.
+    inject_arrays = (
+        (inject["weight"], down["scales"], down["biases"])
+        if dense
+        else (inject["weight"], inject["scales"], inject["biases"])
+    )
     threads = hidden // 4
     down_groups = lowrank // (threads // 32 * (4 if law else DOWN_ROWS))
     axis, eps = _scalars(hidden, module.hc_norm.eps)
@@ -734,6 +984,11 @@ def _build_plan(module, law: int = 0) -> dict:
     plan = {
         "hidden": hidden,
         "has_inject": has_inject,
+        "inject_mode": inject_mode,
+        "format": (
+            f"down b{down.bits} up b{up.bits} inject "
+            + (f"b{inject.bits}" if inject_mode == "quantized" else inject_mode)
+        ),
         "a_kernel": _kernel(
             "mlx2_qwen4_hc_decode_norm_down",
             ["x", "nw", "axis", "eps", "down_w", "down_s", "down_b", "inj_w", "inj_s", "inj_b"],
@@ -743,7 +998,7 @@ def _build_plan(module, law: int = 0) -> dict:
         "a_inputs": [
             module.hc_norm.weight, axis, eps,
             down["weight"], down["scales"], down["biases"],
-            inject["weight"], inject["scales"], inject["biases"],
+            *inject_arrays,
         ],
         "a_template": [
             ("T", dtype),
@@ -752,8 +1007,12 @@ def _build_plan(module, law: int = 0) -> dict:
             ("R", lowrank),
             ("RPS", DOWN_ROWS),
             ("ND", down_groups),
-            ("INJ", int(has_inject)),
+            # 0: none, 1: quantized (qmv_fast / qmv_wide), 2: dense bf16
+            # (gemv / gemv_wide).
+            ("INJ", 2 if dense else int(has_inject)),
             ("LAW", law),
+            ("DB", int(down.bits)),
+            ("IB", 4 if dense else int(inject.bits)),
         ],
         "a_groups": (threads, down_groups + int(has_inject)),
         "b_kernel": _kernel(
@@ -770,6 +1029,7 @@ def _build_plan(module, law: int = 0) -> dict:
             ("R", lowrank),
             ("NSGB", UP_SIMDGROUPS),
             ("LAW", law),
+            ("UB", int(up.bits)),
         ],
         "width": width,
         "lowrank": lowrank,
@@ -970,6 +1230,7 @@ def _try_launch(module, hyper_input, rows: int, law: int, eager_norm: bool, comp
             plan["lowrank"],
             module.hc_norm.weight.dtype,
             inject is not None,
+            plan["format"],
             law,
             rows,
         )
@@ -990,6 +1251,7 @@ def _try_launch(module, hyper_input, rows: int, law: int, eager_norm: bool, comp
     mixed = mixed.reshape(*lead, plan["hidden"])
     # Hot path: the model runs on one thread; no lock for the two increments.
     _STATS["calls"] += 1
+    _FORMATS[plan["format"]] += 1
     if inject is not None:
         _STATS["inject_calls"] += 1
     if inject is None:
