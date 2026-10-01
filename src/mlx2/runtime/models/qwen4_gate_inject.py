@@ -31,6 +31,9 @@ PHYSICAL_ENGAGEMENT_RECEIPT = (
     "candidate-dispatch-count.json"
 )
 
+from .import_env import snapshot as _import_env_snapshot
+
+_import_env_snapshot(__name__)
 _ENABLE = os.environ.get("MLX_QWEN4_FUSED_GATE_INJECT", "0") == "1"
 _KERNEL = None
 _KERNEL_LOCK = threading.Lock()

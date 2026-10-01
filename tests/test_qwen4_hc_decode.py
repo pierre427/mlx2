@@ -378,3 +378,17 @@ def test_metal_kernels_are_bit_identical_to_the_composed_body():
                 for a, b in zip(want, got):
                     assert mx.array_equal(a.view(mx.uint16), b.view(mx.uint16)).item()
         assert HCD.hc_decode_status()["calls"] == 12
+
+
+def test_raw_gate_inject_mode_declines_the_hc_kernels(reference_kernels):
+    # The kernels return the finished 2*sigmoid inject; main's fused
+    # gate-inject path asks GatedResidual for the raw gate logit instead.
+    # Serving both would apply the sigmoid twice (campaign merge, 2026-10-01).
+    m = _module(seed=7, combine=True)
+    x = _x(8)
+    want = m(x, raw_inject=True)
+    HCD.set_hc_decode_enabled(True)
+    got = m(x, raw_inject=True)
+    assert reference_kernels["launch"] == 0
+    assert _same(got[0], want[0]) and _same(got[2], want[2])
+    assert HCD.hc_decode_status()["declines"] == {"raw gate inject requested": 1}

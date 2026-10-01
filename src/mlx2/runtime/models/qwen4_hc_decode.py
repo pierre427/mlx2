@@ -179,6 +179,11 @@ def hc_decode_status(*, reset: bool = False) -> dict:
     return report
 
 
+def decline(reason: str) -> None:
+    """Count a decline decided by the caller."""
+    _decline(reason)
+
+
 def _decline(reason: str) -> None:
     global _LAST_DECLINE
     with _LOCK:
