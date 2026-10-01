@@ -120,6 +120,10 @@ def main():
                     ("gathered", candidate_attention),
                 ):
                     install(label, function)
+                    stats = (getattr(candidate, "_MATERIALIZATION_STATS", None)
+                             if label == "gathered" and candidate is not None else None)
+                    if stats is not None:
+                        stats["evaluations"] = 0
                     prompt = mx.array(values[:length][None])
                     mx.eval(prompt)
                     mx.synchronize()
@@ -128,6 +132,7 @@ def main():
                     logits, cache = model.prefill(prompt)
                     mx.synchronize()
                     prefill = time.perf_counter() - start
+                    prefill_evaluations = stats["evaluations"] if stats is not None else None
                     generated = []
                     start = time.perf_counter()
                     for _ in range(args.decode_tokens):
@@ -150,6 +155,11 @@ def main():
                         "peak_memory_bytes": mx.get_peak_memory(),
                         "kv_bytes": cache.resident_bytes(),
                     }
+                    if stats is not None:
+                        row["arms"][label]["periodic_materializations"] = {
+                            "prefill": prefill_evaluations,
+                            "decode": stats["evaluations"] - prefill_evaluations,
+                        }
                     del cache, prompt, generated
                     mx.clear_cache()
                 row["tokens_equal"] = results[0][0] == results[1][0]

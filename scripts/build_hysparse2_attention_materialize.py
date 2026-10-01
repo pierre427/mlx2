@@ -10,6 +10,8 @@ def main():
     p.add_argument("--source", type=Path, required=True)
     p.add_argument("--output", type=Path, required=True)
     p.add_argument("--period", type=int, default=32)
+    p.add_argument("--instrument-counts", action="store_true",
+                   help="Count completed periodic evaluations; creates a distinct candidate hash")
     args = p.parse_args()
     if args.output.exists() or not 1 <= args.period <= 4096:
         p.error("fresh output and period1..4096 required")
@@ -20,6 +22,12 @@ def main():
         raise ValueError("reference scan structure differs; review candidate transformation")
     candidate = source.replace(loop, "for tile_index, (k, v, kp) in enumerate(_tiles(\n            blocks, key_tile, minimum=minimum, maximum=maximum_position\n        )):")
     candidate = candidate.replace(update, update + f"            if (tile_index + 1) % {args.period} == 0:\n                mx.eval(accum, denom, maximum)\n")
+    if args.instrument_counts:
+        evaluation = "                mx.eval(accum, denom, maximum)\n"
+        candidate = candidate.replace(
+            evaluation, evaluation + '                _MATERIALIZATION_STATS["evaluations"] += 1\n'
+        )
+        candidate += '\n_MATERIALIZATION_STATS = {"evaluations": 0}\n'
     compile(candidate, str(args.output), "exec")
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(candidate)
