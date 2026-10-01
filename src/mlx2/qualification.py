@@ -56,10 +56,11 @@ def required_generic_checks(descriptor):
 APPROVED_QUALIFICATION_HARNESS = {
     "schema": "mlx2.qualification-harness.v1",
     "name": "scripts/qualify_serving.py",
-    # Re-pinned 2026-10-01 for the dense_weight_streaming serving observation
-    # (root-approved re-freeze); receipts from the previous harness must be
-    # re-run before they validate.
-    "sha256": "f3f001ecbe54925cefd851afcf32cb608fbed37d74b077138ff775b3fb0c7756",
+    # Re-pinned 2026-10-01 for the combined harness re-freeze: origin/main's
+    # import-guard and SRPT-forcing producer plus the dense_weight_streaming
+    # serving observation. Receipts from either previous harness
+    # (16c32750..., f3f001ec...) must be regenerated before they validate.
+    "sha256": "82ab29716f4b4f11bfb698223c4e6ae78afeb1c0dd00cc37838c26d451ce9e56",
 }
 
 # The approved generic producer has no live adapter-owned media probes. A

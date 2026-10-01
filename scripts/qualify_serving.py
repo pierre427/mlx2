@@ -1074,6 +1074,353 @@ def wait_for_quiescence(
         sleep(min(poll_interval_seconds, remaining))
 
 
+# The prefill-scheduling forcing load (see run_prefill_scheduling_forcing).
+# The hold lane keeps the admission gate shut while the load is queued; it
+# holds EOS for this many tokens and is cancelled long before it gets there.
+SRPT_FORCING_HOLD_TOKENS = 4096
+SRPT_FORCING_COMPLETION_TOKENS = 4
+# Tokens past one prefill slice, so the long prompt stays a multi-slice
+# (incremental) prefill after its chat template and any APC hit.
+SRPT_FORCING_SLICE_MARGIN = 512
+# Hold lane + an atomic cohort of two + long + short, admitted in one pass.
+# The ordinary route prefills two prompts per admission (prefill_batch_size
+# 2), so it reorders only with a second short prompt queued: one more lane.
+SRPT_FORCING_MIN_LANES = 4
+SRPT_FORCING_ORDINARY_MIN_LANES = 5
+SRPT_FORCING_COHORT_ATTEMPTS = 3
+SRPT_FORCING_SETUP_SECONDS = 60.0
+# The worker republishes its scheduler counters into /v1/status at most once
+# a second; a stale snapshot can hide a reorder but never invent one.
+SRPT_FORCING_COUNTER_SETTLE_SECONDS = 10.0
+
+
+def prefill_scheduling_counters(status):
+    """The scheduler's own SRPT counters from a ``/v1/status`` snapshot."""
+    scheduler = status.get("scheduler") or {}
+    return {
+        key: int(scheduler.get(f"prefill_scheduling_{key}", 0) or 0)
+        for key in ("bypasses", "bypass_forced", "one_slice_clamps")
+    }
+
+
+def prefill_scheduling_reorders(before, after):
+    """Reorders between two counter readings: overtakes plus capped service.
+
+    The same quantity ``feature_observations`` reports, as a delta, so the
+    forcing check credits only reorders its own load produced.
+    """
+    return sum(
+        max(0, after[key] - before[key]) for key in ("bypasses", "bypass_forced")
+    )
+
+
+def srpt_forcing_long_tokens(settings):
+    """Prompt words for the long request: one prefill slice plus a margin.
+
+    ``_next_mtp`` applies SRPT only while a candidate still needs more than
+    one slice (``prefill_step + 1`` residual tokens); a prompt that fits one
+    slice is admitted together with the short one and nothing is reordered.
+    Capped below the route's context so the request is always accepted.
+    """
+    step = int(settings.get("prefill_step") or 0)
+    context = int(settings.get("max_context") or 0)
+    cap = context - LONG_CONTEXT_HEADROOM - SRPT_FORCING_COMPLETION_TOKENS
+    return max(1, min(step + SRPT_FORCING_SLICE_MARGIN, cap))
+
+
+def run_prefill_scheduling_forcing(
+    *,
+    get_status,
+    post,
+    settings,
+    nonce,
+    long_text_for=None,
+    setup_seconds=SRPT_FORCING_SETUP_SECONDS,
+    settle_seconds=SRPT_FORCING_COUNTER_SETTLE_SECONDS,
+    poll_seconds=0.02,
+    sleep=time.sleep,
+    monotonic=time.monotonic,
+):
+    """Force one SRPT reorder and return ``(passed, evidence)``.
+
+    Natural qualification traffic never queues a short prompt behind an
+    older multi-slice one, so ``feature_prefill_scheduling`` could not pass
+    on any route that selects the policy.  This load makes the reorder a
+    consequence of the server's admission rules, not of timing:
+
+    1. A *hold* request streams with EOS held, so one lane is active.
+    2. An atomic ``batch_cohort`` of two tiny requests is published.  The
+       worker never attaches a declared cohort beside live work; it holds
+       the cohort and stops admitting anything queued behind it.
+    3. The *long* (multi-slice) prompt is published, then, each only after
+       the server reports the previous one queued, the *short* ones: FIFO
+       order long -> short (-> second short when the lanes allow it).
+    4. Closing the hold stream cancels its single lane.  On the next worker
+       pass the cohort attaches and, in the same admission loop, the long
+       and short prompts behind it.  Ungrouped prefill waits while the
+       cohort owns the batch, so when it drains the scheduler chooses among
+       prompts that are all fully queued: SRPT serves a short one first and
+       counts the older long one as overtaken.  (The ordinary route admits
+       two prompts per prefill round, hence its second short prompt.)
+
+    Every step is confirmed through ``/v1/status`` (``queue_depth``,
+    ``inflight``) before the next one, and the verdict is the scheduler's own
+    counter delta.  A cohort that misses its staging deadline is retried
+    before anything was released; nothing after the release is retried.
+    """
+    evidence = {
+        "schema": "mlx2.prefill-scheduling-forcing.v1",
+        "policy": settings.get("prefill_scheduling"),
+        "max_lanes": settings.get("max_lanes"),
+        "max_inflight": settings.get("max_inflight"),
+        "prefill_step": settings.get("prefill_step"),
+        "steps": [],
+    }
+
+    def step(name, **detail):
+        evidence["steps"].append({"step": name, **detail})
+
+    def fail(reason):
+        evidence["failure"] = reason
+        return False, evidence
+
+    lanes = int(settings.get("max_lanes") or 0)
+    native_mtp = settings.get("mtp") is True
+    needed = SRPT_FORCING_MIN_LANES if native_mtp else SRPT_FORCING_ORDINARY_MIN_LANES
+    evidence["route"] = "native_mtp" if native_mtp else "ordinary"
+    if lanes < needed:
+        return fail(
+            f"the forcing load needs --max-lanes >= {needed} on this route "
+            "(the released lane must admit the cohort and every queued prompt "
+            "in one admission pass)"
+        )
+    # Every lane past the hold lane and the cohort takes a queued prompt.
+    shorts = min(2, lanes - 3)
+    evidence["short_prompts"] = shorts
+    inflight = 3 + 1 + shorts
+    max_inflight = settings.get("max_inflight")
+    if max_inflight is not None and int(max_inflight) < inflight:
+        return fail(f"the forcing load needs --max-inflight >= {inflight}")
+
+    def wait_for(predicate, what):
+        deadline = monotonic() + setup_seconds
+        while True:
+            status = get_status()
+            if predicate(status):
+                return status
+            if monotonic() >= deadline:
+                raise TimeoutError(
+                    f"{what}: inflight={status.get('inflight')} "
+                    f"queue_depth={status.get('queue_depth')}"
+                )
+            sleep(poll_seconds)
+
+    def no_thinking(text, max_tokens, **kw):
+        return {
+            "messages": [{"role": "user", "content": text}],
+            "max_tokens": max_tokens,
+            "reasoning_effort": "none",
+            "think": False,
+            **kw,
+        }
+
+    def call(body):
+        try:
+            response = post(body)
+        except HTTPError as error:
+            return {"refused": http_refusal(error), "finished_at": monotonic()}
+        except Exception as error:  # noqa: BLE001 - becomes check evidence
+            return {"error": f"{type(error).__name__}: {error}",
+                    "finished_at": monotonic()}
+        return {"response": response, "finished_at": monotonic()}
+
+    release = {}
+
+    def summary(result):
+        # Completion instants are relative to the release, for the reader;
+        # the verdict never depends on them.
+        finished = result["finished_at"] - release.get("at", result["finished_at"])
+        if "response" not in result:
+            return {**{k: v for k, v in result.items() if k != "finished_at"},
+                    "finished_after_release_seconds": finished}
+        response = result["response"]
+        receipt = response.get("mlx2") or {}
+        return {
+            "finish_reason": (response.get("choices") or [{}])[0].get("finish_reason"),
+            "usage": response.get("usage"),
+            "cached_tokens": receipt.get("cached_tokens"),
+            "finished_after_release_seconds": finished,
+        }
+
+    try:
+        idle = wait_for(
+            lambda s: s.get("inflight") == 0 and s.get("queue_depth") == 0,
+            "server did not become idle before the forcing load",
+        )
+    except TimeoutError as error:
+        return fail(str(error))
+    before = prefill_scheduling_counters(idle)
+    evidence["counters_before"] = before
+
+    hold_tokens = max(
+        16,
+        min(
+            SRPT_FORCING_HOLD_TOKENS,
+            int(settings.get("max_context") or 0) - LONG_CONTEXT_HEADROOM,
+        ),
+    )
+    try:
+        hold = post(
+            no_thinking(
+                f"Count upward from 1, one number per line. ({nonce} hold)",
+                hold_tokens,
+                min_tokens=hold_tokens,
+            ),
+            stream=True,
+        )
+    except OSError as error:  # HTTPError included: a refused hold request
+        return fail(f"hold request failed: {type(error).__name__}: {error}")
+    pool = ThreadPoolExecutor(max_workers=8)
+    futures = {}
+    try:
+        # A token on the hold stream proves its lane is in the worker's
+        # active set, which is what keeps a held cohort from attaching.
+        while True:
+            raw = hold.readline()
+            if not raw:
+                return fail("hold stream closed before its first token")
+            line = raw.decode() if isinstance(raw, bytes) else raw
+            if line.startswith("data: [DONE]"):
+                return fail("hold stream finished before its first token")
+            if not line.startswith("data: {"):
+                continue
+            chunk = json.loads(line[6:])
+            if "error" in chunk:
+                return fail(f"hold stream failed: {chunk['error']}")
+            if any(
+                (choice.get("delta") or {}).get("content")
+                or (choice.get("delta") or {}).get("reasoning_content")
+                for choice in chunk.get("choices") or ()
+            ):
+                break
+        held = get_status()
+        base = int(held.get("queue_depth") or 0)
+        step("hold_active", inflight=held.get("inflight"), queue_depth=base)
+
+        cohort_held = False
+        for attempt in range(1, SRPT_FORCING_COHORT_ATTEMPTS + 1):
+            cohort = {"id": f"qualification-srpt-gate-{nonce}-{attempt}", "size": 2}
+            members = [
+                pool.submit(call, no_thinking(
+                    f"Reply with exactly GATE_{index} ({nonce})",
+                    SRPT_FORCING_COMPLETION_TOKENS,
+                    batch_cohort=cohort,
+                ))
+                for index in range(2)
+            ]
+            deadline = monotonic() + setup_seconds
+            while True:
+                status = get_status()
+                if int(status.get("queue_depth") or 0) >= base + 2:
+                    cohort_held = True
+                    break
+                if any(member.done() for member in members) or monotonic() >= deadline:
+                    break
+                sleep(poll_seconds)
+            if cohort_held:
+                futures["cohort"] = members
+                step("cohort_held", attempt=attempt,
+                     queue_depth=status.get("queue_depth"))
+                break
+            outcomes = [summary(member.result()) for member in members]
+            step("cohort_not_published", attempt=attempt, outcomes=outcomes)
+        if not cohort_held:
+            return fail("the gating cohort was never published")
+
+        long_words = srpt_forcing_long_tokens(settings)
+        evidence["long_prompt_words"] = long_words
+        long_text = (long_text_for or long_context_filler)(long_words)
+        # The nonce leads so no earlier prompt (the near-limit context check
+        # uses the same filler) can serve the long prompt from APC.
+        futures["long"] = pool.submit(call, no_thinking(
+            f"nonce {nonce} {long_text} Reply with exactly SRPT_LONG",
+            SRPT_FORCING_COMPLETION_TOKENS,
+        ))
+        status = wait_for(
+            lambda s: int(s.get("queue_depth") or 0) >= base + 3,
+            "long request was not queued behind the held cohort",
+        )
+        step("long_queued", queue_depth=status.get("queue_depth"))
+        futures["shorts"] = []
+        for index in range(shorts):
+            futures["shorts"].append(pool.submit(call, no_thinking(
+                f"Reply with exactly SRPT_SHORT_{index} ({nonce})",
+                SRPT_FORCING_COMPLETION_TOKENS,
+            )))
+            queued = base + 4 + index
+            status = wait_for(
+                lambda s, queued=queued: int(s.get("queue_depth") or 0) >= queued,
+                "short request was not queued behind the long one",
+            )
+        gate = {
+            "queue_depth": status.get("queue_depth"),
+            "inflight": status.get("inflight"),
+            "expected_queue_depth": base + 3 + shorts,
+        }
+        evidence["gate_before_release"] = gate
+        step("shorts_queued", **gate)
+        if int(status.get("queue_depth") or 0) != base + 3 + shorts:
+            return fail("the admission gate opened before the release")
+    except (TimeoutError, OSError, ValueError) as error:
+        # A stalled, refused or malformed setup step is a failed check with
+        # its evidence, never an exception that discards the run.
+        return fail(f"{type(error).__name__}: {error}")
+    finally:
+        # Release (or abandon) the hold lane: its cancellation is the one
+        # event that opens the gate.
+        hold.close()
+        release["at"] = monotonic()
+        step("hold_released")
+        results = {}
+        for name in ("cohort", "long", "shorts"):
+            future = futures.get(name)
+            if future is None:
+                continue
+            if isinstance(future, list):
+                results[name] = [summary(member.result()) for member in future]
+            else:
+                results[name] = summary(future.result())
+        pool.shutdown(wait=True)
+        evidence["results"] = results
+
+    settle_deadline = monotonic() + settle_seconds
+    while True:
+        after = prefill_scheduling_counters(get_status())
+        reorders = prefill_scheduling_reorders(before, after)
+        if reorders > 0 or monotonic() >= settle_deadline:
+            break
+        sleep(min(0.25, settle_seconds))
+    evidence["counters_after"] = after
+    evidence["reorders"] = reorders
+    results = evidence["results"]
+    completed = all(
+        "usage" in result
+        for result in [*results.get("cohort", []), results.get("long", {}),
+                       *results.get("shorts", [])]
+    ) and len(results.get("shorts", [])) == shorts
+    long_result = results.get("long", {})
+    if "usage" in long_result:
+        prompt_tokens = int((long_result.get("usage") or {}).get("prompt_tokens") or 0)
+        residual = prompt_tokens - int(long_result.get("cached_tokens") or 0)
+        evidence["long_residual_tokens"] = residual
+        evidence["long_multi_slice"] = residual > int(settings.get("prefill_step") or 0) + 1
+    if not completed:
+        return fail("a forcing-load request did not complete")
+    if reorders <= 0:
+        return fail("the scheduler did not reorder a queued short prompt")
+    return True, evidence
+
+
 def sp_qmm_routed_observation(initial, final):
     """Count only routed calls made during this qualification run."""
     if initial is None:
@@ -2241,6 +2588,22 @@ def main():
                  "content": [content(run) for run in spomin_runs],
                  "cached_tokens": [run["mlx2"]["cached_tokens"] for run in spomin_runs]},
             )
+        forced = None
+        if initial["settings"].get("prefill_scheduling"):
+            # Only a route that selects SRPT runs the forcing load; every
+            # other route keeps feature_prefill_scheduling unrequired.  The
+            # load runs before the final status is sampled; its verdict is
+            # checked with the feature checks below, so a failure there does
+            # not hide the quiescence, lease and mechanism checks.
+            import uuid
+
+            forced, forcing_evidence = run_prefill_scheduling_forcing(
+                get_status=lambda: get("/v1/status"),
+                post=post,
+                settings=initial["settings"],
+                nonce=uuid.uuid4().hex,
+            )
+            report["prefill_scheduling_forcing"] = forcing_evidence
         final, quiescence = wait_for_quiescence(
             lambda: get("/v1/status"),
             timeout_seconds=args.quiescence_timeout,
@@ -2295,6 +2658,12 @@ def main():
             initial=initial,
         )
         report["feature_observations"] = observed
+        if forced is not None:
+            check(
+                "prefill_scheduling_forced_reorder",
+                forced,
+                report["prefill_scheduling_forcing"],
+            )
         for feature in sorted(required_features):
             if feature in {"adaptive_mtp_depth", "mtp_ordinary_handoff"}:
                 evidence = report.get("adaptive_benchmark")
@@ -2309,6 +2678,11 @@ def main():
                     "before": initial.get("qsdpa_verify"),
                     "after": final.get("qsdpa_verify"),
                     "verify_delta": observed["qsdpa_verify_kernel"],
+                }
+            elif feature == "prefill_scheduling":
+                evidence = {
+                    "counters": prefill_scheduling_counters(final),
+                    "forcing_load": report.get("prefill_scheduling_forcing"),
                 }
             else:
                 evidence = execution
