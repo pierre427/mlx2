@@ -105,8 +105,10 @@ class SelfMTPLaneAdmissionController:
     margin that grows as the host shrinks.
 
     ``available_execution_bytes`` hands ``decide``
-    ``min(host available, advisory - in use)``.  The second term is where the
-    OS margin already lives.  ``host - advisory`` is exactly what macOS has
+    ``min(host available, advisory - in use)`` (the host term carries the
+    ``host_term_reserve_credit_bytes`` credit: it measures the rest of the
+    host, so the service quota is not charged against it a second time).
+    The second term is where the OS margin already lives.  ``host - advisory`` is exactly what macOS has
     withheld from this process before we reserve anything, and that share is
     **not** a constant fraction of the host:
 
