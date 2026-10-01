@@ -797,11 +797,12 @@ def _moe_rows_refusal(block, x, rows):
 
 def _dense_gate_ok(layer) -> bool:
     """A dense shared gate (mixed-precision artifacts keep it bf16): exactly
-    ``nn.Linear``, no bias, bf16 weight. A window runs it one row at a time."""
+    ``nn.Linear`` (or the row-exact route's swap of it), no bias, bf16
+    weight. A window runs it one row at a time."""
     import mlx.nn as _nn
 
     return (
-        type(layer) is _nn.Linear
+        getattr(type(layer), "_mlx2_row_exact_base", type(layer)) is _nn.Linear
         and "bias" not in layer
         and layer["weight"].dtype == mx.bfloat16
     )

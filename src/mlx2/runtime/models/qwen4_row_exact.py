@@ -16,6 +16,12 @@ projections     every trunk ``QuantizedLinear`` and the LM head: the
                 one-row ``qmv_fast``/``qmv`` bits per row), or one stock
                 one-row call per row where the kernel does not cover the
                 layout
+dense           every trunk dense ``nn.Linear`` (mixed-precision artifacts
+projections     keep the HC ``block_inject_weight`` and the MoE
+                ``shared_expert_gate`` bf16): one one-token call per row
+                (MLX's dense matmul is ``gemv`` at one row and
+                ``gemv_wide``/GEMM tiling at more, so the composed M=R call
+                is not the one-token arithmetic)
 norms           ``GroupRMSNorm`` sees the one-token width (the width-8 fast
                 RMSNorm gate would move wider windows to the eager norm)
 attention       batched row-exact projections, then per row the one-token
@@ -39,7 +45,10 @@ stream mean, fast RMSNorm, logsumexp) was checked row-invariant on Metal.
 Fail closed: each window records the route every stage took.  A window is
 counted row-exact only when no stage fell back to a width-dependent path;
 ``status()`` reports both counts, and a receipt may say ``row_exact`` only
-when the not-exact count did not move.
+when the not-exact count did not move.  A projection module the route does
+not swap (a ``Linear``/``QuantizedLinear`` subclass installed by another
+mechanism, or a tied embedding head) would run its stock multi-row call
+unrecorded, so its presence fails every window (``static_refusals``).
 """
 from __future__ import annotations
 
@@ -74,6 +83,27 @@ class _RowExactQuantizedLinear:
         return y
 
 
+class _RowExactLinear:
+    """Mixin: a dense (unquantized) ``nn.Linear`` inside a window, one
+    one-token-shaped call per row.
+
+    MLX runs a bf16 ``x @ W.T`` as ``gemv`` at one row but as ``gemv_wide`` or
+    a tiled GEMM at more, so the composed multi-row call does not carry the
+    one-token step's bits (W3, Metal: the uncensored artifact's bf16 HC
+    inject at 17 rows).  Each row here IS the one-token call."""
+
+    def __call__(self, x):
+        window = REV.current()
+        rows = _rows(x)
+        if window is None or rows <= 1:
+            return super().__call__(x)
+        call = super(_RowExactLinear, self).__call__
+        flat = x.reshape(rows, 1, 1, x.shape[-1])
+        out = mx.concatenate([call(flat[r]) for r in range(rows)], axis=0)
+        window.note("projections", "dense_per_row", rows)
+        return out.reshape(*x.shape[:-1], out.shape[-1])
+
+
 class _RowExactMoE:
     """Mixin: the MoE block of a window.
 
@@ -91,6 +121,12 @@ class _RowExactMoE:
         if window is None or rows <= 1:
             return super().__call__(x)
         if getattr(self, "moe_router_mode", "stock") != "fused":
+            from . import qwen3_next as Q3N
+
+            if Q3N._MOE_GATE_COMPILE and rows > Q3N._MOE_GATE_COMPILE_MAX_TOKENS:
+                # The one-token step routes through the compiled router; a
+                # window this wide runs the eager routing instead.
+                window.fail("moe_router_compiled_one_token_eager_window")
             window.note("moe_router", "batched", rows)
             return super().__call__(x)
         flat = x.reshape(rows, 1, 1, x.shape[-1])
@@ -350,6 +386,8 @@ class RowExactVerify:
             cls = type(module)
             if cls is nn.QuantizedLinear:
                 mixin = _RowExactQuantizedLinear
+            elif cls is nn.Linear:
+                mixin = _RowExactLinear
             elif cls is Attention:
                 mixin = _RowExactAttention
             elif cls is Qwen3NextSparseMoeBlock:
@@ -362,12 +400,38 @@ class RowExactVerify:
                 continue
             self._swapped.append((module, cls))
             module.__class__ = _subclass(mixin, cls)
+        self.static_refusals = self._audit()
         object.__setattr__(model, "mtp_verify_backbone", self.verify_backbone)
         object.__setattr__(model, "mtp_verify_logits", self.verify_logits)
+
+    def _audit(self) -> Dict[str, int]:
+        """Projection modules a window would reach without a row-exact form.
+
+        The window runs ``language_model`` (trunk and LM head).  Every
+        ``Linear``/``QuantizedLinear`` there must be one this route swapped;
+        a subclass installed by another mechanism (for example a prefill
+        projection class) keeps its stock multi-row call, and a tied head
+        multiplies the embedding table at M=R.  Each is a reason every window
+        fails closed."""
+        language = self.model.language_model
+        swapped = {id(module) for module, _ in self._swapped}
+        refusals: Dict[str, int] = {}
+        for _, module in language.named_modules():
+            if id(module) in swapped:
+                continue
+            if isinstance(module, (nn.Linear, nn.QuantizedLinear)):
+                key = f"unswapped_projection:{type(module).__name__}"
+                refusals[key] = refusals.get(key, 0) + 1
+        if getattr(getattr(language, "args", None), "tie_word_embeddings", False):
+            refusals["tied_embedding_head"] = 1
+        return refusals
 
     # -- control ---------------------------------------------------------------
     def enable(self, flag: bool = True) -> None:
         self.enabled = bool(flag)
+        if self.enabled:
+            # Re-audit: a mechanism may have swapped classes since install.
+            self.static_refusals = self._audit()
 
     def remove(self) -> None:
         for module, cls in self._swapped:
@@ -394,6 +458,8 @@ class RowExactVerify:
 
         self._retire_pending()
         record = REV.Window(rows)
+        for reason in self.static_refusals:
+            record.fail(reason)
         before = self._gdn_engaged()
         with REV.window(record), Q._declared_width(1):
             out = model.language_model.model(tokens, cache, return_hyper=True)
@@ -482,6 +548,7 @@ class RowExactVerify:
             "schema": SCHEMA,
             "enabled": self.enabled,
             "installed_modules": len(self._swapped),
+            "static_refusals": dict(self.static_refusals),
             "gdn_layers": len(self._gdn),
             "windows": counts["windows"],
             "windows_row_exact": counts["windows_row_exact"],

@@ -171,7 +171,9 @@ def test_enabled_route_matches_mtp_off_and_fails_closed_without_fused_gdn():
         assert status["windows"] > 0
         assert status["windows_row_exact"] == 0
         assert status["failures"] == {"gdn_fused_verify_not_engaged": status["windows"]}
-        assert status["stages"]["projections"] == {"per_row": status["stages"]["projections"]["per_row"]}
+        # The tiny model keeps some projections dense (K not a multiple of
+        # the group): those run one one-token call per row.
+        assert set(status["stages"]["projections"]) == {"per_row", "dense_per_row"}
         assert status["stages"]["moe_experts"]["per_row"] >= status["rows"]
         assert status["stages"]["moe_router"]["batched"] >= status["rows"]
         assert status["stages"]["attention"]["per_row"] > 0
@@ -279,5 +281,173 @@ def test_unconsumed_verify_window_is_closed_not_exact():
         assert handle._pending is None
         assert handle.counts["windows_not_exact"] == 1
         assert handle.counts["failures"].get("verify_window_not_consumed") == 1
+    finally:
+        mx.set_default_device(previous)
+
+
+def _mixed_tiny_model(seed=3):
+    """The tiny model with the uncensored Flash-Next artifact's dense pieces:
+    a bf16 HC ``block_inject_weight`` and a bf16 ``shared_expert_gate``."""
+    mx.random.seed(seed)
+    model = _tiny_qwen4_model()
+    nn.quantize(
+        model,
+        group_size=32,
+        bits=4,
+        class_predicate=lambda p, m: isinstance(m, nn.Linear)
+        and m.weight.shape[-1] % 32 == 0
+        and not p.endswith(("block_inject_weight", "shared_expert_gate")),
+    )
+    mx.eval(model.parameters())
+    return model
+
+
+def _fake_gdn_engaged(handle):
+    """Report the fused GDN verify kernel engaged (it is Metal-only), so a
+    CPU window can be counted row-exact and the other stages are what decide."""
+    calls = [0]
+
+    def engaged():
+        calls[0] += 1
+        return (calls[0] // 2) * len(handle._gdn)
+
+    handle._gdn_engaged = engaged
+
+
+def test_window_with_dense_linear_is_row_exact_only_with_one_token_rows(monkeypatch):
+    """W3 (Metal): the bf16 HC inject at M=R is not the one-token gemv, yet a
+    window that ran it was labelled row-exact.  A window counted row-exact
+    must not have run any dense ``nn.Linear`` at more than one row."""
+    previous = mx.default_device()
+    mx.set_default_device(mx.cpu)
+    try:
+        model = _mixed_tiny_model()
+        dense = [
+            name for name, m in model.language_model.named_modules()
+            if type(m) is nn.Linear
+        ]
+        assert any(n.endswith("block_inject_weight") for n in dense)
+        assert any(n.endswith("shared_expert_gate") for n in dense)
+        handle = install(model)
+        handle.enable(True)
+        _fake_gdn_engaged(handle)
+        seen = []
+        stock = nn.Linear.__call__
+
+        def spy(self, x):
+            if REV.active():
+                seen.append(int(x.size // x.shape[-1]))
+            return stock(self, x)
+
+        monkeypatch.setattr(nn.Linear, "__call__", spy)
+        cache = model.make_cache()
+        mx.eval(model(mx.array([[1, 7, 3, 9, 2, 8]]), cache=cache))
+        (hidden, _) = handle.verify_backbone(mx.array([[4, 6, 5]]), cache)
+        mx.eval(handle.verify_logits(hidden))
+        status = handle.status()
+        assert status["windows"] == 1
+        assert seen, "the window reached no dense projection"
+        if status["windows_row_exact"]:
+            assert max(seen) == 1, f"dense Linear ran at {max(seen)} rows in a row-exact window"
+        assert status["windows_row_exact"] == 1, status["failures"]
+        assert status["stages"]["projections"]["dense_per_row"] > 0
+    finally:
+        mx.set_default_device(previous)
+
+
+def test_dense_linear_rows_equal_their_one_token_calls():
+    previous = mx.default_device()
+    mx.set_default_device(mx.cpu)
+    try:
+        model = _mixed_tiny_model()
+        handle = install(model)
+        layer = model.language_model.model.layers[0].attn_hyper_connection.block_inject_weight
+        assert type(layer).__name__ == "RowExactLinear"
+        x = mx.random.normal((1, 5, layer.weight.shape[-1]))
+        record = REV.Window(5)
+        with REV.window(record):
+            y = layer(x)
+        one = [nn.Linear.__call__(layer, x[:, r : r + 1]) for r in range(5)]
+        assert np.array_equal(
+            np.array(y.view(mx.uint32)),
+            np.array(mx.concatenate(one, axis=1).view(mx.uint32)),
+        )
+        assert record.exact and record.stages == {"projections": {"dense_per_row": 5}}
+        # Outside a window (and at one row) the layer is the plain Linear.
+        assert np.array_equal(np.array(layer(x)), np.array(nn.Linear.__call__(layer, x)))
+        handle.remove()
+        assert type(layer) is nn.Linear
+    finally:
+        mx.set_default_device(previous)
+
+
+def test_swapped_dense_shared_gate_keeps_the_moe_window_admission():
+    from mlx2.runtime.models import qwen3_next as Q3N
+
+    previous = mx.default_device()
+    mx.set_default_device(mx.cpu)
+    try:
+        model = _mixed_tiny_model()
+        gate = model.language_model.model.layers[0].mlp.shared_expert_gate
+        gate.weight = gate.weight.astype(mx.bfloat16)
+        assert Q3N._dense_gate_ok(gate)
+        install(model)
+        assert type(gate) is not nn.Linear
+        assert Q3N._dense_gate_ok(gate)
+    finally:
+        mx.set_default_device(previous)
+
+
+def test_unswapped_projection_or_tied_head_fails_every_window():
+    class OtherQuantizedLinear(nn.QuantizedLinear):
+        pass
+
+    previous = mx.default_device()
+    mx.set_default_device(mx.cpu)
+    try:
+        model = _mixed_tiny_model()
+        hc = model.language_model.model.layers[0].attn_hyper_connection
+        hc.input_mix_weight_down.__class__ = OtherQuantizedLinear
+        handle = install(model)
+        assert handle.status()["static_refusals"] == {
+            "unswapped_projection:OtherQuantizedLinear": 1
+        }
+        handle.enable(True)
+        _fake_gdn_engaged(handle)
+        cache = model.make_cache()
+        mx.eval(model(mx.array([[1, 7, 3, 9, 2, 8]]), cache=cache))
+        start = handle.snapshot()
+        (hidden, _) = handle.verify_backbone(mx.array([[4, 6, 5]]), cache)
+        mx.eval(handle.verify_logits(hidden))
+        status = handle.status()
+        assert status["windows_not_exact"] == 1
+        assert status["failures"] == {"unswapped_projection:OtherQuantizedLinear": 1}
+        assert handle.receipt(start)["row_exact"] is False
+        handle.remove()
+
+        tied = _mixed_tiny_model()
+        tied.language_model.args.tie_word_embeddings = True
+        assert install(tied).status()["static_refusals"] == {"tied_embedding_head": 1}
+    finally:
+        mx.set_default_device(previous)
+
+
+def test_compiled_router_window_wider_than_its_trace_fails(monkeypatch):
+    from mlx2.runtime.models import qwen3_next as Q3N
+
+    previous = mx.default_device()
+    mx.set_default_device(mx.cpu)
+    try:
+        model = _mixed_tiny_model()
+        handle = install(model)
+        block = model.language_model.model.layers[0].mlp
+        monkeypatch.setattr(Q3N, "_MOE_GATE_COMPILE", True)
+        monkeypatch.setattr(Q3N, "_MOE_GATE_COMPILE_MAX_TOKENS", 2)
+        x = mx.random.normal((1, 3, 32))
+        record = REV.Window(3)
+        with REV.window(record):
+            mx.eval(block(x))
+        assert record.failures == {"moe_router_compiled_one_token_eager_window": 1}
+        handle.remove()
     finally:
         mx.set_default_device(previous)

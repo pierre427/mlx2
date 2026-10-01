@@ -54,7 +54,8 @@ both launches run law 0 with one grid row per verify row (up to
 ``ROW_EXACT_MAX_ROWS``), never qmv_wide.  The route's class-swapped
 projections (``_row_exact_base`` = ``nn.QuantizedLinear``) are admitted.  Opt-in
 (``MLX_QWEN4_HC_ROW_EXACT``, policy ``row_exact_window_kernels``); off, a window
-keeps the composed path, which is row-exact too.
+keeps the composed path, which is row-exact too because the route swaps every
+projection in it (a dense bf16 inject included: one one-token call per row).
 
 Admission is structural and exact-shape: rows as above, bf16 activations,
 four streams, affine group-64 projections with bf16 scales/biases that are
