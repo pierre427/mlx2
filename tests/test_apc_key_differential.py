@@ -200,6 +200,11 @@ NOT_BOUND = {
     "env: MLX_QWEN4_HC_DECODE": {"env": {"MLX_QWEN4_HC_DECODE": "0"}},
     "env: MLX_QWEN4_ATTN_FUSED_ROWS": {"env": {"MLX_QWEN4_ATTN_FUSED_ROWS": "0"}},
     "env: MLX_QWEN4_MOE_TOPK_FOLD": {"env": {"MLX_QWEN4_MOE_TOPK_FOLD": "off"}},
+    # MoE rows padded to MLX's streaming floor (default 3 rows/expert): the
+    # same kernel switch a prompt already gets when it crosses MLX's own
+    # floor, and chunk geometry already moves it (tolerance class, like
+    # prefill slicing).
+    "env: MLX2_MOE_RHS_PAD_MIN_ROWS": {"env": {"MLX2_MOE_RHS_PAD_MIN_ROWS": "0"}},
     # Fused routed weighted sum: replays MLX's col_reduce_small order, bit-exact
     # against the eager tail (qualification/runs/recon-20261001/l4-moe-wsum).
     "env: MLX_QWEN4_MOE_WEIGHTED_SUM": {"env": {"MLX_QWEN4_MOE_WEIGHTED_SUM": "1"}},

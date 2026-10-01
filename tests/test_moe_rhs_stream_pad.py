@@ -36,9 +36,15 @@ def pad_floor():
     SL._RHS_PAD_MIN_ROWS_PER_EXPERT = saved
 
 
+def test_pad_default_is_three_rows_per_expert():
+    assert SL._rhs_pad_floor({}) == 3
+    assert SL._rhs_pad_floor({"MLX2_MOE_RHS_PAD_MIN_ROWS": "0"}) == 0
+    assert SL._rhs_pad_floor({"MLX2_MOE_RHS_PAD_MIN_ROWS": "2"}) == 2
+
+
 def test_pad_arithmetic(pad_floor):
     pad_floor(0)
-    assert SL._rhs_stream_pad(300, 128) == 0  # off by default
+    assert SL._rhs_stream_pad(300, 128) == 0  # 0 turns it off
     pad_floor(2)
     assert SL._rhs_stream_pad(255, 128) == 0  # under 2 rows/expert
     assert SL._rhs_stream_pad(256, 128) == 512 - 256
