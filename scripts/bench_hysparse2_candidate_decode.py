@@ -19,11 +19,14 @@ def main():
     p.add_argument("--tokens", type=Path, required=True)
     p.add_argument("--reference", type=Path, required=True)
     p.add_argument("--candidate", type=Path, help="Isolated candidate attention module; does not replace runtime source")
+    p.add_argument("--candidate-only", action="store_true", help="Capacity cell without a reference parity claim")
     p.add_argument("--output", type=Path, required=True)
     p.add_argument("--contexts", type=int, nargs="+", default=[4096, 16384])
     p.add_argument("--decode-tokens", type=int, default=16)
     p.add_argument("--public-methods", action="store_true", help="Compare reference model public prefill/decode methods on current internals")
     args = p.parse_args()
+    if args.candidate_only and (not args.candidate or args.public_methods):
+        p.error("candidate-only requires an isolated attention candidate")
     if args.candidate and args.public_methods:
         p.error("candidate attention cannot be combined with public-method comparison")
     if (any(length < 8 for length in args.contexts)
@@ -45,7 +48,7 @@ def main():
         candidate_spec.loader.exec_module(candidate)
     c = Config(**json.loads((args.checkpoint / "state.json").read_text())["config"])
     report = {
-        "schema": "mlx2.hysparse2-candidate-decode.v1",
+        "schema": "mlx2.hysparse2-candidate-capacity.v1" if args.candidate_only else "mlx2.hysparse2-candidate-decode.v1",
         "completed": False,
         "serving_route_qualified": False,
         "repetitions": 1,
@@ -53,7 +56,8 @@ def main():
         "batch": 1,
         "dtype": "bfloat16",
         "decode_tokens": args.decode_tokens,
-        "arm_order": ["reference", "gathered"],
+        "arm_order": ["gathered"] if args.candidate_only else ["reference", "gathered"],
+        "reference_parity_exercised": not args.candidate_only,
         "contexts": [],
         "checkpoint_sha256": file_hash(args.checkpoint / "model.safetensors"),
         "tokens_sha256": file_hash(args.tokens),
@@ -72,6 +76,8 @@ def main():
         from mlx2.experimental.hysparse2 import attention
         from mlx2.experimental.hysparse2 import model as model_module
         candidate_attention = candidate.attention if candidate is not None else attention.attention
+        arms = (("gathered", candidate_attention),) if args.candidate_only else (
+            ("reference", reference.attention), ("gathered", candidate_attention))
 
         mx.set_default_device(mx.gpu)
         mx.set_memory_limit(24 << 30)
@@ -103,10 +109,7 @@ def main():
             )
         }
         try:
-            for label, function in (
-                ("reference", reference.attention),
-                ("gathered", candidate_attention),
-            ):
+            for label, function in arms:
                 install(label, function)
                 logits, cache = model.prefill(mx.array(values[:8][None]))
                 model.decode(mx.argmax(logits[:, -1], axis=-1)[:, None], cache)
@@ -115,10 +118,7 @@ def main():
             mx.clear_cache()
             for length in args.contexts:
                 row, results = {"context": length, "arms": {}}, []
-                for label, function in (
-                    ("reference", reference.attention),
-                    ("gathered", candidate_attention),
-                ):
+                for label, function in arms:
                     install(label, function)
                     stats = (getattr(candidate, "_MATERIALIZATION_STATS", None)
                              if label == "gathered" and candidate is not None else None)
@@ -151,6 +151,13 @@ def main():
                         mx.all(mx.isfinite(logits)).item()
                     )
                     output = mx.concatenate(generated, axis=1).tolist()[0]
+                    expected_length = length + args.decode_tokens
+                    expected_kv = ((1 + c.cross_blocks) * expected_length
+                                   + (c.self_layers - 1) * min(expected_length, c.local_window)) * 2 * c.head_dim * 2
+                    expected_self = c.self_layers * ((length + c.prefill_chunk - 1) // c.prefill_chunk + args.decode_tokens)
+                    expected_cross = c.cross_blocks * (1 + c.sparse_per_block) * (1 + args.decode_tokens)
+                    assert cache.resident_bytes() == expected_kv
+                    assert cache.self_layer_calls == expected_self and cache.cross_layer_calls == expected_cross
                     results.append((output, logits))
                     row["arms"][label] = {
                         "prefill_seconds": prefill,
@@ -159,6 +166,13 @@ def main():
                         "decode_tokens_per_second": args.decode_tokens / elapsed,
                         "peak_memory_bytes": mx.get_peak_memory(),
                         "kv_bytes": cache.resident_bytes(),
+                        "finite_logits": True,
+                        "final_cache_length": cache.length,
+                        "self_layer_calls": cache.self_layer_calls,
+                        "cross_layer_calls": cache.cross_layer_calls,
+                        "expected_kv_bytes": expected_kv,
+                        "expected_self_layer_calls": expected_self,
+                        "expected_cross_layer_calls": expected_cross,
                     }
                     if stats is not None:
                         row["arms"][label]["periodic_materializations"] = {
@@ -167,14 +181,16 @@ def main():
                         }
                     del cache, prompt, generated
                     mx.clear_cache()
-                row["tokens_equal"] = results[0][0] == results[1][0]
-                row["final_logits_max_error"] = float(
-                    mx.max(mx.abs(results[0][1] - results[1][1])).item()
-                )
+                if not args.candidate_only:
+                    row["tokens_equal"] = results[0][0] == results[1][0]
+                    row["final_logits_max_error"] = float(
+                        mx.max(mx.abs(results[0][1] - results[1][1])).item()
+                    )
                 report["contexts"].append(row)
                 save()
                 print(json.dumps(row), flush=True)
-                assert row["tokens_equal"] and row["final_logits_max_error"] == 0, row
+                if not args.candidate_only:
+                    assert row["tokens_equal"] and row["final_logits_max_error"] == 0, row
                 del results
         finally:
             model_module.attention = attention.attention

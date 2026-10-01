@@ -17,6 +17,7 @@ def main():
     p.add_argument("--output", type=Path, required=True)
     p.add_argument("--reference", required=True)
     p.add_argument("--candidate", required=True)
+    p.add_argument("--candidate-only", action="store_true")
     p.add_argument("--length", type=int, required=True)
     p.add_argument("--decode-tokens", type=int, default=8)
     p.add_argument("--timeout-seconds", type=int, default=900)
@@ -31,6 +32,8 @@ def main():
                "--output", str(args.output), "--reference", args.reference,
                "--candidate", args.candidate, "--contexts", str(args.length),
                "--decode-tokens", str(args.decode_tokens)]
+    if args.candidate_only:
+        command.append("--candidate-only")
     with log_path.open("x") as log:
         child = subprocess.Popen(command, env=dict(os.environ, PYTHONPATH="src"),
                                  stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
