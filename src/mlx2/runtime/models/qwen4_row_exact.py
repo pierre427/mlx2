@@ -27,8 +27,10 @@ GDN             the fused verify kernel (already bit-identical to the
                 stock multi-row block is not row-exact
 MoE             router gate and shared expert through the kernel, routing
                 and combine batched (per-row reductions), routed experts one
-                one-token call per row; wave 2 can fuse this once the
-                routed kernel covers verify windows
+                one-token call per row; with the MoE row window selected
+                (policy ``moe_window_row_exact``, qwen4_moe_window) the
+                whole block runs in the window launches instead, each row
+                still bit-identical to its one-token call
 ==============  ============================================================
 
 Everything else in the window (embedding, PLE gather, HC elementwise and
@@ -281,9 +283,14 @@ def _subclass(mixin, cls):
     key = (mixin, cls)
     sub = _SUBCLASSES.get(key)
     if sub is None:
-        # ``_row_exact_base`` names the swapped-out class for kernels that
-        # admit only an exact layer class (qwen4_hc_decode).
-        sub = type("RowExact" + cls.__name__, (mixin, cls), {"_row_exact_base": cls})
+        # The swapped-out class, for kernels that admit only an exact layer
+        # class: ``_row_exact_base`` (qwen4_hc_decode) and
+        # ``_mlx2_row_exact_base`` (the shared-fold admission, qwen3_next).
+        sub = type(
+            "RowExact" + cls.__name__,
+            (mixin, cls),
+            {"_row_exact_base": cls, "_mlx2_row_exact_base": cls},
+        )
         _SUBCLASSES[key] = sub
     return sub
 

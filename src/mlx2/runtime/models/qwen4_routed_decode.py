@@ -1161,7 +1161,9 @@ def _shared_kernels():
 def _linear_ok(layer, bits: int, out_dims: int, in_dims: int) -> str | None:
     import mlx.nn as nn
 
-    if type(layer) is not nn.QuantizedLinear:
+    # The row-exact verify route (qwen4_row_exact) swaps in a subclass whose
+    # one-row call is the plain one; the kernels read only the arrays.
+    if getattr(type(layer), "_mlx2_row_exact_base", type(layer)) is not nn.QuantizedLinear:
         return "not a plain QuantizedLinear"
     if "_lane_prepared" in layer.__dict__:
         return "lane matmul installed"

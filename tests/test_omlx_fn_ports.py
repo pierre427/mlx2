@@ -533,3 +533,17 @@ def test_policy_accepts_gate_up_down_shared():
 
     chosen = FlashNextPolicy.from_mapping({"moe_routed_decode": "gate_up_down_shared"})
     assert chosen.environment()[RD.ROUTED_DECODE_ENV] == "gate_up_down_shared"
+
+
+def test_shared_fold_admission_sees_through_the_row_exact_subclass():
+    """The row-exact verify route swaps its own QuantizedLinear subclass onto
+    the trunk; its one-row call is the plain one, so the fold still admits."""
+    from mlx2.runtime.models import qwen4_row_exact as RX
+
+    shared = QN.Qwen3NextMLP(H, I)
+    nn.quantize(shared, group_size=64, bits=4)
+    shared.set_dtype(mx.bfloat16)
+    for linear in (shared.gate_proj, shared.up_proj, shared.down_proj):
+        linear.__class__ = RX._subclass(RX._RowExactQuantizedLinear, type(linear))
+    assert type(shared.gate_proj) is not nn.QuantizedLinear
+    assert RD.admit_shared_fold(shared, H, I).accepted
