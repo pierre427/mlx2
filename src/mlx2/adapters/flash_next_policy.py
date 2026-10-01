@@ -16,6 +16,7 @@ _OPTIONAL_KERNEL_ENV = {
     # TensorFold 0.6.1 "Flash Next on Macs at long context" intake
     # (provenance/tensorfold-0.6.1-flashnext-longctx.json).
     "qsa_fused_scores": "MLX_QWEN4_QSA_FUSED_SCORES",
+    "ple_early_dispatch": "MLX_QWEN4_PLE_EARLY_DISPATCH",
 }
 
 
@@ -68,6 +69,14 @@ class FlashNextPolicy:
     # ids identical on Metal, scripts/check_qwen4_qsa_scores.py).  Opt-in;
     # enters the environment and receipts only when enabled.
     qsa_fused_scores: bool = False
+    # TensorFold 0.6.1 "a window's tokens stay on the GPU"
+    # (MLX_QWEN4_PLE_EARLY_DISPATCH): a decode or verify window's ids are
+    # device arrays the n-gram (PLE) layer reads on the host; the layers
+    # before it are dispatched first, so the GPU runs them while the host
+    # waits for the ids and gathers the PLE rows.  Scheduling only (an
+    # async_eval boundary).  Opt-in; enters the environment and receipts
+    # only when enabled.
+    ple_early_dispatch: bool = False
     # Widest verify block the fused GDN verify kernel admits
     # (MLX_QWEN4_FUSED_GDN_VERIFY_MAX_STEPS, 2..17; the kernel module's own
     # default stays 8).  17 since 2026-09-25: every width is bit-exact to the

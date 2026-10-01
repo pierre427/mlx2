@@ -2,8 +2,8 @@
 
 The Metal arithmetic is gated by scripts/check_qwen4_qsa_scores.py (bytes and
 argpartition ids against the stock chain) and the full-model A/B; here: the
-policy fields (opt-in, receipt-neutral, strict), the diagnostics key, and the
-scores admission and its counted fallback.
+policy fields (opt-in, receipt-neutral, strict), the diagnostics key, the
+scores admission and its counted fallback, and the PLE early dispatch order.
 """
 
 import mlx.core as mx
@@ -19,6 +19,7 @@ from qsa_oracle import tiny_args
 
 FIELDS = {
     "qsa_fused_scores": "MLX_QWEN4_QSA_FUSED_SCORES",
+    "ple_early_dispatch": "MLX_QWEN4_PLE_EARLY_DISPATCH",
 }
 
 
@@ -26,9 +27,13 @@ FIELDS = {
 def _reset():
     S.set_enabled(False)
     S.status(reset=True)
+    Q.set_ple_early_dispatch(False)
+    Q._PLE_EARLY_STATS.clear()
     yield
     S.set_enabled(False)
     S.status(reset=True)
+    Q.set_ple_early_dispatch(False)
+    Q._PLE_EARLY_STATS.clear()
 
 
 def test_policy_fields_are_opt_in_and_receipt_neutral():
@@ -39,6 +44,7 @@ def test_policy_fields_are_opt_in_and_receipt_neutral():
         assert name not in default.as_dict()
         assert variable not in env
     assert tensorfold_longctx_diagnostics(default) == {}
+    assert "ple_early" not in Q.qwen4_eager_dispatch_status()
 
 
 @pytest.mark.parametrize("name", sorted(FIELDS))
@@ -134,3 +140,88 @@ def test_indexer_counts_the_fallback_and_keeps_the_stock_selection():
     assert np.array_equal(np.array(stock.raw_block_ids), np.array(fused.raw_block_ids))
     # CPU: refused and counted, the MLX chain ran
     assert S.status()["counts"] == {"fallback_device": 1}
+
+
+class _Recorder:
+    def __init__(self, monkeypatch):
+        self.events = []
+        real = mx.async_eval
+
+        def record(*arrays):
+            self.events.append("async_eval")
+            return real(*arrays)
+
+        monkeypatch.setattr(mx, "async_eval", record)
+        stock = Q.DecoderLayer.__call__
+        recorder = self
+
+        def layer_call(layer, *a, **k):
+            recorder.events.append(f"layer{layer._test_index}")
+            return stock(layer, *a, **k)
+
+        monkeypatch.setattr(Q.DecoderLayer, "__call__", layer_call)
+
+
+def _ple_model():
+    mx.random.seed(5)
+    args = tiny_args(ple_layer_ids=[2], num_hidden_layers=4)
+    model = Q.Qwen4ExpTextModel(args)
+    model.set_dtype(mx.float32)
+    for index, layer in enumerate(model.layers):
+        layer._test_index = index
+    return model
+
+
+@pytest.mark.parametrize("early", [False, True])
+def test_ple_early_dispatch_runs_the_layers_before_the_ple_layer(monkeypatch, early):
+    monkeypatch.setattr(Q, "_EAGER_DISPATCH", False)
+    model = _ple_model()
+    assert model.layers[1].ple is not None
+    inputs = mx.array([[3, 5, 7]])
+    Q.set_ple_early_dispatch(False)
+    want = model(inputs)
+    mx.eval(want)
+    recorder = _Recorder(monkeypatch)
+    Q.set_ple_early_dispatch(early)
+    got = model(inputs)
+    mx.eval(got)
+    assert np.array_equal(np.array(got), np.array(want))
+    if early:
+        # layer 0 is on the GPU queue before layer 1 reads the window's ids
+        assert recorder.events[:3] == ["layer0", "async_eval", "layer1"]
+        assert Q.qwen4_eager_dispatch_status()["ple_early"]["dispatches"] == 1
+    else:
+        assert "async_eval" not in recorder.events
+        assert "ple_early" not in Q.qwen4_eager_dispatch_status()
+
+
+def test_ple_early_dispatch_declines_prefill_rows(monkeypatch):
+    monkeypatch.setattr(Q, "_EAGER_DISPATCH", False)
+    monkeypatch.setattr(Q, "_EAGER_DISPATCH_MAX_ROWS", 4)
+    model = _ple_model()
+    recorder = _Recorder(monkeypatch)
+    Q.set_ple_early_dispatch(True)
+    mx.eval(model(mx.array([[1, 2, 3, 4, 5, 6]])))
+    assert "async_eval" not in recorder.events
+    assert Q.qwen4_eager_dispatch_status()["ple_early"]["row_declines"] == 1
+
+
+def test_reads_host_ids_follows_the_route_choice(monkeypatch):
+    model = _ple_model()
+    ngram = model.layers[1].ple.ple_embedding
+    ids = mx.array([[1, 2, 3]])
+    calls = []
+    real = Q.NGramEmbedding._ngram_ids_numpy
+
+    def spy(self, *a, **k):
+        calls.append(1)
+        return real(self, *a, **k)
+
+    monkeypatch.setattr(Q.NGramEmbedding, "_ngram_ids_numpy", spy)
+    for backend in ("cpu", "routed_cpu", "metal_prefill"):
+        ngram.hash_backend = backend
+        calls.clear()
+        mx.eval(ngram(ids))
+        assert ngram.reads_host_ids(ids) is bool(calls), backend
+    ngram.hash_backend = "metal"
+    assert ngram.reads_host_ids(ids) is False

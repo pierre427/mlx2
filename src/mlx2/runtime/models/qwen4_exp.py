@@ -462,10 +462,27 @@ _EAGER_DISPATCH_STRIDE = max(
 )
 
 
+# TensorFold 0.6.1 "a window's tokens stay on the GPU": a decode or verify
+# window's ids are device arrays (sampled tokens, chained drafts) that the
+# n-gram (PLE) layer reads on the host.  Dispatch the layers before that layer
+# first, so the GPU runs them while the host waits for the ids and gathers
+# the PLE rows.  Scheduling only (an ``async_eval`` boundary), same kernels.
+_PLE_EARLY_DISPATCH = _env_flag("MLX_QWEN4_PLE_EARLY_DISPATCH")
+# Own counters (not round_levers'), so default receipts keep their key set.
+_PLE_EARLY_STATS = Counter()
+
+
+def set_ple_early_dispatch(value: bool) -> None:
+    """Process switch (the policy sets it through the environment; in-process
+    A/B harnesses flip it directly).  ``False`` is the kill switch."""
+    global _PLE_EARLY_DISPATCH
+    _PLE_EARLY_DISPATCH = bool(value)
+
+
 def qwen4_eager_dispatch_status() -> dict:
     """Return the selected eager-dispatch policy and bounded engagement counts."""
     counters = _lv.counters()
-    return {
+    report = {
         "enabled": bool(_EAGER_DISPATCH),
         "max_rows": int(_EAGER_DISPATCH_MAX_ROWS),
         "stride": int(_EAGER_DISPATCH_STRIDE),
@@ -473,6 +490,12 @@ def qwen4_eager_dispatch_status() -> dict:
         "row_declines": int(counters["eager_dispatch_row_declines"]),
         "async_evals": int(counters["eager_async_evals"]),
     }
+    if _PLE_EARLY_DISPATCH:
+        report["ple_early"] = {
+            name: int(_PLE_EARLY_STATS[name])
+            for name in ("dispatches", "device_ids", "row_declines")
+        }
+    return report
 
 
 _QSA_DENSE_SHORTCIRCUIT = _env_flag("MLX_QWEN4_QSA_DENSE_SHORTCIRCUIT")
@@ -2415,6 +2438,26 @@ class NGramEmbedding(nn.Module):
 
         self.ngram_embedding.submit_prefetch(hash_and_dequant)
         _lv.bump("ple_prefetch_submitted")
+        return True
+
+    def reads_host_ids(self, input_ids: mx.array) -> bool:
+        """Whether ``__call__`` reads ``input_ids`` on the host (a sync when
+        they are unevaluated device arrays), by the same route choice."""
+        table = self.ngram_embedding
+        if (
+            self.file_backed
+            and input_ids.shape == (1, 3)
+            and mx.metal.is_available()
+            and table.verify_device_available
+            and table.verify_status["device_prepared"]
+        ):
+            return False
+        if self.file_backed or self.hash_backend == "routed_cpu":
+            return True
+        if self.hash_backend == "metal":
+            return False
+        if self.hash_backend == "metal_prefill":
+            return input_ids.shape[1] < self.metal_hash_min_tokens
         return True
 
     def __call__(
@@ -6376,7 +6419,17 @@ class Qwen4ExpTextModel(PipelineMixin, nn.Module):
             _lv.bump("eager_dispatch_row_declines")
         stride = _EAGER_DISPATCH_STRIDE
         last = len(self.layers) - 1
+        ple_early = _PLE_EARLY_DISPATCH and inputs is not None
+        if ple_early and forward_rows > _EAGER_DISPATCH_MAX_ROWS:
+            _PLE_EARLY_STATS["row_declines"] += 1
+            ple_early = False
         for index, (layer, layer_cache) in enumerate(zip(self.layers, cache)):
+            if ple_early and index and layer.ple is not None:
+                if layer.ple.ple_embedding.reads_host_ids(inputs):
+                    mx.async_eval(hidden)
+                    _PLE_EARLY_STATS["dispatches"] += 1
+                else:
+                    _PLE_EARLY_STATS["device_ids"] += 1
             hidden = layer(hidden, inputs, fa_mask, layer_cache, ssm_mask)
             if eager and (index == last or (index + 1) % stride == 0):
                 mx.async_eval(hidden)

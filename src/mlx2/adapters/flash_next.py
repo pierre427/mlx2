@@ -124,7 +124,7 @@ def gdn_state_diagnostics(adapter) -> dict:
     return {"gdn_state": {**receipt, "counters": dict(receipt["counters"])}}
 
 
-TENSORFOLD_LONGCTX_FIELDS = ("qsa_fused_scores",)
+TENSORFOLD_LONGCTX_FIELDS = ("qsa_fused_scores", "ple_early_dispatch")
 
 
 def tensorfold_longctx_diagnostics(policy) -> dict:
@@ -138,6 +138,10 @@ def tensorfold_longctx_diagnostics(policy) -> dict:
         from ..runtime.models.qwen4_qsa_scores import status as qsa_scores_status
 
         report["qsa_fused_scores"] = qsa_scores_status()
+    if getattr(policy, "ple_early_dispatch", False):
+        from ..runtime.models.qwen4_exp import qwen4_eager_dispatch_status
+
+        report["ple_early_dispatch"] = qwen4_eager_dispatch_status().get("ple_early")
     return {"tensorfold_longctx": report}
 
 
