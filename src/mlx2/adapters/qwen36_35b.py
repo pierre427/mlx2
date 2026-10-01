@@ -12,6 +12,7 @@ from .mtp_depth_cap import validate_self_mtp_num_draft
 from .qwen38_27b import (
     EAGER_DISPATCH_POLICY_KEYS,
     Qwen3827BAdapter,
+    eager_dispatch_environment,
     eager_dispatch_policy,
     resolve_eos_token_ids,
 )
@@ -257,6 +258,15 @@ class Qwen3635BA3BAdapter(Qwen3827BAdapter):
         "native_mtp": {"apc_interior_checkpoints": "auto"},
     }
     descriptor = QWEN36_35B
+    # Per-layer eager dispatch (MTPLX #579, the Flash-Next mechanism): opt-in
+    # (``eager_dispatch_stride``).  Bit-exact here, and this 3B-active MoE is
+    # host-bound enough to gain at the forward (3-row verify -21%) and for
+    # ordinary B4 (+7%, every round), but the native-MTP B1 default route did
+    # not clear the pre-registered bar on confirmation (median +2.9%, 4 of 6
+    # rounds ahead) and ordinary B1 was noise (qualification/runs/
+    # recon-20261001/l7-decode-perf).  Default-on needs a controlled serving
+    # run over the native-MTP + handoff widths.
+    default_eager_dispatch_stride = 0
     # Unqualified candidates: the server accepts these policy keys only in
     # qualification mode (ServingEngine); direct adapter harnesses may opt in.
     qualification_mode_only_policy = frozenset({"moe_routed_candidate"})
@@ -287,7 +297,7 @@ class Qwen3635BA3BAdapter(Qwen3827BAdapter):
                 "eager-dispatch keys and the kernel switches "
                 + ", ".join(sorted(KERNEL_POLICY_ENV))
             )
-        eager_dispatch = eager_dispatch_policy(policy)
+        eager_dispatch = eager_dispatch_policy(policy, self.default_eager_dispatch_stride)
         self._num_draft = validate_self_mtp_num_draft(policy.get("num_draft", 2))
         self._kernels = {}
         for key in KERNEL_POLICY_ENV:
@@ -306,10 +316,11 @@ class Qwen3635BA3BAdapter(Qwen3827BAdapter):
             raise ValueError("requested MTP requires embedded head weights")
         self.identity = artifact["identity"]
         self.descriptor = descriptor_for(has_mtp=artifact["has_mtp"])
-        self.environment = (
+        self.environment = eager_dispatch_environment(
             configure_environment(self._kernels)
             if self._kernels
-            else configure_environment()
+            else configure_environment(),
+            eager_dispatch,
         )
         self.layout = CACHE_LAYOUT
         self._tables = []

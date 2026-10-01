@@ -287,22 +287,38 @@ def configure_environment() -> dict[str, str]:
 
 
 EAGER_DISPATCH_POLICY_KEYS = ("eager_dispatch_stride", "eager_dispatch_max_rows")
+# Route identity of a selected stride: recorded in the adapter environment
+# (and so in qualification settings) only when the lever is on, so receipts
+# of routes that leave it off stay byte-identical.  Nothing reads them back.
+EAGER_DISPATCH_ENV = ("MLX2_EAGER_DISPATCH_STRIDE", "MLX2_EAGER_DISPATCH_MAX_ROWS")
 
 
-def eager_dispatch_policy(policy: dict) -> tuple[int, int]:
-    """Validate the per-layer eager-dispatch policy keys; (0, 64) = off.
+def eager_dispatch_policy(policy: dict, default_stride: int = 0) -> tuple[int, int]:
+    """Validate the per-layer eager-dispatch policy keys; stride 0 = off.
 
-    Opt-in (MTPLX #579 / Flash-Next ``eager_dispatch``): no win on this
-    family outside noise yet (qualification/runs/recon-20261001/
-    l7-decode-perf), so absent keeps the stock forward and its receipts.
+    The adapter's ``default_eager_dispatch_stride`` applies when the policy
+    omits the key; an explicit 0 turns it off.
     """
-    stride = policy.get("eager_dispatch_stride", 0)
+    stride = policy.get("eager_dispatch_stride", default_stride)
     max_rows = policy.get("eager_dispatch_max_rows", 64)
     if type(stride) is not int or stride < 0:
         raise ValueError("eager_dispatch_stride must be a non-negative integer")
     if type(max_rows) is not int or max_rows < 1:
         raise ValueError("eager_dispatch_max_rows must be a positive integer")
     return stride, max_rows
+
+
+def eager_dispatch_environment(environment: dict, eager_dispatch) -> dict:
+    """``environment`` plus the selected eager-dispatch identity, if any."""
+    environment = {k: v for k, v in environment.items() if k not in EAGER_DISPATCH_ENV}
+    for name in EAGER_DISPATCH_ENV:
+        os.environ.pop(name, None)
+    stride, max_rows = eager_dispatch
+    if stride:
+        selected = dict(zip(EAGER_DISPATCH_ENV, (str(stride), str(max_rows))))
+        environment.update(selected)
+        os.environ.update(selected)
+    return environment
 
 
 def eager_dispatch_diagnostics(adapter) -> dict:
@@ -319,7 +335,9 @@ def eager_dispatch_diagnostics(adapter) -> dict:
             "forwards": int(levers["eager_dispatch_forwards"]),
             "row_declines": int(levers["eager_dispatch_row_declines"]),
             "async_evals": int(levers["eager_async_evals"]),
-        }
+        },
+        # The serving qualifier reads eager_async_evals here (observed use).
+        "round_levers": levers,
     }
 
 
@@ -387,6 +405,11 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
     # inherit it.
     weight_streaming_modes = frozenset({"dense_mlp"})
 
+    # Per-layer eager dispatch stays off on the dense 27B: bit-exact, but
+    # neutral end to end (native MTP B1 1.001x, ordinary B1 0.996x, B4
+    # 0.995x; qualification/runs/recon-20261001/l7-decode-perf).
+    default_eager_dispatch_stride = 0
+
     def __init__(
         self, model_path: str, *, require_mtp: bool = False, execution_policy=None,
         weight_streaming=None,
@@ -451,7 +474,7 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
                 "gdn_prefill_chunk, gdn_prefill_segment_rows, "
                 "eager_dispatch_stride and eager_dispatch_max_rows"
             )
-        eager_dispatch = eager_dispatch_policy(policy)
+        eager_dispatch = eager_dispatch_policy(policy, self.default_eager_dispatch_stride)
         # Opt-in: the quantized lm_head stores fp32 logits instead of rounding
         # them to bf16 (runtime/fp32_head.py).  Absent keeps receipts as-is.
         fp32_head = policy.get("fp32_head_logits", False)
@@ -475,6 +498,7 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
                 **self.environment, "MLX_GDN_CORE": "1" if gdn_core else "0"
             }
             os.environ["MLX_GDN_CORE"] = self.environment["MLX_GDN_CORE"]
+        self.environment = eager_dispatch_environment(self.environment, eager_dispatch)
         self.layout = self.descriptor.cache_layout
         self._tables = []
         path = Path(self.identity["path"])

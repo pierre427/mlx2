@@ -224,8 +224,8 @@ def _route_feature_checks(settings):
         features.add("fused_gdn_decode")
     if env.get("MLX_QWEN4_EAGER_DISPATCH") == "1":
         features.add("eager_dispatch")
-    if isinstance(policy, dict) and (policy.get("eager_dispatch_stride") or 0) > 0:
-        # Qwen3.8/3.6 adapter-policy form of the same mechanism.
+    if env.get("MLX2_EAGER_DISPATCH_STRIDE", "0") != "0":
+        # Qwen3.8/3.6 adapter form of the same mechanism.
         features.add("eager_dispatch")
     if (env.get("MLX_QWEN4_MOE_FUSED_GATE_UP") == "1"
             and env.get("MLX_QWEN4_FUSED_EXPERT_KERNEL", "stock") != "stock"):

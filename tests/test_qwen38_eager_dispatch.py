@@ -58,3 +58,24 @@ def test_eager_dispatch_policy_defaults_off_and_validates():
     assert model.model.eager_dispatch_stride == 0
     with pytest.raises(ValueError):
         model.model.set_eager_dispatch(-2)
+
+
+def test_selected_stride_is_route_identity_and_needs_observed_use():
+    from mlx2.adapters.qwen36_35b import Qwen3635BA3BAdapter
+    from mlx2.adapters.qwen38_27b import (
+        Qwen3827BAdapter, eager_dispatch_environment, eager_dispatch_policy as policy,
+    )
+    from mlx2.qualification import required_feature_checks
+
+    # Opt-in on both: 27B neutral end to end, 35B short of the default bar.
+    assert policy({}, Qwen3827BAdapter.default_eager_dispatch_stride) == (0, 64)
+    assert policy({}, Qwen3635BA3BAdapter.default_eager_dispatch_stride) == (0, 64)
+    assert policy({"eager_dispatch_stride": 0}, 2) == (0, 64)
+    on = eager_dispatch_environment({"A": "1"}, (2, 64))
+    off = eager_dispatch_environment(on, (0, 64))
+    assert on == {"A": "1", "MLX2_EAGER_DISPATCH_STRIDE": "2",
+                  "MLX2_EAGER_DISPATCH_MAX_ROWS": "64"}
+    assert off == {"A": "1"}
+    settings = {"mtp": False, "max_context": 4096, "execution_policy": {}}
+    assert "feature_eager_dispatch" in required_feature_checks({**settings, "environment": on})
+    assert "feature_eager_dispatch" not in required_feature_checks({**settings, "environment": off})
