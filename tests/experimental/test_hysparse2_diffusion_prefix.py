@@ -111,3 +111,26 @@ def test_incomplete_prefix_rejected_before_diffusion(damage):
     with pytest.raises(ValueError, match="endpoint state"):
         model.diffusion_propose(cache)
     assert before == (cache.length, cache.self_layer_calls, cache.cross_layer_calls)
+
+
+@pytest.mark.parametrize("revision", ["parameters", "capsule"])
+def test_diffusion_revision_change_during_denoising_rejected(monkeypatch, revision):
+    model = Model(replace(Config.smoke(), diffusion_conditioning="prefix"))
+    model.eval()
+    _, cache = model.prefill(mx.array([[1, 2, 3, 4]]))
+    before = (cache.owner, cache.length, cache.boundary, cache.ple_history,
+              tuple(id(x) for x in cache.arrays()))
+    original = model.diffusion_student.denoise
+
+    def changed(*args):
+        if revision == "parameters":
+            model.update({"embedding": {"weight": model.embedding.weight}})
+        else:
+            model.attach_semantic_capsules(None)
+        return original(*args)
+
+    monkeypatch.setattr(model.diffusion_student, "denoise", changed)
+    with pytest.raises(ValueError, match="revision"):
+        model.diffusion_propose(cache, count=4, steps=3)
+    assert before == (cache.owner, cache.length, cache.boundary, cache.ple_history,
+                      tuple(id(x) for x in cache.arrays()))

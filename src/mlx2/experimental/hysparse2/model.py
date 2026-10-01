@@ -742,6 +742,10 @@ class Model(nn.Module):
             logits = self.diffusion_student.denoise(candidate, self.embedding, teacher, mask, level)
             candidate = mx.where(mask, mx.argmax(logits, axis=-1), candidate)
         mx.eval(candidate)
+        # Lazy denoising may span a weight or semantic-memory revision change.
+        # Never publish a proposal conditioned on a stale trunk boundary.
+        if self.training or cache.owner is not self._cache_owner or canonical_json(cache.apcv2_identity) != canonical_json(self.new_cache(cache.batch).apcv2_identity):
+            raise ValueError("proposal source revision changed during denoising")
         return candidate, {"schema": "mlx2.hysparse2-diffusion-proposal.v1", "count": count,
                            "steps": steps, "prefix_tokens": cache.length,
                            "conditioning": "prefix-only-self-boundary", "target_verified": False,
