@@ -10,9 +10,9 @@ alternated (ABBA), after a discarded warm-up:
          exactly as there (the HC layout check runs, then reports
          ``down: bits``; the shared-fold admission runs, then reports the
          4-bit-only format refusal) and 2..8-row HC calls served with the
-         qmv_wide law (multi-row on)
+         qmv_wide law for every admitted layout (multi-row on)
   tree   this tree's defaults (8-bit HC rows and fold served; HC multi-row
-         path off: 2..8-row calls stay composed)
+         ``auto``: 2..8-row calls served for all-4-bit layouts only)
 
 Records greedy-token hashes (identity vs base), HC calls/declines, shared
 fold calls/fallbacks, ms per generation step.  Prompts are token slices of a
@@ -90,14 +90,14 @@ def main():
                 return RD.RoutedDecodeAdmission(False, f"shared {name}: format b{bits}g64 != b4g64")
         return admission
 
-    tree_multi_row = HCD.set_hc_multi_row_enabled(False)
-    HCD.set_hc_multi_row_enabled(tree_multi_row)
+    tree_multi_row = HCD.set_hc_multi_row_mode("on")
+    HCD.set_hc_multi_row_mode(tree_multi_row)
 
     def configure(arm):
         main = arm in ("main", "base")
         HCD._cached_plan = base_plan if main else real_plan
         RD.admit_shared_fold = base_admit if main else real_admit
-        HCD.set_hc_multi_row_enabled(True if main else tree_multi_row)
+        HCD.set_hc_multi_row_mode("on" if main else tree_multi_row)
 
     def counters():
         status = HCD.hc_decode_status()

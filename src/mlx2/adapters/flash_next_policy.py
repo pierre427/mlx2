@@ -90,14 +90,16 @@ class FlashNextPolicy:
     # False restores the composed ops; it enters the environment and receipts
     # only when enabled.
     hc_decode_kernels: bool = True
-    # Opt-in (MLX_QWEN4_HC_MULTI_ROW): also serve 2..8-row HC calls outside a
-    # row-exact window (MTP verify rows, multi-lane decode) with the qmv_wide
-    # law.  Off since 2026-10-01: the launches read the weights once per row,
-    # and the full-model A/B measured 4-lane decode -4..-7% and MTP-on flat
-    # (qualification/runs/omlx-w3-8bit-20261001).  One-row calls and
-    # row-exact windows are unaffected.  Enters the environment and receipts
-    # only when enabled.
-    hc_decode_multi_row: bool = False
+    # 2..8-row HC calls outside a row-exact window (MTP verify rows,
+    # multi-lane decode; MLX_QWEN4_HC_MULTI_ROW). The launches read the
+    # weights once per row: on the all-4-bit artifact that wins (switching it
+    # off cost 4 lanes -5.8%, MTP on -6.8%); with 8-bit HC projections and a
+    # dense inject it loses (4 lanes -5.2%, MTP on flat)
+    # (qualification/runs/omlx-w3-8bit-20261001). "auto" (default) serves
+    # multi-row calls only for all-4-bit layouts, which is the behaviour main
+    # had on the 4-bit artifact; "on" / "off" force it. Enters the
+    # environment and receipts only when not "auto".
+    hc_decode_multi_row: str = "auto"
     # omlx #4106 GDN half (MLX_QWEN4_FUSED_GDN_BATCH_DECODE): one launch of
     # the one-row fused GDN decode step for every row of a batched one-token
     # decode (the MTP->ordinary handoff width).  "row_exact" runs each row's
@@ -214,7 +216,6 @@ class FlashNextPolicy:
             "tensorfold_qmv_rows",
             "tensorfold_prefill",
             "hc_decode_kernels",
-            "hc_decode_multi_row",
             "attn_fused_rows",
             "row_exact_verify",
             "row_exact_window_kernels",
@@ -259,8 +260,10 @@ class FlashNextPolicy:
                 "row_exact_verify cannot be combined with tensorfold_qmv_rows "
                 "or fp32_head_logits"
             )
-        if self.hc_decode_multi_row and not self.hc_decode_kernels:
-            raise ValueError("hc_decode_multi_row requires hc_decode_kernels")
+        if self.hc_decode_multi_row not in ("auto", "on", "off"):
+            raise ValueError("hc_decode_multi_row must be auto, on, or off")
+        if self.hc_decode_multi_row == "on" and not self.hc_decode_kernels:
+            raise ValueError("hc_decode_multi_row on requires hc_decode_kernels")
         if self.tensorfold_prefill_backend not in ("native", "metal"):
             raise ValueError("tensorfold_prefill_backend must be native or metal")
         if self.tensorfold_prefill_backend != "native" and not self.tensorfold_prefill:
@@ -320,7 +323,7 @@ class FlashNextPolicy:
             del values["moe_routed_decode"]
         if not self.hc_decode_kernels:
             del values["hc_decode_kernels"]
-        if not self.hc_decode_multi_row:
+        if self.hc_decode_multi_row == "auto":
             del values["hc_decode_multi_row"]
         if self.fused_gdn_batch_decode == "off":
             del values["fused_gdn_batch_decode"]
@@ -378,8 +381,8 @@ class FlashNextPolicy:
             environment["MLX_QWEN4_MOE_ROUTED_DECODE"] = self.moe_routed_decode
         if self.hc_decode_kernels:
             environment["MLX_QWEN4_HC_DECODE"] = "1"
-        if self.hc_decode_multi_row:
-            environment["MLX_QWEN4_HC_MULTI_ROW"] = "1"
+        if self.hc_decode_multi_row != "auto":
+            environment["MLX_QWEN4_HC_MULTI_ROW"] = self.hc_decode_multi_row
         if self.fused_gdn_batch_decode != "off":
             environment["MLX_QWEN4_FUSED_GDN_BATCH_DECODE"] = (
                 self.fused_gdn_batch_decode

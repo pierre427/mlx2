@@ -69,7 +69,7 @@ def main():
     assert mx.default_device() == mx.gpu and mx.metal.is_available()
     # The gate covers both projection laws: lift the serving default that
     # keeps 2..8-row calls composed.
-    HCD.set_hc_multi_row_enabled(True)
+    HCD.set_hc_multi_row_mode("on")
     mx.set_cache_limit(4 << 30)
     config = json.loads((a.model / "config.json").read_text())
     text = config.get("text_config", config)

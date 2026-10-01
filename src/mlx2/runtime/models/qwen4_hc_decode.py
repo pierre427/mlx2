@@ -41,11 +41,12 @@ on Apple GPU family 15+ it runs ``qmv_wide`` (law 1: an 8-lane group per
 output row, per-group 8-value dequantised sub-chunks, a shuffle-down ladder),
 which both launches also transcribe, so verify windows and multi-lane decode
 stay bit-identical to their own composed call (not to one-row decode, exactly
-as the composed path).  Other row counts are declined and counted.  The
-multi-row path is opt-in since 2026-10-01 (``MLX_QWEN4_HC_MULTI_ROW``, policy
-``hc_decode_multi_row``): every row is its own grid row, so it re-reads the
-weights per row where MLX reads them once, and lost to the composed ops at 4
-lanes; off, 2..8-row calls decline as ``rows>1 (multi-row path off)``.
+as the composed path).  Other row counts are declined and counted.  Every
+row is its own grid row, so 2..8 rows re-read the weights per row where MLX
+reads them once: a win for all-4-bit layouts, a loss with 8-bit projections
+or a dense inject.  ``MLX_QWEN4_HC_MULTI_ROW`` (policy ``hc_decode_multi_row``)
+is ``auto`` by default (multi-row only for all-4-bit layouts), or ``on`` /
+``off``; declined calls are counted.
 
 Row-exact verify windows (``qwen4_row_exact``, omlx #4041/#4105): inside a
 ``row_exact_verify.window`` every row must carry its one-token step's bits, so
@@ -146,27 +147,33 @@ def row_exact_from_env() -> bool:
 
 _ROW_EXACT = row_exact_from_env()
 # Multi-row (2..8 folded rows: verify windows, multi-lane decode) outside a
-# row-exact window, served with the qmv_wide law.  Default off since
-# 2026-10-01: each row is its own grid row, so the launches re-read every
-# weight per row where MLX's qmv_wide / gemv_wide read it once for all rows,
-# and a full-model A/B measured 4-lane decode -4..-7% and 3-row MTP verify
-# flat (qualification/runs/omlx-w3-8bit-20261001).  Opt-in
-# (MLX_QWEN4_HC_MULTI_ROW, policy ``hc_decode_multi_row``); the law stays
-# Metal-checked bit-identical.
+# row-exact window, served with the qmv_wide law.  Each row is its own grid
+# row, so the launches read every weight once per row where MLX's qmv_wide /
+# gemv_wide read it once for all rows.  Full-model A/Bs (2026-10-01,
+# qualification/runs/omlx-w3-8bit-20261001): on the all-4-bit artifact the
+# multi-row path wins (off: 4 lanes -5.8%, MTP on -6.8%); with 8-bit
+# projections or a dense inject it loses (on: 4 lanes -5.2%, MTP on flat).
+# Modes (MLX_QWEN4_HC_MULTI_ROW, policy ``hc_decode_multi_row``):
+#   auto  (default) serve 2..8 rows only for all-4-bit layouts
+#   on    serve 2..8 rows for every admitted layout
+#   off   one-row calls only
+# Row-exact windows (one-row law per row) are not affected.
 HC_MULTI_ROW_ENV = "MLX_QWEN4_HC_MULTI_ROW"
+MULTI_ROW_MODES = ("auto", "on", "off")
 
 
-def multi_row_from_env() -> bool:
-    raw = os.environ.get(HC_MULTI_ROW_ENV, "0").strip().lower()
-    if raw in {"", "0", "false", "off", "no"}:
-        return False
-    if raw in {"1", "true", "on", "yes"}:
-        return True
-    raise ValueError(f"{HC_MULTI_ROW_ENV}={raw!r}: expected 0/off or 1/on")
+def multi_row_from_env() -> str:
+    raw = os.environ.get(HC_MULTI_ROW_ENV, "auto").strip().lower()
+    raw = {"": "auto", "1": "on", "true": "on", "yes": "on",
+           "0": "off", "false": "off", "no": "off"}.get(raw, raw)
+    if raw not in MULTI_ROW_MODES:
+        raise ValueError(f"{HC_MULTI_ROW_ENV}={raw!r}: expected one of {MULTI_ROW_MODES}")
+    return raw
 
 
 _MULTI_ROW = multi_row_from_env()
 MULTI_ROW_DECLINE = "rows>1 (multi-row path off)"
+MULTI_ROW_FORMAT_DECLINE = "rows>1 (multi-row path auto: not an all-4-bit layout)"
 _LOCK = threading.Lock()
 _STATS: Counter = Counter()
 _DECLINES: Counter = Counter()
@@ -189,12 +196,14 @@ def set_hc_row_exact_enabled(enabled: bool) -> bool:
     return previous
 
 
-def set_hc_multi_row_enabled(enabled: bool) -> bool:
-    """Live switch for the multi-row (qmv_wide law) path; returns the
-    previous value."""
+def set_hc_multi_row_mode(mode: str) -> str:
+    """Live switch for the multi-row (qmv_wide law) path: ``auto``, ``on``
+    or ``off``; returns the previous mode."""
     global _MULTI_ROW
+    if mode not in MULTI_ROW_MODES:
+        raise ValueError(f"multi-row mode {mode!r}: expected one of {MULTI_ROW_MODES}")
     previous = _MULTI_ROW
-    _MULTI_ROW = bool(enabled)
+    _MULTI_ROW = mode
     return previous
 
 
@@ -219,7 +228,7 @@ def hc_decode_status(*, reset: bool = False) -> dict:
             "inject_calls": int(_STATS["inject_calls"]),
             "row_exact_calls": int(_STATS["row_exact_calls"]),
             "row_exact_mode": bool(_ROW_EXACT),
-            "multi_row_mode": bool(_MULTI_ROW),
+            "multi_row_mode": _MULTI_ROW,
             "launches": int(2 * _STATS["calls"]),
             "declines": dict(_DECLINES),
             "calls_by_format": dict(_FORMATS),
@@ -1021,6 +1030,10 @@ def _build_plan(module, law: int = 0) -> dict:
         "hidden": hidden,
         "has_inject": has_inject,
         "inject_mode": inject_mode,
+        "all_4bit": (
+            down.bits == 4 and up.bits == 4
+            and (inject_mode == "none" or (inject_mode == "quantized" and inject.bits == 4))
+        ),
         "format": (
             f"down b{down.bits} up b{up.bits} inject "
             + (f"b{inject.bits}" if inject_mode == "quantized" else inject_mode)
@@ -1213,7 +1226,7 @@ def try_hc_decode(module, hyper_input, *, eager_norm: bool, compile_glue: bool):
             window.note("hc", "composed", 1)
             return None
         law = 0
-    elif rows > 1 and not _MULTI_ROW:
+    elif rows > 1 and _MULTI_ROW == "off":
         _decline(MULTI_ROW_DECLINE)
         return None
     else:
@@ -1262,6 +1275,9 @@ def _try_launch(module, hyper_input, rows: int, law: int, eager_norm: bool, comp
         return None
     try:
         plan = _law_plan(module, plans, law)
+        if law == 1 and _MULTI_ROW == "auto" and not plan["all_4bit"]:
+            _decline(MULTI_ROW_FORMAT_DECLINE)
+            return None
         flat = hyper_input.reshape(rows, -1)
         mixed, inject = hc_decode_launch(module, flat, plan=plan)
         signature = (

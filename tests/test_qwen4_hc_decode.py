@@ -57,11 +57,11 @@ def _x(seed, rows=1, hidden=H):
 @pytest.fixture(autouse=True)
 def _clean():
     previous = HCD.set_hc_decode_enabled(False)
-    multi_row = HCD.set_hc_multi_row_enabled(False)
+    multi_row = HCD.set_hc_multi_row_mode("off")
     HCD.reset_for_tests()
     yield
     HCD.set_hc_decode_enabled(previous)
-    HCD.set_hc_multi_row_enabled(multi_row)
+    HCD.set_hc_multi_row_mode(multi_row)
     HCD.reset_for_tests()
 
 
@@ -212,7 +212,7 @@ def pair_reference(monkeypatch):
 @pytest.mark.parametrize("rows", [1, 3])
 @pytest.mark.parametrize("kwargs", [{"dense_inject": True}, {"inject_bits": 4}, {}])
 def test_8bit_module_is_served_with_its_inject(pair_reference, rows, kwargs):
-    HCD.set_hc_multi_row_enabled(True)
+    HCD.set_hc_multi_row_mode("on")
     m = _module(seed=9, bits=8, **kwargs)
     x = _x(21, rows=rows)
     want = m(x)
@@ -266,7 +266,7 @@ def test_projection_law_follows_mlx_dispatch(monkeypatch):
     assert HCD.projection_law(3) is None and HCD.projection_law(1) == 0
 
 
-def test_multi_row_is_opt_in_and_declines_counted(reference_kernels, monkeypatch):
+def test_multi_row_off_declines_counted(reference_kernels, monkeypatch):
     monkeypatch.setattr(HCD, "_GPU_FAMILY", 17)
     m = _module()
     x = _x(3, rows=3)
@@ -276,7 +276,7 @@ def test_multi_row_is_opt_in_and_declines_counted(reference_kernels, monkeypatch
     assert reference_kernels["launch"] == 0
     assert all(_same(a, b) for a, b in zip(got, want))
     status = HCD.hc_decode_status()
-    assert status["multi_row_mode"] is False
+    assert status["multi_row_mode"] == "off"
     assert status["declines"] == {HCD.MULTI_ROW_DECLINE: 1}
     m(_x(4, rows=1))  # one row is unaffected
     assert reference_kernels["launch"] == 1
@@ -284,17 +284,43 @@ def test_multi_row_is_opt_in_and_declines_counted(reference_kernels, monkeypatch
 
 def test_multi_row_env_parsing(monkeypatch):
     monkeypatch.delenv(HCD.HC_MULTI_ROW_ENV, raising=False)
-    assert HCD.multi_row_from_env() is False
-    monkeypatch.setenv(HCD.HC_MULTI_ROW_ENV, "1")
-    assert HCD.multi_row_from_env() is True
+    assert HCD.multi_row_from_env() == "auto"
+    for raw, want in (("1", "on"), ("on", "on"), ("0", "off"), ("auto", "auto")):
+        monkeypatch.setenv(HCD.HC_MULTI_ROW_ENV, raw)
+        assert HCD.multi_row_from_env() == want
     monkeypatch.setenv(HCD.HC_MULTI_ROW_ENV, "maybe")
     with pytest.raises(ValueError):
         HCD.multi_row_from_env()
+    with pytest.raises(ValueError):
+        HCD.set_hc_multi_row_mode("maybe")
+
+
+@pytest.mark.parametrize(
+    "kwargs,served",
+    [({}, True), ({"bits": 8}, False), ({"bits": 8, "dense_inject": True}, False),
+     ({"inject_bits": 8}, False), ({"combine": False}, True)],
+)
+def test_multi_row_auto_serves_all_4bit_layouts_only(pair_reference, kwargs, served):
+    HCD.set_hc_multi_row_mode("auto")
+    m = _module(seed=12, **kwargs)
+    x = _x(23, rows=3)
+    want = m(x)
+    HCD.set_hc_decode_enabled(True)
+    got = m(x)
+    want = want if isinstance(want, tuple) else (want,)
+    got = got if isinstance(got, tuple) else (got,)
+    assert _same(got[0], want[0])
+    status = HCD.hc_decode_status()
+    assert status["calls"] == int(served)
+    if not served:
+        assert status["declines"] == {HCD.MULTI_ROW_FORMAT_DECLINE: 1}
+    m(_x(24, rows=1))  # one row is served whatever the layout
+    assert HCD.hc_decode_status()["calls"] == int(served) + 1
 
 
 def test_verify_window_is_served_on_wide_law(reference_kernels, monkeypatch):
     monkeypatch.setattr(HCD, "_GPU_FAMILY", 17)
-    HCD.set_hc_multi_row_enabled(True)
+    HCD.set_hc_multi_row_mode("on")
     m = _module()
     x = _x(3, rows=3)
     want = m(x)
@@ -307,7 +333,7 @@ def test_verify_window_is_served_on_wide_law(reference_kernels, monkeypatch):
 
 def test_wide_rows_beyond_the_cap_decline_and_are_counted(reference_kernels, monkeypatch):
     monkeypatch.setattr(HCD, "_GPU_FAMILY", 17)
-    HCD.set_hc_multi_row_enabled(True)
+    HCD.set_hc_multi_row_mode("on")
     m = _module()
     x = _x(3, rows=9)
     want = m(x)
@@ -360,7 +386,7 @@ def test_row_exact_window_runs_the_one_row_law(law_recorder, rows):
 
 
 def test_outside_a_window_the_wide_law_is_unchanged(law_recorder):
-    HCD.set_hc_multi_row_enabled(True)
+    HCD.set_hc_multi_row_mode("on")
     m = _module()
     HCD.set_hc_decode_enabled(True)
     m(_x(12, rows=3))
@@ -486,17 +512,21 @@ def test_layout_cache_rechecks_replaced_tensors():
     assert "scales" in HCD._cached_static_admission(m)
 
 
-def test_multi_row_policy_is_opt_in_and_receipt_neutral():
+def test_multi_row_policy_auto_is_receipt_neutral():
     from mlx2.adapters.flash_next_policy import FlashNextPolicy
 
     default = FlashNextPolicy()
+    assert default.hc_decode_multi_row == "auto"
     assert "hc_decode_multi_row" not in default.as_dict()
     assert HCD.HC_MULTI_ROW_ENV not in default.environment()
-    on = FlashNextPolicy.from_mapping({"hc_decode_multi_row": True})
-    assert on.as_dict()["hc_decode_multi_row"] is True
-    assert on.environment()[HCD.HC_MULTI_ROW_ENV] == "1"
+    for mode in ("on", "off"):
+        chosen = FlashNextPolicy.from_mapping({"hc_decode_multi_row": mode})
+        assert chosen.as_dict()["hc_decode_multi_row"] == mode
+        assert chosen.environment()[HCD.HC_MULTI_ROW_ENV] == mode
     with pytest.raises(ValueError, match="requires hc_decode_kernels"):
-        FlashNextPolicy.from_mapping({"hc_decode_multi_row": True, "hc_decode_kernels": False})
+        FlashNextPolicy.from_mapping({"hc_decode_multi_row": "on", "hc_decode_kernels": False})
+    with pytest.raises(ValueError, match="auto, on, or off"):
+        FlashNextPolicy.from_mapping({"hc_decode_multi_row": True})
 
 
 def test_flash_next_policy_defaults_on_and_off_is_receipt_neutral():
