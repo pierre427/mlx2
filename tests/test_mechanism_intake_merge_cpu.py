@@ -220,10 +220,26 @@ def test_resolved_files_have_no_conflict_markers(path):
         ast.parse(text)
 
 
+# Whole sections added after the merge.  Removing exactly these must give the
+# merge's text back byte for byte, so every original byte is still proven.
+_PROV_POST_MERGE_SECTIONS = (
+    "## 2026-10-01 — memory-budgeted disk weight streaming\n",
+)
+
+
+def _without_post_merge_sections(text):
+    for header in _PROV_POST_MERGE_SECTIONS:
+        assert text.count(header) == 1, header
+        start = text.index(header)
+        end = text.find("\n## ", start + len(header))
+        text = text[:start] + (text[end + 1:] if end >= 0 else "")
+    return text
+
+
 def test_provenance_keeps_every_main_and_intake_section_verbatim():
     base_lines = _git_show(BASE, PROV).splitlines(True)
     intake_tail = "".join(_git_show(INTAKE, PROV).splitlines(True)[len(base_lines):])
-    assert _read(PROV) == _git_show(MAIN, PROV) + intake_tail
+    assert _without_post_merge_sections(_read(PROV)) == _git_show(MAIN, PROV) + intake_tail
 
 
 def test_routed_decode_module_is_main_plus_the_intake_candidate_block():
@@ -284,6 +300,9 @@ _QN_MERGED = {
     "Qwen3NextSparseMoeBlock.__init__", "_enable_routed_decode", "_try_routed_decode",
     "_try_shared_fold", "_try_topk_fold_decode",
 }
+# Edited after the merge, each with its own equivalence test below:
+# _concat_parts gained the disk-weight-streaming concat-ledger record.
+_QN_POST_MERGE = {"_concat_parts"}
 
 
 def test_qwen3_next_symbols_come_from_their_parent():
@@ -296,7 +315,10 @@ def test_qwen3_next_symbols_come_from_their_parent():
         if dump != main.get(name) and dump != intake.get(name)
     }
     # The classes differ because their methods do.
-    assert changed - {"FusedDownSwitchGLU", "Qwen3NextSparseMoeBlock"} == _QN_MERGED
+    assert (
+        changed - {"FusedDownSwitchGLU", "Qwen3NextSparseMoeBlock"} - _QN_POST_MERGE
+        == _QN_MERGED
+    )
     for name in ("_CANDIDATE_REASON_SLOTS", "_enable_routed_candidate",
                  "_try_routed_candidate", "routed_candidate_stats",
                  "Qwen3NextSparseMoeBlock.set_moe_routed_candidate_mode",
@@ -312,6 +334,63 @@ def test_qwen3_next_symbols_come_from_their_parent():
                  "Qwen3NextSparseMoeBlock.set_moe_topk_mode", "_MOE_WINDOW_CONSUMERS",
                  "_MOE_TOPK_MODE", "_MOE_ROUTED_DECODE"):
         assert merged[name] == main[name], name
+
+
+def _concat_parts_from(src, namespace):
+    """Exec ``_concat_parts`` from ``src`` with its in-function imports removed."""
+
+    class StripImports(ast.NodeTransformer):
+        def visit_ImportFrom(self, node):
+            return None
+
+        def visit_Import(self, node):
+            return None
+
+    node = StripImports().visit(ast.parse(ast.unparse(_symbols(src)["_concat_parts"])))
+    code = compile(
+        node, "<_concat_parts>", "exec",
+        flags=__future__.annotations.compiler_flag, dont_inherit=True,
+    )
+    exec(code, namespace)
+    return namespace["_concat_parts"]
+
+
+def test_concat_parts_post_merge_hook_is_output_equivalent_with_an_inactive_ledger():
+    """The ledger hook only records; with no ledger active (every ordinary
+    load) the merged function returns exactly what main's does, and with one
+    active it records each fused suffix once."""
+    records = []
+    fake_mx = SimpleNamespace(
+        concatenate=lambda arrays, axis: ("cat", tuple(a.tag for a in arrays), axis)
+    )
+    main = _concat_parts_from(
+        _git_show(MAIN, QN), {"mx": fake_mx}
+    )
+    inactive = _concat_parts_from(
+        _read(QN), {"mx": fake_mx, "record_concat": lambda *_a: None}
+    )
+    active = _concat_parts_from(
+        _read(QN),
+        {"mx": fake_mx, "record_concat": lambda result, parts, axis: records.append(
+            (result, tuple(p.tag for p in parts), axis))},
+    )
+    cases = [
+        [{"weight": A((4, 6, 8), tag="g"), "scales": A((4, 6, 1), tag="gs")},
+         {"weight": A((4, 6, 8), tag="u"), "scales": A((4, 6, 1), tag="us")}],
+        [{"weight": A((4, 6, 8), tag="g")}, {"weight": A((4, 3, 8), tag="u")}],
+        [{"weight": A((4, 6, 8), tag="g")}, {}],
+        [{"weight": A((4, 6, 8), tag="g")}, {"scales": A((4, 6, 1), tag="s")}],
+        [{"weight": A((4, 6, 8), tag="g")}, {"weight": A((4, 6, 9), tag="u")}],
+        [{"weight": A((4, 6, 8), tag="g")}, {"weight": A((4, 6, 8, 1), tag="u")}],
+    ]
+    for parts in cases:
+        for axis in (-2, 0):
+            expected = main(parts, axis)
+            assert inactive(parts, axis) == expected
+            before = len(records)
+            assert active(parts, axis) == expected
+            assert len(records) - before == (0 if expected is None else len(expected))
+    assert records, "the active ledger saw no fusion at all"
 
 
 def _without_decode_down_counter(node):
