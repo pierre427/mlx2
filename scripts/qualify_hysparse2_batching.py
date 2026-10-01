@@ -87,6 +87,31 @@ def main():
             thread_errors.append(float(mx.max(mx.abs(result[0][0] - expected)).item()))
         assert max(thread_errors) < 1e-3
         report["serialized_caller_errors"] = thread_errors
+        report["incomplete_state_rejections"] = []
+        for batched in (False, True):
+            for damage in ("missing_layer", "offset", "boundary", "history"):
+                _, bad = model.prefill(mx.array([prompts[0]]))
+                if damage == "missing_layer":
+                    del bad.self_kv[0]
+                elif damage == "offset":
+                    k, v, offset = bad.cross_kv[0][0]
+                    bad.cross_kv[0][0] = k, v, offset + 1
+                elif damage == "boundary":
+                    bad.boundary = bad.boundary[:, :, :1]
+                else:
+                    bad.ple_history = None
+                before = (bad.length, bad.self_layer_calls, bad.cross_layer_calls, bad.ple_history)
+                try:
+                    if batched:
+                        batcher.decode([[100]], [bad])
+                    else:
+                        model.decode(mx.array([[100]]), bad)
+                    raise AssertionError("incomplete state accepted")
+                except ValueError as exc:
+                    assert "endpoint state" in str(exc)
+                after = (bad.length, bad.self_layer_calls, bad.cross_layer_calls, bad.ple_history)
+                assert before[:3] == after[:3] and before[3] is after[3]
+                report["incomplete_state_rejections"].append({"batched": batched, "damage": damage, "state_unchanged": True})
         report["peak_memory_bytes"] = mx.get_peak_memory()
         report["source_hashes"] = {
             str(p): file_hash(p)

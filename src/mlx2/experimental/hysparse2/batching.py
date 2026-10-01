@@ -42,6 +42,8 @@ class ResearchBatcher:
         ):
             raise ValueError("request state owner, batch or revision differs")
 
+        self.model.validate_cache_state(cache)
+
         def shape(array):
             return None if array is None else (tuple(array.shape[1:]), str(array.dtype))
 

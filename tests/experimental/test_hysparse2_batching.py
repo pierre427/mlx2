@@ -71,3 +71,29 @@ def test_serialized_concurrent_callers():
     for row, result in zip([[1, 2, 3], [4, 5, 6]], results):
         expected, _ = model.prefill(mx.array([row]))
         assert float(mx.max(mx.abs(result[0][0] - expected)).item()) < 1e-3
+
+
+@pytest.mark.parametrize("damage", ["missing_layer", "offset", "boundary", "history"])
+@pytest.mark.parametrize("batched", [False, True])
+def test_incomplete_state_rejected_before_decode_mutation(damage, batched):
+    model = Model(Config.smoke())
+    model.eval()
+    batcher = ResearchBatcher(model)
+    _, cache = model.prefill(mx.array([[1, 2, 3, 4]]))
+    if damage == "missing_layer":
+        del cache.self_kv[0]
+    elif damage == "offset":
+        k, v, start = cache.cross_kv[0][0]
+        cache.cross_kv[0][0] = k, v, start + 1
+    elif damage == "boundary":
+        cache.boundary = cache.boundary[:, :, :1]
+    else:
+        cache.ple_history = None
+    before = (cache.length, cache.self_layer_calls, cache.cross_layer_calls, cache.ple_history)
+    with pytest.raises(ValueError, match="endpoint state"):
+        if batched:
+            batcher.decode([[5]], [cache])
+        else:
+            model.decode(mx.array([[5]]), cache)
+    after = (cache.length, cache.self_layer_calls, cache.cross_layer_calls, cache.ple_history)
+    assert before[:3] == after[:3] and before[3] is after[3]

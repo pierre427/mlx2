@@ -520,6 +520,80 @@ class Model(nn.Module):
             },
         )
 
+    def validate_cache_state(self, cache, *, allow_empty=False):
+        """Require every layer's complete, exact endpoint geometry."""
+        c = self.config
+        if type(cache.batch) is not int or cache.batch < 1:
+            raise ValueError("invalid endpoint state batch")
+        if allow_empty and type(cache.length) is int and cache.length == 0:
+            if (cache.self_kv != {} or cache.cross_kv != {} or cache.boundary is not None
+                    or cache.ple_history is not None or cache.self_layer_calls != 0
+                    or cache.cross_layer_calls != 0):
+                raise ValueError("invalid empty cache state")
+            return
+        if type(cache.length) is not int or not 1 <= cache.length <= c.max_context:
+            raise ValueError("invalid endpoint state length")
+        for name, layers in (
+            ("self_kv", self.self_decoder),
+            ("cross_kv", self.cross_decoder),
+        ):
+            required = {i for i, layer in enumerate(layers) if layer.kind != "sparse"}
+            groups = getattr(cache, name)
+            if not isinstance(groups, dict) or set(groups) != required:
+                raise ValueError("incomplete endpoint state layer coverage")
+            for i in required:
+                position = (
+                    max(0, cache.length - c.local_window)
+                    if layers[i].kind == "swa"
+                    else 0
+                )
+                blocks = groups[i]
+                if not blocks:
+                    raise ValueError("empty endpoint state KV")
+                for k, v, start in blocks:
+                    if (
+                        type(start) is not int
+                        or start != position
+                        or not isinstance(k, mx.array)
+                        or not isinstance(v, mx.array)
+                        or k.ndim != 4
+                        or k.shape != v.shape
+                        or k.shape[:2] != (cache.batch, 1)
+                        or k.shape[2] < 1
+                        or k.shape[3] != c.head_dim
+                        or k.dtype != v.dtype
+                        or not mx.issubdtype(k.dtype, mx.floating)
+                    ):
+                        raise ValueError("invalid endpoint state KV geometry")
+                    position += k.shape[2]
+                if position != cache.length:
+                    raise ValueError("incomplete endpoint state KV history")
+        boundary = cache.boundary
+        if (
+            not isinstance(boundary, mx.array)
+            or boundary.shape != (cache.batch, 1, c.residual_streams, c.hidden_size)
+            or not mx.issubdtype(boundary.dtype, mx.floating)
+        ):
+            raise ValueError("invalid endpoint state boundary")
+        history_length = (
+            min(cache.length, c.semantic_ngram - 1) if c.semantic_ple_rows else 0
+        )
+        history = cache.ple_history
+        if history_length:
+            if (
+                not isinstance(history, mx.array)
+                or history.shape != (cache.batch, history_length)
+                or not mx.issubdtype(history.dtype, mx.integer)
+            ):
+                raise ValueError("invalid endpoint state PLE history")
+        elif history is not None:
+            raise ValueError("unexpected endpoint state PLE history")
+        if any(
+            type(v) is not int or v < 0
+            for v in (cache.self_layer_calls, cache.cross_layer_calls)
+        ):
+            raise ValueError("invalid endpoint state counters")
+
     def _append(self, tokens, cache):
         if self.training:
             raise ValueError("cached inference requires model.eval()")
@@ -539,6 +613,7 @@ class Model(nn.Module):
             != expected["semantic_fingerprint"][2:]
         ):
             raise ValueError("cache geometry, attention math or PLE revision differs")
+        self.validate_cache_state(cache, allow_empty=True)
         offset = cache.length
         if offset + tokens.shape[1] > self.config.max_context:
             raise ValueError("context limit exceeded")
