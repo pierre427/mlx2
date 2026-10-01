@@ -40,6 +40,18 @@ evaluated stages) can stamp ``native_synthetic_gate``; a JSON round trip drops
 it. A trust boundary against forged reports and fake backends, not a security
 claim against arbitrary code.
 
+Identity association: the native backend class, the live-run type, the
+witness and the evaluator are captured ONCE, at import, in the closure that
+defines ``_run_native`` and ``native_verdict`` (not in default arguments a
+caller could override): ``native_verdict(live)`` and
+``_run_native(admission, cells, full_requested)`` accept nothing else.
+Rebinding the module names ``NativeBackend``, ``_LiveNativeRun``,
+``_WITNESS`` or ``evaluate`` afterwards, a subclass or a look-alike cannot make
+a CPU fake count as native, and ``_run_native`` still constructs the original
+class. Evidence-association hygiene only: it does not resist code that edits
+closures, class attributes or private objects, and an instance of the
+original class is not by itself proof of native execution.
+
 No timing: ``--timing`` is refused before any admission, import or backend.
 
 Nothing imports MLX at module import, ``--help``, ``--catalogue``, admission
@@ -102,6 +114,7 @@ HARNESS_FILES = (
     "scripts/qualify_segmented_moe_prefill_research.py",
     "tests/test_segmented_moe_prefill_native_qualifier.py",
     "provenance/segmented-moe-prefill-native-qualifier.json",
+    "tests/test_segmented_moe_native_identity_cpu.py",
 )
 REFERENCE_FILES = (
     "src/mlx2/runtime/models/switch_layers.py",
@@ -1299,49 +1312,60 @@ class _LiveNativeRun:
         self.cells, self.full_requested, self.fresh = tuple(cells), bool(full_requested), dict(fresh)
 
 
-# The native backend class, live-run class, witness and evaluator are bound HERE, at import, as
-# default arguments: rebinding the module names (NativeBackend, _LiveNativeRun, evaluate, ...) cannot
-# make a fake backend or a look-alike run count as native. Evidence-association hygiene, not
-# protection against arbitrary code.
-def _run_native(admission, cells, full_requested, _cls=NativeBackend, _live=_LiveNativeRun, _witness=_WITNESS):
-    backend = _cls(admission)
-    report = run_gate(backend, cells, guard=lambda: source_guard(admission))
-    fresh = backend.cand.ENGAGEMENT.fresh_since(backend.engagement_start)
-    post = post_run_refusals(admission, backend)
-    return _live(_witness, backend, admission, report, post, cells, full_requested, fresh)
+def _bind_native_identity(native_cls, live_cls, witness, evaluator):
+    """Capture the original native class, live-run type, witness and evaluator at import.
+
+    Closure cells, not default arguments: no caller argument can substitute a class, run type,
+    witness or evaluator, and rebinding the module names later changes neither what ``_run_native``
+    constructs nor what ``native_verdict`` accepts. Evidence-association hygiene, not protection
+    against code that edits closures, class attributes or private objects.
+    """
+
+    def _run_native(admission, cells, full_requested):
+        backend = native_cls(admission)
+        report = run_gate(backend, cells, guard=lambda: source_guard(admission))
+        fresh = backend.cand.ENGAGEMENT.fresh_since(backend.engagement_start)
+        post = post_run_refusals(admission, backend)
+        return live_cls(witness, backend, admission, report, post, cells, full_requested, fresh)
+
+    def native_verdict(live):
+        """The ONLY place a native synthetic gate can be stamped: a live run object, never a dict/JSON.
+        The evaluation is computed HERE from this run's own report and cells."""
+        reasons = []
+        report, cells = getattr(live, "report", None), getattr(live, "cells", None)
+        full = getattr(live, "full_requested", False) is True
+        if isinstance(report, dict) and isinstance(cells, (list, tuple)) and cells:
+            evaluation = evaluator(report, list(cells), full_requested=full)
+        else:
+            evaluation = {"verdict": "failed", "refusals": ["no live report/cells"], "chains": {},
+                          "expected_chains": 0}
+        if type(live) is not live_cls or getattr(live, "_witness", None) is not witness:
+            reasons.append("no live native orchestration (evidence alone never establishes native execution)")
+        elif type(live.backend) is not native_cls:
+            reasons.append("backend is not the native backend")
+        else:
+            reasons += live.post_run
+            chains, want = evaluation.get("chains") or {}, evaluation.get("expected_chains")
+            fresh = live.fresh
+            native_moved = sum(fresh.get(f"native.successful_chains.{k}", 0) for k in KINDS)
+            if not (isinstance(want, int) and want > 0 and chains.get("native") == want == native_moved
+                    and chains.get("substituted") == 0):
+                reasons.append(f"fresh native chains {native_moved} / evaluated native stages "
+                               f"{chains.get('native')} do not both equal the {want} expected checked outputs")
+            stray = {k: v for k, v in fresh.items() if v and not k.startswith("native.successful_chains.")
+                     and k != "calls"}
+            if stray or fresh.get("calls") != native_moved:
+                reasons.append(f"engagement counters moved outside successful native chains: {stray}")
+        if evaluation.get("verdict") != "bit_identity_evidence_pass":
+            reasons.append("bit-identity evidence did not pass the full mandatory catalogue")
+        return {"native_synthetic_gate": not reasons, "reasons": reasons, "evaluation": evaluation,
+                "qualified": False, "selected": False, "observed_used": False, "model_gain": False}
+
+    _run_native.__qualname__, native_verdict.__qualname__ = "_run_native", "native_verdict"
+    return _run_native, native_verdict
 
 
-def native_verdict(live, _cls=NativeBackend, _live=_LiveNativeRun, _witness=_WITNESS, _evaluate=evaluate):
-    """The ONLY place a native synthetic gate can be stamped: a live run object, never a dict/JSON.
-    The evaluation is computed HERE from this run's own report and cells."""
-    reasons = []
-    report, cells = getattr(live, "report", None), getattr(live, "cells", None)
-    full = getattr(live, "full_requested", False) is True
-    if isinstance(report, dict) and isinstance(cells, (list, tuple)) and cells:
-        evaluation = _evaluate(report, list(cells), full_requested=full)
-    else:
-        evaluation = {"verdict": "failed", "refusals": ["no live report/cells"], "chains": {}, "expected_chains": 0}
-    if type(live) is not _live or getattr(live, "_witness", None) is not _witness:
-        reasons.append("no live native orchestration (evidence alone never establishes native execution)")
-    elif type(live.backend) is not _cls:
-        reasons.append("backend is not the native backend")
-    else:
-        reasons += live.post_run
-        chains, want = evaluation.get("chains") or {}, evaluation.get("expected_chains")
-        fresh = live.fresh
-        native_moved = sum(fresh.get(f"native.successful_chains.{k}", 0) for k in KINDS)
-        if not (isinstance(want, int) and want > 0 and chains.get("native") == want == native_moved
-                and chains.get("substituted") == 0):
-            reasons.append(f"fresh native chains {native_moved} / evaluated native stages {chains.get('native')} "
-                           f"do not both equal the {want} expected checked outputs")
-        stray = {k: v for k, v in fresh.items() if v and not k.startswith("native.successful_chains.")
-                 and k != "calls"}
-        if stray or fresh.get("calls") != native_moved:
-            reasons.append(f"engagement counters moved outside successful native chains: {stray}")
-    if evaluation.get("verdict") != "bit_identity_evidence_pass":
-        reasons.append("bit-identity evidence did not pass the full mandatory catalogue")
-    return {"native_synthetic_gate": not reasons, "reasons": reasons, "evaluation": evaluation,
-            "qualified": False, "selected": False, "observed_used": False, "model_gain": False}
+_run_native, native_verdict = _bind_native_identity(NativeBackend, _LiveNativeRun, _WITNESS, evaluate)
 
 
 # ================================================================ CLI

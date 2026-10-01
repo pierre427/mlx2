@@ -445,25 +445,38 @@ def test_forged_native_report_and_live_lookalikes_never_stamp():
 
 
 def test_native_verdict_requires_matching_fresh_native_counters(monkeypatch):
-    report, cells, _, _ = _run(ids=["d35-t128-uniform"], backend=FakeBackend(prefix="native", native=True))
+    """HOST ASSOCIATION CHECK, not native execution: the actual full catalogue through the substituted
+    FakeBackend, run_gate and the captured evaluator (no evaluator injection); an UNINITIALIZED original
+    NativeBackend instance only reaches the counter and post-run checks."""
+    report, cells, full, _ = _run(ids=None, backend=FakeBackend(prefix="native", native=True))
+    ev = q.evaluate(report, cells, full_requested=full)
+    per_kind = {k: 0 for k in q.KINDS}
+    for c in cells:
+        if c["expect"] == "pass":
+            for e in q.expectations(c, cand).values():
+                if e["kind"] in q.KINDS:
+                    per_kind[e["kind"]] += 1
+    assert full and len(cells) == len(q.CATALOGUE) == 21
+    assert per_kind == {"gate_up_mapped_swiglu": 26, "down_segmented": 40}
+    assert ev["verdict"] == "bit_identity_evidence_pass", ev["refusals"][:5]
+    assert ev["chains"] == {"native": 66, "substituted": 0} and ev["expected_chains"] == 66
     native = object.__new__(q.NativeBackend)
-
-    def passing(r, c, full_requested):
-        return {"verdict": "bit_identity_evidence_pass", "chains": {"native": 3, "substituted": 0},
-                "expected_chains": 3}
-    good = {"calls": 3, "native.successful_chains.gate_up_mapped_swiglu": 1,
-            "native.successful_chains.down_segmented": 2}
+    down = "native.successful_chains.down_segmented"
+    good = {"calls": 66, **{f"native.successful_chains.{k}": v for k, v in per_kind.items()}}
 
     def stamp(fresh, post=()):
         live = q._LiveNativeRun(q._WITNESS, native, {}, report, list(post), cells, True, fresh)
-        return q.native_verdict(live, _evaluate=passing)
-    assert stamp(good)["native_synthetic_gate"] is True
-    for fresh in ({}, dict(good, **{"native.successful_chains.down_segmented": 1}), dict(good, backend_raised=1),
-                  dict(good, **{"substituted.successful_chains.down_segmented": 1}), dict(good, calls=4),
-                  dict(good, calls=2, **{"native.successful_chains.down_segmented": 1})):
+        return q.native_verdict(live)
+    v = stamp(good)
+    assert v["native_synthetic_gate"] is True and v["reasons"] == []
+    assert ({k: v["evaluation"][k] for k in ("verdict", "chains", "expected_chains", "refusals")}
+            == {k: ev[k] for k in ("verdict", "chains", "expected_chains", "refusals")})
+    for fresh in ({}, dict(good, **{down: 39}), dict(good, backend_raised=1),
+                  dict(good, **{"substituted.successful_chains.down_segmented": 1}), dict(good, calls=67),
+                  dict(good, calls=65, **{down: 39})):
         assert stamp(fresh)["native_synthetic_gate"] is False, fresh
     v = stamp(good, ["git HEAD differs from the admitted commit"])
-    assert v["native_synthetic_gate"] is False and "git HEAD differs from the admitted commit" in v["reasons"]
+    assert v["native_synthetic_gate"] is False and v["reasons"] == ["git HEAD differs from the admitted commit"]
 
 
 def test_rebinding_module_names_cannot_make_a_fake_native(monkeypatch):
