@@ -692,6 +692,7 @@ class Model(nn.Module):
         cache.length += tokens.shape[1]
         cache.boundary = mx.contiguous(x[:, -1:])
         mx.eval(fresh, x)
+        self._require_inference_owner(cache)
         return x, offset
 
     def _cross(self, x, cache, offset):
@@ -700,6 +701,12 @@ class Model(nn.Module):
             x, selected, _, _ = layer(x, cache.cross_kv.get(i), offset, selected)
             cache.cross_layer_calls += 1
         return self.embedding.as_linear(self.norm(mx.mean(x, axis=-2)))
+
+    def _require_inference_owner(self, cache):
+        # Parameter updates and semantic snapshot attachments rotate ownership.
+        # Lazy inference must not publish output built across that transition.
+        if self.training or cache.owner is not self._cache_owner:
+            raise ValueError("cached inference source revision changed before return")
 
     def prefill(self, tokens, cache=None, *, return_logits=True):
         """Build caches through self decoder; run cross only for the last logit."""
@@ -718,6 +725,7 @@ class Model(nn.Module):
         )
         if logits is not None:
             mx.eval(logits)
+        self._require_inference_owner(cache)
         return logits, cache
 
     def diffusion_propose(self, cache, *, count=4, steps=2):
@@ -758,4 +766,5 @@ class Model(nn.Module):
         x, offset = self._append(tokens, cache)
         logits = self._cross(x, cache, offset)
         mx.eval(logits)
+        self._require_inference_owner(cache)
         return logits

@@ -154,3 +154,32 @@ def test_prefill_cannot_return_cohorts_from_different_revisions(monkeypatch):
     monkeypatch.setattr(model, "prefill", changed)
     with pytest.raises(ValueError, match="revision|owner"):
         batcher.prefill([[1, 2, 3], [4, 5]])
+
+
+@pytest.mark.parametrize("operation", ["prefill", "decode", "prefill_cache_only"])
+@pytest.mark.parametrize("change", ["parameters", "capsules"])
+def test_ordinary_inference_rejects_revision_changed_before_return(monkeypatch, operation, change):
+    model = Model(Config.smoke())
+    model.eval()
+    tokens = mx.array([[1, 2, 3, 4]])
+    _, cache = model.prefill(tokens)
+    hook = "_append" if operation == "prefill_cache_only" else "_cross"
+    original = getattr(model, hook)
+
+    def changed(*args, **kwargs):
+        value = original(*args, **kwargs)
+        if change == "parameters":
+            model.update({"embedding": {"weight": model.embedding.weight}})
+        else:
+            model.attach_semantic_capsules(None)
+        return value
+
+    monkeypatch.setattr(model, hook, changed)
+    with pytest.raises(ValueError, match="revision|owner|another model"):
+        if operation == "decode":
+            model.decode(mx.array([[5]]), cache)
+        else:
+            model.prefill(tokens, return_logits=operation != "prefill_cache_only")
+    monkeypatch.setattr(model, hook, original)
+    _, fresh = model.prefill(tokens)
+    assert bool(mx.all(mx.isfinite(model.decode(mx.array([[5]]), fresh))).item())
