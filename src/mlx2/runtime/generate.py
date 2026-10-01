@@ -6145,6 +6145,15 @@ class BatchGenerator:
                 self.scheduler_stats.get("short_prefill_overflow_admissions", 0) + 1
             )
         prompt_responses.extend(self._promote_ready_prompts())
+        if generation_responses and self._mixed_round_ready():
+            # The next round fuses this prompt's first slice into the decode
+            # step.  Slicing it here as well put a plain slice and a mixed
+            # forward back to back with no decode step between them: one
+            # ~1.2 s gap on the 27B, against ~0.6 s mixed rounds.
+            self.scheduler_stats["mixed_deferred_slices"] = (
+                self.scheduler_stats.get("mixed_deferred_slices", 0) + 1
+            )
+            return (prompt_responses, generation_responses)
         prompts = []
         for i, seq in enumerate(self._currently_processing):
             response = PromptProcessingBatch.Response(

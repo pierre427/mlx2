@@ -28,6 +28,15 @@ def _run(monkeypatch, *, mixed, model_override=None):
         return original(self)
 
     monkeypatch.setattr(generate.BatchGenerator, "_next_mixed", spy)
+    chunks = live.setdefault("chunks", [])
+    original_prompt = generate.PromptProcessingBatch.prompt
+
+    def prompt_spy(self, tokens, *, forward_fn=None):
+        if any(len(t) for t in tokens):  # empty calls slice nothing
+            chunks.append(("mixed" if forward_fn else "plain", bool(getattr(self, "decode_active", False))))
+        return original_prompt(self, tokens, forward_fn=forward_fn)
+
+    monkeypatch.setattr(generate.PromptProcessingBatch, "prompt", prompt_spy)
     model, vocab = rh.tiny_qwen38_mtp()
     if model_override is not None:
         model = model_override(model)
@@ -48,7 +57,7 @@ def _run(monkeypatch, *, mixed, model_override=None):
             engine.submit({"tokens": b_prompt, "max_tokens": 12, "temperature": 0})
         )
         rest.join()
-        return results, dict(live.get("stats") or {})
+        return results, dict(live.get("stats") or {}, _chunks=list(chunks))
     finally:
         engine.close()
 
@@ -65,6 +74,12 @@ def test_mixed_rounds_engage_and_match_ordinary_greedy_outputs(monkeypatch):
     assert mixed_stats.get("mixed_rounds", 0) > 0, mixed_stats
     assert mixed_stats.get("mixed_declined_rounds", 0) == 0
     assert mixed_stats.get("mixed_prompt_tokens", 0) > 0
+    # Beside a decoding lane every slice rides in a mixed forward: the round
+    # that admits the prompt defers its slice instead of running a plain one
+    # back to back with the first mixed forward.
+    contended_plain = [c for c in mixed_stats["_chunks"] if c == ("plain", True)]
+    assert contended_plain == [], mixed_stats["_chunks"]
+    assert mixed_stats.get("mixed_deferred_slices", 0) >= 1
     assert _tokens(mixed["b"]) == _tokens(ordinary["b"])
     # A's first token was taken above; the remainder must match too.
     assert _tokens(mixed["a"]) == _tokens(ordinary["a"])
