@@ -775,9 +775,11 @@ def _moe_rows_refusal(block, x, rows):
     )
     if refusal is not None:
         return refusal
-    for name in ("gate", "shared_expert_gate"):
-        if not _base_linear_ok(block.get(name)):
-            return f"{name} is not a QuantizedLinear"
+    if not _base_linear_ok(block.get("gate")):
+        return "gate is not a QuantizedLinear"
+    if not (_base_linear_ok(block.get("shared_expert_gate"))
+            or _dense_gate_ok(block.get("shared_expert_gate"))):
+        return "shared_expert_gate is not a QuantizedLinear or a plain bf16 Linear"
     refusal = _window.admit_router_topk(
         _ShapeOnly((rows, block.num_experts), x.dtype), block.top_k, bool(block.norm_topk_prob)
     )
@@ -791,6 +793,35 @@ def _moe_rows_refusal(block, x, rows):
     if shared is None or hasattr(shared, "_prefill_counts"):
         return "shared expert missing or tensorfold prefill MLP installed"
     return None
+
+
+def _dense_gate_ok(layer) -> bool:
+    """A dense shared gate (mixed-precision artifacts keep it bf16): exactly
+    ``nn.Linear``, no bias, bf16 weight. A window runs it one row at a time."""
+    import mlx.nn as _nn
+
+    return (
+        type(layer) is _nn.Linear
+        and "bias" not in layer
+        and layer["weight"].dtype == mx.bfloat16
+    )
+
+
+def _row_gate_logits(window, layer, flat):
+    """``layer(row)`` for every row of ``flat`` with one-token arithmetic: the
+    row-exact qmv kernel for a quantized gate; for a dense gate (a bf16 gemv
+    whose multi-row matmul is not the one-row gemv) one one-token-shaped call
+    per row."""
+    if not _dense_gate_ok(layer):
+        return _row_projections(window, (layer,), flat)[0]
+    hidden = flat.shape[-1]
+    out = mx.concatenate(
+        [layer(flat[r : r + 1].reshape(1, 1, hidden)).reshape(1, -1) for r in range(flat.shape[0])],
+        axis=0,
+    )
+    if window is not None:
+        window.note("projections", "dense_per_row", flat.shape[0])
+    return out
 
 
 def _shared_fold_ok(block, x) -> bool:
@@ -834,7 +865,11 @@ def _run_moe_window(block, x, rows, consumer):
     window = _rev.current()
     hidden = x.shape[-1]
     flat = x.reshape(rows, hidden)
-    (gates, gate_logit) = _row_projections(window, (block.gate, block.shared_expert_gate), flat)
+    if _dense_gate_ok(block.shared_expert_gate):
+        (gates,) = _row_projections(window, (block.gate,), flat)
+        gate_logit = _row_gate_logits(window, block.shared_expert_gate, flat)
+    else:
+        (gates, gate_logit) = _row_projections(window, (block.gate, block.shared_expert_gate), flat)
     sw = block.switch_mlp
     mode = block.moe_topk_mode
     if mode == "fold" and rows > _window.topk_fold_max_rows():

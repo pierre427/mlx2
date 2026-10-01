@@ -366,10 +366,15 @@ def _shared_down_window_source() -> str:
 _KERNELS: dict = {}
 
 
-def _kernel(name: str):
-    kernel = _KERNELS.get(name)
+def _kernel(name: str, formats: tuple = (RD.BITS, RD.BITS)):
+    """``formats``: the shared expert's (gate/up bits, down bits) for the
+    shared kernels (``RD.shared_formats``); 4/4 is the original source."""
+    key = name if formats == (RD.BITS, RD.BITS) else (name, formats)
+    kernel = _KERNELS.get(key)
     if kernel is not None:
         return kernel
+    gate_up_bits, down_bits = formats
+    suffix = RD.shared_kernel_suffix(gate_up_bits, down_bits)
     if name == "router_topk":
         kernel = mx.fast.metal_kernel(
             name="mlx2_qwen4_moe_router_topk_rows",
@@ -391,24 +396,23 @@ def _kernel(name: str):
         inputs = ["x", "wg", "sg", "bg", "wu", "su", "bu", "logits" if fold else "rhs",
                   "shw", "shs", "shb", "suw", "sus", "sub"]
         kernel = mx.fast.metal_kernel(
-            name="mlx2_qwen4_moe_gate_up_shared_window" + ("_topk_fold" if fold else ""),
+            name="mlx2_qwen4_moe_gate_up_shared_window" + ("_topk_fold" if fold else "") + suffix,
             input_names=inputs,
             output_names=["y", "indices", "scores"] if fold else ["y"],
-            header=RD.SHARED_COMMON + RD._format_header("q4f", 4, True)
-            + (ROUTER_HEADER if fold else ""),
-            source=_shared_gate_up_window_source(fold),
+            header=RD.shared_gate_up_header(gate_up_bits) + (ROUTER_HEADER if fold else ""),
+            source=RD.shared_gate_up_source(_shared_gate_up_window_source(fold), gate_up_bits),
         )
     elif name == "shared_down":
         kernel = mx.fast.metal_kernel(
-            name="mlx2_qwen4_moe_served_down_shared_window",
+            name="mlx2_qwen4_moe_served_down_shared_window" + suffix,
             input_names=["hidden", "w", "scales", "biases", "rhs", "scores", "sdw", "sds", "sdb", "gate"],
             output_names=["out"],
-            header="using namespace metal;\n" + RD._format_header("q4s", 4, False),
-            source=_shared_down_window_source(),
+            header=RD.shared_down_header(down_bits),
+            source=RD.shared_down_source(_shared_down_window_source(), down_bits),
         )
     else:
         raise KeyError(name)
-    _KERNELS[name] = kernel
+    _KERNELS[key] = kernel
     return kernel
 
 
@@ -521,18 +525,19 @@ def shared_rows(x, indices, scores, gate, up, down, shared, gate_logit, *, logit
     )
     operands = [xr, *RD.expert_operands(gate), *RD.expert_operands(up), *routing,
                 *RD._dense_operands(shared.gate_proj), *RD._dense_operands(shared.up_proj)]
+    formats = RD.shared_formats(shared)
     if logits is None:
-        h = _kernel("shared_gate_up")(
+        h = _kernel("shared_gate_up", formats)(
             inputs=operands, template=template,
             output_shapes=[(rows * (TOP_K + 1) * inter,)], output_dtypes=[x.dtype], **common,
         )[0]
     else:
-        h, indices, scores = _kernel("shared_gate_up_fold")(
+        h, indices, scores = _kernel("shared_gate_up_fold", formats)(
             inputs=operands, template=template + [("NE", logits.shape[-1])],
             output_shapes=[(rows * (TOP_K + 1) * inter,), (rows * TOP_K,), (rows * TOP_K,)],
             output_dtypes=[x.dtype, mx.uint32, x.dtype], **common,
         )
-    y = _kernel("shared_down")(
+    y = _kernel("shared_down", formats)(
         inputs=[h, *RD.expert_operands(down), indices.reshape(rows * TOP_K),
                 scores.reshape(rows * TOP_K), *RD._dense_operands(shared.down_proj),
                 gate_logit.reshape(rows)],

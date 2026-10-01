@@ -1135,29 +1135,76 @@ SHARED_DOWN_SOURCE = r"""
     }
 """
 
-_SHARED_KERNELS = None
+# Shared-expert formats: the routed experts stay 4-bit (``q4f``), the shared
+# gate/up rows and the shared down rows each read their own namespaced copy
+# of the QMV header at their own width (mixed-precision artifacts quantize the
+# shared expert at 8 bits). 4/4 is the original source, byte for byte.
+SHARED_FORMAT_BITS = (4, 8)
+_SHARED_GATE_UP_CALL = "      q4f::qmv_rows<T, K, RPS, RPS>(\n          (const device uint8_t*)shw"
+_SHARED_DOWN_CALL = "q4s::qmv_rows<T, EH, RPS, 0>("
 
 
-def _shared_kernels():
-    global _SHARED_KERNELS
-    if _SHARED_KERNELS is None:
+def shared_gate_up_source(src: str, gate_up_bits: int) -> str:
+    """``src`` (a shared gate+up source) with the shared rows (grid z 0) read
+    at ``gate_up_bits``; the routed rows keep ``q4f``."""
+    if gate_up_bits == BITS:
+        return src
+    if src.count(_SHARED_GATE_UP_CALL) != 1:
+        raise AssertionError("shared gate+up source changed: expected one shared qmv_rows call")
+    return src.replace(_SHARED_GATE_UP_CALL, _SHARED_GATE_UP_CALL.replace("q4f::", f"q{gate_up_bits}f::"))
+
+
+def shared_gate_up_header(gate_up_bits: int) -> str:
+    header = SHARED_COMMON + _format_header("q4f", 4, True)
+    if gate_up_bits != BITS:
+        header += _format_header(f"q{gate_up_bits}f", gate_up_bits, True)
+    return header
+
+
+def shared_down_source(src: str, down_bits: int) -> str:
+    """``src`` (a shared down source) with the shared down rows read at
+    ``down_bits`` (MLX plain ``qmv``: the input width is not a whole
+    ``qmv_fast`` block at either width)."""
+    if down_bits == BITS:
+        return src
+    if src.count(_SHARED_DOWN_CALL) != 1:
+        raise AssertionError("shared down source changed: expected one shared qmv_rows call")
+    return src.replace(_SHARED_DOWN_CALL, _SHARED_DOWN_CALL.replace("q4s::", f"q{down_bits}s::"))
+
+
+def shared_down_header(down_bits: int) -> str:
+    return "using namespace metal;\n" + _format_header(f"q{down_bits}s", down_bits, False)
+
+
+def shared_kernel_suffix(gate_up_bits: int, down_bits: int) -> str:
+    return "" if (gate_up_bits, down_bits) == (BITS, BITS) else f"_s{gate_up_bits}{down_bits}"
+
+
+_SHARED_KERNELS: dict = {}
+
+
+def _shared_kernels(gate_up_bits: int = BITS, down_bits: int = BITS):
+    key = (gate_up_bits, down_bits)
+    kernels = _SHARED_KERNELS.get(key)
+    if kernels is None:
+        suffix = shared_kernel_suffix(gate_up_bits, down_bits)
         gate_up = mx.fast.metal_kernel(
-            name="mlx2_qwen4_moe_gate_up_shared_decode",
+            name="mlx2_qwen4_moe_gate_up_shared_decode" + suffix,
             input_names=["x", "wg", "sg", "bg", "wu", "su", "bu", "rhs",
                          "shw", "shs", "shb", "suw", "sus", "sub"],
             output_names=["y"],
-            header=SHARED_COMMON + _format_header("q4f", 4, True),
-            source=SHARED_GATE_UP_SOURCE,
+            header=shared_gate_up_header(gate_up_bits),
+            source=shared_gate_up_source(SHARED_GATE_UP_SOURCE, gate_up_bits),
         )
         down = mx.fast.metal_kernel(
-            name="mlx2_qwen4_moe_served_down_shared_decode",
+            name="mlx2_qwen4_moe_served_down_shared_decode" + suffix,
             input_names=["hidden", "w", "scales", "biases", "rhs", "scores", "sdw", "sds", "sdb", "gate"],
             output_names=["out"],
-            header="using namespace metal;\n" + _format_header("q4s", 4, False),
-            source=SHARED_DOWN_SOURCE,
+            header=shared_down_header(down_bits),
+            source=shared_down_source(SHARED_DOWN_SOURCE, down_bits),
         )
-        _SHARED_KERNELS = (gate_up, down)
-    return _SHARED_KERNELS
+        kernels = _SHARED_KERNELS[key] = (gate_up, down)
+    return kernels
 
 
 def _linear_ok(layer, bits: int, out_dims: int, in_dims: int) -> str | None:
@@ -1180,21 +1227,46 @@ def _linear_ok(layer, bits: int, out_dims: int, in_dims: int) -> str | None:
     return None
 
 
+def shared_formats(shared) -> tuple[int, int]:
+    """(gate/up bits, down bits) of an admitted shared expert."""
+    return int(shared.gate_proj.bits), int(shared.down_proj.bits)
+
+
 def admit_shared_fold(shared, hidden: int, inter: int) -> RoutedDecodeAdmission:
     """Structural check of the shared expert for the fold (its gate logit is
-    computed by the block's own module and only has to be [.., 1] in T)."""
+    computed by the block's own module and only has to be [.., 1] in T).
+
+    The shared gate/up (one width) and down may each be 4- or 8-bit, group
+    64, where MLX runs exactly the kernels the fold transcribes: ``qmv_fast``
+    for gate/up (hidden a whole ``qmv_fast`` block at that width, inter a
+    multiple of 8) and plain ``qmv`` for down (inter not a whole block, not
+    a ``qmv_quad`` width)."""
     if shared is None:
         return RoutedDecodeAdmission(False, "no shared expert")
     if hasattr(shared, "_prefill_counts"):
         return RoutedDecodeAdmission(False, "tensorfold prefill MLP installed")
+    gate, up, down = shared.get("gate_proj"), shared.get("up_proj"), shared.get("down_proj")
+    widths = {}
+    for name, layer in (("shared gate_proj", gate), ("shared up_proj", up), ("shared down_proj", down)):
+        bits = getattr(layer, "bits", None)
+        widths[name] = bits if bits in SHARED_FORMAT_BITS else BITS
+    if widths["shared gate_proj"] != widths["shared up_proj"]:
+        return RoutedDecodeAdmission(False, "shared gate_proj/up_proj formats differ")
     for name, layer, out_dims, in_dims in (
-        ("shared gate_proj", shared.get("gate_proj"), inter, hidden),
-        ("shared up_proj", shared.get("up_proj"), inter, hidden),
-        ("shared down_proj", shared.get("down_proj"), hidden, inter),
+        ("shared gate_proj", gate, inter, hidden),
+        ("shared up_proj", up, inter, hidden),
+        ("shared down_proj", down, hidden, inter),
     ):
-        reason = _linear_ok(layer, BITS, out_dims, in_dims)
+        reason = _linear_ok(layer, widths[name], out_dims, in_dims)
         if reason is not None:
             return RoutedDecodeAdmission(False, f"{name}: {reason}")
+    gate_up_bits, down_bits = widths["shared gate_proj"], widths["shared down_proj"]
+    if not qmv_fast_layout(hidden, inter, gate_up_bits):
+        return RoutedDecodeAdmission(False, "shared gate/up: MLX would not run qmv_fast")
+    # Any whole-block input width would run qmv_fast or qmv_fast_rows.
+    down_block = (32 // down_bits) * 2 * 32
+    if inter % down_block == 0 or inter in (64, 128) or inter % GROUP_SIZE:
+        return RoutedDecodeAdmission(False, "shared down: MLX would not run plain qmv")
     return RoutedDecodeAdmission(True, "eligible")
 
 
@@ -1212,7 +1284,7 @@ def shared_fold_decode(x, indices, scores, gate, up, down, shared, gate_logit, r
         raise ValueError(f"served down rows must be one of {DOWN_ROWS_SERVED_CHOICES}")
     hidden = x.shape[-1]
     inter = gate["weight"].shape[1]
-    gate_up_kernel, down_kernel = _shared_kernels()
+    gate_up_kernel, down_kernel = _shared_kernels(*shared_formats(shared))
     h = gate_up_kernel(
         inputs=[
             x.reshape(hidden),

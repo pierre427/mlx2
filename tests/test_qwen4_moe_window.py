@@ -21,7 +21,9 @@ from mlx2.runtime.models import qwen4_moe_window as W
 from mlx2.runtime.models import qwen4_routed_decode as RD
 from mlx2.runtime.models.precise_ops import gate_sigmoid
 
-E, H, I = 16, 512, 64
+# I = 192: the shared down input must not be a qmv_quad width (64, 128) or
+# a whole qmv_fast block, or MLX would not run the plain qmv the fold transcribes.
+E, H, I = 16, 512, 192
 
 
 def _block(monkeypatch, seed=0):
@@ -385,3 +387,50 @@ def test_batch_decode_above_its_row_cap_declines_quietly(monkeypatch, ref_kernel
     assert sum(block.moe_window_fallbacks.values()) == 0
     with pytest.raises(ValueError):
         W.set_batch_decode_max_rows(1)
+
+
+@pytest.mark.parametrize("consumer", ["batch_decode", "row_exact"])
+def test_dense_shared_gate_runs_one_row_at_a_time(monkeypatch, ref_kernels, consumer):
+    # Mixed-precision artifacts keep the shared gate a bf16 nn.Linear: a
+    # multi-row matmul is not the one-token gemv, so the window gives every
+    # row its own one-token-shaped gate call (8-bit router still row-exact qmv).
+    block = _block(monkeypatch)
+    block.shared_expert_gate = nn.Linear(H, 1, bias=False)
+    block.shared_expert_gate.set_dtype(mx.bfloat16)
+    shared = QN.Qwen3NextMLP(H, I)
+    nn.quantize(shared, group_size=64, bits=8)
+    shared.set_dtype(mx.bfloat16)
+    block.shared_expert = shared
+    block.set_moe_window_consumers({consumer})
+    rows = 3
+    x = _x(31, (rows, 1, H) if consumer == "batch_decode" else (1, rows, H))
+    want = _one_token_rows(block, x)
+    shapes = []
+    linear_call = nn.Linear.__call__
+
+    def spy(self, v):
+        shapes.append(tuple(v.shape))
+        return linear_call(self, v)
+
+    monkeypatch.setattr(nn.Linear, "__call__", spy)
+    record = REV.Window(rows)
+    if consumer == "row_exact":
+        with REV.window(record):
+            got = block(x)
+    else:
+        got = block(x)
+    assert mx.array_equal(got.reshape(rows, H), want).item()
+    assert block.moe_window_calls[consumer] == 1 and block.moe_window_shared_calls == 1
+    assert shapes == [(1, 1, H)] * rows
+    if consumer == "row_exact":
+        assert record.exact and record.stages["projections"].get("dense_per_row") == rows
+
+
+def test_dense_shared_gate_with_bias_is_refused(monkeypatch, ref_kernels):
+    block = _block(monkeypatch)
+    block.shared_expert_gate = nn.Linear(H, 1, bias=True)
+    block.shared_expert_gate.set_dtype(mx.bfloat16)
+    block.set_moe_window_consumers({"batch_decode"})
+    block(_x(32, (2, 1, H)))
+    assert block.moe_window_fallbacks["batch_decode"] == 1
+    assert "shared_expert_gate" in block.moe_window_last_fallback

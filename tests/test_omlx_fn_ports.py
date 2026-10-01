@@ -16,7 +16,9 @@ import pytest
 from mlx2.runtime.models import qwen3_next as QN
 from mlx2.runtime.models import qwen4_routed_decode as RD
 
-E, H, I = 16, 512, 64  # hidden % 512 == 0, intermediate % 512 != 0, % 64 == 0
+# hidden % 512 == 0, intermediate % 512 != 0, % 64 == 0; not 64/128 (MLX
+# runs qmv_quad there, so the shared fold's plain-qmv down would not apply).
+E, H, I = 16, 512, 192
 
 
 def _switch(seed=0, dtype=mx.bfloat16, bits=4, group_size=64):
@@ -553,7 +555,26 @@ def test_shared_fold_admission():
     q8 = QN.Qwen3NextMLP(H, I)
     nn.quantize(q8, group_size=64, bits=8)
     q8.set_dtype(mx.bfloat16)
-    assert "b8g64 != b4g64" in RD.admit_shared_fold(q8, H, I).reason
+    assert RD.admit_shared_fold(q8, H, I).accepted  # 8-bit shared expert
+    assert RD.shared_formats(q8) == (8, 8)
+    mixed = QN.Qwen3NextMLP(H, I)
+    nn.quantize(mixed, group_size=64, bits=4,
+                class_predicate=lambda p, m: {"group_size": 64, "bits": 8} if p == "down_proj" else True)
+    mixed.set_dtype(mx.bfloat16)
+    assert RD.admit_shared_fold(mixed, H, I).accepted and RD.shared_formats(mixed) == (4, 8)
+    split = QN.Qwen3NextMLP(H, I)
+    nn.quantize(split, group_size=64, bits=4,
+                class_predicate=lambda p, m: {"group_size": 64, "bits": 8} if p == "gate_proj" else True)
+    split.set_dtype(mx.bfloat16)
+    assert "formats differ" in RD.admit_shared_fold(split, H, I).reason
+    q6 = QN.Qwen3NextMLP(H, I)
+    nn.quantize(q6, group_size=64, bits=6)
+    q6.set_dtype(mx.bfloat16)
+    assert "b6g64 != b4g64" in RD.admit_shared_fold(q6, H, I).reason
+    quad = QN.Qwen3NextMLP(H, 128)
+    nn.quantize(quad, group_size=64, bits=8)
+    quad.set_dtype(mx.bfloat16)
+    assert "plain qmv" in RD.admit_shared_fold(quad, H, 128).reason
     object.__setattr__(shared, "_prefill_counts", {})
     assert "tensorfold" in RD.admit_shared_fold(shared, H, I).reason
 
@@ -585,7 +606,7 @@ def test_shared_fold_declines_with_reasons(monkeypatch, fold_reference):
     assert "glue" in block.shared_fold_last_fallback
     monkeypatch.setattr(QN, "_COMPILE_GLUE", False)
     shared = QN.Qwen3NextMLP(H, I)
-    nn.quantize(shared, group_size=64, bits=8)
+    nn.quantize(shared, group_size=64, bits=6)
     shared.set_dtype(mx.bfloat16)
     block.shared_expert = shared
     block(x)
@@ -613,3 +634,38 @@ def test_shared_fold_admission_sees_through_the_row_exact_subclass():
         linear.__class__ = RX._subclass(RX._RowExactQuantizedLinear, type(linear))
     assert type(shared.gate_proj) is not nn.QuantizedLinear
     assert RD.admit_shared_fold(shared, H, I).accepted
+
+
+def test_shared_fold_serves_an_8bit_shared_expert(monkeypatch, fold_reference):
+    # The uncensored artifact: routed experts 4-bit, shared expert 8-bit, a
+    # dense bf16 shared gate (its logit is the block's own launch).
+    block = _served_block(monkeypatch)
+    shared = QN.Qwen3NextMLP(H, I)
+    nn.quantize(shared, group_size=64, bits=8)
+    shared.set_dtype(mx.bfloat16)
+    block.shared_expert = shared
+    block.shared_expert_gate = nn.Linear(H, 1, bias=False)
+    block.shared_expert_gate.set_dtype(mx.bfloat16)
+    x = _x(5)
+    block.set_moe_routed_decode_mode("off")
+    want = block(x)
+    block.set_moe_routed_decode_mode("gate_up_down_shared")
+    got = block(x)
+    assert mx.array_equal(got, want).item()
+    assert block.shared_fold_calls == 1 and block.shared_fold_fallbacks == 0
+
+
+def test_shared_kernel_sources_per_format():
+    # 4/4 is the original source; other formats re-point exactly the shared
+    # rows' qmv_rows call at their own namespace.
+    assert RD.shared_gate_up_source(RD.SHARED_GATE_UP_SOURCE, 4) is RD.SHARED_GATE_UP_SOURCE
+    assert RD.shared_down_source(RD.SHARED_DOWN_SOURCE, 4) is RD.SHARED_DOWN_SOURCE
+    src = RD.shared_gate_up_source(RD.SHARED_GATE_UP_SOURCE, 8)
+    assert src.count("q8f::qmv_rows") == 1 and src.count("q4f::qmv_rows") == 1
+    assert src.index("q8f::") < src.index("tid.z == 0") + 200  # the shared branch
+    down = RD.shared_down_source(RD.SHARED_DOWN_SOURCE, 8)
+    assert down.count("q8s::qmv_rows") == 1 and "q4s::" not in down
+    header = RD.shared_gate_up_header(8)
+    assert "namespace q4f" in header and "namespace q8f" in header
+    assert "namespace q8s" in RD.shared_down_header(8)
+    assert RD.shared_kernel_suffix(4, 4) == "" and RD.shared_kernel_suffix(8, 8) == "_s88"

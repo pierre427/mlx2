@@ -12,9 +12,15 @@ gate) for a few layers, including the MTP layer:
   gate_up      split gate+up/SwiGLU kernel, then the block's tile4 down
   gate_up_down split gate+up kernel + served_down (tile4 arithmetic, 2 or 4
                rows per threadgroup, one-expert views on or off)
-  gate_up_down_shared  the same with the shared expert, its 8-bit gate and
-               the combine folded into the two launches (block-level; on the
-               switch-level synthetic cases it runs as gate_up_down)
+  gate_up_down_shared  the same with the shared expert and the combine
+               folded into the two launches (block-level; on the switch-level
+               synthetic cases it runs as gate_up_down); the shared gate
+               logit stays the block's own launch
+
+Projection formats follow the artifact (``--model``): each projection is
+quantized at the width its packed weight and scales imply, or stays a dense
+``nn.Linear`` when the artifact stores it unquantized (the uncensored
+artifact: 8-bit shared expert and router, bf16 shared gate).
 
 Per case it also compares the isolated pieces: the SwiGLU hidden against
 ``swiglu(gather_qmm gate, gather_qmm up)`` and served_down against
@@ -51,12 +57,17 @@ import mlx.core as mx  # noqa: E402
 import mlx.nn as nn  # noqa: E402
 
 MODEL = Path.home() / "mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP"
+if "--model" in sys.argv:
+    MODEL = Path(sys.argv[sys.argv.index("--model") + 1]).expanduser()
 E, H, I, TOPK = 512, 2560, 640, 10
 
 
 def load_layer(prefix, index, cache):
     """{relative key: array} for one MoE block from the artifact."""
     wanted = {k: f for k, f in index.items() if k.startswith(prefix + ".mlp.")}
+    if not wanted:
+        prefix = "language_model." + prefix
+        wanted = {k: f for k, f in index.items() if k.startswith(prefix + ".mlp.")}
     out = {}
     for key, fname in wanted.items():
         if fname not in cache:
@@ -76,13 +87,26 @@ def qsl(w, s, b):
     return m
 
 
-def ql(tensors, name, bits):
+def ql(tensors, name):
+    """The artifact's projection: quantized at the width its packed weight
+    and group count imply, or dense when stored without scales."""
     w = tensors[f"{name}.weight"]
     out_dims, packed = w.shape
-    m = nn.QuantizedLinear(packed * 32 // bits, out_dims, bias=False, group_size=64, bits=bits)
+    if f"{name}.scales" not in tensors:
+        m = nn.Linear(packed, out_dims, bias=False)
+        m.weight = w
+        m.freeze()
+        return m
+    in_dims = tensors[f"{name}.scales"].shape[1] * 64
+    bits = packed * 32 // in_dims
+    m = nn.QuantizedLinear(in_dims, out_dims, bias=False, group_size=64, bits=bits)
     m.weight, m.scales, m.biases = w, tensors[f"{name}.scales"], tensors[f"{name}.biases"]
     m.freeze()
     return m
+
+
+def describe(layer):
+    return f"q{layer.bits}" if isinstance(layer, nn.QuantizedLinear) else f"dense {layer.weight.dtype}"
 
 
 def build_block(tensors):
@@ -97,10 +121,10 @@ def build_block(tensors):
     sw = block.switch_mlp
     for proj in ("gate_proj", "up_proj", "down_proj"):
         setattr(sw, proj, qsl(*(tensors[f"switch_mlp.{proj}.{p}"] for p in ("weight", "scales", "biases"))))
-    block.gate = ql(tensors, "gate", 8)
-    block.shared_expert_gate = ql(tensors, "shared_expert_gate", 8)
+    block.gate = ql(tensors, "gate")
+    block.shared_expert_gate = ql(tensors, "shared_expert_gate")
     for proj in ("gate_proj", "up_proj", "down_proj"):
-        setattr(block.shared_expert, proj, ql(tensors, f"shared_expert.{proj}", 4))
+        setattr(block.shared_expert, proj, ql(tensors, f"shared_expert.{proj}"))
     block.eval()
     mx.eval(block.parameters())
     return block
@@ -214,6 +238,7 @@ def main():
     ap.add_argument("--chain", type=int, default=48)
     ap.add_argument("--reps", type=int, default=12)
     ap.add_argument("--out", required=True)
+    ap.add_argument("--model", default=str(MODEL))
     a = ap.parse_args()
     if not a.i_own_the_gpu:
         ap.error("refusing Metal execution without --i-own-the-gpu")
@@ -317,6 +342,9 @@ def main():
                     tally(f"served_down/rows{rows}/views{int(views)}==tile4", bits_equal(got, tile4), maxdiff(got, tile4))
             views_seen.add(tuple(RD.expert_view_count(p) for p in (sw.gate_proj, sw.up_proj, sw.down_proj)))
         per_layer[prefix] = {"cases": n_cases, "view_counts": sorted(views_seen),
+                             "formats": {n: describe(block[n]) for n in ("gate", "shared_expert_gate")}
+                             | {f"shared_expert.{p}": describe(block.shared_expert[p])
+                                for p in ("gate_proj", "up_proj", "down_proj")},
                              "switch_types": [type(getattr(sw, p)).__name__ for p in ("gate_proj", "up_proj", "down_proj")]}
         print(prefix, json.dumps(per_layer[prefix]), flush=True)
         print(json.dumps({k: f"{v[0]}/{v[1]}" for k, v in counts.items()}), flush=True)

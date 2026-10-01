@@ -2,7 +2,8 @@
 
 Real Flash-Next layer weights (``check_fn_split_routed_decode`` loads one MoE
 block from the artifact's safetensors: routed tables, 8-bit router, shared
-expert, 8-bit shared gate) for layers 0, 23, 47 and ``mtp.layers.0``.
+expert, shared gate, each at the artifact's own format; ``--model``) for
+layers 0, 23, 47 and ``mtp.layers.0``.
 
 Reference: the served one-token block (routed decode ``off``: gather_qmm
 gate/up, swiglu, tile4 fused down, eager shared expert and combine, stock
@@ -65,6 +66,8 @@ def main():
     ap.add_argument("--b1-cases", type=int, default=12)
     ap.add_argument("--routing-rows", type=int, default=4096, help="synthetic routing rows per layer")
     ap.add_argument("--out", required=True)
+    ap.add_argument("--model", default=str(base.MODEL),
+                    help="artifact (read by check_fn_split_routed_decode at import)")
     a = ap.parse_args()
     if not a.i_own_the_gpu:
         ap.error("refusing Metal execution without --i-own-the-gpu")
