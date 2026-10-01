@@ -26,6 +26,7 @@ COUNTER_NAMES = (
     "eager_dispatch_row_declines",
     "qsa_pooled_key_cache_hits",
     "qsa_pooled_key_cache_misses",
+    "qsa_pooled_key_tail_hits",
     "qsa_scatter_chosen_calls",
 )
 _COUNTERS: Dict[str, float] = {name: 0 for name in COUNTER_NAMES}

@@ -1344,6 +1344,7 @@ def _add_execution(builder: PrometheusBuilder, execution: Mapping[str, Any]) -> 
             "hedge_skipped", "hedge_discarded", "eager_async_evals",
             "eager_dispatch_forwards", "eager_dispatch_row_declines",
             "qsa_pooled_key_cache_hits", "qsa_pooled_key_cache_misses",
+            "qsa_pooled_key_tail_hits",
             "qsa_scatter_chosen_calls",
         ):
             builder.counter(

@@ -259,6 +259,10 @@ def qwen4_ple_compile_status(*, reset: bool = False) -> dict:
 
 
 _QSA_POOLED_KEY_CACHE = _env_flag("MLX_QWEN4_QSA_POOLED_KEY_CACHE")
+# Ragged batches: keep the pooled blocks past the every-row-closed prefix and
+# re-pool only the (row, block) entries that closed since the last forward.
+# Runtime-only reuse of already computed blocks; see ``_pooled_tail``.
+_QSA_POOLED_TAIL = _env_flag("MLX_QWEN4_QSA_POOLED_TAIL", default=True)
 _QSA_APC_SUMMARIES = _env_flag("MLX_QWEN4_QSA_APC_SUMMARIES")
 _QSA_SUMMARY_FORMAT_VERSION = 1
 _QSA_SUMMARY_PRODUCER_VERSION = "qwen4-pooled-key-v1"
@@ -2806,6 +2810,9 @@ _QSA_CYCLE_STATE = (
     ("_mtp_shared_topk_n_blocks", None),
     ("_qsa_pooled_keys", None),
     ("_qsa_pooled_ratio", None),
+    # (blocks, first block, ledger width, ratio, per-row left padding): the
+    # ragged tail past ``_qsa_pooled_keys``. Every lifecycle exit drops it.
+    ("_qsa_pooled_tail", None),
 )
 
 # Process-lifetime observability for the correctness-critical amendment below.
@@ -2881,6 +2888,11 @@ def _extend_mtp_shared_topk(cache, shared_topk, n_blocks):
     cache._mtp_shared_topk_n_blocks = n_blocks
     _record_qsa_mtp_amendment(appended_blocks=appended_count)
     return cache._mtp_shared_topk
+
+
+def _qsa_pooled_tail_nbytes(cache) -> int:
+    tail = getattr(cache, "_qsa_pooled_tail", None)
+    return 0 if tail is None else int(tail[0].nbytes)
 
 
 def _qsa_summary_persistable(cache) -> bool:
@@ -3506,6 +3518,7 @@ class BatchQSAKVCache(_StepGrownIndexLedger, BatchKVCache):
     @property
     def nbytes(self):
         summary = 0 if self._qsa_pooled_keys is None else self._qsa_pooled_keys.nbytes
+        summary += _qsa_pooled_tail_nbytes(self)
         return (
             super().nbytes
             + self._index_nbytes
@@ -4285,6 +4298,7 @@ class BatchQSAQuantizedKVCache(BatchQSAKVCache):
         if self.keys is not None:
             packed = sum((x.nbytes for x in (*self.keys, *self.values)))
         summary = 0 if self._qsa_pooled_keys is None else self._qsa_pooled_keys.nbytes
+        summary += _qsa_pooled_tail_nbytes(self)
         return (
             packed
             + self._index_nbytes
@@ -5074,6 +5088,72 @@ class QSAIndexer(nn.Module):
             return n_blocks <= self.block_topk
         return shared_topk.shape[-1] == n_blocks
 
+    def _pooled_tail(
+        self, all_raw, n_blocks, starts, cache, length, left_pad, count, closed
+    ):
+        """Blocks ``[count, n_blocks)`` of a left-padded batch, and how many
+        of them were pooled now.
+
+        The shared prefix only holds blocks every row has closed, so beside a
+        long row a short row's padding kept the long row's closed history out
+        of it and every forward re-pooled it. Row ``b``'s logical block ``j``
+        is final once ``j < (width - pad[b]) // r``: a block mean is a closed
+        window over ``r`` of the row's own tokens. A stored entry therefore
+        stays exact while the ledger has only grown since it was pooled
+        (each lifecycle exit drops the tail through ``_QSA_CYCLE_STATE``, and
+        the stored width and padding must match), and only the entries a row
+        closed since then are re-pooled. Entries past a row's own closed
+        count are clamped garbage that ``valid_blocks`` never admits; they
+        keep whatever was pooled until the row closes them.
+        """
+        ratio = self.compress_ratio
+        total = int(all_raw.shape[1])
+        rows = cache._left_padding_rows()
+        stored = cache._qsa_pooled_tail
+        cache._qsa_pooled_tail = None
+        rows = None if rows is None else tuple(int(pad) for pad in rows)
+        if not (
+            rows is not None
+            and stored is not None
+            and stored[1:] == (count, total - length, ratio, rows)
+            and stored[0].shape[0] == all_raw.shape[0]
+            and stored[0].dtype == all_raw.dtype
+            and count + stored[0].shape[1] <= n_blocks
+        ):
+            tail = self._pool_blocks_left_padded(
+                all_raw, starts[count:n_blocks], left_pad
+            )
+            misses = n_blocks - count
+        else:
+            (tail, width) = (stored[0], stored[2])
+            end = count + tail.shape[1]
+            closing = sorted(
+                {
+                    block
+                    for pad in rows
+                    for block in range(
+                        max(count, (width - pad) // ratio),
+                        min(end, (total - pad) // ratio),
+                    )
+                }
+            )
+            if closing:
+                ids = mx.array(closing, dtype=mx.int32)
+                fresh = self._pool_blocks_left_padded(all_raw, starts[ids], left_pad)
+                slots = mx.broadcast_to((ids - count)[None, :, None], fresh.shape)
+                tail = mx.put_along_axis(tail, slots, fresh, axis=1)
+            if end < n_blocks:
+                grown = self._pool_blocks_left_padded(
+                    all_raw, starts[end:n_blocks], left_pad
+                )
+                tail = mx.concatenate([tail, grown], axis=1)
+            misses = len(closing) + n_blocks - end
+        if rows is not None and closed < n_blocks:
+            cache._qsa_pooled_tail = (
+                tail[:, closed - count :], closed, total, ratio, rows
+            )
+        return (tail, misses)
+
     def _pooled_keys(self, all_raw, n_blocks, starts, cache, length, left_pad):
         ratio = self.compress_ratio
 
@@ -5150,11 +5230,20 @@ class QSAIndexer(nn.Module):
             if count:
                 _lv.bump("qsa_pooled_key_cache_hits", count)
             pooled = cached
+            cache._qsa_pooled_tail = None
         else:
-            if count:
-                _lv.bump("qsa_pooled_key_cache_hits", min(count, n_blocks))
-            _lv.bump("qsa_pooled_key_cache_misses", max(0, n_blocks - count))
-            new = pool(count, n_blocks)
+            if left_pad is not None and _QSA_POOLED_TAIL:
+                (new, misses) = self._pooled_tail(
+                    all_raw, n_blocks, starts, cache, length, left_pad, count, closed
+                )
+                if n_blocks - count > misses:
+                    _lv.bump("qsa_pooled_key_tail_hits", n_blocks - count - misses)
+            else:
+                cache._qsa_pooled_tail = None
+                (new, misses) = (pool(count, n_blocks), n_blocks - count)
+            if n_blocks > misses:
+                _lv.bump("qsa_pooled_key_cache_hits", n_blocks - misses)
+            _lv.bump("qsa_pooled_key_cache_misses", misses)
             pooled = new if cached is None else mx.concatenate([cached, new], axis=1)
             if _QSA_APC_SUMMARIES and closed > count:
                 _record_qsa_summary(

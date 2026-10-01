@@ -2448,6 +2448,121 @@ def test_ragged_finalize_keeps_no_pooled_qsa_block_the_padded_row_left_open(
         assert mx.array_equal(cached, run(False)).item()
 
 
+def test_ragged_decode_reuses_pooled_qsa_tail_bit_exact(monkeypatch):
+    """A short row beside a long one must not make every step re-pool the
+    long row's closed history (the omlx#4070 shape).
+
+    The shared prefix holds only blocks every row has closed, so the tail
+    past it used to be pooled again on every forward. With the tail kept, a
+    decode step pools only the blocks some row closed since the last step
+    plus the grown grid, while every block a row can attend, and every
+    selection, stays bit-identical to the re-pooling path, across a rewind
+    and a filter that end the tail.
+    """
+    from qsa_oracle import tiny_args
+
+    from mlx2.runtime import round_levers
+    from mlx2.runtime.models import qwen4_exp
+
+    monkeypatch.setattr(qwen4_exp, "_QSA_APC_SUMMARIES", False)
+    monkeypatch.setattr(qwen4_exp, "_QSA_POOLED_KEY_CACHE", True)
+    args = tiny_args()
+    mx.random.seed(7)
+    indexer = qwen4_exp.QSAIndexer(args)
+    # bf16 like the served indexer: the CPU fp32 RMSNorm is not bit-invariant
+    # to how many rows one call normalizes, on either path.
+    indexer.set_dtype(mx.bfloat16)
+    mx.eval(indexer.parameters())
+    ratio = indexer.compress_ratio
+    # Rows hold 5, 37 and 17 real tokens: 8 blocks only row 1 closed. The
+    # filter keeps rows 0 and 2, still ragged.
+    script = [("step", 3, 37)] + [("step", 3, 1)] * 9 + [("trim", 3)]
+    script += [("step", 3, 1)] * 6 + [("filter", [0, 2])] + [("step", 2, 1)] * 5
+    hiddens = [
+        mx.random.normal((op[1], op[2], args.hidden_size)).astype(mx.bfloat16)
+        for op in script
+        if op[0] == "step"
+    ]
+
+    def run(tail):
+        monkeypatch.setattr(qwen4_exp, "_QSA_POOLED_TAIL", tail)
+        cache = BatchQSAKVCache([32, 0, 20])
+        pooled_keys = indexer._pooled_keys
+        out = []
+
+        def spy(*a, **k):
+            out[-1]["pooled"] = pooled_keys(*a, **k)
+            return out[-1]["pooled"]
+
+        indexer._pooled_keys = spy
+        steps = iter(hiddens)
+        try:
+            for op in script:
+                if op[0] == "trim":
+                    cache.trim(op[1])
+                    continue
+                if op[0] == "filter":
+                    cache.filter(op[1])
+                    continue
+                hidden = next(steps)
+                width = hidden.shape[1]
+                before = round_levers.counters()
+                out.append({})
+                mask = cache.make_mask(width, return_array=True, window_size=None)
+                selection = indexer(hidden, mask, cache)
+                after = round_levers.counters()
+                record = out[-1]
+                record["misses"] = (
+                    after["qsa_pooled_key_cache_misses"]
+                    - before["qsa_pooled_key_cache_misses"]
+                )
+                record["tail_hits"] = (
+                    after["qsa_pooled_key_tail_hits"]
+                    - before["qsa_pooled_key_tail_hits"]
+                )
+                record["mask"] = selection.dense_mask()
+                total = cache.index_keys.shape[1]
+                pads = cache.left_padding.tolist()
+                record["closed"] = [(total - pad) // ratio for pad in pads]
+                record["n_blocks"] = total // ratio
+                kv = mx.zeros((hidden.shape[0], 1, width, args.head_dim))
+                cache.update_and_fetch(kv, kv)
+                fresh = indexer._pool_blocks_left_padded(
+                    cache.index_keys,
+                    mx.arange(total // ratio) * ratio,
+                    cache.left_padding.astype(cache.offset.dtype),
+                )
+                for row, closed in enumerate(record["closed"]):
+                    np.testing.assert_array_equal(
+                        np.asarray(record["pooled"][row, :closed].view(mx.uint16)),
+                        np.asarray(fresh[row, :closed].view(mx.uint16)),
+                    )
+        finally:
+            del indexer._pooled_keys
+        return out
+
+    kept = run(True)
+    repooled = run(False)
+    for (a, b) in zip(kept, repooled):
+        assert mx.array_equal(a["mask"], b["mask"]).item()
+        assert a["closed"] == b["closed"]
+    # Without the tail every step re-pools all blocks past the shared prefix.
+    for record in repooled[1:]:
+        assert record["tail_hits"] == 0
+        assert record["misses"] >= record["n_blocks"] - min(record["closed"]) - 1
+    # With it, a ragged decode step pools at most one closing block per row
+    # plus the grown grid. The prefill's tail carries into the first decode;
+    # the rewind and the filter each drop it, costing one full pool.
+    for index, record in enumerate(kept):
+        if index in (0, 10, 16):
+            assert record["tail_hits"] == 0, index
+            continue
+        assert record["misses"] <= len(record["closed"]) + 1, (index, record)
+        if min(record["closed"]) < record["n_blocks"] - 1:
+            assert record["tail_hits"] > 0, index
+    assert sum(r["misses"] for r in kept) < sum(r["misses"] for r in repooled) / 3
+
+
 def test_committed_cycles_retire_older_rollback_records():
     """Each verify forward records a GDN rollback that pins the whole
     pre-forward recurrent state. The non-segmented route starts speculation
