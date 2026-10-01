@@ -19,6 +19,7 @@ def main():
     parser.add_argument("--sequence", type=int, default=256)
     parser.add_argument("--require-coalescing", action="store_true")
     parser.add_argument("--segment-tokens", type=int, default=0)
+    parser.add_argument("--optimizer-step", action="store_true")
     args = parser.parse_args()
     if args.batch < 1 or args.sequence < 2 or args.segment_tokens < 0:
         parser.error("batch must be positive and sequence at least two")
@@ -136,6 +137,47 @@ def main():
             if args.require_coalescing:
                 assert coalescing["calls"] > 0 and coalescing["joined_groups"] > 0
                 assert coalescing["max_group_bytes"] <= 16 << 20
+            if args.optimizer_step:
+                from mlx import optimizers
+                from mlx.utils import tree_unflatten
+                from mlx2.experimental.hysparse2.train import load_checkpoint, save_checkpoint
+
+                before = dict(tree_flatten(model.parameters()))
+                optimizer = optimizers.Adam(1e-4)
+                optimizer.update(model, tree_unflatten(list(right.items())))
+                mx.eval(model.parameters(), optimizer.state)
+                after = dict(tree_flatten(model.parameters()))
+                report["parameter_update_probes"] = {
+                    key: float(mx.max(mx.abs(after[key] - before[key])).item())
+                    for key in probes
+                }
+                assert all(delta > 0 for delta in report["parameter_update_probes"].values())
+                assert all(bool(mx.all(mx.isfinite(x)).item()) for x in after.values())
+                run = {"qualification": "coalesced-gather-step", "parent_checkpoint_sha256": report["checkpoint_sha256"], "batch": args.batch, "sequence": args.sequence}
+                path = save_checkpoint(args.output / "checkpoints", model, optimizer, 1, run)
+                report["optimizer_update_performed"] = True
+                report["fresh_optimizer_lineage"] = True
+                report["updated_checkpoint_sha256"] = file_hash(path / "model.safetensors")
+                del before, after, runs, left, right
+                model.eval()
+                model_module.attention = attention.attention
+                expected, cache = model.prefill(tokens[:, :72])
+                proposed, _ = model.diffusion_propose(cache, count=8, steps=3)
+                recovered_model = model_module.Model(c)
+                recovered_optimizer = optimizers.Adam(1e-4)
+                assert load_checkpoint(path, recovered_model, recovered_optimizer, run) == 1
+                recovered_model.eval()
+                actual, recovered_cache = recovered_model.prefill(tokens[:, :72])
+                recovered_proposals, _ = recovered_model.diffusion_propose(recovered_cache, count=8, steps=3)
+                report["checkpoint_logits_max_error"] = float(mx.max(mx.abs(expected - actual)).item())
+                report["checkpoint_proposals_equal"] = bool(mx.all(proposed == recovered_proposals).item())
+                original_state = dict(tree_flatten(optimizer.state))
+                recovered_state = dict(tree_flatten(recovered_optimizer.state))
+                assert original_state.keys() == recovered_state.keys()
+                report["optimizer_state_tensors_compared"] = len(original_state)
+                report["optimizer_state_max_error"] = max(float(mx.max(mx.abs(original_state[k] - recovered_state[k])).item()) for k in original_state)
+                assert report["checkpoint_logits_max_error"] == report["optimizer_state_max_error"] == 0
+                assert report["checkpoint_proposals_equal"]
             report["peak_memory_bytes"] = mx.get_peak_memory()
             report["completed"] = True
         finally:
