@@ -31,7 +31,7 @@ def _tiles(blocks, key_tile, *, minimum=None, maximum=None):
             )
 
 
-def _candidate_tiles(blocks, block_size):
+def _candidate_tiles(blocks, block_size, *, include_values=True):
     """Yield absolute, fixed-size cache blocks without joining full history."""
     pending_k, pending_v, pending_positions, pending_start = [], [], [], None
     pending_length = 0
@@ -53,21 +53,22 @@ def _candidate_tiles(blocks, block_size):
             if pending_start is not None and block_start != pending_start:
                 yield (
                     mx.concatenate(pending_k, axis=2),
-                    mx.concatenate(pending_v, axis=2),
+                    mx.concatenate(pending_v, axis=2) if include_values else None,
                     mx.concatenate(pending_positions),
                     pending_start // block_size,
                 )
                 pending_k, pending_v, pending_positions, pending_length = [], [], [], 0
             pending_start = block_start
             pending_k.append(k[:, :, cursor : cursor + take])
-            pending_v.append(v[:, :, cursor : cursor + take])
+            if include_values:
+                pending_v.append(v[:, :, cursor : cursor + take])
             pending_positions.append(mx.arange(absolute, absolute + take))
             pending_length += take
             cursor += take
             if absolute + take == block_start + block_size:
                 yield (
                     mx.concatenate(pending_k, axis=2),
-                    mx.concatenate(pending_v, axis=2),
+                    mx.concatenate(pending_v, axis=2) if include_values else None,
                     mx.concatenate(pending_positions),
                     block_start // block_size,
                 )
@@ -81,7 +82,7 @@ def _candidate_tiles(blocks, block_size):
     if pending_k:
         yield (
             mx.concatenate(pending_k, axis=2),
-            mx.concatenate(pending_v, axis=2),
+            mx.concatenate(pending_v, axis=2) if include_values else None,
             mx.concatenate(pending_positions),
             pending_start // block_size,
         )
@@ -101,10 +102,11 @@ def _candidate_groups(blocks, block_size, key_tile, *, maximum=None):
                 if start > maximum:
                     break
                 size = min(k.shape[2], maximum - start + 1)
-                k, v = k[:, :, :size], v[:, :, :size]
-            yield k, v, start
+                k = k[:, :, :size]
+            # Coarse selection uses keys only: do not slice or assemble values.
+            yield k, None, start
 
-    for k, _, kp, block_id in _candidate_tiles(visible_blocks(), block_size):
+    for k, _, kp, block_id in _candidate_tiles(visible_blocks(), block_size, include_values=False):
         padding = block_size - k.shape[2]
         keys.append(mx.pad(k, [(0, 0), (0, 0), (0, padding), (0, 0)]))
         positions.append(mx.pad(kp, [(0, padding)], constant_values=2147483647))

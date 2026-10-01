@@ -5,6 +5,7 @@ import pytest
 mx = pytest.importorskip("mlx.core")
 from mlx2.experimental.hysparse2.attention import (
     _candidate_tiles,
+    _candidate_groups,
     _gather_groups,
     _tiles,
     attention,
@@ -159,3 +160,21 @@ def test_coarse_candidates_skip_future_history_with_reference_parity(monkeypatch
     assert bool(mx.all(mx.sort(current[1][2], axis=-1) == mx.sort(reference[1][2], axis=-1)).item())
     for a, b in zip((current[0], current[2], *current_grad), (reference[0], reference[2], *reference_grad)):
         assert float(mx.max(mx.abs(a - b)).item()) < 1e-5
+
+
+def test_coarse_candidate_groups_never_read_value_tensors():
+    class UnreadableValue:
+        def __getitem__(self, key):
+            raise AssertionError("coarse selection read a value tensor")
+
+    keys = mx.arange(6).astype(mx.float32).reshape(1, 1, 6, 1)
+    blocks = [(keys[:, :, :3], UnreadableValue(), 5),
+              (keys[:, :, 3:], UnreadableValue(), 8)]
+    actual = list(_candidate_groups(blocks, 4, 8, maximum=9))
+    reference = list(_candidate_groups([(k, mx.zeros_like(k), start)
+                                       for k, _, start in blocks], 4, 8, maximum=9))
+    assert len(actual) == len(reference)
+    for a, b in zip(actual, reference):
+        assert all(bool(mx.all(x == y).item()) for x, y in zip(a, b))
+    valid = mx.concatenate([kp for _, kp, _ in actual])
+    assert valid.tolist() == [5, 6, 7, 2147483647, 8, 9, 2147483647, 2147483647]
