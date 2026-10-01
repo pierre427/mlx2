@@ -133,6 +133,19 @@ class FlashNextPolicy:
     # (qualification/runs/omlx-4106-gdn-batch-20260930).  "off" restores the
     # stock chain; it enters the environment and receipts only when not "off".
     fused_gdn_batch_decode: str = "row_exact"
+    # Batched fused GDN verify (MLX_QWEN4_FUSED_GDN_BATCH_VERIFY): a batched
+    # MTP verify block (B lanes x S rows, ragged right padding) runs one
+    # launch of the B=1 fused verify step per lane, each lane at its own
+    # width from its own states, bit-identical to that lane's B=1 fused
+    # verify (and so to one-token decode), rollback included; otherwise
+    # such blocks take the stock multi-row chain.  TensorFold 0.6.1
+    # multi-stream GDN + mlx2 L1 lane rebinding
+    # (provenance/tensorfold-batched-gdn-verify.json).  Default "row_exact"
+    # since 2026-10-01 (Pierre): no speed gain for plain batched MTP (-0.3 to
+    # -2.1% at 2-16 lanes, tokens identical) but it lets batched row-exact
+    # verify windows engage GDN (B4 63/63, B8 62/62).  Recorded in receipts
+    # only when it differs from the default; "off" restores the stock chain.
+    fused_gdn_batch_verify: str = "row_exact"
     # Opt-in: the quantized lm_head stores fp32 logits instead of rounding
     # them to bf16 (runtime/fp32_head.py).  Not an environment switch; it
     # enters receipts only when enabled, like the kernels above.
@@ -227,6 +240,8 @@ class FlashNextPolicy:
             raise ValueError("moe_topk_fold must be off, launch, or fold")
         if self.fused_gdn_batch_decode not in {"off", "row_exact"}:
             raise ValueError("fused_gdn_batch_decode must be off or row_exact")
+        if self.fused_gdn_batch_verify not in {"off", "row_exact"}:
+            raise ValueError("fused_gdn_batch_verify must be off or row_exact")
         for name in (
             "async_qsa_promotion",
             "known_tail_ple_prefetch",
@@ -353,6 +368,8 @@ class FlashNextPolicy:
             del values["hc_decode_multi_row"]
         if self.fused_gdn_batch_decode == _DEFAULTS["fused_gdn_batch_decode"]:
             del values["fused_gdn_batch_decode"]
+        if self.fused_gdn_batch_verify == _DEFAULTS["fused_gdn_batch_verify"]:
+            del values["fused_gdn_batch_verify"]
         if self.attn_fused_rows == _DEFAULTS["attn_fused_rows"]:
             del values["attn_fused_rows"]
         for name in ("moe_window_batch_decode", "moe_window_verify"):
@@ -412,6 +429,10 @@ class FlashNextPolicy:
         if self.fused_gdn_batch_decode != "off":
             environment["MLX_QWEN4_FUSED_GDN_BATCH_DECODE"] = (
                 self.fused_gdn_batch_decode
+            )
+        if self.fused_gdn_batch_verify != "off":
+            environment["MLX_QWEN4_FUSED_GDN_BATCH_VERIFY"] = (
+                self.fused_gdn_batch_verify
             )
         if self.attn_fused_rows:
             environment["MLX_QWEN4_ATTN_FUSED_ROWS"] = "1"

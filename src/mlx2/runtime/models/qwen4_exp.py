@@ -57,7 +57,12 @@ from .qwen4_fused_gdn import (
     served_silu_refusal,
 )
 from .qwen4_fused_gdn_verify import (
+    admit_qwen4_fused_gdn_batch_verify,
     admit_qwen4_fused_gdn_verify,
+    batch_verify_row_steps,
+    probe_qwen4_fused_gdn_batch_verify,
+    qwen4_fused_gdn_batch_replay_verify,
+    qwen4_fused_gdn_batch_verify,
     probe_qwen4_fused_gdn_catchup,
     probe_qwen4_fused_gdn_replay_verify,
     probe_qwen4_fused_gdn_verify,
@@ -428,6 +433,24 @@ if _FUSED_GDN_BATCH_DECODE not in _FUSED_GDN_BATCH_DECODE_MODES:
         f"{_FUSED_GDN_BATCH_DECODE_MODES}, got {_FUSED_GDN_BATCH_DECODE!r}"
     )
 _FUSED_GDN_VERIFY = _env_flag("MLX_QWEN4_FUSED_GDN_VERIFY")
+# Batched speculative verify (B lanes x S rows): one launch of the B=1 fused
+# verify step per lane, each lane at its own valid width, bit-identical to
+# that lane's B=1 fused verify (rollback included).  Default off; the
+# Flash-Next policy field ``fused_gdn_batch_verify`` is the only way the
+# adapter sets it.  "off" is the kill switch: B>1 verify blocks keep the
+# stock multi-row chain and the B=1 path's counted "batch of N rows" refusal.
+_FUSED_GDN_BATCH_VERIFY_MODES = ("off", "row_exact")
+_FUSED_GDN_BATCH_VERIFY = os.environ.get(
+    "MLX_QWEN4_FUSED_GDN_BATCH_VERIFY", "off"
+).strip().lower()
+_FUSED_GDN_BATCH_VERIFY = {"": "off", "0": "off", "false": "off", "1": "row_exact"}.get(
+    _FUSED_GDN_BATCH_VERIFY, _FUSED_GDN_BATCH_VERIFY
+)
+if _FUSED_GDN_BATCH_VERIFY not in _FUSED_GDN_BATCH_VERIFY_MODES:
+    raise ValueError(
+        "MLX_QWEN4_FUSED_GDN_BATCH_VERIFY must be one of "
+        f"{_FUSED_GDN_BATCH_VERIFY_MODES}, got {_FUSED_GDN_BATCH_VERIFY!r}"
+    )
 _FUSED_GDN_REPLAY_ROLLBACK = _env_flag("MLX_QWEN4_FUSED_GDN_REPLAY_ROLLBACK")
 _FUSED_GDN_DYNAMIC_ACCEPT = _env_flag("MLX_QWEN4_FUSED_GDN_DYNAMIC_ACCEPT")
 _FUSED_GDN_CATCHUP_DEFAULT = _env_flag("MLX_QWEN4_FUSED_GDN_CATCHUP")
@@ -993,6 +1016,17 @@ class GatedDeltaNet(Qwen35GatedDeltaNet):
         self.fused_gdn_batch_decode_fallbacks = 0
         self.fused_gdn_batch_decode_last_fallback = None
         object.__setattr__(self, "fused_gdn_batch_decode_fallback_reasons", {})
+        self.fused_gdn_batch_verify_mode = _FUSED_GDN_BATCH_VERIFY
+        self.fused_gdn_batch_verify_calls = 0
+        self.fused_gdn_batch_verify_rows = 0
+        self.fused_gdn_batch_verify_tokens = 0
+        self.fused_gdn_batch_verify_ragged_calls = 0
+        self.fused_gdn_batch_verify_compact_calls = 0
+        self.fused_gdn_batch_verify_rollback_calls = 0
+        self.fused_gdn_batch_verify_rollback_tokens = 0
+        self.fused_gdn_batch_verify_fallbacks = 0
+        self.fused_gdn_batch_verify_last_fallback = None
+        object.__setattr__(self, "fused_gdn_batch_verify_fallback_reasons", {})
         object.__setattr__(self, "_gdn_inproj_fused_cache", None)
         self.gdn_fused_inproj = _GDN_FUSED_INPROJ
         self.gdn_fused_inproj_calls = 0
@@ -1148,6 +1182,180 @@ class GatedDeltaNet(Qwen35GatedDeltaNet):
         self.fused_gdn_batch_decode_rows += int(qkv.shape[0])
         self.fused_gdn_batch_decode_last_fallback = None
         return self.out_proj(out)
+
+    def set_fused_gdn_batch_verify_mode(self, mode: str):
+        """Select the batched speculative-verify route; B=1 verify is untouched."""
+        if mode not in _FUSED_GDN_BATCH_VERIFY_MODES:
+            raise ValueError(
+                f"unknown fused GDN batch verify mode {mode!r}; expected one of {_FUSED_GDN_BATCH_VERIFY_MODES}"
+            )
+        self.fused_gdn_batch_verify_mode = mode
+
+    def _fused_gdn_batch_verify_fallback(self, reason: str):
+        self.fused_gdn_batch_verify_fallbacks += 1
+        self.fused_gdn_batch_verify_last_fallback = reason
+        reasons = self.fused_gdn_batch_verify_fallback_reasons
+        if reason not in reasons and len(reasons) >= _VERIFY_FALLBACK_REASON_LIMIT:
+            reason = "other"
+        reasons[reason] = reasons.get(reason, 0) + 1
+        return None
+
+    def _try_fused_batch_verify(self, qkv, z, b, a, mask, cache):
+        """Batched speculative verify: one launch, each lane its B=1 verify.
+
+        Lane ``r`` runs the B=1 fused verify kernel's arithmetic over its own
+        ``spans[r]`` valid rows (right padding is that lane's shorter verify)
+        from its own conv window and recurrent state, and records its own
+        restore points.  The rollback record restores each lane exactly as
+        its B=1 record would: compact mode rebuilds every lane in one
+        dynamic-count reconstruct dispatch (a lane at count 0 keeps its
+        checkpoint), snapshot mode returns the per-lane snapshot.  Admission
+        re-runs every call (lanes join and leave between rounds); every
+        refusal is counted and returns ``None`` to the stock chain, before
+        the cache is touched.
+        """
+        fallback = self._fused_gdn_batch_verify_fallback
+        if cache is None or cache[0] is None or cache[1] is None:
+            return fallback("uninitialized cache")
+        describe = getattr(cache, "rollback_spans", None)
+        if not callable(describe) or not callable(
+            getattr(cache, "record_rollback", None)
+        ):
+            return fallback("cache lacks rollback records")
+        steps = int(qkv.shape[1])
+        spans = describe(steps, mask)
+        admission = admit_qwen4_fused_gdn_batch_verify(
+            qkv=qkv,
+            z=z,
+            b=b,
+            a=a,
+            conv_state=cache[0],
+            recurrent_state=cache[1],
+            conv_weight=self.conv1d.weight,
+            A_log=self.A_log,
+            dt_bias=self.dt_bias,
+            norm_weight=self.norm.weight,
+            mask=mask,
+            spans=spans,
+            speculating=bool(getattr(cache, "speculating", False)),
+            training=bool(self.training),
+            sharded=self.sharding_group is not None,
+            num_key_heads=self.num_k_heads,
+            num_value_heads=self.num_v_heads,
+            key_head_dim=self.head_k_dim,
+            value_head_dim=self.head_v_dim,
+            conv_kernel=self.conv_kernel_size,
+            gate_activation=self.norm.activation,
+        )
+        if not admission.accepted:
+            return fallback(admission.reason)
+        row_steps = batch_verify_row_steps(spans, mask, int(qkv.shape[0]), steps)
+        if not fused_gdn_runtime_supported():
+            return fallback("Metal runtime unavailable")
+        refusal = served_silu_refusal()
+        if refusal is not None:
+            return fallback(refusal)
+        compact = self.fused_gdn_replay_rollback_mode == "compact"
+        try:
+            threadgroup_y = probe_qwen4_fused_gdn_batch_verify(
+                qkv.dtype, steps, compact=compact, **_state_probe(cache[1])
+            )
+            if threadgroup_y is None:
+                return fallback("Metal kernel probe declined")
+            kernel = (
+                qwen4_fused_gdn_batch_replay_verify
+                if compact
+                else qwen4_fused_gdn_batch_verify
+            )
+            outputs = kernel(
+                qkv,
+                z,
+                b,
+                a,
+                cache[0],
+                self.conv1d.weight,
+                self.A_log,
+                self.dt_bias,
+                cache[1],
+                self.norm.weight,
+                self.norm.eps,
+                row_steps,
+                threadgroup_y=threadgroup_y,
+            )
+        except Exception as exc:
+            return fallback(f"Metal kernel dispatch failed: {type(exc).__name__}")
+        (out, conv_state, recurrent_state) = outputs[:3]
+        if compact:
+            (keys, corrections, decay) = outputs[3:]
+            _rollback, per_row_fn = self._batch_replay_rollback(
+                cache[0], cache[1], qkv, keys, corrections, decay, threadgroup_y
+            )
+            cache.record_rollback(
+                steps, _rollback, [cache[0], cache[1]], per_row_fn=per_row_fn
+            )
+        else:
+            (state_snapshots, conv_snapshots) = outputs[3:]
+
+            def _rollback(m, conv=conv_snapshots, state=state_snapshots):
+                self.fused_gdn_batch_verify_rollback_calls += 1
+                return [mx.contiguous(conv[:, m - 1]), state[:, m - 1]]
+
+            cache.record_rollback(steps, _rollback, [cache[0], cache[1]])
+        cache[0] = conv_state
+        cache[1] = recurrent_state
+        cache.advance(steps)
+        self.fused_gdn_batch_verify_calls += 1
+        self.fused_gdn_batch_verify_rows += len(row_steps)
+        self.fused_gdn_batch_verify_tokens += sum(row_steps)
+        if any(count != steps for count in row_steps):
+            self.fused_gdn_batch_verify_ragged_calls += 1
+        if compact:
+            self.fused_gdn_batch_verify_compact_calls += 1
+        self.fused_gdn_batch_verify_last_fallback = None
+        return self.out_proj(out)
+
+    def _batch_replay_rollback(
+        self, conv, state, raw_qkv, keys, corrections, decay, threadgroup_y
+    ):
+        """Per-lane compact rollback for a batched verify record.
+
+        ``rows(lengths)`` rebuilds lane ``r`` from its checkpoint over its
+        first ``lengths[r]`` tape steps in one dynamic-count reconstruct
+        dispatch, and gathers its conv window at the same end; ``fn(m)`` is
+        the uniform host-int form (``trim``, and the per-row slices a
+        segmented cache takes).  A lane whose count reaches its own width is
+        never selected by the rewind (it lost no tokens), so its unwritten
+        tape steps are never read into live state.
+        """
+        keep = self.conv_kernel_size - 1
+        tape_steps = int(decay.shape[1])
+        rows_n = int(raw_qkv.shape[0])
+        combined = mx.concatenate([conv, raw_qkv], axis=1)
+
+        def rows(lengths):
+            if isinstance(lengths, mx.array):
+                ends = lengths.reshape(-1).astype(mx.int32)
+                tokens = None
+            else:
+                lengths = [int(value) for value in lengths]
+                ends = mx.array(lengths, dtype=mx.int32)
+                tokens = sum(lengths)
+            ends = mx.broadcast_to(ends, (rows_n,))
+            restored_conv = mx.contiguous(_row_tail(combined, ends, keep))
+            restored_state = qwen4_fused_gdn_reconstruct(
+                state, keys, corrections, decay, ends, threadgroup_y=threadgroup_y
+            )
+            self.fused_gdn_batch_verify_rollback_calls += 1
+            if tokens is not None:
+                self.fused_gdn_batch_verify_rollback_tokens += tokens
+            return [restored_conv, restored_state]
+
+        def fn(m):
+            if isinstance(m, mx.array):
+                return rows(m)
+            return rows([validate_qwen4_gdn_replay_acceptance(m, tape_steps)] * rows_n)
+
+        return fn, rows
 
     def _fused_gdn_fallback(self, reason: str):
         self.fused_gdn_decode_fallbacks += 1
@@ -1509,6 +1717,15 @@ class GatedDeltaNet(Qwen35GatedDeltaNet):
             _gdn_state.check_state(cache[1], getattr(self, "_gdn_state_dtype", None))
         if cache is not None and qkv.shape[1] > 1:
             speculating = bool(getattr(cache, "speculating", False))
+            if (
+                speculating
+                and qkv.shape[0] > 1
+                and self.fused_gdn_batch_verify_mode != "off"
+            ):
+                # A batched verify block: its own route, counters and
+                # refusals.  With the mode off it keeps the B=1 admission
+                # (and its counted "batch of N rows" refusal) as before.
+                return self._try_fused_batch_verify(qkv, z, b, a, mask, cache)
             if speculating or _FUSED_GDN_CATCHUP_SCOPE.get():
                 return self._try_fused_verify(
                     qkv, z, b, a, mask, cache, catchup=not speculating
@@ -1844,6 +2061,43 @@ def qwen4_fused_gdn_stats(
                 batch["last_fallbacks"][reason] = (
                     batch["last_fallbacks"].get(reason, 0) + 1
                 )
+        if module.fused_gdn_batch_verify_mode != "off":
+            # Reported only when selected, so default diagnostics are unchanged.
+            batch = stats.setdefault(
+                "batch_verify",
+                {
+                    "modes": [],
+                    "calls": 0,
+                    "rows": 0,
+                    "tokens": 0,
+                    "ragged_calls": 0,
+                    "compact_calls": 0,
+                    "rollback_calls": 0,
+                    "rollback_tokens": 0,
+                    "fallbacks": 0,
+                    "fallback_reasons": {},
+                    "last_fallbacks": {},
+                },
+            )
+            if module.fused_gdn_batch_verify_mode not in batch["modes"]:
+                batch["modes"].append(module.fused_gdn_batch_verify_mode)
+            batch["calls"] += module.fused_gdn_batch_verify_calls
+            batch["rows"] += module.fused_gdn_batch_verify_rows
+            batch["tokens"] += module.fused_gdn_batch_verify_tokens
+            batch["ragged_calls"] += module.fused_gdn_batch_verify_ragged_calls
+            batch["compact_calls"] += module.fused_gdn_batch_verify_compact_calls
+            batch["rollback_calls"] += module.fused_gdn_batch_verify_rollback_calls
+            batch["rollback_tokens"] += module.fused_gdn_batch_verify_rollback_tokens
+            batch["fallbacks"] += module.fused_gdn_batch_verify_fallbacks
+            for reason, count in module.fused_gdn_batch_verify_fallback_reasons.items():
+                batch["fallback_reasons"][reason] = (
+                    batch["fallback_reasons"].get(reason, 0) + count
+                )
+            reason = module.fused_gdn_batch_verify_last_fallback
+            if reason is not None:
+                batch["last_fallbacks"][reason] = (
+                    batch["last_fallbacks"].get(reason, 0) + 1
+                )
         stats["catchup_calls"] += module.fused_gdn_catchup_calls
         stats["catchup_fallbacks"] += module.fused_gdn_catchup_fallbacks
         reason = module.fused_gdn_catchup_last_fallback
@@ -1862,6 +2116,16 @@ def qwen4_fused_gdn_stats(
             module.fused_gdn_batch_decode_fallbacks = 0
             module.fused_gdn_batch_decode_last_fallback = None
             module.fused_gdn_batch_decode_fallback_reasons.clear()
+            module.fused_gdn_batch_verify_calls = 0
+            module.fused_gdn_batch_verify_rows = 0
+            module.fused_gdn_batch_verify_tokens = 0
+            module.fused_gdn_batch_verify_ragged_calls = 0
+            module.fused_gdn_batch_verify_compact_calls = 0
+            module.fused_gdn_batch_verify_rollback_calls = 0
+            module.fused_gdn_batch_verify_rollback_tokens = 0
+            module.fused_gdn_batch_verify_fallbacks = 0
+            module.fused_gdn_batch_verify_last_fallback = None
+            module.fused_gdn_batch_verify_fallback_reasons.clear()
             module.fused_gdn_verify_calls = 0
             module.fused_gdn_verify_fallbacks = 0
             module.fused_gdn_verify_last_fallback = None

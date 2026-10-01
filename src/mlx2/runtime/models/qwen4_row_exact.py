@@ -444,7 +444,14 @@ class RowExactVerify:
 
     # -- verify hooks ----------------------------------------------------------
     def _gdn_engaged(self) -> int:
-        return sum(int(layer.linear_attn.fused_gdn_verify_calls) for layer in self._gdn)
+        # A batched window's GDN is engaged when the batched fused verify ran
+        # (policy fused_gdn_batch_verify): every lane's rows are its B=1
+        # fused verify bits, which are the one-token decode bits.
+        return sum(
+            int(layer.linear_attn.fused_gdn_verify_calls)
+            + int(getattr(layer.linear_attn, "fused_gdn_batch_verify_calls", 0))
+            for layer in self._gdn
+        )
 
     def verify_backbone(self, tokens, cache):
         model = self.model

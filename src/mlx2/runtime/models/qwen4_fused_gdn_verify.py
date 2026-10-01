@@ -1079,3 +1079,457 @@ def probe_qwen4_fused_gdn_catchup(
                 continue
         _PROBED_CATCHUP_STEPS[key] = result
         return result
+
+
+# ---------------------------------------------------------------------------
+# Batched verify: B lanes x S rows in one launch, each lane its B=1 arithmetic.
+#
+# A batched self-MTP verify block is ``(B, S, ...)`` with right padding: lane
+# ``r`` owns its first ``row_steps[r]`` rows (the pending token plus its
+# drafts) and its own conv window, recurrent state and rollback tape.  The
+# kernel bodies below are checked textual derivations of the proven B=1
+# bodies (``_SOURCE`` / ``_REPLAY_SOURCE`` and their fp16 storage classes):
+#
+# * grid z is (lane, value head), and every per-lane buffer is rebound to its
+#   lane's slab (mlx2 L1, ``qwen4_fused_gdn._BATCH_ROW_PREFIX``);
+# * the token loop, the restore-point bounds and the final-window position
+#   read the lane's own row count ``RS`` instead of the template width
+#   (TensorFold ``gdn_step_multi``'s per-stream ``R``, Apache-2.0, see
+#   provenance/tensorfold-batched-gdn-verify.json);
+# * rows past ``RS`` are written as zeros (the stock chain's padded rows are
+#   finite too; nothing downstream may read uninitialized memory).
+#
+# Every valid row therefore runs the B=1 kernel's per-token arithmetic in
+# the B=1 order, so each lane is bit-identical to a B=1 launch of width
+# ``RS`` on its own inputs (Metal gate: scripts/check_qwen4_gdn_batch_verify.py).
+# ``S`` keeps its role as the leading extent of the per-lane slabs.
+# ---------------------------------------------------------------------------
+
+# Validated lane bound (Metal gate at 2..16 lanes); the served cohort is <= 16.
+BATCH_VERIFY_MAX_ROWS = 16
+
+
+def admit_qwen4_fused_gdn_batch_verify(
+    *,
+    qkv: Any,
+    z: Any,
+    b: Any,
+    a: Any,
+    conv_state: Any,
+    recurrent_state: Any,
+    conv_weight: Any,
+    A_log: Any,
+    dt_bias: Any,
+    norm_weight: Any,
+    mask: Any,
+    spans: Any,
+    speculating: bool,
+    training: bool,
+    sharded: bool,
+    num_key_heads: int,
+    num_value_heads: int,
+    key_head_dim: int,
+    value_head_dim: int,
+    conv_kernel: int,
+    gate_activation: str,
+    max_rows: int = BATCH_VERIFY_MAX_ROWS,
+) -> FusedGdnAdmission:
+    """Structural admission for a ``(B, S)`` speculative verify block.
+
+    Every per-lane condition is the B=1 verify kernel's.  The batch adds the
+    lane count and the per-lane row geometry: ``spans`` (the cache's host
+    rollback geometry) must give every lane 1..S valid leading rows -- right
+    padding is the lane's own shorter verify, which the kernel runs at that
+    lane's width.  Leading padding (``spans is None``), a mask the metadata
+    cannot explain and an idle lane are refused.  No MLX evaluation.
+    """
+    if training:
+        return FusedGdnAdmission(False, "training")
+    if sharded:
+        return FusedGdnAdmission(False, "distributed sharding")
+    if not speculating:
+        return FusedGdnAdmission(False, "not a speculative verify")
+    if gate_activation != "sigmoid":
+        return FusedGdnAdmission(False, f"output gate {gate_activation!r}")
+    geometry = (num_key_heads, num_value_heads, key_head_dim, value_head_dim, conv_kernel)
+    if geometry != (NUM_KEY_HEADS, NUM_VALUE_HEADS, KEY_HEAD_DIM, VALUE_HEAD_DIM, CONV_KERNEL):
+        return FusedGdnAdmission(False, f"unsupported geometry {geometry}")
+    qkv_shape = _shape(qkv)
+    if len(qkv_shape) != 3 or qkv_shape[2] != CONV_DIM:
+        return FusedGdnAdmission(False, f"qkv shape {qkv_shape}, expected (B, S, {CONV_DIM})")
+    rows, steps = int(qkv_shape[0]), int(qkv_shape[1])
+    if rows < 2:
+        return FusedGdnAdmission(False, "single row (B=1 kernel)")
+    if rows > int(max_rows):
+        return FusedGdnAdmission(False, f"batch of {rows} rows > {int(max_rows)}")
+    if steps < 2:
+        return FusedGdnAdmission(False, f"verify width {steps} below 2")
+    if steps > MAX_VERIFY_STEPS:
+        return FusedGdnAdmission(False, f"verify width {steps} above {MAX_VERIFY_STEPS}")
+    refusal = batch_verify_row_steps(spans, mask, rows, steps)
+    if isinstance(refusal, FusedGdnAdmission):
+        return refusal
+    expected = {
+        "z": (rows, steps, VALUE_DIM),
+        "a": (rows, steps, NUM_VALUE_HEADS),
+        "b": (rows, steps, NUM_VALUE_HEADS),
+        "conv_state": (rows, CONV_KERNEL - 1, CONV_DIM),
+        "recurrent_state": (rows, NUM_VALUE_HEADS, VALUE_HEAD_DIM, KEY_HEAD_DIM),
+        "conv_weight": (CONV_DIM, CONV_KERNEL, 1),
+        "A_log": (NUM_VALUE_HEADS,),
+        "dt_bias": (NUM_VALUE_HEADS,),
+        "norm_weight": (VALUE_HEAD_DIM,),
+    }
+    values = {
+        "z": z, "a": a, "b": b, "conv_state": conv_state,
+        "recurrent_state": recurrent_state, "conv_weight": conv_weight,
+        "A_log": A_log, "dt_bias": dt_bias, "norm_weight": norm_weight,
+    }
+    for name, expected_shape in expected.items():
+        if _shape(values[name]) != expected_shape:
+            return FusedGdnAdmission(
+                False, f"{name} shape {_shape(values[name])}, expected {expected_shape}"
+            )
+    value_dtype = _dtype(qkv)
+    if value_dtype != mx.bfloat16:
+        return FusedGdnAdmission(False, f"unsupported activation dtype {value_dtype}")
+    for name in ("z", "a", "b", "conv_state", "conv_weight", "dt_bias", "norm_weight"):
+        if _dtype(values[name]) != value_dtype:
+            return FusedGdnAdmission(False, f"{name} dtype {_dtype(values[name])}")
+    if _dtype(recurrent_state) not in (mx.float32, mx.float16):
+        return FusedGdnAdmission(False, "recurrent_state must be float32 or float16")
+    if _dtype(A_log) not in (value_dtype, mx.float32):
+        return FusedGdnAdmission(False, f"A_log dtype {_dtype(A_log)}")
+    return FusedGdnAdmission(True, "eligible")
+
+
+def batch_verify_row_steps(spans: Any, mask: Any, rows: int, steps: int):
+    """Per-lane valid row counts for a ``(rows, steps)`` verify, or a refusal.
+
+    ``()`` (no length metadata) is every lane at the full width and is only
+    admissible without a mask.  A list is one span per lane from the same
+    metadata the mask is built from, so a padded lane comes with a mask and
+    an unpadded batch may come without one; a shorter lane with no mask is a
+    geometry the metadata does not explain.
+    """
+    if spans is None:
+        return FusedGdnAdmission(False, "rollback geometry not describable")
+    if spans == ():
+        if mask is not None:
+            return FusedGdnAdmission(False, "masked batched verify")
+        return (int(steps),) * int(rows)
+    if len(spans) != rows:
+        return FusedGdnAdmission(
+            False, f"rollback spans for {len(spans)} rows, batch of {rows}"
+        )
+    counts = tuple(int(span) for span in spans)
+    if any(count < 1 for count in counts):
+        return FusedGdnAdmission(False, "idle lane in batched verify")
+    if any(count > steps for count in counts):
+        return FusedGdnAdmission(False, "lane span exceeds the verify width")
+    if mask is None and any(count != steps for count in counts):
+        return FusedGdnAdmission(False, "padded lane without a mask")
+    return counts
+
+
+# Per-lane slab extents, in elements, for every buffer the verify kernels
+# index per lane.  ``S`` is the padded width; ``SNAPS`` buffers hold S - 1
+# restore points per lane.
+_LANE_STRIDES = {
+    "qkv": "(size_t)S * row_cd",
+    "z": "(size_t)S * row_vd",
+    "a": "(size_t)S * (size_t)HV",
+    "b": "(size_t)S * (size_t)HV",
+    "conv_state": "(size_t)(K - 1) * row_cd",
+    "recurrent_state": "row_state",
+    "output": "(size_t)S * row_vd",
+    "conv_state_out": "(size_t)(K - 1) * row_cd",
+    "recurrent_state_out": "row_state",
+    "state_snapshots": "(size_t)(S - 1) * row_state",
+    "conv_snapshots": "(size_t)(S - 1) * (size_t)(K - 1) * row_cd",
+    "replay_keys": "(size_t)(S - 1) * row_kd",
+    "replay_corrections": "(size_t)(S - 1) * row_vd",
+    "replay_decay": "(size_t)(S - 1) * (size_t)HV",
+}
+
+_VERIFY_LANE_BUFFERS = (
+    "qkv", "z", "a", "b", "conv_state", "recurrent_state", "output",
+    "conv_state_out", "recurrent_state_out", "state_snapshots", "conv_snapshots",
+)
+_REPLAY_LANE_BUFFERS = (
+    "qkv", "z", "a", "b", "conv_state", "recurrent_state", "output",
+    "conv_state_out", "recurrent_state_out", "replay_keys",
+    "replay_corrections", "replay_decay",
+)
+
+
+def _lane_prefix(buffers) -> str:
+    lines = [
+        "  const uint batch_row = threadgroup_position_in_grid.z / (uint)HV;",
+        "  const uint head_in_row = threadgroup_position_in_grid.z - batch_row * (uint)HV;",
+        "  const uint RS = (uint)row_steps[batch_row];",
+        "  const size_t row_cd = (size_t)(2 * HK * DK + HV * DV);",
+        "  const size_t row_vd = (size_t)(HV * DV);",
+        "  const size_t row_kd = (size_t)(HK * DK);",
+        "  const size_t row_state = row_vd * (size_t)DK;",
+    ]
+    for name in buffers:
+        lines.append(
+            f"  const auto {name}_lane = {name} + (size_t)batch_row * {_LANE_STRIDES[name]};"
+        )
+    lines.append("  {")
+    for name in buffers:
+        lines.append(f"  const auto {name} = {name}_lane;")
+    return "\n" + "\n".join(lines) + "\n"
+
+
+# Rows past the lane's own count are zeros, written by the same threads.
+_PADDED_ROWS_EPILOGUE = """
+  for (uint t = RS; t < (uint)S; ++t) {
+    for (uint d = tid; d < (uint)DV; d += NT)
+      output[t * VD + hv * DV + d] = static_cast<T>(0);
+  }
+"""
+
+
+def _derive_batch_verify_source(source: str, buffers, *, final_store: int, what: str) -> str:
+    """Lane-rebound, lane-width form of a proven B=1 verify body.
+
+    ``(uint)S`` occurs in the final conv window position, the token loop and
+    (compact replay) the final-state store; ``SNAPS`` bounds every restore
+    point.  Both become the lane's own count, so a lane of ``RS`` rows runs
+    exactly the B=1 kernel specialized at ``S = RS``.
+    """
+    body = derive_source(
+        source,
+        (
+            ("threadgroup_position_in_grid.z", "head_in_row", 1),
+            ("constexpr uint SNAPS = (uint)S - 1u;", "const uint SNAPS = RS - 1u;", 1),
+            ("uint row = (uint)S + tap;", "uint row = RS + tap;", 1),
+            ("for (uint t = 0; t < (uint)S; ++t) {", "for (uint t = 0; t < RS; ++t) {", 1),
+            ("if (t + 1u == (uint)S) {", "if (t + 1u == RS) {", final_store),
+        ),
+        what=what,
+    )
+    if "(uint)S" in body:
+        raise RuntimeError(f"{what}: a template-width reference survived the lane derivation")
+    return _lane_prefix(buffers) + body + _PADDED_ROWS_EPILOGUE + "\n  }\n"
+
+
+_BATCH_SOURCE = _derive_batch_verify_source(
+    _SOURCE, _VERIFY_LANE_BUFFERS, final_store=0, what="qwen4_fused_gdn_batch_verify"
+)
+_BATCH_SOURCE_ST16 = _derive_batch_verify_source(
+    _SOURCE_ST16, _VERIFY_LANE_BUFFERS, final_store=0,
+    what="qwen4_fused_gdn_batch_verify_st16",
+)
+_BATCH_REPLAY_SOURCE = _derive_batch_verify_source(
+    _REPLAY_SOURCE, _REPLAY_LANE_BUFFERS, final_store=1,
+    what="qwen4_fused_gdn_batch_replay_verify",
+)
+_BATCH_REPLAY_SOURCE_ST16 = _derive_batch_verify_source(
+    _REPLAY_SOURCE_ST16, _REPLAY_LANE_BUFFERS, final_store=1,
+    what="qwen4_fused_gdn_batch_replay_verify_st16",
+)
+
+_VERIFY_INPUTS = [
+    "qkv", "z", "b", "a", "conv_state", "conv_weight", "A_log", "dt_bias",
+    "recurrent_state", "norm_weight", "norm_eps", "row_steps",
+]
+
+
+@lru_cache(maxsize=None)
+def _batch_kernel(st16: bool = False):
+    return mx.fast.metal_kernel(
+        name="qwen4_fused_gdn_batch_verify" + ("_st16" if st16 else ""),
+        input_names=_VERIFY_INPUTS,
+        output_names=[
+            "output", "conv_state_out", "recurrent_state_out",
+            "state_snapshots", "conv_snapshots",
+        ],
+        header=_HEADER,
+        source=_BATCH_SOURCE_ST16 if st16 else _BATCH_SOURCE,
+        ensure_row_contiguous=True,
+    )
+
+
+@lru_cache(maxsize=None)
+def _batch_replay_kernel(st16: bool = False):
+    return mx.fast.metal_kernel(
+        name="qwen4_fused_gdn_batch_replay_verify" + ("_st16" if st16 else ""),
+        input_names=_VERIFY_INPUTS,
+        output_names=[
+            "output", "conv_state_out", "recurrent_state_out",
+            "replay_keys", "replay_corrections", "replay_decay",
+        ],
+        header=_HEADER,
+        source=_BATCH_REPLAY_SOURCE_ST16 if st16 else _BATCH_REPLAY_SOURCE,
+        ensure_row_contiguous=True,
+    )
+
+
+@lru_cache(maxsize=256)
+def _row_steps_array(counts: tuple) -> mx.array:
+    return mx.array(list(counts), dtype=mx.int32)
+
+
+def _check_batch_launch(qkv, row_steps, threadgroup_y):
+    if threadgroup_y not in _THREADGROUP_Y_CANDIDATES:
+        raise ValueError(
+            f"unsupported threadgroup_y {threadgroup_y}; expected one of {_THREADGROUP_Y_CANDIDATES}"
+        )
+    rows, steps = int(qkv.shape[0]), int(qkv.shape[1])
+    if not 2 <= steps <= MAX_VERIFY_WIDTH_PROVEN:
+        raise ValueError(
+            f"unsupported verify width {steps}; expected 2..{MAX_VERIFY_WIDTH_PROVEN}"
+        )
+    counts = tuple(int(v) for v in row_steps)
+    if len(counts) != rows or any(not 1 <= v <= steps for v in counts):
+        raise ValueError(f"row steps {counts} do not fit a ({rows}, {steps}) verify block")
+    return rows, steps, _row_steps_array(counts)
+
+
+def qwen4_fused_gdn_batch_verify(
+    qkv, z, b, a, conv_state, conv_weight, A_log, dt_bias, recurrent_state,
+    norm_weight, norm_eps: float, row_steps, *, threadgroup_y: int,
+):
+    """Snapshot-rollback batched verify.  Callers run batch admission first.
+
+    ``row_steps[r]`` is lane ``r``'s valid row count.  Returns the B=1 tuple
+    with a leading lane axis; ``state_snapshots[r, p]`` / ``conv_snapshots[r,
+    p]`` are lane ``r``'s states after ``p + 1`` tokens for ``p < row_steps[r]
+    - 1`` (later restore points are not written).  ``threadgroup_y`` must be
+    the B=1 verify probe's value so each lane runs its B=1 thread geometry.
+    """
+    rows, steps, counts = _check_batch_launch(qkv, row_steps, threadgroup_y)
+    st16 = _st16(recurrent_state, "fused_batch_verify")
+    outputs = _batch_kernel(st16)(
+        inputs=[
+            qkv, z, b, a, conv_state, conv_weight, A_log, dt_bias,
+            recurrent_state, norm_weight, float(norm_eps), counts,
+        ],
+        template=[
+            ("T", qkv.dtype), ("HK", NUM_KEY_HEADS), ("HV", NUM_VALUE_HEADS),
+            ("DK", KEY_HEAD_DIM), ("DV", VALUE_HEAD_DIM), ("K", CONV_KERNEL),
+            ("S", steps), ("TY", threadgroup_y),
+            ("RATIO", NUM_VALUE_HEADS // NUM_KEY_HEADS),
+        ],
+        grid=(32, threadgroup_y, NUM_VALUE_HEADS * rows),
+        threadgroup=(32, threadgroup_y, 1),
+        output_shapes=[
+            (rows, steps, VALUE_DIM),
+            (rows, CONV_KERNEL - 1, CONV_DIM),
+            (rows, NUM_VALUE_HEADS, VALUE_HEAD_DIM, KEY_HEAD_DIM),
+            (rows, steps - 1, NUM_VALUE_HEADS, VALUE_HEAD_DIM, KEY_HEAD_DIM),
+            (rows, steps - 1, CONV_KERNEL - 1, CONV_DIM),
+        ],
+        output_dtypes=[
+            qkv.dtype, qkv.dtype, recurrent_state.dtype, recurrent_state.dtype, qkv.dtype
+        ],
+    )
+    return tuple(outputs)
+
+
+def qwen4_fused_gdn_batch_replay_verify(
+    qkv, z, b, a, conv_state, conv_weight, A_log, dt_bias, recurrent_state,
+    norm_weight, norm_eps: float, row_steps, *, threadgroup_y: int,
+):
+    """Compact-tape batched verify.  Lane ``r``'s tape holds its first
+    ``row_steps[r] - 1`` steps; partial acceptance rebuilds every lane in one
+    ``qwen4_fused_gdn_reconstruct`` dispatch with a per-lane count array."""
+    rows, steps, counts = _check_batch_launch(qkv, row_steps, threadgroup_y)
+    st16 = _st16(recurrent_state, "fused_batch_replay_verify")
+    outputs = _batch_replay_kernel(st16)(
+        inputs=[
+            qkv, z, b, a, conv_state, conv_weight, A_log, dt_bias,
+            recurrent_state, norm_weight, float(norm_eps), counts,
+        ],
+        template=[
+            ("T", qkv.dtype), ("HK", NUM_KEY_HEADS), ("HV", NUM_VALUE_HEADS),
+            ("DK", KEY_HEAD_DIM), ("DV", VALUE_HEAD_DIM), ("K", CONV_KERNEL),
+            ("S", steps), ("TY", threadgroup_y),
+            ("RATIO", NUM_VALUE_HEADS // NUM_KEY_HEADS),
+        ],
+        grid=(32, threadgroup_y, NUM_VALUE_HEADS * rows),
+        threadgroup=(32, threadgroup_y, 1),
+        output_shapes=[
+            (rows, steps, VALUE_DIM),
+            (rows, CONV_KERNEL - 1, CONV_DIM),
+            (rows, NUM_VALUE_HEADS, VALUE_HEAD_DIM, KEY_HEAD_DIM),
+            (rows, steps - 1, NUM_KEY_HEADS, KEY_HEAD_DIM),
+            (rows, steps - 1, NUM_VALUE_HEADS, VALUE_HEAD_DIM),
+            (rows, steps - 1, NUM_VALUE_HEADS),
+        ],
+        output_dtypes=[
+            qkv.dtype, qkv.dtype, recurrent_state.dtype, qkv.dtype, mx.float32, mx.float32,
+        ],
+    )
+    return tuple(outputs)
+
+
+_PROBED_BATCH: dict = {}
+
+
+def probe_qwen4_fused_gdn_batch_verify(
+    dtype, steps: int, *, compact: bool, state_dtype=None
+) -> Optional[int]:
+    """The B=1 verify probe's ``threadgroup_y`` once the batched kernel at
+    that geometry compiled and ran (with the dynamic reconstruct for the
+    compact tape), else ``None``.  Cached per (width, form, state class)."""
+    steps = int(steps)
+    key = (_probe_key(steps, state_dtype), bool(compact))
+    if key in _PROBED_BATCH:
+        return _PROBED_BATCH[key]
+    state_kw = {} if state_dtype is None else {"state_dtype": state_dtype}
+    if compact:
+        threadgroup_y = probe_qwen4_fused_gdn_replay_verify(
+            dtype, steps, dynamic_accept=True, **state_kw
+        )
+    else:
+        threadgroup_y = probe_qwen4_fused_gdn_verify(dtype, steps, **state_kw)
+    with _PROBE_LOCK:
+        if key in _PROBED_BATCH:
+            return _PROBED_BATCH[key]
+        result: Optional[int] = None
+        if threadgroup_y is not None:
+            rows = 2
+            qkv = mx.zeros((rows, steps, CONV_DIM), dtype=dtype)
+            z = mx.zeros((rows, steps, VALUE_DIM), dtype=dtype)
+            gates = mx.zeros((rows, steps, NUM_VALUE_HEADS), dtype=dtype)
+            conv_state = mx.zeros((rows, CONV_KERNEL - 1, CONV_DIM), dtype=dtype)
+            conv_weight = mx.zeros((CONV_DIM, CONV_KERNEL, 1), dtype=dtype)
+            recurrent_state = mx.zeros(
+                (rows, NUM_VALUE_HEADS, VALUE_HEAD_DIM, KEY_HEAD_DIM),
+                dtype=state_dtype or mx.float32,
+            )
+            vector = mx.zeros((NUM_VALUE_HEADS,), dtype=dtype)
+            A_log = mx.zeros((NUM_VALUE_HEADS,), dtype=mx.float32)
+            norm_weight = mx.ones((VALUE_HEAD_DIM,), dtype=dtype)
+            build = (
+                qwen4_fused_gdn_batch_replay_verify
+                if compact
+                else qwen4_fused_gdn_batch_verify
+            )
+            try:
+                outputs = build(
+                    qkv, z, gates, gates, conv_state, conv_weight, A_log, vector,
+                    recurrent_state, norm_weight, 1e-06, (steps, 1),
+                    threadgroup_y=threadgroup_y,
+                )
+                extra = []
+                if compact:
+                    extra.append(
+                        qwen4_fused_gdn_reconstruct(
+                            recurrent_state, outputs[3], outputs[4], outputs[5],
+                            mx.array([steps - 1, 0], dtype=mx.int32),
+                            threadgroup_y=threadgroup_y,
+                        )
+                    )
+                mx.eval(*outputs, *extra)
+                result = threadgroup_y
+            except (ValueError, RuntimeError) as exc:
+                logger.info(
+                    "Qwen4 batched fused GDN verify width %d unavailable: %s", steps, exc
+                )
+        _PROBED_BATCH[key] = result
+        return result
