@@ -71,8 +71,7 @@ def test_numeric_delta_reports_rms_and_rejects_shape_mismatch():
         diagnostic.delta([1], [1, 2])
 
 
-@pytest.mark.parametrize("tied", [False, True])
-def test_full_diagnostic_runs_tiny_cpu_bf16_restores_patches(monkeypatch, tied):
+def run_tiny_cpu_diagnostic(monkeypatch, tied):
     import mlx.core as mx
     from mlx import nn
     from test_standard_xpress_serving_cpu import tiny
@@ -93,6 +92,9 @@ def test_full_diagnostic_runs_tiny_cpu_bf16_restores_patches(monkeypatch, tied):
     linear = nn.Linear.__call__
     embedding_linear = nn.Embedding.as_linear
     attention = model_module.scaled_dot_product_attention
+    norm = nn.RMSNorm.__call__
+    rope = nn.RoPE.__call__
+    swiglu = model_module.swiglu
 
     class Adapter:
         def __init__(self, *args, **kwargs):
@@ -139,13 +141,54 @@ def test_full_diagnostic_runs_tiny_cpu_bf16_restores_patches(monkeypatch, tied):
         diagnostic.run(args("--i-own-the-gpu"), report)
         assert report["passed"] and report["temporary_patches_restored"]
         assert report["trace_reproduces_actual_logits"]["equal"]
-        assert len(report["comparisons"]) == 12
+        assert len(report["comparisons"]) == 18
+        assert len(report["fixed_qkv_attention_controls"]) == 4
+        assert len(report["fixed_norm_controls"]) == 5
+        assert len(report["runtime_patched_controls"]) == 2
+        assert all(
+            control["completed"] and control["matches_same_patched_ordinary"]
+            for control in report["runtime_patched_controls"]
+        )
+        verification = report["verification_only_runtime_control"]
+        assert verification["completed"] and not verification["failures"]
+        assert verification["matches_original_ordinary"]
+        assert verification["ordinary_Model_call_unchanged"]
+        assert verification["frames"]
+        assert all(
+            frame["precache_equal_to_original_ordinary"]
+            for frame in verification["frames"]
+        )
+        assert all(
+            row["logits"]["equal"]
+            and row["greedy_equal"]
+            and row["unit_temperature_softmax_l1"] == 0.0
+            for frame in verification["frames"]
+            for row in frame["reached_rows"]
+        )
+        assert verification["committed_next_logits"]["logits"]["equal"]
         assert report["scalar_vector_rope"]["equal"]
         assert len(report["fixed_input_projection_controls"]) == 8
         assert all(frame["per_row"] for frame in report["comparisons"])
         assert nn.Linear.__call__ is linear
         assert nn.Embedding.as_linear is embedding_linear
         assert model_module.scaled_dot_product_attention is attention
+        assert nn.RMSNorm.__call__ is norm
+        assert nn.RoPE.__call__ is rope
+        assert model_module.swiglu is swiglu
+        return report
     finally:
         original_set(previous)
         sys.path.remove(str(SCRIPT.parent))
+
+
+def test_verification_only_control_preserves_original_prefill_cpu(monkeypatch):
+    report = run_tiny_cpu_diagnostic(monkeypatch, True)
+    verification = report["verification_only_runtime_control"]
+    assert verification["prefill_math"] == "original body_only=True"
+    assert verification["ordinary_math"] == "original Model.__call__"
+    assert verification["stats"]["draft_max_width"] > 0
+
+
+@pytest.mark.parametrize("tied", [False, True])
+def test_full_diagnostic_runs_tiny_cpu_bf16_restores_patches(monkeypatch, tied):
+    run_tiny_cpu_diagnostic(monkeypatch, tied)
