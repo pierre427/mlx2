@@ -16,6 +16,41 @@ from mlx2.runtime.semantic_capsules import CapsuleStore
 from mlx2.runtime.semantic_memory import SEMANTIC_SCHEMA
 
 
+@pytest.mark.parametrize("change_at", [1, 3])
+def test_lora_gate_requires_one_capsule_binding(tmp_path, change_at):
+    from mlx2.experimental.hysparse2.lora import LoRAEpisode
+
+    c = Config.smoke()
+    model = Model(c)
+    model.eval()
+    store = CapsuleStore(tmp_path / "capsules")
+    first = snapshot(store, c.vocab_size)
+    other = snapshot(store, c.vocab_size, text="revised valid arguments")
+    model.attach_semantic_capsules(first)
+    episode = LoRAEpisode(model, ["semantic_ple.value"], base_revision="fixture")
+    try:
+        episode.step(None, lambda m, _: mx.sum(m.semantic_ple.value.lora_b))
+        calls = 0
+
+        def evaluate(m, _):
+            nonlocal calls
+            calls += 1
+            value = 0.5 if m.capsule_binding == first.binding() else 1.0
+            if calls == change_at:
+                m.attach_semantic_capsules(other)
+            return mx.array(value)
+
+        with pytest.raises(ValueError, match="capsule binding"):
+            episode.evaluate(None, None, evaluate)
+        assert not episode.promoted
+        assert hasattr(model.semantic_ple.value, "lora_b")
+        assert model.adapter_revision == episode.live_revision
+        model.attach_semantic_capsules(first)
+        assert not episode.evaluate(None, None, lambda *_: mx.array(1.0))["promoted"]
+    finally:
+        episode.close()
+
+
 @pytest.fixture(autouse=True)
 def cpu():
     previous = mx.default_device()

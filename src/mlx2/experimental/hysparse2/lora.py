@@ -156,8 +156,16 @@ class LoRAEpisode:
         ):
             raise ValueError("invalid preservation budget")
         self.model.eval()
+        capsule_binding = self.model.capsule_binding
+
+        def score(tokens):
+            value = float(objective(self.model, tokens).item())
+            if self.model.capsule_binding != capsule_binding:
+                raise ValueError("capsule binding changed during episode evaluation")
+            return value
+
         adapted = [
-            float(objective(self.model, x).item()) for x in (heldout, preservation)
+            score(x) for x in (heldout, preservation)
         ]
         wrapped = {key: dict(self.model.named_modules())[key] for key in self.keys}
         try:
@@ -165,7 +173,7 @@ class LoRAEpisode:
             self.model.adapter_revision = self.previous_revision
             self.model._cache_owner = object()
             baseline = [
-                float(objective(self.model, x).item()) for x in (heldout, preservation)
+                score(x) for x in (heldout, preservation)
             ]
         finally:
             self.model.update_modules(tree_unflatten(list(wrapped.items())))
@@ -181,6 +189,7 @@ class LoRAEpisode:
             "adapted": adapted,
             "promoted": self.promoted,
             "steps": self.steps,
+            "evaluation_capsule_binding": capsule_binding,
             "serving_route_qualified": False,
         }
 
