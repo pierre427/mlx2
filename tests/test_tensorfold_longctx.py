@@ -35,26 +35,36 @@ def _reset():
     Q._PLE_EARLY_STATS.clear()
 
 
-def test_policy_fields_are_opt_in_and_receipt_neutral():
+def test_policy_defaults_scores_on_and_early_dispatch_off():
+    # qsa_fused_scores defaults on since 2026-10-01; ple_early_dispatch stays
+    # opt-in.  Receipts record a field only when it differs from its default.
     default = FlashNextPolicy()
     env = default.environment()
-    for name, variable in FIELDS.items():
-        assert getattr(default, name) is False
+    assert default.qsa_fused_scores is True and default.ple_early_dispatch is False
+    assert env[FIELDS["qsa_fused_scores"]] == "1"
+    assert FIELDS["ple_early_dispatch"] not in env
+    for name in FIELDS:
         assert name not in default.as_dict()
-        assert variable not in env
-    assert tensorfold_longctx_diagnostics(default) == {}
+    assert tensorfold_longctx_diagnostics(default)["tensorfold_longctx"]["selected"] == [
+        "qsa_fused_scores"
+    ]
+    off = FlashNextPolicy.from_mapping({"qsa_fused_scores": False})
+    assert off.as_dict()["qsa_fused_scores"] is False
+    assert FIELDS["qsa_fused_scores"] not in off.environment()
+    assert FlashNextPolicy.from_mapping(off.as_dict()) == off
+    assert tensorfold_longctx_diagnostics(off) == {}
     assert "ple_early" not in Q.qwen4_eager_dispatch_status()
 
 
 @pytest.mark.parametrize("name", sorted(FIELDS))
 def test_policy_field_enables_its_switch_only(name):
-    policy = FlashNextPolicy.from_mapping({name: True})
+    policy = FlashNextPolicy.from_mapping({**{f: False for f in FIELDS}, name: True})
     env = policy.environment()
     assert env[FIELDS[name]] == "1"
     for other, variable in FIELDS.items():
         if other != name:
             assert variable not in env
-    assert policy.as_dict()[name] is True
+    assert FlashNextPolicy.from_mapping(policy.as_dict()) == policy
     report = tensorfold_longctx_diagnostics(policy)["tensorfold_longctx"]
     assert report["selected"] == [name]
     with pytest.raises(ValueError, match=name):

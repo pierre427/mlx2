@@ -146,6 +146,7 @@ def test_flash_next_receipt_round_trips_every_non_default_choice():
         "hc_decode_multi_row": "off",
         "moe_window_batch_decode": True,
         "row_exact_verify": True,
+        "qsa_fused_scores": False,
     }
     assert FlashNextPolicy.from_mapping(FlashNextPolicy().as_dict()) == FlashNextPolicy()
     names = {f.name for f in fields(FlashNextPolicy)}

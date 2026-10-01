@@ -66,9 +66,12 @@ class FlashNextPolicy:
     # bf16 pooled keys once for all of the step's rows, instead of an fp32
     # copy of every pooled key, a steel GEMM and four elementwise/reduction
     # launches; the arithmetic is the stock chain's (bytes and argpartition
-    # ids identical on Metal, scripts/check_qwen4_qsa_scores.py).  Opt-in;
-    # enters the environment and receipts only when enabled.
-    qsa_fused_scores: bool = False
+    # ids identical on Metal, scripts/check_qwen4_qsa_scores.py).  Default on
+    # since 2026-10-01 (Pierre): B1 MTP on +1.6% at 32K, +2.2% at 64K; MTP
+    # off +2.6% at 32K; 4 lanes +2.7%; tokens identical
+    # (qualification/runs/tf-longctx-20261001).  Sets its environment
+    # variable when on; recorded in receipts only when off.
+    qsa_fused_scores: bool = True
     # TensorFold 0.6.1 "a window's tokens stay on the GPU"
     # (MLX_QWEN4_PLE_EARLY_DISPATCH): a decode or verify window's ids are
     # device arrays the n-gram (PLE) layer reads on the host; the layers
@@ -336,7 +339,7 @@ class FlashNextPolicy:
         if self.gdn_prefill_segment_rows == 2048:
             del values["gdn_prefill_segment_rows"]
         for name in _OPTIONAL_KERNEL_ENV:
-            if not getattr(self, name):
+            if getattr(self, name) == _DEFAULTS[name]:
                 del values[name]
         # Fields whose default is not their "off" value are omitted only at the
         # default, so a receipt read back reproduces an explicit choice.
