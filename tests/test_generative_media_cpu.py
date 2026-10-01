@@ -42,7 +42,7 @@ def _snapshot(root: Path, repo: str, revision: str, files: list[str]) -> None:
             _write(root / name)
     (root / ".hf-download-manifest.json").write_text(json.dumps({
         "repo": repo, "revision": revision,
-        "files": [{"path": name, "size": (root / name).stat().st_size} for name in files],
+        "files": [{"path": name, "size": (root / name).stat().st_size, "sha256": hashlib.sha256((root / name).read_bytes()).hexdigest()} for name in files],
     }))
     (root / ".hf-download-complete.json").write_text(json.dumps({
         "repo": repo, "revision": revision, "files": len(files),
@@ -164,6 +164,7 @@ def test_qwen_backend_uses_the_shared_mlx_vlm_pin(monkeypatch: pytest.MonkeyPatc
 
 
 def test_qwen_model_load_fails_closed_off_pin(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(generative_media, "_qwen_bound_inputs", lambda path: {})
     monkeypatch.setattr(generative_media, "inspect_qwen_image21", lambda path: SimpleNamespace(path=tmp_path))
     monkeypatch.setattr(mlx_vlm_pin, "mlx_vlm_runtime", lambda: {"version": "0.7.2", "source": "index", "editable": False, "revision": None})
     with pytest.raises(RuntimeError, match="not the pinned revision"):

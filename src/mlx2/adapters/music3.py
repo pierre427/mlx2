@@ -27,6 +27,7 @@ from .generative_media import (
 )
 from .media_lora_control import MediaLoRAControl, serialized
 from .music3_pin import SOURCE_SHA256, UNIFIED_SHA256, UNIFIED_TREE_SHA256
+from .pinned_imports import PinnedSourceFinder
 
 MUSIC3_SOURCE_REVISION = "fbdf52fbaaca799592917417eb05f1899f1255ec"
 MUSIC3_RUNTIME_REVISION = "36cddae1146af463cace351af4a1404042ce3268"
@@ -120,9 +121,15 @@ def _load_runtime_modules(runtime_root):
         .resolve()
     )
     tree = hashlib.sha256()
-    for path in sorted((unified / "mlx_lm").rglob("*.py")):
+    unified_sources = sorted((unified / "mlx_lm").rglob("*.py"))
+    verified_sources = {
+        root / name: expected for name, expected in SOURCE_SHA256.items()
+    }
+    for path in unified_sources:
         name = str(path.relative_to(unified))
-        tree.update(name.encode() + b"\0" + bytes.fromhex(_file_sha256(path)))
+        digest = _file_sha256(path)
+        verified_sources[path] = digest
+        tree.update(name.encode() + b"\0" + bytes.fromhex(digest))
     if tree.hexdigest() != UNIFIED_TREE_SHA256:
         raise ValueError("Music3 unified Python package differs from pinned revision")
     for name, expected in UNIFIED_SHA256.items():
@@ -152,6 +159,11 @@ def _load_runtime_modules(runtime_root):
     cache = tempfile.TemporaryDirectory(prefix="mlx2-music-code-")
     sys.pycache_prefix = cache.name
     sys.path.insert(0, str(root))
+    finder = PinnedSourceFinder(
+        ("minimax_music3_mlx", "mlx_lm"),
+        verified_sources,
+    )
+    finder.__enter__()
     try:
         modules = {
             name: importlib.import_module("minimax_music3_mlx." + name)
@@ -165,15 +177,7 @@ def _load_runtime_modules(runtime_root):
                 "prompt",
             )
         }
-        for name, module in list(sys.modules.items()):
-            if name == "mlx_lm" or name.startswith("mlx_lm."):
-                file = getattr(module, "__file__", None)
-                if file is None or not Path(file).resolve().is_relative_to(
-                    unified / "mlx_lm"
-                ):
-                    raise RuntimeError(
-                        "Music3 unified dependency import identity differs"
-                    )
+        finder.validate_loaded()
         for name, module in list(sys.modules.items()):
             if name in ("mlx_lm", "minimax_music3_mlx") or name.startswith(
                 ("mlx_lm.", "minimax_music3_mlx.")
@@ -181,6 +185,7 @@ def _load_runtime_modules(runtime_root):
                 _VERIFIED_MODULES[name] = module
         return modules
     finally:
+        finder.__exit__()
         # The external backbone inserts its own dependency path. Restore the
         # complete list, including on import failure, rather than one entry.
         sys.path[:] = previous_path

@@ -382,13 +382,14 @@ def _check_embedded_peft_metadata(data, *, rank, alpha):
                 value = json.loads(value)
             except (ValueError, TypeError):
                 pass
+        leaf = field.rsplit(".", 1)[-1]
         if isinstance(value, dict):
-            if field in ("rank_pattern", "alpha_pattern"):
+            if leaf in ("rank_pattern", "alpha_pattern"):
                 if value:
                     raise ValueError("unsupported embedded PEFT configuration")
                 return
             if "alpha" in field.lower():
-                if field != "network_alphas":
+                if leaf != "network_alphas":
                     raise ValueError("unsupported embedded PEFT alpha metadata")
                 for item in value.values():
                     walk(item, "alpha")

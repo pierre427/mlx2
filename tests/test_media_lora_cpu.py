@@ -374,6 +374,7 @@ def test_qwen_generation_edit_lora_effect_and_epochs(tmp_path, monkeypatch):
     edit_request.ImageEditRequest = lambda **kw: SimpleNamespace(**kw)
     monkeypatch.setitem(sys.modules, "mlx_vlm.generate.image", image_request)
     monkeypatch.setitem(sys.modules, "mlx_vlm.generate.edit_image", edit_request)
+    monkeypatch.setattr(media, "_qwen_bound_inputs", lambda path: {})
     monkeypatch.setattr(
         media,
         "inspect_qwen_image21",
@@ -823,6 +824,7 @@ def test_trained_requires_complete_loss_evidence(tmp_path):
 def test_editor_only_lora_load_and_lazy_generator(tmp_path, monkeypatch):
     from mlx2.adapters import generative_media as media
 
+    monkeypatch.setattr(media, "_qwen_bound_inputs", lambda path: {})
     monkeypatch.setattr(
         media,
         "inspect_qwen_image21",
@@ -907,6 +909,7 @@ def test_generation_and_unload_serialize(tmp_path, monkeypatch):
 
     from mlx2.adapters import generative_media as media
 
+    monkeypatch.setattr(media, "_qwen_bound_inputs", lambda path: {})
     monkeypatch.setattr(
         media,
         "inspect_qwen_image21",
@@ -989,7 +992,7 @@ def test_ltx_rejects_dirty_runtime_and_checks_import_origin(tmp_path, monkeypatc
     dirty[0] = False
     owner._verify_execution_identity()
     assert calls[-1][0] == str(owner.executable)
-    assert "__file__" in calls[-1][2]
+    assert "__spec__" in calls[-1][2]
 
 
 def test_music_pins_package_initialization_before_import(tmp_path, monkeypatch):
@@ -1044,6 +1047,28 @@ def test_ltx_origin_probe_survives_optimization_and_stale_bytecode(tmp_path):
         folder = packages / name
         folder.mkdir(parents=True)
         (folder / "__init__.py").write_text("MARKER = 'source'\n")
+    subprocess.run(["git", "init", str(root)], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(root), "add", "packages"], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(root),
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.invalid",
+            "commit",
+            "-m",
+            "test sources",
+        ],
+        check=True,
+        capture_output=True,
+    )
+    revision = subprocess.check_output(
+        ["git", "-C", str(root), "rev-parse", "HEAD"], text=True
+    ).strip()
+    probe = _ltx_origin_probe(revision)
     source = packages / "ltx_core_mlx/__init__.py"
     evil = tmp_path / "evil.py"
     evil.write_text("raise RuntimeError('stale compiled code')\n")
@@ -1067,7 +1092,7 @@ def test_ltx_origin_probe_survives_optimization_and_stale_bytecode(tmp_path):
     )
     assert unguarded.returncode != 0 and "stale compiled code" in unguarded.stderr
     guarded = subprocess.run(
-        [sys.executable, "-c", _ltx_origin_probe(), str(root)],
+        [sys.executable, "-c", probe, str(root)],
         env=env,
         check=False,
         capture_output=True,
@@ -1075,9 +1100,13 @@ def test_ltx_origin_probe_survives_optimization_and_stale_bytecode(tmp_path):
     )
     assert guarded.returncode == 0, guarded.stderr
     wrong_root = tmp_path / "other"
-    wrong_root.mkdir()
+    subprocess.run(
+        ["git", "clone", "--shared", "--no-checkout", str(root), str(wrong_root)],
+        check=True,
+        capture_output=True,
+    )
     optimized = subprocess.run(
-        [sys.executable, "-O", "-c", _ltx_origin_probe(), str(wrong_root)],
+        [sys.executable, "-O", "-c", probe, str(wrong_root)],
         env=env,
         check=False,
         capture_output=True,
@@ -1153,3 +1182,263 @@ def test_embedded_matching_alpha_metadata_converts(tmp_path):
         alpha=4,
     )
     assert result.config["scale"] == 2
+
+
+@pytest.mark.parametrize("pattern", ["alpha_pattern", "rank_pattern"])
+def test_prefixed_metadata_patterns_default_and_nonempty(tmp_path, pattern):
+    key = "transformer_blocks.0.attn.to_q"
+    source = tmp_path / "source.safetensors"
+    tensors = {
+        key + ".lora_A.weight": np.ones((2, 4), np.float32),
+        key + ".lora_B.weight": np.ones((3, 2), np.float32),
+    }
+    for value, accepted in [({}, True), ({"block": 2}, False)]:
+        save_file(
+            tensors,
+            str(source),
+            metadata={
+                "lora_adapter_metadata": json.dumps(
+                    {
+                        "transformer.r": 2,
+                        "transformer.lora_alpha": 4,
+                        "transformer." + pattern: value,
+                    }
+                )
+            },
+        )
+        if accepted:
+            result = convert_media_lora(
+                source,
+                tmp_path / "good",
+                family="qwen-image-2.1",
+                base_fingerprint=BASE,
+                backend_revision=REV,
+                alpha=4,
+            )
+            assert result.config["scale"] == 2
+        else:
+            with pytest.raises(ValueError, match="embedded PEFT"):
+                convert_media_lora(
+                    source,
+                    tmp_path / "bad",
+                    family="qwen-image-2.1",
+                    base_fingerprint=BASE,
+                    backend_revision=REV,
+                    alpha=4,
+                )
+
+
+def test_pinned_import_refuses_package_shadow_before_execution(tmp_path, monkeypatch):
+    import hashlib
+    import importlib
+    import sys
+
+    from mlx2.adapters.pinned_imports import PinnedSourceFinder
+
+    package = tmp_path / "_mlx2_source_pin_probe"
+    package.mkdir()
+    init, target = package / "__init__.py", package / "dit.py"
+    init.write_text("")
+    target.write_text("VALUE = 1\n")
+    sources = {p: hashlib.sha256(p.read_bytes()).hexdigest() for p in (init, target)}
+    shadow = package / "dit"
+    shadow.mkdir()
+    (shadow / "__init__.py").write_text(
+        "raise RuntimeError('unverified shadow executed')"
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+    try:
+        with (
+            PinnedSourceFinder((package.name,), sources),
+            pytest.raises(ImportError, match="origin differs"),
+        ):
+            importlib.import_module(package.name + ".dit")
+    finally:
+        for name in list(sys.modules):
+            if name == package.name or name.startswith(package.name + "."):
+                del sys.modules[name]
+
+
+def test_pinned_loader_hashes_exact_compiled_buffer(tmp_path):
+    import hashlib
+
+    from mlx2.adapters.pinned_imports import PinnedSourceLoader
+
+    source = tmp_path / "module.py"
+    original = b"VALUE = 7\n"
+    source.write_bytes(original)
+    loader = PinnedSourceLoader(
+        "probe", str(source), hashlib.sha256(original).hexdigest()
+    )
+    namespace = {}
+    exec(loader.get_code("probe"), namespace)  # noqa: S102 - locally constructed constant test source
+    assert namespace["VALUE"] == 7
+    source.write_text("raise RuntimeError('replacement executed')")
+    with pytest.raises(ImportError, match="source bytes changed"):
+        loader.get_code("probe")
+
+
+def test_pinned_import_refuses_extension_loader(tmp_path):
+    import importlib.machinery
+
+    from mlx2.adapters.pinned_imports import PinnedSourceFinder
+
+    finder = PinnedSourceFinder(("probe",), {tmp_path / "probe.py": "a" * 64})
+    spec = importlib.machinery.ModuleSpec(
+        "probe",
+        importlib.machinery.ExtensionFileLoader("probe", str(tmp_path / "probe.so")),
+        origin=str(tmp_path / "probe.so"),
+    )
+    with pytest.raises(ImportError, match="origin differs"):
+        finder.validate("probe", spec)
+
+
+@pytest.mark.parametrize(
+    "change", ["replace", "new_shard", "during_load", "during_inspect"]
+)
+def test_qwen_lazy_load_binds_identity_and_inventory(tmp_path, monkeypatch, change):
+    import hashlib
+
+    from mlx2.adapters import generative_media as media
+
+    values = {
+        "model_index.json": json.dumps({"_class_name": "QwenImage21Pipeline"}).encode(),
+        "transformer/config.json": json.dumps(
+            {
+                "_class_name": "QwenImage21Transformer2DModel",
+                "num_layers": 32,
+                "num_attention_heads": 32,
+            }
+        ).encode(),
+        "transformer/model.safetensors": b"original",
+    }
+    for name, data in values.items():
+        path = tmp_path / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(data)
+    proof = {
+        "repo": "Qwen/Qwen-Image-2.1",
+        "revision": media.QWEN_REVISION,
+        "files": [
+            {
+                "path": name,
+                "size": len(data),
+                "sha256": hashlib.sha256(data).hexdigest(),
+            }
+            for name, data in values.items()
+        ],
+    }
+    (tmp_path / ".hf-download-manifest.json").write_text(json.dumps(proof))
+    (tmp_path / ".hf-download-complete.json").write_text(
+        json.dumps(
+            {
+                "repo": proof["repo"],
+                "revision": proof["revision"],
+                "files": 3,
+                "total_bytes": sum(map(len, values.values())),
+            }
+        )
+    )
+    shard = tmp_path / "transformer/model.safetensors"
+    calls = []
+
+    def factory(path, edit):
+        calls.append(edit)
+        if change == "during_load":
+            shard.write_bytes(b"replaced")
+        return SimpleNamespace()
+
+    if change == "during_inspect":
+        original_hash = media._file_sha256
+
+        def digest(path):
+            result = original_hash(path)
+            if path == shard:
+                shard.write_bytes(b"replaced")
+            return result
+
+        monkeypatch.setattr(media, "_file_sha256", digest)
+        with pytest.raises(ValueError, match="changed since inspection"):
+            media.QwenImage21Adapter(tmp_path, backend_factory=factory)
+        assert not calls
+        return
+    owner = media.QwenImage21Adapter(tmp_path, backend_factory=factory)
+    if change == "replace":
+        shard.write_bytes(b"replaced")
+    elif change == "new_shard":
+        (tmp_path / "transformer/zz.safetensors").write_bytes(b"new")
+    with pytest.raises(ValueError, match="Qwen"):
+        owner._model(edit=False)
+    assert calls == ([False] if change == "during_load" else [])
+    assert owner._generator is None
+
+
+def test_ltx_construction_hash_window_does_not_rebind_replacement(
+    tmp_path, monkeypatch
+):
+    import hashlib
+
+    from mlx2.adapters import generative_media as media
+
+    monkeypatch.setattr(
+        media,
+        "inspect_ltx25_source",
+        lambda path: media.MediaArtifact("ltx-2.5", tmp_path, "s", BASE),
+    )
+    model = tmp_path / "model"
+    model.mkdir()
+    (model / "config.json").write_text('{"model_version":"2.5"}')
+    names = [
+        "config",
+        "transformer-distilled",
+        "connector",
+        "text-encoder",
+        "vae",
+        "audio-vae",
+        "duration-head",
+        "upscalers",
+    ]
+    steps = {}
+    for step in names:
+        name = "config.json" if step == "config" else step + ".safetensors"
+        path = model / name
+        if step != "config":
+            path.write_bytes(b"x")
+        steps[step] = {
+            name: {
+                "size": path.stat().st_size,
+                "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+            }
+        }
+    (model / ".mlx2-cpu-conversion.json").write_text(
+        json.dumps(
+            {
+                "source_fingerprint": BASE,
+                "runtime_revision": media.LTX_RUNTIME_REVISION,
+                "converter_sha256": media.LTX_CONVERTER_SHA256,
+                "steps": steps,
+            }
+        )
+    )
+    runtime = tmp_path / "runtime"
+    executable = runtime / ".venv/bin/python"
+    executable.parent.mkdir(parents=True)
+    executable.touch()
+    original = media._file_sha256
+
+    def digest(path):
+        result = original(path)
+        if path.name == "transformer-distilled.safetensors":
+            (model / "config.json").write_text('{"model_version":"2.5-new"}')
+        return result
+
+    monkeypatch.setattr(media, "_file_sha256", digest)
+    monkeypatch.setattr(
+        media.subprocess,
+        "run",
+        lambda command, **kwargs: SimpleNamespace(
+            stdout=media.LTX_RUNTIME_REVISION if "rev-parse" in command else ""
+        ),
+    )
+    with pytest.raises(ValueError, match="changed since inspection"):
+        media.LTX25Adapter(source=tmp_path, mlx_model=model, runtime_root=runtime)

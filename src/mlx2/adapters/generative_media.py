@@ -8,6 +8,7 @@ version-pinned MLX image/video runtimes only when explicitly invoked.
 from __future__ import annotations
 
 import hashlib
+import inspect
 import io
 import json
 import os
@@ -20,6 +21,7 @@ from typing import Any
 
 from .media_lora_control import MediaLoRAControl, serialized
 from .mlx_vlm_pin import MLX_VLM_REVISION, require_pinned_mlx_vlm
+from .pinned_imports import PinnedSourceFinder, PinnedSourceLoader
 
 QWEN_REVISION = "790c92633540aa0cb11d9abf19eb46d861714758"
 GGUF_REVISION = "40319fb15542f0ad22921e0124a191a8a935a60a"
@@ -251,6 +253,52 @@ def _verify_qwen_backend_revision() -> dict:
         raise RuntimeError(f"mlx-vlm Qwen image backend: {exc}") from None
 
 
+def _qwen_bound_inputs(root):
+    """Capture identities before inspection hashes can race a large shard load."""
+    root = Path(root).expanduser().resolve()
+    official, converted = (
+        root / "mlx2-official-conversion.json",
+        root / "mlx2-conversion.json",
+    )
+    proof_path = (
+        official
+        if official.exists()
+        else converted
+        if converted.exists()
+        else root / ".hf-download-manifest.json"
+    )
+    identities = {
+        str(proof_path.relative_to(root)): LTX25Adapter._file_identity(proof_path)
+    }
+    proof = _json(proof_path)
+    if proof_path == official:
+        records = proof["output_files"]
+    elif proof_path == converted:
+        records = {
+            "transformer/" + name: record
+            for name, record in proof["output_files"].items()
+        }
+        records.update(proof["base_files"])
+    else:
+        records = {entry["path"]: entry for entry in proof["files"]}
+        identities[".hf-download-complete.json"] = LTX25Adapter._file_identity(
+            root / ".hf-download-complete.json"
+        )
+    for name, record in records.items():
+        path = (root / name).resolve()
+        if not path.is_relative_to(root):
+            raise ValueError("Qwen loader input escapes artifact")
+        if (
+            path.suffix in (".json", ".safetensors")
+            or name.startswith(("transformer/", "text_encoder/", "vae/", "processor/"))
+        ) and not isinstance(record.get("sha256"), str):
+            raise ValueError("Qwen loader input requires SHA-256 binding")
+        identities[name] = LTX25Adapter._file_identity(path)
+    if not {"model_index.json", "transformer/config.json"}.issubset(identities):
+        raise ValueError("Qwen pipeline configuration is unbound")
+    return identities
+
+
 class QwenImage21Adapter(MediaLoRAControl):
     """Direct generation/edit adapter using the pinned mlx-vlm Qwen backend."""
 
@@ -260,7 +308,9 @@ class QwenImage21Adapter(MediaLoRAControl):
         *,
         backend_factory: Callable[..., Any] | None = None,
     ) -> None:
+        self._input_identity = _qwen_bound_inputs(path)
         self.artifact = inspect_qwen_image21(path)
+        self._verify_input_identity()
         self._backend_factory = backend_factory
         self._generator: Any = None
         self._editor: Any = None
@@ -277,17 +327,38 @@ class QwenImage21Adapter(MediaLoRAControl):
             }.values()
         )
 
-    def _model(self, *, edit: bool) -> Any:
-        if self._backend_factory is not None:
-            return self._backend_factory(self.artifact.path, edit=edit)
-        _verify_qwen_backend_revision()
-        from mlx_vlm.models.qwen_image.model import (
-            QwenImageEditModel,
-            QwenImageGenerationModel,
-        )
+    def _verify_input_identity(self):
+        root = self.artifact.path
+        for name, expected in self._input_identity.items():
+            path = (root / name).resolve()
+            if (
+                not path.is_relative_to(root)
+                or LTX25Adapter._file_identity(path) != expected
+            ):
+                raise ValueError(f"Qwen loader input changed since inspection: {name}")
+        for folder in ("transformer", "vae", "text_encoder", "processor"):
+            if any(
+                str(p.relative_to(root)) not in self._input_identity
+                for p in (root / folder).rglob("*")
+                if p.is_file() and p.name != ".DS_Store"
+            ):
+                raise ValueError("Qwen new unbound loader input")
 
-        cls = QwenImageEditModel if edit else QwenImageGenerationModel
-        return cls.from_model_id(str(self.artifact.path), download=False)
+    def _model(self, *, edit: bool) -> Any:
+        self._verify_input_identity()
+        if self._backend_factory is not None:
+            candidate = self._backend_factory(self.artifact.path, edit=edit)
+        else:
+            _verify_qwen_backend_revision()
+            from mlx_vlm.models.qwen_image.model import (
+                QwenImageEditModel,
+                QwenImageGenerationModel,
+            )
+
+            cls = QwenImageEditModel if edit else QwenImageGenerationModel
+            candidate = cls.from_model_id(str(self.artifact.path), download=False)
+        self._verify_input_identity()
+        return candidate
 
     @serialized
     def generate_image(
@@ -396,16 +467,58 @@ class QwenImage21Adapter(MediaLoRAControl):
         )
 
 
-def _ltx_origin_probe():
-    # A private fresh cache avoids executing ignored, pre-existing bytecode.
+def _ltx_source_hashes(root, expected_revision=LTX_RUNTIME_REVISION):
+    root = Path(root).resolve()
+    head = subprocess.check_output(
+        ["git", "-C", str(root), "rev-parse", "HEAD"], text=True
+    ).strip()
+    if head != expected_revision:
+        raise ValueError("LTX source revision differs during import")
+    tracked = subprocess.check_output(
+        [
+            "git",
+            "-C",
+            str(root),
+            "ls-tree",
+            "-r",
+            "-z",
+            "--name-only",
+            head,
+            "--",
+            "packages",
+        ]
+    )
+    return {
+        root / p.decode(): hashlib.sha256(
+            subprocess.check_output(
+                ["git", "-C", str(root), "show", head + ":" + p.decode()]
+            )
+        ).hexdigest()
+        for p in tracked.split(b"\0")
+        if p.endswith(b".py")
+    }
+
+
+def _ltx_origin_probe(expected_revision=LTX_RUNTIME_REVISION):
+    # Keep this self-contained: the external LTX venv need not install mlx2.
     return (
-        "import sys, tempfile; _cache=tempfile.TemporaryDirectory(prefix='mlx2-ltx-code-'); "
-        "sys.pycache_prefix=_cache.name; from pathlib import Path; "
-        "import ltx_core_mlx, ltx_pipelines_mlx; "
-        "root=Path(sys.argv[1]).resolve()/'packages'\n"
-        "if not all(Path(m.__file__).resolve().is_relative_to(root) "
-        "for m in (ltx_core_mlx, ltx_pipelines_mlx)):\n"
-        " raise SystemExit('LTX import origin differs from pinned source')\n"
+        "import sys, tempfile, subprocess, hashlib, importlib.abc, importlib.machinery\n"
+        "from pathlib import Path\n"
+        "_cache=tempfile.TemporaryDirectory(prefix='mlx2-ltx-code-')\n"
+        "sys.pycache_prefix=_cache.name\n"
+        "root=Path(sys.argv[1]).resolve()\n"
+        + inspect.getsource(PinnedSourceLoader)
+        + "\n"
+        + inspect.getsource(PinnedSourceFinder)
+        + "\n"
+        + inspect.getsource(_ltx_source_hashes).replace(
+            "expected_revision=LTX_RUNTIME_REVISION",
+            "expected_revision=" + repr(expected_revision),
+        )
+        + "\n_finder=PinnedSourceFinder(('ltx_core_mlx','ltx_pipelines_mlx'), _ltx_source_hashes(root))\n"
+        "_finder.__enter__()\n"
+        "import ltx_core_mlx, ltx_pipelines_mlx\n"
+        "_finder.validate_loaded()\n"
     )
 
 
@@ -445,11 +558,13 @@ class LTX25Adapter(MediaLoRAControl):
             raise ValueError(
                 "LTX conversion receipt is incomplete or source mismatched"
             )
+        self._conversion_identity = {}
         for records in conversion["steps"].values():
             if not isinstance(records, dict) or not records:
                 raise ValueError("LTX conversion output checksums are missing")
             for name, record in records.items():
                 path = (self.mlx_model / name).resolve()
+                expected_identity = self._file_identity(path)
                 if (
                     not path.is_relative_to(self.mlx_model)
                     or not isinstance(record, dict)
@@ -458,15 +573,15 @@ class LTX25Adapter(MediaLoRAControl):
                     or _file_sha256(path) != record.get("sha256")
                 ):
                     raise ValueError(f"LTX conversion output changed: {name}")
+                if self._file_identity(path) != expected_identity:
+                    raise ValueError(
+                        f"LTX conversion output changed during hashing: {name}"
+                    )
+                self._conversion_identity[name] = expected_identity
         self._bound_inputs = {
             name for records in conversion["steps"].values() for name in records
         }
         self._verify_input_listing()
-        self._conversion_identity = {
-            name: self._file_identity(self.mlx_model / name)
-            for records in conversion["steps"].values()
-            for name in records
-        }
         revision = subprocess.run(
             ["git", "-C", str(self.runtime_root), "rev-parse", "HEAD"],
             check=True,

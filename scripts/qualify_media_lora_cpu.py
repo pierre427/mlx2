@@ -76,16 +76,9 @@ def main():
     elif args.family == "minimax-music3":
         if args.runtime_root is None:
             parser.error("--runtime-root required for Music3")
-        from mlx2.adapters.music3 import MUSIC3_RUNTIME_REVISION
-        from mlx2.adapters.music3_pin import SOURCE_SHA256
-        from mlx2.runtime.media_lora import _digest
+        from mlx2.adapters.music3 import MUSIC3_RUNTIME_REVISION, _runtime_modules
 
-        root = args.runtime_root.resolve()
-        for name, expected in SOURCE_SHA256.items():
-            if _digest(root / name) != expected:
-                raise ValueError("Music3 source pin differs: " + name)
-        sys.path.insert(0, str(root))
-        from minimax_music3_mlx.dit import DiT
+        DiT = _runtime_modules(args.runtime_root)["dit"].DiT
 
         revision = MUSIC3_RUNTIME_REVISION
         config = {
@@ -111,34 +104,27 @@ def main():
     else:
         import subprocess
 
-        import ltx_core_mlx
-        import ltx_pipelines_mlx
-        from ltx_core_mlx.model.transformer.model import LTXModel, LTXModelConfig
-
-        from mlx2.adapters.generative_media import LTX_RUNTIME_REVISION
+        from mlx2.adapters.generative_media import (
+            LTX_RUNTIME_REVISION,
+            _ltx_source_hashes,
+        )
+        from mlx2.adapters.pinned_imports import PinnedSourceFinder
 
         if args.runtime_root is None:
             parser.error("--runtime-root required for LTX")
+        root = args.runtime_root.expanduser().resolve()
         if (
             subprocess.check_output(
-                ["git", "-C", str(args.runtime_root), "rev-parse", "HEAD"], text=True
+                ["git", "-C", str(root), "rev-parse", "HEAD"], text=True
             ).strip()
             != LTX_RUNTIME_REVISION
         ):
             raise ValueError("LTX source pin differs")
-        package_root = args.runtime_root.expanduser().resolve() / "packages"
-        if any(
-            not Path(module.__file__).resolve().is_relative_to(package_root)
-            for module in (ltx_core_mlx, ltx_pipelines_mlx)
-        ):
-            raise ValueError(
-                "LTX qualification import origin differs from runtime root"
-            )
         if subprocess.check_output(
             [
                 "git",
                 "-C",
-                str(args.runtime_root),
+                str(root),
                 "status",
                 "--porcelain",
                 "--untracked-files=all",
@@ -148,6 +134,13 @@ def main():
             text=True,
         ).strip():
             raise ValueError("LTX qualification runtime packages are dirty")
+        finder = PinnedSourceFinder(
+            ("ltx_core_mlx", "ltx_pipelines_mlx"), _ltx_source_hashes(root)
+        )
+        with finder:
+            from ltx_core_mlx.model.transformer.model import LTXModel, LTXModelConfig
+
+            finder.validate_loaded()
         revision = LTX_RUNTIME_REVISION
         config = {
             "num_layers": 1,
