@@ -15,6 +15,15 @@ admission, with the real ``NativeBackend`` and its counters) can stamp
 boundary against forged reports and fake backends, not a security claim
 against arbitrary code that monkeypatches this module.
 
+Identity association: the native backend class, the live-run type, the
+witness and the evaluator are captured ONCE, at import, in the closure that
+defines ``_run_native`` and ``native_verdict`` (not in default arguments a
+caller could override). Rebinding the module names ``NativeBackend``,
+``_LiveNativeRun``, ``_WITNESS`` or ``evaluate`` afterwards, a subclass or a
+look-alike cannot make a CPU fake count as native, and ``_run_native`` still
+constructs the original class. Evidence-association hygiene only: it does
+not resist code that edits closures, class attributes or private objects.
+
 Timing is NOT implemented: ``--timing`` is refused before any admission or
 backend work. Controlled fair kernel/conversion timing is a pending stage.
 
@@ -84,6 +93,7 @@ SOURCE_FILES = (
     "provenance/tensor-fa-research.NOTICE",
     "scripts/qualify_tensor_fa_research.py",
     "tests/test_tensor_fa_research_qualifier.py",
+    "tests/test_tensor_fa_native_identity_cpu.py",
     "provenance/tensor-fa-native-qualifier.json",
 )
 STATUS_PATHS = ("src", "scripts", "tests", "provenance")
@@ -524,53 +534,6 @@ def run_gate(backend, cases, *, source=source_hashes, guard=None):
     return {"producer": type(backend).__name__, "cases": records, "identity": backend.identity()}
 
 
-_WITNESS = object()   # module-private; held only by live runs built in _run_native
-
-
-class _LiveNativeRun:
-    """In-process record of an actual native orchestration (never serialized)."""
-
-    __slots__ = ("_witness", "backend", "admission", "report", "post_run", "cases", "full_requested")
-
-    def __init__(self, witness, backend, admission, report, post_run, cases, full_requested):
-        self._witness, self.backend, self.admission = witness, backend, admission
-        self.report, self.post_run = report, list(post_run)
-        self.cases, self.full_requested = tuple(cases), bool(full_requested)
-
-
-def _run_native(admission, cases, full_requested):
-    backend = NativeBackend(admission)
-    report = run_gate(backend, cases, guard=lambda: source_guard(admission))
-    post = post_run_refusals(admission, backend.cand.__file__, backend.mx.__file__)
-    return _LiveNativeRun(_WITNESS, backend, admission, report, post, cases, full_requested)
-
-
-def native_verdict(live):
-    """The ONLY place a native synthetic gate can be stamped: a live run object, never a dict/JSON.
-
-    The numeric evaluation is computed HERE from this run's own report, catalogue cases and scope;
-    no caller-supplied evaluation can be associated with a run.
-    """
-    reasons = []
-    report = getattr(live, "report", None)
-    cases = getattr(live, "cases", None)
-    full = getattr(live, "full_requested", False) is True
-    if isinstance(report, dict) and isinstance(cases, (list, tuple)) and cases:
-        evaluation = evaluate(report, list(cases), full_requested=full)
-    else:
-        evaluation = {"verdict": "refused", "refusals": ["no live report/cases"], "native_synthetic_gate": False}
-    if type(live) is not _LiveNativeRun or getattr(live, "_witness", None) is not _WITNESS:
-        reasons.append("no live native orchestration (evidence alone never establishes native execution)")
-    elif type(live.backend) is not NativeBackend:
-        reasons.append("backend is not the native backend")
-    else:
-        reasons += live.post_run
-    if evaluation.get("verdict") != "numeric_evidence_pass":
-        reasons.append("numeric evidence did not pass the full mandatory catalogue")
-    return {"native_synthetic_gate": not reasons, "reasons": reasons, "evaluation": evaluation,
-            "qualified": False, "selected": False, "model_gain": False}
-
-
 class NativeBackend:
     """Real Metal backend; constructed only after native_admission (never in CPU tests)."""
 
@@ -652,6 +615,66 @@ class NativeBackend:
     def release(self):
         self.mx.synchronize()
         self.mx.clear_cache()
+
+
+_WITNESS = object()   # module-private; held only by live runs built in _run_native
+
+
+class _LiveNativeRun:
+    """In-process record of an actual native orchestration (never serialized)."""
+
+    __slots__ = ("_witness", "backend", "admission", "report", "post_run", "cases", "full_requested")
+
+    def __init__(self, witness, backend, admission, report, post_run, cases, full_requested):
+        self._witness, self.backend, self.admission = witness, backend, admission
+        self.report, self.post_run = report, list(post_run)
+        self.cases, self.full_requested = tuple(cases), bool(full_requested)
+
+
+def _bind_native_identity(native_cls, live_cls, witness, evaluator):
+    """Capture the original native class, live-run type, witness and evaluator at import.
+
+    Closure cells, not default arguments: no caller argument can substitute a class or evaluator, and
+    rebinding the module names later changes neither what ``_run_native`` constructs nor what
+    ``native_verdict`` accepts.
+    """
+
+    def _run_native(admission, cases, full_requested):
+        backend = native_cls(admission)
+        report = run_gate(backend, cases, guard=lambda: source_guard(admission))
+        post = post_run_refusals(admission, backend.cand.__file__, backend.mx.__file__)
+        return live_cls(witness, backend, admission, report, post, cases, full_requested)
+
+    def native_verdict(live):
+        """The ONLY place a native synthetic gate can be stamped: a live run object, never a dict/JSON.
+
+        The numeric evaluation is computed HERE from this run's own report, catalogue cases and scope;
+        no caller-supplied evaluation can be associated with a run.
+        """
+        reasons = []
+        report = getattr(live, "report", None)
+        cases = getattr(live, "cases", None)
+        full = getattr(live, "full_requested", False) is True
+        if isinstance(report, dict) and isinstance(cases, (list, tuple)) and cases:
+            evaluation = evaluator(report, list(cases), full_requested=full)
+        else:
+            evaluation = {"verdict": "refused", "refusals": ["no live report/cases"], "native_synthetic_gate": False}
+        if type(live) is not live_cls or getattr(live, "_witness", None) is not witness:
+            reasons.append("no live native orchestration (evidence alone never establishes native execution)")
+        elif type(live.backend) is not native_cls:
+            reasons.append("backend is not the native backend")
+        else:
+            reasons += live.post_run
+        if evaluation.get("verdict") != "numeric_evidence_pass":
+            reasons.append("numeric evidence did not pass the full mandatory catalogue")
+        return {"native_synthetic_gate": not reasons, "reasons": reasons, "evaluation": evaluation,
+                "qualified": False, "selected": False, "model_gain": False}
+
+    _run_native.__qualname__, native_verdict.__qualname__ = "_run_native", "native_verdict"
+    return _run_native, native_verdict
+
+
+_run_native, native_verdict = _bind_native_identity(NativeBackend, _LiveNativeRun, _WITNESS, evaluate)
 
 
 # ================================================================ CLI
