@@ -139,6 +139,24 @@ class FlashNextPolicy:
     # Default on, but inert and absent from the environment and receipts
     # unless row_exact_verify is enabled (which stays default off).
     row_exact_window_kernels: bool = True
+    # omlx #4106 MoE half / #4041 / #4105 routed MoE row window
+    # (MLX_QWEN4_MOE_WINDOW, runtime/models/qwen4_moe_window.py): 2..17 rows
+    # run the routed experts (and the shared expert) in the one-token routed
+    # launches with every row bit-identical to its own one-token block call.
+    # One switch per consumer: row-exact verify windows (replaces the per-row
+    # expert loop; needs row_exact_verify), batched one-token decode (B lanes),
+    # and plain MTP verify windows (moves verify numerics from the multi-row
+    # gather to one-token arithmetic).  Opt-in; enter the environment and
+    # receipts only when enabled.
+    moe_window_row_exact: bool = False
+    moe_window_batch_decode: bool = False
+    moe_window_verify: bool = False
+    # omlx #4052 router top-k (MLX_QWEN4_MOE_TOPK_FOLD): "launch" runs the
+    # stock softmax/argpartition/normalize in one launch, "fold" inside the
+    # routed gate+up launch (one-token decode with moe_routed_decode
+    # gate_up_down[_shared], and row windows); both bit-identical to the
+    # stock routing.  The 8-bit router gemv stays its own launch.
+    moe_topk_fold: str = "off"
 
     def __post_init__(self):
         validate_self_mtp_num_draft(self.num_draft)
@@ -152,6 +170,10 @@ class FlashNextPolicy:
                 "moe_routed_decode must be off, gate_up, gate_up_down, "
                 "gate_up_down_shared, or two_launch"
             )
+        if self.moe_topk_fold not in {"off", "launch", "fold"}:
+            raise ValueError("moe_topk_fold must be off, launch, or fold")
+        if self.moe_window_row_exact and not self.row_exact_verify:
+            raise ValueError("moe_window_row_exact requires row_exact_verify")
         if self.fused_gdn_batch_decode not in {"off", "row_exact"}:
             raise ValueError("fused_gdn_batch_decode must be off or row_exact")
         for name in (
@@ -170,6 +192,9 @@ class FlashNextPolicy:
             "attn_fused_rows",
             "row_exact_verify",
             "row_exact_window_kernels",
+            "moe_window_row_exact",
+            "moe_window_batch_decode",
+            "moe_window_verify",
             *_OPTIONAL_KERNEL_ENV,
         ):
             if type(getattr(self, name)) is not bool:
@@ -264,7 +289,23 @@ class FlashNextPolicy:
             del values["fused_gdn_batch_decode"]
         if not self.attn_fused_rows:
             del values["attn_fused_rows"]
+        for name in ("moe_window_row_exact", "moe_window_batch_decode", "moe_window_verify"):
+            if not getattr(self, name):
+                del values[name]
+        if self.moe_topk_fold == "off":
+            del values["moe_topk_fold"]
         return values
+
+    def moe_window_consumers(self):
+        return tuple(
+            name
+            for name, enabled in (
+                ("row_exact", self.moe_window_row_exact),
+                ("batch_decode", self.moe_window_batch_decode),
+                ("verify", self.moe_window_verify),
+            )
+            if enabled
+        )
 
     def environment(self):
         environment = {
@@ -305,6 +346,11 @@ class FlashNextPolicy:
         if self.row_exact_verify and self.row_exact_window_kernels:
             environment["MLX_QWEN4_ROW_EXACT_ATTN_WINDOW"] = "1"
             environment["MLX_QWEN4_HC_ROW_EXACT"] = "1"
+        consumers = self.moe_window_consumers()
+        if consumers:
+            environment["MLX_QWEN4_MOE_WINDOW"] = ",".join(consumers)
+        if self.moe_topk_fold != "off":
+            environment["MLX_QWEN4_MOE_TOPK_FOLD"] = self.moe_topk_fold
         return environment
 
     def batch_config(self, *, max_lanes, prefill_step):

@@ -529,6 +529,38 @@ class FlashNextAdapter:
                 "expert_views": routed_decode.expert_views_enabled(),
                 "served_down_rows": routed_decode.served_down_rows(),
             }
+        windowed = [
+            m for m in moe_modules
+            if getattr(m, "moe_window_consumers", None) or getattr(m, "moe_topk_mode", "off") != "off"
+        ]
+        if windowed:
+            # omlx #4106/#4041/#4052 port; absent while off.
+            from ..runtime.models import qwen4_moe_window as moe_window
+
+            moe["moe_window"] = {
+                "consumers": sorted({c for m in windowed for c in m.moe_window_consumers}),
+                "calls": {
+                    c: sum(m.moe_window_calls[c] for m in windowed) for c in moe_window.CONSUMERS
+                },
+                "rows": sum(m.moe_window_rows for m in windowed),
+                "shared_fold_calls": sum(m.moe_window_shared_calls for m in windowed),
+                "fallbacks": {
+                    c: sum(m.moe_window_fallbacks[c] for m in windowed) for c in moe_window.CONSUMERS
+                },
+                "last_fallback": next(
+                    (m.moe_window_last_fallback for m in windowed if m.moe_window_last_fallback), None
+                ),
+                "topk_modes": sorted({m.moe_topk_mode for m in windowed}),
+                "topk_calls": {
+                    k: sum(m.moe_topk_calls[k] for m in windowed) for k in ("launch", "fold")
+                },
+                "topk_fallbacks": sum(m.moe_topk_fallbacks for m in windowed),
+                "topk_last_fallback": next(
+                    (m.moe_topk_last_fallback for m in windowed if m.moe_topk_last_fallback), None
+                ),
+                "topk_fold_max_rows": moe_window.topk_fold_max_rows(),
+                "window_shared": moe_window.window_shared_enabled(),
+            }
         return {
             "moe": moe,
             "policy": self.policy.as_dict(),

@@ -26,6 +26,7 @@ from .models.cache import (
 from .processor_probe import VerifyWindow
 from .prompt_lookup import HybridStats as _PromptLookupStatsBase
 from . import round_levers
+from . import verify_scope as _verify_scope
 from .sample_utils import LaneRNG, draw_key, make_transformed_logprobs
 from .verify_sync import record_verify_sync, verify_sync_round
 
@@ -2411,7 +2412,8 @@ def _propose_batched_self_mtp_round(
             # A model that verifies with its own backbone may also own the
             # head for those rows (row-exact verify); default: model.logits.
             verify_head = getattr(model, "mtp_verify_logits", model.logits)
-        (vlogit_hidden, batched_hidden) = verifier(verify_ids, batch.caches.target)
+        with _verify_scope.verify_forward():
+            (vlogit_hidden, batched_hidden) = verifier(verify_ids, batch.caches.target)
         batched_logits = verify_head(vlogit_hidden)
     finally:
         _finalize_self_mtp_cache_group(batch.caches.target)

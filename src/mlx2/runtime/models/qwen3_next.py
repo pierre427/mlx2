@@ -25,6 +25,7 @@ from .qwen4_moe_router import (
 from . import switch_layers as _switch_layers
 from . import qwen4_moe_weighted_sum as _moe_wsum
 from . import qwen4_routed_decode as _routed
+from . import qwen4_moe_window as _window
 from .switch_layers import (
     QuantizedSwitchLinear,
     SwiGLU,
@@ -62,6 +63,10 @@ _MOE_ROUTER_MODES = ("stock", "fused")
 _MOE_WEIGHTED_SUM = _moe_wsum.weighted_sum_enabled_from_env()
 # omlx #3912 port: one-token routed experts in fewer launches; default off.
 _MOE_ROUTED_DECODE = _routed.mode_from_env()
+# omlx #4106/#4041/#4052 port: routed MoE row windows and the router top-k
+# launch/fold; default off (no consumer, top-k "off").
+_MOE_WINDOW_CONSUMERS = _window.consumers_from_env()
+_MOE_TOPK_MODE = _window.topk_mode_from_env()
 _MOE_GATE_COMPILE_MAX_TOKENS = 8
 _COMPILE_GLUE_DEFAULT = False
 _COMPILE_GLUE = _env_flag("MLX_QWEN4_COMPILE_GLUE", default=_COMPILE_GLUE_DEFAULT)
@@ -654,6 +659,283 @@ class _ShapeOnly:
     def __init__(self, shape, dtype):
         self.shape = tuple(shape)
         self.dtype = dtype
+        self.size = 1
+        for extent in self.shape:
+            self.size *= int(extent)
+
+
+# --------------------------------------------------------------------------
+# Routed MoE row windows and the router top-k launch/fold (omlx #4106 MoE
+# half, #4041 verify windows, #4052 top-k fold; qwen4_moe_window). A window
+# gives each of 2..17 rows the arithmetic of its own one-token block call:
+# router gemv and shared gate through the row-exact qmv kernel, the stock
+# routing per row (or the stock-identical routing kernel), routed experts in
+# the one-token routed kernels with the token on grid z, and the shared
+# expert folded per row (or through the row-exact qmv kernel).
+# --------------------------------------------------------------------------
+def _enable_moe_window(block, consumers, topk_mode) -> None:
+    consumers = frozenset(consumers)
+    unknown = consumers - set(_window.CONSUMERS)
+    if unknown:
+        raise ValueError(f"unknown MoE window consumers {sorted(unknown)}; expected {_window.CONSUMERS}")
+    if topk_mode not in _window.TOPK_MODES:
+        raise ValueError(f"unknown top-k mode {topk_mode!r}; expected {_window.TOPK_MODES}")
+    block.moe_window_consumers = consumers
+    block.moe_topk_mode = topk_mode
+    block.moe_window_calls = {name: 0 for name in _window.CONSUMERS}
+    block.moe_window_rows = 0
+    block.moe_window_shared_calls = 0
+    block.moe_window_fallbacks = {name: 0 for name in _window.CONSUMERS}
+    block.moe_window_last_fallback = None
+    block.moe_topk_calls = {"launch": 0, "fold": 0}
+    block.moe_topk_fallbacks = 0
+    block.moe_topk_last_fallback = None
+
+
+def _moe_window_consumer(x):
+    """Which consumer a multi-row MoE call belongs to, or None (prefill)."""
+    from .. import row_exact_verify as _rev
+    from .. import verify_scope as _verify_scope
+
+    if _rev.current() is not None:
+        return "row_exact"
+    if _verify_scope.active():
+        return "verify"
+    if x.ndim == 3 and x.shape[1] == 1:
+        return "batch_decode"
+    return None
+
+
+def _base_linear_ok(layer) -> bool:
+    import mlx.nn as _nn
+
+    base = getattr(type(layer), "_mlx2_row_exact_base", type(layer))
+    return base is _nn.QuantizedLinear
+
+
+def _moe_rows_refusal(block, x, rows):
+    """Why the block's one-token reference cannot be reproduced row by row
+    by the window kernels, or None. Structural; never evaluates."""
+    if block.shared_folded or block.sharding_group is not None:
+        return "shared row folded or sharded"
+    if block.training or block.switch_mlp.training:
+        return "training"
+    if _COMPILE_GLUE:
+        return "compiled combine glue selected"
+    if _MOE_GATE_COMPILE:
+        return "compiled router selected (one-token reference routes compiled)"
+    if block.moe_router_mode == "fused":
+        return "fused router kernel selected (one-token reference routes there)"
+    if getattr(block.switch_mlp, "routed_decode_mode", "off") == "two_launch":
+        return "two_launch selected (one-token reference is stock-down numerics)"
+    if not block.fused_expert_kernel_enabled:
+        return "fused expert kernel off (one-token reference down is stock)"
+    switch_mlp = block.switch_mlp
+    if "gate_up_proj" in switch_mlp:
+        return "fused [gate|up] table (window is split-table only)"
+    hidden = x.shape[-1]
+    one_x = _ShapeOnly((hidden,), x.dtype)
+    one_idx = _ShapeOnly((1, _window.TOP_K), mx.uint32)
+    one_scores = _ShapeOnly((1, _window.TOP_K), x.dtype)
+    admission = _routed.admit_split_routed_decode(
+        one_x, one_idx, one_scores, switch_mlp.gate_proj, switch_mlp.up_proj, switch_mlp.down_proj
+    )
+    if not admission.accepted:
+        return admission.reason
+    inter = switch_mlp.gate_proj["weight"].shape[1]
+    refusal = _served_down_refusal(
+        switch_mlp, inter, x.dtype, one_idx, one_scores, block.fused_expert_kernel_mode
+    )
+    if refusal is not None:
+        return refusal
+    for name in ("gate", "shared_expert_gate"):
+        if not _base_linear_ok(block.get(name)):
+            return f"{name} is not a QuantizedLinear"
+    refusal = _window.admit_router_topk(
+        _ShapeOnly((rows, block.num_experts), x.dtype), block.top_k, bool(block.norm_topk_prob)
+    )
+    if refusal is not None:
+        return refusal
+    shared = block.get("shared_expert")
+    if shared is None or hasattr(shared, "_prefill_counts"):
+        return "shared expert missing or tensorfold prefill MLP installed"
+    return None
+
+
+def _shared_fold_ok(block, x) -> bool:
+    inter = block.switch_mlp.gate_proj["weight"].shape[1]
+    return _routed.admit_shared_fold(block.get("shared_expert"), x.shape[-1], inter).accepted
+
+
+def _stock_routing(block, gates):
+    """The block's own composed routing (the one-token reference)."""
+    gates = mx.softmax(gates, axis=-1, precise=True)
+    k = block.top_k
+    inds = mx.argpartition(gates, kth=-k, axis=-1)[..., -k:]
+    scores = mx.take_along_axis(gates, inds, axis=-1)
+    if block.norm_topk_prob:
+        scores = scores / scores.sum(axis=-1, keepdims=True)
+    return inds, scores
+
+
+def _row_projections(window, linears, x):
+    """Projections of ``x`` with one-row arithmetic per row (row-exact qmv)."""
+    from . import row_exact_qmv as _req
+
+    if len(linears) == 1:
+        (y, route) = _req.quantized_linear(linears[0], x)
+        outputs = (y,)
+    else:
+        (outputs, route) = _req.quantized_linears(linears, x)
+    if window is not None:
+        window.note("projections", route, 1 if route == "group_kernel" else len(linears))
+    return outputs
+
+
+def _run_moe_window(block, x, rows, consumer):
+    """The block's output for every row of ``x`` (admitted), each row with
+    its one-token block arithmetic."""
+    from .. import row_exact_verify as _rev
+
+    window = _rev.current()
+    hidden = x.shape[-1]
+    flat = x.reshape(rows, hidden)
+    (gates, gate_logit) = _row_projections(window, (block.gate, block.shared_expert_gate), flat)
+    sw = block.switch_mlp
+    mode = block.moe_topk_mode
+    if mode == "fold" and rows > _window.topk_fold_max_rows():
+        mode = "launch"
+    if mode == "launch":
+        (inds, scores) = _window.router_topk(gates)
+    elif mode == "off":
+        (inds, scores) = _stock_routing(block, gates)
+    else:
+        inds = scores = None
+    logits = gates if mode == "fold" else None
+    shared = _window.window_shared_enabled() and _shared_fold_ok(block, x)
+    if shared:
+        y = _window.shared_rows(
+            flat, inds, scores, sw.gate_proj, sw.up_proj, sw.down_proj,
+            block.shared_expert, gate_logit, logits=logits,
+        )
+        block.moe_window_shared_calls += 1
+    else:
+        y = _window.routed_rows(
+            flat, inds, scores, sw.gate_proj, sw.up_proj, sw.down_proj, logits=logits
+        )
+        shared_mlp = block.shared_expert
+        (g, u) = _row_projections(window, (shared_mlp.gate_proj, shared_mlp.up_proj), flat)
+        (shared_y,) = _row_projections(window, (shared_mlp.down_proj,), swiglu(g, u))
+    if mode == "fold":
+        y = y[0]
+    if not shared:
+        y = y + gate_sigmoid(gate_logit) * shared_y
+    if mode != "off":
+        block.moe_topk_calls[mode] += 1
+    block.moe_window_calls[consumer] += 1
+    block.moe_window_rows += rows
+    if window is not None:
+        window.note("moe_window", "shared_fold" if shared else "routed", rows)
+        window.note("moe_routing", mode, rows)
+    return y.reshape(*x.shape[:-1], hidden)
+
+
+def _try_moe_window(block, x):
+    """A multi-row window's block output, or None for the composed body."""
+    if not block.moe_window_consumers:
+        return None
+    hidden = x.shape[-1]
+    rows = x.size // hidden
+    if rows <= 1:
+        return None
+    consumer = _moe_window_consumer(x)
+    if consumer is None or consumer not in block.moe_window_consumers:
+        return None
+    if rows > _window.WINDOW_MAX_ROWS:
+        refusal = f"{rows} rows > {_window.WINDOW_MAX_ROWS}"
+    else:
+        refusal = _moe_rows_refusal(block, x, rows)
+    if refusal is not None:
+        block.moe_window_fallbacks[consumer] += 1
+        block.moe_window_last_fallback = refusal
+        return None
+    block.moe_window_last_fallback = None
+    return _run_moe_window(block, x, rows, consumer)
+
+
+def _topk_refusal(block, x, gates_shape):
+    if block.shared_folded or block.sharding_group is not None:
+        return "shared row folded or sharded"
+    if block.moe_router_mode == "fused":
+        return "fused router kernel selected"
+    if _MOE_GATE_COMPILE:
+        return "compiled router selected"
+    return _window.admit_router_topk(
+        _ShapeOnly(gates_shape, x.dtype), block.top_k, bool(block.norm_topk_prob)
+    )
+
+
+def _try_topk_fold_decode(block, x):
+    """One-token decode with the routing folded into the gate+up launch, or
+    None. Needs the routed kernels on both halves (gate_up_down or
+    gate_up_down_shared), where the fold replaces the stock routing."""
+    if block.moe_topk_mode != "fold" or x.size != x.shape[-1]:
+        return None
+    sw = block.switch_mlp
+    routed_mode = getattr(sw, "routed_decode_mode", "off")
+    refusal = None
+    if routed_mode not in ("gate_up_down", "gate_up_down_shared"):
+        refusal = f"routed decode {routed_mode!r} (fold needs gate_up_down or gate_up_down_shared)"
+    if refusal is None:
+        refusal = _topk_refusal(block, x, x.shape[:-1] + (block.num_experts,))
+    if refusal is None:
+        refusal = _moe_rows_refusal(block, x, 1)
+    if refusal is not None:
+        block.moe_topk_fallbacks += 1
+        block.moe_topk_last_fallback = refusal
+        return None
+    gates = block.gate(x)
+    hidden = x.shape[-1]
+    flat = x.reshape(1, hidden)
+    shared = routed_mode == "gate_up_down_shared" and _shared_fold_ok(block, x)
+    if shared:
+        gate_logit = block.shared_expert_gate(x)
+        (y, _, _) = _window.shared_rows(
+            flat, None, None, sw.gate_proj, sw.up_proj, sw.down_proj,
+            block.shared_expert, gate_logit, logits=gates,
+        )
+        block.shared_fold_calls += 1
+    else:
+        (y, _, _) = _window.routed_rows(
+            flat, None, None, sw.gate_proj, sw.up_proj, sw.down_proj, logits=gates
+        )
+        y = y.reshape(x.shape)
+        shared_y = block.shared_expert(x)
+        y = y + gate_sigmoid(block.shared_expert_gate(x)) * shared_y
+    sw.routed_decode_calls += 1
+    sw.routed_down_calls += 1
+    block.moe_topk_calls["fold"] += 1
+    block.moe_topk_last_fallback = None
+    return y.reshape(x.shape)
+
+
+def _try_topk_launch(block, x, gates):
+    """``(inds, scores)`` from the one-launch stock-identical routing for a
+    one-token call (top-k mode ``launch``), or None."""
+    if block.moe_topk_mode != "launch" or x.size != x.shape[-1]:
+        return None
+    refusal = _topk_refusal(block, x, gates.shape)
+    if refusal is None and gates.dtype != x.dtype:
+        refusal = "router logits dtype differs from the activation"
+    if refusal is not None:
+        block.moe_topk_fallbacks += 1
+        block.moe_topk_last_fallback = refusal
+        return None
+    (inds, scores) = _window.router_topk(gates)
+    block.moe_topk_calls["launch"] += 1
+    block.moe_topk_last_fallback = None
+    lead = gates.shape[:-1]
+    return inds.reshape(*lead, _window.TOP_K), scores.reshape(*lead, _window.TOP_K)
 
 
 def _routed_tail(switch_mlp, x, indices, inv_order, scores, do_sort):
@@ -1024,6 +1306,11 @@ class Qwen3NextSparseMoeBlock(nn.Module):
         self.fused_expert_dispatches = {"scalar": 0, "tile4": 0}
         self.fused_expert_fallbacks = 0
         self.sharding_group = None
+        _enable_moe_window(
+            self,
+            _MOE_WINDOW_CONSUMERS if not self.shared_folded else (),
+            _MOE_TOPK_MODE if not self.shared_folded else "off",
+        )
 
     @property
     def fused_expert_kernel_enabled(self):
@@ -1058,6 +1345,26 @@ class Qwen3NextSparseMoeBlock(nn.Module):
         self.switch_mlp.routed_decode_mode = mode
         return mode
 
+    def set_moe_window_consumers(self, consumers) -> frozenset:
+        """Live-select who may run a routed row window (omlx #4106/#4041)."""
+        consumers = frozenset(consumers)
+        if consumers and self.shared_folded:
+            raise ValueError("MoE row windows do not support a folded shared row")
+        unknown = consumers - set(_window.CONSUMERS)
+        if unknown:
+            raise ValueError(f"unknown MoE window consumers {sorted(unknown)}; expected {_window.CONSUMERS}")
+        self.moe_window_consumers = consumers
+        return consumers
+
+    def set_moe_topk_mode(self, mode: str) -> str:
+        """Live-select the routing: stock ops, one launch, or folded (#4052)."""
+        if mode not in _window.TOPK_MODES:
+            raise ValueError(f"unknown top-k mode {mode!r}; expected {_window.TOPK_MODES}")
+        if mode != "off" and self.shared_folded:
+            raise ValueError("the top-k launch does not support a folded shared row")
+        self.moe_topk_mode = mode
+        return mode
+
     def set_moe_router_mode(self, mode: str):
         if mode not in _MOE_ROUTER_MODES:
             raise ValueError(
@@ -1068,9 +1375,19 @@ class Qwen3NextSparseMoeBlock(nn.Module):
     def __call__(self, x: mx.array) -> mx.array:
         if self.sharding_group is not None:
             x = sum_gradients(self.sharding_group)(x)
+        windowed = _try_moe_window(self, x)
+        if windowed is not None:
+            return windowed
+        folded = _try_topk_fold_decode(self, x)
+        if folded is not None:
+            return folded
         gates = self.gate(x)
         router_fused = False
-        if self.moe_router_mode == "fused":
+        launched = _try_topk_launch(self, x, gates)
+        if launched is not None:
+            (inds, scores) = launched
+            router_fused = True
+        elif self.moe_router_mode == "fused":
             admission = admit_qwen4_moe_router(
                 gates, top_k=self.top_k, norm_topk_prob=bool(self.norm_topk_prob)
             )
