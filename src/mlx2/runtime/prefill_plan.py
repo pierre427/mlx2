@@ -57,3 +57,30 @@ def prefill_rows(shape, *, minimum_sequence: int = 18):
     if len(shape) != 3 or shape[0] < 1 or shape[1] < minimum_sequence or shape[2] < 1:
         return 0
     return int(shape[0]) * int(shape[1])
+
+
+def depth_bounded_prefill_rows(step: int, depth: int, budget, *, floor: int = 128):
+    """Prefill chunk rows for a lane whose KV cache already holds ``depth``.
+
+    One chunk's attention costs about ``rows * (depth + rows)``; at deep KV a
+    fixed chunk can run one Metal command buffer past the GPU watchdog
+    (jundot/omlx#4149).  ``budget`` bounds that product: the configured
+    ``step`` is kept while ``step * (depth + step) <= budget`` -- so every
+    chunk ending at or before ``budget // step`` tokens is unchanged, and so
+    are its output bits -- and beyond that the largest power of two that fits
+    is used, never below ``min(step, floor)``.  ``budget=None`` is off.
+    """
+    if budget is None:
+        return step
+    if type(step) is not int or step < 1 or type(depth) is not int or depth < 0:
+        raise ValueError("step must be positive and depth nonnegative")
+    if type(budget) is not int or budget < 1:
+        raise ValueError("budget must be a positive integer or None")
+    if step * (depth + step) <= budget:
+        return step
+    rows = 1 << (step.bit_length() - 1)
+    if rows == step:
+        rows >>= 1
+    while rows > floor and rows * (depth + rows) > budget:
+        rows >>= 1
+    return max(rows, min(step, floor))

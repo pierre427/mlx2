@@ -215,6 +215,11 @@ class FlashNextAdapter:
         policy = getattr(self, "policy", None)
         return None if policy is None else int(policy.prefill_step)
 
+    def prefill_depth_budget_default(self):
+        """Adapter-preferred depth bound on the prefill chunk, or None (off)."""
+        policy = getattr(self, "policy", None)
+        return None if policy is None else policy.prefill_depth_budget
+
     def execution_config(self, *, max_lanes, prefill_step):
         return self.policy.batch_config(max_lanes=max_lanes, prefill_step=prefill_step)
 

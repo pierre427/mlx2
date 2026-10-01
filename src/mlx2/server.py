@@ -4395,6 +4395,13 @@ def build_parser():
         help="prefill chunk step; the resolved value is bound to route qualification",
     )
     parser.add_argument(
+        "--prefill-depth-budget", type=prefill_step_arg,
+        help="shrink a prefill chunk once rows x (KV depth + rows) would exceed "
+        "this many tokens squared, so deep prefill stays under the Metal "
+        "watchdog (default: the adapter's, normally off); changes output bits "
+        "of the chunks it shrinks and is bound to route qualification",
+    )
+    parser.add_argument(
         "--default-max-tokens",
         type=default_max_tokens_arg,
         default=DEFAULT_OUTPUT_TOKENS,
@@ -4955,6 +4962,7 @@ def serving_engine_kwargs(
         "max_lanes": args.max_lanes,
         "max_context": args.max_context,
         "prefill_step": getattr(args, "prefill_step", None),
+        "prefill_depth_budget": getattr(args, "prefill_depth_budget", None),
         "default_max_tokens": args.default_max_tokens,
         "max_request_bytes": max_request_bytes,
         "cache_bytes": args.cache_bytes,

@@ -36,6 +36,82 @@ def test_only_metal_memory_failures_are_recovered():
     assert not serving.is_device_out_of_memory(ValueError(str(OOM)))
 
 
+GPU_TIMEOUT = RuntimeError(
+    "[METAL] Command buffer execution failed: Caused GPU Timeout Error "
+    "(00000002:kIOGPUCommandBufferCallbackErrorTimeout)."
+)
+
+
+def test_a_gpu_watchdog_timeout_is_a_recoverable_device_fault():
+    """jundot/omlx#4149: a deep prefill chunk's command buffer was stopped by
+    the Metal watchdog.  It abandons that buffer's lanes, exactly like OOM,
+    so it takes the same recovery instead of killing the worker."""
+    assert serving.device_fault_kind(OOM) == "out_of_memory"
+    assert serving.device_fault_kind(GPU_TIMEOUT) == "gpu_timeout"
+    assert serving.device_fault_kind(RuntimeError(serving.SIMULATED_GPU_TIMEOUT)) == "gpu_timeout"
+    assert not serving.is_device_out_of_memory(GPU_TIMEOUT)
+    assert serving.device_fault_kind(RuntimeError("shape mismatch")) is None
+    assert serving.device_fault_kind(ValueError(str(GPU_TIMEOUT))) is None
+
+
+def test_gpu_timeout_mid_step_fails_in_flight_requests_and_keeps_serving(monkeypatch):
+    patch_host(monkeypatch)
+    original = generate.BatchGenerator.next
+    state = {"armed": True}
+
+    def next_(self):
+        if state["armed"] and getattr(self, "_prompt_batch", None) is not None:
+            state["armed"] = False
+            raise GPU_TIMEOUT
+        return original(self)
+
+    monkeypatch.setattr(generate.BatchGenerator, "next", next_)
+    model, vocab = tiny_qwen38_mtp()
+    engine = make_engine(model, vocab, mtp=False, max_lanes=2)
+    try:
+        prompt = [(7 * i + 2) % (vocab - 2) + 1 for i in range(40)]
+        body = {"tokens": prompt, "max_tokens": 4, "temperature": 0}
+        failed = collect(engine.submit(dict(body)))
+        assert not state["armed"]
+        assert failed.get("status") == 503 and "device GPU timeout" in failed["error"]
+        assert engine.error is None
+        served = collect(engine.submit(dict(body)))
+        assert "error" not in served, served
+        assert engine.counts["device_gpu_timeout_events"] == 1
+        assert engine.counts["device_gpu_timeout_failed_requests"] == 1
+        assert engine.counts["device_gpu_timeout_recoveries"] == 1
+        assert engine.counts["device_oom_events"] == 0
+    finally:
+        engine.close()
+
+
+@pytest.mark.parametrize("after_tokens", [0, 2])
+def test_injected_gpu_timeout_fault_is_recovered(monkeypatch, after_tokens):
+    """``mlx_fault: gpu_timeout`` raises Metal's watchdog error from one real
+    generation step, so a qualification harness can observe the recovery on
+    a served route.  0 fires in prefill, N after N completion tokens."""
+    patch_host(monkeypatch)
+    model, vocab = tiny_qwen38_mtp()
+    engine = make_engine(model, vocab, mtp=False, max_lanes=2)
+    try:
+        prompt = [(5 * i + 3) % (vocab - 2) + 1 for i in range(40)]
+        body = {"tokens": prompt, "max_tokens": 6, "temperature": 0}
+        reference = collect(engine.submit(dict(body)))
+        failed = collect(engine.submit(dict(
+            body, mlx_fault={"kind": "gpu_timeout", "after_tokens": after_tokens}
+        )))
+        assert failed.get("status") == 503
+        assert "kIOGPUCommandBufferCallbackErrorTimeout" in failed["error"]
+        assert len(failed["tokens"]) == after_tokens
+        again = collect(engine.submit(dict(body)))
+        assert again["tokens"] == reference["tokens"]
+        assert engine.error is None
+        assert engine.counts["device_gpu_timeout_recoveries"] == 1
+        assert engine.batch_metrics._counters["fault_gpu_timeout"] == 1
+    finally:
+        engine.close()
+
+
 def _inject_one_oom(monkeypatch):
     original = generate.BatchGenerator.next
     state = {"armed": True}

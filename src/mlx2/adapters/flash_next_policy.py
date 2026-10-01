@@ -4,6 +4,7 @@ Values select candidate mechanisms; only a matching qualification record makes
 this policy deployable. Automatic modes retain the measured source thresholds.
 """
 from dataclasses import asdict, dataclass
+from typing import Optional
 
 from .mtp_depth_cap import validate_self_mtp_num_draft
 
@@ -39,6 +40,10 @@ class FlashNextPolicy:
     # 8192-token prefill chunks: -9..11% prefill at 16K/64K with the same KL
     # to the unchunked result as 2048, +5 GiB peak (triage-20260925).
     prefill_step: int = 8192
+    # rows x (KV depth + rows) cap per prefill chunk (jundot/omlx#4149):
+    # None keeps prefill_step at every depth.  The engine applies it via
+    # prefill_depth_budget_default(); --prefill-depth-budget overrides.
+    prefill_depth_budget: Optional[int] = None
     # Opt-in A/B switches for kernels with no mlx2 full-model evidence yet.
     # Like fused_gdn_dynamic_accept they enter the environment and receipts
     # only when enabled, so default receipts are unchanged.
@@ -243,6 +248,10 @@ class FlashNextPolicy:
             value = getattr(self, name)
             if type(value) is not int or value < 1:
                 raise ValueError(f"{name} must be a positive integer")
+        if self.prefill_depth_budget is not None and (
+            type(self.prefill_depth_budget) is not int or self.prefill_depth_budget < 1
+        ):
+            raise ValueError("prefill_depth_budget must be a positive integer or null")
 
     @classmethod
     def from_mapping(cls, value=None):
@@ -299,6 +308,8 @@ class FlashNextPolicy:
                 del values[name]
         if self.moe_topk_fold == "off":
             del values["moe_topk_fold"]
+        if self.prefill_depth_budget is None:
+            del values["prefill_depth_budget"]
         return values
 
     def moe_window_consumers(self):

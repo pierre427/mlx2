@@ -1146,6 +1146,46 @@ def is_device_out_of_memory(exc):
     )
 
 
+# What a qualification ``gpu_timeout`` fault raises: Metal's own wording.
+SIMULATED_GPU_TIMEOUT = (
+    "[METAL] Command buffer execution failed: Caused GPU Timeout Error "
+    "(00000002:kIOGPUCommandBufferCallbackErrorTimeout). "
+    "(qualification fault injected)"
+)
+
+
+def is_device_gpu_timeout(exc):
+    """A Metal command buffer the GPU watchdog stopped.
+
+    One very long command buffer (jundot/omlx#4149: a deep prefill chunk) is
+    killed by the watchdog.  Like an out-of-memory failure it abandons only
+    the lanes stepped in that buffer; the device itself keeps running.
+    """
+    text = str(exc)
+    return isinstance(exc, RuntimeError) and (
+        "kIOGPUCommandBufferCallbackErrorTimeout" in text
+        or "GPU Timeout Error" in text
+    )
+
+
+def device_fault_kind(exc):
+    """``"out_of_memory"``, ``"gpu_timeout"`` or None for a step failure."""
+    if is_device_out_of_memory(exc):
+        return "out_of_memory"
+    if is_device_gpu_timeout(exc):
+        return "gpu_timeout"
+    return None
+
+
+def validate_prefill_depth_budget(value):
+    """A positive integer rows x (depth + rows) budget, or None (off)."""
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise ValueError("prefill depth budget must be a positive integer")
+    return value
+
+
 def prefill_transient_gib(
     cache_budget, *, context_tokens, uncached_tokens, prefill_step, single_chunk=False
 ):
@@ -1708,6 +1748,7 @@ class ServingEngine:
         apc_quarantine_max_bytes=1 << 30,
         int8_prefill=None,
         verify_bitexact=None,
+        prefill_depth_budget=None,
         _validate_only=False,
     ):
         self.default_max_tokens = validate_default_max_tokens(default_max_tokens)
@@ -1717,6 +1758,14 @@ class ServingEngine:
         self.prefill_step_source = "engine_argument" if prefill_step is not None else "default"
         if prefill_step is None:
             prefill_step = DEFAULT_PREFILL_STEP
+        # rows x (KV depth + rows) cap per prefill chunk (jundot/omlx#4149);
+        # None: the adapter's prefill_depth_budget_default() applies, which
+        # is itself None (off) unless an adapter declares one.
+        self.prefill_depth_budget = validate_prefill_depth_budget(prefill_depth_budget)
+        self._prefill_depth_budget_override = self.prefill_depth_budget
+        self.prefill_depth_budget_source = (
+            "engine_argument" if prefill_depth_budget is not None else "default"
+        )
         if min(
             max_inflight,
             max_lanes,
@@ -4321,34 +4370,60 @@ class ServingEngine:
 
     DEVICE_OOM_RELEASE_TOLERANCE_GIB = 1.0
 
-    def _fail_lanes_after_device_oom(self, exc, batch, active):
+    # Counter prefix and request error text per recoverable device fault.
+    _DEVICE_FAULTS = {
+        "out_of_memory": ("device_oom", "device out of memory"),
+        "gpu_timeout": ("device_gpu_timeout", "device GPU timeout"),
+    }
+
+    def _fail_lanes_after_device_oom(self, exc, batch, active, fault="out_of_memory"):
         """Fail every lane of a step Metal could not run and drop its generator.
 
         A failed command buffer leaves every lane stepped in it with cache
         state that may be partly written, and one ``next`` can step every
         attached lane, so all of them fail with 503.  Queued and deferred
-        requests hold no device state and stay queued.
+        requests hold no device state and stay queued.  ``fault`` is
+        ``out_of_memory`` or ``gpu_timeout`` (the watchdog stopped one
+        command buffer); both are recovered the same way.
         """
-        self.counts["device_oom_events"] += 1
+        (prefix, reason) = self._DEVICE_FAULTS[fault]
+        self.counts[f"{prefix}_events"] += 1
         log.error(
-            "Metal out-of-memory in a generation step; failing %d in-flight "
+            "Metal %s in a generation step; failing %d in-flight "
             "request(s) and rebuilding the generator: %s",
+            reason.removeprefix("device "),
             len(active),
             exc,
         )
         failed = list(active.values())
         active.clear()
         for job in failed:
-            self._finish(
-                job, {"error": f"device out of memory: {exc}", "status": 503}
-            )
+            self._finish(job, {"error": f"{reason}: {exc}", "status": 503})
         try:
             batch.close()
         except Exception:  # noqa: BLE001 - its state is already abandoned
             log.exception("closing the failed generator raised")
-        self.counts["device_oom_failed_requests"] += len(failed)
+        self.counts[f"{prefix}_failed_requests"] += len(failed)
 
-    def _rebuild_after_device_oom(self, exc, build_batch, apc):
+    def _inject_device_fault(self, active):
+        """Qualification ``gpu_timeout`` fault: fail this step as Metal would.
+
+        Fires once per request, on the first step after the request has
+        ``after_tokens`` completion tokens (0: its first prefill step).
+        """
+        for job in active.values():
+            fault = getattr(job, "fault", None)
+            if (
+                fault is not None
+                and fault.kind == "gpu_timeout"
+                and not job.fault_fired
+                and job.completion_tokens >= fault.after_tokens
+            ):
+                job.fault_fired = True
+                self.batch_metrics.fault(job.id, fault.kind)
+                raise RuntimeError(SIMULATED_GPU_TIMEOUT)
+
+    def _rebuild_after_device_oom(self, exc, build_batch, apc, fault="out_of_memory"):
         """Release what the failed step held, verify it, then rebuild.
 
         Called after the caller dropped its last reference to the failed
@@ -4370,6 +4445,8 @@ class ServingEngine:
 
         import mlx.core as mx
 
+        (prefix, reason) = self._DEVICE_FAULTS[fault]
+        what = reason.removeprefix("device ")
         try:
             traceback.clear_frames(exc.__traceback__)
         except Exception:  # noqa: BLE001 - best effort; memory is verified below
@@ -4389,8 +4466,8 @@ class ServingEngine:
             mx.clear_cache()
             active_bytes = int(mx.get_active_memory())
         except Exception:
-            self.counts["device_oom_unrecoverable"] += 1
-            log.exception("device did not recover after out-of-memory")
+            self.counts[f"{prefix}_unrecoverable"] += 1
+            log.exception("device did not recover after %s", what)
             raise exc
         baseline = getattr(self, "_device_resident_baseline", None)
         if baseline is not None:
@@ -4415,18 +4492,20 @@ class ServingEngine:
                 )
             )
             log.info(
-                "after out-of-memory: active %.4g GiB, load-time resident %.4g GiB, "
+                "after %s: active %.4g GiB, load-time resident %.4g GiB, "
                 "APCv2 resident %.4g GiB",
+                what,
                 active_bytes / float(1 << 30),
                 baseline / float(1 << 30),
                 resident_apc / float(1 << 30),
             )
             if active_bytes > allowed:
-                self.counts["device_oom_memory_not_released"] += 1
+                self.counts[f"{prefix}_memory_not_released"] += 1
                 log.error(
-                    "device memory not released after out-of-memory: %.4g GiB "
+                    "device memory not released after %s: %.4g GiB "
                     "active, %.4g GiB expected; stopping the worker (restart "
                     "the server)",
+                    what,
                     active_bytes / float(1 << 30),
                     allowed / float(1 << 30),
                 )
@@ -4434,10 +4513,10 @@ class ServingEngine:
         try:
             rebuilt = build_batch()
         except Exception:
-            self.counts["device_oom_unrecoverable"] += 1
-            log.exception("generator could not be rebuilt after out-of-memory")
+            self.counts[f"{prefix}_unrecoverable"] += 1
+            log.exception("generator could not be rebuilt after %s", what)
             raise exc
-        self.counts["device_oom_recoveries"] += 1
+        self.counts[f"{prefix}_recoveries"] += 1
         return rebuilt
 
     def _fail_deferred_admission_timeout(self, batch, job):
@@ -4980,6 +5059,12 @@ class ServingEngine:
                     raise ValueError(f"adapter prefill_step_default must be positive, got {step}")
                 self.prefill_step = step
                 self.prefill_step_source = "adapter"
+            budget_default = getattr(adapter, "prefill_depth_budget_default", None)
+            if self._prefill_depth_budget_override is None and callable(budget_default):
+                budget = validate_prefill_depth_budget(budget_default())
+                if budget is not None:
+                    self.prefill_depth_budget = budget
+                    self.prefill_depth_budget_source = "adapter"
             stop_token_ids = generation_stop_token_ids(adapter)
             # A model adapter may ship its own run-on reasoning defaults (North
             # does: its calibrated guard and steering).  Operator flags win,
@@ -5260,6 +5345,22 @@ class ServingEngine:
                 # settings are byte-identical.
                 settings["multi_lora"] = self.multi_lora.settings()
             prompt_lookup = self.prompt_lookup
+            if self.prefill_depth_budget is not None:
+                if external_draft or prompt_lookup:
+                    # Those generators chunk prefill on their own.  An
+                    # operator's explicit bound fails closed; an adapter
+                    # default simply does not apply to the route.
+                    if self.prefill_depth_budget_source == "engine_argument":
+                        raise ValueError(
+                            "prefill depth budget is not supported on the "
+                            "external-draft or prompt-lookup route"
+                        )
+                    self.prefill_depth_budget = None
+                    self.prefill_depth_budget_source = "unsupported_route"
+                else:
+                    # Present only when set, so default settings are unchanged;
+                    # a bound changes chunk geometry and so output bits.
+                    settings["prefill_depth_budget"] = self.prefill_depth_budget
             self.apc_interior_route_supported = not (
                 external_draft or prompt_lookup or self.approximate_kv_policy.enabled
             )
@@ -6059,6 +6160,7 @@ class ServingEngine:
                             1 if self.spomin_policy.enabled else min(2, self.max_lanes)
                         ),
                         prefill_step_size=self.prefill_step,
+                        prefill_depth_budget=self.prefill_depth_budget,
                         prefill_batch_window=1,
                         adaptive_prefill=True,
                         decode_time_fairness=settings["decode_time_fairness"],
@@ -7681,14 +7783,18 @@ class ServingEngine:
                     self.counts["multi_request_cycles"] += int(len(active) > 1)
                     self.batch_metrics.batch_cycle(len(active), len(deferred))
                     try:
+                        self._inject_device_fault(active)
                         prompts, responses = batch.next()
                     except RuntimeError as exc:
-                        if not is_device_out_of_memory(exc):
+                        fault = device_fault_kind(exc)
+                        if fault is None:
                             raise
-                        self._fail_lanes_after_device_oom(exc, batch, active)
+                        self._fail_lanes_after_device_oom(
+                            exc, batch, active, fault=fault
+                        )
                         batch = None
                         batch = self._rebuild_after_device_oom(
-                            exc, build_batch, apc
+                            exc, build_batch, apc, fault=fault
                         )
                         continue
                     if (

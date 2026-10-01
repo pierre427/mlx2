@@ -26,6 +26,7 @@ from .models.cache import (
     release_window_checkpoints,
 )
 from .sample_utils import LaneRNG, draw_key
+from .prefill_plan import depth_bounded_prefill_rows
 from .state_boundaries import BoundaryPurpose, StateBoundary
 from .multi_lora import bind_lora_rows, clear_lora_rows
 from .mixed_step import (
@@ -3002,6 +3003,7 @@ class BatchGenerator:
         memory_pressure_level: Optional[Callable[[], int]] = None,
         copy_draft=None,
         mtp_acceptance_log: Optional[Any] = None,
+        prefill_depth_budget: Optional[int] = None,
     ):
         if decode_priority_cadence < 1:
             raise ValueError("decode_priority_cadence must be positive")
@@ -3084,6 +3086,10 @@ class BatchGenerator:
         self.logits_processors = logits_processors or []
         self.uid_count = 0
         self.prefill_step_size = prefill_step_size
+        # rows x (KV depth + rows) cap per prefill chunk; None is off
+        # (prefill_plan.depth_bounded_prefill_rows).
+        depth_bounded_prefill_rows(prefill_step_size, 0, prefill_depth_budget)
+        self.prefill_depth_budget = prefill_depth_budget
         self.prefill_batch_size = prefill_batch_size
         self.prefill_batch_window = (
             1 if prefill_batch_window is None else prefill_batch_window
@@ -4795,6 +4801,7 @@ class BatchGenerator:
             "configured_step": int(getattr(self, "prefill_step_size", 0)),
             "adaptive": bool(getattr(self, "adaptive_prefill", False)),
             "adaptive_slices": list(getattr(self, "adaptive_prefill_slices", ())),
+            "depth_budget": getattr(self, "prefill_depth_budget", None),
             "widths": dict(widths),
             "rounds": int(sum(widths.values())),
             "first": entry["first"],
@@ -4992,6 +4999,26 @@ class BatchGenerator:
             prepared_prompt_cache=prepared_prompt_cache,
             prefill_inputs=[sequence[9] if len(sequence) > 9 else None for sequence in sequences],
         )
+
+    # Smallest chunk the depth bound shrinks to (omlx#4149 uses 128 too).
+    PREFILL_DEPTH_FLOOR = 128
+
+    def _depth_bounded_step(self, step: int, depth: int) -> int:
+        """``step`` shrunk for a lane already ``depth`` tokens deep.
+
+        Identity unless a ``prefill_depth_budget`` is set and this chunk would
+        exceed it; ``prefill_depth_bounded_chunks`` counts the chunks it
+        shrank, so an enabled bound that never engaged is visible.
+        """
+        budget = getattr(self, "prefill_depth_budget", None)
+        if budget is None:
+            return step
+        rows = depth_bounded_prefill_rows(
+            int(step), int(depth), budget, floor=self.PREFILL_DEPTH_FLOOR
+        )
+        if rows < step:
+            _bump_bounded_counter(self.scheduler_stats, "prefill_depth_bounded_chunks")
+        return rows
 
     def _prefill_chunk_length(self, segments):
         if len(segments) == 1 and len(segments[0]) == 1:
@@ -5551,7 +5578,10 @@ class BatchGenerator:
             for index, candidate in enumerate(candidates):
                 config = dict(self.self_mtp or {})
                 config.update(self._mtp_configs.get(candidate[0], {}))
-                step = int(config.get("prefill_step_size", self.prefill_step_size))
+                step = self._depth_bounded_step(
+                    int(config.get("prefill_step_size", self.prefill_step_size)),
+                    len(candidate[4]),
+                )
                 next_checkpoint = self._next_interior_checkpoint(
                     candidate[0], len(candidate[4])
                 )
@@ -5970,8 +6000,12 @@ class BatchGenerator:
         segments = seq[0]
         budget = self._fairness().stall_bound(self.prefill_step_size)
         n = aligned_prompt_rows(min(budget, self.prefill_step_size), len(gen))
-        n = min(n, self.prefill_step_size, len(segments[0]))
         covered = int(seq[4] or 0) + int(seq[1])
+        n = min(
+            n,
+            self._depth_bounded_step(self.prefill_step_size, covered),
+            len(segments[0]),
+        )
         next_checkpoint = self._next_interior_checkpoint(uid, covered)
         if next_checkpoint is not None:
             n = min(n, next_checkpoint - covered)
@@ -6160,15 +6194,16 @@ class BatchGenerator:
                 self._prompt_batch.uids[i], 0, False, False
             )
             segments = seq[0]
-            step_size = (
+            covered = int(seq[4] or 0) + int(seq[1])
+            step_size = self._depth_bounded_step(
                 adaptive_chunk
                 if self._bounded_prefill_chunks()
-                else self.prefill_step_size
+                else self.prefill_step_size,
+                covered,
             )
             if len(seq) > 6 and seq[6] is not None:
                 step_size = len(segments[0])
             n = min(len(segments[0]), step_size)
-            covered = int(seq[4] or 0) + int(seq[1])
             next_checkpoint = self._next_interior_checkpoint(
                 self._prompt_batch.uids[i], covered
             )
