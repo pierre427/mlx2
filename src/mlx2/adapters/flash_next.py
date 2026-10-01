@@ -7,6 +7,7 @@ import copy
 import json
 import os
 from pathlib import Path
+from ..process_env import PROCESS_NUMERICS
 
 
 # Default on at width 4, as for Qwen3.8 and Qwen3.6.
@@ -65,8 +66,7 @@ def configure_environment(model_path: Path, policy=None) -> dict[str, str]:
     profile = {
         "HF_HUB_OFFLINE": "1",
         "TRANSFORMERS_OFFLINE": "1",
-        "MLX_ENABLE_TF32": "0",
-        "MLX_QWEN4_PLE_NVME": str(model_path / "ple_rows.bin"),
+        **PROCESS_NUMERICS, "MLX_QWEN4_PLE_NVME": str(model_path / "ple_rows.bin"),
         "MLX_QWEN4_PLE_NVME_LRU_MB": "2048",
         "MLX_QWEN4_PLE_COMPILE": "1",
         "MLX_QWEN4_QSA_POOLED_KEY_CACHE": "1",
@@ -475,6 +475,7 @@ class FlashNextAdapter:
             qsa_stage1_status,
         )
         from ..runtime.models.qwen4_hc_decode import hc_decode_status
+        from ..runtime.models.qwen4_gate_inject import qwen4_gate_inject_stats
         from ..runtime.models.qwen4_qsa_indexed import qsa_indexed_status
         from ..runtime.models.qwen4_attn_rows import status as qwen4_attn_rows_status
         from ..runtime.round_levers import counters as lever_snapshot
@@ -571,6 +572,7 @@ class FlashNextAdapter:
             "eager_dispatch": qwen4_eager_dispatch_status(),
             "ple_tables": [asdict(table.stats) for table in self._tables],
             "fused_gdn": qwen4_fused_gdn_stats(self.model, modules=diagnostic_modules),
+            "fused_gate_inject": qwen4_gate_inject_stats(),
             "ple_compile": qwen4_ple_compile_status(),
             "indexed_qsa": qsa_indexed_status(),
             "qsa_stage1": qsa_stage1_status(),

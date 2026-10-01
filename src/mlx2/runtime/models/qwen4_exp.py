@@ -62,6 +62,11 @@ from .qwen4_fused_gdn_verify import (
 )
 from .qwen4_fused_group_norm import fused_group_norm_enabled, try_fused_group_norm
 from . import qwen4_hc_decode as _hc_decode
+from .qwen4_gate_inject import (
+    eager_qwen4_gate_inject,
+    fused_gate_inject_enabled,
+    try_qwen4_gate_inject,
+)
 from .qwen4_gdn_outproj import admit_qwen4_gdn_outproj
 from . import qwen4_fused_gdn_prefill as _gdn_prefill
 from . import qwen4_attn_rows as _attn_rows
@@ -1951,11 +1956,13 @@ class GatedResidual(nn.Module):
         if use_combine:
             self.block_inject_weight = nn.Linear(hc_hidden, self.hc_count, bias=False)
 
-    def __call__(self, hyper_input: mx.array):
+    def __call__(self, hyper_input: mx.array, *, raw_inject: bool = False):
         if _GDN_SHAPE_STABLE_PROJECTIONS and hyper_input.shape[1] > 1:
             with _declared_width(hyper_input.shape[1]):
                 tokens = [
-                    self(hyper_input[:, index : index + 1])
+                    self(
+                        hyper_input[:, index : index + 1], raw_inject=raw_inject
+                    )
                     for index in range(hyper_input.shape[1])
                 ]
             if isinstance(tokens[0], tuple):
@@ -1967,8 +1974,12 @@ class GatedResidual(nn.Module):
                 )
             return mx.concatenate(tokens, axis=1)
         glue = compile_glue_enabled()
-        if _hc_decode.hc_decode_enabled():
-            # omlx #4038 two-launch HC decode; default off, counted declines.
+        if _hc_decode.hc_decode_enabled() and raw_inject:
+            # The HC kernels return the finished 2*sigmoid inject; the fused
+            # gate-inject path wants the raw gate logit instead.
+            _hc_decode.decline("raw gate inject requested")
+        elif _hc_decode.hc_decode_enabled():
+            # omlx #4038 two-launch HC decode; counted declines.
             fused = _hc_decode.try_hc_decode(
                 self,
                 hyper_input,
@@ -2001,7 +2012,10 @@ class GatedResidual(nn.Module):
             mixed = mx.mean(weights * streams, axis=-2)
         if not hasattr(self, "block_inject_weight"):
             return mixed
-        inject = 2 * mx.sigmoid(self.block_inject_weight(normed) / self.hc_count)
+        raw_gate = self.block_inject_weight(normed)
+        if raw_inject:
+            return (mixed, hyper_input, raw_gate)
+        inject = 2 * mx.sigmoid(raw_gate / self.hc_count)
         return (mixed, hyper_input, inject)
 
 
@@ -4289,11 +4303,6 @@ class QSACompactBlocks:
     physical_width: int
     causal_mask: Optional[mx.array]
 
-    @property
-    def block_valid(self) -> mx.array:
-        """Derived, never stored: a second tensor could desynchronize."""
-        return mx.arange(self.block_ids.shape[-1]) < self.block_counts[..., None]
-
 
 def _compact_qsa_block_ids(
     selected_block_ids: mx.array, selected_is_valid: mx.array, *, n_blocks: int
@@ -6110,6 +6119,15 @@ def _apply_inject(residual, branch, inject):
     )
 
 
+def _apply_raw_gate_inject(residual, branch, raw_gate, *, training: bool):
+    out = try_qwen4_gate_inject(
+        residual, branch, raw_gate, training=training
+    )
+    if out is not None:
+        return out
+    return eager_qwen4_gate_inject(residual, branch, raw_gate)
+
+
 class DecoderLayer(nn.Module):
     def __init__(self, args: TextModelArgs, layer_idx: int, summary_layer_id=None):
         super().__init__()
@@ -6133,14 +6151,29 @@ class DecoderLayer(nn.Module):
     def __call__(self, x, input_ids, mask=None, cache=None, ssm_mask=None):
         if self.ple is not None:
             x = x + self.ple(x, input_ids, cache, ssm_mask)
-        (mixed, residual, inject) = self.attn_hyper_connection(x)
+        raw_inject = fused_gate_inject_enabled()
+        (mixed, residual, inject) = self.attn_hyper_connection(
+            x, raw_inject=raw_inject
+        )
         if self.is_linear:
             branch = self.linear_attn(mixed, ssm_mask, cache)
         else:
             branch = self.self_attn(mixed, mask, cache)
-        x = _apply_inject(residual, branch, inject)
-        (mixed, residual, inject) = self.mlp_hyper_connection(x)
+        x = (
+            _apply_raw_gate_inject(
+                residual, branch, inject, training=self.training
+            )
+            if raw_inject
+            else _apply_inject(residual, branch, inject)
+        )
+        (mixed, residual, inject) = self.mlp_hyper_connection(
+            x, raw_inject=raw_inject
+        )
         branch = self.mlp(mixed)
+        if raw_inject:
+            return _apply_raw_gate_inject(
+                residual, branch, inject, training=self.training
+            )
         return _apply_inject(residual, branch, inject)
 
 
