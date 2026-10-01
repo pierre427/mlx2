@@ -57,7 +57,11 @@ library only): a 40-hex HEAD, a known clean and tracked ``git status`` for
 the required files (``IDENTITY_FILES`` plus the selected family's adapter,
 config and model files), a sha256 for each, the ``--prompt-ids`` file
 sha256, and a metadata/stat artifact manifest in the selected adapter
-inspector's own fingerprint recipe (``FAMILIES``). Then, in order: the
+inspector's own fingerprint recipe (``FAMILIES``). North's recipe also
+reads each shard's 8-byte length prefix and bounded safetensors header
+(never payload bytes), folds the header sha256 list into its fingerprint
+and validates the full pinned checkpoint schema from those headers, as
+``north_mini_code.inspect_artifact`` does. Then, in order: the
 actual MLX build identity (package, path, metallib sha256, GPU device)
 before any mlx2 import; the dispatched adapter class, its source sha256
 and every loaded mlx2 module path before the adapter is constructed; the
@@ -66,8 +70,8 @@ module closure (worktree paths, clean and tracked) before any arm. A
 failure writes an unexecuted ``refused`` receipt (``arms_executed: []``).
 After the arms every identity is taken again; any drift refuses the
 receipt while keeping the real results. The manifest hashes metadata
-files and shard (name, size, mtime_ns) only: it is not tensor-byte
-verification. ``--i-own-the-gpu`` is the caller's assertion; this driver
+files and shard (name, size, mtime_ns), plus North's raw header bytes: it
+is not tensor-payload verification. ``--i-own-the-gpu`` is the caller's assertion; this driver
 neither acquires nor checks the GPU lease. ``--tiny`` records the same
 source identity without enforcing it (CPU diagnostic, nothing qualified).
 
@@ -82,10 +86,13 @@ import importlib
 import json
 import math
 import os
+import struct
 import subprocess
 import sys
 import time
+from itertools import pairwise
 from pathlib import Path
+from stat import S_ISREG
 
 # Full float32 matmuls unless the caller chose otherwise; must precede the
 # first MLX operation (adapters pin the same value for real artifacts).
@@ -122,7 +129,8 @@ MUSE_METADATA = ("config.json", "model.safetensors.index.json", "tokenizer.json"
                  "tokenizer_config.json", "chat_template.jinja")
 QWEN_METADATA = MUSE_METADATA + ("generation_config.json",)
 # Families whose adapter fingerprint this driver reproduces from metadata
-# and shard stats alone. ``files[0]`` is the adapter module.
+# and shard stats (``headers``: plus bounded safetensors headers).
+# ``files[0]`` is the adapter module.
 FAMILIES = {
     "muse": {"adapter": "mlx2.adapters.muse_glimmer.MuseGlimmerAdapter",
              "metadata": MUSE_METADATA, "single_shard": True,
@@ -136,11 +144,46 @@ FAMILIES = {
                "metadata": QWEN_METADATA, "single_shard": False,
                "files": ("src/mlx2/adapters/qwen36_35b.py", "src/mlx2/adapters/qwen38_27b.py",
                          "src/mlx2/runtime/models/qwen36_35b.py", "src/mlx2/runtime/models/qwen3_5.py")},
+    # North's ordinary route: adapter, its drafter-policy base class, model
+    # body and MoE layers, the shard loader and the tokenizer repair it runs.
+    "north": {"adapter": "mlx2.adapters.north_mini_code.NorthMiniCodeAdapter",
+              "metadata": QWEN_METADATA, "single_shard": False, "headers": True,
+              "files": ("src/mlx2/adapters/north_mini_code.py", "src/mlx2/adapters/external_draft_policy.py",
+                        "src/mlx2/runtime/models/cohere2_moe.py", "src/mlx2/runtime/models/switch_layers.py",
+                        "src/mlx2/runtime/ubc_evict.py", "src/mlx2/runtime/tokenizer_integrity.py")},
 }
 FINGERPRINT_SCOPE = ("sha256 over the present metadata files (name + bytes) in the adapter "
                      "inspector's order, then json [name, size, mtime_ns] per sorted shard; "
                      "filesystem metadata and stat only, no shard or tensor bytes read, so this "
                      "is not tensor-content verification")
+NORTH_FINGERPRINT_SCOPE = (
+    "sha256 over the present metadata files (name + bytes) in north_mini_code.inspect_artifact's "
+    "order, then json [name, size, mtime_ns] per sorted shard, then json of the sha256 of each "
+    "shard's raw safetensors header in sorted shard order; per shard only the 8-byte length prefix "
+    "and the header (at most 64 MiB) are read, never payload bytes, so this is not tensor-payload "
+    "content verification: a payload rewritten at the same size with a restored mtime is not seen")
+NORTH_HEADER_SCOPE = ("sha256 of each raw safetensors header (bytes 8 .. 8 + length) in sorted shard "
+                      "order; the header declares names, dtypes, shapes and offsets, not tensor values")
+# Pinned from north_mini_code.inspect_artifact (sha256 7b6cecf3...): the
+# topology, norm epsilons, layer order and architecture it requires, its
+# header limit and the dtypes its schema allows.
+NORTH_CONFIG = {
+    "model_type": "cohere2_moe", "hidden_size": 2048, "head_dim": 128, "num_hidden_layers": 49,
+    "intermediate_size": 768, "prefix_dense_intermediate_size": 3072, "num_attention_heads": 32,
+    "num_key_value_heads": 4, "vocab_size": 262144, "num_experts": 128, "num_experts_per_tok": 8,
+    "num_shared_experts": 0, "first_k_dense_replace": 1, "prefix_dense_sliding_window_pattern": 1,
+    "expert_selection_fn": "sigmoid", "sliding_window": 4096, "rope_theta": 50000,
+    "max_position_embeddings": 500000, "use_parallel_block": True, "use_qk_norm": False,
+    "norm_topk_prob": False, "tie_word_embeddings": None, "rms_norm_eps": 1e-06, "layer_norm_eps": 1e-05,
+}
+NORTH_LAYER_TYPES = ["full_attention" if i % 4 == 0 else "sliding_attention" for i in range(49)]
+NORTH_ARCHITECTURES = ["Cohere2MoeForCausalLM"]
+NORTH_HEADER_LIMIT = 64 << 20
+NORTH_DTYPE_BYTES = {"BF16": 2, "U32": 4}
+NORTH_SPECULATIVE_MARKERS = ("mtp.", "eagle", "draft")
+# Guarded metadata reads (the initial config.json of every family, every
+# North metadata file): larger files refuse before any byte is read.
+MAX_METADATA_BYTES = 256 << 20
 ORACLE_MODULES = ("scripts.paired_direct_ab",)
 # Imported after the adapter is constructed (import-order guard), before
 # any arm, so the loaded-module closure covers the route the arms run.
@@ -284,9 +327,22 @@ def artifact_family(config):
     if model_type == "qwen3_5_moe" and topology != (48, 3072):
         return "qwen36", None
     if model_type == "cohere2_moe":
-        return None, ("North's adapter fingerprint also binds safetensors header digests; a "
-                      "metadata/stat-only preflight cannot reproduce it, so this diagnostic refuses")
+        why = north_config_refusal(config)
+        if why is None:
+            return "north", None
+        return None, f"cohere2_moe: {why}; the North bounded-header digests recipe binds only that artifact"
     return None, f"model_type {model_type!r} topology {topology!r} has no identity recipe here"[:200]
+
+
+def north_config_refusal(config):
+    """Why ``config`` is not the pinned North Mini Code 1.0 (as its inspector checks), or None."""
+    if any(config.get(key) != value for key, value in NORTH_CONFIG.items()):
+        return "artifact topology does not match North Mini Code 1.0"
+    if config.get("layer_types") != NORTH_LAYER_TYPES:
+        return "artifact layer order does not match North Mini Code 1.0"
+    if config.get("architectures") != NORTH_ARCHITECTURES:
+        return "artifact architecture does not match North Mini Code 1.0"
+    return None
 
 
 def _metadata_json(path, name):
@@ -296,21 +352,316 @@ def _metadata_json(path, name):
         raise ValueError(f"{name} unreadable: {type(error).__name__}: {error}"[:200]) from None
 
 
+# ---------------------------------------------------------------- North headers
+
+# Seams for every guarded read (metadata files and shard headers), so tests
+# can prove which files are opened and that only the length prefix and the
+# bounded header of a shard are ever requested.
+_open_fd, _read_fd, _fstat_fd = os.open, os.read, os.fstat
+_NOFOLLOW = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+
+
+def _unique_object(pairs, label):
+    value = {}
+    for key, item in pairs:
+        if key in value:
+            raise ValueError(f"duplicate JSON key {key!r} in {label}"[:200])
+        value[key] = item
+    return value
+
+
+def _strict_json(raw, label, *, text=True):
+    """Parse like North's inspector: UTF-8 text (metadata) or raw bytes (headers), duplicate keys refused."""
+    try:
+        return json.loads(raw.decode("utf-8") if text else raw,
+                          object_pairs_hook=lambda pairs: _unique_object(pairs, label))
+    except RecursionError:
+        raise ValueError(f"{label} nests too deeply to parse"[:200]) from None
+    except ValueError as error:
+        raise ValueError(f"{label} is not valid JSON: {error}"[:200]) from None
+
+
+def _quantized_shapes(name, shape, quant):
+    """``{suffix: (dtype, shape)}`` of one quantized module (north_mini_code._quantized_shapes)."""
+    override = quant.get(name, quant)
+    if not isinstance(override, dict):
+        raise ValueError(f"Invalid North quantization override: {name}")  # noqa: TRY004 - a refusal
+    group_size, bits = override.get("group_size"), override.get("bits")
+    # group_size <= 0 would divide by zero or give negative shapes there.
+    if type(group_size) is not int or type(bits) is not int or bits not in {4, 8} or group_size <= 0:
+        raise ValueError(f"Invalid North quantization parameters: {name}")
+    if shape[-1] % group_size or (shape[-1] * bits) % 32:
+        raise ValueError("North quantization dimensions are not integral")
+    groups = [*shape[:-1], shape[-1] // group_size]
+    return {"weight": ("U32", [*shape[:-1], shape[-1] * bits // 32]),
+            "scales": ("BF16", groups), "biases": ("BF16", groups)}
+
+
+def north_expected_headers(config):
+    """``{tensor: (dtype, shape)}`` North's pinned config and quantization imply (_expected_weight_headers)."""
+    hidden = int(config["hidden_size"])
+    heads = int(config["num_attention_heads"]) * int(config["head_dim"])
+    kv_heads = int(config["num_key_value_heads"]) * int(config["head_dim"])
+    experts, intermediate = int(config["num_experts"]), int(config["intermediate_size"])
+    dense = int(config["prefix_dense_intermediate_size"])
+    quant = config.get("quantization", config.get("quantization_config"))
+    if not isinstance(quant, dict):
+        raise ValueError("North artifact must declare quantization metadata")  # noqa: TRY004 - a refusal
+    expected = {}
+
+    def add(name, shape):
+        for suffix, entry in _quantized_shapes(name, shape, quant).items():
+            expected[f"{name}.{suffix}"] = entry
+
+    add("model.embed_tokens", [int(config["vocab_size"]), hidden])
+    for index in range(int(config["num_hidden_layers"])):
+        prefix = f"model.layers.{index}."
+        expected[prefix + "input_layernorm.weight"] = ("BF16", [hidden])
+        for projection, shape in (("q_proj", [heads, hidden]), ("k_proj", [kv_heads, hidden]),
+                                  ("v_proj", [kv_heads, hidden]), ("o_proj", [hidden, heads])):
+            add(prefix + "self_attn." + projection, shape)
+        if index < int(config["first_k_dense_replace"]):
+            for projection, shape in (("gate_proj", [dense, hidden]), ("up_proj", [dense, hidden]),
+                                      ("down_proj", [hidden, dense])):
+                add(prefix + "mlp." + projection, shape)
+        else:
+            add(prefix + "mlp.gate", [experts, hidden])
+            for projection, shape in (("gate_proj", [experts, intermediate, hidden]),
+                                      ("up_proj", [experts, intermediate, hidden]),
+                                      ("down_proj", [experts, hidden, intermediate])):
+                add(prefix + "mlp.switch_mlp." + projection, shape)
+    expected["model.norm.weight"] = ("BF16", [hidden])
+    return expected
+
+
+def _stat_key(info):
+    return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns)
+
+
+def _read_exact(fd, count, short):
+    chunks, remaining = [], count
+    while remaining:
+        chunk = _read_fd(fd, min(remaining, 1 << 20))
+        if not chunk:
+            raise ValueError(short[:200])
+        chunks.append(chunk)
+        remaining -= len(chunk)
+    return b"".join(chunks)
+
+
+def _read_metadata(item, name):
+    """Bytes of one metadata file, read through one descriptor; refusals come before any byte.
+
+    The name must be a regular file itself (a symlink refuses) with one
+    hard link and at most ``MAX_METADATA_BYTES``, so it cannot redirect a
+    read into shard payload. The path before the open, the descriptor at
+    open and after the read, and the path after the read must be the same
+    file (device, inode, size, mtime_ns); the read stops at the stat size.
+    """
+    info = os.lstat(item)
+    if not S_ISREG(info.st_mode):
+        raise ValueError(f"metadata {name} is not a regular file (symlinks are refused)")
+    if info.st_nlink != 1:
+        raise ValueError(f"metadata {name} has {info.st_nlink} hard links")
+    if info.st_size > MAX_METADATA_BYTES:
+        raise ValueError(f"metadata {name} exceeds {MAX_METADATA_BYTES} bytes")
+    fd = _open_fd(item, _NOFOLLOW)
+    try:
+        if _stat_key(_fstat_fd(fd)) != _stat_key(info):
+            raise ValueError(f"metadata {name} changed between stat and open")
+        data = _read_exact(fd, info.st_size, f"metadata {name} shrank while read")
+        after = _fstat_fd(fd)
+    finally:
+        os.close(fd)
+    if _stat_key(after) != _stat_key(info) or _stat_key(os.lstat(item)) != _stat_key(info):
+        raise ValueError(f"metadata {name} changed or was replaced while read")
+    return data
+
+
+def _config_json(path):
+    """The initial config.json (every family, before dispatch) through the guarded reader."""
+    try:
+        return json.loads(_read_metadata(path / "config.json", "config.json").decode("utf-8"))
+    except RecursionError:
+        raise ValueError("config.json unreadable: nests too deeply to parse") from None
+    except (OSError, ValueError) as error:
+        raise ValueError(f"config.json unreadable: {type(error).__name__}: {error}"[:200]) from None
+
+
+def north_shard_header(item, label):
+    """(stat, raw header) of one shard; reads its 8-byte length and the bounded header only.
+
+    The path stat before the open, the descriptor at open and after the
+    read, and the path stat after the read must be the same file (device,
+    inode, size, mtime_ns), so a shard swapped, replaced at its path or
+    rewritten with a new mtime while its header is read refuses.
+    """
+    before = os.stat(item)
+    if not S_ISREG(before.st_mode):
+        raise ValueError(f"weight shard {label!r} is not a regular file"[:200])
+    fd = _open_fd(item, _NOFOLLOW)
+    try:
+        if _stat_key(_fstat_fd(fd)) != _stat_key(before):
+            raise ValueError(f"weight shard {label!r} changed between stat and open"[:200])
+        short = f"Truncated safetensors file: {label}"
+        length = struct.unpack("<Q", _read_exact(fd, 8, short))[0]
+        if not 0 < length <= min(NORTH_HEADER_LIMIT, before.st_size - 8):
+            raise ValueError(f"Invalid safetensors header length: {label}"[:200])
+        raw = _read_exact(fd, length, short)
+        after = _fstat_fd(fd)
+    finally:
+        os.close(fd)
+    if _stat_key(after) != _stat_key(before):
+        raise ValueError(f"weight shard {label!r} changed while its header was read"[:200])
+    if _stat_key(os.stat(item)) != _stat_key(before):
+        raise ValueError(f"weight shard {label!r} was replaced at its path while its header was read"[:200])
+    return before, raw
+
+
+def _check_north_header(header, name, weight_map, observed, payload_size):
+    """Validate one shard header into ``observed`` (north_mini_code._validate_weight_headers)."""
+    ranges = []
+    for tensor, record in header.items():
+        if tensor == "__metadata__":
+            continue
+        if tensor in observed:
+            raise ValueError(f"Duplicate North tensor across shards: {tensor}"[:200])
+        if not isinstance(record, dict) or set(record) != {"dtype", "shape", "data_offsets"}:
+            raise ValueError(f"Invalid North tensor metadata: {tensor}"[:200])
+        dtype, shape, offsets = record["dtype"], record["shape"], record["data_offsets"]
+        if (type(dtype) is not str or dtype not in NORTH_DTYPE_BYTES or not isinstance(shape, list)
+                or not all(type(value) is int and value >= 0 for value in shape)):
+            raise ValueError(f"Invalid North tensor dtype/shape: {tensor}"[:200])
+        if not (isinstance(offsets, list) and len(offsets) == 2 and all(type(value) is int for value in offsets)
+                and 0 <= offsets[0] <= offsets[1] <= payload_size):
+            raise ValueError(f"Invalid North tensor offsets: {tensor}"[:200])
+        if offsets[1] - offsets[0] != math.prod(shape) * NORTH_DTYPE_BYTES[dtype]:
+            raise ValueError(f"Invalid North tensor byte size: {tensor}"[:200])
+        if weight_map.get(tensor) != name:
+            raise ValueError(f"North index/shard mismatch: {tensor}"[:200])
+        observed[tensor] = (dtype, shape)
+        ranges.append((offsets[0], offsets[1], tensor))
+    ranges.sort()
+    for previous, current in pairwise(ranges):
+        if previous[1] > current[0]:
+            raise ValueError(f"Overlapping North tensor payloads: {previous[2]}, {current[2]}"[:200])
+
+
+def _schema_mismatch(observed, expected):
+    missing = sorted(set(expected) - set(observed))
+    extra = sorted(set(observed) - set(expected))
+    wrong = sorted(name for name in set(expected) & set(observed) if expected[name] != observed[name])
+    return ("North checkpoint schema mismatch "
+            + ", ".join(f"{label}={len(names)} {names[:3]}" for label, names in
+                        (("missing", missing), ("extra", extra), ("wrong", wrong))))[:300]
+
+
+def _north_collect(path):
+    """One collection of North's identity: metadata bytes, index, shard stats, raw headers, schema."""
+    raw = {}
+    for name in FAMILIES["north"]["metadata"]:
+        item = path / name
+        if not os.path.lexists(item):
+            continue
+        raw[name] = _read_metadata(item, name)
+    for name in ("config.json", "model.safetensors.index.json"):
+        if name not in raw:
+            raise ValueError(f"North requires {name}")
+    # The parsed config and index are the bytes hashed below.
+    config = _strict_json(raw["config.json"], "config.json")
+    if not isinstance(config, dict):
+        raise ValueError("config.json is not a JSON object")  # noqa: TRY004 - a refusal
+    why = north_config_refusal(config)
+    if why is not None:
+        raise ValueError(why)
+    index = _strict_json(raw["model.safetensors.index.json"], "model.safetensors.index.json")
+    weight_map = index.get("weight_map") if isinstance(index, dict) else None
+    if not isinstance(weight_map, dict) or not weight_map:
+        raise ValueError("North artifact must have a nonempty weight index")
+    if any(type(name) is not str for name in weight_map.values()):
+        raise ValueError("weight index maps a tensor to a non-string shard")
+    if any(marker in key.lower() for key in weight_map for marker in NORTH_SPECULATIVE_MARKERS):
+        raise ValueError("embedded speculative tensors are not a North target artifact")
+    if "model.embed_tokens.weight" not in weight_map or "lm_head.weight" in weight_map:
+        raise ValueError("North artifact must use its tied embedding output head")
+    names, resolved, inodes = sorted(set(weight_map.values())), {}, set()
+    for name in names:
+        item = (path / name).resolve()
+        if (not name or Path(name).is_absolute() or ".." in Path(name).parts
+                or not item.is_relative_to(path) or item.suffix != ".safetensors"):
+            raise ValueError(f"weight shard {name!r} is not a local .safetensors file in the artifact"[:200])
+        if not item.is_file():
+            raise ValueError(f"missing weight shard {name!r}"[:200])
+        info = item.stat()
+        if item in resolved.values() or (info.st_dev, info.st_ino) in inodes:
+            raise ValueError(f"weight shard {name!r} is another index name for the same file"[:200])
+        resolved[name] = item
+        inodes.add((info.st_dev, info.st_ino))
+    expected = north_expected_headers(config)
+    observed, records, headers, files = {}, [], [], []
+    for name in names:
+        info, header_raw = north_shard_header(resolved[name], name)
+        header = _strict_json(header_raw, f"safetensors header {name}", text=False)
+        if not isinstance(header, dict):
+            raise ValueError(f"Invalid safetensors header object: {name}"[:200])  # noqa: TRY004 - a refusal
+        _check_north_header(header, name, weight_map, observed, info.st_size - 8 - len(header_raw))
+        records.append((name, info.st_size, info.st_mtime_ns))
+        headers.append(_sha(header_raw))
+        files.append([name, info.st_dev, info.st_ino])
+    if set(weight_map) != set(observed):
+        raise ValueError("North weight index does not match shard headers")
+    if observed != expected:
+        raise ValueError(_schema_mismatch(observed, expected))
+    digest = hashlib.sha256()
+    for name, data in raw.items():  # metadata order, absent files skipped
+        digest.update(name.encode())
+        digest.update(data)
+    for record in records:
+        digest.update(json.dumps(record).encode())
+    digest.update(json.dumps(headers).encode())
+    return {"fingerprint": digest.hexdigest(), "metadata_sha256": {name: _sha(data) for name, data in raw.items()},
+            "shards": [list(record) for record in records], "header_sha256": headers,
+            "shard_file_ids": files, "schema": {"tensors": len(observed), "shards": len(names)}}
+
+
+def north_artifact_manifest(path):
+    """North's identity, collected twice; any difference (a change mid-preflight) refuses.
+
+    Each collection records metadata hashes, shard stats, shard (device,
+    inode) and header hashes; files replaced between the collections with
+    identical bytes and stats are seen through their inode.
+    """
+    try:
+        first = _north_collect(path)
+        second = _north_collect(path)
+    except (KeyError, OverflowError, TypeError) as error:
+        raise ValueError(f"North artifact cannot be bound: {type(error).__name__}: {error}"[:200]) from None
+    if first != second:
+        raise ValueError("North metadata, index, shard stats or headers changed during the preflight")
+    return {**first, "fingerprint_scope": NORTH_FINGERPRINT_SCOPE, "header_scope": NORTH_HEADER_SCOPE}
+
+
 def artifact_manifest(model_path):
     """Metadata/stat identity in the selected adapter inspector's recipe (stdlib).
 
-    Reads config, index and the recipe's metadata files; shards are only
-    resolved and stat'ed, never opened. Raises ``ValueError`` (or
-    ``OSError``) when the artifact cannot be bound.
+    Reads config (guarded: a regular, single-link, bounded file, never a
+    symlink), index and the recipe's metadata files; shards are only
+    resolved and stat'ed, never opened (North: every metadata read is
+    guarded and only each shard's length prefix and bounded header are
+    read). Raises ``ValueError`` (or ``OSError``) when the artifact cannot
+    be bound.
     """
     path = Path(model_path).expanduser().resolve()
     if not path.is_dir():
         raise ValueError(f"artifact {str(path)!r} is not a directory")
-    config = _metadata_json(path, "config.json")
+    config = _config_json(path)
     family, why = artifact_family(config)
     if family is None:
         raise ValueError(why)
     recipe = FAMILIES[family]
+    if recipe.get("headers"):
+        return {"path": str(path), "family": family, "adapter": recipe["adapter"],
+                "model_type": config.get("model_type"), **north_artifact_manifest(path)}
     if (path / "model.safetensors.index.json").exists():
         index = _metadata_json(path, "model.safetensors.index.json")
         weight_map = index.get("weight_map") if isinstance(index, dict) else None
@@ -492,7 +843,7 @@ def adapter_source_refusals(adapter_name, adapter_file, manifest, source):
 
 
 def adapter_identity_snapshot(adapter):
-    """Path, fingerprint and shard records of a constructed adapter (Muse top-level, Qwen nested)."""
+    """Path, fingerprint, shard records (and North's header digests) of a constructed adapter."""
     identity = getattr(adapter, "identity", None)
     if not isinstance(identity, dict):
         return None
@@ -500,7 +851,11 @@ def adapter_identity_snapshot(adapter):
         files = [list(record) for record in identity.get("files")]
     except TypeError:
         files = None
-    return {"path": identity.get("path"), "fingerprint": identity.get("fingerprint"), "files": files}
+    snapshot = {"path": identity.get("path"), "fingerprint": identity.get("fingerprint"), "files": files}
+    if "header_sha256" in identity:
+        headers = identity["header_sha256"]
+        snapshot["header_sha256"] = list(headers) if isinstance(headers, (list, tuple)) else headers
+    return snapshot
 
 
 def adapter_identity_refusals(adapter, manifest):
@@ -515,6 +870,8 @@ def adapter_identity_refusals(adapter, manifest):
         out.append("adapter artifact path differs from the preflight manifest")
     if snapshot["files"] != manifest["shards"]:
         out.append("adapter shard records differ from the preflight manifest")
+    if "header_sha256" in manifest and snapshot.get("header_sha256") != manifest["header_sha256"]:
+        out.append("adapter safetensors header digests differ from the preflight manifest")
     identity = adapter.identity
     if (getattr(adapter, "draft_model", None) is not None
             or any(key in identity for key in ("draft_fingerprint", "target_fingerprint", "draft_revision"))):
@@ -542,7 +899,8 @@ def post_run_identity(args, gate, driver):
         refusals.append(f"after the arms: artifact: {error}"[:300])
     else:
         refusals.extend(f"artifact {key} changed during the run"
-                        for key in ("path", "family", "fingerprint", "metadata_sha256", "shards")
+                        for key in ("path", "family", "fingerprint", "metadata_sha256", "shards", "header_sha256",
+                                    "shard_file_ids")
                         if after["artifact"].get(key) != (gate["artifact"] or {}).get(key))
     native = getattr(driver, "native_identity", None) or {}
     after["mlx"], problems = collect_build_identity(driver.mx)
