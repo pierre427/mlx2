@@ -14,6 +14,7 @@ def main():
     p.add_argument("--checkpoint", type=Path, required=True)
     p.add_argument("--tokens", type=Path, required=True)
     p.add_argument("--output", type=Path, required=True)
+    p.add_argument("--array-table-only", action="store_true")
     args = p.parse_args()
     args.output.mkdir(parents=True, exist_ok=False)
     metadata = json.loads((args.checkpoint / "state.json").read_text())
@@ -78,6 +79,51 @@ def main():
             continuation = int(values[144])
             reference = model.decode(mx.array([[continuation]]), cache)
             mx.eval(reference)
+            if args.array_table_only:
+                from types import SimpleNamespace
+                from unittest.mock import patch
+                from mlx2.runtime.semantic_capsules import canonical_json
+                report["array_table_rejections"] = []
+                for damage in ("alias", "orphan"):
+                    raw = engine.lookup(bridge.key(), tokens + [continuation])
+                    assert raw.hit
+                    leaf = raw.cache[0]
+                    header = json.loads(bytes(leaf.cache[0][0].tolist()))
+                    if damage == "alias":
+                        indices = header["groups"]["self_kv"]["0"][0]
+                        indices[1] = indices[0]
+                    else:
+                        extra = mx.zeros_like(leaf.cache[1])
+                        leaf.cache.append(extra)
+                        header["arrays"].append([list(extra.shape), str(extra.dtype)])
+                    leaf.cache[0] = mx.array(list(canonical_json(header)), dtype=mx.uint8)[None]
+                    class TrackedLease(list):
+                        closed = False
+                        def close(self):
+                            self.closed = True
+                            close = getattr(raw.cache, "close", None)
+                            if callable(close):
+                                close()
+                    lease = TrackedLease([leaf])
+                    with patch.object(engine, "lookup", lambda *_: SimpleNamespace(hit=True, cache=lease, cached_tokens=len(tokens))):
+                        try:
+                            bridge.restore(tokens + [continuation])
+                            raise AssertionError("malformed array table accepted")
+                        except ValueError as exc:
+                            assert "endpoint state" in str(exc)
+                    assert lease.closed
+                    report["array_table_rejections"].append({"damage": damage, "lease_closed": True})
+                restored, hit = bridge.restore(tokens + [continuation])
+                leases.append(hit.cache)
+                report["valid_restore_error"] = float(mx.max(mx.abs(model.decode(mx.array([[continuation]]), restored) - reference)).item())
+                assert report["valid_restore_error"] == 0
+                report["peak_memory_bytes"] = mx.get_peak_memory()
+                report["source_hashes"] = {str(path): file_hash(path) for path in (
+                    Path(__file__), Path("src/mlx2/experimental/hysparse2/apc.py"), Path("src/mlx2/experimental/hysparse2/model.py"))}
+                report["completed"] = True
+                (args.output / "receipt.json").write_text(json.dumps(report, indent=2) + "\n")
+                print(json.dumps(report), flush=True)
+                return
             a, hit = bridge.restore(tokens + [continuation])
             leases.append(hit.cache)
             actual = model.decode(mx.array([[continuation]]), a)

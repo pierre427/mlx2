@@ -225,7 +225,7 @@ def test_incomplete_endpoint_cannot_be_published(damage):
         engine.close()
 
 
-@pytest.mark.parametrize("damage", ["missing_layer", "offset", "boundary", "history"])
+@pytest.mark.parametrize("damage", ["missing_layer", "offset", "boundary", "history", "alias", "orphan"])
 def test_malformed_restored_geometry_releases_lease(damage, monkeypatch):
     import json
     from types import SimpleNamespace
@@ -257,8 +257,14 @@ def test_malformed_restored_geometry_releases_lease(damage, monkeypatch):
             header["groups"]["cross_kv"]["0"][0][2] += 1
         elif damage == "boundary":
             header["boundary"] = header["groups"]["cross_kv"]["0"][0][0]
-        else:
+        elif damage == "history":
             header["ple_history"] = None
+        elif damage == "alias":
+            header["groups"]["self_kv"]["0"][0][1] = header["groups"]["self_kv"]["0"][0][0]
+        else:
+            extra = mx.zeros_like(leaf.cache[1])
+            leaf.cache.append(extra)
+            header["arrays"].append([list(extra.shape), str(extra.dtype)])
         leaf.cache[0] = mx.array(list(canonical_json(header)), dtype=mx.uint8)[None]
         lease = Lease([leaf])
         monkeypatch.setattr(

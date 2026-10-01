@@ -152,12 +152,16 @@ class EndpointAPC:
             raise ValueError("endpoint tensor layout differs")
         cache = self.model.new_cache()
         cache.length = header["length"]
+        referenced = set()
 
         def get(index):
             if index is None:
                 return None
             if type(index) is not int or not 1 <= index < len(arrays):
                 raise ValueError("invalid endpoint array index")
+            if index in referenced:
+                raise ValueError("endpoint state reuses an array index")
+            referenced.add(index)
             return arrays[index]
 
         for group in ("self_kv", "cross_kv"):
@@ -178,4 +182,6 @@ class EndpointAPC:
             header["cross_layer_calls"],
         )
         self._validate_endpoint(cache)
+        if referenced != set(range(1, len(arrays))):
+            raise ValueError("endpoint state contains unreferenced arrays")
         return cache
