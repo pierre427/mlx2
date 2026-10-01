@@ -87,7 +87,7 @@ def _candidate_tiles(blocks, block_size):
         )
 
 
-def _candidate_groups(blocks, block_size, key_tile):
+def _candidate_groups(blocks, block_size, key_tile, *, maximum=None):
     """Bounded batches of absolute blocks for one coarse scoring operation.
 
     Partial blocks use causally invalid position padding, so their score is
@@ -95,7 +95,16 @@ def _candidate_groups(blocks, block_size, key_tile):
     """
     group_count = max(1, key_tile // block_size)
     keys, positions, ids = [], [], []
-    for k, _, kp, block_id in _candidate_tiles(blocks, block_size):
+    def visible_blocks():
+        for k, v, start in blocks:
+            if maximum is not None:
+                if start > maximum:
+                    break
+                size = min(k.shape[2], maximum - start + 1)
+                k, v = k[:, :, :size], v[:, :, :size]
+            yield k, v, start
+
+    for k, _, kp, block_id in _candidate_tiles(visible_blocks(), block_size):
         padding = block_size - k.shape[2]
         keys.append(mx.pad(k, [(0, 0), (0, 0), (0, padding), (0, 0)]))
         positions.append(mx.pad(kp, [(0, padding)], constant_values=2147483647))
@@ -270,7 +279,7 @@ def attention(
             block_size, candidate_count = block_select
             candidate_scores = mx.zeros((b, t, 0), dtype=mx.float32)
             candidate_ids = mx.zeros((b, t, 0), dtype=mx.int32)
-            for k, kp, block_ids in _candidate_groups(blocks, block_size, key_tile):
+            for k, kp, block_ids in _candidate_groups(blocks, block_size, key_tile, maximum=maximum_position):
                 scores, valid = _logits(
                     mx.stop_gradient(query), mx.stop_gradient(k), qp, kp, None
                 )

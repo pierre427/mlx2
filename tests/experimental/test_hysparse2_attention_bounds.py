@@ -122,3 +122,40 @@ def test_gather_groups_respect_byte_budget_gaps_and_values():
     merged = list(_gather_groups(blocks, max_bytes=128, max_tokens=8))
     assert [(a.shape[2], start) for a, _, start in merged] == [(7, 0), (3, 9)]
     assert bool(mx.all(merged[0][0] == k[:, :, :7]).item())
+@pytest.mark.parametrize("offset", [0, 1024])
+def test_coarse_candidates_skip_future_history_with_reference_parity(monkeypatch, offset):
+    from mlx2.experimental.hysparse2 import attention as module
+    q = mx.random.normal((1, 2, 16, 8))
+    k = mx.random.normal((1, 1, 4096, 8))
+    v = mx.random.normal(k.shape)
+    original = module._candidate_groups
+    work = []
+    def counted(blocks, block_size, key_tile, *, maximum=None):
+        for item in original(blocks, block_size, key_tile, maximum=maximum):
+            work.append(item[0].shape[2])
+            yield item
+    monkeypatch.setattr(module, "_candidate_groups", counted)
+    def run(q, k, v):
+        dense, selected = module.attention(q, [(k, v, 0)], offset=offset,
+            query_tile=4, key_tile=128, select=(4, 8), block_select=(16, 2))
+        return dense, selected, module.sparse_attention(q, selected, offset=offset, sinks=mx.zeros((2,)))
+    current = run(q, k, v)
+    mx.eval(current)
+    bounded_work = sum(work)
+    def objective(q, k, v):
+        dense, _, sparse = run(q, k, v)
+        return mx.mean(dense * dense) + mx.mean(sparse * sparse)
+    current_grad = mx.grad(objective, argnums=(0, 1, 2))(q, k, v)
+    mx.eval(current_grad)
+    work.clear()
+    def unbounded(blocks, block_size, key_tile, *, maximum=None):
+        yield from counted(blocks, block_size, key_tile)
+    monkeypatch.setattr(module, "_candidate_groups", unbounded)
+    reference = run(q, k, v)
+    mx.eval(reference)
+    assert bounded_work < sum(work)
+    reference_grad = mx.grad(objective, argnums=(0, 1, 2))(q, k, v)
+    mx.eval(reference_grad)
+    assert bool(mx.all(mx.sort(current[1][2], axis=-1) == mx.sort(reference[1][2], axis=-1)).item())
+    for a, b in zip((current[0], current[2], *current_grad), (reference[0], reference[2], *reference_grad)):
+        assert float(mx.max(mx.abs(a - b)).item()) < 1e-5
