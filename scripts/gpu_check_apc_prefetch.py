@@ -401,7 +401,11 @@ def run_engine_check(args) -> dict:
     scratch.mkdir(parents=True, exist_ok=True)
     persist = Path(tempfile.mkdtemp(prefix="mlx2-apc-metal-check-", dir=scratch))
     probe = BatchProbe()
-    restore_probe = _install_batch_probe(probe)
+    # Installed only once the engine is ready: the probe imports
+    # mlx2.runtime.generate (and with it mlx2.runtime.models.base), and the
+    # Flash-Next adapter refuses to load after those modules were imported
+    # under a different environment (ImportOrderError).
+    restore_probe = lambda: None  # noqa: E731 - replaced after load
     engine = None
     session_id = "apc-prefetch-metal-check"
     timings = {}
@@ -425,6 +429,7 @@ def run_engine_check(args) -> dict:
             engine,
             timeout=min(args.timeout_seconds, args.startup_timeout_seconds),
         )
+        restore_probe = _install_batch_probe(probe)
 
         cold_started = time.perf_counter()
         cold_job = engine.submit(_request(args, session_id=session_id))

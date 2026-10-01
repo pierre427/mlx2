@@ -192,3 +192,48 @@ def test_provenance_degrades_outside_a_git_checkout(tmp_path, monkeypatch):
     script = load_script("benchmark_apc_persistence")
     monkeypatch.setattr(script, "repository_root", lambda: tmp_path)
     assert script._git_head() is None
+
+
+def test_gpu_check_installs_batch_probe_only_after_the_engine_is_ready(
+    tmp_path, monkeypatch
+):
+    # The probe patches mlx2.runtime.generate.BatchGenerator, and importing
+    # that module imports mlx2.runtime.models.base.  Flash-Next pins its
+    # import-time environment when its adapter is constructed and raises
+    # ImportOrderError if those modules were imported first, so a probe
+    # installed before the engine loads the artifact fails every Flash-Next
+    # run (qualify-709bedf8-uncensored smoke, 2026-10-01).
+    import mlx2.serving
+
+    script = load_script("gpu_check_apc_prefetch")
+    order = []
+
+    class Stop(Exception):
+        pass
+
+    class FakeEngine:
+        def __init__(self, *args, **kwargs):
+            order.append("engine")
+
+        def submit(self, *args, **kwargs):
+            raise Stop
+
+        def close(self):
+            order.append("close")
+
+    def fake_install(probe):
+        order.append("probe")
+        return lambda: order.append("restore")
+
+    monkeypatch.setattr(mlx2.serving, "ServingEngine", FakeEngine)
+    monkeypatch.setattr(script, "_install_batch_probe", fake_install)
+    monkeypatch.setattr(
+        script, "_wait_for_engine_ready", lambda *a, **k: order.append("ready")
+    )
+    args = script.build_parser().parse_args(
+        ["--cpu", "--dir", str(tmp_path), "--timeout-seconds", "5"]
+    )
+    with pytest.raises(Stop):
+        script.run_engine_check(args)
+    assert order.index("engine") < order.index("ready") < order.index("probe")
+    assert order[-2:] == ["close", "restore"]
