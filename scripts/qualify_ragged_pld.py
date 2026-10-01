@@ -52,6 +52,25 @@ does not reproduce it. September 26's warm-prefix parity receipt instead
 retains prompt hashes without the original raw prompts.
 ``--tiny`` runs a deterministic random Muse-class model on CPU.
 
+Identity (real runs, fail closed). Before any native import (standard
+library only): a 40-hex HEAD, a known clean and tracked ``git status`` for
+the required files (``IDENTITY_FILES`` plus the selected family's adapter,
+config and model files), a sha256 for each, the ``--prompt-ids`` file
+sha256, and a metadata/stat artifact manifest in the selected adapter
+inspector's own fingerprint recipe (``FAMILIES``). Then, in order: the
+actual MLX build identity (package, path, metallib sha256, GPU device)
+before any mlx2 import; the dispatched adapter class, its source sha256
+and every loaded mlx2 module path before the adapter is constructed; the
+constructed adapter's identity against the manifest; and the full loaded
+module closure (worktree paths, clean and tracked) before any arm. A
+failure writes an unexecuted ``refused`` receipt (``arms_executed: []``).
+After the arms every identity is taken again; any drift refuses the
+receipt while keeping the real results. The manifest hashes metadata
+files and shard (name, size, mtime_ns) only: it is not tensor-byte
+verification. ``--i-own-the-gpu`` is the caller's assertion; this driver
+neither acquires nor checks the GPU lease. ``--tiny`` records the same
+source identity without enforcing it (CPU diagnostic, nothing qualified).
+
   PYTHONPATH=src .venv/bin/python scripts/qualify_ragged_pld.py --tiny --out /tmp/pld.json
 """
 
@@ -59,9 +78,11 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib
 import json
 import math
 import os
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -78,6 +99,10 @@ SCHEMA = "mlx2.direct-model.ragged-pld.v2"
 EVIDENCE = "mlx2.ragged-pld.lane-evidence.v2"
 ARMS = ("ordinary_b1", "ordinary_bN", "pld_per_lane", "pld_batched", "pld_removal")
 PRIMARY_REFERENCE = "ordinary_b1"
+# Shared route closure hashed before any native import: this driver, its
+# digest oracle, the ragged PLD scheduler/cache/sampler path, adapter
+# dispatch and stop tokens. Other loaded mlx2 modules are bound by the
+# loaded-module closure check (clean, tracked, worktree paths).
 IDENTITY_FILES = (
     "scripts/qualify_ragged_pld.py",
     "scripts/paired_direct_ab.py",
@@ -85,7 +110,52 @@ IDENTITY_FILES = (
     "src/mlx2/runtime/generate.py",
     "src/mlx2/runtime/segmented_rotating_kv.py",
     "src/mlx2/runtime/models/cache.py",
+    "src/mlx2/runtime/prompt_lookup.py",
+    "src/mlx2/runtime/sample_utils.py",
+    "src/mlx2/adapters/registry.py",
+    "src/mlx2/contracts.py",
+    "src/mlx2/serving.py",
 )
+# Metadata files each adapter inspector folds into its fingerprint, in its
+# order: Muse omits generation_config.json; Qwen3.8 and Qwen3.6 include it.
+MUSE_METADATA = ("config.json", "model.safetensors.index.json", "tokenizer.json",
+                 "tokenizer_config.json", "chat_template.jinja")
+QWEN_METADATA = MUSE_METADATA + ("generation_config.json",)
+# Families whose adapter fingerprint this driver reproduces from metadata
+# and shard stats alone. ``files[0]`` is the adapter module.
+FAMILIES = {
+    "muse": {"adapter": "mlx2.adapters.muse_glimmer.MuseGlimmerAdapter",
+             "metadata": MUSE_METADATA, "single_shard": True,
+             "files": ("src/mlx2/adapters/muse_glimmer.py", "src/mlx2/adapters/muse_glimmer_config.py",
+                       "src/mlx2/runtime/models/muse_glimmer.py")},
+    "qwen38": {"adapter": "mlx2.adapters.qwen38_27b.Qwen3827BAdapter",
+               "metadata": QWEN_METADATA, "single_shard": False,
+               "files": ("src/mlx2/adapters/qwen38_27b.py", "src/mlx2/runtime/models/qwen38_27b.py",
+                         "src/mlx2/runtime/models/qwen3_5.py")},
+    "qwen36": {"adapter": "mlx2.adapters.qwen36_35b.Qwen3635BA3BAdapter",
+               "metadata": QWEN_METADATA, "single_shard": False,
+               "files": ("src/mlx2/adapters/qwen36_35b.py", "src/mlx2/adapters/qwen38_27b.py",
+                         "src/mlx2/runtime/models/qwen36_35b.py", "src/mlx2/runtime/models/qwen3_5.py")},
+}
+FINGERPRINT_SCOPE = ("sha256 over the present metadata files (name + bytes) in the adapter "
+                     "inspector's order, then json [name, size, mtime_ns] per sorted shard; "
+                     "filesystem metadata and stat only, no shard or tensor bytes read, so this "
+                     "is not tensor-content verification")
+ORACLE_MODULES = ("scripts.paired_direct_ab",)
+# Imported after the adapter is constructed (import-order guard), before
+# any arm, so the loaded-module closure covers the route the arms run.
+ROUTE_MODULES = ("mlx2.serving", "mlx2.runtime.generate", "mlx2.runtime.pld", "mlx2.runtime.sample_utils")
+MAX_WORKLOAD_BYTES = 64 << 20
+GPU_OWNERSHIP = ("asserted by the caller with --i-own-the-gpu; not acquired or verified here "
+                 "(the external admission wrapper remains mandatory)")
+STAGE_PREFLIGHT = "source/artifact preflight (no native import)"
+STAGE_BUILD = "MLX build identity (MLX imported; no mlx2 import, adapter or model)"
+STAGE_DISPATCH = "dispatch and loaded mlx2 modules (no adapter or model constructed)"
+STAGE_ADAPTER = "adapter artifact identity (model loaded; no arm run)"
+STAGE_CLOSURE = "loaded module closure (model loaded; no arm run)"
+STAGE_POST_RUN = "post-run identity (all arms executed; results kept, bound to nothing)"
+# Failures of identity COLLECTION (not of decode) that become refusals.
+COLLECTION_ERRORS = (AttributeError, ImportError, KeyError, OSError, RuntimeError, TypeError, ValueError)
 MAX_LANES = 4
 MAX_PROMPT_TOKENS = 16384
 MAX_OUTPUT_TOKENS = 512
@@ -95,6 +165,412 @@ DISTINCT_UNIT = "Quartz vexing jumbled fog; my wry pixie bank."
 
 def _sha(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
+
+
+# The one seam for native imports (``mlx.core`` and mlx2 modules), so tests
+# can pin the gate order without importing MLX.
+_import = importlib.import_module
+
+
+def _is_sha256(value) -> bool:
+    return type(value) is str and len(value) == 64 and all(c in "0123456789abcdef" for c in value)
+
+
+def _is_commit(value) -> bool:
+    return type(value) is str and len(value) == 40 and all(c in "0123456789abcdef" for c in value)
+
+
+class IdentityRefusal(Exception):
+    """A native identity gate refused; no arm has run."""
+
+    def __init__(self, stage, refusals, identity=None):
+        super().__init__(f"{stage}: {'; '.join(refusals)}"[:500])
+        self.stage, self.refusals, self.identity = stage, list(refusals), dict(identity or {})
+
+
+# ---------------------------------------------------------------- identity
+
+def _git(*args):
+    """Stdout of one git command in this worktree, or None on any failure (never '')."""
+    try:
+        done = subprocess.run(["git", *args], cwd=ROOT, capture_output=True, text=True,
+                              timeout=60, check=False)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return done.stdout if done.returncode == 0 else None
+
+
+def source_identity(names):
+    """Raw source identity of ``names`` (repo-relative); git failures stay None, never clean."""
+    names = list(names)
+    files = {}
+    for name in names:
+        path = ROOT / name
+        try:
+            files[name] = _sha(path.read_bytes()) if path.is_file() else None
+        except OSError:
+            files[name] = None
+    head = _git("rev-parse", "--verify", "HEAD")
+    status = _git("status", "--porcelain", "--untracked-files=all", "--", *names) if names else None
+    tracked = _git("ls-files", "--error-unmatch", "--", *names) if names else None
+    return {
+        "commit": None if head is None else head.strip(),
+        "status_known": status is not None,
+        "dirty": None if status is None else bool(status.strip()),
+        "status_porcelain": None if status is None else status[:2000],
+        "tracked": tracked is not None,
+        "files": files,
+    }
+
+
+def source_identity_refusals(identity, required):
+    """Why a raw source identity cannot bind a native run (empty when it can)."""
+    if not isinstance(identity, dict):
+        return ["source identity missing"]
+    out = []
+    if not _is_commit(identity.get("commit")):
+        out.append(f"source commit {identity.get('commit')!r} is not a 40-hex revision "
+                   "(git failed or HEAD unknown)"[:200])
+    if identity.get("status_known") is not True or type(identity.get("dirty")) is not bool:
+        out.append("worktree status of the required files is unknown (git status failed)")
+    elif identity["dirty"]:
+        out.append("required files are not clean at HEAD (modified, staged, deleted or untracked)")
+    if identity.get("tracked") is not True:
+        out.append("required files are not all tracked (git ls-files failed or a file is untracked)")
+    files = identity.get("files")
+    if not required or not isinstance(files, dict) or set(files) != set(required):
+        out.append("hashed file set is not exactly the required set")
+    else:
+        missing = sorted(str(name) for name, value in files.items() if not _is_sha256(value))
+        if missing:
+            out.append("no sha256 for required files: " + ", ".join(missing)[:300])
+    return out
+
+
+def identity_changes(label, before, after):
+    """Refusals when a raw source identity moved between two points of the run."""
+    if not isinstance(before, dict) or not isinstance(after, dict):
+        return [f"{label} identity before or after the run is missing"]
+    out = [f"{label} {key} changed during the run" for key in ("commit", "status_known", "dirty", "tracked")
+           if before.get(key) != after.get(key)]
+    files_before, files_after = before.get("files") or {}, after.get("files") or {}
+    out.extend(f"{label} file {name} changed during the run"
+               for name in sorted(set(files_before) | set(files_after))
+               if files_before.get(name) != files_after.get(name))
+    return out
+
+
+def artifact_family(config):
+    """(family, None) for the adapters this driver can bind, else (None, why).
+
+    Mirrors ``registry._RESOLVERS`` for the supported families; the
+    dispatched class is checked again against ``FAMILIES`` after import.
+    """
+    if not isinstance(config, dict):
+        return None, "config.json is not a JSON object"
+    architectures = config.get("architectures", [])
+    if "dflash_config" in config or (isinstance(architectures, list)
+                                     and any("Draft" in str(name) for name in architectures)):
+        return None, "a speculative drafter is not a ragged PLD target"
+    model_type = config.get("model_type")
+    text = config.get("text_config", config)
+    if not isinstance(text, dict):
+        return None, "text_config is not a JSON object"
+    topology = (text.get("num_hidden_layers"), text.get("hidden_size"))
+    if model_type in ("muse_glimmer", "muse_glimmer_text"):
+        return "muse", None
+    if model_type == "qwen3_5" and topology == (64, 5120) and not text.get("num_experts", 0):
+        return "qwen38", None
+    if model_type == "qwen3_5_moe" and topology != (48, 3072):
+        return "qwen36", None
+    if model_type == "cohere2_moe":
+        return None, ("North's adapter fingerprint also binds safetensors header digests; a "
+                      "metadata/stat-only preflight cannot reproduce it, so this diagnostic refuses")
+    return None, f"model_type {model_type!r} topology {topology!r} has no identity recipe here"[:200]
+
+
+def _metadata_json(path, name):
+    try:
+        return json.loads((path / name).read_text())
+    except (OSError, ValueError) as error:
+        raise ValueError(f"{name} unreadable: {type(error).__name__}: {error}"[:200]) from None
+
+
+def artifact_manifest(model_path):
+    """Metadata/stat identity in the selected adapter inspector's recipe (stdlib).
+
+    Reads config, index and the recipe's metadata files; shards are only
+    resolved and stat'ed, never opened. Raises ``ValueError`` (or
+    ``OSError``) when the artifact cannot be bound.
+    """
+    path = Path(model_path).expanduser().resolve()
+    if not path.is_dir():
+        raise ValueError(f"artifact {str(path)!r} is not a directory")
+    config = _metadata_json(path, "config.json")
+    family, why = artifact_family(config)
+    if family is None:
+        raise ValueError(why)
+    recipe = FAMILIES[family]
+    if (path / "model.safetensors.index.json").exists():
+        index = _metadata_json(path, "model.safetensors.index.json")
+        weight_map = index.get("weight_map") if isinstance(index, dict) else None
+        if not isinstance(weight_map, dict) or not weight_map:
+            raise ValueError("weight index has no nonempty weight_map")
+        if any(type(name) is not str for name in weight_map.values()):
+            raise ValueError("weight index maps a tensor to a non-string shard")
+        names = sorted(set(weight_map.values()))
+    elif recipe["single_shard"]:
+        names = ["model.safetensors"]
+    else:
+        raise ValueError(f"{family} requires model.safetensors.index.json")
+    digest = hashlib.sha256()
+    metadata = {}
+    for name in recipe["metadata"]:
+        item = path / name
+        if not item.exists():
+            continue
+        if not item.is_file():
+            raise ValueError(f"metadata {name} is not a regular file")
+        data = item.read_bytes()
+        metadata[name] = _sha(data)
+        digest.update(name.encode())
+        digest.update(data)
+    shards = []
+    for name in names:
+        item = (path / name).resolve()
+        if (not name or Path(name).is_absolute() or ".." in Path(name).parts
+                or not item.is_relative_to(path) or item.suffix != ".safetensors"):
+            raise ValueError(f"weight shard {name!r} is not a local .safetensors file in the artifact"[:200])
+        if not item.is_file():
+            raise ValueError(f"missing weight shard {name!r}"[:200])
+        stat = item.stat()
+        record = (name, stat.st_size, stat.st_mtime_ns)
+        shards.append(list(record))
+        digest.update(json.dumps(record).encode())
+    return {"path": str(path), "family": family, "adapter": recipe["adapter"],
+            "model_type": config.get("model_type"), "fingerprint": digest.hexdigest(),
+            "fingerprint_scope": FINGERPRINT_SCOPE, "metadata_sha256": metadata, "shards": shards}
+
+
+def workload_identity(path):
+    """(identity, raw bytes, refusals) of the pinned ``--prompt-ids`` file."""
+    try:
+        item = Path(path).expanduser().resolve()
+        if not item.is_file() or item.stat().st_size > MAX_WORKLOAD_BYTES:
+            return None, None, [f"--prompt-ids {str(item)!r} is not a file of at most {MAX_WORKLOAD_BYTES} bytes"]
+        raw = item.read_bytes()
+    except OSError as error:
+        return None, None, [f"--prompt-ids unreadable: {type(error).__name__}: {error}"[:200]]
+    return {"path": str(item), "bytes": len(raw), "sha256": _sha(raw)}, raw, []
+
+
+def preflight(args):
+    """Standard-library identity taken before any native import.
+
+    Real runs refuse on any entry of ``refusals``; ``--tiny`` records the
+    same source identity without enforcing it.
+    """
+    refusals, manifest, required = [], None, IDENTITY_FILES
+    if not args.tiny:
+        try:
+            manifest = artifact_manifest(args.model)
+        except (OSError, ValueError) as error:
+            refusals.append(f"artifact: {error}"[:300])
+        else:
+            required += tuple(name for name in FAMILIES[manifest["family"]]["files"] if name not in required)
+    source = source_identity(required)
+    refusals.extend(source_identity_refusals(source, required))
+    workload, raw = None, None
+    if args.prompt_ids:
+        workload, raw, problems = workload_identity(args.prompt_ids)
+        refusals.extend(problems)
+    return {"enforced": not args.tiny, "required_files": list(required), "source": source,
+            "artifact": manifest, "workload": workload, "workload_raw": raw, "refusals": refusals}
+
+
+def public_preflight(gate):
+    return {key: value for key, value in gate.items() if key != "workload_raw"}
+
+
+def build_identity(mx):
+    """``paired_direct_ab.mlx_identity`` of the imported MLX (version, package, path, metallib)."""
+    from scripts.paired_direct_ab import mlx_identity
+
+    return mlx_identity(mx)
+
+
+def build_identity_refusals(build):
+    """Why an MLX build identity cannot bind a native GPU run (empty when it can)."""
+    if not isinstance(build, dict):
+        return ["MLX build identity missing"]
+    out = [f"MLX build identity has no {key}" for key in ("version", "package", "device")
+           if type(build.get(key)) is not str or not build[key].strip()]
+    path = build.get("path")
+    if type(path) is not str or not os.path.isabs(path) or not os.path.isdir(path):
+        out.append(f"MLX core path {path!r} is not an existing absolute directory"[:200])
+    if not _is_sha256(build.get("metallib_sha256")):
+        out.append("MLX build identity has no metallib sha256")
+    if type(build.get("device")) is str and "gpu" not in build["device"].lower():
+        out.append(f"MLX default device {build['device']!r} is not the GPU"[:200])
+    return out
+
+
+def collect_build_identity(mx):
+    """(build identity or None, refusals); a collector failure is a refusal, never a crash."""
+    try:
+        build = build_identity(mx)
+    except COLLECTION_ERRORS as error:
+        return None, [f"MLX build identity could not be collected: {type(error).__name__}: {error}"[:300]]
+    return build, build_identity_refusals(build)
+
+
+def loaded_module_files(modules=None):
+    """``{name: __file__}`` of every loaded mlx2 module and the digest oracle."""
+    modules = sys.modules if modules is None else modules
+    return {name: getattr(module, "__file__", None) for name, module in list(modules.items())
+            if module is not None and (name == "mlx2" or name.startswith("mlx2.") or name in ORACLE_MODULES)}
+
+
+def _worktree_file(name, file):
+    """The resolved file when module ``name`` comes from this worktree, else None."""
+    root = ROOT / "scripts" if name in ORACLE_MODULES else ROOT / "src" / "mlx2"
+    if not isinstance(file, str) or not os.path.isabs(file):
+        return None
+    path = Path(file).resolve()
+    return path if path.suffix == ".py" and path.is_file() and root in path.parents else None
+
+
+def module_path_refusals(files):
+    """Every loaded mlx2 module (and the oracle) must be a source file of this worktree."""
+    out = [] if any(name == "mlx2" or name.startswith("mlx2.") for name in files) else ["no mlx2 module is loaded"]
+    out.extend(f"{name} imported from {file!r}, not this worktree"[:200]
+               for name, file in sorted(files.items()) if _worktree_file(name, file) is None)
+    return out
+
+
+def module_closure(files):
+    """Loaded modules with a git-bound source identity of their files."""
+    paths = (_worktree_file(name, file) for name, file in files.items())
+    names = sorted({str(path.relative_to(ROOT)) for path in paths if path is not None})
+    return {"modules": dict(sorted(files.items())), "required": names,
+            "source": source_identity(names) if names else None}
+
+
+def module_closure_refusals(closure):
+    if not isinstance(closure, dict) or not isinstance(closure.get("modules"), dict):
+        return ["loaded module closure missing"]
+    out = module_path_refusals(closure["modules"])
+    out.extend(f"loaded modules: {p}" for p in source_identity_refusals(closure.get("source"), closure.get("required")))
+    return out
+
+
+def closure_drift_refusals(closure, source):
+    """Loaded files that the preflight also hashed must still carry the preflight hash."""
+    now = (((closure or {}).get("source") or {}).get("files")) or {}
+    pre = ((source or {}).get("files")) or {}
+    return [f"loaded {name} differs from its preflight hash" for name in sorted(set(now) & set(pre))
+            if now[name] != pre[name]]
+
+
+def adapter_source_refusals(adapter_name, adapter_file, manifest, source):
+    """The dispatched class must be the family's adapter, from this worktree, at the preflight hash."""
+    family = FAMILIES[manifest["family"]]
+    out = []
+    if adapter_name != family["adapter"]:
+        out.append(f"dispatch selected {adapter_name}, the preflight recipe binds {family['adapter']}"[:200])
+    path = _worktree_file(family["adapter"].rsplit(".", 1)[0], adapter_file)
+    if path is None or str(path.relative_to(ROOT)) != family["files"][0]:
+        out.append(f"adapter module file {adapter_file!r} is not this worktree's {family['files'][0]}"[:200])
+        return out
+    try:
+        now = _sha(path.read_bytes())
+    except OSError:
+        now = None
+    if not _is_sha256(now) or now != ((source or {}).get("files") or {}).get(family["files"][0]):
+        out.append("adapter source sha256 differs from the preflight hash")
+    return out
+
+
+def adapter_identity_snapshot(adapter):
+    """Path, fingerprint and shard records of a constructed adapter (Muse top-level, Qwen nested)."""
+    identity = getattr(adapter, "identity", None)
+    if not isinstance(identity, dict):
+        return None
+    try:
+        files = [list(record) for record in identity.get("files")]
+    except TypeError:
+        files = None
+    return {"path": identity.get("path"), "fingerprint": identity.get("fingerprint"), "files": files}
+
+
+def adapter_identity_refusals(adapter, manifest):
+    """The constructed adapter must report exactly the preflight artifact, with no drafter bound."""
+    snapshot = adapter_identity_snapshot(adapter)
+    if snapshot is None:
+        return ["adapter has no identity mapping"]
+    out = []
+    if not _is_sha256(snapshot["fingerprint"]) or snapshot["fingerprint"] != manifest["fingerprint"]:
+        out.append("adapter artifact fingerprint differs from the preflight manifest")
+    if snapshot["path"] != manifest["path"]:
+        out.append("adapter artifact path differs from the preflight manifest")
+    if snapshot["files"] != manifest["shards"]:
+        out.append("adapter shard records differ from the preflight manifest")
+    identity = adapter.identity
+    if (getattr(adapter, "draft_model", None) is not None
+            or any(key in identity for key in ("draft_fingerprint", "target_fingerprint", "draft_revision"))):
+        out.append("an external drafter is bound; this ordinary PLD diagnostic binds the target alone")
+    return out
+
+
+def post_run_identity(args, gate, driver):
+    """(identity after the arms, refusals): nothing that bound the run may have moved."""
+    required = gate["required_files"]
+    after = {"source": source_identity(required)}
+    refusals = [f"after the arms: {p}" for p in source_identity_refusals(after["source"], required)]
+    refusals.extend(identity_changes("source", gate["source"], after["source"]))
+    if gate["workload"] is not None:
+        after["workload"], _raw, problems = workload_identity(args.prompt_ids)
+        refusals.extend(f"after the arms: {p}" for p in problems)
+        if (after["workload"] or {}).get("sha256") != gate["workload"]["sha256"]:
+            refusals.append("the --prompt-ids file changed during the run")
+    if args.tiny:
+        return after, refusals
+    try:
+        after["artifact"] = artifact_manifest(args.model)
+    except (OSError, ValueError) as error:
+        after["artifact"] = None
+        refusals.append(f"after the arms: artifact: {error}"[:300])
+    else:
+        refusals.extend(f"artifact {key} changed during the run"
+                        for key in ("path", "family", "fingerprint", "metadata_sha256", "shards")
+                        if after["artifact"].get(key) != (gate["artifact"] or {}).get(key))
+    native = getattr(driver, "native_identity", None) or {}
+    after["mlx"], problems = collect_build_identity(driver.mx)
+    refusals.extend(f"after the arms: {p}" for p in problems)
+    if after["mlx"] != native.get("mlx"):
+        refusals.append("MLX build identity changed during the run")
+    after["modules"] = module_closure(loaded_module_files())
+    refusals.extend(f"after the arms: {p}" for p in module_closure_refusals(after["modules"]))
+    before = ((native.get("modules_before_arms") or {}).get("source") or {}).get("files")
+    now = (after["modules"].get("source") or {}).get("files") or {}
+    if not before:
+        refusals.append("no pre-arm module closure was recorded")
+    else:
+        refusals.extend(f"loaded module file {name} changed or unloaded during the run"
+                        for name in sorted(before) if now.get(name) != before[name])
+    after["adapter_identity"] = adapter_identity_snapshot(getattr(driver, "adapter", None))
+    if after["adapter_identity"] is None or after["adapter_identity"] != native.get("adapter_identity"):
+        refusals.append("adapter artifact identity changed during the run")
+    return after, refusals
+
+
+def checked_post_run_identity(args, gate, driver):
+    """``post_run_identity``, with a collection failure refused instead of discarding the results."""
+    try:
+        return post_run_identity(args, gate, driver)
+    except COLLECTION_ERRORS as error:
+        return ({"error": f"{type(error).__name__}: {error}"[:300]},
+                [f"post-run identity could not be collected: {type(error).__name__}: {error}"[:300]])
 
 
 # ---------------------------------------------------------------- models
@@ -149,9 +625,12 @@ def constructed_prompts(tokenizer, lanes):
     return prompts[:lanes], caps[:lanes]
 
 
-def load_workload(path):
-    """(prompts, caps, receipt, source) from a pinned token file; fail closed."""
-    raw = Path(path).read_bytes()
+def load_workload(path, raw=None):
+    """(prompts, caps, receipt, source) from a pinned token file; fail closed.
+
+    ``raw`` is the preflight's bytes, so the hashed file is the one used.
+    """
+    raw = Path(path).read_bytes() if raw is None else raw
     data = json.loads(raw)
     if not isinstance(data, dict) or set(data) - {"prompts", "max_tokens", "receipt"} \
             or not isinstance(data.get("prompts"), list) or not isinstance(data.get("max_tokens"), list):
@@ -162,12 +641,22 @@ def load_workload(path):
 # ---------------------------------------------------------------- run one arm
 
 class Driver:
-    def __init__(self, args):
-        import mlx.core as mx
+    def __init__(self, args, gate=None):
+        """Load the model; real runs gate every identity before the first arm.
+
+        Order is part of the contract: MLX build identity before any mlx2
+        import; dispatch, adapter source and loaded mlx2 paths before the
+        adapter is constructed; then the adapter identity and the loaded
+        module closure. Each failure raises ``IdentityRefusal``.
+        """
+        if not args.tiny and (not isinstance(gate, dict) or gate.get("refusals") or not gate.get("artifact")):
+            raise IdentityRefusal(STAGE_PREFLIGHT, ["no clean preflight was passed to the native driver"])
+        mx = _import("mlx.core")
 
         self.args, self.mx = args, mx
         self.stops = ()
         self.identity = {}
+        self.native_identity = None
         self.workload_receipt = None
         self.lane_policies = None
         if args.tiny:
@@ -177,26 +666,56 @@ class Driver:
             self.identity = {"model": "tiny-random-muse", "fingerprint": None}
             self.followup = [5, 6, 7]
             return
-        from mlx2.adapters.registry import resolve_adapter
-
-        cls = resolve_adapter(args.model, mtp=False, qualification_mode=True)
+        manifest = gate["artifact"]
+        build, refusals = collect_build_identity(mx)
+        if refusals:
+            raise IdentityRefusal(STAGE_BUILD, refusals, {"mlx": build})
+        registry = _import("mlx2.adapters.registry")
+        try:
+            cls = registry.resolve_adapter(args.model, mtp=False, qualification_mode=True)
+        except (ImportError, OSError, ValueError, TypeError, KeyError) as error:
+            raise IdentityRefusal(STAGE_DISPATCH, [f"adapter dispatch failed: {type(error).__name__}: {error}"[:300]],
+                                  {"mlx": build}) from None
+        adapter_name = f"{cls.__module__}.{cls.__qualname__}"
+        loaded = loaded_module_files()
+        before_adapter = module_closure(loaded)
+        refusals = (adapter_source_refusals(adapter_name, loaded.get(cls.__module__), manifest, gate["source"])
+                    + module_closure_refusals(before_adapter)
+                    + closure_drift_refusals(before_adapter, gate["source"]))
+        if refusals:
+            raise IdentityRefusal(STAGE_DISPATCH, refusals, {"mlx": build, "adapter": adapter_name,
+                                                             "modules_before_adapter": before_adapter})
         # Constructed before any runtime module is imported (import-order guard).
         self.adapter = cls(args.model)
-        from mlx2.serving import generation_stop_token_ids
-
+        adapter_identity = adapter_identity_snapshot(self.adapter)
+        refusals = adapter_identity_refusals(self.adapter, manifest)
+        if refusals:
+            raise IdentityRefusal(STAGE_ADAPTER, refusals, {"mlx": build, "adapter": adapter_name,
+                                                            "adapter_identity": adapter_identity})
+        serving = _import("mlx2.serving")
+        for name in ROUTE_MODULES:
+            _import(name)
+        before_arms = module_closure(loaded_module_files())
+        refusals = module_closure_refusals(before_arms) + closure_drift_refusals(before_arms, gate["source"])
+        if refusals:
+            raise IdentityRefusal(STAGE_CLOSURE, refusals, {"mlx": build, "adapter": adapter_name,
+                                                            "modules_before_arms": before_arms})
+        self.native_identity = {"mlx": build, "adapter": adapter_name, "adapter_identity": adapter_identity,
+                                "modules_before_adapter": before_adapter, "modules_before_arms": before_arms}
         self.model = self.adapter.model
-        self.stops = () if args.ignore_eos else generation_stop_token_ids(self.adapter)
+        self.stops = () if args.ignore_eos else serving.generation_stop_token_ids(self.adapter)
         if args.prompt_ids:
-            self.prompts, self.caps, self.workload_receipt, prompt_source = load_workload(args.prompt_ids)
+            self.prompts, self.caps, self.workload_receipt, prompt_source = load_workload(
+                args.prompt_ids, raw=gate["workload_raw"])
         else:
             self.prompts, self.caps = constructed_prompts(self.adapter.tokenizer, args.lanes)
             prompt_source = "deterministic constructor (not the 2026-09-18 campaign prompts)"
         self.followup = list(self.prompts[0][:3])
         self.identity = {
             "model": str(args.model),
-            "adapter": f"{cls.__module__}.{cls.__qualname__}",
-            "adapter_sha256": _sha(Path(sys.modules[cls.__module__].__file__).read_bytes()),
-            "fingerprint": self.adapter.identity.get("fingerprint"),
+            "adapter": adapter_name,
+            "adapter_sha256": gate["source"]["files"][FAMILIES[manifest["family"]]["files"][0]],
+            "fingerprint": adapter_identity["fingerprint"],
             "environment": dict(getattr(self.adapter, "environment", {}) or {}),
             "prompt_source": prompt_source,
         }
@@ -588,7 +1107,14 @@ def coverage(driver, results, stats, removed):
 
 
 def run_all(args):
-    driver = Driver(args)
+    gate = preflight(args)
+    if gate["enforced"] and gate["refusals"]:
+        return refused_receipt(args, STAGE_PREFLIGHT, gate["refusals"], {"preflight": public_preflight(gate)})
+    try:
+        driver = Driver(args, gate)
+    except IdentityRefusal as refusal:
+        return refused_receipt(args, refusal.stage, refusal.refusals,
+                               {"preflight": public_preflight(gate), **refusal.identity})
     driver.check_geometry()
     lanes = list(range(len(driver.prompts)))
     results, stats, failures = {}, {}, {}
@@ -657,21 +1183,33 @@ def run_all(args):
         verdict = "token_exact_bits_diverge"
     else:
         verdict = "pass"
-    from scripts.paired_direct_ab import mlx_identity, source_identity
+    after, identity_refusals = checked_post_run_identity(args, gate, driver)
+    enforced = gate["enforced"]
+    if enforced and identity_refusals:
+        # Real results stay in the record; they are bound to no identity.
+        verdict = "refused"
+    native = driver.native_identity or {}
 
     return {
         "schema": SCHEMA,
-        "scope": ("direct-model ragged PLD (one process); not HTTP serving, not serving "
-                  "qualification, no route or default selected; no timing"
-                  + ("; TINY random CPU model" if args.tiny else "")),
+        "scope": _scope(args),
+        "executed": True,
+        "arms_executed": list(ARMS),
+        "refused_at": STAGE_POST_RUN if enforced and identity_refusals else None,
         "verdict": verdict,
+        "qualification": "none: diagnostic only; no route, default or model qualification is asserted",
+        "gpu_ownership": "not applicable (tiny CPU run)" if args.tiny else GPU_OWNERSHIP,
+        "identity_gate": ("enforced before native import, before the adapter and after the arms" if enforced
+                          else "recorded only: tiny CPU diagnostic, nothing qualified"),
+        "identity_refusals": identity_refusals if enforced else [],
+        "identity_advisory": [] if enforced else gate["refusals"] + identity_refusals,
         "primary_reference": PRIMARY_REFERENCE,
         "ordinary_geometry": ("bit_exact" if comparisons[0]["bits_exact"] else
                               "token_exact_bits_diverge" if comparisons[0]["tokens_exact"] else
                               "tokens_diverge"),
         "comparisons": comparisons,
         "coverage": cov,
-        "refusals": engagement,
+        "refusals": engagement + ([f"identity: {p}" for p in identity_refusals] if enforced else []),
         "removed": removed,
         "widths": {
             "requested": len(driver.prompts),
@@ -687,14 +1225,41 @@ def run_all(args):
         "results": {arm: {str(i): {k: v for k, v in r.items() if not k.startswith("_")}
                           for i, r in res.items()} for arm, res in results.items()},
         "scheduler_stats": stats,
-        "protocol": {"arms": list(ARMS), "sampling": "greedy", "seed": args.seed,
-                     "prefill_step": args.prefill_step, "pld_policy": args.pld_policy,
-                     "logprob_rows": args.logprob_rows, "continuation_tokens": args.continuation_tokens,
-                     "remove_lane": args.remove_lane, "remove_after": args.remove_after,
-                     "time_limit_s": args.time_limit_s, "stop_tokens": list(driver.stops)},
-        "identity": {"source": source_identity(), "files": {n: _sha((ROOT / n).read_bytes()) for n in IDENTITY_FILES},
-                     "mlx": mlx_identity(driver.mx), "MLX_ENABLE_TF32": os.environ.get("MLX_ENABLE_TF32"),
-                     **driver.identity},
+        "protocol": protocol_section(args, list(driver.stops)),
+        "identity": {"preflight": public_preflight(gate), "source": gate["source"],
+                     "files": gate["source"]["files"], "after": after,
+                     "mlx": native.get("mlx") or collect_build_identity(driver.mx)[0],
+                     "modules_before_arms": native.get("modules_before_arms"),
+                     "adapter_identity": native.get("adapter_identity"),
+                     "MLX_ENABLE_TF32": os.environ.get("MLX_ENABLE_TF32"), **driver.identity},
+    }
+
+
+def _scope(args):
+    return ("direct-model ragged PLD (one process); not HTTP serving, not serving "
+            "qualification, no route or default selected; no timing"
+            + ("; TINY random CPU model" if args.tiny else ""))
+
+
+def protocol_section(args, stops):
+    return {"arms": list(ARMS), "sampling": "greedy", "seed": args.seed,
+            "prefill_step": args.prefill_step, "pld_policy": args.pld_policy,
+            "lane_policies": args.lane_policies,
+            "logprob_rows": args.logprob_rows, "continuation_tokens": args.continuation_tokens,
+            "remove_lane": args.remove_lane, "remove_after": args.remove_after,
+            "time_limit_s": args.time_limit_s, "lanes": args.lanes, "ignore_eos": args.ignore_eos,
+            "stop_tokens": "not resolved (no adapter loaded)" if stops is None else stops}
+
+
+def refused_receipt(args, stage, refusals, identity):
+    """An unexecuted refusal: no arm ran, so no results, comparisons or coverage exist."""
+    return {
+        "schema": SCHEMA, "scope": _scope(args), "executed": False, "arms_executed": [],
+        "refused_at": stage, "verdict": "refused", "refusals": list(refusals),
+        "identity_refusals": list(refusals),
+        "qualification": "none: refused before any arm ran; no parity, divergence or coverage evidence",
+        "gpu_ownership": GPU_OWNERSHIP, "ordinary_geometry": "not_run", "comparisons": [],
+        "coverage": None, "results": {}, "protocol": protocol_section(args, None), "identity": identity,
     }
 
 
@@ -754,8 +1319,9 @@ def main(argv=None):
     record = run_all(args)
     Path(args.out).parent.mkdir(parents=True, exist_ok=True)
     Path(args.out).write_text(json.dumps(record, indent=1, default=sorted) + "\n")
-    print(json.dumps({k: record[k] for k in ("verdict", "ordinary_geometry", "coverage", "refusals")}, indent=1))
-    for c in record["comparisons"]:
+    print(json.dumps({k: record.get(k) for k in ("verdict", "executed", "refused_at", "ordinary_geometry",
+                                                 "coverage", "refusals")}, indent=1))
+    for c in record.get("comparisons") or []:
         print(f"{c['arm']} vs {c['reference']} ({c['kind']}): tokens_exact={c['tokens_exact']} "
               f"bits_exact={c['bits_exact']} {(c['token_differences'] + c['bit_differences'] + c['incomparable'])[:3]}")
     return 0 if record["verdict"] == "pass" else 1
