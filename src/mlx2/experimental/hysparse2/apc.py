@@ -19,8 +19,11 @@ class EndpointAPC:
             raise ValueError("exact checkpoint and tokenizer revisions required")
         self.model, self.engine = model, engine
         self.revision, self.tokenizer = checkpoint_revision, tokenizer_fingerprint
+        self._parameter_epoch = model._parameter_epoch
 
     def key(self):
+        if self._parameter_epoch is not self.model._parameter_epoch:
+            raise ValueError("parameter update requires a new exact checkpoint binding")
         identity = self.model.new_cache().apcv2_identity
         return APCKey(
             model=self.model.config.model_type,

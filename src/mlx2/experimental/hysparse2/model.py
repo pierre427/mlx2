@@ -414,8 +414,21 @@ class Model(nn.Module):
         # remains in an explicit, non-colliding APCv2 namespace.
         self.ple_sidecar_digest = None
         self._cache_owner = object()
+        self._parameter_epoch = object()
         self.adapter_revision = None
         self._semantic_capsules = None
+
+    def update(self, parameters, strict=True):
+        # Optimizers, dtype conversion and autodiff tracer installation all
+        # replace parameters through this hook. Fail closed before replacement,
+        # including a partially failing update; old KV must not survive it.
+        if hasattr(self, "_cache_owner"):
+            self._cache_owner = object()
+            # LoRA episodes already bind exact adapter content and rollback;
+            # preserve that separate revision contract during their updates.
+            if getattr(self, "_lora_episode", None) is None:
+                self._parameter_epoch = object()
+        return super().update(parameters, strict=strict)
 
     @property
     def capsule_binding(self):

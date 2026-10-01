@@ -84,6 +84,40 @@ def test_real_apcv2_endpoint_and_independent_restore():
         engine.close()
 
 
+def test_parameter_replacement_invalidates_kv_and_existing_checkpoint_bridge():
+    model = Model(Config.smoke())
+    model.eval()
+    tokens = [1, 2, 3, 4]
+    _, cache = model.prefill(mx.array([tokens]))
+    engine = APCv2(max_size=4, layout_name="hysparse2-endpoint-v1")
+    try:
+        bridge = EndpointAPC(model, engine, checkpoint_revision="old", tokenizer_fingerprint="t")
+        bridge.publish(tokens, cache)
+        model.update({"embedding": {"weight": model.embedding.weight + 0.01}})
+        before = cache.length
+        with pytest.raises(ValueError, match="another model"):
+            model.decode(mx.array([[5]]), cache)
+        assert cache.length == before
+        with pytest.raises(ValueError, match="parameter update"):
+            bridge.restore(tokens + [5])
+        _, fresh = model.prefill(mx.array([tokens]))
+        with pytest.raises(ValueError, match="parameter update"):
+            bridge.publish(tokens, fresh)
+        rebound = EndpointAPC(model, engine, checkpoint_revision="updated", tokenizer_fingerprint="t")
+        _, miss = rebound.restore(tokens + [5])
+        assert not miss.hit
+        rebound.publish(tokens, fresh)
+        restored, hit = rebound.restore(tokens + [5])
+        assert hit.hit
+        expected = model.decode(mx.array([[5]]), fresh)
+        actual = model.decode(mx.array([[5]]), restored)
+        assert float(mx.max(mx.abs(expected - actual)).item()) == 0
+        if hasattr(hit.cache, "close"):
+            hit.cache.close()
+    finally:
+        engine.close()
+
+
 def test_fail_closed_stale_and_disabled_checkpoint(monkeypatch):
     model = Model(Config.smoke())
     model.eval()
