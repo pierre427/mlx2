@@ -546,7 +546,7 @@ class FlashNextAdapter:
             **(
                 # omlx #4038 port; absent while off so default receipts are unchanged.
                 {"hc_decode": hc_decode_status()}
-                if self.policy.hc_decode_kernels or hc_decode_status()["calls"]
+                if getattr(self.policy, "hc_decode_kernels", False) or hc_decode_status()["calls"]
                 else {}
             ),
             "round_levers": lever_snapshot(),
@@ -561,7 +561,7 @@ class FlashNextAdapter:
             "segmented_mtp": segmented_self_mtp_stats(),
             **(
                 {"attn_fused_rows": qwen4_attn_rows_status()}
-                if self.policy.attn_fused_rows
+                if getattr(self.policy, "attn_fused_rows", False)
                 else {}
             ),
             "norm_convention": (

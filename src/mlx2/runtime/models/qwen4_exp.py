@@ -5160,6 +5160,7 @@ class QSAIndexer(nn.Module):
         causal_mask: mx.array,
         cache,
         projected_qk: Optional[mx.array] = None,
+        fused_query: bool = False,
     ):
         """Select blocks from one immutable base plus a row-private ledger.
 

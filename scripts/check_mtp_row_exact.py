@@ -290,8 +290,6 @@ def align(forwards, sequence):
 
 def row_table(placed):
     """position -> (digests per component key, logits row) for kept rows."""
-    import numpy as np
-
     table = {}
     for forward, start, kept in placed:
         logits = forward["logits"]
