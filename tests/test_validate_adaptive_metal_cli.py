@@ -55,6 +55,22 @@ def test_dry_run_prints_complete_cost_grid_without_importing_mlx(tmp_path):
     assert plan["depths"] == list(range(16)) and plan["cohorts"] == [1, 2, 4]
     assert plan["model_loaded"] is False and plan["performance_qualified"] is False
     assert not (tmp_path / "receipt.json").exists()
+    assert plan["target_verify_row_exact"] is False
+
+
+def test_row_exact_option_is_explicit_tensor_free_and_strict(tmp_path):
+    selected = cli(tmp_path, "--dry-run", "--target-verify-row-exact")
+    assert selected.returncode == 0, selected.stderr
+    assert json.loads(selected.stdout)["target_verify_row_exact"] is True
+    invalid = cli(tmp_path, "--dry-run", "--target-verify-row-exact", "false")
+    assert invalid.returncode != 0 and "unrecognized arguments" in invalid.stderr
+    script = load()
+    args = script.parser().parse_args(
+        ["--target", "/a", "--draft", "/b", "--out", "/c", "--dry-run"]
+    )
+    args.target_verify_row_exact = 1
+    with pytest.raises(ValueError, match="must be boolean"):
+        script.plan(args)
 
 
 @pytest.mark.parametrize(

@@ -70,6 +70,17 @@ def test_float32_mode_is_explicit_and_choices_fail_closed():
         args("--dry-run", "--compute-precision", "float16")
 
 
+def test_target_row_exact_is_explicit_strict_boolean():
+    assert matrix.preflight(args("--dry-run"))["target_verify_row_exact"] is False
+    selected = args("--dry-run", "--target-verify-row-exact")
+    assert matrix.preflight(selected)["target_verify_row_exact"] is True
+    with pytest.raises(SystemExit):
+        args("--dry-run", "--target-verify-row-exact", "false")
+    selected.target_verify_row_exact = 1
+    with pytest.raises(ValueError, match="must be boolean"):
+        matrix.preflight(selected)
+
+
 def test_float32_memory_guard_requires_safe_known_footprint():
     receipt = matrix.guard_float32_footprint(17 << 30, 1 << 30, 24 << 30, 27 << 30)
     assert receipt["required_bytes"] == 22 << 30

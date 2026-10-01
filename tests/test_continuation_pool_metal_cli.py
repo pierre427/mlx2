@@ -60,6 +60,13 @@ def test_execution_requires_explicit_gpu_ownership():
         harness.preflight(args())
 
 
+def test_row_exact_candidate_is_explicit_and_reported_before_tensor_load():
+    assert harness.preflight(args("--dry-run"))["target_verify_row_exact"] is False
+    assert harness.preflight(args("--dry-run", "--target-verify-row-exact"))[
+        "target_verify_row_exact"
+    ] is True
+
+
 @pytest.mark.parametrize(
     "flag,value",
     [

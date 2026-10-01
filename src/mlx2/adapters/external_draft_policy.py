@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import replace
+from dataclasses import asdict, replace
 
 from ..contracts import Capability, StatePlane
 
@@ -79,6 +79,13 @@ class ExternalDraftAdapterMixin:
 
     def _bind_external_drafter(self, record, loader, base_descriptor):
         self.draft_model = loader(record, self.model)
+        # Capture effective head geometry before wrappers add policy receipts.
+        # Artifact bytes alone do not pin refinement passes or retained context.
+        effective_draft_settings = (
+            self.draft_model.receipt_settings
+            if "continuation_pool" in self.external_policy
+            else None
+        )
         self._external_target_revision = self.identity["fingerprint"]
         self._external_draft_revision = record["fingerprint"]
         if "lilicorr_feedback" in self.external_policy and not hasattr(
@@ -105,6 +112,7 @@ class ExternalDraftAdapterMixin:
                 self.draft_model.policy.as_dict(), sort_keys=True, separators=(",", ":")
             )
         if "continuation_pool" in self.external_policy:
+            from ..runtime.acceptance_estimator import AdaptiveVerificationPolicy
             from ..runtime.proposal_providers import ContinuationPoolPolicy
             from .proposal_path_sources import build_continuation_drafter
 
@@ -113,12 +121,29 @@ class ExternalDraftAdapterMixin:
             composition_identity = json.dumps(
                 normalized, sort_keys=True, separators=(",", ":")
             )
+            adaptive = AdaptiveVerificationPolicy.from_value(
+                self.external_policy.get("adaptive_verification"),
+                self._external_num_draft(),
+            )
+            adaptive_settings = None if adaptive is None else asdict(adaptive)
+            if adaptive_settings is not None:
+                adaptive_settings["draft_cost"] = float(adaptive.draft_cost)
+                adaptive_settings["min_gain"] = float(adaptive.min_gain)
             session_revision = hashlib.sha256(
-                (
-                    self._external_target_revision
-                    + self._external_draft_revision
-                    + self.EXTERNAL_ROUTE_TAG
-                    + composition_identity
+                json.dumps(
+                    {
+                        "schema": "mlx2.continuation-session.v2",
+                        "target_revision": self._external_target_revision,
+                        "draft_revision": self._external_draft_revision,
+                        "route": self.EXTERNAL_ROUTE_TAG,
+                        "continuation_pool": normalized,
+                        "draft_settings": effective_draft_settings,
+                        "num_draft": self._external_num_draft(),
+                        "adaptive_verification": adaptive_settings,
+                    },
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    allow_nan=False,
                 ).encode()
             ).hexdigest()
             self.draft_model = build_continuation_drafter(
@@ -131,8 +156,6 @@ class ExternalDraftAdapterMixin:
                 session_revision=session_revision,
             )
         if "lilicorr_feedback" in self.external_policy:
-            from dataclasses import asdict
-
             from ..runtime.lilicorr_feedback import LiLiCorrFeedbackPolicy
 
             composition_identity += json.dumps(

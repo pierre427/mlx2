@@ -35,6 +35,7 @@ def parser():
     result.add_argument("--repetitions", type=int, default=2)
     result.add_argument("--deadline-seconds", type=int, default=900)
     result.add_argument("--i-own-the-gpu", action="store_true")
+    result.add_argument("--target-verify-row-exact", action="store_true")
     result.add_argument("--dry-run", action="store_true")
     return result
 
@@ -58,6 +59,7 @@ def preflight(args):
         "model": str(args.model.resolve()),
         "draft": str(args.draft.resolve()),
         "compute_precision": args.compute_precision,
+        "target_verify_row_exact": args.target_verify_row_exact,
         "max_sequences": 15,
         "max_depth": 15,
         "cost_path_widths": [1, 5, 15],
@@ -231,6 +233,7 @@ def run(args, report):
         execution_policy={
             "draft_model": str(args.draft),
             "num_draft": 15,
+            "target_verify_row_exact": args.target_verify_row_exact,
             "continuation_pool": {"limit": 15, "ngram_min": 1, "ngram_max": 3},
         },
     )

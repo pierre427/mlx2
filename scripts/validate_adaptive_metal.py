@@ -39,6 +39,7 @@ def parser():
     p.add_argument("--timeout", type=int, default=900)
     p.add_argument("--i-own-the-gpu", action="store_true")
     p.add_argument("--dry-run", action="store_true")
+    p.add_argument("--target-verify-row-exact", action="store_true")
     p.add_argument(
         "--compute-precision",
         choices=("artifact", "float32-diagnostic"),
@@ -48,6 +49,8 @@ def parser():
 
 
 def plan(args):
+    if type(args.target_verify_row_exact) is not bool:
+        raise ValueError("target_verify_row_exact must be boolean")
     for name, limit in (
         ("num_draft", 15),
         ("context_tokens", 128),
@@ -84,6 +87,7 @@ def plan(args):
         "dry_run": args.dry_run,
         "model_loaded": False,
         "compute_precision": args.compute_precision,
+        "target_verify_row_exact": args.target_verify_row_exact,
     }
 
 
@@ -248,12 +252,17 @@ def run(args, receipt):
         }
     adapter = StandardDecoderAdapter(
         str(args.target),
-        execution_policy={"draft_model": str(args.draft), "num_draft": args.num_draft},
+        execution_policy={
+            "draft_model": str(args.draft),
+            "num_draft": args.num_draft,
+            "target_verify_row_exact": args.target_verify_row_exact,
+        },
     )
     receipt["model_loaded"] = True
     receipt["artifacts"] = {
         "identity": adapter.identity,
         "draft_settings": adapter.draft_model.receipt_settings,
+        "target_execution": getattr(adapter.model, "external_execution_receipt", None),
     }
     model = adapter.model
     if args.compute_precision == "float32-diagnostic":
@@ -358,6 +367,7 @@ def run(args, receipt):
     receipt["policy"] = policy
     receipt["cost_binding"] = {
         "artifact_identity": adapter.identity,
+        "target_verify_row_exact": args.target_verify_row_exact,
         "device": receipt["device"],
         "context_tokens": args.context_tokens,
         "cohorts": [1, 2, 4],
@@ -655,6 +665,7 @@ def run(args, receipt):
     receipt["note"] = (
         "Natural measured-cost decisions may preserve fixed depth. Correctness does not establish speedup or production qualification."
     )
+    receipt["target_execution"] = getattr(model, "external_execution_receipt", None)
 
 
 def write(path, receipt):

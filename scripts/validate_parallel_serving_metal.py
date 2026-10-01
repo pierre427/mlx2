@@ -46,6 +46,7 @@ def parser():
     )
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--i-own-the-gpu", action="store_true")
+    p.add_argument("--target-verify-row-exact", action="store_true")
     return p
 
 
@@ -62,6 +63,7 @@ def preflight(args):
         "model": str(args.model.resolve()),
         "draft": str(args.draft.resolve()),
         "routes": list(args.routes),
+        "target_verify_row_exact": args.target_verify_row_exact,
         "cells": {},
         "failures": [],
     }
@@ -167,6 +169,7 @@ def run_route(args, report, route):
             "draft_model": str(args.draft),
             "num_draft": 15,
             "xpress_num_passes": 6,
+            "target_verify_row_exact": args.target_verify_row_exact,
         }
         if route == "xpress_pool":
             policy["continuation_pool"] = {"limit": 15}

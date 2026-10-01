@@ -156,10 +156,13 @@ def build_parser():
     )
     parser.add_argument("--i-own-the-gpu", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--target-verify-row-exact", action="store_true")
     return parser
 
 
 def preflight(args):
+    if type(args.target_verify_row_exact) is not bool:
+        raise ValueError("target_verify_row_exact must be boolean")
     if not 1 <= args.timeout_seconds <= 900:
         raise ValueError("timeout-seconds must be between 1 and 900")
     windows = [32, 128, None]
@@ -195,6 +198,7 @@ def preflight(args):
         "qualified": False,
         "will_execute": not args.dry_run,
         "compute_precision_requested": args.compute_precision,
+        "target_verify_row_exact": args.target_verify_row_exact,
     }
 
 
@@ -472,6 +476,7 @@ def run(args, report):
             "draft_model": report["draft"],
             "num_draft": 15,
             "xpress_num_passes": 6,
+            "target_verify_row_exact": report["target_verify_row_exact"],
         },
     )
     if adapter.descriptor.model_type != "qwen3":
@@ -479,6 +484,7 @@ def run(args, report):
     report.update(
         device="Metal GPU",
         artifact_identity=adapter.identity,
+        target_execution=getattr(adapter.model, "external_execution_receipt", None),
         load_seconds_diagnostic=time.perf_counter() - started,
     )
     model, draft = adapter.model, adapter.draft_model
@@ -1079,6 +1085,7 @@ def run(args, report):
     if report["aggregate"]["sampled_laws"] <= 0:
         raise AssertionError("sampled target laws unobserved")
     report["draft_counters"] = dict(draft.stats)
+    report["target_execution"] = getattr(model, "external_execution_receipt", None)
     adapter.close()
 
 
