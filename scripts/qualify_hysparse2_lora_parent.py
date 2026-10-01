@@ -23,6 +23,7 @@ def main():
         from mlx.utils import tree_flatten, tree_unflatten
         from mlx2.experimental.hysparse2 import lora as lora_module
         from mlx2.experimental.hysparse2 import model as model_module
+        from mlx2.experimental.hysparse2 import train as train_module
         from mlx2.experimental.hysparse2.config import Config
         from mlx2.experimental.hysparse2.train import _load_model_state
         from mlx2.experimental.hysparse2.apc import EndpointAPC
@@ -41,6 +42,27 @@ def main():
         child = unrelated = loaded = None
         engine = APCv2(max_size=4, layout_name="hysparse2-endpoint-v1")
         try:
+            report["base_checkpoint_overlay_guards"] = []
+            def checkpoint_guard(label):
+                weights = dict(tree_flatten(model.parameters()))
+                owner, identity, digest = model._cache_owner, model.adapter_revision, model.ple_sidecar_digest
+                unsupported = args.output / ("unsupported-" + label)
+                try:
+                    train_module.save_checkpoint(unsupported, model, parent.optimizer, 0, {}, mode="model")
+                    raise AssertionError("overlay base checkpoint accepted")
+                except ValueError as exc:
+                    assert "LoRA overlays" in str(exc)
+                assert not unsupported.exists()
+                try:
+                    train_module.initialize_from_checkpoint(args.checkpoint, model)
+                    raise AssertionError("base load into overlay accepted")
+                except ValueError as exc:
+                    assert "LoRA overlays" in str(exc)
+                assert model._cache_owner is owner and model.adapter_revision == identity
+                assert model.ple_sidecar_digest == digest
+                assert all(dict(tree_flatten(model.parameters()))[key] is value for key, value in weights.items())
+                report["base_checkpoint_overlay_guards"].append(label)
+            checkpoint_guard("active")
             def diagnostic(m, _):
                 layer = m.self_decoder[0].attention.q
                 return mx.sum(layer.lora_b) if hasattr(layer, "lora_b") else mx.array(0.)
@@ -48,6 +70,7 @@ def main():
             parent.step(None, diagnostic)
             assert parent.evaluate(None, None, diagnostic)["promoted"]
             parent.close()
+            checkpoint_guard("retained")
             report["parent_adapter_revision"] = model.adapter_revision
             mx.random.seed(73)
             child = lora_module.LoRAEpisode(model, ["semantic_ple.value"], base_revision=revision, rank=2, max_steps=1)
@@ -143,7 +166,7 @@ def main():
             assert loaded.steps == 1 and model.adapter_revision != child_revision
             report["managed_retry_passed"] = True
             report["peak_memory_bytes"] = mx.get_peak_memory()
-            report["source_hashes"] = {str(path): file_hash(path) for path in (Path(__file__), Path(lora_module.__file__), Path(model_module.__file__))}
+            report["source_hashes"] = {str(path): file_hash(path) for path in (Path(__file__), Path(lora_module.__file__), Path(model_module.__file__), Path(train_module.__file__))}
             report["completed"] = True
         finally:
             for episode in (loaded, unrelated, child):

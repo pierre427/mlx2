@@ -27,12 +27,24 @@ def file_hash(path):
     return h.hexdigest()
 
 
+def _require_base_checkpoint_topology(model):
+    from .lora import EpisodeLinear
+
+    if (
+        getattr(model, "_lora_episode", None) is not None
+        or model.adapter_revision is not None
+        or any(isinstance(module, EpisodeLinear) for _, module in model.named_modules())
+    ):
+        raise ValueError("base checkpoints do not support LoRA overlays; use adapter export and restore the base first")
+
+
 def save_checkpoint(root, model, optimizer, step, run, mode="full"):
     import mlx.core as mx
     from mlx.utils import tree_flatten
 
     if mode not in {"full", "model"}:
         raise ValueError("checkpoint mode must be full or model")
+    _require_base_checkpoint_topology(model)
     root = Path(root)
     root.mkdir(parents=True, exist_ok=True)
     target = root / f"step-{step:08d}"
@@ -100,6 +112,7 @@ def save_checkpoint(root, model, optimizer, step, run, mode="full"):
 def _load_model_state(path, model):
     import mlx.core as mx
 
+    _require_base_checkpoint_topology(model)
     path = Path(path)
     metadata = json.loads((path / "state.json").read_text())
     try:

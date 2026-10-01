@@ -272,3 +272,33 @@ def test_failed_optimizer_step_restores_adapter_and_optimizer(monkeypatch, failu
         assert episode.steps == steps + 1
     finally:
         episode.close()
+
+
+@pytest.mark.parametrize("retained", [False, True])
+def test_full_checkpoint_rejects_lora_topology_before_io_or_mutation(tmp_path, retained):
+    from mlx import optimizers
+    from mlx2.experimental.hysparse2.train import save_checkpoint, initialize_from_checkpoint
+
+    model = Model(Config.smoke())
+    plain = save_checkpoint(tmp_path / "plain", model, optimizers.Adam(1e-3), 0, {}, mode="model")
+    episode = LoRAEpisode(model, ["self_decoder.0.attention.q"], base_revision="r", rank=2)
+    try:
+        if retained:
+            def diagnostic(m, _):
+                layer = m.self_decoder[0].attention.q
+                return mx.sum(layer.lora_b) if hasattr(layer, "lora_b") else mx.array(0.)
+            episode.step(None, diagnostic)
+            assert episode.evaluate(None, None, diagnostic)["promoted"]
+            episode.close()
+        before = dict(tree_flatten(model.parameters()))
+        owner, revision, digest = model._cache_owner, model.adapter_revision, model.ple_sidecar_digest
+        with pytest.raises(ValueError, match="LoRA overlays"):
+            save_checkpoint(tmp_path / "unsupported", model, optimizers.Adam(1e-3), 0, {}, mode="model")
+        assert not (tmp_path / "unsupported").exists()
+        with pytest.raises(ValueError, match="LoRA overlays"):
+            initialize_from_checkpoint(plain, model)
+        assert model._cache_owner is owner and model.adapter_revision == revision
+        assert model.ple_sidecar_digest == digest
+        assert all(dict(tree_flatten(model.parameters()))[k] is v for k, v in before.items())
+    finally:
+        episode.rollback()
