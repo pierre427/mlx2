@@ -38,17 +38,20 @@ def test_env_flag_defaults_off():
         AW._parse_flag("maybe")
 
 
-def test_policy_field_is_opt_in_and_receipt_neutral():
+def test_policy_field_follows_the_row_exact_route_and_is_receipt_neutral():
     from mlx2.adapters.flash_next_policy import FlashNextPolicy
 
     default = FlashNextPolicy()
     assert "row_exact_window_kernels" not in default.as_dict()
     env = default.environment()
     assert AW.ENV_NAME not in env and "MLX_QWEN4_HC_ROW_EXACT" not in env
-    chosen = FlashNextPolicy.from_mapping({"row_exact_window_kernels": True})
+    chosen = FlashNextPolicy.from_mapping({"row_exact_verify": True})
     assert chosen.as_dict()["row_exact_window_kernels"] is True
     env = chosen.environment()
     assert env[AW.ENV_NAME] == "1" and env["MLX_QWEN4_HC_ROW_EXACT"] == "1"
+    off = FlashNextPolicy.from_mapping({"row_exact_verify": True, "row_exact_window_kernels": False})
+    assert "row_exact_window_kernels" not in off.as_dict()
+    assert AW.ENV_NAME not in off.environment()
     with pytest.raises(ValueError, match="row_exact_window_kernels"):
         FlashNextPolicy.from_mapping({"row_exact_window_kernels": "yes"})
 
