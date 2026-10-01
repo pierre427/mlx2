@@ -1637,12 +1637,6 @@ def feature_observations(final, kv_fidelity=None, adaptive_benchmark=None, initi
         # feature_int8_prefill whenever the policy is enabled, so the
         # observation key must exist or the qualifier raises KeyError.
         "int8_prefill": final.get("int8_prefill", {}).get("counts", {}).get("engaged_calls", 0),
-        # Recurrent-state codec: leaves encoded into APCv2 entries and decoded
-        # back on restore; both must happen for the codec to be exercised.
-        "recurrent_state_codec": min(
-            int((final.get("recurrent_state_codec") or {}).get("counters", {}).get("encoded_leaves", 0)),
-            int((final.get("recurrent_state_codec") or {}).get("counters", {}).get("process_decoded_leaves", 0)),
-        ),
         "prefill_projection": prefill_delta(
             "tensorfold_prefill", ("projection_calls", "grouped_calls", "swiglu_calls")
         ),

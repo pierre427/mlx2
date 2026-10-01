@@ -56,12 +56,11 @@ def required_generic_checks(descriptor):
 APPROVED_QUALIFICATION_HARNESS = {
     "schema": "mlx2.qualification-harness.v1",
     "name": "scripts/qualify_serving.py",
-    # Re-pinned 2026-10-01 (recon-20261001) for the recurrent_state_codec
-    # observation. Before that: the combined harness re-freeze (origin/main's
+    # Re-pinned 2026-10-01 for the combined harness re-freeze: origin/main's
     # import-guard and SRPT-forcing producer plus the dense_weight_streaming
-    # serving observation). Receipts from earlier harnesses (82ab2971...,
-    # 16c32750..., f3f001ec...) must be regenerated before they validate.
-    "sha256": "577eeceab339ccb94a099c0c118d822137af71fced88a77b01036235d1d4518f",
+    # serving observation. Receipts from either previous harness
+    # (16c32750..., f3f001ec...) must be regenerated before they validate.
+    "sha256": "82ab29716f4b4f11bfb698223c4e6ae78afeb1c0dd00cc37838c26d451ce9e56",
 }
 
 # The approved generic producer has no live adapter-owned media probes. A
@@ -144,7 +143,9 @@ def required_feature_checks(settings):
         features.add("feature_int8_prefill")
     if (settings.get("recurrent_state_codec") or {}).get("enabled") is True:
         # A selected recurrent-state codec must show leaves encoded on store
-        # and decoded on restore, or a no-op codec could be qualified.
+        # and decoded on restore, or a no-op codec could be qualified.  The
+        # approved harness has no such observation yet, so a codec route
+        # cannot qualify until the next harness freeze adds one (fail closed).
         features.add("feature_recurrent_state_codec")
     prefill = settings.get("prefill_execution") or {}
     if prefill.get("projection"):
