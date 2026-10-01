@@ -18,11 +18,14 @@ def main():
     p.add_argument("--checkpoint", type=Path, required=True)
     p.add_argument("--tokens", type=Path, required=True)
     p.add_argument("--reference", type=Path, required=True)
+    p.add_argument("--candidate", type=Path, help="Isolated candidate attention module; does not replace runtime source")
     p.add_argument("--output", type=Path, required=True)
     p.add_argument("--contexts", type=int, nargs="+", default=[4096, 16384])
     p.add_argument("--decode-tokens", type=int, default=16)
     p.add_argument("--public-methods", action="store_true", help="Compare reference model public prefill/decode methods on current internals")
     args = p.parse_args()
+    if args.candidate and args.public_methods:
+        p.error("candidate attention cannot be combined with public-method comparison")
     if (any(length < 8 for length in args.contexts)
             or len(set(args.contexts)) != len(args.contexts)
             or not 1 <= args.decode_tokens <= 64):
@@ -35,6 +38,11 @@ def main():
     reference = importlib.util.module_from_spec(spec)
     sys.modules[name] = reference
     spec.loader.exec_module(reference)
+    candidate = None
+    if args.candidate:
+        candidate_spec = importlib.util.spec_from_file_location("isolated_attention_candidate", args.candidate)
+        candidate = importlib.util.module_from_spec(candidate_spec)
+        candidate_spec.loader.exec_module(candidate)
     c = Config(**json.loads((args.checkpoint / "state.json").read_text())["config"])
     report = {
         "schema": "mlx2.hysparse2-candidate-decode.v1",
@@ -50,6 +58,7 @@ def main():
         "checkpoint_sha256": file_hash(args.checkpoint / "model.safetensors"),
         "tokens_sha256": file_hash(args.tokens),
         "reference_sha256": file_hash(args.reference),
+        "candidate_sha256": file_hash(args.candidate) if args.candidate else None,
     }
 
     def save():
@@ -62,6 +71,7 @@ def main():
 
         from mlx2.experimental.hysparse2 import attention
         from mlx2.experimental.hysparse2 import model as model_module
+        candidate_attention = candidate.attention if candidate is not None else attention.attention
 
         mx.set_default_device(mx.gpu)
         mx.set_memory_limit(24 << 30)
@@ -95,7 +105,7 @@ def main():
         try:
             for label, function in (
                 ("reference", reference.attention),
-                ("gathered", attention.attention),
+                ("gathered", candidate_attention),
             ):
                 install(label, function)
                 logits, cache = model.prefill(mx.array(values[:8][None]))
@@ -107,7 +117,7 @@ def main():
                 row, results = {"context": length, "arms": {}}, []
                 for label, function in (
                     ("reference", reference.attention),
-                    ("gathered", attention.attention),
+                    ("gathered", candidate_attention),
                 ):
                     install(label, function)
                     prompt = mx.array(values[:length][None])
