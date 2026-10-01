@@ -221,12 +221,27 @@ class GatedDeltaNet(nn.Module):
         fused = self._try_fused_decode(qkv, z, b, a, mask, cache)
         if fused is not None:
             return fused
+        out = self._recurrent_core(qkv, z, b, a, mask, cache, dtype=inputs.dtype)
+        out = self.out_proj(out.reshape(B, S, -1))
+        if self.sharding_group is not None:
+            out = mx.distributed.all_sum(out, group=self.sharding_group)
+        return out
+
+    def _recurrent_core(self, qkv, z, b, a, mask, cache, *, dtype):
+        """Everything between the input and output projections.
+
+        Shared by ``__call__`` and :meth:`mixed`, so the mixed prefill+decode
+        forward runs exactly the ordinary path's conv, normalization,
+        recurrence and gated norm per segment.  Returns the gated-norm output
+        before ``out_proj``.
+        """
+        (B, S) = qkv.shape[:2]
         z = z.reshape(B, S, self.num_v_heads, self.head_v_dim)
         if cache is not None and cache[0] is not None:
             conv_state = cache[0]
         else:
             conv_state = mx.zeros(
-                (B, self.conv_kernel_size - 1, self.conv_dim), dtype=inputs.dtype
+                (B, self.conv_kernel_size - 1, self.conv_dim), dtype=dtype
             )
         if mask is not None:
             qkv = mx.where(mask[..., None], qkv, 0)
@@ -309,8 +324,33 @@ class GatedDeltaNet(nn.Module):
         if cache is not None:
             cache[1] = state
             cache.advance(S)
-        out = self.norm(out, z)
-        out = self.out_proj(out.reshape(B, S, -1))
+        return self.norm(out, z)
+
+    def mixed(self, inputs, parts):
+        """One packed forward over several cache segments.
+
+        ``inputs`` is the packed ``[1, N, D]`` token stream; ``parts`` is a
+        sequence of ``(rows, length, start, cache, mask)`` with
+        ``rows * length`` tokens starting at ``start``.  Projections run once
+        on the packed stream (one weight read for every segment); the
+        convolution and recurrence run per segment against that segment's
+        cache.  The fused decode shortcut is not used: a decode row here
+        rides inside a prefill-width matmul by design.
+        """
         if self.sharding_group is not None:
-            out = mx.distributed.all_sum(out, group=self.sharding_group)
-        return out
+            raise ValueError("mixed forward is not qualified with tensor sharding")
+        (qkv, z, b, a) = self._input_projections(inputs)
+        outs = []
+        for rows, length, start, cache, mask in parts:
+            if bool(getattr(cache, "speculating", False)):
+                raise ValueError("mixed forward cannot run inside a speculative transaction")
+            span = slice(start, start + rows * length)
+
+            def seg(t):
+                return t[:, span].reshape(rows, length, -1)
+
+            out = self._recurrent_core(
+                seg(qkv), seg(z), seg(b), seg(a), mask, cache, dtype=inputs.dtype
+            )
+            outs.append(out.reshape(1, rows * length, -1))
+        return self.out_proj(mx.concatenate(outs, axis=1))

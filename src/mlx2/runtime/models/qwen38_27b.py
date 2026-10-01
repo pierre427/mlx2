@@ -62,12 +62,20 @@ class Qwen3NextAttention(nn.Module):
         self, x: mx.array, mask: Optional[mx.array] = None, cache: Optional[Any] = None
     ) -> mx.array:
         (B, L, D) = x.shape
-        q_proj_output = self.q_proj(x)
+        output = self._attend(
+            self.q_proj(x), self.k_proj(x), self.v_proj(x), B, L, mask, cache
+        )
+        return self.o_proj(output)
+
+    def _attend(self, q_proj_output, keys, values, B, L, mask, cache):
+        """Everything between the input and output projections (gated output).
+
+        Shared by ``__call__`` and :meth:`mixed`.
+        """
         (queries, gate) = mx.split(
             q_proj_output.reshape(B, L, self.num_attention_heads, -1), 2, axis=-1
         )
         gate = gate.reshape(B, L, -1)
-        (keys, values) = (self.k_proj(x), self.v_proj(x))
         queries = self.q_norm(queries).transpose(0, 2, 1, 3)
         keys = self.k_norm(keys.reshape(B, L, self.num_key_value_heads, -1)).transpose(
             0, 2, 1, 3
@@ -86,7 +94,27 @@ class Qwen3NextAttention(nn.Module):
             queries, keys, values, cache=cache, scale=self.scale, mask=mask
         )
         output = output.transpose(0, 2, 1, 3).reshape(B, L, -1)
-        return self.o_proj(output * gate_sigmoid(gate))
+        return output * gate_sigmoid(gate)
+
+    def mixed(self, x, parts):
+        """Packed projections, per-segment RoPE/cache/attention, packed o_proj.
+
+        See ``GatedDeltaNet.mixed`` for ``parts``.  Each segment keeps its own
+        cache, positions and mask; no variable-length kernel is needed because
+        MLX's own attention kernels run once per segment.
+        """
+        q_all, k_all, v_all = self.q_proj(x), self.k_proj(x), self.v_proj(x)
+        outs = []
+        for rows, length, start, cache, mask in parts:
+            span = slice(start, start + rows * length)
+            out = self._attend(
+                q_all[:, span].reshape(rows, length, -1),
+                k_all[:, span].reshape(rows, length, -1),
+                v_all[:, span].reshape(rows, length, -1),
+                rows, length, mask, cache,
+            )
+            outs.append(out.reshape(1, rows * length, -1))
+        return self.o_proj(mx.concatenate(outs, axis=1))
 
 
 Attention = Qwen3NextAttention
@@ -160,6 +188,12 @@ class DecoderLayer(nn.Module):
         h = x + r
         out = h + self.mlp(self.post_attention_layernorm(h))
         return out
+
+    def mixed(self, x: mx.array, parts) -> mx.array:
+        """``__call__`` over a packed multi-segment stream (see ``Qwen3_5TextModel.mixed``)."""
+        mixer = self.linear_attn if self.is_linear else self.self_attn
+        h = x + mixer.mixed(self.input_layernorm(x), parts)
+        return h + self.mlp(self.post_attention_layernorm(h))
 
 
 class Qwen3_5TextModel(PipelineMixin, nn.Module):
@@ -266,6 +300,59 @@ class MTPModule(nn.Module):
         self.norm = nn.RMSNorm(args.hidden_size, eps=args.rms_norm_eps)
 
 
+def _mixed_plan(trunk, segments):
+    """Validate ``segments`` and lay them out in one packed stream."""
+    if trunk.pipeline_size != 1:
+        raise ValueError("mixed forward is not qualified with pipeline parallelism")
+    if not segments:
+        raise ValueError("mixed forward needs at least one segment")
+    n_layers = len(trunk.layers)
+    embeds, plan, start = [], [], 0
+    for tokens, caches in segments:
+        if not isinstance(tokens, mx.array) or tokens.ndim != 2 or tokens.size == 0:
+            raise ValueError("each mixed segment needs a nonempty [rows, length] token array")
+        if caches is None or len(caches) != n_layers:
+            raise ValueError("each mixed segment needs one cache per layer")
+        if any(bool(getattr(c, "speculating", False)) for c in caches):
+            raise ValueError("mixed forward cannot run inside a speculative transaction")
+        (rows, length) = tokens.shape
+        e = trunk.embed_tokens(tokens)
+        plan.append((
+            rows, length, start, caches,
+            create_attention_mask(e, caches[trunk.fa_idx]),
+            create_ssm_mask(e, caches[trunk.ssm_idx]),
+        ))
+        embeds.append(e.reshape(1, rows * length, -1))
+        start += rows * length
+    return mx.concatenate(embeds, axis=1), plan
+
+
+def _trunk_mixed(trunk, segments):
+    """``Qwen3_5TextModel.__call__`` over several segments in one forward.
+
+    Per-token work (embedding, norms, every projection, the MLP) runs once on
+    the packed stream, so a decode row costs a fraction of a percent of a
+    prefill slice's forward instead of its own full weight read; attention
+    and the gated-delta recurrence run per segment against that segment's
+    cache.  On the served 27B the mixed forward costs what the slice alone
+    costs when the packed width is 64-row aligned (docs/audits/
+    2026-09-30-basics-sweep/prefill-contention).  Returns the final-normed
+    hidden states per segment as ``[rows, length, D]``.
+    """
+    (x, plan) = _mixed_plan(trunk, segments)
+    for index, layer in enumerate(trunk.layers):
+        parts = [
+            (rows, length, start, caches[index], ssm_mask if layer.is_linear else fa_mask)
+            for (rows, length, start, caches, fa_mask, ssm_mask) in plan
+        ]
+        x = layer.mixed(x, parts)
+    x = trunk.norm(x)
+    return [
+        x[:, start : start + rows * length].reshape(rows, length, -1)
+        for (rows, length, start, *_rest) in plan
+    ]
+
+
 class TextModel(nn.Module):
     def __init__(self, args: TextModelArgs):
         super().__init__()
@@ -339,6 +426,15 @@ class TextModel(nn.Module):
 
     def make_cache(self):
         return [ArraysCache(size=2) if l.is_linear else KVCache() for l in self.layers]
+
+    def mixed_forward(self, segments):
+        """One forward over prefill slices and decode cohorts; see ``_trunk_mixed``.
+
+        ``segments`` is a sequence of ``(tokens [rows, length], caches)``.
+        Logits are left to the caller (``self.logits`` on the rows it needs),
+        as the ordinary prefill leaves them unevaluated.
+        """
+        return _trunk_mixed(self.model, segments)
 
     def logits(self, hidden: mx.array) -> mx.array:
         if self.args.tie_word_embeddings:
@@ -492,6 +588,9 @@ class Model(nn.Module):
 
     def logits(self, hidden: mx.array) -> mx.array:
         return self.language_model.logits(hidden)
+
+    def mixed_forward(self, segments):
+        return self.language_model.mixed_forward(segments)
 
     def make_mtp_cache(self):
         return self.language_model.make_mtp_cache()
