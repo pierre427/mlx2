@@ -462,7 +462,7 @@ class Model(nn.Module):
         self._semantic_capsules = snapshot
         self._cache_owner = object()
 
-    def _embed(self, tokens, ple_history=None):
+    def _validate_tokens(self, tokens, *, check_range=True):
         if (
             tokens.ndim != 2
             or tokens.shape[0] < 1
@@ -470,6 +470,11 @@ class Model(nn.Module):
             or not 0 < tokens.shape[1] <= self.config.max_context
         ):
             raise ValueError("tokens must be a nonempty B,T array within max_context")
+        if check_range and bool(mx.any((tokens < 0) | (tokens >= self.config.vocab_size)).item()):
+            raise ValueError("token IDs must be within the vocabulary")
+
+    def _embed(self, tokens, ple_history=None):
+        self._validate_tokens(tokens, check_range=False)
         x = self.embedding(tokens)
         if self.config.semantic_ple_rows:
             x = x + self.semantic_ple(tokens, x, ple_history)
@@ -488,6 +493,11 @@ class Model(nn.Module):
 
     def __call__(self, tokens, *, next_tokens=None):
         """Full teacher-forced training: all layers, no prefill early exit."""
+        self._validate_tokens(tokens)
+        if next_tokens is not None:
+            if not self.config.mtp or next_tokens.shape != tokens.shape:
+                raise ValueError("MTP requires enabled head and aligned next_tokens")
+            self._validate_tokens(next_tokens)
         x = self._embed(tokens)
         aux = mx.array(0.0)
         source = None
@@ -693,6 +703,7 @@ class Model(nn.Module):
 
     def prefill(self, tokens, cache=None, *, return_logits=True):
         """Build caches through self decoder; run cross only for the last logit."""
+        self._validate_tokens(tokens)
         if tokens.ndim != 2 or tokens.shape[1] < 1:
             raise ValueError("nonempty B,T tokens required")
         cache = self.new_cache(tokens.shape[0]) if cache is None else cache
@@ -737,6 +748,7 @@ class Model(nn.Module):
                            "kv_committed": False, "serving_route_qualified": False}
 
     def decode(self, tokens, cache):
+        self._validate_tokens(tokens)
         if tokens.ndim != 2 or tokens.shape[1] != 1:
             raise ValueError("decode consumes one new token per row")
         x, offset = self._append(tokens, cache)

@@ -97,3 +97,19 @@ def test_incomplete_state_rejected_before_decode_mutation(damage, batched):
             model.decode(mx.array([[5]]), cache)
     after = (cache.length, cache.self_layer_calls, cache.cross_layer_calls, cache.ple_history)
     assert before[:3] == after[:3] and before[3] is after[3]
+
+
+@pytest.mark.parametrize("value", [-1, 48])
+@pytest.mark.parametrize("operation", ["prefill", "decode"])
+def test_invalid_tokens_reject_before_existing_cache_mutation(value, operation):
+    model = Model(replace(Config.smoke(), prefill_chunk=2))
+    model.eval()
+    _, cache = model.prefill(mx.array([[1, 2]]))
+    before = (cache.length, cache.self_layer_calls, cache.cross_layer_calls, cache.boundary, cache.ple_history)
+    with pytest.raises(ValueError, match="vocabulary"):
+        if operation == "prefill":
+            model.prefill(mx.array([[3, 4, value]]), cache)
+        else:
+            model.decode(mx.array([[value]]), cache)
+    after = (cache.length, cache.self_layer_calls, cache.cross_layer_calls, cache.boundary, cache.ple_history)
+    assert before[:3] == after[:3] and before[3] is after[3] and before[4] is after[4]
