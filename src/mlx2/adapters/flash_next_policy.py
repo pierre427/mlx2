@@ -13,6 +13,9 @@ _OPTIONAL_KERNEL_ENV = {
     "moe_router_kernel": "MLX_QWEN4_MOE_ROUTER_KERNEL",
     "qsa_nax_decode": "MLX_QWEN4_QSA_NAX_DECODE",
     "gdn_core": "MLX_GDN_CORE",
+    # TensorFold 0.6.1 "Flash Next on Macs at long context" intake
+    # (provenance/tensorfold-0.6.1-flashnext-longctx.json).
+    "qsa_fused_scores": "MLX_QWEN4_QSA_FUSED_SCORES",
 }
 
 
@@ -56,6 +59,15 @@ class FlashNextPolicy:
     moe_router_kernel: bool = False
     qsa_nax_decode: bool = False
     gdn_core: bool = False
+    # TensorFold 0.6.1 keys-stationary block scores (MLX_QWEN4_QSA_FUSED_SCORES,
+    # runtime/models/qwen4_qsa_scores.py): past the indexer budget a decode
+    # or verify step's QSA block scores come from ONE launch that reads the
+    # bf16 pooled keys once for all of the step's rows, instead of an fp32
+    # copy of every pooled key, a steel GEMM and four elementwise/reduction
+    # launches; the arithmetic is the stock chain's (bytes and argpartition
+    # ids identical on Metal, scripts/check_qwen4_qsa_scores.py).  Opt-in;
+    # enters the environment and receipts only when enabled.
+    qsa_fused_scores: bool = False
     # Widest verify block the fused GDN verify kernel admits
     # (MLX_QWEN4_FUSED_GDN_VERIFY_MAX_STEPS, 2..17; the kernel module's own
     # default stays 8).  17 since 2026-09-25: every width is bit-exact to the

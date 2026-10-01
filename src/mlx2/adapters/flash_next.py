@@ -124,6 +124,23 @@ def gdn_state_diagnostics(adapter) -> dict:
     return {"gdn_state": {**receipt, "counters": dict(receipt["counters"])}}
 
 
+TENSORFOLD_LONGCTX_FIELDS = ("qsa_fused_scores",)
+
+
+def tensorfold_longctx_diagnostics(policy) -> dict:
+    """Engagement of the TensorFold 0.6.1 long-context mechanisms, under one
+    key that exists only while at least one of them is enabled."""
+    selected = [f for f in TENSORFOLD_LONGCTX_FIELDS if getattr(policy, f, False)]
+    if not selected:
+        return {}
+    report = {"selected": selected}
+    if getattr(policy, "qsa_fused_scores", False):
+        from ..runtime.models.qwen4_qsa_scores import status as qsa_scores_status
+
+        report["qsa_fused_scores"] = qsa_scores_status()
+    return {"tensorfold_longctx": report}
+
+
 def chat_template(tokenizer, request: dict, *, tokenize: bool):
     """Render a chat request through the Qwen template (ids or text)."""
     messages = copy.deepcopy(request["messages"])
@@ -660,6 +677,9 @@ class FlashNextAdapter:
                 if getattr(self.policy, "attn_fused_rows", False)
                 else {}
             ),
+            # TensorFold 0.6.1 long-context intake; absent while every
+            # mechanism is off so default receipts are unchanged.
+            **tensorfold_longctx_diagnostics(self.policy),
             "norm_convention": (
                 None
                 if getattr(self, "norm_convention", None) is None

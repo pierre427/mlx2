@@ -77,6 +77,7 @@ from .qwen4_gate_inject import (
 from .qwen4_gdn_outproj import admit_qwen4_gdn_outproj
 from . import qwen4_fused_gdn_prefill as _gdn_prefill
 from . import qwen4_attn_rows as _attn_rows
+from . import qwen4_qsa_scores as _qsa_scores
 from .qwen4_qsa_nax import (
     block_sparse_layout_supported,
     compact_blocks_to_kernel_inputs,
@@ -5693,13 +5694,31 @@ class QSAIndexer(nn.Module):
                 else:
                     stage1_reason = "unsupported_geometry"
             if not stage1_engaged:
-                scores = mx.einsum(
-                    "blhd,bnd->blnh", q.astype(mx.float32), pooled.astype(mx.float32)
-                )
-                scores = mx.sum(mx.maximum(scores, 0), axis=-1) / math.sqrt(
-                    self.head_dim
-                )
-                scores = mx.where(valid_blocks, scores, -mx.inf)
+                scores = None
+                if _qsa_scores.enabled():
+                    # TensorFold 0.6.1's keys-stationary block scores, in the
+                    # stock chain's arithmetic (qwen4_qsa_scores).
+                    refusal = _qsa_scores.supported(
+                        q, pooled
+                    ) or _qsa_scores.offset_supported(offset, batch)
+                    if refusal is None:
+                        _qsa_scores.bump("engaged")
+                        _qsa_scores.bump("engaged_rows", batch * length)
+                        scores = _qsa_scores.block_scores(
+                            q, pooled, offset, self.compress_ratio
+                        )
+                    else:
+                        _qsa_scores.bump("fallback_" + refusal)
+                if scores is None:
+                    scores = mx.einsum(
+                        "blhd,bnd->blnh",
+                        q.astype(mx.float32),
+                        pooled.astype(mx.float32),
+                    )
+                    scores = mx.sum(mx.maximum(scores, 0), axis=-1) / math.sqrt(
+                        self.head_dim
+                    )
+                    scores = mx.where(valid_blocks, scores, -mx.inf)
                 selected = mx.argpartition(scores, kth=n_blocks - k, axis=-1)[..., -k:]
             if length >= _QSA_STAGE1_MIN_QUERY:
                 _record_qsa_stage1(
