@@ -15,7 +15,13 @@ def main():
     parser.add_argument("--checkpoint", type=Path, required=True)
     parser.add_argument("--reference", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--batch", type=int, default=2)
+    parser.add_argument("--sequence", type=int, default=256)
+    parser.add_argument("--require-coalescing", action="store_true")
+    parser.add_argument("--segment-tokens", type=int, default=0)
     args = parser.parse_args()
+    if args.batch < 1 or args.sequence < 2 or args.segment_tokens < 0:
+        parser.error("batch must be positive and sequence at least two")
     args.output.mkdir(parents=True, exist_ok=False)
     spec = importlib.util.spec_from_file_location("attention_reference", args.reference)
     reference = importlib.util.module_from_spec(spec)
@@ -28,8 +34,10 @@ def main():
         "one_repetition_no_thermal_control": True,
         "checkpoint_sha256": file_hash(args.checkpoint / "model.safetensors"),
         "reference_sha256": file_hash(args.reference),
-        "batch": 2,
-        "sequence": 256,
+        "batch": args.batch,
+        "sequence": args.sequence,
+        "script_sha256": file_hash(Path(__file__)),
+        "kv_segment_tokens": args.segment_tokens,
     }
     with gpu_guard(wait_seconds=0):
         import mlx.core as mx
@@ -49,18 +57,44 @@ def main():
         _load_model_state(args.checkpoint, model)
         model.train()
         model.checkpoint_layers = True
-        tokens = (mx.arange(512).reshape(2, 256) * 17 + 1) % c.vocab_size
+        tokens = (
+            mx.arange(args.batch * args.sequence).reshape(args.batch, args.sequence)
+            * 17 + 1
+        ) % c.vocab_size
         mx.eval(model.parameters(), tokens)
         report["parameters"] = c.capacity()["parameters"]
         report["attention_source_sha256"] = file_hash(Path(attention.__file__))
         report["model_source_sha256"] = file_hash(Path(model_module.__file__))
         runs = []
+        gather_groups = attention._gather_groups
+        coalescing = {"calls": 0, "joined_groups": 0, "max_group_bytes": 0}
+
+        def observed_groups(blocks, **kwargs):
+            coalescing["calls"] += 1
+            original_max = max(k.shape[2] for k, _, _ in blocks)
+            for keys, values, start in gather_groups(blocks, **kwargs):
+                coalescing["joined_groups"] += int(keys.shape[2] > original_max)
+                size = keys.nbytes + values.nbytes
+                coalescing["max_group_bytes"] = max(coalescing["max_group_bytes"], size)
+                yield keys, values, start
+
         try:
+            attention._gather_groups = observed_groups
             for label, function in (
                 ("reference", reference.attention),
                 ("bounded", attention.attention),
             ):
-                model_module.attention = function
+                def segmented_attention(q, blocks, **kwargs):
+                    if args.segment_tokens:
+                        blocks = [
+                            (k[:, :, j:j + args.segment_tokens],
+                             v[:, :, j:j + args.segment_tokens], start + j)
+                            for k, v, start in blocks
+                            for j in range(0, k.shape[2], args.segment_tokens)
+                        ]
+                    return function(q, blocks, **kwargs)
+
+                model_module.attention = segmented_attention
                 compute = nn.value_and_grad(model, loss)
                 warm_value, warm_gradients = compute(model, tokens)
                 mx.eval(warm_value, warm_gradients)
@@ -98,10 +132,15 @@ def main():
             assert all(value > 0 for value in report["active_gradient_probes"].values())
             assert report["loss_abs_error"] < 1e-4
             assert report["gradient_max_abs_error"] < 1e-4
+            report["coalescing_observed"] = coalescing
+            if args.require_coalescing:
+                assert coalescing["calls"] > 0 and coalescing["joined_groups"] > 0
+                assert coalescing["max_group_bytes"] <= 16 << 20
             report["peak_memory_bytes"] = mx.get_peak_memory()
             report["completed"] = True
         finally:
             model_module.attention = attention.attention
+            attention._gather_groups = gather_groups
     (args.output / "receipt.json").write_text(json.dumps(report, indent=2) + "\n")
     print(json.dumps(report, indent=2))
 
