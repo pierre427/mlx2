@@ -23,7 +23,10 @@ _SORTED_QMM_K_TILE = 64
 # quantized gather is padded up to 4 rows per expert so MLX picks the
 # streaming kernel (ddalcu/mlx-serve#671).  The pad rows repeat the last
 # sorted row, so they stay sorted and touch no new expert; their outputs are
-# sliced off.  0 = off (default): the kernel switch is not bit-exact.
+# sliced off.  0 = off (default): the kernel switch is not bit-exact.  On an
+# M5, 3 cut short-prompt TTFT by up to 23% (Qwen3.6-35B) and 13% (Nemotron-3.5)
+# without a measured loss; 2 lost 11% on Nemotron at 2.25 rows/expert
+# (qualification/runs/recon-20261001/l5-moe-pad).
 _RHS_ROWS_PER_EXPERT = 4
 _RHS_MIN_ROWS = 16
 _RHS_PAD_MIN_ROWS_PER_EXPERT = int(os.environ.get("MLX2_MOE_RHS_PAD_MIN_ROWS", "0") or 0)
