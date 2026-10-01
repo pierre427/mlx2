@@ -109,7 +109,6 @@ def check_prep(attn, rng, report):
 
 
 def check_index_q(attn, rng, report):
-    from mlx2.runtime.models import qwen4_attn_rows as R
     from mlx2.runtime.models import qwen4_exp as Q
 
     ix = attn.indexer
