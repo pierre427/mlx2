@@ -259,3 +259,59 @@ def test_memory_batch_apc_diffusion_and_adapter_composition(tmp_path):
             if hasattr(lease, "close"):
                 lease.close()
         engine.close()
+
+
+@pytest.mark.parametrize("phase", ["objective", "optimizer"])
+def test_lora_step_rejects_changed_capsule_and_rolls_back(tmp_path, monkeypatch, phase):
+    from mlx2.experimental.hysparse2.lora import LoRAEpisode
+
+    model = Model(Config.smoke())
+    store = CapsuleStore(tmp_path / "capsules")
+    first = snapshot(store, model.config.vocab_size)
+    other = snapshot(store, model.config.vocab_size, text="changed training evidence")
+    model.attach_semantic_capsules(first)
+    episode = LoRAEpisode(model, ["semantic_ple.value"], base_revision="fixture")
+    tokens = mx.array([[1, 2, 3, 4, 5, 6, 7, 8]])
+    try:
+        episode.step(tokens, loss)
+        model.eval()
+        _, old_cache = model.prefill(tokens[:, :4])
+        weights = episode.weights()
+        optimizer_state = dict(tree_flatten(episode.optimizer.state))
+        mx.eval(weights, optimizer_state)
+        revision, steps = episode.live_revision, episode.steps
+        update = episode.optimizer.update
+
+        def objective(m, ids):
+            value = loss(m, ids)
+            if phase == "objective":
+                m.attach_semantic_capsules(other)
+            return value
+
+        def changed_update(m, gradients):
+            update(m, gradients)
+            if phase == "optimizer":
+                m.attach_semantic_capsules(other)
+
+        monkeypatch.setattr(episode.optimizer, "update", changed_update)
+        with pytest.raises(ValueError, match="capsule binding"):
+            episode.step(tokens, objective)
+        assert episode.steps == steps and episode.live_revision == revision
+        assert model.adapter_revision == revision and not model.training
+        assert not episode._allow_parameter_update
+        for key, value in episode.weights().items():
+            assert float(mx.max(mx.abs(value - weights[key])).item()) == 0
+        restored = dict(tree_flatten(episode.optimizer.state))
+        assert restored.keys() == optimizer_state.keys()
+        for key, value in optimizer_state.items():
+            assert bool(mx.all(restored[key] == value).item())
+        # Preserve the caller's memory change; reject the update made under it.
+        assert model.capsule_binding == other.binding()
+        with pytest.raises(ValueError, match="owner|another model"):
+            model.decode(tokens[:, 4:5], old_cache)
+        monkeypatch.setattr(episode.optimizer, "update", update)
+        model.attach_semantic_capsules(first)
+        assert mx.isfinite(mx.array(episode.step(tokens, loss))).item()
+        assert episode.steps == steps + 1
+    finally:
+        episode.close()

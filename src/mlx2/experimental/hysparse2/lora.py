@@ -115,6 +115,12 @@ class LoRAEpisode:
         weights = self.weights()
         optimizer_state = tree_map(lambda x: x, self.optimizer.state)
         revision, steps, was_training = self.live_revision, self.steps, self.model.training
+        capsule_binding = self.model.capsule_binding
+
+        def require_capsule_binding():
+            if self.model.capsule_binding != capsule_binding:
+                raise ValueError("capsule binding changed during episode step")
+
         self.model.train()
         self._allow_parameter_update = True
         try:
@@ -124,13 +130,16 @@ class LoRAEpisode:
                 not bool(mx.all(mx.isfinite(g)).item()) for _, g in tree_flatten(gradients)
             ):
                 raise ValueError("nonfinite episode loss or gradient")
+            require_capsule_binding()
             self.optimizer.update(self.model, gradients)
             mx.eval(self.model.parameters(), self.optimizer.state)
             if any(not bool(mx.all(mx.isfinite(v)).item()) for v in self.weights().values()) or any(
                 not bool(mx.all(mx.isfinite(v)).item()) for _, v in tree_flatten(self.optimizer.state)
             ):
                 raise ValueError("nonfinite episode update")
+            require_capsule_binding()
             self._invalidate()
+            require_capsule_binding()
             self.steps += 1
             return float(value.item())
         except BaseException:

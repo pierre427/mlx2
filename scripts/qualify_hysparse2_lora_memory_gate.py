@@ -18,6 +18,7 @@ def main():
     p.add_argument("--checkpoint", type=Path)
     p.add_argument("--output", type=Path, required=True)
     p.add_argument("--cpu-smoke", action="store_true")
+    p.add_argument("--step-binding-check", action="store_true", help="Exercise transactional objective/optimizer memory changes")
     args = p.parse_args()
     if not args.cpu_smoke and args.checkpoint is None:
         p.error("GPU exercise requires the scaled checkpoint")
@@ -27,6 +28,7 @@ def main():
               "device": "cpu" if args.cpu_smoke else "gpu", "cases": []}
     with nullcontext() if args.cpu_smoke else gpu_guard(wait_seconds=0):
         import mlx.core as mx
+        from mlx.utils import tree_flatten
         from mlx2.experimental.hysparse2.capsule_memory import CapsuleMemory
         from mlx2.experimental.hysparse2.config import Config
         from mlx2.experimental.hysparse2.lora import LoRAEpisode
@@ -63,7 +65,67 @@ def main():
                 encode=lambda s: [ord(x) % c.vocab_size for x in s]))
         tokens = (mx.arange(144)[None] * 17 + 1) % c.vocab_size
         keys = ["semantic_ple.value", "diffusion_student.condition"]
-        for change_at in (1, 3):
+        if args.step_binding_check:
+            for phase in ("objective", "optimizer"):
+                model.attach_semantic_capsules(memories[0])
+                model.eval()
+                baseline = model(tokens)[0]
+                mx.eval(baseline)
+                episode = LoRAEpisode(model, keys, base_revision=revision, max_steps=2)
+                update = episode.optimizer.update
+                try:
+                    value = episode.step(tokens, loss)
+                    model.eval()
+                    weights = episode.weights()
+                    state = dict(tree_flatten(episode.optimizer.state))
+                    mx.eval(weights, state)
+                    adapter_revision = episode.live_revision
+
+                    def objective(m, ids):
+                        result = loss(m, ids)
+                        if phase == "objective":
+                            m.attach_semantic_capsules(memories[1])
+                        return result
+
+                    def changed_update(m, gradients):
+                        update(m, gradients)
+                        if phase == "optimizer":
+                            m.attach_semantic_capsules(memories[1])
+
+                    episode.optimizer.update = changed_update
+                    try:
+                        episode.step(tokens, objective)
+                    except ValueError as exc:
+                        assert "capsule binding" in str(exc)
+                    else:
+                        raise AssertionError("mixed memory step accepted")
+                    assert episode.steps == 1 and episode.live_revision == adapter_revision
+                    assert model.adapter_revision == adapter_revision and not model.training
+                    assert model.capsule_binding == memories[1].binding()
+                    assert not episode._allow_parameter_update
+                    weight_error = max(float(mx.max(mx.abs(v - weights[k])).item())
+                                       for k, v in episode.weights().items())
+                    restored = dict(tree_flatten(episode.optimizer.state))
+                    assert restored.keys() == state.keys()
+                    state_error = max(float(mx.max(mx.abs(restored[k] - v)).item())
+                                      for k, v in state.items())
+                    assert weight_error == state_error == 0
+                    episode.optimizer.update = update
+                    model.attach_semantic_capsules(memories[0])
+                    retry_value = episode.step(tokens, loss)
+                    assert episode.steps == 2
+                finally:
+                    episode.optimizer.update = update
+                    episode.close()
+                model.eval()
+                error = float(mx.max(mx.abs(model(tokens)[0] - baseline)).item())
+                assert error == 0
+                report["cases"].append({"change_during": phase, "rejected": True,
+                    "training_loss": value, "retry_training_loss": retry_value,
+                    "adapter_restore_error": weight_error, "optimizer_restore_error": state_error,
+                    "caller_memory_change_preserved": True, "retry_steps": 2,
+                    "rollback_logit_error": error})
+        for change_at in (() if args.step_binding_check else (1, 3)):
             model.attach_semantic_capsules(memories[0])
             baseline = model(tokens)[0]
             mx.eval(baseline)
@@ -102,7 +164,7 @@ def main():
                                     "training_loss": value, "adapter_b_magnitudes": magnitudes,
                                     "retry_unpromoted": True, "rollback_logit_error": error})
         report["parameters"] = c.capacity()["parameters"]
-        report["adapter_steps_per_episode"] = 1
+        report["adapter_steps_per_episode"] = 2 if args.step_binding_check else 1
         if not args.cpu_smoke:
             report["peak_gib"] = mx.get_peak_memory() / (1 << 30)
     root = Path(__file__).resolve().parents[1]
