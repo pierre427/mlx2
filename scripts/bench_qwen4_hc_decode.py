@@ -117,9 +117,8 @@ def main():
                    for arm in a.arms}
         first_tokens = {}
         for rep in range(a.reps):
-            order = a.arms[rep % len(a.arms):] + a.arms[: rep % len(a.arms)]
-            if rep % 2:
-                order = order[::-1]
+            # ABBA: even reps run the arms in order, odd reps reversed.
+            order = list(a.arms) if rep % 2 == 0 else list(a.arms)[::-1]
             for arm in order:
                 configure(arm)
                 before = calls()
@@ -132,6 +131,9 @@ def main():
                 per_arm[arm]["tps"].append(tps)
                 per_arm[arm]["sha"].append(sha)
                 per_arm[arm]["calls"].append(after[0] - before[0])
+                per_arm[arm]["declines"].append(after[1] - before[1])
+                per_arm[arm]["inject_calls"].append(after[2] - before[2])
+                per_arm[arm]["emitted"].append(run.last["emitted"])
                 first_tokens.setdefault(arm, toks)
                 print(f"{config} rep{rep} off{offset} {arm} {tps:.2f} tok/s {run.last['ms_per_step']:.2f} ms/step "
                       f"{run.last['tokens_per_step']:.3f} tok/step hc_calls={after[0] - before[0]} hc_declines={after[1] - before[1]} sha={sha}", flush=True)
