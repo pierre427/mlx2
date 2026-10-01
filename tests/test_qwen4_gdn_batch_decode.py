@@ -234,10 +234,10 @@ def test_batch_mode_setter_rejects_unknown_modes(production_gdn_qwen4):
 
 def test_policy_field_enters_environment_and_receipts_only_when_selected():
     default = FlashNextPolicy()
-    assert default.as_dict()["fused_gdn_batch_decode"] == "row_exact"
+    assert "fused_gdn_batch_decode" not in default.as_dict()  # omitted at its default
     assert default.environment()["MLX_QWEN4_FUSED_GDN_BATCH_DECODE"] == "row_exact"
     off = FlashNextPolicy.from_mapping({"fused_gdn_batch_decode": "off"})
-    assert "fused_gdn_batch_decode" not in off.as_dict()
+    assert off.as_dict()["fused_gdn_batch_decode"] == "off"  # an explicit off is recorded
     assert "MLX_QWEN4_FUSED_GDN_BATCH_DECODE" not in off.environment()
     with pytest.raises(ValueError, match="fused_gdn_batch_decode"):
         FlashNextPolicy.from_mapping({"fused_gdn_batch_decode": "on"})

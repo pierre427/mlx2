@@ -251,10 +251,10 @@ def test_flash_next_policy_switch_defaults_to_the_fold_and_off_is_receipt_neutra
     from mlx2.adapters.flash_next_policy import FlashNextPolicy
 
     default = FlashNextPolicy()
-    assert default.as_dict()["moe_routed_decode"] == "gate_up_down_shared"
+    assert "moe_routed_decode" not in default.as_dict()  # omitted at its default
     assert default.environment()[RD.ROUTED_DECODE_ENV] == "gate_up_down_shared"
     off = FlashNextPolicy.from_mapping({"moe_routed_decode": "off"})
-    assert "moe_routed_decode" not in off.as_dict()
+    assert off.as_dict()["moe_routed_decode"] == "off"  # an explicit off is recorded
     assert RD.ROUTED_DECODE_ENV not in off.environment()
     for mode in ("gate_up", "two_launch"):
         chosen = FlashNextPolicy.from_mapping({"moe_routed_decode": mode})

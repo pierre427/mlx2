@@ -534,10 +534,10 @@ def test_flash_next_policy_defaults_on_and_off_is_receipt_neutral():
     from mlx2.adapters.flash_next_policy import FlashNextPolicy
 
     default = FlashNextPolicy()
-    assert default.as_dict()["hc_decode_kernels"] is True
+    assert "hc_decode_kernels" not in default.as_dict()  # omitted at its default
     assert default.environment()[HCD.HC_DECODE_ENV] == "1"
     off = FlashNextPolicy.from_mapping({"hc_decode_kernels": False})
-    assert "hc_decode_kernels" not in off.as_dict()
+    assert off.as_dict()["hc_decode_kernels"] is False  # an explicit off is recorded
     assert HCD.HC_DECODE_ENV not in off.environment()
     with pytest.raises(ValueError, match="hc_decode_kernels"):
         FlashNextPolicy.from_mapping({"hc_decode_kernels": "yes"})

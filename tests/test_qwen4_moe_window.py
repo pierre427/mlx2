@@ -340,10 +340,10 @@ def test_policy_defaults_and_receipts():
     for name in ("moe_window_row_exact", "moe_window_batch_decode", "moe_window_verify"):
         assert name not in default.as_dict()
     assert W.WINDOW_ENV not in default.environment()
-    assert default.as_dict()["moe_topk_fold"] == "launch"
+    assert "moe_topk_fold" not in default.as_dict()  # omitted at its default
     assert default.environment()[W.TOPK_ENV] == "launch"
     off = FlashNextPolicy.from_mapping({"moe_topk_fold": "off"})
-    assert "moe_topk_fold" not in off.as_dict()
+    assert off.as_dict()["moe_topk_fold"] == "off"  # an explicit off is recorded
     assert W.TOPK_ENV not in off.environment()
     chosen = FlashNextPolicy.from_mapping({
         "moe_window_batch_decode": True, "moe_window_verify": True, "moe_topk_fold": "fold",

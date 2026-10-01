@@ -3,7 +3,7 @@
 Values select candidate mechanisms; only a matching qualification record makes
 this policy deployable. Automatic modes retain the measured source thresholds.
 """
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, fields
 from typing import Optional
 
 from .mtp_depth_cap import validate_self_mtp_num_draft
@@ -317,22 +317,24 @@ class FlashNextPolicy:
         for name in _OPTIONAL_KERNEL_ENV:
             if not getattr(self, name):
                 del values[name]
-        if self.fused_gdn_verify_max_steps == 8:
+        # Fields whose default is not their "off" value are omitted only at the
+        # default, so a receipt read back reproduces an explicit choice.
+        if self.fused_gdn_verify_max_steps == _DEFAULTS["fused_gdn_verify_max_steps"]:
             del values["fused_gdn_verify_max_steps"]
-        if self.moe_routed_decode == "off":
+        if self.moe_routed_decode == _DEFAULTS["moe_routed_decode"]:
             del values["moe_routed_decode"]
-        if not self.hc_decode_kernels:
+        if self.hc_decode_kernels == _DEFAULTS["hc_decode_kernels"]:
             del values["hc_decode_kernels"]
         if self.hc_decode_multi_row == "auto":
             del values["hc_decode_multi_row"]
-        if self.fused_gdn_batch_decode == "off":
+        if self.fused_gdn_batch_decode == _DEFAULTS["fused_gdn_batch_decode"]:
             del values["fused_gdn_batch_decode"]
-        if not self.attn_fused_rows:
+        if self.attn_fused_rows == _DEFAULTS["attn_fused_rows"]:
             del values["attn_fused_rows"]
         for name in ("moe_window_batch_decode", "moe_window_verify"):
             if not getattr(self, name):
                 del values[name]
-        if self.moe_topk_fold == "off":
+        if self.moe_topk_fold == _DEFAULTS["moe_topk_fold"]:
             del values["moe_topk_fold"]
         if self.prefill_depth_budget is None:
             del values["prefill_depth_budget"]
@@ -410,3 +412,7 @@ class FlashNextPolicy:
         if self.fp32_head_logits:
             config["fp32_head_logits"] = True
         return config
+
+
+# Field defaults, for as_dict's omit-at-default rule.
+_DEFAULTS = {f.name: f.default for f in fields(FlashNextPolicy)}

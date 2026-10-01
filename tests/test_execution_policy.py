@@ -126,3 +126,31 @@ def test_finishing_job_releases_closed_cache_object():
     assert job.cache_branch is None
     assert reference() is None
     assert engine.slots.acquire(blocking=False)
+
+
+def test_flash_next_receipt_round_trips_every_non_default_choice():
+    # as_dict omits a field only at its default, so a receipt read back
+    # reproduces the policy: an explicit "off" of a default-on kernel used to
+    # be dropped and read back as "on" (2026-10-01).
+    from dataclasses import fields
+
+    from mlx2.adapters.flash_next_policy import FlashNextPolicy
+
+    alternatives = {
+        "hc_decode_kernels": False,
+        "attn_fused_rows": False,
+        "moe_routed_decode": "off",
+        "fused_gdn_batch_decode": "off",
+        "moe_topk_fold": "off",
+        "fused_gdn_verify_max_steps": 8,
+        "hc_decode_multi_row": "off",
+        "moe_window_batch_decode": True,
+        "row_exact_verify": True,
+    }
+    assert FlashNextPolicy.from_mapping(FlashNextPolicy().as_dict()) == FlashNextPolicy()
+    names = {f.name for f in fields(FlashNextPolicy)}
+    for name, value in alternatives.items():
+        assert name in names, name
+        policy = FlashNextPolicy.from_mapping({name: value})
+        assert FlashNextPolicy.from_mapping(policy.as_dict()) == policy, name
+        assert policy.as_dict()[name] == value, name
