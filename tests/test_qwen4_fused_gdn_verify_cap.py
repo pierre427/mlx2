@@ -70,10 +70,12 @@ def test_flash_next_policy_defaults_to_17_and_8_restores_the_old_bound():
     default = FlashNextPolicy()
     assert default.fused_gdn_verify_max_steps == 17
     assert default.environment()["MLX_QWEN4_FUSED_GDN_VERIFY_MAX_STEPS"] == "17"
-    assert default.as_dict()["fused_gdn_verify_max_steps"] == 17
+    assert "fused_gdn_verify_max_steps" not in default.as_dict()  # omitted at its default
     old = FlashNextPolicy(fused_gdn_verify_max_steps=8)
     assert "MLX_QWEN4_FUSED_GDN_VERIFY_MAX_STEPS" not in old.environment()
-    assert "fused_gdn_verify_max_steps" not in old.as_dict()
+    # Recorded so the receipt reads back as 8, not the default 17.
+    assert old.as_dict()["fused_gdn_verify_max_steps"] == 8
+    assert FlashNextPolicy.from_mapping(old.as_dict()) == old
     for bad in (1, 18, True, "17"):
         with pytest.raises(ValueError, match="fused_gdn_verify_max_steps"):
             FlashNextPolicy(fused_gdn_verify_max_steps=bad)
