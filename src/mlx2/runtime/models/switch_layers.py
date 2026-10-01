@@ -1,14 +1,35 @@
 # SPDX-License-Identifier: MIT
 # Adapted from mlx-lm-unified; see docs/PROVENANCE.md and provenance/flashnext.json.
 import math
+import os
+
 import mlx.core as mx
 import mlx.nn as nn
 from .activations import swiglu
+from .import_env import snapshot as _import_env_snapshot
+
+_import_env_snapshot(__name__)
 
 _SORTED_GATHER_TAIL_BUG = True
 _GATHER_SORT_MIN_ASSIGNMENTS = 20
 _QMM_TILE = 32
 _SORTED_QMM_K_TILE = 64
+
+# MLX's GatherQMM streams each expert once (``gather_qmm_rhs``) only when a
+# sorted gather has M == 1, B >= 16 and B // E >= 4 (mlx 39400a0d4,
+# quantized.cpp GatherQMM::eval_gpu); below that every row runs a
+# ``gather_qmv`` that re-reads its expert's weights.  When a sorted quantized
+# gather has at least ``_RHS_PAD_MIN_ROWS_PER_EXPERT`` rows per expert, the
+# sorted rows are padded up to 4 per expert so MLX picks the streaming kernel
+# (ddalcu/mlx-serve#671).  The pad rows repeat the last sorted row, so they
+# stay sorted, touch no new expert, and ``inv_order`` never reads them.
+# 0 = off (default): the kernel switch is not bit-exact against gather_qmv.
+_RHS_ROWS_PER_EXPERT = 4
+_RHS_MIN_ROWS = 16
+_RHS_PAD_MIN_ROWS_PER_EXPERT = int(os.environ.get("MLX2_MOE_RHS_PAD_MIN_ROWS", "0") or 0)
+# Observed-use counters: sorted gathers padded, and pad rows added.
+rhs_pad_calls = 0
+rhs_pad_rows = 0
 
 
 def _quantized_gather_tail_policy(mode: str, input_dims: int, sorted_indices: bool):
@@ -20,7 +41,40 @@ def _quantized_gather_tail_policy(mode: str, input_dims: int, sorted_indices: bo
     return "native"
 
 
-def _gather_sort(x, indices):
+def _rhs_stream_pad(n: int, num_experts) -> int:
+    """Pad rows that lift ``n`` sorted rows to MLX's streaming-kernel floor."""
+    floor = _RHS_PAD_MIN_ROWS_PER_EXPERT
+    if floor <= 0 or not num_experts or n < floor * num_experts:
+        return 0
+    target = max(_RHS_ROWS_PER_EXPERT * num_experts, _RHS_MIN_ROWS)
+    return max(0, target - n)
+
+
+def _rhs_pad_experts(*projections):
+    """Expert count for the streaming pad, or None when it cannot apply.
+
+    Only a natively sorted quantized gather has the rows-per-expert cliff;
+    ``gather_mm`` streams every sorted gather already.
+    """
+    experts = None
+    for proj in projections:
+        if not isinstance(proj, QuantizedSwitchLinear):
+            return None
+        policy = _quantized_gather_tail_policy(proj.mode, int(proj.input_dims), True)
+        if policy != "native":
+            return None
+        experts = max(experts or 0, int(proj.num_experts))
+    return experts
+
+
+def _pad_sorted_tail(x, indices, pad):
+    x = mx.concatenate([x, mx.broadcast_to(x[-1:], (pad,) + x.shape[1:])], axis=0)
+    indices = mx.concatenate([indices, mx.broadcast_to(indices[-1:], (pad,))], axis=0)
+    return x, indices
+
+
+def _gather_sort(x, indices, num_experts=None):
+    global rhs_pad_calls, rhs_pad_rows
     (*_, M) = indices.shape
     indices = indices.flatten()
     order = mx.argsort(indices)
@@ -28,12 +82,14 @@ def _gather_sort(x, indices):
     x = x.flatten(0, -3)[order // M]
     indices = indices[order]
     n = indices.size
-    if _SORTED_GATHER_TAIL_BUG and n > 32768 and (n % 64 != 0):
+    pad = _rhs_stream_pad(n, num_experts)
+    if pad:
+        rhs_pad_calls += 1
+        rhs_pad_rows += pad
+    elif _SORTED_GATHER_TAIL_BUG and n > 32768 and (n % 64 != 0):
         pad = 64 - n % 64
-        x = mx.concatenate([x, mx.broadcast_to(x[-1:], (pad,) + x.shape[1:])], axis=0)
-        indices = mx.concatenate(
-            [indices, mx.broadcast_to(indices[-1:], (pad,))], axis=0
-        )
+    if pad:
+        x, indices = _pad_sorted_tail(x, indices, pad)
     return (x, indices, inv_order)
 
 
@@ -200,7 +256,10 @@ class SwitchGLU(nn.Module):
         idx = indices
         inv_order = None
         if do_sort:
-            (x, idx, inv_order) = _gather_sort(x, indices)
+            (x, idx, inv_order) = _gather_sort(
+                x, indices,
+                _rhs_pad_experts(self.gate_proj, self.up_proj, self.down_proj),
+            )
         if self.training:
             idx = mx.stop_gradient(idx)
         x_up = self.up_proj(x, idx, sorted_indices=do_sort)
@@ -229,7 +288,9 @@ class SwitchMLP(nn.Module):
         idx = indices
         inv_order = None
         if do_sort:
-            x, idx, inv_order = _gather_sort(x, indices)
+            x, idx, inv_order = _gather_sort(
+                x, indices, _rhs_pad_experts(self.fc1, self.fc2)
+            )
         if self.training:
             idx = mx.stop_gradient(idx)
         x = self.fc1(x, idx, sorted_indices=do_sort)

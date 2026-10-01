@@ -30,6 +30,7 @@ PREFIXES = (
     "MLX2_FUSED_SDPA_",
     "MLX2_QSDPA_",
     "MLX2_XING_",
+    "MLX2_MOE_",
     "MLX_LM_QSA_",
     "MLX_SDPA_",
     "MLX_ENABLE_TF32",
