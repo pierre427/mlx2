@@ -542,21 +542,32 @@ PREFLIGHT_IMPORT_GUARD_MODULES = (
     "tests/test_granite_hils_cpu.py",
     "tests/test_laguna_s21_adapter.py",
     "tests/test_lfm25_dspark_compat_cpu.py",
+    "tests/test_lfm25_dspark_eval_contract_cpu.py",
+    "tests/test_lfm25_dspark_stats_cpu.py",
     "tests/test_lfm25_fused_shortconv_cpu.py",
     "tests/test_lfm25_hybrid_persistence_cpu.py",
     "tests/test_lfm25_vl_cpu.py",
     "tests/test_llada_denoising_cpu.py",
+    "tests/test_mechanism_intake_merge_cpu.py",
     "tests/test_multimodal_prefill_contract_cpu.py",
     "tests/test_multimodal_registry_gate_cpu.py",
     "tests/test_muse_glimmer_vision_candidate_cpu.py",
+    "tests/test_native_mtp_head_probe_cpu.py",
     "tests/test_nemotron3_diarization_candidate_cpu.py",
+    "tests/test_paired_direct_state_gate_cpu.py",
     "tests/test_phi4mm_candidate_cpu.py",
     "tests/test_pinned_vlm_candidates_cpu.py",
+    "tests/test_qsa_output_gate_vectors_cpu.py",
     "tests/test_qwen25_rope_cpu.py",
     "tests/test_qwen25_vision_grouped_cpu.py",
-    "tests/test_qwen35_4b_adapter.py",
     "tests/test_qwen35_122b_cpu.py",
+    "tests/test_qwen35_4b_adapter.py",
     "tests/test_qwen35_vlm_candidate_cpu.py",
+    "tests/test_ragged_pld_evidence_cpu.py",
+    "tests/test_ragged_pld_identity_cpu.py",
+    "tests/test_ragged_pld_north_identity_cpu.py",
+    "tests/test_ragged_pld_survivor_continuation_cpu.py",
+    "tests/test_segmented_moe_native_identity_cpu.py",
     "tests/test_smolvlm2_apcv2_cpu.py",
     "tests/test_standard_decoder_cpu.py",
     "tests/test_vision_feature_reuse_cpu.py",
@@ -572,8 +583,32 @@ def preflight_test_commands(*, pytest_args=None):
         raise AssertionError("preflight import-guard manifest is missing or invalid")
     ordinary = [sys.executable, *FULL_SUITE_PYTEST_ARGS,
                 *(f"--ignore={module}" for module in guards), *(pytest_args or [])]
-    guarded = [sys.executable, *FULL_SUITE_PYTEST_ARGS, "--noconftest", *guards]
+    # One interpreter per guard module: module-level import poisons differ
+    # (some refuse only mlx, some every mlx2 import) and break each other when
+    # they share a process.  The runner lives in this pinned harness.
+    guarded = [sys.executable, str(Path(__file__).resolve().relative_to(root)),
+               "--run-import-guards", *guards]
     return ordinary, guarded
+
+
+def run_import_guards(modules) -> int:
+    """Run each import-guard module alone (fresh interpreter, no conftest)."""
+    root = Path(__file__).resolve().parents[1]
+    failed = []
+    for module in modules:
+        if module not in PREFLIGHT_IMPORT_GUARD_MODULES:
+            print(f"refusing unlisted import-guard module {module}", flush=True)
+            return 2
+        print(f"=== import guard: {module}", flush=True)
+        completed = subprocess.run(
+            [sys.executable, *FULL_SUITE_PYTEST_ARGS, "-q", "--noconftest", module],
+            cwd=root,
+        )
+        if completed.returncode != 0:
+            failed.append(module)
+    print(f"import guards: {len(modules) - len(failed)}/{len(modules)} modules passed"
+          + (f"; failed: {', '.join(failed)}" if failed else ""), flush=True)
+    return 1 if failed else 0
 
 
 def write_preflight_receipt(path, *, pytest_args=None, run=subprocess.run,
@@ -2702,4 +2737,6 @@ def main():
 
 
 if __name__ == "__main__":
+    if sys.argv[1:2] == ["--run-import-guards"]:
+        sys.exit(run_import_guards(sys.argv[2:]))
     main()

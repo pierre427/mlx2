@@ -138,7 +138,7 @@ def test_preflight_guard_manifest_partitions_the_test_tree():
     assert guards and len(guards) == len(set(guards))
     assert ordinary[1:3] == ["-m", "pytest"]
     assert ordinary[3:] == [f"--ignore={module}" for module in guards]
-    assert guarded[1:] == ["-m", "pytest", "--noconftest", *guards]
+    assert guarded[1:] == ["scripts/qualify_serving.py", "--run-import-guards", *guards]
     assert all((ROOT / module).is_file() for module in guards)
     assert "tests/test_qualify_serving_receipts.py" not in guards
 
@@ -1027,3 +1027,26 @@ def test_long_context_checks_record_reply_evidence():
     assert "reply_evidence(primed)" in source
     assert '{"cold": reply_evidence(long), "warm": reply_evidence(repeated)}' in source
     assert '[r.get("mlx2", r) for r in shared]' not in source
+
+
+def test_import_guards_run_one_module_per_interpreter(monkeypatch):
+    # Guard modules poison imports at module level, some only mlx and some
+    # every mlx2 import; sharing one interpreter made them fail each other
+    # (16 collection errors on 2026-10-01).  The guard command runs each alone.
+    ordinary, guarded = qualify.preflight_test_commands()
+    assert guarded[1:3] == ["scripts/qualify_serving.py", "--run-import-guards"]
+    assert guarded[3:] == list(qualify.PREFLIGHT_IMPORT_GUARD_MODULES)
+    calls = []
+
+    def fake_run(cmd, cwd=None):
+        calls.append(cmd)
+        return SimpleNamespace(returncode=1 if cmd[-1].endswith("b.py") else 0)
+
+    monkeypatch.setattr(qualify, "PREFLIGHT_IMPORT_GUARD_MODULES", ("tests/a.py", "tests/b.py"))
+    monkeypatch.setattr(qualify.subprocess, "run", fake_run)
+    assert qualify.run_import_guards(["tests/a.py", "tests/b.py"]) == 1
+    assert [c[-1] for c in calls] == ["tests/a.py", "tests/b.py"]
+    assert all("--noconftest" in c and c.count("tests/a.py") + c.count("tests/b.py") == 1 for c in calls)
+    calls.clear()
+    assert qualify.run_import_guards(["tests/a.py"]) == 0
+    assert qualify.run_import_guards(["tests/unlisted.py"]) == 2

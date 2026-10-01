@@ -28,6 +28,7 @@ PREFIXES = (
     "MLX_LM_GDN_",
     "MLX_LM_QSDPA_",
     "MLX2_FUSED_SDPA_",
+    "MLX2_QSDPA_",
     "MLX2_XING_",
     "MLX_LM_QSA_",
     "MLX_SDPA_",

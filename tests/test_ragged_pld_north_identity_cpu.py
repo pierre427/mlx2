@@ -64,7 +64,11 @@ from scripts import qualify_ragged_pld as Q
 COMMIT = "a" * 40
 BASELINE = "649a1ce21f8a61ef319300067872d1218c04fa63"
 NORTH_SOURCE = "src/mlx2/adapters/north_mini_code.py"
-NORTH_SHA256 = "7b6cecf3f5767a5cda57d6b563edc6f3d352f340c63aaad525341d61be0bd8a8"
+# Re-pinned 2026-10-01 after 637ff770 (process-wide TF32 constant, one import)
+# changed the file but none of REFERENCE_FUNCTIONS / REFERENCE_CONSTANTS
+# (AST-compared byte-identical).  The recorded North evidence in
+# qualification/runs/mechanism-intake-20260930 was taken at 7b6cecf3....
+NORTH_SHA256 = "8e256ddfef2750589838bf5773891c562baab75d0ea6a6ae09ceb1e26f8cfdee"
 REFERENCE_FUNCTIONS = ("_load_json", "_safe_index", "_quantized_shapes", "_expected_weight_headers",
                        "_validate_weight_headers", "_unique_pairs", "inspect_artifact")
 REFERENCE_CONSTANTS = ("_SAFETENSORS_HEADER_LIMIT", "_DTYPE_BYTES")
@@ -1122,7 +1126,9 @@ def _definitions(tree):
 
 
 CHANGED = {"artifact_family", "artifact_manifest", "adapter_identity_snapshot", "adapter_identity_refusals",
-           "post_run_identity"}
+           "post_run_identity",
+           # 451f5d30 (survivor continuation after lane removal) changed run_all on purpose
+           "run_all"}
 
 
 def test_every_other_baseline_definition_is_unchanged():
@@ -1130,7 +1136,7 @@ def test_every_other_baseline_definition_is_unchanged():
     assert set(before) <= set(now)
     moved = sorted(name for name in before if before[name] != now[name])
     assert moved == sorted(CHANGED)
-    for name in ("Driver.__init__", "Driver.run", "Driver.continuation", "compare", "coverage", "run_all",
+    for name in ("Driver.__init__", "Driver.run", "Driver.continuation", "compare", "coverage",
                  "row_evidence_refusal", "continuation_refusal", "lane_row_evidence", "preflight",
                  "source_identity", "checked_post_run_identity", "build_parser", "resolve_args"):
         assert before[name] == now[name], name

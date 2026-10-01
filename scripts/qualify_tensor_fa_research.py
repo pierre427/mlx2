@@ -76,7 +76,6 @@ import os
 import re
 import subprocess
 import sys
-import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -571,7 +570,6 @@ class NativeBackend:
         return arrays
 
     def _mask(self, case):
-        import numpy as np
 
         return self.mx.array(visible_mask(case)) if case["causal"] else None
 

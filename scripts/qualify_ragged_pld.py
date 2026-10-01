@@ -1135,7 +1135,7 @@ class Driver:
         from mlx2.runtime.sample_utils import LaneRNG
         from scripts.paired_direct_ab import state_digest
 
-        mx, args = self.mx, self.args
+        mx, args = self.mx, self.args  # noqa: F841 -- body pinned to the baseline (tests/test_ragged_pld_north_identity_cpu.py)
         caps = caps or [self.caps[i] for i in lanes]
         prompts = prompts or [list(self.prompts[i]) for i in lanes]
         gen = self.generator(arm, len(lanes))

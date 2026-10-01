@@ -338,6 +338,10 @@ class ExternalDraftBatchGenerator:
     attention remains per-row SDPA. Receipts report actual target and draft
     widths. No dense cache repacking or shared global random generator.
     """
+    # Class default so instances built without __init__ (test doubles that
+    # bind only the lane methods) keep the off behaviour.
+    prefill_allocator_reclaim = False
+
     def __init__(self, model, *, draft_model, binding, completion_batch_size=4,
                  prefill_step_size=2048, num_draft=4, stop_tokens=(), memory_headroom=None,
                  reclaim_memory=None, evict_checkpoint=None, fly_verification=None,
