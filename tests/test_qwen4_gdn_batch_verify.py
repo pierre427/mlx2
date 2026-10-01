@@ -150,6 +150,14 @@ def test_policy_field_is_off_by_default_and_absent_from_receipts():
         FlashNextPolicy.from_mapping({"fused_gdn_batch_verify": "on"})
 
 
+@pytest.mark.parametrize("value", ["off", "row_exact"])
+def test_policy_field_round_trips_through_receipts(value):
+    policy = FlashNextPolicy.from_mapping({"fused_gdn_batch_verify": value})
+    assert FlashNextPolicy.from_mapping(policy.as_dict()) == policy
+    default = FlashNextPolicy.__dataclass_fields__["fused_gdn_batch_verify"].default
+    assert ("fused_gdn_batch_verify" in policy.as_dict()) == (value != default)
+
+
 # --------------------------------------------------------------- routing ----
 
 def _gdn_layers(model):
