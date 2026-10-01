@@ -94,17 +94,25 @@ def ref_norm_gate(y, z, w, eps):
     return bf16(normed * sig).reshape(S, HV * DV)
 
 
-def ref_weighted_sum(x_sorted, inv_order, scores, round_product):
-    """Mirror of the MoE weighted-sum kernel: fp32 accumulation, slot order."""
+def ref_weighted_sum(x_sorted, inv_order, scores, round_product, partials=None):
+    """Mirror of the MoE weighted-sum kernel (MLX col_reduce_small order).
+
+    Partial ``j`` folds slots ``j, j + P, ...`` (P = min(8, K)), then partials
+    1..P-1 fold into partial 0.  With ``round_product`` (bf16 scores) every
+    product and every add rounds to bf16; otherwise the arithmetic is fp32.
+    """
     tokens, top_k = scores.shape
+    rnd = bf16 if round_product else (lambda v: v.astype(np.float32))
+    partials = partials or min(8, top_k)
     rows = x_sorted[:, 0, :]
-    acc = np.zeros((tokens, rows.shape[-1]), dtype=np.float32)
+    acc = [np.zeros((tokens, rows.shape[-1]), dtype=np.float32) for _ in range(partials)]
     for k in range(top_k):
-        term = rows[inv_order.reshape(tokens, top_k)[:, k]] * scores[:, k : k + 1]
-        if round_product:
-            term = bf16(term)
-        acc = acc + term
-    return acc
+        term = rnd(rows[inv_order.reshape(tokens, top_k)[:, k]] * scores[:, k : k + 1])
+        acc[k % partials] = rnd(term + acc[k % partials])
+    total = acc[0]
+    for j in range(1, partials):
+        total = rnd(acc[j] + total)
+    return total
 
 
 # --------------------------------------------------------------------------
@@ -616,14 +624,60 @@ def test_moe_weighted_sum_skips_decode_widths(wsum_on_cpu):
 
 
 def test_moe_weighted_sum_refuses_other_top_k(wsum_on_cpu):
-    block = _block(top_k=8)
+    block = _block(top_k=6)
     block.set_moe_weighted_sum(True)
-    stock_block = _block(top_k=8)
+    stock_block = _block(top_k=6)
     x = mx.random.normal((1, 16, 32), key=mx.random.key(4))
     out = block(x)
     assert wsum_on_cpu == []
-    assert block.switch_mlp.moe_weighted_sum_last_fallback == "top_k 8"
+    assert block.switch_mlp.moe_weighted_sum_last_fallback == "top_k 6"
     np.testing.assert_array_equal(np.array(out), np.array(stock_block(x)))
+
+
+def test_moe_weighted_sum_admits_top8(wsum_on_cpu):
+    """Qwen3.6-35B routes 8 experts; the Metal gate proves top-8 bit-exact."""
+    block = _block(top_k=8)
+    x = mx.random.normal((1, 16, 32), key=mx.random.key(6))
+    stock = block(x)
+    block.set_moe_weighted_sum(True)
+    fused = block(x)
+    assert wsum_on_cpu == [(16 * 8, 1, 32)]
+    np.testing.assert_allclose(np.array(fused), np.array(stock), rtol=1e-5, atol=1e-5)
+
+
+@pytest.mark.parametrize("top_k", [8, 10])
+def test_moe_weighted_sum_replays_col_reduce_small_partials(monkeypatch, top_k):
+    """The launch carries MLX's partial count and the eager promoted dtype."""
+    seen = {}
+
+    def fake_kernel(*, inputs, template, grid, threadgroup, output_shapes, output_dtypes):
+        seen.update(template=dict(template), grid=grid, dtypes=output_dtypes)
+        return [mx.zeros(output_shapes[0], output_dtypes[0])]
+
+    monkeypatch.setattr(moe_wsum, "_kernel", lambda: fake_kernel)
+    x_sorted = mx.zeros((top_k * 8, 1, 32), mx.bfloat16)
+    inv_order = mx.arange(top_k * 8)
+    for scores, dtype in (
+        (mx.zeros((1, 8, top_k), mx.bfloat16), mx.bfloat16),
+        (mx.zeros((1, 8, top_k), mx.float32), mx.float32),
+    ):
+        out = moe_wsum.moe_weighted_sum(x_sorted, inv_order, scores)
+        assert out.shape == (1, 8, 32)
+        assert seen["template"]["PARTIALS"] == 8
+        assert seen["template"]["TOPK"] == top_k
+        assert seen["template"]["O"] == dtype and seen["dtypes"] == [dtype]
+
+
+def test_weighted_sum_mirror_order_is_not_slot_order():
+    """The col_reduce_small order and a slot-order bf16 sum differ (K=10)."""
+    rng = np.random.default_rng(3)
+    tokens, top_k, D = 64, 10, 256
+    x_sorted = bf16(rng.normal(size=(tokens * top_k, 1, D)).astype(np.float32))
+    inv_order = rng.permutation(tokens * top_k)
+    scores = bf16(rng.uniform(size=(tokens, top_k)).astype(np.float32))
+    mlx_order = ref_weighted_sum(x_sorted, inv_order, scores, True)
+    slot_order = ref_weighted_sum(x_sorted, inv_order, scores, True, partials=1)
+    assert np.count_nonzero(mlx_order != slot_order) > 0
 
 
 def test_moe_weighted_sum_admission_reasons():
