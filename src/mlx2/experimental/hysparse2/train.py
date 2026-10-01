@@ -38,6 +38,23 @@ def _require_base_checkpoint_topology(model):
         raise ValueError("base checkpoints do not support LoRA overlays; use adapter export and restore the base first")
 
 
+def _optimizer_settings(optimizer):
+    from mlx import optimizers
+
+    if type(optimizer) not in (optimizers.Adam, optimizers.AdamW):
+        raise ValueError("optimizer settings require supported Adam or AdamW")
+    if optimizer._schedulers:
+        raise ValueError("optimizer settings with schedules are not supported for exact resume")
+    settings = {
+        "betas": [float(beta) for beta in optimizer.betas],
+        "eps": float(optimizer.eps),
+        "bias_correction": bool(optimizer.bias_correction),
+    }
+    if type(optimizer) is optimizers.AdamW:
+        settings["weight_decay"] = float(optimizer.weight_decay)
+    return settings
+
+
 def save_checkpoint(root, model, optimizer, step, run, mode="full"):
     import mlx.core as mx
     from mlx.utils import tree_flatten
@@ -45,6 +62,7 @@ def save_checkpoint(root, model, optimizer, step, run, mode="full"):
     if mode not in {"full", "model"}:
         raise ValueError("checkpoint mode must be full or model")
     _require_base_checkpoint_topology(model)
+    optimizer_settings = _optimizer_settings(optimizer) if mode == "full" else None
     root = Path(root)
     root.mkdir(parents=True, exist_ok=True)
     target = root / f"step-{step:08d}"
@@ -103,6 +121,7 @@ def save_checkpoint(root, model, optimizer, step, run, mode="full"):
             "capsule_binding": model.capsule_binding,
             "optimizer_state_saved": mode == "full",
             "exact_training_resume": mode == "full",
+            "optimizer_settings": optimizer_settings,
             "optimizer_type": type(optimizer).__module__ + "." + type(optimizer).__qualname__ if mode == "full" else None,
         }
         (temporary / "state.json").write_text(json.dumps(metadata, indent=2) + "\n")
@@ -221,6 +240,9 @@ def _validate_optimizer_state(state, model, optimizer, metadata):
     identity = type(optimizer).__module__ + "." + type(optimizer).__qualname__
     if type(optimizer) not in (optimizers.Adam, optimizers.AdamW) or metadata.get("optimizer_type", identity) != identity:
         raise ValueError("optimizer state requires the matching supported Adam optimizer")
+    settings = _optimizer_settings(optimizer)
+    if "optimizer_settings" in metadata and metadata["optimizer_settings"] != settings:
+        raise ValueError("checkpoint optimizer settings differ")
     flat = dict(tree_flatten(state))
     step = metadata.get("step")
     counter, rate = flat.get("step"), flat.get("learning_rate")

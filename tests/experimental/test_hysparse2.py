@@ -627,3 +627,44 @@ def test_full_layout_cache_matches_full_forward():
     close(last, full[:, 4:5], 1e-4)
     close(m.decode(tokens[:, 5:], cache), full[:, 5:], 1e-4)
     assert len(m.self_decoder) + len(m.cross_decoder) == 49
+
+
+@pytest.mark.parametrize("change", [{"betas": [0.8, 0.95]}, {"eps": 1e-4},
+                                    {"bias_correction": True}, {"weight_decay": 0.2}])
+def test_checkpoint_optimizer_settings_must_match(tmp_path, change):
+    source = Model(Config.smoke())
+    checkpoint = save_checkpoint(tmp_path, source, optimizers.AdamW(1e-3), 0, {})
+    target = Model(source.config)
+    owner = target._cache_owner
+    optimizer = optimizers.AdamW(1e-3, **change)
+    state = optimizer.state
+    with pytest.raises(ValueError, match="optimizer settings"):
+        load_checkpoint(checkpoint, target, optimizer, {})
+    assert target._cache_owner is owner and optimizer.state is state
+
+
+def test_checkpoint_matching_settings_preserve_next_adamw_update(tmp_path):
+    source = Model(Config.smoke())
+    settings = dict(betas=[0.8, 0.95], eps=1e-5, bias_correction=True, weight_decay=0.2)
+    optimizer = optimizers.AdamW(1e-3, **settings)
+    from mlx.utils import tree_map
+    gradients = tree_map(lambda p: mx.full(p.shape, 0.01), source.trainable_parameters())
+    optimizer.update(source, gradients)
+    mx.eval(source.parameters(), optimizer.state)
+    checkpoint = save_checkpoint(tmp_path, source, optimizer, 1, {})
+    restored = Model(source.config)
+    restored_optimizer = optimizers.AdamW(1e-3, **settings)
+    assert load_checkpoint(checkpoint, restored, restored_optimizer, {}) == 1
+    optimizer.update(source, gradients)
+    restored_optimizer.update(restored, gradients)
+    mx.eval(source.parameters(), restored.parameters())
+    assert all(bool(mx.all(a == b).item()) for (_, a), (_, b) in
+               zip(tree_flatten(source.parameters()), tree_flatten(restored.parameters())))
+
+
+def test_scheduled_optimizer_checkpoint_is_not_exactly_serializable(tmp_path):
+    model = Model(Config.smoke())
+    optimizer = optimizers.Adam(lambda step: 1e-3 / (step + 1))
+    with pytest.raises(ValueError, match="schedules"):
+        save_checkpoint(tmp_path / "unsupported", model, optimizer, 0, {})
+    assert not (tmp_path / "unsupported").exists()
