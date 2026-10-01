@@ -42,6 +42,7 @@ when the not-exact count did not move.
 from __future__ import annotations
 
 import threading
+import weakref
 from typing import Any, Dict, Optional
 
 import mlx.core as mx
@@ -287,6 +288,26 @@ def _subclass(mixin, cls):
     return sub
 
 
+class _RequestStart:
+    """A request's receipt snapshot.  Live snapshots are tracked weakly so a
+    request that overlaps another is never credited with its windows (the
+    window counters are process-wide)."""
+
+    __slots__ = ("windows", "windows_not_exact", "enabled", "overlapped", "__weakref__")
+
+    def __init__(self, windows: int, windows_not_exact: int, enabled: bool):
+        self.windows = windows
+        self.windows_not_exact = windows_not_exact
+        self.enabled = enabled
+        self.overlapped = False
+
+    def __getitem__(self, key):
+        return getattr(self, key)
+
+    def get(self, key, default=None):
+        return getattr(self, key, default)
+
+
 class RowExactVerify:
     """Installed route: class swaps on the trunk plus the verify hooks."""
 
@@ -303,6 +324,7 @@ class RowExactVerify:
         self._lock = threading.Lock()
         self._swapped = []
         self._pending: Optional[REV.Window] = None
+        self._live = weakref.WeakSet()
         self.counts: Dict[str, Any] = {
             "windows": 0,
             "windows_row_exact": 0,
@@ -359,10 +381,11 @@ class RowExactVerify:
         if not self.enabled or int(tokens.shape[-1]) <= 1:
             if self.enabled:
                 self.counts["one_row_passthrough"] += 1
-            self._pending = None
+            self._retire_pending()
             return model.mtp_backbone(tokens, cache=cache)
         from . import qwen4_exp as Q
 
+        self._retire_pending()
         record = REV.Window(rows)
         before = self._gdn_engaged()
         with REV.window(record), Q._declared_width(1):
@@ -383,6 +406,14 @@ class RowExactVerify:
         self._close(record)
         return logits
 
+    def _retire_pending(self) -> None:
+        """A window whose logits never ran is closed as not row-exact, so a
+        second backbone call cannot silently replace (and drop) it."""
+        record, self._pending = self._pending, None
+        if record is not None:
+            record.fail("verify_window_not_consumed")
+            self._close(record)
+
     def _close(self, record: REV.Window) -> None:
         with self._lock:
             counts = self.counts
@@ -397,12 +428,17 @@ class RowExactVerify:
                 counts["failures"][reason] = counts["failures"].get(reason, 0) + n
 
     # -- receipts --------------------------------------------------------------
-    def snapshot(self) -> dict:
-        return {
-            "windows": self.counts["windows"],
-            "windows_not_exact": self.counts["windows_not_exact"],
-            "enabled": self.enabled,
-        }
+    def snapshot(self) -> _RequestStart:
+        start = _RequestStart(
+            self.counts["windows"], self.counts["windows_not_exact"], self.enabled
+        )
+        with self._lock:
+            live = list(self._live)
+            for other in live:
+                other.overlapped = True
+            start.overlapped = bool(live)
+            self._live.add(start)
+        return start
 
     def receipt(self, start: Optional[dict]) -> dict:
         """Fail closed: ``row_exact`` only when every window since ``start``
@@ -414,8 +450,13 @@ class RowExactVerify:
         else:
             windows = self.counts["windows"] - int(start["windows"])
             not_exact = self.counts["windows_not_exact"] - int(start["windows_not_exact"])
+            if isinstance(start, _RequestStart):
+                with self._lock:
+                    self._live.discard(start)
             if not (start.get("enabled") and self.enabled):
                 reason = "route_not_enabled"
+            elif start.get("overlapped"):
+                reason = "concurrent_requests"
             elif not_exact:
                 reason = "window_fell_back"
             elif windows <= 0:

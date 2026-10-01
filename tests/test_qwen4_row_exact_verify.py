@@ -240,3 +240,44 @@ def test_serving_receipt_fields_absent_by_default_and_fail_closed():
         assert row_exact_verify_receipt_fields(engine, start)["row_exact_verify"] is True
     finally:
         mx.set_default_device(previous)
+
+
+def test_receipt_fails_closed_when_requests_overlap():
+    # Window counters are process-wide: a request that overlaps another must
+    # not inherit that request's exact windows (codex review, 2026-10-01).
+    previous = mx.default_device()
+    mx.set_default_device(mx.cpu)
+    try:
+        handle = install(_quantized_tiny_model())
+        handle.enable(True)
+        first = handle.snapshot()
+        second = handle.snapshot()
+        handle._close(REV.Window(3))
+        for start in (first, second):
+            receipt = handle.receipt(start)
+            assert receipt["row_exact"] is False
+            assert receipt["reason"] == "concurrent_requests"
+        # Once both have reported, a later request alone is attributable again.
+        alone = handle.snapshot()
+        handle._close(REV.Window(3))
+        assert handle.receipt(alone)["row_exact"] is True
+    finally:
+        mx.set_default_device(previous)
+
+
+def test_unconsumed_verify_window_is_closed_not_exact():
+    # verify_backbone(A), verify_backbone(B), verify_logits(...): A's record
+    # must not vanish or be credited to B.
+    previous = mx.default_device()
+    mx.set_default_device(mx.cpu)
+    try:
+        handle = install(_quantized_tiny_model())
+        handle.enable(True)
+        stale = REV.Window(3)
+        handle._pending = stale
+        handle._retire_pending()
+        assert handle._pending is None
+        assert handle.counts["windows_not_exact"] == 1
+        assert handle.counts["failures"].get("verify_window_not_consumed") == 1
+    finally:
+        mx.set_default_device(previous)

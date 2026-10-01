@@ -1442,7 +1442,7 @@ class Job:
     approximate_kv_receipt: dict | None = None
     approximate_kv_applied: bool = False
     verify_bitexact_start: dict | None = None
-    row_exact_verify_start: dict | None = None
+    row_exact_verify_start: object | None = None
     admission_final_reclaim_done: bool = False
     # Lane bytes admission granted this job that its cache has not allocated
     # yet; cleared by its first generated token (see ``unmaterialized_lane_bytes``).
