@@ -23,11 +23,18 @@ Every comparison names its reference. PLD arms are judged against
 ``ordinary_b1``; the comparison with ``ordinary_bN`` and the
 ``ordinary_b1`` vs ``ordinary_bN`` geometry comparison are reported
 separately and never swapped in after the fact. Per lane the driver records
-token IDs and hash, logprob-row storage-bit digests (first
-``--logprob-rows``), the final target cache ``state_digest`` (class, state
-and ``meta_state``), the committed prompt boundary, and a greedy ordinary B1
-continuation from the final cache. A missing digest is ``unavailable``,
-never equal.
+token IDs and hash, logprob-row storage-bit digests (one per delivered token,
+up to ``--logprob-rows``), the final target cache ``state_digest`` (class,
+state and ``meta_state``), the committed prompt boundary, and a greedy
+ordinary B1 continuation from the final cache. A missing digest is
+``unavailable``, never equal.
+
+Evidence (v2): bit parity needs, on each arm independently, exactly
+``min(--logprob-rows, delivered tokens)`` complete row digest records and
+complete final and continuation digests (``paired_direct_ab.snapshot_refusal``);
+equal dictionaries that are incomplete are ``incomparable``, never exact.
+Receipts without the v2 lane evidence (every ``ragged-pld.v1`` record) are
+incomparable for bit parity; their legacy hash lists are not upgraded.
 
 Coverage (all required for ``pass``): unequal prompt lengths and output
 caps, a zero-proposal lane, proposals and a rejected suffix (partial
@@ -67,7 +74,8 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(ROOT))
 
-SCHEMA = "mlx2.direct-model.ragged-pld.v1"
+SCHEMA = "mlx2.direct-model.ragged-pld.v2"
+EVIDENCE = "mlx2.ragged-pld.lane-evidence.v2"
 ARMS = ("ordinary_b1", "ordinary_bN", "pld_per_lane", "pld_batched", "pld_removal")
 PRIMARY_REFERENCE = "ordinary_b1"
 IDENTITY_FILES = (
@@ -298,8 +306,10 @@ class Driver:
                     if receipt is not None and (not record["receipts"] or record["receipts"][-1] is not receipt):
                         record["receipts"].append(receipt)
                     row = getattr(response, "logprobs", None)
-                    if row is not None and len(record["logprob_rows"]) < args.logprob_rows:
-                        record["logprob_rows"].append(state_digest([row]))
+                    if len(record["logprob_rows"]) < args.logprob_rows:
+                        # One slot per delivered token: a missing row is an
+                        # unavailable digest in its place, never a shifted one.
+                        record["logprob_rows"].append(state_digest(None if row is None else [row]))
                     if response.finish_reason:
                         record["finish_reason"] = response.finish_reason
                         record["final"] = response
@@ -326,8 +336,7 @@ class Driver:
                 "finish_reason": record["finish_reason"],
                 "execution_widths": (sorted(record["widths"]) if not arm.startswith("ordinary")
                                      else "not reported by the ordinary route"),
-                "logprob_rows": [d["sha256"] for d in record["logprob_rows"]],
-                "logprob_rows_status": sorted({d["status"] for d in record["logprob_rows"]}) or ["unavailable"],
+                **lane_row_evidence(record["logprob_rows"], record["tokens"], args.logprob_rows),
                 "final_state": state_digest(getattr(final, "prompt_cache", None)),
                 "boundary": None if boundary is None else {
                     "covered_tokens": boundary.get("covered_tokens") if isinstance(boundary, dict) else None,
@@ -339,7 +348,14 @@ class Driver:
         return out, stats, failures, removed
 
     def continuation(self, lane, record):
-        """Greedy ordinary B1 continuation from the lane's final cache."""
+        """Greedy ordinary B1 continuation from the lane's final cache.
+
+        The lane's ``final_state`` was digested by ``run`` before this reuses
+        the cache. ``complete`` needs delivered tokens and a complete final
+        digest; anything less is ``unavailable`` with the refusal reason.
+        """
+        from scripts.paired_direct_ab import snapshot_refusal
+
         final = record.pop("_final", None)
         if not self.args.continuation_tokens:
             return {"status": "unavailable", "reason": "disabled (--continuation-tokens 0)"}
@@ -361,6 +377,11 @@ class Driver:
             return {"status": "unavailable", "reason": "; ".join(failures)[:200]}
         result = out[lane]
         result.pop("_final", None)
+        refusal = ("no continuation tokens" if not result["tokens"]
+                   else snapshot_refusal(result["final_state"]))
+        if refusal is not None:
+            return {"status": "unavailable", "reason": f"continuation final state: {refusal}"[:200],
+                    "tokens": result["tokens"], "final_state": result["final_state"]}
         return {"status": "complete", "tokens": result["tokens"], "final_state": result["final_state"]}
 
 
@@ -386,51 +407,153 @@ def _round_summary(receipts):
     }
 
 
+# ---------------------------------------------------------------- evidence
+
+def lane_row_evidence(digests, tokens, requested):
+    """Logprob-row evidence fields of one lane record (pure).
+
+    ``digests`` are the emitted ``state_digest`` records, one per delivered
+    token up to ``requested``; the hash and status lists are readable
+    duplicates only and never qualify on their own.
+    """
+    return {
+        "evidence": EVIDENCE,
+        "logprob_rows_requested": requested,
+        "logprob_rows_expected": min(requested, len(tokens)),
+        "logprob_row_digests": list(digests),
+        "logprob_rows": [d["sha256"] for d in digests],
+        "logprob_rows_status": sorted({d["status"] for d in digests}) or ["unavailable"],
+    }
+
+
+def _is_count(value):
+    return type(value) is int and value >= 0
+
+
+def row_evidence_refusal(record, requested):
+    """Why one lane's logprob rows cannot support bit parity, or None (pure).
+
+    ``requested`` is the protocol bound (``--logprob-rows``); the expected
+    count is recomputed from it and the lane's own delivered tokens, so a
+    record cannot lower its own bar.
+    """
+    from scripts.paired_direct_ab import snapshot_refusal
+
+    if not _is_count(requested):
+        return "no protocol logprob row bound"
+    if requested == 0:
+        return "disabled (--logprob-rows 0)"
+    if record.get("evidence") != EVIDENCE:
+        return "legacy record without strict row evidence"
+    tokens = record.get("tokens")
+    if not isinstance(tokens, list) or not tokens:
+        return "no delivered tokens"
+    expected = min(requested, len(tokens))
+    declared = record.get("logprob_rows_requested")
+    if not _is_count(declared) or declared != requested:
+        return f"requested {declared!r} is not the protocol bound {requested}"[:200]
+    declared = record.get("logprob_rows_expected")
+    if not _is_count(declared) or declared != expected:
+        return f"declares {declared!r} rows; protocol bound and delivered tokens give {expected}"[:200]
+    digests = record.get("logprob_row_digests")
+    if not isinstance(digests, list):
+        return "no row digest records"
+    if len(digests) != expected:
+        return f"{len(digests)} row digests, expected {expected}"
+    for k, digest in enumerate(digests):
+        refusal = snapshot_refusal(digest)
+        if refusal is not None:
+            return f"row {k}: {refusal}"[:200]
+    if "logprob_rows" in record and record["logprob_rows"] != [d["sha256"] for d in digests]:
+        return "logprob_rows hashes contradict the row digests"
+    if "logprob_rows_status" in record and record["logprob_rows_status"] != ["complete"]:
+        return "logprob_rows_status contradicts the row digests"
+    return None
+
+
+def continuation_refusal(continuation):
+    """Why a continuation record is not complete evidence, or None (pure)."""
+    from scripts.paired_direct_ab import snapshot_refusal
+
+    if not isinstance(continuation, dict):
+        return "absent"
+    if continuation.get("status") != "complete":
+        return f"status {continuation.get('status')!r}: {continuation.get('reason')}"[:200]
+    if continuation.get("reason") is not None:
+        return "complete with a refusal reason"
+    tokens = continuation.get("tokens")
+    if not isinstance(tokens, list) or not tokens or any(type(t) is not int for t in tokens):
+        return "complete without delivered token ids"
+    refusal = snapshot_refusal(continuation.get("final_state"))
+    return None if refusal is None else f"final state: {refusal}"[:200]
+
+
+def _both(check, arm, got, reference, want):
+    """Each arm's refusal from ``check`` (named), joined; '' when both pass."""
+    return "; ".join(f"{side}: {refusal}" for side, refusal in
+                     ((arm, check(got)), (reference, check(want))) if refusal is not None)
+
+
 # ---------------------------------------------------------------- compare
 
-def compare(arm, reference, lanes, results, *, prefix_only=(), continuation=True):
+def compare(arm, reference, lanes, results, *, prefix_only=(), continuation=True, logprob_rows=None):
     """Token and storage-bit parity of ``arm`` against a named ``reference``.
 
     Token parity and bit parity are separate verdicts: equal tokens with
     different logprob or state bits is reported as bit divergence (different
     forward geometry), never as exact. Final states whose routes cover a
     different number of tokens are ``incomparable``, not equal and not a
-    counterexample.
+    counterexample. Every digest is validated on each arm before equality
+    (``snapshot_refusal``, ``row_evidence_refusal`` against the protocol
+    bound ``logprob_rows``, ``continuation_refusal``); incomplete evidence is
+    ``incomparable`` even when both arms record the same dictionary. A
+    removed (``prefix_only``) lane needs a non-empty token prefix only.
     """
+    from scripts.paired_direct_ab import snapshot_refusal
+
     token_diffs, bit_diffs, incomparable = [], [], []
     for i in lanes:
         got, want = results[arm][i], results[reference][i]
         a, b = got["tokens"], want["tokens"]
         if i in prefix_only:
-            if a != b[: len(a)]:
+            if not a:
+                incomparable.append(f"lane {i}: removed-lane prefix is empty")
+            elif a != b[: len(a)]:
                 token_diffs.append(f"lane {i}: removed-lane prefix differs")
             continue
         if a != b:
             index = next((k for k, (x, y) in enumerate(zip(a, b)) if x != y), min(len(a), len(b)))
             token_diffs.append(f"lane {i}: tokens differ at {index}")
             continue
-        rows = min(len(got["logprob_rows"]), len(want["logprob_rows"]))
-        if rows == 0 or None in got["logprob_rows"][:rows] + want["logprob_rows"][:rows]:
-            incomparable.append(f"lane {i}: logprob rows unavailable")
-        elif got["logprob_rows"][:rows] != want["logprob_rows"][:rows]:
-            first = next(k for k in range(rows) if got["logprob_rows"][k] != want["logprob_rows"][k])
-            bit_diffs.append(f"lane {i}: logprob row bits differ from row {first}")
-        g_state, w_state = got["final_state"], want["final_state"]
-        if g_state["status"] != "complete" or w_state["status"] != "complete":
-            incomparable.append(f"lane {i}: final state unavailable")
-        elif got["covered_tokens"] != want["covered_tokens"]:
+        refused = _both(lambda r: row_evidence_refusal(r, logprob_rows), arm, got, reference, want)
+        if refused:
+            incomparable.append(f"lane {i}: logprob rows unavailable ({refused})"[:400])
+        else:
+            g_rows = [d["sha256"] for d in got["logprob_row_digests"]]
+            w_rows = [d["sha256"] for d in want["logprob_row_digests"]]
+            if g_rows != w_rows:
+                first = next(k for k in range(len(g_rows)) if g_rows[k] != w_rows[k])
+                bit_diffs.append(f"lane {i}: logprob row bits differ from row {first}")
+        refused = _both(lambda r: snapshot_refusal(r.get("final_state")), arm, got, reference, want)
+        g_cover, w_cover = got.get("covered_tokens"), want.get("covered_tokens")
+        if refused:
+            incomparable.append(f"lane {i}: final state unavailable ({refused})"[:400])
+        elif not all(type(c) is int and c > 0 for c in (g_cover, w_cover)):
+            incomparable.append(f"lane {i}: covered tokens unavailable ({g_cover!r} vs {w_cover!r})")
+        elif g_cover != w_cover:
             incomparable.append(f"lane {i}: final caches cover {got['covered_tokens']} vs "
                                 f"{want['covered_tokens']} tokens")
-        elif g_state["sha256"] != w_state["sha256"]:
+        elif got["final_state"]["sha256"] != want["final_state"]["sha256"]:
             bit_diffs.append(f"lane {i}: final state bits differ")
         if not continuation:
             continue
-        g, w = got.get("continuation", {}), want.get("continuation", {})
-        if g.get("status") != "complete" or w.get("status") != "complete":
-            incomparable.append(f"lane {i}: continuation unavailable")
+        g, w = got.get("continuation"), want.get("continuation")
+        refused = _both(continuation_refusal, arm, g, reference, w)
+        if refused:
+            incomparable.append(f"lane {i}: continuation unavailable ({refused})"[:400])
         elif g["tokens"] != w["tokens"]:
             token_diffs.append(f"lane {i}: continuation tokens differ")
-        elif g["final_state"] != w["final_state"]:
+        elif g["final_state"]["sha256"] != w["final_state"]["sha256"]:
             bit_diffs.append(f"lane {i}: continuation state bits differ")
     return {"arm": arm, "reference": reference, "tokens_exact": not token_diffs,
             "bits_exact": not token_diffs and not bit_diffs and not incomparable,
@@ -492,14 +615,20 @@ def run_all(args):
                 results[arm][i].pop("_final", None)
             else:
                 results[arm][i]["continuation"] = driver.continuation(i, results[arm][i])
+    rows = args.logprob_rows
     comparisons = [
-        compare("ordinary_bN", PRIMARY_REFERENCE, lanes, results) | {"kind": "ordinary geometry (B1 vs BN)"},
-        compare("pld_per_lane", PRIMARY_REFERENCE, lanes, results) | {"kind": "pld vs primary reference"},
-        compare("pld_batched", PRIMARY_REFERENCE, lanes, results) | {"kind": "pld vs primary reference"},
-        compare("pld_batched", "ordinary_bN", lanes, results) | {"kind": "pld vs batched ordinary (secondary)"},
-        compare("pld_per_lane", "ordinary_bN", lanes, results) | {"kind": "pld vs batched ordinary (secondary)"},
+        compare("ordinary_bN", PRIMARY_REFERENCE, lanes, results, logprob_rows=rows)
+        | {"kind": "ordinary geometry (B1 vs BN)"},
+        compare("pld_per_lane", PRIMARY_REFERENCE, lanes, results, logprob_rows=rows)
+        | {"kind": "pld vs primary reference"},
+        compare("pld_batched", PRIMARY_REFERENCE, lanes, results, logprob_rows=rows)
+        | {"kind": "pld vs primary reference"},
+        compare("pld_batched", "ordinary_bN", lanes, results, logprob_rows=rows)
+        | {"kind": "pld vs batched ordinary (secondary)"},
+        compare("pld_per_lane", "ordinary_bN", lanes, results, logprob_rows=rows)
+        | {"kind": "pld vs batched ordinary (secondary)"},
     ]
-    removal_cmp = compare("pld_removal", PRIMARY_REFERENCE, lanes, results,
+    removal_cmp = compare("pld_removal", PRIMARY_REFERENCE, lanes, results, logprob_rows=rows,
                           prefix_only=(removed["lane"],) if removed else (), continuation=False)
     removal_cmp["kind"] = "membership survivor vs primary reference"
     comparisons.append(removal_cmp)

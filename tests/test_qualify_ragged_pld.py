@@ -65,10 +65,11 @@ def test_bit_divergence_is_never_relabeled_exact(tiny_record):
 
 
 def test_different_covered_lengths_are_incomparable_not_equal():
-    lane = {"tokens": [1, 2], "logprob_rows": ["a"], "covered_tokens": 5,
-            "final_state": {"status": "complete", "sha256": "x"}}
-    other = dict(lane, covered_tokens=6, final_state={"status": "complete", "sha256": "y"})
-    result = Q.compare("b", "a", [0], {"a": {0: lane}, "b": {0: other}}, continuation=False)
+    rows = [{"status": "complete", "sha256": c * 64, "reason": None} for c in "ab"]
+    lane = {"tokens": [1, 2], **Q.lane_row_evidence(rows, [1, 2], 2), "covered_tokens": 5,
+            "final_state": {"status": "complete", "sha256": "c" * 64, "reason": None}}
+    other = dict(lane, covered_tokens=6, final_state={"status": "complete", "sha256": "d" * 64, "reason": None})
+    result = Q.compare("b", "a", [0], {"a": {0: lane}, "b": {0: other}}, continuation=False, logprob_rows=2)
     assert result["tokens_exact"] and not result["bits_exact"]
     assert result["bit_differences"] == []
     assert result["incomparable"] == ["lane 0: final caches cover 6 vs 5 tokens"]
