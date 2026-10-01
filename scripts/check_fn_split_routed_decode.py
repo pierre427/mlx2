@@ -320,7 +320,7 @@ def main():
                              "switch_types": [type(getattr(sw, p)).__name__ for p in ("gate_proj", "up_proj", "down_proj")]}
         print(prefix, json.dumps(per_layer[prefix]), flush=True)
         print(json.dumps({k: f"{v[0]}/{v[1]}" for k, v in counts.items()}), flush=True)
-        del block, sw, tensors
+        block = sw = tensors = None
         cache.clear()
         mx.clear_cache()
 
@@ -341,7 +341,7 @@ def main():
     mx.eval(t_view, t_copy)
     tile4_diag = {"reversed_view_equals_contiguous": bits_equal(t_view, t_copy),
                   "max_abs_diff": maxdiff(t_view, t_copy)}
-    del sw, tensors
+    sw = tensors = None
     cache.clear()
     all_exact = all(v[0] == v[1] for v in counts.values())
     rec = {
