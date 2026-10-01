@@ -113,3 +113,44 @@ def test_invalid_tokens_reject_before_existing_cache_mutation(value, operation):
             model.decode(mx.array([[value]]), cache)
     after = (cache.length, cache.self_layer_calls, cache.cross_layer_calls, cache.boundary, cache.ple_history)
     assert before[:3] == after[:3] and before[3] is after[3] and before[4] is after[4]
+
+
+@pytest.mark.parametrize("phase", ["merge", "decode_split", "prefill_split"])
+def test_model_revision_change_cannot_relabel_batched_state(monkeypatch, phase):
+    model = Model(Config.smoke())
+    model.eval()
+    batcher = ResearchBatcher(model, max_lanes=2)
+    _, caches, _ = batcher.prefill([[1, 2, 3], [4, 5, 6]])
+    before = [list(c.arrays()) for c in caches]
+    old_owner = model._cache_owner
+    method = "_merge" if phase == "merge" else "_split"
+    original = getattr(batcher, method)
+    def changed(*args):
+        model.update({"embedding": {"weight": model.embedding.weight}})
+        return original(*args)
+    monkeypatch.setattr(batcher, method, changed)
+    with pytest.raises(ValueError, match="revision|owner"):
+        if phase == "prefill_split":
+            batcher.prefill([[1, 2, 3], [4, 5, 6]])
+        else:
+            batcher.decode([[7], [8]], caches)
+    assert all(c.owner is old_owner and c.length == 3 for c in caches)
+    assert all(all(a is b for a, b in zip(previous, c.arrays()))
+               for previous, c in zip(before, caches))
+def test_prefill_cannot_return_cohorts_from_different_revisions(monkeypatch):
+    model = Model(Config.smoke())
+    model.eval()
+    batcher = ResearchBatcher(model, max_lanes=2)
+    original = model.prefill
+    calls = 0
+
+    def changed(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            model.update({"embedding": {"weight": model.embedding.weight}})
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(model, "prefill", changed)
+    with pytest.raises(ValueError, match="revision|owner"):
+        batcher.prefill([[1, 2, 3], [4, 5]])

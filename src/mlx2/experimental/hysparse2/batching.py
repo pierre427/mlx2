@@ -4,6 +4,7 @@ Ragged prompts use length cohorts rather than masked padding. Decode cohorts
 also bind segment geometry and revisions. This is not a serving scheduler.
 """
 
+import copy
 import threading
 
 import mlx.core as mx
@@ -33,14 +34,16 @@ class ResearchBatcher:
             raise ValueError("request batching requires model.eval()")
         return rows
 
+    def _require_revision(self, cache):
+        expected = self.model.new_cache(cache.batch).apcv2_identity
+        if (cache.owner is not self.model._cache_owner
+                or canonical_json(cache.apcv2_identity) != canonical_json(expected)):
+            raise ValueError("request state owner or revision changed during batching")
+
     def _signature(self, cache):
-        expected = self.model.new_cache().apcv2_identity
-        if (
-            cache.owner is not self.model._cache_owner
-            or cache.batch != 1
-            or canonical_json(cache.apcv2_identity) != canonical_json(expected)
-        ):
-            raise ValueError("request state owner, batch or revision differs")
+        self._require_revision(cache)
+        if cache.batch != 1:
+            raise ValueError("request state batch differs")
 
         self.model.validate_cache_state(cache)
 
@@ -82,8 +85,11 @@ class ResearchBatcher:
     def _merge(self, caches):
         # Signatures are checked before any model call. Preserve segment edges:
         # changing coarse block boundaries could change candidate selection.
-        merged = self.model.new_cache(len(caches))
         first = caches[0]
+        self._require_revision(first)
+        merged = self.model.new_cache(len(caches))
+        merged.owner = first.owner
+        merged.apcv2_identity = copy.deepcopy(first.apcv2_identity)
         merged.length = first.length
         merged.self_layer_calls, merged.cross_layer_calls = (
             first.self_layer_calls,
@@ -117,12 +123,16 @@ class ResearchBatcher:
                 if getattr(first, name) is None
                 else mx.concatenate([getattr(c, name) for c in caches], axis=0),
             )
+        self._require_revision(merged)
         return merged
 
     def _split(self, cache):
+        self._require_revision(cache)
         result = []
         for row in range(cache.batch):
             single = self.model.new_cache()
+            single.owner = cache.owner
+            single.apcv2_identity = copy.deepcopy(cache.apcv2_identity)
             single.length = cache.length
             single.self_layer_calls, single.cross_layer_calls = (
                 cache.self_layer_calls,
@@ -147,6 +157,7 @@ class ResearchBatcher:
             )
             mx.eval(single.arrays(), single.boundary, single.ple_history)
             result.append(single)
+        self._require_revision(cache)
         return result
 
     def prefill(self, rows):
@@ -162,6 +173,8 @@ class ResearchBatcher:
                 for lane, i in enumerate(indices):
                     logits[i], caches[i] = mx.array(value[lane : lane + 1]), split[lane]
             mx.eval(logits)
+            for cache in caches:
+                self._require_revision(cache)
             return logits, caches, self._receipt(cohorts, rows)
 
     def decode(self, rows, caches):
@@ -190,6 +203,8 @@ class ResearchBatcher:
                         split[lane],
                     )
             mx.eval(logits)
+            for cache in next_caches:
+                self._require_revision(cache)
             return logits, next_caches, self._receipt(cohorts, rows)
 
     def _receipt(self, cohorts, rows):
