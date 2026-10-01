@@ -37,8 +37,9 @@ ROOT = Path(__file__).resolve().parents[1]
 MAIN = "709bedf8dabf671b6d60a326bae26fe49b92ae7c"
 INTAKE = "b6d54c2e19b6ce4b6012f05332749d39bd9e7192"
 BASE = "d5886a98925dc9e731dcef3f45552d60e8c88612"
-# The merge as committed. Later edits to these files (e.g. the served-exp
-# gates, recon-20261001) carry their own tests; this audit checks the merge.
+# The merge as committed.  Later edits to these files (the served-exp gates,
+# recon-20261001; the 8-bit HC / shared-fold lane) carry their own tests;
+# this audit checks what the merge proved.
 MERGE = "e311587a3e4092c27a4e87d6baad94dec2b6decf"
 QN = "src/mlx2/runtime/models/qwen3_next.py"
 RD = "src/mlx2/runtime/models/qwen4_routed_decode.py"
