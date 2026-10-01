@@ -204,6 +204,7 @@ class _RowExactAttention:
             )
         if _projected is None:
             _projected = self._project_segmented_qsa(x)
+        from . import qwen4_attn_window as AW
         from .qwen4_qsa_indexed_merge import fused_gate_enabled
 
         # Unless the indexed kernel may fuse the output gate (policy
@@ -211,6 +212,14 @@ class _RowExactAttention:
         # ``o_proj(out * sigmoid(gate))``: stop each row before the output
         # projection and run it once for the window with the row-exact kernel.
         pre_o = not fused_gate_enabled()
+        windowed = pre_o and AW.enabled()
+        if windowed:
+            # Every row dense by construction: one norm/RoPE launch, one
+            # append, one windowed SDPA (qwen4_attn_window.dense_window).
+            out = AW.dense_window(self, x, cache, _projected, window)
+            if out is not None:
+                return self.o_proj(out)
+        deferred = AW.DeferredSDPA() if windowed else None
         outputs, gates = [], []
         for j in range(length):
             row_mask = _ordinary_b1_mask(cache)
@@ -222,8 +231,13 @@ class _RowExactAttention:
                 cache,
                 _projected=tuple(value[:, j : j + 1] for value in _projected),
                 _return_pre_o=pre_o,
+                _defer_sdpa=deferred,
             )
-            if pre_o:
+            if result is None:
+                # Deferred: the row's one-row SDPA runs with the window below.
+                outputs.append(None)
+                gates.append(None)
+            elif pre_o:
                 outputs.append(result[0])
                 gates.append(result[1])
             else:
@@ -232,9 +246,12 @@ class _RowExactAttention:
         if not pre_o:
             window.note("attention_o_proj", "per_row", length)
             return mx.concatenate(outputs, axis=1)
-        out = mx.concatenate(outputs, axis=1)
-        gate = mx.concatenate(gates, axis=1)
-        return self.o_proj(out * mx.sigmoid(gate))
+        ran = iter(AW.run_deferred(deferred, window) if deferred is not None else ())
+        gated = [
+            next(ran) if out is None else out * mx.sigmoid(gate)
+            for out, gate in zip(outputs, gates)
+        ]
+        return self.o_proj(mx.concatenate(gated, axis=1))
 
 
 class _RowExactGatedDeltaNet:

@@ -5814,6 +5814,7 @@ class Attention(nn.Module):
         _return_pre_o=False,
         _selection=None,
         _fetched_kv=None,
+        _defer_sdpa=None,
     ):
         if (_selection is None) != (_fetched_kv is None):
             raise ValueError("existing QSA selection and fetched K/V must be paired")
@@ -6063,6 +6064,14 @@ class Attention(nn.Module):
                 )
         else:
             if fused_rows and self._attn_rows_sdpa_ok(q, k, v, cache, sparse_mask):
+                if _defer_sdpa is not None:
+                    # A row-exact verify window collects this one-row call
+                    # and runs it with the window's other rows
+                    # (qwen4_attn_window.run_deferred); same arithmetic.
+                    _defer_sdpa.append(
+                        q, k, v, self.scale, sparse_mask, mx.sigmoid(gate_heads)
+                    )
+                    return None
                 # The gate's sigmoid is MLX's own; the multiply and the
                 # [B, L, H * D] layout come out of the closing reduction.
                 gated = None if _return_pre_o else mx.sigmoid(gate_heads)

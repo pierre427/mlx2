@@ -128,6 +128,16 @@ class FlashNextPolicy:
     # Not an environment switch; installed on the loaded model and entered
     # in receipts only when enabled.
     row_exact_verify: bool = False
+    # Opt-in wave-2 speed-up of the row-exact verify route (omlx #4041/#4105
+    # attention window; qwen4_attn_window.py, qwen4_hc_decode.py): the
+    # window's attention runs one norm/RoPE launch, one append and one
+    # windowed SDPA (dense arm) or one windowed SDPA over the rows' one-token
+    # selections (masked arm), and the HC kernels serve the window with their
+    # one-row law -- every row still the one-token step's bits (Metal-checked,
+    # scripts/check_row_exact_window.py).  Inert unless row_exact_verify runs;
+    # the attention part needs attn_fused_rows, the HC part hc_decode_kernels.
+    # Enters the environment and receipts only when enabled.
+    row_exact_window_kernels: bool = False
 
     def __post_init__(self):
         validate_self_mtp_num_draft(self.num_draft)
@@ -158,6 +168,7 @@ class FlashNextPolicy:
             "hc_decode_kernels",
             "attn_fused_rows",
             "row_exact_verify",
+            "row_exact_window_kernels",
             *_OPTIONAL_KERNEL_ENV,
         ):
             if type(getattr(self, name)) is not bool:
@@ -231,6 +242,8 @@ class FlashNextPolicy:
             del values["tensorfold_prefill"]
         if not self.row_exact_verify:
             del values["row_exact_verify"]
+        if not self.row_exact_window_kernels:
+            del values["row_exact_window_kernels"]
         if self.tensorfold_prefill_backend == "native":
             del values["tensorfold_prefill_backend"]
         if not self.gdn_prefill_chunk:
@@ -288,6 +301,9 @@ class FlashNextPolicy:
             )
         if self.attn_fused_rows:
             environment["MLX_QWEN4_ATTN_FUSED_ROWS"] = "1"
+        if self.row_exact_window_kernels:
+            environment["MLX_QWEN4_ROW_EXACT_ATTN_WINDOW"] = "1"
+            environment["MLX_QWEN4_HC_ROW_EXACT"] = "1"
         return environment
 
     def batch_config(self, *, max_lanes, prefill_step):
