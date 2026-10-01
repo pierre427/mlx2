@@ -226,11 +226,18 @@ def test_expert_overflow_reclaims_unneeded_rows_and_bounds_failure(fail):
         num_experts = 8
         expert_bytes = 16
 
-        def read_many(self, experts):
+        def check_sources(self):
+            pass
+
+        def outstanding_bytes(self):
+            return self.expert_bytes
+
+        def iter_many(self, experts):
             # Old expert 0 is not used by the new forward and must not overlap
             # the entire temporary bank needed by this wider request.
             assert 0 not in cache._entries
-            return {i: i for i in experts}
+            for expert in experts:
+                yield (expert, expert)
 
         def materialize(self, expert):
             if fail and expert == 3:
@@ -238,7 +245,9 @@ def test_expert_overflow_reclaims_unneeded_rows_and_bounds_failure(fail):
             return (expert,)
 
     cache = ExpertLRU(Reader(), capacity_experts=1, stats=StreamStats())
+    # A row already resident from an earlier forward, accounted as one.
     cache._entries[0] = (0,)
+    cache.stats.add_resident(Reader.expert_bytes)
     if fail:
         with pytest.raises(RuntimeError, match="materialization failure"):
             cache.acquire([1, 2, 3])
