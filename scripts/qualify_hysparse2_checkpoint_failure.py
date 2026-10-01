@@ -13,6 +13,7 @@ def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--checkpoint", type=Path, required=True)
     p.add_argument("--output", type=Path, required=True)
+    p.add_argument("--load-only", action="store_true")
     args = p.parse_args()
     args.output.mkdir(parents=True, exist_ok=False)
     report = {"schema": "mlx2.hysparse2-checkpoint-failure.v1", "completed": False,
@@ -41,7 +42,7 @@ def main():
         expected = model.decode(next_token, reference_cache)
         mx.eval(expected)
         report["failures"] = []
-        for failure in ("optimizer", "metadata", "rename"):
+        for failure in (() if args.load_only else ("optimizer", "metadata", "rename")):
             root = args.output / failure
             unrelated = root / ".writing-unrelated"
             unrelated.mkdir(parents=True)
@@ -88,6 +89,52 @@ def main():
         report["retry_reload_logits_error"] = float(mx.max(mx.abs(actual - expected)).item())
         assert report["retry_reload_logits_error"] == 0
         report["saved_checkpoint_sha256"] = file_hash(saved / "model.safetensors")
+        if args.load_only:
+            from mlx.utils import tree_flatten
+            full = training.save_checkpoint(args.output / "full", model, optimizer, 0, {}, mode="full")
+            model.update({"embedding": {"weight": model.embedding.weight + 0.001}})
+            report["load_failures"] = []
+            for failure in ("model_file", "partial_update", "optimizer_file"):
+                weights = dict(tree_flatten(model.parameters()))
+                owner, epoch, digest = model._cache_owner, model._parameter_epoch, model.ple_sidecar_digest
+                state = optimizer.state
+                _, cache = model.prefill(tokens)
+                _, comparison = model.prefill(tokens)
+                expected = model.decode(next_token, comparison)
+                mx.eval(expected)
+                if failure == "partial_update":
+                    def partial(*a, **kw):
+                        model.update({"embedding": {"weight": model.embedding.weight + 0.1}})
+                        raise RuntimeError("partial weight load")
+                    context = patch.object(model, "load_weights", partial)
+                else:
+                    original = mx.load
+                    filename = "model.safetensors" if failure == "model_file" else "optimizer.safetensors"
+                    def rejected(path, *a, **kw):
+                        if Path(path).name == filename:
+                            raise ValueError("injected corrupt payload")
+                        return original(path, *a, **kw)
+                    context = patch.object(mx, "load", rejected)
+                with context:
+                    try:
+                        training.load_checkpoint(full, model, optimizer, {})
+                        raise AssertionError("load failure accepted")
+                    except (ValueError, RuntimeError) as exc:
+                        assert "injected corrupt payload" in str(exc) or "partial weight load" in str(exc)
+                restored = dict(tree_flatten(model.parameters()))
+                assert all(float(mx.max(mx.abs(restored[key] - value)).item()) == 0 for key, value in weights.items())
+                assert model._cache_owner is owner and model._parameter_epoch is epoch
+                assert model.ple_sidecar_digest == digest and optimizer.state is state
+                actual = model.decode(next_token, cache)
+                error = float(mx.max(mx.abs(actual - expected)).item())
+                assert error == 0
+                report["load_failures"].append({"stage": failure, "decode_logits_error": error, "exact_state_preserved": True})
+            report["resume_step"] = training.load_checkpoint(full, model, optimizer, {})
+            assert report["resume_step"] == 0
+            actual, _ = model.prefill(tokens)
+            expected, _ = fresh.prefill(tokens)
+            report["full_resume_logits_error"] = float(mx.max(mx.abs(actual - expected)).item())
+            assert report["full_resume_logits_error"] == 0
         report["peak_memory_bytes"] = mx.get_peak_memory()
         report["source_hashes"] = {str(path): file_hash(path) for path in (Path(__file__), Path(training.__file__))}
         report["completed"] = True

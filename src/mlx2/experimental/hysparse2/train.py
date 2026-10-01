@@ -117,6 +117,7 @@ def save_checkpoint(root, model, optimizer, step, run, mode="full"):
 
 def _load_model_state(path, model):
     import mlx.core as mx
+    from mlx.utils import tree_flatten, tree_unflatten
 
     _require_base_checkpoint_topology(model)
     path = Path(path)
@@ -167,9 +168,17 @@ def _load_model_state(path, model):
             raise ValueError(
                 "checkpoint permanent semantic PLE sidecar is missing or corrupt"
             )
+    previous = tree_flatten(model.parameters())
+    owner, epoch = model._cache_owner, model._parameter_epoch
+    try:
+        model.load_weights(str(path / "model.safetensors"), strict=True)
+        mx.eval(model.parameters())
+    except BaseException:
+        model.update(tree_unflatten(previous))
+        model._cache_owner, model._parameter_epoch = owner, epoch
+        raise
+    if model.config.semantic_ple_rows:
         model.ple_sidecar_digest = sidecar["sha256"]
-    model.load_weights(str(path / "model.safetensors"), strict=True)
-    mx.eval(model.parameters())
     model._cache_owner = object()
     return metadata
 
@@ -194,16 +203,18 @@ def load_checkpoint(path, model, optimizer, run):
     import mlx.core as mx
     from mlx.utils import tree_unflatten
 
+    _require_base_checkpoint_topology(model)
     path = Path(path)
     metadata = json.loads((path / "state.json").read_text())
     if metadata.get("schema") != "mlx2.hysparse2-checkpoint.v1":
         raise ValueError("checkpoint does not contain exact optimizer resume state")
     if metadata["run"] != run:
         raise ValueError("resume data, tokenizer or training settings differ")
+    # Reject missing/corrupt optimizer payloads before replacing live weights.
+    state = tree_unflatten(list(mx.load(str(path / "optimizer.safetensors")).items()))
+    mx.eval(state)
     metadata = _load_model_state(path, model)
-    optimizer.state = tree_unflatten(
-        list(mx.load(str(path / "optimizer.safetensors")).items())
-    )
+    optimizer.state = state
     mx.eval(model.parameters(), optimizer.state)
     return metadata["step"]
 

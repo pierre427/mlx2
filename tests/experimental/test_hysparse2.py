@@ -403,6 +403,37 @@ def test_failed_checkpoint_preserves_live_identity_and_cleans_own_staging(tmp_pa
     model.decode(mx.array([[5]]), cache)
 
 
+@pytest.mark.parametrize("failure", ["model_file", "partial_update", "optimizer_file"])
+def test_failed_checkpoint_load_preserves_live_state(tmp_path, monkeypatch, failure):
+    source = Model(Config.smoke())
+    checkpoint = save_checkpoint(tmp_path, source, optimizers.Adam(1e-3), 0, {})
+    model = Model(source.config)
+    model.eval()
+    tokens = mx.array([[1, 2, 3, 4]])
+    _, cache = model.prefill(tokens)
+    before = dict(tree_flatten(model.parameters()))
+    owner, epoch, digest = model._cache_owner, model._parameter_epoch, model.ple_sidecar_digest
+    optimizer = optimizers.Adam(1e-3)
+    state = optimizer.state
+    if failure == "model_file":
+        (checkpoint / "model.safetensors").write_bytes(b"corrupt")
+    elif failure == "optimizer_file":
+        (checkpoint / "optimizer.safetensors").write_bytes(b"corrupt")
+    else:
+        def partial(*a, **kw):
+            model.update({"embedding": {"weight": model.embedding.weight + 0.1}})
+            raise RuntimeError("partial weight load")
+        monkeypatch.setattr(model, "load_weights", partial)
+    with pytest.raises((ValueError, RuntimeError)):
+        load_checkpoint(checkpoint, model, optimizer, {})
+    after = dict(tree_flatten(model.parameters()))
+    assert after.keys() == before.keys()
+    assert all(float(mx.max(mx.abs(after[k] - v)).item()) == 0 for k, v in before.items())
+    assert model._cache_owner is owner and model._parameter_epoch is epoch
+    assert model.ple_sidecar_digest == digest and optimizer.state is state
+    model.decode(mx.array([[5]]), cache)
+
+
 def test_model_only_checkpoint_is_explicitly_not_an_exact_resume(tmp_path):
     c = Config.smoke()
     model = Model(c)
