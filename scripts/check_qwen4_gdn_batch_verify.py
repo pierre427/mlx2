@@ -224,6 +224,18 @@ def main():
             lane["padded_rows_zero"] = all(
                 bool(mx.all(t[0][r, span:] == 0).item()) for t in (snap, tape))
             result["lanes"][r] = lane
+        # Falsifier: one ulp-scale change to lane 0's state must be visible
+        # to the same comparison, or "equal" above would mean nothing.
+        # (2^-20 relative is below fp16 resolution: the fp16 class nudges by 2^-9.)
+        eps = 2.0**-9 if state.dtype == mx.float16 else 2.0**-20
+        nudged = mx.concatenate([(state[:1] * (1 + eps)).astype(state.dtype), state[1:]])
+        probe = V.qwen4_fused_gdn_batch_verify(
+            qkv, z, b, a, conv, *common, nudged, layer.norm.weight, layer.norm.eps,
+            spans, threadgroup_y=tg_snap)
+        mx.eval(*probe)
+        result["falsifier_nudged_state_detected"] = not same(probe[2][:1], snap[2][:1])
+        result["falsifier_other_lanes_unchanged"] = all(
+            same(probe[i][1:], snap[i][1:]) for i in range(3))
         batched_restore = V.qwen4_fused_gdn_reconstruct(
             state, tape[3], tape[4], tape[5], mx.array(accepts, dtype=mx.int32),
             threadgroup_y=tg_compact)
@@ -238,7 +250,8 @@ def main():
             else:
                 lane["restore_count0_keeps_checkpoint"] = same(
                     batched_restore[r:r + 1], state[r:r + 1])
-        ok = True
+        ok = (result["falsifier_nudged_state_detected"]
+              and result["falsifier_other_lanes_unchanged"])
         for lane in result["lanes"].values():
             for value in lane.values():
                 if isinstance(value, dict):
@@ -408,11 +421,11 @@ def main():
             check(f"layer {kind} {rows}x{steps} {rollback_mode}",
                   ok_out and ok_state and engaged == n_rounds)
             report[kind] = entry
-        # Falsifier: the stock multi-row chain (mode off) on the same merged
-        # schedule.  It is not row-invariant, so a working comparison should
-        # report it unequal to the lanes alone (informational, not a gate).
+        # Informational: the stock multi-row chain (mode off) on the same
+        # merged schedule with the same one-token projections, i.e. whether
+        # the stock GDN core is itself per-lane exact (not a gate).
         results, _, _ = batched("merged", mode="off")
-        report["stock_chain_falsifier"] = {
+        report["stock_chain_same_schedule"] = {
             "outputs_vs_lane_alone": all(
                 same(out, alone[lane_id][0][rnd])
                 for lane_id, (outs, _) in results.items() for rnd, out in outs),
