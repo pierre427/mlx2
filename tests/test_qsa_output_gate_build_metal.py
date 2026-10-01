@@ -234,6 +234,23 @@ def _assert_bits_equal(mx, np, storage, actual, expected, ungated, gate, label):
     assert int(np.count_nonzero(actual_bits != ungated_bits)) > 0, f"{label}: gate had no effect"
 
 
+# The served-exp probe (served_exp, recon-20261001) found the epilogue's fast
+# exp off by up to 59 ULP from eager float32 sigmoid on ~1% of inputs, so
+# float32 now takes the composed gate (counted); bf16/fp16 keep the epilogue.
+REFUSED_FP32 = "served eager sigmoid uses metal::precise::exp"
+
+
+def _expect_gate(status, path, dtype):
+    import mlx.core as mx
+
+    if dtype == mx.float32:
+        assert not status["gate_engaged"] and status["gate_path"] is None, status
+        assert status["gate_refusals"] >= 1 and status["gate_last_refusal"] == REFUSED_FP32, status
+    else:
+        assert status["gate_engaged"] is True and status["gate_path"] == path, status
+        assert status["gate_refusals"] == 0, status
+
+
 def _sequential_cell(mx, merge, dtype, m, l, o, gate):
     fallbacks = []
     with pytest.MonkeyPatch.context() as env:
@@ -262,7 +279,7 @@ def _sequential_cell(mx, merge, dtype, m, l, o, gate):
         status = merge.fused_merge_status()
     assert not fallbacks, fallbacks
     assert status["engaged"] and status["fallbacks"] == 0, status
-    assert status["gate_engaged"] is True and status["gate_path"] == "sequential_fused_merge", status
+    _expect_gate(status, "sequential_fused_merge", dtype)
     return (ungated, expected, actual)
 
 
@@ -291,7 +308,7 @@ def _native_sdpa_cell(mx, merge, indexed, dtype, m, l, o, gate):
         assert returned.tolist() == [1]
         status = merge.fused_merge_status()
     assert not status["engaged"] and status["fallbacks"] == 0, status
-    assert status["gate_engaged"] is True and status["gate_path"] == "native_sdpa_merge", status
+    _expect_gate(status, "native_sdpa_merge", dtype)
     return (ungated, expected, actual)
 
 
