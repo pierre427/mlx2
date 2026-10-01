@@ -12,6 +12,9 @@ gate) for a few layers, including the MTP layer:
   gate_up      split gate+up/SwiGLU kernel, then the block's tile4 down
   gate_up_down split gate+up kernel + served_down (tile4 arithmetic, 2 or 4
                rows per threadgroup, one-expert views on or off)
+  gate_up_down_shared  the same with the shared expert, its 8-bit gate and
+               the combine folded into the two launches (block-level; on the
+               switch-level synthetic cases it runs as gate_up_down)
 
 Per case it also compares the isolated pieces: the SwiGLU hidden against
 ``swiglu(gather_qmm gate, gather_qmm up)`` and served_down against
@@ -155,6 +158,7 @@ def chain_bench(a, index, cache):
         "gate_up_down": ("gate_up_down", 2, True),
         "gate_up_down_rows4": ("gate_up_down", 4, True),
         "gate_up_down_noviews": ("gate_up_down", 2, False),
+        "gate_up_down_shared": ("gate_up_down_shared", 2, True),
     }
 
     def chain(arm):
@@ -223,7 +227,9 @@ def main():
     index = json.load(open(MODEL / "model.safetensors.index.json"))["weight_map"]
     cache = {}
     arms = [("gate_up", 2, True), ("gate_up_down", 2, True), ("gate_up_down", 4, True),
-            ("gate_up_down", 2, False), ("gate_up_down", 4, False)]
+            ("gate_up_down", 2, False), ("gate_up_down", 4, False),
+            ("gate_up_down_shared", 2, True), ("gate_up_down_shared", 4, True),
+            ("gate_up_down_shared", 2, False)]
     counts = {}
     diffs = {}
     engaged_ok = True
@@ -242,16 +248,22 @@ def main():
         views_seen = set()
         n_cases = 0
 
-        def run_arm(mode, rows, views, fn):
+        def run_arm(mode, rows, views, fn, natural):
             RD.set_served_down_rows(rows)
             RD.set_expert_views(views)
             block.set_moe_routed_decode_mode(mode)
-            before = (sw.routed_decode_calls, sw.routed_down_calls)
+            before = (sw.routed_decode_calls, sw.routed_down_calls, block.shared_fold_calls)
             out = fn()
             mx.eval(out)
-            after = (sw.routed_decode_calls, sw.routed_down_calls)
-            want_down = 1 if mode == "gate_up_down" else 0
-            ok = after[0] - before[0] == 1 and after[1] - before[1] == want_down
+            after = (sw.routed_decode_calls, sw.routed_down_calls, block.shared_fold_calls)
+            want_down = 1 if mode.startswith("gate_up_down") else 0
+            # the fold is block-level: natural cases only
+            want_fold = 1 if mode == "gate_up_down_shared" and natural else 0
+            ok = (after[0] - before[0] == 1 and after[1] - before[1] == want_down
+                  and after[2] - before[2] == want_fold)
+            if not ok:
+                print("NOT ENGAGED", mode, rows, views, natural, before, after,
+                      block.shared_fold_last_fallback, sw.routed_down_last_fallback, flush=True)
             block.set_moe_routed_decode_mode("off")
             return out, ok
 
@@ -283,7 +295,7 @@ def main():
                 mx.eval(ref)
                 call = lambda: sw(x, inds, scores=scores, variant="auto")  # noqa: E731
             for mode, rows, views in arms:
-                out, ok = run_arm(mode, rows, views, call)
+                out, ok = run_arm(mode, rows, views, call, kind == "natural")
                 engaged_ok &= ok
                 name = f"{mode}/rows{rows}/views{int(views)}=={'block' if kind == 'natural' else 'switch'}"
                 tally(name, bits_equal(out, ref), maxdiff(out, ref))

@@ -55,6 +55,16 @@ Modes (``MLX_QWEN4_MOE_ROUTED_DECODE``, or the Flash-Next policy field
 ``two_launch``   gate+up kernel and ``down_combine``, the literal omlx pairing
                  (stock-down numerics, not the Flash-Next default's).
 
+Batched rows (extension point for omlx #4106 / #4052): the split gate+up
+kernel already addresses x row ``token = z / TOPK`` and output row ``z``, so
+an M-row window is grid z = M * TOPK with ``indices`` [M, 10]; served_down
+already takes the token from grid z. Admission (``x.size == hidden``) and the
+``do_sort`` decline in qwen3_next are what keep them one-token today. For M>1
+the reference is gather_qmm's unsorted per-(row, expert) qmv_fast (and tile4
+at width 3 is only a candidate), so each width needs its own Metal gate. A
+router top-k folded into gate+up (#4052) would replace ``rhs`` by a device
+top-k computed in the same launch.
+
 Admission is structural and exact-shape: one token (so the gather is
 unsorted), bf16 activations and scales, top-k 10, affine 4-bit group-64,
 hidden % 512 == 0 and intermediate % 512 != 0 (MLX then picks ``qmv_fast`` for
@@ -74,7 +84,7 @@ import mlx.core as mx
 ROUTED_DECODE_ENV = "MLX_QWEN4_MOE_ROUTED_DECODE"
 VIEWS_ENV = "MLX_QWEN4_MOE_ROUTED_VIEWS"
 DOWN_ROWS_ENV = "MLX_QWEN4_MOE_ROUTED_DOWN_ROWS"
-MODES = ("off", "gate_up", "gate_up_down", "two_launch")
+MODES = ("off", "gate_up", "gate_up_down", "gate_up_down_shared", "two_launch")
 TOP_K = 10
 BITS = 4
 GROUP_SIZE = 64
@@ -902,4 +912,338 @@ def served_down(h, indices, scores, down, rows=None):
         threadgroup=(32 * SERVED_DOWN_SIMDGROUPS, 1, 1),
         output_shapes=[(hidden,)],
         output_dtypes=[h.dtype],
+    )[0]
+
+
+# --------------------------------------------------------------------------
+# Shared-expert fold (omlx #4039 idea, matched to mlx2's served block).
+# The Flash-Next block ends with
+#   y = tile4_down(routed); s = shared_expert(x)   (4-bit qmv_fast gate/up,
+#   compiled swiglu, 4-bit qmv down); g = mx.sigmoid(shared_expert_gate(x))
+#   (8-bit qmv, one row; eager sigmoid from the -fno-fast-math metallib);
+#   out = y + g * s   (eager bf16 multiply, then add; glue compile off)
+# The fold computes the shared gate/up rows and the 8-bit gate row in the
+# gate+up launch (grid z 0: gate row, z 1: shared rows, z 2..11: routed
+# slots) and the shared down rows plus that combine in the down launch (a
+# sixth simdgroup). Each weight format gets its own namespaced copy of the
+# QMV header (omlx's per-format namespaces and qmv_rows helper).
+# --------------------------------------------------------------------------
+QMV_ROWS = r"""
+template <typename T, int K, int NA, int NB>
+METAL_FUNC void qmv_rows(
+    const device uint8_t* wa, const device T* sa, const device T* ba, size_t row_a,
+    const device uint8_t* wb, const device T* sb, const device T* bb, size_t row_b,
+    const device T* x, uint simd_lid, thread float* result) {
+  constexpr int in_vec_size_w = K * BYTES_PER_PACK / PACK_FACTOR;
+  constexpr int in_vec_size_g = K / GS;
+  const int lane_w = int(simd_lid) * PACKS_PER_THREAD * BYTES_PER_PACK;
+  const int lane_g = int(simd_lid) / SCALE_STEP_PER_THREAD;
+  wa += row_a * in_vec_size_w + lane_w;
+  sa += row_a * in_vec_size_g + lane_g;
+  ba += row_a * in_vec_size_g + lane_g;
+  wb += row_b * in_vec_size_w + lane_w;
+  sb += row_b * in_vec_size_g + lane_g;
+  bb += row_b * in_vec_size_g + lane_g;
+  x += int(simd_lid) * VALUES_PER_THREAD;
+  float x_thread[VALUES_PER_THREAD];
+  for (int row = 0; row < NA + NB; row++) {
+    result[row] = 0;
+  }
+  int k = 0;
+  for (; k < (FAST ? K : K - BLOCK_SIZE); k += BLOCK_SIZE) {
+    float sum = load_vector<T>(x, x_thread);
+    for (int row = 0; row < NA + NB; row++) {
+      const bool a = row < NA;
+      const int r = a ? row : row - NA;
+      const device uint8_t* wl = (a ? wa : wb) + r * in_vec_size_w;
+      float s = (a ? sa : sb)[r * in_vec_size_g];
+      float b = (a ? ba : bb)[r * in_vec_size_g];
+      result[row] += qdot_n(wl, x_thread, s, b, sum, VALUES_PER_THREAD);
+    }
+    wa += BLOCK_SIZE * BYTES_PER_PACK / PACK_FACTOR;
+    wb += BLOCK_SIZE * BYTES_PER_PACK / PACK_FACTOR;
+    sa += BLOCK_SIZE / GS;
+    ba += BLOCK_SIZE / GS;
+    sb += BLOCK_SIZE / GS;
+    bb += BLOCK_SIZE / GS;
+    x += BLOCK_SIZE;
+  }
+  if (!FAST) {
+    const int remaining = clamp(
+        int(K - k - int(simd_lid) * VALUES_PER_THREAD), 0, VALUES_PER_THREAD);
+    if (remaining > 0) {
+      float sum = load_vector_safe<T>(x, x_thread, remaining);
+      for (int row = 0; row < NA + NB; row++) {
+        const bool a = row < NA;
+        const int r = a ? row : row - NA;
+        const device uint8_t* wl = (a ? wa : wb) + r * in_vec_size_w;
+        float s = (a ? sa : sb)[r * in_vec_size_g];
+        float b = (a ? ba : bb)[r * in_vec_size_g];
+        result[row] += qdot_n(wl, x_thread, s, b, sum, remaining);
+      }
+    }
+  }
+  for (int row = 0; row < NA + NB; row++) {
+    result[row] = simd_sum(result[row]);
+  }
+}
+"""
+
+
+def _format_header(namespace: str, bits: int, fast: bool) -> str:
+    body = (
+        QMV_HEADER.replace("__BITS__", str(bits))
+        .replace("__GS__", str(GROUP_SIZE))
+        .replace("__FAST__", "1" if fast else "0")
+        .replace("using namespace metal;", "")
+    )
+    return f"namespace {namespace} {{\n{body}\n{QMV_ROWS}\n}}  // namespace {namespace}\n"
+
+
+SHARED_COMMON = "using namespace metal;\n" + SIGMOID + r"""
+template <typename T, int RPS>
+METAL_FUNC void swiglu_store(thread const float* result, device T* yp, uint simd_lid) {
+  if (simd_lid == 0) {
+    for (int row = 0; row < RPS; row++) {
+      T g = static_cast<T>(result[row]);
+      T u = static_cast<T>(result[row + RPS]);
+      T t = g * omlx_mlx_sigmoid<T>(g);
+      yp[row] = t * u;
+    }
+  }
+}
+"""
+
+SHARED_GATE_UP_SOURCE = r"""
+    const uint3 tid = threadgroup_position_in_grid;
+    const uint simd_gid = simdgroup_index_in_threadgroup;
+    const uint simd_lid = thread_index_in_simdgroup;
+    const int out_row = int(tid.y) * (NSG * RPS) + int(simd_gid) * RPS;
+    float result[2 * RPS];
+    if (tid.z == 0) {
+      if (tid.y == 0 && simd_gid == 0) {
+        q8s::qmv_rows<T, K, 1, 0>(
+            (const device uint8_t*)gw, gsc, gbi, 0,
+            (const device uint8_t*)gw, gsc, gbi, 0, x, simd_lid, result);
+        if (simd_lid == 0) {
+          y[(TOPK + 1) * NI] = static_cast<T>(result[0]);
+        }
+      }
+      return;
+    }
+    if (tid.z == 1) {
+      q4f::qmv_rows<T, K, RPS, RPS>(
+          (const device uint8_t*)shw, shs, shb, out_row,
+          (const device uint8_t*)suw, sus, sub, out_row, x, simd_lid, result);
+      swiglu_store<T, RPS>(result, y + TOPK * NI + out_row, simd_lid);
+      return;
+    }
+    const int slot = int(tid.z) - 2;
+    const size_t row0 = size_t(rhs[slot]) * NI + out_row;
+    q4f::qmv_rows<T, K, RPS, RPS>(
+        (const device uint8_t*)wg, sg, bg, row0,
+        (const device uint8_t*)wu, su, bu, row0, x, simd_lid, result);
+    swiglu_store<T, RPS>(result, y + size_t(slot) * NI + out_row, simd_lid);
+"""
+
+SHARED_DOWN_SOURCE = r"""
+    constexpr uint DOWN_WORDS = EH / 8;
+    constexpr uint DOWN_GROUPS = EH / 64;
+    uint lane = thread_index_in_simdgroup;
+    uint sg = simdgroup_index_in_threadgroup;
+    uint row_base = threadgroup_position_in_grid.y * RPS;
+    threadgroup float partials[TOPK * RPS];
+    threadgroup T shared_part[RPS];
+    if (sg == 5) {
+      float result[RPS];
+      q4s::qmv_rows<T, EH, RPS, 0>(
+          (const device uint8_t*)sdw, sds, sdb, row_base,
+          (const device uint8_t*)sdw, sds, sdb, row_base,
+          hidden + TOPK * EH, lane, result);
+      if (lane == 0) {
+        for (int r = 0; r < RPS; r++) shared_part[r] = static_cast<T>(result[r]);
+      }
+    } else {
+    const device uint32_t* packed = w;
+    uint slot_base = sg * 2;
+    float values[2 * RPS];
+#pragma unroll
+    for (uint i = 0; i < 2 * RPS; ++i) {
+        values[i] = 0.0f;
+    }
+#pragma unroll
+    for (uint local_slot = 0; local_slot < 2; ++local_slot) {
+        uint slot = slot_base + local_slot;
+        uint expert = uint(rhs[slot]);
+        const device T* hrow = hidden + size_t(slot) * EH;
+        for (uint word = lane; word < DOWN_WORDS; word += 32) {
+            size_t hbase = size_t(word) * 8;
+            float xv[8];
+            float accum_x = 0.0f;
+#pragma unroll
+            for (uint nibble = 0; nibble < 8; ++nibble) {
+                xv[nibble] = float(hrow[hbase + nibble]);
+                accum_x += xv[nibble];
+            }
+#pragma unroll
+            for (uint local_row = 0; local_row < RPS; ++local_row) {
+                uint row = row_base + local_row;
+                size_t wrow = size_t(expert) * H + row;
+                uint32_t p = packed[wrow * DOWN_WORDS + word];
+                uint group = word >> 3;
+                float scale = float(scales[wrow * DOWN_GROUPS + group]);
+                float bias = float(biases[wrow * DOWN_GROUPS + group]);
+                float accum_q = 0.0f;
+#pragma unroll
+                for (uint nibble = 0; nibble < 8; ++nibble) {
+                    accum_q += xv[nibble] *
+                        float((p >> (4 * nibble)) & 0xFu);
+                }
+                values[local_slot * RPS + local_row] +=
+                    scale * accum_q + bias * accum_x;
+            }
+        }
+    }
+#pragma unroll
+    for (uint i = 0; i < 2 * RPS; ++i) {
+        values[i] = simd_sum(values[i]);
+    }
+    if (lane == 0) {
+#pragma unroll
+        for (uint local_slot = 0; local_slot < 2; ++local_slot) {
+            uint slot = slot_base + local_slot;
+            float score = float(scores[slot]);
+#pragma unroll
+            for (uint local_row = 0; local_row < RPS; ++local_row) {
+                T expert_value = static_cast<T>(
+                    values[local_slot * RPS + local_row]);
+                T weighted_value = static_cast<T>(
+                    float(expert_value) * score);
+                partials[slot * RPS + local_row] = float(weighted_value);
+            }
+        }
+    }
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (sg == 0 && lane < RPS) {
+        float routed = 0.0f;
+#pragma unroll
+        for (uint slot = 0; slot < TOPK; ++slot) {
+            routed += partials[slot * RPS + lane];
+        }
+        const T yr = static_cast<T>(routed);
+        const float g = float(hidden[(TOPK + 1) * EH]);
+        const T e = T(1.0f + float(T(metal::precise::exp(metal::abs(g)))));
+        const T sy = T(metal::precise::divide(1.0f, float(e)));
+        const T gate = g < 0.0f ? sy : T(1.0f - float(sy));
+        const T sh = T(float(gate) * float(shared_part[lane]));
+        out[row_base + lane] = T(float(yr) + float(sh));
+    }
+"""
+
+_SHARED_KERNELS = None
+
+
+def _shared_kernels():
+    global _SHARED_KERNELS
+    if _SHARED_KERNELS is None:
+        gate_up = mx.fast.metal_kernel(
+            name="mlx2_qwen4_moe_gate_up_shared_decode",
+            input_names=["x", "wg", "sg", "bg", "wu", "su", "bu", "rhs",
+                         "shw", "shs", "shb", "suw", "sus", "sub", "gw", "gsc", "gbi"],
+            output_names=["y"],
+            header=SHARED_COMMON + _format_header("q4f", 4, True) + _format_header("q8s", 8, False),
+            source=SHARED_GATE_UP_SOURCE,
+        )
+        down = mx.fast.metal_kernel(
+            name="mlx2_qwen4_moe_served_down_shared_decode",
+            input_names=["hidden", "w", "scales", "biases", "rhs", "scores", "sdw", "sds", "sdb"],
+            output_names=["out"],
+            header="using namespace metal;\n" + _format_header("q4s", 4, False),
+            source=SHARED_DOWN_SOURCE,
+        )
+        _SHARED_KERNELS = (gate_up, down)
+    return _SHARED_KERNELS
+
+
+def _linear_ok(layer, bits: int, out_dims: int, in_dims: int) -> str | None:
+    import mlx.nn as nn
+
+    if type(layer) is not nn.QuantizedLinear:
+        return "not a plain QuantizedLinear"
+    if "_lane_prepared" in layer.__dict__:
+        return "lane matmul installed"
+    if (layer.bits, layer.group_size, getattr(layer, "mode", "affine")) != (bits, GROUP_SIZE, "affine"):
+        return f"format b{layer.bits}g{layer.group_size} != b{bits}g{GROUP_SIZE}"
+    if "bias" in layer or "biases" not in layer:
+        return "needs affine biases and no linear bias"
+    if layer["scales"].dtype != mx.bfloat16 or layer["biases"].dtype != mx.bfloat16:
+        return "scales/biases must be bfloat16"
+    if tuple(layer["weight"].shape) != (out_dims, in_dims * bits // 32):
+        return f"weight shape {tuple(layer['weight'].shape)}"
+    return None
+
+
+def admit_shared_fold(shared, shared_gate, hidden: int, inter: int) -> RoutedDecodeAdmission:
+    """Structural check of the shared expert and its gate for the fold."""
+    if shared is None or shared_gate is None:
+        return RoutedDecodeAdmission(False, "no shared expert")
+    if hasattr(shared, "_prefill_counts"):
+        return RoutedDecodeAdmission(False, "tensorfold prefill MLP installed")
+    for name, layer, bits, out_dims, in_dims in (
+        ("shared gate_proj", shared.get("gate_proj"), BITS, inter, hidden),
+        ("shared up_proj", shared.get("up_proj"), BITS, inter, hidden),
+        ("shared down_proj", shared.get("down_proj"), BITS, hidden, inter),
+        ("shared_expert_gate", shared_gate, 8, 1, hidden),
+    ):
+        reason = _linear_ok(layer, bits, out_dims, in_dims)
+        if reason is not None:
+            return RoutedDecodeAdmission(False, f"{name}: {reason}")
+    return RoutedDecodeAdmission(True, "eligible")
+
+
+def _dense_operands(layer):
+    return (layer["weight"], layer["scales"], layer["biases"])
+
+
+def shared_fold_decode(x, indices, scores, gate, up, down, shared, shared_gate, rows=None):
+    """``tile4 routed + sigmoid(shared_gate(x)) * shared_expert(x)`` for one
+    token in two launches, from split gate/up tables. Admission is the
+    caller's (split routed + tile4 + ``admit_shared_fold``)."""
+    rows = _DOWN_ROWS_SERVED if rows is None else rows
+    if rows not in DOWN_ROWS_SERVED_CHOICES:
+        raise ValueError(f"served down rows must be one of {DOWN_ROWS_SERVED_CHOICES}")
+    hidden = x.shape[-1]
+    inter = gate["weight"].shape[1]
+    gate_up_kernel, down_kernel = _shared_kernels()
+    h = gate_up_kernel(
+        inputs=[
+            x.reshape(hidden),
+            *expert_operands(gate),
+            *expert_operands(up),
+            indices.reshape(TOP_K).astype(mx.uint32),
+            *_dense_operands(shared.gate_proj),
+            *_dense_operands(shared.up_proj),
+            *_dense_operands(shared_gate),
+        ],
+        template=[("T", x.dtype), ("K", hidden), ("NI", inter),
+                  ("RPS", GATE_UP_ROWS), ("NSG", GATE_UP_SIMDGROUPS), ("TOPK", TOP_K)],
+        grid=(32, inter // GATE_UP_ROWS, TOP_K + 2),
+        threadgroup=(32, GATE_UP_SIMDGROUPS, 1),
+        output_shapes=[((TOP_K + 1) * inter + 1,)],
+        output_dtypes=[x.dtype],
+    )[0]
+    return down_kernel(
+        inputs=[
+            h,
+            *expert_operands(down),
+            indices.reshape(TOP_K),
+            scores.reshape(TOP_K),
+            *_dense_operands(shared.down_proj),
+        ],
+        template=[("T", x.dtype), ("H", hidden), ("EH", inter), ("TOPK", TOP_K), ("RPS", rows)],
+        grid=(32 * (SERVED_DOWN_SIMDGROUPS + 1), hidden // rows, 1),
+        threadgroup=(32 * (SERVED_DOWN_SIMDGROUPS + 1), 1, 1),
+        output_shapes=[(hidden,)],
+        output_dtypes=[x.dtype],
     )[0]

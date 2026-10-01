@@ -305,7 +305,7 @@ def test_split_tables_route_through_the_kernels(split_reference_kernels, mode):
 def test_gate_up_down_runs_served_down_where_tile4_would(split_reference_kernels, monkeypatch):
     seen = []
 
-    def refusal(switch_mlp, hidden, indices, scores, variant):
+    def refusal(switch_mlp, inter, dtype, indices, scores, variant):
         seen.append(variant)
         return None
 
@@ -425,3 +425,108 @@ def test_expert_view_keeps_a_non_contiguous_table_whole():
     half = t[:, I:, :]  # strided rows: a [:1] view would not index experts
     mx.eval(half)
     assert RD._expert_view(half) is half
+
+
+# --------------------------------------------------------------------------
+# Shared-expert fold (moe_routed_decode = "gate_up_down_shared")
+# --------------------------------------------------------------------------
+
+
+def _served_block(monkeypatch, mode="gate_up_down_shared", seed=0):
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(QN, "_MOE_FUSED_GATE_UP", False)
+    monkeypatch.setattr(QN, "_MOE_ROUTED_DECODE", mode)
+    mx.random.seed(seed)
+    args = SimpleNamespace(
+        hidden_size=H, moe_intermediate_size=I, shared_expert_intermediate_size=I,
+        norm_topk_prob=True, num_experts=E, num_experts_per_tok=10,
+    )
+    block = QN.Qwen3NextSparseMoeBlock(args)
+    for proj, shape in (("gate_proj", (E, I, H)), ("up_proj", (E, I, H)), ("down_proj", (E, H, I))):
+        getattr(block.switch_mlp, proj).weight = (mx.random.normal(shape) * 0.05)
+    nn.quantize(block, group_size=64, bits=4)
+    block.shared_expert_gate = nn.QuantizedLinear.from_linear(
+        nn.Linear(H, 1, bias=False), group_size=64, bits=8)
+    block.set_dtype(mx.bfloat16)
+    block.set_fused_expert_kernel_mode("tile4")  # tile4 declines on CPU -> stock down
+    block.eval()
+    return block
+
+
+@pytest.fixture
+def fold_reference(monkeypatch):
+    """Composed stand-in for the folded launches; served_down admission forced."""
+    calls = {"fold": 0}
+
+    def shared_fold_decode(x, indices, scores, gate, up, down, shared, shared_gate, rows=None):
+        calls["fold"] += 1
+        xe = mx.expand_dims(x, (-2, -3))
+        h = QN.SwiGLU()(up(xe, indices), gate(xe, indices))
+        y = (down(h, indices).squeeze(-2) * scores[..., None]).sum(axis=-2)
+        return (y + mx.sigmoid(shared_gate(x)) * shared(x)).reshape(-1)
+
+    monkeypatch.setattr(RD, "shared_fold_decode", shared_fold_decode)
+    monkeypatch.setattr(RD, "runtime_supported", lambda: True)
+    monkeypatch.setattr(QN, "_served_down_refusal", lambda *a: None)
+    return calls
+
+
+def test_shared_fold_admission():
+    shared = QN.Qwen3NextMLP(H, I)
+    nn.quantize(shared, group_size=64, bits=4)
+    shared.set_dtype(mx.bfloat16)
+    gate = nn.QuantizedLinear.from_linear(nn.Linear(H, 1, bias=False), group_size=64, bits=8)
+    gate.set_dtype(mx.bfloat16)
+    assert RD.admit_shared_fold(shared, gate, H, I).accepted
+    gate4 = nn.QuantizedLinear.from_linear(nn.Linear(H, 1, bias=False), group_size=64, bits=4)
+    gate4.set_dtype(mx.bfloat16)
+    assert "b4g64 != b8g64" in RD.admit_shared_fold(shared, gate4, H, I).reason
+    assert "no shared expert" in RD.admit_shared_fold(None, gate, H, I).reason
+    shared.down_proj.__dict__["_lane_prepared"] = object()
+    assert "lane matmul" in RD.admit_shared_fold(shared, gate, H, I).reason
+    del shared.down_proj.__dict__["_lane_prepared"]
+    object.__setattr__(shared, "_prefill_counts", {})
+    assert "tensorfold" in RD.admit_shared_fold(shared, gate, H, I).reason
+
+
+def test_shared_fold_replaces_the_block_tail(monkeypatch, fold_reference):
+    block = _served_block(monkeypatch)
+    for seed in range(3):
+        x = _x(seed)
+        block.set_moe_routed_decode_mode("off")
+        want = block(x)
+        block.set_moe_routed_decode_mode("gate_up_down_shared")
+        got = block(x)
+        assert got.shape == want.shape == (1, 1, H)
+        assert mx.array_equal(got, want).item()
+    assert block.shared_fold_calls == 3 and block.shared_fold_fallbacks == 0
+    assert block.switch_mlp.routed_decode_calls == 3 and block.switch_mlp.routed_down_calls == 3
+    assert fold_reference["fold"] == 3
+
+
+def test_shared_fold_declines_with_reasons(monkeypatch, fold_reference):
+    block = _served_block(monkeypatch)
+    x = _x(4)
+    # multi-token forwards decline quietly
+    block(_x(4, rows=3))
+    assert block.shared_fold_calls == 0 and block.shared_fold_fallbacks == 0
+    monkeypatch.setattr(QN, "_COMPILE_GLUE", True)
+    block(x)
+    assert block.shared_fold_fallbacks == 1
+    assert "glue" in block.shared_fold_last_fallback
+    monkeypatch.setattr(QN, "_COMPILE_GLUE", False)
+    block.shared_expert_gate = nn.QuantizedLinear.from_linear(
+        nn.Linear(H, 1, bias=False), group_size=64, bits=4)
+    block.shared_expert_gate.set_dtype(mx.bfloat16)
+    block(x)
+    assert block.shared_fold_fallbacks == 2
+    assert "shared_expert_gate" in block.shared_fold_last_fallback
+    assert fold_reference["fold"] == 0
+
+
+def test_policy_accepts_gate_up_down_shared():
+    from mlx2.adapters.flash_next_policy import FlashNextPolicy
+
+    chosen = FlashNextPolicy.from_mapping({"moe_routed_decode": "gate_up_down_shared"})
+    assert chosen.environment()[RD.ROUTED_DECODE_ENV] == "gate_up_down_shared"

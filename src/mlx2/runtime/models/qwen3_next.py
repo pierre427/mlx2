@@ -493,7 +493,7 @@ def _enable_routed_decode(switch_mlp, mode: str) -> None:
     switch_mlp.routed_down_last_fallback = None
 
 
-def _served_down_refusal(switch_mlp, hidden, indices, scores, variant):
+def _served_down_refusal(switch_mlp, inter, dtype, indices, scores, variant):
     """Why served_down may not stand in for the block's down here, or None.
 
     It reproduces the tile4 fused down only, so it runs only where the block
@@ -508,7 +508,7 @@ def _served_down_refusal(switch_mlp, hidden, indices, scores, variant):
     if type(down) is not QuantizedSwitchLinear:
         return "down is not a resident QuantizedSwitchLinear"
     admission = admit_qwen4_fused_down(
-        hidden.reshape(indices.shape + (hidden.shape[-1],)),
+        _ShapeOnly(indices.shape + (inter,), dtype),
         indices,
         scores,
         down["weight"],
@@ -537,6 +537,10 @@ def _try_routed_decode(switch_mlp, x, indices, scores, do_sort, variant="scalar"
     mode = getattr(switch_mlp, "routed_decode_mode", "off")
     if mode == "off" or do_sort or x.size != x.shape[-1]:
         return None
+    if mode == "gate_up_down_shared":
+        # The block folds the shared expert when it can; reaching the switch
+        # means it declined (counted there), so run the routed half alone.
+        mode = "gate_up_down"
     if mode in ("two_launch", "gate_up_down") and scores is None:
         mode = "gate_up"
     split = "gate_up_proj" not in switch_mlp
@@ -566,7 +570,9 @@ def _try_routed_decode(switch_mlp, x, indices, scores, do_sort, variant="scalar"
     switch_mlp.routed_decode_calls += 1
     switch_mlp.routed_decode_last_fallback = None
     if mode == "gate_up_down":
-        refusal = _served_down_refusal(switch_mlp, hidden, indices, scores, variant)
+        refusal = _served_down_refusal(
+            switch_mlp, hidden.shape[-1], hidden.dtype, indices, scores, variant
+        )
         if refusal is not None:
             switch_mlp.routed_down_fallbacks += 1
             switch_mlp.routed_down_last_fallback = refusal
@@ -581,6 +587,70 @@ def _try_routed_decode(switch_mlp, x, indices, scores, do_sort, variant="scalar"
         switch_mlp.routed_down_calls += 1
         return ("two_launch", y.reshape(indices.shape[:-1] + (y.shape[-1],)))
     return ("gate_up", hidden.reshape(indices.shape + (1, hidden.shape[-1])))
+
+
+def _shared_fold_refusal(block, x, inds, scores):
+    """Why the block may not fold its shared expert into the routed launches."""
+    switch_mlp = block.switch_mlp
+    if block.shared_folded or block.sharding_group is not None:
+        return "shared row folded or sharded"
+    if _COMPILE_GLUE:
+        return "compiled combine glue selected"
+    if not block.fused_expert_kernel_enabled:
+        return "fused expert kernel off"
+    if "gate_up_proj" in switch_mlp:
+        return "fused [gate|up] table (fold is split-table only)"
+    if not _routed.runtime_supported():
+        return "Metal runtime unavailable"
+    admission = _routed.admit_split_routed_decode(
+        x, inds, scores, switch_mlp.gate_proj, switch_mlp.up_proj, switch_mlp.down_proj
+    )
+    if not admission.accepted:
+        return admission.reason
+    if switch_mlp.training or block.training:
+        return "training"
+    inter = switch_mlp.gate_proj["weight"].shape[1]
+    refusal = _served_down_refusal(
+        switch_mlp, inter, x.dtype, inds, scores, block.fused_expert_kernel_mode
+    )
+    if refusal is not None:
+        return refusal
+    admission = _routed.admit_shared_fold(
+        block.get("shared_expert"), block.get("shared_expert_gate"), x.shape[-1], inter
+    )
+    return None if admission.accepted else admission.reason
+
+
+def _try_shared_fold(block, x, inds, scores):
+    """The block's output from the two folded launches, or None."""
+    if getattr(block.switch_mlp, "routed_decode_mode", "off") != "gate_up_down_shared":
+        return None
+    if x.size != x.shape[-1]:
+        return None  # multi-token forwards decline quietly
+    refusal = _shared_fold_refusal(block, x, inds, scores)
+    if refusal is not None:
+        block.shared_fold_fallbacks += 1
+        block.shared_fold_last_fallback = refusal
+        return None
+    sw = block.switch_mlp
+    y = _routed.shared_fold_decode(
+        x, inds, scores, sw.gate_proj, sw.up_proj, sw.down_proj,
+        block.shared_expert, block.shared_expert_gate,
+    )
+    block.shared_fold_calls += 1
+    block.shared_fold_last_fallback = None
+    sw.routed_decode_calls += 1
+    sw.routed_down_calls += 1
+    return y.reshape(x.shape[:-1] + (y.shape[-1],))
+
+
+class _ShapeOnly:
+    """Shape/dtype stand-in for the routed hidden in a structural admission
+    (``admit_qwen4_fused_down`` reads only ``shape`` and ``dtype``)."""
+
+    def __init__(self, shape, dtype):
+        self.shape = tuple(shape)
+        self.dtype = dtype
 
 
 def _routed_tail(switch_mlp, x, indices, inv_order, scores, do_sort):
@@ -945,6 +1015,9 @@ class Qwen3NextSparseMoeBlock(nn.Module):
         if not self.shared_folded:
             self.shared_expert = Qwen3NextMLP(dim, shared_expert_intermediate_size)
         self.shared_expert_gate = nn.Linear(dim, 1, bias=False)
+        self.shared_fold_calls = 0
+        self.shared_fold_fallbacks = 0
+        self.shared_fold_last_fallback = None
         self.fused_expert_dispatches = {"scalar": 0, "tile4": 0}
         self.fused_expert_fallbacks = 0
         self.sharding_group = None
@@ -1020,6 +1093,9 @@ class Qwen3NextSparseMoeBlock(nn.Module):
             scores = mx.take_along_axis(gates, inds, axis=-1)
             if self.norm_topk_prob:
                 scores = scores / scores.sum(axis=-1, keepdims=True)
+        folded = _try_shared_fold(self, x, inds, scores)
+        if folded is not None:
+            return folded
         glue = _COMPILE_GLUE
         if self.shared_folded:
             shared_col = mx.full(

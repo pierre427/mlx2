@@ -518,6 +518,13 @@ class FlashNextAdapter:
                      if getattr(s, "routed_down_last_fallback", None)),
                     None,
                 ),
+                "shared_fold_calls": sum(getattr(m, "shared_fold_calls", 0) for m in moe_modules),
+                "shared_fold_fallbacks": sum(getattr(m, "shared_fold_fallbacks", 0) for m in moe_modules),
+                "shared_fold_last_fallback": next(
+                    (m.shared_fold_last_fallback for m in moe_modules
+                     if getattr(m, "shared_fold_last_fallback", None)),
+                    None,
+                ),
                 "expert_views": routed_decode.expert_views_enabled(),
                 "served_down_rows": routed_decode.served_down_rows(),
             }
