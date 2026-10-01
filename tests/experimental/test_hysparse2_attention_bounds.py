@@ -181,7 +181,7 @@ def test_coarse_candidate_groups_never_read_value_tensors():
 
 
 @pytest.mark.parametrize("length", [65, 257])
-def test_aligned_coarse_groups_match_split_block_fallback(length):
+def test_contiguous_coarse_groups_match_split_block_segments(length):
     keys = mx.random.normal((2, 1, length, 8))
     aligned = [(keys, None, 64)]
     fragmented = [(keys[:, :, :31], None, 64), (keys[:, :, 31:], None, 95)]
@@ -197,3 +197,19 @@ def test_aligned_coarse_groups_match_split_block_fallback(length):
     fast_grad = mx.grad(lambda k: total(k, False))(keys)
     general_grad = mx.grad(lambda k: total(k, True))(keys)
     assert bool(mx.all(fast_grad == general_grad).item())
+
+
+def test_coarse_group_fast_path_handles_many_decode_tail_segments(monkeypatch):
+    import mlx2.experimental.hysparse2.attention as module
+
+    keys = mx.random.normal((2, 1, 259, 8))
+    blocks = [(keys[:, :, :256], None, 0)] + [
+        (keys[:, :, i:i + 1], None, i) for i in range(256, 259)]
+    def unexpected_general(*a, **kw):
+        raise AssertionError("contiguous decode tail fell back to block assembly")
+    monkeypatch.setattr(module, "_candidate_tiles", unexpected_general)
+    actual = list(module._candidate_groups(blocks, 64, 128, maximum=258))
+    single = list(module._candidate_groups([(keys, None, 0)], 64, 128, maximum=258))
+    assert len(actual) == len(single)
+    for a, b in zip(actual, single):
+        assert all(bool(mx.all(x == y).item()) for x, y in zip(a, b))

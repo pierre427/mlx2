@@ -107,12 +107,13 @@ def _candidate_groups(blocks, block_size, key_tile, *, maximum=None):
             yield k, None, start
 
     visible = list(visible_blocks())
-    # Aligned contiguous history can be assembled directly at the coarse tile
-    # width. Keep the general absolute-block path for gaps and split blocks.
+    # Contiguous history beginning at an absolute block boundary can be
+    # assembled directly at coarse tile width, including one-token decode
+    # segments. Keep the general block path for gaps or unaligned beginnings.
     aligned = bool(visible) and all(
-        type(start) is int and start >= 0 and start % block_size == 0
+        type(start) is int and start >= 0
+        and (i != 0 or start % block_size == 0)
         and k.shape[2] > 0
-        and (i == len(visible) - 1 or k.shape[2] % block_size == 0)
         and k.shape[:2] == visible[0][0].shape[:2]
         and k.shape[3:] == visible[0][0].shape[3:]
         and k.dtype == visible[0][0].dtype
