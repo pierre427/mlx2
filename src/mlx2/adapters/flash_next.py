@@ -470,6 +470,7 @@ class FlashNextAdapter:
         )
         from ..runtime.models.qwen4_hc_decode import hc_decode_status
         from ..runtime.models.qwen4_qsa_indexed import qsa_indexed_status
+        from ..runtime.models.qwen4_attn_rows import status as qwen4_attn_rows_status
         from ..runtime.round_levers import counters as lever_snapshot
         from ..runtime.segmented_self_mtp import segmented_self_mtp_stats
         diagnostic_modules = getattr(self, "_diagnostic_modules", None)
@@ -552,6 +553,11 @@ class FlashNextAdapter:
             "qsa_mtp_amendment": qsa_mtp_amendment_status(),
             "qsa_rollback": qsa_rollback_status(),
             "segmented_mtp": segmented_self_mtp_stats(),
+            **(
+                {"attn_fused_rows": qwen4_attn_rows_status()}
+                if self.policy.attn_fused_rows
+                else {}
+            ),
             "norm_convention": (
                 None
                 if getattr(self, "norm_convention", None) is None

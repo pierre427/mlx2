@@ -64,6 +64,7 @@ from .qwen4_fused_group_norm import fused_group_norm_enabled, try_fused_group_no
 from . import qwen4_hc_decode as _hc_decode
 from .qwen4_gdn_outproj import admit_qwen4_gdn_outproj
 from . import qwen4_fused_gdn_prefill as _gdn_prefill
+from . import qwen4_attn_rows as _attn_rows
 from .qwen4_qsa_nax import (
     block_sparse_layout_supported,
     compact_blocks_to_kernel_inputs,
@@ -5382,6 +5383,7 @@ class QSAIndexer(nn.Module):
         causal_mask: mx.array,
         cache: QSAKVCache,
         projected_qk: Optional[mx.array] = None,
+        dense_shortcircuit: bool = False,
     ):
         (batch, length, _) = hidden.shape
         if isinstance(cache, SinkWindowKVCache):
@@ -5429,9 +5431,11 @@ class QSAIndexer(nn.Module):
                 physical_width=total,
                 n_blocks=n_blocks,
             )
-        if _QSA_DENSE_SHORTCIRCUIT and self._dense_by_construction(
+        if (_QSA_DENSE_SHORTCIRCUIT or dense_shortcircuit) and self._dense_by_construction(
             n_blocks, shared_topk
         ):
+            if dense_shortcircuit and not _QSA_DENSE_SHORTCIRCUIT:
+                _attn_rows.bump("indexer_dense_shortcircuit")
             if shared_topk is None and getattr(cache, "_mtp_share_topk", False):
                 cache._mtp_shared_topk = mx.contiguous(
                     mx.broadcast_to(
@@ -5631,10 +5635,100 @@ class Attention(nn.Module):
         object.__setattr__(self, "_qsa_fused_cache", (key, table))
         return table
 
+    def _attn_rows_admit(self, x: mx.array, cache, length: int) -> bool:
+        """Whether this call may take the fused attention rows (default off):
+        one request row, short rows, an unquantized cache."""
+        reason = None
+        if x.shape[0] != 1:
+            reason = "batch"
+        elif length > _attn_rows.PREP_MAX_ROWS:
+            reason = "rows"
+        elif x.dtype not in (mx.bfloat16, mx.float16):
+            reason = "dtype"
+        elif cache is not None and hasattr(cache, "bits"):
+            reason = "quantized_cache"
+        elif not _attn_rows.metal_ready():
+            reason = "device"
+        if reason is not None:
+            _attn_rows.bump("fallback_" + reason)
+            return False
+        return True
+
+    def _attn_rows_prep(self, qg: mx.array, k_flat: mx.array, offset):
+        """``(q, k)`` from the fused norm + RoPE launch, or ``None``."""
+        reason = None
+        if type(self.q_norm) is not nn.RMSNorm or type(self.k_norm) is not nn.RMSNorm:
+            reason = "norm_type"
+        elif self.q_norm.eps != self.k_norm.eps:
+            reason = "norm_eps"
+        elif isinstance(offset, mx.array) and offset.size not in (1, qg.shape[0]):
+            reason = "offset_shape"
+        else:
+            reason = _attn_rows.prep_qk_supported(
+                qg,
+                k_flat,
+                self.q_norm.weight,
+                self.k_norm.weight,
+                heads=self.num_heads,
+                kv_heads=self.num_kv_heads,
+                head_dim=self.head_dim,
+                rope=self.rope,
+            )
+        if reason is not None:
+            _attn_rows.bump("prep_fallback_" + reason)
+            return None
+        _attn_rows.bump("prep_rows", qg.shape[1])
+        return _attn_rows.prep_qk(
+            qg,
+            k_flat,
+            self.q_norm.weight,
+            self.k_norm.weight,
+            self.q_norm.eps,
+            offset,
+            heads=self.num_heads,
+            kv_heads=self.num_kv_heads,
+            rope=self.rope,
+        )
+
+    def _attn_rows_sdpa_ok(self, q, k, v, cache, mask) -> bool:
+        """Whether ``scaled_dot_product_attention`` here is MLX's vector
+        kernel that ``sdpa_gate`` transcribes."""
+        reason = None
+        if isinstance(k, tuple) or isinstance(v, tuple):
+            reason = "quantized_kv"
+        elif getattr(cache, "attention_backend", "sdpa") != "sdpa":
+            reason = "attention_backend"
+        else:
+            from .qsdpa_decode_metal import use_fp_decode_kernel
+
+            row_mask = None if isinstance(mask, str) else mask
+            if q.shape[2] == 1 and use_fp_decode_kernel(q, k, v, mask=row_mask):
+                reason = "fp_decode_kernel"
+            else:
+                reason = _attn_rows.sdpa_supported(q, k, v, mask)
+        if reason is not None:
+            _attn_rows.bump("sdpa_fallback_" + reason)
+            return False
+        plan = _attn_rows.sdpa_plan(
+            k.shape[2], q.shape[2], self.num_heads, self.num_kv_heads, self.head_dim
+        )
+        _attn_rows.bump(f"sdpa_{plan[0]}pass_rows", q.shape[2])
+        return True
+
     def _project_segmented_qsa(self, x: mx.array):
         """Project a segmented batch once before its B1 attention reductions."""
-        if _QSA_FUSED_PROJ and (not self.training):
+        grouped = (
+            _attn_rows.enabled()
+            and x.shape[0] * x.shape[1] <= _attn_rows.PROJECTION_MAX_ROWS
+            and x.dtype in (mx.bfloat16, mx.float16)
+            and _attn_rows.metal_ready()
+        )
+        if (_QSA_FUSED_PROJ or grouped) and (not self.training):
             table = self._fused_projection_table()
+            if grouped:
+                _attn_rows.bump(
+                    "projection_grouped" if table is not None else "projection_fallback_table"
+                )
             if table is not None:
                 width_q = self.num_heads * self.head_dim * 2
                 width_kv = self.num_kv_heads * self.head_dim
@@ -5669,10 +5763,20 @@ class Attention(nn.Module):
         (batch, length, _) = x.shape
         quantized_indexed = qsa_indexed_quantized_cache_config(cache)
         qg = k_flat = v_flat = fused_index_qk = None
+        fused_rows = (
+            _attn_rows.enabled()
+            and (not self.training)
+            and self._attn_rows_admit(x, cache, length)
+        )
+        grouped = fused_rows and batch * length <= _attn_rows.PROJECTION_MAX_ROWS
         if _projected is not None:
             (qg, k_flat, v_flat, fused_index_qk) = _projected
-        elif _QSA_FUSED_PROJ and (not self.training):
+        elif (_QSA_FUSED_PROJ or grouped) and (not self.training):
             table = self._fused_projection_table()
+            if grouped:
+                _attn_rows.bump(
+                    "projection_grouped" if table is not None else "projection_fallback_table"
+                )
             if table is not None:
                 width_q = self.num_heads * self.head_dim * 2
                 width_kv = self.num_kv_heads * self.head_dim
@@ -5682,7 +5786,16 @@ class Attention(nn.Module):
                     axis=-1,
                 )
         selection = (
-            self.indexer(x, mask, cache, projected_qk=fused_index_qk)
+            self.indexer(
+                x,
+                mask,
+                cache,
+                projected_qk=fused_index_qk,
+                # The indexer selects every block below its budget; the fused
+                # rows skip that selection (omlx's dense arm).  A gather arm
+                # would read the explicit selection, so it keeps it.
+                dense_shortcircuit=fused_rows and not _QSA_GATHER_KV,
+            )
             if _selection is None
             else _selection
         )
@@ -5770,13 +5883,6 @@ class Attention(nn.Module):
             qg = self.q_proj(x)
             k_flat = self.k_proj(x)
             v_flat = self.v_proj(x)
-        (q, gate) = mx.split(qg.reshape(batch, length, self.num_heads, -1), 2, axis=-1)
-        gate = gate.reshape(batch, length, -1)
-        k = k_flat.reshape(batch, length, self.num_kv_heads, self.head_dim)
-        v = v_flat.reshape(batch, length, self.num_kv_heads, self.head_dim)
-        q = self.q_norm(q).transpose(0, 2, 1, 3)
-        k = self.k_norm(k).transpose(0, 2, 1, 3)
-        v = v.transpose(0, 2, 1, 3)
         offset = (
             _selection.offset
             if _fetched_kv is not None
@@ -5784,7 +5890,19 @@ class Attention(nn.Module):
             if cache is None
             else cache.offset
         )
-        (q, k) = (self.rope(q, offset=offset), self.rope(k, offset=offset))
+        (q, gate) = mx.split(qg.reshape(batch, length, self.num_heads, -1), 2, axis=-1)
+        gate_heads = gate
+        gate = gate.reshape(batch, length, -1)
+        v = v_flat.reshape(batch, length, self.num_kv_heads, self.head_dim)
+        v = v.transpose(0, 2, 1, 3)
+        prepped = self._attn_rows_prep(qg, k_flat, offset) if fused_rows else None
+        if prepped is not None:
+            (q, k) = prepped
+        else:
+            k = k_flat.reshape(batch, length, self.num_kv_heads, self.head_dim)
+            q = self.q_norm(q).transpose(0, 2, 1, 3)
+            k = self.k_norm(k).transpose(0, 2, 1, 3)
+            (q, k) = (self.rope(q, offset=offset), self.rope(k, offset=offset))
         if _fetched_kv is not None:
             (k, v) = _fetched_kv
         elif cache is not None:
@@ -5880,6 +5998,16 @@ class Attention(nn.Module):
                     tile_rows=_QSA_GATHER_TILE_ROWS,
                 )
         else:
+            if fused_rows and self._attn_rows_sdpa_ok(q, k, v, cache, sparse_mask):
+                # The gate's sigmoid is MLX's own; the multiply and the
+                # [B, L, H * D] layout come out of the closing reduction.
+                gated = None if _return_pre_o else mx.sigmoid(gate_heads)
+                out = _attn_rows.sdpa_gate(
+                    q, k, v, self.scale, mask=sparse_mask, gate=gated
+                )
+                if _return_pre_o:
+                    return (out, gate)
+                return self.o_proj(out)
             out = scaled_dot_product_attention(
                 q, k, v, cache=cache, scale=self.scale, mask=sparse_mask
             )

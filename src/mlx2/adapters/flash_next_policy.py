@@ -93,6 +93,17 @@ class FlashNextPolicy:
     tensorfold_prefill_backend: str = "native"
     gdn_prefill_chunk: int = 0
     gdn_prefill_segment_rows: int = 2048
+    # omlx #4052 fused attention rows (MLX_QWEN4_ATTN_FUSED_ROWS): one-request
+    # decode and short verify rows take one grouped q/k/v/index projection
+    # launch (M <= 7), one q/k norm + RoPE launch, and (R <= 2) MLX's vector
+    # SDPA transcribed with the gate multiply folded into its closing
+    # reduction; below the indexer budget the selection is skipped (every
+    # block is selected there); past it the QSA mask and the indexer query's
+    # norm + RoPE run as one launch each.  Bit-identical to the MLX ops on
+    # Metal, full-model tokens identical; B1 decode +11% ordinary / +2% MTP at
+    # 1K, +2% / flat at 32K (qualification/runs/attn-rows-20260930).  Opt-in;
+    # enters the environment and receipts only when enabled.
+    attn_fused_rows: bool = False
 
     def __post_init__(self):
         validate_self_mtp_num_draft(self.num_draft)
@@ -116,6 +127,7 @@ class FlashNextPolicy:
             "tensorfold_qmv_rows",
             "tensorfold_prefill",
             "hc_decode_kernels",
+            "attn_fused_rows",
             *_OPTIONAL_KERNEL_ENV,
         ):
             if type(getattr(self, name)) is not bool:
@@ -197,6 +209,8 @@ class FlashNextPolicy:
             del values["hc_decode_kernels"]
         if self.fused_gdn_batch_decode == "off":
             del values["fused_gdn_batch_decode"]
+        if not self.attn_fused_rows:
+            del values["attn_fused_rows"]
         return values
 
     def environment(self):
@@ -233,6 +247,8 @@ class FlashNextPolicy:
             environment["MLX_QWEN4_FUSED_GDN_BATCH_DECODE"] = (
                 self.fused_gdn_batch_decode
             )
+        if self.attn_fused_rows:
+            environment["MLX_QWEN4_ATTN_FUSED_ROWS"] = "1"
         return environment
 
     def batch_config(self, *, max_lanes, prefill_step):
