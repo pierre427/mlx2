@@ -33,8 +33,16 @@ def main():
     ap.add_argument("--model", required=True)
     ap.add_argument("--prompt-file", required=True)
     ap.add_argument("--phase", choices=("speed", "quality"), required=True)
-    ap.add_argument("--knob", choices=("moe_routed", "gdn_batch"), default="moe_routed",
-                    help="gdn_batch: arms are fused GDN batched-decode modes (off | row_exact)")
+    ap.add_argument("--knob", choices=("moe_routed", "gdn_batch", "moe_window", "topk"), default="moe_routed",
+                    help="gdn_batch: arms are fused GDN batched-decode modes (off | row_exact); "
+                         "moe_window: arms are MoE row-window consumer sets (off | batch | verify | "
+                         "batch+verify), optionally ':launch'/':fold' (top-k) and ':noshared'; "
+                         "topk: arms are top-k modes (off | launch | fold)")
+    ap.add_argument("--policy", default=None,
+                    help="JSON execution policy for the adapter (e.g. the campaign defaults)")
+    ap.add_argument("--solo-reference", action="store_true",
+                    help="speed: also decode every lane's prompt alone (B=1, arms off) once per "
+                         "config and report which arms' lanes equal their solo decode")
     ap.add_argument("--arms", nargs="+", default=None)
     ap.add_argument("--configs", nargs="+", default=["ordinary:1", "mtp:1", "ordinary:4", "mtp:4"])
     ap.add_argument("--context", type=int, default=4096)
@@ -53,13 +61,15 @@ def main():
     ap.add_argument("--i-own-the-gpu", action="store_true")
     a = ap.parse_args()
     if a.arms is None:
-        a.arms = ["off", "row_exact"] if a.knob == "gdn_batch" else ["off", "gate_up", "two_launch"]
+        a.arms = {"gdn_batch": ["off", "row_exact"], "moe_window": ["off", "batch"],
+                  "topk": ["off", "fold"]}.get(a.knob, ["off", "gate_up", "two_launch"])
     if not a.i_own_the_gpu:
         ap.error("refusing Metal execution without --i-own-the-gpu")
 
     from mlx2.adapters.registry import resolve_adapter
 
-    adapter = resolve_adapter(a.model, mtp=True)(a.model)
+    policy = json.loads(a.policy) if a.policy else None
+    adapter = resolve_adapter(a.model, mtp=True)(a.model, execution_policy=policy)
     model = adapter.model
     mx.eval(model.parameters())
     mx.set_cache_limit(a.cache_limit_gib << 30)
@@ -81,7 +91,27 @@ def main():
 
     gdn_layers = [m for _, m in model.named_modules() if hasattr(m, "set_fused_gdn_batch_decode_mode")]
 
+    from mlx2.runtime.models import qwen4_moe_window as MW
+
     def configure(arm):
+        if a.knob == "moe_window":
+            # Arms: "off", or consumers joined by "+" (batch -> batch_decode,
+            # verify, row_exact), with ":launch"/":fold" (top-k) and
+            # ":noshared" (shared expert through the row-exact qmv kernel).
+            name, *opts = arm.split(":")
+            consumers = set()
+            if name != "off":
+                consumers = {{"batch": "batch_decode"}.get(c, c) for c in name.split("+")}
+            topk = "fold" if "fold" in opts else ("launch" if "launch" in opts else "off")
+            MW.set_window_shared("noshared" not in opts)
+            for b in blocks:
+                b.set_moe_window_consumers(consumers)
+                b.set_moe_topk_mode(topk)
+            return
+        if a.knob == "topk":
+            for b in blocks:
+                b.set_moe_topk_mode(arm)
+            return
         if a.knob == "gdn_batch":
             # Arms: the fused GDN batched one-token decode mode (off | row_exact).
             for layer in gdn_layers:
@@ -101,6 +131,12 @@ def main():
             b.set_fused_expert_kernel_mode("stock" if mode == "stock_down" else default_expert_mode)
 
     def calls():
+        if a.knob == "moe_window":
+            return sum(sum(b.moe_window_calls.values()) for b in blocks), sum(
+                sum(b.moe_window_fallbacks.values()) for b in blocks)
+        if a.knob == "topk":
+            return sum(sum(b.moe_topk_calls.values()) for b in blocks), sum(
+                b.moe_topk_fallbacks for b in blocks)
         if a.knob == "gdn_batch":
             return sum(m.fused_gdn_batch_decode_calls for m in gdn_layers), sum(
                 m.fused_gdn_batch_decode_fallbacks for m in gdn_layers)
@@ -217,6 +253,29 @@ def main():
                     "tokens_per_step": emitted / max(1, steps)}
         return emitted / (t_end - t_first), sha, [tokens.get(u, []) for u in uids]
 
+    def run_solo(route, prompt, lane):
+        kwargs = {}
+        if route == "mtp":
+            kwargs["self_mtp"] = {"num_draft": adapter.policy.num_draft, "persistent": True,
+                                  "rate_gate": False, "prefill_step_size": a.prefill_step}
+        gen = G.BatchGenerator(model, completion_batch_size=1, prefill_batch_size=1,
+                               prefill_step_size=a.prefill_step, **kwargs)
+        insert = {"max_tokens": [a.gen], "lane_rngs": [LaneRNG(1 + lane)]}
+        if route == "mtp":
+            insert["self_mtp_configs"] = [{"sampling_temp": 0.0}]
+        gen.insert([prompt], **insert)
+        out, done = [], False
+        try:
+            while not done:
+                _p, responses = gen.next()
+                for r in responses:
+                    out.append(int(r.token))
+                    done = done or bool(r.finish_reason)
+        finally:
+            gen.close()
+        mx.clear_cache()
+        return out
+
     results = {}
     for config in a.configs:
         route, batch = config.split(":")
@@ -226,6 +285,16 @@ def main():
         per_arm = {arm: {"tps": [], "sha": [], "calls": [], "fallbacks": [], "down_calls": [], "down_fallbacks": [],
                          "ms_per_step": [], "tokens_per_step": [], "offset": []} for arm in a.arms}
         first_tokens = {}
+        solo = None
+        if a.solo_reference and batch > 1:
+            # each lane's prompt decoded alone at B=1 (off arm) with the same
+            # lane RNG; the reference a row-exact batched path should match
+            configure("off")
+            offset0 = a.prompt_offsets[0] if a.prompt_offsets else 0
+            solo = []
+            for lane in range(batch):
+                ids_lane = all_ids[offset0 + lane * a.context: offset0 + (lane + 1) * a.context]
+                solo.append(run_solo(route, ids_lane, lane))
         for rep in range(a.reps):
             order = a.arms[rep % len(a.arms):] + a.arms[: rep % len(a.arms)]
             if rep % 2 and len(a.arms) > 2:
@@ -274,6 +343,11 @@ def main():
                             "fallbacks_per_run": v["fallbacks"],
                             "lanes_identical_to_off": None if arm == "off" or "off" not in first_tokens else [
                                 x == y for x, y in zip(first_tokens["off"], first_tokens[arm])],
+                            "lanes_identical_to_solo": None if solo is None else [
+                                x == y for x, y in zip(solo, first_tokens[arm])],
+                            "first_divergence_vs_solo": None if solo is None else [
+                                next((i for i, (p, q) in enumerate(zip(x, y)) if p != q), None)
+                                for x, y in zip(solo, first_tokens[arm])],
                             "routed_down_calls_per_run": v["down_calls"][0],
                             "routed_down_fallbacks_per_run": v["down_fallbacks"][0],
                             "tokens_identical_to_off": None if arm == "off" else all(
@@ -286,7 +360,8 @@ def main():
         results[config] = {"runs": per_arm, "summary": summary}
         print(config, json.dumps(summary, indent=1), flush=True)
     configure("off")
-    json.dump({"phase": "speed", "knob": a.knob, "swapouts_delta_pages": swapouts() - swap0,
+    json.dump({"phase": "speed", "knob": a.knob, "policy": adapter.policy.as_dict(),
+               "swapouts_delta_pages": swapouts() - swap0,
                "num_draft": adapter.policy.num_draft, "context": a.context, "gen": a.gen, "reps": a.reps,
                "prefill_step": a.prefill_step, "results": results,
                "peak_gib": mx.get_peak_memory() / 2**30, "mlx": mx.__version__},

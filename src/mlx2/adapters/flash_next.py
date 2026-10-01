@@ -559,6 +559,7 @@ class FlashNextAdapter:
                     (m.moe_topk_last_fallback for m in windowed if m.moe_topk_last_fallback), None
                 ),
                 "topk_fold_max_rows": moe_window.topk_fold_max_rows(),
+                "batch_decode_max_rows": moe_window.batch_decode_max_rows(),
                 "window_shared": moe_window.window_shared_enabled(),
             }
         return {

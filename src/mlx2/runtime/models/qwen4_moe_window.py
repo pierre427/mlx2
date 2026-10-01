@@ -109,6 +109,24 @@ _TOPK_FOLD_MAX_ROWS = 3
 _WINDOW_SHARED = window_shared_from_env()
 
 
+# Batched one-token decode: lanes above this keep the stock multi-row gather
+# (a quiet decline, not a fallback). Full-model A/B with the GDN batch step
+# on (w2a evidence): B=2 +11%, B=4 +8%, B=8 +2% decode tok/s, B=16 -7%.
+_BATCH_DECODE_MAX_ROWS = 8
+
+
+def set_batch_decode_max_rows(rows: int) -> int:
+    global _BATCH_DECODE_MAX_ROWS
+    if not 2 <= int(rows) <= WINDOW_MAX_ROWS:
+        raise ValueError(f"batch decode max rows must be in 2..{WINDOW_MAX_ROWS}")
+    _BATCH_DECODE_MAX_ROWS = int(rows)
+    return _BATCH_DECODE_MAX_ROWS
+
+
+def batch_decode_max_rows() -> int:
+    return _BATCH_DECODE_MAX_ROWS
+
+
 def set_topk_fold_max_rows(rows: int) -> int:
     global _TOPK_FOLD_MAX_ROWS
     if not 1 <= int(rows) <= WINDOW_MAX_ROWS:

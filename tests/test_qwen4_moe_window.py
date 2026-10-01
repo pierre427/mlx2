@@ -213,7 +213,7 @@ def test_window_off_for_a_consumer_is_quiet(monkeypatch, ref_kernels):
 
 def test_window_refusals_are_counted(monkeypatch, ref_kernels):
     block = _block(monkeypatch)
-    block.set_moe_window_consumers({"batch_decode"})
+    block.set_moe_window_consumers({"batch_decode", "verify"})
     x = _x(7, (3, 1, H))
     want = _one_token_rows(block, x)
     block.set_moe_routed_decode_mode("two_launch")
@@ -229,9 +229,11 @@ def test_window_refusals_are_counted(monkeypatch, ref_kernels):
     block(x)
     assert "fused router" in block.moe_window_last_fallback
     block.set_moe_router_mode("stock")
-    block(_x(8, (W.WINDOW_MAX_ROWS + 1, 1, H)))
+    with verify_scope.verify_forward():
+        block(_x(8, (1, W.WINDOW_MAX_ROWS + 1, H)))
     assert "> 17" in block.moe_window_last_fallback
-    assert block.moe_window_fallbacks["batch_decode"] == 4
+    assert block.moe_window_fallbacks["batch_decode"] == 3
+    assert block.moe_window_fallbacks["verify"] == 1
     assert sum(block.moe_window_calls.values()) == 0
     assert got.reshape(3, H).shape == want.shape
 
@@ -361,3 +363,13 @@ def test_verify_scope_nests_and_resets():
             assert verify_scope.active()
         assert verify_scope.active()
     assert not verify_scope.active()
+
+
+def test_batch_decode_above_its_row_cap_declines_quietly(monkeypatch, ref_kernels):
+    block = _block(monkeypatch)
+    block.set_moe_window_consumers({"batch_decode"})
+    block(_x(16, (W.batch_decode_max_rows() + 1, 1, H)))
+    assert sum(block.moe_window_calls.values()) == 0
+    assert sum(block.moe_window_fallbacks.values()) == 0
+    with pytest.raises(ValueError):
+        W.set_batch_decode_max_rows(1)

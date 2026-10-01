@@ -851,6 +851,8 @@ def _try_moe_window(block, x):
     consumer = _moe_window_consumer(x)
     if consumer is None or consumer not in block.moe_window_consumers:
         return None
+    if consumer == "batch_decode" and rows > _window.batch_decode_max_rows():
+        return None  # a measured loss at wide batches: not a candidate
     if rows > _window.WINDOW_MAX_ROWS:
         refusal = f"{rows} rows > {_window.WINDOW_MAX_ROWS}"
     else:

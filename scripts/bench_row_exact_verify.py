@@ -6,10 +6,9 @@ One process, one loaded model, greedy B=1 decode.  Arms:
 * ``off``       ordinary one-token decode (MTP off)
 * ``mtp``       native self-MTP, route copy drafts, stock verify
 * ``rowexact``  the same with the row-exact verify route enabled, with the
-                wave-2 window kernels (policy ``row_exact_window_kernels``:
-                attention window + HC row-exact mode) switched on in-process
-* ``rowexact_base``  (opt-in, ``--arms``) the route without those window
-                kernels (the wave-1 route), to isolate their increment
+                W2-B window kernels (attention window + HC row-exact mode)
+                switched on in-process
+* ``rowexact_base``  (opt-in) the route without the W2-B window kernels
 
 Every rep visits all arms in a rotated order (ABC, BCA, CAB, ...); rep 0 is a
 discarded warm-up.  Decode tok/s is measured from the first generated token to
@@ -36,6 +35,11 @@ sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(ROOT / "scripts"))
 
 ARMS = ("off", "mtp", "rowexact")
+# Optional arms (--arms): "mtp_window" (stock MTP with the plain-verify MoE
+# row window), "rowexact_window" (row-exact verify with its MoE row window);
+# any arm may carry ":launch" or ":fold" (router top-k mode in the window and
+# at one token).  "rowexact" and "rowexact_window" also switch on the W2-B
+# attention window and HC row-exact mode; "rowexact_base" leaves them off.
 
 
 def _set_window_stages(on: bool):
@@ -46,23 +50,49 @@ def _set_window_stages(on: bool):
     HCD.set_hc_row_exact_enabled(on)
 
 
+def _configure_moe(adapter, arm):
+    from mlx2.runtime.models.qwen3_next import Qwen3NextSparseMoeBlock
+
+    name, *opts = arm.split(":")
+    consumers = {"mtp_window": {"verify"}, "rowexact_window": {"row_exact"}}.get(name, set())
+    topk = "fold" if "fold" in opts else ("launch" if "launch" in opts else "off")
+    for _, module in adapter.model.named_modules():
+        if isinstance(module, Qwen3NextSparseMoeBlock):
+            module.set_moe_window_consumers(consumers)
+            module.set_moe_topk_mode(topk)
+    return name
+
+
+def _moe_window_calls(adapter):
+    from mlx2.runtime.models.qwen3_next import Qwen3NextSparseMoeBlock
+
+    total = {}
+    for _, module in adapter.model.named_modules():
+        if isinstance(module, Qwen3NextSparseMoeBlock):
+            for key, value in module.moe_window_calls.items():
+                total[key] = total.get(key, 0) + value
+            total["fallbacks"] = total.get("fallbacks", 0) + sum(module.moe_window_fallbacks.values())
+    return total
+
+
 def _decode(adapter, prompt_ids, *, arm, max_tokens, prefill_step, copy_policy):
     import mlx.core as mx
     from mlx2.runtime import generate as G
     from mlx2.runtime.sample_utils import LaneRNG
 
+    name = _configure_moe(adapter, arm)
     kwargs = dict(completion_batch_size=1, prefill_batch_size=1, prefill_step_size=prefill_step)
-    if arm != "off":
+    if name != "off":
         kwargs["self_mtp"] = adapter.policy.batch_config(max_lanes=1, prefill_step=prefill_step)
         if copy_policy is not None:
             kwargs["copy_draft"] = copy_policy
-    adapter.row_exact_verify.enable(arm.startswith("rowexact"))
-    _set_window_stages(arm == "rowexact")
+    adapter.row_exact_verify.enable(name.startswith("rowexact"))
+    _set_window_stages(name in ("rowexact", "rowexact_window"))
     gen = G.BatchGenerator(adapter.model, **kwargs)
     tokens, first, last = [], None, None
     try:
         insert = dict(max_tokens=[max_tokens], lane_rngs=[LaneRNG(1)])
-        if arm != "off":
+        if name != "off":
             insert["self_mtp_configs"] = [{"sampling_temp": 0.0}]
         gen.insert([list(prompt_ids)], **insert)
         done = False
@@ -81,6 +111,7 @@ def _decode(adapter, prompt_ids, *, arm, max_tokens, prefill_step, copy_policy):
         gen.close()
         adapter.row_exact_verify.enable(False)
         _set_window_stages(False)
+        _configure_moe(adapter, "off")
     mx.clear_cache()
     decoded = len(tokens) - first_count
     return {
@@ -98,8 +129,10 @@ def main():
     parser.add_argument("--max-tokens", type=int, default=256)
     parser.add_argument("--prefill-step", type=int, default=2048)
     parser.add_argument("--no-copy", action="store_true")
-    parser.add_argument("--arms", default=",".join(ARMS))
-    parser.add_argument("--execution-policy", default=None, help="JSON FlashNextPolicy mapping")
+    parser.add_argument("--arms", default=",".join(ARMS),
+                        help="comma list; also mtp_window, rowexact_window, with :launch/:fold")
+    parser.add_argument("--policy", "--execution-policy", dest="policy", default=None,
+                        help="JSON execution policy for the adapter")
     parser.add_argument("--out", required=True)
     parser.add_argument("--i-own-the-gpu", action="store_true")
     args = parser.parse_args()
@@ -112,10 +145,10 @@ def main():
     from mlx2.runtime.models.qwen4_row_exact import install
 
     mx.set_cache_limit(4 << 30)
-    policy = json.loads(args.execution_policy) if args.execution_policy else None
-    adapter = FlashNextAdapter(args.model, execution_policy=policy)
     arms = tuple(a for a in args.arms.split(",") if a)
-    assert {"off", "mtp", "rowexact"} <= set(arms), arms
+    if "off" not in arms or "mtp" not in arms:
+        parser.error("--arms must include off and mtp (the ratios are taken against them)")
+    adapter = FlashNextAdapter(args.model, execution_policy=json.loads(args.policy) if args.policy else None)
     adapter.row_exact_verify = install(adapter.model)
     copy_policy = None
     if not args.no_copy:
@@ -127,20 +160,28 @@ def main():
     }
     samples = {name: {arm: [] for arm in arms} for name in names}
     shas = {name: {arm: set() for arm in arms} for name in names}
+    window_calls = {name: {arm: [] for arm in arms} for name in names}
     order_log = []
+    n = len(arms)
     for rep in range(args.reps + 1):
         for name in names:
-            order = arms[rep % len(arms) :] + arms[: rep % len(arms)]
+            order = arms[rep % n :] + arms[: rep % n]
+            if rep % 2 and n > 2:
+                order = order[::-1]
             order_log.append([rep, name, list(order)])
             for arm in order:
+                before = _moe_window_calls(adapter)
                 result = _decode(
                     adapter, prompt_ids[name], arm=arm, max_tokens=args.max_tokens,
                     prefill_step=args.prefill_step, copy_policy=copy_policy,
                 )
+                after = _moe_window_calls(adapter)
+                window_calls[name][arm].append({k: after[k] - before.get(k, 0) for k in after})
                 shas[name][arm].add(result["sha"])
                 if rep:
                     samples[name][arm].append(result["decode_tps"])
-                print(rep, name, arm, f"{result['decode_tps']:.1f} tok/s", result["sha"], flush=True)
+                print(rep, name, arm, f"{result['decode_tps']:.1f} tok/s", result["sha"],
+                      json.dumps(window_calls[name][arm][-1]), flush=True)
     summary = {}
     for name in names:
         cell = {}
@@ -152,23 +193,26 @@ def main():
                 "max": max(values),
                 "samples": values,
                 "token_sha": sorted(shas[name][arm]),
+                "output_equals_off": shas[name][arm] == shas[name]["off"],
+                "output_equals_mtp": shas[name][arm] == shas[name]["mtp"],
+                "moe_window_calls": window_calls[name][arm][-1],
             }
-        cell["rowexact_over_mtp"] = cell["rowexact"]["median"] / cell["mtp"]["median"]
-        cell["rowexact_over_off"] = cell["rowexact"]["median"] / cell["off"]["median"]
-        cell["mtp_over_off"] = cell["mtp"]["median"] / cell["off"]["median"]
-        cell["rowexact_output_equals_off"] = shas[name]["rowexact"] == shas[name]["off"]
-        if "rowexact_base" in arms:
-            cell["rowexact_over_base"] = cell["rowexact"]["median"] / cell["rowexact_base"]["median"]
-            cell["rowexact_base_over_mtp"] = cell["rowexact_base"]["median"] / cell["mtp"]["median"]
-            cell["rowexact_base_output_equals_off"] = shas[name]["rowexact_base"] == shas[name]["off"]
+        for arm in arms:
+            if arm != "off":
+                cell[f"{arm}_over_off"] = cell[arm]["median"] / cell["off"]["median"]
+            if arm not in ("off", "mtp"):
+                cell[f"{arm}_over_mtp"] = cell[arm]["median"] / cell["mtp"]["median"]
+        if "rowexact" in arms:
+            cell["rowexact_output_equals_off"] = shas[name]["rowexact"] == shas[name]["off"]
         summary[name] = cell
     report = {
         "schema": "mlx2.bench-row-exact-verify.v1",
         "mlx": mx.__version__,
         "reps": args.reps,
         "max_tokens": args.max_tokens,
-        "order": order_log,
+        "arms": list(arms),
         "policy": adapter.policy.as_dict(),
+        "order": order_log,
         "route_status": adapter.row_exact_verify.status(),
         "summary": summary,
     }
