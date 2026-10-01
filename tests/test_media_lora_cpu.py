@@ -1294,7 +1294,7 @@ def test_pinned_import_refuses_extension_loader(tmp_path):
 
 
 @pytest.mark.parametrize(
-    "change", ["replace", "new_shard", "during_load", "during_inspect"]
+    "change", ["replace", "new_shard", "during_load", "during_inspect", "during_render"]
 )
 def test_qwen_lazy_load_binds_identity_and_inventory(tmp_path, monkeypatch, change):
     import hashlib
@@ -1346,7 +1346,13 @@ def test_qwen_lazy_load_binds_identity_and_inventory(tmp_path, monkeypatch, chan
         calls.append(edit)
         if change == "during_load":
             shard.write_bytes(b"replaced")
-        return SimpleNamespace()
+
+        def generate(request):
+            if change == "during_render":
+                shard.write_bytes(b"replaced")
+            return SimpleNamespace(array=np.zeros((256, 256, 3), np.uint8))
+
+        return SimpleNamespace(generate=generate)
 
     if change == "during_inspect":
         original_hash = media._file_sha256
@@ -1363,6 +1369,11 @@ def test_qwen_lazy_load_binds_identity_and_inventory(tmp_path, monkeypatch, chan
         assert not calls
         return
     owner = media.QwenImage21Adapter(tmp_path, backend_factory=factory)
+    if change == "during_render":
+        with pytest.raises(ValueError, match="Qwen"):
+            owner.generate_image("test", width=256, height=256)
+        assert calls == [False] and not owner._lora_observed
+        return
     if change == "replace":
         shard.write_bytes(b"replaced")
     elif change == "new_shard":
@@ -1442,3 +1453,119 @@ def test_ltx_construction_hash_window_does_not_rebind_replacement(
     )
     with pytest.raises(ValueError, match="changed since inspection"):
         media.LTX25Adapter(source=tmp_path, mlx_model=model, runtime_root=runtime)
+
+
+@pytest.mark.parametrize(
+    "kind", ["raw", "raw-missing-json-sha", "official-8bit", "gguf-bf16", "gguf-4bit"]
+)
+def test_qwen_real_identity_collection_supports_all_receipt_layouts(tmp_path, kind):
+    import hashlib
+
+    from mlx2.adapters import generative_media as media
+
+    quant = {
+        "group_size": 64,
+        "bits": 8 if kind == "official-8bit" else 4,
+        "mode": "affine",
+    }
+    config = {
+        "_class_name": "QwenImage21Transformer2DModel",
+        "num_layers": 32,
+        "num_attention_heads": 32,
+    }
+    if kind in ("official-8bit", "gguf-4bit"):
+        config.update({"quantization": quant, "mlx_format": True})
+    values = {
+        "model_index.json": json.dumps({"_class_name": "QwenImage21Pipeline"}).encode(),
+        "transformer/config.json": json.dumps(config).encode(),
+        "processor/tokenizer.json": b"{}",
+        "text_encoder/config.json": json.dumps(
+            {"quantization": quant, "mlx_format": True}
+            if kind == "official-8bit"
+            else {}
+        ).encode(),
+        "vae/config.json": b"{}",
+    }
+    for n in range(33 if kind.startswith("gguf") else 1):
+        values[f"transformer/block-{n:02}.safetensors"] = b"test"
+    for name, data in values.items():
+        path = tmp_path / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(data)
+    records = {
+        name: {"size": len(data), "sha256": hashlib.sha256(data).hexdigest()}
+        for name, data in values.items()
+    }
+    if kind.startswith("raw"):
+        entries = [{"path": name, **record} for name, record in records.items()]
+        if kind.endswith("missing-json-sha"):
+            for item in entries:
+                if item["path"].endswith(".json"):
+                    item.pop("sha256")
+        proof = {
+            "repo": "Qwen/Qwen-Image-2.1",
+            "revision": media.QWEN_REVISION,
+            "files": entries,
+        }
+        (tmp_path / ".hf-download-manifest.json").write_text(json.dumps(proof))
+        (tmp_path / ".hf-download-complete.json").write_text(
+            json.dumps(
+                {
+                    "repo": proof["repo"],
+                    "revision": proof["revision"],
+                    "files": len(entries),
+                    "total_bytes": sum(map(len, values.values())),
+                }
+            )
+        )
+    elif kind == "official-8bit":
+        (tmp_path / "mlx2-official-conversion.json").write_text(
+            json.dumps(
+                {
+                    "source_repo": "Qwen/Qwen-Image-2.1",
+                    "source_revision": media.QWEN_REVISION,
+                    "backend_revision": media.QWEN_BACKEND_REVISION,
+                    "quantization": quant,
+                    "output_files": records,
+                }
+            )
+        )
+    else:
+        proof = {
+            "source_revision": media.GGUF_REVISION,
+            "base_revision": media.QWEN_REVISION,
+            "tensor_count": 297,
+            "output_dtype": "bfloat16" if kind == "gguf-bf16" else "mlx-affine-4bit",
+            "quantization": None if kind == "gguf-bf16" else quant,
+            "output_files": {
+                name.removeprefix("transformer/"): record
+                for name, record in records.items()
+                if name.endswith(".safetensors")
+            },
+            "base_files": {
+                name: record
+                for name, record in records.items()
+                if not name.startswith("transformer/")
+            },
+        }
+        (tmp_path / "mlx2-conversion.json").write_text(json.dumps(proof))
+    calls = []
+    adapter = media.QwenImage21Adapter(
+        tmp_path,
+        backend_factory=lambda path, edit: calls.append(edit) or SimpleNamespace(),
+    )
+    adapter._model(edit=False)
+    assert calls == [False] and "transformer/config.json" in adapter._input_identity
+    if kind.startswith("gguf"):
+        before = adapter.artifact.fingerprint
+        proof["transformer_config"] = records["transformer/config.json"]
+        (tmp_path / "mlx2-conversion.json").write_text(json.dumps(proof))
+        fresh = media.QwenImage21Adapter(
+            tmp_path, backend_factory=lambda path, edit: SimpleNamespace()
+        )
+        fresh._model(edit=False)
+        assert fresh.artifact.fingerprint != before
+        proof["transformer_config"]["sha256"] = "0" * 64
+        (tmp_path / "mlx2-conversion.json").write_text(json.dumps(proof))
+        with pytest.raises(ValueError, match="configuration changed"):
+            media.QwenImage21Adapter(tmp_path)

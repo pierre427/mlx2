@@ -12,10 +12,16 @@ import hashlib
 import json
 import sys
 import tempfile
+from contextlib import ExitStack
 from pathlib import Path
 
 
 def main():
+    with ExitStack() as stack:
+        _run(stack)
+
+
+def _run(stack):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--family",
@@ -137,10 +143,10 @@ def main():
         finder = PinnedSourceFinder(
             ("ltx_core_mlx", "ltx_pipelines_mlx"), _ltx_source_hashes(root)
         )
-        with finder:
-            from ltx_core_mlx.model.transformer.model import LTXModel, LTXModelConfig
+        stack.enter_context(finder)
+        from ltx_core_mlx.model.transformer.model import LTXModel, LTXModelConfig
 
-            finder.validate_loaded()
+        finder.validate_loaded()
         revision = LTX_RUNTIME_REVISION
         config = {
             "num_layers": 1,
@@ -289,6 +295,8 @@ def main():
         "production_selected": False,
         "production_observed_used": False,
     }
+    if args.family == "ltx-2.5":
+        finder.validate_loaded()
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(receipt, indent=2) + "\n")
     print(json.dumps(receipt))

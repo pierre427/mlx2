@@ -219,11 +219,35 @@ def inspect_qwen_image21(path: str | Path) -> MediaArtifact:
             kind = "qwen-image-2.1-gguf-mlx-4bit"
         else:
             raise ValueError("converted transformer format is unsupported")
-        return MediaArtifact(kind, root, GGUF_REVISION, _fingerprint(proof))
+        config_path = root / "transformer/config.json"
+        config_hash = _file_sha256(config_path)
+        record = proof.get("transformer_config")
+        if record is not None and (
+            not isinstance(record, dict)
+            or record.get("size") != config_path.stat().st_size
+            or record.get("sha256") != config_hash
+        ):
+            raise ValueError("converted transformer configuration changed")
+        # Legacy receipts omitted this small file. Bind its observed bytes in
+        # the identity without rewriting weights or trusting an absent checksum.
+        fingerprint = _fingerprint(
+            {"conversion": proof, "transformer_config_sha256": config_hash}
+        )
+        return MediaArtifact(kind, root, GGUF_REVISION, fingerprint)
     manifest = _complete_snapshot(
         root, repo="Qwen/Qwen-Image-2.1", revision=QWEN_REVISION
     )
-    return MediaArtifact("qwen-image-2.1", root, QWEN_REVISION, _fingerprint(manifest))
+    observed = {
+        entry["path"]: _file_sha256(root / entry["path"])
+        for entry in manifest["files"]
+        if not entry.get("sha256")
+    }
+    fingerprint = (
+        _fingerprint({"manifest": manifest, "observed_sha256": observed})
+        if observed
+        else _fingerprint(manifest)
+    )
+    return MediaArtifact("qwen-image-2.1", root, QWEN_REVISION, fingerprint)
 
 
 def inspect_ltx25_source(path: str | Path) -> MediaArtifact:
@@ -279,20 +303,16 @@ def _qwen_bound_inputs(root):
             for name, record in proof["output_files"].items()
         }
         records.update(proof["base_files"])
+        records["transformer/config.json"] = proof.get("transformer_config", {})
     else:
         records = {entry["path"]: entry for entry in proof["files"]}
         identities[".hf-download-complete.json"] = LTX25Adapter._file_identity(
             root / ".hf-download-complete.json"
         )
-    for name, record in records.items():
+    for name in records:
         path = (root / name).resolve()
         if not path.is_relative_to(root):
             raise ValueError("Qwen loader input escapes artifact")
-        if (
-            path.suffix in (".json", ".safetensors")
-            or name.startswith(("transformer/", "text_encoder/", "vae/", "processor/"))
-        ) and not isinstance(record.get("sha256"), str):
-            raise ValueError("Qwen loader input requires SHA-256 binding")
         identities[name] = LTX25Adapter._file_identity(path)
     if not {"model_index.json", "transformer/config.json"}.issubset(identities):
         raise ValueError("Qwen pipeline configuration is unbound")
@@ -317,6 +337,7 @@ class QwenImage21Adapter(MediaLoRAControl):
         self._init_lora("qwen-image-2.1", QWEN_BACKEND_REVISION)
 
     def _lora_models(self):
+        self._verify_input_identity()
         if self._generator is None and self._editor is None:
             self._generator = self._model(edit=False)
         models = [m for m in (self._generator, self._editor) if m is not None]
@@ -371,6 +392,7 @@ class QwenImage21Adapter(MediaLoRAControl):
         seed: int = 0,
     ) -> GeneratedImage:
         self._validate_request(prompt, width, height, steps)
+        self._verify_input_identity()
         from mlx_vlm.generate.image import ImageGenerationRequest
 
         if self._generator is None:
@@ -400,6 +422,7 @@ class QwenImage21Adapter(MediaLoRAControl):
         seed: int = 0,
     ) -> GeneratedImage:
         self._validate_request(prompt, width, height, steps)
+        self._verify_input_identity()
         if not image_paths:
             raise ValueError("at least one reference image is required")
         references = [Path(path).expanduser().resolve() for path in image_paths]
@@ -455,6 +478,7 @@ class QwenImage21Adapter(MediaLoRAControl):
             raise ValueError("Qwen image backend returned invalid pixels")
         buffer = io.BytesIO()
         Image.fromarray(pixels).save(buffer, format="PNG")
+        self._verify_input_identity()
         self._mark_lora_used()
         return GeneratedImage(
             buffer.getvalue(),

@@ -216,6 +216,7 @@ def convert(gguf_path: Path, output: Path, *, base: Path | None = None) -> dict:
         "layout_sha256": layout_hash,
         "output_dtype": "bfloat16",
         "output_files": output_files,
+        "transformer_config": {"size": (output / "transformer/config.json").stat().st_size, "sha256": _sha256(output / "transformer/config.json")},
         "execution_qualification": "pending",
     }
     (output / "mlx2-conversion.json").write_text(json.dumps(proof, indent=2) + "\n")

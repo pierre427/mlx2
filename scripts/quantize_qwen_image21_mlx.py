@@ -100,6 +100,7 @@ def quantize(source: Path, output: Path) -> dict:
         "quantization": config["quantization"],
         "bf16_source_fingerprint": input_fingerprint,
         "output_files": records,
+        "transformer_config": {"size": (output / "transformer/config.json").stat().st_size, "sha256": _sha256(output / "transformer/config.json")},
         "execution_qualification": "pending",
     })
     (output / "mlx2-conversion.json").write_text(json.dumps(result, indent=2) + "\n")
