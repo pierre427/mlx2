@@ -38,6 +38,8 @@ def parser():
     p.add_argument("--draft", required=True, type=Path)
     p.add_argument("--out", required=True, type=Path)
     p.add_argument("--timeout-seconds", type=int, default=900)
+    p.add_argument("--max-tokens", type=int, default=48)
+    p.add_argument("--request-timeout-seconds", type=int, default=240)
     p.add_argument(
         "--routes",
         nargs="+",
@@ -53,6 +55,10 @@ def parser():
 def preflight(args):
     if not 1 <= args.timeout_seconds <= 900:
         raise ValueError("timeout must be within 1..900 seconds")
+    if not 17 <= args.max_tokens <= 64:
+        raise ValueError("max-tokens must be within 17..64")
+    if not 1 <= args.request_timeout_seconds <= 900:
+        raise ValueError("request-timeout-seconds must be within 1..900")
     if not args.dry_run and not args.i_own_the_gpu:
         raise ValueError("GPU execution requires --i-own-the-gpu under both locks")
     return {
@@ -64,8 +70,39 @@ def preflight(args):
         "draft": str(args.draft.resolve()),
         "routes": list(args.routes),
         "target_verify_row_exact": args.target_verify_row_exact,
+        "request_timeout_seconds": args.request_timeout_seconds,
+        "request_budgets": request_budgets(args.max_tokens),
         "cells": {},
         "failures": [],
+    }
+
+
+def request_budgets(max_tokens):
+    """Preserve default payloads; explicit nondefault budgets bound every cell."""
+    if not 17 <= max_tokens <= 64:
+        raise ValueError("max-tokens must be within 17..64")
+    return {
+        "mode": "legacy_default_payloads" if max_tokens == 48 else "bounded_override",
+        "cold_warm_reference": max_tokens,
+        "mixed": [16, 32, 48, 64]
+        if max_tokens == 48
+        else list(range(max_tokens - 3, max_tokens + 1)),
+        "cancel_stream": 128 if max_tokens == 48 else max_tokens,
+        "performance_qualified": False,
+    }
+
+
+def completion_body(identity, prompt, budget, temperature=0, *, route):
+    return {
+        "model": identity,
+        "messages": [{"role": "user", "content": prompt}],
+        "max_tokens": budget,
+        "temperature": temperature,
+        **(
+            {"session_id": "pool-" + hashlib.sha256(prompt.encode()).hexdigest()[:16]}
+            if route == "xpress_pool"
+            else {}
+        ),
     }
 
 
@@ -109,14 +146,14 @@ def kinds(value):
     return set()
 
 
-def stream(base, body, *, cancel=False):
+def stream(base, body, *, cancel=False, timeout=240):
     req = urllib.request.Request(
         base + "/v1/chat/completions",
         data=json.dumps({**body, "stream": True}).encode(),
         headers={"Content-Type": "application/json"},
     )
-    text, receipt, events = [], None, 0
-    with urllib.request.urlopen(req, timeout=240) as response:
+    text, receipt, events, closed_early = [], None, 0, False
+    with urllib.request.urlopen(req, timeout=timeout) as response:
         for raw in response:
             line = raw.decode().strip()
             if not line.startswith("data: ") or line == "data: [DONE]":
@@ -127,12 +164,21 @@ def stream(base, body, *, cancel=False):
             for choice in event.get("choices", []):
                 text.append((choice.get("delta") or {}).get("content") or "")
             if cancel and events >= 2:
+                if any(
+                    choice.get("finish_reason") is not None
+                    for choice in event.get("choices", [])
+                ):
+                    raise AssertionError("stream finished before active cancellation")
+                closed_early = True
                 break
+    if cancel and not closed_early:
+        raise AssertionError("stream ended before active cancellation")
     return {
         "text": "".join(text),
         "mlx2": receipt,
         "events": events,
-        "client_closed_early": cancel,
+        "client_closed_early": closed_early,
+        "cancelled_while_active": closed_early,
     }
 
 
@@ -211,57 +257,54 @@ def run_route(args, report, route):
                             "server startup exceeded 180 seconds"
                         ) from None
                     time.sleep(1)
-            models = request(base, "/v1/models")
+
+            def call(endpoint, payload=None):
+                return request(
+                    base, endpoint, payload, timeout=args.request_timeout_seconds
+                )
+
+            models = call("/v1/models")
             identity = models["data"][0]["id"]
             if identity != args.model.name or child.poll() is not None:
                 raise RuntimeError("launched server identity mismatch")
 
-            def body(prompt, budget=48, temperature=0):
-                return {
-                    "model": identity,
-                    "messages": [{"role": "user", "content": prompt}],
-                    "max_tokens": budget,
-                    "temperature": temperature,
-                    **(
-                        {
-                            "session_id": "pool-"
-                            + hashlib.sha256(prompt.encode()).hexdigest()[:16]
-                        }
-                        if route == "xpress_pool"
-                        else {}
-                    ),
-                }
+            budgets = request_budgets(args.max_tokens)
+
+            def body(prompt, budget=None, temperature=0):
+                return completion_body(
+                    identity,
+                    prompt,
+                    args.max_tokens if budget is None else budget,
+                    temperature,
+                    route=route,
+                )
 
             steps = cell["steps"]
             # Inspect French cold before any previous requests can influence
             # cache reuse; top probabilities help diagnose a numerical tie.
-            steps["initial_french"] = request(
-                base,
+            steps["initial_french"] = call(
                 "/v1/chat/completions",
                 {**body(PROMPTS[2]), "logprobs": True, "top_logprobs": 5},
             )
-            steps["cold"] = request(base, "/v1/chat/completions", body(PROMPTS[0]))
+            steps["cold"] = call("/v1/chat/completions", body(PROMPTS[0]))
             if route == "ordinary_reference":
                 steps["reference"] = [
                     steps["cold"],
-                    *[
-                        request(base, "/v1/chat/completions", body(p))
-                        for p in PROMPTS[1:]
-                    ],
+                    *[call("/v1/chat/completions", body(p)) for p in PROMPTS[1:]],
                 ]
                 cell["passed"] = True
                 return
-            steps["warm"] = request(base, "/v1/chat/completions", body(PROMPTS[0]))
+            steps["warm"] = call("/v1/chat/completions", body(PROMPTS[0]))
             content = lambda response: response["choices"][0]["message"]["content"]
             if content(steps["cold"]) != content(steps["warm"]):
                 raise AssertionError("cold/warm greedy response differs")
             cached = find(steps["warm"], "cached_tokens")
             if not isinstance(cached, int) or cached <= 0:
                 raise AssertionError(f"warm APCv2 reused no prefix: {cached}")
-            steps["stream"] = stream(base, body(PROMPTS[1]))
-            steps["stream_reference"] = request(
-                base, "/v1/chat/completions", body(PROMPTS[1])
+            steps["stream"] = stream(
+                base, body(PROMPTS[1]), timeout=args.request_timeout_seconds
             )
+            steps["stream_reference"] = call("/v1/chat/completions", body(PROMPTS[1]))
             if steps["stream"]["text"] != content(steps["stream_reference"]):
                 raise AssertionError(
                     "streaming and nonstreaming greedy content differs"
@@ -269,19 +312,22 @@ def run_route(args, report, route):
             with concurrent.futures.ThreadPoolExecutor(4) as pool:
                 steps["mixed_b4"] = list(
                     pool.map(
-                        lambda item: request(base, "/v1/chat/completions", body(*item)),
-                        zip(PROMPTS, (16, 32, 48, 64), (0, 0.8, 0, 0.8)),
+                        lambda item: call("/v1/chat/completions", body(*item)),
+                        zip(PROMPTS, budgets["mixed"], (0, 0.8, 0, 0.8)),
                     )
                 )
-            steps["cancelled_stream"] = stream(base, body(PROMPTS[2], 128), cancel=True)
-            steps["after_cancel"] = request(
-                base, "/v1/chat/completions", body(PROMPTS[2])
+            steps["cancelled_stream"] = stream(
+                base,
+                body(PROMPTS[2], budgets["cancel_stream"]),
+                cancel=True,
+                timeout=args.request_timeout_seconds,
             )
+            steps["after_cancel"] = call("/v1/chat/completions", body(PROMPTS[2]))
             steps["greedy_references"] = [
                 steps["cold"],
                 steps["stream_reference"],
                 steps["after_cancel"],
-                request(base, "/v1/chat/completions", body(PROMPTS[3])),
+                call("/v1/chat/completions", body(PROMPTS[3])),
             ]
             responses = [
                 steps["cold"],
@@ -296,7 +342,7 @@ def run_route(args, report, route):
                         "HTTP response lacks actual external XPress receipt"
                     )
             for _ in range(5):
-                cell["status"] = request(base, "/v1/status")
+                cell["status"] = call("/v1/status")
                 scheduler = find(cell["status"], "scheduler") or {}
                 if scheduler.get("external_rounds", 0) > 0:
                     break
