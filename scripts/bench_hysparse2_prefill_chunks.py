@@ -1,7 +1,6 @@
 """One warm fixed-order prefill chunk comparison; no serving selection."""
 
 import argparse
-import hashlib
 import json
 from pathlib import Path
 import time
