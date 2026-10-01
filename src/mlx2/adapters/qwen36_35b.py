@@ -336,7 +336,8 @@ class Qwen3635BA3BAdapter(Qwen3827BAdapter):
 
         try:
             self._load_weights(
-                path, artifact, config, stream_request, load_shards_evicting
+                path, artifact, config, stream_request, load_shards_evicting,
+                eager_dispatch,
             )
             self._record_load_dtype()
             self._select_routed_candidate()
@@ -359,7 +360,9 @@ class Qwen3635BA3BAdapter(Qwen3827BAdapter):
             self.close()
             raise
 
-    def _load_weights(self, path, artifact, config, stream_request, load_shards_evicting):
+    def _load_weights(
+        self, path, artifact, config, stream_request, load_shards_evicting, eager_dispatch
+    ):
         """Build ``self.model`` and load its weights, ordinary or streamed.
 
         The ordinary branch is the reference: shard-eager load, sanitize,

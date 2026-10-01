@@ -26,6 +26,8 @@ import hashlib
 import json
 import os
 
+from ..process_env import PROCESS_NUMERICS
+
 TAG = "execution-numerics-v1"
 
 # Environment switches that select a KV-producing law outside the qualified
@@ -33,7 +35,7 @@ TAG = "execution-numerics-v1"
 # nonzero.  Each entry says why.
 CANDIDATE_ENV = {
     # Reduced-precision fp32 matmuls (process_env pins "0"; explicit wins).
-    "MLX_ENABLE_TF32": "flag",
+    **{name: "flag" for name in PROCESS_NUMERICS},
     # MLX gated_delta_update for 17..256-row prefill chunks; parity unestablished.
     "MLX_GDN_CORE": "flag",
     # Opt-in A/B kernels with no mlx2 full-model evidence (flash_next_policy).
