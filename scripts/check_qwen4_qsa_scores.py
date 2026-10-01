@@ -3,11 +3,12 @@
 Compares ``qwen4_qsa_scores.block_scores`` with the stock MLX chain it
 replaces (``stock_scores``) as raw bytes, and the ``argpartition`` block ids
 taken from each, over decode (1 row), MTP verify (2, 3 rows) and wider rows,
-at 16K..128K-token contexts, for random keys and for pooled keys produced by
-the indexer's own pooling of random raw keys.  Then times both (32 chained
-launches per eval, median of 7).
+at 8K..128K-token contexts, for normal keys, mixed-magnitude keys and
+duplicated blocks (score ties), plus batched rows with per-row array offsets
+(the batched cache's left-pad path).  Then times both (32 chained launches
+per eval, median of 7).  Real-layer checks: scripts/check_tf_longctx_layers.py.
 
-  MLX_ENABLE_TF32=0 PYTHONPATH=src python scripts/check_qwen4_qsa_scores.py --out r.json
+  MLX_ENABLE_TF32=0 PYTHONPATH=src python scripts/check_qwen4_qsa_scores.py --i-own-the-gpu --out r.json
 """
 
 import argparse
@@ -28,7 +29,10 @@ def main():
     ap.add_argument("--rows", type=int, nargs="+", default=[1, 2, 3, 4, 8])
     ap.add_argument("--seeds", type=int, default=3)
     ap.add_argument("--no-timing", action="store_true")
+    ap.add_argument("--i-own-the-gpu", action="store_true")
     a = ap.parse_args()
+    if not a.i_own_the_gpu:
+        ap.error("refusing Metal execution without --i-own-the-gpu")
 
     from mlx2.runtime.models import qwen4_qsa_scores as S
 

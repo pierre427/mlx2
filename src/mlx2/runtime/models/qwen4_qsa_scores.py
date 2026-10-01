@@ -44,7 +44,6 @@ import math
 import os
 import threading
 from collections import Counter
-from typing import Optional
 
 import mlx.core as mx
 
@@ -62,7 +61,7 @@ _FRAGS_PER_SIMD = 2  # 16 blocks per simdgroup, 64 per threadgroup
 _DTYPES = (mx.bfloat16, mx.float16, mx.float32)
 
 
-def _parse_flag(raw: Optional[str]) -> bool:
+def _parse_flag(raw: str | None) -> bool:
     if raw is None:
         return False
     value = raw.strip().lower()
@@ -109,7 +108,7 @@ def _tf32_off() -> bool:
     return os.environ.get("MLX_ENABLE_TF32", "0").strip() in ("0", "")
 
 
-def supported(q: mx.array, pooled: mx.array) -> Optional[str]:
+def supported(q: mx.array, pooled: mx.array) -> str | None:
     """``None`` when ``block_scores`` reproduces the stock chain for these
     operands, else the refusal reason.  Never evaluates an array."""
     if mx.default_device() != mx.gpu or not mx.metal.is_available():
@@ -221,7 +220,7 @@ def _kernel():
     return found
 
 
-def offset_supported(offset, batch: int) -> Optional[str]:
+def offset_supported(offset, batch: int) -> str | None:
     """``None`` when ``offset`` (an int, or ``batch`` integer offsets) is a
     form ``block_scores`` reads, else the refusal reason."""
     if isinstance(offset, mx.array):

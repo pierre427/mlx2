@@ -38,3 +38,25 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+------------------------------------------------------------------------------
+TensorFold 0.6.1 (https://github.com/ashhart/TensorFold, revision
+17c73e189f5e6a5304cda7ea37f086f9c49b4788), Apache License, Version 2.0
+
+Two ideas of TensorFold 0.6.1's "Flash Next on Macs at long context" (commit
+b8027439) are reimplemented in src/mlx2/runtime/models/qwen4_qsa_scores.py
+(block scores that read each pooled block once for every query row) and in
+src/mlx2/runtime/models/qwen4_exp.py (the layers before the n-gram layer are
+dispatched before it reads a window's ids on the host). No TensorFold source
+is copied; the arithmetic is MLX's. See
+provenance/tensorfold-0.6.1-flashnext-longctx.json. TensorFold's NOTICE file
+reads:
+
+  TensorFold
+  Copyright 2026 TensorFold contributors
+  https://github.com/ashhart/TensorFold
+
+  TensorFold is licensed under the Apache License, Version 2.0 (LICENSE) from 0.6.0.
+  Releases up to 0.5.0 were MIT-licensed, and code written before 0.6.0 keeps its
+  MIT notice in LICENSES/MIT.txt. Third-party code and its licenses are listed in
+  THIRD_PARTY_NOTICES.md.

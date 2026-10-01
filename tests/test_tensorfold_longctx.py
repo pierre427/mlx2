@@ -7,15 +7,14 @@ scores admission and its counted fallback, and the PLE early dispatch order.
 """
 
 import mlx.core as mx
-import mlx.nn as nn
 import numpy as np
 import pytest
+from qsa_oracle import tiny_args
 
 from mlx2.adapters.flash_next import tensorfold_longctx_diagnostics
 from mlx2.adapters.flash_next_policy import FlashNextPolicy
 from mlx2.runtime.models import qwen4_exp as Q
 from mlx2.runtime.models import qwen4_qsa_scores as S
-from qsa_oracle import tiny_args
 
 FIELDS = {
     "qsa_fused_scores": "MLX_QWEN4_QSA_FUSED_SCORES",
