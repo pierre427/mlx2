@@ -64,6 +64,14 @@ def probe_inputs(dtype) -> mx.array:
     raise ValueError(f"no served-exp probe inputs for {dtype}")
 
 
+def is_device_fault(exc) -> bool:
+    """A Metal out-of-memory or GPU-timeout step failure (serving recovers
+    those by abandoning the lanes in the failed buffer)."""
+    from ...serving import device_fault_kind
+
+    return device_fault_kind(exc) is not None
+
+
 def same_bits(a: mx.array, b: mx.array) -> bool:
     from .qwen4_fused_gdn import same_bits as equal
 
@@ -169,6 +177,11 @@ class ServedExpGate:
                 try:
                     found = self.select(self.probe(dtype))
                 except Exception as exc:  # noqa: BLE001 - fail closed
+                    if is_device_fault(exc):
+                        # The probe shared a command buffer with the step: let
+                        # serving's device-fault recovery see it, and probe
+                        # again next time rather than refusing for good.
+                        raise
                     logger.info("Served exp probe %s failed: %s", self.name, exc)
                     found = None
                 self._spellings[key] = found

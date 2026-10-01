@@ -577,6 +577,7 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
             self._finish_load(
                 weights, prefill_policy, fp32_head, path, config,
                 AutoTokenizer, TokenizerWrapper, BPEStreamingDetokenizer,
+                eager_dispatch,
             )
         except BaseException:
             if self.weight_stream is not None:
@@ -603,7 +604,7 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
 
     def _finish_load(
         self, weights, prefill_policy, fp32_head, path, config,
-        AutoTokenizer, TokenizerWrapper, BPEStreamingDetokenizer,
+        AutoTokenizer, TokenizerWrapper, BPEStreamingDetokenizer, eager_dispatch,
     ):
         """Everything after the weights load: installs, probe, tokenizer.
 

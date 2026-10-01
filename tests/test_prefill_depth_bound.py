@@ -217,3 +217,15 @@ def test_cli_flag_reaches_the_engine():
     assert kwargs()["prefill_depth_budget"] is None
     with pytest.raises(SystemExit):
         kwargs("--prefill-depth-budget", "0")
+
+
+def test_prefill_input_request_that_cannot_be_bounded_is_refused():
+    from mlx2.serving import refuse_unbounded_prefill_input
+
+    # Off by default: nothing is refused.
+    refuse_unbounded_prefill_input(None, 200_000, 0)
+    # Within the budget the single chunk is allowed (rows * rows <= budget).
+    refuse_unbounded_prefill_input(4096 * 4096, 4097, 0)
+    # A prefill-input chunk the bound would have to shrink fails closed.
+    with pytest.raises(ValueError, match="prefill depth budget"):
+        refuse_unbounded_prefill_input(4096 * 4096, 8193, 0)

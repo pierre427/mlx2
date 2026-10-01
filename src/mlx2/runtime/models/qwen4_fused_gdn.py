@@ -764,6 +764,10 @@ def served_silu_exp() -> Optional[str]:
             try:
                 _SERVED_SILU_EXP = select_silu_exp(_probe_served_silu())
             except Exception as exc:
+                from .served_exp import is_device_fault
+
+                if is_device_fault(exc):
+                    raise
                 logger.info("Served SiLU probe failed: %s", exc)
                 _SERVED_SILU_EXP = None
             _SERVED_SILU_COMPLETE = True

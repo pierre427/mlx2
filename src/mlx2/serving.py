@@ -1222,6 +1222,30 @@ def device_fault_kind(exc):
     return None
 
 
+def refuse_unbounded_prefill_input(budget, remaining_tokens, depth):
+    """Fail closed when a prefill-input request cannot honour the depth bound.
+
+    Prefill inputs (multimodal embeddings) run their segment as one chunk, so
+    the configured ``prefill_depth_budget`` cannot shrink it.  Rather than
+    issue the oversized command buffer the bound exists to prevent, refuse the
+    request.  ``budget=None`` (the default) refuses nothing.
+    """
+    if budget is None:
+        return
+    from .runtime.generate import BatchGenerator
+    from .runtime.prefill_plan import depth_bounded_prefill_rows
+
+    # The final prompt token is its own segment and goes to generation.
+    rows = max(1, int(remaining_tokens) - 1)
+    floor = BatchGenerator.PREFILL_DEPTH_FLOOR
+    if depth_bounded_prefill_rows(rows, int(depth), budget, floor=floor) < rows:
+        raise ValueError(
+            f"this request's prefill inputs run as one {rows}-token chunk, which "
+            f"exceeds the configured prefill depth budget ({budget}); shorten the "
+            "prompt or serve without --prefill-depth-budget"
+        )
+
+
 def validate_prefill_depth_budget(value):
     """A positive integer rows x (depth + rows) budget, or None (off)."""
     if value is None:
@@ -7577,6 +7601,12 @@ class ServingEngine:
                         prefill_input = validated_adapter_prefill_inputs(
                             adapter, job.request, hit.remaining_tokens, prefill_input
                         )
+                        if prefill_input is not None:
+                            refuse_unbounded_prefill_input(
+                                self.prefill_depth_budget,
+                                len(hit.remaining_tokens),
+                                int(hit.cached_tokens or 0),
+                            )
                         neural_payload = job.request.get("_mlx2_neural_concepts")
                         if neural_payload is not None:
                             route = self.snapshot["settings"]["route"]

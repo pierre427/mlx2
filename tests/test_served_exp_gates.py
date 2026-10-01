@@ -119,6 +119,32 @@ def test_refusal_follows_one_probe_per_process_and_dtype(monkeypatch, kernel_exp
     assert len(calls) == 3
 
 
+@pytest.mark.parametrize(
+    "fault",
+    [
+        RuntimeError("[METAL] Command buffer execution failed: Insufficient Memory"),
+        RuntimeError(
+            "[METAL] Command buffer execution failed: Caused GPU Timeout Error "
+            "(00000002:kIOGPUCommandBufferCallbackErrorTimeout)"
+        ),
+    ],
+)
+def test_device_fault_in_probe_reaches_serving_and_is_not_cached(monkeypatch, fault):
+    # Serving recovers a failed command buffer by abandoning its lanes; a probe
+    # that swallowed it would hide the fault and refuse the kernel for good.
+    gate = SE.ServedExpGate(
+        "t", served_name="op", served=mx.sigmoid, body=f"y = {FAST}(x);",
+        kernel_exp=FAST,
+    )
+    calls = _inject(monkeypatch, gate, fault)
+    with pytest.raises(RuntimeError):
+        gate.refusal(mx.bfloat16)
+    calls_after_fault = len(calls)
+    _inject(monkeypatch, gate, {FAST: True, PRECISE: False})
+    assert gate.refusal(mx.bfloat16) is None
+    assert calls_after_fault == 1
+
+
 def test_real_probe_fails_closed_without_metal():
     """On the CPU test device the kernel cannot run: the gate refuses."""
     gate = RD.SWIGLU_GATE

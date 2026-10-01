@@ -222,3 +222,19 @@ def test_metal_probe_selects_the_kernel_form_on_the_pinned_build(monkeypatch):
     # MLX without #4461 serves the fast sigmoid; with it, the precise one.
     assert fused.select_silu_exp(matches) in fused._SILU_EXP_CANDIDATES
     assert matches["metal::exp"] != matches["metal::precise::exp"]
+
+
+def test_device_fault_in_served_silu_probe_is_raised_not_cached(probe):
+    calls = probe(
+        RuntimeError(
+            "[METAL] Command buffer execution failed: Caused GPU Timeout Error "
+            "(00000002:kIOGPUCommandBufferCallbackErrorTimeout)"
+        )
+    )
+    with pytest.raises(RuntimeError):
+        fused.served_silu_exp()
+    assert not fused._SERVED_SILU_COMPLETE
+    with pytest.raises(RuntimeError):
+        fused.served_silu_exp()
+    assert len(calls) == 2
+
