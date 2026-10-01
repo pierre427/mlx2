@@ -35,9 +35,15 @@ The pending residual write ``residual + branch * inject`` (``_apply_inject``)
 is NOT folded in: it stays a separable stage owned by the composed path (see
 ``PENDING_WRITE_SEAM``).
 
-Admission is structural and exact-shape: one row (verify rows are refused and
-counted, because MLX runs ``qmv_wide`` there, a different arithmetic), bf16
-activations, four streams, affine 4-bit group-64 projections with bf16
+Rows: MLX folds every leading dimension into the matvec's M, and picks the
+kernel by M.  One row runs ``qmv_fast``/``qmv`` (law 0 above).  For 2..8 rows
+on Apple GPU family 15+ it runs ``qmv_wide`` (law 1: an 8-lane group per
+output row, per-group 8-value dequantised sub-chunks, a shuffle-down ladder),
+which both launches also transcribe, so verify windows and multi-lane decode
+stay bit-identical to their own composed call (not to one-row decode, exactly
+as the composed path).  Other row counts are declined and counted.
+
+Admission is structural and exact-shape: rows as above, bf16 activations, four streams, affine 4-bit group-64 projections with bf16
 scales/biases that are exactly ``nn.QuantizedLinear``, and the eager norm
 profile (fast RMS norm on, fused group norm and compiled glue off).  Anything
 else keeps the composed body.
@@ -50,6 +56,7 @@ live; ``MLX_QWEN4_HC_DECODE=0`` or the setter is the kill switch.
 from __future__ import annotations
 
 import os
+import re
 import threading
 from collections import Counter
 from itertools import chain
@@ -66,6 +73,8 @@ GROUP_SIZE = 64
 DOWN_ROWS = 1
 # Simdgroups (hidden columns) per up_mix threadgroup.
 UP_SIMDGROUPS = 8
+# Widest folded row count served with qmv_wide's arithmetic (verify windows).
+MAX_WIDE_ROWS = 8
 
 # Where #4024's deferred write and the separate raw-gate+inject fusion meet:
 # norm_down's first load reads ``hyper_input``, which is exactly the output of
@@ -201,7 +210,7 @@ def static_admission(module) -> str | None:
     if lowrank % 512 == 0 or lowrank in (64, 128) or lowrank % GROUP_SIZE:
         return "lowrank (MLX would not run plain qmv for the up rows)"
     simdgroups = hidden // 4 // 32
-    if lowrank % (simdgroups * DOWN_ROWS):
+    if lowrank % (simdgroups * DOWN_ROWS) or lowrank % (simdgroups * 4):
         return "lowrank row tiling"
     if hidden % UP_SIMDGROUPS:
         return "hidden column tiling"
@@ -241,9 +250,16 @@ def _cached_plan(module):
         reason = static_admission(module)
     except Exception as exc:  # noqa: BLE001 - odd layouts stay composed
         reason = f"layout check raised {type(exc).__name__}"
-    plan = None if reason is not None else _build_plan(module)
+    plan = None if reason is not None else {}
     module.__dict__["_hc_decode_plan"] = (refs, reason, plan)
     return reason, plan
+
+
+def _law_plan(module, plans: dict, law: int) -> dict:
+    plan = plans.get(law)
+    if plan is None:
+        plan = plans[law] = _build_plan(module, law)
+    return plan
 
 
 def _cached_static_admission(module) -> str | None:
@@ -309,6 +325,46 @@ inline float hcd_qdot(
          x_thread[4 * i + 3] * (ws[i] & 0xf000));
   }
   return scale * accum + sum * bias;
+}
+
+// qmv_wide (affine, k_lanes = 8) for 4-bit group-64 rows: the 8-lane group of
+// one output row strides over its groups, decodes each 8-value sub-chunk as
+// dequantize() does, dots it from 0, adds the sub-chunk sums in order, then
+// the shuffle-down ladder 4, 2, 1.  All 32 lanes must call it.
+template <typename T, typename P>
+inline float hcd_wide_row(
+    P x,
+    const device uint8_t* wrow,
+    const device T* srow,
+    const device T* brow,
+    int groups,
+    int k_lane) {
+  float result = 0;
+  for (int g = k_lane; g < groups; g += 8) {
+    float scale = srow[g];
+    float bias = brow[g];
+    for (int sc = 0; sc < 8; sc++) {
+      const int k0 = g * 64 + sc * 8;
+      const device uint8_t* wc = wrow + k0 * 4 / 8;
+      float w_dq[8];
+      const float s = float(scale);
+      const float b = float(bias);
+      float scv[2] = {s, s / 16.0f};
+      for (int i = 0; i < 4; i++) {
+        w_dq[2 * i] = static_cast<float>(scv[0] * (wc[i] & 0x0f) + b);
+        w_dq[2 * i + 1] = static_cast<float>(scv[1] * (wc[i] & 0xf0) + b);
+      }
+      float acc = 0;
+      for (int i = 0; i < 8; i++) {
+        acc += static_cast<float>(x[k0 + i]) * w_dq[i];
+      }
+      result += acc;
+    }
+  }
+  result += simd_shuffle_down(result, 4);
+  result += simd_shuffle_down(result, 2);
+  result += simd_shuffle_down(result, 1);
+  return result;
 }
 
 // MLX Sigmoid, evaluated in T.  Two variants because the eager path runs it
@@ -398,7 +454,36 @@ NORM_DOWN_SOURCE = r"""
     constexpr int IN_W = K / 2;   // bytes per 4-bit row
     constexpr int IN_G = K / 64;  // groups per row
     float x_thread[16];
-    if (int(gy) < ND) {
+    if (LAW == 1) {
+      // Rows 2..8: MLX runs qmv_wide; one 8-lane group per output row.
+      const int k_lane = int(lane) % 8;
+      const int sg_row = int(lane) / 8;
+      if (int(gy) < ND) {
+        const int out_row = int(gy) * (NSG * 4) + int(sg) * 4 + sg_row;
+        const float r = hcd_wide_row<T>(
+            (const threadgroup T*)xs,
+            (const device uint8_t*)down_w + out_row * IN_W,
+            down_s + out_row * IN_G, down_b + out_row * IN_G, IN_G, k_lane);
+        if (k_lane == 0) {
+          const T d = static_cast<T>(r);
+          const T a = d / T(HC);
+          const T g = hcd_sigmoid_jit<T>(a);
+          act[size_t(row) * R + out_row] = a * g;
+        }
+      } else if (INJ != 0 && sg == 0) {
+        const int out_row = sg_row;
+        const float r = hcd_wide_row<T>(
+            (const threadgroup T*)xs,
+            (const device uint8_t*)inj_w + out_row * IN_W,
+            inj_s + out_row * IN_G, inj_b + out_row * IN_G, IN_G, k_lane);
+        if (k_lane == 0) {
+          const T raw = static_cast<T>(r);
+          const T q = raw / T(HC);
+          const T g = hcd_sigmoid_unary<T>(q);
+          inj[size_t(row) * HC + out_row] = T(2) * g;
+        }
+      }
+    } else if (int(gy) < ND) {
       const int out_row = int(gy) * (NSG * RPS) + int(sg) * RPS;
       const device uint8_t* ws =
           (const device uint8_t*)down_w + out_row * IN_W + int(lane) * 8;
@@ -469,7 +554,17 @@ UP_MIX_SOURCE = r"""
     const device T* ar = act + size_t(row) * R;
     float x_thread[8];
     float u[HC];
-    for (int s = 0; s < HC; ++s) {
+    if (LAW == 1) {
+      // qmv_wide: lane group s (8 lanes) runs up row s * H + h.
+      const int s = int(lane) / 8;
+      const int n = s * H + h;
+      const float r = hcd_wide_row<T>(
+          ar, (const device uint8_t*)up_w + n * IN_W, up_s + n * IN_G,
+          up_b + n * IN_G, IN_G, int(lane) % 8);
+      for (int j = 0; j < HC; ++j) {
+        u[j] = simd_shuffle(r, ushort(j * 8));
+      }
+    } else for (int s = 0; s < HC; ++s) {
       const int n = s * H + h;
       const device uint8_t* ws = (const device uint8_t*)up_w + n * IN_W + int(lane) * 4;
       const device T* sc = up_s + n * IN_G + int(lane) / 8;
@@ -540,8 +635,9 @@ def _scalars(hidden: int, eps: float):
     return pair
 
 
-def _build_plan(module) -> dict:
-    """Everything a launch needs except the input row, built once per layout."""
+def _build_plan(module, law: int = 0) -> dict:
+    """Everything a launch needs except the input rows, built once per layout
+    and projection law (0: one row, MLX qmv/qmv_fast; 1: 2..8 rows, qmv_wide)."""
     hidden = module.hidden_size
     width = HC_COUNT * hidden
     down = module["input_mix_weight_down"]
@@ -550,7 +646,7 @@ def _build_plan(module) -> dict:
     has_inject = "block_inject_weight" in module
     inject = module["block_inject_weight"] if has_inject else down
     threads = hidden // 4
-    down_groups = lowrank // (threads // 32 * DOWN_ROWS)
+    down_groups = lowrank // (threads // 32 * (4 if law else DOWN_ROWS))
     axis, eps = _scalars(hidden, module.hc_norm.eps)
     dtype = mx.bfloat16
     plan = {
@@ -575,10 +671,9 @@ def _build_plan(module) -> dict:
             ("RPS", DOWN_ROWS),
             ("ND", down_groups),
             ("INJ", int(has_inject)),
+            ("LAW", law),
         ],
-        "a_grid": (threads, down_groups + int(has_inject), 1),
-        "a_threadgroup": (threads, 1, 1),
-        "a_shapes": [(1, width), (1, lowrank), (1, HC_COUNT)],
+        "a_groups": (threads, down_groups + int(has_inject)),
         "b_kernel": _kernel(
             "mlx2_qwen4_hc_decode_up_mix",
             ["xn", "act", "up_w", "up_s", "up_b"],
@@ -592,40 +687,53 @@ def _build_plan(module) -> dict:
             ("HC", HC_COUNT),
             ("R", lowrank),
             ("NSGB", UP_SIMDGROUPS),
+            ("LAW", law),
         ],
-        "b_grid": (32 * UP_SIMDGROUPS, hidden // UP_SIMDGROUPS, 1),
-        "b_threadgroup": (32 * UP_SIMDGROUPS, 1, 1),
-        "b_shapes": [(1, hidden)],
-        "dtypes3": [dtype, dtype, dtype],
-        "dtypes1": [dtype],
+        "width": width,
+        "lowrank": lowrank,
+        "by_rows": {},
     }
-    plan["compiled"] = _compiled_pair(plan)
     return plan
+
+
+def _launches(plan, rows: int):
+    """The two launch descriptions for ``rows`` input rows."""
+    threads, groups = plan["a_groups"]
+    dtype = mx.bfloat16
+    a_launch = dict(
+        template=plan["a_template"],
+        grid=(threads, groups, rows),
+        threadgroup=(threads, 1, 1),
+        output_shapes=[(rows, plan["width"]), (rows, plan["lowrank"]), (rows, HC_COUNT)],
+        output_dtypes=[dtype, dtype, dtype],
+    )
+    b_launch = dict(
+        template=plan["b_template"],
+        grid=(32 * UP_SIMDGROUPS, plan["hidden"] // UP_SIMDGROUPS, rows),
+        threadgroup=(32 * UP_SIMDGROUPS, 1, 1),
+        output_shapes=[(rows, plan["hidden"])],
+        output_dtypes=[dtype],
+    )
+    return a_launch, b_launch
 
 
 _COMPILED: dict = {}
 
 
-def _compiled_pair(plan):
+def _compiled_pair(plan, rows: int):
     """Both launches as one ``mx.compile`` function per launch geometry.
 
     The weights are inputs, so every layer with this geometry shares it; the
     replay costs ~2.3 us of host time against ~5.7 us for two direct
     ``metal_kernel`` calls (M5 Max), and records the same two dispatches."""
-    key = (tuple(plan["a_template"]), tuple(plan["b_template"]), plan["a_grid"], plan["b_grid"])
+    fn = plan["by_rows"].get(rows)
+    if fn is not None:
+        return fn
+    key = (tuple(plan["a_template"]), tuple(plan["b_template"]), plan["a_groups"], rows)
     fn = _COMPILED.get(key)
     if fn is None:
         a_kernel, b_kernel = plan["a_kernel"], plan["b_kernel"]
-        a_launch = dict(
-            template=plan["a_template"], grid=plan["a_grid"],
-            threadgroup=plan["a_threadgroup"], output_shapes=plan["a_shapes"],
-            output_dtypes=plan["dtypes3"],
-        )
-        b_launch = dict(
-            template=plan["b_template"], grid=plan["b_grid"],
-            threadgroup=plan["b_threadgroup"], output_shapes=plan["b_shapes"],
-            output_dtypes=plan["dtypes1"],
-        )
+        a_launch, b_launch = _launches(plan, rows)
 
         def pair(flat, nw, axis, eps, dw, ds, db, iw, is_, ib, uw, us, ub):
             xn, act, inj = a_kernel(
@@ -636,43 +744,59 @@ def _compiled_pair(plan):
 
         fn = mx.compile(pair)
         _COMPILED[key] = fn
+    plan["by_rows"][rows] = fn
     return fn
 
 
-def hc_decode_launch(module, flat, *, debug: bool = False, plan=None):
-    """The two launches for one row ``flat`` [1, 4 * hidden]; returns (mixed, inject|None).
+def projection_law(rows: int) -> int | None:
+    """Which MLX matvec the composed path runs for ``rows`` folded rows.
 
-    ``debug`` also returns the normed row and the SiLU activations, for the
+    0: one row, ``qmv_fast``/``qmv``.  1: 2..8 rows on an Apple GPU of family
+    15 or newer, where ``dispatch_qmv`` takes ``qmv_wide`` (below the
+    ``qmv_nax`` and ``qmm`` crossovers for these shapes and below the fast
+    RMS norm's width cap).  None: not transcribed."""
+    if rows == 1:
+        return 0
+    if 2 <= rows <= MAX_WIDE_ROWS and _gpu_family() >= 15 and "MLX_QMV_LIMIT" not in os.environ:
+        return 1
+    return None
+
+
+_GPU_FAMILY: int | None = None
+
+
+def _gpu_family() -> int:
+    global _GPU_FAMILY
+    if _GPU_FAMILY is None:
+        try:
+            info = mx.device_info() if hasattr(mx, "device_info") else mx.metal.device_info()
+            arch = str(info.get("architecture", ""))
+            match = re.search(r"g(\d+)", arch)
+            _GPU_FAMILY = int(match.group(1)) if match else 0
+        except Exception:  # noqa: BLE001 - unknown device: one-row law only
+            _GPU_FAMILY = 0
+    return _GPU_FAMILY
+
+
+def hc_decode_launch(module, flat, *, debug: bool = False, plan=None):
+    """The two launches for ``flat`` [rows, 4 * hidden]; returns (mixed, inject|None).
+
+    ``debug`` also returns the normed rows and the SiLU activations, for the
     Metal check that localises a mismatch."""
+    rows = flat.shape[0]
     if plan is None:
-        reason, plan = _cached_plan(module)
-        if plan is None:
-            raise ValueError(f"layout not admitted: {reason}")
-    if flat.shape[0] != 1:
-        raise ValueError("the launches transcribe the one-row kernels only")
+        law = projection_law(rows)
+        reason, plans = _cached_plan(module)
+        if plans is None or law is None:
+            raise ValueError(f"not admitted: {reason or 'rows'}")
+        plan = _law_plan(module, plans, law)
     if not debug:
-        mixed, inj = plan["compiled"](flat, *plan["a_inputs"], *plan["b_weights"])
+        mixed, inj = _compiled_pair(plan, rows)(flat, *plan["a_inputs"], *plan["b_weights"])
         return mixed, (inj if plan["has_inject"] else None)
-    xn, act, inj = plan["a_kernel"](
-        inputs=[flat, *plan["a_inputs"]],
-        template=plan["a_template"],
-        grid=plan["a_grid"],
-        threadgroup=plan["a_threadgroup"],
-        output_shapes=plan["a_shapes"],
-        output_dtypes=plan["dtypes3"],
-    )
-    mixed = plan["b_kernel"](
-        inputs=[xn, act, *plan["b_weights"]],
-        template=plan["b_template"],
-        grid=plan["b_grid"],
-        threadgroup=plan["b_threadgroup"],
-        output_shapes=plan["b_shapes"],
-        output_dtypes=plan["dtypes1"],
-    )[0]
-    inject = inj if plan["has_inject"] else None
-    if debug:
-        return mixed, inject, xn, act
-    return mixed, inject
+    a_launch, b_launch = _launches(plan, rows)
+    xn, act, inj = plan["a_kernel"](inputs=[flat, *plan["a_inputs"]], **a_launch)
+    mixed = plan["b_kernel"](inputs=[xn, act, *plan["b_weights"]], **b_launch)[0]
+    return mixed, (inj if plan["has_inject"] else None), xn, act
 
 
 def try_hc_decode(module, hyper_input, *, eager_norm: bool, compile_glue: bool):
@@ -695,8 +819,9 @@ def try_hc_decode(module, hyper_input, *, eager_norm: bool, compile_glue: bool):
         _decline("input dtype")
         return None
     rows = hyper_input.shape[0] * hyper_input.shape[1]
-    if rows != 1:
-        _decline("rows != 1 (MLX runs qmv_wide/qmm there)")
+    law = projection_law(rows)
+    if law is None:
+        _decline("rows (MLX runs a matvec this module does not transcribe)")
         return None
     if getattr(module, "training", False):
         _decline("training")
@@ -707,24 +832,27 @@ def try_hc_decode(module, hyper_input, *, eager_norm: bool, compile_glue: bool):
     if compile_glue:
         _decline("compiled glue enabled")
         return None
-    reason, plan = _cached_plan(module)
+    reason, plans = _cached_plan(module)
     if reason is not None:
         _decline(reason)
         return None
-    if hyper_input.shape[2] != HC_COUNT * plan["hidden"]:
+    if hyper_input.shape[2] != HC_COUNT * module.hidden_size:
         _decline("input width")
         return None
     if not runtime_supported():
         _decline("Metal runtime unavailable")
         return None
     try:
+        plan = _law_plan(module, plans, law)
         flat = hyper_input.reshape(rows, -1)
         mixed, inject = hc_decode_launch(module, flat, plan=plan)
         signature = (
             plan["hidden"],
-            plan["a_template"][3][1],
+            plan["lowrank"],
             module.hc_norm.weight.dtype,
             inject is not None,
+            law,
+            rows,
         )
         if signature not in _VALIDATED:
             # Metal compilation is lazy: evaluate the first call of each

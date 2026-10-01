@@ -4,7 +4,8 @@ Loads REAL hyper-connection weights (a few trunk layers, the trunk mixer and
 the MTP head's HC modules) from the served artifact into stand-alone
 ``GatedResidual`` modules under the Flash-Next environment profile, then:
 
-  exact   for each module and many one-row inputs, compares the composed path
+  exact   for each module and many inputs (one row and 2..8 folded rows),
+          compares the composed path
           (kernel off) with the two launches bit for bit: ``mixed`` and
           ``inject``, plus the kernel's normed row and SiLU activations against
           the composed intermediates (localises any mismatch).
@@ -28,6 +29,9 @@ from pathlib import Path
 from types import SimpleNamespace
 
 DEFAULT_MODEL = Path("~/mlx-models/Qwen3.8-Flash-Next-MLX-4bit-MTP").expanduser()
+# (batch, seq) shapes: one-row decode (law 0), verify windows and multi-lane
+# decode (law 1, MLX qmv_wide).
+SHAPES = [(1, 1), (1, 1), (1, 3), (1, 2), (4, 1), (1, 5), (1, 8), (2, 3)]
 NO_LAUNCH = {"Reshape", "Broadcast", "Squeeze", "ExpandDims", "Transpose", "AsStrided",
              "StopGradient", "Depends"}
 
@@ -162,14 +166,15 @@ def main():
     total_mismatch = 0
     for name, module in modules.items():
         stats = {"cases": 0, "mixed_equal": 0, "inject_equal": 0, "normed_equal": 0,
-                 "act_equal": 0, "max_abs_mixed": 0.0, "max_abs_inject": 0.0}
+                 "act_equal": 0, "max_abs_mixed": 0.0, "max_abs_inject": 0.0, "by_rows": {}}
         for case in range(a.cases):
             key = mx.random.key(7919 * case + len(name))
             k1, k2 = mx.random.split(key)
             scale = scales[case % len(scales)]
-            x = mx.random.normal((1, 1, width), key=k1) * scale
+            shape = SHAPES[case % len(SHAPES)]
+            x = mx.random.normal((*shape, width), key=k1) * scale
             if case % 3 == 2:  # heavy-tailed residual streams
-                x = x * mx.exp(mx.random.normal((1, 1, width), key=k2))
+                x = x * mx.exp(mx.random.normal((*shape, width), key=k2))
             x = x.astype(mx.bfloat16)
             mx.eval(x)
             ref = composed(module, x)
@@ -194,9 +199,11 @@ def main():
             # intermediates
             normed = module.hc_norm(x)
             act = nn.silu(module.input_mix_weight_down(normed) / module.hc_count)
-            _m, _i, xn, kact = HCD.hc_decode_launch(module, x.reshape(1, width), debug=True)
+            rows = shape[0] * shape[1]
+            _m, _i, xn, kact = HCD.hc_decode_launch(module, x.reshape(rows, width), debug=True)
             mx.eval(normed, act, xn, kact)
-            stats["normed_equal"] += bits_equal(normed.reshape(1, width), xn)
+            stats["by_rows"][rows] = stats["by_rows"].get(rows, 0) + 1
+            stats["normed_equal"] += bits_equal(normed.reshape(rows, width), xn)
             stats["act_equal"] += bits_equal(act.reshape(kact.shape), kact)
             if not (ok_mixed and ok_inj):
                 total_mismatch += 1
@@ -208,8 +215,8 @@ def main():
     print("EXACT", total_mismatch == 0, "mismatched", total_mismatch, "status", status, flush=True)
 
     # ---- launches ----------------------------------------------------------
-    def launches(fn, module):
-        x = mx.random.normal((1, 1, width)).astype(mx.bfloat16)
+    def launches(fn, module, seq=1):
+        x = mx.random.normal((1, seq, width)).astype(mx.bfloat16)
         mx.eval(x)
         out = fn(module, x)
         outs = list(out) if isinstance(out, tuple) else [out]
@@ -228,6 +235,8 @@ def main():
         "fused_combine": launches(fused, trunk),
         "composed_mixer": launches(composed, mixer),
         "fused_mixer": launches(fused, mixer),
+        "composed_combine_verify3": launches(composed, trunk, 3),
+        "fused_combine_verify3": launches(fused, trunk, 3),
     }
     for k, v in report["launches_per_call"].items():
         print("LAUNCHES", k, v["launches"], v["ops"], flush=True)

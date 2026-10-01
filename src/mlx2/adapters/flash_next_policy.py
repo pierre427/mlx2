@@ -65,10 +65,11 @@ class FlashNextPolicy:
     # Opt-in; enters the environment and receipts only when not "off".
     moe_routed_decode: str = "off"
     # omlx #4038 two-launch hyper-connection decode (MLX_QWEN4_HC_DECODE):
-    # one-row GatedResidual calls run in two launches instead of ~17, bit-
-    # identical to the composed ops on Metal (scripts/check_qwen4_hc_decode.py).
-    # Verify rows stay composed (counted).  Opt-in; enters the environment and
-    # receipts only when enabled.
+    # GatedResidual calls of 1..8 folded rows (decode, verify windows) run in
+    # two launches instead of 13-17, bit-identical to the composed ops on
+    # Metal (scripts/check_qwen4_hc_decode.py); other widths stay composed and
+    # are counted.  Opt-in; enters the environment and receipts only when
+    # enabled.
     hc_decode_kernels: bool = False
     # Opt-in: the quantized lm_head stores fp32 logits instead of rounding
     # them to bf16 (runtime/fp32_head.py).  Not an environment switch; it

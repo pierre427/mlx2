@@ -142,9 +142,35 @@ def test_one_row_is_served_and_matches_the_composed_body(reference_kernels, comb
     assert status["inject_calls"] == int(combine)
 
 
-def test_verify_rows_decline_and_are_counted(reference_kernels):
+def test_projection_law_follows_mlx_dispatch(monkeypatch):
+    monkeypatch.setattr(HCD, "_GPU_FAMILY", 17)
+    monkeypatch.delenv("MLX_QMV_LIMIT", raising=False)
+    assert HCD.projection_law(1) == 0
+    assert [HCD.projection_law(r) for r in (2, 3, 8)] == [1, 1, 1]
+    assert HCD.projection_law(9) is None
+    monkeypatch.setenv("MLX_QMV_LIMIT", "4")
+    assert HCD.projection_law(3) is None and HCD.projection_law(1) == 0
+    monkeypatch.delenv("MLX_QMV_LIMIT")
+    monkeypatch.setattr(HCD, "_GPU_FAMILY", 14)
+    assert HCD.projection_law(3) is None and HCD.projection_law(1) == 0
+
+
+def test_verify_window_is_served_on_wide_law(reference_kernels, monkeypatch):
+    monkeypatch.setattr(HCD, "_GPU_FAMILY", 17)
     m = _module()
     x = _x(3, rows=3)
+    want = m(x)
+    HCD.set_hc_decode_enabled(True)
+    got = m(x)
+    assert reference_kernels["launch"] == 1
+    assert got[1] is x and all(_same(a, b) for a, b in zip(got, want))
+    assert got[0].shape == (1, 3, H) and got[2].shape == (1, 3, 4)
+
+
+def test_wide_rows_beyond_the_cap_decline_and_are_counted(reference_kernels, monkeypatch):
+    monkeypatch.setattr(HCD, "_GPU_FAMILY", 17)
+    m = _module()
+    x = _x(3, rows=9)
     want = m(x)
     HCD.set_hc_decode_enabled(True)
     got = m(x)
