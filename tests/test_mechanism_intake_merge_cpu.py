@@ -64,6 +64,11 @@ def _read(path: str) -> str:
     return _git_show(MERGE, path)
 
 
+def _worktree(path: str) -> str:
+    """The checked-out file, for hooks main added after the pinned merge."""
+    return (ROOT / path).read_text(encoding="utf-8")
+
+
 def _symbols(src: str) -> dict:
     """Top-level functions/classes/assignments and ``Class.method`` -> node."""
     found = {}
@@ -223,26 +228,11 @@ def test_resolved_files_have_no_conflict_markers(path):
         ast.parse(text)
 
 
-# Whole sections added after the merge.  Removing exactly these must give the
-# merge's text back byte for byte, so every original byte is still proven.
-_PROV_POST_MERGE_SECTIONS = (
-    "## 2026-10-01 — memory-budgeted disk weight streaming\n",
-)
-
-
-def _without_post_merge_sections(text):
-    for header in _PROV_POST_MERGE_SECTIONS:
-        assert text.count(header) == 1, header
-        start = text.index(header)
-        end = text.find("\n## ", start + len(header))
-        text = text[:start] + (text[end + 1:] if end >= 0 else "")
-    return text
-
-
 def test_provenance_keeps_every_main_and_intake_section_verbatim():
     base_lines = _git_show(BASE, PROV).splitlines(True)
     intake_tail = "".join(_git_show(INTAKE, PROV).splitlines(True)[len(base_lines):])
-    assert _without_post_merge_sections(_read(PROV)) == _git_show(MAIN, PROV) + intake_tail
+    # ``_read`` pins the merge commit, so later sections cannot interfere.
+    assert _read(PROV) == _git_show(MAIN, PROV) + intake_tail
 
 
 def test_routed_decode_module_is_main_plus_the_intake_candidate_block():
@@ -370,10 +360,10 @@ def test_concat_parts_post_merge_hook_is_output_equivalent_with_an_inactive_ledg
         _git_show(MAIN, QN), {"mx": fake_mx}
     )
     inactive = _concat_parts_from(
-        _read(QN), {"mx": fake_mx, "record_concat": lambda *_a: None}
+        _worktree(QN), {"mx": fake_mx, "record_concat": lambda *_a: None}
     )
     active = _concat_parts_from(
-        _read(QN),
+        _worktree(QN),
         {"mx": fake_mx, "record_concat": lambda result, parts, axis: records.append(
             (result, tuple(p.tag for p in parts), axis))},
     )
