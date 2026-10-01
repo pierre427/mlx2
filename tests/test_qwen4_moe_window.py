@@ -331,24 +331,36 @@ def test_fold_above_its_row_limit_takes_the_launch(monkeypatch, ref_kernels):
 # ----------------------------------------------------------------- policy
 
 
-def test_policy_is_opt_in_and_receipt_neutral():
+def test_policy_defaults_and_receipts():
     from mlx2.adapters.flash_next_policy import FlashNextPolicy
 
     default = FlashNextPolicy()
-    for name in ("moe_window_row_exact", "moe_window_batch_decode", "moe_window_verify", "moe_topk_fold"):
+    for name in ("moe_window_row_exact", "moe_window_batch_decode", "moe_window_verify"):
         assert name not in default.as_dict()
     assert W.WINDOW_ENV not in default.environment()
-    assert W.TOPK_ENV not in default.environment()
+    assert default.as_dict()["moe_topk_fold"] == "launch"
+    assert default.environment()[W.TOPK_ENV] == "launch"
+    off = FlashNextPolicy.from_mapping({"moe_topk_fold": "off"})
+    assert "moe_topk_fold" not in off.as_dict()
+    assert W.TOPK_ENV not in off.environment()
     chosen = FlashNextPolicy.from_mapping({
         "moe_window_batch_decode": True, "moe_window_verify": True, "moe_topk_fold": "fold",
     })
     assert chosen.environment()[W.WINDOW_ENV] == "batch_decode,verify"
     assert chosen.environment()[W.TOPK_ENV] == "fold"
     assert chosen.as_dict()["moe_topk_fold"] == "fold"
-    with pytest.raises(ValueError, match="requires row_exact_verify"):
-        FlashNextPolicy.from_mapping({"moe_window_row_exact": True})
-    both = FlashNextPolicy.from_mapping({"moe_window_row_exact": True, "row_exact_verify": True})
+    # The row-exact consumer is inert without the route, and follows it.
+    inert = FlashNextPolicy.from_mapping({"moe_window_row_exact": True})
+    assert W.WINDOW_ENV not in inert.environment()
+    assert "moe_window_row_exact" not in inert.as_dict()
+    both = FlashNextPolicy.from_mapping({"row_exact_verify": True})
     assert both.environment()[W.WINDOW_ENV] == "row_exact"
+    assert both.as_dict()["moe_window_row_exact"] is True
+    explicit_off = FlashNextPolicy.from_mapping(
+        {"row_exact_verify": True, "moe_window_row_exact": False}
+    )
+    assert W.WINDOW_ENV not in explicit_off.environment()
+    assert FlashNextPolicy.from_mapping(explicit_off.as_dict()) == explicit_off
     with pytest.raises(ValueError, match="moe_topk_fold"):
         FlashNextPolicy.from_mapping({"moe_topk_fold": "on"})
     with pytest.raises(ValueError, match="boolean"):

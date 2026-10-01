@@ -144,19 +144,23 @@ class FlashNextPolicy:
     # run the routed experts (and the shared expert) in the one-token routed
     # launches with every row bit-identical to its own one-token block call.
     # One switch per consumer: row-exact verify windows (replaces the per-row
-    # expert loop; needs row_exact_verify), batched one-token decode (B lanes),
-    # and plain MTP verify windows (moves verify numerics from the multi-row
-    # gather to one-token arithmetic).  Opt-in; enter the environment and
-    # receipts only when enabled.
-    moe_window_row_exact: bool = False
+    # expert loop; default on but inert, and absent from the environment and
+    # receipts, unless row_exact_verify runs), batched one-token decode (B
+    # lanes; changes batched tokens, -7% at 16 lanes) and plain MTP verify
+    # windows (moves verify numerics to one-token arithmetic, no speed gain).
+    # The last two are opt-in and enter receipts only when enabled.
+    moe_window_row_exact: bool = True
     moe_window_batch_decode: bool = False
     moe_window_verify: bool = False
     # omlx #4052 router top-k (MLX_QWEN4_MOE_TOPK_FOLD): "launch" runs the
     # stock softmax/argpartition/normalize in one launch, "fold" inside the
     # routed gate+up launch (one-token decode with moe_routed_decode
     # gate_up_down[_shared], and row windows); both bit-identical to the
-    # stock routing.  The 8-bit router gemv stays its own launch.
-    moe_topk_fold: str = "off"
+    # stock routing.  The 8-bit router gemv stays its own launch.  Default
+    # "launch" since 2026-10-01: B1 decode +5.1%, tokens identical
+    # (qualification/runs/omlx-w2a-moe-window-20260930).  "off" restores the
+    # stock routing ops and is the only value absent from receipts.
+    moe_topk_fold: str = "launch"
 
     def __post_init__(self):
         validate_self_mtp_num_draft(self.num_draft)
@@ -172,8 +176,6 @@ class FlashNextPolicy:
             )
         if self.moe_topk_fold not in {"off", "launch", "fold"}:
             raise ValueError("moe_topk_fold must be off, launch, or fold")
-        if self.moe_window_row_exact and not self.row_exact_verify:
-            raise ValueError("moe_window_row_exact requires row_exact_verify")
         if self.fused_gdn_batch_decode not in {"off", "row_exact"}:
             raise ValueError("fused_gdn_batch_decode must be off or row_exact")
         for name in (
@@ -268,8 +270,11 @@ class FlashNextPolicy:
             del values["tensorfold_prefill"]
         if not self.row_exact_verify:
             del values["row_exact_verify"]
-        if not (self.row_exact_verify and self.row_exact_window_kernels):
+        # Inert without the route: absent then; recorded either way with it,
+        # so a receipt read back reproduces an explicit "off".
+        if not self.row_exact_verify:
             del values["row_exact_window_kernels"]
+            del values["moe_window_row_exact"]
         if self.tensorfold_prefill_backend == "native":
             del values["tensorfold_prefill_backend"]
         if not self.gdn_prefill_chunk:
@@ -289,7 +294,7 @@ class FlashNextPolicy:
             del values["fused_gdn_batch_decode"]
         if not self.attn_fused_rows:
             del values["attn_fused_rows"]
-        for name in ("moe_window_row_exact", "moe_window_batch_decode", "moe_window_verify"):
+        for name in ("moe_window_batch_decode", "moe_window_verify"):
             if not getattr(self, name):
                 del values[name]
         if self.moe_topk_fold == "off":
@@ -300,7 +305,7 @@ class FlashNextPolicy:
         return tuple(
             name
             for name, enabled in (
-                ("row_exact", self.moe_window_row_exact),
+                ("row_exact", self.row_exact_verify and self.moe_window_row_exact),
                 ("batch_decode", self.moe_window_batch_decode),
                 ("verify", self.moe_window_verify),
             )

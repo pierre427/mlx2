@@ -50,7 +50,8 @@ def test_policy_field_follows_the_row_exact_route_and_is_receipt_neutral():
     env = chosen.environment()
     assert env[AW.ENV_NAME] == "1" and env["MLX_QWEN4_HC_ROW_EXACT"] == "1"
     off = FlashNextPolicy.from_mapping({"row_exact_verify": True, "row_exact_window_kernels": False})
-    assert "row_exact_window_kernels" not in off.as_dict()
+    assert off.as_dict()["row_exact_window_kernels"] is False
+    assert FlashNextPolicy.from_mapping(off.as_dict()) == off
     assert AW.ENV_NAME not in off.environment()
     with pytest.raises(ValueError, match="row_exact_window_kernels"):
         FlashNextPolicy.from_mapping({"row_exact_window_kernels": "yes"})
