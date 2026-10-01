@@ -142,6 +142,8 @@ def test_flash_next_profile_enables_fused_gdn_prefill(monkeypatch, tmp_path):
     monkeypatch.setattr(os, "environ", dict(os.environ))
     profile = flash_next.configure_environment(tmp_path)
     assert profile["MLX_QWEN4_FUSED_GDN_PREFILL"] == "1"
+    # Bit-exact against the eager MoE tail on Metal (recon-20261001/l4-moe-wsum).
+    assert profile["MLX_QWEN4_MOE_WEIGHTED_SUM"] == "1"
 
 
 def test_flash_next_subclasses_without_a_policy_defer_to_the_engine(monkeypatch):

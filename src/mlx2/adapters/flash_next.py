@@ -77,6 +77,11 @@ def configure_environment(model_path: Path, policy=None) -> dict[str, str]:
         # omlx #3903 prefill prework + gated norm: bit-identical to the eager
         # path on the GPU, -2..3% prefill (triage-20260925).
         "MLX_QWEN4_FUSED_GDN_PREFILL": "1",
+        # Sorted-order MoE weighted sum (omlx #3903 + mlx-serve #653 order):
+        # bit-identical to the eager unsort/multiply/sum tail on the GPU
+        # (kernel bits and full-model logits), -2.5% (8K) / -4.7% (32K)
+        # prefill time (recon-20261001/l4-moe-wsum).
+        "MLX_QWEN4_MOE_WEIGHTED_SUM": "1",
         "MLX_GDN_PACKED": "1",
         "MLX_GDN_CORE": "0",
         # The Flash artifacts already load split expert projections. Re-fusing
