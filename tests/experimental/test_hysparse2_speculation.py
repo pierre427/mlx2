@@ -125,3 +125,31 @@ def test_cache_fork_shares_tensors_but_not_history_or_identity():
     model.decode(mx.array([[6]]), fork)
     assert cache.length == 5 and fork.length == 6
     assert [len(blocks) for blocks in cache.cross_kv.values()] == before
+
+
+@pytest.mark.parametrize("budget", [1, 8])
+@pytest.mark.parametrize("change", ["parameters", "capsules"])
+def test_final_policy_observation_cannot_publish_stale_generation(monkeypatch, budget, change):
+    model = Model(Config.smoke())
+    model.eval()
+    controller = policy()
+    original = controller.observe
+    committed = 0
+
+    def changed(*args, **kwargs):
+        nonlocal committed
+        original(*args, **kwargs)
+        committed += kwargs["committed"]
+        if committed == budget:
+            if change == "parameters":
+                model.update({"embedding": {"weight": model.embedding.weight}})
+            else:
+                model.attach_semantic_capsules(None)
+
+    monkeypatch.setattr(controller, "observe", changed)
+    prompt = [1, 2, 3, 4, 5]
+    with pytest.raises(ValueError, match="revision|owner"):
+        GreedyMTPReference(model, policy=controller).generate(prompt, max_tokens=budget)
+    expected, _ = ordinary(model, prompt, budget)
+    got, cache, _ = GreedyMTPReference(model).generate(prompt, max_tokens=budget)
+    assert got == expected and cache.length == len(prompt) + budget

@@ -84,6 +84,9 @@ class GreedyMTPReference:
                 committed=committed,
                 elapsed_seconds=elapsed,
             )
+            # Policy callbacks may replace weights or the memory snapshot even
+            # after the final decode. Never publish verification from that owner.
+            self.model._require_inference_owner(cache)
             rounds.append(
                 {
                     "depth": depth,

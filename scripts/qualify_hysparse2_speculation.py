@@ -15,7 +15,10 @@ def main():
     p.add_argument("--tokens", type=Path, required=True)
     p.add_argument("--output", type=Path, required=True)
     p.add_argument("--isolation-only", action="store_true")
+    p.add_argument("--publication-owner-check", action="store_true")
     args = p.parse_args()
+    if args.isolation_only and args.publication_owner_check:
+        p.error("select only one focused probe")
     args.output.mkdir(parents=True, exist_ok=False)
     c = Config(**json.loads((args.checkpoint / "state.json").read_text())["config"])
     report = {
@@ -53,6 +56,45 @@ def main():
             token = int(mx.argmax(logits[0, -1]).item())
             expected.append(token)
             logits = model.decode(mx.array([[token]]), reference)
+        if args.publication_owner_check:
+            cases = []
+            for change in ("parameters", "capsules"):
+                for budget in (1, 8):
+                    control = CohortAdaptiveMTPDepth(max_depth=1, adaptive_single_lane=True)
+                    original = control.observe
+                    committed = 0
+
+                    def changed(*values, **kwargs):
+                        nonlocal committed
+                        original(*values, **kwargs)
+                        committed += kwargs["committed"]
+                        if committed == budget:
+                            if change == "parameters":
+                                model.update({"embedding": {"weight": model.embedding.weight}})
+                            else:
+                                model.attach_semantic_capsules(None)
+
+                    control.observe = changed
+                    try:
+                        GreedyMTPReference(model, policy=control).generate(prompt, max_tokens=budget)
+                    except ValueError as error:
+                        assert "revision" in str(error) or "owner" in str(error)
+                        rejection = str(error)
+                    else:
+                        raise AssertionError("stale generation was published")
+                    actual, state, _ = GreedyMTPReference(model).generate(prompt, max_tokens=budget)
+                    assert actual == expected[:budget] and state.length == len(prompt) + budget
+                    cases.append({"change": change, "budget": budget, "rejection": rejection,
+                                  "fresh_retry_tokens_exact": True})
+            report["publication_owner_cases"] = cases
+            report["peak_memory_bytes"] = mx.get_peak_memory()
+            report["source_hashes"] = {str(path): file_hash(path) for path in (
+                Path(__file__), Path("src/mlx2/experimental/hysparse2/speculation.py"),
+                Path("src/mlx2/experimental/hysparse2/model.py"))}
+            report["completed"] = True
+            (args.output / "receipt.json").write_text(json.dumps(report, indent=2) + "\n")
+            print(json.dumps(report), flush=True)
+            return
         if args.isolation_only:
             def decoding_proposal(m, first, state):
                 proposal_logits = m.decode(mx.array([[first]]), state)
