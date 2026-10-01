@@ -28,14 +28,14 @@ def _reset():
     R.status(reset=True)
 
 
-def test_policy_default_off_and_absent_from_receipts():
+def test_policy_default_on_and_off_is_absent_from_receipts():
     default = FlashNextPolicy()
-    assert default.attn_fused_rows is False
-    assert "attn_fused_rows" not in default.as_dict()
-    assert "MLX_QWEN4_ATTN_FUSED_ROWS" not in default.environment()
-    chosen = FlashNextPolicy.from_mapping({"attn_fused_rows": True})
-    assert chosen.as_dict()["attn_fused_rows"] is True
-    assert chosen.environment()["MLX_QWEN4_ATTN_FUSED_ROWS"] == "1"
+    assert default.attn_fused_rows is True
+    assert default.as_dict()["attn_fused_rows"] is True
+    assert default.environment()["MLX_QWEN4_ATTN_FUSED_ROWS"] == "1"
+    off = FlashNextPolicy.from_mapping({"attn_fused_rows": False})
+    assert "attn_fused_rows" not in off.as_dict()
+    assert "MLX_QWEN4_ATTN_FUSED_ROWS" not in off.environment()
     with pytest.raises(ValueError, match="attn_fused_rows"):
         FlashNextPolicy.from_mapping({"attn_fused_rows": 1})
 

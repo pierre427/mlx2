@@ -242,15 +242,15 @@ def test_layout_cache_rechecks_replaced_tensors():
     assert "scales" in HCD._cached_static_admission(m)
 
 
-def test_flash_next_policy_switch_is_opt_in_and_receipt_neutral():
+def test_flash_next_policy_defaults_on_and_off_is_receipt_neutral():
     from mlx2.adapters.flash_next_policy import FlashNextPolicy
 
     default = FlashNextPolicy()
-    assert "hc_decode_kernels" not in default.as_dict()
-    assert HCD.HC_DECODE_ENV not in default.environment()
-    chosen = FlashNextPolicy.from_mapping({"hc_decode_kernels": True})
-    assert chosen.environment()[HCD.HC_DECODE_ENV] == "1"
-    assert chosen.as_dict()["hc_decode_kernels"] is True
+    assert default.as_dict()["hc_decode_kernels"] is True
+    assert default.environment()[HCD.HC_DECODE_ENV] == "1"
+    off = FlashNextPolicy.from_mapping({"hc_decode_kernels": False})
+    assert "hc_decode_kernels" not in off.as_dict()
+    assert HCD.HC_DECODE_ENV not in off.environment()
     with pytest.raises(ValueError, match="hc_decode_kernels"):
         FlashNextPolicy.from_mapping({"hc_decode_kernels": "yes"})
 

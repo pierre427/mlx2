@@ -179,12 +179,15 @@ def test_block_setter_validates():
         block.set_moe_routed_decode_mode("on")
 
 
-def test_flash_next_policy_switch_is_opt_in_and_receipt_neutral():
+def test_flash_next_policy_switch_defaults_to_the_fold_and_off_is_receipt_neutral():
     from mlx2.adapters.flash_next_policy import FlashNextPolicy
 
     default = FlashNextPolicy()
-    assert "moe_routed_decode" not in default.as_dict()
-    assert RD.ROUTED_DECODE_ENV not in default.environment()
+    assert default.as_dict()["moe_routed_decode"] == "gate_up_down_shared"
+    assert default.environment()[RD.ROUTED_DECODE_ENV] == "gate_up_down_shared"
+    off = FlashNextPolicy.from_mapping({"moe_routed_decode": "off"})
+    assert "moe_routed_decode" not in off.as_dict()
+    assert RD.ROUTED_DECODE_ENV not in off.environment()
     for mode in ("gate_up", "two_launch"):
         chosen = FlashNextPolicy.from_mapping({"moe_routed_decode": mode})
         assert chosen.environment()[RD.ROUTED_DECODE_ENV] == mode

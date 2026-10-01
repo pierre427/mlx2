@@ -68,15 +68,23 @@ class FlashNextPolicy:
     # folds the shared expert, its 8-bit gate and the combine into those two
     # launches (omlx #4039 shared fold); "two_launch" replaces the
     # tile4 fused down with omlx's down + weighted sum (stock-down numerics).
-    # Opt-in; enters the environment and receipts only when not "off".
-    moe_routed_decode: str = "off"
+    # Enters the environment and receipts only when not "off".
+    # Default "gate_up_down_shared" since 2026-09-30: per call bit-identical
+    # to the composed block (0 mismatches in 110880 full-model calls), MTP-off
+    # B1 decode +10.9% (8/8 paired reps faster, tokens identical), MTP on
+    # neutral (qualification/runs/omlx-l2-routed-reach-20260930). "off"
+    # restores the composed block.
+    moe_routed_decode: str = "gate_up_down_shared"
     # omlx #4038 two-launch hyper-connection decode (MLX_QWEN4_HC_DECODE):
     # GatedResidual calls of 1..8 folded rows (decode, verify windows) run in
     # two launches instead of 13-17, bit-identical to the composed ops on
     # Metal (scripts/check_qwen4_hc_decode.py); other widths stay composed and
-    # are counted.  Opt-in; enters the environment and receipts only when
-    # enabled.
-    hc_decode_kernels: bool = False
+    # are counted.  Default on since 2026-09-30: 768/768 real-weight cases
+    # bit-identical at 1-8 rows; full-model B1 +14.0% MTP off, +8.0% MTP on,
+    # greedy tokens identical (qualification/runs/omlx-4038-hc-decode-20260930).
+    # False restores the composed ops; it enters the environment and receipts
+    # only when enabled.
+    hc_decode_kernels: bool = True
     # omlx #4106 GDN half (MLX_QWEN4_FUSED_GDN_BATCH_DECODE): one launch of
     # the one-row fused GDN decode step for every row of a batched one-token
     # decode (the MTP->ordinary handoff width).  "row_exact" runs each row's
@@ -110,9 +118,10 @@ class FlashNextPolicy:
     # block is selected there); past it the QSA mask and the indexer query's
     # norm + RoPE run as one launch each.  Bit-identical to the MLX ops on
     # Metal, full-model tokens identical; B1 decode +11% ordinary / +2% MTP at
-    # 1K, +2% / flat at 32K (qualification/runs/attn-rows-20260930).  Opt-in;
-    # enters the environment and receipts only when enabled.
-    attn_fused_rows: bool = False
+    # 1K, +2% / flat at 32K (qualification/runs/attn-rows-20260930).  Default
+    # on since 2026-09-30; False restores the MLX ops.  It enters the
+    # environment and receipts only when enabled.
+    attn_fused_rows: bool = True
     # Opt-in row-exact self-MTP verify (omlx #4023/#4050/#4041 port,
     # runtime/models/qwen4_row_exact.py): every verify row gets the bits of
     # the one-token decode step, so greedy MTP-on output equals MTP-off.
