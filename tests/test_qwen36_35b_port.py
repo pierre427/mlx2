@@ -542,3 +542,31 @@ def test_flash_next_stops_on_the_tokenizer_chat_eos(tmp_path, monkeypatch):
     monkeypatch.setattr(nn, "quantize", lambda *_a, **_k: None)
     adapter = flash_next.FlashNextAdapter(str(tmp_path))
     assert generation_stop_token_ids(adapter) == (endoftext, im_end)
+
+
+def test_qwen36_eager_dispatch_reaches_the_trunk_only_through_policy(tmp_path, monkeypatch):
+    from mlx2.adapters import qwen36_35b
+    from mlx2.runtime import ubc_evict
+    from mlx2.runtime.models import qwen36_35b as tensors
+
+    calls = []
+
+    class _Trunk:
+        def set_eager_dispatch(self, stride, max_rows):
+            calls.append((stride, max_rows))
+
+    class _Model(_LoadedModel):
+        model = _Trunk()
+
+    _chat_tokenizer(tmp_path)
+    make_artifact(tmp_path)
+    monkeypatch.setattr(qwen36_35b, "configure_environment", lambda *_a: {})
+    monkeypatch.setattr(tensors, "Model", _Model)
+    monkeypatch.setattr(ubc_evict, "load_shards_evicting", lambda *_a, **_k: {})
+    Qwen3635BA3BAdapter(str(tmp_path))
+    assert calls == []  # absent policy: stock forward, nothing installed
+    Qwen3635BA3BAdapter(str(tmp_path), execution_policy={
+        "eager_dispatch_stride": 4, "eager_dispatch_max_rows": 8})
+    assert calls == [(4, 8)]
+    with pytest.raises(ValueError):
+        Qwen3635BA3BAdapter(str(tmp_path), execution_policy={"eager_dispatch_stride": "4"})

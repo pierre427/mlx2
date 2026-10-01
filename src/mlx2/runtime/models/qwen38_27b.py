@@ -19,6 +19,7 @@ from .qwen3_5 import TextModelArgs, GatedDeltaNet
 from .qwen3_next import Qwen3NextMLP as MLP
 from .precise_ops import gate_sigmoid
 from .rope_utils import initialize_rope
+from .. import round_levers as _lv
 
 
 class Qwen3NextAttention(nn.Module):
@@ -197,6 +198,23 @@ class DecoderLayer(nn.Module):
 
 
 class Qwen3_5TextModel(PipelineMixin, nn.Module):
+    # Per-layer eager dispatch (MTPLX #579; same mechanism as Flash-Next's
+    # ``MLX_QWEN4_EAGER_DISPATCH``): on forwards of at most ``max_rows`` rows,
+    # ``mx.async_eval`` the residual every ``stride`` layers so the GPU starts
+    # while the host still builds the later layers.  Graph and kernels are
+    # unchanged.  0 = off; selected only through ``set_eager_dispatch``
+    # (adapter execution policy ``eager_dispatch_stride``).
+    eager_dispatch_stride = 0
+    eager_dispatch_max_rows = 64
+
+    def set_eager_dispatch(self, stride: int, max_rows: int = 64) -> None:
+        if type(stride) is not int or stride < 0:
+            raise ValueError("eager_dispatch_stride must be a non-negative integer")
+        if type(max_rows) is not int or max_rows < 1:
+            raise ValueError("eager_dispatch_max_rows must be a positive integer")
+        self.eager_dispatch_stride = stride
+        self.eager_dispatch_max_rows = max_rows
+
     def __init__(self, args: TextModelArgs):
         super().__init__()
         self.embed_tokens = nn.Embedding(args.vocab_size, args.hidden_size)
@@ -255,9 +273,20 @@ class Qwen3_5TextModel(PipelineMixin, nn.Module):
                 raise ValueError("deep concept memory layer must be an integer")
             if not 0 <= injection_layer < len(self.pipeline_layers):
                 raise ValueError("deep concept memory layer is outside the Qwen trunk")
+        stride = self.eager_dispatch_stride if pipeline_size == 1 else 0
+        if stride:
+            if hidden_states.shape[0] * hidden_states.shape[1] <= self.eager_dispatch_max_rows:
+                _lv.bump("eager_dispatch_forwards")
+            else:
+                _lv.bump("eager_dispatch_row_declines")
+                stride = 0
+        last = len(self.pipeline_layers) - 1
         for layer_index, (layer, c) in enumerate(zip(self.pipeline_layers, cache)):
             mask = ssm_mask if layer.is_linear else fa_mask
             hidden_states = layer(hidden_states, mask=mask, cache=c)
+            if stride and (layer_index == last or (layer_index + 1) % stride == 0):
+                mx.async_eval(hidden_states)
+                _lv.bump("eager_async_evals")
             if layer_index == injection_layer:
                 hidden_states = _apply_deep_concept_memory(
                     hidden_states, deep_concept_memory

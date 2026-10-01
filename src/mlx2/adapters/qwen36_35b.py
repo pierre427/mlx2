@@ -9,7 +9,12 @@ from pathlib import Path
 
 from ..contracts import Capability, ModelDescriptor, StatePlane
 from .mtp_depth_cap import validate_self_mtp_num_draft
-from .qwen38_27b import Qwen3827BAdapter, resolve_eos_token_ids
+from .qwen38_27b import (
+    EAGER_DISPATCH_POLICY_KEYS,
+    Qwen3827BAdapter,
+    eager_dispatch_policy,
+    resolve_eos_token_ids,
+)
 from ..process_env import PROCESS_NUMERICS
 
 CACHE_LAYOUT = "qwen36-35b-a3b-hybrid-layer-segments-v1"
@@ -276,11 +281,13 @@ class Qwen3635BA3BAdapter(Qwen3827BAdapter):
         if execution_policy is not None and not isinstance(execution_policy, dict):
             raise ValueError("execution policy must be a JSON object")
         policy = {} if execution_policy is None else dict(execution_policy)
-        if set(policy) - {"num_draft", *KERNEL_POLICY_ENV}:
+        if set(policy) - {"num_draft", *KERNEL_POLICY_ENV, *EAGER_DISPATCH_POLICY_KEYS}:
             raise ValueError(
-                "Qwen3.6 execution policy supports only num_draft and the "
-                "kernel switches " + ", ".join(sorted(KERNEL_POLICY_ENV))
+                "Qwen3.6 execution policy supports only num_draft, the "
+                "eager-dispatch keys and the kernel switches "
+                + ", ".join(sorted(KERNEL_POLICY_ENV))
             )
+        eager_dispatch = eager_dispatch_policy(policy)
         self._num_draft = validate_self_mtp_num_draft(policy.get("num_draft", 2))
         self._kernels = {}
         for key in KERNEL_POLICY_ENV:
@@ -395,6 +402,8 @@ class Qwen3635BA3BAdapter(Qwen3827BAdapter):
             self.model.load_weights(list(weights.items()), strict=True)
         self.model.eval()
         mx.eval(self.model.parameters())
+        if eager_dispatch[0]:
+            self.model.model.set_eager_dispatch(*eager_dispatch)
         weights.clear()
         mx.clear_cache()
 

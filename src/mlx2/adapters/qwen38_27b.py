@@ -286,6 +286,43 @@ def configure_environment() -> dict[str, str]:
     return profile
 
 
+EAGER_DISPATCH_POLICY_KEYS = ("eager_dispatch_stride", "eager_dispatch_max_rows")
+
+
+def eager_dispatch_policy(policy: dict) -> tuple[int, int]:
+    """Validate the per-layer eager-dispatch policy keys; (0, 64) = off.
+
+    Opt-in (MTPLX #579 / Flash-Next ``eager_dispatch``): no win on this
+    family outside noise yet (qualification/runs/recon-20261001/
+    l7-decode-perf), so absent keeps the stock forward and its receipts.
+    """
+    stride = policy.get("eager_dispatch_stride", 0)
+    max_rows = policy.get("eager_dispatch_max_rows", 64)
+    if type(stride) is not int or stride < 0:
+        raise ValueError("eager_dispatch_stride must be a non-negative integer")
+    if type(max_rows) is not int or max_rows < 1:
+        raise ValueError("eager_dispatch_max_rows must be a positive integer")
+    return stride, max_rows
+
+
+def eager_dispatch_diagnostics(adapter) -> dict:
+    trunk = getattr(getattr(adapter, "model", None), "model", None)
+    if not getattr(trunk, "eager_dispatch_stride", 0):
+        return {}
+    from ..runtime.round_levers import counters
+
+    levers = counters()
+    return {
+        "eager_dispatch": {
+            "stride": trunk.eager_dispatch_stride,
+            "max_rows": trunk.eager_dispatch_max_rows,
+            "forwards": int(levers["eager_dispatch_forwards"]),
+            "row_declines": int(levers["eager_dispatch_row_declines"]),
+            "async_evals": int(levers["eager_async_evals"]),
+        }
+    }
+
+
 def resolve_eos_token_ids(config: dict, tokenizer) -> list[int]:
     """Combine artifact and tokenizer EOS ids without trusting either alone."""
     text = config.get("text_config", config)
@@ -406,12 +443,15 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
             "tensorfold_prefill_backend",
             "gdn_prefill_chunk",
             "gdn_prefill_segment_rows",
+            *EAGER_DISPATCH_POLICY_KEYS,
         }:
             raise ValueError(
                 "Qwen3.8 27B execution policy supports only num_draft, gdn_core, "
                 "fp32_head_logits, tensorfold_prefill, tensorfold_prefill_backend, "
-                "gdn_prefill_chunk and gdn_prefill_segment_rows"
+                "gdn_prefill_chunk, gdn_prefill_segment_rows, "
+                "eager_dispatch_stride and eager_dispatch_max_rows"
             )
+        eager_dispatch = eager_dispatch_policy(policy)
         # Opt-in: the quantized lm_head stores fp32 logits instead of rounding
         # them to bf16 (runtime/fp32_head.py).  Absent keeps receipts as-is.
         fp32_head = policy.get("fp32_head_logits", False)
@@ -551,6 +591,8 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
 
         self.model.eval()
         mx.eval(self.model.parameters())
+        if eager_dispatch[0]:
+            self.model.model.set_eager_dispatch(*eager_dispatch)
         self.tensorfold_prefill = None
         if prefill_policy.tensorfold_prefill:
             weights.clear()
@@ -725,4 +767,5 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
                 if getattr(self, "fp32_head", None)
                 else {}
             ),
+            **eager_dispatch_diagnostics(self),
         }
