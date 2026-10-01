@@ -70,6 +70,23 @@ Verdict: ``pass`` when every run engaged as required and every run's tokens
 (and logprob rows where available) equal the first run's; ``counterexample``
 when engaged but outputs differ; ``refused`` otherwise. Exit 0/1/1.
 
+``--require-complete-state`` (default off) adds a strict state gate for a
+paired qualification run. Every measured run (warmups are discarded and not
+checked) must carry a ``complete`` digest with a lowercase 64-hex ``sha256``
+and no missing-state reason for each snapshot its mechanism requires:
+``final_target_state`` on ``qsdpa-tiling`` (the ordinary route has no draft
+sidecar), plus ``final_draft_sidecar`` on the external routes, plus a
+well-formed prompt boundary on ``external-prefill-reclaim`` whose
+``covered_tokens``/``tokens_sha256`` name exactly the committed prefix of a
+fresh run (the pinned prompt minus its final token, which stays the
+unconsumed decode anchor) and whose ``target``/``sidecar`` digests are
+complete. An incomplete or malformed required
+snapshot is refused even when tokens match; complete snapshots that differ
+stay a counterexample. Without the flag the diagnostic verdict above is
+unchanged. The gate checks host digest records only: final and boundary cache
+snapshots, not RNG, scheduler or transaction state, and never native, model,
+transaction or serving qualification.
+
 Real runs need ``--i-own-the-gpu``. ``--tiny`` runs random CPU models (the
 harness and gates only; numbers are meaningless) and never touches Metal.
 
@@ -659,7 +676,169 @@ def _comparison_label(runs, key):
     return "compared" if statuses == {"complete"} else "state_only (metadata unavailable)"
 
 
+# ``--require-complete-state``: snapshots each mechanism must deliver complete.
+REQUIRED_STATE = {
+    # The ordinary route has no draft sidecar; its "unavailable" is legitimate.
+    "qsdpa-tiling": ("final_target_state",),
+    "external-reclaim": ("final_target_state", "final_draft_sidecar"),
+    "external-prefill-reclaim": ("final_target_state", "final_draft_sidecar",
+                                 "prompt_boundary.target", "prompt_boundary.sidecar"),
+}
+FINAL_STATE_KEYS = ("final_target_state", "final_draft_sidecar")
+# Exactly the fields state_digest returns for a complete digest.
+_COMPLETE_FIELDS = frozenset({"status", "sha256", "reason"})
+_BOUNDARY_FIELDS = frozenset({"covered_tokens", "tokens_sha256", "target", "sidecar"})
+STRICT_STATE_SCOPE = (
+    "host check of the state_digest records of measured runs: each required snapshot "
+    "complete with a lowercase 64-hex sha256 and no missing-state reason; a prompt "
+    "boundary's covered_tokens/tokens_sha256 bound to the fresh-run committed prefix "
+    "(pinned prompt minus the final anchor token, which the boundary does not cover). "
+    "Final and boundary cache snapshots only, not RNG, scheduler or full "
+    "transaction state; not native, model, transaction or serving qualification; "
+    "changes no implemented/qualified/selected/observed-used state")
+
+
+def _is_sha256(value):
+    return type(value) is str and len(value) == 64 and all(c in "0123456789abcdef" for c in value)
+
+
+def _digest_shaped(value):
+    return isinstance(value, dict) and type(value.get("status")) is str
+
+
+def snapshot_refusal(snapshot):
+    """Why one ``state_digest`` record is not a complete snapshot, or None."""
+    if not isinstance(snapshot, dict):
+        return f"not a digest record ({type(snapshot).__name__})"
+    status = snapshot.get("status")
+    if type(status) is not str or status != "complete":
+        return f"status {status!r} is not complete"[:200]
+    extra = sorted(str(k) for k in set(snapshot) - _COMPLETE_FIELDS)
+    if extra:  # e.g. state_only_sha256: never a complete digest's field
+        return "complete with unexpected fields " + ", ".join(extra)[:200]
+    missing = sorted(_COMPLETE_FIELDS - set(snapshot))
+    if missing:
+        return "complete without " + ", ".join(missing)
+    if not _is_sha256(snapshot["sha256"]):
+        return "complete without a lowercase 64-hex sha256"
+    if snapshot["reason"] is not None:
+        return "complete with a missing-state reason"
+    return None
+
+
+def _boundary_refusal(boundary, prompt):
+    """Why a recorded prompt boundary is not the expected claim, or None.
+
+    A fresh external run (no resumed cache) commits every prompt token but
+    the last, which becomes the decode anchor, so the boundary must cover
+    exactly ``prompt[:-1]``.
+    """
+    if boundary is None:
+        return "absent (no prompt boundary was taken)"
+    if not isinstance(boundary, dict):
+        return f"not a mapping ({type(boundary).__name__})"
+    if set(boundary) != _BOUNDARY_FIELDS:
+        return "fields " + ", ".join(sorted(str(k) for k in boundary))[:200]
+    covered = boundary["covered_tokens"]
+    if type(covered) is not int or covered <= 0:
+        return "covered_tokens is not a positive int"
+    if not _is_sha256(boundary["tokens_sha256"]):
+        return "tokens_sha256 is not lowercase 64-hex"
+    if prompt is None:
+        return "no pinned prompt to bind the boundary against"
+    committed = list(prompt)[:-1]
+    if covered != len(committed):
+        return f"covered_tokens {covered} is not the {len(committed)}-token committed prefix"
+    if boundary["tokens_sha256"] != _sha(json.dumps(committed).encode()):
+        return "tokens_sha256 is not the hash of the committed prefix prompt[:-1]"
+    return None
+
+
+def strict_state_refusals(mechanism, record, prompt=None):
+    """Strict-gate refusals for one measured run record (empty when it passes).
+
+    Pure host check of the digests ``run_arm`` recorded; it never digests a
+    cache itself. ``prompt`` (the pinned token ids) binds a required prompt
+    boundary; without it that boundary is refused. A snapshot that is not
+    required may have any status or be absent, but a duplicate ``*_sha256``
+    field that contradicts it is still refused.
+    """
+    required = REQUIRED_STATE.get(mechanism)
+    if required is None:
+        return [f"no strict state requirement for mechanism {mechanism!r}"[:200]]
+    if not isinstance(record, dict):
+        return [f"not a run record ({type(record).__name__})"]
+    out = []
+    boundary = record.get("prompt_boundary")
+    if any(path.startswith("prompt_boundary.") for path in required):
+        problem = _boundary_refusal(boundary, prompt)
+        if problem:
+            out.append(f"prompt_boundary: {problem}")
+    for path in required:
+        head, _, leaf = path.partition(".")
+        if leaf:
+            if not isinstance(boundary, dict) or leaf not in boundary:
+                out.append(f"{path}: absent")
+                continue
+            snapshot = boundary[leaf]
+        else:
+            if head not in record:
+                out.append(f"{path}: absent")
+                continue
+            snapshot = record[head]
+        problem = snapshot_refusal(snapshot)
+        duplicate = f"{head}_sha256"
+        if problem is None and not leaf and duplicate in record and record[duplicate] != snapshot["sha256"]:
+            problem = f"{duplicate} contradicts the digest"
+        if problem:
+            out.append(f"{path}: {problem}")
+    for key in FINAL_STATE_KEYS:
+        if key in required:
+            continue
+        snapshot, duplicate = record.get(key), f"{key}_sha256"
+        digest = snapshot.get("sha256") if isinstance(snapshot, dict) else None
+        if duplicate in record and record[duplicate] != digest:
+            out.append(f"{key}: {duplicate} contradicts the digest (not required complete)")
+    return out
+
+
+def strict_state_gate(mechanism, runs, prompt=None):
+    """``--require-complete-state`` over the measured runs: (receipt, refusals)."""
+    refusals, complete = [], 0
+    for record in runs:
+        problems = strict_state_refusals(mechanism, record, prompt)
+        complete += not problems
+        label = (f"pair {record.get('pair')} {record.get('arm')}" if isinstance(record, dict)
+                 else "run")
+        refusals.extend(f"{label}: strict state: {problem}" for problem in problems)
+    if not runs:
+        refusals.append("strict state: no measured runs to check")
+    required = REQUIRED_STATE.get(mechanism, ())
+    return {
+        "requested": True,
+        "required_snapshots": list(required),
+        "not_required": [key for key in FINAL_STATE_KEYS if key not in required],
+        "measured_runs_checked": len(runs),
+        "complete_runs": complete,
+        "warmups": "discarded diagnostic work; not checked",
+        "refusals": refusals,
+        "scope": STRICT_STATE_SCOPE,
+    }, refusals
+
+
+def _strict_comparison_label(mechanism, runs, key):
+    """``state_comparison`` under the strict gate: never ``compared`` on a refused digest."""
+    if key in REQUIRED_STATE.get(mechanism, ()):
+        if runs and all(snapshot_refusal(r.get(key)) is None for r in runs):
+            return "compared"
+        return "refused by the strict state gate (incomplete or malformed)"
+    if all(_digest_shaped(r.get(key)) for r in runs):
+        return "not required; " + _comparison_label(runs, key)
+    return "not required; absent or malformed, not compared"
+
+
 def run_cohort(args):
+    strict = bool(getattr(args, "require_complete_state", False))
     cohort = Cohort(args)
     first, second = ARMS[args.mechanism]
     for _ in range(args.warmups):
@@ -675,6 +854,15 @@ def run_cohort(args):
             if reason:
                 refusals.append(f"pair {pair} {arm}: {reason}")
             runs.append(record)
+    if strict:
+        # Before the state comparison, which (strict only) skips records it
+        # cannot read rather than crash on them.
+        strict_receipt, strict_refusals = strict_state_gate(args.mechanism, runs, cohort.prompt)
+        refusals.extend(strict_refusals)
+    else:
+        strict_receipt = {"requested": False,
+                          "gate": ("not applied: diagnostic default; matching incomplete snapshots "
+                                   "may pass on token parity and are labelled in state_comparison")}
     reference = runs[0] if runs else None
     mismatches = []
     for record in runs[1:]:
@@ -684,9 +872,15 @@ def run_cohort(args):
             mismatches.append(f"pair {record['pair']} {record['arm']}: tokens differ at {index}")
         elif record["logprob_row_sha256"] != reference["logprob_row_sha256"]:
             mismatches.append(f"pair {record['pair']} {record['arm']}: logprob rows differ")
-        if record["prompt_boundary"] != reference["prompt_boundary"]:
+        if strict:
+            boundaries = record.get("prompt_boundary"), reference.get("prompt_boundary")
+        else:
+            boundaries = record["prompt_boundary"], reference["prompt_boundary"]
+        if boundaries[0] != boundaries[1]:
             mismatches.append(f"pair {record['pair']} {record['arm']}: prompt boundary differs")
-        for key in ("final_target_state", "final_draft_sidecar"):
+        for key in FINAL_STATE_KEYS:
+            if strict and not (_digest_shaped(record.get(key)) and _digest_shaped(reference.get(key))):
+                continue  # unreadable: refused if required, labelled if not
             mine, ref = record[key], reference[key]
             if mine["status"] != ref["status"]:
                 mismatches.append(f"pair {record['pair']} {record['arm']}: {key} status "
@@ -723,8 +917,11 @@ def run_cohort(args):
         "mismatches": mismatches,
         "arms": [first, second],
         "state_comparison": {
-            key: _comparison_label(runs, key) for key in ("final_target_state", "final_draft_sidecar")
+            key: (_strict_comparison_label(args.mechanism, runs, key) if strict
+                  else _comparison_label(runs, key))
+            for key in FINAL_STATE_KEYS
         },
+        "strict_state": strict_receipt,
         "protocol": {
             "pairs": args.pairs, "warmups_discarded": args.warmups, "order": "alternating AB/BA",
             "max_tokens": args.max_tokens, "seed": args.seed, "sampling": "greedy",
@@ -760,6 +957,8 @@ def build_parser():
     ap.add_argument("--logprob-rows", type=int, default=8)
     ap.add_argument("--seed", type=int, default=1234)
     ap.add_argument("--ignore-eos", action="store_true", help="both arms; fixed-length rows")
+    ap.add_argument("--require-complete-state", action="store_true",
+                    help="refuse measured runs whose required cache snapshots are not complete")
     ap.add_argument("--out", required=True)
     return ap
 
