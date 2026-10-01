@@ -111,6 +111,19 @@ def configure_environment(model_path: Path, policy=None) -> dict[str, str]:
     return profile
 
 
+def gdn_state_bytes(adapter) -> int:
+    """Bytes per recurrent-state value the adapter's GDN layers store."""
+    return 2 if getattr(adapter, "gdn_state", None) else 4
+
+
+def gdn_state_diagnostics(adapter) -> dict:
+    """The fp16 storage-class receipt; absent (default receipts unchanged) at fp32."""
+    receipt = getattr(adapter, "gdn_state", None)
+    if not receipt:
+        return {}
+    return {"gdn_state": {**receipt, "counters": dict(receipt["counters"])}}
+
+
 def chat_template(tokenizer, request: dict, *, tokenize: bool):
     """Render a chat request through the Qwen template (ids or text)."""
     messages = copy.deepcopy(request["messages"])
@@ -208,7 +221,11 @@ class FlashNextAdapter:
 
     def cache_budget(self, *, mtp):
         from .flash_next_memory import FlashNextCacheBudget
-        return FlashNextCacheBudget.from_config(self.model.args.text_config, mtp=mtp)
+        return FlashNextCacheBudget.from_config(
+            self.model.args.text_config,
+            mtp=mtp,
+            recurrent_state_bytes=gdn_state_bytes(self),
+        )
 
     def prefill_step_default(self):
         """Adapter-preferred prefill chunk; an explicit engine setting wins.
@@ -399,7 +416,21 @@ class FlashNextAdapter:
             self.max_context = int(
                 config["text_config"].get("max_position_embeddings", 262144)
             )
-            self.layout = self.model.apc_v2_layout
+            from ..runtime.models.gdn_state import (
+                install_state_dtype,
+                layout_with_state_dtype,
+            )
+
+            # Unqualified fp16 storage class: bound to the GDN layers, and
+            # its own APCv2 layout so fp16 and fp32 states never share entries.
+            self.gdn_state = (
+                install_state_dtype(self.model, self.policy.gdn_state_dtype)
+                if self.policy.gdn_state_dtype != "float32"
+                else None
+            )
+            self.layout = layout_with_state_dtype(
+                self.model.apc_v2_layout, self.policy.gdn_state_dtype
+            )
         except BaseException:
             self.close()
             raise
@@ -576,6 +607,7 @@ class FlashNextAdapter:
         return {
             "moe": moe,
             "policy": self.policy.as_dict(),
+            **gdn_state_diagnostics(self),
             **(
                 {
                     "tensorfold_qmv": {

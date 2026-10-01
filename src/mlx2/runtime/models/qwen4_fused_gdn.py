@@ -8,6 +8,8 @@ from threading import Lock
 from typing import Any, Optional
 import mlx.core as mx
 
+from . import gdn_state as _gdn_state
+
 logger = logging.getLogger(__name__)
 NUM_KEY_HEADS = 16
 NUM_VALUE_HEADS = 48
@@ -221,8 +223,9 @@ def _admit_decode_operands(
     for name in ("z", "a", "b", "conv_state", "conv_weight", "dt_bias", "norm_weight"):
         if _dtype(values[name]) != value_dtype:
             return FusedGdnAdmission(False, f"{name} dtype {_dtype(values[name])}")
-    if _dtype(recurrent_state) != mx.float32:
-        return FusedGdnAdmission(False, "recurrent_state must be float32")
+    if _dtype(recurrent_state) not in (mx.float32, mx.float16):
+        # fp16 is the per-token-rounded storage class (gdn_state).
+        return FusedGdnAdmission(False, "recurrent_state must be float32 or float16")
     if _dtype(A_log) not in (value_dtype, mx.float32):
         return FusedGdnAdmission(False, f"A_log dtype {_dtype(A_log)}")
     return FusedGdnAdmission(True, "eligible")
@@ -381,10 +384,46 @@ _SOURCE_BATCH = (
 )
 
 
+def st16_source(source: str, *, what: str, state_dst: int = 0) -> str:
+    """The fp16 storage class of a fused GDN kernel body (``gdn_state``).
+
+    Derived textually from the proven fp32 body, so the fp32 kernels are the
+    unchanged sources: the state pointers become ``half``, and after each
+    token's readout (``out = simd_sum(out)``) the register state is rounded
+    to fp16 -- every token, also inside a verify block -- then stored.  The
+    arithmetic of every token is otherwise the fp32 kernel's.
+    """
+    return _gdn_state.derive_source(
+        source,
+        (
+            ("device const float* si = recurrent_state", "device const half* si = recurrent_state", 1),
+            ("device float* so = recurrent_state_out", "device half* so = recurrent_state_out", 1),
+            ("device float* state_dst =", "device half* state_dst =", state_dst),
+            (
+                "out = simd_sum(out);\n",
+                "out = simd_sum(out);\n"
+                "    for (int i = 0; i < NDK; ++i)\n"
+                "      st[j][i] = float(static_cast<half>(st[j][i]));\n",
+                1,
+            ),
+            ("= st[j][i];", "= static_cast<half>(st[j][i]);", 1),
+        ),
+        what=what,
+    )
+
+
+_SOURCE_ST16 = st16_source(_SOURCE, what="qwen4_fused_gdn_decode")
+_SOURCE_BATCH_ST16 = (
+    _BATCH_ROW_PREFIX
+    + _SOURCE_ST16.replace("threadgroup_position_in_grid.z", "head_in_row")
+    + "\n  }\n"
+)
+
+
 @lru_cache(maxsize=None)
-def _kernel():
+def _kernel(st16: bool = False):
     return mx.fast.metal_kernel(
-        name="qwen4_fused_gdn_decode",
+        name="qwen4_fused_gdn_decode" + ("_st16" if st16 else ""),
         input_names=[
             "qkv",
             "z",
@@ -400,15 +439,15 @@ def _kernel():
         ],
         output_names=["output", "conv_state_out", "recurrent_state_out"],
         header=_HEADER,
-        source=_SOURCE,
+        source=_SOURCE_ST16 if st16 else _SOURCE,
         ensure_row_contiguous=True,
     )
 
 
 @lru_cache(maxsize=None)
-def _kernel_batch():
+def _kernel_batch(st16: bool = False):
     return mx.fast.metal_kernel(
-        name="qwen4_fused_gdn_batch_decode",
+        name="qwen4_fused_gdn_batch_decode" + ("_st16" if st16 else ""),
         input_names=[
             "qkv",
             "z",
@@ -424,7 +463,7 @@ def _kernel_batch():
         ],
         output_names=["output", "conv_state_out", "recurrent_state_out"],
         header=_HEADER,
-        source=_SOURCE_BATCH,
+        source=_SOURCE_BATCH_ST16 if st16 else _SOURCE_BATCH,
         ensure_row_contiguous=True,
     )
 
@@ -489,7 +528,10 @@ def qwen4_fused_gdn_decode(
     key_dim = num_key_heads * key_head_dim
     value_dim = num_value_heads * value_head_dim
     conv_dim = 2 * key_dim + value_dim
-    outputs = _kernel()(
+    st16 = recurrent_state.dtype == mx.float16
+    if st16:
+        _gdn_state.STATS["fused_decode"] += 1
+    outputs = _kernel(st16)(
         inputs=[
             qkv,
             z,
@@ -521,7 +563,7 @@ def qwen4_fused_gdn_decode(
             (1, conv_kernel - 1, conv_dim),
             (1, num_value_heads, value_head_dim, key_head_dim),
         ],
-        output_dtypes=[qkv.dtype, qkv.dtype, mx.float32],
+        output_dtypes=[qkv.dtype, qkv.dtype, recurrent_state.dtype],
     )
     return tuple(outputs)
 
@@ -561,7 +603,10 @@ def qwen4_fused_gdn_batch_decode(
     key_dim = num_key_heads * key_head_dim
     value_dim = num_value_heads * value_head_dim
     conv_dim = 2 * key_dim + value_dim
-    outputs = _kernel_batch()(
+    st16 = recurrent_state.dtype == mx.float16
+    if st16:
+        _gdn_state.STATS["fused_batch_decode"] += 1
+    outputs = _kernel_batch(st16)(
         inputs=[
             qkv,
             z,
@@ -593,7 +638,7 @@ def qwen4_fused_gdn_batch_decode(
             (rows, conv_kernel - 1, conv_dim),
             (rows, num_value_heads, value_head_dim, key_head_dim),
         ],
-        output_dtypes=[qkv.dtype, qkv.dtype, mx.float32],
+        output_dtypes=[qkv.dtype, qkv.dtype, recurrent_state.dtype],
     )
     return tuple(outputs)
 
@@ -622,6 +667,9 @@ def qwen4_fused_gdn_decode_outproj(
     """One-dispatch GDN recurrence, gated norm, and affine-q4 QMV."""
     if output_dim != 2560 or output_group_size != 64:
         raise ValueError("only the production 2560x6144 affine-q4 epilogue")
+    if recurrent_state.dtype != mx.float32:
+        # No fp16 storage-class variant of this epilogue kernel.
+        raise ValueError("the outproj epilogue requires a float32 state")
     outputs = _kernel_outproj()(
         inputs=[
             qkv,
@@ -794,9 +842,60 @@ _PROBE_COMPLETE = False
 _PROBE_LOCK = Lock()
 
 
-def probe_qwen4_fused_gdn_decode(dtype) -> Optional[int]:
-    """Compile candidates once and publish the supported geometry atomically."""
+_PROBED_ST16: dict = {}
+
+
+def _probe_st16_decode(dtype) -> Optional[int]:
+    """The fp16 storage-class decode and batch kernels at the fp32 geometry.
+
+    Only the fp32 probe's ``threadgroup_y`` is tried, so both classes run the
+    same thread geometry; a failure keeps fp16 states on the stock chain.
+    """
+    if "decode" in _PROBED_ST16:
+        return _PROBED_ST16["decode"]
+    start = probe_qwen4_fused_gdn_decode(dtype)
+    with _PROBE_LOCK:
+        if "decode" in _PROBED_ST16:
+            return _PROBED_ST16["decode"]
+        result = None
+        if start is not None:
+            try:
+                for rows in (1, 2):
+                    qkv = mx.zeros((rows, 1, CONV_DIM), dtype=dtype)
+                    z = mx.zeros((rows, 1, VALUE_DIM), dtype=dtype)
+                    gates = mx.zeros((rows, 1, NUM_VALUE_HEADS), dtype=dtype)
+                    conv_state = mx.zeros((rows, CONV_KERNEL - 1, CONV_DIM), dtype=dtype)
+                    state = mx.zeros(
+                        (rows, NUM_VALUE_HEADS, VALUE_HEAD_DIM, KEY_HEAD_DIM),
+                        dtype=mx.float16,
+                    )
+                    build = qwen4_fused_gdn_decode if rows == 1 else qwen4_fused_gdn_batch_decode
+                    outputs = build(
+                        qkv, z, gates, gates, conv_state,
+                        mx.zeros((CONV_DIM, CONV_KERNEL, 1), dtype=dtype),
+                        mx.zeros((NUM_VALUE_HEADS,), dtype=mx.float32),
+                        mx.zeros((NUM_VALUE_HEADS,), dtype=dtype),
+                        state,
+                        mx.ones((VALUE_HEAD_DIM,), dtype=dtype),
+                        1e-06,
+                        threadgroup_y=start,
+                    )
+                    mx.eval(*outputs)
+                result = start
+            except (ValueError, RuntimeError) as exc:
+                logger.info("Qwen4 fused GDN fp16-state probe failed: %s", exc)
+        _PROBED_ST16["decode"] = result
+        return result
+
+
+def probe_qwen4_fused_gdn_decode(dtype, *, state_dtype=None) -> Optional[int]:
+    """Compile candidates once and publish the supported geometry atomically.
+
+    ``state_dtype=mx.float16`` probes the fp16 storage-class kernels instead.
+    """
     global _PROBE_COMPLETE, _PROBED_THREADGROUP_Y
+    if state_dtype == mx.float16:
+        return _probe_st16_decode(dtype)
     if _PROBE_COMPLETE:
         return _PROBED_THREADGROUP_Y
     with _PROBE_LOCK:

@@ -39,6 +39,12 @@ from .cache import (
     dynamic_roll,
 )
 from .gated_delta import gated_delta_update
+from . import gdn_state as _gdn_state
+
+
+def _state_probe(state):
+    """Probe keywords for a recurrent state's storage class (fp32: none)."""
+    return {"state_dtype": mx.float16} if state.dtype == mx.float16 else {}
 from .pipeline import PipelineMixin
 from .qwen4_fused_gdn import (
     admit_qwen4_fused_gdn_batch_decode,
@@ -1021,6 +1027,7 @@ class GatedDeltaNet(Qwen35GatedDeltaNet):
             else 0,
             prefill_stats=getattr(self, "_prefill_scan_stats", None),
             prefill_segment_rows=getattr(self, "_prefill_scan_segment", 256),
+            state_dtype=getattr(self, "_gdn_state_dtype", None),
         )
 
     def set_fused_gdn_decode_mode(self, mode: str):
@@ -1087,7 +1094,9 @@ class GatedDeltaNet(Qwen35GatedDeltaNet):
         if not fused_gdn_runtime_supported():
             return self._fused_gdn_batch_fallback("Metal runtime unavailable")
         try:
-            threadgroup_y = probe_qwen4_fused_gdn_decode(qkv.dtype)
+            threadgroup_y = probe_qwen4_fused_gdn_decode(
+                qkv.dtype, **_state_probe(cache[1])
+            )
             if threadgroup_y is None:
                 return self._fused_gdn_batch_fallback("Metal kernel probe declined")
             (out, conv_state, recurrent_state) = qwen4_fused_gdn_batch_decode(
@@ -1241,10 +1250,13 @@ class GatedDeltaNet(Qwen35GatedDeltaNet):
                     else probe_qwen4_fused_gdn_verify
                 )
             )
+            state_kw = _state_probe(cache[1])
             if compact_replay and self.fused_gdn_dynamic_accept:
-                threadgroup_y = probe(qkv.dtype, steps, dynamic_accept=True)
+                threadgroup_y = probe(
+                    qkv.dtype, steps, dynamic_accept=True, **state_kw
+                )
             else:
-                threadgroup_y = probe(qkv.dtype, steps)
+                threadgroup_y = probe(qkv.dtype, steps, **state_kw)
             if threadgroup_y is None:
                 return fallback("Metal kernel probe declined")
             kernel = qwen4_fused_gdn_catchup if catchup else (
@@ -1467,6 +1479,10 @@ class GatedDeltaNet(Qwen35GatedDeltaNet):
         return self.out_proj(flat)
 
     def _try_fused_decode(self, qkv, z, b, a, mask, cache):
+        if cache is not None:
+            # The fused kernels follow the carried state's class; refuse a
+            # state of the class this layer did not select (gdn_state).
+            _gdn_state.check_state(cache[1], getattr(self, "_gdn_state_dtype", None))
         if cache is not None and qkv.shape[1] > 1:
             speculating = bool(getattr(cache, "speculating", False))
             if speculating or _FUSED_GDN_CATCHUP_SCOPE.get():
@@ -1522,13 +1538,19 @@ class GatedDeltaNet(Qwen35GatedDeltaNet):
         if refusal is not None:
             return self._fused_gdn_fallback(refusal)
         try:
-            threadgroup_y = probe_qwen4_fused_gdn_decode(qkv.dtype)
+            threadgroup_y = probe_qwen4_fused_gdn_decode(
+                qkv.dtype, **_state_probe(cache[1])
+            )
             if threadgroup_y is None:
                 return self._fused_gdn_fallback("Metal kernel probe declined")
             if self.fused_gdn_decode_mode == "fused_outproj":
                 outproj_admission = admit_qwen4_gdn_outproj(self.out_proj, z)
                 if not outproj_admission.accepted:
                     return self._fused_gdn_fallback(outproj_admission.reason)
+                if cache[1].dtype != mx.float32:
+                    return self._fused_gdn_fallback(
+                        "outproj epilogue requires a float32 state"
+                    )
                 self._fused_gdn_outproj_epoch += 1
                 (out, conv_state, recurrent_state) = qwen4_fused_gdn_decode_outproj(
                     qkv,

@@ -517,8 +517,10 @@ def admit_qwen4_fused_gdn_prefill(
             return FusedGdnAdmission(
                 False, f"recurrent_state shape {_shape(recurrent_state)}"
             )
-        if recurrent_state.dtype != mx.float32:
-            return FusedGdnAdmission(False, "recurrent_state must be float32")
+        if recurrent_state.dtype not in (mx.float32, mx.float16):
+            # The recurrence runs in the layer's own gated_delta_update, which
+            # serves the fp16 storage class (gdn_state) too.
+            return FusedGdnAdmission(False, "recurrent_state must be float32 or float16")
     return FusedGdnAdmission(True, "eligible")
 
 

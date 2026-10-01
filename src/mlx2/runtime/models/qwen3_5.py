@@ -137,6 +137,7 @@ class GatedDeltaNet(nn.Module):
             else 0,
             prefill_stats=getattr(self, "_prefill_scan_stats", None),
             prefill_segment_rows=getattr(self, "_prefill_scan_segment", 256),
+            state_dtype=getattr(self, "_gdn_state_dtype", None),
         )
 
     def _input_projections(self, inputs: mx.array):

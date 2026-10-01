@@ -6,6 +6,7 @@ from typing import Optional, Tuple
 import mlx.core as mx
 import mlx.nn as nn
 from .precise_ops import gate_sigmoid
+from . import gdn_state as _gdn_state
 
 from .import_env import snapshot as _import_env_snapshot
 
@@ -109,6 +110,10 @@ def _chunked_prefill(
         reason = "masked_or_vector_gate"
     elif q.shape[1] < _CORE_GDN_MIN_T:
         reason = "short_sequence"
+    elif state.dtype == mx.float16:
+        # MLX's scan keeps fp32 state across its chunks; the fp16 storage
+        # class rounds per token, so it stays on the mlx2 kernels.
+        reason = "fp16_state"
     elif not _core_layout_supported(q, k, v, g, state):
         reason = "unsupported_layout"
     elif chunk_size == 16 and "M5" not in str(mx.device_info().get("device_name", "")):
@@ -195,7 +200,9 @@ def compute_lower_bound_g(A_log, a, dt_bias, lower_bound):
     )
 
 
-def _make_gated_delta_kernel(has_mask=False, vectorized=False):
+def _make_gated_delta_kernel(has_mask=False, vectorized=False, round_state=False):
+    """``round_state``: the fp16 storage class (``gdn_state``).  The state is
+    rounded to ``StT`` after every token's readout, inside the launch."""
     if not mx.metal.is_available():
         return None
     mask_source = "mask[b_idx * T + t]" if has_mask else "true"
@@ -210,6 +217,21 @@ def _make_gated_delta_kernel(has_mask=False, vectorized=False):
         g_access = "g_[hv_idx]"
         g_advance = "g_ += Hv;"
     source = f"\n        auto n = thread_position_in_grid.z;\n        auto b_idx = n / Hv;\n        auto hv_idx = n % Hv;\n        auto hk_idx = hv_idx / (Hv / Hk);\n        constexpr int n_per_t = Dk / 32;\n\n        // q, k: [B, T, Hk, Dk]\n        auto q_ = q + b_idx * T * Hk * Dk + hk_idx * Dk;\n        auto k_ = k + b_idx * T * Hk * Dk + hk_idx * Dk;\n\n        // v, y: [B, T, Hv, Dv]\n        auto v_ = v + b_idx * T * Hv * Dv + hv_idx * Dv;\n        y += b_idx * T * Hv * Dv + hv_idx * Dv;\n\n        auto dk_idx = thread_position_in_threadgroup.x;\n        auto dv_idx = thread_position_in_grid.y;\n\n        // state_in, state_out: [B, Hv, Dv, Dk]\n        auto i_state = state_in + (n * Dv + dv_idx) * Dk;\n        auto o_state = state_out + (n * Dv + dv_idx) * Dk;\n\n        float state[n_per_t];\n        for (int i = 0; i < n_per_t; ++i) {{\n          auto s_idx = n_per_t * dk_idx + i;\n          state[i] = static_cast<float>(i_state[s_idx]);\n        }}\n\n        {g_comment}\n        {g_setup}\n        auto beta_ = beta + b_idx * T * Hv;\n\n        for (int t = 0; t < T; ++t) {{\n          if ({mask_source}) {{\n            float kv_mem = 0.0f;\n            for (int i = 0; i < n_per_t; ++i) {{\n              auto s_idx = n_per_t * dk_idx + i;\n              state[i] = state[i] * {g_access};\n              kv_mem += state[i] * k_[s_idx];\n            }}\n            kv_mem = simd_sum(kv_mem);\n\n            auto delta = (v_[dv_idx] - kv_mem) * beta_[hv_idx];\n\n            float out = 0.0f;\n            for (int i = 0; i < n_per_t; ++i) {{\n              auto s_idx = n_per_t * dk_idx + i;\n              state[i] = state[i] + k_[s_idx] * delta;\n              out += state[i] * q_[s_idx];\n            }}\n            out = simd_sum(out);\n            if (thread_index_in_simdgroup == 0) {{\n              y[dv_idx] = static_cast<InT>(out);\n            }}\n          }} else {{\n            y[dv_idx] = static_cast<InT>(0);\n          }}\n          // Increment data pointers to next time step\n          q_ += Hk * Dk;\n          k_ += Hk * Dk;\n          v_ += Hv * Dv;\n          y += Hv * Dv;\n          {g_advance}\n          beta_ += Hv;\n        }}\n        for (int i = 0; i < n_per_t; ++i) {{\n          auto s_idx = n_per_t * dk_idx + i;\n          o_state[s_idx] = static_cast<StT>(state[i]);\n        }}\n    "
+    if round_state:
+        source = _gdn_state.derive_source(
+            source,
+            (
+                (
+                    "out = simd_sum(out);\n",
+                    "out = simd_sum(out);\n"
+                    "            for (int i = 0; i < n_per_t; ++i) {\n"
+                    "              state[i] = static_cast<float>(static_cast<StT>(state[i]));\n"
+                    "            }\n",
+                    1,
+                ),
+            ),
+            what="gated_delta_step",
+        )
     inputs = ["q", "k", "v", "g", "beta", "state_in", "T"]
     if has_mask:
         inputs.append("mask")
@@ -218,6 +240,8 @@ def _make_gated_delta_kernel(has_mask=False, vectorized=False):
         suffix += "_vec"
     if has_mask:
         suffix += "_mask"
+    if round_state:
+        suffix += "_st16"
     return mx.fast.metal_kernel(
         name=f"gated_delta_step{suffix}",
         input_names=inputs,
@@ -226,7 +250,7 @@ def _make_gated_delta_kernel(has_mask=False, vectorized=False):
     )
 
 
-def _make_gated_delta_packed_kernel():
+def _make_gated_delta_packed_kernel(round_state=False):
     """Make the scalar-gate Dk=128 prefill specialization.
 
     The generic kernel assigns one 32-lane SIMD-group to each value row. For
@@ -250,8 +274,25 @@ def _make_gated_delta_packed_kernel():
     if not mx.metal.is_available():
         return None
     source = "\n        constexpr int lanes_per_row = 4;\n        constexpr int rows_per_simdgroup = 32 / lanes_per_row;\n        constexpr int values_per_lane = Dk / lanes_per_row;\n        constexpr int partials_per_lane = values_per_lane / 4;\n\n        auto n = thread_position_in_grid.z;\n        auto b_idx = n / Hv;\n        auto hv_idx = n % Hv;\n        auto hk_idx = hv_idx / (Hv / Hk);\n\n        auto lane = thread_index_in_simdgroup;\n        auto row_in_simdgroup = lane / lanes_per_row;\n        auto lane_in_row = lane & (lanes_per_row - 1);\n        auto row_group = thread_position_in_grid.y;\n        auto dv_idx = row_group * rows_per_simdgroup + row_in_simdgroup;\n\n        // q, k: [B, T, Hk, Dk]\n        auto q_ = q + (b_idx * T * Hk + hk_idx) * Dk + lane_in_row * values_per_lane;\n        auto k_ = k + (b_idx * T * Hk + hk_idx) * Dk + lane_in_row * values_per_lane;\n\n        // v, y: [B, T, Hv, Dv]\n        auto v_ = v + (b_idx * T * Hv + hv_idx) * Dv;\n        y += (b_idx * T * Hv + hv_idx) * Dv;\n\n        // state_in, state_out: [B, Hv, Dv, Dk]\n        auto i_state = state_in + (n * Dv + dv_idx) * Dk + lane_in_row * values_per_lane;\n        auto o_state = state_out + (n * Dv + dv_idx) * Dk + lane_in_row * values_per_lane;\n\n        float state[values_per_lane];\n        for (int i = 0; i < values_per_lane; ++i) {\n          state[i] = static_cast<float>(i_state[i]);\n        }\n\n        // g, beta: [B, T, Hv]\n        auto g_ = g + b_idx * T * Hv;\n        auto beta_ = beta + b_idx * T * Hv;\n\n        for (int t = 0; t < T; ++t) {\n          float gt = static_cast<float>(g_[hv_idx]);\n\n          // Partials mirror the generic kernel: each 4-element chain is one\n          // original lane's sequential accumulation.\n          float part[partials_per_lane];\n          for (int pb = 0; pb < partials_per_lane; ++pb) {\n            float acc = 0.0f;\n            for (int i = 0; i < 4; ++i) {\n              int e = pb * 4 + i;\n              state[e] = state[e] * gt;\n              acc += state[e] * static_cast<float>(k_[e]);\n            }\n            part[pb] = acc;\n          }\n          // Butterfly levels xor 1,2,4 stay inside this lane (commutative\n          // pairwise tree); levels xor 8,16 become the row-group shuffles.\n          float kv_mem =\n              ((part[0] + part[1]) + (part[2] + part[3])) +\n              ((part[4] + part[5]) + (part[6] + part[7]));\n          kv_mem += simd_shuffle_xor(kv_mem, 1);\n          kv_mem += simd_shuffle_xor(kv_mem, 2);\n\n          auto delta =\n              (static_cast<float>(v_[dv_idx]) - kv_mem) *\n              static_cast<float>(beta_[hv_idx]);\n\n          for (int pb = 0; pb < partials_per_lane; ++pb) {\n            float acc = 0.0f;\n            for (int i = 0; i < 4; ++i) {\n              int e = pb * 4 + i;\n              state[e] = state[e] + static_cast<float>(k_[e]) * delta;\n              acc += state[e] * static_cast<float>(q_[e]);\n            }\n            part[pb] = acc;\n          }\n          float out =\n              ((part[0] + part[1]) + (part[2] + part[3])) +\n              ((part[4] + part[5]) + (part[6] + part[7]));\n          out += simd_shuffle_xor(out, 1);\n          out += simd_shuffle_xor(out, 2);\n          if (lane_in_row == 0) {\n            y[dv_idx] = static_cast<InT>(out);\n          }\n\n          q_ += Hk * Dk;\n          k_ += Hk * Dk;\n          v_ += Hv * Dv;\n          y += Hv * Dv;\n          g_ += Hv;\n          beta_ += Hv;\n        }\n\n        for (int i = 0; i < values_per_lane; ++i) {\n          o_state[i] = static_cast<StT>(state[i]);\n        }\n    "
+    name = "gated_delta_step_packed_btree"
+    if round_state:
+        source = _gdn_state.derive_source(
+            source,
+            (
+                (
+                    "out += simd_shuffle_xor(out, 2);\n",
+                    "out += simd_shuffle_xor(out, 2);\n"
+                    "          for (int i = 0; i < values_per_lane; ++i) {\n"
+                    "            state[i] = static_cast<float>(static_cast<StT>(state[i]));\n"
+                    "          }\n",
+                    1,
+                ),
+            ),
+            what="gated_delta_step_packed",
+        )
+        name += "_st16"
     return mx.fast.metal_kernel(
-        name="gated_delta_step_packed_btree",
+        name=name,
         input_names=["q", "k", "v", "g", "beta", "state_in", "T"],
         output_names=["y", "state_out"],
         source=source,
@@ -265,6 +306,18 @@ _gated_delta_kernel_vec_masked = _make_gated_delta_kernel(
     has_mask=True, vectorized=True
 )
 _gated_delta_kernel_packed = _make_gated_delta_packed_kernel()
+# fp16 storage class: the same kernels with the per-token state rounding.
+_gated_delta_kernel_st16 = _make_gated_delta_kernel(round_state=True)
+_gated_delta_kernel_masked_st16 = _make_gated_delta_kernel(
+    has_mask=True, round_state=True
+)
+_gated_delta_kernel_vec_st16 = _make_gated_delta_kernel(
+    vectorized=True, round_state=True
+)
+_gated_delta_kernel_vec_masked_st16 = _make_gated_delta_kernel(
+    has_mask=True, vectorized=True, round_state=True
+)
+_gated_delta_kernel_packed_st16 = _make_gated_delta_packed_kernel(round_state=True)
 
 
 @mx.compile
@@ -327,7 +380,12 @@ def _gated_delta_kernel_impl(
     (Hv, Dv) = v.shape[2:]
     input_type = q.dtype
     state_type = state.dtype
-    widen = _readout_needs_widening(input_type, state_type)
+    st16 = state_type == mx.float16
+    # The fp16 storage class computes in fp32, so its readout keeps the fp32
+    # route's widening decision.
+    widen = _readout_needs_widening(
+        input_type, mx.float32 if st16 else state_type
+    )
     readout_type = mx.float32 if widen else input_type
     packed_eligible = (
         mask is None
@@ -335,29 +393,37 @@ def _gated_delta_kernel_impl(
         and (Dk == 128)
         and (Dv % 8 == 0)
         and (g.dtype == mx.float32)
-        and (state.dtype == mx.float32)
+        and (state.dtype in (mx.float32, mx.float16))
     )
     if packed_eligible and allow_packed and _ENABLE_GDN_PACKED:
-        kernel = _gated_delta_kernel_packed
+        kernel = _gated_delta_kernel_packed_st16 if st16 else _gated_delta_kernel_packed
         inputs = [q, k, v, g, beta, state, T]
         grid = (32, Dv // 8, B * Hv)
         threadgroup = (32, 2, 1)
     elif g.ndim == 4:
-        kernel = _gated_delta_kernel_vec
+        kernel = _gated_delta_kernel_vec_st16 if st16 else _gated_delta_kernel_vec
         inputs = [q, k, v, g, beta, state, T]
         if mask is not None:
-            kernel = _gated_delta_kernel_vec_masked
+            kernel = (
+                _gated_delta_kernel_vec_masked_st16
+                if st16
+                else _gated_delta_kernel_vec_masked
+            )
             inputs.append(mask)
         grid = (32, Dv, B * Hv)
         threadgroup = (32, 4, 1)
     else:
-        kernel = _gated_delta_kernel
+        kernel = _gated_delta_kernel_st16 if st16 else _gated_delta_kernel
         inputs = [q, k, v, g, beta, state, T]
         if mask is not None:
-            kernel = _gated_delta_kernel_masked
+            kernel = (
+                _gated_delta_kernel_masked_st16 if st16 else _gated_delta_kernel_masked
+            )
             inputs.append(mask)
         grid = (32, Dv, B * Hv)
         threadgroup = (32, 4, 1)
+    if st16:
+        _gdn_state.STATS["kernel_launches"] += 1
     (y, new_state) = kernel(
         inputs=inputs,
         template=[
@@ -374,7 +440,7 @@ def _gated_delta_kernel_impl(
         output_dtypes=[readout_type, state_type],
     )
     if widen:
-        y = _cast_readout(y, input_type, state_type)
+        y = _cast_readout(y, input_type, mx.float32 if st16 else state_type)
     return (y, new_state)
 
 
@@ -420,6 +486,11 @@ def gated_delta_ops(
     if (repeat_factor := (Hv // Hk)) > 1:
         q = mx.repeat(q, repeat_factor, -2)
         k = mx.repeat(k, repeat_factor, -2)
+    # fp16 storage class: each step loads fp16, computes in fp32 and stores
+    # fp16 (the kernels' per-token rounding).
+    stored = state.dtype if state.dtype == mx.float16 else None
+    if stored is not None:
+        _gdn_state.STATS["ops_calls"] += 1
     ys = []
     for t in range(T):
         (y, state) = _gated_delta_step_ops(
@@ -428,9 +499,11 @@ def gated_delta_ops(
             v[:, t],
             g[:, t],
             beta[:, t],
-            state,
+            state if stored is None else state.astype(mx.float32),
             None if mask is None else mask[:, t],
         )
+        if stored is not None:
+            state = state.astype(stored)
         ys.append(y)
     y = mx.stack(ys, axis=1)
     return (y, state)
@@ -471,7 +544,11 @@ def gated_delta_update(
     prefill_chunk_size: int = 0,
     prefill_segment_rows: int = 256,
     prefill_stats=None,
+    state_dtype=None,
 ) -> Tuple[mx.array, mx.array]:
+    """``state_dtype``: the layer's storage class (``gdn_state``); ``None``
+    is fp32.  A fresh state is created in it and a carried state of the
+    other class is refused."""
     beta = gate_sigmoid(b) if beta_input_dtype else gate_sigmoid(b.astype(mx.float32))
     if lower_bound is None:
         g = compute_g(A_log, a, dt_bias)
@@ -480,7 +557,9 @@ def gated_delta_update(
     if state is None:
         (B, _, Hk, Dk) = q.shape
         (Hv, Dv) = v.shape[-2:]
-        state = mx.zeros((B, Hv, Dv, Dk), dtype=mx.float32)
+        state = mx.zeros((B, Hv, Dv, Dk), dtype=state_dtype or mx.float32)
+    else:
+        _gdn_state.check_state(state, state_dtype)
     if not use_kernel or mx.default_device() != mx.gpu or (not mx.metal.is_available()):
         return gated_delta_ops(q, k, v, g, beta, state, mask)
     if prefill_chunk_size:

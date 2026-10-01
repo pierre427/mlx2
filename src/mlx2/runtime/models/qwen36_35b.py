@@ -13,6 +13,7 @@ import mlx.nn as nn
 from . import qwen3_next
 from .qwen3_5 import GatedDeltaNet as ReferenceGatedDeltaNet, TextModelArgs
 from .qwen3_next import Qwen3NextSparseMoeBlock, transform_moe_weights
+from .gdn_state import check_state
 from .qwen4_fused_gdn import (
     admit_qwen4_fused_gdn_decode,
     fused_gdn_runtime_supported,
@@ -59,6 +60,9 @@ class GatedDeltaNet(ReferenceGatedDeltaNet):
         return None
 
     def _try_fused_decode(self, qkv, z, b, a, mask, cache):
+        if cache is not None:
+            # A state of the class this layer did not select never runs.
+            check_state(cache[1], getattr(self, "_gdn_state_dtype", None))
         if self.fused_gdn_decode_mode == "stock":
             return None
         if qkv.shape[1] > 1 and not bool(getattr(cache, "speculating", False)):
@@ -100,7 +104,14 @@ class GatedDeltaNet(ReferenceGatedDeltaNet):
         if refusal is not None:
             return self._fallback(refusal)
         try:
-            threadgroup_y = probe_qwen4_fused_gdn_decode(qkv.dtype)
+            threadgroup_y = probe_qwen4_fused_gdn_decode(
+                qkv.dtype,
+                **(
+                    {"state_dtype": mx.float16}
+                    if cache[1].dtype == mx.float16
+                    else {}
+                ),
+            )
             if threadgroup_y is None:
                 return self._fallback("Metal kernel probe declined")
             (out, conv_state, recurrent_state) = qwen4_fused_gdn_decode(

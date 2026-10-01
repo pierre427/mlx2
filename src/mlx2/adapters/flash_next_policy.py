@@ -166,9 +166,19 @@ class FlashNextPolicy:
     # (qualification/runs/omlx-w2a-moe-window-20260930).  "off" restores the
     # stock routing ops and is the only value absent from receipts.
     moe_topk_fold: str = "launch"
+    # Storage class of the GDN recurrent state (runtime/models/gdn_state.py):
+    # "float16" loads/stores fp16 and computes in fp32, rounding the state
+    # after every token, in every GDN kernel (fused decode/verify/replay and
+    # the stock chain).  Changes numerics (never bit-exact to fp32), so it is
+    # opt-in and UNQUALIFIED; it halves state, snapshot and checkpoint bytes.
+    # Not an environment switch: bound to the layers at load, entered in the
+    # APCv2 cache layout fingerprint and in receipts only when "float16".
+    gdn_state_dtype: str = "float32"
 
     def __post_init__(self):
         validate_self_mtp_num_draft(self.num_draft)
+        if self.gdn_state_dtype not in ("float32", "float16"):
+            raise ValueError("gdn_state_dtype must be float32 or float16")
         for name in ("shared_qsa_suffix", "indexed_qsa"):
             if getattr(self, name) not in {"auto", "on", "off"}:
                 raise ValueError(f"{name} must be auto, on, or off")
@@ -310,6 +320,8 @@ class FlashNextPolicy:
             del values["moe_topk_fold"]
         if self.prefill_depth_budget is None:
             del values["prefill_depth_budget"]
+        if self.gdn_state_dtype == "float32":
+            del values["gdn_state_dtype"]
         return values
 
     def moe_window_consumers(self):

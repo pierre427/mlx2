@@ -38,9 +38,12 @@ class Qwen38CacheBudget:
     # growing cache reallocates and copies while the old buffer is live.
     prefill_chunk_transient_gib: float = 2.0
     prefill_chunk_rows: int = 2048
+    # Recurrent state under the GDN storage class: 2 for the fp16 class
+    # (runtime/models/gdn_state.py); conv state stays at ``item_bytes``.
+    recurrent_state_bytes: int = 4
 
     @classmethod
-    def from_config(cls, config, *, mtp):
+    def from_config(cls, config, *, mtp, recurrent_state_bytes=4):
         layer_count = int(config["num_hidden_layers"])
         interval = int(config["full_attention_interval"])
         if layer_count < 1 or interval < 1 or layer_count % interval:
@@ -65,7 +68,10 @@ class Qwen38CacheBudget:
             recurrent_key_dim=int(config["linear_key_head_dim"]),
             recurrent_value_dim=int(config["linear_value_head_dim"]),
             conv_kernel=int(config["linear_conv_kernel_dim"]),
+            recurrent_state_bytes=recurrent_state_bytes,
         )
+        if result.recurrent_state_bytes not in (2, 4):
+            raise ValueError("recurrent_state_bytes must be 2 or 4")
         numeric = asdict(result)
         if any(
             (not math.isfinite(value)) or value < 0
@@ -98,8 +104,10 @@ class Qwen38CacheBudget:
             2 * self.recurrent_key_heads * self.recurrent_key_dim
             + self.recurrent_heads * self.recurrent_value_dim
         )
-        per_layer = recurrent + max(0, self.conv_kernel - 1) * conv_dim
-        return self.recurrent_layers * per_layer * self.item_bytes
+        return self.recurrent_layers * (
+            recurrent * self.recurrent_state_bytes
+            + max(0, self.conv_kernel - 1) * conv_dim * self.item_bytes
+        )
 
     @property
     def speculative_scratch_bytes(self):
@@ -191,9 +199,13 @@ class Qwen38CacheBudget:
         )
 
     def as_dict(self):
+        values = asdict(self)
+        if self.recurrent_state_bytes == 4:
+            # Default geometry receipts stay byte-identical.
+            del values["recurrent_state_bytes"]
         return {
             "schema": "qwen38-cache-geometry-v1",
-            **asdict(self),
+            **values,
             "fixed_bytes": self.fixed_bytes,
             "resident_fixed_bytes": self.resident_fixed_bytes,
             "speculative_scratch_bytes": self.speculative_scratch_bytes,

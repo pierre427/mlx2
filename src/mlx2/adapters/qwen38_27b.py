@@ -13,7 +13,7 @@ from pathlib import Path
 
 from ..contracts import Capability, ModelDescriptor, StatePlane
 from .external_draft_policy import ExternalDraftAdapterMixin
-from .flash_next import FlashNextAdapter
+from .flash_next import FlashNextAdapter, gdn_state_diagnostics
 from .mtp_depth_cap import validate_self_mtp_num_draft
 from ..process_env import PROCESS_NUMERICS
 
@@ -434,6 +434,11 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
         self.weight_stream = None
         from .flash_next_policy import FlashNextPolicy
 
+        # GDN recurrent-state storage class (runtime/models/gdn_state.py);
+        # applies to the target on every route, external draft included.
+        gdn_state_dtype = FlashNextPolicy(
+            gdn_state_dtype=policy.pop("gdn_state_dtype", "float32")
+        ).gdn_state_dtype
         prefill_policy = FlashNextPolicy.from_mapping(
             {
                 key: policy[key]
@@ -577,7 +582,7 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
             self._finish_load(
                 weights, prefill_policy, fp32_head, path, config,
                 AutoTokenizer, TokenizerWrapper, BPEStreamingDetokenizer,
-                eager_dispatch,
+                eager_dispatch, gdn_state_dtype,
             )
         except BaseException:
             if self.weight_stream is not None:
@@ -605,6 +610,7 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
     def _finish_load(
         self, weights, prefill_policy, fp32_head, path, config,
         AutoTokenizer, TokenizerWrapper, BPEStreamingDetokenizer, eager_dispatch,
+        gdn_state_dtype,
     ):
         """Everything after the weights load: installs, probe, tokenizer.
 
@@ -648,6 +654,7 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
         weights.clear()
         mx.clear_cache()
         self._record_load_dtype()
+        self._select_gdn_state(gdn_state_dtype)
         tokenizer = AutoTokenizer.from_pretrained(
             path, local_files_only=True, trust_remote_code=False
         )
@@ -722,11 +729,30 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
         return standard_kv_quantization_operations(group_size=64)
 
     def cache_budget(self, *, mtp):
+        from .flash_next import gdn_state_bytes
         from .qwen38_memory import Qwen38CacheBudget
 
         return Qwen38CacheBudget.from_config(
-            self.model.args.text_config, mtp=mtp
+            self.model.args.text_config,
+            mtp=mtp,
+            recurrent_state_bytes=gdn_state_bytes(self),
         )
+
+    def _select_gdn_state(self, value):
+        """Bind the GDN state storage class; fp16 also gets its own APCv2 layout.
+
+        ``float32`` installs nothing and keeps the layout, so default
+        receipts and cache identities are unchanged.
+        """
+        from ..runtime.models.gdn_state import (
+            install_state_dtype,
+            layout_with_state_dtype,
+        )
+
+        self.gdn_state = (
+            install_state_dtype(self.model, value) if value != "float32" else None
+        )
+        self.layout = layout_with_state_dtype(self.layout, value)
 
     def _record_load_dtype(self):
         """Record the float32-norm cast receipt and the load dtype check."""
@@ -793,4 +819,5 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
                 else {}
             ),
             **eager_dispatch_diagnostics(self),
+            **gdn_state_diagnostics(self),
         }

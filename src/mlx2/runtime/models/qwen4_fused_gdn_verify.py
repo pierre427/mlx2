@@ -24,7 +24,9 @@ from .qwen4_fused_gdn import (
     admit_rollback_span,
     fused_gdn_runtime_supported,
     probe_qwen4_fused_gdn_decode,
+    st16_source,
 )
+from .gdn_state import STATS as _GDN_STATS, derive_source
 
 from .import_env import snapshot as _import_env_snapshot
 
@@ -187,8 +189,9 @@ def admit_qwen4_fused_gdn_verify(
     for name in ("z", "a", "b", "conv_state", "conv_weight", "dt_bias", "norm_weight"):
         if _dtype(values[name]) != value_dtype:
             return FusedGdnAdmission(False, f"{name} dtype {_dtype(values[name])}")
-    if _dtype(recurrent_state) != mx.float32:
-        return FusedGdnAdmission(False, "recurrent_state must be float32")
+    if _dtype(recurrent_state) not in (mx.float32, mx.float16):
+        # fp16 is the per-token-rounded storage class (gdn_state).
+        return FusedGdnAdmission(False, "recurrent_state must be float32 or float16")
     if _dtype(A_log) not in (value_dtype, mx.float32):
         return FusedGdnAdmission(False, f"A_log dtype {_dtype(A_log)}")
     return FusedGdnAdmission(True, "eligible")
@@ -336,10 +339,53 @@ def _derive_reconstruct_dynamic_source() -> str:
 _RECONSTRUCT_DYNAMIC_SOURCE = _derive_reconstruct_dynamic_source()
 
 
+def _reconstruct_st16_source(source: str, what: str) -> str:
+    """fp16 storage class of a tape replay: half state, per-step rounding.
+
+    The verify kernel rounds its register state after every token's update;
+    the replay applies the same two steps and the same rounding, so the
+    rebuilt state is the verify kernel's fp16 snapshot bit for bit.
+    """
+    return derive_source(
+        source,
+        (
+            ("device const float* si = recurrent_state", "device const half* si = recurrent_state", 1),
+            ("device float* so = recurrent_state_out", "device half* so = recurrent_state_out", 1),
+            (
+                "        st = st + key * correction;\n",
+                "        st = st + key * correction;\n"
+                "        st = float(static_cast<half>(st));\n",
+                1,
+            ),
+            ("so[(size_t)dv * DK + dk] = st;", "so[(size_t)dv * DK + dk] = static_cast<half>(st);", 1),
+        ),
+        what=what,
+    )
+
+
+_SOURCE_ST16 = st16_source(_SOURCE, what="qwen4_fused_gdn_verify", state_dst=1)
+_CATCHUP_SOURCE_ST16 = st16_source(_CATCHUP_SOURCE, what="qwen4_fused_gdn_catchup")
+_REPLAY_SOURCE_ST16 = st16_source(_REPLAY_SOURCE, what="qwen4_fused_gdn_replay_verify")
+_RECONSTRUCT_SOURCE_ST16 = _reconstruct_st16_source(
+    _RECONSTRUCT_SOURCE, "qwen4_fused_gdn_reconstruct"
+)
+_RECONSTRUCT_DYNAMIC_SOURCE_ST16 = _reconstruct_st16_source(
+    _RECONSTRUCT_DYNAMIC_SOURCE, "qwen4_fused_gdn_reconstruct_dynamic"
+)
+
+
+def _st16(recurrent_state, counter: str) -> bool:
+    """Whether ``recurrent_state`` is the fp16 storage class; counts it."""
+    if recurrent_state.dtype != mx.float16:
+        return False
+    _GDN_STATS[counter] += 1
+    return True
+
+
 @lru_cache(maxsize=None)
-def _kernel():
+def _kernel(st16: bool = False):
     return mx.fast.metal_kernel(
-        name="qwen4_fused_gdn_verify",
+        name="qwen4_fused_gdn_verify" + ("_st16" if st16 else ""),
         input_names=[
             "qkv",
             "z",
@@ -361,15 +407,15 @@ def _kernel():
             "conv_snapshots",
         ],
         header=_HEADER,
-        source=_SOURCE,
+        source=_SOURCE_ST16 if st16 else _SOURCE,
         ensure_row_contiguous=True,
     )
 
 
 @lru_cache(maxsize=None)
-def _catchup_kernel():
+def _catchup_kernel(st16: bool = False):
     return mx.fast.metal_kernel(
-        name="qwen4_fused_gdn_catchup",
+        name="qwen4_fused_gdn_catchup" + ("_st16" if st16 else ""),
         input_names=[
             "qkv",
             "z",
@@ -385,15 +431,15 @@ def _catchup_kernel():
         ],
         output_names=["output", "conv_state_out", "recurrent_state_out"],
         header=_HEADER,
-        source=_CATCHUP_SOURCE,
+        source=_CATCHUP_SOURCE_ST16 if st16 else _CATCHUP_SOURCE,
         ensure_row_contiguous=True,
     )
 
 
 @lru_cache(maxsize=None)
-def _replay_verify_kernel():
+def _replay_verify_kernel(st16: bool = False):
     return mx.fast.metal_kernel(
-        name="qwen4_fused_gdn_replay_verify",
+        name="qwen4_fused_gdn_replay_verify" + ("_st16" if st16 else ""),
         input_names=[
             "qkv",
             "z",
@@ -416,15 +462,15 @@ def _replay_verify_kernel():
             "replay_decay",
         ],
         header=_HEADER,
-        source=_REPLAY_SOURCE,
+        source=_REPLAY_SOURCE_ST16 if st16 else _REPLAY_SOURCE,
         ensure_row_contiguous=True,
     )
 
 
 @lru_cache(maxsize=None)
-def _reconstruct_kernel():
+def _reconstruct_kernel(st16: bool = False):
     return mx.fast.metal_kernel(
-        name="qwen4_fused_gdn_reconstruct",
+        name="qwen4_fused_gdn_reconstruct" + ("_st16" if st16 else ""),
         input_names=[
             "recurrent_state",
             "replay_keys",
@@ -432,15 +478,15 @@ def _reconstruct_kernel():
             "replay_decay",
         ],
         output_names=["recurrent_state_out"],
-        source=_RECONSTRUCT_SOURCE,
+        source=_RECONSTRUCT_SOURCE_ST16 if st16 else _RECONSTRUCT_SOURCE,
         ensure_row_contiguous=True,
     )
 
 
 @lru_cache(maxsize=None)
-def _reconstruct_dynamic_kernel():
+def _reconstruct_dynamic_kernel(st16: bool = False):
     return mx.fast.metal_kernel(
-        name="qwen4_fused_gdn_reconstruct_dynamic",
+        name="qwen4_fused_gdn_reconstruct_dynamic" + ("_st16" if st16 else ""),
         input_names=[
             "recurrent_state",
             "replay_keys",
@@ -449,7 +495,9 @@ def _reconstruct_dynamic_kernel():
             "accepted",
         ],
         output_names=["recurrent_state_out"],
-        source=_RECONSTRUCT_DYNAMIC_SOURCE,
+        source=(
+            _RECONSTRUCT_DYNAMIC_SOURCE_ST16 if st16 else _RECONSTRUCT_DYNAMIC_SOURCE
+        ),
         ensure_row_contiguous=True,
     )
 
@@ -485,7 +533,8 @@ def qwen4_fused_gdn_verify(
         raise ValueError(
             f"unsupported verify width {steps}; expected 2..{MAX_VERIFY_WIDTH_PROVEN}"
         )
-    outputs = _kernel()(
+    st16 = _st16(recurrent_state, "fused_verify")
+    outputs = _kernel(st16)(
         inputs=[
             qkv,
             z,
@@ -519,7 +568,10 @@ def qwen4_fused_gdn_verify(
             (1, steps - 1, NUM_VALUE_HEADS, VALUE_HEAD_DIM, KEY_HEAD_DIM),
             (1, steps - 1, CONV_KERNEL - 1, CONV_DIM),
         ],
-        output_dtypes=[qkv.dtype, qkv.dtype, mx.float32, mx.float32, qkv.dtype],
+        # Snapshots are stored in the state's class (fp16: half the bytes).
+        output_dtypes=[
+            qkv.dtype, qkv.dtype, recurrent_state.dtype, recurrent_state.dtype, qkv.dtype
+        ],
     )
     return tuple(outputs)
 
@@ -549,7 +601,8 @@ def qwen4_fused_gdn_replay_verify(
         raise ValueError(
             f"unsupported verify width {steps}; expected 2..{MAX_VERIFY_WIDTH_PROVEN}"
         )
-    outputs = _replay_verify_kernel()(
+    st16 = _st16(recurrent_state, "fused_replay_verify")
+    outputs = _replay_verify_kernel(st16)(
         inputs=[
             qkv,
             z,
@@ -587,7 +640,7 @@ def qwen4_fused_gdn_replay_verify(
         output_dtypes=[
             qkv.dtype,
             qkv.dtype,
-            mx.float32,
+            recurrent_state.dtype,
             qkv.dtype,
             mx.float32,
             mx.float32,
@@ -642,7 +695,8 @@ def qwen4_fused_gdn_reconstruct(
     accepted = validate_qwen4_gdn_replay_acceptance(
         accepted, int(replay_decay.shape[1])
     )
-    return _reconstruct_kernel()(
+    st16 = _st16(recurrent_state, "fused_reconstruct")
+    return _reconstruct_kernel(st16)(
         inputs=[recurrent_state, replay_keys, replay_corrections, replay_decay],
         template=[
             ("T", replay_keys.dtype),
@@ -659,7 +713,7 @@ def qwen4_fused_gdn_reconstruct(
         output_shapes=[
             (1, NUM_VALUE_HEADS, VALUE_HEAD_DIM, KEY_HEAD_DIM),
         ],
-        output_dtypes=[mx.float32],
+        output_dtypes=[recurrent_state.dtype],
     )[0]
 
 
@@ -688,7 +742,8 @@ def qwen4_fused_gdn_catchup(
         raise ValueError(
             f"unsupported catch-up width {steps}; expected 2..{MAX_VERIFY_WIDTH_PROVEN}"
         )
-    outputs = _catchup_kernel()(
+    st16 = _st16(recurrent_state, "fused_catchup")
+    outputs = _catchup_kernel(st16)(
         inputs=[
             qkv,
             z,
@@ -720,7 +775,7 @@ def qwen4_fused_gdn_catchup(
             (1, CONV_KERNEL - 1, CONV_DIM),
             (1, NUM_VALUE_HEADS, VALUE_HEAD_DIM, KEY_HEAD_DIM),
         ],
-        output_dtypes=[qkv.dtype, qkv.dtype, mx.float32],
+        output_dtypes=[qkv.dtype, qkv.dtype, recurrent_state.dtype],
     )
     return tuple(outputs)
 
@@ -750,7 +805,8 @@ def _reconstruct_dynamic(
             f"accepted count must be an integer array, got {accepted.dtype}"
         )
     accepted = mx.broadcast_to(accepted.reshape(-1).astype(mx.int32), (rows,))
-    return _reconstruct_dynamic_kernel()(
+    st16 = _st16(recurrent_state, "fused_reconstruct_dynamic")
+    return _reconstruct_dynamic_kernel(st16)(
         inputs=[
             recurrent_state,
             replay_keys,
@@ -773,7 +829,7 @@ def _reconstruct_dynamic(
         output_shapes=[
             (rows, NUM_VALUE_HEADS, VALUE_HEAD_DIM, KEY_HEAD_DIM),
         ],
-        output_dtypes=[mx.float32],
+        output_dtypes=[recurrent_state.dtype],
     )[0]
 
 
@@ -784,8 +840,13 @@ _PROBED_DYNAMIC_REPLAY_STEPS: dict[int, Optional[int]] = {}
 _PROBE_LOCK = Lock()
 
 
+def _probe_key(steps: int, state_dtype):
+    """fp32 probes keep their bare-width keys; the fp16 class is keyed apart."""
+    return (steps, "float16") if state_dtype == mx.float16 else steps
+
+
 def probe_qwen4_fused_gdn_replay_verify(
-    dtype, steps: int, *, dynamic_accept: bool = False
+    dtype, steps: int, *, dynamic_accept: bool = False, state_dtype=None
 ) -> Optional[int]:
     """Compile the compact verify and every reconstruction it can dispatch.
 
@@ -793,21 +854,22 @@ def probe_qwen4_fused_gdn_replay_verify(
     ``dynamic_accept`` compiles the single device-count kernel instead.
     """
     steps = int(steps)
+    key = _probe_key(steps, state_dtype)
     probed = _PROBED_DYNAMIC_REPLAY_STEPS if dynamic_accept else _PROBED_REPLAY_STEPS
-    if steps in probed:
-        return probed[steps]
+    if key in probed:
+        return probed[key]
     with _PROBE_LOCK:
-        if steps in probed:
-            return probed[steps]
+        if key in probed:
+            return probed[key]
         if (
             not 2 <= steps <= MAX_VERIFY_WIDTH_PROVEN
             or not fused_gdn_runtime_supported()
         ):
-            probed[steps] = None
+            probed[key] = None
             return None
-        start = probe_qwen4_fused_gdn_decode(dtype)
+        start = probe_qwen4_fused_gdn_decode(dtype, state_dtype=state_dtype)
         if start is None:
-            probed[steps] = None
+            probed[key] = None
             return None
         qkv = mx.zeros((1, steps, CONV_DIM), dtype=dtype)
         z = mx.zeros((1, steps, VALUE_DIM), dtype=dtype)
@@ -815,7 +877,8 @@ def probe_qwen4_fused_gdn_replay_verify(
         conv_state = mx.zeros((1, CONV_KERNEL - 1, CONV_DIM), dtype=dtype)
         conv_weight = mx.zeros((CONV_DIM, CONV_KERNEL, 1), dtype=dtype)
         recurrent_state = mx.zeros(
-            (1, NUM_VALUE_HEADS, VALUE_HEAD_DIM, KEY_HEAD_DIM), dtype=mx.float32
+            (1, NUM_VALUE_HEADS, VALUE_HEAD_DIM, KEY_HEAD_DIM),
+            dtype=state_dtype or mx.float32,
         )
         vector = mx.zeros((NUM_VALUE_HEADS,), dtype=dtype)
         A_log = mx.zeros((NUM_VALUE_HEADS,), dtype=mx.float32)
@@ -869,11 +932,13 @@ def probe_qwen4_fused_gdn_replay_verify(
                     exc,
                 )
                 continue
-        probed[steps] = result
+        probed[key] = result
         return result
 
 
-def probe_qwen4_fused_gdn_verify(dtype, steps: int) -> Optional[int]:
+def probe_qwen4_fused_gdn_verify(
+    dtype, steps: int, *, state_dtype=None
+) -> Optional[int]:
     """Compile-and-run one verify specialization once per width.
 
     The decode probe's published ``threadgroup_y`` is tried first, then every
@@ -881,20 +946,21 @@ def probe_qwen4_fused_gdn_verify(dtype, steps: int) -> Optional[int]:
     all fail stays on the stock path. Cached widths are read lock-free.
     """
     steps = int(steps)
-    if steps in _PROBED_STEPS:
-        return _PROBED_STEPS[steps]
+    key = _probe_key(steps, state_dtype)
+    if key in _PROBED_STEPS:
+        return _PROBED_STEPS[key]
     with _PROBE_LOCK:
-        if steps in _PROBED_STEPS:
-            return _PROBED_STEPS[steps]
+        if key in _PROBED_STEPS:
+            return _PROBED_STEPS[key]
         if (
             not 2 <= steps <= MAX_VERIFY_WIDTH_PROVEN
             or not fused_gdn_runtime_supported()
         ):
-            _PROBED_STEPS[steps] = None
+            _PROBED_STEPS[key] = None
             return None
-        start = probe_qwen4_fused_gdn_decode(dtype)
+        start = probe_qwen4_fused_gdn_decode(dtype, state_dtype=state_dtype)
         if start is None:
-            _PROBED_STEPS[steps] = None
+            _PROBED_STEPS[key] = None
             return None
         qkv = mx.zeros((1, steps, CONV_DIM), dtype=dtype)
         z = mx.zeros((1, steps, VALUE_DIM), dtype=dtype)
@@ -902,7 +968,8 @@ def probe_qwen4_fused_gdn_verify(dtype, steps: int) -> Optional[int]:
         conv_state = mx.zeros((1, CONV_KERNEL - 1, CONV_DIM), dtype=dtype)
         conv_weight = mx.zeros((CONV_DIM, CONV_KERNEL, 1), dtype=dtype)
         recurrent_state = mx.zeros(
-            (1, NUM_VALUE_HEADS, VALUE_HEAD_DIM, KEY_HEAD_DIM), dtype=mx.float32
+            (1, NUM_VALUE_HEADS, VALUE_HEAD_DIM, KEY_HEAD_DIM),
+            dtype=state_dtype or mx.float32,
         )
         vector = mx.zeros((NUM_VALUE_HEADS,), dtype=dtype)
         A_log = mx.zeros((NUM_VALUE_HEADS,), dtype=mx.float32)
@@ -940,27 +1007,30 @@ def probe_qwen4_fused_gdn_verify(dtype, steps: int) -> Optional[int]:
                     exc,
                 )
                 continue
-        _PROBED_STEPS[steps] = result
+        _PROBED_STEPS[key] = result
         return result
 
 
-def probe_qwen4_fused_gdn_catchup(dtype, steps: int) -> Optional[int]:
+def probe_qwen4_fused_gdn_catchup(
+    dtype, steps: int, *, state_dtype=None
+) -> Optional[int]:
     """Compile-and-run the no-snapshot catch-up specialization once."""
     steps = int(steps)
-    if steps in _PROBED_CATCHUP_STEPS:
-        return _PROBED_CATCHUP_STEPS[steps]
+    key = _probe_key(steps, state_dtype)
+    if key in _PROBED_CATCHUP_STEPS:
+        return _PROBED_CATCHUP_STEPS[key]
     with _PROBE_LOCK:
-        if steps in _PROBED_CATCHUP_STEPS:
-            return _PROBED_CATCHUP_STEPS[steps]
+        if key in _PROBED_CATCHUP_STEPS:
+            return _PROBED_CATCHUP_STEPS[key]
         if (
             not 2 <= steps <= MAX_VERIFY_WIDTH_PROVEN
             or not fused_gdn_runtime_supported()
         ):
-            _PROBED_CATCHUP_STEPS[steps] = None
+            _PROBED_CATCHUP_STEPS[key] = None
             return None
-        start = probe_qwen4_fused_gdn_decode(dtype)
+        start = probe_qwen4_fused_gdn_decode(dtype, state_dtype=state_dtype)
         if start is None:
-            _PROBED_CATCHUP_STEPS[steps] = None
+            _PROBED_CATCHUP_STEPS[key] = None
             return None
         qkv = mx.zeros((1, steps, CONV_DIM), dtype=dtype)
         z = mx.zeros((1, steps, VALUE_DIM), dtype=dtype)
@@ -968,7 +1038,8 @@ def probe_qwen4_fused_gdn_catchup(dtype, steps: int) -> Optional[int]:
         conv_state = mx.zeros((1, CONV_KERNEL - 1, CONV_DIM), dtype=dtype)
         conv_weight = mx.zeros((CONV_DIM, CONV_KERNEL, 1), dtype=dtype)
         recurrent_state = mx.zeros(
-            (1, NUM_VALUE_HEADS, VALUE_HEAD_DIM, KEY_HEAD_DIM), dtype=mx.float32
+            (1, NUM_VALUE_HEADS, VALUE_HEAD_DIM, KEY_HEAD_DIM),
+            dtype=state_dtype or mx.float32,
         )
         vector = mx.zeros((NUM_VALUE_HEADS,), dtype=dtype)
         A_log = mx.zeros((NUM_VALUE_HEADS,), dtype=mx.float32)
@@ -1006,5 +1077,5 @@ def probe_qwen4_fused_gdn_catchup(dtype, steps: int) -> Optional[int]:
                     exc,
                 )
                 continue
-        _PROBED_CATCHUP_STEPS[steps] = result
+        _PROBED_CATCHUP_STEPS[key] = result
         return result

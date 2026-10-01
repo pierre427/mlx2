@@ -291,13 +291,21 @@ class Qwen3635BA3BAdapter(Qwen3827BAdapter):
         if execution_policy is not None and not isinstance(execution_policy, dict):
             raise ValueError("execution policy must be a JSON object")
         policy = {} if execution_policy is None else dict(execution_policy)
-        if set(policy) - {"num_draft", *KERNEL_POLICY_ENV, *EAGER_DISPATCH_POLICY_KEYS}:
+        if set(policy) - {
+            "num_draft", "gdn_state_dtype", *KERNEL_POLICY_ENV, *EAGER_DISPATCH_POLICY_KEYS
+        }:
             raise ValueError(
-                "Qwen3.6 execution policy supports only num_draft, the "
-                "eager-dispatch keys and the kernel switches "
+                "Qwen3.6 execution policy supports only num_draft, gdn_state_dtype, "
+                "the eager-dispatch keys and the kernel switches "
                 + ", ".join(sorted(KERNEL_POLICY_ENV))
             )
         eager_dispatch = eager_dispatch_policy(policy, self.default_eager_dispatch_stride)
+        from .flash_next_policy import FlashNextPolicy
+
+        # GDN recurrent-state storage class (runtime/models/gdn_state.py).
+        gdn_state_dtype = FlashNextPolicy(
+            gdn_state_dtype=policy.pop("gdn_state_dtype", "float32")
+        ).gdn_state_dtype
         self._num_draft = validate_self_mtp_num_draft(policy.get("num_draft", 2))
         self._kernels = {}
         for key in KERNEL_POLICY_ENV:
@@ -340,6 +348,7 @@ class Qwen3635BA3BAdapter(Qwen3827BAdapter):
                 eager_dispatch,
             )
             self._record_load_dtype()
+            self._select_gdn_state(gdn_state_dtype)
             self._select_routed_candidate()
             tokenizer = AutoTokenizer.from_pretrained(path, local_files_only=True, trust_remote_code=False)
             # transformers' Qwen2Tokenizer drops the declared combining-mark split rule.

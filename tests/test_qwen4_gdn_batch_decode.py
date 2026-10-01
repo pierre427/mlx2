@@ -83,7 +83,7 @@ def test_batch_admission_refusals_are_named():
     assert _admit(2, gate_activation="swish").reason == "output gate 'swish'"
     wrong = _operands(2)
     wrong["recurrent_state"] = wrong["recurrent_state"].astype(mx.bfloat16)
-    assert _admit(2, **wrong).reason == "recurrent_state must be float32"
+    assert _admit(2, **wrong).reason == "recurrent_state must be float32 or float16"
 
 
 def test_batch_span_predicate_matches_the_one_row_rule():

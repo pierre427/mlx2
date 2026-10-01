@@ -28,9 +28,13 @@ class FlashNextCacheBudget:
     ple_kernel: int
     item_bytes: int = 4
     allocation_step: int = 256
+    # Recurrent state (live and rollback) under the GDN storage class: 2 for
+    # the fp16 class (runtime/models/gdn_state.py).  Conv state stays at
+    # ``item_bytes``.
+    recurrent_state_bytes: int = 4
 
     @classmethod
-    def from_config(cls, config, *, mtp):
+    def from_config(cls, config, *, mtp, recurrent_state_bytes=4):
         layers = config["layer_types"]
         if len(layers) != int(config["num_hidden_layers"]) or set(layers) - {"full_attention", "linear_attention"}:
             raise ValueError("unknown Flash-Next cache topology")
@@ -46,20 +50,26 @@ class FlashNextCacheBudget:
             conv_kernel=int(config["linear_conv_kernel_dim"]),
             ple_layers=len(config.get("ple_layer_ids", [])),
             ple_dim=int(config["ple_embed_dim"]), ple_kernel=int(config["ple_conv_kernel_size"]),
+            recurrent_state_bytes=recurrent_state_bytes,
         )
         if any(value < 0 for value in asdict(result).values()) or not result.pool_ratio:
             raise ValueError("invalid cache dimensions")
+        if result.recurrent_state_bytes not in (2, 4):
+            raise ValueError("recurrent_state_bytes must be 2 or 4")
         return result
 
     @property
     def fixed_bytes(self):
         recurrent = self.recurrent_heads * self.recurrent_key_dim * self.recurrent_value_dim
         conv_dim = 2 * self.recurrent_key_heads * self.recurrent_key_dim + self.recurrent_heads * self.recurrent_value_dim
-        per_recurrent = recurrent + max(0, self.conv_kernel - 1) * conv_dim
+        conv = max(0, self.conv_kernel - 1) * conv_dim
         # A live recurrent state and rollback snapshot, plus PLE convolution
         # and a generous scalar/token bookkeeping allowance per layer.
-        return self.item_bytes * (2 * self.recurrent_layers * per_recurrent
-            + 2 * self.ple_layers * self.ple_dim * self.ple_kernel) + (self.qsa_layers + self.recurrent_layers) * 4096
+        return (
+            2 * self.recurrent_layers
+            * (self.recurrent_state_bytes * recurrent + self.item_bytes * conv)
+            + self.item_bytes * 2 * self.ple_layers * self.ple_dim * self.ple_kernel
+        ) + (self.qsa_layers + self.recurrent_layers) * 4096
 
     def project(self, context_tokens):
         if type(context_tokens) is not int or context_tokens < 0:
@@ -73,5 +83,9 @@ class FlashNextCacheBudget:
         return self.fixed_bytes + qsa + capacity * 16
 
     def as_dict(self):
-        return {"schema": "flash-next-cache-geometry-v1", **asdict(self),
+        values = asdict(self)
+        if self.recurrent_state_bytes == 4:
+            # Default geometry receipts stay byte-identical.
+            del values["recurrent_state_bytes"]
+        return {"schema": "flash-next-cache-geometry-v1", **values,
                 "fixed_bytes": self.fixed_bytes, "bound": "fp32-capacity-plus-recurrent-rollback"}
