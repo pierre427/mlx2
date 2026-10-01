@@ -3,7 +3,9 @@
 import argparse
 import importlib.util
 import json
+import sys
 import time
+from types import MethodType
 from pathlib import Path
 
 from mlx2.experimental.hysparse2.config import Config
@@ -19,6 +21,7 @@ def main():
     p.add_argument("--output", type=Path, required=True)
     p.add_argument("--contexts", type=int, nargs="+", default=[4096, 16384])
     p.add_argument("--decode-tokens", type=int, default=16)
+    p.add_argument("--public-methods", action="store_true", help="Compare reference model public prefill/decode methods on current internals")
     args = p.parse_args()
     if (any(length < 8 for length in args.contexts)
             or len(set(args.contexts)) != len(args.contexts)
@@ -27,8 +30,10 @@ def main():
     if args.output.exists():
         p.error("use a new receipt path")
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    spec = importlib.util.spec_from_file_location("reference", args.reference)
+    name = "mlx2.experimental.hysparse2.reference_model" if args.public_methods else "reference"
+    spec = importlib.util.spec_from_file_location(name, args.reference)
     reference = importlib.util.module_from_spec(spec)
+    sys.modules[name] = reference
     spec.loader.exec_module(reference)
     c = Config(**json.loads((args.checkpoint / "state.json").read_text())["config"])
     report = {
@@ -66,6 +71,15 @@ def main():
         model.set_dtype(mx.bfloat16)
         model.eval()
         mx.eval(model.parameters())
+        ordinary_methods = (model.prefill, model.decode)
+        report["comparison"] = "public-prefill-decode-on-current-internals" if args.public_methods else "attention"
+        def install(label, function):
+            model_module.attention = function
+            if args.public_methods:
+                model.prefill, model.decode = (
+                    (MethodType(reference.Model.prefill, model), MethodType(reference.Model.decode, model))
+                    if label == "reference" else ordinary_methods
+                )
         values = np.load(args.tokens, allow_pickle=False)
         if (values.ndim != 1 or len(values) < max(args.contexts)
                 or c.max_context < max(args.contexts) + args.decode_tokens):
@@ -83,7 +97,7 @@ def main():
                 ("reference", reference.attention),
                 ("gathered", attention.attention),
             ):
-                model_module.attention = function
+                install(label, function)
                 logits, cache = model.prefill(mx.array(values[:8][None]))
                 model.decode(mx.argmax(logits[:, -1], axis=-1)[:, None], cache)
                 del logits, cache
@@ -95,7 +109,7 @@ def main():
                     ("reference", reference.attention),
                     ("gathered", attention.attention),
                 ):
-                    model_module.attention = function
+                    install(label, function)
                     prompt = mx.array(values[:length][None])
                     mx.eval(prompt)
                     mx.synchronize()
@@ -139,6 +153,7 @@ def main():
                 del results
         finally:
             model_module.attention = attention.attention
+            model.prefill, model.decode = ordinary_methods
         report["completed"] = True
         save()
 
