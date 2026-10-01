@@ -4027,6 +4027,10 @@ class BatchQSAKVCache(_StepGrownIndexLedger, BatchKVCache):
 class QSAKVCache(_StepGrownIndexLedger, KVCache):
     """KV cache with the raw, pre-pooling indexer keys QSA also requires."""
 
+    # Exact prefix trim settles KV, raw index keys and pooled summaries.
+    # Subclasses must explicitly redeclare this transaction contract.
+    supports_external_verify_transaction = True
+
     _RECOVERY_APPEND_ONLY_FIELDS = KVCache._RECOVERY_APPEND_ONLY_FIELDS + (
         ("_index_buffer", 1, "_index_width"),
     )
@@ -6638,19 +6642,33 @@ class Qwen4ExpTextModel(PipelineMixin, nn.Module):
             (i for (i, layer) in enumerate(self.layers) if not layer.is_linear), None
         )
 
-    def __call__(self, inputs, cache=None, input_embeddings=None, return_hyper=False):
-        if _SHAPE_STABLE_SHORT_FORWARD and cache is not None and (inputs.shape[1] > 1):
-            outputs = [
-                self(
+    def __call__(self, inputs, cache=None, input_embeddings=None, return_hyper=False,
+                 *, capture_layers=(), hidden_sink=None):
+        # A prepared segmented cohort owns masks and valid lengths for the
+        # entire verification block. Splitting it into token forwards would
+        # reuse those lengths against width-one QSA rows and mutate recurrent
+        # state before the indexed attention mask could reject the mismatch.
+        prepared_block = cache is not None and any(
+            getattr(entry, "_step_lengths", None) is not None for entry in cache
+        )
+        if (_SHAPE_STABLE_SHORT_FORWARD and cache is not None
+                and inputs.shape[1] > 1 and not prepared_block):
+            outputs, captured = [], []
+            for index in range(inputs.shape[1]):
+                local_taps = [] if hidden_sink is not None else None
+                outputs.append(self(
                     inputs[:, index : index + 1],
                     cache,
                     None
                     if input_embeddings is None
                     else input_embeddings[:, index : index + 1],
                     return_hyper,
-                )
-                for index in range(inputs.shape[1])
-            ]
+                    capture_layers=capture_layers, hidden_sink=local_taps,
+                ))
+                captured.append(local_taps)
+            if hidden_sink is not None:
+                hidden_sink.extend(mx.concatenate([row[i] for row in captured], axis=1)
+                                   for i in range(len(capture_layers)))
             if return_hyper:
                 return tuple(
                     (
@@ -6695,6 +6713,10 @@ class Qwen4ExpTextModel(PipelineMixin, nn.Module):
                 else:
                     _PLE_EARLY_STATS["device_ids"] += 1
             hidden = layer(hidden, inputs, fa_mask, layer_cache, ssm_mask)
+            if hidden_sink is not None and index in capture_layers:
+                # HC expands the residual stream; expose H-wide features using
+                # the target's learned mixer, never an invented slice or mean.
+                hidden_sink.append(self.hyper_connection_mixer(hidden))
             if eager and (index == last or (index + 1) % stride == 0):
                 mx.async_eval(hidden)
                 _lv.bump("eager_async_evals")
@@ -6704,6 +6726,13 @@ class Qwen4ExpTextModel(PipelineMixin, nn.Module):
 
 class TextModel(nn.Module):
     apc_v2_layout = "qwen4-exp-layer-segments-v1"
+    supports_speculative_rollback = True
+    external_feature_convention = "post_layer_shared_hc_mixer"
+    external_execution_receipt = {
+        "feature_convention": "post_layer_shared_hc_mixer",
+        "cache_transaction": "indexed_kv_and_recurrent_prefix_replay",
+        "real_artifact_qualified": False,
+    }
 
     def __init__(self, args: TextModelArgs):
         super().__init__()
@@ -6737,6 +6766,25 @@ class TextModel(nn.Module):
             else:
                 caches.append(QSAKVCache(layer.self_attn.indexer.summary_identity))
         return caches
+
+    def logits(self, hidden):
+        return (self.model.embed_tokens.as_linear(hidden)
+                if self.args.tie_word_embeddings else self.lm_head(hidden))
+
+    def forward_with_taps(self, inputs, cache, capture_layers, *, body_only=False):
+        layers = tuple(capture_layers)
+        if (not layers or any(type(i) is not int for i in layers)
+                or layers != tuple(sorted(set(layers)))
+                or layers[0] < 0 or layers[-1] >= len(self.model.layers)):
+            raise ValueError("Invalid Qwen4 external capture layers")
+        if cache is not None and len(cache) != len(self.model.layers):
+            raise ValueError("Qwen4 external cache must cover every layer")
+        taps = []
+        hidden = self.model(inputs, cache=cache, capture_layers=layers, hidden_sink=taps)
+        return (None if body_only else self.logits(hidden)), mx.concatenate(taps, axis=-1)
+
+    def prefill_body(self, inputs, cache, capture_layers):
+        return self.forward_with_taps(inputs, cache, capture_layers, body_only=True)[1]
 
     def sanitize(self, weights):
         if self.args.tie_word_embeddings:
@@ -6858,6 +6906,8 @@ class ModelArgs(BaseModelArgs):
 class Model(nn.Module):
     apc_v2_layout = "qwen4-exp-layer-segments-v1"
     supports_speculative_rollback = True
+    external_feature_convention = "post_layer_shared_hc_mixer"
+    external_execution_receipt = TextModel.external_execution_receipt
 
     def __init__(self, args: ModelArgs):
         super().__init__()
@@ -6881,6 +6931,16 @@ class Model(nn.Module):
 
     def make_cache(self):
         return self.language_model.make_cache()
+
+    @property
+    def speculative_args(self):
+        return self.language_model.args
+
+    def forward_with_taps(self, inputs, cache, capture_layers, *, body_only=False):
+        return self.language_model.forward_with_taps(inputs, cache, capture_layers, body_only=body_only)
+
+    def prefill_body(self, inputs, cache, capture_layers):
+        return self.language_model.prefill_body(inputs, cache, capture_layers)
 
     def logits(self, hidden):
         return (

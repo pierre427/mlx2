@@ -235,6 +235,7 @@ class HostDraftRow:
     tokens: list
     laws: list
     width: int = 1
+    confidence_features: object = None
 
     @property
     def lengths(self):
@@ -341,12 +342,13 @@ class ExternalDraftBatchGenerator:
     # Class default so instances built without __init__ (test doubles that
     # bind only the lane methods) keep the off behaviour.
     prefill_allocator_reclaim = False
+    adaptive_policy = None
 
     def __init__(self, model, *, draft_model, binding, completion_batch_size=4,
                  prefill_step_size=2048, num_draft=4, stop_tokens=(), memory_headroom=None,
                  reclaim_memory=None, evict_checkpoint=None, fly_verification=None,
                  pairwise_selection="host", ready_drain="one",
-                 prefill_allocator_reclaim=False, **kwargs):
+                 prefill_allocator_reclaim=False, adaptive_verification=None, **kwargs):
         import mlx.core as mx
         self.mx = mx; self.model = model; self.draft = draft_model
         self.memory_headroom = memory_headroom
@@ -381,6 +383,20 @@ class ExternalDraftBatchGenerator:
                 "TensorFold target execution requires MLX2_TENSORFOLD_SOURCE"
             )
         self.tree_gates = _tree_gates(self.draft_topology, self.target_execution)
+        from .acceptance_estimator import (
+            AdaptiveVerificationPolicy,
+            OnlineAcceptanceEstimator,
+        )
+        self.adaptive_policy = AdaptiveVerificationPolicy.from_value(
+            adaptive_verification, self.num_draft
+        )
+        self.acceptance_estimator = None
+        if self.adaptive_policy is not None:
+            if self.draft_topology != "chain" or self.fly_verification.enabled:
+                raise ValueError("adaptive verification requires exact chain verification")
+            self.acceptance_estimator = OnlineAcceptanceEstimator(
+                self.num_draft, refit_interval=self.adaptive_policy.refit_interval
+            )
         # "one" (default, unchanged): one ready token per lane per poll.  A
         # lane still draining a multi-token round sits out the next cohort,
         # so at B>1 a lane that accepted more waits one round of the others
@@ -399,6 +415,18 @@ class ExternalDraftBatchGenerator:
         self.lanes = {}; self.next_uid = 0; self.boundaries = {}
         self._lane_failures = []
         self.scheduler_stats = {"external_rounds": 0, "accepted_proposals": 0, "proposed_tokens": 0, "ordinary_rounds": 0, "cancelled": 0, "target_max_width": 0, "draft_max_width": 1, "prefill_rounds": 0, "paired_cache_resumes": 0, "segmented_transactions": 0, "segmented_rollbacks": 0, "draft_fallbacks": 0, "recovery_checkpoint_captures": 0, "recovery_checkpoint_restores": 0, "external_draft_masked_positions": 0, "external_ordinary_fast_path_rounds": 0, "external_ordinary_fast_path_lanes": 0, "external_draft_context_skipped": 0, "external_taps_skipped": 0, "external_transactions_skipped": 0, "fly_relaxed_accepts": 0, "external_context_token_pairings": 0, "external_verify_steer_rounds": 0, "external_verify_steered_lanes": 0, "external_allocator_reclaims": 0}
+        if self.adaptive_policy is not None:
+            self.scheduler_stats.update(
+                external_adaptive_rounds=0,
+                external_adaptive_trimmed_rounds=0,
+                external_adaptive_trimmed_target_rows=0,
+                external_adaptive_target_rows=0,
+                external_adaptive_round_depth=0,
+                external_adaptive_verify_width=0,
+                external_adaptive_verification_groups=0,
+                external_adaptive_per_request_rounds=0,
+                external_adaptive_current_confidence_rounds=0,
+            )
         # Drafters that fuse each target feature with the token that follows
         # it (EAGLE) opt in; DFlash-family drafters keep the original calls.
         self.pair_context_tokens = bool(getattr(draft_model, "requires_context_tokens", False))
@@ -631,7 +659,8 @@ class ExternalDraftBatchGenerator:
             if lane.history:
                 # A pairing (EAGLE) drafter keeps the last prompt chunk pending:
                 # its final feature must be drafted from in the first round.
-                if lane.tail.shape[1] and not self.pair_context_tokens:
+                if (lane.tail.shape[1] and not self.pair_context_tokens
+                        and not getattr(self.draft, "requires_pending_context_at_prefill", False)):
                     self._append_context(lane, lane.anchor)
                     lane.tail = lane.tail[:, :0]
                 self.boundaries[lane.uid] = {"committed_only": True, "tokens": list(lane.history), "target_cache": self._freeze_cache(lane.cache), "covered_tokens": len(lane.history), "cache_sidecar": self._sidecar(lane)}
@@ -704,19 +733,20 @@ class ExternalDraftBatchGenerator:
         return result
 
     def _target_execution_receipt(self):
+        model_receipt = getattr(self.model, "external_execution_receipt", None)
+        result = {"target_protocol": dict(model_receipt)} if model_receipt else {}
         if self.target_execution != "tensorfold":
-            return {}
-        return {
-            "tensorfold_target": {
-                "cohort_limit": self.tensorfold_cohort_limit,
-                "cohort_max_width": self.scheduler_stats[
-                    "external_tensorfold_cohort_max_width"
-                ],
-                "cohort_rounds": self.scheduler_stats[
-                    "external_tensorfold_cohort_rounds"
-                ],
-            }
+            return result
+        result["tensorfold_target"] = {
+            "cohort_limit": self.tensorfold_cohort_limit,
+            "cohort_max_width": self.scheduler_stats[
+                "external_tensorfold_cohort_max_width"
+            ],
+            "cohort_rounds": self.scheduler_stats[
+                "external_tensorfold_cohort_rounds"
+            ],
         }
+        return result
 
     def _propose_pairwise(self, lanes, arguments):
         """Batched DFlash2 selection: one pair-table walk, one host read.
@@ -876,7 +906,7 @@ class ExternalDraftBatchGenerator:
             state["processors"] = list(snapshot.processors)
             lane.__dict__.clear(); lane.__dict__.update(state)
 
-    def _propose(self, cohort):
+    def _propose(self, cohort, *, adaptive_depth=None):
         """Draft phase: one proposal block per cohort row, ``None`` for no draft.
 
         A zero-count round only appends pending draft context so the draft
@@ -886,6 +916,8 @@ class ExternalDraftBatchGenerator:
             15 if self.draft_topology == "tree15" else self.num_draft,
             min(l.maximum-l.generated-1 for l in cohort),
         )
+        if adaptive_depth is not None:
+            requested_count = min(requested_count, int(adaptive_depth))
         if any(l.ordinary for l in cohort): requested_count = 0
         blocks = [None]*len(cohort)
         if not requested_count:
@@ -940,6 +972,9 @@ class ExternalDraftBatchGenerator:
                 except (TypeError, ValueError):
                     pass
                 extra = {"context_tokens": pairing} if self.pair_context_tokens else {}
+                needs_histories = bool(getattr(self.draft, "requires_processor_histories", False))
+                if needs_histories:
+                    extra["processor_histories"] = [list(l.history) for l in lanes]
                 if self.draft_topology == "tree15":
                     if self.pair_context_tokens:
                         raise ValueError("tree15 is unavailable for paired-context drafters")
@@ -993,8 +1028,7 @@ class ExternalDraftBatchGenerator:
                     tokens,q = self.draft.draft_distributions(
                         *arguments,
                         logits_processors=processors,
-                        processor_histories=[list(l.history) for l in lanes],
-                        **extra,
+                        **{**extra, "processor_histories": [list(l.history) for l in lanes]},
                     )
                 elif extra:
                     tokens,q = self.draft.draft_distributions(*arguments, **extra)
@@ -1017,10 +1051,29 @@ class ExternalDraftBatchGenerator:
                 requested_count * sum(bool(value) for value in processors),
             )
             self.scheduler_stats["draft_max_width"] = max(self.scheduler_stats["draft_max_width"],len(lanes))
+            confidence = None
+            if (self.adaptive_policy is not None and self.adaptive_policy.mode == "per_request"
+                    and getattr(self.draft, "proposal_distribution", None) == "deterministic_point_mass"):
+                confidence = getattr(self.draft, "adaptive_confidence_features", None)
+                if confidence is not None and len(confidence) != len(lanes):
+                    raise ValueError("deterministic drafter confidence rows mismatch")
             for j,row in enumerate(indices):
+                feature_row = None
+                if confidence is not None:
+                    feature_row = np.asarray(confidence[j], dtype=np.float64)
+                    if (feature_row.ndim != 1 or len(feature_row) < len(tokens[j])
+                            or not np.isfinite(feature_row).all()):
+                        raise ValueError("invalid deterministic drafter confidence features")
+                    # The hook is safe only when every returned q is the stated
+                    # point mass. A stochastic law must use lagged admission.
+                    for token, law in zip(tokens[j], q[j]):
+                        law = probability(law)
+                        if law[int(token)] != 1.0 or np.count_nonzero(law) != 1:
+                            raise ValueError("current confidence requires deterministic point-mass proposals")
+                    feature_row = np.clip(feature_row[:len(tokens[j])], -40.0, 40.0).tolist()
                 blocks[row] = (
                     q[j] if isinstance(q[j], (CompactDraftRow, TreeDraftRow))
-                    else HostDraftRow(tokens[j], q[j], len(lanes))
+                    else HostDraftRow(tokens[j], q[j], len(lanes), feature_row)
                 )
         return blocks
 
@@ -1640,7 +1693,7 @@ class ExternalDraftBatchGenerator:
                 if logp is not None and decision.response_logprobs:
                     if j < len(decision.response_logprobs) and decision.response_logprobs[j] is not None:
                         logp = decision.response_logprobs[j]
-                lane.ready.append(SimpleNamespace(uid=lane.uid, token=token, logprobs=logp, finish_reason=finish, execution_width=len(cohort), all_tokens=list(lane.history) if final else None, prompt_cache=self._freeze_cache(lane.cache) if finish else None, cache_sidecar=self._sidecar(lane) if finish else None, mtp_state=None, mtp_receipt=None, speculative_receipt={"kind":self.receipt_kind, "execution":"external_draft_verify" if lane.external_rounds else "ordinary_target", "current_execution":"ordinary_target" if count == 0 else "external_draft_verify", "ordinary_fallback":lane.ordinary, "external_rounds":lane.external_rounds, "accepted":lane.accepted,"proposed":lane.proposed,"round_accepted":round_accepted,"round_proposed":count,"target_width":lane.target_max_width,"draft_width":lane.draft_max_width,"qualification_authority":"serving_route", **self._target_execution_receipt(), **self._verification_receipt(lane)}))
+                lane.ready.append(SimpleNamespace(uid=lane.uid, token=token, logprobs=logp, finish_reason=finish, execution_width=len(cohort), all_tokens=list(lane.history) if final else None, prompt_cache=self._freeze_cache(lane.cache) if finish else None, cache_sidecar=self._sidecar(lane) if finish else None, mtp_state=None, mtp_receipt=None, speculative_receipt={"kind":self.receipt_kind, "execution":"external_draft_verify" if lane.external_rounds else "ordinary_target", "current_execution":"ordinary_target" if count == 0 else "external_draft_verify", "ordinary_fallback":lane.ordinary, "external_rounds":lane.external_rounds, "accepted":lane.accepted,"proposed":lane.proposed,"round_accepted":round_accepted,"round_proposed":count,"target_width":lane.target_max_width,"draft_width":lane.draft_max_width,"qualification_authority":"serving_route", **self._target_execution_receipt(), **self._verification_receipt(lane), **self._adaptive_receipt(lane), **self._draft_settings_receipt()}))
         if clock is not None:
             self._mark("emit", clock)
         self.scheduler_stats[
@@ -1661,6 +1714,206 @@ class ExternalDraftBatchGenerator:
         )
         return now
 
+    def _draft_settings_receipt(self):
+        settings = getattr(getattr(self, "draft", None), "receipt_settings", None)
+        if settings is None:
+            return {}
+        if not isinstance(settings, dict):
+            raise ValueError("drafter receipt_settings must be a dictionary")  # noqa: TRY004
+        # Freeze settings with the response: later drafter tuning cannot change
+        # the configuration attributed to an already committed token.
+        json.dumps(settings, allow_nan=False)
+        return {"draft_settings": copy.deepcopy(settings)}
+
+    def _adaptive_receipt(self, lane=None):
+        if self.adaptive_policy is None:
+            return {}
+        return {"adaptive_verification": {
+            "implemented": True,
+            "qualified": False,
+            "selected": True,
+            "observed_used": (
+                getattr(lane, "adaptive_trimmed_rounds", 0) > 0 if lane is not None
+                else self.scheduler_stats["external_adaptive_trimmed_rounds"] > 0
+            ),
+            "policy": ("per_request_grouped_cost_model" if self.adaptive_policy.mode == "per_request"
+                       else "lagged_cohort_cost_model"),
+            "confidence": ("deterministic_refined_logit_proxy_or_lagged_q"
+                           if self.adaptive_policy.mode == "per_request" else "lagged_q"),
+            "calibration": "shared_online_censored_logistic",
+            "current_policy": getattr(lane, "adaptive_round_policy", "not_executed"),
+            "current_feature_source": getattr(lane, "adaptive_feature_source", "not_executed"),
+            "per_request_rounds": self.scheduler_stats["external_adaptive_per_request_rounds"],
+            "cost_model_cohort_sizes": sorted({self.adaptive_policy.cohort_size,
+                *(size for size, _ in self.adaptive_policy.verification_costs_by_cohort)}),
+            "verification_groups": self.scheduler_stats["external_adaptive_verification_groups"],
+            "cost_model_cohort_size": self.adaptive_policy.cohort_size,
+            "cost_model_source": "caller_supplied",
+            "round_proposal_depth": self.scheduler_stats["external_adaptive_round_depth"],
+            "round_verify_width": self.scheduler_stats["external_adaptive_verify_width"],
+            "target_rows": self.scheduler_stats["external_adaptive_target_rows"],
+            "trimmed_target_rows": self.scheduler_stats["external_adaptive_trimmed_target_rows"],
+        }}
+
+    def _adaptive_observe(self, blocks, decisions, cohort=None):
+        from .acceptance_estimator import proposal_feature
+        for row, (block, decision) in enumerate(zip(blocks, decisions)):
+            if block is None:
+                continue
+            tokens, laws = _block_row(block, self._target_args.vocab_size)
+            confidence = getattr(block, "confidence_features", None)
+            if confidence is not None:
+                features = list(confidence)
+            elif isinstance(laws, CompactDraftRow):
+                features = [proposal_feature(row) for row in laws.candidate_probs]
+            else:
+                features = [proposal_feature(row) for row in laws]
+            if cohort is not None:
+                lane = cohort[row]
+                means = np.asarray(getattr(lane, "adaptive_feature_means", np.zeros(self.num_draft)), dtype=float)
+                counts = np.asarray(getattr(lane, "adaptive_feature_counts", np.zeros(self.num_draft)), dtype=np.int64)
+                size = len(features)
+                counts[:size] += 1
+                means[:size] += (np.asarray(features) - means[:size]) / counts[:size]
+                lane.adaptive_feature_means = means.tolist()
+                lane.adaptive_feature_counts = counts.tolist()
+            # A stop can cut an accepted sequence. Only delivered accepts and
+            # the first rejection reached before that stop are labeled.
+            accepted = min(decision.accepted, len(decision.emitted))
+            rejected = decision.accepted < len(tokens) and decision.accepted < len(decision.emitted)
+            self.acceptance_estimator.observe(features, accepted, rejected=rejected)
+        self.acceptance_estimator.finish_round()
+
+    @staticmethod
+    def _trim_adaptive_block(block, depth):
+        if block is None:
+            return None
+        if isinstance(block, CompactDraftRow):
+            return CompactDraftRow(block.tokens[:depth], block.candidate_ids[:depth],
+                                   block.candidate_probs[:depth], block.width)
+        if isinstance(block, HostDraftRow):
+            confidence = block.confidence_features
+            return HostDraftRow(block.tokens[:depth], block.laws[:depth], block.width,
+                                None if confidence is None else confidence[:depth])
+        raise ValueError("adaptive chain trimming requires a supported proposal block")
+
+    def _adaptive_physical_groups(self, blocks):
+        groups = {}
+        for row, block in enumerate(blocks):
+            depth = 0 if block is None else int(block.lengths[0])
+            groups.setdefault(depth, []).append(row)
+        result = []
+        for indices in groups.values():
+            while indices:
+                width = max(size for size in range(1, len(indices) + 1)
+                            if self.adaptive_policy.costs(size) is not None)
+                result.append(indices[:width])
+                indices = indices[width:]
+        return result
+
+    def _request_adaptive_round(self, cohort):
+        """Atomic variable-depth round with physical forwards grouped by depth.
+
+        Stochastic admission precedes proposal RNG draws. Deterministic full
+        blocks may be trimmed using their own confidence hook. All lanes retain
+        one common recovery boundary until every subgroup and estimator commits.
+        """
+        recovery = self._snapshot_round(cohort)
+        self.scheduler_stats["recovery_checkpoint_captures"] += len(recovery)
+        stats_snapshot = dict(self.scheduler_stats)
+        estimator_snapshot = copy.deepcopy(self.acceptance_estimator)
+        self._open = True
+        transaction = None
+        try:
+            maxima = [min(self.num_draft, lane.maximum - lane.generated - 1)
+                      if not lane.ordinary else 0 for lane in cohort]
+            deterministic = getattr(self.draft, "proposal_distribution", None) == "deterministic_point_mass"
+            blocks = [None] * len(cohort)
+            features = []
+            for lane, maximum in zip(cohort, maxima):
+                means = getattr(lane, "adaptive_feature_means", None)
+                counts = getattr(lane, "adaptive_feature_counts", None)
+                features.append(means if counts is not None and all(counts[:maximum]) else None)
+            if deterministic:
+                depths = maxima
+            else:
+                # This choice cannot see any current sampled proposal token.
+                depths = self.adaptive_policy.request_depths(self.acceptance_estimator, maxima, features)
+            draft_groups = {}
+            for row, depth in enumerate(depths):
+                draft_groups.setdefault(depth, []).append(row)
+            for depth, indices in draft_groups.items():
+                proposed = self._propose([cohort[row] for row in indices], adaptive_depth=depth)
+                for row, block in zip(indices, proposed):
+                    blocks[row] = block
+            if deterministic:
+                features = [getattr(block, "confidence_features", None) for block in blocks]
+                if any(feature is not None for feature in features):
+                    _bump(self.scheduler_stats, "external_adaptive_current_confidence_rounds")
+                depths = self.adaptive_policy.request_depths(self.acceptance_estimator, maxima, features)
+                blocks = [self._trim_adaptive_block(block, depth) for block, depth in zip(blocks, depths)]
+            decisions = [None] * len(cohort)
+            physical = self._adaptive_physical_groups(blocks)
+            _bump(self.scheduler_stats, "external_adaptive_rounds")
+            _bump(self.scheduler_stats, "external_adaptive_per_request_rounds")
+            _bump(self.scheduler_stats, "external_adaptive_verification_groups", len(physical))
+            baseline = min(maxima, default=0)
+            saved = max(0, baseline * len(cohort) - sum(depths))
+            _bump(self.scheduler_stats, "external_adaptive_trimmed_rounds", int(saved > 0))
+            _bump(self.scheduler_stats, "external_adaptive_trimmed_target_rows", saved)
+            for lane, depth, feature in zip(cohort, depths, features):
+                lane.adaptive_round_policy = "per_request_grouped"
+                lane.adaptive_feature_source = (
+                    "deterministic_refined_logit_proxy" if deterministic and feature is not None else "lagged_q"
+                )
+                if depth < baseline:
+                    lane.adaptive_trimmed_rounds = getattr(lane, "adaptive_trimmed_rounds", 0) + 1
+            for indices in physical:
+                lanes = [cohort[row] for row in indices]
+                selected = [blocks[row] for row in indices]
+                counts = [0 if block is None else int(block.lengths[0]) for block in selected]
+                verify_width = counts[0] + 1
+                self.scheduler_stats["external_adaptive_round_depth"] = counts[0]
+                self.scheduler_stats["external_adaptive_verify_width"] = verify_width
+                _bump(self.scheduler_stats, "external_adaptive_target_rows", verify_width * len(lanes))
+                inputs = [[lane.anchor] + _block_row(block, None)[0] for lane, block in zip(lanes, selected)]
+                taps, steer, commits = self._verify_steer(lanes, inputs, counts)
+                if steer is not None:
+                    taps.steer = steer
+                try:
+                    if self.target_execution == "tensorfold":
+                        parents = [list(range(-1, len(row) - 1)) for row in inputs]
+                        logits, hidden, transaction = self._target_tree_forward_many(lanes, inputs, parents)
+                    else:
+                        transaction = self._target_owner([lane.cache for lane in lanes]).begin(
+                            lengths=[count + 1 for count in counts])
+                        logits, hidden = self.model.forward_with_taps(
+                            self.mx.array(inputs), transaction.caches, self.layers)
+                    self.mx.eval(logits, hidden)
+                finally:
+                    if steer is not None:
+                        taps.steer = None
+                verified = self._verify(lanes, selected, logits)
+                self._commit(lanes, verified, hidden, blocks=selected, transaction=transaction)
+                for commit, decision in zip(commits, verified):
+                    commit(min(decision.accepted + 1, len(decision.emitted)))
+                for row, decision in zip(indices, verified):
+                    decisions[row] = decision
+            self._adaptive_observe(blocks, decisions, cohort)
+        except BaseException:
+            if transaction is not None and not transaction.closed:
+                try:
+                    transaction.abort()
+                except BaseException:  # noqa: BLE001, S110 - original boundary is authoritative
+                    pass
+            self._restore_round(cohort, recovery)
+            self.scheduler_stats = stats_snapshot
+            self.acceptance_estimator = estimator_snapshot
+            self.scheduler_stats["recovery_checkpoint_restores"] += len(recovery)
+            raise
+        finally:
+            self._open = False
+
     def _round(self, cohort):
         if cohort and all(lane.ordinary for lane in cohort):
             return self._ordinary_round(cohort)
@@ -1671,20 +1924,50 @@ class ExternalDraftBatchGenerator:
             # round, which appends the draft context and publishes the
             # sidecar; the ordinary path reported ordinary_fallback for it.
             return self._tree_round(cohort)
+        if (self.adaptive_policy is not None and self.adaptive_policy.mode == "per_request"
+                and self.adaptive_policy.costs(1) is not None
+                and self.adaptive_policy.costs(len(cohort)) is not None):
+            return self._request_adaptive_round(cohort)
         clock = time.perf_counter() if self.round_timing else None
         recovery = self._snapshot_round(cohort)
         self.scheduler_stats["recovery_checkpoint_captures"] += len(recovery)
         if clock is not None:
             clock = self._mark("recovery_capture", clock)
         stats_snapshot = dict(self.scheduler_stats)
+        adaptive_snapshot = (
+            copy.deepcopy(self.acceptance_estimator) if self.adaptive_policy is not None else None
+        )
         self._open = True
         transaction = None
         try:
-            blocks = self._propose(cohort)
+            if self.adaptive_policy is None:
+                blocks = self._propose(cohort)
+                fixed_depth = None
+            else:
+                fixed_depth = min(self.num_draft, min(l.maximum - l.generated - 1 for l in cohort))
+                if any(l.ordinary for l in cohort):
+                    fixed_depth = 0
+                depth = self.adaptive_policy.choose_depth(
+                    self.acceptance_estimator, fixed_depth, len(cohort)
+                )
+                blocks = self._propose(cohort, adaptive_depth=depth)
             if clock is not None:
                 clock = self._mark("draft", clock)
             proposal_counts = [0 if block is None else int(block.lengths[0]) for block in blocks]
             verify_width = max(proposal_counts, default=0) + 1
+            if self.adaptive_policy is not None:
+                _bump(self.scheduler_stats, "external_adaptive_rounds")
+                saved = max(0, fixed_depth - depth) * len(cohort)
+                for lane in cohort:
+                    lane.adaptive_round_policy = "lagged_cohort"
+                    lane.adaptive_feature_source = "lagged_q"
+                    if saved:
+                        lane.adaptive_trimmed_rounds = getattr(lane, "adaptive_trimmed_rounds", 0) + 1
+                _bump(self.scheduler_stats, "external_adaptive_trimmed_rounds", int(saved > 0))
+                _bump(self.scheduler_stats, "external_adaptive_trimmed_target_rows", saved)
+                _bump(self.scheduler_stats, "external_adaptive_target_rows", verify_width * len(cohort))
+                self.scheduler_stats["external_adaptive_round_depth"] = verify_width - 1
+                self.scheduler_stats["external_adaptive_verify_width"] = verify_width
             inputs = [
                 [lane.anchor]+_block_row(block, None)[0]+[0]*(verify_width-count-1)
                 for lane,block,count in zip(cohort,blocks,proposal_counts)
@@ -1724,6 +2007,8 @@ class ExternalDraftBatchGenerator:
             )
             for commit, decision in zip(steer_commits, decisions):
                 commit(min(decision.accepted + 1, len(decision.emitted)))
+            if self.adaptive_policy is not None:
+                self._adaptive_observe(blocks, decisions, cohort)
         except BaseException:
             if transaction is not None and not transaction.closed:
                 try: transaction.abort()
@@ -1731,6 +2016,8 @@ class ExternalDraftBatchGenerator:
                     pass
             self._restore_round(cohort, recovery)
             self.scheduler_stats = stats_snapshot
+            if self.adaptive_policy is not None:
+                self.acceptance_estimator = adaptive_snapshot
             self.scheduler_stats["recovery_checkpoint_restores"] += len(recovery)
             raise
         finally: self._open = False
@@ -1877,6 +2164,13 @@ class ExternalDraftBatchGenerator:
         stats_snapshot = dict(self.scheduler_stats)
         self._open = True
         try:
+            if self.adaptive_policy is not None:
+                self.scheduler_stats["external_adaptive_round_depth"] = 0
+                self.scheduler_stats["external_adaptive_verify_width"] = 1
+                _bump(self.scheduler_stats, "external_adaptive_target_rows", len(cohort))
+                for lane in cohort:
+                    lane.adaptive_round_policy = "ordinary_target"
+                    lane.adaptive_feature_source = "not_executed"
             inputs = self.mx.array(
                 [[lane.anchor] for lane in cohort], dtype=self.mx.int32
             )
@@ -1991,7 +2285,7 @@ class ExternalDraftBatchGenerator:
                             "draft_width":lane.draft_max_width,
                             "qualification_authority":"serving_route",
                             **self._target_execution_receipt(),
-                            **self._verification_receipt(lane),
+                            **self._verification_receipt(lane), **self._adaptive_receipt(lane), **self._draft_settings_receipt(),
                         },
                     )
                 )

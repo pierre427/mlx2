@@ -190,6 +190,7 @@ EXTERNAL_POLICY_KEYS = frozenset(
         "draft_model",
         "num_draft",
         "pairwise_selection",
+        "adaptive_verification",
         "draft_revision",
         "target_revision",
         "draft_quantization",
@@ -247,6 +248,11 @@ def inspect_external_policy(policy: dict, model_path: str | Path) -> dict:
     count = policy.get("num_draft", Qwen3827BAdapter.EXTERNAL_DEFAULT_NUM_DRAFT)
     if type(count) is not int or not 1 <= count < args.block_size:
         raise ValueError("num_draft must be a positive integer below the draft block size")
+    adaptive = policy.get("adaptive_verification")
+    if adaptive is not None:
+        from ..runtime.acceptance_estimator import AdaptiveVerificationPolicy
+
+        AdaptiveVerificationPolicy.from_value(adaptive, count)
     quantization = validate_runtime_quantization(policy.get("draft_quantization"))
     if quantization is not None:
         # Numerics differ from the bf16 drafter: a distinct cache identity.
@@ -676,6 +682,9 @@ class Qwen3827BAdapter(ExternalDraftAdapterMixin, FlashNextAdapter):
             raise ValueError("No external draft model bound")
         from ..runtime.external_speculative import ExternalDraftBatchGenerator
 
+        adaptive = self.external_policy.get("adaptive_verification")
+        if adaptive is not None:
+            kwargs.setdefault("adaptive_verification", adaptive)
         return ExternalDraftBatchGenerator(
             self.model,
             draft_model=self.draft_model,

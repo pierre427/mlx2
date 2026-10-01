@@ -20,12 +20,12 @@ class ExternalDraftAdapterMixin:
     def _parse_external_policy(self, execution_policy, *, family):
         self.external_policy = dict(execution_policy or {})
         self.draft_model = None
-        if set(self.external_policy) - {"draft_model", "num_draft"} or (
+        if set(self.external_policy) - {"draft_model", "num_draft", "adaptive_verification"} or (
             self.external_policy and not self.external_policy.get("draft_model")
         ):
             raise ValueError(
                 f"{family} execution policy has no qualified overrides; only an "
-                "external draft_model (and num_draft) may be configured"
+                "external draft_model, num_draft and adaptive_verification may be configured"
             )
         return bool(self.external_policy)
 
@@ -33,6 +33,11 @@ class ExternalDraftAdapterMixin:
         count = self.external_policy.get("num_draft", self.EXTERNAL_DEFAULT_NUM_DRAFT)
         if type(count) is not int or not 1 <= count < record["args"].block_size:
             raise ValueError("num_draft must be a positive integer below the draft block size")
+        adaptive = self.external_policy.get("adaptive_verification")
+        if adaptive is not None:
+            from ..runtime.acceptance_estimator import AdaptiveVerificationPolicy
+
+            AdaptiveVerificationPolicy.from_value(adaptive, count)
 
     def _bind_external_drafter(self, record, loader, base_descriptor):
         self.draft_model = loader(record, self.model)
@@ -81,6 +86,9 @@ class ExternalDraftAdapterMixin:
             raise ValueError("No external draft model bound")
         from ..runtime.external_speculative import ExternalDraftBatchGenerator
 
+        adaptive = self.external_policy.get("adaptive_verification")
+        if adaptive is not None:
+            kwargs.setdefault("adaptive_verification", adaptive)
         return ExternalDraftBatchGenerator(
             self.model,
             draft_model=self.draft_model,

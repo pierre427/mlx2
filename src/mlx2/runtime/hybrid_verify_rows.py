@@ -3,7 +3,8 @@
 Original mlx2 implementation.  It gives ``ExternalDraftBatchGenerator`` the
 same ``begin(lengths) -> transaction`` seam that ``SegmentedKVRows`` gives
 attention-only targets, for targets whose layers hold gated-delta recurrent
-state (``ArraysCache``) beside plain ``KVCache`` planes.
+state (``ArraysCache``) beside KV planes, or a KV layer with an explicitly
+declared exact transaction contract (such as QSA's raw-key/pooled ledger).
 
 Nothing new is invented for the state math: rollback is the exact
 record-and-replay contract the recurrent layers already stage while a cache
@@ -18,6 +19,7 @@ forward records one replay per recurrent layer, commit trims each row to its
 consumed prefix and stops speculation (dropping the records and the
 pre-forward state they pin).  No capability is qualified by this module.
 """
+
 from __future__ import annotations
 
 from numbers import Integral
@@ -26,22 +28,34 @@ from .models.cache import ArraysCache, KVCache
 
 
 class HybridVerifyUnsupported(TypeError):
-    """The lane caches are not recurrent + plain KV rows."""
+    """The lane caches do not declare the required exact transaction contract."""
+
+
+def _supported_kv(cache):
+    # A subclass can add state that ordinary KV trim does not settle.  Require
+    # its own declaration: inheriting a parent's flag is not evidence that the
+    # subclass's extra planes support the same exact rollback operation.
+    return type(cache) is KVCache or (
+        isinstance(cache, KVCache)
+        and type(cache).__dict__.get("supports_external_verify_transaction") is True
+    )
 
 
 def is_hybrid_rows(rows) -> bool:
-    """True when at least one layer is recurrent and every layer is supported."""
+    """True for supported rows needing recurrent or declared KV transactions."""
     rows = [list(row) for row in rows]
     if not rows or not rows[0]:
         return False
-    recurrent = False
+    specialized = False
     for row in rows:
         for cache in row:
             if isinstance(cache, ArraysCache):
-                recurrent = True
-            elif type(cache) is not KVCache:
+                specialized = True
+            elif not _supported_kv(cache):
                 return False
-    return recurrent
+            elif type(cache) is not KVCache:
+                specialized = True
+    return specialized
 
 
 def _kv_offset(cache):
@@ -63,17 +77,27 @@ class HybridVerifyRows:
         if len({id(cache) for row in rows for cache in row}) != sum(map(len, rows)):
             raise ValueError("hybrid lanes/layers must have independent cache owners")
         for layer in zip(*rows):
-            kinds = {ArraysCache if isinstance(c, ArraysCache) else type(c) for c in layer}
-            if len(kinds) != 1 or kinds.pop() not in (ArraysCache, KVCache):
+            kinds = {
+                ArraysCache if isinstance(c, ArraysCache) else type(c) for c in layer
+            }
+            if len(kinds) != 1 or not all(
+                isinstance(cache, ArraysCache) or _supported_kv(cache)
+                for cache in layer
+            ):
                 raise HybridVerifyUnsupported(
-                    "hybrid verify supports ArraysCache and plain KVCache layers only"
+                    "hybrid verify needs ArraysCache, plain KVCache, or explicitly "
+                    "declared exact KV transaction layers"
                 )
             for cache in layer:
                 if isinstance(cache, ArraysCache):
                     if cache.batch_size != 1 and not cache.empty():
-                        raise ValueError("each authoritative recurrent cache must be a B1 row")
+                        raise ValueError(
+                            "each authoritative recurrent cache must be a B1 row"
+                        )
                     if cache.speculating:
-                        raise ValueError("recurrent row already has a speculation owner")
+                        raise ValueError(
+                            "recurrent row already has a speculation owner"
+                        )
                 else:
                     _kv_offset(cache)
         self.rows = rows
@@ -162,14 +186,18 @@ class HybridVerifyTransaction:
         (drop,) = drops
         applied = [int(cache.trim(drop)) for cache in self.caches]
         if any(value != drop for value in applied):
-            raise RuntimeError(f"hybrid B1 trim diverged: expected {drop}, got {applied}")
+            raise RuntimeError(
+                f"hybrid B1 trim diverged: expected {drop}, got {applied}"
+            )
 
     def _check_advanced(self):
         """Every KV row advanced by exactly its verified length."""
         for row, bases, length in zip(self.owner.rows, self._kv_base, self.lengths):
             for cache, base in zip(row, bases):
                 if base is not None and _kv_offset(cache) != base + length:
-                    raise RuntimeError("every target layer must finish verification before commit")
+                    raise RuntimeError(
+                        "every target layer must finish verification before commit"
+                    )
 
     def commit(self, accepted_lengths):
         if self.closed:

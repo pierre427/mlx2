@@ -147,13 +147,15 @@ class Decoder(nn.Module):
         self.layers = [Layer(args, i) for i in range(args.num_hidden_layers)]
         self.norm = nn.RMSNorm(args.hidden_size, eps=args.rms_norm_eps)
 
-    def __call__(self, inputs, cache=None):
+    def __call__(self, inputs, cache=None, *, capture_layers=(), hidden_sink=None):
         h = self.embed_tokens(inputs)
         if cache is None:
             cache = [None] * len(self.layers)
         mask = create_attention_mask(h, cache[0])
-        for layer, layer_cache in zip(self.layers, cache):
+        for index, (layer, layer_cache) in enumerate(zip(self.layers, cache)):
             h = layer(h, mask, layer_cache)
+            if hidden_sink is not None and index in capture_layers:
+                hidden_sink.append(h)
         return self.norm(h)
 
 
@@ -168,10 +170,35 @@ class Model(nn.Module):
 
     def __call__(self, inputs, cache=None):
         out = self.model(inputs, cache)
-        return (
-            self.model.embed_tokens.as_linear(out)
-            if self.args.tie_word_embeddings else self.lm_head(out)
-        )
+        return self.logits(out)
+
+    def logits(self, hidden):
+        return (self.model.embed_tokens.as_linear(hidden)
+                if self.args.tie_word_embeddings else self.lm_head(hidden))
+
+    def make_cache(self):
+        from .cache import KVCache
+
+        return [KVCache() for _ in self.layers]
+
+    def forward_with_taps(self, inputs, cache, capture_layers, *, body_only=False):
+        """Post-layer features before final norm, paired with consumed cache tokens."""
+        capture_layers = tuple(capture_layers)
+        if (not capture_layers
+                or any(type(index) is not int for index in capture_layers)
+                or tuple(sorted(set(capture_layers))) != capture_layers
+                or capture_layers[0] < 0 or capture_layers[-1] >= len(self.layers)):
+            raise ValueError("Invalid target capture layers")
+        if cache is not None and len(cache) != len(self.layers):
+            raise ValueError("Target cache must have one entry per layer")
+        taps = []
+        hidden = self.model(inputs, cache=cache, capture_layers=capture_layers,
+                            hidden_sink=taps)
+        features = mx.concatenate(taps, axis=-1)
+        return (None if body_only else self.logits(hidden)), features
+
+    def prefill_body(self, inputs, cache, capture_layers):
+        return self.forward_with_taps(inputs, cache, capture_layers, body_only=True)[1]
 
     def sanitize(self, weights):
         if self.args.tie_word_embeddings:

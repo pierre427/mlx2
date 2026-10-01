@@ -60,3 +60,24 @@ reads:
   Releases up to 0.5.0 were MIT-licensed, and code written before 0.6.0 keeps its
   MIT notice in LICENSES/MIT.txt. Third-party code and its licenses are listed in
   THIRD_PARTY_NOTICES.md.
+
+------------------------------------------------------------------------------
+XPress refiner (vLLM pull request https://github.com/vllm-project/vllm/pull/54448,
+source https://github.com/ZKBig/vllm, revision
+15ba199f070f4bb4d1d394108525b4101117c067)
+
+Adapted from vllm/model_executor/models/qwen3_xpress.py in
+src/mlx2/runtime/drafters/xpress.py. Copyright contributors to the vLLM
+project. Licensed under the Apache License, Version 2.0; see LICENSE.
+Provenance and modifications: provenance/xpress.json.
+
+------------------------------------------------------------------------------
+LiLiCorr (https://github.com/vllm-project/vllm, revision
+2a52715ef7ca533a0ce287e14dc1c0702bdc2e8d)
+
+Adapted in src/mlx2/runtime/drafters/lilicorr.py from
+vllm/model_executor/models/lilicorr.py, the LiLiCorr speculator, and the
+nongated SiLU MLP in nemotron_h.py. Copyright contributors to the vLLM
+project. The upstream head is adapted from sgl-project/sglang PR #37462.
+Licensed under Apache License, Version 2.0; see LICENSE.
+Provenance and modifications: provenance/lilicorr.json.

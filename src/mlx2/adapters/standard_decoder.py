@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+from dataclasses import replace
 from pathlib import Path
 
 from ..contracts import Capability, ModelDescriptor, StatePlane
+from .external_draft_policy import ExternalDraftAdapterMixin
 
 FAMILIES = frozenset({"qwen3", "qwen3_moe", "qwen2", "llama"})
 CACHE_LAYOUT = "standard-full-kv-layer-segments-v1"
@@ -162,9 +164,12 @@ def inspect_artifact(model_path: str | Path, *, expected: str | None = None) -> 
     }
 
 
-class StandardDecoderAdapter:
+class StandardDecoderAdapter(ExternalDraftAdapterMixin):
     default_route = "ordinary"
     descriptor = descriptor_for("qwen3")
+    EXTERNAL_DEFAULT_NUM_DRAFT = 15
+    EXTERNAL_ROUTE_TAG = "external-xpress-qwen3-v1"
+    EXTERNAL_PROFILE = "qwen3-apcv2-xpress"
 
     def profile_name(self, mtp):
         if mtp:
@@ -172,6 +177,8 @@ class StandardDecoderAdapter:
         return f"{self.descriptor.model_type}-apcv2-ordinary"
 
     def execution_config(self, *, max_lanes, prefill_step):
+        if getattr(self, "draft_model", None) is not None:
+            return self._external_execution_config(max_lanes=max_lanes, prefill_step=prefill_step)
         return {
             "persistent": True, "num_draft": 0, "backend": "ordinary",
             "rate_gate": False, "prefill_step_size": prefill_step,
@@ -183,9 +190,54 @@ class StandardDecoderAdapter:
         pass
 
     def __init__(self, model_path: str, *, execution_policy=None):
-        if execution_policy not in (None, {}):
-            raise ValueError("ordinary standard decoder has no execution policy")
+        self.external_policy = dict(execution_policy or {})
+        self.draft_model = None
+        allowed = {"draft_model", "num_draft", "xpress_num_passes", "draft_quantization", "adaptive_verification", "draft_revision", "target_fingerprint", "draft_attention_windows"}
+        if set(self.external_policy) - allowed or (
+            self.external_policy and not self.external_policy.get("draft_model")
+        ):
+            raise ValueError("standard decoder execution policy requires a supported draft_model")
         artifact = inspect_artifact(model_path)
+        draft_record = None
+        if self.external_policy:
+            if artifact["config"]["model_type"] != "qwen3":
+                raise ValueError("external drafting currently requires a Qwen3 target")
+            draft_path = Path(self.external_policy["draft_model"]).expanduser().resolve()
+            architecture = _json(draft_path / "config.json").get("architectures")
+            if architecture == ["Qwen3XPressModel"]:
+                from .xpress import content_revision, inspect_drafter, load_drafter
+
+                draft_kind = "xpress"
+            elif architecture == ["LiLiCorrDraftModel"]:
+                from .lilicorr import content_revision, inspect_drafter, load_drafter
+
+                draft_kind = "lilicorr"
+                if "xpress_num_passes" in self.external_policy:
+                    raise ValueError("xpress_num_passes requires an XPress drafter")
+            else:
+                raise ValueError(f"unsupported standard decoder draft architecture: {architecture!r}")
+            self.EXTERNAL_ROUTE_TAG = f"external-{draft_kind}-qwen3-v1"
+            self.EXTERNAL_PROFILE = f"qwen3-apcv2-{draft_kind}"
+            draft_record = inspect_drafter(draft_path, model_path)
+            from ..runtime.drafters.attention_windows import validate_attention_windows
+
+            validate_attention_windows(self.external_policy.get("draft_attention_windows"), draft_record["args"].num_hidden_layers)
+            if "draft_revision" in self.external_policy and self.external_policy["draft_revision"] != content_revision(draft_record):
+                raise ValueError("external drafter source revision mismatch")
+            if "target_fingerprint" in self.external_policy and self.external_policy["target_fingerprint"] != artifact["identity"]["fingerprint"]:
+                raise ValueError("external target artifact fingerprint mismatch")
+            self._check_num_draft(draft_record)
+            if draft_kind == "xpress":
+                passes = self.external_policy.get("xpress_num_passes", draft_record["args"].xpress_num_passes)
+                if type(passes) is not int or not 1 <= passes <= draft_record["args"].block_size:
+                    raise ValueError("xpress_num_passes must be a positive integer within the trained block")
+            if self.external_policy.get("draft_quantization") is not None:
+                raise ValueError(f"{draft_kind} runtime quantization is not supported")
+            adaptive = self.external_policy.get("adaptive_verification")
+            if adaptive is not None:
+                from ..runtime.acceptance_estimator import AdaptiveVerificationPolicy
+
+                AdaptiveVerificationPolicy.from_value(adaptive, self._external_num_draft())
         self.config = artifact["config"]
         self.identity = artifact["identity"]
         self.descriptor = descriptor_for(self.config["model_type"])
@@ -195,6 +247,7 @@ class StandardDecoderAdapter:
         import mlx.core as mx
         from mlx import nn
         from transformers import AutoTokenizer
+
         from ..runtime.models.standard_decoder import Model, ModelArgs
         from ..runtime.tokenizer_utils import BPEStreamingDetokenizer, TokenizerWrapper
         from ..runtime.ubc_evict import load_shards_evicting
@@ -230,6 +283,38 @@ class StandardDecoderAdapter:
             eos_token_ids=artifact_eos_token_ids(path, self.config, tokenizer),
         )
         self.max_context = self.config["max_position_embeddings"]
+        if draft_record is not None:
+            def loader(record, target):
+                options = {"runtime_quantization": self.external_policy.get("draft_quantization"),
+                           "draft_attention_windows": self.external_policy.get("draft_attention_windows")}
+                if draft_kind == "xpress":
+                    options["num_passes"] = self.external_policy.get("xpress_num_passes")
+                return load_drafter(record, target, **options)
+
+            self._bind_external_drafter(draft_record, loader, self.descriptor)
+            # Runtime quantization changes stored draft context. Bind the
+            # execution settings before any paired sidecar is published.
+            settings = json.dumps(self.draft_model.receipt_settings, sort_keys=True)
+            settings += json.dumps(self.external_policy.get("draft_quantization"), sort_keys=True)
+            fingerprint = hashlib.sha256((self.identity["fingerprint"] + settings).encode()).hexdigest()
+            self.identity = {**self.identity, "fingerprint": fingerprint}
+            self.layout += ":" + fingerprint
+            self.descriptor = replace(
+                self.descriptor, variant=f"external-{draft_kind}",
+                cache_layout=self.layout,
+                metadata={**self.descriptor.metadata, "qualification": "unqualified",
+                          "scope": f"text-only {draft_kind} draft/verify", "implemented": True})
+
+    def external_profile_name(self, mtp):
+        if mtp:
+            raise ValueError("External draft is not native MTP")
+        return self.EXTERNAL_PROFILE
+
+    def create_external_batch(self, **kwargs):
+        adaptive = self.external_policy.get("adaptive_verification")
+        if adaptive is not None:
+            kwargs["adaptive_verification"] = adaptive
+        return super().create_external_batch(**kwargs)
 
     # The descriptor declares no reasoning (an explicit enable_thinking: true
     # is refused), so thinking defaults off.  Defaulting to the tokenizer's
@@ -267,9 +352,15 @@ class StandardDecoderAdapter:
         )
 
     def diagnostics(self):
-        return {
+        external = getattr(self, "draft_model", None) is not None
+        result = {
             "architecture": self.config["model_type"],
             "cache_layout": self.layout,
-            "qualification": "pending",
-            "route": "ordinary",
+            "qualification": "unqualified" if external else "pending",
+            "route": "external_draft" if external else "ordinary",
         }
+        if external:
+            result["speculation"] = {"kind": self.draft_model.receipt_kind, "implemented": True,
+                                     "qualified": False, "settings": self.draft_model.receipt_settings,
+                                     "adaptive_verification": self.external_policy.get("adaptive_verification")}
+        return result

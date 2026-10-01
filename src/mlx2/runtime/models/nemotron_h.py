@@ -621,6 +621,8 @@ class NemotronHModel(nn.Module):
         inputs,
         cache: Any | None = None,
         ssm_sink: list | None = None,
+        capture_layers: tuple[int, ...] = (),
+        hidden_sink: list | None = None,
     ):
         hidden_states = self.embeddings(inputs)
 
@@ -649,7 +651,7 @@ class NemotronHModel(nn.Module):
             ssm_mask = create_ssm_mask(hidden_states, ssm_cache)
 
         cache_counter = 0
-        for layer in self.layers:
+        for layer_index, layer in enumerate(self.layers):
             if layer.block_type == "M" or layer.block_type == "*":
                 c = cache[cache_counter]
                 cache_counter += 1
@@ -661,11 +663,16 @@ class NemotronHModel(nn.Module):
             else:
                 mask = ssm_mask
             hidden_states = layer(hidden_states, mask=mask, cache=c, ssm_sink=ssm_sink)
+            if hidden_sink is not None and layer_index in capture_layers:
+                hidden_sink.append(hidden_states)
 
         return self.norm_f(hidden_states)
 
 
 class Model(nn.Module):
+    # External hybrid verification uses existing ArraysCache record/replay.
+    # Tiny CPU protocol evidence: provenance/nemotron-external-taps.json.
+    supports_speculative_rollback = True
     mtp_align_full_final_chunk = True
     # ``mtp_verify_backbone`` verifies a B1 row one token at a time for exact
     # parity with ordinary decode. A true-batched segmented cohort prepares
@@ -690,6 +697,72 @@ class Model(nn.Module):
     ):
         out = self.backbone(inputs, cache=cache)
         return self.lm_head(out)
+
+    @property
+    def embed_tokens(self):
+        """Architecture-neutral embedding contract without duplicate parameters."""
+        return self.backbone.embeddings
+
+    @property
+    def external_execution_receipt(self):
+        return {
+            "single_row_verification": "ordinary_tokenwise",
+            "batched_verification": "block_candidate",
+            "batched_numerical_qualification": False,
+            "real_artifact_qualification": False,
+        }
+
+    def forward_with_taps(self, inputs, cache, capture_layers, *, body_only=False):
+        """Post-layer, pre-final-norm taps; IDs index the full hybrid backbone.
+
+        Only Mamba and attention layers own caches. MLP/MoE layers still count
+        in capture IDs, using the ordinary backbone's compact cache mapping.
+        """
+        capture_layers = tuple(capture_layers)
+        if (not capture_layers
+                or any(type(index) is not int for index in capture_layers)
+                or tuple(sorted(set(capture_layers))) != capture_layers
+                or capture_layers[0] < 0 or capture_layers[-1] >= len(self.layers)):
+            raise ValueError("Invalid target capture layers")
+        expected_caches = sum(layer.block_type in ('M', '*') for layer in self.layers)
+        if cache is not None and len(cache) != expected_caches:
+            raise ValueError("Target cache must match compact hybrid layer topology")
+        if (inputs.shape[0] == 1 and inputs.shape[1] > 1 and cache is not None
+                and any(getattr(entry, "speculating", False) for entry in cache)):
+            # Match ordinary S=1 recurrence and attention rounding, just as
+            # mtp_verify_backbone does. Non-speculative prefill stays blocked;
+            # true B>1 verification remains an unqualified numerical strategy.
+            logits, features = [], []
+            marked = []
+            try:
+                for entry in cache:
+                    if (isinstance(entry, BatchKVCache)
+                            and entry._right_padding is None
+                            and int(entry.left_padding[0].item()) == 0):
+                        marked.append((entry, entry.__dict__.get(
+                            "_nemotron_unpadded_verify", None)))
+                        entry._nemotron_unpadded_verify = True
+                for index in range(inputs.shape[1]):
+                    output, taps = self.forward_with_taps(
+                        inputs[:, index:index + 1], cache, capture_layers,
+                        body_only=body_only)
+                    if not body_only:
+                        logits.append(output)
+                    features.append(taps)
+            finally:
+                for entry, previous in marked:
+                    if previous is None:
+                        entry.__dict__.pop("_nemotron_unpadded_verify", None)
+                    else:
+                        entry._nemotron_unpadded_verify = previous
+            return (None if body_only else mx.concatenate(logits, axis=1)), mx.concatenate(features, axis=1)
+        taps = []
+        hidden = self.backbone(inputs, cache=cache, capture_layers=capture_layers,
+                               hidden_sink=taps)
+        return (None if body_only else self.logits(hidden)), mx.concatenate(taps, axis=-1)
+
+    def prefill_body(self, inputs, cache, capture_layers):
+        return self.forward_with_taps(inputs, cache, capture_layers, body_only=True)[1]
 
     def mtp_backbone(self, inputs: mx.array, cache=None):
         hidden = self.backbone(inputs, cache=cache)
