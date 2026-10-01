@@ -64,6 +64,12 @@ class FlashNextPolicy:
     # also replaces the tile4 fused down with omlx's down + weighted sum.
     # Opt-in; enters the environment and receipts only when not "off".
     moe_routed_decode: str = "off"
+    # omlx #4038 two-launch hyper-connection decode (MLX_QWEN4_HC_DECODE):
+    # one-row GatedResidual calls run in two launches instead of ~17, bit-
+    # identical to the composed ops on Metal (scripts/check_qwen4_hc_decode.py).
+    # Verify rows stay composed (counted).  Opt-in; enters the environment and
+    # receipts only when enabled.
+    hc_decode_kernels: bool = False
     # Opt-in: the quantized lm_head stores fp32 logits instead of rounding
     # them to bf16 (runtime/fp32_head.py).  Not an environment switch; it
     # enters receipts only when enabled, like the kernels above.
@@ -100,6 +106,7 @@ class FlashNextPolicy:
             "mtp_draft_vocab",
             "tensorfold_qmv_rows",
             "tensorfold_prefill",
+            "hc_decode_kernels",
             *_OPTIONAL_KERNEL_ENV,
         ):
             if type(getattr(self, name)) is not bool:
@@ -177,6 +184,8 @@ class FlashNextPolicy:
             del values["fused_gdn_verify_max_steps"]
         if self.moe_routed_decode == "off":
             del values["moe_routed_decode"]
+        if not self.hc_decode_kernels:
+            del values["hc_decode_kernels"]
         return values
 
     def environment(self):
@@ -207,6 +216,8 @@ class FlashNextPolicy:
             )
         if self.moe_routed_decode != "off":
             environment["MLX_QWEN4_MOE_ROUTED_DECODE"] = self.moe_routed_decode
+        if self.hc_decode_kernels:
+            environment["MLX_QWEN4_HC_DECODE"] = "1"
         return environment
 
     def batch_config(self, *, max_lanes, prefill_step):

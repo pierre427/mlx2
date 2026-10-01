@@ -468,6 +468,7 @@ class FlashNextAdapter:
             qsa_rollback_status,
             qsa_stage1_status,
         )
+        from ..runtime.models.qwen4_hc_decode import hc_decode_status
         from ..runtime.models.qwen4_qsa_indexed import qsa_indexed_status
         from ..runtime.round_levers import counters as lever_snapshot
         from ..runtime.segmented_self_mtp import segmented_self_mtp_stats
@@ -533,6 +534,12 @@ class FlashNextAdapter:
                     }
                 }
                 if getattr(self, "gdn_prefill_scan", None)
+                else {}
+            ),
+            **(
+                # omlx #4038 port; absent while off so default receipts are unchanged.
+                {"hc_decode": hc_decode_status()}
+                if self.policy.hc_decode_kernels or hc_decode_status()["calls"]
                 else {}
             ),
             "round_levers": lever_snapshot(),

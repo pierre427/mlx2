@@ -58,7 +58,8 @@ from .qwen4_fused_gdn_verify import (
     qwen4_fused_gdn_verify,
     validate_qwen4_gdn_replay_acceptance,
 )
-from .qwen4_fused_group_norm import try_fused_group_norm
+from .qwen4_fused_group_norm import fused_group_norm_enabled, try_fused_group_norm
+from . import qwen4_hc_decode as _hc_decode
 from .qwen4_gdn_outproj import admit_qwen4_gdn_outproj
 from . import qwen4_fused_gdn_prefill as _gdn_prefill
 from .qwen4_qsa_nax import (
@@ -1818,6 +1819,19 @@ class GatedResidual(nn.Module):
                 )
             return mx.concatenate(tokens, axis=1)
         glue = compile_glue_enabled()
+        if _hc_decode.hc_decode_enabled():
+            # omlx #4038 two-launch HC decode; default off, counted declines.
+            fused = _hc_decode.try_hc_decode(
+                self,
+                hyper_input,
+                eager_norm=(
+                    not fused_group_norm_enabled()
+                    and self.hc_norm._use_fast(hyper_input)
+                ),
+                compile_glue=glue,
+            )
+            if fused is not None:
+                return fused
         normed = self.hc_norm(hyper_input)
         gate_input = self.input_mix_weight_down(normed)
         weights = None
