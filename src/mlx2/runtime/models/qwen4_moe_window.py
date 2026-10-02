@@ -156,10 +156,10 @@ def admit_router_topk(logits, top_k: int, norm_topk_prob: bool) -> str | None:
     rows = logits.size // ne if ne else 0
     if logits.dtype != mx.bfloat16:
         return "router logits must be bfloat16"
-    if ne != NUM_EXPERTS:
-        return f"expert count {ne} != {NUM_EXPERTS}"
-    if top_k != TOP_K or not norm_topk_prob:
-        return "only normalized top-10 routing"
+    if (ne, top_k) not in ((NUM_EXPERTS, TOP_K), (256, 8)):
+        return f"routing E{ne}/top-{top_k} is not E{NUM_EXPERTS}/top-{TOP_K} or E256/top-8"
+    if not norm_topk_prob:
+        return "only normalized top-k routing"
     if not 1 <= rows <= WINDOW_MAX_ROWS:
         return f"{rows} rows outside 1..{WINDOW_MAX_ROWS}"
     if not RD.runtime_supported():
@@ -221,11 +221,11 @@ METAL_FUNC void mlx2_router_keys(const device T* logits, uint lane, thread uint*
 }
 
 // The ten largest keys of the row, descending (sel[0] largest).
-template <int NE>
+template <int NE, int NK = 10>
 METAL_FUNC void mlx2_router_select(thread const uint* key, thread uint* sel) {
   constexpr int PER = NE / 32;
   uint below = 0xffffffffu;
-  for (int j = 0; j < 10; j++) {
+  for (int j = 0; j < NK; j++) {
     uint best = 0u;
     for (int k = 0; k < PER; k++) {
       const uint v = key[k];
@@ -247,13 +247,13 @@ inline float mlx2_router_prob(uint sel) {
 // Slot s is selection 9 - s (argpartition's ascending suffix). The stock
 // normalization sums the ten bf16 probabilities in slot order in bf16 and
 // divides in bf16.
-template <typename T>
+template <typename T, int NK = 10>
 METAL_FUNC T mlx2_router_score(thread const uint* sel, int slot) {
   T total = T(0.0f);
-  for (int s = 0; s < 10; s++) {
-    total = static_cast<T>(float(static_cast<T>(mlx2_router_prob(sel[9 - s]))) + float(total));
+  for (int s = 0; s < NK; s++) {
+    total = static_cast<T>(float(static_cast<T>(mlx2_router_prob(sel[NK - 1 - s]))) + float(total));
   }
-  const T p = static_cast<T>(mlx2_router_prob(sel[9 - slot]));
+  const T p = static_cast<T>(mlx2_router_prob(sel[NK - 1 - slot]));
   return static_cast<T>(float(p) / float(total));
 }
 """
@@ -263,12 +263,12 @@ ROUTER_TOPK_SOURCE = r"""
     const uint row = threadgroup_position_in_grid.y;
     uint key[NE / 32];
     mlx2_router_keys<T, NE>(logits + size_t(row) * NE, lane, key);
-    uint sel[10];
-    mlx2_router_select<NE>(key, sel);
-    if (lane < 10) {
+    uint sel[TOPK];
+    mlx2_router_select<NE, TOPK>(key, sel);
+    if (lane < TOPK) {
       const int slot = int(lane);
-      indices[row * 10 + slot] = mlx2_router_expert(sel[9 - slot]);
-      scores[row * 10 + slot] = mlx2_router_score<T>(sel, slot);
+      indices[row * TOPK + slot] = mlx2_router_expert(sel[TOPK - 1 - slot]);
+      scores[row * TOPK + slot] = mlx2_router_score<T, TOPK>(sel, slot);
     }
 """
 
@@ -420,17 +420,17 @@ def _rows(x) -> int:
     return int(x.size // x.shape[-1])
 
 
-def router_topk(logits):
+def router_topk(logits, *, top_k: int = TOP_K):
     """Stock-identical ``(indices uint32, scores)`` [rows, 10] of bf16 router
     logits [..., 512] in one launch. Admission is the caller's."""
     ne = logits.shape[-1]
     rows = _rows(logits)
     return _kernel("router_topk")(
         inputs=[logits.reshape(rows, ne)],
-        template=[("T", logits.dtype), ("NE", ne)],
+        template=[("T", logits.dtype), ("NE", ne), ("TOPK", top_k)],
         grid=(32, rows, 1),
         threadgroup=(32, 1, 1),
-        output_shapes=[(rows, TOP_K), (rows, TOP_K)],
+        output_shapes=[(rows, top_k), (rows, top_k)],
         output_dtypes=[mx.uint32, logits.dtype],
     )
 

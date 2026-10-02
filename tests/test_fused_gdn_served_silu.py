@@ -142,7 +142,7 @@ def test_qwen36_fused_decode_declines_before_any_kernel(monkeypatch):
     monkeypatch.setattr(qwen36_35b, "admit_qwen4_fused_gdn_decode", _accept)
     monkeypatch.setattr(qwen36_35b, "fused_gdn_runtime_supported", lambda: True)
     monkeypatch.setattr(qwen36_35b, "served_silu_refusal", lambda: REFUSAL)
-    monkeypatch.setattr(qwen36_35b, "probe_qwen4_fused_gdn_decode", _never)
+    monkeypatch.setattr(qwen36_35b, "probe_qwen36_gdn", _never)
     monkeypatch.setattr(qwen36_35b, "qwen4_fused_gdn_decode", _never)
     cache = _Cache([mx.zeros((1, 2, 8)), mx.zeros((1, 4, 8, 8))])
     assert layer._try_fused_decode(*_inputs(1), None, cache) is None

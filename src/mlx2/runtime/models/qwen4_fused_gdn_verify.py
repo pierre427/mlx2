@@ -105,6 +105,7 @@ def admit_qwen4_fused_gdn_verify(
     value_head_dim: int,
     conv_kernel: int,
     gate_activation: str,
+    architecture: str = "qwen4",
 ) -> FusedGdnAdmission:
     """Pure structural admission for a B=1 verify block; no MLX evaluation."""
     if training:
@@ -127,7 +128,12 @@ def admit_qwen4_fused_gdn_verify(
         )
         if refusal is not None:
             return refusal
-    if gate_activation != "sigmoid":
+    if architecture not in ("qwen4", "qwen35"):
+        return FusedGdnAdmission(False, f"unsupported architecture {architecture!r}")
+    NUM_VALUE_HEADS = 32 if architecture == "qwen35" else 48
+    VALUE_DIM = NUM_VALUE_HEADS * VALUE_HEAD_DIM
+    CONV_DIM = 2 * NUM_KEY_HEADS * KEY_HEAD_DIM + VALUE_DIM
+    if gate_activation != ("swish" if architecture == "qwen35" else "sigmoid"):
         return FusedGdnAdmission(False, f"output gate {gate_activation!r}")
     geometry = (
         num_key_heads,
@@ -382,10 +388,43 @@ def _st16(recurrent_state, counter: str) -> bool:
     return True
 
 
+def _qwen35_verify_source(source: str) -> str:
+    """Reuse Qwen3.5 decode arithmetic at each verify token, preserving the
+    original Flash-Next source byte for byte. Snapshot indexing is unchanged."""
+    from .qwen4_fused_gdn import _SOURCE as decode_source
+
+    start = "  for (uint d = tid; d < (uint)DK; d += NT) {"
+    stop = "  for (int j = 0; j < NDV; ++j) {"
+    lo = decode_source.index(start, decode_source.index("shr[3]"))
+    hi = decode_source.index(stop, lo)
+    normalization = decode_source[lo:hi]
+    lo = source.index("    for (uint d = tid; d < (uint)DK; d += NT) {")
+    hi = source.index("    device float* state_dst", lo)
+    source = source[:lo] + normalization + source[hi:]
+    source = source.replace("threadgroup T sq_squared", "threadgroup float sq_squared")
+    source = source.replace("threadgroup T sk_squared", "threadgroup float sk_squared")
+    source = source.replace(
+        "shr[3] = float(mlx_sigmoid_precise(b[t * HV + hv]));",
+        "shr[3] = mlx_sigmoid_precise<float>(float(b[t * HV + hv]));",
+    )
+    source = source.replace(
+        "mlx_sigmoid_precise<float>(float(z[t * VD + hv * DV + d]));",
+        "(float(z[t * VD + hv * DV + d]) * "
+        "mlx_sigmoid_fast<float>(float(z[t * VD + hv * DV + d])));",
+    )
+    return source
+
+
+_QWEN35_SOURCE = _qwen35_verify_source(_SOURCE)
+_QWEN35_SOURCE_ST16 = st16_source(
+    _QWEN35_SOURCE, what="qwen35_fused_gdn_verify", state_dst=1
+)
+
+
 @lru_cache(maxsize=None)
-def _kernel(st16: bool = False):
+def _kernel(st16: bool = False, architecture: str = "qwen4"):
     return mx.fast.metal_kernel(
-        name="qwen4_fused_gdn_verify" + ("_st16" if st16 else ""),
+        name=f"{architecture}_fused_gdn_verify" + ("_st16" if st16 else ""),
         input_names=[
             "qkv",
             "z",
@@ -407,7 +446,10 @@ def _kernel(st16: bool = False):
             "conv_snapshots",
         ],
         header=_HEADER,
-        source=_SOURCE_ST16 if st16 else _SOURCE,
+        source=(
+            (_QWEN35_SOURCE_ST16 if st16 else _QWEN35_SOURCE)
+            if architecture == "qwen35" else (_SOURCE_ST16 if st16 else _SOURCE)
+        ),
         ensure_row_contiguous=True,
     )
 
@@ -516,6 +558,8 @@ def qwen4_fused_gdn_verify(
     norm_eps: float,
     *,
     threadgroup_y: int,
+    architecture: str = "qwen4",
+    num_value_heads: int = NUM_VALUE_HEADS,
 ):
     """Build the fused verify graph. Callers must run structural admission first.
 
@@ -524,6 +568,11 @@ def qwen4_fused_gdn_verify(
     are the recurrent state and convolution window after ``p + 1`` tokens for
     ``p`` in ``range(S - 1)``.
     """
+    if (architecture, num_value_heads) not in (("qwen4", 48), ("qwen35", 32)):
+        raise ValueError("unsupported verify architecture/head geometry")
+    NUM_VALUE_HEADS = num_value_heads
+    VALUE_DIM = NUM_VALUE_HEADS * VALUE_HEAD_DIM
+    CONV_DIM = 2 * NUM_KEY_HEADS * KEY_HEAD_DIM + VALUE_DIM
     if threadgroup_y not in _THREADGROUP_Y_CANDIDATES:
         raise ValueError(
             f"unsupported threadgroup_y {threadgroup_y}; expected one of {_THREADGROUP_Y_CANDIDATES}"
@@ -534,7 +583,8 @@ def qwen4_fused_gdn_verify(
             f"unsupported verify width {steps}; expected 2..{MAX_VERIFY_WIDTH_PROVEN}"
         )
     st16 = _st16(recurrent_state, "fused_verify")
-    outputs = _kernel(st16)(
+    kernel = _kernel(st16) if architecture == "qwen4" else _kernel(st16, architecture)
+    outputs = kernel(
         inputs=[
             qkv,
             z,
@@ -558,7 +608,7 @@ def qwen4_fused_gdn_verify(
             ("S", steps),
             ("TY", threadgroup_y),
             ("RATIO", NUM_VALUE_HEADS // NUM_KEY_HEADS),
-        ],
+        ] + ([("AGNES_NUMERICS", 1)] if architecture == "qwen35" else []),
         grid=(32, threadgroup_y, NUM_VALUE_HEADS),
         threadgroup=(32, threadgroup_y, 1),
         output_shapes=[
@@ -1132,6 +1182,7 @@ def admit_qwen4_fused_gdn_batch_verify(
     value_head_dim: int,
     conv_kernel: int,
     gate_activation: str,
+    architecture: str = "qwen4",
     max_rows: int = BATCH_VERIFY_MAX_ROWS,
 ) -> FusedGdnAdmission:
     """Structural admission for a ``(B, S)`` speculative verify block.
@@ -1149,7 +1200,12 @@ def admit_qwen4_fused_gdn_batch_verify(
         return FusedGdnAdmission(False, "distributed sharding")
     if not speculating:
         return FusedGdnAdmission(False, "not a speculative verify")
-    if gate_activation != "sigmoid":
+    if architecture not in ("qwen4", "qwen35"):
+        return FusedGdnAdmission(False, f"unsupported architecture {architecture!r}")
+    NUM_VALUE_HEADS = 32 if architecture == "qwen35" else 48
+    VALUE_DIM = NUM_VALUE_HEADS * VALUE_HEAD_DIM
+    CONV_DIM = 2 * NUM_KEY_HEADS * KEY_HEAD_DIM + VALUE_DIM
+    if gate_activation != ("swish" if architecture == "qwen35" else "sigmoid"):
         return FusedGdnAdmission(False, f"output gate {gate_activation!r}")
     geometry = (num_key_heads, num_value_heads, key_head_dim, value_head_dim, conv_kernel)
     if geometry != (NUM_KEY_HEADS, NUM_VALUE_HEADS, KEY_HEAD_DIM, VALUE_HEAD_DIM, CONV_KERNEL):
@@ -1339,16 +1395,22 @@ _VERIFY_INPUTS = [
 
 
 @lru_cache(maxsize=None)
-def _batch_kernel(st16: bool = False):
+def _batch_kernel(st16: bool = False, architecture: str = "qwen4"):
     return mx.fast.metal_kernel(
-        name="qwen4_fused_gdn_batch_verify" + ("_st16" if st16 else ""),
+        name=f"{architecture}_fused_gdn_batch_verify" + ("_st16" if st16 else ""),
         input_names=_VERIFY_INPUTS,
         output_names=[
             "output", "conv_state_out", "recurrent_state_out",
             "state_snapshots", "conv_snapshots",
         ],
         header=_HEADER,
-        source=_BATCH_SOURCE_ST16 if st16 else _BATCH_SOURCE,
+        source=(
+            _derive_batch_verify_source(
+                _QWEN35_SOURCE_ST16 if st16 else _QWEN35_SOURCE,
+                _VERIFY_LANE_BUFFERS, final_store=0, what="qwen35_fused_gdn_batch_verify",
+            ) if architecture == "qwen35"
+            else (_BATCH_SOURCE_ST16 if st16 else _BATCH_SOURCE)
+        ),
         ensure_row_contiguous=True,
     )
 
@@ -1392,6 +1454,7 @@ def _check_batch_launch(qkv, row_steps, threadgroup_y):
 def qwen4_fused_gdn_batch_verify(
     qkv, z, b, a, conv_state, conv_weight, A_log, dt_bias, recurrent_state,
     norm_weight, norm_eps: float, row_steps, *, threadgroup_y: int,
+    architecture: str = "qwen4", num_value_heads: int = NUM_VALUE_HEADS,
 ):
     """Snapshot-rollback batched verify.  Callers run batch admission first.
 
@@ -1401,9 +1464,15 @@ def qwen4_fused_gdn_batch_verify(
     - 1`` (later restore points are not written).  ``threadgroup_y`` must be
     the B=1 verify probe's value so each lane runs its B=1 thread geometry.
     """
+    if (architecture, num_value_heads) not in (("qwen4", 48), ("qwen35", 32)):
+        raise ValueError("unsupported verify architecture/head geometry")
+    NUM_VALUE_HEADS = num_value_heads
+    VALUE_DIM = NUM_VALUE_HEADS * VALUE_HEAD_DIM
+    CONV_DIM = 2 * NUM_KEY_HEADS * KEY_HEAD_DIM + VALUE_DIM
     rows, steps, counts = _check_batch_launch(qkv, row_steps, threadgroup_y)
     st16 = _st16(recurrent_state, "fused_batch_verify")
-    outputs = _batch_kernel(st16)(
+    kernel = _batch_kernel(st16) if architecture == "qwen4" else _batch_kernel(st16, architecture)
+    outputs = kernel(
         inputs=[
             qkv, z, b, a, conv_state, conv_weight, A_log, dt_bias,
             recurrent_state, norm_weight, float(norm_eps), counts,
@@ -1413,7 +1482,7 @@ def qwen4_fused_gdn_batch_verify(
             ("DK", KEY_HEAD_DIM), ("DV", VALUE_HEAD_DIM), ("K", CONV_KERNEL),
             ("S", steps), ("TY", threadgroup_y),
             ("RATIO", NUM_VALUE_HEADS // NUM_KEY_HEADS),
-        ],
+        ] + ([("AGNES_NUMERICS", 1)] if architecture == "qwen35" else []),
         grid=(32, threadgroup_y, NUM_VALUE_HEADS * rows),
         threadgroup=(32, threadgroup_y, 1),
         output_shapes=[

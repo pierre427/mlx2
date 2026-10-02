@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 
 from ..contracts import Capability, ModelDescriptor, StatePlane
+from ..process_env import PROCESS_NUMERICS
 from .mtp_depth_cap import validate_self_mtp_num_draft
 from .qwen38_27b import (
     EAGER_DISPATCH_POLICY_KEYS,
@@ -16,7 +17,6 @@ from .qwen38_27b import (
     eager_dispatch_policy,
     resolve_eos_token_ids,
 )
-from ..process_env import PROCESS_NUMERICS
 
 CACHE_LAYOUT = "qwen36-35b-a3b-hybrid-layer-segments-v1"
 # Explicit rather than inherited through Qwen3.8: threshold four passed the
@@ -101,11 +101,17 @@ def inspect_artifact(model_path: str | Path) -> dict:
         raise ValueError("artifact has no indexed weights")
     shards = sorted(set(weight_map.values()))
     for name in shards:
-        if not isinstance(name, str) or Path(name).is_absolute() or ".." in Path(name).parts:
+        if (
+            not isinstance(name, str)
+            or Path(name).is_absolute()
+            or ".." in Path(name).parts
+        ):
             raise ValueError("weight shard paths must stay within the artifact")
         if not (path / name).is_file():
             raise ValueError(f"missing weight shard: {name}")
-    mtp_keys = [key for key in weight_map if key.startswith(("language_model.mtp.", "mtp."))]
+    mtp_keys = [
+        key for key in weight_map if key.startswith(("language_model.mtp.", "mtp."))
+    ]
     has_mtp = bool(mtp_keys)
     if has_mtp and text.get("mtp_num_hidden_layers") != 1:
         raise ValueError("MTP tensors and configured head count disagree")
@@ -127,7 +133,8 @@ def inspect_artifact(model_path: str | Path) -> dict:
             or {
                 "mtp.layers.0.mlp.switch_mlp.gate_proj.weight",
                 "mtp.layers.0.mlp.switch_mlp.up_proj.weight",
-            } <= normalized
+            }
+            <= normalized
         )
         # The official checkpoint keeps the experts fused in the hub layout
         # (``experts.gate_up_proj`` [E, 2I, H], ``experts.down_proj``
@@ -163,7 +170,11 @@ def inspect_artifact(model_path: str | Path) -> dict:
         "weight_map": weight_map,
         "has_mtp": has_mtp,
         "mtp_tensor_count": len(mtp_keys),
-        "identity": {"path": str(path), "fingerprint": digest.hexdigest(), "files": records},
+        "identity": {
+            "path": str(path),
+            "fingerprint": digest.hexdigest(),
+            "files": records,
+        },
     }
 
 
@@ -181,22 +192,62 @@ def inspect_artifact(model_path: str | Path) -> dict:
 #     gate/up tables (qwen4_routed_decode candidate).  UNQUALIFIED, default
 #     off, explicit execution policy only (never inherited from the
 #     environment); loading refuses it when no MoE layer admits it.
-# The MoE router and fused-expert kernels are shape-locked to Flash-Next's
-# 512-expert top-10 layout and cannot engage on this 256/top-8 model.
+# New decode slices below are explicit-only, default-off and unqualified.
+# The Flash-Next tile4 down remains ineligible; Qwen3.6 keeps stock down numerics.
 KERNEL_POLICY_ENV = {
     "fused_gdn_decode": "MLX_QWEN36_FUSED_GDN_DECODE",
     "moe_fused_gate_up": "MLX_QWEN4_MOE_FUSED_GATE_UP",
     "gdn_core": "MLX_GDN_CORE",
     "moe_routed_candidate": "MLX_QWEN36_MOE_ROUTED_CANDIDATE",
+    "moe_routed_decode": "MLX_QWEN4_MOE_ROUTED_DECODE",
+    "moe_topk_fold": "MLX_QWEN4_MOE_TOPK_FOLD",
+    "moe_window": "MLX_QWEN36_MOE_WINDOW",
+    "fused_gdn_batch_decode": "MLX_QWEN36_FUSED_GDN_BATCH_DECODE",
+    "fused_gdn_verify": "MLX_QWEN36_FUSED_GDN_VERIFY",
+    "fused_gdn_batch_verify": "MLX_QWEN36_FUSED_GDN_BATCH_VERIFY",
 }
-EXPLICIT_ONLY_KERNELS = frozenset({"moe_routed_candidate"})
+NEW_DECODE_KERNELS = frozenset(
+    {
+        "moe_routed_decode",
+        "moe_topk_fold",
+        "moe_window",
+        "fused_gdn_batch_decode",
+        "fused_gdn_verify",
+        "fused_gdn_batch_verify",
+    }
+)
+ENUM_KERNELS = {
+    "moe_routed_decode": (
+        "off",
+        "gate_up",
+        "gate_up_down",
+        "gate_up_down_shared",
+        "two_launch",
+    ),
+    "moe_topk_fold": ("off", "launch"),
+}
+EXPLICIT_ONLY_KERNELS = NEW_DECODE_KERNELS | {"moe_routed_candidate"}
+
+
+def validate_kernel_choice(key, value):
+    if key in ENUM_KERNELS:
+        if value not in ENUM_KERNELS[key]:
+            raise ValueError(f"Qwen3.6 {key} must be one of {ENUM_KERNELS[key]}")
+    elif type(value) is not bool:
+        raise ValueError(f"Qwen3.6 {key} must be boolean")
+    return value
+
+
+def choice_selected(key, value):
+    return value != "off" if key in ENUM_KERNELS else bool(value)
 
 
 def configure_environment(kernels=None) -> dict[str, str]:
     profile = {
         "HF_HUB_OFFLINE": "1",
         "TRANSFORMERS_OFFLINE": "1",
-        **PROCESS_NUMERICS, "MLX_GDN_PACKED": "1",
+        **PROCESS_NUMERICS,
+        "MLX_GDN_PACKED": "1",
         "MLX_GDN_CORE": "0",
         "MLX_QWEN36_FUSED_GDN_DECODE": "0",
         "MLX_LM_COMPILED_DECODE": "0",
@@ -218,11 +269,20 @@ def configure_environment(kernels=None) -> dict[str, str]:
         if name in os.environ and key not in EXPLICIT_ONLY_KERNELS:
             profile[name] = os.environ[name]
     for key, enabled in (kernels or {}).items():
-        if key in EXPLICIT_ONLY_KERNELS and not enabled:
+        validate_kernel_choice(key, enabled)
+        if key in EXPLICIT_ONLY_KERNELS and not choice_selected(key, enabled):
             # Absent unless selected, so stock receipts keep matching; an
             # inherited value is cleared with the MLX_QWEN prefix below.
             continue
-        profile[KERNEL_POLICY_ENV[key]] = "1" if enabled else "0"
+        profile[KERNEL_POLICY_ENV[key]] = (
+            enabled if key in ENUM_KERNELS else ("1" if enabled else "0")
+        )
+    if any(
+        choice_selected(key, value)
+        for key, value in (kernels or {}).items()
+        if key in NEW_DECODE_KERNELS
+    ):
+        profile["MLX_QWEN36_DECODE_WINS"] = "1"
     for name in tuple(os.environ):
         if name.startswith(("MLX_QWEN", "MLX_LM_", "MLXUAG_", "MLX_GDN_")):
             del os.environ[name]
@@ -246,9 +306,7 @@ class Qwen3635BA3BAdapter(Qwen3827BAdapter):
     default_route = "native_mtp"
     # Required by the route above, not merely available to it: see the note on
     # ``default_route``.  Also applies when native MTP is selected explicitly.
-    default_mtp_ordinary_handoff_max_width = (
-        DEFAULT_MTP_ORDINARY_HANDOFF_MAX_WIDTH
-    )
+    default_mtp_ordinary_handoff_max_width = DEFAULT_MTP_ORDINARY_HANDOFF_MAX_WIDTH
     # Interior checkpoints ``"auto"``: measured on the two sibling hybrids that
     # share this GDN cache and capture path (Flash-Next and Qwen3.8 27B native
     # MTP, zero output differences; qualification/runs/interior-ckpt-20260919).
@@ -272,6 +330,7 @@ class Qwen3635BA3BAdapter(Qwen3827BAdapter):
     # Vendor sampling defaults: Qwen/Qwen3.6-35B-A3B model card and the
     # artifact's generation_config.json (see ``adapters/qwen.py``).
     from .qwen import QWEN36_35B_SAMPLING as sampling_defaults
+
     # Early-load MoE expert streaming (runtime/streamed_load.py).  Read from
     # this class's own __dict__: subclasses must declare it themselves.
     weight_streaming_modes = frozenset({"moe_experts"})
@@ -291,14 +350,19 @@ class Qwen3635BA3BAdapter(Qwen3827BAdapter):
             raise ValueError("execution policy must be a JSON object")
         policy = {} if execution_policy is None else dict(execution_policy)
         if set(policy) - {
-            "num_draft", "gdn_state_dtype", *KERNEL_POLICY_ENV, *EAGER_DISPATCH_POLICY_KEYS
+            "num_draft",
+            "gdn_state_dtype",
+            *KERNEL_POLICY_ENV,
+            *EAGER_DISPATCH_POLICY_KEYS,
         }:
             raise ValueError(
                 "Qwen3.6 execution policy supports only num_draft, gdn_state_dtype, "
                 "the eager-dispatch keys and the kernel switches "
                 + ", ".join(sorted(KERNEL_POLICY_ENV))
             )
-        eager_dispatch = eager_dispatch_policy(policy, self.default_eager_dispatch_stride)
+        eager_dispatch = eager_dispatch_policy(
+            policy, self.default_eager_dispatch_stride
+        )
         from .flash_next_policy import FlashNextPolicy
 
         # GDN recurrent-state storage class (runtime/models/gdn_state.py).
@@ -309,10 +373,22 @@ class Qwen3635BA3BAdapter(Qwen3827BAdapter):
         self._kernels = {}
         for key in KERNEL_POLICY_ENV:
             if key in policy:
-                if type(policy[key]) is not bool:
-                    raise ValueError(f"Qwen3.6 {key} must be boolean")
-                self._kernels[key] = policy[key]
-        if stream_request is not None and self._kernels.get("moe_routed_candidate"):
+                self._kernels[key] = validate_kernel_choice(key, policy[key])
+        if self._kernels.get("moe_routed_candidate") and (
+            self._kernels.get("moe_routed_decode", "off") != "off"
+            or self._kernels.get("moe_window")
+        ):
+            raise ValueError(
+                "historical routed candidate and new routed/window slices are exclusive"
+            )
+        if stream_request is not None and (
+            self._kernels.get("moe_routed_candidate")
+            or any(
+                choice_selected(k, v)
+                for k, v in self._kernels.items()
+                if k in {"moe_routed_decode", "moe_window"}
+            )
+        ):
             raise ValueError(
                 "moe_routed_candidate reads resident expert tables and cannot "
                 "run with weight streaming"
@@ -338,18 +414,26 @@ class Qwen3635BA3BAdapter(Qwen3827BAdapter):
             config["text_config"]["mtp_num_hidden_layers"] = 0
 
         from transformers import AutoTokenizer
+
         from ..runtime.tokenizer_utils import BPEStreamingDetokenizer, TokenizerWrapper
         from ..runtime.ubc_evict import load_shards_evicting
 
         try:
             self._load_weights(
-                path, artifact, config, stream_request, load_shards_evicting,
+                path,
+                artifact,
+                config,
+                stream_request,
+                load_shards_evicting,
                 eager_dispatch,
             )
             self._record_load_dtype()
             self._select_gdn_state(gdn_state_dtype)
             self._select_routed_candidate()
-            tokenizer = AutoTokenizer.from_pretrained(path, local_files_only=True, trust_remote_code=False)
+            self._select_decode_wins()
+            tokenizer = AutoTokenizer.from_pretrained(
+                path, local_files_only=True, trust_remote_code=False
+            )
             # transformers' Qwen2Tokenizer drops the declared combining-mark split rule.
             from ..runtime.tokenizer_integrity import repair_loaded_tokenizer
 
@@ -369,7 +453,13 @@ class Qwen3635BA3BAdapter(Qwen3827BAdapter):
             raise
 
     def _load_weights(
-        self, path, artifact, config, stream_request, load_shards_evicting, eager_dispatch
+        self,
+        path,
+        artifact,
+        config,
+        stream_request,
+        load_shards_evicting,
+        eager_dispatch,
     ):
         """Build ``self.model`` and load its weights, ordinary or streamed.
 
@@ -379,6 +469,7 @@ class Qwen3635BA3BAdapter(Qwen3827BAdapter):
         """
         import mlx.core as mx
         import mlx.nn as nn
+
         from ..runtime.models.qwen36_35b import Model, ModelArgs
         from .norm_repair import norm_means
 
@@ -415,7 +506,9 @@ class Qwen3635BA3BAdapter(Qwen3827BAdapter):
         # ``sanitize`` decided the norm fold per group and repaired MTP norms
         # a converter left unshifted (oQ's mean<0.5 rule skips four of seven
         # on this head; see norm_repair). Record which ones.
-        report = getattr(getattr(self.model, "language_model", None), "norm_convention", None)
+        report = getattr(
+            getattr(self.model, "language_model", None), "norm_convention", None
+        )
         self.norm_convention = report
         self.mtp_norm_repairs = [] if report is None else report.repaired_head_keys
         self.mtp_norm_means = norm_means(weights, "mtp.")
@@ -498,10 +591,15 @@ class Qwen3635BA3BAdapter(Qwen3827BAdapter):
         if self.environment.get("MLX_QWEN36_MOE_ROUTED_CANDIDATE") != "1":
             return
         import mlx.core as mx
+
         from ..runtime.models import qwen4_routed_decode as routed
         from ..runtime.models.qwen3_next import Qwen3NextSparseMoeBlock
 
-        blocks = [m for _, m in self.model.named_modules() if isinstance(m, Qwen3NextSparseMoeBlock)]
+        blocks = [
+            m
+            for _, m in self.model.named_modules()
+            if isinstance(m, Qwen3NextSparseMoeBlock)
+        ]
         if not blocks:
             raise ValueError("moe_routed_candidate: no MoE layer")
         for block in blocks:
@@ -511,18 +609,55 @@ class Qwen3635BA3BAdapter(Qwen3827BAdapter):
             inds = mx.zeros((1, 1, block.top_k), dtype=mx.uint32)
             scores = mx.zeros((1, 1, block.top_k), dtype=mx.bfloat16)
             admission = routed.admit_routed_candidate(
-                probe, inds, scores,
-                switch.get("gate_proj"), switch.get("up_proj"), switch.down_proj,
+                probe,
+                inds,
+                scores,
+                switch.get("gate_proj"),
+                switch.get("up_proj"),
+                switch.down_proj,
             )
             if not admission.accepted:
                 raise ValueError(f"moe_routed_candidate refused: {admission.reason}")
             block.set_moe_routed_candidate_mode("two_launch")
 
+    def _select_decode_wins(self):
+        # Live setters make the selection independent of import-time latches.
+        from ..runtime.models.qwen36_35b import GatedDeltaNet
+        from ..runtime.models.qwen36_moe_decode import Qwen36SparseMoeBlock
+
+        for _, module in self.model.named_modules():
+            if isinstance(module, GatedDeltaNet):
+                for choice in ("batch_decode", "verify", "batch_verify"):
+                    key = "fused_gdn_" + choice
+                    getattr(module, "set_" + key + "_mode")(
+                        "row_exact" if self._kernels.get(key, False) else "off"
+                    )
+            if isinstance(module, Qwen36SparseMoeBlock):
+                module.set_moe_routed_decode_mode(
+                    self._kernels.get("moe_routed_decode", "off")
+                )
+                module.set_moe_topk_mode(self._kernels.get("moe_topk_fold", "off"))
+                module.set_moe_window_consumers(
+                    ("batch_decode", "verify", "row_exact")
+                    if self._kernels.get("moe_window")
+                    else ()
+                )
+
     def diagnostics(self):
         result = super().diagnostics()
         result["architecture"] = "sparse-moe-hybrid-gdn-gqa"
         result["layout"] = self.layout
-        result["optimized_moe_selected"] = False
+        result["optimized_moe_selected"] = any(
+            choice_selected(k, v)
+            for k, v in (getattr(self, "_kernels", None) or {}).items()
+            if k
+            in {
+                "moe_routed_decode",
+                "moe_topk_fold",
+                "moe_window",
+                "moe_routed_candidate",
+            }
+        )
         result["compiled_decode_selected"] = False
         result["mtp_norm_repairs"] = list(getattr(self, "mtp_norm_repairs", ()))
         result["mtp_norm_means"] = dict(getattr(self, "mtp_norm_means", {}))
@@ -537,5 +672,16 @@ class Qwen3635BA3BAdapter(Qwen3827BAdapter):
             result["moe_routed_candidate"] = {
                 "qualification": "unqualified",
                 **routed_candidate_stats(self.model),
+            }
+        if any(
+            choice_selected(k, v)
+            for k, v in (getattr(self, "_kernels", None) or {}).items()
+            if k in NEW_DECODE_KERNELS
+        ):
+            from ..runtime.models.qwen36_35b import qwen36_decode_wins_stats
+
+            result["decode_wins"] = {
+                "qualification": "unqualified",
+                **qwen36_decode_wins_stats(self.model),
             }
         return result

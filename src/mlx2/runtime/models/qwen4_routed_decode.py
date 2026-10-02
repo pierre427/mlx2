@@ -223,10 +223,11 @@ def admit_split_routed_decode(x, indices, scores, gate, up, down) -> RoutedDecod
         return RoutedDecodeAdmission(False, "not one token")
     if x.dtype != mx.bfloat16:
         return RoutedDecodeAdmission(False, "activation must be bfloat16")
-    if indices.size != TOP_K or indices.shape[-1] != TOP_K:
-        return RoutedDecodeAdmission(False, f"top-k must be {TOP_K}")
-    if scores is not None and (scores.size != TOP_K or scores.dtype != x.dtype):
-        return RoutedDecodeAdmission(False, "scores must be [10] in the activation dtype")
+    top_k = indices.shape[-1]
+    if top_k not in (8, TOP_K) or indices.size != top_k:
+        return RoutedDecodeAdmission(False, "top-k must be 8 or 10")
+    if scores is not None and (scores.size != top_k or scores.dtype != x.dtype):
+        return RoutedDecodeAdmission(False, "scores must be [top-k] in the activation dtype")
     from .switch_layers import QuantizedSwitchLinear
 
     for name, layer in (("gate", gate), ("up", up), ("down", down)):
@@ -241,8 +242,11 @@ def admit_split_routed_decode(x, indices, scores, gate, up, down) -> RoutedDecod
     inter = down["weight"].shape[-1] * 32 // BITS
     if hidden % 512:
         return RoutedDecodeAdmission(False, "hidden % 512 != 0 (MLX would not pick qmv_fast)")
-    if inter % 512 == 0 or inter % GROUP_SIZE:
+    qwen36 = (experts, hidden, inter, top_k) == (256, 2048, 512, 8)
+    if (inter % 512 == 0 and not qwen36) or inter % GROUP_SIZE:
         return RoutedDecodeAdmission(False, "intermediate must be a non-multiple of 512, multiple of 64")
+    if top_k == 8 and not qwen36:
+        return RoutedDecodeAdmission(False, "unsupported top-8 geometry")
     table = (experts, inter, hidden * BITS // 32)
     if tuple(gate["weight"].shape) != table or tuple(up["weight"].shape) != table:
         return RoutedDecodeAdmission(False, "gate/up tables do not match down")
@@ -858,8 +862,9 @@ def down_combine(h, indices, scores, down):
 
 
 def split_gate_up_swiglu(x, indices, gate, up):
-    """``swiglu(gate_j(x), up_j(x))`` of the ten routed experts from separate
-    gate and up tables for one token: [10, inter]."""
+    """``swiglu(gate_j(x), up_j(x))`` from separate tables for one token:
+    [top_k, inter]. The caller runs exact geometry admission first."""
+    top_k = indices.shape[-1]
     hidden = x.shape[-1]
     inter = gate["weight"].shape[1]
     rows = GATE_UP_ROWS * GATE_UP_SIMDGROUPS
@@ -869,7 +874,7 @@ def split_gate_up_swiglu(x, indices, gate, up):
             x.reshape(hidden),
             *expert_operands(gate),
             *expert_operands(up),
-            indices.reshape(TOP_K).astype(mx.uint32),
+            indices.reshape(top_k).astype(mx.uint32),
         ],
         template=[
             ("T", x.dtype),
@@ -877,11 +882,11 @@ def split_gate_up_swiglu(x, indices, gate, up):
             ("NI", inter),
             ("RPS", GATE_UP_ROWS),
             ("NSG", GATE_UP_SIMDGROUPS),
-            ("TOPK", TOP_K),
+            ("TOPK", top_k),
         ],
-        grid=(32, GATE_UP_SIMDGROUPS * inter // rows, TOP_K),
+        grid=(32, GATE_UP_SIMDGROUPS * inter // rows, top_k),
         threadgroup=(32, GATE_UP_SIMDGROUPS, 1),
-        output_shapes=[(TOP_K, inter)],
+        output_shapes=[(top_k, inter)],
         output_dtypes=[x.dtype],
     )[0]
 
@@ -995,10 +1000,10 @@ METAL_FUNC void qmv_rows(
 """
 
 
-def _format_header(namespace: str, bits: int, fast: bool) -> str:
+def _format_header(namespace: str, bits: int, fast: bool, group_size: int = GROUP_SIZE) -> str:
     body = (
         QMV_HEADER.replace("__BITS__", str(bits))
-        .replace("__GS__", str(GROUP_SIZE))
+        .replace("__GS__", str(group_size))
         .replace("__FAST__", "1" if fast else "0")
         .replace("using namespace metal;", "")
     )
@@ -1207,7 +1212,7 @@ def _shared_kernels(gate_up_bits: int = BITS, down_bits: int = BITS):
     return kernels
 
 
-def _linear_ok(layer, bits: int, out_dims: int, in_dims: int) -> str | None:
+def _linear_ok(layer, bits: int, out_dims: int, in_dims: int, group_size: int = GROUP_SIZE) -> str | None:
     import mlx.nn as nn
 
     # The row-exact verify route (qwen4_row_exact) swaps in a subclass whose
@@ -1216,8 +1221,8 @@ def _linear_ok(layer, bits: int, out_dims: int, in_dims: int) -> str | None:
         return "not a plain QuantizedLinear"
     if "_lane_prepared" in layer.__dict__:
         return "lane matmul installed"
-    if (layer.bits, layer.group_size, getattr(layer, "mode", "affine")) != (bits, GROUP_SIZE, "affine"):
-        return f"format b{layer.bits}g{layer.group_size} != b{bits}g{GROUP_SIZE}"
+    if (layer.bits, layer.group_size, getattr(layer, "mode", "affine")) != (bits, group_size, "affine"):
+        return f"format b{layer.bits}g{layer.group_size} != b{bits}g{group_size}"
     if "bias" in layer or "biases" not in layer:
         return "needs affine biases and no linear bias"
     if layer["scales"].dtype != mx.bfloat16 or layer["biases"].dtype != mx.bfloat16:
@@ -1550,7 +1555,7 @@ def _candidate_kernel(kind: str, fast: bool):
     return _CANDIDATE_KERNELS[key]
 
 
-def candidate_gate_up_swiglu(x, indices, gate, up):
+def candidate_gate_up_swiglu(x, indices, gate, up, *, views=False):
     """``swiglu(gate_j(x), up_j(x))`` for the top-k routed experts: [top_k, inter]."""
     hidden = x.shape[-1]
     inter = gate["weight"].shape[1]
@@ -1559,8 +1564,8 @@ def candidate_gate_up_swiglu(x, indices, gate, up):
     return _candidate_kernel("gate_up", True)(
         inputs=[
             x.reshape(hidden),
-            gate["weight"], gate["scales"], gate["biases"],
-            up["weight"], up["scales"], up["biases"],
+            *(expert_operands(gate) if views else (gate["weight"], gate["scales"], gate["biases"])),
+            *(expert_operands(up) if views else (up["weight"], up["scales"], up["biases"])),
             indices.reshape(top_k).astype(mx.uint32),
         ],
         template=[
@@ -1574,7 +1579,7 @@ def candidate_gate_up_swiglu(x, indices, gate, up):
     )[0]
 
 
-def candidate_down_combine(h, indices, scores, down):
+def candidate_down_combine(h, indices, scores, down, *, views=False):
     """``sum_j scores[j] * down_j(h[j])`` with MLX's traversal for the shape."""
     top_k = indices.size
     inter = h.shape[-1]
@@ -1582,7 +1587,7 @@ def candidate_down_combine(h, indices, scores, down):
     return _candidate_kernel("down", qmv_fast_layout(inter, hidden))(
         inputs=[
             h.reshape(top_k, inter),
-            down["weight"], down["scales"], down["biases"],
+            *(expert_operands(down) if views else (down["weight"], down["scales"], down["biases"])),
             indices.reshape(top_k).astype(mx.uint32),
             scores.reshape(top_k),
         ],

@@ -610,7 +610,9 @@ def _try_routed_decode(switch_mlp, x, indices, scores, do_sort, variant="scalar"
             switch_mlp.routed_down_last_fallback = None
             return ("gate_up_down", y.reshape(indices.shape[:-1] + (y.shape[-1],)))
     if mode == "two_launch":
-        y = _routed.down_combine(hidden, indices, scores, switch_mlp.down_proj)
+        # Top-8 width-512 down runs qmv_fast, unlike Flash-Next qmv.
+        kernel = _routed.candidate_down_combine if indices.size == 8 else _routed.down_combine
+        y = kernel(hidden, indices, scores, switch_mlp.down_proj)
         switch_mlp.routed_down_calls += 1
         switch_mlp.routed_decode_down_calls += 1
         return ("two_launch", y.reshape(indices.shape[:-1] + (y.shape[-1],)))
@@ -876,7 +878,10 @@ def _run_moe_window(block, x, rows, consumer):
     if mode == "fold" and rows > _window.topk_fold_max_rows():
         mode = "launch"
     if mode == "launch":
-        (inds, scores) = _window.router_topk(gates)
+        (inds, scores) = (
+        _window.router_topk(gates) if block.top_k == _window.TOP_K
+        else _window.router_topk(gates, top_k=block.top_k)
+    )
     elif mode == "off":
         (inds, scores) = _stock_routing(block, gates)
     else:
@@ -1004,11 +1009,14 @@ def _try_topk_launch(block, x, gates):
         block.moe_topk_fallbacks += 1
         block.moe_topk_last_fallback = refusal
         return None
-    (inds, scores) = _window.router_topk(gates)
+    (inds, scores) = (
+        _window.router_topk(gates) if block.top_k == _window.TOP_K
+        else _window.router_topk(gates, top_k=block.top_k)
+    )
     block.moe_topk_calls["launch"] += 1
     block.moe_topk_last_fallback = None
     lead = gates.shape[:-1]
-    return inds.reshape(*lead, _window.TOP_K), scores.reshape(*lead, _window.TOP_K)
+    return inds.reshape(*lead, block.top_k), scores.reshape(*lead, block.top_k)
 
 
 _CANDIDATE_REASON_SLOTS = 16

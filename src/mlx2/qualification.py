@@ -340,6 +340,7 @@ PROVENANCE_ONLY_SETTINGS = frozenset(
 # selects one serves only as an unqualified route.  Each entry leaves when
 # its Metal gate, paired model A/B and a harness observation exist.
 UNQUALIFIABLE_CANDIDATES = {
+    "MLX_QWEN36_DECODE_WINS": "Qwen3.6 decode slices: pending real-weight Metal identity and full-model A/B",
     "MLX_QWEN36_MOE_ROUTED_CANDIDATE": (
         "omlx #4113 routed-decode candidate: pending the Metal geometry check "
         "and paired model A/B"
