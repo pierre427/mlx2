@@ -25,6 +25,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import sys
 
 from ..process_env import PROCESS_NUMERICS
 
@@ -45,6 +46,48 @@ CANDIDATE_ENV = {
     "MLX2_QSDPA_SCORES_BUDGET_BYTES": "int",
 }
 _FALSE = {"", "0", "false", "off", "no"}
+
+# Sorted-MoE pad policy (switch_layers): which of gather_qmv and the padded
+# gather_qmm_rhs a sorted expert gather runs.  ``adaptive``/``always`` pick
+# the other kernel than the default floor for some prefill chunk sizes, and
+# the two reduce in different orders (qualification/runs/
+# moe-adaptive-pad-20261001), so a prefix cached under one policy must not
+# be reused under another.  The floor row count stays a reported exemption
+# (tests/test_apc_key_differential.py NOT_BOUND).
+MOE_RHS_PAD_POLICY_ENV = "MLX2_MOE_RHS_PAD_POLICY"
+MOE_RHS_PAD_MIN_ROWS_ENV = "MLX2_MOE_RHS_PAD_MIN_ROWS"
+MOE_RHS_PAD_DEFAULT = {"policy": "floor", "min_rows_per_expert": 3}
+_SWITCH_LAYERS = "mlx2.runtime.models.switch_layers"
+
+
+def moe_rhs_pad_effective(environ=None) -> dict:
+    """``{"policy", "min_rows_per_expert"}`` the sorted-MoE gathers run under.
+
+    With ``environ`` None this is the value ``switch_layers`` latched at
+    import when it is loaded (what actually runs), else the process
+    environment.  A zero floor turns every pad off, so the policy is ``off``.
+    """
+    module = sys.modules.get(_SWITCH_LAYERS) if environ is None else None
+    if module is not None:
+        policy = module._RHS_PAD_POLICY
+        floor = module._RHS_PAD_MIN_ROWS_PER_EXPERT
+    else:
+        env = os.environ if environ is None else environ
+        policy = (env.get(MOE_RHS_PAD_POLICY_ENV, "floor") or "floor").strip().lower()
+        raw = env.get(MOE_RHS_PAD_MIN_ROWS_ENV, "3") or "0"
+        try:
+            floor = int(raw)
+        except ValueError:
+            floor = raw.strip()
+    if floor == 0:
+        policy = "off"
+    return {"policy": policy, "min_rows_per_expert": floor}
+
+
+def moe_rhs_pad_identity(environ=None):
+    """The effective sorted-MoE pad law, or None when it is the default."""
+    effective = moe_rhs_pad_effective(environ)
+    return None if effective == MOE_RHS_PAD_DEFAULT else effective
 
 
 def _bound_value(kind: str, raw: str):
@@ -73,6 +116,9 @@ def execution_numerics_identity(environ=None, *, sp_qmm=False, verify_bitexact=F
             value = _bound_value(kind, raw)
             if value is not None:
                 bound[name] = value
+    policy = moe_rhs_pad_effective(environ)["policy"]
+    if policy not in {"floor", "off"}:
+        bound[MOE_RHS_PAD_POLICY_ENV] = policy
     if sp_qmm:
         bound["sp_qmm"] = True
     if verify_bitexact:

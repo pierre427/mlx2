@@ -169,6 +169,15 @@ BOUND = {
         )
         for name, kind in CANDIDATE_ENV.items()
     },
+    # Sorted-MoE pad policy: adaptive/always run gather_qmv or the padded
+    # gather_qmm_rhs where the default floor runs the other, for the same
+    # prefill chunk (review item 1; the floor row count stays NOT_BOUND).
+    "env: MLX2_MOE_RHS_PAD_POLICY=adaptive": (
+        {"env": {"MLX2_MOE_RHS_PAD_POLICY": "adaptive"}}, "sorted-MoE expert kernel choice",
+    ),
+    "env: MLX2_MOE_RHS_PAD_POLICY=always": (
+        {"env": {"MLX2_MOE_RHS_PAD_POLICY": "always"}}, "sorted-MoE expert kernel choice",
+    ),
     "sp_qmm": ({"sp_qmm": True}, "M=2..16 matmuls (prefill tails), not bitwise identical"),
     "verify_bitexact": ({"verify_bitexact": True}, "every M<=max_m matmul (prefill tails)"),
 }
@@ -205,8 +214,10 @@ NOT_BOUND = {
     # floor, and chunk geometry already moves it (tolerance class, like
     # prefill slicing).
     "env: MLX2_MOE_RHS_PAD_MIN_ROWS": {"env": {"MLX2_MOE_RHS_PAD_MIN_ROWS": "0"}},
-    # Adaptive per-table choice between the same two kernels (same class).
-    "env: MLX2_MOE_RHS_PAD_POLICY": {"env": {"MLX2_MOE_RHS_PAD_POLICY": "adaptive"}},
+    # A zero floor turns padding off whatever the pad policy says.
+    "env: MLX2_MOE_RHS_PAD_POLICY under a zero floor": {
+        "env": {"MLX2_MOE_RHS_PAD_POLICY": "adaptive", "MLX2_MOE_RHS_PAD_MIN_ROWS": "0"}
+    },
     # Fused routed weighted sum: replays MLX's col_reduce_small order, bit-exact
     # against the eager tail (qualification/runs/recon-20261001/l4-moe-wsum).
     "env: MLX_QWEN4_MOE_WEIGHTED_SUM": {"env": {"MLX_QWEN4_MOE_WEIGHTED_SUM": "1"}},
@@ -276,7 +287,12 @@ def _server(directory, template):
 
 @pytest.mark.parametrize(
     "env",
-    [{"MLX_GDN_CORE": "1"}, {"MLX_ENABLE_TF32": "1"}, {"MLX_QWEN4_MOE_ROUTER_KERNEL": "1"}],
+    [
+        {"MLX_GDN_CORE": "1"},
+        {"MLX_ENABLE_TF32": "1"},
+        {"MLX_QWEN4_MOE_ROUTER_KERNEL": "1"},
+        {"MLX2_MOE_RHS_PAD_POLICY": "adaptive"},
+    ],
 )
 def test_persistent_identity_refuses_another_execution_law(tmp_path, env):
     base = build_key(tmp_path / "k")

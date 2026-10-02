@@ -35,6 +35,7 @@ from .sampling_defaults import (
     vendor_sampling,
 )
 from .batch_metrics import BatchFaultSpec, BatchRuntimeMetrics, HttpRuntimeMetrics
+from .runtime.apc_numerics import moe_rhs_pad_identity as _moe_rhs_pad_identity
 
 log = logging.getLogger(__name__)
 
@@ -5467,6 +5468,15 @@ class ServingEngine:
                 **(
                     {"adapter_policy": adapter.policy.as_dict()}
                     if callable(getattr(getattr(adapter, "policy", None), "as_dict", None))
+                    else {}
+                ),
+                # Process-wide sorted-MoE kernel choice (switch_layers): an
+                # adaptive or always-pad policy, or another floor, runs other
+                # kernels than the default floor, so a floor receipt must not
+                # qualify it.  Absent at the default so receipts are unchanged.
+                **(
+                    {"moe_rhs_pad": moe_rhs_pad}
+                    if (moe_rhs_pad := _moe_rhs_pad_identity()) is not None
                     else {}
                 ),
                 "adaptive_mtp_depth": self.adaptive_mtp_policy.as_dict(),
