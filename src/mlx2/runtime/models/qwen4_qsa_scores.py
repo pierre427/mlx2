@@ -103,9 +103,11 @@ def status(*, reset: bool = False) -> dict:
 
 
 def _tf32_off() -> bool:
-    # MLX latches MLX_ENABLE_TF32 at its first fp32 matmul; with TF32 on the
-    # stock scores run the NAX GEMM, whose bits this kernel does not follow.
-    return os.environ.get("MLX_ENABLE_TF32", "0").strip() in ("0", "")
+    # MLX latches TF32 at its first fp32 matmul; with TF32 on the stock scores
+    # run the NAX GEMM, whose bits this kernel does not follow.
+    from ...process_env import tf32_enabled
+
+    return not tf32_enabled()
 
 
 def supported(q: mx.array, pooled: mx.array) -> str | None:

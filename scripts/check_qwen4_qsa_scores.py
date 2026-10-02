@@ -13,7 +13,6 @@ per eval, median of 7).  Real-layer checks: scripts/check_tf_longctx_layers.py.
 
 import argparse
 import json
-import math
 import statistics
 import time
 

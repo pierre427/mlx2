@@ -15,7 +15,15 @@ from __future__ import annotations
 
 import os
 
-PROCESS_NUMERICS = {"MLX_ENABLE_TF32": "0"}
+TF32_ENV = "MLX_ENABLE_TF32"
+PROCESS_NUMERICS = {TF32_ENV: "0"}
+
+
+def tf32_enabled(environ=None) -> bool:
+    """Whether this process runs fp32 matmuls at TF32 (the owner of the
+    variable reads it for kernels whose bits depend on it)."""
+    target = os.environ if environ is None else environ
+    return target.get(TF32_ENV, PROCESS_NUMERICS[TF32_ENV]).strip() not in ("0", "")
 
 
 def apply_process_numerics(environ=None) -> dict:
