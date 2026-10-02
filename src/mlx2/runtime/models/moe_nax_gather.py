@@ -53,6 +53,8 @@ import logging
 import math
 import os
 import threading
+from contextlib import contextmanager
+from contextvars import ContextVar
 from functools import partial
 from pathlib import Path
 from typing import NamedTuple, Optional
@@ -2093,7 +2095,75 @@ calls = {"gather": 0, "swiglu": 0, "swiglu_map": 0, "swiglu_split": 0,
          "swiglu_split_map": 0}
 fallbacks: dict = {}
 not_candidates = 0
+# Sorted gathers of a non-prefill forward (decode, MTP drafting, verify):
+# never offered to the kernel, whatever their (padded) row count.
+not_prefill = 0
 last_fallback: Optional[str] = None
+
+
+# Execution phase (Codex port review 2026-10-02 item 7).  The port's contract
+# is prefill only; admission by row count alone let a padded batched decode
+# in (32 one-token lanes x top-10 of 512 experts = 320 rows, padded by the
+# adaptive/always rhs pad to the 2048-row streaming floor).  A trunk forward
+# opens ``forward_scope``: True for a prefill forward, False otherwise; the
+# MoE call sites admit NAX only while it is True.  None = no trunk decided
+# (a bare module call): not prefill.  Nested trunk calls keep the outer
+# decision, as the invariant lane does.
+_PREFILL: ContextVar[Optional[bool]] = ContextVar("mlx2_moe_nax_prefill", default=None)
+
+
+def prefill_active() -> bool:
+    """Whether the current forward is a prefill forward (NAX admissible)."""
+    return _PREFILL.get() is True
+
+
+@contextmanager
+def prefill_scope(enabled: bool = True):
+    """Mark the enclosed calls as one prefill forward (or not)."""
+    token = _PREFILL.set(bool(enabled))
+    try:
+        yield
+    finally:
+        _PREFILL.reset(token)
+
+
+def is_prefill_forward(inputs, cache) -> bool:
+    """A trunk forward over more than one row per lane that is not a
+    speculative verify window (verify scope, a speculating cache, or a
+    prepared segmented verify block).  Decode at any batch width is not."""
+    from .invariant_prefill import prefill_decline_reason
+
+    if prefill_decline_reason(inputs, cache) is not None:
+        return False
+    if cache is not None and any(
+        getattr(entry, "_step_lengths", None) is not None
+        for entry in cache
+        if entry is not None
+    ):
+        return False
+    return True
+
+
+@contextmanager
+def forward_scope(inputs, cache):
+    """Open the phase for one trunk forward (no-op while off or nested)."""
+    if MODE == "off" or _PREFILL.get() is not None:
+        yield
+        return
+    token = _PREFILL.set(is_prefill_forward(inputs, cache))
+    try:
+        yield
+    finally:
+        _PREFILL.reset(token)
+
+
+def admit_phase() -> bool:
+    """Call-site gate: True inside a prefill forward, else counted."""
+    global not_prefill
+    if _PREFILL.get() is True:
+        return True
+    not_prefill += 1
+    return False
 
 
 def set_mode(mode: str) -> str:
@@ -2107,7 +2177,7 @@ def set_mode(mode: str) -> str:
 
 def status(*, reset: bool = False) -> dict:
     """Mode, host gate, engaged calls, fallbacks with reasons, armed kernels."""
-    global not_candidates, last_fallback
+    global not_candidates, not_prefill, last_fallback
     out = {
         "mode": MODE,
         "nax_host": nax_host() if MODE != "off" else _nax_host,
@@ -2115,6 +2185,7 @@ def status(*, reset: bool = False) -> dict:
         "calls": dict(calls),
         "fallbacks": dict(fallbacks),
         "not_candidates": not_candidates,
+        "not_prefill": not_prefill,
         "last_fallback": last_fallback,
         "verified": {_describe(k): v for k, v in _verified.items()},
     }
@@ -2123,6 +2194,7 @@ def status(*, reset: bool = False) -> dict:
             calls[k] = 0
         fallbacks.clear()
         not_candidates = 0
+        not_prefill = 0
         last_fallback = None
     return out
 

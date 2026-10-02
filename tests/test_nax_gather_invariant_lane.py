@@ -17,7 +17,9 @@ from mlx2.runtime.models import switch_layers as sl
 @pytest.fixture(autouse=True)
 def _reset():
     old = nax.MODE
-    yield
+    # Inside a prefill forward: the lane is the only reason NAX stands aside.
+    with nax.prefill_scope():
+        yield
     nax.set_mode(old)
 
 

@@ -259,8 +259,9 @@ class FlashNextPolicy:
     # the stock op) run a segmented kernel; "fused" also runs gate and up of
     # the split tables in one launch with silu(gate) * up in its epilogue,
     # reading the token rows through the sorted row map.  Decode and MTP
-    # verify are below the floor and untouched.  Default "fused" on
-    # Flash-Next since 2026-10-02: prefill MoE bit-identical on the served and
+    # verify never take it: the kernel is offered inside a prefill forward
+    # only (moe_nax_gather.forward_scope), at any batch width or padding.
+    # Default "fused" on Flash-Next since 2026-10-02: prefill MoE bit-identical on the served and
     # all-4-bit artifacts (trunk hidden and logits), prefill +20% at 512-row
     # chunks and +6% at 8192 (qualification/runs/port-nax-gather-20261002).
     # The module default stays "off", so other models are unaffected.  The

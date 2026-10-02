@@ -19,7 +19,10 @@ from mlx2.runtime.models import switch_layers as sl
 def _reset():
     old = nax.MODE
     nax.status(reset=True)
-    yield
+    # These tests model calls inside a prefill forward (the only phase NAX
+    # is offered; tests/test_moe_nax_gather_prefill_only.py covers the gate).
+    with nax.prefill_scope():
+        yield
     nax.set_mode(old)
     nax.status(reset=True)
 

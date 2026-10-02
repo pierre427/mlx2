@@ -381,14 +381,15 @@ def check_materialization_budget(nbytes: int, what: str, headroom: float = 0.15)
 def _nax_swiglu_candidate(switch_mlp) -> bool:
     """Whether a sorted forward should try the fused NAX gate/up kernel.
 
-    Structural only (policy, exact module types, no bias, inference); the
-    kernel's own admission (rows, layout, host, canary) is counted in
+    Structural (policy, prefill forward, exact module types, no bias,
+    inference); the kernel's own admission (rows, layout, host, canary) is counted in
     ``moe_nax_gather.status()``.
     """
     proj = switch_mlp.get("gate_up_proj") if hasattr(switch_mlp, "get") else None
     return (
         _nax.MODE == "fused"
         and not _invariant.active()
+        and _nax.prefill_active()
         and not switch_mlp.training
         and type(proj) is QuantizedSwitchLinear
         and "bias" not in proj
@@ -403,6 +404,7 @@ def _nax_split_swiglu_candidate(switch_mlp) -> bool:
     return (
         _nax.MODE == "fused"
         and not _invariant.active()
+        and _nax.prefill_active()
         and not switch_mlp.training
         and type(gate) is QuantizedSwitchLinear
         and type(up) is QuantizedSwitchLinear

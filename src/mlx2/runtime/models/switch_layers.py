@@ -293,6 +293,9 @@ class QuantizedSwitchLinear(nn.Module):
                 and sorted_indices
                 and tail_policy == "native"
                 and "bias" not in self
+                # Prefill forwards only: a padded decode or verify call can
+                # reach the NAX row floor (Codex port review item 7).
+                and _nax.admit_phase()
             ):
                 # The segmented NAX kernel, bit-identical to the stock
                 # sorted rhs kernel it replaces (omlx #3995); None keeps it.

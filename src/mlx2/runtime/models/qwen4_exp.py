@@ -24,6 +24,7 @@ from .import_env import snapshot as _import_env_snapshot
 _import_env_snapshot(__name__)
 from .. import round_levers as _lv
 from . import invariant_prefill as _invariant
+from . import moe_nax_gather as _moe_nax
 from .base import (
     BaseModelArgs,
     create_attention_mask,
@@ -6890,6 +6891,19 @@ class Qwen4ExpTextModel(PipelineMixin, nn.Module):
         )
 
     def __call__(self, inputs, cache=None, input_embeddings=None, return_hyper=False,
+                 *, capture_layers=(), hidden_sink=None):
+        # The NAX MoE gather is prefill-only: this trunk forward decides the
+        # phase once (decode, MTP verify and prepared verify blocks are not
+        # prefill at any width or padding); nested calls keep it.
+        with _moe_nax.forward_scope(
+            inputs if inputs is not None else input_embeddings, cache
+        ):
+            return self._forward(
+                inputs, cache, input_embeddings, return_hyper,
+                capture_layers=capture_layers, hidden_sink=hidden_sink,
+            )
+
+    def _forward(self, inputs, cache=None, input_embeddings=None, return_hyper=False,
                  *, capture_layers=(), hidden_sink=None):
         # A prepared segmented cohort owns masks and valid lengths for the
         # entire verification block. Splitting it into token forwards would
