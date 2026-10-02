@@ -50,6 +50,10 @@ sys.path.insert(0, str(ROOT / "scripts"))
 
 DECODED = {}  # uid -> [perf_counter of each decode step that emitted for it]
 TOKENS = {}  # uid -> token ids returned by BatchGenerator.next
+PREFILL = []  # (start, end, kind) of each self-MTP prefill call
+GATE = threading.Event()  # cleared: the worker holds before its next round
+GATE.set()
+LIVE = {}  # the live generator's scheduler_stats (status snapshots lag)
 COALESCE_S = 0.003
 
 
@@ -138,12 +142,32 @@ def main():
     real_next = G.BatchGenerator.next
 
     def batch_next(self, *args_, **kwargs):
+        LIVE["stats"] = self.scheduler_stats
         out = real_next(self, *args_, **kwargs)
         for r in out[1]:
             TOKENS.setdefault(r.uid, []).append(int(r.token))
         return out
 
     G.BatchGenerator.next = batch_next
+    real_loop_top = engine._expire_pending_cohorts
+
+    def loop_top(*args_, **kwargs):
+        GATE.wait()  # the worker parks at its loop top, before admission
+        return real_loop_top(*args_, **kwargs)
+
+    engine._expire_pending_cohorts = loop_top
+
+    for name in ("_advance_mtp_prefill", "_make_mtp_batch"):
+        real = getattr(G.BatchGenerator, name)
+
+        def timed(self, *args_, _real=real, _name=name, **kwargs):
+            t0 = time.perf_counter()
+            try:
+                return _real(self, *args_, **kwargs)
+            finally:
+                PREFILL.append((t0, time.perf_counter(), _name))
+
+        setattr(G.BatchGenerator, name, timed)
     print(f"engine ready route={selection.route} native_mtp={selection.native_mtp} policy={policy}",
           flush=True)
 
@@ -237,7 +261,7 @@ def main():
             return out
 
     def scheduler_counters():
-        sched = (engine.status() or {}).get("scheduler") or {}
+        sched = dict(LIVE.get("stats") or {})
         return {k: v for k, v in sched.items() if isinstance(v, (int, float))
                 and ("decode_first" in k or "fairness" in k or "prefill" in k or "handoff" in k)}
 
@@ -257,8 +281,16 @@ def main():
                 raise SystemExit("decode lanes never started")
             time.sleep(0.005)
 
+    def trace(lanes, t0, t1):
+        rel = lambda t: round((t - t0) * 1e3, 1)
+        return {"deliveries": [[rel(t) for t in x.deliveries() if t0 - 1 <= t <= t1 + 1] for x in lanes],
+                "decode_steps": [[rel(t) for t in sorted(set(DECODED.get(x.uid, []))) if t0 - 1 <= t <= t1 + 1]
+                                 for x in lanes],
+                "prefill_calls": [[rel(a_), rel(b_), k] for a_, b_, k in PREFILL if t0 - 1 <= a_ <= t1 + 1]}
+
     def contended(d):
         DECODED.clear()
+        del PREFILL[:]
         TOKENS.clear()
         before = scheduler_counters()
         lanes = [Lane(lane_request(i)) for i in range(d)]
@@ -277,6 +309,7 @@ def main():
         after = scheduler_counters()
         window_s = t_first - t_sub
         return {"ttft_s": round(window_s, 3), "gap_ms": summary(g), "lag_ms": summary(lag),
+                "trace": trace(lanes, t_sub, t_first),
                 "lane_tok_s": n_in / max(window_s, 1e-9),
                 "prompt_tokens_out": b.tokens(), "lane_tokens_out": [x.tokens() for x in lanes],
                 "lanes_finished_early": sum(1 for x in lanes if x.recv and x.recv[-1] < t_first),
@@ -285,6 +318,7 @@ def main():
 
     def burst():
         DECODED.clear()
+        del PREFILL[:]
         TOKENS.clear()
         before = scheduler_counters()
         lead = Lane(lane_request(0))
@@ -309,8 +343,41 @@ def main():
                 "lead_gap_ms": summary(lead_gaps), "peer_gap_ms": summary(peer_gaps),
                 "gap_ms": summary(all_gaps),
                 "lag_ms": summary(lead.lags(t_sub, t_end) + sum((p.lags(t_sub, t_end) for p in peers), [])),
+                "trace": trace([lead] + peers, t_sub, t_end),
                 "window_s": t_end - t_sub, "out_tok_s": tokens / max(t_end - t_sub, 1e-9),
                 "lead_tokens_out": lead.tokens(), "peer_tokens_out": [p.tokens() for p in peers],
+                "scheduler_delta": {k: v - before.get(k, 0) for k, v in after.items()
+                                    if v != before.get(k, 0)}}
+
+    def together():
+        """Every request admitted in one worker iteration: no mid-stream
+        arrival, so arrival alignment cannot differ between arms and token
+        identity isolates the scheduling change itself."""
+        DECODED.clear()
+        TOKENS.clear()
+        del PREFILL[:]
+        before = scheduler_counters()
+        GATE.clear()
+        time.sleep(0.3)  # the idle worker reaches its loop top and parks
+        lanes = [Lane(lane_request(i)) for i in range(3)]
+        b = Lane(long_prompt(a.decode_lanes[0]))
+        peers = [Lane(r) for r in burst_prompts()[:3]]
+        time.sleep(0.3)
+        t0 = time.perf_counter()
+        GATE.set()
+        for x in lanes + [b] + peers:
+            x.wait()
+        t_end = max(x.deliveries()[-1] for x in lanes + [b] + peers)
+        clear_apc()
+        g = []
+        for x in lanes + [b] + peers:
+            g += gaps(x, t0, t_end)
+        after = scheduler_counters()
+        return {"ttft_s": b.deliveries()[0] - t0, "gap_ms": summary(g),
+                "lag_ms": summary(sum((x.lags(t0, t_end) for x in lanes + [b] + peers), [])),
+                "out_tok_s": sum(len(x.tokens()) for x in lanes + [b] + peers) / max(t_end - t0, 1e-9),
+                "lead_tokens_out": b.tokens(),
+                "peer_tokens_out": [x.tokens() for x in lanes + peers],
                 "scheduler_delta": {k: v - before.get(k, 0) for k, v in after.items()
                                     if v != before.get(k, 0)}}
 
@@ -329,6 +396,8 @@ def main():
             contended(a.decode_lanes[0])
         if "burst" in a.workloads:
             burst()
+        if "together" in a.workloads:
+            together()
         mx.clear_cache()
     check_swap()
     print("warm-up done", flush=True)
@@ -337,15 +406,17 @@ def main():
     for rep in range(a.reps):
         order = list(a.arms) if rep % 2 == 0 else list(a.arms)[::-1]
         cells = ([("contended", d) for d in a.decode_lanes] if "contended" in a.workloads else []) + (
-            [("burst", a.burst)] if "burst" in a.workloads else [])
+            [("burst", a.burst)] if "burst" in a.workloads else []) + (
+            [("together", 7)] if "together" in a.workloads else [])
         for kind, d in cells:
             cell = {"rep": rep, "kind": kind, "d": d, "order": order}
             for name in order:
                 set_arm(name)
-                c = contended(d) if kind == "contended" else burst()
+                c = (contended(d) if kind == "contended" else burst() if kind == "burst"
+                     else together())
                 cell[name] = c
                 g = c["gap_ms"]
-                t = c["ttft_s"] if kind == "contended" else c["ttft_s"]["max"]
+                t = c["ttft_s"]["max"] if kind == "burst" else c["ttft_s"]
                 tps = c.get("lane_tok_s") or c.get("out_tok_s")
                 print(f"rep{rep} {kind} D={d} {name}: ttft={t:.3f}s gap p50/p95/max="
                       f"{g['p50'] and round(g['p50'])}/{g['p95'] and round(g['p95'])}/"
@@ -386,7 +457,7 @@ def main():
         for name in a.arms:
             xs = [c[name] for c in cs]
             row[name] = {
-                "ttft_s": statistics.median(x["ttft_s"] if kind == "contended" else x["ttft_s"]["max"]
+                "ttft_s": statistics.median(x["ttft_s"]["max"] if kind == "burst" else x["ttft_s"]
                                             for x in xs),
                 "gap_p50_ms": statistics.median(x["gap_ms"]["p50"] for x in xs),
                 "gap_p95_ms": statistics.median(x["gap_ms"]["p95"] for x in xs),
