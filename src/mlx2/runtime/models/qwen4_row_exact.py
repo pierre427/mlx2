@@ -49,6 +49,10 @@ when the not-exact count did not move.  A projection module the route does
 not swap (a ``Linear``/``QuantizedLinear`` subclass installed by another
 mechanism, or a tied embedding head) would run its stock multi-row call
 unrecorded, so its presence fails every window (``static_refusals``).
+The whole target batch is also refused above eight lanes: B=16 token
+divergence is observed despite successful stage counters. Batched one-token
+passthroughs are recorded as not exact, including depth-zero target rounds;
+their projections and head run outside the row-exact arithmetic window.
 """
 from __future__ import annotations
 
@@ -64,6 +68,11 @@ from . import row_exact_qmv as REQ
 
 SCHEMA = "mlx2.qwen4-row-exact-verify.v1"
 ENV = "MLX_QWEN4_ROW_EXACT_VERIFY"
+# Safety boundary, not qualification: B=4/8 matched the B=1 oracle, whereas
+# B=16 diverged despite every verify stage reporting success. See
+# qualification/runs/batched-gdn-verify-20261001/README.md. Do not raise this
+# until the complete target path (including one-token rounds) is evidenced.
+MAX_EVIDENCED_LANES = 8
 
 
 def _rows(x) -> int:
@@ -456,15 +465,28 @@ class RowExactVerify:
     def verify_backbone(self, tokens, cache):
         model = self.model
         rows = int(tokens.size)
-        if not self.enabled or int(tokens.shape[-1]) <= 1:
+        lanes = int(tokens.shape[0])
+        width = int(tokens.shape[-1])
+        if not self.enabled or width <= 1:
             if self.enabled:
                 self.counts["one_row_passthrough"] += 1
             self._retire_pending()
+            if self.enabled and lanes > 1:
+                # One token per lane is still a multi-row target forward.
+                # Preserve the stock arithmetic, but never silently credit it
+                # with a previous exact verify window's claim.
+                record = REV.Window(rows)
+                self._admit_batch(record, lanes)
+                record.note("target_backbone", "batched_one_token_passthrough")
+                record.note("target_logits", "outside_window")
+                record.fail("batched_one_token_target_not_row_exact")
+                self._close(record)
             return model.mtp_backbone(tokens, cache=cache)
         from . import qwen4_exp as Q
 
         self._retire_pending()
         record = REV.Window(rows)
+        self._admit_batch(record, lanes)
         for reason in self.static_refusals:
             record.fail(reason)
         before = self._gdn_engaged()
@@ -476,6 +498,11 @@ class RowExactVerify:
         record.note("gdn", "fused_verify", engaged)
         self._pending = record
         return out
+
+    def _admit_batch(self, record: REV.Window, lanes: int) -> None:
+        if lanes > MAX_EVIDENCED_LANES:
+            record.note("target_batch", "above_evidenced_lane_limit")
+            record.fail("target_batch_lane_limit")
 
     def verify_logits(self, hidden):
         record, self._pending = self._pending, None
@@ -554,6 +581,7 @@ class RowExactVerify:
         return {
             "schema": SCHEMA,
             "enabled": self.enabled,
+            "max_evidenced_lanes": MAX_EVIDENCED_LANES,
             "installed_modules": len(self._swapped),
             "static_refusals": dict(self.static_refusals),
             "gdn_layers": len(self._gdn),

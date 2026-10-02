@@ -1979,10 +1979,19 @@ def advance_batched_self_mtp_zero(
     try:
         _prepare_self_mtp_cache_group(target_caches, lengths, (0,) * len(lengths))
         try:
-            (logit_hidden, target_hidden) = _mtp_backbone(
-                model, inputs, target_caches
-            )
-            batched_logits = model.logits(logit_hidden)
+            # K=0 is still a target forward. Let an adapter account for its
+            # arithmetic just as in a positive-depth verify round; bypassing
+            # these hooks can hide a non-exact batched one-token step.
+            verifier = getattr(model, "mtp_verify_backbone", None)
+            if verifier is None:
+                (logit_hidden, target_hidden) = _mtp_backbone(
+                    model, inputs, target_caches
+                )
+                batched_logits = model.logits(logit_hidden)
+            else:
+                (logit_hidden, target_hidden) = verifier(inputs, target_caches)
+                verify_head = getattr(model, "mtp_verify_logits", model.logits)
+                batched_logits = verify_head(logit_hidden)
         finally:
             _finalize_self_mtp_cache_group(target_caches)
 

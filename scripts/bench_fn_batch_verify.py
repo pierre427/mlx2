@@ -277,8 +277,10 @@ def main():
             for arm in a.arms:
                 configure(arm)
                 before = handle.status()
+                start = handle.snapshot()
                 result = run(batch)
                 after = handle.status()
+                receipt = handle.receipt(start)
                 check_swap()
                 windows = after["windows"] - before["windows"]
                 failures = {k: v - before["failures"].get(k, 0)
@@ -292,6 +294,13 @@ def main():
                     "windows_row_exact": after["windows_row_exact"] - before["windows_row_exact"],
                     "windows_not_exact": after["windows_not_exact"] - before["windows_not_exact"],
                     "failures": failures,
+                    "receipt": receipt,
+                    "stages": {
+                        stage: {route: count - before["stages"].get(stage, {}).get(route, 0)
+                                for route, count in routes.items()
+                                if count - before["stages"].get(stage, {}).get(route, 0)}
+                        for stage, routes in after["stages"].items()
+                    },
                     "gdn_stage": gdn_stage,
                     "lanes_identical_to_mtp_off_b1": [x == y for x, y in zip(result["lanes"], solo)],
                     "first_divergence_vs_mtp_off_b1": [first_div(y, x) for x, y in zip(result["lanes"], solo)],

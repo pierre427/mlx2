@@ -314,6 +314,85 @@ def _fake_gdn_engaged(handle):
     handle._gdn_engaged = engaged
 
 
+@pytest.mark.parametrize("lanes", [8, 9, 16])
+def test_verify_batch_above_evidenced_lanes_fails_even_with_all_stages_exact(monkeypatch, lanes):
+    model = _tiny_qwen4_model()
+    handle = install(model)
+    handle.enable(True)
+    _fake_gdn_engaged(handle)
+
+    # Isolate admission from Metal-only kernels: all arithmetic stages report
+    # success, just as the false-green B=16 evidence does.
+    def trunk(self, tokens, cache, return_hyper=False):
+        REV.current().note("test_trunk", "exact")
+        return mx.zeros((*tokens.shape, 32)), mx.zeros((*tokens.shape, 64))
+
+    monkeypatch.setattr(type(model.language_model.model), "__call__", trunk)
+    start = handle.snapshot()
+    hidden, _ = handle.verify_backbone(mx.ones((lanes, 3), mx.uint32), None)
+    mx.eval(handle.verify_logits(hidden))
+    status = handle.status()
+    if lanes > 8:
+        assert status["windows_row_exact"] == 0
+        assert status["failures"]["target_batch_lane_limit"] == 1
+        assert status["stages"]["target_batch"]["above_evidenced_lane_limit"] == 1
+        # Membership can shrink; a later green window cannot erase the
+        # oversized target work from the request-span receipt.
+        hidden, _ = handle.verify_backbone(mx.ones((8, 3), mx.uint32), None)
+        mx.eval(handle.verify_logits(hidden))
+        assert handle.status()["windows_row_exact"] == 1
+        assert handle.receipt(start)["row_exact"] is False
+    else:
+        assert status["windows_row_exact"] == 1
+        assert handle.receipt(start)["row_exact"] is True
+
+
+@pytest.mark.parametrize("lanes", [2, 8, 16])
+def test_batched_one_token_target_is_recorded_not_exact(monkeypatch, lanes):
+    model = _tiny_qwen4_model()
+    handle = install(model)
+    handle.enable(True)
+    seen = []
+
+    def backbone(tokens, cache=None):
+        seen.append(REV.active())
+        return mx.zeros((*tokens.shape, 32)), mx.zeros((*tokens.shape, 64))
+
+    monkeypatch.setattr(model, "mtp_backbone", backbone)
+    start = handle.snapshot()
+    hidden, _ = handle.verify_backbone(mx.ones((lanes, 1), mx.uint32), None)
+    mx.eval(handle.verify_logits(hidden))
+    status = handle.status()
+    assert seen == [False], "accounting must preserve the passthrough arithmetic"
+    assert status["windows_not_exact"] == 1
+    assert status["failures"]["batched_one_token_target_not_row_exact"] == 1
+    assert status["stages"]["target_backbone"]["batched_one_token_passthrough"] == 1
+    assert handle.receipt(start)["row_exact"] is False
+
+
+def test_zero_depth_target_uses_verify_accounting_hooks():
+    from test_batched_mtp import _prepare_lane
+    from mlx2.runtime.hybrid_speculative import (
+        advance_batched_self_mtp_zero, attach_self_mtp_lanes,
+    )
+
+    model = _tiny_qwen4_model()
+    lanes = [_prepare_lane(model, uid, [1, 3, 7, 5]) for uid in range(16)]
+    for detached in lanes:
+        detached.lane.num_draft = 0
+    batch = attach_self_mtp_lanes(model, None, lanes)
+    handle = install(model)
+    handle.enable(True)
+    start = handle.snapshot()
+    result = advance_batched_self_mtp_zero(model, batch)
+    assert len(result.outputs) == 16
+    status = handle.status()
+    assert status["windows_not_exact"] == 1
+    assert status["failures"]["target_batch_lane_limit"] == 1
+    assert status["failures"]["batched_one_token_target_not_row_exact"] == 1
+    assert handle.receipt(start)["row_exact"] is False
+
+
 def test_window_with_dense_linear_is_row_exact_only_with_one_token_rows(monkeypatch):
     """W3 (Metal): the bf16 HC inject at M=R is not the one-token gemv, yet a
     window that ran it was labelled row-exact.  A window counted row-exact
