@@ -26,12 +26,14 @@ from . import switch_layers as _switch_layers
 from . import qwen4_moe_weighted_sum as _moe_wsum
 from . import qwen4_routed_decode as _routed
 from . import qwen4_moe_window as _window
+from . import moe_nax_gather as _nax
 from .switch_layers import (
     QuantizedSwitchLinear,
     SwiGLU,
     SwitchGLU,
     SwitchLinear,
     _gather_sort,
+    _sort_routes,
     _scatter_unsort,
 )
 
@@ -375,6 +377,38 @@ def check_materialization_budget(nbytes: int, what: str, headroom: float = 0.15)
     return estimate
 
 
+def _nax_swiglu_candidate(switch_mlp) -> bool:
+    """Whether a sorted forward should try the fused NAX gate/up kernel.
+
+    Structural only (policy, exact module types, no bias, inference); the
+    kernel's own admission (rows, layout, host, canary) is counted in
+    ``moe_nax_gather.status()``.
+    """
+    proj = switch_mlp.get("gate_up_proj") if hasattr(switch_mlp, "get") else None
+    return (
+        _nax.MODE == "fused"
+        and not switch_mlp.training
+        and type(proj) is QuantizedSwitchLinear
+        and "bias" not in proj
+        and type(switch_mlp.activation) is SwiGLU
+    )
+
+
+def _nax_split_swiglu_candidate(switch_mlp) -> bool:
+    """``_nax_swiglu_candidate`` for split gate/up projections."""
+    gate = switch_mlp.get("gate_proj") if hasattr(switch_mlp, "get") else None
+    up = switch_mlp.get("up_proj") if hasattr(switch_mlp, "get") else None
+    return (
+        _nax.MODE == "fused"
+        and not switch_mlp.training
+        and type(gate) is QuantizedSwitchLinear
+        and type(up) is QuantizedSwitchLinear
+        and "bias" not in gate
+        and "bias" not in up
+        and type(switch_mlp.activation) is SwiGLU
+    )
+
+
 def switch_layers_sort_min() -> int:
     """Read the sorted-gather threshold at call time so an A/B can switch it."""
     return _switch_layers._GATHER_SORT_MIN_ASSIGNMENTS
@@ -415,17 +449,29 @@ class FusedGateUpSwitchGLU(nn.Module):
         do_sort = indices.size >= switch_layers_sort_min()
         idx = indices
         inv_order = None
+        token_rows = None
         if do_sort:
-            (x, idx, inv_order) = _gather_sort(x, indices)
+            if _nax_swiglu_candidate(self):
+                # Same ops as _gather_sort; the sorted copy stays lazy so the
+                # row-mapped kernel can skip it (omlx #4029).
+                (x, idx, inv_order, x_tok, row_map) = _sort_routes(x, indices)
+                token_rows = (x_tok, row_map)
+            else:
+                (x, idx, inv_order) = _gather_sort(x, indices)
         if self.training:
             idx = mx.stop_gradient(idx)
         routed = _try_routed_decode(self, x, idx, scores, do_sort, variant)
         if routed is not None and routed[0] != "gate_up":
             object.__setattr__(self, "_last_fused_variant", f"routed_{routed[0]}")
             return routed[1]
+        hidden = None
         if routed is not None:
             hidden = routed[1]
-        else:
+        elif token_rows is not None:
+            # SwiGLU in the NAX gate/up kernel's epilogue (omlx #4022),
+            # bit-identical to the split + compiled swiglu below.
+            hidden = _nax.try_swiglu(self.gate_up_proj, x, idx, token_rows)
+        if hidden is None:
             gate_up = self.gate_up_proj(x, idx, sorted_indices=do_sort)
             half = self.hidden_dims
             hidden = self.activation(gate_up[..., half:], gate_up[..., :half])
@@ -456,8 +502,15 @@ class FusedDownSwitchGLU(SwitchGLU):
         do_sort = indices.size >= switch_layers_sort_min()
         idx = indices
         inv_order = None
+        token_rows = None
         if do_sort:
-            (x, idx, inv_order) = _gather_sort(x, indices)
+            if _nax_split_swiglu_candidate(self):
+                # Same ops as _gather_sort; the sorted copy stays lazy so the
+                # row-mapped kernel can skip it (omlx #4029).
+                (x, idx, inv_order, x_tok, row_map) = _sort_routes(x, indices)
+                token_rows = (x_tok, row_map)
+            else:
+                (x, idx, inv_order) = _gather_sort(x, indices)
         if self.training:
             idx = mx.stop_gradient(idx)
         # An explicitly selected candidate runs first, on stock arithmetic
@@ -473,9 +526,17 @@ class FusedDownSwitchGLU(SwitchGLU):
         if routed is not None and routed[0] != "gate_up":
             object.__setattr__(self, "_last_fused_variant", f"routed_{routed[0]}")
             return routed[1]
+        hidden = None
         if routed is not None:
             hidden = routed[1]
-        else:
+        elif token_rows is not None:
+            # Gate and up in one NAX kernel with SwiGLU in its epilogue,
+            # reading the separate tables (mlx-serve #638's pairing of omlx
+            # #4022), bit-identical to the two gathers + swiglu below.
+            hidden = _nax.try_swiglu_split(
+                self.gate_proj, self.up_proj, x, idx, token_rows
+            )
+        if hidden is None:
             hidden = self.activation(
                 self.up_proj(x, idx, sorted_indices=do_sort),
                 self.gate_proj(x, idx, sorted_indices=do_sort),

@@ -6,6 +6,7 @@ import os
 import mlx.core as mx
 import mlx.nn as nn
 
+from . import moe_nax_gather as _nax
 from .activations import swiglu
 from .import_env import snapshot as _import_env_snapshot
 
@@ -161,6 +162,31 @@ def _gather_sort(x, indices):
     return (x, indices, inv_order)
 
 
+def _sort_routes(x, indices):
+    """``_gather_sort`` with the replicated rows left lazy.
+
+    Returns ``(x_sorted, idx, inv_order, x_tok, row_map)``: the same ops as
+    ``_gather_sort`` (including its tail pad, applied to the index and the
+    row map), so ``x_sorted == x_tok[row_map]`` is exactly ``_gather_sort``'s
+    sorted ``x``.  MLX is lazy: ``x_sorted`` is only computed if a consumer
+    that is evaluated reads it (the NAX row-mapped gate/up kernel reads
+    ``x_tok`` through ``row_map`` instead; omlx #4029 ``sort_routes``).
+    """
+    (*_, M) = indices.shape
+    indices = indices.flatten()
+    order = mx.argsort(indices)
+    inv_order = mx.argsort(order)
+    x_tok = x.flatten(0, -3)
+    row_map = order // M
+    indices = indices[order]
+    n = indices.size
+    if _SORTED_GATHER_TAIL_BUG and n > 32768 and (n % 64 != 0):
+        pad = 64 - n % 64
+        row_map = mx.concatenate([row_map, mx.broadcast_to(row_map[-1:], (pad,))])
+        indices = mx.concatenate([indices, mx.broadcast_to(indices[-1:], (pad,))])
+    return (x_tok[row_map], indices, inv_order, x_tok, row_map)
+
+
 def _scatter_unsort(x, inv_order, shape=None):
     x = x[inv_order]
     if shape is not None:
@@ -241,18 +267,31 @@ class QuantizedSwitchLinear(nn.Module):
                 rhs_pad_calls += 1
                 rhs_pad_rows += pad
                 (x, rhs) = _pad_sorted_tail(x, indices, pad)
-            x = mx.gather_qmm(
-                x,
-                self["weight"],
-                self["scales"],
-                self.get("biases"),
-                rhs_indices=rhs,
-                transpose=True,
-                group_size=self.group_size,
-                bits=self.bits,
-                mode=self.mode,
-                sorted_indices=False if tail_policy == "unsorted" else sorted_indices,
-            )
+            nax = None
+            if (
+                _nax.MODE != "off"
+                and sorted_indices
+                and tail_policy == "native"
+                and "bias" not in self
+            ):
+                # The segmented NAX kernel, bit-identical to the stock
+                # sorted rhs kernel it replaces (omlx #3995); None keeps it.
+                nax = _nax.try_gather(x, self, rhs)
+            if nax is not None:
+                x = nax
+            else:
+                x = mx.gather_qmm(
+                    x,
+                    self["weight"],
+                    self["scales"],
+                    self.get("biases"),
+                    rhs_indices=rhs,
+                    transpose=True,
+                    group_size=self.group_size,
+                    bits=self.bits,
+                    mode=self.mode,
+                    sorted_indices=False if tail_policy == "unsorted" else sorted_indices,
+                )
             if pad:
                 x = x[:rows]
         if "bias" in self:

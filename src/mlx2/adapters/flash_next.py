@@ -568,6 +568,7 @@ class FlashNextAdapter:
         )
         from ..runtime.models.qwen4_hc_decode import hc_decode_status
         from ..runtime.models.switch_layers import moe_pad_status
+        from ..runtime.models import moe_nax_gather as _moe_nax
         from ..runtime.models.qwen4_gate_inject import qwen4_gate_inject_stats
         from ..runtime.models.qwen4_qsa_indexed import qsa_indexed_status
         from ..runtime.models.qwen4_attn_rows import status as qwen4_attn_rows_status
@@ -702,6 +703,13 @@ class FlashNextAdapter:
             **(
                 {"moe_pad": moe_pad_status()}
                 if moe_pad_status()["policy"] != "floor"
+                else {}
+            ),
+            # omlx #3995/#4022/#4029 NAX sorted gather; absent while off
+            # (MLX2_MOE_NAX_GATHER unset) so default receipts are unchanged.
+            **(
+                {"moe_nax_gather": _moe_nax.status()}
+                if _moe_nax.MODE != "off" or any(_moe_nax.calls.values())
                 else {}
             ),
             "eager_dispatch": qwen4_eager_dispatch_status(),
