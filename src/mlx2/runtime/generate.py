@@ -6065,8 +6065,15 @@ class BatchGenerator:
                 self.scheduler_stats["mixed_declined_rounds"] = (
                     self.scheduler_stats.get("mixed_declined_rounds", 0) + 1
                 )
-                forward = getattr(self.model, "prefill_forward", self.model)
-                forward(tokens, cache=cache)
+                # Bind the prompt's own LoRA rows, as the ordinary prompt
+                # forward does, or a LoRA request prefills as base (sweep
+                # 2026-10-02 V2).
+                lora_rows = bind_lora_rows(self.model, self._prompt_batch.uids)
+                try:
+                    forward = getattr(self.model, "prefill_forward", self.model)
+                    forward(tokens, cache=cache)
+                finally:
+                    clear_lora_rows(lora_rows)
 
         tic = time.perf_counter()
         self._prompt_batch.decode_active = True
