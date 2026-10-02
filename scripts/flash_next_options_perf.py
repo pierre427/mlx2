@@ -45,6 +45,14 @@ from flash_next_options_sweep import (  # noqa: E402
 )
 
 
+# Levers that take no value: naming one switches it on.
+SWITCH_LEVERS = frozenset({
+    "dynamic_accept", "router_kernel", "nax_decode", "gdn_core", "indexed_merge",
+    "indexed_gate", "gate_inject", "row_exact", "tf_qmv", "fp32_head", "adaptive",
+    "adaptive_single", "fly", "copy_off",
+})
+
+
 class Toggles:
     """In-process levers; ``set(arm)`` applies one arm, everything else default."""
 
@@ -177,6 +185,13 @@ class Toggles:
 
     def _apply(self, part):
         lever, _, value = part.partition(":")
+        if lever in SWITCH_LEVERS and value not in ("", "on", "1"):
+            # These levers only switch something on; "gate_inject:off" used
+            # to switch it ON.  Leave a lever out of the arm to keep it off.
+            raise ValueError(
+                f"lever {lever!r} takes no value (got {value!r}); "
+                "omit it to keep it off"
+            )
         if lever == "routed":
             for b in self.blocks:
                 b.set_moe_routed_decode_mode(value)
