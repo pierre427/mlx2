@@ -5583,8 +5583,6 @@ class BatchGenerator:
         """
         memory = self.mtp_park_memory
         now = time.perf_counter()
-        if plain_width > 0:
-            memory.tick_ordinary(1)
         kind = None
         if (
             mtp_width > 0

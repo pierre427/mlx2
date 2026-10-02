@@ -69,7 +69,7 @@ def test_adaptive_park_selected_appears_in_policy_receipt():
         ({"enabled": True, "hold_ratio": 1.0}, "hysteresis"),
         ({"enabled": True, "ema_alpha": 0.0}, "ema_alpha"),
         ({"enabled": True, "hold_decisions": 0}, "hold_decisions"),
-        ({"enabled": True, "cooldown_steps": 8, "max_cooldown_steps": 4}, "max_cooldown"),
+        ({"enabled": True, "cooldown_cohorts": 8, "max_cooldown_cohorts": 4}, "max_cooldown"),
         ({"enabled": False, "hold_decisions": 3}, "require enabled"),
         ("yes", "object or boolean"),
     ],
@@ -192,8 +192,9 @@ def test_short_hold_keeps_the_verdict_and_a_long_hold_clears_it():
         memory.decide(2)
     # A width-2 cohort cannot clear a verdict at width 4 (only k <= rows).
     assert memory.decide(4)["reason"] == "park_memory"
-    # Expire the width-4 verdict, then let a width-4 cohort hold up.
-    memory.tick_ordinary(128)
+    # Expire the width-4 verdict (one more parked cohort), then let a width-4
+    # cohort hold up.
+    assert memory.decide(4)["reason"] == "park_memory"
     assert memory.decide(4) is None  # re-measuring MTP from scratch
     _feed(memory, "mtp", 4, 11.0, 4)
     for _ in range(31):
@@ -205,22 +206,25 @@ def test_short_hold_keeps_the_verdict_and_a_long_hold_clears_it():
     assert memory.snapshot()["verdicts"] == {}
 
 
-def test_verdict_expires_after_ordinary_steps_and_repeat_loss_doubles():
+def test_verdict_expires_after_parked_cohorts_and_repeat_loss_doubles():
     stats = {}
-    memory = _memory(stats, cooldown_steps=16, max_cooldown_steps=40)
+    memory = _memory(stats, cooldown_cohorts=2, max_cooldown_cohorts=6)
     _park_at(memory, 4)
-    assert memory.snapshot()["verdicts"]["4"] == {"cooldown": 16, "remaining": 16}
-    memory.tick_ordinary(15)
-    assert memory.would_park(4)
-    memory.tick_ordinary(1)
+    assert memory.snapshot()["verdicts"]["4"] == {"cooldown": 2, "remaining": 2}
+    # Peeks (latch release, width-locked joins) never consume the cooldown.
+    for _ in range(5):
+        assert memory.would_park(4)
+    assert memory.decide(4)["remaining_cohorts"] == 2
+    assert memory.decide(8)["reason"] == "park_memory"  # second parked cohort
     assert stats["mtp_adaptive_park_verdicts_expired"] == 1
     assert not memory.would_park(4)
     assert "mtp:4" not in memory.snapshot()["rates"]  # MTP re-measured
     _park_at(memory, 4)
-    assert memory.snapshot()["verdicts"]["4"]["cooldown"] == 32
-    memory.tick_ordinary(32)
+    assert memory.snapshot()["verdicts"]["4"]["cooldown"] == 4
+    for _ in range(4):
+        memory.decide(4)
     _park_at(memory, 4)
-    assert memory.snapshot()["verdicts"]["4"]["cooldown"] == 40  # capped
+    assert memory.snapshot()["verdicts"]["4"]["cooldown"] == 6  # capped
 
 
 def test_invalid_samples_are_skipped_and_counted():
@@ -372,9 +376,10 @@ def test_remembered_verdict_hands_off_a_new_cohort_exactly(cpu_model):
         decision = receipt["mtp_ordinary_handoff"]["decision"]
         assert decision["reason"] == "park_memory" and decision["verdict_width"] == 2
         assert "adaptive_park" in receipt["mtp_ordinary_handoff"]["policy"]
-        # Ordinary decode after the handoff was measured and ticked the cooldown.
+        # Ordinary decode after the handoff was measured; the parked cohort
+        # counted against the verdict's cooldown.
         assert stats["mtp_adaptive_park_ordinary_samples"] >= 1
-        assert second.mtp_park_memory_snapshot()["verdicts"]["2"]["remaining"] < 128
+        assert second.mtp_park_memory_snapshot()["verdicts"]["2"]["remaining"] == 1
     finally:
         for gen in (first, second, ordinary):
             if gen is not None:

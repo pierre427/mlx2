@@ -64,13 +64,14 @@ def main():
     import mlx.core as mx
 
     from mlx2.adapters.registry import resolve_adapter
-    from mlx2.runtime import generate as G
-    from mlx2.runtime.adaptive_policy import MTPOrdinaryHandoffPolicy
-    from mlx2.runtime.sample_utils import LaneRNG
 
     factory = resolve_adapter(a.model, mtp=True, qualification_mode=True)
     kwargs = {} if policy is None else {"execution_policy": policy}
+    # Adapters pin their import-time environment: build before runtime imports.
     adapter = factory(a.model, **kwargs)
+    from mlx2.runtime import generate as G
+    from mlx2.runtime.adaptive_policy import MTPOrdinaryHandoffPolicy
+    from mlx2.runtime.sample_utils import LaneRNG
     tok = adapter.tokenizer
 
     def encode(text):

@@ -36,9 +36,14 @@ Decision (``decide``), at every closed MTP boundary of a cohort of width ``w``:
    row clears every verdict at ``k <= w``.  Verdict persistence plus the
    asymmetric streaks are the hysteresis.
 
-A verdict lives for ``cooldown_steps`` ordinary decode steps, then expires and
-the next cohort at that width re-measures MTP from scratch.  Each repeated
-loss at the same width doubles its cooldown (capped), as in oMLX.
+A verdict parks ``cooldown_cohorts`` cohorts, then expires and the next
+cohort at that width re-measures MTP from scratch.  Each repeated loss at the
+same width doubles its cooldown (capped), as oMLX doubles its cooldown.  oMLX
+counts the cooldown in decode steps because its park is reversible inside the
+cohort; mlx2's handoff is one-way per lane, so a re-measurement costs a whole
+cohort's MTP ramp and the cooldown is counted in parked cohorts instead (a
+2026-10-02 GPU run with a 128-step cooldown re-probed, and lost, on every
+wave; see qualification/runs/port-park-memory-20261002).
 
 Reproducibility.  Handing a cohort to the ordinary batcher is exact at width 1
 (greedy MTP verify and ordinary decode commit the same tokens), but at width
@@ -111,8 +116,8 @@ class AdaptiveParkSettings:
     hold_decisions: int = 32
     min_samples: int = 4
     ema_alpha: float = 0.25
-    cooldown_steps: int = 128
-    max_cooldown_steps: int = 4096
+    cooldown_cohorts: int = 2
+    max_cooldown_cohorts: int = 64
 
     _KEYS = (
         "enabled",
@@ -124,8 +129,8 @@ class AdaptiveParkSettings:
         "hold_decisions",
         "min_samples",
         "ema_alpha",
-        "cooldown_steps",
-        "max_cooldown_steps",
+        "cooldown_cohorts",
+        "max_cooldown_cohorts",
     )
 
     def __post_init__(self) -> None:
@@ -144,13 +149,13 @@ class AdaptiveParkSettings:
             "loss_decisions",
             "hold_decisions",
             "min_samples",
-            "cooldown_steps",
-            "max_cooldown_steps",
+            "cooldown_cohorts",
+            "max_cooldown_cohorts",
         ):
             _positive_int(getattr(self, name), f"adaptive_park {name}")
-        if self.max_cooldown_steps < self.cooldown_steps:
+        if self.max_cooldown_cohorts < self.cooldown_cohorts:
             raise ValueError(
-                "adaptive_park max_cooldown_steps must be >= cooldown_steps"
+                "adaptive_park max_cooldown_cohorts must be >= cooldown_cohorts"
             )
         alpha = self.ema_alpha
         if isinstance(alpha, bool) or not isinstance(alpha, (int, float)) or not (
@@ -221,7 +226,7 @@ class ParkMemory:
         self.stats = stats
         self._lock = threading.Lock()
         self._rates: dict[tuple[str, int], _Rate] = {}
-        # width -> {"cooldown": next cooldown, "remaining": steps left}
+        # width -> {"cooldown": cohorts, "remaining": cohorts still to park}
         self._verdicts: dict[int, dict[str, int]] = {}
         self._streak_width: Optional[int] = None
         self._clear_losing = 0
@@ -250,23 +255,10 @@ class ParkMemory:
     def note_skipped(self) -> None:
         _bump(self.stats, "mtp_adaptive_park_samples_skipped")
 
-    def tick_ordinary(self, steps: int = 1) -> None:
-        """Count ordinary decode steps against every live verdict's cooldown."""
-        expired = []
-        with self._lock:
-            for width, verdict in self._verdicts.items():
-                if verdict["remaining"] > 0:
-                    verdict["remaining"] = max(0, verdict["remaining"] - steps)
-                    if verdict["remaining"] == 0:
-                        expired.append(width)
-            for width in expired:
-                # Re-measure MTP from scratch at and above the expired width.
-                for key in [
-                    key for key in self._rates if key[0] == "mtp" and key[1] >= width
-                ]:
-                    del self._rates[key]
-        if expired:
-            _bump(self.stats, "mtp_adaptive_park_verdicts_expired", len(expired))
+    def _expire_locked(self, width: int) -> None:
+        """Re-measure MTP from scratch at and above an expired verdict."""
+        for key in [k for k in self._rates if k[0] == "mtp" and k[1] >= width]:
+            del self._rates[key]
 
     def _rate(self, kind: str, width: int) -> Optional[_Rate]:
         rate = self._rates.get((kind, width))
@@ -315,7 +307,7 @@ class ParkMemory:
             return {
                 "reason": "park_memory",
                 "verdict_width": verdict,
-                "remaining_ordinary_steps": self._verdicts[verdict]["remaining"],
+                "remaining_cohorts": self._verdicts[verdict]["remaining"],
             }
         if self._ordinary_rate(width) is None:
             if width > self.static_max_width:
@@ -341,8 +333,16 @@ class ParkMemory:
                 self._held = 0
                 self._last_seen_samples = None
             early = self._peek_locked(width)
+            expired = False
             if early is not None:
                 result = early
+                if early["reason"] == "park_memory":
+                    # This cohort is parked; count it against the cooldown.
+                    verdict = self._verdicts[early["verdict_width"]]
+                    verdict["remaining"] -= 1
+                    if verdict["remaining"] == 0:
+                        self._expire_locked(early["verdict_width"])
+                        expired = True
             else:
                 ordinary = self._ordinary_rate(width)
                 mtp = self._rate("mtp", width)
@@ -373,9 +373,11 @@ class ParkMemory:
                     ):
                         previous = self._verdicts.get(width)
                         cooldown = (
-                            s.cooldown_steps
+                            s.cooldown_cohorts
                             if previous is None
-                            else min(s.max_cooldown_steps, previous["cooldown"] * 2)
+                            else min(
+                                s.max_cooldown_cohorts, previous["cooldown"] * 2
+                            )
                         )
                         self._verdicts[width] = {
                             "cooldown": cooldown,
@@ -393,7 +395,7 @@ class ParkMemory:
                             "reason": "measured_loss",
                             "rule": rule,
                             "verdict_width": width,
-                            "cooldown_ordinary_steps": cooldown,
+                            "cooldown_cohorts": cooldown,
                             "mtp_tokens_per_ms": round(mtp.ema, 6),
                             "ordinary_tokens_per_ms": round(ordinary_rate, 6),
                             "ordinary_rate_source": ordinary_source,
@@ -401,6 +403,8 @@ class ParkMemory:
                         }
         if cleared:
             _bump(self.stats, "mtp_adaptive_park_verdicts_cleared", cleared)
+        if expired:
+            _bump(self.stats, "mtp_adaptive_park_verdicts_expired")
         if result is not None:
             _bump(self.stats, f"mtp_adaptive_park_{result['reason']}")
         return result
