@@ -56,12 +56,12 @@ def required_generic_checks(descriptor):
 APPROVED_QUALIFICATION_HARNESS = {
     "schema": "mlx2.qualification-harness.v1",
     "name": "scripts/qualify_serving.py",
-    # Re-pinned 2026-10-02 (NAX gather default): the producer observes the
-    # Flash-Next NAX segmented MoE gather (moe_nax_gather) and records it
-    # "selected, not observed" (host_gated) when the host is not M5 or the
-    # bitwise canary refused the kernel.  Receipts from the previous harness
-    # (8777ab76..., sweep H1) must be regenerated before they validate.
-    "sha256": "8a2ced1d8982733bdd2321989aa0e533fcf64f4e4da6187d9fe58be63c2e39ac",
+    # Re-pinned 2026-10-02 (Codex port review item 2): a host-gated
+    # "selected, not observed" entry now carries the host gate it was
+    # recorded under ({"nax_host", "device_name"}), which the loader
+    # re-evaluates on the serving host.  Receipts from the previous harness
+    # (8a2ced1d..., NAX gather default) must be regenerated.
+    "sha256": "2ce013d983b3d848aed5391b0ac54f9f970b16862c99f14881c8d50c500f3934",
 }
 
 # The approved generic producer has no live adapter-owned media probes. A
@@ -375,10 +375,21 @@ def _default_on_mechanisms(settings):
         # Qwen3.8-27B: one-token decode on the shared fused kernels.
         required.add("qwen38_fused_gdn")
     if str(env.get("MLX2_MOE_NAX_GATHER") or "off").strip().lower() in {"gather", "fused"}:
-        # Prefill expert gathers of >= 16 rows and >= 4 rows per expert; every
-        # qualifier route prefills prompts well past that.  Host-gated: see
-        # HOST_GATED_FEATURES / host_gated_not_observed.
-        required.add("moe_nax_gather")
+        if ((settings.get("prefill_execution") or {}).get("invariant")):
+            # The slice-invariant prefill lane pins the stock sorted gather
+            # in every prefill forward (switch_layers, qwen3_next), so the
+            # NAX gather is selected but can never engage on this route
+            # (Codex port review 2026-10-02 item 3).
+            not_observed["moe_nax_gather"] = (
+                "selected, suppressed by invariant_prefill: the slice-invariant "
+                "prefill lane runs the stock sorted gather in every prefill "
+                "forward, so the NAX gather never engages on this route"
+            )
+        else:
+            # Prefill expert gathers of >= 16 rows and >= 4 rows per expert;
+            # every qualifier route prefills prompts well past that.
+            # Host-gated: see HOST_GATED_FEATURES / host_gated_not_observed.
+            required.add("moe_nax_gather")
     return required, not_observed
 
 
@@ -465,20 +476,77 @@ def host_gated_not_observed(execution, initial_execution=None):
     return out
 
 
+def _moe_nax_gather_host_gate():
+    try:
+        from .runtime.models import moe_nax_gather
+    except Exception:  # noqa: BLE001 -- no Metal/MLX here: no NAX either
+        return {"nax_host": False, "device_name": ""}
+    return moe_nax_gather.host_gate()
+
+
+# The serving host's gate per host-gated feature, re-evaluated at load
+# (Codex port review 2026-10-02 item 2).  Each returns
+# {"nax_host": bool, "device_name": str}.
+HOST_GATE_PROBES = {"moe_nax_gather": _moe_nax_gather_host_gate}
+
+
+def host_gate_record(feature, execution):
+    """The host gate a run evaluated, from its served status, or None.
+
+    The producer binds this into a host-gated "selected, not observed" entry
+    so the loader can compare it with the serving host.
+    """
+    status = (execution or {}).get(feature)
+    if not isinstance(status, dict):
+        return None
+    return {
+        "nax_host": status.get("nax_host"),
+        "device_name": status.get("device_name"),
+    }
+
+
+def _valid_host_gate(gate):
+    return (
+        isinstance(gate, dict)
+        and type(gate.get("nax_host")) is bool
+        and isinstance(gate.get("device_name"), str)
+        and bool(gate["device_name"])
+    )
+
+
 def _host_gated_exemption(record, name):
-    """A required host-gated feature the producer recorded as not observed."""
-    if name.removeprefix("feature_") not in HOST_GATED_FEATURES:
+    """A required host-gated feature the producer recorded as not observed,
+    on a host gate the serving host still matches.
+
+    The entry must carry the host gate it was recorded under.  A waiver
+    recorded on a host that does not admit the kernel is refused where the
+    serving host admits it (that receipt never exercised the kernel).  A
+    canary refusal recorded on an admitting host binds that device: another
+    admitting device may pass the canary and run the kernel.
+    """
+    feature = name.removeprefix("feature_")
+    if feature not in HOST_GATED_FEATURES:
         return False
     if name in (record.get("checks") or {}):
         return False
     entry = (record.get("selected_not_observed") or {}).get(name)
-    return (
+    if not (
         isinstance(entry, dict)
         and entry.get("status") == "selected, not observed"
         and entry.get("host_gated") is True
         and isinstance(entry.get("reason"), str)
         and bool(entry["reason"])
-    )
+        and _valid_host_gate(entry.get("host_gate"))
+    ):
+        return False
+    recorded = entry["host_gate"]
+    current = HOST_GATE_PROBES[feature]()
+    if not current.get("nax_host"):
+        # The serving host keeps the stock kernel, as the receipt observed.
+        return True
+    if not recorded["nax_host"]:
+        return False
+    return recorded["device_name"] == current.get("device_name")
 
 
 def _topk_fold_paths(settings, env, native_mtp, width, handoff_width):

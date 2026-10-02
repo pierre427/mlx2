@@ -401,9 +401,28 @@ def _nax_record(tmp_path, checks, selected_not_observed=None):
         descriptor=QWEN4_FLASH_NEXT, name="nax")
 
 
-def test_loader_accepts_host_gated_not_observed_but_not_a_bare_omission(tmp_path):
+M3_GATE = {"nax_host": False, "device_name": "Apple M3 Max"}
+M5_GATE = {"nax_host": True, "device_name": "Apple M5 Max"}
+
+
+@pytest.fixture
+def serving_host(monkeypatch):
+    """Pin the loader's re-evaluated host gate (default: a non-NAX M3)."""
+    import mlx2.qualification as Q
+
+    def pin(gate):
+        monkeypatch.setitem(Q.HOST_GATE_PROBES, "moe_nax_gather", lambda: dict(gate))
+
+    pin(M3_GATE)
+    return pin
+
+
+def test_loader_accepts_host_gated_not_observed_but_not_a_bare_omission(
+    tmp_path, serving_host
+):
     entry = {"status": "selected, not observed", "host_gated": True,
-             "reason": "host is not an M5 (NAX) Metal device"}
+             "reason": "host is not an M5 (NAX) Metal device",
+             "host_gate": dict(M3_GATE)}
     assert _nax_record(tmp_path, {"feature_moe_nax_gather": {"passed": True}})().profile
     assert _nax_record(tmp_path, {}, {"feature_moe_nax_gather": entry})().profile
     with pytest.raises(ValueError, match="moe_nax_gather"):
@@ -416,3 +435,130 @@ def test_loader_accepts_host_gated_not_observed_but_not_a_bare_omission(tmp_path
     with pytest.raises(ValueError):
         _nax_record(tmp_path, {"feature_moe_nax_gather": {"passed": False}},
                     {"feature_moe_nax_gather": entry})()
+
+
+# Codex port review 2026-10-02 item 2: the waiver is bound to the host gate it
+# was recorded under and re-evaluated on the serving host.
+
+def test_host_gate_waiver_is_refused_where_the_serving_host_admits_nax(
+    tmp_path, serving_host
+):
+    m3_entry = {"status": "selected, not observed", "host_gated": True,
+                "reason": "host is not an M5 (NAX) Metal device",
+                "host_gate": dict(M3_GATE)}
+    load = _nax_record(tmp_path, {}, {"feature_moe_nax_gather": m3_entry})
+    assert load().profile  # served on another non-NAX host: stock path, as recorded
+    serving_host(M5_GATE)
+    with pytest.raises(ValueError, match="moe_nax_gather"):
+        load()  # an M3 receipt never exercised the kernel an M5 will run
+    # An entry without its host gate (the pre-fix receipt shape) is refused.
+    bare = {k: v for k, v in m3_entry.items() if k != "host_gate"}
+    serving_host(M3_GATE)
+    with pytest.raises(ValueError, match="moe_nax_gather"):
+        _nax_record(tmp_path, {}, {"feature_moe_nax_gather": bare})()
+    for gate in ({"nax_host": "no", "device_name": "x"}, {"nax_host": False},
+                 {"nax_host": False, "device_name": ""}):
+        with pytest.raises(ValueError, match="moe_nax_gather"):
+            _nax_record(tmp_path, {}, {"feature_moe_nax_gather": {
+                **m3_entry, "host_gate": gate}})()
+
+
+def test_canary_waiver_binds_the_device_it_was_refused_on(tmp_path, serving_host):
+    canary = {"status": "selected, not observed", "host_gated": True,
+              "reason": "bitwise canary refused the NAX kernel (kernel_unverified)",
+              "host_gate": dict(M5_GATE)}
+    load = _nax_record(tmp_path, {}, {"feature_moe_nax_gather": canary})
+    serving_host(M5_GATE)
+    assert load().profile
+    serving_host({"nax_host": True, "device_name": "Apple M5 Pro"})
+    with pytest.raises(ValueError, match="moe_nax_gather"):
+        load()
+    serving_host(M3_GATE)  # no NAX here: the stock path runs, as the receipt saw
+    assert load().profile
+
+
+def test_host_gate_record_comes_from_the_served_status():
+    from mlx2.qualification import host_gate_record
+
+    status = _nax(nax_host=False)
+    status["moe_nax_gather"]["device_name"] = "Apple M3 Max"
+    assert host_gate_record("moe_nax_gather", status) == M3_GATE
+    assert host_gate_record("moe_nax_gather", {}) is None
+
+
+def test_qualify_serving_binds_the_host_gate(qualify):
+    import inspect
+
+    source = inspect.getsource(qualify.main)
+    assert '"host_gate": host_gate_record(' in source
+
+
+def test_status_reports_the_device_the_gate_was_evaluated_on(monkeypatch):
+    from mlx2.runtime.models import moe_nax_gather as nax
+
+    monkeypatch.setattr(nax, "_nax_host", None)
+    monkeypatch.setattr(nax, "_device_name", None)
+    gate = nax.host_gate()
+    assert set(gate) == {"nax_host", "device_name"}
+    assert isinstance(gate["nax_host"], bool) and isinstance(gate["device_name"], str)
+    assert nax.status()["device_name"] == gate["device_name"]
+
+
+# Codex port review 2026-10-02 item 3: the invariant prefill lane suppresses
+# the NAX gather, so a route with both selected cannot require its engagement.
+
+def _invariant_settings(**policy):
+    from mlx2.runtime.prefill_plan import execution_identity
+
+    pol = FlashNextPolicy(invariant_prefill=True, **policy)
+    return _settings(
+        environment=pol.environment(),
+        prefill_execution=execution_identity(
+            invariant={"schema": "invariant-prefill-v1", "law": {"x": 1}}
+        ),
+    )
+
+
+def test_invariant_lane_suppresses_the_nax_requirement():
+    combined = _invariant_settings()
+    assert FlashNextPolicy(invariant_prefill=True).moe_nax_gather == "fused"
+    assert "feature_moe_nax_gather" not in required_feature_checks(combined)
+    reason = selected_not_observed_features(combined)["feature_moe_nax_gather"]
+    assert reason.startswith("selected, suppressed by invariant_prefill")
+    # Every other default-on requirement is unchanged by the lane.
+    assert required_feature_checks(combined) == (
+        required_feature_checks(_settings()) - {"feature_moe_nax_gather"}
+    )
+    # NAX off under the lane: nothing selected, nothing recorded.
+    off = _invariant_settings(moe_nax_gather="off")
+    assert "feature_moe_nax_gather" not in selected_not_observed_features(off)
+    # Without the lane NAX stays required.
+    assert "feature_moe_nax_gather" in required_feature_checks(_settings())
+
+
+def test_loader_qualifies_the_combined_route_without_nax_engagement(tmp_path):
+    import json
+
+    from mlx2.adapters.qwen import QWEN4_FLASH_NEXT
+    from mlx2.qualification import (
+        APPROVED_QUALIFICATION_HARNESS,
+        REQUIRED_CHECKS,
+        load_qualified_route,
+    )
+    from mlx2.runtime.prefill_plan import execution_identity
+
+    settings = {"mtp": False, "max_context": 32768,
+                "environment": {"MLX2_MOE_NAX_GATHER": "fused"},
+                "prefill_execution": execution_identity(
+                    invariant={"schema": "invariant-prefill-v1", "law": {"x": 1}})}
+    record = {
+        "passed": True, "runtime": {"source": "abc"}, "artifact": "weights",
+        "settings": settings,
+        "qualification_harness": APPROVED_QUALIFICATION_HARNESS,
+        "checks": {c: {"passed": True} for c in REQUIRED_CHECKS | {"structured_output"}},
+    }
+    path = tmp_path / "qualification.json"
+    path.write_text(json.dumps(record))
+    assert load_qualified_route(
+        path, runtime=record["runtime"], artifact="weights", settings=settings,
+        descriptor=QWEN4_FLASH_NEXT, name="nax+invariant").profile

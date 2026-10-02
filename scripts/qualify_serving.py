@@ -2101,6 +2101,7 @@ def main():
             raise AssertionError(name)
 
     from mlx2.qualification import (
+        host_gate_record,
         host_gated_not_observed,
         required_feature_checks,
         selected_not_observed_features,
@@ -2807,6 +2808,8 @@ def main():
                 "status": "selected, not observed",
                 "reason": host_gated[feature],
                 "host_gated": True,
+                # Re-evaluated against the serving host at load.
+                "host_gate": host_gate_record(feature, final.get("execution") or {}),
             }
             print(f"feature_{feature}: SELECTED, NOT OBSERVED "
                   f"({host_gated[feature]})", flush=True)

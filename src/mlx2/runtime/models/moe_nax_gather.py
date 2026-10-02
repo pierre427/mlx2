@@ -1207,6 +1207,8 @@ _verified: dict[tuple, bool] = {}
 
 
 _nax_host: Optional[bool] = None
+# The Metal device name the host gate was evaluated on ("" when unknown).
+_device_name: Optional[str] = None
 
 
 def nax_host() -> bool:
@@ -1215,15 +1217,27 @@ def nax_host() -> bool:
     Only a gate on where to try: every kernel instantiation still proves
     nonzero numerics bit-for-bit against the stock op before it is used
     (a compile probe alone can lie, see ``qwen4_qsa_nax``)."""
-    global _nax_host
+    global _nax_host, _device_name
     if _nax_host is None:
         try:
-            _nax_host = bool(mx.metal.is_available()) and "M5" in str(
-                mx.device_info().get("device_name", "")
+            metal = bool(mx.metal.is_available())
+            _device_name = (
+                str(mx.device_info().get("device_name", "")) if metal else ""
             )
+            _nax_host = metal and "M5" in _device_name
         except Exception:  # noqa: BLE001
             _nax_host = False
+            _device_name = _device_name or ""
     return _nax_host
+
+
+def host_gate() -> dict:
+    """The evaluated host gate: ``{"nax_host", "device_name"}``.
+
+    Bound into a qualification receipt that waives this mechanism as
+    host-gated, and re-evaluated by the loader on the serving host."""
+    admitted = nax_host()
+    return {"nax_host": bool(admitted), "device_name": _device_name or ""}
 
 
 def enabled() -> bool:
@@ -2097,6 +2111,7 @@ def status(*, reset: bool = False) -> dict:
     out = {
         "mode": MODE,
         "nax_host": nax_host() if MODE != "off" else _nax_host,
+        "device_name": _device_name,
         "calls": dict(calls),
         "fallbacks": dict(fallbacks),
         "not_candidates": not_candidates,
