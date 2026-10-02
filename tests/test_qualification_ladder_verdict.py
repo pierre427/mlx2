@@ -1,0 +1,102 @@
+"""Thermal ladder and qualification verdict false greens (sweep H2, H3).
+
+The scripts live in the latest qualification run directory, which the next
+run copies (qualification/runs/qualify-e8861bb5-uncensored).
+
+H2: a warm request that reused only the chat preamble (cached_tokens 54 of
+    32,000) counted as an APCv2 hit.
+H3: the verdict bound no identity, compared against a reference from another
+    model/route/artifact, and qualified runs_per_cell 0.
+"""
+
+import importlib
+import os
+import sys
+from pathlib import Path
+
+import pytest
+
+ROOT = Path(__file__).resolve().parents[1]
+RUN = ROOT / "qualification" / "runs" / "qualify-e8861bb5-uncensored"
+
+
+@pytest.fixture(scope="module")
+def run_modules():
+    sys.path.insert(0, str(RUN))
+    previous = os.environ.get("MLX2_CAMPAIGN_ROOT")
+    os.environ["MLX2_CAMPAIGN_ROOT"] = str(ROOT)
+    try:
+        yield (importlib.import_module("thermal_ladder"),
+               importlib.import_module("qualification_verdict"))
+    finally:
+        sys.path.remove(str(RUN))
+        if previous is None:
+            os.environ.pop("MLX2_CAMPAIGN_ROOT", None)
+        else:
+            os.environ["MLX2_CAMPAIGN_ROOT"] = previous
+
+
+def _row(cached, prompt=32000):
+    return {"done": True, "content": "NEEDLE-X-0", "prompt_tokens": prompt,
+            "completion_tokens": 128, "cached_tokens": cached,
+            "server_ttft_seconds": 20.0, "client_ttft_seconds": 20.0,
+            "prefill_tokens_per_second": 1500.0, "decode_tokens_per_second": 60.0}
+
+
+def test_preamble_only_warm_reuse_is_not_an_apc_hit(run_modules):
+    ladder, _ = run_modules
+    cold = {"rows": [_row(54)], "aggregate_completion_tokens_per_second": 60.0}
+    preamble = ladder.summarize_run(cold, {"rows": [_row(54)]}, ["NEEDLE-X-0"])
+    assert preamble["warm_apc_hits"] == 0
+    full = ladder.summarize_run(cold, {"rows": [_row(31999)]}, ["NEEDLE-X-0"])
+    assert full["warm_apc_hits"] == 1
+    assert full["warm_cached_min_fraction"] > 0.99
+
+
+def _run(i, warm_cached=31999, decode=60.0, prefill=1500.0):
+    summary = {"streams_done": True, "needle_correct": 2, "needle_total": 2,
+               "warm_apc_hits": 1, "prefill_tokens_per_second": prefill,
+               "decode_tokens_per_second": decode}
+    return {"run": i, "summary": summary,
+            "requests": {"warm": {"rows": [_row(warm_cached)]}}}
+
+
+def _ladder(runs, model="flash-next", route="mtp2", artifact="A", runs_per_cell=3):
+    return {"finished_at": 1, "runs_per_cell": runs_per_cell, "model": model, "route": route,
+            "max_context": 65536,
+            "initial": {"artifact": artifact, "runtime": {"source_sha256": "S"}},
+            "cells": [{"requested_tokens": 32768, "width": 1, "runs": runs}]}
+
+
+def test_verdict_fails_a_preamble_only_warm_hit(run_modules):
+    _, verdict = run_modules
+    assert verdict.verdict(_ladder([_run(i) for i in range(3)]))["qualified"] is True
+    result = verdict.verdict(_ladder([_run(i, warm_cached=54) for i in range(3)]))
+    assert result["qualified"] is False
+    assert any("warm APC hits 0/1" in f for f in result["failures"])
+
+
+def test_verdict_refuses_a_foreign_reference(run_modules):
+    _, verdict = run_modules
+    slow = _ladder([_run(i, decode=12.0, prefill=120.0) for i in range(3)])
+    foreign = _ladder([_run(i, decode=10.0, prefill=100.0) for i in range(3)],
+                      model="some-slow-model", route="ordinary", artifact="Z")
+    result = verdict.verdict(slow, foreign)
+    assert result["qualified"] is False
+    assert any("reference is not the same" in f for f in result["failures"])
+    own = _ladder([_run(i) for i in range(3)])
+    regressed = verdict.verdict(slow, own)
+    assert regressed["qualified"] is False
+    assert any("regressed" in f for f in regressed["failures"])
+
+
+def test_verdict_binds_identity_and_refuses_zero_runs(run_modules):
+    _, verdict = run_modules
+    zero = _ladder([], runs_per_cell=0)
+    result = verdict.verdict(zero)
+    assert result["qualified"] is False
+    assert result["identity"]["model"] == "flash-next"
+    assert result["identity"]["artifact"] == "A"
+    anonymous = _ladder([_run(i) for i in range(3)])
+    del anonymous["model"], anonymous["initial"]
+    assert verdict.verdict(anonymous)["qualified"] is False
