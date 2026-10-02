@@ -332,7 +332,8 @@ class FlashNextAdapter:
         # The QSA indexer geometry decides which contexts reach the fused
         # indexer query, block scorer and QSA mask; qualification derives
         # their requirements from it (sweep 1002 review item 2).
-        self.qsa_indexer = qsa_indexer_geometry(self.model.args.text_config)
+        # Same text config ModelArgs.from_dict derives (nested or flat).
+        self.qsa_indexer = qsa_indexer_geometry(config.get("text_config", config))
         index = json.loads((path / "model.safetensors.index.json").read_text())[
             "weight_map"
         ]

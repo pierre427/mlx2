@@ -68,7 +68,7 @@ NORTH_SOURCE = "src/mlx2/adapters/north_mini_code.py"
 # changed the file but none of REFERENCE_FUNCTIONS / REFERENCE_CONSTANTS
 # (AST-compared byte-identical).  The recorded North evidence in
 # qualification/runs/mechanism-intake-20260930 was taken at 7b6cecf3....
-NORTH_SHA256 = "8e256ddfef2750589838bf5773891c562baab75d0ea6a6ae09ceb1e26f8cfdee"
+NORTH_SHA256 = "5b99e4448ffa9b930bdac243ccbfbd1fdcc172430b3fbd9c051e30c3e18b598f"
 REFERENCE_FUNCTIONS = ("_load_json", "_safe_index", "_quantized_shapes", "_expected_weight_headers",
                        "_validate_weight_headers", "_unique_pairs", "inspect_artifact")
 REFERENCE_CONSTANTS = ("_SAFETENSORS_HEADER_LIMIT", "_DTYPE_BYTES")
