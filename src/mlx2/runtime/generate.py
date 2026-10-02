@@ -5542,10 +5542,14 @@ class BatchGenerator:
             self._gen_tokens_counter += len(generation_responses)
             previous_steps = self._steps_counter
             self._steps_counter += 1
-            if _crossed_counter_interval(
-                previous_steps,
-                self._steps_counter,
-                ALLOCATOR_RECLAIM_STEP_INTERVAL,
+            reclaim_interval = allocator_reclaim_step_interval()
+            if (
+                reclaim_interval
+                and _crossed_counter_interval(
+                    previous_steps,
+                    self._steps_counter,
+                    reclaim_interval,
+                )
             ) or _crossed_counter_interval(
                 previous_tokens,
                 self._gen_tokens_counter,
