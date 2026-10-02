@@ -725,6 +725,12 @@ class FlashNextAdapter:
         }
 
     def close(self):
-        for table in getattr(self, "_tables", []):
+        tables = getattr(self, "_tables", [])
+        for table in tables:
             table.close()
+        # serving.py leaves an early-load weight stream to the adapter; the
+        # load paths also table it, so close it here only when they did not.
+        stream = getattr(self, "weight_stream", None)
+        if stream is not None and not any(table is stream for table in tables):
+            stream.close()
         self._tables = []
